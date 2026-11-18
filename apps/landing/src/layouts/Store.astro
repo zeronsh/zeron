@@ -1,0 +1,140 @@
+---
+// Zeron Plugins: the store's pages, as a site of their own (the
+// coordinator's prototype, build.py's wrapper): a top bar (the brand,
+// Discover, Browse, Publish, Review for staff, the search, you), the page,
+// and the foot. No sidebar, no shell.
+//
+// A public page is the same for everyone (kept by shared caches), so who
+// you are and Review are filled in by scripts/store.ts once the page is in;
+// `session` given (an account or staff page, never kept), they are drawn
+// here. On a phone the bar keeps the brand, the search and a menu.
+import Head from "../components/site/Head.astro";
+import Icon from "../components/look/Icon.astro";
+import Icons from "../components/look/Icons.astro";
+import Inks from "../components/look/Inks.astro";
+import type { WebSession } from "../lib/store/types.ts";
+import { signInUrl } from "../lib/store/urls.ts";
+import "../styles/look/store.css";
+
+type Section = "discover" | "browse" | "publish" | "review";
+
+interface Props {
+  title: string;
+  description: string;
+  noindex?: boolean;
+  canonical?: string;
+  /** The bar's place this page is in (none: a page of its own). */
+  current?: Section | null;
+  /** Undefined on a public page (the script fills in who you are); null or a session on a private one. */
+  session?: WebSession | null;
+  /** What the bar's search holds (a search's own page). */
+  query?: string;
+  /** The page's own class on <main> (a plugin's hue, say). */
+  class?: string;
+}
+const { title, description, noindex = false, canonical, current = null, session, query = "", class: mainClass } = Astro.props;
+const isPublic = session === undefined;
+const staff = session?.roles.includes("admin") ?? false;
+const here = `${Astro.url.pathname}${Astro.url.search}`;
+const handle = session ? (session.username ?? session.user.name ?? "You") : "";
+const face = handle.replace(/^@/, "").charAt(0).toUpperCase() || "?";
+const SECTIONS: { id: Section; label: string; href: string }[] = [
+  { id: "discover", label: "Discover", href: "/plugins" },
+  { id: "browse", label: "Browse", href: "/plugins/all" },
+  { id: "publish", label: "Publish", href: "/account" },
+  { id: "review", label: "Review", href: "/admin/plugins" },
+];
+const shown = (id: Section) => id !== "review" || staff || isPublic;
+const hiddenUntilKnown = (id: Section) => id === "review" && isPublic;
+const mark = [[0, 0], [1, 0], [2, 0], [4, 0], [0, 1], [1, 1], [3, 1], [4, 1], [0, 2], [2, 2], [3, 2], [4, 2]];
+---
+
+<!doctype html>
+<html lang="en" class="store">
+  <head>
+    <Head title={title} description={description} noindex={noindex} canonical={canonical} />
+    <meta name="color-scheme" content="light dark" />
+    <slot name="head" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to the page</a>
+    <Icons />
+    <Inks />
+    <header class="top">
+      <div class="wrap">
+        <a class="brand" href="/plugins">
+          <svg class="mark" viewBox="0 0 49 29" aria-hidden="true" focusable="false">{mark.map(([x, y]) => <rect x={x! * 10} y={y! * 10} width="9" height="9" rx="2.7" />)}</svg>
+          <span>Zeron</span><span class="sep" aria-hidden="true">/</span><span>Plugins</span>
+        </a>
+        <nav class="nav" aria-label="The store">
+          {SECTIONS.filter((s) => shown(s.id)).map((s) => (
+            <a href={s.href} aria-current={s.id === current ? "page" : undefined} hidden={hiddenUntilKnown(s.id)} data-staff={hiddenUntilKnown(s.id) ? "" : undefined}>{s.label}</a>
+          ))}
+        </nav>
+        <div class="grow"></div>
+        <form class="find" role="search" action="/plugins/all" method="get" data-tidy>
+          <Icon name="search" />
+          <input type="search" name="q" value={query || undefined} placeholder="Search plugins" aria-label="Search plugins" autocomplete="off" enterkeyhint="search" data-search />
+          <kbd class="kbd" aria-hidden="true">/</kbd>
+        </form>
+        <a class="find-icon" href="/plugins/all#q" aria-label="Search plugins"><Icon name="search" /></a>
+        {(isPublic || !session) && <a class="signin" href={signInUrl(here)} data-signin>Sign in</a>}
+        {(isPublic || session) && (
+          <button class="me" type="button" popovertarget="me-menu" hidden={isPublic} data-me>
+            <span class="face" aria-hidden="true" data-face>{face}</span><span data-handle>{handle}</span><span class="sr-only">: your account</span>
+          </button>
+        )}
+        <button class="menubtn" type="button" popovertarget="nav-menu" aria-label="Menu"><Icon name="menu" /></button>
+      </div>
+    </header>
+
+    {(isPublic || session) && (
+      <div class="menu" id="me-menu" popover>
+        <p class="who"><b data-handle>{handle}</b>Signed in to Zeron</p>
+        <a href="/account">Your plugins</a>
+        <a href="/account/keys">Deploy keys</a>
+        <a href="/plugins/publishing">Publishing guide</a>
+        <hr />
+        <form method="post" action="/auth/web/logout" data-signout>
+          <input type="hidden" name="csrf" value={session?.csrf ?? ""} />
+          <button type="submit">Sign out</button>
+        </form>
+      </div>
+    )}
+    <nav class="menu" id="nav-menu" popover aria-label="The store, on a phone">
+      {SECTIONS.filter((s) => shown(s.id)).map((s) => (
+        <a href={s.href} aria-current={s.id === current ? "page" : undefined} hidden={hiddenUntilKnown(s.id)} data-staff={hiddenUntilKnown(s.id) ? "" : undefined}>{s.label}</a>
+      ))}
+      <hr />
+      <a href="/plugins/publishing">Publishing guide</a>
+      {(isPublic || !session) && <a href={signInUrl(here)} data-signin>Sign in</a>}
+      {(isPublic || session) && (
+        <>
+          <a href="/account/keys" hidden={isPublic} data-signed-in>Deploy keys</a>
+          <form method="post" action="/auth/web/logout" hidden={isPublic} data-signout>
+            <input type="hidden" name="csrf" value={session?.csrf ?? ""} />
+            <button type="submit">Sign out <span class="t3" data-handle>{handle}</span></button>
+          </form>
+        </>
+      )}
+    </nav>
+
+    <main id="main" class={mainClass}>
+      <slot />
+    </main>
+
+    <footer class="foot">
+      <div class="wrap">
+        <span>Zeron Plugins</span>
+        <a href="/">zeron.sh</a>
+        <a href="/plugins/publishing">Publishing guide</a>
+        <span class="grow"></span>
+        <a href="/privacy">Privacy</a>
+        <a href="/#downloads">Download Zeron</a>
+      </div>
+    </footer>
+    <script>
+      import "../scripts/store.ts";
+    </script>
+  </body>
+</html>

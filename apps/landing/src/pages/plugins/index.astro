@@ -1,44 +1,48 @@
 ---
-// Discover, the store's front: what a first-time visitor sees. What the
-// store's reviewers feature, each with its first picture; then the newest
-// and the most installed, each a short list on the table system with the
-// way to all of them. Public and the same for everyone (no cookie read):
-// the Worker cache keeps it as it keeps All plugins.
-import PluginRows, { type Measure } from "../../components/kit/PluginRows.astro";
-import PluginTile from "../../components/store/PluginTile.astro";
-import Glyph from "../../components/ui/Glyph.astro";
-import App from "../../layouts/App.astro";
+// Discover, the store's front (the prototype's discover): what the store
+// is, in a line and three numbers; its search and its categories; what's
+// featured, each on its own colour with its first picture (or its tile,
+// large, when it ships none); the most installed and the verified ones
+// updated lately; every category with a line and a few of its plugins; and
+// what was just published, said honestly: live, not yet verified.
+// Public and the same for everyone (no cookie read): the Worker cache
+// keeps it as it keeps the lists.
+import Icon from "../../components/look/Icon.astro";
+import Seal from "../../components/look/Seal.astro";
+import Tile from "../../components/look/Tile.astro";
+import Store from "../../layouts/Store.astro";
+import "../../styles/look/discover.css";
 import { catalogHref } from "../../lib/store/catalog.ts";
-import { count, day } from "../../lib/store/format.ts";
+import { count, since } from "../../lib/store/format.ts";
+import { hueClass } from "../../lib/store/hue.ts";
 import { CATALOG_TAG, publicPage } from "../../lib/store/http.ts";
-import type { PluginCard } from "../../lib/store/types.ts";
+import { CATEGORIES } from "../../lib/store/nav.ts";
+import type { Category, PluginCard } from "../../lib/store/types.ts";
 import { pictureUrl, pluginUrl } from "../../lib/store/urls.ts";
-import { EMPTY_BODY, store } from "../../lib/store/words.ts";
+import { categoryLine, EMPTY_BODY, store } from "../../lib/store/words.ts";
 
 export const prerender = false;
 
-// A search, a category or a sort is All plugins' (/plugins/all); /plugins is the store's front.
+// A search, a category or a sort is the list's (/plugins/all); /plugins is the store's front.
 if (Astro.url.search) return Astro.redirect(`/plugins/all${Astro.url.search}`, 301);
 
-/** How many each short list shows, and how many featured. */
-const SHORT = 6;
-const FEATURED = 3;
 const edge = Astro.locals.edge;
-// (Each asked at the edge's own page size, no `limit`: those first pages are
-// the ones the edge purges on a change, so a takedown leaves this page at
-// once, as it leaves All plugins'. The page shows the first few.)
-const [featured, newest, popular, categoriesResult] = await Promise.all([
+// (Each list asked at the edge's own page size, no `limit`: those first
+// pages are the ones the edge purges on a change, so a take-down leaves
+// this page at once, as it leaves the list's.)
+const [stats, categoriesResult, featured, popular, recent, newest] = await Promise.all([
+  edge.stats(),
+  edge.categories(3),
   edge.catalog({ featured: true, sort: "popular" }),
-  edge.catalog({ sort: "new" }),
   edge.catalog({ sort: "popular" }),
-  edge.categories(),
+  edge.catalog({ verified: true, sort: "updated" }),
+  edge.catalog({ sort: "new" }),
 ]);
-const names = new Map((categoriesResult.ok ? categoriesResult.data.categories : []).map((c) => [c.id, c.name]));
 
-// Each featured plugin's first picture, from its page's record.
+// Each featured plugin's first picture, from its page's record (a card carries none).
 const featuredItems: { plugin: PluginCard; picture: string | null }[] = [];
 if (featured.ok) {
-  const items = featured.data.items.slice(0, FEATURED);
+  const items = featured.data.items.slice(0, 3);
   const details = await Promise.all(items.map((p) => edge.plugin(p.id)));
   for (const [i, plugin] of items.entries()) {
     const detail = details[i];
@@ -46,79 +50,204 @@ if (featured.ok) {
     featuredItems.push({ plugin, picture: first ? pictureUrl(plugin.id, plugin.version, first) : null });
   }
 }
+const [big, ...side] = featuredItems;
 
-// Covers only when every featured plugin has a picture: one without, and
-// the whole row is drawn compact (tile, name, who, two lines), one height;
-// never a placeholder band, never cards of two heights.
-const covers = featuredItems.length > 0 && featuredItems.every((f) => f.picture);
-const ok = newest.ok && popular.ok;
+const ok = popular.ok;
 if (ok) publicPage(Astro, [CATALOG_TAG]);
 else Astro.response.status = 503;
-const empty = ok && newest.data.total === 0;
+const empty = ok && popular.data.total === 0;
+const mostInstalled = popular.ok ? popular.data.items.slice(0, 5) : [];
+const updated = recent.ok ? recent.data.items.slice(0, 5) : [];
+// Just published: the newest plugins whose version no one has verified yet, as the line above them says.
+const fresh = newest.ok ? newest.data.items.filter((p) => !p.verified).slice(0, 3) : [];
 
-const published: Measure = { head: "Published", cell: (p) => (p.listed_at === null ? "—" : day(p.listed_at)), folded: (p) => `Published ${p.listed_at === null ? "—" : day(p.listed_at)}` };
-const installs: Measure = { head: "Installs", cell: (p) => count(p.installs), folded: (p) => `${count(p.installs)} ${p.installs === 1 ? "install" : "installs"}` };
+/** The categories as the edge counts them, else as the site names them (no counts, no tiles). */
+const categories: Category[] = categoriesResult.ok ? categoriesResult.data.categories : CATEGORIES.map((c) => ({ id: c.id, name: c.label }));
+const categoryName = new Map(categories.map((c) => [c.id, c.name]));
+const firstCategory = (p: PluginCard) => (p.categories[0] ? (categoryName.get(p.categories[0]) ?? null) : null);
+const by = (p: PluginCard) => (p.author.username ? `@${p.author.username}` : "a former account");
+const now = Date.now();
+const n = (value: number | undefined) => (value === undefined ? "—" : count(value));
 ---
 
-<App title="Plugins · Zeron" description="Plugins for Zeron: panels, commands, tools for your agents and more, each saying whether Zeron verified it." canonical="/plugins" current="discover">
-  <h1 slot="title" class="t-title">Discover</h1>
+<Store title="Plugins · Zeron" description="Panels, commands and tools for your agents, made by people who use Zeron. Each says whether Zeron verified it." canonical="/plugins" current="discover">
+  <section class="intro wrap">
+    <div class="hd">
+      <div>
+        <h1>Plugins</h1>
+        <p class="lead">Panels, commands and tools for your agents, made by people who use Zeron. Anyone can publish. A check marks what Zeron has verified.</p>
+      </div>
+      {
+        stats.ok && (
+          <dl class="nums">
+            <div><dt>Plugins</dt><dd class="num">{n(stats.data.plugins)}</dd></div>
+            <div><dt>Verified</dt><dd class="num">{n(stats.data.verified)} <Seal size="s" quiet /></dd></div>
+            {stats.data.new_7d !== undefined && <div><dt>New this week</dt><dd class="num">{n(stats.data.new_7d)}</dd></div>}
+          </dl>
+        )
+      }
+    </div>
+    <form class="bigfind" role="search" action="/plugins/all" method="get" data-tidy>
+      <Icon name="search" />
+      <input type="search" name="q" placeholder="Search plugins, authors and what they do" aria-label="Search plugins" autocomplete="off" enterkeyhint="search" data-search data-page-search />
+      <kbd class="kbd" aria-hidden="true">/</kbd>
+    </form>
+    <nav class="cats" aria-label="Categories">
+      <a class="chip solid" href="/plugins/all">All</a>
+      {categories.map((c) => <a class="chip" href={catalogHref({ category: c.id })}>{c.name}</a>)}
+      <span class="grow"></span>
+      <a class="chip only" href="/plugins/all?verified=1"><Seal size="s" quiet />{store("plugins.store.verified_only")}</a>
+    </nav>
+  </section>
 
   {
     !ok ? (
-      <div class="panel">
+      <section class="blk wrap">
         <div class="empty" role="status">
-          <span class="tile"><Glyph name="wifi-off" size={20} /></span>
-          <div class="words"><h2 class="t-heading">{store("plugins.store.failed_title")}</h2><p>{store("plugins.store.failed_body")}</p></div>
-          <div class="actions"><a class="btn secondary sm" href="/plugins">{store("plugins.store.try_again")}</a></div>
+          <h2>{store("plugins.store.failed_title")}</h2>
+          <p>{store("plugins.store.failed_body")}</p>
+          <a class="btn sec" href="/plugins">{store("plugins.store.try_again")}</a>
         </div>
-      </div>
+      </section>
     ) : empty ? (
-      <div class="panel">
+      <section class="blk wrap">
         <div class="empty">
-          <span class="tile"><Glyph name="widget" size={20} /></span>
-          <div class="words"><h2 class="t-heading">{store("plugins.store.empty_title")}</h2><p>{EMPTY_BODY}</p></div>
-          <div class="actions"><a class="btn secondary sm" href="/plugins/publishing">Publishing guide</a></div>
+          <h2>No plugins yet</h2>
+          {/* (The way to publish is the band below.) */}
+          <p>{EMPTY_BODY} Anyone with a Zeron account can publish one.</p>
         </div>
-      </div>
+      </section>
     ) : (
-      <div class="discover">
-        {featuredItems.length > 0 && (
-          <section class="section" aria-labelledby="featured-heading">
-            <div class="section-head"><div class="words"><h2 id="featured-heading">{store("plugins.store.featured")}</h2><p>Chosen by the store's reviewers.</p></div></div>
-            <ul class:list={["featured-row", { compact: !covers }]} role="list">
-              {featuredItems.map(({ plugin, picture }) => (
-                <li class="panel feature">
-                  {covers && <img class="feature-picture" src={picture!} alt="" width="1280" height="800" loading="lazy" decoding="async" />}
-                  <div class="feature-words">
-                    <PluginTile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size={covers ? 32 : 40} class="plugin-tile" />
-                    <div class="cell-words">
-                      <a class="name feature-link" href={pluginUrl(plugin.id)}>{plugin.name}</a>
-                      <span class="by">{plugin.author.username ? `@${plugin.author.username}` : "Unnamed author"} · {count(plugin.installs)} {plugin.installs === 1 ? "install" : "installs"}</span>
-                    </div>
+      <>
+        {big && (
+          <section class="blk wrap" aria-labelledby="featured">
+            <div class="sec-head"><h2 id="featured">Featured</h2></div>
+            <div class:list={["bento", { single: side.length === 0 }]}>
+              <a class:list={["card f-big", hueClass(big.plugin.id)]} href={pluginUrl(big.plugin.id)}>
+                <div class="stage">
+                  {big.picture ? <img class="shot" src={big.picture} alt="" loading="lazy" decoding="async" /> : <span class="alone"><Tile id={big.plugin.id} name={big.plugin.name} icon={big.plugin.icon} version={big.plugin.version} size="xxl" /></span>}
+                </div>
+                <div class="cap">
+                  <Tile id={big.plugin.id} name={big.plugin.name} icon={big.plugin.icon} version={big.plugin.version} size="l" />
+                  <div class="txt">
+                    <div class="nm"><span class="name">{big.plugin.name}</span>{big.plugin.verified && <Seal />}</div>
+                    <div class="by">by {by(big.plugin)}{firstCategory(big.plugin) && ` · ${firstCategory(big.plugin)}`}</div>
+                    <p class="sum">{big.plugin.summary}</p>
                   </div>
-                  <p class="feature-summary">{plugin.summary}</p>
+                  <span class="count num">{count(big.plugin.installs)} {big.plugin.installs === 1 ? "install" : "installs"}</span>
+                </div>
+              </a>
+              {side.length > 0 && (
+                <div class="side">
+                  {side.map((f) => (
+                    <a class:list={["card f-small", hueClass(f.plugin.id)]} href={pluginUrl(f.plugin.id)}>
+                      <div class="stage">
+                        {f.picture ? <img class="shot" src={f.picture} alt="" loading="lazy" decoding="async" /> : <span class="alone"><Tile id={f.plugin.id} name={f.plugin.name} icon={f.plugin.icon} version={f.plugin.version} size="xl" /></span>}
+                      </div>
+                      <div class="cap">
+                        <Tile id={f.plugin.id} name={f.plugin.name} icon={f.plugin.icon} version={f.plugin.version} />
+                        <div class="nm"><span class="name">{f.plugin.name}</span>{f.plugin.verified && <Seal size="s" />}</div>
+                        <div class="by">by {by(f.plugin)}{firstCategory(f.plugin) && ` · ${firstCategory(f.plugin)}`}</div>
+                        <p class="sum">{f.plugin.summary}</p>
+                        <span class="grow"></span>
+                        <span class="count num">{count(f.plugin.installs)} {f.plugin.installs === 1 ? "install" : "installs"}</span>
+                      </div>
+                    </a>
+                  ))}
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+
+        <section class="blk wrap cols">
+          <div>
+            <div class="sec-head"><h2 id="popular">Most installed</h2><a class="more" href={catalogHref({ sort: "popular" })}>See all<span class="sr-only"> by installs</span><Icon name="chev" /></a></div>
+            <ol class="list" aria-labelledby="popular">
+              {mostInstalled.map((p, i) => (
+                <li>
+                  <a class="item" href={pluginUrl(p.id)}>
+                    <span class="rank" aria-hidden="true">{i + 1}</span>
+                    <Tile id={p.id} name={p.name} icon={p.icon} version={p.version} />
+                    <div class="txt"><div class="nm"><span class="name">{p.name}</span>{p.verified && <Seal size="s" />}</div><div class="sm">{p.summary}</div></div>
+                    <div class="meta num">{count(p.installs)}<span class="sr-only"> installs</span></div>
+                  </a>
+                </li>
+              ))}
+            </ol>
+          </div>
+          {updated.length > 0 && (
+            <div>
+              <div class="sec-head"><h2 id="updated">Updated, verified</h2><a class="more" href={catalogHref({ verified: true, sort: "updated" })}>See all<span class="sr-only"> verified, by update</span><Icon name="chev" /></a></div>
+              <ul class="list" aria-labelledby="updated">
+                {updated.map((p) => (
+                  <li>
+                    <a class="item" href={pluginUrl(p.id)}>
+                      <Tile id={p.id} name={p.name} icon={p.icon} version={p.version} />
+                      <div class="txt"><div class="nm"><span class="name">{p.name}</span><Seal size="s" /></div><div class="sm">{p.summary}</div></div>
+                      <div class="meta"><time datetime={new Date(p.updated_at).toISOString()}>{since(p.updated_at, now)}</time></div>
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </section>
+
+        <section class="blk wrap" aria-labelledby="by-category">
+          <div class="sec-head"><h2 id="by-category">Browse by category</h2></div>
+          <ul class="index">
+            {categories.map((c) => (
+              <li>
+                <a class="idx" href={catalogHref({ category: c.id })}>
+                  <div class="txt"><h3>{c.name}</h3>{categoryLine(c.id) && <p>{categoryLine(c.id)}</p>}</div>
+                  {c.top && c.top.length > 0 && (
+                    <div class="tiles" aria-hidden="true">
+                      {c.top.map((p) => <Tile id={p.id} name={p.name} icon={p.icon} version={p.version} size="s" />)}
+                    </div>
+                  )}
+                  {c.count !== undefined && <span class="n num">{count(c.count)}<span class="sr-only"> plugins</span></span>}
+                  <Icon name="chev" />
+                </a>
+              </li>
+            ))}
+          </ul>
+        </section>
+
+        {fresh.length > 0 && (
+          <section class="blk wrap" aria-labelledby="fresh">
+            <div class="sec-head">
+              <div><h2 id="fresh">Just published</h2><p class="small t3">Live the moment they are sent. Zeron has not verified these yet.</p></div>
+              <a class="more" href={catalogHref({ sort: "new" })}>See all<span class="sr-only"> newest</span><Icon name="chev" /></a>
+            </div>
+            <ul class="fresh">
+              {fresh.map((p) => (
+                <li>
+                  <a class:list={["card", hueClass(p.id)]} href={pluginUrl(p.id)}>
+                    <div class="hd">
+                      <Tile id={p.id} name={p.name} icon={p.icon} version={p.version} />
+                      <div class="who"><div class="nm name">{p.name}</div><div class="by">by {by(p)}{p.version && ` · ${p.version}`}</div></div>
+                    </div>
+                    <p>{p.summary}</p>
+                    <div class="ft"><span class="state no">Not verified yet</span>{p.listed_at !== null && <time class="count" datetime={new Date(p.listed_at).toISOString()}>{since(p.listed_at, now, true)}</time>}</div>
+                  </a>
                 </li>
               ))}
             </ul>
           </section>
         )}
-
-        <section class="section" aria-labelledby="new-heading">
-          <div class="section-head">
-            <div class="words"><h2 id="new-heading">{store("plugins.store.sort.new")}</h2></div>
-            <a class="btn ghost sm" href={catalogHref({ sort: "new" })}>See all<Glyph name="alt-arrow-right" size={12} /></a>
-          </div>
-          <div class="panel"><PluginRows items={newest.data.items.slice(0, SHORT)} caption={store("plugins.store.sort.new")} measure={published} names={names} /></div>
-        </section>
-
-        <section class="section" aria-labelledby="popular-heading">
-          <div class="section-head">
-            <div class="words"><h2 id="popular-heading">{store("plugins.store.sort.popular")}</h2></div>
-            <a class="btn ghost sm" href="/plugins/all">See all<Glyph name="alt-arrow-right" size={12} /></a>
-          </div>
-          <div class="panel"><PluginRows items={popular.data.items.slice(0, SHORT)} caption={store("plugins.store.sort.popular")} measure={installs} names={names} /></div>
-        </section>
-      </div>
+      </>
     )
   }
-</App>
+
+  <section class="wrap">
+    <div class="make">
+      <div class="txt">
+        <h3>Made something for Zeron?</h3>
+        <p>Publish it from Zeron's Settings, or from the folder it lives in. It is live at once, and marked verified when Zeron has read it.</p>
+      </div>
+      <span class="cmd"><code><em aria-hidden="true">$</em> zeron plugin publish</code><button type="button" data-copy="zeron plugin publish" aria-label="Copy the command"><Icon name="copy" /></button></span>
+      <a class="btn sec" href="/plugins/publishing">Publishing guide<Icon name="arrow" /></a>
+    </div>
+  </section>
+</Store>

@@ -27,6 +27,8 @@ const state = {
   down: false,
   /** A plugin shown with no pictures (POST /_fake/bare?id=…, empty for none): Featured with one that has none. */
   bare: null as string | null,
+  /** The store with nothing listed (POST /_fake/empty?on=1): a page's emptiest. */
+  empty: false,
 };
 
 // Programs the host rates (crates/plugin-guard/src/commands.rs), enough for the fixtures.
@@ -80,7 +82,7 @@ const shown = (v: FakeVersion) => v.status === "listed" || v.status === "yanked"
 const latest = (p: FakePlugin) => p.versions.find((v) => v.status === "listed" && !prerelease(v)) ?? p.versions.find((v) => v.status === "listed");
 /** The newest verified listed version, a release before a pre-release. */
 const verifiedVersion = (p: FakePlugin) => p.versions.find((v) => v.status === "listed" && v.verified && !prerelease(v)) ?? p.versions.find((v) => v.status === "listed" && v.verified);
-const listed = (p: FakePlugin) => p.status !== "suspended" && latest(p) !== undefined;
+const listed = (p: FakePlugin) => !state.empty && p.status !== "suspended" && latest(p) !== undefined;
 /** When it was first listed (amendment 39): its first version's day, never moved by a later one; null with no listed version. */
 const listedAt = (p: FakePlugin) => (latest(p) ? Math.min(...p.versions.filter(shown).map((v) => v.published_at)) : null);
 
@@ -757,6 +759,10 @@ async function route(request: Request): Promise<Response> {
   if (parts[0] === "_fake" && parts[1] === "bare" && method === "POST") {
     state.bare = url.searchParams.get("id") || null;
     return json({ bare: state.bare });
+  }
+  if (parts[0] === "_fake" && parts[1] === "empty" && method === "POST") {
+    state.empty = url.searchParams.get("on") === "1";
+    return json({ empty: state.empty });
   }
   if (parts[0] === "_fake" && parts[1] === "down" && method === "POST") {
     state.down = url.searchParams.get("on") === "1";

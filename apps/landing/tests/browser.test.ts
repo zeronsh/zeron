@@ -231,24 +231,37 @@ describe("an author's words stay in their place", () => {
   });
 });
 
-describe("the account chip is the same on every page", () => {
-  test("signed in, a public page's chip has its name and Sign out, with the session's token", async () => {
+describe("who you are, in the bar of a public page", () => {
+  test("signed in, the bar has your name; its menu, Sign out with the session's token; Review only for staff", async () => {
     const { page, context } = await open("/plugins", { as: "user_ada" });
     try {
-      await expect.poll(() => page.locator(".sidebar-foot .account .name").textContent()).toBe("@ada");
-      const signOut = page.locator("form[data-signout]");
-      expect(await signOut.isVisible()).toBe(true);
+      const me = page.locator(".top button[data-me]");
+      await expect.poll(() => me.isVisible()).toBe(true);
+      expect(await me.locator("[data-handle]").textContent()).toBe("@ada");
+      expect(await page.locator(".top [data-signin]").isVisible()).toBe(false);
+      expect(await page.locator(".top .nav a[data-staff]").isVisible()).toBe(false);
+      await me.click();
+      const signOut = page.locator("#me-menu form[data-signout]");
+      await expect.poll(() => signOut.isVisible()).toBe(true);
       expect(await signOut.locator("input[name=csrf]").inputValue()).not.toBe("");
     } finally {
       await context.close();
     }
+    const staff = await open("/plugins", { as: "user_grace" });
+    try {
+      await expect.poll(() => staff.page.locator(".top .nav a[data-staff]").isVisible()).toBe(true);
+    } finally {
+      await staff.context.close();
+    }
   });
 
-  test("signed out, it says Sign in, and no Sign out", async () => {
+  test("signed out, it says Sign in, and no name and no Sign out", async () => {
     const { page, context } = await open("/plugins");
     try {
-      await expect.poll(() => page.locator(".sidebar-foot .account").evaluate((a) => a.classList.contains("is-pending"))).toBe(false);
-      expect(await page.locator("form[data-signout]").isVisible()).toBe(false);
+      await page.waitForLoadState("networkidle");
+      expect(await page.locator(".top [data-signin]").isVisible()).toBe(true);
+      expect(await page.locator(".top button[data-me]").isVisible()).toBe(false);
+      expect(await page.locator("form[data-signout]").first().isVisible()).toBe(false);
     } finally {
       await context.close();
     }

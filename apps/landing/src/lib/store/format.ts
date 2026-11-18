@@ -33,6 +33,26 @@ export function ago(ms: number, now = Date.now()): string {
   return "just now";
 }
 
+/**
+ * When, said as a list says it: "Today", "Yesterday", "3 days ago", then the
+ * day ("Nov 14"). With `hours`, today is said in hours too ("2 hours ago",
+ * "Just now"): for what was just published.
+ */
+export function since(ms: number, now = Date.now(), hours = false): string {
+  const elapsed = Math.max(0, now - ms);
+  if (hours && elapsed < 86_400_000) {
+    const h = Math.floor(elapsed / 3_600_000);
+    const m = Math.floor(elapsed / 60_000);
+    return h >= 1 ? `${h} ${h === 1 ? "hour" : "hours"} ago` : m >= 1 ? `${m} ${m === 1 ? "minute" : "minutes"} ago` : "Just now";
+  }
+  const startOf = (t: number) => Math.floor(t / 86_400_000);
+  const days = startOf(now) - startOf(ms);
+  if (days <= 0) return "Today";
+  if (days === 1) return "Yesterday";
+  if (days < 7) return `${days} days ago`;
+  return day(ms, now);
+}
+
 /** How long since, said as a length ("5 hours", "3 days"): how long something has waited. */
 export function waitedFor(ms: number, now = Date.now()): string {
   const seconds = Math.max(0, (now - ms) / 1000);

@@ -94,7 +94,7 @@ describe("the store's front (/plugins)", () => {
     expect(response.headers.get("x-frame-options")).toBe("DENY");
     expect(hasInlineScript(body)).toBe(false);
     expect(body).toContain("Focus timer");
-    expect(body).toContain('id="featured-heading"');
+    expect(body).toContain('<h2 id="featured">Featured</h2>');
   });
 
 });
@@ -858,24 +858,61 @@ describe("forms", () => {
 });
 
 describe("Discover", () => {
-  test("Featured draws covers only when every featured plugin has a picture; one without, and the row is compact, one height", async () => {
-    const withCovers = (await html("/plugins")).body;
-    expect(withCovers).toContain('<ul class="featured-row" role="list">');
-    expect(withCovers.match(/<img class="feature-picture"/g)).toHaveLength(3);
+  test("the store in three numbers, from /stats; every category with its line, its count and a few of its plugins", async () => {
+    const { body } = await html("/plugins");
+    expect(body).toMatch(/<dt>Plugins<\/dt><dd class="num">\d+<\/dd>/);
+    expect(body).toMatch(/<dt>Verified<\/dt><dd class="num">\d+ <svg class="seal s"/);
+    expect(body).toMatch(/<dt>New this week<\/dt><dd class="num">\d+<\/dd>/);
+    const index = body.slice(body.indexOf('<ul class="index">'), body.indexOf("</ul>", body.indexOf('<ul class="index">')));
+    expect(index.match(/<a class="idx" href="\/plugins\/all\?category=/g)).toHaveLength(8);
+    expect(index).toContain("<h3>Developer tools</h3><p>Docs, databases, secrets and builds</p>");
+    // (Its top plugins, at most three tiles, each on its own hue.)
+    for (const tiles of index.matchAll(/<div class="tiles" aria-hidden="true">(.*?)<\/div>/gs)) expect(tiles[1]!.match(/class="tile s h\d+"/g)!.length).toBeLessThanOrEqual(3);
+  });
+
+  test("Featured: each on its own colour, its first picture, or its tile alone, large, when it ships none", async () => {
+    const withPictures = (await html("/plugins")).body;
+    const featured = withPictures.slice(withPictures.indexOf('<h2 id="featured">'), withPictures.indexOf("</section>", withPictures.indexOf('<h2 id="featured">')));
+    expect(featured.match(/<a class="card f-(big|small) h\d+"/g)).toHaveLength(3);
+    expect(featured.match(/<img class="shot"/g)).toHaveLength(3);
     try {
       await site.fake("bare", { id: "pr-radar" });
       // (A minute's cache: another address of the same page, a fresh one.)
       const { body } = await html("/plugins", await site.signIn("user_kai"));
-      expect(body).toContain('<ul class="featured-row compact" role="list">');
-      expect(body).not.toContain("feature-picture");
+      const bare = body.slice(body.indexOf('<h2 id="featured">'), body.indexOf("</section>", body.indexOf('<h2 id="featured">')));
+      expect(bare.match(/<img class="shot"/g)).toHaveLength(2);
+      expect(bare).toMatch(/<span class="alone"><span class="tile xl h\d+"/);
     } finally {
       await site.fake("bare");
     }
   });
 
-  test("its lists say See all the one way", async () => {
+  test("its lists: See all, each a real link to the list it summarises; Just published only what isn't verified yet", async () => {
     const { body } = await html("/plugins");
-    expect(body.match(/>See all<span class="glyph/g)).toHaveLength(2);
+    expect([...body.matchAll(/<a class="more" href="([^"]+)">See all/g)].map((m) => m[1])).toEqual(["/plugins/all", "/plugins/all?verified=1&amp;sort=updated", "/plugins/all?sort=new"]);
+    const fresh = body.slice(body.indexOf('<ul class="fresh">'), body.indexOf("</ul>", body.indexOf('<ul class="fresh">')));
+    expect(fresh.match(/<li>/g)!.length).toBeGreaterThan(0);
+    expect(fresh.match(/<li>/g)!.length).toBe(fresh.match(/<span class="state no">Not verified yet<\/span>/g)!.length);
+    expect(fresh).not.toContain('class="seal');
+  });
+
+  test("an empty store says so; a store that didn't answer says so, and isn't kept", async () => {
+    try {
+      await site.fake("empty", { on: "1" });
+      const { body } = await html("/plugins", await site.signIn("user_mo"));
+      expect(body).toContain("<h2>No plugins yet</h2>");
+      expect(body).not.toContain('<h2 id="featured">');
+    } finally {
+      await site.fake("empty");
+    }
+    try {
+      await site.fake("down", { on: "1" });
+      const { response, body } = await html("/plugins", await site.signIn("user_lin"));
+      expect(response.status).toBe(503);
+      expect(body).toContain("The plugin store didn&#39;t answer");
+    } finally {
+      await site.fake("down");
+    }
   });
 });
 

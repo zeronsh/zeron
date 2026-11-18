@@ -1,0 +1,33 @@
+---
+// A plugin's tile: its own icon when it ships one, drawn in its hue's ink
+// (Inks.astro), else its name's first letter; on its own colour, from its
+// id (lib/store/hue.ts).
+import { hueStep } from "../../lib/store/hue.ts";
+import { initial } from "../../lib/store/tile.ts";
+import { pictureUrl } from "../../lib/store/urls.ts";
+
+interface Props {
+  id: string;
+  name: string;
+  /** Its icon: the edge's address for it, or its path in the package and the version it's from. */
+  icon: string | null | undefined;
+  version: string | null;
+  size?: "xs" | "s" | "m" | "l" | "xl" | "xxl";
+  class?: string;
+}
+const { id, name, icon, version, size = "m", class: className } = Astro.props;
+const step = hueStep(id);
+const src = pictureUrl(id, version, icon);
+---
+
+<span class:list={["tile", size !== "m" && size, `h${step}`, className]} aria-hidden="true">
+  {
+    src ? (
+      <svg viewBox="0 0 100 100" focusable="false">
+        <image href={src} x="25" y="25" width="50" height="50" filter={`url(#ink-${step})`} preserveAspectRatio="xMidYMid meet" />
+      </svg>
+    ) : (
+      initial(name)
+    )
+  }
+</span>

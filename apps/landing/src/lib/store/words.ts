@@ -128,6 +128,15 @@ export const EMPTY_BODY = "Plugins people publish appear here.";
 export const SITE_WORDS = {
   "status.listed": "Listed",
   "undecided": "Not verified yet",
+  // What each category holds, in a line (the coordinator's, from the prototype's index).
+  "category.agents": "What your agents can use and how they report back",
+  "category.appearance": "Themes, icons and how Zeron looks",
+  "category.chat": "What a chat shows and remembers",
+  "category.developer-tools": "Docs, databases, secrets and builds",
+  "category.git": "Branches, pull requests and reviews",
+  "category.integrations": "The other tools your work lives in",
+  "category.productivity": "Time, notes and staying on track",
+  "category.utilities": "Small things that should exist",
 } as const;
 
 /**
@@ -145,3 +154,6 @@ export const statusWords = (status: VersionStatus): string => (status === "liste
 
 /** A report's reason, as the app's report sheet lists it. */
 export const reportReasonWords = (reason: ReportReason): string => store(`plugins.store.report.reason.${reason}`);
+
+/** A category's line (SITE_WORDS), or none for one the site doesn't know yet. */
+export const categoryLine = (id: string): string | null => (SITE_WORDS as Record<string, string>)[`category.${id}`] ?? null;
