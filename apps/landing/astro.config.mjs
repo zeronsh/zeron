@@ -13,6 +13,23 @@ import { defineConfig, fontProviders } from "astro/config";
 const command = process.argv.slice(2).find((arg) => !arg.startsWith("-"));
 const fakeEdge = command === "dev";
 
+/**
+ * Pages for making the store, never built for zeron.sh: the design sheet
+ * (every token and control in every state) and the empty shell, under
+ * /_dev in `astro dev` alone.
+ * @type {import("astro").AstroIntegration}
+ */
+const devPages = {
+  name: "zeron:dev-pages",
+  hooks: {
+    "astro:config:setup": ({ command, injectRoute }) => {
+      if (command !== "dev") return;
+      injectRoute({ pattern: "/_dev/sheet", entrypoint: "./src/dev/sheet.astro", prerender: false });
+      injectRoute({ pattern: "/_dev/shell", entrypoint: "./src/dev/shell.astro", prerender: false });
+    },
+  },
+};
+
 /** The landing page's components with scripts of their own (their chunks' names). */
 const LANDING_SCRIPTS = /(^|\/)(Base|CopyCommand|Downloads|GitHubStars|Yours)\.astro_astro_type_script_/;
 
@@ -22,6 +39,7 @@ export default defineConfig({
   // /privacy is served from privacy.html, the URL the app and stores link to.
   build: { format: "file" },
   devToolbar: { enabled: false },
+  integrations: [devPages],
   adapter: cloudflare({
     // Pictures are optimized at build time, as before the adapter.
     imageService: "compile",

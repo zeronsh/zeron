@@ -1,0 +1,476 @@
+/* Zeron Plugins: the app, in a browser. Every value here is the desktop
+   app's own (apps/zgx/ui/ds/themes/zeron-dark.json and ds/tokens.luau),
+   named as it names them; where the web differs, the line says why. The
+   design sheet (src/dev/sheet.astro, dev only) shows each in every state.
+
+   Type    11/14 label · 12/16 caption · 13/18 body (13/20 wrapped) · 15/20
+           heading · 20/26 title; mono 12/16; prose 15/24 (h 22/30, 18/26).
+   Space   4 8 12 16 24 32 (48 64 for an empty page's air); 2 6 10 inside
+           controls only (the app's hair, tight, snug).
+   Heights 16 20 badges · 22 24 28 icon buttons · 24 28 32 40 controls ·
+           26 segmented · 28 nav row · 32 36 tabs · 32 40 52 table rows.
+   Radius  4 6 8 12, 16 a dialog; an inner corner is its outer less the
+           inset between them. */
+
+:root {
+  /* Surfaces: the window, and two cards set into it 4 apart (zeron.inset). */
+  --window: #0e0e10;
+  --sidebar: #ebebeb0d; /* zeron.sidebar.tint */
+  --card: #ffffff0f; /* zeron.inset.bg = surface.raised */
+  --panel: #ebebeb0b; /* zeron.settings.tint: a group's card */
+  --sunken: #00000038; /* zeron.field.bg */
+  --overlay: #1c1c1f; /* zeron.menu.solid: menus, dialogs, toasts (opaque on the web: no glass behind a page) */
+
+  /* Lines. */
+  --line-faint: #ffffff0a; /* border.subtle */
+  --line: #ffffff12; /* border */
+  --line-strong: #ffffff2e; /* border.strong */
+  --field-edge: #ffffff14;
+  --field-edge-hover: #ffffff26;
+
+  /* Washes over anything. */
+  --hover: #ffffff0d;
+  --pressed: #ffffff17;
+  --selected: #ebebeb24; /* zeron.selected.flat.bg */
+  --wash: #ffffff14; /* zeron.secondary.bg */
+
+  /* Ink: the primary, and the primary fainter (never a grey). */
+  --text: #ededef;
+  --text-2: rgb(237 237 239 / 0.6);
+  /* (The app's tertiary is 0.42, under WCAG AA on the web's cards: 0.54 here.) */
+  --text-3: rgb(237 237 239 / 0.54);
+  --text-off: rgb(237 237 239 / 0.28);
+
+  --accent: #9277b0;
+  --ring: rgb(146 119 176 / 0.6); /* focus.ring */
+
+  /* Tones (zeron.tone): pale inks, faint washes, edges between. */
+  --ok-ink: #6ee7b7; --ok-wash: rgb(52 211 153 / 0.14); --ok-edge: rgb(52 211 153 / 0.3);
+  --warn-ink: #fcd34d; --warn-wash: rgb(251 191 36 / 0.14); --warn-edge: rgb(251 191 36 / 0.3);
+  --bad-ink: #fca5a5; --bad-wash: rgb(248 113 113 / 0.15); --bad-edge: rgb(248 113 113 / 0.32);
+  --info-ink: #93c5fd; --info-wash: rgb(96 165 250 / 0.14); --info-edge: rgb(96 165 250 / 0.3);
+  --accent-ink: #c4b5fd; --accent-wash: rgb(146 119 176 / 0.2); --accent-edge: rgb(146 119 176 / 0.4);
+
+  /* Buttons (zeron.primary, secondary, destructive). */
+  --primary: #ececee; --primary-hover: #ffffff; --primary-active: #d2d2d7; --primary-ink: #0b0b0c;
+  --secondary: #ffffff14; --secondary-hover: #ffffff1f; --secondary-active: #ffffff29;
+  --danger: #dc2626; --danger-hover: #ef4444; --danger-active: #b91c1c;
+
+  /* Code (zeron.syntax: the palette's 300s, structure in the text's ink). */
+  --code-text: rgb(237 237 239 / 0.9);
+  --code-keyword: #c4b5fd; --code-function: #93c5fd; --code-type: #fcd34d; --code-string: #86efac;
+  --code-number: #fdba74; --code-property: #fecdd3; --code-tag: #fca5a5; --code-attribute: #fde047;
+  /* (The app's comment ink is 0.46: 0.58 here, for AA.) */
+  --code-comment: rgb(237 237 239 / 0.58);
+  --code-punct: rgb(237 237 239 / 0.6);
+  --diff-added: #34d399; --diff-removed: #f87171;
+  --diff-added-wash: rgb(52 211 153 / 0.12); --diff-removed-wash: rgb(248 113 113 / 0.12);
+
+  --sans: var(--font-sans);
+  --mono: var(--font-mono);
+
+  /* The shell. */
+  --sidebar-w: 272px; /* the app's sidebar, at its default (fit_policy SIDEBAR_DEFAULT) */
+  --inset: 4px; /* zeron.inset.gap: the window round and between the cards */
+  --head-h: 56px; /* a 32 control with 12 above and under */
+  --measure: 640px; /* zeron.settings.measure: a column of reading */
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+* { margin: 0; padding: 0; }
+html { background: var(--window); color-scheme: dark; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body {
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--text);
+  background: var(--window);
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+a { color: inherit; text-decoration: none; }
+img, svg { display: block; max-width: 100%; }
+ul, ol { list-style: none; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { background: none; border: 0; cursor: pointer; }
+code, pre, kbd, samp { font-family: var(--mono); }
+::selection { background: rgb(146 119 176 / 0.5); color: #fff; }
+:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+.num, td, .tabular { font-variant-numeric: tabular-nums; }
+/* (Hidden means hidden: a component's own display never shows it.) */
+[hidden] { display: none !important; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+/* An author's words keep their reordering to themselves. */
+.app :where(a, span, b, strong, em, code, bdi, time, label, dt, dd, li, td, th, p, h1, h2, h3) { unicode-bidi: isolate; }
+
+/* ── Type ──────────────────────────────────────────────────────────────── */
+
+.t-title { font-size: 20px; line-height: 26px; font-weight: 600; letter-spacing: -0.01em; }
+.t-heading { font-size: 15px; line-height: 20px; font-weight: 500; }
+.t-body { font-size: 13px; line-height: 18px; }
+.t-text { font-size: 13px; line-height: 20px; } /* wrapped body: a description, a paragraph */
+.t-caption { font-size: 12px; line-height: 16px; }
+.t-label { font-size: 11px; line-height: 14px; font-weight: 500; }
+.t-mono { font-family: var(--mono); font-size: 12px; line-height: 16px; }
+.t-2 { color: var(--text-2); }
+.t-3 { color: var(--text-3); }
+.t-strong { font-weight: 500; }
+
+/* ── The shell ─────────────────────────────────────────────────────────── */
+
+/* The window: two cards set into it, the sidebar and the page, 4 apart. */
+.shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  gap: var(--inset);
+  height: 100dvh;
+  padding: var(--inset);
+}
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--sidebar);
+  border-radius: 12px;
+  box-shadow: inset 0 0 0 1px var(--line-faint);
+}
+.sidebar-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 8px; scrollbar-width: thin; scrollbar-color: rgb(237 237 239 / 0.26) transparent; }
+.sidebar-foot { padding: 8px; display: grid; gap: 4px; }
+
+/* The page's card: it scrolls on its own; its header stays. */
+.page {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--card);
+  border-radius: 12px;
+  box-shadow: inset 0 0 0 1px var(--line-faint);
+  scrollbar-width: thin;
+  scrollbar-color: rgb(237 237 239 / 0.26) transparent;
+}
+.page-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: var(--head-h);
+  padding: 12px 24px;
+  /* (The card's own fill over the window, solid, so what scrolls under it doesn't show.) */
+  background: color-mix(in srgb, #ffffff 5.9%, var(--window));
+  border-bottom: 1px solid var(--line-faint);
+  border-radius: 12px 12px 0 0;
+}
+.page-head .lead { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+.page-head .tools { display: flex; align-items: center; gap: 8px; flex: none; }
+.page-body { padding: 24px 24px 32px; }
+
+/* The brand: the mark and "Plugins", on a row's grid, 40 high so its middle
+   is the page header's (4 + 8 + 20 = 4 + 28). */
+.brand { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 8px; font-weight: 600; }
+.brand .mark { width: 16px; height: 9.5px; fill: var(--text); }
+
+/* The list's rows (Settings.Nav): 28 high, 8 in, an icon and a name 8 apart. */
+.nav { display: grid; gap: 2px; }
+.nav-heading { display: flex; align-items: flex-end; height: 24px; padding: 8px 8px 0; color: var(--text-3); font-size: 11px; line-height: 14px; font-weight: 500; }
+.nav-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  color: var(--text-2);
+  transition: color 0.1s, background-color 0.1s;
+}
+.nav-row .glyph { color: inherit; }
+.nav-row .count { margin-left: auto; color: var(--text-3); font-size: 11px; line-height: 14px; }
+.nav-row:hover, .nav-row.is-hover { color: var(--text); }
+.nav-row:active, .nav-row.is-active { background: var(--hover); }
+.nav-row[aria-current="page"] { background: var(--selected); color: var(--text); }
+.nav-row:focus-visible { outline-offset: -2px; }
+.nav-gap { height: 8px; }
+
+/* The search over the list: a field at a row's height, "/" to it. */
+.sidebar .search { margin: 8px 0; }
+
+/* You, at the list's foot (ds.AccountRow): a face and a name on a 30 slot. */
+.account {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 8px 0 5px;
+  border-radius: 8px;
+  color: var(--text);
+}
+a.account:hover { background: var(--hover); }
+.account .avatar { width: 20px; height: 20px; border-radius: 50%; background: var(--wash); display: grid; place-items: center; font-size: 11px; font-weight: 600; color: var(--text-2); flex: none; overflow: hidden; }
+.account .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account.is-pending .name { color: transparent; }
+.account.is-pending .name::before { content: ""; display: block; width: 72px; height: 12px; border-radius: 4px; background: var(--hover); }
+.colophon { display: flex; gap: 6px; padding: 0 8px; color: var(--text-3); font-size: 11px; line-height: 14px; }
+.colophon a:hover { color: var(--text); }
+
+/* ── The phone: a top bar, the list in a drawer ────────────────────────── */
+
+.topbar { display: none; }
+.drawer-scrim { display: none; }
+@media (max-width: 899px) {
+  /* (Without the script the list is at the page's end, where Menu leads;
+     with it, a drawer over the page from the left.) */
+  .shell { display: flex; flex-direction: column; height: auto; padding: 0; }
+  .sidebar { order: 2; border-radius: 0; box-shadow: none; border-top: 1px solid var(--line-faint); }
+  .js .sidebar { display: none; }
+  .js .sidebar.is-open {
+    display: flex;
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 21;
+    width: min(304px, 88vw);
+    border: 0;
+    background: var(--overlay);
+    box-shadow: 0 24px 64px #00000080;
+  }
+  .js .drawer-scrim.is-open { display: block; position: fixed; inset: 0; z-index: 20; background: #00000059; }
+  .page { overflow: visible; border-radius: 0; box-shadow: none; background: transparent; }
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 48px;
+    padding: 0 8px;
+    background: var(--window);
+    border-bottom: 1px solid var(--line-faint);
+  }
+  .topbar .brand { padding: 0 4px; }
+  .topbar .spacer { flex: 1; }
+  .page-head { position: static; padding: 16px; border-radius: 0; background: transparent; flex-wrap: wrap; min-height: 0; border-bottom: 0; }
+  .page-head .tools { width: 100%; }
+  .page-head .tools > .segmented { flex: 1; }
+  .page-head .tools > .segmented > * { flex: 1; justify-content: center; }
+  .page-body { padding: 0 16px 32px; }
+  /* A phone's list is touched: rows at the large control's 40, names at 15. */
+  .sidebar .nav-row { height: 40px; font-size: 15px; line-height: 20px; }
+  .sidebar .nav-heading { height: 32px; }
+  .sidebar .search.field { height: 40px; padding: 0 10px; border-radius: 8px; }
+  .sidebar .search input { font-size: 15px; line-height: 20px; }
+  .sidebar .search .kbd { display: none; }
+  .sidebar .account { height: 40px; }
+}
+/* ── Controls ──────────────────────────────────────────────────────────── */
+
+/* A button: 24, 28, 32 or 40 high (xs, sm, md, lg); medium weight; an 8
+   corner (6 at 28). */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.1s, color 0.1s;
+  user-select: none;
+}
+.btn.xs { height: 24px; padding: 0 6px; gap: 6px; font-size: 12px; line-height: 16px; }
+.btn.sm { height: 28px; padding: 0 10px; gap: 6px; border-radius: 6px; font-size: 12px; line-height: 16px; }
+.btn.lg { height: 40px; padding: 0 24px; font-size: 15px; line-height: 20px; }
+.btn.icon { width: 32px; padding: 0; }
+.btn.icon.xs { width: 24px; }
+.btn.icon.sm { width: 28px; }
+.btn.primary { background: var(--primary); color: var(--primary-ink); }
+.btn.primary:hover, .btn.primary.is-hover { background: var(--primary-hover); }
+.btn.primary:active, .btn.primary.is-active { background: var(--primary-active); }
+.btn.secondary { background: var(--secondary); color: var(--text); }
+.btn.secondary:hover, .btn.secondary.is-hover { background: var(--secondary-hover); }
+.btn.secondary:active, .btn.secondary.is-active { background: var(--secondary-active); }
+.btn.ghost { color: var(--text-2); }
+.btn.ghost:hover, .btn.ghost.is-hover { background: var(--hover); color: var(--text); }
+.btn.ghost:active, .btn.ghost.is-active { background: var(--pressed); color: var(--text); }
+.btn.danger { background: var(--danger); color: #fff; }
+.btn.danger:hover, .btn.danger.is-hover { background: var(--danger-hover); }
+.btn.danger:active, .btn.danger.is-active { background: var(--danger-active); }
+.btn:disabled, .btn[aria-disabled="true"] { opacity: 0.4; pointer-events: none; }
+.is-focus { outline: 2px solid var(--ring); outline-offset: 1px; }
+
+/* A key on the keyboard. */
+.kbd { display: inline-grid; place-items: center; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 4px; box-shadow: inset 0 0 0 1px var(--line); color: var(--text-3); font-family: var(--sans); font-size: 11px; line-height: 14px; }
+
+/* A field: a sunken well, its hairline firming under the pointer, the
+   accent's edge and the ring when focused. 32 high (28 small). */
+.field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background: var(--sunken);
+  box-shadow: inset 0 0 0 1px var(--field-edge);
+  color: var(--text);
+  transition: box-shadow 0.1s;
+}
+.field.sm { height: 28px; padding: 0 8px; border-radius: 6px; gap: 6px; }
+.field:hover, .field.is-hover { box-shadow: inset 0 0 0 1px var(--field-edge-hover); }
+.field:focus-within, .field.is-focus { box-shadow: inset 0 0 0 1px rgb(146 119 176 / 0.7); outline: 2px solid var(--ring); outline-offset: 1px; }
+.field.is-error { box-shadow: inset 0 0 0 1px rgb(248 113 113 / 0.7); }
+.field.is-disabled { opacity: 0.4; pointer-events: none; }
+.field input, .field select, .field textarea { flex: 1; min-width: 0; height: 100%; background: none; border: 0; outline: 0; font-size: 13px; line-height: 18px; }
+.field.sm input { font-size: 12px; line-height: 16px; }
+.field input::placeholder, .field textarea::placeholder { color: var(--text-3); }
+.field .glyph { color: var(--text-3); }
+.field.area { height: auto; padding: 6px 10px; align-items: stretch; }
+.field.area textarea { min-height: 80px; line-height: 20px; resize: vertical; }
+.field select { appearance: none; padding-right: 20px; cursor: pointer; }
+.field.select { position: relative; }
+.field.select .chevron { position: absolute; right: 10px; pointer-events: none; color: var(--text-3); }
+.field-label { display: block; margin-bottom: 6px; font-size: 12px; line-height: 16px; font-weight: 500; color: var(--text); }
+.field-hint { margin-top: 6px; font-size: 12px; line-height: 16px; color: var(--text-3); }
+.field-hint.is-error { color: var(--bad-ink); }
+
+/* A segmented control: a 26 track, its thumb 2 in (corner 6, the thumb's 4). */
+.segmented { display: inline-flex; height: 26px; padding: 2px; gap: 2px; border-radius: 6px; background: var(--wash); }
+.segmented > * { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 12px; border-radius: 4px; color: var(--text-2); font-size: 12px; line-height: 16px; font-weight: 500; white-space: nowrap; }
+.segmented > *:hover, .segmented > .is-hover { color: var(--text); }
+.segmented > [aria-current="page"], .segmented > [aria-pressed="true"], .segmented > .is-on { background: var(--selected); color: var(--text); }
+.segmented > *:focus-visible { outline: 1px solid var(--ring); outline-offset: -1px; }
+
+/* Tabs: labels on a hairline, the open one marked under. 36 high (32 small). */
+.tabs { display: flex; gap: 16px; border-bottom: 1px solid var(--line-faint); overflow-x: auto; scrollbar-width: none; }
+.tabs > * { position: relative; display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 4px; color: var(--text-2); font-size: 13px; line-height: 18px; font-weight: 500; white-space: nowrap; flex: none; }
+.tabs.sm > * { height: 32px; font-size: 12px; line-height: 16px; }
+.tabs > *:first-child { padding-left: 0; }
+.tabs > *:hover, .tabs > .is-hover { color: var(--text); }
+.tabs > [aria-current="page"], .tabs > [aria-selected="true"] { color: var(--text); }
+.tabs > [aria-current="page"]::after, .tabs > [aria-selected="true"]::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; border-radius: 1px; background: var(--text); }
+.tabs > *:first-child[aria-current="page"]::after { left: 0; }
+.tabs > *:focus-visible { outline-offset: -2px; border-radius: 6px; }
+.tabs .count { color: var(--text-3); font-size: 11px; line-height: 14px; }
+
+/* A badge: 20 high (16 small), its tone's ink on its wash. */
+.badge { display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 6px; border-radius: 6px; background: var(--wash); color: var(--text-2); font-size: 12px; line-height: 16px; font-weight: 500; white-space: nowrap; }
+.badge.sm { height: 16px; padding: 0 4px; gap: 3px; border-radius: 4px; font-size: 11px; line-height: 14px; }
+.badge.dot::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.badge.ok { background: var(--ok-wash); color: var(--ok-ink); }
+.badge.warn { background: var(--warn-wash); color: var(--warn-ink); }
+.badge.bad { background: var(--bad-wash); color: var(--bad-ink); }
+.badge.info { background: var(--info-wash); color: var(--info-ink); }
+.badge.accent { background: var(--accent-wash); color: var(--accent-ink); }
+
+/* An icon tile: a plugin's (or a row's) mark on a quiet wash, 8 a side round it at 32. */
+.tile { display: grid; place-items: center; flex: none; width: 32px; height: 32px; border-radius: 8px; background: var(--wash); color: var(--text); }
+.tile.s20 { width: 20px; height: 20px; border-radius: 5px; }
+.tile.s40 { width: 40px; height: 40px; border-radius: 10px; }
+.tile.s56 { width: 56px; height: 56px; border-radius: 12px; }
+
+/* ── Groups: panels, lists, tables ─────────────────────────────────────── */
+
+/* A section: its title and a line, then what it holds 8 under. */
+.section { display: grid; gap: 8px; }
+.section-head { display: flex; align-items: flex-end; gap: 12px; }
+.section-head .words { flex: 1; min-width: 0; display: grid; gap: 4px; }
+.section-head h2 { font-size: 15px; line-height: 20px; font-weight: 500; }
+.section-head p { font-size: 13px; line-height: 20px; color: var(--text-2); }
+
+/* A panel (a settings group's card): a quiet fill, a hairline, a 12 corner;
+   what is in it reaches its edges and is clipped to its corners. */
+.panel { background: var(--panel); border-radius: 12px; box-shadow: inset 0 0 0 1px var(--line-faint); overflow: hidden; }
+.panel-pad { padding: 16px; }
+
+/* A list row (Settings.Row): 52 at least, 16 in; a lead, the words, the control. */
+.row { display: flex; align-items: center; gap: 12px; min-height: 52px; padding: 10px 16px; }
+.row + .row { border-top: 1px solid var(--line-faint); }
+.row .words { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.row .label { font-size: 13px; line-height: 18px; }
+.row .label.strong { font-weight: 500; }
+.row .desc { font-size: 12px; line-height: 16px; color: var(--text-3); }
+.row .end { flex: none; display: flex; align-items: center; gap: 8px; }
+a.row:hover, .row.link:hover, .row.is-hover { background: var(--hover); }
+a.row:focus-visible { outline-offset: -2px; }
+
+/* A table: a 32 head of labels, rows 40 (52 comfortable, 32 dense), cells 12
+   apart, 16 in at the ends; hairlines between rows, washed under the pointer. */
+.table { width: 100%; border-collapse: collapse; }
+.table th { height: 32px; padding: 0 12px; text-align: left; font-size: 12px; line-height: 16px; font-weight: 500; color: var(--text-2); white-space: nowrap; border-bottom: 1px solid var(--line-faint); }
+.table td { height: 40px; padding: 0 12px; font-size: 13px; line-height: 18px; vertical-align: middle; }
+.table tr > :first-child { padding-left: 16px; }
+.table tr > :last-child { padding-right: 16px; }
+.table tbody tr + tr td { border-top: 1px solid var(--line-faint); }
+.table tbody tr:hover, .table tbody tr.is-hover { background: var(--hover); }
+.table tbody tr[aria-selected="true"] { background: var(--selected); }
+.table.comfortable td { height: 52px; padding-top: 8px; padding-bottom: 8px; }
+.table.dense td { height: 32px; }
+.table .end { text-align: right; }
+.table .muted { color: var(--text-2); }
+.table .faint { color: var(--text-3); }
+.table .cell-main { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.table .cell-words { display: grid; gap: 2px; min-width: 0; }
+.table .cell-words .sub { font-size: 12px; line-height: 16px; color: var(--text-3); }
+
+/* A toolbar over a list: what it holds at the left, how it's ordered at the right. */
+.toolbar { display: flex; align-items: center; gap: 8px; min-height: 32px; margin-bottom: 12px; }
+.toolbar .grow { flex: 1; }
+
+/* Facts, label and value (a key/value list): 32 a line, hairlines between. */
+.facts { display: grid; }
+.facts > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 32px; }
+.facts > div + div { border-top: 1px solid var(--line-faint); }
+.facts dt { font-size: 12px; line-height: 16px; color: var(--text-2); }
+.facts dd { font-size: 13px; line-height: 18px; text-align: right; min-width: 0; overflow-wrap: anywhere; }
+
+/* A copy box: something to paste elsewhere, on a field's well, with Copy. */
+.copybox { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 4px 0 10px; border-radius: 8px; background: var(--sunken); box-shadow: inset 0 0 0 1px var(--field-edge); }
+.copybox code { flex: 1; min-width: 0; font-size: 12px; line-height: 16px; white-space: nowrap; overflow-x: auto; scrollbar-width: none; }
+
+/* An empty state: a tile, a heading, a line, what to do. */
+.empty { display: grid; justify-items: center; gap: 16px; padding: 48px 24px; text-align: center; }
+.empty .tile { width: 40px; height: 40px; border-radius: 12px; color: var(--text-2); }
+.empty .words { display: grid; gap: 4px; max-width: 360px; }
+.empty h3 { font-size: 15px; line-height: 20px; font-weight: 500; }
+.empty p { font-size: 13px; line-height: 20px; color: var(--text-2); }
+.empty .actions { display: flex; gap: 8px; padding-top: 4px; }
+
+/* A skeleton: where something will be, the hover wash, breathing. */
+.skeleton { display: block; border-radius: 4px; background: var(--hover); animation: breathe 1.6s ease-in-out infinite; }
+.skeleton.line { height: 12px; }
+@keyframes breathe { 50% { background: var(--pressed); } }
+@media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
+
+/* Pagination: Previous and Next, and where you are. */
+.pager { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; }
+.pager .where { color: var(--text-3); font-size: 12px; line-height: 16px; }
+
+/* A dialog (ds/dialog): 460 wide, a 16 corner, 24 in, 24 between its parts;
+   a sheet: 400 from the right, the window's height. */
+.dialog, .sheet { color: var(--text); background: var(--overlay); box-shadow: 0 0 0 1px var(--line), 0 24px 64px #00000080; border: 0; }
+.dialog { width: min(460px, calc(100vw - 32px)); border-radius: 16px; padding: 24px; margin: auto; }
+.dialog.sm { width: min(380px, calc(100vw - 32px)); }
+.dialog::backdrop, .sheet::backdrop { background: #00000059; }
+.dialog .head, .sheet .head { display: grid; gap: 6px; }
+.dialog h2, .sheet h2 { font-size: 15px; line-height: 20px; font-weight: 600; }
+.dialog .head p, .sheet .head p { font-size: 13px; line-height: 20px; color: var(--text-2); }
+.dialog .body, .sheet .body { display: grid; gap: 12px; margin-top: 24px; }
+.dialog .answers, .sheet .answers { display: flex; justify-content: flex-end; gap: 8px; margin-top: 24px; }
+.sheet { position: fixed; inset: 0 0 0 auto; margin: 0; width: min(400px, 100vw); height: 100dvh; max-height: none; padding: 24px; border-radius: 16px 0 0 16px; }
+
+/* A toast (ds/toast): 340 wide, a 12 corner, its tone's glyph, what happened. */
+.toast { display: flex; align-items: flex-start; gap: 12px; width: min(340px, calc(100vw - 32px)); padding: 12px 8px 12px 16px; border-radius: 12px; background: var(--overlay); box-shadow: 0 0 0 1px var(--line), 0 20px 56px #00000052; }
+.toast .glyph { margin-top: 1px; }
+.toast.ok .glyph { color: var(--ok-ink); }
+.toast.bad .glyph { color: var(--bad-ink); }
+.toast .what { flex: 1; min-width: 0; font-size: 13px; line-height: 18px; font-weight: 500; }
+/* (Its close, 24 high, centred on the first 18 line: (24 − 18) / 2 over it.) */
+.toast > .btn { margin-block: -3px; }

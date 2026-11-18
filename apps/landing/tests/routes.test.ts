@@ -321,6 +321,22 @@ describe("signed-in pages", () => {
   });
 });
 
+describe("who is signed in, for a public page's list (account/me.json)", () => {
+  test("always 200, never kept; signed out, a member, staff", async () => {
+    const answers: [string | undefined, Record<string, unknown>][] = [
+      [undefined, { signed_in: false }],
+      [await site.signIn("user_ada"), { signed_in: true, name: "@ada", staff: false }],
+      [await site.signIn("user_grace"), { signed_in: true, name: "@grace", staff: true }],
+    ];
+    for (const [cookie, expected] of answers) {
+      const response = await site.fetch("/account/me.json", cookie ? { headers: { cookie } } : {});
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+      expect(await response.json()).toEqual(expected);
+    }
+  });
+});
+
 describe("the admin pages can't be told from pages that don't exist", () => {
   const PATHS = ["/admin/reservations", "/admin/reservations/linear", "/admin/plugins", "/admin/plugins/session-badges", "/admin/plugins/session-badges/1.2.1", "/admin/plugins/session-badges/1.2.1/approve", "/admin/plugins/session-badges/actions/suspend", "/admin/reports", "/admin/audit"];
 
