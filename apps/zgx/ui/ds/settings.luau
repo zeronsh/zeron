@@ -1435,24 +1435,22 @@ local CatalogHead = ui.component(function(props: { catalog: CatalogProps, tab: S
 	local head_w = ui.use_state(0)
 	-- The head's width the action needs beside the tabs (0: it fits).
 	local needed = ui.use_state(0)
-	-- (Each box's width once laid out; nil until then.)
-	local inner_w: number?, outer_w: number? = nil, nil
+	-- (Each box once laid out, nil until then: the action's own width, the
+	-- room its box got and where that box starts, and where the head does.)
+	local inner_w: number?, outer_w: number?, outer_x: number?, head_x: number? = nil, nil, nil, nil
+	-- The line's inset at its end (the card's words' edge), in points.
+	local end_inset = M.TEXT_INSET - ((ui.theme.get("space.1") :: number?) or 4)
 	local function action_fits(): boolean
 		local n = needed:get()
 		return n <= 0 or head_w:get() >= n
 	end
-	-- (Beside the tabs and short of its own width: the head it needs. A
-	-- shortfall seen before the head's own width is known waits for it: the
-	-- action's box can be laid out, and squeezed, first.)
-	local short_waiting = 0
+	-- (Beside the tabs and short of its own width: the head it needs, from
+	-- where its box starts (after the tabs, however wide they run) to its
+	-- own end and the line's inset: exact even while the tabs themselves
+	-- overflow, so it comes back beside them only once it truly fits.)
 	local function check()
-		if inner_w and outer_w and action_fits() and inner_w - outer_w > 0.5 then
-			local head = head_w:peek()
-			if head > 0 then
-				needed:set(head + (inner_w - outer_w))
-			else
-				short_waiting = inner_w - outer_w
-			end
+		if inner_w and outer_w and outer_x and head_x and action_fits() and inner_w - outer_w > 0.5 then
+			needed:set((outer_x - head_x) + inner_w + end_inset)
 		end
 	end
 	local function action(beside: boolean): Node?
@@ -1466,7 +1464,7 @@ local CatalogHead = ui.component(function(props: { catalog: CatalogProps, tab: S
 		-- (Kept in its place while under the rule, collapsed to none and
 		-- unseen: measured all the while, never built again. A row, so the
 		-- action inside keeps its own width however little room the box
-		-- has: what it lacks is the shortfall.)
+		-- has.)
 		return ui.row {
 			shrink = 1,
 			min_w = 0,
@@ -1474,8 +1472,9 @@ local CatalogHead = ui.component(function(props: { catalog: CatalogProps, tab: S
 			w = function(): number?
 				return if action_fits() then nil else 0
 			end,
-			on_resize = function(size: { w: number, h: number })
+			on_resize = function(size: { w: number, h: number }, el: any)
 				outer_w = size.w
+				outer_x = el.x
 				check()
 			end,
 			ui.div {
@@ -1496,14 +1495,13 @@ local CatalogHead = ui.component(function(props: { catalog: CatalogProps, tab: S
 	return ui.column {
 		w_full = true,
 		gap = CATALOG_STEP,
-		on_resize = function(size: { w: number, h: number })
+		on_resize = function(size: { w: number, h: number }, el: any)
+			head_x = el.x
 			if math.abs(size.w - head_w:peek()) >= 0.5 then
 				head_w:set(size.w)
 			end
-			if short_waiting > 0 and size.w > 0 then
-				needed:set(size.w + short_waiting)
-				short_waiting = 0
-			end
+			-- (A shortfall seen before the head was laid out is read now.)
+			check()
 		end,
 		ui.row {
 			w_full = true,
