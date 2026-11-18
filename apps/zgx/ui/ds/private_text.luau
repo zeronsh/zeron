@@ -28,7 +28,7 @@ local M = {}
 -- Whether addresses are hidden: Settings → General's switch (kept across
 -- launches), on until it's turned off. (Its own key: a switch saved off
 -- before hiding was the default doesn't carry over.)
-M.hidden = preference.kept("private_text_hidden", true)
+M.hidden = preference.kept(ui.persist("private_text_hidden", true), "private_text_hidden")
 
 -- The letters a stand-in is made of: no look-alikes (no i, l, o, 0, 1).
 local ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"

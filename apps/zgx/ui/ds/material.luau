@@ -16,7 +16,7 @@ local preference = require("@self/preference")
 
 local M = {}
 
-M.frosted = preference.kept("frosted", true)
+M.frosted = preference.kept(ui.persist("frosted", true), "frosted")
 
 -- How much the desktop blurs behind the window's glass, in points, where
 -- the app can tell (Hyprland, by its blur settings: src/desktop_blur.rs);

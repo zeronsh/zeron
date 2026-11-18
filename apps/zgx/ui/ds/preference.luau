@@ -13,7 +13,7 @@
 -- and no plugin changes it. (Each key is shared with plugins by the host:
 -- src/plugins/grants.rs `PREFERENCES`.)
 --
---   M.frosted = preference.kept("frosted", true)
+--   M.frosted = preference.kept(ui.persist("frosted", true), "frosted")
 
 local M = {}
 
@@ -21,13 +21,13 @@ local M = {}
 -- doesn't share with plugins (zgx refuses it), and it never shares this.
 M.in_app = pcall(ui.shared, "ds.host", true)
 
--- The preference `key`, as a state: the app's own, set by its settings,
--- and shared; in a plugin's VM, the app's value, read only (its default
--- where a host shares none).
-function M.kept(key: string, default: any): any
+-- The preference `key`, as a state: `state` (the module's own `ui.persist`,
+-- made where it always was, so what's kept is found where it always was),
+-- shared as it changes; in a plugin's VM, the app's value, read only (the
+-- module's own where a host shares none).
+function M.kept(state: any, key: string): any
 	local name = `zeron.preference.{key}`
 	if M.in_app then
-		local state = ui.persist(key, default)
 		local shared = ui.shared(name, state:peek())
 		ui.effect(function()
 			local now = state:get()
@@ -37,11 +37,8 @@ function M.kept(key: string, default: any): any
 		end)
 		return state
 	end
-	local ok, shared = pcall(ui.shared, name, default)
-	if ok then
-		return shared
-	end
-	return ui.state(`ds_preference_{key}`, default)
+	local ok, shared = pcall(ui.shared, name, state:peek())
+	return if ok then shared else state
 end
 
 return M

@@ -310,7 +310,7 @@ mod tests {
         let mut kept: Vec<String> = Vec::new();
         for entry in std::fs::read_dir(&ds).unwrap().flatten() {
             let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
-            for part in text.split("preference.kept(\"").skip(1) {
+            for part in text.split("preference.kept(ui.persist(\"").skip(1) {
                 kept.push(part.split('"').next().unwrap().to_string());
             }
         }
