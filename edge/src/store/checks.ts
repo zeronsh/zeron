@@ -6,7 +6,7 @@
  */
 import { type ConsentItem, RISKY_ASKS, consentDiff, fullControl } from "./consent";
 import { pictureType } from "./listing";
-import type { Listing } from "./listing";
+import type { Listing, Problem } from "./listing";
 import { riskyHost } from "./manifest";
 import type { VerifiedPackage } from "./package";
 
@@ -14,6 +14,8 @@ export interface Check {
   readonly id: string;
   readonly level: "ok" | "warn" | "fail";
   readonly message: string;
+  /** The file it's about, if one. */
+  readonly path?: string;
 }
 
 /** How a packaged file is served and shown. */
@@ -72,7 +74,8 @@ const megabytes = (bytes: number): string => `${(bytes / (1024 * 1024)).toFixed(
 export interface CheckInput {
   readonly pkg: VerifiedPackage;
   readonly listing: Listing;
-  readonly kinds: ReadonlyMap<string, FileKind>;
+  /** The engine's listing warnings (`binary_file`, `no_notes`). */
+  readonly warnings: readonly Problem[];
   readonly via: "session" | "deploy_key";
   readonly consent: ConsentItem;
   /** The last approved version's, the diff base; null for a first version. */
@@ -82,7 +85,7 @@ export interface CheckInput {
 }
 
 export const runChecks = (input: CheckInput): Check[] => {
-  const { pkg, listing, kinds, consent, base } = input;
+  const { pkg, listing, consent, base } = input;
   const checks: Check[] = [];
   const add = (id: string, level: Check["level"], message: string) => checks.push({ id, level, message });
   let total = 0;
@@ -94,11 +97,12 @@ export const runChecks = (input: CheckInput): Check[] => {
   add("version", listing.version.pre.length ? "warn" : "ok", listing.version.pre.length ? `${listing.version.text} is a pre-release.` : `${listing.version.text}.`);
   add("newer", "ok", input.previous ? `Later than ${input.previous}.` : "Its first version.");
   add("readme", "ok", "README.md is there.");
-  add("changelog", listing.notes ? "ok" : "warn", listing.notes ? "CHANGELOG.md has a section for this version." : "No changelog section for this version.");
+  if (listing.notes) add("changelog", "ok", "CHANGELOG.md has a section for this version.");
   add("engines", listing.engines ? "ok" : "warn", listing.engines ? `Needs Zeron ${listing.engines}.` : "It doesn't say which Zeron versions it works with.");
 
-  const binary = [...kinds].filter(([, kind]) => kind === "binary").map(([path]) => path);
-  add("binary", binary.length ? "warn" : "ok", binary.length ? `Files that aren't text or pictures: ${list(binary)}.` : "Every file is text or a picture.");
+  // The engine's warnings, by its rule words, one per file.
+  for (const w of input.warnings) checks.push({ id: w.rule, level: "warn", message: w.path ? `${w.path}: ${w.words}.` : `${w.words}.`, ...(w.path ? { path: w.path } : {}) });
+  if (!input.warnings.some((w) => w.rule === "binary_file")) add("binary_file", "ok", "Every file is text or a picture.");
 
   const risky = consent.asks.filter((a) => RISKY_ASKS.includes(a));
   add("asks", risky.length ? "warn" : "ok", risky.length ? `Asks for: ${list(risky, 12)}.` : "Asks for nothing that reaches past Zeron.");

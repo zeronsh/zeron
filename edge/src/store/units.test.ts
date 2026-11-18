@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { decodeCursor, encodeCursor, ftsQuery, searchTerms } from "./search";
+import { isText } from "./checks";
 import { consentItem, fullControl, heldToItsOwnRules } from "./consent";
 import { formatFloat, parseJsonText } from "./json";
 import type { JsonObject } from "./json";
-import { changelogSection, readListing } from "./listing";
+import { changelogNotes, checkListing, listingOf } from "./listing";
 import { readManifest } from "./manifest";
 import { PAYLOAD_PREFIX, decodeBase64, sha256Hex, signaturePayload, verifyPackage } from "./package";
-import { isText } from "./checks";
 import { comparePrecedence, parseRange, parseVersion, preKey, precedenceText, satisfies } from "./semver";
 
 const v = (text: string) => {
@@ -61,7 +61,9 @@ describe("store versions", () => {
     yes("<0.4.0||>=1.0.0", "0.3.0");
     yes("*", "0.0.1");
     yes(">1.0.0-beta.1", "1.0.0-beta.2");
-    for (const bad of ["", ">= 0.4.0", "0.4", "^0.4", "x", ">=0.4.0,<0.6.0", "0.4.0 - 0.5.0", ">=v0.4.0", "~>1.0.0", "||", ">=0.4.0 ||", "1.0.0\t2.0.0", "a".repeat(300)]) {
+    yes(">= 0.4.0 <0.6.0", "0.5.0");
+    yes("<0.3.0 || *", "9.9.9");
+    for (const bad of ["", " ", ">=", "0.4", "^0.4", "x", ">=0.4.0,<0.6.0", "0.4.0 - 0.5.0", ">=v0.4.0", "~>1.0.0", "||", ">=0.4.0 ||", "1.0.0\t2.0.0", "* 1.0.0", ">=*", "a".repeat(300)]) {
       expect(parseRange(bad), bad).toBeUndefined();
     }
   });
@@ -102,11 +104,11 @@ describe("store base64", () => {
 describe("store changelog", () => {
   it("finds the section a version names", () => {
     const log = "# Changelog\n\n## [Unreleased]\n- soon\n\n## [1.2.0] - 2026-11-01\n### Added\n- a thing\n\n## v1.1.0\n- older\n\n## 1.10.0\n- not 1.1.0\n";
-    expect(changelogSection(log, "1.2.0")).toBe("### Added\n- a thing");
-    expect(changelogSection(log, "1.1.0")).toBe("- older");
-    expect(changelogSection(log, "1.10.0")).toBe("- not 1.1.0");
-    expect(changelogSection(log, "1.0.0")).toBeUndefined();
-    expect(changelogSection("## 2.0.0-beta.1\nbeta\n## 2.0.0\nfinal", "2.0.0")).toBe("final");
+    expect(changelogNotes(log, "1.2.0")).toBe("### Added\n- a thing");
+    expect(changelogNotes(log, "1.1.0")).toBe("- older");
+    expect(changelogNotes(log, "1.10.0")).toBe("- not 1.1.0");
+    expect(changelogNotes(log, "1.0.0")).toBeUndefined();
+    expect(changelogNotes("## 2.0.0-beta.1\nbeta\n## 2.0.0\r\nfinal\r\n", "2.0.0")).toBe("final");
   });
 });
 
@@ -115,18 +117,17 @@ describe("store listing", () => {
     new Map(Object.entries({ "init.luau": "x", "README.md": "# Hi", "icon.svg": "<svg/>", ...extra }).map(([k, s]) => [k, new TextEncoder().encode(s)]));
   const manifest = (fields: Record<string, unknown>) =>
     readManifest(parseJsonText(JSON.stringify({ id: "focus", name: "Focus", version: "1.0.0", entry: "init.luau", description: "Focus.", icon: "icon.svg", categories: ["productivity"], ...fields })) as JsonObject);
+  const rules = (fields: Record<string, unknown>, extra?: Record<string, string>) => checkListing(manifest(fields), files(extra), isText).problems.map((p) => p.rule);
 
-  it("reads a complete listing and refuses an incomplete one", () => {
-    const ok = readListing(manifest({ keywords: ["timer", "deep work"], homepage: "https://example.com", engines: { zeron: ">=0.4.0" } }), files());
-    expect(ok).toMatchObject({ summary: "Focus.", icon: "icon.svg", categories: ["productivity"], keywords: ["timer", "deep work"], engines: ">=0.4.0", readme: "# Hi", notes: null });
-    expect(readListing(manifest({ icon: "../icon.svg" }), files())).toMatchObject({ error: "missing_listing" });
-    expect(readListing(manifest({ icon: "big.svg" }), files({ "big.svg": `<svg>${"x".repeat(33 * 1024)}</svg>` }))).toMatchObject({ error: "missing_listing" });
-    expect(readListing(manifest({ keywords: Array.from({ length: 9 }, (_, i) => `k${i}`) }), files())).toMatchObject({ error: "missing_listing" });
-    expect(readListing(manifest({ keywords: [" padded"] }), files())).toMatchObject({ error: "missing_listing" });
-    expect(readListing(manifest({ categories: ["git", "git"] }), files())).toMatchObject({ error: "missing_listing" });
-    expect(readListing(manifest({ repository: "https://user:pw@example.com" }), files())).toMatchObject({ error: "missing_listing" });
-    expect(readListing(manifest({ description: "two\nlines" }), files())).toMatchObject({ error: "missing_listing" });
-    expect(readListing(manifest({}), new Map([...files()].map(([k, b]) => [k, k === "README.md" ? new Uint8Array([0xff, 0xfe]) : b])))).toMatchObject({ error: "missing_readme" });
+  it("reads a complete listing, and the store's own size limits on top", () => {
+    expect(rules({ keywords: ["timer", "deep work"], homepage: "https://example.com", engines: { zeron: ">=0.4.0" } })).toEqual([]);
+    const ok = listingOf(manifest({ keywords: ["timer"], engines: { zeron: ">=0.4.0" } }), files());
+    expect(ok).toMatchObject({ summary: "Focus.", icon: "icon.svg", categories: ["productivity"], keywords: ["timer"], engines: ">=0.4.0", readme: "# Hi", notes: null });
+    expect(listingOf(manifest({}), files({ "README.md": `# Big\n${"x".repeat(512 * 1024)}` }))).toMatchObject({ rule: "too_large" });
+    expect(rules({ icon: "../icon.svg" })).toEqual(["bad_listing"]);
+    expect(rules({ icon: "big.svg" }, { "big.svg": `<svg>${"x".repeat(33 * 1024)}</svg>` })).toEqual(["bad_listing"]);
+    expect(rules({ repository: "https://user@example.com" })).toEqual(["bad_listing"]);
+    expect(rules({ description: undefined, icon: undefined })).toEqual(["missing_listing", "missing_listing"]);
   });
 });
 

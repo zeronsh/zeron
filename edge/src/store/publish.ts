@@ -5,7 +5,7 @@
  * In order: who publishes (a session or a deploy key scoped to this id),
  * that they have a username, the body's size, the package exactly as a
  * device verifies it (package.ts), what the store needs to list it
- * (listing.ts), that the key that signed it may sign for this account, the
+ * (listing.ts, the engine's rules), that the key that signed it may sign for this account, the
  * id (owned by them, or free and not reserved), the version (new, and later
  * than the versions it follows), the rate. Then the automated checks
  * (checks.ts), stored with the version.
@@ -20,11 +20,11 @@
  */
 import type { Env } from "../env";
 import { isReservedUsername, skeleton } from "../username";
-import { type FileKind, fileKind, runChecks } from "./checks";
+import { type FileKind, fileKind, isText, runChecks } from "./checks";
 import { type ConsentItem, consentItem } from "./consent";
 import { VERSION_ORDER, filesKey, packageKey, pluginRow } from "./db";
 import { fail, answer, rateLimited } from "./http";
-import { readListing } from "./listing";
+import { type Listing, type Problem, checkListing, listingOf } from "./listing";
 import { PackageRefusal, verifyPackage } from "./package";
 import { type Publisher, authenticatePublisher, readBody, signingKeyAllowed } from "./principal";
 import { isPrerelease, preKey, precedenceText } from "./semver";
@@ -75,6 +75,16 @@ const refusal = (e: PackageRefusal): Response => {
   }
 };
 
+/** A listing problem as the publish error: its rule word is the error word
+ * (`id_reserved` 403, `too_large` 413, the rest 400), with every problem
+ * found, so one upload shows them all. */
+const listingRefusal = (first: Problem, all: readonly Problem[]): Response =>
+  fail(first.rule === "id_reserved" ? 403 : first.rule === "too_large" ? 413 : 400, first.rule, first.words, {
+    field: first.field,
+    path: first.path,
+    problems: all.map((p) => ({ rule: p.rule, field: p.field, path: p.path, message: p.words }))
+  });
+
 const accepted = (id: string, version: string, status: string, checks: unknown): Response =>
   answer({ id, version, status, checks }, 201);
 
@@ -97,8 +107,12 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
     throw e;
   }
   if (pkg.manifest.id !== id) return fail(400, "bad_package", `The package is "${pkg.manifest.id}", not "${id}".`, { reason: "id_mismatch" });
-  const listing = readListing(pkg.manifest, pkg.files);
-  if ("error" in listing) return fail(listing.error === "too_large" ? 413 : 400, listing.error, listing.message);
+  // The engine's listing rules (what `zeron plugin check` says on the
+  // device), then the store's own size limits.
+  const { problems, warnings } = checkListing(pkg.manifest, pkg.files, isText);
+  if (problems.length > 0) return listingRefusal(problems[0]!, problems);
+  const listing = listingOf(pkg.manifest, pkg.files);
+  if ("rule" in listing) return listingRefusal(listing, [listing]);
   if (!(await signingKeyAllowed(env, publisher, id, pkg.key))) {
     return fail(403, "key_not_allowed", "The key that signed this package isn't one of this account's.");
   }
@@ -137,7 +151,7 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
   const checks = runChecks({
     pkg,
     listing,
-    kinds,
+    warnings,
     via: publisher.via,
     consent,
     base: base ? { version: base.version, consent: JSON.parse(base.permissions) as ConsentItem } : null,
@@ -230,7 +244,7 @@ interface NewVersion {
   readonly filesCount: number;
   readonly filesBytes: number;
   readonly manifest: string;
-  readonly listing: Exclude<ReturnType<typeof readListing>, { error: string }>;
+  readonly listing: Listing;
   readonly consent: ConsentItem;
   readonly checks: unknown;
 }

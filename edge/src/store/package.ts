@@ -30,8 +30,9 @@ export const MAX_BYTES = 50 * 1024 * 1024;
 /** package.rs `MAX_PACKAGE_BYTES`: the engine's own ceiling. */
 export const MAX_PACKAGE_BYTES = Math.floor((MAX_BYTES * 4) / 3) + 1024 * 1024;
 
-/** Why a package was refused: install.rs's reason words, plus the plugin
- * level ones (`bad_manifest`, `bad_id`, `missing_entry`). */
+/** Why a package was refused: install.rs's reason words, plus
+ * `bad_manifest` for a manifest Zeron won't run (its rules, its id, its
+ * entry file), as the engine's vectors name them. */
 export type PackageError =
   | "not_a_package"
   | "unsigned"
@@ -39,9 +40,7 @@ export type PackageError =
   | "bad_signature"
   | "too_big"
   | "bad_file"
-  | "bad_manifest"
-  | "bad_id"
-  | "missing_entry";
+  | "bad_manifest";
 
 export const PACKAGE_WORDS: Record<PackageError, string> = {
   not_a_package: "That isn't a Zeron plugin",
@@ -50,9 +49,7 @@ export const PACKAGE_WORDS: Record<PackageError, string> = {
   bad_signature: "Its signature doesn't check out",
   too_big: "It's too big for a plugin",
   bad_file: "It has a file Zeron won't write",
-  bad_manifest: "Its manifest is broken",
-  bad_id: "Its id can't be used",
-  missing_entry: "Its entry file is missing"
+  bad_manifest: "Its manifest is broken"
 };
 
 export class PackageRefusal extends Error {
@@ -297,8 +294,8 @@ export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTE
   const manifest = readManifest(manifestValue);
   if (manifest.problem) refuse("bad_manifest", manifest.problem);
   const badId = idProblem(manifest.id);
-  if (badId) refuse("bad_id", badId);
-  if (!files.has(manifest.entry)) refuse("missing_entry", `Its entry file ${manifest.entry} is missing`);
+  if (badId) refuse("bad_manifest", badId);
+  if (!files.has(manifest.entry)) refuse("bad_manifest", `Its entry file ${manifest.entry} is missing`);
   return {
     manifest,
     manifestCanonical: canonicalJson(manifestValue),

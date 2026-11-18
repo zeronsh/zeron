@@ -99,6 +99,8 @@ export const parseVersion = (text: string): Version | undefined => {
   if (!parsed) return undefined;
   const limit = BigInt(Number.MAX_SAFE_INTEGER);
   if (parsed.major > limit || parsed.minor > limit || parsed.patch > limit) return undefined;
+  // (A numeric pre-release identifier too, as the engine's version.rs.)
+  if (parsed.pre.some((p) => /^[0-9]+$/.test(p) && (p.length > 16 || BigInt(p) > limit))) return undefined;
   return {
     major: Number(parsed.major),
     minor: Number(parsed.minor),
@@ -188,27 +190,52 @@ const expand = (op: string, v: Version): Comparator[] => {
         { op: "<", version: floor(v.major, v.minor + 1, 0) }
       ];
     case "":
+    case "=":
       return [{ op: "=", version: v }];
     default:
       return [{ op: op as Op, version: v }];
   }
 };
 
-/** An `engines.zeron` range, or undefined if it isn't one. */
+const OPS = [">=", "<=", ">", "<", "=", "^", "~"] as const;
+/** `token`'s operator, if it starts with one, and the rest. */
+const splitOp = (token: string): [string | undefined, string] => {
+  for (const op of OPS) if (token.startsWith(op)) return [op, token.slice(op.length)];
+  return [undefined, token];
+};
+
+/** Unicode White_Space other than the space (Rust's `char::is_whitespace`). */
+const OTHER_WHITESPACE = /[\t\n\u000b\f\r\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/;
+
+/**
+ * An `engines.zeron` range, or undefined if it isn't one: the engine's
+ * version.rs `Range::parse`. Sets split on `||`, comparators on spaces (and
+ * nothing else); an operator alone takes the next token as its version
+ * (`>= 1.0.0`); `*` stands alone as a whole set.
+ */
 export const parseRange = (text: string): Range | undefined => {
-  if (text.length === 0 || text.length > MAX_RANGE_LENGTH) return undefined;
+  if (text.trim() === "" || new TextEncoder().encode(text).length > MAX_RANGE_LENGTH || OTHER_WHITESPACE.test(text)) return undefined;
   const sets: Comparator[][] = [];
   for (const rawSet of text.split("||")) {
-    const words = rawSet.split(" ").filter((w) => w.length > 0);
-    // Only spaces separate; anything else blank is not a range.
-    if (/[^\x21-\x7e ]/.test(rawSet) || words.length === 0) return undefined;
+    const tokens = rawSet.split(" ").filter((t) => t.length > 0);
+    if (tokens.length === 0) return undefined;
+    if (tokens.length === 1 && tokens[0] === "*") {
+      sets.push([]);
+      continue;
+    }
     const set: Comparator[] = [];
-    for (const word of words) {
-      if (word === "*") continue;
-      const match = /^(>=|<=|>|<|=|\^|~)?(.+)$/.exec(word);
-      const version = match && parseVersion(match[2]!);
+    for (let i = 0; i < tokens.length; i++) {
+      const [op, rest] = splitOp(tokens[i]!);
+      let versionText = rest;
+      if (op !== undefined && rest === "") {
+        const next = tokens[++i];
+        if (next === undefined || splitOp(next)[0] !== undefined) return undefined;
+        versionText = next;
+      }
+      if (versionText === "*") return undefined;
+      const version = parseVersion(versionText);
       if (!version) return undefined;
-      set.push(...expand(match[1] ?? "", version));
+      set.push(...expand(op ?? "", version));
     }
     sets.push(set);
   }
