@@ -357,6 +357,13 @@ local answers: { [string]: (arg: any) -> any } = {
 			{ family = "Noto Serif", mono = false },
 		})
 	end,
+	-- A Cloud API key kept by the vault: which, and the gateway it's for
+	-- ("-": its provider's own API), logged as `agents.cloud_key:<provider>@<base url>`
+	-- after the call itself. Refused if asked to be.
+	["agents.cloud_key"] = function(arg: any)
+		log(`agents.cloud_key:{arg.provider}@{arg.base_url or "-"}`)
+		return change(nil)
+	end,
 	-- A background image kept: the picked file itself (the app's own PNG,
 	-- so a headless host can draw it), 512 square.
 	["wallpaper.keep"] = function(arg: any)
@@ -385,6 +392,37 @@ stub.invoke = function(name: string, arg: any?)
 	if name == "account.cancel_step_up" then
 		signed_in_again("cancelled")
 	end
+end
+-- A Cloud key's base URL as the host judges it (src/agents.rs
+-- `base_url_verdict`), its rules in brief: https, a host, no /v1, no
+-- credentials. (Pure, so not logged: it's asked at every keystroke.)
+local function base_url_verdict(arg: any): any
+	local raw = (string.gsub(arg.url or "", "^%s*(.-)%s*$", "%1"))
+	if raw == "" then
+		return { state = "empty" }
+	elseif string.sub("https://", 1, #raw) == string.lower(raw) then
+		return { state = "typing" }
+	elseif arg.provider ~= "anthropic-key" then
+		return { state = "refused", why = "Only an Anthropic API key takes a base URL." }
+	elseif string.lower(string.sub(raw, 1, 8)) ~= "https://" then
+		return { state = "refused", why = "Use an https:// base URL — the key is sent with every request." }
+	end
+	local url = (string.gsub(raw, "/+$", ""))
+	local authority = string.match(url, "^.-//([^/?#]*)") or ""
+	if authority == "" then
+		return { state = "refused", why = "That base URL has no host." }
+	elseif string.find(authority, "@", 1, true) then
+		return { state = "refused", why = "Leave credentials out of the base URL." }
+	elseif string.match(string.lower(url), "/v1$") then
+		return { state = "refused", why = "Leave /v1 off the base URL — Claude Code adds /v1/messages itself." }
+	end
+	return { state = "ready", url = url, host = string.lower(authority), route = url .. "/v1/messages" }
+end
+stub.call_sync = function(name: string, arg: any?): any
+	if name == "agents.cloud_base_url" then
+		return base_url_verdict(arg or {})
+	end
+	error(`no host function {name}`)
 end
 -- A photo picked: the app's own PNG, so a headless host can draw it.
 stub.open_files = function(_opts: any): any

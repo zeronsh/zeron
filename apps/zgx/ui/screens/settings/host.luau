@@ -13,6 +13,12 @@ function M.invoke(name: string, arg: any?)
 	ui.invoke(name, arg)
 end
 
+-- A host function's answer, at once (`ui.call_sync`: pure and quick, a
+-- verdict as something is typed).
+function M.call_sync(name: string, arg: any?): any
+	return ui.call_sync(name, arg)
+end
+
 -- Files the person picks (`ui.open_files`): a promise of a list (empty if
 -- they cancel).
 function M.open_files(opts: FilePickerOptions): Promise<{ File }>

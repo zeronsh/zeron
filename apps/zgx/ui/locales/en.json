@@ -1011,7 +1011,18 @@
       "rename": "Rename",
       "rename_title": "Rename API key",
       "rename_hint": "Leave it blank for its default name.",
-      "key_name_optional": "Name (optional)"
+      "key_name_optional": "Name (optional)",
+      "key_via": "{plan} · via {host}",
+      "key_via_host": "Via {host}",
+      "cloud_key_title": "Add {name} API key",
+      "cloud_key_body": "{agent} uses it on every Cloud machine, from its next turn.",
+      "cloud_key_kept": "Kept in Zeron's vault, never on this computer.",
+      "cloud_key_route": "Requests go to",
+      "cloud_key_api": "{name} API",
+      "cloud_key_gateway": "LLM gateway",
+      "base_url": "Base URL",
+      "base_url_hint": "Your gateway's https:// address, without /v1.",
+      "base_url_route": "{agent} sends each request to {route}"
     },
     "command_palette": {
       "scope": {
@@ -1672,10 +1683,11 @@
         "section_description": "Instead of signing in, Cloud can use an API key. A key saved here becomes the account its agent uses on every Cloud machine, from its next turn.",
         "anthropic": "Anthropic API key",
         "openai": "OpenAI API key",
-        "description": "For {agent} on Cloud. Kept in Zeron's vault, never on this computer.",
-        "placeholder": "Paste a key",
-        "save": "Save",
-        "saved": "{agent} on Cloud now uses this key"
+        "description": "For {agent} on Cloud.",
+        "saved": "{agent} on Cloud now uses this key",
+        "anthropic_description": "For {agent} on Cloud: Anthropic's API, or an LLM gateway of yours.",
+        "add": "Add key",
+        "saved_gateway": "{agent} on Cloud now uses this key, through {host}"
       }
     },
     "devices": {

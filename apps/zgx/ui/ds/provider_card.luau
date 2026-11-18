@@ -36,6 +36,7 @@ local TextField = require("@self/text_field")
 local Links = require("@self/links")
 local Dialog = require("@self/dialog").Dialog
 local Select = require("@self/select")
+local Segmented = require("@self/segmented")
 local RadioGroup = require("@self/radio")
 local PrivateText = require("@self/private_text")
 local locale = require("@self/locale")
@@ -78,6 +79,8 @@ export type Account = {
 	-- for a face (`provider`, the agent's id for it).
 	key: boolean?,
 	provider: string?,
+	-- (A key for an LLM gateway:) the host its requests go to instead.
+	gateway: string?,
 }
 
 -- One model provider's accounts of an agent that keeps a login per
@@ -446,6 +449,12 @@ local function account(c: CardProps, row: State<Account>, group: { read_only: bo
 			return if a.plan ~= ""
 				then locale.s("ds.provider_card.limit_reached_plan", { plan = a.plan, words = words })
 				else locale.s("ds.provider_card.limit_reached", { words = words })
+		end
+		-- A key for an LLM gateway: where its requests go, by its last four.
+		if a.key and a.gateway then
+			return if a.plan ~= ""
+				then locale.s("ds.provider_card.key_via", { plan = a.plan, host = a.gateway })
+				else locale.s("ds.provider_card.key_via_host", { host = a.gateway })
 		end
 		return a.plan
 	end
@@ -1696,6 +1705,278 @@ function M.ResetsDialog(p: ResetsDialogProps): Node
 		},
 		build = choices,
 	}
+end
+
+-- A Cloud API key's lead: its provider's mark in the add rows' well (as a
+-- key's account row has it). `provider`, the card's id for it.
+function M.KeyDisc(provider: string): Node
+	local known = KEY_PROVIDERS[provider]
+	return M.disc(if known then Mark { name = known.mark :: any, size = 16, bare = true } else Icon { name = "keyboard", size = 16 })
+end
+
+-- Adding an API key for Cloud's agents, in a dialog, as the card's own key
+-- dialog asks: its title, one quiet line (every Cloud machine uses it), the
+-- key (masked, where it's kept under it), Cancel and Save. A key that may
+-- name an LLM gateway (Anthropic's: Claude Code reads ANTHROPIC_BASE_URL)
+-- asks where its requests go, Anthropic's own API or a gateway; a gateway's
+-- base URL is judged as it's typed (`judge`, the vault's own rules, quiet
+-- until there's a host): its refusal in the vault's words, else the route
+-- every request takes. Save waits for a key, and for a base URL the vault
+-- would keep; while it saves it spins and the fields hold still; a refusal
+-- says why under the key and the dialog stays. What's typed lives in the
+-- dialog alone and is cleared as it closes.
+--
+--   CloudKeyDialog { open = state, key = fn, judge = fn(url), on_save = fn(provider, key, base_url?), on_saved = fn(key, host?) }
+--
+-- `key`, the key it's adding as it stands (nil: none); `on_save`, the
+-- host's promise (`:after`).
+export type CloudKey = {
+	-- The vault's word for it ("anthropic-key", "openai-key").
+	provider: string,
+	-- The card's id for its provider (its mark and the shape of its keys).
+	mark: string,
+	-- Who issues it, and the agent that uses it.
+	name: string,
+	agent: string,
+	-- Whether it may name an LLM gateway.
+	gateway: boolean?,
+}
+-- A base URL as typed: "empty", "typing" (no host yet), "refused" (`why`)
+-- or "ready" (`url` as kept, its `host`, the `route` requests take).
+export type BaseUrlVerdict = { state: string, why: string?, url: string?, host: string?, route: string? }
+export type CloudKeyDialogProps = {
+	open: State<boolean>,
+	key: () -> CloudKey?,
+	judge: (url: string) -> BaseUrlVerdict,
+	on_save: (provider: string, key: string, base_url: string?) -> any,
+	on_saved: ((k: CloudKey, host: string?) -> ())?,
+}
+
+local GATEWAY_PLACEHOLDER = "https://llm-gateway.example.com"
+
+local function trimmed(s: string): string
+	return (string.gsub(s, "^%s*(.-)%s*$", "%1"))
+end
+
+local function enter_saves(save: () -> ()): (e: any) -> boolean?
+	return function(e: any): boolean?
+		if e.key == "Enter" and not (e.shift or e.cmd or e.alt or e.ctrl) then
+			save()
+			return true
+		end
+		return nil
+	end
+end
+
+function M.CloudKeyDialog(p: CloudKeyDialogProps): Node
+	return ui.component(function(): Node
+		local typed = ui.use_state("")
+		-- Where its requests go: "api" (the provider's own) or "gateway".
+		local route = ui.use_state("api")
+		local url = ui.use_state("")
+		local busy = ui.use_state(false)
+		local why = ui.use_state("")
+		local key_input = ui.ref()
+		local url_input = ui.ref()
+		-- Closed (saved, cancelled, dismissed): nothing typed is kept.
+		ui.effect(function()
+			if not p.open:get() then
+				typed:set("")
+				url:set("")
+				route:set("api")
+				why:set("")
+				busy:set(false)
+			end
+		end)
+		local function takes_gateway(): boolean
+			local k = p.key()
+			return k ~= nil and k.gateway == true
+		end
+		local function through_gateway(): boolean
+			return takes_gateway() and route:get() == "gateway"
+		end
+		local verdict = ui.computed(function(): BaseUrlVerdict
+			return if through_gateway() then p.judge(url:get()) else { state = "empty" }
+		end)
+		local function focus(ref: Ref)
+			ui.after(0, function()
+				local el = ref.current
+				if el then
+					el:focus()
+				end
+			end)
+		end
+		-- A gateway chosen: its base URL is what's asked next.
+		local was = route:peek()
+		ui.effect(function()
+			local now = route:get()
+			if now == "gateway" and was ~= "gateway" then
+				focus(url_input)
+			end
+			was = now
+		end)
+		local function ready(): boolean
+			if string.match(typed:get(), "%S") == nil then
+				return false
+			end
+			return not through_gateway() or verdict:get().state == "ready"
+		end
+		local function save()
+			local k = p.key()
+			local value = trimmed(typed:peek())
+			if not k or value == "" or busy:peek() then
+				return
+			end
+			local base: string?, host: string? = nil, nil
+			if k.gateway == true and route:peek() == "gateway" then
+				local v = verdict:peek()
+				if v.state ~= "ready" then
+					focus(url_input)
+					return
+				end
+				base, host = v.url, v.host
+			end
+			busy:set(true)
+			why:set("")
+			p.on_save(k.provider, value, base):after(function()
+				busy:set(false)
+				p.open:set(false)
+				if p.on_saved then
+					p.on_saved(k, host)
+				end
+			end, function(err: any)
+				busy:set(false)
+				local message = if type(err) == "table" then err.message else tostring(err)
+				why:set(if message == "offline"
+					then locale.s("ds.provider_card.key_offline")
+					else message or locale.s("ds.provider_card.key_failed"))
+				focus(key_input)
+			end)
+		end
+		local function name(): string
+			local k = p.key()
+			return if k then k.name else ""
+		end
+		local function agent(): string
+			local k = p.key()
+			return if k then k.agent else ""
+		end
+		local function held(): boolean
+			return busy:get()
+		end
+		return Dialog {
+			open = p.open,
+			title = function(): string
+				return locale.s("ds.provider_card.cloud_key_title", { name = name() })
+			end,
+			body = function(): string
+				return locale.s("ds.provider_card.cloud_key_body", { agent = agent() })
+			end,
+			-- (A key being saved is kept once the vault has it: the dialog waits.)
+			hold = held,
+			size = "md",
+			confirm = {
+				label = locale.t("ds.provider_card.save_key"),
+				keep_open = true,
+				busy = held,
+				disabled = function(): boolean
+					return not ready()
+				end,
+				on_click = save,
+			},
+			build = function(): Node
+				return ui.column {
+					w_full = true,
+					id = "cloud-key-dialog",
+					gap = "$space.4",
+					TextField {
+						value = typed,
+						label = locale.t("ds.provider_card.key_field"),
+						placeholder = function(): string
+							local k = p.key()
+							local known = if k then KEY_PROVIDERS[k.mark] else nil
+							return if known then known.shape else ""
+						end,
+						password = true,
+						size = "md",
+						w_full = true,
+						autofocus = true,
+						input_ref = key_input,
+						hint = locale.t("ds.provider_card.cloud_key_kept"),
+						-- Why the key wasn't kept, in the vault's words.
+						error = function(): string?
+							local w = why:get()
+							return if w == "" then nil else w
+						end,
+						disabled = held,
+						on_key = enter_saves(save),
+					},
+					-- Where its requests go: the provider's own API, or a
+					-- gateway at a base URL of yours.
+					ui.show(
+						takes_gateway,
+						ui.column {
+							w_full = true,
+							gap = "$space.3",
+							ui.column {
+								w_full = true,
+								gap = "$zeron.space.tight",
+								ui.text {
+									locale.t("ds.provider_card.cloud_key_route"),
+									text_size = "$font.size.sm",
+									line_height = "$font.line.sm",
+									weight = "$font.weight.medium",
+									color = "$text.secondary",
+								},
+								Segmented {
+									value = route,
+									label = locale.t("ds.provider_card.cloud_key_route"),
+									fill = true,
+									id = "cloud-key-route",
+									options = {
+										{
+											value = "api",
+											label = function(): string
+												return locale.s("ds.provider_card.cloud_key_api", { name = name() })
+											end,
+										},
+										{ value = "gateway", label = locale.t("ds.provider_card.cloud_key_gateway") :: any },
+									},
+								},
+							},
+							ui.show(
+								through_gateway,
+								TextField {
+									value = url,
+									label = locale.t("ds.provider_card.base_url"),
+									placeholder = GATEWAY_PLACEHOLDER,
+									inputmode = "url",
+									size = "md",
+									w_full = true,
+									input_ref = url_input,
+									-- Quiet until there's a host; then the route
+									-- each request takes, or the vault's refusal.
+									hint = function(): string
+										local v = verdict:get()
+										if v.state == "ready" and v.route then
+											return locale.s("ds.provider_card.base_url_route", { agent = agent(), route = v.route })
+										end
+										return locale.s("ds.provider_card.base_url_hint")
+									end,
+									error = function(): string?
+										local v = verdict:get()
+										return if v.state == "refused" then v.why else nil
+									end,
+									disabled = held,
+									on_key = enter_saves(save),
+								}
+							),
+						}
+					),
+				}
+			end,
+		}
+	end)()
 end
 
 return M
