@@ -125,7 +125,7 @@ const sanitize = unified().use(rehypeSanitize, SCHEMA).freeze();
 const stringify = unified().use(rehypeStringify, { allowDangerousHtml: false }).freeze();
 
 /** Bump when the HTML this makes changes, so kept renderings are made again. */
-export const RENDERER = 5;
+export const RENDERER = 6;
 
 /**
  * What one rendering may cost. The parser's work grows faster than its
@@ -433,7 +433,7 @@ const plain = (markdown: string) =>
   stringify.stringify({
     type: "root",
     children: [
-      { type: "element", tagName: "p", properties: { className: ["as-text"] }, children: [{ type: "text", value: "Shown as plain text." }] },
+      { type: "element", tagName: "p", properties: { className: ["as-text"] }, children: [{ type: "text", value: "Shown as plain text: it's too long or too deeply nested to lay out." }] },
       { type: "element", tagName: "pre", properties: { className: ["plain"], tabIndex: 0 }, children: [{ type: "text", value: markdown }] },
     ],
   });

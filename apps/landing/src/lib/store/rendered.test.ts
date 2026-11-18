@@ -67,7 +67,7 @@ test("a document shown as text only because the page spent its budget isn't kept
   const options = { file: (p: string) => `/plugins/a/files/1.0.0/${p}`, demote: true };
   const spent = new Budget(0);
   const html = await renderedOnce("https://zeron.sh", "a", "1.0.0", "notes", "Some *notes*.", options, { store, budget: spent });
-  expect(html).toContain("Shown as plain text.");
+  expect(html).toContain("Shown as plain text: it's too long or too deeply nested to lay out.");
   expect(store.size()).toBe(0);
   const drawn = await renderedOnce("https://zeron.sh", "a", "1.0.0", "notes", "Some *notes*.", options, { store, budget: new Budget() });
   expect(drawn).toContain("<em>notes</em>");

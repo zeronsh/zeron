@@ -925,7 +925,7 @@ describe("the review of the web store: what it found, held", () => {
     const first = await timed("/plugins/slow-words");
     expect(first.response.status).toBe(200);
     expect(first.ms).toBeLessThan(4_000);
-    expect(first.body).toContain('<p class="as-text">Shown as plain text.</p>');
+    expect(first.body).toContain(`<p class="as-text">Shown as plain text: it's too long or too deeply nested to lay out.</p>`);
     // (Kept, so the next visit draws nothing again.)
     const again = await timed("/plugins/slow-words");
     expect(again.ms).toBeLessThan(4_000);

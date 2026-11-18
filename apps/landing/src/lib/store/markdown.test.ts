@@ -159,7 +159,7 @@ describe("what a README may hold", () => {
   test("a document nested past what the parser can hold is shown as its text", () => {
     const md = `${"> ".repeat(5_000)}<script>alert(1)</script>`;
     const html = render(md);
-    expect(html).toContain('<p class="as-text">Shown as plain text.</p><pre class="plain" tabindex="0">');
+    expect(html).toContain(`<p class="as-text">Shown as plain text: it's too long or too deeply nested to lay out.</p><pre class="plain" tabindex="0">`);
     expect(html).toContain("&#x3C;script>");
     expect(html).not.toContain("<script");
   });
@@ -258,7 +258,7 @@ describe("a budget of work, not a clock (a Worker's doesn't move while code runs
         const { html, cut, ms } = timed(make(bytes));
         expect(ms).toBeLessThan(1_500);
         // (Drawn when it fits the budget; otherwise its text, said so.)
-        if (cut) expect(html).toContain('<p class="as-text">Shown as plain text.</p><pre class="plain" tabindex="0">');
+        if (cut) expect(html).toContain(`<p class="as-text">Shown as plain text: it's too long or too deeply nested to lay out.</p><pre class="plain" tabindex="0">`);
       });
     }
   }
@@ -343,7 +343,7 @@ describe("the estimate holds: what beat it before is caught, and no shape costs 
         expect(cut).toBe(outcome);
         if (outcome === "shape") expect(work).toBeNull();
         else expect(work!).toBeGreaterThan(BOUNDS.work);
-        expect(html).toContain('<p class="as-text">Shown as plain text.</p>');
+        expect(html).toContain(`<p class="as-text">Shown as plain text: it's too long or too deeply nested to lay out.</p>`);
       }
     });
   }
