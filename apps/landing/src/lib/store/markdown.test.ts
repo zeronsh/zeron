@@ -75,7 +75,7 @@ describe("a README's hostile input renders inert", () => {
 
   test("a fenced block that says HTML is shown as code", () => {
     const html = render("```html\n<script>alert(1)</script>\n```");
-    expect(html).toMatch(/<pre><code class="hljs language-html">/);
+    expect(html).toMatch(/<pre tabindex="0"><code class="hljs language-html">/);
     expect(html).toContain("alert(1)");
   });
 });
@@ -130,7 +130,7 @@ describe("what a README may hold", () => {
 
   test("GFM: tables scroll in their own box, task lists, strikethrough, autolinks, footnotes", () => {
     const html = render("| a | b |\n|:-|-:|\n| 1 | 2 |\n\n- [x] done\n- [ ] todo\n\n~~old~~ https://example.com\n\nNote[^1].\n\n[^1]: The note.");
-    expect(html).toContain('<div class="table-scroll"><table>');
+    expect(html).toContain('<div class="table-scroll" tabindex="0"><table>');
     expect(html).toContain('<th align="left">a</th>');
     expect(html).toContain('<input type="checkbox" checked disabled>');
     expect(html).toContain("<del>old</del>");

@@ -169,10 +169,10 @@ const structured = plugin
                 )}
                 {(plugin.homepage || plugin.repository) && (
                   <ul class="out" role="list">
-                    {plugin.homepage && /^https?:\/\//.test(plugin.homepage) && (
+                    {plugin.homepage && /^https:\/\//.test(plugin.homepage) && (
                       <li><a href={plugin.homepage} rel="nofollow noopener ugc"><Glyph name="global" size={14} />Website<Glyph name="arrow-up-right" size={12} /></a></li>
                     )}
-                    {plugin.repository && /^https?:\/\//.test(plugin.repository) && (
+                    {plugin.repository && /^https:\/\//.test(plugin.repository) && (
                       <li><a href={plugin.repository} rel="nofollow noopener ugc"><Glyph name="file-code" size={14} />Source code<Glyph name="arrow-up-right" size={12} /></a></li>
                     )}
                   </ul>
@@ -197,8 +197,8 @@ const structured = plugin
   .identity { display: grid; gap: 8px; min-width: 0; padding-top: 2px; }
   .identity h1 { overflow-wrap: anywhere; }
   .author { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 15px; color: var(--text-2); }
-  .author a { color: var(--text); font-weight: 500; transition: color 0.12s; }
-  .author a:hover { color: var(--accent-soft); }
+  .author a { color: var(--text); font-weight: 500; text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; transition: color 0.12s, text-decoration-color 0.12s; }
+  .author a:hover { color: var(--accent-soft); text-decoration-color: currentColor; }
   .summary { max-width: 38em; margin-top: 4px; font-size: clamp(16px, 1.3vw, 18px); line-height: 1.55; color: var(--text-2); text-wrap: pretty; overflow-wrap: anywhere; }
   .get { padding-top: 6px; }
 

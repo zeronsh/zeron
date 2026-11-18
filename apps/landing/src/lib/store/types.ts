@@ -41,8 +41,13 @@ export interface Badge {
   description?: string;
 }
 
-/** Who publishes it (amendment 20): every listing is by an account with a username. */
+/**
+ * Who publishes it (amendments 20, 33): every listing is by an account with
+ * a username. `id` is the publisher's stable, opaque id: what anything kept
+ * per author is keyed by; never shown. The username is what people read.
+ */
 export interface Author {
+  id: string;
   username: string;
   badges: Badge[];
 }

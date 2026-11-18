@@ -400,7 +400,7 @@ const failing = checks.filter((c) => c.level === "fail").length;
   .was { color: var(--text-2); background: var(--diff-removed-wash); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--diff-removed) 60%, transparent); }
   .now { color: var(--text); background: var(--diff-added-wash); }
   .who { display: flex; align-items: baseline; gap: 10px; font-size: 15px; }
-  .who a { font-weight: 600; color: var(--text); }
+  .who a { font-weight: 600; color: var(--text); text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
   .who a:hover { color: var(--accent-soft); }
   .facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .facts > div { display: grid; gap: 2px; padding: 10px 12px; background: var(--surface); border-radius: var(--radius-lg); }

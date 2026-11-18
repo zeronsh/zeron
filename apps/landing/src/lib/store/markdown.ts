@@ -115,7 +115,7 @@ const sanitize = unified().use(rehypeSanitize, SCHEMA).freeze();
 const stringify = unified().use(rehypeStringify, { allowDangerousHtml: false }).freeze();
 
 /** Bump when the HTML this makes changes, so kept renderings are made again. */
-export const RENDERER = 1;
+export const RENDERER = 2;
 
 /**
  * Markdown in, safe HTML out. A document the parser can't finish (nesting
@@ -236,10 +236,16 @@ function finish(tree: Root, options: RenderOptions): void {
       return;
     }
     if (node.tagName === "table" && parent && index !== undefined) {
-      // A wide table scrolls in its own box, never the page.
-      const scroller: Element = { type: "element", tagName: "div", properties: { className: ["table-scroll"] }, children: [node] };
+      // A wide table scrolls in its own box, never the page (reachable by
+      // keyboard, so it can be scrolled without a pointer).
+      const scroller: Element = { type: "element", tagName: "div", properties: { className: ["table-scroll"], tabIndex: 0 }, children: [node] };
       parent.children[index] = scroller as RootContent & ElementContent;
       return SKIP;
+    }
+    if (node.tagName === "pre") {
+      // (A long line scrolls in its box: reachable by keyboard.)
+      node.properties.tabIndex = 0;
+      return undefined;
     }
     if (node.tagName === "code" && parent && parent.type === "element" && parent.tagName === "pre") {
       highlight(node);

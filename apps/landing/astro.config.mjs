@@ -13,6 +13,9 @@ import { defineConfig, fontProviders } from "astro/config";
 const command = process.argv.slice(2).find((arg) => !arg.startsWith("-"));
 const fakeEdge = command === "dev";
 
+/** The landing page's components with scripts of their own (their chunks' names). */
+const LANDING_SCRIPTS = /(^|\/)(Base|CopyCommand|Downloads|GitHubStars|Yours)\.astro_astro_type_script_/;
+
 export default defineConfig({
   site: "https://zeron.sh",
   trailingSlash: "never",
@@ -31,6 +34,11 @@ export default defineConfig({
   cache: { provider: cacheCloudflare() },
   security: { checkOrigin: true },
   vite: {
+    // The store's pages allow scripts from the site's own files only (no
+    // inline script), so a script is a file unless it is one of the
+    // landing page's, which keep the build's default (small ones inlined)
+    // and so stay byte for byte as they were. Pictures keep the default.
+    build: { assetsInlineLimit: (file) => (/\.m?js$/.test(file) && !LANDING_SCRIPTS.test(file) ? false : undefined) },
     plugins: [
       {
         name: "zeron:css-target",

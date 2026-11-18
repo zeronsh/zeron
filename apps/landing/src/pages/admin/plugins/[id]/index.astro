@@ -182,7 +182,7 @@ const vid = (v: string) => `remove-${v.replace(/[^\w-]/g, "_")}`;
   .identity { display: grid; gap: 6px; min-width: 0; }
   .identity h1 { font-size: clamp(24px, 2.8vw, 32px); overflow-wrap: anywhere; }
   .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 13.5px; color: var(--text-3); }
-  .meta a { color: var(--text-2); }
+  .meta a { color: var(--text-2); text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
   .meta a:hover { color: var(--text); }
   .quiet-link { display: inline-flex; align-items: center; gap: 6px; justify-self: start; font-size: 14px; font-weight: 500; color: var(--text-2); transition: color 0.12s; }
   .quiet-link:hover { color: var(--text); }

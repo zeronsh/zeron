@@ -5,6 +5,11 @@
    site is untouched by it. */
 
 :root {
+  /* The faintest text, a step firmer than the rest of the site's so it
+     reads at 4.5:1 on the page and on a card (WCAG AA): the store's pages
+     are read closely, often in small type. */
+  --text-3: rgb(237 237 239 / 0.54);
+
   /* Tones: ink on a faint wash of the same colour, a firmer edge (zeron.tone.*). */
   --tone-info: #a3c8fe;
   --tone-info-wash: rgb(116 172 254 / 0.14);
@@ -53,7 +58,9 @@
   --code-attribute: #e6d288;
   --code-label: #b5c2ff;
   --code-tag: #ffada6;
-  --code-comment: rgb(237 237 239 / 0.46);
+  /* (A step firmer than the app's 0.46, which sits on glass: here on the
+     code's well, comments read at 4.5:1.) */
+  --code-comment: rgb(237 237 239 / 0.58);
   --code-operator: rgb(237 237 239 / 0.66);
   --code-punctuation: rgb(237 237 239 / 0.5);
   --diff-added: #73c580;
@@ -81,6 +88,14 @@
 
   --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
 }
+
+/* A page's parts are laid out on grids; none grows past its column to fit
+   a long line or a wide table: those scroll in their own boxes. */
+.store :where(.wrap > *, .block, .panel, .col, .main, .side, .viewer, .readme, .table-wrap, .changes, .change) { min-width: 0; }
+/* A box that scrolls holds what is placed inside it, words kept for screen
+   readers included (.sr-only is absolutely placed), so nothing escapes it
+   to widen the page. */
+.store :where(.table-wrap, .table-scroll, .code, .diff) { position: relative; }
 
 /* The store's pages open a little closer to the nav than the home page's sections. */
 .store { padding-block: clamp(32px, 5vw, 64px) 0; }

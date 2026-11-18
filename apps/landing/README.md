@@ -1,47 +1,89 @@
 # zeron.sh
 
-The landing page, as an [Astro](https://astro.build) site. It is prerendered
-to static files and deployed as an assets-only Cloudflare Worker
-(`wrangler.jsonc`). `npx wrangler deploy` installs, type checks, builds and
-tests before it uploads; `.github/workflows/deploy.yml` runs it on every push
-to `main` that touches this folder. `-c wrangler.staging.jsonc` deploys the
-same build to https://site-staging.zeron.sh.
+The landing page and the plugin store's web pages, as an
+[Astro](https://astro.build) site on a Cloudflare Worker
+(`@astrojs/cloudflare`). Every page that can be is prerendered and served as
+a file (the landing page, privacy, 404); the store's routes say
+`prerender = false` and are rendered by the Worker, which reads the store and
+the visitor's sign-in from the edge worker through its `EDGE` service
+binding. The site holds no secret and never talks to WorkOS: web sign-in is
+the edge's (`/auth/web/*`).
 
 ```sh
 npm install
-npm run dev        # http://localhost:4321
+npm run dev        # http://localhost:4321, with the fake edge (fake-edge/)
 npm run check      # types, in .astro and .ts
-npm test           # builds ./dist, then tests the scripts and the built pages
+npm test           # builds ./dist, then every test (Chromium for the browser ones:
+                   # `npx playwright install chromium` once)
+npm run deploy             # install, check, build, test, then deploy zeron.sh
+npm run deploy:staging     # the same for https://site-staging.zeron.sh
 ```
+
+`wrangler deploy` on its own never builds: the build writes the deployable
+config (`dist/server/wrangler.json`) and points wrangler at it, so deploy
+through the scripts above, which hold the gate. Staging is `env.staging` in
+`wrangler.jsonc`, chosen at build time with `CLOUDFLARE_ENV=staging`.
 
 ## Layout
 
 ```
 src/
-  pages/           index (the landing page), privacy, 404
-  layouts/Base     head, fonts, nav, footer
+  pages/           index, privacy, 404 (prerendered); robots, sitemaps
+    plugins/       the catalog, a plugin's page, its report form, package pictures
+    account/       your plugins: versions, review state, deploy keys
+    admin/         the review dashboard (admins only; anyone else gets the 404)
+    auth/web/      hands sign-in to the edge where its own route doesn't
+  middleware.ts    each rendered page's headers and CSP (lib/store/security.ts)
+  layouts/         Base (the landing page), Store (the store's pages)
   components/
-    ui/            Button, Mark, CopyCommand, agent and platform marks
-    site/          Nav, Footer, GitHubStars
+    ui/            Button, Action, Badge, fields, Select, Tabs, Pagination,
+                   Dialog, Toast, Glyph, Mark, agent and platform marks
+    site/          Head, Nav, Footer, GitHubStars
+    store/         plugin cards and tiles, what a plugin asks for, Install in
+                   Zeron, screenshots, file tree, code and diff views
     app/           the session window, recreated in HTML (generated)
     home/          one file per section of the landing page
-  data/            releases (every download), agents, voices, site links
+  lib/store/       the edge's contract (types, edge.ts), the README pipeline
+                   (markdown.ts), the app's words for permissions, catalog
+                   addresses, review helpers; tested, no DOM
+  data/            releases (every download), agents, voices, site links, icons
   lib/downloads    which build a visitor is offered; tested, no DOM
-  scripts/         downloads.ts points the page's links at the latest release
-  styles/global    the tokens, taken from the app's own dark theme
+  scripts/         downloads.ts (landing), store.ts (the store's forms)
+  styles/          global (the tokens, from the app's dark theme), store
+fake-edge/         the edge's store contract and sign-in over fixtures, for
+                   dev and tests (never deployed)
+tests/             the built pages and routes against the fake edge
+                   (harness.ts), the store's pages in Chromium (axe, keyboard)
 public/
   telemetry.js     the page-view counter, served exactly as written
 tools/
   recreate/        builds the app's windows from its layout tree, and diffs them
 ```
 
+### The plugin store's pages
+
+- **Caching.** Public pages read no cookie, so they are the same for
+  everyone: the Worker cache keeps each address 30 s and serves it 30 s
+  stale while it asks again (at most a minute old). Package pictures are
+  kept by shared caches a minute at most (a takedown shows within it).
+  Signed-in pages are `private, no-store` and `noindex`.
+- **READMEs** are rendered on the server: CommonMark + GFM, raw HTML
+  dropped, links and pictures rewritten (pictures only from the package,
+  through the site's file route; a remote picture becomes a link), then a
+  strict sanitizer, then highlighting by class. A version's README never
+  changes, so each is rendered once and kept.
+- **Forms** post with the session's CSRF token (the edge checks it with the
+  Origin; Astro refuses a cross-site post first), answer with 303 and a
+  one-shot message. A destructive one asks in a dialog; without a script,
+  its link opens a page that asks the same.
+- **CSP**: scripts only from the site's own files (no inline script on these
+  pages; `astro.config.mjs` keeps the store's scripts out of the page),
+  styles from its files and the exact inline blocks a page carries,
+  pictures and fonts from the site, nothing from anyone else.
+
 The site wears the app's design: `src/styles/global.css` copies its colours,
 radii and control sizes from `apps/zgx/ui/ds/themes/zeron-dark.json`, and the
 fonts are the app's (Geist, Geist Mono). Change a token there first.
-
-It is static today. When a route needs a server (sign-in, the plugin store),
-add `@astrojs/cloudflare` as the adapter and mark that route
-`export const prerender = false`; the rest stays prerendered.
 
 ## The app on the page
 

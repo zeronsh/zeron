@@ -12,6 +12,8 @@ const root = new URL("../", import.meta.url);
 const ORIGIN = "https://zeron.sh";
 
 export interface Site {
+  /** Where it listens, for a browser (http://127.0.0.1:…). */
+  url: URL;
   /** A request to the site, as from a browser at https://zeron.sh. */
   fetch(path: string, init?: RequestInit): Promise<Response>;
   /** A signed-in visitor's cookie (a fake account: user_ada, user_grace, …). */
@@ -37,9 +39,10 @@ export async function startSite(): Promise<Site> {
       ],
     } as never),
   );
-  await mf.ready;
+  const url = await mf.ready;
   const fetch = async (path: string, init: RequestInit = {}) => (await mf.dispatchFetch(new URL(path, ORIGIN), { redirect: "manual", ...init } as never)) as unknown as Response;
   return {
+    url: new URL(url.href),
     fetch,
     async signIn(user) {
       const response = await fetch(`/auth/web/callback?as=${user}&return_to=/`);

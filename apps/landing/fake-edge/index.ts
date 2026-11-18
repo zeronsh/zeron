@@ -73,7 +73,7 @@ function card(p: FakePlugin, version: FakeVersion | undefined = latest(p)) {
     name: String(m.name),
     summary: String(m.description),
     icon: typeof m.icon === "string" ? m.icon : null,
-    author: { username: owner.username ?? "", badges: owner.badges },
+    author: { id: `pub_${hash(owner.id).slice(0, 32)}`, username: owner.username ?? "", badges: owner.badges },
     categories: (m.categories as string[]) ?? [],
     keywords: (m.keywords as string[]) ?? [],
     version: v.version,
