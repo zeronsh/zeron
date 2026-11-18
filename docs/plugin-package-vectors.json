@@ -4411,6 +4411,172 @@
         }
       ],
       "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "UI/a": "MQ==",
+        "Ui": "MQ==",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "ui/b": "MQ=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "a file on a folder, then a path inside it",
+      "problems": [
+        {
+          "field": "files",
+          "path": "Ui",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "café/a": "MQ==",
+        "café": "MQ==",
+        "café/b": "MQ==",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "a file on a folder in Unicode's other spelling, then a path inside it",
+      "problems": [
+        {
+          "field": "files",
+          "path": "café",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "A": "MQ==",
+        "A/B": "MQ==",
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "a/b/c": "MQ==",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "a file, a path under it, a path deeper under it",
+      "problems": [
+        {
+          "field": "files",
+          "path": "A/B",
+          "rule": "bad_listing"
+        },
+        {
+          "field": "files",
+          "path": "a/b/c",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "A": "MQ==",
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "a": "MQ==",
+        "a/x": "MQ==",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "a file, the same file, a path under it",
+      "problems": [
+        {
+          "field": "files",
+          "path": "a",
+          "rule": "bad_listing"
+        },
+        {
+          "field": "files",
+          "path": "a/x",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
     }
   ],
   "manifests": [
