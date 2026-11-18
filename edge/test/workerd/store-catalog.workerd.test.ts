@@ -13,7 +13,7 @@ const list = async (query: string, bearer?: string) => {
 };
 
 describe("store catalog", () => {
-  it("lists approved plugins as cards, with the author's live username", async () => {
+  it("lists published plugins as cards, with the author's live username and the mark", async () => {
     const a = await author();
     const id = uniqueId();
     const tag = `t${randomLetters(8)}`;
@@ -30,7 +30,9 @@ describe("store catalog", () => {
       categories: ["productivity"],
       keywords: [tag],
       installs: 0,
-      featured: false
+      featured: false,
+      verified: true,
+      verified_version: "1.0.0"
     });
     const detail = await json<Record<string, unknown>>(await call(undefined, "GET", `/store/v1/plugins/${id}`));
     expect(detail).toMatchObject({
@@ -39,27 +41,41 @@ describe("store catalog", () => {
       screenshots: ["shots/one.png"],
       permissions: { asks: ["ui.add"], commands: [], network_hosts: [], tools: [] },
       engines: null,
-      versions: [{ version: "1.0.0", status: "approved", yanked: false, notes: "- What changed in 1.0.0.", key: a.signer.key }],
+      versions: [{ version: "1.0.0", status: "listed", yanked: false, notes: "- What changed in 1.0.0.", key: a.signer.key, verified: true, via: "device" }],
       package: { url: `/store/v1/plugins/${id}/versions/1.0.0/package`, key: a.signer.key }
     });
     const categories = await json<{ categories: { id: string }[] }>(await call(undefined, "GET", "/store/v1/categories"));
     expect(categories.categories.map((c) => c.id)).toEqual(["agents", "appearance", "chat", "developer-tools", "git", "integrations", "productivity", "utilities"]);
   });
 
-  it("shows nothing pending, rejected, unknown or suspended to the public", async () => {
+  it("shows a version the moment it is published, and nothing taken down, removed, unknown or suspended", async () => {
     const a = await author();
     const id = uniqueId();
     expect((await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer }))).status).toBe(201);
-    expect((await call(undefined, "GET", `/store/v1/plugins/${id}`)).status).toBe(404);
-    expect((await call(undefined, "GET", `/store/v1/plugins/${id}/versions`)).status).toBe(404);
+    expect(await json(await call(undefined, "GET", `/store/v1/plugins/${id}`))).toMatchObject({ version: "1.0.0", verified: false, verified_version: null });
     expect((await call(undefined, "GET", "/store/v1/plugins/nope-not-here")).status).toBe(404);
     expect((await call(undefined, "GET", "/store/v1/plugins/Bad..Id")).status).toBe(404);
-    expect((await adminCall("POST", `/store/v1/admin/submissions/${id}/1.0.0/approve`)).status).toBe(200);
-    expect((await call(undefined, "GET", `/store/v1/plugins/${id}`)).status).toBe(200);
+    // Taken down, its only version: out of the catalog; its package isn't served.
+    expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/versions/1.0.0/take-down`, { reason: "Harmful." })).status).toBe(200);
+    expect((await call(undefined, "GET", `/store/v1/plugins/${id}`)).status).toBe(404);
+    expect((await call(undefined, "GET", `/store/v1/plugins/${id}/versions/1.0.0/package`)).status).toBe(404);
+    expect((await call(undefined, "GET", `/store/v1/plugins/${id}/versions/1.0.0`)).status).toBe(404);
+    expect((await json<{ versions: unknown[] }>(await call(undefined, "GET", `/store/v1/plugins/${id}/versions`))).versions).toEqual([]);
+    // Restored: back, unverified.
+    expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/versions/1.0.0/restore`, { reason: "A mistake." })).status).toBe(200);
+    expect(await json(await call(undefined, "GET", `/store/v1/plugins/${id}`))).toMatchObject({ version: "1.0.0", verified: false });
     expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/suspend`, { reason: "Looking into it." })).status).toBe(200);
     const gone = await call(undefined, "GET", `/store/v1/plugins/${id}`);
     expect([gone.status, (await json(gone)).error]).toEqual([404, "not_found"]);
     expect((await call(undefined, "GET", `/store/v1/plugins/${id}/versions/1.0.0/package`)).status).toBe(404);
+    expect((await call(undefined, "GET", `/store/v1/plugins/${id}/versions`)).status).toBe(404);
+    expect((await call(undefined, "GET", `/store/v1/plugins/${id}/versions/1.0.0`)).status).toBe(404);
+    // Removed (not harmful): not served either.
+    const other = uniqueId();
+    await listed(a, other, "1.0.0");
+    expect((await adminCall("POST", `/store/v1/admin/plugins/${other}/versions/1.0.0/remove`, { reason: "A copyright claim." })).status).toBe(200);
+    expect((await call(undefined, "GET", `/store/v1/plugins/${other}`)).status).toBe(404);
+    expect((await call(undefined, "GET", `/store/v1/plugins/${other}/versions/1.0.0/package`)).status).toBe(404);
   });
 
   it("pages with keyset cursors: every item once, in order, whatever the page size", async () => {
@@ -114,9 +130,16 @@ describe("store catalog", () => {
     const tag = `t${randomLetters(8)}`;
     const ids = [uniqueId(), uniqueId(), uniqueId(), uniqueId()];
     for (const id of ids) await listed(a, id, "1.0.0", { manifest: { keywords: [tag], description: `Has ${tag} inside.` } });
-    // Neither a pending plugin nor a suspended one counts for anyone.
+    // Neither a plugin with nothing installable (taken down, or only yanked)
+    // nor a suspended one counts for anyone.
+    // (Another author: an account claims 5 new ids a week.)
+    const b = await author();
     const quiet = uniqueId();
-    expect((await publish(a.userId, quiet, await makePackage({ id: quiet, version: "1.0.0", signer: a.signer, manifest: { keywords: [tag] } }))).status).toBe(201);
+    expect((await publish(b.userId, quiet, await makePackage({ id: quiet, version: "1.0.0", signer: b.signer, manifest: { keywords: [tag], description: `Has ${tag} inside.` } }))).status).toBe(201);
+    expect((await adminCall("POST", `/store/v1/admin/plugins/${quiet}/versions/1.0.0/take-down`, { reason: "Harmful." })).status).toBe(200);
+    const yankedOnly = uniqueId();
+    expect((await publish(b.userId, yankedOnly, await makePackage({ id: yankedOnly, version: "1.0.0", signer: b.signer, manifest: { keywords: [tag], description: `Has ${tag} inside.` } }))).status).toBe(201);
+    expect((await call(b.userId, "POST", `/store/v1/plugins/${yankedOnly}/versions/1.0.0/yank`)).status).toBe(200);
     expect((await adminCall("POST", `/store/v1/admin/plugins/${ids[3]}/suspend`, { reason: "Looking." })).status).toBe(200);
     for (const query of [`keyword=${tag}&limit=1`, `q=${tag}&limit=1`]) {
       const totals: number[] = [];
@@ -150,25 +173,32 @@ describe("store catalog", () => {
     expect(page[0]!.listed_at).toBeGreaterThanOrEqual(page[1]!.listed_at);
     expect(page[1]!.listed_at).toBe(before.listed_at);
     expect(page[1]!.updated_at).toBeGreaterThanOrEqual(before.updated_at);
-    // Never listed: the owner's card has none.
+    // Nothing listed (its only version taken down): the owner's card has none.
     const quiet = uniqueId();
     expect((await publish(a.userId, quiet, await makePackage({ id: quiet, version: "1.0.0", signer: a.signer }))).status).toBe(201);
+    expect((await adminCall("POST", `/store/v1/admin/plugins/${quiet}/versions/1.0.0/take-down`, { reason: "Harmful." })).status).toBe(200);
     const mine = (await json<{ plugins: { id: string; listed_at: number | null }[] }>(await call(a.userId, "GET", "/store/v1/me/plugins"))).plugins;
     expect(mine.find((p) => p.id === quiet)!.listed_at).toBeNull();
     expect(mine.find((p) => p.id === first)!.listed_at).toBe(before.listed_at);
   });
 
-  it("changes the total when a plugin is approved or taken down", async () => {
+  it("changes the total when a plugin is published, taken down, or left with nothing installable", async () => {
     const a = await author();
     const before = (await list("")).total;
     expect(before).toBe(await env.STORE_DB.prepare("SELECT COUNT(*) AS n FROM plugins WHERE status = 'active' AND listed_version IS NOT NULL").first("n"));
     const id = uniqueId();
     expect((await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer }))).status).toBe(201);
-    expect((await list("")).total).toBe(before);
-    expect((await adminCall("POST", `/store/v1/admin/submissions/${id}/1.0.0/approve`)).status).toBe(200);
     expect((await list("")).total).toBe(before + 1);
-    expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/versions/1.0.0/remove`, { block: true, reason: "Harmful." })).status).toBe(200);
+    expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/versions/1.0.0/take-down`, { reason: "Harmful." })).status).toBe(200);
     expect((await list("")).total).toBe(before);
+    // Its author yanking its only version leaves the lists too, until they publish again.
+    const other = uniqueId();
+    expect((await publish(a.userId, other, await makePackage({ id: other, version: "1.0.0", signer: a.signer }))).status).toBe(201);
+    expect((await list("")).total).toBe(before + 1);
+    expect((await call(a.userId, "POST", `/store/v1/plugins/${other}/versions/1.0.0/yank`)).status).toBe(200);
+    expect((await list("")).total).toBe(before);
+    expect((await publish(a.userId, other, await makePackage({ id: other, version: "1.0.1", signer: a.signer }))).status).toBe(201);
+    expect((await list("")).total).toBe(before + 1);
   });
 
   it("searches name, summary, keywords, author and README, best match first, by prefix", async () => {
@@ -236,18 +266,19 @@ describe("store catalog", () => {
     ]);
   });
 
-  it("purges the cached page and detail when a version is approved or yanked", async () => {
+  it("purges the cached page and detail when a version is published, verified or yanked", async () => {
     const a = await author();
     const id = uniqueId();
     await listed(a, id, "1.0.0");
-    expect((await json<Card>(await call(undefined, "GET", `/store/v1/plugins/${id}`))).version).toBe("1.0.0");
+    const detail = async () => json<Card & { verified: boolean; verified_version: string | null; versions: { version: string; yanked: boolean }[] }>(await call(undefined, "GET", `/store/v1/plugins/${id}`));
+    expect((await detail()).version).toBe("1.0.0");
+    // A publish is public at once: the cached detail moves with it.
     expect((await publish(a.userId, id, await makePackage({ id, version: "1.1.0", signer: a.signer }))).status).toBe(201);
-    // Pending changes nothing public.
-    expect((await json<Card>(await call(undefined, "GET", `/store/v1/plugins/${id}`))).version).toBe("1.0.0");
-    expect((await adminCall("POST", `/store/v1/admin/submissions/${id}/1.1.0/approve`)).status).toBe(200);
-    expect((await json<Card>(await call(undefined, "GET", `/store/v1/plugins/${id}`))).version).toBe("1.1.0");
+    expect(await detail()).toMatchObject({ version: "1.1.0", verified: false, verified_version: "1.0.0" });
+    expect((await adminCall("POST", `/store/v1/admin/versions/${id}/1.1.0/verify`)).status).toBe(200);
+    expect(await detail()).toMatchObject({ version: "1.1.0", verified: true, verified_version: "1.1.0" });
     expect((await call(a.userId, "POST", `/store/v1/plugins/${id}/versions/1.1.0/yank`)).status).toBe(200);
-    const after = await json<Card & { versions: { version: string; yanked: boolean }[] }>(await call(undefined, "GET", `/store/v1/plugins/${id}`));
+    const after = await detail();
     expect(after.version).toBe("1.0.0");
     expect(after.versions.map((v) => [v.version, v.yanked])).toEqual([
       ["1.1.0", true],
@@ -266,29 +297,19 @@ describe("store catalog", () => {
     // A public page carries no owner-only field, cached or not, whoever asks.
     for (const res of [first, signedIn, await call(undefined, "GET", `/store/v1/plugins/${id}`)]) {
       const detail = (await res.json()) as { versions: Record<string, unknown>[] };
-      for (const version of detail.versions) for (const field of ["review", "checks", "blocked", "via"]) expect(version, field).not.toHaveProperty(field);
+      for (const version of detail.versions) for (const field of ["review", "checks", "deploy_key", "removal"]) expect(version, field).not.toHaveProperty(field);
     }
   });
 });
 
 describe("store packages and files", () => {
-  it("serves an approved package to anyone, and a pending one to its owner and admins only", async () => {
+  it("serves a listed or yanked package to anyone, and a taken-down one to its owner and admins only", async () => {
     const a = await author();
     const stranger = await author();
     const id = uniqueId();
     const pkg = await makePackage({ id, version: "1.0.0", signer: a.signer });
     expect((await publish(a.userId, id, pkg)).status).toBe(201);
     const path = `/store/v1/plugins/${id}/versions/1.0.0/package`;
-    expect((await call(undefined, "GET", path)).status).toBe(404);
-    expect((await call(stranger.userId, "GET", path)).status).toBe(404);
-    const own = await call(a.userId, "GET", path);
-    expect(own.status).toBe(200);
-    expect(own.headers.get("cache-control")).toBe("private, no-store");
-    expect(new Uint8Array(await own.arrayBuffer())).toEqual(pkg);
-    // The owner's answer was never cached: to anyone else it still isn't there.
-    expect((await call(undefined, "GET", path)).status).toBe(404);
-    expect((await adminCall("GET", path)).status).toBe(200);
-    expect((await adminCall("POST", `/store/v1/admin/submissions/${id}/1.0.0/approve`)).status).toBe(200);
     const pub = await call(undefined, "GET", path);
     expect(pub.status).toBe(200);
     expect(pub.headers.get("content-type")).toBe("application/octet-stream");
@@ -296,6 +317,19 @@ describe("store packages and files", () => {
     expect(pub.headers.get("x-content-type-options")).toBe("nosniff");
     expect(pub.headers.get("content-security-policy")).toBe("sandbox; default-src 'none'");
     expect(new Uint8Array(await pub.arrayBuffer())).toEqual(pkg);
+    // Yanked: still served (the devices that have it reinstall it).
+    expect((await call(a.userId, "POST", `/store/v1/plugins/${id}/versions/1.0.0/yank`)).status).toBe(200);
+    expect((await call(undefined, "GET", path)).status).toBe(200);
+    // Taken down: its owner and staff only, never cached for anyone else.
+    expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/versions/1.0.0/take-down`, { reason: "Harmful." })).status).toBe(200);
+    expect((await call(undefined, "GET", path)).status).toBe(404);
+    expect((await call(stranger.userId, "GET", path)).status).toBe(404);
+    const own = await call(a.userId, "GET", path);
+    expect(own.status).toBe(200);
+    expect(own.headers.get("cache-control")).toBe("private, no-store");
+    expect(new Uint8Array(await own.arrayBuffer())).toEqual(pkg);
+    expect((await call(undefined, "GET", path)).status).toBe(404);
+    expect((await adminCall("GET", path)).status).toBe(200);
   });
 
   it("serves pictures and the icon inline, and every other file only as an attachment to its owner or admins", async () => {

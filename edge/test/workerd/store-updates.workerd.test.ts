@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { author, call, listed, makePackage, publish, uniqueId, adminCall } from "./store-helpers";
+import { author, call, listed, published, uniqueId, adminCall } from "./store-helpers";
 
 type Updates = { updates: Record<string, unknown>[]; blocked: Record<string, unknown>[] };
 const json = async <T>(res: Response) => (await res.json()) as T;
@@ -13,7 +13,7 @@ const check = async (body: unknown, bearer?: string) => {
 };
 
 describe("POST /store/v1/updates", () => {
-  it("offers the highest approved version the device's Zeron takes, with what it adds", async () => {
+  it("offers the highest listed version the device's Zeron takes, with what it adds", async () => {
     const a = await author();
     const id = uniqueId();
     await listed(a, id, "1.0.0");
@@ -23,9 +23,10 @@ describe("POST /store/v1/updates", () => {
     const installed = { id, version: "1.0.0", hash: await hashOf(id, "1.0.0") };
     const old = await check({ zeron: "0.4.2", plugins: [installed] });
     expect(old.updates).toEqual([
-      expect.objectContaining({ id, version: "1.1.0", added: ["links.open"], removed: [], prerelease: false, hash: await hashOf(id, "1.1.0"), key: a.signer.key, publisher: a.username, notes: "- What changed in 1.1.0." })
+      expect.objectContaining({ id, version: "1.1.0", added: ["links.open"], removed: [], prerelease: false, hash: await hashOf(id, "1.1.0"), key: a.signer.key, publisher: a.username, notes: "- What changed in 1.1.0.", verified: true, verified_at: expect.any(Number) })
     ]);
     expect(old.updates[0]).not.toHaveProperty("in_review");
+    expect(old.updates[0]).not.toHaveProperty("verified_update");
     expect((await check({ zeron: "0.5.0", plugins: [installed] })).updates[0]).toMatchObject({ version: "1.2.0" });
     expect((await check({ zeron: "0.5.0", plugins: [{ ...installed, prerelease: true }] })).updates[0]).toMatchObject({ version: "2.0.0-beta.1", prerelease: true });
     // Up to date: nothing.
@@ -35,16 +36,32 @@ describe("POST /store/v1/updates", () => {
     expect((await check({ zeron: "0.5.0", plugins: [installed] })).updates[0]).toMatchObject({ version: "1.1.0" });
   });
 
-  it("offers the owner's own pending version as in review, and nobody else's", async () => {
+  it("offers every listed version at once, to everyone, saying whether it is verified, with the newest verified beside it", async () => {
     const a = await author();
     const someone = await author();
     const id = uniqueId();
     await listed(a, id, "1.0.0");
-    expect((await publish(a.userId, id, await makePackage({ id, version: "1.1.0", signer: a.signer }))).status).toBe(201);
+    await listed(a, id, "1.1.0");
+    await published(a, id, "1.2.0");
     const body = { zeron: "0.4.0", plugins: [{ id, version: "1.0.0", hash: await hashOf(id, "1.0.0") }] };
-    expect((await check(body, a.userId)).updates).toEqual([expect.objectContaining({ version: "1.1.0", in_review: true })]);
-    expect((await check(body, someone.userId)).updates).toEqual([]);
-    expect((await check(body)).updates).toEqual([]);
+    // The same offer to anyone (no version is only its author's any more).
+    const offers = [await check(body), await check(body, someone.userId), await check(body, a.userId)].map((r) => r.updates);
+    expect(offers[1]).toEqual(offers[0]);
+    expect(offers[2]).toEqual(offers[0]);
+    const [offer] = offers[0]!;
+    expect(offer).toMatchObject({ version: "1.2.0", verified: false, verified_at: null });
+    expect(offer).not.toHaveProperty("in_review");
+    expect(offer!.verified_update).toMatchObject({ id, version: "1.1.0", verified: true, verified_at: expect.any(Number), hash: await hashOf(id, "1.1.0") });
+    // Asking for verified versions only: the newest verified is the offer.
+    const vetted = await check({ ...body, plugins: [{ ...body.plugins[0], verified_only: true }] });
+    expect(vetted.updates).toEqual([expect.objectContaining({ version: "1.1.0", verified: true })]);
+    expect(vetted.updates[0]).not.toHaveProperty("verified_update");
+    // Installed at the newest verified: the unverified one is offered alone.
+    const fromVetted = await check({ zeron: "0.4.0", plugins: [{ id, version: "1.1.0", hash: await hashOf(id, "1.1.0") }] });
+    expect(fromVetted.updates).toEqual([expect.objectContaining({ version: "1.2.0", verified: false })]);
+    expect(fromVetted.updates[0]).not.toHaveProperty("verified_update");
+    expect((await check({ zeron: "0.4.0", plugins: [{ id, version: "1.1.0", hash: await hashOf(id, "1.1.0"), verified_only: true }] })).updates).toEqual([]);
+    expect((await call(undefined, "POST", "/store/v1/updates", { zeron: "0.4.0", plugins: [{ ...body.plugins[0], verified_only: "yes" }] })).status).toBe(400);
   });
 
   it("names installed versions taken down with a block, for those contents only", async () => {
@@ -53,7 +70,7 @@ describe("POST /store/v1/updates", () => {
     await listed(a, id, "1.0.0");
     await listed(a, id, "1.1.0");
     const bad = await hashOf(id, "1.1.0");
-    expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/versions/1.1.0/remove`, { block: true, reason: "It sends your files away." })).status).toBe(200);
+    expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/versions/1.1.0/take-down`, { reason: "It sends your files away." })).status).toBe(200);
     const res = await check({ zeron: "0.4.0", plugins: [{ id, version: "1.1.0", hash: bad }] });
     expect(res.blocked).toEqual([{ id, version: "1.1.0", reason: "It sends your files away." }]);
     expect(res.updates).toEqual([]);
@@ -63,6 +80,17 @@ describe("POST /store/v1/updates", () => {
     const suspended = await check({ zeron: "0.4.0", plugins: [{ id, version: "1.1.0", hash: bad }, ] });
     expect(suspended.blocked).toHaveLength(1);
     expect((await check({ zeron: "0.4.0", plugins: [{ id, version: "0.9.0", hash: "0".repeat(64) }] })).updates).toEqual([]);
+  });
+
+  it("never blocks a version staff removed without a take-down", async () => {
+    const a = await author();
+    const id = uniqueId();
+    await listed(a, id, "1.0.0");
+    await listed(a, id, "1.1.0");
+    const hash = await hashOf(id, "1.1.0");
+    expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/versions/1.1.0/remove`, { reason: "A copyright claim." })).status).toBe(200);
+    const res = await check({ zeron: "0.4.0", plugins: [{ id, version: "1.1.0", hash }] });
+    expect(res).toEqual({ updates: [], blocked: [] });
   });
 
   it("refuses a malformed request", async () => {

@@ -15,6 +15,7 @@ import { type Json, type JsonObject, canonicalJson, isArray, isObject } from "./
 import { MANIFEST_FILE, type Manifest, RESERVED_ID_ERROR, idProblem, isRustWhitespace, rustTrim, rustTrimStart } from "./manifest";
 import { MAX_BYTES, MAX_FILES } from "./package";
 import { LIMITS, STORE_DATA } from "./data";
+import { asWritten, firstUnseen, keywordClaim, markClaim, problemWord } from "./mark";
 import { foldPath, plainPath } from "./paths";
 import { type Range, type Version, parseRange, parseVersion } from "./semver";
 
@@ -59,14 +60,35 @@ export type ListingRule =
   | "binary_file"
   | "no_notes";
 
+/** Why a name, description or keywords are refused (`listing_causes`): a
+ * closed list an app says in its own words. */
+export type ListingCause = "too_long" | "not_one_line" | "unseen_char" | "mark_word" | "mark_glyph" | "keyword_shape" | "too_many" | "repeated";
+
 export interface Problem {
   readonly rule: ListingRule;
   readonly field: string | null;
   readonly path: string | null;
   readonly words: string;
+  /** A bad name, description or keywords: why, and (where there is one)
+   * the word at fault, cleaned (`problemWord`). */
+  readonly cause?: ListingCause;
+  readonly word?: string;
 }
 
 const problem = (rule: ListingRule, field: string | null, words: string, path: string | null = null): Problem => ({ rule, field, path, words });
+const because = (p: Problem, cause: ListingCause, word?: string): Problem => {
+  const cleaned = problemWord(word);
+  return { ...p, cause, ...(cleaned === undefined ? {} : { word: cleaned }) };
+};
+/** A mark claim's problem: its cause by whether the claim is a glyph, its
+ * word where the text says it, as written (the claim when nowhere). */
+const markProblem = (field: string, text: string, claim: string, words: string): Problem =>
+  because(problem("bad_listing", field, words), [...claim].length === 1 && MARK_GLYPHS.includes(claim) ? "mark_glyph" : "mark_word", asWritten(text, claim) ?? claim);
+/** The first character unseen refuses, as U+ and four or more hex digits. */
+const unseenProblem = (field: string, text: string, words: string): Problem => {
+  const c = firstUnseen(text);
+  return because(problem("bad_listing", field, words), "unseen_char", c === undefined ? undefined : `U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}`);
+};
 
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 const lossy = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true });
@@ -87,9 +109,12 @@ const isControl = (ch: string): boolean => {
   return c <= 0x1f || (c >= 0x7f && c <= 0x9f);
 };
 
-/** A control or format character (Unicode Cc, Cf: bidi controls among
- * them), which `name`, `description` and `keywords` refuse (amendment 31). */
-const UNSEEN = /[\p{Cc}\p{Cf}]/u;
+/** The mark's glyphs (data file `mark_claims.glyphs`). */
+const MARK_GLYPHS: readonly string[] = STORE_DATA.mark_claims.glyphs;
+
+/** The store's mark and claims of being Zeron's own (mark.ts: the engine's
+ * mark.rs, ported). */
+export { asWritten, firstUnseen, keywordClaim, markClaim, markText, problemWord } from "./mark";
 
 /** (The fold of a path, as the store and devices compare paths: paths.ts.) */
 export { foldPath } from "./paths";
@@ -240,8 +265,14 @@ export const checkListing = (
     problems.push(problem("id_reserved", "id", `"${manifest.id}" is kept for Zeron`));
   }
   if (!parseVersion(manifest.version)) problems.push(problem("not_semver", "version", `"${manifest.version}" isn't a version (MAJOR.MINOR.PATCH)`));
-  if (chars(manifest.name) > MAX_NAME_LEN) problems.push(problem("bad_listing", "name", `Its name is longer than ${MAX_NAME_LEN} characters`));
-  else if (UNSEEN.test(manifest.name)) problems.push(problem("bad_listing", "name", "Its name has a control or invisible formatting character"));
+  if (chars(manifest.name) > MAX_NAME_LEN) problems.push(because(problem("bad_listing", "name", `Its name is longer than ${MAX_NAME_LEN} characters`), "too_long"));
+  else if (firstUnseen(manifest.name) !== undefined) problems.push(unseenProblem("name", manifest.name, "Its name has a control or invisible formatting character"));
+  else {
+    const claim = markClaim(manifest.name, true);
+    if (claim !== undefined) {
+      problems.push(markProblem("name", manifest.name, claim, `Its name says "${claim}": only the store marks a plugin verified or official. Name it for what it does, without that word`));
+    }
+  }
   if (manifest.entry !== "" && !files.has(manifest.entry)) problems.push(problem("bad_package", "entry", `Its entry file ${manifest.entry} is missing`));
 
   const readme = files.get(README_FILE);
@@ -255,8 +286,22 @@ export const checkListing = (
   const description = rustTrim(manifest.description);
   if (description === "") problems.push(problem("missing_listing", "description", 'It needs a "description": one line saying what it does'));
   else if (chars(description) > MAX_DESCRIPTION_LEN || description.includes("\n")) {
-    problems.push(problem("bad_listing", "description", `Its description is one line of at most ${MAX_DESCRIPTION_LEN} characters`));
-  } else if (UNSEEN.test(description)) problems.push(problem("bad_listing", "description", "Its description has a control or invisible formatting character"));
+    const why: ListingCause = chars(description) > MAX_DESCRIPTION_LEN ? "too_long" : "not_one_line";
+    problems.push(because(problem("bad_listing", "description", `Its description is one line of at most ${MAX_DESCRIPTION_LEN} characters`), why));
+  } else if (firstUnseen(description) !== undefined) problems.push(unseenProblem("description", description, "Its description has a control or invisible formatting character"));
+  else {
+    const claim = markClaim(description, false);
+    if (claim !== undefined) {
+      problems.push(
+        markProblem(
+          "description",
+          description,
+          claim,
+          `Its description says "${claim}" of the plugin itself: only the store marks a plugin verified or official. Say what it does instead, or say whose thing it is ("works with the official Slack app")`
+        )
+      );
+    }
+  }
   const icon = raw.get("icon");
   if (icon === undefined || icon === null) problems.push(problem("missing_listing", "icon", 'It needs an "icon": an SVG file in it'));
   else if (typeof icon === "string") {
@@ -284,10 +329,26 @@ export const checkListing = (
   const keywords = raw.get("keywords");
   if (isArray(keywords)) {
     const words = strings(keywords);
-    if (keywords.length > MAX_KEYWORDS || duplicates(words)) problems.push(problem("bad_listing", "keywords", `It has at most ${MAX_KEYWORDS} keywords, each once`));
-    else if (words.some((w) => w === undefined || !keyword(w))) {
+    if (keywords.length > MAX_KEYWORDS || duplicates(words)) {
+      const bad = problem("bad_listing", "keywords", `It has at most ${MAX_KEYWORDS} keywords, each once`);
+      // (The first keyword given again; none when it isn't text.)
+      const twice = words.find((w, at) => words.slice(0, at).includes(w));
+      problems.push(keywords.length > MAX_KEYWORDS ? because(bad, "too_many") : because(bad, "repeated", twice));
+    } else if (words.some((w) => w === undefined || !keyword(w))) {
       const bad = words.find((w) => w === undefined || !keyword(w));
-      problems.push(problem("bad_listing", "keywords", `Keyword "${bad ?? "?"}" must be lowercase letters, digits, dashes and single spaces, at most ${MAX_KEYWORD_LEN} characters`));
+      problems.push(
+        because(problem("bad_listing", "keywords", `Keyword "${bad ?? "?"}" must be lowercase letters, digits, dashes and single spaces, at most ${MAX_KEYWORD_LEN} characters`), "keyword_shape", bad)
+      );
+    } else {
+      // (No badge lifts this; "zeron" in a keyword is anyone's.)
+      for (const w of words as string[]) {
+        const claim = keywordClaim(w);
+        if (claim === undefined) continue;
+        problems.push(
+          because(problem("bad_listing", "keywords", `Keyword "${w}" says "${claim}": only the store marks a plugin verified or official. Drop it, or use a word for what the plugin does`), "mark_word", w)
+        );
+        break;
+      }
     }
   } else if (keywords !== undefined && keywords !== null) problems.push(problem("bad_listing", "keywords", 'Its "keywords" must be a list'));
 

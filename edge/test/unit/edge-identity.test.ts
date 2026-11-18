@@ -9,14 +9,16 @@ describe("reserved usernames (R17)", () => {
       "github", "anthropic", "openai", "google", "apple", "microsoft", "wing", "winglee", "wingleeio", "admin", "support",
       "security", "zeron", "zer0n", "zeronhq", "the-zeron", "zer_on", "g1thub", "githubbot", "openai-dev", "anthropic-ai",
       "google-dev", "apple1", "adm1n", "admin-bob", "bob-admin", "support-2", "acme-support", "official", "acme-official",
-      "claude", "claude-bot", "cloudflare", "rnicrosoft", "staff", "verified", "username", "user-name", "noreply"
+      "claude", "claude-bot", "cloudflare", "rnicrosoft", "staff", "verified", "username", "user-name", "noreply",
+      // A 2 for z, and doubled letters (the identity lane's probe).
+      "2eron", "zerron", "zeeron", "zeronn", "gitthub", "claaude"
     ]) {
       expect(isReservedUsername(name), name).toBe(true);
     }
   });
 
   it("leaves ordinary names alone", () => {
-    for (const name of ["ada", "pineapple", "bigapple", "steam", "wingspan-fan", "keyowner", "goneowner", "runnerowner", "grace_h", "lovelace", "supporter", "staffing", "helper-bot"]) {
+    for (const name of ["ada", "pineapple", "bigapple", "steam", "wingspan-fan", "keyowner", "goneowner", "runnerowner", "grace_h", "lovelace", "supporter", "staffing", "helper-bot", "zero", "zen2", "2fa-fan", "jazz", "coffee"]) {
       expect(isReservedUsername(name), name).toBe(false);
     }
   });

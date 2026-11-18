@@ -5,6 +5,7 @@
  */
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { publisherId } from "../../src/store/cards";
 import { adminCall, author, call, listed, makePackage, publish, uniqueId } from "./store-helpers";
 
 /** A time's key: `at`, or anything `…_at`. */
@@ -75,6 +76,45 @@ describe("what a device reads (amendment 43)", () => {
   });
 });
 
+describe("an author's own view", () => {
+  it("names the account's publisher id, with plugins or none, to a session and to its deploy key alike", async () => {
+    const a = await author();
+    const none = (await (await call(a.userId, "GET", "/store/v1/me/plugins")).json()) as any;
+    expect(none).toEqual({ publisher_id: await publisherId(a.userId), plugins: [] });
+    const id = uniqueId();
+    await listed(a, id, "1.0.0");
+    const some = (await (await call(a.userId, "GET", "/store/v1/me/plugins")).json()) as any;
+    // The same id a card's author carries.
+    expect(some.publisher_id).toBe(none.publisher_id);
+    expect(some.plugins[0].author.id).toBe(none.publisher_id);
+  });
+});
+
+describe("who published each version", () => {
+  it("names each version's publisher to its owner and staff, fixed at publish: a transfer changes none", async () => {
+    const a = await author();
+    const b = await author();
+    const id = uniqueId();
+    await listed(a, id, "1.0.0");
+    expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/transfer`, { to_username: b.username })).status).toBe(200);
+    expect((await publish(b.userId, id, await makePackage({ id, version: "1.1.0", signer: b.signer }))).status).toBe(201);
+    const [pa, pb] = [await publisherId(a.userId), await publisherId(b.userId)];
+    const byVersion = (versions: { version: string; publisher_id?: string }[]) => Object.fromEntries(versions.map((v) => [v.version, v.publisher_id]));
+    const mine = ((await (await call(b.userId, "GET", "/store/v1/me/plugins")).json()) as any).plugins.find((p: { id: string }) => p.id === id);
+    expect(byVersion(mine.versions)).toEqual({ "1.1.0": pb, "1.0.0": pa });
+    const staff = (await (await adminCall("GET", `/store/v1/admin/plugins/${id}`)).json()) as any;
+    expect(byVersion(staff.versions)).toEqual({ "1.1.0": pb, "1.0.0": pa });
+    // Nobody else reads it per version: not the public, not the former owner.
+    for (const path of [`/store/v1/plugins/${id}`, `/store/v1/plugins/${id}/versions`]) {
+      const versions = ((await (await call(a.userId, "GET", path)).json()) as any).versions as Record<string, unknown>[];
+      expect(versions.length, path).toBeGreaterThan(0);
+      for (const v of versions) expect(v, path).not.toHaveProperty("publisher_id");
+    }
+    expect(await (await call(undefined, "GET", `/store/v1/plugins/${id}/versions/1.0.0`)).json()).not.toHaveProperty("publisher_id");
+    expect(((await (await call(a.userId, "GET", "/store/v1/me/plugins")).json()) as any).plugins.find((p: { id: string }) => p.id === id)).toBeUndefined();
+  });
+});
+
 describe("store answers", () => {
   it("give every time as ms since the epoch", async () => {
     const a = await author();
@@ -89,23 +129,27 @@ describe("store answers", () => {
       answers.push([what, r]);
     };
 
-    // Owner: a publish, the owner's list, an author action.
+    // Owner: a publish, one that supersedes it, the owner's list, the keys.
     await take("publish", publish(a.userId, id, await makePackage({ id, version: "1.1.0", signer: a.signer, manifest: { permissions: ["ui.add", "links.open"] } })));
     await take("publish again", publish(a.userId, id, await makePackage({ id, version: "1.2.0", signer: a.signer })));
-    await take("withdraw", call(a.userId, "POST", `/store/v1/plugins/${id}/versions/1.2.0/withdraw`));
     await take("me/plugins", call(a.userId, "GET", "/store/v1/me/plugins"));
-    // Admin.
-    await take("queue", adminCall("GET", "/store/v1/admin/queue?status=all"));
-    await take("submission", adminCall("GET", `/store/v1/admin/submissions/${id}/1.1.0`));
-    await take("approve", adminCall("POST", `/store/v1/admin/submissions/${id}/1.1.0/approve`));
-    await take("yank", call(a.userId, "POST", `/store/v1/plugins/${id}/versions/1.1.0/yank`));
-    await take("unyank", call(a.userId, "POST", `/store/v1/plugins/${id}/versions/1.1.0/unyank`));
+    await take("me/keys", call(a.userId, "GET", "/store/v1/me/keys"));
+    // Admin: the queue, a version, the marks.
+    await take("queue", adminCall("GET", "/store/v1/admin/queue"));
+    await take("queue, all", adminCall("GET", "/store/v1/admin/queue?state=all"));
+    await take("version view", adminCall("GET", `/store/v1/admin/versions/${id}/1.1.0`));
+    await take("decline", adminCall("POST", `/store/v1/admin/versions/${id}/1.1.0/decline`, { reason: "broken", message: "It crashes on start." }));
+    await take("verify", adminCall("POST", `/store/v1/admin/versions/${id}/1.2.0/verify`));
+    await take("yank", call(a.userId, "POST", `/store/v1/plugins/${id}/versions/1.2.0/yank`));
+    await take("unyank", call(a.userId, "POST", `/store/v1/plugins/${id}/versions/1.2.0/unyank`));
     // Public.
     await take("list", call(undefined, "GET", "/store/v1/plugins?sort=new"));
     await take("search", call(undefined, "GET", `/store/v1/plugins?q=${encodeURIComponent(id)}`));
     await take("detail", call(undefined, "GET", `/store/v1/plugins/${id}`));
     await take("versions", call(undefined, "GET", `/store/v1/plugins/${id}/versions`));
+    await take("one version", call(undefined, "GET", `/store/v1/plugins/${id}/versions/1.2.0`));
     await take("categories", call(undefined, "GET", "/store/v1/categories"));
+    await take("stats", call(undefined, "GET", "/store/v1/stats"));
     const hash = (await env.STORE_DB.prepare("SELECT content_hash FROM versions WHERE plugin_id = ? AND version = '1.0.0'").bind(id).first<string>("content_hash"))!;
     await take("updates", call(reader.userId, "POST", "/store/v1/updates", { zeron: "0.4.0", plugins: [{ id, version: "1.0.0", hash }] }));
     // A signed-in person.
@@ -120,7 +164,10 @@ describe("store answers", () => {
     await take("feature", adminCall("POST", `/store/v1/admin/plugins/${id}/feature`, { featured: true }));
     await take("suspend", adminCall("POST", `/store/v1/admin/plugins/${id}/suspend`, { reason: "Looking." }));
     await take("restore", adminCall("POST", `/store/v1/admin/plugins/${id}/restore`));
-    await take("remove", adminCall("POST", `/store/v1/admin/plugins/${id}/versions/1.0.0/remove`, { block: true, reason: "It sends your files away." }));
+    await take("take-down", adminCall("POST", `/store/v1/admin/plugins/${id}/versions/1.0.0/take-down`, { reason: "It sends your files away." }));
+    await take("takedowns", call(undefined, "GET", "/store/v1/takedowns?after=0"));
+    await take("restore a version", adminCall("POST", `/store/v1/admin/plugins/${id}/versions/1.0.0/restore`, { reason: "It was a mistake." }));
+    await take("remove", adminCall("POST", `/store/v1/admin/plugins/${id}/versions/1.1.0/remove`, { reason: "A copyright claim." }));
     await take("transfer", adminCall("POST", `/store/v1/admin/plugins/${id}/transfer`, { to_username: newOwner.username }));
     await take("audit", adminCall("GET", `/store/v1/admin/audit?plugin=${id}`));
     const reserved = uniqueId();

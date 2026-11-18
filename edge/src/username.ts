@@ -73,17 +73,23 @@ export const skeleton = (name: string): string =>
     .replace(/rn/g, "m");
 
 /** Every way to read a name: `l` may be `i`, so `1` (folded to `l`) tests as
- * both, and `m` may be a folded `rn`. Brand words are checked against each. */
+ * both, `m` may be a folded `rn`, and `2` reads as `z` (`2eron`). Brand
+ * words are checked against each. */
 const readings = (name: string): string[] => {
-  const s = skeleton(name);
+  const s = skeleton(name).replace(/2/g, "z");
   return [...new Set([s, s.replace(/l/g, "i"), s.replace(/m/g, "rn"), s.replace(/l/g, "i").replace(/m/g, "rn")])];
 };
+
+/** A letter doubled reads as one at a glance (`zerron`, `zeeron`): brand
+ * words are compared with every run of a letter as one. */
+const single = (s: string): string => s.replace(/(.)\1+/g, "$1");
+const hasBrand = (reading: string, word: string): boolean => reading.includes(word) || single(reading).includes(single(word));
 
 /** A brand or staff word a name (or an org's name) passes itself off as, if
  * any. Shared with the org-name check (`impersonates` in auth-routes.ts). */
 export const impersonatedWord = (name: string): string | undefined => {
   for (const r of readings(name)) {
-    for (const word of RESERVED_ANYWHERE) if (r.includes(word)) return word;
+    for (const word of RESERVED_ANYWHERE) if (hasBrand(r, word)) return word;
   }
   return undefined;
 };
@@ -93,7 +99,7 @@ export const isReservedUsername = (username: string): boolean =>
   readings(username).some(
     (r) =>
       RESERVED.has(r) ||
-      RESERVED_ANYWHERE.some((w) => r.includes(w)) ||
+      RESERVED_ANYWHERE.some((w) => hasBrand(r, w)) ||
       RESERVED_PREFIX.some((w) => r.startsWith(w)) ||
       RESERVED_SUFFIX.some((w) => r.length > w.length && r.endsWith(w))
   ) ||

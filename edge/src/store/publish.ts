@@ -1,32 +1,40 @@
 /**
  * `POST /store/v1/plugins/:id/versions`, body: the `.zeron-plugin` file.
- * → 201 { id, version, status, checks }
+ * → 201 { id, version, status: "listed", verified: false, checks }
  *
- * In order: who publishes (a session or a deploy key scoped to this id),
+ * A version that passes is listed and installable by everyone at once
+ * (amendment 45); a reviewer's decision later only marks it verified.
+ *
+ * In order: who publishes (a signed-in device, or a deploy key whose scope
+ * holds this id, an id its account owns already: a key never claims one),
  * that they have a username, the body's size, the package exactly as a
  * device verifies it (package.ts), what the store needs to list it
- * (listing.ts, the engine's rules), that the key that signed it may sign for this account, the
- * id (owned by them, or free and not reserved), the version (new, and later
- * than the versions it follows), the rate. Then the automated checks
- * (checks.ts), stored with the version.
+ * (listing.ts, the engine's rules), that the key that signed it may sign
+ * for this account, the id (owned by them, or free and not reserved), the
+ * version (new, and later than every version the plugin has, in any
+ * state), the rate. Then the automated checks (checks.ts), stored with the
+ * version.
  *
  * Storing it can't leave half a version, and two publishes at once can't
  * both win: the package and the version's files (one object, every file in
  * path order) go to R2 first under keys named by the package's sha256, then
- * one D1 batch claims the id and inserts the version, guarded by every rule
+ * one D1 batch claims the id, inserts the version (guarded by every rule
  * above, so whichever insert lands first wins and the other is answered as
- * it would have been a moment later. A loser deletes its own two objects.
- * The same bytes again answer as the first time did.
+ * it would have been a moment later), logs it, takes the plugin's earlier
+ * undecided versions out of the review queue, and relists the plugin. Then
+ * this colo's cached catalog pages are purged. The same bytes again answer
+ * as the first time did.
  */
 import type { Env } from "../env";
 import { isReservedUsername, skeleton } from "../username";
 import { type FileKind, fileKind, isText, runChecks } from "./checks";
 import { type ConsentItem, consentItem } from "./consent";
-import { VERSION_ORDER, filesKey, packageKey, pluginRow } from "./db";
+import { VERSION_ORDER, auditIfChanged, filesKey, packageKey, pluginRow, relist } from "./db";
+import { purgeCatalog } from "./purge";
 import { fail, answer, rateLimited, refusedBody } from "./http";
 import { type Listing, type Problem, checkListing, listingOf } from "./listing";
 import { PackageRefusal, verifyPackage } from "./package";
-import { MAX_PUBLISH_BODY_BYTES, type Publisher, authenticatePublisher, readBody, signingKeyAllowed } from "./principal";
+import { MAX_PUBLISH_BODY_BYTES, type Publisher, authenticatePublisher, keyInScope, readBody, signingKeyAllowed } from "./principal";
 import { isPrerelease, preKey, precedenceText } from "./semver";
 
 /**
@@ -46,6 +54,8 @@ export const CLAIMS_PER_WEEK = 5;
 const WEEK = 7 * 86_400_000;
 
 const CLAIMS_SQL = "(SELECT COUNT(*) FROM id_claims WHERE user_id = ? AND at > ?) < ?";
+/** The same, numbered for the claim's insert (?2 the user, ?5 the window, ?6 the limit). */
+const CLAIMS_SQL_AT = "(SELECT COUNT(*) FROM id_claims WHERE user_id = ?2 AND at > ?5) < ?6";
 
 /** Built-in plugins' ids (the app ships them), beside the engine's own
  * reserved ones (manifest.ts `RESERVED_IDS`, refused as a bad id). */
@@ -61,6 +71,44 @@ export const idReserved = async (db: D1Database, id: string, userId: string): Pr
   const held = await db.prepare("SELECT user_id FROM reservations WHERE id = ?").bind(id).first<{ user_id: string | null }>();
   if (held) return held.user_id !== userId;
   return BUILTIN_IDS.includes(id) || isReservedUsername(id);
+};
+
+/** How many installs make an id one a new claim must not be confused with. */
+export const SIMILAR_INSTALLS = 100;
+
+/** Whether `a` and `b` are at most one edit apart (an insertion, a
+ * deletion or a substitution). */
+export const oneEditApart = (a: string, b: string): boolean => {
+  if (a === b) return true;
+  const [s, t] = a.length <= b.length ? [a, b] : [b, a];
+  if (t.length - s.length > 1) return false;
+  let i = 0;
+  while (i < s.length && s[i] === t[i]) i++;
+  // Past the first difference the rest must match: shifted by one when the
+  // lengths differ, aligned when one letter was swapped.
+  return s.length === t.length ? s.slice(i + 1) === t.slice(i + 1) : s.slice(i) === t.slice(i + 1);
+};
+
+/**
+ * The popular id `id` would be confused with, if any (contract: "Names too
+ * like another's"): one edit, or one confusable letter, from an id another
+ * account owns with `SIMILAR_INSTALLS` installs or more, compared on the
+ * username rules' skeleton (username.ts, the lookalike table brands are
+ * kept by). Checked only when an id is claimed; an id an admin reserved
+ * for the claimer passes. Costs one indexed read of the popular ids within
+ * one letter of its length, and a linear compare of each.
+ */
+export const tooSimilar = async (db: D1Database, id: string, userId: string): Promise<string | undefined> => {
+  const held = await db.prepare("SELECT 1 FROM reservations WHERE id = ? AND user_id = ?").bind(id, userId).first();
+  if (held) return undefined;
+  const mine = skeleton(id);
+  const rows = (
+    await db
+      .prepare("SELECT id, skeleton FROM plugins WHERE installs >= ? AND owner_id != ? AND length(skeleton) BETWEEN ? AND ?")
+      .bind(SIMILAR_INSTALLS, userId, mine.length - 1, mine.length + 1)
+      .all<{ id: string; skeleton: string }>()
+  ).results;
+  return rows.find((r) => oneEditApart(mine, r.skeleton))?.id;
 };
 
 /** A write by `userId` within the per-account limit (STORE_WRITES). */
@@ -83,22 +131,33 @@ const refusal = (e: PackageRefusal): Response => {
 /** A listing problem as the publish error: its rule word is the error word
  * (`id_reserved` 403, `too_large` 413, the rest 400), with every problem
  * found, so one upload shows them all. */
+/** The why and where of a bad name, description or keywords
+ * (`listing_causes`), when the problem has them. */
+const causeOf = (p: Problem) => ({ ...(p.cause === undefined ? {} : { cause: p.cause }), ...(p.word === undefined ? {} : { word: p.word }) });
+
 const listingRefusal = (first: Problem, all: readonly Problem[]): Response =>
   fail(first.rule === "id_reserved" ? 403 : first.rule === "too_large" ? 413 : 400, first.rule, first.words, {
     field: first.field,
     path: first.path,
-    problems: all.slice(0, 100).map((p) => ({ rule: p.rule, field: p.field, path: p.path, message: p.words }))
+    ...causeOf(first),
+    problems: all.slice(0, 100).map((p) => ({ rule: p.rule, field: p.field, path: p.path, ...causeOf(p), message: p.words }))
   });
 
-const accepted = (id: string, version: string, status: string, checks: unknown): Response =>
-  answer({ id, version, status, checks }, 201);
+/** The publish answer: the version, and the older unverified versions it
+ * superseded (now yanked by it, for good). */
+const accepted = (id: string, version: string, status: string, verified: boolean, checks: unknown, superseded: readonly string[] = []): Response =>
+  answer({ id, version, status, verified, checks, superseded }, 201);
 
 export const handlePublish = async (request: Request, env: Env, db: D1Database, bucket: R2Bucket, id: string): Promise<Response> => {
   const publisher = await authenticatePublisher(request, env);
   if (publisher instanceof Response) return publisher;
   if (!(await allowWrite(env, publisher.userId))) return rateLimited();
-  if (publisher.via === "deploy_key" && publisher.pluginScope !== id) {
-    return fail(403, "key_not_allowed", "This deploy key is for another plugin.");
+  // Who may publish what, before the body is read: a deploy key only a
+  // plugin its account owns that its scope holds, never a new id.
+  const plugin = await pluginRow(db, id);
+  if (publisher.via === "deploy_key") {
+    if (!plugin) return fail(403, "key_not_allowed", `"${id}" isn't in the store yet: publish its first version from a signed-in device.`);
+    if (!keyInScope(publisher, plugin)) return fail(403, "key_not_allowed", "This deploy key's scope doesn't hold this plugin.");
   }
   if (!publisher.username) return fail(403, "needs_username", "Publishing needs a username: every listing reads \"by @username\".");
 
@@ -115,13 +174,16 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
   if (pkg.manifest.id !== id) return fail(400, "bad_package", `The package is "${pkg.manifest.id}", not "${id}".`, { reason: "id_mismatch" });
   // Who may publish this, before any work on what it is: a stranger's key,
   // someone else's id, a suspended plugin are refused here.
-  if (!(await signingKeyAllowed(env, publisher, id, pkg.key))) {
-    return fail(403, "key_not_allowed", "The key that signed this package isn't one of this account's.");
+  if (!(await signingKeyAllowed(env, publisher, id, pkg.key, plugin))) {
+    return fail(403, "key_not_allowed", "The key that signed this package isn't one of this account's that may sign this plugin.");
   }
-  const plugin = await pluginRow(db, id);
   if (plugin && plugin.owner_id !== publisher.userId) return fail(403, "id_taken", `"${id}" belongs to another account.`);
   if (plugin?.status === "suspended") return fail(403, "suspended", "This plugin is suspended: it can't take new versions.");
   if (!plugin && (await idReserved(db, id, publisher.userId))) return fail(403, "id_reserved", `"${id}" is kept back: ask Zeron for it.`);
+  if (!plugin) {
+    const near = await tooSimilar(db, id, publisher.userId);
+    if (near) return fail(403, "id_too_similar", `"${id}" is too like "${near}", another publisher's plugin. Choose another id, or ask Zeron for this one.`, { similar_to: near });
+  }
   if (!plugin && (await overClaims(db, publisher.userId, Date.now()))) return claimsRefusal();
 
   // The engine's listing rules (what `zeron plugin check` says on the
@@ -134,12 +196,17 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
   const version = listing.version;
   const precedence = precedenceText(version);
   const existing = await db
-    .prepare("SELECT version, status, package_sha256, checks FROM versions WHERE plugin_id = ? AND precedence = ?")
+    .prepare("SELECT version, status, verification, package_sha256, checks FROM versions WHERE plugin_id = ? AND precedence = ?")
     .bind(id, precedence)
-    .first<{ version: string; status: string; package_sha256: string; checks: string }>();
+    .first<{ version: string; status: string; verification: string; package_sha256: string; checks: string }>();
   if (existing) {
-    if (existing.package_sha256 === pkg.sha256) return accepted(id, existing.version, existing.status, JSON.parse(existing.checks));
-    return fail(409, "version_exists", `Version ${existing.version} was already submitted, with other contents. Submit a new version.`);
+    if (existing.package_sha256 === pkg.sha256) {
+      const superseded = (
+        await db.prepare(`SELECT version FROM versions WHERE plugin_id = ? AND superseded_by = ? AND yanked_by = 'superseded' ORDER BY ${VERSION_ORDER}`).bind(id, existing.version).all<{ version: string }>()
+      ).results.map((r) => r.version);
+      return accepted(id, existing.version, existing.status, existing.verification === "verified", JSON.parse(existing.checks), superseded);
+    }
+    return fail(409, "version_exists", `Version ${existing.version} was already published, with other contents. Publish a new version.`);
   }
   const order = [version.major, version.minor, version.patch, isPrerelease(version) ? 0 : 1, preKey(version.pre)] as const;
   const blocking = await notNewerThan(db, id, order);
@@ -147,12 +214,13 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
   const now = Date.now();
   if (await overRate(db, publisher.userId, now)) return fail(429, "rate_limited", "Too many versions submitted lately. Try again later.");
 
+  // What it asks, against what a reviewer last verified of it.
   const base = await db
-    .prepare(`SELECT version, permissions, manifest FROM versions WHERE plugin_id = ? AND status IN ('approved', 'yanked') ORDER BY ${VERSION_ORDER} LIMIT 1`)
+    .prepare(`SELECT version, permissions, manifest FROM versions WHERE plugin_id = ? AND verification = 'verified' AND status IN ('listed', 'yanked') ORDER BY ${VERSION_ORDER} LIMIT 1`)
     .bind(id)
     .first<{ version: string; permissions: string; manifest: string }>();
   const previous = await db
-    .prepare(`SELECT version FROM versions WHERE plugin_id = ? AND status NOT IN ('rejected', 'withdrawn') ORDER BY ${VERSION_ORDER} LIMIT 1`)
+    .prepare(`SELECT version FROM versions WHERE plugin_id = ? ORDER BY ${VERSION_ORDER} LIMIT 1`)
     .bind(id)
     .first<{ version: string }>();
   const kinds = new Map<string, FileKind>([...pkg.files].map(([path, bytes]) => [path, fileKind(path, bytes)]));
@@ -196,8 +264,8 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
     const statements: D1PreparedStatement[] = [
       // A new id is claimed within the weekly limit, and the claim recorded.
       db
-        .prepare(`INSERT INTO plugins (id, owner_id, skeleton, created_at) SELECT ?, ?, ?, ? WHERE ${CLAIMS_SQL} ON CONFLICT DO NOTHING`)
-        .bind(id, publisher.userId, skeleton(id), now, publisher.userId, now - WEEK, CLAIMS_PER_WEEK),
+        .prepare(`INSERT INTO plugins (id, owner_id, owner_since, skeleton, created_at) SELECT ?1, ?2, ?4, ?3, ?4 WHERE ${CLAIMS_SQL_AT} ON CONFLICT DO NOTHING`)
+        .bind(id, publisher.userId, skeleton(id), now, now - WEEK, CLAIMS_PER_WEEK),
       db.prepare("INSERT INTO id_claims (user_id, plugin_id, at) SELECT ?, ?, ? WHERE changes() = 1").bind(publisher.userId, id, now),
       insertVersion(db, publisher, id, now, {
         version: version.text,
@@ -214,7 +282,23 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
         consent,
         checks
       }),
+      // A public act: in the log, by its author (amendment 45).
+      auditIfChanged(db, now, publisher.userId, "version.publish", id, version.text, { via: publisher.via === "session" ? "device" : "deploy_key", key: pkg.key }),
       ...fileRows(db, id, version.text, pkg.sha256, files),
+      // Every older unverified version it supersedes stops taking new
+      // installs, for good, and leaves the review queue (amendment 45): a
+      // release supersedes older releases and pre-releases, a pre-release
+      // older pre-releases only. Verified versions are untouched.
+      db
+        .prepare(
+          `UPDATE versions SET status = 'yanked', yanked_by = 'superseded', superseded_at = ?1, superseded_by = ?2
+           WHERE plugin_id = ?3 AND version != ?2 AND verification = 'unverified' AND status IN ('listed', 'yanked')
+             AND superseded_at IS NULL AND (?5 = 1 OR is_release = 0)
+             AND (major, minor, patch, is_release, pre_key) < (?6, ?7, ?8, ?5, ?9)
+             AND (SELECT package_sha256 FROM versions WHERE plugin_id = ?3 AND version = ?2) = ?4`
+        )
+        .bind(now, version.text, id, pkg.sha256, order[3], order[0], order[1], order[2], order[4]),
+      ...relist(db, id, publisher.username),
       // A claim whose version didn't land isn't kept: no id is held without a
       // submission, and a refused publish doesn't count towards the limit.
       db
@@ -239,6 +323,13 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
     .bind(id, precedence)
     .first<{ version: string; status: string; package_sha256: string }>();
   if (landed?.package_sha256 === pkg.sha256) {
+    const superseded = (
+      await db
+        .prepare(`SELECT version FROM versions WHERE plugin_id = ? AND superseded_by = ? AND yanked_by = 'superseded' ORDER BY ${VERSION_ORDER}`)
+        .bind(id, version.text)
+        .all<{ version: string }>()
+    ).results.map((r) => r.version);
+    await purgeCatalog(db, id, [version.text, ...superseded]);
     // A sweep that judged an earlier attempt's record before this publish
     // refreshed it may have deleted an object after this publish wrote it.
     // Now that the row names the objects, write back any that is gone (this
@@ -246,24 +337,24 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
     // deletes, so the only delete that can still follow is one already
     // decided and slower than this publish's batch and these HEADs.
     for (const [key, write] of writes) if ((await bucket.head(key)) === null) await write();
-    return accepted(id, landed.version, landed.status, checks);
+    return accepted(id, landed.version, landed.status, false, checks, superseded);
   }
 
   // Lost: to another publish of this version, or to a change since the
   // checks above. Its objects are the sweep's to delete, once no row names them.
   await maybeOrphaned(db, [pkgKey, blobKey]);
-  if (landed) return fail(409, "version_exists", `Version ${landed.version} was already submitted, with other contents. Submit a new version.`);
+  if (landed) return fail(409, "version_exists", `Version ${landed.version} was already published, with other contents. Publish a new version.`);
   const now2 = await pluginRow(db, id);
   if (!now2 && (await overClaims(db, publisher.userId, Date.now()))) return claimsRefusal();
   if (!now2 && (await db.prepare("SELECT 1 FROM plugins WHERE skeleton = ?").bind(skeleton(id)).first())) {
     return fail(403, "id_reserved", `"${id}" is too close to the id of a plugin already in the store.`);
   }
-  if (!now2) return fail(409, "not_newer", "Another submission changed this plugin meanwhile: try again.");
+  if (!now2) return fail(409, "not_newer", "Another publish changed this plugin meanwhile: try again.");
   if (now2.owner_id !== publisher.userId) return fail(403, "id_taken", `"${id}" belongs to another account.`);
   if (now2.status === "suspended") return fail(403, "suspended", "This plugin is suspended: it can't take new versions.");
   if (await overRate(db, publisher.userId, Date.now())) return fail(429, "rate_limited", "Too many versions submitted lately. Try again later.");
   const later = await notNewerThan(db, id, order);
-  return fail(409, "not_newer", `Version ${version.text} isn't later than ${later ?? "a version submitted just now"}.`);
+  return fail(409, "not_newer", `Version ${version.text} isn't later than ${later ?? "a version published just now"}.`);
 };
 
 /** Record (or refresh) `keys` as objects no row may name yet, now. */
@@ -288,22 +379,21 @@ const claimsRefusal = (): Response =>
 
 type Order = readonly [number, number, number, number, string];
 
-/** The highest version `order` must follow and doesn't, if any: a release
- * comes after every release still standing, a pre-release after every
- * version still standing (rejected and withdrawn ones don't stand). */
-const NOT_NEWER_SQL = `plugin_id = ? AND status NOT IN ('rejected', 'withdrawn') AND (? = 0 OR is_release = 1)
-  AND (major, minor, patch, is_release, pre_key) >= (?, ?, ?, ?, ?)`;
+/** The highest version `order` must follow and doesn't, if any: a publish
+ * comes after every version the plugin has, in any state (amendment 45: a
+ * taken-down or removed version's number is never reused or gone round). */
+const NOT_NEWER_SQL = `plugin_id = ? AND (major, minor, patch, is_release, pre_key) >= (?, ?, ?, ?, ?)`;
 
 const notNewerThan = async (db: D1Database, id: string, order: Order): Promise<string | undefined> => {
   const row = await db
     .prepare(`SELECT version FROM versions WHERE ${NOT_NEWER_SQL} ORDER BY ${VERSION_ORDER} LIMIT 1`)
-    .bind(id, order[3], ...order)
+    .bind(id, ...order)
     .first<{ version: string }>();
   return row?.version;
 };
 
-const RATE_SQL = `(SELECT COUNT(*) FROM versions WHERE publisher_id = ? AND submitted_at > ?) < ?
-  AND (SELECT COUNT(*) FROM versions WHERE publisher_id = ? AND submitted_at > ?) < ?`;
+const RATE_SQL = `(SELECT COUNT(*) FROM versions WHERE publisher_id = ? AND published_at > ?) < ?
+  AND (SELECT COUNT(*) FROM versions WHERE publisher_id = ? AND published_at > ?) < ?`;
 const rateBinds = (userId: string, now: number) => [userId, now - HOUR, PUBLISHES_PER_HOUR, userId, now - DAY, PUBLISHES_PER_DAY];
 
 const overRate = async (db: D1Database, userId: string, now: number): Promise<boolean> =>
@@ -338,9 +428,10 @@ const insertVersion = (db: D1Database, publisher: Publisher, id: string, now: nu
     ["patch", v.order[2]],
     ["is_release", v.order[3]],
     ["pre_key", v.order[4]],
-    ["status", "pending"],
+    ["status", "listed"],
     ["publisher_id", publisher.userId],
-    ["via", publisher.via],
+    ["via", publisher.via === "session" ? "device" : "deploy_key"],
+    ["deploy_key_name", publisher.via === "deploy_key" ? (publisher.keyName ?? null) : null],
     ["signer_key", v.key],
     ["content_hash", v.hash],
     ["package_sha256", v.sha256],
@@ -362,7 +453,7 @@ const insertVersion = (db: D1Database, publisher: Publisher, id: string, now: nu
     ["readme", l.readme],
     ["notes", l.notes],
     ["checks", JSON.stringify(v.checks)],
-    ["submitted_at", now]
+    ["published_at", now]
   ];
   return db
     .prepare(
@@ -373,7 +464,7 @@ const insertVersion = (db: D1Database, publisher: Publisher, id: string, now: nu
          AND ${RATE_SQL}
        ON CONFLICT DO NOTHING`
     )
-    .bind(...columns.map(([, value]) => value), id, publisher.userId, id, v.order[3], ...v.order, ...rateBinds(publisher.userId, now));
+    .bind(...columns.map(([, value]) => value), id, publisher.userId, id, ...v.order, ...rateBinds(publisher.userId, now));
 };
 
 /** The version's file rows, in statements of a bounded size, each written

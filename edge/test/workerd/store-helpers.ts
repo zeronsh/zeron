@@ -203,11 +203,18 @@ export const makePackage = async (o: PackageOptions): Promise<Uint8Array> => {
 
 export const publish = (bearer: string, id: string, pkg: Uint8Array) => call(bearer, "POST", `/store/v1/plugins/${id}/versions`, pkg);
 
-/** Publish then approve: a listed version. */
-export const listed = async (who: { userId: string; signer: Signer }, id: string, version: string, options: Partial<PackageOptions> = {}) => {
+/** Publish: listed at once, unverified (amendment 45). The answer's body. */
+export const published = async (who: { userId: string; signer: Signer }, id: string, version: string, options: Partial<PackageOptions> = {}) => {
   const res = await publish(who.userId, id, await makePackage({ id, version, signer: who.signer, ...options }));
   expect(res.status, await res.clone().text()).toBe(201);
-  const ok = await adminCall("POST", `/store/v1/admin/submissions/${id}/${version}/approve`);
+  return (await res.json()) as { id: string; version: string; status: string; verified: boolean; superseded: string[] };
+};
+
+/** Publish, then staff verify it: a listed, verified version (what an
+ * approved one was before amendment 45; a newer version never supersedes it). */
+export const listed = async (who: { userId: string; signer: Signer }, id: string, version: string, options: Partial<PackageOptions> = {}) => {
+  await published(who, id, version, options);
+  const ok = await adminCall("POST", `/store/v1/admin/versions/${id}/${version}/verify`);
   expect(ok.status, await ok.clone().text()).toBe(200);
 };
 

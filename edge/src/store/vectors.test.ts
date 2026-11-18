@@ -148,7 +148,11 @@ describe("engine vectors (docs/plugin-package-vectors.json)", () => {
       const files = new Map(Object.entries(c.files_b64 as Record<string, string>).map(([p, b]) => [p, fileBytes(b, written[p])]));
       const manifest = readManifest(json(c.manifest) as JsonObject);
       const { problems, warnings } = checkListing(manifest, files, isText);
-      const shape = (list: { rule: string; field: string | null; path: string | null }[]) => list.map((p) => ({ field: p.field, path: p.path, rule: p.rule }));
+      // (A name's, description's or keywords' refusal says why, and where: listing_causes.)
+      const shape = (list: { rule: string; field: string | null; path: string | null; cause?: string; word?: string }[]) =>
+        list.map((p) => ({ field: p.field, path: p.path, rule: p.rule, ...(p.cause === undefined ? {} : { cause: p.cause }), ...(p.word === undefined ? {} : { word: p.word }) }));
+      // One rule: the device's answer and the edge's are the same.
+      expect(c, c.name).not.toHaveProperty("edge_problems");
       expect(shape(problems), c.name).toEqual(c.problems);
       expect(shape(warnings), c.name).toEqual(c.warnings);
       // What a listing that passes keeps: the fields as stored.

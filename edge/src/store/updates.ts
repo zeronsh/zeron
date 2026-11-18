@@ -1,18 +1,21 @@
 /**
- * `POST /store/v1/updates { zeron, plugins: [{ id, version, hash, prerelease? }] }`
- * → { updates: [{ id, version, hash, key, publisher, publisher_id, sha256, bytes, prerelease, notes, added, removed, in_review? }],
- *     blocked: [{ id, version, reason }] }
+ * `POST /store/v1/updates { zeron, plugins: [{ id, version, hash, prerelease?, verified_only? }] }`
+ * → { updates: [Offer & { verified_update?: Offer }], blocked: [{ id, version, reason }] }
+ *   Offer = { id, version, hash, sha256, bytes, key, publisher, publisher_id, notes, added, removed, prerelease, verified, verified_at }
  *
  * One request for every store-installed plugin on a device. For each, the
- * highest version above the installed one that the device may take: approved
- * and not yanked, its `engines.zeron` accepting the device's Zeron, a
- * pre-release only where the device opted in for that plugin. A signed-in
- * caller who owns the plugin is also offered their own pending versions
- * (`in_review: true`); nobody else is. A suspended plugin offers nothing.
+ * newest listed version above the installed one that the device may take:
+ * its `engines.zeron` accepting the device's Zeron, a pre-release only where
+ * the device opted in for that plugin. Every listed version is offered at
+ * once (amendment 45), each saying whether it is verified; when that newest
+ * one isn't and a newer-than-installed verified one is listed, it is
+ * offered beside it (`verified_update`), and with `verified_only` it is the
+ * offer. A yanked version is never offered. A suspended plugin offers
+ * nothing.
  *
- * `blocked` names installed versions an admin took down with a block, when
- * the installed contents are the ones taken down (`hash`): the device turns
- * them off and shows the reason.
+ * `blocked` names installed versions staff took down, when the installed
+ * contents are the ones taken down (`hash`): the device turns them off and
+ * shows the reason.
  *
  * `added` and `removed` are what the update changes in what the plugin asks,
  * against the store's record of the installed version (or, for contents the
@@ -23,7 +26,7 @@ import { LIMITS } from "./data";
 import { authorsOf } from "./cards";
 import { type ConsentItem, consentDiff } from "./consent";
 import { fail, answer, objectBody, refusedBody } from "./http";
-import { optionalUser, readBody } from "./principal";
+import { readBody } from "./principal";
 import { type Version, comparePrecedence, parseRange, parseVersion, satisfies } from "./semver";
 
 export const MAX_UPDATE_PLUGINS = LIMITS.max_update_plugins;
@@ -36,14 +39,17 @@ interface Installed {
   readonly version: string;
   readonly hash: string;
   readonly prerelease: boolean;
+  /** Offer only verified versions of it. */
+  readonly verifiedOnly: boolean;
 }
 
 interface Row {
   readonly plugin_id: string;
   readonly version: string;
   readonly status: string;
-  readonly blocked: number;
-  readonly block_reason: string | null;
+  readonly removal_reason: string | null;
+  readonly verification: string;
+  readonly verified_at: number | null;
   readonly signer_key: string;
   readonly content_hash: string;
   readonly package_sha256: string;
@@ -74,12 +80,13 @@ const parseRequest = (body: Record<string, unknown> | undefined): { zeron: Versi
       typeof p.hash !== "string" ||
       !HASH_RE.test(p.hash) ||
       (p.prerelease !== undefined && typeof p.prerelease !== "boolean") ||
+      (p.verified_only !== undefined && typeof p.verified_only !== "boolean") ||
       seen.has(p.id)
     ) {
-      return "Each plugin is { id, version, hash, prerelease? }, each id once.";
+      return "Each plugin is { id, version, hash, prerelease?, verified_only? }, each id once.";
     }
     seen.add(p.id);
-    plugins.push({ id: p.id, version: p.version, hash: p.hash, prerelease: p.prerelease === true });
+    plugins.push({ id: p.id, version: p.version, hash: p.hash, prerelease: p.prerelease === true, verifiedOnly: p.verified_only === true });
   }
   return { zeron, plugins };
 };
@@ -89,16 +96,15 @@ export const handleUpdates = async (request: Request, env: Env, db: D1Database):
   if (typeof raw === "string") return refusedBody(raw);
   const parsed = parseRequest(objectBody(raw));
   if (typeof parsed === "string") return fail(400, "bad_request", parsed);
-  const caller = await optionalUser(request, env);
   if (parsed.plugins.length === 0) return answer({ updates: [], blocked: [] });
 
   const rows = (
     await db
       .prepare(
-        `SELECT v.plugin_id, v.version, v.status, v.blocked, v.block_reason, v.signer_key, v.content_hash, v.package_sha256,
-                v.package_bytes, v.engines_zeron, v.permissions, v.notes, v.is_release, p.owner_id, p.status AS plugin_status
+        `SELECT v.plugin_id, v.version, v.status, v.removal_reason, v.verification, v.verified_at, v.signer_key, v.content_hash,
+                v.package_sha256, v.package_bytes, v.engines_zeron, v.permissions, v.notes, v.is_release, p.owner_id, p.status AS plugin_status
          FROM versions v JOIN plugins p ON p.id = v.plugin_id
-         WHERE v.plugin_id IN (SELECT value FROM json_each(?)) AND v.status IN ('approved', 'pending', 'yanked', 'removed')`
+         WHERE v.plugin_id IN (SELECT value FROM json_each(?))`
       )
       .bind(JSON.stringify(parsed.plugins.map((p) => p.id)))
       .all<Row>()
@@ -117,40 +123,49 @@ export const handleUpdates = async (request: Request, env: Env, db: D1Database):
   for (const installed of parsed.plugins) {
     const versions = byPlugin.get(installed.id) ?? [];
     const current = versions.find((v) => v.version === installed.version && v.content_hash === installed.hash);
-    if (current && current.status === "removed" && current.blocked === 1) {
-      blocked.push({ id: installed.id, version: installed.version, reason: current.block_reason ?? "" });
+    if (current && current.status === "taken_down") {
+      blocked.push({ id: installed.id, version: installed.version, reason: current.removal_reason ?? "" });
     }
     const have = parseVersion(installed.version);
     if (!have || versions.length === 0 || versions[0]!.plugin_status !== "active") continue;
-    const mine = caller !== null && caller.userId === versions[0]!.owner_id;
-    let best: { row: Row; version: Version } | undefined;
+    // The newest it may take, and the newest verified one.
+    let newest: { row: Row; version: Version } | undefined;
+    let vetted: { row: Row; version: Version } | undefined;
     for (const row of versions) {
-      const inReview = row.status === "pending";
-      if (!(row.status === "approved" || (inReview && mine))) continue;
+      if (row.status !== "listed") continue;
       const version = parseVersion(row.version);
       if (!version || comparePrecedence(version, have) <= 0) continue;
       if (row.is_release === 0 && !installed.prerelease) continue;
       const range = row.engines_zeron === null ? null : parseRange(row.engines_zeron);
       if (row.engines_zeron !== null && (!range || !satisfies(parsed.zeron, range))) continue;
-      if (!best || comparePrecedence(version, best.version) > 0) best = { row, version };
+      if (!newest || comparePrecedence(version, newest.version) > 0) newest = { row, version };
+      if (row.verification === "verified" && (!vetted || comparePrecedence(version, vetted.version) > 0)) vetted = { row, version };
     }
-    if (!best) continue;
     const before = current ? (JSON.parse(current.permissions) as ConsentItem) : null;
-    const diff = consentDiff(before, JSON.parse(best.row.permissions) as ConsentItem);
+    const offer = (row: Row) => {
+      const diff = consentDiff(before, JSON.parse(row.permissions) as ConsentItem);
+      return {
+        id: installed.id,
+        version: row.version,
+        hash: row.content_hash,
+        sha256: row.package_sha256,
+        bytes: row.package_bytes,
+        key: row.signer_key,
+        publisher: owners[row.owner_id]?.username ?? null,
+        publisher_id: owners[row.owner_id]!.id,
+        notes: row.notes,
+        added: diff.added,
+        removed: diff.removed,
+        prerelease: row.is_release === 0,
+        verified: row.verification === "verified",
+        verified_at: row.verification === "verified" ? row.verified_at : null
+      };
+    };
+    const chosen = installed.verifiedOnly ? vetted : newest;
+    if (!chosen) continue;
     updates.push({
-      id: installed.id,
-      version: best.row.version,
-      hash: best.row.content_hash,
-      key: best.row.signer_key,
-      publisher: owners[best.row.owner_id]?.username ?? null,
-      publisher_id: owners[best.row.owner_id]!.id,
-      sha256: best.row.package_sha256,
-      bytes: best.row.package_bytes,
-      prerelease: best.row.is_release === 0,
-      notes: best.row.notes,
-      added: diff.added,
-      removed: diff.removed,
-      ...(best.row.status === "pending" ? { in_review: true } : {})
+      ...offer(chosen.row),
+      ...(chosen.row.verification !== "verified" && vetted ? { verified_update: offer(vetted.row) } : {})
     });
   }
   return answer({ updates, blocked });

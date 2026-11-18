@@ -4,7 +4,7 @@ import { isText, readmePictures } from "./checks";
 import { askParts, askPartsOf, asksChanged, consentDiff, consentItem, fullControl, heldToItsOwnRules } from "./consent";
 import { canonicalJson, formatFloat, parseJsonText } from "./json";
 import type { JsonObject } from "./json";
-import { changelogNotes, checkListing, listingOf } from "./listing";
+import { asWritten, changelogNotes, checkListing, firstUnseen, keywordClaim, listingOf, markClaim, problemWord } from "./listing";
 import { firstCollision } from "./paths";
 import { readManifest } from "./manifest";
 import { PAYLOAD_PREFIX, decodeBase64, inspectPackageJson, sha256Hex, signaturePayload, verifyPackage } from "./package";
@@ -161,6 +161,181 @@ describe("store listing", () => {
       repository: "https://example.com/y"
     });
     expect(problems({ homepage: "https://example.com/focus?x=1#y" })).toEqual([]);
+  });
+});
+
+describe("store listing: the mark (amendment 45)", () => {
+  it("refuses the mark's words spelled with Cyrillic letters", () => {
+    // е (U+0435), і (U+0456), о (U+043E), с (U+0441), а (U+0430), ӏ (U+04CF)
+    for (const text of ["Vеrіfіеd Focus", "VЕRIFIЕD", "The оffiсiаl board", "оfficiaӏ tools", "ѵerified"]) {
+      expect(markClaim(text), text).toBeDefined();
+    }
+  });
+
+  it("refuses the mark's words spelled with Greek letters", () => {
+    // ν (U+03BD), ε (U+03B5), ι (U+03B9), ο (U+03BF), α (U+03B1); capitals fold first: Ο (U+039F), Ι (U+0399)
+    for (const text of ["νerified", "vεrιfιεd builds", "The οfficiαl one", "ΟFFΙCIAL"]) {
+      expect(markClaim(text), text).toBeDefined();
+    }
+  });
+
+  it("refuses the identity lane's look-alikes: small capitals, Lisu, digits and the ticks the shared glyphs leave out", () => {
+    for (const text of [
+      "\u{1d20}\u{1d07}\u{280}\u{26a}\u{a730}\u{26a}\u{1d07}\u{1d05} Focus", // ᴠᴇʀɪꜰɪᴇᴅ
+      "\u{a4e6}\u{a4f0}\u{a4e3}\u{a4f2}\u{a4dd}\u{a4f2}\u{a4f0}\u{a4d3} Focus", // Lisu VERIFIED
+      "\u{a4f3}\u{a4dd}\u{a4dd}\u{a4f2}\u{a4da}\u{a4f2}\u{a4ee}\u{a4e1} Git", // Lisu OFFICIAL
+      "Ver\u{26a}f\u{26a}ed", // small capital I
+      "VER1F1ED", "0FFICIAL tools", "v3rified", "officia1",
+      "Focus \u{221a}", "Focus \u{10102}"
+    ]) {
+      expect(markClaim(text), text).toBeDefined();
+    }
+  });
+
+  it("leaves honest words alone, in those alphabets and mixed", () => {
+    for (const text of [
+      // Whole words only, after the look-alikes too.
+      "Unvеrified Links", // a Cyrillic е in "unverified"
+      "For every οfficer", // a Greek ο in "officer"
+      "Offіcially the best", // a Cyrillic і in "officially"
+      // Honest text in those scripts, the mark's meaning included.
+      // (The mark's own words in Russian are refused: amendment 45's languages.)
+      "Неофициальный клиент",
+      "Доска для заметок",
+      "Επίσημη εφαρμογή",
+      "Ελεγμένο πρόσθετο",
+      "Ρεκόρ και σημειώσεις",
+      // Latin words near the mark's.
+      "verify your builds", "verification", "officer", "officialdom",
+      // Digits and symbols where the look-alikes don't spell a word.
+      "Top 10 tools", "v1.0 verifier", "Notes | Files", "100% local", "Verifiedly 3D",
+      // Single letters apart, and i and l for each other, where no mark word results.
+      "A B testing", "U.S. weather", "Notes - Files - Links", "V I M keys", "J. R. R. Tolkien notes", "Q & A board", "R·E·M songs", "Oil fields", "Lift", "Civil filed",
+      // An emoji drawn with its variation selector.
+      "Stars \u{2b50}\u{fe0f}"
+    ]) {
+      expect(markClaim(text), text).toBeUndefined();
+    }
+  });
+
+  it("tests the mark's words with every default-ignorable character gone, variation selectors included", () => {
+    for (const text of ["Veri\u{fe0f}fied", "Veri\u{fe0e}fied", "Veri\u{e0100}fied", "Veri\u{3164}fied", "Veri\u{200b}fied", "Offi\u{115f}cial"]) {
+      expect(markClaim(text), JSON.stringify(text)).toBe(text.startsWith("Veri") ? "verified" : "official");
+    }
+  });
+
+  it("lets a name or description hold U+FE0F only after an emoji, and no other variation selector", () => {
+    const unseen = (fields: Record<string, unknown>) => {
+      const manifest = readManifest(parseJsonText(JSON.stringify({ id: "focus", name: "Focus", version: "1.0.0", entry: "", description: "Boards.", icon: "icon.svg", categories: ["productivity"], ...fields })) as JsonObject);
+      const files = new Map([["README.md", "# Focus"], ["icon.svg", "<svg/>"]].map(([k, v]) => [k!, new TextEncoder().encode(v)]));
+      return checkListing(manifest, files, isText).problems.filter((p) => p.rule === "bad_listing").map((p) => p.field);
+    };
+    // After an emoji: drawn as the emoji.
+    for (const ok of ["Stars \u{2b50}\u{fe0f}", "Hearts \u{2764}\u{fe0f}", "Keys 1\u{fe0f}\u{20e3}"]) {
+      expect(unseen({ name: ok }), ok).toEqual([]);
+      expect(unseen({ description: ok }), ok).toEqual([]);
+    }
+    // Anywhere else, or any other selector: refused.
+    for (const bad of ["Focus\u{fe0f}", "Fo\u{fe0f}cus", "Stars \u{2b50}\u{fe0f}\u{fe0f}", "Stars \u{2b50}\u{fe0e}", "Focus\u{fe00}", "Focus\u{e0100}", "Focus\u{3164}Board"]) {
+      expect(unseen({ name: bad }), JSON.stringify(bad)).toEqual(["name"]);
+      expect(unseen({ description: bad }), JSON.stringify(bad)).toEqual(["description"]);
+    }
+  });
+
+  it("says what claimed it, and holds the name and the description to it", () => {
+    expect(markClaim("Focus ✔")).toBe("✔");
+    expect(markClaim("Vеrified Focus")).toBe("verified");
+    const problems = (fields: Record<string, unknown>) => {
+      const manifest = readManifest(parseJsonText(JSON.stringify({ id: "focus", name: "Focus", version: "1.0.0", entry: "", description: "Boards.", icon: "icon.svg", categories: ["productivity"], ...fields })) as JsonObject);
+      const files = new Map([["README.md", "# Focus"], ["icon.svg", "<svg/>"]].map(([k, v]) => [k!, new TextEncoder().encode(v)]));
+      return checkListing(manifest, files, isText).problems.filter((p) => p.rule === "bad_listing").map((p) => [p.field, p.words]);
+    };
+    expect(problems({ name: "Оfficial Focus" })).toEqual([["name", 'Its name says "official": only the store marks a plugin verified or official. Name it for what it does, without that word']]);
+    // (A description only when said of the plugin itself: 011fd8af2.)
+    expect(problems({ description: "The vеrified plugin." })).toEqual([["description", 'Its description says "verified" of the plugin itself: only the store marks a plugin verified or official. Say what it does instead, or say whose thing it is ("works with the official Slack app")']]);
+    expect(problems({ description: "Shows your vеrified commits." })).toEqual([]);
+    expect(problems({ name: "Focus", description: "Boards." })).toEqual([]);
+  });
+});
+
+describe("store listing: Zeron in a name, and the mark in other languages (58fc12caf)", () => {
+  it("holds keywords to the mark's rule, for every publisher (367b7fbd7)", () => {
+    for (const k of ["verified", "official", "zeron-official", "veri-fied", "oficial", "ver1fied"]) {
+      expect(keywordClaim(k), k).toBeDefined();
+    }
+    // ("zeron" in a keyword is anyone's: fa75e5a40.)
+    for (const k of ["focus", "git-flow", "code review", "heron", "zero", "verify", "officer", "zeron", "by-zeron", "zeron-team", "ze-ron"]) {
+      expect(keywordClaim(k), k).toBeUndefined();
+    }
+  });
+
+  it("leaves Zeron in a name or description alone (fa75e5a40)", () => {
+    for (const text of ["Zeron Labs", "Team Zeron", "Git by Zeron", "Built-in Zeron Git", "Made by Zeron.", "Zeron HQ approved.", "使用 Zeron 的技巧"]) {
+      expect(markClaim(text, true), text).toBeUndefined();
+      expect(markClaim(text, false), text).toBeUndefined();
+    }
+    // (But Zeron verifying is the store's mark itself, and a mark word beside
+    // Zeron or the store says it of them: rule 4, whole again, 49f57f6fb.)
+    expect(markClaim("Verified by Zeron.", false)).toBe("verified");
+    for (const text of ["Zeron verified.", "Zeron-verified.", "Officially Zeron-verified.", "Zeron official.", "Not Zeron official.", "Verified by the store."]) {
+      expect(markClaim(text, false), text).toBeDefined();
+    }
+  });
+
+  it("refuses the mark's words in the store's other languages: whole where words are spaced, anywhere in CJK", () => {
+    for (const text of ["Plugin oficial", "Vérifié", "GEPRÜFT", "Ufficiale", "Officielles", "Официальный клиент", "官方插件", "非官方", "公式プラグイン", "검증됨 플러그인"]) {
+      expect(markClaim(text), text).toBeDefined();
+    }
+    // (公式 and 공식 are "formula" too: only with kana, or not at all, 139146b19.)
+    for (const text of ["Unofficial", "Неофициальный клиент", "Oficialmente útil", "Verificador", "数学公式", "公式编辑器", "수학 공식", "공식 계산기"]) {
+      expect(markClaim(text), text).toBeUndefined();
+    }
+  });
+});
+
+describe("store listing: a refusal says why and where (listing_causes)", () => {
+  it("gives a name's, description's or keywords' first problem its cause and word", () => {
+    const first = (fields: Record<string, unknown>) => {
+      const manifest = readManifest(parseJsonText(JSON.stringify({ id: "focus", name: "Focus", version: "1.0.0", entry: "init.luau", description: "Boards.", icon: "icon.svg", categories: ["productivity"], ...fields })) as JsonObject);
+      const files = new Map([["init.luau", "x"], ["README.md", "# Focus"], ["icon.svg", "<svg/>"]].map(([k, v]) => [k!, new TextEncoder().encode(v)]));
+      const p = checkListing(manifest, files, isText).problems[0]!;
+      return [p.field, p.cause, p.word];
+    };
+    expect(first({ name: "Verified Focus" })).toEqual(["name", "mark_word", "Verified"]);
+    expect(first({ name: "Focus \u{2705}" })).toEqual(["name", "mark_glyph", "\u{2705}"]);
+    expect(first({ name: "n".repeat(65) })).toEqual(["name", "too_long", undefined]);
+    expect(first({ name: "Focus\u{200b}Board" })).toEqual(["name", "unseen_char", "U+200B"]);
+    expect(first({ description: "a\nb" })).toEqual(["description", "not_one_line", undefined]);
+    expect(first({ description: "Official Git tools." })).toEqual(["description", "mark_word", "Official"]);
+    expect(first({ description: "The \u{43e}fficial board." })).toEqual(["description", "mark_word", "\u{43e}fficial"]);
+    expect(first({ keywords: ["a", "b", "a"] })).toEqual(["keywords", "repeated", "a"]);
+    expect(first({ keywords: ["a", "b", "c", "d", "e", "f", "g", "h", "i"] })).toEqual(["keywords", "too_many", undefined]);
+    expect(first({ keywords: ["Focus"] })).toEqual(["keywords", "keyword_shape", "Focus"]);
+    expect(first({ keywords: ["timer\u{fe0f}"] })).toEqual(["keywords", "keyword_shape", "timer"]);
+    expect(first({ keywords: ["veri-fied"] })).toEqual(["keywords", "mark_word", "veri-fied"]);
+    // Other fields' problems carry none.
+    expect(first({ categories: ["games"] })).toEqual(["categories", undefined, undefined]);
+  });
+
+  it("names a claim as its author wrote it", () => {
+    for (const [text, inName, written] of [
+      ["Verified Focus", true, "Verified"],
+      ["Focus, VERIFIED.", true, "VERIFIED"],
+      ["verified_focus", true, "verified"],
+      ["The \u{43e}fficial board.", false, "\u{43e}fficial"],
+      ["Notes. V.E.R.I.F.I.E.D. Boards", false, "V.E.R.I.F.I.E.D"],
+      ["A board V E R I F I E D", true, "V E R I F I E D"],
+      ["Focus \u{2714}\u{fe0f}", true, "\u{2714}"],
+      ["\u{5df2}\u{8ba4}\u{8bc1}\u{63d2}\u{4ef6}", false, "\u{5df2}\u{8ba4}\u{8bc1}\u{63d2}\u{4ef6}"],
+      ["\u{516c}\u{5f0f}\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}", true, "\u{516c}\u{5f0f}"]
+    ] as const) {
+      const claim = markClaim(text, inName)!;
+      expect(asWritten(text, claim), text).toBe(written);
+    }
+    expect(asWritten("Plain words", "verified")).toBeUndefined();
+    expect(firstUnseen("Focus\u{200b}Board\u{202e}")).toBe("\u{200b}");
+    expect(firstUnseen("Stars \u{2b50}\u{fe0f}")).toBeUndefined();
+    expect(problemWord(`a\u{202e}${"x".repeat(100)}`)).toBe(`a${"x".repeat(63)}`);
   });
 });
 

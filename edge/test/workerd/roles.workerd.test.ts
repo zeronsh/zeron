@@ -96,9 +96,9 @@ describe("the admin role", () => {
     const staff = await webSignIn(userId);
     const routes: [string, string][] = [
       ["GET", "/store/v1/admin/queue?status=pending"],
-      ["GET", "/store/v1/admin/submissions/demo/1.0.0"],
-      ["POST", "/store/v1/admin/submissions/demo/1.0.0/approve"],
-      ["POST", "/store/v1/admin/submissions/demo/1.0.0/reject"],
+      ["GET", "/store/v1/admin/versions/demo/1.0.0"],
+      ["POST", "/store/v1/admin/versions/demo/1.0.0/verify"],
+      ["POST", "/store/v1/admin/versions/demo/1.0.0/decline"],
       ["GET", "/store/v1/admin/plugins/demo"],
       ...["suspend", "restore", "feature", "transfer"].map((a): [string, string] => ["POST", `/store/v1/admin/plugins/demo/${a}`]),
       ["POST", "/store/v1/admin/plugins/demo/versions/1.0.0/remove"],

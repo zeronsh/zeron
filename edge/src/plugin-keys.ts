@@ -29,12 +29,13 @@
  * holds a live username.
  *
  * A deploy key (store/identity/deploy-keys.ts) answers the same lookup,
- * plus `kind: "deploy"`, `plugin`, `expiresAt` and `expired`. It vouches
- * for its one plugin only: it reads as verified only when the lookup names
- * that plugin (`GET /plugin-keys/:key?plugin=<id>`) and it is neither
- * revoked nor expired. Engines that don't name the plugin (all before deploy
- * keys) see it unverified, so it can't pass as its owner's key for their
- * other plugins. Lists (`GET /plugin-keys`) and DELETE here are devices'
+ * plus `kind: "deploy"`, `expiresAt` and `expired` (and, to its owner
+ * only, its `scope`; amendment 44). It vouches for the plugins its scope
+ * holds only: it reads as verified only when the lookup names a plugin
+ * (`GET /plugin-keys/:key?plugin=<id>`) its scope holds and its account
+ * owns now, and it is neither revoked nor expired. Engines that don't name
+ * the plugin (all before deploy keys) see it unverified, so it can't pass
+ * as its owner's key for their other plugins. Lists (`GET /plugin-keys`) and DELETE here are devices'
  * keys only. To anyone but the owner, a live key whose owner has
  * no username answers 404 like an unregistered one.
  *
@@ -130,10 +131,14 @@ export const handlePluginKeyRoute = async (
   const key = parseKey(parts[1]);
   if (request.method === "GET") {
     const plugin = url.searchParams.get("plugin") ?? undefined;
-    // Who owns the named plugin now: a deploy key vouches only for its owner's.
+    // Who owns the named plugin now, and since when: a deploy key vouches
+    // only for a plugin its scope holds that its account owns.
     const owner = key && plugin !== undefined && PLUGIN_ID_RE.test(plugin) ? await pluginOwner(env, plugin) : null;
     const found = key ? await directory.pluginKey(key, auth.userId, plugin, owner) : undefined;
-    return found ? fresh(found) : unknownKey();
+    if (!found) return unknownKey();
+    // A key's scope (its account's plugin ids) is its owner's to read.
+    const { scope, ...shown } = found;
+    return fresh(found.mine && scope ? { ...shown, scope } : shown);
   }
   if (request.method !== "DELETE") return jsonError(405, "method_not_allowed", "GET or DELETE only.");
   if (!key || !(await directory.revokePluginKey(auth.userId, key))) return unknownKey();

@@ -27,8 +27,8 @@
  *   GET  /admin/roles, POST /admin/roles/{grant|revoke} — ADMIN_TOKEN (roles.ts)
  *   GET  /admin/deploy-keys, POST /admin/deploy-keys/revoke — ADMIN_TOKEN
  *     (store/identity/deploy-keys.ts: one plugin's, or all, before a rollback)
- *   GET|POST /store/v1/plugins/:id/keys, DELETE …/keys/:key — deploy keys
- *     (store/identity/deploy-keys.ts; a signed-in owner, checked there)
+ *   GET|POST /store/v1/me/keys, DELETE /store/v1/me/keys/:key — deploy keys
+ *     (store/identity/deploy-keys.ts; the signed-in account, checked there)
  *   GET  /session/:chatId/ws          — loro-protocol room (wss upgrade)
  *   GET  /tail/:chatId                — L2 instant-open tail JSON (§5)
  *   GET  /diff/:chatId                — latest working-tree diff (§6.1)
@@ -204,7 +204,7 @@ export default {
     if (usersRouted) return usersRouted;
     const rolesRouted = await handleRoleAdminRoute(request, env, url);
     if (rolesRouted) return rolesRouted;
-    const deployKeyAdminRouted = await handleDeployKeyAdminRoute(request, env, url);
+    const deployKeyAdminRouted = await handleDeployKeyAdminRoute(request, env, url, pluginOwner);
     if (deployKeyAdminRouted) return deployKeyAdminRouted;
     // The store's own principals (store/principal.ts): before the bearer gate.
     const deployKeysRouted = await handleDeployKeyRoute(request, env, url, pluginOwner);

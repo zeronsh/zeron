@@ -59,12 +59,11 @@ export const publishSigningString = (method: string, path: string, bodySha256Hex
   `${PUBLISH_SIGNATURE_PREFIX}${method}\n${path}\n${bodySha256Hex}\n${ts}`;
 
 /**
- * What a deploy key may do at `method path` (contract amendment 6), or
- * undefined: publish a version of its plugin (`pluginId` named by the path),
- * or read its plugin's state (`GET /store/v1/me/plugins`, `pluginId` null:
- * the key's own). Withdrawing, yanking, unyanking and managing keys need a
- * signed-in person, so a leaked key can add a pending version (which review
- * stops) and nothing more.
+ * What a deploy key may do at `method path` (amendments 6 and 44), or
+ * undefined: publish a version of a plugin (`pluginId` named by the path;
+ * its scope and its account's ownership are checked after), or read its
+ * account's plugins in its scope (`GET /store/v1/me/plugins`, `pluginId`
+ * null). Yanking, unyanking and managing keys need a signed-in person.
  */
 export const deployKeyRoute = (method: string, path: string): { readonly pluginId: string | null } | undefined => {
   if (method === "GET" && path === "/store/v1/me/plugins") return { pluginId: null };
@@ -77,7 +76,21 @@ export const deployKeyRoute = (method: string, path: string): { readonly pluginI
   return PLUGIN_ID_RE.test(parts[4]!) ? { pluginId: parts[4]! } : undefined;
 };
 
-export const DEPLOY_KEY_PROOF_PREFIX = "zeron-deploy-key:v1:";
+export const DEPLOY_KEY_PROOF_PREFIX = "zeron-deploy-key:v2:";
 
-/** What a deploy key's proof of possession signs. */
-export const deployKeyProofMessage = (pluginId: string, key: string): string => `${DEPLOY_KEY_PROOF_PREFIX}${pluginId}:${key}`;
+/** A deploy key's scope as its proof spells it: `*` for all, else its ids,
+ * each an id, sorted by code unit, joined with `,`; undefined when a list
+ * names an id twice or isn't ids. */
+export const scopeText = (scope: { readonly all: true } | { readonly plugins: readonly string[] }): string | undefined => {
+  if ("all" in scope) return "*";
+  const ids = [...scope.plugins];
+  if (ids.length === 0 || !ids.every((id) => PLUGIN_ID_RE.test(id)) || new Set(ids).size !== ids.length) return undefined;
+  return ids.sort().join(",");
+};
+
+/** What a deploy key's proof of possession signs (contract
+ * 2026-11-19-store-shapes-44-45): the account's publisher id, the key's
+ * expiry (`expires_at` in ms, or `never`), its scope and the key itself, so
+ * a proof is good for one account's key with one lifetime and one scope. */
+export const deployKeyProofMessage = (publisherId: string, expiresAt: number | null, scope: string, key: string): string =>
+  `${DEPLOY_KEY_PROOF_PREFIX}${publisherId}:${expiresAt === null ? "never" : String(expiresAt)}:${scope}:${key}`;

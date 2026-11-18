@@ -58,8 +58,10 @@ not routed to the edge: the site reaches the store over its service binding.
 ### Durable Object storage
 
 Nothing to run. On start, `users1` creates `web_sessions`, `user_roles` and
-`deploy_key_uses`, and adds `kind`, `plugin_id`, `name`, `last_used_at` and
-`expires_at` to `plugin_keys` (existing rows become `kind = 'device'`).
+`deploy_key_uses` and `deploy_key_plugins` (a key's listed scope), and adds
+`kind`, `plugin_id`, `name`, `last_used_at`, `last_used_plugin`,
+`expires_at` and `scope_all` to `plugin_keys` (existing rows become
+`kind = 'device'`).
 
 ## 2. Deploy
 
@@ -186,12 +188,29 @@ lists revoked grants too.
 
 ## 5. Deploy keys (after the store is merged)
 
-- A plugin's owner makes keys from the app or CLI (`zeron plugin key
-  create <id>`). This needs a fresh sign-in and a plugin they already own
-  (its first version submitted from their machine).
+- An account makes keys from the app or CLI (`POST EDGE/store/v1/me/keys`,
+  amendment 44). A key belongs to the account and carries a scope: a list
+  of plugins it owns, or all of them (those it owns then and those it
+  claims later, never one transferred in). This needs a fresh sign-in. A
+  key never claims an id: each plugin's first version comes from a device.
+  An account has at most 20 live keys and makes at most 10 a day.
+- Keys from before amendment 44 (one plugin's each): there are none in any
+  environment (no store database has existed, and the schema is one new
+  file), so nothing is converted.
 - CI then publishes with the key's signed requests.
-- Check: create a key, publish a version with it (it lands in review),
-  revoke it, and see the next publish answer 401 `key_revoked`.
+- Check, with a test account that owns two plugins, A and B:
+  1. Create a key scoped to A (`{"plugins":["A"]}`). `GET
+     EDGE/store/v1/me/keys` lists it with that `scope` and
+     `last_used_at: null`.
+  2. Publish a version of A with it: it lists at once, unverified. The
+     owner's `/me/plugins` shows that version with `via: "deploy_key"` and
+     `deploy_key: {key, name}`, and the key's `last_used_plugin` is A.
+  3. Publish B with it, and a new id with it: both 403 `key_not_allowed`.
+     Scoping a key to a plugin the account doesn't own is 403 `not_owner`.
+  4. `GET EDGE/plugin-keys/<key>?plugin=A` is `verified: true`; with
+     `?plugin=B`, or no plugin, `verified: false`.
+  5. Revoke it (`DELETE EDGE/store/v1/me/keys/<key>` → `{"revoked":true}`)
+     and see the next publish answer 401 `key_revoked`.
 
 Operator routes for incidents:
 
@@ -200,7 +219,7 @@ curl -s "EDGE/admin/deploy-keys" -H "authorization: Bearer $ADMIN_TOKEN"
 #   {"live": n}
 curl -s -X POST "EDGE/admin/deploy-keys/revoke" -H "authorization: Bearer $ADMIN_TOKEN" \
   -H "content-type: application/json" -d '{"pluginId":"<id>"}'
-#   one plugin's, e.g. a leaked key
+#   {"revoked": n}: its owner's keys whose scope may hold it (listed, or all), e.g. a leaked key
 ```
 
 ## 6. Rolling back

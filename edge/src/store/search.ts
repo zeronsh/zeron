@@ -43,3 +43,27 @@ export const decodeCursor = (cursor: string, filter: string): { key: number; seq
     return undefined;
   }
 };
+
+/** A version's place in its plugin's list, newest first by precedence:
+ * `[major, minor, patch, is_release, pre_key]`. */
+export type VersionPlace = readonly [number, number, number, number, string];
+
+/** A cursor into plugin `id`'s versions, past (or, `prev`, before) `place`. */
+export const encodeVersionCursor = (id: string, place: VersionPlace, dir: Direction = "next"): string =>
+  b64url(JSON.stringify({ f: `versions:${id}`, v: place, ...(dir === "prev" ? { d: "prev" } : {}) }));
+
+export const decodeVersionCursor = (cursor: string, id: string): { place: VersionPlace; dir: Direction } | undefined => {
+  if (cursor.length > 512) return undefined;
+  const text = unb64url(cursor);
+  if (text === undefined) return undefined;
+  try {
+    const value = JSON.parse(text) as { f?: unknown; v?: unknown; d?: unknown };
+    const v = value.v;
+    if (value.f !== `versions:${id}` || !Array.isArray(v) || v.length !== 5) return undefined;
+    if (!v.slice(0, 4).every((n) => Number.isSafeInteger(n)) || typeof v[4] !== "string" || v[4].length > 1024) return undefined;
+    if (value.d !== undefined && value.d !== "prev") return undefined;
+    return { place: v as unknown as VersionPlace, dir: value.d === "prev" ? "prev" : "next" };
+  } catch {
+    return undefined;
+  }
+};

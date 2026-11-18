@@ -308,7 +308,7 @@ describe("web sessions", () => {
     const userId = await person();
     await grantAdmin(userId);
     const browser = await webSignIn(userId);
-    const refused = await fetchSite("/store/v1/admin/submissions/demo/1.0.0/approve", {
+    const refused = await fetchSite("/store/v1/admin/versions/demo/1.0.0/verify", {
       method: "POST",
       cookie: browser.cookie,
       headers: { origin: SITE, "x-csrf-token": "A".repeat(43) }
@@ -483,8 +483,8 @@ describe("cookie-authenticated store routes", () => {
     expect(await res.json()).toEqual({ admin: { userId } });
     const cookie = sessionHeader(setCookies(res).get("__Host-zeron_session") ?? admin.token);
     // A change needs the token, as everywhere.
-    expect((await fetchSite("/store/v1/admin/submissions/demo/1.0.0/approve", { method: "POST", cookie, headers: { origin: SITE, ...PROBE } })).status).toBe(403);
-    expect((await siteChange("/store/v1/admin/submissions/demo/1.0.0/approve", { cookie, csrf: admin.csrf }, { headers: PROBE })).status).toBe(200);
+    expect((await fetchSite("/store/v1/admin/versions/demo/1.0.0/verify", { method: "POST", cookie, headers: { origin: SITE, ...PROBE } })).status).toBe(403);
+    expect((await siteChange("/store/v1/admin/versions/demo/1.0.0/verify", { cookie, csrf: admin.csrf }, { headers: PROBE })).status).toBe(200);
     await revokeAdmin(userId);
     expect((await fetchSite("/store/v1/admin/queue", { cookie })).status).toBe(403);
   });
