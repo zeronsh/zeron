@@ -35,7 +35,6 @@ export type ErrorWord =
   | "not_owner"
   | "not_verified"
   | "bad_listing"
-  | "claims_zeron"
   | "unauthenticated"
   | "bad_cursor"
   | "bad_path"
