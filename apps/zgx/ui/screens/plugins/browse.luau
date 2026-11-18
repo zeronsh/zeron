@@ -565,7 +565,8 @@ local function body_key(): string
 		return "list"
 	end
 	if s == "failed" then
-		return if failed:get() == "offline" then "offline" else "failed"
+		local word = string.match(failed:get() or "", "^([%l_]+)")
+		return if word == "offline" or word == "store_unreachable" then "offline" else "failed"
 	end
 	if s == "loading" or listing.loading:get() or not wanted:get() then
 		return "loading"

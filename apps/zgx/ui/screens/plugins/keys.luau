@@ -10,7 +10,9 @@
 -- A key can only publish versions of this plugin, and every version still
 -- waits for review: what it can't do is said where it's made.
 --
---   keys.Section { plugin, here }
+--   keys.Section { plugin, here, published }  (`published`: whether a version
+--                                             of it has been sent, a key's
+--                                             first condition)
 
 local ds = require("@ds")
 local locale = require("@ds/locale")
@@ -30,7 +32,7 @@ local function day_of(at: any): string?
 	return if type(at) == "number" and at > 0 then locale.date(at / 1000) else nil
 end
 
-M.Section = ui.component(function(props: { plugin: string, here: any }): Node
+M.Section = ui.component(function(props: { plugin: string, here: any, published: () -> boolean }): Node
 	local id = props.plugin
 	-- "loading", "ready", or why not.
 	local phase = ui.use_state("loading")
@@ -164,6 +166,9 @@ M.Section = ui.component(function(props: { plugin: string, here: any }): Node
 					pl = ds.Settings.inset(),
 					ui.text {
 						function(): string
+							if not props.published() then
+								return ui.t("plugins.store.keys_publish_first"):get()
+							end
 							return if #list:get() == 0 then ui.t("plugins.store.keys_none"):get() else ""
 						end,
 						grow = 1,
@@ -177,6 +182,11 @@ M.Section = ui.component(function(props: { plugin: string, here: any }): Node
 						id = "keys-new",
 						tone = "secondary",
 						size = "sm",
+						-- (A key sends the versions after the first, which comes
+						-- from this computer.)
+						disabled = function(): boolean
+							return not props.published()
+						end,
 						on_click = function()
 							made_phase:set("idle")
 							making:set(true)

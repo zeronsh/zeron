@@ -3810,7 +3810,39 @@
       "store_unreachable": "Zeron 暂时无法连接插件商店。请稍后再试。",
       "not_in_store": "插件商店里没有这个插件或这个版本。",
       "store_mismatch": "收到的内容与插件商店审核过的不一致，所以没有安装。",
-      "blocked": "Zeron 已将这个版本从插件商店下架。"
+      "store_error": "无法读取插件商店的回应。请稍后再试。",
+      "signed_out": "需要先登录 Zeron。",
+      "review": "发布需要在 Zeron 或命令行中对插件当前状态做一次检查。请重新检查。",
+      "changed": "检查之后文件夹有改动。请重新检查。",
+      "not_published": "第一个版本要从这台电脑发送；之后的版本可以由部署密钥发送。",
+      "step_up_required": "需要你先重新登录。",
+      "bad_package": "商店无法读取这个包。",
+      "id_reserved": "这个 id 被 Zeron 或他人保留了。",
+      "not_semver": "版本号不是三个数字，例如 1.2.0。",
+      "missing_readme": "商店需要 README.md。",
+      "missing_listing": "商店需要描述、图标和类别。",
+      "bad_listing": "它的商店信息有些内容不符合要求。",
+      "too_large": "它超出了商店允许的大小。",
+      "binary_file": "它包含一个既不是文本也不是图片的文件。",
+      "no_notes": "CHANGELOG.md 里没有这个版本的内容。",
+      "needs_username": "请先设定用户名：商店里的每个插件都署名 @某人。",
+      "id_taken": "已经有人用这个 id 发布了插件。",
+      "version_exists": "这个版本你已经发送过了。请换一个新版本号。",
+      "suspended": "这个插件在商店里已被暂停。",
+      "key_not_allowed": "它的签名密钥不被商店认作是你的。",
+      "key_revoked": "这个部署密钥已被吊销。",
+      "key_expired": "这个部署密钥已到期。",
+      "invalid_signature": "商店不接受这个密钥的签名。",
+      "unauthenticated": "商店无法确认发送者。",
+      "stale_request": "这台电脑的时间偏差超过五分钟。请校准后再试。",
+      "replayed_request": "这个请求已经发送过了。请重新发送。",
+      "body_mismatch": "内容在发送途中被改动了。请重新发送。",
+      "too_many_keys": "这个插件的部署密钥已达上限。请先吊销一个。",
+      "key_taken": "这个密钥已被使用。",
+      "invalid_name": "请给密钥一个短一点的名字。",
+      "invalid_expiry": "请重新选择密钥的到期时间。",
+      "invalid_proof": "商店无法验证新密钥。请再试一次。",
+      "bad_csrf": "商店拒绝了一个无法信任的请求。请再试一次。"
     },
     "store": {
       "browse": "浏览",
@@ -3928,8 +3960,7 @@
         "categories": "类别",
         "version": "商店接受的版本号",
         "newer": "比上一个版本新",
-        "newer_than": "提交时商店会检查它是否比 {version} 新。",
-        "newer_first": "这是你发送的第一个版本。"
+        "newer_unchecked": "提交时商店会检查它是否比你发送过的所有版本都新。"
       },
       "fix": {
         "missing_readme": "在它的文件夹里添加 README.md：这是它在商店里的页面。",
@@ -3960,7 +3991,9 @@
           "homepage": "网站必须是 https 链接。",
           "repository": "源代码地址必须是 https 链接。",
           "license": "许可证不能超过 64 个字符。"
-        }
+        },
+        "not_newer": "在 zeron-plugin.json 里给它一个比你发送过的所有版本都新的版本号。",
+        "version_exists": "这个版本你已经发送过了。请在 zeron-plugin.json 里换一个新版本号。"
       },
       "check_again": "重新检查",
       "check_failed": "无法检查",
@@ -3969,25 +4002,6 @@
       "submit_version": "提交 {version} 审核",
       "submit_note": "{n, plural, other {将发送 # 个文件}}，以你的签名、与检查时完全一致。",
       "sent_toast": "已提交{name} {version}审核",
-      "sent": {
-        "needs_username": "请先设定用户名：商店里的每个插件都署名 @某人。",
-        "id_taken": "已经有人用这个 id 发布了插件。",
-        "id_reserved": "这个 id 被 Zeron 或他人保留了。",
-        "not_semver": "版本号不是三个数字，例如 1.2.0。",
-        "version_exists": "这个版本你已经发送过了。请换一个新版本号。",
-        "not_newer": "版本号必须比你上次发送的新。",
-        "bad_package": "商店无法读取这个包。",
-        "bad_signature": "签名与文件不符。请重新检查后再发送。",
-        "key_not_allowed": "它的签名密钥不被商店认作是你的。",
-        "missing_readme": "商店需要 README.md。",
-        "missing_listing": "商店需要描述、图标和类别。",
-        "too_large": "它超出了商店允许的大小。",
-        "rate_limited": "尝试次数过多。请一分钟后再试。",
-        "suspended": "这个插件在商店里已被暂停。",
-        "changed": "检查之后文件夹有改动。请重新检查。",
-        "signed_out": "请登录 Zeron 再发布。",
-        "offline": "无法连接插件商店。"
-      },
       "your_versions": "你发送过的版本",
       "no_versions": "还没有发送过",
       "no_versions_body": "你发送的版本会显示在这里，并附上审核进度。",
@@ -4067,7 +4081,11 @@
       "other_installed": "这里已安装了另一个同 id 的插件（来自别处）。先移除它才能安装这个。",
       "unblock_title": "重新打开{name}？",
       "unblock_body": "Zeron 已将这个版本从商店下架。它会按你之前的允许在这里再次运行。",
-      "unblock_body_reason": "Zeron 已将这个版本从商店下架：{reason} 它会按你之前的允许在这里再次运行。"
+      "unblock_body_reason": "Zeron 已将这个版本从商店下架：{reason} 它会按你之前的允许在这里再次运行。",
+      "update_new_owner": "它有了新的发布者 @{username}。更新后 Zeron 会再次请你允许。",
+      "update_new_owner_unnamed": "它有了新的发布者。更新后 Zeron 会再次请你允许。",
+      "update_in_review": "这个版本还在审核中：只提供给你自己的设备。",
+      "keys_publish_first": "请先从这台电脑发送第一个版本；之后的版本可以由部署密钥发送。"
     }
   },
   "templates": {

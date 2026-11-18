@@ -131,8 +131,9 @@ test("scrolling near the end asks for the next page once, and the list never hol
 	-- Every page once: the first, then each from where the last ended.
 	expect(count(c, "sort=popular,cursor=\n")).to_be(1)
 	expect(count(c, "sort=popular,cursor=30")).to_be(1)
-	-- 74 plugins, however the pages overlapped.
-	expect(rows(app)).to_be(74)
+	-- 75 plugins (74 and one at every listing limit), however the pages
+	-- overlapped.
+	expect(rows(app)).to_be(75)
 	expect(app:error()).to_be_nil()
 end)
 
@@ -316,4 +317,16 @@ test("a store's words are drawn as they are, never read as the app's templates",
 	app:type('#store-card >> role:textbox "Search plugins"', "o")
 	settle(app, 600)
 	expect(app:error()).to_be_nil()
+end)
+
+test("a row at every limit at once keeps its height, its words fading at its end", function()
+	local app = open()
+	app:type('#store-card >> role:textbox "Search plugins"', "Superlong")
+	settle(app, 700)
+	expect(app:error()).to_be_nil()
+	local name = string.sub("Superlongpluginnamewithnospacesanywhereatalljusttokeepgoingonandon", 1, 64)
+	local line = app:tree(`#store-card >> role:button "{name}"`):match("[^\n]+") or ""
+	local w, h = line:match("(%d+)x(%d+)")
+	expect(tonumber(h)).to_be(ROW)
+	expect(tonumber(w) <= 640).to_be(true)
 end)

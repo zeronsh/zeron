@@ -181,6 +181,15 @@ ui.command {
 	end,
 }
 ui.command {
+	id = "store.update_new_owner",
+	title = "A newer Focus timer from a new publisher, still in review",
+	run = function()
+		local p = find("focus-timer")
+		p.update = { version = "1.3.0", added = {}, removed = {}, notes = "- Longer breaks.", new_owner = true, in_review = true }
+		publish()
+	end,
+}
+ui.command {
 	id = "store.branch_update",
 	title = "A newer Branch badge is found",
 	run = function()
@@ -199,6 +208,19 @@ ui.command {
 	end,
 }
 publish()
+
+-- What the page says of each reason word a test names (`reason_probe`),
+-- in `reason_said`: a word's message, as came and alone.
+local words = require("@app/screens/plugins/words")
+local probe = ui.state("reason_probe", {} :: { string })
+local said = ui.state("reason_said", {} :: { [string]: any })
+ui.effect(function()
+	local out: { [string]: any } = {}
+	for _, w in probe:get() do
+		out[w] = { came = words.failure(`{w}: the engine's English`), alone = words.failure(w) }
+	end
+	said:set(out)
+end)
 
 ui.command { id = "theme_light", title = "Light theme", run = function() ui.theme.follow_system(false); ui.theme.current:set("zeron-light") end }
 

@@ -116,38 +116,18 @@ local function fix_of(p: any): string
 	local rule, field = p.rule, p.field
 	if (rule == "missing_listing" or rule == "bad_listing") and type(field) == "string" and FIELDS[field] then
 		return ui.t(`plugins.store.fix.{rule}.{field}`):get()
-	elseif rule == "missing_readme" or rule == "not_semver" or rule == "id_reserved" or rule == "too_large" or rule == "binary_file" or rule == "no_notes" then
+	elseif rule == "missing_readme" or rule == "not_semver" or rule == "id_reserved" or rule == "too_large" or rule == "binary_file" or rule == "no_notes" or rule == "not_newer" or rule == "version_exists" then
 		return ui.t(`plugins.store.fix.{rule}`):get()
 	end
 	return if type(p.words) == "string" and p.words ~= "" then string.sub(p.words, 1, 400) else ui.t("plugins.store.fix.other"):get()
 end
 
--- The store's own words for what went wrong as it was sent, where Zeron
--- knows them.
-local SENT: { [string]: boolean } = {
-	needs_username = true,
-	id_taken = true,
-	id_reserved = true,
-	not_semver = true,
-	version_exists = true,
-	not_newer = true,
-	bad_package = true,
-	bad_signature = true,
-	key_not_allowed = true,
-	missing_readme = true,
-	missing_listing = true,
-	too_large = true,
-	rate_limited = true,
-	suspended = true,
-	changed = true,
-	signed_out = true,
-	offline = true,
-}
+-- What went wrong, in Zeron's words (screens/plugins/words `failure`: the
+-- engine's reason words); the engine out of reach said as the store's is.
 function M.failure(message: any): string
 	local m = if type(message) == "string" then message else ""
-	local word = string.match(m, "^([%l_]+):") or string.match(m, "^([%l_]+)$")
-	if word and SENT[word] then
-		return ui.t(`plugins.store.sent.{word}`):get()
+	if m == "offline" then
+		return ui.t("plugins.store.offline_title"):get()
 	end
 	return words.failure(m)
 end
@@ -289,19 +269,24 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 			end
 			add(check_row(found == nil, ui.t(`plugins.store.check.{c.id}`), if found then fix_of(found) else nil))
 		end
-		-- Newer than the last: the store's to say, as it's sent (the last
-		-- one sent that wasn't turned down or withdrawn, as your versions
-		-- come in).
-		add(check_row("later", ui.t("plugins.store.check.newer"), function(): string
-			local p = mine:get().plugins[id]
-			for _, v in (if p and type(p.versions) == "table" then p.versions else {}) :: { any } do
-				local s = status_of(v)
-				if s ~= "rejected" and s ~= "withdrawn" then
-					return ui.t("plugins.store.check.newer_than", { version = v.version }):get()
+		-- Newer than every version sent: a check of its own when the engine
+		-- could ask the store which it has (`store_checked`); else what the
+		-- engine says of it, the store having the last word as it's sent.
+		if r.store_checked == true then
+			local found: any = nil
+			for _, p in problems do
+				if type(p) == "table" and (p.rule == "not_newer" or p.rule == "version_exists") then
+					found = p
+					used[p] = true
 				end
 			end
-			return ui.t("plugins.store.check.newer_first"):get()
-		end))
+			add(check_row(found == nil, ui.t("plugins.store.check.newer"), if found then fix_of(found) else nil))
+		else
+			local note = if type(r.note) == "string" and r.note ~= "" then string.sub(r.note, 1, 300) else nil
+			add(check_row("later", ui.t("plugins.store.check.newer"), function(): string
+				return note or ui.t("plugins.store.check.newer_unchecked"):get()
+			end))
+		end
 		-- Anything else in the way, in the engine's words.
 		for _, pr in problems do
 			if type(pr) == "table" and not used[pr] then
@@ -557,7 +542,13 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 					return checks_body(if string.match(key, "^failed:") then string.sub(key, 8) else key)
 				end, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
 				history(),
-				keys_view.Section { plugin = id, here = props.here },
+				keys_view.Section {
+					plugin = id,
+					here = props.here,
+					published = function(): boolean
+						return #versions:get() > 0
+					end,
+				},
 			},
 		},
 		ds.Dialog {

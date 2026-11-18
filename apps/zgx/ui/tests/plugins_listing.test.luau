@@ -307,3 +307,33 @@ test("a README with more pictures than a page shows asks for only so many", func
 	expect(n).to_be(24)
 	expect(app:error()).to_be_nil()
 end)
+
+test("a listing at every limit at once lays out on the page, its name and words kept inside it", function()
+	local app = mount("plugins_store_fixture.luau")
+	app:resize(1000, 900)
+	app:frames(10)
+	app:set_state("plugins_view", "store:extremes")
+	app:wait("#store-readme", { timeout_ms = 10000 })
+	settle(app, 500)
+	expect(app:error()).to_be_nil()
+	-- Nothing wider than the page (its measure), however long its words.
+	for _, id in { "#store-offer", "#store-readme", "#store-keywords", "#store-shots" } do
+		local w = tonumber((app:tree(id):match("^%s*@%d+[^\n]- %d+,%-?%d+ (%d+)x"))) or 0
+		expect(`{id} {w <= 640}`).to_be(`{id} true`)
+	end
+	expect(app:tree()).to_contain("Maintainer")
+end)
+
+test("an update from a new publisher says so by name, and one still in review says only your devices get it", function()
+	local app = page("Focus timer")
+	app:click('#store-offer >> role:button "Install"')
+	app:command("store.install_done")
+	app:command("store.allowed")
+	app:command("store.update_new_owner")
+	settle(app)
+	app:click('#store-offer >> role:button "Update to 1.3.0"')
+	settle(app)
+	local dialog = app:tree("role:dialog")
+	expect(dialog).to_contain("It has a new publisher, @ada.")
+	expect(dialog).to_contain("still in review")
+end)

@@ -3810,7 +3810,39 @@
       "store_unreachable": "Zeron can't reach the plugin store right now. Try again in a moment.",
       "not_in_store": "This plugin, or this version of it, isn't in the plugin store.",
       "store_mismatch": "What came isn't what the plugin store reviewed, so it wasn't installed.",
-      "blocked": "Zeron took this version down from the plugin store."
+      "store_error": "The plugin store's answer couldn't be read. Try again in a moment.",
+      "signed_out": "This needs you signed in to Zeron.",
+      "review": "Publishing needs a check made in Zeron or its command line for the plugin as it is. Check it again.",
+      "changed": "Its folder changed after it was checked. Check it again.",
+      "not_published": "The first version is sent from this computer; a deploy key sends the ones after it.",
+      "step_up_required": "This needs you to sign in again first.",
+      "bad_package": "The store couldn't read the package.",
+      "id_reserved": "Zeron keeps this id for itself or someone else.",
+      "not_semver": "Its version isn't three numbers, like 1.2.0.",
+      "missing_readme": "The store needs a README.md.",
+      "missing_listing": "The store needs its description, icon and category.",
+      "bad_listing": "Something in its listing isn't what the store takes.",
+      "too_large": "It's bigger than the store takes.",
+      "binary_file": "It holds a file that isn't text or a picture.",
+      "no_notes": "CHANGELOG.md has nothing for this version.",
+      "needs_username": "Claim a username first: every plugin in the store is by @someone.",
+      "id_taken": "Someone else already publishes a plugin with this id.",
+      "version_exists": "You've sent this version already. Give it a new one.",
+      "suspended": "This plugin is suspended in the store.",
+      "key_not_allowed": "It's signed with a key the store doesn't know as yours.",
+      "key_revoked": "That deploy key was revoked.",
+      "key_expired": "That deploy key has ended.",
+      "invalid_signature": "The store didn't accept the key's signature.",
+      "unauthenticated": "The store didn't know who sent it.",
+      "stale_request": "This computer's clock is more than five minutes out. Set it right and try again.",
+      "replayed_request": "That was already sent. Send it again.",
+      "body_mismatch": "It changed on its way to the store. Send it again.",
+      "too_many_keys": "This plugin has as many deploy keys as it can. Revoke one first.",
+      "key_taken": "That key is already in use.",
+      "invalid_name": "Give the key a shorter name.",
+      "invalid_expiry": "Choose when the key ends again.",
+      "invalid_proof": "The store couldn't check the new key. Try again.",
+      "bad_csrf": "The store refused a request it couldn't trust. Try again."
     },
     "store": {
       "browse": "Browse",
@@ -3928,8 +3960,7 @@
         "categories": "A category",
         "version": "A version the store takes",
         "newer": "Newer than the last",
-        "newer_than": "The store checks it's newer than {version} as you submit it.",
-        "newer_first": "This is the first version you're sending."
+        "newer_unchecked": "The store checks it's newer than every version you've sent as you submit it."
       },
       "fix": {
         "missing_readme": "Add README.md to its folder: it's the plugin's page in the store.",
@@ -3960,7 +3991,9 @@
           "homepage": "Its website must be an https link.",
           "repository": "Its source must be an https link.",
           "license": "Keep its license to 64 characters."
-        }
+        },
+        "not_newer": "Give it a version newer than every one you've sent, in zeron-plugin.json.",
+        "version_exists": "You've sent this version already. Give it a new one in zeron-plugin.json."
       },
       "check_again": "Check again",
       "check_failed": "Couldn't check it",
@@ -3969,25 +4002,6 @@
       "submit_version": "Submit {version} for review",
       "submit_note": "{n, plural, one {# file is} other {# files are}} sent, signed as yours, exactly as checked.",
       "sent_toast": "Sent {name} {version} for review",
-      "sent": {
-        "needs_username": "Claim a username first: every plugin in the store is by @someone.",
-        "id_taken": "Someone else already publishes a plugin with this id.",
-        "id_reserved": "Zeron keeps this id for itself or someone else.",
-        "not_semver": "Its version isn't three numbers, like 1.2.0.",
-        "version_exists": "You've sent this version already. Give it a new one.",
-        "not_newer": "Its version must be newer than the last you sent.",
-        "bad_package": "The store couldn't read the package.",
-        "bad_signature": "Its signature doesn't match its files. Check again and resend.",
-        "key_not_allowed": "It's signed with a key the store doesn't know as yours.",
-        "missing_readme": "The store needs a README.md.",
-        "missing_listing": "The store needs its description, icon and category.",
-        "too_large": "It's bigger than the store takes.",
-        "rate_limited": "Too many tries for now. Try again in a minute.",
-        "suspended": "This plugin is suspended in the store.",
-        "changed": "Its folder changed after it was checked. Check it again.",
-        "signed_out": "Sign in to Zeron to publish.",
-        "offline": "Can't reach the plugin store."
-      },
       "your_versions": "Versions you've sent",
       "no_versions": "Nothing sent yet",
       "no_versions_body": "Versions you send show here with where their review stands.",
@@ -4067,7 +4081,11 @@
       "other_installed": "A different plugin with this id is installed here, from somewhere else. Remove it to install this one.",
       "unblock_title": "Turn {name} back on?",
       "unblock_body": "Zeron took this version down from the store. It runs again here, as you allowed it.",
-      "unblock_body_reason": "Zeron took this version down from the store: {reason} It runs again here, as you allowed it."
+      "unblock_body_reason": "Zeron took this version down from the store: {reason} It runs again here, as you allowed it.",
+      "update_new_owner": "It has a new publisher, @{username}. Zeron asks you to allow it again after it updates.",
+      "update_new_owner_unnamed": "It has a new publisher. Zeron asks you to allow it again after it updates.",
+      "update_in_review": "This version is still in review: only your own devices are offered it.",
+      "keys_publish_first": "Send its first version from this computer; a deploy key can send the ones after it."
     }
   },
   "templates": {

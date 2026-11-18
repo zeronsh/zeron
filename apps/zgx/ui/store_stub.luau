@@ -57,7 +57,7 @@ local function answer(work: () -> any, quiet: boolean?): any
 	end
 	local word: string? = nil
 	if offline then
-		word = "offline"
+		word = "store_unreachable: the store didn't answer"
 	elseif fail_next and not quiet then
 		fail_next = false
 		word = "rate_limited: the store is busy; try again in a minute"
@@ -188,6 +188,65 @@ for i, name in WORDS do
 	by_id[id] = e
 end
 
+-- The store's listing limits, each at its worst (plan amendment 22): a
+-- name of 64 with no spaces, a description of 300, two categories, eight
+-- keywords of 32, eight screenshots, a README of 512 KB, notes of 64 KB.
+do
+	local name = string.sub("Superlongpluginnamewithnospacesanywhereatalljusttokeepgoingonandon", 1, 64)
+	local summary = string.sub(string.rep("Every word of this description is here to fill all three hundred characters the store allows. ", 4), 1, 300)
+	local keywords = {}
+	for i = 1, 8 do
+		table.insert(keywords, string.sub(string.rep(string.char(96 + i), 32), 1, 32))
+	end
+	local shots = {}
+	for i = 1, 8 do
+		table.insert(shots, `shots/{i}.png`)
+	end
+	local para = "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does. "
+	local lines = { `# {name}` }
+	local size = 0
+	local n = 0
+	while size < 512 * 1024 - 200 do
+		n += 1
+		local line = if n % 40 == 0 then `## Part {n // 40}` else para
+		table.insert(lines, "")
+		table.insert(lines, line)
+		size += #line + 2
+	end
+	local notes = string.sub(string.rep("- A change in this version, said in one line of the changelog.\n", 1100), 1, 64 * 1024)
+	local card: store.Card = {
+		id = "extremes",
+		name = name,
+		summary = summary,
+		icon = "icon.svg",
+		author = { id = "u_extreme", username = "averylongusernamex", badges = { { id = "maintainer", name = "Maintainer" } } },
+		categories = { "developer-tools", "integrations" },
+		keywords = keywords,
+		version = "10.20.30",
+		updated_at = NOW,
+		installs = 9_876_543,
+		featured = false,
+	}
+	local e = {
+		card = card,
+		detail = {
+			readme = table.concat(lines, "\n"),
+			screenshots = shots,
+			permissions = { asks = { "ui.add" } },
+			compatible = true,
+			license = "Apache-2.0 WITH LLVM-exception OR MIT OR BSD-3-Clause-Clear",
+			homepage = "https://example.com/" .. string.rep("a", 200),
+			repository = "https://github.com/averylongusernamex/" .. name,
+			package = { bytes = 49_000_000, sha256 = string.rep("b", 64), hash = "extremes-hash" },
+		},
+		versions = {
+			{ version = "10.20.30", status = "approved", published_at = NOW, notes = notes },
+		},
+	}
+	table.insert(entries, 1, e)
+	by_id.extremes = e
+end
+
 -- A README of forty pictures (a page asks for only so many).
 do
 	local lines = { "# Screenshot tray" }
@@ -249,7 +308,7 @@ end
 -- One that needs a later Zeron: the engine says so, in its words.
 by_id["cost-meter"].detail.engines = { zeron = ">=9.0.0" }
 by_id["cost-meter"].detail.compatible = false
-by_id["cost-meter"].detail.incompatible_reason = "Needs Zeron 9.0.0 or later; this device has 0.4.2."
+by_id["cost-meter"].detail.incompatible = "Needs Zeron 9.0.0 or later; this device has 0.4.2."
 
 
 local function card_of(e: Entry): store.Card
@@ -309,7 +368,7 @@ end
 local function entry(id: string): Entry
 	local e = by_id[id]
 	if not e then
-		error({ message = "not_found" }, 0)
+		error({ message = "not_in_store: no plugin by that id in the store" }, 0)
 	end
 	return e
 end
@@ -322,8 +381,8 @@ stub.search = function(q: store.Query): any
 		return search(asked)
 	end)
 end
-stub.detail = function(id: string): any
-	note(`detail:{id}`)
+stub.detail = function(id: string, for_zeron: string?): any
+	note(if for_zeron then `detail:{id}:for_zeron={for_zeron}` else `detail:{id}`)
 	return answer(function(): any
 		local e = entry(id)
 		local d: any = card_of(e)
@@ -399,6 +458,8 @@ local problems: { any } = {
 	{ rule = "missing_readme", words = "README.md is missing" },
 }
 local prepared_version = "1.2.0"
+-- Whether the engine could ask the store which versions it has.
+local store_checked = true
 local signed_in_again = false
 
 stub.mine = function(): any
@@ -425,6 +486,8 @@ stub.prepare = function(id: string): any
 			warnings = { { rule = "no_notes", words = "CHANGELOG.md has no section for 1.2.0" } },
 			package = { files = 4, bytes = 9120 },
 			ticket = if ok then `ticket-{prepared_version}` else nil,
+			store_checked = store_checked,
+			note = if store_checked then nil else "Couldn't ask the store which versions it has: the store has the last word on whether this one is newer",
 		}
 	end)
 end
@@ -516,6 +579,27 @@ stub.revoke_key = function(id: string, key: string): any
 	end)
 end
 ui.command {
+	id = "store_stub.never_published",
+	title = "Store: none of Pomodoro clock's versions sent yet",
+	run = function()
+		mine["pomodoro-clock"] = nil
+	end,
+}
+ui.command {
+	id = "store_stub.store_unchecked",
+	title = "Store: the engine couldn't ask the store which versions it has",
+	run = function()
+		store_checked = false
+	end,
+}
+ui.command {
+	id = "store_stub.not_newer",
+	title = "Store: the version isn't newer than one sent",
+	run = function()
+		table.insert(problems, { rule = "not_newer", field = "version", words = "1.2.0 isn't newer than 1.3.0" })
+	end,
+}
+ui.command {
 	id = "store_stub.fixed",
 	title = "Store: your plugin's folder has all the store needs",
 	run = function()
@@ -537,7 +621,7 @@ ui.command {
 	run = function()
 		local f = by_id["focus-timer"]
 		f.detail.compatible = false
-		f.detail.incompatible_reason = "Needs Zeron 0.3.0 or later; this device has 0.2.0."
+		f.detail.incompatible = "Needs Zeron 0.3.0 or later; this device has 0.2.0."
 	end,
 }
 

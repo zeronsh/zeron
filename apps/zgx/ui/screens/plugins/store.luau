@@ -8,14 +8,17 @@
 -- took down is turned back on with `state.set_off(id, false, device)`.
 --
 -- Each returns the host's promise, `:after(ok, err)`; `err.message` is an
--- outcome word ("offline", "signed_out", "not_found") or "<reason>: <words>"
+-- outcome word ("offline", "signed_out") or the engine's "<reason>: <words>"
+-- (its reason words: docs/plugins.md "Reason words")
 -- (screens/plugins/words `failure`).
 --
 -- Reading the catalog:
 --   store.search { q?, category?, keyword?, sort?, cursor?, limit?, featured? }
 --       { items = { Card }, next_cursor? }   sort: "relevance" | "popular" |
 --                                            "updated" | "new"
---   store.detail(id)          Detail (rejects "not_found")
+--   store.detail(id, for_zeron?)  Detail, every version; whether it works
+--                             with Zeron `for_zeron` (the device shown's), else
+--                             this one (rejects "not_in_store")
 --   store.categories()        { categories = { { id, name } } }
 --   store.picture(id, version, path)  { src }: a picture of its package, as
 --                             the engine keeps it here
@@ -44,7 +47,7 @@
 --   Detail  Card + { readme, screenshots = { path }, permissions (the consent
 --             sheet's item: { asks, ui, commands, network_hosts, tools… }),
 --             engines, homepage?, repository?, license?, versions = { Version },
---             package, compatible, incompatible_reason? (why not, in words),
+--             package, compatible, incompatible? (why not, in words),
 --             installed? }
 --   Version { version, status, published_at, notes?, engines?, yanked?,
 --             review? = { state, reason?, message?, decided_at? } }
@@ -94,8 +97,8 @@ function M.search(query: Query): any
 	return ui.call("plugins.store.search", query)
 end
 
-function M.detail(id: string): any
-	return ui.call("plugins.store.detail", id)
+function M.detail(id: string, for_zeron: string?): any
+	return ui.call("plugins.store.detail", if for_zeron then { id = id, for_zeron = for_zeron } else id)
 end
 
 function M.categories(): any

@@ -113,6 +113,9 @@ impl Notice {
                 "Signing key revoked".to_owned(),
                 format!("{here} key was revoked on another device. Sign in again for a new one, then allow your plugins again."),
             ),
+            // (A store plugin's version Zeron took down: the engine says
+            // which and why, and that it can be turned back on.)
+            "plugin_blocked" => ("Plugin turned off".to_owned(), words.to_owned()),
             _ => ("Signing keys".to_owned(), words.to_owned()),
         };
         Notice { title, body, tone: Tone::Warning, action: None, stays: true }
@@ -843,6 +846,10 @@ mod tests {
         assert!(app.find("role:alert \"Signing key revoked\"").is_some(), "a warning is an alert");
         assert_eq!(Notice::key("key_added", None, "").body, "Added to your account on another device. If it wasn't you, revoke it in Settings → Account.");
         assert_eq!(Notice::key("other", None, "The engine's words.").body, "The engine's words.");
+        // A store plugin taken down: its own title, the engine's words.
+        let blocked = Notice::key("plugin_blocked", None, "Focus 1.2.0 was taken down from the store and turned off.");
+        assert_eq!(blocked.title, "Plugin turned off");
+        assert_eq!(blocked.body, "Focus 1.2.0 was taken down from the store and turned off.");
 
         // Three at most, the newest: the switch has gone.
         notice(Notice::safe_at_launch(preview::SafeReason::Crashed));

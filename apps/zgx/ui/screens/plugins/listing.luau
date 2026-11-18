@@ -39,6 +39,7 @@ local asks_view = require("@app/screens/plugins/asks")
 local nav = require("@app/screens/plugins/nav")
 local browse = require("@app/screens/plugins/browse")
 local plugin_settings = require("@app/screens/plugins/settings")
+local sessions = require("@account/sessions")
 
 local M = {}
 
@@ -143,7 +144,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		return d().compatible ~= false
 	end
 	local function incompatible(): string
-		local why = d().incompatible_reason or d().incompatible
+		local why = d().incompatible
 		return if type(why) == "string" and why ~= "" then why else ui.t("plugins.store.needs_other_zeron"):get()
 	end
 	-- Taken down by Zeron, and not turned back on.
@@ -562,7 +563,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 						foreign = true,
 						text = function(): string
 							local r = d().readme
-							return if type(r) == "string" then string.sub(r, 1, 200000) else ""
+							return if type(r) == "string" then string.sub(r, 1, 512 * 1024) else ""
 						end,
 						-- A picture of its package, through the store; anything else
 						-- is its link (`false`), never fetched from where it points.
@@ -702,7 +703,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				w_full = true,
 				Markdown {
 					text = function(): string
-						return string.sub(now:get().notes or "", 1, 20000)
+						return string.sub(now:get().notes or "", 1, 64 * 1024)
 					end,
 					small = true,
 					foreign = true,
@@ -786,6 +787,40 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				ui.column {
 					w_full = true,
 					gap = "$space.4",
+					-- A new publisher, by name (asked again after it updates),
+					-- and a version still in review (offered only to its author).
+					ui.show(function(): boolean
+						local it: any = item()
+						local u = if it then it.update else nil
+						return type(u) == "table" and (u.new_owner == true or u.in_review == true)
+					end, ui.column {
+						w_full = true,
+						gap = "$space.2",
+						ui.show(function(): boolean
+							local it: any = item()
+							return it ~= nil and type(it.update) == "table" and it.update.new_owner == true
+						end, ds.Callout {
+							tone = "warning",
+							title = function(): string
+								local a = d().author
+								local name = if type(a) == "table" and type(a.username) == "string" and a.username ~= "" then a.username else nil
+								return if name
+									then ui.t("plugins.store.update_new_owner", { username = name }):get()
+									else ui.t("plugins.store.update_new_owner_unnamed"):get()
+							end,
+						}),
+						ui.show(function(): boolean
+							local it: any = item()
+							return it ~= nil and type(it.update) == "table" and it.update.in_review == true
+						end, ui.text {
+							ui.t("plugins.store.update_in_review"),
+							w_full = true,
+							wrap = true,
+							text_size = "$font.size.sm",
+							line_height = "$font.line.sm",
+							color = "$text.secondary",
+						}),
+					}),
 					ui.show(function(): boolean
 						return notes() ~= ""
 					end, ui.column {
@@ -919,8 +954,22 @@ end)
 M.Page = ui.component(function(props: { plugin: string, here: Here }): Node
 	local id = props.plugin
 	local phase = ui.use_state(if details:peek()[id] then "found" else "loading")
+	-- Another device's Zeron, as its presence says it, for the engine to
+	-- judge it by (this one's it knows).
+	local function for_zeron(): string?
+		local device = props.here.device()
+		if not device then
+			return nil
+		end
+		for _, d in sessions.devices:peek() or {} do
+			if d.id == device and type(d.version) == "string" and d.version ~= "" then
+				return d.version
+			end
+		end
+		return nil
+	end
 	local function load()
-		store.detail(id):after(function(found: any)
+		store.detail(id, for_zeron()):after(function(found: any)
 			if type(found) == "table" and found.id == id then
 				details:set_key(id, found)
 				phase:set("found")
@@ -932,12 +981,22 @@ M.Page = ui.component(function(props: { plugin: string, here: Here }): Node
 				return
 			end
 			local m = if type(err) == "table" then err.message else err
-			phase:set(if m == "not_found" then "not_found" elseif m == "offline" then "offline" else "failed")
+			local word = if type(m) == "string" then (string.match(m, "^([%l_]+)") or m) else ""
+			phase:set(if word == "not_in_store" then "not_found" elseif word == "offline" or word == "store_unreachable" then "offline" else "failed")
 		end)
 	end
-	-- (As it shows, never as it builds.)
+	-- (As it shows, never as it builds.) Another device chosen: whether it
+	-- works there is asked again.
 	ui.on_mount(function()
 		load()
+	end)
+	local shown_device: string? = props.here.device()
+	ui.effect(function()
+		local now = props.here.device()
+		if now ~= shown_device then
+			shown_device = now
+			load()
+		end
 	end)
 	local function body(key: string): Node
 		local kind = if string.match(key, "^found:") then "found" else key
