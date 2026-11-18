@@ -4035,7 +4035,7 @@
         "unknown": "把它分享到插件商店"
       },
       "keys": "部署密钥",
-      "keys_body": "部署密钥让 CI 任务（例如 GitHub Action）不用你的登录就能发布新版本。它只能发布这个插件，每个版本仍需审核。",
+      "keys_body": "部署密钥让 CI 任务（例如 GitHub Action）不用你的登录也能发送这个插件的新版本；每个版本仍需审核。",
       "keys_none": "还没有密钥。",
       "keys_failed": "无法查看它的密钥",
       "key": {
@@ -4060,14 +4060,14 @@
         "copy": "复制",
         "copied": "密钥已复制",
         "done": "我已复制",
-        "made": "创建于 {date}",
-        "used": "上次使用 {date}",
-        "never_used": "从未使用",
         "ends": "{date} 到期",
         "revoke": "吊销",
         "revoke_title": "吊销{name}？",
         "revoke_body": "用它发布的流程会立即停止。它已经发送的版本保持不变。",
-        "revoke_failed": "无法吊销密钥"
+        "revoke_failed": "无法吊销密钥",
+        "last_used": "上次使用 {date}",
+        "not_used": "尚未使用",
+        "no_end": "永不过期"
       },
       "unblock_title": "重新打开{name}？",
       "unblock_body": "Zeron 已将这个版本从商店下架。它会按你之前的允许在这里再次运行。",

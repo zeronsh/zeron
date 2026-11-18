@@ -4035,7 +4035,7 @@
         "unknown": "Share it in the plugin store"
       },
       "keys": "Deploy keys",
-      "keys_body": "A deploy key lets a CI job, such as a GitHub Action, publish new versions without your session. It publishes this plugin alone, and every version still waits for review.",
+      "keys_body": "A deploy key lets a CI job, such as a GitHub Action, send new versions of this plugin without your session; each still waits for review.",
       "keys_none": "No keys yet.",
       "keys_failed": "Couldn't see its keys",
       "key": {
@@ -4060,14 +4060,14 @@
         "copy": "Copy",
         "copied": "Key copied",
         "done": "I've copied it",
-        "made": "Made {date}",
-        "used": "last used {date}",
-        "never_used": "never used",
-        "ends": "ends {date}",
+        "ends": "Ends {date}",
         "revoke": "Revoke",
         "revoke_title": "Revoke {name}?",
         "revoke_body": "Anything publishing with it stops working at once. Versions it already sent stay as they are.",
-        "revoke_failed": "Couldn't revoke the key"
+        "revoke_failed": "Couldn't revoke the key",
+        "last_used": "Last used {date}",
+        "not_used": "Not used yet",
+        "no_end": "Doesn't expire"
       },
       "unblock_title": "Turn {name} back on?",
       "unblock_body": "Zeron took this version down from the store. It runs again here, as you allowed it.",

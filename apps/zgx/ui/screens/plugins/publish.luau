@@ -137,10 +137,12 @@ local function said(node: Node): Node
 	return ui.column { w_full = true, py = "$space.6", px = "$space.4", node }
 end
 
--- One line of the checks: a mark, what it is, and what to do.
-local function check_row(ok: boolean | "later", title: string | Message, detail: (string | Message | () -> string)?): Node
-	local icon = if ok == true then "check-circle" elseif ok == "later" then "clock-circle" else "danger-triangle"
-	local tone = if ok == true then "$zeron.tone.success.ink" elseif ok == "later" then "$text.tertiary" else "$zeron.tone.warning.ink"
+-- One line of the checks: a mark, what it is, and what to do. `ok`: passed,
+-- not passed, "later" (the store says as it's sent), or "note" (worth
+-- knowing, nothing in the way).
+local function check_row(ok: boolean | "later" | "note", title: string | Message, detail: (string | Message | () -> string)?): Node
+	local icon = if ok == true then "check-circle" elseif ok == "later" then "clock-circle" elseif ok == "note" then "info-circle" else "danger-triangle"
+	local tone = if ok == true then "$zeron.tone.success.ink" elseif ok == "later" or ok == "note" then "$text.tertiary" else "$zeron.tone.warning.ink"
 	return ui.row {
 		w_full = true,
 		px = "$space.4",
@@ -301,84 +303,66 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 				add(check_row(false, fix_of(pr), if type(pr.path) == "string" then pr.path else nil))
 			end
 		end
-		local warnings: { any } = if type(r.warnings) == "table" then r.warnings else {}
-		local notes: { Node } = {}
-		for _, w in warnings do
+		-- What's worth knowing and in nobody's way, under them.
+		for _, w in (if type(r.warnings) == "table" then r.warnings else {}) :: { any } do
 			if type(w) == "table" then
-				table.insert(notes, ui.text {
-					if type(w.path) == "string" then `{fix_of(w)} ({w.path})` else fix_of(w),
-					text_size = "$font.size.sm",
-					line_height = "$font.line.sm",
-					color = "$text.tertiary",
-					wrap = true,
-				})
+				add(check_row("note", fix_of(w), if type(w.path) == "string" then w.path else nil))
 			end
 		end
-		return ui.column {
+		-- Its last row: what Submit sends (or what's in the way), and Submit,
+		-- ending on the content edge as every row's control does.
+		add(ui.row {
+			id = "publish-foot",
 			w_full = true,
+			min_h = ui.theme.get("zeron.settings.row") :: number?,
+			px = "$space.4",
+			py = "$space.3",
 			gap = "$space.3",
-			ds.Settings.Section {
-				title = ui.t("plugins.store.checks_title"),
-				ds.Settings.Group { ui.column { id = "publish-checks", w_full = true, table.unpack(rows) } },
+			items = "center",
+			ui.text {
+				function(): string
+					if sent_error:get() ~= "" then
+						return sent_error:get()
+					end
+					local now = prepared:get() or {}
+					if now.ok == true then
+						local pkg = now.package
+						local files = if type(pkg) == "table" and type(pkg.files) == "number" then pkg.files else 0
+						return ui.t("plugins.store.submit_note", { n = files }):get()
+					end
+					return ui.t("plugins.store.fix_first"):get()
+				end,
+				id = "publish-note",
+				grow = 1,
+				min_w = 0,
+				wrap = true,
+				text_size = "$font.size.sm",
+				line_height = "$font.line.sm",
+				color = function(): string
+					return if sent_error:get() ~= "" then "$zeron.tone.danger.ink" else "$text.secondary"
+				end,
 			},
-			if #notes > 0 then ui.column { w_full = true, gap = "$space.1", px = ds.Settings.inset(), table.unpack(notes) } else nil,
-			-- (Its words on the text edge, its buttons ending on the content
-			-- edge, where the rows' controls end.)
-			ui.row {
-				w_full = true,
-				gap = "$space.3",
-				items = "center",
-				px = ds.Settings.inset(),
-				ui.text {
-					function(): string
-						if sent_error:get() ~= "" then
-							return sent_error:get()
-						end
-						local now = prepared:get() or {}
-						if now.ok == true then
-							local pkg = now.package
-							local files = if type(pkg) == "table" and type(pkg.files) == "number" then pkg.files else 0
-							return ui.t("plugins.store.submit_note", { n = files }):get()
-						end
-						return ui.t("plugins.store.fix_first"):get()
-					end,
-					id = "publish-note",
-					grow = 1,
-					min_w = 0,
-					wrap = true,
-					text_size = "$font.size.sm",
-					line_height = "$font.line.sm",
-					color = function(): string
-						return if sent_error:get() ~= "" then "$zeron.tone.danger.ink" else "$text.tertiary"
-					end,
-				},
-				ds.Button {
-					tone = "secondary",
-					size = "sm",
-					on_click = check,
-					ui.t("plugins.store.check_again"),
-				},
-				ds.Button {
-					id = "publish-submit",
-					tone = "primary",
-					size = "sm",
-					disabled = function(): boolean
-						local now = prepared:get() or {}
-						return now.ok ~= true or type(now.ticket) ~= "string"
-					end,
-					busy = function(): boolean
-						return sending:get()
-					end,
-					on_click = submit,
-					function(): string
-						local v = (prepared:get() or {}).version
-						return if type(v) == "string" and v ~= ""
-							then ui.t("plugins.store.submit_version", { version = v }):get()
-							else ui.t("plugins.store.submit"):get()
-					end,
-				},
+			ds.Button {
+				id = "publish-submit",
+				tone = "primary",
+				size = "sm",
+				disabled = function(): boolean
+					local now = prepared:get() or {}
+					return now.ok ~= true or type(now.ticket) ~= "string"
+				end,
+				busy = function(): boolean
+					return sending:get()
+				end,
+				on_click = submit,
+				function(): string
+					local v = (prepared:get() or {}).version
+					return if type(v) == "string" and v ~= ""
+						then ui.t("plugins.store.submit_version", { version = v }):get()
+						else ui.t("plugins.store.submit"):get()
+				end,
 			},
-		}
+		})
+		return ds.Settings.Group { ui.column { id = "publish-checks", w_full = true, table.unpack(rows) } }
 	end
 
 	local function checks_body(key: string): Node
@@ -387,11 +371,10 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 		elseif key == "checking" then
 			return ds.SkeletonWaiting {
 				build = function(still: boolean): Node
+					-- (The card draws the hairlines between its rows.)
 					return ds.Settings.Group {
 						ds.SkeletonRow { lead = 16, title = 140, line = 0, still = still },
-						ds.Settings.Rule(),
 						ds.SkeletonRow { lead = 16, title = 110, line = 0, still = still },
-						ds.Settings.Rule(),
 						ds.SkeletonRow { lead = 16, title = 160, line = 0, still = still },
 					}
 				end,
@@ -553,12 +536,28 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 					return ui.t("plugins.store.publish_title", { name = name() }):get()
 				end,
 				description = ui.t("plugins.store.publish_body"),
-				ui.presence(function(): string
-					local p = phase:get()
-					return if p == "checking" or p == "ready" then p else `failed:{p}`
-				end, function(key: string): Node
-					return checks_body(if string.match(key, "^failed:") then string.sub(key, 8) else key)
-				end, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
+				-- What the store needs: its title there from the first frame,
+				-- its card the checks' (a skeleton while they run), Check
+				-- again the section's own action at its title's end.
+				ds.Settings.Section {
+					title = ui.t("plugins.store.checks_title"),
+					trail = ds.Button {
+						id = "publish-check-again",
+						tone = "ghost",
+						size = "xs",
+						disabled = function(): boolean
+							return phase:get() == "checking"
+						end,
+						on_click = check,
+						ui.t("plugins.store.check_again"),
+					},
+					ui.presence(function(): string
+						local p = phase:get()
+						return if p == "checking" or p == "ready" then p else `failed:{p}`
+					end, function(key: string): Node
+						return checks_body(if string.match(key, "^failed:") then string.sub(key, 8) else key)
+					end, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
+				},
 				history(),
 				keys_view.Section {
 					plugin = id,

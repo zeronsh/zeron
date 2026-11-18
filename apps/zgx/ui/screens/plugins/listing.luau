@@ -1432,9 +1432,9 @@ M.Page = ui.component(function(props: { plugin: string, here: Here }): Node
 							ui.column { grow = 1, gap = "$space.2", ds.Skeleton { w = 180, h = 20, still = still }, ds.Skeleton { w = 120, still = still }, ds.Skeleton { w = 160, still = still } },
 							ds.Skeleton { w = 64, h = 28, rounded = "$radius.lg", still = still },
 						},
+						-- (The card draws the hairline between its rows.)
 						ds.Settings.Group {
 							ds.SkeletonRow { lead = 0, title = 160, line = 220, still = still },
-							ds.Settings.Rule(),
 							ds.SkeletonRow { lead = 0, title = 120, line = 260, still = still },
 						},
 					}

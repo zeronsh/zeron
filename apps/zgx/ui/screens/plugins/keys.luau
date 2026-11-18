@@ -1,8 +1,10 @@
 --!strict
 -- A plugin's deploy keys, on its publishing page (screens/plugins/publish):
 -- what a CI job (a GitHub Action) publishes its new versions with instead
--- of your session. Each says its name, when it was made, when it was last
--- used and when it ends, and can be revoked. A new one is made by the
+-- of your session. A section with New key… at its title's end; each key a
+-- row: its name, the key shortened (`M.short`, as the store's site shows
+-- it) in the code face, when it was last used and when it ends, and Revoke
+-- at the row's end. Revoked keys aren't listed. A new one is made by the
 -- engine (`CreateDeployKey`) after a fresh sign-in in the browser when the
 -- store asks for one; its secret is shown here once, to copy, and kept
 -- nowhere.
@@ -30,6 +32,15 @@ local EXPIRY: { { value: string, days: number? } } = {
 
 local function day_of(at: any): string?
 	return if type(at) == "number" and at > 0 then locale.date(at / 1000) else nil
+end
+
+-- A key as it's shown everywhere it's shown short (the store's site too):
+-- its first eight characters, "…", its last four; the whole in a tooltip.
+function M.short(key: string): string
+	if #key <= 14 then
+		return key
+	end
+	return `{string.sub(key, 1, 8)}…{string.sub(key, -4)}`
 end
 
 M.Section = ui.component(function(props: { plugin: string, here: any, published: () -> boolean }): Node
@@ -109,36 +120,33 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 		return ds.Settings.Row {
 			label = function(): string
 				local k = now:get()
-				return k.name or k.key
+				return if type(k.name) == "string" and k.name ~= "" then k.name else M.short(k.key)
 			end,
+			-- (The key itself, short, in the code face after its name.)
+			badge = ui.text {
+				function(): string
+					return M.short(now:get().key)
+				end,
+				class = "key-short",
+				font = "$font.mono",
+				text_size = "$font.size.sm",
+				line_height = "$font.line.sm",
+				color = "$text.tertiary",
+				-- (A row is its key's: the key never changes under it.)
+				tooltip = first.key,
+			},
 			description = function(): string
 				local k = now:get()
-				local parts: { string } = {}
-				local made = day_of(k.created_at)
-				if made then
-					table.insert(parts, ui.t("plugins.store.key.made", { date = made }):get())
-				end
 				local used = day_of(k.last_used_at)
-				table.insert(parts, if used then ui.t("plugins.store.key.used", { date = used }):get() else ui.t("plugins.store.key.never_used"):get())
 				local ends = day_of(k.expires_at)
-				if ends then
-					table.insert(parts, ui.t("plugins.store.key.ends", { date = ends }):get())
-				end
-				return table.concat(parts, " · ")
+				return table.concat({
+					if used then ui.t("plugins.store.key.last_used", { date = used }):get() else ui.t("plugins.store.key.not_used"):get(),
+					if ends then ui.t("plugins.store.key.ends", { date = ends }):get() else ui.t("plugins.store.key.no_end"):get(),
+				}, " · ")
 			end,
-			lead = ui.row {
-				w = 28,
-				h = 28,
-				shrink = 0,
-				items = "center",
-				justify = "center",
-				rounded = "$radius.lg",
-				bg = "$zeron.secondary.bg",
-				color = "$text.secondary",
-				ds.Icon { name = "shield-check", size = 16 },
-			},
+			-- (A row's action, as the versions' are.)
 			control = ds.Button {
-				tone = "ghost",
+				tone = "secondary",
 				size = "sm",
 				on_click = function()
 					revoking:set(now:peek())
@@ -151,54 +159,38 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 
 	local function body(key: string): Node
 		if key == "ready" then
-			return ui.column {
-				w_full = true,
-				gap = "$space.3",
-				ds.Settings.Each(list, key_row, {
-					key = function(k: any): string
-						return k.key
-					end,
-				}),
-				ui.row {
-					w_full = true,
-					gap = "$space.3",
-					items = "center",
-					px = ds.Settings.inset(),
-					ui.text {
-						function(): string
-							if not props.published() then
-								return ui.t("plugins.store.keys_publish_first"):get()
-							end
-							return if #list:get() == 0 then ui.t("plugins.store.keys_none"):get() else ""
+			-- (Nothing sent yet: what comes first, whatever's listed.)
+			return ui.presence(function(): string
+				return if props.published() and #list:get() > 0 then "list" else "none"
+			end, function(shown: string): Node
+				if shown == "list" then
+					return ds.Settings.Each(list, key_row, {
+						key = function(k: any): string
+							return k.key
 						end,
-						grow = 1,
-						min_w = 0,
+					})
+				end
+				-- None yet: why, in the card where they'd be.
+				return ds.Settings.Group {
+					ui.text {
+						id = "keys-none",
+						function(): string
+							return if props.published() then ui.t("plugins.store.keys_none"):get() else ui.t("plugins.store.keys_publish_first"):get()
+						end,
+						w_full = true,
+						px = "$space.4",
+						py = "$space.3",
 						wrap = true,
 						text_size = "$font.size.sm",
 						line_height = "$font.line.sm",
-						color = "$text.tertiary",
+						color = "$text.secondary",
 					},
-					ds.Button {
-						id = "keys-new",
-						tone = "secondary",
-						size = "sm",
-						-- (A key sends the versions after the first, which comes
-						-- from this computer.)
-						disabled = function(): boolean
-							return not props.published()
-						end,
-						on_click = function()
-							made_phase:set("idle")
-							making:set(true)
-						end,
-						ui.t("plugins.store.key.new"),
-					},
-				},
-			}
+				}
+			end, { w_full = true })
 		elseif key == "loading" then
 			return ds.SkeletonWaiting {
 				build = function(still: boolean): Node
-					return ds.Settings.Group { ds.SkeletonRow { lead = 28, title = 120, line = 220, trail = 60, still = still } }
+					return ds.Settings.Group { ds.SkeletonRow { lead = 0, title = 120, line = 220, trail = 60, still = still } }
 				end,
 			}
 		end
@@ -226,6 +218,21 @@ M.Section = ui.component(function(props: { plugin: string, here: any, published:
 		ds.Settings.Section {
 			title = ui.t("plugins.store.keys"),
 			description = ui.t("plugins.store.keys_body"),
+			-- (The section's own action, at its title's end; a key sends the
+			-- versions after the first, which comes from this computer.)
+			trail = ds.Button {
+				id = "keys-new",
+				tone = "ghost",
+				size = "xs",
+				disabled = function(): boolean
+					return not props.published()
+				end,
+				on_click = function()
+					made_phase:set("idle")
+					making:set(true)
+				end,
+				ui.t("plugins.store.key.new"),
+			},
 			ui.presence(function(): string
 				return phase:get()
 			end, body, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
