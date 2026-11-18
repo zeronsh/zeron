@@ -1235,7 +1235,7 @@ impl Plugins {
             if package.hash != offer.hash || offer.key.as_deref().is_some_and(|k| k != package.key) {
                 return Err(failure(client::reason::STORE_MISMATCH, "The update kept isn't the store's"));
             }
-            let store = install::StoreSource { id: c.id.clone(), publisher, publisher_id, hash: package.hash.clone(), key: Some(package.key.clone()), verified: offer.verified, verified_at: None, verified_alternative: None, instead_of_unverified: false };
+            let store = install::StoreSource { id: c.id.clone(), publisher, publisher_id, hash: package.hash.clone(), key: Some(package.key.clone()), verified: offer.verified, verified_at: None, verified_alternative: None, instead_of_unverified: false, replaced: None };
             (package, store)
         } else {
             let raw = client.package(&c.id, &offer.version, caller, record.bytes).await?;

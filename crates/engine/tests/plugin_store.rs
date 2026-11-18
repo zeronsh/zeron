@@ -157,6 +157,9 @@ async fn an_unverified_update_is_offered_at_once_marked_and_always_asks() {
     assert_eq!((updated["plugin"]["version"].as_str(), updated["plugin"]["status"].as_str()), (Some("1.2.0"), Some("pending")), "{updated}");
     let item = d.item("focus").await;
     assert_eq!((item["source"]["verified"].as_bool(), item["nothing_new"].as_bool()), (Some(false), Some(true)), "the sheet says it's not verified and asks nothing new: {item}");
+    // And says of the version it replaced: "The version you have, 1.0.0,
+    // was verified."
+    assert_eq!(item["source"]["replaced"], json!({ "version": "1.0.0", "verified": true }), "{item}");
     assert!(item.get("digest_diff").is_none());
     // A first install of an unverified version isn't "nothing new".
     let other = device(&store, Some("eve"));

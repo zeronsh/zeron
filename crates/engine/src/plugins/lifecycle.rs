@@ -345,6 +345,11 @@ impl Plugins {
                 return Err(Self::needs_person(&entry.item.name));
             }
             old_binding = entry.binding().map(str::to_owned);
+            // From the store over a store version: which one, and whether
+            // it was verified (the consent window says so).
+            if let (Some(before), Some(store)) = (&entry.store, source.store.as_mut().filter(|_| source.kind == install::STORE)) {
+                store.replaced = Some(install::ReplacedVersion { version: entry.item.version.clone(), verified: before.verified });
+            }
             if let Some(key) = entry.key().filter(|k| *k != package.key) {
                 let takes_over = match (&entry.store, source.store()) {
                     (Some(_), Some(_)) => true,

@@ -186,6 +186,19 @@ pub struct StoreSource {
     /// unverified one installed: it may be older than that one.
     #[serde(skip)]
     pub instead_of_unverified: bool,
+    /// The store version this one replaced here, and whether it was
+    /// verified (its install record's word): what a consent window says of
+    /// "the version you have".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced: Option<ReplacedVersion>,
+}
+
+/// The version a store install replaced (`StoreSource::replaced`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReplacedVersion {
+    pub version: String,
+    #[serde(default)]
+    pub verified: bool,
 }
 
 impl StoreSource {
@@ -230,6 +243,9 @@ impl Source {
             }
             if !store.verified {
                 value["verified_alternative"] = json!(store.verified_alternative);
+            }
+            if let Some(replaced) = &store.replaced {
+                value["replaced"] = json!(replaced);
             }
         }
         value
