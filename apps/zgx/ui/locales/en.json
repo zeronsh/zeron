@@ -4080,8 +4080,6 @@
         "timed_out": "The sign-in didn't finish. Try again.",
         "secret_title": "Copy your key now",
         "secret_body": "This is the only time Zeron shows it. Put it in your CI's secrets. Anyone with it can send versions of this plugin as you.",
-        "copy": "Copy",
-        "copied": "Key copied",
         "done": "I've copied it",
         "ends": "Ends {date}",
         "revoke": "Revoke",
