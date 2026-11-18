@@ -31,7 +31,8 @@ export interface RenderOptions {
 
 /** Every tag written, and the attributes each may carry. */
 export const TAGS: Readonly<Record<string, readonly string[]>> = {
-  p: [],
+  // (`class` on p and pre only for asText's own notice and block, never from a document.)
+  p: ["class"],
   br: [],
   hr: [],
   h1: ["id"],
@@ -45,7 +46,7 @@ export const TAGS: Readonly<Record<string, readonly string[]>> = {
   ol: ["start", "class"],
   li: ["class"],
   input: ["type", "disabled", "checked"],
-  pre: ["tabindex"],
+  pre: ["tabindex", "class"],
   code: ["class"],
   span: ["class"],
   em: [],
@@ -323,7 +324,8 @@ function writeBlocks(w: Writing, blocks: Block[], tight: boolean): void {
         if (!tight) out.open("p");
         writeInlines(w, inlines(w, block.text));
         if (!tight) out.close("p");
-        out.line();
+        // (A tight item's last paragraph ends with the item.)
+        if (!tight || block !== blocks[blocks.length - 1]) out.line();
         break;
       case "heading": {
         const content = inlines(w, block.text);
@@ -424,6 +426,21 @@ function writeRow(w: Writing, tag: "th" | "td", cells: string[], align: Align[])
   });
   w.out.close("tr");
   w.out.line();
+}
+
+/** What a document shown as its text says first. */
+export const AS_TEXT = "Shown as plain text: it's too long to lay out.";
+
+/** A document as its text, said so (every character escaped). */
+export function asText(markdown: string): string {
+  const out = new Html(Infinity);
+  out.open("p", [["class", "as-text"]]);
+  out.text(AS_TEXT);
+  out.close("p");
+  out.open("pre", [["class", "plain"], ["tabindex", "0"]]);
+  out.text(markdown);
+  out.close("pre");
+  return out.toString();
 }
 
 export interface Written {

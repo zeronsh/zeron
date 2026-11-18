@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { Budget, PIPELINE, render as renderWithin, RENDERER, type Rendered, type RenderOptions } from "./markdown.ts";
+import { PIPELINE, render as renderWithin, RENDERER, type Rendered, type RenderOptions } from "./markdown.ts";
 import { renderedOnce, type Keeper } from "./rendered.ts";
 
 /** A cache in memory, as the Worker's keeps responses. */
@@ -15,7 +15,7 @@ const memory = (): Keeper & { size(): number } => {
 test("a rendering is kept, and found again for the same text", async () => {
   const store = memory();
   let renders = 0;
-  const render = (md: string, o: RenderOptions, b?: Budget): Rendered => (renders++, renderWithin(md, o, b));
+  const render = (md: string, o: RenderOptions): Rendered => (renders++, renderWithin(md, o));
   const options = { file: (p: string) => `/plugins/a/files/1.0.0/${p}`, demote: true };
   const first = await renderedOnce("https://zeron.sh", "a", "1.0.0", "readme", "# Hi", options, { store, render });
   const again = await renderedOnce("https://zeron.sh", "a", "1.0.0", "readme", "# Hi", options, { store, render });
@@ -48,29 +48,25 @@ test("two plugins with one README text each draw their own pictures, whoever's i
   expect(store.size()).toBe(5);
 });
 
-test("a change to the pipeline or the sanitizer's schema misses every kept rendering", async () => {
+test("a change to the pipeline, the tags it may write or its bounds misses every kept rendering", async () => {
   const store = memory();
   let renders = 0;
-  const render = (md: string, o: RenderOptions, b?: Budget): Rendered => (renders++, renderWithin(md, o, b));
+  const render = (md: string, o: RenderOptions): Rendered => (renders++, renderWithin(md, o));
   const options = { file: (p: string) => `/plugins/a/files/1.0.0/${p}`, demote: true };
   await renderedOnce("https://zeron.sh", "a", "1.0.0", "readme", "# Hi", options, { store, render });
-  // (RENDERER bumped by hand, or the schema's fingerprint changed by itself.)
+  // (RENDERER bumped by hand, or the tags' fingerprint changed by itself.)
   await renderedOnce("https://zeron.sh", "a", "1.0.0", "readme", "# Hi", options, { store, render, pipeline: `${RENDERER + 1}.${PIPELINE.split(".").slice(1).join(".")}` });
-  await renderedOnce("https://zeron.sh", "a", "1.0.0", "readme", "# Hi", options, { store, render, pipeline: `${RENDERER}.another-schema.${PIPELINE.split(".").at(-1)}` });
+  await renderedOnce("https://zeron.sh", "a", "1.0.0", "readme", "# Hi", options, { store, render, pipeline: `${RENDERER}.other-tags.${PIPELINE.split(".").at(-1)}` });
   expect(renders).toBe(3);
   expect(store.size()).toBe(3);
   expect(PIPELINE.startsWith(`${RENDERER}.`)).toBe(true);
 });
 
-test("a document shown as text only because the page spent its budget isn't kept; one drawn with the budget is", async () => {
+test("a document too large to draw is kept as its text, said so (the same text always comes out the same)", async () => {
   const store = memory();
   const options = { file: (p: string) => `/plugins/a/files/1.0.0/${p}`, demote: true };
-  const spent = new Budget(0);
-  const html = await renderedOnce("https://zeron.sh", "a", "1.0.0", "notes", "Some *notes*.", options, { store, budget: spent });
-  expect(html).toContain("Shown as plain text: it's too long or too deeply nested to lay out.");
-  expect(store.size()).toBe(0);
-  const drawn = await renderedOnce("https://zeron.sh", "a", "1.0.0", "notes", "Some *notes*.", options, { store, budget: new Budget() });
-  expect(drawn).toContain("<em>notes</em>");
+  const wide = `|${"a|".repeat(64)}\n|${"-|".repeat(64)}\n${"a\n".repeat(20_000)}`;
+  const html = await renderedOnce("https://zeron.sh", "a", "1.0.0", "notes", wide, options, { store });
+  expect(html).toContain("Shown as plain text: it's too long to lay out.");
   expect(store.size()).toBe(1);
 });
-

@@ -2,25 +2,25 @@
 // Whatever goes in, what comes out runs nothing, loads nothing from
 // anywhere but the package, and can't pass for the page's own parts.
 import { describe, expect, test } from "vitest";
-import { BOUNDS, Budget, delimiters, drawable, RATIO_CEILING, render as renderWithin, renderMarkdown, target, workOf } from "./markdown.ts";
-import { BEATERS, REFERENCE, SHAPES } from "./markdown.shapes.ts";
+import { BOUNDS, firstLine, render as renderWith, renderMarkdown, target } from "./markdown.ts";
 
 const FILES = "/plugins/demo/files/1.0.0/";
-const render = (md: string) => renderMarkdown(md, { file: (p) => FILES + p.split("/").map(encodeURIComponent).join("/"), demote: true });
+const render = (md: string) => renderMarkdown(md, { file: (p) => FILES + p.split("/").map(encodeURIComponent).join("/"), demote: true }).trim();
 
 /** Every attribute value of a kind in some HTML, e.g. all hrefs. */
 const attributes = (html: string, name: string) => [...html.matchAll(new RegExp(`\\s${name}="([^"]*)"`, "g"))].map((m) => m[1]!);
 
-/** What no rendered README may hold, whatever its source. */
+/** What no rendered README may hold, whatever its source. (Raw HTML is its characters, escaped: only real tags are looked at.) */
 function assertInert(html: string) {
-  expect(html).not.toMatch(/<script/i);
-  expect(html).not.toMatch(/<(iframe|object|embed|form|style|link|meta|base|svg|math|template|details|textarea|button|select)\b/i);
-  expect(html).not.toMatch(/\son[a-z]+=/i);
-  expect(html).not.toMatch(/\sstyle=/i);
-  expect(html).not.toMatch(/\s(srcset|formaction|action|xlink:href|background|poster)=/i);
-  for (const href of attributes(html, "href")) expect(href).toMatch(/^(https?:\/\/|mailto:|#user-content-)/);
+  const tags = (html.match(/<[^>]*>/g) ?? []).join("\n");
+  expect(tags).not.toMatch(/<script/i);
+  expect(tags).not.toMatch(/<(iframe|object|embed|form|style|link|meta|base|svg|math|template|details|textarea|button|select|section|sup)\b/i);
+  expect(tags).not.toMatch(/\son[a-z]+=/i);
+  expect(tags).not.toMatch(/\sstyle=/i);
+  expect(tags).not.toMatch(/\s(srcset|formaction|action|xlink:href|background|poster)=/i);
+  for (const href of attributes(html, "href")) expect(href).toMatch(/^(https:\/\/|mailto:|#user-content-)/);
   for (const src of attributes(html, "src")) expect(src.startsWith(FILES)).toBe(true);
-  for (const id of attributes(html, "id")) expect(id).toMatch(/^(user-content-|footnote-label$)/);
+  for (const id of attributes(html, "id")) expect(id).toMatch(/^user-content-/);
 }
 
 const HOSTILE: [string, string][] = [
@@ -61,6 +61,8 @@ const HOSTILE: [string, string][] = [
   ["a base tag", '<base href="https://evil.example/">'],
   ["a meta refresh", '<meta http-equiv="refresh" content="0;url=https://evil.example">'],
   ["an object", '<object data="https://evil.example/x.swf"></object>'],
+  ["a badge whose link is javascript", "[![b](https://x.example/b.svg)](javascript:alert(1))"],
+  ["a badge whose picture is the package's, in a link out", "[![b](shots/b.png)](https://x.example/)"],
 ];
 
 describe("a README's hostile input renders inert", () => {
@@ -68,10 +70,16 @@ describe("a README's hostile input renders inert", () => {
     test(name, () => assertInert(render(md)));
   }
 
+  test("raw HTML is the characters typed, escaped", () => {
+    expect(render("<script>alert(1)</script>")).toBe("<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>");
+    expect(render("<details>\n<summary>x</summary> &amp;\n</details>")).toBe("<p>&lt;details&gt;<br>\n&lt;summary&gt;x&lt;/summary&gt; &amp;amp;<br>\n&lt;/details&gt;</p>");
+    expect(render("a <b>bold</b> word")).toBe("<p>a &lt;b&gt;bold&lt;/b&gt; word</p>");
+  });
+
   test("text that looks like HTML stays as text", () => {
     const html = render("&lt;script&gt;alert(1)&lt;/script&gt; and `<b>code</b>`");
-    expect(html).toContain("&#x3C;script>");
-    expect(html).toContain("<code>&#x3C;b>code&#x3C;/b></code>");
+    expect(html).toContain("&lt;script&gt;alert(1)");
+    expect(html).toContain("<code>&lt;b&gt;code&lt;/b&gt;</code>");
   });
 
   test("a fenced block that says HTML is shown as code", () => {
@@ -101,8 +109,11 @@ describe("what a README may hold", () => {
   });
 
   test("a remote picture becomes a link to it, named by its words", () => {
-    const html = render("![Build status](https://ci.example/badge.svg)");
-    expect(html).toBe('<p><a href="https://ci.example/badge.svg" rel="nofollow noopener ugc">Build status</a></p>');
+    expect(render("![Build status](https://ci.example/badge.svg)")).toBe('<p><a href="https://ci.example/badge.svg" rel="nofollow noopener ugc">Build status</a></p>');
+  });
+
+  test("a badge: a remote picture inside a link is the link, named by the picture's words", () => {
+    expect(render("[![build](https://ci.example/badge.svg)](https://ci.example/runs)")).toBe('<p><a href="https://ci.example/runs" rel="nofollow noopener ugc">build</a></p>');
   });
 
   test("links out carry nofollow noopener ugc; in-page links don't", () => {
@@ -134,18 +145,16 @@ describe("what a README may hold", () => {
     expect(html).toContain('<h3 id="user-content-part-1">Part</h3>');
   });
 
-  test("GFM: tables scroll in their own box, task lists, strikethrough, autolinks, footnotes", () => {
-    const html = render("| a | b |\n|:-|-:|\n| 1 | 2 |\n\n- [x] done\n- [ ] todo\n\n~~old~~ https://example.com\n\nNote[^1].\n\n[^1]: The note.");
+  test("tables scroll in their own box; task lists, strikethrough, bare links; footnotes and math are their characters", () => {
+    const html = render("| a | b |\n|:-|-:|\n| 1 | 2 |\n\n- [x] done\n- [ ] todo\n\n~~old~~ https://example.com\n\nNote[^1] and $x^2$.\n\n[^1]: The note.");
     expect(html).toContain('<div class="table-scroll" tabindex="0"><table>');
     expect(html).toContain('<th align="left">a</th>');
-    expect(html).toContain('<input type="checkbox" checked disabled>');
+    expect(html).toContain('<ul class="contains-task-list">');
+    expect(html).toContain('<li class="task-list-item"><input type="checkbox" disabled checked> done</li>');
     expect(html).toContain("<del>old</del>");
     expect(html).toContain('<a href="https://example.com/" rel="nofollow noopener ugc">https://example.com</a>');
-    // (A footnote's ids carry its document's tag: two documents on a page never share one.)
-    const tag = /id="user-content-([a-z0-9]+)-fn-1"/.exec(html)?.[1];
-    expect(tag).toBeTruthy();
-    expect(html).toContain(`href="#user-content-${tag}-fn-1"`);
-    expect(html).toContain(`id="user-content-${tag}-footnote-label"`);
+    expect(html).toContain("Note[^1] and $x^2$.");
+    expect(html).toContain("[^1]: The note.");
     assertInert(html);
   });
 
@@ -156,34 +165,30 @@ describe("what a README may hold", () => {
     expect(html).not.toContain("style=");
   });
 
-  test("a document nested past what the parser can hold is shown as its text", () => {
+  test("nested past 32, a quote or a list is its text; the page is drawn, never shown as text for it", () => {
     const md = `${"> ".repeat(5_000)}<script>alert(1)</script>`;
     const html = render(md);
-    expect(html).toContain(`<p class="as-text">Shown as plain text: it's too long or too deeply nested to lay out.</p><pre class="plain" tabindex="0">`);
-    expect(html).toContain("&#x3C;script>");
-    expect(html).not.toContain("<script");
+    expect(html.match(/<blockquote>/g)).toHaveLength(32);
+    expect(html).toContain("&lt;script&gt;");
+    expect(html).not.toContain('class="as-text"');
+    assertInert(html);
   });
 
-  test("emphasis delimiters past the bound are shown as text, at once (the parser's cost is their square)", () => {
-    for (const md of ["*a_ ".repeat(12_000), "**_ ".repeat(16_000), "~~a~~ ".repeat(8_000)]) {
+  test("emphasis and brackets by the ten thousand are drawn, at once", () => {
+    for (const md of ["*a_ ".repeat(12_000), "**_ ".repeat(16_000), "~~a~~ ".repeat(8_000), `${"[".repeat(20_000)}\n\n${"*a".repeat(4_000)}`]) {
       const started = performance.now();
       const html = render(md);
       expect(performance.now() - started).toBeLessThan(250);
-      expect(html).toContain('<pre class="plain"');
+      expect(html).not.toContain('class="as-text"');
+      assertInert(html);
     }
   });
 
-  test("underscores in code don't count against the bound", () => {
-    const code = `\`\`\`py\n${"snake_case_name = other_name_here\n".repeat(2_000)}\`\`\`\n\nSome *real* emphasis and \`inline_code_with_underscores\`.`;
-    expect(delimiters(code)).toBe(2);
-    expect(render(code)).toContain("<em>real</em>");
-  });
-
-  test("brackets and emphasis by the thousand render in good time", () => {
-    const md = `${"[".repeat(20_000)}\n\n${"*a".repeat(4_000)}`;
-    const started = performance.now();
-    assertInert(render(md));
-    expect(performance.now() - started).toBeLessThan(2_000);
+  test(`a document that would write more than ${BOUNDS.html / 1024 / 1024} MB is shown as its text, said so`, () => {
+    const wide = `|${"a|".repeat(64)}\n|${"-|".repeat(64)}\n${"a\n".repeat(20_000)}`;
+    const out = renderWith(wide, { file: (p) => FILES + p });
+    expect(out.cut).toBe("size");
+    expect(out.html).toBe(`<p class="as-text">Shown as plain text: it's too long to lay out.</p><pre class="plain" tabindex="0">${wide}</pre>`);
   });
 });
 
@@ -222,150 +227,17 @@ describe("the README never outweighs the page", () => {
 });
 
 describe("a version's notes in one line", () => {
-  test("the first line that says something, without its markdown", async () => {
-    const { firstLine } = await import("./markdown.ts");
+  test("the first line that says something, without its markdown", () => {
     expect(firstLine("## 1.2.0\n\n- Fixed **the** timer, see [the issue](https://x)")).toBe("1.2.0");
     expect(firstLine("\n\n- Fixed **the** `timer`, see [the issue](https://x)")).toBe("Fixed the timer, see the issue");
     expect(firstLine("1. First\n2. Second")).toBe("First");
+    expect(firstLine("> - quoted, listed")).toBe("quoted, listed");
     expect(firstLine(null)).toBe("");
   });
-});
 
-describe("a budget of work, not a clock (a Worker's doesn't move while code runs)", () => {
-  const options = { file: (p: string) => `/f/${p}`, demote: true };
-  const timed = (md: string, budget?: Budget) => {
+  test("…at once, whatever it holds (a line of 64 KB of brackets once took the square of its length)", () => {
     const started = performance.now();
-    const out = renderWithin(md, options, budget);
-    return { ...out, ms: performance.now() - started };
-  };
-  /** The store's caps: a README's 512 KB, a version's notes 64 KB. */
-  const README = 512 * 1024;
-  const NOTES = 64 * 1024;
-  // The three shapes the review found, then the same spread over many blocks (each block small, the whole not).
-  const SHAPES: [string, (bytes: number) => string][] = [
-    ["setext headings", (b) => "a\n=\n".repeat(b / 4)],
-    ["quote markers", (b) => ">".repeat(b)],
-    ["nested brackets", (b) => "[".repeat(b / 5) + "a" + "](b)".repeat(b / 5)],
-    ["setext headings, a block each", (b) => "a\n=\n\n".repeat(b / 5)],
-    ["list items, a block each", (b) => "- a\n\n".repeat(b / 5)],
-    ["nested pictures, many blocks", (b) => ("![".repeat(16) + "a" + "](b)".repeat(16) + "\n\n").repeat(b / 99)],
-    ["emphasis, many blocks", (b) => ("*a_ ".repeat(300) + "\n\n").repeat(b / 1202)],
-  ];
-
-  for (const [name, make] of SHAPES) {
-    for (const [cap, bytes] of [["notes", NOTES], ["README", README]] as const) {
-      test(`${name} at the ${cap}'s cap: answered within the bound, never parsed past it`, () => {
-        const { html, cut, ms } = timed(make(bytes));
-        expect(ms).toBeLessThan(1_500);
-        // (Drawn when it fits the budget; otherwise its text, said so.)
-        if (cut) expect(html).toContain(`<p class="as-text">Shown as plain text: it's too long or too deeply nested to lay out.</p><pre class="plain" tabindex="0">`);
-      });
-    }
-  }
-
-  test("a shape past a bound is known before parsing: drawable says so, at once", () => {
-    for (const md of ["a\n=\n".repeat(131_072), ">".repeat(65_536), "[".repeat(13_107) + "a" + "](b)".repeat(13_107)]) {
-      const started = performance.now();
-      expect(drawable(md)).not.toBeNull();
-      expect(performance.now() - started).toBeLessThan(250);
-    }
-  });
-
-  test("an ordinary README of about 64 KB is drawn, whole, its references and footnotes across its pieces", () => {
-    const section = (i: number) => `## Part ${i}\n\nSee [the guide][guide] and the note.[^n]\n\n- one\n- two\n\n\`\`\`js\nconst a = ${i};\n\`\`\`\n\n`;
-    const md = Array.from({ length: 700 }, (_, i) => section(i)).join("") + "[guide]: https://example.com/guide\n\n[^n]: The note.\n";
-    expect(md.length).toBeGreaterThan(60_000);
-    const { html, cut } = timed(md);
-    expect(cut).toBeNull();
-    expect(html.match(/<h3 id="user-content-part-\d+">/g)).toHaveLength(700);
-    // (A reference in the first piece finds its definition in the last.)
-    expect(html).toContain('<a href="https://example.com/guide" rel="nofollow noopener ugc">the guide</a>');
-    expect(html).toContain('data-footnotes');
-    expect(html.match(/id="user-content-part-0"/g)).toHaveLength(1);
-  });
-
-  test("a page's budget is shared: what is left undrawn is its text, said so, and the budget is spent only on what is drawn", () => {
-    const budget = new Budget(700);
-    const big = "- a\n\n".repeat(10_000);
-    const first = timed(big, budget);
-    expect(first.cut).toBeNull();
-    const second = timed(big, budget);
-    expect(second.cut).toBe("page");
-    expect(second.ms).toBeLessThan(250);
-    expect(timed("Small *notes*.", budget).cut).toBeNull();
+    expect(firstLine("[".repeat(64 * 1024))).toBe("[".repeat(64 * 1024));
+    expect(performance.now() - started).toBeLessThan(250);
   });
 });
-
-test("two documents' footnotes on one page share no id", () => {
-  const options = { file: (p: string) => p };
-  const ids = (html: string) => [...html.matchAll(/id="([^"]+)"/g)].map((m) => m[1]);
-  const a = renderMarkdown("A note.[^1]\n\n[^1]: The note.", options);
-  const b = renderMarkdown("Another.[^1]\n\n[^1]: Another note.", options);
-  expect(ids(a)).toHaveLength(3);
-  expect(ids(a).filter((id) => ids(b).includes(id))).toEqual([]);
-  expect(a).not.toContain('id="footnote-label"');
-});
-
-describe("the estimate holds: what beat it before is caught, and no shape costs far more than reckoned", () => {
-  const options = { file: (p: string) => `/f/${p}`, demote: true };
-  /** What each shape must come to: drawn within the budget, or its text because it's past it. */
-  const OUTCOMES: Record<string, "drawn" | "budget" | "shape"> = {
-    "a fake fence (a backtick in its info string), 32 KB": "shape",
-    "a fake fence, 64 KB": "shape",
-    "a fence indented four spaces": "shape",
-    "a fence indented by a tab": "shape",
-    "a sparse table 1,300 columns wide": "shape",
-    "runs of closing brackets": "shape",
-    "lines ended by CR alone": "shape",
-    // (Code past what may be highlighted is drawn as plain code.)
-    "a markdown code block of link openers": "drawn",
-    "a rust code block of raw-string openers": "drawn",
-    "2,000 footnote definitions at the end of 100 KB": "budget",
-    "link definitions spread out with blank lines": "budget",
-    "every footnote referenced from every piece": "drawn",
-    "465 KB of fenced code": "drawn",
-    "2,000 footnotes": "budget",
-  };
-
-  for (const [name, make] of Object.entries(BEATERS)) {
-    const outcome = OUTCOMES[name]!;
-    test(`${name}: ${outcome === "drawn" ? "drawn, within the budget of work" : outcome === "shape" ? "its text, said so: a block past a bound, known before parsing" : "its text, said so: past the budget of work"}`, () => {
-      const md = make();
-      const work = workOf(md);
-      const { html, cut } = renderWithin(md, options);
-      if (outcome === "drawn") {
-        expect(cut).toBeNull();
-        expect(work).not.toBeNull();
-        expect(work!).toBeLessThanOrEqual(BOUNDS.work);
-        // (Within the output's bound too.)
-        expect(html.length).toBeLessThanOrEqual(BOUNDS.html);
-      } else {
-        expect(cut).toBe(outcome);
-        if (outcome === "shape") expect(work).toBeNull();
-        else expect(work!).toBeGreaterThan(BOUNDS.work);
-        expect(html).toContain(`<p class="as-text">Shown as plain text: it's too long or too deeply nested to lay out.</p>`);
-      }
-    });
-  }
-
-  test(`no measured shape costs more than ${RATIO_CEILING}× its estimate (each judged against the reference shape, so a machine's speed is set aside)`, () => {
-    // (Here the clock moves: this is Node, not a Worker. Best of three, warm.)
-    const ratio = (md: string) => {
-      let best = Infinity;
-      for (let i = 0; i < 3; i++) {
-        const started = performance.now();
-        renderWithin(md, options);
-        best = Math.min(best, performance.now() - started);
-      }
-      return best / workOf(md)!;
-    };
-    // The reference's ratio on the measuring box (markdown.ts, warm), and here.
-    const MEASURED_REFERENCE = 0.41;
-    const scale = MEASURED_REFERENCE / ratio(SHAPES[REFERENCE]!());
-    const over = Object.entries(SHAPES)
-      .map(([name, make]) => [name, ratio(make()) * scale] as const)
-      .filter(([, r]) => r > RATIO_CEILING);
-    expect(over).toEqual([]);
-  }, 120_000);
-});
-
