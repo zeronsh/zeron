@@ -431,7 +431,13 @@ local function order_control(): Node
 							return ui.t(`plugins.store.sort.{shown_sort:get()}`):get()
 						end,
 					},
-					ds.Icon { name = "alt-arrow-down", size = 14, aria_hidden = true },
+					-- (Its ink, not its box, on the content edge: the down
+					-- chevron's stroke ends at 18.375 of its 24, so it moves
+					-- out by the rest, as a settings row's chevron does.)
+					ui.div {
+						x = ui.raw(14 * (1 - 18.375 / 24), "the down chevron's ink on the edge, not its box"),
+						ds.Icon { name = "alt-arrow-down", size = 14, aria_hidden = true },
+					},
 				},
 			}
 		end,

@@ -190,6 +190,9 @@ export type SectionProps = {
 	-- (a 24 action beside a 14 title): title to description 4 and title
 	-- to card 8 with or without one (the plugin store's pages). Without it,
 	-- the title's row is as tall as its trail, as Settings' sections have it.
+	-- It's a ghost (xs): its words end on the content edge, text lined up
+	-- with text, and its wash hangs past by its end padding, showing under
+	-- the pointer and the ring.
 	trail_on_line: boolean?,
 	[number]: Child,
 }
@@ -212,10 +215,13 @@ function M.Section(props: SectionProps): Node
 					trail = if props.trail and props.trail_on_line
 						then ui.column {
 							-- (A line high, the trail centred in it, standing out
-							-- of it above and below alike.)
+							-- of it above and below alike; and past the content
+							-- edge by a ghost xs button's end padding, so its
+							-- words, not its box, end on it.)
 							h = "$font.line.xs",
 							shrink = 0,
 							justify = "center",
+							mr = ui.raw(-((ui.theme.get("zeron.space.tight") :: number?) or 6), "a ghost xs trail's end padding: its words on the content edge, its wash past it"),
 							props.trail,
 						}
 						else props.trail,

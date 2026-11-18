@@ -154,7 +154,14 @@ test("Browse's list: its head's order on the content edge, the categories across
 	local card = box(app, "#store-card")
 	local text, content = card.x + INSET, card.x + card.w - INSET
 	local order = box(app, "#store-order")
-	expect(math.abs(order.x + order.w - content) < 0.6).to_be(true)
+	-- (Order is a ghost: its last ink, the chevron's stroke, ends on the
+	-- content edge, its box and wash past it. The chevron's stroke ends at
+	-- 18.375 of its 24.)
+	local img = app:tree("#store-order"):match("[^\n]* img [^\n]*") or ""
+	local cx, cw = img:match("(%-?[%d.]+),%-?[%d.]+ ([%d.]+)x")
+	local chevron = { x = tonumber(cx) or 0, w = tonumber(cw) or 0 }
+	expect(math.abs(chevron.x + chevron.w * 18.375 / 24 - content) < 0.6).to_be(true)
+	expect(order.x + order.w > content).to_be(true)
 	-- (The head's action is the section actions' ghost, 24.)
 	expect(order.h).to_be(24)
 	local search_before = box(app, '#store-card >> role:textbox "Search plugins"').y
@@ -702,10 +709,18 @@ test("publishing's buttons and its versions' actions end on one edge, the conten
 	local _, content = edges(app, "#publish-checks")
 	-- (The checks' column is 1 in from its card's edge.)
 	content += 1
-	-- (Each row's last: Check again stands before Submit.)
-	for _, target in { "#publish-submit", 'role:button "Stop new installs"', "#keys-new" } do
+	-- (A filled control's box is its edge: Submit, a version's action.)
+	for _, target in { "#publish-submit", 'role:button "Stop new installs"' } do
 		local b = box(app, target)
 		expect(`{target} {math.abs(b.x + b.w - content) < 0.6}`).to_be(`{target} true`)
+	end
+	-- A ghost trail's words end on it, its wash past by its end padding (a
+	-- ghost xs button's, 6): text lined up with text.
+	app:scroll(SCROLL, 1e6)
+	settle(app)
+	for _, target in { "#publish-check-again", "#keys-new" } do
+		local b = box(app, target)
+		expect(`{target} {math.abs(b.x + b.w - 6 - content) < 0.6}`).to_be(`{target} true`)
 	end
 end)
 
