@@ -345,6 +345,47 @@ test("capture is the chat composer: the Brain dump's, its model there", function
 	expect(app:has(`{COMPOSER} >> ~"No ref"`)).to_be(false)
 end)
 
+-- Whether Capture's own composer holds the keys.
+local function capture_focused(app: any): boolean
+	for line in app:tree("#control-capture-inline"):gmatch("[^\n]+") do
+		if line:find("textbox", 1, true) and line:find(" focused", 1, true) then
+			return true
+		end
+	end
+	return false
+end
+
+test("capture has its composer before there's a Brain dump, and the first dump makes it", function()
+	local app = open()
+	-- A device that has never dumped: the engine makes the Brain dump with
+	-- the first dump, so there's none yet.
+	app:command("fixture.no_brain_dump")
+	app:frames(10)
+	expect(app:error()).to_be_nil()
+	expect(app:has(`{COMPOSER} >> role:textbox`)).to_be(true)
+	expect(app:has(`{COMPOSER} >> role:button "Attach"`)).to_be(true)
+	app:type(`{COMPOSER} >> role:textbox`, "first thing on my mind")
+	app:key("Enter")
+	app:frames(10)
+	expect(app:error()).to_be_nil()
+	-- Sent as a dump with no chat of its own.
+	expect(calls(app)).to_contain("dump:first thing on my mind")
+	expect(calls(app)).to_contain("dump-chat:none")
+	-- The Brain dump's composer in its place, the keys gone on to it.
+	expect(app:text(`{COMPOSER} >> role:textbox`)).to_be("")
+	expect(capture_focused(app)).to_be(true)
+	app:hover(`{COMPOSER} >> role:textbox`)
+	app:frames(5)
+	expect((app:state("watched") or {})["control-capture"]).to_be("orc-brain")
+	-- The next dump is the Brain dump's.
+	app:type(`{COMPOSER} >> role:textbox`, "and a second")
+	app:key("Enter")
+	app:frames(5)
+	expect(calls(app)).to_contain("dump:and a second")
+	local _, n = string.gsub(calls(app), "dump%-chat:none", "")
+	expect(n).to_be(1)
+end)
+
 test("capture: Shift+Enter breaks the line, Enter sends it as a dump", function()
 	local app = open()
 	app:type(`{COMPOSER} >> role:textbox`, "first line")
