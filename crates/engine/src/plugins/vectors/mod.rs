@@ -295,7 +295,10 @@ fn packed(key: Option<&SigningKey>, manifest: &Value, files: &BTreeMap<String, V
 fn package_result(raw: Vec<u8>) -> Value {
     let sha256 = signing::sha256_hex(&raw);
     match install::parse(raw.clone()) {
-        Ok(p) => json!({ "ok": true, "id": p.id(), "version": p.manifest.version, "key": p.key, "hash": p.hash, "sha256": sha256, "files": p.files.len() }),
+        Ok(p) => json!({
+            "ok": true, "id": p.id(), "version": p.manifest.version, "key": p.key, "hash": p.hash, "sha256": sha256,
+            "files": p.files.len(), "paths": p.files.keys().collect::<Vec<_>>(),
+        }),
         Err(error) => {
             let word = install::reason_of(&error).map(str::to_owned).unwrap_or_else(|| {
                 let value: Value = serde_json::from_slice(&raw).unwrap();
