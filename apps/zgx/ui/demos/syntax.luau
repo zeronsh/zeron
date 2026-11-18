@@ -70,8 +70,9 @@ local function editor(id: string, value: State<string>): Node
 		highlight = Syntax.highlighter(id),
 		line_numbers = true,
 		font = "$font.mono",
-		-- The textarea takes its type size as a number, not a token.
-		text_size = ui.theme.get("zeron.prose.code.size") :: number,
+		-- The textarea takes its type size as a number, not a token: the
+		-- code size's, read from the theme.
+		text_size = ui.raw(ui.theme.get("zeron.prose.code.size") :: number, "a textarea takes its type size as a number: the theme's code size"),
 		tab = "    ",
 		current_line = "$hover",
 		-- No inset on the scrolling sides: a textarea clips inside its padding.
