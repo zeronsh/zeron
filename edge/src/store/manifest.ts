@@ -9,6 +9,8 @@
  * White_Space (which, unlike JavaScript's, has U+0085 and not U+FEFF),
  * `is_control()` is category Cc.
  */
+
+import { LIMITS, STORE_DATA } from "./data";
 import { type Json, type JsonObject, isArray, isObject } from "./json";
 
 export const MANIFEST_FILE = "zeron-plugin.json";
@@ -21,7 +23,7 @@ export const KNOWN_PERMISSIONS: readonly string[] = [
 ];
 
 /** Ids the app keeps for itself (manifest.rs `RESERVED_IDS`). */
-export const RESERVED_IDS: readonly string[] = ["templates", "zeron", "app"];
+export const RESERVED_IDS: readonly string[] = STORE_DATA.reserved_ids;
 export const RESERVED_ID_ERROR = "Zeron already uses that name";
 
 const encoder = new TextEncoder();
@@ -110,7 +112,7 @@ export const changeTargetProblem = (target: string): string | undefined => {
 
 // ── network hosts (plugin-guard net.rs) ─────────────────────────────────────
 
-export const MAX_HOSTS = 64;
+export const MAX_HOSTS = LIMITS.max_hosts;
 
 /** Rust's `Ipv4Addr::from_str`: four decimal octets, no leading zeros. */
 export const parseIpv4 = (s: string): number[] | undefined => {

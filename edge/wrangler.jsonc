@@ -348,5 +348,11 @@
   },
   "observability": {
     "enabled": true
-  }
+  },
+  // CPU per request, for the whole worker and its Durable Objects: pinned at
+  // the paid plan's default, deliberately not lower. The session rooms'
+  // cold replays run near it (session-room.ts), so less would cut them; the
+  // plugin store needs far less (its worst body, 20 MiB of hostile JSON, is
+  // well under 2 s: docs/plugin-store-limits.md).
+  "limits": { "cpu_ms": 30000 }
 }

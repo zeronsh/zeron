@@ -1,13 +1,16 @@
 /**
- * Reading a `.zeron-plugin` exactly as the engine does
- * (crates/engine/src/plugins/{package.rs `parse`, install.rs `parse`,
- * signing.rs}): every check before anything is kept, in the engine's order,
- * so a package the store takes is one every device takes, and the reverse.
+ * Reading a `.zeron-plugin` as the engine does (crates/engine/src/plugins/
+ * {package.rs `parse`, install.rs `parse`, signing.rs}): the same checks in
+ * the same order, so a package the store takes is one every device takes.
+ * The store's own bounds come on top (its body cap, the manifest's size and
+ * value count, a long duplicated file key's word): within them the reverse
+ * holds too, and past them it refuses what a device might take.
  *
  *   { "format": "zeron-plugin:v1", "manifest": {…signed…}, "files": { rel: base64 } }
  *
- * 1. The JSON (json.ts, serde_json's rules); `format`; `manifest` an object;
- *    `files` an object of at most 2,000.
+ * 1. The JSON, checked whole as serde_json reads it without being built
+ *    (scan.ts); `format`; `manifest` an object; `files` an object of at
+ *    most 2,000.
  * 2. Each file, in path order: a plain path (paths.ts), not the manifest
  *    file, its data strict standard base64 (padded, canonical). Their total
  *    at most 50 MB.
@@ -19,17 +22,19 @@
  * Then the content hash: sha256 of `canonical(manifest without signature) +
  * "\n" + canonical(file hashes)`.
  */
+
 import { type Json, type JsonObject, JsonError, canonicalJson, isObject, parseJson } from "./json";
 import { MANIFEST_FILE, type Manifest, idProblem, readManifest } from "./manifest";
+import { LIMITS } from "./data";
 import { plainPath } from "./paths";
-import { Scanner, type Span, decodeBase64String, spanDecodedBound, stringText } from "./scan";
+import { Scanner, decodeBase64String, decodedBound as spanBound, stringIs, stringText } from "./scan";
 
 export const FORMAT = "zeron-plugin:v1";
 export const PAYLOAD_PREFIX = "zeron-plugin:v1\n";
-export const MAX_FILES = 2000;
-export const MAX_BYTES = 50 * 1024 * 1024;
+export const MAX_FILES = LIMITS.max_files;
+export const MAX_BYTES = LIMITS.max_bytes;
 /** package.rs `MAX_PACKAGE_BYTES`: the engine's own ceiling. */
-export const MAX_PACKAGE_BYTES = Math.floor((MAX_BYTES * 4) / 3) + 1024 * 1024;
+export const MAX_PACKAGE_BYTES = LIMITS.max_package_bytes;
 
 /** Why a package was refused: install.rs's reason words, plus the plugin
  * level ones (`bad_manifest`, `bad_id`, `missing_entry`), as the engine's
@@ -250,13 +255,70 @@ const byCodePoint = (a: string, b: string): number => {
 /** The longest manifest JSON the store reads (bytes as written), and the
  * most values in it: bounds on what building it can cost. The canonical
  * manifest is held to 256 KB as a listing rule (listing.ts). */
-export const MAX_MANIFEST_JSON = 1024 * 1024;
-export const MAX_MANIFEST_VALUES = 100_000;
+export const MAX_MANIFEST_JSON = LIMITS.max_manifest_json_bytes;
+export const MAX_MANIFEST_VALUES = LIMITS.max_manifest_values;
 /** A file's path is at most 1,024 bytes, and each takes at most six bytes
  * of JSON (`\u0041`): a longer key is no path, read or not. */
 const MAX_KEY_JSON = 6 * 1024 + 6;
+/** Stands for every key too long to be a path: one entry, however many,
+ * as duplicates of one key would be (they can't be told apart unread, and
+ * any of them makes the package `bad_file`). */
+const TOO_LONG_KEY = "\u0000too long";
 
-const keyText = (raw: Uint8Array, span: Span): string | undefined => (span.end - span.start <= 96 ? stringText(raw, span) : undefined);
+interface Span {
+  readonly start: number;
+  readonly end: number;
+}
+
+/** The package's JSON as the engine reads its parts: checked whole (scan.ts),
+ * then `format`'s text, `manifest`'s bytes and each of `files`' members,
+ * the last of a duplicated key winning, as serde_json's map keeps it. */
+const readParts = (raw: Uint8Array) => {
+  let format: Span | undefined;
+  let manifest: Span | undefined;
+  let files: Span | undefined;
+  const top = new Scanner(raw);
+  top.skipWhitespace();
+  if (raw[top.at] !== 0x7b) return undefined;
+  top.members(0, (ks, ke, vs, ve) => {
+    if (stringIs(raw, ks, ke, "format")) format = { start: vs, end: ve };
+    else if (stringIs(raw, ks, ke, "manifest")) manifest = { start: vs, end: ve };
+    else if (stringIs(raw, ks, ke, "files")) files = { start: vs, end: ve };
+  });
+  top.finish();
+  return { format, manifest, files };
+};
+
+/** A string value's content span, if `span` is a string. */
+const stringSpan = (raw: Uint8Array, span: Span | undefined): Span | undefined =>
+  span !== undefined && raw[span.start] === 0x22 ? { start: span.start + 1, end: span.end - 1 } : undefined;
+
+/** `files`' members: each key's text (or `TOO_LONG_KEY`) and its data's
+ * span (null when it isn't a string), stopping past MAX_FILES distinct. */
+const readFiles = (raw: Uint8Array, files: Span): Map<string, Span | null> => {
+  const entries = new Map<string, Span | null>();
+  const scanner = new Scanner(raw);
+  scanner.at = files.start;
+  // (`files` is a member of the top level: inside one container.)
+  // (A key repeated member after member is read once.)
+  let lastStart = -1;
+  let lastEnd = -1;
+  let lastName = "";
+  const sameAsLast = (ks: number, ke: number): boolean => {
+    if (lastStart < 0 || ke - ks !== lastEnd - lastStart) return false;
+    for (let i = 0; i < ke - ks; i++) if (raw[ks + i] !== raw[lastStart + i]) return false;
+    return true;
+  };
+  scanner.members(1, (ks, ke, vs, ve) => {
+    const name = ke - ks > MAX_KEY_JSON ? TOO_LONG_KEY : sameAsLast(ks, ke) ? lastName : stringText(raw, ks, ke);
+    lastStart = ks;
+    lastEnd = ke;
+    lastName = name;
+    entries.set(name, stringSpan(raw, { start: vs, end: ve }) ?? null);
+    return entries.size <= MAX_FILES;
+  });
+  return entries;
+};
 
 /**
  * The package `raw`, verified as install.rs `parse` verifies it, or a
@@ -270,40 +332,20 @@ const keyText = (raw: Uint8Array, span: Span): string | undefined => (span.end -
  */
 export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTES): Promise<VerifiedPackage> => {
   if (raw.length > maxBytes) refuse("too_big");
-  let format: Span | undefined;
-  let manifestSpan: Span | undefined;
-  let filesSpan: Span | undefined;
+  let parts: ReturnType<typeof readParts>;
   try {
-    const top = new Scanner(raw);
-    top.skipWhitespace();
-    if (raw[top.at] !== 0x7b) return refuse("not_a_package");
-    // Duplicate keys: the last one wins, as serde_json's map keeps it.
-    top.members((key, value) => {
-      const name = keyText(raw, key);
-      if (name === "format") format = value;
-      else if (name === "manifest") manifestSpan = value;
-      else if (name === "files") filesSpan = value;
-    });
-    top.end();
+    parts = readParts(raw);
   } catch (e) {
     if (e instanceof JsonError) return refuse("not_a_package");
     throw e;
   }
-  const isString = (span: Span | undefined): span is Span => span !== undefined && raw[span.start] === 0x22;
-  const inner = (span: Span): Span => ({ start: span.start + 1, end: span.end - 1 });
-  if (!isString(format) || format.end - format.start > 128 || stringText(raw, inner(format)) !== FORMAT) return refuse("not_a_package");
+  if (!parts) return refuse("not_a_package");
+  const format = stringSpan(raw, parts.format);
+  if (!format || format.end - format.start > 128 || stringText(raw, format.start, format.end) !== FORMAT) return refuse("not_a_package");
+  const { files: filesSpan, manifest: manifestSpan } = parts;
   if (!filesSpan || raw[filesSpan.start] !== 0x7b || !manifestSpan || raw[manifestSpan.start] !== 0x7b) return refuse("not_a_package");
 
-  const entries = new Map<string, Span | null>();
-  let tooLong = 0;
-  const files = new Scanner(raw);
-  files.at = filesSpan.start;
-  files.members((key, value) => {
-    // (A key too long to be a path stands for itself: it's a bad file.)
-    const name = key.end - key.start > MAX_KEY_JSON ? `\u0000${tooLong++}` : stringText(raw, key);
-    entries.set(name, isString(value) ? inner(value) : null);
-    return entries.size <= MAX_FILES;
-  });
+  const entries = readFiles(raw, filesSpan);
   if (entries.size > MAX_FILES) refuse("too_big");
   if (manifestSpan.end - manifestSpan.start > MAX_MANIFEST_JSON) refuse("too_big", "Its manifest is over 1 MB");
   let manifestValue: JsonObject;
@@ -318,14 +360,14 @@ export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTE
   // Every file decodes into one buffer, in path order: the files are views
   // of it, and it is what the store keeps as the version's files.
   let bound = 0;
-  for (const span of entries.values()) if (span) bound += spanDecodedBound(span);
+  for (const span of entries.values()) if (span) bound += spanBound(span.start, span.end);
   const blob = new Uint8Array(bound);
   const decoded = new Map<string, Uint8Array>();
   let total = 0;
   for (const rel of paths) {
-    if (rel.startsWith("\u0000") || !plainPath(rel) || rel === MANIFEST_FILE) refuse("bad_file", JSON.stringify(rel.slice(0, 80)));
+    if (rel === TOO_LONG_KEY || !plainPath(rel) || rel === MANIFEST_FILE) refuse("bad_file", JSON.stringify(rel.slice(0, 80)));
     const span = entries.get(rel);
-    const written = span ? decodeBase64String(raw, span, blob, total) : -1;
+    const written = span ? decodeBase64String(raw, span.start, span.end, blob, total) : -1;
     if (written < 0) return refuse("bad_file", JSON.stringify(rel));
     decoded.set(rel, blob.subarray(total, total + written));
     total += written;
@@ -354,3 +396,42 @@ export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTE
     bytes: raw.length
   };
 };
+
+/**
+ * What serde_json makes of `raw` as the engine reads a package from it
+ * (for the differential tests, scan.test.ts): whether it is JSON at all,
+ * and, for an object, its `format` if a string, its `manifest` in
+ * canonical form if an object, and each of its `files` (if an object)
+ * decoded from base64, or null where that fails. The same reading
+ * `verifyPackage` does, without its limits.
+ */
+export const inspectPackageJson = (raw: Uint8Array): { doc: boolean; pkg: null | { format: string | null; manifest: string | null; files: [string, Uint8Array | null][] | null } } => {
+  try {
+    const whole = new Scanner(raw);
+    whole.value();
+    whole.finish();
+  } catch (e) {
+    if (e instanceof JsonError) return { doc: false, pkg: null };
+    throw e;
+  }
+  const parts = readParts(raw);
+  if (!parts) return { doc: true, pkg: null };
+  const format = stringSpan(raw, parts.format);
+  const manifest = parts.manifest && raw[parts.manifest.start] === 0x7b ? canonicalJson(parseJson(raw.subarray(parts.manifest.start, parts.manifest.end))) : null;
+  let files: [string, Uint8Array | null][] | null = null;
+  if (parts.files && raw[parts.files.start] === 0x7b) {
+    const entries = new Map<string, Span | null>();
+    const scanner = new Scanner(raw);
+    scanner.at = parts.files.start;
+    scanner.members(1, (ks, ke, vs, ve) => void entries.set(stringText(raw, ks, ke), stringSpan(raw, { start: vs, end: ve }) ?? null));
+    files = [...entries.keys()].sort(byCodePoint).map((path) => {
+      const span = entries.get(path);
+      if (!span) return [path, null];
+      const out = new Uint8Array(spanBound(span.start, span.end));
+      const n = decodeBase64String(raw, span.start, span.end, out, 0);
+      return [path, n < 0 ? null : out.subarray(0, n)];
+    });
+  }
+  return { doc: true, pkg: { format: format ? stringText(raw, format.start, format.end) : null, manifest, files } };
+};
+

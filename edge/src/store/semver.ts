@@ -11,8 +11,9 @@
  * one, and `*`. Versions compare by precedence; `^` and `~` expand as npm's
  * do, 0.x included.
  */
+import { LIMITS } from "./data";
 
-export const MAX_VERSION_LENGTH = 128;
+export const MAX_VERSION_LENGTH = LIMITS.max_version_len;
 
 export interface Version {
   readonly major: number;
@@ -162,7 +163,7 @@ interface Comparator {
 /** Sets joined by `||`; each set's comparators all hold. An empty set is `*`. */
 export type Range = readonly (readonly Comparator[])[];
 
-export const MAX_RANGE_LENGTH = 256;
+export const MAX_RANGE_LENGTH = LIMITS.max_range_len;
 
 /** The lowest version of `major.minor.patch`: `x.y.z-0`. */
 const floor = (major: number, minor: number, patch: number): Version => ({

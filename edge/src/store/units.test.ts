@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { decodeCursor, encodeCursor, ftsQuery, searchTerms } from "./search";
-import { isText } from "./checks";
+import { isText, readmePictures } from "./checks";
 import { consentItem, fullControl, heldToItsOwnRules } from "./consent";
 import { formatFloat, parseJsonText } from "./json";
 import type { JsonObject } from "./json";
 import { changelogNotes, checkListing, listingOf } from "./listing";
 import { readManifest } from "./manifest";
-import { PAYLOAD_PREFIX, decodeBase64, sha256Hex, signaturePayload, verifyPackage } from "./package";
+import { PAYLOAD_PREFIX, decodeBase64, inspectPackageJson, sha256Hex, signaturePayload, verifyPackage } from "./package";
 import { comparePrecedence, parseRange, parseVersion, preKey, precedenceText, satisfies } from "./semver";
 
 const v = (text: string) => {
@@ -123,7 +123,7 @@ describe("store listing", () => {
     expect(rules({ keywords: ["timer", "deep work"], homepage: "https://example.com/", engines: { zeron: ">=0.4.0" } })).toEqual([]);
     const ok = listingOf(manifest({ keywords: ["timer"], engines: { zeron: ">=0.4.0" } }), files());
     expect(ok).toMatchObject({ summary: "Focus.", icon: "icon.svg", categories: ["productivity"], keywords: ["timer"], engines: ">=0.4.0", readme: "# Hi", notes: null });
-    expect(rules({}, { "README.md": `# Big\n${"x".repeat(512 * 1024)}` })).toEqual(["bad_listing"]);
+    expect(rules({}, { "README.md": `# Big\n${"x".repeat(512 * 1024)}` })).toEqual(["too_large"]);
     expect(rules({}, { "CHANGELOG.md": `## 1.0.0\n${"x".repeat(512 * 1024)}` })).toEqual(["too_large"]);
     expect(rules({ x: "y".repeat(256 * 1024) })).toEqual(["too_large"]);
     expect(rules({ icon: "../icon.svg" })).toEqual(["bad_listing"]);
@@ -251,5 +251,65 @@ describe("store package fast path", () => {
     for (const bad of [b(0), b(0xc0, 0x80), b(0xe0, 0x80, 0x80), b(0xed, 0xa0, 0x80), b(0xf4, 0x90, 0x80, 0x80), b(0xe4, 0xb8), b(0x80), b(0xff)]) {
       expect(isText(bad), [...bad].join(",")).toBe(false);
     }
+  });
+});
+
+describe("store package depth (serde_json: 127 containers at most)", () => {
+  const encoder = new TextEncoder();
+  const b64url = (b: Uint8Array) => Buffer.from(b).toString("base64url");
+  const nest = (n: number) => "[".repeat(n) + "]".repeat(n);
+  /** A signed package with `x` (nested `inTop` deep) at the top level, or
+   * inside the manifest (`inManifest`), or as a file's data (`inFile`).
+   * Keys are written in sorted order, so the JSON text is the canonical form. */
+  const build = async (where: "top" | "manifest" | "file", arrays: number) => {
+    const pair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"])) as CryptoKeyPair;
+    const key = b64url(new Uint8Array((await crypto.subtle.exportKey("raw", pair.publicKey)) as ArrayBuffer));
+    const init = encoder.encode("return 1");
+    const files: Record<string, string> = { "init.luau": await sha256Hex(init) };
+    const x = where === "manifest" ? `,"x":${nest(arrays)}` : "";
+    const fields = (sig: string) =>
+      `{"entry":"init.luau","id":"deep","name":"Deep","signature":{"files":${JSON.stringify(files)},"key":"${key}"${sig}},"version":"1.0.0"${x}}`;
+    const sig = b64url(new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, pair.privateKey, encoder.encode(PAYLOAD_PREFIX + fields("")))));
+    const fileData = `"init.luau":"${Buffer.from(init).toString("base64")}"` + (where === "file" ? `,"z.bin":${nest(arrays)}` : "");
+    const top = where === "top" ? `,"x":${nest(arrays)}` : "";
+    return encoder.encode(`{"files":{${fileData}},"format":"zeron-plugin:v1","manifest":${fields(`,"sig":"${sig}"`)}${top}}`);
+  };
+  const verdict = async (raw: Uint8Array) => {
+    try {
+      await verifyPackage(raw);
+      return "ok";
+    } catch (e) {
+      return (e as { code: string }).code;
+    }
+  };
+
+  it("takes 127 open at once and refuses 128 and 129, wherever they are", async () => {
+    // Containers open at the deepest point: the top level (1), then where `x` sits.
+    for (const [where, around, below] of [["top", 1, "ok"], ["manifest", 2, "ok"], ["file", 2, "bad_file"]] as const) {
+      for (const total of [127, 128, 129]) {
+        const got = await verdict(await build(where, total - around));
+        expect(got, `${where} at ${total}`).toBe(total <= 127 ? below : "not_a_package");
+      }
+    }
+  });
+
+  it("is the coordinator's minimal case: a member nested 127 deep inside the top-level object", async () => {
+    const raw = encoder.encode(`{"x":${nest(127)}}`);
+    expect(inspectPackageJson(raw).doc).toBe(false);
+    expect(inspectPackageJson(encoder.encode(`{"x":${nest(126)}}`)).doc).toBe(true);
+  });
+});
+
+describe("store README pictures", () => {
+  it("finds the relative ones, in linear time", () => {
+    expect(readmePictures("# Hi\n![a](shots/one.png) ![b](./x/../two.jpg?v=1#top) ![c](https://e.com/x.png) ![d](//cdn/x.png) ![e](<a%20b.png>)\n![no\n](n.png)")).toEqual([
+      "shots/one.png",
+      "two.jpg",
+      "a b.png"
+    ]);
+    const hostile = "![".repeat(200_000);
+    const started = performance.now();
+    expect(readmePictures(hostile)).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(500);
   });
 });

@@ -161,6 +161,7 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
     pkg,
     listing,
     warnings,
+    kinds,
     via: publisher.via,
     consent,
     base: base ? { version: base.version, consent: JSON.parse(base.permissions) as ConsentItem } : null,
@@ -215,12 +216,9 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
     ];
     await db.batch(statements);
   } catch (e) {
-    const kept = await db
-      .prepare("SELECT 1 FROM versions WHERE plugin_id = ? AND package_sha256 = ?")
-      .bind(id, pkg.sha256)
-      .first()
-      .catch(() => null);
-    if (!kept) await Promise.all([bucket.delete(pkgKey), bucket.delete(blobKey)]).catch(() => undefined);
+    // Never deleted here: a retry of these same bytes wrote these same
+    // keys, and its row may yet land. The sweep decides, later.
+    await maybeOrphaned(db, [pkgKey, blobKey]);
     throw e;
   }
 
@@ -230,8 +228,9 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
     .first<{ version: string; status: string; package_sha256: string }>();
   if (landed?.package_sha256 === pkg.sha256) return accepted(id, landed.version, landed.status, checks);
 
-  // Lost: to another publish of this version, or to a change since the checks above.
-  await Promise.all([bucket.delete(pkgKey), bucket.delete(blobKey)]);
+  // Lost: to another publish of this version, or to a change since the
+  // checks above. Its objects are the sweep's to delete, once no row names them.
+  await maybeOrphaned(db, [pkgKey, blobKey]);
   if (landed) return fail(409, "version_exists", `Version ${landed.version} was already submitted, with other contents. Submit a new version.`);
   const now2 = await pluginRow(db, id);
   if (!now2 && (await overClaims(db, publisher.userId, Date.now()))) return claimsRefusal();
@@ -244,6 +243,16 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
   if (await overRate(db, publisher.userId, Date.now())) return fail(429, "rate_limited", "Too many versions submitted lately. Try again later.");
   const later = await notNewerThan(db, id, order);
   return fail(409, "not_newer", `Version ${version.text} isn't later than ${later ?? "a version submitted just now"}.`);
+};
+
+/** Record R2 keys a publish wrote but may not need (release.ts
+ * `collectOrphans` deletes each after a grace period, if no version row
+ * names it). Best effort: if even this fails, the objects are only garbage. */
+const maybeOrphaned = async (db: D1Database, keys: readonly string[]): Promise<void> => {
+  const now = Date.now();
+  await Promise.all(
+    keys.map((key) => db.prepare("INSERT INTO object_orphans (key, at) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET at = excluded.at").bind(key, now).run())
+  ).catch((e) => console.error("store: couldn't record possibly orphaned objects", String(e)));
 };
 
 const overClaims = async (db: D1Database, userId: string, now: number): Promise<boolean> =>

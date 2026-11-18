@@ -144,3 +144,53 @@ Every pattern run on text a publisher controls is linear or bounded:
   (`/^[a-z0-9 -]+$/`, `/[\p{Cc}\p{Cf}]/u`), each linear, on fields the
   listing rules bound;
 - search terms (`?q`, at most 200 characters): `/[\p{L}\p{N}]+/gu`, linear.
+
+## CPU per hostile shape, after the review
+
+The identity lane's review measured the scanner at 0.6–6.3 s of CPU on
+some 20 MiB shapes: it allocated a stack per value, an object per span
+and a string per key. Now positions are scanner fields, the stack is one
+per scanner, top-level keys are compared as bytes, `\u` escapes decode
+inline, a repeated `files` key is read once, and a number at 10^308 is
+judged against the exact midpoint digit by digit. `src/store/scan.test.ts`
+holds each shape, at the 20 MiB cap, to 1.5 s through `verifyPackage`
+(Node 22, this box):
+
+| Shape at 20 MiB | Before (review) | Now |
+|---|---:|---:|
+| `{"a":0,"a":0,…}` | 6.3 s | 171 ms |
+| `{"a":[],"a":[],…}` | 4.3 s | 178 ms |
+| `files` full of `"a":""` | 2.9–5.5 s | 194 ms |
+| `files` of distinct keys | — | 132 ms |
+| one 20 MB string of `A` | 0.9–1.8 s | 43 ms |
+| `1e308` repeated | 0.6–0.8 s | 120 ms |
+| file data of `\/` escapes | — | 127 ms |
+| file data of `\u0041` escapes | — | 134 ms |
+| `[0,0,0,…]` | — | 177 ms |
+| `[{},{},…]` | — | 181 ms |
+
+`limits.cpu_ms` in `edge/wrangler.jsonc` is pinned at 30,000, the paid
+plan's default: it applies to the whole worker and its Durable Objects, and
+the session rooms' cold replays run near it, so a lower value would cut
+them. The store needs far less.
+
+## The scanner against serde_json
+
+Depth: serde_json allows at most 127 containers open at once in a
+document, the package's own top-level object among them. The scanner counts
+the same (`src/store/units.test.ts`, "store package depth": 127, 128 and
+129 at the top level, inside the manifest and inside a file's data).
+
+Differential testing, two tiers:
+
+- `npm test` runs a fixed corpus (`edge/test/fixtures/scan-corpus.*`, 3,175
+  inputs with serde_json's own answers: hand-written edges, generated
+  packages, byte mutations) through `src/store/scan-corpus.test.ts`, with no
+  cargo needed.
+- `node edge/scripts/scan-fuzz/run.mjs [--seed N] [--count N] [--valid]`
+  generates fresh inputs and compares the scanner with serde_json live
+  (`scripts/scan-fuzz/reference`, the engine's serde_json version and
+  features). Run it with a few seeds after any change to `scan.ts` or
+  `json.ts`; `--write-corpus` refreshes the fixed corpus. Last run: seeds 1–5,
+  840,875 inputs, 0 differences.
+

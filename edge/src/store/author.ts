@@ -16,6 +16,7 @@
  * actor, and moves the listing in the same batch.
  */
 import type { Env } from "../env";
+import { STORE_DATA } from "./data";
 import { firstPageKeys } from "./catalog";
 import { authorCard, authorsOf, pluginCard, versionInfo } from "./cards";
 import { cacheKey, purge } from "./cache";
@@ -25,7 +26,7 @@ import { authenticatePublisher, optionalUser, readBody } from "./principal";
 import { allowWrite } from "./publish";
 import { decodeSegment, versionFileKeys } from "./serve";
 
-export const REPORT_REASONS = ["malware", "misleading", "broken", "copyright", "other"] as const;
+export const REPORT_REASONS: readonly string[] = STORE_DATA.report_reasons;
 export const MAX_REPORT_TEXT = 2000;
 export const REPORTS_PER_DAY = 10;
 
@@ -148,7 +149,7 @@ export const handleReport = async (request: Request, env: Env, db: D1Database, i
   const reason = body?.reason;
   const text = body?.text ?? "";
   const version = body?.version ?? null;
-  if (typeof reason !== "string" || !(REPORT_REASONS as readonly string[]).includes(reason)) {
+  if (typeof reason !== "string" || !REPORT_REASONS.includes(reason)) {
     return fail(400, "bad_request", `reason is one of ${REPORT_REASONS.join(", ")}.`);
   }
   if (typeof text !== "string" || text.length > MAX_REPORT_TEXT) return fail(400, "bad_request", `text is at most ${MAX_REPORT_TEXT} characters.`);

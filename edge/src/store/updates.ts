@@ -19,13 +19,14 @@
  * store doesn't know, against nothing).
  */
 import type { Env } from "../env";
+import { LIMITS } from "./data";
 import { authorsOf } from "./cards";
 import { type ConsentItem, consentDiff } from "./consent";
 import { fail, answer, objectBody, refusedBody } from "./http";
 import { optionalUser, readBody } from "./principal";
 import { type Version, comparePrecedence, parseRange, parseVersion, satisfies } from "./semver";
 
-export const MAX_UPDATE_PLUGINS = 200;
+export const MAX_UPDATE_PLUGINS = LIMITS.max_update_plugins;
 const MAX_BODY = 64 * 1024;
 const ID_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
 const HASH_RE = /^[0-9a-f]{64}$/;

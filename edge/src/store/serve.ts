@@ -26,6 +26,7 @@ import { STATE_TTL, cacheKey, cachedBytes, cachedValue } from "./cache";
 import { filesKey, packageKey } from "./db";
 import { fail, notFound } from "./http";
 import { plainPath } from "./paths";
+import { MAX_VERSION_LENGTH, parseVersion } from "./semver";
 import { hasCredentials, optionalUser, requireAdmin } from "./principal";
 
 export const SANDBOX = "sandbox; default-src 'none'";
@@ -43,13 +44,20 @@ const baseHeaders = (cacheControl: string): Headers =>
     "cache-control": cacheControl
   });
 
-/** A version named in a URL segment, decoded (versions may carry `+`). */
+/** A URL segment, decoded (versions may carry `+`). */
 export const decodeSegment = (segment: string): string | undefined => {
   try {
     return decodeURIComponent(segment);
   } catch {
     return undefined;
   }
+};
+
+/** A version named in a URL segment: decoded, and a version the store
+ * takes (so at most 128 characters), before it keys anything. */
+const versionSegment = (segment: string): string | undefined => {
+  const text = segment.length <= 3 * MAX_VERSION_LENGTH ? decodeSegment(segment) : undefined;
+  return text !== undefined && parseVersion(text) ? text : undefined;
 };
 
 /** Whether the caller owns the plugin or is an admin. */
@@ -73,8 +81,8 @@ export const packageBytesKey = (sha256: string): string => cacheKey(["bytes", "p
 
 const PUBLIC_SQL = "p.status = 'active' AND v.status IN ('approved', 'yanked')";
 
-export const servePackage = async (request: Request, env: Env, db: D1Database, bucket: R2Bucket, id: string, versionSegment: string): Promise<Response> => {
-  const versionText = decodeSegment(versionSegment);
+export const servePackage = async (request: Request, env: Env, db: D1Database, bucket: R2Bucket, id: string, segment: string): Promise<Response> => {
+  const versionText = versionSegment(segment);
   if (!versionText) return notFound();
   const state = await cachedValue<PackageState>(request, packageStateKey(id, versionText), STATE_TTL, async () => {
     const row = await db
@@ -122,12 +130,13 @@ export const serveFile = async (
   db: D1Database,
   bucket: R2Bucket,
   id: string,
-  versionSegment: string,
+  segment: string,
   pathSegments: readonly string[]
 ): Promise<Response> => {
-  const versionText = decodeSegment(versionSegment);
+  const versionText = versionSegment(segment);
+  if (!versionText) return notFound();
   const decoded = pathSegments.map(decodeSegment);
-  if (!versionText || decoded.some((p) => p === undefined)) return fail(400, "bad_path", "That isn't a file's path.");
+  if (decoded.some((p) => p === undefined)) return fail(400, "bad_path", "That isn't a file's path.");
   const path = decoded.join("/");
   if (!plainPath(path)) return fail(400, "bad_path", "That isn't a file's path.");
   const state = await cachedValue<FileState>(request, fileStateKey(id, versionText, path), STATE_TTL, async () => {
@@ -153,29 +162,43 @@ export const serveFile = async (
     };
   });
   if (!state) return notFound();
-  const picture = state.kind === "png" || state.kind === "jpeg" || (state.kind === "svg" && state.icon);
-  const isPublic = picture && state.public;
-  if (!isPublic && !(await privileged(request, env, state.owner))) return notFound();
-  const read = async (): Promise<Uint8Array | undefined> => {
+  const pictureKind = state.kind === "png" || state.kind === "jpeg" || (state.kind === "svg" && state.icon);
+  const readRaw = async (): Promise<Uint8Array | undefined> => {
     if (state.bytes === 0) return new Uint8Array(0);
     const object = await bucket.get(filesKey(id, state.version, state.packageSha256), { range: { offset: state.at, length: state.bytes } });
-    if (!object) return undefined;
-    const raw = new Uint8Array(await object.arrayBuffer());
-    // A picture is served as image-check.ts rebuilds it.
-    if (state.kind === "png" || state.kind === "jpeg") return cleanImage(state.kind === "png" ? "image/png" : "image/jpeg", raw) ?? raw;
-    return raw;
+    return object ? new Uint8Array(await object.arrayBuffer()) : undefined;
   };
-  const bytes = isPublic ? await cachedBytes(request, fileBytesKey(state.sha256, state.kind), read) : await read();
-  if (!bytes) return fail(503, "unavailable", "The file can't be read right now.");
-  const headers = baseHeaders(isPublic && !hasCredentials(request) ? PUBLIC_CACHE : "private, no-store");
-  headers.set("etag", `"${state.sha256}"`);
-  if (picture && state.kind !== "svg") headers.set("content-type", state.kind === "png" ? "image/png" : "image/jpeg");
-  else if (picture) headers.set("content-type", "image/svg+xml");
-  else {
-    headers.set("content-type", "application/octet-stream");
-    headers.set("content-disposition", `attachment; filename="${attachmentName(path.split("/").pop()!)}"`);
+  /** A picture as image-check.ts rebuilds it; the icon as it is; else none. */
+  const readPicture = async (): Promise<Uint8Array | undefined> => {
+    const raw = await readRaw();
+    if (!raw || state.kind === "svg") return raw;
+    // What isn't the picture it claims to be is never shown as one.
+    return cleanImage(state.kind === "png" ? "image/png" : "image/jpeg", raw);
+  };
+  // Who may read: anyone, a public version's picture; else its owner and
+  // admins only (to anyone else it doesn't exist).
+  const isPublic = pictureKind && state.public;
+  const mayRead = isPublic || (await privileged(request, env, state.owner));
+  if (!mayRead) return notFound();
+  if (pictureKind) {
+    const bytes = isPublic ? await cachedBytes(request, fileBytesKey(state.sha256, state.kind), readPicture) : await readPicture();
+    if (bytes) {
+      const headers = baseHeaders(isPublic && !hasCredentials(request) ? PUBLIC_CACHE : "private, no-store");
+      headers.set("etag", `"${state.sha256}"`);
+      headers.set("content-type", state.kind === "png" ? "image/png" : state.kind === "jpeg" ? "image/jpeg" : "image/svg+xml");
+      return new Response(request.method === "HEAD" ? null : bytes, { headers });
+    }
   }
-  return new Response(request.method === "HEAD" ? null : bytes, { headers });
+  // Anything else, a picture that won't clean included: its owner's and
+  // admins' only, and only as an attachment.
+  if (isPublic && !(await privileged(request, env, state.owner))) return notFound();
+  const raw = await readRaw();
+  if (!raw) return fail(503, "unavailable", "The file can't be read right now.");
+  const headers = baseHeaders("private, no-store");
+  headers.set("etag", `"${state.sha256}"`);
+  headers.set("content-type", "application/octet-stream");
+  headers.set("content-disposition", `attachment; filename="${attachmentName(path.split("/").pop()!)}"`);
+  return new Response(request.method === "HEAD" ? null : raw, { headers });
 };
 
 /** The state keys a change to a version moves: its package's and its

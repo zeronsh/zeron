@@ -1,25 +1,20 @@
 /**
  * Reading a package's JSON without building it: a validating scanner that
- * holds a whole document to serde_json's rules (json.ts says which) while
- * allocating nothing per value, and keeps only where the top level's
- * `format`, `manifest` and `files` members are. A package is mostly its
- * files' base64; the store reads each file's data straight from the
- * request's bytes (`decodeBase64String`), escapes and all, and builds JSON
- * values only for the manifest, under a bound (package.ts).
+ * holds a document to serde_json's rules (json.ts says which) and keeps only
+ * where the top level's `format`, `manifest` and `files` members are. A
+ * package is mostly its files' base64; the store decodes each file's data
+ * straight from the request's bytes (`decodeBase64String`), escapes and all,
+ * and builds JSON values only for the manifest, under a bound (package.ts).
  *
- * So what a hostile body costs is linear in its size and bounded in memory,
- * whatever its shape: an 8 MB array of zeros, 4 MB of digits in one number,
- * a string of `\/` escapes, a million empty objects. Every such document is
- * walked once, byte by byte, with no allocation but a 128-entry stack.
+ * What it costs: the whole document is walked once to check it; the
+ * `files` object is walked again to read its members, and the manifest's
+ * bytes are parsed once more to build it. Every walk is linear and makes no
+ * object per JSON value: positions are the scanner's own fields, the
+ * container stack is one array per scanner, numbers are judged in place,
+ * and a top-level key is compared as bytes. Only `files`' keys (paths, at
+ * most 2,001 distinct ones read) become strings.
  */
 import { JsonError, MAX_DEPTH } from "./json";
-
-/** Bytes `[start, end)` of the input. For a string, its content between
- * the quotes. */
-export interface Span {
-  readonly start: number;
-  readonly end: number;
-}
 
 const isDigit = (b: number): boolean => b >= 0x30 && b <= 0x39;
 const isWhitespace = (b: number): boolean => b === 0x20 || b === 0x0a || b === 0x0d || b === 0x09;
@@ -30,14 +25,18 @@ const hexValue = (b: number): number => {
   return -1;
 };
 
-/** Significant digits kept to decide a number's range: with a sticky digit
- * for the rest, enough for any double's correct rounding (768 suffice). */
-const KEEP = 800;
+/** The exact midpoint between the largest double and 2^1024, as 309
+ * decimal digits: a decimal at or above it rounds to infinity (ties go to
+ * the even 2^1024), which serde_json refuses as out of range. */
+const MIDPOINT = (2n ** 1024n - 2n ** 970n).toString();
 
 export class Scanner {
   at = 0;
-  /** The first significant digits of the number being scanned. */
-  private readonly digits = new Uint8Array(KEEP);
+  /** The span `[start, end)` of the last string read (its content). */
+  start = 0;
+  end = 0;
+  /** The kinds of the open containers (1: array, 2: object), by depth. */
+  private readonly stack = new Uint8Array(MAX_DEPTH + 2);
   constructor(readonly bytes: Uint8Array) {}
 
   fail(why: string): never {
@@ -49,46 +48,63 @@ export class Scanner {
     while (this.at < bytes.length && isWhitespace(bytes[this.at]!)) this.at++;
   }
 
-  /** A string at `at` (its opening quote): checked, its content's span. */
-  string(): Span {
+  /** A string at `at` (its opening quote), checked; its content's span in
+   * `start` and `end`. */
+  string(): void {
     const bytes = this.bytes;
-    this.at++;
-    const start = this.at;
+    let at = this.at + 1;
+    const start = at;
     for (;;) {
-      const b = bytes[this.at];
-      if (b === undefined) this.fail("EOF while parsing a string");
-      if (b === 0x22) {
-        const end = this.at++;
-        return { start, end };
+      const b = bytes[at];
+      if (b === undefined) {
+        this.at = at;
+        this.fail("EOF while parsing a string");
       }
+      if (b === 0x22) break;
+      if (b >= 0x20 && b < 0x80 && b !== 0x5c) {
+        at++;
+        continue;
+      }
+      this.at = at;
       if (b < 0x20) this.fail("control character in a string");
-      if (b === 0x5c) {
-        this.at++;
-        const e = bytes[this.at++];
-        if (e === 0x75) {
-          const unit = this.hex4();
-          if (unit >= 0xdc00 && unit <= 0xdfff) this.fail("lone trailing surrogate");
-          if (unit >= 0xd800 && unit <= 0xdbff) {
-            if (bytes[this.at] !== 0x5c || bytes[this.at + 1] !== 0x75) this.fail("lone leading surrogate");
-            this.at += 2;
-            const low = this.hex4();
-            if (!(low >= 0xdc00 && low <= 0xdfff)) this.fail("lone leading surrogate");
-          }
-        } else if (!(e === 0x22 || e === 0x5c || e === 0x2f || e === 0x62 || e === 0x66 || e === 0x6e || e === 0x72 || e === 0x74)) {
-          this.fail("invalid escape");
-        }
-        continue;
-      }
-      if (b < 0x80) {
-        this.at++;
-        continue;
-      }
-      this.utf8(b);
+      at = b === 0x5c ? this.escape(at) : this.utf8(at, b);
     }
+    this.start = start;
+    this.end = at;
+    this.at = at + 1;
   }
 
-  /** One UTF-8 sequence starting with `lead` (RFC 3629). */
-  private utf8(lead: number): void {
+  /** The escape at `at` (its backslash), checked: where it ends. */
+  private escape(at: number): number {
+    const bytes = this.bytes;
+    const e = bytes[at + 1];
+    if (e === 0x75) {
+      const unit = this.hex4(at + 2);
+      if (unit >= 0xdc00 && unit <= 0xdfff) this.fail("lone trailing surrogate");
+      if (unit >= 0xd800 && unit <= 0xdbff) {
+        if (bytes[at + 6] !== 0x5c || bytes[at + 7] !== 0x75) this.fail("lone leading surrogate");
+        const low = this.hex4(at + 8);
+        if (!(low >= 0xdc00 && low <= 0xdfff)) this.fail("lone leading surrogate");
+        return at + 12;
+      }
+      return at + 6;
+    }
+    if (e === 0x22 || e === 0x5c || e === 0x2f || e === 0x62 || e === 0x66 || e === 0x6e || e === 0x72 || e === 0x74) return at + 2;
+    return this.fail("invalid escape");
+  }
+
+  private hex4(at: number): number {
+    let unit = 0;
+    for (let i = 0; i < 4; i++) {
+      const digit = hexValue(this.bytes[at + i] ?? -1);
+      if (digit < 0) this.fail("invalid \\u escape");
+      unit = unit * 16 + digit;
+    }
+    return unit;
+  }
+
+  /** One UTF-8 sequence at `at` starting with `lead` (RFC 3629): where it ends. */
+  private utf8(at: number, lead: number): number {
     const bytes = this.bytes;
     let need: number;
     let min: number;
@@ -98,22 +114,12 @@ export class Scanner {
     else if (lead >= 0xf0 && lead <= 0xf4) (need = 3), (min = 0x10000), (cp = lead & 0x07);
     else return this.fail("invalid UTF-8");
     for (let k = 1; k <= need; k++) {
-      const c = bytes[this.at + k];
+      const c = bytes[at + k];
       if (c === undefined || (c & 0xc0) !== 0x80) this.fail("invalid UTF-8");
       cp = (cp << 6) | (c & 0x3f);
     }
     if (cp < min || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) this.fail("invalid UTF-8");
-    this.at += need + 1;
-  }
-
-  private hex4(): number {
-    let unit = 0;
-    for (let i = 0; i < 4; i++) {
-      const digit = hexValue(this.bytes[this.at++] ?? -1);
-      if (digit < 0) this.fail("invalid \\u escape");
-      unit = unit * 16 + digit;
-    }
-    return unit;
+    return at + need + 1;
   }
 
   /** A number at `at`, checked as serde_json reads one: its grammar, and
@@ -176,10 +182,11 @@ export class Scanner {
     this.inRange(intStart, intEnd, fracStart, fracEnd, expStart, expEnd, expNegative);
   }
 
-  /** Fail unless the float `int.frac e exp` rounds to a finite double. */
+  /** Fail unless the float `int.frac e exp` rounds to a finite double:
+   * decided from where its first significant digit falls, and only at
+   * 10^308 from its digits against the midpoint's, in place. */
   private inRange(intStart: number, intEnd: number, fracStart: number, fracEnd: number, expStart: number, expEnd: number, expNegative: boolean): void {
     const bytes = this.bytes;
-    // The first significant digit, and its decimal exponent before `exp`.
     let firstAt = -1;
     let place = 0;
     for (let i = intStart; i < intEnd; i++) {
@@ -204,50 +211,49 @@ export class Scanner {
     const e = place + (expNegative ? -exponent : exponent);
     if (e < 308) return;
     if (e > 308) this.fail("number out of range");
-    // On the edge of the range: the first KEEP significant digits, a sticky
-    // 1 for any non-zero after them, rounded as serde_json (float_roundtrip)
-    // and V8 both round, correctly.
-    let kept = 0;
-    let sticky = false;
-    const take = (from: number, to: number) => {
-      for (let i = from; i < to; i++) {
-        if (kept < KEEP) this.digits[kept++] = bytes[i]!;
-        else if (bytes[i] !== 0x30) sticky = true;
+    let k = 0;
+    let order = 0;
+    const compare = (from: number, to: number): void => {
+      for (let i = from; i < to && order === 0; i++, k++) {
+        const d = bytes[i]!;
+        if (k < MIDPOINT.length) {
+          const m = MIDPOINT.charCodeAt(k);
+          if (d !== m) order = d < m ? -1 : 1;
+        } else if (d !== 0x30) order = 1;
       }
     };
     if (firstAt < intEnd) {
-      take(firstAt, intEnd);
-      take(fracStart, fracEnd);
-    } else take(firstAt, fracEnd);
-    let text = "0.";
-    for (let i = 0; i < kept; i++) text += String.fromCharCode(this.digits[i]!);
-    if (sticky) text += "1";
-    if (!Number.isFinite(Number(`${text}e${e + 1}`))) this.fail("number out of range");
+      compare(firstAt, intEnd);
+      compare(fracStart, fracEnd);
+    } else compare(firstAt, fracEnd);
+    // Fewer digits than the midpoint, all equal so far: below it.
+    if (order === 0 && k < MIDPOINT.length) order = -1;
+    if (order >= 0) this.fail("number out of range");
   }
 
-  /** A whole value at `at` (after whitespace), its containers walked with
-   * a stack of their kinds; answers its span. */
-  value(): Span {
-    this.skipWhitespace();
-    const start = this.at;
+  /**
+   * A whole value at `at` (after whitespace), inside `depth` open
+   * containers (0 for a document; an object's member is inside it), its
+   * own containers walked on the scanner's stack. serde_json's limit is on
+   * the document: at most MAX_DEPTH containers open at once.
+   */
+  value(depth = 0): void {
+    const base = depth;
     const bytes = this.bytes;
-    const stack = new Uint8Array(MAX_DEPTH + 1); // 1: array, 2: object
-    let depth = 0;
+    const stack = this.stack;
     for (;;) {
       this.skipWhitespace();
       const b = bytes[this.at];
       if (b === undefined) this.fail("EOF while parsing a value");
-      let opened = false;
       if (b === 0x5b || b === 0x7b) {
         if (depth + 1 > MAX_DEPTH) this.fail("recursion limit exceeded");
         this.at++;
         this.skipWhitespace();
-        const close = b === 0x5b ? 0x5d : 0x7d;
-        if (bytes[this.at] === close) this.at++;
+        if (bytes[this.at] === (b === 0x5b ? 0x5d : 0x7d)) this.at++;
         else {
           stack[++depth] = b === 0x5b ? 1 : 2;
-          opened = true;
           if (b === 0x7b) this.key();
+          continue;
         }
       } else if (b === 0x22) this.string();
       else if (b === 0x2d || isDigit(b)) this.number();
@@ -255,10 +261,9 @@ export class Scanner {
       else if (this.matches("false")) this.at += 5;
       else if (this.matches("null")) this.at += 4;
       else this.fail("expected value");
-      if (opened) continue;
       // Close every container the value completed.
       for (;;) {
-        if (depth === 0) return { start, end: this.at };
+        if (depth === base) return;
         this.skipWhitespace();
         const next = bytes[this.at];
         const isArray = stack[depth] === 1;
@@ -280,15 +285,14 @@ export class Scanner {
     }
   }
 
-  /** `"key"` then `:`, inside an object: the key's span. */
-  key(): Span {
+  /** `"key"` then `:`, inside an object: the key's span in `start`/`end`. */
+  key(): void {
     this.skipWhitespace();
     if (this.bytes[this.at] !== 0x22) this.fail(this.bytes[this.at] === 0x7d ? "trailing comma" : "key must be a string");
-    const span = this.string();
+    this.string();
     this.skipWhitespace();
     if (this.bytes[this.at] !== 0x3a) this.fail("expected `:`");
     this.at++;
-    return span;
   }
 
   private matches(word: string): boolean {
@@ -296,24 +300,32 @@ export class Scanner {
     return true;
   }
 
-  /** Each member of the object at `at` (`{`), checked, as spans: the key's
-   * content and the value. Stops early when `each` answers false (the
-   * rest is still checked). */
-  members(each: (key: Span, value: Span) => boolean | void): Span {
+  /**
+   * Each member of the object at `at` (its `{`), the object itself inside
+   * `depth` open containers (0 for a document's top level), checked. `each`
+   * is told the key's content span and the value's span; once it answers
+   * false it isn't called again (the rest is still checked).
+   */
+  members(depth: number, each: (keyStart: number, keyEnd: number, valueStart: number, valueEnd: number) => boolean | void): void {
     this.skipWhitespace();
-    const start = this.at;
     if (this.bytes[this.at] !== 0x7b) this.fail("expected an object");
+    if (depth + 1 > MAX_DEPTH) this.fail("recursion limit exceeded");
     this.at++;
     this.skipWhitespace();
-    let open = true;
     if (this.bytes[this.at] === 0x7d) {
       this.at++;
-      return { start, end: this.at };
+      return;
     }
+    let open = true;
     for (;;) {
-      const key = this.key();
-      const value = this.value();
-      if (open && each(key, value) === false) open = false;
+      this.key();
+      const keyStart = this.start;
+      const keyEnd = this.end;
+      this.skipWhitespace();
+      const valueStart = this.at;
+      // The member's value is inside this object: one container deeper.
+      this.value(depth + 1);
+      if (open && each(keyStart, keyEnd, valueStart, this.at) === false) open = false;
       this.skipWhitespace();
       const next = this.bytes[this.at];
       if (next === 0x2c) {
@@ -324,13 +336,14 @@ export class Scanner {
       }
       if (next === 0x7d) {
         this.at++;
-        return { start, end: this.at };
+        return;
       }
       this.fail(next === undefined ? "EOF while parsing an object" : "expected `,` or `}`");
     }
   }
 
-  end(): void {
+  /** Nothing but whitespace may follow the document. */
+  finish(): void {
     this.skipWhitespace();
     if (this.at !== this.bytes.length) this.fail("trailing characters");
   }
@@ -338,17 +351,29 @@ export class Scanner {
 
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
-/** The text of a string's content span (already checked by the scanner). */
-export const stringText = (bytes: Uint8Array, span: Span): string => {
+/** One `\uXXXX` escape's code unit at `at` (already checked). */
+const unitAt = (bytes: Uint8Array, at: number): number =>
+  (hexValue(bytes[at]!) << 12) | (hexValue(bytes[at + 1]!) << 8) | (hexValue(bytes[at + 2]!) << 4) | hexValue(bytes[at + 3]!);
+
+const SHORT_ESCAPES: Record<number, number> = { 0x22: 0x22, 0x5c: 0x5c, 0x2f: 0x2f, 0x62: 0x08, 0x66: 0x0c, 0x6e: 0x0a, 0x72: 0x0d, 0x74: 0x09 };
+
+/** The text of a checked string's content `[start, end)`. */
+export const stringText = (bytes: Uint8Array, start: number, end: number): string => {
+  // A short one of plain ASCII (a path, a key): straight from its bytes.
+  if (end - start <= 64) {
+    let plain = true;
+    for (let i = start; i < end && plain; i++) plain = bytes[i]! < 0x80 && bytes[i] !== 0x5c;
+    if (plain) return String.fromCharCode.apply(null, bytes.subarray(start, end) as unknown as number[]);
+  }
   let out = "";
-  let run = span.start;
+  let run = start;
   const units: number[] = [];
   const flushUnits = () => {
     for (let i = 0; i < units.length; i += 8192) out += String.fromCharCode(...units.slice(i, i + 8192));
     units.length = 0;
   };
-  let i = span.start;
-  while (i < span.end) {
+  let i = start;
+  while (i < end) {
     if (bytes[i] !== 0x5c) {
       i++;
       continue;
@@ -359,22 +384,36 @@ export const stringText = (bytes: Uint8Array, span: Span): string => {
     }
     const e = bytes[i + 1]!;
     if (e === 0x75) {
-      units.push(parseInt(String.fromCharCode(...bytes.subarray(i + 2, i + 6)), 16));
+      units.push(unitAt(bytes, i + 2));
       i += 6;
     } else {
-      units.push({ 0x22: 0x22, 0x5c: 0x5c, 0x2f: 0x2f, 0x62: 0x08, 0x66: 0x0c, 0x6e: 0x0a, 0x72: 0x0d, 0x74: 0x09 }[e]!);
+      units.push(SHORT_ESCAPES[e]!);
       i += 2;
     }
     if (units.length >= 8192) flushUnits();
     run = i;
   }
   flushUnits();
-  if (span.end > run) out += utf8.decode(bytes.subarray(run, span.end));
+  if (end > run) out += utf8.decode(bytes.subarray(run, end));
   return out;
 };
 
-/** The most bytes a string span's base64 can decode to. */
-export const spanDecodedBound = (span: Span): number => Math.ceil((span.end - span.start) / 4) * 3;
+/** Whether a checked string's content `[start, end)` is the ASCII text
+ * `name`: compared as bytes when it has no escape (the usual case). */
+export const stringIs = (bytes: Uint8Array, start: number, end: number, name: string): boolean => {
+  if (end - start === name.length) {
+    let same = true;
+    for (let i = 0; i < name.length && same; i++) same = bytes[start + i] === name.charCodeAt(i);
+    if (same) return true;
+  }
+  // With escapes, at most six bytes a character.
+  if (end - start > name.length * 6) return false;
+  for (let i = start; i < end; i++) if (bytes[i] === 0x5c) return stringText(bytes, start, end) === name;
+  return false;
+};
+
+/** The most bytes a string's base64 content can decode to. */
+export const decodedBound = (start: number, end: number): number => Math.ceil((end - start) / 4) * 3;
 
 const STANDARD = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const LOOKUP = (() => {
@@ -384,23 +423,23 @@ const LOOKUP = (() => {
 })();
 
 /**
- * Decode a checked string's content as STANDARD base64 (padding required
- * and canonical, zero trailing bits, nothing outside the alphabet: the
- * base64 crate's), unescaping as it goes, into `out` at `at`. Answers the
- * bytes written, or -1 if the string's text isn't such base64.
+ * Decode a checked string's content `[start, end)` as STANDARD base64
+ * (padding required and canonical, zero trailing bits, nothing outside the
+ * alphabet: the base64 crate's), unescaping as it goes, into `out` at
+ * `at`. Answers the bytes written, or -1 if the text isn't such base64.
  */
-export const decodeBase64String = (bytes: Uint8Array, span: Span, out: Uint8Array, at: number): number => {
+export const decodeBase64String = (bytes: Uint8Array, start: number, end: number, out: Uint8Array, at: number): number => {
   let o = at;
   let quad = 0;
   let filled = 0;
   let padding = 0;
-  let i = span.start;
-  while (i < span.end) {
+  let i = start;
+  while (i < end) {
     let c = bytes[i]!;
     if (c === 0x5c) {
       const e = bytes[i + 1]!;
       if (e === 0x75) {
-        c = parseInt(String.fromCharCode(...bytes.subarray(i + 2, i + 6)), 16);
+        c = unitAt(bytes, i + 2);
         i += 6;
       } else {
         c = e === 0x2f ? 0x2f : -1; // `\/` is `/`; every other escape is no base64
@@ -408,8 +447,7 @@ export const decodeBase64String = (bytes: Uint8Array, span: Span, out: Uint8Arra
       }
     } else i++;
     if (c === 0x3d) {
-      padding++;
-      if (padding > 2) return -1;
+      if (++padding > 2) return -1;
       continue;
     }
     if (padding > 0) return -1; // anything after padding

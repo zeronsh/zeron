@@ -54,7 +54,7 @@ export default {
     const listing = listingOf(pkg.manifest, pkg.files);
     if ("rule" in listing) return new Response(listing.words, { status: 400 });
     const kinds = new Map([...pkg.files].map(([path, bytes]) => [path, fileKind(path, bytes)]));
-    const checks = runChecks({ pkg, listing, warnings, via: "session", consent: consentItem(pkg.manifest), base: null, previous: null });
+    const checks = runChecks({ pkg, listing, warnings, kinds, via: "session", consent: consentItem(pkg.manifest), base: null, previous: null });
     // `?r2=0`: leave R2 out, to tell the pipeline's memory from local R2's
     // (Miniflare runs its R2 inside the same workerd process).
     if (new URL(request.url).searchParams.get("r2") !== "0") await Promise.all([

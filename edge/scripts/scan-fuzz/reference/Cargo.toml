@@ -1,0 +1,17 @@
+# The reference for scan-fuzz: what serde_json (the engine's version and
+# features) makes of each input, as the engine reads a package from it.
+# Standalone: not part of the repository's workspace.
+[package]
+name = "scan-fuzz-reference"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+serde_json = { version = "=1.0.151", features = ["float_roundtrip", "raw_value"] }
+base64 = "=0.22.1"
+
+[profile.release]
+debug = false

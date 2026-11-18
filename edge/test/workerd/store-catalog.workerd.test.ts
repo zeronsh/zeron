@@ -323,4 +323,40 @@ describe("store packages and files", () => {
       expect((await get.arrayBuffer()).byteLength, path).toBeGreaterThan(0);
     }
   });
+
+  it("never shows a picture image-check won't vouch for: public 404, its owner an attachment", async () => {
+    const a = await author();
+    const id = uniqueId();
+    await listed(a, id, "1.0.0", { files: { "fake.png": new TextEncoder().encode("\u0089PNG not really") } });
+    // As if it had been taken for a picture: what's served still has to clean.
+    await env.STORE_DB.prepare("UPDATE version_files SET kind = 'png' WHERE plugin_id = ? AND path = 'fake.png'").bind(id).run();
+    const path = `/store/v1/plugins/${id}/files/1.0.0/fake.png`;
+    expect((await call(undefined, "GET", path)).status).toBe(404);
+    const own = await call(a.userId, "GET", path);
+    expect([own.status, own.headers.get("content-type"), own.headers.get("content-disposition")]).toEqual([200, "application/octet-stream", 'attachment; filename="fake.png"']);
+  });
+
+  it("flags a screenshot or README picture that won't show, at publish", async () => {
+    const a = await author();
+    const id = uniqueId();
+    const res = await publish(
+      a.userId,
+      id,
+      await makePackage({ id, version: "1.0.0", signer: a.signer, files: { "README.md": "# Hi\n![x](shots/one.png) ![y](missing.png) ![z](notes.txt)\n", "notes.txt": "text" } })
+    );
+    expect(res.status).toBe(201);
+    const checks = ((await res.json()) as { checks: { id: string; path?: string }[] }).checks;
+    expect(checks.filter((c) => c.id === "picture_unshown").map((c) => c.path)).toEqual(["missing.png", "notes.txt"]);
+  });
+
+  it("answers a version segment that isn't a version as not found, never a 500", async () => {
+    const a = await author();
+    const id = uniqueId();
+    await listed(a, id, "1.0.0");
+    for (const v of ["x".repeat(5000), "1.0", "%ZZ", "1.0.0%2F..", "%00"]) {
+      expect((await call(undefined, "GET", `/store/v1/plugins/${id}/versions/${v}/package`)).status, v.slice(0, 20)).toBe(404);
+      expect((await call(undefined, "GET", `/store/v1/plugins/${id}/files/${v}/icon.svg`)).status, v.slice(0, 20)).toBe(404);
+    }
+  });
 });
+
