@@ -932,6 +932,15 @@ ui.command {
 		typed = true
 	end,
 }
+-- Focus timer gone from the store (taken down, or its owner removed it):
+-- the store answers `not_in_store` for it from now.
+ui.command {
+	id = "store_stub.gone",
+	title = "Store: Focus timer is no longer in the store",
+	run = function()
+		by_id["focus-timer"] = nil
+	end,
+}
 ui.command {
 	id = "store_stub.refuse_listing",
 	title = "Store: the next publish is refused for its description's mark",

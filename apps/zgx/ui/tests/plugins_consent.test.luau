@@ -390,3 +390,17 @@ test("a git plugin's re-ask lists its asks as it always has, never the store's n
 	expect(sheet).to_contain("It now also asks to:")
 	expect(app:has("#consent-unverified")).to_be(false)
 end)
+
+-- An update from a new publisher says so here too, by name, in the update
+-- sheet's words: the window where the person decides never leaves it out.
+test("an update from a new publisher says so in the consent window, by name", function()
+	local app = open()
+	app:command("newowner")
+	app:frames(20)
+	expect(app:tree("#consent-new-owner")).to_contain("It has a new publisher, @bea.")
+	expect(app:has("#consent-unverified")).to_be(true)
+	-- (Any other: never.)
+	app:command("timer")
+	app:frames(20)
+	expect(app:has("#consent-new-owner")).to_be(false)
+end)
