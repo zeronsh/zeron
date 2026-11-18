@@ -344,13 +344,32 @@ export const checkListing = (
   unsigned.delete("signature");
   if (byteLength(canonicalJson(unsigned)) > MAX_MANIFEST_BYTES) problems.push(problem("too_large", "manifest", "Its manifest is over 256 KB"));
   // Two paths that are one file on a Mac or a Windows machine (the
-  // manifest's own name among them).
+  // manifest's own name among them), or a file where another path needs
+  // a folder of that name there (amendment 42): each at the later path, in
+  // code point order.
   const folded = new Map<string, string>([[foldPath(MANIFEST_FILE), MANIFEST_FILE]]);
+  const folders = new Map<string, string>();
   for (const rel of [...files.keys()].sort(byCodePoint)) {
     const key = foldPath(rel);
     const other = folded.get(key);
-    if (other !== undefined) problems.push(problem("bad_listing", "files", `"${rel}" and "${other}" are the same file on macOS and Windows`, rel));
-    else folded.set(key, rel);
+    if (other !== undefined) {
+      problems.push(problem("bad_listing", "files", `"${rel}" and "${other}" are the same file on macOS and Windows`, rel));
+      continue;
+    }
+    const inside = folders.get(key);
+    if (inside !== undefined) {
+      problems.push(problem("bad_listing", "files", `"${rel}" is a file where "${inside}" needs a folder of that name on macOS and Windows`, rel));
+      continue;
+    }
+    const parts = key.split("/");
+    let clash: string | undefined;
+    for (let end = 1; end < parts.length; end++) {
+      const folder = parts.slice(0, end).join("/");
+      clash ??= folded.get(folder);
+      if (!folders.has(folder)) folders.set(folder, rel);
+    }
+    if (clash !== undefined) problems.push(problem("bad_listing", "files", `"${clash}" is a file where "${rel}" needs a folder of that name on macOS and Windows`, rel));
+    folded.set(key, rel);
   }
 
   return { problems, warnings };

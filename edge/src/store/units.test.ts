@@ -139,6 +139,12 @@ describe("store listing", () => {
     expect(problems({}, { "caf\u00e9.txt": "a", "cafe\u0301.txt": "b" })).toEqual([["bad_listing", "files", "caf\u00e9.txt"]]);
     expect(problems({}, { "Zeron-Plugin.json": "{}" })).toEqual([["bad_listing", "files", "Zeron-Plugin.json"]]);
     expect(problems({}, { "a/b.txt": "a", "a/b.txt.": "b" }).length).toBe(1);
+    // A file and a folder that fold alike (amendment 42), at the later path
+    // in code point order, whichever is the file.
+    expect(problems({}, { ui: "a", "UI/x.luau": "b" })).toEqual([["bad_listing", "files", "ui"]]);
+    expect(problems({}, { UI: "a", "ui/x.luau": "b" })).toEqual([["bad_listing", "files", "ui/x.luau"]]);
+    expect(problems({}, { "zeron-plugin.json/x.luau": "b" })).toEqual([["bad_listing", "files", "zeron-plugin.json/x.luau"]]);
+    expect(problems({}, { "lib/a.luau": "a", "lib/b.luau": "b", "libs": "c" })).toEqual([]);
     expect(problems({ name: "Focus\u202e" })).toEqual([["bad_listing", "name", null]]);
     expect(problems({ description: "Fo\u200bcus." })).toEqual([["bad_listing", "description", null]]);
     expect(problems({ description: "Tab\there." })).toEqual([["bad_listing", "description", null]]);
