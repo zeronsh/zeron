@@ -146,7 +146,27 @@ pub async fn run(
     ipc_port: u16,
     data_dir: &std::path::Path,
 ) -> anyhow::Result<()> {
-    let client = connect(ipc_port, data_dir).await?;
+    // `check` needs no running Zeron; nor does the store with a deploy key.
+    let Some(command) = crate::store_cli::standalone(command, data_dir).await? else {
+        return Ok(());
+    };
+    let client = match connect(ipc_port, data_dir).await {
+        Ok(client) => client,
+        Err(error) if crate::store_cli::is_store_command(&command) => {
+            return Err(crate::store_cli::Exit {
+                code: crate::store_cli::SETUP,
+                message: format!(
+                    "{error} (From CI, set {} to a deploy key's secret: `zeron plugin key create`.)",
+                    zeron_engine::plugins::store::deploy_key::ENV
+                ),
+            }
+            .into());
+        }
+        Err(error) => return Err(error),
+    };
+    if crate::store_cli::is_store_command(&command) {
+        return crate::store_cli::through_zeron(command, data_dir, &client).await;
+    }
     let call = |method: &'static str, params: Value| call(&client, method, params);
     match command {
         PluginCommand::New {
@@ -232,6 +252,13 @@ pub async fn run(
             );
             println!("Share that file: anyone installs it from the file or a link to it.");
         }
+        PluginCommand::Check { .. }
+        | PluginCommand::Publish { .. }
+        | PluginCommand::Status { .. }
+        | PluginCommand::Key { .. }
+        | PluginCommand::Yank { .. }
+        | PluginCommand::Unyank { .. }
+        | PluginCommand::Withdraw { .. } => unreachable!("the store's commands ran above"),
     }
     Ok(())
 }

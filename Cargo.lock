@@ -8843,12 +8843,15 @@ name = "zeron"
 version = "0.3.8"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "clap",
  "embed-resource",
  "libc",
  "libmimalloc-sys",
  "mimalloc",
+ "ring",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tracing",

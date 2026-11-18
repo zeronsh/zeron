@@ -48,6 +48,11 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 
 [dev-dependencies]
 tempfile.workspace = true
+# The stand-in store the CLI's store tests publish to (shared with the
+# engine's, crates/engine/tests/support/fake_store.rs): already in the tree.
+ring = "0.17"
+sha2.workspace = true
+base64 = "0.22"
 
 [build-dependencies]
 embed-resource = "3.0.11"
