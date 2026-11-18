@@ -292,7 +292,8 @@ M.View = ui.component(function(props: ViewProps): Node
 							wrap = true,
 							text_size = "$font.size.sm",
 							line_height = "$font.line.sm",
-							color = "$text.tertiary",
+							-- (The app's quiet line, as a list's "none yet".)
+							color = "$text.secondary",
 						}
 						else nil,
 					ui.text {
