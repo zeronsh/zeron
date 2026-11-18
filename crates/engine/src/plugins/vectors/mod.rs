@@ -38,10 +38,6 @@ use super::version::{self, Range, Version};
 
 const CORPUS: &str = include_str!("corpus.json");
 
-fn path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/plugin-package-vectors.json")
-}
-
 fn corpus() -> Value {
     serde_json::from_str(CORPUS).expect("corpus.json is JSON")
 }
@@ -456,6 +452,10 @@ fn range_cases() -> Value {
         ("<0.3.0 || *", &["9.9.9"]),
         ("  >=1.0.0   <2.0.0  ", &["1.5.0"]),
         (">=1.0.0 <1.0.0", &["1.0.0"]),
+        // Amendment 32: by precedence, with no npm-style pre-release
+        // exclusion: a beta of a Zeron the range accepts runs the plugin.
+        (">=1.0.0", &["2.0.0-beta", "1.0.1-rc.1"]),
+        ("^0.4.0", &["0.4.5-beta.2"]),
     ];
     let mut out = Vec::new();
     for (range, versions) in cases {
@@ -511,6 +511,14 @@ fn listing_cases() -> Value {
         ("an id starting zeron", "id", json!("zeron-tools")),
         ("a built-in plugin's id", "id", json!("github")),
         ("a permission Zeron doesn't know", "permissions", json!(["root"])),
+        ("a name with a direction override", "name", json!("Focus\u{202e}draoB")),
+        ("a name with a zero-width space", "name", json!("Focus\u{200b}Board")),
+        ("a description with a direction isolate", "description", json!("A board\u{2066}.")),
+        ("a homepage without its path's slash", "homepage", json!("https://example.com")),
+        ("a homepage with a capital in its host", "homepage", json!("https://Example.com/x")),
+        ("a homepage written with a backslash", "homepage", json!("https:\\example.com/x")),
+        ("a homepage exactly as it parses", "homepage", json!("https://example.com/")),
+        ("a repository with a query and a fragment", "repository", json!("https://github.com/a/b?x=1#y")),
     ];
     for (name, key, value) in changes {
         let mut m = base.clone();
@@ -529,11 +537,23 @@ fn listing_cases() -> Value {
     let mut no_readme = files.clone();
     no_readme.remove(listing::README);
     cases.push(("no README.md".into(), base.clone(), no_readme));
-    cases.push(("a README.md over 512 KB".into(), base.clone(), with_file(listing::README, vec![b'x'; listing::MAX_README_BYTES + 1])));
     cases.push(("a WebP screenshot".into(), { let mut m = base.clone(); m["screenshots"] = json!(["shots/a.webp"]); m }, with_file("shots/a.webp", b"RIFF\0\0\0\0WEBPVP8 ".to_vec())));
-    let long_notes = format!("## 1.2.0\n\n{}\n", "n".repeat(listing::MAX_NOTES_BYTES + 1));
-    cases.push(("notes over 64 KB".into(), base.clone(), with_file(listing::CHANGELOG, long_notes.into_bytes())));
+    // (The size limits themselves are data, in plugin-store-data.json, and
+    // the engine's own tests hold them: a case of each would carry
+    // megabytes of filler here.)
     cases.push(("a binary file (a warning)".into(), base.clone(), with_file("bin/tool.wasm", b"\0asm\x01\0\0\0".to_vec())));
+    for (name, a, b) in [
+        ("two paths differing in case", "README.md", "readme.md"),
+        ("two paths differing in Unicode form", "caf\u{e9}.txt", "cafe\u{301}.txt"),
+        ("two folders differing in case", "shots/a.png", "Shots/A.png"),
+        ("a path and the same with a trailing dot", "x.txt", "x.txt."),
+        ("a file that is its manifest on a Mac", "ZERON-PLUGIN.JSON", "init2.luau"),
+    ] {
+        let mut two = files.clone();
+        two.insert(a.into(), b"1".to_vec());
+        two.insert(b.into(), b"2".to_vec());
+        cases.push((name.into(), base.clone(), two));
+    }
     Value::Array(
         cases
             .into_iter()
@@ -640,14 +660,26 @@ fn consent_item_cases() -> Value {
     )
 }
 
-fn build() -> Value {
+/// `docs/plugin-store-data.json`: the store's rules as data, small enough
+/// for the edge to import at run time (its Worker never bundles the test
+/// vectors): formats and prefixes, limits, categories, kept ids, report
+/// reasons, deploy-key constants, and the tables behind the consent
+/// sheet's ratings.
+fn data() -> Value {
     json!({
-        "format": "zeron-plugin-package-vectors:v1",
-        "about": "Made by crates/engine/src/plugins/vectors from the engine's own code; the edge's package verification must agree with every case. JSON inputs are text (input, manifest), parsed as the engine parses them. Keys are ed25519, base64url without padding; hashes are lowercase hex sha256; package_b64 and files_b64 are standard base64 of the exact bytes.",
+        "format": "zeron-plugin-store-data:v1",
+        "about": "Made by crates/engine/src/plugins/vectors from the engine's own constants; the edge imports it. The cases that hold both sides to these rules are in docs/plugin-package-vectors.json.",
         "package_format": FORMAT,
         "payload_prefix": PAYLOAD_PREFIX,
         "template_payload_prefix": TEMPLATE_PAYLOAD_PREFIX,
         "key_proof_prefix": signing::KEY_PROOF_PREFIX,
+        "deploy_key": {
+            "secret_prefix": deploy_key::SECRET_PREFIX,
+            "proof_prefix": deploy_key::PROOF_PREFIX,
+            "request_prefix": deploy_key::REQUEST_PREFIX,
+            "content_sha256_header": deploy_key::CONTENT_SHA256_HEADER,
+            "max_skew_ms": deploy_key::MAX_SKEW_MS,
+        },
         "limits": {
             "max_files": super::files::MAX_FILES,
             "max_bytes": super::files::MAX_BYTES,
@@ -667,13 +699,26 @@ fn build() -> Value {
             "max_description_len": listing::MAX_DESCRIPTION_LEN,
             "max_icon_bytes": listing::MAX_ICON_BYTES,
             "max_readme_bytes": listing::MAX_README_BYTES,
+            "max_changelog_bytes": listing::MAX_CHANGELOG_BYTES,
+            "max_manifest_bytes": listing::MAX_MANIFEST_BYTES,
             "max_notes_bytes": listing::MAX_NOTES_BYTES,
             "screenshot_types": listing::SCREENSHOT_TYPES,
+            "max_update_plugins": super::store::MAX_UPDATE_PLUGINS,
         },
         "newer_rule": "A store version is newer by SemVer 2.0.0 precedence, build metadata ignored: equal precedence is the same version.",
         "categories": CATEGORIES.iter().map(|(id, name)| json!({ "id": id, "name": name })).collect::<Vec<_>>(),
         "builtin_ids": listing::BUILTIN_IDS,
         "reserved_ids": manifest::RESERVED_IDS,
+        "report_reasons": super::store::REPORT_REASONS,
+        "consent": consent_tables(),
+    })
+}
+
+/// `docs/plugin-package-vectors.json`: the cases, for tests alone.
+fn build() -> Value {
+    json!({
+        "format": "zeron-plugin-package-vectors:v1",
+        "about": "Made by crates/engine/src/plugins/vectors from the engine's own code; the edge's package verification must agree with every case. The constants and tables these cases hold to are in docs/plugin-store-data.json. JSON inputs are text (input, manifest), parsed as the engine parses them. Keys are ed25519, base64url without padding; hashes are lowercase hex sha256; package_b64 and files_b64 are standard base64 of the exact bytes.",
         "canonical_json": canonical_cases(),
         "content_hash": content_hash_cases(),
         "signatures": signature_cases(),
@@ -686,25 +731,32 @@ fn build() -> Value {
         "listing": listing_cases(),
         "changelog": changelog_cases(),
         "deploy_key": deploy_key_cases(),
-        "consent": consent_tables(),
         "consent_items": consent_item_cases(),
     })
 }
 
+/// Each generated file and what it says now.
+fn generated() -> [(PathBuf, Value); 2] {
+    let docs = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs");
+    [(docs.join("plugin-store-data.json"), data()), (docs.join("plugin-package-vectors.json"), build())]
+}
+
 #[test]
 fn vectors_are_current() {
-    let mut text = serde_json::to_string_pretty(&build()).unwrap();
-    text.push('\n');
-    let path = path();
-    if std::env::var_os("UPDATE_VECTORS").is_some() {
-        std::fs::write(&path, &text).unwrap();
-        return;
+    for (path, value) in generated() {
+        let mut text = serde_json::to_string_pretty(&value).unwrap();
+        text.push('\n');
+        if std::env::var_os("UPDATE_VECTORS").is_some() {
+            std::fs::write(&path, &text).unwrap();
+            continue;
+        }
+        let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            on_disk == text,
+            "{} is out of date with the engine's rules: run `UPDATE_VECTORS=1 cargo test -p zeron-engine vectors_are_current` and commit it (the edge reads it)",
+            path.display()
+        );
     }
-    let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
-    assert!(
-        on_disk == text,
-        "docs/plugin-package-vectors.json is out of date with the engine's rules: run `UPDATE_VECTORS=1 cargo test -p zeron-engine vectors_are_current` and commit it (the edge's tests read it)"
-    );
 }
 
 /// How serde_json writes floats is part of what a signature covers: the

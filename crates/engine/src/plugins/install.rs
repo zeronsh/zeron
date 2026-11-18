@@ -1203,6 +1203,38 @@ pub(crate) mod tests {
         assert_eq!(reason_of(&forbidden), Some(reason::DOWNLOAD_FAILED), "{forbidden}");
     }
 
+    /// Two paths that are one file on a disk that ignores case (macOS's,
+    /// Windows'): sideloading doesn't refuse such a package (the store's
+    /// rules do: `listing::fold_path`), so what installing it ends as is
+    /// pinned here. On a disk that keeps case, both files, as signed. On
+    /// one that ignores it, the second write lands on the first, the folder
+    /// no longer matches what was signed, and it's refused before it takes
+    /// its place: nothing is installed and nothing is left half-way.
+    #[test]
+    fn a_package_whose_paths_collide_on_a_case_blind_disk_never_half_installs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("probe"), b"x").unwrap();
+        let ignores_case = dir.path().join("PROBE").exists();
+        std::fs::remove_file(dir.path().join("probe")).unwrap();
+        let (key, _) = SigningKey::generate().unwrap();
+        let mut files = BTreeMap::new();
+        files.insert("init.luau".to_string(), b"return 1".to_vec());
+        files.insert("ui/Badge.luau".to_string(), b"return 'upper'".to_vec());
+        files.insert("ui/badge.luau".to_string(), b"return 'lower'".to_vec());
+        let manifest = key.sign_manifest(&json!({ "id": "focus", "name": "F", "version": "1.0.0", "entry": "init.luau" }), &package::hashes(&files));
+        let package = parse(package::pack(FORMAT, &manifest, &files).unwrap()).unwrap();
+        let source = Source { kind: "file".into(), url: None, path: None, git_ref: None, commit: None, version: String::new(), installed_at: 0, store: None };
+        let installed = install(dir.path(), &package, &source, None);
+        if ignores_case {
+            assert_eq!(installed.unwrap_err(), "It changed while it was being installed");
+            assert!(!dir.path().join("focus").exists());
+        } else {
+            installed.unwrap();
+            assert_eq!(scan::inspect(&dir.path().join("focus"), true).sig, SigCheck::Valid(key.public()));
+        }
+        assert_eq!(std::fs::read_dir(dir.path().join(INCOMING_DIR)).unwrap().count(), 0, "nothing left half-way");
+    }
+
     /// R23: an update was any package with another hash under the same key,
     /// so the author's key (or whoever holds it) could roll a plugin back to
     /// an older, vulnerable version.

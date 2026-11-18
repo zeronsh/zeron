@@ -724,12 +724,17 @@ The rest is optional:
 ```
 
 - `keywords`: up to 8, each lowercase letters, digits, dashes and single spaces, at most 32 characters.
-- `homepage`, `repository`: `https://` links, at most 2048 characters.
+- `homepage`, `repository`: `https://` links, at most 2048 characters, written exactly as a browser reads them (`https://example.com/`, with its slash; a lowercase host).
 - `license`: a short name, like `MIT`, at most 64 characters.
 - `screenshots`: up to 8 PNG or JPEG pictures in the plugin, shown on its page.
 - **`CHANGELOG.md`** gives each version's notes: the section under the heading that starts with that version (`## 1.2.0`, `## [1.2.0] - 2026-11-01`, `## v1.2.0`), up to the next heading as high, at most 64 KB. People see the notes when Zeron offers them the update.
 
 Files that aren't text or pictures (a compiled program, bytecode) are allowed, but reviewers look closely at them, and the check says which they are.
+
+What the store shows is what's there:
+- The `name`, `description` and `keywords` can't hold control characters or invisible formatting characters (direction overrides, zero-width spaces).
+- Two files whose paths a Mac or a Windows machine would see as one (`README.md` and `readme.md`, or the same name in two Unicode forms) are refused.
+- The manifest is at most 256 KB, and `CHANGELOG.md` at most 512 KB.
 
 ### Checking it
 

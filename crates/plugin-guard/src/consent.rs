@@ -52,4 +52,20 @@ mod tests {
         assert_eq!(local(&hosts), list(&["localhost:8080", "nas.local", "10.0.0.2"]));
         assert_eq!(named(&hosts), list(&["api.example.com"]));
     }
+
+    /// The consent window's own cases (apps/zgx `plugins/consent.rs`
+    /// `the_sheet_is_told_how_far_each_program_reaches` and
+    /// `the_sheet_is_told_how_each_host_reads`), as this module rates them.
+    #[test]
+    fn the_consent_window_s_cases() {
+        let programs = list(&["python3", "sh", "git", "gh", "rg", "jq"]);
+        assert_eq!(full_control(&programs), list(&["python3", "sh"]));
+        assert_eq!(anything(&programs), list(&["rg"]));
+        let added = list(&["node", "git", "rg"]);
+        assert_eq!((full_control(&added), anything(&added)), (list(&["node"]), list(&["rg"])));
+        let hosts = list(&["localhost:8080", "127.1", "box.tail1234.ts.net", "api.example.com", "*.example.org", "*"]);
+        assert_eq!(local(&hosts), list(&["localhost:8080", "127.1"]));
+        assert_eq!(named(&hosts), list(&["box.tail1234.ts.net", "api.example.com"]));
+        assert_eq!(named(&list(&["rebind.example.com", "*.example.net"])), list(&["rebind.example.com"]));
+    }
 }

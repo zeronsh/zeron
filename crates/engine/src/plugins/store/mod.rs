@@ -20,7 +20,7 @@ use super::install::{self, Package, StoreSource, failure};
 use super::signing;
 use client::{PackageRecord, Publisher, reason};
 
-pub use device::handles;
+pub use device::{MAX_UPDATE_PLUGINS, REPORT_REASONS, handles};
 pub(in crate::plugins) use device::StoreHandle;
 
 /// Whether `name` reads as a username: 1 to 40 letters, digits, `_` and `-`.

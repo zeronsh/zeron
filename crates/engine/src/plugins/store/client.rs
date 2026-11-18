@@ -492,6 +492,10 @@ mod tests {
         assert_eq!(install::reason_of(&said(404, "")), Some(reason::NOT_IN_STORE));
         assert_eq!(install::reason_of(&said(503, "<html>")), Some(reason::STORE_UNREACHABLE));
         assert_eq!(install::reason_of(&said(429, "")), Some(install::reason::RATE_LIMITED));
+        // The edge's id-claim limit (amendment 30): its word, its one line.
+        let claims = said(429, r#"{"error":"rate_limited","message":"An account claims at most 5 new ids a week. Try again later, or publish a new version of one you have."}"#);
+        assert_eq!(claims, "rate_limited: An account claims at most 5 new ids a week. Try again later, or publish a new version of one you have.");
+        assert_eq!(said(404, r#"{"error":"not_found","message":"No such plugin."}"#), "not_in_store: No such plugin.");
         // A word the edge didn't really give (not a plain word) isn't taken as one.
         assert_eq!(install::reason_of(&said(400, r#"{"error":"Bad: thing"}"#)), Some(reason::STORE_ERROR));
         assert!(!said(400, "{\"error\":\"x\",\"message\":\"a\\u0007b\"}").contains('\u{7}'));

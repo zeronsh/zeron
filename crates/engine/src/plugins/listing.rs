@@ -40,6 +40,9 @@ pub const MAX_DESCRIPTION_LEN: usize = 300;
 /// An icon is an SVG at most this big (as `scan::icon_svg` reads one).
 pub const MAX_ICON_BYTES: usize = 32 * 1024;
 pub const MAX_README_BYTES: usize = 512 * 1024;
+pub const MAX_CHANGELOG_BYTES: usize = 512 * 1024;
+/// The manifest's canonical JSON, without its signature.
+pub const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 /// A version's notes (its CHANGELOG.md section).
 pub const MAX_NOTES_BYTES: usize = 64 * 1024;
 /// Screenshots are PNG or JPEG pictures.
@@ -210,6 +213,29 @@ fn https_url(url: &str) -> bool {
         && !url.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
+/// Whether `text` has a control or format character (Unicode Cc or Cf:
+/// direction overrides, invisible joiners), which what a listing shows may
+/// not (amendment 31).
+fn unseen(text: &str) -> bool {
+    use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
+    text.chars().any(|c| matches!(c.general_category(), GeneralCategory::Control | GeneralCategory::Format))
+}
+
+/// A link exactly as it parses (WHATWG URL): `https:\\evil.com` reads as
+/// `https://evil.com/`, so it's refused, as is anything a reader would see
+/// differently from what a browser opens.
+fn exact_url(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|parsed| parsed.as_str() == url)
+}
+
+/// A path as macOS and Windows compare it: Unicode NFC, then
+/// plugin-guard's `fold` (case, separators, trailing dots and spaces). Two
+/// paths that fold the same are one file there.
+pub fn fold_path(rel: &str) -> String {
+    let nfc = icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(rel);
+    zeron_plugin_guard::path::fold(&nfc)
+}
+
 /// A keyword: lowercase letters, digits, spaces and dashes, not starting or
 /// ending with a space, 1 to [`MAX_KEYWORD_LEN`] characters.
 fn keyword(k: &str) -> bool {
@@ -328,6 +354,12 @@ pub fn check(
             Some("name"),
             format!("Its name is longer than {MAX_NAME_LEN} characters"),
         ));
+    } else if unseen(&manifest.name) {
+        problems.push(Problem::new(
+            BAD_LISTING,
+            Some("name"),
+            "Its name has a control or invisible formatting character",
+        ));
     }
     if !manifest.entry.is_empty() && !files.contains_key(&manifest.entry) {
         problems.push(Problem::new(
@@ -340,10 +372,10 @@ pub fn check(
     // Its page.
     match files.get(README) {
         Some(bytes) if bytes.len() > MAX_README_BYTES => problems.push(Problem::at(
-            BAD_LISTING,
-            Some("readme"),
+            TOO_LARGE,
+            None,
             README,
-            format!("Its README.md is at most {} KB", MAX_README_BYTES / 1024),
+            "README.md is over 512 KB",
         )),
         Some(bytes) if std::str::from_utf8(bytes).is_ok_and(|t| !t.trim().is_empty()) => {}
         Some(_) => problems.push(Problem::at(
@@ -372,6 +404,12 @@ pub fn check(
             BAD_LISTING,
             Some("description"),
             format!("Its description is one line of at most {MAX_DESCRIPTION_LEN} characters"),
+        ));
+    } else if unseen(description) {
+        problems.push(Problem::new(
+            BAD_LISTING,
+            Some("description"),
+            "Its description has a control or invisible formatting character",
         ));
     }
     match raw.get("icon") {
@@ -480,7 +518,7 @@ pub fn check(
     for field in ["homepage", "repository"] {
         match raw.get(field) {
             None | Some(Value::Null) => {}
-            Some(Value::String(url)) if https_url(url) => {}
+            Some(Value::String(url)) if https_url(url) && exact_url(url) => {}
             Some(_) => problems.push(Problem::new(
                 BAD_LISTING,
                 Some(if field == "homepage" {
@@ -558,6 +596,32 @@ pub fn check(
         Err(e) => problems.push(Problem::new(BAD_LISTING, Some("engines"), e)),
     }
 
+    if files.get(CHANGELOG).is_some_and(|log| log.len() > MAX_CHANGELOG_BYTES) {
+        problems.push(Problem::at(TOO_LARGE, None, CHANGELOG, "CHANGELOG.md is over 512 KB"));
+    }
+    // (As written: without the signature, which the store keeps apart.)
+    if super::signing::canonical_json(&manifest.unsigned_value()).len() > MAX_MANIFEST_BYTES {
+        problems.push(Problem::new(TOO_LARGE, Some("manifest"), "Its manifest is over 256 KB"));
+    }
+    // Two paths that are one file on a Mac or a Windows machine (the
+    // manifest's own name among them), in code point order.
+    let mut folded: BTreeMap<String, &str> = BTreeMap::new();
+    folded.insert(fold_path(super::manifest::MANIFEST_FILE), super::manifest::MANIFEST_FILE);
+    for rel in files.keys() {
+        let key = fold_path(rel);
+        match folded.get(&key) {
+            Some(other) => problems.push(Problem::at(
+                BAD_LISTING,
+                Some("files"),
+                rel,
+                format!("\"{rel}\" and \"{other}\" are the same file on macOS and Windows"),
+            )),
+            None => {
+                folded.insert(key, rel);
+            }
+        }
+    }
+
     // How big.
     let total: u64 = files.values().map(|b| b.len() as u64).sum();
     if files.len() > super::files::MAX_FILES || total > super::files::MAX_BYTES {
@@ -581,19 +645,12 @@ pub fn check(
     }
     let notes = files
         .get(CHANGELOG)
+        .filter(|log| log.len() <= MAX_CHANGELOG_BYTES)
         .map(|log| changelog_notes(&String::from_utf8_lossy(log), &manifest.version));
     if let Some(Some(notes)) = &notes
         && notes.len() > MAX_NOTES_BYTES
     {
-        problems.push(Problem::at(
-            BAD_LISTING,
-            Some("changelog"),
-            CHANGELOG,
-            format!(
-                "This version's notes in CHANGELOG.md are at most {} KB",
-                MAX_NOTES_BYTES / 1024
-            ),
-        ));
+        problems.push(Problem::at(TOO_LARGE, None, CHANGELOG, "This version's changelog section is over 64 KB"));
     }
     if let Some(None) = notes {
         warnings.push(Problem::at(
@@ -788,6 +845,44 @@ pub(crate) mod tests {
         let mut no_readme = files.clone();
         no_readme.remove(README);
         assert_eq!(rules(&base, &no_readme), vec![("missing_readme", None)]);
+    }
+
+    /// Amendment 31: what a reader would see differently from what's
+    /// there is refused.
+    #[test]
+    fn what_a_listing_shows_is_what_s_there() {
+        let (base, files) = listed();
+        let with = |key: &str, value: Value| {
+            let mut m = base.clone();
+            m[key] = value;
+            rules(&m, &files)
+        };
+        let bad = |field| vec![("bad_listing", Some(field))];
+        assert_eq!(with("name", serde_json::json!("Focus\u{202e}draoB")), bad("name"));
+        assert_eq!(with("name", serde_json::json!("Focus\u{200b}Board")), bad("name"));
+        assert_eq!(with("description", serde_json::json!("A board\u{2066}.")), bad("description"));
+        assert_eq!(with("homepage", serde_json::json!("https://example.com")), bad("homepage"), "parses as https://example.com/");
+        assert_eq!(with("homepage", serde_json::json!("https://Example.com/x")), bad("homepage"));
+        assert_eq!(with("homepage", serde_json::json!("https://example.com/")), vec![]);
+        assert_eq!(with("repository", serde_json::json!("https://github.com/a/b?x=1#y")), vec![]);
+        // Two paths that are one file on a Mac or a Windows machine.
+        for (a, b) in [("README.md", "readme.md"), ("caf\u{e9}.txt", "cafe\u{301}.txt"), ("shots/a.png", "Shots/A.png"), ("x.txt", "x.txt.")] {
+            let mut two = files.clone();
+            two.insert(a.into(), b"1".to_vec());
+            two.insert(b.into(), b"2".to_vec());
+            let problems = check(&Manifest::from_value(base.clone()).unwrap(), &two).0;
+            assert!(problems.iter().any(|p| p.field == Some("files")), "{a} {b}: {problems:?}");
+        }
+        let mut manifest_too = files.clone();
+        manifest_too.insert("ZERON-PLUGIN.JSON".into(), b"{}".to_vec());
+        assert_eq!(rules(&base, &manifest_too), bad("files"));
+        // Sizes.
+        let mut big = base.clone();
+        big["x-notes"] = serde_json::json!("x".repeat(MAX_MANIFEST_BYTES));
+        assert_eq!(rules(&big, &files), vec![("too_large", Some("manifest"))]);
+        let mut log = files.clone();
+        log.insert(CHANGELOG.into(), vec![b'x'; MAX_CHANGELOG_BYTES + 1]);
+        assert_eq!(rules(&base, &log), vec![("too_large", None)]);
     }
 
     #[test]
