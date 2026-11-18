@@ -441,3 +441,20 @@ describe("a listing that says the plugin is Zeron's own (claims_zeron)", () => {
     expect((await json(await go(a, uniqueId(), "1.0.0", { name: "Git by Zeron" }))).error).toBe("claims_zeron");
   });
 });
+
+describe("keywords held to both rules (367b7fbd7)", () => {
+  it("refuses at publish a keyword that says the mark or Zeron, for every publisher, so /keywords never shows one", async () => {
+    await SELF.fetch("https://edge.test/admin/badges", { method: "POST", headers: { authorization: "Bearer test-admin-token", "content-type": "application/json" }, body: JSON.stringify({ id: "maintainer", name: "Maintainer" }) });
+    const zeron = await author();
+    await SELF.fetch("https://edge.test/admin/badges/grant", { method: "POST", headers: { authorization: "Bearer test-admin-token", "content-type": "application/json" }, body: JSON.stringify({ badgeId: "maintainer", userIds: [zeron.userId] }) });
+    for (const keyword of ["verified", "official", "zeron-official", "by-zeron", "zeron-approved", "zeron-team"]) {
+      const id = uniqueId();
+      // (Zeron's badge lifts no keyword rule.)
+      const res = await publish(zeron.userId, id, await makePackage({ id, version: "1.0.0", signer: zeron.signer, manifest: { keywords: [keyword] } }));
+      const body = await json(res);
+      expect([res.status, body.error, body.field], keyword).toEqual([400, "bad_listing", "keywords"]);
+    }
+    const shown = ((await json(await call(zeron.userId, "GET", "/store/v1/keywords"))).keywords as { keyword: string }[]).map((k) => k.keyword);
+    for (const keyword of ["verified", "official", "zeron-official", "by-zeron", "zeron-approved", "zeron-team"]) expect(shown).not.toContain(keyword);
+  });
+});

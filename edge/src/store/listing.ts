@@ -119,7 +119,19 @@ const MARK_WORDS: readonly string[] = MARKS.words;
 const LOOKALIKES: Readonly<Record<string, readonly string[]>> = MARKS.lookalikes;
 const PAIRS: Readonly<Record<string, readonly string[]>> = MARKS.pairs;
 const INTERCHANGEABLE: readonly (readonly string[])[] = MARKS.interchangeable;
-const LANGUAGES: Readonly<Record<string, { readonly substring: boolean; readonly words: readonly string[] }>> = MARKS.languages;
+/** A word of the store's other languages: how a description is held to it
+ * (`folded` as a name is, `accented` with its accents kept, or `never`),
+ * and whether it counts only beside kana (a Japanese text). */
+interface LanguageWord {
+  readonly word: string;
+  readonly description: "folded" | "accented" | "never";
+  readonly with_kana?: boolean;
+}
+const LANGUAGES: Readonly<Record<string, { readonly substring: boolean; readonly words: readonly LanguageWord[] }>> = MARKS.languages as never;
+const LANGUAGE_WORDS: readonly (LanguageWord & { readonly substring: boolean })[] = Object.values(LANGUAGES).flatMap((l) =>
+  l.words.map((w) => ({ ...w, substring: l.substring }))
+);
+const KANA = /[\u{3040}-\u{30ff}\u{31f0}-\u{31ff}\u{ff66}-\u{ff9f}]/u;
 const ZERONS = STORE_DATA.claims_zeron;
 const ZERON: string = ZERONS.word;
 const ASCII_WORD = /^[A-Za-z0-9]$/;
@@ -229,11 +241,29 @@ const unspaced = (text: readonly string[]): string[] => {
 
 const startsWith = (text: readonly string[], at: number, word: readonly string[]): boolean => word.every((c, n) => text[at + n] === c);
 
-/** What in `text` claims the store's mark, if anything: a glyph, the word
- * it says or spells ("Vеrified" with a Cyrillic е, "ᴠᴇʀɪꜰɪᴇᴅ",
- * "VER1F1ED", "V. E. R. I. F. I. E. D."), or one of the store's other
- * languages' words (whole where words are spaced, else anywhere). */
-export const markClaim = (text: string): string | undefined => {
+/** `text` lowercased with its accents kept: NFKC, lowercase, without
+ * ignorables or enclosing marks (a description's `accented` reading). */
+const keptAccents = (text: string): string[] => [...text.normalize("NFKC").toLowerCase().replace(IGNORABLE, "")];
+
+/** Whether `wanted` is in either reading: anywhere (`substring`), else
+ * with no letter or digit of any script beside it. */
+const foundIn = (readings: readonly (readonly string[])[], wanted: readonly string[], substring: boolean): boolean => {
+  const anyWord = (c: string | undefined) => c !== undefined && ANY_WORD.test(c);
+  return readings.some((r) => {
+    for (let at = 0; at < r.length; at++) {
+      if (startsWith(r, at, wanted) && (substring || (!anyWord(r[at - 1]) && !anyWord(r[at + wanted.length])))) return true;
+    }
+    return false;
+  });
+};
+
+/** What in `text` (a name, or with `inName` false a description) claims
+ * the store's mark, if anything: a glyph, the word it says or spells
+ * ("Vеrified" with a Cyrillic е, "ᴠᴇʀɪꜰɪᴇᴅ", "VER1F1ED",
+ * "V. E. R. I. F. I. E. D."), or one of the store's other languages' words
+ * (whole where words are spaced, else anywhere): every one in a name; in a
+ * description as each word's `description` says. */
+export const markClaim = (text: string, inName = true): string | undefined => {
   const plain = folded(text);
   const glyph = plain.find((ch) => MARK_GLYPHS.includes(ch));
   if (glyph !== undefined) return glyph;
@@ -248,17 +278,15 @@ export const markClaim = (text: string): string | undefined => {
   const readings = [plain, unspaced(plain)];
   const word = MARK_WORDS.find((w) => readings.some((r) => spelled(r, w)));
   if (word !== undefined) return word;
-  const anyWord = (c: string | undefined) => c !== undefined && ANY_WORD.test(c);
-  for (const { substring, words } of Object.values(LANGUAGES)) {
-    for (const w of words) {
-      const wanted = folded(w);
-      const found = readings.some((r) => {
-        for (let at = 0; at < r.length; at++) {
-          if (startsWith(r, at, wanted) && (substring || (!anyWord(r[at - 1]) && !anyWord(r[at + wanted.length])))) return true;
-        }
-        return false;
-      });
-      if (found) return w;
+  const kana = KANA.test(text);
+  const accents = keptAccents(text);
+  const accentedReadings = [accents, unspaced(accents)];
+  for (const w of LANGUAGE_WORDS) {
+    if (w.with_kana && !kana) continue;
+    if (inName || w.description === "folded") {
+      if (foundIn(readings, folded(w.word), w.substring)) return w.word;
+    } else if (w.description === "accented") {
+      if (foundIn(accentedReadings, keptAccents(w.word), w.substring)) return w.word;
     }
   }
   return undefined;
@@ -266,17 +294,18 @@ export const markClaim = (text: string): string | undefined => {
 
 /** `a` then `b` as a spelling: apart by a space, or by `~` (none or more
  * separators) when either is in a script that doesn't space its words. */
-const joinWords = (a: string, b: string): string => (/^[\x00-\x7f]*$/.test(a) && /^[\x00-\x7f]*$/.test(b) ? `${a} ${b}` : `${a}~${b}`);
+const ascii = (text: string): boolean => /^[\x00-\x7f]*$/.test(markText(text));
+const joinWords = (a: string, b: string): string => (ascii(a) && ascii(b) ? `${a} ${b}` : `${a}~${b}`);
 /** The spellings that make a name's "zeron" the object of a form. */
 const NAME_FORMS: readonly string[] = Object.values(ZERONS.name.allowed_before as Record<string, readonly string[]>).flatMap((forms) => forms.map((f) => joinWords(f, ZERON)));
 /** The spellings a description may not use: "zeron" after a word of
  * origin, or beside a word of standing. */
 const ZERON_PHRASES: readonly string[] = [
   ...ZERONS.description.origin_before.map((o: string) => joinWords(o, ZERON)),
-  ...ZERONS.description.standing.flatMap((st: string) => [
+  ...[...ZERONS.description.standing, ...ZERONS.description.standing_other, ...LANGUAGE_WORDS.map((w) => w.word)].flatMap((st: string) => [
     joinWords(ZERON, st),
     joinWords(st, ZERON),
-    ...(/^[\x00-\x7f]*$/.test(st) ? [`${ZERON}'s ${st}`] : [])
+    ...(ascii(st) ? [`${ZERON}'s ${st}`] : [])
   ])
 ];
 
@@ -297,6 +326,19 @@ export const claimsZeron = (text: string): string | undefined => {
   const plain = folded(text);
   const readings = [plain, unspaced(plain)];
   return ZERON_PHRASES.find((phrase) => readings.some((r) => spelled(r, phrase)))?.replace(/~/g, " ");
+};
+
+/** What a keyword says that no keyword may (`keyword_claims`): split at
+ * '-' and ' ', each part folded, a part or all of them joined spelled
+ * whole as a mark word, an other-language mark word that folds to ASCII,
+ * or "zeron". No badge lifts it. */
+export const keywordClaim = (keyword: string): string | undefined => {
+  const parts = keyword.split(/[- ]/).filter((p) => p !== "").map(folded);
+  const candidates = [...parts, parts.flat()];
+  const whole = (text: readonly string[], word: string) => spellEnd(text, 0, [...markText(word)], 0) === text.length;
+  if (candidates.some((part) => whole(part, ZERON))) return ZERON;
+  const words = [...MARK_WORDS, ...LANGUAGE_WORDS.map((w) => w.word).filter(ascii)];
+  return words.find((word) => candidates.some((part) => whole(part, word)));
 };
 
 /** Whether a listing with this name and summary would be refused
@@ -456,7 +498,7 @@ export const checkListing = (
   if (chars(manifest.name) > MAX_NAME_LEN) problems.push(problem("bad_listing", "name", `Its name is longer than ${MAX_NAME_LEN} characters`));
   else if (UNSEEN.test(manifest.name)) problems.push(problem("bad_listing", "name", "Its name has a control or invisible formatting character"));
   else {
-    const claim = markClaim(manifest.name);
+    const claim = markClaim(manifest.name, true);
     if (claim !== undefined) problems.push(problem("bad_listing", "name", `Its name says "${claim}": only the store marks a plugin verified`));
     else if (claimsZeronInName(manifest.name)) {
       warnings.push(problem("claims_zeron", "name", 'Its name says "Zeron" other than as what it\'s for ("for Zeron", "in Zeron"): only Zeron\'s own plugins may, and the store refuses it from anyone else'));
@@ -478,7 +520,7 @@ export const checkListing = (
     problems.push(problem("bad_listing", "description", `Its description is one line of at most ${MAX_DESCRIPTION_LEN} characters`));
   } else if (UNSEEN.test(description)) problems.push(problem("bad_listing", "description", "Its description has a control or invisible formatting character"));
   else {
-    const claim = markClaim(description);
+    const claim = markClaim(description, false);
     const zeron = claim === undefined ? claimsZeron(description) : undefined;
     if (claim !== undefined) problems.push(problem("bad_listing", "description", `Its description says "${claim}": only the store marks a plugin verified`));
     else if (zeron !== undefined) warnings.push(problem("claims_zeron", "description", `Its description says "${zeron}": only Zeron's own plugins may, and the store refuses it from anyone else`));
@@ -514,6 +556,14 @@ export const checkListing = (
     else if (words.some((w) => w === undefined || !keyword(w))) {
       const bad = words.find((w) => w === undefined || !keyword(w));
       problems.push(problem("bad_listing", "keywords", `Keyword "${bad ?? "?"}" must be lowercase letters, digits, dashes and single spaces, at most ${MAX_KEYWORD_LEN} characters`));
+    } else {
+      // (No badge lifts this: every plugin here is for Zeron.)
+      for (const w of words as string[]) {
+        const claim = keywordClaim(w);
+        if (claim === undefined) continue;
+        problems.push(problem("bad_listing", "keywords", `Keyword "${w}" says "${claim}": a keyword may say neither the store's mark nor Zeron`));
+        break;
+      }
     }
   } else if (keywords !== undefined && keywords !== null) problems.push(problem("bad_listing", "keywords", 'Its "keywords" must be a list'));
 

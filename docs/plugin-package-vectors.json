@@ -8457,11 +8457,11 @@
           "shots/board.png"
         ]
       },
-      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Cliente no oficial\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Cliente no oficial.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
       "name": "the mark: Spanish no oficial",
       "problems": [
         {
-          "field": "name",
+          "field": "description",
           "path": null,
           "rule": "bad_listing"
         }
@@ -8493,8 +8493,44 @@
           "shots/board.png"
         ]
       },
-      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Thème vérifié\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "the mark: French vérifié",
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Thème vérifié.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "the mark: French vérifié in a description",
+      "problems": [
+        {
+          "field": "description",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Vérifie la syntaxe\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "the mark: French vérifie in a name, folded",
       "problems": [
         {
           "field": "name",
@@ -8565,8 +8601,44 @@
           "shots/board.png"
         ]
       },
-      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Offizieller Client\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Offizieller Client.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
       "name": "the mark: German offizieller",
+      "problems": [
+        {
+          "field": "description",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Verifiziert\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "the mark: German verifiziert in a name",
       "problems": [
         {
           "field": "name",
@@ -8601,8 +8673,8 @@
           "shots/board.png"
         ]
       },
-      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Geprüfte Notizen\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "the mark: German geprüfte",
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Offiziell\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "the mark: German offiziell in a name",
       "problems": [
         {
           "field": "name",
@@ -8673,11 +8745,11 @@
           "shots/board.png"
         ]
       },
-      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Tema verificado\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Tema verificado.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
       "name": "the mark: Portuguese verificado",
       "problems": [
         {
-          "field": "name",
+          "field": "description",
           "path": null,
           "rule": "bad_listing"
         }
@@ -8745,8 +8817,8 @@
           "shots/board.png"
         ]
       },
-      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Проверено сообществом\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "the mark: Russian verified",
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Проверено\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "the mark: Russian verified in a name",
       "problems": [
         {
           "field": "name",
@@ -8817,11 +8889,11 @@
           "shots/board.png"
         ]
       },
-      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"非官方插件\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"非官方插件。\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
       "name": "the mark: Chinese not official",
       "problems": [
         {
-          "field": "name",
+          "field": "description",
           "path": null,
           "rule": "bad_listing"
         }
@@ -8890,7 +8962,7 @@
         ]
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"公式プラグイン\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "the mark: Japanese official",
+      "name": "the mark: Japanese official beside kana",
       "problems": [
         {
           "field": "name",
@@ -8925,8 +8997,44 @@
           "shots/board.png"
         ]
       },
-      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"공식 플러그인\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
-      "name": "the mark: Korean official",
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"検証済みのメモ。\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "the mark: Japanese verified",
+      "problems": [
+        {
+          "field": "description",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"검증됨 플러그인\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "the mark: Korean verified",
       "problems": [
         {
           "field": "name",
@@ -8934,6 +9042,396 @@
           "rule": "bad_listing"
         }
       ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Vérifie la syntaxe de vos fichiers\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "the mark: French vérifie in a description is fine",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Verifiziert Signaturen.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "the mark: German verifiziert in a description is fine",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Offiziell unterstützt.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "the mark: German offiziell in a description is fine",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Eingaben werden geprüft.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "the mark: German geprüft in a description is fine",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Проверено: 5 файлов.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "the mark: Russian checked in a description is fine",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Verifica la sintassi\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "the mark: Italian verifica is fine",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Verifica tus archivos\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "the mark: Spanish verifica is fine",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Inoffizieller Client\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "the mark: German inoffizieller is fine",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"数学公式编辑器\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "the mark: Chinese formula is fine",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"수학 공식\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "the mark: Korean formula is fine",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"身份认证\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "the mark: Chinese authentication is fine",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"認証トークン\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "the mark: Japanese authentication token is fine",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"인증 토큰\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "the mark: Korean authentication token is fine",
+      "problems": [],
       "warnings": []
     },
     {
@@ -9113,6 +9611,768 @@
       },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"메모장\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
       "name": "the mark: Korean notes are fine",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Zeron 公式のメモ。\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "claims_zeron: Zeron beside Japanese official",
+      "problems": [
+        {
+          "field": "description",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"공식 Zeron 플러그인.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "claims_zeron: Zeron beside Korean official",
+      "problems": [],
+      "warnings": [
+        {
+          "field": "description",
+          "path": null,
+          "rule": "claims_zeron"
+        }
+      ]
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Zeron 认证插件。\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "claims_zeron: Zeron beside Chinese certified",
+      "problems": [],
+      "warnings": [
+        {
+          "field": "description",
+          "path": null,
+          "rule": "claims_zeron"
+        }
+      ]
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Le thème Zeron officiel.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "claims_zeron: Zeron beside French officiel",
+      "problems": [
+        {
+          "field": "description",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"由 Zeron 制作。\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "claims_zeron: by Zeron in Chinese",
+      "problems": [],
+      "warnings": [
+        {
+          "field": "description",
+          "path": null,
+          "rule": "claims_zeron"
+        }
+      ]
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"来自Zeron的笔记。\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "claims_zeron: from Zeron in Chinese",
+      "problems": [],
+      "warnings": [
+        {
+          "field": "description",
+          "path": null,
+          "rule": "claims_zeron"
+        }
+      ]
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "verified"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"verified\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "keywords: verified",
+      "problems": [
+        {
+          "field": "keywords",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "veri-fied"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"veri-fied\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "keywords: veri-fied joined",
+      "problems": [
+        {
+          "field": "keywords",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "0fficial"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"0fficial\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "keywords: a digit for O",
+      "problems": [
+        {
+          "field": "keywords",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "oficial"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"oficial\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "keywords: Spanish oficial",
+      "problems": [
+        {
+          "field": "keywords",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "verifie"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"verifie\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "keywords: French verifie, folded",
+      "problems": [
+        {
+          "field": "keywords",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "zeron"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"zeron\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "keywords: zeron",
+      "problems": [
+        {
+          "field": "keywords",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "zeron-themes"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"zeron-themes\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "keywords: zeron as a part",
+      "problems": [
+        {
+          "field": "keywords",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "themes zeron"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"themes zeron\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "keywords: zeron after a space",
+      "problems": [
+        {
+          "field": "keywords",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "zer0n"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"zer0n\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "keywords: zer0n",
+      "problems": [
+        {
+          "field": "keywords",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "2eron"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"2eron\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "keywords: 2eron",
+      "problems": [
+        {
+          "field": "keywords",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "ze-ron"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"ze-ron\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "keywords: ze-ron joined",
+      "problems": [
+        {
+          "field": "keywords",
+          "path": null,
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "themes"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"themes\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "keywords: themes are fine",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "zero"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"zero\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "keywords: zero is fine",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "heron"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"heron\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "keywords: heron is fine",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "verify"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"verify\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "keywords: verify is fine",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "zeronaut"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"A board of what you're focused on.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"zeronaut\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "keywords: zeronaut is fine",
       "problems": [],
       "warnings": []
     },

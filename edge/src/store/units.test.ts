@@ -4,7 +4,7 @@ import { isText, readmePictures } from "./checks";
 import { askParts, askPartsOf, asksChanged, consentDiff, consentItem, fullControl, heldToItsOwnRules } from "./consent";
 import { canonicalJson, formatFloat, parseJsonText } from "./json";
 import type { JsonObject } from "./json";
-import { changelogNotes, checkListing, claimsZeron, claimsZeronInName, listingOf, markClaim } from "./listing";
+import { changelogNotes, checkListing, claimsZeron, claimsZeronInName, keywordClaim, listingOf, markClaim } from "./listing";
 import { firstCollision } from "./paths";
 import { readManifest } from "./manifest";
 import { PAYLOAD_PREFIX, decodeBase64, inspectPackageJson, sha256Hex, signaturePayload, verifyPackage } from "./package";
@@ -274,6 +274,15 @@ describe("store listing: claims of being Zeron's own", () => {
 });
 
 describe("store listing: Zeron in a name, and the mark in other languages (58fc12caf)", () => {
+  it("holds keywords to both rules, for every publisher (367b7fbd7)", () => {
+    for (const k of ["verified", "official", "zeron-official", "by-zeron", "zeron-approved", "zeron-team", "ze-ron", "veri-fied", "oficial", "zer0n"]) {
+      expect(keywordClaim(k), k).toBeDefined();
+    }
+    for (const k of ["focus", "git-flow", "code review", "heron", "zero", "verify", "officer"]) {
+      expect(keywordClaim(k), k).toBeUndefined();
+    }
+  });
+
   it("lets a name say Zeron only as what it's for", () => {
     for (const name of ["Themes for Zeron", "Git in Zeron", "Notes with Zer0n", "适用于Zeron的主题", "Zeron 用于"]) {
       expect(claimsZeronInName(name), name).toBe(name === "Zeron 用于");
@@ -293,10 +302,11 @@ describe("store listing: Zeron in a name, and the mark in other languages (58fc1
   });
 
   it("refuses the mark's words in the store's other languages: whole where words are spaced, anywhere in CJK", () => {
-    for (const text of ["Plugin oficial", "Vérifié", "GEPRÜFT", "Ufficiale", "Officielles", "Официальный клиент", "官方插件", "非官方", "公式プラグイン", "공식 플러그인"]) {
+    for (const text of ["Plugin oficial", "Vérifié", "GEPRÜFT", "Ufficiale", "Officielles", "Официальный клиент", "官方插件", "非官方", "公式プラグイン", "검증됨 플러그인"]) {
       expect(markClaim(text), text).toBeDefined();
     }
-    for (const text of ["Unofficial", "Неофициальный клиент", "Oficialmente útil", "Verificador"]) {
+    // (公式 and 공식 are "formula" too: only with kana, or not at all, 139146b19.)
+    for (const text of ["Unofficial", "Неофициальный клиент", "Oficialmente útil", "Verificador", "数学公式", "公式编辑器", "수학 공식", "공식 계산기"]) {
       expect(markClaim(text), text).toBeUndefined();
     }
   });
