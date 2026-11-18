@@ -466,3 +466,20 @@ Agreed after the plan was first written. Newest last.
     An id that has never had an approved version and has no pending one is
     released 90 days after its last submission; an admin can release or
     grant one at any time through reservations.
+31. **More store listing rules** (checked the same way by the engine's local
+    check and the edge, pinned by `listing` vectors; sideloading is not
+    changed by any of them):
+    - Two paths that are the same after plugin-guard's `fold` (case, Unicode
+      normal form) are refused: reviewers would see two files where a Mac or
+      a Windows machine keeps one.
+    - `name`, `description` and `keywords` refuse Unicode bidi controls
+      (U+202A–202E, U+2066–2069) and other format characters, as well as
+      control characters.
+    - `homepage` and `repository` are stored as the parsed URL's text and
+      refused when that differs from what was written.
+    - The canonical manifest is at most 256 KB; `CHANGELOG.md` at most
+      512 KB, like `README.md`.
+32. **`engines.zeron` and pre-releases**: comparison is by SemVer precedence
+    with no npm-style pre-release exclusion, on purpose: a beta of a Zeron
+    version that satisfies the range should run the plugin. "npm-style" in
+    amendment 2 describes the syntax only.
