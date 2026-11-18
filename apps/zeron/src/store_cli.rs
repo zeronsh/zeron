@@ -258,9 +258,9 @@ fn submitted(what: &str, reply: &Value, page: &str) {
     let mark = if reply["verified"] == true { "verified" } else { "not yet verified" };
     out!("Published {what}: live now, {mark}. Anyone can install it from {page}");
     // Older versions nobody had verified take no new installs now.
-    let superseded: Vec<&str> = reply["superseded"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-    if !superseded.is_empty() {
-        out!("{}", listing::escaped(&format!("It supersedes {}, which weren't verified: they take no new installs now.", superseded.join(", "))));
+    let version = reply["version"].as_str().unwrap_or("this version");
+    for older in reply["superseded"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        out!("{}", listing::escaped(&format!("{older} no longer takes new installs: {version} replaced it before it was verified")));
     }
 }
 

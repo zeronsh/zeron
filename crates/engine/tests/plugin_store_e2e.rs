@@ -661,7 +661,7 @@ async fn the_plugin_store_end_to_end() {
     e.check("6", "the author unyanks it", out.status.success(), text(&out));
     set_version(&ci, "1.2.0", &["ui.add", "links.open"], "- Faster.");
     let out = e.cli("ci", &["publish", &ci_arg], &[("ZERON_DEPLOY_KEY", &secret)]);
-    e.must("6", "CI publishes 1.2.0, and says it supersedes 1.1.0, never verified", out.status.success() && text(&out).contains("It supersedes 1.1.0"), text(&out));
+    e.must("6", "CI publishes 1.2.0, and says it supersedes 1.1.0, never verified", out.status.success() && text(&out).contains("1.1.0 no longer takes new installs: 1.2.0 replaced it before it was verified"), text(&out));
     let out = e.cli_on(&laptop, &["status", ID]);
     e.check("6", "status shows 1.1.0 yanked, superseded by 1.2.0", text(&out).contains("1.1.0  yanked  not verified: superseded by 1.2.0"), text(&out));
     let out = e.cli_on(&laptop, &["unyank", ID, "1.1.0"]);

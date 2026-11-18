@@ -132,7 +132,7 @@ async fn ci_checks_and_publishes_with_a_deploy_key() {
     plugin(&folder, "1.1.0");
     let newer = run.zeron(&store, Some(&secret), &["publish", &folder_arg]).await;
     assert_eq!(newer.status.code(), Some(0), "{}", text(&newer));
-    assert!(text(&newer).contains("It supersedes 1.0.0, which weren't verified: they take no new installs now."), "{}", text(&newer));
+    assert!(text(&newer).contains("1.0.0 no longer takes new installs: 1.1.0 replaced it before it was verified"), "{}", text(&newer));
     let status = run.zeron(&store, Some(&secret), &["status"]).await;
     assert!(text(&status).contains("  1.0.0  yanked  not verified: superseded by 1.1.0"), "{}", text(&status));
 }
