@@ -721,13 +721,14 @@ final class AccountCell: UITableViewCell {
     }
 
     /// Where a gateway key's requests go, standing where a login's meters
-    /// would (the desktop row's usage column): the host, by the globe.
+    /// would (the desktop row's usage column): "Via host", by the globe, as
+    /// the desktop card says it (`ds.provider_card.key_via_host`).
     private static func gatewayLine(_ host: String) -> UIView {
         let globe = UIImageView(image: CloudUI.symbol("globe", 12))
         globe.tintColor = Palette.secondary
         globe.setContentHuggingPriority(.required, for: .horizontal)
         let label = UILabel()
-        label.text = host
+        label.text = "Via \(host)"
         label.font = Fonts.ui(.sans, 13)
         label.textColor = Palette.text
         label.lineBreakMode = .byTruncatingMiddle

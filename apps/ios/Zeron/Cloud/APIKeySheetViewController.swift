@@ -1,15 +1,18 @@
 import UIKit
 
-/// Cloud's "Add an API key" sheet — the desktop dialog on the phone
-/// (`crates/ui/src/settings/cloud_key.rs`). The masked key echoes the four
-/// characters Cloud will list it by; an Anthropic key then says where its
-/// requests go: Anthropic's API, or an LLM gateway whose base URL the core
-/// checks as it is typed (the desktop's rules, in its words) and previews as
-/// the URL Claude Code will call. The core checks again when it saves.
+/// Cloud's "Add … API key" sheet — the desktop dialog on the phone
+/// (`CloudKeyDialog`, `apps/zgx/ui/ds/provider_card.luau`), in its words
+/// (`ds.provider_card.cloud_key_*`, `apps/zgx/ui/locales/en.json`) and its
+/// order: the key, where it's kept, where its requests go, the base URL.
+/// The masked key echoes the four characters Cloud will list it by; an
+/// Anthropic key's gateway base URL is judged as it is typed by the core
+/// (the vault's rules, in its words) and, once it holds, shown as the URL
+/// Claude Code will call. The core checks again when it saves.
 final class APIKeySheetViewController: UIViewController, UITextFieldDelegate {
     private enum Endpoint { case direct, gateway }
 
     private static let gatewayDetail = "Your own base URL"
+    private static let gatewayPlaceholder = "https://llm-gateway.example.com"
 
     private let agent: CloudStore.Agent
     private let save: @MainActor (String, String?) async throws -> Void
@@ -59,11 +62,12 @@ final class APIKeySheetViewController: UIViewController, UITextFieldDelegate {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    /// Title, what the key is for, and the key's placeholder.
+    /// Title, what the key is for, and the key's placeholder: the desktop's
+    /// `cloud_key_title`, `cloud_key_body` and key shapes.
     private var copy: (title: String, body: String, placeholder: String) {
-        agent.key == "openai-key"
-            ? ("Add an OpenAI API key", "Cloud sessions use it for Codex instead of a ChatGPT sign-in.", "sk-proj-…")
-            : ("Add an Anthropic API key", "Cloud sessions use it for Claude Code instead of a subscription sign-in.", "sk-ant-api03-…")
+        ("Add \(agent.keyName)",
+         "\(agent.name) uses it on every Cloud machine, from its next turn.",
+         agent.key == "anthropic-key" ? "sk-ant-…" : "sk-…")
     }
 
     override func viewDidLoad() {
@@ -91,7 +95,12 @@ final class APIKeySheetViewController: UIViewController, UITextFieldDelegate {
         suffixLabel.setContentHuggingPriority(.required, for: .horizontal)
         suffixLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         pasteControl.setContentHuggingPriority(.required, for: .horizontal)
+        // Where it's kept, under the key, as the desktop's field hint.
+        let vaultNote = StatusLine()
+        vaultNote.show("lock.fill", "Kept in Zeron's vault, never on this \(UIDevice.current.model).", color: Palette.secondary)
         let keySection = Self.section("API key", FieldCard(field: keyField, trailing: [suffixLabel, pasteControl]))
+        keySection.addArrangedSubview(vaultNote)
+        keySection.setCustomSpacing(10, after: keySection.arrangedSubviews[1])
 
         var sections: [UIView] = [tileRow, header, keySection]
         if takesBaseUrl {
@@ -113,9 +122,9 @@ final class APIKeySheetViewController: UIViewController, UITextFieldDelegate {
             let card = CloudCard(rows: [direct, gateway])
             card.clipsToBounds = true
             card.accessibilityContainerType = .semanticGroup
-            card.accessibilityLabel = "Endpoint"
+            card.accessibilityLabel = "Requests go to"
 
-            configure(urlField, placeholder: "https://gateway.example.com", size: 15)
+            configure(urlField, placeholder: Self.gatewayPlaceholder, size: 15)
             urlField.keyboardType = .URL
             urlField.textContentType = .URL
             urlField.clearButtonMode = .whileEditing
@@ -124,19 +133,17 @@ final class APIKeySheetViewController: UIViewController, UITextFieldDelegate {
             urlField.accessibilityIdentifier = "api-key-base-url"
             urlField.addAction(UIAction { [weak self] _ in self?.revealGateway() }, for: .editingDidBegin)
             routeLine.accessibilityIdentifier = "api-key-route"
-            gatewayBlock.addArrangedSubview(FieldCard(field: urlField))
-            gatewayBlock.addArrangedSubview(routeLine)
+            let urlSection = Self.section("Base URL", FieldCard(field: urlField))
+            urlSection.addArrangedSubview(routeLine)
+            urlSection.setCustomSpacing(10, after: urlSection.arrangedSubviews[1])
+            gatewayBlock.addArrangedSubview(urlSection)
             gatewayBlock.axis = .vertical
-            gatewayBlock.spacing = 10
             gatewayBlock.isHidden = true
             gatewayBlock.alpha = 0
-            let endpointSection = Self.section("Endpoint", card)
+            let endpointSection = Self.section("Requests go to", card)
             sections += [endpointSection, gatewayBlock]
-            content.setCustomSpacing(12, after: endpointSection)
+            content.setCustomSpacing(20, after: endpointSection)
         }
-        let vaultNote = StatusLine()
-        vaultNote.show("lock.fill", "Encrypted in your vault — only your Cloud machines can use it.", color: Palette.secondary)
-        sections.append(vaultNote)
 
         sections.forEach(content.addArrangedSubview)
         content.axis = .vertical
@@ -148,7 +155,7 @@ final class APIKeySheetViewController: UIViewController, UITextFieldDelegate {
         // up, where the eye is after the tap.
         failureLine.isHidden = true
         failureLine.accessibilityIdentifier = "api-key-failure"
-        saveButton = CloudUI.primaryButton("Save Key") { [weak self] in self?.submit() }
+        saveButton = CloudUI.primaryButton("Save") { [weak self] in self?.submit() }
         saveButton.accessibilityIdentifier = "api-key-save"
         let bottom = UIStackView(arrangedSubviews: [failureLine, saveButton])
         bottom.axis = .vertical
@@ -237,18 +244,19 @@ final class APIKeySheetViewController: UIViewController, UITextFieldDelegate {
             switch checkApiBaseUrl(provider: agent.key, raw: urlField.text ?? "") {
             case let .ready(url, host, path):
                 gatewayChoice?.detail = host
-                routeLine.show("arrow.right", Self.route(url, path), tint: Palette.secondary)
-                routeLine.accessibilityLabel = "Claude Code sends every request to \(url)\(path)"
+                let says = "\(agent.name) sends each request to"
+                routeLine.show("arrow.right", Self.route(says, url, path), tint: Palette.secondary)
+                routeLine.accessibilityLabel = "\(says) \(url)\(path)"
             case let .refused(reason):
                 gatewayChoice?.detail = Self.gatewayDetail
                 routeLine.show("exclamationmark.triangle.fill", reason, color: Palette.danger)
             case .empty, .typing:
                 gatewayChoice?.detail = Self.gatewayDetail
-                routeLine.show("info.circle", "Claude Code adds /v1/messages to this URL.", color: Palette.secondary)
+                routeLine.show("info.circle", "Your gateway's https:// address, without /v1.", color: Palette.secondary)
             }
         }
         var c = saveButton.configuration
-        c?.title = saving ? "Saving…" : "Save Key"
+        c?.title = saving ? "Saving…" : "Save"
         c?.showsActivityIndicator = saving
         c?.imagePadding = 8
         saveButton.configuration = c
@@ -257,17 +265,22 @@ final class APIKeySheetViewController: UIViewController, UITextFieldDelegate {
         saveButton.isUserInteractionEnabled = !saving
     }
 
+    /// "Claude Code sends each request to", then on its own line
     /// "https://llm-gateway.example.com/v1/messages": the base URL as typed in
     /// the text color, the path Claude Code adds muted. The whole URL shows;
     /// a long one wraps before a slash, never inside a word.
-    private static func route(_ url: String, _ path: String) -> NSAttributedString {
+    private static func route(_ says: String, _ url: String, _ path: String) -> NSAttributedString {
         let breakable = { (s: String) in s.replacingOccurrences(of: "/", with: "\u{200B}/") }
         let scheme = url.prefix(8)
         let mono = Fonts.ui(.mono, 12)
         let line = NSMutableAttributedString(
+            string: says + "\n",
+            attributes: [.font: Fonts.ui(.sans, 13), .foregroundColor: Palette.secondary]
+        )
+        line.append(NSAttributedString(
             string: String(scheme) + breakable(String(url.dropFirst(8))),
             attributes: [.font: mono, .foregroundColor: Palette.text]
-        )
+        ))
         line.append(NSAttributedString(string: breakable(path), attributes: [.font: mono, .foregroundColor: Palette.secondary]))
         return line
     }
@@ -312,6 +325,15 @@ final class APIKeySheetViewController: UIViewController, UITextFieldDelegate {
         }
     }
 
+    /// The failure line takes its height from the scroll: what sat just above
+    /// Save (the route, or where the key is kept) moves back above the fading
+    /// edge rather than under it.
+    private func keepEndInSight() {
+        let inset = scroll.adjustedContentInset
+        let end = scroll.contentSize.height + inset.bottom - scroll.bounds.height
+        scroll.contentOffset.y = max(-inset.top, end)
+    }
+
     private func submit() {
         guard !saving, let submission else { return }
         saving = true
@@ -330,6 +352,7 @@ final class APIKeySheetViewController: UIViewController, UITextFieldDelegate {
                 UIView.animate(withDuration: 0.25) {
                     self.failureLine.show("exclamationmark.triangle.fill", CloudStore.message(error), color: Palette.danger)
                     self.view.layoutIfNeeded()
+                    self.keepEndInSight()
                 }
                 UINotificationFeedbackGenerator().notificationOccurred(.error)
                 self.refresh()
