@@ -44,6 +44,8 @@ mkdir -p "$EDGE_DIR/public"
   { cat "$WORK/bundle.log"; echo "FAIL 0 the edge didn't bundle"; exit 1; }
 
 echo "== zeron"
+# (A debug build: only one reads ZERON_TAKEDOWN_EVERY_SECS, which the run
+# sets so the take-down feed is read every second.)
 cargo build -p zeron --bin zeron
 TARGET="${CARGO_TARGET_DIR:-$ROOT/target}"
 ZERON_BIN="$TARGET/debug/zeron"

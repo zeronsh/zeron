@@ -258,7 +258,7 @@ pub fn store_link(url: &str) -> Option<String> {
 
 /// What a listing's name or description may not say: the store's mark,
 /// or that it's Zeron's own (`mark.rs`).
-pub use super::mark::{MARK_GLYPHS, MARK_WORDS, claims_zeron, mark_claim, mark_text};
+pub use super::mark::{MARK_GLYPHS, MARK_WORDS, claims_zeron, claims_zeron_in_name, mark_claim, mark_text};
 
 /// Whether `text` has a character drawn as nothing, which what a listing
 /// shows may not (amendment 31): a control or format character, any other
@@ -501,11 +501,11 @@ pub fn check(
             Some("name"),
             format!("Its name says \"{claim}\": only the store marks a plugin verified"),
         ));
-    } else if let Some(claim) = claims_zeron(&manifest.name) {
+    } else if claims_zeron_in_name(&manifest.name).is_some() {
         warnings.push(Problem::new(
             CLAIMS_ZERON,
             Some("name"),
-            format!("Its name says \"{claim}\": only Zeron's own plugins may, and the store refuses it from anyone else"),
+            "Its name says \"Zeron\" other than as what it's for (\"for Zeron\", \"in Zeron\"): only Zeron's own plugins may, and the store refuses it from anyone else",
         ));
     }
     if !manifest.entry.is_empty() && !files.contains_key(&manifest.entry) {

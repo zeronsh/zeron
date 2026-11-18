@@ -636,8 +636,10 @@ impl FakeStore {
                 }
                 // (As the edge: saying it's Zeron's own, from anyone but
                 // Zeron, here everyone.)
-                for (field, text) in [("name", &package.manifest.name), ("description", &package.manifest.description)] {
-                    if let Some(claim) = zeron_engine::plugins::mark::claims_zeron(text) {
+                use zeron_engine::plugins::mark::{claims_zeron, claims_zeron_in_name};
+                let said = [("name", claims_zeron_in_name(&package.manifest.name)), ("description", claims_zeron(&package.manifest.description))];
+                for (field, claim) in said {
+                    if let Some(claim) = claim {
                         return json_reply(400, json!({ "error": "claims_zeron", "message": format!("Its {field} says \"{claim}\": only Zeron's own plugins may say they're Zeron's.") }));
                     }
                 }

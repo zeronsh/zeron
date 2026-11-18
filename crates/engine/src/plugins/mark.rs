@@ -20,10 +20,15 @@
 //!   marks read as one word ("V. E. R. I. F. I. E. D.").
 //! - A name or description may not hold a character drawn as nothing
 //!   ([`unseen`]).
-//! - [`claims_zeron`]: after the same folding, one of [`ZERON_PHRASES`] as a
-//!   whole phrase. Only Zeron's own publisher may say it: the edge refuses
-//!   it unless the publisher carries the `maintainer` badge; a device, which
-//!   can't know the publisher, warns.
+//! - The mark's words in other languages ([`OTHER_LANGUAGES`]): whole words
+//!   in scripts with spaces, substrings in Chinese, Japanese and Korean.
+//! - Claims of being Zeron's (`claims_zeron`), "zeron" read as the mark's
+//!   words are: in a name, any "zeron" not the object of one of
+//!   [`NAME_FORMS`] ([`claims_zeron_in_name`]); in a description, "zeron"
+//!   after a word of origin or beside a word of standing ([`claims_zeron`]).
+//!   Only Zeron's own publisher may: the edge refuses it unless the publisher
+//!   carries the `maintainer` badge; a device, which can't know the
+//!   publisher, warns.
 
 use std::collections::BTreeSet;
 
@@ -57,18 +62,59 @@ pub const PAIRS: &[(char, &str)] = &[('d', "cl")];
 /// read as one word.
 pub const MAX_SPACING: usize = 3;
 
-/// Phrases only Zeron's own plugins may use (`claims_zeron`), as folded:
-/// separators (spaces, punctuation but the apostrophe) read as one space.
-pub const ZERON_PHRASES: &[&str] = &[
-    "by zeron",
-    "from zeron",
-    "zeron team",
-    "zeron's own",
-    "zeron approved",
-    "zeron certified",
-    "zeron endorsed",
-    "zeron recommended",
-    "zeron staff",
+/// The mark's words in the store's other languages: `(language, substring,
+/// words)`, each folded as the text is; whole words (no letter or digit of
+/// any script right before or after) where words are spaced, substrings in
+/// Chinese, Japanese and Korean. "No oficial" and "非官方" are refused as
+/// "not official" is: the author rewords.
+pub const OTHER_LANGUAGES: &[(&str, bool, &[&str])] = &[
+    ("es", false, &["verificado", "verificada", "verificados", "verificadas", "oficial", "oficiales"]),
+    ("fr", false, &["v\u{e9}rifi\u{e9}", "v\u{e9}rifi\u{e9}e", "v\u{e9}rifi\u{e9}s", "v\u{e9}rifi\u{e9}es", "officiel", "officielle", "officiels", "officielles"]),
+    ("de", false, &[
+        "verifiziert", "verifizierte", "verifizierter", "verifiziertes", "verifizierten",
+        "gepr\u{fc}ft", "gepr\u{fc}fte", "gepr\u{fc}fter", "gepr\u{fc}ftes", "gepr\u{fc}ften",
+        "offiziell", "offizielle", "offizieller", "offizielles", "offiziellen",
+    ]),
+    ("it", false, &["verificato", "verificata", "verificati", "verificate", "ufficiale", "ufficiali"]),
+    ("pt", false, &["verificado", "verificada", "verificados", "verificadas", "oficial", "oficiais"]),
+    ("ru", false, &[
+        "\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43e}",
+        "\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43d}\u{44b}\u{439}",
+        "\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43d}\u{430}\u{44f}",
+        "\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43d}\u{43e}\u{435}",
+        "\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43d}\u{44b}\u{435}",
+        "\u{432}\u{435}\u{440}\u{438}\u{444}\u{438}\u{446}\u{438}\u{440}\u{43e}\u{432}\u{430}\u{43d}",
+        "\u{432}\u{435}\u{440}\u{438}\u{444}\u{438}\u{446}\u{438}\u{440}\u{43e}\u{432}\u{430}\u{43d}\u{43d}\u{44b}\u{439}",
+        "\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439}",
+        "\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{430}\u{44f}",
+        "\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}\u{435}",
+        "\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{435}",
+        "\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}",
+    ]),
+    ("zh", true, &["\u{5b98}\u{65b9}", "\u{5df2}\u{9a8c}\u{8bc1}", "\u{5df2}\u{9a57}\u{8b49}", "\u{5df2}\u{8ba4}\u{8bc1}", "\u{5df2}\u{8a8d}\u{8b49}"]),
+    ("ja", true, &["\u{516c}\u{5f0f}", "\u{8a8d}\u{8a3c}\u{6e08}", "\u{691c}\u{8a3c}\u{6e08}", "\u{30aa}\u{30d5}\u{30a3}\u{30b7}\u{30e3}\u{30eb}"]),
+    ("ko", true, &["\u{acf5}\u{c2dd}", "\u{c778}\u{c99d}\u{b428}", "\u{c778}\u{c99d}\u{b41c}", "\u{ac80}\u{c99d}\u{b428}", "\u{ac80}\u{c99d}\u{b41c}"]),
+];
+
+/// The brand: a listing may say it only about Zeron, never as Zeron, unless
+/// its publisher is Zeron's own.
+pub const ZERON: &str = "zeron";
+
+/// In a name, "zeron" only as the object of one of these, by the store's
+/// locale: `(language, forms)`. Anything else ("Zeron Labs", "Team Zeron",
+/// "Zeron Git", "Zeron's git", "Zeron-made") reads as ours.
+pub const NAME_FORMS: &[(&str, &[&str])] = &[
+    ("en", &["for", "in", "with", "on", "to"]),
+    ("zh", &["\u{9002}\u{7528}\u{4e8e}", "\u{9069}\u{7528}\u{65bc}", "\u{7528}\u{4e8e}", "\u{7528}\u{65bc}", "\u{4e3a}", "\u{70ba}", "\u{7ed9}", "\u{7d66}", "\u{5728}", "\u{4e0e}", "\u{8207}", "\u{548c}"]),
+];
+
+/// In a description, "zeron" right after one of these reads as its maker.
+pub const ORIGIN_WORDS: &[&str] = &["by", "from", "by the", "made by", "built by", "von", "par", "de", "da", "di", "del", "van"];
+
+/// In a description, "zeron" right before or after one of these (or its
+/// possessive, "zeron's team") reads as its standing.
+pub const STANDING_WORDS: &[&str] = &[
+    "team", "labs", "inc", "hq", "staff", "approved", "certified", "endorsed", "recommended", "made", "built", "own", "\u{5b98}\u{65b9}", "\u{516c}\u{5f0f}", "\u{acf5}\u{c2dd}",
 ];
 
 /// `text` as the rules read it before ignorables go: Unicode NFKC (so
@@ -150,34 +196,47 @@ fn apostrophe(c: char) -> bool {
     matches!(c, '\'' | '\u{2019}' | '\u{02BC}')
 }
 
-/// Whether `spelling`, each letter a character of its class or a pair, an
-/// apostrophe any of [`apostrophe`]'s, a space any run of separators but
-/// an apostrophe, matches `text` from `at` to an end with no ASCII letter or
-/// digit right after.
-fn spells(text: &[char], at: usize, spelling: &[char]) -> bool {
+/// Where `spelling` (folded) ends when it matches `text` from `at`, with no
+/// ASCII letter or digit right after: each letter a character of its class
+/// or a pair; an apostrophe any of [`apostrophe`]'s; a space a run of one or
+/// more separators but an apostrophe; a `~` a run of none or more (between
+/// words of scripts that don't space them).
+fn spell_end(text: &[char], at: usize, spelling: &[char]) -> Option<usize> {
     let Some((&letter, rest)) = spelling.split_first() else {
-        return !ascii_word(text.get(at));
+        return (!ascii_word(text.get(at))).then_some(at);
     };
+    let gap = |from: usize| (from..text.len()).take_while(move |n| separator(text[*n]) && !apostrophe(text[*n])).map(|n| n + 1);
     match letter {
-        ' ' => (at..text.len()).take_while(|n| separator(text[*n]) && !apostrophe(text[*n])).any(|last| spells(text, last + 1, rest)),
-        '\'' => text.get(at).is_some_and(|c| apostrophe(*c)) && spells(text, at + 1, rest),
+        ' ' => gap(at).find_map(|next| spell_end(text, next, rest)),
+        '~' => std::iter::once(at).chain(gap(at)).find_map(|next| spell_end(text, next, rest)),
+        '\'' => text.get(at).filter(|c| apostrophe(**c)).and_then(|_| spell_end(text, at + 1, rest)),
         _ => {
-            if text.get(at).is_some_and(|c| class_of(letter).contains(c)) && spells(text, at + 1, rest) {
-                return true;
+            if text.get(at).is_some_and(|c| class_of(letter).contains(c))
+                && let Some(end) = spell_end(text, at + 1, rest)
+            {
+                return Some(end);
             }
-            PAIRS.iter().filter(|(l, _)| *l == letter).any(|(_, pair)| {
+            PAIRS.iter().filter(|(l, _)| *l == letter).find_map(|(_, pair)| {
                 let pair: Vec<char> = pair.chars().collect();
-                pair.iter().enumerate().all(|(n, p)| text.get(at + n).is_some_and(|c| lookalikes_of(*p).contains(c))) && spells(text, at + pair.len(), rest)
+                let fits = pair.iter().enumerate().all(|(n, p)| text.get(at + n).is_some_and(|c| lookalikes_of(*p).contains(c)));
+                if fits { spell_end(text, at + pair.len(), rest) } else { None }
             })
         }
     }
 }
 
-/// Whether `text` spells `words` (a word, or a phrase) with look-alikes,
-/// whole.
+/// Where each whole match of `words` (a word, or a phrase) in `text` ends.
+fn ends(text: &[char], words: &str) -> BTreeSet<usize> {
+    let spelling: Vec<char> = mark_text(words).chars().collect();
+    (0..text.len())
+        .filter(|at| !ascii_word(at.checked_sub(1).and_then(|b| text.get(b))))
+        .filter_map(|at| spell_end(text, at, &spelling))
+        .collect()
+}
+
+/// Whether `text` spells `words` with look-alikes, whole.
 fn spelled(text: &[char], words: &str) -> bool {
-    let spelling: Vec<char> = words.chars().collect();
-    (0..text.len()).any(|at| !ascii_word(at.checked_sub(1).and_then(|b| text.get(b))) && spells(text, at, &spelling))
+    !ends(text, words).is_empty()
 }
 
 /// `text` with each run of single characters, apart by 1 to
@@ -232,18 +291,78 @@ pub fn mark_claim(text: &str) -> Option<String> {
         return Some((*word).to_owned());
     }
     let readings = [folded.clone(), unspaced(&folded)];
-    MARK_WORDS.iter().find(|word| readings.iter().any(|reading| spelled(reading, word))).map(|word| (*word).to_owned())
+    if let Some(word) = MARK_WORDS.iter().find(|word| readings.iter().any(|reading| spelled(reading, word))) {
+        return Some((*word).to_owned());
+    }
+    // In the store's other languages.
+    let any_word = |c: Option<&char>| c.is_some_and(|c| matches!(c.general_category_group(), GeneralCategoryGroup::Letter | GeneralCategoryGroup::Number));
+    OTHER_LANGUAGES.iter().flat_map(|(_, substring, words)| words.iter().map(move |w| (*substring, *w))).find_map(|(substring, word)| {
+        let wanted: Vec<char> = folded_word(word);
+        let found = readings.iter().any(|reading| {
+            (0..reading.len()).any(|at| {
+                reading[at..].starts_with(&wanted)
+                    && (substring || (!any_word(at.checked_sub(1).and_then(|b| reading.get(b))) && !any_word(reading.get(at + wanted.len()))))
+            })
+        });
+        found.then(|| word.to_owned())
+    })
 }
 
-/// Which of [`ZERON_PHRASES`] `text` says, if any, read as the mark's words
-/// are: folded as [`mark_claim`] folds, each letter itself or a look-alike,
-/// its apostrophe any of ' ’ ʼ, each space any run of separators but an
-/// apostrophe, whole, in the text or with its spaced letters read as one
-/// word ("Git by Zer0n", "Z.E.R.O.N. approved").
+/// A word of a list, folded as the text is.
+fn folded_word(word: &str) -> Vec<char> {
+    folded(word)
+}
+
+/// `a` then `b`, as a spelling: apart by a space, or by `~` (none or more
+/// separators) when either is in a script that doesn't space its words.
+fn joined(a: &str, b: &str) -> String {
+    if a.is_ascii() && b.is_ascii() { format!("{a} {b}") } else { format!("{a}~{b}") }
+}
+
+/// The spellings that make a name's "zeron" the object of a form.
+fn name_forms() -> Vec<String> {
+    NAME_FORMS.iter().flat_map(|(_, forms)| forms.iter().map(|form| joined(form, ZERON))).collect()
+}
+
+/// The spellings a description may not use: "zeron" after a word of origin,
+/// or beside a word of standing.
+pub fn zeron_phrases() -> Vec<String> {
+    let mut phrases: Vec<String> = ORIGIN_WORDS.iter().map(|o| joined(o, ZERON)).collect();
+    for standing in STANDING_WORDS {
+        phrases.push(joined(ZERON, standing));
+        phrases.push(joined(standing, ZERON));
+        if standing.is_ascii() {
+            phrases.push(format!("{ZERON}'s {standing}"));
+        }
+    }
+    phrases
+}
+
+/// Whether a name says "zeron" other than as the object of one of
+/// [`NAME_FORMS`] ("Themes for Zeron" may; "Zeron Labs", "Git by Zeron"
+/// may not): `Some("zeron")` if it does. Read as the mark's words are.
+pub fn claims_zeron_in_name(text: &str) -> Option<String> {
+    let folded = folded(text);
+    let forms = name_forms();
+    [folded.clone(), unspaced(&folded)]
+        .iter()
+        .any(|reading| {
+            let allowed: BTreeSet<usize> = forms.iter().flat_map(|form| ends(reading, form)).collect();
+            ends(reading, ZERON).iter().any(|end| !allowed.contains(end))
+        })
+        .then(|| ZERON.to_owned())
+}
+
+/// Which of [`zeron_phrases`] a description says, if any, read as the
+/// mark's words are: each letter itself or a look-alike, its apostrophe any
+/// of ' ’ ʼ, each space any run of separators but an apostrophe, whole, in
+/// the text or with its spaced letters read as one word ("Git by Zer0n",
+/// "Z.E.R.O.N. approved"). Prose about Zeron ("adds a panel to Zeron's
+/// sidebar") says none.
 pub fn claims_zeron(text: &str) -> Option<String> {
     let folded = folded(text);
     let readings = [folded.clone(), unspaced(&folded)];
-    ZERON_PHRASES.iter().find(|phrase| readings.iter().any(|reading| spelled(reading, phrase))).map(|phrase| (*phrase).to_owned())
+    zeron_phrases().into_iter().find(|phrase| readings.iter().any(|reading| spelled(reading, phrase))).map(|phrase| phrase.replace('~', " "))
 }
 
 #[cfg(test)]
@@ -315,7 +434,6 @@ mod tests {
             "Unv\u{435}rified Links",
             "For every \u{3bf}fficer",
             "Off\u{456}cially the best",
-            "\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439} \u{43a}\u{43b}\u{438}\u{435}\u{43d}\u{442}",
             "verify your builds",
             "verification",
             "officialdom",
@@ -348,33 +466,72 @@ mod tests {
     }
 
     #[test]
-    fn saying_it_s_zeron_s_own() {
-        for (text, claim) in [
-            ("Notes, by Zeron", Some("by zeron")),
-            ("From ZERON: the board", Some("from zeron")),
-            ("Made by the Zeron-team", Some("zeron team")),
-            ("Zeron\u{2019}s own notes", Some("zeron's own")),
-            ("A Zeron approved board", Some("zeron approved")),
-            ("zeron\u{2014}recommended", Some("zeron recommended")),
-            ("Git by Zer0n", Some("by zeron")),
-            ("Git by Z\u{435}ron", Some("by zeron")),
-            ("Z.E.R.O.N. approved", Some("zeron approved")),
-            ("Git by Z e r o n", Some("by zeron")),
-            ("Zeron  -  certified", Some("zeron certified")),
-            ("Zeron\u{2bc}s own", Some("zeron's own")),
-            ("Notes from Zer\u{fe0f}on", Some("from zeron")),
-            ("Git b\u{443} Zeron", Some("by zeron")),
-            ("Git by \u{1d22}\u{1d07}\u{280}\u{1d0f}\u{274}", Some("by zeron")),
-            ("Notes for Zeron", None),
-            ("Works with Zeron", None),
-            ("Zeronaut tools", None),
-            ("by zeronaut", None),
-            ("A board by Zenon", None),
-            ("Lazeron approved", None),
-            ("from zero n", None),
-            ("Zeron notes", None),
+    fn a_name_says_zeron_only_as_what_it_s_for() {
+        for name in [
+            "Zeron Labs", "Team Zeron", "Zeron Git", "Zeron's git", "Zeron-made", "Git by Zeron", "Git by Zer0n", "Git by Z\u{435}ron",
+            "Git by \u{1d22}\u{1d07}\u{280}\u{1d0f}\u{274}", "Z.E.R.O.N. approved", "z e r o n approved", "Zeron notes", "Zeron\u{63d2}\u{4ef6}",
+            "Themes for Zeron, by Zeron",
         ] {
-            assert_eq!(claims_zeron(text).as_deref(), claim, "{text}");
+            assert_eq!(claims_zeron_in_name(name).as_deref(), Some("zeron"), "{name}");
+        }
+        for name in [
+            "Themes for Zeron", "Git in Zeron", "Notes with Zeron", "Tabs on Zeron", "Send to Zeron", "Zeronaut", "Lazeron", "A board by Zenon",
+            "\u{9002}\u{7528}\u{4e8e}Zeron\u{7684}\u{4e3b}\u{9898}", "\u{4e3a} Zeron \u{505a}\u{7684}\u{7b14}\u{8bb0}", "Focus Board",
+        ] {
+            assert_eq!(claims_zeron_in_name(name), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_description_may_say_what_zeron_is_but_not_that_it_s_zeron_s() {
+        for (text, claim) in [
+            ("Notes, by Zeron", "by zeron"),
+            ("From ZERON: the board", "from zeron"),
+            ("Made by the Zeron team.", "by the zeron"),
+            ("Zeron\u{2019}s own notes", "zeron's own"),
+            ("A Zeron approved board", "zeron approved"),
+            ("zeron\u{2014}recommended", "zeron recommended"),
+            ("Team Zeron's notes", "team zeron"),
+            ("Ein Plugin von Zeron", "von zeron"),
+            ("Un th\u{e8}me par Zeron", "par zeron"),
+            ("Git by Zer0n", "by zeron"),
+            ("Git b\u{443} Zeron", "by zeron"),
+            ("Z.E.R.O.N. approved", "zeron approved"),
+            ("Zeron\u{5b98}\u{65b9}\u{63d2}\u{4ef6}", "zeron \u{5b98}\u{65b9}"),
+        ] {
+            assert_eq!(claims_zeron(text).as_deref(), Some(claim), "{text}");
+        }
+        for text in [
+            "Adds a panel to Zeron's sidebar.", "Themes for Zeron.", "Works with Zeron.", "Made for Zeron.", "Built with Zeron in mind.",
+            "Zeronaut tools", "by zeronaut", "A board by Zenon", "Lazeron approved", "from zero n", "Zeron notes",
+        ] {
+            assert_eq!(claims_zeron(text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn the_mark_s_words_in_other_languages() {
+        for (text, claim) in [
+            ("Cliente oficial", "oficial"),
+            ("No oficial", "oficial"),
+            ("Th\u{e8}me officiel", "officiel"),
+            ("Th\u{e8}me v\u{e9}rifi\u{e9}", "v\u{e9}rifi\u{e9}"),
+            ("Offizieller Client", "offizieller"),
+            ("Gepr\u{fc}fte Notizen", "gepr\u{fc}fte"),
+            ("Client ufficiale", "ufficiale"),
+            ("\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439} \u{43a}\u{43b}\u{438}\u{435}\u{43d}\u{442}", "\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439}"),
+            ("\u{5b98}\u{65b9}\u{63d2}\u{4ef6}", "\u{5b98}\u{65b9}"),
+            ("\u{975e}\u{5b98}\u{65b9}\u{63d2}\u{4ef6}", "\u{5b98}\u{65b9}"),
+            ("\u{516c}\u{5f0f}\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}", "\u{516c}\u{5f0f}"),
+            ("\u{acf5}\u{c2dd} \u{d50c}\u{b7ec}\u{adf8}\u{c778}", "\u{acf5}\u{c2dd}"),
+        ] {
+            assert_eq!(mark_claim(text).as_deref(), Some(claim), "{text}");
+        }
+        for text in [
+            "Ofici\u{f3} de notas", "Oficina", "Officier de garde", "Neoficiale", "\u{43d}\u{435}\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439} \u{43a}\u{43b}\u{438}\u{435}\u{43d}\u{442}",
+            "\u{7b14}\u{8bb0}\u{677f}", "\u{30e1}\u{30e2}\u{5e33}", "\u{ba54}\u{baa8}\u{c7a5}",
+        ] {
+            assert_eq!(mark_claim(text), None, "{text}");
         }
     }
 
@@ -397,7 +554,10 @@ mod tests {
     /// to that letter, then the Latin small capitals and the digit 3 for e.
     fn generate(text: &str, sha256: &str) -> String {
         let version = text.lines().find_map(|l| l.strip_prefix("# Version: ")).unwrap_or("unknown").trim().to_owned();
-        let letters: BTreeSet<char> = MARK_WORDS.iter().chain(ZERON_PHRASES).flat_map(|w| w.chars()).filter(char::is_ascii_lowercase).collect();
+        let zeron = [ZERON];
+        let names = NAME_FORMS.iter().flat_map(|(_, forms)| forms.iter());
+        let letters: BTreeSet<char> =
+            MARK_WORDS.iter().chain(&zeron).chain(ORIGIN_WORDS).chain(STANDING_WORDS).chain(names).flat_map(|w| w.chars()).filter(char::is_ascii_lowercase).collect();
         let mut table: std::collections::BTreeMap<char, BTreeSet<char>> = letters.iter().map(|l| (*l, BTreeSet::new())).collect();
         // Each kept as folded here and as written, so a runtime whose case
         // data is older or newer than this one's (a new letter it doesn't
