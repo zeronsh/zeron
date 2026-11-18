@@ -1465,6 +1465,11 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			detail = function(): string?
 				local v: any = now:get()
 				local parts: { string } = {}
+				-- (Replaced before the store verified it: why it takes no new
+				-- installs, as the store says it.)
+				if v.status == "yanked" and v.yanked_by == "superseded" and type(v.superseded_by) == "string" and v.superseded_by ~= "" then
+					table.insert(parts, ui.t("plugins.store.superseded", { version = v.superseded_by }):get())
+				end
 				if v.status ~= "yanked" then
 					if v.verified == true then
 						table.insert(parts, if type(v.verified_at) == "number"

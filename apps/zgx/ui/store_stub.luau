@@ -356,7 +356,7 @@ do
 	f.detail.engines = { zeron = ">=0.3.0" }
 	f.versions = {
 		{ version = "1.2.0", status = "listed", verified = true, verified_at = NOW - DAY, published_at = NOW - 2 * DAY, notes = "- Pauses when you leave the chat.\n- Says when it's done." },
-		{ version = "1.1.0", status = "yanked", yanked = true, verified = false, published_at = NOW - 20 * DAY, notes = "- A bell." },
+		{ version = "1.1.0", status = "yanked", yanked = true, yanked_by = "superseded", superseded_by = "1.2.0", verified = false, published_at = NOW - 20 * DAY, notes = "- A bell." },
 		{ version = "1.0.0", status = "listed", verified = true, verified_at = NOW - 59 * DAY, published_at = NOW - 60 * DAY, notes = "- The first one." },
 	}
 end

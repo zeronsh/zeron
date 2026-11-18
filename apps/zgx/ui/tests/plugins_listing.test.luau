@@ -672,6 +672,8 @@ test("each version says whether the store has verified it, and any listed one in
 	local versions = app:tree('role:group "Versions"')
 	expect(versions).to_contain("Verified on")
 	expect(versions).to_contain("No new installs")
+	-- (1.1.0, never verified, replaced by 1.2.0: said why.)
+	expect(versions).to_contain("Replaced by 1.2.0 before it was verified")
 	-- 1.1.0 was stopped: no Install of its own.
 	expect(app:count('role:group "Versions" >> role:button "Install"')).to_be(2)
 	app:click('role:group "Versions" >> role:button "Install"[2]')
