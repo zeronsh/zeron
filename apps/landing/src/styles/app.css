@@ -598,7 +598,12 @@ a.row:focus-visible { outline-offset: -2px; }
 .prose { font-size: 15px; line-height: 24px; color: var(--text); overflow-wrap: anywhere; }
 .prose > :first-child { margin-top: 0; }
 .prose :where(p, ul, ol, blockquote, pre, .table-scroll, hr, img) { margin-top: 12px; }
-.prose :where(h2, h3, h4, h5, h6) { margin-top: 24px; font-weight: 600; scroll-margin-top: 80px; }
+/* (A heading stepped down keeps the room of its source level: a README's
+   # (here an h2) 32 above, ## 24, ### and lower 20; always more than the 12
+   between paragraphs and the 8 under it, so its section groups.) */
+.prose :where(h2, h3, h4, h5, h6) { margin-top: 20px; font-weight: 600; scroll-margin-top: 80px; }
+.prose h2 { margin-top: 32px; }
+.prose h3 { margin-top: 24px; }
 .prose h2 { font-size: 18px; line-height: 26px; }
 .prose :where(h3, h4, h5, h6) { font-size: 15px; line-height: 24px; }
 .prose :where(h2, h3, h4, h5, h6) + * { margin-top: 8px; }
@@ -617,7 +622,9 @@ a.row:focus-visible { outline-offset: -2px; }
 .prose blockquote { padding-left: 16px; border-left: 2px solid var(--line-strong); color: var(--text-2); }
 .prose hr { height: 1px; border: 0; background: var(--line-faint); margin-block: 24px; }
 /* (A picture as the app draws an attachment: the cards' 12 corner, a 1 hairline drawn over it.) */
-.prose img { max-width: 100%; height: auto; border-radius: 12px; outline: 1px solid var(--line-faint); outline-offset: -1px; display: inline-block; vertical-align: middle; }
+/* (A picture in the words takes the smaller corner, 8; the strip's, peers
+   of the panels on the column's edge, take theirs, 12.) */
+.prose img { max-width: 100%; height: auto; border-radius: 8px; outline: 1px solid var(--line-faint); outline-offset: -1px; display: inline-block; vertical-align: middle; }
 .prose p > img:only-child { display: block; }
 .prose :not(pre) > code { padding: 0 4px; font-size: 13px; border-radius: 4px; background: var(--wash); }
 .prose pre { padding: 12px 16px; overflow-x: auto; font-size: 13px; line-height: 20px; border-radius: 8px; background: var(--sunken); box-shadow: inset 0 0 0 1px var(--line-faint); tab-size: 2; }
@@ -819,7 +826,7 @@ a.row:focus-visible { outline-offset: -2px; }
 .older summary:hover { background: var(--hover); }
 .older summary:focus-visible { outline-offset: -2px; }
 .older .num { font-family: var(--mono); font-size: 12px; line-height: 16px; }
-.older .first { color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.older .first { color: var(--text); /* (the latest's notes' ink: the fold says which is which) */ white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .older time { color: var(--text-3); font-size: 12px; line-height: 16px; font-variant-numeric: tabular-nums; }
 .older summary .glyph { color: var(--text-3); transition: rotate 0.15s; }
 .older details[open] summary .glyph { rotate: 180deg; }
