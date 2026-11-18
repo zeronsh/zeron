@@ -61,7 +61,7 @@ echo "== the edge serves $EDGE_URL"
 
 mkdir -p "$WORK/devices"
 set +e
-E2E_EDGE_URL="$EDGE_URL" E2E_ZERON_BIN="$ZERON_BIN" E2E_WORK_DIR="$WORK/devices" \
+E2E_EDGE_JSON="$WORK/edge.json" E2E_ZERON_BIN="$ZERON_BIN" E2E_WORK_DIR="$WORK/devices" \
   cargo test -p zeron-engine --test plugin_store_e2e -- --ignored --nocapture --test-threads=1 2>&1 | tee "$WORK/run.log"
 status=${PIPESTATUS[0]}
 set -e

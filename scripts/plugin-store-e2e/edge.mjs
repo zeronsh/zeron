@@ -21,7 +21,8 @@
 // Store admins (the edge-store lane's stand-in session): STORE_ADMIN_USERS.
 
 import { createRequire } from "node:module";
-import { createHmac, generateKeyPairSync, randomUUID, sign } from "node:crypto";
+import { createHash, createHmac, generateKeyPairSync, randomUUID, sign } from "node:crypto";
+import { createServer } from "node:http";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -72,15 +73,57 @@ const deliverUserCreated = async (id) => {
 
 const reply = (status, body) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
+// Codes the authorize page handed out (a browser's sign-in): code → the user
+// and the PKCE challenge it was asked with. Each is good once.
+const issued = new Map();
+
+/** AuthKit's authorize page, as a browser reaches it through the site port:
+ * signs in `e2e_user` and sends the browser back to `redirect_uri` with a
+ * code and the `state` it was given. */
+const authorize = (url) => {
+  const user = url.searchParams.get("e2e_user");
+  const redirect = url.searchParams.get("redirect_uri");
+  const state = url.searchParams.get("state");
+  if (!user || !redirect || !state) return new Response("authorize needs e2e_user, redirect_uri and state", { status: 400 });
+  const code = `web_${randomUUID()}`;
+  issued.set(code, { user, challenge: url.searchParams.get("code_challenge"), method: url.searchParams.get("code_challenge_method") });
+  const back = new URL(redirect);
+  back.searchParams.set("code", code);
+  back.searchParams.set("state", state);
+  return new Response(null, { status: 302, headers: { location: back.toString() } });
+};
+
+/** A code's user: an authorize page's (its PKCE verifier checked against
+ * its challenge, as WorkOS does), or a device's test code `code:<user>`. */
+const userOfCode = (code, verifier) => {
+  const asked = issued.get(code);
+  if (asked) {
+    issued.delete(code);
+    if (asked.challenge) {
+      const proof = verifier && createHash("sha256").update(verifier).digest("base64url");
+      if (asked.method !== "S256" || proof !== asked.challenge) return { error: "invalid_grant", error_description: "PKCE verification failed." };
+    }
+    return { user: asked.user };
+  }
+  return code.startsWith("code:") ? { user: code.slice(5) } : { error: "invalid_grant", error_description: "Unknown code." };
+};
+
 const workos = async (request) => {
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === `/sso/jwks/${CLIENT_ID}`) return reply(200, { keys: [jwk] });
+  if (request.method === "POST" && url.pathname === "/user_management/sessions/revoke") return reply(200, {});
   if (request.method === "POST" && url.pathname === "/user_management/authenticate") {
     const body = await request.json();
-    const raw = String(body.grant_type === "authorization_code" ? body.code : body.refresh_token);
-    const prefix = body.grant_type === "authorization_code" ? "code:" : "rt:";
-    if (!raw.startsWith(prefix)) return reply(400, { error: "invalid_grant", error_description: "Unknown code." });
-    const id = raw.slice(prefix.length);
+    let id;
+    if (body.grant_type === "authorization_code") {
+      const found = userOfCode(String(body.code), body.code_verifier);
+      if (found.error) return reply(400, found);
+      id = found.user;
+    } else {
+      const raw = String(body.refresh_token);
+      if (!raw.startsWith("rt:")) return reply(400, { error: "invalid_grant", error_description: "Unknown refresh token." });
+      id = raw.slice(3);
+    }
     await deliverUserCreated(id);
     return reply(200, { user: user(id), organization_id: `org_${id}`, access_token: accessToken(id), refresh_token: `rt:${id}` });
   }
@@ -110,6 +153,11 @@ const config = JSON.parse(
     .filter((line) => !line.trim().startsWith("//"))
     .join("\n")
 );
+// The web site's origin (https, as the edge requires of it). Requests to it
+// are served by the site port below, which forwards them to the worker as
+// the site's own (staging: the Astro site, over its service binding).
+const SITE = "https://site.e2e.test";
+const ADMIN_TOKEN = randomUUID();
 const bindings = {
   ...config.vars,
   AUTH_MODE: "workos",
@@ -117,7 +165,8 @@ const bindings = {
   WORKOS_API_KEY: "sk_e2e",
   WORKOS_ISSUER: ISSUER,
   CLOUD_EDGE_URL: "http://127.0.0.1",
-  ADMIN_TOKEN: randomUUID(),
+  ADMIN_TOKEN,
+  WEB_ORIGIN: SITE,
   WORKOS_WEBHOOK_SECRET: WEBHOOK_SECRET,
   STORE_ADMIN_USERS: process.env.STORE_ADMIN_USERS ?? "user_admin"
 };
@@ -153,10 +202,41 @@ for (const file of readdirSync(migrations).filter((f) => f.endsWith(".sql")).sor
   for (const statement of splitStatements(sql)) await db.prepare(statement).run();
 }
 
-writeFileSync(readyFile, JSON.stringify({ url, client_id: CLIENT_ID }));
-console.error(`edge e2e: serving ${url}`);
+// The site port: what a browser on the site reaches. `/__workos/authorize`
+// is AuthKit's page (the fake's); everything else goes to the worker as a
+// request to the site's origin, redirects and cookies passed back as sent.
+const siteServer = createServer(async (req, res) => {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  const path = req.url ?? "/";
+  let answer;
+  if (path.startsWith("/__workos/authorize")) {
+    answer = authorize(new URL(path, "http://site"));
+  } else {
+    const headers = new Headers();
+    for (const [name, value] of Object.entries(req.headers)) {
+      if (name !== "host" && value !== undefined) headers.set(name, Array.isArray(value) ? value.join(", ") : value);
+    }
+    const body = ["GET", "HEAD"].includes(req.method ?? "GET") ? undefined : Buffer.concat(chunks);
+    answer = await mf.dispatchFetch(`${SITE}${path}`, { method: req.method, headers, body, redirect: "manual" });
+  }
+  const out = {};
+  answer.headers.forEach((value, name) => {
+    if (name !== "set-cookie") out[name] = value;
+  });
+  const cookies = answer.headers.getSetCookie?.() ?? [];
+  if (cookies.length) out["set-cookie"] = cookies;
+  res.writeHead(answer.status, out);
+  res.end(Buffer.from(await answer.arrayBuffer()));
+});
+await new Promise((ok) => siteServer.listen(0, "127.0.0.1", ok));
+const site = `http://127.0.0.1:${siteServer.address().port}`;
+
+writeFileSync(readyFile, JSON.stringify({ url, site, site_origin: SITE, admin_token: ADMIN_TOKEN, client_id: CLIENT_ID }));
+console.error(`edge e2e: serving ${url}, the site at ${site}`);
 
 const stop = async () => {
+  siteServer.close();
   await mf.dispose();
   process.exit(0);
 };
