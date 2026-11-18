@@ -3,6 +3,18 @@
 // made to nest the highlighter's tree deeper than the serializer can walk
 // (a 3 KB `"\`${"` run): past NESTING, or if anything throws, the text is
 // shown plain, and the caller is told, so a reviewer can say so.
+//
+// What highlighting costs can't be told from outside the grammars: one
+// long line runs some of them into the square of its length or worse (a
+// 32 KB line of "_" takes TypeScript's 3 s, of "[a](" markdown's 160 s),
+// and some grow with the whole text whatever its lines (C's and shell's
+// past 2 s at 32 KB, Rust's raw strings 0.6 s). Measured on every grammar
+// shipped, each against its worst of 43 openers, so: a text is highlighted
+// only when no line passes HIGHLIGHT.line and the whole is within its
+// language's cap, and a page or document highlights within a budget of
+// bytes; everything else is shown as plain text (with nothing said: being
+// long isn't suspicious). Within these, the worst measured is about 60 ms
+// a call.
 import type { Root, RootContent } from "hast";
 import { toHtml } from "hast-util-to-html";
 import { common, createLowlight } from "lowlight";
@@ -12,8 +24,31 @@ const lowlight = createLowlight(common);
 /** Deeper than any real file's highlighting nests (a few levels). */
 export const NESTING = 64;
 
-/** Text past this many characters is shown plain: highlighting is a nicety. */
-const LIMIT = 200_000;
+/** How long a line, and how much text, a highlighting may take on. */
+export const HIGHLIGHT = { line: 400, bytes: 4 * 1024 } as const;
+
+/** Grammars whose worst grows faster still (markdown's is about cubic): a smaller cap. */
+const SMALLER: Record<string, number> = { markdown: 1024, md: 1024, mkdown: 1024, mkd: 1024 };
+
+/** What one page (a submission's changes) or one document may highlight, together, in bytes. */
+export class HighlightBudget {
+  bytes: number;
+  constructor(bytes: number) {
+    this.bytes = bytes;
+  }
+}
+
+/** Whether a text may be highlighted in a language at all: within its cap, and no line past HIGHLIGHT.line. */
+export function highlightable(text: string, language: string): boolean {
+  if (text.length > (SMALLER[language] ?? HIGHLIGHT.bytes)) return false;
+  let start = 0;
+  for (;;) {
+    const end = text.indexOf("\n", start);
+    if ((end === -1 ? text.length : end) - start > HIGHLIGHT.line) return false;
+    if (end === -1) return true;
+    start = end + 1;
+  }
+}
 
 export interface Highlighted {
   html: string;
@@ -39,9 +74,17 @@ function depth(tree: Root): number {
   return most;
 }
 
-/** One file's text (or a line of it), highlighted when its language is known; plain, and said so, when it can't be. */
-export function highlighted(text: string, language: string | null): Highlighted {
-  if (!language || !lowlight.registered(language) || text.length > LIMIT) return { html: asText(text), plain: false };
+/**
+ * One file's text (or a line of it), highlighted when its language is known
+ * and it is within the bounds (and the `budget`, when given, which it
+ * spends); plain otherwise. Plain, and said so, when the highlighter fails on it.
+ */
+export function highlighted(text: string, language: string | null, budget?: HighlightBudget): Highlighted {
+  if (!language || !lowlight.registered(language) || !highlightable(text, language)) return { html: asText(text), plain: false };
+  if (budget) {
+    if (text.length > budget.bytes) return { html: asText(text), plain: false };
+    budget.bytes -= text.length;
+  }
   try {
     const tree = lowlight.highlight(language, text);
     if (depth(tree) > NESTING) return { html: asText(text), plain: true };

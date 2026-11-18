@@ -20,7 +20,8 @@ import { reasonLabel, toWeigh, versionAsk } from "../../../../lib/store/admin.ts
 import { takeFlash } from "../../../../lib/store/flash.ts";
 import { age, bytes, count, dateTime, day, unbidi, waitedFor } from "../../../../lib/store/format.ts";
 import { privatePage } from "../../../../lib/store/http.ts";
-import { drawable, render } from "../../../../lib/store/markdown.ts";
+import { Budget, drawable, render } from "../../../../lib/store/markdown.ts";
+import { HighlightBudget } from "../../../../lib/store/highlight.ts";
 import { isPluginId, isVersion } from "../../../../lib/store/names.ts";
 import { compared, together } from "../../../../lib/store/permissions.ts";
 import { changedFiles, countRows, diffRows, fileTree, languageOf, MANIFEST_FILE, manifestChanges, manifestFile, manifestText, pictureType, readText, type DiffRow } from "../../../../lib/store/review.ts";
@@ -86,9 +87,13 @@ if (s && view === "files") {
 // (at most this many files on one page; the rest are listed).
 const DIFF_FILES = 40;
 /** The most the page diffs, all files together, in lines before and after. */
-// (Counted in lines, not time: a Worker's clock doesn't move while code runs.)
+// (Counted in lines and bytes, not time: a Worker's clock doesn't move while code runs.)
 const PAGE_LINES = 24_000;
+const PAGE_BYTES = 2 * 1024 * 1024;
 let linesLeft = PAGE_LINES;
+let bytesLeft = PAGE_BYTES;
+/** What the changes may highlight, all files together (highlight.ts). */
+const diffHighlight = new HighlightBudget(64 * 1024);
 let diffs: { path: string; change: keyof typeof CHANGE; rows: DiffRow[] | null; note?: string }[] = [];
 if (s?.base && view === "changes") {
   const base = s.base.version;
@@ -105,8 +110,10 @@ if (s?.base && view === "changes") {
       if (!("text" in now) || !("text" in before)) return { path: c.path, change: c.change, rows: null, note: "tooBig" in now || "tooBig" in before ? "Too big to show here." : "Not text." };
       // (Each diff is bounded; and once the page has spent its time, the rest are listed to open in Files.)
       const lines = now.text.split("\n").length + before.text.split("\n").length;
-      if (lines > linesLeft) return { path: c.path, change: c.change, rows: null, note: "Not compared here: open it in Files." };
+      const bytes = now.text.length + before.text.length;
+      if (lines > linesLeft || bytes > bytesLeft) return { path: c.path, change: c.change, rows: null, note: "Not compared here: open it in Files." };
       linesLeft -= lines;
+      bytesLeft -= bytes;
       const rows = diffRows(before.text, now.text);
       return rows ? { path: c.path, change: c.change, rows } : { path: c.path, change: c.change, rows: null, note: "Too different to show line by line: open it in Files." };
     }),
@@ -120,15 +127,19 @@ const readmeText = s ? (s.version.readme ?? (await (async () => {
   const got = await readText(await edge.file(id, version, "README.md", true));
   return got && "text" in got ? got.text : "";
 })())) : "";
-const notesDrawn = overview && s.version.notes ? render(s.version.notes, { file, demote: true }) : null;
-const readmeDrawn = overview && readmeText.trim() ? render(readmeText, { file, demote: true, title: name }) : null;
+// (The README first, then the notes, under one page budget, as the public page draws them.)
+const budget = new Budget();
+const readmeDrawn = overview && readmeText.trim() ? render(readmeText, { file, demote: true, title: name }, budget) : null;
+const notesDrawn = overview && s.version.notes ? render(s.version.notes, { file, demote: true }, budget) : null;
 const notes = notesDrawn?.html ?? "";
 const readme = readmeDrawn?.html ?? "";
 // A README or notes too costly to draw (markdown.ts BOUNDS) is shown as its
 // text, and the reviewer is told, loudly, on every view: a submission that
 // can't be drawn within the limit is itself a reason not to approve it.
-const readmeCut = readmeDrawn?.cut ?? (readmeText.trim() ? drawable(readmeText) : null);
-const notesCut = notesDrawn?.cut ?? (s?.version.notes ? drawable(s.version.notes) : null);
+// (Loud only for the document's own sake: one left undrawn because the page spent its budget is just its text.)
+const own = (cut: string | null | undefined) => (cut === "page" ? null : cut);
+const readmeCut = own(readmeDrawn?.cut) ?? (!readmeDrawn && readmeText.trim() ? drawable(readmeText) : null);
+const notesCut = own(notesDrawn?.cut) ?? (!notesDrawn && s?.version.notes ? drawable(s.version.notes) : null);
 const drawing: Check[] = [
   ...(readmeCut ? [{ id: "readme_drawn", level: "fail" as const, message: "This README could not be drawn within the limit: it's shown as plain text. That alone is a reason not to approve it." }] : []),
   ...(notesCut ? [{ id: "notes_drawn", level: "fail" as const, message: `Its notes for ${version} could not be drawn within the limit: they're shown as plain text.` }] : []),
@@ -459,7 +470,7 @@ const plural = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n ==
                         </span>
                       )}
                     </header>
-                    {d.rows ? d.rows.length > 0 ? <DiffView rows={d.rows} language={languageOf(d.path)} /> : <p class="t-text t-3">Only its bytes changed.</p> : <p class="t-text t-3">{d.note}</p>}
+                    {d.rows ? d.rows.length > 0 ? <DiffView rows={d.rows} language={languageOf(d.path)} budget={diffHighlight} /> : <p class="t-text t-3">Only its bytes changed.</p> : <p class="t-text t-3">{d.note}</p>}
                   </article>
                 );
               })}

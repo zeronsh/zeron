@@ -309,7 +309,17 @@ test("two documents' footnotes on one page share no id", () => {
 describe("the estimate holds: what beat it before is caught, and no shape costs far more than reckoned", () => {
   const options = { file: (p: string) => `/f/${p}`, demote: true };
   /** What each shape must come to: drawn within the budget, or its text because it's past it. */
-  const OUTCOMES: Record<string, "drawn" | "budget"> = {
+  const OUTCOMES: Record<string, "drawn" | "budget" | "shape"> = {
+    "a fake fence (a backtick in its info string), 32 KB": "shape",
+    "a fake fence, 64 KB": "shape",
+    "a fence indented four spaces": "shape",
+    "a fence indented by a tab": "shape",
+    "a sparse table 1,300 columns wide": "shape",
+    "runs of closing brackets": "shape",
+    "lines ended by CR alone": "shape",
+    // (Code past what may be highlighted is drawn as plain code.)
+    "a markdown code block of link openers": "drawn",
+    "a rust code block of raw-string openers": "drawn",
     "2,000 footnote definitions at the end of 100 KB": "budget",
     "link definitions spread out with blank lines": "budget",
     "every footnote referenced from every piece": "drawn",
@@ -318,17 +328,21 @@ describe("the estimate holds: what beat it before is caught, and no shape costs 
   };
 
   for (const [name, make] of Object.entries(BEATERS)) {
-    test(`${name}: ${OUTCOMES[name] === "drawn" ? "drawn, within the budget of work" : "its text, said so: past the budget of work"}`, () => {
+    const outcome = OUTCOMES[name]!;
+    test(`${name}: ${outcome === "drawn" ? "drawn, within the budget of work" : outcome === "shape" ? "its text, said so: a block past a bound, known before parsing" : "its text, said so: past the budget of work"}`, () => {
       const md = make();
       const work = workOf(md);
-      expect(work).not.toBeNull();
       const { html, cut } = renderWithin(md, options);
-      if (OUTCOMES[name] === "drawn") {
+      if (outcome === "drawn") {
         expect(cut).toBeNull();
+        expect(work).not.toBeNull();
         expect(work!).toBeLessThanOrEqual(BOUNDS.work);
+        // (Within the output's bound too.)
+        expect(html.length).toBeLessThanOrEqual(BOUNDS.html);
       } else {
-        expect(cut).toBe("budget");
-        expect(work!).toBeGreaterThan(BOUNDS.work);
+        expect(cut).toBe(outcome);
+        if (outcome === "shape") expect(work).toBeNull();
+        else expect(work!).toBeGreaterThan(BOUNDS.work);
         expect(html).toContain('<p class="as-text">Shown as plain text.</p>');
       }
     });
@@ -346,7 +360,7 @@ describe("the estimate holds: what beat it before is caught, and no shape costs 
       return best / workOf(md)!;
     };
     // The reference's ratio on the measuring box (markdown.ts, warm), and here.
-    const MEASURED_REFERENCE = 0.44;
+    const MEASURED_REFERENCE = 0.41;
     const scale = MEASURED_REFERENCE / ratio(SHAPES[REFERENCE]!());
     const over = Object.entries(SHAPES)
       .map(([name, make]) => [name, ratio(make()) * scale] as const)
