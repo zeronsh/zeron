@@ -15,7 +15,6 @@ import { type Json, type JsonObject, canonicalJson, isArray, isObject } from "./
 import { MANIFEST_FILE, type Manifest, RESERVED_ID_ERROR, idProblem, isRustWhitespace, rustTrim, rustTrimStart } from "./manifest";
 import { MAX_BYTES, MAX_FILES } from "./package";
 import { LIMITS, STORE_DATA } from "./data";
-import { MARK_LOOKALIKES } from "./mark-lookalikes";
 import { foldPath, plainPath } from "./paths";
 import { type Range, type Version, parseRange, parseVersion } from "./semver";
 
@@ -58,7 +57,9 @@ export type ListingRule =
   | "bad_listing"
   | "too_large"
   | "binary_file"
-  | "no_notes";
+  | "no_notes"
+  /** A warning on a device; the edge refuses it unless the publisher is Zeron's own. */
+  | "claims_zeron";
 
 export interface Problem {
   readonly rule: ListingRule;
@@ -89,89 +90,100 @@ const isControl = (ch: string): boolean => {
 };
 
 /** A character that may be drawn as nothing, which `name` and
- * `description` refuse (amendment 31; `keywords` are ASCII): a control or
- * format character (Cc, Cf: bidi controls among them), any other
- * Default_Ignorable_Code_Point (the Hangul fillers, which are letters), and
- * any variation selector but U+FE0F directly after a character with the
- * Emoji property ("⭐️"). */
+ * `description` refuse (amendment 31; data file `unseen`; `keywords` are
+ * ASCII): a control or format character (Cc, Cf: bidi controls among them),
+ * any other Default_Ignorable_Code_Point (the Hangul fillers, which are
+ * letters), and any variation selector but U+FE0F directly after a
+ * character with the Emoji property ("⭐️"). */
 const UNSEEN = /[\p{Cc}\p{Cf}]|(?!\p{Variation_Selector})\p{Default_Ignorable_Code_Point}|(?!\u{fe0f})\p{Variation_Selector}|(?<!\p{Emoji})\u{fe0f}/u;
-/** Every default-ignorable character, variation selectors included, and
- * every enclosing mark (Me: a keycap's, a circle's), which the fold keeps:
- * gone before the mark's word test, so none can split a word. */
-const IGNORABLE = /[\p{Default_Ignorable_Code_Point}\p{Me}]/gu;
 
 /**
- * The store's mark (amendment 45): a listing's name or description may not
- * claim it. The shared rule (data file `mark_claims`, listing.rs
- * `mark_claim`): the text read as NFKC, lowercased, then NFKD without its
- * nonspacing marks (`markText`); a claim is any of the glyphs anywhere, or
- * one of the words with no ASCII letter or digit right before or after it.
+ * The store's mark (amendment 45) and claims of being Zeron's own: one rule
+ * for a device's check and the edge, as the data file states it
+ * (`mark_claims`, `claims_zeron`; the engine's mark.rs).
+ *
+ * The text is folded (`markText`: NFKC, lowercase, NFKD without nonspacing
+ * marks), then every Default_Ignorable_Code_Point (variation selectors
+ * among them) and enclosing mark (Me) goes, so nothing drawn as nothing, or
+ * around a letter, splits a word. It claims the mark with a glyph anywhere,
+ * a word whole as written, or a word spelled with look-alikes (generated
+ * from Unicode's confusables, UTS #39; `i` and `l` interchangeable; `cl`
+ * for d), in the text or with its spaced single characters read as one word.
  */
-const MARK_GLYPHS: readonly string[] = STORE_DATA.mark_claims.glyphs;
-const MARK_WORDS: readonly string[] = STORE_DATA.mark_claims.words;
+const MARKS = STORE_DATA.mark_claims;
+const MARK_GLYPHS: readonly string[] = MARKS.glyphs;
+const MARK_WORDS: readonly string[] = MARKS.words;
+const LOOKALIKES: Readonly<Record<string, readonly string[]>> = MARKS.lookalikes;
+const PAIRS: Readonly<Record<string, readonly string[]>> = MARKS.pairs;
+const INTERCHANGEABLE: readonly (readonly string[])[] = MARKS.interchangeable;
+const ZERON_PHRASES: readonly string[] = STORE_DATA.claims_zeron.phrases;
 const ASCII_WORD = /[A-Za-z0-9]/;
+const IGNORABLE = /[\p{Default_Ignorable_Code_Point}\p{Me}]/gu;
+/** A space (White_Space, or U+FEFF) or a punctuation mark (P*). */
+const SEPARATOR = "[\\p{White_Space}\\u{feff}\\p{P}]";
+const NOT_SEPARATOR = "[^\\p{White_Space}\\u{feff}\\p{P}]";
 
 export const markText = (text: string): string =>
   text.normalize("NFKC").toLowerCase().normalize("NFKD").replace(/\p{Mn}/gu, "");
+const folded = (text: string): string => markText(text).replace(IGNORABLE, "");
 
-/** The first of the mark's words in `folded` as a whole word, if any. */
-const markWord = (folded: string): string | undefined =>
-  MARK_WORDS.find((word) => {
-    for (let at = folded.indexOf(word); at !== -1; at = folded.indexOf(word, at + 1)) {
-      const before = folded[at - 1];
-      const after = folded[at + word.length];
-      if (!(before !== undefined && ASCII_WORD.test(before)) && !(after !== undefined && ASCII_WORD.test(after))) return true;
-    }
-    return false;
-  });
-
-/**
- * The edge's own reading (a device's check has none: the vectors' cases
- * with `edge_problems`): a mark word spelled with characters that pass for
- * its letters, from Unicode's confusables (UTS #39) plus the Latin small
- * capitals and the digit 3 (mark-lookalikes.ts, generated). `i` and `l`,
- * and so their look-alikes, stand for each other (capital I and lowercase l
- * are one stroke in sans-serif; UTS #39 folds I to l). A letter may also
- * be two that pass for it together (`LOOKALIKE_PAIRS`). Whole words, as
- * the shared rule's.
- */
-const LOOKALIKE_PAIRS: Readonly<Record<string, readonly string[]>> = { d: ["cl"] };
-const lookalikeChars = (letter: string): string[] => [letter, ...(MARK_LOOKALIKES[letter] ?? "")];
-const charClass = (chars: readonly string[]): string => `[${chars.map((ch) => `\\u{${ch.codePointAt(0)!.toString(16)}}`).join("")}]`;
-const letterPattern = (letter: string): string => {
-  const chars = letter === "i" || letter === "l" ? [...lookalikeChars("i"), ...lookalikeChars("l")] : lookalikeChars(letter);
-  const pairs = (LOOKALIKE_PAIRS[letter] ?? []).map((pair) => [...pair].map((ch) => charClass(lookalikeChars(ch))).join(""));
-  return pairs.length ? `(?:${[charClass(chars), ...pairs].join("|")})` : charClass(chars);
+/** Whether `phrase` is in `text` whole: no ASCII letter or digit right
+ * before or after it. */
+const whole = (text: string, phrase: string): boolean => {
+  for (let at = text.indexOf(phrase); at !== -1; at = text.indexOf(phrase, at + 1)) {
+    const before = text[at - 1];
+    const after = text[at + phrase.length];
+    if (!(before !== undefined && ASCII_WORD.test(before)) && !(after !== undefined && ASCII_WORD.test(after))) return true;
+  }
+  return false;
 };
-const LOOKALIKE_WORDS: readonly (readonly [string, RegExp])[] = MARK_WORDS.map(
+
+const charClass = (chars: Iterable<string>): string => `[${[...new Set(chars)].map((ch) => `\\u{${ch.codePointAt(0)!.toString(16)}}`).join("")}]`;
+const lookalikesOf = (letter: string): string[] => [letter, ...(LOOKALIKES[letter] ?? [])];
+/** What may stand for `letter`: its look-alikes, and those of the letter
+ * it's interchangeable with. */
+const classOf = (letter: string): string[] => {
+  const other = INTERCHANGEABLE.flatMap((pair) => (pair.includes(letter) ? pair.filter((l) => l !== letter) : []));
+  return [letter, ...other].flatMap(lookalikesOf);
+};
+const letterPattern = (letter: string): string => {
+  const pairs = (PAIRS[letter] ?? []).map((pair) => [...pair].map((ch) => charClass(lookalikesOf(ch))).join(""));
+  return pairs.length ? `(?:${[charClass(classOf(letter)), ...pairs].join("|")})` : charClass(classOf(letter));
+};
+const SPELLED: readonly (readonly [string, RegExp])[] = MARK_WORDS.map(
   (word) => [word, new RegExp(`(?<![A-Za-z0-9])${[...word].map(letterPattern).join("")}(?![A-Za-z0-9])`, "u")] as const
 );
-/** `text` with its runs of single characters, each apart by up to three
- * spaces or punctuation marks, read as one word ("V E R I F I E D",
- * "V.E.R.I.F.I.E.D.", "V. E. R. I. F. I. E. D.", "V·E·R·I·F·I·E·D"). */
-const SPACED = /(?<![^\s\p{P}])[^\s\p{P}](?:[\s\p{P}]{1,3}[^\s\p{P}])+(?![^\s\p{P}])/gu;
-const unspaced = (text: string): string => text.replace(SPACED, (run) => run.replace(/[\s\p{P}]/gu, ""));
+/** `text` with each run of single characters (a separator or the text's
+ * edge on each side), apart by 1 to `max_spacing` separators, read as one
+ * word: "V E R I F I E D", "V. E. R. I. F. I. E. D.", "V·E·R·I·F·I·E·D". */
+const SPACED = new RegExp(
+  `(?<!${NOT_SEPARATOR})${NOT_SEPARATOR}(?:${SEPARATOR}{1,${MARKS.max_spacing}}${NOT_SEPARATOR})+(?!${NOT_SEPARATOR})`,
+  "gu"
+);
+const SEPARATORS = new RegExp(SEPARATOR, "gu");
+const unspaced = (text: string): string => text.replace(SPACED, (run) => run.replace(SEPARATORS, ""));
 
-/** Ticks the shared glyphs leave out, refused on the edge: √ (used as one)
- * and 𐄂 AEGEAN CHECK MARK. */
-const EDGE_GLYPHS: readonly string[] = ["\u{221a}", "\u{10102}"];
-
-/**
- * What in `text` claims the store's mark, if anything: the shared rule's
- * glyph or word, or (`lookalikes`, the edge's alone) one of its own ticks
- * or a mark word spelled with look-alike characters ("Vеrified" with a
- * Cyrillic е, "ᴠᴇʀɪꜰɪᴇᴅ", "VER1F1ED", "OFFlClAL", "V.E.R.I.F.I.E.D.").
- */
-export const markClaim = (text: string, lookalikes = true): string | undefined => {
-  // Nothing drawn between its letters, or around one, splits a word.
-  const folded = markText(text).replace(IGNORABLE, "");
-  const glyph = [...folded].find((ch) => MARK_GLYPHS.includes(ch) || (lookalikes && EDGE_GLYPHS.includes(ch)));
+/** What in `text` claims the store's mark, if anything: a glyph, or the
+ * word it says or spells ("Vеrified" with a Cyrillic е, "ᴠᴇʀɪꜰɪᴇᴅ",
+ * "VER1F1ED", "OFFlClAL", "V. E. R. I. F. I. E. D."). */
+export const markClaim = (text: string): string | undefined => {
+  const plain = folded(text);
+  const glyph = [...plain].find((ch) => MARK_GLYPHS.includes(ch));
   if (glyph !== undefined) return glyph;
-  const word = markWord(folded);
-  if (word !== undefined || !lookalikes) return word;
-  // Nor spaces between single letters.
-  const readings = [folded, unspaced(folded)];
-  return LOOKALIKE_WORDS.find(([, re]) => readings.some((r) => re.test(r)))?.[0];
+  const written = MARK_WORDS.find((word) => whole(plain, word));
+  if (written !== undefined) return written;
+  const readings = [plain, unspaced(plain)];
+  return SPELLED.find(([, re]) => readings.some((r) => re.test(r)))?.[0];
+};
+
+/** Which of the phrases only Zeron's own plugins may use `text` says, if
+ * any: folded as `markClaim` folds, ’ and ʼ read as an apostrophe, each run
+ * of separators but the apostrophe read as one space, the phrase whole. */
+export const claimsZeron = (text: string): string | undefined => {
+  const plain = folded(text)
+    .replace(/[\u{2019}\u{2bc}]/gu, "'")
+    .replace(new RegExp(`(?:(?!')${SEPARATOR})+`, "gu"), " ");
+  return ZERON_PHRASES.find((phrase) => whole(plain, phrase));
 };
 
 /** (The fold of a path, as the store and devices compare paths: paths.ts.) */
@@ -311,10 +323,7 @@ export const zeronRange = (raw: ReadonlyMap<string, Json>): { range: string | nu
 export const checkListing = (
   manifest: Manifest,
   files: ReadonlyMap<string, Uint8Array>,
-  isText: (bytes: Uint8Array) => boolean,
-  /** The edge's look-alike reading of the mark's words (`markClaim`); off,
-   * the device's check exactly. */
-  lookalikes = true
+  isText: (bytes: Uint8Array) => boolean
 ): { problems: Problem[]; warnings: Problem[] } => {
   const problems: Problem[] = [];
   const warnings: Problem[] = [];
@@ -329,8 +338,10 @@ export const checkListing = (
   if (chars(manifest.name) > MAX_NAME_LEN) problems.push(problem("bad_listing", "name", `Its name is longer than ${MAX_NAME_LEN} characters`));
   else if (UNSEEN.test(manifest.name)) problems.push(problem("bad_listing", "name", "Its name has a control or invisible formatting character"));
   else {
-    const claim = markClaim(manifest.name, lookalikes);
+    const claim = markClaim(manifest.name);
+    const zeron = claim === undefined ? claimsZeron(manifest.name) : undefined;
     if (claim !== undefined) problems.push(problem("bad_listing", "name", `Its name says "${claim}": only the store marks a plugin verified`));
+    else if (zeron !== undefined) warnings.push(problem("claims_zeron", "name", `Its name says "${zeron}": only Zeron's own plugins may, and the store refuses it from anyone else`));
   }
   if (manifest.entry !== "" && !files.has(manifest.entry)) problems.push(problem("bad_package", "entry", `Its entry file ${manifest.entry} is missing`));
 
@@ -348,8 +359,10 @@ export const checkListing = (
     problems.push(problem("bad_listing", "description", `Its description is one line of at most ${MAX_DESCRIPTION_LEN} characters`));
   } else if (UNSEEN.test(description)) problems.push(problem("bad_listing", "description", "Its description has a control or invisible formatting character"));
   else {
-    const claim = markClaim(description, lookalikes);
+    const claim = markClaim(description);
+    const zeron = claim === undefined ? claimsZeron(description) : undefined;
     if (claim !== undefined) problems.push(problem("bad_listing", "description", `Its description says "${claim}": only the store marks a plugin verified`));
+    else if (zeron !== undefined) warnings.push(problem("claims_zeron", "description", `Its description says "${zeron}": only Zeron's own plugins may, and the store refuses it from anyone else`));
   }
   const icon = raw.get("icon");
   if (icon === undefined || icon === null) problems.push(problem("missing_listing", "icon", 'It needs an "icon": an SVG file in it'));

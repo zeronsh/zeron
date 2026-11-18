@@ -165,19 +165,17 @@ describe("store listing", () => {
 });
 
 describe("store listing: the mark (amendment 45)", () => {
-  it("refuses the mark's words spelled with Cyrillic letters (the edge's alone)", () => {
+  it("refuses the mark's words spelled with Cyrillic letters", () => {
     // е (U+0435), і (U+0456), о (U+043E), с (U+0441), а (U+0430), ӏ (U+04CF)
     for (const text of ["Vеrіfіеd Focus", "VЕRIFIЕD", "The оffiсiаl board", "оfficiaӏ tools", "ѵerified"]) {
       expect(markClaim(text), text).toBeDefined();
-      expect(markClaim(text, false), `${text} (device)`).toBeUndefined();
     }
   });
 
-  it("refuses the mark's words spelled with Greek letters (the edge's alone)", () => {
+  it("refuses the mark's words spelled with Greek letters", () => {
     // ν (U+03BD), ε (U+03B5), ι (U+03B9), ο (U+03BF), α (U+03B1); capitals fold first: Ο (U+039F), Ι (U+0399)
     for (const text of ["νerified", "vεrιfιεd builds", "The οfficiαl one", "ΟFFΙCIAL"]) {
       expect(markClaim(text), text).toBeDefined();
-      expect(markClaim(text, false), `${text} (device)`).toBeUndefined();
     }
   });
 
@@ -191,7 +189,6 @@ describe("store listing: the mark (amendment 45)", () => {
       "Focus \u{221a}", "Focus \u{10102}"
     ]) {
       expect(markClaim(text), text).toBeDefined();
-      expect(markClaim(text, false), `${text} (device)`).toBeUndefined();
     }
   });
 

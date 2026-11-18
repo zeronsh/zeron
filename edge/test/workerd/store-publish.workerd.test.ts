@@ -1,4 +1,4 @@
-import { env } from "cloudflare:test";
+import { SELF, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { PUBLISHES_PER_HOUR, handlePublish } from "../../src/store/publish";
 import { ORPHAN_GRACE_MS, collectOrphans } from "../../src/store/release";
@@ -393,5 +393,51 @@ describe("POST /store/v1/plugins/:id/versions", () => {
     expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/suspend`, { reason: "Malware." })).status).toBe(200);
     const res = await publish(a.userId, id, await makePackage({ id, version: "1.0.1", signer: a.signer }));
     expect([res.status, (await json(res)).error]).toEqual([403, "suspended"]);
+  });
+});
+
+describe("a listing that says the plugin is Zeron's own (claims_zeron)", () => {
+  const operator = (path: string, body: unknown, token = "test-admin-token") =>
+    SELF.fetch(`https://edge.test${path}`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+
+  it("is refused from anyone but a publisher with Zeron's own badge, which only an operator grants", async () => {
+    const a = await author();
+    const go = async (who: typeof a, id: string, version: string, manifest: Record<string, unknown>) =>
+      publish(who.userId, id, await makePackage({ id, version, signer: who.signer, manifest }));
+    const id = uniqueId();
+    // Refused, whichever field says it, however it's spelled.
+    for (const manifest of [
+      { name: "Git by Zeron" },
+      { name: "Zeron Approved Themes" },
+      { description: "Boards from Zeron, for focus." },
+      { description: "The zeron’s own board." },
+      { name: "Zeron-Certified" }
+    ]) {
+      const res = await go(a, id, "1.0.0", manifest);
+      const body = await json(res);
+      expect([res.status, body.error], JSON.stringify(manifest)).toEqual([400, "claims_zeron"]);
+      expect(body.field).toBe("name" in manifest ? "name" : "description");
+    }
+    // Saying it's for Zeron is anyone's.
+    expect((await go(a, id, "1.0.0", { name: "Themes for Zeron" })).status).toBe(201);
+
+    // Nothing the publisher sends makes them Zeron's own: not the manifest,
+    // not their own call to the badge routes.
+    const pretend = uniqueId();
+    const sent = await go(a, pretend, "1.0.0", { name: "Git by Zeron", author: { badges: [{ id: "maintainer" }] }, badges: ["maintainer"], maintainer: true });
+    expect((await json(sent)).error).toBe("claims_zeron");
+    expect((await operator("/admin/badges", { id: "maintainer", name: "Maintainer" }, a.userId)).status).toBe(401);
+    expect((await operator("/admin/badges/grant", { badgeId: "maintainer", userIds: [a.userId] }, a.userId)).status).toBe(401);
+    expect((await json(await go(a, pretend, "1.0.0", { name: "Git by Zeron" }))).error).toBe("claims_zeron");
+
+    // An operator grants it: then Zeron's own plugin may say so.
+    await operator("/admin/badges", { id: "maintainer", name: "Maintainer" });
+    const zeron = await author();
+    expect((await operator("/admin/badges/grant", { badgeId: "maintainer", userIds: [zeron.userId] })).status).toBe(200);
+    const own = uniqueId();
+    const res = await go(zeron, own, "1.0.0", { name: "Git by Zeron" });
+    expect(res.status, await res.clone().text()).toBe(201);
+    // (The badge is the account's, not anyone's who publishes beside it.)
+    expect((await json(await go(a, uniqueId(), "1.0.0", { name: "Git by Zeron" }))).error).toBe("claims_zeron");
   });
 });
