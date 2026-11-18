@@ -669,6 +669,18 @@ async fn the_plugin_store_end_to_end() {
     let refused = phone.call(methods::INSTALL_PLUGIN, json!({ "store": ID, "version": "1.1.0" })).await;
     e.check("6", "nobody installs 1.1.0 any more", refused.as_ref().is_err_and(|r| r.contains("not_in_store")), format!("{refused:?}"));
     e.check("6", "while the desk's copy of it keeps running", desk.item(ID).await["status"] == "on", "");
+    // A first install of 1.2.0, not verified: its sheet offers 1.0.0, the
+    // newest verified, and installs it by its own record.
+    let pad = e.device("eve-pad").await;
+    e.sign_in(&pad, "user_eve").await;
+    let fresh = pad.call(methods::INSTALL_PLUGIN, json!({ "store": ID })).await.unwrap_or_default();
+    let alternative = &fresh["plugin"]["source"]["verified_alternative"];
+    let ok = fresh["plugin"]["version"] == "1.2.0" && fresh["plugin"]["source"]["verified"] == false && alternative["version"] == "1.0.0" && alternative["removed"] == json!(["links.open"]);
+    e.check("6", "a first install of an unverified version names the verified one instead, and what it asks less", ok, &fresh);
+    let instead = pad.call(methods::INSTALL_VERIFIED_PLUGIN, json!({ "id": ID, "hash": fresh["plugin"]["hash"] })).await;
+    let ok = instead.as_ref().is_ok_and(|r| r["plugin"]["version"] == "1.0.0" && r["plugin"]["source"]["verified"] == true);
+    e.check("6", "and installs it instead, marked verified by its record", ok, format!("{instead:?}"));
+    drop(pad);
     let (status, body) = e.admin(&staff, &format!("versions/{ID}/1.2.0/verify"), json!({})).await;
     e.must("6", "staff verify 1.2.0", status == 200, &body);
     let update = offer(&phone, ID).await;
@@ -780,7 +792,9 @@ async fn the_plugin_store_end_to_end() {
     let (status, body) = from_laptop("2.0.0", json!({ "name": "Verified Third Board" })).await;
     e.check("9", "a name claiming the mark is refused (bad_listing)", status == 400 && body["error"] == "bad_listing", format!("{status} {body}"));
     let (status, body) = from_laptop("2.0.1", json!({ "description": "The \u{43e}fficial board." })).await;
-    e.check("9", "and a description claiming it in look-alike letters, by the edge alone", status == 400 && body["error"] == "bad_listing", format!("{status} {body}"));
+    e.check("9", "and a description claiming it in look-alike letters", status == 400 && body["error"] == "bad_listing", format!("{status} {body}"));
+    let (status, body) = from_laptop("2.0.2", json!({ "description": "Boards, by Zeron." })).await;
+    e.check("9", "a description saying it's Zeron's own is refused (claims_zeron)", status == 400 && body["error"] == "claims_zeron", format!("{status} {body}"));
     let big = store_package(signer, ID, "1.3.2", json!({}), &[("data.bin", vec![7u8; 16 * 1024 * 1024])]);
     let (status, body) = e.publish_signed(&bob_key, ID, &big).await;
     e.check("9", "a package over the store's limit is refused", status == 413 || body["error"] == "too_large", format!("{status} {body}"));
