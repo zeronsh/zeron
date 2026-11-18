@@ -25,6 +25,9 @@ local function big()
 	-- (Motion reduced: the status dots and rings still, so what a push costs
 	-- isn't mixed with their steps.)
 	require("@ds/motion").reduce:set(true)
+	-- (Every widget shown, whatever a run before left kept.)
+	local page = require("@app/screens/control/page")
+	page.widgets:set({ order = table.clone(page.WIDGETS), hidden = {} :: any })
 	local t = T
 	local devices = {
 		{ id = "dev-desk", name = "dev-desk", platform = "linux", here = true, online = true },
