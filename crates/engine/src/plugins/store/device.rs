@@ -38,6 +38,12 @@ const CACHED_VERSIONS: usize = 3;
 const MAX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 /// The most pages of the take-down feed one check reads.
 const TAKEDOWN_PAGES: usize = 20;
+/// How long an account with no plugins waits between looks: an hour, or a
+/// local run's shorter setting (`ZERON_TAKEDOWN_EVERY_SECS`), never longer.
+pub(in crate::plugins) fn publishes_idle(local: Option<std::time::Duration>) -> std::time::Duration {
+    local.map_or(PUBLISHES_IDLE, |every| every.min(PUBLISHES_IDLE))
+}
+
 /// At most this many pages of versions (50 each) are looked through for a
 /// verified version to offer instead.
 const ALTERNATIVE_PAGES: usize = 4;
@@ -1034,9 +1040,7 @@ impl Plugins {
     /// with no plugins is asked again only every few hours.
     pub async fn check_publishes(&self) {
         let Ok((client, caller)) = self.store_as_person().await else { return };
-        // (A local run's shorter interval, `ZERON_TAKEDOWN_EVERY_SECS`,
-        // shortens this too.)
-        let idle_for = PUBLISHES_IDLE.min(super::super::lifecycle::takedown_every().1);
+        let idle_for = publishes_idle(super::super::lifecycle::local_every());
         let idle = lock(&self.inner.publishes_checked).is_some_and(|(at, had)| !had && at.elapsed() < idle_for);
         if idle {
             return;

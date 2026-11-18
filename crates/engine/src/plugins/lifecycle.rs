@@ -35,17 +35,28 @@ const TAKEDOWN_EVERY: Duration = Duration::from_secs(15 * 60);
 
 /// [`TAKEDOWN_EVERY`] (and the wait before the first read): or, in a debug
 /// build only, `ZERON_TAKEDOWN_EVERY_SECS` (a local end-to-end run, which
-/// can't wait 15 minutes), at least 1 s. A release build reads no such
-/// setting: nothing in its environment makes it ask the store more often.
+/// can't wait 15 minutes). A release build reads no such setting.
 pub(super) fn takedown_every() -> (Duration, Duration) {
-    let local = cfg!(debug_assertions).then(|| std::env::var("ZERON_TAKEDOWN_EVERY_SECS").ok()).flatten();
-    match local.and_then(|s| s.trim().parse::<u64>().ok()) {
-        Some(secs) => {
-            let every = Duration::from_secs(secs.clamp(1, TAKEDOWN_EVERY.as_secs()));
-            (every, every)
-        }
-        None => (FIRST_CHECK, TAKEDOWN_EVERY),
-    }
+    takedown_every_from(local_every())
+}
+
+/// `ZERON_TAKEDOWN_EVERY_SECS`, in a debug build only, when it shortens.
+pub(super) fn local_every() -> Option<Duration> {
+    let setting = cfg!(debug_assertions).then(|| std::env::var("ZERON_TAKEDOWN_EVERY_SECS").ok()).flatten();
+    shorter(setting.as_deref())
+}
+
+/// A setting of `secs`, taken only when it shortens: 1 s up to the built-in
+/// interval. Zero, junk, or anything longer is ignored, so nothing makes a
+/// device read the feed (or look over its account's publishes) less often.
+fn shorter(secs: Option<&str>) -> Option<Duration> {
+    secs.and_then(|s| s.trim().parse::<u64>().ok()).filter(|s| (1..=TAKEDOWN_EVERY.as_secs()).contains(s)).map(Duration::from_secs)
+}
+
+/// The first read's wait and the interval, for a setting: the first read
+/// never waits longer than it would anyway.
+fn takedown_every_from(every: Option<Duration>) -> (Duration, Duration) {
+    every.map_or((FIRST_CHECK, TAKEDOWN_EVERY), |every| (every.min(FIRST_CHECK), every))
 }
 
 #[derive(Deserialize)]
@@ -757,3 +768,26 @@ pub(super) fn annotate(plugins_dir: &Path, item: &mut super::scan::PluginItem) {
     item.update = install::found(plugins_dir, &item.id, &item.hash).map(|f| f.shown());
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_take_down_interval_setting_only_ever_shortens() {
+        let built_in = (FIRST_CHECK, TAKEDOWN_EVERY);
+        assert_eq!(takedown_every_from(shorter(None)), built_in);
+        // Zero, junk, or longer than built in: ignored.
+        for ignored in ["0", "", "soon", "-5", "1.5", "901", "3600", "18446744073709551616"] {
+            assert_eq!(shorter(Some(ignored)), None, "{ignored:?}");
+        }
+        // Shorter: taken, and the first read never waits longer than built in.
+        assert_eq!(takedown_every_from(shorter(Some("1"))), (Duration::from_secs(1), Duration::from_secs(1)));
+        assert_eq!(takedown_every_from(shorter(Some(" 600 "))), (FIRST_CHECK, Duration::from_secs(600)));
+        assert_eq!(takedown_every_from(shorter(Some("900"))), (FIRST_CHECK, TAKEDOWN_EVERY));
+        // An account with no plugins: looked at hourly unless a setting
+        // shortens it (never by the feed's interval alone).
+        assert_eq!(super::super::store::publishes_idle(None), Duration::from_secs(60 * 60));
+        assert_eq!(super::super::store::publishes_idle(Some(Duration::from_secs(1))), Duration::from_secs(1));
+    }
+}
