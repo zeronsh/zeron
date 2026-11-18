@@ -22,7 +22,9 @@ export const KNOWN_PERMISSIONS: readonly string[] = [
   "accounts.read", "accounts.switch", "accounts.pin", "models.read", "models.set", "messages.send"
 ];
 
-/** Ids the app keeps for itself (manifest.rs `RESERVED_IDS`). */
+/** Ids no plugin may have at all (manifest.rs `RESERVED_IDS`): a device
+ * refuses them too. The store's own further words (built-in plugins' ids,
+ * the site's pages) are listing rules, in listing.ts. */
 export const RESERVED_IDS: readonly string[] = STORE_DATA.reserved_ids;
 export const RESERVED_ID_ERROR = "Zeron already uses that name";
 

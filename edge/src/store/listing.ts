@@ -24,6 +24,10 @@ export const isCategory = (id: string): boolean => CATEGORIES.some((c) => c.id =
 
 /** Zeron's own plugins' ids: nobody publishes them. */
 export const BUILTIN_IDS: readonly string[] = STORE_DATA.builtin_ids;
+/** The store site's own page words under `/plugins/` (listing.rs
+ * `SITE_IDS`): no plugin is ever listed with one, and nothing lifts that,
+ * a reservation included. Zeron itself runs such a plugin as any other. */
+export const SITE_IDS: readonly string[] = STORE_DATA.site_ids;
 
 export const README_FILE = "README.md";
 export const CHANGELOG_FILE = "CHANGELOG.md";
@@ -240,7 +244,7 @@ export const checkListing = (
   if (manifest.problem) problems.push(problem("bad_package", "manifest", manifest.problem));
   const idError = idProblem(manifest.id);
   if (idError && idError !== RESERVED_ID_ERROR) problems.push(problem("bad_package", "id", idError));
-  else if (BUILTIN_IDS.includes(manifest.id) || manifest.id.startsWith("zeron") || idError === RESERVED_ID_ERROR) {
+  else if (BUILTIN_IDS.includes(manifest.id) || SITE_IDS.includes(manifest.id) || manifest.id.startsWith("zeron") || idError === RESERVED_ID_ERROR) {
     problems.push(problem("id_reserved", "id", `"${manifest.id}" is kept for Zeron`));
   }
   if (!parseVersion(manifest.version)) problems.push(problem("not_semver", "version", `"${manifest.version}" isn't a version (MAJOR.MINOR.PATCH)`));

@@ -34,6 +34,7 @@ import { VERSION_ORDER, type VersionRow, auditIfChanged, pluginRow, relist, vers
 import { answer, fail, notFound, objectBody, refusedBody } from "./http";
 import { readBody, requireAdmin, revokeDeployKeys } from "./principal";
 import { isUnused, releaseId } from "./release";
+import { SITE_IDS } from "./listing";
 import { decodeSegment } from "./serve";
 import { foldUsername } from "../username";
 
@@ -519,6 +520,8 @@ const reservations = async (request: Request, env: Env, db: D1Database, bucket: 
   if (rest.length === 0 && request.method === "POST") {
     const id = body?.id;
     if (typeof id !== "string" || !ID_RE.test(id)) return fail(400, "bad_request", "id is a plugin id.");
+    // The site's own pages (listing.ts `SITE_IDS`): never anyone's.
+    if (SITE_IDS.includes(id)) return fail(400, "site_id", `"${id}" is one of the site's pages: no plugin can have it.`);
     let userId: string | null = null;
     if (body?.to_username !== undefined && body.to_username !== null) {
       const username = foldUsername(body.to_username);

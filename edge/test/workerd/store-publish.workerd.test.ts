@@ -230,6 +230,36 @@ describe("POST /store/v1/plugins/:id/versions", () => {
     expect((await json(res)).error).toBe("id_reserved");
   });
 
+  it("keeps the site's page words from every plugin, whoever asks, and leaves ids that merely start with one", async () => {
+    const a = await author();
+    const pkgOf = (id: string, signer = a.signer) => makePackage({ id, version: "1.0.0", signer });
+    // A site word: the listing rule, 403 id_reserved (not the manifest's bad_id).
+    for (const id of ["all", "publishing", "featured", "feed", "admin"]) {
+      const res = await publish(a.userId, id, await pkgOf(id));
+      expect([res.status, (await json(res)).error], id).toEqual([403, "id_reserved"]);
+    }
+    // Words that only start like one are anyone's.
+    for (const id of ["allergies", "feed-reader"]) expect((await publish(a.userId, id, await pkgOf(id))).status, id).toBe(201);
+    // The manifest's own reserved ids stay a package refusal, as a device's.
+    const templates = await publish(a.userId, "templates", await pkgOf("templates"));
+    expect([templates.status, await json(templates)]).toEqual([400, expect.objectContaining({ error: "bad_package", reason: "bad_id" })]);
+    // No reservation can give one: refused, and nothing written.
+    const b = await author();
+    for (const body of [{ id: "all", to_username: b.username }, { id: "all" }, { id: "feed", note: "ours" }]) {
+      const res = await adminCall("POST", "/store/v1/admin/reservations", body);
+      expect([res.status, await res.json()], JSON.stringify(body)).toEqual([400, { error: "site_id", message: `"${body.id}" is one of the site's pages: no plugin can have it.` }]);
+    }
+    expect(await env.STORE_DB.prepare("SELECT COUNT(*) AS n FROM reservations WHERE id IN ('all', 'feed')").first("n")).toBe(0);
+    expect(await env.STORE_DB.prepare("SELECT COUNT(*) AS n FROM audit WHERE plugin_id IN ('all', 'feed')").first("n")).toBe(0);
+    // Even a reservation row put there by hand lifts nothing.
+    await env.STORE_DB.prepare("INSERT INTO reservations (id, user_id, note, created_by, created_at) VALUES ('queue', ?, 'by hand', 'x', ?)").bind(b.userId, Date.now()).run();
+    const queue = await publish(b.userId, "queue", await pkgOf("queue", b.signer));
+    expect([queue.status, (await json(queue)).error]).toEqual([403, "id_reserved"]);
+    // A brand word still goes to the account it's reserved for.
+    expect((await adminCall("POST", "/store/v1/admin/reservations", { id: "github-sync", to_username: b.username })).status).toBe(200);
+    expect((await publish(b.userId, "github-sync", await pkgOf("github-sync", b.signer))).status).toBe(201);
+  });
+
   it("lets an admin keep an id back, or give a reserved one to one account", async () => {
     const a = await author();
     const b = await author();
