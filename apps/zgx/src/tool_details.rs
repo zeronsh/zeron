@@ -278,12 +278,164 @@ pub fn tool_fields(part: &Json) -> Vec<(&'static str, Value)> {
     {
         fields.push(("diff", diff));
     }
+    if let Some(pictures) = pictures_value(part) {
+        fields.push(("pictures", pictures));
+    }
     fields
+}
+
+/// Pictures a tool row opens to, at most (the shipping chip's
+/// `MAX_IMAGES_PER_TOOL`).
+const MAX_PICTURES: usize = 4;
+
+/// The pictures a tool's result carried (`previewPaths`: the engine's copies
+/// in the profile's uploads, on the chat's host), each `{ path, name }`: its
+/// name the file the call named (a Read's) when it carried one, else the
+/// copy's own. Nil when it carried none: a path a tool only named is never
+/// read from here, and neither is any path that isn't such a copy
+/// (`stored_tool_picture`).
+fn pictures_value(part: &Json) -> Option<Value> {
+    let data_dir = engine::data_dir();
+    pictures_in(part, data_dir.as_deref())
+}
+
+fn pictures_in(part: &Json, data_dir: Option<&std::path::Path>) -> Option<Value> {
+    let paths: Vec<&str> = part["previewPaths"]
+        .as_array()?
+        .iter()
+        .filter_map(Json::as_str)
+        .filter(|p| stored_tool_picture(p, data_dir))
+        .take(MAX_PICTURES)
+        .collect();
+    if paths.is_empty() {
+        return None;
+    }
+    // (The call's file names its one picture; several are each their own.)
+    let named = (paths.len() == 1)
+        .then(|| part["call"]["path"].as_str().and_then(file_name))
+        .flatten();
+    let list: Vec<Value> = paths
+        .iter()
+        .map(|path| {
+            let name = named.or_else(|| file_name(path)).unwrap_or_default();
+            Value::record([("path", Value::from(*path)), ("name", Value::from(name))])
+        })
+        .collect();
+    Some(Value::List(list.into()))
+}
+
+/// Whether `path` is a copy the engine stored of a tool result's picture:
+/// named as the engine names them (`tool-<chat>-<sha256>-image.<ext>`, a
+/// raster it sniffed). A local chat's pictures are read straight from disk,
+/// so one that is here must also be a file within the engine's data (its
+/// profiles' uploads) and no larger than a picture can be: a doc naming
+/// `/dev/zero`, a picture elsewhere on this Mac, or a huge file is never
+/// opened. One on another device is read from there, through its engine's
+/// own jail.
+fn stored_tool_picture(path: &str, data_dir: Option<&std::path::Path>) -> bool {
+    let Some(name) = file_name(path) else {
+        return false;
+    };
+    let Some(stem) = ["png", "jpg", "webp", "gif"]
+        .iter()
+        .find_map(|ext| name.strip_suffix(&format!("-image.{ext}")))
+    else {
+        return false;
+    };
+    let mut parts = stem.splitn(3, '-');
+    let hex = |s: Option<&str>, len: usize| {
+        s.is_some_and(|s| s.len() == len && s.bytes().all(|b| b.is_ascii_hexdigit()))
+    };
+    if parts.next() != Some("tool") || !hex(parts.next(), 16) || !hex(parts.next(), 64) {
+        return false;
+    }
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        // (Not on this device: another's, read through its engine.)
+        return true;
+    };
+    let within = || -> Option<bool> {
+        let file = std::fs::canonicalize(path).ok()?;
+        let data = std::fs::canonicalize(data_dir?).ok()?;
+        Some(file.starts_with(data) && file.components().any(|c| c.as_os_str() == "uploads"))
+    };
+    meta.is_file()
+        && meta.len() <= zeron_proto::IMAGE_MAX_BYTES as u64
+        && within().unwrap_or(false)
+}
+
+fn file_name(path: &str) -> Option<&str> {
+    path.rsplit(['/', '\\']).find(|s| !s.is_empty())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const STORED: &str = "/home/me/.zeron/uploads/tool-0123456789abcdef-0000000000000000000000000000000000000000000000000000000000000001-image.png";
+
+    #[test]
+    fn a_result_s_stored_pictures_are_the_row_s_named_as_the_call_s_file() {
+        let part = json!({
+            "kind": "tool", "id": "t1", "isError": false,
+            "call": { "kind": "readFile", "path": "/home/me/scratch/shot.png" },
+            "previewPaths": [STORED],
+        });
+        let fields = tool_fields(&part);
+        let (_, pictures) = fields.iter().find(|(k, _)| *k == "pictures").expect("pictures");
+        let Value::List(list) = pictures else { panic!("not a list: {pictures:?}") };
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].field("path").map(crate::auth::text).as_deref(), Some(STORED));
+        assert_eq!(list[0].field("name").map(crate::auth::text).as_deref(), Some("shot.png"));
+        // Several: each is its own, not all the call's one file.
+        let two = STORED.replace("01-image.png", "02-image.png");
+        let several = json!({
+            "kind": "tool", "id": "t3",
+            "call": { "kind": "readFile", "path": "/home/me/scratch/shot.png" },
+            "previewPaths": [STORED, two],
+        });
+        let Some(Value::List(list)) = pictures_in(&several, None) else { panic!("no pictures") };
+        let names: Vec<_> = list.iter().map(|p| p.field("name").map(crate::auth::text).unwrap_or_default()).collect();
+        assert!(names.iter().all(|n| n.starts_with("tool-") && n.ends_with("-image.png")), "{names:?}");
+        // None stored (an older doc, a path only named): no pictures.
+        let bare = json!({ "kind": "tool", "id": "t2", "call": { "kind": "readFile", "path": "/x/a.png" } });
+        assert!(!tool_fields(&bare).iter().any(|(k, _)| *k == "pictures"));
+    }
+
+    /// Only the engine's own copies are a row's pictures: a doc naming a
+    /// device file, a picture elsewhere on this computer, or a huge file
+    /// under the engine's name is never read; a copy inside the engine's
+    /// uploads is.
+    #[test]
+    fn only_the_engines_stored_copies_are_pictures() {
+        let data = tempfile::tempdir().unwrap();
+        let uploads = data.path().join("orgs").join("o").join("uploads");
+        std::fs::create_dir_all(&uploads).unwrap();
+        let name = "tool-0123456789abcdef-0000000000000000000000000000000000000000000000000000000000000001-image.png";
+        let inside = uploads.join(name);
+        std::fs::write(&inside, b"\x89PNG\r\n\x1a\n").unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let outside = elsewhere.path().join(name);
+        std::fs::write(&outside, b"\x89PNG\r\n\x1a\n").unwrap();
+        let big = uploads.join(name.replace("01-image", "02-image"));
+        std::fs::File::create(&big).unwrap().set_len(zeron_proto::IMAGE_MAX_BYTES as u64 + 1).unwrap();
+        let dir = Some(data.path());
+        let ok = |p: &std::path::Path| stored_tool_picture(p.to_str().unwrap(), dir);
+        assert!(ok(&inside));
+        assert!(!ok(&outside), "a copy outside the engine's data");
+        assert!(!ok(&big), "larger than a picture can be");
+        assert!(!stored_tool_picture(inside.to_str().unwrap(), None), "no data dir to check against");
+        #[cfg(unix)]
+        {
+            let link = uploads.join(name.replace("01-image", "03-image"));
+            std::os::unix::fs::symlink(&outside, &link).unwrap();
+            assert!(!ok(&link), "a link out of uploads");
+        }
+        for path in ["/dev/zero", "/etc/hosts", "/home/me/Pictures/private.png", "/x/uploads/ab12-image.png", "/x/uploads/tool-0123-01-image.png", ""] {
+            assert!(!stored_tool_picture(path, dir), "{path}");
+        }
+        // Another device's copy (no such file here) is read there, by its engine.
+        assert!(stored_tool_picture(&format!("/Users/other/.zeron/uploads/{name}"), dir));
+    }
 
     #[test]
     fn a_diff_is_hunks_with_three_lines_of_context_numbered_from_one() {

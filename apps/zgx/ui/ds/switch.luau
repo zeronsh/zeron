@@ -47,6 +47,8 @@ return function(props: Props): Node
 		rounded = "$radius.full",
 		bg = ui.tween(value, { from = "$zeron.switch.track", to = "$zeron.switch.on", duration = 180 }),
 		ui.div {
+			-- (Its place, for a test: it travels by `x`.)
+			id = "switch-knob",
 			absolute = true,
 			left = INSET,
 			top = INSET,

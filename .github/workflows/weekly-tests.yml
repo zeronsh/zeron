@@ -35,7 +35,7 @@ jobs:
       - uses: ./.github/actions/linux-ci
         with:
           rust-cache: weekly-crates
-          apt-cache: ui-browser
+          apt-cache: weekly-crates
           apt-packages: >-
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev
             libx11-xcb-dev libfontconfig1-dev libfreetype-dev libasound2-dev libvulkan-dev

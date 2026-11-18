@@ -1,7 +1,9 @@
 /**
  * The Cloud runner trust boundary (docs/design/cloud-device.md, "Trust
  * boundary"): a runner token — possibly stolen by code running in the
- * sandbox — acts as its device, never as the whole user.
+ * sandbox — acts as its device, never as the whole user. Like any of the
+ * person's devices it reaches their other devices and chats; it never hosts
+ * another device's room or writes rows it doesn't own.
  */
 import { describe, expect, it } from "vitest";
 import { encodeHlc, type Op } from "../../src/registry-core";
@@ -44,25 +46,21 @@ const world = async () => {
 const ws = { upgrade: "websocket" };
 
 describe("device rooms", () => {
-  it("a runner cannot dial, nudge or read sidecars of another device, but can see its liveness", async () => {
+  it("a runner dials and nudges another device as a client, never as its host or into its sidecars", async () => {
     const { user, runner, laptop } = await world();
     const host = await call("GET", `/device/${laptop}/ws?role=host`, user, undefined, ws);
     expect(host.status).toBe(101);
     host.webSocket!.accept();
 
-    expect((await call("GET", `/device/${laptop}/ws?role=client`, runner, undefined, ws)).status).toBe(403);
+    const client = await call("GET", `/device/${laptop}/ws?role=client`, runner, undefined, ws);
+    expect(client.status).toBe(101);
+    client.webSocket!.accept();
+    expect((await call("POST", `/device/${laptop}/nudge`, runner, { chatId: "c1" })).status).toBe(200);
     expect((await call("GET", `/device/${laptop}/ws?role=host`, runner, undefined, ws)).status).toBe(403);
-    expect((await call("POST", `/device/${laptop}/nudge`, runner, { chatId: "c1" })).status).toBe(403);
     expect((await call("GET", `/device/${laptop}/sidecar/repos`, runner)).status).toBe(403);
     const status = await call("GET", `/device/${laptop}/status`, runner);
     expect(status.status).toBe(200);
     expect(await status.json()).toMatchObject({ hostConnected: true });
-
-    // The user's own devices are unaffected.
-    const client = await call("GET", `/device/${laptop}/ws?role=client`, user, undefined, ws);
-    expect(client.status).toBe(101);
-    client.webSocket!.accept();
-    expect((await call("POST", `/device/${laptop}/nudge`, user, { chatId: "c1" })).status).toBe(200);
     client.webSocket!.close();
     host.webSocket!.close();
   });
@@ -84,46 +82,25 @@ describe("device rooms", () => {
 });
 
 describe("chat-scoped data", () => {
-  it("opens chat2 and blobs only for chats the runner's device hosts", async () => {
+  it("opens chat2 and blobs for any of the person's chats, wherever they're hosted", async () => {
     const { user, runner, cloud, laptopChat } = await world();
     const cloudChat = `cc-${rand()}`;
-
-    const denied = await call("GET", `/chat2/${laptopChat}/stats`, runner);
-    expect(denied.status).toBe(403);
-    expect(await denied.json()).toMatchObject({ error: "not_host" });
-    // Not in the registry yet: refused — and not remembered as refused.
-    expect((await call("GET", `/chat2/${cloudChat}/stats`, runner)).status).toBe(403);
     expect((await push(runner, [upsert("chats", cloudChat, { deviceId: cloud, title: "cloud work" }, cloud)], cloud)).applied).toBe(1);
+
+    expect((await call("GET", `/chat2/${laptopChat}/stats`, runner)).status).toBe(200);
+    expect((await call("GET", `/chat2/${laptopChat}--sub--toolu_01/stats`, runner)).status).toBe(200);
     expect((await call("GET", `/chat2/${cloudChat}/stats`, runner)).status).toBe(200);
-
-    expect((await call("PUT", `/blob/${laptopChat}/p1`, runner, "out")).status).toBe(403);
+    expect((await call("PUT", `/blob/${laptopChat}/p1`, runner, "out")).status).toBe(200);
     expect((await call("PUT", `/blob/${cloudChat}/p1`, runner, "out")).status).toBe(200);
-
-    // User bearers are untouched.
     expect((await call("GET", `/chat2/${laptopChat}/stats`, user)).status).toBe(200);
-    expect((await call("PUT", `/blob/${laptopChat}/p1`, user, "out")).status).toBe(200);
   });
 
-  it("opens a subagent's doc by the chat that spawned it", async () => {
-    const { runner, cloud, laptopChat } = await world();
-    const cloudChat = `cc-${rand()}`;
-    expect((await push(runner, [upsert("chats", cloudChat, { deviceId: cloud, title: "cloud work" }, cloud)], cloud)).applied).toBe(1);
-
-    // No registry row of its own: the spawning chat's host decides.
-    expect((await call("GET", `/chat2/${cloudChat}--sub--toolu_01/stats`, runner)).status).toBe(200);
-    expect((await call("GET", `/chat2/${cloudChat}--sub--toolu_01--sub--toolu_02/stats`, runner)).status).toBe(200);
-    const denied = await call("GET", `/chat2/${laptopChat}--sub--toolu_01/stats`, runner);
-    expect(denied.status).toBe(403);
-    expect(await denied.json()).toMatchObject({ error: "not_host" });
-  });
-
-  it("refuses a runner's attempt to claim a laptop chat, so the chat stays closed to it", async () => {
+  it("refuses a runner's attempt to claim a laptop chat", async () => {
     const { user, runner, cloud, laptop, laptopChat } = await world();
     const claim = await push(runner, [upsert("chats", laptopChat, { deviceId: cloud }, cloud)], cloud);
     expect(claim.applied).toBe(0);
-    expect(claim.rejected).toEqual([{ kind: "chats", id: laptopChat, error: "hosted by another device" }]);
+    expect(claim.rejected).toEqual([{ kind: "chats", id: laptopChat, error: "a chat on another device stays hosted there" }]);
     expect(find(await rows(user), "chats", laptopChat)?.fields).toMatchObject({ deviceId: laptop, title: "secret plans" });
-    expect((await call("GET", `/chat2/${laptopChat}/stats`, runner)).status).toBe(403);
   });
 });
 
@@ -158,29 +135,70 @@ describe("registry writes", () => {
     expect(find(all, "chats", laptopChat)?.deleted).toBe(false);
     expect(find(all, "chats", cloudChat)?.fields.deviceId).toBe(cloud);
 
+    // It may set a laptop chat's fields (not its host), and start a chat there.
+    const startedThere = `lc-${rand()}`;
+    const allowed = await push(
+      runner,
+      [
+        upsert("chats", laptopChat, { title: "renamed from Cloud", archived: true }, cloud),
+        upsert("chats", startedThere, { deviceId: laptop, title: "started from Cloud" }, cloud)
+      ],
+      cloud
+    );
+    expect(allowed).toMatchObject({ applied: 2 });
+    const after = await rows(user);
+    expect(find(after, "chats", laptopChat)?.fields).toMatchObject({ deviceId: laptop, title: "renamed from Cloud", archived: true });
+    expect(find(after, "chats", startedThere)?.fields.deviceId).toBe(laptop);
+
     // The same writes from the user's own bearer are not restricted.
     expect((await push(user, [upsert("devices", laptop, { name: "Renamed" }, laptop)])).applied).toBe(1);
   });
 });
 
 describe("registry reads", () => {
-  it("delivers only devices and the runner's own rows — over HTTP, hello and live broadcasts", async () => {
+  it("sends a Cloud machine that synced before every row it now sees, until it has them", async () => {
+    const { user, runner, laptopChat } = await world();
+    type Pulled = { seq: number; full: boolean; rows: WireRow[] };
+    const pull = async (bearer: string, since: number) =>
+      (await (await call("GET", `/registry/org1/rows?since=${since}`, bearer)).json()) as Pulled;
+    // Caught up as of now, as a machine that synced before the change is
+    // (its cursor past the laptop's rows, which it was never sent).
+    const head = (await pull(user, 0)).seq;
+    const first = await pull(runner, head);
+    expect(first.full).toBe(true);
+    expect(find(first.rows, "chats", laptopChat)).toBeDefined();
+    // At that cursor still: maybe it never got the reply, so again, but at
+    // most three times in all (a quiet room can't tell applied from lost).
+    expect((await pull(runner, head)).full).toBe(true);
+    expect((await pull(runner, head)).full).toBe(true);
+    expect((await pull(runner, head)).full).toBe(false);
+    // Past it (applied, and a row since): incremental from then on.
+    await push(user, [upsert("chats", laptopChat, { title: "renamed" }, "laptop")]);
+    const after = (await pull(user, 0)).seq;
+    const caughtUp = await pull(runner, after);
+    expect(caughtUp.full).toBe(false);
+    await push(user, [upsert("chats", laptopChat, { title: "renamed again" }, "laptop")]);
+    const next = await pull(runner, after);
+    expect(next.full).toBe(false);
+    expect(next.rows.map((r) => r.id)).toEqual([laptopChat]);
+  });
+
+  it("delivers every device, chat, project and session, never the user's own kinds", async () => {
     const { user, runner, cloud, laptop, laptopChat, space } = await world();
     const cloudChat = `cc-${rand()}`;
+    await push(user, [upsert("preferences", "sidebar", { collapsed: true }, laptop)]);
     await push(runner, [upsert("devices", cloud, { name: "Cloud" }, cloud), upsert("chats", cloudChat, { deviceId: cloud, title: "mine" }, cloud)], cloud);
 
     const seen = await rows(runner);
     expect(find(seen, "devices", laptop)).toBeDefined();
     expect(find(seen, "devices", cloud)).toBeDefined();
     expect(find(seen, "chats", cloudChat)).toBeDefined();
-    expect(find(seen, "chats", laptopChat)).toBeUndefined();
-    expect(find(seen, "sessions", laptopChat)).toBeUndefined();
-    expect(find(seen, "spaces", space)).toBeUndefined();
-    expect(JSON.stringify(seen)).not.toContain("secret");
-    const everything = await rows(user);
-    expect(find(everything, "chats", laptopChat)).toBeDefined();
+    expect(find(seen, "chats", laptopChat)?.fields.title).toBe("secret plans");
+    expect(find(seen, "sessions", laptopChat)).toBeDefined();
+    expect(find(seen, "spaces", space)).toBeDefined();
+    expect(find(seen, "preferences", "sidebar")).toBeUndefined();
 
-    // WebSocket: the hello state is filtered, and so is every broadcast.
+    // WebSocket: the hello state and every broadcast.
     const socket = (await call("GET", "/registry/org1/ws", runner, undefined, ws)).webSocket!;
     socket.accept();
     const frames: Record<string, unknown>[] = [];
@@ -191,22 +209,22 @@ describe("registry reads", () => {
     await expect.poll(() => frames.some((f) => f.t === "state")).toBe(true);
     const state = frames.find((f) => f.t === "state") as { rows: WireRow[] };
     expect(find(state.rows, "chats", cloudChat)).toBeDefined();
-    expect(find(state.rows, "chats", laptopChat)).toBeUndefined();
+    expect(find(state.rows, "chats", laptopChat)).toBeDefined();
+    expect(find(state.rows, "preferences", "sidebar")).toBeUndefined();
 
-    await push(user, [upsert("chats", laptopChat, { title: "more secret plans" }, laptop)]);
-    await push(user, [upsert("chats", cloudChat, { title: "renamed from the laptop" }, laptop)]);
+    await push(user, [upsert("chats", laptopChat, { title: "more plans" }, laptop)]);
+    await push(user, [upsert("preferences", "sidebar", { collapsed: false }, laptop)]);
     await expect.poll(() => frames.filter((f) => f.t === "rows").length).toBe(2);
     const broadcasts = frames.filter((f) => f.t === "rows") as { rows: WireRow[] }[];
-    expect(broadcasts[0]!.rows).toEqual([]); // the cursor still advances
-    expect(broadcasts[1]!.rows.map((r) => r.id)).toEqual([cloudChat]);
-    expect(JSON.stringify(frames)).not.toContain("secret");
+    expect(broadcasts[0]!.rows.map((r) => r.id)).toEqual([laptopChat]);
+    expect(broadcasts[1]!.rows).toEqual([]); // the cursor still advances
 
     // Its pushes over the socket get per-op errors plus a partial ack, and
     // its presence/attribution is its verified device, not the claimed one.
-    socket.send(JSON.stringify({ t: "push", batch: "ws-1", ops: [upsert("chats", laptopChat, { title: "x" }, cloud)] }));
+    socket.send(JSON.stringify({ t: "push", batch: "ws-1", ops: [upsert("chats", laptopChat, { deviceId: cloud }, cloud)] }));
     await expect.poll(() => frames.some((f) => f.t === "ack" && f.batch === "ws-1")).toBe(true);
     expect(frames.find((f) => f.t === "error" && f.code === "not_owner")).toMatchObject({
-      message: `chats/${laptopChat}: hosted by another device`
+      message: `chats/${laptopChat}: a chat on another device stays hosted there`
     });
     expect(frames.find((f) => f.t === "ack" && f.batch === "ws-1")).toMatchObject({ applied: 0, rejected: [expect.objectContaining({ id: laptopChat })] });
     socket.close();

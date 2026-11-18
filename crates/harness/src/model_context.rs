@@ -145,17 +145,31 @@ fn hash_files<'a>(
 ) -> Result<(), HarnessError> {
     for path in files {
         field(hash, path.as_os_str().as_encoded_bytes());
-        match std::fs::read(path) {
+        // Some of these sit in the project (`opencode.json` up its tree), a
+        // repository anyone may have written: one that is a FIFO or a
+        // symlink to `/dev/zero` is refused, never read.
+        match crate::bounded_file::read(path, MAX_HASHED_FILE) {
             Ok(bytes) => {
                 hash.update([1]);
                 field(hash, &bytes);
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => hash.update([0]),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::InvalidInput | std::io::ErrorKind::FileTooLarge
+                ) =>
+            {
+                hash.update([2]);
+            }
             Err(e) => return Err(e.into()),
         }
     }
     Ok(())
 }
+
+/// The most of one config or credentials file hashed.
+const MAX_HASHED_FILE: u64 = 16 * 1024 * 1024;
 
 impl ModelContext {
     pub(crate) fn key(&self) -> [u8; 32] {
@@ -187,5 +201,28 @@ mod tests {
         assert!(!first.contains("account"));
         std::fs::remove_file(&file).unwrap();
         assert_eq!(key(), missing);
+    }
+
+    /// A project's `opencode.json` that is a symlink to `/dev/zero` or a
+    /// FIFO is hashed as unreadable at once, never read.
+    #[cfg(unix)]
+    #[test]
+    fn a_config_that_is_a_device_or_a_fifo_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let zero = dir.path().join("opencode.json");
+        std::os::unix::fs::symlink("/dev/zero", &zero).unwrap();
+        let fifo = dir.path().join("opencode.jsonc");
+        let c_path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut hash = Sha256::new();
+            let _ = tx.send(hash_files(&mut hash, [zero, fifo].iter()).is_ok());
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_secs(5))
+                .expect("hashing the project's config hung")
+        );
     }
 }

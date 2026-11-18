@@ -1,0 +1,53 @@
+---
+import { AGENTS } from "../../data/agents.ts";
+import SessionWindow from "../app/SessionWindow.astro";
+import AgentMark from "../ui/AgentMark.astro";
+---
+
+<section class="section" id="agents">
+  <div class="wrap">
+    <h2 class="statement" data-reveal><b>Every agent you run, in one window.</b> Zeron works with the coding agents you already use and puts their sessions side by side.</h2>
+    <div class="bento">
+      <article class="card span-7" data-reveal>
+        <div class="card-copy">
+          <h3>Keep track of every session</h3>
+          <p>See which agents have finished, which are still working and which need an answer from you, across all your projects.</p>
+        </div>
+        <div class="card-visual"><SessionWindow class="piece list" crop={[5, 42, 640, 404]} decorative /></div>
+      </article>
+      <article class="card span-5" data-reveal>
+        <div class="card-copy">
+          <h3>Works with the agents you already use</h3>
+          <p>Zeron runs each agent with the account and configuration it already has on your machine.</p>
+        </div>
+        <ul class="agents card-visual">
+          {AGENTS.map((agent) => <li><AgentMark mark={agent.mark} /><span>{agent.name}</span></li>)}
+        </ul>
+      </article>
+    </div>
+  </div>
+</section>
+
+<style>
+  /* Nine cells divided by the card's own line; the card's ring closes the outside. */
+  .agents { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); padding-top: 0; margin-top: 28px; border-top: 1px solid var(--line); flex: 1; }
+  .agents li {
+    display: grid;
+    justify-items: center;
+    align-content: center;
+    gap: 12px;
+    min-height: 116px;
+    font-size: 13px;
+    color: var(--text-2);
+    border-right: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    transition: color 0.15s, background-color 0.15s;
+  }
+  .agents li:nth-child(3n) { border-right: 0; }
+  .agents li:nth-last-child(-n + 3) { border-bottom: 0; }
+  .agents li:hover { color: var(--text); background: rgb(255 255 255 / 0.025); }
+  .agents :global(.agent-mark) { font-size: 24px; color: var(--text); }
+  @media (max-width: 700px) {
+    :global(.piece.list) { --zw: 430 !important; --zh: 340 !important; }
+  }
+</style>

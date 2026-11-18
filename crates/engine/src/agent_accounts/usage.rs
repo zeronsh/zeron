@@ -261,6 +261,13 @@ impl AgentAccounts {
                 }),
             };
         }
+        // An API key has no plan to report (and is never sent to a usage
+        // endpoint).
+        if api_keys::key_entry_secret(harness, creds).is_some() {
+            return Err(ProbeError::NoCredentials {
+                why: NoCredentials::ApiKey,
+            });
+        }
         match upstream_of(harness, key) {
             Some(Upstream::OpenAi) => {
                 let access = str_field(creds, "access").ok_or(missing)?;

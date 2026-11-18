@@ -82,6 +82,9 @@ export type Message = {
 	-- part), open while it is the tail of a reply being written. Given,
 	-- they are what shows (`text` and `tools` then only say what it holds).
 	blocks: { Block }?,
+	-- A long settled reply's runs, its blocks then the host's (src/chat.rs
+	-- `set_aside`, asked for a run at a time as it's built: `chat.reply_run`).
+	runs: { { key: string, n: number, guess: number, sum: string } }?,
 	-- Being written: the reply grows, its tools open.
 	streaming: boolean?,
 	-- When it began (`ui.now() / 1000`), and how long it worked, once done.
@@ -161,8 +164,16 @@ export type Props = {
 	foot: (() -> number)?,
 	-- Whether the view this one is made for rested at its end (a chat
 	-- switched back to: the session page keeps each chat's place); else the
-	-- last transcript's, as a reload's rebuild has it.
-	was_at_end: boolean?,
+	-- last transcript's, as a reload's rebuild has it. (With `session`, asked
+	-- of each chat as it's shown, by its id: nil, as without one.)
+	was_at_end: (boolean | (id: string) -> boolean?)?,
+	-- The chat it shows, for a transcript that stays as one chat after
+	-- another is shown in it (the session page's): another one swaps its
+	-- rows (its list, made for that chat, opening where it was left or at
+	-- its latest), and what stands round them (the scrollbar, the way back
+	-- to the latest, a selection's bar, its lightbox) stays as it is. Its
+	-- reading place, runway, glide and hover start again for each chat.
+	session: State<string?>?,
 	-- What a reply's pictures (`![alt](path)`) are, read as they're asked
 	-- for (screens/chat/reply_images): without it, their alt text.
 	pictures: ReplyPicture.Pictures?,
@@ -228,6 +239,46 @@ export type Block = {
 
 -- Rows not yet measured: about a short message.
 local ESTIMATE = 96
+-- Rows not yet measured, as their messages make them (`ui.list`'s
+-- `estimate`, worked out in Rust from each row's data, no script a row):
+-- a prompt's words; a reply's blocks, its prose wrapped in the column
+-- (24-point lines; a paragraph's room, a code line's, a table row's), each
+-- group of tools a folded line; a long reply's runs at about what one
+-- holds. Measured, a row takes its real height; this keeps a chat opening
+-- from building rows it then finds are far out of view.
+local PROSE: any = {
+	field = "text",
+	size = 15,
+	line = 24,
+	most = 684,
+	markdown = { paragraph = 16, heading = 12, item = 4, code = 20, table = 37 },
+}
+local ROW_ESTIMATE: any = {
+	by = "role",
+	cases = {
+		user = { height = 64, text = { field = "text", size = 15, line = 24, most = 520 } },
+		assistant = {
+			height = 40,
+			has = {
+				blocks = {
+					each = "blocks",
+					item = {
+						by = "kind",
+						cases = {
+							text = { height = 12, text = PROSE },
+							tools = { height = 38 },
+							work = { height = 38 },
+							display_failed = { height = 36 },
+						},
+						default = { height = 320 },
+					},
+				},
+				runs = { each = "runs", item = { height = 3600 } },
+			},
+		},
+	},
+	default = { height = ESTIMATE },
+}
 -- A selection's action: its words' height and its height round them (the
 -- bar's even inset and its border, each side), what it keeps from the
 -- selection and from the view's edges, and the room the way back to the end
@@ -246,10 +297,10 @@ local SEAM_GAP = 6
 
 -- `ZERON_ZGX_TRACE_TRANSCRIPT=1`: the transcript's hover and layout, a line
 -- each to the app's output (off, nothing is made or printed).
-local TRACING = ui.shared("debug.trace_transcript", false):peek() == true
+local TRACING = ui.shared("trace.transcript", false):peek() == true
 local function trace(what: string, ...: any)
 	if TRACING then
-		print(`[transcript] {math.floor(ui.now())} {what}`, ...)
+		print(`zeron-zgx: transcript {math.floor(ui.now())} {what}`, ...)
 	end
 end
 
@@ -300,9 +351,11 @@ local function strip(m: Message, row: State<Message>, hovered: () -> boolean): N
 		justify = if mine then "end" else "start",
 		selectable = false,
 		ui.presence(function(): string?
-			-- (Never while a reply is written: it has no time yet.)
+			-- (Never while a reply is written. A settled message shows it
+			-- with or without its time: a time missing, as on a platform
+			-- that couldn't read one, mustn't take Copy with it.)
 			local now = row:get()
-			return if hovered() and now.at and not now.streaming then "shown" else nil
+			return if hovered() and (now.at or now.copy) and not now.streaming then "shown" else nil
 		end, function(): Node
 			return ui.row {
 				class = "message-actions",
@@ -652,13 +705,122 @@ local function thought_of(m: Message, now: () -> Message, draft: State<Draft>?):
 	}
 end
 
-local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, draft: State<Draft>?, view: View?): Node
-	local shown = ui.computed(list)
-	return ui.each(shown, function(b: Block, _i: number, brow: State<Block>): Node
+-- A long reply's blocks are windowed, as a long text's are (ds/markdown's
+-- `window`): in runs of about RUN blocks, each run built while its reach
+-- (the run and RUN_OVERSCAN either side) touches the view; away, a box of its
+-- last height (a guess until it has been laid out). A reply of a thousand steps,
+-- each a text and a tool (ademark's A11 thread), otherwise built all its
+-- blocks' rows, texts and tools, every time it opened, though its end alone
+-- shows. Only a reply of more than LONG_REPLY blocks, or one being written.
+local RUN = 32
+local RUN_MOST = 64
+local RUN_OVERSCAN = 600
+local LONG_REPLY = 48
+-- How much of a long reply's end is built as it's first made, before the
+-- view has said what's near it (its runs' heights, kept or guessed, from its
+-- end): the view a transcript opens on, at its end, and RUN_OVERSCAN past
+-- it, so the first frame shows its end whole and nothing near it is built a
+-- frame later. (A view not laid out yet: about a tall window's.)
+local OPENING_VIEW = 1000
+-- What windowed runs keep by their reply and first block (`<id>:<block id>`):
+-- each one's height as last laid out, and whether it was built when last
+-- judged, so a reply opened again holds its runs at their heights and builds
+-- the same ones. Plain tables a key at a time (ds/markdown's `kept`, the oldest half
+-- going as they fill).
+local KEPT_RUNS = 8192
+local function kept_runs<T>(): { get: (string) -> T?, set: (string, T) -> () }
+	local now: { [string]: T }, older: { [string]: T }, count = {}, {}, 0
+	local function set(k: string, value: T)
+		if now[k] == nil then
+			if count >= KEPT_RUNS then
+				now, older, count = {}, now, 0
+			end
+			count += 1
+		end
+		now[k] = value
+	end
+	return {
+		get = function(k: string): T?
+			local value = now[k]
+			if value == nil then
+				value = older[k]
+				if value ~= nil then
+					set(k, value)
+				end
+			end
+			return value
+		end,
+		set = set,
+	}
+end
+local RUN_HEIGHTS = kept_runs() :: { get: (string) -> number?, set: (string, number) -> () }
+local RUN_NEAR = kept_runs() :: { get: (string) -> boolean?, set: (string, boolean) -> () }
+
+-- About how tall a block will be before it's laid out: a text's lines at a
+-- reply's width (about 85 characters a line) and its code blocks by their
+-- lines (ds/markdown's `estimate`), a group of tools its summary's line.
+local function guess_block(b: Block): number
+	if b.kind == "text" then
+		local h, chars, code, fenced = 0, 0, 0, false
+		local function paragraph()
+			if chars > 0 then
+				h += math.ceil(chars / 85) * 24 + 16
+				chars = 0
+			end
+		end
+		for line in string.gmatch((b.text or "") .. "\n", "(.-)\n") do
+			if string.match(line, "^%s*```") then
+				if fenced then
+					h += code * 19 + 56 + 16
+					code = 0
+				else
+					paragraph()
+				end
+				fenced = not fenced
+			elseif fenced then
+				code += 1
+			elseif string.match(line, "^%s*$") then
+				paragraph()
+			else
+				chars += #line + 1
+			end
+		end
+		paragraph()
+		return math.max(24, h - 16)
+	elseif b.kind == "tools" or b.kind == "work" then
+		return if b.live then 26 * math.max(1, #(b.tools or {})) else 26
+	end
+	return 240
+end
+local function guess_run(blocks: { Block }): number
+	local h = 0
+	for _, b in blocks do
+		h += guess_block(b) + 12
+	end
+	return math.max(0, h - 12)
+end
+
+-- A long settled reply's blocks are the host's (src/chat.rs `set_aside`): its
+-- row says its runs (`runs`: each `{ key, n, guess, sum }`) and a run's blocks
+-- are asked for as it's built (`chat.reply_run`), so opening it hands this
+-- script its end's blocks alone, not its thousands.
+local function run_blocks(id: string, key: string): { Block }
+	local ok, list = pcall(ui.call_sync, "chat.reply_run", { id = id, key = key })
+	return if ok and type(list) == "table" then list else {}
+end
+local function aside_blocks(id: string): { Block }
+	local ok, list = pcall(ui.call_sync, "chat.reply_blocks", id)
+	return if ok and type(list) == "table" then list else {}
+end
+
+-- (`aside`: the reply's blocks are the host's, its runs said by its row.)
+local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, draft: State<Draft>?, view: View?, aside: boolean?): Node
+	local function block(b: Block, brow: State<Block>): Node
 		if b.kind == "tools" or b.kind == "work" then
 			return Activity {
 				key = `{m.id}:{b.id}`,
 				open_subagent = if view then view.open_subagent else nil,
+				pictures = if view then view.shown_pictures else nil,
 				-- (A long group builds only what's near the view, as a long
 				-- reply does.)
 				window = if view
@@ -766,9 +928,256 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 			find = if view and view.find then view.find(`{m.id}:{b.id}`) else nil,
 			group = `reply:{m.id}`,
 		}
+	end
+	local function key(b: Block): string
+		return b.id
+	end
+	-- (A reply being written may grow long as it's watched: windowed from
+	-- the start, one run while it's short.)
+	if aside and not view then
+		list = function(): { Block }
+			local _ = now().runs
+			return aside_blocks(m.id)
+		end
+	end
+	if not view or (not aside and #(m.blocks or {}) <= LONG_REPLY and not m.streaming) then
+		return ui.each(ui.computed(list), function(b: Block, _i: number, brow: State<Block>): Node
+			return block(b, brow)
+		end, { key = key, w_full = true, gap = "$space.3" })
+	end
+	local w = view :: View
+	-- Its runs. Where one ends is said by its blocks' ids alone (a block
+	-- whose id falls on RUN starts a run; none runs past RUN_MOST), so blocks
+	-- coming before or after (the engine's opening tail, then the whole reply;
+	-- a reply being written) leave the runs they don't reach as they were.
+	-- Each is kept (its very table) while its blocks are the same ones, so
+	-- only a run whose blocks changed is looked at again; and keyed by its
+	-- first block.
+	local starts: { [string]: boolean } = {}
+	local function starts_run(id: string): boolean
+		local yes = starts[id]
+		if yes == nil then
+			local h = 0
+			for i = 1, #id do
+				h = (h * 31 + string.byte(id, i)) % 1000003
+			end
+			yes = h % RUN == 0
+			starts[id] = yes
+		end
+		return yes
+	end
+	type Run = { key: string, blocks: { Block }?, guess: number?, sum: string?, n: number? }
+	local made: { [string]: Run } = {}
+	-- (Set aside: a run's blocks as asked for, while it's the same run.)
+	local fetched: { [string]: { sum: string?, blocks: { Block } } } = {}
+	local function blocks_in(run: Run): { Block }
+		if run.blocks ~= nil then
+			return run.blocks :: { Block }
+		end
+		local got = fetched[run.key]
+		if got == nil or got.sum ~= run.sum then
+			got = { sum = run.sum, blocks = run_blocks(m.id, run.key) }
+			fetched[run.key] = got
+		end
+		return got.blocks
+	end
+	local function guess_of(run: Run): number
+		return run.guess or guess_run(run.blocks or {})
+	end
+	-- The runs within the opening's reach of its end (by their heights, kept or
+	-- guessed), as they last stood: one made there is built from the start.
+	local reach: { [string]: boolean } = {}
+	local runs = ui.computed(function(): { Run }
+		local out: { Run } = {}
+		local now_made: { [string]: Run } = {}
+		if aside then
+			-- As the host cut them: each kept (its very table, its blocks
+			-- if asked for) while it says the same run.
+			for _, r in now().runs or {} do
+				local was = made[r.key]
+				local run = if was and was.sum == r.sum and was.n == r.n
+					then was
+					else { key = r.key, guess = r.guess, sum = r.sum, n = r.n }
+				table.insert(out, run)
+				now_made[r.key] = run
+			end
+		end
+		local all = if aside then {} else list()
+		local function take(from: number, to: number)
+			local first = all[from].id
+			local was = made[first]
+			local same = was ~= nil and #was.blocks == to - from + 1
+			if same then
+				for i = from, to do
+					if (was :: Run).blocks[i - from + 1] ~= all[i] then
+						same = false
+						break
+					end
+				end
+			end
+			local run = if same then was :: Run else { key = first, blocks = table.move(all, from, to, 1, {}) }
+			table.insert(out, run)
+			now_made[first] = run
+		end
+		local from = 1
+		for i = 2, if aside then 0 else #all do
+			if i - from >= RUN_MOST or starts_run(all[i].id) then
+				take(from, i - 1)
+				from = i
+			end
+		end
+		if not aside and #all >= from then
+			take(from, #all)
+		end
+		made = now_made
+		reach = {}
+		local list_el = w.view:peek()
+		local opening = (if list_el and list_el.height and list_el.height > 0 then list_el.height else OPENING_VIEW) + RUN_OVERSCAN
+		local h = 0
+		for i = #out, 1, -1 do
+			if h > opening then
+				break
+			end
+			reach[out[i].key] = true
+			h += RUN_HEIGHTS.get(`{m.id}:{out[i].key}`) or guess_of(out[i])
+		end
+		return out
+	end)
+	-- A find's current match, if it's in this reply: the key of its text.
+	local found = if w.find then w.find("") else nil
+	local function current_key(): string?
+		local c = if found then found.current() else nil
+		return if c then c.key else nil
+	end
+	-- Each run's judge, by its key: all judged again as what holds one
+	-- built changes (a find's current match moving, the reply's writing
+	-- ending); each judges itself as it comes near the view or goes.
+	local judges: { [string]: () -> () } = {}
+	ui.effect(function()
+		current_key()
+		local _ = now().streaming
+		for _, judge in judges do
+			judge()
+		end
+	end)
+	return ui.each(runs, function(run: Run, _i: number, row: State<any>): Node
+		local k = `{m.id}:{run.key}`
+		local was_near = RUN_NEAR.get(k)
+		-- Built if it was when last judged (a reply opened again where it was
+		-- read), and if it's near the reply's end (where a transcript opens,
+		-- and where a reply being written grows); else held at its height
+		-- until the view says it's near.
+		local near = ui.use_state(was_near == true or reach[run.key] == true)
+		local held = ui.use_state(RUN_HEIGHTS.get(k) or guess_of(run))
+		local r = ui.ref()
+		-- Built again after being held: its first layout makes up the
+		-- difference to the height it was held at, as ds/markdown's runs do.
+		local returning = false
+		-- Near the view, as zgx says (`on_visible`, its box grown by
+		-- `visible_margin`): nil until its first layout.
+		local seen: boolean? = nil
+		local function judge()
+			if seen == nil then
+				return
+			end
+			-- (Always built: the last run of a reply being written, where its
+			-- words arrive; and the run holding a find's current match.)
+			local all = runs:peek()
+			local live = now().streaming == true and #all > 0 and all[#all].key == run.key
+			local c = current_key()
+			local holds = false
+			if c and aside and string.sub(c, 1, #m.id + 1) == `{m.id}:` then
+				-- (Its blocks not asked for yet: the host says which run has it.)
+				local ok, at = pcall(ui.call_sync, "chat.reply_run_of", { id = m.id, block = string.sub(c, #m.id + 2) })
+				holds = ok and at == run.key
+			elseif c and not aside then
+				for _, b in row:peek().blocks do
+					if c == `{m.id}:{b.id}` then
+						holds = true
+						break
+					end
+				end
+			end
+			local shows = live or holds or seen :: boolean
+			if RUN_NEAR.get(k) ~= shows then
+				RUN_NEAR.set(k, shows)
+			end
+			if near:peek() ~= shows then
+				returning = shows
+				near:set(shows)
+			end
+		end
+		-- (Its blocks, made only once it's near: a component's body runs as it
+		-- mounts, so a run held away from the view asks for none of them.)
+		local Blocks = ui.component(function(_: {}): Node
+			return ui.each(ui.computed(function(): { Block }
+				local r = row:get()
+				return if aside then blocks_in(r) else r.blocks
+			end), function(b: Block, _j: number, brow: State<Block>): Node
+				return block(b, brow)
+			end, { key = key, w_full = true, gap = "$space.3" })
+		end)
+		judges[run.key] = judge
+		ui.on_cleanup(function()
+			if judges[run.key] == judge then
+				judges[run.key] = nil
+			end
+		end)
+		return ui.div {
+			ref = r,
+			w_full = true,
+			min_w = 0,
+			visible_margin = RUN_OVERSCAN,
+			on_visible = function(visible: boolean)
+				-- (Built as it was made, and not near at its first layout: kept
+				-- until the view has been near it and gone. Let go of at once,
+				-- it took a frame of its own after the one the reply opened in.)
+				if seen == nil and not visible and near:peek() then
+					seen = false
+					return
+				end
+				seen = visible
+				judge()
+			end,
+			on_resize = function(size: { w: number, h: number })
+				local before = held:peek()
+				local back = returning
+				returning = false
+				local last_height = RUN_HEIGHTS.get(k)
+				if last_height == nil or math.abs(size.h - last_height) >= 0.5 then
+					RUN_HEIGHTS.set(k, size.h)
+				end
+				if math.abs(size.h - before) < 0.5 then
+					return
+				end
+				held:set(size.h)
+				if not back or (w.at_end and w.at_end:peek()) then
+					return
+				end
+				-- Above the view's top (it came in from there): the view moves
+				-- with it, so what shows doesn't (ds/markdown's runs, the same).
+				local el, list_el = r:peek(), w.view:peek()
+				local outer = if w.row then w.row:peek() else nil
+				local row_above = outer ~= nil
+					and list_el ~= nil
+					and outer.y ~= nil
+					and outer.height ~= nil
+					and list_el.y ~= nil
+					and (outer.y :: number) + (outer.height :: number) <= (list_el.y :: number)
+				if el and list_el and el.y and list_el.y and (el.y :: number) < (list_el.y :: number) and not row_above then
+					w.offset:set(math.max(0, w.offset:peek() + size.h - before))
+				end
+			end,
+			-- Away from the view, this box alone, as tall as the run last was
+			-- (or its guess); near, its blocks.
+			min_h = function(): number
+				return if near:get() then 0 else held:get()
+			end,
+			ui.show(near, Blocks {}),
+		}
 	end, {
-		key = function(b: Block): string
-			return b.id
+		key = function(run: Run): string
+			return run.key
 		end,
 		w_full = true,
 		gap = "$space.3",
@@ -805,7 +1214,26 @@ local function reply(
 		provide = { message = m.id },
 		w_full = true,
 		gap = "$space.3",
-		if m.blocks ~= nil
+		if m.runs ~= nil or (m.blocks ~= nil and m.streaming)
+			-- Its blocks set aside by the host (a long settled reply), or
+			-- soon may be (one being written, once it settles): as its row
+			-- says, laid out compact, from its runs, or from its blocks.
+			then ui.presence(function(): string
+				local n = now()
+				if compact and compact() and n.compact then
+					return "compact"
+				end
+				return if n.runs ~= nil then "runs" else "blocks"
+			end, function(kind: string): Node
+				return blocks_of(function(): { Block }
+					local n = now()
+					if kind == "compact" then
+						return n.compact or {}
+					end
+					return n.blocks or {}
+				end, m, now, draft, view, kind == "runs")
+			end, { w_full = true, min_w = 0 })
+			elseif m.blocks ~= nil
 			then blocks_of(function(): { Block }
 				local n = now()
 				if compact and compact() and n.compact then
@@ -821,6 +1249,7 @@ local function reply(
 			Activity {
 				key = m.id,
 				open_subagent = if view then view.open_subagent else nil,
+				pictures = if view then view.shown_pictures else nil,
 				thought = thought_of(m, now, draft),
 				tools = function()
 					return now().tools or {}
@@ -833,7 +1262,7 @@ local function reply(
 				end,
 			}
 		),
-		if m.blocks ~= nil then nil else Markdown {
+		if m.blocks ~= nil or m.runs ~= nil then nil else Markdown {
 			text = text,
 			-- Parsed incrementally only while it can grow.
 			key = if m.streaming then `reply:{m.id}` else nil,
@@ -969,10 +1398,22 @@ local function Transcript(props: Props): Node
 			return { key = key, query = f.query, current = f.current, reveal = reveal }
 		end
 	end
+	-- The chat shown (`session`): the one it's made for, then each shown in
+	-- it (`fresh`).
+	local showing: string? = if props.session then props.session:peek() else nil
 	-- Whether the transcript this one replaces rested at its end (kept
 	-- state: a reload's rebuild knows it; `keep` brings a view back only if
-	-- it didn't). Then a new one starts at its end.
-	local was_at_end = if props.was_at_end ~= nil then props.was_at_end else at_end:peek()
+	-- it didn't). Then a new one starts at its end. (Asked again of each
+	-- chat shown, by its id.)
+	local function was_at_end_of(id: string?): boolean
+		local given: any = props.was_at_end
+		if type(given) == "function" then
+			local said = if id ~= nil then given(id) else nil
+			return if said ~= nil then said else at_end:peek()
+		end
+		return if given ~= nil then given else at_end:peek()
+	end
+	local was_at_end = was_at_end_of(showing)
 	-- A new one starts at its end; one made again where the last was
 	-- scrolled up (a reload, `keep` holding its place) stays away from it,
 	-- its way back to the latest still out. (The list writes the state only
@@ -1071,6 +1512,9 @@ local function Transcript(props: Props): Node
 	local glide: any = nil
 	-- (Each send's turn: a later one takes over from one still on its way.)
 	local glides = 0
+	-- (Each chat shown in it, with `session`: a glide or a place being put
+	-- back for one leaves the next alone.)
+	local shown_turn = 0
 	local glide_from: (push: () -> (), from: number, last: Message, r: any, landing: string?) -> ()
 	local function send_here(push: () -> (), landing: string?)
 		waiting = nil
@@ -1093,7 +1537,14 @@ local function Transcript(props: Props): Node
 		if el then
 			el:scroll_to_row(n, { align = "end" })
 		end
+		local view = shown_turn
 		ui.after(16, function()
+			-- (Another chat shown meanwhile (`fresh`): the prompt goes, and
+			-- the view, now that chat's, stays where it opened.)
+			if shown_turn ~= view then
+				push()
+				return
+			end
 			local real = offset:peek()
 			if real >= PAST_END / 2 then
 				push()
@@ -1114,6 +1565,8 @@ local function Transcript(props: Props): Node
 		end
 		glides += 1
 		local turn = glides
+		-- (The chat it's in: another shown meanwhile (`fresh`) leaves it.)
+		local view = shown_turn
 		-- First a step clear of the end (the old last reply holding its
 		-- runway meanwhile, so nothing above moves): the list then no
 		-- longer rests at its end, and doesn't follow the new rows there.
@@ -1129,6 +1582,10 @@ local function Transcript(props: Props): Node
 		-- Nothing to glide to: the old reply lets go of its room, and the
 		-- view goes to the end.
 		local function let_go()
+			-- (Another chat shown meanwhile (`fresh`): its view is its own.)
+			if shown_turn ~= view then
+				return
+			end
 			ui.batch(function()
 				held:set { id = "", h = 0 }
 				gliding:set(false)
@@ -1142,6 +1599,11 @@ local function Transcript(props: Props): Node
 		-- taken meanwhile stays where it went.
 		local function rise(prompt: Message?)
 			ui.after(16, function()
+				-- (Another chat shown meanwhile (`fresh`), or scrolled meanwhile:
+				-- the view is that chat's, or the reader's, see `wheeled`.)
+				if shown_turn ~= view or glides ~= turn then
+					return
+				end
 				local row_el = prompt and tops[prompt.id] and tops[prompt.id]:peek()
 				local list_el = list:peek()
 				if not row_el or not list_el or row_el.y == nil or list_el.y == nil then
@@ -1154,6 +1616,9 @@ local function Transcript(props: Props): Node
 					duration = motion.ms(GLIDE_MS),
 					ease = "outQuad",
 					onComplete = function()
+						if glides ~= turn then
+							return
+						end
 						-- Landed: the old reply lets go of the room it held
 						-- (above the view, so nothing seen moves), and the
 						-- offset says where the list now rests, a real place
@@ -1440,6 +1905,18 @@ local function Transcript(props: Props): Node
 		-- (Taken somewhere of their own: a place still to come back to is
 		-- let go.)
 		waiting = nil
+		-- A send's glide under way (or its prompt still to land, a steer's):
+		-- the scroll is theirs, so the glide stops where it is rather than
+		-- pulling the view back to the end. The old reply keeps the room it
+		-- held until it's out of view (`rested`), so nothing shown moves.
+		if gliding:peek() then
+			glides += 1
+			if glide then
+				glide:pause()
+				glide = nil
+			end
+			gliding:set(false)
+		end
 		return nil
 	end
 	-- When focus last came to something in the list (Tab, ⇧Tab to a row's
@@ -1448,6 +1925,8 @@ local function Transcript(props: Props): Node
 	-- While the width is changing (and a moment after): the reading row
 	-- puts the place back as its lines rewrap, the frame they do.
 	local resizing_until = 0
+	-- When the view's size last changed.
+	local resized_at = -math.huge
 	local function find_reading()
 		reading = nil
 		local el = list:peek()
@@ -1529,8 +2008,31 @@ local function Transcript(props: Props): Node
 	local function rested()
 		remember()
 		find_reading()
-		if not at_end:peek() and ui.now() >= resizing_until then
+		-- Resting away from the end: let go of it once no change of size is
+		-- under way, or at once if a person scrolled since the last one (a
+		-- scroll begun just after a resize is theirs; held, the next resize,
+		-- however much later, would pull the view back to the end).
+		if not at_end:peek() and (ui.now() >= resizing_until or wheeled_at >= resized_at) then
 			end_held = false
+		end
+		-- A send's glide a scroll stopped (`wheeled`): the old reply's held
+		-- room goes once that reply is out of view, where it moves nothing.
+		local h = held:peek()
+		if h.id ~= "" and not gliding:peek() then
+			local r = rows[h.id]
+			local row_el = r and r.outer:peek()
+			local el = list:peek()
+			local away_from_view = not row_el
+				or not el
+				or row_el.y == nil
+				or row_el.height == nil
+				or el.y == nil
+				or el.height == nil
+				or (row_el.y :: number) + (row_el.height :: number) <= (el.y :: number)
+				or (row_el.y :: number) >= (el.y :: number) + (el.height :: number)
+			if away_from_view then
+				held:set { id = "", h = 0 }
+			end
 		end
 	end
 	local rest = ui.debounced(offset, 150, { every = true })
@@ -1904,22 +2406,10 @@ local function Transcript(props: Props): Node
 		}
 	end
 
-	return ui.overlay {
-		w_full = true,
-		h_full = true,
-		-- The lightbox a message's pictures open in (one a window draws).
-		Lightbox.Host(),
-		on_hover = function(inside: boolean)
-			if not inside then
-				hover:set("")
-			end
-		end,
-		ui.div { absolute = true, left = 0, right = 0, top = 0, bottom = 0, SelectionMenu { w_full = true, h_full = true, more = offers, on_release = if props.on_mention or props.on_attach
-			then function()
-				-- (A turn on: the release ends the gesture first.)
-				ui.after(0, settle)
-			end
-			else nil, ui.list {
+	-- Its rows: the chat's messages, virtualized. With `session`, one list
+	-- for each chat shown (`fresh` first), the rest of the transcript staying.
+	local function List(): Node
+		return ui.list {
 			id = "transcript",
 			ref = list,
 			label = locale.t("ds.transcript.conversation"),
@@ -1990,7 +2480,8 @@ local function Transcript(props: Props): Node
 					ui.after(48, settle)
 				end
 				if changed then
-					resizing_until = ui.now() + 300
+					resized_at = ui.now()
+					resizing_until = resized_at + 300
 					-- At the end: on it still, every frame of the change.
 					if end_held and not gliding:peek() then
 						-- (Asked of the list itself, which lands it as it lays
@@ -2039,6 +2530,7 @@ local function Transcript(props: Props): Node
 			follow = true,
 			at_end = at_end,
 			height = ESTIMATE,
+			estimate = ROW_ESTIMATE,
 			overscan = 3,
 			-- (Its scrollbar is the rail below, over it: a bar of its own
 			-- would fade at its edges with the rows.)
@@ -2062,13 +2554,99 @@ local function Transcript(props: Props): Node
 			-- On whole points, so a scroll moves its pixels rather than
 			-- painting them again (a view between device pixels can't).
 			snap = true,
-		} } },
+		}
+	end
+	-- Another chat shown (`session`): its list is made for it, and what was
+	-- the last chat's own here goes, as a transcript made for this one would
+	-- start: where it opens (its place kept, or its latest), its runway and
+	-- glide, the hover and a selection's bar, the reading place and its
+	-- sizes. (The list's own `on_mount` then opens it where it should.)
+	-- (Each chat shown in it, for the scrollbar.)
+	local placed = ui.use_state(0)
+	local function fresh(id: string?)
+		if id == showing then
+			return
+		end
+		showing = id
+		shown_turn += 1
+		opened_at = ui.now()
+		-- (Its own list's: the last list, going, lets go of its own.)
+		if not props.ref then
+			list = ui.ref()
+		end
+		was_at_end = was_at_end_of(id)
+		restoring = props.keep ~= nil and props.keep:peek() ~= nil and not was_at_end
+		if glide then
+			glide:pause()
+			glide = nil
+		end
+		here, waiting, returning, reading = nil, nil, nil, nil
+		sizes, known, seen_n = {}, 0, 0
+		last_w, last_h = nil, nil
+		end_held = not restoring
+		wheeled_at, focused_at, resizing_until, resized_at = -math.huge, -math.huge, 0, -math.huge
+		ui.batch(function()
+			at_end:set(not restoring)
+			placing:set(restoring)
+			held:set { id = "", h = 0 }
+			gliding:set(false)
+			pin:set { id = "", h = 0 }
+			hover:set("")
+			spot:set(nil)
+			sized:set(sized:peek() + 1)
+		end)
+		-- (Its place told once it has stood 150 ms, as a view just made's.)
+		ui.after(150, rested)
+		-- (The scrollbar too: placing the next chat's rows is no scroll.)
+		placed:set(placed:peek() + 1)
+	end
+
+	return ui.overlay {
+		w_full = true,
+		h_full = true,
+		-- The lightbox a message's pictures open in (one a window draws).
+		Lightbox.Host(),
+		on_hover = function(inside: boolean)
+			if not inside then
+				hover:set("")
+			end
+		end,
+		ui.div {
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			bottom = 0,
+			SelectionMenu {
+				w_full = true,
+				h_full = true,
+				more = offers,
+				on_release = if props.on_mention or props.on_attach
+					then function()
+						-- (A turn on: the release ends the gesture first.)
+						ui.after(0, settle)
+					end
+					else nil,
+				if props.session
+					then ui.presence(function(): string
+						return (props.session :: State<string?>):get() or ""
+					end, function(id: string): Node
+						fresh(if id == "" then nil else id)
+						return List()
+					end, { w_full = true, h_full = true })
+					else List(),
+			},
+		},
 		-- The scrollbar, over the list and never faded, running its whole
 		-- height: at the window's edge, beside the composer rather than
 		-- under it, so scrolled to the end it reaches the page's end.
 		Rail {
 			id = "transcript-rail",
 			offset = offset,
+			-- (Another chat's rows placing themselves: no scroll to show.)
+			settle = function(): number
+				return placed:get()
+			end,
 			extent = extent,
 			view = function(): number
 				return list.height or 0

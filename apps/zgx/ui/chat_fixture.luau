@@ -92,6 +92,13 @@ do
 		note(`switch_on:{key}:{id}:{account}`)
 		return { after = function(_: any, done: (any) -> ()) done(nil) end }
 	end
+	-- (An Account row adding one of its provider's accounts.)
+	stub_agents.target = function(device: string?)
+		note(`target:{device or ""}`)
+	end
+	stub_agents.sign_in_to = function(id: string, provider: string)
+		note(`sign_in_to:{id}:{provider}`)
+	end
 end
 
 local function publish(id: string, patch: { [string]: any }?)
@@ -323,6 +330,24 @@ ui.command {
 		SEND_FAILS:set(true)
 	end,
 }
+-- A new chat's agent started early (screens/chat/warm): noted, with whether
+-- it was typed into (`warm:<new|id>:<typed>`; a new chat's id is "new"), and
+-- what it was asked for (`warm_ask:<id>|<model>|<cwd>|<device>`).
+stub.warm = function(id: string, req: any, typed: boolean): any
+	local m = META[id]
+	note(`warm:{if m then id else "new"}:{if typed then "typed" else "open"}`)
+	note(`warm_ask:{id}|{req.model or "-"}|{req.cwd or "-"}|{req.device or "-"}`)
+	return { after = function(_: any, done: (any) -> ()) done("started") end }
+end
+stub.unwarm = function(id: string)
+	note(`unwarm:{if META[id] then id else "new"}`)
+end
+stub.warm_cleared = function(id: string)
+	note(`warm_cleared:{if META[id] then id else "new"}`)
+end
+stub.warm_taken = function(id: string)
+	note(`warm_taken:{id}`)
+end
 stub.send = function(req: any)
 	note(`send:{req.session or "new"}:{req.text}`)
 	-- A send carries no time of its own: the host starts its clock when it
@@ -879,6 +904,16 @@ ui.command {
 	end,
 }
 
+-- A settled reply the host gave no time (as Windows did before it could
+-- read one): its Copy shows all the same (tests/chat_in_place).
+ui.command {
+	id = "reply_without_time",
+	title = "A reply with no time",
+	run = function()
+		store.messages:push { id = "notime1", role = "assistant", text = "Answered with no clock.", copy = "Answered with no clock." }
+	end,
+}
+
 -- Messages from other chats, as the host gives them: one from a chat that's
 -- listed, one from a chat that isn't, one with a long title (tests/chat_sender).
 ui.command {
@@ -1120,7 +1155,18 @@ stub.create_failed = function(id: string)
 	TRANSCRIPTS[id] = nil
 	seed()
 end
+local CREATE_FAILS = ui.state("fixture_create_fails", false)
+ui.command { id = "create_fails", title = "The next new chat isn't made", run = function()
+	CREATE_FAILS:set(true)
+end }
 sessions_stub.create = function(req: any)
+	if CREATE_FAILS:peek() and not req.cloud then
+		CREATE_FAILS:set(false)
+		note(`create_failed_for:{req.id or "-"}`)
+		return { after = function(_self: any, _ok: any, bad: (any) -> ())
+			bad("offline")
+		end }
+	end
 	made_chats += 1
 	local id = req.id or `new{made_chats}`
 	note(`create:{req.project or "none"}:{req.config and req.config.model or ""}`)
@@ -1161,6 +1207,17 @@ ui.command {
 	title = "A session with no model",
 	run = function()
 		META.s3 = { title = "No model", project = "atlas", access = "full", plan = false }
+		TRANSCRIPTS.s3 = { { id = "z1", role = "user", text = "Hi" } }
+		seed()
+	end,
+}
+-- A Codex session on its agent's default model (none set, so none the
+-- catalog names): its agent only the one its config records.
+ui.command {
+	id = "codex_model_less",
+	title = "A Codex session with no model",
+	run = function()
+		META.s3 = { title = "Codex chat", project = "atlas", agent = "codex", harness = "codex", access = "full", plan = false }
 		TRANSCRIPTS.s3 = { { id = "z1", role = "user", text = "Hi" } }
 		seed()
 	end,
@@ -1588,6 +1645,29 @@ ui.effect(function()
 	table.sort(keys)
 	plugin_comments:set(table.concat(keys, ","))
 end)
+-- The draft lifted out whole and laid back (a plugin's `zeron.take_draft`
+-- and `put_draft`; screens/plugins keeps it between the two, as this
+-- does). `test_lifted` says what was lifted: its words and how many chips.
+local lifted: any = nil
+local lifted_said = ui.state("test_lifted", "")
+ui.command {
+	id = "draft_lift",
+	title = "A plugin takes the draft",
+	run = function()
+		lifted = require("@app/screens/chat/shared").lift()
+		lifted_said:set(if lifted then `{lifted.text}|{#lifted.cargo}` else "nothing")
+	end,
+}
+ui.command {
+	id = "draft_lay",
+	title = "A plugin puts the draft back",
+	run = function()
+		if lifted then
+			require("@app/screens/chat/shared").lay(lifted)
+			lifted = nil
+		end
+	end,
+}
 ui.command {
 	id = "comment_moves",
 	title = "The comment is carried two lines down",
@@ -1623,6 +1703,49 @@ ui.command {
 			copy = text,
 			blocks = { { id = "t", kind = "text", text = text } },
 		}
+	end,
+}
+-- `long_thread`: ademark's A11 thread, one reply of a thousand steps, each a
+-- short text (one in five with a code block) and a call reading a file, its
+-- last text holding `LONGTHREAD-END` (the engine's mock `/longthread`), as
+-- Tall replies (s7).
+local function long_thread(steps: number): { any }
+	local blocks: { any } = {}
+	for n = 1, steps do
+		local text = `Step {n} of {steps}. I read src/invoices.ts and noted what step {n} needs from it.`
+		if n % 5 == 0 then
+			text ..= "\n\n```ts\nfunction summarize(invoice: Invoice): InvoiceSummary {\n  const total = invoiceTotal(invoice);\n  return { id: invoice.id, totalCents: total };\n}\n```"
+		end
+		table.insert(blocks, { id = `t{n}`, kind = "text", text = text })
+		table.insert(blocks, {
+			id = `g:toolu_{n}`,
+			kind = "tools",
+			summary = "Read 1 file",
+			live = false,
+			tools = { { id = `toolu_{n}`, kind = "read", verb = "Read", target = "invoices.ts", call = "src/invoices.ts" } },
+		})
+	end
+	table.insert(blocks, { id = "tend", kind = "text", text = "All steps done. LONGTHREAD-END" })
+	local texts = {}
+	for _, b in blocks do
+		if b.kind == "text" then
+			table.insert(texts, b.text)
+		end
+	end
+	local whole = table.concat(texts, "\n\n")
+	return {
+		{ id = "lt1", role = "user", text = `/longthread {steps}` },
+		{ id = "lt2", role = "assistant", text = whole, model = "Opus", at = "Nov 13, 9:00 PM", copy = whole, blocks = blocks },
+	}
+end
+ui.command {
+	id = "long_thread",
+	title = "A thread of a thousand steps",
+	run = function()
+		TRANSCRIPTS.s7 = long_thread(1000)
+		if store.session:peek() and (store.session:peek() :: any).id == "s7" then
+			store.messages:set(TRANSCRIPTS.s7)
+		end
 	end,
 }
 -- A long chat: many long messages, landing at once (a chat of a day's
@@ -2052,6 +2175,14 @@ ui.command {
 	title = "New chat",
 	run = function()
 		route.new_chat()
+	end,
+}
+-- The person's own new chat (⌘N's own path: screens/chat/warm hears it).
+ui.command {
+	id = "go_new_by_hand",
+	title = "New chat, by hand",
+	run = function()
+		route.new_chat("atlas")
 	end,
 }
 ui.command {

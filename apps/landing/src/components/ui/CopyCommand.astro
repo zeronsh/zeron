@@ -1,0 +1,68 @@
+---
+// A shell command with a button that copies it.
+interface Props {
+  command: string;
+}
+const { command } = Astro.props;
+---
+
+<div class="command">
+  <code><span aria-hidden="true">$ </span>{command}</code>
+  <button type="button" data-copy={command} aria-label="Copy the command">
+    <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="2"></rect><path d="M10.5 5.5v-1a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h1"></path></svg>
+    <span data-copy-label>Copy</span>
+  </button>
+</div>
+
+<script>
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-copy]")) {
+    const label = button.querySelector("[data-copy-label]");
+    button.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(button.dataset.copy ?? "");
+      } catch {
+        return;
+      }
+      if (!label) return;
+      label.textContent = "Copied";
+      setTimeout(() => (label.textContent = "Copy"), 1600);
+    });
+  }
+</script>
+
+<style>
+  .command {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 44px;
+    padding: 6px 6px 6px 14px;
+    background: var(--surface);
+    border-radius: var(--radius-lg);
+    box-shadow: inset 0 0 0 1px var(--border);
+  }
+  code {
+    flex: 1;
+    min-width: 0;
+    overflow-x: auto;
+    font-size: 13.5px;
+    white-space: nowrap;
+    scrollbar-width: none;
+  }
+  code span { color: var(--text-3); user-select: none; }
+  button {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: none;
+    height: 32px;
+    padding: 0 10px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-2);
+    border-radius: var(--radius-md);
+    transition: background-color 0.12s, color 0.12s;
+  }
+  button:hover { color: var(--text); background: var(--secondary-bg); }
+  svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
+</style>

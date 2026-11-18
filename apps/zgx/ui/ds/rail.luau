@@ -42,6 +42,11 @@ export type Props = {
 	hint: (() -> boolean)?,
 	-- An id for the strip, for tools that look for it.
 	id: string?,
+	-- Read: as what it returns changes, the view is placing itself again,
+	-- as on its mount (the same rail over another chat's rows, a chat
+	-- switched to): for a moment its offset's changes are no scroll, and
+	-- the rail, if it showed, goes.
+	settle: (() -> any)?,
 }
 
 -- The rail's geometry: the strip that takes the pointer, the thumb at rest
@@ -103,10 +108,17 @@ return ui.component(function(props: Props): Node
 	-- rail and drew some 60 frames for it.
 	local settled = false
 	local settling: (() -> ())? = nil
-	settling = ui.after(SETTLE, function()
-		settling = nil
-		settled = true
-	end)
+	local function settle()
+		if settling then
+			settling()
+		end
+		settled = false
+		settling = ui.after(SETTLE, function()
+			settling = nil
+			settled = true
+		end)
+	end
+	settle()
 	-- Only a scroll's first move is heard: while the rail shows, a poll
 	-- every POLL ms sees whether the view has moved since (the effect then
 	-- reads nothing, so a scroll's frames run nothing here), and it goes
@@ -142,6 +154,21 @@ return ui.component(function(props: Props): Node
 		end
 		recent:set(true)
 	end)
+	-- Placing itself again (`settle`): as it mounted.
+	if props.settle then
+		local again = props.settle
+		local first = true
+		ui.effect(function()
+			again()
+			if first then
+				first = false
+				return
+			end
+			seen = offset:peek()
+			recent:set(false)
+			settle()
+		end)
+	end
 	ui.on_cleanup(function()
 		if settling then
 			settling()

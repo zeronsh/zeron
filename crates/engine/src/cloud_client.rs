@@ -19,7 +19,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use zeron_proto::{
-    BillingLink, BillingStatus, CloudSession, CloudSessions, CloudStatus, CloudUsage,
+    BillingLink, BillingStatus, CloudReach, CloudSession, CloudSessions, CloudStatus, CloudUsage,
     GithubConnectProgress, GithubDeviceFlow, GithubRepo, HarnessId, VaultAccount,
     VaultAccountProfile, VaultProvider, VaultStatus,
 };
@@ -249,14 +249,16 @@ impl CloudClient {
         }
     }
 
-    /// `POST /cloud/{orgId}/sessions` with `{chatId, spaceId, repo, branch?}` — idempotent
-    /// per chat; mints the session device and starts provisioning.
+    /// `POST /cloud/{orgId}/sessions` with `{chatId, spaceId, repo, branch?,
+    /// reach?}` — idempotent per chat; mints the session device and starts
+    /// provisioning. No `reach`: the account's default.
     pub async fn create_session(
         &self,
         chat_id: &str,
         space_id: &str,
         repo: &GithubRepo,
         branch: Option<&str>,
+        reach: Option<CloudReach>,
     ) -> Result<CloudSession, EngineError> {
         let mut body = serde_json::json!({
             "chatId": chat_id,
@@ -269,6 +271,9 @@ impl CloudClient {
         });
         if let Some(branch) = branch {
             body["branch"] = serde_json::Value::String(branch.to_owned());
+        }
+        if let Some(reach) = reach {
+            body["reach"] = reach.as_str().into();
         }
         self.target()?
             .call::<CloudSession>(
@@ -292,6 +297,39 @@ impl CloudClient {
                 &[],
                 Some(serde_json::json!({ "machine": machine })),
                 "Set the Cloud machine size",
+            )
+            .await
+            .map_err(Failure::into_error)
+    }
+
+    /// `PUT /cloud/{orgId}/reach`: the reach new sessions start with.
+    pub async fn set_reach(&self, reach: CloudReach) -> Result<CloudStatus, EngineError> {
+        self.target()?
+            .call::<CloudStatus>(
+                reqwest::Method::PUT,
+                &["cloud", "reach"],
+                &[],
+                Some(serde_json::json!({ "reach": reach })),
+                "Set what Cloud chats reach",
+            )
+            .await
+            .map_err(Failure::into_error)
+    }
+
+    /// `POST /cloud/{orgId}/sessions/{chatId}/reach {reach}`.
+    pub async fn set_session_reach(
+        &self,
+        chat_id: &str,
+        reach: CloudReach,
+    ) -> Result<CloudSession, EngineError> {
+        require_id(chat_id, "chatId")?;
+        self.target()?
+            .call::<CloudSession>(
+                reqwest::Method::POST,
+                &["cloud", "sessions", chat_id, "reach"],
+                &[],
+                Some(serde_json::json!({ "reach": reach })),
+                "Change what this Cloud chat reaches",
             )
             .await
             .map_err(Failure::into_error)
@@ -896,6 +934,8 @@ pub(crate) fn handles(method: &str) -> bool {
             | methods::BILLING_PORTAL
             | methods::CLOUD_SESSIONS
             | methods::CLOUD_SET_MACHINE
+            | methods::CLOUD_SET_REACH
+            | methods::CLOUD_SESSION_SET_REACH
             | methods::CLOUD_SESSION_WAKE
             | methods::CLOUD_SESSION_SLEEP
             | methods::CLOUD_SESSION_RETRY
@@ -918,6 +958,18 @@ pub(crate) fn handles(method: &str) -> bool {
 #[derive(Deserialize)]
 struct MachineParams {
     machine: String,
+}
+
+#[derive(Deserialize)]
+struct ReachParams {
+    reach: CloudReach,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatReachParams {
+    chat_id: String,
+    reach: CloudReach,
 }
 
 #[derive(Deserialize)]
@@ -1040,6 +1092,19 @@ pub(crate) async fn dispatch(
         methods::CLOUD_SET_MACHINE => {
             let p: MachineParams = params(raw)?;
             RpcReply::value(&cloud.set_machine(&p.machine).await.map_err(failed)?)
+        }
+        methods::CLOUD_SET_REACH => {
+            let p: ReachParams = params(raw)?;
+            RpcReply::value(&cloud.set_reach(p.reach).await.map_err(failed)?)
+        }
+        methods::CLOUD_SESSION_SET_REACH => {
+            let p: ChatReachParams = params(raw)?;
+            RpcReply::value(
+                &cloud
+                    .set_session_reach(&p.chat_id, p.reach)
+                    .await
+                    .map_err(failed)?,
+            )
         }
         methods::CLOUD_SESSION_WAKE => {
             let p: SizedChatParams = params(raw)?;
@@ -1584,6 +1649,7 @@ mod tests {
                 assert_eq!(body["branch"], "feature/x");
                 assert_eq!(body["repo"]["fullName"], "acme/app");
                 assert_eq!(body["repo"]["defaultBranch"], "main");
+                assert_eq!(body["reach"], "isolated");
                 (
                     200,
                     serde_json::json!({"chatId": "chat-2", "deviceId": "cloud-s2",
@@ -1719,6 +1785,7 @@ mod tests {
                     ..Default::default()
                 },
                 Some("feature/x"),
+                Some(CloudReach::Isolated),
             )
             .await
             .unwrap();
@@ -1761,6 +1828,26 @@ mod tests {
         assert_eq!(sent[1].1, serde_json::json!({ "machine": "large" }));
         assert!(sent[0].0.ends_with("/machine"), "{}", sent[0].0);
         assert_eq!(sent[0].1, serde_json::json!({ "machine": "small" }));
+        // A reach, the account's and one session's, as the person picked it.
+        let _ = client.set_reach(CloudReach::Isolated).await;
+        let _ = client
+            .set_session_reach("chat-1", CloudReach::Devices)
+            .await;
+        let sent: Vec<(String, serde_json::Value)> = edge
+            .requests()
+            .into_iter()
+            .rev()
+            .take(2)
+            .map(|r| (r.target.clone(), r.body.clone()))
+            .collect();
+        assert!(sent[1].0.ends_with("/cloud/org_1/reach"), "{}", sent[1].0);
+        assert_eq!(sent[1].1, serde_json::json!({ "reach": "isolated" }));
+        assert!(
+            sent[0].0.ends_with("/sessions/chat-1/reach"),
+            "{}",
+            sent[0].0
+        );
+        assert_eq!(sent[0].1, serde_json::json!({ "reach": "devices" }));
         // A malformed chat id never reaches the edge.
         assert!(
             client

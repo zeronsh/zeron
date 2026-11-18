@@ -205,6 +205,32 @@ pub struct CloudStatus {
     /// The account's default size: what new sessions start on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine: Option<String>,
+    /// The account's default reach: what new sessions start with. `None`
+    /// from an edge that predates choosing (every session reaches devices).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach: Option<CloudReach>,
+}
+
+/// What a Cloud session reaches beyond its own machine. Only the person sets
+/// it (Settings → Cloud, the composer): never an agent, never a machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudReach {
+    /// The person's other devices, as a chat on one of them reaches them:
+    /// their chats, and commands on them.
+    #[default]
+    Devices,
+    /// Its own machine and the chats it delegates to, nothing else.
+    Isolated,
+}
+
+impl CloudReach {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CloudReach::Devices => "devices",
+            CloudReach::Isolated => "isolated",
+        }
+    }
 }
 
 /// One Cloud session: a top-level chat run on Cloud and its sandbox.
@@ -232,6 +258,9 @@ pub struct CloudSession {
     /// The size it is on, or will come back on when picked asleep.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine: Option<String>,
+    /// What it reaches beyond its machine. `None` from an older edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach: Option<CloudReach>,
     /// Omitted until its engine first reports.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk: Option<CloudDisk>,

@@ -28,6 +28,9 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     "notifications",
     "navigate",
     "compose",
+    // Reading the composer's draft, and taking it and putting it back
+    // (`zeron.draft`, `take_draft`, `put_draft`).
+    "draft",
     "network",
     "clipboard",
     "files",

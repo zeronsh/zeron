@@ -21,7 +21,6 @@ members = [
     "crates/update",
     "crates/cli",
     "crates/launch",
-    "crates/ui",
     "crates/notify",
     "crates/syntax",
     "crates/markdown",
@@ -38,7 +37,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.8"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -62,7 +61,6 @@ zeron-rpc = { path = "crates/rpc" }
 zeron-update = { path = "crates/update" }
 zeron-cli = { path = "crates/cli" }
 zeron-launch = { path = "crates/launch" }
-zeron-ui = { path = "crates/ui" }
 zeron-notify = { path = "crates/notify" }
 zeron-syntax = { path = "crates/syntax" }
 zeron-markdown = { path = "crates/markdown" }
@@ -82,49 +80,6 @@ loro = "1.17"
 # `loro-protocol` package the TS edge speaks (same monorepo, byte-identical
 # frames, cross-checked by its js_snapshots tests).
 loro-protocol = "0.3"
-
-# gpui — zeronsh/zui, extracted from wingleeio/zed e2ddcc6 with identical
-# crate sources; adds bounded blur passes and shared Gaussian weights.
-# Removes GPL tracing crates and composites deferred GPUI content above native macOS views.
-# Preserved fork history: upstream f14fea9 + commits on
-# `comet/edge-fade-horizontal` (tip of `comet/line-wrap-closing-punctuation`
-# + 5d1f83d horizontal per-pixel EdgeFade for quads/images; rebase when bumping the
-# upstream rev): a6bf17c fixes BOTH wrap-rule copies (LineWrapper +
-# line_layout's shaped-text duplicate); 14baea0 adds the EdgeFade primitive
-# (Window::with_edge_fade — per-primitive scroll-edge fades for the glass
-# sidebar); a6c1ad5 adds BackdropBlur + horizontal EdgeFade + glass fixes;
-# 9b672fa bounds renderer GPU memory (region-sized backdrop blur scratch,
-# idle release of blur/path intermediates, instance pool shrink,
-# ZERON_GPU_STATS=1 diagnostics); b687328 adds ImageSource::evict (frees
-# sprite-atlas tiles — remove_asset alone leaked them, see
-# attachments::flush_evicted); ac135eb adds device memory to the stats line;
-# f596cde fixes destination alpha on transparent windows (Porter-Duff OVER,
-# not additive); 53518c0 merges the edge-fade line: per-edge fade bands +
-# per-pixel EdgeFade for quads/images (true fade-into-glass), and
-# object-fit Cover cropping via atlas-tile UVs so image corner radii hold;
-# 8a8954c switches the macOS blurred view to UnderWindowBackground (macOS 26
-# stopped vending CABackdropLayer for Selection — window blur went dead);
-# b68970e rasterizes BackdropBlur in the wgpu renderer (frosted floats on
-# Linux — the Metal path's snapshot/blur/composite, ported).
-# Paint-time rounded image masks (#9), bounded Windows backdrop blur and
-# translucent compositing, plus blur-aware scene batching (#10).
-# Per-pixel rounded clipping (`Window::with_rounded_clip`, 361ff20).
-# Drags need the button held and 4px of travel (0dc69aa).
-# Atlas tiles updated in place from pixels or imported dma-bufs, display-rate
-# frame callbacks in inactive windows, and Wayland frames that no longer stop
-# after a forced draw (b564a34, zeronsh/zui#18).
-# Dropped images stay in the atlas until the next draw, so presenting the last
-# frame again no longer aborts with "texture must exist" (15ee708,
-# zeronsh/zui#19; gpui-base cab50b0, zeronsh/gpui-component#7).
-gpui = { git = "https://github.com/zeronsh/zui", rev = "15ee7082c4f910618be306166436a6d9fe0451be" }
-gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "15ee7082c4f910618be306166436a6d9fe0451be", features = [
-    "wayland",
-    "x11",
-    "font-kit",
-    "runtime_shaders",
-] }
-gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "15ee7082c4f910618be306166436a6d9fe0451be" }
-gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "cab50b071497683a119ae0e4038880f195c0f23f" }
 
 # diffs
 similar = "2"
@@ -194,7 +149,7 @@ lto = "thin"
 strip = "symbols"
 
 [profile.dev]
-# gpui is slow unoptimized; match zed's approach for deps
+# Our own crates unoptimized for quick rebuilds; dependencies optimized below.
 opt-level = 0
 # Full DWARF was ~90% of every rlib (25 GB of target/debug/deps). Line tables
 # keep file:line in panics and backtraces; for locals in lldb, build with

@@ -158,7 +158,7 @@ fn paragraph(rng: &mut Rng, st: &Styles) -> (String, Vec<Span>) {
 }
 
 fn setup() -> (FontBook, Vec<(String, Vec<Span>)>, Styles) {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../ui/assets/fonts");
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
     let read = |n: &str| std::fs::read(dir.join(n)).unwrap();
     let mut book = FontBook::new();
     let geist = book.add_face(read("Geist.ttf")).unwrap();

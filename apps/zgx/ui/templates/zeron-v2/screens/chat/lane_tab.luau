@@ -29,6 +29,7 @@ local LinkMenu = require("@app/screens/chat/link_menu")
 local Shared = require("@app/screens/chat/shared")
 local boundary = require("@app/screens/shell/boundary")
 local Quote = require("@ds/quote")
+local Draft = require("@ds/draft_text")
 local Carried = require("@app/screens/chat/carried")
 local Completions = require("@app/screens/chat/completions")
 local Invocations = require("@app/screens/chat/invocations")
@@ -414,13 +415,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		key = `chat_lane_{chat}`,
 		text = draft,
 		agent = function(): string?
-			local chosen = model:get()
-			for _, m in store.catalog:get().models do
-				if m.value == chosen then
-					return m.harness
-				end
-			end
-			return nil
+			return Completions.agent_of(model:get(), if unsent() then nil else session:get())
 		end,
 		target = function(): any
 			if unsent() then
@@ -484,6 +479,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		placeholder = locale.s("chat.lane_tab.placeholder"),
 		running = running,
 		access = access,
+		access_auto = function(): boolean
+			return store.offers_auto(model:get())
+		end,
 		plan = plan,
 		model = model,
 		effort = effort,
@@ -511,7 +509,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			if mine then
 				return mine
 			end
-			local link = machine.cloud_link(string.find(draft:get(), "%S") ~= nil)
+			local link = machine.cloud_link(Draft.has_text(draft))
 			return if link then LinkNotice.of { cloud = link } else nil
 		end),
 		on_dismiss_notice = function()
@@ -528,6 +526,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			return store.catalog:get().models
 		end,
 		accounts = accounts.accounts,
+		account_group = accounts.account_group,
 		on_account = accounts.on_account,
 		on_accounts_open = accounts.on_accounts_open,
 		-- What its context holds: the chat page's ring and card, from the
@@ -751,10 +750,18 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 	local pictures = ReplyImages.for_session(lane_session)
 	local sent_pictures = ReplyImages.for_attachments(function(): any
 		local s = lane_session()
-		if not s then
+		if s then
+			return { id = s.id, device = s.device, cwd = s.cwd, here = sessions.here:get() }
+		end
+		-- A subagent's lane has no chat of its own (its doc is its parent's
+		-- child): the pictures its tools kept are files on its parent's
+		-- host, read as the parent's are.
+		local parent = data.parent
+		local open = store.session:get()
+		if not parent or not open or open.id ~= parent or open.state == "missing" then
 			return nil
 		end
-		return { id = s.id, device = s.device, cwd = s.cwd, here = sessions.here:get() }
+		return { id = open.id, device = open.device, cwd = open.cwd, here = sessions.here:get() }
 	end)
 	-- The session whose panel it's in (the page's): where a file it links
 	-- opens, and a subagent it spawned.

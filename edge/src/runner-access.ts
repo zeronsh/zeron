@@ -1,104 +1,119 @@
 /**
- * Per-chat gate for runner bearers on chat-scoped data — `/chat2/{chatId}/*`
- * (transcripts, command rows a host executes) and `/blob/{chatId}/*` (tool
- * outputs): a runner may touch a chat only while the registry says its device
- * hosts it (`chats/{chatId}` live, `fields.deviceId === dev`; a subagent's
- * doc goes by the chat that spawned it). Without this a
- * stolen runner key could read every transcript or append commands that a
- * LAPTOP host then executes.
+ * The Worker's gate for a runner bearer (a Cloud machine) reaching another
+ * chat's data — `/chat2/{chatId}/*` (transcripts, the commands its host
+ * runs), `/blob/{chatId}/*` (tool outputs, attachments) — or another
+ * device's room as a client (`/device/{id}/ws`, `/nudge`: that device's
+ * RPC surface).
  *
- * Positive answers are cached per isolate for ≤5 minutes (a chat's host
- * rarely changes; the registry DO stays off the hot path). Negative answers
- * are never cached: a chat the Cloud device created moments ago must work as
- * soon as its row lands.
+ * What it may reach is its session's reach, which the registry keeps and
+ * answers for (`/runner-admit`, registry-runner.ts): in any reach its own
+ * chats, its delegates' and their machines; with `devices` reach (the
+ * default) every chat and device the person has, at a revocation epoch the
+ * forward carries, so isolating the session closes it out of them
+ * (runner-revocation.ts).
+ *
+ * Only what holds in every reach is cached (per isolate, ≤5 minutes; a
+ * chat's host rarely changes): a reach the person can change is asked of
+ * the registry on every request, so a change takes effect at once.
+ * Refusals are never cached: a chat the machine created moments ago works
+ * as soon as its row lands.
  */
 import type { Verified } from "./auth";
 import { AUTH_USER_HEADER, type Env } from "./env";
 import { json } from "./http";
 
-const POSITIVE_TTL_MS = 5 * 60_000;
+const OWN_TTL_MS = 5 * 60_000;
 const MAX_CACHE = 10_000;
-const allowed = new Map<string, number>();
+const own = new Map<string, number>();
 
 /** A subagent's transcript doc is `{chatId}--sub--{toolUseId}` (nested ones
  * are named after the root chat too) and has no registry row of its own: it
  * belongs to whoever hosts the chat that spawned it. */
 export const gatedChat = (chatId: string): string => chatId.split("--sub--", 1)[0] || chatId;
 
-/** undefined = proceed; otherwise the refusal to return. */
-export const runnerChatGate = async (
+/** What the gate decided: a refusal to send back, or an admission and the
+ * epoch it is revocable at (none: it holds in every reach). */
+export type RunnerAdmission = { readonly refused: Response } | { readonly refused?: undefined; readonly epoch?: number };
+
+const ADMITTED: RunnerAdmission = {};
+
+const admit = async (
+  env: Pick<Env, "REGISTRY_ROOMS">,
+  auth: Verified,
+  ask: { chat: string } | { target: string },
+  refusal: () => Response,
+  now: number
+): Promise<RunnerAdmission> => {
+  if (!auth.orgId || !auth.deviceId) return { refused: refusal() };
+  const [param, value] = "chat" in ask ? ["chat", ask.chat] : ["target", ask.target];
+  const key = `${auth.orgId}/${auth.userId}/${auth.deviceId}/${param}/${value}`;
+  const until = own.get(key);
+  if (until !== undefined && until > now) return ADMITTED;
+  own.delete(key);
+
+  const room = env.REGISTRY_ROOMS.get(env.REGISTRY_ROOMS.idFromName(`reg1/${auth.orgId}/${auth.userId}`));
+  let answer: { ok?: unknown; epoch?: unknown };
+  try {
+    const query = `device=${encodeURIComponent(auth.deviceId)}&${param}=${encodeURIComponent(value)}`;
+    const reply = await room.fetch(`https://registry/runner-admit?${query}`, {
+      headers: { [AUTH_USER_HEADER]: auth.userId }
+    });
+    if (!reply.ok) throw new Error(`registry ${reply.status}`);
+    answer = (await reply.json()) as typeof answer;
+  } catch (e) {
+    console.warn("runner gate: registry unavailable", String(e));
+    return {
+      refused: json(
+        {
+          error: "unavailable",
+          message: "Couldn't check what this Cloud chat reaches; retry."
+        },
+        503
+      )
+    };
+  }
+  if (answer.ok !== true) return { refused: refusal() };
+  if (typeof answer.epoch === "number") return { epoch: answer.epoch };
+  if (own.size >= MAX_CACHE) own.clear();
+  own.set(key, now + OWN_TTL_MS);
+  return ADMITTED;
+};
+
+/** Gate a runner on chat `chatId`'s data. Other bearers pass. */
+export const runnerChatGate = (
   env: Pick<Env, "REGISTRY_ROOMS">,
   auth: Verified,
   chatId: string,
   now = Date.now()
-): Promise<Response | undefined> => {
-  if (auth.kind !== "runner") return undefined;
-  const notHost = () => json({ error: "not_host", message: "This chat is not hosted by this Cloud device." }, 403);
-  if (!auth.orgId || !auth.deviceId) return notHost();
-  const chat = gatedChat(chatId);
-  const key = `${auth.orgId}/${auth.userId}/${auth.deviceId}/${chat}`;
-  const until = allowed.get(key);
-  if (until !== undefined && until > now) return undefined;
-  allowed.delete(key);
-
-  const room = env.REGISTRY_ROOMS.get(env.REGISTRY_ROOMS.idFromName(`reg1/${auth.orgId}/${auth.userId}`));
-  let host: unknown;
-  let parentHost: unknown;
-  try {
-    const reply = await room.fetch(`https://registry/chat-host?chat=${encodeURIComponent(chat)}`, {
-      headers: { [AUTH_USER_HEADER]: auth.userId }
-    });
-    if (!reply.ok) throw new Error(`registry ${reply.status}`);
-    ({ deviceId: host, parentHost } = (await reply.json()) as { deviceId?: unknown; parentHost?: unknown });
-  } catch (e) {
-    console.warn("runner chat gate: registry unavailable", String(e));
-    return json({ error: "unavailable", message: "Couldn't check the chat's host; retry." }, 503);
-  }
-  // Its own chat, or a delegate it started on another machine (it hosts the
-  // delegate's parent).
-  if (host !== auth.deviceId && parentHost !== auth.deviceId) return notHost();
-  if (allowed.size >= MAX_CACHE) allowed.clear();
-  allowed.set(key, now + POSITIVE_TTL_MS);
-  return undefined;
+): Promise<RunnerAdmission> | RunnerAdmission => {
+  if (auth.kind !== "runner") return ADMITTED;
+  const refusal = () =>
+    json(
+      {
+        error: "not_host",
+        message: "This Cloud chat doesn't reach that chat."
+      },
+      403
+    );
+  return admit(env, auth, { chat: gatedChat(chatId) }, refusal, now);
 };
 
-const deviceAllowed = new Map<string, number>();
-
-/**
- * Gate for a runner on ANOTHER device's room (`/device/{id}/*` — that
- * device's RPC surface: queues, interrupts, files). Allowed only when the
- * device hosts a chat whose parent the runner hosts: the runner started that
- * delegate and manages it. Its own room and read-only liveness never reach
- * here (runner-policy.ts). Cached like the chat gate: positive answers only.
- */
-export const runnerDeviceGate = async (
+/** Gate a runner on another device's room (a client link, a nudge). Its own
+ * room, and read-only liveness, never reach here (runner-policy.ts). */
+export const runnerDeviceGate = (
   env: Pick<Env, "REGISTRY_ROOMS">,
   auth: Verified,
   deviceId: string,
   now = Date.now()
-): Promise<Response | undefined> => {
-  if (auth.kind !== "runner" || deviceId === auth.deviceId) return undefined;
-  const refused = () => json({ error: "forbidden", message: "A runner may only reach the machines of chats it started." }, 403);
-  if (!auth.orgId || !auth.deviceId) return refused();
-  const key = `${auth.orgId}/${auth.userId}/${auth.deviceId}/${deviceId}`;
-  const until = deviceAllowed.get(key);
-  if (until !== undefined && until > now) return undefined;
-  deviceAllowed.delete(key);
-
-  const room = env.REGISTRY_ROOMS.get(env.REGISTRY_ROOMS.idFromName(`reg1/${auth.orgId}/${auth.userId}`));
-  let hosts: unknown;
-  try {
-    const reply = await room.fetch(`https://registry/device-parents?device=${encodeURIComponent(deviceId)}`, {
-      headers: { [AUTH_USER_HEADER]: auth.userId }
-    });
-    if (!reply.ok) throw new Error(`registry ${reply.status}`);
-    hosts = ((await reply.json()) as { hosts?: unknown }).hosts;
-  } catch (e) {
-    console.warn("runner device gate: registry unavailable", String(e));
-    return json({ error: "unavailable", message: "Couldn't check the device's chats; retry." }, 503);
-  }
-  if (!Array.isArray(hosts) || !hosts.includes(auth.deviceId)) return refused();
-  if (deviceAllowed.size >= MAX_CACHE) deviceAllowed.clear();
-  deviceAllowed.set(key, now + POSITIVE_TTL_MS);
-  return undefined;
+): Promise<RunnerAdmission> | RunnerAdmission => {
+  if (auth.kind !== "runner" || deviceId === auth.deviceId) return ADMITTED;
+  const refusal = () =>
+    json(
+      {
+        error: "forbidden",
+        message: "This Cloud chat doesn't reach that device."
+      },
+      403
+    );
+  return admit(env, auth, { target: deviceId }, refusal, now);
 };

@@ -440,6 +440,8 @@ async fn open_tool_call_never_quiesces() {
             is_error: false,
             output: None,
             diff: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
             exit_code: None,
         })
         .unwrap();
@@ -481,6 +483,8 @@ async fn stale_tool_echo_stays_parked() {
             is_error: false,
             output: None,
             diff: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
             exit_code: None,
         })
         .unwrap();
