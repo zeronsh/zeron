@@ -1,6 +1,7 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { PUBLISHES_PER_HOUR } from "../../src/store/publish";
+import { PUBLISHES_PER_HOUR, handlePublish } from "../../src/store/publish";
+import { ORPHAN_GRACE_MS, collectOrphans } from "../../src/store/release";
 import { ADMIN, author, call, makePackage, member, newSigner, publish, uniqueId, adminCall } from "./store-helpers";
 
 const json = async (res: Response) => (await res.json()) as Record<string, unknown>;
@@ -50,7 +51,7 @@ describe("POST /store/v1/plugins/:id/versions", () => {
     expect((await json(build)).error).toBe("version_exists");
     const count = await env.STORE_DB.prepare("SELECT COUNT(*) AS n FROM versions WHERE plugin_id = ?").bind(id).first<{ n: number }>();
     expect(count?.n).toBe(1);
-    // The loser's R2 objects are gone.
+    // Refused before anything was written: only the first's objects.
     expect((await env.PLUGIN_STORE.list({ prefix: `pkg/${id}/` })).objects).toHaveLength(1);
     expect((await env.PLUGIN_STORE.list({ prefix: `files/${id}/` })).objects).toHaveLength(1);
   });
@@ -67,8 +68,41 @@ describe("POST /store/v1/plugins/:id/versions", () => {
     expect(statuses).toEqual([201, 409]);
     const row = await env.STORE_DB.prepare("SELECT package_sha256 FROM versions WHERE plugin_id = ?").bind(id).all<{ package_sha256: string }>();
     expect(row.results).toHaveLength(1);
+    await collectOrphans(env.STORE_DB, env.PLUGIN_STORE, Date.now() + ORPHAN_GRACE_MS + 1);
     const pkgs = (await env.PLUGIN_STORE.list({ prefix: `pkg/${id}/` })).objects;
     expect(pkgs.map((o) => o.key)).toEqual([`pkg/${id}/2.0.0/${row.results[0]!.package_sha256}.zeron-plugin`]);
+  });
+
+  it("never deletes on a failed publish: a retry's row may yet name the same objects", async () => {
+    const a = await author();
+    const id = uniqueId("retry");
+    const pkg = await makePackage({ id, version: "1.0.0", signer: a.signer });
+    // The retry: its D1 batch throws after its objects are written.
+    const failing = new Proxy(env.STORE_DB, {
+      get: (target, prop) => (prop === "batch" ? () => Promise.reject(new Error("D1 is down")) : Reflect.get(target, prop, target).bind?.(target) ?? Reflect.get(target, prop, target))
+    }) as D1Database;
+    const request = new Request(`https://edge.test/store/v1/plugins/${id}/versions`, { method: "POST", headers: { authorization: `Bearer ${a.userId}` }, body: pkg });
+    await expect(handlePublish(request, env as never, failing, env.PLUGIN_STORE, id)).rejects.toThrow("D1 is down");
+    const objects = (await env.PLUGIN_STORE.list({ prefix: `pkg/${id}/` })).objects;
+    expect(objects).toHaveLength(1);
+    const orphans = await env.STORE_DB.prepare("SELECT COUNT(*) AS n FROM object_orphans WHERE key LIKE ?").bind(`%/${id}/%`).first<{ n: number }>();
+    expect(orphans?.n).toBe(2);
+    // The first attempt's row lands after: the sweep keeps what it names.
+    expect((await publish(a.userId, id, pkg)).status).toBe(201);
+    await collectOrphans(env.STORE_DB, env.PLUGIN_STORE, Date.now() + ORPHAN_GRACE_MS + 1);
+    expect((await env.PLUGIN_STORE.list({ prefix: `pkg/${id}/` })).objects.map((o) => o.key)).toEqual(objects.map((o) => o.key));
+    expect(await env.PLUGIN_STORE.head(`files/${id}/1.0.0/${objects[0]!.key.split("/")[3]!.replace(".zeron-plugin", "")}.bin`)).not.toBeNull();
+    expect((await call(a.userId, "GET", `/store/v1/plugins/${id}/versions/1.0.0/package`)).status).toBe(200);
+  });
+
+  it("keeps an orphan record for its grace, and deletes what no row names after it", async () => {
+    const key = `pkg/${uniqueId("gone")}/1.0.0/${"0".repeat(64)}.zeron-plugin`;
+    await env.PLUGIN_STORE.put(key, "x");
+    await env.STORE_DB.prepare("INSERT INTO object_orphans (key, at) VALUES (?, ?)").bind(key, Date.now()).run();
+    expect(await collectOrphans(env.STORE_DB, env.PLUGIN_STORE, Date.now())).toBe(0);
+    expect(await env.PLUGIN_STORE.head(key)).not.toBeNull();
+    await collectOrphans(env.STORE_DB, env.PLUGIN_STORE, Date.now() + ORPHAN_GRACE_MS + 1);
+    expect(await env.PLUGIN_STORE.head(key)).toBeNull();
   });
 
   it("lets two publishes of the same bytes at once both succeed, and neither deletes what the other stored", async () => {

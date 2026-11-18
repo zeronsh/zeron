@@ -173,6 +173,16 @@ CREATE TABLE key_revocations (
   PRIMARY KEY (plugin_id, at)
 );
 
+-- R2 objects a publish wrote and may not need: one that threw before or
+-- during its D1 batch, or lost the version to other bytes. Never deleted on
+-- the spot (a retry of the same bytes writes the same keys, and its row may
+-- yet land): the sweep deletes one after a grace period, and only if no
+-- version row names it.
+CREATE TABLE object_orphans (
+  key TEXT PRIMARY KEY,
+  at INTEGER NOT NULL
+);
+
 -- Ids kept back from first come, first served: for nobody (user_id null), or
 -- for the one account that may take one the reserved-name rules refuse.
 CREATE TABLE reservations (

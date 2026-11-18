@@ -106,13 +106,49 @@ export const releaseId = async (env: Env, db: D1Database, bucket: R2Bucket, id: 
   return released;
 };
 
-/** The hourly sweep: finish what earlier releases owe, then release ids
- * unused for `UNUSED_ID_DAYS` (never one reserved for an account). */
+/** How long a publish's possibly orphaned object waits before the sweep
+ * looks at it: far past any publish still in flight. */
+export const ORPHAN_GRACE_MS = 3_600_000;
+
+/** `<prefix><id>/<version>/<sha256><suffix>` read back, or undefined. */
+const keyNames = (key: string): { id: string; version: string; sha256: string } | undefined => {
+  for (const k of [PACKAGE_KEY, FILES_KEY]) {
+    if (!key.startsWith(k.prefix) || !key.endsWith(k.suffix)) continue;
+    const parts = key.slice(k.prefix.length, key.length - k.suffix.length).split("/");
+    if (parts.length === 3) return { id: parts[0]!, version: parts[1]!, sha256: parts[2]! };
+  }
+  return undefined;
+};
+
+/** Delete the objects publishes recorded as possibly orphaned, once their
+ * grace is over and only where no version row names them; a named one is
+ * kept and its record cleared. Answers how many were deleted. */
+export const collectOrphans = async (db: D1Database, bucket: R2Bucket, now: number): Promise<number> => {
+  const rows = (await db.prepare("SELECT key FROM object_orphans WHERE at < ? ORDER BY at LIMIT ?").bind(now - ORPHAN_GRACE_MS, PURGE_BATCH).all<{ key: string }>()).results;
+  let deleted = 0;
+  for (const { key } of rows) {
+    const names = keyNames(key);
+    const named =
+      names !== undefined &&
+      (await db.prepare("SELECT 1 FROM versions WHERE plugin_id = ? AND version = ? AND package_sha256 = ?").bind(names.id, names.version, names.sha256).first()) !== null;
+    if (!named) {
+      await bucket.delete(key);
+      deleted++;
+    }
+    await db.prepare("DELETE FROM object_orphans WHERE key = ? AND at < ?").bind(key, now - ORPHAN_GRACE_MS).run();
+  }
+  return deleted;
+};
+
+/** The hourly sweep: finish what earlier releases owe, collect publishes'
+ * orphaned objects, then release ids unused for `UNUSED_ID_DAYS` (never one
+ * reserved for an account). */
 export const releaseUnusedIds = async (env: Env, now: number): Promise<number> => {
   const db = env.STORE_DB;
   const bucket = env.PLUGIN_STORE;
   if (!db || !bucket) return 0;
   await finishReleases(env, db, bucket);
+  await collectOrphans(db, bucket, now);
   const before = now - UNUSED_ID_DAYS * DAY;
   const stale = await db
     .prepare(

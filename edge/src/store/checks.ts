@@ -69,6 +69,53 @@ export const fileKind = (path: string, bytes: Uint8Array): FileKind => {
   return /\.svg$/i.test(path) ? "svg" : "text";
 };
 
+/** The relative picture references in a README: `![…](path)` on one
+ * line, without a scheme, a leading `//` or `#`, its query, fragment and
+ * `./` dropped. Linear: each `![` looks for its `]` and line end from
+ * positions found once and reused, never rescanned. */
+export const readmePictures = (readme: string): string[] => {
+  const found = new Set<string>();
+  let nextClose = -1;
+  let nextLine = -1;
+  for (let at = readme.indexOf("!["); at >= 0; at = readme.indexOf("![", at + 2)) {
+    if (nextClose <= at) nextClose = readme.indexOf("]", at + 2);
+    if (nextLine <= at) nextLine = readme.indexOf("\n", at);
+    if (nextClose < 0) break;
+    if (nextLine >= 0 && nextLine < nextClose) continue;
+    if (readme[nextClose + 1] !== "(") continue;
+    let i = nextClose + 2;
+    while (readme[i] === " " || readme[i] === "\t") i++;
+    if (readme[i] === "<") i++;
+    let end = i;
+    while (end < readme.length && end - i < 2048 && !") \t\n>".includes(readme[end]!)) end++;
+    const ref = readme.slice(i, end);
+    if (ref === "" || /^[a-z][a-z0-9+.-]*:/i.test(ref) || ref.startsWith("//") || ref.startsWith("#")) continue;
+    let path = ref.split(/[?#]/)[0]!;
+    try {
+      path = decodeURIComponent(path);
+    } catch {
+      // As written.
+    }
+    const parts: string[] = [];
+    for (const part of path.split("/")) {
+      if (part === "" || part === ".") continue;
+      if (part === "..") parts.pop();
+      else parts.push(part);
+    }
+    if (parts.length) found.add(parts.join("/"));
+  }
+  return [...found];
+};
+
+/** Screenshots and README pictures that won't show (see `runChecks`). */
+const unshownPictures = (listing: Listing, kinds: ReadonlyMap<string, FileKind>): string[] => {
+  const shown = (path: string) => {
+    const kind = kinds.get(path);
+    return kind === "png" || kind === "jpeg";
+  };
+  return [...new Set([...listing.screenshots, ...readmePictures(listing.readme)])].filter((path) => !shown(path));
+};
+
 const list = (items: readonly string[], most = 8): string =>
   items.length <= most ? items.join(", ") : `${items.slice(0, most).join(", ")} and ${items.length - most} more`;
 
@@ -79,6 +126,8 @@ export interface CheckInput {
   readonly listing: Listing;
   /** The engine's listing warnings (`binary_file`, `no_notes`). */
   readonly warnings: readonly Problem[];
+  /** Each file's kind as the store serves it. */
+  readonly kinds: ReadonlyMap<string, FileKind>;
   readonly via: "session" | "deploy_key";
   readonly consent: ConsentItem;
   /** The last approved version's, the diff base; null for a first version. */
@@ -89,6 +138,7 @@ export interface CheckInput {
 
 export const runChecks = (input: CheckInput): Check[] => {
   const { pkg, listing, consent, base } = input;
+  const unshown = unshownPictures(listing, input.kinds);
   const checks: Check[] = [];
   const add = (id: string, level: Check["level"], message: string) => checks.push({ id, level, message });
   let total = 0;
@@ -110,6 +160,11 @@ export const runChecks = (input: CheckInput): Check[] => {
   }
   if (input.warnings.length > MAX_WARNINGS) add("more_warnings", "warn", `${input.warnings.length - MAX_WARNINGS} more warnings like these.`);
   if (!input.warnings.some((w) => w.rule === "binary_file")) add("binary_file", "ok", "Every file is text or a picture.");
+  // Pictures the page or the listing shows, that won't show: not in the
+  // package, or not a PNG or JPEG image-check.ts takes.
+  for (const path of unshown.slice(0, MAX_WARNINGS)) {
+    checks.push({ id: "picture_unshown", level: "warn", message: `${path}: it won't show: it isn't a PNG or JPEG picture in the plugin that the store can read.`, path });
+  }
 
   const risky = consent.asks.filter((a) => RISKY_ASKS.includes(a));
   add("asks", risky.length ? "warn" : "ok", risky.length ? `Asks for: ${list(risky, 12)}.` : "Asks for nothing that reaches past Zeron.");
