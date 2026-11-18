@@ -1,8 +1,10 @@
 -- Settings: plugins. What's installed, what's new, and what could be: a
 -- real page's search, tabs, updates, and its loading, empty and failed states.
 -- Browse is the store's catalog on the page's own pieces: the featured
--- (`Settings.Feature`), the catalog's card with a bar of filters
--- (`Settings.CatalogCard`), its rows built as they show (`Settings.ListRows`);
+-- (`Settings.Feature`, a cover over each), the catalog's card with its one
+-- quiet row of filters (category tabs, the order at the right) and a
+-- keyword narrowed to beside its search (`Settings.CatalogCard`), its rows
+-- built as they show (`Settings.ListRows`);
 -- a plugin opens a page under it (`Settings.SubPage`, `Settings.Back`).
 
 local ds = require("@ds")
@@ -14,6 +16,7 @@ local shown = ui.state("ex_pl_state", "ready")
 local removing = ui.state("ex_pl_removing", false)
 local category = ui.state("ex_pl_category", "")
 local order = ui.state("ex_pl_order", "popular")
+local keyword = ui.state("ex_pl_keyword", "design")
 local opened = ui.state("ex_pl_opened", nil :: string?)
 local enabled = {
 	linear = ui.state("ex_pl_linear", true),
@@ -55,6 +58,15 @@ end)
 local function browse(): Node
 	local function feature(p: any): Node
 		return ds.Settings.Feature {
+			-- (A plugin with no screenshot: its tile on a quiet wash.)
+			cover = ui.row {
+				w_full = true,
+				h_full = true,
+				items = "center",
+				justify = "center",
+				bg = "$zeron.secondary.bg",
+				ds.Tile { label = p.name, hue = p.hue, size = 48 },
+			},
 			label = p.name,
 			byline = `by @{p.by}`,
 			description = p.about,
@@ -66,7 +78,7 @@ local function browse(): Node
 	end
 	return ui.column {
 		w_full = true,
-		gap = "$space.5",
+		gap = "$space.6",
 		ui.show(function(): boolean
 			return query:get() == ""
 		end, ds.Settings.Section {
@@ -75,17 +87,53 @@ local function browse(): Node
 		}),
 		ds.Settings.CatalogCard {
 			search = { value = query, placeholder = "Search plugins" },
+			search_trail = ui.show(function(): boolean
+				return keyword:get() ~= ""
+			end, ds.Tag {
+				function(): string
+					return keyword:get()
+				end :: any,
+				size = "sm",
+				selected = true,
+				on_remove = function()
+					keyword:set("")
+				end,
+			}),
+			-- (A quiet tab's words are 12 inside it, so 4 here puts the
+			-- first's on the rows' 16; the order ends on the rows' 16 too.)
 			filters = ui.row {
 				w_full = true,
-				p = "$space.2",
-				pl = ds.Settings.inset(1 + 8),
-				gap = "$space.2",
+				py = "$space.1",
+				pl = "$space.1",
+				pr = "$space.4",
+				gap = "$space.3",
 				items = "center",
-				flex_wrap = true,
-				ds.Select { value = category, name = "Category", size = "sm", options = { { value = "", label = "All categories" }, { value = "integrations", label = "Integrations" }, { value = "developer-tools", label = "Developer tools" } } },
-				ds.Select { value = order, name = "Order", size = "sm", options = { { value = "popular", label = "Most installed" }, { value = "updated", label = "Recently updated" }, { value = "new", label = "Newest" } } },
-				ds.Tag { "design", size = "sm", on_click = function() end },
-				ds.Tag { "alerts", size = "sm", on_click = function() end },
+				ui.scroll_x {
+					grow = 1,
+					min_w = 0,
+					fade = { 12, 12 },
+					fade_overflow = true,
+					ds.Tabs {
+						value = category,
+						label = "Category",
+						look = "pill",
+						size = "sm",
+						options = { { value = "", label = "All" }, { value = "integrations", label = "Integrations" }, { value = "developer-tools", label = "Developer tools" }, { value = "productivity", label = "Productivity" } },
+					},
+				},
+				ui.div {
+					shrink = 0,
+					ds.Dropdown {
+						value = order :: any,
+						label = "Order",
+						search = false,
+						items = {
+							{ value = "popular", label = "Most installed", icon = "download" },
+							{ value = "updated", label = "Recently updated", icon = "refresh" },
+							{ value = "new", label = "Newest", icon = "calendar" },
+						},
+					},
+				},
 			},
 			body = ds.Settings.ListRows(found, function(p: any): Node
 				return ds.Settings.Row {

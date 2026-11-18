@@ -18,7 +18,6 @@
 -- right stays: what's installed is that device's, and Install goes there.
 
 local ds = require("@ds")
-local control = require("@ds/control")
 local store = require("@app/screens/plugins/store")
 local state = require("@app/screens/plugins/state")
 local words = require("@app/screens/plugins/words")
@@ -319,27 +318,40 @@ local function row(first: store.Card, _i: State<number>, now: State<store.Card>)
 	}
 end
 
--- A filter's width: a settings select's (a choice, not a form's field).
-local FILTER_W = 168
-
--- What narrows the list: a category, the order, and keywords (the one
--- chosen, removable; else the commonest among what shows, to choose).
+-- What narrows the list, one quiet row under the search: the store's
+-- categories as the app's quiet tabs (All first), running sideways with
+-- the edge's fade when they don't fit, and the order, a compact dropdown at
+-- its own width, at the row's end. The categories' words start on the
+-- rows' text edge, the order's trigger ends on their controls' edge; the
+-- row's top and bottom are the search row's inset.
 local function filters(): Node
-	local function category_options(): { any }
-		local out: { any } = { { value = "", label = ui.t("plugins.store.all_categories"):get() } }
-		for _, c in categories:get() do
-			table.insert(out, { value = c.id, label = M.category_name(c.id) })
+	local tabs = ui.presence(function(): string
+		return if #categories:get() > 0 then "ready" else "waiting"
+	end, function(key: string): Node
+		-- (The store's list arrives once: built then, the tabs its own.)
+		local options: { any } = { { value = "", label = ui.t("plugins.store.all") } }
+		if key == "ready" then
+			for _, c in categories:peek() do
+				local name = M.category_name(c.id)
+				table.insert(options, { value = c.id, label = name })
+			end
 		end
-		return out
-	end
-	local function sort_options(): { any }
+		return ds.Tabs {
+			value = category,
+			label = ui.t("plugins.store.category_label"),
+			look = "pill",
+			size = "sm",
+			options = options,
+		}
+	end)
+	local function sort_items(): { any }
 		local out: { any } = {}
 		if trimmed(query:get()) ~= "" then
-			table.insert(out, { value = "relevance", label = ui.t("plugins.store.sort.relevance"):get() })
+			table.insert(out, { value = "relevance", label = ui.t("plugins.store.sort.relevance"):get(), icon = "star" })
 		end
-		table.insert(out, { value = "popular", label = ui.t("plugins.store.sort.popular"):get() })
-		table.insert(out, { value = "updated", label = ui.t("plugins.store.sort.updated"):get() })
-		table.insert(out, { value = "new", label = ui.t("plugins.store.sort.new"):get() })
+		table.insert(out, { value = "popular", label = ui.t("plugins.store.sort.popular"):get(), icon = "download" })
+		table.insert(out, { value = "updated", label = ui.t("plugins.store.sort.updated"):get(), icon = "refresh" })
+		table.insert(out, { value = "new", label = ui.t("plugins.store.sort.new"):get(), icon = "calendar" })
 		return out
 	end
 	-- The order shown: the one in use (relevance only with words).
@@ -358,108 +370,37 @@ local function filters(): Node
 			sort_value:set(s)
 		end
 	end)
-	-- Keywords to choose: the commonest among the plugins shown.
-	local suggested = ui.computed(function(): { { k: string, chosen: boolean } }
-		if keyword:get() ~= "" then
-			return { { k = keyword:get(), chosen = true } }
+	ui.effect(function()
+		local v = sort_value:get()
+		if v ~= shown_sort:peek() then
+			sort:set(v)
 		end
-		local counts: { [string]: number } = {}
-		local order_seen: { string } = {}
-		for _, c in listing.items:get() do
-			for _, k in (if type(c.keywords) == "table" then c.keywords else {}) :: { any } do
-				if type(k) == "string" and k ~= "" and k ~= category:get() then
-					if counts[k] == nil then
-						counts[k] = 0
-						table.insert(order_seen, k)
-					end
-					counts[k] += 1
-				end
-			end
-		end
-		table.sort(order_seen, function(a: string, b: string): boolean
-			if counts[a] ~= counts[b] then
-				return counts[a] > counts[b]
-			end
-			return a < b
-		end)
-		local out: { { k: string, chosen: boolean } } = {}
-		for i = 1, math.min(5, #order_seen) do
-			if counts[order_seen[i]] > 1 then
-				table.insert(out, { k = order_seen[i], chosen = false })
-			end
-		end
-		return out
 	end)
-	-- (Controls on the card's even inset, as a bar's are: a select's words
-	-- sit inside its own box, and that box can't stand on the card's edge
-	-- to bring them to the rows' text. One line, whatever chips come: they
-	-- scroll sideways rather than wrap, so the bar keeps its height.)
+	-- (A quiet tab's words are 12 inside it, so 4 here puts the first's on
+	-- the rows' 16; the order's trigger ends on the rows' 16 too.)
 	return ui.row {
 		id = "store-filters",
 		w_full = true,
-		p = "$space.2",
-		gap = "$space.2",
+		py = "$space.1",
+		pl = "$space.1",
+		pr = "$space.4",
+		gap = "$space.3",
 		items = "center",
-		ui.div {
-			shrink = 0,
-			ds.Select {
-				value = category,
-				name = ui.t("plugins.store.category_label"),
-				size = "sm",
-				w = FILTER_W,
-				options = category_options,
-			},
-		},
-		ui.div {
-			shrink = 0,
-			ds.Select {
-				value = sort_value,
-				name = ui.t("plugins.store.sort_label"),
-				size = "sm",
-				w = FILTER_W,
-				options = sort_options,
-				on_change = function(v: string)
-					sort:set(v)
-				end,
-			},
-		},
 		ui.scroll_x {
-			id = "store-chips",
+			id = "store-categories",
 			grow = 1,
 			min_w = 0,
-			-- (A small control's height: the selects' beside it.)
-			h = control.H.sm,
 			fade = { 12, 12 },
 			fade_overflow = true,
-			ui.row {
-				gap = "$space.2",
-				items = "center",
-				h_full = true,
-		-- (The chosen one is a chip of another kind, with its ×: keyed so.)
-		ui.each(suggested, function(chip: { k: string, chosen: boolean }): Node
-			local k = chip.k
-			return ds.Tag {
-				function(): string
-					return k
-				end :: any,
-				size = "sm",
-				selected = chip.chosen,
-				on_click = if chip.chosen
-					then nil
-					else function()
-						keyword:set(k)
-					end,
-				on_remove = if chip.chosen
-					then function()
-						keyword:set("")
-					end
-					else nil,
-			}
-		end, {
-			key = function(chip: { k: string, chosen: boolean }): string
-				return if chip.chosen then `chosen:{chip.k}` else chip.k
-			end,
-		}),
+			tabs,
+		},
+		ui.div {
+			shrink = 0,
+			ds.Dropdown {
+				value = sort_value :: any,
+				label = ui.t("plugins.store.sort_label"),
+				items = sort_items,
+				search = false,
 			},
 		},
 	}
@@ -615,9 +556,67 @@ local function body_key(): string
 	return if narrowed() then "nomatch" else "none"
 end
 
+-- Each featured plugin's cover: its first screenshot (its page's, asked
+-- once), false for none.
+local covers = ui.state("store_covers", {} :: { [string]: string | false })
+local asked_covers: { [string]: boolean } = {}
+local function cover_of(card: store.Card): (string | false)?
+	local have = covers:get()[card.id]
+	if have ~= nil then
+		return have
+	end
+	if not asked_covers[card.id] then
+		asked_covers[card.id] = true
+		local id = card.id
+		store.detail(id):after(function(d: any)
+			local shots = if type(d) == "table" then d.screenshots else nil
+			local first = if type(shots) == "table" then shots[1] else nil
+			covers:set_key(id, if type(first) == "string" and first ~= "" then first else false)
+		end, function()
+			asked_covers[id] = nil
+		end)
+	end
+	return nil
+end
+
+-- A featured card's cover: the picture, at the card's top; while it comes,
+-- the skeleton's wash; with none, its icon on the quiet wash.
+local Cover = ui.component(function(props: { card: State<store.Card> }): Node
+	local card = props.card
+	return ui.presence(function(): string
+		local c = card:get()
+		local path = cover_of(c)
+		if path == nil then
+			return ""
+		elseif path == false then
+			return "\0none"
+		end
+		local src = store.picture_src(c.id, c.version, path :: string)
+		if src == false then
+			return "\0none"
+		end
+		return src or ""
+	end, function(src: string): Node
+		if src == "" then
+			return ds.Skeleton { fill = true }
+		elseif src == "\0none" then
+			return ui.row {
+				w_full = true,
+				h_full = true,
+				items = "center",
+				justify = "center",
+				bg = "$zeron.secondary.bg",
+				M.Tile { card = card, size = 48 },
+			}
+		end
+		return ui.image { src = src, w_full = true, h_full = true, fit = "cover", aria_hidden = true }
+	end, { w_full = true, h_full = true })
+end)
+
 -- One featured plugin, a card of its own that opens it.
 local function feature(first: store.Card, _i: number, now: State<store.Card>): Node
 	return ds.Settings.Feature {
+		cover = Cover { card = now },
 		label = function(): string
 			return now:get().name
 		end,
@@ -672,9 +671,9 @@ M.View = ui.component(function(): Node
 								w_full = true,
 								gap = "$space.3",
 								flex_wrap = true,
-								ds.Settings.FeatureSkeleton { still = still },
-								ds.Settings.FeatureSkeleton { still = still },
-								ds.Settings.FeatureSkeleton { still = still },
+								ds.Settings.FeatureSkeleton { still = still, cover = true },
+								ds.Settings.FeatureSkeleton { still = still, cover = true },
+								ds.Settings.FeatureSkeleton { still = still, cover = true },
 							}
 						end,
 					}
@@ -694,6 +693,19 @@ M.View = ui.component(function(): Node
 		ds.Settings.CatalogCard {
 			id = "store-card",
 			search = { value = query, placeholder = ui.t("plugins.store.search") },
+			-- The keyword a plugin's page narrowed it to: one token, removable.
+			search_trail = ui.show(function(): boolean
+				return keyword:get() ~= ""
+			end, ds.Tag {
+				function(): string
+					return keyword:get()
+				end :: any,
+				size = "sm",
+				selected = true,
+				on_remove = function()
+					keyword:set("")
+				end,
+			}),
 			filters = filters(),
 			body = ui.presence(body_key, inside, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
 		},

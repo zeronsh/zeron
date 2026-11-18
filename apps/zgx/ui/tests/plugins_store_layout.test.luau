@@ -96,24 +96,28 @@ test("the pictures' strip: 16:10 thumbnails, two and a bit across the column, th
 	expect(strip.w > 2 * thumb.w + 2 * 12 and strip.w < 3 * thumb.w + 2 * 12).to_be(true)
 end)
 
-test("Browse's filters are controls on the card's even inset, settings-select wide, one line whatever comes", function()
+test("Browse's filters: one quiet row, the categories' words on the text edge, the order ending on the content edge, its height held", function()
 	local app = mounted()
 	app:command("store_stub.hold")
 	app:click('role:tab "Browse"')
 	app:frames(20)
 	local card = box(app, "#store-card")
+	local text, content = card.x + INSET, card.x + card.w - INSET
 	local bar = box(app, "#store-filters")
-	local select = box(app, '#store-filters >> role:button "Category"')
-	expect(bar.h).to_be(44)
-	expect(math.abs(select.x - (card.x + 1 + 8)) < 0.6).to_be(true)
-	expect(select.w).to_be(168)
+	local order = box(app, '#store-filters >> role:button "Order"')
+	expect(math.abs(order.x + order.w - content) < 0.6).to_be(true)
 	local search_before = box(app, '#store-card >> role:textbox "Search plugins"').y
+	local bar_before = bar.h
 	app:command("store_stub.release")
 	settle(app, 500)
-	-- The chips came: the bar's height, and everything under the search, held.
-	expect(app:tree("#store-filters")).to_contain('button "review"')
-	expect(box(app, "#store-filters").h).to_be(44)
+	local all = app:tree('#store-filters >> role:tab "All"'):match("[^\n]+") or ""
+	local first_tab = box(app, '#store-filters >> role:tab "All"')
+	-- (A quiet tab's words are 12 inside it.)
+	expect(math.abs(first_tab.x + 12 - text) < 0.6).to_be(true)
+	expect(box(app, "#store-filters").h).to_be(bar_before)
+	expect(box(app, '#store-filters >> role:tab "Agents"').h).to_be(order.h)
 	expect(box(app, '#store-card >> role:textbox "Search plugins"').y).to_be(search_before)
+	expect(all).never.to_contain("All categories")
 end)
 
 test("the featured hold their room as they come, and stand a section's step from the card", function()
@@ -127,6 +131,12 @@ test("the featured hold their room as they come, and stand a section's step from
 	settle(app, 500)
 	local cards = box(app, "#store-featured")
 	expect(cards.h).to_be(loading.h)
+	-- Each with its cover on top at 16:10.
+	local first = box(app, '#store-featured >> role:button "Focus timer"')
+	local cover_line = app:tree('#store-featured >> role:button "Focus timer"'):match("\n%s*(@%d+ img [^\n]+)") or ""
+	local cw, ch = cover_line:match("([%d.]+)x([%d.]+)")
+	expect(math.abs((tonumber(cw) or 0) - first.w) < 1).to_be(true)
+	expect(math.abs((tonumber(cw) or 0) / (tonumber(ch) or 1) - 1.6) < 0.02).to_be(true)
 	local card = box(app, "#store-card")
 	expect(card.y - (cards.y + cards.h)).to_be(32)
 end)

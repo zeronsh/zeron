@@ -186,40 +186,44 @@ test("a search that finds nothing says what it looked for, and Clear brings ever
 	expect(app:has('#store-card >> role:button "Focus timer"')).to_be(true)
 end)
 
-test("a category, a keyword and the order each ask the store again", function()
+test("a category, the order and a keyword each ask the store again", function()
 	local app = open()
-	app:click('#store-filters >> role:button "Category"')
-	app:frames(10)
-	app:click('role:menuitem "Git"')
+	app:click('#store-filters >> role:tab "Git"')
 	settle(app)
 	expect(calls(app)).to_contain("search:q=,category=git,keyword=,sort=popular,cursor=")
 	expect(app:has("#store-featured")).to_be(false)
 	app:click('#store-filters >> role:button "Order"')
 	app:frames(10)
-	app:click('role:menuitem "Recently updated"')
+	app:click('role:option "Recently updated"')
 	settle(app)
 	expect(calls(app)).to_contain("search:q=,category=git,keyword=,sort=updated,cursor=")
-	-- A keyword among those shown: chosen, then put away with its ×.
-	app:click('#store-filters >> role:button "daily"')
+	-- A keyword, from a plugin's page: one token beside the search, removable.
+	app:click('#store-filters >> role:tab "All"')
 	settle(app)
-	expect(calls(app)).to_contain("category=git,keyword=daily,sort=updated")
-	app:click('#store-filters >> role:button "Remove daily"')
+	app:click('#store-card >> role:button "Focus timer"')
+	app:wait("#store-keywords", { timeout_ms = 3000 })
 	settle(app)
-	local c = calls(app)
+	app:click('#store-keywords >> role:button "pomodoro"')
+	app:wait("#store-card", { timeout_ms = 3000 })
+	settle(app)
+	expect(calls(app)).to_contain("keyword=pomodoro")
+	expect(app:has('#store-card >> role:button "Remove pomodoro"')).to_be(true)
+	app:click('#store-card >> role:button "Remove pomodoro"')
+	settle(app)
 	local last = ""
-	for l in c:gmatch("[^\n]+") do
+	for l in calls(app):gmatch("[^\n]+") do
 		if l:find("^search:q=,") and not l:find("featured", 1, true) then
 			last = l
 		end
 	end
-	expect(last).to_be("search:q=,category=git,keyword=,sort=updated,cursor=")
+	expect(last).to_be("search:q=,category=,keyword=,sort=updated,cursor=")
 end)
 
 test("words searched order by best match; without words, Best match isn't offered", function()
 	local app = open()
 	app:click('#store-filters >> role:button "Order"')
 	app:frames(10)
-	expect(app:has('role:menuitem "Best match"')).to_be(false)
+	expect(app:tree()).never.to_contain("Best match")
 	app:key("Escape")
 	app:frames(5)
 	app:type('#store-card >> role:textbox "Search plugins"', "git")

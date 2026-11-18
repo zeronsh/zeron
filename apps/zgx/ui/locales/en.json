@@ -4085,7 +4085,8 @@
       "show_installed": "Show it in Installed",
       "readme_more": "Show more",
       "version_meta": "Version {version} · {date} · {n, plural, one {# install} other {# installs}}",
-      "details": "Details"
+      "details": "Details",
+      "all": "All"
     }
   },
   "templates": {

@@ -9,16 +9,19 @@ local M = {}
 
 -- `still`: held at rest, not breathing (one that has waited long enough:
 -- nothing redraws for it).
-export type Props = { w: any?, h: number?, w_full: boolean?, grow: number?, rounded: string?, still: boolean? }
+-- `fill`: the whole of its box, square (what holds it gives it its shape
+-- and its corner: a card's cover).
+export type Props = { w: any?, h: number?, w_full: boolean?, grow: number?, rounded: string?, still: boolean?, fill: boolean? }
 
 function M.Bar(props: Props): Node
 	return ui.div {
 		w = props.w,
-		w_full = props.w_full,
+		w_full = props.w_full or props.fill,
+		h_full = props.fill,
 		grow = props.grow,
-		h = props.h or 10,
+		h = if props.fill then nil else (props.h or 10),
 		shrink = 0,
-		rounded = props.rounded or "$radius.sm",
+		rounded = if props.fill then nil else (props.rounded or "$radius.sm"),
 		bg = "$zeron.secondary.hover",
 		aria_hidden = true,
 		opacity = if props.still then 0.55 else ui.loop { from = 0.55, to = 1, duration = 900, yoyo = true, ease = "inOut(2)", fps = 30 },

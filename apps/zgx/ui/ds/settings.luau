@@ -469,8 +469,15 @@ export type FeatureProps = {
 	description: (string | Message | () -> string)?,
 	lead: Node?,
 	badge: Node?,
+	-- Over it all, edge to edge at the card's top, at `COVER` (16:10): a
+	-- picture of the thing (a plugin's first screenshot), clipped to the
+	-- card's corner.
+	cover: Node?,
 	on_click: () -> (),
 }
+
+-- A cover's shape, width over height.
+M.COVER = 1.6
 
 function M.Feature(props: FeatureProps): Node
 	return ui.column {
@@ -482,6 +489,7 @@ function M.Feature(props: FeatureProps): Node
 		bg = material.pick("$zeron.settings.tint", "$zeron.settings.card"),
 		border = 1,
 		border_color = "$zeron.settings.edge",
+		overflow = "hidden",
 		ui.column {
 			role = "button",
 			label = props.label,
@@ -489,13 +497,19 @@ function M.Feature(props: FeatureProps): Node
 			cursor = "pointer",
 			w_full = true,
 			grow = 1,
-			p = "$space.4",
-			gap = "$space.3",
 			rounded = ui.raw(control.nest("$radius.xl", 1), "the card's corner less its edge"),
 			hover = { bg = "$hover" },
 			active = { bg = "$pressed" },
 			focus = { outline = "$zeron.focus.width", outline_color = "$zeron.focus.ring", outline_offset = -2 },
 			on_click = props.on_click,
+			if props.cover
+				then ui.div { class = "settings-feature-cover", w_full = true, aspect = M.COVER, overflow = "hidden", shrink = 0, props.cover }
+				else nil,
+			ui.column {
+			w_full = true,
+			grow = 1,
+			p = "$space.4",
+			gap = "$space.3",
 			props.lead,
 			ui.column {
 				w_full = true,
@@ -532,6 +546,7 @@ function M.Feature(props: FeatureProps): Node
 					color = "$text.secondary",
 				}
 				else nil,
+			},
 		},
 	}
 end
@@ -540,8 +555,9 @@ end
 -- made it and two lines held in the skeleton's wash, as tall as the card
 -- that comes, so nothing under it moves when it does. `still`: at rest, not
 -- breathing (it has waited long enough).
-function M.FeatureSkeleton(props: { still: boolean? }?): Node
+function M.FeatureSkeleton(props: { still: boolean?, cover: boolean? }?): Node
 	local still = props and props.still
+	local cover = props and props.cover
 	local function line(w: any, h: string, bar: number?): Node
 		return ui.div { h = h, w_full = true, justify = "center", skeleton.Bar { w = w, h = bar, still = still } }
 	end
@@ -555,6 +571,8 @@ function M.FeatureSkeleton(props: { still: boolean? }?): Node
 		border = 1,
 		border_color = "$zeron.settings.edge",
 		aria_hidden = true,
+		overflow = "hidden",
+		if cover then ui.div { w_full = true, aspect = M.COVER, shrink = 0, skeleton.Bar { fill = true, still = still } } else nil,
 		ui.column {
 			w_full = true,
 			p = "$space.4",
@@ -1111,15 +1129,20 @@ export type CatalogProps = {
 export type CatalogCardProps = {
 	id: string?,
 	search: { value: State<string>, placeholder: string | Message },
+	-- At the search's end, on its line: what narrows it besides its words
+	-- (an active keyword's token).
+	search_trail: Node?,
 	filters: Node?,
 	body: Node,
 }
 
 function M.CatalogCard(props: CatalogCardProps): Node
-	local search = ui.div {
+	local search = ui.row {
 		w_full = true,
 		shrink = 0,
 		p = "$space.1",
+		gap = "$space.2",
+		items = "center",
 		theme = { radius = { md = control.nest("$radius.xl", 1, "$space.1") } },
 		-- (Its glyph's ink on the rows' edge, over their tiles: the rows' inset
 		-- less the card's edge, this inset and the glyph's own side bearing.)
@@ -1129,9 +1152,14 @@ function M.CatalogCard(props: CatalogCardProps): Node
 			name = props.search.placeholder,
 			size = "sm",
 			quiet = true,
-			w_full = true,
+			w_full = props.search_trail == nil,
+			grow = if props.search_trail then 1 else nil,
 			pl = M.TEXT_INSET - 1 - ((ui.theme.get("space.1") :: number?) or 4) - SEARCH_INK,
 		},
+		-- (What else narrows it, ending on the rows' controls' edge.)
+		if props.search_trail
+			then ui.row { shrink = 0, items = "center", pr = ui.raw(M.TEXT_INSET - 1 - ((ui.theme.get("space.1") :: number?) or 4), "the rows' 16 inset, less this bar's own"), props.search_trail }
+			else nil,
 	}
 	return ui.column {
 		id = props.id,
