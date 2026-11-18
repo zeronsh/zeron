@@ -1,0 +1,235 @@
+{
+  "about": "Made by crates/engine/src/plugins/vectors from the engine's own constants; the edge imports it. max_manifest_bytes is the manifest's canonical JSON without its signature; max_manifest_json_bytes and max_manifest_values are the manifest as written in the package, signature included, every JSON value counted once (keys not); max_publish_body_bytes is the .zeron-plugin file as uploaded. reserved_ids are the manifest rule's: ids Zeron itself won't run ('Zeron already uses that name', the manifests cases' id_error). site_ids are the store site's own pages beside /plugins/<id>: a device runs a plugin with one, but the store never lists it (the listing rule id_reserved, which no reservation lifts). The cases that hold both sides to these rules are in docs/plugin-package-vectors.json.",
+  "builtin_ids": [
+    "git",
+    "github",
+    "parallax-scenes"
+  ],
+  "categories": [
+    {
+      "id": "agents",
+      "name": "Agents"
+    },
+    {
+      "id": "appearance",
+      "name": "Appearance"
+    },
+    {
+      "id": "chat",
+      "name": "Chat"
+    },
+    {
+      "id": "developer-tools",
+      "name": "Developer tools"
+    },
+    {
+      "id": "git",
+      "name": "Git"
+    },
+    {
+      "id": "integrations",
+      "name": "Integrations"
+    },
+    {
+      "id": "productivity",
+      "name": "Productivity"
+    },
+    {
+      "id": "utilities",
+      "name": "Utilities"
+    }
+  ],
+  "consent": {
+    "about": "A program's name is lowercased and loses one Windows extension (windows_extensions) before it's looked up. It can do anything you can unless it's in contained. It gives full control when it's in full_control, as it is or with its trailing digits and dots taken off (python3.12 → python). commands_anything is every program that can do anything you can and is neither full_control nor held_to_its_own_rules. A host is local when it's localhost, a private or loopback address, ends .localhost .local .internal .lan .home.arpa .intranet .corp, has one label, or ends in a number (decimal or 0x hex); network_local is every host but * that is local, network_named every host that names one host exactly (not * or *.…) and isn't local.",
+    "always_ask": [
+      "native",
+      "commands",
+      "service",
+      "devices",
+      "ui.replace",
+      "accounts.switch",
+      "accounts.pin",
+      "models.set",
+      "messages.send"
+    ],
+    "contained": [
+      "basename",
+      "cat",
+      "cksum",
+      "cut",
+      "date",
+      "df",
+      "dirname",
+      "du",
+      "echo",
+      "false",
+      "file",
+      "grep",
+      "head",
+      "hostname",
+      "id",
+      "jq",
+      "ls",
+      "md5",
+      "md5sum",
+      "nproc",
+      "printenv",
+      "printf",
+      "ps",
+      "pwd",
+      "readlink",
+      "realpath",
+      "sha1sum",
+      "sha256sum",
+      "shasum",
+      "sleep",
+      "stat",
+      "sw_vers",
+      "tail",
+      "tr",
+      "true",
+      "uname",
+      "uptime",
+      "wc",
+      "which",
+      "whoami"
+    ],
+    "full_control": [
+      "ash",
+      "bash",
+      "bun",
+      "cmd",
+      "csh",
+      "dash",
+      "deno",
+      "elixir",
+      "erl",
+      "fish",
+      "ksh",
+      "lua",
+      "luajit",
+      "node",
+      "nodejs",
+      "osascript",
+      "perl",
+      "php",
+      "powershell",
+      "pwsh",
+      "python",
+      "pypy",
+      "ruby",
+      "sh",
+      "swift",
+      "tclsh",
+      "tcsh",
+      "wscript",
+      "cscript",
+      "zsh"
+    ],
+    "held_to_its_own_rules": [
+      "git",
+      "gh"
+    ],
+    "windows_extensions": [
+      ".exe",
+      ".cmd",
+      ".bat",
+      ".com"
+    ]
+  },
+  "deploy_key": {
+    "content_sha256_header": "X-Zeron-Content-SHA256",
+    "max_skew_ms": 300000,
+    "proof_prefix": "zeron-deploy-key:v1:",
+    "request_prefix": "zeron-plugin-publish:v1\n",
+    "secret_prefix": "zpk_"
+  },
+  "format": "zeron-plugin-store-data:v1",
+  "key_proof_prefix": "zeron-plugin-key:v1:",
+  "limits": {
+    "max_bytes": 52428800,
+    "max_categories": 2,
+    "max_changelog_bytes": 524288,
+    "max_description_len": 300,
+    "max_files": 2000,
+    "max_hosts": 64,
+    "max_icon_bytes": 32768,
+    "max_keyword_len": 32,
+    "max_keywords": 8,
+    "max_license_len": 64,
+    "max_manifest_bytes": 262144,
+    "max_manifest_json_bytes": 1048576,
+    "max_manifest_values": 100000,
+    "max_name_len": 64,
+    "max_notes_bytes": 65536,
+    "max_number": 9007199254740991,
+    "max_package_bytes": 70953642,
+    "max_path": 1024,
+    "max_publish_body_bytes": 20971520,
+    "max_range_len": 256,
+    "max_readme_bytes": 524288,
+    "max_screenshots": 8,
+    "max_update_plugins": 200,
+    "max_url_len": 2048,
+    "max_version_len": 128,
+    "screenshot_types": [
+      "png",
+      "jpg",
+      "jpeg"
+    ]
+  },
+  "newer_rule": "A store version is newer by SemVer 2.0.0 precedence, build metadata ignored: equal precedence is the same version.",
+  "package_format": "zeron-plugin:v1",
+  "payload_prefix": "zeron-plugin:v1\n",
+  "report_reasons": [
+    "malware",
+    "misleading",
+    "broken",
+    "copyright",
+    "other"
+  ],
+  "reserved_ids": [
+    "templates",
+    "zeron",
+    "app"
+  ],
+  "site_ids": [
+    "all",
+    "new",
+    "search",
+    "browse",
+    "discover",
+    "featured",
+    "popular",
+    "updated",
+    "category",
+    "categories",
+    "keyword",
+    "keywords",
+    "tags",
+    "publishing",
+    "publish",
+    "guide",
+    "docs",
+    "help",
+    "about",
+    "account",
+    "admin",
+    "api",
+    "install",
+    "me",
+    "settings",
+    "report",
+    "reports",
+    "review",
+    "queue",
+    "audit",
+    "terms",
+    "privacy",
+    "sitemap",
+    "feed",
+    "static",
+    "assets"
+  ],
+  "template_payload_prefix": "zeron-template:v1\n"
+}

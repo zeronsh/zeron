@@ -24,6 +24,13 @@ import { handleVaultRoute } from "../../src/vault-routes";
 import { handleUserDirectoryRoute } from "../../src/user-directory";
 import { handleOnboardingRoute } from "../../src/onboarding-routes";
 import { handlePluginKeyRoute } from "../../src/plugin-keys";
+import { handleStoreRoute } from "../../src/store/routes";
+import { pluginOwner } from "../../src/store/db";
+import { handleWebAuthRoute } from "../../src/web-auth-routes";
+import { handleRoleAdminRoute } from "../../src/roles";
+import { handleDeployKeyAdminRoute, handleDeployKeyRoute } from "../../src/store/identity/deploy-keys";
+import { sha256Hex } from "../../src/store/identity/signing";
+import { BodyRefused, authenticatePublisher, hasCredentials, bodyStream, optionalUser, readBody, requireAdmin, withSessionCookie } from "../../src/store/principal";
 export { DeviceRoom } from "../../src/device-room";
 export { ChatRoom } from "../../src/chat-room";
 export { PreviewRoom } from "../../src/preview-room";
@@ -114,8 +121,87 @@ export class VaultStub extends WorkerEntrypoint {
   calls() { return vaultCalls; }
 }
 
+/**
+ * The web site's server as the contract has it (amendment 8): it relays a
+ * browser's request to the edge over its service binding, at an address of
+ * its choosing, copying the browser's Cookie, Origin and X-CSRF-Token (and a
+ * body with its type) verbatim and nothing else, and hands the edge's answer
+ * (its Set-Cookie too) back to the browser.
+ */
+export class SiteStub extends WorkerEntrypoint<{ EDGE: Fetcher }> {
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const headers = new Headers();
+    // (`x-test-principal`: the tests' own marker for the principal probes.)
+    for (const name of ["cookie", "origin", "x-csrf-token", "content-type", "x-test-principal"]) {
+      const value = request.headers.get(name);
+      if (value !== null) headers.set(name, value);
+    }
+    const hasBody = request.method !== "GET" && request.method !== "HEAD";
+    return this.env.EDGE.fetch(`https://edge.internal${url.pathname}${url.search}`, {
+      method: request.method,
+      headers,
+      body: hasBody ? await request.arrayBuffer() : undefined,
+      redirect: "manual"
+    });
+  }
+}
+
 const json = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
+
+/**
+ * `POST /__test/owner {pluginId, userId}`: make `userId` own store id
+ * `pluginId` in the real catalog (null: no one), so the identity tests'
+ * deploy keys meet the store's own `pluginOwner`. A plugin made here has no
+ * version; its skeleton is its id behind a prefix no real id has, so it
+ * never stands in a real publish's lookalike check.
+ */
+const setTestOwner = async (env: Env, pluginId: string, userId: string | null): Promise<void> => {
+  const db = env.STORE_DB!;
+  if (userId === null) {
+    await db.prepare("DELETE FROM plugins WHERE id = ? AND NOT EXISTS (SELECT 1 FROM versions WHERE plugin_id = ?)").bind(pluginId, pluginId).run();
+    return;
+  }
+  await db
+    .prepare("INSERT INTO plugins (id, owner_id, skeleton, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET owner_id = excluded.owner_id")
+    .bind(pluginId, userId, `__test:${pluginId}`, Date.now())
+    .run();
+};
+
+/**
+ * The identity lane's principal probes, reached only by a request carrying
+ * `x-test-principal` (every other store request goes to the real routes):
+ * each answers who its principal says is calling, on the real paths (a
+ * deploy key signs those): publisher routes (`POST /store/v1/plugins/:id/versions`
+ * and its version actions, `GET /store/v1/me/plugins`) with the body's hash
+ * as the route reads it after authentication, admin routes
+ * (`/store/v1/admin/*`), and a public one (`/store/v1/public`).
+ */
+const storeStandIn = async (request: Request, env: Env, url: URL): Promise<Response | undefined> => {
+  const path = url.pathname;
+  if (path.startsWith("/store/v1/admin/")) {
+    const admin = await requireAdmin(request, env);
+    return admin instanceof Response ? admin : json({ admin });
+  }
+  if (path === "/store/v1/public") return json({ user: await optionalUser(request, env), credentials: hasCredentials(request) });
+  if (path === "/store/v1/me/plugins" || /^\/store\/v1\/plugins\/[^/]+\/versions(\/[^/]+\/[a-z]+)?$/.test(path)) {
+    const publisher = await authenticatePublisher(request, env);
+    if (publisher instanceof Response) return publisher;
+    // `x-test-stream: 1`: read it as a package write would (bodyStream), not buffered.
+    if (request.headers.get("x-test-stream") === "1") {
+      try {
+        const bytes = new Uint8Array(await new Response(bodyStream(request)).arrayBuffer());
+        return json({ publisher, body: await sha256Hex(bytes) });
+      } catch (e) {
+        return json({ publisher, body: e instanceof BodyRefused ? e.reason : "error" });
+      }
+    }
+    const body = await readBody(request);
+    return json({ publisher, body: typeof body === "string" ? body : await sha256Hex(body) });
+  }
+  return undefined;
+};
 
 /**
  * The production routing seam, in src/index.ts's order, minus the routes
@@ -139,8 +225,27 @@ export default {
     if (runner) return runner;
     const users = await handleUserDirectoryRoute(request, env, url);
     if (users) return users;
+    const webAuth = await handleWebAuthRoute(request, env, url);
+    if (webAuth) return webAuth;
+    const roles = await handleRoleAdminRoute(request, env, url);
+    if (roles) return roles;
+    const deployKeyAdmin = await handleDeployKeyAdminRoute(request, env, url);
+    if (deployKeyAdmin) return deployKeyAdmin;
+    if (url.pathname === "/__test/owner" && request.method === "POST") {
+      const { pluginId, userId } = (await request.json()) as { pluginId: string; userId: string | null };
+      await setTestOwner(env, pluginId, userId);
+      return json({ ok: true });
+    }
+    const deployKeys = await handleDeployKeyRoute(request, env, url, pluginOwner);
+    if (deployKeys) return withSessionCookie(request, deployKeys);
+    if (request.headers.has("x-test-principal")) {
+      const probe = await storeStandIn(request, env, url);
+      if (probe) return withSessionCookie(request, probe);
+    }
     const card = await publicCardGate(request, env, url, () => handlePublicCardRoute(request, env, ctx, url));
     if (card) return card;
+    const store = await handleStoreRoute(request, env, url);
+    if (store) return store;
     const auth = await authenticate(env, request);
     if (!auth) return new Response("Unauthorized", { status: 401 });
     const refused = runnerRefusal(auth, request.method, url);
@@ -149,7 +254,7 @@ export default {
     if (username) return username;
     const onboarding = await handleOnboardingRoute(request, env, auth, url);
     if (onboarding) return onboarding;
-    const pluginKeys = await handlePluginKeyRoute(request, env, auth, url);
+    const pluginKeys = await handlePluginKeyRoute(request, env, auth, url, pluginOwner);
     if (pluginKeys) return pluginKeys;
     const cloud = await handleCloudRoute(request, env, auth, url);
     if (cloud) return cloud;

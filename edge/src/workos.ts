@@ -93,8 +93,29 @@ const post = async (apiKey: string, path: string, body: unknown): Promise<Respon
     body: JSON.stringify(body)
   });
 
-/** `authenticateWithCode`: WorkOS code → tokens + user. */
-export const exchange = async (env: Env, apiKey: string, code: string): Promise<ExchangeResult> => {
+/** AuthKit's sign-in page for the web (web-auth-routes.ts): back to
+ * `redirectUri` with a code and `state`, the code bound to `codeChallenge`
+ * (PKCE, S256) unless that's null (`WEB_SIGNIN_PKCE=off`). `max_age=0` makes AuthKit ask for the person's credentials
+ * every time, rather than reuse its own session: a web sign-in is always a
+ * real one, so it can earn a step-up ticket and nobody is signed in silently
+ * as the last person on a shared computer. */
+export const authorizeUrl = (
+  env: Pick<Env, "WORKOS_CLIENT_ID">,
+  params: { readonly redirectUri: string; readonly state: string; readonly codeChallenge: string | null }
+): string =>
+  `${API}/user_management/authorize?${new URLSearchParams({
+    client_id: env.WORKOS_CLIENT_ID,
+    redirect_uri: params.redirectUri,
+    response_type: "code",
+    provider: "authkit",
+    state: params.state,
+    ...(params.codeChallenge === null ? {} : { code_challenge: params.codeChallenge, code_challenge_method: "S256" }),
+    max_age: "0"
+  })}`;
+
+/** `authenticateWithCode`: WorkOS code → tokens + user. `codeVerifier`
+ * when the sign-in began with a PKCE challenge (the web's does). */
+export const exchange = async (env: Env, apiKey: string, code: string, codeVerifier?: string): Promise<ExchangeResult> => {
   const res = await fetch(`${API}/user_management/authenticate`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -102,7 +123,8 @@ export const exchange = async (env: Env, apiKey: string, code: string): Promise<
       client_id: env.WORKOS_CLIENT_ID,
       client_secret: apiKey,
       grant_type: "authorization_code",
-      code
+      code,
+      ...(codeVerifier ? { code_verifier: codeVerifier } : {})
     })
   });
   if (!res.ok) return failed(res);
@@ -117,6 +139,13 @@ export const exchange = async (env: Env, apiKey: string, code: string): Promise<
     accessToken: r.access_token,
     refreshToken: r.refresh_token
   };
+};
+
+/** End a WorkOS session (the `sid` of its access tokens): its refresh token
+ * stops working. One already gone counts as ended. */
+export const revokeSession = async (apiKey: string, sessionId: string): Promise<void> => {
+  const res = await post(apiKey, "/user_management/sessions/revoke", { session_id: sessionId });
+  if (!res.ok && res.status !== 404) await failed(res);
 };
 
 /** `authenticateWithRefreshToken`; passing `organizationId` scopes the session
