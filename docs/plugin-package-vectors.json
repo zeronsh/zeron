@@ -52,6 +52,16 @@
       "name": "an integer past u64 becomes a float"
     },
     {
+      "canonical": "0.5",
+      "input": "0.5",
+      "name": "a half"
+    },
+    {
+      "canonical": "0.25",
+      "input": "0.25",
+      "name": "a quarter"
+    },
+    {
       "error": true,
       "input": "\"\\udc00\"",
       "name": "a lone surrogate is refused"

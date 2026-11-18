@@ -132,6 +132,8 @@ fn canonical_cases() -> Value {
         ("1e-6 is written 1e-6", "1e-6"),
         ("a big integer stays exact", "18446744073709551615"),
         ("an integer past u64 becomes a float", "18446744073709551616"),
+        ("a half", "0.5"),
+        ("a quarter", "0.25"),
         ("a lone surrogate is refused", "\"\\udc00\""),
         ("a number too big for a double is refused", "1e400"),
         ("a trailing comma is refused", "[1,]"),
@@ -905,6 +907,30 @@ fn serde_json_writes_floats_as_the_vectors_say() {
     }
     for refused in ["1e400", "\"\\ud800\"", "01", "NaN"] {
         assert!(serde_json::from_str::<Value>(refused).is_err(), "{refused}");
+    }
+}
+
+/// Numbers survive the whole path a package takes: a manifest carrying
+/// each, signed, packed, read back and verified, has the same content hash
+/// and a signature that checks out, and canonicalizes as it did.
+#[test]
+fn numbers_survive_sign_pack_parse_verify() {
+    let numbers = [
+        "0.5", "0.25", "0.1", "1.0", "100.0", "1e21", "1e-7", "1.5e300", "5e-324", "-0.0", "9007199254740992", "9007199254740993",
+        "-9223372036854775808", "18446744073709551615", "18446744073709551616", "1e16", "123456789012345678901234567890",
+    ];
+    let key = author();
+    let files = files(&[("init.luau", b"return 1")]);
+    for number in numbers {
+        let text = format!(r#"{{"id":"dimmer","name":"Dimmer","version":"1.0.0","entry":"init.luau","settings":[{{"key":"n","type":"number","default":{number}}}]}}"#);
+        let manifest: Value = serde_json::from_str(&text).unwrap();
+        let before = signing::canonical_json(&manifest);
+        let raw = package::pack(FORMAT, &key.sign_manifest(&manifest, &package::hashes(&files)), &files).unwrap();
+        let parsed = install::parse(raw).unwrap_or_else(|e| panic!("{number}: {e}"));
+        assert_eq!(parsed.key, key.public(), "{number}");
+        assert_eq!(signing::canonical_json(&parsed.manifest.unsigned_value()), before, "{number} changed on its way");
+        let expected = signing::content_hash(&Manifest::from_value(manifest).unwrap(), &package::hashes(&files));
+        assert_eq!(parsed.hash, expected, "{number}");
     }
 }
 
