@@ -426,31 +426,45 @@ local UpdateLink = ui.component(function(props: { now: State<any> }): Node
 	local function busy(): boolean
 		return updating:get() == now:get().id
 	end
+	-- (One the store hasn't verified: "Update…", a question follows in the
+	-- consent window, as "Publish…" and "New key…" say. Verified, one
+	-- click. Drawn as it always was.)
+	local function words(): string
+		if busy() then
+			return ui.t("plugins.page.updating"):get()
+		end
+		local u: any = now:get().update
+		return if type(u) == "table" and u.verified == false then ui.t("plugins.page.update_asks"):get() else ui.t("plugins.page.update"):get()
+	end
 	return ui.show(function(): boolean
 		local it: any = now:get()
 		return type(it.update) == "table" and it.update.refused == nil and not it.builtin and kind(it) ~= "broken"
-	end, ds.Settings.InlineLink {
-		-- (A row's inline link, doing something here: a button.)
+	end, ui.row {
 		role = "button",
-		-- (One the store hasn't verified: "Update…", a question follows in
-		-- the consent window, as "Publish…" and "New key…" say. Verified,
-		-- one click.)
 		label = function(): string
-			if busy() then
-				return ui.t("plugins.page.updating"):get()
-			end
-			local u: any = now:get().update
-			return if type(u) == "table" and u.verified == false then ui.t("plugins.page.update_asks"):get() else ui.t("plugins.page.update"):get()
+			return words()
 		end,
 		focusable = function(): boolean
 			return not busy()
 		end,
 		disabled = busy,
+		shrink = 0,
+		cursor = "pointer",
+		color = "$text.primary",
+		hover = { color = "$accent" },
 		on_click = function()
 			if not busy() then
 				update(now:peek().id, now:peek().name)
 			end
 		end,
+		ui.text {
+			words,
+			text_size = "$font.size.sm",
+			line_height = "$font.line.sm",
+			weight = "$font.weight.medium",
+			underline = true,
+			underline_offset = 4,
+		},
 	})
 end)
 
@@ -512,20 +526,29 @@ local function row(p: state.Item, _i: number, now: State<any>): Node
 			truncate = true,
 			-- Its version, centred on the row beside its controls; before it,
 			-- Unknown author for one whose maker Zeron can't vouch for.
-			control = ui.row {
-				gap = "$space.3",
-				items = "center",
-				ui.show(function(): boolean
-					return words.unverified(now:get())
-				end, ds.Badge { ui.t("plugins.words.unverified"), tone = "warning", class = "plugin-unverified" }),
-				ds.Badge {
-					function(): string
-						return now:get().version
-					end,
-					tone = "neutral",
-					tabular = true,
-				},
-				Control { now = now, on = device_now() },
+			-- (Short of room, they give way so the name keeps its least and
+			-- shows: the badges under the text first, then Update under its
+			-- sentence, then the switch and Remove under it too.)
+			give_way = {
+				gives = function(): Node
+					return ui.row {
+						gap = "$space.3",
+						items = "center",
+						ui.show(function(): boolean
+							return words.unverified(now:get())
+						end, ds.Badge { ui.t("plugins.words.unverified"), tone = "warning", class = "plugin-unverified" }),
+						ds.Badge {
+							function(): string
+								return now:get().version
+							end,
+							tone = "neutral",
+							tabular = true,
+						},
+					}
+				end,
+				stays = function(): Node
+					return Control { now = now, on = device_now() }
+				end,
 			},
 		}
 	end

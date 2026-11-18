@@ -353,13 +353,14 @@ test("with the account's setup unfinished it says so, and the plugins load once 
 	expect(tree).to_contain("Compact sidebar")
 end)
 
-test("Update, a row's inline link, shows the app's focus ring when the keys reach it", function()
+-- Installed's Update is drawn as it always was (its own button, its words
+-- underlined), not the store's inline link, and the keys reach it.
+test("Update draws as it always did, and the keys reach it", function()
 	local app = open()
 	app:command("update_found")
 	app:frames(20)
-	-- From the search, Tab on until the link has the focus.
-	-- (At rest, its words underlined.)
-	expect(app:has(".settings-inline-link >> .inline-link-underlined")).to_be(true)
+	expect(app:has('role:button "Update"')).to_be(true)
+	expect(app:has(".settings-inline-link")).to_be(false)
 	app:click('role:textbox "Search plugins"')
 	app:frames(5)
 	local reached = false
@@ -372,17 +373,6 @@ test("Update, a row's inline link, shows the app's focus ring when the keys reac
 		end
 	end
 	expect(reached).to_be(true)
-	-- (The one inline link, its focus style the app's ring: control.ring.)
-	expect(app:tree(".settings-inline-link")).to_contain('button "Update"')
-	expect(app:tree(".settings-inline-link")).to_contain("focused")
-	-- Focused, the ring says it's the control: no underline while it holds
-	-- the focus, the words where they were; back as focus leaves.
-	expect(app:has(".settings-inline-link >> .inline-link-plain")).to_be(true)
-	expect(app:has(".settings-inline-link >> .inline-link-underlined")).to_be(false)
-	app:key("Tab")
-	app:frames(3)
-	expect(app:has(".settings-inline-link >> .inline-link-underlined")).to_be(true)
-	expect(app:has(".settings-inline-link >> .inline-link-plain")).to_be(false)
 end)
 
 -- The tabs' action (Install…) stays inside the page at every width: beside
@@ -596,5 +586,83 @@ test("a catalog's action sits in the same place at a width whether widened or na
 		-- (Wide enough, it's beside the tabs; narrow, under the rule.)
 		expect(`{case.tabs} {up[1100]}`).to_be(`{case.tabs} beside`)
 		expect(`{case.tabs} {up[260]}`).to_be(`{case.tabs} under`)
+	end
+end)
+
+-- Installed's rows short of room give way so the name keeps its least
+-- (96) and every control stays whole and inside the card: the badges move
+-- under the text first, then Update under its sentence, then the switch
+-- and Remove under the text too (wrapping under the badges, in their own
+-- order, where even that line is too wide). Where things fit, the row is
+-- the row it always was; the place is the width's alone, both ways.
+local function focus_row(app: any): { [string]: { x: number, y: number, w: number }? }
+	local tree = app:tree("#catalog-card")
+	local out: { [string]: { x: number, y: number, w: number }? } = {}
+	local function box(pattern: string): { x: number, y: number, w: number }?
+		local x, y, w = tree:match(pattern .. " (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x")
+		return if x then { x = tonumber(x) :: number, y = tonumber(y) :: number, w = tonumber(w) :: number } else nil
+	end
+	local cx, _, cw = tree:match("#catalog%-card (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x")
+	out.card = { x = tonumber(cx) :: number, y = 0, w = tonumber(cw) :: number }
+	out.name = box('text "Focus"')
+	out.switch = box('switch "Focus"')
+	out.remove = box('button "Remove Focus"')
+	out.update = box('button "Update"')
+	-- (Focus's version: the second row's, after Compact sidebar's.)
+	local versions = {}
+	for line in tree:gmatch('[^\n]*text "1%.0%.0"[^\n]*') do
+		if not line:find("hidden", 1, true) then
+			table.insert(versions, line)
+		end
+	end
+	local vx, vy, vw = (versions[2] or ""):match(" (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x")
+	out.version = if vx then { x = tonumber(vx) :: number, y = tonumber(vy) :: number, w = tonumber(vw) :: number } else nil
+	return out
+end
+
+test("Installed's rows give way short of room: the name keeps its least, every control whole and inside", function()
+	-- Where everything fits, as it always was (main's boxes at 1048).
+	local wide = mount("plugins_fixture.luau")
+	wide:resize(1048, 900)
+	wide:frames(30)
+	wide:command("update_found")
+	wide:frames(30)
+	local b = focus_row(wide)
+	expect(`{b.version and b.version.x} {b.switch and b.switch.x} {b.remove and b.remove.x} {b.update and b.update.x}`).to_be("678 757 805 603")
+
+	local app = mount("plugins_fixture.luau")
+	app:resize(250, 900)
+	app:frames(30)
+	app:command("update_found")
+	app:frames(30)
+	local function layout(width: number): string
+		app:resize(width, 900)
+		app:frames(25)
+		local r = focus_row(app)
+		local right = r.card.x + r.card.w
+		local at = `{width}`
+		for _, k in { "switch", "remove", "update", "version" } do
+			local c = r[k]
+			assert(c, `{at}: no {k}`)
+			-- Whole and inside the card.
+			expect(`{at} {k} inside={c.x + c.w <= right + 0.5}`).to_be(`{at} {k} inside=true`)
+		end
+		local name = r.name :: any
+		-- Anything on the name's line leaves it its least (where the card
+		-- has that much beside the tile at all).
+		for _, k in { "switch", "version" } do
+			local c = r[k] :: any
+			if math.abs(c.y - name.y) < 12 and r.card.w >= 96 + 76 then
+				expect(`{at} {k} floor={c.x - name.x >= 96}`).to_be(`{at} {k} floor=true`)
+			end
+		end
+		return `{r.version.x},{r.version.y - name.y}|{r.switch.x},{r.switch.y - name.y}|{r.update.x},{r.update.y - name.y}`
+	end
+	local up: { [number]: string } = {}
+	for width = 250, 1100, 10 do
+		up[width] = layout(width)
+	end
+	for width = 1100, 250, -10 do
+		expect(`{width} {layout(width)}`).to_be(`{width} {up[width]}`)
 	end
 end)

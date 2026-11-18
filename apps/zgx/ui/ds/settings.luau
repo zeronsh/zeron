@@ -674,6 +674,15 @@ export type RowProps = {
 	-- known to the next row as it comes.
 	badges: RowBadges?,
 	control: Node?,
+	-- In a truncating row, in `control`'s place: its controls in two parts
+	-- that give way, each only when the one before isn't enough, so the
+	-- name keeps `NAME_LEAST` and shows and every control stays whole: the
+	-- part that `gives` first (a version badge) moves under the text; then
+	-- the detail's action wraps under its sentence; then the part that
+	-- `stays` (a switch, Remove) moves under the text too, after it, in
+	-- their own order and gaps. Built afresh as they move, so builders.
+	-- Where they fit, the row is the row it always was.
+	give_way: { gives: () -> Node, stays: () -> Node }?,
 	-- The control under the text, full width.
 	stacked: boolean?,
 	-- The row leads somewhere: the whole row takes the click, a chevron
@@ -828,7 +837,13 @@ local function byline_line(props: RowProps): Node
 	end, line)
 end
 
-function M.Row(props: RowProps): Node
+-- A giving row's place in its steps and what it measures there
+-- (`RowProps.give_way`): 0 as it always was; 1 its first part under the
+-- text; 2 its detail's action under its sentence too; 3 its controls all
+-- under the text.
+type GiveWayRun = { step: number, measure: (what: string) -> (size: { w: number, h: number }) -> () }
+
+local function row_body(props: RowProps, gw: GiveWayRun?): Node
 	local name = if props.private_label
 		then PrivateText {
 			props.label,
@@ -864,6 +879,7 @@ function M.Row(props: RowProps): Node
 		grow = 1,
 		min_w = 0,
 		gap = "$zeron.space.hair",
+		on_resize = if gw then gw.measure("text") else nil,
 		if props.badges
 			then BadgedName { name = name, badges = props.badges }
 			else ui.row {
@@ -923,10 +939,33 @@ function M.Row(props: RowProps): Node
 					},
 					M.InlineLink { label = props.detail_link.label, on_click = props.detail_link.on_click, role = props.detail_link.role },
 				}
+				-- (A giving row's action under its sentence, at its start, once
+				-- beside it the sentence would fall below the name's least:
+				-- its step 2. Every other row's line as it always was.)
+				elseif gw and gw.step >= 2
+				then ui.column {
+					w_full = true,
+					gap = "$zeron.space.hair",
+					items = "start",
+					on_resize = gw.measure("detail"),
+					ui.text {
+						function(): string
+							return control.value(props.detail) or ""
+						end,
+						w_full = true,
+						min_w = 0,
+						text_size = "$font.size.sm",
+						line_height = "$font.line.sm",
+						color = "$text.tertiary",
+						wrap = true,
+					},
+					if props.detail_action then ui.div { shrink = 0, on_resize = gw.measure("act"), props.detail_action } else nil,
+				}
 				else ui.row {
 					w_full = true,
 					gap = "$space.3",
 					items = "start",
+					on_resize = if gw then gw.measure("detail") else nil,
 					ui.text {
 						function(): string
 							return control.value(props.detail) or ""
@@ -938,8 +977,23 @@ function M.Row(props: RowProps): Node
 						color = "$text.tertiary",
 						wrap = true,
 					},
-					props.detail_action,
+					if gw and props.detail_action then ui.div { shrink = 0, on_resize = gw.measure("act"), props.detail_action } else props.detail_action,
 				})
+			else nil,
+		-- (A giving row's controls under its text, a stacked row's step
+		-- under the last line: the column's hair and a snug.)
+		if gw and gw.step >= 1 and props.give_way
+			then ui.row {
+				pt = "$zeron.space.snug",
+				gap = "$space.3",
+				items = "center",
+				-- (Narrower still than its badges and controls together: the
+				-- controls on the line under the badges, in the same order and
+				-- gaps, each part whole.)
+				flex_wrap = true,
+				ui.div { shrink = 0, on_resize = gw.measure("gives"), props.give_way.gives() },
+				if gw.step >= 3 then ui.div { shrink = 0, on_resize = gw.measure("stays"), props.give_way.stays() } else nil,
+			}
 			else nil,
 	}
 	local lead: Node? = props.lead
@@ -957,6 +1011,13 @@ function M.Row(props: RowProps): Node
 		}
 	end
 	local trail: Node? = props.control
+	if gw and props.give_way then
+		-- (Measured where each is: the parts that give way.)
+		local stays = if gw.step < 3 then ui.div { shrink = 0, on_resize = gw.measure("stays"), props.give_way.stays() } else nil
+		trail = if gw.step == 0
+			then ui.row { gap = "$space.3", items = "center", ui.div { shrink = 0, on_resize = gw.measure("gives"), props.give_way.gives() }, stays }
+			else stays
+	end
 	if props.on_click then
 		trail = ui.row {
 			gap = "$space.1",
@@ -985,6 +1046,9 @@ function M.Row(props: RowProps): Node
 				return if disabled() then "$zeron.disabled" else nil
 			end
 			else nil,
+		-- (A giving row is its container's width, never widened by what it
+		-- holds: that width decides its step.)
+		min_w = if gw then 0 else nil,
 	}
 	if props.on_click then
 		row.role = "button"
@@ -1036,10 +1100,97 @@ function M.Row(props: RowProps): Node
 		})
 		if trail then
 			-- (A theme number, read as it is built: max_w takes points.)
-			table.insert(row, ui.row { shrink = 0, max_w = ui.theme.get("zeron.settings.control") :: number?, items = "center", justify = "end", trail })
+			-- (A giving row measures the room its controls take beside the
+			-- text, at the step it's in.)
+			table.insert(row, ui.row {
+				shrink = 0,
+				max_w = ui.theme.get("zeron.settings.control") :: number?,
+				items = "center",
+				justify = "end",
+				on_resize = if gw then gw.measure(if gw.step == 0 then "box0" else "box1") else nil,
+				trail,
+			})
 		end
 	end
 	return ui.row(row)
+end
+
+-- A truncating row whose controls give way (`RowProps.give_way`): its own
+-- width, its lead's and its two parts' natural widths decide its step,
+-- the first that leaves the name `NAME_LEAST`. Each a width that doesn't
+-- move with the row's but its own, so the step is the width's alone.
+local GivingRow = ui.component(function(p: { props: RowProps }): Node
+	local props = p.props
+	-- (-1: not laid out yet.)
+	local widths = ui.use_state({ text = -1, detail = 0, gives = 0, stays = 0, act = 0, box0 = 0, box1 = 0 } :: { [string]: number })
+	-- (The step laid out now: what the text's width was measured at.)
+	local current = 0
+	local function measure(what: string): (size: { w: number, h: number }) -> ()
+		return function(size: { w: number, h: number })
+			local now = widths:peek()
+			if math.abs((now[what] or -1) - size.w) >= 0.5 then
+				local next = table.clone(now)
+				next[what] = size.w
+				widths:set(next)
+			end
+		end
+	end
+	local function n(token: string, fallback: number): number
+		return (ui.theme.get(token) :: number?) or fallback
+	end
+	local function step(): number
+		local m = widths:get()
+		if m.text < 0 or m.stays <= 0 then
+			return current
+		end
+		local gap, beside, cap = n("space.3", 12), n("space.4", 16), n("zeron.settings.control", math.huge)
+		-- What its controls take beside the text at each step (none once
+		-- they're all under it), and so what the text gets: measured as
+		-- laid out now, the same at every step.
+		local function trail(t: number): number
+			if t >= 3 then
+				return 0
+			end
+			-- (As laid out at that step, else from its parts: a row starts
+			-- at step 0, so that one is always known.)
+			local laid = if t == 0 then m.box0 else m.box1
+			local w = if laid > 0 then laid elseif t == 0 then (if m.gives > 0 then m.gives + gap else 0) + m.stays else m.stays
+			return math.min(w, cap) + beside
+		end
+		local left = m.text + trail(current)
+		local function text(t: number): number
+			return left - trail(t)
+		end
+		-- (The detail's line sits inside the text by its own inset.)
+		local inset = if m.detail > 0 then m.text - m.detail else 0
+		local act = if m.act > 0 then m.act + gap else 0
+		local function sentence_beside(t: number): boolean
+			return act == 0 or text(t) - inset - act >= NAME_LEAST
+		end
+		if text(0) >= NAME_LEAST and sentence_beside(0) then
+			return 0
+		end
+		if text(1) >= NAME_LEAST and sentence_beside(1) then
+			return 1
+		end
+		if text(1) >= NAME_LEAST and text(1) - inset >= NAME_LEAST then
+			return 2
+		end
+		return 3
+	end
+	return ui.presence(function(): string
+		return tostring(step())
+	end, function(k: string): Node
+		current = tonumber(k) :: number
+		return row_body(props, { step = current, measure = measure })
+	end, { w_full = true })
+end)
+
+function M.Row(props: RowProps): Node
+	if props.give_way and props.truncate and not props.stacked and not props.on_click then
+		return GivingRow { props = props }
+	end
+	return row_body(props, nil)
 end
 
 -- A settings window's own list of pages, down its side: an icon and a name
