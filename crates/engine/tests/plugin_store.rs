@@ -179,6 +179,28 @@ async fn a_blocked_version_is_turned_off_and_can_be_turned_back_on() {
     assert_eq!(d.item("focus").await["status"], "on");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_block_repeated_by_a_hostile_store_is_applied_once() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    // 8 MB, so each rescan (which hashes every file) costs something.
+    let body = format!("return 1 --{}", "x".repeat(8 * 1024 * 1024));
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], &body, json!({})), "approved", "");
+    let d = device(&store, Some("bob"));
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    assert_eq!(d.allow("focus").await["status"], "on");
+    let mut blocks = vec![json!({ "id": "focus", "version": "1.0.0", "reason": "It sent your chats somewhere." }); 2000];
+    blocks.push(json!({ "id": "focus", "version": "1.0.0", "reason": "Another reason." }));
+    store.state.lock().unwrap().blocked_anyway = blocks;
+    let started = std::time::Instant::now();
+    d.check().await;
+    let took = started.elapsed();
+    let item = d.item("focus").await;
+    assert_eq!((item["status"].as_str(), item["blocked"]["reason"].as_str()), (Some("off"), Some("It sent your chats somewhere.")), "{item}");
+    // (A rescan per copy took over ten seconds here.)
+    assert!(took < Duration::from_secs(3), "2001 copies of one block took {took:?}");
+}
+
 #[tokio::test]
 async fn a_version_for_another_zeron_is_never_installed() {
     let store = FakeStore::start().await;

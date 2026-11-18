@@ -756,12 +756,18 @@ impl Plugins {
                 }
             }
         }
+        // One block per plugin, for the version installed (the first the
+        // store says: a hostile answer repeating one costs nothing more).
+        let mut blocked: BTreeMap<&str, (&Candidate, String)> = BTreeMap::new();
         for block in &blocks {
             if let Some(c) = by_id.get(block.id.as_str())
                 && same_version(&block.version, &c.version)
             {
-                self.block(c, &plain(&block.reason, 500)).await;
+                blocked.entry(c.id.as_str()).or_insert_with(|| (*c, plain(&block.reason, 500)));
             }
+        }
+        if !blocked.is_empty() {
+            self.block(blocked.into_values().collect()).await;
         }
         let plugins_dir = self.inner.plugins_dir.clone();
         let mut updates = Vec::new();
@@ -840,10 +846,18 @@ impl Plugins {
 
     /// `c`'s installed version is blocked by the store: turned off, the
     /// reason kept, and you're told. Not again once you turned it back on.
-    async fn block(&self, c: &Candidate, reason: &str) {
+    /// Turn off each blocked version (with the store's reason), after one
+    /// rescan for all of them.
+    async fn block(&self, blocked: Vec<(&Candidate, String)>) {
+        self.rescan().await;
+        for (c, reason) in blocked {
+            self.block_one(c, &reason);
+        }
+    }
+
+    fn block_one(&self, c: &Candidate, reason: &str) {
         // Still the version the store blocked (not one installed while the
         // check was out).
-        self.rescan().await;
         if self.entry(&c.id).is_none_or(|e| e.item.version != c.version || e.item.hash != c.hash) {
             return;
         }

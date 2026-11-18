@@ -71,6 +71,8 @@ pub struct State {
     pub content_sha256: Vec<Option<String>>,
     /// Reports: `(id, body)`.
     pub reports: Vec<(String, Value)>,
+    /// Blocks sent whatever the device asked (a hostile store).
+    pub blocked_anyway: Vec<Value>,
 }
 
 /// Who sent a request: a username, and the plugin a deploy key is for.
@@ -358,6 +360,7 @@ impl FakeStore {
                     }
                 }
                 updates.append(&mut state.offer_anyway);
+                blocked.extend(state.blocked_anyway.iter().cloned());
                 json_reply(200, json!({ "updates": updates, "blocked": blocked }))
             }
             ("POST", ["store", "v1", "plugins", id, "versions"]) => {
