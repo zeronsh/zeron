@@ -18,7 +18,7 @@ inputs:
     required: false
     default: "."
   dry-run:
-    description: Check, sign and pack the plugin, but don't submit it.
+    description: "`true`: check, sign and pack the plugin, but don't submit it. `true` or `false` only: anything else fails the step."
     required: false
     default: "false"
   zeron-version:

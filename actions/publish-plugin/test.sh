@@ -233,4 +233,20 @@ expect "a version that isn't one is refused, never run as a command" 2 "zeron-ve
 expect "an empty version is refused" 2 "zeron-version is latest or a version like 0.4.0." \
   ZERON_RELEASES_URL="$http/good" ZERON_VERSION=" " ZERON_PLUGIN_PATH="$ok"
 
+# With a deploy key (made for the run; the store is a closed port here, so
+# nothing could be sent anyway).
+key="$(python3 -c 'import base64, hashlib; seed = bytes(range(32)); print("zpk_" + base64.urlsafe_b64encode(seed + hashlib.sha256(seed).digest()[:4]).decode().rstrip("="))')"
+offline="http://127.0.0.1:9"
+expect "a dry run with a key checks, signs and packs, and sends nothing" 0 "Not sent (--dry-run)." \
+  ZERON_RELEASES_URL="$http/good" ZERON_DEPLOY_KEY="$key" ZERON_DRY_RUN=true ZERON_EDGE_URL="$offline" ZERON_PLUGIN_PATH="$ok"
+for word in yes True 1 " true"; do
+  expect "dry-run \"$word\" is refused, never taken as false" 2 "dry-run is true or false." \
+    ZERON_RELEASES_URL="$http/good" ZERON_DEPLOY_KEY="$key" ZERON_DRY_RUN="$word" ZERON_EDGE_URL="$offline" ZERON_PLUGIN_PATH="$ok"
+  never_ran "dry-run $word"
+done
+expect "a path that reads like an option is a path" 2 "--help: there's no plugin folder there" \
+  ZERON_RELEASES_URL="$http/good" ZERON_PLUGIN_PATH="--help"
+expect "and so with a key" 2 "--dry-run: there's no plugin folder there" \
+  ZERON_RELEASES_URL="$http/good" ZERON_DEPLOY_KEY="$key" ZERON_EDGE_URL="$offline" ZERON_PLUGIN_PATH="--dry-run"
+
 echo "publish.sh: $passed of $passed cases as promised"

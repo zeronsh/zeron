@@ -8,7 +8,8 @@
 # Env (the action sets these from its inputs):
 #   ZERON_DEPLOY_KEY   the deploy key's secret (zpk_…), or empty
 #   ZERON_PLUGIN_PATH  the plugin's folder (default .)
-#   ZERON_DRY_RUN      true: check, sign and pack, don't submit
+#   ZERON_DRY_RUN      true: check, sign and pack, don't submit; false (or
+#                      unset): submit. Anything else is refused.
 #   ZERON_VERSION      latest, or a release's version (held: the release's
 #                      manifest must name that version)
 #   ZERON_SHA256       optional: the command line's tarball must have this
@@ -36,6 +37,12 @@ esac
 for tool in curl jq sha256sum tar; do
   command -v "$tool" >/dev/null || fail "$tool is needed on the runner."
 done
+# A dry run that isn't one would submit for real: only the two words.
+case "${ZERON_DRY_RUN:-false}" in
+  true) dry_run=true ;;
+  false) dry_run=false ;;
+  *) fail "dry-run is true or false." ;;
+esac
 
 releases="${ZERON_RELEASES_URL:-https://zeron.sh/releases}"
 # https only, redirects included (a plain-http address on this machine is
@@ -86,8 +93,9 @@ folder="${ZERON_PLUGIN_PATH:-.}"
 
 if [ -z "${ZERON_DEPLOY_KEY:-}" ]; then
   echo "No deploy key (the key input is empty): checking only."
-  exec "$zeron" plugin check "$folder"
+  exec "$zeron" plugin check -- "$folder"
 fi
-args=(plugin publish "$folder")
-[ "${ZERON_DRY_RUN:-false}" = true ] && args+=(--dry-run)
-exec "$zeron" "${args[@]}"
+args=(plugin publish)
+[ "$dry_run" = true ] && args+=(--dry-run)
+# (After `--`: a folder named like an option is a folder.)
+exec "$zeron" "${args[@]}" -- "$folder"
