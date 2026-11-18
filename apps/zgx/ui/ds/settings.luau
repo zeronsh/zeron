@@ -1418,6 +1418,104 @@ local function trail(props: CatalogProps): Node?
 	}
 end
 
+-- A catalog's step: between its head, the line its action moves to, its
+-- card and what's under it.
+local CATALOG_STEP = "$space.4"
+
+-- A catalog's head: its tabs, their action (New…, Install…) at the rule's
+-- far end; where the tabs and it don't fit beside each other (a narrow
+-- pane, more tabs), the action on a line of its own under the rule, the
+-- catalog's step below it, ending on the same edge, never past the page.
+-- Measured as Browse's head is: beside the tabs, the action's box gives
+-- way when the line runs short, and by how much says the head's width it
+-- needs; under the rule until the head is that wide again.
+local CatalogHead = ui.component(function(props: { catalog: CatalogProps, tab: State<any> }): Node
+	local catalog, tab = props.catalog, props.tab
+	local inset = M.inset(ui.theme.get("space.1") :: number?)
+	local head_w = ui.use_state(0)
+	-- The head's width the action needs beside the tabs (0: it fits).
+	local needed = ui.use_state(0)
+	-- (Each box's width once laid out; nil until then.)
+	local inner_w: number?, outer_w: number? = nil, nil
+	local function action_fits(): boolean
+		local n = needed:get()
+		return n <= 0 or head_w:get() >= n
+	end
+	-- (Beside the tabs and short of its own width: the head it needs.)
+	local function check()
+		if inner_w and outer_w and action_fits() and inner_w - outer_w > 0.5 then
+			needed:set(head_w:peek() + (inner_w - outer_w))
+		end
+	end
+	local function action(beside: boolean): Node?
+		local node = trail(catalog)
+		if not node then
+			return nil
+		end
+		if not beside then
+			return node
+		end
+		-- (Kept in its place while under the rule, collapsed to none and
+		-- unseen: measured all the while, never built again.)
+		return ui.div {
+			shrink = 1,
+			min_w = 0,
+			overflow = "hidden",
+			w = function(): number?
+				return if action_fits() then nil else 0
+			end,
+			on_resize = function(size: { w: number, h: number })
+				outer_w = size.w
+				check()
+			end,
+			ui.div {
+				shrink = 0,
+				invisible = function(): boolean
+					return not action_fits()
+				end,
+				on_resize = function(size: { w: number, h: number })
+					inner_w = size.w
+					check()
+				end,
+				node,
+			},
+		}
+	end
+	local beside = action(true)
+	local under = if beside then action(false) else nil
+	return ui.column {
+		w_full = true,
+		gap = CATALOG_STEP,
+		on_resize = function(size: { w: number, h: number })
+			if math.abs(size.w - head_w:peek()) >= 0.5 then
+				head_w:set(size.w)
+			end
+		end,
+		ui.row {
+			w_full = true,
+			items = "end",
+			gap = "$space.2",
+			-- In to the rows' words, as the title is: the tab's label (its
+			-- space.1 inside the tab) on that edge, its underline hanging
+			-- past it as a wash does.
+			Tabs {
+				value = tab,
+				label = catalog.tabs.label,
+				rule = true,
+				-- (The rule runs the card's width, as the board's does.)
+				inset = inset,
+				options = catalog.tabs.options,
+				trail = beside,
+			},
+		},
+		if under
+			then ui.show(function(): boolean
+				return not action_fits()
+			end, ui.row { w_full = true, px = inset, justify = "end", under })
+			else nil,
+	}
+end)
+
 function M.Catalog(props: CatalogProps): Node
 	local query, tab = props.search.value, props.tabs.value
 	-- (What the card says in place of rows: in from its edges as the board's.)
@@ -1523,24 +1621,8 @@ function M.Catalog(props: CatalogProps): Node
 	end
 	local column: { any } = {
 		w_full = true,
-		gap = "$space.4",
-		ui.row {
-			w_full = true,
-			items = "end",
-			gap = "$space.2",
-			-- In to the rows' words, as the title is: the tab's label (its
-			-- space.1 inside the tab) on that edge, its underline hanging
-			-- past it as a wash does.
-			Tabs {
-				value = tab,
-				label = props.tabs.label,
-				rule = true,
-				-- (The rule runs the card's width, as the board's does.)
-				inset = M.inset(ui.theme.get("space.1") :: number?),
-				options = props.tabs.options,
-				trail = trail(props),
-			},
-		},
+		gap = CATALOG_STEP,
+		CatalogHead { catalog = props, tab = tab },
 		if props.notice and props.notice_when
 			then ui.show(props.notice_when, ui.column { w_full = true, (props.notice :: () -> Node)() })
 			elseif props.notice then props.notice()

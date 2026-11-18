@@ -384,3 +384,73 @@ test("Update, a row's inline link, shows the app's focus ring when the keys reac
 	expect(app:has(".settings-inline-link >> .inline-link-underlined")).to_be(true)
 	expect(app:has(".settings-inline-link >> .inline-link-plain")).to_be(false)
 end)
+
+-- The tabs' action (Install…) stays inside the page at every width: beside
+-- the tabs where they and it fit (as always, at 1000 and wider), else on a
+-- line of its own under them, ending on the same edge, still pressable.
+test("Install stays inside the page beside the tabs, or under them where they don't fit", function()
+	local placed: { [number]: boolean } = {}
+	for _, width in { 400, 560, 760, 1000 } do
+		local app = mount("plugins_fixture.luau")
+		app:resize(width, 900)
+		app:frames(30)
+		local tree = app:tree()
+		local cx, _, cw = tree:match("#catalog%-card (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x")
+		local tx, ty, tw, th = tree:match('tablist "Plugins" (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x([%d.]+)')
+		-- (The one that shows: beside the tabs, or on its own line.)
+		local ix, iy, iw
+		local shown = 0
+		for line in tree:gmatch('[^\n]*button "Install"[^\n]*') do
+			if not line:find("hidden", 1, true) then
+				shown += 1
+				ix, iy, iw = line:match('button "Install" (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x')
+			end
+		end
+		expect(`{width} shown={shown}`).to_be(`{width} shown=1`)
+		assert(cx and tx and ix, `{width}: {tree}`)
+		local right = tonumber(cx) + tonumber(cw)
+		expect(`{width} inside={tonumber(ix) + tonumber(iw) <= right + 0.5}`).to_be(`{width} inside=true`)
+		local beside = math.abs(tonumber(iy) - tonumber(ty)) < tonumber(th)
+		placed[width] = beside
+		if width == 1000 then
+			-- (As it always was: beside the tabs, ending on the card's words.)
+			expect(`{width} beside={beside}`).to_be(`{width} beside=true`)
+		elseif not beside then
+			-- (Under the rule, the catalog's own step below it: 16.)
+			expect(tonumber(iy) - (tonumber(ty) + tonumber(th))).to_be(16)
+		end
+		-- (Where it fits, the head is as it always was: the card one tab
+		-- row and the step under the tabs' top.)
+		local _, cy = tree:match("#catalog%-card (%-?[%d.]+),(%-?[%d.]+)")
+		if beside then
+			expect(`{width} head={tonumber(cy) - tonumber(ty)}`).to_be(`{width} head=52`)
+		end
+		app:click('role:button "Install"')
+		app:frames(10)
+		expect(app:has('role:dialog')).to_be(true)
+	end
+	-- (Narrow enough, it does go under: the give-way is exercised.)
+	expect(placed[400]).to_be(false)
+end)
+
+-- Templates' catalog, where its tabs and Install fit at 560 and 1000, is as
+-- it always was: Install beside the tabs, the card where it was.
+test("Templates' head where its action fits is as it always was", function()
+	for _, width in { 560, 1000 } do
+		local app = mount("templates_fixture.luau")
+		app:resize(width, 900)
+		app:frames(30)
+		local tree = app:tree()
+		local _, ty, _, th = tree:match('tablist "Templates" (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x([%d.]+)')
+		local _, cy = tree:match("#catalog%-card (%-?[%d.]+),(%-?[%d.]+)")
+		local iy: string? = nil
+		for line in tree:gmatch('[^\n]*button "Install"[^\n]*') do
+			if not line:find("hidden", 1, true) then
+				iy = line:match('button "Install" %-?[%d.]+,(%-?[%d.]+)')
+			end
+		end
+		assert(ty and cy and iy, `{width}: {tree}`)
+		expect(`{width} beside={math.abs(tonumber(iy) - tonumber(ty)) < tonumber(th)}`).to_be(`{width} beside=true`)
+		expect(`{width} head={tonumber(cy) - tonumber(ty)}`).to_be(`{width} head=52`)
+	end
+end)
