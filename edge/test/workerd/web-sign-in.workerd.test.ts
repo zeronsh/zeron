@@ -360,6 +360,8 @@ describe("signing out", () => {
     for (const [what, headers] of attempts) {
       const res = await fetchSite("/auth/web/logout", { method: "POST", cookie: browser.cookie, headers });
       expect(res.status, what).toBe(403);
+      // The same word as every store route's refused cookie write.
+      expect(await errorOf(res), what).toBe("bad_csrf");
     }
     expect((await sessionOf(browser.cookie)).status).toBe(200);
   });
@@ -391,7 +393,8 @@ describe("signing out", () => {
   it("clears a dead cookie without a token, from the site only", async () => {
     const res = await fetchSite("/auth/web/logout", { method: "POST", cookie: sessionHeader("A".repeat(43)), headers: { origin: SITE } });
     expect(res.status).toBe(200);
-    expect((await fetchSite("/auth/web/logout", { method: "POST", headers: { origin: "https://evil.example" } })).status).toBe(403);
+    const foreign = await fetchSite("/auth/web/logout", { method: "POST", headers: { origin: "https://evil.example" } });
+    expect([foreign.status, await errorOf(foreign)]).toEqual([403, "bad_csrf"]);
   });
 });
 

@@ -220,7 +220,11 @@ const logout = async (request: Request, env: Env, origin: string): Promise<Respo
   const refusal = crossSiteRefusal(request, env, live?.csrf ?? "", csrf);
   // Without a live session there's nothing to protect but the request's
   // origin: the cookie is cleared either way.
-  if (refusal === "bad_origin" || (live && refusal)) return jsonAnswer({ error: "forbidden", reason: refusal }, 403);
+  // One word for a refused cookie write, as on every store route (amendment 35).
+  if (refusal === "bad_origin" || (live && refusal)) {
+    const message = refusal === "bad_origin" ? "This request didn't come from the Zeron site." : "This page is out of date. Reload it and try again.";
+    return jsonAnswer({ error: "bad_csrf", message }, 403);
+  }
   if (live) {
     const ended = await userDirectoryStub(env)?.endWebSession((await sessionTokenHash(live.token))!);
     if (ended?.workosSessionId && env.WORKOS_API_KEY) {
