@@ -35,7 +35,7 @@ const TAKEDOWN_EVERY: Duration = Duration::from_secs(15 * 60);
 
 /// [`TAKEDOWN_EVERY`], or `ZERON_TAKEDOWN_EVERY_SECS` (a local end-to-end
 /// run, which can't wait 15 minutes), also the wait before the first read.
-fn takedown_every() -> (Duration, Duration) {
+pub(super) fn takedown_every() -> (Duration, Duration) {
     match std::env::var("ZERON_TAKEDOWN_EVERY_SECS").ok().and_then(|s| s.parse::<u64>().ok()).filter(|s| *s > 0) {
         Some(secs) => (Duration::from_secs(secs), Duration::from_secs(secs)),
         None => (FIRST_CHECK, TAKEDOWN_EVERY),

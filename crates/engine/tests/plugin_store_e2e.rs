@@ -765,6 +765,14 @@ async fn the_plugin_store_end_to_end() {
     e.check("9", "the same signed request again is refused as a replay", status == 401 && body["error"] == "replayed_request", format!("{status} {body}"));
     let (status, body) = e.admin(&staff, &format!("versions/{ID}/1.3.0/verify"), json!({})).await;
     e.check("9", "staff verify 1.3.0", status == 200, &body);
+    // Bob's phone, his since before the transfer: his key's publish is a
+    // notice; ada's versions, transferred in with the plugin, never were.
+    let noticed = wait_for("bob's phone to notice his key's publish", async || notices(&phone).await.contains(&format!("{ID}@1.3.0"))).await;
+    let list = phone.call(methods::LIST_PLUGINS, json!({})).await.unwrap();
+    let shown = list["store_notices"].as_array().cloned().unwrap_or_default();
+    let by_key = shown.iter().any(|n| n["id"] == format!("{ID}@1.3.0") && n["via"] == "deploy_key" && n["key_name"] == "CI");
+    let ada_s = shown.iter().any(|n| ["1.0.0", "1.1.0", "1.2.0"].iter().any(|v| n["id"] == format!("{ID}@{v}")));
+    e.check("9", "the new owner's devices notice his first key publish, and none of the former owner's versions", noticed && by_key && !ada_s, &list["store_notices"]);
     let other = store_package(signer, ID, "1.3.1", json!({}), &[]);
     let (status, body) = e.signed(&bob_key, "POST", &path, &other, now_ms(), Some(&pkg)).await;
     e.check("9", "a body that isn't the one its hash names is refused", status == 400 && body["error"] == "body_mismatch", format!("{status} {body}"));

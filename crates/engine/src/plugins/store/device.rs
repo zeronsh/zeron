@@ -1034,7 +1034,10 @@ impl Plugins {
     /// with no plugins is asked again only every few hours.
     pub async fn check_publishes(&self) {
         let Ok((client, caller)) = self.store_as_person().await else { return };
-        let idle = lock(&self.inner.publishes_checked).is_some_and(|(at, had)| !had && at.elapsed() < PUBLISHES_IDLE);
+        // (A local run's shorter interval, `ZERON_TAKEDOWN_EVERY_SECS`,
+        // shortens this too.)
+        let idle_for = PUBLISHES_IDLE.min(super::super::lifecycle::takedown_every().1);
+        let idle = lock(&self.inner.publishes_checked).is_some_and(|(at, had)| !had && at.elapsed() < idle_for);
         if idle {
             return;
         }
