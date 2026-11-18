@@ -390,6 +390,10 @@ function M.place(s: Sim, saved: { [string]: any }?): number
 			placed[i] = true
 		end
 	end
+	-- (Nodes with no parent and no place, round the middle on a spiral, a
+	-- fan's spacing apart: all at the middle, hundreds of them on one
+	-- point, the push apart was hundreds squared each step.)
+	local loose = 0
 	local function put(i: number)
 		if placed[i] then
 			return
@@ -400,8 +404,14 @@ function M.place(s: Sim, saved: { [string]: any }?): number
 			local x, y = slot(s, i)
 			local j = (hash01(s.ids[i], s.seed) - 0.5) * 2
 			s.x[i], s.y[i] = x + j, y - j
-		else
+		elseif loose == 0 then
 			s.x[i], s.y[i] = 0, 0
+			loose = 1
+		else
+			local r = M.FAN_GAP * math.sqrt(loose)
+			local a = loose * 2.399963229728653
+			s.x[i], s.y[i] = r * math.cos(a), r * math.sin(a)
+			loose += 1
 		end
 		placed[i] = true
 		s.fresh[i] = true

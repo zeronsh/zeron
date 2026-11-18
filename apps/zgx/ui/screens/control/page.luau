@@ -1196,22 +1196,26 @@ local function readers(live: () -> boolean, name: string): any
 	R.clock = held(function(): any
 		return Visibility.now()
 	end)
-	local rows = held(function(): any
+	local prows = held(function(): any
 		return Progress.rows:get()
 	end)
 	-- A chat's progress row (a board card's clocks).
 	function R.row(id: string): any
-		return rows()[id]
+		return prows()[id]
 	end
 	-- A name, a hue: from what's held.
+	-- (Each by its own rows, account/rows, held: a push wakes the names and
+	-- hues of the chats it changed, not every one shown.)
+	local title = hold.by(live, rows.title, name)
+	local hue = hold.by(live, rows.hue, name)
 	function R.name_of(id: string?): string?
-		return data.name_of(R.now(), R.chats(), id)
+		return if id then title(id) else nil
 	end
 	function R.thread_name(id: string): string
-		return Name.from(R.named(), R.chats(), id)
+		return R.name(id)
 	end
 	function R.hue_of(id: string?): number?
-		return data.hue_of(R.now(), R.chats(), id)
+		return if id then hue(id) else nil
 	end
 	return R
 end
