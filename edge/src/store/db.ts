@@ -29,6 +29,8 @@ export interface PluginRow {
   readonly listed_version: string | null;
   readonly verified: number;
   readonly verified_version: string | null;
+  /** When `verified_version` was verified. */
+  readonly verified_at: number | null;
   readonly name: string | null;
   readonly summary: string | null;
   readonly icon: string | null;
@@ -167,12 +169,13 @@ export const relist = (db: D1Database, id: string, author: string | null): D1Pre
       `WITH best AS (
          SELECT * FROM versions WHERE plugin_id = ?1 AND status = 'listed' ORDER BY ${LISTING_ORDER} LIMIT 1
        ), vetted AS (
-         SELECT version FROM versions WHERE plugin_id = ?1 AND status = 'listed' AND verification = 'verified' ORDER BY ${LISTING_ORDER} LIMIT 1
+         SELECT version, verified_at FROM versions WHERE plugin_id = ?1 AND status = 'listed' AND verification = 'verified' ORDER BY ${LISTING_ORDER} LIMIT 1
        )
        UPDATE plugins SET
          listed_version = (SELECT version FROM best),
          verified = COALESCE((SELECT verification = 'verified' FROM best), 0),
          verified_version = (SELECT version FROM vetted),
+         verified_at = (SELECT verified_at FROM vetted),
          name = (SELECT name FROM best),
          summary = (SELECT summary FROM best),
          icon = (SELECT icon FROM best),

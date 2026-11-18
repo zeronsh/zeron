@@ -117,6 +117,7 @@ describe("store admin routes", () => {
       version: "1.1.0",
       verified: false,
       verified_version: "1.0.0",
+      verified_at: expect.any(Number),
       updated_at: expect.any(Number),
       listed_at: expect.any(Number),
       installs: 0,
@@ -451,6 +452,7 @@ describe("store author routes", () => {
       author: { username: a.username },
       verified: false,
       verified_version: null,
+      verified_at: null,
       versions: [
         {
           version: "0.1.0-beta.1", status: "listed", prerelease: true, verified: false, via: "device", key: a.signer.key,

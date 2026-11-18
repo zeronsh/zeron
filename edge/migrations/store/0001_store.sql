@@ -28,10 +28,12 @@ CREATE TABLE plugins (
   -- The card (store/db.ts `relist`): its newest listed version (a release
   -- before a pre-release), verified or not, and what the card shows of it;
   -- null while nothing is listed. `verified`: that version is verified.
-  -- `verified_version`: the newest verified listed version.
+  -- `verified_version`: the newest verified listed version, verified at
+  -- `verified_at` (the catalog's `sort=verified`).
   listed_version TEXT,
   verified INTEGER NOT NULL DEFAULT 0 CHECK (verified IN (0, 1)),
   verified_version TEXT,
+  verified_at INTEGER,
   name TEXT,
   summary TEXT,
   icon TEXT,

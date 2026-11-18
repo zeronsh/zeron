@@ -38,7 +38,7 @@ import { type VersionPlace, decodeCursor, decodeVersionCursor, encodeCursor, enc
 import { decodeSegment } from "./serve";
 import { parseVersion } from "./semver";
 
-export const SORTS = ["relevance", "popular", "updated", "new"] as const;
+export const SORTS = ["relevance", "popular", "updated", "new", "verified"] as const;
 export type Sort = (typeof SORTS)[number];
 export const DEFAULT_LIMIT = 24;
 export const MAX_LIMIT = 50;
@@ -128,7 +128,7 @@ export const listParams = (lq: ListKey) => ({
  * each sort, featured or not, verified or not. */
 export const firstPageKeys = (categories: readonly string[]): string[] => {
   const keys: string[] = [];
-  for (const sort of ["popular", "updated", "new"] as const) {
+  for (const sort of ["popular", "updated", "new", "verified"] as const) {
     for (const featured of [false, true]) {
       for (const verified of [false, true]) {
         for (const category of [undefined, ...categories]) {
@@ -161,7 +161,10 @@ const SORT_KEY: Record<Sort, { readonly expr: string; readonly asc: boolean }> =
   relevance: { expr: "bm25(plugin_search, 10.0, 5.0, 3.0, 2.0, 1.0) - p.verified * 1e-9", asc: true },
   popular: { expr: "p.installs", asc: false },
   updated: { expr: "p.updated_at", asc: false },
-  new: { expr: "p.listed_at", asc: false }
+  new: { expr: "p.listed_at", asc: false },
+  // Newly verified: when its newest verified version was verified (only
+  // plugins with one).
+  verified: { expr: "p.verified_at", asc: false }
 };
 
 const listPlugins = async (env: Env, db: D1Database, lq: ListQuery): Promise<Response> => {
@@ -192,6 +195,7 @@ const listPlugins = async (env: Env, db: D1Database, lq: ListQuery): Promise<Res
   // Featured is the vetted shelf: only a plugin whose newest version is verified.
   if (lq.featured) where.push({ sql: "p.featured_at IS NOT NULL AND p.verified = 1", binds: [] });
   if (lq.verified) where.push({ sql: "p.verified = 1", binds: [] });
+  if (lq.sort === "verified") where.push({ sql: "p.verified_at IS NOT NULL", binds: [] });
   const sort = SORT_KEY[lq.sort];
   // Paging back reads the other way from the cursor's item, then turns round.
   const back = after?.dir === "prev";

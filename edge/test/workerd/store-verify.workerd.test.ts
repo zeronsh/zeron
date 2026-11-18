@@ -349,6 +349,45 @@ describe("the catalog's mark, filters and totals", () => {
     }
   });
 
+  it("shelves newly verified plugins by when their newest verified version was verified (sort=verified, ee380cca3)", async () => {
+    const a = await author();
+    const [first, second, older] = [uniqueId(), uniqueId(), uniqueId()];
+    await listed(a, first, "1.0.0");
+    await listed(a, second, "1.0.0");
+    // Its newest version unverified, an older one verified: shelved by the older one's time.
+    await listed(a, older, "1.0.0");
+    await published(a, older, "1.1.0");
+    const unverified = uniqueId();
+    await published(a, unverified, "1.0.0");
+    const card = async (id: string) => json<Record<string, any>>(await call(a.userId, "GET", `/store/v1/plugins/${id}`));
+    const versionAt = async (id: string, v: string) => (await json<{ verified_at: number }>(await call(a.userId, "GET", `/store/v1/plugins/${id}/versions/${v}`))).verified_at;
+    // A card's verified_at is its newest verified version's, or null.
+    expect((await card(older)).verified_at).toBe(await versionAt(older, "1.0.0"));
+    expect(await card(older)).toMatchObject({ version: "1.1.0", verified: false, verified_version: "1.0.0" });
+    expect((await card(unverified)).verified_at).toBeNull();
+    // Known verify times, set on the version and on the card's row as relist keeps them.
+    const at = Date.now() + 3_600_000;
+    for (const [id, v, t] of [[first, "1.0.0", at + 3000], [second, "1.0.0", at + 1000], [older, "1.0.0", at + 2000]] as const) {
+      await env.STORE_DB.batch([
+        env.STORE_DB.prepare("UPDATE versions SET verified_at = ? WHERE plugin_id = ? AND version = ?").bind(t, id, v),
+        env.STORE_DB.prepare("UPDATE plugins SET verified_at = ? WHERE id = ?").bind(t, id)
+      ]);
+    }
+    const shelf = async () => (await json<{ items: { id: string; verified_at: number }[] }>(await call(a.userId, "GET", "/store/v1/plugins?sort=verified&limit=3"))).items;
+    expect((await shelf()).map((c) => c.id)).toEqual([first, older, second]);
+    const all = (await json<{ items: { id: string }[]; total: number }>(await call(a.userId, "GET", "/store/v1/plugins?sort=verified&limit=50"))).items.map((c) => c.id);
+    expect(all).not.toContain(unverified);
+    // Keyset-paged as the others.
+    const page1 = await json<{ items: { id: string }[]; next_cursor: string }>(await call(a.userId, "GET", "/store/v1/plugins?sort=verified&limit=2"));
+    const page2 = await json<{ items: { id: string }[] }>(await call(a.userId, "GET", `/store/v1/plugins?sort=verified&limit=2&cursor=${page1.next_cursor}`));
+    expect([...page1.items, ...page2.items].map((c) => c.id).slice(0, 3)).toEqual([first, older, second]);
+    // Its only verified version taken down: off the shelf.
+    expect((await takeDown(older, "1.0.0")).status).toBe(200);
+    expect((await shelf()).map((c) => c.id).slice(0, 2)).toEqual([first, second]);
+    expect((await json<{ items: { id: string }[] }>(await call(a.userId, "GET", "/store/v1/plugins?sort=verified&limit=50"))).items.map((c) => c.id)).not.toContain(older);
+    expect((await card(older)).verified_at).toBeNull();
+  });
+
   it("pages every listed version, and answers one by name", async () => {
     const a = await author();
     const id = uniqueId();

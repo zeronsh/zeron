@@ -82,6 +82,8 @@ export const pluginCard = (p: PluginRow, author: Author) => ({
   // Its `version` is verified, and the newest verified listed version (amendment 45).
   verified: p.listed_version !== null && p.verified === 1,
   verified_version: p.verified_version,
+  // When that version was verified (the "Newly verified" shelf's order).
+  verified_at: p.verified_version !== null ? p.verified_at : null,
   updated_at: p.updated_at,
   // First listed, what "new" sorts by (amendment 39); null only on an owner's
   // or admin's card of a plugin never listed.
