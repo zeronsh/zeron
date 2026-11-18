@@ -88,6 +88,8 @@ interface Spec {
   history?: { version: string; status: Status; ago: number; notes?: string; review?: FakeVersion["review"]; engines?: string; permissions?: string[]; commands?: string[]; network?: string[] }[];
   readme?: string;
   screenshots?: number;
+  /** More files in every version's package. */
+  files?: Record<string, string>;
   status?: FakePlugin["status"];
 }
 
@@ -143,6 +145,7 @@ function build(spec: Spec): FakePlugin {
       "CHANGELOG.md": history.map((x) => `## ${x.version}\n\n${x.notes ?? "First release."}\n`).reverse().join("\n"),
     };
     if (spec.icon) files["icon.svg"] = ICONS[spec.icon]!;
+    Object.assign(files, spec.files ?? {});
     for (const [i, s] of shots.entries()) files[s] = screenshot(spec.name, accent, i === 0 ? (spec.part ?? "panel") : "page");
     const manifest: Record<string, unknown> = {
       id: spec.id,
@@ -310,6 +313,12 @@ const SPECS: Spec[] = [
   },
   {
     id: "theme-sync",
+    // Pictures that are not what they say: the file route must never let one run.
+    files: {
+      "shots/script.svg": `<svg xmlns="http://www.w3.org/2000/svg" onload="document.documentElement.setAttribute('data-ran','onload')"><script>document.documentElement.setAttribute('data-ran','script');parent.postMessage('ran','*')</script><rect width="10" height="10"/></svg>`,
+      "shots/page.png": `<!doctype html><html><body><p id="ran">an HTML page named .png</p><script>document.title='ran'</script></body></html>`,
+      "shots/polyglot.gif": `GIF89a/*\x00\x00*/=1;window.__ran='polyglot';/*<html><script>document.title='ran'</script>*/`,
+    },
     name: "Theme sync",
     summary: "Follows your desktop's light and dark, and your editor's theme, as they change.",
     icon: "palette",

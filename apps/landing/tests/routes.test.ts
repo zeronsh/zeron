@@ -175,6 +175,25 @@ describe("package files", () => {
     expect(response.headers.get("cache-control")).toBe("public, max-age=60");
   });
 
+  test("pictures that aren't what they say are still only pictures: typed by name, sandboxed, never sniffed", async () => {
+    for (const [file, type] of [["script.svg", "image/svg+xml"], ["page.png", "image/png"], ["polyglot.gif", "image/gif"]]) {
+      const response = await site.fetch(`/plugins/theme-sync/files/1.0.0/shots/${file}`);
+      expect(response.status, file).toBe(200);
+      expect(response.headers.get("content-type"), file).toBe(type);
+      expect(response.headers.get("x-content-type-options"), file).toBe("nosniff");
+      expect(response.headers.get("content-disposition"), file).toBe("inline");
+      const csp = response.headers.get("content-security-policy") ?? "";
+      expect(csp, file).toContain("sandbox");
+      expect(csp, file).toContain("default-src 'none'");
+      expect(csp, file).not.toContain("script");
+      expect(response.headers.get("cross-origin-resource-policy"), file).toBe("same-origin");
+    }
+    // Anything else in a package is never served from here, whatever it's called.
+    for (const file of ["page.html", "x.js", "x.htm", "x.xml", "x.svgz", "x.json", "x"]) {
+      expect((await site.fetch(`/plugins/theme-sync/files/1.0.0/shots/${file}`)).status, file).toBe(404);
+    }
+  });
+
   test("only pictures pass, and no path climbs out", async () => {
     for (const path of ["/plugins/focus-timer/files/1.2.0/init.luau", "/plugins/focus-timer/files/1.2.0/README.md", "/plugins/focus-timer/files/1.2.0/..%2f..%2fsecret.png", "/plugins/focus-timer/files/1.2.0/a//b.png", "/plugins/focus-timer/files/v1/icon.svg"]) {
       expect((await site.fetch(path)).status, path).toBe(404);
@@ -190,6 +209,18 @@ describe("package files", () => {
       expect(response.status, user).toBe(200);
       expect(response.headers.get("cache-control"), user).toBe("private, no-store");
       expect(response.headers.get("cloudflare-cdn-cache-control"), user).not.toMatch(/public/);
+    }
+  });
+});
+
+describe("public pages are the same for everyone (so a shared cache can keep them)", () => {
+  test("signed in or not, admin or not, the bytes are the same", async () => {
+    const people = [undefined, await site.signIn("user_ada"), await site.signIn("user_grace")];
+    for (const path of ["/plugins", "/plugins?category=git", "/plugins/focus-timer", "/plugins/session-badges", "/plugins/sitemap.xml"]) {
+      const bodies = await Promise.all(people.map(async (cookie) => (await html(path, cookie)).body));
+      expect(new Set(bodies).size, path).toBe(1);
+      const csp = await Promise.all(people.map(async (cookie) => (await site.fetch(path, cookie ? { headers: { cookie } } : {})).headers.get("set-cookie")));
+      expect(csp.every((c) => c === null), `${path} sets no cookie`).toBe(true);
     }
   });
 });

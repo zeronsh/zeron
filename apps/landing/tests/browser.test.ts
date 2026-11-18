@@ -69,6 +69,48 @@ describe("no violations axe can find", () => {
   }
 });
 
+describe("a package's pictures can't run", () => {
+  test("an SVG with script, opened on its own, runs nothing", async () => {
+    const { page, context } = await open("/plugins/theme-sync/files/1.0.0/shots/script.svg");
+    try {
+      await page.waitForTimeout(300);
+      expect(await page.evaluate(() => document.documentElement.getAttribute("data-ran"))).toBeNull();
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("an HTML page named .png is shown as a (broken) picture, not a page", async () => {
+    const { page, context } = await open("/plugins/theme-sync/files/1.0.0/shots/page.png");
+    try {
+      expect(await page.evaluate(() => document.getElementById("ran"))).toBeNull();
+      expect(await page.title()).not.toBe("ran");
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("a picture that is also a script won't load as one, even from the site's own page", async () => {
+    const { page, context } = await open("/plugins/theme-sync");
+    try {
+      const outcome = await page.evaluate(
+        () =>
+          new Promise<string>((resolve) => {
+            const script = document.createElement("script");
+            script.src = "/plugins/theme-sync/files/1.0.0/shots/polyglot.gif";
+            script.onload = () => resolve("loaded");
+            script.onerror = () => resolve("refused");
+            document.body.append(script);
+          }),
+      );
+      expect(outcome).toBe("refused");
+      expect(await page.evaluate(() => (window as { __ran?: string }).__ran)).toBeUndefined();
+    } finally {
+      await context.close();
+    }
+  });
+});
+
 describe("by keyboard", () => {
   test("a destructive action asks in a dialog that starts on Cancel and closes on Escape, back where it was", async () => {
     const { page, context } = await open("/account/plugins/session-badges", { as: "user_ada" });
