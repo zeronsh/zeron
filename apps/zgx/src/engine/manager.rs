@@ -9,8 +9,8 @@
 //! data in `ZERON_DATA_DIR` or ~/.zeron (crates/cli's paths), on
 //! `ZERON_IPC_PORT` or 27654. One already serving that port is used as it is
 //! (the shipping app's, before this one was installed). It signs in against
-//! production only (src/auth.rs), and a staging engine (port 27871,
-//! ~/.zeron-staging) or any other edge is refused. No more devices, no other
+//! production (src/auth.rs) unless a server is chosen (below), and a staging
+//! engine (port 27871, ~/.zeron-staging) is refused. No more devices, no other
 //! data: the same engine as before the beta. When the bundle is replaced by a
 //! newer one, the engine restarts into it by itself once nothing runs
 //! (crates/update `SupersededRestart`, weighing the bundle's
@@ -44,6 +44,12 @@
 //!                                 chats: for comparing against the shipping
 //!                                 app; never sign out from it)
 //!
+//! A **server chosen** on this computer (a self-hosted edge, picked on the
+//! sign-in screen or in Settings › Account) is kept in the engine's data dir
+//! (zeron_proto::server's `server.json`) and signed in to in place of the
+//! build's own, by this app's engine and by one the CLI starts there alike.
+//! Not when a development build's environment names an edge: that wins.
+//!
 //! A signed-out engine opens a local workspace and keeps it; signing in
 //! takes a new one (the shipping app's sync switch). So once the engine's
 //! session is signed in while its workspace is still local, it is stopped
@@ -52,6 +58,8 @@
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+use crate::auth::Endpoint;
 
 /// The production engine's data dirs, relative to home: today's and the one
 /// it was renamed from in 0.2.0.
@@ -88,10 +96,10 @@ pub struct Config {
     bin: Option<PathBuf>,
     home: Option<PathBuf>,
     spawn: bool,
-    /// What the engine signs in against: `src/auth.rs`'s.
-    edge: String,
-    client: String,
-    callback_port: u16,
+    /// Where the engine signs in: the build's own (`src/auth.rs`'s
+    /// [`crate::auth::endpoint`]) or the server chosen on this computer
+    /// ([`Config::with_chosen_server`]).
+    pub account: Endpoint,
     /// Zeron.app's engine, managed as Zeron.app manages it (the beta): its
     /// bundle's, started through crates/launch; it restarts into a newer
     /// bundle by itself.
@@ -140,28 +148,36 @@ pub fn started_build(config: &Config) -> Option<String> {
 }
 
 impl Config {
-    /// From the environment, for the account's edge, sign-in client and
-    /// callback port.
-    pub fn from_env(edge: &str, client: &str, callback_port: u16) -> Result<Self, Refusal> {
+    /// From the environment, for the build's own account (`base`) unless a
+    /// server is chosen on this computer.
+    pub fn from_env(base: &Endpoint) -> Result<Self, Refusal> {
         let var = |key: &str| std::env::var(key).ok().filter(|v: &String| !v.trim().is_empty());
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
         let exe = std::env::current_exe().ok();
-        Self::from_vars(var, &home, exe.as_deref(), edge, client, callback_port)
+        Self::from_vars(var, &home, exe.as_deref(), base)
     }
 
     fn from_vars(
         var: impl Fn(&str) -> Option<String>,
         home: &Path,
         exe: Option<&Path>,
-        edge: &str,
-        client: &str,
-        callback_port: u16,
+        base: &Endpoint,
     ) -> Result<Self, Refusal> {
-        if BETA {
-            Self::zeron_app(var, home, exe, edge, client, callback_port)
-        } else {
-            Self::staging(var, home, edge, client, callback_port)
+        let config = if BETA { Self::zeron_app(var, home, exe, base) } else { Self::staging(var, home, base) };
+        config.map(Self::with_chosen_server)
+    }
+
+    /// The server chosen on this computer (kept in the data dir, so the CLI
+    /// and its daemon starting this engine sign in there too) in place of
+    /// the build's own. Not when the environment names one: that wins.
+    fn with_chosen_server(mut self) -> Self {
+        if !self.account.set_by_environment()
+            && let Some(server) = zeron_proto::server::saved(&self.data_dir)
+            && server.url != self.account.edge
+        {
+            self.account = Endpoint::chosen(server);
         }
+        self
     }
 
     /// The beta's: Zeron.app's engine, resolved as Zeron.app resolves it.
@@ -169,13 +185,10 @@ impl Config {
         var: impl Fn(&str) -> Option<String>,
         home: &Path,
         exe: Option<&Path>,
-        edge: &str,
-        client: &str,
-        callback_port: u16,
+        base: &Endpoint,
     ) -> Result<Self, Refusal> {
-        let production = crate::auth::production();
-        if (edge, client, callback_port) != (production.edge.as_str(), production.client.as_str(), production.port) {
-            return Err(format!("{edge} isn't production's edge and sign-in"));
+        if *base != crate::auth::production() {
+            return Err(format!("{} isn't production's edge and sign-in", base.edge));
         }
         let port = zeron_cli::ipc_port_from(var("ZERON_IPC_PORT").as_deref());
         let data_dir = zeron_cli::paths::resolve_data_dir(|key| match key {
@@ -194,21 +207,13 @@ impl Config {
             bin: exe.and_then(zeron_launch::engine_executable),
             home: None,
             spawn: true,
-            edge: edge.into(),
-            client: client.into(),
-            callback_port,
+            account: base.clone(),
             managed: true,
         })
     }
 
     /// A development build's: a staging engine, never production's.
-    fn staging(
-        var: impl Fn(&str) -> Option<String>,
-        home: &Path,
-        edge: &str,
-        client: &str,
-        callback_port: u16,
-    ) -> Result<Self, Refusal> {
+    fn staging(var: impl Fn(&str) -> Option<String>, home: &Path, base: &Endpoint) -> Result<Self, Refusal> {
         let port = match var("ZERON_ZGX_ENGINE_PORT") {
             Some(raw) => raw
                 .trim()
@@ -238,15 +243,13 @@ impl Config {
             bin,
             home: var("ZERON_ZGX_ENGINE_HOME").map(|dir| expand(&dir, home)),
             spawn: var("ZERON_ZGX_ENGINE_SPAWN").as_deref() != Some("0"),
-            edge: edge.into(),
-            client: client.into(),
-            callback_port,
+            account: base.clone(),
             managed: false,
         })
     }
 
     pub fn describe(&self) -> String {
-        format!("port {}, data {}", self.port, self.data_dir.display())
+        format!("port {}, data {}, signing in on {}", self.port, self.data_dir.display(), self.account.edge)
     }
 }
 
@@ -347,8 +350,8 @@ fn launch(config: &Config) -> std::io::Result<()> {
         &zeron_launch::LaunchConfig {
             data_dir: config.data_dir.clone(),
             ipc_port: config.port,
-            edge_url: config.edge.clone(),
-            workos_client_id: Some(config.client.clone()),
+            edge_url: config.account.edge.clone(),
+            workos_client_id: Some(config.account.client.clone()),
             edge_token: None,
             org_id: None,
         },
@@ -371,9 +374,9 @@ fn spawn(config: &Config, bin: &Path) -> std::io::Result<()> {
     command
         .env("ZERON_DATA_DIR", &config.data_dir)
         .env("ZERON_IPC_PORT", config.port.to_string())
-        .env("ZERON_EDGE_URL", &config.edge)
-        .env("ZERON_WORKOS_CLIENT_ID", &config.client)
-        .env("ZERON_CALLBACK_PORT", config.callback_port.to_string())
+        .env("ZERON_EDGE_URL", &config.account.edge)
+        .env("ZERON_WORKOS_CLIENT_ID", &config.account.client)
+        .env("ZERON_CALLBACK_PORT", config.account.port.to_string())
         // Not the shipping app's: no app to open from a banner.
         .env_remove("ZERON_APP")
         // Nor a chat's (this app run from a Zeron terminal): an engine that
@@ -432,17 +435,15 @@ pub fn needs_restart(scope: Option<&str>, signed_in: bool, keep_local: bool) -> 
 mod tests {
     use super::*;
 
+    /// The config for production's sign-in on `edge`.
     fn config_of(vars: &[(&str, &str)], home: &Path, exe: Option<&Path>, edge: &str) -> Result<Config, Refusal> {
+        let base = Endpoint { edge: edge.into(), ..crate::auth::production() };
+        config_for(vars, home, exe, &base)
+    }
+
+    fn config_for(vars: &[(&str, &str)], home: &Path, exe: Option<&Path>, base: &Endpoint) -> Result<Config, Refusal> {
         let vars: Vec<(String, String)> = vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        let prod = crate::auth::production();
-        Config::from_vars(
-            move |key| vars.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()),
-            home,
-            exe,
-            edge,
-            &prod.client,
-            prod.port,
-        )
+        Config::from_vars(move |key| vars.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()), home, exe, base)
     }
 
     #[test]
@@ -508,7 +509,7 @@ mod tests {
         let beta = config_of(&[], home, Some(&exe), &prod.edge).unwrap();
         assert_eq!((beta.port, beta.data_dir.clone()), (27654, home.join(".zeron")));
         assert_eq!(beta.startable(), Some(macos.join("Zeron Engine").as_path()));
-        assert_eq!((beta.edge.as_str(), beta.client.as_str(), beta.callback_port), (prod.edge.as_str(), prod.client.as_str(), 27641));
+        assert_eq!(beta.account, prod);
         assert!(beta.follows_bundle());
         // As Zeron.app: ZERON_DATA_DIR and ZERON_IPC_PORT move it; the
         // development variables don't.
@@ -538,9 +539,7 @@ mod tests {
             bin: Some(bin),
             home: None,
             spawn: true,
-            edge: String::new(),
-            client: String::new(),
-            callback_port: 0,
+            account: crate::auth::production(),
             managed: false,
         };
         std::fs::create_dir_all(&config.data_dir).unwrap();
@@ -564,9 +563,7 @@ mod tests {
             bin: Some(dir.path().join("no-such-engine")),
             home: None,
             spawn: true,
-            edge: String::new(),
-            client: String::new(),
-            callback_port: 0,
+            account: crate::auth::production(),
             managed: false,
         };
         let mut spawner = Spawner::new();
@@ -578,6 +575,38 @@ mod tests {
         assert!(!spawner.start_if_due(&config), "one start per SPAWN_SPACING");
         let never = Config { spawn: false, ..config };
         assert!(!Spawner::new().start_if_due(&never));
+    }
+
+    /// A server chosen on this computer (kept in the engine's data dir) is
+    /// where the engine signs in, in place of the build's own; not once it's
+    /// the build's own again, nor when the environment names an edge.
+    #[test]
+    fn a_chosen_server_is_signed_in_to_in_place_of_the_build_s_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().to_str().unwrap();
+        let vars = [(if BETA { "ZERON_DATA_DIR" } else { "ZERON_ZGX_ENGINE_DATA" }, data)];
+        let home = Path::new("/Users/someone");
+        let own = crate::auth::endpoint();
+        let acme = zeron_proto::server::Server {
+            url: "https://zeron.acme.dev".into(),
+            workos_client_id: "client_acme".into(),
+            name: Some("Acme".into()),
+        };
+        assert_eq!(config_for(&vars, home, None, &own).unwrap().account, own);
+        zeron_proto::server::save(dir.path(), Some(&acme)).unwrap();
+        let chosen = config_for(&vars, home, None, &own).unwrap();
+        assert_eq!(chosen.account, Endpoint::chosen(acme.clone()));
+        assert_eq!((chosen.account.name, chosen.account.port), ("self_hosted", 27641));
+        assert!(chosen.describe().contains("https://zeron.acme.dev"));
+        if !BETA {
+            let named = Endpoint { name: "custom", edge: "http://localhost:8787".into(), ..own.clone() };
+            assert_eq!(config_for(&vars, home, None, &named).unwrap().account, named);
+        }
+        let own_again = zeron_proto::server::Server { url: own.edge.clone(), workos_client_id: own.client.clone(), name: None };
+        zeron_proto::server::save(dir.path(), Some(&own_again)).unwrap();
+        assert_eq!(config_for(&vars, home, None, &own).unwrap().account, own);
+        zeron_proto::server::save(dir.path(), None).unwrap();
+        assert_eq!(config_for(&vars, home, None, &own).unwrap().account, own);
     }
 
     #[test]

@@ -54,6 +54,7 @@
 
 local sessions = require("@account/sessions")
 local look = require("@app/screens/shell/project_look")
+local server = require("@screens/server")
 
 local M = {}
 
@@ -695,10 +696,18 @@ function M.settings(page: string?)
 	go("settings", { page = to })
 end
 
+-- File → Connect to Server…, or an invite clicked (on its `address`):
+-- Settings → Account, the server's dialog open over it (screens/server).
+function M.connect_server(address: string?)
+	server.ask(address)
+	M.settings("profile")
+end
+
 -- A `zeron://` link the system handed the app (a clicked banner, a chat's
--- link), read by the host (src/links.rs): `{ seq, chat?, settings? }`, `seq`
--- moving with each. Followed once each, never on a reload.
-local link = ui.shared("app.link", { seq = 0 } :: { seq: number, chat: string?, settings: string? })
+-- link, a server's invite), read by the host (src/links.rs): `{ seq, chat?,
+-- settings?, server? }`, `seq` moving with each. Followed once each, never
+-- on a reload.
+local link = ui.shared("app.link", { seq = 0 } :: { seq: number, chat: string?, settings: string?, server: string? })
 local followed = ui.state("shell_link_followed", 0)
 ui.effect(function()
 	local l = link:get()
@@ -710,6 +719,8 @@ ui.effect(function()
 		M.open_session(l.chat)
 	elseif l.settings then
 		M.settings(l.settings)
+	elseif l.server then
+		M.connect_server(l.server)
 	end
 end)
 

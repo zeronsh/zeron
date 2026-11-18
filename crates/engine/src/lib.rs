@@ -960,7 +960,7 @@ impl Engine {
             std::env::var("ZERON_CALLBACK_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
-                .unwrap_or(27641),
+                .unwrap_or(zeron_proto::server::CALLBACK_PORT),
         );
         if let Some(token) = &config.edge_token {
             auth_config.dev_user_id = token.clone();

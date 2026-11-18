@@ -32,6 +32,7 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.LinearWavyProgressIndicator
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.LoadingIndicator
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SegmentedListItem
 import androidx.compose.material3.Surface
@@ -183,16 +184,24 @@ fun AgentTile(harness: String?, size: Dp = 40.dp) {
     }
 }
 
-/** The filled capsule: the one way forward. */
+/** The filled capsule: the one way forward. [busyText] says what it's waiting on ("Connecting…"). */
 @Composable
-fun PrimaryCapsule(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, @DrawableRes icon: Int? = null, enabled: Boolean = true, busy: Boolean = false) {
+fun PrimaryCapsule(
+    text: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    @DrawableRes icon: Int? = null,
+    enabled: Boolean = true,
+    busy: Boolean = false,
+    busyText: String? = null,
+) {
     Button(
         onClick = onClick,
         enabled = enabled && !busy,
         shape = CircleShape,
         contentPadding = PaddingValues(horizontal = 24.dp),
         modifier = modifier.fillMaxWidth().heightIn(min = 56.dp),
-    ) { CapsuleContent(text, icon, busy) }
+    ) { CapsuleContent(text, icon, busy, busyText) }
 }
 
 /** A quieter tonal capsule beside or under the primary one. */
@@ -217,7 +226,13 @@ fun PlainCapsule(text: String, onClick: () -> Unit, modifier: Modifier = Modifie
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun CapsuleContent(text: String, @DrawableRes icon: Int?, busy: Boolean) {
+private fun CapsuleContent(text: String, @DrawableRes icon: Int?, busy: Boolean, busyText: String? = null) {
+    if (busy && busyText != null) {
+        LoadingIndicator(Modifier.size(24.dp), color = LocalContentColor.current)
+        Spacer(Modifier.width(8.dp))
+        Text(busyText, style = MaterialTheme.typography.titleMedium)
+        return
+    }
     if (busy) {
         LoadingIndicator(Modifier.size(28.dp), color = ButtonDefaults.buttonColors().contentColor)
         return

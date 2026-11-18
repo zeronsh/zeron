@@ -10,6 +10,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import sh.zeron.android.core.LaunchOptions
+import sh.zeron.android.core.ServerLink
 import sh.zeron.android.ui.ZeronRoot
 
 /**
@@ -54,7 +55,9 @@ class MainActivity : ComponentActivity() {
                 sendOnOpen = rig?.getString("send-on-open"),
             ),
         )
-        handleCallback(intent)
+        // Recreated (rotation, a theme change), the intent is one already handled:
+        // a link would open the server sheet again, a callback fail as replayed.
+        if (savedInstanceState == null) handleCallback(intent)
         setContent { ZeronRoot(model) }
     }
 
@@ -105,7 +108,12 @@ class MainActivity : ComponentActivity() {
         }
         val data = intent?.data ?: return
         if (data.scheme != "zeron") return
-        if (data.host == "callback") model.handleCallback(data.toString()) else model.browser.links.tryEmit(data)
+        when (data.host) {
+            "callback" -> model.handleCallback(data.toString())
+            // An invite to a self-hosted server; one without an address is ignored.
+            ServerLink.HOST -> ServerLink.address(data.toString())?.let(model::openServerLink)
+            else -> model.browser.links.tryEmit(data)
+        }
     }
 
     override fun onResume() {

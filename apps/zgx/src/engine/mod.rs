@@ -27,7 +27,9 @@ use std::{
 use serde_json::{Value as Json, json};
 use zgx_desktop::{TaskSpawner, WindowContext};
 
+use crate::auth::Endpoint;
 use manager::{Config, Spawner};
+use zeron_proto::server::Server;
 use rpc::{DialError, Rpc};
 
 /// How long a connection lost, or an engine this app can't start, takes to
@@ -76,7 +78,12 @@ where
 }
 
 pub struct Engine {
-    config: Result<Config, manager::Refusal>,
+    /// The build's own account (or a development build's environment's):
+    /// what "Zeron" is here, and where the account lives unless a server is
+    /// chosen ([`Engine::account`]).
+    own: Endpoint,
+    /// Changes only as a server is chosen ([`Engine::use_server`]).
+    config: RefCell<Result<Config, manager::Refusal>>,
     /// The connection, while there is one.
     rpc: RefCell<Option<Rpc>>,
     /// Its engine's workspace (`local`, `synced`, `development`), once asked.
@@ -131,7 +138,7 @@ pub fn install(cx: &mut WindowContext) {
 /// supervisor finds none: the engine starts up beside the window's.
 pub fn start_ahead() {
     let engine = get();
-    if let Ok(config) = &engine.config
+    if let Ok(config) = &*engine.config.borrow()
         && !zeron_launch::data_dir_held(&config.data_dir)
     {
         engine.spawner.borrow_mut().start_if_due(config);
@@ -152,14 +159,15 @@ impl Drop for Supervising {
 
 impl Engine {
     fn new() -> Self {
-        let account = crate::auth::endpoint();
-        let config = Config::from_env(&account.edge, &account.client, account.port);
+        let own = crate::auth::endpoint();
+        let config = Config::from_env(&own);
         match &config {
             Ok(config) => eprintln!("zeron-zgx: engine: {}", config.describe()),
             Err(why) => eprintln!("zeron-zgx: engine: refused ({why}); nothing that needs it works"),
         }
         Self {
-            config,
+            own,
+            config: RefCell::new(config),
             rpc: RefCell::default(),
             scope: RefCell::default(),
             signed_in: Cell::new(false),
@@ -183,12 +191,54 @@ impl Engine {
     /// token): for a helper process of this app's own that talks to it
     /// directly (src/terminal.rs's bridge).
     pub fn ipc_endpoint(&self) -> Option<(u16, std::path::PathBuf)> {
-        self.config.as_ref().ok().map(|c| (c.port, c.data_dir.clone()))
+        self.config.borrow().as_ref().ok().map(|c| (c.port, c.data_dir.clone()))
     }
 
-    /// How this app reaches and starts its engine (none: refused).
-    pub fn config(&self) -> Option<&Config> {
-        self.config.as_ref().ok()
+    /// How this app reaches and starts its engine, as it is now (none:
+    /// refused).
+    pub fn config(&self) -> Option<Config> {
+        self.config.borrow().as_ref().ok().cloned()
+    }
+
+    /// Where the account lives: the server chosen on this computer, else the
+    /// build's own.
+    pub fn account(&self) -> Endpoint {
+        self.config.borrow().as_ref().map_or_else(|_| self.own.clone(), |config| config.account.clone())
+    }
+
+    /// The build's own account (or the environment's), whatever is chosen.
+    pub fn own_server(&self) -> &Endpoint {
+        &self.own
+    }
+
+    /// Signs in to `server` from now on, or to the build's own (none): kept
+    /// in the data dir for every engine started there (this app's, the
+    /// CLI's), and the engine started again on it. The caller signs out
+    /// first: a session is one server's. `offline` while an engine this app
+    /// can't reach holds the data dir (it would carry on on the old one).
+    pub fn use_server(&self, server: Option<Server>) -> Result<(), String> {
+        self.may_use_server()?;
+        let mut config = self.config.borrow().clone()?;
+        let server = server.filter(|server| server.url != self.own.edge);
+        zeron_proto::server::save(&config.data_dir, server.as_ref()).map_err(|error| error.to_string())?;
+        config.account = server.map_or_else(|| self.own.clone(), Endpoint::chosen);
+        eprintln!("zeron-zgx: engine: signing in on {} from now on", config.account.edge);
+        *self.config.borrow_mut() = Ok(config);
+        self.start_again("the server changed; starting it again on the new one");
+        Ok(())
+    }
+
+    /// Why [`Self::use_server`] can't switch now, if it can't: asked before
+    /// signing out, so a switch that can't happen leaves the session alone.
+    pub fn may_use_server(&self) -> Result<(), String> {
+        if self.own.set_by_environment() {
+            return Err("the environment names the edge".into());
+        }
+        let config = self.config.borrow().clone()?;
+        if self.current().is_none() && zeron_launch::data_dir_held(&config.data_dir) {
+            return Err("offline".into());
+        }
+        Ok(())
     }
 
     /// Asks the engine to stop: the connection ends and the supervisor
@@ -212,7 +262,7 @@ impl Engine {
     /// The engine's data dir, as this app's config has it (nothing when the
     /// config refused one).
     pub fn data_dir(&self) -> Option<std::path::PathBuf> {
-        self.config.as_ref().ok().map(|c| c.data_dir.clone())
+        self.config.borrow().as_ref().ok().map(|c| c.data_dir.clone())
     }
 
     /// `work` on the connection's tasks.
@@ -242,12 +292,12 @@ impl Engine {
     /// Whether no connection is to be said as "can't reach the engine". (With
     /// a connection, it's not asked.)
     pub fn unreachable(&self) -> bool {
-        says_unreachable(self.config.is_err(), self.answered.get(), self.can_start(), self.down_since.get().elapsed())
+        says_unreachable(self.config.borrow().is_err(), self.answered.get(), self.can_start(), self.down_since.get().elapsed())
     }
 
     /// Whether this app can start an engine, should none answer.
     pub fn can_start(&self) -> bool {
-        self.config.as_ref().is_ok_and(|config| config.startable().is_some())
+        self.config.borrow().as_ref().is_ok_and(|config| config.startable().is_some())
     }
 
     /// The connection, waiting up to `wait` for one.
@@ -257,7 +307,7 @@ impl Engine {
             if let Some(rpc) = self.rpc.borrow().clone().filter(|rpc| !rpc.is_closed()) {
                 return Some(rpc);
             }
-            if self.config.is_err() || Instant::now() >= until {
+            if self.config.borrow().is_err() || Instant::now() >= until {
                 return None;
             }
             zgx::timer::sleep(Duration::from_millis(100)).await;
@@ -273,7 +323,7 @@ impl Engine {
                 return Some(rpc);
             }
             let waiting = keeps_waiting(self.answered.get(), self.can_start());
-            if self.config.is_err() || (!waiting && Instant::now() >= until) {
+            if self.config.borrow().is_err() || (!waiting && Instant::now() >= until) {
                 return None;
             }
             zgx::timer::sleep(Duration::from_millis(100)).await;
@@ -326,15 +376,22 @@ impl Engine {
         if self.restarting.get() || !manager::needs_restart(scope.as_deref(), self.signed_in.get(), keep_local) {
             return;
         }
+        self.start_again(if keep_local {
+            "chats kept on this device; starting it again on the local workspace"
+        } else {
+            "signed in on a local workspace; starting it again to sync"
+        });
+    }
+
+    /// Stops the connected engine (saying `why`), for the supervisor to start
+    /// one in its place with the config as it is now. None connected: the
+    /// next one started has it.
+    fn start_again(&self, why: &str) {
         let Some(rpc) = self.rpc.borrow().clone() else {
             return;
         };
         self.restarting.set(true);
-        if keep_local {
-            eprintln!("zeron-zgx: engine: chats kept on this device; starting it again on the local workspace");
-        } else {
-            eprintln!("zeron-zgx: engine: signed in on a local workspace; starting it again to sync");
-        }
+        eprintln!("zeron-zgx: engine: {why}");
         self.spawn(async move {
             // It answers, then stops; the connection ends and a new engine
             // is started in its place.
@@ -348,15 +405,16 @@ impl Engine {
 
     async fn supervise(self: Rc<Self>) {
         let _supervising = Supervising(self.clone());
-        let Ok(config) = &self.config else {
-            return;
-        };
         let mut delay = Duration::from_millis(250);
         let mut said = None::<String>;
         let mut said_unreachable = false;
         // The token the engine last refused, if it refused the last dial.
         let mut refused = None::<Option<String>>;
         loop {
+            // As it is now: a server chosen meanwhile is the next engine's.
+            let Some(config) = self.config() else {
+                return;
+            };
             let token = rpc::read_token(&config.data_dir);
             // Refused again with the same token: nothing will change by
             // dialling as often (a data dir with a copy of an engine's token,
@@ -367,7 +425,7 @@ impl Engine {
             // computer, or after the engine stopped): none is running, so
             // one is started before dialling, not once a dial is refused.
             if !zeron_launch::data_dir_held(&config.data_dir) {
-                self.spawner.borrow_mut().start_if_due(config);
+                self.spawner.borrow_mut().start_if_due(&config);
             }
             match rpc::connect(config.port, token.clone()).await {
                 Ok(rpc) => {
@@ -404,7 +462,7 @@ impl Engine {
                     // or an engine is about to let go of the data dir: it's a
                     // moment away, not worth backing off.)
                     let mut spawner = self.spawner.borrow_mut();
-                    if spawner.start_if_due(config) || spawner.held() || spawner.starting() {
+                    if spawner.start_if_due(&config) || spawner.held() || spawner.starting() {
                         delay = Duration::from_millis(100);
                     }
                 }

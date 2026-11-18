@@ -8426,7 +8426,8 @@ public func FfiConverterTypeContextUsage_lower(_ value: ContextUsage) -> RustBuf
  */
 public struct CoreConfig: Equatable, Hashable {
     /**
-     * Edge base URL (`auth_production_edge_url()` for prod).
+     * Edge base URL: the `url` of the server the credentials belong to
+     * (`ServerInfo`; `server_official()` until someone picks another).
      */
     public var edgeUrl: String
     /**
@@ -8457,7 +8458,8 @@ public struct CoreConfig: Equatable, Hashable {
     // declare one manually.
     public init(
         /**
-         * Edge base URL (`auth_production_edge_url()` for prod).
+         * Edge base URL: the `url` of the server the credentials belong to
+         * (`ServerInfo`; `server_official()` until someone picks another).
          */edgeUrl: String, 
         /**
          * Writable directory for registry/doc snapshots and caches, scoped by
@@ -12241,6 +12243,115 @@ public func FfiConverterTypeSendRequest_lift(_ buf: RustBuffer) throws -> SendRe
 #endif
 public func FfiConverterTypeSendRequest_lower(_ value: SendRequest) -> RustBuffer {
     return FfiConverterTypeSendRequest.lower(value)
+}
+
+
+/**
+ * A server an app can sign in to, with what the UI shows of it.
+ */
+public struct ServerInfo: Equatable, Hashable {
+    /**
+     * Origin, `https://host[:port]`: the `edge_url` of everything else.
+     */
+    public var url: String
+    /**
+     * The WorkOS client its sign-in goes through (`workos_authorize_url`).
+     */
+    public var workosClientId: String
+    /**
+     * What its operator calls it, when they named it.
+     */
+    public var name: String?
+    /**
+     * `host[:port]`.
+     */
+    public var host: String
+    /**
+     * The name, else the host: what to call it in a sentence.
+     */
+    public var label: String
+    /**
+     * Zeron's own server.
+     */
+    public var isOfficial: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Origin, `https://host[:port]`: the `edge_url` of everything else.
+         */url: String, 
+        /**
+         * The WorkOS client its sign-in goes through (`workos_authorize_url`).
+         */workosClientId: String, 
+        /**
+         * What its operator calls it, when they named it.
+         */name: String?, 
+        /**
+         * `host[:port]`.
+         */host: String, 
+        /**
+         * The name, else the host: what to call it in a sentence.
+         */label: String, 
+        /**
+         * Zeron's own server.
+         */isOfficial: Bool) {
+        self.url = url
+        self.workosClientId = workosClientId
+        self.name = name
+        self.host = host
+        self.label = label
+        self.isOfficial = isOfficial
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ServerInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeServerInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ServerInfo {
+        return
+            try ServerInfo(
+                url: FfiConverterString.read(from: &buf), 
+                workosClientId: FfiConverterString.read(from: &buf), 
+                name: FfiConverterOptionString.read(from: &buf), 
+                host: FfiConverterString.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf), 
+                isOfficial: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ServerInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.url, into: &buf)
+        FfiConverterString.write(value.workosClientId, into: &buf)
+        FfiConverterOptionString.write(value.name, into: &buf)
+        FfiConverterString.write(value.host, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterBool.write(value.isOfficial, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeServerInfo_lift(_ buf: RustBuffer) throws -> ServerInfo {
+    return try FfiConverterTypeServerInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeServerInfo_lower(_ value: ServerInfo) -> RustBuffer {
+    return FfiConverterTypeServerInfo.lower(value)
 }
 
 
@@ -17676,6 +17787,90 @@ public func FfiConverterTypeSendState_lower(_ value: SendState) -> RustBuffer {
 
 
 /**
+ * Why the server at an address can't be used.
+ */
+public 
+enum ServerLookupError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+    
+    
+    /**
+     * `message` is the sentence to show; `code` names the case
+     * (zeron_proto::server::ServerError::code) for UIs that branch on it.
+     */
+    case Failed(code: String, message: String
+    )
+
+    
+
+    
+
+    
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+    
+}
+
+#if compiler(>=6)
+extension ServerLookupError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeServerLookupError: FfiConverterRustBuffer {
+    typealias SwiftType = ServerLookupError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ServerLookupError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        
+
+        
+        case 1: return .Failed(
+            code: try FfiConverterString.read(from: &buf), 
+            message: try FfiConverterString.read(from: &buf)
+            )
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ServerLookupError, into buf: inout [UInt8]) {
+        switch value {
+
+        
+
+        
+        
+        case let .Failed(code,message):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(code, into: &buf)
+            FfiConverterString.write(message, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeServerLookupError_lift(_ buf: RustBuffer) throws -> ServerLookupError {
+    return try FfiConverterTypeServerLookupError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeServerLookupError_lower(_ value: ServerLookupError) -> RustBuffer {
+    return FfiConverterTypeServerLookupError.lower(value)
+}
+
+
+/**
  * Where a new session runs.
  */
 
@@ -21902,12 +22097,14 @@ public func relativeTimeLabel(atMs: Int64, nowMs: Int64) -> String  {
 })
 }
 /**
- * WorkOS AuthKit authorize URL (start of the web-auth session).
+ * WorkOS AuthKit authorize URL (start of the web-auth session) for the
+ * server whose client is `workos_client_id` (`ServerInfo`).
  */
-public func workosAuthorizeUrl(state: String) -> String  {
+public func workosAuthorizeUrl(workosClientId: String, state: String) -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
         uniffiCallStatus in
     uniffi_zeron_mobile_fn_func_workos_authorize_url(
+        FfiConverterString.lower(workosClientId),
         FfiConverterString.lower(state),uniffiCallStatus
     )
 })
@@ -21920,6 +22117,57 @@ public func agentLoginRules(harness: String) -> AgentLoginRules  {
         uniffiCallStatus in
     uniffi_zeron_mobile_fn_func_agent_login_rules(
         FfiConverterString.lower(harness),uniffiCallStatus
+    )
+})
+}
+/**
+ * The server at `address` as someone typed it (`zeron.example.com`,
+ * `http://192.168.1.20:8787`), read from its discovery document.
+ */
+public func serverDiscover(address: String)async throws  -> ServerInfo  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_func_server_discover(FfiConverterString.lower(address)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeServerInfo_lift,
+            errorHandler: FfiConverterTypeServerLookupError_lift
+        )
+}
+/**
+ * A stored server, described again (its host, label, whether it's Zeron's).
+ */
+public func serverInfo(url: String, workosClientId: String, name: String?) -> ServerInfo  {
+    return try!  FfiConverterTypeServerInfo_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_server_info(
+        FfiConverterString.lower(url),
+        FfiConverterString.lower(workosClientId),
+        FfiConverterOptionString.lower(name),uniffiCallStatus
+    )
+})
+}
+/**
+ * Zeron's own server.
+ */
+public func serverOfficial() -> ServerInfo  {
+    return try!  FfiConverterTypeServerInfo_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_server_official(uniffiCallStatus
+    )
+})
+}
+/**
+ * How to run a server of one's own (the "learn more" link).
+ */
+public func serverSelfHostingGuide() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_server_self_hosting_guide(uniffiCallStatus
     )
 })
 }
@@ -22104,10 +22352,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_func_relative_time_label() != 32740) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_zeron_mobile_checksum_func_workos_authorize_url() != 35994) {
+    if (uniffi_zeron_mobile_checksum_func_workos_authorize_url() != 45923) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_agent_login_rules() != 18451) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_server_discover() != 56165) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_server_info() != 24112) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_server_official() != 45518) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_server_self_hosting_guide() != 41435) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_file_mention_link() != 14340) {

@@ -8858,6 +8858,7 @@ dependencies = [
  "zeron-engine",
  "zeron-mcp",
  "zeron-notify",
+ "zeron-proto",
  "zeron-rpc",
  "zeron-sync",
  "zeron-update",
@@ -9170,6 +9171,7 @@ dependencies = [
  "pulldown-cmark",
  "serde",
  "serde_json",
+ "url",
  "uuid",
 ]
 

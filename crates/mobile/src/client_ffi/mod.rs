@@ -15,6 +15,7 @@ mod cloud;
 pub(crate) mod companions;
 mod providers;
 pub use providers::UsageWindowInfo;
+mod server;
 mod session;
 mod voice;
 pub use voice::*;
@@ -595,10 +596,11 @@ pub fn auth_callback_scheme() -> String {
     zc::auth::CALLBACK_SCHEME.to_owned()
 }
 
-/// WorkOS AuthKit authorize URL (start of the web-auth session).
+/// WorkOS AuthKit authorize URL (start of the web-auth session) for the
+/// server whose client is `workos_client_id` (`ServerInfo`).
 #[uniffi::export]
-pub fn workos_authorize_url(state: String) -> String {
-    zc::auth::workos_authorize_url(&state)
+pub fn workos_authorize_url(workos_client_id: String, state: String) -> String {
+    zc::auth::workos_authorize_url(&workos_client_id, &state)
 }
 
 /// `code`/`state` (or the provider error) of a `zeron://callback?…` URL.

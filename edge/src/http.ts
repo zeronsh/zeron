@@ -1,5 +1,15 @@
 /** Small HTTP helpers shared by the Cloud/vault route modules. */
 
+/** Text for an HTML page or attribute, its markup characters escaped (a
+ * query param or an operator's setting can be anything). */
+export const escapeHtml = (s: string): string =>
+  s
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+
 export const json = (value: unknown, status = 200): Response =>
   new Response(JSON.stringify(value), {
     status,

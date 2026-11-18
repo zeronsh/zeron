@@ -62,6 +62,7 @@ mod previews;
 mod projects;
 mod quit_prompt;
 mod relaunch;
+mod server;
 mod session_home;
 mod sessions;
 mod settings;
@@ -447,6 +448,9 @@ fn intro(cx: &mut WindowContext, inspect: bool) {
     // Setup's window is made hidden (`prepare`): the intro may ask for it at
     // launch, over the desktop.
     host.shared("onboarding.prepare_hidden", true);
+    // No account here, but the server sign-in names: the same as setup's
+    // window will.
+    host.shared("account", auth::signed_out_value());
     let setup: Rc<RefCell<Option<WindowHandle>>> = Rc::default();
     // Setup's `onboarding.arrived`, set once the window is its own.
     let arrival: Rc<RefCell<Option<Shared>>> = Rc::default();

@@ -62,6 +62,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
@@ -157,6 +158,7 @@ class MenuAction(
     val destructive: Boolean = false,
     /** A toggle's state (a trailing check), or null for a plain action. */
     val checked: Boolean? = null,
+    val testTag: String? = null,
     val onClick: () -> Unit,
 )
 
@@ -184,6 +186,7 @@ fun GroupedActionMenu(expanded: Boolean, onDismiss: () -> Unit, groups: List<Lis
                         },
                         text = { Text(a.label, color = tint) },
                         shape = MenuDefaults.itemShape(i, actions.size).shape,
+                        modifier = a.testTag?.let { Modifier.testTag(it) } ?: Modifier,
                         leadingIcon = { sh.zeron.android.design.ZIcon(a.icon, null, Modifier.size(20.dp), tint = tint) },
                         trailingIcon = if (a.checked == true) {
                             { sh.zeron.android.design.ZIcon(sh.zeron.android.design.ZIcons.Check, "On", Modifier.size(20.dp), tint = tint) }

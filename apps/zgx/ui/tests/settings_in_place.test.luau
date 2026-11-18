@@ -1146,3 +1146,93 @@ test("the wallpaper's rows stand inline in one card, a hairline only between the
 	expect(app:count(`{NEW_CHAT} >> .settings-rule`)).to_be(0)
 	expect(app:state("shell_wallpaper_image")).never.to_be_nil()
 end)
+
+-- The server the account lives on (screens/server): named on Account, the
+-- way to another. Signed in, a switch asks first (it signs out), then setup.
+local SERVER_DIALOG = 'role:dialog "Choose a server"'
+local SWITCH_DIALOG = 'role:dialog "Switch to Acme?"'
+
+-- Whether `sel` is on screen: a closed dialog's content is kept, hidden.
+local function showing(app: any, sel: string): boolean
+	if not app:has(sel) then
+		return false
+	end
+	local first = string.match(app:tree(sel), "[^\n]+") or ""
+	return string.find(first, " hidden", 1, true) == nil
+end
+
+local function choose_server(app: any, address: string)
+	app:click(`{PAGE} >> role:button "Server"`)
+	app:frames(20)
+	app:click(`{SERVER_DIALOG} >> role:radio "Self-hosted"`)
+	app:frames(4)
+	app:fill(`{SERVER_DIALOG} >> role:textbox "Server address"`, address)
+	app:frames(4)
+	app:click(`{SERVER_DIALOG} >> role:button "Connect"`)
+	app:frames(30)
+end
+
+test("signed in, another server is asked about first, by its name, then switched to, signed out, at setup", function()
+	local app = open("Account")
+	expect(shows(app, `{PAGE} >> role:button "Server"`, "Zeron")).to_be(true)
+	expect(shows(app, `{PAGE} >> role:button "Server"`, "edge.zeron.sh")).to_be(true)
+	choose_server(app, "zeron.acme.com")
+	expect(asked(app, "account.find_server:zeron.acme.com")).to_be(true)
+	-- Found, nothing changed yet: the question, red, in the chooser's place.
+	expect(showing(app, SERVER_DIALOG)).to_be(false)
+	expect(showing(app, SWITCH_DIALOG)).to_be(true)
+	expect(app:has(`{SWITCH_DIALOG} >> role:button "Sign Out and Switch"`)).to_be(true)
+	expect(asked(app, "account.use_server:zeron.acme.com")).to_be(false)
+	app:click(`{SWITCH_DIALOG} >> role:button "Sign Out and Switch"`)
+	app:frames(30)
+	expect(asked(app, "account.use_server:zeron.acme.com")).to_be(true)
+	expect(showing(app, SWITCH_DIALOG)).to_be(false)
+	expect(asked(app, "app.onboard")).to_be(true)
+end)
+
+test("signed in, the switch's question cancelled changes nothing; refused, it says why and stays", function()
+	local app = open("Account")
+	choose_server(app, "zeron.acme.com")
+	app:click(`{SWITCH_DIALOG} >> role:button "Cancel"`)
+	app:frames(30)
+	expect(showing(app, SWITCH_DIALOG)).to_be(false)
+	expect(asked(app, "account.use_server:zeron.acme.com")).to_be(false)
+	expect(app:has(`{PAGE} >> role:textbox "Name"`)).to_be(true)
+	-- The engine not answering: said under the question, which stays.
+	app:command("settings_stub.refuse_next")
+	choose_server(app, "zeron.acme.com")
+	app:click(`{SWITCH_DIALOG} >> role:button "Sign Out and Switch"`)
+	app:frames(20)
+	expect(showing(app, SWITCH_DIALOG)).to_be(true)
+	expect(shows(app, SWITCH_DIALOG, "Zeron's engine isn't answering")).to_be(true)
+	expect(asked(app, "app.onboard")).to_be(false)
+end)
+
+test("signed out, Account's server row switches at once, nothing to ask", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1200, 900)
+	app:frames(30)
+	app:command("shell.settings")
+	app:frames(20)
+	app:click(`{NAV} >> role:tab "Account"`)
+	app:frames(30)
+	choose_server(app, "zeron.acme.com")
+	expect(asked(app, "account.use_server:zeron.acme.com")).to_be(true)
+	expect(app:has(SWITCH_DIALOG)).to_be(false)
+	expect(showing(app, SERVER_DIALOG)).to_be(false)
+	expect(shows(app, `{PAGE} >> role:button "Server"`, "Acme")).to_be(true)
+	expect(asked(app, "app.onboard")).to_be(false)
+end)
+
+test("File → Connect to Server… opens Account, its server's dialog over it", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1200, 900)
+	app:frames(30)
+	app:command("shell.connect_server")
+	app:frames(40)
+	expect(showing(app, SERVER_DIALOG)).to_be(true)
+	expect(app:has(`{PAGE} >> role:button "Server"`)).to_be(true)
+	app:click(`{SERVER_DIALOG} >> role:button "Cancel"`)
+	app:frames(30)
+	expect(showing(app, SERVER_DIALOG)).to_be(false)
+end)

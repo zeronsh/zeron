@@ -197,6 +197,10 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         s.appendItems([
             Row(id: "account", title: app.accountName, subtitle: app.accountDetail, symbol: "person.crop.circle", accessory: .none),
         ])
+        // The demo has no account, so no server either.
+        if !app.isDemo {
+            s.appendItems([Row(id: "server", title: "Server", subtitle: app.server.info.label, symbol: "server.rack")])
+        }
         // Agents and where they run, as the desktop groups them: Providers,
         // then Cloud and Billing when this account is offered Cloud.
         s.appendSections(["Agents"])
@@ -258,6 +262,7 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         collectionView.deselectItem(at: path, animated: true)
         guard let row = dataSource.itemIdentifier(for: path) else { return }
         switch row.id {
+        case "server": present(ServerSheetViewController.sheet(app: app, mode: .switchAccount), animated: true)
         case "voice": navigationController?.pushViewController(VoiceViewController(app: app), animated: true)
         case "activity": navigationController?.pushViewController(ActivitySettingsViewController(app: app), animated: true)
         case "providers":

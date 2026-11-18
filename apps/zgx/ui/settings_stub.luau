@@ -525,6 +525,39 @@ auths.sign_out = function(done: (() -> ())?)
 	end
 end
 
+-- Servers, as the host would find them: one at an address with "acme" in
+-- it (Acme's, its sign-in set up), none anywhere else ("not_zeron"). Using
+-- one signs out first, as the host does; `settings_stub.refuse_next`
+-- makes the switch fail ("offline").
+local ZERON_SERVER = { kind = "zeron", host = "edge.zeron.sh", url = "https://edge.zeron.sh", zeron_host = "edge.zeron.sh", guide = "https://github.com/zeronsh/zeron/blob/main/docs/self-hosting.md" }
+auths.find_server = function(address: string, done: (any?, any?) -> ())
+	log(`account.find_server:{address}`)
+	local host = string.gsub(string.gsub(address, "^https://", ""), "/$", "")
+	if string.find(host, "acme", 1, true) then
+		done({ zeron = false, current = (auth.server:peek() :: any).host == host, host = host, url = `https://{host}`, workos_client_id = "client_acme", name = "Acme" }, nil)
+	else
+		done(nil, { error = "not_zeron", host = host, message = `{host} isn't a Zeron server.` })
+	end
+end
+auths.forget_lookup = function() end
+auths.use_server = function(found: any?, done: ((string?) -> ())?)
+	log(`account.use_server:{if found then found.host else "zeron"}`)
+	if refuse:peek() then
+		refuse:set(false)
+		if done then
+			done("offline")
+		end
+		return
+	end
+	local server = if found
+		then { kind = "self_hosted", name = found.name, host = found.host, url = found.url, zeron_host = ZERON_SERVER.zeron_host, guide = ZERON_SERVER.guide }
+		else ZERON_SERVER
+	auth.account:set({ state = "signed_out", env = if found then "self_hosted" else "staging", server = server } :: any)
+	if done then
+		done(nil)
+	end
+end
+
 -- The launch before the engine has answered, and the engine saying signed out.
 ui.command {
 	id = "settings_stub.restoring",

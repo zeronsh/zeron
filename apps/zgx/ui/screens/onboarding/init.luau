@@ -15,6 +15,7 @@ local state = require("@self/state")
 local actions = require("@self/actions")
 local signin = require("@self/signin")
 local auth = require("@account/auth")
+local server = require("@screens/server")
 local username = require("@self/username")
 local card = require("@self/card")
 local appearance = require("@self/appearance")
@@ -36,6 +37,11 @@ end
 local arrived = ui.shared("onboarding.arrived", true)
 -- Sign in has been shown in this launch (signed out, or handed over).
 local signin_seen = ui.state("signin_seen", false)
+-- The server being chosen (its dialog open): from Sign in's pill, File →
+-- Connect to Server…, or an invite (`zeron://server?address=…`).
+local choosing_server = ui.state("signin_server", false)
+-- The last `zeron://` link followed here (`app.link`'s seq).
+local link_followed = ui.state("setup_link_followed", 0)
 
 local STEPS: { [state.Step]: () -> Node } = {
 	signin = function()
@@ -72,6 +78,10 @@ local STEPS: { [state.Step]: () -> Node } = {
 				return auth.says(auth.failure:get())
 			end,
 			on_skip = actions.skip_sign_in,
+			-- (Zeron's goes unsaid; another is named over the title, the way
+			-- to choosing again.)
+			server = server.identity,
+			on_server = ui.set(choosing_server, true),
 		})
 	end,
 	appearance = function()
@@ -143,6 +153,46 @@ return function(): Node
 	ui.effect(function()
 		actions.apply_scheme(state.appearance:get())
 	end)
+	-- File → Connect to Server…, from any step (Sign in's pill is the way
+	-- on its own page). Not while a launch's environment fixes the server.
+	if auth.server:peek().kind ~= "environment" then
+		ui.command {
+			id = "setup.connect_server",
+			title = ui.t("onboarding.connect_server"):get(),
+			menu = "File",
+			run = function()
+				server.ask()
+			end,
+		}
+	end
+	-- An invite clicked (`zeron://server?address=…`, read by the host,
+	-- src/links.rs): the dialog, on its address, once the window is its own
+	-- (not over the intro's hand-off). Followed once each, never on a
+	-- reload.
+	local link = ui.shared("app.link", { seq = 0 } :: { seq: number, server: string? })
+	ui.effect(function()
+		local l = link:get()
+		if l.seq == 0 or l.seq == link_followed:peek() or not arrived:get() then
+			return
+		end
+		link_followed:set(l.seq)
+		if l.server then
+			server.ask(l.server)
+		end
+	end)
+	-- Another server chosen. Signed out of one: back to the start, on the
+	-- new one. From past Sign in (setup without an account): back to it, to
+	-- sign in there. On Sign in: a failure said for the last one, or a
+	-- sign-in waiting on its browser, no longer stands.
+	local function server_changed(signed_out: boolean)
+		if signed_out or state.step:peek() ~= "signin" then
+			actions.signed_out()
+		elseif state.signin:peek() == "waiting" then
+			actions.cancel_sign_in()
+		elseif state.signin:peek() == "failed" then
+			state.signin:set("ready")
+		end
+	end
 	return Onboarding.Frame {
 		opaque = function()
 			return not arrived:get()
@@ -167,5 +217,7 @@ return function(): Node
 			enter = { opacity = { 0, 1 }, y = { 12, 0 }, blur = { 8, 0 }, duration = 420, ease = "outExpo" },
 			exit = { opacity = 0, y = -8, duration = 160, ease = "inQuad" },
 		}),
+		-- (Over every step: an invite or the menu opens it wherever setup is.)
+		server.Dialog { open = choosing_server, on_changed = server_changed },
 	}
 end

@@ -178,13 +178,14 @@ final class AppModel {
         path.start(queue: DispatchQueue(label: "sh.zeron.path"))
         let args = ProcessInfo.processInfo.arguments
         #if DEBUG
-        // Test hooks (never in release builds): wipe the Keychain, or run
-        // against a local dev stack.
+        // Test hooks (never in release builds): wipe the Keychain (and the
+        // chosen server), or run against a local dev stack.
         if args.contains("-signedout") {
-            Credentials.clearStored()
+            StoredCredentials.clear()
+            ChosenServer.save(nil)
         }
         if let i = args.firstIndex(of: "-dev"), i + 2 < args.count {
-            start(.dev(userId: args[i + 1], orgId: args[i + 2]))
+            start(.dev(userId: args[i + 1], orgId: args[i + 2]), server: signInServer)
             return
         }
         #endif
@@ -201,10 +202,11 @@ final class AppModel {
             // too: nothing folded.
             if i != nil { UserDefaults.standard.removeObject(forKey: "collapsedSections") }
         }
-        if args.contains("-demo") || args.contains("-route") && Credentials.stored() == nil {
+        let stored = StoredCredentials.load()
+        if args.contains("-demo") || args.contains("-route") && stored == nil {
             start(.demo(options: Self.demoOptions()))
-        } else if let stored = Credentials.stored() {
-            start(stored)
+        } else if let stored {
+            start(stored.credentials, server: stored.server)
         }
     }
 
@@ -225,12 +227,12 @@ final class AppModel {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("core", isDirectory: true)
     }
 
-    /// Local docs belong to one identity: another account/org starts from an
-    /// empty store (it must never see — or sync — the last one's cache).
-    private static func claimCoreDir(for credentials: Credentials) {
+    /// Local docs belong to one identity: another account/org/server starts
+    /// from an empty store (it must never see — or sync — the last one's cache).
+    private static func claimCoreDir(for credentials: Credentials, on server: SavedServer) {
         let owner: String
         switch credentials {
-        case let .workOs(userId, orgId, _), let .dev(userId, orgId): owner = "\(userId)/\(orgId)"
+        case let .workOs(userId, orgId, _), let .dev(userId, orgId): owner = server.coreOwner(userId: userId, orgId: orgId)
         case .demo: return
         }
         let marker = coreDir.appendingPathComponent(".owner")
@@ -241,11 +243,14 @@ final class AppModel {
         try? owner.write(to: marker, atomically: true, encoding: .utf8)
     }
 
+    /// Opens the workspace of `credentials`, an account on `server` (the
+    /// demo has none).
     @discardableResult
-    private func start(_ credentials: Credentials) -> Bool {
+    private func start(_ credentials: Credentials, server: SavedServer = .official) -> Bool {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let dir = credentials.isDemo ? support.appendingPathComponent("demo", isDirectory: true) : Self.coreDir
-        if !credentials.isDemo { Self.claimCoreDir(for: credentials) }
+        accountServer = credentials.isDemo ? nil : server
+        if !credentials.isDemo { Self.claimCoreDir(for: credentials, on: server) }
         // `-fresh-demo`: the demo from its fixtures alone, none of an earlier
         // run's writes (sleeps, archives) carried over.
         if credentials.isDemo, ProcessInfo.processInfo.arguments.contains("-fresh-demo") {
@@ -253,7 +258,7 @@ final class AppModel {
         }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let config = CoreConfig(
-            edgeUrl: Self.edgeURL,
+            edgeUrl: self.server.url,
             dataDir: dir.path,
             deviceId: Self.deviceId,
             deviceName: UIDevice.current.name,
@@ -265,7 +270,7 @@ final class AppModel {
             client = try CoreClient(config: config, credentials: credentials, listener: bridge)
             // Only real accounts persist; dev bearers come from launch args
             // (and would be rejected by the production edge next launch).
-            if case .workOs = credentials { Credentials.store(credentials) }
+            if case .workOs = credentials { StoredCredentials(credentials: credentials, server: server).save() }
             refreshWorkspace()
             client?.preloadSessions()
             backfillProfile()
@@ -276,6 +281,7 @@ final class AppModel {
         } catch {
             NSLog("core start failed: \(error)")
             client = nil
+            accountServer = nil
             return false
         }
     }
@@ -291,12 +297,16 @@ final class AppModel {
         return true
     }
 
-    /// `-edge <url>` points at a local `wrangler dev` edge; otherwise production.
-    static var edgeURL: String {
-        #if DEBUG
-        if let edge = Endpoints.debugOverride("-edge", key: "debugEdgeURL") { return edge }
-        #endif
-        return Endpoints.edgeURL.absoluteString
+    /// The server signed in to, as stored with the credentials (nil signed
+    /// out, and in the demo).
+    private(set) var accountServer: SavedServer?
+
+    /// The server sign-in uses: the one chosen on the sign-in screen.
+    var signInServer: SavedServer { ChosenServer.load() ?? .official }
+
+    /// The server this app talks to: its `edgeUrl`, and what Settings shows.
+    var server: SavedServer {
+        ServerChoice.resolve(override: SavedServer.launchOverride, account: accountServer, chosen: ChosenServer.load())
     }
 
     static var deviceId: String {
@@ -306,9 +316,10 @@ final class AppModel {
         return id
     }
 
-    /// WorkOS code → tokens → org (the first, or the only one) → client.
-    func signIn(code: String, chooseOrg: @escaping ([AuthOrg]) async -> AuthOrg?) async throws {
-        let edge = Self.edgeURL
+    /// WorkOS code → tokens → org (the first, or the only one) → client, all
+    /// on `server` (the one the code came from).
+    func signIn(code: String, server: SavedServer, chooseOrg: @escaping ([AuthOrg]) async -> AuthOrg?) async throws {
+        let edge = server.reached.url
         let exchange = try await authExchangeCode(edgeUrl: edge, code: code)
         let orgs = try await authListOrgs(edgeUrl: edge, accessToken: exchange.tokens.accessToken)
         guard !orgs.isEmpty else { throw CoreError.Auth(message: "This account isn't in an organization yet.") }
@@ -317,7 +328,7 @@ final class AppModel {
         let user = exchange.user
         let name = [user.firstName, user.lastName].compactMap { $0?.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.joined(separator: " ")
         AccountProfile(name: name.nonEmpty, email: user.email, orgName: org.name).save()
-        let started = await MainActor.run { start(.workOs(userId: exchange.user.id, orgId: org.organizationId, tokens: tokens)) }
+        let started = await MainActor.run { start(.workOs(userId: exchange.user.id, orgId: org.organizationId, tokens: tokens), server: server) }
         guard started else { throw CoreError.Auth(message: "Couldn't open your workspace. Try signing in again.") }
         await MainActor.run { onSignedIn?() }
     }
@@ -341,7 +352,9 @@ final class AppModel {
         lastDeliveryActivity = .distantPast
         client?.shutdown()
         client = nil
-        Credentials.clearStored()
+        // The chosen server stays: signing in again starts on it.
+        accountServer = nil
+        StoredCredentials.clear()
         AccountProfile.clear()
         clock?.invalidate()
         if forgetOnSignOut { try? FileManager.default.removeItem(at: Self.coreDir) }
@@ -456,7 +469,7 @@ final class AppModel {
             connectivity = c
             observers.values.forEach { $0() }
         case let .authRefreshed(tokens):
-            Credentials.updateTokens(tokens)
+            StoredCredentials.updateTokens(tokens)
         case .authExpired:
             onSignOut?()
         }
@@ -823,8 +836,8 @@ final class AppModel {
     /// Logins from before profiles were saved: recover the org name (the
     /// user's name comes back at the next sign-in).
     private func backfillProfile() {
-        guard case let .workOs(_, orgId, tokens)? = Credentials.stored(), AccountProfile.load().orgName == nil else { return }
-        let edge = Self.edgeURL
+        guard case let .workOs(_, orgId, tokens)? = StoredCredentials.load()?.credentials, AccountProfile.load().orgName == nil else { return }
+        let edge = server.url
         Task { @MainActor [weak self] in
             guard let orgs = try? await authListOrgs(edgeUrl: edge, accessToken: tokens.accessToken),
                   let org = orgs.first(where: { $0.organizationId == orgId })
@@ -999,47 +1012,77 @@ extension Credentials {
         if case .demo = self { return true }
         return false
     }
+}
+
+/// The Keychain's `credentials` item: an account and the server it's on
+/// (`edge`, `workosClientId`, `serverName`). Zeron's server writes none of
+/// those, so items from before servers read back unchanged, as Zeron's.
+struct StoredCredentials: Equatable {
+    var credentials: Credentials
+    var server: SavedServer
 
     private static let service = "sh.zeron.ios"
     private static let account = "credentials"
 
-    static func stored() -> Credentials? {
-        guard let data = Keychain.load(service: service, account: account),
-              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: String]
-        else { return nil }
+    init(credentials: Credentials, server: SavedServer) {
+        self.credentials = credentials
+        self.server = server
+    }
+
+    init?(json: Data) {
+        guard let dict = try? JSONSerialization.jsonObject(with: json) as? [String: String] else { return nil }
         switch dict["kind"] {
         case "workos":
             guard let u = dict["userId"], let o = dict["orgId"], let a = dict["access"], let r = dict["refresh"] else { return nil }
-            return .workOs(userId: u, orgId: o, tokens: AuthTokens(accessToken: a, refreshToken: r))
+            credentials = .workOs(userId: u, orgId: o, tokens: AuthTokens(accessToken: a, refreshToken: r))
         case "dev":
             guard let u = dict["userId"], let o = dict["orgId"] else { return nil }
-            return .dev(userId: u, orgId: o)
+            credentials = .dev(userId: u, orgId: o)
         default:
             return nil
         }
+        if let edge = dict["edge"] {
+            server = SavedServer(url: edge, workosClientId: dict["workosClientId"] ?? "", name: dict["serverName"])
+        } else {
+            server = .official
+        }
     }
 
-    static func store(_ c: Credentials) {
-        var dict: [String: String] = [:]
-        switch c {
+    /// Nil for the demo (it has nothing to keep).
+    var json: Data? {
+        var dict: [String: String]
+        switch credentials {
         case let .workOs(userId, orgId, tokens):
             dict = ["kind": "workos", "userId": userId, "orgId": orgId, "access": tokens.accessToken, "refresh": tokens.refreshToken]
         case let .dev(userId, orgId):
             dict = ["kind": "dev", "userId": userId, "orgId": orgId]
         case .demo:
-            return
+            return nil
         }
-        if let data = try? JSONSerialization.data(withJSONObject: dict) {
-            Keychain.save(data, service: service, account: account)
+        if !server.isOfficial {
+            dict["edge"] = server.url
+            dict["workosClientId"] = server.workosClientId
+            dict["serverName"] = server.name
         }
+        return try? JSONSerialization.data(withJSONObject: dict)
     }
 
+    static func load() -> StoredCredentials? {
+        Keychain.load(service: service, account: account).flatMap(StoredCredentials.init(json:))
+    }
+
+    func save() {
+        if let json { Keychain.save(json, service: Self.service, account: Self.account) }
+    }
+
+    /// New tokens for the stored account, on the server it was on.
     static func updateTokens(_ tokens: AuthTokens) {
-        guard case let .workOs(userId, orgId, _) = stored() else { return }
-        store(.workOs(userId: userId, orgId: orgId, tokens: tokens))
+        guard var stored = load(), case let .workOs(userId, orgId, _) = stored.credentials else { return }
+        stored.credentials = .workOs(userId: userId, orgId: orgId, tokens: tokens)
+        stored.save()
     }
 
-    static func clearStored() {
+    static func clear() {
         Keychain.delete(service: service, account: account)
     }
 }

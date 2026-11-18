@@ -26,6 +26,7 @@ local CardActions = require("@ds/card_actions")
 local store = require("@app/screens/settings/store")
 local search = require("@app/screens/settings/search")
 local visits = require("@app/screens/settings/visits")
+local server = require("@screens/server")
 
 local M = {}
 
@@ -39,6 +40,7 @@ search.index(M.ID, ui.t("settings.profile.title"), ui.t("settings.profile.terms"
 	{ key = "title", title = ui.t("settings.profile.job_title.label"), terms = ui.t("settings.profile.job_title.terms") },
 	{ key = "username", title = ui.t("settings.profile.username.label"), terms = ui.t("settings.profile.username.terms") },
 	{ key = "email", title = ui.t("settings.profile.email.label"), terms = ui.t("settings.profile.email.terms") },
+	{ key = "server", title = ui.t("settings.profile.server.label"), terms = ui.t("settings.profile.server.terms") },
 	{ key = "card", title = ui.t("settings.profile.card.label"), terms = ui.t("settings.profile.card.terms") },
 	{ key = "devices", title = ui.t("settings.profile.devices.label"), terms = ui.t("settings.profile.devices.terms") },
 	{ key = "signing_keys", title = ui.t("settings.profile.keys.label"), terms = ui.t("settings.profile.keys.terms") },
@@ -602,6 +604,44 @@ local function row(key: string, props: any): Node
 	return search.anchor(key, ds.Settings.Row(props))
 end
 
+-- The server the account lives on (screens/server): its name, its address
+-- under it, the row the way to choosing another. Named by a launch's
+-- environment, it says so instead and leads nowhere (only a launch changes
+-- it; the account is the host's before the page is built).
+local choosing_server = ui.state("settings_server", false)
+-- (Searched for, it's the signed-in page's that's lit: the signed-out
+-- page's has no anchor, as none of its rows do.)
+local function server_row(anchored: boolean): Node
+	local fixed = auth.server:peek().kind == "environment"
+	local props = {
+		label = ui.t("settings.profile.server.label"),
+		-- (Its address; one with no name of its own is named by it already.)
+		description = function(): string
+			if fixed then
+				return ui.t("account.server.environment"):get()
+			end
+			local s = auth.server:get()
+			return if s.kind == "self_hosted" and not (s.name and s.name ~= "")
+				then ui.t("account.server.self_hosted"):get()
+				else s.host
+		end,
+		value = function(): string
+			return auth.server_label(auth.server:get())
+		end,
+		icon = "global",
+		on_click = if fixed then nil else ui.set(choosing_server, true),
+	}
+	return if anchored then row("server", props) else ds.Settings.Row(props :: any)
+end
+-- Signed in, a switch signed out first: setup is the way back in, on the
+-- server chosen (as signing out leaves you).
+local function server_changed(signed_out: boolean)
+	if signed_out then
+		store.forget()
+		host.invoke("app.onboard")
+	end
+end
+
 -- Signed out: the page as it will be, with nothing to fill in. The card
 -- yours will be, made out to you, where your card stands once you're in;
 -- what an account gives, as the rows the page will hold; and the one way
@@ -643,6 +683,8 @@ local function signed_out(narrow: () -> boolean): Node
 				gives("tag", ui.t("settings.profile.signed_out.card"), ui.t("settings.profile.signed_out.card_description")),
 				gives("smartphone", ui.t("settings.profile.signed_out.sessions"), ui.t("settings.profile.signed_out.sessions_description")),
 			},
+			-- Where the account will live: chosen before signing in.
+			ds.Settings.Group { server_row(false) },
 			ui.row {
 				w_full = true,
 				justify = "end",
@@ -840,6 +882,7 @@ function M.view(): Node
 								icon = "user-rounded",
 								truncate = true,
 							},
+							server_row(true),
 						},
 					}
 				),
@@ -920,6 +963,7 @@ function M.view(): Node
 				},
 			}),
 		claim_dialog(),
+		server.Dialog { open = choosing_server, on_changed = server_changed },
 		ds.Dialog {
 			open = confirming,
 			title = ui.t("settings.profile.sign_out.confirm_title"),

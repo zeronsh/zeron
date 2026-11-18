@@ -2180,6 +2180,10 @@
         "org": "In {org}. Your sessions sync across your devices.",
         "sync": "Your sessions sync across your devices."
       },
+      "server": {
+        "label": "Server",
+        "terms": "self-hosted self hosted own server edge relay host address url domain"
+      },
       "card": {
         "label": "Member card",
         "terms": "share copy link x twitter",
@@ -2587,6 +2591,7 @@
         "shell_previous_session": "Previous session",
         "session_n": "Session {i}",
         "shell_palette": "Search",
+        "shell_connect_server": "Connect to Server…",
         "shell_check_updates": "Check for Updates…",
         "shell_settings": "Settings",
         "shell_find": "Find",
@@ -2765,6 +2770,7 @@
     }
   },
   "onboarding": {
+    "connect_server": "Connect to Server…",
     "skip_for_now": "Skip for now",
     "not_now": "Not now",
     "signin": {
@@ -3426,6 +3432,46 @@
         "offline": "Zeron can't be reached. Check your connection and try again.",
         "expired": "You were signed out. Sign in again to carry on.",
         "failed": "Sign-in didn't finish. Try again."
+      }
+    },
+    "server": {
+      "zeron": "Zeron",
+      "identity": "Server, {server}",
+      "identity_host": "Server, {server}, {host}",
+      "title": "Choose a server",
+      "body": "Zeron keeps your chats in sync through a server. Use Zeron's, or one you or your team runs.",
+      "label": "Server",
+      "self_hosted": "Self-hosted",
+      "self_hosted_description": "Your own server",
+      "address": "Server address",
+      "placeholder": "zeron.example.com",
+      "separate": "Your account on a self-hosted server is separate from your Zeron account.",
+      "connect": "Connect",
+      "connect_to": "Connect to {server}",
+      "use_zeron": "Use Zeron",
+      "guide": "Run your own server",
+      "environment": "This build's ZERON_ZGX_* variables chose this server when Zeron opened. Open Zeron without them to choose another.",
+      "switch_title": "Switch to {server}?",
+      "switch_body": "You'll be signed out on this computer, then setup opens to sign in on {server}.",
+      "switch": "Sign Out and Switch",
+      "says": {
+        "empty": "Enter your server's address.",
+        "invalid": "That isn't a server address. It looks like zeron.example.com.",
+        "scheme": "Use an https:// address.",
+        "credentials": "Leave the user name and password out of the address.",
+        "path": "Enter the server's address alone, like zeron.example.com, with nothing after it.",
+        "insecure": "Use https://. Zeron connects over http:// only to servers on your own network.",
+        "unreachable": "Couldn't reach {host}. Check the address and your connection.",
+        "not_zeron": "{host} isn't a Zeron server.",
+        "outdated": "{host} runs an older Zeron server. Its owner needs to update it.",
+        "needs_newer_app": "{host} needs a newer version of Zeron. Update Zeron to connect.",
+        "dev_server": "{host} is a development server, which apps can't sign in to. It needs WorkOS sign-in set up.",
+        "not_configured": "{host} hasn't finished setting up sign-in.",
+        "not_configured_missing": "{host} hasn't finished setting up sign-in (missing {missing}).",
+        "unavailable": "{host} isn't answering right now (error {status}). Try again in a moment.",
+        "offline": "The server didn't change: Zeron's engine isn't answering. Try again in a moment.",
+        "set_by_environment": "This build's ZERON_ZGX_* variables chose the server when Zeron opened, so it can't change here.",
+        "failed": "The server didn't change. Try again."
       }
     },
     "cloud": {
