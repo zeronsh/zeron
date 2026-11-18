@@ -2823,6 +2823,7 @@ fn forwardable(method: &str) -> bool {
             | methods::STAGE_PLUGIN_PACKAGE
             | methods::CHECK_PLUGIN_UPDATES
             | methods::UPDATE_PLUGIN
+            | methods::INSTALL_VERIFIED_PLUGIN
             | methods::PLUGIN_STATUS
     )
 }

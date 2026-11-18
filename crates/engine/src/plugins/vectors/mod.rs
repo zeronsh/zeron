@@ -691,6 +691,439 @@ fn listing_cases() -> Value {
         m[field] = value;
         cases.push((name.into(), m, files.clone()));
     }
+    // The store's mark is its alone (amendment 45): a name or description
+    // that claims it is refused, read as NFKC then lowercase, words whole.
+    for (name, field, value) in [
+        ("the mark: a name saying Verified", "name", "Verified Focus"),
+        ("the mark: a name saying OFFICIAL", "name", "OFFICIAL Focus"),
+        ("the mark: a name with a check mark", "name", "Focus \u{2714}"),
+        ("the mark: a name with a check mark emoji", "name", "\u{2705} Focus"),
+        ("the mark: a name saying verified in mathematical bold", "name", "\u{1d42f}\u{1d41e}\u{1d42b}\u{1d422}\u{1d41f}\u{1d422}\u{1d41e}\u{1d41d} Focus"),
+        ("the mark: a name saying verified in fullwidth letters", "name", "Focus \u{ff36}\u{ff25}\u{ff32}\u{ff29}\u{ff26}\u{ff29}\u{ff25}\u{ff24}"),
+        ("the mark: a name with verified before an underscore", "name", "verified_focus"),
+        ("the mark: a description saying official plugin", "description", "The official plugin for focus."),
+        ("the mark: a description with a ballot box check", "description", "Boards \u{2611} done."),
+        ("the mark: a description saying verified in capital I with a dot", "description", "VER\u{130}F\u{130}ED boards."),
+        ("the mark: a name saying unofficial is fine", "name", "Unofficial Focus"),
+        ("the mark: a name saying unverified is fine", "name", "Unverified Links"),
+        ("the mark: a description saying officially is fine", "description", "Officially the best board."),
+        ("the mark: a description saying verifiedx is fine", "description", "Boards by verifiedx."),
+    ] {
+        let mut m = base.clone();
+        m[field] = json!(value);
+        cases.push((name.into(), m, files.clone()));
+    }
+    // Spelled so it reads as the mark at a glance (the edge's attack cases,
+    // each found by the identity lane): look-alike letters from UTS #39,
+    // small capitals, digits, i and l for each other, cl for d, letters
+    // spaced or dotted apart, characters drawn as nothing between letters.
+    for (name, field, value) in [
+        ("the mark: Cyrillic letters", "name", "V\u{435}r\u{456}f\u{456}\u{435}d Focus"),
+        ("the mark: Cyrillic capitals", "name", "V\u{415}RIFI\u{415}D"),
+        ("the mark: Cyrillic letters in official", "description", "The \u{43e}ffi\u{441}i\u{430}l plugin."),
+        ("the mark: Cyrillic palochka for l", "description", "\u{43e}fficia\u{4cf} tools."),
+        ("the mark: Cyrillic izhitsa for v", "name", "\u{475}erified"),
+        ("the mark: Greek nu for v", "name", "\u{3bd}erified"),
+        ("the mark: Greek letters", "description", "v\u{3b5}r\u{3b9}f\u{3b9}\u{3b5}d builds."),
+        ("the mark: Greek capitals", "name", "\u{39f}FF\u{399}CIAL"),
+        ("the mark: small capitals", "name", "\u{1d20}\u{1d07}\u{280}\u{26a}\u{a730}\u{26a}\u{1d07}\u{1d05} Focus"),
+        ("the mark: Lisu capitals for verified", "name", "\u{a4e6}\u{a4f0}\u{a4e3}\u{a4f2}\u{a4dd}\u{a4f2}\u{a4f0}\u{a4d3} Focus"),
+        ("the mark: Lisu capitals for official", "name", "\u{a4f3}\u{a4dd}\u{a4dd}\u{a4f2}\u{a4da}\u{a4f2}\u{a4ee}\u{a4e1} Git"),
+        ("the mark: a small capital I", "name", "Ver\u{26a}f\u{26a}ed"),
+        ("the mark: digits for I", "name", "VER1F1ED"),
+        ("the mark: a digit 0 for O", "name", "0FFICIAL tools"),
+        ("the mark: a digit 3 for e", "name", "v3rified"),
+        ("the mark: a digit 1 for l", "name", "officia1"),
+        ("the mark: a square root as a tick", "name", "Focus \u{221a}"),
+        ("the mark: the Aegean check mark", "name", "Focus \u{10102}"),
+        ("the mark: the inverse check mark", "name", "Focus \u{1fbb1}"),
+        ("the mark: lowercase l for I in capitals", "name", "VERlFlED Focus"),
+        ("the mark: lowercase l for I in OFFICIAL", "name", "OFFlClAL Git"),
+        ("the mark: capital I for l in lowercase", "description", "The officiaI client."),
+        ("the mark: cl for d", "name", "verifiecl tools"),
+        ("the mark: letter-spaced", "name", "V E R I F I E D"),
+        ("the mark: dotted capitals", "name", "V.E.R.I.F.I.E.D. Focus"),
+        ("the mark: dot and space", "name", "V. E. R. I. F. I. E. D. Focus"),
+        ("the mark: middle dots", "name", "V\u{b7}E\u{b7}R\u{b7}I\u{b7}F\u{b7}I\u{b7}E\u{b7}D"),
+        ("the mark: en dashes", "name", "V\u{2013}E\u{2013}R\u{2013}I\u{2013}F\u{2013}I\u{2013}E\u{2013}D"),
+        ("the mark: two spaces", "name", "V  E  R  I  F  I  E  D"),
+        ("the mark: no-break spaces", "name", "V\u{a0}E\u{a0}R\u{a0}I\u{a0}F\u{a0}I\u{a0}E\u{a0}D"),
+        ("the mark: ideographic spaces", "name", "V\u{3000}E\u{3000}R\u{3000}I\u{3000}F\u{3000}I\u{3000}E\u{3000}D"),
+        ("the mark: spaced look-alikes", "name", "V E R \u{406} F \u{406} E D"),
+        ("the mark: a word joiner between letters", "description", "Veri\u{2060}fied boards."),
+        ("the mark: an enclosing keycap mark between letters", "name", "Veri\u{20e3}fied"),
+        ("the mark: an enclosing circle between letters", "description", "Veri\u{20dd}fied boards."),
+        ("the mark: negative circled capitals", "name", "\u{1f165}\u{1f154}\u{1f161}\u{1f158}\u{1f155}\u{1f158}\u{1f154}\u{1f153} Focus"),
+        ("the mark: negative squared capitals", "name", "\u{1f185}\u{1f174}\u{1f181}\u{1f178}\u{1f175}\u{1f178}\u{1f174}\u{1f173} Focus"),
+        ("the mark: spaced regional indicators", "name", "\u{1f1fb} \u{1f1ea} \u{1f1f7} \u{1f1ee} \u{1f1eb} \u{1f1ee} \u{1f1ea} \u{1f1e9}"),
+    ] {
+        let mut m = base.clone();
+        m[field] = json!(value);
+        cases.push((name.into(), m, files.clone()));
+    }
+    // Honest words, in those alphabets and mixed: nothing claimed.
+    for (name, value) in [
+        ("the mark: unverified with a Cyrillic e is fine", "Unv\u{435}rified Links"),
+        ("the mark: officer with a Greek o is fine", "For every \u{3bf}fficer"),
+        ("the mark: officially with a Cyrillic i is fine", "Off\u{456}cially the best"),
+        ("the mark: Greek for official is fine", "\u{395}\u{3c0}\u{3af}\u{3c3}\u{3b7}\u{3bc}\u{3b7} \u{3b5}\u{3c6}\u{3b1}\u{3c1}\u{3bc}\u{3bf}\u{3b3}\u{3ae}"),
+        ("the mark: verification is fine", "verification"),
+        ("the mark: officialdom is fine", "officialdom"),
+        ("the mark: a version and verifier are fine", "v1.0 verifier"),
+        ("the mark: 100 percent is fine", "100% local"),
+        ("the mark: verifiedly 3D is fine", "Verifiedly 3D"),
+        ("the mark: A B testing is fine", "A B testing"),
+        ("the mark: U.S. weather is fine", "U.S. weather"),
+        ("the mark: V I M keys are fine", "V I M keys"),
+        ("the mark: initials are fine", "J. R. R. Tolkien notes"),
+        ("the mark: R.E.M. with middle dots is fine", "R\u{b7}E\u{b7}M songs"),
+        ("the mark: oil fields are fine", "Oil fields"),
+        ("the mark: civil filed is fine", "Civil filed"),
+        ("the mark: an emoji with its variation selector is fine", "Stars \u{2b50}\u{fe0f}"),
+        ("the mark: a keycap is fine", "Keys 1\u{fe0f}\u{20e3}"),
+        ("the mark: a keycap in a name is fine", "Top 1\u{fe0f}\u{20e3} timer"),
+        ("the mark: a ballot box with an X is fine", "Tasks \u{2612}"),
+    ] {
+        let mut m = base.clone();
+        m["name"] = json!(value);
+        cases.push((name.into(), m, files.clone()));
+    }
+    // Drawn as nothing: refused in a name or description at all (only an
+    // emoji's own U+FE0F, right after it, is seen).
+    for (name, field, value) in [
+        ("unseen: U+FE0F after a letter", "name", "Focus\u{fe0f}"),
+        ("unseen: U+FE0F twice after an emoji", "name", "Stars \u{2b50}\u{fe0f}\u{fe0f}"),
+        ("unseen: text-style selector U+FE0E", "name", "Stars \u{2b50}\u{fe0e}"),
+        ("unseen: variation selector 1", "description", "Focus\u{fe00} boards."),
+        ("unseen: variation selector 17", "name", "Focus\u{e0100}"),
+        ("unseen: Hangul filler", "name", "Focus\u{3164}Board"),
+        ("unseen: Hangul choseong filler", "description", "Focus\u{115f}Board."),
+        ("unseen: halfwidth Hangul filler", "name", "Focus\u{ffa0}Board"),
+        ("unseen: U+FE0F at the start", "name", "\u{fe0f}Focus"),
+        ("unseen: U+FE0E after an emoji in a description", "description", "Focus \u{2b50}\u{fe0e}"),
+        ("unseen: a zero-width joiner sequence", "name", "\u{1f469}\u{200d}\u{1f4bb} Dev"),
+        ("unseen: a tag sequence flag", "name", "\u{1f3f4}\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f} Focus"),
+    ] {
+        let mut m = base.clone();
+        m[field] = json!(value);
+        cases.push((name.into(), m, files.clone()));
+    }
+    let mut m = base.clone();
+    m["keywords"] = json!(["timer\u{fe0f}"]);
+    cases.push(("unseen: a variation selector in a keyword".into(), m, files.clone()));
+    // "Zeron" in a name, description or keyword is nobody's concern (the
+    // owner's ruling, Nov 18): what once was claims_zeron is published as
+    // any other listing.
+    for (name, field, value) in [
+        ("zeron: a name leading with Zeron is fine", "name", "Zeron Git"),
+        ("zeron: a name saying Git by Zeron is fine", "name", "Git by Zeron"),
+        ("zeron: a name saying Zeron Labs is fine", "name", "Zeron Labs notes"),
+        ("zeron: a name saying Team Zeron is fine", "name", "Team Zeron"),
+        ("zeron: a name saying Zeron's is fine", "name", "Zeron's git"),
+        ("zeron: a name saying Zeron-made is fine", "name", "Zeron-made boards"),
+        ("zeron: a name saying by Zeron is fine", "name", "Notes, by Zeron"),
+        ("zeron: a name with a digit 0 for o is fine", "name", "Git by Zer0n"),
+        ("zeron: a name with a Cyrillic e is fine", "name", "Git by Z\u{435}ron"),
+        ("zeron: a name in small capitals is fine", "name", "Git by \u{1d22}\u{1d07}\u{280}\u{1d0f}\u{274}"),
+        ("zeron: a name with a Cyrillic u for y is fine", "name", "Git b\u{443} Zeron"),
+        ("zeron: a name in dotted capitals is fine", "name", "Z.E.R.O.N. approved"),
+        ("zeron: a name spaced is fine", "name", "z e r o n approved"),
+        ("zeron: a name spaced after by is fine", "name", "Git by Z e r o n"),
+        ("zeron: a name with Zeron in Chinese text is fine", "name", "Zeron\u{63d2}\u{4ef6}"),
+        ("zeron: a name saying by Zeron in Chinese is fine", "name", "\u{7531}Zeron\u{5236}\u{4f5c}\u{7684}\u{7b14}\u{8bb0}"),
+        ("zeron: a description saying by Zeron is fine", "description", "Boards, by Zeron."),
+        ("zeron: a description saying from ZERON is fine", "description", "From ZERON: the board."),
+        ("zeron: a description saying made by the Zeron team is fine", "description", "Made by the Zeron team."),
+        ("zeron: a description saying Zeron's own is fine", "description", "Zeron\u{2019}s own notes."),
+        ("zeron: a description saying Zeron approved is fine", "description", "A Zeron approved board."),
+        ("zeron: a description saying recommended after a dash is fine", "description", "zeron\u{2014}recommended."),
+        ("zeron: a description saying von Zeron is fine", "description", "Ein Plugin von Zeron."),
+        ("zeron: a description saying par Zeron is fine", "description", "Un th\u{e8}me par Zeron."),
+        ("zeron: a description saying Zeron HQ is fine", "description", "Straight from Zeron HQ."),
+        ("the mark: Chinese official near plugin, Zeron before", "description", "Zeron\u{5b98}\u{65b9}\u{63d2}\u{4ef6}\u{3002}"),
+        ("zeron: a description with a modifier apostrophe is fine", "description", "Zeron\u{2bc}s own board."),
+        ("zeron: a name for Zeron is fine", "name", "Themes for Zeron"),
+        ("zeron: a name in Zeron is fine", "name", "Git in Zeron"),
+        ("zeron: a name with Zeron is fine", "name", "Notes with Zeron"),
+        ("zeron: a name for Zeron in Chinese is fine", "name", "\u{9002}\u{7528}\u{4e8e}Zeron\u{7684}\u{4e3b}\u{9898}"),
+        ("zeron: a name saying Zeronaut is fine", "name", "Zeronaut"),
+        ("zeron: a name saying Heron is fine", "name", "Heron"),
+        ("zeron: a name using Zeron in Chinese is fine", "name", "\u{4f7f}\u{7528} Zeron \u{7684}\u{6280}\u{5de7}"),
+        ("zeron: a description of a zero-noise timer is fine", "description", "a zero-noise timer"),
+        ("zeron: a name saying Lazeron is fine", "name", "Lazeron approved"),
+        ("zeron: a name saying Zenon is fine", "name", "A board by Zenon"),
+        ("zeron: a description about Zeron's sidebar is fine", "description", "Adds a panel to Zeron's sidebar."),
+        ("zeron: a description made for Zeron is fine", "description", "Made for Zeron."),
+        ("zeron: a description works with Zeron is fine", "description", "Works with Zeron."),
+        ("zeron: a description saying Zeron notes is fine", "description", "Zeron notes, kept tidy."),
+        ("zeron: a description saying zero n is fine", "description", "Counts from zero n times."),
+    ] {
+        let mut m = base.clone();
+        m[field] = json!(value);
+        cases.push((name.into(), m, files.clone()));
+    }
+    // The mark's words in the store's other languages: never an ordinary
+    // word. (name or description, text)
+    for (name, field, value) in [
+        ("the mark: Spanish oficial", "name", "Cliente oficial"),
+        ("the mark: Spanish no oficial in a description is fine", "description", "Cliente no oficial."),
+        ("the mark: French v\u{e9}rifi\u{e9} in a description", "description", "Th\u{e8}me v\u{e9}rifi\u{e9}."),
+        ("the mark: French v\u{e9}rifie in a name, folded", "name", "V\u{e9}rifie la syntaxe"),
+        ("the mark: French officielle", "name", "Extension officielle"),
+        ("the mark: German offizieller", "description", "Offizieller Client."),
+        ("the mark: German verifiziert in a name", "name", "Verifiziert"),
+        ("the mark: German offiziell in a name", "name", "Offiziell"),
+        ("the mark: Italian ufficiale", "name", "Client ufficiale"),
+        ("the mark: Portuguese verificado", "description", "Tema verificado."),
+        ("the mark: Russian official", "name", "\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439} \u{43a}\u{43b}\u{438}\u{435}\u{43d}\u{442}"),
+        ("the mark: Russian verified in a name", "name", "\u{41f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43e}"),
+        ("the mark: Chinese official", "name", "\u{5b98}\u{65b9}\u{63d2}\u{4ef6}"),
+        ("the mark: Chinese not official in a description is fine", "description", "\u{975e}\u{5b98}\u{65b9}\u{63d2}\u{4ef6}\u{3002}"),
+        ("the mark: Chinese verified", "name", "\u{5df2}\u{9a8c}\u{8bc1}\u{7684}\u{7b14}\u{8bb0}"),
+        ("the mark: Japanese official beside kana", "name", "\u{516c}\u{5f0f}\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}"),
+        ("the mark: Japanese verified memos, modifier first, in a description are fine", "description", "\u{691c}\u{8a3c}\u{6e08}\u{307f}\u{306e}\u{30e1}\u{30e2}\u{3002}"),
+        ("the mark: Japanese verified plugin", "description", "\u{691c}\u{8a3c}\u{6e08}\u{307f}\u{306e}\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}\u{3002}"),
+        ("the mark: Korean verified", "name", "\u{ac80}\u{c99d}\u{b428} \u{d50c}\u{b7ec}\u{adf8}\u{c778}"),
+        ("the mark: French v\u{e9}rifie in a description is fine", "description", "V\u{e9}rifie la syntaxe de vos fichiers"),
+        ("the mark: German verifiziert in a description is fine", "description", "Verifiziert Signaturen."),
+        ("the mark: German offiziell in a description is fine", "description", "Offiziell unterst\u{fc}tzt."),
+        ("the mark: German gepr\u{fc}ft in a description is fine", "description", "Eingaben werden gepr\u{fc}ft."),
+        ("the mark: Russian checked in a description is fine", "description", "\u{41f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43e}: 5 \u{444}\u{430}\u{439}\u{43b}\u{43e}\u{432}."),
+        ("the mark: Italian verifica is fine", "name", "Verifica la sintassi"),
+        ("the mark: Spanish verifica is fine", "name", "Verifica tus archivos"),
+        ("the mark: German inoffizieller is fine", "name", "Inoffizieller Client"),
+        ("the mark: Chinese formula is fine", "name", "\u{6570}\u{5b66}\u{516c}\u{5f0f}\u{7f16}\u{8f91}\u{5668}"),
+        ("the mark: Korean formula is fine", "name", "\u{c218}\u{d559} \u{acf5}\u{c2dd}"),
+        ("the mark: Chinese authentication is fine", "name", "\u{8eab}\u{4efd}\u{8ba4}\u{8bc1}"),
+        ("the mark: Japanese authentication token is fine", "name", "\u{8a8d}\u{8a3c}\u{30c8}\u{30fc}\u{30af}\u{30f3}"),
+        ("the mark: Korean authentication token is fine", "name", "\u{c778}\u{c99d} \u{d1a0}\u{d070}"),
+        ("the mark: Spanish oficina is fine", "name", "Oficina de notas"),
+        ("the mark: French officier is fine", "name", "Officier de garde"),
+        ("the mark: Russian unofficial in one word is fine", "name", "\u{43d}\u{435}\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439} \u{43a}\u{43b}\u{438}\u{435}\u{43d}\u{442}"),
+        ("the mark: Chinese notes are fine", "name", "\u{7b14}\u{8bb0}\u{677f}"),
+        ("the mark: Japanese notes are fine", "name", "\u{30e1}\u{30e2}\u{5e33}"),
+        ("the mark: Korean notes are fine", "name", "\u{ba54}\u{baa8}\u{c7a5}"),
+    ] {
+        let mut m = base.clone();
+        m[field] = json!(value);
+        cases.push((name.into(), m, files.clone()));
+    }
+    // Chinese words of origin: fine. A mark word beside "zeron" is rule 4.
+    for (name, value) in [
+        ("description: beside Zeron, Japanese official", "Zeron \u{516c}\u{5f0f}\u{306e}\u{30e1}\u{30e2}\u{3002}"),
+        ("the mark: Korean official near plugin, Zeron between", "\u{acf5}\u{c2dd} Zeron \u{d50c}\u{b7ec}\u{adf8}\u{c778}."),
+        ("zeron: Zeron beside Chinese certified is fine", "Zeron \u{8ba4}\u{8bc1}\u{63d2}\u{4ef6}\u{3002}"),
+        ("description: beside Zeron, French officiel", "Le th\u{e8}me Zeron officiel."),
+        ("zeron: by Zeron in Chinese is fine", "\u{7531} Zeron \u{5236}\u{4f5c}\u{3002}"),
+        ("zeron: from Zeron in Chinese is fine", "\u{6765}\u{81ea}Zeron\u{7684}\u{7b14}\u{8bb0}\u{3002}"),
+    ] {
+        let mut m = base.clone();
+        m["description"] = json!(value);
+        cases.push((name.into(), m, files.clone()));
+    }
+    // In a description, the mark only when said of the plugin itself:
+    // 1 first word or alone; 2 near a word for the plugin; 3 after a word
+    // that says it of the subject; 4 beside Zeron or the store (no
+    // negation lifts it); a negation directly before lifts 1 to 3.
+    for (name, value) in [
+        ("description: the first word", "Official Git tools."),
+        ("description: alone as a sentence", "Notes, kept tidy. Verified."),
+        ("description: near plugin", "A verified plugin for notes."),
+        ("description: near extension, a word between", "The official Git extension."),
+        ("description: near version, after a comma", "A board, the official version."),
+        ("description: Spanish near cliente", "Cliente oficial para Git."),
+        ("description: Japanese \u{516c}\u{5f0f} near \u{62e1}\u{5f35}, no kana needed", "\u{516c}\u{5f0f} Git \u{62e1}\u{5f35}\u{3002}"),
+        ("description: Korean \u{acf5}\u{c2dd} near \u{d50c}\u{b7ec}\u{adf8}\u{c778}", "\u{acf5}\u{c2dd} Git \u{d50c}\u{b7ec}\u{adf8}\u{c778}"),
+        ("description: Chinese \u{5df2}\u{8ba4}\u{8bc1} near \u{63d2}\u{4ef6}", "\u{5df2}\u{8ba4}\u{8bc1}\u{63d2}\u{4ef6}"),
+        ("description: Japanese \u{8a8d}\u{8a3c}\u{6e08}\u{307f} near \u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}", "\u{8a8d}\u{8a3c}\u{6e08}\u{307f}\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}"),
+        ("description: after is", "This board is verified."),
+        ("description: after now", "Now official: boards for everyone."),
+        ("description: after fully", "Fully verified and signed."),
+        ("description: German after ist", "Der Client ist offizielle Software."),
+        ("description: beside Zeron", "Boards, Zeron verified."),
+        ("description: beside Zeron, a negation doesn't lift it", "Not Zeron official."),
+        ("description: Zeron verified alone", "Zeron verified."),
+        ("description: Zeron-verified, hyphened", "Zeron-verified."),
+        ("description: officially Zeron-verified", "Officially Zeron-verified."),
+        ("description: Zeron official", "Zeron official."),
+        ("description: verified by Zeron, an authority", "Checked: verified by Zeron."),
+        ("description: by the store", "Checked: verified by the store."),
+        ("description: spaced capitals alone", "Notes. V.E.R.I.F.I.E.D."),
+        ("description: a digit for e near plugin", "A v3rified plugin."),
+        ("description: at the end after but", "Jira, but verified."),
+        ("description: a status after a colon is fine", "Shows each commit's signature status: verified."),
+        ("description: Italian ufficiale near pannello", "Il pannello ufficiale per Jira."),
+        ("description: Russian near \u{43f}\u{430}\u{43d}\u{435}\u{43b}\u{44c}", "\u{42d}\u{442}\u{43e} \u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{430}\u{44f} \u{43f}\u{430}\u{43d}\u{435}\u{43b}\u{44c} Jira."),
+        ("description: Chinese \u{5b98}\u{65b9} near \u{9762}\u{677f}", "\u{5b98}\u{65b9} Jira \u{9762}\u{677f}"),
+        ("description: Japanese \u{516c}\u{5f0f} near \u{30d1}\u{30cd}\u{30eb}", "\u{516c}\u{5f0f} Jira \u{30d1}\u{30cd}\u{30eb}"),
+        ("description: Korean \u{acf5}\u{c2dd} near \u{d328}\u{b110}", "\u{acf5}\u{c2dd} Jira \u{d328}\u{b110}"),
+        ("description: someone else's official docs are fine", "Opens the official Rust documentation."),
+        ("description: GitHub's verified badge is fine", "Shows GitHub's verified badge next to commits."),
+        ("description: not official is fine", "Not official, just useful."),
+        ("description: unofficial is fine", "An unofficial client for Git."),
+        ("description: non official is fine", "A non official client for Git."),
+        ("description: Korean \u{be44}\u{acf5}\u{c2dd} is fine", "\u{c774} \u{d50c}\u{b7ec}\u{adf8}\u{c778}\u{c740} \u{be44}\u{acf5}\u{c2dd} \u{d074}\u{b77c}\u{c774}\u{c5b8}\u{d2b8}\u{c785}\u{b2c8}\u{b2e4}"),
+        ("description: verified email addresses are fine", "Lists your verified email addresses."),
+        ("description: a sentence between is fine", "Links to the official site. A tool for boards."),
+        ("description: German verifiziert near Plugin is fine", "Das Plugin verifiziert Signaturen."),
+    ] {
+        let mut m = base.clone();
+        m["description"] = json!(value);
+        cases.push((name.into(), m, files.clone()));
+    }
+    // Once words of belonging: fine.
+    for (name, field, value) in [
+        ("zeron: a description saying ships with Zeron is fine", "description", "Ships with Zeron."),
+        ("zeron: a description saying included in Zeron is fine", "description", "Included in Zeron."),
+        ("zeron: a description saying part of Zeron is fine", "description", "Part of Zeron."),
+        ("zeron: a description saying comes with Zeron is fine", "description", "Comes with Zeron."),
+        ("zeron: a description saying built into Zeron is fine", "description", "Built into Zeron."),
+        ("zeron: a description saying Zeron-made is fine", "description", "Zeron-made boards."),
+        ("zeron: a description saying built into Zeron in Chinese is fine", "description", "\u{5185}\u{7f6e}\u{4e8e}Zeron\u{3002}"),
+        ("zeron: a name saying Built-in Zeron is fine", "name", "Built-in Zeron Git"),
+        ("zeron: a name saying Default Git for Zeron is fine", "name", "Default Git for Zeron"),
+        ("zeron: a description about Zeron's built-in terminal is fine", "description", "Adds a button to Zeron's built-in terminal."),
+        ("zeron: a description saying Zeron built-in is fine", "description", "Zeron built-in terminal tools."),
+        ("zeron: a description about Zeron's built-in terminal in Chinese is fine", "description", "Zeron\u{5185}\u{7f6e}\u{7ec8}\u{7aef}\u{7684}\u{6309}\u{94ae}"),
+    ] {
+        let mut m = base.clone();
+        m[field] = json!(value);
+        cases.push((name.into(), m, files.clone()));
+    }
+    // Russian case forms (stems), and look-alikes in every language.
+    for (name, field, value) in [
+        ("the mark: Russian genitive official in a name", "name", "\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}\u{433}\u{43e} \u{43a}\u{43b}\u{438}\u{435}\u{43d}\u{442}\u{430}"),
+        ("the mark: Russian verified, a stem, in a name", "name", "\u{412}\u{435}\u{440}\u{438}\u{444}\u{438}\u{446}\u{438}\u{440}\u{43e}\u{432}\u{430}\u{43d}\u{43d}\u{43e}\u{433}\u{43e} \u{43f}\u{43b}\u{430}\u{433}\u{438}\u{43d}\u{430}"),
+        ("the mark: Russian official with a Latin o", "name", "o\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439} \u{43a}\u{43b}\u{438}\u{435}\u{43d}\u{442}"),
+        ("the mark: Spanish oficial with a digit 0", "name", "0ficial"),
+        ("the mark: Spanish oficial with Cyrillic letters", "name", "\u{43e}fi\u{441}ial"),
+        ("the mark: Spanish verificado with a digit 0", "name", "Verificad0"),
+        ("the mark: Russian official theme in the accusative", "description", "\u{423}\u{441}\u{442}\u{430}\u{43d}\u{43e}\u{432}\u{438}\u{442}\u{435} \u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{443}\u{44e} \u{442}\u{435}\u{43c}\u{443}."),
+        ("the mark: Russian for the official Git plugin, someone else's, is fine", "description", "\u{414}\u{43b}\u{44f} \u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}\u{433}\u{43e} \u{43f}\u{43b}\u{430}\u{433}\u{438}\u{43d}\u{430} Git."),
+        ("the mark: Russian official plugin for Git", "description", "\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{439} \u{43f}\u{43b}\u{430}\u{433}\u{438}\u{43d} \u{434}\u{43b}\u{44f} Git."),
+        ("the mark: Spanish oficial with a Cyrillic o near cliente", "description", "Cliente \u{43e}ficial para Git."),
+        ("the mark: Russian officially is fine", "name", "\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e} \u{43d}\u{435}\u{442}"),
+        ("the mark: Russian not an official app is fine", "description", "\u{42d}\u{442}\u{43e} \u{43d}\u{435} \u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}\u{435} \u{43f}\u{440}\u{438}\u{43b}\u{43e}\u{436}\u{435}\u{43d}\u{438}\u{435}."),
+        ("the mark: Russian a proven way is fine", "description", "\u{41f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43d}\u{44b}\u{439} \u{441}\u{43f}\u{43e}\u{441}\u{43e}\u{431} \u{445}\u{440}\u{430}\u{43d}\u{438}\u{442}\u{44c} \u{437}\u{430}\u{43c}\u{435}\u{442}\u{43a}\u{438}."),
+        ("the mark: Russian official Rust documentation is fine", "description", "\u{41f}\u{43e}\u{43a}\u{430}\u{437}\u{44b}\u{432}\u{430}\u{435}\u{442} \u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{443}\u{44e} \u{434}\u{43e}\u{43a}\u{443}\u{43c}\u{435}\u{43d}\u{442}\u{430}\u{446}\u{438}\u{44e} Rust."),
+    ] {
+        let mut m = base.clone();
+        m[field] = json!(value);
+        cases.push((name.into(), m, files.clone()));
+    }
+    // The identity lane's fifth probe, as names (its Zeron ones fine now).
+    for (name, value) in [
+        ("zeron: probe 5: Built-in Zeron Git is fine", "Built-in Zeron Git"),
+        ("zeron: probe 5: Built in Zeron is fine", "Built in Zeron"),
+        ("zeron: probe 5: Ships with Zeron is fine", "Ships with Zeron"),
+        ("zeron: probe 5: Bundled with Zeron is fine", "Bundled with Zeron"),
+        ("zeron: probe 5: Included in Zeron is fine", "Included in Zeron"),
+        ("zeron: probe 5: Comes with Zeron is fine", "Comes with Zeron"),
+        ("zeron: probe 5: Native to Zeron is fine", "Native to Zeron"),
+        ("zeron: probe 5: Default in Zeron is fine", "Default in Zeron"),
+        ("zeron: probe 5: using Zeron in Chinese is fine", "\u{4f7f}\u{7528} Zeron \u{7684}\u{6280}\u{5de7}"),
+        ("zeron: probe 5: using Zeron's Git in Chinese is fine", "\u{4f7f}\u{7528}Zeron\u{7684}Git"),
+        ("the mark: probe 5: Russian instrumental", "\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}\u{439}"),
+        ("the mark: probe 5: Russian genitive plural", "\u{434}\u{43b}\u{44f} \u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{44b}\u{445}"),
+        ("the mark: probe 5: Russian accusative", "\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{443}\u{44e}"),
+        ("the mark: probe 5: Russian short form", "\u{41f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}"),
+        ("the mark: probe 5: Russian genitive plural participle", "\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}\u{43d}\u{44b}\u{445}"),
+        ("the mark: probe 5: Spanish with a Cyrillic s", "Verifi\u{441}ado"),
+        ("the mark: probe 5: Spanish with a digit 0", "0ficial"),
+        ("the mark: probe 5: Japanese \u{516c}\u{8a8d} beside kana", "\u{516c}\u{8a8d}\u{30d7}\u{30e9}\u{30b0}\u{30a4}\u{30f3}"),
+        ("the mark: probe 5: Korean \u{acf5}\u{c778} before \u{d50c}\u{b7ec}\u{adf8}\u{c778}", "\u{acf5}\u{c778} \u{d50c}\u{b7ec}\u{adf8}\u{c778}"),
+        ("the mark: probe 5: Chinese \u{8ba4}\u{8bc1} before \u{63d2}\u{4ef6}, also an authentication plugin, is fine", "\u{8ba4}\u{8bc1}\u{63d2}\u{4ef6}"),
+        ("the mark: probe 5: Chinese math formula is fine", "\u{6570}\u{5b66}\u{516c}\u{5f0f}"),
+        ("the mark: probe 5: Chinese formula editor is fine", "\u{516c}\u{5f0f}\u{7f16}\u{8f91}\u{5668}"),
+        ("the mark: probe 5: Korean math formula is fine", "\u{c218}\u{d559} \u{acf5}\u{c2dd}"),
+        ("the mark: probe 5: Korean formula calculator is fine", "\u{acf5}\u{c2dd} \u{acc4}\u{c0b0}\u{ae30}"),
+    ] {
+        let mut m = base.clone();
+        m["name"] = json!(value);
+        cases.push((name.into(), m, files.clone()));
+    }
+    // The identity lane's corpus (mark_corpus.json): every honest text is
+    // fine as a description; every dodge is refused, as a description (a
+    // name's, as a name), but the few that pass by decision, said so.
+    let corpus: Value = serde_json::from_str(include_str!("mark_corpus.json")).expect("the mark corpus");
+    let by_decision: [(&str, &str); 3] = [
+        ("Plugin verifie", "unaccented, it's also French 'vérifie', 'checks'"),
+        ("Verifica-do", "a hyphen inside a word; low"),
+        ("\u{8ba4}\u{8bc1}\u{63d2}\u{4ef6}", "also 'authentication plugin' (双因素认证插件)"),
+    ];
+    for (n, row) in corpus["honest"].as_array().into_iter().flatten().enumerate() {
+        let (lang, text) = (row[0].as_str().unwrap_or_default(), row[1].as_str().unwrap_or_default());
+        let mut m = base.clone();
+        m["description"] = json!(text);
+        cases.push((format!("corpus: honest {lang} {n:02} is fine"), m, files.clone()));
+    }
+    for (n, row) in corpus["dodges"].as_array().into_iter().flatten().enumerate() {
+        let (lang, text) = (row[0].as_str().unwrap_or_default(), row[1].as_str().unwrap_or_default());
+        let field = if lang.ends_with("-name") { "name" } else { "description" };
+        let mut m = base.clone();
+        m[field] = json!(text);
+        let name = match by_decision.iter().find(|(t, _)| *t == text) {
+            Some((_, why)) => format!("corpus: dodge {lang} {n:02} passes by decision ({why}), so is fine"),
+            // (Once claims_zeron: nobody's concern now.)
+            None if text.to_lowercase().contains("zeron") => format!("corpus: once a Zeron dodge {lang} {n:02} is fine"),
+            None => format!("corpus: dodge {lang} {n:02}"),
+        };
+        cases.push((name, m, files.clone()));
+    }
+    // The identity lane's corpus for 011fd8af2 (mark_corpus_3.json): each
+    // entry's field and expectation as it gives them; two pass by decision.
+    let corpus3: Value = serde_json::from_str(include_str!("mark_corpus_3.json")).expect("the third mark corpus");
+    let decided: [(&str, &str); 2] = [
+        ("Plugin verifie", "unaccented, it's also French 'vérifie', 'checks'"),
+        ("\u{41e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e} \u{438} \u{431}\u{435}\u{437}\u{43e}\u{43f}\u{430}\u{441}\u{43d}\u{43e}", "the adverb 'officially', as English 'officially' isn't refused"),
+    ];
+    for kind in ["honest", "dodges"] {
+        for (n, row) in corpus3[kind].as_array().into_iter().flatten().enumerate() {
+            let (lang, field, expect, text) = (row["lang"].as_str().unwrap_or_default(), row["field"].as_str().unwrap_or("description"), row["expect"].as_str().unwrap_or_default(), row["text"].as_str().unwrap_or_default());
+            let mut m = base.clone();
+            m[field] = json!(text);
+            let name = match (expect, decided.iter().find(|(t, _)| *t == text)) {
+                ("pass", _) => format!("corpus3: {kind} {lang} {n:03} ({field}) is fine"),
+                (_, Some((_, why))) => format!("corpus3: {kind} {lang} {n:03} ({field}) passes by decision ({why}), so is fine"),
+                _ => format!("corpus3: {kind} {lang} {n:03} ({field})"),
+            };
+            cases.push((name, m, files.clone()));
+        }
+    }
+    // Keywords: not the mark (any language a keyword can write, a part or
+    // its parts joined); no badge lifts it. "zeron" in one is anyone's.
+    for (name, keyword) in [
+        ("keywords: verified", "verified"),
+        ("keywords: veri-fied joined", "veri-fied"),
+        ("keywords: a digit for O", "0fficial"),
+        ("keywords: Spanish oficial", "oficial"),
+        ("keywords: French verifie, folded", "verifie"),
+        ("keywords: zeron is fine", "zeron"),
+        ("keywords: zeron as a part is fine", "zeron-themes"),
+        ("keywords: zeron after a space is fine", "themes zeron"),
+        ("keywords: zer0n is fine", "zer0n"),
+        ("keywords: 2eron is fine", "2eron"),
+        ("keywords: ze-ron joined is fine", "ze-ron"),
+        ("keywords: zeron-tools is fine", "zeron-tools"),
+        ("keywords: themes are fine", "themes"),
+        ("keywords: zero is fine", "zero"),
+        ("keywords: heron is fine", "heron"),
+        ("keywords: verify is fine", "verify"),
+        ("keywords: zeronaut is fine", "zeronaut"),
+        ("keywords: ver-ified joined", "ver-ified"),
+        ("keywords: ver1fied", "ver1fied"),
+        ("keywords: official as a part", "official-docs"),
+        ("keywords: by-zeron is fine", "by-zeron"),
+        ("keywords: zeron-team is fine", "zeron-team"),
+        ("keywords: zer0n-approved is fine", "zer0n-approved"),
+        ("keywords: zero-config is fine", "zero-config"),
+        ("keywords: verification is fine", "verification"),
+        ("keywords: officially-unsupported is fine", "officially-unsupported"),
+    ] {
+        let mut m = base.clone();
+        m["keywords"] = json!(["focus", keyword]);
+        cases.push((name.into(), m, files.clone()));
+    }
     cases.push(("a binary file (a warning)".into(), base.clone(), with_file("bin/tool.wasm", b"\0asm\x01\0\0\0".to_vec())));
     for (name, a, b) in [
         ("two paths differing in case", "README.md", "readme.md"),
@@ -730,7 +1163,20 @@ fn listing_cases() -> Value {
             .into_iter()
             .map(|(name, manifest, files)| {
                 let (problems, warnings) = listing::check(&Manifest::from_value(manifest.clone()).unwrap(), &files);
-                let said = |list: &[listing::Problem]| -> Value { list.iter().map(|p| json!({ "rule": p.rule, "field": p.field, "path": p.path })).collect() };
+                let said = |list: &[listing::Problem]| -> Value {
+                    list.iter()
+                        .map(|p| {
+                            let mut said = json!({ "rule": p.rule, "field": p.field, "path": p.path });
+                            if let Some(cause) = p.cause {
+                                said["cause"] = json!(cause);
+                            }
+                            if let Some(word) = &p.word {
+                                said["word"] = json!(word);
+                            }
+                            said
+                        })
+                        .collect()
+                };
                 json!({
                     "name": name, "manifest": compact(&text(&manifest)), "files_b64": files_b64(&files),
                     "problems": said(&problems), "warnings": said(&warnings), "listing": listing::Listing::of(&manifest),
@@ -770,12 +1216,29 @@ fn deploy_key_cases() -> Value {
             "headers": headers(key.authorization(method, path, body, ts), &body_sha256),
         })
     };
+    // Proof of possession, v2: one account's key (its publisher id), one
+    // lifetime (`expires_at`, or never), one scope (`*`, or the ids sorted
+    // and joined with `,`), the key last.
+    let publisher_id = "pub_0123456789abcdef0123456789abcdef";
+    let proofs: Vec<Value> = [
+        (deploy_key::Scope::All, None),
+        (deploy_key::Scope::plugins(&["git".into(), "focus".into()]).unwrap(), Some(1_800_000_000_000_i64)),
+    ]
+    .iter()
+    .map(|(scope, expires_at)| {
+        json!({
+            "publisher_id": publisher_id, "expires_at": expires_at,
+            "scope": scope.to_value(), "scope_text": scope.text(),
+            "message": deploy_key::proof_message(publisher_id, *expires_at, scope, &key.public()),
+            "proof": key.proof(publisher_id, *expires_at, scope),
+        })
+    })
+    .collect();
     json!({
         "secret_prefix": deploy_key::SECRET_PREFIX,
         "secret": key.secret(),
         "public": key.public(),
-        "proof_message": deploy_key::proof_message("focus", &key.public()),
-        "proof": key.proof("focus"),
+        "proofs": proofs,
         "max_skew_ms": deploy_key::MAX_SKEW_MS,
         "content_sha256_header": deploy_key::CONTENT_SHA256_HEADER,
         "request": request("POST", "/store/v1/plugins/focus/versions", br#"{"format":"zeron-plugin:v1"}"#, 1_763_000_000_000),
@@ -882,7 +1345,71 @@ fn data() -> Value {
             "screenshot_types": listing::SCREENSHOT_TYPES,
             "max_update_plugins": super::store::MAX_UPDATE_PLUGINS,
         },
-        "newer_rule": "A store version is newer by SemVer 2.0.0 precedence, build metadata ignored: equal precedence is the same version.",
+        "newer_rule": "A store version is newer by SemVer 2.0.0 precedence, build metadata ignored: equal precedence is the same version. A publish must be later than every version the plugin has had, in any state, pre-releases included.",
+        "mark_claims": {
+            "about": "A listing's name or description may not claim the store's mark (amendment 45; bad_listing on that field). One rule, the device's check and the edge alike (crates/engine/src/plugins/mark.rs). Fold: Unicode NFKC, then full lowercase (as JavaScript's toLowerCase), then NFKD with every nonspacing mark (General_Category Mn) dropped, then every Default_Ignorable_Code_Point (variation selectors among them) and every enclosing mark (General_Category Me) removed. It claims the mark when the folded text has any of glyphs anywhere; or any of words as a whole word, as written (no ASCII letter or digit right before or after it); or, as a whole word in the folded text or in it with its spaced runs read as words, any of words spelled letter by letter with: the letter itself or any of lookalikes[letter] (for each letter of interchangeable's pairs, those of both letters), or for a letter in pairs, its characters in order, each it or one of its own lookalikes. A spaced run: single characters, each with a separator or the text's edge on either side, apart by 1 to max_spacing separators (White_Space, U+FEFF, or General_Category P*), read as one word with the separators gone. lookalikes is generated from source (Unicode's confusables.txt, at version, whose file's sha256 is sha256): every single-character source whose prototype folds to one of the letters of words or an ASCII letter of a languages word as mark_text folds it, kept both folded and as written unless either is an ASCII letter, plus the Latin small capitals, the boxed emoji letters (NEGATIVE CIRCLED and NEGATIVE SQUARED LATIN CAPITAL LETTERs, REGIONAL INDICATOR SYMBOL LETTERs) and the digit 3 for e. Then, in the store's other languages: each of languages[lang].words, in either reading, spelled letter by letter as the words are (each letter itself or one of its lookalikes; a letter that is itself one of lookalikes[x] reads as x, so a Cyrillic word's о takes a Latin o), as a substring where substring is true (Chinese, Japanese, Korean), else whole (no character of General_Category L* or N* right before or after it); a word ending in '*' is a stem: no letter or digit right before it, any letters after (Russian's case forms). In a name, every word, folded the same way. In a description, a word whose description is 'folded' the same way; 'accented' read with accents kept (NFKC, lowercase, ignorables and Me gone, on both the text and the word; French 'vérifié', whose folded form is also 'vérifie', checks); 'never' not at all (it's also an ordinary word there). In a name, a word of description.ambiguous is refused too when, read as a description is (description.about), rule 4, 2 or 'alone' says it ('已认证插件', '公式 Git 拡張', '인증됨'); and a with_kana word when it is the only CJK in the name ('公式Git'). A word with with_kana is refused only in a text that also holds kana (U+3040–30FF, U+31F0–31FF, U+FF66–FF9F): Japanese 公式 is official, Chinese 公式 a formula. The listing cases named 'the mark:' hold both sides to it.",
+            "words": listing::MARK_WORDS,
+            "glyphs": listing::MARK_GLYPHS.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+            "lookalikes": super::mark::LOOKALIKES.iter().map(|(letter, chars)| (letter.to_string(), json!(chars.chars().map(|c| c.to_string()).collect::<Vec<_>>()))).collect::<serde_json::Map<_, _>>(),
+            "interchangeable": super::mark::INTERCHANGEABLE.iter().map(|(a, b)| json!([a.to_string(), b.to_string()])).collect::<Vec<_>>(),
+            "pairs": super::mark::PAIRS.iter().map(|(letter, pair)| (letter.to_string(), json!([pair]))).collect::<serde_json::Map<_, _>>(),
+            "max_spacing": super::mark::MAX_SPACING,
+            "source": { "name": super::mark::SOURCE, "version": super::mark::SOURCE_VERSION, "sha256": super::mark::SOURCE_SHA256 },
+            "not_bare": super::mark::NOT_BARE.iter().map(|(word, where_, why)| json!({ "word": word, "refused": where_, "why": why })).collect::<Vec<_>>(),
+            "languages": super::mark::OTHER_LANGUAGES
+                .iter()
+                .map(|(lang, substring, words)| {
+                    let words: Vec<Value> = words
+                        .iter()
+                        .map(|w| {
+                            let description = match w.description {
+                                super::mark::InDescription::Folded => "folded",
+                                super::mark::InDescription::Accented => "accented",
+                                super::mark::InDescription::NameOnly => "never",
+                            };
+                            let mut word = json!({ "word": w.word, "description": description });
+                            if w.with_kana {
+                                word["with_kana"] = json!(true);
+                            }
+                            if !w.before.is_empty() {
+                                word["before"] = json!(w.before);
+                            }
+                            word
+                        })
+                        .collect();
+                    (lang.to_string(), json!({ "substring": substring, "words": words }))
+                })
+                .collect::<serde_json::Map<_, _>>(),
+            "description": {
+                "about": "In a description, only a glyph refuses anywhere; a mark word only when said of the plugin itself (crates/engine/src/plugins/mark.rs, Reading::said_of, is the reference). Read the folded text (and its spaced runs read as words) as words: each run of characters that aren't separators is a word, but each Han ideograph (U+3400–4DBF, U+4E00–9FFF, U+F900–FAFF, U+20000–3134F) is a word by itself. A sentence is bounded by sentence_ends. Candidates and their kind: MARK: words spelled as mark_claims reads them; languages words whose description is 'folded'; 'accented' ones in the text read with accents kept; a with_kana word that is the only CJK in the text (no other Han, kana or Hangul). NAME-ONLY: languages words whose description is 'never' and that have neither with_kana nor before. AMBIGUOUS: ambiguous, and the languages words with with_kana or before, as substrings. For each occurrence (covering the words it overlaps), in order: (4) refused when the words directly before it, or directly after it, read as one of store_words; else (negation) not refused when a word of negations is among the four words before it in its sentence, or ends the characters before it inside its word, or one of negations_after is after it in its sentence; else (object) unless a word directly before it holds a plugin_words entry ('Cliente oficial para Git'), not refused when the word directly after it in its sentence is one of object_words; else (by) when that word is one of by_words: refused when the next word after it (articles skipped) is one of authorities, else not; else (alone) refused when every word of its sentence is one it covers. Then by kind. MARK is refused when: it ends its sentence and directly before it is one of conjunctions, subject_words or predicate_before, or one of list_marks ends the characters before it in its sentence (spaces aside); or (first) for a mark word not matched as a substring, every word before it in the text is one of articles or holds no letter or digit; or (3) the word directly before it is one of subject_words; or (2, near) below. NAME-ONLY is refused when: the word directly before it is one of subject_words; or (first, as above) and the word after it is one of conjunctions; or it ends its sentence and the word before it is one of conjunctions or holds a plugin_words entry. AMBIGUOUS is refused when it ends its sentence after one of list_marks or conjunctions, or (2, near). (2, near): a plugin_words entry (whole words in order, a last word ending in '*' a stem; or a substring where substring), or for a MARK one of certified_words as a substring, with nothing in sentence_ends between, either after it with at most two words between and none of them one of relation_words nor any of relation_after among the characters between, or directly before it with no word between, or overlapping it; and the phrase not someone else's thing: walking back from the phrase's first word (skipping at most two articles), no word of relation_words; no relation_before_zh ending the characters before it (separators aside); no relation_after beginning the characters after the plugin word (separators aside). Words and phrases of these lists are compared in the reading's own form (folded, or with accents kept). The listing cases named 'description:', 'corpus:' and 'corpus3:' hold both sides to it.",
+                "plugin_words": super::mark::PLUGIN_WORDS.iter().map(|(lang, substring, words)| (lang.to_string(), json!({ "substring": substring, "words": words }))).collect::<serde_json::Map<_, _>>(),
+                "subject_words": super::mark::SUBJECT_WORDS,
+                "negations": super::mark::NEGATIONS,
+                "sentence_ends": super::mark::SENTENCE_ENDS.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                "store_words": super::mark::STORE_WORDS,
+                "certified_words": super::mark::CERTIFIED_WORDS,
+                "articles": super::mark::ARTICLES,
+                "relation_words": super::mark::RELATION_WORDS,
+                "relation_before_zh": super::mark::RELATION_BEFORE_ZH,
+                "relation_after": super::mark::RELATION_AFTER,
+                "object_words": super::mark::OBJECT_WORDS,
+                "conjunctions": super::mark::CONJUNCTIONS,
+                "by_words": super::mark::BY_WORDS,
+                "authorities": super::mark::AUTHORITIES,
+                "predicate_before": super::mark::PREDICATE_BEFORE,
+                "list_marks": super::mark::LIST_MARKS.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                "negations_after": super::mark::NEGATIONS_AFTER,
+                "ambiguous": super::mark::AMBIGUOUS,
+            },
+        },
+        "unseen": "A name or description may hold no character drawn as nothing (bad_listing): a control or format character (General_Category Cc, Cf), any other Default_Ignorable_Code_Point (the Hangul fillers among them), any Variation_Selector but U+FE0F, and U+FE0F only directly after a character with the Emoji property. Keywords are ASCII. The listing cases named 'unseen:' hold both sides to it.",
+        "listing_causes": {
+            "about": "A bad_listing problem on a name, a description or keywords carries cause, one of causes, and, where there is one, word, for an app that says it in its own words: the device's check and the edge's answer alike (the edge's refusal gives field, cause and word beside error and message, those of its first problem, and each of its problems the same). name: too_long; unseen_char; mark_glyph (its claim is one of mark_claims.glyphs) or else mark_word. description: too_long (over max_description_len), else not_one_line; unseen_char; mark_glyph or mark_word. keywords: too_many (more than max_keywords), else repeated (word: the first keyword given again); keyword_shape (word: the keyword, none when it isn't text); mark_word (word: the keyword). unseen_char's word is the first character unseen refuses, as U+ and its code point in at least four uppercase hex digits. mark_glyph's and mark_word's word in a name or description is where it says its claim, as written: of the runs of its words (each word a run of characters but White_Space, as long as it goes; a run from its first word's start to its last's end, as written; at most written_max_words words), the shortest that, read as a name is (mark_claims), claims the same claim, the earliest of those; then without its first character while it still does, then without its last while it still does; the claim itself when no run does. Every word is without control or format characters (General_Category Cc, Cf) and any other Default_Ignorable_Code_Point, and is at most max_word_chars characters (cut there). The listing cases' problems hold both sides to it.",
+            "causes": listing::cause::ALL,
+            "max_word_chars": listing::MAX_PROBLEM_WORD_CHARS,
+            "written_max_words": super::mark::WRITTEN_MAX_WORDS,
+        },
+        "keyword_claims": "A keyword (already lowercase letters, digits, dashes and single spaces) is refused (bad_listing, field keywords) when, its parts split at '-' and ' ' and each folded as mark_claims folds, a part or all its parts joined spells, whole, with mark_claims' lookalikes (interchangeable and pairs too): one of mark_claims.words; a word of mark_claims.languages whose folded form is ASCII (any description reading); No badge lifts it ('zeron' in a keyword is anyone's). The listing cases named 'keywords:' hold both sides to it.",
         "categories": CATEGORIES.iter().map(|(id, name)| json!({ "id": id, "name": name })).collect::<Vec<_>>(),
         "builtin_ids": listing::BUILTIN_IDS,
         "reserved_ids": manifest::RESERVED_IDS,

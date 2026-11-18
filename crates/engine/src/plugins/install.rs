@@ -96,6 +96,9 @@ pub mod reason {
     /// Replacing an installed store plugin's code is the person's to do
     /// (an update they click), never an agent's.
     pub const NEEDS_PERSON: &str = "needs_person";
+    /// An update asked for as one of many (`verified_only`) isn't
+    /// verified: taken on its own, with its own question.
+    pub const NOT_VERIFIED: &str = "not_verified";
     // The store's words (`store::client::reason`): `store_unreachable`,
     // `not_in_store`, `store_error`, `store_mismatch`; and the edge's own.
 }
@@ -165,6 +168,37 @@ pub struct StoreSource {
     /// The key that signed it, as the store's record names it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// The version installed was verified (amendment 45), as the record it
+    /// was installed from said, fetched at install time: never a card, a
+    /// remembered offer, the manifest or a caller's word. A record here
+    /// without it reads as not verified: it never fails open.
+    #[serde(default)]
+    pub verified: bool,
+    /// When the store verified it (ms), as its record said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<i64>,
+    /// Installed not verified: the newest verified version this Zeron can
+    /// run, other than it, as the store said at install (for its consent
+    /// sheet's "instead"; installing it asks its own record again).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_alternative: Option<Alternative>,
+    /// (Not kept.) The person chose this verified version instead of the
+    /// unverified one installed: it may be older than that one.
+    #[serde(skip)]
+    pub instead_of_unverified: bool,
+    /// The store version this one replaced here, and whether it was
+    /// verified (its install record's word): what a consent window says of
+    /// "the version you have".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced: Option<ReplacedVersion>,
+}
+
+/// The version a store install replaced (`StoreSource::replaced`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReplacedVersion {
+    pub version: String,
+    #[serde(default)]
+    pub verified: bool,
 }
 
 impl StoreSource {
@@ -184,6 +218,13 @@ impl Source {
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
     }
 
+    /// Written back to the plugin folder `dir` (a dot file: never part of
+    /// what's signed).
+    pub fn save(&self, dir: &Path) -> Result<(), String> {
+        let bytes = serde_json::to_vec_pretty(self).map_err(|_| "Couldn't say where it came from".to_string())?;
+        std::fs::write(dir.join(SOURCE_FILE), bytes).map_err(|_| "Couldn't say where it came from".to_string())
+    }
+
     /// What the app is shown: never a local path.
     pub fn shown(&self) -> Value {
         let mut value = json!({ "kind": self.kind });
@@ -196,6 +237,16 @@ impl Source {
         if let Some(store) = &self.store {
             value["id"] = json!(store.id);
             value["publisher"] = json!(store.publisher);
+            value["verified"] = json!(store.verified);
+            if store.verified && let Some(at) = store.verified_at {
+                value["verified_at"] = json!(at);
+            }
+            if !store.verified {
+                value["verified_alternative"] = json!(store.verified_alternative);
+            }
+            if let Some(replaced) = &store.replaced {
+                value["replaced"] = json!(replaced);
+            }
         }
         value
     }
@@ -415,7 +466,11 @@ pub fn install(plugins_dir: &Path, package: &Package, source: &Source, rotated_f
         // are refused: an old version's holes stay closed.
         // (From the store, by precedence: a build of the same version isn't later.)
         let later = if source.store().is_some() { newer_by_precedence } else { newer };
-        if replaced.hash != package.hash && !later(&package.manifest.version, &replaced.version) {
+        // But the verified version the person chose instead of an
+        // unverified one installed from the store (its sheet's "instead").
+        let instead = source.store().is_some_and(|s| s.instead_of_unverified && s.verified)
+            && Source::load(&dir).is_some_and(|installed| installed.store().is_some_and(|s| !s.verified));
+        if replaced.hash != package.hash && !instead && !later(&package.manifest.version, &replaced.version) {
             return Err(not_newer(&package.manifest.version, &replaced.version));
         }
         Some(replaced)
@@ -942,13 +997,41 @@ pub struct Found {
     /// you again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub new_owner: bool,
-    /// From the store: your own version, still in review (offered to your
-    /// devices alone).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub in_review: bool,
     /// From the store: what's new in it (its CHANGELOG.md section).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
+    /// From the store: this update is verified, as the store said when it
+    /// was found (for its sheet; taking it asks the store's record again).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_verified: Option<bool>,
+    /// When the store verified it (ms), as it said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_verified_at: Option<i64>,
+    /// From the store: the version installed was verified (the sheet says
+    /// "the version you have was verified; this one is not").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_verified: Option<bool>,
+    /// From the store, when this update isn't verified: the newest verified
+    /// version newer than the one installed, offered beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_alternative: Option<Alternative>,
+}
+
+/// The newest verified version, offered beside an unverified update: what
+/// its sheet says of it (installed by `InstallPlugin {store, version}`,
+/// whose own record then says whether it's verified).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Alternative {
+    pub version: String,
+    /// The permissions it adds and drops against the version installed.
+    #[serde(default)]
+    pub added: Vec<String>,
+    #[serde(default)]
+    pub removed: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notes: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<i64>,
 }
 
 impl Found {
@@ -967,8 +1050,17 @@ impl Found {
         if self.new_owner {
             value["new_owner"] = json!(true);
         }
-        if self.in_review {
-            value["in_review"] = json!(true);
+        if let Some(verified) = self.store_verified {
+            value["verified"] = json!(verified);
+        }
+        if let Some(at) = self.store_verified_at {
+            value["verified_at"] = json!(at);
+        }
+        if let Some(verified) = self.installed_verified {
+            value["installed_verified"] = json!(verified);
+        }
+        if let Some(alternative) = &self.verified_alternative {
+            value["verified_alternative"] = json!(alternative);
         }
         if !self.notes.is_empty() {
             value["notes"] = json!(self.notes);
@@ -1061,8 +1153,11 @@ pub fn compare(installed: &Installed<'_>, fetched: &Package, source: Source, sam
         digest_diff: diff.grew().then(|| diff.to_value()),
         new_key: fetched.key != key,
         new_owner: false,
-        in_review: false,
         notes: String::new(),
+        store_verified: None,
+        store_verified_at: None,
+        installed_verified: None,
+        verified_alternative: None,
     })
 }
 

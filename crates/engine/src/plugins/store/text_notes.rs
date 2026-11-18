@@ -161,6 +161,8 @@ pub fn notes(file: &str, text: &str) -> Vec<Problem> {
         field: None,
         path: Some(file.to_owned()),
         line: Some(line),
+        cause: None,
+        word: None,
         words,
     };
     let as_text = |line: usize, what: &str, instead: &str| {

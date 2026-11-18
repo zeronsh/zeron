@@ -1,4 +1,4 @@
-//! `zeron plugin check|publish|status|key|yank|unyank|withdraw`: the plugin
+//! `zeron plugin check|publish|status|key|yank|unyank`: the plugin
 //! store from the command line.
 //!
 //! Two ways, one model (the plan's "Who may publish"):
@@ -70,7 +70,7 @@ fn exit(code: i32, message: impl Into<String>) -> anyhow::Error {
 pub fn code(word: &str) -> i32 {
     match word {
         "not_semver" | "version_exists" | "not_newer" | "missing_readme" | "missing_listing" | "bad_listing" | "bad_package" | "bad_manifest"
-        | "too_large" | "too_big" | "id_reserved" | "changed" | "not_a_package" | "unsigned" | "tampered" | "bad_file" => RULES,
+        | "too_large" | "too_big" | "id_reserved" | "id_too_similar" | "changed" | "not_a_package" | "unsigned" | "tampered" | "bad_file" => RULES,
         // (A request already made, or changed on its way: sending it again
         // is the fix.)
         "store_unreachable" | "rate_limited" | "store_error" | "unavailable" | "body_mismatch" | "replayed_request" => UNREACHABLE,
@@ -170,8 +170,8 @@ pub async fn standalone(command: PluginCommand, data_dir: &Path) -> anyhow::Resu
                 out!("{what} is ready: {} files, {}, signed with deploy key {}. Not sent (--dry-run).", prepared.files.len(), size(raw.len() as u64), key.public());
                 return Ok(None);
             }
-            let reply = store.publish(&prepared.manifest.id, raw, &caller).await.map_err(|e| failed(&e))?;
-            submitted(&what, &reply);
+            let reply = store.publish(&prepared.manifest.id, raw, &caller).await.map_err(|(e, _)| failed(&e))?;
+            submitted(&what, &reply, &store.page_url(&prepared.manifest.id));
         }
         PluginCommand::Status { id } => print_status(&store.my_plugins(&caller).await.map_err(|e| failed(&e))?, id.as_deref()),
         _ => unreachable!("only publish and status get here"),
@@ -185,7 +185,6 @@ pub fn needs_zeron(command: &PluginCommand) -> String {
     let what = match command {
         PluginCommand::Yank { .. } => "yank",
         PluginCommand::Unyank { .. } => "unyank",
-        PluginCommand::Withdraw { .. } => "withdraw",
         PluginCommand::Key { .. } => "key",
         _ => "publish",
     };
@@ -204,8 +203,7 @@ pub fn needs_zeron(command: &PluginCommand) -> String {
 fn acted(id: &str, version: &str, action: &str, reply: &Value) -> String {
     let done = match action {
         "yank" => "yanked: no new installs",
-        "unyank" => "back in the store",
-        _ => "withdrawn from review",
+        _ => "back in the store",
     };
     match reply["status"].as_str() {
         Some(status) => format!("{id} {version} {done} ({status})."),
@@ -254,9 +252,16 @@ fn problems_line(prepared: &Prepared) -> String {
     )
 }
 
-fn submitted(what: &str, reply: &Value) {
-    let status = reply["status"].as_str().unwrap_or("pending");
-    out!("Submitted {what}: {status}. It's reviewed before anyone else sees it; your own devices are offered it now.");
+/// A version published: live at once, verified only once a reviewer has
+/// read it (amendment 45), and where its page is.
+fn submitted(what: &str, reply: &Value, page: &str) {
+    let mark = if reply["verified"] == true { "verified" } else { "not yet verified" };
+    out!("Published {what}: live now, {mark}. Anyone can install it from {page}");
+    // Older versions nobody had verified take no new installs now.
+    let version = reply["version"].as_str().unwrap_or("this version");
+    for older in reply["superseded"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        out!("{}", listing::escaped(&format!("{older} no longer takes new installs: {version} replaced it before it was verified")));
+    }
 }
 
 /// `zeron plugin status`'s lines: each plugin, then each version's state.
@@ -276,9 +281,18 @@ fn status_lines(reply: &Value, only: Option<&str>) -> Vec<String> {
     for plugin in plugins {
         lines.push(listing::escaped(plugin["id"].as_str().unwrap_or("?")));
         for version in plugin["versions"].as_array().into_iter().flatten() {
-            let mut line = format!("  {}  {}", version["version"].as_str().unwrap_or("?"), version["status"].as_str().unwrap_or("?"));
-            if let Some(reason) = version["reason"].as_str().or(version["message"].as_str()).filter(|r| !r.is_empty()) {
-                line.push_str(&format!(": {reason}"));
+            let mark = if version["verified"] == true { "verified" } else { "not verified" };
+            let mut line = format!("  {}  {}  {mark}", version["version"].as_str().unwrap_or("?"), version["status"].as_str().unwrap_or("?"));
+            // Yanked because a newer version came out before anyone verified it.
+            if version["yanked_by"] == "superseded" {
+                let by = version["superseded"]["by"].as_str().unwrap_or("a newer version");
+                line.push_str(&format!(": superseded by {by}"));
+            }
+            // A reviewer declined to verify it (yours alone to read).
+            let review = &version["review"];
+            if review["decision"] == "declined" {
+                let words: Vec<&str> = [review["reason"].as_str(), review["message"].as_str()].into_iter().flatten().filter(|w| !w.is_empty()).collect();
+                line.push_str(&format!(": declined{}", if words.is_empty() { String::new() } else { format!(": {}", words.join(": ")) }));
             }
             lines.push(listing::escaped(&line));
         }
@@ -330,12 +344,11 @@ pub async fn through_zeron(command: PluginCommand, data_dir: &Path, client: &zer
             }
             let reply = call(methods::PUBLISH_PLUGIN, json!({ "id": id, "hash": prepared["hash"], "ticket": prepared["ticket"] })).await?;
             answered(&reply)?;
-            submitted(&what, &reply);
+            submitted(&what, &reply, reply["url"].as_str().unwrap_or_default());
         }
         PluginCommand::Status { id } => print_status(&call(methods::STORE_MY_PLUGINS, json!({})).await?, id.as_deref()),
         PluginCommand::Yank { id, version } => action(client, &id, &version, "yank").await?,
         PluginCommand::Unyank { id, version } => action(client, &id, &version, "unyank").await?,
-        PluginCommand::Withdraw { id, version } => action(client, &id, &version, "withdraw").await?,
         PluginCommand::Key { command } => key(client, command).await?,
         _ => unreachable!("only the store's commands get here"),
     }
@@ -384,8 +397,10 @@ const STEP_UP_WAIT: std::time::Duration = std::time::Duration::from_secs(5 * 60)
 async fn key(client: &zeron_rpc::RpcClient, command: KeyCommand) -> anyhow::Result<()> {
     let call = |method: &'static str, params: Value| ask(client, method, params);
     match command {
-        KeyCommand::Create { id, name, expires_in_days } => {
-            let mut params = json!({ "id": id, "name": name });
+        KeyCommand::Create { name, plugins, all, expires_in_days } => {
+            let scope = if all { json!({ "all": true }) } else { json!({ "plugins": plugins }) };
+            let what = if all { "all of your plugins".to_owned() } else { plugins.join(", ") };
+            let mut params = json!({ "name": name, "scope": scope });
             if let Some(days) = expires_in_days {
                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
                 params["expires"] = json!(now + i64::from(days) * 24 * 60 * 60 * 1000);
@@ -404,28 +419,24 @@ async fn key(client: &zeron_rpc::RpcClient, command: KeyCommand) -> anyhow::Resu
             }
             answered(&reply)?;
             let public = reply["key"]["key"].as_str().unwrap_or("");
-            out!("Made deploy key \"{name}\" for {id}{}.", if public.is_empty() { String::new() } else { format!(" ({public})") });
+            out!("Made deploy key \"{name}\" for {what}{}.", if public.is_empty() { String::new() } else { format!(" ({public})") });
             println!("Its secret, shown this once (Zeron keeps no copy):\n");
             println!("  {}\n", reply["secret"].as_str().unwrap_or(""));
             println!("Add it to your CI's secrets as {}. `zeron plugin publish <folder>` reads it from there.", deploy_key::ENV);
         }
-        KeyCommand::List { id } => {
-            let reply = call(methods::LIST_DEPLOY_KEYS, json!({ "id": id })).await?;
+        KeyCommand::List => {
+            let reply = call(methods::LIST_DEPLOY_KEYS, json!({})).await?;
             let keys = reply["keys"].as_array().cloned().unwrap_or_default();
             if keys.is_empty() {
-                out!("{id} has no deploy keys. Make one with `zeron plugin key create {id} --name <what it's for>`.");
+                out!("You have no deploy keys. Make one with `zeron plugin key create --name <what it's for> --plugins <id,…>` (or `--all`).");
             }
             for k in keys {
-                let mut line = format!("{}  {}", k["key"].as_str().unwrap_or("?"), k["name"].as_str().unwrap_or(""));
-                if k["revokedAt"].is_number() || k["revoked_at"].is_number() {
-                    line.push_str("  revoked");
-                }
-                out!("{line}");
+                out!("{}", key_line(&k));
             }
         }
-        KeyCommand::Revoke { id, key } => {
-            call(methods::REVOKE_DEPLOY_KEY, json!({ "id": id, "key": key })).await?;
-            out!("Revoked {key}: it publishes nothing for {id} from now on.");
+        KeyCommand::Revoke { key } => {
+            call(methods::REVOKE_DEPLOY_KEY, json!({ "key": key })).await?;
+            out!("Revoked {key}: it publishes nothing from now on.");
         }
     }
     Ok(())
@@ -440,8 +451,22 @@ pub fn is_store_command(command: &PluginCommand) -> bool {
             | PluginCommand::Key { .. }
             | PluginCommand::Yank { .. }
             | PluginCommand::Unyank { .. }
-            | PluginCommand::Withdraw { .. }
     )
+}
+
+/// One deploy key, as `zeron plugin key list` says it: its key, name, what
+/// it publishes, and whether it's revoked.
+fn key_line(key: &Value) -> String {
+    let scope = if key["scope"]["all"] == true {
+        "all of your plugins".to_owned()
+    } else {
+        key["scope"]["plugins"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")
+    };
+    let mut line = format!("{}  {}  {scope}", key["key"].as_str().unwrap_or("?"), key["name"].as_str().unwrap_or(""));
+    if key["revoked_at"].is_number() {
+        line.push_str("  revoked");
+    }
+    line
 }
 
 #[cfg(test)]
@@ -452,6 +477,7 @@ mod tests {
     fn each_failure_word_has_its_exit_code() {
         assert_eq!(code("not_semver"), RULES);
         assert_eq!(code("version_exists"), RULES);
+        assert_eq!(code("id_too_similar"), RULES);
         assert_eq!(code("key_not_allowed"), REFUSED);
         assert_eq!(code("needs_username"), REFUSED);
         assert_eq!(code("signed_out"), REFUSED);
@@ -499,13 +525,17 @@ mod tests {
     #[test]
     fn the_store_s_words_in_status_are_never_printed_raw() {
         let reply = json!({ "plugins": [{ "id": HOSTILE, "versions": [
-            { "version": "1.0.0\u{1b}[31m", "status": "rejected", "reason": HOSTILE },
-            { "version": "1.1.0", "status": "pending", "message": "fine\r\nerror: forged" },
+            { "version": "1.0.0\u{1b}[31m", "status": "listed", "verified": false, "review": { "decided": true, "decision": "declined", "reason": HOSTILE } },
+            { "version": "1.1.0", "status": "listed", "verified": false, "review": { "decided": true, "decision": "declined", "message": "fine\r\nerror: forged" } },
+            { "version": "1.2.0", "status": "listed", "verified": true, "review": { "decided": true, "decision": "verified" } },
+            { "version": "1.3.0", "status": "yanked", "verified": false, "yanked_by": "superseded", "superseded": { "at": 1, "by": "1.4.0\u{1b}[2J" } },
         ] }] });
         let lines = status_lines(&reply, None);
-        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!(lines.len(), 5, "{lines:?}");
         assert!(lines.iter().all(|l| raw_free(l)), "{lines:?}");
-        assert!(lines[1].contains("rejected: a\\u{a}error: fake line\\u{1b}[2J\\u{202e}"), "{lines:?}");
+        assert!(lines[1].contains("not verified: declined: a\\u{a}error: fake line\\u{1b}[2J\\u{202e}"), "{lines:?}");
         assert!(lines[2].ends_with("fine\\u{d}\\u{a}error: forged"), "{lines:?}");
+        assert_eq!(lines[3], "  1.2.0  listed  verified");
+        assert_eq!(lines[4], "  1.3.0  yanked  not verified: superseded by 1.4.0\\u{1b}[2J");
     }
 }

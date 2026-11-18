@@ -8,8 +8,8 @@
 # Env (the action sets these from its inputs):
 #   ZERON_DEPLOY_KEY   the deploy key's secret (zpk_…), or empty
 #   ZERON_PLUGIN_PATH  the plugin's folder (default .)
-#   ZERON_DRY_RUN      true: check, sign and pack, don't submit; false (or
-#                      unset): submit. Anything else is refused.
+#   ZERON_DRY_RUN      true: check, sign and pack, don't publish; false (or
+#                      unset): publish. Anything else is refused.
 #   ZERON_VERSION      latest, or a release's version (held: the release's
 #                      manifest must name that version)
 #   ZERON_SHA256       optional: the command line's tarball must have this
@@ -17,7 +17,7 @@
 #   ZERON_RELEASES_URL where releases are (default https://zeron.sh/releases)
 #   ZERON_EDGE_URL     the store's edge (default: the command line's own)
 #
-# Exits as `zeron plugin publish` does: 0 submitted (or checked), 1 the
+# Exits as `zeron plugin publish` does: 0 published (or checked), 1 the
 # plugin doesn't meet the store's rules, 2 set-up, 3 the store refused the
 # key or the account, 4 the store couldn't be reached (re-run the job).
 
@@ -37,7 +37,7 @@ esac
 for tool in curl jq sha256sum tar; do
   command -v "$tool" >/dev/null || fail "$tool is needed on the runner."
 done
-# A dry run that isn't one would submit for real: only the two words.
+# A dry run that isn't one would publish for real: only the two words.
 case "${ZERON_DRY_RUN:-false}" in
   true) dry_run=true ;;
   false) dry_run=false ;;

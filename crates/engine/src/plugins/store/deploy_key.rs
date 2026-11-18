@@ -29,8 +29,13 @@ use super::super::signing::{self, SigningKey};
 pub const SECRET_PREFIX: &str = "zpk_";
 /// The environment variable `zeron plugin publish` reads the secret from.
 pub const ENV: &str = "ZERON_DEPLOY_KEY";
-/// What a deploy key's proof of possession signs, before `<plugin id>:<key>`.
-pub const PROOF_PREFIX: &str = "zeron-deploy-key:v1:";
+/// What a deploy key's proof of possession signs, before
+/// `<publisher id>:<expiry>:<scope text>:<key>` (v2: one account's key, one
+/// lifetime, one scope, so a session can't widen or extend it; v1, which
+/// named one plugin, is refused).
+pub const PROOF_PREFIX: &str = "zeron-deploy-key:v2:";
+/// The most plugins one key's scope names.
+pub const MAX_SCOPE_PLUGINS: usize = 50;
 /// What a signed request's signature covers, first.
 pub const REQUEST_PREFIX: &str = "zeron-plugin-publish:v1\n";
 pub const SCHEME: &str = "ZeronKey";
@@ -71,6 +76,61 @@ impl Drop for DeployKey {
 /// base64url of 32 bytes.
 pub fn valid_public(key: &str) -> bool {
     key.len() == 43 && B64URL.decode(key).is_ok_and(|bytes| bytes.len() == SEED_LEN)
+}
+
+/// What a key may publish, fixed when it's made (amendment 44): every
+/// plugin of its account's, those it publishes later included, or the
+/// plugins named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    All,
+    /// Sorted and unique.
+    Plugins(Vec<String>),
+}
+
+impl Scope {
+    /// The plugins named (`ids`, trimmed and sorted by code unit), or `Err`
+    /// when there are none or more than [`MAX_SCOPE_PLUGINS`], one isn't an
+    /// id, or one is named twice: the store refuses a duplicate rather than
+    /// dropping it, so this does too.
+    pub fn plugins(ids: &[String]) -> Result<Self, String> {
+        let mut ids: Vec<String> = ids.iter().map(|id| id.trim().to_owned()).collect();
+        ids.sort();
+        if ids.is_empty() || ids.len() > MAX_SCOPE_PLUGINS {
+            return Err(format!("A key is for 1 to {MAX_SCOPE_PLUGINS} plugins, or for all of yours"));
+        }
+        if let Some(bad) = ids.iter().find(|id| super::super::manifest::check_id(id).is_err()) {
+            return Err(format!("\"{bad}\" isn't a plugin's id"));
+        }
+        if let Some(twice) = ids.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Err(format!("\"{}\" is named twice", twice[0]));
+        }
+        Ok(Self::Plugins(ids))
+    }
+
+    /// As the proof binds it: `*`, or the ids joined with `,`.
+    pub fn text(&self) -> String {
+        match self {
+            Scope::All => "*".to_owned(),
+            Scope::Plugins(ids) => ids.join(","),
+        }
+    }
+
+    /// As the store takes and answers it: `{all: true}` or `{plugins: [...]}`.
+    pub fn to_value(&self) -> serde_json::Value {
+        match self {
+            Scope::All => serde_json::json!({ "all": true }),
+            Scope::Plugins(ids) => serde_json::json!({ "plugins": ids }),
+        }
+    }
+
+    /// Whether it covers plugin `id`.
+    pub fn covers(&self, id: &str) -> bool {
+        match self {
+            Scope::All => true,
+            Scope::Plugins(ids) => ids.iter().any(|p| p == id),
+        }
+    }
 }
 
 /// Why a secret can't be used, in words a CI log can carry (never quoting it).
@@ -128,10 +188,11 @@ impl DeployKey {
         &self.key
     }
 
-    /// Its proof of possession, for registering it to `plugin`.
-    pub fn proof(&self, plugin: &str) -> String {
+    /// Its proof of possession, for registering it to the account
+    /// `publisher_id` with `scope`, until `expires_at` (ms; `None`: never).
+    pub fn proof(&self, publisher_id: &str, expires_at: Option<i64>, scope: &Scope) -> String {
         self.key
-            .sign(proof_message(plugin, &self.public()).as_bytes())
+            .sign(proof_message(publisher_id, expires_at, scope, &self.public()).as_bytes())
     }
 
     /// The `Authorization` header for `method path` with `body`, at `ts`
@@ -146,9 +207,11 @@ impl DeployKey {
     }
 }
 
-/// What registering `key` to `plugin` proves possession with.
-pub fn proof_message(plugin: &str, key: &str) -> String {
-    format!("{PROOF_PREFIX}{plugin}:{key}")
+/// What registering `key` to the account `publisher_id` with `scope`, until
+/// `expires_at` (ms; `None`: `never`), proves possession with.
+pub fn proof_message(publisher_id: &str, expires_at: Option<i64>, scope: &Scope, key: &str) -> String {
+    let expiry = expires_at.map_or_else(|| "never".to_owned(), |ms| ms.to_string());
+    format!("{PROOF_PREFIX}{publisher_id}:{expiry}:{}:{key}", scope.text())
 }
 
 /// What a signed request's signature covers.
@@ -181,7 +244,13 @@ mod tests {
             format!("zeron-plugin-publish:v1\nPOST\n/store/v1/plugins/git/versions\n{body}\n1700000000000")
         );
         assert_eq!(signing::sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
-        assert_eq!(proof_message("git", "KEY"), "zeron-deploy-key:v1:git:KEY");
+        assert_eq!(proof_message("pub_1", None, &Scope::All, "KEY"), "zeron-deploy-key:v2:pub_1:never:*:KEY");
+        let two = Scope::plugins(&["git".into(), " focus".into()]).unwrap();
+        assert_eq!(proof_message("pub_1", Some(1_800_000_000_000), &two, "KEY"), "zeron-deploy-key:v2:pub_1:1800000000000:focus,git:KEY");
+        assert_eq!(two.to_value(), serde_json::json!({ "plugins": ["focus", "git"] }));
+        assert!(Scope::plugins(&[]).is_err() && Scope::plugins(&["Not An Id".into()]).is_err());
+        assert_eq!(Scope::plugins(&["git".into(), "focus".into(), " git".into()]), Err("\"git\" is named twice".to_owned()));
+        assert!(Scope::plugins(&(0..51).map(|n| format!("p{n:02}")).collect::<Vec<_>>()).is_err());
         assert_eq!(CONTENT_SHA256_HEADER, "X-Zeron-Content-SHA256");
     }
 
@@ -221,14 +290,13 @@ mod tests {
                 .verify(message.as_bytes(), &B64URL.decode(sig).unwrap())
                 .is_ok()
         };
-        assert!(verify(
-            &proof_message("focus", &key.public()),
-            &key.proof("focus")
-        ));
-        assert!(
-            !verify(&proof_message("other", &key.public()), &key.proof("focus")),
-            "scoped to its plugin"
-        );
+        let focus = Scope::plugins(&["focus".into()]).unwrap();
+        let proof = key.proof("pub_a", None, &focus);
+        assert!(verify(&proof_message("pub_a", None, &focus, &key.public()), &proof));
+        // One account's key, one lifetime, one scope: none can be widened.
+        assert!(!verify(&proof_message("pub_a", None, &Scope::All, &key.public()), &proof), "another scope");
+        assert!(!verify(&proof_message("pub_b", None, &focus, &key.public()), &proof), "another account");
+        assert!(!verify(&proof_message("pub_a", Some(1), &focus, &key.public()), &proof), "another lifetime");
         let header = key.authorization(
             "POST",
             "/store/v1/plugins/focus/versions",

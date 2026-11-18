@@ -250,8 +250,7 @@ pub async fn run(
         | PluginCommand::Status { .. }
         | PluginCommand::Key { .. }
         | PluginCommand::Yank { .. }
-        | PluginCommand::Unyank { .. }
-        | PluginCommand::Withdraw { .. } => unreachable!("the store's commands ran above"),
+        | PluginCommand::Unyank { .. } => unreachable!("the store's commands ran above"),
     }
     Ok(())
 }

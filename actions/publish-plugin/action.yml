@@ -1,5 +1,5 @@
 name: Publish a Zeron plugin
-description: Check a Zeron plugin against the store's rules and submit it for review, signed with a deploy key.
+description: Check a Zeron plugin against the store's rules and publish it (live at once, verified once Zeron has read it), signed with a deploy key.
 author: Zeron
 branding:
   icon: upload-cloud
@@ -9,7 +9,7 @@ inputs:
   key:
     description: >-
       The plugin's deploy key secret (zpk_…), from your repository's secrets.
-      Make one with `zeron plugin key create <id> --name "GitHub Actions"`.
+      Make one with `zeron plugin key create --name "GitHub Actions" --plugins <id>`.
       Without it, the plugin is only checked (`zeron plugin check`).
     required: false
     default: ""
@@ -18,7 +18,7 @@ inputs:
     required: false
     default: "."
   dry-run:
-    description: "`true`: check, sign and pack the plugin, but don't submit it. `true` or `false` only: anything else fails the step."
+    description: "`true`: check, sign and pack the plugin, but don't publish it. `true` or `false` only: anything else fails the step."
     required: false
     default: "false"
   zeron-version:
