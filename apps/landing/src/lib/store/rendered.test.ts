@@ -23,7 +23,7 @@ test("a rendering is kept, and found again for the same text", async () => {
   expect(renders).toBe(1);
   // Other text, another site (staging), or other pictures: never the same rendering.
   await renderedOnce("https://zeron.sh", "a", "1.0.0", "readme", "# Hello", options, { store, render });
-  await renderedOnce("https://site-staging.zeron.sh", "a", "1.0.0", "readme", "# Hi", options, { store, render });
+  await renderedOnce("https://another-origin.example", "a", "1.0.0", "readme", "# Hi", options, { store, render });
   expect(renders).toBe(3);
 });
 
