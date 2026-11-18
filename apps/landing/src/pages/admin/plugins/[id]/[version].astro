@@ -20,7 +20,7 @@ import { reasonLabel, toWeigh, versionAsk } from "../../../../lib/store/admin.ts
 import { takeFlash } from "../../../../lib/store/flash.ts";
 import { age, bytes, count, dateTime, day, unbidi, waitedFor } from "../../../../lib/store/format.ts";
 import { privatePage } from "../../../../lib/store/http.ts";
-import { Budget, drawable, render } from "../../../../lib/store/markdown.ts";
+import { render } from "../../../../lib/store/markdown.ts";
 import { HighlightBudget } from "../../../../lib/store/highlight.ts";
 import { isPluginId, isVersion } from "../../../../lib/store/names.ts";
 import { compared, together } from "../../../../lib/store/permissions.ts";
@@ -127,19 +127,16 @@ const readmeText = s ? (s.version.readme ?? (await (async () => {
   const got = await readText(await edge.file(id, version, "README.md", true));
   return got && "text" in got ? got.text : "";
 })())) : "";
-// (The README first, then the notes, under one page budget, as the public page draws them.)
-const budget = new Budget();
-const readmeDrawn = overview && readmeText.trim() ? render(readmeText, { file, demote: true, title: name }, budget) : null;
-const notesDrawn = overview && s.version.notes ? render(s.version.notes, { file, demote: true }, budget) : null;
-const notes = notesDrawn?.html ?? "";
-const readme = readmeDrawn?.html ?? "";
-// A README or notes too costly to draw (markdown.ts BOUNDS) is shown as its
+// Drawn on every view (linear in their text, markdown.ts), shown on the overview.
+const readmeDrawn = readmeText.trim() ? render(readmeText, { file, demote: true, title: name }) : null;
+const notesDrawn = s?.version.notes ? render(s.version.notes, { file, demote: true }) : null;
+const notes = overview ? (notesDrawn?.html ?? "") : "";
+const readme = overview ? (readmeDrawn?.html ?? "") : "";
+// A README or notes too large to draw (markdown.ts BOUNDS) is shown as its
 // text, and the reviewer is told, loudly, on every view: a submission that
 // can't be drawn within the limit is itself a reason not to approve it.
-// (Loud only for the document's own sake: one left undrawn because the page spent its budget is just its text.)
-const own = (cut: string | null | undefined) => (cut === "page" ? null : cut);
-const readmeCut = own(readmeDrawn?.cut) ?? (!readmeDrawn && readmeText.trim() ? drawable(readmeText) : null);
-const notesCut = own(notesDrawn?.cut) ?? (!notesDrawn && s?.version.notes ? drawable(s.version.notes) : null);
+const readmeCut = readmeDrawn?.cut ?? null;
+const notesCut = notesDrawn?.cut ?? null;
 const drawing: Check[] = [
   ...(readmeCut ? [{ id: "readme_drawn", level: "fail" as const, message: "This README could not be drawn within the limit: it's shown as plain text. That alone is a reason not to approve it." }] : []),
   ...(notesCut ? [{ id: "notes_drawn", level: "fail" as const, message: `Its notes for ${version} could not be drawn within the limit: they're shown as plain text.` }] : []),

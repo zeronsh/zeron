@@ -685,7 +685,7 @@ describe("forms", () => {
     expect(files.body).toContain("alert('file')");
     const changes = await html(`${here}?view=changes`, grace);
     inert(changes.body);
-    expect(changes.body).toMatch(/&#x3C;\/code>&#x3C;\/pre>&#x3C;script>alert\('diff'\)|&lt;\/code&gt;&lt;\/pre&gt;&lt;script&gt;alert\(&#39;diff&#39;\)/);
+    expect(changes.body).toMatch(/&lt;\/code&gt;&lt;\/pre&gt;&lt;script&gt;alert\(('|&#39;)diff('|&#39;)\)/);
     const readme = await html(`${here}?view=readme`, grace);
     inert(readme.body);
     // The public page's notes too.
@@ -921,27 +921,30 @@ describe("the review of the web store: what it found, held", () => {
     return { ...page, ms: performance.now() - started };
   };
 
-  test("words built to be slow to draw, at the store's caps, can't hold a plugin's page: it answers within the bound, as text, said so", async () => {
+  test("words built to be slow to draw, at the store's caps, can't hold a plugin's page: it answers within the bound; what would write too much is its text, said so", async () => {
     const first = await timed("/plugins/slow-words");
     expect(first.response.status).toBe(200);
     expect(first.ms).toBeLessThan(4_000);
-    expect(first.body).toContain('<p class="as-text">Shown as plain text.</p>');
+    // (The README, 131,072 headings, would write more than its bound; the notes are drawn.)
+    expect(first.body).toContain(`<p class="as-text">Shown as plain text: it's too long to lay out.</p>`);
+    expect(first.body).toContain("<blockquote>");
     // (Kept, so the next visit draws nothing again.)
     const again = await timed("/plugins/slow-words");
     expect(again.ms).toBeLessThan(4_000);
   });
 
-  test("…nor hide a submission from its reviewer: every view answers, and says, loudly, that it couldn't be drawn", async () => {
+  test("…nor hide a submission from its reviewer: every view answers, and says, loudly, what couldn't be drawn", async () => {
     const grace = await site.signIn("user_grace");
     for (const view of ["", "?view=files", "?view=changes"]) {
       const { response, body, ms } = await timed(`/admin/plugins/slow-words/1.2.0${view}`, grace);
       expect(response.status, view).toBe(200);
       expect(ms, view).toBeLessThan(4_000);
       expect(body, view).toMatch(/<li class="fail">.*?This README could not be drawn within the limit/s);
-      expect(body, view).toContain("Its notes for 1.2.0 could not be drawn within the limit");
+      // (Its notes, 16,384 headings, are drawn: linear in their text, within the bound.)
+      expect(body, view).not.toContain("Its notes for 1.2.0 could not be drawn within the limit");
     }
     // (Approve's line counts it among what failed.)
-    expect((await html("/admin/plugins/slow-words/1.2.0", grace)).body).toMatch(/<p class="weigh-line bad">[^<]*2 checks failed/);
+    expect((await html("/admin/plugins/slow-words/1.2.0", grace)).body).toMatch(/<p class="weigh-line bad">[^<]*1 check failed/);
   });
 
   test("a file built to break the highlighter is shown as text, and the reviewer told, in Files and in Changes", async () => {

@@ -11,7 +11,7 @@ import Glyph from "../../components/ui/Glyph.astro";
 import App from "../../layouts/App.astro";
 import { catalogHref } from "../../lib/store/catalog.ts";
 import { bytes, compatibility, count, day } from "../../lib/store/format.ts";
-import { Budget, firstLine } from "../../lib/store/markdown.ts";
+import { firstLine } from "../../lib/store/markdown.ts";
 import { lines } from "../../lib/store/permissions.ts";
 import { CATEGORIES } from "../../lib/store/nav.ts";
 import { satisfies } from "../../lib/store/semver.ts";
@@ -51,17 +51,14 @@ if (plugin) {
   publicPage(Astro, [pluginTag(plugin.id)]);
   const file = (version: string) => (path: string) => fileUrl(plugin.id, version, path);
   const origin = Astro.url.origin;
-  // What the page may spend drawing (markdown.ts): the README first, then
-  // each version's notes, newest first, each on its own and each kept by
-  // its text, so no one document can sink the page, and what one page left
-  // undrawn a later visit draws.
-  const budget = new Budget();
-  // (A first heading that only says its name again isn't drawn: the page says it.)
-  readme = await renderedOnce(origin, plugin.id, plugin.version, "readme", plugin.readme, { file: file(plugin.version), demote: true, title: plugin.name }, { budget });
+  // The README, then each version's notes, newest first, each drawn once
+  // and kept by its text (markdown.ts: linear in its text, so none can
+  // sink the page). (A first heading that only says its name again isn't drawn: the page says it.)
+  readme = await renderedOnce(origin, plugin.id, plugin.version, "readme", plugin.readme, { file: file(plugin.version), demote: true, title: plugin.name });
   // The notes of the latest few versions are shown; older versions are listed by number and date.
   const all = (versionsResult?.ok ? versionsResult.data.versions : plugin.versions).slice(0, NOTED + 20);
   for (const [i, v] of all.entries()) {
-    versions.push({ ...v, html: v.notes && i < NOTED ? await renderedOnce(origin, plugin.id, v.version, "notes", v.notes, { file: file(v.version), demote: true }, { budget }) : null });
+    versions.push({ ...v, html: v.notes && i < NOTED ? await renderedOnce(origin, plugin.id, v.version, "notes", v.notes, { file: file(v.version), demote: true }) : null });
   }
 }
 // An author's links, parsed: https only, never the text as given.

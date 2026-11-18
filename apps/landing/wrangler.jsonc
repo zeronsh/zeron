@@ -42,6 +42,15 @@
   // The Worker cache in front of the Worker: public store pages say how
   // long they may be kept (Astro's route cache); everything else is no-store.
   "cache": { "enabled": true },
+  // CPU per request, a backstop: a fault anywhere in the page's own code is
+  // cut short by the platform rather than running to the default 30 s. Set
+  // from what a page can cost (src/lib/store/markdown.ts): the honest worst,
+  // a README of code at its 512 KB cap and eight notes at their 64 KB, is
+  // about 0.45 s; the worst the renderer's bounds allow (every document's
+  // highlighting spent on the slowest grammar, the rest the slowest
+  // markup) about 1.6 s. 3 s is about 7 times the first and 2 times the
+  // second, so a page within the bounds is always drawn.
+  "limits": { "cpu_ms": 3000 },
   "env": {
     // The site's staging copy, at https://site-staging.zeron.sh: the same
     // site on its own worker (zeron-landing-staging), which holds only that
@@ -53,7 +62,8 @@
       "routes": [{ "pattern": "site-staging.zeron.sh", "custom_domain": true }],
       "services": [{ "binding": "EDGE", "service": "zeron-edge-staging" }],
       "vars": { "SITE_ORIGIN": "https://site-staging.zeron.sh" },
-      "cache": { "enabled": true }
+      "cache": { "enabled": true },
+      "limits": { "cpu_ms": 3000 }
     }
   }
 }

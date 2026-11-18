@@ -39,7 +39,7 @@ const PARTS = [
     <h2 id="needs">What the store needs</h2>
     <p>A plugin is a folder with its <code>zeron-plugin.json</code>. For the store, it also needs:</p>
     <ul>
-      <li><strong><code>README.md</code></strong>, its page, at most 512 KB. Markdown with tables, task lists and strikethrough; raw HTML is dropped. Pictures are files in the plugin, by a relative path (<code>![Board](shots/board.png)</code>). A picture from elsewhere shows as a link, because what is shown is what was reviewed.</li>
+      <li><strong><code>README.md</code></strong>, its page, at most 512 KB, in the store's Markdown (below). Pictures are files in the plugin, by a relative path (<code>![Board](shots/board.png)</code>). A picture from elsewhere shows as a link, because what is shown is what was reviewed.</li>
       <li><strong><code>description</code></strong>: one line, at most 300 characters, its summary everywhere it's listed. Its <code>name</code> is at most 64.</li>
       <li><strong><code>icon</code></strong>: an SVG in the plugin, at most 32 KB. It's drawn in the text's colour, as Zeron draws its own.</li>
       <li><strong><code>categories</code></strong>: one or two of {CATEGORIES.map((c, i) => <>{i > 0 && (i === CATEGORIES.length - 1 ? " and " : ", ")}<code>{c.id}</code></>)}.</li>
@@ -62,6 +62,19 @@ const PARTS = [
       <li><code>engines.zeron</code>: the Zeron versions it works with. Anyone on another can't install it, and its page says why.</li>
       <li><strong><code>CHANGELOG.md</code></strong> gives each version's notes: the section under the heading that starts with that version (<code>## 1.2.0</code>). People read them when Zeron offers the update.</li>
     </ul>
+    <h3 id="markdown">The store's Markdown</h3>
+    <p>A README and a version's notes are drawn from this part of Markdown, on the web as in Zeron:</p>
+    <ul>
+      <li>Headings (<code>#</code> to <code>######</code>, or underlined), paragraphs and line breaks.</li>
+      <li><em>Emphasis</em>, <strong>strong</strong>, <del>strikethrough</del> (<code>~~</code>), and <code>`code`</code>.</li>
+      <li>Code blocks, fenced (with a language, to highlight it) or indented.</li>
+      <li>Quotes, numbered and bulleted lists, and task lists (<code>- [ ]</code>, <code>- [x]</code>), nested up to 32 deep.</li>
+      <li>Tables, up to 64 columns.</li>
+      <li>Rules (<code>---</code>).</li>
+      <li>Links: inline, by reference, and <code>&lt;https://…&gt;</code> or a bare <code>https://</code> address. A link goes only to https or mail; a link to a file of the plugin shows as its words.</li>
+      <li>Pictures, as above, also inside a link (a badge).</li>
+    </ul>
+    <p>Anything else is shown as you typed it, characters and all: raw HTML and footnotes (<code>[^1]</code>) included, and on the web, math (<code>$…$</code>). Nothing in a README runs.</p>
     <p>The package, as sent, is at most 20 MB. Files that aren't text or pictures, a compiled program say, are allowed, but reviewers look closely at them.</p>
 
     <h2 id="send">Sending a version</h2>

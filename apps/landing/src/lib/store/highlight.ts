@@ -1,5 +1,6 @@
 // Code as HTML with the highlighter's classes (no inline style: the CSP
-// allows none), every character escaped by the serializer. A file can be
+// allows none), every character escaped by the store's one writer
+// (md/writer.ts). A file can be
 // made to nest the highlighter's tree deeper than the serializer can walk
 // (a 3 KB `"\`${"` run): past NESTING, or if anything throws, the text is
 // shown plain, and the caller is told, so a reviewer can say so.
@@ -16,10 +17,12 @@
 // long isn't suspicious). Within these, the worst measured is about 60 ms
 // a call.
 import type { Root, RootContent } from "hast";
-import { toHtml } from "hast-util-to-html";
 import { common, createLowlight } from "lowlight";
+import { escapeText, highlightedHtml } from "./md/writer.ts";
 
-const lowlight = createLowlight(common);
+/** The grammars shipped (common's), and the names people write after ``` for some of them. */
+export const lowlight = createLowlight(common);
+lowlight.registerAlias({ javascript: ["mjs", "cjs"], lua: ["luau"], bash: ["zsh"], json: ["jsonc", "json5"] });
 
 /** Deeper than any real file's highlighting nests (a few levels). */
 export const NESTING = 64;
@@ -56,7 +59,7 @@ export interface Highlighted {
   plain: boolean;
 }
 
-const asText = (text: string) => toHtml({ type: "text", value: text });
+const asText = escapeText;
 
 /** Whether a highlighter's tree nests past NESTING (the serializer would fail on it). */
 export const nestsTooDeep = (tree: Root): boolean => depth(tree) > NESTING;
@@ -88,7 +91,7 @@ export function highlighted(text: string, language: string | null, budget?: High
   try {
     const tree = lowlight.highlight(language, text);
     if (depth(tree) > NESTING) return { html: asText(text), plain: true };
-    return { html: toHtml(tree), plain: false };
+    return { html: highlightedHtml(tree), plain: false };
   } catch {
     return { html: asText(text), plain: true };
   }

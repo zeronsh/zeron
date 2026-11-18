@@ -43,6 +43,6 @@ describe("the highlighter, given a file built to break it", () => {
   });
 
   test("text that could be markup comes out as text", () => {
-    expect(highlighted("<script>alert(1)</script>", null).html).toBe("&#x3C;script>alert(1)&#x3C;/script>");
+    expect(highlighted("<script>alert(1)</script>", null).html).toBe("&lt;script&gt;alert(1)&lt;/script&gt;");
   });
 });
