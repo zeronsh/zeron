@@ -339,7 +339,8 @@ describe("POST /store/v1/plugins/:id/versions", () => {
       [{ name: "Verified Focus" }, {}, "bad_listing"],
       [{ description: "Boards ✅" }, {}, "bad_listing"],
       [{ name: "Vеrified Focus" }, {}, "bad_listing"],
-      [{ description: "The οfficial board." }, {}, "bad_listing"]
+      // (In a description, only said of the plugin itself: 011fd8af2.)
+      [{ description: "The οfficial plugin." }, {}, "bad_listing"]
     ];
     for (const [manifest, files, error] of cases) {
       const res = await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer, manifest, files }));

@@ -251,7 +251,9 @@ describe("store listing: the mark (amendment 45)", () => {
       return checkListing(manifest, files, isText).problems.filter((p) => p.rule === "bad_listing").map((p) => [p.field, p.words]);
     };
     expect(problems({ name: "Оfficial Focus" })).toEqual([["name", 'Its name says "official": only the store marks a plugin verified']]);
-    expect(problems({ description: "The vеrified board." })).toEqual([["description", 'Its description says "verified": only the store marks a plugin verified']]);
+    // (A description only when said of the plugin itself: 011fd8af2.)
+    expect(problems({ description: "The vеrified plugin." })).toEqual([["description", 'Its description says "verified": only the store marks a plugin verified']]);
+    expect(problems({ description: "Shows your vеrified commits." })).toEqual([]);
     expect(problems({ name: "Focus", description: "Boards." })).toEqual([]);
   });
 });

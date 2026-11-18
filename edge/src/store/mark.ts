@@ -1,0 +1,619 @@
+/**
+ * What a store listing's name or description may not say (amendment 45):
+ * that it carries the store's mark, or that the plugin is Zeron's own. One
+ * rule for a device's check and the edge: a port of the engine's
+ * crates/engine/src/plugins/mark.rs, reading every list from the shared data
+ * file (docs/plugin-store-data.json: `mark_claims`, `claims_zeron`,
+ * `keyword_claims`), whose `about` texts state each step, and held to the
+ * shared listing cases (docs/plugin-package-vectors.json).
+ *
+ * Text is read as code points throughout: `folded` (NFKC, lowercase, NFKD
+ * without nonspacing marks, then without default-ignorables and enclosing
+ * marks); a word is spelled letter by letter with the shared look-alikes.
+ *
+ * - A name refuses every mark word, glyph and other-language word.
+ * - A description refuses a mark word only when said of the plugin itself:
+ *   beside a store word (4, no negation lifts it); alone as a sentence or
+ *   the text's first word (1); directly after a subject word (3); within two
+ *   words of a word for the plugin (2). A negation directly before lifts 1–3.
+ * - `claims_zeron`: in a name, "zeron" only as the object of an allowed
+ *   form, and never beside a word of belonging; in a description, after a
+ *   word of origin, beside a word of standing, or with a word of belonging.
+ * - A keyword may say neither the mark nor "zeron".
+ */
+import { STORE_DATA } from "./data";
+
+type Text = readonly string[];
+type Span = readonly [number, number];
+
+interface OtherWord {
+  readonly word: string;
+  readonly description: "folded" | "accented" | "never";
+  readonly with_kana?: boolean;
+  readonly before?: readonly string[];
+}
+interface WordList {
+  readonly substring: boolean;
+  readonly words: readonly string[];
+}
+
+const MARKS = STORE_DATA.mark_claims as unknown as {
+  readonly glyphs: readonly string[];
+  readonly words: readonly string[];
+  readonly lookalikes: Readonly<Record<string, readonly string[]>>;
+  readonly pairs: Readonly<Record<string, readonly string[]>>;
+  readonly interchangeable: readonly (readonly string[])[];
+  readonly max_spacing: number;
+  readonly languages: Readonly<Record<string, { readonly substring: boolean; readonly words: readonly OtherWord[] }>>;
+  readonly description: {
+    readonly ambiguous: readonly string[];
+    readonly negations: readonly string[];
+    readonly plugin_words: Readonly<Record<string, WordList>>;
+    readonly sentence_ends: readonly string[];
+    readonly store_words: readonly string[];
+    readonly subject_words: readonly string[];
+  };
+};
+const ZERONS = STORE_DATA.claims_zeron as unknown as {
+  readonly word: string;
+  readonly name: { readonly allowed_before: Readonly<Record<string, readonly string[]>> };
+  readonly description: {
+    readonly origin_before: readonly string[];
+    readonly standing: readonly string[];
+    readonly standing_other: readonly string[];
+    readonly standing_after_word: readonly string[];
+    readonly belonging: readonly string[];
+    readonly belonging_joins: readonly string[];
+    readonly belonging_zh: readonly string[];
+  };
+};
+
+const MARK_GLYPHS = MARKS.glyphs;
+const MARK_WORDS = MARKS.words;
+const LOOKALIKES = MARKS.lookalikes;
+const PAIRS = MARKS.pairs;
+const INTERCHANGEABLE = MARKS.interchangeable;
+const MAX_SPACING = MARKS.max_spacing;
+const OTHER_LANGUAGES: readonly (readonly [boolean, readonly OtherWord[]])[] = Object.values(MARKS.languages).map((l) => [l.substring, l.words] as const);
+const AMBIGUOUS = MARKS.description.ambiguous;
+const NEGATIONS = MARKS.description.negations;
+const PLUGIN_WORDS: readonly WordList[] = Object.values(MARKS.description.plugin_words);
+const SENTENCE_ENDS = new Set(MARKS.description.sentence_ends);
+const STORE_WORDS = MARKS.description.store_words;
+const SUBJECT_WORDS = MARKS.description.subject_words;
+const ZERON = ZERONS.word;
+const NAME_FORMS: readonly string[] = Object.values(ZERONS.name.allowed_before).flat();
+const ORIGIN_WORDS = ZERONS.description.origin_before;
+const STANDING_WORDS = ZERONS.description.standing;
+const STANDING_OTHER = ZERONS.description.standing_other;
+const STANDING_AFTER_ZERON = ZERONS.description.standing_after_word;
+const BELONGING = ZERONS.description.belonging;
+const BELONGING_JOINS = ZERONS.description.belonging_joins;
+const BELONGING_ZH = ZERONS.description.belonging_zh;
+
+const SEPARATOR = /^[\p{White_Space}\u{feff}\p{P}]$/u;
+const ANY_WORD = /^[\p{L}\p{N}]$/u;
+const ASCII_WORD = /^[A-Za-z0-9]$/;
+const ASCII = /^[\x00-\x7f]*$/;
+const IGNORABLE = /[\p{Default_Ignorable_Code_Point}\p{Me}]/gu;
+
+/** `text` as the rules read it before ignorables go: NFKC, lowercase, then
+ * NFKD without its nonspacing marks. */
+export const markText = (text: string): string => text.normalize("NFKC").toLowerCase().normalize("NFKD").replace(/\p{Mn}/gu, "");
+/** `markText` without anything drawn as nothing, nor enclosing marks. */
+const folded = (text: string): string[] => [...markText(text).replace(IGNORABLE, "")];
+/** NFKC and lowercase, keeping accents, ignorables and enclosing marks gone. */
+const keptAccents = (text: string): string[] => [...text.normalize("NFKC").toLowerCase().replace(IGNORABLE, "")];
+
+const separator = (c: string | undefined): boolean => c !== undefined && SEPARATOR.test(c);
+const asciiWord = (c: string | undefined): boolean => c !== undefined && ASCII_WORD.test(c);
+const anyWord = (c: string | undefined): boolean => c !== undefined && ANY_WORD.test(c);
+const isAscii = (text: string): boolean => ASCII.test(markText(text));
+const apostrophe = (c: string | undefined): boolean => c === "'" || c === "\u{2019}" || c === "\u{2bc}";
+const cp = (c: string): number => c.codePointAt(0)!;
+const han = (c: string): boolean => {
+  const n = cp(c);
+  return (n >= 0x3400 && n <= 0x4dbf) || (n >= 0x4e00 && n <= 0x9fff) || (n >= 0xf900 && n <= 0xfaff) || (n >= 0x20000 && n <= 0x3134f);
+};
+const kana = (n: number): boolean => (n >= 0x3040 && n <= 0x30ff) || (n >= 0x31f0 && n <= 0x31ff) || (n >= 0xff66 && n <= 0xff9f);
+const hasKana = (text: string): boolean => [...text].some((c) => kana(cp(c)));
+const eq = (a: Text, b: Text): boolean => a.length === b.length && a.every((c, i) => c === b[i]);
+const startsWith = (text: Text, at: number, word: Text): boolean => word.every((c, n) => text[at + n] === c);
+const endsWith = (text: Text, word: Text): boolean => word.length <= text.length && startsWith(text, text.length - word.length, word);
+
+const lookalikesOf = (letter: string): Set<string> => new Set([letter, ...(LOOKALIKES[letter] ?? [])]);
+/** The table's letter `c` passes for, if it's one of its look-alikes. */
+const readsAs = (c: string): string => {
+  if (c in LOOKALIKES) return c;
+  for (const [letter, chars] of Object.entries(LOOKALIKES)) if (chars.includes(c)) return letter;
+  return c;
+};
+const CLASSES = new Map<string, Set<string>>();
+const classOf = (letter: string): Set<string> => {
+  let found = CLASSES.get(letter);
+  if (!found) {
+    const base = readsAs(letter);
+    found = lookalikesOf(base);
+    found.add(letter);
+    for (const [a, b] of INTERCHANGEABLE) {
+      const other = a === base ? b : b === base ? a : undefined;
+      if (other !== undefined) for (const c of lookalikesOf(other)) found.add(c);
+    }
+    CLASSES.set(letter, found);
+  }
+  return found;
+};
+
+/** Where `spelling` (from its `i`th character) ends when it matches `text`
+ * from `at`, with no ASCII letter or digit right after. */
+const spellEnd = (text: Text, at: number, spelling: Text, i = 0): number | undefined => {
+  if (i === spelling.length) return asciiWord(text[at]) ? undefined : at;
+  const letter = spelling[i]!;
+  const gaps = (from: number): number[] => {
+    const out: number[] = [];
+    for (let n = from; n < text.length && separator(text[n]) && !apostrophe(text[n]); n++) out.push(n + 1);
+    return out;
+  };
+  if (letter === " " || letter === "~") {
+    for (const next of letter === "~" ? [at, ...gaps(at)] : gaps(at)) {
+      const end = spellEnd(text, next, spelling, i + 1);
+      if (end !== undefined) return end;
+    }
+    return undefined;
+  }
+  if (letter === "'") return apostrophe(text[at]) ? spellEnd(text, at + 1, spelling, i + 1) : undefined;
+  if (text[at] !== undefined && classOf(letter).has(text[at]!)) {
+    const end = spellEnd(text, at + 1, spelling, i + 1);
+    if (end !== undefined) return end;
+  }
+  for (const pair of PAIRS[letter] ?? []) {
+    const chars = [...pair];
+    if (chars.every((p, n) => text[at + n] !== undefined && lookalikesOf(p).has(text[at + n]!))) {
+      const end = spellEnd(text, at + chars.length, spelling, i + 1);
+      if (end !== undefined) return end;
+    }
+  }
+  return undefined;
+};
+
+/** Where each whole match of `words` in `text` ends. */
+const ends = (text: Text, words: string): Set<number> => {
+  const spelling = [...markText(words)];
+  const found = new Set<number>();
+  for (let at = 0; at < text.length; at++) {
+    if (asciiWord(text[at - 1])) continue;
+    const end = spellEnd(text, at, spelling);
+    if (end !== undefined) found.add(end);
+  }
+  return found;
+};
+const spelled = (text: Text, words: string): boolean => ends(text, words).size > 0;
+
+/** `text` with each run of single characters, apart by 1 to `max_spacing`
+ * separators, read as one word. */
+const unspaced = (text: Text): string[] => {
+  const out: string[] = [];
+  let at = 0;
+  while (at < text.length) {
+    if (!separator(text[at]) && (at === 0 || separator(text[at - 1]))) {
+      const run = [text[at]!];
+      let last = at;
+      for (;;) {
+        let gap = 0;
+        while (last + 1 + gap < text.length && separator(text[last + 1 + gap])) gap++;
+        const next = last + 1 + gap;
+        if (gap < 1 || gap > MAX_SPACING || next >= text.length || (text[next + 1] !== undefined && !separator(text[next + 1]))) break;
+        run.push(text[next]!);
+        last = next;
+      }
+      if (run.length > 1) {
+        out.push(...run);
+        at = last + 1;
+        continue;
+      }
+    }
+    out.push(text[at]!);
+    at++;
+  }
+  return out;
+};
+
+/** The words of `text`: runs of non-separators, each Han ideograph a word. */
+const wordsOf = (text: Text): Span[] => {
+  const words: Span[] = [];
+  let start: number | undefined;
+  text.forEach((c, at) => {
+    if (separator(c) || han(c)) {
+      if (start !== undefined) words.push([start, at]);
+      start = undefined;
+      if (han(c)) words.push([at, at + 1]);
+    } else if (start === undefined) start = at;
+  });
+  if (start !== undefined) words.push([start, text.length]);
+  return words;
+};
+
+/** Where `wanted` is in `text`: anywhere, or whole (no letter or digit of
+ * any script beside it). */
+const spans = (text: Text, wanted: Text, substring: boolean): Span[] => {
+  if (wanted.length === 0) return [];
+  const out: Span[] = [];
+  for (let at = 0; at < text.length; at++) {
+    if (startsWith(text, at, wanted) && (substring || (!anyWord(text[at - 1]) && !anyWord(text[at + wanted.length])))) out.push([at, at + wanted.length]);
+  }
+  return out;
+};
+
+/** A listed word, and whether it's a stem (a trailing `*`: any ending). */
+const listed = (word: string): readonly [string, boolean] => (word.endsWith("*") ? [word.slice(0, -1), true] : [word, false]);
+
+/** Where `word`'s letters, each of its class or a pair, end from `at`. */
+const lettersEnd = (text: Text, at: number, word: Text, i = 0): number | undefined => {
+  if (i === word.length) return at;
+  const letter = word[i]!;
+  if (text[at] !== undefined && classOf(letter).has(text[at]!)) {
+    const end = lettersEnd(text, at + 1, word, i + 1);
+    if (end !== undefined) return end;
+  }
+  for (const pair of PAIRS[letter] ?? []) {
+    const chars = [...pair];
+    if (chars.every((p, n) => text[at + n] !== undefined && lookalikesOf(p).has(text[at + n]!))) {
+      const end = lettersEnd(text, at + chars.length, word, i + 1);
+      if (end !== undefined) return end;
+    }
+  }
+  return undefined;
+};
+
+/** Where a listed word is spelled with the look-alikes: anywhere, or whole;
+ * a stem with any ending. */
+const spelledSpans = (text: Text, word: Text, substring: boolean, stem: boolean): Span[] => {
+  if (word.length === 0) return [];
+  const out: Span[] = [];
+  for (let at = 0; at < text.length; at++) {
+    if (!substring && anyWord(text[at - 1])) continue;
+    let end = lettersEnd(text, at, word);
+    if (end === undefined) continue;
+    if (stem) {
+      while (anyWord(text[end])) end++;
+      out.push([at, end]);
+    } else if (substring || !anyWord(text[end])) out.push([at, end]);
+  }
+  return out;
+};
+
+/** Whether `word` is the only CJK in `text`. */
+const loneCjk = (text: Text, word: Text): boolean => {
+  const cjk = (c: string) => {
+    const n = cp(c);
+    return han(c) || kana(n) || (n >= 0x1100 && n <= 0x11ff) || (n >= 0x3130 && n <= 0x318f) || (n >= 0xac00 && n <= 0xd7af);
+  };
+  return text.filter(cjk).length === word.length && word.every(cjk);
+};
+
+/** Whether a word of a text is `word`: the same, or "zeron" spelled. */
+const ZERON_CHARS = [...ZERON];
+const sameWord = (text: Text, word: Text): boolean =>
+  eq(text, word) || (eq(word, ZERON_CHARS) && spellEnd(text, 0, ZERON_CHARS) === text.length);
+
+/** A reading of a description: its text, its words, and how a listed word
+ * is put in its form. */
+class Reading {
+  readonly words: Span[];
+  constructor(
+    readonly text: Text,
+    readonly form: (word: string) => string[]
+  ) {
+    this.words = wordsOf(text);
+  }
+
+  covers([start, end]: Span): readonly [number, number] | undefined {
+    const first = this.words.findIndex((w) => w[1] > start);
+    let last = -1;
+    for (let n = this.words.length - 1; n >= 0; n--) {
+      if (this.words[n]![0] < end) {
+        last = n;
+        break;
+      }
+    }
+    return first !== -1 && last !== -1 && first <= last ? [first, last] : undefined;
+  }
+
+  sentenceEndIn(from: number, to: number): boolean {
+    if (from >= to) return false;
+    for (let n = from; n < to; n++) if (SENTENCE_ENDS.has(this.text[n]!)) return true;
+    return false;
+  }
+
+  private phraseWords(phrase: string): string[][] {
+    const text = this.form(phrase);
+    return wordsOf(text).map(([a, b]) => text.slice(a, b));
+  }
+
+  beforeIs(at: number, phrase: string): boolean {
+    const parts = this.phraseWords(phrase);
+    const wanted = parts.length;
+    if (wanted === 0 || at < wanted || this.sentenceEndIn(this.words[at - wanted]![0], this.words[at]![0])) return false;
+    return parts.every((part, n) => {
+      const [a, b] = this.words[at - wanted + n]!;
+      return sameWord(this.text.slice(a, b), part);
+    });
+  }
+
+  afterIs(at: number, phrase: string): boolean {
+    const parts = this.phraseWords(phrase);
+    const wanted = parts.length;
+    if (wanted === 0 || at + wanted >= this.words.length || this.sentenceEndIn(this.words[at]![1], this.words[at + wanted]![1])) return false;
+    return parts.every((part, n) => {
+      const [a, b] = this.words[at + 1 + n]!;
+      return sameWord(this.text.slice(a, b), part);
+    });
+  }
+
+  saidOfPlugin(span: Span, ambiguous: boolean): boolean {
+    return this.saidOf(span, ambiguous, !ambiguous);
+  }
+
+  saidOf(span: Span, ambiguous: boolean, firstWord: boolean): boolean {
+    const covered = this.covers(span);
+    if (!covered) return false;
+    const [first, last] = covered;
+    // 4: beside "zeron", "the store", "the plugin store". No negation lifts it.
+    if (STORE_WORDS.some((w) => this.beforeIs(first, w) || this.afterIs(last, w))) return true;
+    // A negation directly before lifts 1 to 3: the word before, or (in a
+    // script that doesn't space words) inside this word.
+    const inside = this.text.slice(this.words[first]![0], span[0]);
+    if (NEGATIONS.some((n) => this.beforeIs(first, n) || (inside.length > 0 && endsWith(inside, this.form(n))))) return false;
+    // 1: alone as a sentence; or the text's first word.
+    if (this.alone(covered, span)) return true;
+    if (!ambiguous) {
+      if (firstWord && first === 0) return true;
+      // 3: directly after a word that says it of the subject.
+      if (SUBJECT_WORDS.some((w) => this.beforeIs(first, w))) return true;
+    }
+    // 2: within two words of a word for the plugin (or, for a mark word, of
+    // a word that says it's certified), nothing ending a sentence between.
+    const neighbours: WordList[] = [...PLUGIN_WORDS, { substring: true, words: ambiguous ? [] : STANDING_OTHER }];
+    return neighbours.some(({ substring, words }) =>
+      words.some((entry) => {
+        const [word, stem] = listed(entry);
+        const wanted = this.form(word);
+        const found = substring ? spans(this.text, wanted, true) : this.phraseSpans(wanted, stem);
+        return found.some((other) => {
+          const around = this.covers(other);
+          if (!around) return false;
+          const [oFirst, oLast] = around;
+          const [gap, from, to] = oFirst > last ? [oFirst - last - 1, span[1], other[0]] : first > oLast ? [first - oLast - 1, other[1], span[0]] : [0, 0, 0];
+          return gap <= 2 && !this.sentenceEndIn(from, to);
+        });
+      })
+    );
+  }
+
+  /** Whether every word of the sentence holding `span` is one it covers. */
+  alone([first, last]: readonly [number, number], span: Span): boolean {
+    let from = 0;
+    for (let n = span[0] - 1; n >= 0; n--) {
+      if (SENTENCE_ENDS.has(this.text[n]!)) {
+        from = n + 1;
+        break;
+      }
+    }
+    let to = this.text.length;
+    for (let n = span[1]; n < this.text.length; n++) {
+      if (SENTENCE_ENDS.has(this.text[n]!)) {
+        to = n;
+        break;
+      }
+    }
+    return this.words.every((w, n) => !(w[0] >= from && w[1] <= to) || (n >= first && n <= last));
+  }
+
+  /** Where a word or phrase of spaced words is, whole word by word (its last
+   * word a stem: any ending). */
+  phraseSpans(phrase: Text, stem: boolean): Span[] {
+    const parts = wordsOf(phrase).map(([a, b]) => phrase.slice(a, b));
+    if (parts.length === 0 || parts.length > this.words.length) return [];
+    const out: Span[] = [];
+    for (let at = 0; at <= this.words.length - parts.length; at++) {
+      const fits = parts.every((part, n) => {
+        const [a, b] = this.words[at + n]!;
+        const word = this.text.slice(a, b);
+        return sameWord(word, part) || (stem && n + 1 === parts.length && startsWith(word, 0, part));
+      });
+      if (fits && !this.sentenceEndIn(this.words[at]![0], this.words[at + parts.length - 1]![1])) {
+        out.push([this.words[at]![0], this.words[at + parts.length - 1]![1]]);
+      }
+    }
+    return out;
+  }
+}
+
+/** The mark word written whole (ASCII boundaries) in `plain`, if any. */
+const writtenWord = (plain: Text): string | undefined => {
+  const joined = plain.join("");
+  return MARK_WORDS.find((word) => {
+    for (let at = joined.indexOf(word); at !== -1; at = joined.indexOf(word, at + 1)) {
+      if (!asciiWord(joined[at - 1]) && !asciiWord(joined[at + word.length])) return true;
+    }
+    return false;
+  });
+};
+
+/** A name's mark: any glyph, any mark word, each other-language word. */
+const nameMark = (text: string): string | undefined => {
+  const plain = folded(text);
+  const glyph = plain.find((c) => MARK_GLYPHS.includes(c));
+  if (glyph !== undefined) return glyph;
+  const written = writtenWord(plain);
+  if (written !== undefined) return written;
+  const readings = [plain, unspaced(plain)];
+  const word = MARK_WORDS.find((w) => readings.some((r) => spelled(r, w)));
+  if (word !== undefined) return word;
+  // A word that alone isn't the mark, within two words of a word for the
+  // plugin, or the whole name.
+  for (const ambiguous of AMBIGUOUS) {
+    const wanted = folded(ambiguous);
+    const said = readings.some((r) => {
+      const reading = new Reading(r, folded);
+      return spans(reading.text, wanted, true).some((span) => reading.saidOf(span, true, false));
+    });
+    if (said) return ambiguous;
+  }
+  // In the store's other languages.
+  const withKana = hasKana(text);
+  for (const [substring, words] of OTHER_LANGUAGES) {
+    for (const w of words) {
+      const [listedWord, stem] = listed(w.word);
+      if (w.with_kana && !withKana && !loneCjk(plain, folded(listedWord))) continue;
+      const wanted = folded(listedWord);
+      for (const r of readings) {
+        for (const [start, end] of spelledSpans(r, wanted, substring, stem)) {
+          const before =
+            !w.before?.length ||
+            (() => {
+              let n = end;
+              while (n < r.length && separator(r[n])) n++;
+              const rest = r.slice(n);
+              return w.before!.some((b) => startsWith(rest, 0, folded(b)));
+            })();
+          if (before) return stem ? r.slice(start, end).join("") : w.word;
+        }
+      }
+    }
+  }
+  return undefined;
+};
+
+/** A description's mark: a glyph anywhere; a mark word only when said of
+ * the plugin itself. */
+const descriptionMark = (text: string): string | undefined => {
+  const plainText = folded(text);
+  const glyph = plainText.find((c) => MARK_GLYPHS.includes(c));
+  if (glyph !== undefined) return glyph;
+  for (const reading of [new Reading(plainText, folded), new Reading(unspaced(plainText), folded)]) {
+    for (const word of MARK_WORDS) {
+      const spelling = [...markText(word)];
+      for (let at = 0; at < reading.text.length; at++) {
+        if (asciiWord(reading.text[at - 1])) continue;
+        const end = spellEnd(reading.text, at, spelling);
+        if (end !== undefined && reading.saidOfPlugin([at, end], false)) return word;
+      }
+    }
+    for (const [substring, words] of OTHER_LANGUAGES) {
+      for (const w of words) {
+        const [listedWord, stem] = listed(w.word);
+        const lone = !!w.with_kana && loneCjk(reading.text, folded(listedWord));
+        const said = (span: Span): boolean => {
+          switch (w.description) {
+            case "folded":
+              return reading.saidOf(span, false, !substring);
+            case "never": {
+              if (lone) return reading.saidOf(span, false, true);
+              const covered = reading.covers(span);
+              return covered !== undefined && reading.alone(covered, span);
+            }
+            case "accented":
+              return false;
+          }
+        };
+        const found = spelledSpans(reading.text, folded(listedWord), substring, stem).find(said);
+        if (found) return stem ? reading.text.slice(found[0], found[1]).join("") : w.word;
+      }
+    }
+    // Not the mark alone, but near a word for the plugin (or beside the store).
+    const ambiguous = [
+      ...OTHER_LANGUAGES.flatMap(([, words]) => words.filter((w) => w.description === "never" && (w.with_kana || (w.before?.length ?? 0) > 0)).map((w) => w.word)),
+      ...AMBIGUOUS
+    ];
+    for (const word of ambiguous) {
+      if (spans(reading.text, folded(word), true).some((span) => reading.saidOfPlugin(span, true))) return word;
+    }
+  }
+  // Words refused only as written with their accents.
+  const kept = keptAccents(text);
+  for (const reading of [new Reading(kept, keptAccents), new Reading(unspaced(kept), keptAccents)]) {
+    for (const [substring, words] of OTHER_LANGUAGES) {
+      for (const w of words.filter((w) => w.description === "accented")) {
+        if (spans(reading.text, keptAccents(w.word), substring).some((span) => reading.saidOfPlugin(span, false))) return w.word;
+      }
+    }
+  }
+  return undefined;
+};
+
+/** What in `text` claims the store's mark, if anything: in a name
+ * (`inName`) anywhere; in a description only when said of the plugin. */
+export const markClaim = (text: string, inName = true): string | undefined => (inName ? nameMark(text) : descriptionMark(text));
+
+/** `a` then `b` as a spelling: a space, or `~` beside a script that doesn't
+ * space its words. */
+const joined = (a: string, b: string): string => (isAscii(a) && isAscii(b) ? `${a} ${b}` : `${a}~${b}`);
+const NAME_SPELLINGS: readonly string[] = NAME_FORMS.map((form) => joined(form, ZERON));
+const ZERON_PHRASES: readonly string[] = [
+  ...ORIGIN_WORDS.map((o) => joined(o, ZERON)),
+  ...[...STANDING_WORDS, ...STANDING_OTHER, ...OTHER_LANGUAGES.flatMap(([, words]) => words.map((w) => listed(w.word)[0]))].flatMap((st) => [
+    joined(ZERON, st),
+    joined(st, ZERON),
+    ...(isAscii(st) ? [`${ZERON}'s ${st}`] : [])
+  ])
+];
+const BELONGING_PHRASES: readonly string[] = [
+  ...BELONGING.flatMap((word) =>
+    BELONGING_JOINS.some((join) => word.endsWith(` ${join}`)) ? [`${word} ${ZERON}`] : BELONGING_JOINS.map((join) => `${word} ${join} ${ZERON}`)
+  ),
+  ...BELONGING_ZH.flatMap((word) => [
+    ...["\u{4e8e}", "\u{65bc}", "\u{5728}", "\u{5230}"].map((join) => `${word}~${join}~${ZERON}`),
+    `\u{968f}~${ZERON}~${word}`,
+    `\u{96a8}~${ZERON}~${word}`
+  ])
+];
+
+/** Whether a name says "zeron" other than as the object of an allowed form,
+ * or beside a word of belonging anywhere. */
+export const claimsZeronInName = (text: string): boolean => {
+  const plain = folded(text);
+  return [plain, unspaced(plain)].some((reading) => {
+    const zerons = ends(reading, ZERON);
+    const allowed = new Set(NAME_SPELLINGS.flatMap((form) => [...ends(reading, form)]));
+    return [...zerons].some((end) => !allowed.has(end)) || (zerons.size > 0 && [...BELONGING, ...BELONGING_ZH].some((b) => spelled(reading, b)));
+  });
+};
+
+/** Which phrase a description says that only Zeron's own plugins may, if any. */
+export const claimsZeron = (text: string): string | undefined => {
+  const plain = folded(text);
+  const readings = [plain, unspaced(plain)];
+  const phrase = [...ZERON_PHRASES, ...BELONGING_PHRASES].find((p) => readings.some((r) => spelled(r, p)));
+  if (phrase !== undefined) return phrase.replace(/~/g, " ");
+  // "made", "built" only directly after a bare "zeron", never as "built-in"
+  // or "built in".
+  const word = STANDING_AFTER_ZERON.find((w) =>
+    readings.some((r) =>
+      [...ends(r, `${ZERON} ${w}`)].some((end) => {
+        let n = end;
+        while (n < r.length && separator(r[n])) n++;
+        const gap = n - end;
+        return !(gap > 0 && r[n] === "i" && r[n + 1] === "n" && !asciiWord(r[n + 2]));
+      })
+    )
+  );
+  return word === undefined ? undefined : `${ZERON} ${word}`;
+};
+
+/** What a keyword says that it may not: a part (or its parts joined) that
+ * is a mark word in any language a keyword's letters can write, or "zeron".
+ * No badge lifts it. */
+export const keywordClaim = (keyword: string): string | undefined => {
+  const parts = keyword.split(/[- ]/).filter((p) => p !== "").map(folded);
+  const candidates = [...parts, parts.flat()];
+  const whole = (text: Text, word: string) => spellEnd(text, 0, [...markText(word)]) === text.length;
+  if (candidates.some((part) => whole(part, ZERON))) return ZERON;
+  const words = [...MARK_WORDS, ...OTHER_LANGUAGES.flatMap(([, ws]) => ws.map((w) => listed(w.word)[0])).filter(isAscii)];
+  return words.find((word) => candidates.some((part) => whole(part, word)));
+};
+
+/** Whether a listing with this name and summary would be refused
+ * `claims_zeron` for a publisher without Zeron's own badge. */
+export const listingClaimsZeron = (name: string | null, summary: string | null): boolean =>
+  (name !== null && claimsZeronInName(name)) || (summary !== null && claimsZeron(summary) !== undefined);
