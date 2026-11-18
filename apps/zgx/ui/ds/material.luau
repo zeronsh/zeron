@@ -42,15 +42,23 @@ end
 -- and its edge, and muted text. Nil over glass, and for a theme that doesn't
 -- name its own.
 function M.solid_theme(): { [string]: any }?
-	if M.see_through() or ui.theme.get("zeron.solid.card") == nil then
+	if M.see_through() then
 		return nil
 	end
-	return {
-		["zeron.inset.bg"] = "$zeron.solid.card",
-		["zeron.inset.edge"] = "$zeron.solid.edge",
-		["text.secondary"] = "$zeron.solid.secondary",
-		["text.tertiary"] = "$zeron.solid.tertiary",
+	-- The islands' glass (ds/island) turns to the menus' solid fill,
+	-- unblurred: by its tokens, so an island the engine animates (the title
+	-- bar's, sliding in and out of full screen) runs no script per frame.
+	local out: { [string]: any } = {
+		["zeron.island.tint"] = "$zeron.menu.solid",
+		["zeron.island.blur"] = 0,
 	}
+	if ui.theme.get("zeron.solid.card") ~= nil then
+		out["zeron.inset.bg"] = "$zeron.solid.card"
+		out["zeron.inset.edge"] = "$zeron.solid.edge"
+		out["text.secondary"] = "$zeron.solid.secondary"
+		out["text.tertiary"] = "$zeron.solid.tertiary"
+	end
+	return out
 end
 
 -- Windows' Transparency effects off (zgx reports macOS's alone, as
