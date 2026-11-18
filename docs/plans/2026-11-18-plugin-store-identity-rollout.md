@@ -130,7 +130,21 @@ The browser is still signed in afterwards (re-check
 `SITE/auth/web/session`). Through the site, a store change without the
 token answers 403 `bad_csrf` the same way.
 
-### e. Sign out
+### e. A refused bearer on an admin route
+
+Once an admin is granted (step 4), take that account's app bearer (an
+access token from the app's sign-in) and call an admin route the site
+reaches over its service binding. Through the edge's own address:
+
+```sh
+curl -s "EDGE/store/v1/admin/queue" -H "authorization: Bearer $ADMIN_ACCOUNTS_ACCESS_TOKEN" -w ' %{http_code}\n'
+#   {"error":"forbidden","message":"Admin is by signing in on the web only."} 403
+```
+
+The same account's web session opens the admin dashboard; its bearer never
+opens an admin route.
+
+### f. Sign out
 
 Use the site's Sign out button (a form post with the `csrf` field). It lands
 on `SITE/`, and `SITE/auth/web/session` answers 401 `signed_out`.
