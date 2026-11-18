@@ -13,6 +13,10 @@ const state = {
   reports: reports(),
   audit: audit(),
   keys: keys(),
+  reservations: [
+    { id: "zeron-tools", user: "user_grace", note: "For the team's own plugins.", created_at: NOW - 40 * DAY },
+    { id: "linear", user: null, note: "Held until Linear asks for it.", created_at: NOW - 12 * DAY },
+  ] as { id: string; user: string | null; note: string | null; created_at: number }[],
   /** session id → user id, csrf */
   sessions: new Map<string, { user: string; csrf: string }>(),
 };
@@ -428,6 +432,22 @@ async function adminAction(request: Request, parts: string[]): Promise<Response>
       }
     }
   }
+  // reservations { id, to_username?, note? }
+  if (parts[0] === "reservations" && parts.length === 1) {
+    const id = text("id");
+    if (!/^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$/.test(id)) return fail(400, "bad_request", "id is a plugin id.");
+    if (state.plugins.some((p) => p.id === id && p.versions.some((v) => v.status === "approved" || v.status === "pending"))) return fail(409, "invalid_state", `"${id}" is in use: transfer it instead.`);
+    let user: string | null = null;
+    if (text("to_username")) {
+      user = USERS.find((u) => u.username === text("to_username"))?.id ?? null;
+      if (!user) return fail(400, "bad_request", "to_username is a member's username.");
+    }
+    const note = text("note") || null;
+    state.reservations = state.reservations.filter((r) => r.id !== id);
+    state.reservations.push({ id, user, note, created_at: Date.now() });
+    log(who.user, "reservation.set", id, null, user ? `for @${userOf(user).username}` : "for nobody");
+    return json({ id, to: user ? { username: userOf(user).username } : null, note, released: false });
+  }
   // reports/:id/resolve
   if (parts[0] === "reports" && parts[2] === "resolve") {
     const r = state.reports.find((x) => x.id === parts[1]);
@@ -554,6 +574,15 @@ async function route(request: Request): Promise<Response> {
     return s ? json({ plugins: mine(s.user) }) : fail(401, "signed_out");
   }
   if (a === "admin") {
+    if (b === "reservations" && method === "DELETE" && c) {
+      const who = adminWriter(request);
+      if (who instanceof Response) return who;
+      const before = state.reservations.length;
+      state.reservations = state.reservations.filter((r) => r.id !== c);
+      if (state.reservations.length === before) return notFound();
+      log(who.user, "reservation.release", c, null, null);
+      return json({ id: c, released: true });
+    }
     if (method === "POST") return adminAction(request, parts.slice(3));
     const who = admin(request);
     if (who instanceof Response) return who;
@@ -574,6 +603,9 @@ async function route(request: Request): Promise<Response> {
     if (b === "reports") {
       const status = url.searchParams.get("status") ?? "open";
       return json(paged(state.reports.filter((r) => status === "all" || r.status === status).map(reportView), url, "reports"));
+    }
+    if (b === "reservations" && c === undefined) {
+      return json({ reservations: [...state.reservations].sort((x, y) => x.id.localeCompare(y.id)).map((r) => ({ id: r.id, to: r.user ? { username: userOf(r.user).username } : null, note: r.note, created_at: r.created_at })) });
     }
     if (b === "audit") return json(paged(state.audit.map((x) => ({ ...x, actor: person(x.actor) })), url, "entries"));
   }

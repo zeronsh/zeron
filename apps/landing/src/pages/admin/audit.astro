@@ -28,6 +28,8 @@ const ACTIONS: Record<string, string> = {
   transfer: "Moved",
   report_dismissed: "Dismissed a report on",
   report_actioned: "Acted on a report on",
+  "reservation.set": "Reserved",
+  "reservation.release": "Freed",
 };
 ---
 
@@ -60,7 +62,8 @@ const ACTIONS: Record<string, string> = {
                   <td data-label="By">{e.actor.username ? `@${e.actor.username}` : e.actor.user_id}</td>
                   <td>
                     {ACTIONS[e.action] ?? e.action}{" "}
-                    {e.plugin_id && (
+                    {e.plugin_id && e.action.startsWith("reservation.") && <a href="/admin/reservations"><code>{e.plugin_id}</code></a>}
+                    {e.plugin_id && !e.action.startsWith("reservation.") && (
                       <a href={e.version ? `/admin/plugins/${encodeURIComponent(e.plugin_id)}/${encodeURIComponent(e.version)}` : `/admin/plugins/${encodeURIComponent(e.plugin_id)}`}>
                         <code>{e.plugin_id}</code>
                         {e.version && <span class="num"> {e.version}</span>}

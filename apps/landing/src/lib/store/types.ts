@@ -26,6 +26,7 @@ export type ErrorWord =
   | "missing_listing"
   | "too_large"
   | "conflict"
+  | "invalid_state"
   | "unknown";
 
 export interface EdgeError {
@@ -291,6 +292,14 @@ export interface ReportsPage {
   reports: Report[];
   next_cursor?: string;
   prev_cursor?: string;
+}
+
+/** An id held back from first-come claims: for one account, or for nobody. */
+export interface Reservation {
+  id: string;
+  to: { username: string } | null;
+  note: string | null;
+  created_at: number;
 }
 
 export interface AuditEntry {

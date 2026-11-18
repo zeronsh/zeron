@@ -1,0 +1,125 @@
+---
+// Ids held back from first-come claims (plan, amendment 19): each for one
+// account, or for nobody. Reserve one here, or free it. Admins only.
+import AccountBar from "../../../components/store/AccountBar.astro";
+import ConfirmForm from "../../../components/store/ConfirmForm.astro";
+import Action from "../../../components/ui/Action.astro";
+import Dialog from "../../../components/ui/Dialog.astro";
+import Field from "../../../components/ui/Field.astro";
+import Store from "../../../layouts/Store.astro";
+import { takeFlash } from "../../../lib/store/flash.ts";
+import { ago, date } from "../../../lib/store/format.ts";
+import { done, field, flashFor, formOf, tokenMatches } from "../../../lib/store/forms.ts";
+import { privatePage } from "../../../lib/store/http.ts";
+import { isPluginId, isUsername } from "../../../lib/store/names.ts";
+import { adminOrResume, resumed } from "../../../lib/store/resume.ts";
+
+export const prerender = false;
+
+const here = "/admin/reservations";
+const session = await adminOrResume(Astro, { path: here, fields: ["id", "to_username", "note"] });
+if (session instanceof Response) return session;
+
+if (Astro.request.method === "POST") {
+  const form = await formOf(Astro.request);
+  if (!form || !tokenMatches(form, session)) return done(Astro, "expired", here);
+  const id = field(form, "id", 40).toLowerCase();
+  const to = field(form, "to_username", 21).replace(/^@/, "").toLowerCase();
+  if (!isPluginId(id) || (to && !isUsername(to))) return done(Astro, "bad_input", here);
+  const result = await Astro.locals.edge.admin("reservations", { id, to_username: to || null, note: field(form, "note", 500) || null }, session.csrf);
+  return done(Astro, flashFor(result, "reserved"), here);
+}
+if (Astro.request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
+
+privatePage(Astro);
+const toast = takeFlash(Astro.cookies);
+const result = await Astro.locals.edge.reservations();
+const reservations = result.ok ? result.data.reservations : [];
+const dialogId = (id: string) => `free-${id}`;
+---
+
+<Store title="Reserved ids · Zeron" description="Plugin ids held back from first-come claims." noindex tool toast={toast}>
+  <div class="wrap reserved">
+    <AccountBar session={session} current="reservations">
+      <h1>Reserved ids</h1>
+      <p class="lead">An id here can't be claimed by whoever submits it first: it's held for the account named, or for nobody.</p>
+    </AccountBar>
+
+
+    {
+      !result.ok ? (
+        <p class="quiet">Reserved ids can't be loaded right now. Try again in a minute.</p>
+      ) : reservations.length === 0 ? (
+        <p class="quiet">No ids are reserved.</p>
+      ) : (
+        <div class="table-wrap">
+          <table class="stack-table">
+            <thead>
+              <tr>
+                <th scope="col">Id</th>
+                <th scope="col">For</th>
+                <th scope="col">Why</th>
+                <th scope="col">Since</th>
+                <th scope="col"><span class="sr-only">What can be done</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              {reservations.map((r) => (
+                <tr>
+                  <th scope="row"><code>{r.id}</code></th>
+                  <td data-label="For">{r.to ? `@${r.to.username}` : <span class="quiet">Nobody</span>}</td>
+                  <td class="note">{r.note ?? ""}</td>
+                  <td class="when" data-label="Since"><time datetime={new Date(r.created_at).toISOString()} title={date(r.created_at)}>{ago(r.created_at)}</time></td>
+                  <td class="do">
+                    <a class="free" href={`${here}/${encodeURIComponent(r.id)}`} data-dialog={dialogId(r.id)}>Free…</a>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )
+    }
+
+    <section class="panel" aria-labelledby="reserve-heading">
+      <h2 id="reserve-heading">Reserve an id</h2>
+      <form method="post" action={here} class="reserve">
+        <input type="hidden" name="csrf" value={session.csrf} />
+        <Field name="id" label="Plugin id" required maxlength={40} value={resumed(Astro.url, "id", 40)} placeholder="an-id" hint="2 to 40 lowercase letters, digits and dashes. An id in use moves by a transfer instead." />
+        <Field name="to_username" label="For" maxlength={21} value={resumed(Astro.url, "to_username", 21)} placeholder="@username" hint="Leave it empty to hold the id for nobody." />
+        <Field name="note" label="Why" maxlength={500} value={resumed(Astro.url, "note", 500)} hint="For the other reviewers." />
+        <div class="answers"><Action tone="primary">Reserve</Action></div>
+      </form>
+    </section>
+
+    {
+      reservations.map((r) => (
+        <Dialog id={dialogId(r.id)} title={`Free “${r.id}”?`} tone="danger">
+          <p>Anyone can claim it then, first come. If someone claimed it and never used it, their claim goes too.</p>
+          <ConfirmForm action={`${here}/${encodeURIComponent(r.id)}`} csrf={session.csrf} confirm="Free it" tone="danger" mode="dialog" back={here} />
+        </Dialog>
+      ))
+    }
+  </div>
+</Store>
+
+<style>
+  .reserved { display: grid; gap: 24px; }
+  .lead { max-width: 40em; font-size: 16px; }
+  .panel { display: grid; gap: 16px; max-width: 640px; padding: 20px; background: linear-gradient(180deg, #111113 0%, #0b0b0d 100%); border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
+  .panel h2 { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+  .reserve { display: grid; gap: 14px; }
+  .answers { display: flex; justify-content: flex-end; }
+  .quiet { font-size: 14px; color: var(--text-3); }
+  .table-wrap { overflow-x: auto; border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.5; }
+  th, td { padding: 14px 16px; text-align: left; vertical-align: top; }
+  thead th { padding-block: 10px; font-size: 12.5px; font-weight: 500; color: var(--text-3); border-bottom: 1px solid var(--line); white-space: nowrap; }
+  tbody tr + tr > * { border-top: 1px solid var(--line); }
+  tbody th code { font-size: 13.5px; color: var(--text); }
+  .note { color: var(--text-2); overflow-wrap: anywhere; }
+  .when { color: var(--text-2); white-space: nowrap; }
+  .do { text-align: right; }
+  .free { display: inline-flex; align-items: center; margin-top: -4px; height: 28px; padding: 0 10px; font-size: 13px; font-weight: 500; color: var(--tone-danger); background: var(--secondary-bg); border-radius: var(--radius-md); transition: background-color 0.12s; }
+  .free:hover { background: var(--tone-danger-wash); }
+</style>

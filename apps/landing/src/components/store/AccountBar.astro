@@ -8,7 +8,7 @@ import Tabs from "../ui/Tabs.astro";
 interface Props {
   session: WebSession;
   /** Which of the signed-in pages this is. */
-  current: "mine" | "queue" | "reports" | "audit" | null;
+  current: "mine" | "queue" | "reports" | "reservations" | "audit" | null;
 }
 const { session, current } = Astro.props;
 const admin = session.roles.includes("admin");
@@ -16,6 +16,7 @@ const tabs = [
   { href: "/account", label: "Your plugins", current: current === "mine" },
   { href: "/admin/plugins", label: "Review", current: current === "queue" },
   { href: "/admin/reports", label: "Reports", current: current === "reports" },
+  { href: "/admin/reservations", label: "Reserved ids", current: current === "reservations" },
   { href: "/admin/audit", label: "Audit log", current: current === "audit" },
 ];
 ---

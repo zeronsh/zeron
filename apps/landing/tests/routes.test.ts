@@ -263,7 +263,7 @@ describe("signed-in pages", () => {
 });
 
 describe("the admin pages can't be told from pages that don't exist", () => {
-  const PATHS = ["/admin/plugins", "/admin/plugins/session-badges", "/admin/plugins/session-badges/1.2.1", "/admin/plugins/session-badges/1.2.1/approve", "/admin/plugins/session-badges/actions/suspend", "/admin/reports", "/admin/audit"];
+  const PATHS = ["/admin/reservations", "/admin/reservations/linear", "/admin/plugins", "/admin/plugins/session-badges", "/admin/plugins/session-badges/1.2.1", "/admin/plugins/session-badges/1.2.1/approve", "/admin/plugins/session-badges/actions/suspend", "/admin/reports", "/admin/audit"];
 
   test("signed out, or signed in without the role: the site's 404, byte for byte", async () => {
     const notFound = readFileSync(new URL("../dist/client/404.html", import.meta.url), "utf8");
@@ -368,6 +368,22 @@ describe("forms", () => {
       expect(response.status).toBe(404);
       expect(response.headers.get("location")).toBeNull();
     }
+  });
+
+  test("reserving an id for an account, and freeing it", async () => {
+    const grace = await site.signIn("user_grace");
+    const page = await html("/admin/reservations", grace);
+    expect(page.body).toContain("zeron-tools");
+    const csrf = tokenOf(page.body);
+    const reserved = await post("/admin/reservations", grace, { csrf, id: "Kai-Tools", to_username: "@kai", note: "Asked by email." });
+    expect(flashOf(reserved)).toBe("__Host-zeron_flash=reserved");
+    expect((await html("/admin/reservations", grace)).body).toMatch(/<code[^>]*>kai-tools<\/code>[^]*?@kai[^]*?Asked by email\./);
+    // An id in use moves by a transfer, and the page says so.
+    expect(flashOf(await post("/admin/reservations", grace, { csrf, id: "focus-timer" }))).toBe("__Host-zeron_flash=id_in_use");
+    expect(flashOf(await post("/admin/reservations", grace, { csrf, id: "x" }))).toBe("__Host-zeron_flash=bad_input");
+    expect(flashOf(await post("/admin/reservations/kai-tools", grace, { csrf }))).toBe("__Host-zeron_flash=reservation_released");
+    expect((await html("/admin/reservations", grace)).body).not.toContain("kai-tools");
+    expect((await html("/admin/audit", grace)).body).toMatch(/Freed\s*<a href="\/admin\/reservations"/);
   });
 
   test("rejecting needs a reason and words for the author", async () => {

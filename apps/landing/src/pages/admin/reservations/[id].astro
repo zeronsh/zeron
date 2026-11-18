@@ -1,0 +1,35 @@
+---
+// Free a reserved id. A post does it; a visit asks first.
+import ConfirmPage from "../../../components/store/ConfirmPage.astro";
+import Store from "../../../layouts/Store.astro";
+import { done, flashFor, formOf, tokenMatches } from "../../../lib/store/forms.ts";
+import { privatePage } from "../../../lib/store/http.ts";
+import { isPluginId } from "../../../lib/store/names.ts";
+import { adminOrResume } from "../../../lib/store/resume.ts";
+
+export const prerender = false;
+
+const { id } = Astro.params;
+if (!isPluginId(id)) return new Response(null, { status: 404 });
+const session = await adminOrResume(Astro, { path: Astro.url.pathname, fields: [] });
+if (session instanceof Response) return session;
+const back = "/admin/reservations";
+
+if (Astro.request.method === "POST") {
+  const form = await formOf(Astro.request);
+  if (!form || !tokenMatches(form, session)) return done(Astro, "expired", back);
+  const result = await Astro.locals.edge.releaseReservation(id, session.csrf);
+  return done(Astro, flashFor(result, "reservation_released"), back);
+}
+if (Astro.request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
+privatePage(Astro);
+const title = `Free “${id}”?`;
+---
+
+<Store title={`${title} · Zeron`} description={title} noindex tool>
+  <div class="wrap">
+    <ConfirmPage title={title} action={Astro.url.pathname} csrf={session.csrf} confirm="Free it" tone="danger" back={back}>
+      <p slot="words">Anyone can claim it then, first come. If someone claimed it and never used it, their claim goes too.</p>
+    </ConfirmPage>
+  </div>
+</Store>

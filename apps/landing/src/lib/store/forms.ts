@@ -34,6 +34,8 @@ export function flashFor(result: Result<unknown>, done: FlashWord): FlashWord {
     case "conflict":
     case "not_found":
       return "conflict";
+    case "invalid_state":
+      return done === "reserved" ? "id_in_use" : "conflict";
     case "forbidden":
     case "signed_out":
       return "not_allowed";

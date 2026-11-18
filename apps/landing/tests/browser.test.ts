@@ -49,6 +49,7 @@ const PAGES: [string, string | undefined][] = [
   ["/admin/plugins/session-badges/1.2.1?view=changes", "user_grace"],
   ["/admin/plugins/session-badges/1.2.1/reject", "user_grace"],
   ["/admin/reports", "user_grace"],
+  ["/admin/reservations", "user_grace"],
   ["/admin/audit", "user_grace"],
 ];
 

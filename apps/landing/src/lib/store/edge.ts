@@ -16,6 +16,7 @@ import type {
   PluginDetail,
   QueuePage,
   ReportsPage,
+  Reservation,
   Sort,
   Submission,
   VersionInfo,
@@ -27,7 +28,7 @@ export type Result<T> = { ok: true; data: T } | { ok: false; status: number; err
 const ERROR_WORDS = new Set<string>([
   "not_found", "signed_out", "forbidden", "bad_request", "bad_csrf", "rate_limited", "suspended",
   "needs_username", "id_taken", "id_reserved", "not_semver", "version_exists", "not_newer", "bad_package",
-  "bad_signature", "key_not_allowed", "missing_readme", "missing_listing", "too_large", "conflict",
+  "bad_signature", "key_not_allowed", "missing_readme", "missing_listing", "too_large", "conflict", "invalid_state",
 ]);
 
 /** A binding: what `env.EDGE` is, and what a test hands in instead. */
@@ -160,6 +161,15 @@ export class Edge {
     const params = new URLSearchParams();
     if (cursor) params.set("cursor", cursor);
     return this.#json(`/store/v1/admin/audit${params.size ? `?${params}` : ""}`, { signedIn: true });
+  }
+
+  reservations(): Promise<Result<{ reservations: Reservation[] }>> {
+    return this.#json("/store/v1/admin/reservations", { signedIn: true });
+  }
+
+  /** Free a reserved id (its reservation goes; a claim never used is released). */
+  releaseReservation(id: string, csrf: string): Promise<Result<unknown>> {
+    return this.#json(`/store/v1/admin/reservations/${segment(id)}`, { method: "DELETE", csrf });
   }
 
   /** An admin's decision or action: `path` under /store/v1/admin. */
