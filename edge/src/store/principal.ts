@@ -8,8 +8,9 @@
  *   key's signed request (only to publish its plugin's versions and read its
  *   plugin's state: identity/signing.ts `deployKeyRoute`; the store answers
  *   `GET /store/v1/me/plugins` for `pluginScope` alone).
- * - Admin routes: a session bearer or a web session's cookie, of an account
- *   holding the edge's `admin` role (roles.ts); never a deploy key.
+ * - Admin routes: a web session's cookie only (contract amendment 27), of an
+ *   account holding the edge's `admin` role (roles.ts); never a bearer or a
+ *   deploy key.
  * - Public routes: anyone; `optionalUser` says who, when it can tell.
  *
  * A route that reads a principal answers through `withSessionCookie` (a
@@ -19,7 +20,6 @@
  * request with a user must not be cached.
  */
 import type { Env } from "../env";
-import { hasRole } from "../roles";
 import { userDirectoryStub } from "../user-directory";
 import { bearerUser, cookieSession, forbidden, headerBearer, unauthenticated } from "./identity/callers";
 import { verifySignedRequest } from "./identity/signed-request";
@@ -60,15 +60,10 @@ export const authenticatePublisher = async (req: Request, env: Env): Promise<Pub
 };
 
 export const requireAdmin = async (req: Request, env: Env): Promise<{ userId: string } | Response> => {
-  const header = req.headers.get("authorization");
-  if (header !== null) {
-    const token = headerBearer(req);
-    if (!token) return /^ZeronKey\s/i.test(header) ? forbidden("A deploy key can't do this.") : unauthenticated();
-    const user = await bearerUser(env, token);
-    if (user instanceof Response) return user;
-    if (!(await hasRole(env, user.userId, "admin"))) return forbidden();
-    return { userId: user.userId };
-  }
+  // Web session only (contract amendment 27): a bearer, which any local
+  // process an engine hands its token to holds, skips the staff session's
+  // short lifetime, rotation and CSRF checks. A deploy key never is staff.
+  if (req.headers.get("authorization") !== null) return forbidden("Admin is by signing in on the web only.");
   const session = await cookieSession(req, env, true);
   if (!session) return unauthenticated();
   if (session instanceof Response) return session;

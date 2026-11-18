@@ -81,21 +81,32 @@ describe("the admin role", () => {
     expect((await (await SELF.fetch("https://site.test/auth/web/session", { headers: { cookie: browser.cookie } })).json()) as { roles: string[] }).toMatchObject({
       roles: []
     });
-    // The edge's grant is what counts.
+    // The edge's grant is what counts, on the web.
     await grantAdmin(userId);
-    expect((await admin(userId)).status).toBe(200);
-    expect(await (await admin(`${userId}@${orgId}`)).json()).toEqual({ admin: { userId } });
+    const staff = await webSignIn(userId);
+    const res = await SELF.fetch("https://site.test/store/v1/admin/queue", { headers: { cookie: staff.cookie } });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ admin: { userId } });
   });
 
-  it("never goes to a runner token or a deploy key, and needs a sign-in", async () => {
+  it("is by web session only: never a bearer, a runner token or a deploy key", async () => {
     const userId = await person();
     await grantAdmin(userId);
+    // An admin's own bearer, org-scoped or not, even beside their live web session.
+    const staff = await webSignIn(userId);
+    for (const bearer of [userId, `${userId}@org1`]) {
+      const res = await admin(bearer);
+      expect(res.status, bearer).toBe(403);
+      expect(await errorOf(res)).toBe("forbidden");
+      const both = await SELF.fetch("https://site.test/store/v1/admin/queue", { headers: { authorization: `Bearer ${bearer}`, cookie: staff.cookie } });
+      expect(both.status).toBe(403);
+    }
     const runner = await admin(`runner:${userId}@org1:cloud-1`);
     expect(runner.status).toBe(403);
     const key = await SELF.fetch("https://edge.test/store/v1/admin/queue", { headers: { authorization: `ZeronKey key=${"A".repeat(43)}, ts=1, sig=${"A".repeat(86)}` } });
     expect(key.status).toBe(403);
     expect((await SELF.fetch("https://edge.test/store/v1/admin/queue")).status).toBe(401);
-    expect((await SELF.fetch("https://edge.test/store/v1/admin/queue", { headers: { authorization: "Bearer " } })).status).toBe(401);
+    expect((await SELF.fetch("https://edge.test/store/v1/admin/queue", { headers: { authorization: "Bearer " } })).status).toBe(403);
     // A bearer in the query string is never read here.
     expect((await SELF.fetch(`https://edge.test/store/v1/admin/queue?token=${userId}`)).status).toBe(401);
   });
