@@ -1971,6 +1971,83 @@
       ]
     },
     "max_spacing": 3,
+    "not_bare": [
+      {
+        "refused": "name only, folded",
+        "why": "French \"vérifie\" is \"checks\"; a description refuses only the accented participle \"vérifié(e)(s)\"",
+        "word": "vérifie"
+      },
+      {
+        "refused": "name only",
+        "why": "German \"verifiziert\" is also \"verifies\"",
+        "word": "verifiziert"
+      },
+      {
+        "refused": "name only",
+        "why": "German \"offiziell\" is also \"officially\", which English doesn't refuse",
+        "word": "offiziell"
+      },
+      {
+        "refused": "name only",
+        "why": "German \"geprüft\" and its forms are also \"checked\" (Eingaben werden geprüft)",
+        "word": "geprüft"
+      },
+      {
+        "refused": "name only",
+        "why": "Russian \"проверено\", \"проверенный\" are also \"checked\", \"proven\"",
+        "word": "проверен*"
+      },
+      {
+        "refused": "never",
+        "why": "Russian \"officially\", as English \"officially\" isn't refused: why \"официальн…\" is listed in full, not as a stem",
+        "word": "официально"
+      },
+      {
+        "refused": "name beside kana; a description near a word for the plugin",
+        "why": "Chinese 公式 is \"formula\"",
+        "word": "公式"
+      },
+      {
+        "refused": "name beside kana; a description near a word for the plugin",
+        "why": "as 公式",
+        "word": "公認"
+      },
+      {
+        "refused": "name before a word for the plugin; a description near one",
+        "why": "Korean 공식 is also \"formula\"",
+        "word": "공식"
+      },
+      {
+        "refused": "name before a word for the plugin; a description near one",
+        "why": "공인인증서 is an ordinary term",
+        "word": "공인"
+      },
+      {
+        "refused": "name before a word for the plugin; a description near one",
+        "why": "认证/認證/認証/인증 are also \"authentication\" (身份认证, 認証トークン, 인증 토큰)",
+        "word": "认证"
+      },
+      {
+        "refused": "name before a word for the plugin; a description near one",
+        "why": "已认证/已認證, 認証済み, 인증됨 are also \"authenticated\" (已认证用户, a login status)",
+        "word": "已认证"
+      },
+      {
+        "refused": "name before a word for the plugin; a description near one",
+        "why": "確認済み, 확인됨 are \"checked/confirmed\", an ordinary status",
+        "word": "確認済"
+      },
+      {
+        "refused": "never bare",
+        "why": "Korean 검증된 is the adjective \"validated\" (검증된 입력); 검증됨 is listed",
+        "word": "검증된"
+      },
+      {
+        "refused": "not a word that says it of the subject",
+        "why": "Italian \"è\" and Portuguese \"é\" fold to \"e\", \"and\"",
+        "word": "è"
+      }
+    ],
     "pairs": {
       "d": [
         "cl"

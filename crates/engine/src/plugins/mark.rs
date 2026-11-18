@@ -169,6 +169,27 @@ pub const OTHER_LANGUAGES: &[(&str, bool, &[OtherWord])] = &[
     ]),
 ];
 
+/// Why words that might look like the mark aren't refused bare (or are
+/// refused in a name only): kept beside the lists so nobody adds them back.
+/// `(word, where it's refused, why)`.
+pub const NOT_BARE: &[(&str, &str, &str)] = &[
+    ("v\u{e9}rifie", "name only, folded", "French \"vérifie\" is \"checks\"; a description refuses only the accented participle \"vérifié(e)(s)\""),
+    ("verifiziert", "name only", "German \"verifiziert\" is also \"verifies\""),
+    ("offiziell", "name only", "German \"offiziell\" is also \"officially\", which English doesn't refuse"),
+    ("gepr\u{fc}ft", "name only", "German \"geprüft\" and its forms are also \"checked\" (Eingaben werden geprüft)"),
+    ("\u{43f}\u{440}\u{43e}\u{432}\u{435}\u{440}\u{435}\u{43d}*", "name only", "Russian \"проверено\", \"проверенный\" are also \"checked\", \"proven\""),
+    ("\u{43e}\u{444}\u{438}\u{446}\u{438}\u{430}\u{43b}\u{44c}\u{43d}\u{43e}", "never", "Russian \"officially\", as English \"officially\" isn't refused: why \"официальн…\" is listed in full, not as a stem"),
+    ("\u{516c}\u{5f0f}", "name beside kana; a description near a word for the plugin", "Chinese 公式 is \"formula\""),
+    ("\u{516c}\u{8a8d}", "name beside kana; a description near a word for the plugin", "as 公式"),
+    ("\u{acf5}\u{c2dd}", "name before a word for the plugin; a description near one", "Korean 공식 is also \"formula\""),
+    ("\u{acf5}\u{c778}", "name before a word for the plugin; a description near one", "공인인증서 is an ordinary term"),
+    ("\u{8ba4}\u{8bc1}", "name before a word for the plugin; a description near one", "认证/認證/認証/인증 are also \"authentication\" (身份认证, 認証トークン, 인증 토큰)"),
+    ("\u{5df2}\u{8ba4}\u{8bc1}", "name before a word for the plugin; a description near one", "已认证/已認證, 認証済み, 인증됨 are also \"authenticated\" (已认证用户, a login status)"),
+    ("\u{78ba}\u{8a8d}\u{6e08}", "name before a word for the plugin; a description near one", "確認済み, 확인됨 are \"checked/confirmed\", an ordinary status"),
+    ("\u{ac80}\u{c99d}\u{b41c}", "never bare", "Korean 검증된 is the adjective \"validated\" (검증된 입력); 검증됨 is listed"),
+    ("\u{e8}", "not a word that says it of the subject", "Italian \"è\" and Portuguese \"é\" fold to \"e\", \"and\""),
+];
+
 /// Words beside which "zeron" claims standing though alone they're not the
 /// mark (each of [`OTHER_LANGUAGES`] is too): 公式, 공식, 认证, 認證, 認証,
 /// 인증 and their "done" forms, 確認済み, 확인됨.

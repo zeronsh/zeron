@@ -1280,6 +1280,7 @@ fn data() -> Value {
             "pairs": super::mark::PAIRS.iter().map(|(letter, pair)| (letter.to_string(), json!([pair]))).collect::<serde_json::Map<_, _>>(),
             "max_spacing": super::mark::MAX_SPACING,
             "source": { "name": super::mark::SOURCE, "version": super::mark::SOURCE_VERSION, "sha256": super::mark::SOURCE_SHA256 },
+            "not_bare": super::mark::NOT_BARE.iter().map(|(word, where_, why)| json!({ "word": word, "refused": where_, "why": why })).collect::<Vec<_>>(),
             "languages": super::mark::OTHER_LANGUAGES
                 .iter()
                 .map(|(lang, substring, words)| {
