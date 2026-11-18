@@ -1,0 +1,41 @@
+name: Publish a Zeron plugin
+description: Check a Zeron plugin against the store's rules and submit it for review, signed with a deploy key.
+author: Zeron
+branding:
+  icon: upload-cloud
+  color: gray-dark
+
+inputs:
+  key:
+    description: >-
+      The plugin's deploy key secret (zpk_…), from your repository's secrets.
+      Make one with `zeron plugin key create <id> --name "GitHub Actions"`.
+      Without it, the plugin is only checked (`zeron plugin check`).
+    required: false
+    default: ""
+  path:
+    description: The plugin's folder (the one with zeron-plugin.json), relative to the workspace.
+    required: false
+    default: "."
+  dry-run:
+    description: Check, sign and pack the plugin, but don't submit it.
+    required: false
+    default: "false"
+  zeron-version:
+    description: The Zeron release whose command line runs (`latest`, or a version like 0.4.0).
+    required: false
+    default: latest
+
+runs:
+  using: composite
+  steps:
+    - name: Publish
+      shell: bash
+      # Inputs reach the script as environment variables, never pasted into
+      # it: a path or version can't become a command.
+      env:
+        ZERON_DEPLOY_KEY: ${{ inputs.key }}
+        ZERON_PLUGIN_PATH: ${{ inputs.path }}
+        ZERON_DRY_RUN: ${{ inputs.dry-run }}
+        ZERON_VERSION: ${{ inputs.zeron-version }}
+      run: '"$GITHUB_ACTION_PATH/publish.sh"'
