@@ -324,3 +324,37 @@ addresses, deploy, grant the first admin).
   `zgx test ui` with a fixture per screen, site tests on the built pages.
 - Report to the coordinator: what is done, what is proven and how, what is
   open. Do not stop on a question that has a safe default: take it, say so.
+
+## Contract amendments
+
+Agreed after the plan was first written. Newest last.
+
+1. **The store's record names what was signed.** `VersionInfo`, each entry of
+   `updates[]` and `PluginDetail.package` carry `key` (the b64url public key
+   that signed the package), `hash` (content hash), `sha256` and `bytes` (of
+   the package file). A device checks id, version, content hash, sha256 and
+   key against the record. The owner is `author.username`; a device binds a
+   store install's consent to `store:<username>`, so a transfer asks again.
+2. **`engines.zeron` ranges** are an npm-style subset: `||` between sets,
+   whitespace between comparators, `>= > <= < = ^ ~`, a bare version meaning
+   exact, and `*`. Versions are full `x.y.z` (pre-release allowed), compared
+   by precedence; `^` and `~` as npm has them, 0.x included.
+3. **Strict semver limits**: each numeric part ≤ 2^53−1, a version at most
+   128 characters, build metadata ignored for precedence.
+4. **Categories** are one fixed list, embedded in the engine and carried in
+   `docs/plugin-package-vectors.json`; the edge seeds from that file:
+   `agents`, `appearance`, `chat`, `developer-tools`, `git`, `integrations`,
+   `productivity`, `utilities`.
+5. **Deploy-key registration proof** signs
+   `"zeron-deploy-key:v1:" + pluginId + ":" + key`, so a proof for one plugin
+   cannot register the key for another.
+6. **What a deploy key may do**: publish a version of its plugin, and read
+   its plugin's state (`GET /store/v1/me/plugins`, answered for that plugin
+   only), both with the signed `ZeronKey` header. Nothing else: withdraw,
+   yank, unyank and key management need a signed-in session, so a leaked key
+   can add a pending version (which review stops) and nothing more.
+7. **Vectors file shape** (`zeron-plugin-package-vectors:v1`): `limits`,
+   `categories`, `canonical_json`, `content_hash`, `signatures`, `packages`,
+   `paths`, `manifests`, `semver { parse, order, compare }`, `ranges`,
+   `deploy_key { secret, public, proof_message, proof, request }`. The engine
+   lane generates it; both sides' tests run every vector.
