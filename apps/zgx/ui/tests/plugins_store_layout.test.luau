@@ -146,18 +146,20 @@ test("three or more show two whole and the next at the column's end, the strip a
 	expect(third.x < column.x + column.w and third.x + third.w > column.x + column.w).to_be(true)
 end)
 
-test("Browse's filters: one quiet row, the categories' words on the text edge, the order ending on the content edge, its height held", function()
+test("Browse's list: its head's order on the content edge, the categories across the card, the first's words on the text edge, nothing moving as it loads", function()
 	local app = mounted()
 	app:command("store_stub.hold")
 	app:click('role:tab "Browse"')
 	app:frames(20)
 	local card = box(app, "#store-card")
 	local text, content = card.x + INSET, card.x + card.w - INSET
-	local bar = box(app, "#store-filters")
-	local order = box(app, '#store-filters >> role:button "Order"')
+	local order = box(app, "#store-order")
 	expect(math.abs(order.x + order.w - content) < 0.6).to_be(true)
+	-- (The head's action is the section actions' ghost, 24.)
+	expect(order.h).to_be(24)
 	local search_before = box(app, '#store-card >> role:textbox "Search plugins"').y
-	local bar_before = bar.h
+	local bar_before = box(app, "#store-filters").h
+	local card_before = card.y
 	app:command("store_stub.release")
 	settle(app, 500)
 	local all = app:tree('#store-filters >> role:tab "All"'):match("[^\n]+") or ""
@@ -165,12 +167,16 @@ test("Browse's filters: one quiet row, the categories' words on the text edge, t
 	-- (A quiet tab's words are 12 inside it.)
 	expect(math.abs(first_tab.x + 12 - text) < 0.6).to_be(true)
 	expect(box(app, "#store-filters").h).to_be(bar_before)
-	expect(box(app, '#store-filters >> role:tab "Agents"').h).to_be(order.h)
 	expect(box(app, '#store-card >> role:textbox "Search plugins"').y).to_be(search_before)
+	expect(box(app, "#store-card").y).to_be(card_before)
 	expect(all).never.to_contain("All categories")
+	-- The categories run the card's width, from edge to edge of its row.
+	local tabs = box(app, "#store-categories")
+	expect(math.abs(tabs.x - (card.x + 1 + 4)) < 0.6).to_be(true)
+	expect(math.abs(tabs.x + tabs.w - (card.x + card.w - 1 - 4)) < 0.6).to_be(true)
 end)
 
-test("the featured hold their room as they come, and stand a section's step from the card", function()
+test("the featured hold their room as they come, one height each, and stand a section's step from the list", function()
 	local app = mounted()
 	app:command("store_stub.hold")
 	app:click('role:tab "Browse"')
@@ -181,14 +187,104 @@ test("the featured hold their room as they come, and stand a section's step from
 	settle(app, 500)
 	local cards = box(app, "#store-featured")
 	expect(cards.h).to_be(loading.h)
-	-- Each with its cover on top at 16:10.
-	local first = box(app, '#store-featured >> role:button "Focus timer"')
-	local cover_line = app:tree('#store-featured >> role:button "Focus timer"'):match("\n%s*(@%d+ img [^\n]+)") or ""
-	local cw, ch = cover_line:match("([%d.]+)x([%d.]+)")
-	expect(math.abs((tonumber(cw) or 0) - first.w) < 1).to_be(true)
-	expect(math.abs((tonumber(cw) or 0) / (tonumber(ch) or 1) - 1.6) < 0.02).to_be(true)
-	local card = box(app, "#store-card")
-	expect(card.y - (cards.y + cards.h)).to_be(32)
+	-- No covers: a card's head is its tile beside its name over its by-line.
+	expect(app:tree("#store-featured")).never.to_contain(" img 0")
+	local list = box(app, "#store-list")
+	expect(list.y - (cards.y + cards.h)).to_be(32)
+end)
+
+-- The featured cards' boxes, left to right.
+local function featured(app: any): { { x: number, y: number, w: number, h: number } }
+	local out = {}
+	for line in app:tree("#store-featured"):gmatch("[^\n]+") do
+		if line:find(" button ") then
+			local x, y, w, h = line:match("(%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x([%d.]+)")
+			table.insert(out, { x = tonumber(x) or 0, y = tonumber(y) or 0, w = tonumber(w) or 0, h = tonumber(h) or 0 })
+		end
+	end
+	return out
+end
+
+test("a featured card is one height whatever it says of itself, all it may or nothing", function()
+	local app = mounted()
+	app:command("store_stub.long_featured")
+	app:click('role:tab "Browse"')
+	app:wait("#store-featured", { timeout_ms = 3000 })
+	settle(app, 500)
+	local list = featured(app)
+	expect(#list).to_be(3)
+	for _, c in list do
+		expect(c.h).to_be(list[3].h)
+	end
+	app:command("store_stub.hold")
+	app:set_state("plugins_view", "catalog")
+end)
+
+test("the featured never wrap: three across while each keeps its least, else running sideways, the next cut by the column's end", function()
+	local app = mounted()
+	app:click('role:tab "Browse"')
+	app:wait("#store-featured", { timeout_ms = 3000 })
+	settle(app, 500)
+	for _, width in { 1000, 760, 640, 600, 560 } do
+		app:resize(width, 900)
+		settle(app)
+		local shelf = box(app, "#store-featured")
+		local list = featured(app)
+		for _, c in list do
+			expect(`{width}: {c.y}`).to_be(`{width}: {list[1].y}`)
+		end
+		-- (The card's 1 edge inside its slot.)
+		local least = 180 - 2
+		local three = (shelf.w - 2 * 12) / 3
+		if three >= 180 then
+			expect(math.abs(list[3].x + list[3].w + 1 - (shelf.x + shelf.w)) < 1).to_be(true)
+		else
+			expect(list[1].w >= least).to_be(true)
+			expect(list[3].x < shelf.x + shelf.w).to_be(true)
+			expect(list[3].x + list[3].w > shelf.x + shelf.w).to_be(true)
+		end
+	end
+end)
+
+test("the categories that fit show no chevron; more than fit, the edge hiding them pages them, and the keys bring one into view", function()
+	local app = mounted()
+	app:command("store_stub.few_categories")
+	app:click('role:tab "Browse"')
+	app:wait("#store-rows", { timeout_ms = 3000 })
+	settle(app, 500)
+	expect(app:has(".pager-more")).to_be(false)
+	expect(app:has(".pager-back")).to_be(false)
+end)
+
+test("more categories than fit: a chevron at the hiding edge pages them on and back; the arrows choose, and bring the chosen into view", function()
+	local app = mounted()
+	app:click('role:tab "Browse"')
+	app:wait("#store-rows", { timeout_ms = 3000 })
+	settle(app, 500)
+	local view = box(app, "#store-categories")
+	local function shown(name: string): boolean
+		local tab = box(app, `#store-categories >> role:tab "{name}"`)
+		return tab.x >= view.x - 0.5 and tab.x + tab.w <= view.x + view.w + 0.5
+	end
+	expect(app:has(".pager-more")).to_be(true)
+	expect(app:has(".pager-back")).to_be(false)
+	expect(shown("Utilities")).to_be(false)
+	app:click('role:button "More categories"')
+	settle(app)
+	expect(app:has(".pager-back")).to_be(true)
+	app:click('role:button "Earlier categories"')
+	settle(app)
+	expect(app:has(".pager-back")).to_be(false)
+	-- The keys: one Tab stop, the arrows choosing; End to the last, in view.
+	app:click('#store-categories >> role:tab "All"')
+	settle(app)
+	app:key("ArrowRight")
+	settle(app)
+	expect(app:state("store_category")).to_be("agents")
+	app:key("End")
+	settle(app)
+	expect(app:state("store_category")).to_be("utilities")
+	expect(shown("Utilities")).to_be(true)
 end)
 
 test("a skeleton that waits too long rests: the first load's, the next page's and a plugin page's", function()
@@ -440,6 +536,29 @@ test("the checks open at the height they have when all pass: a plugin that passe
 	settle(app, 500)
 	expect(app:has("#publish-checks")).to_be(true)
 	expect(box(app, 'role:group "Versions you\'ve sent"').y).to_be(versions.y)
+end)
+
+test("opened from Yours, its versions draw on the first frame from what Yours read: Deploy keys doesn't move as the store answers", function()
+	local app = mounted()
+	app:command("store_stub.fixed")
+	app:command("store_stub.no_notes")
+	app:click('role:tab "Yours"')
+	settle(app)
+	-- (Yours has read its versions: its store line says so.)
+	expect(app:tree()).to_contain("1.0.0 in the plugin store")
+	app:command("store_stub.hold")
+	app:click('role:link "Publish…"')
+	app:wait('role:group "Deploy keys"', { timeout_ms = 3000 })
+	-- (The page come to rest, the store still not answering.)
+	settle(app, 400)
+	expect(app:has("#publish-checks")).to_be(false)
+	expect(app:has("#versions-none")).to_be(false)
+	expect(app:tree('role:group "Versions you\'ve sent"')).to_contain("Not approved")
+	local keys = box(app, 'role:group "Deploy keys"').y
+	app:command("store_stub.release")
+	settle(app, 500)
+	expect(app:has("#publish-checks")).to_be(true)
+	expect(box(app, 'role:group "Deploy keys"').y).to_be(keys)
 end)
 
 -- The checks' rows: each one's height and its hairline, by where each

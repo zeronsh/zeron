@@ -15,9 +15,11 @@
 --   store_stub.one_shot    Focus timer has one screenshot (store_stub.three_shots: three)
 --   store_stub.id_reserved the plugin's id is one the store keeps (its site's pages)
 --   store_stub.no_total    lists come without `total` (how many match)
+--   store_stub.few_categories  the store has three categories (before Browse opens)
 --   store_stub.no_notes    the engine has no notes on your plugin's folder
 --   store_stub.many_keys   Pomodoro clock has ten deploy keys: names of every length,
 --                          one ending today, one tomorrow, one in five days
+--   store_stub.long_featured   the first featured says 300 characters of itself, the second nothing
 
 local store = require("@app/screens/plugins/store")
 
@@ -770,6 +772,30 @@ ui.command {
 			table.insert(list, { key = key, name = name, created_at = NOW - i * DAY, last_used_at = if i % 2 == 0 then NOW - DAY else nil, expires_at = ends })
 		end
 		keys["pomodoro-clock"] = list
+	end,
+}
+ui.command {
+	id = "store_stub.few_categories",
+	title = "Store: three categories",
+	run = function()
+		CATEGORIES = table.move(CATEGORIES, 1, 3, 1, {})
+	end,
+}
+ui.command {
+	id = "store_stub.long_featured",
+	title = "Store: one featured says all it may, another nothing",
+	run = function()
+		local n = 0
+		for _, e in entries do
+			if e.card.featured then
+				n += 1
+				if n == 1 then
+					e.card.summary = string.sub(string.rep("All it may say of itself, to the store's last character. ", 6), 1, 300)
+				elseif n == 2 then
+					e.card.summary = ""
+				end
+			end
+		end
 	end,
 }
 ui.command {

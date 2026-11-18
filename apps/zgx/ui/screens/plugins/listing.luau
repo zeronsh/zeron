@@ -1189,9 +1189,8 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		-- Folded from far down a long one: the control that folded it
 		-- brought back into view, focus on it again. (Focusing the row hands
 		-- focus to its first control, Show more, and zgx scrolls the least
-		-- that shows it; nothing moves when it's in view. The version's head
-		-- too, once zgx can bring any element into view:
-		-- zgx-asks/scroll-into-view.)
+		-- that shows it; nothing moves when it's in view.)
+		-- Once the pin passes zgx #2234: `row:scroll_into_view { block = "start" }`, its head first ("nearest" would align a too-tall row's end).
 		local function keep_in_view()
 			local el = row:peek()
 			if el then

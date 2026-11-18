@@ -3859,7 +3859,6 @@
       "turn_on": "Turn on",
       "open_settings": "Open settings",
       "category_label": "Category",
-      "sort_label": "Order",
       "sort": {
         "relevance": "Best match",
         "popular": "Most installed",
@@ -3877,7 +3876,7 @@
         "utilities": "Utilities"
       },
       "offline_title": "Can't reach the plugin store",
-      "offline_body": "Your installed plugins still work. Try again when you're back online.",
+      "offline_body": "Installed plugins still work. Try again when you're online.",
       "failed_title": "The plugin store didn't answer",
       "failed_body": "Your installed plugins still work. Try again in a moment.",
       "try_again": "Try again",
@@ -4094,7 +4093,10 @@
       "other_body": "It came from somewhere else. Remove it in Installed to install this one.",
       "show_less": "Show less",
       "all_versions": "Show all {n} versions",
-      "count": "{n, plural, one {# plugin} other {# plugins}}"
+      "count": "{n, plural, one {# plugin} other {# plugins}}",
+      "list_title": "Plugins",
+      "categories_back": "Earlier categories",
+      "categories_more": "More categories"
     }
   },
   "templates": {

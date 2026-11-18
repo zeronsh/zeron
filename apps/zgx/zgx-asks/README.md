@@ -28,7 +28,6 @@ which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 | [web-snapshot](web-snapshot/ASK.md) | The browser panel can't attach a picture of the page. |
 | [markdown-offsets](markdown-offsets/ASK.md) | Review comments on a Markdown preview can't anchor to the block that holds their line. |
 | [rich-span-boundary-break](rich-span-boundary-break/ASK.md) | A rich paragraph that must break at the boundary between two spans breaks the next span's word in two instead (a sentence's own link, Publish… in Yours, cut across lines). Zeron draws that link as a box after the sentence meanwhile. |
-| [scroll-into-view](scroll-into-view/ASK.md) | Nothing brings a given element into view, only focus (which shows the focused node): a long version's notes folded from their foot leave its head above the view. Zeron keeps the pressed button in view meanwhile. |
 
 ## Developers of Zeron (and of any zgx app)
 

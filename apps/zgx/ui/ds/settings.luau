@@ -480,146 +480,129 @@ function M.truncated_row_h(lead: number?, byline: boolean?): number
 end
 
 -- One thing set apart, a card of its own that opens it (the plugin store's
--- featured plugins): its tile over its name, who made it, and two lines of
--- what it is; as wide as its row gives it (`Feature`s side by side in a
--- wrapping row share it), at least `MIN_FEATURE`. The card is a settings
--- card; under the pointer it takes the rows' wash, edge to edge inside its
--- edge, its corner the card's less that edge.
-local MIN_FEATURE = 180
+-- featured plugins): its tile beside its name over who made it (a list
+-- row's head), then two lines of what it is, on the card's text edge. One
+-- height whatever it says (the two lines held for it); its width a shelf's
+-- (ds/shelf, `M.FEATURE_MIN` its least: the tile, and a name and its two
+-- lines a readable measure beside and under it). The whole card is one
+-- target; under the pointer it takes the rows' wash, edge to edge inside
+-- its edge, its corner the card's less that edge.
+M.FEATURE_MIN = 180
 export type FeatureProps = {
 	label: string | Message | () -> string,
 	byline: (string | Message | () -> string)?,
 	description: (string | Message | () -> string)?,
 	lead: Node?,
 	badge: Node?,
-	-- Over it all, edge to edge at the card's top, at `COVER` (16:10): a
-	-- picture of the thing (a plugin's first screenshot), clipped to the
-	-- card's corner.
-	cover: Node?,
 	on_click: () -> (),
 }
 
--- A cover's shape, width over height.
-M.COVER = 1.6
+-- (The card round a Feature and its skeleton.)
+local function feature_card(props: { [any]: any }): Node
+	props.w_full = true
+	props.rounded = "$radius.xl"
+	props.bg = material.pick("$zeron.settings.tint", "$zeron.settings.card")
+	props.border = 1
+	props.border_color = "$zeron.settings.edge"
+	props.overflow = "hidden"
+	return ui.column(props)
+end
 
 function M.Feature(props: FeatureProps): Node
-	return ui.column {
+	local line_sm = (ui.theme.get("font.line.sm") :: number?) or 16
+	return feature_card {
 		class = "settings-feature",
-		grow = 1,
-		basis = 0,
-		min_w = MIN_FEATURE,
-		rounded = "$radius.xl",
-		bg = material.pick("$zeron.settings.tint", "$zeron.settings.card"),
-		border = 1,
-		border_color = "$zeron.settings.edge",
-		overflow = "hidden",
 		ui.column {
 			role = "button",
 			label = props.label,
 			focusable = true,
 			cursor = "pointer",
 			w_full = true,
-			grow = 1,
+			p = "$space.4",
+			gap = "$space.3",
 			rounded = ui.raw(control.nest("$radius.xl", 1), "the card's corner less its edge"),
 			hover = { bg = "$hover" },
 			active = { bg = "$pressed" },
 			focus = { outline = "$zeron.focus.width", outline_color = "$zeron.focus.ring", outline_offset = -2 },
 			on_click = props.on_click,
-			if props.cover
-				then ui.div {
-					class = "settings-feature-cover",
-					w_full = true,
-					aspect = M.COVER,
-					-- (Clipped to the card's top corners on its own box, so
-					-- the picture's corners are the card's.)
-					overflow = "hidden",
-					rounded_tl = ui.raw(control.nest("$radius.xl", 1), "the card's corner less its edge"),
-					rounded_tr = ui.raw(control.nest("$radius.xl", 1), "the card's corner less its edge"),
-					shrink = 0,
-					props.cover,
-				}
-				else nil,
-			ui.column {
-			w_full = true,
-			grow = 1,
-			p = "$space.4",
-			gap = "$space.3",
-			props.lead,
-			ui.column {
+			ui.row {
 				w_full = true,
-				gap = "$zeron.space.hair",
-				ui.row {
-					gap = "$space.2",
-					items = "center",
+				gap = "$space.3",
+				items = "center",
+				props.lead,
+				ui.column {
+					grow = 1,
 					min_w = 0,
-					FadeText {
-						props.label,
-						shrink = 1,
+					gap = "$zeron.space.hair",
+					ui.row {
+						gap = "$space.2",
+						items = "center",
 						min_w = 0,
-						text_size = "$font.size.md",
-						line_height = "$font.line.md",
-						weight = "$font.weight.medium",
-						color = "$text.primary",
+						FadeText {
+							props.label,
+							shrink = 1,
+							min_w = 0,
+							text_size = "$font.size.md",
+							line_height = "$font.line.md",
+							weight = "$font.weight.medium",
+							color = "$text.primary",
+						},
+						props.badge,
 					},
-					props.badge,
+					FadeText { props.byline or "", min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" },
 				},
-				if props.byline
-					then FadeText { props.byline, min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" }
-					else nil,
 			},
-			if props.description
-				then ui.text {
-					props.description,
-					w_full = true,
-					wrap = true,
-					lines = 2,
-					-- (Cut at its second line's end, said so: "…".)
-					truncate = true,
-					text_size = "$font.size.sm",
-					line_height = "$font.line.sm",
-					color = "$text.secondary",
-				}
-				else nil,
+			-- (Two lines held whatever it says: one height for every card.)
+			ui.text {
+				props.description or "",
+				w_full = true,
+				h = ui.raw(2 * line_sm, "two lines of the small type"),
+				wrap = true,
+				lines = 2,
+				-- (Cut at its second line's end, said so: "…".)
+				truncate = true,
+				text_size = "$font.size.sm",
+				line_height = "$font.line.sm",
+				color = "$text.secondary",
 			},
 		},
 	}
 end
 
 -- A `Feature` still on its way: its card and shape, its tile, name, who
--- made it and two lines held in the skeleton's wash, as tall as the card
--- that comes, so nothing under it moves when it does. `still`: at rest, not
--- breathing (it has waited long enough).
-function M.FeatureSkeleton(props: { still: boolean?, cover: boolean? }?): Node
+-- made it and two lines held in the skeleton's wash, in the very boxes the
+-- card has, so it is the card's height and nothing under it moves when the
+-- card comes. `still`: at rest, not breathing (it has waited long enough).
+function M.FeatureSkeleton(props: { still: boolean?, lead: number? }?): Node
 	local still = props and props.still
-	local cover = props and props.cover
+	local lead = (props and props.lead) or 32
+	local line_sm = (ui.theme.get("font.line.sm") :: number?) or 16
 	local function line(w: any, h: string, bar: number?): Node
 		return ui.div { h = h, w_full = true, justify = "center", skeleton.Bar { w = w, h = bar, still = still } }
 	end
-	return ui.column {
+	return feature_card {
 		class = "settings-feature-skeleton",
-		grow = 1,
-		basis = 0,
-		min_w = MIN_FEATURE,
-		rounded = "$radius.xl",
-		bg = material.pick("$zeron.settings.tint", "$zeron.settings.card"),
-		border = 1,
-		border_color = "$zeron.settings.edge",
 		aria_hidden = true,
-		overflow = "hidden",
-		if cover then ui.div { w_full = true, aspect = M.COVER, shrink = 0, skeleton.Bar { fill = true, still = still } } else nil,
 		ui.column {
 			w_full = true,
 			p = "$space.4",
 			gap = "$space.3",
-			skeleton.Bar { w = 40, h = 40, rounded = "$radius.md", still = still },
-			ui.column {
+			ui.row {
 				w_full = true,
-				gap = "$zeron.space.hair",
-				line(96, "$font.line.md", nil),
-				line(72, "$font.line.sm", 8),
+				gap = "$space.3",
+				items = "center",
+				skeleton.Bar { w = lead, h = lead, rounded = "$radius.md", still = still },
+				ui.column {
+					grow = 1,
+					min_w = 0,
+					gap = "$zeron.space.hair",
+					line(96, "$font.line.md", nil),
+					line(72, "$font.line.sm", 8),
+				},
 			},
 			ui.column {
 				w_full = true,
+				h = ui.raw(2 * line_sm, "two lines of the small type"),
 				line("90%", "$font.line.sm", 8),
 				line("60%", "$font.line.sm", 8),
 			},

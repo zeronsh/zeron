@@ -329,13 +329,12 @@ local function row(first: store.Card, _i: State<number>, now: State<store.Card>)
 	}
 end
 
--- What narrows the list, one quiet row under the search: the store's
--- categories as the app's quiet tabs (All first), running sideways with
--- the edge's fade when they don't fit, then how many it matches and the
--- order, a compact dropdown at its own width, at the row's end. The categories' words start on the
--- rows' text edge, the order's trigger ends on their controls' edge; the
--- row's top and bottom are the search row's inset.
-local function filters(): Node
+-- The store's categories, the card's row under its search: the app's quiet
+-- tabs (All first) across the card's width, their first's words on the
+-- rows' text edge. Too many for the room (a narrow pane, a longer
+-- language), they run sideways and the edge hiding some shows a chevron
+-- that pages them (ds/pager). One Tab stop, the arrows between them.
+local function category_tabs(): Node
 	local tabs = ui.presence(function(): string
 		return if #categories:get() > 0 then "ready" else "waiting"
 	end, function(key: string): Node
@@ -355,14 +354,34 @@ local function filters(): Node
 			options = options,
 		}
 	end)
+	-- (A quiet tab's words are 12 inside it, so 4 here puts the first's on
+	-- the rows' 16; 4 at the end as well, the row's own inset.)
+	return ui.row {
+		id = "store-filters",
+		w_full = true,
+		py = "$space.1",
+		px = "$space.1",
+		ds.Pager {
+			id = "store-categories",
+			back = ui.t("plugins.store.categories_back"),
+			more = ui.t("plugins.store.categories_more"),
+			tabs,
+		},
+	}
+end
+
+-- The order the list is in: the list's section's own action at its title's
+-- end, quiet (no fill at rest, so the chosen category is the one filled
+-- thing above the rows), saying the order and opening the choice.
+local function order_control(): Node
 	local function sort_items(): { any }
 		local out: { any } = {}
 		if trimmed(query:get()) ~= "" then
-			table.insert(out, { value = "relevance", label = ui.t("plugins.store.sort.relevance"):get(), icon = "star" })
+			table.insert(out, { value = "relevance", label = ui.t("plugins.store.sort.relevance"):get() })
 		end
-		table.insert(out, { value = "popular", label = ui.t("plugins.store.sort.popular"):get(), icon = "download" })
-		table.insert(out, { value = "updated", label = ui.t("plugins.store.sort.updated"):get(), icon = "refresh" })
-		table.insert(out, { value = "new", label = ui.t("plugins.store.sort.new"):get(), icon = "calendar" })
+		table.insert(out, { value = "popular", label = ui.t("plugins.store.sort.popular"):get() })
+		table.insert(out, { value = "updated", label = ui.t("plugins.store.sort.updated"):get() })
+		table.insert(out, { value = "new", label = ui.t("plugins.store.sort.new"):get() })
 		return out
 	end
 	-- The order shown: the one in use (relevance only with words).
@@ -387,50 +406,33 @@ local function filters(): Node
 			sort:set(v)
 		end
 	end)
-	-- (A quiet tab's words are 12 inside it, so 4 here puts the first's on
-	-- the rows' 16; the order's trigger ends on the rows' 16 too.)
-	return ui.row {
-		id = "store-filters",
-		w_full = true,
-		py = "$space.1",
-		pl = "$space.1",
-		pr = "$space.4",
-		gap = "$space.3",
-		items = "center",
-		ui.scroll_x {
-			id = "store-categories",
-			grow = 1,
-			min_w = 0,
-			fade = { 12, 12 },
-			fade_overflow = true,
-			tabs,
-		},
-		-- How many it matches, before the order that ranks them: said of
-		-- the list under it (none while unknown, or when nothing matches,
-		-- which the card says).
-		ui.show(function(): boolean
-			local n = total:get()
-			return n ~= nil and n > 0
-		end, ui.text {
-			id = "store-total",
-			function(): string
-				return ui.t("plugins.store.count", { n = total:get() or 0 }):get()
-			end,
-			shrink = 0,
-			tabular = true,
-			text_size = "$font.size.sm",
-			line_height = "$font.line.sm",
-			color = "$text.tertiary",
-		}),
-		ui.div {
-			shrink = 0,
-			ds.Dropdown {
-				value = sort_value :: any,
-				label = ui.t("plugins.store.sort_label"),
-				items = sort_items,
-				search = false,
-			},
-		},
+	return ds.Dropdown {
+		value = sort_value :: any,
+		items = sort_items,
+		search = false,
+		plain = true,
+		placement = { side = "bottom", align = "end" },
+		trigger = function(menu: any): Node
+			return ds.Button {
+				id = "store-order",
+				tone = "ghost",
+				size = "xs",
+				expanded = function(): boolean
+					return menu.open:get()
+				end,
+				on_click = menu.toggle,
+				ui.row {
+					gap = "$space.1",
+					items = "center",
+					ui.text {
+						function(): string
+							return ui.t(`plugins.store.sort.{shown_sort:get()}`):get()
+						end,
+					},
+					ds.Icon { name = "alt-arrow-down", size = 14, aria_hidden = true },
+				},
+			}
+		end,
 	}
 end
 
@@ -584,67 +586,9 @@ local function body_key(): string
 	return if narrowed() then "nomatch" else "none"
 end
 
--- Each featured plugin's cover: its first screenshot (its page's, asked
--- once), false for none.
-local covers = ui.state("store_covers", {} :: { [string]: string | false })
-local asked_covers: { [string]: boolean } = {}
-local function cover_of(card: store.Card): (string | false)?
-	local have = covers:get()[card.id]
-	if have ~= nil then
-		return have
-	end
-	if not asked_covers[card.id] then
-		asked_covers[card.id] = true
-		local id = card.id
-		store.detail(id):after(function(d: any)
-			local shots = if type(d) == "table" then d.screenshots else nil
-			local first = if type(shots) == "table" then shots[1] else nil
-			covers:set_key(id, if type(first) == "string" and first ~= "" then first else false)
-		end, function()
-			asked_covers[id] = nil
-		end)
-	end
-	return nil
-end
-
--- A featured card's cover: the picture, at the card's top; while it comes,
--- the skeleton's wash; with none, its icon on the quiet wash.
-local Cover = ui.component(function(props: { card: State<store.Card> }): Node
-	local card = props.card
-	return ui.presence(function(): string
-		local c = card:get()
-		local path = cover_of(c)
-		if path == nil then
-			return ""
-		elseif path == false then
-			return "\0none"
-		end
-		local src = store.picture_src(c.id, c.version, path :: string)
-		if src == false then
-			return "\0none"
-		end
-		return src or ""
-	end, function(src: string): Node
-		if src == "" then
-			return ds.Skeleton { fill = true }
-		elseif src == "\0none" then
-			return ui.row {
-				w_full = true,
-				h_full = true,
-				items = "center",
-				justify = "center",
-				bg = "$zeron.secondary.bg",
-				M.Tile { card = card, size = 48 },
-			}
-		end
-		return ui.image { src = src, w_full = true, h_full = true, fit = "cover", aria_hidden = true }
-	end, { w_full = true, h_full = true })
-end)
-
 -- One featured plugin, a card of its own that opens it.
 local function feature(first: store.Card, _i: number, now: State<store.Card>): Node
 	return ds.Settings.Feature {
-		cover = Cover { card = now },
 		label = function(): string
 			return now:get().name
 		end,
@@ -654,7 +598,8 @@ local function feature(first: store.Card, _i: number, now: State<store.Card>): N
 		description = function(): string
 			return now:get().summary or ""
 		end,
-		lead = M.Tile { card = now, size = 40 },
+		-- (A list row's head: its tile at a row's size.)
+		lead = M.Tile { card = now, size = 32 },
 		on_click = function()
 			nav.open_listing(now:peek().id)
 		end,
@@ -689,54 +634,83 @@ M.View = ui.component(function(): Node
 		ui.show(function(): boolean
 			return featured_key() ~= "none"
 		end, ui.presence(featured_key, function(key: string): Node
+			-- (One shelf, the picture strip's rule: three share the column
+			-- while each keeps its least; under that they run sideways, the
+			-- next cut by the column's end. Never two and one.)
 			return ds.Settings.Section {
 				title = ui.t("plugins.store.featured"),
 				if key == "loading"
 					then ds.SkeletonWaiting {
 						build = function(still: boolean): Node
-							return ui.row {
+							return ds.Shelf {
 								id = "store-featured-loading",
-								w_full = true,
-								gap = "$space.3",
-								flex_wrap = true,
-								ds.Settings.FeatureSkeleton { still = still, cover = true },
-								ds.Settings.FeatureSkeleton { still = still, cover = true },
-								ds.Settings.FeatureSkeleton { still = still, cover = true },
+								across = 3,
+								min_w = ds.Settings.FEATURE_MIN,
+								count = function(): number
+									return 3
+								end,
+								build = function(w: () -> number): Node
+									local cards: { Node } = {}
+									for _ = 1, 3 do
+										table.insert(cards, ui.div { w = w, shrink = 0, ds.Settings.FeatureSkeleton { still = still } })
+									end
+									return cards :: any
+								end,
 							}
 						end,
 					}
-					else ui.row {
+					else ds.Shelf {
 						id = "store-featured",
-						w_full = true,
-						gap = "$space.3",
-						flex_wrap = true,
-						ui.each(featured_pages.items, feature, {
-							key = function(c: store.Card): string
-								return c.id
-							end,
-						}),
+						across = 3,
+						min_w = ds.Settings.FEATURE_MIN,
+						count = function(): number
+							return #featured_pages.items:get()
+						end,
+						build = function(w: () -> number): Node
+							return ui.each(featured_pages.items, function(first: store.Card, i: number, now: State<store.Card>): Node
+								return ui.div { w = w, shrink = 0, feature(first, i, now) }
+							end, {
+								key = function(c: store.Card): string
+									return c.id
+								end,
+							})
+						end,
 					},
 			}
 		end, { w_full = true })),
-		ds.Settings.CatalogCard {
-			id = "store-card",
-			search = { value = query, placeholder = ui.t("plugins.store.search") },
-			-- The keyword a plugin's page narrowed it to: one token, removable.
-			search_trail = ui.show(function(): boolean
-				return keyword:get() ~= ""
-			end, ds.Tag {
-				function(): string
-					return keyword:get()
-				end :: any,
-				size = "sm",
-				selected = true,
-				on_remove = function()
-					keyword:set("")
-				end,
-			}),
-			filters = filters(),
-			body = ui.presence(body_key, inside, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
-		},
+		-- The store's plugins: a section, its title how many what's asked
+		-- matches (the store's `total`; "Plugins" while it isn't known, or
+		-- from a store that doesn't count), its action the order; then the
+		-- card: the search, the categories, the rows. (Its head is one
+		-- height loading or loaded: nothing under it moves.)
+		ui.column { id = "store-list", w_full = true, ds.Settings.Section {
+			title = function(): string
+				local n = total:get()
+				return if n and n > 0 then ui.t("plugins.store.count", { n = n }):get() else ui.t("plugins.store.list_title"):get()
+			end,
+			trail = order_control(),
+			-- (Order on the title's line, adding nothing to it.)
+			trail_on_line = true,
+			ds.Settings.CatalogCard {
+				id = "store-card",
+				search = { value = query, placeholder = ui.t("plugins.store.search") },
+				-- The keyword a plugin's page narrowed it to: one token, removable.
+				search_trail = ui.show(function(): boolean
+					return keyword:get() ~= ""
+				end, ds.Tag {
+					function(): string
+						return keyword:get()
+					end :: any,
+					size = "sm",
+					selected = true,
+					on_remove = function()
+						keyword:set("")
+					end,
+				}),
+				filters = category_tabs(),
+				body = ui.presence(body_key, inside, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
+			},
+		} },
 	}
 end)
 

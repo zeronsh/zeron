@@ -3859,7 +3859,6 @@
       "turn_on": "打开",
       "open_settings": "打开设置",
       "category_label": "类别",
-      "sort_label": "排序",
       "sort": {
         "relevance": "最相关",
         "popular": "安装最多",
@@ -3877,7 +3876,7 @@
         "utilities": "实用工具"
       },
       "offline_title": "无法连接插件商店",
-      "offline_body": "已安装的插件照常工作。联网后再试一次。",
+      "offline_body": "已安装的插件照常工作。联网后再试。",
       "failed_title": "插件商店没有回应",
       "failed_body": "已安装的插件照常工作。稍后再试一次。",
       "try_again": "再试一次",
@@ -4094,7 +4093,10 @@
       "other_body": "它来自别处。在“已安装”中移除它，即可安装这个。",
       "show_less": "收起",
       "all_versions": "显示全部 {n} 个版本",
-      "count": "{n, plural, other {# 个插件}}"
+      "count": "{n, plural, other {# 个插件}}",
+      "list_title": "插件",
+      "categories_back": "前面的分类",
+      "categories_more": "更多分类"
     }
   },
   "templates": {

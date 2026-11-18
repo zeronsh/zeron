@@ -195,7 +195,7 @@ test("a category, the order and a keyword each ask the store again", function()
 	settle(app)
 	expect(calls(app)).to_contain("search:q=,category=git,keyword=,sort=popular,cursor=")
 	expect(app:has("#store-featured")).to_be(false)
-	app:click('#store-filters >> role:button "Order"')
+	app:click("#store-order")
 	app:frames(10)
 	app:click('role:option "Recently updated"')
 	settle(app)
@@ -226,14 +226,14 @@ end)
 
 test("words searched order by best match; without words, Best match isn't offered", function()
 	local app = open()
-	app:click('#store-filters >> role:button "Order"')
+	app:click("#store-order")
 	app:frames(10)
 	expect(app:tree()).never.to_contain("Best match")
 	app:key("Escape")
 	app:frames(5)
 	app:type('#store-card >> role:textbox "Search plugins"', "git")
 	settle(app, 600)
-	expect(app:tree("#store-filters")).to_contain("Best match")
+	expect(app:tree("#store-order")).to_contain("Best match")
 end)
 
 test("a row says Installed for what this device has, and Update once a newer version is found for it", function()
@@ -255,7 +255,7 @@ test("the store out of reach says so in the card, and Try again lists it once it
 	app:click('role:tab "Browse"')
 	app:wait('"Can\'t reach the plugin store"', { timeout_ms = 3000 })
 	app:frames(20)
-	expect(app:tree("#store-card")).to_contain("Your installed plugins still work.")
+	expect(app:tree("#store-card")).to_contain("Installed plugins still work.")
 	app:command("store_stub.online")
 	app:click('#store-card >> role:button "Try again"')
 	app:wait('#store-rows', { timeout_ms = 3000 })
@@ -362,34 +362,53 @@ test("rows are built as the card fades them in, the page never scrolled: as Brow
 	expect(app:has('#store-card >> role:button "Branch badge"')).to_be(true)
 end)
 
-test("how many plugins what's asked matches is said before the order, kept as a new search comes, none when nothing matches or the store doesn't say", function()
-	local app = open()
-	settle(app)
-	local all = app:tree("#store-total")
-	expect(all).to_contain("75 plugins")
-	-- (Before the order, a gap's width from it.)
-	local function x_of(sel: string): (number, number)
-		local x, w = app:tree(sel):match("(%-?[%d.]+),%-?[%d.]+ ([%d.]+)x")
-		return tonumber(x) or 0, tonumber(w) or 0
+test("the list's head says how many what's asked matches, kept as a new search comes, Plugins while unknown, one height throughout", function()
+	local app = mount("plugins_store_fixture.luau")
+	app:resize(1000, 900)
+	app:frames(10)
+	-- Loading: the head is there, saying Plugins, at its height.
+	app:command("store_stub.hold")
+	app:click('role:tab "Browse"')
+	app:frames(20)
+	-- (The head: the section's words over its card; its height, from the
+	-- section's top to the card's.)
+	local function head(): string
+		-- (The section's group, named by its title: the tree's second line.)
+		local tree = app:tree("#store-list")
+		return tree:match("^[^\n]+\n([^\n]+)") or ""
 	end
-	local tx, tw = x_of("#store-total")
-	local ox = x_of('#store-filters >> role:button "Order"')
-	expect(math.abs(ox - (tx + tw) - 12) < 0.6).to_be(true)
+	local function y_of(sel: string): number
+		return tonumber((app:tree(sel):match(" [%d.]+,([%-%d.]+) "))) or 0
+	end
+	local function head_h(): number
+		return y_of("#store-card") - y_of("#store-list")
+	end
+	expect(head()).to_contain("Plugins")
+	local loading_h = head_h()
+	app:command("store_stub.release")
+	settle(app)
+	expect(head()).to_contain("75 plugins")
+	expect(head_h()).to_be(loading_h)
+	-- Order is the head's own action, at its end.
+	expect(app:tree("#store-list")).to_contain('#store-order button "Most installed"')
 	-- A search: the count of what it finds, the last one kept until it answers.
 	app:command("store_stub.hold")
 	app:type('#store-card >> role:textbox "Search plugins"', "timer")
 	settle(app, 500)
-	expect(app:tree("#store-total")).to_contain("75 plugins")
+	expect(head()).to_contain("75 plugins")
 	app:command("store_stub.release")
 	settle(app, 500)
-	expect(app:tree("#store-total")).never.to_contain("75 plugins")
-	-- Nothing found: the card says so, and no count.
+	expect(head()).never.to_contain("75 plugins")
+	expect(head()).to_contain("plugin")
+	-- Nothing found: the card says so; the head says Plugins.
 	app:fill('#store-card >> role:textbox "Search plugins"', "zzzz")
 	settle(app, 600)
-	expect(app:has("#store-total")).to_be(false)
-	-- A store that doesn't count: nothing said.
+	expect(head()).to_contain("Plugins")
+	-- A store that doesn't count: Plugins.
 	app:command("store_stub.no_total")
 	app:fill('#store-card >> role:textbox "Search plugins"', "")
 	settle(app, 600)
-	expect(app:has("#store-total")).to_be(false)
+	expect(head()).to_contain("Plugins")
+	expect(head()).never.to_contain("75")
+	expect(head_h()).to_be(loading_h)
 end)

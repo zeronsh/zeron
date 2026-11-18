@@ -1,10 +1,11 @@
 -- Settings: plugins. What's installed, what's new, and what could be: a
 -- real page's search, tabs, updates, and its loading, empty and failed states.
 -- Browse is the store's catalog on the page's own pieces: the featured
--- (`Settings.Feature`, a cover over each), the catalog's card with its one
--- quiet row of filters (category tabs, the order at the right) and a
--- keyword narrowed to beside its search (`Settings.CatalogCard`), its rows
--- built as they show (`Settings.ListRows`);
+-- (`Settings.Feature` on a `Shelf`), then the list's section, how many as
+-- its title and the order its action, its card with a keyword narrowed to
+-- beside its search and the categories (`Pager` paging them when they don't
+-- fit) (`Settings.CatalogCard`), its rows built as they show
+-- (`Settings.ListRows`);
 -- a plugin opens a page under it (`Settings.SubPage`, `Settings.Back`).
 
 local ds = require("@ds")
@@ -59,114 +60,139 @@ end)
 local function browse(): Node
 	local function feature(p: any): Node
 		return ds.Settings.Feature {
-			-- (A plugin with no screenshot: its tile on a quiet wash.)
-			cover = ui.row {
-				w_full = true,
-				h_full = true,
-				items = "center",
-				justify = "center",
-				bg = "$zeron.secondary.bg",
-				ds.Tile { label = p.name, hue = p.hue, size = 48 },
-			},
 			label = p.name,
 			byline = `by @{p.by}`,
 			description = p.about,
-			lead = ds.Tile { label = p.name, hue = p.hue, size = 40 },
+			lead = ds.Tile { label = p.name, hue = p.hue, size = 32 },
 			on_click = function()
 				opened:set(p.id)
 			end,
 		}
 	end
+	local ORDERS = { popular = "Most installed", updated = "Recently updated", new = "Newest" }
 	return ui.column {
 		w_full = true,
 		gap = "$space.6",
+		-- The featured on a shelf (ds.Shelf): three across while each keeps
+		-- its least, else running sideways, the next cut by the column's end.
 		ui.show(function(): boolean
 			return query:get() == ""
 		end, ds.Settings.Section {
 			title = "Featured",
-			ui.row { w_full = true, gap = "$space.3", flex_wrap = true, feature(CATALOG[1]), feature(CATALOG[2]), feature(CATALOG[3]) },
-		}),
-		ds.Settings.CatalogCard {
-			search = { value = query, placeholder = "Search plugins" },
-			search_trail = ui.show(function(): boolean
-				return keyword:get() ~= ""
-			end, ds.Tag {
-				function(): string
-					return keyword:get()
-				end :: any,
-				size = "sm",
-				selected = true,
-				on_remove = function()
-					keyword:set("")
+			ds.Shelf {
+				across = 3,
+				min_w = ds.Settings.FEATURE_MIN,
+				count = function(): number
+					return 3
 				end,
-			}),
-			-- (A quiet tab's words are 12 inside it, so 4 here puts the
-			-- first's on the rows' 16; the order ends on the rows' 16 too.)
-			filters = ui.row {
-				w_full = true,
-				py = "$space.1",
-				pl = "$space.1",
-				pr = "$space.4",
-				gap = "$space.3",
-				items = "center",
-				ui.scroll_x {
-					grow = 1,
-					min_w = 0,
-					fade = { 12, 12 },
-					fade_overflow = true,
-					ds.Tabs {
-						value = category,
-						label = "Category",
-						look = "pill",
-						size = "sm",
-						options = { { value = "", label = "All" }, { value = "integrations", label = "Integrations" }, { value = "developer-tools", label = "Developer tools" }, { value = "productivity", label = "Productivity" } },
-					},
+				build = function(w: () -> number): any
+					local cards = {}
+					for i = 1, 3 do
+						table.insert(cards, ui.div { w = w, shrink = 0, feature(CATALOG[i]) })
+					end
+					return cards
+				end,
+			},
+		}),
+		-- The list: a section, how many as its title, the order its quiet
+		-- action; the card's search, its categories (ds.Pager pages them
+		-- when they don't fit), its rows.
+		ds.Settings.Section {
+			title = function(): string
+				return `{#found:get()} plugins`
+			end,
+			trail_on_line = true,
+			trail = ds.Dropdown {
+				value = order :: any,
+				search = false,
+				plain = true,
+				placement = { side = "bottom", align = "end" },
+				items = {
+					{ value = "popular", label = "Most installed" },
+					{ value = "updated", label = "Recently updated" },
+					{ value = "new", label = "Newest" },
 				},
-				-- (How many it matches, before the order.)
-				ui.text {
+				trigger = function(menu: any): Node
+					return ds.Button {
+						tone = "ghost",
+						size = "xs",
+						on_click = menu.toggle,
+						ui.row {
+							gap = "$space.1",
+							items = "center",
+							ui.text {
+								function(): string
+									return ORDERS[order:get()] or ""
+								end,
+							},
+							ds.Icon { name = "alt-arrow-down", size = 14, aria_hidden = true },
+						},
+					}
+				end,
+			},
+			ds.Settings.CatalogCard {
+				search = { value = query, placeholder = "Search plugins" },
+				search_trail = ui.show(function(): boolean
+					return keyword:get() ~= ""
+				end, ds.Tag {
 					function(): string
-						return `{#found:get()} plugins`
+						return keyword:get()
+					end :: any,
+					size = "sm",
+					selected = true,
+					on_remove = function()
+						keyword:set("")
 					end,
-					shrink = 0,
-					tabular = true,
-					text_size = "$font.size.sm",
-					line_height = "$font.line.sm",
-					color = "$text.tertiary",
-				},
-				ui.div {
-					shrink = 0,
-					ds.Dropdown {
-						value = order :: any,
-						label = "Order",
-						search = false,
-						items = {
-							{ value = "popular", label = "Most installed", icon = "download" },
-							{ value = "updated", label = "Recently updated", icon = "refresh" },
-							{ value = "new", label = "Newest", icon = "calendar" },
+				}),
+				-- (A quiet tab's words are 12 inside it, so 4 here puts the
+				-- first's on the rows' 16.)
+				filters = ui.row {
+					w_full = true,
+					py = "$space.1",
+					px = "$space.1",
+					ds.Pager {
+						back = "Earlier categories",
+						more = "More categories",
+						ds.Tabs {
+							value = category,
+							label = "Category",
+							look = "pill",
+							size = "sm",
+							options = {
+								{ value = "", label = "All" },
+								{ value = "agents", label = "Agents" },
+								{ value = "appearance", label = "Appearance" },
+								{ value = "chat", label = "Chat" },
+								{ value = "developer-tools", label = "Developer tools" },
+								{ value = "git", label = "Git" },
+								{ value = "integrations", label = "Integrations" },
+								{ value = "productivity", label = "Productivity" },
+								{ value = "utilities", label = "Utilities" },
+							},
 						},
 					},
 				},
-			},
-			body = ds.Settings.ListRows(found, function(p: any): Node
-				return ds.Settings.Row {
-					label = p.name,
-					byline = `by @{p.by} · {p.installs} installs`,
-					description = p.about,
-					lead = ds.Tile { label = p.name, hue = p.hue, size = 32 },
-					truncate = true,
-					value = if p.id == "slack" then "Installed" else "",
-					on_click = function()
-						opened:set(p.id)
+				body = ds.Settings.ListRows(found, function(p: any): Node
+					return ds.Settings.Row {
+						label = p.name,
+						byline = `by @{p.by} · {p.installs} installs`,
+						description = p.about,
+						lead = ds.Tile { label = p.name, hue = p.hue, size = 32 },
+						truncate = true,
+						value = if p.id == "slack" then "Installed" else "",
+						on_click = function()
+							opened:set(p.id)
+						end,
+					}
+				end, {
+					key = function(p: any): string
+						return p.id
 					end,
-				}
-			end, {
-				key = function(p: any): string
-					return p.id
-				end,
-				height = function(): number
-					return ds.Settings.truncated_row_h(32, true)
-				end,
-			}),
+					height = function(): number
+						return ds.Settings.truncated_row_h(32, true)
+					end,
+				}),
+			},
 		},
 	}
 end

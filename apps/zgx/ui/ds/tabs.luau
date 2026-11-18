@@ -64,7 +64,33 @@ return ui.component(function(props: Props): Node
 			props.on_change(o.value)
 		end
 	end
-	for _, o in props.options do
+	-- The tab an arrow (Home, End) moves to from the `from`th, past
+	-- disabled ones; nil for another key, or none to move to.
+	local function step(from: number, key: string): number?
+		local list = props.options
+		local function open(at: number): boolean
+			return list[at] ~= nil and not list[at].disabled
+		end
+		if key == "Home" or key == "End" then
+			local first, last, by = if key == "Home" then 1 else #list, if key == "Home" then #list else 1, if key == "Home" then 1 else -1
+			for at = first, last, by do
+				if open(at) then
+					return if at ~= from then at else nil
+				end
+			end
+			return nil
+		end
+		local by = if key == "ArrowRight" then 1 elseif key == "ArrowLeft" then -1 else 0
+		if by == 0 then
+			return nil
+		end
+		local at = from + by
+		while list[at] and not open(at) do
+			at += by
+		end
+		return if open(at) then at else nil
+	end
+	for i, o in props.options do
 		local ref = ui.ref()
 		table.insert(refs, ref)
 		local function chosen(): boolean
@@ -124,8 +150,19 @@ return ui.component(function(props: Props): Node
 				on_click = function()
 					choose(o)
 				end,
-				on_focus = function()
-					choose(o)
+				-- The arrows, Home and End choose the tab they move to; zgx's
+				-- tab list moves the focus there (not handled here). Focus
+				-- that only arrives (Tab into the list, or handed on as what
+				-- had it goes away) chooses nothing.
+				on_key = function(e: any): boolean
+					if e.shift or e.ctrl or e.alt or e.meta or e.cmd then
+						return false
+					end
+					local to = step(i, e.key)
+					if to then
+						choose(props.options[to])
+					end
+					return false
 				end,
 				if pill
 					then TabStrip.Wash(function(): boolean
