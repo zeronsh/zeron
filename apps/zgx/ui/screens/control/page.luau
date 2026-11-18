@@ -380,11 +380,32 @@ local function brain_dump(): string?
 	return nil
 end
 
+-- The chat Capture's composer is bound to: the Brain dump's, or, on a
+-- device with none yet, a stand-in. The engine makes the Brain dump with
+-- the first dump (engine orchestration/brain.rs `ensure_brain_dump`), so
+-- the composer has to be there before it: its first send goes as a dump
+-- with no chat, and once the Brain dump's row comes the composer is its.
+-- (Never sent anywhere: the stand-in has no chat in the engine.)
+M.NO_BRAIN_DUMP = "control-capture-new"
+local function capture_chat(): string
+	return brain_dump() or M.NO_BRAIN_DUMP
+end
+-- (Whether either placement of Capture's composer holds the keys, followed
+-- as focus moves.)
+local inline_focused = false
+local float_focused = false
+-- (A first dump sent from the stand-in with the keys in it: they go on to
+-- the Brain dump's composer as it takes the stand-in's place.)
+local keys_to_brain_dump = false
+
 -- A send from Capture: the words, the files they carry, and the Brain
 -- dump's model as the composer has it picked, a dump; what it references
 -- (the composer's `{ kind = "ref", ref }`, dragged from the room's widgets)
 -- goes as the dump's `refs`, never as files.
 function M.take(text: string, attachments: { any }, picks: { [string]: any }?): any
+	if not brain_dump() then
+		keys_to_brain_dump = inline_focused or float_focused
+	end
 	local files, refs = {}, {}
 	for _, a in attachments or {} do
 		if a.kind == "ref" and type(a.ref) == "table" then
@@ -576,9 +597,6 @@ local FOOTER: any = { access = false, place = false }
 M.floating = ui.state("control_capture_floating", false)
 -- The floating one opened out.
 M.float_open = ui.state("control_capture_float_open", false)
--- (Whether either placement holds the keys, followed as focus moves.)
-local inline_focused = false
-local float_focused = false
 -- The floating one's height as laid out (the Chat tab keeps its foot clear).
 M.float_h = ui.state("control_capture_float_h", 0)
 -- Asked for the keys: bumped, the floating one takes them.
@@ -669,7 +687,7 @@ local function capture(): Node
 	-- dropped is an @-mention, files are carried with the dump.)
 	-- (And a card, thread, machine, ask… dragged from the room's widgets: a
 	-- reference, ds/orch_ref.)
-	return LaneTab().DropZone { slot = "control-capture", chat = brain_dump, refs = true, ui.column {
+	return LaneTab().DropZone { slot = "control-capture", chat = capture_chat, refs = true, ui.column {
 		id = "control-capture",
 		w_full = true,
 		gap = "$space.5",
@@ -686,7 +704,7 @@ local function capture(): Node
 			LaneTab().Composer {
 				id = "control-capture-composer",
 				slot = SLOT,
-				chat = brain_dump,
+				chat = capture_chat,
 				take = M.take,
 				-- (The Brain dump's chat watched only once it's used: its
 				-- transcript, hundreds of routing turns, is never shown here.)
@@ -1801,8 +1819,7 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, show
 		take_keys()
 	end
 	local count = ui.computed(function(): number
-		local chat = brain_dump()
-		return if chat then #Shared.cargo_of(chat) else 0
+		return #Shared.cargo_of(capture_chat())
 	end)
 	local w = ui.computed(function(): number
 		local room = math.max(0, props.width() - FLOAT_SIDE * 2)
@@ -1909,7 +1926,7 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, show
 			end,
 			LaneTab().DropZone {
 				slot = SLOT,
-				chat = brain_dump,
+				chat = capture_chat,
 				focus = focus,
 				place = "float",
 				-- (References dragged from the room too, as Capture's own.)
@@ -1961,7 +1978,7 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, show
 						LaneTab().Composer {
 							id = "control-float-composer",
 							slot = SLOT,
-							chat = brain_dump,
+							chat = capture_chat,
 							take = M.take,
 							lazy = true,
 							session_only = true,
@@ -2399,6 +2416,22 @@ M.Page = ui.component(function(): Node
 				ui.after(0, function()
 					M.show_dump(id)
 				end)
+			end)
+		end
+	end)
+	-- The Brain dump made by the first dump: its composer takes the
+	-- stand-in's place, and the keys, if they were in the stand-in's.
+	-- (Followed as whether there is one: a push wakes nothing here.)
+	local has_brain_dump = ui.computed(function(): boolean
+		return brain_dump() ~= nil
+	end)
+	ui.effect(function()
+		if has_brain_dump:get() and keys_to_brain_dump then
+			keys_to_brain_dump = false
+			ui.after(0, function()
+				if alive then
+					M.focus_composer()
+				end
 			end)
 		end
 	end)
