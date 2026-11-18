@@ -7,8 +7,9 @@
  *   GET /store/v1/plugins/:id                    → PluginDetail
  *   GET /store/v1/plugins/:id/versions?cursor&limit → { versions, total, next_cursor?, prev_cursor? }
  *   GET /store/v1/plugins/:id/versions/:version  → VersionInfo
- *   GET /store/v1/categories                     → { categories: [{ id, name, count }] }
- *   GET /store/v1/stats                          → { plugins, verified }
+ *   GET /store/v1/categories?top                 → { categories: [{ id, name, count, top? }] }
+ *   GET /store/v1/keywords?category&limit        → { keywords: [{ keyword, count }] }
+ *   GET /store/v1/stats                          → { plugins, verified, new_7d }
  *   GET /store/v1/takedowns?after=<seq>          → { events, head, reset? }
  *
  * Every listed plugin is in the catalog the moment it is published; a
@@ -27,7 +28,8 @@
 import type { Env } from "../env";
 import { userDirectoryStub } from "../user-directory";
 import { foldUsername } from "../username";
-import { LIST_TTL, cacheKey, throughCache } from "./cache";
+import { LIST_TTL, cacheKey, cachedValue, throughCache } from "./cache";
+import { hasCredentials } from "./principal";
 import { authorCard, authorsOf, packageUrl, permissionsOf, pluginCard, versionInfo } from "./cards";
 import { LISTED, PUBLIC_STATUSES, type PluginRow, type VersionRow, parseList, pluginRow, publicVersion } from "./db";
 import { answer, fail, notFound } from "./http";
@@ -142,7 +144,12 @@ export const firstPageKeys = (categories: readonly string[]): string[] => {
 
 /** The cache keys of a plugin's versions' first page and one version. */
 export const STATS_KEY = cacheKey(["stats"]);
+/** The categories with their counts and each one's most installed plugins
+ * (as many as `top` may ask for): one cached value every `?top` reads. */
 export const CATEGORIES_KEY = cacheKey(["categories"]);
+/** The most used keywords, of all listed plugins or of one category's (as
+ * many as `limit` may ask for): one cached value each. */
+export const keywordsKey = (category: string | undefined): string => cacheKey(["keywords"], { category });
 /** The take-down feed's answer for a device at `after` (none: one that
  * starts afresh). */
 export const takedownsKey = (after: number | undefined): string => cacheKey(["takedowns"], { after: after === undefined ? undefined : String(after) });
@@ -342,22 +349,98 @@ const oneVersion = async (db: D1Database, id: string, version: string): Promise<
 /** Each category with the number of listed plugins in it: exactly the set
  * its list shows. Counted when read (nothing to keep in step), cached and
  * purged with the lists. */
-const categories = async (db: D1Database): Promise<Response> => {
-  const counts = new Map(
-    (
-      await db
-        .prepare(`SELECT c.category, COUNT(*) AS n FROM plugin_categories c JOIN plugins p ON p.id = c.plugin_id WHERE ${LISTED} GROUP BY c.category`)
-        .all<{ category: string; n: number }>()
-    ).results.map((r) => [r.category, r.n])
-  );
-  return answer({ categories: CATEGORIES.map((c) => ({ ...c, count: counts.get(c.id) ?? 0 })) }, 200, publicCache(LIST_TTL));
+const MAX_TOP = 4;
+const MAX_KEYWORDS_SHOWN = 24;
+const DAY_MS = 86_400_000;
+
+/** A small count from `p.get(name)`: digits only, `min` to `max`; the
+ * default when absent; undefined when it isn't one. */
+const countParam = (p: URLSearchParams, name: string, min: number, max: number, fallback: number | undefined): number | undefined | null => {
+  const raw = p.get(name);
+  if (raw === null) return fallback;
+  if (!/^[0-9]{1,3}$/.test(raw)) return null;
+  const n = Number(raw);
+  return n >= min && n <= max ? n : null;
 };
 
-/** The store's totals: listed plugins, and those whose newest version is
- * verified (what `?verified=1` lists). */
+/** An answer from a cached value, public unless the request carries
+ * credentials (cachedValue reads afresh for them). */
+const fromValue = (request: Request, value: unknown): Response =>
+  answer(value, 200, hasCredentials(request) ? "private, no-store" : publicCache(LIST_TTL));
+
+interface CategoryEntry {
+  readonly id: string;
+  readonly name: string;
+  readonly count: number;
+  readonly top: readonly ReturnType<typeof pluginCard>[];
+}
+
+/** Each category: how many listed plugins it has, and its `MAX_TOP` most
+ * installed, in the order and set `?category=<id>&sort=popular` lists. */
+const categoryEntries = async (env: Env, db: D1Database): Promise<CategoryEntry[]> => {
+  const [counted, ranked] = await db.batch<unknown>([
+    db.prepare(`SELECT c.category, COUNT(*) AS n FROM plugin_categories c JOIN plugins p ON p.id = c.plugin_id WHERE ${LISTED} GROUP BY c.category`),
+    db
+      .prepare(
+        `SELECT * FROM (
+           SELECT c.category AS top_category, p.*,
+             ROW_NUMBER() OVER (PARTITION BY c.category ORDER BY COALESCE(${SORT_KEY.popular.expr}, 0) DESC, p.seq DESC) AS top_rank
+           FROM plugin_categories c JOIN plugins p ON p.id = c.plugin_id WHERE ${LISTED}
+         ) WHERE top_rank <= ? ORDER BY top_category, top_rank`
+      )
+      .bind(MAX_TOP)
+  ]);
+  const counts = new Map((counted!.results as { category: string; n: number }[]).map((r) => [r.category, r.n]));
+  const rows = ranked!.results as (PluginRow & { top_category: string })[];
+  const authors = await authorsOf(env, rows.map((r) => r.owner_id));
+  return CATEGORIES.map((c) => ({
+    ...c,
+    count: counts.get(c.id) ?? 0,
+    top: rows.filter((r) => r.top_category === c.id).map((r) => pluginCard(r, authorCard(authors[r.owner_id]!)))
+  }));
+};
+
+/** `GET /store/v1/categories[?top=1..4]`: each category with its count,
+ * and with `top`, its most installed plugins as cards. */
+const categories = async (request: Request, env: Env, db: D1Database, url: URL): Promise<Response> => {
+  const top = countParam(url.searchParams, "top", 1, MAX_TOP, undefined);
+  if (top === null) return fail(400, "bad_request", `top is 1 to ${MAX_TOP}.`);
+  const entries = (await cachedValue(request, CATEGORIES_KEY, LIST_TTL, () => categoryEntries(env, db)))!;
+  return fromValue(request, { categories: entries.map(({ top: cards, ...c }) => (top === undefined ? c : { ...c, top: cards.slice(0, top) })) });
+};
+
+/** `GET /store/v1/keywords[?category&limit=1..24]`: the keywords listed
+ * plugins use most (of one category's, with `category`), most used first,
+ * ties by keyword. */
+const keywords = async (request: Request, db: D1Database, url: URL): Promise<Response> => {
+  const category = url.searchParams.get("category") ?? undefined;
+  if (category !== undefined && !isCategory(category)) return fail(400, "bad_request", "That isn't a category.");
+  const limit = countParam(url.searchParams, "limit", 1, MAX_KEYWORDS_SHOWN, MAX_KEYWORDS_SHOWN);
+  if (limit === null || limit === undefined) return fail(400, "bad_request", `limit is 1 to ${MAX_KEYWORDS_SHOWN}.`);
+  const all = (await cachedValue(request, keywordsKey(category), LIST_TTL, async () =>
+    (
+      await db
+        .prepare(
+          `SELECT k.keyword, COUNT(*) AS count FROM plugin_keywords k JOIN plugins p ON p.id = k.plugin_id
+             ${category ? "JOIN plugin_categories c ON c.plugin_id = p.id AND c.category = ?" : ""}
+           WHERE ${LISTED} GROUP BY k.keyword ORDER BY count DESC, k.keyword ASC LIMIT ?`
+        )
+        .bind(...(category ? [category] : []), MAX_KEYWORDS_SHOWN)
+        .all<{ keyword: string; count: number }>()
+    ).results
+  ))!;
+  return fromValue(request, { keywords: all.slice(0, limit) });
+};
+
+/** The store's totals: listed plugins, those whose newest version is
+ * verified (what `?verified=1` lists), and those first listed in the last
+ * seven days. */
 const stats = async (db: D1Database): Promise<Response> => {
-  const row = await db.prepare(`SELECT COUNT(*) AS plugins, COALESCE(SUM(p.verified), 0) AS verified FROM plugins p WHERE ${LISTED}`).first<{ plugins: number; verified: number }>();
-  return answer({ plugins: row?.plugins ?? 0, verified: row?.verified ?? 0 }, 200, publicCache(LIST_TTL));
+  const row = await db
+    .prepare(`SELECT COUNT(*) AS plugins, COALESCE(SUM(p.verified), 0) AS verified, COALESCE(SUM(p.listed_at >= ?), 0) AS new_7d FROM plugins p WHERE ${LISTED}`)
+    .bind(Date.now() - 7 * DAY_MS)
+    .first<{ plugins: number; verified: number; new_7d: number }>();
+  return answer({ plugins: row?.plugins ?? 0, verified: row?.verified ?? 0, new_7d: row?.new_7d ?? 0 }, 200, publicCache(LIST_TTL));
 };
 
 /**
@@ -397,7 +480,8 @@ const takedowns = async (db: D1Database, after: number | undefined): Promise<Res
 
 export const handleCatalog = async (request: Request, env: Env, db: D1Database, url: URL, parts: readonly string[]): Promise<Response | undefined> => {
   if (request.method !== "GET" && request.method !== "HEAD") return undefined;
-  if (parts.length === 3 && parts[2] === "categories") return throughCache(request, CATEGORIES_KEY, LIST_TTL, () => categories(db));
+  if (parts.length === 3 && parts[2] === "categories") return categories(request, env, db, url);
+  if (parts.length === 3 && parts[2] === "keywords") return keywords(request, db, url);
   if (parts.length === 3 && parts[2] === "stats") return throughCache(request, STATS_KEY, LIST_TTL, () => stats(db));
   if (parts.length === 3 && parts[2] === "takedowns") {
     // Read once: the key and the answer are the same `after`. Anything but

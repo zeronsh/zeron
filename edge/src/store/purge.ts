@@ -14,7 +14,7 @@
  * suspend, restore of a plugin, transfer and release.
  */
 import { cacheKey, purge } from "./cache";
-import { CATEGORIES_KEY, STATS_KEY, firstPageKeys, takedownsKey, versionKey, versionsPageKey } from "./catalog";
+import { CATEGORIES_KEY, STATS_KEY, firstPageKeys, keywordsKey, takedownsKey, versionKey, versionsPageKey } from "./catalog";
 import { CATEGORIES } from "./listing";
 import { versionFileKeys } from "./serve";
 
@@ -30,6 +30,8 @@ export const purgeCatalog = async (db: D1Database, id: string, versions: readonl
     ...firstPageKeys(CATEGORIES.map((c) => c.id)),
     STATS_KEY,
     CATEGORIES_KEY,
+    keywordsKey(undefined),
+    ...CATEGORIES.map((c) => keywordsKey(c.id)),
     ...files.flat()
   ]);
 };

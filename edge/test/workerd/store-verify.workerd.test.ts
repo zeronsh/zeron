@@ -273,20 +273,80 @@ describe("the catalog's mark, filters and totals", () => {
       const cats = (await json<{ categories: { id: string; count: number }[] }>(await call(undefined, "GET", "/store/v1/categories"))).categories;
       return cats.find((c) => c.id === "productivity")!.count;
     };
-    const stats = async () => json<{ plugins: number; verified: number }>(await call(undefined, "GET", "/store/v1/stats"));
+    const stats = async () => json<{ plugins: number; verified: number; new_7d: number }>(await call(undefined, "GET", "/store/v1/stats"));
     const listedCount = async () => (await json<{ total: number }>(await call(undefined, "GET", "/store/v1/plugins?category=productivity"))).total;
     const before = { category: await count(), stats: await stats() };
     expect(before.category).toBe(await listedCount());
     const id = uniqueId();
     await published(a, id, "1.0.0");
     expect(await count()).toBe(before.category + 1);
-    expect(await stats()).toEqual({ plugins: before.stats.plugins + 1, verified: before.stats.verified });
+    // (First listed now: new in the last seven days too.)
+    expect(await stats()).toEqual({ plugins: before.stats.plugins + 1, verified: before.stats.verified, new_7d: before.stats.new_7d + 1 });
     expect((await verify(id, "1.0.0")).status).toBe(200);
-    expect(await stats()).toEqual({ plugins: before.stats.plugins + 1, verified: before.stats.verified + 1 });
+    expect(await stats()).toEqual({ plugins: before.stats.plugins + 1, verified: before.stats.verified + 1, new_7d: before.stats.new_7d + 1 });
     expect((await takeDown(id, "1.0.0")).status).toBe(200);
     expect(await count()).toBe(before.category);
     expect(await stats()).toEqual(before.stats);
     expect(await count()).toBe(await listedCount());
+  });
+
+  it("counts as new only plugins first listed in the last seven days", async () => {
+    const a = await author();
+    const id = uniqueId();
+    await published(a, id, "1.0.0");
+    const fresh = (await json<{ new_7d: number }>(await call(a.userId, "GET", "/store/v1/stats"))).new_7d;
+    await env.STORE_DB.prepare("UPDATE plugins SET listed_at = ? WHERE id = ?").bind(Date.now() - 8 * 86_400_000, id).run();
+    expect((await json<{ new_7d: number }>(await call(a.userId, "GET", "/store/v1/stats"))).new_7d).toBe(fresh - 1);
+  });
+
+  it("gives each category its most installed plugins, as the popular list has them, and the most used keywords", async () => {
+    const a = await author();
+    const word = `kw${uniqueId().slice(-8)}`.replace(/-/g, "");
+    const ids: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const id = uniqueId();
+      ids.push(id);
+      await published(a, id, "1.0.0", { manifest: { categories: ["git"], keywords: i < 2 ? [word, `${word}b`] : [word] } });
+    }
+    // Installs put the last first: two people install it, one the first.
+    for (const [id, people] of [[ids[2]!, 2], [ids[0]!, 1]] as const) {
+      for (let n = 0; n < people; n++) expect((await call((await author()).userId, "POST", `/store/v1/plugins/${id}/installed`)).status).toBe(200);
+    }
+    // (Read with a session: both fresh, so they compare as of one moment.)
+    const top = (await json<{ categories: { id: string; count: number; top: { id: string }[] }[] }>(await call(a.userId, "GET", "/store/v1/categories?top=4"))).categories;
+    const popular = (await json<{ items: { id: string }[]; total: number }>(await call(a.userId, "GET", "/store/v1/plugins?category=git&sort=popular&limit=4"))).items;
+    const git = top.find((c) => c.id === "git")!;
+    expect(git.top.map((c) => c.id)).toEqual(popular.map((c) => c.id));
+    expect(git.top.length).toBeLessThanOrEqual(4);
+    expect(git.top[0]).toMatchObject({ id: expect.any(String), name: expect.any(String), version: expect.any(String), verified: expect.any(Boolean) });
+    // Fewer asked, fewer given; none asked, none given.
+    const one = (await json<{ categories: { id: string; top: unknown[] }[] }>(await call(undefined, "GET", "/store/v1/categories?top=1"))).categories;
+    expect(one.every((c) => c.top.length <= 1)).toBe(true);
+    const plain = (await json<{ categories: Record<string, unknown>[] }>(await call(undefined, "GET", "/store/v1/categories"))).categories;
+    expect(plain.every((c) => !("top" in c))).toBe(true);
+    // Keywords: the most used first, ties by keyword, within a category or not.
+    const kw = (await json<{ keywords: { keyword: string; count: number }[] }>(await call(a.userId, "GET", "/store/v1/keywords?category=git&limit=24"))).keywords;
+    const mine = kw.filter((k) => k.keyword.startsWith(word));
+    expect(mine).toEqual([{ keyword: word, count: 3 }, { keyword: `${word}b`, count: 2 }]);
+    for (let i = 1; i < kw.length; i++) expect(kw[i - 1]!.count > kw[i]!.count || (kw[i - 1]!.count === kw[i]!.count && kw[i - 1]!.keyword < kw[i]!.keyword)).toBe(true);
+    // Each count is the list's: `?keyword=` lists as many.
+    for (const k of mine) {
+      expect((await json<{ total: number }>(await call(a.userId, "GET", `/store/v1/plugins?category=git&keyword=${k.keyword}`))).total).toBe(k.count);
+    }
+    expect((await json<{ keywords: unknown[] }>(await call(undefined, "GET", "/store/v1/keywords?limit=1"))).keywords).toHaveLength(1);
+    // Taken down: in none of them.
+    expect((await takeDown(ids[2]!, "1.0.0")).status).toBe(200);
+    const after = (await json<{ categories: { id: string; top: { id: string }[] }[] }>(await call(undefined, "GET", "/store/v1/categories?top=4"))).categories;
+    expect(after.find((c) => c.id === "git")!.top.map((c) => c.id)).not.toContain(ids[2]);
+    expect((await json<{ keywords: { keyword: string; count: number }[] }>(await call(undefined, "GET", "/store/v1/keywords?category=git"))).keywords.find((k) => k.keyword === word)?.count).toBe(2);
+    // A bad top, limit or category: 400, and nothing cached for it.
+    for (const path of [
+      "/store/v1/categories?top=0", "/store/v1/categories?top=5", "/store/v1/categories?top=1e0", "/store/v1/categories?top=",
+      "/store/v1/keywords?limit=0", "/store/v1/keywords?limit=25", "/store/v1/keywords?limit=%201", "/store/v1/keywords?category=games"
+    ]) {
+      const res = await call(undefined, "GET", path);
+      expect([res.status, (await json(res)).error, res.headers.get("cache-control")], path).toEqual([400, "bad_request", "no-store"]);
+    }
   });
 
   it("pages every listed version, and answers one by name", async () => {
