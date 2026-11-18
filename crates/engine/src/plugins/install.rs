@@ -88,6 +88,11 @@ pub mod reason {
     pub const NO_SOURCE: &str = "no_source";
     /// Its `engines.zeron` leaves this Zeron out (or can't be read).
     pub const INCOMPATIBLE: &str = "incompatible";
+    /// Two of its paths are one file (or a file and a folder) on a disk that
+    /// folds names (macOS's, Windows'), or one is the manifest's name or
+    /// `.source.json` there: refused before anything is written, on every
+    /// disk alike.
+    pub const PATHS_COLLIDE: &str = "paths_collide";
     /// Replacing an installed store plugin's code is the person's to do
     /// (an update they click), never an agent's.
     pub const NEEDS_PERSON: &str = "needs_person";
@@ -232,10 +237,47 @@ fn keep_path(rel: &str) -> bool {
     package::plain_path(rel) && rel != MANIFEST_FILE
 }
 
+/// The first two of `files`' paths that would be one file, or a file where
+/// the other needs a folder, on a disk that folds names as macOS's and
+/// Windows' do (Unicode NFC, then case and the rest: `listing::fold_path`,
+/// the store's own rule), the manifest's name and `.source.json` taken
+/// already: in words naming both.
+fn colliding(files: &BTreeMap<String, Vec<u8>>) -> Option<String> {
+    use super::listing::fold_path;
+    // Each folded path: the path it was, as written.
+    let mut taken: BTreeMap<String, &str> = [MANIFEST_FILE, SOURCE_FILE].into_iter().map(|rel| (fold_path(rel), rel)).collect();
+    // Each folded folder: a path inside it, as written.
+    let mut folders: BTreeMap<String, &str> = BTreeMap::new();
+    for rel in files.keys() {
+        let folded = fold_path(rel);
+        if let Some(other) = taken.get(&folded) {
+            return Some(format!("{rel:?} and {other:?} are one file on macOS and Windows"));
+        }
+        if let Some(inside) = folders.get(&folded) {
+            return Some(format!("{rel:?} is a file where {inside:?} needs a folder of that name on macOS and Windows"));
+        }
+        let parts: Vec<&str> = folded.split('/').collect();
+        for end in 1..parts.len() {
+            let folder = parts[..end].join("/");
+            if let Some(file) = taken.get(&folder) {
+                return Some(format!("{file:?} is a file where {rel:?} needs a folder of that name on macOS and Windows"));
+            }
+            folders.entry(folder).or_insert(rel);
+        }
+        taken.insert(folded, rel);
+    }
+    None
+}
+
 /// The plugin package `raw`, verified (signature over every file, a
 /// manifest Zeron can run, an id it can be installed under).
 pub fn parse(raw: Vec<u8>) -> Result<Package, String> {
     let verified = package::parse(raw, FORMAT, signing::PAYLOAD_PREFIX, keep_path, &WORDS)?;
+    // What the store refuses at publish (amendment 31), refused here too,
+    // before anything is written; the scan after writing stays the backstop.
+    if let Some(words) = colliding(&verified.files) {
+        return Err(failure(reason::PATHS_COLLIDE, format!("{words}, so it can't be installed")));
+    }
     let manifest = Manifest::from_value(verified.manifest.clone())?;
     if let Some(problem) = manifest.problem() {
         return Err(problem.to_owned());
@@ -1208,13 +1250,48 @@ pub(crate) mod tests {
         assert_eq!(reason_of(&forbidden), Some(reason::DOWNLOAD_FAILED), "{forbidden}");
     }
 
-    /// Two paths that are one file on a disk that ignores case (macOS's,
-    /// Windows'): sideloading doesn't refuse such a package (the store's
-    /// rules do: `listing::fold_path`), so what installing it ends as is
-    /// pinned here. On a disk that keeps case, both files, as signed. On
-    /// one that ignores it, the second write lands on the first, the folder
-    /// no longer matches what was signed, and it's refused before it takes
-    /// its place: nothing is installed and nothing is left half-way.
+    /// A package whose paths fold alike, its signature good: refused as it's
+    /// read, naming the two paths, the same on every disk.
+    #[test]
+    fn paths_that_fold_alike_are_refused_before_anything_is_written() {
+        let (key, _) = SigningKey::generate().unwrap();
+        let with = |extra: &[&str]| {
+            let mut files = BTreeMap::new();
+            files.insert("init.luau".to_string(), b"return 1".to_vec());
+            for rel in extra {
+                files.insert((*rel).to_string(), b"x".to_vec());
+            }
+            let manifest = key.sign_manifest(&json!({ "id": "focus", "name": "F", "version": "1.0.0", "entry": "init.luau" }), &package::hashes(&files));
+            parse(package::pack(FORMAT, &manifest, &files).unwrap())
+        };
+        let refused = |extra: &[&str], names: &[&str]| {
+            let error = with(extra).unwrap_err();
+            assert_eq!(reason_of(&error), Some(reason::PATHS_COLLIDE), "{extra:?}: {error}");
+            for name in names {
+                assert!(error.contains(&format!("{name:?}")), "{extra:?}: {error} names {name}");
+            }
+        };
+        // Case, and Unicode's two spellings of one name (NFC and NFD).
+        refused(&["ui/Badge.luau", "ui/badge.luau"], &["ui/Badge.luau", "ui/badge.luau"]);
+        refused(&["caf\u{e9}.luau", "cafe\u{301}.luau"], &["caf\u{e9}.luau", "cafe\u{301}.luau"]);
+        // A file and a folder that fold alike, in either order.
+        refused(&["ui", "UI/x.luau"], &["ui", "UI/x.luau"]);
+        refused(&["Ui", "ui/x.luau"], &["Ui", "ui/x.luau"]);
+        // The manifest's own name, folded (a long s folds to s), and as a folder.
+        refused(&["Zeron-Plugin.json"], &["Zeron-Plugin.json", "zeron-plugin.json"]);
+        refused(&["zeron-plugin.j\u{17f}on"], &["zeron-plugin.j\u{17f}on", "zeron-plugin.json"]);
+        refused(&["ZERON-PLUGIN.JSON/x.luau"], &["zeron-plugin.json", "ZERON-PLUGIN.JSON/x.luau"]);
+        // (Trailing dots and spaces, which Windows drops, are no file Zeron writes at all.)
+        assert_eq!(reason_of(&with(&["a.luau", "a.luau."]).unwrap_err()), Some(reason::BAD_FILE));
+        // Names that only look alike are anyone's.
+        with(&["ui/badge.luau", "ui/badge2.luau", "uix/a.luau", "zeron-plugin.json.md"]).unwrap();
+    }
+
+    /// The backstop under that refusal: a package whose paths collide that
+    /// got past it (built here without `parse`). On a disk that ignores
+    /// case, the second write lands on the first, the folder no longer
+    /// matches what was signed, and it's refused before it takes its place:
+    /// nothing is installed and nothing is left half-way.
     #[test]
     fn a_package_whose_paths_collide_on_a_case_blind_disk_never_half_installs() {
         let dir = tempfile::tempdir().unwrap();
@@ -1227,7 +1304,10 @@ pub(crate) mod tests {
         files.insert("ui/Badge.luau".to_string(), b"return 'upper'".to_vec());
         files.insert("ui/badge.luau".to_string(), b"return 'lower'".to_vec());
         let manifest = key.sign_manifest(&json!({ "id": "focus", "name": "F", "version": "1.0.0", "entry": "init.luau" }), &package::hashes(&files));
-        let package = parse(package::pack(FORMAT, &manifest, &files).unwrap()).unwrap();
+        assert_eq!(reason_of(&parse(package::pack(FORMAT, &manifest, &files).unwrap()).unwrap_err()), Some(reason::PATHS_COLLIDE));
+        let manifest = Manifest::from_value(manifest).unwrap();
+        let hash = signing::content_hash(&manifest, &package::hashes(&files));
+        let package = Package { manifest, key: key.public(), files, hash };
         let source = Source { kind: "file".into(), url: None, path: None, git_ref: None, commit: None, version: String::new(), installed_at: 0, store: None };
         let installed = install(dir.path(), &package, &source, None);
         if ignores_case {

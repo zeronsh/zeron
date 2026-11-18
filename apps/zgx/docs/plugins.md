@@ -785,6 +785,7 @@ Every refusal from the store, or from Zeron about the store, reads `"<word>: <wo
 |---|---|
 | `not_a_package`, `unsigned`, `tampered`, `bad_signature`, `too_big`, `bad_file` | the package itself is refused, as from a file |
 | `incompatible` | its `engines.zeron` leaves this Zeron out |
+| `paths_collide` | two of its paths are one file on macOS and Windows (case, Unicode spelling, trailing dots), a file sits where another needs a folder of that name, or a path is the manifest's name there: refused as it's read, on every disk |
 | `needs_person` | an agent tried to install over a plugin installed from the store: updating it (and taking its pre-releases) is the person's, in Zeron's window |
 | `other_signer`, `not_newer`, `different_plugin`, `up_to_date`, `no_source` | installing or updating, as from any source |
 | `store_unreachable` | the store didn't answer (offline, or busy): what's installed keeps running |
