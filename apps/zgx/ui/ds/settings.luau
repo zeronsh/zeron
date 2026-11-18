@@ -1141,6 +1141,7 @@ local GivingRow = ui.component(function(p: { props: RowProps }): Node
 	local function step(): number
 		local m = widths:get()
 		if m.text < 0 or m.stays <= 0 then
+			print(string.format("zeron-zgx: giving row %s: at %d, not measured yet (text %.1f stays %.1f)", tostring(control.text(props.label) or "?"), current, m.text, m.stays))
 			return current
 		end
 		local gap, beside, cap = n("space.3", 12), n("space.4", 16), n("zeron.settings.control", math.huge)
@@ -1167,6 +1168,7 @@ local GivingRow = ui.component(function(p: { props: RowProps }): Node
 		local function sentence_beside(t: number): boolean
 			return act == 0 or text(t) - inset - act >= NAME_LEAST
 		end
+		print(string.format("zeron-zgx: giving row %s: at %d, text %.1f detail %.1f gives %.1f stays %.1f act %.1f box0 %.1f box1 %.1f -> text(0) %.1f text(1) %.1f inset %.1f", tostring(control.text(props.label) or "?"), current, m.text, m.detail, m.gives, m.stays, m.act, m.box0, m.box1, text(0), text(1), inset))
 		if text(0) >= NAME_LEAST and sentence_beside(0) then
 			return 0
 		end
