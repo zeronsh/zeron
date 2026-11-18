@@ -387,7 +387,8 @@ const SPECS: Spec[] = [
   {
     // A plugin whose words try to break the page.
     id: "xss-probe",
-    name: `<img src=x onerror="alert('name')"> Probe`,
+    // (With a right-to-left override in it, which must reorder nothing but itself.)
+    name: `<img src=x onerror="alert('name')"> Probe \u202Eevil`,
     summary: `"><script>alert('summary')</script> A plugin whose every word tries to escape the page.`,
     icon: "flame",
     categories: ["utilities"],
@@ -486,6 +487,18 @@ Footnote[^x"><script>].
     owner: "user_mo",
     age: 1,
     history: [{ version: "0.1.0", status: "pending", ago: 1 }],
+    status: "unlisted",
+  },
+  {
+    // Only a rejected version: nothing listed or in review, so its id goes back in 90 days.
+    id: "old-idea",
+    name: "Old idea",
+    summary: "Tried once.",
+    homepage: "https://user:pw@example.com/",
+    categories: ["utilities"],
+    owner: "user_kai",
+    age: 20,
+    history: [{ version: "0.1.0", status: "rejected", ago: 20, review: { state: "rejected", reason: "broken", message: "It doesn't start.", decided_at: NOW - 19 * DAY } }],
     status: "unlisted",
   },
   {

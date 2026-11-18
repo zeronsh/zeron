@@ -70,6 +70,13 @@ const short = (key: string) => `${key.slice(0, 8)}…${key.slice(-4)}`;
             )}
           </header>
 
+          {!plugin.versions.some((v) => v.status === "approved" || v.status === "yanked" || v.status === "pending") && (
+            <p class="unused">
+              <Glyph name="info-circle" size={16} />
+              <span>No version of it is listed or in review. Its id stays yours for 90 days after your last submission; after that, anyone can take it.</span>
+            </p>
+          )}
+
           <section aria-labelledby="versions-heading" class="block">
             <h2 id="versions-heading">Versions</h2>
             <div class="table-wrap">
@@ -235,6 +242,8 @@ const short = (key: string) => `${key.slice(0, 8)}…${key.slice(-4)}`;
   .see:hover { background: var(--secondary-hover); }
 
   .block { display: grid; gap: 14px; }
+  .unused { display: flex; gap: 10px; max-width: 44em; padding: 12px 14px; font-size: 14px; line-height: 1.5; color: var(--tone-info); background: var(--tone-info-wash); border-radius: var(--radius-lg); }
+  .unused :global(.glyph) { margin-top: 2px; }
   .block h2 { font-size: 17px; font-weight: 600; letter-spacing: -0.015em; }
   .explain { max-width: 44em; font-size: 14.5px; line-height: 1.6; color: var(--text-2); }
   .none { font-size: 14px; color: var(--text-3); }

@@ -21,6 +21,23 @@ export function pictureUrl(id: string, version: string | null, value: string | n
   return version ? fileUrl(id, version, value) : null;
 }
 
+/**
+ * An author's link (a homepage, a repository) as it may be followed: parsed,
+ * https only, no user or password in it, given back as the parsed address.
+ * Null for anything else. The author's text itself is never put in an href.
+ */
+export function httpsUrl(value: string | null | undefined): string | null {
+  // (As the store holds them, amendment 31: no backslash, whitespace or control character.)
+  // eslint-disable-next-line no-control-regex
+  if (!value || /[\\\s\u0000-\u001f\u007f]/.test(value)) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password && url.hostname ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
 /** A member's card (served by the edge on this host). */
 export const memberUrl = (username: string) => `/@${encodeURIComponent(username)}`;
 

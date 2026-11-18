@@ -89,6 +89,12 @@
   --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
 }
 
+/* An author's words can't turn the page's around: every inline element is
+   an isolate, so a right-to-left override in a name, a summary, a keyword,
+   a file name or a tool's words reorders nothing outside the element that
+   holds it. (Each paragraph and cell is its own paragraph already.) */
+.store :where(a, span, b, strong, em, i, code, bdi, time, label, summary, figcaption, dt, dd, li, td, th, p, h1, h2, h3, h4) { unicode-bidi: isolate; }
+
 /* A page's parts are laid out on grids; none grows past its column to fit
    a long line or a wide table: those scroll in their own boxes. */
 .store :where(.wrap > *, .block, .panel, .col, .main, .side, .viewer, .readme, .table-wrap, .changes, .change) { min-width: 0; }

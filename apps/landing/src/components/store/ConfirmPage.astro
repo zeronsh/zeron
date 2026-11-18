@@ -11,7 +11,9 @@ interface Props {
   tone?: "primary" | "danger";
   back: string;
 }
-const { title, action, csrf, confirm, tone, back } = Astro.props;
+import { unbidi } from "../../lib/store/format.ts";
+const { action, csrf, confirm, tone, back } = Astro.props;
+const title = unbidi(Astro.props.title);
 ---
 
 <section class="ask" aria-labelledby="ask-title">

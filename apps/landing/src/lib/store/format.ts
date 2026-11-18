@@ -75,3 +75,12 @@ export function compatibility(range: string | undefined | null): string {
   if (m) return `Zeron ${m[1]} or later, before ${m[2]}`;
   return `Zeron ${r}`;
 }
+
+/**
+ * Words an author wrote, for a place that can't hold an element of their
+ * own (a page's title, a dialog's, a label read aloud): without the
+ * controls that reorder text (U+061C, U+200E/F, U+202A–202E, U+2066–2069),
+ * so they can't turn the words around them. Everywhere else an author's
+ * words sit in an element that isolates them (store.css).
+ */
+export const unbidi = (text: string) => text.replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "");

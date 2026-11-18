@@ -11,7 +11,9 @@ interface Props {
   /** "danger": what it asks can't be undone. */
   tone?: "default" | "danger";
 }
-const { id, title, tone = "default" } = Astro.props;
+import { unbidi } from "../../lib/store/format.ts";
+const { id, tone = "default" } = Astro.props;
+const title = unbidi(Astro.props.title);
 ---
 
 <dialog id={id} class:list={["dialog", tone]} aria-labelledby={`${id}-title`} closedby="any">

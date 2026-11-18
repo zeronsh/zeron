@@ -4,6 +4,7 @@
 // the landing page's own scripts after it; the store's pages add none.)
 import { Font } from "astro:assets";
 import { SITE } from "../../data/site.ts";
+import { unbidi } from "../../lib/store/format.ts";
 
 interface Props {
   title: string;
@@ -13,7 +14,10 @@ interface Props {
   /** The page's own address when its query is part of it (a category); else its path. */
   canonical?: string;
 }
-const { title, description, noindex = false } = Astro.props;
+const { noindex = false } = Astro.props;
+// (A plugin's name may be in either: never controls that reorder the rest.)
+const title = unbidi(Astro.props.title);
+const description = unbidi(Astro.props.description);
 const canonical = new URL(Astro.props.canonical ?? Astro.url.pathname, Astro.site);
 const image = new URL("/assets/og.png", Astro.site);
 ---

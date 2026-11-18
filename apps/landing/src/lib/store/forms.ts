@@ -44,6 +44,8 @@ export function flashFor(result: Result<unknown>, done: FlashWord): FlashWord {
       return "expired";
     case "bad_request":
       return "bad_input";
+    case "rate_limited":
+      return "slow_down";
     default:
       return "failed";
   }

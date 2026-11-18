@@ -13,7 +13,7 @@ import { ago, bytes, compatibility, count, date } from "../../lib/store/format.t
 import { pluginTag, publicPage } from "../../lib/store/http.ts";
 import { renderedOnce } from "../../lib/store/rendered.ts";
 import { isPluginId, isPrerelease } from "../../lib/store/names.ts";
-import { fileUrl, memberUrl, pictureUrl, pluginUrl } from "../../lib/store/urls.ts";
+import { fileUrl, httpsUrl, memberUrl, pictureUrl, pluginUrl } from "../../lib/store/urls.ts";
 import type { VersionInfo } from "../../lib/store/types.ts";
 
 export const prerender = false;
@@ -47,6 +47,9 @@ if (plugin) {
   const all = (versionsResult.ok ? versionsResult.data.versions : plugin.versions).slice(0, NOTED + 20);
   versions = await Promise.all(all.map(async (v, i) => ({ ...v, html: v.notes && i < NOTED ? await renderedOnce(origin, plugin.id, v.version, "notes", v.notes, { file: file(v.version), demote: true }) : null })));
 }
+// An author's links, parsed: https only, never the text as given.
+const homepage = httpsUrl(plugin?.homepage);
+const repository = httpsUrl(plugin?.repository);
 const categories = categoriesResult.ok ? new Map(categoriesResult.data.categories.map((c) => [c.id, c.name])) : new Map<string, string>();
 const RECENT = 4;
 
@@ -175,13 +178,13 @@ const structured = plugin
                     ))}
                   </ul>
                 )}
-                {(plugin.homepage || plugin.repository) && (
+                {(homepage || repository) && (
                   <ul class="out" role="list">
-                    {plugin.homepage && /^https:\/\//.test(plugin.homepage) && (
-                      <li><a href={plugin.homepage} rel="nofollow noopener ugc"><Glyph name="global" size={14} />Website<Glyph name="arrow-up-right" size={12} /></a></li>
+                    {homepage && (
+                      <li><a href={homepage} rel="nofollow noopener ugc"><Glyph name="global" size={14} />Website<Glyph name="arrow-up-right" size={12} /></a></li>
                     )}
-                    {plugin.repository && /^https:\/\//.test(plugin.repository) && (
-                      <li><a href={plugin.repository} rel="nofollow noopener ugc"><Glyph name="file-code" size={14} />Source code<Glyph name="arrow-up-right" size={12} /></a></li>
+                    {repository && (
+                      <li><a href={repository} rel="nofollow noopener ugc"><Glyph name="file-code" size={14} />Source code<Glyph name="arrow-up-right" size={12} /></a></li>
                     )}
                   </ul>
                 )}

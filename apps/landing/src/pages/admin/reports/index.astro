@@ -59,7 +59,7 @@ const resumedNote = resumed(Astro.url, "note", 500);
             <li class="report">
               <div class="head">
                 <a class="plugin" href={`/admin/plugins/${encodeURIComponent(r.plugin.id)}`}>
-                  {r.plugin.name ?? r.plugin.id}
+                  <span>{r.plugin.name ?? r.plugin.id}</span>
                   {r.version && <span class="num"> {r.version}</span>}
                 </a>
                 <Badge tone={r.reason === "malware" ? "danger" : "warning"} size="sm">{reasonWords(r.reason)}</Badge>

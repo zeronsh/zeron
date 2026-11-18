@@ -129,7 +129,7 @@ const failing = checks.filter((c) => c.level === "fail").length;
             <PluginTile id={s.plugin.id} name={name} icon={s.version.icon ?? s.plugin.icon} version={version} size={64} />
             <div class="identity">
               <h1>
-                {name} <span class="v num">{version}</span>
+                <span>{name}</span> <span class="v num">{version}</span>
               </h1>
               <p class="meta">
                 {state && <Badge tone={state.tone} size="sm">{state.label}</Badge>}

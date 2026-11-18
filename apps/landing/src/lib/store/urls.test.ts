@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { appUrl, fileUrl, signInUrl, sitePath } from "./urls.ts";
+import { appUrl, fileUrl, httpsUrl, signInUrl, sitePath } from "./urls.ts";
 
 test.each([
   ["/account", "/account"],
@@ -29,3 +29,16 @@ test("the app's link names only a store id", () => {
 test("a file's address encodes each part", () => {
   expect(fileUrl("a", "1.0.0", "shots/a b.png")).toBe("/plugins/a/files/1.0.0/shots/a%20b.png");
 });
+
+test.each([
+  ["https://example.com", "https://example.com/"],
+  ["https://example.com/a%20b", "https://example.com/a%20b"],
+  ["https://example.com/a b", null],
+  ["http://example.com", null],
+  ["javascript:alert(1)", null],
+  ["https://user:pw@example.com", null],
+  ["https:\\\\evil.example", null],
+  ["  https://example.com", null],
+  ["", null],
+  [null, null],
+])("an author's link %j is followed as %j", (input, out) => expect(httpsUrl(input)).toBe(out));

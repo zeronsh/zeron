@@ -160,6 +160,22 @@ describe("a plugin's page", () => {
     expect(JSON.parse(ld).name).toContain("<img");
   });
 
+  test("a name with a right-to-left override can't turn the page's words around", async () => {
+    const { body } = await html("/plugins/xss-probe");
+    const title = /<title>([^<]*)<\/title>/.exec(body)![1]!;
+    expect(title).not.toMatch(/[\u202a-\u202e\u2066-\u2069]/);
+    expect(title).toContain("a plugin for Zeron");
+    expect(/<meta name="description" content="([^"]*)"/.exec(body)![1]).not.toMatch(/[\u202a-\u202e\u2066-\u2069]/);
+    // (In the page, it stays as written, in an element of its own.)
+    expect(body).toMatch(/<h1[^>]*>[^<]*\u202eevil<\/h1>/);
+  });
+
+  test("an author's links are followed only as parsed https addresses", async () => {
+    const { body } = await html("/plugins/focus-timer");
+    expect(body).toContain('href="https://example.com/focus-timer" rel="nofollow noopener ugc"');
+    expect(body).toContain('href="https://github.com/ada/focus-timer" rel="nofollow noopener ugc"');
+  });
+
   test("unknown, unlisted and malformed ids are the site's 404", async () => {
     const notFound = readFileSync(new URL("../dist/client/404.html", import.meta.url), "utf8");
     for (const path of ["/plugins/no-such-plugin", "/plugins/voice-memos", "/plugins/crypto-ticker", "/plugins/Bad_Id", "/plugins/a%2Fb"]) {
@@ -284,6 +300,12 @@ describe("signed-in pages", () => {
     expect(response.headers.getSetCookie().join("\n")).toMatch(/__Host-zeron_session=[\w-]+; Path=\/; HttpOnly; Secure; SameSite=Lax/);
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(response.headers.get("cloudflare-cdn-cache-control") ?? "").not.toMatch(/public/);
+  });
+
+  test("an id with nothing listed or in review says it goes back after 90 days", async () => {
+    const kai = await site.signIn("user_kai");
+    expect((await html("/account/plugins/old-idea", kai)).body).toContain("Its id stays yours for 90 days after your last submission");
+    expect((await html("/account/plugins/pr-radar", kai)).body).not.toContain("90 days");
   });
 
   test("someone else's plugin is the 404 page", async () => {

@@ -126,6 +126,18 @@ describe("a package's pictures can't run", () => {
   });
 });
 
+describe("an author's words stay in their place", () => {
+  test("a right-to-left override in a name reorders nothing after it", async () => {
+    const { page, context } = await open("/admin/plugins/xss-probe/1.1.0", { as: "user_grace" });
+    try {
+      const [name, version] = await Promise.all([page.locator("h1 > span").first().boundingBox(), page.locator("h1 > .v").boundingBox()]);
+      expect(version!.x).toBeGreaterThanOrEqual(name!.x + name!.width - 1);
+    } finally {
+      await context.close();
+    }
+  });
+});
+
 describe("by keyboard", () => {
   test("a destructive action asks in a dialog that starts on Cancel and closes on Escape, back where it was", async () => {
     const { page, context } = await open("/account/plugins/session-badges", { as: "user_ada" });

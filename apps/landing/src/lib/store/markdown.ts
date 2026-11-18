@@ -46,8 +46,8 @@ const PREFIX = "user-content-";
 /** Code past this many characters is shown plain: highlighting is a nicety. */
 const HIGHLIGHT_LIMIT = 40_000;
 
-/** Links a person may follow out of a README. */
-const LINK_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
+/** Links a person may follow out of a README: https, and mail. */
+const LINK_PROTOCOLS = new Set(["https:", "mailto:"]);
 
 const REL = ["nofollow", "noopener", "ugc"];
 
@@ -115,7 +115,7 @@ const sanitize = unified().use(rehypeSanitize, SCHEMA).freeze();
 const stringify = unified().use(rehypeStringify, { allowDangerousHtml: false }).freeze();
 
 /** Bump when the HTML this makes changes, so kept renderings are made again. */
-export const RENDERER = 3;
+export const RENDERER = 4;
 
 /**
  * Emphasis delimiters (`*`, `_`, `~`) outside code a document may hold and
@@ -197,7 +197,8 @@ export function target(reference: string): Target {
     } catch {
       return { kind: "none" };
     }
-    return LINK_PROTOCOLS.has(url.protocol) ? { kind: "web", url: url.href } : { kind: "none" };
+    // (Parsed, and given back as the parsed address: never the author's text. No credentials.)
+    return LINK_PROTOCOLS.has(url.protocol) && !url.username && !url.password ? { kind: "web", url: url.href } : { kind: "none" };
   }
   const path = resolvePackagePath(value);
   return path ? { kind: "file", path } : { kind: "none" };
@@ -239,7 +240,7 @@ function picture(node: Element, options: RenderOptions): ElementContent[] {
     if (typeof node.properties.title === "string") out.properties.title = node.properties.title;
     return [out];
   }
-  if (to.kind === "web" && to.url.startsWith("http")) {
+  if (to.kind === "web" && to.url.startsWith("https:")) {
     // Not what was reviewed, so not shown: a link to it, named by its words.
     return [{ type: "element", tagName: "a", properties: { href: to.url }, children: [{ type: "text", value: alt || to.url }] }];
   }

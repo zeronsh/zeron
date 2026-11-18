@@ -22,6 +22,7 @@ export const FLASH = {
   id_in_use: { message: "That id is in use: move its plugin to the account instead.", tone: "danger" },
   report_sent: { message: "Thanks. Your report reached the people who review plugins.", tone: "success" },
   failed: { message: "That didn't work. Try again in a moment.", tone: "danger" },
+  slow_down: { message: "That's a lot of changes at once. Wait a minute, then try again.", tone: "danger" },
   conflict: { message: "It changed while you were looking. Here it is now.", tone: "danger" },
   not_allowed: { message: "You can't do that here.", tone: "danger" },
   expired: { message: "The page was open too long. Try again.", tone: "danger" },

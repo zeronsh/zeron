@@ -70,7 +70,7 @@ const REASONS: Record<(typeof REPORT_REASONS)[number], { label: string; about: s
           <header class="who">
             {plugin && <PluginTile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size={40} />}
             <div>
-              <h1 id="report-heading">Report {plugin?.name ?? id}</h1>
+              <h1 id="report-heading">Report <span>{plugin?.name ?? id}</span></h1>
               {plugin && <p class="by">by @{plugin.author.username}</p>}
             </div>
           </header>

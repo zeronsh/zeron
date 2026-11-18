@@ -116,6 +116,11 @@ describe("what a README may hold", () => {
     expect(render("See [the guide](docs/guide.md).")).toBe("<p>See the guide.</p>");
   });
 
+  test("only https (and mail) is a link: http, and a link with a password in it, are words", () => {
+    expect(render("[plain](http://example.com/) [creds](https://user:pw@example.com/)")).toBe("<p>plain creds</p>");
+    expect(render("![tracker](http://example.com/p.png)")).toBe("<p>tracker</p>");
+  });
+
   test("protocol-relative links are https", () => {
     expect(render("[x](//example.com/p)")).toContain('href="https://example.com/p"');
   });
@@ -187,6 +192,7 @@ describe("references", () => {
     ["/a.png", { kind: "none" }],
     ["#Usage", { kind: "anchor", id: "Usage" }],
     ["https://x.example/", { kind: "web", url: "https://x.example/" }],
+    ["http://x.example/", { kind: "none" }],
     ["//x.example/p", { kind: "web", url: "https://x.example/p" }],
     ["HTTPS://X.EXAMPLE", { kind: "web", url: "https://x.example/" }],
     ["javascript:alert(1)", { kind: "none" }],
