@@ -116,6 +116,10 @@ export const versionInfo = (v: VersionRow, full = false) => ({
   notes: v.notes,
   engines: v.engines_zeron === null ? null : { zeron: v.engines_zeron },
   yanked: v.status === "yanked",
+  // Why it takes no new installs (public): its author's yank, or a newer
+  // version listed before anyone verified it, named.
+  yanked_by: v.status === "yanked" ? v.yanked_by : null,
+  ...(v.status === "yanked" && v.yanked_by === "superseded" ? { superseded_by: v.superseded_by } : {}),
   prerelease: v.is_release === 0,
   key: v.signer_key,
   hash: v.content_hash,

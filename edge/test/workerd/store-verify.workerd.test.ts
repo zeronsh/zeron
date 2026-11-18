@@ -51,6 +51,31 @@ describe("an unverified version stops taking new installs when a newer one is pu
     expect(card).toMatchObject({ version: "1.2.0", verified: false, verified_version: "1.1.0" });
   });
 
+  it("says why a version takes no new installs, to the public: its author, or the version that replaced it", async () => {
+    const a = await author();
+    const id = uniqueId();
+    await published(a, id, "1.0.0");
+    await published(a, id, "1.1.0");
+    // (Verified, so 1.3.0 leaves its author's yank as it is.)
+    await listed(a, id, "1.2.0");
+    expect((await call(a.userId, "POST", `/store/v1/plugins/${id}/versions/1.2.0/yank`)).status).toBe(200);
+    await published(a, id, "1.3.0");
+    const why = (v: Record<string, unknown>) => [v.version, v.yanked, v.yanked_by, v.superseded_by];
+    const expected = [
+      ["1.3.0", false, null, undefined],
+      ["1.2.0", true, "author", undefined],
+      ["1.1.0", true, "superseded", "1.2.0"],
+      ["1.0.0", true, "superseded", "1.1.0"]
+    ];
+    // The versions list, the detail's first page and each version by name.
+    expect((await json<{ versions: Record<string, unknown>[] }>(await call(undefined, "GET", `/store/v1/plugins/${id}/versions`))).versions.map(why)).toEqual(expected);
+    expect((await json<{ versions: Record<string, unknown>[] }>(await call(undefined, "GET", `/store/v1/plugins/${id}`))).versions.map(why)).toEqual(expected);
+    for (const row of expected) expect(why(await json(await call(undefined, "GET", `/store/v1/plugins/${id}/versions/${row[0]}`)))).toEqual(row);
+    // Verified, a superseded version takes installs again: no reason shown.
+    expect((await verify(id, "1.1.0")).status).toBe(200);
+    expect(why(await json(await call(undefined, "GET", `/store/v1/plugins/${id}/versions/1.1.0`)))).toEqual(["1.1.0", false, null, undefined]);
+  });
+
   it("a pre-release supersedes older pre-releases only, so a release line and a pre-release line each keep one undecided row", async () => {
     const a = await author();
     const id = uniqueId();

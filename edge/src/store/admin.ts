@@ -277,7 +277,6 @@ const versionView = async (env: Env, db: D1Database, id: string, versionText: st
     plugin: ownerCard(plugin, v, authorCard(owner)),
     version: {
       ...versionInfo(v, true),
-      yanked_by: v.status === "yanked" ? v.yanked_by : null,
       superseded: v.superseded_at !== null ? { at: v.superseded_at, by: v.superseded_by } : null,
       name: v.name, summary: v.summary, icon: v.icon, readme: v.readme, homepage: v.homepage, repository: v.repository, license: v.license,
       categories: parseStoredJson(v.categories, []), keywords: parseStoredJson(v.keywords, []), screenshots: parseStoredJson(v.screenshots, [])
@@ -616,7 +615,6 @@ const adminPlugin = async (env: Env, db: D1Database, id: string): Promise<Respon
     owner: { id: owner.id, username: owner.username, user_id: plugin.owner_id, created_at: owner.createdAt },
     versions: versions.results.map((v) => ({
       ...versionInfo(v, true),
-      yanked_by: v.status === "yanked" ? v.yanked_by : null,
       superseded: v.superseded_at !== null ? { at: v.superseded_at, by: v.superseded_by } : null
     })),
     // As /admin/reports gives them.

@@ -67,7 +67,6 @@ export const handleMyPlugins = async (request: Request, env: Env, db: D1Database
           // A deploy key's name is its account's: a version a former owner
           // published shows none to whoever owns the plugin now.
           ...(v.publisher_id === publisher.userId ? {} : { deploy_key: null }),
-          yanked_by: v.status === "yanked" ? v.yanked_by : null,
           superseded: v.superseded_at !== null ? { at: v.superseded_at, by: v.superseded_by } : null
         }))
       };
