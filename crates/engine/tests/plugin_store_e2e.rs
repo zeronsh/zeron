@@ -725,12 +725,35 @@ async fn the_plugin_store_end_to_end() {
     let status = res.status().as_u16();
     let answer: Value = res.json().await.unwrap_or_default();
     e.check("8", "a report on a web session without the site's Origin is refused", status == 403 && answer["error"] == "bad_csrf", format!("{status} {answer}"));
+    // (Someone who isn't staff, on the site: the route's own session check.)
+    let carol = e.web_sign_in("user_carol").await;
+    let web_report = async |csrf: &str| {
+        let cookie = carol.cookie.lock().unwrap().clone();
+        let res = e
+            .http
+            .post(format!("{}{reports}", e.site))
+            .header("cookie", cookie)
+            .header("origin", &e.site_origin)
+            .header("x-csrf-token", csrf)
+            .json(&json!({ "reason": "misleading", "text": "Not what it says." }))
+            .send()
+            .await
+            .unwrap();
+        if let Some(newer) = cookie_of(&res, SESSION) {
+            *carol.cookie.lock().unwrap() = newer;
+        }
+        (res.status().as_u16(), res.json::<Value>().await.unwrap_or_default())
+    };
+    let (status, answer) = web_report("not-the-session-token").await;
+    e.check("8", "a report on a web session with a wrong CSRF token is refused", status == 403 && answer["error"] == "bad_csrf", format!("{status} {answer}"));
+    let (status, carols) = web_report(&carol.csrf.clone()).await;
+    e.check("8", "with the session's token, it lands", status == 201 && carols["status"] == "open" && carols["id"] != first["id"], format!("{status} {carols}"));
     let id = first["id"].as_i64().unwrap_or_default();
     let (status, body) = e.admin(&staff, &format!("reports/{id}/resolve"), json!({ "resolution": "dismissed", "note": "Works here." })).await;
     e.check("8", "staff resolve it", status == 200, &body);
     let (_, open) = e.admin_get(&staff, "reports?status=open").await;
-    let gone = open["reports"].as_array().is_some_and(|r| r.iter().all(|r| r["id"] != first["id"]));
-    e.check("8", "and it leaves the open reports", gone, &open);
+    let gone = open["reports"].as_array().is_some_and(|r| r.iter().all(|r| r["id"] != first["id"]) && r.iter().any(|r| r["id"] == carols["id"]));
+    e.check("8", "and it leaves the open reports (the other one stays)", gone, &open);
 
     drop((laptop, desk, phone, bob_laptop));
     let failures = e.failures.lock().unwrap().clone();
