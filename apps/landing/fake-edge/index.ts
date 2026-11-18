@@ -23,6 +23,8 @@ const state = {
   sessions: new Map<string, { user: string; csrf: string; rotated?: boolean }>(),
   /** The queue as a screenshot asks for it (POST /_fake/queue, astro dev's /_dev/queue): empty, or this long. Null: as it is. */
   queueAs: null as null | "empty" | number,
+  /** A version answered with another's record (POST /_fake/loose?on=1): a page must say only what the record names. */
+  loose: false,
   /** The store as if it were down (POST /_fake/down?on=1): every /store/v1 read and write a 503. */
   down: false,
   /** A plugin shown with no pictures (POST /_fake/bare?id=…, empty for none): Featured with one that has none. */
@@ -762,6 +764,10 @@ async function route(request: Request): Promise<Response> {
     return json({ bare: state.bare });
   }
   // (One plugin's version under another name, everywhere it is named: POST /_fake/rename?id=…&from=…&to=…. A version the app's link can't carry, without a fixture of its own.)
+  if (parts[0] === "_fake" && parts[1] === "loose" && method === "POST") {
+    state.loose = url.searchParams.get("on") === "1";
+    return json({ loose: state.loose });
+  }
   if (parts[0] === "_fake" && parts[1] === "rename" && method === "POST") {
     const [id, from, to] = ["id", "from", "to"].map((k) => url.searchParams.get(k) ?? "");
     const i = state.plugins.findIndex((p) => p.id === id);
@@ -820,7 +826,7 @@ async function route(request: Request): Promise<Response> {
   }
   if (a === "plugins" && b && c === "versions" && d && e === undefined && method === "GET") {
     const p = state.plugins.find((x) => x.id === b);
-    const v = p && listed(p) ? p.versions.find((x) => x.version === d && shown(x)) : undefined;
+    const v = p && listed(p) ? p.versions.find((x) => (state.loose || x.version === d) && shown(x)) : undefined;
     return v ? json(versionInfo(v, false), 200, { "cache-control": "public, max-age=30" }) : notFound();
   }
   if (a === "plugins" && b && c === "files" && d && parts.length > 6 && method === "GET") return file(request, b, d, parts.slice(6).join("/"));
