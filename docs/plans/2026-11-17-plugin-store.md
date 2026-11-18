@@ -500,3 +500,22 @@ Agreed after the plan was first written. Newest last.
     peaks near 72 MB, 0.28 s CPU; hostile shapes stay under 72 MB). Inside a
     package the store also bounds the manifest JSON to 1 MiB and 100,000
     values. Sideloaded packages keep the engine's 50 MB.
+35. **Shapes settled when the site met the edge**:
+    - `icon` and `screenshots` are package-relative paths everywhere (cards,
+      details, submissions); a client fetches them through the files route
+      with the version. Never a URL.
+    - Every time in every store answer is ms since the epoch, account ages
+      included (`owner.created_at`, `publisher.created_at`).
+    - A submission's `plugin` is a `PluginCard`. The admin plugin view uses
+      the `/me/plugins` listing words (`listed | unlisted | suspended`) and
+      gives its reports in the same shape as `/admin/reports`.
+    - Queue items are `{ plugin { id, name }, version, status, prerelease,
+      submitted_at, publisher { id, username } | null, base?, new_asks,
+      checks { ok, warn, fail } }`.
+    - `permissions_diff` carries `tools_changed`, and descriptions in
+      `tools_added`, as the app's own diff does.
+    - Report statuses are `open | actioned | dismissed`. Audit actions are
+      `version.*`, `plugin.*`, `report.*` with `detail` an object.
+    - Pictures the store serves are PNG, JPEG and the icon SVG.
+    - A cookie-authenticated write with a bad token or Origin is `403
+      bad_csrf` on every route, reports included.
