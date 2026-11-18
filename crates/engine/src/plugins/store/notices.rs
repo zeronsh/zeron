@@ -80,9 +80,12 @@ impl PublishNotice {
 /// Look over `mine` (`/me/plugins`' answer) after `seen`: what's been
 /// looked over now, and a notice for each publish after `seen` that this
 /// device (`own_key`, its signing key) didn't send. The first look notices
-/// nothing: what was there before a device looked isn't news to it.
+/// nothing: what was there before a device looked isn't news to it. A
+/// version another account published (a plugin transferred in, by its
+/// former owner: its `publisher_id` isn't the account's) isn't noticed.
 /// `clean` makes the store's words safe to keep and show.
 pub fn look(seen: Option<&Seen>, mine: &Value, own_key: &str, clean: impl Fn(&str) -> String) -> (Seen, Vec<PublishNotice>) {
+    let account = mine["publisher_id"].as_str();
     let versions = mine["plugins"].as_array().into_iter().flatten().flat_map(|plugin| {
         let id = plugin["id"].as_str().unwrap_or_default();
         let name = plugin["name"].as_str();
@@ -103,6 +106,11 @@ pub fn look(seen: Option<&Seen>, mine: &Value, own_key: &str, clean: impl Fn(&st
             continue;
         }
         seen.versions.insert(key.clone(), at);
+        if let (Some(account), Some(by)) = (account, v["publisher_id"].as_str())
+            && by != account
+        {
+            continue;
+        }
         let via = v["via"].as_str().unwrap_or_default();
         let from_here = via == "device" && v["key"].as_str() == Some(own_key);
         if from_here {
@@ -181,6 +189,17 @@ mod tests {
         // Once per version.
         let (_, again) = look(Some(&seen), &now, "MINE", same);
         assert!(again.is_empty());
+    }
+
+    #[test]
+    fn a_version_another_account_published_is_no_notice() {
+        let (seen, _) = look(None, &json!({ "publisher_id": "pub_a", "plugins": [] }), "MINE", same);
+        let mut now = mine(&[("moved", "1.0.0", 100, "device", "OTHER", None), ("moved", "1.1.0", 200, "device", "OTHER", None)]);
+        now["publisher_id"] = json!("pub_a");
+        now["plugins"][0]["versions"][0]["publisher_id"] = json!("pub_former");
+        now["plugins"][0]["versions"][1]["publisher_id"] = json!("pub_a");
+        let (_, notices) = look(Some(&seen), &now, "MINE", same);
+        assert_eq!(notices.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["moved@1.1.0"]);
     }
 
     #[test]

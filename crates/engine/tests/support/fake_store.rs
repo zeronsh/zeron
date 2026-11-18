@@ -696,10 +696,10 @@ impl FakeStore {
                         }).collect::<Vec<_>>(),
                     })))
                     .collect();
-                let mut reply = json!({ "plugins": plugins });
-                if let Some(p) = state.plugins.values().find(|p| p.owner == owner) {
-                    reply["publisher_id"] = json!(publisher_id(p.account()));
-                }
+                // (The account's publisher id, plugins or none, as the edge's
+                // ff4af27bc.)
+                let account = state.plugins.values().find(|p| p.owner == owner).map_or(owner.as_str(), |p| p.account());
+                let reply = json!({ "plugins": plugins, "publisher_id": publisher_id(account) });
                 json_reply(200, reply)
             }
             ("GET", ["store", "v1", "me", "keys"]) => {
