@@ -23,7 +23,8 @@
 --                             link; it waits for the consent window unless it's
 --                             signed as yours
 --   state.update(id, device?)  a promise of the same: the update found for it
---   state.check_updates(device?)  a promise: every installed plugin's source
+--   state.check_updates(device?, id?)  a promise: every installed plugin's
+--                           (or plugin `id`'s alone) source
 --                             checked
 --
 -- Plugins are per device. Settings → Plugins can show another of your
@@ -141,8 +142,8 @@ function M.update(id: string, device: string?): any
 	return ui.call("plugins.update", if device then { id = id, device = device } else id)
 end
 
-function M.check_updates(device: string?): any
-	return ui.call("plugins.check_updates", if device then { device = device } else nil)
+function M.check_updates(device: string?, id: string?): any
+	return ui.call("plugins.check_updates", if device or id then { device = device, id = id } else nil)
 end
 
 function M.open_folder(id: string?)

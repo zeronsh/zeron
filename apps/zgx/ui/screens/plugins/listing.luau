@@ -574,6 +574,10 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 					return updating:get()
 				end,
 				on_click = function()
+					-- (Its offer read again as the sheet opens: whether the
+					-- store has verified it, as of now, not of the last
+					-- check hours ago.)
+					state.check_updates(here.device(), id)
 					update_open:set(true)
 				end,
 				function(): string

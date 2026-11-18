@@ -120,7 +120,12 @@ end
 s.review = function(id: string)
 	stub.note(`review:{id}`)
 end
-s.check_updates = function(): any
+-- (One plugin's, as its update sheet opens, noted; the page's own check
+-- of them all isn't the store's.)
+s.check_updates = function(_device: string?, id: string?): any
+	if id then
+		stub.note(`check_updates:{id}`)
+	end
 	return nil
 end
 ui.command {

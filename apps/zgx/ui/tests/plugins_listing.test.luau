@@ -703,6 +703,8 @@ test("an update the store hasn't verified warns where the person decides, says t
 	settle(app)
 	app:click('#store-offer >> role:button "Update to 1.3.0"')
 	settle(app)
+	-- (Its offer read again as the sheet opens.)
+	expect(calls(app)).to_contain("check_updates:focus-timer")
 	local warning = app:tree("role:dialog >> .store-update-unverified")
 	expect(warning).to_contain("Zeron hasn't verified 1.3.0 yet.")
 	expect(warning).to_contain("The version you have, 1.2.0, was verified.")

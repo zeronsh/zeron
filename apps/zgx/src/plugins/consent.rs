@@ -129,20 +129,30 @@ fn version_reads(version: &str) -> bool {
     (1..=VERSION).contains(&version.len()) && version.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-'))
 }
 
-/// The newest verified version the store has, which an unverified store
-/// version waiting here could take instead: as the engine's item names it
-/// (an update's offer, or its source for a first install), never as a
-/// script says it. With its store id.
-fn verified_alternative(item: &Json) -> Option<(String, String)> {
+/// The store id of an unverified store version waiting here, else nil.
+fn unverified_store(item: &Json) -> Option<String> {
     if item["source"]["kind"].as_str() != Some("store") || item["source"]["verified"].as_bool() != Some(false) {
         return None;
     }
-    let store = item["source"]["id"].as_str().filter(|s| !s.is_empty())?;
-    let alt = item["update"]["verified_alternative"]["version"]
-        .as_str()
-        .or_else(|| item["source"]["verified_alternative"]["version"].as_str())
-        .filter(|v| version_reads(v))?;
-    Some((store.to_string(), alt.to_string()))
+    item["source"]["id"].as_str().filter(|s| !s.is_empty()).map(str::to_owned)
+}
+
+/// The newest verified version the store has, which an unverified store
+/// version waiting here could take instead, as the engine's item names it
+/// (an update's offer). With its store id. (A first install's isn't on the
+/// item: `newest_verified` asks the store.)
+fn verified_alternative(item: &Json) -> Option<(String, String)> {
+    let store = unverified_store(item)?;
+    let alt = item["update"]["verified_alternative"]["version"].as_str().filter(|v| version_reads(v))?;
+    Some((store, alt.to_string()))
+}
+
+/// The store's newest verified version of `store`, asked now (this visit's
+/// answer, never kept), on `device`'s engine: none when there's none, it
+/// doesn't read as a version, or it's the version waiting (`waiting`).
+async fn newest_verified(device: Option<&str>, store: &str, waiting: &str) -> Option<String> {
+    let reply = engine::get().call("StorePlugin", remote::addressed(device, json!({ "id": store }))).await.ok()?;
+    reply["verified_version"].as_str().filter(|v| version_reads(v) && *v != waiting).map(str::to_owned)
 }
 
 fn bounded(item: &Json) -> Json {
@@ -372,12 +382,25 @@ fn host(cx: &mut WindowContext, bridge: &Rc<Bridge>, id: Rc<RefCell<String>>, on
         let Some(item) = showable(&b, &id, &on).filter(|item| *ids.borrow() == id && item.hash() == hash && item.status() == "pending") else {
             return;
         };
-        let Some((store, version)) = verified_alternative(&item.json) else { return };
-        eprintln!("zeron-zgx: plugins: {id} {version} installed in place of an unverified version");
+        let Some(store) = unverified_store(&item.json) else { return };
+        let offered = verified_alternative(&item.json).map(|(_, v)| v);
+        let waiting = item.json["version"].as_str().unwrap_or("").to_owned();
         out.set(shown(&b, &id, &on, true, None));
         let (weak, window, out) = (Rc::downgrade(&b), window.clone(), out.clone());
         engine::get().spawn(async move {
             let device = on.as_ref().map(|(d, _)| d.as_str());
+            // (An update's offer names it; a first install's, the store now.)
+            let version = match offered {
+                Some(v) => Some(v),
+                None => newest_verified(device, &store, &waiting).await,
+            };
+            let Some(version) = version else {
+                if let Some(b) = weak.upgrade() {
+                    out.set(shown(&b, &id, &on, false, None));
+                }
+                return;
+            };
+            eprintln!("zeron-zgx: plugins: {id} {version} installed in place of an unverified version");
             let params = remote::addressed(device, json!({ "store": store, "version": version }));
             let result = engine::get().call("InstallPlugin", params).await;
             let Some(b) = weak.upgrade() else { return };
@@ -393,6 +416,28 @@ fn host(cx: &mut WindowContext, bridge: &Rc<Bridge>, id: Rc<RefCell<String>>, on
                 }
             }
         });
+    });
+    // The newest verified version, for the sheet to offer: asked of the
+    // store as it shows a first install's (an update's offer names its own),
+    // the sheet shown alone. Pressing it asks again (above): never what the
+    // script says.
+    let (weak, ons, ids) = (Rc::downgrade(bridge), on.clone(), id.clone());
+    host.async_action("plugins.store_verified", move |arg| {
+        let (weak, ons, ids) = (weak.clone(), ons.clone(), ids.clone());
+        async move {
+            let b = weak.upgrade().ok_or("gone")?;
+            let id = arg.field("id").map(text).unwrap_or_default();
+            let hash = arg.field("hash").map(text).unwrap_or_default();
+            let on = ons.borrow().clone();
+            let item = showable(&b, &id, &on).filter(|item| *ids.borrow() == id && item.hash() == hash && item.status() == "pending").ok_or("gone")?;
+            let store = unverified_store(&item.json).ok_or("gone")?;
+            let waiting = item.json["version"].as_str().unwrap_or("").to_owned();
+            let device = on.as_ref().map(|(d, _)| d.clone());
+            Ok(match newest_verified(device.as_deref(), &store, &waiting).await {
+                Some(v) => Value::from(v.as_str()),
+                None => Value::Nil,
+            })
+        }
     });
     let (weak, out, ons, ids) = (Rc::downgrade(bridge), shared.clone(), on.clone(), id.clone());
     host.action("plugins.reinstall", move |arg| {
@@ -507,8 +552,10 @@ mod tests {
     fn the_verified_version_instead_is_the_engine_s_and_reads_as_a_version() {
         let update = json!({ "source": { "kind": "store", "id": "focus-timer", "verified": false }, "update": { "verified_alternative": { "version": "1.2.1" } } });
         assert_eq!(verified_alternative(&update), Some(("focus-timer".into(), "1.2.1".into())));
-        let first = json!({ "source": { "kind": "store", "id": "fresh", "verified": false, "verified_alternative": { "version": "0.1.0" } } });
-        assert_eq!(verified_alternative(&first), Some(("fresh".into(), "0.1.0".into())));
+        // (A first install's isn't on the item: the store is asked.)
+        let first = json!({ "source": { "kind": "store", "id": "fresh", "verified": false } });
+        assert_eq!(verified_alternative(&first), None);
+        assert_eq!(unverified_store(&first), Some("fresh".into()));
         let verified = json!({ "source": { "kind": "store", "id": "fresh", "verified": true, "verified_alternative": { "version": "0.1.0" } } });
         assert_eq!(verified_alternative(&verified), None);
         let git = json!({ "source": { "kind": "git", "verified": false }, "update": { "verified_alternative": { "version": "1.0.0" } } });

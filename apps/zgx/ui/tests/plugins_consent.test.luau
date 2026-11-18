@@ -336,12 +336,13 @@ test("a store version the store hasn't verified asks even for nothing new, warns
 	expect(app:state("calls")).to_contain("install_verified:timer:timer-13")
 end)
 
-test("a first install the store hasn't verified warns, with nothing to offer instead when there's no verified version", function()
+test("a first install the store hasn't verified warns, offering the store's newest verified version, asked as it shows", function()
 	local app = open()
 	app:command("fresh")
 	app:frames(20)
 	expect(app:tree("#consent-unverified")).to_contain("Zeron hasn't verified 0.1.0 yet.")
-	expect(app:has("#consent-unverified >> role:button")).to_be(false)
+	expect(app:state("calls")).to_contain("store_verified:fresh")
+	expect(app:has('#consent-unverified >> role:button "Install 0.0.9 instead"')).to_be(true)
 	-- What it asks, as any first install's.
 	expect(app:tree("#consent")).never.to_contain("nothing beyond what you allowed")
 	-- And one from elsewhere, or verified, says nothing of it.

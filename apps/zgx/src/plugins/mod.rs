@@ -3608,7 +3608,12 @@ impl Bridge {
             move |arg| {
                 let me = me.clone();
                 async move {
-                    let reply = call_on(&me, remote::device_of(&arg), "CheckPluginUpdates", json!({})).await?;
+                    // (One plugin's, fresh for a sheet about to show it: `id`.)
+                    let mut params = json!({});
+                    if let Some(id) = arg.field("id").map(text).and_then(|i| catalog::store_id(&i)) {
+                        params["id"] = json!(id);
+                    }
+                    let reply = call_on(&me, remote::device_of(&arg), "CheckPluginUpdates", params).await?;
                     Ok(json_value(&reply))
                 }
             }

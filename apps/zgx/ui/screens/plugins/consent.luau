@@ -32,6 +32,13 @@ local M = {}
 -- How long a sheet shows before Allow takes a click.
 M.ARM_MS = 800
 
+-- The store's newest verified version of a first install waiting (the
+-- window's host asks the store, for the sheet shown): a promise of it, or
+-- of nil.
+function M.store_verified(id: string, hash: string): any
+	return ui.call("plugins.store_verified", { id = id, hash = hash })
+end
+
 local consent = ui.shared("consent", { busy = false } :: any)
 
 local function item(): any
@@ -116,15 +123,23 @@ local Sheet = ui.component(function(props: { it: any, elsewhere: string? }): Nod
 	-- engine names one. It asks even when it asks nothing new.
 	local store_source = type(it.source) == "table" and it.source.kind == "store"
 	local unverified = store_source and it.source.verified == false
-	local function verified_alternative(): string?
-		local alt = (type(it.update) == "table" and type(it.update.verified_alternative) == "table" and it.update.verified_alternative.version)
-			or (type(it.source.verified_alternative) == "table" and it.source.verified_alternative.version)
-		return if type(alt) == "string" and alt ~= "" then alt else nil
-	end
-	local alternative = if unverified then verified_alternative() else nil
+	-- The newest verified one: an update's offer names it; a first
+	-- install's, the window's host asks the store as the sheet shows (this
+	-- visit's answer), and pressing it asks again: never this script's word.
+	local offered = if unverified and type(it.update) == "table" and type(it.update.verified_alternative) == "table" then it.update.verified_alternative.version else nil
+	local alternative = ui.use_state(if type(offered) == "string" and offered ~= "" then offered else nil :: string?)
+	ui.on_mount(function()
+		if unverified and alternative:peek() == nil and not elsewhere then
+			M.store_verified(it.id, it.hash):after(function(v: any)
+				if type(v) == "string" and v ~= "" then
+					alternative:set(v)
+				end
+			end, function(_: any) end)
+		end
+	end)
 	-- Asking again for nothing beyond what was allowed (an unverified
-	-- version always asks): said in one line.
-	local nothing_new = again and (it.ask == nil or #it.ask == 0)
+	-- version always asks): the engine says so; one line.
+	local nothing_new = it.nothing_new == true
 
 	local asks: Node
 	if nothing_new and #grew == 0 then
@@ -295,18 +310,23 @@ local Sheet = ui.component(function(props: { it: any, elsewhere: string? }): Nod
 					then ui.div {
 						id = "consent-unverified",
 						w_full = true,
-						ds.Callout {
-							tone = "warning",
-							title = ui.t("plugins.store.not_verified_yet", { version = v or "" }),
-							action = if alternative and not elsewhere
-								then {
-									label = ui.t("plugins.store.install_instead", { version = alternative }),
-									on_click = function()
-										ui.invoke("plugins.install_verified", { id = it.id, hash = it.hash })
-									end,
-								}
-								else nil,
-						},
+						-- (Keyed by the verified one offered: its action once known.)
+						ui.presence(function(): string
+							return alternative:get() or ""
+						end, function(alt: string): Node
+							return ds.Callout {
+								tone = "warning",
+								title = ui.t("plugins.store.not_verified_yet", { version = v or "" }),
+								action = if alt ~= "" and not elsewhere
+									then {
+										label = ui.t("plugins.store.install_instead", { version = alt }),
+										on_click = function()
+											ui.invoke("plugins.install_verified", { id = it.id, hash = it.hash })
+										end,
+									}
+									else nil,
+							}
+						end, { w_full = true }),
 					}
 					else nil,
 				if #grew > 0 then section(ui.t("plugins.consent.grew"), grew) else nil,
