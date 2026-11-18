@@ -1,0 +1,12 @@
+{
+	"title": "Private reactive regions",
+	"width": 480,
+	"height": 320,
+	"app_id": "private-reactive-regions",
+	"expose": {
+		"hooks": { "*": "override" }
+	},
+	"plugins": {
+		"reach": { "path": "plugins/reach", "allow": ["override:*"] }
+	}
+}

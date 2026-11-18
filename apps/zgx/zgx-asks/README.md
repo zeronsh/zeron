@@ -16,6 +16,7 @@ which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 | [windows-caption-buttons](windows-caption-buttons/ASK.md) | Windows' caption glyphs stay the system's light or dark (invisible on a light Zeron on a dark system), come from an icon font (tofu on Windows 10), disagree with their hit test when the window is zoomed, are fixed at 32 tall, and Maximise shows on a fixed-size window. |
 | [windows-popup-backdrop](windows-popup-backdrop/ASK.md) | A popup's glass on Windows blurs nothing: a wallpaper's dither shows sharp through the model picker. Zeron draws the menus' glass solid there meanwhile. |
 | [windows-transparency](windows-transparency/ASK.md) | Windows' Transparency effects aren't reported (`ui.prefers.reduced_transparency` is always false there). Zeron watches the registry meanwhile. |
+| [private-reactive-regions](private-reactive-regions/ASK.md) | A plugin can replace, or add beside, rows on another plugin's Settings page (and parts of Cloud and Billing): what a `ui.presence`, `ui.show` or `ui.each` builds inside a `hook = false` element isn't kept from plugins' targets. |
 
 ## Medium: users meet it now and then, or a feature waits on it
 
