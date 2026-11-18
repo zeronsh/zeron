@@ -66,6 +66,8 @@ export class PackageRefusal extends Error {
 
 export interface VerifiedPackage {
   readonly manifest: Manifest;
+  /** The signed manifest's canonical JSON (signature included). */
+  readonly manifestCanonical: string;
   /** The signer's public key, b64url without padding. */
   readonly key: string;
   /** Every file, by path, in path order: views of `blob`. */
@@ -285,6 +287,7 @@ export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTE
   if (!files.has(manifest.entry)) refuse("missing_entry", `Its entry file ${manifest.entry} is missing`);
   return {
     manifest,
+    manifestCanonical: canonicalJson(manifestValue),
     key: checked.valid,
     files,
     blob: blob.subarray(0, total),

@@ -33,6 +33,7 @@ CREATE INDEX plugins_updated ON plugins (updated_at DESC, seq DESC) WHERE listed
 CREATE INDEX plugins_new ON plugins (listed_at DESC, seq DESC) WHERE listed_version IS NOT NULL AND status = 'active';
 
 -- Every version ever submitted. A version belongs to its content for good.
+-- Its R2 objects are written before its row, so a row means they exist.
 CREATE TABLE versions (
   plugin_id TEXT NOT NULL REFERENCES plugins (id),
   version TEXT NOT NULL,                         -- as written (build metadata kept)
@@ -43,7 +44,6 @@ CREATE TABLE versions (
   is_release INTEGER NOT NULL CHECK (is_release IN (0, 1)),
   pre_key TEXT NOT NULL,                         -- semver.ts `preKey`
   status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'withdrawn', 'yanked', 'removed')),
-  stored INTEGER NOT NULL DEFAULT 0,             -- 1 once its files are in R2
   blocked INTEGER NOT NULL DEFAULT 0,
   block_reason TEXT,
   publisher_id TEXT NOT NULL,
@@ -81,10 +81,13 @@ CREATE INDEX versions_order ON versions (plugin_id, major, minor, patch, is_rele
 CREATE INDEX versions_queue ON versions (status, submitted_at);
 CREATE INDEX versions_publisher ON versions (publisher_id, submitted_at);
 
+-- Each file of a version: where its bytes start in the version's files
+-- object in R2 (files/<id>/<version>/<package sha256>.bin), and how many.
 CREATE TABLE version_files (
   plugin_id TEXT NOT NULL,
   version TEXT NOT NULL,
   path TEXT NOT NULL,
+  at INTEGER NOT NULL,
   bytes INTEGER NOT NULL,
   sha256 TEXT NOT NULL,
   kind TEXT NOT NULL CHECK (kind IN ('png', 'jpeg', 'svg', 'text', 'binary')),

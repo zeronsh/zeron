@@ -70,6 +70,13 @@
  *   GET  /c/:username, /@:username      — pre-bearer, a card's page (also routed from zeron.sh)
  *     (every public card route goes through publicCardGate: per-IP limit, one plain 503)
  *   GET|POST /username, GET /username/check — user bearer (claim, availability)
+ *
+ * Plugin store (store/routes.ts, docs/plans/2026-11-17-plugin-store.md):
+ *   GET  /store/v1/{categories,plugins,plugins/:id,plugins/:id/versions} — public, cached
+ *   GET  /store/v1/plugins/:id/versions/:version/package, …/files/:version/*path
+ *   POST /store/v1/updates                — batched update check
+ *   POST /store/v1/plugins/:id/versions   — publish (session or deploy key)
+ *   …    /store/v1/me/plugins, …/{withdraw,yank,unyank,installed,reports}, /store/v1/admin/*
  */
 import { authenticate } from "./auth";
 import { chatRoute } from "./chat-route";
@@ -107,6 +114,7 @@ import { handleOnboardingRoute } from "./onboarding-routes";
 import { handlePluginKeyRoute } from "./plugin-keys";
 import { handleVaultRoute } from "./vault-routes";
 import { handleUserDirectoryRoute, UserDirectory } from "./user-directory";
+import { handleStoreRoute } from "./store/routes";
 import installSh from "./install.sh";
 
 export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom, CloudAccount, CloudIndex, UserDirectory };
@@ -175,6 +183,10 @@ export default {
     if (usersRouted) return usersRouted;
     const cardRouted = await publicCardGate(request, env, url, () => handlePublicCardRoute(request, env, ctx, url));
     if (cardRouted) return cardRouted;
+    // ── the plugin store (store/routes.ts): public reads need no sign-in;
+    //    each other route asks store/principal.ts who the caller is ──────────
+    const storeRouted = await handleStoreRoute(request, env, url);
+    if (storeRouted) return storeRouted;
 
     const auth = await authenticate(env, request);
     if (!auth) return json({ error: "unauthenticated" }, 401);

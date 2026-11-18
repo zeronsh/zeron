@@ -24,6 +24,7 @@ import { handleVaultRoute } from "../../src/vault-routes";
 import { handleUserDirectoryRoute } from "../../src/user-directory";
 import { handleOnboardingRoute } from "../../src/onboarding-routes";
 import { handlePluginKeyRoute } from "../../src/plugin-keys";
+import { handleStoreRoute } from "../../src/store/routes";
 export { DeviceRoom } from "../../src/device-room";
 export { ChatRoom } from "../../src/chat-room";
 export { PreviewRoom } from "../../src/preview-room";
@@ -141,6 +142,8 @@ export default {
     if (users) return users;
     const card = await publicCardGate(request, env, url, () => handlePublicCardRoute(request, env, ctx, url));
     if (card) return card;
+    const store = await handleStoreRoute(request, env, url);
+    if (store) return store;
     const auth = await authenticate(env, request);
     if (!auth) return new Response("Unauthorized", { status: 401 });
     const refused = runnerRefusal(auth, request.method, url);
