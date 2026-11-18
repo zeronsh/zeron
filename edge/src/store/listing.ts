@@ -89,8 +89,12 @@ const isControl = (ch: string): boolean => {
 };
 
 /** A control or format character (Unicode Cc, Cf: bidi controls among
- * them), which `name`, `description` and `keywords` refuse (amendment 31). */
-const UNSEEN = /[\p{Cc}\p{Cf}]/u;
+ * them), which `name`, `description` and `keywords` refuse (amendment 31);
+ * on the edge, any other character Unicode says may be drawn as nothing
+ * (Default_Ignorable_Code_Point: the Hangul fillers, which are letters,
+ * among them), but for the variation selectors an emoji is drawn with. */
+const UNSEEN = /[\p{Cc}\p{Cf}]|(?!\p{Variation_Selector})\p{Default_Ignorable_Code_Point}/u;
+const IGNORABLE = /(?!\p{Variation_Selector})\p{Default_Ignorable_Code_Point}/gu;
 
 /**
  * The store's mark (amendment 45): a listing's name or description may not
@@ -121,17 +125,28 @@ const markWord = (folded: string): string | undefined =>
  * The edge's own reading (a device's check has none: the vectors' cases
  * with `edge_problems`): a mark word spelled with characters that pass for
  * its letters, from Unicode's confusables (UTS #39) plus the Latin small
- * capitals and the digit 3 (mark-lookalikes.ts, generated). A look-alike of
- * `l` stands for `i` too (UTS #39 folds capital I, and so its look-alikes,
- * to `l`). Whole words, as the shared rule's.
+ * capitals and the digit 3 (mark-lookalikes.ts, generated). `i` and `l`,
+ * and so their look-alikes, stand for each other (capital I and lowercase l
+ * are one stroke in sans-serif; UTS #39 folds I to l). A letter may also
+ * be two that pass for it together (`LOOKALIKE_PAIRS`). Whole words, as
+ * the shared rule's.
  */
-const lookalikeClass = (letter: string): string => {
-  const chars = [letter, ...(MARK_LOOKALIKES[letter] ?? ""), ...(letter === "i" ? (MARK_LOOKALIKES.l ?? "") : "")];
-  return `[${chars.map((ch) => `\\u{${ch.codePointAt(0)!.toString(16)}}`).join("")}]`;
+const LOOKALIKE_PAIRS: Readonly<Record<string, readonly string[]>> = { d: ["cl"] };
+const lookalikeChars = (letter: string): string[] => [letter, ...(MARK_LOOKALIKES[letter] ?? "")];
+const charClass = (chars: readonly string[]): string => `[${chars.map((ch) => `\\u{${ch.codePointAt(0)!.toString(16)}}`).join("")}]`;
+const letterPattern = (letter: string): string => {
+  const chars = letter === "i" || letter === "l" ? [...lookalikeChars("i"), ...lookalikeChars("l")] : lookalikeChars(letter);
+  const pairs = (LOOKALIKE_PAIRS[letter] ?? []).map((pair) => [...pair].map((ch) => charClass(lookalikeChars(ch))).join(""));
+  return pairs.length ? `(?:${[charClass(chars), ...pairs].join("|")})` : charClass(chars);
 };
 const LOOKALIKE_WORDS: readonly (readonly [string, RegExp])[] = MARK_WORDS.map(
-  (word) => [word, new RegExp(`(?<![A-Za-z0-9])${[...word].map(lookalikeClass).join("")}(?![A-Za-z0-9])`, "u")] as const
+  (word) => [word, new RegExp(`(?<![A-Za-z0-9])${[...word].map(letterPattern).join("")}(?![A-Za-z0-9])`, "u")] as const
 );
+/** `text` with its runs of single characters, each apart by one space or
+ * one `.`, `-` or `_`, read as one word ("V E R I F I E D", "V.E.R.I.F.I.E.D."). */
+const SPACED = /(?<![^\s._-])[^\s._-](?:[ ._-][^\s._-])+(?![^\s._-])/gu;
+const unspaced = (text: string): string => text.replace(SPACED, (run) => run.replace(/[ ._-]/g, ""));
+
 /** Ticks the shared glyphs leave out, refused on the edge: √ (used as one)
  * and 𐄂 AEGEAN CHECK MARK. */
 const EDGE_GLYPHS: readonly string[] = ["\u{221a}", "\u{10102}"];
@@ -140,7 +155,7 @@ const EDGE_GLYPHS: readonly string[] = ["\u{221a}", "\u{10102}"];
  * What in `text` claims the store's mark, if anything: the shared rule's
  * glyph or word, or (`lookalikes`, the edge's alone) one of its own ticks
  * or a mark word spelled with look-alike characters ("Vеrified" with a
- * Cyrillic е, "ᴠᴇʀɪꜰɪᴇᴅ", "VER1F1ED").
+ * Cyrillic е, "ᴠᴇʀɪꜰɪᴇᴅ", "VER1F1ED", "OFFlClAL", "V.E.R.I.F.I.E.D.").
  */
 export const markClaim = (text: string, lookalikes = true): string | undefined => {
   const folded = markText(text);
@@ -148,7 +163,10 @@ export const markClaim = (text: string, lookalikes = true): string | undefined =
   if (glyph !== undefined) return glyph;
   const word = markWord(folded);
   if (word !== undefined || !lookalikes) return word;
-  return LOOKALIKE_WORDS.find(([, re]) => re.test(folded))?.[0];
+  // Nothing drawn between its letters, nor spaces between single ones.
+  const seen = folded.replace(IGNORABLE, "");
+  const readings = [seen, unspaced(seen)];
+  return LOOKALIKE_WORDS.find(([, re]) => readings.some((r) => re.test(r)))?.[0];
 };
 
 /** (The fold of a path, as the store and devices compare paths: paths.ts.) */
