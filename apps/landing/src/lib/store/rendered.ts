@@ -6,7 +6,7 @@
 // another plugin's that later took the same id and version, not staging's.
 // Only listed versions' (public) are kept, under a host no visitor can ask
 // for, so a kept rendering is never an answer to anyone's request.
-import { PIPELINE, renderMarkdown, type RenderOptions } from "./markdown.ts";
+import { PIPELINE, render as renderWithin, type Budget, type RenderOptions, type Rendered } from "./markdown.ts";
 
 const DAY = 86_400;
 
@@ -23,7 +23,13 @@ export interface Keeper {
 
 const workerCache = (): Keeper | null => (typeof caches === "undefined" ? null : (caches as unknown as { default: Keeper }).default);
 
-/** The HTML of `markdown`, which is `what` of `id` at `version`, on the site at `origin`. */
+/**
+ * The HTML of `markdown`, which is `what` of `id` at `version`, on the site
+ * at `origin`, within the page's `budget` (markdown.ts). A rendering is kept
+ * whether it was drawn or shown as its text for its own sake (the same text
+ * always comes out the same); one shown as text only because the page had
+ * spent its budget is not, so a later visit, with the rest kept, draws it.
+ */
 export async function renderedOnce(
   origin: string,
   id: string,
@@ -31,10 +37,10 @@ export async function renderedOnce(
   what: "readme" | "notes",
   markdown: string,
   options: RenderOptions,
-  keep: { store?: Keeper | null; pipeline?: string; render?: typeof renderMarkdown } = {},
+  keep: { store?: Keeper | null; pipeline?: string; render?: (markdown: string, options: RenderOptions, budget?: Budget) => Rendered; budget?: Budget } = {},
 ): Promise<string> {
   const store = keep.store === undefined ? workerCache() : keep.store;
-  const render = keep.render ?? renderMarkdown;
+  const render = keep.render ?? renderWithin;
   const pictures = options.file("x");
   const hash = await sha256(`${keep.pipeline ?? PIPELINE}\n${origin}\n${pictures}\n${options.demote ? 1 : 0}\n${options.title ?? ""}\n${markdown}`);
   const key = new Request(`https://rendered.zeron.invalid/${encodeURIComponent(id)}/${encodeURIComponent(version)}/${what}/${hash}`);
@@ -42,7 +48,8 @@ export async function renderedOnce(
     const kept = await store.match(key).catch(() => undefined);
     if (kept) return kept.text();
   }
-  const html = render(markdown, options);
+  const { html, cut } = render(markdown, options, keep.budget);
+  if (cut === "page") return html;
   await store?.put(key, new Response(html, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": `public, max-age=${30 * DAY}` } })).catch(() => {});
   return html;
 }

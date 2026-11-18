@@ -8,12 +8,50 @@ import { setFlash, type FlashWord } from "./flash.ts";
 import type { WebSession } from "./types.ts";
 import { sitePath } from "./urls.ts";
 
-/** The post's fields, or null when it isn't a form. */
+/**
+ * The most a form's body may be, in bytes. The longest field any form has
+ * is 2,000 characters (a reviewer's words; 18 KB when every one is encoded
+ * as three bytes thrice), so 64 KB is generous; past it the body is never
+ * read whole, let alone parsed (the middleware answers 413 first when the
+ * request says how long it is).
+ */
+export const MOST_FORM = 64 * 1024;
+
+/** A request's body, read no further than `most` bytes: null past them. */
+async function bodyOf(request: Request, most: number): Promise<Uint8Array<ArrayBuffer> | null> {
+  const declared = Number(request.headers.get("content-length") ?? "0");
+  if (!Number.isFinite(declared) || declared > most) return null;
+  const reader = request.body?.getReader();
+  if (!reader) return new Uint8Array();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > most) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return out;
+}
+
+/** The post's fields, or null when it isn't a form (or is a body past MOST_FORM). */
 export async function formOf(request: Request): Promise<FormData | null> {
   const type = request.headers.get("content-type") ?? "";
   if (!type.startsWith("application/x-www-form-urlencoded") && !type.startsWith("multipart/form-data")) return null;
   try {
-    return await request.formData();
+    const body = await bodyOf(request, MOST_FORM);
+    if (!body) return null;
+    return await new Response(body, { headers: { "content-type": type } }).formData();
   } catch {
     return null;
   }
@@ -24,8 +62,21 @@ export const field = (form: FormData, name: string, max = 2000): string => {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
 };
 
-/** Whether the post carries this session's token. */
-export const tokenMatches = (form: FormData, session: WebSession) => field(form, "csrf", 200) === session.csrf;
+/**
+ * Whether the post carries this session's token, compared in constant time
+ * (every character looked at, whatever the first difference): the edge
+ * checks it again, but the site is never the weaker copy.
+ */
+export const tokenMatches = (form: FormData, session: WebSession) => sameText(field(form, "csrf", 200), session.csrf);
+
+/** Two strings compared without stopping at the first difference. */
+export function sameText(a: string, b: string): boolean {
+  const x = new TextEncoder().encode(a);
+  const y = new TextEncoder().encode(b);
+  let differ = x.length ^ y.length;
+  for (let i = 0; i < Math.max(x.length, y.length); i++) differ |= (x[i] ?? 0) ^ (y[i] ?? 0);
+  return differ === 0;
+}
 
 /** What to say about an answer from the edge. */
 export function flashFor(result: Result<unknown>, done: FlashWord): FlashWord {

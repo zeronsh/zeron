@@ -36,6 +36,9 @@
   },
   // The store's data and the sign-in session.
   "services": [{ "binding": "EDGE", "service": "comet-native-edge" }],
+  // The site's own origin: the store's paths asked for on another name of
+  // this Worker (comet.zeron.sh, its workers.dev address) are sent here.
+  "vars": { "SITE_ORIGIN": "https://zeron.sh" },
   // The Worker cache in front of the Worker: public store pages say how
   // long they may be kept (Astro's route cache); everything else is no-store.
   "cache": { "enabled": true },
@@ -49,6 +52,7 @@
       "name": "zeron-landing-staging",
       "routes": [{ "pattern": "site-staging.zeron.sh", "custom_domain": true }],
       "services": [{ "binding": "EDGE", "service": "zeron-edge-staging" }],
+      "vars": { "SITE_ORIGIN": "https://site-staging.zeron.sh" },
       "cache": { "enabled": true }
     }
   }

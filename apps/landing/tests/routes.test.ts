@@ -892,3 +892,111 @@ describe("the staff's side: the queue, a submission, the decision", () => {
     expect(page.body).toContain("What @ada reads");
   });
 });
+
+describe("the review of the web store: what it found, held", () => {
+  const notFound = () => readFileSync(new URL("../dist/client/404.html", import.meta.url), "utf8");
+  const headersOf = (r: Response) => JSON.stringify([...r.headers].filter(([k]) => k !== "date" && k !== "cf-cache-status"));
+  const timed = async (path: string, cookie?: string) => {
+    const started = performance.now();
+    const page = await html(path, cookie);
+    return { ...page, ms: performance.now() - started };
+  };
+
+  test("words built to be slow to draw, at the store's caps, can't hold a plugin's page: it answers within the bound, as text, said so", async () => {
+    const first = await timed("/plugins/slow-words");
+    expect(first.response.status).toBe(200);
+    expect(first.ms).toBeLessThan(4_000);
+    expect(first.body).toContain('<p class="as-text">Shown as plain text.</p>');
+    // (Kept, so the next visit draws nothing again.)
+    const again = await timed("/plugins/slow-words");
+    expect(again.ms).toBeLessThan(4_000);
+  });
+
+  test("…nor hide a submission from its reviewer: every view answers, and says, loudly, that it couldn't be drawn", async () => {
+    const grace = await site.signIn("user_grace");
+    for (const view of ["", "?view=files", "?view=changes"]) {
+      const { response, body, ms } = await timed(`/admin/plugins/slow-words/1.2.0${view}`, grace);
+      expect(response.status, view).toBe(200);
+      expect(ms, view).toBeLessThan(4_000);
+      expect(body, view).toMatch(/<li class="fail">.*?This README could not be drawn within the limit/s);
+      expect(body, view).toContain("Its notes for 1.2.0 could not be drawn within the limit");
+    }
+    // (Approve's line counts it among what failed.)
+    expect((await html("/admin/plugins/slow-words/1.2.0", grace)).body).toMatch(/<p class="weigh-line bad">[^<]*2 checks failed/);
+  });
+
+  test("a file built to break the highlighter is shown as text, and the reviewer told, in Files and in Changes", async () => {
+    const grace = await site.signIn("user_grace");
+    const file = await html(`/admin/plugins/slow-words/1.2.0?view=files&path=${encodeURIComponent("src/nest.js")}`, grace);
+    expect(file.response.status).toBe(200);
+    expect(file.body).toContain("This file couldn't be highlighted.");
+    const changes = await html("/admin/plugins/slow-words/1.2.0?view=changes", grace);
+    expect(changes.response.status).toBe(200);
+    expect(changes.body).toContain("Some lines couldn't be highlighted.");
+  });
+
+  test("a staff address written another way is the same 404 as one that isn't there; an admin is sent to its one form", async () => {
+    const unknown = await site.fetch("/admin/nothing-here");
+    const ada = await site.signIn("user_ada");
+    for (const path of ["/%61dmin/plugins", "/%2561dmin/plugins", "/admin%2Fplugins", "/%61dmin/nothing-here", "/%2561dmin/audit", "/%61dmin/plugins/slow-words/1.2.0"]) {
+      for (const cookie of [undefined, ada]) {
+        const response = await site.fetch(path, cookie ? { headers: { cookie } } : {});
+        expect(response.status, path).toBe(404);
+        expect(await response.text(), path).toBe(notFound());
+        expect(headersOf(response), path).toBe(headersOf(unknown));
+      }
+    }
+    const grace = await site.signIn("user_grace");
+    const sent = await site.fetch("/%2561dmin/plugins", { headers: { cookie: grace } });
+    expect(sent.status).toBe(301);
+    expect(sent.headers.get("location")).toBe("/admin/plugins");
+  });
+
+  test("a form's body past what any form sends is never parsed: 413, or the staff's 404 to anyone but an admin", async () => {
+    const big = "note=" + "x".repeat(2 * 1024 * 1024);
+    const headers = (cookie: string) => ({ cookie, origin: "https://zeron.sh", "content-type": "application/x-www-form-urlencoded", "content-length": String(big.length) });
+    const kai = await site.signIn("user_kai");
+    expect((await site.fetch("/plugins/theme-sync/report", { method: "POST", headers: headers(kai), body: big })).status).toBe(413);
+    const grace = await site.signIn("user_grace");
+    expect((await site.fetch("/admin/reports/1", { method: "POST", headers: headers(grace), body: big })).status).toBe(413);
+    // To anyone else, under /admin: the same answer whether a page is there or not, the body unread.
+    const ada = await site.signIn("user_ada");
+    for (const path of ["/admin/reports/1", "/admin/nothing-here"]) {
+      const started = performance.now();
+      const response = await site.fetch(path, { method: "POST", headers: headers(ada), body: big });
+      expect(response.status, path).toBe(404);
+      expect(performance.now() - started, path).toBeLessThan(2_000);
+    }
+    // A session that ended: off to sign in, the body unread, nothing of it carried along.
+    const ended = await site.fetch("/admin/reports/1", { method: "POST", headers: headers("__Host-zeron_session=x"), body: big });
+    expect(ended.status).toBe(303);
+    expect(ended.headers.get("location")).toBe(`/auth/web/login?${new URLSearchParams({ return_to: "/admin/reports/1" })}`);
+  });
+
+  test("a picture the manifest names outside its package is never put on the review page", async () => {
+    const { body } = await html("/admin/plugins/slow-words/1.2.0", await site.signIn("user_grace"));
+    // (The raw manifest shows the path, as text; no picture is ever made of it.)
+    expect(body).not.toMatch(/<img[^>]*me\.json/);
+    expect(body).not.toMatch(/<img[^>]*src="[^"]*\.\./);
+  });
+
+  test("the built 404 goes out with the site's headers; its bytes as built", async () => {
+    const response = await site.fetch("/nothing-here");
+    expect(response.status).toBe(404);
+    expect(await response.text()).toBe(notFound());
+    expect(response.headers.get("content-security-policy")).toContain("default-src 'none'");
+    expect(response.headers.get("x-frame-options")).toBe("DENY");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+
+  test("on the Worker's other names, the store's pages are the site's own origin's; the landing pages stay", async () => {
+    for (const host of ["https://comet.zeron.sh", "https://comet-landing.someone.workers.dev"]) {
+      for (const path of ["/plugins/all?sort=new", "/account", "/admin/plugins", "/auth/web/login"]) {
+        const response = await site.fetch(`${host}${path}`);
+        expect(response.status, `${host}${path}`).toBe(path.startsWith("/admin") ? 404 : 301);
+        if (!path.startsWith("/admin")) expect(response.headers.get("location")).toBe(`https://zeron.sh${path}`);
+      }
+      expect((await site.fetch(`${host}/`)).status).toBe(200);
+    }
+  });
+});

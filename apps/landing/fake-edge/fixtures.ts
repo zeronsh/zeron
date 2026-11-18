@@ -92,7 +92,7 @@ interface Spec {
   featured?: boolean;
   age: number;
   /** Older versions first; the last is the newest. Default: one approved 1.0.0. */
-  history?: { version: string; status: Status; ago: number; notes?: string; review?: FakeVersion["review"]; engines?: string; permissions?: string[]; commands?: string[]; network?: string[]; mcp?: { command: string; args?: string[]; env?: Record<string, string> }; service?: string; settings?: Record<string, unknown>[] }[];
+  history?: { version: string; status: Status; ago: number; notes?: string; review?: FakeVersion["review"]; engines?: string; permissions?: string[]; commands?: string[]; network?: string[]; mcp?: { command: string; args?: string[]; env?: Record<string, string> }; service?: string; settings?: Record<string, unknown>[]; files?: Record<string, string>; shots?: string[] }[];
   readme?: string;
   screenshots?: number;
   /** More files in every version's package. */
@@ -154,7 +154,7 @@ function build(spec: Spec): FakePlugin {
       "CHANGELOG.md": history.map((x) => `## ${x.version}\n\n${x.notes ?? "First release."}\n`).reverse().join("\n"),
     };
     if (spec.icon) files["icon.svg"] = spec.iconSvg ?? ICONS[spec.icon]!;
-    Object.assign(files, spec.files ?? {});
+    Object.assign(files, spec.files ?? {}, h.files ?? {});
     for (const [i, s] of shots.entries()) files[s] = screenshot(spec.name, accent, i === 0 ? (spec.part ?? "panel") : "page");
     const manifest: Record<string, unknown> = {
       id: spec.id,
@@ -176,7 +176,7 @@ function build(spec: Spec): FakePlugin {
       ...(spec.homepage ? { homepage: spec.homepage } : {}),
       ...(spec.repository ? { repository: spec.repository } : {}),
       ...(spec.license ? { license: spec.license } : {}),
-      screenshots: shots,
+      screenshots: [...shots, ...(h.shots ?? [])],
       engines: { zeron: h.engines ?? ">=0.3.0" },
     };
     const checks = h.status === "pending" && (h.permissions ?? spec.permissions ?? []).some((p) => p === "commands" || p === "native")
@@ -593,6 +593,9 @@ SPECS.push(
   { id: "rough-draft", name: "Rough draft", summary: "Drafts a reply in the composer from the chat so far.", icon: null, categories: ["chat"], keywords: ["draft"], permissions: ["ui.add", "messages.read"], owner: "user_ada", installs: 0, age: 9, screenshots: 0, history: [{ version: "0.1.0", status: "rejected", ago: 9, review: { state: "rejected", reason: "listing", message: "The README is one line. Say what it drafts from, where the draft appears, and add a picture of it.", decided_at: NOW - 8 * DAY } }] },
   { id: "clipboard-sync", name: "Clipboard sync", summary: "Keeps the clipboard the same on all your devices.", icon: null, categories: ["utilities"], keywords: ["clipboard"], permissions: ["ui.add", "clipboard", "network"], network: ["sync.clipboard-sync.example.com"], owner: "user_ada", installs: 310, age: 40, screenshots: 0, history: [{ version: "1.0.0", status: "removed", ago: 40, review: { state: "removed", reason: "unsafe", message: "It sent every copied password to its sync host in plain text.", decided_at: NOW - 12 * DAY } }] },
   { id: "old-sketch", name: "Old sketch", summary: "A first try at a sidebar of pinned chats.", icon: null, categories: ["productivity"], keywords: ["pins"], permissions: ["ui.add"], owner: "user_ada", installs: 0, age: 30, screenshots: 0, history: [{ version: "0.1.0", status: "yanked", ago: 30 }, { version: "0.2.0", status: "withdrawn", ago: 20 }] },
+  // Words built to cost the parser the square of their length, each at the store's cap (a 512 KB
+  // README, 64 KB notes): the page must still answer at once, showing them as text.
+  { id: "slow-words", name: "Slow words", summary: "Its README and notes are built to be slow to draw.", icon: null, categories: ["utilities"], keywords: ["slow"], permissions: ["ui.add"], owner: "user_mo", installs: 3, age: 7, screenshots: 0, readme: "a\n=\n".repeat(131_072), history: [{ version: "1.0.0", status: "approved", ago: 7, notes: ">".repeat(65_536) }, { version: "1.1.0", status: "approved", ago: 5, notes: "[".repeat(13_107) + "a" + "](b)".repeat(13_107) }, { version: "1.2.0", status: "pending", ago: 1, notes: "a\n=\n".repeat(16_384), files: { "src/nest.js": "`${".repeat(1000) }, shots: ["../../../../account/me.json"] }] },
 );
 
 export function plugins(): FakePlugin[] {

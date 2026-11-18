@@ -1,6 +1,8 @@
 ---
-// A file's text with its line numbers, highlighted on the server.
-import { highlight } from "../../lib/store/highlight.ts";
+// A file's text with its line numbers, highlighted on the server. One the
+// highlighter can't take (nested past its bound) is shown plain, and the
+// reviewer is told: a file built to break the tool is worth a look.
+import { highlighted } from "../../lib/store/highlight.ts";
 
 interface Props {
   text: string;
@@ -9,11 +11,14 @@ interface Props {
 }
 const { text, language, label } = Astro.props;
 const lines = text.endsWith("\n") ? text.slice(0, -1).split("\n").length : text.split("\n").length;
+const code = highlighted(text, language);
 ---
+
+{code.plain && <p class="notice bad" role="note"><b>This file couldn't be highlighted.</b> It nests deeper than real code does, so it's shown as plain text. It's worth a look.</p>}
 
 <div class="code" role="region" aria-label={label} tabindex="0">
   <pre class="numbers" aria-hidden="true">{Array.from({ length: lines }, (_, i) => i + 1).join("\n")}</pre>
-  <pre class="text"><code class="hljs" set:html={highlight(text, language)} /></pre>
+  <pre class="text"><code class="hljs" set:html={code.html} /></pre>
 </div>
 
 <style>
