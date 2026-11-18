@@ -162,10 +162,10 @@ function M.report(id: string, reason: string, text: string): any
 	return ui.call("plugins.store.report", { id = id, reason = reason, text = text })
 end
 
--- A store id, as plugin ids are (the engine's manifest rule): what a link
--- may name, and nothing else.
+-- A store id, as plugin ids are (the engine's manifest rule,
+-- `^[a-z0-9][a-z0-9-]{1,39}$`): what a link may name, and nothing else.
 function M.valid_id(id: any): boolean
-	return type(id) == "string" and #id >= 1 and #id <= 64 and string.match(id, "^[a-z0-9][a-z0-9%-]*$") ~= nil
+	return type(id) == "string" and #id >= 2 and #id <= 40 and string.match(id, "^[a-z0-9][a-z0-9%-]*$") ~= nil
 end
 
 -- Its pictures, as the host has them here: by `id@version/path`, the file

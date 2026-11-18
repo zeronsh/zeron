@@ -19,9 +19,10 @@ M.tab = ui.state("plugins_tab", "installed")
 -- A page opened from outside the page (a link) before the visit began.
 local opened = ui.state("plugins_view_opened", false)
 
--- (Only an id a store id could be: anything else is no page at all.)
+-- (Only an id a store id could be, as a plugin's id is: anything else is
+-- no page at all.)
 local function valid(id: string): boolean
-	return #id >= 1 and #id <= 64 and string.match(id, "^[a-z0-9][a-z0-9%-]*$") ~= nil
+	return #id >= 2 and #id <= 40 and string.match(id, "^[a-z0-9][a-z0-9%-]*$") ~= nil
 end
 
 function M.open_listing(id: string, from_outside: boolean?)
