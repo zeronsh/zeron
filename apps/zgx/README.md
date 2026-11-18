@@ -88,6 +88,11 @@ ZERON_ZGX_ENGINE_HOME=/tmp/zgx-home \
 (`HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`), so the agents' logins it reads
 and writes are that folder's, not this Mac's. `ZERON_ZGX_ENGINE_BIN` picks
 another engine; `ZERON_ZGX_ENGINE_SPAWN=0` only uses one that's running.
+With no engine answering and no session kept, a launch says signed out
+after 20 seconds (`RESTORE_WAIT`, src/auth.rs) and opens setup's window
+(`app.onboard`, src/main.rs), which takes a `fixture=` window's place:
+`settings_stub.sign_in` signs in the scripts alone, so a capture pass on
+a fixture finishes inside those 20 seconds or stands in for the engine.
 `ZERON_ZGX_NO_BROWSER=1` opens no browser for a sign-in (a path instead
 writes the page there, for a test rig). See `src/engine/manager.rs`.
 `ZERON_ZGX_MOCK=1` offers the engine's mock agent in the model picker

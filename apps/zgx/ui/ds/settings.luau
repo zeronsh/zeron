@@ -416,7 +416,9 @@ function M.Back(props: BackProps): Node
 		}),
 		color = "$text.tertiary",
 		hover = { color = "$text.primary" },
-		focus = { outline = "$zeron.focus.width", outline_color = "$zeron.focus.ring", outline_offset = 2 },
+		-- (A link's ring, as ds.Link draws it: rounded round its words.)
+		rounded = "$radius.sm",
+		focus = control.ring,
 		on_click = props.on_click,
 		Icon { name = "alt-arrow-left", size = 14 },
 		ui.text { label, text_size = "$font.size.sm", line_height = "$font.line.sm" },
