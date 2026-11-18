@@ -121,9 +121,10 @@ const structured = plugin
           <Install id={plugin.id} name={plugin.name} />
         </header>
 
-        <Strip name={plugin.name} pictures={plugin.screenshots.map((s) => pictureUrl(plugin.id, plugin.version, s)).filter((s): s is string => s !== null)} />
-
         <div class="plugin-body">
+          <div class="plugin-strip">
+            <Strip name={plugin.name} pictures={plugin.screenshots.map((s) => pictureUrl(plugin.id, plugin.version, s)).filter((s): s is string => s !== null)} />
+          </div>
           <div class="plugin-main">
             <nav class="tabs" aria-label="About this plugin" data-tabs>
               <a href="#overview" aria-current="page">Overview</a>
@@ -176,7 +177,7 @@ const structured = plugin
           </div>
 
           <aside class="rail" aria-label="About this plugin">
-            <section class="rail-part" aria-labelledby="asks-heading">
+            <section class="rail-part rail-asks" aria-labelledby="asks-heading">
               <h2 id="asks-heading">{store("plugins.store.asks")}</h2>
               <Asks permissions={plugin.permissions} author={plugin.author.username ?? undefined} mode="short" />
               <a class="more" href="#permissions" data-tab-link>All of what it asks for</a>
@@ -207,9 +208,6 @@ const structured = plugin
                 </ul>
               </section>
             )}
-            <section class="rail-part">
-              <ul class="out" role="list"><li><a href={`${pluginUrl(plugin.id)}/report`}><Glyph name="flag" size={16} />{store("plugins.store.report.link")}</a></li></ul>
-            </section>
           </aside>
         </div>
       </div>

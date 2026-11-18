@@ -1,7 +1,8 @@
 ---
 // Revoke one of your plugin's deploy keys. A post does it; a visit asks first.
-import ConfirmPage from "../../../../../components/store/ConfirmPage.astro";
-import Store from "../../../../../layouts/Store.astro";
+import Confirm from "../../../../../components/kit/Confirm.astro";
+import Glyph from "../../../../../components/ui/Glyph.astro";
+import App from "../../../../../layouts/App.astro";
 import { isKey, revokeAsk } from "../../../../../lib/store/actions.ts";
 import { done, flashFor, formOf, tokenMatches } from "../../../../../lib/store/forms.ts";
 import { privatePage } from "../../../../../lib/store/http.ts";
@@ -31,10 +32,9 @@ privatePage(Astro);
 const ask = revokeAsk(found.name);
 ---
 
-<Store title={`${ask.title} · Zeron`} description={ask.title} noindex tool>
-  <div class="wrap">
-    <ConfirmPage title={ask.title} action={Astro.url.pathname} csrf={session.csrf} confirm={ask.confirm} tone="danger" back={back}>
-      <Fragment slot="words">{ask.words.map((w) => <p>{w}</p>)}</Fragment>
-    </ConfirmPage>
-  </div>
-</Store>
+<App title={`${ask.title} · Zeron`} description={ask.title} noindex current="mine" session={session}>
+  <nav slot="title" class="crumbs" aria-label="Where this is">
+    <a href="/account">Your plugins</a><Glyph name="alt-arrow-right" size={12} /><a href={`${back}#keys`}>{id}</a><Glyph name="alt-arrow-right" size={12} /><span aria-current="page">Revoke a key</span>
+  </nav>
+  <Confirm ask={ask} action={Astro.url.pathname} csrf={session.csrf} back={`${back}#keys`} />
+</App>

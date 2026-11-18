@@ -33,6 +33,9 @@ const post = (path: string, cookie: string, fields: Record<string, string>, orig
 /** The one-shot message a response set, as a cookie to send back. */
 const flashOf = (response: Response) => response.headers.getSetCookie().find((c) => c.startsWith("__Host-zeron_flash="))?.split(";")[0] ?? "";
 
+/** A version's state on its author's page, as its row's badge says it. */
+const stateOf = (body: string, version: string) => new RegExp(`<span class="line version">${version.replace(/\./g, "\\.")}</span></td><td><span class="line"><span class="badge sm[^"]*">([^<]+)</span>`).exec(body)?.[1];
+
 /** The session's CSRF token, as a page carries it in its forms. */
 const tokenOf = (body: string) => /name="csrf" value="([^"]+)"/.exec(body)?.[1] ?? "";
 
@@ -520,7 +523,7 @@ describe("forms", () => {
     const page = await html("/account/plugins/session-badges", ada);
     const response = await post("/account/plugins/session-badges/versions/1.2.1/withdraw", ada, { csrf: tokenOf(page.body) }, "https://evil.example");
     expect(response.status).toBe(403);
-    expect((await html("/account/plugins/session-badges", ada)).body).toMatch(/1\.2\.1<\/th>\s*<td[^>]*>[^]*?In review/);
+    expect(stateOf((await html("/account/plugins/session-badges", ada)).body, "1.2.1")).toBe("In review");
   });
 
   test("a post without the session's token changes nothing", async () => {
@@ -529,7 +532,7 @@ describe("forms", () => {
     expect(response.status).toBe(303);
     const after = await html("/account/plugins/session-badges", `${ada}; ${flashOf(response)}`);
     expect(after.body).toContain("The page was open too long. Try again.");
-    expect(after.body).toMatch(/1\.2\.1<\/th>\s*<td[^>]*>[^]*?In review/);
+    expect(stateOf(after.body, "1.2.1")).toBe("In review");
   });
 
   test("a confirm page names the plugin in the app's words; someone else's plugin is the 404", async () => {
@@ -540,6 +543,37 @@ describe("forms", () => {
     expect(ask.body).toContain("Those who have it keep it working.");
     const kai = await site.signIn("user_kai");
     expect((await html("/account/plugins/focus-timer/versions/1.2.0/yank", kai)).response.status).toBe(404);
+  });
+
+  test("an author with nothing sent is told how to send the first", async () => {
+    const { body } = await html("/account", await site.signIn("user_noor"));
+    expect(body).toContain("You haven't published a plugin yet");
+    expect(body).toContain("<code>zeron plugin publish</code>");
+    expect(body).toMatch(/Your plugins<span class="title-count"> · 0<\/span>/);
+  });
+
+  test("one plugin: a version's one action in its column; six states, six tones; keys short, the gone ones apart", async () => {
+    const { body } = await html("/account/plugins/worst-case-listing-at-every-limit-xyz12", await site.signIn("user_ada"));
+    const states = Object.fromEntries(["1.5.0", "1.4.0", "1.3.0", "1.2.0", "1.1.0", "1.0.0"].map((v) => [v, stateOf(body, v)]));
+    expect(states).toEqual({ "1.5.0": "In review", "1.4.0": "Not approved", "1.3.0": "Withdrawn", "1.2.0": "Taken down", "1.1.0": "No new installs", "1.0.0": "Approved" });
+    // Each state's tone its own.
+    const tones = [...body.matchAll(/<span class="line"><span class="badge sm ?([a-z]*)">/g)].map((m) => m[1]);
+    expect(new Set(tones).size).toBe(6);
+    // Exactly one action where one can be taken, none where none can.
+    const actions = [...body.matchAll(/data-dialog="(withdraw|yank|unyank)-([\d_]+)"/g)].map((m) => `${m[1]} ${m[2]}`);
+    expect(actions).toEqual(["withdraw 1_5_0", "unyank 1_1_0", "yank 1_0_0"]);
+    // A reviewer's words in full, never cut.
+    expect(body).toContain("Until then it can&#39;t be listed, and nobody else can install it.”");
+    // Keys: seven working, three gone in their group with their count, each shown the one short way.
+    expect(body.match(/data-dialog="revoke-/g)).toHaveLength(7);
+    expect(body).toMatch(/<details class="gone"><summary>Revoked keys · 3/);
+    for (const m of body.matchAll(/<span class="line key" title="([^"]+)">([^<]+)<\/span>/g)) expect(m[2]).toBe(`${m[1]!.slice(0, 6)}…${m[1]!.slice(-4)}`);
+    // Ending within 14 days: the warning's ink (three of them).
+    expect(body.match(/<span class="line soon">/g)).toHaveLength(3);
+    // Its parts are tabs that are addresses; New key… opens a sheet that is one too.
+    expect(body).toMatch(/<a href="#versions" aria-current="page">Versions <span class="count">6<\/span><\/a><a href="#keys">Deploy keys <span class="count">7<\/span><\/a>/);
+    expect(body).toContain('<dialog class="sheet" id="new-key"');
+    expect(body).toContain("<code>zeron plugin key create worst-case-listing-at-every-limit-xyz12</code>");
   });
 
   test("a confirm page asks first; the post does it once and says so once", async () => {
@@ -554,7 +588,7 @@ describe("forms", () => {
     const cookie = `${ada}; ${flashOf(response)}`;
     const after = await html("/account/plugins/session-badges", cookie);
     expect(after.body).toContain("Withdrawn from review.");
-    expect(after.body).toMatch(/1\.2\.1<\/th>\s*<td[^>]*>[^]*?Withdrawn/);
+    expect(stateOf(after.body, "1.2.1")).toBe("Withdrawn");
     // (Said once: the page that shows it clears it.)
     expect(after.response.headers.getSetCookie().join("\n")).toMatch(/__Host-zeron_flash=[^;]*;.*(Max-Age=0|Expires=Thu, 01 Jan 1970)/);
   });
@@ -713,7 +747,7 @@ describe("forms", () => {
   test("signing out is a form post with the token; the session ends", async () => {
     const lin = await site.signIn("user_lin");
     const page = await html("/account", lin);
-    expect(page.body).toContain("claim a username first");
+    expect(page.body).toContain("Claim a username first.");
     const response = await post("/auth/web/logout", lin, { csrf: tokenOf(page.body) });
     expect(response.status).toBe(303);
     // (As the edge does: always the front page, absolute.)

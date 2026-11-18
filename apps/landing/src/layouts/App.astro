@@ -95,10 +95,16 @@ const row = (item: NavItem) => ({ ...item, on: item.id === current });
         <div class="sidebar-foot">
           {
             session ? (
-              <a class="account" href="/account">
-                <span class="avatar" aria-hidden="true">{initial}</span>
-                <span class="name">{name}</span>
-              </a>
+              <div class="account-row">
+                <a class="account" href="/account">
+                  <span class="avatar" aria-hidden="true">{initial}</span>
+                  <span class="name">{name}</span>
+                </a>
+                <form method="post" action="/auth/web/logout">
+                  <input type="hidden" name="csrf" value={session.csrf} />
+                  <button class="btn ghost xs" type="submit">Sign out</button>
+                </form>
+              </div>
             ) : (
               <a class:list={["account", { "is-pending": isPublic }]} href={signInUrl(here)} data-account>
                 <span class="avatar" aria-hidden="true"><Glyph name="user-rounded" size={14} /></span>

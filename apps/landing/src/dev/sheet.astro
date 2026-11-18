@@ -289,6 +289,24 @@ const stateName = { rest: "Rest", "is-hover": "Hover", "is-focus": "Focus", "is-
       </div>
     </section>
 
+    <section class="block">
+      <h2 class="t-heading">A table whose rows wrap</h2>
+      <p class="t-text t-2">Every cell starts on one 28-high line, 12 under the row's top, so a first line, a badge and a button share a middle (12 + 14 = 26); words at 13 / 20 begin 4 lower (16 + 10). An action column of 176 at the row's end, the button's words on its edge. 52 at the least. A deploy key is shown one way everywhere: its first 6 and last 4 characters, mono 12, the whole key in its title (k5Yh3x…g2Wq).</p>
+      <div class="panel">
+        <table class="table wrapping versions-table">
+          <colgroup><col class="version" /><col class="state" /><col /><col class="sent" /><col class="action" /></colgroup>
+          <thead><tr><th>Version</th><th>State</th><th>What it means</th><th class="end">Sent</th><th class="end"><span class="sr-only">Action</span></th></tr></thead>
+          <tbody>
+            <tr><td><span class="line version">1.4.0</span></td><td><span class="line"><span class="badge sm warn">Not approved</span></span></td><td class="words"><span class="said">“Name the hosts it needs and drop the wildcard, then send it again.”</span><span class="who">The reviewer, asks for more than it explains · Nov 14</span></td><td class="end"><span class="line end muted">Nov 13</span></td><td class="end"><span class="line end"></span></td></tr>
+            <tr><td><span class="line version">1.0.0</span></td><td><span class="line"><span class="badge sm ok">Approved</span></span></td><td class="words">Anyone can install it.</td><td class="end"><span class="line end muted">Nov 5</span></td><td class="end"><span class="line end"><a class="btn ghost sm" href="#">Stop new installs</a></span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="notice"><Glyph name="info-circle" size={16} /><span><b>A notice:</b> something to know before anything else on the page. Its tone's wash, 12 / 16 in, an 8 corner, 13 / 20.</span></p>
+      <p class="notice warn"><Glyph name="info-circle" size={16} /><span>The warning's, for what blocks the next step.</span></p>
+      <p class="t-caption t-3">The six states, six tones: <span class="badge sm info">In review</span> <span class="badge sm ok">Approved</span> <span class="badge sm warn">Not approved</span> <span class="badge sm">Withdrawn</span> <span class="badge sm accent">No new installs</span> <span class="badge sm bad">Taken down</span>. On a page of yours, Sign out sits beside you at the list's foot (a quiet 24).</p>
+    </section>
+
     <section class="block two">
       <div class="section">
         <div class="section-head"><div class="words"><h2>Facts</h2><p>Label 12 secondary, value 13; 32 a line, hairlines between.</p></div></div>

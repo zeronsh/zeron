@@ -24,6 +24,8 @@ export const USERS: FakeUser[] = [
   { id: "user_lin", name: "Lin", username: null, roles: [], created_at: NOW - 2 * DAY, badges: [] },
   { id: "user_kai", name: "Kai Moreno", username: "kai", roles: [], created_at: NOW - 30 * DAY, badges: [] },
   { id: "user_mo", name: "Mo", username: "mo-dev", roles: [], created_at: NOW - 6 * DAY, badges: [] },
+  // An author with a username and nothing sent yet.
+  { id: "user_noor", name: "Noor", username: "noor", roles: [], created_at: NOW - 1 * DAY, badges: [] },
 ];
 
 // The store's fixed list (contract amendment 4); the names are the fake's.
@@ -384,6 +386,15 @@ const SPECS: Spec[] = [
     installs: 7000,
     featured: true,
     age: 12,
+    // A version in every state, a reviewer's reason as long as they write them.
+    history: [
+      { version: "1.0.0", status: "approved", ago: 12 },
+      { version: "1.1.0", status: "yanked", ago: 10, notes: "Moved the panel; stopped offering it after the sidebar changed under it." },
+      { version: "1.2.0", status: "removed", ago: 8, review: { state: "removed", reason: "unsafe", message: "Taken down: it sent the open chat's text to a host its README doesn't name. Anyone who has it has had it turned off.", decided_at: NOW - 7 * DAY } },
+      { version: "1.3.0", status: "withdrawn", ago: 6 },
+      { version: "1.4.0", status: "rejected", ago: 4, review: { state: "rejected", reason: "asks_too_much", message: "It asks to run python3, git and jq and to reach any site at all, but nothing in the README or the listing says what it runs them for or what it sends where. Name the hosts it needs and drop the wildcard, say in the README what each program is run for, and send it again: a reviewer will look at the new version the same day. Until then it can't be listed, and nobody else can install it.", decided_at: NOW - 3 * DAY } },
+      { version: "1.5.0", status: "pending", ago: 1, notes: "Names the hosts it reaches; says what it runs and why." },
+    ],
   },
   {
     // A plugin whose words try to break the page.
@@ -625,5 +636,27 @@ export function keys(): FakeKey[] {
   return [
     { plugin_id: "focus-timer", key: "k5Yh3xQ2b8VtYwGm1rPz0nLc4dEa6sJu9oKi7fBg2Wq", name: "GitHub Actions", created_at: NOW - 50 * DAY, last_used_at: NOW - 9 * DAY, expires_at: NOW + 315 * DAY, revoked_at: null },
     { plugin_id: "focus-timer", key: "Zt8nQ1wE4rT7yU0iO3pA6sD9fG2hJ5kL8zX1cV4bN7m", name: "Old laptop script", created_at: NOW - 110 * DAY, last_used_at: NOW - 100 * DAY, expires_at: null, revoked_at: NOW - 60 * DAY },
+    // The worst case's ten: live and revoked, used and never, ending soon and never.
+    ...[
+      ["GitHub Actions: release on tag, the main repository's workflow", 40, 1, 300, null],
+      ["Nightly build", 90, 0.5, 12, null],
+      ["Staging deploy from the CI runner in the second datacenter", 30, null, null, null],
+      ["Laptop", 200, 30, 6, null],
+      ["Backup runner", 15, null, 365, null],
+      ["Release candidate pipeline", 60, 2, null, null],
+      ["Old CI", 300, 250, null, 200],
+      ["A key that was leaked in a log", 120, 119, 200, 118],
+      ["Test", 20, 19, 30, 10],
+      ["Contributor's fork", 8, 3, 3, null],
+    ].map(([name, made, used, ends, revoked], i) => ({
+      plugin_id: "worst-case-listing-at-every-limit-xyz12",
+      // (Each its own 43 characters of base64url, as an ed25519 key is.)
+      key: Array.from({ length: 43 }, (_, j) => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"[(i * 131 + j * j * 17 + j * 7 + 3) % 64]).join(""),
+      name: name as string,
+      created_at: NOW - (made as number) * DAY,
+      last_used_at: used === null ? null : NOW - (used as number) * DAY,
+      expires_at: ends === null ? null : NOW + (ends as number) * DAY,
+      revoked_at: revoked === null ? null : NOW - (revoked as number) * DAY,
+    })),
   ];
 }

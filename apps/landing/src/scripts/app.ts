@@ -167,3 +167,51 @@ for (const notes of document.querySelectorAll<HTMLElement>("[data-clamp]")) {
   });
   notes.after(more);
 }
+
+// ── Questions before doing ─────────────────────────────────────────────
+// An opener is a link to its question as a page; with this, it opens the
+// question's dialog instead (components/kit/Ask.astro).
+document.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element) || event.defaultPrevented) return;
+  const opener = event.target.closest<HTMLElement>("[data-dialog]");
+  if (!opener || (event instanceof MouseEvent && (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0))) return;
+  const dialog = document.getElementById(opener.dataset.dialog ?? "");
+  if (!(dialog instanceof HTMLDialogElement) || typeof dialog.showModal !== "function") return;
+  event.preventDefault();
+  dialog.showModal();
+});
+// (A click on the dim closes it, where `closedby` isn't known yet.)
+for (const dialog of document.querySelectorAll<HTMLDialogElement>("dialog.dialog, dialog.sheet")) {
+  if (typeof (dialog as { closedBy?: unknown }).closedBy === "string") continue;
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) dialog.close();
+  });
+}
+
+// ── Copy ───────────────────────────────────────────────────────────────
+// A copy box's Copy: its words to the clipboard, and it says so.
+document.addEventListener("click", async (event) => {
+  const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>("[data-copy]") : null;
+  const text = button?.closest(".copybox")?.querySelector("code")?.textContent;
+  if (!button || !text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    const was = button.getAttribute("aria-label") ?? "Copy";
+    button.setAttribute("aria-label", "Copied");
+    button.classList.add("is-done");
+    window.setTimeout(() => {
+      button.setAttribute("aria-label", was);
+      button.classList.remove("is-done");
+    }, 1600);
+  } catch {
+    // (No clipboard: the words are there to select.)
+  }
+});
+// (A dialog's own "Done" or "Cancel" link closes it; without the script it leads away.)
+document.addEventListener("click", (event) => {
+  const link = event.target instanceof Element ? event.target.closest<HTMLElement>("dialog [data-close]") : null;
+  const dialog = link?.closest("dialog");
+  if (!link || !dialog?.open) return;
+  event.preventDefault();
+  dialog.close();
+});
