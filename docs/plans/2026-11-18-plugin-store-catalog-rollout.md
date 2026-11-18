@@ -138,8 +138,9 @@ binding is missing from that environment.
    files routes check the state on every request.
 
 A device asking with `verified_only` for the plugin (an agent's install,
-or an author's choice) is offered only verified versions: with 1.0.0
-verified and 1.0.1 not, it gets 1.0.0 and no `verified_update`.
+or an author's choice) is offered only verified versions: holding 0.9.0,
+with 1.0.0 verified and 1.0.1 not, it is offered 1.0.0, where a device
+without it is offered 1.0.1 with `verified_update` naming 1.0.0.
 
 ### d. A report
 
