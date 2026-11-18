@@ -40,6 +40,17 @@ local function page(name: string, before: ((app: any) -> ())?): any
 	return app
 end
 
+-- About, folded at its height (a long README), opened: its Show more,
+-- brought into view and pressed.
+local function open_about(app: any)
+	local y = tonumber((app:tree(".store-about-fold"):match(" %-?[%d.]+,(%-?[%d.]+) "))) or 0
+	app:scroll("#fixture-scroll", y - 400)
+	app:frames(5)
+	app:click(".store-about-fold")
+	app:wait("#never-there", { timeout_ms = 300 })
+	app:frames(10)
+end
+
 test("a plugin's page says what it is, who made it, which version, how many have it and what it works with", function()
 	local app = page("Focus timer")
 	local tree = app:tree()
@@ -546,6 +557,8 @@ test("a README of the store's whole 512 KB opens with its first piece, the rest 
 	app:wait("#store-readme", { timeout_ms = 10000 })
 	settle(app, 300)
 	expect(app:error()).to_be_nil()
+	-- (Folded at its height first: opened, its first piece whole.)
+	open_about(app)
 	expect(app:has("#store-readme-more")).to_be(true)
 	local function height(): number
 		return tonumber((app:tree("#store-readme"):match("^%s*@%d+[^\n]- [%d.]+x([%d.]+)"))) or 0
@@ -558,4 +571,77 @@ test("a README of the store's whole 512 KB opens with its first piece, the rest 
 	settle(app, 300)
 	expect(height() > before + 1000).to_be(true)
 	expect(app:error()).to_be_nil()
+end)
+
+-- About folded at its height (screens/plugins/listing ABOUT_FOLD, 1,200,
+-- with a slack of 240), on the page opened with `readme` as Focus timer's.
+local function about_page(readme: string): any
+	local app = mount("plugins_store_fixture.luau")
+	app:resize(1000, 900)
+	app:frames(10)
+	app:set_state("store_stub_readme", readme)
+	app:set_state("plugins_view", "store:focus-timer")
+	app:wait("#store-readme", { timeout_ms = 5000 })
+	settle(app, 400)
+	return app
+end
+local function box(app: any, selector: string): (number, number)
+	local y, h = app:tree(selector):match("^%s*@%d+[^\n]- %-?[%d.]+,(%-?[%d.]+) [%d.]+x([%d.]+)")
+	return tonumber(y) or 0, tonumber(h) or 0
+end
+
+test("a README built to cost folds at its height, under What it asks for, and Report stays near the top", function()
+	local app = about_page(string.sub(string.rep("Heading\n=======\n\n", 32768), 1, 512 * 1024))
+	expect(app:error()).to_be_nil()
+	-- What a person weighs first comes before the author's words.
+	local asks_y = box(app, 'role:heading "What it asks for"')
+	local about_y = box(app, 'role:heading "About"')
+	expect(asks_y < about_y).to_be(true)
+	-- Folded: no taller than the fold and its control, its next pieces
+	-- not offered until it's open.
+	local _, card_h = box(app, "#store-readme")
+	expect(card_h <= 1200 + 80).to_be(true)
+	expect(app:has(".store-about-fold")).to_be(true)
+	expect(app:has("#store-readme-more")).to_be(false)
+	-- Report, the door a page like this needs, is within 2,700 of the top
+	-- on first open (2,576 measured at 1000 wide), not 36,000 down.
+	local report_y = box(app, 'role:link "Report this plugin"')
+	expect(report_y > about_y and report_y <= 2700).to_be(true)
+end)
+
+test("a short README isn't folded, nor one just over the fold by less than its slack", function()
+	-- Focus timer's own (about 670 high).
+	local app = about_page("")
+	expect(app:has(".store-about-fold")).to_be(false)
+	-- A list item is 30 high: 44 of them about 1,320, past the fold by
+	-- less than 240, shown whole; 52, about 1,560, folded.
+	app = about_page(string.rep("- item\n", 44))
+	local _, h = box(app, "#store-readme")
+	expect(h > 1200 + 32).to_be(true)
+	expect(app:has(".store-about-fold")).to_be(false)
+	app = about_page(string.rep("- item\n", 52))
+	expect(app:has(".store-about-fold")).to_be(true)
+end)
+
+test("About's Show more, then Show less, comes back to the same height with its control in view", function()
+	local app = about_page(string.rep("A line of a long README.\n\n", 400))
+	local _, folded_h = box(app, "#store-readme")
+	open_about(app)
+	local _, open_h = box(app, "#store-readme")
+	expect(open_h > folded_h + 1000).to_be(true)
+	expect(app:tree(".store-about-fold")).to_contain("Show less")
+	-- Far down the open text, in a window short enough that the page's end
+	-- alone wouldn't show it, then folded again.
+	app:resize(1000, 500)
+	app:frames(5)
+	local y = box(app, ".store-about-fold")
+	app:scroll("#fixture-scroll", y - 300)
+	app:frames(5)
+	app:click(".store-about-fold")
+	settle(app, 300)
+	local _, again_h = box(app, "#store-readme")
+	expect(math.abs(again_h - folded_h) < 0.5).to_be(true)
+	local at, at_h = box(app, ".store-about-fold")
+	expect(`{at}`).to_be(`{math.clamp(at, 0, 500 - at_h)}`)
+	expect(app:tree(".store-about-fold")).to_contain("Show more")
 end)

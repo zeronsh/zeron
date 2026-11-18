@@ -61,6 +61,17 @@ local function page(readme: string, notes: string?): (any, number)
 	return app, (os.clock() - t0) * 1000
 end
 
+-- About, folded at its height (a long README), opened: its Show more,
+-- brought into view and pressed.
+local function open_about(app: any)
+	local y = tonumber((app:tree(".store-about-fold"):match(" %-?[%d.]+,(%-?[%d.]+) "))) or 0
+	app:scroll("#fixture-scroll", y - 400)
+	app:frames(5)
+	app:click(".store-about-fold")
+	app:wait("#never-there", { timeout_ms = 300 })
+	app:frames(10)
+end
+
 test("a README built to cost, every shape at the store's 512 KiB, opens its page with no error, About drawn", function()
 	for _, s in shapes(512 * KIB) do
 		local app = page(s[2])
@@ -74,6 +85,7 @@ test("past its budget a README is plain text after one quiet line; within it, Ma
 	-- (A setext README of 512 KiB: far past the pieces Markdown may take.)
 	local app = page(string.sub(string.rep("a\n=\n", 131072 + 1), 1, 512 * KIB))
 	settle(app)
+	open_about(app)
 	-- Show more until it's all there: the plain part, with its line.
 	for _ = 1, 60 do
 		if not app:has('#store-readme-more >> role:button "Show more"') then
@@ -112,6 +124,7 @@ test("a piece drawn plain starts and ends on its own text, wherever the cut fell
 	-- to plain falls on a blank line.)
 	local app = page(string.sub(string.rep("Heading\n=======\n\n", 32768), 1, 512 * KIB))
 	settle(app)
+	open_about(app)
 	for _ = 1, 60 do
 		if app:has(".untrusted-plain") then
 			break

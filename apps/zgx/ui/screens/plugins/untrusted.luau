@@ -22,8 +22,16 @@
 -- Show more asks (`more`), or one a frame (`auto`).
 --
 --   untrusted.View { text, what = "readme" | "notes", small?, auto?,
---     image?, heading_step?, drop_title?, picture_radius?, more_id? }
+--     image?, heading_step?, drop_title?, picture_radius?, more_id?,
+--     first_lines?, only_first?, handle? }
 --   untrusted.pieces(text) -> { { plain: boolean, text: string } }
+--
+-- `first_lines`: the first piece also ends at this many lines that aren't
+-- blank (a fold that shows the start alone lays out about what it shows:
+-- a line is 20 high or more). `only_first`: that piece alone, nothing to
+-- show more. `handle` (`untrusted.handle()`, made in the component that
+-- draws it): whether there's more and the way to show the next piece, for
+-- a control drawn outside the text (none inside).
 
 local FoldButton = require("@ds/fold_button").FoldButton
 local Markdown = require("@ds/markdown")
@@ -45,7 +53,7 @@ export type Cutter = { next: (self: Cutter) -> Piece?, done: boolean }
 
 -- What cuts a text into pieces, one at a time, each read as it's asked for
 -- (so the first frame reads one piece, not the whole text).
-function M.cutter(text: string): Cutter
+function M.cutter(text: string, first_lines: number?): Cutter
 	local len = #text
 	local pos = 1
 	local fenced = false
@@ -59,6 +67,8 @@ function M.cutter(text: string): Cutter
 		end
 		local start = pos
 		local units = 0
+		local lines = 0
+		local most_lines = if made == 0 and first_lines then first_lines else math.huge
 		local cut: number? = nil
 		local as_plain = plain
 		while pos <= len do
@@ -86,6 +96,7 @@ function M.cutter(text: string): Cutter
 				fenced = not fenced
 			end
 			if not as_plain and not blank then
+				lines += 1
 				if fenced then
 					units += 1
 				elseif (b == DASH or b == STAR or b == PLUS) and string.byte(text, i + 1) == SPACE then
@@ -121,7 +132,7 @@ function M.cutter(text: string): Cutter
 				plain = true
 				cut = nl
 				break
-			elseif not fenced and (units >= M.UNITS or bytes >= 2 * M.PIECE or (bytes >= M.PIECE and blank)) then
+			elseif not fenced and (units >= M.UNITS or lines >= most_lines or bytes >= 2 * M.PIECE or (bytes >= M.PIECE and blank)) then
 				cut = nl
 				break
 			end
@@ -182,6 +193,13 @@ function M.pieces(text: string): { Piece }
 	return out
 end
 
+-- Whether a view has more to show, and the way to show its next piece: for
+-- a control drawn outside its text. Made in the component that draws both.
+export type Handle = { more: State<boolean>, next: (() -> ())? }
+function M.handle(): Handle
+	return { more = ui.use_state(false), next = nil }
+end
+
 export type ViewProps = {
 	text: string,
 	what: "readme" | "notes",
@@ -192,12 +210,15 @@ export type ViewProps = {
 	drop_title: ((words: string) -> boolean)?,
 	picture_radius: string?,
 	more_id: string?,
+	first_lines: number?,
+	only_first: boolean?,
+	handle: Handle?,
 }
 
 M.View = ui.component(function(props: ViewProps): Node
 	-- (Pieces cut as they're shown: the first now, each next in the call
 	-- that shows it.)
-	local cutter = M.cutter(props.text)
+	local cutter = M.cutter(props.text, props.first_lines)
 	local pieces: { Piece } = {}
 	local function cut_one(): boolean
 		local p = cutter:next()
@@ -211,10 +232,24 @@ M.View = ui.component(function(props: ViewProps): Node
 	local count = ui.use_state(#pieces)
 	local more = ui.use_state(not cutter.done)
 	local function show_next()
+		if props.only_first then
+			return
+		end
 		if cut_one() then
 			count:set(#pieces)
 		end
 		more:set(not cutter.done)
+		if props.handle then
+			props.handle.more:set(not cutter.done)
+		end
+	end
+	if props.handle then
+		local handle = props.handle
+		handle.next = show_next
+		-- (Said once it's there: never while it's being built.)
+		ui.on_mount(function()
+			handle.more:set(not cutter.done)
+		end)
 	end
 	-- (`auto`: the rest a piece a frame, each its own call.)
 	if props.auto then
@@ -289,7 +324,7 @@ M.View = ui.component(function(props: ViewProps): Node
 				return i
 			end,
 		}),
-		if props.auto
+		if props.auto or props.only_first or props.handle
 			then nil
 			else ui.show(function(): boolean
 				return more:get()
