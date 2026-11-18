@@ -10641,6 +10641,158 @@
           "shots/board.png"
         ]
       },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Это официальная панель Jira.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "description: Russian near панель",
+      "problems": [
+        {
+          "cause": "mark_word",
+          "field": "description",
+          "path": null,
+          "rule": "bad_listing",
+          "word": "официальная"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"官方 Jira 面板\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "description: Chinese 官方 near 面板",
+      "problems": [
+        {
+          "cause": "mark_word",
+          "field": "description",
+          "path": null,
+          "rule": "bad_listing",
+          "word": "官方"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"公式 Jira パネル\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "description: Japanese 公式 near パネル",
+      "problems": [
+        {
+          "cause": "mark_word",
+          "field": "description",
+          "path": null,
+          "rule": "bad_listing",
+          "word": "公式"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
+      "manifest": "{\"categories\":[\"productivity\"],\"description\":\"공식 Jira 패널\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
+      "name": "description: Korean 공식 near 패널",
+      "problems": [
+        {
+          "cause": "mark_word",
+          "field": "description",
+          "path": null,
+          "rule": "bad_listing",
+          "word": "공식"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBCb2FyZHMuCgojIyAxLjEuMAoKLSBGaXJzdC4=",
+        "README.md": "IyBGb2N1cyBCb2FyZAoKV2hhdCB5b3UncmUgb24u",
+        "icon.svg": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjYiLz48L3N2Zz4=",
+        "init.luau": "cmV0dXJuIHt9",
+        "shots/board.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [
+          "productivity"
+        ],
+        "engines_zeron": ">=0.3.0",
+        "homepage": "https://example.com/focus",
+        "icon": "icon.svg",
+        "keywords": [
+          "focus",
+          "board"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/focus",
+        "screenshots": [
+          "shots/board.png"
+        ]
+      },
       "manifest": "{\"categories\":[\"productivity\"],\"description\":\"Opens the official Rust documentation.\",\"engines\":{\"zeron\":\">=0.3.0\"},\"entry\":\"init.luau\",\"homepage\":\"https://example.com/focus\",\"icon\":\"icon.svg\",\"id\":\"focus-board\",\"keywords\":[\"focus\",\"board\"],\"license\":\"MIT\",\"name\":\"Focus Board\",\"repository\":\"https://github.com/example/focus\",\"screenshots\":[\"shots/board.png\"],\"version\":\"1.2.0\"}",
       "name": "description: someone else's official docs are fine",
       "problems": [],
