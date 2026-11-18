@@ -1322,12 +1322,14 @@ pub(crate) mod tests {
 
     /// A hostile package on the disk Zeron's people run: macOS's APFS, which
     /// ignores case and Unicode normalization when it compares names. Each
-    /// package is real and signed, and installed as a sideloaded one is (no
-    /// store's check before it). Where its paths name one file twice on this
-    /// disk, it's refused with a word, nothing left in the plugins folder and
-    /// nothing staged; where they don't, what's installed is exactly what
-    /// was signed. (Only on macOS: elsewhere the disk tells these names apart
-    /// and none of them collide.)
+    /// package is real and signed. Where its paths name one file twice
+    /// (folded as the store folds them), it's refused as it's read, with a
+    /// word naming the two (`paths_collide`), before anything is written;
+    /// and, built past that check, the scan after writing still refuses it,
+    /// nothing left in the plugins folder and nothing staged. Where they
+    /// don't, what's installed is exactly what was signed. (Only on macOS:
+    /// the disk's own folding is asked first; elsewhere it tells these names
+    /// apart.)
     #[cfg(target_os = "macos")]
     mod on_a_folding_disk {
         use super::*;
@@ -1339,10 +1341,9 @@ pub(crate) mod tests {
             dir.path().join(b).exists()
         }
 
-        /// `files` (and an entry), signed, installed into an empty plugins
-        /// folder: what came of it, the folder, and the package.
-        fn install_files(files: &[(&str, &[u8])]) -> (Result<Option<Replaced>, String>, tempfile::TempDir, Package) {
-            let dir = tempfile::tempdir().unwrap();
+        /// `files` and an entry, signed: the package as it travels, and its
+        /// parts.
+        fn signed(files: &[(&str, &[u8])]) -> (Vec<u8>, serde_json::Value, SigningKey, BTreeMap<String, Vec<u8>>) {
             let (key, _) = SigningKey::generate().unwrap();
             let mut all = BTreeMap::new();
             all.insert("init.luau".to_string(), b"return 1".to_vec());
@@ -1350,10 +1351,39 @@ pub(crate) mod tests {
                 all.insert(rel.to_string(), bytes.to_vec());
             }
             let manifest = key.sign_manifest(&json!({ "id": "focus", "name": "F", "version": "1.0.0", "entry": "init.luau" }), &package::hashes(&all));
-            let package = parse(package::pack(FORMAT, &manifest, &all).unwrap()).expect("a signed package Zeron takes");
-            // (A file's, sideloaded: no store looked at it first.)
-            let source: Source = serde_json::from_value(json!({ "kind": "file", "version": "", "installed_at": 0 })).unwrap();
-            (install(dir.path(), &package, &source, None), dir, package)
+            (package::pack(FORMAT, &manifest, &all).unwrap(), manifest, key, all)
+        }
+
+        /// (A file's, sideloaded: no store looked at it first.)
+        fn source() -> Source {
+            serde_json::from_value(json!({ "kind": "file", "version": "", "installed_at": 0 })).unwrap()
+        }
+
+        /// Refused as it's read: `paths_collide`, naming each of `named`.
+        fn refused_as_read(files: &[(&str, &[u8])], named: &[&str]) {
+            let error = parse(signed(files).0).map(|_| ()).unwrap_err();
+            assert_eq!(reason_of(&error), Some(reason::PATHS_COLLIDE), "{error}");
+            for rel in named {
+                assert!(error.contains(&format!("{rel:?}")), "{error} names {rel:?}");
+            }
+        }
+
+        /// The same package built past that check (as a store that didn't
+        /// check would hand it over), installed into an empty plugins folder.
+        fn installed_past_the_read(files: &[(&str, &[u8])]) -> (Result<Option<Replaced>, String>, tempfile::TempDir) {
+            let dir = tempfile::tempdir().unwrap();
+            let (_, manifest, key, all) = signed(files);
+            let manifest = Manifest::from_value(manifest).unwrap();
+            let hash = signing::content_hash(&manifest, &package::hashes(&all));
+            let package = Package { manifest, key: key.public(), files: all, hash };
+            (install(dir.path(), &package, &source(), None), dir)
+        }
+
+        /// `files` read and installed as Zeron takes any package.
+        fn installed(files: &[(&str, &[u8])]) -> (Result<Option<Replaced>, String>, tempfile::TempDir, Package) {
+            let dir = tempfile::tempdir().unwrap();
+            let package = parse(signed(files).0).expect("a signed package Zeron takes");
+            (install(dir.path(), &package, &source(), None), dir, package)
         }
 
         /// Refused, with a word, and nothing left: no plugin, nothing staged.
@@ -1384,7 +1414,9 @@ pub(crate) mod tests {
         #[test]
         fn two_files_differing_only_in_case_are_refused() {
             assert!(folds("a.luau", "A.luau"), "this disk ignores case");
-            let (result, dir, _) = install_files(&[("a.luau", b"return 'lower'"), ("A.luau", b"return 'upper'")]);
+            let files: &[(&str, &[u8])] = &[("a.luau", b"return 'lower'"), ("A.luau", b"return 'upper'")];
+            refused_as_read(files, &["a.luau", "A.luau"]);
+            let (result, dir) = installed_past_the_read(files);
             fails_closed(result, dir.path(), CHANGED);
         }
 
@@ -1392,7 +1424,9 @@ pub(crate) mod tests {
         fn two_names_equal_once_normalized_are_refused() {
             let (composed, decomposed) = ("caf\u{e9}.luau", "cafe\u{301}.luau");
             assert!(folds(composed, decomposed), "this disk ignores Unicode normalization");
-            let (result, dir, _) = install_files(&[(composed, b"return 'composed'"), (decomposed, b"return 'decomposed'")]);
+            let files: &[(&str, &[u8])] = &[(composed, b"return 'composed'"), (decomposed, b"return 'decomposed'")];
+            refused_as_read(files, &[composed, decomposed]);
+            let (result, dir) = installed_past_the_read(files);
             fails_closed(result, dir.path(), CHANGED);
         }
 
@@ -1400,61 +1434,61 @@ pub(crate) mod tests {
         fn a_file_and_a_folder_that_fold_alike_are_refused() {
             // Either order the package lists them in (`Lib/…` before `lib`,
             // `Lib` before `lib/…`).
-            let (result, dir, _) = install_files(&[("lib", b"a file"), ("Lib/x.luau", b"return 1")]);
-            fails_closed(result, dir.path(), UNWRITABLE);
-            let (result, dir, _) = install_files(&[("Lib", b"a file"), ("lib/x.luau", b"return 1")]);
-            fails_closed(result, dir.path(), UNWRITABLE);
+            let lib_first: &[(&str, &[u8])] = &[("lib", b"a file"), ("Lib/x.luau", b"return 1")];
+            let folder_first: &[(&str, &[u8])] = &[("Lib", b"a file"), ("lib/x.luau", b"return 1")];
+            for files in [lib_first, folder_first] {
+                let named: Vec<&str> = files.iter().map(|(rel, _)| *rel).collect();
+                refused_as_read(files, &named);
+                let (result, dir) = installed_past_the_read(files);
+                fails_closed(result, dir.path(), UNWRITABLE);
+            }
         }
 
         #[test]
         fn a_file_that_folds_onto_the_manifest_is_refused() {
-            assert!(folds("zeron-plugin.json", "Zeron-Plugin.json"));
-            let (result, dir, _) = install_files(&[("Zeron-Plugin.json", br#"{ "id": "focus", "permissions": ["commands"] }"#)]);
-            fails_closed(result, dir.path(), CHANGED);
-            // And by Unicode's case folding alone (the long s, `ſ`, is `s`):
-            // refused where this disk folds it so, else its own file.
-            let long_s = "zeron-plugin.j\u{17f}on";
-            let (result, dir, package) = install_files(&[(long_s, b"{}")]);
-            if folds("zeron-plugin.json", long_s) {
+            // By case, and by Unicode's case folding alone (the long s, `ſ`,
+            // is `s` to this disk).
+            for rel in ["Zeron-Plugin.json", "zeron-plugin.j\u{17f}on"] {
+                assert!(folds("zeron-plugin.json", rel), "{rel:?} opens the manifest on this disk");
+                let files: &[(&str, &[u8])] = &[(rel, br#"{ "id": "focus", "permissions": ["commands"] }"#)];
+                refused_as_read(files, &[rel, "zeron-plugin.json"]);
+                let (result, dir) = installed_past_the_read(files);
                 fails_closed(result, dir.path(), CHANGED);
-            } else {
-                installs_as_signed(result, dir.path(), &package);
             }
         }
 
         #[test]
         fn a_name_that_would_be_a_dot_name_is_refused_or_is_its_own_file() {
-            // Refused before anything's written: a dot name is never a
-            // package's (`plain_path`), nor one ending in a dot or a space,
-            // which APFS keeps but Windows drops.
+            // Refused as it's read: a dot name is never a package's
+            // (`plain_path`), nor one ending in a dot or a space, which APFS
+            // keeps but Windows drops.
             for rel in [".source.json", ".Source.json", ".\u{17f}ource.json", "x.luau.", "x.luau ", "lib./x.luau"] {
-                let mut files = BTreeMap::new();
-                files.insert("init.luau".to_string(), b"return 1".to_vec());
-                files.insert(rel.to_string(), b"{}".to_vec());
-                let (key, _) = SigningKey::generate().unwrap();
-                let manifest = key.sign_manifest(&json!({ "id": "focus", "name": "F", "version": "1.0.0", "entry": "init.luau" }), &package::hashes(&files));
-                assert!(parse(package::pack(FORMAT, &manifest, &files).unwrap()).is_err(), "{rel:?} is never a package's path");
+                let error = parse(signed(&[(rel, b"{}")]).0).map(|_| ()).unwrap_err();
+                assert_eq!(reason_of(&error), Some("bad_file"), "{rel:?}: {error}");
             }
-            // A fullwidth dot, a one-dot leader, a zero-width space before
-            // the dot: APFS keeps each apart from `.source.json`, so each is
-            // a file of its own, installed as signed, Zeron's own beside it.
-            for rel in ["\u{ff0e}source.json", "\u{2024}source.json", "\u{200b}.source.json"] {
-                assert!(!folds(".source.json", rel), "{rel:?} is its own name on this disk");
-                let (result, dir, package) = install_files(&[(rel, br#"{ "kind": "store" }"#)]);
+            // A fullwidth dot (leading, or trailing), a one-dot leader, a
+            // zero-width space before the dot: APFS keeps each apart, so
+            // each is a file of its own, installed as signed, Zeron's own
+            // `.source.json` beside it.
+            for (rel, apart_from) in [
+                ("\u{ff0e}source.json", ".source.json"),
+                ("\u{2024}source.json", ".source.json"),
+                ("\u{200b}.source.json", ".source.json"),
+                ("x.luau\u{ff0e}", "x.luau"),
+            ] {
+                assert!(!folds(apart_from, rel), "{rel:?} is its own name on this disk");
+                let (result, dir, package) = installed(&[(rel, br#"{ "kind": "store" }"#), (apart_from.trim_start_matches('.'), b"--")]);
                 installs_as_signed(result, dir.path(), &package);
             }
         }
 
         #[test]
         fn what_is_installed_is_always_what_was_signed() {
-            // Every case above, at once: still refused, nothing left.
-            let (result, dir, _) = install_files(&[
-                ("a.luau", b"1"),
-                ("A.luau", b"2"),
-                ("caf\u{e9}.luau", b"3"),
-                ("cafe\u{301}.luau", b"4"),
-                ("Zeron-Plugin.json", b"{}"),
-            ]);
+            // Every collision above, at once: refused as read, and past it.
+            let files: &[(&str, &[u8])] = &[("a.luau", b"1"), ("A.luau", b"2"), ("caf\u{e9}.luau", b"3"), ("cafe\u{301}.luau", b"4"), ("Zeron-Plugin.json", b"{}")];
+            let error = parse(signed(files).0).map(|_| ()).unwrap_err();
+            assert_eq!(reason_of(&error), Some(reason::PATHS_COLLIDE), "{error}");
+            let (result, dir) = installed_past_the_read(files);
             fails_closed(result, dir.path(), CHANGED);
         }
     }
