@@ -5,7 +5,7 @@
  * VaultAccount owns persistence, generations and the one-refresh-in-flight
  * gate — so every adapter is unit-testable in Node with an injected `fetch`.
  */
-import type { VaultMaterial, VaultProviderId } from "../api";
+import type { VaultAccountProfile, VaultMaterial, VaultProviderId } from "../api";
 
 export type FetchFn = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -59,7 +59,7 @@ export interface ProviderAdapter<S> {
   /** What makes two uploads the same account (never secret material): the
    * same identity replaces its account instead of adding one. Absent: the
    * account DO's own rule for the provider. */
-  identity?(secret: S): Promise<string | undefined>;
+  identity?(secret: S, profile: VaultAccountProfile): Promise<string | undefined>;
   /** Whether a refresh token exists at all (canary: "not_refreshable"). */
   refreshable(secret: S): boolean;
   refreshDue(secret: S, now: number): boolean;

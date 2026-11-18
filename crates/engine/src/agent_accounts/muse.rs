@@ -238,6 +238,76 @@ impl AgentAccounts {
         })
     }
 
+    /// A Muse sign-in for Cloud: Muse's own device-code sign-in against a
+    /// throwaway, file-backed config root (never one of this device's
+    /// accounts), whose `auth.json` goes to `capture` as a `muse` upload
+    /// once Muse signed in. The root is shredded on every exit path.
+    pub(super) async fn start_muse_capture(
+        &self,
+        capture: super::CaptureSink,
+    ) -> Result<AgentLoginStart, EngineError> {
+        self.reap_spawned_flows(HarnessId::Muse);
+        let cli = self.muse_cli()?;
+        let login_id = new_id();
+        let home = self.login_home(&login_id)?;
+        let shred = super::ShredOnDrop(home.clone());
+        let config = home.join("config");
+        let auth_file = config.join("muse").join("auth.json");
+        private_dir(&config.join("muse"))?;
+        let env = BTreeMap::from([
+            (
+                "XDG_CONFIG_HOME".to_string(),
+                config.to_string_lossy().into_owned(),
+            ),
+            (
+                "MUSE_AUTH_PATH".to_string(),
+                auth_file.to_string_lossy().into_owned(),
+            ),
+            ("TBH_CREDENTIAL_BACKEND".to_string(), "file".to_string()),
+        ]);
+        let login = msp::start_device_login(&cli, &env)
+            .await
+            .map_err(muse_error)?;
+        let url = login.verification_url.clone();
+        let state = std::sync::Arc::new(std::sync::Mutex::new(TaskLoginState {
+            url: Some(url.clone()),
+            message: Some(format!("Enter the code {} on Meta.", login.user_code)),
+            ..Default::default()
+        }));
+        let task_state = state.clone();
+        let handle = tokio::spawn(async move {
+            let found = login.finish().await.and_then(|_| {
+                super::muse_capture(&auth_file).ok_or_else(|| {
+                    "Muse reported a successful sign-in, but saved no Meta login.".to_string()
+                })
+            });
+            // Off the disk before the upload.
+            drop(shred);
+            let outcome = match found {
+                Ok(upload) => capture(upload).await,
+                Err(message) => Err(message),
+            };
+            lock(&task_state).outcome = Some(outcome);
+        });
+        lock(&self.inner.flows).insert(
+            login_id.clone(),
+            LoginFlow::Task {
+                harness: HarnessId::Muse,
+                started_at: std::time::Instant::now(),
+                state,
+                handle,
+                home: Some(home),
+                port: None,
+            },
+        );
+        Ok(AgentLoginStart {
+            login_id,
+            url,
+            mode: AgentLoginMode::Browser,
+            callback_port: None,
+        })
+    }
+
     /// The Muse sign-in still waiting for approval, if any.
     fn pending_muse_login(&self) -> Option<AgentLoginStart> {
         let flows = lock(&self.inner.flows);

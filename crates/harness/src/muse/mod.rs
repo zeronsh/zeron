@@ -109,7 +109,9 @@ impl MuseHarness {
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
         let exe = self.resolve_executable()?;
         let cwd = std::env::current_dir()?;
-        let mut host = Host::spawn(&exe, &cwd, Mode::ReadOnly, &Default::default())?;
+        // (A Cloud machine's Meta key: crate::catalog_env.)
+        let env = crate::catalog_env::get(HarnessId::Muse);
+        let mut host = Host::spawn(&exe, &cwd, Mode::ReadOnly, &env)?;
         let grace = self.kill_grace;
         let result = tokio::time::timeout(Duration::from_secs(20), async {
             host.initialize(true).await?;

@@ -108,6 +108,7 @@ import {
   type MachineSpec,
   type WorkflowKind
 } from "./policy";
+import { isCloudAgent, type CloudAgent, type PublishedCatalog, type PublishedModel } from "./models";
 import { activeProviderName, sandboxProvider } from "./providers";
 import { WAKE_STAGE_TTL_MS, wakeTiming, type EngineTiming, type WakeStage, type WakeStages, type WakeTrace } from "./wake";
 import {
@@ -477,6 +478,8 @@ const RETIRED_DEVICES_KEPT = 8;
 /** While a machine is awake, credits are re-checked this often. */
 const CREDIT_CHECK_MS = 5 * 60_000;
 const SESSION_PREFIX = "session:";
+/** `models:{agent}` → the agent's catalog a machine last published. */
+const MODELS_PREFIX = "models:";
 /** A delete that crashed mid-way may be retried after this long. */
 const DELETE_STUCK_MS = 5 * 60_000;
 /** Waits before retrying a failed delete on its own; the last repeats. */
@@ -2035,6 +2038,39 @@ export class CloudAccount extends DurableObject<Env> {
     if (!this.matches(caller)) return undefined;
     const parent = this.sessionByDevice(deviceId)?.parentChatId;
     return parent === undefined ? undefined : this.sessions.get(parent)?.deviceId;
+  }
+
+  /**
+   * `POST /runner/models` (runner bearer, already verified): the catalog a
+   * machine discovered for `agent` with Cloud's credentials. Kept as the
+   * account's (every machine runs on the same logins), so the model picker
+   * lists it while every machine sleeps. The latest publish wins.
+   */
+  async publishModels(
+    runner: CloudCaller & { deviceId: string },
+    agent: CloudAgent,
+    models: readonly PublishedModel[],
+    credential: string
+  ): Promise<CloudResult<{ ok: true }>> {
+    const s = this.sessionByDevice(runner.deviceId);
+    if (!s || !s.runnerKey || !this.matches(runner)) {
+      return fail(403, "revoked", "This Cloud device is not enrolled.");
+    }
+    const catalog: PublishedCatalog = { models, credential, at: Date.now() };
+    await this.ctx.storage.put(`${MODELS_PREFIX}${agent}`, catalog);
+    return { ok: true, value: { ok: true } };
+  }
+
+  /** The catalogs machines published, by agent (`GET /cloud/{orgId}/models`).
+   * Empty for anyone but this account's own user. */
+  async publishedModels(caller: CloudCaller): Promise<Partial<Record<CloudAgent, PublishedCatalog>>> {
+    if (!this.matches(caller)) return {};
+    const out: Partial<Record<CloudAgent, PublishedCatalog>> = {};
+    for (const [key, catalog] of await this.ctx.storage.list<PublishedCatalog>({ prefix: MODELS_PREFIX })) {
+      const agent = key.slice(MODELS_PREFIX.length);
+      if (isCloudAgent(agent)) out[agent] = catalog;
+    }
+    return out;
   }
 
   /** `POST /runner/heartbeat` (runner bearer, already verified). */

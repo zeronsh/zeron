@@ -89,3 +89,155 @@ export const CLOUD_MODELS: Readonly<Record<CloudHarness, readonly CloudModel[]>>
     model("gpt-daybreak-blue-latest", "Daybreak Blue", "Latest frontier agentic coding model for broad defensive cybersecurity work.", CODEX_ULTRA),
   ],
 };
+
+// ── Catalogs Cloud machines publish ─────────────────────────────────────────
+
+/**
+ * Every agent a Cloud machine runs (crates/proto `CLOUD_HARNESSES`). Beyond
+ * the two above, an agent's models depend on the credentials Cloud holds for
+ * it (Pi lists the models of every provider it's signed in to), so its
+ * catalog is the one a machine last discovered with Cloud's credentials
+ * (`POST /runner/models`), kept per account and served while every machine
+ * sleeps.
+ */
+export const CLOUD_AGENTS = [
+  "claude-code",
+  "codex",
+  "cursor",
+  "devin",
+  "grok",
+  "hermes",
+  "fx",
+  "pi",
+  "opencode",
+  "antigravity",
+  "muse"
+] as const;
+export type CloudAgent = (typeof CLOUD_AGENTS)[number];
+
+export const isCloudAgent = (value: unknown): value is CloudAgent =>
+  typeof value === "string" && (CLOUD_AGENTS as readonly string[]).includes(value);
+
+/** Whose models come from `CLOUD_MODELS` (kept by hand), never a machine. */
+export const isStaticCloudAgent = (agent: CloudAgent): agent is CloudHarness => agent in CLOUD_MODELS;
+
+/** A published model, as `crates/proto` `Model` serializes it. */
+export interface PublishedModel {
+  readonly id: string;
+  readonly label: string;
+  readonly description?: string;
+  readonly provider?: { readonly id: string; readonly name: string };
+  readonly reasoningLevels: readonly string[];
+  readonly options: readonly ModelOption[];
+  readonly default?: boolean;
+}
+
+export interface PublishedCatalog {
+  readonly models: readonly PublishedModel[];
+  /** The machine's credential fingerprint the catalog was discovered with
+   * (opaque: which logins and keys, never their secrets). */
+  readonly credential: string;
+  /** Unix ms. */
+  readonly at: number;
+}
+
+/** The most models one agent's catalog keeps. */
+export const MAX_PUBLISHED_MODELS = 400;
+/** A catalog's stored size at most (a Durable Object value is ≤ 128 KiB). */
+export const MAX_PUBLISHED_BYTES = 100 * 1024;
+/** The body of `POST /runner/models` at most. */
+export const MAX_PUBLISH_BODY = 512 * 1024;
+
+/** The reasoning levels every client parses (crates/proto `ReasoningLevel`):
+ * an older phone reads a whole catalog strictly, so nothing else is kept. */
+const REASONING_LEVELS = new Set(["minimal", "low", "medium", "high", "xhigh", "max", "ultra", "ultracode", "ultrathink"]);
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const text = (value: unknown, max: number): string | undefined =>
+  typeof value === "string" && value.length > 0 && value.length <= max ? value : undefined;
+
+const option = (value: unknown): ModelOption | undefined => {
+  if (!isRecord(value)) return undefined;
+  const id = text(value.id, 100);
+  const label = text(value.label, 100);
+  const defaultChoice = text(value.defaultChoice, 100);
+  if (!id || !label || !defaultChoice || !Array.isArray(value.choices) || value.choices.length > 32) return undefined;
+  const choices: { id: string; label: string }[] = [];
+  for (const choice of value.choices) {
+    const choiceId = isRecord(choice) ? text(choice.id, 100) : undefined;
+    const choiceLabel = isRecord(choice) ? text(choice.label, 100) : undefined;
+    if (!choiceId || !choiceLabel) return undefined;
+    choices.push({ id: choiceId, label: choiceLabel });
+  }
+  return { id, label, choices, defaultChoice };
+};
+
+/** One model, or undefined when it isn't one (dropped, not fatal). */
+const publishedModel = (value: unknown): PublishedModel | undefined => {
+  if (!isRecord(value)) return undefined;
+  const id = text(value.id, 200);
+  const label = text(value.label, 200);
+  if (!id || !label) return undefined;
+  const description = text(value.description, 500);
+  const provider =
+    isRecord(value.provider) && text(value.provider.id, 100) && text(value.provider.name, 100)
+      ? { id: value.provider.id as string, name: value.provider.name as string }
+      : undefined;
+  const reasoningLevels = Array.isArray(value.reasoningLevels)
+    ? value.reasoningLevels.filter((level): level is string => typeof level === "string" && REASONING_LEVELS.has(level))
+    : [];
+  const options = Array.isArray(value.options)
+    ? value.options.slice(0, 16).map(option).filter((o): o is ModelOption => o !== undefined)
+    : [];
+  return {
+    id,
+    label,
+    ...(description ? { description } : {}),
+    ...(provider ? { provider } : {}),
+    reasoningLevels: [...new Set(reasoningLevels)],
+    options,
+    ...(value.default === true ? { default: true } : {})
+  };
+};
+
+/**
+ * A machine's catalog as it is kept: the models that parse (the rest
+ * dropped), at most `MAX_PUBLISHED_MODELS`, distinct by id, and small enough
+ * to store — descriptions go first, then models from the end. Undefined when
+ * nothing usable is left.
+ */
+export const parsePublishedModels = (value: unknown): PublishedModel[] | undefined => {
+  if (!Array.isArray(value)) return undefined;
+  const seen = new Set<string>();
+  let models: PublishedModel[] = [];
+  for (const raw of value) {
+    if (models.length >= MAX_PUBLISHED_MODELS) break;
+    const model = publishedModel(raw);
+    if (!model || seen.has(model.id)) continue;
+    seen.add(model.id);
+    models.push(model);
+  }
+  const size = (list: readonly PublishedModel[]) => JSON.stringify(list).length;
+  if (size(models) > MAX_PUBLISHED_BYTES) {
+    models = models.map(({ description: _, ...rest }) => rest);
+  }
+  while (models.length > 0 && size(models) > MAX_PUBLISHED_BYTES) {
+    models = models.slice(0, Math.floor(models.length * 0.9));
+  }
+  return models.length > 0 ? models : undefined;
+};
+
+/** What `GET /cloud/{orgId}/models` answers: the hand-kept lists, then every
+ * other agent's last published catalog. */
+export const cloudModels = (
+  published: Readonly<Partial<Record<CloudAgent, PublishedCatalog>>>
+): Record<string, readonly (CloudModel | PublishedModel)[]> => {
+  const out: Record<string, readonly (CloudModel | PublishedModel)[]> = { ...CLOUD_MODELS };
+  for (const agent of CLOUD_AGENTS) {
+    const catalog = published[agent];
+    if (!isStaticCloudAgent(agent) && catalog && catalog.models.length > 0) out[agent] = catalog.models;
+  }
+  return out;
+};

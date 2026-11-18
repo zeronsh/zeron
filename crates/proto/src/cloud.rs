@@ -426,7 +426,7 @@ pub enum VaultProvider {
     Codex,
     /// Claude subscription sign-in for Claude Code (uploaded from a laptop's
     /// sign-in through Claude's own OAuth flow, or a `claude setup-token`).
-    /// Granted to the unmodified Claude Code CLI only.
+    /// Claude Code runs on it, and so does Pi's Claude provider.
     Claude,
     /// GitHub App user token (device flow).
     Github,
@@ -458,6 +458,16 @@ pub enum VaultProvider {
     /// A Grok (xAI) sign-in: the OIDC token set `grok login` writes. The
     /// vault refreshes it; machines get its access token only.
     Grok,
+    /// Hermes' xAI sign-in (`hermes auth add xai-oauth`): its own xAI OAuth
+    /// grant (API scopes), refreshed by the vault at xAI.
+    XaiOauth,
+    /// Hermes' Nous Portal sign-in, refreshed by the vault at the portal.
+    Nous,
+    /// Antigravity's Google sign-in, refreshed by the vault at Google.
+    Antigravity,
+    /// Muse Code's Meta sign-in: its long-lived access token, used until it
+    /// expires (Muse mints its model keys from it).
+    Muse,
 }
 
 impl VaultProvider {
@@ -465,7 +475,7 @@ impl VaultProvider {
         Self::ALL.into_iter().find(|p| p.as_str() == value)
     }
 
-    pub const ALL: [VaultProvider; 15] = [
+    pub const ALL: [VaultProvider; 19] = [
         VaultProvider::Codex,
         VaultProvider::Claude,
         VaultProvider::Github,
@@ -481,6 +491,10 @@ impl VaultProvider {
         VaultProvider::Copilot,
         VaultProvider::Devin,
         VaultProvider::Grok,
+        VaultProvider::XaiOauth,
+        VaultProvider::Nous,
+        VaultProvider::Antigravity,
+        VaultProvider::Muse,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -500,6 +514,10 @@ impl VaultProvider {
             VaultProvider::Copilot => "copilot",
             VaultProvider::Devin => "devin",
             VaultProvider::Grok => "grok",
+            VaultProvider::XaiOauth => "xai-oauth",
+            VaultProvider::Nous => "nous",
+            VaultProvider::Antigravity => "antigravity",
+            VaultProvider::Muse => "muse",
         }
     }
 
@@ -532,6 +550,8 @@ impl VaultProvider {
             VaultProvider::AnthropicKey => Some(VaultProvider::Claude),
             VaultProvider::OpenaiKey => Some(VaultProvider::Codex),
             VaultProvider::XaiKey => Some(VaultProvider::Grok),
+            VaultProvider::GeminiKey => Some(VaultProvider::Antigravity),
+            VaultProvider::MetaKey => Some(VaultProvider::Muse),
             _ => None,
         }
     }

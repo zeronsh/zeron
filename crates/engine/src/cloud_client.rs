@@ -457,10 +457,11 @@ impl CloudClient {
             .map_err(Failure::into_error)
     }
 
-    /// `GET /cloud/{orgId}/models`: the models Cloud's machines run, by agent
-    /// (`claude-code`, `codex`), kept on the edge by hand so a new one needs no
-    /// app release. Each model is as the edge wrote it; [`cloud_models`] reads
-    /// them leniently.
+    /// `GET /cloud/{orgId}/models`: the models Cloud's machines run, by agent:
+    /// Claude Code's and Codex's kept on the edge by hand (a new one needs no
+    /// app release), every other agent's as a machine of this account last
+    /// discovered it with Cloud's credentials (`crate::model_publish`). Each
+    /// model is as the edge wrote it; [`cloud_models`] reads them leniently.
     pub async fn models(
         &self,
     ) -> Result<std::collections::HashMap<String, Vec<serde_json::Value>>, EngineError> {
@@ -1181,11 +1182,12 @@ pub(crate) async fn dispatch(
                 .put_api_key(p.provider, &p.key, p.authorized_devices)
                 .await
                 .map_err(failed)?;
-            // A new key is the account Cloud uses from now on — machines
-            // prefer an active subscription login, so clear that one.
-            if let Some(login) = p.provider.login_it_replaces() {
-                cloud.vault_activate(login, None).await.map_err(failed)?;
-            }
+            // The key becomes its vendor's active key. No sign-in is
+            // cleared: logins are shared by several agents (one ChatGPT
+            // login runs Codex, Pi, OpenCode and Hermes), so a key saved for
+            // one must not sign the others out. Machines use it wherever no
+            // sign-in is in use; preferring it over a sign-in is the card's
+            // own switch (`ActivateAgentAccount`).
             RpcReply::value(&status)
         }
         methods::VAULT_AUTHORIZE => {
@@ -2021,6 +2023,43 @@ mod tests {
         assert!(
             error.to_string().contains("Subscribe or buy credits first"),
             "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn saving_a_key_signs_no_agent_out() {
+        fn edge(method: &str, target: &str, _: &serde_json::Value) -> (u16, serde_json::Value) {
+            match method {
+                "PUT" if target.starts_with("/vault/org_1/credentials/") => (200, vault_view()),
+                _ => (404, serde_json::json!({"error": "not_found"})),
+            }
+        }
+        let edge = MockEdge::start(edge).await;
+        let client = edge.client("org_1");
+        let tmp = tempfile::tempdir().unwrap();
+        let accounts = AgentAccounts::new(crate::agent_accounts::AgentAccountsConfig::detect(
+            tmp.path(),
+        ));
+        // An OpenAI key beside the ChatGPT login Codex, Pi, OpenCode and
+        // Hermes share: saved, and nothing else changes.
+        for provider in ["openai-key", "anthropic-key", "xai-key", "gemini-key"] {
+            dispatch(
+                client.clone(),
+                &accounts,
+                zeron_rpc::methods::VAULT_PUT_API_KEY,
+                serde_json::json!({
+                    "provider": provider, "key": "sk-saved-key-1", "authorizedDevices": ["cloud-1"]
+                }),
+            )
+            .await
+            .unwrap();
+        }
+        let requests = edge.requests();
+        assert_eq!(requests.iter().filter(|r| r.method == "PUT").count(), 4);
+        assert!(
+            requests.iter().all(|r| !r.target.ends_with("/active")),
+            "{:?}",
+            requests.iter().map(|r| &r.target).collect::<Vec<_>>()
         );
     }
 

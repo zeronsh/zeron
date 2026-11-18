@@ -429,9 +429,9 @@ impl Client {
     }
 
     /// `PUT /vault/{org}/credentials/{vendor}-key` — the user's own API key
-    /// (any vendor's: `anthropic-key`, `openrouter-key`, …), made the one
-    /// Cloud uses: the subscription login it stands behind steps aside, as
-    /// on desktop.
+    /// (any vendor's: `anthropic-key`, `openrouter-key`, …), made its
+    /// vendor's active key. Machines use it wherever no sign-in is in use;
+    /// no sign-in is cleared.
     pub async fn vault_put_api_key(&self, provider: VaultProvider, key: &str) -> Result<()> {
         if !provider.is_api_key() {
             return Err(ClientError::InvalidArgument(format!(
@@ -453,12 +453,11 @@ impl Client {
         if self.inner.is_demo() {
             return Ok(());
         }
+        // The key becomes its vendor's active key; no sign-in is cleared
+        // (several agents share one, so a key for one must not sign the
+        // others out). Machines use it wherever no sign-in is in use.
         self.put_credential(provider, serde_json::json!({ "key": key }), None)
-            .await?;
-        match provider.login_it_replaces() {
-            Some(login) => self.vault_activate(login, None).await.map(drop),
-            None => Ok(()),
-        }
+            .await
     }
 
     /// `PUT /vault/{org}/credentials/{provider}` for the logical Cloud device:

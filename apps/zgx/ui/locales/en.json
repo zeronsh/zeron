@@ -1670,12 +1670,12 @@
       "cloud": "Cloud",
       "cloud_keys": {
         "title": "API keys",
-        "section_description": "Instead of signing in, Cloud can use an API key, and some agents run on Cloud with keys alone. A key saved here becomes the account its agents use on every Cloud machine, from their next turn.",
+        "section_description": "Cloud can also run agents on your own API keys. A key saved here is used on every Cloud machine, from the next turn, wherever no sign-in is in use. To use a key instead of a sign-in, pick it on the agent's card.",
         "key": "{vendor} API key",
         "description": "For {agent} on Cloud. Kept in Zeron's vault, never on this computer.",
         "placeholder": "Paste a key",
         "save": "Save",
-        "saved": "Cloud now uses this key for {agent}"
+        "saved": "Saved for {agent} on Cloud"
       }
     },
     "devices": {

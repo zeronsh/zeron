@@ -148,6 +148,8 @@ fn mocked(base: &str) -> ProbeEndpoints {
         openai_auth: base.to_string(),
         openai_port: 0,
         nous_portal: base.to_string(),
+        google_token: format!("{base}/google/token"),
+        google_userinfo: format!("{base}/google/userinfo"),
         allow_slot_refresh: true,
         allow_loopback_http: true,
     }

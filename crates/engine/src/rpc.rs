@@ -3468,9 +3468,15 @@ impl RpcService for EngineRpc {
                 let reply = self.forward(&target, method, params).await;
                 return reply.map_err(|error| remote_plugins::older_engine(&target, method, error));
             }
-            // Settings → Providers' Cloud: its logins live in the vault.
-            if crate::cloud_accounts::is_cloud_accounts_target(&target)
-                && crate::cloud_accounts::handles(method)
+            // Settings → Providers' Cloud, and a Cloud chat's composer (its
+            // session machine): Cloud's logins live in the vault, the same
+            // for every machine, so they're read there — never by dialing a
+            // machine, which may be asleep. (A Cloud machine itself has no
+            // user bearer for the vault: it forwards as before.)
+            if crate::cloud_accounts::handles(method)
+                && (crate::cloud_accounts::is_cloud_accounts_target(&target)
+                    || (target.starts_with(zeron_proto::CLOUD_DEVICE_PREFIX)
+                        && !crate::runner::is_cloud_platform()))
             {
                 return Box::pin(crate::cloud_accounts::dispatch(
                     self.cloud(),

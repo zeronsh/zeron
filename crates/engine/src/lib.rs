@@ -64,6 +64,7 @@ pub mod heap;
 pub mod managed;
 mod hosted_models;
 mod model_catalogs;
+pub mod model_publish;
 mod plugin_agents;
 pub mod plugins;
 pub mod profile;
@@ -1163,6 +1164,16 @@ impl Engine {
             );
             core.registry.set_run_environment(Arc::new(broker.clone()));
             broker.start();
+            // Each agent's models as this machine's credentials list them,
+            // kept on the edge for every device's picker while Cloud sleeps.
+            core.registry
+                .set_catalog_publisher(Arc::new(model_publish::ModelPublisher::new(
+                    &core.registry,
+                    Arc::new(model_publish::EdgeSink::new(
+                        identity.edge_url(),
+                        tokens.clone(),
+                    )),
+                )));
             let sessions = core.sessions.clone();
             let commands = core.commands.clone();
             let activity = runner::RelayActivity::default();

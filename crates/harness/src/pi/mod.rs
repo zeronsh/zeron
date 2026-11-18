@@ -116,12 +116,13 @@ impl PiHarness {
         })
     }
     async fn probe(&self, cwd: &Path, models: bool) -> Result<Value, HarnessError> {
+        // (A Cloud machine's credential keys for Pi: crate::catalog_env.)
         let mut process = self.spawn(
             cwd,
             &["--no-session".into()],
             None,
             &[],
-            &Default::default(),
+            &crate::catalog_env::get(HarnessId::Pi),
         )?;
         let (mut tx, rx) = tokio::sync::oneshot::channel();
         let grace = self.kill_grace;
