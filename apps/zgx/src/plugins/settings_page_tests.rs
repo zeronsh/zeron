@@ -225,6 +225,13 @@ impl Rig {
         self.book.borrow().values(plugin).get(id).cloned().unwrap_or(Json::Null)
     }
 
+    /// How many nodes `target` names.
+    fn count(&mut self, target: &str) -> usize {
+        self.app.frames(1);
+        let target = zgx_script::driver::parse(target).unwrap();
+        zgx_script::driver::find_all(&self.app.ui, &self.app.handle, &target).map(|n| n.len()).unwrap_or(0)
+    }
+
     /// The window's whole tree (`tree` keeps to its first 200 lines).
     fn tree(&mut self) -> String {
         self.app.frames(1);
@@ -303,13 +310,19 @@ fn snippets_edits_its_list_with_master_detail_validation_and_a_result() {
     assert!(rig.app.find("#snippets-list >> \"Standup\"").is_some());
     let review_row = rig.app.find("#snippets-list >> role:button \"Ask for a review\"");
     assert!(rig.line("textbox \"Name\"").contains("Ask for a review"), "{}", rig.tree());
-    // A text snippet has no Try it.
+    // A text snippet has no Try it; its card a hairline between each of its
+    // three rows, once.
     assert!(rig.app.find("role:button \"Try it\"").is_none());
+    assert_eq!(rig.count("#snippets-editor >> .settings-rule"), 2);
+    // Its count reads out of the real limit.
+    assert!(rig.tree().contains("/2000") && !rig.tree().contains("/1800"), "{}", rig.tree());
     // Another chosen: open under the list; the list's rows stay as they were.
     rig.app.click("#snippets-list >> role:button \"Standup\"");
     rig.frames(20);
     assert!(rig.line("textbox \"Name\"").contains("Standup"));
     assert_eq!(rig.app.find("#snippets-list >> role:button \"Ask for a review\""), review_row, "the list's rows, in place");
+    // A template's Try it comes with its own hairline, and only one.
+    assert_eq!(rig.count("#snippets-editor >> .settings-rule"), 3);
     // A template tries itself: what it puts in, drawn under its row.
     rig.app.click("role:button \"Try it\"");
     rig.frames(10);
@@ -328,6 +341,12 @@ fn snippets_edits_its_list_with_master_detail_validation_and_a_result() {
     rig.frames(20);
     assert_eq!(kept(&rig).as_array().unwrap().len(), 3);
     assert!(rig.line("textbox \"Name\"").contains("New snippet"), "{}", rig.tree());
+    // Nobody has typed in its empty text yet: nothing said against it.
+    assert!(!rig.tree().contains("Write what it puts in the message box."), "{}", rig.tree());
+    rig.app.fill("role:textbox \"Text\"", "x");
+    rig.app.fill("role:textbox \"Text\"", "");
+    rig.frames(10);
+    assert!(rig.tree().contains("Write what it puts in the message box."), "once typed in, it says so: {}", rig.tree());
     // A name another has is said, and not kept; one of its own is.
     rig.app.fill("role:textbox \"Name\"", "standup");
     rig.app.keys("enter");

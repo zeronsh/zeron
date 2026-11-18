@@ -657,11 +657,11 @@ Your page sits under Zeron's rows, so any difference shows. Zeron's settings pag
 
 A section's title and the words of any note you set over or under a card start 17 in from the card's outer edge, on the rows' words (`px = Settings.inset()`), so the words line up down one edge and the cards hang past it.
 
-1. **Zeron's parts first.** The page's shape is `@ds/settings`. Its controls are Zeron's: `@ds/switch`; `@ds/segmented` for two or three choices; `@ds/select` for more (168 wide, as Zeron's); `@ds/text_field` (`size = "sm"`, 220 wide); a number as Zeron's number rows draw one, a `TextField` 96 wide (`inputmode = "decimal"`) with its unit after it in a row (`ui.row { gap = "$space.2", items = "center", TextField { … }, ui.text { "minutes", text_size = "$font.size.sm", color = "$text.secondary" } }`); `@ds/text_area` in a `stacked` row; `@ds/button` (`size = "sm"`: `secondary` for an action, `ghost` for a quiet one, `danger` to confirm what can't be undone); `@ds/icon_button` (`tone = "quiet"`); `@ds/badge`; `@ds/banner`'s `Callout`; `@ds/empty_state`. Draw your own only for what none of them is.
+1. **Zeron's parts first.** The page's shape is `@ds/settings`. Its controls are Zeron's: `@ds/switch`; `@ds/segmented` for two or three choices; `@ds/select` for more (168 wide, as Zeron's); `@ds/text_field` (`size = "sm"`, 220 wide); a number as Zeron's number rows draw one, a `TextField` 96 wide (`inputmode = "decimal"`) with its unit after it in a row (`ui.row { gap = "$space.2", items = "center", TextField { … }, ui.text { "minutes", text_size = "$font.size.sm", color = "$text.secondary" } }`); `@ds/text_area` in a `stacked` row; `@ds/button` (`size = "sm"`: `secondary` for an action on a row, `ghost` for a quiet one and for every action at a section title's end, as Zeron's are, `danger` to confirm what can't be undone); `@ds/icon_button` (`tone = "quiet"`); `@ds/badge`; `@ds/banner`'s `Callout`; `@ds/empty_state`. Draw your own only for what none of them is.
 2. **Tokens only.** Colours, spacing, corners and type are `$…` tokens, never numbers or hex: `$text.secondary`, `$space.3`, `$radius.lg`, `$font.size.sm`. Inside something rounded, a corner is the outer one less the inset. `plugin_status { page = "settings" }` lists what isn't, as hints.
 3. **Say it as Zeron says it.** A row's name says what the setting is in a few words, in sentence case ("Show the timer", "Sound"); the line under it says what it does, in one plain sentence ending in a period. No "Enable", no exclamation marks, no "Zeron's own". A button says what it does ("New snippet", "Try it"). A callout's title has no full stop; its body is sentences. A field's error is short, as Zeron's are ("At least 5", "At most 120", "Give it a name."). Give every control without a visible label its `name` (`label` on a switch), what a screen reader says.
-4. **Rows that hang off another** come and go with it, each bringing its hairline: `ui.show(on, ui.column { w_full = true, Settings.Rule(), Settings.Row { … } })`. Or they stay, dimmed and out of reach (`opacity = "$zeron.disabled"`, `disabled = true`), while what they hang off is off.
-5. **Every state.** Empty: an `EmptyState { size = "sm" }` in the card, with a way to add one (`Settings.Group { ui.column { w_full = true, py = "$space.6", px = "$space.4", EmptyState { … } } }`). Loading: `@ds/skeleton`'s `Row`s in the card, so nothing jumps when it comes. Something that failed: a `Callout { tone = "warning" }` in the section over its card, with a way to try again. A field that's wrong says why under it (`error = …`), and nothing is kept until it's right. Keep what's typed as Zeron's text rows do: at once on `on_commit` (Enter, or leaving the field), and a moment (600 ms) after the typing stops. A notice about the section (a declared setting that hides what the section is for, say) is a `Callout` in that section, over its card: `tone = "info"` for something to know, `"warning"` for something that failed. A callout is a card, so it stands at the cards' edge, not the words' 17.
+4. **Rows that hang off another** come and go with it, each bringing its hairline, in one column with the row they hang off: `ui.column { w_full = true, Settings.Row { … }, ui.show(on, ui.column { w_full = true, Settings.Rule(), Settings.Row { … } }) }`. (A `Settings.Group` draws a hairline between each of its own children, so a `ui.show` given straight to it would draw two, and one more with nothing under it while it's hidden.) Or they stay, dimmed and out of reach (`opacity = "$zeron.disabled"`, `disabled = true`), while what they hang off is off.
+5. **Every state.** Empty: an `EmptyState { size = "sm" }` in the card, with a way to add one (`Settings.Group { ui.column { w_full = true, py = "$space.6", px = "$space.4", EmptyState { … } } }`). Loading: `@ds/skeleton`'s `Row`s in the card, so nothing jumps when it comes. Something that failed: a `Callout { tone = "warning" }` in the section over its card, with a way to try again. A field that's wrong says why under it (`error = …`), and nothing is kept until it's right; but a field nobody has typed in or left says nothing yet (a new item's empty name isn't an error until the person has been there). A count under a field reads out of its real limit (``count = { of = …, max = 2000, say = function(n) return `{n}/2000`, n > 1800 end }``: `soft` alone would show the soft point as the limit). Keep what's typed as Zeron's text rows do: at once on `on_commit` (Enter, or leaving the field), and a moment (600 ms) after the typing stops. A notice about the section (a declared setting that hides what the section is for, say) is a `Callout` in that section, over its card: `tone = "info"` for something to know, `"warning"` for something that failed. A callout is a card, so it stands at the cards' edge, not the words' 17.
 6. **An action and what came of it** stay on its row: the button at its end; the result in the line under the name, or a row under it while there's one to show. What can't be undone asks first, in place: deleting the item open under a list is a `ghost` "Delete" at its section title's end, which becomes a `ghost` Cancel and a `danger` "Delete <it>" ("Delete snippet"). Or ask in a dialog (`@ds/dialog`'s `Dialog`, `tone = "danger"`): a settings page can open one over the window, as any page of yours can.
 7. **Lists.** A list you edit is a `Settings.Each` card, a row per item keyed by its id, its add action at the section title's end. Choosing one opens it in a section of its own under the list (`ui.presence(chosen, build)`: built again only as another is chosen, its fields starting from that item); mark the open row (`badge = Badge { "Editing", tone = "neutral" }`).
 8. **What belongs here** is how your plugin behaves: what it shows and where, the accounts it uses, its rules, the lists it keeps. What the person does with your plugin (a board, a viewer, a log) belongs on a page (`zeron.page`) or a tab (`zeron.tab`); your settings page can lead there.
@@ -734,6 +734,8 @@ local Feed = ui.component(function(props)
 	local f = find(props.id)
 	local url = ui.use_state(f.url)
 	local quiet = ui.use_state(f.quiet)
+	-- (Its address says what's wrong only once it's been typed in or left.)
+	local said = ui.use_state(false)
 	ui.effect(function()
 		local held = find(props.id)
 		if held and quiet:get() ~= held.quiet then update(props.id, { quiet = quiet:get() }) end
@@ -753,21 +755,25 @@ local Feed = ui.component(function(props)
 				description = "The feed it reads.",
 				control = TextField {
 					value = url, name = "Address", size = "sm", w = 220,
-					error = function() return url_problem(url:get()) end,
+					error = function() return if said:get() then url_problem(url:get()) else nil end,
 					on_commit = function(text)
+						said:set(true)
 						if url_problem(text) == nil then update(props.id, { url = text }) end
 					end,
 				},
 			},
-			Settings.Row {
-				label = "Quiet hours",
-				description = "Hold what arrives overnight until the morning.",
-				control = Switch { value = quiet, label = "Quiet hours" },
+			-- (With the row that hangs off it, in one column: one hairline each.)
+			ui.column { w_full = true,
+				Settings.Row {
+					label = "Quiet hours",
+					description = "Hold what arrives overnight until the morning.",
+					control = Switch { value = quiet, label = "Quiet hours" },
+				},
+				ui.show(function() return quiet:get() end, ui.column { w_full = true,
+					Settings.Rule(),
+					Settings.Row { label = "Overnight", description = "From 10 pm to 7 am, on this device's clock." },
+				}),
 			},
-			ui.show(function() return quiet:get() end, ui.column { w_full = true,
-				Settings.Rule(),
-				Settings.Row { label = "Overnight", description = "From 10 pm to 7 am, on this device's clock." },
-			}),
 		},
 	}
 end)
@@ -780,7 +786,7 @@ zeron.settings_page {
 			Settings.Section {
 				title = "Feeds",
 				description = "Choose one to set it up.",
-				trail = Button { "Add feed", tone = "secondary", size = "sm", on_click = add },
+				trail = Button { "Add feed", tone = "ghost", size = "sm", on_click = add },
 				ui.show(function() return #list:get() > 0 end,
 					Settings.Each(list, feed_row, { key = function(f) return f.id end }),
 					Settings.Group { ui.column { w_full = true, py = "$space.6", px = "$space.4",
