@@ -312,3 +312,31 @@ test("on a page a link opened, Install instead and a version row's Install wait 
 	app:frames(5)
 	expect(app:tree(instead)).never.to_contain("disabled")
 end)
+
+-- In the app's own frame at a 560 window, Settings' page is narrow: the
+-- Plugins tabs and Install don't fit beside each other, so Install takes
+-- its own line under the tabs, inside the page, and can be pressed.
+test("at a 560 window, Plugins' Install stays inside the page, under its tabs", function()
+	local app = shell()
+	app:resize(560, 900)
+	app:frames(20)
+	app:command("shell.settings")
+	app:frames(10)
+	app:click('#settings-nav >> "Plugins"')
+	app:frames(40)
+	local tree = app:tree(PAGE)
+	local px, _, pw = tree:match("#settings%-page (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x")
+	local _, ty, _, th = tree:match('tablist "Plugins" (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x([%d.]+)')
+	local ix, iy, iw
+	local shown = 0
+	for line in tree:gmatch('[^\n]*button "Install"[^\n]*') do
+		if not line:find("hidden", 1, true) then
+			shown += 1
+			ix, iy, iw = line:match('button "Install" (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x')
+		end
+	end
+	assert(px and ty and ix, tree)
+	expect(shown).to_be(1)
+	expect(tonumber(ix) + tonumber(iw) <= tonumber(px) + tonumber(pw)).to_be(true)
+	expect(tonumber(iy) - (tonumber(ty) + tonumber(th))).to_be(16)
+end)

@@ -384,3 +384,217 @@ test("Update, a row's inline link, shows the app's focus ring when the keys reac
 	expect(app:has(".settings-inline-link >> .inline-link-underlined")).to_be(true)
 	expect(app:has(".settings-inline-link >> .inline-link-plain")).to_be(false)
 end)
+
+-- The tabs' action (Install…) stays inside the page at every width: beside
+-- the tabs where they and it fit (as always, at 1000 and wider), else on a
+-- line of its own under them, ending on the same edge, still pressable.
+test("Install stays inside the page beside the tabs, or under them where they don't fit", function()
+	local placed: { [number]: boolean } = {}
+	for _, width in { 400, 560, 760, 1000 } do
+		local app = mount("plugins_fixture.luau")
+		app:resize(width, 900)
+		app:frames(30)
+		local tree = app:tree()
+		local cx, _, cw = tree:match("#catalog%-card (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x")
+		local tx, ty, tw, th = tree:match('tablist "Plugins" (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x([%d.]+)')
+		-- (The one that shows: beside the tabs, or on its own line.)
+		local ix, iy, iw
+		local shown = 0
+		for line in tree:gmatch('[^\n]*button "Install"[^\n]*') do
+			if not line:find("hidden", 1, true) then
+				shown += 1
+				ix, iy, iw = line:match('button "Install" (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x')
+			end
+		end
+		expect(`{width} shown={shown}`).to_be(`{width} shown=1`)
+		assert(cx and tx and ix, `{width}: {tree}`)
+		local right = tonumber(cx) + tonumber(cw)
+		expect(`{width} inside={tonumber(ix) + tonumber(iw) <= right + 0.5}`).to_be(`{width} inside=true`)
+		local beside = math.abs(tonumber(iy) - tonumber(ty)) < tonumber(th)
+		placed[width] = beside
+		if width == 1000 then
+			-- (As it always was: beside the tabs, ending on the card's words.)
+			expect(`{width} beside={beside}`).to_be(`{width} beside=true`)
+		elseif not beside then
+			-- (Under the rule, the catalog's own step below it: 16.)
+			expect(tonumber(iy) - (tonumber(ty) + tonumber(th))).to_be(16)
+		end
+		-- (Where it fits, the head is as it always was: the card one tab
+		-- row and the step under the tabs' top.)
+		local _, cy = tree:match("#catalog%-card (%-?[%d.]+),(%-?[%d.]+)")
+		if beside then
+			expect(`{width} head={tonumber(cy) - tonumber(ty)}`).to_be(`{width} head=52`)
+		end
+		app:click('role:button "Install"')
+		app:frames(10)
+		expect(app:has('role:dialog')).to_be(true)
+	end
+	-- (Narrow enough, it does go under: the give-way is exercised.)
+	expect(placed[400]).to_be(false)
+end)
+
+-- Templates' catalog, where its tabs and Install fit at 560 and 1000, is as
+-- it always was: Install beside the tabs, the card where it was.
+test("Templates' head where its action fits is as it always was", function()
+	for _, width in { 560, 1000 } do
+		local app = mount("templates_fixture.luau")
+		app:resize(width, 900)
+		app:frames(30)
+		local tree = app:tree()
+		local _, ty, _, th = tree:match('tablist "Templates" (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x([%d.]+)')
+		local _, cy = tree:match("#catalog%-card (%-?[%d.]+),(%-?[%d.]+)")
+		local iy: string? = nil
+		for line in tree:gmatch('[^\n]*button "Install"[^\n]*') do
+			if not line:find("hidden", 1, true) then
+				iy = line:match('button "Install" %-?[%d.]+,(%-?[%d.]+)')
+			end
+		end
+		assert(ty and cy and iy, `{width}: {tree}`)
+		expect(`{width} beside={math.abs(tonumber(iy) - tonumber(ty)) < tonumber(th)}`).to_be(`{width} beside=true`)
+		expect(`{width} head={tonumber(cy) - tonumber(ty)}`).to_be(`{width} head=52`)
+	end
+end)
+
+-- At every width from 400 to 1100, a catalog's action is whole and inside
+-- its card: beside the tabs ending on the line's content edge (never
+-- clipped), or on its own line one step under the rule. Plugins' Install
+-- and Themes' Import theme (longer: Themes' tabs alone run wide), the
+-- decision taken from the action's own width against the room it got,
+-- whatever the font measures.
+test("a catalog's action is whole and inside its card at every width from 400 to 1100", function()
+	for _, case in { { fx = "plugins_fixture.luau", tabs = "Plugins", action = "Install" }, { fx = "themes_fixture.luau", cmd = "themes", tabs = "Themes", action = "Import" } } do
+		for width = 400, 1100, 20 do
+			local app = mount(case.fx)
+			app:resize(width, 900)
+			app:frames(10)
+			if case.cmd then
+				app:command(case.cmd)
+			end
+			app:frames(30)
+			local tree = app:tree()
+			local cx, _, cw = tree:match("#catalog%-card (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x")
+			local _, ty, _, th = tree:match(`tablist "{case.tabs}" (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x([%d.]+)`)
+			local ax, ay, aw
+			local shown = 0
+			for line in tree:gmatch(`[^\n]*button "{case.action}[^\n]*`) do
+				if not line:find("hidden", 1, true) then
+					shown += 1
+					ax, ay, aw = line:match(' (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x')
+				end
+			end
+			local at = `{case.tabs} {width}`
+			assert(cx and ty and ax, `{at}: {tree}`)
+			expect(`{at} shown={shown}`).to_be(`{at} shown=1`)
+			local right = tonumber(cx) + tonumber(cw)
+			local edge = tonumber(ax) + tonumber(aw)
+			local beside = math.abs(tonumber(ay) - tonumber(ty)) < tonumber(th)
+			-- (Whole: ending on or before the line's content edge, the card's
+			-- words' inset in from its side.)
+			expect(`{at} whole={edge <= right - 12}`).to_be(`{at} whole=true`)
+			if not beside then
+				expect(`{at} step={tonumber(ay) - (tonumber(ty) + tonumber(th))}`).to_be(`{at} step=16`)
+			end
+		end
+	end
+end)
+
+-- Widened step by step in one window (not built fresh at each width), the
+-- action stays whole and inside its card at every step: under the rule
+-- until it truly fits, then beside the tabs, once, never back and forth.
+-- Themes' tabs alone run past the page at the narrow end, where a guess
+-- from the shortfall would bring it back beside too soon.
+test("widened step by step, a catalog's action moves beside its tabs once, only when it fits", function()
+	for _, case in { { fx = "themes_fixture.luau", cmd = "themes", tabs = "Themes", action = "Import" }, { fx = "plugins_fixture.luau", tabs = "Plugins", action = "Install" } } do
+		-- (From narrower than the tabs themselves, whatever the font: the
+		-- case where the action's need can't be read off its shortfall.)
+		local app = mount(case.fx)
+		app:resize(260, 900)
+		app:frames(10)
+		if case.cmd then
+			app:command(case.cmd)
+		end
+		app:frames(30)
+		local switches, was_beside = 0, nil
+		local overflowed = false
+		for width = 260, 1100, 20 do
+			app:resize(width, 900)
+			app:frames(20)
+			local tree = app:tree()
+			local cx, _, cw = tree:match("#catalog%-card (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x")
+			local _, ty, _, th = tree:match(`tablist "{case.tabs}" (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x([%d.]+)`)
+			local ax, ay, aw
+			for line in tree:gmatch(`[^\n]*button "{case.action}[^\n]*`) do
+				if not line:find("hidden", 1, true) then
+					ax, ay, aw = line:match(' (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x')
+				end
+			end
+			local at = `{case.tabs} {width}`
+			assert(cx and ty and ax, `{at}: {tree}`)
+			-- (Whether the tabs alone run past the card here.)
+			local tx, _, tw = tree:match(`tablist "{case.tabs}" (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x`)
+			if tonumber(tx) + tonumber(tw) > tonumber(cx) + tonumber(cw) then
+				overflowed = true
+			end
+			local beside = math.abs(tonumber(ay) - tonumber(ty)) < tonumber(th)
+			-- Beside the tabs, it is whole and inside the card; under the rule,
+			-- inside the card at the narrow end where only the tabs run past.
+			if beside then
+				expect(`{at} whole={tonumber(ax) + tonumber(aw) <= tonumber(cx) + tonumber(cw) - 12}`).to_be(`{at} whole=true`)
+			else
+				expect(`{at} inside={tonumber(ax) + tonumber(aw) <= tonumber(cx) + tonumber(cw) - 12}`).to_be(`{at} inside=true`)
+			end
+			if was_beside ~= nil and beside ~= was_beside then
+				switches += 1
+			end
+			was_beside = beside
+		end
+		-- (Once from under to beside; never back and forth.)
+		expect(`{case.tabs} switches={switches}`).to_be(`{case.tabs} switches=1`)
+		-- (The tabs did run past the card at the narrow end: the case forced.)
+		expect(`{case.tabs} overflowed={overflowed}`).to_be(`{case.tabs} overflowed=true`)
+	end
+end)
+
+-- Where a catalog's action sits depends only on the width now, never on
+-- the way there: swept up and down in steps of 10 in one window, from
+-- narrower than Themes' own tabs (they overflow there, whatever the font)
+-- to 1100, each width gives the same place both ways.
+test("a catalog's action sits in the same place at a width whether widened or narrowed to it", function()
+	for _, case in { { fx = "themes_fixture.luau", cmd = "themes", tabs = "Themes", action = "Import" }, { fx = "plugins_fixture.luau", tabs = "Plugins", action = "Install" } } do
+		local app = mount(case.fx)
+		app:resize(260, 900)
+		app:frames(10)
+		if case.cmd then
+			app:command(case.cmd)
+		end
+		app:frames(30)
+		local function place(width: number): string
+			app:resize(width, 900)
+			app:frames(20)
+			local tree = app:tree()
+			local _, ty, _, th = tree:match(`tablist "{case.tabs}" (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x([%d.]+)`)
+			local cx, _, cw = tree:match("#catalog%-card (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x")
+			local ax, ay, aw
+			for line in tree:gmatch(`[^\n]*button "{case.action}[^\n]*`) do
+				if not line:find("hidden", 1, true) then
+					ax, ay, aw = line:match(' (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x')
+				end
+			end
+			assert(ty and ax and cx, `{case.tabs} {width}: {tree}`)
+			-- (Whole and inside its card, wherever it is.)
+			expect(`{case.tabs} {width} inside={tonumber(ax) + tonumber(aw) <= tonumber(cx) + tonumber(cw) - 12}`).to_be(`{case.tabs} {width} inside=true`)
+			return if math.abs(tonumber(ay) - tonumber(ty)) < tonumber(th) then "beside" else "under"
+		end
+		local up: { [number]: string } = {}
+		for width = 260, 1100, 10 do
+			up[width] = place(width)
+		end
+		for width = 1100, 260, -10 do
+			local down = place(width)
+			expect(`{case.tabs} {width} {down}`).to_be(`{case.tabs} {width} {up[width]}`)
+		end
+		-- (Wide enough, it's beside the tabs; narrow, under the rule.)
+		expect(`{case.tabs} {up[1100]}`).to_be(`{case.tabs} beside`)
+		expect(`{case.tabs} {up[260]}`).to_be(`{case.tabs} under`)
+	end
+end)
