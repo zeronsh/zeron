@@ -48,15 +48,15 @@ const shown = page.ok ? range(state, items.length) : null;
 /**
  * The last column is what the list is sorted by, its head naming it:
  * installs for Most installed (and Best match), the day it was updated for
- * Recently updated, the day it was first listed for Newest (while the edge's
- * cards don't carry that, the day updated, and the head says so).
+ * Recently updated, the day it was first listed for Newest. (A public card
+ * always carries that day; a dash, were one ever to come without it.)
  */
-const published = sort === "new" && items.every((p) => typeof p.listed_at === "number");
+const published = (p: PluginCard) => (p.listed_at === null ? "—" : day(p.listed_at));
 const measure: { head: string; cell: (p: PluginCard) => string; folded: (p: PluginCard) => string } =
-  sort === "updated" || (sort === "new" && !published)
+  sort === "updated"
     ? { head: "Updated", cell: (p) => day(p.updated_at), folded: (p) => `Updated ${day(p.updated_at)}` }
     : sort === "new"
-      ? { head: "Published", cell: (p) => day(p.listed_at!), folded: (p) => `Published ${day(p.listed_at!)}` }
+      ? { head: "Published", cell: published, folded: (p) => `Published ${published(p)}` }
       : { head: "Installs", cell: (p) => count(p.installs), folded: (p) => `${count(p.installs)} ${p.installs === 1 ? "install" : "installs"}` };
 
 const sorts = (["relevance", "popular", "updated", "new"] as Sort[]).filter((s) => s !== "relevance" || state.q);

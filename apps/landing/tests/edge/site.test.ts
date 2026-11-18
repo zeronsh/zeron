@@ -447,6 +447,14 @@ describe("the audit log", () => {
   });
 });
 
+describe("Newest, from the edge's cards", () => {
+  test("says the day each was first listed (amendment 39)", async () => {
+    const { body } = await new Browser().get("/plugins/all?sort=new");
+    expect(body).toContain('<th scope="col" class="end">Published</th>');
+    expect(body).toMatch(/<td class="installs end">[A-Z][a-z]{2} \d{1,2}(, \d{4})?<\/td>/);
+  });
+});
+
 describe("every page, with what the real edge holds", () => {
   const PUBLIC = ["/plugins", "/plugins/all", "/plugins/all?category=productivity", "/plugins/all?keyword=focus", "/plugins/all?sort=new", "/plugins/focus-timer", "/plugins/probe", "/plugins/sitemap.xml"];
   const MEMBER = ["/account", "/account/plugins/focus-timer", "/account/plugins/theme-sync", "/account/plugins/focus-timer/versions/1.0.0/yank", "/plugins/focus-timer/report"];

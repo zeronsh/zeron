@@ -134,8 +134,13 @@ describe("All plugins (/plugins/all)", () => {
     expect(head(updated.body)).toBe("Updated");
     expect(updated.body).toMatch(/<td class="installs end">[A-Z][a-z]{2} \d{1,2}(, \d{4})?<\/td>/);
     expect(updated.body).toMatch(/<span class="meta">@[a-z-]+ · Updated [A-Z][a-z]{2} \d/);
-    // (Newest: the day first listed, once the edge's cards carry it; until then, the day updated, said so.)
-    expect(head((await html("/plugins/all?sort=new")).body)).toBe("Updated");
+    // Newest: the day each was first listed (amendment 39), the newest first.
+    const newest = await html("/plugins/all?sort=new");
+    expect(head(newest.body)).toBe("Published");
+    expect(newest.body).toMatch(/<span class="meta">@[a-z-]+ · Published [A-Z][a-z]{2} \d/);
+    const days = [...newest.body.matchAll(/<td class="installs end">([^<]+)<\/td>/g)].map((m) => Date.parse(`${m[1]}${/\d{4}/.test(m[1]!) ? "" : `, ${new Date().getUTCFullYear()}`}`));
+    expect(days.length).toBeGreaterThan(1);
+    expect(days).toEqual([...days].sort((a, b) => b - a));
   });
 
   test("the pager: Previous, where you are of how many, Next", async () => {

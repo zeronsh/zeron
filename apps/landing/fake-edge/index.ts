@@ -71,6 +71,8 @@ const userOf = (id: string) => USERS.find((u) => u.id === id)!;
 
 const latest = (p: FakePlugin) => p.versions.find((v) => v.status === "approved");
 const listed = (p: FakePlugin) => p.status === "listed" && latest(p) !== undefined;
+/** When it was first listed (amendment 39): its first approved version's day, never moved by a later one; null with no listed version. */
+const listedAt = (p: FakePlugin) => (latest(p) ? Math.min(...p.versions.filter((v) => v.status === "approved" || v.status === "yanked").map((v) => v.published_at)) : null);
 
 const author = (userId: string) => {
   const u = userOf(userId);
@@ -91,6 +93,7 @@ function card(p: FakePlugin, version: FakeVersion | undefined = latest(p)) {
     keywords: (m.keywords as string[]) ?? [],
     version: listedVersion?.version ?? null,
     updated_at: (listedVersion ?? v).published_at,
+    listed_at: listedAt(p),
     installs: p.installs,
     featured: p.featured,
   };
@@ -197,7 +200,7 @@ function catalog(url: URL): Response {
   const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit") ?? 24) || 24));
 
   const keyOf = (p: FakePlugin): Key => {
-    const value = sort === "relevance" ? score(p, terms) : sort === "popular" ? p.installs : sort === "updated" ? latest(p)!.published_at : p.created_at;
+    const value = sort === "relevance" ? score(p, terms) : sort === "popular" ? p.installs : sort === "updated" ? latest(p)!.published_at : listedAt(p)!;
     return [value, p.id];
   };
   // Descending by value, then ascending by id: a stable total order.

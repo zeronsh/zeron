@@ -71,8 +71,12 @@ export interface PluginCard {
   /** The latest approved version (null while it has none). */
   version: string | null;
   updated_at: number;
-  /** When it was first listed: what Newest sorts by (proposed; read when present). */
-  listed_at?: number;
+  /**
+   * When it was first listed: what Newest sorts by (amendment 39). Set once,
+   * never moved by a later version. Always there on a public card; null only
+   * on an owner's or admin's card of a plugin with no listed version.
+   */
+  listed_at: number | null;
   installs: number;
   featured: boolean;
 }
