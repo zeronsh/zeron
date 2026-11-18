@@ -83,6 +83,12 @@ export class VaultStub extends WorkerEntrypoint {
   grant(caller: Caller, req: { provider: string }) {
     return this.answer("grant", [caller, req], { provider: req.provider, accessToken: "tok", expiresAt: 1, generation: 1 });
   }
+  grantMany(caller: Caller, req: { providers: string[] }) {
+    return this.answer("grantMany", [caller, req], {
+      grants: req.providers.map((provider) => ({ provider, accessToken: "tok", expiresAt: 1, generation: 1 })),
+      missing: []
+    });
+  }
   githubDeviceStart(caller: Caller, devices: string[]) {
     return this.answer("githubDeviceStart", [caller, devices], { flowId: "f1", userCode: "ABCD-1234", verificationUri: "https://github.com/login/device", intervalSecs: 5, expiresAt: 1 });
   }

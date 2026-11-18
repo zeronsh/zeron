@@ -16,7 +16,9 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use zeron_engine::credentials::{BrokerConfig, CredentialBroker, GITHUB_NOT_CONNECTED};
+use zeron_engine::credentials::{
+    AgentPaths, BrokerConfig, CredentialBroker, GITHUB_NOT_CONNECTED, not_signed_in,
+};
 use zeron_engine::runner::{self, RunnerIdentity};
 use zeron_engine::{Auth, AuthConfig, AuthState, Engine};
 use zeron_proto::{HarnessId, RunRequest};
@@ -202,6 +204,10 @@ struct Edge {
     github_repos: Vec<String>,
     /// Grant requests seen, per provider.
     grant_requests: HashMap<String, usize>,
+    /// An edge from before `POST /vault/{org}/grants` (it answers 404).
+    no_batch: bool,
+    /// Batch grant requests seen: each one's providers.
+    batches: Vec<Vec<String>>,
 }
 
 fn edge_handler(state: Arc<Mutex<Edge>>) -> impl FnMut(&Req) -> (u16, Value) + Send + 'static {
@@ -305,6 +311,51 @@ fn edge_handler(state: Arc<Mutex<Edge>>) -> impl FnMut(&Req) -> (u16, Value) + S
                     json!({"error": "not_authorized", "message": "not connected"}),
                 ))
             }
+            ("POST", p) if p == format!("/vault/{ORG}/grants") && !edge.no_batch => {
+                if req.bearer.is_none() {
+                    return (401, json!({"error": "unauthorized"}));
+                }
+                let device = b["deviceId"].as_str().unwrap();
+                let providers: Vec<String> = b["providers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| p.as_str().unwrap().to_owned())
+                    .collect();
+                let ts = b["ts"].as_i64().unwrap();
+                let joined = providers.join(",");
+                let message = format!("zeron-vault-grant\n{USER}\n{device}\n{joined}\n{ts}");
+                let key = edge.public_keys.get(device).cloned().unwrap_or_default();
+                if !verify(&key, &message, b["sig"].as_str().unwrap()) {
+                    return (401, json!({"error": "bad_signature"}));
+                }
+                let mut sorted = providers.clone();
+                sorted.sort();
+                sorted.dedup();
+                assert_eq!(
+                    sorted, providers,
+                    "providers are signed sorted and distinct"
+                );
+                assert!(!providers.iter().any(|p| p == "github"));
+                if ts <= edge.last_grant_ts {
+                    return (401, json!({"error": "stale"}));
+                }
+                edge.last_grant_ts = ts;
+                edge.batches.push(providers.clone());
+                let (mut grants, mut missing) = (Vec::new(), Vec::new());
+                for provider in providers {
+                    match edge.grants.get(&provider).cloned() {
+                        Some((200, body)) => grants.push(body),
+                        Some((_, body)) => missing.push(json!({
+                            "provider": provider, "error": body["error"], "message": body["message"],
+                        })),
+                        None => missing.push(json!({
+                            "provider": provider, "error": "not_authorized", "message": "not connected",
+                        })),
+                    }
+                }
+                (200, json!({"grants": grants, "missing": missing}))
+            }
             _ => (404, json!({"error": "not_found"})),
         }
     }
@@ -346,6 +397,9 @@ impl Rig {
             claude_env_login: false,
             codex_env_login: false,
             github_repo: Some("acme/app".into()),
+            agents: AgentPaths::under(&self.home),
+            env_logins: Default::default(),
+            install_missing: false,
         }
     }
 
@@ -1403,9 +1457,18 @@ async fn the_run_credential_follows_the_active_account() {
     assert_eq!(fingerprint().await.as_deref(), Some("none"));
     rig.grant("claude", 503, json!({"error": "unavailable"}));
     assert_eq!(fingerprint().await, None, "unknown is not a change");
+    // Cursor on its key: nothing connected reads as such.
+    assert_eq!(
+        rig.broker(identity.clone(), "http://127.0.0.1:9")
+            .credential(HarnessId::Cursor)
+            .await
+            .as_deref(),
+        Some("none")
+    );
+    // An agent Cloud doesn't run has no Cloud credential at all.
     assert_eq!(
         rig.broker(identity, "http://127.0.0.1:9")
-            .credential(HarnessId::Cursor)
+            .credential(HarnessId::Mock)
             .await,
         None
     );
@@ -1662,4 +1725,467 @@ async fn a_claude_grant_displacing_a_native_login_backs_it_up_and_restores_it() 
             .join("cloud/claude-native-credentials.json")
             .exists()
     );
+}
+
+// ---------------------------------------------------------------------------
+// The other agents
+// ---------------------------------------------------------------------------
+
+fn read(path: &Path) -> Value {
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+fn key_grant(provider: &str, key: &str, generation: i64) -> Value {
+    json!({"provider": provider, "accessToken": key, "expiresAt": in_ms(3600), "generation": generation})
+}
+
+#[tokio::test]
+async fn pi_gets_chatgpt_in_its_file_and_keys_in_its_environment_in_one_request() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    rig.grant(
+        "codex",
+        200,
+        json!({"provider": "codex", "accessToken": "chatgpt-at", "expiresAt": in_ms(86_400),
+               "accountId": "acct_1", "generation": 4}),
+    );
+    rig.grant(
+        "openrouter-key",
+        200,
+        key_grant("openrouter-key", "sk-or-1", 2),
+    );
+    rig.grant("copilot", 200, key_grant("copilot", "gho_copilot", 3));
+    // Pi's own login for another provider stays beside ours.
+    let pi = rig.home.join(".pi/agent");
+    std::fs::create_dir_all(&pi).unwrap();
+    std::fs::write(
+        pi.join("auth.json"),
+        r#"{"kimi-coding": {"type": "api_key", "key": "k"}}"#,
+    )
+    .unwrap();
+    let broker = rig.broker(identity.clone(), "http://127.0.0.1:9");
+    let mut request = run_request();
+    broker.prepare(HarnessId::Pi, &mut request).await.unwrap();
+
+    assert_eq!(
+        request.env.get("OPENROUTER_API_KEY").map(String::as_str),
+        Some("sk-or-1")
+    );
+    assert_eq!(
+        request.env.get("COPILOT_GITHUB_TOKEN").map(String::as_str),
+        Some("gho_copilot")
+    );
+    assert!(!request.env.contains_key("ANTHROPIC_API_KEY"));
+    let auth = read(&pi.join("auth.json"));
+    assert_eq!(auth["openai-codex"]["access"], "chatgpt-at");
+    assert_eq!(
+        auth["openai-codex"]["refresh"], "",
+        "the vault is the only refresher"
+    );
+    assert_eq!(auth["openai-codex"]["accountId"], "acct_1");
+    assert_eq!(auth["kimi-coding"]["key"], "k");
+    assert_eq!(mode(&pi.join("auth.json")), 0o600);
+    assert!(!pi.join("auth.json.lock").exists(), "Pi's lock is released");
+    {
+        let edge = rig.state.lock().unwrap();
+        assert_eq!(edge.batches.len(), 1, "one signed round trip");
+        assert!(edge.batches[0].contains(&"codex".to_owned()));
+        assert_eq!(edge.grant_requests.get("codex"), None, "no single grants");
+    }
+    // The fingerprint names what the run uses, by generation.
+    let credential = broker.credential(HarnessId::Pi).await.unwrap();
+    assert_eq!(credential, "codex:4,copilot:3,openrouter-key:2");
+    assert_eq!(
+        rig.state.lock().unwrap().batches.len(),
+        1,
+        "cached within the turn"
+    );
+
+    // The ChatGPT login goes away: only the entry the broker wrote goes.
+    rig.state.lock().unwrap().grants.remove("codex");
+    let broker = rig.broker(identity.clone(), "http://127.0.0.1:9");
+    broker
+        .prepare(HarnessId::Pi, &mut run_request())
+        .await
+        .unwrap();
+    let auth = read(&pi.join("auth.json"));
+    assert!(auth.get("openai-codex").is_none());
+    assert_eq!(auth["kimi-coding"]["key"], "k");
+}
+
+#[tokio::test]
+async fn a_pi_login_of_the_machines_own_is_left_alone() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    rig.grant("codex", 200, key_grant("codex", "vault-at", 1));
+    let pi = rig.home.join(".pi/agent");
+    std::fs::create_dir_all(&pi).unwrap();
+    let own = json!({"openai-codex": {"type": "oauth", "access": "own", "refresh": "own-rt", "expires": 1}});
+    std::fs::write(pi.join("auth.json"), own.to_string()).unwrap();
+    let broker = rig.broker(identity.clone(), "http://127.0.0.1:9");
+    broker
+        .prepare(HarnessId::Pi, &mut run_request())
+        .await
+        .unwrap();
+    assert_eq!(read(&pi.join("auth.json")), own);
+}
+
+#[tokio::test]
+async fn grok_runs_on_its_login_in_its_file_before_an_xai_key() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    let expires = in_ms(3600);
+    rig.grant(
+        "grok",
+        200,
+        json!({"provider": "grok", "accessToken": "grok-at", "expiresAt": expires, "generation": 7,
+               "settings": {"scope": "https://auth.x.ai::client-1", "oidc_issuer": "https://auth.x.ai",
+                            "oidc_client_id": "client-1", "user_id": "u-1", "email": "ada@x.ai"}}),
+    );
+    rig.grant("xai-key", 200, key_grant("xai-key", "xai-key-1", 1));
+    let grok = rig.home.join(".grok");
+    std::fs::create_dir_all(&grok).unwrap();
+    // Another issuer's login of grok's own stays.
+    std::fs::write(
+        grok.join("auth.json"),
+        r#"{"https://accounts.x.ai::legacy": {"key": "legacy", "oidc_issuer": "https://accounts.x.ai"}}"#,
+    )
+    .unwrap();
+    let broker = rig.broker(identity.clone(), "http://127.0.0.1:9");
+    let mut request = run_request();
+    broker.prepare(HarnessId::Grok, &mut request).await.unwrap();
+    assert!(
+        !request.env.contains_key("XAI_API_KEY"),
+        "the login wins over the key"
+    );
+    let auth = read(&grok.join("auth.json"));
+    let entry = &auth["https://auth.x.ai::client-1"];
+    assert_eq!(entry["key"], "grok-at");
+    assert_eq!(entry["refresh_token"], "");
+    assert_eq!(entry["email"], "ada@x.ai");
+    assert_eq!(entry["oidc_client_id"], "client-1");
+    assert!(entry.get("scope").is_none());
+    let at = chrono::DateTime::parse_from_rfc3339(entry["expires_at"].as_str().unwrap()).unwrap();
+    assert!((at.timestamp_millis() - expires).abs() < 1000);
+    assert_eq!(auth["https://accounts.x.ai::legacy"]["key"], "legacy");
+    assert_eq!(
+        broker.credential(HarnessId::Grok).await.as_deref(),
+        Some("grok:7")
+    );
+
+    // Signed out on the vault: the managed entry goes, the key takes over.
+    rig.state.lock().unwrap().grants.remove("grok");
+    let broker = rig.broker(identity.clone(), "http://127.0.0.1:9");
+    let mut request = run_request();
+    broker.prepare(HarnessId::Grok, &mut request).await.unwrap();
+    assert_eq!(
+        request.env.get("XAI_API_KEY").map(String::as_str),
+        Some("xai-key-1")
+    );
+    let auth = read(&grok.join("auth.json"));
+    assert!(auth.get("https://auth.x.ai::client-1").is_none());
+    assert_eq!(auth["https://accounts.x.ai::legacy"]["key"], "legacy");
+}
+
+#[tokio::test]
+async fn a_grok_login_of_the_machines_own_wins() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    rig.grant(
+        "grok",
+        200,
+        json!({"provider": "grok", "accessToken": "vault-at", "expiresAt": in_ms(3600), "generation": 1,
+               "settings": {"scope": "https://auth.x.ai::c"}}),
+    );
+    let grok = rig.home.join(".grok");
+    std::fs::create_dir_all(&grok).unwrap();
+    let own = json!({"https://auth.x.ai::c": {"key": "own", "refresh_token": "own-rt"}});
+    std::fs::write(grok.join("auth.json"), own.to_string()).unwrap();
+    let broker = rig.broker(identity.clone(), "http://127.0.0.1:9");
+    broker
+        .prepare(HarnessId::Grok, &mut run_request())
+        .await
+        .unwrap();
+    assert_eq!(read(&grok.join("auth.json")), own);
+}
+
+#[tokio::test]
+async fn devin_gets_its_credentials_file_and_only_ours_is_removed() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    rig.grant(
+        "devin",
+        200,
+        json!({"provider": "devin", "accessToken": "wsk-1", "expiresAt": in_ms(3600), "generation": 1,
+               "settings": {"api_server_url": "https://server.codeium.com"}}),
+    );
+    let broker = rig.broker(identity.clone(), "http://127.0.0.1:9");
+    broker
+        .prepare(HarnessId::Devin, &mut run_request())
+        .await
+        .unwrap();
+    let file = rig.home.join(".local/share/devin/credentials.toml");
+    let table: toml::Table = std::fs::read_to_string(&file).unwrap().parse().unwrap();
+    assert_eq!(table["windsurf_api_key"].as_str(), Some("wsk-1"));
+    assert_eq!(
+        table["api_server_url"].as_str(),
+        Some("https://server.codeium.com")
+    );
+    assert_eq!(mode(&file), 0o600);
+
+    // Disconnected: ours goes.
+    rig.state.lock().unwrap().grants.remove("devin");
+    let broker = rig.broker(identity.clone(), "http://127.0.0.1:9");
+    let refused = broker
+        .prepare(HarnessId::Devin, &mut run_request())
+        .await
+        .unwrap_err();
+    assert_eq!(refused, not_signed_in(HarnessId::Devin));
+    assert!(!file.exists());
+
+    // A login the machine made itself is never removed, and is used.
+    std::fs::write(&file, "windsurf_api_key = \"own\"\n").unwrap();
+    let broker = rig.broker(identity.clone(), "http://127.0.0.1:9");
+    broker
+        .prepare(HarnessId::Devin, &mut run_request())
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "windsurf_api_key = \"own\"\n"
+    );
+}
+
+#[tokio::test]
+async fn antigravity_signs_in_with_the_gemini_key() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    rig.grant("gemini-key", 200, key_grant("gemini-key", "AIza-1", 1));
+    let settings = rig.home.join(".gemini/antigravity-acp/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    std::fs::write(
+        &settings,
+        r#"{"theme": "dark", "auth": {"type": "oauth-personal"}}"#,
+    )
+    .unwrap();
+    let broker = rig.broker(identity.clone(), "http://127.0.0.1:9");
+    let mut request = run_request();
+    broker
+        .prepare(HarnessId::Antigravity, &mut request)
+        .await
+        .unwrap();
+    assert_eq!(
+        request.env.get("GEMINI_API_KEY").map(String::as_str),
+        Some("AIza-1")
+    );
+    let value = read(&settings);
+    assert_eq!(value["auth"]["type"], "gemini-api-key");
+    assert_eq!(value["theme"], "dark");
+}
+
+#[tokio::test]
+async fn key_agents_get_their_vendors_variables() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    rig.grant(
+        "ai-gateway-key",
+        200,
+        key_grant("ai-gateway-key", "vck-1", 1),
+    );
+    rig.grant(
+        "anthropic-key",
+        200,
+        key_grant("anthropic-key", "sk-ant-1", 1),
+    );
+    rig.grant("meta-key", 200, key_grant("meta-key", "meta-1", 1));
+    rig.grant("cursor-key", 200, key_grant("cursor-key", "crsr-1", 1));
+    rig.grant("gemini-key", 200, key_grant("gemini-key", "AIza-1", 1));
+    let broker = rig.broker(identity.clone(), "http://127.0.0.1:9");
+    let env = |harness| {
+        let broker = broker.clone();
+        async move {
+            let mut request = run_request();
+            broker.prepare(harness, &mut request).await.unwrap();
+            request.env
+        }
+    };
+    let fx = env(HarnessId::Fx).await;
+    assert_eq!(
+        fx.get("AI_GATEWAY_API_KEY").map(String::as_str),
+        Some("vck-1")
+    );
+    assert_eq!(
+        fx.get("ANTHROPIC_API_KEY").map(String::as_str),
+        Some("sk-ant-1")
+    );
+    assert_eq!(
+        env(HarnessId::Muse)
+            .await
+            .get("META_API_KEY")
+            .map(String::as_str),
+        Some("meta-1")
+    );
+    assert_eq!(
+        env(HarnessId::Cursor)
+            .await
+            .get("CURSOR_API_KEY")
+            .map(String::as_str),
+        Some("crsr-1")
+    );
+    let opencode = env(HarnessId::Opencode).await;
+    assert_eq!(
+        opencode
+            .get("GOOGLE_GENERATIVE_AI_API_KEY")
+            .map(String::as_str),
+        Some("AIza-1")
+    );
+    assert_eq!(
+        opencode.get("GEMINI_API_KEY").map(String::as_str),
+        Some("AIza-1")
+    );
+    assert_eq!(
+        opencode.get("AI_GATEWAY_API_KEY").map(String::as_str),
+        Some("vck-1")
+    );
+    let hermes = env(HarnessId::Hermes).await;
+    assert_eq!(
+        hermes.get("ANTHROPIC_API_KEY").map(String::as_str),
+        Some("sk-ant-1")
+    );
+    assert!(!hermes.contains_key("AI_GATEWAY_API_KEY"));
+}
+
+#[tokio::test]
+async fn an_agent_with_nothing_to_sign_in_with_says_where_to_add_it() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    let broker = rig.broker(identity.clone(), "http://127.0.0.1:9");
+    let refused = broker
+        .prepare(HarnessId::Hermes, &mut run_request())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused,
+        "Hermes isn't signed in on Cloud. Add an API key for one of its providers in \
+         Settings → Providers → Cloud, then send again."
+    );
+    assert_eq!(
+        not_signed_in(HarnessId::Grok),
+        "Grok isn't signed in on Cloud. Sign in with Grok or add an xAI API key in \
+         Settings → Providers → Cloud, then send again."
+    );
+    assert_eq!(
+        not_signed_in(HarnessId::Muse),
+        "Muse Code isn't signed in on Cloud. Add a Meta API key in Settings → Providers → Cloud, \
+         then send again."
+    );
+    assert_eq!(
+        broker.credential(HarnessId::Hermes).await.as_deref(),
+        Some("none")
+    );
+    // A login of the machine's own (Hermes' pool) lets it run on that.
+    std::fs::create_dir_all(rig.home.join(".hermes")).unwrap();
+    std::fs::write(rig.home.join(".hermes/auth.json"), "{}").unwrap();
+    broker
+        .prepare(HarnessId::Hermes, &mut run_request())
+        .await
+        .unwrap();
+    // fx can't be told: it runs and says so itself.
+    broker
+        .prepare(HarnessId::Fx, &mut run_request())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn an_edge_without_batch_grants_is_asked_one_at_a_time() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    rig.state.lock().unwrap().no_batch = true;
+    rig.grant(
+        "openrouter-key",
+        200,
+        key_grant("openrouter-key", "sk-or-1", 1),
+    );
+    rig.grant("xai-key", 200, key_grant("xai-key", "xai-1", 1));
+    let broker = rig.broker(identity.clone(), "http://127.0.0.1:9");
+    let mut request = run_request();
+    broker
+        .prepare(HarnessId::Opencode, &mut request)
+        .await
+        .unwrap();
+    assert_eq!(
+        request.env.get("OPENROUTER_API_KEY").map(String::as_str),
+        Some("sk-or-1")
+    );
+    assert_eq!(
+        request.env.get("XAI_API_KEY").map(String::as_str),
+        Some("xai-1")
+    );
+    let edge = rig.state.lock().unwrap();
+    assert!(edge.batches.is_empty());
+    assert_eq!(edge.grant_requests.get("openrouter-key"), Some(&1));
+    assert_eq!(edge.grant_requests.get("anthropic-key"), Some(&1));
+}
+
+#[tokio::test]
+async fn a_vault_out_of_reach_lets_the_run_try_what_is_on_disk() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    let broker = rig.broker(identity.clone(), "http://127.0.0.1:9");
+    rig.state.lock().unwrap().no_batch = false;
+    // Every grant answers 503: unknown, not "signed out".
+    for provider in [
+        "anthropic-key",
+        "openai-key",
+        "openrouter-key",
+        "gemini-key",
+        "xai-key",
+        "deepseek-key",
+    ] {
+        rig.grant(
+            provider,
+            503,
+            json!({"error": "unavailable", "message": "down"}),
+        );
+    }
+    broker
+        .prepare(HarnessId::Hermes, &mut run_request())
+        .await
+        .unwrap();
+    assert_eq!(broker.credential(HarnessId::Hermes).await, None);
+}
+
+#[tokio::test]
+async fn background_refresh_keeps_grok_and_pis_chatgpt_files_ahead_of_expiry() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    let grok = |token: &str, secs: i64| {
+        json!({"provider": "grok", "accessToken": token, "expiresAt": in_ms(secs), "generation": 1,
+               "settings": {"scope": "https://auth.x.ai::c"}})
+    };
+    let codex = |token: &str, secs: i64| json!({"provider": "codex", "accessToken": token, "expiresAt": in_ms(secs), "accountId": "a", "generation": 1});
+    // Seven minutes left: past the run slack, inside the refresher's window.
+    rig.grant("grok", 200, grok("grok-1", 420));
+    rig.grant("codex", 200, codex("chatgpt-1", 420));
+    let broker = rig.broker(identity, "http://127.0.0.1:9");
+    broker
+        .prepare(HarnessId::Grok, &mut run_request())
+        .await
+        .unwrap();
+    broker
+        .prepare(HarnessId::Pi, &mut run_request())
+        .await
+        .unwrap();
+    let grok_file = rig.home.join(".grok/auth.json");
+    let pi_file = rig.home.join(".pi/agent/auth.json");
+    assert_eq!(read(&grok_file)["https://auth.x.ai::c"]["key"], "grok-1");
+    assert_eq!(read(&pi_file)["openai-codex"]["access"], "chatgpt-1");
+
+    rig.grant("grok", 200, grok("grok-2", 3600));
+    rig.grant("codex", 200, codex("chatgpt-2", 86_400));
+    broker.refresh_due().await;
+    assert_eq!(read(&grok_file)["https://auth.x.ai::c"]["key"], "grok-2");
+    assert_eq!(read(&pi_file)["openai-codex"]["access"], "chatgpt-2");
+    assert_eq!(read(&pi_file)["openai-codex"]["refresh"], "");
 }

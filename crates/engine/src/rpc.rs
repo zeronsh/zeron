@@ -1219,9 +1219,10 @@ impl EngineRpc {
                     Err(e) => return Some(Err(e)),
                 };
                 if !crate::registry::CLOUD_HARNESS_IDS.contains(&p.harness) {
-                    return Some(Err(RpcError::Failed(
-                        "Cloud runs Codex and Claude Code only".into(),
-                    )));
+                    return Some(Err(RpcError::Failed(format!(
+                        "{} doesn't run on Cloud",
+                        zeron_proto::providers::provider_name(p.harness)
+                    ))));
                 }
                 // What Cloud's machines run: the edge's list (the last one read,
                 // when it's out of reach), as a phone reads it. This computer's

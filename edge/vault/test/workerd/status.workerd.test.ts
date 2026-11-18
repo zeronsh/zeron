@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/index";
 import { runCanary } from "../../src/canary";
 import { accountStub, devicesStub } from "../../src/names";
-import { VAULT_PROVIDERS } from "../../src/api";
+import { LEGACY_VAULT_PROVIDERS, VAULT_PROVIDERS } from "../../src/api";
 import { CODEX_TOKEN_URL } from "../../src/providers/codex";
 import { GITHUB_DEVICE_CODE_URL, GITHUB_TOKEN_URL, GITHUB_USER_URL } from "../../src/providers/github";
 import { fakeJwt } from "../support";
@@ -59,7 +59,7 @@ describe("status", () => {
     value(await vault().putCredential(caller, "claude", { material: { claudeAiOauth: claude }, authorizedDevices: devices }));
     const start = value(await vault().githubDeviceStart(caller, devices));
     expect(value(await vault().githubDevicePoll(caller, start.flowId)).state).toBe("connected");
-    for (const provider of VAULT_PROVIDERS) {
+    for (const provider of LEGACY_VAULT_PROVIDERS) {
       const repo = provider === "github" ? "octocat/app" : undefined;
       value(await vault().grant(caller, await signedGrant(device, userId, provider, undefined, repo)));
     }
@@ -137,7 +137,7 @@ describe("worker surface", () => {
 });
 
 describe("canary", () => {
-  it("force-refreshes codex, reports missing claude/github, checks the GitHub App, records and logs results", async () => {
+  it("force-refreshes codex, reports missing claude/github/grok, checks the GitHub App, records and logs results", async () => {
     const { userId, caller, device } = await setup();
     value(
       await vault().putCredential(caller, "codex", {
@@ -158,6 +158,7 @@ describe("canary", () => {
       { provider: "codex", ok: true, status: "refreshed" },
       { provider: "claude", ok: false, status: "missing" },
       { provider: "github", ok: false, status: "missing" },
+      { provider: "grok", ok: false, status: "missing" },
       { provider: "github", ok: true, status: "app_valid" }
     ]);
     expect(upstream.count(CODEX_TOKEN_URL)).toBe(1);
@@ -168,6 +169,7 @@ describe("canary", () => {
       { event: "vault.canary", provider: "codex", ok: true, status: "refreshed" },
       { event: "vault.canary", provider: "claude", ok: false, status: "missing" },
       { event: "vault.canary", provider: "github", ok: false, status: "missing" },
+      { event: "vault.canary", provider: "grok", ok: false, status: "missing" },
       { event: "vault.canary", provider: "github", ok: true, status: "app_valid" }
     ]);
     expect(value(await accountStub(env, userId, "codex").canaryLog(userId, "codex"))[0]).toMatchObject({

@@ -2083,19 +2083,36 @@ impl AgentAccounts {
     /// failure), a `paste-code` flow is finished with [`Self::complete_login`],
     /// and [`Self::cancel_login`] stops either. Abandoned flows are reaped
     /// after [`FLOW_TTL`].
+    ///
+    /// What `capture` receives: Codex's `auth.json` (also for Pi's ChatGPT —
+    /// one `codex` login serves both), Claude's `{credential, profile}`, and
+    /// for every other sign-in the vault upload itself, `{provider, material,
+    /// profile?}` (Cursor's minted key, Grok's token set, Devin's
+    /// `credentials.toml`, Pi's GitHub Copilot token).
     pub async fn start_capture_login(
         &self,
         harness: HarnessId,
+        provider: Option<&str>,
         capture: CaptureSink,
     ) -> Result<AgentLoginStart, EngineError> {
         self.sweep_flows();
-        let mut start = match harness {
-            HarnessId::ClaudeCode => {
+        let provider = provider.filter(|p| !p.is_empty());
+        let mut start = match (harness, provider) {
+            (HarnessId::ClaudeCode, _) => {
                 self.reap_spawned_flows(HarnessId::ClaudeCode);
                 self.start_claude_login_with(Some(capture)).await
             }
-            HarnessId::Codex => self.start_codex_capture(capture).await?,
-            other => {
+            (HarnessId::Codex, _) | (HarnessId::Pi, None | Some("openai-codex")) => {
+                self.start_codex_capture(capture).await?
+            }
+            (HarnessId::Pi, Some("github-copilot")) => {
+                self.start_copilot_login_with(HarnessId::Pi, Some(capture))
+                    .await?
+            }
+            (HarnessId::Cursor, _) => self.start_cursor_capture(capture).await?,
+            (HarnessId::Grok, _) => self.start_grok_capture(capture).await?,
+            (HarnessId::Devin, _) => self.start_devin_login_with(None, Some(capture))?,
+            (other, _) => {
                 return Err(EngineError::Other(format!(
                     "{other:?} sign-ins can't be connected to Cloud"
                 )));
@@ -2208,6 +2225,161 @@ impl AgentAccounts {
                 // could beat it to the files.
                 home: None,
                 port: Some(oauth::OPENAI_LOOPBACK_PORT),
+            },
+        );
+        Ok(AgentLoginStart {
+            login_id,
+            url,
+            mode: AgentLoginMode::Browser,
+            callback_port: None,
+        })
+    }
+
+    /// Cursor half of [`Self::start_capture_login`]: the SDK's browser
+    /// sign-in mints its key into a throwaway store, and the key (with its
+    /// expiry) goes to `capture` as a `cursor-key` upload.
+    async fn start_cursor_capture(
+        &self,
+        capture: CaptureSink,
+    ) -> Result<AgentLoginStart, EngineError> {
+        self.reap_spawned_flows(HarnessId::Cursor);
+        let login_id = new_id();
+        let home = self.login_home(&login_id)?;
+        let shred = ShredOnDrop(home.clone());
+        let command = zeron_harness::cursor::login_command(&home.join("auth.json"))
+            .await
+            .map_err(|e| EngineError::Other(format!("Could not start the Cursor login: {e}")))?;
+        self.start_file_capture(
+            HarnessId::Cursor,
+            login_id,
+            command,
+            shred,
+            scan_cursor_url,
+            cursor_capture,
+            capture,
+        )
+        .await
+    }
+
+    /// Grok half of [`Self::start_capture_login`]: `grok login --device-auth`
+    /// against a throwaway `GROK_HOME`; its xAI token set goes to `capture`
+    /// as a `grok` upload (the vault refreshes it from then on).
+    async fn start_grok_capture(
+        &self,
+        capture: CaptureSink,
+    ) -> Result<AgentLoginStart, EngineError> {
+        self.reap_spawned_flows(HarnessId::Grok);
+        let login_id = new_id();
+        let home = self.login_home(&login_id)?;
+        let shred = ShredOnDrop(home.clone());
+        let mut command = self
+            .cli_command(
+                HarnessId::Grok,
+                &["--no-auto-update", "login", "--device-auth"],
+            )
+            .await?;
+        command.env("GROK_HOME", &home);
+        #[cfg(unix)]
+        if let Some(noop) = ensure_noop_browser(&self.inner.config.root_dir()) {
+            command.env("BROWSER", noop);
+        }
+        self.start_file_capture(
+            HarnessId::Grok,
+            login_id,
+            command,
+            shred,
+            stores::scan_grok_url,
+            grok_capture,
+            capture,
+        )
+        .await
+    }
+
+    /// A captured sign-in run by a CLI that writes its credential file under
+    /// the throwaway home `shred` owns: polled until `read` finds a complete
+    /// login there, which goes to `capture` once the home is shredded. The
+    /// CLI is killed and the home shredded on every exit path (done, failed,
+    /// timed out, cancelled, superseded).
+    #[allow(clippy::too_many_arguments)]
+    async fn start_file_capture(
+        &self,
+        harness: HarnessId,
+        login_id: String,
+        mut command: zeron_harness::process::Command,
+        shred: ShredOnDrop,
+        scan_url: fn(&str) -> Option<String>,
+        read: fn(&Path) -> Result<Option<serde_json::Value>, String>,
+        capture: CaptureSink,
+    ) -> Result<AgentLoginStart, EngineError> {
+        command
+            .stdin(zeron_harness::process::Stdio::null())
+            .stdout(zeron_harness::process::Stdio::piped())
+            .stderr(zeron_harness::process::Stdio::piped());
+        let cli = stores::cli_name(harness);
+        let child = zeron_harness::process::spawn_agent(&mut command).map_err(|err| {
+            EngineError::Other(if err.kind() == std::io::ErrorKind::NotFound {
+                format!("The `{cli}` CLI was not found on this device — install it first.")
+            } else {
+                format!("Could not start the {cli} sign-in: {err}")
+            })
+        })?;
+        let (child, output, exit) = wire_login_child(child);
+        let kill = KillOnDrop(child);
+        let url = await_login_url(&output, &exit, scan_url).await;
+        let state = Arc::new(Mutex::new(TaskLoginState {
+            url: (!url.is_empty()).then(|| url.clone()),
+            ..Default::default()
+        }));
+        let task_state = state.clone();
+        let device_code = matches!(harness, HarnessId::Grok);
+        let handle = tokio::spawn(async move {
+            let home = shred.0.clone();
+            let wait = async {
+                loop {
+                    // Read before checking exit: a CLI may write and exit in one tick.
+                    let exited = *lock(&exit);
+                    if let Some(found) = read(&home)? {
+                        return Ok(found);
+                    }
+                    if let Some(code) = exited {
+                        return Err(login_child_failure(code, &output));
+                    }
+                    {
+                        let output = lock(&output);
+                        let mut state = lock(&task_state);
+                        if state.url.is_none() {
+                            state.url = scan_url(&output);
+                        }
+                        if device_code && state.message.is_none() {
+                            state.message = scan_device_code(&output)
+                                .map(|code| format!("Enter the code {code} when asked."));
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            };
+            let waited = tokio::time::timeout(FLOW_TTL, wait)
+                .await
+                .unwrap_or_else(|_| Err("The sign-in timed out — start again.".into()));
+            drop(kill);
+            // Off the disk before the upload: the credential lives on only
+            // in this task's memory until the capturer has it.
+            drop(shred);
+            let outcome = match waited {
+                Ok(found) => capture(found).await,
+                Err(message) => Err(message),
+            };
+            lock(&task_state).outcome = Some(outcome);
+        });
+        lock(&self.inner.flows).insert(
+            login_id.clone(),
+            LoginFlow::Task {
+                harness,
+                started_at: Instant::now(),
+                state,
+                handle,
+                home: None,
+                port: None,
             },
         );
         Ok(AgentLoginStart {
@@ -4894,6 +5066,62 @@ async fn await_codex_capture(
     }
 }
 
+/// A captured Cursor sign-in's upload, once the shim minted its key into
+/// `home/auth.json`: `{provider: "cursor-key", material: {key, expiresAt?}}`.
+fn cursor_capture(home: &Path) -> Result<Option<serde_json::Value>, String> {
+    let Some(auth) = read_json(&home.join("auth.json")) else {
+        return Ok(None);
+    };
+    let Some(key) = str_field(&auth, "apiKey") else {
+        return Ok(None);
+    };
+    let mut material = serde_json::json!({ "key": key });
+    if let Some(expires_at) = auth.get("apiKeyExpiresAtMs").and_then(|v| v.as_i64()) {
+        material["expiresAt"] = serde_json::json!(expires_at);
+    }
+    let mut upload = serde_json::json!({ "provider": "cursor-key", "material": material });
+    if let Some(email) = str_field(&auth, "email") {
+        upload["profile"] = serde_json::json!({ "email": email });
+    }
+    Ok(Some(upload))
+}
+
+/// A captured Grok sign-in's upload, once `grok login` wrote a complete xAI
+/// token set to `home/auth.json`: `{provider: "grok", material: {grokAuth,
+/// scope}, profile}` — the one issuer entry the agent would use, refresh
+/// token included (the vault becomes its only refresher).
+fn grok_capture(home: &Path) -> Result<Option<serde_json::Value>, String> {
+    let Some(auth) = read_json(&home.join("auth.json")) else {
+        return Ok(None);
+    };
+    let Some(detected) = stores::parse_grok_auth(auth) else {
+        return Ok(None);
+    };
+    let (Some(entry), Some(scope)) = (detected.credentials, detected.store_key) else {
+        return Ok(None);
+    };
+    if str_field(&entry, "refresh_token").is_none() {
+        // Written in two steps by some builds: wait for the whole set.
+        return Ok(None);
+    }
+    let mut profile = serde_json::Map::new();
+    let email = &detected.profile.email;
+    if email.contains('@') {
+        profile.insert("email".into(), serde_json::json!(email));
+    }
+    if let Some(name) = &detected.profile.display_name {
+        profile.insert("displayName".into(), serde_json::json!(name));
+    }
+    if let Some(plan) = &detected.profile.plan {
+        profile.insert("plan".into(), serde_json::json!(plan));
+    }
+    Ok(Some(serde_json::json!({
+        "provider": "grok",
+        "material": { "grokAuth": entry, "scope": scope },
+        "profile": profile,
+    })))
+}
+
 /// Kills a captured sign-in's CLI when its task ends or is aborted (cancel,
 /// a superseding sign-in, engine shutdown).
 struct KillOnDrop(Arc<Mutex<Option<zeron_harness::process::Child>>>);
@@ -6675,7 +6903,7 @@ mod login_tests {
         // No live login: a regular sign-in would go live here at once.
         let (sink, captured) = recording_sink(None);
         let start = accounts
-            .start_capture_login(HarnessId::ClaudeCode, sink)
+            .start_capture_login(HarnessId::ClaudeCode, None, sink)
             .await
             .unwrap();
         assert_eq!(start.mode, AgentLoginMode::Browser);
@@ -6733,7 +6961,7 @@ mod login_tests {
 
         let (sink, captured) = recording_sink(Some("The vault refused that sign-in."));
         let start = accounts
-            .start_capture_login(HarnessId::ClaudeCode, sink)
+            .start_capture_login(HarnessId::ClaudeCode, None, sink)
             .await
             .unwrap();
         let state = reqwest::Url::parse(&start.url)
@@ -6804,7 +7032,7 @@ mod login_tests {
         );
         let (sink, captured) = recording_sink(None);
         let start = accounts
-            .start_capture_login(HarnessId::Codex, sink)
+            .start_capture_login(HarnessId::Codex, None, sink)
             .await
             .unwrap();
         assert!(
@@ -6835,7 +7063,7 @@ mod login_tests {
         );
         let (sink, captured) = recording_sink(None);
         let start = accounts
-            .start_capture_login(HarnessId::Codex, sink)
+            .start_capture_login(HarnessId::Codex, None, sink)
             .await
             .unwrap();
         let poll = poll_until_settled_slowly(&accounts, &start.login_id).await;
@@ -6845,17 +7073,118 @@ mod login_tests {
         assert!(no_sign_in_homes_left(tmp.path()));
     }
 
+    /// A fake CLI that prints `url` and a device code, then writes
+    /// `contents` to `$<home_var>/auth.json`.
+    #[cfg(unix)]
+    fn fake_login_cli(
+        root: &Path,
+        name: &str,
+        home_var: &str,
+        url: &str,
+        contents: &str,
+    ) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = root.join(name);
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n\
+                 echo 'Open {url} and enter the code ABCD-EFGH' >&2\n\
+                 sleep 0.3\n\
+                 printf '%s' '{contents}' > \"${home_var}/auth.json\"\n\
+                 sleep 0.2\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
-    async fn capture_is_offered_for_claude_and_codex_only() {
+    async fn grok_capture_uploads_the_token_set_and_leaves_this_device_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let accounts = AgentAccounts::new(config(tmp.path()));
+        let auth = r#"{"https://auth.x.ai::client-1":{"key":"at","refresh_token":"rt","expires_at":"2030-01-01T00:00:00Z","oidc_issuer":"https://auth.x.ai","oidc_client_id":"client-1","user_id":"u1","email":"ada@x.ai","first_name":"Ada","subscription_tier":"SUBSCRIPTION_TIER_SUPER_GROK"}}"#;
+        accounts.override_cli(
+            HarnessId::Grok,
+            fake_login_cli(
+                tmp.path(),
+                "fake-grok",
+                "GROK_HOME",
+                "https://accounts.x.ai/device",
+                auth,
+            ),
+        );
+        let (sink, captured) = recording_sink(None);
+        let start = accounts
+            .start_capture_login(HarnessId::Grok, None, sink)
+            .await
+            .unwrap();
+        assert!(
+            start.url.starts_with("https://accounts.x.ai/"),
+            "{}",
+            start.url
+        );
+        let poll = poll_until_settled_slowly(&accounts, &start.login_id).await;
+        assert_eq!(poll.status, AgentLoginStatus::Done, "{:?}", poll.message);
+        let captured = lock(&captured).clone();
+        assert_eq!(captured.len(), 1);
+        let upload = &captured[0];
+        assert_eq!(upload["provider"], "grok");
+        assert_eq!(upload["material"]["scope"], "https://auth.x.ai::client-1");
+        assert_eq!(upload["material"]["grokAuth"]["refresh_token"], "rt");
+        assert_eq!(upload["profile"]["email"], "ada@x.ai");
+        assert!(no_sign_in_homes_left(tmp.path()));
+        assert!(accounts.read_slots(HarnessId::Grok).is_empty());
+    }
+
+    #[test]
+    fn a_cursor_capture_is_its_key_and_expiry() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(cursor_capture(tmp.path()), Ok(None), "nothing minted yet");
+        std::fs::write(
+            tmp.path().join("auth.json"),
+            r#"{"apiKey":"key_1","apiKeyExpiresAtMs":1900000000000,"email":"ada@example.com"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cursor_capture(tmp.path()).unwrap(),
+            Some(serde_json::json!({
+                "provider": "cursor-key",
+                "material": {"key": "key_1", "expiresAt": 1900000000000i64},
+                "profile": {"email": "ada@example.com"},
+            }))
+        );
+        // A token set without its refresh token isn't a login yet.
+        std::fs::write(
+            tmp.path().join("auth.json"),
+            r#"{"https://auth.x.ai::c":{"key":"at","user_id":"u"}}"#,
+        )
+        .unwrap();
+        assert_eq!(grok_capture(tmp.path()), Ok(None));
+    }
+
+    #[tokio::test]
+    async fn capture_is_offered_only_for_sign_ins_cloud_takes() {
         let tmp = tempfile::tempdir().unwrap();
         let accounts = AgentAccounts::new(config(tmp.path()));
         let (sink, _) = recording_sink(None);
-        assert!(
-            accounts
-                .start_capture_login(HarnessId::Grok, sink)
-                .await
-                .is_err()
-        );
+        for (harness, provider) in [
+            (HarnessId::Hermes, None),
+            (HarnessId::Opencode, Some("openai")),
+            (HarnessId::Pi, Some("anthropic")),
+            (HarnessId::Muse, None),
+        ] {
+            assert!(
+                accounts
+                    .start_capture_login(harness, provider, sink.clone())
+                    .await
+                    .is_err(),
+                "{harness:?} {provider:?}"
+            );
+        }
+        assert!(no_sign_in_homes_left(tmp.path()));
     }
 }
 

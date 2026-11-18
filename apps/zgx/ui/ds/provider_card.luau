@@ -297,6 +297,13 @@ export type CardProps = {
 	keys_here: (() -> boolean)?,
 	key_request: (() -> string?)?,
 	key_request_seen: (() -> ())?,
+	-- How the agent signs in where it's shown, when that differs from its
+	-- own way (Cloud's: "On Cloud, Muse Code uses a Meta API key…"): a row
+	-- under its head.
+	note: (() -> string?)?,
+	-- Whether Add account (a sign-in) is offered at all: an agent that runs
+	-- on API keys alone there has no foot to add with (nil: it is).
+	can_add: (() -> boolean)?,
 }
 
 export type LoginMethod = {
@@ -1531,14 +1538,32 @@ function M.Card(c: CardProps): Node
 		end
 	-- An agent with a login per model provider: its accounts, a provider's
 	-- together, and its add rows at the foot.
+	local note = if c.note
+		then ui.show(function(): boolean
+			return (c.note :: any)() ~= nil
+		end, ui.column {
+			w_full = true,
+			rule(),
+			Settings.Row {
+				label = locale.t("ds.provider_card.how_it_signs_in"),
+				description = function(): string
+					return (c.note :: any)() or ""
+				end,
+				lead = M.disc(Icon { name = "cloud", size = 16 }),
+			},
+		})
+		else nil
 	if c.groups then
 		return Settings.Group {
-			ui.column { w_full = true, head, grouped(c, kind) },
+			ui.column { w_full = true, head, note, grouped(c, kind) },
 		}
 	end
+	local function adds(): boolean
+		return c.can_add == nil or c.can_add()
+	end
 	return Settings.Group {
-		ui.column { w_full = true, head, list },
-		ui.presence(kind, foot, { w_full = true }),
+		ui.column { w_full = true, head, note, list },
+		ui.show(adds, ui.presence(kind, foot, { w_full = true })),
 	}
 end
 

@@ -140,14 +140,27 @@ pub struct NativeSubagentSettings {
 type Factory = Box<dyn Fn() -> Result<Arc<dyn Harness>, HarnessError> + Send + Sync>;
 type InstalledProbe = Box<dyn Fn() -> bool + Send + Sync>;
 
-/// The harnesses a Cloud device (`ZERON_DEVICE_PLATFORM=cloud`) registers —
+/// The harnesses a Cloud device (`ZERON_DEVICE_PLATFORM=cloud`) registers (every
+/// built-in agent; agents from the ACP registry stay off it) —
 /// the typed twin of [`zeron_proto::CLOUD_HARNESSES`]. Everything else is not
 /// merely disabled but absent: never probed (`--version`, install detection,
 /// model discovery, update checks). The rule is generic to the `cloud`
 /// platform; the motivating example is a hosted sandbox whose preinstalled
 /// CLIs are lazy installer shims (Boat's, at the time of writing) that
 /// download and install the real agent when merely probed.
-pub const CLOUD_HARNESS_IDS: &[HarnessId] = &[HarnessId::Codex, HarnessId::ClaudeCode];
+pub const CLOUD_HARNESS_IDS: &[HarnessId] = &[
+    HarnessId::Codex,
+    HarnessId::ClaudeCode,
+    HarnessId::Cursor,
+    HarnessId::Devin,
+    HarnessId::Grok,
+    HarnessId::Hermes,
+    HarnessId::Fx,
+    HarnessId::Pi,
+    HarnessId::Opencode,
+    HarnessId::Antigravity,
+    HarnessId::Muse,
+];
 
 /// How long a run waits for an expected [`RunEnvironment`]: far longer than the
 /// engine's assembly, on any disk.
@@ -1921,28 +1934,17 @@ mod gate_tests {
     }
 
     #[test]
-    fn cloud_platform_registers_only_codex_and_claude() {
+    fn cloud_platform_registers_the_built_in_agents_only() {
         let registry = registry_for_platform(zeron_proto::CLOUD_PLATFORM);
-        let ids: Vec<HarnessId> = registry.descriptors().iter().map(|d| d.id).collect();
-        assert_eq!(
-            ids,
-            vec![HarnessId::Mock, HarnessId::ClaudeCode, HarnessId::Codex]
-        );
-        for hidden in [
-            HarnessId::Cursor,
-            HarnessId::Devin,
-            HarnessId::Grok,
-            HarnessId::Hermes,
-            HarnessId::Fx,
-            HarnessId::Pi,
-            HarnessId::Opencode,
-            HarnessId::Antigravity,
-            HarnessId::Muse,
-        ] {
-            assert!(!registry.is_registered(hidden), "{hidden:?}");
-            // Never resolved, so never probed or spawned.
-            assert!(registry.resolve(hidden).is_err(), "{hidden:?}");
-        }
+        let mut ids: Vec<HarnessId> = registry.descriptors().iter().map(|d| d.id).collect();
+        ids.retain(|id| *id != HarnessId::Mock);
+        let mut expected = CLOUD_HARNESS_IDS.to_vec();
+        ids.sort_by_key(|id| id.as_str());
+        expected.sort_by_key(|id| id.as_str());
+        assert_eq!(ids, expected);
+        // Agents added from the ACP registry stay off Cloud.
+        let agent = HarnessId::from_slug("acp.gemini").unwrap();
+        assert!(!registry.is_registered(agent));
         let enabled = registry.enabled_set();
         assert!(
             enabled.iter().all(|id| CLOUD_HARNESS_IDS.contains(id)),
