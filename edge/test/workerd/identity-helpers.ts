@@ -97,7 +97,7 @@ export const siteChange = (path: string, browser: Pick<Browser, "cookie" | "csrf
     method,
     ...init,
     cookie: browser.cookie,
-    headers: { origin: SITE, "x-zeron-csrf": browser.csrf, ...(init.headers as Record<string, string> | undefined) }
+    headers: { origin: SITE, "x-csrf-token": browser.csrf, ...(init.headers as Record<string, string> | undefined) }
   });
 
 export const grantAdmin = async (userId: string) => {

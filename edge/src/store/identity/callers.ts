@@ -15,8 +15,8 @@
 import { verifyToken } from "../../auth";
 import type { Env } from "../../env";
 import { jsonError } from "../../http";
-import { CSRF_HEADER, crossSiteRefusal, isSafeMethod } from "../../web-cookies";
-import { resolveWebSession, type ResolvedSession } from "../../web-session";
+import { crossSiteRefusal, isSafeMethod } from "../../web-cookies";
+import { requestCsrf, resolveWebSession, type ResolvedSession } from "../../web-session";
 
 /** The bearer token in `Authorization`, or undefined (none, or not Bearer). */
 export const headerBearer = (request: Request): string | undefined => {
@@ -49,7 +49,7 @@ export const cookieSession = async (
   const session = await resolveWebSession(request, env, privileged);
   if (!session) return undefined;
   if (isSafeMethod(request.method)) return session;
-  const refusal = crossSiteRefusal(request, env, session.csrf, request.headers.get(CSRF_HEADER));
+  const refusal = crossSiteRefusal(request, env, session.csrf, (await requestCsrf(request)).csrf);
   if (refusal === "bad_origin") return forbidden("This request didn't come from the Zeron site.");
   if (refusal) return jsonError(403, "bad_csrf", "This page is out of date. Reload it and try again.");
   return session;

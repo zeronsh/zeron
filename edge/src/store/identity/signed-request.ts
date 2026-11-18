@@ -12,9 +12,10 @@
  * - Replay: the directory remembers what each accepted request signed for
  *   longer than its `ts` is accepted (`DEPLOY_REPLAY_WINDOW_MS`), so the
  *   same request is never accepted twice; once forgotten, its `ts` is stale.
- * - Scope: a deploy key belongs to one plugin, and works only on that
- *   plugin's publishing routes (`deployKeyRoute`): submitting a version and
- *   withdrawing, yanking or unyanking one. Anything else: 403 `key_not_allowed`.
+ * - Scope: a deploy key belongs to one plugin, and does only what
+ *   `deployKeyRoute` allows: submit a version of that plugin, and read that
+ *   plugin's state (`GET /store/v1/me/plugins`, a GET signing the hash of an
+ *   empty body). Anything else: 403 `key_not_allowed`.
  * - The key must be live: registered, not revoked, not expired, its owner's
  *   account not deleted. Its owner owning the plugin is the store's check,
  *   as it is for any publisher.
@@ -26,7 +27,7 @@
 import { verifyEd25519 } from "../../cloud/crypto";
 import type { Env } from "../../env";
 import { jsonError } from "../../http";
-import { userDirectoryStub } from "../../user-directory";
+import { userDirectoryStub, type DeployKeyRefusal } from "../../user-directory";
 import { readBody } from "./body";
 import { MAX_REQUEST_SKEW_MS, deployKeyRoute, parseZeronKeyAuthorization, publishSigningString, sha256Hex } from "./signing";
 
@@ -51,7 +52,7 @@ export const verifySignedRequest = async (
   if (!auth) return unauthenticated("The ZeronKey authorization is malformed.");
   if (url.search !== "") return unauthenticated("A signed request carries no query string.");
   const route = deployKeyRoute(request.method, url.pathname);
-  if (!route) return jsonError(403, "key_not_allowed", "A deploy key only publishes its plugin's versions.");
+  if (!route) return jsonError(403, "key_not_allowed", "A deploy key only publishes its plugin's versions and reads its state.");
   if (Math.abs(now - Number(auth.ts)) > MAX_REQUEST_SKEW_MS) {
     return jsonError(401, "stale_request", "The request's time is more than 5 minutes from the server's. Check the clock.");
   }
@@ -59,7 +60,7 @@ export const verifySignedRequest = async (
   if (!directory) return jsonError(503, "unavailable", "The user directory isn't set up on this server.");
   // The key first, so nobody's body is read for a key that can't publish here.
   const status = await directory.deployKeyStatus(auth.key, route.pluginId);
-  if (status !== "ok") return deployKeyRefusal(status);
+  if ("error" in status) return deployKeyRefusal(status.error);
   const body = await readBody(request);
   if (body === "too_large") return jsonError(413, "too_large", "The request body is too large.");
   const message = publishSigningString(request.method, url.pathname, await sha256Hex(body), auth.ts);
@@ -68,10 +69,10 @@ export const verifySignedRequest = async (
   }
   const used = await directory.useDeployKey(auth.key, route.pluginId, await sha256Hex(`${auth.key}\n${message}`));
   if ("error" in used) return deployKeyRefusal(used.error);
-  return { userId: used.userId, username: used.username, key: auth.key, pluginId: route.pluginId };
+  return { userId: used.userId, username: used.username, key: auth.key, pluginId: used.pluginId };
 };
 
-const deployKeyRefusal = (error: "unknown_key" | "key_revoked" | "key_expired" | "key_not_allowed" | "replayed_request"): Response => {
+const deployKeyRefusal = (error: DeployKeyRefusal | "replayed_request"): Response => {
   switch (error) {
     case "unknown_key":
       return unauthenticated("No one has registered this deploy key.");

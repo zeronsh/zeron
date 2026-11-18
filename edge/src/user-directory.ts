@@ -371,9 +371,10 @@ export interface DeployKeyRow {
 }
 
 /** `useDeployKey`: whose key signed a request, or why it may not. */
+export type DeployKeyRefusal = "unknown_key" | "key_revoked" | "key_expired" | "key_not_allowed";
 export type DeployKeyUse =
-  | { readonly userId: string; readonly username: string | null }
-  | { readonly error: "unknown_key" | "key_revoked" | "key_expired" | "key_not_allowed" | "replayed_request" };
+  | { readonly userId: string; readonly username: string | null; readonly pluginId: string }
+  | { readonly error: DeployKeyRefusal | "replayed_request" };
 
 /** A live web session, as `webSession` reads it. */
 export interface WebSessionRead {
@@ -1416,16 +1417,16 @@ export class UserDirectory extends DurableObject<Env> {
       .toArray().length;
   }
 
-  /** A deploy key's signed request for `pluginId` (signature already
-   * checked): whose it is, or why it may not. Each request is accepted once:
+  /** A deploy key's signed request (signature already checked) for
+   * `pluginId`, or for its own plugin when that's null: whose it is and for
+   * which plugin, or why it may not. Each request is accepted once:
    * `requestHash` (what it signed) is remembered for
    * `DEPLOY_REPLAY_WINDOW_MS`, longer than its timestamp is accepted. */
-  useDeployKey(key: string, pluginId: string, requestHash: string): DeployKeyUse {
+  useDeployKey(key: string, pluginId: string | null, requestHash: string): DeployKeyUse {
     return this.ctx.storage.transactionSync((): DeployKeyUse => {
       const now = Date.now();
       const status = this.deployKeyStatus(key, pluginId);
-      if (status !== "ok") return { error: status };
-      const userId = this.ctx.storage.sql.exec("SELECT user_id FROM plugin_keys WHERE key = ?", key).one().user_id as string;
+      if ("error" in status) return status;
       this.ctx.storage.sql.exec("DELETE FROM deploy_key_uses WHERE expires_at <= ?", now);
       const fresh = this.ctx.storage.sql
         .exec(
@@ -1436,20 +1437,33 @@ export class UserDirectory extends DurableObject<Env> {
         .toArray().length;
       if (!fresh) return { error: "replayed_request" };
       this.ctx.storage.sql.exec("UPDATE plugin_keys SET last_used_at = ? WHERE key = ?", now, key);
-      return { userId, username: this.username(userId) };
+      return { userId: status.userId, username: this.username(status.userId), pluginId: status.pluginId };
     });
   }
 
-  /** Whether a deploy key may act on `pluginId` now (nothing recorded). */
-  deployKeyStatus(key: string, pluginId: string): "ok" | "unknown_key" | "key_revoked" | "key_expired" | "key_not_allowed" {
+  /** Whether a deploy key may act on `pluginId` (null: on its own plugin)
+   * now, and whose it is. Nothing recorded. */
+  deployKeyStatus(key: string, pluginId: string | null): { readonly userId: string; readonly pluginId: string } | { readonly error: DeployKeyRefusal } {
     const [row] = this.ctx.storage.sql
       .exec("SELECT user_id, plugin_id, revoked_at, expires_at FROM plugin_keys WHERE key = ? AND kind = 'deploy'", key)
       .toArray();
-    if (!row || this.userRefusal(row.user_id as string) === "deleted_user") return "unknown_key";
-    if (row.revoked_at !== null) return "key_revoked";
-    if (row.expires_at !== null && (row.expires_at as number) <= Date.now()) return "key_expired";
-    if (row.plugin_id !== pluginId) return "key_not_allowed";
-    return "ok";
+    if (!row || this.userRefusal(row.user_id as string) === "deleted_user") return { error: "unknown_key" };
+    if (row.revoked_at !== null) return { error: "key_revoked" };
+    if (row.expires_at !== null && (row.expires_at as number) <= Date.now()) return { error: "key_expired" };
+    if (pluginId !== null && row.plugin_id !== pluginId) return { error: "key_not_allowed" };
+    return { userId: row.user_id as string, pluginId: row.plugin_id as string };
+  }
+
+  /** Whether `key` may sign a package of `pluginId` that `userId` submits
+   * (`signingKeyAllowed`, principal.ts): a live key of theirs, either a
+   * device's or a deploy key for that plugin. */
+  signingKeyLive(userId: string, key: string, pluginId: string): boolean {
+    const [row] = this.ctx.storage.sql
+      .exec("SELECT kind, plugin_id, expires_at FROM plugin_keys WHERE key = ? AND user_id = ? AND revoked_at IS NULL", key, userId)
+      .toArray();
+    if (!row || this.userRefusal(userId) === "deleted_user") return false;
+    if (row.kind === "device") return true;
+    return row.kind === "deploy" && row.plugin_id === pluginId && (row.expires_at === null || (row.expires_at as number) > Date.now());
   }
 
   // ── roles (roles.ts) ─────────────────────────────────────────────────────

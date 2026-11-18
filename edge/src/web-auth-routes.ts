@@ -5,11 +5,13 @@
  *
  *   GET  /auth/web/login?return_to=/path → 302 to AuthKit
  *   GET  /auth/web/callback?code&state   → 303 to return_to, signed in
- *   POST /auth/web/logout                → signed out (Origin + CSRF; 303 to
- *                                          / for a form post, else {ok: true})
- *   GET  /auth/web/session               → { user: {name, email, avatar},
- *                                          username, roles, csrf, expiresAt,
- *                                          freshSignIn } or 401
+ *   POST /auth/web/logout                → signed out (Origin + CSRF: the
+ *                                          X-CSRF-Token header or a `csrf` form
+ *                                          field; 303 to / for a form post,
+ *                                          else {ok: true})
+ *   GET  /auth/web/session               → { user: {name, email, avatar?},
+ *                                          username, roles, csrf, expires_at,
+ *                                          fresh_sign_in } or 401 signed_out
  *
  * Login binds the attempt to this browser: `state`, the PKCE verifier and
  * where to go after are kept in a 10-minute `__Host-` cookie (nothing is
@@ -32,7 +34,6 @@ import type { Env } from "./env";
 import { MAX_LIVE_STEP_UPS, STEP_UP_TTL_MS, newStepUpToken, stepUpHash } from "./step-up";
 import { WEB_SESSION_ABSOLUTE_MS, userDirectoryStub } from "./user-directory";
 import {
-  CSRF_HEADER,
   LOGIN_COOKIE,
   LOGIN_TTL_MS,
   SESSION_COOKIE,
@@ -50,11 +51,10 @@ import {
   sessionTokenHash,
   webOrigin
 } from "./web-cookies";
-import { resolveWebSession, withSessionCookie } from "./web-session";
+import { requestCsrf, resolveWebSession, withSessionCookie } from "./web-session";
 import { WorkOsAuthFailed, authorizeUrl, exchange, getUser, revokeSession } from "./workos";
 
 export const CALLBACK_PATH = "/auth/web/callback";
-const MAX_FORM_BODY = 4096;
 
 const NO_STORE = { "cache-control": "no-store", vary: "Cookie" };
 
@@ -194,21 +194,8 @@ const callback = async (request: Request, env: Env, url: URL, origin: string): P
   return new Response(null, { status: 303, headers });
 };
 
-/** The CSRF token a logout carries: the header, or a form post's `csrf`. */
-const logoutCsrf = async (request: Request): Promise<{ csrf: string | null; form: boolean }> => {
-  const header = request.headers.get(CSRF_HEADER);
-  const type = request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
-  if (type !== "application/x-www-form-urlencoded") return { csrf: header, form: false };
-  const declared = Number(request.headers.get("content-length") ?? "0");
-  if (declared > MAX_FORM_BODY) return { csrf: header, form: true };
-  const bytes = await request.arrayBuffer().catch(() => new ArrayBuffer(0));
-  if (bytes.byteLength > MAX_FORM_BODY) return { csrf: header, form: true };
-  const text = new TextDecoder().decode(bytes);
-  return { csrf: header ?? new URLSearchParams(text).get("csrf"), form: true };
-};
-
 const logout = async (request: Request, env: Env, origin: string): Promise<Response> => {
-  const { csrf, form } = await logoutCsrf(request);
+  const { csrf, form } = await requestCsrf(request);
   const live = await resolveWebSession(request, env);
   const refusal = crossSiteRefusal(request, env, live?.csrf ?? "", csrf);
   // Without a live session there's nothing to protect but the request's
@@ -233,7 +220,7 @@ const session = async (request: Request, env: Env, url: URL): Promise<Response> 
   if (!live) {
     // A cookie that names no live session goes.
     const stale = sendsCookie(request, SESSION_COOKIE) ? [clearSessionCookie()] : [];
-    return jsonAnswer({ error: "unauthenticated" }, 401, stale);
+    return jsonAnswer({ error: "signed_out" }, 401, stale);
   }
   let profile: Awaited<ReturnType<NonNullable<ReturnType<typeof userDirectoryStub>>["profiles"]>>[string] | undefined;
   try {
@@ -242,19 +229,20 @@ const session = async (request: Request, env: Env, url: URL): Promise<Response> 
     console.warn("auth/web: directory read failed", e instanceof Error ? e.name : "error");
   }
   const edgeOrigin = env.CLOUD_EDGE_URL ?? url.origin;
+  const avatar = profile?.photoKey ? `${edgeOrigin}/auth/avatars/${profile.photoKey}` : (profile?.profilePictureUrl ?? null);
   return withSessionCookie(
     request,
     jsonAnswer({
       user: {
         name: [profile?.firstName, profile?.lastName].filter(Boolean).join(" ") || null,
         email: profile?.email ?? null,
-        avatar: profile?.photoKey ? `${edgeOrigin}/auth/avatars/${profile.photoKey}` : (profile?.profilePictureUrl ?? null)
+        ...(avatar ? { avatar } : {})
       },
       username: live.username,
       roles: live.roles,
       csrf: live.csrf,
-      expiresAt: live.expiresAt,
-      freshSignIn: live.stepUpHash !== null
+      expires_at: live.expiresAt,
+      fresh_sign_in: live.stepUpHash !== null
     })
   );
 };

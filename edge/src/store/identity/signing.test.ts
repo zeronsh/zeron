@@ -74,31 +74,34 @@ describe("the signing string", () => {
 });
 
 describe("the routes a deploy key may use", () => {
-  it("are its plugin's publishing routes, by POST", () => {
+  it("are publishing its plugin's versions, and reading its state", () => {
     expect(deployKeyRoute("POST", "/store/v1/plugins/git/versions")).toEqual({ pluginId: "git" });
-    for (const action of ["withdraw", "yank", "unyank"]) {
-      expect(deployKeyRoute("POST", `/store/v1/plugins/git/versions/1.2.0/${action}`)).toEqual({ pluginId: "git" });
-    }
+    expect(deployKeyRoute("GET", "/store/v1/me/plugins")).toEqual({ pluginId: null });
   });
 
-  it("are nothing else", () => {
+  it("are nothing else: withdraw, yank, unyank and keys need a person", () => {
     const refused: [string, string][] = [
       ["GET", "/store/v1/plugins/git/versions"],
       ["PUT", "/store/v1/plugins/git/versions"],
+      ["POST", "/store/v1/plugins/git/versions/1.2.0/withdraw"],
+      ["POST", "/store/v1/plugins/git/versions/1.2.0/yank"],
+      ["POST", "/store/v1/plugins/git/versions/1.2.0/unyank"],
+      ["GET", "/store/v1/plugins/git/keys"],
       ["POST", "/store/v1/plugins/git/keys"],
       ["DELETE", "/store/v1/plugins/git/keys/abc"],
       ["POST", "/store/v1/plugins/git/installed"],
       ["POST", "/store/v1/plugins/git/reports"],
       ["POST", "/store/v1/me/plugins"],
+      ["GET", "/store/v1/me/plugins/"],
+      ["GET", "/store/v1/me"],
       ["POST", "/store/v1/admin/submissions/git/1.0.0/approve"],
-      ["POST", "/store/v1/plugins/git/versions/1.0.0/remove"],
-      ["POST", "/store/v1/plugins/git/versions//yank"],
       ["POST", "/store/v1/plugins/git/versions/"],
       ["POST", "/store/v1/plugins/Git/versions"],
       ["POST", "/store/v1/plugins/git%2Fx/versions"],
       ["POST", "/store/v1/plugins/../versions"],
       ["POST", "//store/v1/plugins/git/versions"],
-      ["POST", "/store/v2/plugins/git/versions"]
+      ["POST", "/store/v2/plugins/git/versions"],
+      ["post", "/store/v1/plugins/git/versions"]
     ];
     for (const [method, path] of refused) expect(deployKeyRoute(method, path), `${method} ${path}`).toBeUndefined();
   });

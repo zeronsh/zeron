@@ -4,9 +4,9 @@
  * (signed-request.ts), from CI. The secret never comes here.
  *
  *   GET    /store/v1/plugins/:id/keys
- *     → { keys: [{ key, fingerprint, name, createdAt, lastUsedAt, expiresAt, revokedAt }] }
+ *     → { keys: [{ key, fingerprint, name, created_at, last_used_at?, expires_at?, revoked_at? }] }
  *   POST   /store/v1/plugins/:id/keys { key, name, expires?, proof, stepUp? }
- *     → 201 { key, plugin, name, fingerprint, createdAt, expiresAt }
+ *     → 201 { key, fingerprint, name, created_at, expires_at?, plugin }
  *   DELETE /store/v1/plugins/:id/keys/:key → { revoked: true }
  *
  * Only the plugin's owner, signed in (a session bearer or the web's cookie;
@@ -31,7 +31,7 @@ import type { Env } from "../../env";
 import { jsonError } from "../../http";
 import { stepUpHash, stepUpRequired } from "../../step-up";
 import { b64urlEncode, parseEd25519PublicKey, verifyEd25519 } from "../../cloud/crypto";
-import { pluginKeyFingerprint, userDirectoryStub } from "../../user-directory";
+import { userDirectoryStub, type DeployKeyRow } from "../../user-directory";
 import { cookieSession, bearerUser, forbidden, headerBearer, unauthenticated } from "./callers";
 import { readBody } from "./body";
 import { PLUGIN_ID_RE, deployKeyProofMessage } from "./signing";
@@ -54,6 +54,27 @@ const parseKey = (key: unknown): string | undefined => {
   if (typeof key !== "string") return undefined;
   const raw = parseEd25519PublicKey(key);
   return raw && b64urlEncode(raw) === key ? key : undefined;
+};
+
+/** A deploy key as the store's contract lists it (amendment 11): times in
+ * epoch ms, those it doesn't have left out. Never a secret. */
+const wireKey = (row: DeployKeyRow) => ({
+  key: row.key,
+  fingerprint: row.fingerprint,
+  name: row.name,
+  created_at: row.createdAt,
+  ...(row.lastUsedAt === null ? {} : { last_used_at: row.lastUsedAt }),
+  ...(row.expiresAt === null ? {} : { expires_at: row.expiresAt }),
+  ...(row.revokedAt === null ? {} : { revoked_at: row.revokedAt })
+});
+
+/** Revoke every live deploy key of `pluginId`, whoever made it: the store
+ * calls this when the plugin changes hands (and may on a takedown). Answers
+ * how many. */
+export const revokeDeployKeys = async (env: Env, pluginId: string): Promise<number> => {
+  const directory = userDirectoryStub(env);
+  if (!directory) throw new Error("The user directory isn't set up on this server.");
+  return directory.revokeDeployKeys(pluginId);
 };
 
 /** The signed-in caller (never a deploy key) with the step-up ticket a web
@@ -97,7 +118,7 @@ export const handleDeployKeyRoute = async (
   const directory = userDirectoryStub(env);
   if (!directory) return jsonError(503, "unavailable", "The user directory isn't set up on this server.");
 
-  if (request.method === "GET") return fresh({ keys: await directory.deployKeys(pluginId, caller.userId) });
+  if (request.method === "GET") return fresh({ keys: (await directory.deployKeys(pluginId, caller.userId)).map(wireKey) });
 
   if (request.method === "DELETE") {
     const key = parseKey(keyPart);
@@ -135,7 +156,7 @@ export const handleDeployKeyRoute = async (
   switch (result) {
     case "registered": {
       const row = (await directory.deployKeys(pluginId, caller.userId)).find((k) => k.key === key)!;
-      return fresh({ key, plugin: pluginId, name: row.name, fingerprint: await pluginKeyFingerprint(key), createdAt: row.createdAt, expiresAt: row.expiresAt }, 201);
+      return fresh({ ...wireKey(row), plugin: pluginId }, 201);
     }
     case "step_up_required":
       return stepUpRequired();

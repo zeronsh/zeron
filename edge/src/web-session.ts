@@ -19,13 +19,14 @@
  * - CSRF: every state-changing request a cookie authenticates must come
  *   from the web origin (`Origin` equal to `WEB_ORIGIN`; `Sec-Fetch-Site`,
  *   when sent, `same-origin`) and carry the session's CSRF token in
- *   `x-zeron-csrf`. The token is random per session, kept server-side and
+ *   `X-CSRF-Token` (or a form post's `csrf` field). The token is random per session, kept server-side and
  *   stays the same across rotation; one session's token is worthless with
  *   another's cookie.
  */
 import type { Env } from "./env";
 import { userDirectoryStub, type WebSessionRead } from "./user-directory";
-import { SESSION_COOKIE, newToken, readCookie, sessionCookie, sessionTokenHash, webOrigin } from "./web-cookies";
+import { readBody } from "./store/identity/body";
+import { CSRF_HEADER, SESSION_COOKIE, newToken, readCookie, sessionCookie, sessionTokenHash, webOrigin } from "./web-cookies";
 
 /** A live session, resolved for one request. */
 export interface ResolvedSession extends WebSessionRead {
@@ -74,4 +75,21 @@ export const withSessionCookie = (request: Request, response: Response): Respons
   const answer = new Response(response.body, response);
   for (const cookie of cookies) answer.headers.append("set-cookie", cookie);
   return answer;
+};
+
+/** The largest form post read for its CSRF field. */
+export const MAX_FORM_BYTES = 64 * 1024;
+
+/**
+ * The CSRF token a request carries: the `X-CSRF-Token` header, or a form
+ * post's `csrf` field (read through the shared body reader, so the route can
+ * still read the body). `form`: it's a form post.
+ */
+export const requestCsrf = async (request: Request): Promise<{ readonly csrf: string | null; readonly form: boolean }> => {
+  const header = request.headers.get(CSRF_HEADER);
+  const form = request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() === "application/x-www-form-urlencoded";
+  if (header !== null || !form) return { csrf: header, form };
+  const body = await readBody(request, MAX_FORM_BYTES);
+  if (body === "too_large") return { csrf: null, form };
+  return { csrf: new URLSearchParams(new TextDecoder().decode(body)).get("csrf"), form };
 };

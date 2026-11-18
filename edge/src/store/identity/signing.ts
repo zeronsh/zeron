@@ -53,20 +53,23 @@ export const sha256Hex = async (bytes: Uint8Array | string): Promise<string> => 
 export const publishSigningString = (method: string, path: string, bodySha256Hex: string, ts: string): string =>
   `${PUBLISH_SIGNATURE_PREFIX}${method}\n${path}\n${bodySha256Hex}\n${ts}`;
 
-const VERSION_ACTIONS = new Set(["withdraw", "yank", "unyank"]);
-
-/** The plugin a deploy key may act on at `method path`, or undefined: the
- * publishing routes only. */
-export const deployKeyRoute = (method: string, path: string): { readonly pluginId: string } | undefined => {
+/**
+ * What a deploy key may do at `method path` (contract amendment 6), or
+ * undefined: publish a version of its plugin (`pluginId` named by the path),
+ * or read its plugin's state (`GET /store/v1/me/plugins`, `pluginId` null:
+ * the key's own). Withdrawing, yanking, unyanking and managing keys need a
+ * signed-in person, so a leaked key can add a pending version (which review
+ * stops) and nothing more.
+ */
+export const deployKeyRoute = (method: string, path: string): { readonly pluginId: string | null } | undefined => {
+  if (method === "GET" && path === "/store/v1/me/plugins") return { pluginId: null };
   if (method !== "POST") return undefined;
   const parts = path.split("/");
-  // ["", "store", "v1", "plugins", id, "versions", (version, action)?]
-  if (parts[0] !== "" || parts[1] !== "store" || parts[2] !== "v1" || parts[3] !== "plugins" || parts[5] !== "versions") return undefined;
-  const pluginId = parts[4]!;
-  if (!PLUGIN_ID_RE.test(pluginId)) return undefined;
-  if (parts.length === 6) return { pluginId };
-  if (parts.length === 8 && parts[6] && VERSION_ACTIONS.has(parts[7]!)) return { pluginId };
-  return undefined;
+  // ["", "store", "v1", "plugins", id, "versions"]
+  if (parts.length !== 6 || parts[0] !== "" || parts[1] !== "store" || parts[2] !== "v1" || parts[3] !== "plugins" || parts[5] !== "versions") {
+    return undefined;
+  }
+  return PLUGIN_ID_RE.test(parts[4]!) ? { pluginId: parts[4]! } : undefined;
 };
 
 export const DEPLOY_KEY_PROOF_PREFIX = "zeron-deploy-key:v1:";

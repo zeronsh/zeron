@@ -1,4 +1,6 @@
-import { SELF, runInDurableObject } from "cloudflare:test";
+import { SELF, env, runInDurableObject } from "cloudflare:test";
+import type { Env } from "../../src/env";
+import { signingKeyAllowed, type Publisher } from "../../src/store/principal";
 import { describe, expect, it } from "vitest";
 import { PLUGIN_KEY_PROOF_PREFIX } from "../../src/plugin-keys";
 import { MAX_REQUEST_SKEW_MS, deployKeyProofMessage, publishSigningString, sha256Hex } from "../../src/store/identity/signing";
@@ -85,10 +87,17 @@ describe("deploy keys: registering", () => {
     const { res, signer } = await addKey(userId, pluginId, undefined, { expires });
     expect(res.status).toBe(201);
     expect(res.headers.get("cache-control")).toBe("no-store");
-    expect(await res.json()).toMatchObject({ key: signer.key, plugin: pluginId, name: "GitHub Actions", expiresAt: expires, fingerprint: expect.stringMatching(/^[0-9a-f]{4}( [0-9a-f]{4}){7}$/) });
+    expect(await res.json()).toEqual({
+      key: signer.key,
+      plugin: pluginId,
+      name: "GitHub Actions",
+      created_at: expect.any(Number),
+      expires_at: expires,
+      fingerprint: expect.stringMatching(/^[0-9a-f]{4}( [0-9a-f]{4}){7}$/)
+    });
     const list = (await (await api(userId, "GET", `/store/v1/plugins/${pluginId}/keys`)).json()) as { keys: Record<string, unknown>[] };
     expect(list.keys).toEqual([
-      { key: signer.key, fingerprint: expect.any(String), name: "GitHub Actions", createdAt: expect.any(Number), lastUsedAt: null, expiresAt: expires, revokedAt: null }
+      { key: signer.key, fingerprint: expect.any(String), name: "GitHub Actions", created_at: expect.any(Number), expires_at: expires }
     ]);
     // The same key again: a no-op that succeeds, no new ticket needed.
     const again = await api(userId, "POST", `/store/v1/plugins/${pluginId}/keys`, await registration(pluginId, signer));
@@ -137,12 +146,12 @@ describe("deploy keys: registering", () => {
     const second = await add();
     expect(second.status).toBe(403);
     expect(await errorOf(second)).toBe("step_up_required");
-    const session = (await (await SELF.fetch(`${SITE}/auth/web/session`, { headers: { cookie: browser.cookie } })).json()) as { freshSignIn: boolean };
-    expect(session.freshSignIn).toBe(false);
+    const session = (await (await SELF.fetch(`${SITE}/auth/web/session`, { headers: { cookie: browser.cookie } })).json()) as { fresh_sign_in: boolean };
+    expect(session.fresh_sign_in).toBe(false);
     // And it's a change: the site's origin and token, as always.
     const forged = await SELF.fetch(`${SITE}/store/v1/plugins/${pluginId}/keys`, {
       method: "POST",
-      headers: { cookie: browser.cookie, origin: "https://evil.example", "x-zeron-csrf": browser.csrf },
+      headers: { cookie: browser.cookie, origin: "https://evil.example", "x-csrf-token": browser.csrf },
       body: JSON.stringify(await registration(pluginId, await newSigner()))
     });
     expect(forged.status).toBe(403);
@@ -234,7 +243,7 @@ describe("deploy keys: registering", () => {
     const stranger = await person();
     expect((await api(stranger, "DELETE", `/store/v1/plugins/${pluginId}/keys/${signer.key}`)).status).toBe(404);
     expect((await api(userId, "DELETE", `/store/v1/plugins/${pluginId}/keys/${signer.key}`)).status).toBe(200);
-    const listed = async () => ((await (await api(userId, "GET", `/store/v1/plugins/${pluginId}/keys`)).json()) as { keys: { revokedAt: number }[] }).keys[0]!.revokedAt;
+    const listed = async () => ((await (await api(userId, "GET", `/store/v1/plugins/${pluginId}/keys`)).json()) as { keys: { revoked_at: number }[] }).keys[0]!.revoked_at;
     const first = await listed();
     expect(first).toEqual(expect.any(Number));
     expect((await api(userId, "DELETE", `/store/v1/plugins/${pluginId}/keys/${signer.key}`)).status).toBe(200);
@@ -291,24 +300,34 @@ describe("deploy keys: signed requests", () => {
       publisher: { userId, username: "dkpublisher", via: "deploy_key", key: signer.key, pluginScope: pluginId },
       body: await sha256Hex(new TextEncoder().encode(body))
     });
-    for (const action of ["withdraw", "yank", "unyank"]) {
-      expect((await signed(signer, `${publish(pluginId)}/1.0.0/${action}`, "")).status, action).toBe(200);
-    }
-    const listed = ((await (await api(userId, "GET", `/store/v1/plugins/${pluginId}/keys`)).json()) as { keys: { lastUsedAt: number }[] }).keys[0]!;
-    expect(Math.abs(Date.now() - listed.lastUsedAt)).toBeLessThan(60_000);
+    const listed = ((await (await api(userId, "GET", `/store/v1/plugins/${pluginId}/keys`)).json()) as { keys: { last_used_at: number }[] }).keys[0]!;
+    expect(Math.abs(Date.now() - listed.last_used_at)).toBeLessThan(60_000);
+  });
+
+  it("read their plugin's state, signing an empty body", async () => {
+    const { userId, pluginId } = await owned("dkreader");
+    const { signer } = await addKey(userId, pluginId);
+    const res = await signed(signer, "/store/v1/me/plugins", "", { method: "GET" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      publisher: { userId, username: "dkreader", via: "deploy_key", key: signer.key, pluginScope: pluginId },
+      body: await sha256Hex(new Uint8Array(0))
+    });
   });
 
   it("are accepted once (replay)", async () => {
     const { userId, pluginId } = await owned();
     const { signer } = await addKey(userId, pluginId);
     const ts = Date.now();
-    const yank = `${publish(pluginId)}/1.0.0/yank`;
-    expect((await signed(signer, yank, "", { ts })).status).toBe(200);
-    const replay = await signed(signer, yank, "", { ts });
+    expect((await signed(signer, publish(pluginId), "pkg", { ts })).status).toBe(200);
+    const replay = await signed(signer, publish(pluginId), "pkg", { ts });
     expect(replay.status).toBe(401);
     expect(await errorOf(replay)).toBe("replayed_request");
-    // The same action signed afresh is a new request.
-    expect((await signed(signer, yank, "", { ts: ts + 1 })).status).toBe(200);
+    // A read replays no better.
+    expect((await signed(signer, "/store/v1/me/plugins", "", { ts, method: "GET" })).status).toBe(200);
+    expect(await errorOf(await signed(signer, "/store/v1/me/plugins", "", { ts, method: "GET" }))).toBe("replayed_request");
+    // The same upload signed afresh is a new request.
+    expect((await signed(signer, publish(pluginId), "pkg", { ts: ts + 1 })).status).toBe(200);
   });
 
   it("refuse a key used on another plugin, even the same owner's", async () => {
@@ -316,18 +335,20 @@ describe("deploy keys: signed requests", () => {
     const other = newPlugin();
     await setOwner(other, userId);
     const { signer } = await addKey(userId, pluginId);
-    for (const path of [publish(other), `${publish(other)}/1.0.0/yank`]) {
+    for (const path of [publish(other)]) {
       const res = await signed(signer, path, "pkg");
       expect(res.status, path).toBe(403);
       expect(await errorOf(res)).toBe("key_not_allowed");
     }
   });
 
-  it("refuse anything but the publishing routes", async () => {
+  it("refuse anything but publishing and reading: no withdraw, yank or unyank", async () => {
     const { userId, pluginId } = await owned();
     const { signer } = await addKey(userId, pluginId);
     for (const [method, path] of [
-      ["GET", "/store/v1/me/plugins"],
+      ["POST", `${publish(pluginId)}/1.0.0/withdraw`],
+      ["POST", `${publish(pluginId)}/1.0.0/yank`],
+      ["POST", `${publish(pluginId)}/1.0.0/unyank`],
       ["POST", `/store/v1/admin/submissions/${pluginId}/1.0.0/approve`],
       ["GET", publish(pluginId)]
     ]) {
@@ -355,7 +376,9 @@ describe("deploy keys: signed requests", () => {
     const swapped = await signed(signer, publish(pluginId), "pkg", { sendBody: "evil pkg" });
     expect(swapped.status).toBe(401);
     expect(await errorOf(swapped)).toBe("invalid_signature");
-    const moved = await signed(signer, `${publish(pluginId)}/1.0.0/unyank`, "", { sendPath: `${publish(pluginId)}/1.0.0/yank` });
+    const otherPlugin = newPlugin();
+    await setOwner(otherPlugin, userId);
+    const moved = await signed(signer, publish(otherPlugin), "pkg", { sendPath: publish(pluginId) });
     expect(await errorOf(moved)).toBe("invalid_signature");
     const impostor = await newSigner();
     const ts = String(Date.now());
@@ -393,5 +416,44 @@ describe("deploy keys: signed requests", () => {
     const stamp = new Date().toISOString();
     await directory().remove({ id: gone.userId, email: "", first_name: null, last_name: null, profile_picture_url: null, created_at: stamp, updated_at: stamp }, stamp);
     expect((await signed(theirs, publish(gone.pluginId), "pkg")).status).toBe(401);
+  });
+});
+
+describe("signingKeyAllowed", () => {
+  const allowed = (publisher: Publisher, id: string, key: string) => signingKeyAllowed(env as unknown as Env, publisher, id, key);
+
+  it("with a session: the caller's live device key, or their live deploy key for that plugin", async () => {
+    const { userId, pluginId } = await owned();
+    const session: Publisher = { userId, username: null, via: "session" };
+    const device = await newSigner();
+    expect((await api(userId, "POST", "/plugin-keys", { key: device.key, proof: await device.sign(PLUGIN_KEY_PROOF_PREFIX + device.key), stepUp: await stepUp(userId) })).status).toBe(201);
+    const { signer: deploy } = await addKey(userId, pluginId);
+    expect(await allowed(session, pluginId, device.key)).toBe(true);
+    expect(await allowed(session, "any-plugin", device.key)).toBe(true);
+    expect(await allowed(session, pluginId, deploy.key)).toBe(true);
+    expect(await allowed(session, "another-plugin", deploy.key)).toBe(false);
+    // Someone else's key, or none at all.
+    const stranger = await person();
+    expect(await allowed({ userId: stranger, username: null, via: "session" }, pluginId, device.key)).toBe(false);
+    expect(await allowed(session, pluginId, (await newSigner()).key)).toBe(false);
+    // Revoked or expired keys sign nothing.
+    expect((await api(userId, "DELETE", `/plugin-keys/${device.key}`)).status).toBe(200);
+    expect(await allowed(session, pluginId, device.key)).toBe(false);
+    await sql("UPDATE plugin_keys SET expires_at = ? WHERE key = ?", Date.now() - 1, deploy.key);
+    expect(await allowed(session, pluginId, deploy.key)).toBe(false);
+  });
+
+  it("with a deploy key: that very key, for its plugin", async () => {
+    const { userId, pluginId } = await owned();
+    const { signer } = await addKey(userId, pluginId);
+    const { signer: second } = await addKey(userId, pluginId);
+    const publisher: Publisher = { userId, username: null, via: "deploy_key", key: signer.key, pluginScope: pluginId };
+    expect(await allowed(publisher, pluginId, signer.key)).toBe(true);
+    // Not the plugin's other deploy key, nor the owner's device key, nor another plugin.
+    expect(await allowed(publisher, pluginId, second.key)).toBe(false);
+    const device = await newSigner();
+    expect((await api(userId, "POST", "/plugin-keys", { key: device.key, proof: await device.sign(PLUGIN_KEY_PROOF_PREFIX + device.key), stepUp: await stepUp(userId) })).status).toBe(201);
+    expect(await allowed(publisher, pluginId, device.key)).toBe(false);
+    expect(await allowed(publisher, "another-plugin", signer.key)).toBe(false);
   });
 });

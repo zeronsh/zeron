@@ -10,6 +10,7 @@ import {
   WEB_SESSION_IDLE_MS
 } from "../../src/user-directory";
 import { sessionTokenHash } from "../../src/web-cookies";
+import { sha256Hex } from "../../src/store/identity/signing";
 import {
   SITE,
   directory,
@@ -83,10 +84,11 @@ describe("web sign-in", () => {
     expect(answer.status).toBe(200);
     expect(answer.headers.get("cache-control")).toBe("no-store");
     const body = (await answer.json()) as Record<string, unknown>;
-    expect(body).toMatchObject({ user: { name: "Ada Lovelace", avatar: null }, roles: [], freshSignIn: true });
+    expect(body).toMatchObject({ user: { name: "Ada Lovelace" }, roles: [], fresh_sign_in: true });
+    expect(body.user).not.toHaveProperty("avatar");
     expect(body.username).toMatch(/^web/);
     expect(body.csrf).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    expect(body.expiresAt).toEqual(expect.any(Number));
+    expect(body.expires_at).toEqual(expect.any(Number));
     // No user id goes out.
     expect(JSON.stringify(body)).not.toContain(userId);
     // The directory keeps only the token's hash.
@@ -196,7 +198,7 @@ describe("web sessions", () => {
     for (const value of ["A".repeat(43), "not-a-token", "", `${"A".repeat(43)}; __Host-zeron_session=${"B".repeat(43)}`]) {
       const res = await sessionOf(sessionHeader(value));
       expect(res.status, value).toBe(401);
-      expect(await errorOf(res)).toBe("unauthenticated");
+      expect(await errorOf(res)).toBe("signed_out");
       expect(res.headers.getSetCookie().some((c) => c.startsWith("__Host-zeron_session=;"))).toBe(true);
     }
     expect((await sessionOf("")).status).toBe(401);
@@ -217,9 +219,9 @@ describe("web sessions", () => {
       ["GET", "/registry/org1/rows"],
       ["POST", "/plugin-keys"]
     ] as const) {
-      const res = await SELF.fetch(`https://edge.test${path}`, { method, headers: { cookie: browser.cookie, origin: SITE, "x-zeron-csrf": browser.csrf } });
+      const res = await SELF.fetch(`https://edge.test${path}`, { method, headers: { cookie: browser.cookie, origin: SITE, "x-csrf-token": browser.csrf } });
       expect(res.status, path).toBe(401);
-      const onSite = await fetchSite(path, { method, cookie: browser.cookie, headers: { origin: SITE, "x-zeron-csrf": browser.csrf } });
+      const onSite = await fetchSite(path, { method, cookie: browser.cookie, headers: { origin: SITE, "x-csrf-token": browser.csrf } });
       expect(onSite.status, `site ${path}`).toBe(401);
     }
   });
@@ -249,9 +251,9 @@ describe("web sessions", () => {
     await age(idle.token, { last_seen_at: STAFF_SESSION_IDLE_MS + 1000 });
     expect((await sessionOf(idle.cookie)).status).toBe(401);
     const live = await webSignIn(userId);
-    const answer = (await (await sessionOf(live.cookie)).json()) as { roles: string[]; expiresAt: number };
+    const answer = (await (await sessionOf(live.cookie)).json()) as { roles: string[]; expires_at: number };
     expect(answer.roles).toEqual(["admin"]);
-    expect(answer.expiresAt - Date.now()).toBeLessThanOrEqual(STAFF_SESSION_IDLE_MS);
+    expect(answer.expires_at - Date.now()).toBeLessThanOrEqual(STAFF_SESSION_IDLE_MS);
   });
 
   it("rotate a staff session's token on privileged use; the old one lapses after its grace", async () => {
@@ -316,11 +318,11 @@ describe("signing out", () => {
     const browser = await webSignIn(userId);
     const other = await webSignIn(await person());
     const attempts: [string, Record<string, string>][] = [
-      ["no Origin", { "x-zeron-csrf": browser.csrf }],
-      ["foreign Origin", { origin: "https://evil.example", "x-zeron-csrf": browser.csrf }],
-      ["cross-site fetch", { origin: SITE, "sec-fetch-site": "cross-site", "x-zeron-csrf": browser.csrf }],
+      ["no Origin", { "x-csrf-token": browser.csrf }],
+      ["foreign Origin", { origin: "https://evil.example", "x-csrf-token": browser.csrf }],
+      ["cross-site fetch", { origin: SITE, "sec-fetch-site": "cross-site", "x-csrf-token": browser.csrf }],
       ["no token", { origin: SITE }],
-      ["another session's token", { origin: SITE, "x-zeron-csrf": other.csrf }]
+      ["another session's token", { origin: SITE, "x-csrf-token": other.csrf }]
     ];
     for (const [what, headers] of attempts) {
       const res = await fetchSite("/auth/web/logout", { method: "POST", cookie: browser.cookie, headers });
@@ -367,12 +369,12 @@ describe("cookie-authenticated store routes", () => {
     const other = await webSignIn(await person());
     const path = "/store/v1/plugins/demo/versions";
     const refused: [string, Record<string, string>, string][] = [
-      ["no Origin", { "x-zeron-csrf": browser.csrf }, "forbidden"],
-      ["foreign Origin", { origin: "https://evil.example", "x-zeron-csrf": browser.csrf }, "forbidden"],
-      ["the edge's origin", { origin: "https://edge.test", "x-zeron-csrf": browser.csrf }, "forbidden"],
+      ["no Origin", { "x-csrf-token": browser.csrf }, "forbidden"],
+      ["foreign Origin", { origin: "https://evil.example", "x-csrf-token": browser.csrf }, "forbidden"],
+      ["the edge's origin", { origin: "https://edge.test", "x-csrf-token": browser.csrf }, "forbidden"],
       ["no token", { origin: SITE }, "bad_csrf"],
-      ["another session's token", { origin: SITE, "x-zeron-csrf": other.csrf }, "bad_csrf"],
-      ["a guessed token", { origin: SITE, "x-zeron-csrf": "A".repeat(43) }, "bad_csrf"]
+      ["another session's token", { origin: SITE, "x-csrf-token": other.csrf }, "bad_csrf"],
+      ["a guessed token", { origin: SITE, "x-csrf-token": "A".repeat(43) }, "bad_csrf"]
     ];
     for (const [what, headers, error] of refused) {
       const res = await fetchSite(path, { method: "POST", cookie: browser.cookie, headers, body: "pkg" });
@@ -382,6 +384,23 @@ describe("cookie-authenticated store routes", () => {
     const ok = await siteChange(path, browser, { body: "pkg" });
     expect(ok.status).toBe(200);
     expect(await ok.json()).toMatchObject({ publisher: { userId, via: "session" } });
+    // A plain form post carries the token as a field, and the route still
+    // reads the whole body.
+    const form = await fetchSite(path, {
+      method: "POST",
+      cookie: browser.cookie,
+      headers: { origin: SITE, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf=${browser.csrf}&note=hi`
+    });
+    expect(form.status).toBe(200);
+    expect(((await form.json()) as { body: string }).body).toBe(await sha256Hex(new TextEncoder().encode(`csrf=${browser.csrf}&note=hi`)));
+    const wrongField = await fetchSite(path, {
+      method: "POST",
+      cookie: browser.cookie,
+      headers: { origin: SITE, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf=${other.csrf}`
+    });
+    expect(wrongField.status).toBe(403);
     // A read needs no token.
     expect((await fetchSite("/store/v1/me/plugins", { cookie: browser.cookie })).status).toBe(200);
   });

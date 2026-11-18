@@ -7,7 +7,7 @@ import { b64urlDecode, b64urlEncode, constantTimeEqual } from "./cloud/crypto";
 import type { Env } from "./env";
 
 export const SESSION_COOKIE = "__Host-zeron_session";
-export const CSRF_HEADER = "x-zeron-csrf";
+export const CSRF_HEADER = "x-csrf-token";
 
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
 
