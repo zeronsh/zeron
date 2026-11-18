@@ -1,5 +1,5 @@
--- The plugin store (screens/plugins/store), answered here as the host and
--- the store would: no host in a test host. A made-up catalog of 75
+-- The plugin store (screens/plugins/store), answered here as the engine's
+-- `Store*` calls would (crates/rpc): no engine in a test host. A made-up catalog of 75
 -- plugins, so Browse pages (30 at a time), searches, filters and sorts as
 -- the store does; each plugin's page, its versions, its pictures; your own
 -- plugins' versions and reviews; deploy keys.
@@ -120,15 +120,16 @@ local WORDS = {
 	"Deploy button", "Feature flags", "A/B notes", "Bug bash", "Pair timer", "Rubber duck", "Haiku commit",
 	"Retro board", "Meeting notes", "Agent stats", "Token tally", "Prompt library",
 }
+-- (The store's fixed list, the plan's amendment 4.)
 local CATEGORIES = {
 	{ id = "agents", name = "Agents" },
+	{ id = "appearance", name = "Appearance" },
 	{ id = "chat", name = "Chat" },
-	{ id = "code", name = "Code" },
+	{ id = "developer-tools", name = "Developer tools" },
 	{ id = "git", name = "Git" },
-	{ id = "files", name = "Files" },
-	{ id = "look", name = "Look" },
+	{ id = "integrations", name = "Integrations" },
 	{ id = "productivity", name = "Productivity" },
-	{ id = "data", name = "Data" },
+	{ id = "utilities", name = "Utilities" },
 }
 local FOCUS_SVG = [[<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="13" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 9v4l2 2M9 2h6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>]]
 
@@ -155,9 +156,8 @@ for i, name in WORDS do
 		summary = `{name} for your chats: a short line saying what it does.`,
 		icon = if i % 3 == 0 then nil else "icon.svg",
 		author = {
-			username = if i % 5 == 0 then "zeron" else ({ "ada", "grace", "linus", "mara" })[i % 4 + 1],
-			verified = i % 2 == 0,
-			badges = if i % 5 == 0 then { "zeron" } else {},
+			username = ({ "ada", "grace", "linus", "mara" })[i % 4 + 1],
+			badges = if i % 5 == 0 then { { id = "maintainer", name = "Maintainer" } } else {},
 		},
 		categories = { category },
 		keywords = { category, if i % 2 == 0 then "review" else "daily" },
@@ -171,8 +171,9 @@ for i, name in WORDS do
 		detail = {
 			readme = `# {name}\n\n{card.summary}\n\nIt keeps out of your way.`,
 			screenshots = {},
-			permissions = { "ui.add" },
+			permissions = { asks = { "ui.add" } },
 			engines = { zeron = ">=0.3.0" },
+			compatible = true,
 			license = "MIT",
 			homepage = `https://example.com/{id}`,
 			repository = `https://github.com/{(card.author :: any).username}/{id}`,
@@ -191,7 +192,7 @@ end
 do
 	local f = by_id["focus-timer"]
 	f.card.icon = "icon.svg"
-	f.card.author = { username = "ada", verified = true, badges = {} }
+	f.card.author = { username = "ada", badges = { { id = "maintainer", name = "Maintainer" } } }
 	f.detail.repository = "https://github.com/ada/focus-timer"
 	f.card.version = "1.2.0"
 	f.card.keywords = { "focus", "timer", "pomodoro" }
@@ -214,8 +215,7 @@ do
 		"- Says when it's done.",
 	}, "\n")
 	f.detail.screenshots = { "shots/header.png", "shots/done.png" }
-	f.detail.permissions = { "ui.add", "notifications", "network" }
-	f.detail.network_hosts = { "api.example.com" }
+	f.detail.permissions = { asks = { "ui.add", "notifications", "network" }, network_hosts = { "api.example.com" } }
 	f.detail.engines = { zeron = ">=0.3.0" }
 	f.versions = {
 		{ version = "1.2.0", status = "approved", published_at = NOW - 2 * DAY, notes = "- Pauses when you leave the chat.\n- Says when it's done." },
@@ -223,8 +223,11 @@ do
 		{ version = "1.0.0", status = "approved", published_at = NOW - 60 * DAY, notes = "- The first one." },
 	}
 end
--- One that needs a later Zeron.
+-- One that needs a later Zeron: the engine says so, in its words.
 by_id["cost-meter"].detail.engines = { zeron = ">=9.0.0" }
+by_id["cost-meter"].detail.compatible = false
+by_id["cost-meter"].detail.incompatible = "Needs Zeron 9.0.0 or later; this device has 0.4.2."
+
 
 local function card_of(e: Entry): store.Card
 	local c = table.clone(e.card)
@@ -308,12 +311,6 @@ stub.detail = function(id: string): any
 		return d
 	end)
 end
-stub.versions = function(id: string): any
-	note(`versions:{id}`)
-	return answer(function(): any
-		return { versions = entry(id).versions }
-	end)
-end
 stub.categories = function(): any
 	note("categories")
 	return answer(function(): any
@@ -338,6 +335,30 @@ stub.icon = function(id: string, _version: string, _path: string): any
 		return { svg = FOCUS_SVG }
 	end, true)
 end
+
+stub.report = function(id: string, reason: string, text: string): any
+	note(`report:{id}:{reason}:{text}`)
+	return answer(function(): any
+		entry(id)
+		return {}
+	end)
+end
+stub.prereleases = function(id: string, on: boolean): any
+	note(`prereleases:{id}:{tostring(on)}`)
+	return answer(function(): any
+		return {}
+	end)
+end
+-- (The engine's `compatible` judged again, as for an older Zeron.)
+ui.command {
+	id = "store_stub.old_zeron",
+	title = "Store: this Zeron is too old for Focus timer",
+	run = function()
+		local f = by_id["focus-timer"]
+		f.detail.compatible = false
+		f.detail.incompatible = "Needs Zeron 0.3.0 or later; this device has 0.2.0."
+	end,
+}
 
 ui.command {
 	id = "store_stub.hold",

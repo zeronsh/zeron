@@ -35,3 +35,11 @@ the second, the same list without the enter, passes.
 store's card would leave the page that fades in around it (coming back
 from a plugin's page) with the same empty card, and trades the motion
 every catalog has. Browse waits on this.
+
+**Elsewhere in Zeron on the pin (checked Nov 17, headless):** no other
+screen shows the empty card today. Settings → Archived's lists are
+`EachList`s, but none stands under a fading presence: its rows are built
+as it opens, after a search is cleared, and on coming back to it.
+Installed (Plugins) and Templates use `Settings.Each`, a keyed `ui.each`
+that isn't virtualized. Browse is the first virtualized list under a
+catalog card's fade.

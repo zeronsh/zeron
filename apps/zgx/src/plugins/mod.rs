@@ -3245,11 +3245,11 @@ impl Bridge {
                         // store and verifies it against the store's record.
                         (None, None) if given("store").is_some() => {
                             let id = given("store").and_then(|id| catalog::store_id(&id)).ok_or("not_found")?;
-                            let mut store = json!({ "id": id });
-                            if let Some(v) = given("version").filter(|v| v.len() <= 64) {
+                            let mut store = json!({ "store": id });
+                            if let Some(v) = given("version").filter(|v| v.len() <= 128) {
                                 store["version"] = json!(v);
                             }
-                            json!({ "store": store })
+                            store
                         }
                         _ => return Err("Choose a plugin file or paste a link".into()),
                     };

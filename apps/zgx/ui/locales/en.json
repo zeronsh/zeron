@@ -3810,7 +3810,6 @@
       "browse": "Browse",
       "search": "Search plugins",
       "featured": "Featured",
-      "verified": "Verified",
       "byline": "{author} · {n, plural, one {# install} other {# installs}}",
       "installs": "{n, plural, one {# install} other {# installs}}",
       "installed": "Installed",
@@ -3832,13 +3831,13 @@
       },
       "category": {
         "agents": "Agents",
+        "appearance": "Appearance",
         "chat": "Chat",
-        "code": "Code",
+        "developer_tools": "Developer tools",
         "git": "Git",
-        "files": "Files",
-        "look": "Look",
+        "integrations": "Integrations",
         "productivity": "Productivity",
-        "data": "Data"
+        "utilities": "Utilities"
       },
       "offline_title": "Can't reach the plugin store",
       "offline_body": "Your installed plugins still work. Try again when you're back online.",
@@ -3866,13 +3865,9 @@
         "repository": "Source"
       },
       "version_on": "{version}, {date}",
-      "works_any": "Any version of Zeron",
-      "works_from": "Zeron {version} or later",
       "install_note": "Zeron checks who signed it, then asks you to allow what it needs.",
       "update_note": "A newer version is ready.",
       "review_note": "It's waiting for you to allow it.",
-      "needs_zeron": "Needs Zeron {version} or later.",
-      "needs_zeron_has": "Needs Zeron {version} or later, and {device} has {has}.",
       "needs_other_zeron": "It doesn't work with this version of Zeron.",
       "device_away": "It can't be installed while {device} is away.",
       "blocked_title": "Zeron turned off {name}",
@@ -3901,9 +3896,9 @@
         "reason_label": "What's wrong",
         "reason": {
           "broken": "It doesn't work",
+          "misleading": "It isn't what it says it is",
           "malware": "It does something harmful",
-          "impersonation": "It pretends to be someone else",
-          "spam": "It's spam",
+          "copyright": "It uses someone else's work",
           "other": "Something else"
         },
         "text_label": "More about it",
@@ -3911,7 +3906,11 @@
         "send": "Send report",
         "sent": "Report sent",
         "failed": "Couldn't send the report"
-      }
+      },
+      "works_here": "This version of Zeron",
+      "prereleases": "Try pre-releases",
+      "prereleases_body": "Updates include versions its author is still testing.",
+      "couldnt_prereleases": "Couldn't change {name}'s pre-releases"
     }
   },
   "templates": {

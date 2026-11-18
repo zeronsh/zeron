@@ -10,7 +10,6 @@
 --   store.update_found      a newer Focus timer found, asking for more
 --   store.blocked           Zeron takes Focus timer 1.2.0 down
 --   store.allowed           Focus timer allowed, and on
---   store.old_zeron         this device's Zeron is 0.2.0
 
 ui.theme.strict("warn")
 local ds = require("@ds")
@@ -43,7 +42,7 @@ local model: { any } = {
 		allowed = { "ui.add" },
 		ask = {},
 		hash = "branch-badge-1",
-		source = { kind = "store", id = "branch-badge", version = "1.1.0" },
+		source = { kind = "store", id = "branch-badge", publisher = "grace" },
 	},
 }
 
@@ -91,6 +90,10 @@ s.set_off = function(id: string, off: boolean): any
 	local p = find(id)
 	if p then
 		p.status = if off then "off" else "on"
+		-- (Turned back on after Zeron took it down: the engine keeps it on.)
+		if not off and type(p.blocked) == "table" then
+			p.blocked.overridden = true
+		end
 		publish()
 	end
 	return nil
@@ -101,26 +104,6 @@ end
 s.check_updates = function(): any
 	return nil
 end
-local store = require("@app/screens/plugins/store") :: any
-store.unblock = function(id: string): any
-	stub.note(`unblock:{id}`)
-	local p = find(id)
-	if p then
-		p.blocked = nil
-		p.status = "on"
-		publish()
-	end
-	return stub.answer(function(): any
-		return nil
-	end)
-end
-store.report = function(id: string, reason: string, text: string): any
-	stub.note(`report:{id}:{reason}:{text}`)
-	return stub.answer(function(): any
-		return nil
-	end)
-end
-
 ui.command {
 	id = "store.install_done",
 	title = "The install finishes: Focus timer, waiting for you",
@@ -136,7 +119,7 @@ ui.command {
 			allowed = {},
 			ask = { "ui.add", "notifications", "network" },
 			hash = "focus-timer-1.2.0",
-			source = { kind = "store", id = "focus-timer", version = "1.2.0" },
+			source = { kind = "store", id = "focus-timer", publisher = "ada" },
 		}
 		table.insert(model, focus)
 		publish()
@@ -192,18 +175,10 @@ ui.command {
 	run = function()
 		local p = find("focus-timer")
 		p.status = "off"
-		p.blocked = { version = "1.2.0", reason = "It sent what you typed to a server it didn't name." }
+		p.blocked = { version = "1.2.0", reason = "It sent what you typed to a server it didn't name.", at = 1794873600000, overridden = false }
 		publish()
 	end,
 }
-ui.command {
-	id = "store.old_zeron",
-	title = "This device's Zeron is 0.2.0",
-	run = function()
-		devices("0.2.0")
-	end,
-}
-
 publish()
 
 ui.command { id = "theme_light", title = "Light theme", run = function() ui.theme.follow_system(false); ui.theme.current:set("zeron-light") end }

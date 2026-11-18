@@ -1,62 +1,58 @@
 --!strict
 -- The plugin store, as Settings → Plugins asks it: Browse, a plugin's page,
 -- and publishing from Yours. Every call goes through here, so a fixture
--- answers them as the host would (ui/store_stub.luau). The host reads the
--- catalog from Zeron's servers (src/plugins/catalog.rs: public, no sign-in
--- needed; your own plugins with your session, which never reaches a
--- script); the engine installs, publishes and makes deploy keys, on the
--- device each call names (`device`, nil: this one).
+-- answers them as the host would (ui/store_stub.luau). The engine is the
+-- store's one client (its `Store*` calls, crates/rpc); the host only carries
+-- them (src/plugins/catalog.rs). Installing from the store is
+-- `state.install { store = id, version?, device? }`; a version the store
+-- took down is turned back on with `state.set_off(id, false, device)`.
 --
 -- Each returns the host's promise, `:after(ok, err)`; `err.message` is an
--- outcome word ("offline", "signed_out", "not_found") or the engine's
--- "<reason>: <words>" (screens/plugins/words `failure`).
+-- outcome word ("offline", "signed_out", "not_found") or "<reason>: <words>"
+-- (screens/plugins/words `failure`).
 --
 -- Reading the catalog:
 --   store.search { q?, category?, keyword?, sort?, cursor?, limit?, featured? }
 --       { items = { Card }, next_cursor? }   sort: "relevance" | "popular" |
 --                                            "updated" | "new"
 --   store.detail(id)          Detail (rejects "not_found")
---   store.versions(id)        { versions = { Version } }
 --   store.categories()        { categories = { { id, name } } }
---   store.picture(id, version, path)  { src }: a picture of its package, kept
---                             here to show (only pictures, only its files)
---   store.icon(id, version, path)     { svg }: its icon, as an installed
---                             plugin's (an SVG of its package), or nil
--- Installing (state.install/update carry the rest):
---   store.unblock(id, device?)  a version taken down by Zeron, back on
--- Your own:
---   store.mine()              { plugins = { Mine } }  every version and its
---                             review
---   store.check(id)           { version, last?, checks = { Check } } before
---                             publishing (the engine reads its folder)
---   store.publish(id)         { id, version, status, checks }
---   store.withdraw(id, version), store.yank(id, version),
---   store.unyank(id, version)
---   store.keys(id)            { keys = { Key } }
---   store.create_key { id, name, expires? }   { key = Key, secret } once:
---                             asks for a fresh sign-in first
---   store.revoke_key(id, key)
+--   store.picture(id, version, path)  { src }: a picture of its package, as
+--                             the engine keeps it here
+--   store.icon(id, version, path)     { svg }: its icon, or nil
+--   store.prereleases(id, on, device?)  whether that device takes its
+--                             pre-releases
 --   store.report(id, reason, text)
+-- Your own:
+--   store.mine()              { plugins = { Card + { listing, versions } } }
+--   store.version_action(id, version, action)   "withdraw" | "yank" | "unyank"
+--   store.prepare(id)         { id, version, hash, ok, problems = { { rule,
+--                             field?, path?, words } }, warnings, listing,
+--                             notes, package = { files, bytes }, ticket? }
+--   store.publish(id, hash, ticket)  { id, version, status, checks }
+--   store.keys(id)            { keys = { Key } }
+--   store.create_key { id, name, expires? }   { key, secret } once: a fresh
+--                             sign-in first when the store asks for one
+--   store.cancel_step_up()    stops waiting for that sign-in
+--   store.revoke_key(id, key)
 --
--- Shapes (the plan's contract, docs/plans/2026-11-17-plugin-store.md):
---   Card    { id, name, summary, icon?, author = { username, verified,
---             badges = { "zeron"? } }, categories, keywords, version,
---             updated_at, installs, featured }
---   Detail  Card + { readme, screenshots = { path }, permissions = { string },
---             and what the consent sheet reads of them (ui, tools,
---             commands, network_hosts…), engines = { zeron? }, homepage?,
---             repository?, license?, versions = { Version }, package =
---             { bytes, sha256, hash } }
+-- Shapes (the plan's contract and its amendments,
+-- docs/plans/2026-11-17-plugin-store.md):
+--   Card    { id, name, summary, icon?, author = { username, badges = {
+--             { id, name } } }, categories, keywords, version, updated_at,
+--             installs, featured }
+--   Detail  Card + { readme, screenshots = { path }, permissions (the consent
+--             sheet's item: { asks, ui, commands, network_hosts, tools… }),
+--             engines, homepage?, repository?, license?, versions = { Version },
+--             package, compatible, incompatible? (why not, in words) }
 --   Version { version, status, published_at, notes?, engines?, yanked?,
---             prerelease?, reason?, message? }  status: "pending" |
---             "approved" | "rejected" | "withdrawn" | "yanked" | "removed"
---   Check   { id, ok, detail? }   id: "readme" | "icon" | "category" |
---             "description" | "semver" | "newer"
---   Key     { key, name, created_at, last_used_at?, expires_at? }
+--             review? = { state, reason?, message?, decided_at? } }
+--   Key     { key, name, created_at, last_used_at?, expires_at?, revoked_at? }
 
 local M = {}
 
-export type Author = { username: string?, verified: boolean?, badges: { string }? }
+export type Badge = { id: string?, name: string? }
+export type Author = { username: string?, badges: { Badge | string }? }
 export type Card = {
 	id: string,
 	name: string,
@@ -78,8 +74,7 @@ export type Version = {
 	engines: { zeron: string? }?,
 	yanked: boolean?,
 	prerelease: boolean?,
-	reason: string?,
-	message: string?,
+	review: { state: string?, reason: string?, message: string?, decided_at: number? }?,
 }
 export type Query = {
 	q: string?,
@@ -102,10 +97,6 @@ function M.detail(id: string): any
 	return ui.call("plugins.store.detail", id)
 end
 
-function M.versions(id: string): any
-	return ui.call("plugins.store.versions", id)
-end
-
 function M.categories(): any
 	return ui.call("plugins.store.categories", nil)
 end
@@ -118,32 +109,28 @@ function M.icon(id: string, version: string, path: string): any
 	return ui.call("plugins.store.icon", { id = id, version = version, path = path })
 end
 
-function M.unblock(id: string, device: string?): any
-	return ui.call("plugins.store.unblock", { id = id, device = device })
+function M.prereleases(id: string, on: boolean, device: string?): any
+	return ui.call("plugins.store.prereleases", { id = id, on = on, device = device })
+end
+
+function M.report(id: string, reason: string, text: string): any
+	return ui.call("plugins.store.report", { id = id, reason = reason, text = text })
 end
 
 function M.mine(): any
 	return ui.call("plugins.store.mine", nil)
 end
 
-function M.check(id: string): any
-	return ui.call("plugins.store.check", id)
+function M.version_action(id: string, version: string, action: string): any
+	return ui.call("plugins.store.version_action", { id = id, version = version, action = action })
 end
 
-function M.publish(id: string): any
-	return ui.call("plugins.store.publish", id)
+function M.prepare(id: string): any
+	return ui.call("plugins.store.prepare", id)
 end
 
-function M.withdraw(id: string, version: string): any
-	return ui.call("plugins.store.withdraw", { id = id, version = version })
-end
-
-function M.yank(id: string, version: string): any
-	return ui.call("plugins.store.yank", { id = id, version = version })
-end
-
-function M.unyank(id: string, version: string): any
-	return ui.call("plugins.store.unyank", { id = id, version = version })
+function M.publish(id: string, hash: string, ticket: string): any
+	return ui.call("plugins.store.publish", { id = id, hash = hash, ticket = ticket })
 end
 
 function M.keys(id: string): any
@@ -154,13 +141,16 @@ function M.create_key(args: { id: string, name: string, expires: number? }): any
 	return ui.call("plugins.store.create_key", args)
 end
 
+function M.cancel_step_up()
+	ui.invoke("plugins.store.cancel_step_up", nil)
+end
+
 function M.revoke_key(id: string, key: string): any
 	return ui.call("plugins.store.revoke_key", { id = id, key = key })
 end
 
-function M.report(id: string, reason: string, text: string): any
-	return ui.call("plugins.store.report", { id = id, reason = reason, text = text })
-end
+-- What a report may say is wrong (the store's list).
+M.REPORT_REASONS = { "broken", "misleading", "malware", "copyright", "other" }
 
 -- A store id, as plugin ids are (the engine's manifest rule,
 -- `^[a-z0-9][a-z0-9-]{1,39}$`): what a link may name, and nothing else.

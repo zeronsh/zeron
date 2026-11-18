@@ -37,10 +37,8 @@ local state = require("@app/screens/plugins/state")
 local words = require("@app/screens/plugins/words")
 local asks_view = require("@app/screens/plugins/asks")
 local nav = require("@app/screens/plugins/nav")
-local semver = require("@app/screens/plugins/semver")
 local browse = require("@app/screens/plugins/browse")
 local plugin_settings = require("@app/screens/plugins/settings")
-local sessions = require("@account/sessions")
 
 local M = {}
 
@@ -55,17 +53,6 @@ export type Here = {
 -- Each plugin's page as last read, by id: one opened again draws at once,
 -- and is read again behind it.
 local details = ui.state("store_details", {} :: { [string]: any })
-
--- This build's Zeron (the engine's, as the About page has it), for a
--- device that doesn't say its own.
-local function zeron_of(device: string?): string?
-	for _, d in sessions.devices:get() or {} do
-		if (device and d.id == device) or (not device and d.here) then
-			return d.version
-		end
-	end
-	return nil
-end
 
 -- A link the page may open: the web's alone.
 local function web(url: any): string?
@@ -107,16 +94,6 @@ local function package_path(src: string): string?
 	return path
 end
 
--- Whether it works with the Zeron of the device shown: true, false, or nil
--- when that can't be told (the device didn't say, or the range can't be
--- read: then the engine decides as it installs).
-local function works(range: string?, zeron: string?): boolean?
-	if range == nil or zeron == nil then
-		return if range == nil then true else nil
-	end
-	return semver.satisfies(zeron, range)
-end
-
 local function said(node: Node): Node
 	return ui.column { w_full = true, py = "$space.6", px = "$space.4", node }
 end
@@ -132,7 +109,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 	local updating = ui.use_state(false)
 	local update_open = ui.use_state(false)
 	local report_open = ui.use_state(false)
-	local report_reason = ui.use_state("broken")
+	local report_reason = ui.use_state(store.REPORT_REASONS[1])
 	local report_text = ui.use_state("")
 	local unblocking = ui.use_state(false)
 
@@ -144,19 +121,27 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		end
 		return nil
 	end
-	local function range(): string?
-		local e = d().engines
-		return if type(e) == "table" and type(e.zeron) == "string" and e.zeron ~= "" then e.zeron else nil
+	-- Whether it works with this Zeron, as the engine judges it (its
+	-- `engines.zeron` against the Zeron it runs), and why not in its words.
+	local function compatible(): boolean
+		return d().compatible ~= false
 	end
-	local function zeron(): string?
-		return zeron_of(here.device())
+	local function incompatible(): string
+		local why = d().incompatible
+		return if type(why) == "string" and why ~= "" then why else ui.t("plugins.store.needs_other_zeron"):get()
+	end
+	-- Taken down by Zeron, and not turned back on.
+	local function blocked(): any?
+		local it: any = item()
+		local b = if it then it.blocked else nil
+		return if type(b) == "table" and b.overridden ~= true then b else nil
 	end
 
 	-- What the one button does now.
 	local function standing(): string
 		local it: any = item()
 		if it then
-			if type(it.blocked) == "table" then
+			if blocked() then
 				return "blocked"
 			elseif here.away() then
 				return "away"
@@ -173,7 +158,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		end
 		if here.away() then
 			return "away"
-		elseif works(range(), zeron()) == false then
+		elseif not compatible() then
 			return "incompatible"
 		end
 		return "install"
@@ -222,9 +207,15 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			p:after(function(_: any) end, here.failed(ui.t("plugins.page.couldnt_switch", { name = d().name or id })))
 		end
 	end
+	-- (Yours to run: the engine keeps it on as you turned it.)
 	local function unblock()
 		unblocking:set(true)
-		store.unblock(id, here.device()):after(function()
+		local p: any = state.set_off(id, false, here.device())
+		if p == nil then
+			unblocking:set(false)
+			return
+		end
+		p:after(function(_: any)
 			unblocking:set(false)
 		end, function(err: any)
 			unblocking:set(false)
@@ -320,14 +311,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		if k == "install" then
 			return ui.t("plugins.store.install_note"):get()
 		elseif k == "incompatible" then
-			local least = semver.least(range())
-			local has = zeron()
-			if least and has then
-				return ui.t("plugins.store.needs_zeron_has", { version = least, device = here.device_name(), has = has }):get()
-			elseif least then
-				return ui.t("plugins.store.needs_zeron", { version = least }):get()
-			end
-			return ui.t("plugins.store.needs_other_zeron"):get()
+			return incompatible()
 		elseif k == "away" then
 			return ui.t("plugins.store.device_away", { device = here.device_name() }):get()
 		elseif k == "update" then
@@ -348,17 +332,15 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		end, ds.Callout {
 			tone = "warning",
 			title = function(): string
-				local it: any = item()
-				local b = if it then it.blocked else nil
-				local v = if type(b) == "table" and type(b.version) == "string" then b.version else nil
+				local b = blocked()
+				local v = if b and type(b.version) == "string" then b.version else nil
 				return if v
 					then ui.t("plugins.store.blocked_title_version", { name = d().name or id, version = v }):get()
 					else ui.t("plugins.store.blocked_title", { name = d().name or id }):get()
 			end,
 			body = function(): string
-				local it: any = item()
-				local b = if it then it.blocked else nil
-				local why = if type(b) == "table" and type(b.reason) == "string" and b.reason ~= "" then b.reason else nil
+				local b = blocked()
+				local why = if b and type(b.reason) == "string" and b.reason ~= "" then string.sub(b.reason, 1, 500) else nil
 				return if why
 					then ui.t("plugins.store.blocked_body_reason", { reason = why }):get()
 					else ui.t("plugins.store.blocked_body"):get()
@@ -407,6 +389,36 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		},
 	}
 
+	-- Whether the device shown takes its pre-releases (the engine's choice,
+	-- for this plugin on that device): there once the plugin is.
+	local pre_on = ui.use_state(false)
+	ui.effect(function()
+		local it: any = item()
+		local want = it ~= nil and it.prerelease == true
+		if pre_on:peek() ~= want then
+			pre_on:set(want)
+		end
+	end)
+	local prerelease = ui.show(function(): boolean
+		local it: any = item()
+		return it ~= nil and type(it.source) == "table" and it.source.kind == "store"
+	end, ds.Settings.Group {
+		ds.Settings.Row {
+			label = ui.t("plugins.store.prereleases"),
+			description = ui.t("plugins.store.prereleases_body"),
+			control = ds.Switch {
+				value = pre_on,
+				label = ui.t("plugins.store.prereleases"),
+				on_change = function(v: boolean)
+					store.prereleases(id, v, here.device()):after(function(_: any) end, function(err: any)
+						pre_on:set(not v)
+						here.failed(ui.t("plugins.store.couldnt_prereleases", { name = d().name or id }))(err)
+					end)
+				end,
+			},
+		},
+	})
+
 	-- The facts: who, which version, how many, where from, what it needs.
 	local function facts(): Node
 		local items: { any } = {
@@ -422,7 +434,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 						text_size = "$font.size.sm",
 						color = "$text.primary",
 					},
-					browse.verified(d),
+					browse.badges(d),
 				},
 			},
 			{
@@ -456,13 +468,9 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 				key = ui.t("plugins.store.fact.works_with"),
 				value = ui.text {
 					function(): string
-						local r = range()
-						if not r then
-							return ui.t("plugins.store.works_any"):get()
-						end
-						local least = semver.least(r)
-						return if least then ui.t("plugins.store.works_from", { version = least }):get() else r
+						return if compatible() then ui.t("plugins.store.works_here"):get() else incompatible()
 					end,
+					wrap = true,
 					text_size = "$font.size.sm",
 					color = "$text.primary",
 				},
@@ -600,8 +608,10 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			local p = d().package
 			return if type(p) == "table" and type(p.hash) == "string" then p.hash else tostring(d().version)
 		end, function(_: string): Node
-			local it = d()
-			local lines = words.lines(it, it.permissions or {})
+			-- (The store's consent item: what it asks, and what each names.)
+			local perm: any = d().permissions
+			local asked = if type(perm) == "table" and type(perm.asks) == "table" then perm.asks else {}
+			local lines = words.lines(if type(perm) == "table" then perm else {}, asked)
 			local body: Node
 			if #lines == 0 then
 				body = ui.text { ui.t("plugins.consent.asks_nothing"), text_size = "$font.size.md", color = "$text.secondary", wrap = true }
@@ -699,24 +709,14 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		local function notes(): string
 			local it: any = item()
 			local u = if it then it.update else nil
-			if type(u) == "table" and type(u.notes) == "string" and u.notes ~= "" then
-				return string.sub(u.notes, 1, 20000)
-			end
-			-- (Else the store's, for each version since the one installed.)
-			local out: { string } = {}
-			local have = if it then it.version else nil
-			for _, v in versions:get() do
-				if have and (semver.compare(v.version, have) or 0) > 0 and type(v.notes) == "string" and v.notes ~= "" then
-					table.insert(out, `**{v.version}**\n\n{v.notes}`)
-				end
-			end
-			return table.concat(out, "\n\n")
+			return if type(u) == "table" and type(u.notes) == "string" then string.sub(u.notes, 1, 65536) else ""
 		end
 		local function changed(which: string): { words.Line }
 			local it: any = item()
 			local u = if it then it.update else nil
 			local list = if type(u) == "table" and type(u[which]) == "table" then u[which] else {}
-			return words.lines(d(), list)
+			local perm: any = d().permissions
+			return words.lines(if type(perm) == "table" then perm else {}, list)
 		end
 		return ds.Dialog {
 			open = update_open,
@@ -776,10 +776,9 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 		}
 	end
 
-	local REASONS = { "broken", "malware", "impersonation", "spam", "other" }
 	local function report_dialog(): Node
 		local options = {}
-		for _, r in REASONS do
+		for _, r in store.REPORT_REASONS do
 			table.insert(options, { value = r, label = ui.t(`plugins.store.report.reason.{r}`) })
 		end
 		return ds.Dialog {
@@ -830,6 +829,7 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			keywords(),
 			facts(),
 			offer,
+			prerelease,
 			readme(),
 			shots(),
 			asks(),

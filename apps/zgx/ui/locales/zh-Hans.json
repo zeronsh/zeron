@@ -3810,7 +3810,6 @@
       "browse": "浏览",
       "search": "搜索插件",
       "featured": "精选",
-      "verified": "已验证",
       "byline": "{author} · {n, plural, other {# 次安装}}",
       "installs": "{n, plural, other {# 次安装}}",
       "installed": "已安装",
@@ -3832,13 +3831,13 @@
       },
       "category": {
         "agents": "智能体",
+        "appearance": "外观",
         "chat": "对话",
-        "code": "代码",
+        "developer_tools": "开发工具",
         "git": "Git",
-        "files": "文件",
-        "look": "外观",
+        "integrations": "集成",
         "productivity": "效率",
-        "data": "数据"
+        "utilities": "实用工具"
       },
       "offline_title": "无法连接插件商店",
       "offline_body": "已安装的插件照常工作。联网后再试一次。",
@@ -3866,13 +3865,9 @@
         "repository": "源代码"
       },
       "version_on": "{version}，{date}",
-      "works_any": "任意版本的 Zeron",
-      "works_from": "Zeron {version} 或更高版本",
       "install_note": "Zeron 会检查签名者，然后请你允许它需要的权限。",
       "update_note": "有新版本可用。",
       "review_note": "它在等你允许。",
-      "needs_zeron": "需要 Zeron {version} 或更高版本。",
-      "needs_zeron_has": "需要 Zeron {version} 或更高版本，而{device}装的是 {has}。",
       "needs_other_zeron": "它不支持这个版本的 Zeron。",
       "device_away": "{device}不在线，暂时无法安装。",
       "blocked_title": "Zeron 关闭了{name}",
@@ -3901,9 +3896,9 @@
         "reason_label": "问题",
         "reason": {
           "broken": "无法使用",
+          "misleading": "与描述不符",
           "malware": "有害行为",
-          "impersonation": "冒充他人",
-          "spam": "垃圾内容",
+          "copyright": "使用了他人的作品",
           "other": "其他"
         },
         "text_label": "详细说明",
@@ -3911,7 +3906,11 @@
         "send": "发送举报",
         "sent": "举报已发送",
         "failed": "无法发送举报"
-      }
+      },
+      "works_here": "当前版本的 Zeron",
+      "prereleases": "试用预发布版本",
+      "prereleases_body": "更新时包括作者仍在测试的版本。",
+      "couldnt_prereleases": "无法更改{name}的预发布设置"
     }
   },
   "templates": {

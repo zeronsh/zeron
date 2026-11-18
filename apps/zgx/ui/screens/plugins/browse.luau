@@ -156,19 +156,22 @@ local function load_categories()
 end
 
 -- A category's name, in the locale shown where Zeron knows it.
-local KNOWN_CATEGORIES: { [string]: boolean } = {
-	agents = true,
-	chat = true,
-	code = true,
-	git = true,
-	files = true,
-	look = true,
-	productivity = true,
-	data = true,
+-- (The store's fixed list, amendment 4: named in each language by id;
+-- one the app doesn't know yet goes by the store's own name.)
+local KNOWN_CATEGORIES: { [string]: string } = {
+	agents = "agents",
+	appearance = "appearance",
+	chat = "chat",
+	["developer-tools"] = "developer_tools",
+	git = "git",
+	integrations = "integrations",
+	productivity = "productivity",
+	utilities = "utilities",
 }
 function M.category_name(id: string): string
-	if KNOWN_CATEGORIES[id] then
-		return ui.t(`plugins.store.category.{id}`):get()
+	local known = KNOWN_CATEGORIES[id]
+	if known then
+		return ui.t(`plugins.store.category.{known}`):get()
 	end
 	for _, c in categories:peek() do
 		if c.id == id then
@@ -202,12 +205,10 @@ function M.standing(card: store.Card): string
 	return "installed"
 end
 
--- Who made it, as every plugin says it: Zeron, you, or @username.
+-- Who made it, as every plugin says it: by @username (publishing needs
+-- one, so every listing has its account's).
 function M.author(card: any): string
 	local a = card.author or {}
-	if type(a.badges) == "table" and table.find(a.badges, "zeron") then
-		return ui.t("plugins.words.author.zeron"):get()
-	end
 	if type(a.username) == "string" and a.username ~= "" then
 		return words.author({ author = { kind = "verified", username = a.username } })
 	end
@@ -238,12 +239,32 @@ function M.Tile(props: { card: State<store.Card> | () -> store.Card, size: numbe
 	end)
 end
 
--- The verified mark beside a name.
-function M.verified(card: () -> store.Card): Node
-	return ui.show(function(): boolean
-		local a = card().author
-		return type(a) == "table" and a.verified == true and not (type(a.badges) == "table" and table.find(a.badges, "zeron") ~= nil)
-	end, ds.Badge { ui.t("plugins.store.verified"), tone = "info", icon = "shield-check", size = "sm" })
+-- Its account's badges (what Zeron's operators granted it, as its member
+-- card shows them), beside its name: each its name, quiet.
+function M.badges(card: () -> store.Card): Node
+	local function names(): { string }
+		local out: { string } = {}
+		local a: any = card().author
+		for _, b in (if type(a) == "table" and type(a.badges) == "table" then a.badges else {}) :: { any } do
+			local name = if type(b) == "table" then b.name else b
+			if type(name) == "string" and name ~= "" and #out < 3 then
+				table.insert(out, string.sub(name, 1, 40))
+			end
+		end
+		return out
+	end
+	local list = ui.computed(names)
+	return ui.row {
+		gap = "$space.1",
+		items = "center",
+		ui.each(list, function(name: string): Node
+			return ds.Badge { name, tone = "neutral", look = "outline", size = "sm" }
+		end, {
+			key = function(name: string): string
+				return name
+			end,
+		}),
+	}
 end
 
 -- A row's height: a truncated row with a byline over its line.
@@ -257,7 +278,7 @@ local function row(first: store.Card, _i: State<number>, now: State<store.Card>)
 	end
 	return ds.Settings.Row {
 		label = first.name,
-		badge = M.verified(card),
+		badge = M.badges(card),
 		byline = function(): string
 			return M.byline(now:get())
 		end,
