@@ -329,42 +329,53 @@ describe("by keyboard", () => {
     }
   });
 
-  test("All plugins: the sort and Next are links; while the next page comes, its rows' places are held", async () => {
+  test("Browse: each order, filter and page is a link, the list's whole state its address", async () => {
     const { page, context } = await open("/plugins/all");
     try {
-      // (The click and what it does at once, read before the next page can arrive.)
-      const now = await page.evaluate(() => {
-        const rows = document.querySelectorAll(".plugins .rows tr").length;
-        const rowHeight = document.querySelector(".plugins .rows tr")!.getBoundingClientRect().height;
-        [...document.querySelectorAll<HTMLAnchorElement>(".segmented a")].find((a) => a.textContent === "Newest")!.click();
-        const skeleton = document.querySelector(".plugins .skeleton-rows")!;
-        return { rows, rowHeight, heldHeight: skeleton.querySelector("tr")!.getBoundingClientRect().height, busy: document.querySelector("[data-list]")!.getAttribute("aria-busy"), shown: getComputedStyle(skeleton).display, held: skeleton.querySelectorAll("tr").length };
-      });
-      expect(now.busy).toBe("true");
-      // The skeleton rows stand where the rows were, as many and as tall.
-      expect(now.shown).toBe("table-row-group");
-      expect(now.held).toBe(now.rows);
-      expect(now.heldHeight).toBe(now.rowHeight);
+      await page.locator(".sort").getByRole("link", { name: "Newest" }).click();
       await page.waitForURL(/\/plugins\/all\?sort=new$/);
-      expect(await page.locator("[data-list]").getAttribute("aria-busy")).toBeNull();
+      await page.locator(".facets").getByRole("link", { name: /^Git/ }).click();
+      await page.waitForURL(/\/plugins\/all\?category=git&sort=new$/);
+      expect(await page.getByRole("heading", { level: 1 }).textContent()).toBe("Git");
+      await page.locator(".facets").getByRole("link", { name: "Verified only" }).click();
+      await page.waitForURL(/\/plugins\/all\?category=git&verified=1&sort=new$/);
     } finally {
       await context.close();
     }
   });
 
-  test("the search field: / puts you in it, Escape empties it, Enter leads to All plugins", async () => {
+  test("on a phone, the order and the filters open without a script, and Escape closes one with it", async () => {
+    const { page, context } = await open("/plugins/all?category=productivity", { width: 390 });
+    try {
+      const filters = page.locator("details.drop", { hasText: "Filters" });
+      await filters.locator("summary").click();
+      await expect.poll(() => filters.evaluate((d) => (d as HTMLDetailsElement).open)).toBe(true);
+      await expect.poll(() => filters.getByRole("link", { name: "Verified only" }).isVisible()).toBe(true);
+      await page.keyboard.press("Escape");
+      await expect.poll(() => filters.evaluate((d) => (d as HTMLDetailsElement).open)).toBe(false);
+      // (Opening one closes the other.)
+      const order = page.locator("details.drop").first();
+      await order.locator("summary").click();
+      await filters.locator("summary").click();
+      await expect.poll(() => order.evaluate((d) => (d as HTMLDetailsElement).open)).toBe(false);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("the search field: / puts you in the list's, Escape empties it, Enter searches within the category", async () => {
     const { page, context } = await open("/plugins/all?category=git");
     try {
       await page.keyboard.press("/");
-      const field = page.getByRole("searchbox", { name: "Search plugins" });
+      const field = page.getByRole("searchbox", { name: "Search in Git" });
       await expect.poll(() => field.evaluate((el) => el === document.activeElement)).toBe(true);
       await page.keyboard.type("timer");
       await page.keyboard.press("Escape");
       expect(await field.inputValue()).toBe("");
-      await page.keyboard.type("timer");
+      await page.keyboard.type("pr");
       await page.keyboard.press("Enter");
-      await page.waitForURL(/\/plugins\/all\?q=timer$/);
-      expect(await page.getByRole("heading", { level: 1 }).textContent()).toMatch(/^Results for “timer” · \d+$/);
+      await page.waitForURL(/\/plugins\/all\?q=pr&category=git$/);
+      expect(await page.getByRole("heading", { level: 1 }).textContent()).toBe("Results for “pr”");
     } finally {
       await context.close();
     }

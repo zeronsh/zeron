@@ -24,7 +24,8 @@
 /* ---- getting it ---- */
 .get { flex: none; width: 296px; display: flex; flex-direction: column; gap: 10px; padding-top: 4px; }
 .get .btn { width: 100%; }
-.get .btn .mark { width: 20px; height: 12px; fill: currentColor; }
+/* (The mark at its own whole-pixel size, never scaled: components/look/ZeronMark.astro.) */
+.get .btn .mark { flex: none; fill: currentColor; }
 .get .ver { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px; font-size: 13px; line-height: 20px; color: var(--text-2); }
 .get .ver b { font-weight: 550; color: var(--text); }
 .get .alt { text-align: center; font-size: 13px; line-height: 20px; color: var(--text-3); }
@@ -95,13 +96,14 @@
 .prose ul.contains-task-list { list-style: none; padding-left: 0; }
 .prose .task-list-item { display: flex; gap: 10px; align-items: baseline; }
 .prose .task-list-item input { flex: none; width: 15px; height: 15px; margin: 0; transform: translateY(2px); accent-color: var(--verified); }
-.prose code { font: 500 0.85em/1 var(--mono); padding: 2px 6px; border-radius: 6px; background: var(--sunken); color: var(--text); }
+.prose code { font: 500 0.85em/1 var(--mono); padding: 2px 4px; border-radius: 5px; background: var(--sunken); color: var(--text); }
 .prose pre { padding: 16px 18px; border-radius: 14px; background: var(--sunken); font: 450 13.5px/22px var(--mono); overflow-x: auto; overflow-wrap: normal; white-space: pre; }
 .prose pre code { padding: 0; background: none; font: inherit; color: var(--text); }
 .prose pre:focus-visible { outline-offset: 2px; }
 .prose blockquote { padding: 2px 0 2px 18px; box-shadow: inset 2px 0 0 oklch(var(--ink-l) var(--ink-c) var(--h, 270) / 0.5); color: var(--text-2); }
 .prose hr { height: 1px; border: 0; background: var(--line); margin: 32px 0; }
-.prose img { display: block; max-width: 100%; height: auto; border-radius: 12px; box-shadow: var(--shadow-1); }
+/* (A picture at its own width, capped by the column's, never scaled up; the code blocks' corner.) */
+.prose img { display: block; width: auto; max-width: 100%; height: auto; border-radius: 14px; box-shadow: var(--shadow-1); }
 .prose p img { display: inline-block; vertical-align: middle; }
 .prose .table-scroll { overflow-x: auto; }
 .prose .table-scroll:focus-visible { outline-offset: 2px; }
@@ -159,7 +161,8 @@
 .v .notes > * + * { margin-top: 10px; }
 .v .notes :is(h1, h2, h3) { font-size: 15px; line-height: 22px; margin-top: 16px; }
 .v .act { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
-.v .off { font-size: 13px; line-height: 32px; color: var(--text-3); white-space: nowrap; }
+/* (Its words end where Install's words end: the small button's 12 of padding in.) */
+.v .off { padding-right: 12px; font-size: 13px; line-height: 32px; color: var(--text-3); white-space: nowrap; }
 .v.old .vno a { color: var(--text-2); }
 .pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 28px; padding-top: 20px; box-shadow: 0 -1px 0 var(--line); font-size: 13px; color: var(--text-3); }
 

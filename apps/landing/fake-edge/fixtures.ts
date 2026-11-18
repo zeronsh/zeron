@@ -303,6 +303,8 @@ A **25 minute timer** in a chat's header. Start it when you hand an agent a long
   - A second level, for the details.
 - Remembers your lengths on each of your computers.
 
+![The timer, small](shots/small.svg)
+
 1. Start a long run.
 2. Start the timer.
 3. Take the break it gives you.
@@ -319,7 +321,7 @@ A **25 minute timer** in a chat's header. Start it when you hand an agent a long
 | --- | --- | --- |
 | Length | How long one run of the timer lasts | 25 minutes |
 | Quiet hours | When it keeps to itself | Off |
-| Chime | The sound at the end | Soft |
+| Chime | The sound at the end: \`soft\`, \`bell\` or \`none\` | \`soft\` |
 
 ## For your agents
 
@@ -349,7 +351,8 @@ Footnotes are shown as typed.[^1] Questions and ideas are welcome on [the reposi
     history: [
       { version: "1.0.0", status: "verified", ago: 120, notes: "First release." },
       { version: "1.1.0", status: "verified", ago: 60, notes: "- Pauses when your computer sleeps.\n- A sound at the end, if you want one." },
-      { version: "1.2.0", status: "verified", ago: 9, via: "deploy_key", notes: "### New\n\n- Breaks that follow your agents: a long run gets a long break.\n\n### Fixed\n\n- The timer kept counting after its chat closed." },
+      // (A picture smaller than the reading column: drawn at its own size, never scaled up.)
+      { version: "1.2.0", status: "verified", ago: 9, via: "deploy_key", notes: "### New\n\n- Breaks that follow your agents: a long run gets a long break.\n\n### Fixed\n\n- The timer kept counting after its chat closed.", files: { "shots/small.svg": '<svg xmlns="http://www.w3.org/2000/svg" width="360" height="200" viewBox="0 0 360 200"><rect width="360" height="200" fill="#1b1726"/><circle cx="180" cy="100" r="56" fill="none" stroke="#ad98fe" stroke-width="10"/><path d="M180 64v40l24 16" fill="none" stroke="#ad98fe" stroke-width="10" stroke-linecap="round"/></svg>' } },
       { version: "1.3.0-beta.1", status: "undecided", ago: 1, notes: "Try the new compact look." },
     ],
   },

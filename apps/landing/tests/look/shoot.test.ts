@@ -4,7 +4,7 @@
 //   SHOOT=/some/dir [SHOOT_PAGES=discover,plugin] npx vitest run tests/look/shoot.test.ts
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { chromium, type Browser } from "playwright";
+import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, beforeAll, test } from "vitest";
 import { startSite, type Site } from "../harness.ts";
 
@@ -19,6 +19,9 @@ interface Shot {
   user?: string;
   /** The fake's switches before it's taken (POST /_fake/<what>?<params>), reset after. */
   fake?: [string, Record<string, string>][];
+  /** What to do on the page first (open a disclosure, follow Next), at the widths given. */
+  act?: (page: Page) => Promise<void>;
+  widths?: number[];
 }
 
 const SHOTS: Shot[] = [
@@ -38,6 +41,16 @@ const SHOTS: Shot[] = [
   { page: "plugin", as: "version-superseded", path: "/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.4.0" },
   { page: "plugin", as: "taken-down", path: "/plugins/clipboard-sync" },
   { page: "plugin", as: "version-gone", path: "/plugins/focus-timer/versions/9.9.9" },
+  // Browse: everything, a category, a search with results, verified only, a keyword, no results; the next page by its cursor; the phone's filters, open.
+  { page: "browse", as: "all", path: "/plugins/all" },
+  { page: "browse", as: "category", path: "/plugins/all?category=developer-tools" },
+  { page: "browse", as: "search", path: "/plugins/all?q=git" },
+  { page: "browse", as: "verified-only", path: "/plugins/all?verified=1" },
+  { page: "browse", as: "keyword", path: "/plugins/all?keyword=focus" },
+  { page: "browse", as: "no-results", path: "/plugins/all?q=zzzzqqq" },
+  { page: "browse", as: "page-2", path: "/plugins/all", act: async (page) => { await page.getByRole("link", { name: "Next" }).click(); await page.waitForLoadState("networkidle"); } },
+  { page: "browse", as: "filters-open", path: "/plugins/all?category=productivity&keyword=focus", widths: [390], act: async (page) => { await page.locator("details.drop summary", { hasText: "Filters" }).click(); } },
+  { page: "browse", as: "order-open", path: "/plugins/all?category=productivity", widths: [390], act: async (page) => { await page.locator("details.drop summary").first().click(); } },
 ];
 const RESET: [string, Record<string, string>][] = [["empty", {}], ["down", {}], ["bare", {}]];
 
@@ -56,12 +69,13 @@ afterAll(async () => {
 test.skipIf(!DIR)("pictures of the store's pages", async () => {
   for (const shot of SHOTS.filter((s) => !ONLY || ONLY.includes(s.page))) {
     for (const [what, params] of shot.fake ?? []) await site.fake(what, params);
-    for (const width of [1440, 390]) {
+    for (const width of shot.widths ?? [1440, 390]) {
       for (const scheme of ["light", "dark"] as const) {
         const context = await browser.newContext({ viewport: { width, height: 900 }, deviceScaleFactor: width < 700 ? 3 : 2, colorScheme: scheme, reducedMotion: "reduce" });
         const page = await context.newPage();
         if (shot.user) await page.goto(new URL(`/auth/web/callback?as=${shot.user}&return_to=/plugins`, site.url).href);
         await page.goto(new URL(shot.path, site.url).href, { waitUntil: "networkidle" });
+        if (shot.act) await shot.act(page);
         await page.evaluate(() => document.fonts.ready);
         await page.screenshot({ path: join(DIR!, `${shot.page}-${shot.as}-${width}-${scheme}.png`), fullPage: true });
         await context.close();

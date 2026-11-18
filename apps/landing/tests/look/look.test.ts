@@ -50,6 +50,11 @@ const PAGES = [
   "/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.4.0",
   "/plugins/focus-timer/versions/1.1.0",
   "/plugins/clipboard-sync",
+  "/plugins/all",
+  "/plugins/all?category=developer-tools",
+  "/plugins/all?q=git",
+  "/plugins/all?keyword=eywordthatisthirtytwocharacters0",
+  "/plugins/all?q=zzzzqqq",
 ];
 
 describe("nothing runs off the side", () => {
@@ -68,7 +73,7 @@ describe("nothing runs off the side", () => {
 });
 
 describe("by keyboard", () => {
-  test.each(["/plugins", "/plugins/focus-timer", "/plugins/worst-case-listing-at-every-limit-xyz12/versions"])("Tab goes through %s in its reading order, each stop on screen and ringed", async (path) => {
+  test.each(["/plugins", "/plugins/focus-timer", "/plugins/worst-case-listing-at-every-limit-xyz12/versions", "/plugins/all?category=developer-tools"])("Tab goes through %s in its reading order, each stop on screen and ringed", async (path) => {
     const page = await open(path, 1440);
     try {
       const stops: { tag: string; top: number; left: number; ring: string; label: string }[] = [];

@@ -94,6 +94,22 @@ for (const link of document.querySelectorAll<HTMLAnchorElement>("a[data-install]
   });
 }
 
+// ── The phone's order and filters ──────────────────────────────────────
+// Each a disclosure that works without this; with it, one open at a time,
+// and a click elsewhere or Escape closes it.
+const drops = [...document.querySelectorAll<HTMLDetailsElement>("details.drop")];
+for (const drop of drops) drop.addEventListener("toggle", () => drop.open && drops.forEach((other) => other !== drop && (other.open = false)));
+document.addEventListener("click", (event) => {
+  for (const drop of drops) if (drop.open && !(event.target instanceof Node && drop.contains(event.target))) drop.open = false;
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  const open = drops.find((d) => d.open);
+  if (!open) return;
+  open.open = false;
+  open.querySelector("summary")?.focus();
+});
+
 // ── Who you are, on a public page ──────────────────────────────────────
 
 interface Me {

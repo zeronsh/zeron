@@ -10,6 +10,7 @@ import { compatibility, day, since } from "../../lib/store/format.ts";
 import { appUrl } from "../../lib/store/urls.ts";
 import { store } from "../../lib/store/words.ts";
 import Seal from "./Seal.astro";
+import ZeronMark from "./ZeronMark.astro";
 
 interface Props {
   id: string;
@@ -32,7 +33,6 @@ const { id, name, version, newest, verified, verifiedAt, publishedAt, verifiedVe
 const label = newest ? "Install in Zeron" : store("plugins.store.install_version", { version });
 const href = appUrl(id, newest ? undefined : version);
 const now = Date.now();
-const mark = [[0, 0], [1, 0], [2, 0], [4, 0], [0, 1], [1, 1], [3, 1], [4, 1], [0, 2], [2, 2], [3, 2], [4, 2]];
 ---
 
 <div class="get" data-get>
@@ -41,7 +41,7 @@ const mark = [[0, 0], [1, 0], [2, 0], [4, 0], [0, 1], [1, 1], [3, 1], [4, 1], [0
       <span class="btn pri lg" aria-disabled="true">{label}</span>
     ) : (
       <a class="btn pri lg" href={href} data-install>
-        <svg class="mark" viewBox="0 0 49 29" aria-hidden="true" focusable="false">{mark.map(([x, y]) => <rect x={x! * 10} y={y! * 10} width="9" height="9" rx="2.7" />)}</svg>
+        <ZeronMark pitch={4} />
         {label}
       </a>
     )

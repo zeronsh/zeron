@@ -12,6 +12,7 @@ import Head from "../components/site/Head.astro";
 import Icon from "../components/look/Icon.astro";
 import Icons from "../components/look/Icons.astro";
 import Inks from "../components/look/Inks.astro";
+import ZeronMark from "../components/look/ZeronMark.astro";
 import type { WebSession } from "../lib/store/types.ts";
 import { signInUrl } from "../lib/store/urls.ts";
 import "../styles/look/store.css";
@@ -46,7 +47,6 @@ const SECTIONS: { id: Section; label: string; href: string }[] = [
 ];
 const shown = (id: Section) => id !== "review" || staff || isPublic;
 const hiddenUntilKnown = (id: Section) => id === "review" && isPublic;
-const mark = [[0, 0], [1, 0], [2, 0], [4, 0], [0, 1], [1, 1], [3, 1], [4, 1], [0, 2], [2, 2], [3, 2], [4, 2]];
 ---
 
 <!doctype html>
@@ -63,7 +63,7 @@ const mark = [[0, 0], [1, 0], [2, 0], [4, 0], [0, 1], [1, 1], [3, 1], [4, 1], [0
     <header class="top">
       <div class="wrap">
         <a class="brand" href="/plugins">
-          <svg class="mark" viewBox="0 0 49 29" aria-hidden="true" focusable="false">{mark.map(([x, y]) => <rect x={x! * 10} y={y! * 10} width="9" height="9" rx="2.7" />)}</svg>
+          <ZeronMark pitch={5} />
           <span>Zeron</span><span class="sep" aria-hidden="true">/</span><span>Plugins</span>
         </a>
         <nav class="nav" aria-label="The store">

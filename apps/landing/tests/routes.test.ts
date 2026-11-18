@@ -101,7 +101,7 @@ describe("the store's front (/plugins)", () => {
 
 describe("All plugins (/plugins/all)", () => {
   /** The plugins a list's page shows, in order. */
-  const listed = (body: string) => [...body.matchAll(/class="name name-link" href="\/plugins\/([^"]+)"/g)].map((m) => m[1]);
+  const listed = (body: string) => [...body.matchAll(/<a class="card res h\d+" href="\/plugins\/([^"]+)"/g)].map((m) => m[1]);
 
   test("public, cached for a minute at most, a strict CSP; the columns, a row a plugin", async () => {
     const { response, body } = await html("/plugins/all");
@@ -111,16 +111,17 @@ describe("All plugins (/plugins/all)", () => {
     expect(response.headers.get("content-security-policy")).toMatch(/script-src 'self';/);
     expect(hasInlineScript(body)).toBe(false);
     inert(body);
-    expect(body).toMatch(/<th scope="col">Plugin<\/th><th scope="col">By<\/th><th scope="col">Category<\/th><th scope="col" class="end">Installs<\/th>/);
+    // A card a plugin, each on its own hue; the facets say where you are.
     expect(listed(body)).toHaveLength(24);
-    expect(body).toContain('aria-current="page"><span class="glyph g16"');
+    expect(body).toMatch(/<a href="\/plugins\/all" aria-current="page"><span>All<\/span><span class="num">\d+<\/span><\/a>/);
+    expect(body).toMatch(/<a href="\/plugins\/all" aria-current="true"><i aria-hidden="true"><\/i>Everything<\/a>/);
   });
 
   test("Next and Previous are real addresses that carry the cursor, and come back to the same list", async () => {
     const first = await html("/plugins/all");
     const next = /href="([^"]+)" rel="next"/.exec(first.body)?.[1]?.replaceAll("&amp;", "&");
     expect(next).toMatch(/^\/plugins\/all\?cursor=/);
-    expect(first.body).toMatch(/<span class="btn secondary sm" aria-disabled="true">.*Previous<\/span>/);
+    expect(first.body).toMatch(/<span class="btn sec sm" aria-disabled="true">.*?Previous<\/span>/);
     const second = await html(next!);
     expect(second.response.status).toBe(200);
     expect(listed(second.body)).not.toEqual(listed(first.body));
@@ -129,30 +130,29 @@ describe("All plugins (/plugins/all)", () => {
     expect(listed((await html(previous!)).body)).toEqual(listed(first.body));
   });
 
-  test("the last column is what the list is sorted by, its head naming it", async () => {
-    const head = (body: string) => /<th scope="col" class="end">([^<]+)<\/th>/.exec(body)?.[1];
-    expect(head((await html("/plugins/all")).body)).toBe("Installs");
-    expect(head((await html("/plugins/all?q=timer")).body)).toBe("Installs");
-    const updated = await html("/plugins/all?sort=updated");
-    expect(head(updated.body)).toBe("Updated");
-    expect(updated.body).toMatch(/<td class="installs end">[A-Z][a-z]{2} \d{1,2}(, \d{4})?<\/td>/);
-    expect(updated.body).toMatch(/<span class="meta">@[a-z-]+ · Updated [A-Z][a-z]{2} \d/);
+  test("a card's foot says what the list is sorted by; one not verified says so instead", async () => {
+    const foot = (body: string) => [...body.matchAll(/<span class="count">(Updated|Published|Verified) ([^<]+)<\/span>/g)].map((m) => [m[1], m[2]]);
+    expect(new Set(foot((await html("/plugins/all?sort=updated")).body).map(([w]) => w))).toEqual(new Set(["Updated"]));
+    expect((await html("/plugins/all")).body).toMatch(/<span class="state no">[\d.]+(-[\w.]+)? not verified yet<\/span>/);
     // Newest: the day each was first listed (amendment 39), the newest first.
-    const newest = await html("/plugins/all?sort=new");
-    expect(head(newest.body)).toBe("Published");
-    expect(newest.body).toMatch(/<span class="meta">@[a-z-]+ · Published [A-Z][a-z]{2} \d/);
-    const days = [...newest.body.matchAll(/<td class="installs end">([^<]+)<\/td>/g)].map((m) => Date.parse(`${m[1]}${/\d{4}/.test(m[1]!) ? "" : `, ${new Date().getUTCFullYear()}`}`));
+    const newest = foot((await html("/plugins/all?sort=new")).body);
+    expect(new Set(newest.map(([w]) => w))).toEqual(new Set(["Published"]));
+    const days = newest.map(([, d]) => Date.parse(`${d}${/\d{4}/.test(d!) ? "" : `, ${new Date().getUTCFullYear()}`}`));
     expect(days.length).toBeGreaterThan(1);
     expect(days).toEqual([...days].sort((a, b) => b - a));
+    // Newly verified (Discover's shelf): by when Zeron verified each, said.
+    const verified = foot((await html("/plugins/all?sort=verified")).body);
+    expect(verified.length).toBeGreaterThan(1);
+    expect(verified.every(([w]) => w === "Verified")).toBe(true);
   });
 
   test("the pager: Previous, where you are of how many, Next", async () => {
     const first = await html("/plugins/all");
-    const total = Number(/<span class="title-count"> · ([\d,]+)<\/span>/.exec(first.body)![1]!.replace(",", ""));
-    expect(first.body).toContain(`<span class="where">1–24 of ${total}</span>`);
+    const total = Number(/<b class="num">([\d,]+)<\/b> plugins/.exec(first.body)![1]!.replace(",", ""));
+    expect(first.body).toContain(`<span class="num">1–24 of ${total}</span>`);
     const next = /href="([^"]+)" rel="next"/.exec(first.body)![1]!.replaceAll("&amp;", "&");
     expect(next).toMatch(/&page=2$/);
-    expect((await html(next)).body).toMatch(new RegExp(`<span class="where">25–\\d+ of ${total}</span>`));
+    expect((await html(next)).body).toMatch(new RegExp(`<span class="num">25–\\d+ of ${total}</span>`));
   });
 
   test("the sort is a row of real addresses, the chosen one marked; a search adds Best match", async () => {
@@ -165,20 +165,24 @@ describe("All plugins (/plugins/all)", () => {
   test("search, category, keyword; the count when the list says it exactly", async () => {
     const timer = await html("/plugins/all?q=timer");
     expect(listed(timer.body)).toContain("focus-timer");
-    expect(timer.body).toContain("Results for “timer”");
-    // The title and the count, always (amendment 38's total).
-    expect(timer.body).toMatch(/Results for “timer”<span class="title-count"> · \d+<\/span><\/h1>/);
+    expect(timer.body).toContain("<h1>Results for “timer”</h1>");
+    // The count, always (amendment 38's total).
+    expect(timer.body).toMatch(/<p id="results"><b class="num">\d+<\/b> plugins?<\/p>/);
     // (The field keeps the words.)
     expect(timer.body).toContain('name="q" value="timer"');
     const empty = await html("/plugins/all?q=zzzzqqq");
     expect(empty.body).toContain("Nothing matches “zzzzqqq”");
     expect(empty.body).toContain('href="/plugins/all">Clear search</a>');
-    expect(empty.body).toContain('<span class="title-count"> · 0</span>');
+    expect(empty.body).toContain('<b class="num">0</b> plugins');
     const git = await html("/plugins/all?category=git");
     expect(listed(git.body)).toContain("pr-radar");
     expect(listed(git.body)).not.toContain("token-meter");
     expect(git.body).toContain('<link rel="canonical" href="https://zeron.sh/plugins/all?category=git">');
-    expect(git.body).toMatch(/<a class="nav-row" href="\/plugins\/all\?category=git" aria-current="page">/);
+    expect(git.body).toMatch(/<a href="\/plugins\/all\?category=git" aria-current="page"><span>Git<\/span><span class="num">\d+<\/span><\/a>/);
+    // The category's keywords, each a link that narrows it; the chosen one marked, and a link that lets it go.
+    expect(git.body).toMatch(/<a class="tag" href="\/plugins\/all\?category=git&amp;keyword=[a-z]+">/);
+    const kw = await html("/plugins/all?category=git&keyword=github");
+    expect(kw.body).toContain('<a class="tag" href="/plugins/all?category=git" aria-current="true">github</a>');
     expect(listed((await html("/plugins/all?keyword=github")).body)).toContain("pr-radar");
   });
 

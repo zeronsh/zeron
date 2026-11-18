@@ -105,7 +105,8 @@ pre, pre *, code, .mono, .fn { font-variant-ligatures: none; }
 .top { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--bg) 82%, transparent); backdrop-filter: saturate(1.4) blur(16px); -webkit-backdrop-filter: saturate(1.4) blur(16px); box-shadow: 0 1px 0 var(--line); }
 .top .wrap { display: flex; align-items: center; height: 60px; gap: 28px; }
 .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 15px; letter-spacing: -0.01em; border-radius: 6px; }
-.brand .mark { width: 22px; height: 13px; fill: currentColor; }
+/* (Its own size, on whole pixels: components/look/ZeronMark.astro.) */
+.brand .mark { flex: none; fill: currentColor; }
 .brand .sep { color: var(--text-3); font-weight: 400; }
 .nav { display: flex; gap: 4px; margin-left: 4px; }
 .nav a { padding: 6px 10px; border-radius: 8px; font-size: 14px; line-height: 20px; color: var(--text-2); font-weight: 450; transition: color 0.12s var(--ease), background-color 0.12s var(--ease); }
@@ -202,6 +203,10 @@ h3 { font-size: 15px; line-height: 22px; font-weight: 600; letter-spacing: -0.00
 .btn.lg { height: 46px; padding: 0 20px; font-size: 15px; border-radius: 13px; }
 .btn.sm { height: 32px; padding: 0 12px; font-size: 13px; border-radius: 9px; }
 .btn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+/* Zeron's mark keeps its own whole-pixel size, filled, never stroked (an icon's stroke ran its cells together). */
+.btn svg.mark, svg.mark { width: auto; height: auto; fill: currentColor; stroke: none; }
+/* (On a 1x screen its one-pixel gaps are snapped to the pixel grid; at 2x and over, its corners keep their curve.) */
+@media (max-resolution: 1.5dppx) { svg.mark { shape-rendering: crispEdges; } }
 .btn[aria-disabled] { color: var(--text-3); box-shadow: inset 0 0 0 1px var(--line); background: none; cursor: default; }
 .chip { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 12px; border-radius: 16px; font-size: 13px; font-weight: 500; color: var(--text-2); box-shadow: inset 0 0 0 1px var(--line-2); white-space: nowrap; transition: background-color 0.12s var(--ease), color 0.12s var(--ease); }
 .chip:hover { color: var(--text); background: var(--sunken); }

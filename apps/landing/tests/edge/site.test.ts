@@ -286,8 +286,8 @@ describe("the catalog, from the edge's real listing", () => {
     expect(verified.body).toContain('href="/plugins/focus-timer"');
     expect(verified.body).not.toContain('href="/plugins/theme-sync"');
     // The count is the edge's total (amendment 38): exact, the public list's.
-    expect((await new Browser().get("/plugins/all")).body).toMatch(/All plugins<span class="title-count"> · \d+<\/span>/);
-    expect((await new Browser().get("/plugins/all?q=zzzzqqq")).body).toContain('<span class="title-count"> · 0</span>');
+    expect((await new Browser().get("/plugins/all")).body).toMatch(/<p id="results"><b class="num">\d+<\/b> plugins?<\/p>/);
+    expect((await new Browser().get("/plugins/all?q=zzzzqqq")).body).toContain('<b class="num">0</b> plugins');
     const git = await new Browser().get("/plugins/all?category=git");
     expect(git.body).toContain('href="/plugins/pr-review"');
     expect(git.body).not.toContain('href="/plugins/focus-timer"');
@@ -523,8 +523,8 @@ describe("the audit log", () => {
 describe("Newest, from the edge's cards", () => {
   test("says the day each was first listed (amendment 39)", async () => {
     const { body } = await new Browser().get("/plugins/all?sort=new");
-    expect(body).toContain('<th scope="col" class="end">Published</th>');
-    expect(body).toMatch(/<td class="installs end">[A-Z][a-z]{2} \d{1,2}(, \d{4})?<\/td>/);
+    // (A verified card's foot says the day it was first listed; one not verified says that instead.)
+    expect(body).toMatch(/<span class="count">Published [A-Z][a-z]{2} \d{1,2}(, \d{4})?<\/span>/);
   });
 });
 
