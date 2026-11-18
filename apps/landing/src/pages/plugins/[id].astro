@@ -1,283 +1,78 @@
 ---
-// A plugin's page: who made it, what it does (its README, as reviewed),
-// what it asks for, its versions, and Install in Zeron. The same for
-// everyone, so kept by the Worker cache for at most a minute.
-import { statusWords, store, storeAround } from "../../lib/store/words.ts";
-import Asks from "../../components/kit/Asks.astro";
-import Install from "../../components/kit/Install.astro";
-import Strip from "../../components/kit/Strip.astro";
-import PluginTile from "../../components/store/PluginTile.astro";
-import Glyph from "../../components/ui/Glyph.astro";
-import App from "../../layouts/App.astro";
-import { catalogHref } from "../../lib/store/catalog.ts";
-import { bytes, compatibility, count, day } from "../../lib/store/format.ts";
-import { firstLine } from "../../lib/store/markdown.ts";
-import { lines } from "../../lib/store/permissions.ts";
-import { CATEGORIES } from "../../lib/store/nav.ts";
-import { satisfies } from "../../lib/store/semver.ts";
+// A plugin's page, its Overview (the prototype's plugin page): its head
+// (who made it, what it does, getting it), its pictures on its own colour,
+// its README set to be read, and the rail of what a person weighs before
+// installing. The same for everyone, so kept by the Worker cache for at
+// most a minute.
+import Gallery from "../../components/look/Gallery.astro";
+import NotHere from "../../components/look/NotHere.astro";
+import PluginHead from "../../components/look/PluginHead.astro";
+import PluginTabs from "../../components/look/PluginTabs.astro";
+import Rail from "../../components/look/Rail.astro";
+import Store from "../../layouts/Store.astro";
+import "../../styles/look/plugin.css";
 import { pluginTag, publicPage } from "../../lib/store/http.ts";
-import { drawn, keepable, type Drawn } from "../../lib/store/rendered.ts";
-import { stoppedWhy } from "../../lib/store/states.ts";
-import { isPluginId, isPrerelease } from "../../lib/store/names.ts";
-import { appUrl, fileUrl, httpsUrl, memberUrl, pictureUrl, pluginUrl } from "../../lib/store/urls.ts";
-import type { VersionInfo } from "../../lib/store/types.ts";
+import { hueClass } from "../../lib/store/hue.ts";
+import { loadPlugin } from "../../lib/store/plugin-page.ts";
+import { drawn, keepable } from "../../lib/store/rendered.ts";
+import { fileUrl, memberUrl, pluginUrl } from "../../lib/store/urls.ts";
 
 export const prerender = false;
 
-// An id no plugin is listed under (unknown, taken down or removed, or not
-// an id at all) is one page, the same for each: the shell's own 404, which
-// says nothing of why. (A malformed id never reaches the edge.)
 const asked = Astro.params.id ?? "";
-const valid = isPluginId(asked);
-const id = valid ? asked : "";
-// One address per plugin: a query can't make the page (or its README) be
-// made again, and can't split its cache.
-if (valid && Astro.url.search) return Astro.redirect(pluginUrl(id), 301);
+// One address per plugin: a query can't make the page (or its README) be made again, or split its cache.
+if (Astro.url.search) return Astro.redirect(pluginUrl(asked), 301);
 
-/** Versions whose notes the page shows (each is rendered once, then kept); the rows after them, to 20 more; the rest on its versions page. */
-const NOTED = 8;
-const edge = Astro.locals.edge;
-const [result, versionsResult, categoriesResult, latestZeron] = valid
-  ? await Promise.all([edge.plugin(id), edge.versions(id, undefined, NOTED + 20), edge.categories(), edge.latestRelease()])
-  : [null, null, await edge.categories(), null];
-// (A listed plugin always has a version; one without is not the public's.)
-const missing = !result || (!result.ok && result.error === "not_found") || (result.ok && !result.data.version);
-if (missing) Astro.response.status = 404;
-else if (!result.ok) Astro.response.status = 503;
-const plugin = result?.ok && result.data.version ? { ...result.data, version: result.data.version } : null;
-
+const page = await loadPlugin(Astro.locals.edge, asked);
 let readme = "";
-let versions: (VersionInfo & { html: string | null })[] = [];
-if (plugin) {
-  const file = (version: string) => (path: string) => fileUrl(plugin.id, version, path);
-  const origin = Astro.url.origin;
-  // Each try finished whether or not the visitor stays (rendered.ts).
+if (page.state === "ok") {
+  const { plugin } = page;
+  // Drawn once and kept by its text (rendered.ts), the try finished whether or not the visitor stays.
+  // (A first heading that only says its name again isn't drawn: the page says it.)
   const cf = (Astro.locals as { cfContext?: { waitUntil(p: Promise<unknown>): void } }).cfContext;
-  const drawing = { keep: true, waitUntil: cf ? (p: Promise<unknown>) => cf.waitUntil(p) : undefined };
-  const shown: Drawn[] = [];
-  const draw = async (...args: Parameters<typeof drawn> extends [...infer A, unknown] ? A : never) => {
-    const out = await drawn(...args, drawing);
-    shown.push(out);
-    return out.html;
-  };
-  // The README, then each version's notes, newest first, each drawn once
-  // and kept by its text (markdown.ts: linear in its text, so none can
-  // sink the page). (A first heading that only says its name again isn't drawn: the page says it.)
-  readme = await draw(origin, plugin.id, plugin.version, "readme", plugin.readme, { file: file(plugin.version), demote: true, title: plugin.name });
-  // The notes of the latest few versions are shown; older versions are listed by number and date.
-  const all = (versionsResult?.ok ? versionsResult.data.versions : plugin.versions).slice(0, NOTED + 20);
-  for (const [i, v] of all.entries()) {
-    versions.push({ ...v, html: v.notes && i < NOTED ? await draw(origin, plugin.id, v.version, "notes", v.notes, { file: file(v.version), demote: true }) : null });
-  }
-  // Kept by shared caches only when what it shows is what it will show: a
-  // document held (a try that never finished) or failed is not, so the
-  // page that shows it as text isn't kept either.
-  if (keepable(shown)) publicPage(Astro, [pluginTag(plugin.id)]);
+  const out = await drawn(Astro.url.origin, plugin.id, plugin.version, "readme", plugin.readme, { file: (p) => fileUrl(plugin.id, plugin.version, p), demote: true, title: plugin.name }, { keep: true, waitUntil: cf ? (p) => cf.waitUntil(p) : undefined });
+  readme = out.html;
+  // Kept by shared caches only when what it shows is what it will show (a held or failed drawing isn't).
+  if (keepable([out])) publicPage(Astro, [pluginTag(plugin.id)]);
   else Astro.response.headers.set("cache-control", "no-store");
-}
-// An author's links, parsed: https only, never the text as given.
-const homepage = httpsUrl(plugin?.homepage);
-const repository = httpsUrl(plugin?.repository);
-const categories = categoriesResult.ok ? new Map(categoriesResult.data.categories.map((c) => [c.id, c.name])) : new Map<string, string>();
-// Categories by the app's names (the fixed list), else the edge's.
-const categoryName = (c: string) => CATEGORIES.find((x) => x.id === c)?.label ?? categories.get(c) ?? c;
-const first = plugin?.categories[0] ?? null;
-// The latest version (its notes shown, to a clamp), and the ones before it (a row each).
-const latest = plugin ? (versions.find((v) => v.version === plugin.version) ?? null) : null;
-const older = plugin ? versions.filter((v) => v !== latest) : [];
-const asks = plugin ? lines(plugin.permissions).length : 0;
-const when = (v: VersionInfo) => v.published_at;
-/** Every listed version can be seen and installed (amendment 45): its versions page, when this one shows only some. */
-const allVersions = plugin ? `${pluginUrl(plugin.id)}/versions` : "";
-const versionsTotal = versionsResult?.ok ? versionsResult.data.total : versions.length;
-const versionUrl = (v: string) => `${allVersions}/${encodeURIComponent(v)}`;
-const [before, after] = plugin ? storeAround("plugins.store.not_verified_line", { version: plugin.version }, "verified") : ["", ""];
-// Install is off when the plugin's range leaves out the latest Zeron: the
-// web can't know your Zeron, but it knows none released can install this.
-// (A range it can't read: nothing said, Install left on.)
-const off = plugin && latestZeron ? satisfies(latestZeron, plugin.engines?.zeron) === false : false;
-/** The older versions shown before "Show all": the latest three in all. */
-const SHOWN = 2;
+} else Astro.response.status = page.state === "missing" ? 404 : 503;
 
 // The page as a search engine reads it (a data block; nothing runs).
-const structured = plugin
-  ? JSON.stringify({
-      "@context": "https://schema.org",
-      "@type": "SoftwareApplication",
-      name: plugin.name,
-      description: plugin.summary,
-      applicationCategory: "Plugin",
-      operatingSystem: "macOS, Windows, Linux",
-      softwareVersion: plugin.version,
-      dateModified: new Date(plugin.updated_at).toISOString(),
-      ...(plugin.author.username ? { author: { "@type": "Person", name: `@${plugin.author.username}`, url: new URL(memberUrl(plugin.author.username), Astro.site).href } } : {}),
-      url: new URL(pluginUrl(plugin.id), Astro.site).href,
-      offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
-    }).replace(/</g, "\\u003c")
-  : null;
+const structured =
+  page.state === "ok"
+    ? JSON.stringify({
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        name: page.plugin.name,
+        description: page.plugin.summary,
+        applicationCategory: "Plugin",
+        operatingSystem: "macOS, Windows, Linux",
+        softwareVersion: page.plugin.version,
+        dateModified: new Date(page.plugin.updated_at).toISOString(),
+        ...(page.plugin.author.username ? { author: { "@type": "Person", name: `@${page.plugin.author.username}`, url: new URL(memberUrl(page.plugin.author.username), Astro.site).href } } : {}),
+        url: new URL(pluginUrl(page.plugin.id), Astro.site).href,
+        offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+      }).replace(/</g, "\\u003c")
+    : null;
 ---
 
-<App title={plugin ? `${plugin.name}, a plugin for Zeron` : missing ? "Not found · Plugins · Zeron" : "Plugins · Zeron"} description={plugin?.summary ?? "A plugin for Zeron."} noindex={!plugin} current={null}>
-  {structured && <script slot="head" type="application/ld+json" set:html={structured} />}
-  <nav slot="title" class="crumbs" aria-label="Where this is">
-    <a href={catalogHref({})}>All plugins</a>
-    {first && <><Glyph name="alt-arrow-right" size={12} /><a href={catalogHref({ category: first })}>{categoryName(first)}</a></>}
-    {plugin && <><Glyph name="alt-arrow-right" size={12} /><span aria-current="page">{plugin.name}</span></>}
-  </nav>
-  {plugin && <a slot="tools" class="btn ghost sm" href={`${pluginUrl(plugin.id)}/report`}><Glyph name="flag" size={14} />Report</a>}
-
-  {
-    missing ? (
-      <div class="panel">
-        <div class="empty">
-          <span class="tile"><Glyph name="magnifer" size={20} /></span>
-          <div class="words"><h1 class="t-heading">No plugin is listed here</h1><p>It may have a different id, or it isn't in the store now.</p></div>
-          <div class="actions"><a class="btn secondary sm" href={catalogHref({})}>All plugins</a></div>
+{
+  page.state === "ok" ? (
+    <Store title={`${page.plugin.name}, a plugin for Zeron`} description={page.plugin.summary} canonical={pluginUrl(page.plugin.id)} current="browse" class={hueClass(page.plugin.id)}>
+      {structured && <script slot="head" type="application/ld+json" set:html={structured} />}
+      <div class="wrap">
+        <PluginHead plugin={page.plugin} category={page.category} versions={page.versions?.versions ?? page.plugin.versions} latestZeron={page.latestZeron} />
+        <Gallery id={page.plugin.id} name={page.plugin.name} version={page.plugin.version} screenshots={page.plugin.screenshots} />
+        <div class="cols2">
+          <div>
+            <PluginTabs plugin={page.plugin} current="overview" versions={page.versions?.total ?? null} />
+            {readme.trim() ? <article class="prose" set:html={readme} /> : <p class="prose">{page.plugin.summary}</p>}
+          </div>
+          <Rail plugin={page.plugin} />
         </div>
       </div>
-    ) : !plugin ? (
-      <div class="panel">
-        <div class="empty" role="status">
-          <span class="tile"><Glyph name="wifi-off" size={20} /></span>
-          <div class="words"><h1 class="t-heading">{store("plugins.store.failed_title")}</h1><p>{store("plugins.store.failed_body")}</p></div>
-          <div class="actions"><a class="btn secondary sm" href={pluginUrl(id)}>{store("plugins.store.try_again")}</a></div>
-        </div>
-      </div>
-    ) : (
-      <div class="plugin">
-        <header class="plugin-head">
-          <PluginTile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size={56} class="plugin-tile" />
-          <div class="who">
-            <h1 class="t-title">{plugin.name}</h1>
-            <p class="meta">
-              {plugin.author.username ? <span>by <a href={memberUrl(plugin.author.username)}>@{plugin.author.username}</a></span> : <span>by an author without a username</span>}
-              {plugin.author.badges.map((b) => <span class="badge sm" title={b.description}>{b.name}</span>)}
-              <span class="dot" aria-hidden="true">·</span>
-              <span class="num">{plugin.version}</span>
-              {plugin.verified ? <span class="badge sm ok" title="Zeron verified this version.">{store("plugins.store.verified")}</span> : <span class="badge sm" title="Zeron hasn't verified this version yet.">{store("plugins.store.review.waiting")}</span>}
-              <span class="dot" aria-hidden="true">·</span>
-              <span class="num">{count(plugin.installs)} {plugin.installs === 1 ? "install" : "installs"}</span>
-              <span class="dot updated" aria-hidden="true">·</span>
-              <span class="updated">Updated <time datetime={new Date(plugin.updated_at).toISOString()}>{day(plugin.updated_at)}</time></span>
-            </p>
-          </div>
-          <Install id={plugin.id} name={plugin.name} off={off} />
-        </header>
-        {!plugin.verified && (
-          <p class="notice" role="note">
-            <Glyph name="info-circle" size={16} />
-            <span>
-              {/* (The app's sentence, its verified version a link; then what that means, the web's.) */}
-              <b>{plugin.verified_version ? <>{before}<a href={versionUrl(plugin.verified_version)}>{plugin.verified_version}</a>{after}</> : store("plugins.store.none_verified")}</b>{" "}
-              It's listed as its author published it, and Zeron asks before it installs it.
-              {plugin.verified_version && <>{" "}<a href={appUrl(plugin.id, plugin.verified_version)}>{store("plugins.store.install_instead", { version: plugin.verified_version })}</a></>}
-            </span>
-          </p>
-        )}
-        {off && (
-          <p class="notice warn" role="note">
-            <Glyph name="danger-triangle" size={16} />
-            <span><b>{store("plugins.store.needs_other_zeron")}</b> It needs {compatibility(plugin.engines?.zeron)}; the latest Zeron is {latestZeron}.</span>
-          </p>
-        )}
-
-        <div class="plugin-body">
-          <div class="plugin-strip">
-            <Strip name={plugin.name} pictures={plugin.screenshots.map((s) => pictureUrl(plugin.id, plugin.version, s)).filter((s): s is string => s !== null)} />
-          </div>
-          <div class="plugin-main">
-            <nav class="tabs" aria-label="About this plugin" data-tabs>
-              <a href="#overview" aria-current="page">Overview</a>
-              <a href="#changelog">Changelog <span class="count">{versions.length}</span></a>
-              <a href="#permissions">Permissions <span class="count">{asks}</span></a>
-            </nav>
-            <div class="tab-panels">
-              <section class="tab-panel" id="overview" aria-label="Overview">
-                {readme.trim() ? <div class="prose" set:html={readme} /> : <p class="lead">{plugin.summary}</p>}
-              </section>
-              <section class="tab-panel" id="changelog" aria-label="Changelog">
-                <div class="versions">
-                  {latest && (
-                    <article class="version-latest">
-                      <div class="version-head">
-                        <h2 class="num">{latest.version}</h2>
-                        <span class="badge sm ok">Latest</span>
-                        {latest.verified ? <span class="badge sm ok">{store("plugins.store.verified")}</span> : <span class="badge sm">{store("plugins.store.review.waiting")}</span>}
-                        {isPrerelease(latest.version) && <span class="badge sm info">Pre-release</span>}
-                        {latest.yanked && <span class="badge sm warn" title={stoppedWhy(latest)}>{statusWords("yanked")}</span>}
-                        <time datetime={new Date(when(latest)).toISOString()}>{day(when(latest))}</time>
-                      </div>
-                      {latest.html ? <div class="prose notes" set:html={latest.html} data-clamp /> : <p class="t-text t-3">No notes for this version.</p>}
-                    </article>
-                  )}
-                  {older.length > 0 && (
-                    <div class="panel older" data-versions>
-                      {older.map((v, i) => (
-                        <details class:list={{ "more-version": i >= SHOWN }}>
-                          <summary>
-                            <span class="num">{v.version}</span>
-                            {v.verified && <span class="badge sm ok">{store("plugins.store.verified")}</span>}
-                            <span class="first">{firstLine(v.notes) || "No notes"}</span>
-                            <time datetime={new Date(when(v)).toISOString()}>{day(when(v))}</time>
-                            <Glyph name="alt-arrow-down" size={14} />
-                          </summary>
-                          <div class="notes">
-                            {v.yanked && <p><span class="badge sm warn" title={stoppedWhy(v)}>{statusWords("yanked")}</span></p>}
-                            <p><a href={versionUrl(v.version)}>{v.version} on its own page</a></p>
-                            {v.html ? <div class="prose" set:html={v.html} /> : v.notes ? <p class="t-text t-2">{v.notes}</p> : <p class="t-text t-3">No notes for this version.</p>}
-                          </div>
-                        </details>
-                      ))}
-                    </div>
-                  )}
-                  {older.length > SHOWN && (
-                    <button type="button" class="btn ghost sm show-all" data-show-all aria-expanded="false" data-less={store("plugins.store.show_less")}>
-                      {store("plugins.store.all_versions", { n: versions.length })}
-                    </button>
-                  )}
-                  {/* (A page of its own, not the list above opened: so not the app's "Show all versions", which that button says.) */}
-                  <p><a class="btn ghost sm" href={allVersions}>Every version{versionsTotal > versions.length ? ` (${count(versionsTotal)})` : ""}</a></p>
-                </div>
-              </section>
-              <section class="tab-panel" id="permissions" aria-label="Permissions">
-                <Asks permissions={plugin.permissions} author={plugin.author.username ?? undefined} mode="full" />
-                <p class="t-caption t-3 asked">Zeron asks you to allow these when you install it, and again if an update asks for more.</p>
-              </section>
-            </div>
-          </div>
-
-          <aside class="rail" aria-label="About this plugin">
-            <section class="rail-part rail-asks" aria-labelledby="asks-heading">
-              <h2 id="asks-heading">{store("plugins.store.asks")}</h2>
-              <Asks permissions={plugin.permissions} author={plugin.author.username ?? undefined} mode="short" />
-              <a class="more" href="#permissions" data-tab-link>All of what it asks for</a>
-            </section>
-            <section class="rail-part" aria-label="Facts">
-              <dl class="facts">
-                <div><dt>{store("plugins.store.fact.works_with")}</dt><dd>{compatibility(plugin.engines?.zeron)}</dd></div>
-                <div><dt>Size</dt><dd class="num">{bytes(plugin.package.bytes)}</dd></div>
-                {plugin.license && <div><dt>{store("plugins.store.fact.license")}</dt><dd>{plugin.license}</dd></div>}
-                {plugin.categories.length > 0 && (
-                  <div><dt>{store("plugins.store.fact.category")}</dt><dd>{plugin.categories.map((c, i) => <>{i > 0 && ", "}<a href={catalogHref({ category: c })}>{categoryName(c)}</a></>)}</dd></div>
-                )}
-              </dl>
-              {plugin.keywords.length > 0 && (
-                <ul class="tags" role="list" aria-label="Tags">
-                  {plugin.keywords.map((k) => <li><a class="tag" href={catalogHref({ keyword: k })}>{k}</a></li>)}
-                </ul>
-              )}
-            </section>
-            {(homepage || repository) && (
-              <section class="rail-part" aria-label="Elsewhere">
-                <ul class="out" role="list">
-                  {homepage && <li><a href={homepage} rel="nofollow noopener ugc"><Glyph name="global" size={16} />{store("plugins.store.fact.homepage")}<Glyph name="arrow-up-right" size={14} class="end" /></a></li>}
-                  {repository && <li><a href={repository} rel="nofollow noopener ugc"><Glyph name="file-code" size={16} />{store("plugins.store.fact.repository")}<Glyph name="arrow-up-right" size={14} class="end" /></a></li>}
-                </ul>
-              </section>
-            )}
-          </aside>
-        </div>
-      </div>
-    )
-  }
-</App>
+    </Store>
+  ) : (
+    <NotHere state={page.state} retry={pluginUrl(asked)} />
+  )
+}

@@ -78,7 +78,8 @@ const n = (value: number | undefined) => (value === undefined ? "—" : count(va
         <p class="lead">Panels, commands and tools for your agents, made by people who use Zeron. Anyone can publish. A check marks what Zeron has verified.</p>
       </div>
       {
-        stats.ok && (
+        // (Not drawn for a store with nothing in it: three noughts read as a broken counter.)
+        stats.ok && stats.data.plugins > 0 && (
           <dl class="nums">
             <div><dt>Plugins</dt><dd class="num">{n(stats.data.plugins)}</dd></div>
             <div><dt>Verified</dt><dd class="num">{n(stats.data.verified)} <Seal size="s" quiet /></dd></div>

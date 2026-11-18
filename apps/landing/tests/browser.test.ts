@@ -54,6 +54,11 @@ const PAGES: [string, string | undefined][] = [
   ["/plugins/all?verified=1", undefined],
   ["/plugins/worst-case-listing-at-every-limit-xyz12/versions", undefined],
   ["/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.4.0", undefined],
+  ["/plugins/worst-case-listing-at-every-limit-xyz12/asks", undefined],
+  ["/plugins/focus-timer/versions/1.1.0", undefined],
+  ["/plugins/focus-timer/versions/9.9.9", undefined],
+  ["/plugins/voice-memos", undefined],
+  ["/plugins/clipboard-sync", undefined],
   ["/admin/plugins", "user_grace"],
   ["/admin/plugins/session-badges", "user_grace"],
   ["/admin/plugins/crypto-ticker", "user_grace"],
@@ -113,17 +118,17 @@ const OPENED: [string, string, string | undefined, (page: Page) => Promise<void>
     await page.getByRole("link", { name: "Stop new installs" }).first().click();
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
   }],
-  ["the screenshots", "/plugins/focus-timer", undefined, async (page) => {
-    await page.getByRole("link", { name: /Picture 1 of/ }).first().click();
-    await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
+  ["the pictures, at the second", "/plugins/focus-timer", undefined, async (page) => {
+    await page.getByRole("button", { name: "Picture 2" }).click();
+    await expect.poll(() => page.getByRole("button", { name: "Picture 2" }).getAttribute("aria-current")).toBe("true");
   }],
   ["Install in Zeron's help", "/plugins/focus-timer", undefined, async (page) => {
     await page.evaluate(() => {
-      const a = document.querySelector<HTMLAnchorElement>("[data-install-link]")!;
+      const a = document.querySelector<HTMLAnchorElement>("a[data-install]")!;
       a.addEventListener("click", (e) => e.preventDefault(), { once: true });
       a.click();
     });
-    await expect.poll(() => page.locator("[data-install-help]").evaluate((d) => (d as HTMLDetailsElement).open), { timeout: 4_000 }).toBe(true);
+    await expect.poll(() => page.locator("#get-help-focus-timer").evaluate((d) => d.matches(":popover-open")), { timeout: 4_000 }).toBe(true);
   }],
 ];
 
@@ -286,18 +291,19 @@ describe("by keyboard", () => {
     }
   });
 
-  test("a screenshot opens large; arrows move between them; Escape closes", async () => {
+  test("a plugin's pictures: the strip takes focus, and an arrow brings the next one in, with no script needed", async () => {
     const { page, context } = await open("/plugins/focus-timer");
     try {
-      await page.getByRole("link", { name: "Picture 1 of 2, larger" }).focus();
-      await page.keyboard.press("Enter");
-      const box = page.getByRole("dialog", { name: "Focus timer, pictures" });
-      await expect.poll(() => box.isVisible()).toBe(true);
-      expect(await box.locator("figcaption").textContent()).toBe("1 of 2");
+      const strip = page.getByRole("group", { name: /2 pictures/ });
+      await strip.focus();
+      expect(await strip.evaluate((el) => el.scrollLeft)).toBe(0);
       await page.keyboard.press("ArrowRight");
-      expect(await box.locator("figcaption").textContent()).toBe("2 of 2");
-      await page.keyboard.press("Escape");
-      await expect.poll(() => box.isVisible()).toBe(false);
+      await page.keyboard.press("ArrowRight");
+      await page.keyboard.press("ArrowRight");
+      await expect.poll(() => strip.evaluate((el) => el.scrollLeft)).toBeGreaterThan(0);
+      // (The dots follow it.)
+      await page.keyboard.press("End");
+      await expect.poll(() => page.getByRole("button", { name: "Picture 2" }).getAttribute("aria-current")).toBe("true");
     } finally {
       await context.close();
     }
@@ -311,13 +317,13 @@ describe("by keyboard", () => {
       const before = page.url();
       // (Headless Chromium has no app for zeron:, so the link goes nowhere, as for someone without Zeron.)
       await page.evaluate(() => {
-        const a = document.querySelector<HTMLAnchorElement>("[data-install-link]")!;
+        const a = document.querySelector<HTMLAnchorElement>("a[data-install]")!;
         a.addEventListener("click", (e) => e.preventDefault(), { once: true });
         a.click();
       });
-      await expect.poll(() => page.locator("[data-install-help]").evaluate((d) => (d as HTMLDetailsElement).open), { timeout: 4_000 }).toBe(true);
+      await expect.poll(() => page.locator("#get-help-focus-timer").evaluate((d) => d.matches(":popover-open")), { timeout: 4_000 }).toBe(true);
       expect(page.url()).toBe(before);
-      expect(await page.getByText("Settings").first().isVisible()).toBe(true);
+      expect(await page.locator("#get-help-focus-timer").getByText("Download Zeron").isVisible()).toBe(true);
     } finally {
       await context.close();
     }

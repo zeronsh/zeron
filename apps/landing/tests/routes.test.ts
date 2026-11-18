@@ -202,41 +202,50 @@ describe("a plugin's page", () => {
     const { response, body } = await html("/plugins/pr-radar");
     expect(response.status).toBe(200);
     expect(response.headers.get("cloudflare-cdn-cache-control")).toBe("public, max-age=30, stale-while-revalidate=30");
-    expect(body).toContain('href="zeron://open/plugin/pr-radar"');
-    expect(body).toContain("Run gh, git on your computer as you");
-    expect(body).toContain("Install it only if you trust @kai.");
+    expect(body).toContain('href="zeron://open/plugin/pr-radar" data-install>');
     expect(body).toContain('<h3 id="user-content-what-it-does">What it does</h3>');
     expect(body).toContain('"@type":"SoftwareApplication"');
     expect(hasInlineScript(body)).toBe(false);
+    // All of what it asks for, on its own tab, in the app's words; the risky last, in the danger's ink.
+    const asks = (await html("/plugins/pr-radar/asks")).body;
+    expect(asks).toContain("Run gh, git on your computer as you");
+    expect(asks).toContain("Install it only if you trust @kai.");
+    expect(asks).toMatch(/<li class="ar risky">/);
   });
 
-  test("the page's rules: one primary button, pictures by their number, the README under the page, its parts as tabs", async () => {
+  test("the page's rules: one primary button, its own colour, its pictures, the README under the page, its parts as pages", async () => {
     const { body } = await html("/plugins/focus-timer");
-    // One action slot, one style: Install the page's one primary button; what else is said, in words.
-    expect(body.match(/class="btn primary/g)).toHaveLength(1);
-    expect(body).toContain("<summary>Nothing happened?</summary>");
-    // Two pictures share the column.
-    expect(body).toContain('class="strip two"');
-    expect((await html("/plugins/pr-radar")).body).toMatch(/class="strip (one|two|many)"/);
+    // One action, one primary button; what else is said, in words.
+    expect(body.match(/class="btn pri/g)).toHaveLength(1);
+    expect(body).toContain(">Nothing happened?</button>");
+    // On its own hue; its pictures a strip on it, one at a time.
+    expect(body).toMatch(/<main id="main" class="h\d+">/);
+    expect(body.match(/<a class="slide"/g)).toHaveLength(2);
     // The README doesn't say the name again, and nothing in it outweighs the title.
-    expect(body.match(/<h[1-6][^>]*>Focus timer<\/h[1-6]>/g)).toEqual(['<h1 class="t-title">Focus timer</h1>']);
-    expect(body).not.toMatch(/<div class="prose"[^>]*>[^]*?<h1/);
-    // Its parts are tabs that are addresses; Report is always in the header.
-    expect(body).toMatch(/<a href="#overview" aria-current="page">Overview<\/a><a href="#changelog">Changelog <span class="count">\d+<\/span><\/a><a href="#permissions">Permissions <span class="count">\d+<\/span><\/a>/);
-    expect(body).toMatch(/<a slot="tools"|class="tools"><a class="btn ghost sm" href="\/plugins\/focus-timer\/report">/);
-    // Older versions are rows that open in place; the latest's notes are there to clamp.
-    expect(body).toContain("data-clamp");
-    expect(body).toMatch(/<details><summary><span class="num">1\.1\.0<\/span>/);
-    // A risky ask, in the rail and the tab, in the danger's ink.
-    expect((await html("/plugins/pr-radar")).body).toMatch(/<li class="asks-line risky">/);
+    expect(body.match(/<h[1-6][^>]*>(<span class="name">)?Focus timer/g)).toEqual(['<h1><span class="name">Focus timer']);
+    expect(body).not.toMatch(/<article class="prose"[^>]*>[^]*?<h1/);
+    // Its parts are pages of their own, each a real address; Report is in the rail.
+    expect(body).toMatch(/<a href="\/plugins\/focus-timer" aria-current="page">Overview<\/a><a href="\/plugins\/focus-timer\/versions">Versions<span class="num">\d+<\/span><\/a><a href="\/plugins\/focus-timer\/asks">What it asks for<span class="num">\d+<\/span><\/a>/);
+    expect(body).toContain('<a href="/plugins/focus-timer/report">');
+    // Every version verified: the seal by the name, no amber note.
+    expect(body).toContain('<span class="state ok">');
+    expect(body).not.toContain('<p class="note">');
+  });
+
+  test("its newest not verified: the amber note, the newest verified to install instead; none verified: said so", async () => {
+    const worst = (await html("/plugins/worst-case-listing-at-every-limit-xyz12")).body;
+    expect(worst).toContain('<span class="state no">Not verified yet</span>');
+    expect(worst).toMatch(/<p class="note"><b>1\.5\.0 isn&#39;t verified yet\. 1\.0\.0 is\.<\/b>/);
+    const none = (await html("/plugins/voice-memos")).body;
+    expect(none).toContain('<p class="note"><b>No version of this plugin is verified yet.</b> Zeron asks before it installs it.</p>');
   });
 
   test("a hostile plugin's words are only words", async () => {
     const { body } = await html("/plugins/xss-probe");
     // (Tags only: an attribute's value may hold "<script>" as inert text.)
     const markup = body.replace(/="[^"]*"/g, '=""');
-    const scripts = [...markup.matchAll(/<script\b[^>]*>/g)].map((m) => m[0]);
-    expect(scripts).toEqual(['<script type="">', '<script type="" src="">', '<script type="" src="">', '<script type="" src="">']);
+    // (Every script the page's own: its data block, or a file of the site's.)
+    for (const tag of body.replace(/="[^"]*"/g, (v) => (/^="(application\/ld\+json|\/_astro\/[^"]*)"$/.test(v) ? v : '=""')).matchAll(/<script\b[^>]*>/g)) expect(tag[0]).toMatch(/type="application\/ld\+json"|src="\/_astro\//);
     expect(body).toContain('<script type="application/ld+json">');
     expect(markup).not.toMatch(/<img[^>]+onerror/i);
     expect(markup).not.toMatch(/<svg[^>]+onload/i);
@@ -256,7 +265,7 @@ describe("a plugin's page", () => {
     expect(title).toContain("a plugin for Zeron");
     expect(/<meta name="description" content="([^"]*)"/.exec(body)![1]).not.toMatch(/[\u202a-\u202e\u2066-\u2069]/);
     // (In the page, it stays as written, in an element of its own.)
-    expect(body).toMatch(/<h1[^>]*>[^<]*\u202eevil<\/h1>/);
+    expect(body).toMatch(/<h1><span class="name">[^<]*\u202eevil<\/span>/);
   });
 
   test("an author's links are followed only as parsed https addresses", async () => {
@@ -574,13 +583,18 @@ describe("the admin pages can't be told from pages that don't exist", () => {
   test("the app's link can name a version: 'Install 1.0.0 instead' beside an unverified newest, and a version's own page installs that version", async () => {
     const page = (await html("/plugins/worst-case-listing-at-every-limit-xyz12")).body;
     // (The newest by the plain link.)
-    expect(page).toContain('href="zeron://open/plugin/worst-case-listing-at-every-limit-xyz12" data-install-link');
-    expect(page).toContain('<a href="zeron://open/plugin/worst-case-listing-at-every-limit-xyz12?version=1.0.0">Install 1.0.0 instead</a>');
+    expect(page).toContain('href="zeron://open/plugin/worst-case-listing-at-every-limit-xyz12" data-install>');
+    // (The amber note: the app's sentences, its link the one that names the verified version.)
+    expect(page).toContain('<b>1.5.0 isn&#39;t verified yet. 1.0.0 is.</b> <a href="zeron://open/plugin/worst-case-listing-at-every-limit-xyz12?version=1.0.0">Install 1.0.0 instead</a>, verified');
     const older = (await html("/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.0.0")).body;
-    expect(older).toContain('href="zeron://open/plugin/worst-case-listing-at-every-limit-xyz12?version=1.0.0" data-install-link');
-    expect(older).toContain("Install 1.0.0 in Zeron");
+    expect(older).toContain('href="zeron://open/plugin/worst-case-listing-at-every-limit-xyz12?version=1.0.0" data-install>');
+    expect(older).toMatch(/data-install>[^]*?Install 1\.0\.0\s*<\/a>/);
     // (Its newest's page: the plain link.)
-    expect((await html("/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.5.0")).body).toContain('href="zeron://open/plugin/worst-case-listing-at-every-limit-xyz12" data-install-link');
+    expect((await html("/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.5.0")).body).toContain('href="zeron://open/plugin/worst-case-listing-at-every-limit-xyz12" data-install>');
+    // On Versions, each listed version's Install names it; one that takes no new installs can't be.
+    const versions = (await html("/plugins/worst-case-listing-at-every-limit-xyz12/versions")).body;
+    expect(versions).toContain('href="zeron://open/plugin/worst-case-listing-at-every-limit-xyz12?version=1.0.0">Install 1.0.0</a>');
+    expect(versions.match(/<span class="off">Can't be installed<\/span>/g)).toHaveLength(2);
   });
 });
 
@@ -641,8 +655,9 @@ describe("forms", () => {
   test("in public, a version that takes no new installs says why: replaced before it was verified, or stopped by its author", async () => {
     const superseded = await html("/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.4.0");
     expect(superseded.body).toContain("Replaced by 1.5.0 before it was verified: no new installs. Those who have it keep it working.");
-    // (The app's sentence, its newest verified listed version a link to it: 1.0.0, its author having stopped 1.1.0.)
-    expect(superseded.body).toContain('<b>1.4.0 isn&#39;t verified yet. <a href="/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.0.0">1.0.0</a> is.</b>');
+    // (It can't be installed, and says so in place of Install.)
+    expect(superseded.body).toContain('<span class="btn pri lg" aria-disabled="true">Can\'t be installed</span>');
+    expect(superseded.body).not.toContain("data-install");
     // (Never the reviewer's reason: that is its author's to read.)
     expect(superseded.body).not.toContain("Until then this one stays listed");
     expect((await html("/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.1.0")).body).toContain("Its author stopped new installs of it.");
@@ -1049,7 +1064,11 @@ describe("the review of the web store: what it found, held", () => {
     expect(first.ms).toBeLessThan(4_000);
     // (The README, a new list on every line, would keep more than its bound; the notes are drawn.)
     expect(first.body).toContain(`<p class="as-text">Shown as plain text: it's too long to lay out.</p>`);
-    expect(first.body).toContain("<blockquote>");
+    // (Its versions' notes are drawn on its Versions, within the bound too.)
+    const notes = await timed("/plugins/slow-words/versions");
+    expect(notes.response.status).toBe(200);
+    expect(notes.ms).toBeLessThan(4_000);
+    expect(notes.body).toContain("<blockquote>");
     // (Kept, so the next visit draws nothing again.)
     const again = await timed("/plugins/slow-words");
     expect(again.ms).toBeLessThan(4_000);

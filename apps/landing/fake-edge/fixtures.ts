@@ -289,6 +289,63 @@ const SPECS: Spec[] = [
     installs: 12840,
     featured: true,
     age: 120,
+    // (Every form the site's renderer draws, for the plugin page's pictures and its tests.)
+    readme: `# Focus timer
+
+A **25 minute timer** in a chat's header. Start it when you hand an agent a long task; it counts down beside the chat's title and tells you, *quietly*, when the time is up. ~~No more guessing.~~ Find it in Settings, or run \`zeron plugin install focus-timer\`.
+
+![Focus timer, screen 1](shots/screen-1.svg)
+
+## What it does
+
+- Shows what it knows where you are already looking, and nowhere else.
+- Pauses when you leave the chat, and picks up when you come back.
+  - A second level, for the details.
+- Remembers your lengths on each of your computers.
+
+1. Start a long run.
+2. Start the timer.
+3. Take the break it gives you.
+
+## Before 2.0
+
+- [x] Breaks that follow your agents
+- [x] A chime at the end
+- [ ] A second timer for breaks
+
+## Settings
+
+| Setting | What it does | Default |
+| --- | --- | --- |
+| Length | How long one run of the timer lasts | 25 minutes |
+| Quiet hours | When it keeps to itself | Off |
+| Chime | The sound at the end | Soft |
+
+## For your agents
+
+Agents can ask how long is left, so a long task can pace itself:
+
+\`\`\`json
+{ "tool": "focus_timer_status", "input": {} }
+\`\`\`
+
+    -- An indented block is code too.
+    local left = zeron.timer.left()
+
+> Quiet is the point: it never takes the chat's focus.
+
+---
+
+A very long address, to see that nothing scrolls the page sideways: https://example.com/focus-timer/a/very/long/address/that/keeps/going/without/a/single/space/to/break/it/at/all/0123456789
+
+\`\`\`text
+a-very-long-line-of-code-with-no-spaces-at-all-that-must-scroll-inside-its-own-box-and-never-push-the-page-wider-than-the-window-0123456789
+\`\`\`
+
+Footnotes are shown as typed.[^1] Questions and ideas are welcome on [the repository](https://github.com/ada/focus-timer).
+
+[^1]: As the publishing guide says.
+`,
     history: [
       { version: "1.0.0", status: "verified", ago: 120, notes: "First release." },
       { version: "1.1.0", status: "verified", ago: 60, notes: "- Pauses when your computer sleeps.\n- A sound at the end, if you want one." },

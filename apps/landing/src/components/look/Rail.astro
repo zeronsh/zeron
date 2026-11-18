@@ -1,0 +1,78 @@
+---
+// The rail beside a plugin's page (the prototype's .rail): what a person
+// weighs before installing it. What it asks for (its first few, in the
+// app's words and order, the risky last and in the danger's ink; the rest
+// on its own tab), its details, its keywords, and its links: the author's
+// own (https only, as parsed) and a report.
+import AppIcon from "./AppIcon.astro";
+import Icon from "./Icon.astro";
+import { catalogHref } from "../../lib/store/catalog.ts";
+import { bytes, compatibility, date } from "../../lib/store/format.ts";
+import { lines } from "../../lib/store/permissions.ts";
+import type { PluginDetail } from "../../lib/store/types.ts";
+import { httpsUrl, pluginUrl } from "../../lib/store/urls.ts";
+import { store } from "../../lib/store/words.ts";
+
+interface Props {
+  plugin: PluginDetail;
+  /** The asks shown before "All of what it asks for". */
+  shown?: number;
+  /** Its own "What it asks for" tab is the page: the whole list is there, so the rail doesn't repeat it. */
+  onAsks?: boolean;
+}
+const { plugin, shown = 4, onAsks = false } = Astro.props;
+const asks = lines(plugin.permissions);
+const homepage = httpsUrl(plugin.homepage);
+const repository = httpsUrl(plugin.repository);
+---
+
+<aside class="rail" aria-label="About this plugin">
+  {
+    !onAsks && (
+      <section aria-labelledby="rail-asks">
+        <h2 class="rail-h" id="rail-asks">{store("plugins.store.asks")}</h2>
+        {asks.length === 0 ? (
+          <p class="none">Nothing beyond running in its own space.</p>
+        ) : (
+          <ul class="asks">
+            {asks.slice(0, shown).map((line) => (
+              <li class:list={["ask", { risky: line.risky }]}>
+                <AppIcon name={line.icon} />
+                <div>
+                  {line.title}
+                  {line.risky && <small>Gives it a lot of reach</small>}
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+        {asks.length > shown && (
+          <a class="more" href={`${pluginUrl(plugin.id)}/asks`}>All {asks.length}<Icon name="chev" /></a>
+        )}
+      </section>
+    )
+  }
+  {!onAsks && <div class="rule" aria-hidden="true"></div>}
+  <section aria-labelledby="rail-details">
+    <h2 class="rail-h" id="rail-details">Details</h2>
+    <dl class="facts">
+      <dt>{store("plugins.store.fact.works_with")}</dt><dd>{compatibility(plugin.engines?.zeron)}</dd>
+      <dt>Size</dt><dd class="num">{bytes(plugin.package.bytes)}</dd>
+      {plugin.license && <><dt>{store("plugins.store.fact.license")}</dt><dd>{plugin.license}</dd></>}
+      {plugin.listed_at !== null && <><dt>First published</dt><dd>{date(plugin.listed_at)}</dd></>}
+    </dl>
+  </section>
+  {
+    plugin.keywords.length > 0 && (
+      <ul class="tags" aria-label="Keywords">
+        {plugin.keywords.map((k) => <li><a class="tag" href={catalogHref({ keyword: k })}>{k}</a></li>)}
+      </ul>
+    )
+  }
+  <div class="rule" aria-hidden="true"></div>
+  <ul class="links">
+    {homepage && <li><a href={homepage} rel="nofollow noopener ugc"><Icon name="globe" />{store("plugins.store.fact.homepage")}<span class="o"><Icon name="out" /></span></a></li>}
+    {repository && <li><a href={repository} rel="nofollow noopener ugc"><Icon name="term" />{store("plugins.store.fact.repository")}<span class="o"><Icon name="out" /></span></a></li>}
+    <li><a href={`${pluginUrl(plugin.id)}/report`}><Icon name="flag" />Report this plugin</a></li>
+  </ul>
+</aside>

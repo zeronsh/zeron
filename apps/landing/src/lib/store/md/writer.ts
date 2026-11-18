@@ -25,7 +25,8 @@ export const TAGS: Readonly<Record<string, readonly string[]>> = {
   ul: ["class"],
   ol: ["start", "class"],
   li: ["class"],
-  input: ["type", "disabled", "checked"],
+  // (A task's box, said as "Done" or "To do": a checkbox needs a name, axe and screen readers alike.)
+  input: ["type", "disabled", "checked", "aria-label"],
   pre: ["tabindex", "class"],
   code: ["class"],
   span: ["class"],

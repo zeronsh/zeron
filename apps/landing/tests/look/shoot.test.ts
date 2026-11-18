@@ -27,6 +27,17 @@ const SHOTS: Shot[] = [
   { page: "discover", as: "no-pictures", path: "/plugins", fake: [["bare", { id: "focus-timer" }]] },
   { page: "discover", as: "empty", path: "/plugins", fake: [["empty", { on: "1" }]] },
   { page: "discover", as: "down", path: "/plugins", fake: [["down", { on: "1" }]] },
+  // A plugin: every version verified, the README with every form; its newest not verified (the amber note); nothing verified yet; no pictures.
+  { page: "plugin", as: "all-verified", path: "/plugins/focus-timer" },
+  { page: "plugin", as: "unverified-newest", path: "/plugins/worst-case-listing-at-every-limit-xyz12" },
+  { page: "plugin", as: "none-verified", path: "/plugins/voice-memos" },
+  { page: "plugin", as: "no-pictures", path: "/plugins/focus-timer", fake: [["bare", { id: "focus-timer" }]] },
+  { page: "plugin", as: "versions", path: "/plugins/worst-case-listing-at-every-limit-xyz12/versions" },
+  { page: "plugin", as: "asks", path: "/plugins/worst-case-listing-at-every-limit-xyz12/asks" },
+  { page: "plugin", as: "version", path: "/plugins/focus-timer/versions/1.1.0" },
+  { page: "plugin", as: "version-superseded", path: "/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.4.0" },
+  { page: "plugin", as: "taken-down", path: "/plugins/clipboard-sync" },
+  { page: "plugin", as: "version-gone", path: "/plugins/focus-timer/versions/9.9.9" },
 ];
 const RESET: [string, Record<string, string>][] = [["empty", {}], ["down", {}], ["bare", {}]];
 

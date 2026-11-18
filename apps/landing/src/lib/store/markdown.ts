@@ -23,7 +23,7 @@ import { inlinesOf, plainText } from "./md/inlines.ts";
 export { target, type RenderOptions, type Target } from "./md/html.ts";
 
 /** Bump when the HTML this makes changes, so kept renderings are made again. */
-export const RENDERER = 9;
+export const RENDERER = 10;
 
 /** What a rendering may write: past it, the document is shown as its text. */
 export const BOUNDS = { html: 2 * 1024 * 1024 } as const;

@@ -1,0 +1,228 @@
+/* A plugin's pages: its Overview, Versions, what it asks for, one version (the prototype's plugin.css and versions.css). */
+.crumbs { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding-top: 28px; font-size: 13px; line-height: 20px; color: var(--text-3); }
+.crumbs svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.crumbs a { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 4px; transition: color 0.12s var(--ease); }
+.crumbs a:hover { color: var(--text); }
+
+/* ---- the head ---- */
+.head { display: flex; align-items: flex-start; gap: 24px; padding-top: 24px; }
+.head .txt { flex: 1; min-width: 0; padding-top: 2px; }
+.head h1 { font-size: 40px; line-height: 44px; letter-spacing: -0.035em; display: flex; align-items: center; gap: 10px; min-width: 0; }
+.head h1 .name { min-width: 0; overflow-wrap: anywhere; }
+.head .by { margin-top: 6px; color: var(--text-3); font-size: 14px; line-height: 20px; display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: center; }
+.head .by b { color: var(--text-2); font-weight: 500; }
+.head .by a { border-radius: 4px; }
+.head .by a:hover b { color: var(--text); box-shadow: 0 1px 0 var(--line-2); }
+.head .by i { width: 3px; height: 3px; border-radius: 50%; background: currentColor; opacity: 0.6; }
+.head .sum { margin-top: 14px; max-width: 36em; }
+/* (One version's head: its number beside its name, as staff read it.) */
+.head.one { align-items: center; }
+.head.one h1 { font-size: 32px; line-height: 38px; letter-spacing: -0.03em; flex-wrap: wrap; gap: 0 10px; }
+.head.one .vnum { font: 550 26px/38px var(--mono); letter-spacing: -0.03em; color: var(--text-2); }
+.head.one .by { margin-top: 2px; }
+
+/* ---- getting it ---- */
+.get { flex: none; width: 296px; display: flex; flex-direction: column; gap: 10px; padding-top: 4px; }
+.get .btn { width: 100%; }
+.get .btn .mark { width: 20px; height: 12px; fill: currentColor; }
+.get .ver { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px; font-size: 13px; line-height: 20px; color: var(--text-2); }
+.get .ver b { font-weight: 550; color: var(--text); }
+.get .alt { text-align: center; font-size: 13px; line-height: 20px; color: var(--text-3); }
+.get .alt button { color: var(--text-2); box-shadow: 0 1px 0 var(--line-2); border-radius: 2px; font-size: inherit; line-height: inherit; transition: color 0.12s var(--ease); }
+.get .alt button:hover { color: var(--text); }
+.get .note { padding: 12px 14px; border-radius: 12px; background: var(--warn-wash); color: var(--warn); font-size: 13px; line-height: 19px; }
+.get .note b { font-weight: 600; }
+.get .note a { box-shadow: 0 1px 0 color-mix(in srgb, currentColor 40%, transparent); font-weight: 550; border-radius: 2px; }
+.get .note a:hover { box-shadow: 0 1px 0 currentColor; }
+.get .note.warn { background: var(--danger-wash); color: var(--danger); }
+.get .note.quiet { background: var(--sunken); color: var(--text-2); }
+/* "Nothing happened?": how to get Zeron, over the page. */
+.get-help.menu { inset: 0; margin: auto; height: fit-content; width: min(400px, calc(100vw - 32px)); padding: 18px 20px; gap: 10px; font-size: 14px; line-height: 21px; color: var(--text-2); }
+.get-help.menu b { color: var(--text); font-weight: 550; }
+.get-help ol { padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
+.get-help a { display: inline; height: auto; padding: 0; color: var(--text); font-weight: 500; box-shadow: 0 1px 0 var(--line-2); border-radius: 2px; }
+.get-help a:hover { background: none; }
+
+/* ---- the plugin's pictures, on its own colour ---- */
+.gallery { margin-top: 36px; height: 440px; border-radius: 24px; }
+.gallery .track { position: absolute; inset: 0; display: flex; gap: 40px; padding: 44px 72px 0; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x mandatory; scroll-padding: 0 72px; scrollbar-width: none; border-radius: inherit; }
+.gallery .track::-webkit-scrollbar { display: none; }
+.gallery .track:focus-visible { outline-offset: -4px; }
+.gallery .track::after { content: ""; flex: 0 0 32px; }
+.gallery .slide { flex: none; position: relative; width: min(760px, calc(100% - 72px)); height: calc(100% + 48px); scroll-snap-align: start; border-radius: 16px; box-shadow: var(--shot); overflow: hidden; background: var(--surface); }
+.gallery.one .slide { width: min(860px, 100%); }
+.gallery .slide img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top left; }
+.gallery .slide:focus-visible { outline-offset: 3px; }
+.gallery .dots { position: absolute; left: 0; right: 0; bottom: 14px; display: none; justify-content: center; gap: 2px; }
+.js .gallery .dots { display: flex; }
+.gallery .dots button { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 11px; }
+.gallery .dots button::before { content: ""; width: 6px; height: 6px; border-radius: 3px; background: oklch(var(--ink-l) var(--ink-c) var(--h)); opacity: 0.3; transition: width 0.16s var(--ease), opacity 0.16s var(--ease); }
+.gallery .dots button:hover::before { opacity: 0.55; }
+.gallery .dots button[aria-current]::before { width: 16px; opacity: 0.85; }
+
+/* ---- the page under its head ---- */
+.cols2 { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 72px; margin-top: 40px; align-items: start; }
+.cols2.after-head { margin-top: 44px; }
+.tabs { display: flex; gap: 28px; box-shadow: inset 0 -1px 0 var(--line); overflow-x: auto; scrollbar-width: none; }
+.tabs a { position: relative; flex: none; padding: 0 0 12px; font-size: 15px; line-height: 22px; font-weight: 500; color: var(--text-3); display: flex; gap: 7px; align-items: baseline; border-radius: 4px 4px 0 0; transition: color 0.12s var(--ease); }
+.tabs a:hover { color: var(--text); }
+.tabs a span { font-size: 13px; font-weight: 450; }
+.tabs a[aria-current] { color: var(--text); }
+.tabs a[aria-current]::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; border-radius: 1px; background: var(--text); }
+.tabs a:focus-visible { outline-offset: -2px; }
+.sec-title { font-size: 19px; line-height: 26px; }
+.back { margin-top: 40px; }
+.back .more { max-width: 100%; align-items: flex-start; }
+.back .more svg { margin-top: 3px; }
+.back .more .name { min-width: 0; }
+
+/* ---- a README, or a version's notes, set to be read: every form the renderer draws ---- */
+.prose { padding-top: 28px; font-size: 16px; line-height: 27px; color: color-mix(in srgb, var(--text) 86%, var(--bg)); max-width: 44em; overflow-wrap: anywhere; }
+.sec-title + .prose { padding-top: 14px; }
+.prose > * + * { margin-top: 16px; }
+.prose h1, .prose h2 { font-size: 21px; line-height: 28px; margin-top: 40px; color: var(--text); letter-spacing: -0.02em; }
+.prose h3 { font-size: 17px; line-height: 24px; margin-top: 32px; color: var(--text); }
+.prose h4, .prose h5, .prose h6 { font-size: 15px; line-height: 22px; margin-top: 28px; color: var(--text); }
+.prose > :first-child { margin-top: 0; }
+.prose :is(h1, h2, h3, h4, h5, h6) + * { margin-top: 10px; }
+.prose strong { font-weight: 600; color: var(--text); }
+.prose del { color: var(--text-3); }
+.prose a { color: var(--text); font-weight: 500; box-shadow: 0 1px 0 var(--line-2); border-radius: 2px; transition: box-shadow 0.12s var(--ease); }
+.prose a:hover { box-shadow: 0 1px 0 var(--text-3); }
+.prose ul, .prose ol { padding-left: 22px; }
+.prose li + li, .prose li > ul, .prose li > ol { margin-top: 6px; }
+.prose li::marker { color: var(--text-3); }
+.prose ul.contains-task-list { list-style: none; padding-left: 0; }
+.prose .task-list-item { display: flex; gap: 10px; align-items: baseline; }
+.prose .task-list-item input { flex: none; width: 15px; height: 15px; margin: 0; transform: translateY(2px); accent-color: var(--verified); }
+.prose code { font: 500 0.85em/1 var(--mono); padding: 2px 6px; border-radius: 6px; background: var(--sunken); color: var(--text); }
+.prose pre { padding: 16px 18px; border-radius: 14px; background: var(--sunken); font: 450 13.5px/22px var(--mono); overflow-x: auto; overflow-wrap: normal; white-space: pre; }
+.prose pre code { padding: 0; background: none; font: inherit; color: var(--text); }
+.prose pre:focus-visible { outline-offset: 2px; }
+.prose blockquote { padding: 2px 0 2px 18px; box-shadow: inset 2px 0 0 oklch(var(--ink-l) var(--ink-c) var(--h, 270) / 0.5); color: var(--text-2); }
+.prose hr { height: 1px; border: 0; background: var(--line); margin: 32px 0; }
+.prose img { display: block; max-width: 100%; height: auto; border-radius: 12px; box-shadow: var(--shadow-1); }
+.prose p img { display: inline-block; vertical-align: middle; }
+.prose .table-scroll { overflow-x: auto; }
+.prose .table-scroll:focus-visible { outline-offset: 2px; }
+.prose table { width: 100%; border-collapse: collapse; font-size: 15px; line-height: 22px; }
+.prose th { text-align: left; font-weight: 500; color: var(--text-3); font-size: 13px; padding: 0 16px 8px 0; box-shadow: inset 0 -1px 0 var(--line-2); }
+.prose td { padding: 10px 16px 10px 0; box-shadow: inset 0 -1px 0 var(--line); vertical-align: top; }
+.prose td:first-child { font-weight: 500; color: var(--text); }
+/* (A document past the renderer's bounds, as its text: said so.) */
+.prose .as-text { font-size: 13px; line-height: 20px; color: var(--text-3); }
+.prose pre.plain { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Highlighted code, in the store's own inks. */
+.hljs-keyword, .hljs-selector-tag, .hljs-doctag, .hljs-section, .hljs-attr, .hljs-property { color: var(--accent); }
+.hljs-string, .hljs-meta .hljs-string, .hljs-addition { color: var(--verified); }
+.hljs-number, .hljs-literal, .hljs-type, .hljs-built_in, .hljs-title.class_ { color: var(--warn); }
+.hljs-title, .hljs-title.function_, .hljs-name, .hljs-tag { color: var(--text); font-weight: 550; }
+.hljs-comment, .hljs-quote { color: var(--text-3); font-style: italic; }
+.hljs-deletion { color: var(--danger); }
+.hljs-punctuation, .hljs-operator { color: var(--text-2); }
+
+/* ---- the rail: what a person weighs before installing ---- */
+.rail { display: flex; flex-direction: column; gap: 28px; position: sticky; top: 84px; }
+.rail-h { font-size: 13px; line-height: 20px; font-weight: 500; letter-spacing: 0; color: var(--text-3); margin-bottom: 10px; }
+.rail .rule { height: 1px; background: var(--line); }
+.rail .none { font-size: 14px; line-height: 20px; color: var(--text-2); }
+.rail .more { margin-top: 12px; font-size: 13px; }
+.asks { display: flex; flex-direction: column; gap: 12px; padding: 0; list-style: none; }
+.ask { display: flex; gap: 12px; font-size: 14px; line-height: 20px; }
+.ask .glyph { flex: none; margin-top: 1px; color: var(--text-3); }
+.ask small { display: block; font-size: 13px; color: var(--text-3); }
+.ask.risky { color: var(--danger); }
+.ask.risky .glyph { color: currentColor; }
+.ask.risky small { color: color-mix(in srgb, var(--danger) 78%, var(--text-3)); }
+.facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 16px; font-size: 14px; line-height: 20px; }
+.facts dt { color: var(--text-3); } .facts dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+.facts .okline { display: inline-flex; align-items: center; gap: 6px; color: var(--verified); font-weight: 500; }
+.tags { display: flex; flex-wrap: wrap; gap: 6px; padding: 0; list-style: none; }
+.links { display: flex; flex-direction: column; gap: 8px; padding: 0; list-style: none; font-size: 14px; line-height: 20px; }
+.links a { display: flex; align-items: center; gap: 10px; color: var(--text-2); border-radius: 4px; overflow-wrap: anywhere; transition: color 0.12s var(--ease); }
+.links a:hover { color: var(--text); }
+.links svg { width: 16px; height: 16px; flex: none; fill: none; stroke: var(--text-3); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.links .o { margin-left: auto; }
+.links .o svg { width: 14px; height: 14px; }
+
+/* ---- Versions: every one, newest first, each saying whether Zeron verified it ---- */
+.vintro { padding-top: 24px; color: var(--text-2); max-width: 40em; }
+.vlist { margin-top: 20px; padding: 0; list-style: none; }
+.v { display: grid; grid-template-columns: 148px minmax(0, 1fr) auto; gap: 24px; padding: 24px 0; box-shadow: 0 -1px 0 var(--line); align-items: start; }
+.v:first-child { box-shadow: none; padding-top: 8px; }
+.v .vno { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; font: 600 17px/24px var(--mono); letter-spacing: -0.02em; min-width: 0; }
+.v .vno a { overflow-wrap: anywhere; border-radius: 4px; }
+.v .vno a:hover { box-shadow: 0 1px 0 var(--line-2); }
+.v .new { font: 500 11px/18px var(--sans); letter-spacing: 0.02em; padding: 0 6px; border-radius: 6px; color: var(--text-2); box-shadow: inset 0 0 0 1px var(--line-2); }
+.v .st { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; font-size: 13px; line-height: 20px; color: var(--text-3); }
+.v .notes { margin-top: 12px; padding-top: 0; font-size: 15px; line-height: 24px; }
+.v .notes > * + * { margin-top: 10px; }
+.v .notes :is(h1, h2, h3) { font-size: 15px; line-height: 22px; margin-top: 16px; }
+.v .act { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+.v .off { font-size: 13px; line-height: 32px; color: var(--text-3); white-space: nowrap; }
+.v.old .vno a { color: var(--text-2); }
+.pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 28px; padding-top: 20px; box-shadow: 0 -1px 0 var(--line); font-size: 13px; color: var(--text-3); }
+
+/* ---- What it asks for, all of it ---- */
+.warnline { margin-top: 18px; padding: 12px 14px; border-radius: 12px; background: var(--danger-wash); color: var(--danger); font-size: 14px; line-height: 20px; max-width: 44em; }
+.asklist { margin-top: 18px; border-radius: 16px; background: var(--surface); box-shadow: var(--shadow-1); padding: 0; list-style: none; }
+.asklist-none { margin-top: 18px; color: var(--text-2); }
+.ar { display: flex; align-items: flex-start; gap: 14px; padding: 14px 18px; font-size: 15px; line-height: 22px; }
+.ar + .ar { box-shadow: 0 -1px 0 var(--line); }
+.ar .glyph { flex: none; margin-top: 2px; color: var(--text-3); }
+.ar > div { flex: 1; min-width: 0; }
+.ar .t { font-weight: 500; }
+.ar small { display: block; margin-top: 2px; font-size: 13px; line-height: 20px; color: var(--text-2); }
+.ar.risky .t, .ar.risky .glyph { color: var(--danger); }
+.literal, .items { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; padding: 0; list-style: none; }
+.items { flex-direction: column; gap: 6px; }
+.items li { font-size: 13px; line-height: 20px; color: var(--text-2); }
+.items li span { display: block; }
+.literal code, .items code { font: 500 12.5px/20px var(--mono); padding: 1px 6px; border-radius: 5px; background: var(--sunken); color: var(--text); overflow-wrap: anywhere; }
+.where { margin-top: 32px; }
+.where h2 { font-size: 15px; line-height: 22px; }
+
+/* ---- nothing here ---- */
+.gone { padding: 56px 0 24px; max-width: 40em; }
+.gone h1 { font-size: 40px; line-height: 44px; letter-spacing: -0.035em; }
+.gone .lead { margin-top: 12px; }
+.gone .btn { margin-top: 24px; }
+
+@media (max-width: 1024px) {
+  .cols2 { grid-template-columns: minmax(0, 1fr) 280px; gap: 48px; }
+  .get { width: 264px; }
+}
+@media (max-width: 860px) {
+  .head { flex-wrap: wrap; }
+  .head .txt { flex-basis: calc(100% - 108px); }
+  .get { width: 100%; max-width: 420px; margin-left: 108px; }
+  .cols2 { grid-template-columns: minmax(0, 1fr); gap: 44px; }
+  .rail { position: static; }
+}
+@media (max-width: 720px) {
+  .crumbs { padding-top: 20px; }
+  .head { display: grid; grid-template-columns: 64px minmax(0, 1fr); column-gap: 16px; row-gap: 0; padding-top: 16px; align-items: start; }
+  .head > .tile.xl { width: 64px; height: 64px; font-size: 28px; grid-row: 1 / span 2; }
+  .head .txt { display: contents; }
+  .head h1 { font-size: 28px; line-height: 32px; letter-spacing: -0.03em; align-self: end; }
+  .head h1 .seal.l { width: 22px; height: 22px; }
+  .head .by { font-size: 13px; margin-top: 4px; }
+  .head .sum { grid-column: 1 / -1; margin-top: 16px; }
+  .get { grid-column: 1 / -1; width: auto; max-width: none; margin: 20px 0 0; padding: 0; }
+  .head.one { grid-template-columns: 56px minmax(0, 1fr); }
+  .head.one h1 { font-size: 26px; line-height: 32px; }
+  .head.one .vnum { font-size: 21px; line-height: 32px; }
+  .gallery { margin: 28px -20px 0; height: 248px; border-radius: 0; }
+  .gallery .track { padding: 28px 20px 0; gap: 16px; scroll-padding: 0 20px; }
+  .gallery .slide { width: min(520px, calc(100% - 40px)); height: calc(100% + 40px); border-radius: 12px; }
+  .cols2, .cols2.after-head { margin-top: 32px; }
+  .tabs { gap: 22px; margin: 0 -20px; padding: 0 20px; }
+  .prose { padding-top: 22px; }
+  .prose h1, .prose h2 { margin-top: 32px; }
+  .prose table { font-size: 14px; }
+  .v { grid-template-columns: minmax(0, 1fr) auto; gap: 10px 16px; padding: 20px 0; }
+  .v .vbody { grid-column: 1 / -1; grid-row: 2; }
+  .v .act { grid-column: 2; grid-row: 1; }
+  .gone { padding-top: 32px; }
+  .gone h1 { font-size: 30px; line-height: 34px; }
+}

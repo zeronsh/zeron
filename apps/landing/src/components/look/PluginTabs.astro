@@ -1,0 +1,29 @@
+---
+// A plugin's three views, each a page of its own (a real link, its own
+// address): Overview, every version, and all of what it asks for.
+import { count } from "../../lib/store/format.ts";
+import { lines } from "../../lib/store/permissions.ts";
+import type { PluginDetail } from "../../lib/store/types.ts";
+import { pluginUrl } from "../../lib/store/urls.ts";
+import { store } from "../../lib/store/words.ts";
+
+interface Props {
+  plugin: PluginDetail;
+  current: "overview" | "versions" | "asks";
+  /** How many versions it has, if known. */
+  versions: number | null;
+}
+const { plugin, current, versions } = Astro.props;
+const base = pluginUrl(plugin.id);
+const tabs = [
+  { id: "overview", label: "Overview", href: base, n: null },
+  { id: "versions", label: "Versions", href: `${base}/versions`, n: versions },
+  { id: "asks", label: store("plugins.store.asks"), href: `${base}/asks`, n: lines(plugin.permissions).length },
+] as const;
+---
+
+<nav class="tabs" aria-label={`${plugin.name}: its pages`}>
+  {tabs.map((t) => (
+    <a href={t.href} aria-current={t.id === current ? "page" : undefined}>{t.label}{t.n !== null && <span class="num">{count(t.n)}</span>}</a>
+  ))}
+</nav>

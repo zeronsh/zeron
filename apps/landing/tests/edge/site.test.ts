@@ -258,7 +258,7 @@ describe("an author's words, from a real package", () => {
     }
     await grace.post("/admin/plugins/probe/1.0.0/verify", { csrf: await grace.token("/admin/plugins/probe/1.0.0") });
     expect(grace.flash()).toBe("verified");
-    for (const path of ["/plugins", "/plugins/all", "/plugins/probe", "/plugins/all?q=probe"]) {
+    for (const path of ["/plugins", "/plugins/all", "/plugins/probe", "/plugins/probe/asks", "/plugins/probe/versions", "/plugins/all?q=probe"]) {
       const { response, body } = await new Browser().get(path);
       expect(response.status, path).toBe(200);
       inert(body);
@@ -267,7 +267,8 @@ describe("an author's words, from a real package", () => {
     // The link the author gave, as the edge parsed it, encoded.
     expect(page.body).toContain('href="https://example.com/a?b=%22%3E%3Cscript%3Ealert(%27homepage%27)%3C/script%3E"');
     expect(page.body).toContain('src="/plugins/probe/files/1.0.0/shots/one.png"');
-    expect(page.body).toContain("probe_tool");
+    // (Its tools, by name, on its own "What it asks for".)
+    expect((await new Browser().get("/plugins/probe/asks")).body).toContain("probe_tool");
   });
 });
 

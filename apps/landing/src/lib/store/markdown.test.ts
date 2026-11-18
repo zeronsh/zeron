@@ -150,7 +150,7 @@ describe("what a README may hold", () => {
     expect(html).toContain('<div class="table-scroll" tabindex="0"><table>');
     expect(html).toContain('<th align="left">a</th>');
     expect(html).toContain('<ul class="contains-task-list">');
-    expect(html).toContain('<li class="task-list-item"><input type="checkbox" disabled checked> done</li>');
+    expect(html).toContain('<li class="task-list-item"><input type="checkbox" disabled checked aria-label="Done"> done</li>');
     expect(html).toContain("<del>old</del>");
     expect(html).toContain('<a href="https://example.com/" rel="nofollow noopener ugc">https://example.com</a>');
     expect(html).toContain("Note[^1] and $x^2$.");

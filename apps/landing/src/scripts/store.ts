@@ -60,6 +60,40 @@ document.addEventListener("click", async (event) => {
   }
 });
 
+// ── A plugin's pictures ────────────────────────────────────────────────
+// The strip scrolls by itself (keyboard, touch, trackpad); the dots follow
+// it, and take you to a picture.
+for (const gallery of document.querySelectorAll<HTMLElement>("[data-gallery]")) {
+  const track = gallery.querySelector<HTMLElement>("[data-track]");
+  const slides = [...gallery.querySelectorAll<HTMLElement>("[data-slide]")];
+  const dots = [...gallery.querySelectorAll<HTMLButtonElement>("[data-dot]")];
+  if (!track || dots.length === 0) continue;
+  const show = (i: number) => dots.forEach((dot, j) => (j === i ? dot.setAttribute("aria-current", "true") : dot.removeAttribute("aria-current")));
+  dots.forEach((dot, i) => dot.addEventListener("click", () => track.scrollTo({ left: slides[i]!.offsetLeft - slides[0]!.offsetLeft, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" })));
+  const seen = new IntersectionObserver((entries) => {
+    for (const entry of entries) if (entry.isIntersecting && entry.intersectionRatio > 0.6) show(slides.indexOf(entry.target as HTMLElement));
+  }, { root: track, threshold: [0.6] });
+  for (const slide of slides) seen.observe(slide);
+}
+
+// ── Install in Zeron ───────────────────────────────────────────────────
+// If the page is still in front a moment after the app's link was followed,
+// nothing took it: say how to get Zeron.
+for (const link of document.querySelectorAll<HTMLAnchorElement>("a[data-install]")) {
+  link.addEventListener("click", () => {
+    let left = false;
+    const away = () => (left = true);
+    window.addEventListener("blur", away, { once: true });
+    document.addEventListener("visibilitychange", away, { once: true });
+    window.setTimeout(() => {
+      window.removeEventListener("blur", away);
+      if (left || document.hidden) return;
+      const help = link.closest("[data-get]")?.querySelector<HTMLElement>("[popover]");
+      if (help && !help.matches(":popover-open")) help.showPopover();
+    }, 1500);
+  });
+}
+
 // ── Who you are, on a public page ──────────────────────────────────────
 
 interface Me {

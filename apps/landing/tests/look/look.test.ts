@@ -28,11 +28,29 @@ async function open(path: string, width: number, scheme: "light" | "dark" = "lig
 const overflowing = (page: Page) =>
   page.evaluate(() => {
     if (document.documentElement.scrollWidth <= window.innerWidth) return [];
-    const wide = [...document.querySelectorAll("body *")].filter((e) => e.getBoundingClientRect().right > window.innerWidth + 0.5 && !e.closest(".cats, .stage"));
-    return wide.filter((e) => !wide.some((o) => o !== e && e.contains(o))).map((e) => `${e.tagName.toLowerCase()}.${[...e.classList].join(".")}`);
+    // (Text past its own box shows in no box's rect: named by its element.)
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    const texts: string[] = [];
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const range = document.createRange();
+      range.selectNodeContents(n);
+      if ([...range.getClientRects()].some((r) => r.right > window.innerWidth + 0.5) && !n.parentElement?.closest(".cats, .stage, .tabs, pre, .table-scroll, .crumbs")) texts.push(`text in ${n.parentElement?.tagName.toLowerCase()}.${[...(n.parentElement?.classList ?? [])].join(".")}`);
+    }
+    const wide = [...document.querySelectorAll("body *")].filter((e) => e.getBoundingClientRect().right > window.innerWidth + 0.5 && !e.closest(".cats, .stage, .tabs, pre, .table-scroll"));
+    const boxes = wide.filter((e) => !wide.some((o) => o !== e && e.contains(o))).map((e) => `${e.tagName.toLowerCase()}.${[...e.classList].join(".")}`);
+    return [...boxes, ...texts, ...(boxes.length + texts.length === 0 ? [`the page, ${document.documentElement.scrollWidth} wide`] : [])];
   });
 
-const PAGES = ["/plugins"];
+const PAGES = [
+  "/plugins",
+  "/plugins/focus-timer",
+  "/plugins/worst-case-listing-at-every-limit-xyz12",
+  "/plugins/worst-case-listing-at-every-limit-xyz12/versions",
+  "/plugins/worst-case-listing-at-every-limit-xyz12/asks",
+  "/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.4.0",
+  "/plugins/focus-timer/versions/1.1.0",
+  "/plugins/clipboard-sync",
+];
 
 describe("nothing runs off the side", () => {
   for (const path of PAGES) {
@@ -50,14 +68,16 @@ describe("nothing runs off the side", () => {
 });
 
 describe("by keyboard", () => {
-  test("Tab goes through Discover in its reading order, each stop on screen and ringed", async () => {
-    const page = await open("/plugins", 1440);
+  test.each(["/plugins", "/plugins/focus-timer", "/plugins/worst-case-listing-at-every-limit-xyz12/versions"])("Tab goes through %s in its reading order, each stop on screen and ringed", async (path) => {
+    const page = await open(path, 1440);
     try {
       const stops: { tag: string; top: number; left: number; ring: string; label: string }[] = [];
       for (let i = 0; i < 40; i++) {
         await page.keyboard.press("Tab");
         const stop = await page.evaluate(() => {
           const el = document.activeElement as HTMLElement;
+          // (Past the last stop, focus leaves the page.)
+          if (!el || el === document.body) return null;
           el.scrollIntoView({ block: "nearest" });
           const box = el.getBoundingClientRect();
           const style = getComputedStyle(el);
@@ -65,6 +85,7 @@ describe("by keyboard", () => {
           const field = el.matches("input") && el.parentElement ? getComputedStyle(el.parentElement).boxShadow.includes("0px 0px 0px 4px") : false;
           return { tag: el.tagName.toLowerCase(), top: box.top + scrollY, left: box.left, ring: field ? "solid" : style.outlineStyle, label: (el.getAttribute("aria-label") ?? el.textContent ?? "").trim().slice(0, 40), w: box.width, h: box.height };
         });
+        if (!stop) break;
         expect(stop.w * stop.h, stop.label).toBeGreaterThan(0);
         stops.push(stop);
       }
