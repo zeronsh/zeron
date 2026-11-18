@@ -33,7 +33,8 @@ with `ZGX_CHECK=0`. The first test fails (16 against 62); the second, the
 control, passes.
 
 **Today's workaround in Zeron:** none in zgx's place. `detail_link` draws the
-sentence and its link as two boxes in a row for now: the link at the
-sentence box's end, on its last line. One line, that's the same picture; two,
-the link sits at the right of the box, not after its last word. It becomes
-the one rich paragraph when this lands.
+sentence and its link as two boxes in a wrapping row for now: the link a
+word's space after the sentence when it fits on that line, else on the next
+line at its start. One line, that's the same picture; when the sentence
+itself wraps, the link goes under it rather than after its last word. It
+becomes the one rich paragraph when this lands.

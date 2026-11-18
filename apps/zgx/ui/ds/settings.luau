@@ -717,11 +717,17 @@ function M.Row(props: RowProps): Node
 			end, if props.detail_link
 				-- (One rich paragraph, the link its last span, is the drawing
 				-- this wants: zgx-asks/rich-span-boundary-break. Meanwhile the
-				-- sentence and its link are two boxes, the link at the
-				-- sentence's end on its last line.)
+				-- sentence and its link are two boxes: the link a word's space
+				-- after the sentence when it fits there, else on the next line
+				-- at the sentence's start, as a word that doesn't fit goes.)
 				then ui.row {
 					w_full = true,
-					gap = "$space.1",
+					flex_wrap = true,
+					-- (A word's space between them, none between lines: the
+					-- theme's number, as `gap_x` drops a token,
+					-- zgx-asks/gap-axis-tokens.)
+					gap_x = ui.raw(ui.theme.get("space.1") :: number, "gap_x drops a token (zgx-asks/gap-axis-tokens): $space.1 read as its number"),
+					gap_y = 0,
 					items = "end",
 					ui.text {
 						function(): string
