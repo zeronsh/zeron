@@ -46,11 +46,13 @@ export const cookieSession = async (
   env: Env,
   privileged = false
 ): Promise<ResolvedSession | Response | undefined> => {
-  const session = await resolveWebSession(request, env, privileged);
+  if (isSafeMethod(request.method)) return resolveWebSession(request, env, privileged);
+  // A change is checked before a staff token rotates: a refused request
+  // never costs the browser its cookie.
+  const session = await resolveWebSession(request, env);
   if (!session) return undefined;
-  if (isSafeMethod(request.method)) return session;
   const refusal = crossSiteRefusal(request, env, session.csrf, (await requestCsrf(request)).csrf);
   if (refusal === "bad_origin") return forbidden("This request didn't come from the Zeron site.");
   if (refusal) return jsonError(403, "bad_csrf", "This page is out of date. Reload it and try again.");
-  return session;
+  return privileged ? resolveWebSession(request, env, true) : session;
 };

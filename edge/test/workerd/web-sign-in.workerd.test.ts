@@ -1,4 +1,4 @@
-import { SELF, runInDurableObject } from "cloudflare:test";
+import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { UserDirectory } from "../../src/user-directory";
 import {
@@ -173,11 +173,12 @@ describe("web sign-in", () => {
     expect(res.headers.get("location")).toBe(`${SITE}/`);
   });
 
-  it("answers only on the web origin", async () => {
-    for (const path of ["/auth/web/login", "/auth/web/session", "/auth/web/callback?code=x&state=y"]) {
+  it("sets its cookies only on the web origin", async () => {
+    for (const path of ["/auth/web/login", "/auth/web/callback?code=x&state=y"]) {
       const res = await SELF.fetch(`https://edge.test${path}`, { redirect: "manual" });
       expect(res.status, path).toBe(404);
     }
+    expect((await SELF.fetch("https://edge.test/auth/web/logout", { method: "POST", headers: { origin: SITE } })).status).toBe(404);
     expect((await fetchSite("/auth/web/login", { method: "POST" })).status).toBe(405);
     expect((await fetchSite("/auth/web/logout")).status).toBe(405);
     expect((await fetchSite("/auth/web/nope")).status).toBe(404);
@@ -202,6 +203,20 @@ describe("web sessions", () => {
       expect(res.headers.getSetCookie().some((c) => c.startsWith("__Host-zeron_session=;"))).toBe(true);
     }
     expect((await sessionOf("")).status).toBe(401);
+  });
+
+  it("refuse a cookie whose name only matches once Unicode spaces are trimmed (__Host- bypass)", async () => {
+    const victim = await webSignIn(await person());
+    for (const space of ["\u2000", "\u00a0", "\u3000", "\ufeff", "\u2028", "\u205f"]) {
+      // A planted look-alike is never read as the session…
+      expect((await sessionOf(`${space}${sessionHeader(victim.token)}`)).status, escape(space)).toBe(401);
+      // …and doesn't shadow the real one beside it.
+      expect((await sessionOf(`${space}${sessionHeader("A".repeat(43))}; ${victim.cookie}`)).status, escape(space)).toBe(200);
+    }
+    // Nor a planted sign-in attempt.
+    const { authorize, loginCookie } = await startLogin();
+    const res = await fetchSite(`/auth/web/callback?code=x&state=${authorize.searchParams.get("state")}`, { cookie: `\u2000${loginCookie}` });
+    expect(res.status).toBe(400);
   });
 
   it("refuse a session cookie sent twice, even when one is real", async () => {
@@ -285,6 +300,22 @@ describe("web sessions", () => {
     const later = await fetchSite("/store/v1/admin/queue", { cookie: sessionHeader(rotated!) });
     expect(setCookies(later).get("__Host-zeron_session")).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(ROTATED_TOKEN_GRACE_MS).toBeGreaterThan(0);
+  });
+
+  it("never rotate on a refused change, so the browser keeps a working cookie", async () => {
+    const userId = await person();
+    await grantAdmin(userId);
+    const browser = await webSignIn(userId);
+    const refused = await fetchSite("/store/v1/admin/submissions/demo/1.0.0/approve", {
+      method: "POST",
+      cookie: browser.cookie,
+      headers: { origin: SITE, "x-csrf-token": "A".repeat(43) }
+    });
+    expect(refused.status).toBe(403);
+    expect(setCookies(refused).has("__Host-zeron_session")).toBe(false);
+    // Still the current token: its first privileged use rotates it now.
+    const first = await fetchSite("/store/v1/admin/queue", { cookie: browser.cookie });
+    expect(setCookies(first).get("__Host-zeron_session")).toMatch(/^[A-Za-z0-9_-]{43}$/);
   });
 
   it("never rotate for an account without a role", async () => {
@@ -441,5 +472,59 @@ describe("cookie-authenticated store routes", () => {
     expect((await siteChange("/store/v1/admin/submissions/demo/1.0.0/approve", { cookie, csrf: admin.csrf })).status).toBe(200);
     await revokeAdmin(userId);
     expect((await fetchSite("/store/v1/admin/queue", { cookie })).status).toBe(403);
+  });
+});
+
+describe("through the site's service binding", () => {
+  /** A browser's request to the site, which relays it to the edge. */
+  const viaSite = (path: string, init: RequestInit = {}) => env.SITE.fetch(`${SITE}${path}`, { redirect: "manual", ...init });
+
+  it("reads the session at the binding's own address", async () => {
+    const userId = await person();
+    const browser = await webSignIn(userId);
+    const res = await viaSite("/auth/web/session", { headers: { cookie: browser.cookie } });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ csrf: browser.csrf, roles: [] });
+    expect((await viaSite("/auth/web/session")).status).toBe(401);
+    // What sets cookies stays on the web origin.
+    expect((await viaSite("/auth/web/login")).status).toBe(404);
+    expect((await viaSite("/auth/web/logout", { method: "POST", headers: { cookie: browser.cookie, origin: SITE, "x-csrf-token": browser.csrf } })).status).toBe(404);
+  });
+
+  it("takes a change only with the browser's own Origin and token, forwarded", async () => {
+    const userId = await person();
+    const browser = await webSignIn(userId);
+    const other = await webSignIn(await person());
+    const path = "/store/v1/plugins/demo/versions";
+    const ok = await viaSite(path, { method: "POST", headers: { cookie: browser.cookie, origin: SITE, "x-csrf-token": browser.csrf }, body: "pkg" });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toMatchObject({ publisher: { userId, via: "session" }, body: await sha256Hex(new TextEncoder().encode("pkg")) });
+    const form = await viaSite(path, {
+      method: "POST",
+      headers: { cookie: browser.cookie, origin: SITE, "content-type": "application/x-www-form-urlencoded" },
+      body: `csrf=${browser.csrf}`
+    });
+    expect(form.status).toBe(200);
+    const refused: [string, Record<string, string>][] = [
+      // Another site's page posting to the site: its Origin is forwarded.
+      ["foreign Origin", { cookie: browser.cookie, origin: "https://evil.example", "x-csrf-token": browser.csrf }],
+      // The binding is no proof of origin: no Origin forwarded, no change.
+      ["no Origin", { cookie: browser.cookie, "x-csrf-token": browser.csrf }],
+      ["no token", { cookie: browser.cookie, origin: SITE }],
+      ["another session's token", { cookie: browser.cookie, origin: SITE, "x-csrf-token": other.csrf }]
+    ];
+    for (const [what, headers] of refused) {
+      const res = await viaSite(path, { method: "POST", headers, body: "pkg" });
+      expect(res.status, what).toBe(403);
+    }
+  });
+
+  it("carries a rotated staff cookie back to the browser", async () => {
+    const userId = await person();
+    await grantAdmin(userId);
+    const browser = await webSignIn(userId);
+    const res = await viaSite("/store/v1/admin/queue", { headers: { cookie: browser.cookie } });
+    expect(res.status).toBe(200);
+    expect(setCookies(res).get("__Host-zeron_session")).toMatch(/^[A-Za-z0-9_-]{43}$/);
   });
 });

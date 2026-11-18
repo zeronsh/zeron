@@ -15,6 +15,9 @@ declare module "cloudflare:test" {
     CLOUD_SLEEP: Workflow;
     CLOUD_DELETE: Workflow;
     VAULT: { calls(): Promise<{ method: string; args: unknown[] }[]> };
+    /** The web site's server, relaying a browser's request to the edge (fixture.ts SiteStub). */
+    SITE: Fetcher;
+    EDGE: Fetcher;
     BLOBS: R2Bucket;
     RELEASES: R2Bucket;
     AUTH_MODE: string;

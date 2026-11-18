@@ -51,7 +51,12 @@ describe("safeReturnTo", () => {
       "https:evil.example",
       "/auth/web/logout",
       "/auth/web/login?return_to=//evil.example",
-      "/auth/web"
+      "/auth/web",
+      // Paths that only become `//host` once normalised.
+      "/.//evil.example",
+      "/%2e//evil.example",
+      "/a/..//evil.example",
+      "/./%2e//evil.example"
     ];
     for (const attack of attacks) expect(safeReturnTo(attack, ORIGIN), String(attack)).toBe("/");
   });
@@ -66,6 +71,17 @@ describe("readCookie", () => {
 
   it("refuses a cookie sent twice (a planted twin can't be told apart)", () => {
     expect(readCookie(request({ cookie: `${SESSION_COOKIE}=one; ${SESSION_COOKIE}=two` }), SESSION_COOKIE)).toBeUndefined();
+  });
+
+  it("matches names byte for byte: a Unicode space doesn't make a cookie ours", () => {
+    // (Node's headers are Latin-1; the workerd tier covers the wider spaces.)
+    for (const space of ["\u00a0", "\u0085"]) {
+      expect(readCookie(request({ cookie: `${space}${SESSION_COOKIE}=planted` }), SESSION_COOKIE), escape(space)).toBeUndefined();
+      expect(readCookie(request({ cookie: `${SESSION_COOKIE}${space}=planted` }), SESSION_COOKIE), escape(space)).toBeUndefined();
+      // Nor does it shadow the real one.
+      expect(readCookie(request({ cookie: `${space}${SESSION_COOKIE}=planted; ${SESSION_COOKIE}=real` }), SESSION_COOKIE)).toBe("real");
+    }
+    expect(readCookie(request({ cookie: ` \t${SESSION_COOKIE} = v ` }), SESSION_COOKIE)).toBe("v");
   });
 
   it("matches the whole name, not a prefix or suffix", () => {

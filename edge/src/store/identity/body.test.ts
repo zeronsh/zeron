@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readBody } from "./body";
+import { expectBodyHash, readBody } from "./body";
 
 const post = (body: BodyInit, headers: Record<string, string> = {}) => new Request("https://edge.test/x", { method: "POST", body, headers });
 
@@ -39,6 +39,21 @@ describe("readBody", () => {
     const request = post("x".repeat(50));
     expect(((await readBody(request, 100)) as Uint8Array).byteLength).toBe(50);
     expect(await readBody(request, 10)).toBe("too_large");
+  });
+
+  it("answers a signed request's body only when it's the one signed", async () => {
+    const hex = async (text: string) =>
+      [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))].map((b) => b.toString(16).padStart(2, "0")).join("");
+    const good = post("pkg");
+    expectBodyHash(good, await hex("pkg"));
+    expect(new TextDecoder().decode((await readBody(good)) as Uint8Array)).toBe("pkg");
+    const swapped = post("evil");
+    expectBodyHash(swapped, await hex("pkg"));
+    expect(await readBody(swapped)).toBe("body_mismatch");
+    expect(await readBody(swapped)).toBe("body_mismatch");
+    const emptied = new Request("https://edge.test/x", { method: "POST" });
+    expectBodyHash(emptied, await hex("pkg"));
+    expect(await readBody(emptied)).toBe("body_mismatch");
   });
 
   it("reads an empty body", async () => {

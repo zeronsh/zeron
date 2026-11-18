@@ -43,6 +43,11 @@ export const parseZeronKeyAuthorization = (header: string | null): ZeronKeyAutho
   return { key, ts, sig };
 };
 
+/** The hex SHA-256 of the body a signed request signs, sent beside it, so
+ * the signature is checked before a byte of the body is read. */
+export const CONTENT_SHA256_HEADER = "x-zeron-content-sha256";
+export const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+
 export const sha256Hex = async (bytes: Uint8Array | string): Promise<string> => {
   const data = typeof bytes === "string" ? new TextEncoder().encode(bytes) : bytes;
   const digest = await crypto.subtle.digest("SHA-256", data);

@@ -13,6 +13,14 @@
  *                                          username, roles, csrf, expires_at,
  *                                          fresh_sign_in } or 401 signed_out
  *
+ * Cross-site checks (web-session.ts) read the request's `Origin` whichever
+ * way it arrives: straight from the browser (`POST /auth/web/logout`, a
+ * plain form post), or forwarded by the site over its service binding, which
+ * copies the browser's Cookie, Origin and X-CSRF-Token (or form body)
+ * verbatim. The binding itself proves nothing (the site relays any
+ * browser's request), so a forwarded change without the browser's Origin is
+ * refused like any other.
+ *
  * Login binds the attempt to this browser: `state`, the PKCE verifier and
  * where to go after are kept in a 10-minute `__Host-` cookie (nothing is
  * stored server-side before a sign-in succeeds). The callback answers only
@@ -51,7 +59,7 @@ import {
   sessionTokenHash,
   webOrigin
 } from "./web-cookies";
-import { requestCsrf, resolveWebSession, withSessionCookie } from "./web-session";
+import { MAX_FORM_BYTES, requestCsrf, resolveWebSession, withSessionCookie } from "./web-session";
 import { WorkOsAuthFailed, authorizeUrl, exchange, getUser, revokeSession } from "./workos";
 
 export const CALLBACK_PATH = "/auth/web/callback";
@@ -101,9 +109,12 @@ const signInFailed = (detail: string, status = 400): Response =>
 export const handleWebAuthRoute = async (request: Request, env: Env, url: URL): Promise<Response | undefined> => {
   if (url.pathname !== "/auth/web" && !url.pathname.startsWith("/auth/web/")) return undefined;
   const origin = webOrigin(env);
-  // Only on the web origin: the cookies set here belong to its host.
-  if (!origin || url.origin !== origin) return jsonAnswer({ error: "not_found" }, 404);
+  if (!origin) return jsonAnswer({ error: "not_found" }, 404);
   const route = url.pathname.slice("/auth/web".length);
+  // Reading the session sets no cookie but a rotated one, so the site may
+  // ask over its service binding at any address. Everything else sets this
+  // host's cookies: only on the web origin.
+  if (route !== "/session" && url.origin !== origin) return jsonAnswer({ error: "not_found" }, 404);
   if (route === "/login") return request.method === "GET" ? login(env, url, origin) : notAllowed("GET");
   if (route === "/callback") return request.method === "GET" ? callback(request, env, url, origin) : notAllowed("GET");
   if (route === "/logout") return request.method === "POST" ? logout(request, env, origin) : notAllowed("POST");
@@ -195,7 +206,8 @@ const callback = async (request: Request, env: Env, url: URL, origin: string): P
 };
 
 const logout = async (request: Request, env: Env, origin: string): Promise<Response> => {
-  const { csrf, form } = await requestCsrf(request);
+  // (Nothing else reads a logout's body: a small form at most.)
+  const { csrf, form } = await requestCsrf(request, MAX_FORM_BYTES);
   const live = await resolveWebSession(request, env);
   const refusal = crossSiteRefusal(request, env, live?.csrf ?? "", csrf);
   // Without a live session there's nothing to protect but the request's

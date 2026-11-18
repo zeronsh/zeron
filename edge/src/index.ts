@@ -226,7 +226,7 @@ export default {
     if (usernameRouted) return usernameRouted;
     const onboardingRouted = await handleOnboardingRoute(request, env, auth, url);
     if (onboardingRouted) return onboardingRouted;
-    const pluginKeysRouted = await handlePluginKeyRoute(request, env, auth, url);
+    const pluginKeysRouted = await handlePluginKeyRoute(request, env, auth, url, pluginOwner);
     if (pluginKeysRouted) return pluginKeysRouted;
 
     const cloudRouted = await handleCloudRoute(request, env, auth, url);

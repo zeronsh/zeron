@@ -13,9 +13,10 @@
  * - Public routes: anyone; `optionalUser` says who, when it can tell.
  *
  * A route that reads a principal answers through `withSessionCookie` (a
- * staff session's rotated cookie rides on its answer), and reads its body
- * only through `readBody` (a deploy key's signature check has read it
- * already). A response for a request with a user must not be cached.
+ * staff session's rotated cookie rides on its answer), errors included, and
+ * reads its body only through `readBody` or `bodyStream` (identity/body.ts),
+ * which hold a deploy key's request to the body it signed. A response for a
+ * request with a user must not be cached.
  */
 import type { Env } from "../env";
 import { hasRole } from "../roles";
@@ -23,7 +24,7 @@ import { userDirectoryStub } from "../user-directory";
 import { bearerUser, cookieSession, forbidden, headerBearer, unauthenticated } from "./identity/callers";
 import { verifySignedRequest } from "./identity/signed-request";
 
-export { readBody, MAX_PUBLISH_BODY_BYTES } from "./identity/body";
+export { BodyRefused, MAX_PUBLISH_BODY_BYTES, bodyStream, readBody } from "./identity/body";
 export { revokeDeployKeys } from "./identity/deploy-keys";
 export { withSessionCookie } from "../web-session";
 

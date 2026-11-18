@@ -28,7 +28,7 @@ import { handleWebAuthRoute } from "../../src/web-auth-routes";
 import { handleRoleAdminRoute } from "../../src/roles";
 import { handleDeployKeyRoute } from "../../src/store/identity/deploy-keys";
 import { sha256Hex } from "../../src/store/identity/signing";
-import { authenticatePublisher, optionalUser, readBody, requireAdmin, withSessionCookie } from "../../src/store/principal";
+import { BodyRefused, authenticatePublisher, bodyStream, optionalUser, readBody, requireAdmin, withSessionCookie } from "../../src/store/principal";
 export { DeviceRoom } from "../../src/device-room";
 export { ChatRoom } from "../../src/chat-room";
 export { PreviewRoom } from "../../src/preview-room";
@@ -119,12 +119,38 @@ export class VaultStub extends WorkerEntrypoint {
   calls() { return vaultCalls; }
 }
 
+/**
+ * The web site's server as the contract has it (amendment 8): it relays a
+ * browser's request to the edge over its service binding, at an address of
+ * its choosing, copying the browser's Cookie, Origin and X-CSRF-Token (and a
+ * body with its type) verbatim and nothing else, and hands the edge's answer
+ * (its Set-Cookie too) back to the browser.
+ */
+export class SiteStub extends WorkerEntrypoint<{ EDGE: Fetcher }> {
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const headers = new Headers();
+    for (const name of ["cookie", "origin", "x-csrf-token", "content-type"]) {
+      const value = request.headers.get(name);
+      if (value !== null) headers.set(name, value);
+    }
+    const hasBody = request.method !== "GET" && request.method !== "HEAD";
+    return this.env.EDGE.fetch(`https://edge.internal${url.pathname}${url.search}`, {
+      method: request.method,
+      headers,
+      body: hasBody ? await request.arrayBuffer() : undefined,
+      redirect: "manual"
+    });
+  }
+}
+
 const json = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 
 /** Plugin owners, as the store's catalog would answer (set with
  * `POST /__test/owner {pluginId, userId}`). */
 const owners = new Map<string, string>();
+const ownerOf = async (_env: Env, pluginId: string) => owners.get(pluginId) ?? null;
 
 /**
  * Stand-ins for the store lane's routes, each answering who its principal
@@ -143,8 +169,17 @@ const storeStandIn = async (request: Request, env: Env, url: URL): Promise<Respo
   if (path === "/store/v1/me/plugins" || /^\/store\/v1\/plugins\/[^/]+\/versions(\/[^/]+\/[a-z]+)?$/.test(path)) {
     const publisher = await authenticatePublisher(request, env);
     if (publisher instanceof Response) return publisher;
+    // `x-test-stream: 1`: read it as a package write would (bodyStream), not buffered.
+    if (request.headers.get("x-test-stream") === "1") {
+      try {
+        const bytes = new Uint8Array(await new Response(bodyStream(request)).arrayBuffer());
+        return json({ publisher, body: await sha256Hex(bytes) });
+      } catch (e) {
+        return json({ publisher, body: e instanceof BodyRefused ? e.reason : "error" });
+      }
+    }
     const body = await readBody(request);
-    return json({ publisher, body: body === "too_large" ? body : await sha256Hex(body) });
+    return json({ publisher, body: typeof body === "string" ? body : await sha256Hex(body) });
   }
   return undefined;
 };
@@ -181,7 +216,7 @@ export default {
       else owners.delete(pluginId);
       return json({ ok: true });
     }
-    const deployKeys = await handleDeployKeyRoute(request, env, url, async (_env, pluginId) => owners.get(pluginId) ?? null);
+    const deployKeys = await handleDeployKeyRoute(request, env, url, ownerOf);
     if (deployKeys) return withSessionCookie(request, deployKeys);
     const store = await storeStandIn(request, env, url);
     if (store) return withSessionCookie(request, store);
@@ -195,7 +230,7 @@ export default {
     if (username) return username;
     const onboarding = await handleOnboardingRoute(request, env, auth, url);
     if (onboarding) return onboarding;
-    const pluginKeys = await handlePluginKeyRoute(request, env, auth, url);
+    const pluginKeys = await handlePluginKeyRoute(request, env, auth, url, ownerOf);
     if (pluginKeys) return pluginKeys;
     const cloud = await handleCloudRoute(request, env, auth, url);
     if (cloud) return cloud;

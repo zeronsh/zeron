@@ -1243,10 +1243,12 @@ export class UserDirectory extends DurableObject<Env> {
    * straight from storage on every call, so a revocation shows at once.
    *
    * A deploy key also answers its kind, plugin and expiry, and reads as
-   * verified only when the lookup names its plugin (`forPlugin`) and it
-   * hasn't expired: it vouches for that one plugin, never for its owner's
-   * others. Engines that don't name a plugin see it unverified. */
-  async pluginKey(key: string, viewerId: string, forPlugin?: string): Promise<PluginKeyLookup | undefined> {
+   * verified only when the lookup names its plugin (`forPlugin`), it hasn't
+   * expired, and whoever made it still owns that plugin (`pluginOwner`, the
+   * store's answer; a key outlives no transfer): it vouches for that one
+   * plugin, never for its owner's others. Engines that don't name a plugin
+   * see it unverified. */
+  async pluginKey(key: string, viewerId: string, forPlugin?: string, pluginOwner?: string | null): Promise<PluginKeyLookup | undefined> {
     const [row] = this.ctx.storage.sql
       .exec("SELECT user_id, kind, plugin_id, created_at, revoked_at, expires_at FROM plugin_keys WHERE key = ?", key)
       .toArray();
@@ -1270,7 +1272,7 @@ export class UserDirectory extends DurableObject<Env> {
     const expired = expiresAt !== null && expiresAt <= Date.now();
     return {
       ...base,
-      verified: base.verified && !expired && forPlugin === row.plugin_id,
+      verified: base.verified && !expired && forPlugin === row.plugin_id && pluginOwner === row.user_id,
       kind: "deploy",
       plugin: row.plugin_id as string,
       expiresAt,
@@ -1364,15 +1366,15 @@ export class UserDirectory extends DurableObject<Env> {
     });
   }
 
-  /** `pluginId`'s deploy keys that `ownerId` registered, oldest first,
-   * revoked and expired ones included. */
-  async deployKeys(pluginId: string, ownerId: string): Promise<DeployKeyRow[]> {
+  /** Every deploy key of `pluginId`, whoever made it (a former owner's
+   * too, for its owner now to see and revoke), oldest first, revoked and
+   * expired ones included. The caller checks who owns the plugin. */
+  async deployKeys(pluginId: string): Promise<DeployKeyRow[]> {
     const rows = this.ctx.storage.sql
       .exec(
         `SELECT key, name, created_at, last_used_at, expires_at, revoked_at FROM plugin_keys
-         WHERE kind = 'deploy' AND plugin_id = ? AND user_id = ? ORDER BY created_at, key`,
-        pluginId,
-        ownerId
+         WHERE kind = 'deploy' AND plugin_id = ? ORDER BY created_at, key`,
+        pluginId
       )
       .toArray();
     return Promise.all(
@@ -1388,18 +1390,18 @@ export class UserDirectory extends DurableObject<Env> {
     );
   }
 
-  /** Revoke one of `pluginId`'s deploy keys that `ownerId` registered (the
-   * first revocation's time stays). False when there's no such key. */
-  revokeDeployKey(pluginId: string, ownerId: string, key: string): boolean {
+  /** Revoke one of `pluginId`'s deploy keys, whoever made it (the first
+   * revocation's time stays). The caller checks who owns the plugin. False
+   * when there's no such key. */
+  revokeDeployKey(pluginId: string, key: string): boolean {
     return (
       this.ctx.storage.sql
         .exec(
           `UPDATE plugin_keys SET revoked_at = COALESCE(revoked_at, ?)
-           WHERE key = ? AND kind = 'deploy' AND plugin_id = ? AND user_id = ? RETURNING key`,
+           WHERE key = ? AND kind = 'deploy' AND plugin_id = ? RETURNING key`,
           Date.now(),
           key,
-          pluginId,
-          ownerId
+          pluginId
         )
         .toArray().length > 0
     );

@@ -58,19 +58,26 @@ const addKey = async (userId: string, pluginId: string, signer?: Signer, extra: 
   return { res, signer: key };
 };
 
-/** A request signed by `signer` as the contract says; `tamper` changes what's sent after signing. */
+/** A request signed by `signer` as the contract says, its body's hash in
+ * X-Zeron-Content-SHA256; the options change what's sent after signing. */
 const signed = async (
   signer: Signer,
   path: string,
   body: string,
-  opts: { ts?: number; method?: string; sendPath?: string; sendBody?: string; header?: string } = {}
+  opts: { ts?: number; method?: string; sendPath?: string; sendBody?: BodyInit; sendHash?: string | null; header?: string; headers?: Record<string, string> } = {}
 ) => {
   const ts = String(opts.ts ?? Date.now());
   const method = opts.method ?? "POST";
-  const sig = await signer.sign(publishSigningString(method, path, await sha256Hex(new TextEncoder().encode(body)), ts));
+  const hash = await sha256Hex(new TextEncoder().encode(body));
+  const sig = await signer.sign(publishSigningString(method, path, hash, ts));
+  const sendHash = opts.sendHash === undefined ? hash : opts.sendHash;
   return SELF.fetch(`https://edge.test${opts.sendPath ?? path}`, {
     method,
-    headers: { authorization: opts.header ?? `ZeronKey key=${signer.key}, ts=${ts}, sig=${sig}` },
+    headers: {
+      authorization: opts.header ?? `ZeronKey key=${signer.key}, ts=${ts}, sig=${sig}`,
+      ...(sendHash === null ? {} : { "x-zeron-content-sha256": sendHash }),
+      ...opts.headers
+    },
     body: method === "GET" ? undefined : (opts.sendBody ?? body)
   });
 };
@@ -287,6 +294,25 @@ describe("deploy keys: who signed it", () => {
   });
 });
 
+describe("deploy keys: a plugin changing hands", () => {
+  it("vouches for nothing of its former owner's, and is its new owner's to see and revoke", async () => {
+    const { userId: former, pluginId } = await owned(`dkf${newId("u").slice(5, 11).toLowerCase()}`);
+    const { signer } = await addKey(former, pluginId);
+    const viewer = await person();
+    const lookup = async () => (await api(viewer, "GET", `/plugin-keys/${signer.key}?plugin=${pluginId}`)).json() as Promise<{ verified: boolean }>;
+    expect((await lookup()).verified).toBe(true);
+    // Transferred, before (or without) the store revoking its keys.
+    const next = await person();
+    await setOwner(pluginId, next);
+    expect((await lookup()).verified).toBe(false);
+    expect((await api(former, "GET", `/store/v1/plugins/${pluginId}/keys`)).status).toBe(404);
+    const listed = ((await (await api(next, "GET", `/store/v1/plugins/${pluginId}/keys`)).json()) as { keys: { key: string }[] }).keys;
+    expect(listed.map((k) => k.key)).toEqual([signer.key]);
+    expect((await api(next, "DELETE", `/store/v1/plugins/${pluginId}/keys/${signer.key}`)).status).toBe(200);
+    expect(await errorOf(await signed(signer, `/store/v1/plugins/${pluginId}/versions`, "pkg"))).toBe("key_revoked");
+  });
+});
+
 describe("deploy keys: signed requests", () => {
   const publish = (pluginId: string) => `/store/v1/plugins/${pluginId}/versions`;
 
@@ -359,6 +385,29 @@ describe("deploy keys: signed requests", () => {
     expect((await signed(signer, "/plugin-keys", "", { method: "GET" })).status).toBe(401);
   });
 
+  it("are refused before a byte of the body is read", async () => {
+    const { userId, pluginId } = await owned();
+    const { signer } = await addKey(userId, pluginId);
+    // A body that never ends: reading it would never answer.
+    const endless = () =>
+      new ReadableStream<Uint8Array>({
+        pull: (controller) => new Promise((resolve) => setTimeout(() => {
+          controller.enqueue(new Uint8Array(1024));
+          resolve();
+        }, 50))
+      });
+    const forged = await signed(signer, publish(pluginId), "pkg", {
+      header: `ZeronKey key=${signer.key}, ts=${Date.now()}, sig=${"A".repeat(86)}`,
+      sendBody: endless()
+    });
+    expect(forged.status).toBe(401);
+    expect(await errorOf(forged)).toBe("invalid_signature");
+    const unknown = await signed(await newSigner(), publish(pluginId), "pkg", { sendBody: endless() });
+    expect(unknown.status).toBe(401);
+    const stale = await signed(signer, publish(pluginId), "pkg", { ts: Date.now() - MAX_REQUEST_SKEW_MS - 5000, sendBody: endless() });
+    expect(stale.status).toBe(401);
+  });
+
   it("refuse a stale or future time", async () => {
     const { userId, pluginId } = await owned();
     const { signer } = await addKey(userId, pluginId);
@@ -373,9 +422,24 @@ describe("deploy keys: signed requests", () => {
   it("refuse a changed body, path or signer, and a query string", async () => {
     const { userId, pluginId } = await owned();
     const { signer } = await addKey(userId, pluginId);
-    const swapped = await signed(signer, publish(pluginId), "pkg", { sendBody: "evil pkg" });
-    expect(swapped.status).toBe(401);
-    expect(await errorOf(swapped)).toBe("invalid_signature");
+    // The body swapped under a good signature: the route never gets it,
+    // buffered or streamed.
+    for (const stream of ["0", "1"]) {
+      const swapped = await signed(signer, publish(pluginId), "pkg", { ts: Date.now() + Number(stream), sendBody: "evil pkg", headers: { "x-test-stream": stream } });
+      expect(swapped.status).toBe(200);
+      expect(((await swapped.json()) as { body: string }).body, `stream=${stream}`).toBe("body_mismatch");
+    }
+    const streamedOk = await signed(signer, publish(pluginId), "pkg", { headers: { "x-test-stream": "1" } });
+    expect(((await streamedOk.json()) as { body: string }).body).toBe(await sha256Hex(new TextEncoder().encode("pkg")));
+    // The hash sent isn't the one signed, or isn't sent at all.
+    const rehashed = await signed(signer, publish(pluginId), "pkg", { sendBody: "evil pkg", sendHash: await sha256Hex(new TextEncoder().encode("evil pkg")) });
+    expect(rehashed.status).toBe(401);
+    expect(await errorOf(rehashed)).toBe("invalid_signature");
+    for (const sendHash of [null, "ABC", "0".repeat(63)]) {
+      const res = await signed(signer, publish(pluginId), "pkg", { sendHash });
+      expect(res.status, String(sendHash)).toBe(401);
+      expect(await errorOf(res)).toBe("unauthenticated");
+    }
     const otherPlugin = newPlugin();
     await setOwner(otherPlugin, userId);
     const moved = await signed(signer, publish(otherPlugin), "pkg", { sendPath: publish(pluginId) });

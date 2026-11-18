@@ -9,9 +9,10 @@
  *     → 201 { key, fingerprint, name, created_at, expires_at?, plugin }
  *   DELETE /store/v1/plugins/:id/keys/:key → { revoked: true }
  *
- * Only the plugin's owner, signed in (a session bearer or the web's cookie;
- * never a deploy key), manages its keys; a plugin no one owns yet has none
- * (publish its first version from your machine). Anyone else: 404.
+ * Only the plugin's owner now, signed in (a session bearer or the web's
+ * cookie; never a deploy key), manages its keys, a former owner's included;
+ * a plugin no one owns yet has none (publish its first version from your
+ * machine). Anyone else: 404.
  *
  * Registering is like a device's key (`POST /plugin-keys`): `proof` is the
  * key's signature over `"zeron-deploy-key:v1:" + id + ":" + key` (its own
@@ -118,18 +119,18 @@ export const handleDeployKeyRoute = async (
   const directory = userDirectoryStub(env);
   if (!directory) return jsonError(503, "unavailable", "The user directory isn't set up on this server.");
 
-  if (request.method === "GET") return fresh({ keys: (await directory.deployKeys(pluginId, caller.userId)).map(wireKey) });
+  if (request.method === "GET") return fresh({ keys: (await directory.deployKeys(pluginId)).map(wireKey) });
 
   if (request.method === "DELETE") {
     const key = parseKey(keyPart);
-    if (!key || !(await directory.revokeDeployKey(pluginId, caller.userId, key))) {
+    if (!key || !(await directory.revokeDeployKey(pluginId, key))) {
       return jsonError(404, "unknown_key", "This plugin has no such deploy key.");
     }
     return fresh({ revoked: true });
   }
 
   const raw = await readBody(request, MAX_BODY);
-  if (raw === "too_large") return jsonError(413, "too_large", "The request body is too large.");
+  if (typeof raw === "string") return jsonError(413, "too_large", "The request body is too large.");
   let body: Record<string, unknown> | undefined;
   try {
     const parsed: unknown = JSON.parse(new TextDecoder().decode(raw));
@@ -155,7 +156,7 @@ export const handleDeployKeyRoute = async (
   const result = await directory.registerDeployKey(caller.userId, pluginId, key, name, expires as number | null, ticket);
   switch (result) {
     case "registered": {
-      const row = (await directory.deployKeys(pluginId, caller.userId)).find((k) => k.key === key)!;
+      const row = (await directory.deployKeys(pluginId)).find((k) => k.key === key)!;
       return fresh({ ...wireKey(row), plugin: pluginId }, 201);
     }
     case "step_up_required":

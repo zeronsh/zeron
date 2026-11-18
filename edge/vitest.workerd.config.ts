@@ -62,7 +62,11 @@ export default defineConfig({
           CLOUD_DELETE: { name: "test-cloud-delete", className: "DeleteWorkflow" }
         },
         serviceBindings: {
-          VAULT: { name: kCurrentWorker, entrypoint: "VaultStub" }
+          VAULT: { name: kCurrentWorker, entrypoint: "VaultStub" },
+          // The web site's server (fixture.ts SiteStub) and the edge it
+          // reaches over its service binding, as the site does in production.
+          SITE: { name: kCurrentWorker, entrypoint: "SiteStub" },
+          EDGE: kCurrentWorker
         },
         r2Buckets: ["BLOBS", "RELEASES", "CARD_IMAGES"],
         bindings: {

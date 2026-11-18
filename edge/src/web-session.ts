@@ -25,7 +25,7 @@
  */
 import type { Env } from "./env";
 import { userDirectoryStub, type WebSessionRead } from "./user-directory";
-import { readBody } from "./store/identity/body";
+import { MAX_PUBLISH_BODY_BYTES, readBody } from "./store/identity/body";
 import { CSRF_HEADER, SESSION_COOKIE, newToken, readCookie, sessionCookie, sessionTokenHash, webOrigin } from "./web-cookies";
 
 /** A live session, resolved for one request. */
@@ -82,14 +82,19 @@ export const MAX_FORM_BYTES = 64 * 1024;
 
 /**
  * The CSRF token a request carries: the `X-CSRF-Token` header, or a form
- * post's `csrf` field (read through the shared body reader, so the route can
- * still read the body). `form`: it's a form post.
+ * post's `csrf` field. The form is read through the shared body reader
+ * (store/identity/body.ts) under `bodyCap`, so a store route still reads the
+ * whole body after; only a form of at most `MAX_FORM_BYTES` is searched.
+ * `form`: it's a form post.
  */
-export const requestCsrf = async (request: Request): Promise<{ readonly csrf: string | null; readonly form: boolean }> => {
+export const requestCsrf = async (
+  request: Request,
+  bodyCap = MAX_PUBLISH_BODY_BYTES
+): Promise<{ readonly csrf: string | null; readonly form: boolean }> => {
   const header = request.headers.get(CSRF_HEADER);
   const form = request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() === "application/x-www-form-urlencoded";
   if (header !== null || !form) return { csrf: header, form };
-  const body = await readBody(request, MAX_FORM_BYTES);
-  if (body === "too_large") return { csrf: null, form };
+  const body = await readBody(request, bodyCap);
+  if (typeof body === "string" || body.byteLength > MAX_FORM_BYTES) return { csrf: null, form };
   return { csrf: new URLSearchParams(new TextDecoder().decode(body)).get("csrf"), form };
 };

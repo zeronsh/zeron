@@ -45,6 +45,8 @@ import { b64urlEncode, parseEd25519PublicKey, verifyEd25519 } from "./cloud/cryp
 import type { Env } from "./env";
 import { jsonError, readJsonBody } from "./http";
 import { stepUpHash, stepUpRequired } from "./step-up";
+import type { PluginOwnerLookup } from "./store/identity/deploy-keys";
+import { PLUGIN_ID_RE } from "./store/identity/signing";
 import { userDirectoryStub } from "./user-directory";
 
 export const PLUGIN_KEY_PROOF_PREFIX = "zeron-plugin-key:v1:";
@@ -73,7 +75,8 @@ export const handlePluginKeyRoute = async (
   request: Request,
   env: Env,
   auth: Verified,
-  url: URL
+  url: URL,
+  pluginOwner: PluginOwnerLookup
 ): Promise<Response | undefined> => {
   const parts = url.pathname.split("/").filter(Boolean);
   if (parts[0] !== "plugin-keys" || parts.length > 2) return undefined;
@@ -127,7 +130,9 @@ export const handlePluginKeyRoute = async (
   const key = parseKey(parts[1]);
   if (request.method === "GET") {
     const plugin = url.searchParams.get("plugin") ?? undefined;
-    const found = key ? await directory.pluginKey(key, auth.userId, plugin) : undefined;
+    // Who owns the named plugin now: a deploy key vouches only for its owner's.
+    const owner = key && plugin !== undefined && PLUGIN_ID_RE.test(plugin) ? await pluginOwner(env, plugin) : null;
+    const found = key ? await directory.pluginKey(key, auth.userId, plugin, owner) : undefined;
     return found ? fresh(found) : unknownKey();
   }
   if (request.method !== "DELETE") return jsonError(405, "method_not_allowed", "GET or DELETE only.");

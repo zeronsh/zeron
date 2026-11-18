@@ -22,24 +22,29 @@ export const sessionTokenHash = async (token: unknown): Promise<string | undefin
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 };
 
-/** The one value of cookie `name` in the request; undefined when it's absent
- * or sent more than once (a cookie can't be told from a planted twin). */
-export const readCookie = (request: Request, name: string): string | undefined => {
-  const header = request.headers.get("cookie");
-  if (!header) return undefined;
-  let found: string | undefined;
-  for (const part of header.split(";")) {
+/** Space and tab only: what browsers put around a cookie's name and value.
+ * Never `trim()`, which also strips Unicode spaces: a cookie named
+ * "\u2000__Host-zeron_session" isn't bound by the `__Host-` rules (so any
+ * subdomain can set it) and must never read as ours. */
+const trimOws = (text: string): string => text.replace(/^[ \t]+|[ \t]+$/g, "");
+
+/** Each cookie's exact name and value, in the order sent. */
+const cookiePairs = (request: Request): [string, string][] =>
+  (request.headers.get("cookie") ?? "").split(";").flatMap((part): [string, string][] => {
     const eq = part.indexOf("=");
-    if (eq < 0 || part.slice(0, eq).trim() !== name) continue;
-    if (found !== undefined) return undefined;
-    found = part.slice(eq + 1).trim();
-  }
-  return found;
+    return eq < 0 ? [] : [[trimOws(part.slice(0, eq)), trimOws(part.slice(eq + 1))]];
+  });
+
+/** The one value of cookie `name` in the request; undefined when it's absent
+ * or sent more than once (a cookie can't be told from a planted twin). Names
+ * match byte for byte. */
+export const readCookie = (request: Request, name: string): string | undefined => {
+  const values = cookiePairs(request).filter(([n]) => n === name);
+  return values.length === 1 ? values[0]![1] : undefined;
 };
 
 /** Whether the request sends cookie `name` at all (once or more). */
-export const sendsCookie = (request: Request, name: string): boolean =>
-  (request.headers.get("cookie") ?? "").split(";").some((part) => part.split("=", 1)[0]!.trim() === name);
+export const sendsCookie = (request: Request, name: string): boolean => cookiePairs(request).some(([n]) => n === name);
 
 /** A `__Host-` cookie: Secure, Path=/, no Domain; HttpOnly and SameSite=Lax.
  * `maxAgeMs` 0 clears it. */
@@ -99,7 +104,9 @@ export const safeReturnTo = (raw: string | null | undefined, origin: string): st
   } catch {
     return "/";
   }
-  if (url.origin !== origin) return "/";
+  // Normalising can make a path that read as one (`/.//host`, `/a/..//host`)
+  // into `//host`: a redirect anywhere, to whoever uses it relative.
+  if (url.origin !== origin || url.pathname.startsWith("//")) return "/";
   if (url.pathname === "/auth/web" || url.pathname.startsWith("/auth/web/")) return "/";
   return `${url.pathname}${url.search}`;
 };
