@@ -640,6 +640,15 @@ do
 	}
 end
 stub.load_catalog = function() end
+-- (A model picker opening asks after agents short of models, and an agent's
+-- "Retry" asks for its own: src/chat.rs `chat.catalog_fresh`,
+-- `chat.catalog_retry`, noted.)
+stub.refresh_catalog = function()
+	note("catalog_fresh")
+end
+stub.retry_catalog = function(harness: string)
+	note(`catalog_retry:{harness}`)
+end
 -- (The device whose catalog the composer reads, noted as it changes.)
 stub.catalog_on = function(device: string?)
 	note(`catalog_on:{device or "here"}`)
@@ -2148,6 +2157,59 @@ ui.command {
 		table.insert(harnesses, { id = "acp.factory-droid", label = "Factory Droid", mark = "acp.factory-droid" })
 		table.insert(models, { value = "droid", label = "Droid Auto", harness = "acp.factory-droid", efforts = EFFORT, effort = "medium" })
 		store.catalog:set { state = "ready", harnesses = harnesses, models = models }
+	end,
+}
+-- Cursor in the catalog with how its models stand (`status`): none yet
+-- (signed out), a look that failed, still looking, or its models come.
+local function with_cursor(status: string, error: string?, models: { any }?)
+	local c = store.catalog:peek()
+	local harnesses: { any } = {}
+	for _, h in c.harnesses do
+		if h.id ~= "cursor" then
+			table.insert(harnesses, h)
+		end
+	end
+	table.insert(harnesses, { id = "cursor", label = "Cursor", mark = "cursor", status = status, error = error })
+	local list: { any } = {}
+	for _, m in c.models do
+		if m.harness ~= "cursor" then
+			table.insert(list, m)
+		end
+	end
+	for _, m in models or {} do
+		table.insert(list, m)
+	end
+	store.catalog:set({ state = "ready", complete = true, harnesses = harnesses, models = list } :: any)
+end
+ui.command {
+	id = "catalog_cursor_empty",
+	title = "Cursor lists no models",
+	run = function()
+		with_cursor("empty")
+	end,
+}
+ui.command {
+	id = "catalog_cursor_error",
+	title = "Cursor's models couldn't be looked up",
+	run = function()
+		with_cursor("error", "cursor-agent exited with status 1")
+	end,
+}
+ui.command {
+	id = "catalog_cursor_loading",
+	title = "Cursor's models are on their way",
+	run = function()
+		with_cursor("loading")
+	end,
+}
+ui.command {
+	id = "catalog_cursor_ready",
+	title = "Cursor's models come",
+	run = function()
+		with_cursor("ready", nil, {
+			{ value = "cursor/auto", label = "Auto", harness = "cursor" },
+			{ value = "cursor/composer-2", label = "Composer 2", harness = "cursor" },
+		})
 	end,
 }
 ui.command {

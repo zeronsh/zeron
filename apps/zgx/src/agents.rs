@@ -12,11 +12,14 @@
 //!                login_methods = { { id, name, description?, kind, var?,
 //!                link? } }
 //!                (an agent from the ACP registry, as it says it is),
-//!                accounts = { { id, email, plan, session, week, active } } } } }
+//!                accounts = { { id, email, plan, session, week, active,
+//!                               invalid?, invalid_reason? } } } } }
 //! Each agent carries all it shows, so a page keys its rows by `id` and an
 //! account by its `id`, and they update in place. (`session` and `week` are
 //! the plan's two windows, 0 to 1; `mark` is the design system's name for
-//! the agent's mark, nil for one it has none for.)
+//! the agent's mark, nil for one it has none for. `invalid`: a login whose
+//! key its provider rejected — never switchable, only removed — and
+//! `invalid_reason` the engine's words for why.)
 //! and call, each rejecting with an outcome word as its `message`:
 //!   agents.load (an action)        looks again (and once at first)
 //!   agents.sign_in(id)             a new account for that agent: the browser
@@ -920,8 +923,28 @@ impl Agents {
 
     fn keep_device(&self, key: String, snapshot: &Json) {
         let Some(accounts) = snapshot["accounts"].as_array() else { return };
-        self.device_accounts.borrow_mut().entry(key).or_default().accounts = accounts.clone();
+        let changed = {
+            let mut devices = self.device_accounts.borrow_mut();
+            let device = devices.entry(key.clone()).or_default();
+            // (The first sight of a device's accounts changes nothing: its
+            // models were looked up with them.)
+            let changed = if device.seen { changed_logins(&device.accounts, accounts) } else { Vec::new() };
+            device.seen = true;
+            device.accounts = accounts.clone();
+            changed
+        };
         self.publish_devices();
+        // An agent signed in, switched, given a key or signed out lists other
+        // models (Pi signed in to Claude lists Claude's): its models again.
+        for harness in changed {
+            crate::chat::accounts_changed(&key, &harness);
+        }
+        // (A key replaced in place, or the same account signed in to again,
+        // changes no login: an agent signed in whose models failed or came
+        // empty is asked again all the same.)
+        let signed_in: std::collections::BTreeSet<String> =
+            accounts.iter().filter_map(|a| a["harness"].as_str().map(str::to_owned)).collect();
+        crate::chat::accounts_seen(&key, &signed_in.into_iter().collect::<Vec<_>>());
     }
 
     /// A composer on `key`'s device: its accounts, on first sight of it.
@@ -1528,6 +1551,12 @@ fn account_value(account: &Json, reset: Option<&Reset>) -> Value {
         ("week", Value::from(week_used)),
         ("active", Value::Bool(account["active"].as_bool().unwrap_or(false))),
     ];
+    if invalid(account) {
+        fields.push(("invalid", Value::Bool(true)));
+        if let Some(why) = account["invalidReason"].as_str() {
+            fields.push(("invalid_reason", Value::from(why)));
+        }
+    }
     if account["codexResetCredits"].is_object() {
         let (count, list) = banked(&account["codexResetCredits"], spent);
         fields.push(("banked", Value::from(count as f64)));
@@ -1554,9 +1583,37 @@ fn account_value(account: &Json, reset: Option<&Reset>) -> Value {
 #[derive(Default)]
 struct DeviceAccounts {
     accounts: Vec<Json>,
+    /// Its accounts have come at least once.
+    seen: bool,
     /// A composer has asked for them.
     asked: bool,
     last_forced: Option<Instant>,
+}
+
+/// The agents whose logins differ between two account lists: an account
+/// come or gone, or another in use. (Usage alone changes nothing.)
+fn changed_logins(before: &[Json], after: &[Json]) -> Vec<String> {
+    fn logins(accounts: &[Json]) -> BTreeMap<String, Vec<(String, bool)>> {
+        let mut by: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
+        for a in accounts {
+            if let (Some(harness), Some(id)) = (a["harness"].as_str(), a["id"].as_str()) {
+                by.entry(harness.into()).or_default().push((id.into(), a["active"].as_bool() == Some(true)));
+            }
+        }
+        for list in by.values_mut() {
+            list.sort();
+        }
+        by
+    }
+    let (before, after) = (logins(before), logins(after));
+    let mut changed: Vec<String> = before
+        .keys()
+        .chain(after.keys())
+        .filter(|h| before.get(*h) != after.get(*h))
+        .cloned()
+        .collect();
+    changed.dedup();
+    changed
 }
 
 /// Forced usage asks the provider: not more often than this.
@@ -1610,16 +1667,31 @@ fn device_accounts_value(accounts: &[Json]) -> Value {
             ("active", Value::Bool(account["active"].as_bool().unwrap_or(false))),
             (
                 "can_switch",
-                Value::Bool(account["switchable"].as_bool().unwrap_or(false) && zeron_proto::providers::switches_accounts(id)),
+                // (Never to a key its provider rejected: the engine refuses
+                // that switch anyway.)
+                Value::Bool(
+                    account["switchable"].as_bool().unwrap_or(false)
+                        && !invalid(account)
+                        && zeron_proto::providers::switches_accounts(id),
+                ),
             ),
             ("windows", Value::List(windows.into())),
         ];
-        if let Some(error) = account["usageError"].as_str() {
+        if let Some(error) = account["invalidReason"].as_str().filter(|_| invalid(account)).or(account["usageError"].as_str()) {
             fields.push(("error", Value::from(error)));
+        }
+        if invalid(account) {
+            fields.push(("invalid", Value::Bool(true)));
         }
         by.entry(harness).or_default().push(Value::record(fields));
     }
     Value::record(by.into_iter().map(|(harness, rows)| (harness, Value::List(rows.into()))))
+}
+
+/// A login whose key its provider rejected (revoked or expired): shown so it
+/// can be removed, never switched to.
+fn invalid(account: &Json) -> bool {
+    account["invalid"].as_bool().unwrap_or(false)
 }
 
 /// What an account goes by.
@@ -1665,6 +1737,35 @@ fn epoch_secs(s: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pi signed in to Claude, or another login put in use: Pi's models are
+    /// looked up again. Usage moving, or another agent's, isn't Pi's change.
+    #[test]
+    fn only_an_agent_whose_logins_changed_has_its_models_looked_up_again() {
+        let row = |harness: &str, id: &str, active: bool, used: f64| {
+            json!({ "id": id, "harness": harness, "active": active, "usageWindows": [{ "used": used }] })
+        };
+        let before = vec![row("pi", "chatgpt-a", true, 0.1), row("codex", "c1", true, 0.2)];
+        // Usage alone: nothing.
+        let after = vec![row("pi", "chatgpt-a", true, 0.5), row("codex", "c1", true, 0.9)];
+        assert!(changed_logins(&before, &after).is_empty());
+        // A new Claude login for Pi: Pi.
+        let signed_in = vec![
+            row("pi", "chatgpt-a", true, 0.1),
+            row("pi", "claude-b", true, 0.0),
+            row("codex", "c1", true, 0.2),
+        ];
+        assert_eq!(changed_logins(&before, &signed_in), ["pi"]);
+        // Another in use: that agent.
+        let switched = vec![
+            row("pi", "chatgpt-a", true, 0.1),
+            row("codex", "c1", false, 0.2),
+            row("codex", "c2", true, 0.0),
+        ];
+        assert_eq!(changed_logins(&before, &switched), ["codex"]);
+        // Signed out of everything: that agent too.
+        assert_eq!(changed_logins(&before, &[row("codex", "c1", true, 0.2)]), ["pi"]);
+    }
 
     #[test]
     fn a_switch_moves_only_its_own_login_group() {
@@ -1739,6 +1840,28 @@ mod tests {
         // Only an account with a credit summary (Codex's) banks anything.
         assert_eq!(bare.field("banked"), None);
         assert_eq!(bare.field("resets"), None);
+    }
+
+    #[test]
+    fn a_rejected_key_is_shown_to_remove_never_to_switch_to() {
+        let dead = json!({
+            "id": "c1", "harness": "cursor", "email": "a@example.com", "active": false,
+            "switchable": true, "invalid": true, "invalidReason": "Key rejected — sign in again",
+            "usageError": "Key rejected — sign in again"
+        });
+        let value = account_value(&dead, None);
+        assert!(value.field("invalid").is_some_and(Value::truthy));
+        assert_eq!(value.field("invalid_reason").map(text).as_deref(), Some("Key rejected — sign in again"));
+        let live = json!({ "id": "c2", "harness": "cursor", "email": "b@example.com", "active": true, "switchable": true });
+        let value = account_value(&live, None);
+        assert_eq!(value.field("invalid"), None);
+        // The composer's rows alike: no switch to it.
+        let composer = device_accounts_value(&[dead, live]);
+        let rows = composer.field("cursor").expect("cursor").list().to_vec();
+        assert!(!rows[0].field("can_switch").is_some_and(Value::truthy));
+        assert!(rows[0].field("invalid").is_some_and(Value::truthy));
+        assert_eq!(rows[0].field("error").map(text).as_deref(), Some("Key rejected — sign in again"));
+        assert!(rows[1].field("can_switch").is_some_and(Value::truthy));
     }
 
     fn ids(value: &Value) -> Vec<String> {

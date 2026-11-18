@@ -878,6 +878,17 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		accounts = accounts.accounts,
 		on_account = accounts.on_account,
 		on_accounts_open = accounts.on_accounts_open,
+		-- The picker opened: the host looks again at agents short of
+		-- models (none, a failed look), in the background; one's
+		-- "Retry" asks for its models alone, its "Sign in" opens
+		-- Settings → Providers.
+		on_models_open = function()
+			store.refresh_catalog()
+		end,
+		on_models_retry = function(harness: string)
+			store.retry_catalog(harness)
+		end,
+		on_models_sign_in = accounts.on_sign_in,
 		-- What its context holds: the chat page's ring and card, from the
 		-- side chat's own numbers (once it has run and they're reported).
 		usage = function(): any

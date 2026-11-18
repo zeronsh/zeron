@@ -2548,6 +2548,8 @@ mod tests {
             saved_at: None,
             provider: provider.map(str::to_string),
             codex_reset_credits: None,
+            invalid: false,
+            invalid_reason: None,
         };
         let mut snapshot = AgentAccountsSnapshot {
             accounts: vec![
@@ -2702,6 +2704,8 @@ mod tests {
             saved_at: None,
             provider: Some("openai".into()),
             codex_reset_credits: None,
+            invalid: false,
+            invalid_reason: None,
         };
         window
             .update(cx, |page, _, cx| {
@@ -2777,6 +2781,8 @@ mod tests {
                         saved_at: None,
                         provider: None,
                         codex_reset_credits: None,
+                        invalid: false,
+                        invalid_reason: None,
                     }],
                     warnings: vec![],
                 });
@@ -2860,6 +2866,8 @@ mod tests {
             switchable: true,
             saved_at: None,
             provider: None,
+            invalid: false,
+            invalid_reason: None,
         };
         let snapshot = AgentAccountsSnapshot {
             accounts: vec![

@@ -26,6 +26,7 @@ local Skeleton = require("@self/skeleton")
 local control = require("@self/control")
 local locale = require("@self/locale")
 local EditorMenu = require("@self/editor_menu")
+local Button = require("@self/button")
 
 -- An item: its name, and the harness mark or icon it shows in place of its
 -- letter tile (a model's, a mode's), what it does (under its name), a muted
@@ -77,8 +78,11 @@ export type Menu = { open: State<boolean>, toggle: () -> (), on_hover: ((inside:
 -- stays a string: the search reads it, and its tile its first letter.)
 -- `shown`: whether it's offered now (followed as it changes); none, always.
 export type Action = { label: string | Message | () -> string, icon: Icon.Name, on_click: (() -> ())?, shown: (() -> boolean)? }
--- What an empty list shows: what is missing, and how to fill it.
-export type Empty = { title: string | Message, hint: (string | Message)? }
+-- What an empty list shows: what is missing, and how to fill it; a button
+-- that does (`action`: "Retry", "Sign in"); or, `loading`, that it's on its
+-- way (its rows hold their shape, as the list's own `loading`).
+export type EmptyAction = { label: string | Message, on_click: () -> () }
+export type Empty = { title: string | Message, hint: (string | Message)?, action: EmptyAction?, loading: boolean? }
 -- The trigger's weight: `filled` (a control on its own, with a chevron),
 -- `ghost` (a chip among a bar's controls: no fill until touched), `chip` (a
 -- footer's small quiet label). Only `filled` shows a chevron.
@@ -1261,10 +1265,14 @@ return ui.component(function(props: Props): Node
 						hint = if q ~= "" then locale.s("ds.dropdown.nothing_matches", { query = q }) else nil,
 					}
 				end
+				-- (The list's own, or what an empty list says: on its way.)
+				local function waiting(): boolean
+					return (props.loading ~= nil and props.loading()) or (props.empty ~= nil and said().loading == true)
+				end
 				table.insert(
 					items,
 					ui.show(function()
-						return #shown:get() == 0 and props.loading ~= nil and props.loading()
+						return #shown:get() == 0 and waiting()
 					end, ui.column {
 						w_full = true,
 						gap = "$zeron.list.gap",
@@ -1276,7 +1284,7 @@ return ui.component(function(props: Props): Node
 				table.insert(
 					items,
 					ui.show(function()
-						return #shown:get() == 0 and not (props.loading ~= nil and props.loading())
+						return #shown:get() == 0 and not waiting()
 					end, ui.column {
 						w_full = true,
 						-- (Opened out, the list's whole window: its message in
@@ -1326,6 +1334,31 @@ return ui.component(function(props: Props): Node
 							align = "center",
 							wrap = true,
 							w_full = true,
+						}),
+						-- What fills it, where there's a way ("Retry"), read as
+						-- it's pressed: the message is made again as it changes.
+						ui.show(function(): boolean
+							return said().action ~= nil
+						end, ui.div {
+							pt = "$zeron.space.tight",
+							Button {
+								tone = "secondary",
+								size = "xs",
+								label = function(): string
+									local a = said().action
+									return if a then control.text(a.label) or "" else ""
+								end,
+								on_click = function()
+									local a = said().action
+									if a then
+										a.on_click()
+									end
+								end,
+								function(): string
+									local a = said().action
+									return if a then control.text(a.label) or "" else ""
+								end,
+							},
 						}),
 					})
 				)
@@ -1420,7 +1453,18 @@ return ui.component(function(props: Props): Node
 					table.insert(rows, gated(list))
 				end
 				if props.actions and #props.actions > 0 then
-					table.insert(rows, rule())
+					local all = props.actions
+					-- (The rule and the actions' inset only while an action
+					-- shows: a menu whose every action is hidden ends at its
+					-- last item, with no line or gap under it.)
+					local function any_shown(): boolean
+						for _, action in all do
+							if not action.shown or action.shown() then
+								return true
+							end
+						end
+						return false
+					end
 					local acts: { Node } = {}
 					for n, action in props.actions do
 						local key = `action:{n}`
@@ -1442,7 +1486,18 @@ return ui.component(function(props: Props): Node
 						}, false)
 						table.insert(acts, if action.shown then ui.show(action.shown, made) else made)
 					end
-					table.insert(rows, ui.column { w_full = true, p = "$space.1", gap = "$zeron.list.gap", table.unpack(acts) })
+					table.insert(
+						rows,
+						ui.show(
+							any_shown,
+							ui.column {
+								w_full = true,
+								gap = 0,
+								rule(),
+								ui.column { w_full = true, p = "$space.1", gap = "$zeron.list.gap", table.unpack(acts) },
+							}
+						)
+					)
 				end
 				if bottom_up then
 					place_top()

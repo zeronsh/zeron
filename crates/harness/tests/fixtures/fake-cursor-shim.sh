@@ -7,9 +7,10 @@ emit() { printf '%s\n' "$1"; }
 
 # Models mode (argv, no stdin protocol): one catalog frame, real 1.0.28
 # shapes — parameterized Auto + its bare `default` alias twin (skipped by the
-# harness) + a plain model + one whose default variant is Max Mode.
+# harness) + a plain model + one whose default variant is Max Mode (the
+# variants as the shim passes them: every one, without display text).
 if [ "$1" = "models" ]; then
-  emit '{"ev":"models","items":[{"id":"auto-smart","displayName":"Auto","parameters":[{"id":"optimize_for","displayName":"Optimize For","values":[{"value":"intelligence","displayName":"Intelligence"},{"value":"balanced","displayName":"Balance"},{"value":"cost","displayName":"Cost"}]}],"variants":[{"params":[{"id":"optimize_for","value":"balanced"}],"displayName":"Auto","isDefault":true}]},{"id":"default","displayName":"Auto","aliases":["auto"]},{"id":"claude-fable-5","displayName":"Claude Fable 5","description":"Anthropic frontier","parameters":[{"id":"thinking","values":[{"value":"enabled"},{"value":"disabled"}]}]},{"id":"grok-4.7","displayName":"Grok 4.7","parameters":[{"id":"context","values":[{"value":"256k"},{"value":"500k"}]}],"variants":[{"params":[{"id":"context","value":"500k"}],"displayName":"Grok 4.7","isDefault":true,"isMaxMode":true}]}]}'
+  emit '{"ev":"models","items":[{"id":"auto-smart","displayName":"Auto","parameters":[{"id":"optimize_for","displayName":"Optimize For","values":[{"value":"intelligence","displayName":"Intelligence"},{"value":"balanced","displayName":"Balance"},{"value":"cost","displayName":"Cost"}]}],"variants":[{"params":[{"id":"optimize_for","value":"balanced"}],"displayName":"Auto","isDefault":true}]},{"id":"default","displayName":"Auto","aliases":["auto"]},{"id":"claude-fable-5","displayName":"Claude Fable 5","description":"Anthropic frontier","parameters":[{"id":"thinking","values":[{"value":"enabled"},{"value":"disabled"}]}]},{"id":"grok-4.7","displayName":"Grok 4.7","parameters":[{"id":"context","values":[{"value":"256k"},{"value":"500k"}]}],"variants":[{"params":[{"id":"context","value":"500k"}],"isDefault":true,"isMaxMode":true},{"params":[{"id":"context","value":"256k"}]}]}]}'
   exit 0
 fi
 
@@ -56,7 +57,7 @@ case "$first" in
 
 *scenario:model-maxmode*)
   case "$first" in
-    *'"modelOptions":{}'*) ;;
+    *'"modelOptions":{"context":"256k"}'*) ;;
     *) emit '{"ev":"fatal","message":"max mode default was sent"}'; exit 1 ;;
   esac
   emit '{"ev":"ready","agentId":"agent-options","model":"grok-4.7"}'

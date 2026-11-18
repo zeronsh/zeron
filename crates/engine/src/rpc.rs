@@ -536,6 +536,10 @@ struct ListAgentAccountsParams {
 struct AgentAccountParams {
     harness: HarnessId,
     account_id: String,
+    /// `ActivateAgentAccount` only: switch even to a login whose key the
+    /// provider rejected (refused otherwise).
+    #[serde(default)]
+    force: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5731,7 +5735,7 @@ impl RpcService for EngineRpc {
                 let p: AgentAccountParams = parse_params(params)?;
                 let snapshot = self
                     .agent_accounts
-                    .activate(p.harness, &p.account_id)
+                    .activate_with(p.harness, &p.account_id, p.force)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&snapshot)
