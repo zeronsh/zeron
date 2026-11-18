@@ -24,6 +24,9 @@
 //!                                     text (an SVG of at most 32 KB, as an
 //!                                     installed plugin's icon)
 //!   plugins.store.prereleases { id, on, device? }  SetPluginPrereleases
+//!   plugins.store.updates { id?, prefer?, device? }  SetPluginUpdates: a
+//!                                     plugin's (or with no id the device's)
+//!                                     "newest" or "verified" updates
 //!   plugins.store.mine                StoreMyPlugins
 //!   plugins.store.version_action { id, version, action }  StoreVersionAction
 //!   plugins.store.prepare(id)         PreparePluginPublish
@@ -195,6 +198,29 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
             let id = store_id(&id).ok_or("not_in_store")?;
             let on = matches!(arg.field("on"), Some(Value::Bool(true)));
             let reply = e("SetPluginPrereleases", json!({ "id": id, "on": on }), device).await?;
+            Ok(json_value(&reply))
+        }
+    });
+    let e = engine.clone();
+    host.async_action("plugins.store.updates", move |arg| {
+        let e = e.clone();
+        async move {
+            crate::plugins::preview::refuse("plugins.store.updates")?;
+            // (A plugin's own choice, or with no id the device's; `prefer`
+            // nil: as the device does, or for the device the default.)
+            let id = arg.field("id").map(text).unwrap_or_default();
+            let device = super::remote::device_of(&arg);
+            let mut params = json!({});
+            if !id.is_empty() {
+                params["id"] = json!(store_id(&id).ok_or("not_in_store")?);
+            }
+            params["prefer"] = match arg.field("prefer").map(text).as_deref() {
+                Some("newest") => json!("newest"),
+                Some("verified") => json!("verified"),
+                None | Some("") => Json::Null,
+                Some(_) => return Err("invalid".into()),
+            };
+            let reply = e("SetPluginUpdates", params, device).await?;
             Ok(json_value(&reply))
         }
     });

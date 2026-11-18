@@ -5,7 +5,7 @@
 
 local REASONS = {
 	"not_a_package", "unsigned", "tampered", "bad_signature", "too_big", "bad_file",
-	"incompatible", "paths_collide", "needs_person", "other_signer", "not_newer", "different_plugin", "up_to_date", "no_source",
+	"incompatible", "paths_collide", "needs_person", "not_verified", "other_signer", "not_newer", "different_plugin", "up_to_date", "no_source",
 	"store_unreachable", "not_in_store", "store_mismatch", "store_error", "rate_limited",
 	"signed_out", "review", "changed", "not_published", "step_up_required",
 	"bad_package", "id_reserved", "not_semver", "missing_readme", "missing_listing", "bad_listing", "too_large",

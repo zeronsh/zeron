@@ -208,6 +208,15 @@ ui.command {
 	end,
 }
 ui.command {
+	id = "store.update_held",
+	title = "A newer Focus timer the store hasn't verified, waiting: Focus timer takes verified updates only",
+	run = function()
+		local p = find("focus-timer")
+		p.update = { version = "1.3.0", added = {}, removed = {}, verified = false, held = true, installed_verified = true }
+		publish()
+	end,
+}
+ui.command {
 	id = "store.branch_update",
 	title = "A newer Branch badge is found",
 	run = function()

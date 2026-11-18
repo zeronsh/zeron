@@ -3615,7 +3615,8 @@
         "available": "有可用更新：{version}。",
         "available_unversioned": "有可用更新。",
         "added": "它还请求{list}；将先征求你的许可。",
-        "removed": "它不再请求{list}。"
+        "removed": "它不再请求{list}。",
+        "held": "{version} 已推出，尚未验证：这个插件只接受已验证的更新。"
       },
       "unverified": "未验证",
       "from": "来自 {where}",
@@ -3851,7 +3852,8 @@
       "invalid_proof": "商店无法验证新密钥。请再试一次。",
       "bad_csrf": "商店拒绝了一个无法信任的请求。请再试一次。",
       "not_owner": "其中有些插件在商店里不属于你。",
-      "invalid_scope": "请至少为它选择一个你的插件。"
+      "invalid_scope": "请至少为它选择一个你的插件。",
+      "not_verified": "Zeron 尚未验证这个版本，所以不会随其他插件一起更新。"
     },
     "store": {
       "browse": "浏览",
@@ -4129,7 +4131,12 @@
         "declined_said": "未验证：“{words}”"
       },
       "superseded": "在验证前已被 {version} 取代：不再接受新安装",
-      "sent_toast_body": "在审核者看过之前，它会显示为未验证。"
+      "sent_toast_body": "在审核者看过之前，它会显示为未验证。",
+      "updates_label": "更新",
+      "updates_body": "它在这台设备上接受哪些新版本。",
+      "updates_newest": "最新",
+      "updates_verified": "仅已验证",
+      "couldnt_updates": "无法更改 {name} 的更新设置"
     }
   },
   "templates": {

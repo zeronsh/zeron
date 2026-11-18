@@ -224,6 +224,19 @@ fn a_preview_reads_the_catalog_but_never_your_own_account() {
 }
 
 #[test]
+fn which_updates_a_plugin_or_the_device_takes_is_newest_or_verified() {
+    let (_, asked) = run(r#"ui.call("plugins.store.updates", { id = "focus", prefer = "verified", device = "devbox" })"#, json!({ "prefer": "verified" }));
+    assert_eq!(asked[0], ("SetPluginUpdates".into(), json!({ "id": "focus", "prefer": "verified" }), Some("devbox".into())));
+    let (_, asked) = run(r#"ui.call("plugins.store.updates", { prefer = "newest", device = "devbox" })"#, json!({}));
+    assert_eq!(asked[0], ("SetPluginUpdates".into(), json!({ "prefer": "newest" }), Some("devbox".into())));
+    let (_, asked) = run(r#"ui.call("plugins.store.updates", { id = "focus" })"#, json!({}));
+    assert_eq!(asked[0].1, json!({ "id": "focus", "prefer": null }));
+    let (out, asked) = run(r#"ui.call("plugins.store.updates", { id = "focus", prefer = "anything" })"#, json!({}));
+    assert_eq!(out, "err:invalid");
+    assert!(asked.is_empty());
+}
+
+#[test]
 fn pre_releases_go_to_the_device_chosen() {
     let (_, asked) = run(r#"ui.call("plugins.store.prereleases", { id = "focus", on = true, device = "devbox" })"#, json!({}));
     assert_eq!(asked[0], ("SetPluginPrereleases".into(), json!({ "id": "focus", "on": true }), Some("devbox".into())));

@@ -3615,7 +3615,8 @@
         "available": "Update available: {version}.",
         "available_unversioned": "Update available:.",
         "added": "It also asks to {list}; you'll be asked first.",
-        "removed": "It no longer asks to {list}."
+        "removed": "It no longer asks to {list}.",
+        "held": "{version} is out, not verified yet: this plugin takes verified updates only."
       },
       "unverified": "Unverified",
       "from": "From {where}",
@@ -3851,7 +3852,8 @@
       "invalid_proof": "The store couldn't check the new key. Try again.",
       "bad_csrf": "The store refused a request it couldn't trust. Try again.",
       "not_owner": "Some of those plugins aren't yours in the store.",
-      "invalid_scope": "Choose at least one of your plugins for it."
+      "invalid_scope": "Choose at least one of your plugins for it.",
+      "not_verified": "Zeron hasn't verified this version, so it isn't updated with the others."
     },
     "store": {
       "browse": "Browse",
@@ -4129,7 +4131,12 @@
         "declined_said": "Not verified: “{words}”"
       },
       "superseded": "Replaced by {version} before it was verified: no new installs",
-      "sent_toast_body": "It shows as not verified until a reviewer has read it."
+      "sent_toast_body": "It shows as not verified until a reviewer has read it.",
+      "updates_label": "Updates",
+      "updates_body": "Which newer versions it takes on this device.",
+      "updates_newest": "Newest",
+      "updates_verified": "Verified only",
+      "couldnt_updates": "Couldn't change {name}'s updates"
     }
   },
   "templates": {

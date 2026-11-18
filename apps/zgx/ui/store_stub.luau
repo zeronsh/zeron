@@ -449,6 +449,9 @@ local given_readme = ui.state("store_stub_readme", "")
 local given_notes = ui.state("store_stub_notes", "")
 -- (A detail's first page of versions, as the store gives it.)
 local VERSIONS_PAGE = 5
+-- Which updates each plugin takes here ("newest", the default, or
+-- "verified"), as the store page reads it (`installed.updates`).
+local updates_pref: { [string]: string } = {}
 stub.detail = function(id: string, for_zeron: string?): any
 	note(if for_zeron then `detail:{id}:for_zeron={for_zeron}` else `detail:{id}`)
 	return answer(function(): any
@@ -457,6 +460,9 @@ stub.detail = function(id: string, for_zeron: string?): any
 		for k, v in e.detail do
 			d[k] = v
 		end
+		-- (What this device has of it, as the engine adds: which updates it
+		-- takes here.)
+		d.installed = { updates = updates_pref[id] or "newest" }
 		-- (Its first page of versions, newest first; the rest by cursor.)
 		d.versions = table.move(e.versions, 1, math.min(VERSIONS_PAGE, #e.versions), 1, {})
 		d.versions_next_cursor = if #e.versions > VERSIONS_PAGE then tostring(VERSIONS_PAGE) else nil
@@ -523,6 +529,15 @@ stub.report = function(id: string, reason: string, text: string): any
 	return answer(function(): any
 		entry(id)
 		return {}
+	end)
+end
+stub.set_updates = function(id: string?, prefer: string?): any
+	note(`updates:{id or "device"}:{prefer or "default"}`)
+	return answer(function(): any
+		if id then
+			updates_pref[id] = prefer
+		end
+		return { prefer = prefer or "newest" }
 	end)
 end
 stub.prereleases = function(id: string, on: boolean): any

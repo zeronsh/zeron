@@ -599,6 +599,7 @@ local FAILURES: { [string]: boolean } = {
 	incompatible = true,
 	paths_collide = true,
 	needs_person = true,
+	not_verified = true,
 	store_unreachable = true,
 	not_in_store = true,
 	store_mismatch = true,
@@ -667,6 +668,11 @@ function M.update(item: any): string?
 		return nil
 	end
 	local version = if type(update.version) == "string" and update.version ~= "" then update.version else nil
+	-- (Waiting: this plugin takes verified updates only, and the newer
+	-- version isn't verified. Said; never taken unasked.)
+	if update.held == true and version then
+		return s("plugins.words.update.held", { version = version })
+	end
 	if type(update.refused) == "string" then
 		return if version
 			then s("plugins.words.update.refused", { version = version, reason = reason_words(update.refused) })

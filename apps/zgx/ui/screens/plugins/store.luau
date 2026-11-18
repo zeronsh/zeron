@@ -142,6 +142,12 @@ function M.prereleases(id: string, on: boolean, device: string?): any
 	return ui.call("plugins.store.prereleases", { id = id, on = on, device = device })
 end
 
+-- Which updates a plugin takes on the device shown ("newest", the default,
+-- or "verified"); with no id, the device's own choice (nil: the default).
+function M.set_updates(id: string?, prefer: ("newest" | "verified")?, device: string?): any
+	return ui.call("plugins.store.updates", { id = id, prefer = prefer, device = device })
+end
+
 function M.report(id: string, reason: string, text: string): any
 	return ui.call("plugins.store.report", { id = id, reason = reason, text = text })
 end

@@ -1034,10 +1034,37 @@ local Found = ui.component(function(props: { plugin: string, here: Here }): Node
 			pre_on:set(want)
 		end
 	end)
+	-- Which updates it takes on the device shown: the newest (the default),
+	-- or only those the store has verified (the engine's `installed.updates`).
+	local updates = ui.use_state(if type(first.installed) == "table" and first.installed.updates == "verified" then "verified" else "newest")
 	local prerelease = ui.show(function(): boolean
 		local it: any = item()
 		return it ~= nil and type(it.source) == "table" and it.source.kind == "store"
 	end, ds.Settings.Group {
+		ds.Settings.Row {
+			label = ui.t("plugins.store.updates_label"),
+			description = ui.t("plugins.store.updates_body"),
+			control = ui.div {
+				id = "store-updates",
+				ds.Select {
+					value = updates,
+					size = "sm",
+					w = 160,
+					name = ui.t("plugins.store.updates_label"),
+					options = {
+						{ value = "newest", label = ui.t("plugins.store.updates_newest") },
+						{ value = "verified", label = ui.t("plugins.store.updates_verified") },
+					},
+					on_change = function(v: any)
+						local was = if v == "verified" then "newest" else "verified"
+						store.set_updates(id, v, here.device()):after(function(_: any) end, function(err: any)
+							updates:set(was)
+							here.failed(ui.t("plugins.store.couldnt_updates", { name = d().name or id }))(err)
+						end)
+					end,
+				},
+			},
+		},
 		ds.Settings.Row {
 			label = ui.t("plugins.store.prereleases"),
 			description = ui.t("plugins.store.prereleases_body"),
