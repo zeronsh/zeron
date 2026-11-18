@@ -1781,7 +1781,7 @@ fn account_value(account: &Json, reset: Option<&Reset>) -> Value {
         ("active", Value::Bool(account["active"].as_bool().unwrap_or(false))),
         ("switchable", Value::Bool(can_switch(account))),
         ("provider", account["provider"].as_str().map_or(Value::Nil, Value::from)),
-        // An API key: no plan, so no windows to show; named by someone, or
+        // An API key: no plan, so no session or week; named by someone, or
         // going by its last four.
         ("key", Value::Bool(account["authKind"].as_str() == Some("api-key"))),
         (
@@ -1807,6 +1807,24 @@ fn account_value(account: &Json, reset: Option<&Reset>) -> Value {
         if let Some(at) = window.and_then(|w| w["resetsAt"].as_str()).and_then(epoch_secs) {
             fields.push((name, Value::from(at as f64)));
         }
+    }
+    // A key whose provider reports allowances of its own (NaN's, one per
+    // model): a meter each, by the window's own name.
+    if account["authKind"].as_str() == Some("api-key") && !windows.is_empty() {
+        let meters: Vec<Value> = windows
+            .iter()
+            .map(|w| {
+                let mut meter = vec![
+                    ("label", Value::from(w["label"].as_str().unwrap_or_default())),
+                    ("used", Value::from(fraction(Some(w)))),
+                ];
+                if let Some(at) = w["resetsAt"].as_str().and_then(epoch_secs) {
+                    meter.push(("resets", Value::from(at as f64)));
+                }
+                Value::record(meter)
+            })
+            .collect();
+        fields.push(("meters", Value::List(meters.into())));
     }
     Value::record(fields)
 }
@@ -2149,6 +2167,35 @@ mod tests {
         // Only an account with a credit summary (Codex's) banks anything.
         assert_eq!(bare.field("banked"), None);
         assert_eq!(bare.field("resets"), None);
+    }
+
+    #[test]
+    fn a_key_with_its_own_allowances_reads_a_meter_per_model() {
+        let key = json!({
+            "id": "k1", "harness": "pi", "authKind": "api-key", "planLabel": "NaN",
+            "usageWindows": [
+                { "label": "deepseek-v4-flash", "usedFraction": 0.8, "resetsAt": "2026-11-01T15:45:00Z" },
+                { "label": "glm5.3-flash", "usedFraction": 1.2 }
+            ]
+        });
+        let Some(Value::List(meters)) = account_value(&key, None).field("meters").cloned() else {
+            panic!("a key with windows lists its meters");
+        };
+        let read: Vec<_> = meters
+            .iter()
+            .map(|m| (m.field("label").map(text), m.field("used").and_then(Value::as_f64), m.field("resets").and_then(Value::as_f64)))
+            .collect();
+        assert_eq!(
+            read,
+            [
+                (Some("deepseek-v4-flash".into()), Some(0.8), Some(1_793_547_900.0)),
+                (Some("glm5.3-flash".into()), Some(1.0), None),
+            ]
+        );
+        let bare_key = json!({ "id": "k2", "authKind": "api-key" });
+        assert_eq!(account_value(&bare_key, None).field("meters"), None);
+        let login = json!({ "id": "a1", "usageWindows": [{ "label": "5h", "usedFraction": 0.25 }] });
+        assert_eq!(account_value(&login, None).field("meters"), None);
     }
 
     fn ids(value: &Value) -> Vec<String> {

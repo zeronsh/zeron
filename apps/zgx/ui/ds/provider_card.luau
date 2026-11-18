@@ -74,10 +74,20 @@ export type Account = {
 	-- whether it can be put in use.
 	active: boolean?,
 	switchable: boolean?,
-	-- An API key, not an account: no plan, no meters, its provider's mark
-	-- for a face (`provider`, the agent's id for it).
+	-- An API key, not an account: no plan, no session or week, its
+	-- provider's mark for a face (`provider`, the agent's id for it).
 	key: boolean?,
 	provider: string?,
+	-- A key whose provider reports allowances of its own (NaN's, one per
+	-- model): a meter each, named by the window.
+	meters: { KeyMeter }?,
+}
+
+export type KeyMeter = {
+	label: string,
+	used: number,
+	-- When it starts over (seconds since the epoch), if known.
+	resets: number?,
 }
 
 -- One model provider's accounts of an agent that keeps a login per
@@ -125,10 +135,10 @@ end
 
 -- One window's meter: its name, the bar, the percent, on one line. Fixed
 -- widths, held, so the meters line up down the list. (`label`: its name's
--- message's key.)
-local METER = { label = 52, bar = 88, percent = 34 }
+-- message's key; `model`: a model's own name instead, wider, cut to fit.)
+local METER = { label = 52, model = 112, bar = 88, percent = 34 }
 
-local function meter(label: string, fraction: () -> number): Node
+local function meter(label: string, fraction: () -> number, model: string?): Node
 	local function tone(): string
 		return level(fraction())
 	end
@@ -136,7 +146,9 @@ local function meter(label: string, fraction: () -> number): Node
 		gap = "$space.2",
 		items = "center",
 		shrink = 0,
-		ui.text { locale.t(label), w = METER.label, shrink = 0, text_size = "$font.size.xs", line_height = "$font.line.xs", color = "$text.tertiary" },
+		if model
+			then ui.text { model, literal = true, truncate = true, min_w = 0, w = METER.model, shrink = 0, text_size = "$font.size.xs", line_height = "$font.line.xs", color = "$text.tertiary" }
+			else ui.text { locale.t(label), w = METER.label, shrink = 0, text_size = "$font.size.xs", line_height = "$font.line.xs", color = "$text.tertiary" },
 		ui.div {
 			w = METER.bar,
 			shrink = 0,
@@ -145,7 +157,7 @@ local function meter(label: string, fraction: () -> number): Node
 				tone = tone :: any,
 				size = "thin",
 				w_full = true,
-				label = locale.s("ds.provider_card.usage", { label = locale.s(label) }),
+				label = locale.s("ds.provider_card.usage", { label = model or locale.s(label) }),
 			},
 		},
 		ui.text {
@@ -163,6 +175,33 @@ local function meter(label: string, fraction: () -> number): Node
 				return if t == "accent" then "$text.tertiary" else `$zeron.tone.{t}.ink`
 			end,
 		},
+	}
+end
+
+-- A key's own allowances: a meter per window, its full name and when it
+-- starts over in its tooltip.
+local function key_meters(row: State<Account>): Node
+	local list = ui.computed(function(): { KeyMeter }
+		return row:get().meters or {}
+	end)
+	local function by_label(m: KeyMeter): string
+		return m.label
+	end
+	return ui.column {
+		gap = "$zeron.space.hair",
+		ui.each(list, function(m: KeyMeter, _i: number, now: State<KeyMeter>): Node
+			return ui.div {
+				tooltip = Tooltip {
+					function(): string
+						local words = M.reset_words(now:get().resets)
+						return if words then `{m.label} · {words}` else m.label
+					end,
+				},
+				meter("", function(): number
+					return now:get().used
+				end, m.label),
+			}
+		end, { key = by_label }),
 	}
 end
 
@@ -490,7 +529,12 @@ local function account(c: CardProps, row: State<Account>, group: { read_only: bo
 		control = ui.row {
 			gap = "$space.3",
 			items = "center",
-			-- (An API key has no plan, so no windows: no meters for it.)
+			-- (An API key has no plan, so no session or week; one whose
+			-- provider reports its own allowances shows those instead.)
+			ui.show(function(): boolean
+				local a = row:get()
+				return a.key == true and a.meters ~= nil and #a.meters > 0
+			end, key_meters(row)),
 			ui.show(function(): boolean
 				return row:get().key ~= true
 			end, ui.column {
