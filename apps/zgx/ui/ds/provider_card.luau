@@ -81,6 +81,8 @@ export type Account = {
 	-- A key whose provider reports allowances of its own (NaN's, one per
 	-- model): a meter each, named by the window.
 	meters: { KeyMeter }?,
+	-- Why a key's provider refused it, in the engine's words.
+	error: string?,
 }
 
 export type KeyMeter = {
@@ -508,6 +510,11 @@ local function account(c: CardProps, row: State<Account>, group: { read_only: bo
 		-- (A key's name is no address: shown as it is.)
 		private_label = row:peek().key ~= true,
 		description = detail,
+		-- (A key its provider refused says why, under its line.)
+		detail = function(): string?
+			local a = row:get()
+			return if a.key == true then a.error else nil
+		end,
 		-- (The face is the address's: a new one only if the address changes.
 		-- An API key has no face: its provider's mark, in the add rows' well.)
 		lead = if row:peek().key == true

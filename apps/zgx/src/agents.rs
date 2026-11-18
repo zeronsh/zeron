@@ -1826,6 +1826,13 @@ fn account_value(account: &Json, reset: Option<&Reset>) -> Value {
             .collect();
         fields.push(("meters", Value::List(meters.into())));
     }
+    // Why a key's provider refused it (NaN: "NaN rejected this API key"),
+    // in the engine's words. A login's row keeps its own line instead.
+    if account["authKind"].as_str() == Some("api-key")
+        && let Some(error) = account["usageError"].as_str()
+    {
+        fields.push(("error", Value::from(error)));
+    }
     Value::record(fields)
 }
 
@@ -2196,6 +2203,17 @@ mod tests {
         assert_eq!(account_value(&bare_key, None).field("meters"), None);
         let login = json!({ "id": "a1", "usageWindows": [{ "label": "5h", "usedFraction": 0.25 }] });
         assert_eq!(account_value(&login, None).field("meters"), None);
+    }
+
+    #[test]
+    fn a_key_its_provider_refused_says_why() {
+        let rejected = json!({ "id": "k3", "authKind": "api-key", "usageError": "NaN rejected this API key" });
+        assert_eq!(
+            account_value(&rejected, None).field("error").map(text).as_deref(),
+            Some("NaN rejected this API key")
+        );
+        let login = json!({ "id": "a1", "usageError": "Usage unavailable" });
+        assert_eq!(account_value(&login, None).field("error"), None);
     }
 
     fn ids(value: &Value) -> Vec<String> {
