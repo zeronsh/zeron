@@ -200,6 +200,11 @@ export const claimsZeron = (text: string): string | undefined => {
   return ZERON_SPELLED.find(([, re]) => readings.some((r) => re.test(r)))?.[0];
 };
 
+/** Whether a listing with this name and summary would be refused
+ * `claims_zeron` for a publisher without Zeron's own badge. */
+export const listingClaimsZeron = (name: string | null, summary: string | null): boolean =>
+  (name !== null && claimsZeron(name) !== undefined) || (summary !== null && claimsZeron(summary) !== undefined);
+
 /** (The fold of a path, as the store and devices compare paths: paths.ts.) */
 export { foldPath } from "./paths";
 

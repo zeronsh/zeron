@@ -537,6 +537,12 @@ const pluginAction = async (env: Env, db: D1Database, adminId: string, id: strin
     }
     case "restore":
       if (plugin.status !== "suspended") return fail(409, "invalid_state", "It isn't suspended.");
+      // Back only once it no longer says it's Zeron's own, or its owner is
+      // (zeron-claims.ts: move it to an account with the badge, or take the
+      // versions that say so down, first).
+      if (!(await isZeronsOwn(env, plugin.owner_id)) && (await pluginsClaimingZeron(db, [plugin.owner_id], id)).length > 0) {
+        return fail(409, "claims_zeron", "Its listing says it's Zeron's own and its owner doesn't carry Zeron's badge: transfer it to an account that does, or take those versions down, first.");
+      }
       conflict = await change(
         db,
         db.prepare("UPDATE plugins SET status = 'active', suspend_reason = NULL WHERE id = ? AND status = 'suspended'").bind(id),
@@ -572,7 +578,7 @@ const pluginAction = async (env: Env, db: D1Database, adminId: string, id: strin
       if (to === plugin.owner_id) return fail(409, "invalid_state", "They already own it.");
       // A plugin that says it's Zeron's own goes only to an account that is.
       if (!(await isZeronsOwn(env, to)) && (await pluginsClaimingZeron(db, [plugin.owner_id], id)).length > 0) {
-        return fail(409, "claims_zeron", "Its listing says it's Zeron's own, and they don't carry Zeron's badge: take down or remove those versions first.");
+        return fail(409, "claims_zeron", "Its listing says it's Zeron's own, and they don't carry Zeron's badge: it's renamed first.");
       }
       conflict = await change(
         db,

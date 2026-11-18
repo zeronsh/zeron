@@ -94,7 +94,7 @@ import { json, jsonError } from "./http";
 import { adminAuthorized } from "./cloud/billing";
 import { foldUsername } from "./username";
 import { deleteUserBlobs } from "./user-images";
-import { ZERON_BADGE, pluginsClaimingZeron } from "./store/zeron-claims";
+import { ZERON_BADGE, suspendZeronClaims } from "./store/zeron-claims";
 
 export const USER_DIRECTORY_NAME = "users1";
 
@@ -2216,18 +2216,20 @@ const handleBadgeRoute = async (
   }
   const ids = userIds === "all" ? "all" : [...new Set(userIds as string[])];
   if (action === "revoke") {
-    // Zeron's own badge doesn't leave an account whose plugins still say
-    // they're Zeron's own (store/zeron-claims.ts): those first.
+    const revoked = await directory.revokeBadge(body.badgeId, ids as string[]);
+    // Zeron's own badge gone, each of their plugins that says it's Zeron's
+    // own is suspended (store/zeron-claims.ts): named here and in the audit.
     if (body.badgeId === ZERON_BADGE && storeDb) {
-      const plugins = await pluginsClaimingZeron(storeDb, ids as string[]);
-      if (plugins.length > 0) {
-        return json(
-          { error: "claims_zeron", message: "Their plugins say they're Zeron's own: transfer them to Zeron's account, or take those versions down, first.", plugins },
-          409
-        );
-      }
+      const suspended = await suspendZeronClaims(storeDb, ids as string[], "operator");
+      return json({
+        revoked,
+        suspended,
+        ...(suspended.length
+          ? { message: "Each suspended plugin comes back by a staff restore, once it's moved to an account with Zeron's badge or the versions that say it's Zeron's own are taken down." }
+          : {})
+      });
     }
-    return json({ revoked: await directory.revokeBadge(body.badgeId, ids as string[]) });
+    return json({ revoked });
   }
   if (isEarnedBadge(body.badgeId)) {
     if (ids === "all") return earnedBadgeError(body.badgeId);

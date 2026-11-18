@@ -258,15 +258,13 @@ describe("store listing: the mark (amendment 45)", () => {
 describe("store listing: claims of being Zeron's own", () => {
   it("reads each phrase as the mark's words are read", () => {
     for (const text of [
-      "Git by Zeron", "Git by Zer0n", "Git by Z\u{435}ron", "z e r o n approved", "Z.E.R.O.N. approved", "Git by Z e r o n",
+      "Git by Zeron", "Git by Zer0n", "Git by Z\u{435}ron", "Git b\u{443} Zeron", "Git by \u{1d22}\u{1d07}\u{280}\u{1d0f}\u{274}", "z e r o n approved", "Z.E.R.O.N. approved", "Git by Z e r o n",
       "Zeron  -  certified", "the zeron\u{2019}s own board", "Zeron\u{2bc}s own", "Notes from Zer\u{fe0f}on"
     ]) {
       expect(claimsZeron(text), JSON.stringify(text)).toBeDefined();
     }
   });
 
-  // (Letters the shared table has no look-alikes for yet, b y z n among
-  // them, read only as themselves: "Git bу Zeron", "Git by ᴢᴇʀᴏɴ" wait on it.)
   it("leaves what is only about Zeron alone", () => {
     for (const text of ["Themes for Zeron", "Zeronaut", "Zeron notes", "A board by Zenon", "Lazeron approved", "by zeronaut", "from zero n"]) {
       expect(claimsZeron(text), JSON.stringify(text)).toBeUndefined();
