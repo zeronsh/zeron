@@ -158,6 +158,57 @@ describe("store admin routes", () => {
     }
   });
 
+  it("names in the submission's diff, with before and after, an MCP server, service or setting that alone set the flag", async () => {
+    const a = await author();
+    const files = { "svc.luau": "return {}", "other.luau": "return {}" };
+    const mcp = { command: "node", args: ["server.js"], env: { MODE: "read" } };
+    const setting = { kind: "folder", key: "out", label: "Where it writes" };
+    const cases: { what: string; base: Record<string, unknown>; next: Record<string, unknown>; field: string; named: unknown }[] = [
+      {
+        what: "the MCP server's command",
+        base: { permissions: ["ui.add", "native"], mcp },
+        next: { permissions: ["ui.add", "native"], mcp: { ...mcp, command: "deno" } },
+        field: "mcp_changed",
+        named: { before: { command: "node", args: ["server.js"], env: { MODE: "read" } }, after: { command: "deno", args: ["server.js"], env: { MODE: "read" } } }
+      },
+      {
+        what: "the service",
+        base: { permissions: ["ui.add", "service"], service: "svc.luau" },
+        next: { permissions: ["ui.add", "service"], service: "other.luau" },
+        field: "service_changed",
+        named: { before: "svc.luau", after: "other.luau" }
+      },
+      {
+        what: "a granting setting",
+        base: { settings: [setting] },
+        next: { settings: [{ ...setting, key: "elsewhere" }] },
+        field: "settings_changed",
+        named: true
+      }
+    ];
+    for (const c of cases) {
+      const id = uniqueId("bound");
+      await listed(a, id, "1.0.0", { manifest: c.base, files });
+      await pending(a, id, "1.1.0", { manifest: c.next, files });
+      const item = (await json<{ items: Record<string, any>[] }>(await adminCall("GET", "/store/v1/admin/queue?limit=50"))).items.find((i) => i.plugin.id === id)!;
+      expect([item.asks_changed, item.new_asks], c.what).toEqual([true, []]);
+      const diff = (await json<{ permissions_diff: Record<string, unknown> }>(await adminCall("GET", `/store/v1/admin/submissions/${id}/1.1.0`))).permissions_diff;
+      expect(diff[c.field], c.what).toEqual(c.named);
+      // The other two read unchanged: null, or false for the setting flag.
+      const others = Object.fromEntries(["mcp_changed", "service_changed", "settings_changed"].filter((f) => f !== c.field).map((f) => [f, diff[f]]));
+      expect(Object.values(others).every((v) => v === null || v === false), c.what).toBe(true);
+      // And the publish's own check says it.
+      const since = ((await json<{ checks: { id: string; message: string }[] }>(await adminCall("GET", `/store/v1/admin/submissions/${id}/1.1.0`))).checks).find((ch) => ch.id === "since_approved")!;
+      expect(since.message, c.what).toMatch(/MCP server|service|setting/);
+    }
+    // Nothing of the three moved: null, null, false.
+    const same = uniqueId("bound");
+    await listed(a, same, "1.0.0", { manifest: cases[0]!.base, files });
+    await pending(a, same, "1.1.0", { manifest: cases[0]!.base, files });
+    const diff = (await json<{ permissions_diff: Record<string, unknown> }>(await adminCall("GET", `/store/v1/admin/submissions/${same}/1.1.0`))).permissions_diff;
+    expect([diff.mcp_changed, diff.service_changed, diff.settings_changed]).toEqual([null, null, false]);
+  });
+
   it("approves, rejects with what the author reads, and refuses every illegal transition", async () => {
     const a = await author();
     const id = uniqueId();

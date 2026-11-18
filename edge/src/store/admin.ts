@@ -29,7 +29,7 @@ import { userDirectoryStub } from "../user-directory";
 import { pluginCacheKeys } from "./author";
 import { purge } from "./cache";
 import { authorCard, authorsOf, listingState, ownerCard, parseStoredJson, versionInfo } from "./cards";
-import { ASK_PATHS, type ConsentItem, askParts, asksChanged, consentDiff, toolInputs } from "./consent";
+import { ASK_PATHS, type ConsentItem, askParts, askPartsOf, asksChanged, consentDiff } from "./consent";
 import { VERSION_ORDER, type VersionRow, auditIfChanged, pluginRow, relist, versionRow } from "./db";
 import { answer, fail, notFound, objectBody, refusedBody } from "./http";
 import { readBody, requireAdmin, revokeDeployKeys } from "./principal";
@@ -165,6 +165,7 @@ const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
       const checks = parseStoredJson<{ level: string }[]>(r.checks, []);
       const asks = parseStoredJson<ConsentItem | null>(r.permissions, null);
       const baseAsks = parseStoredJson<ConsentItem | null>(r.base_permissions, null);
+      const diff = asks ? consentDiff(baseAsks, asks, { before: baseAsks ? askParts(r.base_parts) : null, after: askParts(r.parts) }) : null;
       const count = (level: string) => checks.filter((c) => c.level === level).length;
       return {
         plugin: { id: r.plugin_id, name: r.name },
@@ -177,10 +178,11 @@ const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
         // through the files route with this version.
         icon: r.icon,
         ...(r.base_version !== null ? { base: r.base_version } : {}),
-        new_asks: asks ? consentDiff(baseAsks, asks).added : [],
-        // Anything else that moved in what it asks (amendment 40); false
-        // for a first version.
-        asks_changed: asks !== null && baseAsks !== null && asksChanged(baseAsks, asks, askParts(r.base_parts), askParts(r.parts)),
+        new_asks: diff?.added ?? [],
+        // Anything else that moved in what it asks, all of it named in the
+        // submission's permissions_diff (amendments 40, 41); false for a
+        // first version.
+        asks_changed: diff !== null && baseAsks !== null && asksChanged(diff),
         checks: { ok: count("ok"), warn: count("warn"), fail: count("fail") }
       };
     }),
@@ -250,7 +252,7 @@ const submission = async (env: Env, db: D1Database, id: string, versionText: str
     checks: parseStoredJson(v.checks, []),
     permissions,
     permissions_diff: permissions
-      ? consentDiff(basePermissions, permissions, { before: toolInputs(base?.manifest), after: toolInputs(v.manifest) })
+      ? consentDiff(basePermissions, permissions, { before: base ? askPartsOf(base.manifest) : null, after: askPartsOf(v.manifest) })
       : null
   });
 };
