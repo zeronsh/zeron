@@ -33,6 +33,7 @@ import { type ConsentItem, consentDiff } from "./consent";
 import { VERSION_ORDER, type VersionRow, auditIfChanged, pluginRow, relist, versionRow } from "./db";
 import { answer, fail, notFound, objectBody, refusedBody } from "./http";
 import { readBody, requireAdmin, revokeDeployKeys } from "./principal";
+import { isUnused, releaseId } from "./release";
 import { decodeSegment } from "./serve";
 import { foldUsername } from "../username";
 
@@ -52,11 +53,62 @@ const unb64 = (text: string | null): unknown => {
     return null;
   }
 };
-/** A cursor of two numbers (a time or seq, and a rowid), or null if bad. */
-const pair = (text: string | null): [number, number] | undefined | null => {
+/** A keyset cursor: the item's two sort numbers (a time and a rowid, or a
+ * seq twice), and whether it pages back from it (amendment 29). */
+interface Keyset {
+  readonly a: number;
+  readonly b: number;
+  readonly back: boolean;
+}
+
+/** The cursor in `text`: undefined for none, null when it isn't one. */
+const keyset = (text: string | null): Keyset | undefined | null => {
   const v = unb64(text);
   if (v === undefined) return undefined;
-  return Array.isArray(v) && v.length === 2 && v.every((n) => Number.isSafeInteger(n)) ? (v as [number, number]) : null;
+  if (!Array.isArray(v) || (v.length !== 2 && !(v.length === 3 && v[2] === "prev"))) return null;
+  const [a, b] = v as unknown[];
+  return Number.isSafeInteger(a) && Number.isSafeInteger(b) ? { a: a as number, b: b as number, back: v.length === 3 } : null;
+};
+
+/** The SQL that pages a list ordered by (`colA`, `colB`), ascending or not,
+ * from `after`: its condition (with a leading AND), its order and binds. */
+const keysetSql = (colA: string, colB: string, asc: boolean, after: Keyset | undefined) => {
+  const forward = asc !== (after?.back ?? false);
+  const cmp = forward ? ">" : "<";
+  const dir = forward ? "ASC" : "DESC";
+  return {
+    where: after ? `AND (${colA} ${cmp} ? OR (${colA} = ? AND ${colB} ${cmp} ?))` : "",
+    order: `${colA} ${dir}, ${colB} ${dir}`,
+    binds: after ? [after.a, after.a, after.b] : []
+  };
+};
+
+/** `?limit`: 1 to PAGE (the default), or null when it's something else. */
+const limitOf = (url: URL): number | null => {
+  const raw = url.searchParams.get("limit");
+  if (raw === null) return PAGE;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) && n >= 1 && n <= PAGE ? n : null;
+};
+
+/** A page of `rows` (read limit + 1, in the order `keysetSql` gave), turned
+ * the right way round, with its `next_cursor` and `prev_cursor`. */
+const pageOf = <R>(rows: R[], limit: number, after: Keyset | undefined, key: (row: R) => [number, number]) => {
+  const back = after?.back ?? false;
+  const more = rows.length > limit;
+  const page = rows.slice(0, limit);
+  if (back) page.reverse();
+  const first = page[0];
+  const last = page[page.length - 1];
+  const hasNext = back || more;
+  const hasPrev = back ? more : after !== undefined;
+  return {
+    page,
+    links: {
+      ...(hasNext && last ? { next_cursor: b64(key(last)) } : {}),
+      ...(hasPrev && first ? { prev_cursor: b64([...key(first), "prev"]) } : {})
+    }
+  };
 };
 
 const usernames = async (env: Env, ids: readonly string[]): Promise<Record<string, string | null>> => {
@@ -69,26 +121,26 @@ const usernames = async (env: Env, ids: readonly string[]): Promise<Record<strin
 const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
   const status = url.searchParams.get("status") ?? "pending";
   if (status !== "all" && !(VERSION_STATUSES as readonly string[]).includes(status)) return fail(400, "bad_request", "status is a version state or all.");
-  const after = pair(url.searchParams.get("cursor"));
+  const after = keyset(url.searchParams.get("cursor"));
   if (after === null) return fail(400, "bad_cursor", "That cursor isn't from this list.");
+  const limit = limitOf(url);
+  if (limit === null) return fail(400, "bad_request", `limit is 1 to ${PAGE}.`);
   // The queue reads oldest first; any other state, newest first.
-  const asc = status === "pending";
+  const ks = keysetSql("v.submitted_at", "v.rowid", status === "pending", after);
   const rows = (
     await db
       .prepare(
         `SELECT v.rowid AS rid, v.plugin_id, v.version, v.status, v.submitted_at, v.decided_at, v.publisher_id, v.via, v.checks,
                 v.name, v.is_release
          FROM versions v
-         WHERE (? = 'all' OR v.status = ?)
-           ${after ? `AND (v.submitted_at ${asc ? ">" : "<"} ? OR (v.submitted_at = ? AND v.rowid ${asc ? ">" : "<"} ?))` : ""}
-         ORDER BY v.submitted_at ${asc ? "ASC" : "DESC"}, v.rowid ${asc ? "ASC" : "DESC"} LIMIT ?`
+         WHERE (? = 'all' OR v.status = ?) ${ks.where}
+         ORDER BY ${ks.order} LIMIT ?`
       )
-      .bind(status, status, ...(after ? [after[0], after[0], after[1]] : []), PAGE + 1)
+      .bind(status, status, ...ks.binds, limit + 1)
       .all<{ rid: number; plugin_id: string; version: string; status: string; submitted_at: number; decided_at: number | null; publisher_id: string; via: string; checks: string; name: string; is_release: number }>()
   ).results;
-  const page = rows.slice(0, PAGE);
+  const { page, links } = pageOf(rows, limit, after, (r) => [r.submitted_at, r.rid]);
   const names = await usernames(env, page.map((r) => r.publisher_id));
-  const last = page[page.length - 1];
   return answer({
     items: page.map((r) => {
       const checks = parseStoredJson<{ level: string }[]>(r.checks, []);
@@ -104,7 +156,7 @@ const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
         warnings: checks.filter((c) => c.level === "warn").length
       };
     }),
-    ...(rows.length > PAGE && last ? { next_cursor: b64([last.submitted_at, last.rid]) } : {})
+    ...links
   });
 };
 
@@ -331,20 +383,22 @@ const adminPlugin = async (env: Env, db: D1Database, id: string): Promise<Respon
 const reports = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
   const status = url.searchParams.get("status") ?? "open";
   if (!["open", "dismissed", "actioned", "all"].includes(status)) return fail(400, "bad_request", "status is open, dismissed, actioned or all.");
-  const after = pair(url.searchParams.get("cursor"));
+  const after = keyset(url.searchParams.get("cursor"));
   if (after === null) return fail(400, "bad_cursor", "That cursor isn't from this list.");
+  const limit = limitOf(url);
+  if (limit === null) return fail(400, "bad_request", `limit is 1 to ${PAGE}.`);
+  const ks = keysetSql("r.id", "r.id", false, after);
   const rows = (
     await db
       .prepare(
         `SELECT r.*, p.name AS plugin_name FROM reports r LEFT JOIN plugins p ON p.id = r.plugin_id
-         WHERE (? = 'all' OR r.status = ?) ${after ? "AND r.id < ?" : ""} ORDER BY r.id DESC LIMIT ?`
+         WHERE (? = 'all' OR r.status = ?) ${ks.where} ORDER BY ${ks.order} LIMIT ?`
       )
-      .bind(status, status, ...(after ? [after[1]] : []), PAGE + 1)
+      .bind(status, status, ...ks.binds, limit + 1)
       .all<{ id: number; plugin_id: string; plugin_name: string | null; version: string | null; reporter_id: string; reason: string; text: string; created_at: number; status: string; resolved_by: string | null; resolved_at: number | null; note: string | null }>()
   ).results;
-  const page = rows.slice(0, PAGE);
+  const { page, links } = pageOf(rows, limit, after, (r) => [r.id, r.id]);
   const names = await usernames(env, [...page.map((r) => r.reporter_id), ...page.flatMap((r) => (r.resolved_by ? [r.resolved_by] : []))]);
-  const last = page[page.length - 1];
   return answer({
     reports: page.map((r) => ({
       id: r.id,
@@ -359,7 +413,7 @@ const reports = async (env: Env, db: D1Database, url: URL): Promise<Response> =>
       resolved_at: r.resolved_at,
       note: r.note
     })),
-    ...(rows.length > PAGE && last ? { next_cursor: b64([0, last.id]) } : {})
+    ...links
   });
 };
 
@@ -381,19 +435,21 @@ const resolveReport = async (db: D1Database, adminId: string, reportId: number, 
 };
 
 const audit = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
-  const after = pair(url.searchParams.get("cursor"));
+  const after = keyset(url.searchParams.get("cursor"));
   if (after === null) return fail(400, "bad_cursor", "That cursor isn't from this list.");
+  const limit = limitOf(url);
+  if (limit === null) return fail(400, "bad_request", `limit is 1 to ${PAGE}.`);
+  const ks = keysetSql("seq", "seq", false, after);
   const pluginFilter = url.searchParams.get("plugin");
   if (pluginFilter !== null && !ID_RE.test(pluginFilter)) return fail(400, "bad_request", "plugin is a plugin id.");
   const rows = (
     await db
-      .prepare(`SELECT * FROM audit WHERE (? IS NULL OR plugin_id = ?) ${after ? "AND seq < ?" : ""} ORDER BY seq DESC LIMIT ?`)
-      .bind(pluginFilter, pluginFilter, ...(after ? [after[1]] : []), PAGE + 1)
+      .prepare(`SELECT * FROM audit WHERE (? IS NULL OR plugin_id = ?) ${ks.where} ORDER BY ${ks.order} LIMIT ?`)
+      .bind(pluginFilter, pluginFilter, ...ks.binds, limit + 1)
       .all<{ seq: number; at: number; actor_id: string; action: string; plugin_id: string | null; version: string | null; detail: string | null }>()
   ).results;
-  const page = rows.slice(0, PAGE);
+  const { page, links } = pageOf(rows, limit, after, (r) => [r.seq, r.seq]);
   const names = await usernames(env, page.map((r) => r.actor_id));
-  const last = page[page.length - 1];
   return answer({
     entries: page.map((r) => ({
       seq: r.seq,
@@ -404,11 +460,11 @@ const audit = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
       version: r.version,
       detail: parseStoredJson(r.detail, null)
     })),
-    ...(rows.length > PAGE && last ? { next_cursor: b64([0, last.seq]) } : {})
+    ...links
   });
 };
 
-const reservations = async (request: Request, env: Env, db: D1Database, adminId: string, rest: readonly string[], body: Record<string, unknown> | undefined): Promise<Response> => {
+const reservations = async (request: Request, env: Env, db: D1Database, bucket: R2Bucket, adminId: string, rest: readonly string[], body: Record<string, unknown> | undefined): Promise<Response> => {
   if (rest.length === 0 && request.method === "GET") {
     const rows = (await db.prepare("SELECT * FROM reservations ORDER BY id").all<{ id: string; user_id: string | null; note: string | null; created_at: number }>()).results;
     const names = await usernames(env, rows.flatMap((r) => (r.user_id ? [r.user_id] : [])));
@@ -427,6 +483,13 @@ const reservations = async (request: Request, env: Env, db: D1Database, adminId:
     }
     const note = body?.note ?? null;
     if (note !== null && (typeof note !== "string" || note.length > MAX_MESSAGE)) return fail(400, "bad_request", "note is short text.");
+    // An id someone claimed and never used is released for the reservation;
+    // one in use changes hands only by a transfer.
+    let released = false;
+    if (await pluginRow(db, id)) {
+      if (!(await isUnused(db, id))) return fail(409, "invalid_state", `"${id}" is in use: transfer it instead.`);
+      released = await releaseId(env, db, bucket, id, Number.POSITIVE_INFINITY, adminId);
+    }
     await db.batch([
       db
         .prepare(
@@ -436,21 +499,24 @@ const reservations = async (request: Request, env: Env, db: D1Database, adminId:
         .bind(id, userId, note, adminId, now),
       auditIfChanged(db, now, adminId, "reservation.set", id, null, { user_id: userId, note })
     ]);
-    return answer({ id, to: userId ? { username: foldUsername(body?.to_username) } : null, note }, 200);
+    return answer({ id, to: userId ? { username: foldUsername(body?.to_username) } : null, note, released }, 200);
   }
   if (rest.length === 1 && request.method === "DELETE") {
+    // Frees the id: its reservation goes, and a claim never used is released.
     const id = rest[0]!;
     const results = await db.batch([
       db.prepare("DELETE FROM reservations WHERE id = ?").bind(id),
       auditIfChanged(db, now, adminId, "reservation.release", id, null, undefined)
     ]);
-    return (results[0]?.meta.changes ?? 0) === 0 ? notFound() : answer({ id, released: true });
+    const unreserved = (results[0]?.meta.changes ?? 0) > 0;
+    const released = ID_RE.test(id) && (await pluginRow(db, id)) !== null && (await isUnused(db, id)) && (await releaseId(env, db, bucket, id, Number.POSITIVE_INFINITY, adminId));
+    return unreserved || released ? answer({ id, released: true }) : notFound();
   }
   return fail(405, "method_not_allowed", "That method isn't allowed here.");
 };
 
 /** `/store/v1/admin/…`: `parts` from `admin` on. */
-export const handleAdmin = async (request: Request, env: Env, db: D1Database, url: URL, parts: readonly string[]): Promise<Response> => {
+export const handleAdmin = async (request: Request, env: Env, db: D1Database, bucket: R2Bucket, url: URL, parts: readonly string[]): Promise<Response> => {
   const admin = await requireAdmin(request, env);
   if (admin instanceof Response) return admin;
   const [, section, a, b, c, d] = parts;
@@ -483,6 +549,6 @@ export const handleAdmin = async (request: Request, env: Env, db: D1Database, ur
     if (parts.length === 4 && post && b === "resolve" && a && /^[0-9]{1,15}$/.test(a)) return resolveReport(db, admin.userId, Number(a), body);
   }
   if (section === "audit" && parts.length === 2 && get) return audit(env, db, url);
-  if (section === "reservations") return reservations(request, env, db, admin.userId, parts.slice(2), body);
+  if (section === "reservations") return reservations(request, env, db, bucket, admin.userId, parts.slice(2), body);
   return notFound();
 };

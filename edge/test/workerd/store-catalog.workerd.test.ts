@@ -8,7 +8,7 @@ const json = async <T = Record<string, unknown>>(res: Response) => (await res.js
 const list = async (query: string, bearer?: string) => {
   const res = await call(bearer, "GET", `/store/v1/plugins?${query}`);
   expect(res.status, await res.clone().text()).toBe(200);
-  return json<{ items: Card[]; next_cursor?: string }>(res);
+  return json<{ items: Card[]; next_cursor?: string; prev_cursor?: string }>(res);
 };
 
 describe("store catalog", () => {
@@ -67,7 +67,8 @@ describe("store catalog", () => {
     for (let i = 0; i < 7; i++) {
       const id = uniqueId("page");
       ids.push(id);
-      await listed(a, id, "1.0.0", { manifest: { keywords: [tag] } });
+      // (An account claims at most 5 new ids a week.)
+      await listed(i < 4 ? a : await author(), id, "1.0.0", { manifest: { keywords: [tag] } });
     }
     for (const sort of ["popular", "updated", "new"]) {
       const all = (await list(`keyword=${tag}&sort=${sort}&limit=50`)).items.map((c) => c.id);
@@ -81,6 +82,19 @@ describe("store catalog", () => {
           cursor = page.next_cursor;
         } while (cursor);
         expect(seen, `${sort} by ${size}`).toEqual(all);
+        // And back again from the last page (amendment 29), page by page.
+        const pages: string[][] = [];
+        cursor = undefined;
+        let page = await list(`keyword=${tag}&sort=${sort}&limit=${size}`);
+        expect(page.prev_cursor).toBeUndefined();
+        while (page.next_cursor) page = await list(`keyword=${tag}&sort=${sort}&limit=${size}&cursor=${page.next_cursor}`);
+        pages.unshift(page.items.map((c) => c.id));
+        while (page.prev_cursor) {
+          page = await list(`keyword=${tag}&sort=${sort}&limit=${size}&cursor=${page.prev_cursor}`);
+          pages.unshift(page.items.map((c) => c.id));
+        }
+        expect(pages.flat(), `${sort} back by ${size}`).toEqual(all);
+        expect(pages.every((p, i) => i === pages.length - 1 || p.length === size)).toBe(true);
       }
     }
     // A cursor belongs to its list.

@@ -1,7 +1,33 @@
-# Plugin store: package size limit
+# Plugin store: rollout gate and package size limit
 
-The store takes packages up to **20 MB** (`STORE_MAX_PACKAGE_BYTES`,
-`edge/src/store/publish.ts`). A device takes up to 50 MB of files (about
+## Before anything reaches main (hard gate)
+
+`edge/wrangler.jsonc` binds `STORE_DB` to **placeholder database ids**
+(`00000000-0000-0000-0000-000000000000` for production, `…0001` for
+staging). A deploy with a placeholder id fails, and the deploy job now runs
+`wrangler d1 migrations apply STORE_DB --remote` before `wrangler deploy`,
+so a placeholder on main breaks every edge deploy. Before the store merges
+to main:
+
+1. Create the databases (`wrangler d1 create zeron-store`,
+   `wrangler d1 create zeron-store-staging`) and put their ids in
+   `edge/wrangler.jsonc` (production and `env.staging`).
+2. Create the R2 buckets `zeron-plugins` and `zeron-staging-plugins`.
+3. Check the rate limit namespace ids (`STORE_READS` 1003/1004,
+   `STORE_WRITES` 1005/1006) don't clash with others on the account.
+4. Give the deploy token D1 edit access (the migrations step needs it).
+5. Apply the migrations to staging by hand once:
+   `npx wrangler d1 migrations apply STORE_DB --remote --env staging`.
+
+## The package limit
+
+The store takes a request body (the `.zeron-plugin` file exactly as
+uploaded: its files as base64 inside JSON) of at most **20,971,520 bytes**
+(20 MiB): `MAX_PUBLISH_BODY_BYTES` (`edge/src/store/principal.ts`), which
+`STORE_MAX_PACKAGE_BYTES` (`edge/src/store/publish.ts`) is. There is no
+second number for decoded files: base64 makes them at most three quarters of
+the body (about 15.7 MB), and the engine's own 50 MB limit on files is
+checked as well. A device takes up to 50 MB of files (about
 67 MB of package, `crates/engine/src/plugins/package.rs`); a bigger plugin
 can still be sideloaded.
 

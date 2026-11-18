@@ -41,6 +41,11 @@ export const STORE_MAX_PACKAGE_BYTES = MAX_PUBLISH_BODY_BYTES;
 /** Versions an account may submit, across its plugins. */
 export const PUBLISHES_PER_HOUR = 10;
 export const PUBLISHES_PER_DAY = 50;
+/** New ids an account may claim in any 7 days (amendment 30). */
+export const CLAIMS_PER_WEEK = 5;
+const WEEK = 7 * 86_400_000;
+
+const CLAIMS_SQL = "(SELECT COUNT(*) FROM id_claims WHERE user_id = ? AND at > ?) < ?";
 
 /** Built-in plugins' ids (the app ships them), beside the engine's own
  * reserved ones (manifest.ts `RESERVED_IDS`, refused as a bad id). */
@@ -122,6 +127,7 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
   if (plugin && plugin.owner_id !== publisher.userId) return fail(403, "id_taken", `"${id}" belongs to another account.`);
   if (plugin?.status === "suspended") return fail(403, "suspended", "This plugin is suspended: it can't take new versions.");
   if (!plugin && (await idReserved(db, id, publisher.userId))) return fail(403, "id_reserved", `"${id}" is kept back: ask Zeron for it.`);
+  if (!plugin && (await overClaims(db, publisher.userId, Date.now()))) return claimsRefusal();
 
   const version = listing.version;
   const precedence = precedenceText(version);
@@ -173,7 +179,11 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
     at += bytes.length;
   }
   const statements: D1PreparedStatement[] = [
-    db.prepare("INSERT INTO plugins (id, owner_id, skeleton, created_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING").bind(id, publisher.userId, skeleton(id), now),
+    // A new id is claimed within the weekly limit, and the claim recorded.
+    db
+      .prepare(`INSERT INTO plugins (id, owner_id, skeleton, created_at) SELECT ?, ?, ?, ? WHERE ${CLAIMS_SQL} ON CONFLICT DO NOTHING`)
+      .bind(id, publisher.userId, skeleton(id), now, publisher.userId, now - WEEK, CLAIMS_PER_WEEK),
+    db.prepare("INSERT INTO id_claims (user_id, plugin_id, at) SELECT ?, ?, ? WHERE changes() = 1").bind(publisher.userId, id, now),
     insertVersion(db, publisher, id, now, {
       version: version.text,
       precedence,
@@ -189,7 +199,13 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
       consent,
       checks
     }),
-    ...fileRows(db, id, version.text, pkg.sha256, files)
+    ...fileRows(db, id, version.text, pkg.sha256, files),
+    // A claim whose version didn't land isn't kept: no id is held without a
+    // submission, and a refused publish doesn't count towards the limit.
+    db
+      .prepare("DELETE FROM id_claims WHERE user_id = ? AND plugin_id = ? AND at = ? AND NOT EXISTS (SELECT 1 FROM versions WHERE plugin_id = ?)")
+      .bind(publisher.userId, id, now, id),
+    db.prepare("DELETE FROM plugins WHERE id = ? AND owner_id = ? AND created_at = ? AND NOT EXISTS (SELECT 1 FROM versions WHERE plugin_id = ?)").bind(id, publisher.userId, now, id)
   ];
   await db.batch(statements);
 
@@ -203,13 +219,23 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
   await Promise.all([bucket.delete(pkgKey), bucket.delete(blobKey)]);
   if (landed) return fail(409, "version_exists", `Version ${landed.version} was already submitted, with other contents. Submit a new version.`);
   const now2 = await pluginRow(db, id);
-  if (!now2) return fail(403, "id_reserved", `"${id}" is too close to the id of a plugin already in the store.`);
+  if (!now2 && (await overClaims(db, publisher.userId, Date.now()))) return claimsRefusal();
+  if (!now2 && (await db.prepare("SELECT 1 FROM plugins WHERE skeleton = ?").bind(skeleton(id)).first())) {
+    return fail(403, "id_reserved", `"${id}" is too close to the id of a plugin already in the store.`);
+  }
+  if (!now2) return fail(409, "not_newer", "Another submission changed this plugin meanwhile: try again.");
   if (now2.owner_id !== publisher.userId) return fail(403, "id_taken", `"${id}" belongs to another account.`);
   if (now2.status === "suspended") return fail(403, "suspended", "This plugin is suspended: it can't take new versions.");
   if (await overRate(db, publisher.userId, Date.now())) return fail(429, "rate_limited", "Too many versions submitted lately. Try again later.");
   const later = await notNewerThan(db, id, order);
   return fail(409, "not_newer", `Version ${version.text} isn't later than ${later ?? "a version submitted just now"}.`);
 };
+
+const overClaims = async (db: D1Database, userId: string, now: number): Promise<boolean> =>
+  (await db.prepare(`SELECT ${CLAIMS_SQL} AS ok`).bind(userId, now - WEEK, CLAIMS_PER_WEEK).first<{ ok: number }>())?.ok !== 1;
+
+const claimsRefusal = (): Response =>
+  fail(429, "rate_limited", `An account claims at most ${CLAIMS_PER_WEEK} new ids a week. Try again later, or publish a new version of one you have.`);
 
 type Order = readonly [number, number, number, number, string];
 

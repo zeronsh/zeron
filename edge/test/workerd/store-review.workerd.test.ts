@@ -1,5 +1,7 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { CLAIMS_PER_WEEK } from "../../src/store/publish";
+import { releaseUnusedIds } from "../../src/store/release";
 import { ADMIN, ADMIN2, author, call, listed, makePackage, publish, uniqueId, adminCall } from "./store-helpers";
 
 const json = async <T = Record<string, unknown>>(res: Response) => (await res.json()) as T;
@@ -275,5 +277,92 @@ describe("store author routes", () => {
     // Publishing and its state are let through to the key's own checks.
     expect((await call(undefined, "POST", `/store/v1/plugins/${id}/versions`, new Uint8Array(4), key)).status).not.toBe(403);
     expect((await call(undefined, "GET", "/store/v1/me/plugins", undefined, key)).status).not.toBe(403);
+  });
+
+  it("pages the audit log both ways", async () => {
+    const a = await author();
+    const id = uniqueId();
+    await pending(a, id, "1.0.0");
+    for (let i = 0; i < 7; i++) expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/feature`, { featured: i % 2 === 0 })).status).toBe(200);
+    type Page = { entries: { seq: number }[]; next_cursor?: string; prev_cursor?: string };
+    const get = async (q: string) => (await (await adminCall("GET", `/store/v1/admin/audit?plugin=${id}&limit=3${q}`)).json()) as Page;
+    const all = ((await (await adminCall("GET", `/store/v1/admin/audit?plugin=${id}`)).json()) as Page).entries.map((e) => e.seq);
+    expect(all).toHaveLength(7);
+    const forward: number[] = [];
+    let page = await get("");
+    forward.push(...page.entries.map((e) => e.seq));
+    while (page.next_cursor) {
+      page = await get(`&cursor=${page.next_cursor}`);
+      forward.push(...page.entries.map((e) => e.seq));
+    }
+    expect(forward).toEqual(all);
+    const back: number[] = [...page.entries.map((e) => e.seq)];
+    while (page.prev_cursor) {
+      page = await get(`&cursor=${page.prev_cursor}`);
+      back.unshift(...page.entries.map((e) => e.seq));
+    }
+    expect(back).toEqual(all);
+    expect((await adminCall("GET", "/store/v1/admin/audit?limit=0")).status).toBe(400);
+  });
+});
+
+describe("store ids: claiming and release (amendment 30)", () => {
+  it("lets an account claim at most 5 new ids in 7 days, and a refused publish claims nothing", async () => {
+    const a = await author();
+    // A publish refused at the insert (not later than nothing: can't happen) — use a bad
+    // package instead: refused before any claim.
+    expect((await publish(a.userId, uniqueId(), new TextEncoder().encode("{}"))).status).toBe(400);
+    for (let i = 0; i < CLAIMS_PER_WEEK; i++) {
+      const id = uniqueId("claim");
+      expect((await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer }))).status).toBe(201);
+    }
+    const id = uniqueId("claim");
+    const res = await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer }));
+    expect([res.status, ((await res.json()) as { error: string }).error]).toEqual([429, "rate_limited"]);
+    expect(await env.STORE_DB.prepare("SELECT 1 FROM plugins WHERE id = ?").bind(id).first()).toBeNull();
+    // New versions of ids already held are not claims.
+    const held = (await env.STORE_DB.prepare("SELECT id FROM plugins WHERE owner_id = ? LIMIT 1").bind(a.userId).first<{ id: string }>())!.id;
+    expect((await publish(a.userId, held, await makePackage({ id: held, version: "1.1.0", signer: a.signer }))).status).toBe(201);
+  });
+
+  it("releases an id never approved and quiet for 90 days, with its versions and objects, and keeps the audit", async () => {
+    const a = await author();
+    const quiet = uniqueId("quiet");
+    const live = uniqueId("live");
+    expect((await publish(a.userId, quiet, await makePackage({ id: quiet, version: "1.0.0", signer: a.signer }))).status).toBe(201);
+    expect((await adminCall("POST", `/store/v1/admin/submissions/${quiet}/1.0.0/reject`, { reason: "broken", message: "No." })).status).toBe(200);
+    await listed(a, live, "1.0.0");
+    const later = Date.now() + 91 * 86_400_000;
+    // Not yet: 90 days haven't passed.
+    expect(await releaseUnusedIds(env as never, Date.now())).toBe(0);
+    const released = await releaseUnusedIds(env as never, later);
+    expect(released).toBeGreaterThanOrEqual(1);
+    expect(await env.STORE_DB.prepare("SELECT 1 FROM plugins WHERE id = ?").bind(quiet).first()).toBeNull();
+    expect(await env.STORE_DB.prepare("SELECT 1 FROM versions WHERE plugin_id = ?").bind(quiet).first()).toBeNull();
+    expect((await env.PLUGIN_STORE.list({ prefix: `pkg/${quiet}/` })).objects).toEqual([]);
+    expect((await env.PLUGIN_STORE.list({ prefix: `files/${quiet}/` })).objects).toEqual([]);
+    expect(await env.STORE_DB.prepare("SELECT 1 FROM plugins WHERE id = ?").bind(live).first()).not.toBeNull();
+    const entries = (await (await adminCall("GET", `/store/v1/admin/audit?plugin=${quiet}`)).json()) as { entries: { action: string; detail: unknown }[] };
+    expect(entries.entries[0]).toMatchObject({ action: "plugin.release", detail: { versions: [{ version: "1.0.0", status: "rejected" }] } });
+    // Anyone may claim it now.
+    const b = await author();
+    expect((await publish(b.userId, quiet, await makePackage({ id: quiet, version: "1.0.0", signer: b.signer }))).status).toBe(201);
+  });
+
+  it("lets an admin release an unused id at once, or reserve it for someone, but never one in use", async () => {
+    const a = await author();
+    const b = await author();
+    const unused = uniqueId("unused");
+    const used = uniqueId("used");
+    expect((await publish(a.userId, unused, await makePackage({ id: unused, version: "1.0.0", signer: a.signer }))).status).toBe(201);
+    expect((await call(a.userId, "POST", `/store/v1/plugins/${unused}/versions/1.0.0/withdraw`)).status).toBe(200);
+    await listed(a, used, "1.0.0");
+    const inUse = await adminCall("POST", "/store/v1/admin/reservations", { id: used, to_username: b.username });
+    expect([inUse.status, ((await inUse.json()) as { error: string }).error]).toEqual([409, "invalid_state"]);
+    const given = await adminCall("POST", "/store/v1/admin/reservations", { id: unused, to_username: b.username });
+    expect(given.status).toBe(200);
+    expect(await given.json()).toMatchObject({ released: true });
+    expect((await publish(a.userId, unused, await makePackage({ id: unused, version: "1.0.1", signer: a.signer }))).status).toBe(403);
+    expect((await publish(b.userId, unused, await makePackage({ id: unused, version: "1.0.0", signer: b.signer }))).status).toBe(201);
   });
 });

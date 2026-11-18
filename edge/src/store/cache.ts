@@ -36,7 +36,10 @@ export const cacheKey = (segments: readonly string[], params: Record<string, str
   // Every segment encoded and behind a `~`: the URL parser takes `.`, `..`,
   // `%2e%2e` (any case) as dot segments, never `~` followed by anything.
   const path = segments.map((s) => `~${encodeURIComponent(s)}`).join("/");
-  return `${ORIGIN}${path}${query ? `?${query}` : ""}`;
+  const key = `${ORIGIN}${path}${query ? `?${query}` : ""}`;
+  // The key is used as a URL: it must read back as exactly what was built.
+  if (new URL(key).href !== key) throw new Error(`store: a cache key that doesn't read back: ${key}`);
+  return key;
 };
 
 export const openCache = (): Promise<Cache> => caches.open(CACHE_NAME);

@@ -4,7 +4,7 @@
  * the store's package limit (src/store/publish.ts STORE_MAX_PACKAGE_BYTES)
  * from numbers rather than a guess. Results: docs/plugin-store-limits.md.
  *
- *   node scripts/store-package-limit.mjs [size in MB …] [--no-r2]
+ *   node scripts/store-package-limit.mjs [size in MB …] [--no-r2] [--chunks]
  *
  * For each size it starts a fresh local workerd (`wrangler dev` on
  * scripts/store-limit/, which runs the publish pipeline's heavy steps:
@@ -29,6 +29,8 @@ const sizes = process.argv.slice(2).filter((a) => !a.startsWith("--")).map(Numbe
 const SIZES_MB = sizes.length ? sizes : [1, 5, 10, 15, 20, 25, 30, 40, 50, 67];
 /** `--no-r2`: measure without the R2 writes (local R2 shares workerd's process). */
 const R2 = !process.argv.includes("--no-r2");
+/** `--chunks`: read the body as the identity lane's readBody does. */
+const CHUNKS = process.argv.includes("--chunks");
 const FILE = 256 * 1024;
 const TICKS = 100; // USER_HZ
 
@@ -130,7 +132,7 @@ for (const size of SIZES_MB) {
     const pkg = makePackage(size * 1024 * 1024);
     const idle = workerds.map((w) => status(w, "VmRSS"));
     const before = workerds.map(cpu);
-    const res = await fetch(`http://127.0.0.1:${port}/${R2 ? "" : "?r2=0"}`, { method: "POST", body: pkg });
+    const res = await fetch(`http://127.0.0.1:${port}/?${R2 ? "" : "r2=0&"}${CHUNKS ? "read=chunks" : ""}`, { method: "POST", body: pkg });
     const text = await res.text();
     const cpus = workerds.map((w, i) => cpu(w) - before[i]);
     const worker = cpus.indexOf(Math.max(...cpus));

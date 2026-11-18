@@ -39,7 +39,7 @@ const route = async (request: Request, env: Env, db: D1Database, bucket: R2Bucke
   if (/^ZeronKey\s/i.test(request.headers.get("authorization") ?? "") && !deployKeyMayCall(method, parts)) {
     return fail(403, "key_not_allowed", "A deploy key can publish its plugin's versions and read its state, nothing else.");
   }
-  if (parts[2] === "admin") return handleAdmin(request, env, db, url, parts.slice(2));
+  if (parts[2] === "admin") return handleAdmin(request, env, db, bucket, url, parts.slice(2));
   if (parts[2] === "me" && parts[3] === "plugins" && parts.length === 4 && read) return handleMyPlugins(request, env, db);
   if (parts[2] === "updates" && parts.length === 3 && method === "POST") {
     if (!(await allowRead(request, env))) return rateLimited();

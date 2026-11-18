@@ -1,7 +1,7 @@
 /**
  * Public catalog reads (contract "Public", amendment 10):
  *
- *   GET /store/v1/plugins?q&category&keyword&featured&sort&cursor&limit → { items, next_cursor? }
+ *   GET /store/v1/plugins?q&category&keyword&featured&sort&cursor&limit → { items, next_cursor?, prev_cursor? }
  *   GET /store/v1/plugins/:id            → PluginDetail
  *   GET /store/v1/plugins/:id/versions   → { versions }
  *   GET /store/v1/categories             → { categories }
@@ -95,7 +95,7 @@ const SORT_KEY: Record<Sort, { readonly expr: string; readonly asc: boolean }> =
 
 const listPlugins = async (env: Env, db: D1Database, lq: ListQuery): Promise<Response> => {
   const filter = JSON.stringify(listParams({ ...lq, cursor: undefined, limit: DEFAULT_LIMIT }));
-  let after: { key: number; seq: number } | undefined;
+  let after: { key: number; seq: number; dir: "next" | "prev" } | undefined;
   if (lq.cursor !== undefined) {
     after = decodeCursor(lq.cursor, filter);
     if (!after) return fail(400, "bad_cursor", "That cursor isn't from this list.");
@@ -112,24 +112,35 @@ const listPlugins = async (env: Env, db: D1Database, lq: ListQuery): Promise<Res
   if (lq.keyword) joins.push({ sql: "JOIN plugin_keywords k ON k.plugin_id = p.id AND k.keyword = ?", binds: [lq.keyword] });
   if (lq.featured) where.push({ sql: "p.featured_at IS NOT NULL", binds: [] });
   const sort = SORT_KEY[lq.sort];
+  // Paging back reads the other way from the cursor's item, then turns round.
+  const back = after?.dir === "prev";
+  const forwardAsc = sort.asc !== back;
   const keyset = after
-    ? { sql: `WHERE (sort_key ${sort.asc ? ">" : "<"} ? OR (sort_key = ? AND seq < ?))`, binds: [after.key, after.key, after.seq] }
+    ? { sql: `WHERE (sort_key ${forwardAsc ? ">" : "<"} ? OR (sort_key = ? AND seq ${back ? ">" : "<"} ?))`, binds: [after.key, after.key, after.seq] }
     : { sql: "", binds: [] };
   const sql = `SELECT * FROM (
       SELECT p.*, COALESCE(${sort.expr}, 0) AS sort_key FROM plugins p
       ${joins.map((j) => j.sql).join(" ")}
       WHERE ${where.map((w) => w.sql).join(" AND ")}
     ) ${keyset.sql}
-    ORDER BY sort_key ${sort.asc ? "ASC" : "DESC"}, seq DESC LIMIT ?`;
+    ORDER BY sort_key ${forwardAsc ? "ASC" : "DESC"}, seq ${back ? "ASC" : "DESC"} LIMIT ?`;
   const ordered = [...joins.flatMap((j) => j.binds), ...where.flatMap((w) => w.binds), ...keyset.binds];
   const rows = (await db.prepare(sql).bind(...ordered, lq.limit + 1).all<PluginRow & { sort_key: number }>()).results;
+  const more = rows.length > lq.limit;
   const page = rows.slice(0, lq.limit);
+  if (back) page.reverse();
   const authors = await authorsOf(env, page.map((p) => p.owner_id));
+  const first = page[0];
   const last = page[page.length - 1];
+  // Forward: more after, and (with a cursor) something before. Back: more
+  // before, and the page it came from after.
+  const hasNext = back ? true : more;
+  const hasPrev = back ? more : after !== undefined;
   return answer(
     {
       items: page.map((p) => pluginCard(p, authorCard(authors[p.owner_id]))),
-      ...(rows.length > lq.limit && last ? { next_cursor: encodeCursor(filter, last.sort_key, last.seq) } : {})
+      ...(hasNext && last ? { next_cursor: encodeCursor(filter, last.sort_key, last.seq) } : {}),
+      ...(hasPrev && first ? { prev_cursor: encodeCursor(filter, first.sort_key, first.seq, "prev") } : {})
     },
     200,
     publicCache(LIST_TTL)

@@ -165,10 +165,11 @@ export const handleReport = async (request: Request, env: Env, db: D1Database, i
     .prepare(
       `INSERT INTO reports (plugin_id, version, reporter_id, reason, text, created_at)
        SELECT ?, ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM reports WHERE reporter_id = ? AND created_at > ?) < ?
-         AND NOT EXISTS (SELECT 1 FROM reports WHERE plugin_id = ? AND reporter_id = ? AND status = 'open')
+       ON CONFLICT DO NOTHING
        RETURNING id`
     )
-    .bind(id, version, caller.userId, reason, text, now, caller.userId, now - 86_400_000, REPORTS_PER_DAY, id, caller.userId)
+    // (ON CONFLICT: the one open report per person, reports_one_open.)
+    .bind(id, version, caller.userId, reason, text, now, caller.userId, now - 86_400_000, REPORTS_PER_DAY)
     .first<{ id: number }>();
   if (!inserted) {
     // Another report of theirs landed meanwhile, or the day's limit.

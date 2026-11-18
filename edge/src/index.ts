@@ -115,6 +115,7 @@ import { handlePluginKeyRoute } from "./plugin-keys";
 import { handleVaultRoute } from "./vault-routes";
 import { handleUserDirectoryRoute, UserDirectory } from "./user-directory";
 import { handleStoreRoute } from "./store/routes";
+import { releaseUnusedIds } from "./store/release";
 import installSh from "./install.sh";
 
 export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom, CloudAccount, CloudIndex, UserDirectory };
@@ -480,8 +481,10 @@ export default {
   },
 
   /** Hourly (`17 * * * *`): Cloud usage reconcile backstop, daily orphan
-   * scan, closed-month exports (cloud/billing.ts). */
+   * scan, closed-month exports (cloud/billing.ts); the plugin store's
+   * release of ids unused for 90 days (store/release.ts). */
   scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): void {
     ctx.waitUntil(runCloudCron(env, controller.scheduledTime));
+    ctx.waitUntil(releaseUnusedIds(env, controller.scheduledTime));
   }
 } satisfies ExportedHandler<Env>;

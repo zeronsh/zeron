@@ -24,17 +24,22 @@ const unb64url = (text: string): string | undefined => {
 
 /** A keyset cursor: the query it pages (`f`), and the last item's sort
  * key (`k`) and seq (`i`). */
-export const encodeCursor = (filter: string, key: number, seq: number): string => b64url(JSON.stringify({ f: filter, k: key, i: seq }));
-export const decodeCursor = (cursor: string, filter: string): { key: number; seq: number } | undefined => {
+/** Which way a cursor pages: past its item (`next`) or before it (`prev`). */
+export type Direction = "next" | "prev";
+
+export const encodeCursor = (filter: string, key: number, seq: number, dir: Direction = "next"): string =>
+  b64url(JSON.stringify({ f: filter, k: key, i: seq, ...(dir === "prev" ? { d: "prev" } : {}) }));
+
+export const decodeCursor = (cursor: string, filter: string): { key: number; seq: number; dir: Direction } | undefined => {
   if (cursor.length > 512) return undefined;
   const text = unb64url(cursor);
   if (text === undefined) return undefined;
   try {
-    const value = JSON.parse(text) as { f?: unknown; k?: unknown; i?: unknown };
+    const value = JSON.parse(text) as { f?: unknown; k?: unknown; i?: unknown; d?: unknown };
     if (value.f !== filter || typeof value.k !== "number" || !Number.isFinite(value.k) || !Number.isSafeInteger(value.i)) return undefined;
-    return { key: value.k, seq: value.i as number };
+    if (value.d !== undefined && value.d !== "prev") return undefined;
+    return { key: value.k, seq: value.i as number, dir: value.d === "prev" ? "prev" : "next" };
   } catch {
     return undefined;
   }
 };
-

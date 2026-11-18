@@ -134,6 +134,8 @@ CREATE TABLE reports (
   note TEXT
 );
 CREATE INDEX reports_open ON reports (status, id);
+-- One open report per person per plugin, however many arrive at once.
+CREATE UNIQUE INDEX reports_one_open ON reports (plugin_id, reporter_id) WHERE status = 'open';
 CREATE INDEX reports_plugin ON reports (plugin_id, id);
 CREATE INDEX reports_reporter ON reports (reporter_id, created_at);
 
@@ -147,6 +149,15 @@ CREATE TABLE audit (
   version TEXT,
   detail TEXT                                    -- JSON
 );
+
+-- Every new id an account claimed, kept when the id is released again: an
+-- account claims at most 5 in any 7 days (amendment 30).
+CREATE TABLE id_claims (
+  user_id TEXT NOT NULL,
+  plugin_id TEXT NOT NULL,
+  at INTEGER NOT NULL
+);
+CREATE INDEX id_claims_user ON id_claims (user_id, at);
 
 -- Ids kept back from first come, first served: for nobody (user_id null), or
 -- for the one account that may take one the reserved-name rules refuse.
