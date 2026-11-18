@@ -546,3 +546,11 @@ Agreed after the plan was first written. Newest last.
     a first version. `new_asks` stays as it is. The queue flags a row on
     either, so an update with no flag asks for exactly what the approved
     version did.
+41. **`permissions_diff` names everything `asks_changed` counts.** A queue
+    item's `asks_changed` is also true when the MCP server (command, args,
+    env), the service, or a granting setting (kind `permission` or `folder`)
+    changed, since the engine's capability record binds them. So a
+    submission's `permissions_diff` carries those too, before and after, in
+    the engine's `digest_diff` shapes and names, so the reviewer's page and
+    a device's consent sheet say the same thing. The flag is never true
+    while the diff names nothing.
