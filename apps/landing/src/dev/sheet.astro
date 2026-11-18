@@ -1,0 +1,450 @@
+---
+// The design sheet (dev only: astro.config.mjs devPages): every token and
+// control of styles/app.css, in every state, with its numbers beside it.
+// What a page may use is what is here; nothing else.
+import App from "../layouts/App.astro";
+import Glyph from "../components/ui/Glyph.astro";
+import { BROWSE, CATEGORIES, PUBLISH, REVIEW } from "../lib/store/nav.ts";
+
+export const prerender = false;
+
+const SURFACES = [
+  ["window", "#0e0e10", "The window, round the cards"],
+  ["sidebar", "#ebebeb0d", "The list's card (zeron.sidebar.tint)"],
+  ["card", "#ffffff0f", "The page's card (zeron.inset.bg)"],
+  ["panel", "#ebebeb0b", "A group's card in a page (zeron.settings.tint)"],
+  ["sunken", "#00000038", "A field's well (zeron.field.bg)"],
+  ["overlay", "#1c1c1f", "Dialogs, sheets, toasts, the drawer (zeron.menu.solid)"],
+];
+const LINES = [
+  ["line-faint", "#ffffff0a", "Hairlines: rows, cards' edges, the header"],
+  ["line", "#ffffff12", "A key cap, a dialog's edge"],
+  ["line-strong", "#ffffff2e", "Dragged or pointed edges"],
+  ["field-edge", "#ffffff14", "A field at rest (#ffffff26 under the pointer)"],
+];
+const WASHES = [
+  ["hover", "#ffffff0d", "Under the pointer"],
+  ["pressed", "#ffffff17", "Held down"],
+  ["selected", "#ebebeb24", "The open row, the segment chosen"],
+  ["wash", "#ffffff14", "A badge, a tile, a segmented track"],
+];
+const INKS = [
+  ["text", "#ededef", "Primary: what you read"],
+  ["text-2", "0.60", "Secondary: labels, the rest of a line"],
+  ["text-3", "0.54", "Tertiary: by-lines, counts, hints (app 0.42; AA here)"],
+  ["text-off", "0.28", "Disabled words"],
+];
+const TONES = [
+  ["ok", "emerald 300 #91dab5 on 400 #5dc496 at 14%"],
+  ["warn", "amber 300 #f5c283 on 400 #e9a64b at 14%"],
+  ["bad", "red 300 #ffada6 on 400 #f9837b at 15%"],
+  ["info", "blue 300 #a3c8fe on 400 #74acfe at 14%"],
+  ["accent", "violet 300 #c6bbfe on the accent at 20%"],
+];
+const TYPE = [
+  ["t-title", "20 / 26 · 600", "A page's title, in the header"],
+  ["t-heading", "15 / 20 · 500", "A section's title; a dialog's (600); an empty state's"],
+  ["t-body", "13 / 18 · 400", "Everything in the UI: rows, cells, buttons, fields"],
+  ["t-text", "13 / 20 · 400", "Body that wraps: a description, a paragraph"],
+  ["t-caption", "12 / 16 · 400", "A second line, a by-line, a table's head, a hint"],
+  ["t-label", "11 / 14 · 500", "A group's label, a count, a small badge, a key"],
+  ["t-mono", "12 / 16 · Geist Mono", "Ids, keys, versions, commands"],
+];
+const SPACE = [4, 8, 12, 16, 24, 32];
+const RADII = [
+  [4, "a small badge, a key cap, a segment"],
+  [6, "a nav row, a small control, a badge, the segmented track, a tile from 32 to 55"],
+  [8, "a control (6 at 28)"],
+  [12, "a card: the list, the page, a panel, a toast; a tile from 56"],
+  [16, "a dialog, a sheet"],
+];
+const STATES = ["rest", "is-hover", "is-focus", "is-active", "disabled"] as const;
+const stateName = { rest: "Rest", "is-hover": "Hover", "is-focus": "Focus", "is-active": "Pressed", disabled: "Disabled" };
+---
+
+<App title="Design sheet · Zeron" description="Every token and control of the store." noindex>
+  <h1 slot="title" class="t-title">Design sheet</h1>
+  <span slot="tools" class="t-caption t-3">styles/app.css · dev only</span>
+
+  <div class="sheet-page">
+    <section class="block">
+      <h2 class="t-heading">Surfaces</h2>
+      <div class="swatches">
+        {SURFACES.map(([name, value, use]) => (
+          <div class="swatch"><span class:list={["chip", `sw-${name}`]} /><div><p class="t-body t-strong">--{name}</p><p class="t-mono t-3">{value}</p><p class="t-caption t-2">{use}</p></div></div>
+        ))}
+      </div>
+      <h2 class="t-heading">Lines and washes</h2>
+      <div class="swatches">
+        {[...LINES, ...WASHES].map(([name, value, use]) => (
+          <div class="swatch"><span class:list={["chip", `sw-${name}`]} /><div><p class="t-body t-strong">--{name}</p><p class="t-mono t-3">{value}</p><p class="t-caption t-2">{use}</p></div></div>
+        ))}
+      </div>
+      <h2 class="t-heading">Ink and tones</h2>
+      <div class="swatches">
+        {INKS.map(([name, value, use]) => (
+          <div class="swatch"><span class:list={["chip ink", `ink-${name}`]}>Aa</span><div><p class="t-body t-strong">--{name}</p><p class="t-mono t-3">{value}</p><p class="t-caption t-2">{use}</p></div></div>
+        ))}
+        {TONES.map(([name, use]) => (
+          <div class="swatch"><span class:list={["badge", name]}>{name}</span><div><p class="t-body t-strong">.{name}</p><p class="t-caption t-2">{use}</p></div></div>
+        ))}
+      </div>
+    </section>
+
+    <section class="block">
+      <h2 class="t-heading">Type</h2>
+      <p class="t-text t-2">Geist and Geist Mono, the app's. Every word on every page is one of these; numbers in tables and facts take tabular figures.</p>
+      <div class="panel">
+        {TYPE.map(([cls, spec, use]) => (
+          <div class="row type-row"><p class={cls}>Search plugins 1,280</p><div class="end type-spec"><span class="t-mono t-2">{spec}</span><span class="t-caption t-3">{use}</span></div></div>
+        ))}
+      </div>
+      <p class="t-caption t-3">Prose (a README) is the app's transcript: 15 / 24, headings 22 / 30 and 18 / 26 at 600, code 13 / 20.</p>
+    </section>
+
+    <section class="block">
+      <h2 class="t-heading">Space</h2>
+      <p class="t-text t-2">Every gap, inset and height is one of these, or a control's stated height. 48 and 64 only round an empty page's words; 2, 6 and 10 only inside a control.</p>
+      <div class="panel panel-pad space">
+        {SPACE.map((n) => (
+          <div class="space-row"><span class="t-mono t-2">{n}</span><span class:list={["bar", `w${n}`]} /></div>
+        ))}
+      </div>
+      <h2 class="t-heading">Corners</h2>
+      <p class="t-text t-2">An inner corner is its outer less the inset between them: a 22 thumb 2 into a 6 track is 4; a row 4 into a 12 card is 8.</p>
+      <div class="radii">
+        {RADII.map(([r, use]) => (
+          <div class="radius"><span class:list={["corner", `r${r}`]} /><p class="t-mono">{r}</p><p class="t-caption t-3">{use}</p></div>
+        ))}
+        <div class="radius"><span class="corner r12 nest"><span class="corner r8" /></span><p class="t-mono">12 − 4 = 8</p><p class="t-caption t-3">concentric</p></div>
+      </div>
+    </section>
+
+    <section class="block">
+      <h2 class="t-heading">Measure</h2>
+      <p class="t-text t-2">The page's column. A list or a table grows with the page's card to 1120 and stops there, centred in the card; reading (a README, the publishing guide) stops at 720. The header's title and controls stand on the same column's edges as the body under them, so a page has one pair of edges, never one for its header and another for its body. At 1440 the column is 1108 (the card, 1156, less 24 a side); at 1920, 1120.</p>
+      <div class="panel panel-pad measures">
+        <div class="measure list"><span class="t-mono t-2">list · 1120</span></div>
+        <div class="measure prose"><span class="t-mono t-2">prose · 720</span></div>
+      </div>
+    </section>
+
+    <section class="block">
+      <h2 class="t-heading">Search</h2>
+      <p class="t-text t-2">One field, at the top of the list on every page, the same everywhere. What it does: it leads to All plugins with what was typed (/plugins/all?q=…), where the header reads the query (“Results for …”) and its count, the sort gains Best match, and the field still holds the words. “/” anywhere but in a field puts you in it; Escape empties it, and a second Escape leaves it. On a phone, the top bar's Search opens the list with the field focused. Without the script it is a plain form that does the same.</p>
+    </section>
+
+    <section class="block">
+      <h2 class="t-heading">Icons</h2>
+      <p class="t-text t-2">The app's own, never look-alikes: each from apps/zgx/ui/assets/icons/ui, as ds/icon_svgs.luau carries it (src/data/icons.json holds the same SVG, byte for byte: nav.test.ts checks every one). Drawn at 16 in the list (14 in a small field), stroke 1.5 at 24 (the set's own), in the text's ink.</p>
+      <div class="panel icons">
+        {[...BROWSE, ...CATEGORIES, ...PUBLISH, ...REVIEW].map((item) => (
+          <div class="row"><Glyph name={item.icon} size={16} /><span class="words"><span class="label">{item.label}</span></span><span class="end t-mono t-3">{item.icon}</span></div>
+        ))}
+      </div>
+    </section>
+
+    <section class="block">
+      <h2 class="t-heading">Buttons</h2>
+      <p class="t-text t-2">32 high, 12 in, 13 medium, an 8 corner (md). xs 24 · sm 28 (6 corner) · lg 40. Primary is the way on, one a view; danger only to confirm what can't be undone. Danger is the app's destructive (zeron.destructive): the palette's red 600 #c54744, 500 #e4605b under the pointer, 700 #a13735 held, white words.</p>
+      <div class="panel grid-states">
+        <span />
+        {STATES.map((s) => <span class="t-caption t-3">{stateName[s]}</span>)}
+        {(["primary", "secondary", "ghost", "danger"] as const).map((tone) => (
+          <>
+            <span class="t-caption t-2">{tone}</span>
+            {STATES.map((s) => (
+              <span><button type="button" class:list={["btn", tone, s !== "rest" && s !== "disabled" && s]} disabled={s === "disabled"}>{tone === "danger" ? "Revoke" : tone === "primary" ? "Install" : "Cancel"}</button></span>
+            ))}
+          </>
+        ))}
+      </div>
+      <div class="line-up">
+        <button type="button" class="btn secondary xs">xs 24</button>
+        <button type="button" class="btn secondary sm">sm 28</button>
+        <button type="button" class="btn secondary">md 32</button>
+        <button type="button" class="btn primary lg">lg 40</button>
+        <button type="button" class="btn ghost icon sm" aria-label="More"><Glyph name="more-horizontal" size={16} /></button>
+        <button type="button" class="btn secondary icon" aria-label="Copy"><Glyph name="copy" size={16} /></button>
+        <button type="button" class="btn secondary"><Glyph name="plus" size={16} />New key…</button>
+      </div>
+    </section>
+
+    <section class="block">
+      <h2 class="t-heading">Fields</h2>
+      <p class="t-text t-2">A sunken well, 32 high (28 small), 10 in, an 8 corner; its hairline firms under the pointer, the accent's edge and the ring when focused. The label 12 medium 6 above; a hint 12 tertiary 6 under.</p>
+      <div class="field-grid">
+        {(["rest", "is-hover", "is-focus", "is-error", "is-disabled"] as const).map((s) => (
+          <div>
+            <label class="field-label" for={`f-${s}`}>Name</label>
+            <div class:list={["field", s !== "rest" && s]}><input id={`f-${s}`} placeholder="GitHub Actions" value={s === "is-error" ? "a" : undefined} /></div>
+            <p class:list={["field-hint", { "is-error": s === "is-error" }]}>{s === "is-error" ? "At least 2 characters." : { rest: "Rest", "is-hover": "Hover", "is-focus": "Focus", "is-disabled": "Disabled" }[s]}</p>
+          </div>
+        ))}
+      </div>
+      <div class="field-grid">
+        <div>
+          <label class="field-label" for="f-search">Search, small</label>
+          <div class="field sm"><Glyph name="magnifer" size={14} /><input id="f-search" placeholder="Search plugins" /><kbd class="kbd">/</kbd></div>
+        </div>
+        <div>
+          <label class="field-label" for="f-select">Select</label>
+          <div class="field select"><select id="f-select"><option>In 90 days</option><option>In a year</option><option>Never</option></select><Glyph name="alt-arrow-down" size={14} class="chevron" /></div>
+        </div>
+        <div class="wide">
+          <label class="field-label" for="f-area">Text, several lines (13 / 20)</label>
+          <div class="field area"><textarea id="f-area" placeholder="Say what to change, plainly." /></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="block">
+      <h2 class="t-heading">Segmented and tabs</h2>
+      <p class="t-text t-2">Segmented: a 26 track (#ffffff14, corner 6), its 22 thumb 2 in (corner 4), 12 medium labels 12 in. Tabs: 36 high (32 small), 16 apart, 13 medium; the open one primary with a 2 line on the hairline.</p>
+      <div class="line-up">
+        <div class="segmented" role="group" aria-label="Order"><a href="#" aria-current="page">Popular</a><a href="#" class="is-hover">Updated</a><a href="#">New</a></div>
+        <div class="segmented" role="group" aria-label="Filter"><a href="#" aria-current="page">In review <span class="t-label t-3">12</span></a><a href="#">Approved</a><a href="#">Not approved</a></div>
+      </div>
+      <nav class="tabs" aria-label="Tabs, medium"><a href="#" aria-current="page">Overview</a><a href="#" class="is-hover">Changelog</a><a href="#">Permissions <span class="count">4</span></a></nav>
+      <nav class="tabs sm" aria-label="Tabs, small"><a href="#" aria-current="page">Versions <span class="count">6</span></a><a href="#">Deploy keys <span class="count">2</span></a></nav>
+    </section>
+
+    <section class="block">
+      <h2 class="t-heading">Badges and tiles</h2>
+      <p class="t-text t-2">20 high, 6 in, 12 medium, corner 6; small 16, 4 in, 11, corner 4. A tag (a word that leads to its list): 24 high, a target big enough to touch, 8 in, 12, corner 6. A tile: a mark on the quiet wash, its corner the app's (ds/tile.luau): 4 under 32, 6 from 32, 12 from 56. A plugin with no icon: its initial on its hue, the palette's 500 inked in its 50.</p>
+      <div class="line-up">
+        <span class="badge">Neutral</span><span class="badge ok">Approved</span><span class="badge warn">In review</span><span class="badge bad">Not approved</span><span class="badge info">Pre-release</span><span class="badge accent">Featured</span>
+        <span class="badge sm">sm</span><span class="badge sm ok dot">Listed</span><span class="badge sm warn dot">No new installs</span>
+        <a class="tag" href="#">pomodoro</a><a class="tag" href="#">focus</a>
+      </div>
+      <div class="line-up">
+        <span class="tile s20"><Glyph name="widget" size={12} /></span>
+        <span class="tile"><Glyph name="clock-circle" size={16} /></span>
+        <span class="tile s40"><Glyph name="clock-circle" size={20} /></span>
+        <span class="tile s56"><Glyph name="clock-circle" size={20} /></span>
+      </div>
+    </section>
+
+    <section class="block">
+      <h2 class="t-heading">The list's rows</h2>
+      <p class="t-text t-2">28 high, 8 in, a 16 icon and the name 8 apart, corner 6, 2 between rows; secondary ink, primary under the pointer and open; the open one on the selected wash. A group's label: 24 high, 11 medium tertiary, its words on the row's.</p>
+      <div class="nav-sample">
+        <p class="nav-heading">Browse</p>
+        <a class="nav-row" href="#"><Glyph name="star" size={16} /><span>Rest</span></a>
+        <a class="nav-row is-hover" href="#"><Glyph name="widget" size={16} /><span>Hover</span></a>
+        <a class="nav-row is-active" href="#"><Glyph name="bot" size={16} /><span>Pressed</span></a>
+        <a class="nav-row" href="#" aria-current="page"><Glyph name="git-branch" size={16} /><span>Open</span></a>
+        <a class="nav-row is-focus" href="#"><Glyph name="terminal" size={16} /><span>Focus</span></a>
+      </div>
+    </section>
+
+    <section class="block">
+      <h2 class="t-heading">Tables</h2>
+      <p class="t-text t-2">In a panel: a 32 head (12 medium, secondary), rows 40 (52 comfortable, 32 dense), cells 12 apart and 16 in at the panel's edges, hairlines between; washed under the pointer, the selected wash when chosen. Numbers tabular, at the right.</p>
+      <div class="toolbar"><span class="t-caption t-3">3 plugins</span><span class="grow" /><div class="segmented" role="group" aria-label="Order"><a href="#" aria-current="page">Popular</a><a href="#">Updated</a><a href="#">New</a></div></div>
+      <div class="panel">
+        <table class="table">
+          <thead><tr><th>Plugin</th><th>Category</th><th class="end">Installs</th><th class="end">Updated</th></tr></thead>
+          <tbody>
+            <tr><td><span class="cell-main"><span class="tile s20"><Glyph name="clock-circle" size={12} /></span>Focus timer</span></td><td class="muted">Productivity</td><td class="end">12,840</td><td class="end muted">last week</td></tr>
+            <tr class="is-hover"><td><span class="cell-main"><span class="tile s20"><Glyph name="git-branch" size={12} /></span>PR radar <span class="t-caption t-3">hover</span></span></td><td class="muted">Git</td><td class="end">8,410</td><td class="end muted">2 days ago</td></tr>
+            <tr aria-selected="true"><td><span class="cell-main"><span class="tile s20"><Glyph name="palette" size={12} /></span>Theme sync <span class="t-caption t-3">selected</span></span></td><td class="muted">Appearance</td><td class="end">4,402</td><td class="end muted">a month ago</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="two">
+        <div class="panel">
+          <table class="table comfortable">
+            <thead><tr><th>Version</th><th>State</th><th class="end">Submitted</th></tr></thead>
+            <tbody>
+              <tr><td><span class="cell-words"><span class="t-mono">1.2.1</span><span class="sub">Shows the cost of each chat</span></span></td><td><span class="badge sm warn">In review</span></td><td class="end muted">3 days ago</td></tr>
+              <tr><td><span class="cell-words"><span class="t-mono">1.2.0</span><span class="sub">“Add a screenshot of a theme.”</span></span></td><td><span class="badge sm bad">Not approved</span></td><td class="end muted">a week ago</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel">
+          <table class="table dense">
+            <thead><tr><th>When</th><th>Who</th><th>What</th></tr></thead>
+            <tbody>
+              <tr><td class="muted">10:42</td><td>@grace</td><td>Approved <span class="t-mono">focus-timer 1.2.0</span></td></tr>
+              <tr><td class="muted">10:31</td><td>@grace</td><td>Featured <span class="t-mono">pr-radar</span></td></tr>
+              <tr><td class="muted">09:58</td><td>@mo</td><td>Reserved <span class="t-mono">linear</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="block">
+      <div class="section">
+        <div class="section-head">
+          <div class="words"><h2>A section, and its rows</h2><p>A section's title 15 / 20 medium, a line 13 / 20 under it 4 apart, its panel 8 under; its action at the right.</p></div>
+          <button type="button" class="btn secondary sm"><Glyph name="plus" size={14} />New key…</button>
+        </div>
+        <div class="panel">
+          <a class="row" href="#"><span class="tile"><Glyph name="folder-with-files" size={16} /></span><span class="words"><span class="label strong">A list row</span><span class="desc">52 at least, 16 in, a 32 tile, the words 12 from it, its control at the end.</span></span><span class="end"><Glyph name="alt-arrow-right" size={14} /></span></a>
+          <a class="row is-hover" href="#"><span class="tile"><Glyph name="tag" size={16} /></span><span class="words"><span class="label strong">Under the pointer</span><span class="desc">Washed edge to edge: no inset, no rounded wash.</span></span><span class="end"><span class="badge sm">2</span></span></a>
+          <div class="row"><span class="words"><span class="label">Without a lead</span><span class="desc">The words keep the 16 inset.</span></span><span class="end"><button type="button" class="btn ghost sm">Revoke</button></span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="block">
+      <h2 class="t-heading">A table whose rows wrap</h2>
+      <p class="t-text t-2">Every cell starts on one 28-high line, 12 under the row's top, so a first line, a badge and a button share a middle (12 + 14 = 26); words at 13 / 20 begin 4 lower (16 + 10). An action column of 176 at the row's end, the button's words on its edge. 52 at the least. A deploy key is shown one way everywhere: its first 6 and last 4 characters, mono 12, the whole key in its title (k5Yh3x…g2Wq).</p>
+      <div class="panel">
+        <table class="table wrapping versions-table">
+          <colgroup><col class="version" /><col class="state" /><col /><col class="sent" /><col class="action" /></colgroup>
+          <thead><tr><th>Version</th><th>State</th><th>What it means</th><th class="end">Sent</th><th class="end"><span class="sr-only">Action</span></th></tr></thead>
+          <tbody>
+            <tr><td><span class="line version">1.4.0</span></td><td><span class="line"><span class="badge sm warn">Not approved</span></span></td><td class="words"><span class="said">“Name the hosts it needs and drop the wildcard, then send it again.”</span><span class="who">The reviewer, asks for more than it explains · Nov 14</span></td><td class="end"><span class="line end muted">Nov 13</span></td><td class="end"><span class="line end"></span></td></tr>
+            <tr><td><span class="line version">1.0.0</span></td><td><span class="line"><span class="badge sm ok">Approved</span></span></td><td class="words">Anyone can install it.</td><td class="end"><span class="line end muted">Nov 5</span></td><td class="end"><span class="line end"><a class="btn ghost sm" href="#">Stop new installs</a></span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="notice"><Glyph name="info-circle" size={16} /><span><b>A notice:</b> something to know before anything else on the page. Its tone's wash, 12 / 16 in, an 8 corner, 13 / 20.</span></p>
+      <p class="notice warn"><Glyph name="info-circle" size={16} /><span>The warning's, for what blocks the next step.</span></p>
+      <p class="t-caption t-3">The six states, six tones: <span class="badge sm info">In review</span> <span class="badge sm ok">Approved</span> <span class="badge sm warn">Not approved</span> <span class="badge sm">Withdrawn</span> <span class="badge sm accent">No new installs</span> <span class="badge sm bad">Taken down</span>. On a page of yours, Sign out sits beside you at the list's foot (a quiet 24).</p>
+    </section>
+
+    <section class="block two">
+      <div class="section">
+        <div class="section-head"><div class="words"><h2>Facts</h2><p>Label 12 secondary, value 13; 32 a line, hairlines between.</p></div></div>
+        <div class="panel panel-pad">
+          <dl class="facts">
+            <div><dt>Version</dt><dd class="num">1.2.0</dd></div>
+            <div><dt>Installs</dt><dd class="num">12,840</dd></div>
+            <div><dt>Works with</dt><dd>Zeron 0.3.0 or later</dd></div>
+            <div><dt>License</dt><dd>MIT</dd></div>
+          </dl>
+        </div>
+      </div>
+      <div class="section">
+        <div class="section-head"><div class="words"><h2>Copy box</h2><p>On a field's well, mono 12, Copy at its end (24, 4 in).</p></div></div>
+        <div class="copybox"><code tabindex="0">zeron plugin key create focus-timer</code><button type="button" class="btn ghost icon xs" aria-label="Copy"><Glyph name="copy" size={14} /></button></div>
+        <div class="section-head"><div class="words"><h2>Pagination</h2><p>The one everywhere: where you are in the middle, tabular; Previous and Next 12 either side; disabled where there's nothing.</p></div></div>
+        <div class="pager"><a class="btn secondary sm" href="#"><Glyph name="alt-arrow-left" size={14} />Previous</a><span class="where">25–48 of 128</span><a class="btn secondary sm" href="#">Next<Glyph name="alt-arrow-right" size={14} /></a></div>
+      </div>
+    </section>
+
+    <section class="block">
+      <h2 class="t-heading">Dialog, sheet, toast</h2>
+      <p class="t-text t-2">A dialog: 460 wide (380 small), 24 in, corner 16; its title 15 / 20 semibold and a line 6 under; its answers at the right, 24 under, Cancel first and focused. A sheet: 400 from the right, the window's height. A toast: 340, 12 / 8 / 12 / 16 in, corner 12.</p>
+      <div class="stages">
+        <div class="stage">
+          <div class="dialog" role="presentation">
+            <div class="head"><h2>Revoke GitHub Actions?</h2><p>Anything publishing with it stops working at once. Versions it already sent stay as they are.</p></div>
+            <div class="answers"><button type="button" class="btn secondary is-focus">Cancel</button><button type="button" class="btn danger">Revoke</button></div>
+          </div>
+        </div>
+        <div class="stage sheet-stage">
+          <div class="sheet static" role="presentation">
+            <div class="head"><h2>New deploy key</h2><p>A key is made on your computer, where its secret stays. Make it in Zeron, or with the command.</p></div>
+            <div class="body">
+              <div class="copybox"><code tabindex="0">zeron plugin key create focus-timer</code><button type="button" class="btn ghost icon xs" aria-label="Copy"><Glyph name="copy" size={14} /></button></div>
+            </div>
+            <div class="answers"><button type="button" class="btn secondary">Done</button></div>
+          </div>
+        </div>
+      </div>
+      <div class="line-up">
+        <div class="toast ok" role="presentation"><Glyph name="check-circle" size={16} /><p class="what">Approved. It's listed now.</p><button type="button" class="btn ghost icon xs" aria-label="Close"><Glyph name="close" size={14} /></button></div>
+        <div class="toast bad" role="presentation"><Glyph name="danger-triangle" size={16} /><p class="what">That didn't work. Try again in a moment.</p><button type="button" class="btn ghost icon xs" aria-label="Close"><Glyph name="close" size={14} /></button></div>
+      </div>
+    </section>
+
+    <section class="block two">
+      <div class="panel">
+        <div class="empty">
+          <span class="tile"><Glyph name="lock-keyhole-unlocked" size={20} /></span>
+          <div class="words"><h3>No deploy keys</h3><p>A key lets a CI job send new versions of this plugin. Every version still waits for review.</p></div>
+          <div class="actions"><button type="button" class="btn secondary sm"><Glyph name="plus" size={14} />New key…</button></div>
+        </div>
+      </div>
+      <div class="panel">
+        <table class="table" aria-label="Loading">
+          <thead><tr><th>Plugin</th><th class="end">Installs</th></tr></thead>
+          <tbody>
+            {[0, 1, 2].map(() => (
+              <tr><td><span class="cell-main"><span class="skeleton tile s20" /><span class="skeleton line w128" /></span></td><td class="end"><span class="skeleton line w48 right" /></td></tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</App>
+
+<style>
+  .sheet-page { display: grid; gap: 32px; max-width: 1040px; }
+  .block { display: grid; gap: 12px; }
+  .block > h2:not(:first-child) { margin-top: 12px; }
+  .section + .section-head, .copybox + .section-head { margin-top: 16px; }
+  .two { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 24px; align-items: start; }
+  .line-up { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+
+  .swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; }
+  .swatch { display: flex; gap: 12px; align-items: flex-start; padding: 12px; border-radius: 12px; background: var(--panel); box-shadow: inset 0 0 0 1px var(--line-faint); }
+  .chip { flex: none; display: grid; place-items: center; width: 40px; height: 40px; border-radius: 8px; box-shadow: inset 0 0 0 1px var(--line); }
+  .sw-window { background: var(--window); }
+  .sw-sidebar { background: var(--sidebar); }
+  .sw-card { background: var(--card); }
+  .sw-panel { background: var(--panel); }
+  .sw-sunken { background: var(--sunken); }
+  .sw-overlay { background: var(--overlay); }
+  .sw-line-faint { background: var(--line-faint); }
+  .sw-line { background: var(--line); }
+  .sw-line-strong { background: var(--line-strong); }
+  .sw-field-edge { background: var(--field-edge); }
+  .sw-hover { background: var(--hover); }
+  .sw-pressed { background: var(--pressed); }
+  .sw-selected { background: var(--selected); }
+  .sw-wash { background: var(--wash); }
+  .ink { font-size: 15px; line-height: 20px; font-weight: 500; }
+  .ink-text { color: var(--text); }
+  .ink-text-2 { color: var(--text-2); }
+  .ink-text-3 { color: var(--text-3); }
+  .ink-text-off { color: var(--text-off); }
+  .swatch .badge { flex: none; width: 64px; justify-content: center; }
+
+  .type-row > p { flex: 1; min-width: 0; }
+  .type-row .end { flex: none; }
+  .type-spec { display: grid; justify-items: end; gap: 2px; }
+
+  .space { display: grid; gap: 8px; }
+  .space-row { display: grid; grid-template-columns: 32px 1fr; align-items: center; gap: 12px; }
+  .bar { height: 12px; border-radius: 4px; background: var(--accent-wash); box-shadow: inset 0 0 0 1px var(--accent-edge); }
+  .w4 { width: 4px; } .w8 { width: 8px; } .w12 { width: 12px; } .w16 { width: 16px; } .w24 { width: 24px; } .w32 { width: 32px; }
+
+  .radii { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; }
+  .radius { display: grid; align-content: start; gap: 4px; padding: 12px; border-radius: 12px; background: var(--panel); box-shadow: inset 0 0 0 1px var(--line-faint); }
+  .corner { display: block; width: 48px; height: 48px; margin-bottom: 8px; background: var(--wash); box-shadow: inset 0 0 0 1px var(--line); }
+  .r4 { border-radius: 4px; } .r6 { border-radius: 6px; } .r8 { border-radius: 8px; } .r12 { border-radius: 12px; } .r16 { border-radius: 16px; }
+  .nest { display: grid; padding: 4px; }
+  .nest .corner { width: auto; height: auto; margin: 0; background: var(--selected); }
+
+  .grid-states { display: grid; grid-template-columns: 96px repeat(5, 1fr); align-items: center; gap: 12px 16px; padding: 16px; overflow-x: auto; }
+  .grid-states > * { min-width: max-content; }
+
+  .field-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px; }
+  .field-grid .wide { grid-column: span 2; }
+  @media (max-width: 899px) { .field-grid .wide { grid-column: auto; } .swatches, .radii { grid-template-columns: 1fr; } }
+
+  .nav-sample { display: grid; gap: 2px; width: 256px; padding: 8px; border-radius: 12px; background: var(--sidebar); box-shadow: inset 0 0 0 1px var(--line-faint); }
+  .nav-sample .is-focus { outline-offset: -2px; }
+
+  .stages { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 16px; }
+  .stage { display: grid; place-items: center; min-height: 280px; padding: 24px; border-radius: 12px; background: #00000059; box-shadow: inset 0 0 0 1px var(--line-faint); overflow: hidden; }
+  .stage .dialog { margin: 0; }
+  .sheet-stage { place-items: stretch end; padding: 0; }
+  .sheet.static { position: static; height: auto; width: min(360px, 100%); }
+
+  .w128 { width: 128px; } .w48 { width: 48px; }
+  .measures { display: grid; gap: 8px; }
+  .measure { height: 32px; display: flex; align-items: center; padding: 0 12px; border-radius: 6px; background: var(--accent-wash); box-shadow: inset 0 0 0 1px var(--accent-edge); }
+  .measure.list { width: 100%; max-width: 1120px; }
+  .measure.prose { width: 100%; max-width: 720px; }
+  .icons { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr)); }
+  .icons .row { min-height: 40px; padding: 8px 16px; border-top: 1px solid var(--line-faint); }
+  .skeleton.right { margin-left: auto; }
+</style>

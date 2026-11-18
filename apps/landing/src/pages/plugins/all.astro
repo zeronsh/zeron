@@ -1,0 +1,126 @@
+---
+// All plugins: every listed plugin, or a category's, or a search's, a page
+// at a time, as a dense list whose columns line up. Public and the same for
+// everyone (no cookie read), so the Worker cache keeps each address for
+// half a minute and serves it stale for another while it asks again.
+import PluginRows, { type Measure } from "../../components/kit/PluginRows.astro";
+import Glyph from "../../components/ui/Glyph.astro";
+import App from "../../layouts/App.astro";
+import { canonicalSearch, catalogHref, effectiveSort, PAGE_SIZE, pageHref, range, readCatalog } from "../../lib/store/catalog.ts";
+import { count, day } from "../../lib/store/format.ts";
+import { CATALOG_TAG, publicPage } from "../../lib/store/http.ts";
+import { CATEGORIES } from "../../lib/store/nav.ts";
+import type { PluginCard, Sort } from "../../lib/store/types.ts";
+import { store } from "../../lib/store/words.ts";
+
+export const prerender = false;
+
+const edge = Astro.locals.edge;
+const categoriesResult = await edge.categories();
+const categories = categoriesResult.ok ? categoriesResult.data.categories : [];
+const state = readCatalog(Astro.url.searchParams, categoriesResult.ok ? categories : null);
+
+// An address that says more than it means is sent to the one that says it plainly.
+const canonical = canonicalSearch(Astro.url.searchParams, state);
+if (canonical && categoriesResult.ok) return Astro.redirect(canonical, 301);
+
+const sort = effectiveSort(state);
+const page = await edge.catalog({ q: state.q || undefined, category: state.category ?? undefined, keyword: state.keyword ?? undefined, sort, cursor: state.cursor ?? undefined, limit: PAGE_SIZE });
+
+// A cursor from another search, or an old one: this search's first page.
+if (!page.ok && page.error === "bad_cursor") return Astro.redirect(catalogHref({ ...state, cursor: null }), 303);
+if (page.ok) publicPage(Astro, [CATALOG_TAG]);
+else Astro.response.status = page.error === "bad_request" ? 400 : 503;
+
+// Categories by the app's names (the fixed list), else the edge's.
+const names = new Map(categories.map((c) => [c.id, c.name]));
+const categoryName = (id: string) => CATEGORIES.find((c) => c.id === id)?.label ?? names.get(id) ?? id;
+const items = page.ok ? page.data.items : [];
+const next = page.ok ? pageHref(state, page.data.next_cursor) : null;
+const previous = page.ok ? (page.data.prev_cursor ? pageHref(state, page.data.prev_cursor, -1) : state.cursor ? catalogHref({ ...state, cursor: null, page: null }) : null) : null;
+// How many the query matches (amendment 38's total: this page's own, so a
+// cached later page may say one less for a minute after a change), and
+// which of them this page is.
+const total = page.ok ? page.data.total : undefined;
+const shown = page.ok ? range(state, items.length) : null;
+
+/**
+ * The last column is what the list is sorted by, its head naming it:
+ * installs for Most installed (and Best match), the day it was updated for
+ * Recently updated, the day it was first listed for Newest. (A public card
+ * always carries that day; a dash, were one ever to come without it.)
+ */
+const published = (p: PluginCard) => (p.listed_at === null ? "—" : day(p.listed_at));
+const measure: Measure =
+  sort === "updated"
+    ? { head: "Updated", cell: (p) => day(p.updated_at), folded: (p) => `Updated ${day(p.updated_at)}` }
+    : sort === "new"
+      ? { head: "Published", cell: published, folded: (p) => `Published ${published(p)}` }
+      : { head: "Installs", cell: (p) => count(p.installs), folded: (p) => `${count(p.installs)} ${p.installs === 1 ? "install" : "installs"}` };
+
+const sorts = (["relevance", "popular", "updated", "new"] as Sort[]).filter((s) => s !== "relevance" || state.q);
+const heading = state.q ? `Results for “${state.q}”` : state.category ? categoryName(state.category) : state.keyword ? `Tagged “${state.keyword}”` : "All plugins";
+const title = state.q ? `“${state.q}” · Plugins · Zeron` : state.category ? `${categoryName(state.category)} plugins · Zeron` : "All plugins · Zeron";
+const description = state.category
+  ? `Plugins for Zeron in ${categoryName(state.category)}: reviewed before they're listed, installed in a click.`
+  : "Every plugin for Zeron: panels, commands, tools for your agents and more. Each one is reviewed before it's listed.";
+// Search results and later pages stay out of search engines; the list and its categories don't.
+const noindex = Boolean(state.q || state.cursor || state.keyword);
+const here = `${Astro.url.pathname}${Astro.url.search}`;
+---
+
+<App title={title} description={description} noindex={noindex} canonical={catalogHref({ category: state.category })} current={state.category ?? (state.q || state.keyword ? null : "all")} query={state.q}>
+  <h1 slot="title" class="t-title">{heading}{total !== undefined && <span class="title-count"> · {count(total)}</span>}</h1>
+  {
+    page.ok && items.length > 0 && (
+      <nav slot="tools" class="segmented" aria-label="Order">
+        {sorts.map((s) => (
+          <a href={catalogHref({ ...state, sort: s, cursor: null })} aria-current={s === sort ? "page" : undefined}>{store(`plugins.store.sort.${s}`)}</a>
+        ))}
+      </nav>
+    )
+  }
+
+  {
+    !page.ok ? (
+      <div class="panel">
+        <div class="empty" role="status">
+          <span class="tile"><Glyph name="wifi-off" size={20} /></span>
+          <div class="words"><h2 class="t-heading">{store("plugins.store.failed_title")}</h2><p>{store("plugins.store.failed_body")}</p></div>
+          <div class="actions"><a class="btn secondary sm" href={here}>{store("plugins.store.try_again")}</a></div>
+        </div>
+      </div>
+    ) : items.length === 0 ? (
+      <div class="panel">
+        <div class="empty">
+          <span class="tile"><Glyph name={state.q ? "magnifer" : "widget"} size={20} /></span>
+          {state.q ? (
+            <div class="words"><h2 class="t-heading">{store("plugins.store.nothing_matches", { query: state.q })}</h2><p>{store("plugins.store.try_another")}</p></div>
+          ) : state.category || state.keyword ? (
+            <div class="words"><h2 class="t-heading">{store("plugins.store.nothing_here")}</h2><p>{store("plugins.store.empty_body")}</p></div>
+          ) : (
+            <div class="words"><h2 class="t-heading">{store("plugins.store.empty_title")}</h2><p>{store("plugins.store.empty_body")}</p></div>
+          )}
+          {state.q ? (
+            <div class="actions"><a class="btn secondary sm" href={catalogHref({ category: state.category, keyword: state.keyword })}>{store("plugins.store.clear")}</a></div>
+          ) : state.category || state.keyword ? (
+            <div class="actions"><a class="btn secondary sm" href={catalogHref({})}>All plugins</a></div>
+          ) : null}
+        </div>
+      </div>
+    ) : (
+      <>
+        <div class="panel" data-list>
+          <PluginRows items={items} caption={heading} measure={measure} names={names} skeleton />
+        </div>
+        {(previous || next) && (
+          <nav class="pager" aria-label="Pages">
+            {previous ? <a class="btn secondary sm" href={previous} rel="prev"><Glyph name="alt-arrow-left" size={14} />Previous</a> : <span class="btn secondary sm" aria-disabled="true"><Glyph name="alt-arrow-left" size={14} />Previous</span>}
+            <span class="where">{shown ? `${count(shown.from)}–${count(shown.to)}` : ""}{shown && total !== undefined ? " of " : ""}{total !== undefined ? count(total) : ""}</span>
+            {next ? <a class="btn secondary sm" href={next} rel="next">Next<Glyph name="alt-arrow-right" size={14} /></a> : <span class="btn secondary sm" aria-disabled="true">Next<Glyph name="alt-arrow-right" size={14} /></span>}
+          </nav>
+        )}
+      </>
+    )
+  }
+</App>

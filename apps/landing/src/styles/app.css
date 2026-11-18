@@ -1,0 +1,1454 @@
+/* Zeron Plugins: the app, in a browser. Every value here is the desktop
+   app's own (apps/zgx/ui/ds/themes/zeron-dark.json and ds/tokens.luau),
+   named as it names them; where the web differs, the line says why. The
+   design sheet (src/dev/sheet.astro, dev only) shows each in every state.
+
+   Type    11/14 label · 12/16 caption · 13/18 body (13/20 wrapped) · 15/20
+           heading · 20/26 title; mono 12/16; prose 15/24 (h 22/30, 18/26).
+   Space   4 8 12 16 24 32 (48 64 for an empty page's air); 2 6 10 inside
+           controls only (the app's hair, tight, snug).
+   Heights 16 20 badges · 22 24 28 icon buttons · 24 28 32 40 controls ·
+           26 segmented · 28 nav row · 32 36 tabs · 32 40 52 table rows.
+   Radius  4 6 8 12, 16 a dialog; an inner corner is its outer less the
+           inset between them. */
+
+:root {
+  /* Surfaces: the window, and two cards set into it 4 apart (zeron.inset). */
+  --window: #0e0e10;
+  --sidebar: #ebebeb0d; /* zeron.sidebar.tint */
+  --card: #ffffff0f; /* zeron.inset.bg = surface.raised */
+  --panel: #ebebeb0b; /* zeron.settings.tint: a group's card */
+  --sunken: #00000038; /* zeron.field.bg */
+  --overlay: #1c1c1f; /* zeron.menu.solid: menus, dialogs, toasts (opaque on the web: no glass behind a page) */
+
+  /* Lines. */
+  --line-faint: #ffffff0a; /* border.subtle */
+  --line: #ffffff12; /* border */
+  --line-strong: #ffffff2e; /* border.strong */
+  --field-edge: #ffffff14;
+  --field-edge-hover: #ffffff26;
+
+  /* Washes over anything. */
+  --hover: #ffffff0d;
+  --pressed: #ffffff17;
+  --selected: #ebebeb24; /* zeron.selected.flat.bg */
+  --wash: #ffffff14; /* zeron.secondary.bg */
+
+  /* Ink: the primary, and the primary fainter (never a grey). */
+  --text: #ededef;
+  --text-2: rgb(237 237 239 / 0.6);
+  /* (The app's tertiary is 0.42, under WCAG AA on the web's cards: 0.54 here.) */
+  --text-3: rgb(237 237 239 / 0.54);
+  --text-off: rgb(237 237 239 / 0.28);
+
+  --accent: #9277b0;
+  --ring: rgb(146 119 176 / 0.6); /* focus.ring */
+
+  /* Tones (zeron.tone, the app's own palette, ds/palette.luau): the 300
+     step's ink on the 400 step's faint wash. */
+  --ok-ink: #91dab5; --ok-wash: rgb(93 196 150 / 0.14); --ok-edge: rgb(93 196 150 / 0.3); /* emerald */
+  --warn-ink: #f5c283; --warn-wash: rgb(233 166 75 / 0.14); --warn-edge: rgb(233 166 75 / 0.3); /* amber */
+  --bad-ink: #ffada6; --bad-wash: rgb(249 131 123 / 0.15); --bad-edge: rgb(249 131 123 / 0.32); /* red */
+  --info-ink: #a3c8fe; --info-wash: rgb(116 172 254 / 0.14); --info-edge: rgb(116 172 254 / 0.3); /* blue */
+  --accent-ink: #c6bbfe; --accent-wash: rgb(146 119 176 / 0.2); --accent-edge: rgb(146 119 176 / 0.4); /* violet 300 on the accent */
+
+  /* Buttons (zeron.primary, secondary, destructive). */
+  --primary: #ececee; --primary-hover: #ffffff; --primary-active: #d2d2d7; --primary-ink: #0b0b0c;
+  --secondary: #ffffff14; --secondary-hover: #ffffff1f; --secondary-active: #ffffff29;
+  /* (zeron.destructive: the palette's red 600, 500 under the pointer, 700 held.) */
+  --danger: #c54744; --danger-hover: #e4605b; --danger-active: #a13735;
+
+  /* Code (zeron.syntax: the palette's 300s, structure in the text's ink). */
+  --code-text: rgb(237 237 239 / 0.9);
+  --code-keyword: #c6bbfe; --code-function: #a3c8fe; --code-type: #f5c283; --code-string: #9edaa5;
+  --code-number: #ffb58f; --code-property: #ffced3; --code-tag: #ffada6; --code-attribute: #e6d288;
+  /* (The app's comment ink is 0.46: 0.58 here, for AA.) */
+  --code-comment: rgb(237 237 239 / 0.58);
+  --code-punct: rgb(237 237 239 / 0.6);
+  --diff-added: #5dc496; --diff-removed: #f9837b; /* emerald 400, red 400 */
+  --diff-added-wash: rgb(93 196 150 / 0.12); --diff-removed-wash: rgb(249 131 123 / 0.12);
+
+  /* A plugin's tile without an icon: its initial on its hue (the palette's
+     500, inked in its 50), as the app's (screens/plugins/words.luau). */
+  --hue-indigo: #7584f4; --hue-indigo-ink: #f4f6fe;
+  --hue-rose: #e25e76; --hue-rose-ink: #fef4f5;
+  --hue-sky: #149dd2; --hue-sky-ink: #eff9fe;
+  --hue-emerald: #27ac7a; --hue-emerald-ink: #effaf4;
+  --hue-amber: #d68d0a; --hue-amber-ink: #fef6ec;
+  --hue-violet: #9579ee; --hue-violet-ink: #f7f6fe;
+  --hue-orange: #e07434; --hue-orange-ink: #fef5f0;
+  --hue-teal: #18aa99; --hue-teal-ink: #effaf7;
+  /* (What components/store/PluginTile.astro reads, under these names.) */
+  --secondary-bg: var(--wash);
+  --border-subtle: var(--line-faint);
+  /* (…and what the review's code, diff and file tree read: components/store/CodeView, DiffView, FileTree.) */
+  --border: var(--line-faint);
+  --field-bg: var(--sunken);
+  --tone-accent: var(--accent-ink);
+  --tone-accent-wash: var(--accent-wash);
+  --tone-warning: var(--warn-ink);
+  --radius-sm: 4px; --radius-md: 6px; --radius-lg: 8px; --radius-xl: 12px;
+
+  --sans: var(--font-sans);
+  --mono: var(--font-mono);
+
+  /* The shell. */
+  --sidebar-w: 272px; /* the app's sidebar, at its default (fit_policy SIDEBAR_DEFAULT) */
+  --inset: 4px; /* zeron.inset.gap: the window round and between the cards */
+  --head-h: 56px; /* a 32 control with 12 above and under */
+  --measure: 640px; /* zeron.settings.measure: a column of reading */
+
+  /* What the dark set writes in place and the light one changes. */
+  --head-bg: color-mix(in srgb, #ffffff 5.9%, var(--window)); /* the page card's fill, solid, over the window */
+  --field: var(--sunken); /* a field's well */
+  --field-focus: rgb(146 119 176 / 0.7);
+  --field-error: rgb(248 113 113 / 0.7);
+  --scrim: #00000059; /* under a dialog, a sheet, the drawer */
+  --shadow-pop: 0 24px 64px #00000080; /* a dialog's, a sheet's, the drawer's */
+  --shadow-toast: 0 20px 56px #00000052;
+  --scrollbar-thumb: rgb(237 237 239 / 0.26);
+  --selection: rgb(146 119 176 / 0.5); --selection-ink: #ffffff;
+  --lightbox: #060607e0;
+  --checker: #ffffff08; /* behind a picture that may be clear */
+  --seg-thumb: var(--selected); --seg-thumb-shadow: none; /* a segmented control's chosen one */
+  /* (A neutral badge's ink: the second ink, 0.6, is 4.33 on its wash over a hovered row; 0.72 holds AA.) */
+  --neutral-ink: rgb(237 237 239 / 0.72);
+}
+
+/* Light, as the app follows the person's setting: zeron-light.json, its
+   solid surfaces (zeron.solid: a white card on the window, muted text at
+   0.74 and 0.62), its tones at the deep steps (600, 700 for the warm ones)
+   on the 500s' faint washes, its code at the 700s. No toggle: the setting
+   is the person's. Where the web differs, the line says why. */
+@media (prefers-color-scheme: light) {
+  :root {
+    --window: #eeeef0; /* zeron.window */
+    --sidebar: #1a1a1a0d; /* zeron.sidebar.tint */
+    --card: #ffffff; /* zeron.solid.card */
+    --panel: #1a1a1a0b; /* zeron.settings.tint */
+    --sunken: #0000000d; /* surface.sunken */
+    --overlay: #fbfbfc; /* zeron.menu.solid */
+
+    --line-faint: #00000017; /* border.subtle */
+    --line: #00000024; /* border */
+    --line-strong: #0000002e; /* border.strong */
+    --field-edge: #0000001f; /* zeron.field.edge */
+    --field-edge-hover: #00000038;
+
+    --hover: #0000000a;
+    --pressed: #00000012;
+    --selected: #00000012; /* zeron.selected.flat.bg */
+    --wash: #0000000d; /* zeron.secondary.bg */
+
+    --text: #1b1b1d;
+    --text-2: rgb(27 27 29 / 0.74); /* zeron.solid.secondary */
+    /* (zeron.solid.tertiary is 0.62: on the sidebar's tint that's 4.41, under AA; 0.66 here, 4.97.) */
+    --text-3: rgb(27 27 29 / 0.66);
+    --text-off: rgb(27 27 29 / 0.28);
+
+    --accent: #7a55c4;
+    --ring: rgb(122 85 196 / 0.6);
+
+    /* (The app's inks are emerald and amber 700, red 600, the accent itself:
+       a step deeper here wherever that held a badge under AA on a group's
+       panel, or under the pointer's wash, the web's grounds. Blue 700 holds.) */
+    --ok-ink: #015a3c; --ok-wash: rgb(39 172 122 / 0.1); --ok-edge: rgb(3 144 98 / 0.26); /* emerald 800 on 500 */
+    --warn-ink: #6e4603; --warn-wash: rgb(214 141 10 / 0.12); --warn-edge: rgb(180 117 1 / 0.3); /* amber 800 on 500 */
+    --bad-ink: #a13735; --bad-wash: rgb(228 96 91 / 0.1); --bad-edge: rgb(197 71 68 / 0.26); /* red 700 on 500 */
+    --info-ink: #265eaf; --info-wash: rgb(75 143 243 / 0.1); --info-edge: rgb(51 117 212 / 0.26); /* blue 700 on 500 */
+    --accent-ink: #644cab; --accent-wash: rgb(122 85 196 / 0.1); --accent-edge: rgb(122 85 196 / 0.28); /* violet 700 */
+
+    --primary: #1b1b1d; --primary-hover: #2d2d31; --primary-active: #000000; --primary-ink: #ffffff;
+    --secondary: #0000000d; --secondary-hover: #00000014; --secondary-active: #0000001c;
+    --danger: #c54744; --danger-hover: #a13735; --danger-active: #7d2a28; /* red 600, 700, 800: deepening as it's touched */
+
+    --code-text: rgb(27 27 29 / 0.92);
+    /* (Strings green 800, not 700: on a removed line's wash 700 is 4.48.) */
+    --code-keyword: #644cab; --code-function: #265eaf; --code-type: #905d02; --code-string: #1b5b2a;
+    /* (Numbers orange 700, not 600: 600 is under AA on the well.) */
+    --code-number: #9e4708; --code-property: #a0354b; --code-tag: #a13735; --code-attribute: #856f06;
+    /* (The app's comment ink is 0.5 and punctuation 0.52: 0.66 here, for AA on the well and a diff's washes.) */
+    --code-comment: rgb(27 27 29 / 0.66);
+    --code-punct: rgb(27 27 29 / 0.66);
+    --diff-added: #03754f; --diff-removed: #a13735; /* emerald 700, red 700 */
+    --diff-added-wash: rgb(39 172 122 / 0.1); --diff-removed-wash: rgb(228 96 91 / 0.1);
+
+    --head-bg: #ffffff;
+    --field: #ffffff; /* zeron.field.bg over the white card: whiter than a well, never grey (grey reads as off) */
+    --field-focus: rgb(122 85 196 / 0.7);
+    --field-error: rgb(197 71 68 / 0.7);
+    --scrim: #0000002e; /* backdrop: light (a dark dim turns a pale window muddy) */
+    --shadow-pop: 0 24px 64px #00000029; /* zeron.dialog.shadow */
+    --shadow-toast: 0 18px 48px #0000001c; /* zeron.menu.shadow */
+    --scrollbar-thumb: rgb(27 27 29 / 0.26);
+    --selection: rgb(122 85 196 / 0.2); --selection-ink: #1b1b1d;
+    --lightbox: #f3f3f5eb; /* zeron.lightbox.scrim: light stays light */
+    --checker: #00000008;
+    --neutral-ink: var(--text-2);
+    --seg-thumb: #ffffff; --seg-thumb-shadow: 0 1px 2px #0000000f, 0 0 0 1px #0000000d; /* zeron.segmented.thumb: white, lifted by a hairline */
+  }
+  /* (Form controls and scrollbars follow too.) */
+  html { color-scheme: light; }
+}
+/* A phone in light: no window round a card, so the page is the card, white
+   (on the grey window every ink would fall under AA). */
+@media (prefers-color-scheme: light) and (max-width: 899px) {
+  :root { --window: #ffffff; }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+* { margin: 0; padding: 0; }
+html { background: var(--window); color-scheme: dark; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body {
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--text);
+  background: var(--window);
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+a { color: inherit; text-decoration: none; }
+img, svg { display: block; max-width: 100%; }
+ul, ol { list-style: none; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { background: none; border: 0; cursor: pointer; }
+code, pre, kbd, samp { font-family: var(--mono); font-variant-ligatures: none; }
+::selection { background: var(--selection); color: var(--selection-ink); }
+:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+.num, td, .tabular { font-variant-numeric: tabular-nums; }
+/* (Hidden means hidden: a component's own display never shows it.) */
+[hidden] { display: none !important; }
+/* (A plugin's icon takes the text's ink, light or dark: the filter's flood, set here, as the page's policy allows no inline style.) */
+.ink-flood { flood-color: var(--text); }
+.ink-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+/* An author's words keep their reordering to themselves. */
+.app :where(a, span, b, strong, em, code, bdi, time, label, dt, dd, li, td, th, p, h1, h2, h3) { unicode-bidi: isolate; }
+
+/* ── Type ──────────────────────────────────────────────────────────────── */
+
+.t-title { font-size: 20px; line-height: 26px; font-weight: 600; letter-spacing: -0.01em; }
+.t-heading { font-size: 15px; line-height: 20px; font-weight: 500; }
+.t-body { font-size: 13px; line-height: 18px; }
+.t-text { font-size: 13px; line-height: 20px; } /* wrapped body: a description, a paragraph */
+.t-caption { font-size: 12px; line-height: 16px; }
+.t-label { font-size: 11px; line-height: 14px; font-weight: 500; }
+.t-mono { font-family: var(--mono); font-size: 12px; line-height: 16px; }
+.t-2 { color: var(--text-2); }
+.t-3 { color: var(--text-3); }
+.t-strong { font-weight: 500; }
+
+/* ── The shell ─────────────────────────────────────────────────────────── */
+
+/* The window: two cards set into it, the sidebar and the page, 4 apart. */
+.shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  gap: var(--inset);
+  height: 100dvh;
+  padding: var(--inset);
+}
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--sidebar);
+  border-radius: 12px;
+  box-shadow: inset 0 0 0 1px var(--line-faint);
+}
+/* Its brand and search stay; its rows scroll under them, faded 12 at each
+   end (the app's list's fade); its foot (you) stays. */
+.sidebar-top { padding: 8px 8px 0; }
+.sidebar-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 8px 12px;
+  mask-image: linear-gradient(transparent, #000 12px, #000 calc(100% - 12px), transparent);
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+.sidebar-foot { padding: 8px; display: grid; gap: 4px; }
+
+/* The page's card: it scrolls on its own; its header stays. */
+.page {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--card);
+  border-radius: 12px;
+  box-shadow: inset 0 0 0 1px var(--line-faint);
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+/* The header runs the card's width (its hairline edge to edge); what is in
+   it keeps to the page's column, so header and body share their edges. */
+.page-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 12px 24px;
+  /* (The card's own fill over the window, solid, so what scrolls under it doesn't show.) */
+  background: var(--head-bg);
+  border-bottom: 1px solid var(--line-faint);
+  border-radius: 12px 12px 0 0;
+}
+.head-row { display: flex; align-items: center; gap: 12px; min-height: 32px; }
+.page-head .lead { display: flex; align-items: baseline; gap: 8px; min-width: 0; flex: 1; }
+.page-head .tools { display: flex; align-items: center; gap: 8px; flex: none; }
+.page-body { padding: 24px 24px 32px; }
+/* The page's column: a list's or a table's grows to 1120 and stops,
+   centred in the card; reading (a README) stops at 720. */
+.column { max-width: 1120px; margin-inline: auto; }
+.column.prose { max-width: 720px; }
+
+/* The brand: the mark and "Plugins", on a row's grid, 40 high so its middle
+   is the page header's (4 + 8 + 20 = 4 + 28). */
+.brand { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 8px; font-weight: 600; }
+.brand .mark { width: 16px; height: 9.5px; fill: var(--text); }
+
+/* The list's rows (Settings.Nav): 28 high, 8 in, an icon and a name 8 apart. */
+.nav { display: grid; gap: 2px; }
+.nav-heading { display: flex; align-items: flex-end; height: 24px; padding: 8px 8px 0; color: var(--text-3); font-size: 11px; line-height: 14px; font-weight: 500; }
+.nav-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  color: var(--text-2);
+  transition: color 0.1s, background-color 0.1s;
+}
+.nav-row .glyph { color: inherit; }
+.nav-row .count { margin-left: auto; color: var(--text-3); font-size: 11px; line-height: 14px; }
+.nav-row:hover, .nav-row.is-hover { color: var(--text); }
+.nav-row:active, .nav-row.is-active { background: var(--hover); }
+.nav-row[aria-current="page"] { background: var(--selected); color: var(--text); }
+.nav-row:focus-visible { outline-offset: -2px; }
+.nav-gap { height: 8px; }
+
+/* The search over the list: a field at a row's height, "/" to it. */
+.sidebar .search { margin: 8px 0; }
+
+/* You, at the list's foot (ds.AccountRow): a face and a name on a 30 slot. */
+.account {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  /* (6 in: the face's middle on the rows' icon column, 8 + 6 + 10 = 8 + 8 + 8.) */
+  padding: 0 8px 0 6px;
+  border-radius: 8px;
+  color: var(--text);
+}
+a.account:hover { background: var(--hover); }
+/* (On a page of yours: Sign out beside you, a quiet 24.) */
+.account-row { display: flex; align-items: center; gap: 4px; }
+.account-row .account { flex: 1; min-width: 0; }
+.account .avatar { width: 20px; height: 20px; border-radius: 50%; background: var(--wash); display: grid; place-items: center; font-size: 11px; font-weight: 600; color: var(--text-2); flex: none; overflow: hidden; }
+.account .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account.is-pending .name { color: transparent; }
+.account.is-pending .name::before { content: ""; display: block; width: 72px; height: 12px; border-radius: 4px; background: var(--hover); }
+.colophon { display: flex; gap: 6px; padding: 0 8px; color: var(--text-3); font-size: 11px; line-height: 14px; }
+.colophon a:hover { color: var(--text); }
+/* (Each link a 24 target, as WCAG 2.2 asks, its words still 11.) */
+.colophon { align-items: center; }
+.colophon a { display: inline-flex; align-items: center; min-height: 24px; }
+
+/* ── The phone: a top bar, the list in a drawer ────────────────────────── */
+
+.topbar { display: none; }
+.drawer-scrim { display: none; }
+@media (max-width: 899px) {
+  /* (Without the script the list is at the page's end, where Menu leads;
+     with it, a drawer over the page from the left.) */
+  .shell { display: flex; flex-direction: column; height: auto; padding: 0; }
+  .sidebar { order: 2; border-radius: 0; box-shadow: none; border-top: 1px solid var(--line-faint); }
+  .js .sidebar { display: none; }
+  .js .sidebar.is-open {
+    display: flex;
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 21;
+    width: min(304px, 88vw);
+    border: 0;
+    background: var(--overlay);
+    box-shadow: var(--shadow-pop);
+  }
+  .js .drawer-scrim.is-open { display: block; position: fixed; inset: 0; z-index: 20; background: var(--scrim); }
+  .page { overflow: visible; border-radius: 0; box-shadow: none; background: transparent; }
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 48px;
+    padding: 0 8px;
+    background: var(--window);
+    border-bottom: 1px solid var(--line-faint);
+  }
+  .topbar .brand { padding: 0 4px; }
+  .topbar .spacer { flex: 1; }
+  .page-head { position: static; padding: 16px; border-radius: 0; background: transparent; border-bottom: 0; }
+  .head-row { flex-wrap: wrap; }
+  /* (Only a sort takes the phone's width; other tools keep beside the title.) */
+  .page-head .tools:has(> .segmented) { width: 100%; }
+  .head-row:not(:has(.segmented)) { flex-wrap: nowrap; }
+  /* (The sort across the phone, its segments sharing it; past its width it scrolls.) */
+  .page-head .tools > .segmented { flex: 1; overflow-x: auto; scrollbar-width: none; }
+  .page-head .tools > .segmented > * { flex: 1 0 auto; justify-content: center; }
+  .page-body { padding: 0 16px 32px; }
+  /* A phone's list is touched: rows at the large control's 40, names at 15. */
+  .sidebar .nav-row { height: 40px; font-size: 15px; line-height: 20px; }
+  .sidebar .nav-heading { height: 32px; }
+  .sidebar .search.field { height: 40px; padding: 0 10px; border-radius: 8px; }
+  .sidebar .search input { font-size: 15px; line-height: 20px; }
+  .sidebar .search .kbd { display: none; }
+  .sidebar .account { height: 40px; }
+}
+/* ── Controls ──────────────────────────────────────────────────────────── */
+
+/* A button: 24, 28, 32 or 40 high (xs, sm, md, lg); medium weight; an 8
+   corner (6 at 28). */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.1s, color 0.1s;
+  user-select: none;
+}
+.btn.xs { height: 24px; padding: 0 6px; gap: 6px; font-size: 12px; line-height: 16px; }
+.btn.sm { height: 28px; padding: 0 10px; gap: 6px; border-radius: 6px; font-size: 12px; line-height: 16px; }
+.btn.lg { height: 40px; padding: 0 24px; font-size: 15px; line-height: 20px; }
+.btn.icon { width: 32px; padding: 0; }
+.btn.icon.xs { width: 24px; }
+.btn.icon.sm { width: 28px; }
+.btn.primary { background: var(--primary); color: var(--primary-ink); }
+.btn.primary:hover, .btn.primary.is-hover { background: var(--primary-hover); }
+.btn.primary:active, .btn.primary.is-active { background: var(--primary-active); }
+.btn.secondary { background: var(--secondary); color: var(--text); }
+.btn.secondary:hover, .btn.secondary.is-hover { background: var(--secondary-hover); }
+.btn.secondary:active, .btn.secondary.is-active { background: var(--secondary-active); }
+.btn.ghost { color: var(--text-2); }
+.btn.ghost:hover, .btn.ghost.is-hover { background: var(--hover); color: var(--text); }
+.btn.ghost:active, .btn.ghost.is-active { background: var(--pressed); color: var(--text); }
+.btn.danger { background: var(--danger); color: #fff; }
+.btn.danger:hover, .btn.danger.is-hover { background: var(--danger-hover); }
+.btn.danger:active, .btn.danger.is-active { background: var(--danger-active); }
+.btn:disabled, .btn[aria-disabled="true"] { opacity: 0.4; pointer-events: none; }
+.is-focus { outline: 2px solid var(--ring); outline-offset: 1px; }
+
+/* A key on the keyboard. */
+.kbd { display: inline-grid; place-items: center; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 4px; box-shadow: inset 0 0 0 1px var(--line); color: var(--text-3); font-family: var(--sans); font-size: 11px; line-height: 14px; }
+
+/* A field: a sunken well, its hairline firming under the pointer, the
+   accent's edge and the ring when focused. 32 high (28 small). */
+.field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background: var(--sunken);
+  box-shadow: inset 0 0 0 1px var(--field-edge);
+  color: var(--text);
+  transition: box-shadow 0.1s;
+}
+.field.sm { height: 28px; padding: 0 8px; border-radius: 6px; gap: 6px; }
+.field:hover, .field.is-hover { box-shadow: inset 0 0 0 1px var(--field-edge-hover); }
+.field:focus-within, .field.is-focus { box-shadow: inset 0 0 0 1px var(--field-focus); outline: 2px solid var(--ring); outline-offset: 1px; }
+.field.is-error { box-shadow: inset 0 0 0 1px var(--field-error); }
+.field.is-disabled { opacity: 0.4; pointer-events: none; }
+.field input, .field select, .field textarea { flex: 1; min-width: 0; height: 100%; background: none; border: 0; outline: 0; font-size: 13px; line-height: 18px; }
+.field.sm input { font-size: 12px; line-height: 16px; }
+.field input::placeholder, .field textarea::placeholder { color: var(--text-3); }
+.field .glyph { color: var(--text-3); }
+.field.area { height: auto; padding: 6px 10px; align-items: stretch; }
+.field.area textarea { min-height: 80px; line-height: 20px; resize: vertical; }
+.field select { appearance: none; padding-right: 20px; cursor: pointer; }
+.field.select { position: relative; }
+.field.select .chevron { position: absolute; right: 10px; pointer-events: none; color: var(--text-3); }
+.field-label { display: block; margin-bottom: 6px; font-size: 12px; line-height: 16px; font-weight: 500; color: var(--text); }
+.field-hint { margin-top: 6px; font-size: 12px; line-height: 16px; color: var(--text-3); }
+.field-hint.is-error { color: var(--bad-ink); }
+
+/* A segmented control: a 26 track, its thumb 2 in (corner 6, the thumb's 4). */
+.segmented { display: inline-flex; height: 26px; padding: 2px; gap: 2px; border-radius: 6px; background: var(--wash); }
+.segmented > * { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 12px; border-radius: 4px; color: var(--text-2); font-size: 12px; line-height: 16px; font-weight: 500; white-space: nowrap; }
+.segmented > *:hover, .segmented > .is-hover { color: var(--text); }
+.segmented > [aria-current="page"], .segmented > [aria-pressed="true"], .segmented > .is-on { background: var(--seg-thumb); box-shadow: var(--seg-thumb-shadow); color: var(--text); }
+.segmented > *:focus-visible { outline: 1px solid var(--ring); outline-offset: -1px; }
+
+/* Tabs: labels on a hairline, the open one marked under. 36 high (32 small). */
+.tabs { display: flex; gap: 16px; border-bottom: 1px solid var(--line-faint); overflow-x: auto; scrollbar-width: none; }
+.tabs > * { position: relative; display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 4px; color: var(--text-2); font-size: 13px; line-height: 18px; font-weight: 500; white-space: nowrap; flex: none; }
+.tabs.sm > * { height: 32px; font-size: 12px; line-height: 16px; }
+.tabs > *:first-child { padding-left: 0; }
+.tabs > *:hover, .tabs > .is-hover { color: var(--text); }
+.tabs > [aria-current="page"], .tabs > [aria-selected="true"] { color: var(--text); }
+.tabs > [aria-current="page"]::after, .tabs > [aria-selected="true"]::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; border-radius: 1px; background: var(--text); }
+.tabs > *:first-child[aria-current="page"]::after { left: 0; }
+.tabs > *:focus-visible { outline-offset: -2px; border-radius: 6px; }
+.tabs .count { color: var(--text-3); font-size: 11px; line-height: 14px; }
+
+/* A badge: 20 high (16 small), its tone's ink on its wash. */
+.badge { display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 6px; border-radius: 6px; background: var(--wash); color: var(--neutral-ink); font-size: 12px; line-height: 16px; font-weight: 500; white-space: nowrap; }
+.badge.sm { height: 16px; padding: 0 4px; gap: 3px; border-radius: 4px; font-size: 11px; line-height: 14px; }
+.badge.dot::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.badge.ok { background: var(--ok-wash); color: var(--ok-ink); }
+.badge.warn { background: var(--warn-wash); color: var(--warn-ink); }
+.badge.bad { background: var(--bad-wash); color: var(--bad-ink); }
+.badge.info { background: var(--info-wash); color: var(--info-ink); }
+.badge.accent { background: var(--accent-wash); color: var(--accent-ink); }
+
+/* A tag: a word that leads to its list, on the quiet wash, 24 high (the
+   xs control's: a target big enough to touch), 12 / 16, 8 in, corner 6. */
+.tag { display: inline-flex; align-items: center; height: 24px; padding: 0 8px; border-radius: 6px; background: var(--wash); color: var(--text-2); font-size: 12px; line-height: 16px; }
+.tag:hover { background: var(--secondary-hover); color: var(--text); }
+
+/* An icon tile: a mark on the quiet wash. Its corner as the app's
+   (ds/tile.luau): 4 under 32, 6 from 32, 12 from 56. */
+.tile { display: grid; place-items: center; flex: none; width: 32px; height: 32px; border-radius: 6px; background: var(--wash); color: var(--text); }
+.tile.s20 { width: 20px; height: 20px; border-radius: 4px; }
+.tile.s40 { width: 40px; height: 40px; border-radius: 6px; }
+.tile.s56 { width: 56px; height: 56px; border-radius: 12px; }
+
+/* ── Groups: panels, lists, tables ─────────────────────────────────────── */
+
+/* A section: its title and a line, then what it holds 8 under. */
+.section { display: grid; gap: 8px; }
+/* (The app's section title: the title and its action on one row, the
+   action the row's trail; the line under, at most 720, as all prose.) */
+.section-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title action" "text text"; align-items: center; gap: 4px 12px; }
+.section-head .words { display: contents; }
+.section-head h2 { grid-area: title; font-size: 15px; line-height: 20px; font-weight: 500; }
+.section-head p { grid-area: text; max-width: 720px; font-size: 13px; line-height: 20px; color: var(--text-2); }
+.section-head > :not(.words) { grid-area: action; }
+
+/* A panel (a settings group's card): a quiet fill, a hairline, a 12 corner;
+   what is in it reaches its edges and is clipped to its corners. */
+.panel { background: var(--panel); border-radius: 12px; box-shadow: inset 0 0 0 1px var(--line-faint); overflow: hidden; }
+.panel-pad { padding: 16px; }
+
+/* A list row (Settings.Row): 52 at least, 16 in; a lead, the words, the control. */
+.row { display: flex; align-items: center; gap: 12px; min-height: 52px; padding: 10px 16px; }
+.row + .row { border-top: 1px solid var(--line-faint); }
+.row .words { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.row .label { font-size: 13px; line-height: 18px; }
+.row .label.strong { font-weight: 500; }
+.row .desc { font-size: 12px; line-height: 16px; color: var(--text-3); }
+.row .end { flex: none; display: flex; align-items: center; gap: 8px; }
+a.row:hover, .row.link:hover, .row.is-hover { background: var(--hover); }
+a.row:focus-visible { outline-offset: -2px; }
+
+/* A table: a 32 head of labels, rows 40 (52 comfortable, 32 dense), cells 12
+   apart, 16 in at the ends; hairlines between rows, washed under the pointer. */
+/* (Borders kept apart, not collapsed: a collapsed border is shared half and
+   half by the rows it parts, which leaves a row 52.5 high.) */
+.table { width: 100%; border-collapse: separate; border-spacing: 0; }
+.table th { height: 32px; padding: 0 12px; text-align: left; font-size: 12px; line-height: 16px; font-weight: 500; color: var(--text-2); white-space: nowrap; border-bottom: 1px solid var(--line-faint); }
+.table td { height: 40px; padding: 0 12px; font-size: 13px; line-height: 18px; vertical-align: middle; }
+.table tr > :first-child { padding-left: 16px; }
+.table tr > :last-child { padding-right: 16px; }
+.table tbody tr + tr td { border-top: 1px solid var(--line-faint); }
+.table tbody tr:hover, .table tbody tr.is-hover { background: var(--hover); }
+.table tbody tr[aria-selected="true"] { background: var(--selected); }
+.table.comfortable td { height: 52px; padding-top: 8px; padding-bottom: 8px; }
+.table.dense td { height: 32px; }
+.table .end { text-align: right; }
+.table .muted { color: var(--text-2); }
+.table .faint { color: var(--text-3); }
+.table .cell-main { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.table .cell-words { display: grid; gap: 2px; min-width: 0; }
+.table .cell-words .sub { font-size: 12px; line-height: 16px; color: var(--text-3); }
+
+/* A toolbar over a list: what it holds at the left, how it's ordered at the right. */
+.toolbar { display: flex; align-items: center; gap: 8px; min-height: 32px; margin-bottom: 12px; }
+.toolbar .grow { flex: 1; }
+
+/* Facts, label and value (a key/value list): 32 a line, hairlines between. */
+.facts { display: grid; }
+.facts > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 32px; }
+.facts > div + div { border-top: 1px solid var(--line-faint); }
+.facts dt { font-size: 12px; line-height: 16px; color: var(--text-2); }
+.facts dd { font-size: 13px; line-height: 18px; text-align: right; min-width: 0; overflow-wrap: anywhere; }
+
+/* A copy box: something to paste elsewhere, on a field's well, with Copy. */
+.copybox { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 4px 0 10px; border-radius: 8px; background: var(--sunken); box-shadow: inset 0 0 0 1px var(--field-edge); }
+.copybox code { flex: 1; min-width: 0; font-size: 12px; line-height: 16px; white-space: nowrap; overflow-x: auto; scrollbar-width: none; }
+
+/* An empty state: a tile, a heading, a line, what to do. */
+.empty { display: grid; justify-items: center; gap: 16px; padding: 48px 24px; text-align: center; }
+.empty .tile { width: 40px; height: 40px; border-radius: 12px; color: var(--text-2); }
+.empty .words { display: grid; gap: 4px; max-width: 360px; }
+.empty :is(h1, h2, h3) { font-size: 15px; line-height: 20px; font-weight: 500; }
+.empty p { font-size: 13px; line-height: 20px; color: var(--text-2); }
+.empty .actions { display: flex; gap: 8px; padding-top: 4px; }
+
+/* A skeleton: where something will be, the hover wash, breathing. */
+.skeleton { display: block; border-radius: 4px; background: var(--hover); animation: breathe 1.6s ease-in-out infinite; }
+.skeleton.line { height: 12px; }
+@keyframes breathe { 50% { background: var(--pressed); } }
+@media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
+
+/* Pagination, the one everywhere: where you are in the middle ("26–50 of
+   128", tabular), Previous and Next 12 either side of it, 12 under the list. */
+.pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 12px; }
+.pager .where { min-width: 96px; text-align: center; color: var(--text-2); font-size: 12px; line-height: 16px; font-variant-numeric: tabular-nums; }
+
+/* A dialog (ds/dialog): 460 wide, a 16 corner, 24 in, 24 between its parts;
+   a sheet: 400 from the right, the window's height. */
+.dialog, .sheet { color: var(--text); background: var(--overlay); box-shadow: 0 0 0 1px var(--line), var(--shadow-pop); border: 0; }
+.dialog { width: min(460px, calc(100vw - 32px)); border-radius: 16px; padding: 24px; margin: auto; }
+.dialog.sm { width: min(380px, calc(100vw - 32px)); }
+.dialog::backdrop, .sheet::backdrop { background: var(--scrim); }
+.dialog .head, .sheet .head { display: grid; gap: 6px; }
+.dialog h2, .sheet h2 { font-size: 15px; line-height: 20px; font-weight: 600; overflow-wrap: anywhere; }
+.dialog p, .sheet p { overflow-wrap: anywhere; }
+.dialog .head p, .sheet .head p { font-size: 13px; line-height: 20px; color: var(--text-2); }
+.dialog .body, .sheet .body { display: grid; gap: 12px; margin-top: 24px; }
+.dialog .answers, .sheet .answers { display: flex; justify-content: flex-end; gap: 8px; margin-top: 24px; }
+.sheet { position: fixed; inset: 0 0 0 auto; margin: 0; width: min(400px, 100vw); max-width: 100vw; height: 100dvh; max-height: none; padding: 24px; border-radius: 16px 0 0 16px; overflow-y: auto; }
+
+/* A toast (ds/toast): 340 wide, a 12 corner, its tone's glyph, what happened. */
+.toast { display: flex; align-items: flex-start; gap: 12px; width: min(340px, calc(100vw - 32px)); padding: 12px 8px 12px 16px; border-radius: 12px; background: var(--overlay); box-shadow: 0 0 0 1px var(--line), var(--shadow-toast); }
+.toast .glyph { margin-top: 1px; }
+.toast.ok .glyph { color: var(--ok-ink); }
+.toast.bad .glyph { color: var(--bad-ink); }
+.toast .what { flex: 1; min-width: 0; font-size: 13px; line-height: 18px; font-weight: 500; }
+/* (Its close, 24 high, centred on the first 18 line: (24 − 18) / 2 over it.) */
+.toast > .btn { margin-block: -3px; }
+
+/* ── A list of plugins ─────────────────────────────────────────────────── */
+
+/* All plugins, a category, a search: a table in a panel, a plugin a row,
+   the row one link. 52 a row: its 32 tile 10 above and under. Its columns
+   line up down the whole list: the plugin (tile, name, its line) takes what
+   is left; by 160; category 144; installs 96 at the right, tabular. */
+.plugins { table-layout: fixed; }
+.plugins col.by { width: 160px; }
+.plugins col.category { width: 144px; }
+.plugins col.installs { width: 112px; } /* (a count, or a day: "Oct 29, 2025") */
+.plugins tbody tr { position: relative; }
+.plugins .cell-main { gap: 12px; }
+.plugins .name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.plugins .line, .plugins td.by, .plugins td.category { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.plugins .line { font-size: 12px; line-height: 16px; color: var(--text-3); }
+.plugins td.by, .plugins td.category { color: var(--text-2); }
+.plugins .meta { display: none; }
+/* (The row is the name's link, stretched over it.) */
+.plugins .name-link::after { content: ""; position: absolute; inset: 0; }
+.plugins .name-link:focus-visible { outline: 0; }
+.plugins .name-link:focus-visible::after { outline: 2px solid var(--ring); outline-offset: -2px; }
+/* (The last row's ring follows the panel's corners: concentric, its
+   outside on the panel's 12, so it never cuts across the curve.) */
+.plugins .rows tr:last-child .name-link::after { border-radius: 0 0 12px 12px; }
+.plugins .tile-wrap { display: contents; }
+/* Loading the next page: its rows' places held, the same heights. */
+.plugins .sk-tile { width: 32px; height: 32px; border-radius: 6px; flex: none; }
+.plugins .sk-name { width: 144px; height: 12px; }
+.plugins .sk-line { width: 288px; height: 10px; }
+.plugins .sk-short { width: 72px; height: 12px; }
+.plugins .sk-num { width: 48px; height: 12px; margin-left: auto; }
+.plugins .sk-words { display: grid; gap: 8px; }
+[aria-busy="true"] .rows { display: none; }
+.skeleton-rows { display: none; }
+[aria-busy="true"] .skeleton-rows { display: table-row-group; }
+
+/* The count, the title's own line: "All plugins · 128". */
+.title-count { color: var(--text-3); font-weight: 400; }
+
+@media (max-width: 899px) {
+  /* A phone's list, as the app's: a 40 tile, the name at 15, its line at 13,
+     who and how many at 12 under; 12 above and under. */
+  .plugins thead, .plugins col.by, .plugins col.category, .plugins col.installs, .plugins td.by, .plugins td.category, .plugins td.installs { display: none; }
+  .plugins tbody td { height: auto; padding: 12px 16px; }
+  .plugins .cell-main { align-items: flex-start; }
+  .plugins .plugin-tile { width: 40px; height: 40px; }
+  .plugins .name { font-size: 15px; line-height: 20px; }
+  .plugins .line { font-size: 13px; line-height: 18px; }
+  .plugins .meta { display: block; font-size: 12px; line-height: 16px; color: var(--text-3); }
+  .plugins .cell-words { gap: 2px; }
+  .plugins .sk-line { width: 200px; }
+}
+
+/* ── Reading: a README, a version's notes ──────────────────────────────── */
+
+/* The app's transcript (zeron.prose): 15 / 24; headings, a step down from
+   the page's own (the README's h1 drawn as an h2 at 18 / 26), never larger
+   than the page's title; code 13 / 20. 12 between blocks, 24 over a heading. */
+.prose { font-size: 15px; line-height: 24px; color: var(--text); overflow-wrap: anywhere; }
+.prose > :first-child { margin-top: 0; }
+.prose :where(p, ul, ol, blockquote, pre, .table-scroll, hr, img) { margin-top: 12px; }
+/* (A heading stepped down keeps the room of its source level: a README's
+   # (here an h2) 32 above, ## 24, ### and lower 20; always more than the 12
+   between paragraphs and the 8 under it, so its section groups.) */
+.prose :where(h2, h3, h4, h5, h6) { margin-top: 20px; font-weight: 600; scroll-margin-top: 80px; }
+.prose h2 { margin-top: 32px; }
+.prose h3 { margin-top: 24px; }
+.prose h2 { font-size: 18px; line-height: 26px; }
+.prose :where(h3, h4, h5, h6) { font-size: 15px; line-height: 24px; }
+.prose :where(h2, h3, h4, h5, h6) + * { margin-top: 8px; }
+.prose strong { font-weight: 600; }
+.prose em { font-style: italic; }
+.prose del { color: var(--text-3); }
+.prose a { text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
+.prose a:hover { text-decoration-color: var(--text); }
+.prose ul { padding-left: 24px; list-style: disc; }
+.prose ol { padding-left: 24px; list-style: decimal; }
+.prose li + li, .prose li > :where(ul, ol) { margin-top: 4px; }
+.prose li::marker { color: var(--text-3); }
+.prose .contains-task-list { padding-left: 0; list-style: none; }
+.prose .task-list-item { display: flex; gap: 8px; align-items: baseline; }
+.prose .task-list-item input { accent-color: var(--accent); }
+.prose blockquote { padding-left: 16px; border-left: 2px solid var(--line-strong); color: var(--text-2); }
+.prose hr { height: 1px; border: 0; background: var(--line-faint); margin-block: 24px; }
+/* (A picture as the app draws an attachment: the cards' 12 corner, a 1 hairline drawn over it.) */
+/* (A picture in the words takes the smaller corner, 8; the strip's, peers
+   of the panels on the column's edge, take theirs, 12.) */
+.prose img { max-width: 100%; height: auto; border-radius: 8px; outline: 1px solid var(--line-faint); outline-offset: -1px; display: inline-block; vertical-align: middle; }
+.prose p > img:only-child { display: block; }
+.prose :not(pre) > code { padding: 0 4px; font-size: 13px; border-radius: 4px; background: var(--wash); }
+.prose pre { padding: 12px 16px; overflow-x: auto; font-size: 13px; line-height: 20px; border-radius: 8px; background: var(--sunken); box-shadow: inset 0 0 0 1px var(--line-faint); tab-size: 2; }
+.prose pre code { font-size: inherit; }
+.prose .table-scroll { overflow-x: auto; border-radius: 8px; box-shadow: inset 0 0 0 1px var(--line-faint); }
+.prose table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; line-height: 18px; }
+.prose th, .prose td { padding: 8px 12px; text-align: left; vertical-align: top; }
+.prose tr + tr td, .prose tbody tr:first-child td { border-top: 1px solid var(--line-faint); }
+.prose th { font-weight: 500; color: var(--text-2); font-size: 12px; line-height: 16px; }
+.prose [align="center"] { text-align: center; }
+.prose [align="right"] { text-align: right; }
+.prose .footnotes { margin-top: 24px; padding-top: 12px; border-top: 1px solid var(--line-faint); font-size: 13px; line-height: 20px; }
+.prose sup { font-size: 11px; line-height: 0; }
+.prose sup a { text-decoration: none; }
+.prose :focus-visible { outline-offset: 2px; }
+
+/* Code's colours (zeron.syntax). */
+.hljs { color: var(--code-text); }
+.hljs-keyword, .hljs-selector-tag, .hljs-doctag, .hljs-section { color: var(--code-keyword); }
+.hljs-title.function_, .hljs-title, .hljs-function .hljs-title { color: var(--code-function); }
+.hljs-type, .hljs-title.class_, .hljs-built_in { color: var(--code-type); }
+.hljs-string, .hljs-meta .hljs-string { color: var(--code-string); }
+.hljs-number, .hljs-literal { color: var(--code-number); }
+.hljs-attr, .hljs-property { color: var(--code-property); }
+.hljs-attribute, .hljs-selector-attr, .hljs-selector-class, .hljs-selector-id { color: var(--code-attribute); }
+.hljs-name, .hljs-tag { color: var(--code-tag); }
+.hljs-comment, .hljs-quote { color: var(--code-comment); font-style: italic; }
+.hljs-punctuation, .hljs-operator { color: var(--code-punct); }
+.hljs-addition { color: var(--diff-added); }
+.hljs-deletion { color: var(--diff-removed); }
+
+/* ── A plugin's page ───────────────────────────────────────────────────── */
+
+/* Where it is, in the header: All plugins › its category › its name. */
+.crumbs { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; line-height: 18px; }
+.crumbs a { color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; }
+.crumbs > a:first-child { flex: none; }
+.crumbs a:hover { color: var(--text); }
+.crumbs .glyph { color: var(--text-3); }
+.crumbs [aria-current="page"] { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+
+/* Its head: a 56 tile, the name (wrapping whole) over one line of facts,
+   Install at the right; the tile's top on the name's. */
+.plugin-head { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto; gap: 16px; align-items: center; }
+.plugin-head .who { display: grid; gap: 4px; min-width: 0; }
+.plugin-head h1 { overflow-wrap: anywhere; }
+.plugin-head .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--text-2); font-size: 13px; line-height: 18px; }
+.plugin-head .meta a { color: var(--text); }
+.plugin-head .meta a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.plugin-head .meta .dot { color: var(--text-3); }
+
+/* Install, and what it says under it. */
+.install { position: relative; display: grid; justify-items: end; gap: 6px; align-self: start; padding-top: 4px; }
+.install .btn .mark { width: 16px; height: 9.5px; fill: currentColor; }
+.install-help > summary { list-style: none; cursor: pointer; color: var(--text-3); font-size: 12px; line-height: 16px; }
+.install-help > summary::-webkit-details-marker { display: none; }
+.install-help > summary:hover, .install-help[open] > summary { color: var(--text); }
+.install-card {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 5;
+  display: grid;
+  gap: 8px;
+  width: min(320px, calc(100vw - 32px));
+  padding: 16px;
+  border-radius: 12px;
+  background: var(--overlay);
+  box-shadow: 0 0 0 1px var(--line), var(--shadow-toast);
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 20px;
+}
+.install-card ol { display: grid; gap: 4px; padding-left: 16px; list-style: decimal; }
+.install-card b { color: var(--text); font-weight: 500; }
+.install-card a { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
+.install-card .glyph { display: inline-block; vertical-align: -2px; }
+
+/* The pictures (as the app's): one fills the column at 16:10, to 420 high;
+   two share it, 12 apart; three or more show two whole and the third cut
+   by the column's end (48 of it). Each on the quiet wash, the cards' 12
+   corner. */
+.strip ul { display: flex; gap: 12px; }
+.strip li { flex: 1 1 0; min-width: 0; }
+.strip .shot { display: block; overflow: hidden; border-radius: 12px; background: var(--wash); box-shadow: inset 0 0 0 1px var(--line-faint); }
+.strip .shot img { display: block; width: 100%; height: 100%; object-fit: contain; color: transparent; } /* (a picture that won't load: the frame, not its words) */
+.strip.one .shot { aspect-ratio: 16 / 10; max-height: 420px; width: 100%; }
+.strip.two .shot, .strip.many .shot { aspect-ratio: 16 / 10; }
+.strip.many ul { overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; }
+.strip.many li { flex: 0 0 calc((100% - 12px - 48px) / 2); scroll-snap-align: start; }
+.strip .shot:focus-visible { outline-offset: 2px; }
+@media (max-width: 899px) {
+  /* (A phone: one whole, the next peeking.) */
+  .strip.two ul { overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; }
+  .strip.two li, .strip.many li { flex: 0 0 calc(100% - 48px); scroll-snap-align: start; }
+}
+
+/* A picture, large (ds/lightbox): its scrim, 40 from the window's edges. */
+.lightbox { position: fixed; inset: 0; width: 100vw; height: 100dvh; max-width: none; max-height: none; margin: 0; padding: 40px; border: 0; background: var(--lightbox); color: var(--text); }
+.lightbox::backdrop { background: transparent; }
+.lightbox[open] { display: grid; place-items: center; }
+.lightbox figure { display: grid; justify-items: center; gap: 12px; max-width: 100%; max-height: 100%; }
+.lightbox img { max-width: calc(100vw - 160px); max-height: calc(100dvh - 120px); border-radius: 12px; object-fit: contain; }
+.lightbox figcaption { color: var(--text-2); font-size: 12px; line-height: 16px; font-variant-numeric: tabular-nums; }
+.lightbox-close { position: absolute; top: 16px; right: 16px; }
+.lightbox-step { position: absolute; top: 50%; translate: 0 -50%; }
+.lightbox-step.prev { left: 16px; }
+.lightbox-step.next { right: 16px; }
+@media (max-width: 899px) { .lightbox { padding: 16px; } .lightbox img { max-width: calc(100vw - 32px); } .lightbox-step { top: auto; bottom: 16px; translate: none; } }
+
+/* Under the head, two columns: the pictures and then the tabs at the left,
+   the rail (304) beside both from the top, so what it asks for is in view
+   with the name. (The rail spans both rows; the tabs' row takes what is
+   left over, so a tall rail never opens a gap under the pictures.) The
+   README keeps to 720 inside its column. None wider than the column. */
+.plugin { display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; }
+.plugin-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 304px;
+  grid-template-rows: auto 1fr;
+  grid-template-areas: "strip rail" "main rail";
+  gap: 24px 32px;
+  align-items: start;
+}
+.plugin-strip { grid-area: strip; min-width: 0; }
+.plugin-strip:empty { display: none; }
+.plugin-body > .plugin-main { grid-area: main; }
+.plugin-body > .rail { grid-area: rail; }
+.plugin-main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; min-width: 0; }
+.plugin-main .prose, .plugin-main .lead { max-width: 720px; }
+.plugin-main .lead { color: var(--text-2); font-size: 15px; line-height: 24px; margin-bottom: 12px; }
+/* Tabs that are the page's own parts: without the script, the part named in
+   the address; with it, the same, kept in the address. */
+.tab-panels > .tab-panel { display: none; }
+.tab-panels > .tab-panel:first-child { display: block; }
+.tab-panels:has(> .tab-panel:target) > .tab-panel { display: none; }
+.tab-panels > .tab-panel:target { display: block; }
+.tab-panel { scroll-margin-top: 80px; }
+/* (With the script, the shown part is its own, not the address's.) */
+.js .tab-panels.js-tabs > .tab-panel { display: none; }
+.js .tab-panels.js-tabs > .tab-panel.is-shown { display: block; }
+.plugin-main > .tabs { scroll-margin-top: 80px; }
+
+/* The rail: what it asks for, in short; the facts; where else it lives. */
+.rail { display: grid; gap: 24px; min-width: 0; }
+.rail-part { display: grid; gap: 12px; }
+.rail-part + .rail-part { padding-top: 24px; border-top: 1px solid var(--line-faint); }
+.rail h2 { font-size: 13px; line-height: 18px; font-weight: 500; }
+/* (Its first heading's top on the pictures' top edge: the two columns start on one line.) */
+.rail .facts > div { min-height: 32px; }
+.rail .more { justify-self: start; color: var(--text-2); font-size: 12px; line-height: 16px; }
+.rail .more:hover { color: var(--text); }
+.rail .out { display: grid; gap: 2px; }
+.rail .out a { display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 8px; margin: 0 -8px; border-radius: 6px; color: var(--text-2); }
+.rail .out a:hover { background: var(--hover); color: var(--text); }
+.rail .out a .end { margin-left: auto; color: var(--text-3); }
+.rail .tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.rail .tags a { color: var(--text-2); }
+.rail .tags a:hover { color: var(--text); }
+
+/* What it asks for (components/kit/Asks.astro). */
+.asks { display: grid; gap: 12px; }
+.asks-warning { display: flex; gap: 8px; color: var(--bad-ink); font-size: 12px; line-height: 16px; }
+.asks.full .asks-warning { padding: 12px; border-radius: 8px; background: var(--bad-wash); font-size: 13px; line-height: 20px; }
+.asks-warning .glyph { margin-top: 0; flex: none; }
+.asks.full .asks-warning .glyph { margin-top: 2px; }
+.asks-nothing { color: var(--text-2); font-size: 13px; line-height: 20px; }
+.asks-lines { display: grid; gap: 8px; }
+.asks.full .asks-lines { gap: 16px; }
+.asks-line { display: flex; gap: 8px; align-items: flex-start; }
+.asks.full .asks-line { gap: 12px; }
+.asks-line > .glyph { margin-top: 1px; color: var(--text-2); }
+.asks-words { display: grid; gap: 2px; min-width: 0; }
+.asks-title { font-size: 13px; line-height: 18px; overflow-wrap: anywhere; }
+.asks-line.risky .asks-title, .asks-line.risky > .glyph { color: var(--bad-ink); }
+.asks-detail { color: var(--text-2); font-size: 12px; line-height: 16px; }
+.asks-literal { display: grid; gap: 2px; margin-top: 4px; font-family: var(--mono); font-size: 12px; line-height: 16px; color: var(--text-2); overflow-wrap: anywhere; }
+.asks-items { display: grid; gap: 8px; margin-top: 4px; }
+.asks-items code { font-size: 12px; line-height: 16px; }
+.asks-items p { color: var(--text-2); font-size: 12px; line-height: 16px; }
+.asks-group { display: grid; gap: 4px; }
+.tab-panel .asked { margin-top: 16px; }
+.asks-heading { color: var(--text-2); font-size: 12px; line-height: 16px; font-weight: 500; }
+
+/* Its versions, bounded: the latest's notes to 240 (ten lines) and Show
+   more; the older ones a row each (number, the first line, the day),
+   opening in place. */
+.versions { display: grid; gap: 24px; }
+.version-latest { display: grid; gap: 12px; }
+.version-head { display: flex; align-items: center; gap: 8px; }
+.version-head .num { font-family: var(--mono); font-size: 15px; line-height: 20px; font-weight: 500; }
+.version-head time { margin-left: auto; color: var(--text-3); font-size: 12px; line-height: 16px; }
+.js .notes.is-clamped { max-height: 240px; overflow: hidden; mask-image: linear-gradient(#000 calc(100% - 48px), transparent); }
+.notes-more { justify-self: start; }
+.older { display: grid; }
+.older > details + details { border-top: 1px solid var(--line-faint); }
+.older summary { display: grid; grid-template-columns: 96px minmax(0, 1fr) auto 16px; align-items: center; gap: 12px; min-height: 40px; padding: 0 16px; cursor: pointer; list-style: none; }
+.older summary::-webkit-details-marker { display: none; }
+.older summary:hover { background: var(--hover); }
+.older summary:focus-visible { outline-offset: -2px; }
+.older .num { font-family: var(--mono); font-size: 12px; line-height: 16px; }
+.older .first { color: var(--text); /* (the latest's notes' ink: the fold says which is which) */ white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.older time { color: var(--text-3); font-size: 12px; line-height: 16px; font-variant-numeric: tabular-nums; }
+.older summary .glyph { color: var(--text-3); transition: rotate 0.15s; }
+.older details[open] summary .glyph { rotate: 180deg; }
+.older .notes { padding: 0 16px 16px 124px; }
+/* The latest three, then "Show all N versions" (without the script, all). */
+.show-all { display: none; justify-self: start; }
+.js .show-all { display: inline-flex; }
+.js .older:not(.is-all) > .more-version { display: none; }
+.older details:last-child[open] summary:focus-visible, .older details:last-child summary:focus-visible { border-radius: 0 0 12px 12px; }
+
+@media (max-width: 899px) {
+  .plugin-head { grid-template-columns: 40px minmax(0, 1fr); gap: 12px; }
+  .plugin-head .plugin-tile { width: 40px; height: 40px; }
+  .plugin-head { align-items: start; }
+  /* (The day it was updated is in its facts: one line of meta on a phone.) */
+  .plugin-head .meta .updated { display: none; }
+  .plugin-head .install { grid-column: 1 / -1; justify-items: stretch; padding-top: 4px; }
+  .plugin-head .install .btn { height: 40px; font-size: 15px; line-height: 20px; }
+  .install-help > summary { text-align: center; }
+  .install-card { left: 0; right: auto; width: 100%; }
+  /* A phone: the head, Install, the pictures, what it asks for in short,
+     the tabs, then the facts. */
+  .plugin-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; grid-template-areas: none; }
+  .plugin-body > .rail { display: contents; }
+  .plugin-strip { order: 1; grid-area: auto; }
+  .rail-asks { order: 2; }
+  .plugin-body > .plugin-main { order: 3; grid-area: auto; }
+  .rail > .rail-part:not(.rail-asks) { order: 4; padding-top: 24px; border-top: 1px solid var(--line-faint); }
+  .older summary { grid-template-columns: 72px minmax(0, 1fr) auto 16px; }
+  .older .notes { padding-left: 16px; }
+}
+
+/* ── Notices ───────────────────────────────────────────────────────────── */
+
+/* Something to know before anything else on the page: its tone's wash, an
+   8 corner, 12 / 16 in, a 16 glyph on the first line of 13 / 20 words. */
+.notice { display: flex; gap: 8px; padding: 12px 16px; border-radius: 8px; background: var(--info-wash); color: var(--info-ink); font-size: 13px; line-height: 20px; }
+.notice .glyph { flex: none; margin-top: 2px; }
+.notice b { font-weight: 500; }
+.notice code { font-size: 12px; }
+.notice.warn { background: var(--warn-wash); color: var(--warn-ink); }
+
+/* ── Your plugins ──────────────────────────────────────────────────────── */
+
+/* A table of an author's plugins: the plugin (tile, name over its id in
+   mono) takes what is left; its listing 144; its newest version with that
+   version's state 216; when it was last sent 112, at the right. 52 a row. */
+.mine { table-layout: fixed; }
+.mine col.listing { width: 144px; }
+.mine col.newest { width: 216px; }
+.mine col.updated { width: 112px; }
+.mine tbody tr { position: relative; }
+.mine .name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mine .name-link::after { content: ""; position: absolute; inset: 0; }
+.mine .name-link:focus-visible { outline: 0; }
+.mine .name-link:focus-visible::after { outline: 2px solid var(--ring); outline-offset: -2px; }
+.mine tbody tr:last-child .name-link::after { border-radius: 0 0 12px 12px; }
+.mine .id { font-family: var(--mono); font-size: 12px; line-height: 16px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mine .newest-cell { display: flex; align-items: center; gap: 8px; }
+.mine .steady { color: var(--text-2); }
+.mine .meta { display: none; }
+
+/* ── One plugin: its versions and its keys ─────────────────────────────── */
+
+/* Its head, as the public page's: a 56 tile, its name, its id and listing;
+   "See it in the store" quiet at the right. */
+.mine-head { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto; gap: 16px; align-items: center; }
+.mine-head .who { display: grid; gap: 4px; min-width: 0; }
+.mine-head h1 { overflow-wrap: anywhere; }
+.mine-head .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.mine-head .see { display: inline-flex; align-items: center; gap: 4px; color: var(--text-2); font-size: 13px; line-height: 18px; white-space: nowrap; }
+.mine-head .see:hover { color: var(--text); }
+.mine-body { display: grid; gap: 24px; }
+
+/* A table whose rows may wrap (a reviewer's words): every cell starts on
+   one line, 28 high, 12 under the row's top, so its first line, its badge
+   and its button share a middle (12 + 14 = 26); the words, at 13 / 20,
+   begin 4 lower (16 + 10 = 26). 52 at the least. */
+.wrapping td { height: auto; padding-top: 12px; padding-bottom: 12px; vertical-align: top; }
+.wrapping .line { display: flex; align-items: center; min-height: 28px; gap: 8px; }
+.wrapping .line.end { justify-content: flex-end; }
+.wrapping td.words { padding-top: 16px; font-size: 13px; line-height: 20px; color: var(--text-2); }
+.wrapping td.words .said { color: var(--text); }
+.wrapping td.words .who { display: block; color: var(--text-3); font-size: 12px; line-height: 16px; margin-top: 4px; }
+
+/* Versions: the version in mono 128; its state 136; what that means, or
+   the reviewer's words (wrapping, never cut), what is left; when it was
+   sent 112; its one action at the row's end, in a column of 176 so the
+   actions line up down the table (the longest, "Allow installs again",
+   a small button's 10 + 115 + 10 within it). */
+.versions-table { table-layout: fixed; }
+.versions-table col.version { width: 128px; }
+.versions-table col.state { width: 136px; }
+.versions-table col.sent { width: 112px; }
+.versions-table col.action, .keys-table col.action { width: 176px; }
+.versions-table .version { font-family: var(--mono); font-size: 12px; line-height: 16px; overflow-wrap: anywhere; }
+
+/* Keys: the name what is left (one line, the rest in its title); the key,
+   short, mono, 120; made, last used and ends 112 each; Revoke in the same
+   176 action column. 52 a row. Ending within 14 days: the warning's ink. */
+.keys-table { table-layout: fixed; }
+.keys-table col.key { width: 120px; }
+.keys-table col.when { width: 112px; }
+.keys-table .key-name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.keys-table .key { font-family: var(--mono); font-size: 12px; line-height: 16px; color: var(--text-2); }
+.keys-table .soon { color: var(--warn-ink); }
+.keys-table .in-days { display: none; }
+.keys-table td.end .btn { margin-right: -10px; } /* (the button's words, not its wash, on the column's edge) */
+.versions-table td.end .btn { margin-right: -10px; }
+
+/* Revoked and expired keys: under the table, collapsed, with their count;
+   their columns on the live table's. */
+.gone { margin-top: 12px; }
+.gone > summary { display: inline-flex; align-items: center; gap: 8px; height: 28px; cursor: pointer; list-style: none; color: var(--text-2); font-size: 12px; line-height: 16px; font-weight: 500; }
+.gone > summary::-webkit-details-marker { display: none; }
+.gone > summary:hover { color: var(--text); }
+.gone > summary .glyph { transition: rotate 0.15s; }
+.gone[open] > summary .glyph { rotate: 180deg; }
+.gone .panel { margin-top: 8px; }
+.gone td { color: var(--text-2); }
+
+/* A new key: the sheet. Without the script, the address opens it (#new-key). */
+dialog.sheet:target { display: block; }
+.sheet .ways { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.sheet .way { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
+.sheet .path b { overflow-wrap: anywhere; font-weight: 500; }
+.sheet .way h3 { font-size: 13px; line-height: 18px; font-weight: 500; }
+.sheet .way p { color: var(--text-2); font-size: 13px; line-height: 20px; }
+/* (A path: each chevron held to the step after it, so no line starts with
+   one; a long name may break inside itself.) */
+.sheet .path { color: var(--text); font-size: 13px; line-height: 20px; }
+.sheet .path .step { white-space: nowrap; }
+.sheet .path .step b { white-space: normal; }
+.sheet .path .glyph { display: inline-block; vertical-align: -2px; margin: 0 4px; color: var(--text-3); }
+.sheet .first { color: var(--text-3); font-size: 12px; line-height: 16px; }
+
+/* The question as a page (no script): the dialog's card, in the column. */
+.confirm-card { position: static; margin: 0 auto; box-shadow: 0 0 0 1px var(--line); }
+.confirm-card .body { display: grid; gap: 12px; margin-top: 24px; }
+
+@media (max-width: 899px) {
+  /* A phone: each a row of its own lines. */
+  .mine thead, .mine col.listing, .mine col.newest, .mine col.updated, .mine td.listing, .mine td.newest, .mine td.updated { display: none; }
+  .mine tbody td { height: auto; padding: 12px 16px; }
+  .mine .cell-main { align-items: flex-start; }
+  .mine .plugin-tile { width: 40px; height: 40px; }
+  .mine .name { font-size: 15px; line-height: 20px; }
+  .mine .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 4px; }
+  .mine-head { grid-template-columns: 40px minmax(0, 1fr); align-items: start; gap: 12px; }
+  .mine-head .plugin-tile { width: 40px; height: 40px; }
+  .mine-head .see { grid-column: 2; }
+  /* A phone's rows of a wrapping table: their cells laid out as lines, 16
+     in, 12 above and under, 4 between lines. */
+  .wrapping thead, .wrapping colgroup { display: none; }
+  .wrapping, .wrapping tbody { display: block; }
+  .wrapping tbody tr { display: grid; gap: 4px 12px; padding: 12px 16px; }
+  .wrapping tbody tr + tr { border-top: 1px solid var(--line-faint); }
+  .table.wrapping tbody tr > td { display: block; height: auto; padding: 0; border: 0; }
+  .wrapping .line { min-height: 0; }
+  /* A version: its number and its state; what it means; when sent, and its action. */
+  .versions-table tbody tr { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "version state" "words words" "sent action"; }
+  .versions-table td:nth-child(1) { grid-area: version; align-self: center; }
+  .versions-table td:nth-child(2) { grid-area: state; align-self: center; }
+  .versions-table td:nth-child(3) { grid-area: words; }
+  .versions-table td:nth-child(4) { grid-area: sent; align-self: center; }
+  .versions-table td:nth-child(4) .line { justify-content: flex-start; }
+  .versions-table td:nth-child(5) { grid-area: action; align-self: center; }
+  .versions-table td.end .btn, .keys-table td.end .btn { margin-right: -10px; }
+  /* A key: its name; when made, last used and when it ends, each under its
+     label; the key itself, and Revoke. */
+  .keys-table tbody tr { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-areas: "name name name" "made used ends" "key key action"; }
+  .keys-table td:nth-child(1) { grid-area: name; }
+  .keys-table td:nth-child(2) { grid-area: key; align-self: center; }
+  .keys-table td:nth-child(3) { grid-area: made; }
+  .keys-table td:nth-child(4) { grid-area: used; }
+  .keys-table td:nth-child(5) { grid-area: ends; }
+  .keys-table td:nth-child(6) { grid-area: action; align-self: center; }
+  .keys-table td[data-label]::before { content: attr(data-label); display: block; color: var(--text-3); font-size: 12px; line-height: 16px; }
+  .keys-table tbody tr { row-gap: 8px; }
+  .keys-table .in-days { display: inline; }
+  .sheet { inset: auto 0 0 0; width: 100vw; height: auto; max-height: 90dvh; border-radius: 16px 16px 0 0; }
+}
+
+/* Toasts: at the window's foot, 16 from its edges (the page card's), over everything. */
+.toasts { position: fixed; right: 16px; bottom: 16px; z-index: 30; display: grid; gap: 8px; }
+@media (max-width: 899px) { .toasts { left: 16px; right: 16px; justify-items: center; } }
+
+/* ── Reporting a plugin ────────────────────────────────────────────────── */
+
+/* The question as a card in the column (the dialog's 460): who made it, the
+   reasons as rows to choose (40 at least, the chosen one selected, each its
+   line under it), more words, Cancel and Send report. */
+.report-card { width: min(460px, 100%); }
+.dialog .head.report-who { display: flex; align-items: center; gap: 12px; }
+.report-who > div { display: grid; gap: 2px; min-width: 0; }
+.report-card h1 { overflow-wrap: anywhere; }
+.done-tile { color: var(--ok-ink); margin-bottom: 4px; }
+.choices { display: grid; gap: 2px; border: 0; min-width: 0; }
+.choice { display: flex; gap: 12px; align-items: flex-start; min-height: 40px; padding: 8px 10px; margin: 0 -10px; border-radius: 8px; cursor: pointer; }
+.choice:hover { background: var(--hover); }
+.choice:has(input:checked) { background: var(--selected); }
+.choice:has(input:focus-visible) { outline: 2px solid var(--ring); outline-offset: -2px; }
+.choice input { margin-top: 3px; accent-color: var(--accent); }
+.choice-words { display: grid; gap: 2px; }
+.choice-title { font-size: 13px; line-height: 18px; font-weight: 500; }
+.choice-about { font-size: 12px; line-height: 16px; color: var(--text-2); }
+
+/* ── The Publishing guide ──────────────────────────────────────────────── */
+
+/* Prose at 720: its lead at 15 / 24 in the second ink; its parts as tags
+   (24 high, 8 apart) under it; its next step 32 under the last words. */
+.guide-lead { color: var(--text-2); }
+.prose .guide-parts ol { display: flex; flex-wrap: wrap; gap: 8px; padding: 0; list-style: none; }
+.prose .guide-parts li + li { margin-top: 0; }
+.prose .guide-parts a { display: inline-flex; align-items: center; height: 24px; padding: 0 8px; border-radius: 6px; background: var(--wash); color: var(--text-2); font-size: 12px; line-height: 16px; text-decoration: none; }
+.prose .guide-parts a:hover { background: var(--secondary-hover); color: var(--text); }
+.prose h2[id] { scroll-margin-top: calc(var(--head-h) + 24px); }
+.prose .btn { text-decoration: none; }
+.guide-next { margin-top: 32px; }
+
+/* ── Discover ──────────────────────────────────────────────────────────── */
+
+/* The store's front: sections 32 apart. Featured, three cards 16 apart,
+   each its first picture at 16:10 over its tile (32), name and who, then its
+   line, two lines at most; the card one link. On a phone, a row to swipe,
+   each card 80% wide so the next shows. Then short lists on the table system. */
+.discover { display: grid; grid-template-columns: minmax(0, 1fr); gap: 32px; }
+.discover > .section { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.featured-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.feature { position: relative; display: grid; grid-template-rows: auto auto 1fr; align-items: start; }
+.feature:hover { background: color-mix(in srgb, var(--hover) 60%, var(--panel)); }
+.feature-picture { display: block; width: 100%; height: auto; aspect-ratio: 16 / 10; object-fit: cover; object-position: top; background: var(--sunken); border-bottom: 1px solid var(--line-faint); }
+.feature-words { display: flex; align-items: center; gap: 12px; padding: 12px 16px 0; min-width: 0; }
+.feature-words .cell-words { display: grid; gap: 2px; min-width: 0; }
+.feature .name { font-size: 13px; line-height: 18px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.feature .by { font-size: 12px; line-height: 16px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.feature-summary { margin: 8px 16px 16px; /* (margin, not padding: a clamped line would show in the padding) */ font-size: 13px; line-height: 20px; color: var(--text-2); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+/* (Compact, when one has no picture: no cover; a 40 tile, 16 in at the top.) */
+.featured-row.compact .feature-words { padding-top: 16px; }
+.feature-link::after { content: ""; position: absolute; inset: 0; border-radius: 12px; }
+.feature-link:focus-visible { outline: 0; }
+.feature-link:focus-visible::after { outline: 2px solid var(--ring); outline-offset: -2px; }
+@media (max-width: 899px) {
+  .discover { gap: 24px; }
+  .featured-row { grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: 80%; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; margin-inline: -16px; padding-inline: 16px; scroll-padding-inline: 16px; }
+  .feature { scroll-snap-align: start; }
+}
+
+/* ── Review: the staff's side ──────────────────────────────────────────── */
+
+/* The queue: a table, the longest waiting first, a submission a row (the
+   row its link). The plugin (a 32 tile, its name over its id in mono)
+   takes what is left; the version in mono 128; who sent it 144; new or an
+   update 112; a badge only where a row needs a look 152; how long it has
+   waited 112, the last column, so at the right. 52 a row. */
+.queue { table-layout: fixed; }
+.queue col.version { width: 128px; }
+.queue col.author { width: 144px; }
+.queue col.kind { width: 112px; }
+.queue col.flags { width: 152px; }
+.queue col.waited { width: 112px; }
+.queue tbody tr { position: relative; }
+.queue .name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.queue .name-link::after { content: ""; position: absolute; inset: 0; }
+.queue .name-link:focus-visible { outline: 0; }
+.queue .name-link:focus-visible::after { outline: 2px solid var(--ring); outline-offset: -2px; }
+.queue tbody tr:last-child .name-link::after { border-radius: 0 0 12px 12px; }
+.queue .id, .queue td.version { font-family: var(--mono); font-size: 12px; line-height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.queue .id { color: var(--text-3); }
+.queue td.author, .queue td.kind { color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.queue .flags-cell { display: flex; gap: 4px; overflow: hidden; }
+.queue .meta { display: none; }
+
+/* One submission, as a reviewer weighs it: the main column, and the
+   decision's rail beside it, 288 wide, 32 apart. The rail holds still
+   (24 under the page's header) while the column scrolls: what decides is
+   never scrolled away. */
+.review { display: grid; grid-template-columns: minmax(0, 1fr) 288px; gap: 32px; align-items: start; }
+.review > .review-head { grid-column: 1; grid-row: 1; }
+.review > .review-main { grid-column: 1; grid-row: 2; }
+.review > .decide { grid-column: 2; grid-row: 1 / span 2; }
+.review-main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 32px; min-width: 0; }
+.review-main > .section { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.review-head { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 16px; align-items: center; }
+.review-head .who { display: grid; gap: 4px; min-width: 0; }
+.review-head h1 { overflow-wrap: anywhere; }
+.review-head h1 .v { font-family: var(--mono); font-size: 15px; line-height: 20px; font-weight: 400; color: var(--text-2); }
+.review-head .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--text-2); font-size: 13px; line-height: 18px; }
+.review-head .meta .dot { color: var(--text-3); }
+.review-head .meta a { color: var(--text-2); }
+.review-head .meta a:hover { color: var(--text); }
+.review-head .meta code { font-size: 12px; color: var(--text-3); }
+
+/* The rail: one card (a panel, 16 in): its state, then Approve (the one
+   primary) and Don't approve, full width, 8 apart; then who sent it and
+   what the checks found, as facts. */
+.decide { position: sticky; top: calc(var(--head-h) + 1px + 24px); display: grid; gap: 16px; padding: 16px; }
+.decide .state { display: flex; align-items: center; gap: 8px; min-height: 20px; font-size: 12px; line-height: 16px; color: var(--text-2); }
+.decide .buttons { display: grid; gap: 8px; }
+.decide .buttons form, .decide .buttons .btn { width: 100%; }
+.decide .said { font-size: 13px; line-height: 20px; color: var(--text-2); overflow-wrap: anywhere; }
+.decide .said .who { display: block; margin-top: 4px; color: var(--text-3); font-size: 12px; line-height: 16px; }
+.decide .facts { margin: -8px 0; }
+.decide .facts dd a { color: var(--text); }
+.decide .facts dd a:hover { text-decoration: underline; }
+.decide .facts .warn { color: var(--warn-ink); }
+.decide .facts .bad { color: var(--bad-ink); }
+/* (On a phone, a bar at the window's foot carries the buttons.) */
+.decide-bar { display: none; }
+
+/* What it asks for, beside the last approved version: each ask a row, its
+   16 glyph on its first line; new or changed, a badge after its words and
+   what moved under them in mono, + added, − dropped; risky, the danger's
+   ink. Then those as before, quieter, and what it no longer asks. */
+.weigh { display: grid; }
+.weigh-row { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 4px 12px; padding: 12px 16px; }
+.weigh-row + .weigh-row { border-top: 1px solid var(--line-faint); }
+.weigh-row > .glyph { margin-top: 1px; color: var(--text-2); }
+.weigh-row .title { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 13px; line-height: 18px; font-weight: 500; }
+.weigh-row.risky > .glyph, .weigh-row.risky .title { color: var(--bad-ink); }
+.weigh-row .detail { grid-column: 2; color: var(--text-2); font-size: 13px; line-height: 20px; }
+.weigh-row .moved, .weigh-row .named { grid-column: 2; display: grid; gap: 2px; font-family: var(--mono); font-size: 12px; line-height: 16px; color: var(--text-2); overflow-wrap: anywhere; }
+/* (Its sign held beside its item: a long host wraps within itself, never away from it.) */
+.weigh-row .moved li { display: grid; grid-template-columns: 8px minmax(0, 1fr); gap: 6px; }
+.weigh-row .moved .plus { color: var(--diff-added); }
+.weigh-row .moved .minus { color: var(--text-3); }
+.weigh-row .moved .tilde { color: var(--warn-ink); }
+/* (What it binds, whole: Before and After, each a label 12 / 16 over its
+   lines in mono, the two side by side, 16 apart; one over the other on a phone.) */
+.weigh-row .before-after { grid-column: 2; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 4px; }
+.weigh-row .before-after dt { font-size: 12px; line-height: 16px; color: var(--text-3); }
+.weigh-row .before-after dd { display: grid; gap: 2px; margin-top: 2px; font-family: var(--mono); font-size: 12px; line-height: 16px; color: var(--text-2); overflow-wrap: anywhere; }
+.weigh-row .before-after div + div dd { color: var(--text); }
+@media (max-width: 899px) { .weigh-row .before-after { grid-template-columns: minmax(0, 1fr); gap: 8px; } }
+.weigh-row.same { padding-block: 8px; }
+.weigh-row.same .title { font-weight: 400; color: var(--text-2); }
+.weigh-row.same.risky .title { color: var(--bad-ink); }
+.weigh-group { display: flex; align-items: center; height: 32px; padding: 0 16px; border-top: 1px solid var(--line-faint); color: var(--text-3); font-size: 12px; line-height: 16px; font-weight: 500; }
+.weigh-group:first-child { border-top: 0; }
+
+/* What the checks found: the ones to look at, each a line with its glyph
+   in its tone; those that passed counted. */
+.checks-list { display: grid; gap: 8px; padding: 12px 16px; }
+.checks-list li { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 12px; font-size: 13px; line-height: 20px; color: var(--text-2); overflow-wrap: anywhere; }
+.checks-list .glyph { margin-top: 2px; }
+.checks-list .warn .glyph { color: var(--warn-ink); }
+.checks-list .fail, .checks-list .fail .glyph { color: var(--bad-ink); }
+.checks-list .ok .glyph { color: var(--ok-ink); }
+
+/* Its files: the path in mono (the row its link: to the file, or to its
+   change), what changed as a badge 96, its size 96 at the right. 40 a row.
+   Those unchanged folded under their count. */
+.files-table { table-layout: fixed; }
+.files-table col.change { width: 96px; }
+.files-table col.size { width: 96px; }
+.files-table tbody tr { position: relative; }
+.files-table .path { font-family: var(--mono); font-size: 12px; line-height: 16px; overflow-wrap: anywhere; }
+.files-table .path a::after { content: ""; position: absolute; inset: 0; }
+.files-table .path a:focus-visible { outline: 0; }
+.files-table .path a:focus-visible::after { outline: 2px solid var(--ring); outline-offset: -2px; }
+.files-table td { height: 40px; padding-top: 8px; padding-bottom: 8px; }
+.files-table td.size { color: var(--text-2); }
+.files-table tr.removed .path { color: var(--text-3); text-decoration: line-through; text-decoration-color: var(--line-strong); }
+.unchanged > summary { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 16px; border-top: 1px solid var(--line-faint); cursor: pointer; list-style: none; color: var(--text-2); font-size: 12px; line-height: 16px; font-weight: 500; }
+.unchanged > summary::-webkit-details-marker { display: none; }
+.unchanged > summary:hover { color: var(--text); }
+.unchanged > summary .glyph { transition: rotate 0.15s; }
+.unchanged[open] > summary .glyph { rotate: 180deg; }
+.unchanged:last-child > summary:focus-visible { border-radius: 0 0 12px 12px; }
+.unchanged .files-table tbody tr:first-child td { border-top: 1px solid var(--line-faint); }
+
+/* Its notes for this version: their label, then the notes 8 under. */
+.notes-panel { display: grid; gap: 8px; }
+
+/* The listing as visitors see it: its summary, its pictures, its README,
+   in the public page's measure (720). */
+.review-listing { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; max-width: 720px; }
+.review-listing .summary { font-size: 15px; line-height: 24px; color: var(--text-2); }
+
+/* The raw manifest, folded: one row, 40 high, that opens on the code. */
+.fold { border-radius: 12px; background: var(--panel); box-shadow: inset 0 0 0 1px var(--line-faint); }
+.fold > summary { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 10px 16px; cursor: pointer; list-style: none; font-size: 13px; line-height: 18px; font-weight: 500; }
+.fold > summary::-webkit-details-marker { display: none; }
+.fold > summary .what { flex: 1; min-width: 0; color: var(--text-2); font-weight: 400; overflow-wrap: anywhere; }
+.fold > summary .glyph { color: var(--text-3); transition: rotate 0.15s; }
+.fold[open] > summary .glyph { rotate: 180deg; }
+.fold > summary:focus-visible { border-radius: 12px; }
+.fold > :not(summary) { margin: 0 16px 16px; }
+
+/* Its files and its changes, each its own view: the tree 216, the file
+   what is left, 16 apart; a change a head and its lines, 24 apart. */
+.files-view { display: grid; grid-template-columns: 216px minmax(0, 1fr); gap: 16px; align-items: start; }
+.files-view .tree-pane { position: sticky; top: calc(var(--head-h) + 1px + 24px); max-height: calc(100dvh - var(--head-h) - 64px); overflow: auto; padding: 4px; }
+.files-view .viewer { display: grid; gap: 12px; min-width: 0; }
+.file-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-height: 28px; font-size: 13px; line-height: 18px; color: var(--text-2); }
+.file-head code { color: var(--text); font-size: 12px; overflow-wrap: anywhere; }
+.file-head a { margin-left: auto; color: var(--text-2); }
+.file-head a:hover { color: var(--text); }
+.file-picture { max-width: 100%; border-radius: 12px; outline: 1px solid var(--line-faint); outline-offset: -1px; background: repeating-conic-gradient(var(--checker) 0 25%, transparent 0 50%) 0 0 / 16px 16px; }
+.changes-view { display: grid; gap: 24px; }
+.change-block { display: grid; gap: 8px; scroll-margin-top: calc(var(--head-h) + 24px); }
+.change-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-height: 28px; font-size: 13px; line-height: 18px; }
+.change-head a { font-family: var(--mono); font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
+.change-head a:hover { text-decoration: underline; }
+.change-head .counts { margin-left: auto; font-family: var(--mono); font-size: 12px; }
+.change-head .plus { color: var(--diff-added); }
+.change-head .minus { color: var(--diff-removed); }
+
+/* Don't approve: the reason, the words, and the author's view of them as
+   they'll read it (their Versions row), live as it's written. */
+.author-view { display: grid; gap: 8px; }
+.author-view .preview { display: grid; gap: 4px; padding: 12px 16px; }
+.author-view .line { display: flex; align-items: center; gap: 8px; min-height: 20px; }
+.author-view .line .t-mono { font-size: 12px; line-height: 16px; }
+.author-view .said { font-size: 13px; line-height: 20px; color: var(--text); white-space: pre-line; overflow-wrap: anywhere; }
+.author-view .said.is-empty { color: var(--text-3); }
+.author-view .who { color: var(--text-3); font-size: 12px; line-height: 16px; }
+.check-row { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 20px; color: var(--text-2); cursor: pointer; }
+.check-row input { margin-top: 3px; accent-color: var(--danger); }
+/* What is being decided, on a decision's page: the tile, the name, its facts. */
+.deciding { display: grid; gap: 12px; padding: 12px 16px; border-radius: 8px; background: var(--panel); box-shadow: inset 0 0 0 1px var(--line-faint); }
+.deciding .what { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.deciding .words { display: grid; gap: 2px; min-width: 0; }
+.deciding .name { font-size: 13px; line-height: 18px; font-weight: 500; overflow-wrap: anywhere; }
+.deciding .name .t-mono { font-weight: 400; color: var(--text-2); }
+.deciding .facts-line { font-size: 12px; line-height: 16px; color: var(--text-2); }
+.deciding .read { justify-self: start; display: inline-flex; align-items: center; gap: 4px; font-size: 13px; line-height: 18px; color: var(--text-2); }
+.deciding .read:hover { color: var(--text); }
+.deciding .elsewhere { display: flex; gap: 8px; font-size: 13px; line-height: 20px; color: var(--warn-ink); }
+.deciding .elsewhere .glyph { flex: none; margin-top: 2px; }
+.cut { color: var(--warn-ink); font-size: 13px; line-height: 20px; }
+/* Approve's one line of what there is to weigh: 13 / 20, 500, its tone's ink. */
+.weigh-line { font-size: 13px; line-height: 20px; font-weight: 500; }
+.dialog .head p.weigh-line.warn, .weigh-line.warn { color: var(--warn-ink); }
+.dialog .head p.weigh-line.bad, .weigh-line.bad { color: var(--bad-ink); }
+
+/* Reports, the audit log, reserved ids: tables on the same system. Words
+   wrap (never cut); a date is at the left unless it ends the row; the one
+   action in the 176 column. */
+.reports-table, .audit-table, .reserved-table, .staff-versions { table-layout: fixed; }
+.reports-table col.plugin-col { width: 224px; }
+.reports-table col.reason { width: 184px; } /* (the longest reason's badge, "It does something harmful", 4 + 152 + 4, with room) */
+.reports-table col.when, .audit-table col.when, .reserved-table col.when, .staff-versions col.when { width: 112px; }
+.reports-table col.action, .reserved-table col.action, .staff-versions col.action { width: 176px; }
+.reports-table .plugin-name, .audit-table .what a, .reserved-table .id { color: var(--text); font-weight: 500; overflow-wrap: anywhere; }
+.reports-table .plugin-name:hover, .audit-table .what a:hover { text-decoration: underline; }
+.reports-table .t-mono, .audit-table .t-mono, .reserved-table .id { font-family: var(--mono); font-size: 12px; line-height: 16px; font-weight: 400; }
+.reports-table td.end .btn, .reserved-table td.end .btn, .staff-versions td.end .btn { margin-right: -10px; }
+.audit-table col.who { width: 128px; }
+.audit-table col.what { width: 320px; }
+.audit-table .when-line { color: var(--text-2); white-space: nowrap; }
+.audit-table td.detail { color: var(--text-2); }
+.reserved-table col.for { width: 144px; }
+.reserved-table col.id-col { width: 224px; }
+.staff-versions col.version { width: 128px; }
+.staff-versions col.state { width: 136px; }
+.staff-versions .version a { font-family: var(--mono); font-size: 12px; line-height: 16px; color: var(--text); }
+.staff-versions .version a:hover { text-decoration: underline; }
+.reserve-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-items: start; padding: 16px; }
+.reserve-form .site-ids { grid-column: 1 / -1; font-size: 12px; line-height: 16px; color: var(--text-3); }
+.reserve-form .site-ids .words { display: block; margin-top: 4px; font-family: var(--mono); }
+.reserve-form .answers { grid-column: 1 / -1; display: flex; justify-content: flex-end; }
+/* A page's own actions in its header, 8 apart (a plugin's, for its reviewers). */
+.tools-row { display: flex; align-items: center; gap: 8px; }
+/* (A question in a dialog, opened by its address without the script.) */
+dialog.dialog:target { display: block; position: fixed; inset: 0; height: fit-content; z-index: 40; }
+
+@media (max-width: 899px) {
+  /* A phone's queue: each a row of its own lines, the tile 40, its name at
+     15; the version, who, new or an update and how long, at 12 under. */
+  .queue thead, .queue colgroup, .queue td:not(:first-child) { display: none; }
+  .queue tbody td { height: auto; padding: 12px 16px; }
+  .queue .cell-main { align-items: flex-start; }
+  .queue .plugin-tile { width: 40px; height: 40px; }
+  .queue .name { font-size: 15px; line-height: 20px; }
+  .queue .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 4px; color: var(--text-2); font-size: 12px; line-height: 16px; }
+  .queue .meta .t-mono { font-size: 12px; }
+  /* One submission: the column alone; the rail's card after the head, its
+     buttons in a bar at the window's foot (48 + 8 + 8, over the page), so
+     the page ends 64 higher. */
+  .review { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+  .review-main { gap: 24px; }
+  .review-head { grid-template-columns: 40px minmax(0, 1fr); gap: 12px; align-items: start; }
+  .review-head .plugin-tile { width: 40px; height: 40px; }
+  .review > .review-head, .review > .review-main, .review > .decide { grid-column: auto; grid-row: auto; }
+  .review > .decide { position: static; }
+  .decide .buttons { display: none; }
+  .decide-bar { display: flex; gap: 8px; position: fixed; left: 0; right: 0; bottom: 0; z-index: 15; padding: 8px 16px calc(8px + env(safe-area-inset-bottom)); background: var(--window); border-top: 1px solid var(--line-faint); }
+  .decide-bar > *, .decide-bar form .btn { flex: 1; width: 100%; }
+  .decide-bar form { display: flex; flex: 1; }
+  .decide-bar .btn { height: 40px; font-size: 15px; line-height: 20px; }
+  body:has(.decide-bar) .page-body { padding-bottom: 96px; }
+  body:has(.decide-bar) .toasts { bottom: 72px; }
+  .files-view { grid-template-columns: minmax(0, 1fr); }
+  .files-view .tree-pane { position: static; max-height: 320px; }
+  .reserve-form { grid-template-columns: minmax(0, 1fr); }
+  /* Reports, the log, reserved ids and versions: rows of their cells' lines. */
+  .reports-table tbody tr { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "plugin reason" "words words" "when action"; }
+  .reports-table td:nth-child(1) { grid-area: plugin; }
+  .reports-table td:nth-child(2) { grid-area: reason; }
+  .reports-table td:nth-child(3) { grid-area: words; }
+  .reports-table td:nth-child(4) { grid-area: when; align-self: center; }
+  .reports-table td:nth-child(5) { grid-area: action; align-self: center; }
+  .audit-table tbody tr { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "what what" "detail detail" "who when"; }
+  .audit-table td:nth-child(1) { grid-area: when; }
+  .audit-table td:nth-child(2) { grid-area: who; }
+  .audit-table td:nth-child(3) { grid-area: what; }
+  .audit-table td:nth-child(4) { grid-area: detail; }
+  .reserved-table tbody tr { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "id for" "words words" "when action"; }
+  .reserved-table td:nth-child(1) { grid-area: id; }
+  .reserved-table td:nth-child(2) { grid-area: for; }
+  .reserved-table td:nth-child(3) { grid-area: words; }
+  .reserved-table td:nth-child(4) { grid-area: when; align-self: center; }
+  .reserved-table td:nth-child(5) { grid-area: action; align-self: center; }
+  .staff-versions tbody tr { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "version state" "words words" "when action"; }
+  .staff-versions td:nth-child(1) { grid-area: version; }
+  .staff-versions td:nth-child(2) { grid-area: state; }
+  .staff-versions td:nth-child(3) { grid-area: words; }
+  .staff-versions td:nth-child(4) { grid-area: when; align-self: center; }
+  .staff-versions td:nth-child(5) { grid-area: action; align-self: center; }
+  .wrapping td.end .btn { margin-right: -10px; }
+  .wrapping .line.end { justify-content: flex-end; }
+  /* (A page's own actions take the phone's width, under its title.) */
+  .head-row:has(.tools-row) { flex-wrap: wrap; }
+  .page-head .tools:has(> .tools-row) { width: 100%; }
+}

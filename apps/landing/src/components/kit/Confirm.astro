@@ -1,0 +1,30 @@
+---
+// The same question as a page, for a visit without the script (and for a
+// link followed from elsewhere): the dialog's card, in the page; Cancel a
+// link back.
+import type { Ask } from "../../lib/store/actions.ts";
+import { unbidi } from "../../lib/store/format.ts";
+
+interface Props {
+  ask: Ask;
+  action: string;
+  csrf: string;
+  back: string;
+  /** The dialog's width: small (380), or its own 460 for a question with fields. */
+  size?: "sm" | "md";
+}
+const { ask, action, csrf, back, size = "sm" } = Astro.props;
+---
+
+<form method="post" action={action} class:list={["dialog", size === "sm" && "sm", "confirm-card"]}>
+  <input type="hidden" name="csrf" value={csrf} />
+  <div class="head">
+    <h2>{unbidi(ask.title)}</h2>
+    {ask.words.map((w) => <p>{w}</p>)}
+  </div>
+  <slot />
+  <div class="answers">
+    <a class="btn secondary" href={back}>Cancel</a>
+    <button class:list={["btn", ask.tone === "danger" ? "danger" : "primary"]} type="submit">{ask.confirm}</button>
+  </div>
+</form>

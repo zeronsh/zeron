@@ -1,0 +1,38 @@
+---
+// What just happened (a flash after a form), said once, in the sheet's
+// toast: at the window's foot, its tone's glyph, Close. It stays until
+// closed or for six seconds, longer while pointed at or focused.
+import Glyph from "../ui/Glyph.astro";
+
+interface Props {
+  toast: { message: string; tone?: "success" | "danger" } | null;
+}
+const { toast } = Astro.props;
+const bad = toast?.tone === "danger";
+---
+
+{
+  toast && (
+    <div class="toasts">
+      <div class:list={["toast", bad ? "bad" : "ok"]} role={bad ? "alert" : "status"} data-toast>
+        <Glyph name={bad ? "danger-triangle" : "check-circle"} size={16} />
+        <p class="what">{toast.message}</p>
+        <button type="button" class="btn ghost icon xs" aria-label="Close" data-toast-close><Glyph name="close" size={14} /></button>
+      </div>
+    </div>
+  )
+}
+
+<script>
+  for (const toast of document.querySelectorAll<HTMLElement>("[data-toast]")) {
+    const close = () => toast.parentElement?.remove();
+    toast.querySelector("[data-toast-close]")?.addEventListener("click", close);
+    let timer = window.setTimeout(close, 6000);
+    const hold = () => window.clearTimeout(timer);
+    const resume = () => (timer = window.setTimeout(close, 6000));
+    toast.addEventListener("pointerenter", hold);
+    toast.addEventListener("pointerleave", resume);
+    toast.addEventListener("focusin", hold);
+    toast.addEventListener("focusout", resume);
+  }
+</script>

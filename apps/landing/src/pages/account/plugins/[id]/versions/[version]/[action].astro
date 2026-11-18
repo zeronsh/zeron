@@ -1,0 +1,43 @@
+---
+// Withdraw, stop new installs of, or allow installs again of one of your versions. A post does
+// it; a visit (a link followed without a script) asks first.
+import Confirm from "../../../../../../components/kit/Confirm.astro";
+import Glyph from "../../../../../../components/ui/Glyph.astro";
+import App from "../../../../../../layouts/App.astro";
+import { AUTHOR_ACTIONS, isAuthorAction } from "../../../../../../lib/store/actions.ts";
+import { done, flashFor, formOf, tokenMatches } from "../../../../../../lib/store/forms.ts";
+import { privatePage, purge } from "../../../../../../lib/store/http.ts";
+import { isPluginId, isVersion } from "../../../../../../lib/store/names.ts";
+import { requireSession } from "../../../../../../lib/store/session.ts";
+
+export const prerender = false;
+
+const { id, version, action } = Astro.params;
+if (!isPluginId(id) || !isVersion(version) || !isAuthorAction(action)) return new Response(null, { status: 404 });
+const session = await requireSession(Astro);
+if (session instanceof Response) return session;
+const back = `/account/plugins/${id}`;
+
+if (Astro.request.method === "POST") {
+  const ask = AUTHOR_ACTIONS[action].ask(id, version);
+  const form = await formOf(Astro.request);
+  if (!form || !tokenMatches(form, session)) return done(Astro, "expired", back);
+  const result = await Astro.locals.edge.versionAction(id, version, action, session.csrf);
+  if (result.ok && action !== "withdraw") await purge(Astro, id);
+  return done(Astro, flashFor(result, ask.flash), back);
+}
+if (Astro.request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
+privatePage(Astro);
+// The question names the plugin as its page does; someone else's is the 404, as there.
+const mine = await Astro.locals.edge.myPlugins();
+const plugin = mine.ok ? mine.data.plugins.find((p) => p.id === id) : undefined;
+if (mine.ok && !plugin) return new Response(null, { status: 404 });
+const ask = AUTHOR_ACTIONS[action].ask(plugin?.name ?? id, version);
+---
+
+<App title={`${ask.title} · Zeron`} description={ask.title} noindex current="mine" session={session}>
+  <nav slot="title" class="crumbs" aria-label="Where this is">
+    <a href="/account">Your plugins</a><Glyph name="alt-arrow-right" size={12} /><a href={back}>{plugin?.name ?? id}</a><Glyph name="alt-arrow-right" size={12} /><span aria-current="page">{version}</span>
+  </nav>
+  <Confirm ask={ask} action={Astro.url.pathname} csrf={session.csrf} back={back} />
+</App>

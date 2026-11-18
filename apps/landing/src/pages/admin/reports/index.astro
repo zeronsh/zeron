@@ -1,0 +1,143 @@
+---
+// What people reported about listed plugins, as a table: the open ones,
+// each closed (dismissed, or acted on, with a note) from its row's one
+// action; those closed, a segment each. Admins only.
+import Toast from "../../../components/kit/Toast.astro";
+import Glyph from "../../../components/ui/Glyph.astro";
+import App from "../../../layouts/App.astro";
+import { takeFlash } from "../../../lib/store/flash.ts";
+import { count, dateTime, day, unbidi } from "../../../lib/store/format.ts";
+import { privatePage } from "../../../lib/store/http.ts";
+import { pagerOf, placeOf } from "../../../lib/store/paging.ts";
+import { resumed } from "../../../lib/store/resume.ts";
+import { adminSession } from "../../../lib/store/session.ts";
+import { reasonWords } from "../../../lib/store/states.ts";
+import { REPORT_REASONS, type Report, type ReportReason } from "../../../lib/store/types.ts";
+import { reportReasonWords } from "../../../lib/store/words.ts";
+
+export const prerender = false;
+
+const session = await adminSession(Astro);
+if (!session) return new Response(null, { status: 404 });
+privatePage(Astro);
+const toast = takeFlash(Astro.cookies);
+// The edge's own states, a segment each, so each page is the edge's page.
+const STATES = { open: "Open", actioned: "Acted on", dismissed: "Dismissed" } as const;
+type State = keyof typeof STATES;
+const asked = Astro.url.searchParams.get("status");
+const status: State = asked && Object.hasOwn(STATES, asked) ? (asked as State) : "open";
+const open = status === "open";
+const place = placeOf(Astro.url);
+const result = await Astro.locals.edge.reports(status, place.cursor);
+// A cursor from another list (or an old one): back to the first page.
+if (!result.ok && result.error === "bad_cursor") return Astro.redirect(open ? "/admin/reports" : `/admin/reports?status=${status}`, 303);
+const reports = result.ok ? result.data.reports : [];
+const pager = result.ok ? pagerOf("/admin/reports", open ? {} : { status }, place, result.data, reports.length) : null;
+const stateHref = (s: State) => (s === "open" ? "/admin/reports" : `/admin/reports?status=${s}`);
+// A note typed before signing in again comes back to its report, its question open.
+const resumedReport = resumed(Astro.url, "report", 64);
+const resumedNote = resumed(Astro.url, "note", 500);
+const reasonOf = (r: Report) => ((REPORT_REASONS as readonly string[]).includes(r.reason) ? reportReasonWords(r.reason as ReportReason) : reasonWords(r.reason));
+const pluginName = (r: Report) => unbidi(r.plugin.name ?? r.plugin.id);
+---
+
+<App title="Reports · Review · Zeron" description="Reports about plugins." noindex current="reports" session={session}>
+  <h1 slot="title" class="t-title">Reports{result.ok && <span class="title-count"> · {count(result.data.total)}</span>}</h1>
+  <nav slot="tools" class="segmented" aria-label="Reports by state">
+    {(Object.keys(STATES) as State[]).map((s) => <a href={stateHref(s)} aria-current={s === status ? "page" : undefined}>{STATES[s]}</a>)}
+  </nav>
+
+  {
+    !result.ok ? (
+      <div class="panel">
+        <div class="empty" role="status">
+          <span class="tile"><Glyph name="wifi-off" size={20} /></span>
+          <div class="words"><h2>Reports can't be loaded right now</h2><p>Try again in a moment.</p></div>
+          <div class="actions"><a class="btn secondary sm" href={stateHref(status)}>Try again</a></div>
+        </div>
+      </div>
+    ) : reports.length === 0 ? (
+      <div class="panel">
+        <div class="empty">
+          <span class="tile"><Glyph name={open ? "check-circle" : "flag"} size={20} /></span>
+          <div class="words">
+            <h2>{open ? "No open reports" : "Nothing here yet"}</h2>
+            <p>{open ? "What people report about a plugin shows here, the newest first." : `Reports ${status === "actioned" ? "acted on" : "dismissed"} show here, with what was done.`}</p>
+          </div>
+        </div>
+      </div>
+    ) : (
+      <>
+        <div class="panel">
+          <table class="table wrapping reports-table">
+            <caption class="sr-only">{STATES[status]} reports, the newest first</caption>
+            <colgroup><col class="plugin-col" /><col class="reason" /><col /><col class="when" /><col class={open ? "action" : "when"} /></colgroup>
+            <thead>
+              <tr>
+                <th scope="col">Plugin</th>
+                <th scope="col">Reason</th>
+                <th scope="col">What they said</th>
+                <th scope="col">Sent</th>
+                {open ? <th scope="col"><span class="sr-only">What can be done</span></th> : <th scope="col" class="end">Closed</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {reports.map((r) => (
+                <tr>
+                  <td>
+                    <span class="line">
+                      <a class="plugin-name" href={`/admin/plugins/${encodeURIComponent(r.plugin.id)}`}>{pluginName(r)}</a>
+                      {r.version && <span class="t-mono t-2">{r.version}</span>}
+                    </span>
+                  </td>
+                  <td><span class:list={["line", { "t-2": r.reason !== "malware" }]}>{r.reason === "malware" ? <span class="badge sm bad">{reasonOf(r)}</span> : reasonOf(r)}</span></td>
+                  <td class="words">
+                    {r.text ? <span class="said">{r.text}</span> : <span class="t-3">No words given.</span>}
+                    <span class="who">from {r.reporter?.username ? `@${r.reporter.username}` : "someone"}</span>
+                    {!open && (r.note || r.resolved_by?.username) && <span class="who">{[r.note && `Note: ${r.note}`, r.resolved_by?.username && `by @${r.resolved_by.username}`].filter(Boolean).join(" · ")}</span>}
+                  </td>
+                  <td><span class="line t-2"><time datetime={new Date(r.created_at).toISOString()} title={dateTime(r.created_at)}>{day(r.created_at)}</time></span></td>
+                  {open ? (
+                    <td class="end"><span class="line end"><a class="btn ghost sm" href={`#close-${r.id}`} data-dialog={`close-${r.id}`}>Close it…</a></span></td>
+                  ) : (
+                    <td class="end"><span class="line end t-2">{r.resolved_at ? <time datetime={new Date(r.resolved_at).toISOString()} title={dateTime(r.resolved_at)}>{day(r.resolved_at)}</time> : "—"}</span></td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {pager && (pager.previous || pager.next) && (
+          <nav class="pager" aria-label="Pages">
+            {pager.previous ? <a class="btn secondary sm" href={pager.previous} rel="prev"><Glyph name="alt-arrow-left" size={14} />Previous</a> : <span class="btn secondary sm" aria-disabled="true"><Glyph name="alt-arrow-left" size={14} />Previous</span>}
+            <span class="where">{pager.where}</span>
+            {pager.next ? <a class="btn secondary sm" href={pager.next} rel="next">Next<Glyph name="alt-arrow-right" size={14} /></a> : <span class="btn secondary sm" aria-disabled="true">Next<Glyph name="alt-arrow-right" size={14} /></span>}
+          </nav>
+        )}
+        {open && reports.map((r) => (
+          <dialog class="dialog sm" id={`close-${r.id}`} aria-labelledby={`close-${r.id}-title`} closedby="any" data-open={String(r.id) === resumedReport ? "" : undefined}>
+            <form method="post" action={`/admin/reports/${encodeURIComponent(r.id)}`}>
+              <input type="hidden" name="csrf" value={session.csrf} />
+              <div class="head">
+                <h2 id={`close-${r.id}-title`}>Close the report on {pluginName(r)}?</h2>
+                <p>Dismiss it, or say it was acted on. The note is for the other reviewers.</p>
+              </div>
+              <div class="body">
+                <div>
+                  <label class="field-label" for={`note-${r.id}`}>What was done</label>
+                  <div class="field"><input id={`note-${r.id}`} name="note" maxlength="500" placeholder="Optional" autocomplete="off" value={String(r.id) === resumedReport ? resumedNote || undefined : undefined} /></div>
+                </div>
+              </div>
+              <div class="answers">
+                <button class="btn ghost" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
+                <button class="btn secondary" type="submit" name="resolution" value="dismissed">Dismiss</button>
+                <button class="btn primary" type="submit" name="resolution" value="actioned">Acted on it</button>
+              </div>
+            </form>
+          </dialog>
+        ))}
+      </>
+    )
+  }
+  <Toast toast={toast} />
+</App>

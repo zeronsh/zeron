@@ -1,0 +1,100 @@
+---
+// Your plugins: each one's place in the store and its newest version's
+// state, as a table. One person's page: never cached, never indexed.
+import PluginTile from "../../components/store/PluginTile.astro";
+import Glyph from "../../components/ui/Glyph.astro";
+import Toast from "../../components/kit/Toast.astro";
+import App from "../../layouts/App.astro";
+import { takeFlash } from "../../lib/store/flash.ts";
+import { count, day } from "../../lib/store/format.ts";
+import { privatePage } from "../../lib/store/http.ts";
+import { requireSession } from "../../lib/store/session.ts";
+import { everListed, listingState, toneClass, versionState } from "../../lib/store/states.ts";
+
+export const prerender = false;
+
+const session = await requireSession(Astro);
+if (session instanceof Response) return session;
+privatePage(Astro);
+const toast = takeFlash(Astro.cookies);
+const result = await Astro.locals.edge.myPlugins();
+const plugins = result.ok ? result.data.plugins : [];
+---
+
+<App title="Your plugins · Zeron" description="The plugins you publish." noindex current="mine" session={session}>
+  <h1 slot="title" class="t-title">Your plugins{result.ok && <span class="title-count"> · {count(plugins.length)}</span>}</h1>
+
+  <div class="mine-body">
+    {
+      !session.username && (
+        <p class="notice">
+          <Glyph name="info-circle" size={16} />
+          <span><b>Claim a username first.</b> Zeron asks for one right after you sign in, and your plugins read “by @username”. Then you can publish.</span>
+        </p>
+      )
+    }
+    {
+      !result.ok ? (
+        <div class="panel">
+          <div class="empty" role="status">
+            <span class="tile"><Glyph name="wifi-off" size={20} /></span>
+            <div class="words"><h2>Your plugins can't be loaded right now</h2><p>Try again in a moment.</p></div>
+            <div class="actions"><a class="btn secondary sm" href="/account">Try again</a></div>
+          </div>
+        </div>
+      ) : plugins.length === 0 ? (
+        <div class="panel">
+          <div class="empty">
+            <span class="tile"><Glyph name="folder-with-files" size={20} /></span>
+            <div class="words">
+              <h2>You haven't published a plugin yet</h2>
+              <p>In Zeron: <b>Settings</b> › <b>Plugins</b> › <b>Yours</b> › <b>Publish…</b></p>
+              <p>Or from a terminal:</p>
+            </div>
+            <div class="copybox"><code tabindex="0">zeron plugin publish</code><button type="button" class="btn ghost icon xs" aria-label="Copy" data-copy><Glyph name="copy" size={14} /></button></div>
+            <p class="t-caption t-3">The first account to publish an id keeps it. An account can take up to 5 new ids a week.</p>
+          </div>
+        </div>
+      ) : (
+        <div class="panel">
+          <table class="table comfortable mine">
+            <caption class="sr-only">Your plugins</caption>
+            <colgroup><col /><col class="listing" /><col class="newest" /><col class="updated" /></colgroup>
+            <thead><tr><th scope="col">Plugin</th><th scope="col">In the store</th><th scope="col">Newest version</th><th scope="col" class="end">Sent</th></tr></thead>
+            <tbody>
+              {plugins.map((p) => {
+                const newest = p.versions[0];
+                const state = newest ? versionState(newest) : null;
+                const listing = listingState(p.listing, everListed(p.versions));
+                // (Steady is quiet: listed, its newest approved. A badge only where a row needs a look.)
+                const listedSteady = p.listing === "listed";
+                const newestSteady = listedSteady && newest?.status === "approved";
+                return (
+                  <tr>
+                    <td>
+                      <span class="cell-main">
+                        <PluginTile id={p.id} name={p.name} icon={p.icon} version={newest?.version ?? p.version} size={32} class="plugin-tile" />
+                        <span class="cell-words">
+                          <a class="name name-link" href={`/account/plugins/${p.id}`}>{p.name}</a>
+                          <span class="id">{p.id}</span>
+                          <span class="meta">
+                            {listedSteady ? <span class="steady">{listing.label}</span> : <span class:list={["badge sm", toneClass(listing.tone)]}>{listing.label}</span>}
+                            {newest && state && <><span class="t-mono t-2">{newest.version}</span>{!newestSteady && <span class:list={["badge sm", toneClass(state.tone)]}>{state.label}</span>}</>}
+                          </span>
+                        </span>
+                      </span>
+                    </td>
+                    <td class="listing">{listedSteady ? <span class="steady">{listing.label}</span> : <span class:list={["badge sm", toneClass(listing.tone)]}>{listing.label}</span>}</td>
+                    <td class="newest">{newest && state ? <span class="newest-cell"><span class="t-mono">{newest.version}</span>{!newestSteady && <span class:list={["badge sm", toneClass(state.tone)]}>{state.label}</span>}</span> : <span class="t-3">{"—"}</span>}</td>
+                    <td class="updated end muted">{newest ? <time datetime={new Date(newest.submitted_at).toISOString()}>{day(newest.submitted_at)}</time> : "—"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )
+    }
+  </div>
+  <Toast toast={toast} />
+</App>

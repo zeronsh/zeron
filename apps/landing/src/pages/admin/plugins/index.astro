@@ -1,0 +1,143 @@
+---
+// The review queue: every version waiting for a reviewer, the longest
+// waiting first, as a table (styles/app.css .queue). Its other states, the
+// ones not approved and those withdrawn, a segment each. Admins only; to
+// anyone else this address is the site's 404, signed in or not.
+import PluginTile from "../../../components/store/PluginTile.astro";
+import Toast from "../../../components/kit/Toast.astro";
+import Glyph from "../../../components/ui/Glyph.astro";
+import App from "../../../layouts/App.astro";
+import { takeFlash } from "../../../lib/store/flash.ts";
+import { count, dateTime, day, waitedFor } from "../../../lib/store/format.ts";
+import { privatePage } from "../../../lib/store/http.ts";
+import { pagerOf, placeOf } from "../../../lib/store/paging.ts";
+import { RISKY_ASKS } from "../../../lib/store/review.ts";
+import { adminSession } from "../../../lib/store/session.ts";
+import type { QueueItem } from "../../../lib/store/types.ts";
+
+export const prerender = false;
+
+const session = await adminSession(Astro);
+if (!session) return new Response(null, { status: 404 });
+privatePage(Astro);
+const toast = takeFlash(Astro.cookies);
+
+const VIEWS = { pending: "Waiting", rejected: "Not approved", withdrawn: "Withdrawn" } as const;
+type View = keyof typeof VIEWS;
+const asked = Astro.url.searchParams.get("status");
+const status: View = asked && Object.hasOwn(VIEWS, asked) ? (asked as View) : "pending";
+const waiting = status === "pending";
+const keep: Record<string, string> = waiting ? {} : { status };
+const place = placeOf(Astro.url);
+const result = await Astro.locals.edge.queue(status, place.cursor);
+// A cursor from another list (or an old one): back to its first page.
+if (!result.ok && result.error === "bad_cursor") return Astro.redirect(waiting ? "/admin/plugins" : `/admin/plugins?status=${status}`, 303);
+const items = result.ok ? result.data.items : [];
+const pager = result.ok ? pagerOf("/admin/plugins", keep, place, result.data, items.length) : null;
+const viewHref = (v: View) => (v === "pending" ? "/admin/plugins" : `/admin/plugins?status=${v}`);
+const submissionHref = (item: QueueItem) => `/admin/plugins/${encodeURIComponent(item.plugin.id)}/${encodeURIComponent(item.version)}`;
+
+/**
+ * A badge only where a row needs a look (amendment 40): checks that failed;
+ * an update that asks for more (in the danger's ink when what it adds
+ * reaches far), or whose asks changed inside. A row with none asks for
+ * exactly what the approved version did.
+ */
+const flags = (item: QueueItem): { label: string; tone: string; title?: string }[] => [
+  ...(item.checks.fail > 0 ? [{ label: item.checks.fail === 1 ? "A check failed" : `${item.checks.fail} checks failed`, tone: "bad" }] : []),
+  ...(item.base && item.new_asks.length > 0
+    ? [{ label: "Asks for more", tone: item.new_asks.some((a) => RISKY_ASKS.has(a)) ? "bad" : "warn", title: `New since ${item.base}: ${item.new_asks.join(", ")}` }]
+    : item.base && item.asks_changed
+      ? [{ label: "Asks changed", tone: "warn", title: `What it asks for changed inside since ${item.base}` }]
+      : []),
+];
+---
+
+<App title="Queue · Review · Zeron" description="The plugin review queue." noindex current="queue" session={session}>
+  <h1 slot="title" class="t-title">Queue{result.ok && <span class="title-count"> · {count(result.data.total)}</span>}</h1>
+  <nav slot="tools" class="segmented" aria-label="Versions by state">
+    {(Object.keys(VIEWS) as View[]).map((v) => <a href={viewHref(v)} aria-current={v === status ? "page" : undefined}>{VIEWS[v]}</a>)}
+  </nav>
+
+  {
+    !result.ok ? (
+      <div class="panel">
+        <div class="empty" role="status">
+          <span class="tile"><Glyph name="wifi-off" size={20} /></span>
+          <div class="words"><h2>The queue can't be loaded right now</h2><p>Try again in a moment.</p></div>
+          <div class="actions"><a class="btn secondary sm" href={viewHref(status)}>Try again</a></div>
+        </div>
+      </div>
+    ) : items.length === 0 ? (
+      <div class="panel">
+        <div class="empty">
+          <span class="tile"><Glyph name={waiting ? "check-circle" : "inbox"} size={20} /></span>
+          <div class="words">
+            <h2>{waiting ? "Nothing is waiting" : "Nothing here yet"}</h2>
+            <p>{waiting ? "New versions show here as they're sent, the longest waiting first." : `Versions ${status === "rejected" ? "not approved" : "withdrawn by their authors"} show here, the newest first.`}</p>
+          </div>
+        </div>
+      </div>
+    ) : (
+      <>
+        <div class="panel">
+          <table class="table comfortable queue">
+            <caption class="sr-only">{VIEWS[status]}, {waiting ? "the longest waiting first" : "the newest first"}</caption>
+            <colgroup><col /><col class="version" /><col class="author" /><col class="kind" /><col class="flags" /><col class="waited" /></colgroup>
+            <thead>
+              <tr>
+                <th scope="col">Plugin</th>
+                <th scope="col">Version</th>
+                <th scope="col">Sent by</th>
+                <th scope="col">Kind</th>
+                <th scope="col"><span class="sr-only">Needs a look</span></th>
+                <th scope="col" class="end">{waiting ? "Waited" : "Sent"}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((item) => {
+                const kind = item.base ? "Update" : "New plugin";
+                const who = item.publisher?.username ? `@${item.publisher.username}` : null;
+                const when = waiting ? waitedFor(item.submitted_at) : day(item.submitted_at);
+                const marks = flags(item);
+                return (
+                  <tr>
+                    <td>
+                      <span class="cell-main">
+                        <PluginTile id={item.plugin.id} name={item.plugin.name} icon={item.icon ?? null} version={item.version} size={32} class="plugin-tile" />
+                        <span class="cell-words">
+                          <a class="name name-link" href={submissionHref(item)}>{item.plugin.name}<span class="sr-only"> {item.version}</span></a>
+                          <span class="id">{item.plugin.id}</span>
+                          <span class="meta">
+                            <span class="t-mono">{item.version}</span>
+                            <span>{who ?? "No username"}</span>
+                            <span>{kind}</span>
+                            <time datetime={new Date(item.submitted_at).toISOString()} title={dateTime(item.submitted_at)}>{when}</time>
+                            {marks.map((m) => <span class:list={["badge sm", m.tone]} title={m.title}>{m.label}</span>)}
+                          </span>
+                        </span>
+                      </span>
+                    </td>
+                    <td class="version" title={item.base ? `Update from ${item.base}` : undefined}>{item.version}</td>
+                    <td class="author">{who ?? <span class="faint">No username</span>}</td>
+                    <td class="kind" title={item.base ? `From ${item.base}` : undefined}>{kind}</td>
+                    <td><span class="flags-cell">{marks.map((m) => <span class:list={["badge sm", m.tone]} title={m.title}>{m.label}</span>)}</span></td>
+                    <td class="end muted"><time datetime={new Date(item.submitted_at).toISOString()} title={dateTime(item.submitted_at)}>{when}</time></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        {pager && (pager.previous || pager.next) && (
+          <nav class="pager" aria-label="Pages">
+            {pager.previous ? <a class="btn secondary sm" href={pager.previous} rel="prev"><Glyph name="alt-arrow-left" size={14} />Previous</a> : <span class="btn secondary sm" aria-disabled="true"><Glyph name="alt-arrow-left" size={14} />Previous</span>}
+            <span class="where">{pager.where}</span>
+            {pager.next ? <a class="btn secondary sm" href={pager.next} rel="next">Next<Glyph name="alt-arrow-right" size={14} /></a> : <span class="btn secondary sm" aria-disabled="true">Next<Glyph name="alt-arrow-right" size={14} /></span>}
+          </nav>
+        )}
+      </>
+    )
+  }
+  <Toast toast={toast} />
+</App>

@@ -1,0 +1,107 @@
+---
+// The Publishing guide: what the store needs, how to send a version, what a
+// reviewer weighs, versions, and publishing from CI. Its facts are the
+// engine's guide's (apps/zgx/docs/plugins.md, "Publishing to the store"),
+// said for a person on the web; the reasons are the reviewers' own list
+// (lib/store/admin.ts). The same for everyone, kept by shared caches as the
+// store's other public pages are. (Rendered by the Worker, not built: a
+// built page would share the landing pages' styles, which stay as they are.)
+import Glyph from "../../components/ui/Glyph.astro";
+import App from "../../layouts/App.astro";
+import { REJECT_REASONS } from "../../lib/store/admin.ts";
+import { publicPage } from "../../lib/store/http.ts";
+import { CATEGORIES } from "../../lib/store/nav.ts";
+
+export const prerender = false;
+publicPage(Astro);
+
+const PARTS = [
+  ["needs", "What the store needs"],
+  ["send", "Sending a version"],
+  ["review", "Review"],
+  ["versions", "Versions"],
+  ["ci", "Publishing from CI"],
+] as const;
+---
+
+<App title="Publishing guide · Plugins · Zeron" description="How to put a plugin in Zeron's store: what it needs, how to send it, and what a reviewer looks at." canonical="/plugins/publishing" current="guide" measure="prose">
+  <h1 slot="title" class="t-title">Publishing guide</h1>
+
+  <article class="guide prose">
+    <p class="guide-lead">Anyone can share a Zeron plugin as a file or a link. The store is for the ones you want people to find: every version is reviewed before anyone but you can install it, updates included. Your own devices can install a version the moment you send it, marked In review.</p>
+
+    <nav class="guide-parts" aria-label="On this page">
+      <ol>
+        {PARTS.map(([id, label]) => <li><a href={`#${id}`}>{label}</a></li>)}
+      </ol>
+    </nav>
+
+    <h2 id="needs">What the store needs</h2>
+    <p>A plugin is a folder with its <code>zeron-plugin.json</code>. For the store, it also needs:</p>
+    <ul>
+      <li><strong><code>README.md</code></strong>, its page, at most 512 KB. Markdown with tables, task lists and strikethrough; raw HTML is dropped. Pictures are files in the plugin, by a relative path (<code>![Board](shots/board.png)</code>). A picture from elsewhere shows as a link, because what is shown is what was reviewed.</li>
+      <li><strong><code>description</code></strong>: one line, at most 300 characters, its summary everywhere it's listed. Its <code>name</code> is at most 64.</li>
+      <li><strong><code>icon</code></strong>: an SVG in the plugin, at most 32 KB. It's drawn in the text's colour, as Zeron draws its own.</li>
+      <li><strong><code>categories</code></strong>: one or two of {CATEGORIES.map((c, i) => <>{i > 0 && (i === CATEGORIES.length - 1 ? " and " : ", ")}<code>{c.id}</code></>)}.</li>
+      <li><strong><code>version</code></strong>: strict semver, <code>1.2.0</code> or <code>2.0.0-beta.1</code>. No <code>v</code>, no leading zeros.</li>
+      <li><strong>A username</strong> on your Zeron account, so the store can say “by @username”. Zeron asks for one after you sign in.</li>
+    </ul>
+    <p>The first account to publish an id keeps it. An account can take up to 5 new ids in any 7 days. Zeron's own plugins' ids, ids starting with <code>zeron</code>, and names that look like a brand's are held back.</p>
+    <p>The rest is optional:</p>
+    <pre tabindex="0"><code>{`{
+  "keywords": ["focus", "timer"],
+  "homepage": "https://example.com/focus-timer",
+  "repository": "https://github.com/you/focus-timer",
+  "license": "MIT",
+  "screenshots": ["shots/board.png", "shots/settings.png"],
+  "engines": { "zeron": ">=0.4.0" }
+}`}</code></pre>
+    <ul>
+      <li><code>keywords</code>: up to 8, lowercase, at most 32 characters each.</li>
+      <li><code>screenshots</code>: up to 8 PNG or JPEG pictures in the plugin, shown on its page.</li>
+      <li><code>engines.zeron</code>: the Zeron versions it works with. Anyone on another can't install it, and its page says why.</li>
+      <li><strong><code>CHANGELOG.md</code></strong> gives each version's notes: the section under the heading that starts with that version (<code>## 1.2.0</code>). People read them when Zeron offers the update.</li>
+    </ul>
+    <p>The package, as sent, is at most 20 MB. Files that aren't text or pictures, a compiled program say, are allowed, but reviewers look closely at them.</p>
+
+    <h2 id="send">Sending a version</h2>
+    <p>Check it first: <code>zeron plugin check &lt;folder&gt;</code> lists everything the store would refuse, before anything is sent. It needs no Zeron running, so a pull request's CI can run it too.</p>
+    <p>Then send it, from Zeron or a terminal:</p>
+    <ul>
+      <li>In Zeron: <strong>Settings</strong> › <strong>Plugins</strong> › <strong>Yours</strong> › <strong>Publish…</strong></li>
+      <li>From a terminal, with Zeron running and signed in: <code>zeron plugin publish &lt;id&gt;</code>. <code>--dry-run</code> checks it without sending it.</li>
+    </ul>
+    <p>The plugin is signed with your device's key and sent with your account. <a href="/account">Your plugins</a> shows each version's state, and a reviewer's words when there are some.</p>
+
+    <h2 id="review">Review</h2>
+    <p>A reviewer reads every version before anyone but you can install it. They look at what it asks for (what's new since your last approved version first, and anything that reaches past Zeron most closely), what changed in its files, and its page as visitors will see it. Automated checks have already run: the package, its signature, its size, its version, new programs and hosts.</p>
+    <p>A version is approved, or not approved with one of these reasons and the reviewer's own words:</p>
+    <ul>
+      {REJECT_REASONS.map((r) => <li>{r.label}</li>)}
+    </ul>
+    <p>You read the decision in Zeron, the command line and <a href="/account">Your plugins</a>. A version not approved keeps its number: send the fix as a new version. Say plainly in the README what your plugin runs and where it connects; it's what a reviewer asks for most.</p>
+    <p>Anyone signed in can report a listed plugin. The reviewers can take a version down, and turn it off on the devices that have it; its author reads why.</p>
+
+    <h2 id="versions">Versions</h2>
+    <ul>
+      <li>Each version is sent once and keeps its content for good, approved or not. Each must be later than the last you sent.</li>
+      <li>A pre-release (<code>2.0.0-beta.1</code>) is offered only to people who chose that plugin's pre-releases.</li>
+      <li><strong>Withdraw</strong> a version still in review; <strong>stop new installs</strong> of an approved one (those who have it keep it working), and allow them again. From Your plugins, Zeron, or <code>zeron plugin withdraw|yank|unyank &lt;id&gt; &lt;version&gt;</code>.</li>
+    </ul>
+
+    <h2 id="ci">Publishing from CI</h2>
+    <p>A <strong>deploy key</strong> lets a CI job, such as a GitHub Action, send new versions of one plugin without your session. Its first version comes from your machine; a key can send the ones after it, and every one still waits for review.</p>
+    <pre tabindex="0"><code>{`zeron plugin key create focus-timer --name "GitHub Actions"   # once, on your machine
+zeron plugin key list focus-timer
+zeron plugin key revoke focus-timer <key>`}</code></pre>
+    <p>Making a key asks you to sign in again. Its secret (<code>zpk_…</code>) is shown once and Zeron keeps no copy: put it in your CI's secrets as <code>ZERON_DEPLOY_KEY</code>, then run <code>zeron plugin publish &lt;folder&gt;</code>. A key sends new versions of its plugin and reads their state, nothing else, so if one leaks, the most it can do is add a version that waits for review. Revoke it from <a href="/account">Your plugins</a> or the command line; versions it sent stay.</p>
+    <p>On GitHub, the publish action installs Zeron's command line and sends the plugin with your key:</p>
+    <pre tabindex="0"><code>{`- uses: actions/checkout@v4
+- uses: zeronsh/zeron/actions/publish-plugin@v0.4.0
+  with:
+    key: \${{ secrets.ZERON_DEPLOY_KEY }}`}</code></pre>
+    <p>Pin it to a Zeron release tag or a commit, never a branch: the step holds your key. Without a key (a pull request from a fork gets no secrets) it only checks.</p>
+
+    <p class="guide-next"><a class="btn secondary sm" href="/account"><Glyph name="folder-with-files" size={14} />Your plugins</a></p>
+  </article>
+</App>

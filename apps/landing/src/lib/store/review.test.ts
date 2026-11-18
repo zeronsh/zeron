@@ -1,0 +1,93 @@
+import { describe, expect, test } from "vitest";
+import { changedFiles, diffRows, fileTree, languageOf, MANIFEST_FILE, manifestChanges, manifestFile, manifestText, readText } from "./review.ts";
+
+const f = (path: string, sha = "1", binary = false) => ({ path, bytes: 1, sha256: sha, binary });
+
+describe("the file tree", () => {
+  test("folders first, then files, each by name", () => {
+    const tree = fileTree([f("z.md"), f("shots/b.png"), f("a.luau"), f("shots/a.png"), f("lib/x/y.luau")]);
+    expect(tree.map((n) => n.name)).toEqual(["lib", "shots", "a.luau", "z.md"]);
+    expect(tree[1]!.children.map((n) => n.path)).toEqual(["shots/a.png", "shots/b.png"]);
+    expect(tree[0]!.children[0]!.children[0]!.path).toBe("lib/x/y.luau");
+  });
+});
+
+describe("what changed", () => {
+  test("added, removed and changed files, by path", () => {
+    const now = [f("a", "1"), f("b", "2"), f("d", "4")];
+    const base = [f("a", "1"), f("b", "x"), f("c", "3")];
+    expect(changedFiles(now, base).map((c) => [c.path, c.change])).toEqual([["b", "modified"], ["c", "removed"], ["d", "added"]]);
+  });
+
+  test("the manifest is among the files, and only a different manifest is a change", async () => {
+    const one = await manifestFile(manifestText({ id: "a", version: "1.0.0" }));
+    expect(one.path).toBe(MANIFEST_FILE);
+    expect(one.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(one.bytes).toBe(new TextEncoder().encode(manifestText({ id: "a", version: "1.0.0" })).length);
+    expect((await manifestFile(manifestText({ id: "a", version: "1.0.0" }))).sha256).toBe(one.sha256);
+    const two = await manifestFile(manifestText({ id: "a", version: "1.1.0" }));
+    expect(changedFiles([two, f("a")], [one, f("a")]).map((c) => [c.path, c.change])).toEqual([[MANIFEST_FILE, "modified"]]);
+    expect(changedFiles([one, f("a")], [one, f("a")])).toEqual([]);
+  });
+
+  test("manifest lists change item by item, risky additions called out, reach first", () => {
+    const before = { name: "A", permissions: ["ui.add", "network"], network: { hosts: ["a.example"] }, signature: { sig: "x" }, version: "1.0.0" };
+    const now = { name: "B", permissions: ["ui.add", "commands", "sessions.read"], network: { hosts: ["a.example", "b.example"] }, signature: { sig: "y" }, version: "1.1.0" };
+    const out = manifestChanges(now, before);
+    expect(out.map((c) => c.key)).toEqual(["network", "permissions", "name"]);
+    const permissions = out.find((c) => c.key === "permissions")!;
+    expect(permissions.added).toEqual([{ item: "commands", risky: true }, { item: "sessions.read", risky: false }]);
+    expect(permissions.removed).toEqual([{ item: "network", risky: false }]);
+    expect(out.find((c) => c.key === "network")!.added).toEqual([{ item: "hosts: b.example", risky: true }]);
+    const name = out.find((c) => c.key === "name")!;
+    expect(name.added).toBeNull();
+    expect([name.before, name.after]).toEqual(['"A"', '"B"']);
+  });
+
+  test("the same object in another key order is no change", () => {
+    expect(manifestChanges({ ui: { change: ["a"], replace: [] } }, { ui: { replace: [], change: ["a"] } })).toEqual([]);
+  });
+
+  test("lines, numbered before and after", () => {
+    const rows = diffRows("a\nb\nc\n", "a\nB\nc\nd\n")!;
+    expect(rows[0]).toEqual({ kind: "hunk", text: "@@ -1,3 +1,4 @@" });
+    expect(rows.slice(1)).toEqual([
+      { kind: "context", text: "a", old: 1, new: 1 },
+      { kind: "removed", text: "b", old: 2 },
+      { kind: "added", text: "B", new: 2 },
+      { kind: "context", text: "c", old: 3, new: 3 },
+      { kind: "added", text: "d", new: 4 },
+    ]);
+  });
+
+  test("texts too different, or too long, to compare cost nothing and say so", () => {
+    const lines = (n: number, seed: string) => Array.from({ length: n }, (_, i) => `${seed} ${i} ${(i * 7919) % 104729}`).join("\n");
+    let started = performance.now();
+    expect(diffRows(lines(5000, "a"), lines(5000, "b"))).toBeNull();
+    expect(performance.now() - started).toBeLessThan(1500);
+    started = performance.now();
+    expect(diffRows(lines(7000, "a"), lines(7000, "a"))).toBeNull();
+    expect(performance.now() - started).toBeLessThan(50);
+    // A real change in a long file still shows.
+    const before = lines(5000, "a");
+    const after = before.replace("a 2500 ", "A 2500 ");
+    expect(diffRows(before, after)!.filter((r) => r.kind !== "context" && r.kind !== "hunk")).toHaveLength(2);
+  });
+});
+
+describe("reading a file", () => {
+  test("text, binary, too big", async () => {
+    expect(await readText(new Response("héllo"))).toEqual({ text: "héllo" });
+    expect(await readText(new Response(new Uint8Array([0xff, 0xfe, 0x00])))).toEqual({ binary: true });
+    expect(await readText(new Response("a\u0000b"))).toEqual({ binary: true });
+    expect(await readText(new Response("x".repeat(20)), 10)).toEqual({ tooBig: true });
+    expect(await readText(new Response("x", { status: 404 }))).toBeNull();
+  });
+
+  test("languages by extension", () => {
+    expect(languageOf("init.luau")).toBe("lua");
+    expect(languageOf("zeron-plugin.json")).toBe("json");
+    expect(languageOf("bin/tool")).toBeNull();
+    expect(languageOf("x.constructor")).toBeNull();
+  });
+});

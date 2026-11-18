@@ -1,0 +1,124 @@
+---
+// Discover, the store's front: what a first-time visitor sees. What the
+// store's reviewers feature, each with its first picture; then the newest
+// and the most installed, each a short list on the table system with the
+// way to all of them. Public and the same for everyone (no cookie read):
+// the Worker cache keeps it as it keeps All plugins.
+import PluginRows, { type Measure } from "../../components/kit/PluginRows.astro";
+import PluginTile from "../../components/store/PluginTile.astro";
+import Glyph from "../../components/ui/Glyph.astro";
+import App from "../../layouts/App.astro";
+import { catalogHref } from "../../lib/store/catalog.ts";
+import { count, day } from "../../lib/store/format.ts";
+import { CATALOG_TAG, publicPage } from "../../lib/store/http.ts";
+import type { PluginCard } from "../../lib/store/types.ts";
+import { pictureUrl, pluginUrl } from "../../lib/store/urls.ts";
+import { store } from "../../lib/store/words.ts";
+
+export const prerender = false;
+
+// A search, a category or a sort is All plugins' (/plugins/all); /plugins is the store's front.
+if (Astro.url.search) return Astro.redirect(`/plugins/all${Astro.url.search}`, 301);
+
+/** How many each short list shows, and how many featured. */
+const SHORT = 6;
+const FEATURED = 3;
+const edge = Astro.locals.edge;
+// (Each asked at the edge's own page size, no `limit`: those first pages are
+// the ones the edge purges on a change, so a takedown leaves this page at
+// once, as it leaves All plugins'. The page shows the first few.)
+const [featured, newest, popular, categoriesResult] = await Promise.all([
+  edge.catalog({ featured: true, sort: "popular" }),
+  edge.catalog({ sort: "new" }),
+  edge.catalog({ sort: "popular" }),
+  edge.categories(),
+]);
+const names = new Map((categoriesResult.ok ? categoriesResult.data.categories : []).map((c) => [c.id, c.name]));
+
+// Each featured plugin's first picture, from its page's record.
+const featuredItems: { plugin: PluginCard; picture: string | null }[] = [];
+if (featured.ok) {
+  const items = featured.data.items.slice(0, FEATURED);
+  const details = await Promise.all(items.map((p) => edge.plugin(p.id)));
+  for (const [i, plugin] of items.entries()) {
+    const detail = details[i];
+    const first = detail?.ok ? (detail.data.screenshots[0] ?? null) : null;
+    featuredItems.push({ plugin, picture: first ? pictureUrl(plugin.id, plugin.version, first) : null });
+  }
+}
+
+// Covers only when every featured plugin has a picture: one without, and
+// the whole row is drawn compact (tile, name, who, two lines), one height;
+// never a placeholder band, never cards of two heights.
+const covers = featuredItems.length > 0 && featuredItems.every((f) => f.picture);
+const ok = newest.ok && popular.ok;
+if (ok) publicPage(Astro, [CATALOG_TAG]);
+else Astro.response.status = 503;
+const empty = ok && newest.data.total === 0;
+
+const published: Measure = { head: "Published", cell: (p) => (p.listed_at === null ? "—" : day(p.listed_at)), folded: (p) => `Published ${p.listed_at === null ? "—" : day(p.listed_at)}` };
+const installs: Measure = { head: "Installs", cell: (p) => count(p.installs), folded: (p) => `${count(p.installs)} ${p.installs === 1 ? "install" : "installs"}` };
+---
+
+<App title="Plugins · Zeron" description="Plugins for Zeron: panels, commands, tools for your agents and more. Each one is reviewed before it's listed." canonical="/plugins" current="discover">
+  <h1 slot="title" class="t-title">Discover</h1>
+
+  {
+    !ok ? (
+      <div class="panel">
+        <div class="empty" role="status">
+          <span class="tile"><Glyph name="wifi-off" size={20} /></span>
+          <div class="words"><h2 class="t-heading">{store("plugins.store.failed_title")}</h2><p>{store("plugins.store.failed_body")}</p></div>
+          <div class="actions"><a class="btn secondary sm" href="/plugins">{store("plugins.store.try_again")}</a></div>
+        </div>
+      </div>
+    ) : empty ? (
+      <div class="panel">
+        <div class="empty">
+          <span class="tile"><Glyph name="widget" size={20} /></span>
+          <div class="words"><h2 class="t-heading">{store("plugins.store.empty_title")}</h2><p>{store("plugins.store.empty_body")}</p></div>
+          <div class="actions"><a class="btn secondary sm" href="/plugins/publishing">Publishing guide</a></div>
+        </div>
+      </div>
+    ) : (
+      <div class="discover">
+        {featuredItems.length > 0 && (
+          <section class="section" aria-labelledby="featured-heading">
+            <div class="section-head"><div class="words"><h2 id="featured-heading">{store("plugins.store.featured")}</h2><p>Chosen by the store's reviewers.</p></div></div>
+            <ul class:list={["featured-row", { compact: !covers }]} role="list">
+              {featuredItems.map(({ plugin, picture }) => (
+                <li class="panel feature">
+                  {covers && <img class="feature-picture" src={picture!} alt="" width="1280" height="800" loading="lazy" decoding="async" />}
+                  <div class="feature-words">
+                    <PluginTile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size={covers ? 32 : 40} class="plugin-tile" />
+                    <div class="cell-words">
+                      <a class="name feature-link" href={pluginUrl(plugin.id)}>{plugin.name}</a>
+                      <span class="by">{plugin.author.username ? `@${plugin.author.username}` : "Unnamed author"} · {count(plugin.installs)} {plugin.installs === 1 ? "install" : "installs"}</span>
+                    </div>
+                  </div>
+                  <p class="feature-summary">{plugin.summary}</p>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        <section class="section" aria-labelledby="new-heading">
+          <div class="section-head">
+            <div class="words"><h2 id="new-heading">{store("plugins.store.sort.new")}</h2></div>
+            <a class="btn ghost sm" href={catalogHref({ sort: "new" })}>See all<Glyph name="alt-arrow-right" size={12} /></a>
+          </div>
+          <div class="panel"><PluginRows items={newest.data.items.slice(0, SHORT)} caption={store("plugins.store.sort.new")} measure={published} names={names} /></div>
+        </section>
+
+        <section class="section" aria-labelledby="popular-heading">
+          <div class="section-head">
+            <div class="words"><h2 id="popular-heading">{store("plugins.store.sort.popular")}</h2></div>
+            <a class="btn ghost sm" href="/plugins/all">See all<Glyph name="alt-arrow-right" size={12} /></a>
+          </div>
+          <div class="panel"><PluginRows items={popular.data.items.slice(0, SHORT)} caption={store("plugins.store.sort.popular")} measure={installs} names={names} /></div>
+        </section>
+      </div>
+    )
+  }
+</App>

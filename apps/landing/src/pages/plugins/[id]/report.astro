@@ -1,0 +1,107 @@
+---
+// Report a listed plugin to the people who review them. Signed in, so a
+// report has someone behind it; the plugin's page itself stays the same
+// for everyone (and cached), so the thanks are said here.
+import { reportReasonWords, store } from "../../../lib/store/words.ts";
+import PluginTile from "../../../components/store/PluginTile.astro";
+import Glyph from "../../../components/ui/Glyph.astro";
+import Toast from "../../../components/kit/Toast.astro";
+import App from "../../../layouts/App.astro";
+import { unbidi } from "../../../lib/store/format.ts";
+import { done, field, flashFor, formOf, tokenMatches } from "../../../lib/store/forms.ts";
+import { takeFlash } from "../../../lib/store/flash.ts";
+import { privatePage } from "../../../lib/store/http.ts";
+import { isPluginId } from "../../../lib/store/names.ts";
+import { hadSession, resumed, signInAndResume } from "../../../lib/store/resume.ts";
+import { requireSession } from "../../../lib/store/session.ts";
+import { REPORT_REASONS } from "../../../lib/store/types.ts";
+import { pluginUrl } from "../../../lib/store/urls.ts";
+
+export const prerender = false;
+
+const { id } = Astro.params;
+if (!isPluginId(id)) return new Response(null, { status: 404 });
+const here = `${pluginUrl(id)}/report`;
+const session = await requireSession(Astro);
+if (session instanceof Response) {
+  // Signed out while writing: sign in, and come back to the report as it was.
+  if (Astro.request.method === "POST" && hadSession(Astro.request)) return signInAndResume(Astro, here, await formOf(Astro.request), ["reason", "text"]);
+  return session;
+}
+
+if (Astro.request.method === "POST") {
+  const form = await formOf(Astro.request);
+  if (!form || !tokenMatches(form, session)) return done(Astro, "expired", here);
+  const reason = field(form, "reason");
+  if (!(REPORT_REASONS as readonly string[]).includes(reason)) return done(Astro, "bad_input", here);
+  const result = await Astro.locals.edge.report(id, { reason, text: field(form, "text", 2000) }, session.csrf);
+  return done(Astro, flashFor(result, "report_sent"), here);
+}
+if (Astro.request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
+
+const result = await Astro.locals.edge.plugin(id);
+if (!result.ok && result.error === "not_found") return new Response(null, { status: 404 });
+privatePage(Astro);
+const flash = takeFlash(Astro.cookies);
+const sent = flash?.word === "report_sent";
+const plugin = result.ok ? result.data : null;
+
+/** Each reason as the app's report sheet names it, and a line on what it covers. */
+const ABOUT: Record<(typeof REPORT_REASONS)[number], string> = {
+  malware: "It steals, spies, or does damage.",
+  misleading: "It asks for or does more than it tells you.",
+  broken: "It fails, or breaks part of Zeron.",
+  copyright: "It copies someone's code, art or brand without leave.",
+  other: "Tell us below.",
+};
+---
+
+<App title={`Report ${plugin?.name ?? id} · Zeron`} description="Report a plugin." noindex current={null} session={session}>
+  <nav slot="title" class="crumbs" aria-label="Where this is">
+    <a href="/plugins/all">All plugins</a><Glyph name="alt-arrow-right" size={12} /><a href={pluginUrl(id)}>{unbidi(plugin?.name ?? id)}</a><Glyph name="alt-arrow-right" size={12} /><span aria-current="page">Report</span>
+  </nav>
+  {
+    sent ? (
+      <div class="dialog confirm-card report-card" role="status">
+        <div class="head">
+          <span class="tile s40 done-tile"><Glyph name="check-circle" size={20} /></span>
+          <h1 class="t-heading">Thanks for telling us</h1>
+          <p>Your report reached the people who review plugins. If it needs to go, it goes from the store and from people's devices.</p>
+        </div>
+        <div class="answers"><a class="btn secondary" href={pluginUrl(id)}>Back to {unbidi(plugin?.name ?? "the plugin")}</a></div>
+      </div>
+    ) : (
+      <form method="post" action={here} class="dialog confirm-card report-card">
+        <input type="hidden" name="csrf" value={session.csrf} />
+        <div class="head report-who">
+          {plugin && <PluginTile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size={40} />}
+          <div>
+            <h1 class="t-heading">{store("plugins.store.report.title", { name: unbidi(plugin?.name ?? id) })}</h1>
+            {plugin && <p>by {plugin.author.username ? `@${plugin.author.username}` : "an author without a username"}</p>}
+          </div>
+        </div>
+        <div class="body">
+          <fieldset class="choices">
+            <legend class="field-label">{store("plugins.store.report.reason_label")}</legend>
+            {REPORT_REASONS.map((r) => (
+              <label class="choice">
+                <input type="radio" name="reason" value={r} required checked={resumed(Astro.url, "reason") === r} />
+                <span class="choice-words"><span class="choice-title">{reportReasonWords(r)}</span><span class="choice-about">{ABOUT[r]}</span></span>
+              </label>
+            ))}
+          </fieldset>
+          <div>
+            <label class="field-label" for="report-text">{store("plugins.store.report.text_label")}</label>
+            <div class="field area"><textarea id="report-text" name="text" maxlength="2000" rows="4">{resumed(Astro.url, "text")}</textarea></div>
+            <p class="field-hint">What you saw, and where. The reviewers read it as you write it; the author doesn't see who sent it.</p>
+          </div>
+        </div>
+        <div class="answers">
+          <a class="btn secondary" href={pluginUrl(id)}>Cancel</a>
+          <button class="btn danger" type="submit">{store("plugins.store.report.send")}</button>
+        </div>
+      </form>
+    )
+  }
+  <Toast toast={sent ? null : flash} />
+</App>

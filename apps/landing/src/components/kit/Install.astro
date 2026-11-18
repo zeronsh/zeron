@@ -1,0 +1,63 @@
+---
+// Install: the page's one primary button, a link to the app's own address
+// for this plugin (it opens Zeron on its page, Install ready; it never
+// installs by itself). What else there is to say is said in words under it,
+// never as a second button: "Nothing happened?" opens how to get it, and
+// opens itself when the page sees the link went nowhere.
+import { appUrl } from "../../lib/store/urls.ts";
+import Glyph from "../ui/Glyph.astro";
+import Mark from "../ui/Mark.astro";
+
+interface Props {
+  id: string;
+  name: string;
+  /** No Zeron released can install it: the button stays, off (the page says why). */
+  off?: boolean;
+}
+const { id, name, off = false } = Astro.props;
+---
+
+<div class="install" data-install>
+  {off ? <span class="btn primary" aria-disabled="true"><Mark />Install in Zeron</span> : <a class="btn primary" href={appUrl(id)} data-install-link><Mark />Install in Zeron</a>}
+  <details class="install-help" data-install-help hidden={off}>
+    <summary>Nothing happened?</summary>
+    <div class="install-card" role="status" aria-live="polite">
+      <p>Install in Zeron opens Zeron on your computer at this plugin, ready to install. If nothing opened:</p>
+      <ol>
+        <li><a href="/#downloads">Download Zeron</a> for your computer, open it, and press Install in Zeron again.</li>
+        <li>Or, in Zeron, open <b>Settings</b> <Glyph name="alt-arrow-right" size={12} /> <b>Plugins</b> <Glyph name="alt-arrow-right" size={12} /> <b>Browse</b> and search for <b>{name}</b>.</li>
+      </ol>
+    </div>
+  </details>
+</div>
+
+<script>
+  // If the page is still in front a moment after the link was followed,
+  // nothing took it: open the help. (Leaving for the app blurs the page or
+  // hides it; a browser's own "Open Zeron?" prompt blurs it too.)
+  for (const root of document.querySelectorAll<HTMLElement>("[data-install]")) {
+    const link = root.querySelector<HTMLAnchorElement>("[data-install-link]");
+    const help = root.querySelector<HTMLDetailsElement>("[data-install-help]");
+    if (!link || !help) continue;
+    link.addEventListener("click", () => {
+      let left = false;
+      const away = () => (left = true);
+      window.addEventListener("blur", away, { once: true });
+      document.addEventListener("visibilitychange", away, { once: true });
+      window.addEventListener("pagehide", away, { once: true });
+      window.setTimeout(() => {
+        window.removeEventListener("blur", away);
+        document.removeEventListener("visibilitychange", away);
+        window.removeEventListener("pagehide", away);
+        if (!left && document.hasFocus()) help.open = true;
+      }, 1600);
+    });
+    // (Escape, or a click elsewhere, puts it away.)
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && help.open) help.open = false;
+    });
+    document.addEventListener("click", (event) => {
+      if (help.open && event.target instanceof Node && !root.contains(event.target)) help.open = false;
+    });
+  }
+</script>
