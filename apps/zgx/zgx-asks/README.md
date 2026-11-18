@@ -40,7 +40,7 @@ which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 
 | Ask | |
 |---|---|
-| [gap-axis-tokens](gap-axis-tokens/ASK.md) | `gap_x = "$space.1"` spaces nothing, and a token `gap` overrides a number `gap_y`, while the design lint asks for the token. Zeron passes the token's number through `ui.raw` meanwhile. |
+| [gap-axis-tokens](gap-axis-tokens/ASK.md) | `gap_x = "$space.1"` spaces nothing, a token `gap` overrides a number `gap_y`, and `min_h` given a token is ignored (every `Settings.Row`'s 52 least, so rows are their content's height), while the design lint asks for the token. Zeron passes `gap_x`'s number through `ui.raw` meanwhile. |
 | [editor-menu-items](editor-menu-items/ASK.md) | Zeron's own text menu (ds/editor_menu) has no spelling guesses: zgx's `editor_spell::menu_items` is crate-private. Ask: a public way to get the guesses for the word at a point and apply one. |
 | [plugin-time](plugin-time/ASK.md) | A slow plugin can't be timed or blamed. |
 | [tooltip-function](tooltip-function/ASK.md) | A tooltip can't follow a state in place. |
