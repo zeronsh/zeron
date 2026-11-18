@@ -83,9 +83,13 @@ writes a minute per account, so space scripted publishes.
 
 ```sh
 curl -s "EDGE/store/v1/categories" -w ' %{http_code}\n'
-#   {"categories":[{"id":"agents",…},…]} 200 (eight categories)
+#   {"categories":[{"id":"agents","name":…,"count":0},…]} 200 (eight categories)
 curl -s "EDGE/store/v1/plugins" -w ' %{http_code}\n'
-#   {"items":[]} 200; Cache-Control: public, max-age=60
+#   {"items":[],"total":0} 200; Cache-Control: public, max-age=60
+curl -s "EDGE/store/v1/stats" -w ' %{http_code}\n'
+#   {"plugins":0,"verified":0} 200
+curl -s "EDGE/store/v1/takedowns" -w ' %{http_code}\n'
+#   {"events":[],"head":0,"reset":true} 200
 curl -s "EDGE/store/v1/plugins/nope" -w ' %{http_code}\n'
 #   {"error":"not_found",…} 404
 ```
@@ -106,7 +110,9 @@ binding is missing from that environment.
    (`state=undecided`) with `checks` counts and `new_asks`. They open it
    (`/admin/versions/<id>/<version>`), read the files and verify it.
 4. Within 60 s the card says `verified: true` and `verified_version`, and
-   `?verified=1` lists it. `icon` and `screenshots` are package paths, fetched as
+   `?verified=1` lists it. `/stats` counts it under both `plugins` and
+   `verified`, and its categories' `count` include it: the counts always
+   equal what the lists show. `?author=<username>` lists it too. `icon` and `screenshots` are package paths, fetched as
    `GET EDGE/store/v1/plugins/<id>/files/<version>/<path>`. The icon is
    served as `image/svg+xml` with `Content-Security-Policy: sandbox;
    default-src 'none'`.
@@ -127,9 +133,13 @@ binding is missing from that environment.
 4. An admin takes 1.0.2 down with a reason. Within 60 s, a device's update
    check lists it under `blocked` with the reason, and the device turns it
    off; `GET EDGE/store/v1/takedowns?after=0` has the event, with its
-   `seq`. Restore it: a `restore` event follows, and the version comes back
+   `seq` (and `head` is that seq). Restore it: a `restore` event follows, and the version comes back
    unverified. Lists and details can be up to 60 s stale; the package and
    files routes check the state on every request.
+
+A device asking with `verified_only` for the plugin (an agent's install,
+or an author's choice) is offered only verified versions: with 1.0.0
+verified and 1.0.1 not, it gets 1.0.0 and no `verified_update`.
 
 ### d. A report
 

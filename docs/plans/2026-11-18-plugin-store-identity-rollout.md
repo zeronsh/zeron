@@ -195,9 +195,19 @@ lists revoked grants too.
   key never claims an id: each plugin's first version comes from a device.
   An account has at most 20 live keys and makes at most 10 a day.
 - CI then publishes with the key's signed requests.
-- Check: create a key, publish a version with it (it lists at once,
-  unverified, and the author's devices get a notice naming the key),
-  revoke it, and see the next publish answer 401 `key_revoked`.
+- Check, with a test account that owns two plugins, A and B:
+  1. Create a key scoped to A (`{"plugins":["A"]}`). `GET
+     EDGE/store/v1/me/keys` lists it with that `scope` and
+     `last_used_at: null`.
+  2. Publish a version of A with it: it lists at once, unverified. The
+     owner's `/me/plugins` shows that version with `via: "deploy_key"` and
+     `deploy_key: {key, name}`, and the key's `last_used_plugin` is A.
+  3. Publish B with it, and a new id with it: both 403 `key_not_allowed`.
+     Scoping a key to a plugin the account doesn't own is 403 `not_owner`.
+  4. `GET EDGE/plugin-keys/<key>?plugin=A` is `verified: true`; with
+     `?plugin=B`, or no plugin, `verified: false`.
+  5. Revoke it (`DELETE EDGE/store/v1/me/keys/<key>` → `{"revoked":true}`)
+     and see the next publish answer 401 `key_revoked`.
 
 Operator routes for incidents:
 
