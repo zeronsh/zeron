@@ -4005,6 +4005,7 @@
       "no_versions": "还没有发送过版本。",
       "versions_failed": "无法查看你的版本",
       "sign_in_to_see": "登录后查看你的版本",
+      "at_line": "{path}，第 {line} 行",
       "sign_in_to_see_keys": "登录后查看它的密钥",
       "status": {
         "pending": "审核中",

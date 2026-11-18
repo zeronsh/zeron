@@ -349,8 +349,10 @@ test("HTML and math in its README and a footnote in its CHANGELOG are advice und
 	expect(checks).to_contain("It has HTML, which the store shows as typed.")
 	expect(checks).to_contain("It has a footnote, which the store shows as typed.")
 	expect(checks).to_contain("It has math, which the store's website shows as typed.")
-	expect(checks).to_contain("README.md")
-	expect(checks).to_contain("CHANGELOG.md")
+	-- Each where it is: its file and its line.
+	expect(checks).to_contain("README.md, line 3")
+	expect(checks).to_contain("CHANGELOG.md, line 7")
+	expect(checks).to_contain("README.md, line 12")
 	-- (Never the engine's English as it came.)
 	expect(checks).never.to_contain("line 3 has HTML")
 	expect(app:tree("#publish-submit")).never.to_contain("disabled")

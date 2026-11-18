@@ -579,9 +579,9 @@ stub.prepare = function(id: string): any
 					table.insert(out, { rule = "no_notes", words = "CHANGELOG.md has no section for 1.2.0" })
 				end
 				if typed then
-					table.insert(out, { rule = "raw_html", path = "README.md", words = "README.md line 3 has HTML; the store shows it as text. Use Markdown for pictures and headings." })
-					table.insert(out, { rule = "footnote", path = "CHANGELOG.md", words = "CHANGELOG.md line 7 has a footnote; the store shows it as text. Write the note into the text instead." })
-					table.insert(out, { rule = "math", path = "README.md", words = "README.md line 12 has math; the store's website shows it as typed (Zeron itself draws it)." })
+					table.insert(out, { rule = "raw_html", path = "README.md", line = 3, words = "README.md line 3 has HTML; the store shows it as text. Use Markdown for pictures and headings." })
+					table.insert(out, { rule = "footnote", path = "CHANGELOG.md", line = 7, words = "CHANGELOG.md line 7 has a footnote; the store shows it as text. Write the note into the text instead." })
+					table.insert(out, { rule = "math", path = "README.md", line = 12, words = "README.md line 12 has math; the store's website shows it as typed (Zeron itself draws it)." })
 				end
 				return out
 			end)(),

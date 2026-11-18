@@ -4005,6 +4005,7 @@
       "no_versions": "Nothing sent yet.",
       "versions_failed": "Couldn't see your versions",
       "sign_in_to_see": "Sign in to see your versions",
+      "at_line": "{path}, line {line}",
       "sign_in_to_see_keys": "Sign in to see its keys",
       "status": {
         "pending": "In review",
