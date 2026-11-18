@@ -483,3 +483,11 @@ Agreed after the plan was first written. Newest last.
     with no npm-style pre-release exclusion, on purpose: a beta of a Zeron
     version that satisfies the range should run the plugin. "npm-style" in
     amendment 2 describes the syntax only.
+33. **A publisher has a stable id.** `author` is `{ id, username, badges }`;
+    `updates[]` entries carry `publisher_id` beside `publisher`; `/me/plugins`
+    and the admin views carry it too. `id` is opaque and never changes for
+    an account (`"pub_" +` the first 32 hex characters of
+    `sha256("zeron-publisher:v1:" + userId)`); it is not the user id. A
+    device binds a store install's consent to `store:<id>`, so a username
+    that an operator moves can never carry another account's decisions; the
+    username is what people read.
