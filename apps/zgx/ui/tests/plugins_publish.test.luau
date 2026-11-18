@@ -255,6 +255,12 @@ end)
 
 test("Publish…, a row's inline link, shows the app's focus ring when the keys reach it", function()
 	local app = yours()
+	-- (At rest, its words underlined.)
+	expect(app:has(".settings-inline-link >> .inline-link-underlined")).to_be(true)
+	local function words_box(sel: string): string
+		return (app:tree(sel):match("%-?[%d.]+,%-?[%d.]+ [%d.]+x[%d.]+")) or ""
+	end
+	local at_rest = words_box(".settings-inline-link >> .inline-link-underlined")
 	app:click('role:textbox "Search plugins"')
 	app:frames(5)
 	local reached = false
@@ -269,4 +275,13 @@ test("Publish…, a row's inline link, shows the app's focus ring when the keys 
 	expect(reached).to_be(true)
 	expect(app:tree(".settings-inline-link")).to_contain('link "Publish…"')
 	expect(app:tree(".settings-inline-link")).to_contain("focused")
+	-- Focused, the ring says it's the control: no underline while it holds
+	-- the focus, the words where they were; back as focus leaves.
+	expect(app:has(".settings-inline-link >> .inline-link-plain")).to_be(true)
+	expect(app:has(".settings-inline-link >> .inline-link-underlined")).to_be(false)
+	expect(words_box(".settings-inline-link >> .inline-link-plain")).to_be(at_rest)
+	app:key("Tab")
+	app:frames(3)
+	expect(app:has(".settings-inline-link >> .inline-link-underlined")).to_be(true)
+	expect(app:has(".settings-inline-link >> .inline-link-plain")).to_be(false)
 end)

@@ -626,7 +626,23 @@ export type InlineLinkProps = {
 	focusable: (boolean | () -> boolean)?,
 	disabled: (boolean | () -> boolean)?,
 }
-function M.InlineLink(props: InlineLinkProps): Node
+-- (Focused, the ring says it's the control: the underline goes while it
+-- holds the focus, back as focus leaves, the words where they were. Its
+-- words are one of two texts, the same type and box, by whether it's
+-- focused: `.inline-link-underlined`, `.inline-link-plain`.)
+M.InlineLink = ui.component(function(props: InlineLinkProps): Node
+	local focused = ui.use_state(false)
+	local function words(underlined: boolean): Node
+		return ui.text {
+			props.label,
+			class = if underlined then "inline-link-underlined" else "inline-link-plain",
+			text_size = "$font.size.sm",
+			line_height = "$font.line.sm",
+			weight = "$font.weight.medium",
+			underline = underlined,
+			underline_offset = if underlined then 2 else nil,
+		}
+	end
 	return ui.row {
 		class = "settings-inline-link",
 		role = props.role or "link",
@@ -638,17 +654,21 @@ function M.InlineLink(props: InlineLinkProps): Node
 		color = "$text.primary",
 		hover = { color = "$accent" },
 		focus = control.ring,
+		on_focus = function()
+			focused:set(true)
+		end,
+		on_blur = function()
+			focused:set(false)
+		end,
 		on_click = props.on_click,
-		ui.text {
-			props.label,
-			text_size = "$font.size.sm",
-			line_height = "$font.line.sm",
-			weight = "$font.weight.medium",
-			underline = true,
-			underline_offset = 2,
-		},
+		ui.show(function(): boolean
+			return not focused:get()
+		end, words(true)),
+		ui.show(function(): boolean
+			return focused:get()
+		end, words(false)),
 	}
-end
+end)
 
 export type RowProps = {
 	label: string | Message | () -> string,
