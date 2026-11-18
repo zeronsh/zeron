@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { isText } from "./checks";
 import { consentItem, contained, fullControlNames, heldNames, windowsExtensions } from "./consent";
-import { JsonError, type JsonObject, canonicalJson, isObject, parseJsonText } from "./json";
+import { JsonError, type JsonObject, canonicalJson, compareUtf8, isObject, parseJsonText } from "./json";
 import {
   changelogNotes,
   checkListing,
@@ -98,7 +98,8 @@ describe("engine vectors (docs/plugin-package-vectors.json)", () => {
         // (`package_parts`: the package's text, in parts; its UTF-8 bytes.)
         const raw = c.package_parts !== undefined ? new TextEncoder().encode(joinParts(rawVectors.packages[i].package_parts)) : fromB64(c.package_b64);
         const p = await verifyPackage(raw);
-        got = { ok: true, id: p.manifest.id, version: p.manifest.version, key: p.key, hash: p.hash, sha256: p.sha256, files: p.files.size };
+        // (`paths`: the engine's BTreeMap order, its keys' UTF-8 bytes.)
+        got = { ok: true, id: p.manifest.id, version: p.manifest.version, key: p.key, hash: p.hash, sha256: p.sha256, files: p.files.size, paths: [...p.files.keys()].sort(compareUtf8) };
       } catch (e) {
         if (!(e instanceof PackageRefusal)) throw e;
         got = { ok: false, error: e.code };
