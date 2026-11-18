@@ -339,9 +339,11 @@ impl Plugins {
                     "You're making a plugin called {id} on this device. Remove or rename it first to install this one."
                 )));
             }
-            // From the store over one installed: new code under what the
-            // person allowed, so theirs to do (as `UpdatePlugin` is).
-            if source.store().is_some() && !person {
+            // From the store over one installed, or anything over one from
+            // the store (a file or a link would also take it out of the
+            // store's take-downs): new code under what the person allowed,
+            // so theirs to do (as `UpdatePlugin` is).
+            if (source.store().is_some() || entry.store.is_some()) && !person {
                 return Err(Self::needs_person(&entry.item.name));
             }
             old_binding = entry.binding().map(str::to_owned);
@@ -667,6 +669,13 @@ impl Plugins {
     async fn reinstall(&self, id: &str) -> Result<RpcReply, RpcError> {
         self.rescan().await;
         let entry = self.entry(id).ok_or_else(|| failed(format!("There's no plugin {id}")))?;
+        // It starts over what the person allowed: theirs to do.
+        if !Self::by_person() {
+            return Err(failed(install::failure(
+                install::reason::NEEDS_PERSON,
+                format!("Installing {} again is the person's, in Zeron's window", entry.item.name),
+            )));
+        }
         if entry.item.builtin {
             return Err(failed("Built-in plugins update when Zeron does"));
         }

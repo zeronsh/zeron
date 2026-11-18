@@ -1018,3 +1018,159 @@ async fn an_installed_version_becomes_verified_when_its_own_record_says_so() {
     let refused = d.call_as(zeron_rpc::Caller::Agent { chat: None }, methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap_err();
     assert_eq!(word(&refused), "needs_person", "{refused}");
 }
+
+// ── The merged build's review (the contract's last section) ─────────────────
+
+#[tokio::test]
+async fn an_agent_never_replaces_a_store_plugin_from_a_file_nor_reinstalls_one() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "verified", "");
+    let d = device(&store, Some("bob"));
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    assert_eq!(d.allow("focus").await["status"], "on");
+    let before = d.item("focus").await;
+    let agent = || zeron_rpc::Caller::Agent { chat: Some("c1".into()) };
+    // A newer version by the same key, as a file (the store's public
+    // package route serves it, or the author's own release).
+    let file = tempfile::tempdir().unwrap();
+    let path = file.path().join("focus-1.1.0.zeron-plugin");
+    std::fs::write(&path, package_of(&key, "focus", "1.1.0", &["ui.add"], "return 2", json!({}))).unwrap();
+    for params in [json!({ "path": path.display().to_string() }), json!({ "reinstall": "focus" })] {
+        let refused = d.call_as(agent(), methods::INSTALL_PLUGIN, params.clone()).await.unwrap_err();
+        assert_eq!(word(&refused), "needs_person", "{params}: {refused}");
+        let now = d.item("focus").await;
+        assert_eq!((now["version"].as_str(), now["hash"].as_str(), now["status"].as_str()), (Some("1.0.0"), before["hash"].as_str(), Some("on")), "{params}");
+        assert_eq!(now["source"]["kind"], "store", "still the store's, and its take-downs reach it");
+    }
+    // The person reinstalls it.
+    let again = d.call(methods::INSTALL_PLUGIN, json!({ "reinstall": "focus" })).await.unwrap();
+    assert_eq!(again["plugin"]["version"], "1.0.0");
+}
+
+/// A device running each of `ids` (1.0.0, verified, from the store,
+/// allowed), with its place in the take-down feed.
+async fn running(ids: &[&str]) -> (FakeStore, SigningKey, Device) {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    for id in ids {
+        store.add("ada", &package_of(&key, id, "1.0.0", &["ui.add"], "return 1", json!({})), "verified", "");
+    }
+    let d = device(&store, Some("bob"));
+    for id in ids {
+        d.call(methods::INSTALL_PLUGIN, json!({ "store": id })).await.unwrap();
+        assert_eq!(d.allow(id).await["status"], "on");
+        assert_eq!(d.item(id).await["source"]["verified"], true);
+    }
+    d.plugins.check_takedowns().await;
+    (store, key, d)
+}
+
+#[tokio::test]
+async fn taken_down_and_restored_in_one_page_comes_back_unmarked() {
+    let (store, _key, d) = running(&["focus"]).await;
+    store.block("focus", "1.0.0", "Bad.");
+    store.restore("focus", "1.0.0");
+    d.plugins.check_takedowns().await;
+    assert_eq!(d.item("focus").await["source"]["verified"], false, "restored comes back unverified");
+}
+
+#[tokio::test]
+async fn a_blocked_version_shows_no_mark_even_turned_back_on() {
+    let (store, _key, d) = running(&["focus"]).await;
+    store.block("focus", "1.0.0", "Bad.");
+    d.plugins.check_takedowns().await;
+    let item = d.item("focus").await;
+    assert_eq!((item["status"].as_str(), item["source"]["verified"].as_bool()), (Some("off"), Some(false)), "{item}");
+    d.call(methods::SET_PLUGIN_OFF, json!({ "id": "focus", "off": false })).await.unwrap();
+    assert_eq!(d.item("focus").await["source"]["verified"], false);
+}
+
+#[tokio::test]
+async fn a_mark_ended_while_the_feed_forgot_its_place_ends_after_the_reset() {
+    let (store, _key, d) = running(&["focus"]).await;
+    store.block("focus", "1.0.0", "Bad.");
+    store.restore("focus", "1.0.0");
+    store.state.lock().unwrap().feed_floor = 1000;
+    d.plugins.check_takedowns().await;
+    assert_eq!(d.item("focus").await["source"]["verified"], false);
+}
+
+#[tokio::test]
+async fn an_update_yanked_since_it_was_found_isn_t_taken() {
+    let (store, key, d) = running(&["focus"]).await;
+    store.add("ada", &package_of(&key, "focus", "1.1.0", &["ui.add"], "return 2", json!({})), "verified", "");
+    assert_eq!(d.check().await["updates"][0]["version"], "1.1.0");
+    store.set_status("focus", "1.1.0", "yanked");
+    let refused = d.call(methods::UPDATE_PLUGIN, json!({ "id": "focus" })).await.unwrap_err();
+    assert_eq!(word(&refused), "not_in_store", "{refused}");
+    assert_eq!(d.item("focus").await["version"], "1.0.0");
+}
+
+#[tokio::test]
+async fn an_update_taken_down_since_it_was_found_isn_t_taken_with_the_store_unreachable() {
+    let (store, key, d) = running(&["focus"]).await;
+    store.add("ada", &package_of(&key, "focus", "1.1.0", &["ui.add"], "return 2", json!({})), "verified", "");
+    assert_eq!(d.check().await["updates"][0]["version"], "1.1.0");
+    store.block("focus", "1.1.0", "Bad.");
+    d.plugins.check_takedowns().await;
+    store.offline.store(true, std::sync::atomic::Ordering::SeqCst);
+    let refused = d.call(methods::UPDATE_PLUGIN, json!({ "id": "focus" })).await;
+    assert!(refused.is_err(), "{refused:?}");
+    assert_eq!(d.item("focus").await["version"], "1.0.0");
+}
+
+#[tokio::test]
+async fn the_feed_s_place_never_passes_its_head() {
+    let (store, _key, d) = running(&["focus"]).await;
+    // An event far past the head the store gives: not a place to jump to.
+    {
+        let mut state = store.state.lock().unwrap();
+        state.events.push((1_000_000, "take_down".into(), "elsewhere".into(), "1.0.0".into(), String::new()));
+        state.feed_head = Some(0);
+    }
+    d.plugins.check_takedowns().await;
+    {
+        let mut state = store.state.lock().unwrap();
+        state.events.clear();
+        state.feed_head = None;
+    }
+    // So the next real take-down still reaches it.
+    store.block("focus", "1.0.0", "Bad.");
+    d.plugins.check_takedowns().await;
+    assert_eq!(d.item("focus").await["status"], "off", "a take-down after the bogus event was missed");
+}
+
+#[tokio::test]
+async fn a_block_the_device_can_t_read_keeps_the_block_it_had() {
+    let (store, _key, d) = running(&["focus"]).await;
+    store.block("focus", "1.0.0", "Bad.");
+    d.plugins.check_takedowns().await;
+    assert_eq!(d.item("focus").await["status"], "off");
+    {
+        let mut state = store.state.lock().unwrap();
+        let v = state.plugins.get_mut("focus").unwrap().versions.iter_mut().find(|v| v.version == "1.0.0").unwrap();
+        v.blocked = None;
+        state.blocked_anyway = vec![json!({ "id": "focus", "version": 1 })];
+    }
+    d.check().await;
+    let item = d.item("focus").await;
+    assert_eq!(item["status"], "off", "{item}");
+    assert!(item.get("blocked").is_some(), "{item}");
+}
+
+#[test]
+fn a_version_is_at_most_32_characters() {
+    use zeron_engine::plugins::version::Version;
+    let longest = "1.0.0-aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    assert_eq!(longest.len(), 32);
+    assert!(Version::parse(longest).is_ok());
+    assert!(Version::parse(&format!("{longest}a")).is_err());
+    // And so the check before publishing refuses it (not_semver).
+    let files: BTreeMap<String, Vec<u8>> = [("init.luau".to_string(), b"return 1".to_vec())].into();
+    let (key, _) = SigningKey::generate().unwrap();
+    let manifest = key.sign_manifest(&json!({ "id": "focus", "name": "Focus", "version": format!("{longest}a"), "entry": "init.luau" }), &package::hashes(&files));
+    let manifest = zeron_engine::plugins::manifest::Manifest::from_value(manifest).unwrap();
+    let (problems, _) = zeron_engine::plugins::listing::check(&manifest, &files);
+    assert!(problems.iter().any(|p| p.rule == "not_semver"), "{problems:?}");
+}

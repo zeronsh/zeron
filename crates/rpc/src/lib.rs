@@ -936,6 +936,32 @@ pub fn peer_refused(method: &str, params: &serde_json::Value) -> bool {
     }
 }
 
+/// On a forwarded call that changes a device's plugins: `true` only when
+/// the device that sent it was asked by its own app (the person). Its
+/// engine sets it on every forward of [`person_only_from_peer`]'s methods,
+/// over whatever the caller sent, so an agent's token can't claim it.
+pub const BY_PERSON: &str = "byPerson";
+
+/// What changes a device's plugins (installs, updates, reinstalls,
+/// removes, turns on or off, reviews, allows or declines, sets pre-releases
+/// or which updates it takes): another device's call is taken only with
+/// [`BY_PERSON`], else it's the person's to do.
+pub fn person_only_from_peer(method: &str) -> bool {
+    matches!(
+        method,
+        methods::INSTALL_PLUGIN
+            | methods::UPDATE_PLUGIN
+            | methods::INSTALL_VERIFIED_PLUGIN
+            | methods::REMOVE_PLUGIN
+            | methods::SET_PLUGIN_OFF
+            | methods::SET_PLUGIN_PRERELEASES
+            | methods::SET_PLUGIN_UPDATES
+            | methods::REVIEW_PLUGIN
+            | methods::DECIDE_PLUGIN
+            | methods::STAGE_PLUGIN_PACKAGE
+    )
+}
+
 /// Methods only this device's own app may send on to another device: what
 /// a consent window does (a review, an allow) and sending it a file. Never
 /// an agent's, whose engine refuses to carry them.
@@ -1283,6 +1309,17 @@ mod tests {
             assert!(!local_only(method), "{method}");
         }
         assert!(!peer_refused(methods::INSTALL_PLUGIN, &serde_json::json!({ "store": "focus" })));
+        // Each change to a device's plugins another device sends is taken
+        // there only as the person's (`BY_PERSON`); reading them isn't.
+        for method in [
+            methods::INSTALL_PLUGIN, methods::UPDATE_PLUGIN, methods::INSTALL_VERIFIED_PLUGIN, methods::REMOVE_PLUGIN, methods::SET_PLUGIN_OFF,
+            methods::SET_PLUGIN_PRERELEASES, methods::SET_PLUGIN_UPDATES, methods::REVIEW_PLUGIN, methods::DECIDE_PLUGIN, methods::STAGE_PLUGIN_PACKAGE,
+        ] {
+            assert!(person_only_from_peer(method), "{method}");
+        }
+        for method in [methods::LIST_PLUGINS, methods::WATCH_PLUGINS, methods::CHECK_PLUGIN_UPDATES, methods::PLUGIN_STATUS] {
+            assert!(!person_only_from_peer(method), "{method}");
+        }
         for method in [
             methods::STORE_SEARCH, methods::STORE_PLUGIN, methods::STORE_VERSIONS, methods::STORE_VERSION, methods::STORE_CATEGORIES,
             methods::STORE_STATS, methods::STORE_FILE, methods::PREPARE_PLUGIN_PUBLISH,
