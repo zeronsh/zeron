@@ -23,21 +23,25 @@ import type { VersionInfo } from "../../lib/store/types.ts";
 
 export const prerender = false;
 
-const { id } = Astro.params;
-if (!isPluginId(id)) return new Response(null, { status: 404 });
+// An id no plugin is listed under (unknown, in review, taken down, or not
+// an id at all) is one page, the same for each: the shell's own 404, which
+// says nothing of why. (A malformed id never reaches the edge.)
+const asked = Astro.params.id ?? "";
+const valid = isPluginId(asked);
+const id = valid ? asked : "";
 // One address per plugin: a query can't make the page (or its README) be
 // made again, and can't split its cache.
-if (Astro.url.search) return Astro.redirect(pluginUrl(id), 301);
+if (valid && Astro.url.search) return Astro.redirect(pluginUrl(id), 301);
 
 const edge = Astro.locals.edge;
-const [result, versionsResult, categoriesResult, latestZeron] = await Promise.all([edge.plugin(id), edge.versions(id), edge.categories(), edge.latestRelease()]);
-if (!result.ok) {
-  if (result.error === "not_found") return new Response(null, { status: 404 });
-  Astro.response.status = 503;
-}
+const [result, versionsResult, categoriesResult, latestZeron] = valid
+  ? await Promise.all([edge.plugin(id), edge.versions(id), edge.categories(), edge.latestRelease()])
+  : [null, null, await edge.categories(), null];
 // (A listed plugin always has a version; one without is not the public's.)
-if (result.ok && !result.data.version) return new Response(null, { status: 404 });
-const plugin = result.ok ? { ...result.data, version: result.data.version! } : null;
+const missing = !result || (!result.ok && result.error === "not_found") || (result.ok && !result.data.version);
+if (missing) Astro.response.status = 404;
+else if (!result.ok) Astro.response.status = 503;
+const plugin = result?.ok && result.data.version ? { ...result.data, version: result.data.version } : null;
 
 /** Versions whose notes the page shows (each is rendered once, then kept). */
 const NOTED = 8;
@@ -50,7 +54,7 @@ if (plugin) {
   // (A first heading that only says its name again isn't drawn: the page says it.)
   readme = await renderedOnce(origin, plugin.id, plugin.version, "readme", plugin.readme, { file: file(plugin.version), demote: true, title: plugin.name });
   // The notes of the latest few versions are shown; older versions are listed by number and date.
-  const all = (versionsResult.ok ? versionsResult.data.versions : plugin.versions).slice(0, NOTED + 20);
+  const all = (versionsResult?.ok ? versionsResult.data.versions : plugin.versions).slice(0, NOTED + 20);
   versions = await Promise.all(all.map(async (v, i) => ({ ...v, html: v.notes && i < NOTED ? await renderedOnce(origin, plugin.id, v.version, "notes", v.notes, { file: file(v.version), demote: true }) : null })));
 }
 // An author's links, parsed: https only, never the text as given.
@@ -90,7 +94,7 @@ const structured = plugin
   : null;
 ---
 
-<App title={plugin ? `${plugin.name}, a plugin for Zeron` : "Plugins · Zeron"} description={plugin?.summary ?? "A plugin for Zeron."} current={null}>
+<App title={plugin ? `${plugin.name}, a plugin for Zeron` : missing ? "Not found · Plugins · Zeron" : "Plugins · Zeron"} description={plugin?.summary ?? "A plugin for Zeron."} noindex={!plugin} current={null}>
   {structured && <script slot="head" type="application/ld+json" set:html={structured} />}
   <nav slot="title" class="crumbs" aria-label="Where this is">
     <a href={catalogHref({})}>All plugins</a>
@@ -100,7 +104,15 @@ const structured = plugin
   {plugin && <a slot="tools" class="btn ghost sm" href={`${pluginUrl(plugin.id)}/report`}><Glyph name="flag" size={14} />Report</a>}
 
   {
-    !plugin ? (
+    missing ? (
+      <div class="panel">
+        <div class="empty">
+          <span class="tile"><Glyph name="magnifer" size={20} /></span>
+          <div class="words"><h1 class="t-heading">No plugin is listed here</h1><p>It may have a different id, or it isn't in the store now.</p></div>
+          <div class="actions"><a class="btn secondary sm" href={catalogHref({})}>All plugins</a></div>
+        </div>
+      </div>
+    ) : !plugin ? (
       <div class="panel">
         <div class="empty" role="status">
           <span class="tile"><Glyph name="wifi-off" size={20} /></span>

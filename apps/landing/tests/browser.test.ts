@@ -69,6 +69,12 @@ const PAGES: [string, string | undefined][] = [
 
 /** The states a page opens into: each must be as clean as the page. */
 const OPENED: [string, string, string | undefined, (page: Page) => Promise<void>][] = [
+  ["Approve, asked once", "/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", "user_grace", async (page) => {
+    // (Exact: "Don't approve…" holds the words too, and comes first in a phone's bar.)
+    await page.getByRole("link", { name: "Approve…", exact: true }).first().click();
+    await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
+    expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Approve");
+  }],
   ["Don't approve, written", "/admin/plugins/session-badges/1.2.1", "user_grace", async (page) => {
     await page.getByRole("link", { name: "Don't approve…" }).first().click();
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);

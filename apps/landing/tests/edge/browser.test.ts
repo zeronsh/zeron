@@ -115,8 +115,12 @@ describe("a reviewer, start to finish", () => {
       await expect.poll(() => page.getByRole("link", { name: /focus timer/i }).first().isVisible()).toBe(true);
 
       await page.goto(`${edge.origin}/admin/plugins/focus-timer/1.0.0`);
-      // (Approve is the decision's one primary, a post: Take down is the undoing, and it asks first.)
-      await page.getByRole("complementary", { name: "Decision" }).getByRole("button", { name: "Approve" }).click();
+      // (Approve asks once, its own button focused: a clean update is a click, then Enter.)
+      await page.getByRole("complementary", { name: "Decision" }).getByRole("link", { name: "Approve…", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Approve focus timer 1.0.0?" });
+      await expect.poll(() => dialog.isVisible()).toBe(true);
+      expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Approve");
+      await page.keyboard.press("Enter");
       await page.waitForURL(`${edge.origin}/admin/plugins/focus-timer/1.0.0`);
       await expect.poll(() => page.getByText("Approved. It's listed now.").isVisible()).toBe(true);
 

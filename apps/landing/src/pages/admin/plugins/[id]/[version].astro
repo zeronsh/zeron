@@ -16,7 +16,7 @@ import FileTree from "../../../../components/store/FileTree.astro";
 import PluginTile from "../../../../components/store/PluginTile.astro";
 import Glyph from "../../../../components/ui/Glyph.astro";
 import App from "../../../../layouts/App.astro";
-import { reasonLabel, versionAsk } from "../../../../lib/store/admin.ts";
+import { reasonLabel, toWeigh, versionAsk } from "../../../../lib/store/admin.ts";
 import { takeFlash } from "../../../../lib/store/flash.ts";
 import { age, bytes, count, dateTime, day, unbidi, waitedFor } from "../../../../lib/store/format.ts";
 import { privatePage } from "../../../../lib/store/http.ts";
@@ -138,6 +138,8 @@ const removable = s?.version.status === "approved" || s?.version.status === "yan
 const review = s?.version.review;
 const decided = review?.decided_at ?? s?.version.published_at ?? null;
 const author = s?.publisher.username ?? null;
+const approve = versionAsk("approve", name, version);
+const weigh = s ? toWeigh(s) : null;
 const reject = versionAsk("reject", name, version);
 const remove = versionAsk("remove", name, version);
 const plural = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n === 1 ? one : many}`;
@@ -203,10 +205,7 @@ const plural = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n ==
             <div class="buttons">
               {pending && (
                 <>
-                  <form method="post" action={`${here}/approve`}>
-                    <input type="hidden" name="csrf" value={session.csrf} />
-                    <button class="btn primary" type="submit">Approve</button>
-                  </form>
+                  <a class="btn primary" href={`${here}/approve`} data-dialog="approve">Approve…</a>
                   <a class="btn secondary" href={`${here}/reject`} data-dialog="reject">Don't approve…</a>
                 </>
               )}
@@ -216,7 +215,7 @@ const plural = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n ==
           <dl class="facts">
             <div><dt>Sent by</dt><dd>{author ? <a href={memberUrl(author)}>@{author}</a> : "No username"}</dd></div>
             <div><dt>Account</dt><dd>{age(s.publisher.created_at) || "Deleted"}</dd></div>
-            <div><dt>Before this</dt><dd>{count(s.publisher.decisions.approved)} approved · {count(s.publisher.decisions.rejected)} not</dd></div>
+            <div><dt>This author</dt><dd>{count(s.publisher.decisions.approved)} approved · {count(s.publisher.decisions.rejected)} not approved</dd></div>
             <div>
               <dt>Checks</dt>
               <dd>
@@ -450,10 +449,7 @@ const plural = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n ==
         {pending && (
           <>
             <a class="btn secondary" href={`${here}/reject`} data-dialog="reject">Don't approve…</a>
-            <form method="post" action={`${here}/approve`}>
-              <input type="hidden" name="csrf" value={session.csrf} />
-              <button class="btn primary" type="submit">Approve</button>
-            </form>
+            <a class="btn primary" href={`${here}/approve`} data-dialog="approve">Approve…</a>
           </>
         )}
         {removable && <a class="btn secondary" href={`${here}/remove`} data-dialog="take-down">Take down…</a>}
@@ -461,6 +457,24 @@ const plural = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n ==
     )
   }
 
+  {
+    s && pending && (
+      <dialog class="dialog sm" id="approve" aria-labelledby="approve-title" closedby="any">
+        <form method="post" action={`${here}/approve`}>
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <div class="head">
+            <h2 id="approve-title">{unbidi(approve.title)}</h2>
+            {approve.words.map((w) => <p>{w}</p>)}
+            {weigh && <p class:list={["weigh-line", weigh.tone]}>{weigh.text}</p>}
+          </div>
+          <div class="answers">
+            <button class="btn secondary" type="submit" formmethod="dialog" formnovalidate>Cancel</button>
+            <button class="btn primary" type="submit" autofocus>{approve.confirm}</button>
+          </div>
+        </form>
+      </dialog>
+    )
+  }
   {
     s && pending && (
       <dialog class="dialog" id="reject" aria-labelledby="reject-title" closedby="any">

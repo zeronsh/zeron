@@ -13,7 +13,7 @@ import { privatePage, purge } from "../../../../../lib/store/http.ts";
 import { isPluginId } from "../../../../../lib/store/names.ts";
 import { resumed, wasCut } from "../../../../../lib/store/resume.ts";
 import { adminSession } from "../../../../../lib/store/session.ts";
-import { listingState } from "../../../../../lib/store/states.ts";
+import { everListed, listingState } from "../../../../../lib/store/states.ts";
 
 export const prerender = false;
 
@@ -58,7 +58,7 @@ const open = a?.reports.filter((r) => r.status === "open").length ?? 0;
               name={a.plugin.name}
               icon={a.plugin.icon}
               version={a.plugin.version}
-              facts={[a.owner.username ? `by @${a.owner.username}` : "No username", listingState(a.status).label, `${open} open ${open === 1 ? "report" : "reports"}`]}
+              facts={[a.owner.username ? `by @${a.owner.username}` : "No username", listingState(a.status, everListed(a.versions)).label, `${open} open ${open === 1 ? "report" : "reports"}`]}
               read={back}
               fromElsewhere={fromElsewhere(Astro.request)}
             />

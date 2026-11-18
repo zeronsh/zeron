@@ -23,6 +23,8 @@ const state = {
   sessions: new Map<string, { user: string; csrf: string; rotated?: boolean }>(),
   /** The queue as a screenshot asks for it (POST /_fake/queue, astro dev's /_dev/queue): empty, or this long. Null: as it is. */
   queueAs: null as null | "empty" | number,
+  /** The store as if it were down (POST /_fake/down?on=1): every /store/v1 read and write a 503. */
+  down: false,
 };
 
 // Programs the host rates (crates/plugin-guard/src/commands.rs), enough for the fixtures.
@@ -338,9 +340,17 @@ function queue(url: URL): Response {
         const base = p.versions.find((x) => x.status === "approved" && x !== v && x.published_at < v.published_at);
         const asked = (v.manifest.permissions as string[]) ?? [];
         const had = (base?.manifest.permissions as string[]) ?? [];
+        // (Amendment 40: inside an ask both have, a host, program, place or tool's words differ.)
+        const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+        const now = permissions(v.manifest);
+        const was = base ? permissions(base.manifest) : null;
+        const sorted = (list: string[]) => [...list].sort();
+        const asksChanged = was !== null && (!same(sorted(now.commands), sorted(was.commands)) || !same(sorted(now.network_hosts), sorted(was.network_hosts)) || !same(now.tools, was.tools) || !same(now.ui ?? null, was.ui ?? null));
         return {
           plugin: { id: p.id, name: String(v.manifest.name) },
           version: v.version,
+          icon: typeof v.manifest.icon === "string" ? v.manifest.icon : null,
+          asks_changed: asksChanged,
           status: v.status,
           prerelease: v.version.includes("-"),
           submitted_at: v.published_at,
@@ -374,7 +384,9 @@ function filler(n: number) {
       submitted_at: NOW - (i * 5.5 + 1) * 3_600_000,
       publisher: { id: `pub_${i}`, username },
       ...(update ? { base: `1.${i % 4}.0` } : {}),
+      icon: null,
       new_asks: update && i % 5 === 1 ? (i % 2 ? ["commands"] : ["network"]) : [],
+      asks_changed: update && i % 7 === 3,
       checks: { ok: 6, warn: i % 4 === 0 ? 1 : 0, fail: 0 },
     };
   });
@@ -610,7 +622,12 @@ async function route(request: Request): Promise<Response> {
     state.queueAs = as === "empty" ? "empty" : as && /^\d{1,3}$/.test(as) ? Number(as) : null;
     return json({ queue: state.queueAs });
   }
+  if (parts[0] === "_fake" && parts[1] === "down" && method === "POST") {
+    state.down = url.searchParams.get("on") === "1";
+    return json({ down: state.down });
+  }
   if (parts[0] !== "store" || parts[1] !== "v1") return notFound();
+  if (state.down) return fail(503, "unknown", "The store is down (the fake's own switch).");
   const [, , a, b, c, d, e] = parts;
 
   if (a === "categories" && method === "GET") return json({ categories: CATEGORIES }, 200, { "cache-control": "public, max-age=300" });

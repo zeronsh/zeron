@@ -28,7 +28,7 @@ for (const edge of ["missing", "broken"] as const) {
     });
 
     test("the store's pages say it can't be reached, and are never kept", async () => {
-      for (const [path, words] of [["/plugins", /can't be reached/], ["/plugins/focus-timer", /The plugin store didn(&#39;|')t answer/]] as const) {
+      for (const [path, words] of [["/plugins", /The plugin store didn(&#39;|')t answer/], ["/plugins/focus-timer", /The plugin store didn(&#39;|')t answer/]] as const) {
         const response = await site.fetch(path);
         expect(response.status, path).toBe(503);
         expect(await response.text(), path).toMatch(words);

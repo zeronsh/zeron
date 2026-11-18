@@ -37,10 +37,19 @@ const pager = result.ok ? pagerOf("/admin/plugins", keep, place, result.data, it
 const viewHref = (v: View) => (v === "pending" ? "/admin/plugins" : `/admin/plugins?status=${v}`);
 const submissionHref = (item: QueueItem) => `/admin/plugins/${encodeURIComponent(item.plugin.id)}/${encodeURIComponent(item.version)}`;
 
-/** A badge only where a row needs a look: checks that failed; an update that asks for more (in the danger's ink when what it adds reaches far). */
-const flags = (item: QueueItem) => [
+/**
+ * A badge only where a row needs a look (amendment 40): checks that failed;
+ * an update that asks for more (in the danger's ink when what it adds
+ * reaches far), or whose asks changed inside. A row with none asks for
+ * exactly what the approved version did.
+ */
+const flags = (item: QueueItem): { label: string; tone: string; title?: string }[] => [
   ...(item.checks.fail > 0 ? [{ label: item.checks.fail === 1 ? "A check failed" : `${item.checks.fail} checks failed`, tone: "bad" }] : []),
-  ...(item.base && item.new_asks.length > 0 ? [{ label: "Asks for more", tone: item.new_asks.some((a) => RISKY_ASKS.has(a)) ? "bad" : "warn", title: `New since ${item.base}: ${item.new_asks.join(", ")}` }] : []),
+  ...(item.base && item.new_asks.length > 0
+    ? [{ label: "Asks for more", tone: item.new_asks.some((a) => RISKY_ASKS.has(a)) ? "bad" : "warn", title: `New since ${item.base}: ${item.new_asks.join(", ")}` }]
+    : item.base && item.asks_changed
+      ? [{ label: "Asks changed", tone: "warn", title: `What it asks for changed inside since ${item.base}` }]
+      : []),
 ];
 ---
 
@@ -95,7 +104,7 @@ const flags = (item: QueueItem) => [
                   <tr>
                     <td>
                       <span class="cell-main">
-                        <PluginTile id={item.plugin.id} name={item.plugin.name} icon={null} version={item.version} size={32} class="plugin-tile" />
+                        <PluginTile id={item.plugin.id} name={item.plugin.name} icon={item.icon ?? null} version={item.version} size={32} class="plugin-tile" />
                         <span class="cell-words">
                           <a class="name name-link" href={submissionHref(item)}>{item.plugin.name}<span class="sr-only"> {item.version}</span></a>
                           <span class="id">{item.plugin.id}</span>

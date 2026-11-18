@@ -228,6 +228,8 @@ export type ReportReason = (typeof REPORT_REASONS)[number];
 export interface QueueItem {
   plugin: { id: string; name: string };
   version: string;
+  /** This version's icon, its path in the package, as a card's (amendment 40; optional until the edge's commit). */
+  icon?: string | null;
   status: VersionStatus;
   prerelease: boolean;
   submitted_at: number;
@@ -236,6 +238,12 @@ export interface QueueItem {
   base?: string;
   /** Permissions it asks for that the last approved version didn't. */
   new_asks: string[];
+  /**
+   * Anything inside an ask it already had differs from the last approved
+   * version (a host, a program, a place), or a tool says or takes something
+   * else (amendment 40; optional until the edge's commit).
+   */
+  asks_changed?: boolean;
   checks: { ok: number; warn: number; fail: number };
 }
 

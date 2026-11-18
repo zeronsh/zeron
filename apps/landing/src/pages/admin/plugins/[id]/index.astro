@@ -14,7 +14,7 @@ import { age, count, dateTime, day, unbidi } from "../../../../lib/store/format.
 import { privatePage } from "../../../../lib/store/http.ts";
 import { isPluginId } from "../../../../lib/store/names.ts";
 import { adminSession } from "../../../../lib/store/session.ts";
-import { listingState, reasonWords, toneClass, versionState } from "../../../../lib/store/states.ts";
+import { everListed, listingState, reasonWords, toneClass, versionState } from "../../../../lib/store/states.ts";
 import { memberUrl, pluginUrl } from "../../../../lib/store/urls.ts";
 
 export const prerender = false;
@@ -33,7 +33,7 @@ const act = (action: string) => `${here}/actions/${action}`;
 const removable = (status: string) => status === "approved" || status === "yanked";
 const vid = (v: string) => `remove-${v.replace(/[^\w-]/g, "_")}`;
 const name = a ? unbidi(a.plugin.name) : id;
-const listing = a ? listingState(a.status) : null;
+const listing = a ? listingState(a.status, everListed(a.versions)) : null;
 const suspend = pluginAsk("suspend", name);
 const transfer = pluginAsk("transfer", name);
 const REPORT = { open: { label: "Open", tone: "warn" }, actioned: { label: "Acted on", tone: "" }, dismissed: { label: "Dismissed", tone: "" } } as const;

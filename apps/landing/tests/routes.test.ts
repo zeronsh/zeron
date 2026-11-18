@@ -262,13 +262,16 @@ describe("a plugin's page", () => {
     expect(body).toContain('href="https://github.com/ada/focus-timer" rel="nofollow noopener ugc"');
   });
 
-  test("unknown, unlisted and malformed ids are the site's 404", async () => {
-    const notFound = readFileSync(new URL("../dist/client/404.html", import.meta.url), "utf8");
-    for (const path of ["/plugins/no-such-plugin", "/plugins/voice-memos", "/plugins/crypto-ticker", "/plugins/Bad_Id", "/plugins/a%2Fb"]) {
-      const { response, body } = await html(path);
+  test("unknown, unlisted and malformed ids are one 404, in the shell, saying nothing of why", async () => {
+    const pages = await Promise.all(["/plugins/no-such-plugin", "/plugins/voice-memos", "/plugins/crypto-ticker", "/plugins/Bad_Id", "/plugins/a%2Fb"].map(async (path) => ({ path, ...(await html(path)) })));
+    for (const { path, response, body } of pages) {
       expect(response.status, path).toBe(404);
-      expect(body, path).toBe(notFound);
+      expect(body, path).toContain("No plugin is listed here");
+      expect(response.headers.get("x-robots-tag") ?? body, path).toMatch(/noindex/);
     }
+    // (Each the same but for its own address: its canonical, and where sign-in comes back to.)
+    const same = (body: string) => body.replace(/(rel="canonical" href|property="og:url" content)="[^"]*"/g, "").replace(/return_to=[^"]*/g, "");
+    expect(new Set(pages.map((p) => same(p.body))).size).toBe(1);
   });
 
   test("a query on a plugin's page goes to its one address", async () => {
@@ -393,6 +396,16 @@ describe("signed-in pages", () => {
     expect(response.headers.getSetCookie().join("\n")).toMatch(/__Host-zeron_session=[\w-]+; Path=\/; Secure; HttpOnly; SameSite=Lax/);
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(response.headers.get("cloudflare-cdn-cache-control") ?? "").not.toMatch(/public/);
+  });
+
+  test("its place in the store, in three words: Listed, plain; Not listed yet, never was; Not listed, was and isn't now", async () => {
+    const { body } = await html("/account", await site.signIn("user_ada"));
+    const cell = (id: string) => body.slice(body.indexOf(`<span class="id">${id}</span>`)).match(/<td class="listing">(.*?)<\/td>/)![1]!;
+    expect(cell("focus-timer")).toBe('<span class="steady">Listed</span>');
+    expect(cell("rough-draft")).toContain(">Not listed yet<");
+    expect(cell("first-light")).toContain(">Not listed yet<");
+    expect(cell("clipboard-sync")).toContain(">Not listed<");
+    expect(cell("old-sketch")).toContain(">Not listed<");
   });
 
   test("an id with nothing listed or in review says it goes back after 90 days", async () => {
@@ -782,6 +795,9 @@ describe("the staff's side: the queue, a submission, the decision", () => {
     const worst = rows.find((r) => r.includes("worst-case-listing-at-every-limit-xyz12"))!;
     expect(worst).toContain("Update");
     expect(worst).toMatch(/<span class="badge sm bad" title="New since 1\.0\.0: [^"]*messages\.send[^"]*">Asks for more<\/span>/);
+    // Nothing new, but a host swapped inside an ask it had: "Asks changed".
+    const xss = rows.find((r) => r.includes(">xss-probe<"))!;
+    expect(xss).toMatch(/<span class="badge sm warn" title="What it asks for changed inside since 1\.0\.0">Asks changed<\/span>/);
     // A new plugin asks for everything it asks for: said by its kind, not a badge.
     const first = rows.find((r) => r.includes(">first-light<"))!;
     expect(first).toContain("New plugin");
@@ -819,12 +835,18 @@ describe("the staff's side: the queue, a submission, the decision", () => {
     expect(rows.slice(4).every((r) => r.startsWith(" same"))).toBe(true);
   });
 
-  test("the decision: Approve, the one primary, a post; Don't approve asks for a reason and words, showing the author's view; an approved version's is Take down", async () => {
+  test("the decision: Approve, the one primary, asks once with what there is to weigh; Don't approve asks for a reason and words, showing the author's view; an approved version's is Take down", async () => {
     const grace = await site.signIn("user_grace");
     const pending = (await html("/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", grace)).body;
     const rail = pending.slice(pending.indexOf('<aside class="decide'), pending.indexOf("</aside>"));
     expect(rail.match(/btn primary/g)).toHaveLength(1);
-    expect(rail).toMatch(/<form method="post" action="\/admin\/plugins\/worst-case-listing-at-every-limit-xyz12\/1\.5\.0\/approve">/);
+    expect(rail).toContain('<a class="btn primary" href="/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0/approve" data-dialog="approve">Approve…</a>');
+    const ask = pending.slice(pending.indexOf('<dialog class="dialog sm" id="approve"'), pending.indexOf("</dialog>", pending.indexOf('id="approve"')));
+    expect(ask).toContain("Anyone can install it once approved.");
+    expect(ask).toContain('<p class="weigh-line bad">2 new asks · 2 asks changed · 1 check to look at</p>');
+    // (Approve has the focus: a clean update is a click, then Enter.)
+    expect(ask).toContain('<button class="btn primary" type="submit" autofocus>Approve</button>');
+    expect(rail).toContain("<dt>This author</dt><dd>");
     expect(rail).toContain('data-dialog="reject">Don\'t approve…</a>');
     expect(rail).not.toContain("Take down");
     expect(pending).toContain('<select id="reject-reason" name="reason" required>');

@@ -26,13 +26,21 @@ export function versionState(v: Pick<VersionInfo, "status" | "review">): { label
   }
 }
 
-export function listingState(listing: Listing | PluginStatus | "active"): { label: string; tone: Tone } {
+/** Whether a plugin was ever listed: a version of it was approved once (since stopped or taken down, maybe). */
+export const everListed = (versions: readonly Pick<VersionInfo, "status">[]) => versions.some((v) => v.status === "approved" || v.status === "yanked" || v.status === "removed");
+
+/**
+ * Its place in the store, in three words while it isn't suspended: Listed;
+ * Not listed yet (never was); Not listed (was, and isn't now: why is its
+ * versions' to say). `wasListed`: whether it ever was (everListed).
+ */
+export function listingState(listing: Listing | PluginStatus | "active", wasListed = false): { label: string; tone: Tone } {
   switch (listing) {
     case "listed":
     case "active":
       return { label: "Listed", tone: "success" };
     case "unlisted":
-      return { label: "Not listed yet", tone: "neutral" };
+      return { label: wasListed ? "Not listed" : "Not listed yet", tone: "neutral" };
     case "suspended":
       return { label: "Suspended", tone: "danger" };
     case "removed":

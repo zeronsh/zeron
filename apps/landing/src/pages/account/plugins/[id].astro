@@ -14,7 +14,7 @@ import { day, shortKey } from "../../../lib/store/format.ts";
 import { privatePage } from "../../../lib/store/http.ts";
 import { isPluginId } from "../../../lib/store/names.ts";
 import { requireSession } from "../../../lib/store/session.ts";
-import { listingState, toneClass, versionState } from "../../../lib/store/states.ts";
+import { everListed, listingState, toneClass, versionState } from "../../../lib/store/states.ts";
 import type { DeployKey, VersionInfo } from "../../../lib/store/types.ts";
 import { pluginUrl } from "../../../lib/store/urls.ts";
 import { store } from "../../../lib/store/words.ts";
@@ -52,7 +52,7 @@ const endsIn = (k: DeployKey) => {
 /** A key can be made once the plugin has a version (its first is sent from a computer). */
 const sent = plugin?.versions.some((v) => v.status === "approved" || v.status === "yanked" || v.status === "pending") ?? false;
 const idle = plugin && !plugin.versions.some((v) => v.status === "approved" || v.status === "yanked" || v.status === "pending");
-const listing = plugin ? listingState(plugin.listing) : null;
+const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions)) : null;
 ---
 
 <App title={`${plugin?.name ?? id} · Your plugins · Zeron`} description="One of your plugins." noindex current="mine" session={session}>

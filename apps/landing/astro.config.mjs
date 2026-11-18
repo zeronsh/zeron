@@ -27,6 +27,7 @@ const devPages = {
       injectRoute({ pattern: "/_dev/sheet", entrypoint: "./src/dev/sheet.astro", prerender: false });
       injectRoute({ pattern: "/_dev/shell", entrypoint: "./src/dev/shell.astro", prerender: false });
       injectRoute({ pattern: "/_dev/queue", entrypoint: "./src/dev/queue.ts", prerender: false });
+      injectRoute({ pattern: "/_dev/edge", entrypoint: "./src/dev/edge.ts", prerender: false });
     },
   },
 };

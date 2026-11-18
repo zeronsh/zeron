@@ -4,10 +4,10 @@
 // for everyone (and cached), so the thanks are said here.
 import { reportReasonWords, store } from "../../../lib/store/words.ts";
 import PluginTile from "../../../components/store/PluginTile.astro";
-import Action from "../../../components/ui/Action.astro";
-import Field from "../../../components/ui/Field.astro";
 import Glyph from "../../../components/ui/Glyph.astro";
-import Store from "../../../layouts/Store.astro";
+import Toast from "../../../components/kit/Toast.astro";
+import App from "../../../layouts/App.astro";
+import { unbidi } from "../../../lib/store/format.ts";
 import { done, field, flashFor, formOf, tokenMatches } from "../../../lib/store/forms.ts";
 import { takeFlash } from "../../../lib/store/flash.ts";
 import { privatePage } from "../../../lib/store/http.ts";
@@ -56,77 +56,52 @@ const ABOUT: Record<(typeof REPORT_REASONS)[number], string> = {
 };
 ---
 
-<Store title={`Report ${plugin?.name ?? id} · Zeron`} description="Report a plugin." noindex toast={sent ? null : flash}>
-  <div class="wrap report">
-    <a class="back" href={pluginUrl(id)}><Glyph name="alt-arrow-left" size={12} />{plugin?.name ?? "Back"}</a>
-    {
-      sent ? (
-        <section class="card-like done" aria-labelledby="sent-heading">
-          <Glyph name="check-circle" size={20} />
-          <h1 id="sent-heading">Thanks for telling us</h1>
+<App title={`Report ${plugin?.name ?? id} · Zeron`} description="Report a plugin." noindex current={null} session={session}>
+  <nav slot="title" class="crumbs" aria-label="Where this is">
+    <a href="/plugins/all">All plugins</a><Glyph name="alt-arrow-right" size={12} /><a href={pluginUrl(id)}>{unbidi(plugin?.name ?? id)}</a><Glyph name="alt-arrow-right" size={12} /><span aria-current="page">Report</span>
+  </nav>
+  {
+    sent ? (
+      <div class="dialog confirm-card report-card" role="status">
+        <div class="head">
+          <span class="tile s40 done-tile"><Glyph name="check-circle" size={20} /></span>
+          <h1 class="t-heading">Thanks for telling us</h1>
           <p>Your report reached the people who review plugins. If it needs to go, it goes from the store and from people's devices.</p>
-          <a class="back-to" href={pluginUrl(id)}>Back to {plugin?.name ?? "the plugin"}</a>
-        </section>
-      ) : (
-        <section class="card-like" aria-labelledby="report-heading">
-          <header class="who">
-            {plugin && <PluginTile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size={40} />}
-            <div>
-              <h1 id="report-heading">Report <span>{plugin?.name ?? id}</span></h1>
-              {plugin && <p class="by">by @{plugin.author.username}</p>}
-            </div>
-          </header>
-          <form method="post" action={here} class="form">
-            <input type="hidden" name="csrf" value={session.csrf} />
-            <fieldset>
-              <legend>{store("plugins.store.report.reason_label")}</legend>
-              {REPORT_REASONS.map((r, i) => (
-                <label class="choice">
-                  <input type="radio" name="reason" value={r} required checked={resumed(Astro.url, "reason") ? resumed(Astro.url, "reason") === r : i === 0} />
-                  <span>
-                    <b>{reportReasonWords(r)}</b>
-                    <span class="about">{ABOUT[r]}</span>
-                  </span>
-                </label>
-              ))}
-            </fieldset>
-            <Field name="text" label={store("plugins.store.report.text_label")} multiline maxlength={2000} value={resumed(Astro.url, "text")} hint="What you saw, and where. The reviewers read it as you write it; the author doesn't see who sent it." />
-            <div class="answers">
-              <a class="cancel" href={pluginUrl(id)}>Cancel</a>
-              <Action tone="danger">{store("plugins.store.report.send")}</Action>
-            </div>
-          </form>
-        </section>
-      )
-    }
-  </div>
-</Store>
-
-<style>
-  .report { display: grid; gap: 24px; max-width: calc(560px + 2 * var(--gutter)); }
-  .back { display: inline-flex; align-items: center; gap: 6px; justify-self: start; height: 28px; font-size: 14px; font-weight: 500; color: var(--text-3); transition: color 0.12s; overflow-wrap: anywhere; }
-  .back:hover { color: var(--text); }
-  .card-like { display: grid; gap: 20px; padding: 24px; background: linear-gradient(180deg, #111113 0%, #0b0b0d 100%); border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
-  .who { display: flex; align-items: center; gap: 12px; }
-  .who h1 { font-size: 20px; letter-spacing: -0.015em; overflow-wrap: anywhere; }
-  .by { font-size: 13px; color: var(--text-3); }
-  .form { display: grid; gap: 20px; }
-  fieldset { display: grid; gap: 4px; border: 0; }
-  legend { margin-bottom: 8px; font-size: 13px; font-weight: 500; color: var(--text); }
-  .choice { display: flex; gap: 12px; align-items: flex-start; margin: 0 -10px; padding: 10px; border-radius: var(--radius-lg); cursor: pointer; transition: background-color 0.12s; }
-  .choice:hover { background: var(--hover); }
-  .choice:has(input:checked) { background: var(--selected); }
-  .choice:has(input:focus-visible) { outline: 2px solid color-mix(in srgb, var(--accent) 80%, white); outline-offset: -2px; }
-  .choice input { margin-top: 3px; accent-color: var(--accent); }
-  .choice b { display: block; font-size: 14px; font-weight: 500; }
-  .about { font-size: 13px; color: var(--text-3); }
-  .answers { display: flex; justify-content: flex-end; gap: 8px; }
-  .cancel { display: inline-flex; align-items: center; height: 32px; padding: 0 12px; font-size: 14px; font-weight: 500; color: var(--text); background: var(--secondary-bg); border-radius: var(--radius-lg); transition: background-color 0.12s; }
-  .cancel:hover { background: var(--secondary-hover); }
-  .done { justify-items: start; gap: 10px; }
-  .done > :global(.glyph) { color: var(--tone-success); }
-  .done h1 { font-size: 22px; letter-spacing: -0.015em; }
-  .done p { color: var(--text-2); }
-  .back-to { margin-top: 6px; display: inline-flex; align-items: center; height: 32px; padding: 0 12px; font-size: 14px; font-weight: 500; color: var(--text); background: var(--secondary-bg); border-radius: var(--radius-lg); }
-  .back-to:hover { background: var(--secondary-hover); }
-</style>
+        </div>
+        <div class="answers"><a class="btn secondary" href={pluginUrl(id)}>Back to {unbidi(plugin?.name ?? "the plugin")}</a></div>
+      </div>
+    ) : (
+      <form method="post" action={here} class="dialog confirm-card report-card">
+        <input type="hidden" name="csrf" value={session.csrf} />
+        <div class="head report-who">
+          {plugin && <PluginTile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size={40} />}
+          <div>
+            <h1 class="t-heading">{store("plugins.store.report.title", { name: unbidi(plugin?.name ?? id) })}</h1>
+            {plugin && <p>by {plugin.author.username ? `@${plugin.author.username}` : "an author without a username"}</p>}
+          </div>
+        </div>
+        <div class="body">
+          <fieldset class="choices">
+            <legend class="field-label">{store("plugins.store.report.reason_label")}</legend>
+            {REPORT_REASONS.map((r) => (
+              <label class="choice">
+                <input type="radio" name="reason" value={r} required checked={resumed(Astro.url, "reason") === r} />
+                <span class="choice-words"><span class="choice-title">{reportReasonWords(r)}</span><span class="choice-about">{ABOUT[r]}</span></span>
+              </label>
+            ))}
+          </fieldset>
+          <div>
+            <label class="field-label" for="report-text">{store("plugins.store.report.text_label")}</label>
+            <div class="field area"><textarea id="report-text" name="text" maxlength="2000" rows="4">{resumed(Astro.url, "text")}</textarea></div>
+            <p class="field-hint">What you saw, and where. The reviewers read it as you write it; the author doesn't see who sent it.</p>
+          </div>
+        </div>
+        <div class="answers">
+          <a class="btn secondary" href={pluginUrl(id)}>Cancel</a>
+          <button class="btn danger" type="submit">{store("plugins.store.report.send")}</button>
+        </div>
+      </form>
+    )
+  }
+  <Toast toast={sent ? null : flash} />
+</App>

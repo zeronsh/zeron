@@ -9,7 +9,7 @@ import { takeFlash } from "../../lib/store/flash.ts";
 import { count, day } from "../../lib/store/format.ts";
 import { privatePage } from "../../lib/store/http.ts";
 import { requireSession } from "../../lib/store/session.ts";
-import { listingState, toneClass, versionState } from "../../lib/store/states.ts";
+import { everListed, listingState, toneClass, versionState } from "../../lib/store/states.ts";
 
 export const prerender = false;
 
@@ -65,7 +65,7 @@ const plugins = result.ok ? result.data.plugins : [];
               {plugins.map((p) => {
                 const newest = p.versions[0];
                 const state = newest ? versionState(newest) : null;
-                const listing = listingState(p.listing);
+                const listing = listingState(p.listing, everListed(p.versions));
                 // (Steady is quiet: listed, its newest approved. A badge only where a row needs a look.)
                 const listedSteady = p.listing === "listed";
                 const newestSteady = listedSteady && newest?.status === "approved";

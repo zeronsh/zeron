@@ -8,7 +8,7 @@ import Decline from "../../../../../components/kit/Decline.astro";
 import TakeDown from "../../../../../components/kit/TakeDown.astro";
 import Glyph from "../../../../../components/ui/Glyph.astro";
 import App from "../../../../../layouts/App.astro";
-import { isVersionAction, VERSION_FLASH, versionAsk, versionRequest } from "../../../../../lib/store/admin.ts";
+import { isVersionAction, toWeigh, VERSION_FLASH, versionAsk, versionRequest } from "../../../../../lib/store/admin.ts";
 import { unbidi } from "../../../../../lib/store/format.ts";
 import { done, field, flashFor, formOf, fromElsewhere, tokenMatches } from "../../../../../lib/store/forms.ts";
 import { privatePage, purge } from "../../../../../lib/store/http.ts";
@@ -53,6 +53,7 @@ const facts = s
     ]
   : [];
 const ask = versionAsk(action, name, version);
+const weigh = s && action === "approve" ? toWeigh(s) : null;
 ---
 
 <App title={`${ask.title} · Zeron`} description={ask.title} noindex current="queue" session={session}>
@@ -64,6 +65,7 @@ const ask = versionAsk(action, name, version);
       (s || wasCut(Astro.url)) && (
         <div class="body">
           {s && <Deciding id={id} name={name} icon={s.version.icon ?? s.plugin.icon} version={version} facts={facts} read={submission} fromElsewhere={fromElsewhere(Astro.request)} />}
+          {weigh && <p class:list={["weigh-line", weigh.tone]}>{weigh.text}</p>}
           {wasCut(Astro.url) && <p class="cut">You signed in again. What you wrote was longer than could be kept through that, so its end is missing: check it before you send it.</p>}
         </div>
       )

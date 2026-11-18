@@ -3,6 +3,9 @@
 // ones ask first.
 import type { Ask } from "./actions.ts";
 import type { FlashWord } from "./flash.ts";
+import { count } from "./format.ts";
+import { compared } from "./permissions.ts";
+import type { Submission } from "./types.ts";
 
 /** Why a version isn't approved: the words the author reads beside the reviewer's own. */
 export const REJECT_REASONS = [
@@ -31,7 +34,7 @@ export function versionAsk(action: VersionAction, name: string, version: string)
   const flash = VERSION_FLASH[action];
   switch (action) {
     case "approve":
-      return { title: `Approve ${name} ${version}?`, words: ["It's listed at once, and offered to everyone who has it at their next update check."], confirm: "Approve", tone: "primary", flash };
+      return { title: `Approve ${name} ${version}?`, words: ["Anyone can install it once approved."], confirm: "Approve", tone: "primary", flash };
     case "reject":
       return { title: `Don't approve ${name} ${version}?`, words: ["Its author reads your reason and your words, in Zeron and on the web, and can send a new version."], confirm: "Don't approve", tone: "danger", flash };
     case "remove":
@@ -106,3 +109,27 @@ export function pluginRequest(id: string, action: PluginAction, form: { get(name
     }
   }
 }
+
+/**
+ * What there is to weigh before approving, said on one line ("2 new asks ·
+ * 1 check to look at"), in the danger's ink when a check failed or what
+ * moved reaches far, else the warning's; null when there is nothing.
+ * Against the last approved version for an update; for a first version,
+ * its far-reaching asks.
+ */
+export function toWeigh(s: Pick<Submission, "permissions" | "permissions_diff" | "base" | "checks">): { text: string; tone: "warn" | "bad" } | null {
+  const { lines } = compared(s.permissions, s.base ? s.permissions_diff : null);
+  const fresh = lines.filter((l) => l.change === "new");
+  const changed = lines.filter((l) => l.change === "changed");
+  const far = s.base ? [...fresh, ...changed].filter((l) => l.risky) : lines.filter((l) => l.risky);
+  const failed = s.checks.filter((c) => c.level === "fail").length;
+  const warned = s.checks.filter((c) => c.level === "warn").length;
+  const say = (n: number, one: string, many: string) => (n ? [`${count(n)} ${n === 1 ? one : many}`] : []);
+  const parts = [
+    ...(s.base ? [...say(fresh.length, "new ask", "new asks"), ...say(changed.length, "ask changed", "asks changed")] : say(far.length, "ask that reaches far", "asks that reach far")),
+    ...say(failed, "check failed", "checks failed"),
+    ...say(warned, "check to look at", "checks to look at"),
+  ];
+  return parts.length ? { text: parts.join(" · "), tone: failed || far.length ? "bad" : "warn" } : null;
+}
+

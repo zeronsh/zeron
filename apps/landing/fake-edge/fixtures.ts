@@ -422,7 +422,7 @@ const SPECS: Spec[] = [
     },
     history: [
       { version: "1.0.0", status: "approved", ago: 3, notes: `<script>alert('notes')</script> and [a link](javascript:alert('notes'))` },
-      { version: "1.1.0", status: "pending", ago: 1, notes: `</code></pre><script>alert('diff')</script><img src=x onerror=alert('diff')>` },
+      { version: "1.1.0", status: "pending", ago: 1, notes: `</code></pre><script>alert('diff')</script><img src=x onerror=alert('diff')>`, network: ["*", "localhost:9090"] },
     ],
     ui: { replace: ["@app/screens/chat/composer"] },
     network: ["*", "localhost:8080"],
@@ -588,7 +588,7 @@ SPECS.push(
   { id: "first-light", name: "First light", summary: "Opens your morning chats as you left them.", icon: null, categories: ["productivity"], keywords: ["morning"], permissions: ["ui.add"], owner: "user_ada", installs: 0, age: 2, screenshots: 0, history: [{ version: "0.1.0", status: "pending", ago: 2 }] },
   { id: "rough-draft", name: "Rough draft", summary: "Drafts a reply in the composer from the chat so far.", icon: null, categories: ["chat"], keywords: ["draft"], permissions: ["ui.add", "messages.read"], owner: "user_ada", installs: 0, age: 9, screenshots: 0, history: [{ version: "0.1.0", status: "rejected", ago: 9, review: { state: "rejected", reason: "listing", message: "The README is one line. Say what it drafts from, where the draft appears, and add a picture of it.", decided_at: NOW - 8 * DAY } }] },
   { id: "clipboard-sync", name: "Clipboard sync", summary: "Keeps the clipboard the same on all your devices.", icon: null, categories: ["utilities"], keywords: ["clipboard"], permissions: ["ui.add", "clipboard", "network"], network: ["sync.clipboard-sync.example.com"], owner: "user_ada", installs: 310, age: 40, screenshots: 0, history: [{ version: "1.0.0", status: "removed", ago: 40, review: { state: "removed", reason: "unsafe", message: "It sent every copied password to its sync host in plain text.", decided_at: NOW - 12 * DAY } }] },
-  { id: "old-sketch", name: "Old sketch", summary: "A first try at a sidebar of pinned chats.", icon: null, categories: ["productivity"], keywords: ["pins"], permissions: ["ui.add"], owner: "user_ada", installs: 0, age: 20, screenshots: 0, history: [{ version: "0.2.0", status: "withdrawn", ago: 20 }] },
+  { id: "old-sketch", name: "Old sketch", summary: "A first try at a sidebar of pinned chats.", icon: null, categories: ["productivity"], keywords: ["pins"], permissions: ["ui.add"], owner: "user_ada", installs: 0, age: 30, screenshots: 0, history: [{ version: "0.1.0", status: "yanked", ago: 30 }, { version: "0.2.0", status: "withdrawn", ago: 20 }] },
 );
 
 export function plugins(): FakePlugin[] {

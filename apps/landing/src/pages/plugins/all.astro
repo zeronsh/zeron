@@ -3,7 +3,7 @@
 // at a time, as a dense list whose columns line up. Public and the same for
 // everyone (no cookie read), so the Worker cache keeps each address for
 // half a minute and serves it stale for another while it asks again.
-import PluginTile from "../../components/store/PluginTile.astro";
+import PluginRows, { type Measure } from "../../components/kit/PluginRows.astro";
 import Glyph from "../../components/ui/Glyph.astro";
 import App from "../../layouts/App.astro";
 import { canonicalSearch, catalogHref, effectiveSort, PAGE_SIZE, pageHref, range, readCatalog } from "../../lib/store/catalog.ts";
@@ -11,7 +11,6 @@ import { count, day } from "../../lib/store/format.ts";
 import { CATALOG_TAG, publicPage } from "../../lib/store/http.ts";
 import { CATEGORIES } from "../../lib/store/nav.ts";
 import type { PluginCard, Sort } from "../../lib/store/types.ts";
-import { pluginUrl } from "../../lib/store/urls.ts";
 import { store } from "../../lib/store/words.ts";
 
 export const prerender = false;
@@ -33,9 +32,9 @@ if (!page.ok && page.error === "bad_cursor") return Astro.redirect(catalogHref({
 if (page.ok) publicPage(Astro, [CATALOG_TAG]);
 else Astro.response.status = page.error === "bad_request" ? 400 : 503;
 
-// Categories by the app's names (the fixed list), else the edge's. A row
-// shows the one its plugin is filed under first.
-const categoryName = (id: string) => CATEGORIES.find((c) => c.id === id)?.label ?? categories.find((c) => c.id === id)?.name ?? id;
+// Categories by the app's names (the fixed list), else the edge's.
+const names = new Map(categories.map((c) => [c.id, c.name]));
+const categoryName = (id: string) => CATEGORIES.find((c) => c.id === id)?.label ?? names.get(id) ?? id;
 const items = page.ok ? page.data.items : [];
 const next = page.ok ? pageHref(state, page.data.next_cursor) : null;
 const previous = page.ok ? (page.data.prev_cursor ? pageHref(state, page.data.prev_cursor, -1) : state.cursor ? catalogHref({ ...state, cursor: null, page: null }) : null) : null;
@@ -52,7 +51,7 @@ const shown = page.ok ? range(state, items.length) : null;
  * always carries that day; a dash, were one ever to come without it.)
  */
 const published = (p: PluginCard) => (p.listed_at === null ? "—" : day(p.listed_at));
-const measure: { head: string; cell: (p: PluginCard) => string; folded: (p: PluginCard) => string } =
+const measure: Measure =
   sort === "updated"
     ? { head: "Updated", cell: (p) => day(p.updated_at), folded: (p) => `Updated ${day(p.updated_at)}` }
     : sort === "new"
@@ -112,42 +111,7 @@ const here = `${Astro.url.pathname}${Astro.url.search}`;
     ) : (
       <>
         <div class="panel" data-list>
-          <table class="table comfortable plugins">
-            <caption class="sr-only">{heading}</caption>
-            <colgroup><col /><col class="by" /><col class="category" /><col class="installs" /></colgroup>
-            <thead>
-              <tr><th scope="col">Plugin</th><th scope="col">By</th><th scope="col">{store("plugins.store.fact.category")}</th><th scope="col" class="end">{measure.head}</th></tr>
-            </thead>
-            <tbody class="rows">
-              {items.map((p) => (
-                <tr>
-                  <td>
-                    <span class="cell-main">
-                      <PluginTile id={p.id} name={p.name} icon={p.icon} version={p.version} size={32} class="plugin-tile" />
-                      <span class="cell-words">
-                        <a class="name name-link" href={pluginUrl(p.id)}>{p.name}</a>
-                        <span class="line">{p.summary}</span>
-                        <span class="meta">{p.author.username ? `@${p.author.username}` : "Unnamed author"} · {measure.folded(p)}</span>
-                      </span>
-                    </span>
-                  </td>
-                  <td class="by">{p.author.username ? `@${p.author.username}` : "—"}</td>
-                  <td class="category">{p.categories[0] ? categoryName(p.categories[0]) : "—"}</td>
-                  <td class="installs end">{measure.cell(p)}</td>
-                </tr>
-              ))}
-            </tbody>
-            <tbody class="skeleton-rows" aria-hidden="true">
-              {items.map(() => (
-                <tr>
-                  <td><span class="cell-main"><span class="skeleton sk-tile" /><span class="sk-words"><span class="skeleton sk-name" /><span class="skeleton sk-line" /></span></span></td>
-                  <td class="by"><span class="skeleton sk-short" /></td>
-                  <td class="category"><span class="skeleton sk-short" /></td>
-                  <td class="installs end"><span class="skeleton sk-num" /></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <PluginRows items={items} caption={heading} measure={measure} names={names} skeleton />
         </div>
         {(previous || next) && (
           <nav class="pager" aria-label="Pages">

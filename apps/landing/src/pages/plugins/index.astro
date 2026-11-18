@@ -1,215 +1,120 @@
 ---
-// The store: every listed plugin, searched, filtered and sorted, a page at
-// a time. Public and the same for everyone (no cookie is read), so the
-// Worker cache keeps each address for half a minute and serves it stale
-// for another while it asks again: at most a minute old.
-import CategoryNav from "../../components/store/CategoryNav.astro";
-import FeaturedCard from "../../components/store/FeaturedCard.astro";
-import PluginCard from "../../components/store/PluginCard.astro";
-import Action from "../../components/ui/Action.astro";
+// Discover, the store's front: what a first-time visitor sees. What the
+// store's reviewers feature, each with its first picture; then the newest
+// and the most installed, each a short list on the table system with the
+// way to all of them. Public and the same for everyone (no cookie read):
+// the Worker cache keeps it as it keeps All plugins.
+import PluginRows, { type Measure } from "../../components/kit/PluginRows.astro";
+import PluginTile from "../../components/store/PluginTile.astro";
 import Glyph from "../../components/ui/Glyph.astro";
-import Pagination from "../../components/ui/Pagination.astro";
-import SearchField from "../../components/ui/SearchField.astro";
-import Select from "../../components/ui/Select.astro";
-import Store from "../../layouts/Store.astro";
-import { canonicalSearch, catalogHref, effectiveSort, isFront, PAGE_SIZE, pageHref, readCatalog, SORT_LABELS } from "../../lib/store/catalog.ts";
+import App from "../../layouts/App.astro";
+import { catalogHref } from "../../lib/store/catalog.ts";
+import { count, day } from "../../lib/store/format.ts";
 import { CATALOG_TAG, publicPage } from "../../lib/store/http.ts";
-import type { PluginCard as Card, Sort } from "../../lib/store/types.ts";
+import type { PluginCard } from "../../lib/store/types.ts";
+import { pictureUrl, pluginUrl } from "../../lib/store/urls.ts";
+import { store } from "../../lib/store/words.ts";
 
 export const prerender = false;
 
 // A search, a category or a sort is All plugins' (/plugins/all); /plugins is the store's front.
 if (Astro.url.search) return Astro.redirect(`/plugins/all${Astro.url.search}`, 301);
 
+/** How many each short list shows, and how many featured. */
+const SHORT = 6;
+const FEATURED = 3;
 const edge = Astro.locals.edge;
-const categoriesResult = await edge.categories();
-const categories = categoriesResult.ok ? categoriesResult.data.categories : [];
-const state = readCatalog(Astro.url.searchParams, categoriesResult.ok ? categories : null);
-
-// An address that says more than it means is sent to the one that says it plainly.
-const canonical = canonicalSearch(Astro.url.searchParams, state);
-if (canonical && categoriesResult.ok) return Astro.redirect(canonical, 301);
-
-const sort = effectiveSort(state);
-const front = isFront(state);
-const [page, featured] = await Promise.all([
-  edge.catalog({ q: state.q || undefined, category: state.category ?? undefined, keyword: state.keyword ?? undefined, sort, cursor: state.cursor ?? undefined, limit: PAGE_SIZE }),
-  front ? edge.catalog({ featured: true, sort: "popular", limit: 3 }) : null,
+// (Each asked at the edge's own page size, no `limit`: those first pages are
+// the ones the edge purges on a change, so a takedown leaves this page at
+// once, as it leaves All plugins'. The page shows the first few.)
+const [featured, newest, popular, categoriesResult] = await Promise.all([
+  edge.catalog({ featured: true, sort: "popular" }),
+  edge.catalog({ sort: "new" }),
+  edge.catalog({ sort: "popular" }),
+  edge.categories(),
 ]);
+const names = new Map((categoriesResult.ok ? categoriesResult.data.categories : []).map((c) => [c.id, c.name]));
 
-// The featured row's pictures: each one's first screenshot.
-const featuredItems: { plugin: Card; screenshot: string | null }[] = [];
-if (featured?.ok) {
-  const details = await Promise.all(featured.data.items.map((p) => edge.plugin(p.id)));
-  for (const [i, plugin] of featured.data.items.entries()) {
+// Each featured plugin's first picture, from its page's record.
+const featuredItems: { plugin: PluginCard; picture: string | null }[] = [];
+if (featured.ok) {
+  const items = featured.data.items.slice(0, FEATURED);
+  const details = await Promise.all(items.map((p) => edge.plugin(p.id)));
+  for (const [i, plugin] of items.entries()) {
     const detail = details[i];
-    featuredItems.push({ plugin, screenshot: detail?.ok ? (detail.data.screenshots[0] ?? null) : null });
+    const first = detail?.ok ? (detail.data.screenshots[0] ?? null) : null;
+    featuredItems.push({ plugin, picture: first ? pictureUrl(plugin.id, plugin.version, first) : null });
   }
 }
 
-const names = new Map(categories.map((c) => [c.id, c.name]));
-const categoryName = state.category ? names.get(state.category) : null;
+const ok = newest.ok && popular.ok;
+if (ok) publicPage(Astro, [CATALOG_TAG]);
+else Astro.response.status = 503;
+const empty = ok && newest.data.total === 0;
 
-// A cursor from another search, or an old one: this search's first page.
-if (!page.ok && page.error === "bad_cursor") return Astro.redirect(catalogHref({ ...state, cursor: null }), 303);
-if (page.ok) publicPage(Astro, [CATALOG_TAG]);
-else Astro.response.status = page.error === "bad_request" ? 400 : 503;
-
-const sortOptions = (["relevance", "popular", "updated", "new"] as Sort[])
-  .filter((s) => s !== "relevance" || state.q)
-  .map((s) => ({ value: s, label: SORT_LABELS[s] }));
-
-const heading = state.q ? `Results for “${state.q}”` : categoryName ?? (state.keyword ? `Tagged “${state.keyword}”` : "All plugins");
-const title = state.q ? `“${state.q}” · Plugins · Zeron` : categoryName ? `${categoryName} plugins · Zeron` : "Plugins · Zeron";
-const description = categoryName
-  ? `Plugins for Zeron in ${categoryName}: reviewed before they're listed, installed in a click.`
-  : "Plugins for Zeron: panels, commands, tools for your agents and more. Each one is reviewed before it's listed.";
-// Search results and later pages stay out of search engines; the store and its categories don't.
-const noindex = Boolean(state.q || state.cursor || state.keyword);
+const published: Measure = { head: "Published", cell: (p) => (p.listed_at === null ? "—" : day(p.listed_at)), folded: (p) => `Published ${p.listed_at === null ? "—" : day(p.listed_at)}` };
+const installs: Measure = { head: "Installs", cell: (p) => count(p.installs), folded: (p) => `${count(p.installs)} ${p.installs === 1 ? "install" : "installs"}` };
 ---
 
-<Store title={title} description={description} noindex={noindex} canonical={catalogHref({ category: state.category })}>
-  <div class="wrap catalog">
-    <header class="intro">
-      <div>
-        <h1>Plugins</h1>
-        <p class="lead">Panels, commands, tools for your agents and more. Every plugin is reviewed before it's listed here.</p>
-      </div>
-      <a class="mine" href="/account">Your plugins<Glyph name="alt-arrow-right" size={12} /></a>
-    </header>
+<App title="Plugins · Zeron" description="Plugins for Zeron: panels, commands, tools for your agents and more. Each one is reviewed before it's listed." canonical="/plugins" current="discover">
+  <h1 slot="title" class="t-title">Discover</h1>
 
-    <form class="controls" action="/plugins" method="get" role="search" data-tidy>
-      <SearchField name="q" value={state.q} label="Search plugins" placeholder="Search plugins" />
-      {state.category && <input type="hidden" name="category" value={state.category} />}
-      {state.keyword && <input type="hidden" name="keyword" value={state.keyword} />}
-      <div class="sort">
-        <Select name="sort" label="Sort by" options={sortOptions} value={sort} autosubmit />
-        <Action class="js-hidden" tone="secondary">Search</Action>
-      </div>
-    </form>
-
-    <CategoryNav state={state} categories={categories} look="row" />
-
-    {
-      front && featuredItems.length > 0 && (
-        <section class="featured" aria-labelledby="featured-heading">
-          <h2 id="featured-heading" class="section-title">Featured</h2>
-          <div class="featured-grid">
-            {featuredItems.map((f) => <FeaturedCard plugin={f.plugin} screenshot={f.screenshot} />)}
-          </div>
-        </section>
-      )
-    }
-
-    <div class="layout">
-      <CategoryNav state={state} categories={categories} look="rail" />
-
-      <section class="results" aria-labelledby="results-heading">
-        <div class="results-head">
-          <h2 id="results-heading" class="section-title">{heading}</h2>
-          {
-            state.keyword && (
-              <a class="chip" href={catalogHref({ ...state, keyword: null, cursor: null })} aria-label={`Remove the tag “${state.keyword}”`}>
-                <span>Tag: {state.keyword}</span>
-                <Glyph name="close" size={12} />
-              </a>
-            )
-          }
+  {
+    !ok ? (
+      <div class="panel">
+        <div class="empty" role="status">
+          <span class="tile"><Glyph name="wifi-off" size={20} /></span>
+          <div class="words"><h2 class="t-heading">{store("plugins.store.failed_title")}</h2><p>{store("plugins.store.failed_body")}</p></div>
+          <div class="actions"><a class="btn secondary sm" href="/plugins">{store("plugins.store.try_again")}</a></div>
         </div>
+      </div>
+    ) : empty ? (
+      <div class="panel">
+        <div class="empty">
+          <span class="tile"><Glyph name="widget" size={20} /></span>
+          <div class="words"><h2 class="t-heading">{store("plugins.store.empty_title")}</h2><p>{store("plugins.store.empty_body")}</p></div>
+          <div class="actions"><a class="btn secondary sm" href="/plugins/publishing">Publishing guide</a></div>
+        </div>
+      </div>
+    ) : (
+      <div class="discover">
+        {featuredItems.length > 0 && (
+          <section class="section" aria-labelledby="featured-heading">
+            <div class="section-head"><div class="words"><h2 id="featured-heading">{store("plugins.store.featured")}</h2><p>Chosen by the store's reviewers.</p></div></div>
+            <ul class="featured-row" role="list">
+              {featuredItems.map(({ plugin, picture }) => (
+                <li class="panel feature">
+                  {picture ? <img class="feature-picture" src={picture} alt="" width="1280" height="800" loading="lazy" decoding="async" /> : <span class="feature-picture none" aria-hidden="true" />}
+                  <div class="feature-words">
+                    <PluginTile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size={32} class="plugin-tile" />
+                    <div class="cell-words">
+                      <a class="name feature-link" href={pluginUrl(plugin.id)}>{plugin.name}</a>
+                      <span class="by">{plugin.author.username ? `@${plugin.author.username}` : "Unnamed author"} · {count(plugin.installs)} {plugin.installs === 1 ? "install" : "installs"}</span>
+                    </div>
+                  </div>
+                  <p class="feature-summary">{plugin.summary}</p>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
 
-        {
-          !page.ok ? (
-            <div class="state">
-              <Glyph name="danger-triangle" size={20} />
-              <h3>The store can't be reached right now</h3>
-              <p>Try again in a minute.</p>
-              <a class="again" href={Astro.url.pathname + Astro.url.search}>Try again</a>
-            </div>
-          ) : page.data.items.length === 0 ? (
-            <div class="state">
-              <Glyph name="magnifer" size={20} />
-              <h3>{state.q ? `No plugins match “${state.q}”` : "No plugins here yet"}</h3>
-              <p>{state.q || state.category || state.keyword ? "Try other words, or look through all of them." : "Check back soon."}</p>
-              {(state.q || state.category || state.keyword) && <a class="again" href="/plugins">See every plugin</a>}
-            </div>
-          ) : (
-            <>
-              <ul class="grid" role="list">
-                {page.data.items.map((plugin) => (
-                  <li>
-                    <PluginCard plugin={plugin} categories={names} />
-                  </li>
-                ))}
-              </ul>
-              <Pagination label="More plugins" previous={pageHref(state, page.data.prev_cursor)} next={pageHref(state, page.data.next_cursor)} />
-            </>
-          )
-        }
-      </section>
-    </div>
-  </div>
-</Store>
+        <section class="section" aria-labelledby="new-heading">
+          <div class="section-head">
+            <div class="words"><h2 id="new-heading">{store("plugins.store.sort.new")}</h2></div>
+            <a class="btn ghost sm" href={catalogHref({ sort: "new" })}>See all<Glyph name="alt-arrow-right" size={12} /></a>
+          </div>
+          <div class="panel"><PluginRows items={newest.data.items.slice(0, SHORT)} caption={store("plugins.store.sort.new")} measure={published} names={names} /></div>
+        </section>
 
-<style>
-  .catalog { display: grid; gap: 32px; }
-  /* "Your plugins" sits on the title's baseline, at the search row's right edge. */
-  .intro { display: flex; align-items: baseline; justify-content: space-between; gap: 16px 32px; flex-wrap: wrap; }
-  .intro .lead { max-width: 34em; margin-top: 12px; }
-  .mine { display: inline-flex; align-items: center; gap: 6px; height: 32px; font-size: 14px; font-weight: 500; color: var(--text-2); transition: color 0.12s; }
-  .mine:hover { color: var(--text); }
-
-  .controls { display: flex; gap: 12px; align-items: center; }
-  .controls :global(.search) { flex: 1; }
-  .sort { display: flex; gap: 8px; flex: none; }
-  .sort :global(select) { height: 44px; }
-
-  .section-title { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.4; }
-  .featured { display: grid; gap: 14px; }
-  .featured-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
-
-  .layout { display: grid; grid-template-columns: 196px minmax(0, 1fr); gap: 32px; align-items: start; }
-
-  .results { display: grid; gap: 16px; min-width: 0; }
-  .results-head { display: flex; align-items: center; gap: 12px; min-height: 34px; flex-wrap: wrap; }
-  .results-head .section-title { overflow-wrap: anywhere; }
-  .chip { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 8px 0 10px; font-size: 13px; color: var(--text); background: var(--secondary-bg); border-radius: 13px; transition: background-color 0.12s; }
-  .chip:hover { background: var(--secondary-hover); }
-  .chip span { max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
-  .grid > li { display: grid; }
-  .results :global(.pages) { margin-top: 20px; }
-
-  .state { display: grid; justify-items: center; gap: 6px; padding: 72px 24px; text-align: center; color: var(--text-3); border-radius: 16px; box-shadow: inset 0 0 0 1px var(--line); }
-  .state h3 { margin-top: 8px; font-size: 16px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
-  .state p { font-size: 14px; color: var(--text-2); }
-  .again { margin-top: 12px; display: inline-flex; align-items: center; height: 32px; padding: 0 12px; font-size: 14px; font-weight: 500; color: var(--text); background: var(--secondary-bg); border-radius: var(--radius-lg); transition: background-color 0.12s; }
-  .again:hover { background: var(--secondary-hover); }
-
-  @media (max-width: 1080px) {
-    .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    /* Narrower, the featured cards are a row to scroll, the next one peeking. */
-    .featured { container-type: inline-size; }
-    .featured-grid {
-      grid-template-columns: none;
-      grid-auto-flow: column;
-      grid-auto-columns: calc((100cqw - 16px) / 2.2);
-      margin-right: calc(-1 * var(--gutter));
-      padding: 0 var(--gutter) 4px 0;
-      overflow-x: auto;
-      scroll-snap-type: x mandatory;
-      scrollbar-width: none;
-    }
-    .featured-grid > :global(*) { scroll-snap-align: start; }
+        <section class="section" aria-labelledby="popular-heading">
+          <div class="section-head">
+            <div class="words"><h2 id="popular-heading">{store("plugins.store.sort.popular")}</h2></div>
+            <a class="btn ghost sm" href="/plugins/all">See all {count(popular.data.total)}<Glyph name="alt-arrow-right" size={12} /></a>
+          </div>
+          <div class="panel"><PluginRows items={popular.data.items.slice(0, SHORT)} caption={store("plugins.store.sort.popular")} measure={installs} names={names} /></div>
+        </section>
+      </div>
+    )
   }
-  @media (max-width: 800px) {
-    .layout { grid-template-columns: minmax(0, 1fr); gap: 20px; }
-    .featured-grid { grid-auto-columns: 84cqw; gap: 12px; }
-    .featured-grid { --featured-height: 0; --featured-visual: 120px; }
-  }
-  @media (max-width: 600px) {
-    .grid { grid-template-columns: minmax(0, 1fr); }
-    .controls { flex-wrap: wrap; }
-    .sort { width: 100%; }
-    .sort :global(.select), .sort :global(.box), .sort :global(select) { width: 100%; }
-  }
-</style>
+</App>
