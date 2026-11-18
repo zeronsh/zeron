@@ -461,6 +461,7 @@ describe("cookie-authenticated store routes", () => {
     expect(await (await fetchSite("/store/v1/public", { cookie: sessionHeader("A".repeat(43)) })).json()).toEqual({ user: null, credentials: true });
     expect(await (await fetchSite("/store/v1/public", { cookie: `theme=dark; ${browser.cookie}` })).json()).toMatchObject({ credentials: true });
     expect(await (await fetchSite("/store/v1/public", { cookie: "theme=dark; x__Host-zeron_session=1" })).json()).toEqual({ user: null, credentials: false });
+    expect(await (await fetchSite("/store/v1/public?token=x")).json()).toEqual({ user: null, credentials: true });
   });
 
   it("admit an admin's session only while the edge says admin", async () => {

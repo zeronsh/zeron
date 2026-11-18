@@ -31,12 +31,14 @@ export { withSessionCookie } from "../web-session";
 
 /**
  * Whether the request carries credentials of any kind: an `Authorization`
- * header, or the web session's cookie (live or not). The store's cache
- * neither reads nor stores for such a request, so nobody's answer is ever
- * served to anyone else. Decided from the request alone, with no lookup.
+ * header, a `?token=` (the device API's WebSocket form, never read here but
+ * never cached either), or the web session's cookie (live or not). The
+ * store's cache neither reads nor stores for such a request, so nobody's
+ * answer is ever served to anyone else. Decided from the request alone, with
+ * no lookup.
  */
 export const hasCredentials = (req: Request): boolean =>
-  req.headers.get("authorization") !== null || sendsCookie(req, SESSION_COOKIE);
+  req.headers.get("authorization") !== null || new URL(req.url).searchParams.has("token") || sendsCookie(req, SESSION_COOKIE);
 
 export type Publisher = {
   userId: string;
