@@ -10,6 +10,7 @@
 --   store.update_found      a newer Focus timer found, asking for more
 --   store.blocked           Zeron takes Focus timer 1.2.0 down
 --   store.allowed           Focus timer allowed, and on
+--   store.token_published   Branch badge's version sent from CI with a deploy token
 
 ui.theme.strict("warn")
 local ds = require("@ds")
@@ -299,6 +300,22 @@ ui.command {
 	run = function()
 		local p = find("focus-timer")
 		p.source = { kind = "store", id = "focus-timer", publisher = "ada", verified = false }
+		publish()
+	end,
+}
+-- Branch badge's installed version published from CI with its
+-- publisher's deploy token: not signed by the author's key, the store's
+-- record trusted, and the engine reports it as any store install, its
+-- publisher its author (nothing else to read).
+ui.command {
+	id = "store.token_published",
+	title = "Branch badge runs a version its publisher sent with a deploy token",
+	run = function()
+		local p = find("branch-badge")
+		p.version = "1.2.0"
+		p.hash = "branch-badge-1.2.0"
+		p.author = { kind = "verified", username = "grace" }
+		p.source = { kind = "store", id = "branch-badge", publisher = "grace", verified = false }
 		publish()
 	end,
 }

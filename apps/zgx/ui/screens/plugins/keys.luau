@@ -1,18 +1,18 @@
 --!strict
--- The account's deploy keys, at the end of Yours: what a CI job (a GitHub
--- Action) publishes new versions with instead of your session, each for
--- the plugins it was made for (its scope: all of yours, those you publish
--- later too, or the ones chosen), fixed when it's made. A section with New
--- key… at its title's end; each key a row: its name on a line of its own,
--- when it was last used (and on which plugin) and when it ends under it
--- (within 14 days of its end, how soon, the line in the warning's ink), its
--- scope under that, and at the row's end the key shortened (`M.short`, as
--- the store's site shows it) in the code face, a column down the rows, then
--- Revoke. Revoked keys aren't listed. A new one is made by the engine
--- (`CreateDeployKey`) after a fresh sign-in in the browser begun for it;
--- its secret is shown here once, to copy, and kept nowhere.
+-- The account's deploy tokens, at the end of Yours: what a CI job (a
+-- GitHub Action) publishes new versions with instead of your session, each
+-- for the plugins it was made for (its scope: all of yours, those you
+-- publish later too, or the ones chosen), fixed when it's made. A section
+-- with New token… at its title's end; each token a row: its name on a line
+-- of its own, when it was last used (and on which plugin) and when it ends
+-- under it (within 14 days of its end, how soon, the line in the warning's
+-- ink), its scope under that, and at the row's end its short id (the
+-- store's, as its site shows it) in the code face, a column down the rows,
+-- then Revoke. Revoked tokens aren't listed. A new one is made by the store
+-- after a fresh sign-in in the browser begun for it; the token is shown
+-- here once, to copy, and kept nowhere.
 --
--- A key never publishes a plugin's first version: that comes from a
+-- A token never publishes a plugin's first version: that comes from a
 -- signed-in device.
 --
 --   keys.Section { plugins }  (`plugins`: yours in the store, { id, name },
@@ -20,13 +20,22 @@
 
 local ds = require("@ds")
 local field = require("@ds/field")
-local Markdown = require("@ds/markdown")
 local locale = require("@ds/locale")
+local control = require("@ds/control")
+local PrivateText = require("@ds/private_text")
+local auth = require("@account/auth")
 local store = require("@app/screens/plugins/store")
 
 local M = {}
 
--- How long a new key lasts: never ending, or days.
+-- A new token, shown once, and whether its dialog is up: the app's, not
+-- the page's, so one made while Yours was left (another page, a link)
+-- still shows as Yours comes back. Kept nowhere else, and let go of as its
+-- dialog closes.
+local made = ui.state("plugins_deploy_token_made", nil :: string?)
+local made_open = ui.state("plugins_deploy_token_made_open", false)
+
+-- How long a new token lasts: never ending, or days.
 local EXPIRY: { { value: string, days: number? } } = {
 	{ value = "90", days = 90 },
 	{ value = "30", days = 30 },
@@ -38,33 +47,39 @@ local function day_of(at: any): string?
 	return if type(at) == "number" and at > 0 then locale.date(at / 1000) else nil
 end
 
--- How soon a key ends, in whole days from today (0: today), if it's within
+-- Whether a token has ended: the store lists one until it's revoked.
+local function has_ended(at: any): boolean
+	return type(at) == "number" and at > 0 and at <= os.time() * 1000
+end
+
+-- How soon a token ends, in whole days from today (0: today), if it's within
 -- `SOON` of it; nil otherwise. (The store's site says the same.)
 local SOON = 14
 local function ends_in(at: any): number?
 	if type(at) ~= "number" or at <= 0 then
 		return nil
 	end
-	local now = os.date("*t") :: any
-	local today = os.time({ year = now.year, month = now.month, day = now.day, hour = 0 })
+	-- (Today's start as the clock now less the time since local midnight:
+	-- zgx reads a date table as UTC while `os.date` says local time, so a
+	-- table would put today a time zone off.)
+	local t = os.date("*t") :: any
+	local today = os.time() - (t.hour * 3600 + t.min * 60 + t.sec)
 	local days = math.floor((at / 1000 - today) / 86400)
 	return if days <= SOON then math.max(0, days) else nil
 end
 
--- A key as it's shown everywhere it's shown short (the store's site too):
--- its first eight characters, "…", its last four; the whole in a tooltip.
-function M.short(key: string): string
-	if #key <= 14 then
-		return key
-	end
-	return `{string.sub(key, 1, 8)}…{string.sub(key, -4)}`
+-- A token as it's shown everywhere (the store's site too): its short id,
+-- the store's (the first eight characters after `zdt_`). The token itself
+-- is never listed.
+function M.short(token: any): string
+	return if type(token) == "table" and type(token.short) == "string" then token.short else ""
 end
 
 export type Owned = { id: string, name: string }
 
--- A key's scope in words: all of yours, or the plugins it names (by name
+-- A token's scope in words: all of yours, or the plugins it names (by name
 -- where they're yours; two by name, more by how many).
--- Which of yours a key publishes, by name ("A, B and 2 more"; `whole`:
+-- Which of yours a token publishes, by name ("A, B and 2 more"; `whole`:
 -- every one, "A, B, C and D"), or all of them.
 local function scope_names(scope: any, plugins: { Owned }): { string }
 	local names: { string } = {}
@@ -115,7 +130,7 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 	end
 	-- "loading", "ready", or why not.
 	local phase = ui.use_state("loading")
-	-- The keys whose every plugin is shown by name, in place.
+	-- The tokens whose every plugin is shown by name, in place.
 	local whole_scope = ui.use_state({} :: { [string]: boolean })
 	local list = ui.use_state({} :: { any })
 	local making = ui.use_state(false)
@@ -126,22 +141,27 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 	local chosen = ui.use_state({} :: { [string]: boolean })
 	-- Making one: "idle", "busy" (asked; perhaps signing in), or why not.
 	local made_phase = ui.use_state("idle")
-	local secret = ui.use_state(nil :: string?)
-	local secret_open = ui.use_state(false)
+	local secret = made
+	local secret_open = made_open
+	-- Copied: its Copy says so a moment; its line under the block, while
+	-- the dialog is up.
+	local copied = ui.use_state(false)
+	local copied_once = ui.use_state(false)
 	-- (Its secret held only while its dialog is up, however that closes.)
 	ui.effect(function()
 		if not secret_open:get() and secret:peek() ~= nil then
 			secret:set(nil)
+			copied_once:set(false)
 		end
 	end)
 	local revoking = ui.use_state(nil :: any)
 	local revoke_open = ui.use_state(false)
 
 	local function load()
-		store.keys():after(function(r: any)
+		store.tokens():after(function(r: any)
 			local out = {}
-			for _, k in (if type(r) == "table" and type(r.keys) == "table" then r.keys else {}) :: { any } do
-				if type(k) == "table" and type(k.key) == "string" and k.revoked_at == nil then
+			for _, k in (if type(r) == "table" and type(r.tokens) == "table" then r.tokens else {}) :: { any } do
+				if type(k) == "table" and type(k.id) == "string" and k.revoked_at == nil then
 					table.insert(out, k)
 				end
 			end
@@ -153,8 +173,23 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 		end)
 	end
 	ui.on_mount(load)
+	-- Another account signed in while Yours stays open: its own tokens, not
+	-- the last one's.
+	local account: string? = nil
+	local first = true
+	ui.effect(function()
+		local user: any = auth.user:get()
+		local id = if type(user) == "table" and type(user.id) == "string" then user.id else nil
+		if not first and id ~= account then
+			list:set({})
+			phase:set("loading")
+			load()
+		end
+		first = false
+		account = id
+	end)
 	-- Gone from the page (another page, a link): a sign-in still waited for
-	-- is given up, so no key is made whose secret nobody would see.
+	-- is given up, so no token is made that nobody would see.
 	ui.on_cleanup(function()
 		if made_phase:peek() == "busy" then
 			store.cancel_step_up()
@@ -188,16 +223,19 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 		made_phase:set("busy")
 		local expires = if days then (os.time() + days * 86400) * 1000 else nil
 		local scope: store.Scope = if scope_kind:peek() == "all" then { all = true } else { plugins = chosen_ids() }
-		store.create_key({ name = n, scope = scope, expires = expires }):after(function(r: any)
+		store.create_token({ name = n, scope = scope, expires = expires }):after(function(r: any)
+			-- (`secret`: the token, `zdt_…`, this once; `token`, its record.
+			-- Kept first, the app's: shown as Yours comes back if it was
+			-- left meanwhile.)
+			if type(r) == "table" and type(r.secret) == "string" and r.secret ~= "" then
+				secret:set(r.secret)
+				secret_open:set(true)
+			end
 			made_phase:set("idle")
 			making:set(false)
 			name:set("")
 			scope_kind:set("all")
 			chosen:set({})
-			if type(r) == "table" and type(r.secret) == "string" and r.secret ~= "" then
-				secret:set(r.secret)
-				secret_open:set(true)
-			end
 			load()
 		end, function(err: any)
 			local m = if type(err) == "table" then err.message else err
@@ -212,7 +250,7 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 		return ds.Settings.Row {
 			label = function(): string
 				local k = now:get()
-				return if type(k.name) == "string" and k.name ~= "" then k.name else M.short(k.key)
+				return if type(k.name) == "string" and k.name ~= "" then k.name else M.short(k)
 			end,
 			description = function(): string
 				local k = now:get()
@@ -231,7 +269,10 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 				-- About to end: how soon, after whether it's still in use (so
 				-- whether it must be replaced first).
 				local n = soon()
-				local ending = if n == nil
+				-- (Ended, and listed until it's revoked: when.)
+				local ending = if has_ended(k.expires_at) and ends
+					then ui.t("plugins.store.key.ended", { date = ends }):get()
+					elseif n == nil
 					then (if ends then ui.t("plugins.store.key.ends", { date = ends }):get() else ui.t("plugins.store.key.no_end"):get())
 					elseif n == 0 then ui.t("plugins.store.key.ends_today"):get()
 					elseif n == 1 then ui.t("plugins.store.key.ends_tomorrow"):get()
@@ -248,18 +289,18 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 			-- the first two and how many more, and every one in place with
 			-- the line's own link (a key's plugins are fixed once it's made).
 			detail = function(): string
-				return scope_words(now:get().scope, props.plugins(), whole_scope:get()[first.key] == true)
+				return scope_words(now:get().scope, props.plugins(), whole_scope:get()[first.id] == true)
 			end,
 			detail_link = if type(first.scope) == "table" and first.scope.all ~= true and type(first.scope.plugins) == "table" and #first.scope.plugins > 2
 				then {
 					-- (Acting in place: a button.)
 					role = "button",
 					label = function(): string
-						return if whole_scope:get()[first.key] then ui.t("plugins.store.key.scope.fewer"):get() else ui.t("plugins.store.key.scope.show_all"):get()
+						return if whole_scope:get()[first.id] then ui.t("plugins.store.key.scope.fewer"):get() else ui.t("plugins.store.key.scope.show_all"):get()
 					end,
 					on_click = function()
 						local now_open = table.clone(whole_scope:peek())
-						now_open[first.key] = if now_open[first.key] then nil else true
+						now_open[first.id] = if now_open[first.id] then nil else true
 						whole_scope:set(now_open)
 					end,
 				}
@@ -270,24 +311,22 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 			description_ink = function(): string
 				return if soon() then "$zeron.tone.warning.ink" else "$text.tertiary"
 			end,
-			-- At the row's end: the key, short, a column down the rows (it
-			-- ends 12 before Revoke, which ends on the content edge), then
+			-- At the row's end: the token's short id, a column down the rows
+			-- (it ends 12 before Revoke, which ends on the content edge), then
 			-- Revoke, a row's action as the versions' are.
 			control = ui.row {
 				gap = "$space.3",
 				items = "center",
 				ui.text {
 					function(): string
-						return M.short(now:get().key)
+						return M.short(now:get())
 					end,
 					class = "key-short",
-					-- (A key's short form as Settings shows a signing key's.)
+					-- (A token's short id as Settings shows a signing key's.)
 					font = "$font.mono",
 					text_size = "$font.size.xs",
 					line_height = "$font.line.xs",
 					color = "$text.tertiary",
-					-- (A row is its key's: the key never changes under it.)
-					tooltip = first.key,
 				},
 				ds.Button {
 					tone = "secondary",
@@ -311,7 +350,7 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 				if shown == "list" then
 					return ds.Settings.Each(list, key_row, {
 						key = function(k: any): string
-							return k.key
+							return k.id
 						end,
 					})
 				end
@@ -389,7 +428,7 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 				return phase:get()
 			end, body, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
 		},
-		-- A new key: its name and how long it lasts; then, perhaps, a fresh
+		-- A new token: its name and how long it lasts; then, perhaps, a fresh
 		-- sign-in in the browser, waited for here.
 		ds.Dialog {
 			open = making,
@@ -499,6 +538,10 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 					if p == "timed_out" then
 						return ui.t("plugins.store.key.timed_out"):get()
 					end
+					-- (Made too many today: the store's limit, said plainly.)
+					if p == "rate_limited" or string.match(p, "^rate_limited: ") then
+						return ui.t("plugins.store.key.made_today"):get()
+					end
 					return require("@app/screens/plugins/publish").failure(p)
 				end,
 				w_full = true,
@@ -508,7 +551,7 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 				color = "$zeron.tone.danger.ink",
 			}),
 		},
-		-- Its secret, once: copy it now.
+		-- The token, once: copy it now.
 		ds.Dialog {
 			open = secret_open,
 			title = ui.t("plugins.store.key.secret_title"),
@@ -526,29 +569,113 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 					secret_open:set(false)
 				end,
 			},
-			-- The secret as the app shows a line of code to copy: a chat
-			-- reply's code block (mono, its own Copy), drawn by ds/markdown
-			-- from one fence labelled "key", opened wrapped so the whole key
-			-- shows at once to check by eye (`code_fit`; its toggle its own).
-			-- (A deploy key's characters never close it.)
-			ui.div {
+			-- The token as the app shows a line of code to copy (a chat
+			-- reply's code block: its strip, a label and Copy, over its
+			-- line in the code face, wrapped so the whole token shows to
+			-- check by eye), drawn as private text: blurred while addresses
+			-- are hidden (the screen may be seen), shown by a click, and
+			-- never in a picture an agent is handed (src/plugins
+			-- `PRIVATE_REGIONS`). Copy puts it on the clipboard as a secret
+			-- (src/secrets.rs), whether it's shown or not. (Not a Markdown
+			-- block: no copy of it is kept with the block.)
+			ui.column {
 				id = "key-secret",
 				w_full = true,
-				Markdown {
-					text = function(): string
-						-- (`key`: a name the highlighter doesn't know, so the
-						-- block's label reads "key" over the plain text.)
-						return "```key\n" .. (secret:get() or "") .. "\n```"
+				min_w = 0,
+				rounded = "$radius.xl",
+				bg = "$zeron.prose.code.bg",
+				border = 1,
+				border_color = "$zeron.prose.code.edge",
+				overflow = "hidden",
+				ui.row {
+					h = 34,
+					pl = "$space.4",
+					pr = ui.raw(5, "even with Copy's room in the 34 strip, as a code block's"),
+					items = "center",
+					gap = "$space.1",
+					selectable = false,
+					ui.text {
+						"token",
+						literal = true,
+						text_size = "$font.size.xs",
+						color = "$text.tertiary",
+						grow = 1,
+						min_w = 0,
+					},
+					ui.button {
+						id = "key-secret-copy",
+						label = locale.t("ds.markdown.copy_code"),
+						h = 24,
+						px = "$space.2",
+						gap = "$space.1",
+						items = "center",
+						rounded = ui.raw(control.nest("$radius.xl", 1, 5), "concentric with the block: its corner less its edge and inset, as a code block's Copy"),
+						bg = "#00000000",
+						color = "$text.tertiary",
+						text_size = "$font.size.xs",
+						hover = { bg = "$hover", color = "$text.primary" },
+						active = { bg = "$pressed" },
+						focus = { border = 0 },
+						on_click = function()
+							local token = secret:peek()
+							if not token then
+								return
+							end
+							store.copy_secret(token):after(function()
+								copied:set(true)
+								copied_once:set(true)
+								ui.after(1400, function()
+									copied:set(false)
+								end)
+							end, function()
+								ds.toast.show { title = ui.t("plugins.store.key.copy_failed"), tone = "warning" }
+							end)
+						end,
+						ds.Icon {
+							name = function(): string
+								return if copied:get() then "check" else "copy"
+							end,
+							size = 12,
+						},
+						ui.text(function(): string
+							return if copied:get() then locale.s("ds.markdown.copied") else locale.s("common.copy")
+						end),
+					},
+				},
+				PrivateText {
+					function(): string
+						return secret:get() or ""
 					end,
-					code_fit = true,
+					name = ui.t("plugins.store.key.show_token"),
+					font = "$font.mono",
+					text_size = "$zeron.prose.code.size",
+					line_height = "$zeron.prose.code.line",
+					color = "$text.primary",
+					wrap = true,
+					w_full = true,
+					pl = "$space.4",
+					pr = "$space.5",
+					pb = "$space.3",
 				},
 			},
+			-- Copied: how long it stays there.
+			ui.show(function(): boolean
+				return copied_once:get()
+			end, ui.text {
+				id = "key-secret-copied",
+				ui.t("plugins.store.key.copied"),
+				w_full = true,
+				wrap = true,
+				text_size = "$font.size.sm",
+				line_height = "$font.line.sm",
+				color = "$text.tertiary",
+			}),
 		},
 		ds.Dialog {
 			open = revoke_open,
 			title = function(): string
 				local k = revoking:get()
-				return ui.t("plugins.store.key.revoke_title", { name = if k then (k.name or k.key) else "" }):get()
+				return ui.t("plugins.store.key.revoke_title", { name = if k then (k.name or M.short(k)) else "" }):get()
 			end,
 			body = ui.t("plugins.store.key.revoke_body"),
 			tone = "danger",
@@ -558,7 +685,7 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 					local k = revoking:peek()
 					revoking:set(nil)
 					if k then
-						store.revoke_key(k.key):after(function()
+						store.revoke_token(k.id):after(function()
 							load()
 						end, function(err: any)
 							local m = if type(err) == "table" then err.message else err

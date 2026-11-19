@@ -78,9 +78,9 @@ pub struct Notice {
 /// Interface").
 const USE_DEFAULT: Action = Action { label: "Use default interface", command: super::USE_ZERON_TEMPLATE };
 
-/// Settings → Plugins → Yours, where the account's deploy keys are.
-const DEPLOY_KEYS: Action = Action { label: "Deploy keys", command: super::OPEN_DEPLOY_KEYS };
-const DEPLOY_KEYS_ZH: Action = Action { label: "部署密钥", command: super::OPEN_DEPLOY_KEYS };
+/// Settings → Plugins → Yours, where the account's deploy tokens are.
+const DEPLOY_TOKENS: Action = Action { label: "Deploy tokens", command: super::OPEN_DEPLOY_TOKENS };
+const DEPLOY_TOKENS_ZH: Action = Action { label: "部署令牌", command: super::OPEN_DEPLOY_TOKENS };
 
 impl Notice {
     /// The template changed without you choosing it here: to `name`, or
@@ -126,28 +126,28 @@ impl Notice {
     }
 
     /// A version of one of your plugins published somewhere other than
-    /// this device (`via`: "deploy_key", with the key's name, or "device",
-    /// another of yours), in the host's words; one it doesn't know, in the
-    /// engine's (`words`). Its name and the key's are words someone chose:
-    /// plain, one line, short. One by a deploy key has a button to the
-    /// keys, to revoke it there.
-    pub fn published(name: &str, version: &str, via: &str, key_name: Option<&str>, words: &str) -> Self {
+    /// this device (`via`: "deploy_token", with the token's name, or
+    /// "device", another of yours), in the host's words; one it doesn't
+    /// know, in the engine's (`words`). Its name and the token's are words
+    /// someone chose: plain, one line, short. One by a deploy token has a
+    /// button to the tokens, to revoke it there.
+    pub fn published(name: &str, version: &str, via: &str, token_name: Option<&str>, words: &str) -> Self {
         let plain = |text: &str, most: usize| -> String {
             text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ").chars().take(most).collect()
         };
         let (name, version) = (plain(name, 64), plain(version, 32));
-        let key = key_name.map(|k| plain(k, 64)).filter(|k| !k.is_empty());
+        let token = token_name.map(|k| plain(k, 64)).filter(|k| !k.is_empty());
         let chinese = CHINESE.with(std::cell::Cell::get);
         let title = if chinese { format!("{name} {version} 已发布") } else { format!("{name} {version} was published") };
-        let by_key = via == "deploy_key" && key.is_some();
-        let body = match (via, key) {
-            ("deploy_key", Some(key)) if chinese => format!("使用你的部署密钥“{key}”。如果不是你，请吊销它。"),
-            ("deploy_key", Some(key)) => format!("With your deploy key \u{201c}{key}\u{201d}. If it wasn't you, revoke the key."),
+        let by_token = via == "deploy_token" && token.is_some();
+        let body = match (via, token) {
+            ("deploy_token", Some(token)) if chinese => format!("使用你的部署令牌“{token}”。如果不是你，请吊销它。"),
+            ("deploy_token", Some(token)) => format!("With your deploy token \u{201c}{token}\u{201d}. If it wasn't you, revoke the token."),
             ("device", _) if chinese => "来自你的另一台设备。".to_owned(),
             ("device", _) => "From another of your devices.".to_owned(),
             _ => plain(words, 300),
         };
-        let action = by_key.then_some(if chinese { DEPLOY_KEYS_ZH } else { DEPLOY_KEYS });
+        let action = by_token.then_some(if chinese { DEPLOY_TOKENS_ZH } else { DEPLOY_TOKENS });
         Notice { title, body, tone: Tone::Neutral, action, stays: true }
     }
 
@@ -732,11 +732,11 @@ mod tests {
     #[test]
     fn a_publish_from_elsewhere_says_where_it_came_from() {
         CHINESE.with(|c| c.set(false));
-        let key = Notice::published("Focus timer", "1.3.0", "deploy_key", Some("ci"), "");
-        assert_eq!(key.title, "Focus timer 1.3.0 was published");
-        assert_eq!(key.body, "With your deploy key \u{201c}ci\u{201d}. If it wasn't you, revoke the key.");
-        assert_eq!(key.action, Some(DEPLOY_KEYS));
-        assert!(key.stays);
+        let token = Notice::published("Focus timer", "1.3.0", "deploy_token", Some("ci"), "");
+        assert_eq!(token.title, "Focus timer 1.3.0 was published");
+        assert_eq!(token.body, "With your deploy token \u{201c}ci\u{201d}. If it wasn't you, revoke the token.");
+        assert_eq!(token.action, Some(DEPLOY_TOKENS));
+        assert!(token.stays);
         let device = Notice::published("Focus timer", "1.3.0", "device", None, "");
         assert_eq!(device.body, "From another of your devices.");
         assert_eq!(device.action, None);
@@ -748,8 +748,8 @@ mod tests {
         assert!(long.title.chars().count() <= 64 + " 1.3.0 was published".len());
         CHINESE.with(|c| c.set(true));
         assert_eq!(Notice::published("Focus timer", "1.3.0", "device", None, "").title, "Focus timer 1.3.0 已发布");
-        let zh = Notice::published("Focus timer", "1.3.0", "deploy_key", Some("ci"), "");
-        assert_eq!((zh.body.as_str(), zh.action), ("使用你的部署密钥“ci”。如果不是你，请吊销它。", Some(DEPLOY_KEYS_ZH)));
+        let zh = Notice::published("Focus timer", "1.3.0", "deploy_token", Some("ci"), "");
+        assert_eq!((zh.body.as_str(), zh.action), ("使用你的部署令牌“ci”。如果不是你，请吊销它。", Some(DEPLOY_TOKENS_ZH)));
         CHINESE.with(|c| c.set(false));
     }
 

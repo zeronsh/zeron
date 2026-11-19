@@ -869,9 +869,14 @@ pub fn prepare_live() -> PathBuf {
 pub const USE_ZERON_TEMPLATE: &str = "zeron.use-zeron-template";
 /// The host's own "Keep <template>…": the keep sheet for the one in preview.
 pub const KEEP_TEMPLATE: &str = "zeron.keep-template";
-/// The host's own "Deploy keys" (a publish notice's button): Settings →
-/// Plugins → Yours, where the account's deploy keys are.
-pub const OPEN_DEPLOY_KEYS: &str = "zeron.open-deploy-keys";
+/// The host's own "Deploy tokens" (a publish notice's button): Settings →
+/// Plugins → Yours, where the account's deploy tokens are.
+pub const OPEN_DEPLOY_TOKENS: &str = "zeron.open-deploy-tokens";
+
+/// What the app marks private, by its element's id: blank in every picture
+/// an agent is handed (a plugin's, a settings page's). A deploy token shown
+/// once (screens/plugins/keys, its block).
+pub const PRIVATE_REGIONS: &[&str] = &["key-secret"];
 
 /// One of the host's own commands (its menu items and its toasts' buttons:
 /// never a script's, `zeron.` being the host's).
@@ -891,7 +896,7 @@ pub fn host_command(id: &str) {
                 template_consent::keep(&b, &p.id);
             }
         }
-        OPEN_DEPLOY_KEYS => crate::links::show(crate::links::Target::PluginsTab("yours")),
+        OPEN_DEPLOY_TOKENS => crate::links::show(crate::links::Target::PluginsTab("yours")),
         other => eprintln!("zeron-zgx: no host command {other}"),
     }
 }
@@ -1445,7 +1450,7 @@ impl Bridge {
             self.store_updates.set(json_value(&frame["store_updates"]));
         }
         // Versions of the account's plugins published somewhere other than
-        // here (another device, a deploy key): said once each, staying, and
+        // here (another device, a deploy token): said once each, staying, and
         // let go of at the engine once said (it keeps them until then, so
         // one published while Zeron was closed is said when it opens).
         let mut said: Vec<String> = Vec::new();
@@ -1457,7 +1462,7 @@ impl Bridge {
                         name,
                         notice["version"].as_str().unwrap_or(""),
                         notice["via"].as_str().unwrap_or(""),
-                        notice["key_name"].as_str(),
+                        notice["token_name"].as_str(),
                         notice["words"].as_str().unwrap_or(""),
                     ));
                 }
@@ -3344,6 +3349,22 @@ impl Bridge {
         });
     }
 
+    /// Where what the app marks private shows in the window now
+    /// (`PRIVATE_REGIONS`, by id): blank in every picture of it.
+    fn private_regions(&self) -> Vec<surfaces::Region> {
+        let Some(ui) = self.ui.upgrade() else { return Vec::new() };
+        let view = self.view.borrow();
+        let Some(view) = view.as_ref() else { return Vec::new() };
+        let scene = ui.scene.borrow();
+        PRIVATE_REGIONS
+            .iter()
+            .filter_map(|id| view.find(id))
+            .map(|node| scene.bounds(node))
+            .filter(|b| b.width > 0. && b.height > 0.)
+            .map(|b| surfaces::Region { x: b.x, y: b.y, w: b.width, h: b.height })
+            .collect()
+    }
+
     /// The settings page open (`page`) as the window shows it, saved for the
     /// agent: the page's column, cut to what of it the window shows.
     fn picture_settings_page(&self, page: &str) -> Result<Json, String> {
@@ -3364,7 +3385,8 @@ impl Bridge {
         let scale = image.width() as f32 / window.width;
         let found = [surfaces::Region { x: column.x, y: column.y, w: column.width, h: column.height }];
         let region = surfaces::around(&found, 0., window.width, window.height).ok_or("Its page isn't in the window")?;
-        let (w, h, pixels) = surfaces::crop(image.pixels(), image.width(), image.height(), region, scale);
+        let (w, h, mut pixels) = surfaces::crop(image.pixels(), image.width(), image.height(), region, scale);
+        surfaces::blank(&mut pixels, w, h, region, &self.private_regions(), scale);
         let plugin = page.trim_start_matches("plugin-");
         let dir = engine::data_dir().ok_or("Zeron's data folder isn't known")?.join("plugins").join(".snapshots");
         let path = dir.join(format!("{plugin}.settings.png"));
@@ -3396,7 +3418,7 @@ impl Bridge {
         let plugin = plugin.to_string();
         self.tasks.spawn(async move {
             let Some(b) = me.upgrade() else { return };
-            match b.picture(&plugin, &out["placements"]) {
+            match b.picture(&plugin) {
                 Ok(said) => {
                     for (k, v) in said.as_object().into_iter().flatten() {
                         out[k] = v.clone();
@@ -3408,13 +3430,13 @@ impl Bridge {
         });
     }
 
-    /// The window as it shows, cut to around `placements`' regions, saved
-    /// for the agent to look at; none when none of its nodes shows (never
-    /// the whole window: what else the window shows isn't the plugin's to
-    /// hand an agent). The regions are the plugin's own account of where
-    /// its nodes are, until zgx measures a plugin's nodes for the host
-    /// (asked of zgx): each is held inside the window, and so is the cut.
-    fn picture(&self, plugin: &str, placements: &Json) -> Result<Json, String> {
+    /// The window as it shows, cut to around the plugin's own nodes as the
+    /// host measures them (`ScriptHost::contribution_bounds`), never as the
+    /// plugin reports them, saved for the agent to look at; none when none
+    /// of its nodes shows (never the whole window: what else the window
+    /// shows isn't the plugin's to hand an agent). What the app marks
+    /// private in the cut is blank (`private_regions`).
+    fn picture(&self, plugin: &str) -> Result<Json, String> {
         let ui = self.ui.upgrade().ok_or("The window is closed")?;
         let root = ui.root();
         let image = ui.snapshot(root, SNAPSHOT_WIDTH).ok_or("The window isn't showing")?;
@@ -3423,10 +3445,11 @@ impl Bridge {
             return Err("The window isn't laid out".into());
         }
         let scale = image.width() as f32 / bounds.width;
-        let found = surfaces::regions(placements);
+        let found = surfaces::measured(&self.host.contribution_bounds(plugin));
         let region = surfaces::around(&found, 24., bounds.width, bounds.height)
             .ok_or("None of its nodes shows now, so there's nothing of it to picture")?;
-        let (w, h, pixels) = surfaces::crop(image.pixels(), image.width(), image.height(), region, scale);
+        let (w, h, mut pixels) = surfaces::crop(image.pixels(), image.width(), image.height(), region, scale);
+        surfaces::blank(&mut pixels, w, h, region, &self.private_regions(), scale);
         let dir = engine::data_dir().ok_or("Zeron's data folder isn't known")?.join("plugins").join(".snapshots");
         let path = dir.join(format!("{plugin}.png"));
         surfaces::save_png(&path, w, h, &pixels)?;

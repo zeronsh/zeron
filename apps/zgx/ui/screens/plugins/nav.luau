@@ -16,7 +16,7 @@
 --   nav.show_browse()       Browse, wherever a page was opened from (what
 --                           a plugin's keyword or publisher narrowed it to)
 --   nav.show_tab(tab)       a tab, whatever page was open (a notice's
---                           "Deploy keys": Yours)
+--                           "Deploy tokens": Yours)
 --   nav.arrive()            for a visit: the tabs, unless something opened
 --                           a page as Settings came up (a link)
 

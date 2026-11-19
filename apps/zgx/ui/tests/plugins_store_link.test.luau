@@ -145,15 +145,15 @@ test("opened from Browse, the page's action takes a click at once", function()
 	expect(app:tree(`{PAGE} >> #store-slot >> role:button "Install"`)).never.to_contain("disabled")
 end)
 
--- A publish notice's "Deploy keys" (the host's `zeron.open-deploy-keys`
+-- A publish notice's "Deploy tokens" (the host's `zeron.open-deploy-tokens`
 -- tells `app.link` `{ settings = "plugins", tab = "yours" }`): Settings →
--- Plugins on Yours, where the keys are, even from a store plugin's page.
-test("a notice's Deploy keys opens Settings → Plugins on Yours, from any page of it", function()
+-- Plugins on Yours, where the tokens are, even from a store plugin's page.
+test("a notice's Deploy tokens opens Settings → Plugins on Yours, from any page of it", function()
 	local app = shell()
 	link(app, 1, "focus-timer")
 	app:wait(`{PAGE} >> #store-offer`, { timeout_ms = 3000 })
 	app:set_state("app.link", { seq = 2, settings = "plugins", tab = "yours" })
-	app:wait(`{PAGE} >> "Deploy keys"`, { timeout_ms = 3000 })
+	app:wait(`{PAGE} >> "Deploy tokens"`, { timeout_ms = 3000 })
 	app:frames(20)
 	expect(app:has(`{PAGE} >> #store-offer`)).to_be(false)
 	expect(app:has(`{PAGE} >> #keys-new`)).to_be(true)

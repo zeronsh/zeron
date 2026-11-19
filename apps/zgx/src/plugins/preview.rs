@@ -59,12 +59,12 @@ pub const BLOCKED: &[&str] = &[
     // what reads your own account (src/plugins/catalog.rs). Reading the
     // catalog stays.
     "plugins.store.mine",
-    "plugins.store.keys",
+    "plugins.store.tokens",
     "plugins.store.prepare",
     "plugins.store.publish",
     "plugins.store.version_action",
-    "plugins.store.create_key",
-    "plugins.store.revoke_key",
+    "plugins.store.create_token",
+    "plugins.store.revoke_token",
     "plugins.store.prereleases",
     "plugins.store.updates",
     "plugins.store.report",

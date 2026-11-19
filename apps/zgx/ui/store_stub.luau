@@ -2,7 +2,7 @@
 -- `Store*` calls would (crates/rpc): no engine in a test host. A made-up catalog of 75
 -- plugins, so Browse pages (30 at a time), searches, filters and sorts as
 -- the store does; each plugin's page, its versions, its pictures; your own
--- plugins' versions and reviews; deploy keys.
+-- plugins' versions and reviews; deploy tokens.
 --
 -- What was asked is in `store_stub_calls` ("search:q=…", "detail:<id>", …).
 -- `ui.command`s change what the next calls do:
@@ -18,7 +18,10 @@
 --   store_stub.no_notes    the engine has no notes on your plugin's folder
 --   store_stub.html_and_footnote  your plugin's README has HTML and math, its CHANGELOG a footnote (advice)
 --   store_stub.hostile_readme  Focus timer's README: 512 KiB of setext headings (before its page opens)
---   store_stub.many_keys   the account has ten deploy keys: names of every length,
+--   store_stub.token_ended  a token that ended yesterday, still listed
+--   store_stub.tokens_full  a new token is refused: the account has 20 live
+--   store_stub.tokens_today a new token is refused: 10 made today
+--   store_stub.many_keys   the account has ten deploy tokens: names of every length,
 --                          one ending today, one tomorrow, one in five days
 --   store_stub.long_featured   the first featured says 300 characters of itself, the second nothing
 
@@ -620,10 +623,11 @@ local mine: { [string]: any } = {
 		},
 	},
 }
--- The account's deploy keys, each with its scope (all its plugins, or
--- some) and the plugin it last published.
+-- The account's deploy tokens, each with its scope (all its plugins, or
+-- some) and the plugin it last published; the store keeps a token's short
+-- id (its first eight characters after `zdt_`), never the token.
 local keys: { any } = {
-	{ key = "k_gh", name = "GitHub Actions", scope = { all = true }, created_at = NOW - 10 * DAY, last_used_at = NOW - 2 * DAY, last_used_plugin = "pomodoro-clock" },
+	{ id = "t_gh", short = "9fK2mQ7x", name = "GitHub Actions", scope = { all = true }, created_at = NOW - 10 * DAY, last_used_at = NOW - 2 * DAY, last_used_plugin = "pomodoro-clock" },
 }
 -- What the engine finds checking your plugin's folder; `store_stub.fixed`
 -- makes it all there.
@@ -637,6 +641,9 @@ local store_checked = true
 -- (Tests: an answer the engine can't give, to see the page stays honest.)
 local force_problem = ui.state("store_stub_force_problem", false)
 local signed_in_again = false
+-- What the store says to a new token instead of making it: nil, or
+-- "too_many_tokens" (20 live), "rate_limited" (10 made today).
+local token_refusal: string? = nil
 
 -- (Tests: your own account's calls, yours, a version sent, a plugin's keys,
 -- failing with this word as the engine gives it, alone: a session that
@@ -750,24 +757,32 @@ stub.version_action = function(id: string, version: string, action: string): any
 		return {}
 	end)
 end
-stub.keys = function(): any
-	note("keys")
+stub.tokens = function(): any
+	note("tokens")
 	return answer(function(): any
 		refused_as_you()
-		return { keys = table.clone(keys) }
+		return { tokens = table.clone(keys) }
 	end)
 end
--- A new key needs a fresh sign-in: the first ask waits until
+-- A new token needs a fresh sign-in: the first ask waits until
 -- `store_stub.signed_in_again`, as the host's StepUp does.
-stub.create_key = function(args: any): any
+stub.create_token = function(args: any): any
 	local scope = if args.scope and args.scope.all then "all" else table.concat((args.scope and args.scope.plugins) or {}, ",")
-	note(`create_key:{scope}:{args.name}:{if args.expires then "expires" else "never"}`)
+	note(`create_token:{scope}:{args.name}:{if args.expires then "expires" else "never"}`)
 	local p: any = { settled = false, waiters = {} }
 	local function settle()
 		p.settled = true
-		local k = { key = `k_{#keys + 1}`, name = args.name, scope = args.scope, created_at = NOW, expires_at = args.expires }
+		if token_refusal then
+			p.err = { message = `{token_refusal}: the edge's English` }
+			for _, w in p.waiters do
+				w()
+			end
+			return
+		end
+		local token = "zdt_7Hq2Lm9Xc4Rt8Wn1Bv6Zp3Ks5Dj0Fg2Ya9Ue7Io4Tr1Q8k3Lp"
+		local k = { id = `t_{#keys + 1}`, short = string.sub(token, 5, 12), name = args.name, scope = args.scope, created_at = NOW, expires_at = args.expires }
 		table.insert(keys, k)
-		p.value = { ok = true, key = k.key, secret = "zpk_live_3f9a1c7e0b2d4f6a8c1e3a5b7d9f0e2c" }
+		p.value = { ok = true, token = { id = k.id, short = k.short, name = k.name, scope = k.scope, expires_at = k.expires_at, created_at = k.created_at }, secret = token }
 		for _, w in p.waiters do
 			w()
 		end
@@ -801,12 +816,21 @@ end
 stub.cancel_step_up = function()
 	note("cancel_step_up")
 end
-stub.revoke_key = function(key: string): any
-	note(`revoke_key:{key}`)
+-- (The clipboard as it is in a test: plain, noted. The host's marks it a
+-- secret and clears it, src/secrets.rs.)
+stub.copy_secret = function(text: string): any
+	note("copy_secret")
+	ui.clipboard.write(text)
+	return answer(function(): any
+		return true
+	end)
+end
+stub.revoke_token = function(id: string): any
+	note(`revoke_token:{id}`)
 	return answer(function(): any
 		local out = {}
 		for _, k in keys do
-			if k.key ~= key then
+			if k.id ~= id then
 				table.insert(out, k)
 			end
 		end
@@ -962,11 +986,34 @@ ui.command {
 		notes = false
 	end,
 }
--- Keys granted to 1, 2, 3, 14 and 50 of yours, their ids store ids at
+-- Tokens granted to 1, 2, 3, 14 and 50 of yours, their ids store ids at
 -- full length (40): what a row says of each, and of every one in place.
+-- A token that ended yesterday, listed until it's revoked (as the store
+-- keeps it).
+ui.command {
+	id = "store_stub.token_ended",
+	title = "Store: a deploy token that ended yesterday, not yet revoked",
+	run = function()
+		table.insert(keys, { id = "t_old", short = "Qm4Rt8Wn", name = "Old CI", scope = { all = true }, created_at = NOW - 100 * DAY, last_used_at = NOW - 20 * DAY, last_used_plugin = "pomodoro-clock", expires_at = NOW - DAY })
+	end,
+}
+ui.command {
+	id = "store_stub.tokens_full",
+	title = "Store: the account has as many live deploy tokens as it can (20)",
+	run = function()
+		token_refusal = "too_many_tokens"
+	end,
+}
+ui.command {
+	id = "store_stub.tokens_today",
+	title = "Store: the account has made as many deploy tokens today as it can (10)",
+	run = function()
+		token_refusal = "rate_limited"
+	end,
+}
 ui.command {
 	id = "store_stub.wide_keys",
-	title = "Store: keys for 1, 2, 3, 14 and 50 plugins",
+	title = "Store: tokens for 1, 2, 3, 14 and 50 plugins",
 	run = function()
 		local list = {}
 		for i, n in { 1, 2, 3, 14, 50 } do
@@ -975,7 +1022,8 @@ ui.command {
 				table.insert(ids, string.sub(string.format("a-plugin-with-a-long-store-id-number-%02d", j), 1, 40))
 			end
 			table.insert(list, {
-				key = string.sub(string.format("w%02dAbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_", i), 1, 43),
+				id = `t_w{i}`,
+				short = string.format("w%02dAbCdE", i),
 				name = `For {n}`,
 				scope = { plugins = ids },
 				created_at = NOW - i * DAY,
@@ -986,7 +1034,7 @@ ui.command {
 }
 ui.command {
 	id = "store_stub.many_keys",
-	title = "Store: ten deploy keys",
+	title = "Store: ten deploy tokens",
 	run = function()
 		local names = {
 			"GitHub Actions",
@@ -1002,15 +1050,19 @@ ui.command {
 		}
 		local list = {}
 		for i, name in names do
-			-- (A key as the store names it: its public half, base64url.)
-			local key = string.sub(string.rep(string.format("k%02dAbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_", i), 2), 1, 43)
-			-- (Ends from this very day, as the page reads it: noon of today,
-			-- of tomorrow, of five days on.)
+			-- (A token as the store lists it: its id and short id, never itself.)
+			local short = string.format("k%02dAbCdE", i)
+			-- (Ends from this very day, as the page reads it: the end of
+			-- today, noon of tomorrow, of five days on; from local midnight
+			-- as the clock less the time since it.)
 			local t = os.date("*t") :: any
-			local noon = os.time({ year = t.year, month = t.month, day = t.day, hour = 12 }) * 1000
+			local midnight = os.time() - (t.hour * 3600 + t.min * 60 + t.sec)
+			local noon = (midnight + 12 * 3600) * 1000
 			local ends: number? = nil
 			if name == "Ends today" then
-				ends = noon
+				-- (The last minute of today, whatever the hour now: one that
+				-- ended earlier today says it ended.)
+				ends = (midnight + 24 * 3600 - 60) * 1000
 			elseif name == "Ends tomorrow" then
 				ends = noon + DAY
 			elseif name == "Ends in five days" then
@@ -1019,7 +1071,8 @@ ui.command {
 				ends = noon + 90 * DAY
 			end
 			table.insert(list, {
-				key = key,
+				id = `t_k{i}`,
+				short = short,
 				name = name,
 				scope = if i % 2 == 0 then { all = true } else { plugins = { "pomodoro-clock" } },
 				created_at = NOW - i * DAY,

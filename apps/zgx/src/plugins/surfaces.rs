@@ -209,7 +209,9 @@ pub struct Region {
 }
 
 /// Each region a plugin's placements report (`{ placements = { { regions =
-/// { { x, y, w, h } } } } }`), those with a size.
+/// { { x, y, w, h } } } } }`), those with a size: its own account, shown to
+/// the agent as it said it and never what a picture is cut to (`measured`).
+#[cfg(test)]
 pub fn regions(placements: &Json) -> Vec<Region> {
     let mut out = Vec::new();
     for p in placements.as_array().into_iter().flatten() {
@@ -238,6 +240,32 @@ pub fn around(regions: &[Region], pad: f32, width: f32, height: f32) -> Option<R
     let (x0, y0) = ((x0 - pad).max(0.), (y0 - pad).max(0.));
     let (x1, y1) = ((x1 + pad).min(width), (y1 + pad).min(height));
     (x1 > x0 && y1 > y0).then_some(Region { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+}
+
+/// The boxes the host measured of a plugin's own nodes
+/// (`ScriptHost::contribution_bounds`), as regions: what a picture of it is
+/// cut around, never the boxes the plugin reports of itself.
+pub fn measured(bounds: &[zgx::scene::Rect]) -> Vec<Region> {
+    bounds.iter().filter(|b| b.width > 0. && b.height > 0.).map(|b| Region { x: b.x, y: b.y, w: b.width, h: b.height }).collect()
+}
+
+/// A cut's pixels (`width` × `height`, of `cut` at `scale` pixels a point)
+/// with every `private` box in it made blank: what the app marks private
+/// (a deploy token shown once) never leaves in a picture.
+pub fn blank(rgba: &mut [u8], width: u32, height: u32, cut: Region, private: &[Region], scale: f32) {
+    for p in private {
+        let x0 = ((p.x - cut.x) * scale).floor().max(0.) as u32;
+        let y0 = ((p.y - cut.y) * scale).floor().max(0.) as u32;
+        let x1 = (((p.x + p.w - cut.x) * scale).ceil().max(0.) as u32).min(width);
+        let y1 = (((p.y + p.h - cut.y) * scale).ceil().max(0.) as u32).min(height);
+        for row in y0..y1 {
+            let start = ((row * width + x0) * 4) as usize;
+            let end = ((row * width + x1.max(x0)) * 4) as usize;
+            if let Some(line) = rgba.get_mut(start..end) {
+                line.fill(0);
+            }
+        }
+    }
 }
 
 /// `rgba` (`width` × `height` pixels) cut to `region`, in points at `scale`
@@ -346,6 +374,35 @@ mod tests {
     fn a_page_is_an_id_and_a_title() {
         assert_eq!(page(&json!({ "id": "prs", "title": "Pull requests" })).unwrap(), json!({ "id": "prs", "title": "Pull requests" }));
         assert!(page(&json!({ "title": "x" })).is_err());
+    }
+
+    /// A plugin's picture is cut around its own nodes as the host measures
+    /// them: one reporting the whole window as its own gets its own nodes
+    /// (and the margin round them), and what the app marks private in the
+    /// cut is blank.
+    #[test]
+    fn a_plugin_reporting_the_whole_window_gets_only_its_own_nodes() {
+        // What it says of itself: the whole window. Never what's cut.
+        let reported = regions(&json!([{ "at": "#titlebar-actions", "regions": [{ "x": 0, "y": 0, "w": 100000, "h": 100000 }] }]));
+        assert_eq!(reported.len(), 1);
+        // What the host measured: its one node in the title bar.
+        let own = measured(&[zgx::scene::Rect { x: 900., y: 8., width: 24., height: 24. }, zgx::scene::Rect { x: 0., y: 0., width: 0., height: 10. }]);
+        assert_eq!(own, vec![Region { x: 900., y: 8., w: 24., h: 24. }], "a box with no size isn't one");
+        let cut = around(&own, 24., 1200., 800.).unwrap();
+        assert_eq!(cut, Region { x: 876., y: 0., w: 72., h: 56. });
+        // A private box (a token's) half in the cut: blank there, the rest kept.
+        let (w, h) = (72u32, 56u32);
+        let mut px = vec![255u8; (w * h * 4) as usize];
+        blank(&mut px, w, h, cut, &[Region { x: 940., y: 40., w: 200., h: 200. }], 1.);
+        let at = |x: u32, y: u32| px[((y * w + x) * 4) as usize];
+        assert_eq!(at(64, 40), 0, "inside the private box");
+        assert_eq!(at(71, 55), 0);
+        assert_eq!(at(63, 40), 255, "beside it");
+        assert_eq!(at(64, 39), 255, "above it");
+        // One outside the cut leaves it whole.
+        let mut whole = vec![255u8; (w * h * 4) as usize];
+        blank(&mut whole, w, h, cut, &[Region { x: 0., y: 400., w: 50., h: 50. }], 1.);
+        assert!(whole.iter().all(|&b| b == 255));
     }
 
     #[test]

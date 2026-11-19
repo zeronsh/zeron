@@ -31,15 +31,19 @@
 //!   plugins.store.version_action { id, version, action }  StoreVersionAction
 //!   plugins.store.prepare(id)         PreparePluginPublish
 //!   plugins.store.publish { id, hash, ticket }  PublishPlugin
-//!   plugins.store.keys()              ListDeployKeys: the account's
-//!   plugins.store.create_key { name, scope, expires? }  CreateDeployKey
+//!   plugins.store.tokens()            ListDeployTokens: the account's
+//!                                     deploy tokens (never a token itself)
+//!   plugins.store.create_token { name, scope, expires? }  CreateDeployToken
 //!                                     (`scope`: `{ all = true }` or
 //!                                     `{ plugins = { ids } }`), a
 //!                                     fresh sign-in begun for it first
-//!                                     (StepUp `for: "deploy_key"`, each one
-//!                                     a key's); `cancel_step_up` stops
-//!                                     waiting for it
-//!   plugins.store.revoke_key { key }  RevokeDeployKey
+//!                                     (StepUp `for: "deploy_token"`, each
+//!                                     one a token's); `cancel_step_up`
+//!                                     stops waiting for it (and asks the
+//!                                     engine's CancelStepUp); its answer
+//!                                     `{ ok, token, secret }`, `secret`
+//!                                     the token (`zdt_…`) this once
+//!   plugins.store.revoke_token { id }  RevokeDeployToken
 //!   plugins.store.report { id, reason, text }  StoreReport
 //!
 //! Each rejects with the engine's words ("offline", "not_in_store", a store
@@ -278,25 +282,25 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
         }
     });
     let e = engine.clone();
-    host.async_action("plugins.store.keys", move |_| {
+    host.async_action("plugins.store.tokens", move |_| {
         let e = e.clone();
         async move {
-            // (Your own account: your keys' names, fingerprints, scopes and
+            // (Your own account: your tokens' names, short ids, scopes and
             // when they were last used.)
-            crate::plugins::preview::refuse("plugins.store.keys")?;
-            ask(&e, "ListDeployKeys", json!({})).await
+            crate::plugins::preview::refuse("plugins.store.tokens")?;
+            ask(&e, "ListDeployTokens", json!({})).await
         }
     });
     let e = engine.clone();
-    host.async_action("plugins.store.create_key", move |arg| {
+    host.async_action("plugins.store.create_token", move |arg| {
         let e = e.clone();
         async move {
-            crate::plugins::preview::refuse("plugins.store.create_key")?;
+            crate::plugins::preview::refuse("plugins.store.create_token")?;
             let name: String = arg.field("name").map(text).unwrap_or_default().trim().chars().take(64).collect();
             if name.is_empty() {
                 return Err("invalid_name".into());
             }
-            let scope = key_scope(arg.field("scope")).ok_or("invalid_scope")?;
+            let scope = token_scope(arg.field("scope")).ok_or("invalid_scope")?;
             let mut params = json!({ "name": name, "scope": scope });
             if let Some(Value::Num(at)) = arg.field("expires")
                 && at.is_finite()
@@ -304,19 +308,29 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
             {
                 params["expires"] = json!(*at as i64);
             }
-            create_key(&e, params).await
+            create_token(&e, params).await
         }
     });
-    host.action("plugins.store.cancel_step_up", |_| {
-        STEP_UP.with(|n| n.set(n.get() + 1));
-    });
     let e = engine.clone();
-    host.async_action("plugins.store.revoke_key", move |arg| {
+    host.async_action("plugins.store.cancel_step_up", move |_| {
         let e = e.clone();
         async move {
-            crate::plugins::preview::refuse("plugins.store.revoke_key")?;
-            let key = arg.field("key").map(text).filter(|k| !k.is_empty() && k.len() <= 128).ok_or("not_in_store")?;
-            answer(&e, "RevokeDeployKey", json!({ "key": key })).await
+            // (No more waiting here, and the engine lets go of a sign-in it
+            // began for a token: one finished anyway makes no token unasked.
+            // An engine without CancelStepUp yet answers no; nothing else
+            // to do then.)
+            STEP_UP.with(|n| n.set(n.get() + 1));
+            let _ = e("CancelStepUp", json!({ "for": "deploy_token" }), None).await;
+            Ok(Value::Nil)
+        }
+    });
+    let e = engine.clone();
+    host.async_action("plugins.store.revoke_token", move |arg| {
+        let e = e.clone();
+        async move {
+            crate::plugins::preview::refuse("plugins.store.revoke_token")?;
+            let id = arg.field("id").map(text).filter(|k| !k.is_empty() && k.len() <= 128).ok_or("not_in_store")?;
+            answer(&e, "RevokeDeployToken", json!({ "id": id })).await
         }
     });
     let e = engine;
@@ -462,11 +476,11 @@ async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static
     rx.recv().await
 }
 
-/// A deploy key's scope as the store takes it: `{ all: true }` (every
+/// A deploy token's scope as the store takes it: `{ all: true }` (every
 /// plugin of the account's, those it publishes later too), or
 /// `{ plugins: [ids] }`, one to fifty store ids, each once (a duplicate
 /// refused, never dropped). Anything else is no scope.
-fn key_scope(scope: Option<&Value>) -> Option<Json> {
+fn token_scope(scope: Option<&Value>) -> Option<Json> {
     let scope = scope?;
     if matches!(scope.field("all"), Some(Value::Bool(true))) {
         return Some(json!({ "all": true }));
@@ -483,13 +497,13 @@ fn key_scope(scope: Option<&Value>) -> Option<Json> {
     (1..=50).contains(&ids.len()).then(|| json!({ "plugins": ids }))
 }
 
-/// A deploy key made after a fresh sign-in in the browser begun for it
-/// (StepUp `for: "deploy_key"`; every key asks, and each sign-in makes one
-/// key), asked again each second until it lands, is cancelled, or ten
-/// minutes pass. Asked once first, so what makes no key at all (not
+/// A deploy token made after a fresh sign-in in the browser begun for it
+/// (StepUp `for: "deploy_token"`; every token asks, and each sign-in makes
+/// one token), asked again each second until it lands, is cancelled, or ten
+/// minutes pass. Asked once first, so what makes no token at all (not
 /// published yet, not yours) is said before the browser opens.
-async fn create_key(e: &Engine, params: Json) -> Result<Value, String> {
-    let reply = e("CreateDeployKey", params.clone(), None).await?;
+async fn create_token(e: &Engine, params: Json) -> Result<Value, String> {
+    let reply = e("CreateDeployToken", params.clone(), None).await?;
     if reply["ok"].as_bool() != Some(false) || reply["error"].as_str() != Some("step_up_required") {
         answered(&reply)?;
         return Ok(json_value(&reply));
@@ -498,7 +512,7 @@ async fn create_key(e: &Engine, params: Json) -> Result<Value, String> {
         n.set(n.get() + 1);
         n.get()
     });
-    let sign_in = e("StepUp", json!({ "for": "deploy_key" }), None).await?;
+    let sign_in = e("StepUp", json!({ "for": "deploy_token" }), None).await?;
     let url = sign_in["url"].as_str().unwrap_or_default();
     if !url.starts_with("https://") {
         return Err("failed".into());
@@ -510,7 +524,7 @@ async fn create_key(e: &Engine, params: Json) -> Result<Value, String> {
         if STEP_UP.with(Cell::get) != live {
             return Err("cancelled".into());
         }
-        let reply = e("CreateDeployKey", params.clone(), None).await?;
+        let reply = e("CreateDeployToken", params.clone(), None).await?;
         match reply["error"].as_str() {
             Some("step_up_required") if reply["ok"].as_bool() == Some(false) => {
                 if std::time::Instant::now() >= until {

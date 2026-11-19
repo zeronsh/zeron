@@ -76,7 +76,7 @@ local function superseded_by(v: any): string?
 	return if type(by) == "string" and by ~= "" then by else nil
 end
 
--- Yours in the store, by name: what a deploy key's scope chooses from.
+-- Yours in the store, by name: what a deploy token's scope chooses from.
 function M.owned(): { { id: string, name: string } }
 	local out: { { id: string, name: string } } = {}
 	local now = mine:get()

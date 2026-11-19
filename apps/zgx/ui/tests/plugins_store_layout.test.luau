@@ -512,7 +512,7 @@ end)
 
 -- Publish… for Pomodoro clock, from Yours; `before` runs first (a stub's
 -- command), `held` keeps the checks from answering.
--- Yours, scrolled to the account's deploy keys at its end; `before` runs
+-- Yours, scrolled to the account's deploy tokens at its end; `before` runs
 -- first.
 local function keys_page(before: ((app: any) -> ())?): any
 	local app = mounted()
@@ -623,8 +623,8 @@ end)
 
 test("a section's action stands at its title's end as Settings' do: its line as tall as the action, the sentence 4 under it, the card 8", function()
 	local app = keys_page()
-	local title = box(app, 'role:group "Deploy keys" >> role:heading')
-	local line = app:tree('role:group "Deploy keys"'):match("[^\n]*A deploy key lets[^\n]*") or ""
+	local title = box(app, 'role:group "Deploy tokens" >> role:heading')
+	local line = app:tree('role:group "Deploy tokens"'):match("[^\n]*A deploy token lets[^\n]*") or ""
 	local sx, sy, sw, sh = line:match("(%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x([%d.]+)")
 	local sentence = { x = tonumber(sx) or 0, y = tonumber(sy) or 0, w = tonumber(sw) or 0, h = tonumber(sh) or 0 }
 	-- (The action centred on the title, the line as tall as the action.)
@@ -636,7 +636,7 @@ test("a section's action stands at its title's end as Settings' do: its line as 
 	expect(box(app, "#publish-checks").y - 1 - (checks_action.y + checks_action.h)).to_be(8)
 end)
 
-test("a key's short form is a column down its rows, ending before Revoke, at 1000 and in a narrow pane", function()
+test("a token's short id is a column down its rows, ending before Revoke, at 1000 and in a narrow pane", function()
 	local app = keys_page(function(a: any)
 		a:command("store_stub.many_keys")
 	end)
@@ -647,7 +647,7 @@ test("a key's short form is a column down its rows, ending before Revoke, at 100
 		settle(app)
 		local ends: { number } = {}
 		for line in app:tree("#fixture-scroll"):gmatch("[^\n]+") do
-			if line:find(" text ", 1, true) and line:find("…", 1, true) and line:match('"k%d%d') then
+			if line:find(" text ", 1, true) and line:match('"k%d%dAbCdE"') then
 				local x, w = line:match("(%-?[%d.]+),%-?[%d.]+ ([%d.]+)x")
 				table.insert(ends, (tonumber(x) :: number) + (tonumber(w) :: number))
 			end
@@ -659,7 +659,7 @@ test("a key's short form is a column down its rows, ending before Revoke, at 100
 	end
 end)
 
-test("a key within 14 days of its end says how soon, after when it was last used", function()
+test("a token within 14 days of its end says how soon, after when it was last used", function()
 	local app = keys_page(function(a: any)
 		a:command("store_stub.many_keys")
 	end)
@@ -674,7 +674,7 @@ test("a key within 14 days of its end says how soon, after when it was last used
 	expect(tree:find("Not used yet · made [^\"]+ · Doesn't expire") ~= nil).to_be(true)
 end)
 
-test("with nothing sent, its versions say so in one quiet line in their card, as its keys do", function()
+test("with nothing sent, its versions say so in one quiet line in their card, as its tokens do", function()
 	local app = publishing(function(a: any)
 		a:command("store_stub.never_published")
 	end)
@@ -706,7 +706,7 @@ test("publishing's buttons and its versions' actions end on one edge, the conten
 	-- ghost sm button's, 10, `zeron.space.snug`): text lined up with text.
 	local check = box(app, "#publish-check-again")
 	expect(math.abs(check.x + check.w - 10 - content) < 0.6).to_be(true)
-	-- New key…, at Yours' end, on the same edge (the same column's width).
+	-- New token…, at Yours' end, on the same edge (the same column's width).
 	app = keys_page()
 	local new = box(app, "#keys-new")
 	expect(math.abs(new.x + new.w - 10 - content) < 0.6).to_be(true)
@@ -715,18 +715,21 @@ end)
 -- Shown once, the secret is seen whole, to check by eye: its block opens
 -- wrapped (ds/markdown `code_fit`), the key in the code face broken onto
 -- the next line inside the block, never hidden past its edge.
-test("a deploy key's secret is seen whole, wrapped inside its block in the code face", function()
+test("a deploy token is seen whole, wrapped inside its block in the code face", function()
 	local app = keys_page()
 	app:click("#keys-new")
 	settle(app)
 	app:type('role:dialog >> role:textbox "Name"', "CI")
-	app:click('role:dialog >> role:button "Create key"')
+	app:click('role:dialog >> role:button "Create token"')
 	settle(app)
 	app:command("store_stub.signed_in_again")
 	settle(app, 400)
+	-- (Shown: hidden, it's a blurred stand-in of the same length.)
+	app:click('#key-secret >> role:switch "Show token"')
+	settle(app)
 	local block = box(app, "#key-secret")
 	local line = app:tree("#key-secret")
-	local x, w, h = line:match('text "zpk_[^"]*" ([%-%d.]+),[%-%d.]+ ([%d.]+)x([%d.]+)')
+	local x, w, h = line:match('text "zdt_[^"]*" ([%-%d.]+),[%-%d.]+ ([%d.]+)x([%d.]+)')
 	assert(x, line)
 	expect(tonumber(h) > 20).to_be(true)
 	expect(tonumber(x) + tonumber(w) <= block.x + block.w).to_be(true)
@@ -791,7 +794,7 @@ end)
 -- A key granted to many plugins says which, never cut: one or two by name,
 -- past that the first two and how many more, and every one in place with
 -- the line's own Show all (wrapping inside the row), at any count to 50.
-test("a key's plugins are named whole at any count, every one shown in place with Show all", function()
+test("a token's plugins are named whole at any count, every one shown in place with Show all", function()
 	local app = keys_page(function(a: any)
 		a:command("store_stub.wide_keys")
 	end)
@@ -826,3 +829,4 @@ test("a key's plugins are named whole at any count, every one shown in place wit
 	settle(app)
 	expect(app:count('role:button "Show all"')).to_be(1)
 end)
+

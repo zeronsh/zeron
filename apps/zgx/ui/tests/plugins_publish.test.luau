@@ -3,7 +3,7 @@
 -- answered by ui/store_stub.luau: each of yours says where it stands in
 -- the store, Publish… checks it here and says what to fix, Submit sends
 -- exactly what was checked; each version's review and what you can still
--- do with it; deploy keys made after a fresh sign-in, the secret shown
+-- do with it; deploy tokens made after a fresh sign-in, the token shown
 -- once, and revoked.
 
 local function calls(app: any): string
@@ -27,7 +27,7 @@ local function yours(): any
 	return app
 end
 
--- Yours, scrolled to the account's deploy keys at its end.
+-- Yours, scrolled to the account's deploy tokens at its end.
 local function keys_page(): any
 	local app = yours()
 	app:scroll("#fixture-scroll", 2000)
@@ -157,21 +157,21 @@ test("stopping new installs asks first, then the version says so and can allow t
 	expect(calls(app)).to_contain("version:pomodoro-clock:1.0.0:unyank")
 end)
 
-test("the account's deploy keys are at the end of Yours, each saying what it publishes and where it was last used", function()
+test("the account's deploy tokens are at the end of Yours, each saying what it publishes and where it was last used", function()
 	local app = keys_page()
 	local tree = app:tree()
 	expect(tree).to_contain("GitHub Actions")
 	expect(tree).to_contain("on Pomodoro clock")
 	expect(tree).to_contain("All your plugins")
-	-- (The key itself, short, after its name: as the store's site shows it.)
-	expect(app:tree(".key-short")).to_contain("k_gh")
-	expect(calls(app)).to_contain("keys")
+	-- (The token's short id after its name: as the store's site shows it.)
+	expect(app:tree(".key-short")).to_contain("9fK2mQ7x")
+	expect(calls(app)).to_contain("tokens")
 	-- Not on a plugin's Publish page any more.
 	app = publishing()
 	expect(app:has("#keys-new")).to_be(false)
 end)
 
-test("a deploy key is made for the plugins chosen, after a fresh sign-in, its secret shown once to copy", function()
+test("a deploy token is made for the plugins chosen, after a fresh sign-in, the token shown once to copy", function()
 	local app = keys_page()
 	app:click("#keys-new")
 	settle(app)
@@ -179,23 +179,28 @@ test("a deploy key is made for the plugins chosen, after a fresh sign-in, its se
 	-- Chosen plugins, none ticked yet: it can't be made.
 	app:click('#key-scope >> role:radio "Chosen plugins"')
 	settle(app)
-	expect(app:tree('role:dialog >> role:button "Create key"')).to_contain("disabled")
+	expect(app:tree('role:dialog >> role:button "Create token"')).to_contain("disabled")
 	app:click('#key-scope >> role:checkbox "Pomodoro clock"')
 	settle(app)
-	app:click('role:dialog >> role:button "Create key"')
+	app:click('role:dialog >> role:button "Create token"')
 	settle(app)
 	-- Waiting for the browser's sign-in: said, and it can be given up.
 	expect(app:tree("role:dialog")).to_contain("Sign in in your browser")
-	expect(calls(app)).to_contain("create_key:pomodoro-clock:Release job:expires")
+	expect(calls(app)).to_contain("create_token:pomodoro-clock:Release job:expires")
 	app:command("store_stub.signed_in_again")
 	settle(app, 400)
 	local dialog = app:tree("role:dialog")
-	expect(dialog).to_contain("Copy your key now")
-	expect(dialog).to_contain("zpk_live_")
+	expect(dialog).to_contain("Copy your token now")
+	-- Private while the screen may be seen, as an email address is: a
+	-- blurred stand-in, never the token, until it's shown.
+	expect(dialog).never.to_contain("zdt_")
+	app:click('#key-secret >> role:switch "Show token"')
+	settle(app)
+	expect(app:tree("role:dialog")).to_contain("zdt_")
 	-- Whole, wrapped inside the dialog: never cut behind a scroll.
 	local block = app:tree("#key-secret")
 	local bx, _, bw = block:match("#key%-secret (%-?%d+),(%-?%d+) (%d+)x")
-	local kx, _, kw, kh = block:match('text "zpk_live_[^"]*" (%-?%d+),(%-?%d+) (%d+)x(%d+)')
+	local kx, _, kw, kh = block:match('text "zdt_[^"]*" (%-?%d+),(%-?%d+) (%d+)x(%d+)')
 	assert(bx and kx, block)
 	expect(tonumber(kx) + tonumber(kw) <= tonumber(bx) + tonumber(bw)).to_be(true)
 	expect(tonumber(kh) > 20).to_be(true)
@@ -203,21 +208,24 @@ test("a deploy key is made for the plugins chosen, after a fresh sign-in, its se
 	-- Escape doesn't lose it: only its button closes it.
 	app:key("Escape")
 	settle(app)
-	expect(app:tree("role:dialog")).to_contain("zpk_live_")
-	-- (The code block's own Copy, as a chat reply's.)
-	app:click('role:dialog >> role:button "Copy code"')
+	expect(app:tree("role:dialog")).to_contain("zdt_")
+	-- Its Copy puts it on the clipboard as a secret (the host's), and says
+	-- how long it stays there.
+	app:click('#key-secret-copy')
 	settle(app)
-	expect(app:clipboard()).to_contain("zpk_live_")
+	expect(calls(app)).to_contain("copy_secret")
+	expect(app:clipboard()).to_contain("zdt_")
+	expect(app:has('#key-secret-copied >> "Copied. Zeron clears it from the clipboard in a minute."')).to_be(true)
 	app:click('role:dialog >> role:button "I\'ve copied it"')
 	settle(app)
 	-- Gone for good: never shown again.
-	expect(app:tree()).never.to_contain("zpk_live_")
+	expect(app:tree()).never.to_contain("zdt_")
 	expect(app:tree()).to_contain("Release job")
 end)
 
--- What a new key can publish is labelled as its Name and Ends are, by the
+-- What a new token can publish is labelled as its Name and Ends are, by the
 -- same ds piece (ds/field): the same words' place and size.
-test("a new key's Can publish is labelled as its Name and Ends are", function()
+test("a new token's Can publish is labelled as its Name and Ends are", function()
 	local app = keys_page()
 	app:click("#keys-new")
 	settle(app)
@@ -241,27 +249,99 @@ test("a new key's Can publish is labelled as its Name and Ends are", function()
 	expect((tonumber(label_y) :: number) < (tonumber(radio_y) :: number)).to_be(true)
 end)
 
-test("waiting on the sign-in can be stopped; a key for all your plugins is the first choice", function()
+test("waiting on the sign-in can be stopped; a token for all your plugins is the first choice", function()
 	local app = keys_page()
 	app:click("#keys-new")
 	settle(app)
 	app:type('role:dialog >> role:textbox "Name"', "CI")
-	app:click('role:dialog >> role:button "Create key"')
+	app:click('role:dialog >> role:button "Create token"')
 	settle(app)
-	expect(calls(app)).to_contain("create_key:all:CI:expires")
+	expect(calls(app)).to_contain("create_token:all:CI:expires")
 	app:click('role:dialog >> role:button "Stop waiting"')
 	settle(app)
 	expect(calls(app)).to_contain("cancel_step_up")
 end)
 
-test("revoking a key asks first, then it's gone", function()
+test("a new token refused at the store's limits says which, with the numbers, and what to do", function()
+	for _, case in {
+		{ "store_stub.tokens_full", "You have 20 deploy tokens, the most an account can have. Revoke one to make another." },
+		{ "store_stub.tokens_today", "You've made 10 deploy tokens today. You can make more tomorrow." },
+	} do
+		local app = keys_page()
+		app:command(case[1])
+		app:command("store_stub.signed_in_again")
+		app:click("#keys-new")
+		settle(app)
+		app:type('role:dialog >> role:textbox "Name"', "CI")
+		app:click('role:dialog >> role:button "Create token"')
+		settle(app, 400)
+		expect(app:has(`role:dialog >> "{case[2]}"`)).to_be(true)
+		expect(app:tree("role:dialog")).never.to_contain("the edge's English")
+	end
+end)
+
+test("a token that has ended, listed until it's revoked, says when it ended", function()
+	local app = yours()
+	app:command("store_stub.token_ended")
+	app:click('role:tab "Installed"')
+	settle(app)
+	app:click('role:tab "Yours"')
+	settle(app)
+	app:scroll("#fixture-scroll", 2000)
+	app:frames(10)
+	local tree = app:tree()
+	expect(tree:find('"Last used [^"]+ on Pomodoro clock · Ended [^"]+"') ~= nil).to_be(true)
+	expect(tree).never.to_contain("Ends today")
+end)
+
+test("a token finished while Yours was left is still shown once, as Yours comes back", function()
+	local app = keys_page()
+	app:click("#keys-new")
+	settle(app)
+	app:type('role:dialog >> role:textbox "Name"', "CI")
+	app:click('role:dialog >> role:button "Create token"')
+	settle(app)
+	-- Taken away (a link, an agent's or a plugin's opening another page:
+	-- the dialog is modal) as the sign-in finishes: the token made then.
+	app:set_state("screens/plugins/nav.luau::plugins_tab", "installed")
+	settle(app)
+	app:command("store_stub.signed_in_again")
+	settle(app, 400)
+	app:set_state("screens/plugins/nav.luau::plugins_tab", "yours")
+	settle(app, 400)
+	expect(app:tree("role:dialog")).to_contain("Copy your token now")
+	app:click('#key-secret >> role:switch "Show token"')
+	settle(app)
+	expect(app:tree("role:dialog")).to_contain("zdt_")
+end)
+
+test("another account signed in while Yours stays open lists its own tokens", function()
+	local app = keys_page()
+	app:set_state("account", { state = "signed_in", env = "staging", user = { id = "u_ada", email = "ada@example.com" } })
+	settle(app)
+	local function listed(): number
+		local n = 0
+		for line in calls(app):gmatch("[^\n]+") do
+			if line == "tokens" then
+				n += 1
+			end
+		end
+		return n
+	end
+	local before = listed()
+	app:set_state("account", { state = "signed_in", env = "staging", user = { id = "u_grace", email = "grace@example.com" } })
+	settle(app, 400)
+	expect(listed()).to_be(before + 1)
+end)
+
+test("revoking a token asks first, then it's gone", function()
 	local app = keys_page()
 	app:click('role:button "Revoke"')
 	settle(app)
 	expect(app:tree("role:dialog")).to_contain("Revoke GitHub Actions?")
 	app:click('role:dialog >> role:button "Revoke"')
 	settle(app)
-	expect(calls(app)).to_contain("revoke_key:k_gh")
+	expect(calls(app)).to_contain("revoke_token:t_gh")
 	expect(app:tree()).never.to_contain("GitHub Actions")
 end)
 
@@ -313,7 +393,7 @@ test("handed a newer-than problem it can't have (the store not asked), the page 
 	expect(app:tree("#publish-checks")).never.to_contain("Give it a version newer")
 end)
 
-test("a deploy key waits for a plugin of yours in the store, its first version sent from this computer", function()
+test("a deploy token waits for a plugin of yours in the store, its first version sent from this computer", function()
 	local app = mount("plugins_store_fixture.luau")
 	app:resize(1000, 900)
 	app:frames(10)
@@ -360,7 +440,7 @@ test("Publish…, a row's inline link, shows the app's focus ring when the keys 
 	expect(app:has(".settings-inline-link >> .inline-link-plain")).to_be(false)
 end)
 
-test("a session that ended mid-page: its keys say to sign in, never couldn't, and Submit says so in its line", function()
+test("a session that ended mid-page: its tokens say to sign in, never couldn't, and Submit says so in its line", function()
 	for _, word in { "signed_out", "unauthenticated", "forbidden" } do
 		local app = publishing()
 		app:command("store_stub.fixed")
@@ -371,16 +451,16 @@ test("a session that ended mid-page: its keys say to sign in, never couldn't, an
 		app:click("#publish-submit")
 		settle(app)
 		expect(`{word}: {app:tree("#publish-note")}`).to_contain("This needs you signed in to Zeron.")
-		-- The keys, read again with Yours (back to it), say to sign in.
+		-- The tokens, read again with Yours (back to it), say to sign in.
 		app:click('role:button "Back to Plugins"')
 		settle(app, 600)
 		app:scroll("#fixture-scroll", 2000)
 		app:frames(10)
 		local tree = app:tree()
-		for _, said in { "Sign in to see your keys", "This needs you signed in to Zeron." } do
+		for _, said in { "Sign in to see your tokens", "This needs you signed in to Zeron." } do
 			expect(`{word}: {said} {tree:find(said, 1, true) ~= nil}`).to_be(`{word}: {said} true`)
 		end
-		for _, never in { "Couldn't see your keys", "The store didn't know who sent it.", "The store didn't allow it.", `"{word}"` } do
+		for _, never in { "Couldn't see your tokens", "The store didn't know who sent it.", "The store didn't allow it.", `"{word}"` } do
 			expect(`{word}: {never} {tree:find(never, 1, true) ~= nil}`).to_be(`{word}: {never} false`)
 		end
 		-- Signed in again: Try again reads them.
@@ -393,7 +473,7 @@ test("a session that ended mid-page: its keys say to sign in, never couldn't, an
 			settle(app, 600)
 		end
 		expect(app:error()).to_be_nil()
-		expect(app:tree()).never.to_contain("Sign in to see your keys")
+		expect(app:tree()).never.to_contain("Sign in to see your tokens")
 	end
 end)
 
