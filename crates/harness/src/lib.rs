@@ -575,12 +575,47 @@ pub fn apply_run_env(cmd: &mut process::Command, env: &std::collections::BTreeMa
     }
 }
 
+static PREFERRED_NODE_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Put `dir` (a Node install's `bin`) right after an agent's own directory
+/// on every agent child's PATH and on installers' (once per process). A
+/// Cloud machine sets it to its newest Node: the image's default `node` can
+/// be older than npm-distributed agents need (Pi 1.5 needs Node 22's
+/// `module.enableCompileCache`; @cursor/sdk's native bindings need 22.13),
+/// and a script agent runs on whichever `node` its PATH finds first.
+pub fn prefer_node_dir(dir: std::path::PathBuf) {
+    let _ = PREFERRED_NODE_DIR.set(dir);
+}
+
+/// The directory [`prefer_node_dir`] set, if any.
+pub fn preferred_node_dir() -> Option<&'static std::path::Path> {
+    PREFERRED_NODE_DIR.get().map(std::path::PathBuf::as_path)
+}
+
+/// The newest Node on this machine (its version managers' installs and the
+/// PATH's), as its `bin` directory and version.
+pub fn newest_node_dir() -> Option<(std::path::PathBuf, (u64, u64, u64))> {
+    let name = if cfg!(windows) { "node.exe" } else { "node" };
+    executable::node_manager_bins()
+        .into_iter()
+        .map(|dir| dir.join(name))
+        .chain(executable::find_on_paths("node", Vec::new()))
+        .filter_map(|node| {
+            let version = adapter_install::node_version(&node)?;
+            Some((node.parent()?.to_path_buf(), version))
+        })
+        .max_by_key(|(_, version)| *version)
+}
+
 fn compose_path<'a>(
     cmd: &mut std::process::Command,
     executable_dir: impl IntoIterator<Item = &'a std::path::Path>,
 ) {
-    let executable_dir: Vec<std::path::PathBuf> =
+    let mut executable_dir: Vec<std::path::PathBuf> =
         executable_dir.into_iter().map(Into::into).collect();
+    if let Some(node) = preferred_node_dir() {
+        executable_dir.push(node.to_path_buf());
+    }
     let own = std::env::var_os("PATH");
     let user = shell_env::user_path();
     #[cfg(windows)]

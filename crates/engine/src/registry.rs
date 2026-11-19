@@ -263,6 +263,23 @@ impl HarnessRegistry {
         self.discover_models_with_lease(id, lease).await
     }
 
+    /// `id`'s catalog discovered now, with where it came from (`live`, or a
+    /// cached / built-in stand-in when discovery failed): what a Cloud
+    /// machine publishes only when it's live.
+    pub async fn discover_catalog(
+        &self,
+        id: HarnessId,
+    ) -> Result<zeron_harness::ModelCatalog, HarnessError> {
+        let lease = Arc::new(self.execution_lease(id).await);
+        let harness = self.resolve(id)?;
+        tokio::spawn(async move {
+            let _lease = lease;
+            harness.model_catalog(true).await
+        })
+        .await
+        .map_err(|error| HarnessError::Protocol(format!("model discovery task failed: {error}")))?
+    }
+
     /// A caller such as titling already holds a lease. Reacquiring after an
     /// update queues would deadlock it against its own existing reader.
     pub(crate) async fn discover_models_with_lease(
