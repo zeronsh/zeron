@@ -39,10 +39,13 @@ pub const MAX_SCOPE_PLUGINS: usize = 50;
 
 /// The words a token's refusal carries (the CLI's and the edge's).
 pub mod reason {
-    /// Not a token, or a mistyped one, or one the edge doesn't take
-    /// (unknown, revoked, expired): the same word whichever.
-    pub const BAD_TOKEN: &str = "bad_token";
-    /// A live token that may not publish this plugin.
+    /// A publish the store refused the token for, whichever way (mistyped,
+    /// unknown, revoked, expired, out of its scope, a plugin's first
+    /// version, a plugin moved to another account): one word, one 401, so
+    /// nothing about a token can be learned by trying it.
+    pub const INVALID_TOKEN: &str = "invalid_token";
+    /// A token on a route it never may use (anything but publishing and
+    /// reading its plugins): 403.
     pub const TOKEN_NOT_ALLOWED: &str = "token_not_allowed";
 }
 

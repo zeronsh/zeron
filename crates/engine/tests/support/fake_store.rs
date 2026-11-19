@@ -300,7 +300,7 @@ impl FakeStore {
             engines,
             blocked: None,
             via: if by_token { "deploy_token" } else { "device" }.into(),
-            deploy_token: by_token.then(|| ("dt_0".to_owned(), "AAAAAAAA".to_owned(), "CI".to_owned())),
+            deploy_token: by_token.then(|| ("tok_0000000000000000".to_owned(), "AAAAAAAA".to_owned(), "CI".to_owned())),
             published_at,
             superseded_by: None,
             publisher_account: String::new(),
@@ -387,7 +387,7 @@ impl FakeStore {
         state.tokens_made += 1;
         let token = DeployToken::from_random(&[state.tokens_made; 32]);
         let stored = StoredToken {
-            id: format!("dt_{}", state.tokens_made),
+            id: format!("tok_{:016}", state.tokens_made),
             short: token.short().to_owned(),
             owner: owner.to_owned(),
             scope,
@@ -405,8 +405,10 @@ impl FakeStore {
 
     /// Who a request is: a session's username, or a deploy token's owner
     /// (with its scope), as the edge reads one: its form and checksum, then
-    /// its hash; unknown, revoked or expired all answer `bad_token`, and a
-    /// token only publishes and reads its plugins (`token_not_allowed`).
+    /// its hash; unknown, revoked or expired all answer one 401
+    /// `invalid_token` (as do one out of scope and a first version), and a
+    /// token only publishes and reads its plugins (else 403
+    /// `token_not_allowed`).
     fn who(&self, method: &str, path: &str, headers: &BTreeMap<String, String>) -> Result<Option<Who>, (u16, Value)> {
         let Some(auth) = headers.get("authorization") else { return Ok(None) };
         let Some(bearer) = auth.strip_prefix("Bearer ") else {
@@ -415,7 +417,7 @@ impl FakeStore {
         if let Some(user) = bearer.strip_prefix("session:") {
             return Ok(Some((user.to_owned(), None)));
         }
-        let bad = || Err((401, json!({ "error": "bad_token", "message": "That deploy token isn't one this store takes." })));
+        let bad = || Err((401, json!({ "error": "invalid_token", "message": "This deploy token can't publish this plugin." })));
         let Ok(token) = DeployToken::parse(bearer) else { return bad() };
         let state = self.state.lock().unwrap();
         let Some(stored) = state.deploy_tokens.get(&token.hash()).filter(|t| !t.revoked && t.expires_at.is_none_or(|at| at > chrono_now())).cloned() else {
@@ -658,7 +660,7 @@ impl FakeStore {
                 if let Some((scope, _)) = &scope {
                     let owned = state.plugins.get(*id).is_some_and(|p| p.owner == owner);
                     if !owned || !scope.covers(id) {
-                        return json_reply(403, json!({ "error": "token_not_allowed", "message": "This deploy token can't publish that plugin." }));
+                        return json_reply(401, json!({ "error": "invalid_token", "message": "This deploy token can't publish this plugin." }));
                     }
                 }
                 let plugin = state.plugins.entry((*id).to_owned()).or_insert_with(|| StoredPlugin { owner: owner.clone(), ..Default::default() });
@@ -770,7 +772,9 @@ impl FakeStore {
             ("DELETE", ["store", "v1", "me", "tokens", id]) => {
                 let Some((owner, None)) = who else { return unauthorized() };
                 let mut state = self.state.lock().unwrap();
-                let Some(token) = state.deploy_tokens.values_mut().find(|t| t.id == *id && t.owner == owner) else { return not_found() };
+                let Some(token) = state.deploy_tokens.values_mut().find(|t| t.id == *id && t.owner == owner) else {
+                    return json_reply(404, json!({ "error": "unknown_token", "message": "No such deploy token." }));
+                };
                 token.revoked = true;
                 json_reply(200, json!({ "revoked": true }))
             }

@@ -435,7 +435,7 @@ impl StoreClient {
             Caller::DeployToken(token) => {
                 // (Marked sensitive: never in a log or a debug print.)
                 let Ok(mut value) = reqwest::header::HeaderValue::from_str(&token.authorization()) else {
-                    return Err(plain(failure(super::deploy_token::reason::BAD_TOKEN, super::deploy_token::DAMAGED)));
+                    return Err(plain(failure(super::deploy_token::reason::INVALID_TOKEN, super::deploy_token::DAMAGED)));
                 };
                 value.set_sensitive(true);
                 request = request.header(reqwest::header::AUTHORIZATION, value);

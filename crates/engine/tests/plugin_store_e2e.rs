@@ -627,7 +627,7 @@ async fn the_plugin_store_end_to_end() {
     checkout(&laptop.item(THIRD).await["dir"].as_str().map(PathBuf::from).unwrap(), &third_ci);
     set_version(&third_ci, "1.1.0", &["ui.add"], "- Third.");
     let out = e.cli("ci", &["publish", &third_ci.display().to_string()], &[("ZERON_DEPLOY_TOKEN", &secret)]);
-    e.check("4", &format!("and is refused on {THIRD}, yours but outside its scope (exit 3)"), out.status.code() == Some(3) && text(&out).contains("token_not_allowed"), text(&out));
+    e.check("4", &format!("and is refused on {THIRD}, yours but outside its scope (exit 3)"), out.status.code() == Some(3) && text(&out).contains("invalid_token"), text(&out));
     let noticed = wait_for("the laptop's notices of the token's publishes", async || {
         let n = notices(&laptop).await;
         n.contains(&format!("{ID}@1.1.0")) && n.contains(&format!("{OTHER}@1.1.0"))
@@ -769,9 +769,9 @@ async fn the_plugin_store_end_to_end() {
     let mut typo = bob_secret.clone().into_bytes();
     typo[10] = if typo[10] == b'A' { b'B' } else { b'A' };
     let (status, body) = e.publish_with(&String::from_utf8(typo).unwrap(), ID, &token_package(ID, "1.3.1", json!({}), &[])).await;
-    e.check("9", "a mistyped token is refused as one that isn't known (401 bad_token)", status == 401 && body["error"] == "bad_token", format!("{status} {body}"));
+    e.check("9", "a mistyped token is refused as one that isn't known (401 invalid_token)", status == 401 && body["error"] == "invalid_token", format!("{status} {body}"));
     let (status, body) = e.publish_with(&DeployToken::from_random(&[42; 32]).as_str().to_owned(), ID, &token_package(ID, "1.3.1", json!({}), &[])).await;
-    e.check("9", "and so is a well-formed one nobody made, alike", status == 401 && body["error"] == "bad_token", format!("{status} {body}"));
+    e.check("9", "and so is a well-formed one nobody made, alike", status == 401 && body["error"] == "invalid_token", format!("{status} {body}"));
     let (status, body) = e.admin(&staff, &format!("versions/{ID}/1.3.0/verify"), json!({})).await;
     e.check("9", "staff verify 1.3.0", status == 200, &body);
     // Bob's phone, his since before the transfer: his token's publish is a
@@ -784,7 +784,7 @@ async fn the_plugin_store_end_to_end() {
     e.check("9", "the new owner's devices notice his first token publish, and none of the former owner's versions", noticed && by_token && !ada_s, &list["store_notices"]);
     let elsewhere = token_package(OTHER, "9.0.0", json!({}), &[]);
     let (status, body) = e.publish_with(&bob_secret, OTHER, &elsewhere).await;
-    e.check("9", "a token for another plugin is refused", status == 403 && body["error"] == "token_not_allowed", format!("{status} {body}"));
+    e.check("9", "a token for another plugin is refused alike (401 invalid_token)", status == 401 && body["error"] == "invalid_token", format!("{status} {body}"));
     let (status, body) = e.publish_with(&bob_secret, ID, &token_package(ID, "1.2.5", json!({}), &[])).await;
     e.check("9", "a version that isn't newer is refused", body["error"] == "not_newer" || body["error"] == "version_exists", format!("{status} {body}"));
     // (On ada's third plugin, from her laptop: should the edge take one,
@@ -897,7 +897,7 @@ async fn the_plugin_store_end_to_end() {
     let revoked = bob_laptop.call(methods::REVOKE_DEPLOY_TOKEN, json!({ "id": bob_id })).await;
     e.check("10", "bob revokes his token", revoked.is_ok(), format!("{revoked:?}"));
     let (status, body) = e.publish_with(&bob_secret, ID, &token_package(ID, "1.5.0", json!({}), &[])).await;
-    e.check("10", "a revoked token publishes nothing (401 bad_token)", status == 401 && body["error"] == "bad_token", format!("{status} {body}"));
+    e.check("10", "a revoked token publishes nothing (401 invalid_token)", status == 401 && body["error"] == "invalid_token", format!("{status} {body}"));
     let cookie = staff.cookie.lock().unwrap().clone();
     let res = e.http.post(format!("{}{reports}", e.site)).header("cookie", cookie).json(&json!({ "reason": "other" })).send().await.unwrap();
     let status = res.status().as_u16();
