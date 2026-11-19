@@ -150,7 +150,7 @@ const accepted = (id: string, version: string, status: string, verified: boolean
   answer({ id, version, status, verified, checks, superseded }, 201);
 
 export const handlePublish = async (request: Request, env: Env, db: D1Database, bucket: R2Bucket, id: string): Promise<Response> => {
-  const publisher = await authenticatePublisher(request, env, { usedFor: id });
+  const publisher = await authenticatePublisher(request, env, { publishing: true });
   if (publisher instanceof Response) return publisher;
   if (!(await allowWrite(env, publisher.userId))) return rateLimited();
   // Who may publish what, before the body is read: a deploy token only a
@@ -158,6 +158,8 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
   // a live token asking for any other is 403 `token_not_allowed`.
   const plugin = await pluginRow(db, id);
   if (publisher.via === "deploy_token" && (!plugin || plugin.owner_id !== publisher.userId || !tokenInScope(publisher, plugin))) return tokenNotAllowed();
+  // Allowed: the token's last use (never an attempt it was refused).
+  if (publisher.token) await userDirectoryStub(env)?.deployTokenUsed(publisher.token.id, id);
   if (!publisher.username) return fail(403, "needs_username", "Publishing needs a username: every listing reads \"by @username\".");
 
   const body = await readBody(request, STORE_MAX_PACKAGE_BYTES);

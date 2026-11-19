@@ -101,11 +101,11 @@ const usernameOf = async (env: Env, userId: string): Promise<string | null> =>
 
 /**
  * Who publishes: a session bearer, a web session, or (with `tokens`, the
- * publish route only) a deploy token, its last use recorded for `usedFor`
- * (the plugin it publishes). Without `tokens`, a token is refused before
- * it's looked up.
+ * publish route only) a deploy token. Without `tokens`, a token is refused
+ * before it's looked up. (A token's use is recorded by the route, once the
+ * publish is allowed.)
  */
-export const authenticatePublisher = async (req: Request, env: Env, tokens?: { readonly usedFor: string }): Promise<Publisher | Response> => {
+export const authenticatePublisher = async (req: Request, env: Env, tokens?: { readonly publishing: true }): Promise<Publisher | Response> => {
   const header = req.headers.get("authorization");
   if (header !== null) {
     const token = headerBearer(req);
@@ -115,7 +115,7 @@ export const authenticatePublisher = async (req: Request, env: Env, tokens?: { r
       const parsed = parseDeployToken(token);
       const directory = userDirectoryStub(env);
       if (!parsed || !directory) return invalidToken();
-      const holder = await directory.deployTokenHolder(parsed.short, await deployTokenHash(token), tokens.usedFor);
+      const holder = await directory.deployTokenHolder(parsed.short, await deployTokenHash(token));
       if (!holder) return invalidToken();
       return {
         userId: holder.userId,

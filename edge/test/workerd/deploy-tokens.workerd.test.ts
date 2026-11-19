@@ -283,7 +283,7 @@ describe("deploy tokens: making one", () => {
 });
 
 describe("deploy tokens: who's calling", () => {
-  it("publishes as its account, with its ids, name and scope, and records its last use", async () => {
+  it("publishes as its account, with its ids, name and scope", async () => {
     const { userId, pluginId } = await owned({ username: `dt${crypto.randomUUID().slice(0, 8)}` });
     const token = await made(userId, { plugins: [pluginId] });
     const res = await probe(token.token, versions(pluginId));
@@ -294,9 +294,27 @@ describe("deploy tokens: who's calling", () => {
       via: "deploy_token",
       token: { id: token.id, short: token.short, name: "GitHub Actions", scope: { plugins: [pluginId] }, createdAt: token.created_at }
     });
-    const listed = (await tokensOf(userId))[0]!;
-    expect(Math.abs(Date.now() - (listed.last_used_at as number))).toBeLessThan(60_000);
-    expect(listed.last_used_plugin).toBe(pluginId);
+    // Who it is isn't a use.
+    expect((await tokensOf(userId))[0]).toMatchObject({ last_used_at: null, last_used_plugin: null });
+  });
+
+  it("records a use only once a publish is allowed, never an attempt it was refused", async () => {
+    // (A username: publishing needs one.)
+    const { userId, plugins } = await owned({ n: 2, username: `du${crypto.randomUUID().slice(0, 8)}` });
+    const [pluginId, other] = plugins as [string, string];
+    const token = await made(userId, { plugins: [pluginId] });
+    // Refused: outside its scope, and a first version.
+    expect((await api(token.token, "POST", versions(other), "pkg")).status).toBe(403);
+    expect((await api(token.token, "POST", versions(newPlugin()), "pkg")).status).toBe(403);
+    expect((await tokensOf(userId))[0]).toMatchObject({ last_used_at: null, last_used_plugin: null });
+    // Allowed (whatever then becomes of the package): its last use.
+    expect((await api(token.token, "POST", versions(pluginId), "pkg")).status).toBe(400);
+    const used = (await tokensOf(userId))[0]!;
+    expect(Math.abs(Date.now() - (used.last_used_at as number))).toBeLessThan(60_000);
+    expect(used.last_used_plugin).toBe(pluginId);
+    // A refusal later leaves it as it was.
+    expect((await api(token.token, "POST", versions(other), "pkg")).status).toBe(403);
+    expect((await tokensOf(userId))[0]).toMatchObject({ last_used_at: used.last_used_at, last_used_plugin: pluginId });
   });
 
   it("refuses anything but publishing, reads included, before the token is looked up", async () => {
@@ -320,6 +338,9 @@ describe("deploy tokens: who's calling", () => {
     }
     // Not a use.
     expect((await tokensOf(userId))[0]).toMatchObject({ last_used_at: null });
+    // Never a session anywhere, the device API included, in any auth mode
+    // (these tests run in dev mode, where a bearer is its user id).
+    for (const path of ["/plugin-keys", "/auth/me", "/username"]) expect((await api(token.token, "GET", path)).status, path).toBe(401);
   });
 
   it("is refused before a byte of the body is read", async () => {

@@ -1505,6 +1505,12 @@ export class UserDirectory extends DurableObject<Env> {
       .one().n as number;
   }
 
+  /** Token `id` was used to publish `pluginId` (allowed: in its scope, its
+   * account's, not a first version): its last use. */
+  deployTokenUsed(id: string, pluginId: string): void {
+    this.ctx.storage.sql.exec("UPDATE deploy_tokens SET last_used_at = ?, last_used_plugin = ? WHERE id = ?", Date.now(), pluginId, id);
+  }
+
   /** Whether token `id` is still live: not revoked, not expired, its owner
    * not deleted (a publish asks again after its write). */
   deployTokenLive(id: string): boolean {
@@ -1516,9 +1522,9 @@ export class UserDirectory extends DurableObject<Env> {
   /** The live token whose short id is `short` and whose hash is `hash`, and
    * whose it is; undefined for anything else (unknown, revoked, expired, its
    * owner deleted), all alike. The hash is compared in constant time against
-   * each token of that short id (a public prefix), never looked up by it. A
-   * publish it's used for records the plugin (`usedFor`). */
-  deployTokenHolder(short: string, hash: string, usedFor: string): DeployTokenHolder | undefined {
+   * each token of that short id (a public prefix), never looked up by it.
+   * Not a use: that's `deployTokenUsed`, once a publish is allowed. */
+  deployTokenHolder(short: string, hash: string): DeployTokenHolder | undefined {
     const now = Date.now();
     const rows = this.ctx.storage.sql
       .exec("SELECT id, token_hash, user_id, short, name, scope_all, created_at, expires_at, revoked_at FROM deploy_tokens WHERE short = ?", short)
@@ -1528,12 +1534,6 @@ export class UserDirectory extends DurableObject<Env> {
     if (!found || found.revoked_at !== null || (found.expires_at !== null && (found.expires_at as number) <= now)) return undefined;
     const userId = found.user_id as string;
     if (this.userRefusal(userId) === "deleted_user") return undefined;
-    this.ctx.storage.sql.exec(
-      "UPDATE deploy_tokens SET last_used_at = ?, last_used_plugin = ? WHERE id = ?",
-      now,
-      usedFor,
-      found.id as string
-    );
     return {
       userId,
       username: this.username(userId),
