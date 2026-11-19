@@ -343,6 +343,9 @@ export interface Grant {
   readonly accessToken: string;
   /** Unix ms. The consumer may cache the grant until then (offline fallback). */
   readonly expiresAt: number;
+  /** The account it comes from (the active one): what a consumer keys what
+   * it learns with it by, such as the models a machine discovers with it. */
+  readonly slot?: string;
   /** Codex: ChatGPT account id. */
   readonly accountId?: string;
   /** Claude: OAuth scopes and plan of the stored login (the CLI's credential

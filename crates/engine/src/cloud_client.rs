@@ -16,7 +16,7 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
 use zeron_proto::{
     BillingLink, BillingStatus, CloudReach, CloudSession, CloudSessions, CloudStatus, CloudUsage,
@@ -460,19 +460,12 @@ impl CloudClient {
     /// `GET /cloud/{orgId}/models`: the models Cloud's machines run, by agent:
     /// Claude Code's and Codex's kept on the edge by hand (a new one needs no
     /// app release), every other agent's as a machine of this account last
-    /// discovered it with Cloud's credentials (`crate::model_publish`). Each
-    /// model is as the edge wrote it; [`cloud_models`] reads them leniently.
-    pub async fn models(
-        &self,
-    ) -> Result<std::collections::HashMap<String, Vec<serde_json::Value>>, EngineError> {
-        #[derive(Deserialize)]
-        struct Models {
-            #[serde(default)]
-            models: std::collections::HashMap<String, Vec<serde_json::Value>>,
-        }
-        let reply = self
-            .target()?
-            .call::<Models>(
+    /// discovered it with Cloud's credentials (`crate::model_publish`), and
+    /// that agent's catalog per set of accounts beside it. Each model is as
+    /// the edge wrote it; [`cloud_models`] reads them leniently.
+    pub async fn models(&self) -> Result<CloudModelLists, EngineError> {
+        self.target()?
+            .call::<CloudModelLists>(
                 reqwest::Method::GET,
                 &["cloud", "models"],
                 &[],
@@ -480,8 +473,34 @@ impl CloudClient {
                 "Read Cloud's models",
             )
             .await
-            .map_err(Failure::into_error)?;
-        Ok(reply.models)
+            .map_err(Failure::into_error)
+    }
+
+    /// `POST /cloud/{orgId}/models {harness, models, accounts}`: the models
+    /// `accounts` run `harness` with, as this device discovered them signing
+    /// one in for Cloud, kept as theirs until a machine discovers its own.
+    pub async fn publish_account_models(
+        &self,
+        harness: zeron_proto::HarnessId,
+        models: &[zeron_proto::Model],
+        accounts: &str,
+    ) -> Result<(), EngineError> {
+        let body = serde_json::json!({
+            "harness": harness.as_str(),
+            "models": models,
+            "accounts": accounts,
+        });
+        self.target()?
+            .call::<serde_json::Value>(
+                reqwest::Method::POST,
+                &["cloud", "models"],
+                &[],
+                Some(body),
+                "Keep Cloud's models",
+            )
+            .await
+            .map(|_| ())
+            .map_err(Failure::into_error)
     }
 
     /// `GET /vault/{orgId}/github/repos[?q=]` — the vault calls GitHub with
@@ -1082,6 +1101,13 @@ pub(crate) async fn dispatch(
     method: &str,
     raw: serde_json::Value,
 ) -> Result<RpcReply, RpcError> {
+    if matches!(
+        method,
+        methods::VAULT_PUT_API_KEY | methods::VAULT_DISCONNECT | methods::VAULT_CONNECT_CODEX | methods::VAULT_CONNECT_CLAUDE
+    ) {
+        // (Which accounts Cloud runs an agent on may change.)
+        crate::cloud_accounts::forget_active_accounts();
+    }
     match method {
         methods::CLOUD_STATUS => RpcReply::value(&cloud.status().await.map_err(failed)?),
         methods::CLOUD_ENABLE => RpcReply::value(&cloud.enable().await.map_err(failed)?),
@@ -1454,7 +1480,48 @@ impl Target {
 }
 
 
-/// The edge's models, as this engine's catalog takes them: each read alone, so
+/// `GET /cloud/{orgId}/models`'s reply (and the copy kept for when the edge is
+/// out of reach). An older edge's has no `catalogs`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CloudModelLists {
+    /// Each agent's newest catalog (Claude Code's and Codex's hand-kept).
+    #[serde(default)]
+    pub models: std::collections::HashMap<String, Vec<serde_json::Value>>,
+    /// Each agent's catalog per set of accounts, the newest first.
+    #[serde(default)]
+    pub catalogs: std::collections::HashMap<String, Vec<AccountCatalog>>,
+}
+
+/// One set of accounts' catalog of an agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountCatalog {
+    /// `provider@slot` pairs, sorted, `,`-joined
+    /// (`crate::credentials::credential_accounts`).
+    pub accounts: String,
+    #[serde(default)]
+    pub models: Vec<serde_json::Value>,
+}
+
+impl CloudModelLists {
+    /// The models `harness` runs with on Cloud: those discovered with the
+    /// accounts Cloud runs it on now (`accounts`), else its newest catalog
+    /// (another account's, or a machine's that named none). `None` with
+    /// nothing listed for it.
+    pub fn for_harness(&self, harness: &str, accounts: Option<&str>) -> Option<&[serde_json::Value]> {
+        let matched = accounts.and_then(|accounts| {
+            self.catalogs
+                .get(harness)?
+                .iter()
+                .find(|c| c.accounts == accounts && !c.models.is_empty())
+        });
+        match matched {
+            Some(catalog) => Some(&catalog.models),
+            None => self.models.get(harness).map(Vec::as_slice),
+        }
+    }
+}
+
+/// The edge's models, as this engine's catalog takes them: each read alone, so/// The edge's models, as this engine's catalog takes them: each read alone, so
 /// one this build can't read (a reasoning level it doesn't know, say) drops
 /// that level or that model, never the list.
 pub fn cloud_models(listed: &[serde_json::Value]) -> Vec<zeron_proto::Model> {
@@ -1799,6 +1866,29 @@ mod tests {
                 serde_json::json!({"error": "not_found", "message": "no route"}),
             ),
         }
+    }
+
+    /// The catalog for the accounts Cloud runs an agent on now, else its
+    /// newest; an older edge's reply (no `catalogs`) still reads.
+    #[test]
+    fn the_accounts_catalog_wins_over_the_newest() {
+        let lists: CloudModelLists = serde_json::from_value(serde_json::json!({
+            "models": { "grok": [{ "id": "grok-4.7" }] },
+            "catalogs": { "grok": [
+                { "accounts": "grok@paid", "models": [{ "id": "grok-4.7-build-fast" }], "at": 2 },
+                { "accounts": "grok@free", "models": [{ "id": "grok-4.7" }], "at": 1 }
+            ]}
+        }))
+        .unwrap();
+        let ids = |models: Option<&[serde_json::Value]>| {
+            models.map(|m| m.iter().map(|v| v["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>())
+        };
+        assert_eq!(ids(lists.for_harness("grok", Some("grok@paid"))), Some(vec!["grok-4.7-build-fast".into()]));
+        assert_eq!(ids(lists.for_harness("grok", Some("grok@other"))), Some(vec!["grok-4.7".into()]), "unknown accounts: the newest");
+        assert_eq!(ids(lists.for_harness("grok", None)), Some(vec!["grok-4.7".into()]));
+        assert_eq!(lists.for_harness("pi", Some("codex@c1")), None);
+        let older: CloudModelLists = serde_json::from_value(serde_json::json!({ "models": { "pi": [{ "id": "a" }] } })).unwrap();
+        assert_eq!(ids(older.for_harness("pi", Some("codex@c1"))), Some(vec!["a".into()]));
     }
 
     #[test]

@@ -629,7 +629,7 @@ export class VaultAccount extends DurableObject<Env> {
       }
       const usable = await this.usableMaterial(active.slot, allowed);
       if (!usable.ok) return usable;
-      return ok(this.toGrant(usable.value.generation, usable.value.material));
+      return ok(this.toGrant(usable.value.generation, usable.value.material, active.slot));
     });
   }
 
@@ -1631,11 +1631,12 @@ export class VaultAccount extends DurableObject<Env> {
     }
   }
 
-  private toGrant(generation: number, material: GrantMaterial): Grant {
+  private toGrant(generation: number, material: GrantMaterial, slot: string): Grant {
     return {
       provider: this.provider,
       accessToken: material.accessToken,
       expiresAt: material.expiresAt,
+      slot,
       generation,
       ...(material.accountId ? { accountId: material.accountId } : {}),
       ...(material.idToken ? { idToken: material.idToken } : {}),

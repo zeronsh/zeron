@@ -78,6 +78,7 @@ pub mod runner;
 pub mod wake_trace;
 pub mod wake_update;
 pub mod self_schedule;
+pub mod sign_in_catalog;
 pub mod sessions;
 pub mod source_control;
 pub mod spaces;

@@ -134,6 +134,7 @@ pub(crate) async fn dispatch(
     method: &str,
     params: serde_json::Value,
 ) -> Result<RpcReply, RpcError> {
+    forget_active_accounts();
     match method {
         methods::LIST_AGENT_ACCOUNTS => {
             let p: ListParams = parse_params(params).unwrap_or_default();
@@ -579,6 +580,101 @@ fn ready_from(vault: &zeron_proto::VaultStatus) -> Vec<HarnessId> {
         .collect()
 }
 
+/// Where a Cloud sign-in's discovered models go
+/// (`crate::sign_in_catalog`): kept on the edge as the catalog of the
+/// accounts Cloud runs that agent on now, the new one among them (a new
+/// sign-in becomes the active account).
+pub(crate) fn catalog_publisher(cloud: CloudClient) -> crate::sign_in_catalog::CatalogPublisher {
+    std::sync::Arc::new(move |harness, models| {
+        let cloud = cloud.clone();
+        Box::pin(async move {
+            let Some(accounts) = active_accounts(&cloud, harness).await else {
+                tracing::info!(harness = harness.as_str(), "sign-in catalog: no active account to keep it for");
+                return;
+            };
+            match cloud.publish_account_models(harness, &models, &accounts).await {
+                Ok(()) => tracing::info!(harness = harness.as_str(), models = models.len(), "sign-in catalog: kept"),
+                Err(error) => tracing::warn!(harness = harness.as_str(), %error, "sign-in catalog: not kept"),
+            }
+        })
+    })
+}
+
+/// The accounts a Cloud machine runs `harness` on now, as its credential
+/// broker picks them: in each of the agent's groups (`cloud_credentials`), the
+/// first login or key whose active account works, named `provider@slot`,
+/// sorted and `,`-joined as a machine names a catalog's
+/// (`crate::credentials::credential_accounts`). `None` with none, or while
+/// the vault can't be read.
+/// Read again at most this often: the picker asks once per agent each time
+/// it lists Cloud's models, and each asks every provider the agent reaches.
+const ACTIVE_ACCOUNTS_TTL: Duration = Duration::from_secs(15);
+
+fn active_accounts_cache() -> &'static Mutex<HashMap<HarnessId, (Instant, Option<String>)>> {
+    static CACHE: OnceLock<Mutex<HashMap<HarnessId, (Instant, Option<String>)>>> = OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// Read the active accounts afresh next time: Cloud's accounts changed (or
+/// may have, any call about them).
+pub(crate) fn forget_active_accounts() {
+    active_accounts_cache().lock().unwrap_or_else(PoisonError::into_inner).clear();
+}
+
+pub(crate) async fn active_accounts(cloud: &CloudClient, harness: HarnessId) -> Option<String> {
+    if let Some((at, accounts)) = active_accounts_cache()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&harness)
+        && at.elapsed() < ACTIVE_ACCOUNTS_TTL
+    {
+        return accounts.clone();
+    }
+    let mut providers: Vec<VaultProvider> = cloud_credentials(harness).iter().map(|c| c.vault).collect();
+    providers.dedup();
+    let listed = futures::future::join_all(
+        providers
+            .iter()
+            .map(|provider| async move { (*provider, cloud.vault_accounts(*provider).await) }),
+    )
+    .await;
+    let mut by_provider = HashMap::new();
+    for (provider, accounts) in listed {
+        // (Unreadable: not kept, asked again next time.)
+        by_provider.insert(provider, accounts.ok()?);
+    }
+    let accounts = accounts_key(harness, &by_provider);
+    active_accounts_cache()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(harness, (Instant::now(), accounts.clone()));
+    accounts
+}
+
+fn accounts_key(
+    harness: HarnessId,
+    by_provider: &HashMap<VaultProvider, Vec<VaultAccount>>,
+) -> Option<String> {
+    let mut taken: HashSet<&str> = HashSet::new();
+    let mut accounts = Vec::new();
+    for credential in cloud_credentials(harness) {
+        if taken.contains(credential.group) {
+            continue;
+        }
+        let active = by_provider.get(&credential.vault).and_then(|accounts| {
+            accounts
+                .iter()
+                .find(|a| a.active && a.status == VaultConnectionStatus::Connected)
+        });
+        if let Some(account) = active {
+            taken.insert(credential.group);
+            accounts.push(format!("{}@{}", credential.vault.as_str(), account.slot));
+        }
+    }
+    accounts.sort_unstable();
+    (!accounts.is_empty()).then(|| accounts.join(","))
+}
+
 /// Whether `target` is Cloud as the Providers page addresses it.
 pub(crate) fn is_cloud_accounts_target(target: &str) -> bool {
     target == CLOUD_ACCOUNTS_DEVICE
@@ -611,6 +707,46 @@ mod tests {
             created_at: 1,
             updated_at: 2,
         }
+    }
+
+    /// The accounts a machine would run an agent on, as a catalog names
+    /// them: a group's first login or key with a working active account (a
+    /// key behind a working login isn't used), every group's, sorted.
+    #[test]
+    fn active_accounts_are_the_ones_a_machine_runs_on() {
+        let by = |entries: &[(VaultProvider, VaultAccount)]| {
+            let mut map: HashMap<VaultProvider, Vec<VaultAccount>> = HashMap::new();
+            for (provider, account) in entries {
+                map.entry(*provider).or_default().push(account.clone());
+            }
+            map
+        };
+        let grok_login = vault("g1", "oauth", true);
+        let xai_key = vault("k1", "api-key", true);
+        assert_eq!(
+            accounts_key(HarnessId::Grok, &by(&[(VaultProvider::Grok, grok_login.clone()), (VaultProvider::XaiKey, xai_key.clone())])).as_deref(),
+            Some("grok@g1"),
+            "the login, not the key behind it"
+        );
+        let mut broken = grok_login.clone();
+        broken.status = VaultConnectionStatus::NeedsReconnect;
+        assert_eq!(
+            accounts_key(HarnessId::Grok, &by(&[(VaultProvider::Grok, broken), (VaultProvider::XaiKey, xai_key.clone())])).as_deref(),
+            Some("xai-key@k1"),
+            "a login that no longer works gives way to the key"
+        );
+        assert_eq!(accounts_key(HarnessId::Grok, &by(&[(VaultProvider::Grok, vault("g2", "oauth", false))])), None);
+        // Pi: one per provider it reaches, sorted as a machine sorts them.
+        let pi = accounts_key(
+            HarnessId::Pi,
+            &by(&[(VaultProvider::Codex, vault("c1", "oauth", true)), (VaultProvider::Claude, vault("a1", "oauth", true)), (VaultProvider::OpenrouterKey, vault("o1", "api-key", true))]),
+        );
+        assert_eq!(pi.as_deref(), Some("claude@a1,codex@c1,openrouter-key@o1"));
+        assert_eq!(
+            pi,
+            crate::credentials::credential_accounts("openrouter-key@o1:2,codex@c1:9,claude@a1:4"),
+            "the same key a machine's catalog carries"
+        );
     }
 
     #[test]

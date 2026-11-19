@@ -63,11 +63,16 @@ impl CatalogSink for EdgeSink {
         credential: &str,
     ) -> Result<(), String> {
         let token = self.tokens.token().await.map_err(|e| e.to_string())?;
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "harness": harness.as_str(),
             "models": models,
             "credential": credential,
         });
+        // Whose catalog it is: the edge keeps one per set of accounts, so a
+        // switch of account shows that account's models.
+        if let Some(accounts) = crate::credentials::credential_accounts(credential) {
+            body["accounts"] = serde_json::Value::String(accounts);
+        }
         let res = self
             .http
             .post(&self.url)

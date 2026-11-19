@@ -1224,35 +1224,31 @@ impl EngineRpc {
                         zeron_proto::providers::provider_name(p.harness)
                     ))));
                 }
-                // What Cloud's machines run: the edge's list (the last one read,
-                // when it's out of reach), as a phone reads it. This computer's
-                // own catalog only before either: it fails where an agent isn't
-                // installed or signed in here, and Cloud's are signed in on the
-                // machine.
+                // What Cloud's machines run: the edge's list for the accounts
+                // Cloud runs the agent on (the last one read, when it's out of
+                // reach), as a phone reads it.
                 if let Some(models) = self.cloud_models(p.harness).await {
                     return Some(RpcReply::value(&models));
                 }
-                match self.handle(method, local(&[])).await {
-                    Ok(reply) => Some(Ok(reply)),
-                    // Not signed in (or installed) here, while Cloud is, and
-                    // no Cloud machine has run it yet to publish its list:
-                    // the agent's own fallback models, so it can be picked
-                    // for its first Cloud run (which publishes the real ones).
-                    Err(error) => {
-                        let fallback = self
-                            .registry
-                            .resolve(p.harness)
-                            .map(|harness| harness.fallback_models())
-                            .unwrap_or_default();
-                        if fallback.is_empty() {
-                            Some(Err(error))
-                        } else {
-                            tracing::info!(harness = p.harness.as_str(), %error,
-                                "Cloud models: fallback list until a Cloud machine publishes one");
-                            Some(RpcReply::value(&fallback))
-                        }
-                    }
+                // Nothing discovered for Cloud yet (signed in before Cloud
+                // kept a list at sign-in, and no machine has run it): the
+                // agent's own fallback models, so it can be picked for its
+                // first Cloud run, which publishes the real ones. This
+                // computer's own catalog only for an agent with none: it's
+                // whatever account this computer is signed in to (Antigravity
+                // signed in here to an account offered only Flash listed that
+                // for Cloud's), and fails where the agent isn't here at all.
+                let fallback = self
+                    .registry
+                    .resolve(p.harness)
+                    .map(|harness| harness.fallback_models())
+                    .unwrap_or_default();
+                if !fallback.is_empty() {
+                    tracing::info!(harness = p.harness.as_str(),
+                        "Cloud models: fallback list until Cloud discovers one");
+                    return Some(RpcReply::value(&fallback));
                 }
+                Some(self.handle(method, local(&[])).await)
             }
             methods::LIST_SKILLS | methods::LIST_COMMANDS if account => Some(
                 self.handle(method, local(&["chatId", "spaceId", "path"]))
@@ -1265,13 +1261,20 @@ impl EngineRpc {
         }
     }
 
-    /// Cloud's models for `harness`: the edge's list, kept on disk as it's
-    /// read, else the last one kept. `None` before the edge was ever read, or
-    /// with nothing listed for it.
+    /// Cloud's models for `harness`: the edge's lists, kept on disk as they're
+    /// read, else the last ones kept; of them, the catalog discovered with the
+    /// accounts Cloud runs it on now, else its newest
+    /// ([`crate::cloud_client::CloudModelLists::for_harness`]). `None` before
+    /// the edge was ever read, or with nothing listed for it.
     async fn cloud_models(&self, harness: HarnessId) -> Option<Vec<zeron_proto::Model>> {
         let key = serde_json::to_value(harness).ok()?.as_str()?.to_owned();
         let path = self.repos.data_dir().join("cloud-models.json");
-        let listed = match self.cloud().models().await {
+        let cloud = self.cloud();
+        let (listed, accounts) = tokio::join!(
+            cloud.models(),
+            crate::cloud_accounts::active_accounts(&cloud, harness)
+        );
+        let listed = match listed {
             Ok(listed) => {
                 if let Ok(bytes) = serde_json::to_vec(&listed) {
                     if let Err(error) = std::fs::write(&path, bytes) {
@@ -1283,10 +1286,10 @@ impl EngineRpc {
             Err(error) => {
                 tracing::debug!(%error, "Cloud's models: the last list kept");
                 let bytes = std::fs::read(&path).ok()?;
-                serde_json::from_slice(&bytes).ok()?
+                serde_json::from_slice::<crate::cloud_client::CloudModelLists>(&bytes).ok()?
             }
         };
-        let models = crate::cloud_client::cloud_models(listed.get(&key)?);
+        let models = crate::cloud_client::cloud_models(listed.for_harness(&key, accounts.as_deref())?);
         (!models.is_empty()).then_some(models)
     }
 

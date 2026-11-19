@@ -43,7 +43,15 @@ import type { CloudResult, RepoInput } from "./cloud-account";
 import type { SandboxMachine } from "./sandbox-provider";
 import { isEdgeOrigin } from "./install-script";
 import { DAY_MS, dayKey, isDayKey } from "./metering";
-import { MAX_PUBLISH_BODY, cloudModels, isCloudAgent, parsePublishedModels } from "./models";
+import {
+  MAX_PUBLISH_BODY,
+  accountCatalogs,
+  cloudModels,
+  isCloudAgent,
+  parseAccounts,
+  parsePublishedModels,
+  type PublishedCatalogs
+} from "./models";
 
 /** The longest range a usage read covers. */
 const MAX_USAGE_DAYS = 366;
@@ -336,8 +344,15 @@ export const handleCloudRoute = async (
     }
     const models = parsePublishedModels(body.models);
     if (!models) return jsonError(400, "bad_request", "Expected models: a non-empty list of models.");
+    // (Optional: a machine whose vault names no account sends none.)
+    const accounts = body.accounts === undefined ? undefined : parseAccounts(body.accounts);
+    if (body.accounts !== undefined && !accounts) {
+      return jsonError(400, "bad_request", "Expected accounts: sorted provider@slot pairs, comma-joined.");
+    }
     const runner = { orgId: auth.orgId, userId: auth.userId, deviceId: auth.deviceId };
-    return rpc(() => accountStub(ns, runner.orgId, runner.userId).publishModels(runner, harness, models, credential));
+    return rpc(() =>
+      accountStub(ns, runner.orgId, runner.userId).publishModels(runner, harness, models, credential, accounts)
+    );
   }
 
   if (url.pathname === "/runner/wake-timing") {
@@ -417,14 +432,28 @@ export const handleCloudRoute = async (
     // turned Cloud on, and every other agent's catalog as a machine of this
     // account last discovered it. A failure reading those still answers the
     // hand-kept lists: the picker always has Claude Code's and Codex's.
-    if (!ns) return json({ models: cloudModels({}) });
-    let published = {};
+    if (!ns) return json({ models: cloudModels({}), catalogs: {} });
+    let published: PublishedCatalogs = { latest: {}, byAccount: {} };
     try {
       published = await accountStub(ns, orgId, auth.userId).publishedModels(caller);
     } catch (e) {
       console.error("cloud models: published catalogs unreadable", String(e));
     }
-    return json({ models: cloudModels(published) });
+    return json({ models: cloudModels(published.latest), catalogs: accountCatalogs(published.byAccount) });
+  }
+  if (rest.length === 1 && rest[0] === "models" && request.method === "POST") {
+    // An agent's models as this account's own device discovered them while
+    // signing an account in for Cloud: shown before any machine runs it.
+    if (!ns) return unavailable();
+    const body = await readJsonBody(request, MAX_PUBLISH_BODY);
+    if (!isObject(body)) return jsonError(400, "bad_request", "Body must be a JSON object.");
+    if (!isCloudAgent(body.harness)) return jsonError(400, "bad_request", "Unknown harness.");
+    const harness = body.harness;
+    const accounts = parseAccounts(body.accounts);
+    if (!accounts) return jsonError(400, "bad_request", "Expected accounts: sorted provider@slot pairs, comma-joined.");
+    const models = parsePublishedModels(body.models);
+    if (!models) return jsonError(400, "bad_request", "Expected models: a non-empty list of models.");
+    return rpc(() => accountStub(ns, orgId, auth.userId).publishAccountModels(caller, harness, models, accounts));
   }
   if (rest[0] === "billing") {
     if (!ns) return unavailable();

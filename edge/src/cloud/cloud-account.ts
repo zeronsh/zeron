@@ -108,7 +108,14 @@ import {
   type MachineSpec,
   type WorkflowKind
 } from "./policy";
-import { isCloudAgent, type CloudAgent, type PublishedCatalog, type PublishedModel } from "./models";
+import {
+  MAX_ACCOUNT_CATALOGS,
+  isCloudAgent,
+  type CloudAgent,
+  type PublishedCatalog,
+  type PublishedCatalogs,
+  type PublishedModel
+} from "./models";
 import { activeProviderName, sandboxProvider } from "./providers";
 import { WAKE_STAGE_TTL_MS, wakeTiming, type EngineTiming, type WakeStage, type WakeStages, type WakeTrace } from "./wake";
 import {
@@ -480,6 +487,8 @@ const CREDIT_CHECK_MS = 5 * 60_000;
 const SESSION_PREFIX = "session:";
 /** `models:{agent}` → the agent's catalog a machine last published. */
 const MODELS_PREFIX = "models:";
+/** `catalog:{agent}|{accounts}`: an agent's catalog per set of accounts. */
+const ACCOUNT_CATALOG_PREFIX = "catalog:";
 /** A delete that crashed mid-way may be retried after this long. */
 const DELETE_STUCK_MS = 5 * 60_000;
 /** Waits before retrying a failed delete on its own; the last repeats. */
@@ -2050,27 +2059,64 @@ export class CloudAccount extends DurableObject<Env> {
     runner: CloudCaller & { deviceId: string },
     agent: CloudAgent,
     models: readonly PublishedModel[],
-    credential: string
+    credential: string,
+    accounts?: string
   ): Promise<CloudResult<{ ok: true }>> {
     const s = this.sessionByDevice(runner.deviceId);
     if (!s || !s.runnerKey || !this.matches(runner)) {
       return fail(403, "revoked", "This Cloud device is not enrolled.");
     }
-    const catalog: PublishedCatalog = { models, credential, at: Date.now() };
+    const catalog: PublishedCatalog = { models, credential, at: Date.now(), ...(accounts ? { accounts } : {}) };
     await this.ctx.storage.put(`${MODELS_PREFIX}${agent}`, catalog);
+    if (accounts) await this.keepAccountCatalog(agent, catalog, accounts);
     return { ok: true, value: { ok: true } };
   }
 
-  /** The catalogs machines published, by agent (`GET /cloud/{orgId}/models`).
+  /** `POST /cloud/{orgId}/models`: the catalog this account's own device
+   * discovered for `accounts` as it signed one of them in for Cloud (before
+   * any machine runs it), kept beside the machines' as that account's. */
+  async publishAccountModels(
+    caller: CloudCaller,
+    agent: CloudAgent,
+    models: readonly PublishedModel[],
+    accounts: string
+  ): Promise<CloudResult<{ ok: true }>> {
+    if (!this.matches(caller)) return fail(403, "forbidden", "Not this account's.");
+    const catalog: PublishedCatalog = { models, credential: "sign-in", at: Date.now(), accounts };
+    await this.keepAccountCatalog(agent, catalog, accounts);
+    // (The newest any client reads, until a machine publishes one.)
+    if (!(await this.ctx.storage.get(`${MODELS_PREFIX}${agent}`))) {
+      await this.ctx.storage.put(`${MODELS_PREFIX}${agent}`, catalog);
+    }
+    return { ok: true, value: { ok: true } };
+  }
+
+  /** Keep `catalog` as `accounts`' catalog of `agent`, and only the newest
+   * `MAX_ACCOUNT_CATALOGS` of that agent's. */
+  private async keepAccountCatalog(agent: CloudAgent, catalog: PublishedCatalog, accounts: string): Promise<void> {
+    const prefix = `${ACCOUNT_CATALOG_PREFIX}${agent}|`;
+    await this.ctx.storage.put(`${prefix}${accounts}`, catalog);
+    const kept = [...(await this.ctx.storage.list<PublishedCatalog>({ prefix }))].sort(([, a], [, b]) => b.at - a.at);
+    const stale = kept.slice(MAX_ACCOUNT_CATALOGS).map(([key]) => key);
+    if (stale.length > 0) await this.ctx.storage.delete(stale);
+  }
+
+  /** The catalogs published, by agent (`GET /cloud/{orgId}/models`): each
+   * agent's newest (`latest`) and one per set of accounts (`byAccount`).
    * Empty for anyone but this account's own user. */
-  async publishedModels(caller: CloudCaller): Promise<Partial<Record<CloudAgent, PublishedCatalog>>> {
-    if (!this.matches(caller)) return {};
-    const out: Partial<Record<CloudAgent, PublishedCatalog>> = {};
+  async publishedModels(caller: CloudCaller): Promise<PublishedCatalogs> {
+    const latest: Partial<Record<CloudAgent, PublishedCatalog>> = {};
+    const byAccount: Partial<Record<CloudAgent, PublishedCatalog[]>> = {};
+    if (!this.matches(caller)) return { latest, byAccount };
     for (const [key, catalog] of await this.ctx.storage.list<PublishedCatalog>({ prefix: MODELS_PREFIX })) {
       const agent = key.slice(MODELS_PREFIX.length);
-      if (isCloudAgent(agent)) out[agent] = catalog;
+      if (isCloudAgent(agent)) latest[agent] = catalog;
     }
-    return out;
+    for (const [key, catalog] of await this.ctx.storage.list<PublishedCatalog>({ prefix: ACCOUNT_CATALOG_PREFIX })) {
+      const agent = key.slice(ACCOUNT_CATALOG_PREFIX.length).split("|")[0];
+      if (isCloudAgent(agent)) (byAccount[agent] ??= []).push(catalog);
+    }
+    return { latest, byAccount };
   }
 
   /** `POST /runner/heartbeat` (runner bearer, already verified). */

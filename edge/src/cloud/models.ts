@@ -139,7 +139,34 @@ export interface PublishedCatalog {
   readonly credential: string;
   /** Unix ms. */
   readonly at: number;
+  /** The accounts it was discovered with (`provider@slot`, sorted, `,`-
+   * joined; `parseAccounts`): whose models these are. Absent from a machine
+   * whose vault names no account. */
+  readonly accounts?: string;
 }
+
+/** What `CloudAccount.publishedModels` reads: each agent's newest catalog
+ * and its catalog per set of accounts. */
+export interface PublishedCatalogs {
+  readonly latest: Partial<Record<CloudAgent, PublishedCatalog>>;
+  readonly byAccount: Partial<Record<CloudAgent, PublishedCatalog[]>>;
+}
+
+/** How many accounts' catalogs one agent keeps, the newest first. */
+export const MAX_ACCOUNT_CATALOGS = 8;
+
+/**
+ * The accounts a catalog belongs to, as a machine or a sign-in names them
+ * (crates/engine `credential_accounts`): `provider@slot` pairs, sorted and
+ * joined by `,`. Undefined when it isn't that shape.
+ */
+export const parseAccounts = (value: unknown): string | undefined => {
+  if (typeof value !== "string" || value.length === 0 || value.length > 512) return undefined;
+  const pairs = value.split(",");
+  const shaped = pairs.every((pair) => /^[a-z0-9-]{1,40}@[A-Za-z0-9_-]{1,64}$/.test(pair));
+  const sorted = pairs.every((pair, i) => i === 0 || pairs[i - 1] < pair);
+  return shaped && sorted ? value : undefined;
+};
 
 /** The most models one agent's catalog keeps. */
 export const MAX_PUBLISHED_MODELS = 400;
@@ -227,6 +254,23 @@ export const parsePublishedModels = (value: unknown): PublishedModel[] | undefin
     models = models.slice(0, Math.floor(models.length * 0.9));
   }
   return models.length > 0 ? models : undefined;
+};
+
+/** Every agent's catalogs per account, the newest first, as `GET
+ * /cloud/{orgId}/models` answers them beside `models` (`catalogs`): a client
+ * shows the one discovered with the accounts Cloud runs that agent on now. */
+export const accountCatalogs = (
+  byAccount: Readonly<Partial<Record<CloudAgent, readonly PublishedCatalog[]>>>
+): Record<string, { accounts: string; models: readonly PublishedModel[]; at: number }[]> => {
+  const out: Record<string, { accounts: string; models: readonly PublishedModel[]; at: number }[]> = {};
+  for (const agent of CLOUD_AGENTS) {
+    const catalogs = (byAccount[agent] ?? [])
+      .filter((c): c is PublishedCatalog & { accounts: string } => !!c.accounts && c.models.length > 0)
+      .sort((a, b) => b.at - a.at)
+      .map(({ accounts, models, at }) => ({ accounts, models, at }));
+    if (!isStaticCloudAgent(agent) && catalogs.length > 0) out[agent] = catalogs;
+  }
+  return out;
 };
 
 /** What `GET /cloud/{orgId}/models` answers: the hand-kept lists, then every

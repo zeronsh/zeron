@@ -59,6 +59,62 @@ describe("published catalogs", () => {
   });
 });
 
+type Catalogs = Record<string, { accounts: string; models: { id: string }[]; at: number }[]>;
+
+const catalogs = async (bearer: string): Promise<Catalogs> =>
+  ((await (await call("GET", "/cloud/org1/models", bearer)).json()) as { catalogs: Catalogs }).catalogs;
+
+describe("catalogs per account", () => {
+  it("each set of accounts keeps its own catalog, the newest first, at most eight an agent", async () => {
+    const u = newUser();
+    const { deviceId, key } = await readySession(u);
+    const runner = `Bearer ${await runnerToken(u, deviceId, key)}`;
+    const publish = (body: unknown) => call("POST", "/runner/models", runner, body);
+    const grok = (id: string) => [{ id, label: id, reasoningLevels: [], options: [] }];
+    // A free account's one model, then a paid one's four: both kept, by account.
+    expect((await publish({ harness: "grok", models: grok("grok-4.7"), credential: "grok@free:1", accounts: "grok@free" })).status).toBe(200);
+    expect((await publish({ harness: "grok", models: grok("grok-4.7-build-fast"), credential: "grok@paid:2", accounts: "grok@paid" })).status).toBe(200);
+    const kept = (await catalogs(userBearer(u))).grok;
+    expect(kept?.map((c) => [c.accounts, c.models.map((m) => m.id)])).toEqual([
+      ["grok@paid", ["grok-4.7-build-fast"]],
+      ["grok@free", ["grok-4.7"]]
+    ]);
+    // The newest is still what an older client reads.
+    expect((await listed(userBearer(u))).grok?.map((m) => m.id)).toEqual(["grok-4.7-build-fast"]);
+    // A refresh of one account's catalog replaces it in place.
+    expect((await publish({ harness: "grok", models: grok("grok-4.8"), credential: "grok@free:3", accounts: "grok@free" })).status).toBe(200);
+    expect((await catalogs(userBearer(u))).grok?.map((c) => [c.accounts, c.models[0]?.id])).toEqual([
+      ["grok@free", "grok-4.8"],
+      ["grok@paid", "grok-4.7-build-fast"]
+    ]);
+    for (let i = 0; i < 10; i++) {
+      expect((await publish({ harness: "grok", models: grok(`m${i}`), credential: `grok@s${i}:1`, accounts: `grok@s${i}` })).status).toBe(200);
+    }
+    const bounded = (await catalogs(userBearer(u))).grok ?? [];
+    expect(bounded.length).toBe(8);
+    expect(bounded[0]?.accounts).toBe("grok@s9");
+    // Another user sees none of it.
+    expect(await catalogs(userBearer(newUser()))).toEqual({});
+  });
+
+  it("the account's own device publishes what it discovered signing an account in; accounts are well-formed", async () => {
+    const u = newUser();
+    await readySession(u);
+    const body = { harness: "antigravity", models: [{ id: "gemini-4-neon", label: "Gemini 4 Neon", reasoningLevels: ["low", "xhigh"], options: [] }], accounts: "antigravity@g1" };
+    expect((await call("POST", "/cloud/org1/models", userBearer(u), body)).status).toBe(200);
+    expect((await catalogs(userBearer(u))).antigravity?.map((c) => c.accounts)).toEqual(["antigravity@g1"]);
+    // With no machine's yet, it's also the newest.
+    expect((await listed(userBearer(u))).antigravity?.map((m) => m.id)).toEqual(["gemini-4-neon"]);
+    for (const accounts of ["", "antigravity", "b@x,a@y", "antigravity@g 1", 7]) {
+      expect((await call("POST", "/cloud/org1/models", userBearer(u), { ...body, accounts })).status, String(accounts)).toBe(400);
+    }
+    expect((await call("POST", "/cloud/org1/models", userBearer(u), { ...body, harness: "acp.gemini" })).status).toBe(400);
+    const { deviceId, key } = await readySession(u);
+    const runner = `Bearer ${await runnerToken(u, deviceId, key)}`;
+    expect((await call("POST", "/runner/models", runner, { ...body, credential: "x:1", accounts: "Bad@" })).status).toBe(400);
+  });
+});
+
 describe("parsePublishedModels", () => {
   it("keeps what parses, distinct, bounded in count and size", () => {
     const many = Array.from({ length: MAX_PUBLISHED_MODELS + 50 }, (_, i) => ({

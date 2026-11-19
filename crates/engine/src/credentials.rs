@@ -235,6 +235,38 @@ pub struct Grant {
     pub settings: BTreeMap<String, String>,
     #[serde(default)]
     pub generation: i64,
+    /// The vault account it comes from (an older vault names none).
+    #[serde(default)]
+    pub slot: Option<String>,
+}
+
+/// One login's part of a credential fingerprint
+/// ([`CredentialBroker::credential`]): `provider@slot:generation`, the
+/// account it comes from and its version (`provider:generation` from a vault
+/// that names no account).
+fn credential_part(provider: &str, grant: &Grant) -> String {
+    match &grant.slot {
+        Some(slot) => format!("{provider}@{slot}:{}", grant.generation),
+        None => format!("{provider}:{}", grant.generation),
+    }
+}
+
+/// The accounts a credential fingerprint was made with (`provider@slot`,
+/// sorted, joined by `,`), without their versions: whose models a catalog
+/// discovered with it are, the same after a token refresh, another after a
+/// switch of account. `None` for one that names no account: a machine's own
+/// login, none at all, or an older vault's grant.
+pub fn credential_accounts(credential: &str) -> Option<String> {
+    let mut accounts = credential
+        .split(',')
+        .map(|part| {
+            let part = part.strip_suffix(":expiring").unwrap_or(part);
+            let (account, generation) = part.rsplit_once(':')?;
+            (account.contains('@') && generation.parse::<i64>().is_ok()).then_some(account)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    accounts.sort_unstable();
+    (!accounts.is_empty()).then(|| accounts.join(","))
 }
 
 impl std::fmt::Debug for Grant {
@@ -1045,7 +1077,7 @@ impl CredentialBroker {
                     .use_grants
                     .iter()
                     .map(|(c, g)| {
-                        let mut id = format!("{}:{}", c.vault.as_str(), g.generation);
+                        let mut id = credential_part(c.vault.as_str(), g);
                         // Antigravity reads its token once per connection: a
                         // session must not outlive it, so one whose token is
                         // nearing its end reads as another credential and is
@@ -1076,7 +1108,7 @@ impl CredentialBroker {
             }
             _ => return None,
         };
-        let generation = |grant: Grant| format!("{}:{}", grant.provider, grant.generation);
+        let generation = |grant: Grant| credential_part(&grant.provider, &grant);
         match self.grant_for_run(login).await {
             GrantOutcome::Granted(grant) => return Some(generation(grant)),
             GrantOutcome::Unavailable(_) => return None,
@@ -3474,6 +3506,26 @@ mod tests {
             subscription_type: None,
             settings: BTreeMap::new(),
             generation: 3,
+            slot: Some("s1".into()),
+        }
+    }
+
+    /// A fingerprint names each login's account and version; the accounts
+    /// alone say whose catalog it is: the same across a token refresh (or
+    /// Antigravity's nearing expiry), another after a switch of account, and
+    /// none where it names no account.
+    #[test]
+    fn a_fingerprints_accounts_drop_their_versions() {
+        let mut g = grant("at");
+        assert_eq!(credential_part("codex", &g), "codex@s1:3");
+        g.slot = None;
+        assert_eq!(credential_part("codex", &g), "codex:3", "an older vault names no account");
+        assert_eq!(credential_accounts("pi-key@k2:4,codex@s1:7").as_deref(), Some("codex@s1,pi-key@k2"));
+        assert_eq!(credential_accounts("antigravity@a:9:expiring").as_deref(), Some("antigravity@a"));
+        assert_eq!(credential_accounts("codex@s1:8"), credential_accounts("codex@s1:3"));
+        assert_ne!(credential_accounts("codex@s2:3"), credential_accounts("codex@s1:3"));
+        for unnamed in ["codex:3", "codex@s1:3,claude:2", "native", "none", ""] {
+            assert_eq!(credential_accounts(unnamed), None, "{unnamed}");
         }
     }
 
