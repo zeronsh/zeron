@@ -35,7 +35,7 @@ import type { Env } from "../env";
 import { userDirectoryStub } from "../user-directory";
 import { authorCard, authorsOf, listingState, ownerCard, parseStoredJson, publisherIds, reviewOf, versionInfo } from "./cards";
 import { ASK_PATHS, type ConsentItem, askParts, askPartsOf, asksChanged, consentDiff } from "./consent";
-import { VERSION_ORDER, type VersionRow, auditIfChanged, pluginRow, relist, supersedeOlder, supersededAt, versionRow } from "./db";
+import { LISTED, VERSION_ORDER, type VersionRow, auditIfChanged, pluginRow, relist, supersedeOlder, supersededAt, versionRow } from "./db";
 import { answer, fail, notFound, objectBody, refusedBody } from "./http";
 import { dropFromDeployKeys, readBody, requireAdmin } from "./principal";
 import { purgeCatalog, purgeTakedowns } from "./purge";
@@ -133,14 +133,17 @@ const people = async (env: Env, ids: readonly string[]): Promise<Record<string, 
 // ── the queue and a submission ───────────────────────────────────────────────
 
 /** The queue's states (amendment 45): `undecided` (no reviewer decided it
- * yet, nor did a newer version supersede it), `verified`, `declined`. */
-const QUEUE_STATES = ["undecided", "verified", "declined", "all"] as const;
+ * yet, nor did a newer version supersede it), `verified`, `declined`; and
+ * `taken_down` (taken down and not restored, newest take-down first, for
+ * staff to find what to restore). */
+const QUEUE_STATES = ["undecided", "verified", "declined", "taken_down", "all"] as const;
 type QueueState = (typeof QUEUE_STATES)[number];
 
 const QUEUE_WHERE: Record<QueueState, string> = {
   undecided: `v.verification = 'unverified' AND v.declined_at IS NULL AND v.superseded_at IS NULL AND v.status IN ('listed', 'yanked')`,
   verified: "v.verification = 'verified'",
   declined: "v.verification = 'unverified' AND v.declined_at IS NOT NULL",
+  taken_down: "v.status = 'taken_down'",
   all: "1 = 1"
 };
 
@@ -157,7 +160,7 @@ const earlierSql = (alias: string): string =>
 
 const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
   const state = (url.searchParams.get("state") ?? "undecided") as QueueState;
-  if (!QUEUE_STATES.includes(state)) return fail(400, "bad_request", "state is undecided, verified, declined or all.");
+  if (!QUEUE_STATES.includes(state)) return fail(400, "bad_request", "state is undecided, verified, declined, taken_down or all.");
   const after = keyset(url.searchParams.get("cursor"));
   if (after === null) return fail(400, "bad_cursor", "That cursor isn't from this list.");
   const limit = limitOf(url);
@@ -169,11 +172,15 @@ const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
   // undecided pre-release when that is newer (the superseding rule yanked
   // the rest, which a reviewer can still open from the plugin's page).
   const undecided = state === "undecided";
-  const sortKey = undecided ? `(CASE WHEN ${reportsSql("v")} > 0 THEN 0 ELSE 100000000000000 END + v.published_at)` : "v.published_at";
+  const sortKey = undecided
+    ? `(CASE WHEN ${reportsSql("v")} > 0 THEN 0 ELSE 100000000000000 END + v.published_at)`
+    : state === "taken_down"
+      ? "COALESCE(v.removed_at, v.published_at)"
+      : "v.published_at";
   const ks = keysetSql("sort_key", "rid", undecided, after);
   const { rows, total } = await withTotal<{
     rid: number; sort_key: number; plugin_id: string; version: string; status: string; published_at: number; publisher_id: string; checks: string;
-    permissions: string; name: string; icon: string | null; is_release: number; parts: string | null; reports: number; earlier: number;
+    permissions: string; name: string; icon: string | null; is_release: number; parts: string | null; reports: number; earlier: number; installs: number;
     verification: "unverified" | "verified"; verified_at: number | null; declined_at: number | null; decline_reason: string | null; decline_message: string | null;
     base_version: string | null; base_permissions: string | null; base_parts: string | null;
   }>(
@@ -183,6 +190,7 @@ const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
         `SELECT * FROM (
            SELECT v.rowid AS rid, ${sortKey} AS sort_key, v.plugin_id, v.version, v.status, v.published_at, v.publisher_id, v.checks, v.permissions,
                   v.name, v.icon, v.is_release, ${partsSql("v")} AS parts, ${reportsSql("v")} AS reports, ${earlierSql("v")} AS earlier,
+                  (SELECT p.installs FROM plugins p WHERE p.id = v.plugin_id) AS installs,
                   v.verification, v.verified_at, v.declined_at, v.decline_reason, v.decline_message,
                   b.version AS base_version, b.permissions AS base_permissions, ${partsSql("b")} AS base_parts
            FROM versions v LEFT JOIN versions b ON b.rowid = (${baseSql("v")})
@@ -222,7 +230,9 @@ const queue = async (env: Env, db: D1Database, url: URL): Promise<Response> => {
         checks: { ok: count("ok"), warn: count("warn"), fail: count("fail") },
         review: reviewOf({ verification: r.verification, verified_at: r.verified_at, declined_at: r.declined_at, decline_reason: r.decline_reason, decline_message: r.decline_message } as VersionRow),
         reports: r.reports,
-        earlier_undecided: r.earlier
+        earlier_undecided: r.earlier,
+        // The plugin's installs: of equally reported rows, the most used first.
+        installs: r.installs ?? 0
       };
     }),
     total,
@@ -252,7 +262,7 @@ const versionView = async (env: Env, db: D1Database, id: string, versionText: st
       .bind(id, q.version)
       .all<{ path: string; bytes: number; sha256: string; kind: string }>()
       .then((r) => r.results.map((f) => ({ path: f.path, bytes: f.bytes, sha256: f.sha256, kind: f.kind, binary: f.kind === "binary" })));
-  const [ownFiles, baseFiles, decisions, recent, authors] = await Promise.all([
+  const [ownFiles, baseFiles, decisions, recent, authors, standing] = await Promise.all([
     files(v),
     base ? files(base) : Promise.resolve([]),
     db
@@ -266,7 +276,17 @@ const versionView = async (env: Env, db: D1Database, id: string, versionText: st
       .prepare("SELECT plugin_id, version, status, verification, published_at FROM versions WHERE publisher_id = ? ORDER BY published_at DESC LIMIT 10")
       .bind(v.publisher_id)
       .all<{ plugin_id: string; version: string; status: string; verification: string; published_at: number }>(),
-    authorsOf(env, [v.publisher_id, plugin.owner_id])
+    authorsOf(env, [v.publisher_id, plugin.owner_id]),
+    // When the account first listed a version (publishing lists it), and
+    // its listed plugins, how many with a verified version.
+    db
+      .prepare(
+        `SELECT (SELECT MIN(published_at) FROM versions WHERE publisher_id = ?1) AS first_published_at,
+                (SELECT COUNT(*) FROM plugins p WHERE p.owner_id = ?1 AND ${LISTED}) AS total,
+                (SELECT COUNT(*) FROM plugins p WHERE p.owner_id = ?1 AND ${LISTED} AND p.verified_version IS NOT NULL) AS verified`
+      )
+      .bind(v.publisher_id)
+      .first<{ first_published_at: number | null; total: number; verified: number }>()
   ]);
   const publisher = authors[v.publisher_id]!;
   const owner = authors[plugin.owner_id]!;
@@ -287,7 +307,9 @@ const versionView = async (env: Env, db: D1Database, id: string, versionText: st
       username: publisher.username,
       created_at: publisher.createdAt,
       decisions: { verified: decisions?.verified ?? 0, declined: decisions?.declined ?? 0 },
-      recent: recent.results.map((r) => ({ ...r, verified: r.verification === "verified" }))
+      recent: recent.results.map((r) => ({ ...r, verified: r.verification === "verified" })),
+      first_published_at: standing?.first_published_at ?? null,
+      plugins: { total: standing?.total ?? 0, verified: standing?.verified ?? 0 }
     },
     manifest: parseStoredJson(v.manifest, null),
     ...(base ? { base: { version: base.version, manifest: parseStoredJson(base.manifest, null) } } : {}),

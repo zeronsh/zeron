@@ -378,6 +378,16 @@ describe("POST /store/v1/plugins/:id/versions", () => {
     }
   });
 
+  it("says a version's size as the site writes sizes", async () => {
+    const a = await author();
+    const id = uniqueId();
+    expect((await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer }))).status).toBe(201);
+    const checks = JSON.parse((await env.STORE_DB.prepare("SELECT checks FROM versions WHERE plugin_id = ?").bind(id).first<string>("checks"))!) as { id: string; message: string }[];
+    const size = checks.find((c) => c.id === "size")!.message;
+    // A few KB: never "0.0 MB".
+    expect(size).toMatch(/^\d+ files, \d+(\.\d)? (B|KB) \(\d+(\.\d)? (B|KB) packaged\)\.$/);
+  });
+
   it("takes a version of exactly 32 characters, and serves it", async () => {
     const a = await author();
     const id = uniqueId();
