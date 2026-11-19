@@ -806,8 +806,9 @@ Every refusal from the store, or from Zeron about the store, reads `"<word>: <wo
 | `bad_package`, `id_reserved`, `not_semver`, `missing_readme`, `missing_listing`, `bad_listing`, `too_large` | the store's rules (`check_plugin`); `binary_file`, `no_notes`, `raw_html`, `footnote` and `math` are warnings |
 | `needs_username`, `id_taken`, `version_exists`, `suspended` | the store refused the submission |
 | `not_a_token`, `damaged` | `ZERON_DEPLOY_TOKEN` isn't a deploy token, or is mistyped (its checksum doesn't match): nothing was sent |
-| `invalid_token` | the store won't publish this with that deploy token: unknown, mistyped, revoked or expired, not for this plugin, or the plugin's first version (one word for each, so nothing can be learned by trying) |
-| `token_not_allowed` | a deploy token was used for anything but publishing and reading its plugins' state |
+| `invalid_token` | the deploy token is wrong, revoked or expired |
+| `token_not_allowed` | this deploy token may not publish this plugin: not in its scope, not yours, or the plugin's first version (that's published from your computer) |
+| `session_required` | a deploy token only publishes: anything else needs you signed in |
 | `unauthenticated`, `forbidden` | the store turned away who's asking (a 401 or 403 that said no more): for a signed-in person, sign in again |
 | `too_many_tokens`, `invalid_name`, `invalid_expiry` | making a deploy token |
 

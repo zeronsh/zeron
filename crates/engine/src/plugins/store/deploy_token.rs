@@ -39,14 +39,14 @@ pub const MAX_SCOPE_PLUGINS: usize = 50;
 
 /// The words a token's refusal carries (the CLI's and the edge's).
 pub mod reason {
-    /// A publish the store refused the token for, whichever way (mistyped,
-    /// unknown, revoked, expired, out of its scope, a plugin's first
-    /// version, a plugin moved to another account): one word, one 401, so
-    /// nothing about a token can be learned by trying it.
+    /// 401: the token is wrong (a bad checksum, unknown), revoked or
+    /// expired.
     pub const INVALID_TOKEN: &str = "invalid_token";
-    /// A token on a route it never may use (anything but publishing and
-    /// reading its plugins): 403.
+    /// 403: a live token that may not publish this plugin (out of its
+    /// scope, not the account's, or the plugin's first version).
     pub const TOKEN_NOT_ALLOWED: &str = "token_not_allowed";
+    /// 401: a token on a route that takes a signed-in session.
+    pub const SESSION_REQUIRED: &str = "session_required";
 }
 
 /// Why a token can't be used, in words a CI log can carry (never quoting it).

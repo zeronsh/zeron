@@ -198,8 +198,7 @@ async fn each_failure_has_one_line_and_its_exit_code() {
     let out = run.zeron(&store, Some(&secret), &["publish", "/no/such/folder"]).await;
     assert_eq!(out.status.code(), Some(2), "{}", text(&out));
 
-    // A token the store doesn't know (or revoked), or for another plugin (3):
-    // one word for both.
+    // A token the store doesn't know (or revoked), or for another plugin (3).
     let stranger = DeployToken::from_random(&[99; 32]);
     let out = run.zeron(&store, Some(stranger.as_str()), &["publish", &folder_arg]).await;
     assert_eq!(out.status.code(), Some(3), "{}", text(&out));
@@ -207,7 +206,7 @@ async fn each_failure_has_one_line_and_its_exit_code() {
     let other = store.add_deploy_token("ada", "other", Scope::plugins(&["another-plugin".into()]).unwrap());
     let out = run.zeron(&store, Some(&other), &["publish", &folder_arg]).await;
     assert_eq!(out.status.code(), Some(3), "{}", text(&out));
-    assert!(text(&out).contains("invalid_token"), "{}", text(&out));
+    assert!(text(&out).contains("token_not_allowed") && text(&out).contains("may not publish this plugin"), "{}", text(&out));
 
     // The store unreachable (4): try again.
     store.offline.store(true, std::sync::atomic::Ordering::SeqCst);

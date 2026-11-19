@@ -627,7 +627,7 @@ async fn the_plugin_store_end_to_end() {
     checkout(&laptop.item(THIRD).await["dir"].as_str().map(PathBuf::from).unwrap(), &third_ci);
     set_version(&third_ci, "1.1.0", &["ui.add"], "- Third.");
     let out = e.cli("ci", &["publish", &third_ci.display().to_string()], &[("ZERON_DEPLOY_TOKEN", &secret)]);
-    e.check("4", &format!("and is refused on {THIRD}, yours but outside its scope (exit 3)"), out.status.code() == Some(3) && text(&out).contains("invalid_token"), text(&out));
+    e.check("4", &format!("and is refused on {THIRD}, yours but outside its scope (exit 3)"), out.status.code() == Some(3) && text(&out).contains("token_not_allowed"), text(&out));
     let noticed = wait_for("the laptop's notices of the token's publishes", async || {
         let n = notices(&laptop).await;
         n.contains(&format!("{ID}@1.1.0")) && n.contains(&format!("{OTHER}@1.1.0"))
@@ -784,7 +784,7 @@ async fn the_plugin_store_end_to_end() {
     e.check("9", "the new owner's devices notice his first token publish, and none of the former owner's versions", noticed && by_token && !ada_s, &list["store_notices"]);
     let elsewhere = token_package(OTHER, "9.0.0", json!({}), &[]);
     let (status, body) = e.publish_with(&bob_secret, OTHER, &elsewhere).await;
-    e.check("9", "a token for another plugin is refused alike (401 invalid_token)", status == 401 && body["error"] == "invalid_token", format!("{status} {body}"));
+    e.check("9", "a token for another plugin is refused (403 token_not_allowed)", status == 403 && body["error"] == "token_not_allowed", format!("{status} {body}"));
     let (status, body) = e.publish_with(&bob_secret, ID, &token_package(ID, "1.2.5", json!({}), &[])).await;
     e.check("9", "a version that isn't newer is refused", body["error"] == "not_newer" || body["error"] == "version_exists", format!("{status} {body}"));
     // (On ada's third plugin, from her laptop: should the edge take one,
@@ -886,10 +886,10 @@ async fn the_plugin_store_end_to_end() {
     let reports = format!("/store/v1/plugins/{ID}/reports");
     let body = serde_json::to_vec(&json!({ "reason": "other" })).unwrap();
     let (status, answer) = e.with_token(&bob_secret, "POST", &reports, &body).await;
-    e.check("10", "a deploy token can't report", status == 403 && answer["error"] == "token_not_allowed", format!("{status} {answer}"));
+    e.check("10", "a deploy token can't report (401 session_required)", status == 401 && answer["error"] == "session_required", format!("{status} {answer}"));
     let installed = format!("/store/v1/plugins/{ID}/installed");
     let (status, answer) = e.with_token(&bob_secret, "POST", &installed, b"{}").await;
-    e.check("10", "nor count an install", status == 403 && answer["error"] == "token_not_allowed", format!("{status} {answer}"));
+    e.check("10", "nor count an install", status == 401 && answer["error"] == "session_required", format!("{status} {answer}"));
     // Revoked: it publishes nothing from then on, refused as an unknown one.
     let tokens = bob_laptop.call(methods::LIST_DEPLOY_TOKENS, json!({})).await.unwrap();
     let bob_short = DeployToken::parse(&bob_secret).unwrap().short().to_owned();

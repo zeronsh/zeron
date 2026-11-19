@@ -405,10 +405,10 @@ impl FakeStore {
 
     /// Who a request is: a session's username, or a deploy token's owner
     /// (with its scope), as the edge reads one: its form and checksum, then
-    /// its hash; unknown, revoked or expired all answer one 401
-    /// `invalid_token` (as do one out of scope and a first version), and a
-    /// token only publishes and reads its plugins (else 403
-    /// `token_not_allowed`).
+    /// its hash: unknown, revoked or expired answer 401 `invalid_token`; a
+    /// token only publishes and reads its plugins (else 401
+    /// `session_required`), and only plugins in its scope (else, at publish,
+    /// 403 `token_not_allowed`).
     fn who(&self, method: &str, path: &str, headers: &BTreeMap<String, String>) -> Result<Option<Who>, (u16, Value)> {
         let Some(auth) = headers.get("authorization") else { return Ok(None) };
         let Some(bearer) = auth.strip_prefix("Bearer ") else {
@@ -417,7 +417,7 @@ impl FakeStore {
         if let Some(user) = bearer.strip_prefix("session:") {
             return Ok(Some((user.to_owned(), None)));
         }
-        let bad = || Err((401, json!({ "error": "invalid_token", "message": "This deploy token can't publish this plugin." })));
+        let bad = || Err((401, json!({ "error": "invalid_token", "message": "This deploy token is wrong, revoked or expired." })));
         let Ok(token) = DeployToken::parse(bearer) else { return bad() };
         let state = self.state.lock().unwrap();
         let Some(stored) = state.deploy_tokens.get(&token.hash()).filter(|t| !t.revoked && t.expires_at.is_none_or(|at| at > chrono_now())).cloned() else {
@@ -428,7 +428,7 @@ impl FakeStore {
         let bare_parts: Vec<&str> = bare.trim_start_matches('/').split('/').collect();
         let allowed = matches!((method, bare_parts.as_slice()), ("POST", ["store", "v1", "plugins", _, "versions"]) | ("GET", ["store", "v1", "me", "plugins"]));
         if !allowed {
-            return Err((403, json!({ "error": "token_not_allowed", "message": "A deploy token publishes and reads status, nothing else." })));
+            return Err((401, json!({ "error": "session_required", "message": "A deploy token only publishes." })));
         }
         Ok(Some((stored.owner, Some((stored.scope, token.hash())))))
     }
@@ -660,7 +660,7 @@ impl FakeStore {
                 if let Some((scope, _)) = &scope {
                     let owned = state.plugins.get(*id).is_some_and(|p| p.owner == owner);
                     if !owned || !scope.covers(id) {
-                        return json_reply(401, json!({ "error": "invalid_token", "message": "This deploy token can't publish this plugin." }));
+                        return json_reply(403, json!({ "error": "token_not_allowed", "message": "This deploy token may not publish this plugin." }));
                     }
                 }
                 let plugin = state.plugins.entry((*id).to_owned()).or_insert_with(|| StoredPlugin { owner: owner.clone(), ..Default::default() });

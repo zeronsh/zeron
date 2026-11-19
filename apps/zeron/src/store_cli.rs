@@ -82,8 +82,9 @@ pub fn code(word: &str) -> i32 {
 /// with, in one plain line (the store's own words are for its logs).
 fn plain_line(word: &str) -> Option<&'static str> {
     Some(match word {
-        "invalid_token" => "The store won't publish this with that deploy token: it's unknown, revoked or expired, isn't for this plugin, or this is the plugin's first version (that comes from your machine). Check `zeron plugin token list`, or make a new one (`zeron plugin token create`) and put it in ZERON_DEPLOY_TOKEN.",
-        "token_not_allowed" => "A deploy token can't do this: it publishes the plugins it was made for, and reads their status, nothing else.",
+        "invalid_token" => "The deploy token is wrong, revoked or expired: make a new one (`zeron plugin token create`) and put it in ZERON_DEPLOY_TOKEN.",
+        "token_not_allowed" => "This deploy token may not publish this plugin (a plugin's first version is published from your computer).",
+        "session_required" => "A deploy token only publishes: this needs you signed in, with Zeron running on your computer.",
         "unauthenticated" => "The store doesn't know who's asking: no deploy token reached it, and nobody is signed in.",
         "too_many_tokens" => "Your account has as many live deploy tokens as it can. Revoke one first (`zeron plugin token revoke <id>`).",
         _ => return None,
@@ -483,6 +484,7 @@ mod tests {
         assert_eq!(code("id_too_similar"), RULES);
         assert_eq!(code("token_not_allowed"), REFUSED);
         assert_eq!(code("invalid_token"), REFUSED);
+        assert_eq!(code("session_required"), REFUSED);
         assert_eq!(code("needs_username"), REFUSED);
         assert_eq!(code("signed_out"), REFUSED);
         assert_eq!(code("store_unreachable"), UNREACHABLE);
@@ -495,7 +497,7 @@ mod tests {
         assert_eq!(code("unauthenticated"), REFUSED);
         assert_eq!(code("forbidden"), REFUSED);
         // Each token word reads as one plain line, word first.
-        for word in ["invalid_token", "token_not_allowed", "unauthenticated", "too_many_tokens"] {
+        for word in ["invalid_token", "token_not_allowed", "session_required", "unauthenticated", "too_many_tokens"] {
             let said = failed(&format!("{word}: the store's own words")).to_string();
             assert!(said.starts_with(&format!("{word}: ")) && !said.contains('\n') && !said.contains("the store's own words"), "{said}");
         }
