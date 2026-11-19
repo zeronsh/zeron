@@ -36151,20 +36151,11 @@
       }
     },
     {
-      "name": "signed all the same",
+      "name": "signed, under a record naming no signer: refused",
       "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsiaW5pdC5sdWF1IjoiNDg2ZDlhZmZiNjBkYmIwMDYzYjAzZDhlMjNhNmNjZjYzNjRjZTIwM2RjM2E5ZjU2ZjIwZTc1MGViNDFlY2FkZSIsInVpL2JhZGdlLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1In0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJVU0loc0c0NE5TOFpyUkZ6ZFBPRjlKSXhjYVNsRzhYWFd5WXUzTGFaMGthSTVFWWthSjMyOG1DaWxBZHMxWlZ6cFFNQ0h4Q2x4QnBsYnJOMF9sZlJEZyJ9LCJ2ZXJzaW9uIjoiMS4wLjAifX0=",
       "result": {
-        "files": 2,
-        "hash": "8559ddea34a83a98fcc456dd31056b62827be004078eff3fb152fa8694a72776",
-        "id": "focus",
-        "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
-        "ok": true,
-        "paths": [
-          "init.luau",
-          "ui/badge.luau"
-        ],
-        "sha256": "6bc8e253efca7dc439682bcd531bb2720db9793c3e91105efd4f870d25080379",
-        "version": "1.0.0"
+        "error": "store_mismatch",
+        "ok": false
       }
     },
     {

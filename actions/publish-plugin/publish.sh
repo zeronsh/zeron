@@ -19,7 +19,7 @@
 #
 # Exits as `zeron plugin publish` does: 0 published (or checked), 1 the
 # plugin doesn't meet the store's rules, 2 set-up, 3 the store refused the
-# key or the account, 4 the store couldn't be reached (re-run the job).
+# token or the account, 4 the store couldn't be reached (re-run the job).
 
 set -euo pipefail
 

@@ -2506,29 +2506,36 @@ impl Plugins {
         }
     }
 
-    /// `VerifyPlugin`'s reply for any folder.
+    /// `VerifyPlugin`'s reply for any folder. One installed here from the
+    /// store, unsigned and exactly what the store's record vouches for (a
+    /// deploy token's version): `store`, its publisher's, as the list says.
     async fn verify(&self, dir: &Path) -> serde_json::Value {
         let probe = dir.to_path_buf();
         let root = std::fs::canonicalize(&self.inner.plugins_dir).ok();
-        let inspected: Inspected = tokio::task::spawn_blocking(move || {
+        let (inspected, under): (Inspected, bool) = tokio::task::spawn_blocking(move || {
             let under = std::fs::canonicalize(&probe)
                 .ok()
                 .and_then(|c| c.parent().map(Path::to_path_buf))
                 == root;
-            scan::inspect(&probe, under)
+            (scan::inspect(&probe, under), under)
         })
         .await
-        .unwrap_or_else(|_| scan::inspect(dir, false));
+        .unwrap_or_else(|_| (scan::inspect(dir, false), false));
         let own = lock(&self.inner.state).own.contains(&inspected.folder)
             && std::fs::canonicalize(dir).ok()
                 == std::fs::canonicalize(self.inner.plugins_dir.join(&inspected.folder)).ok();
-        let author = match inspected.signature_author() {
+        let from_store = (under && !own && inspected.error.is_none() && inspected.sig == SigCheck::Unsigned)
+            .then(|| scan::store_record(&inspected))
+            .flatten();
+        let author = match (&from_store, inspected.signature_author()) {
             _ if own => Author::You,
-            Ok(author) => author,
-            Err(key) => self.resolve_now(&key, Some(inspected.id())).await,
+            (Some(store), _) => scan::store_author(store),
+            (None, Ok(author)) => author,
+            (None, Err(key)) => self.resolve_now(&key, Some(inspected.id())).await,
         };
         let status = match (&inspected.error, &inspected.sig) {
             (Some(_), _) => "broken",
+            (None, SigCheck::Unsigned) if from_store.is_some() => "store",
             (None, SigCheck::Unsigned) => "unsigned",
             (None, SigCheck::FilesDiffer | SigCheck::BadSignature) => "tampered",
             (None, SigCheck::Valid(_)) => "ok",

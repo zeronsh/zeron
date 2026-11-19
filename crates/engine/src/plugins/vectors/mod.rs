@@ -332,7 +332,8 @@ fn package_result_by(raw: Vec<u8>, parse: impl Fn(Vec<u8>) -> Result<install::Pa
 /// What a device makes of a package the store serves with a record naming
 /// no signer (a deploy token's version, `via: "deploy_token"`, `key: null`):
 /// unsigned, taken by its contents (the record's `hash` must be its content
-/// hash); one that is signed all the same must still check out.
+/// hash); signed, refused (`store_mismatch`: unsigned is taken there, and
+/// nothing else).
 fn store_package_cases() -> Value {
     let key = author();
     let manifest = json!({ "id": "focus", "name": "Focus", "version": "1.0.0", "entry": "init.luau", "permissions": ["ui.add"] });
@@ -344,7 +345,7 @@ fn store_package_cases() -> Value {
     no_entry.remove("init.luau");
     let cases: Vec<(&str, Vec<u8>)> = vec![
         ("unsigned (a deploy token's)", packed(None, &manifest, &good)),
-        ("signed all the same", signed.clone()),
+        ("signed, under a record naming no signer: refused", signed.clone()),
         ("signed, a file changed after signing", serde_json::to_vec(&changed).unwrap()),
         ("unsigned, its entry file missing", packed(None, &manifest, &no_entry)),
     ];

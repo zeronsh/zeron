@@ -227,6 +227,11 @@ pub mod methods {
     /// `for: "deploy_token"`: the ticket is `CreateDeployToken`'s alone,
     /// used once, and no other ticket makes a deploy token.
     pub const STEP_UP: &str = "StepUp";
+    /// `{for}` → `{ok: true}`: call off a [`STEP_UP`] begun for that action
+    /// (the person stopped waiting): a sign-in for it that lands later
+    /// earns no ticket, and a ticket it already earned is dropped. Local
+    /// only, never an agent's.
+    pub const CANCEL_STEP_UP: &str = "CancelStepUp";
     /// `{confirm}` (the account's email) → `{ok: true}`, or `{ok: false,
     /// error, message, organization?}`: the engine deletes the account at
     /// the edge with its step-up ticket. `error` is `step_up_required` (run
@@ -560,7 +565,10 @@ pub mod methods {
     /// `{id}` → `PluginItem`, or `{path}` → `VerifyPlugin`'s reply; both
     /// with `files` (how many files the signature covers).
     pub const SIGN_PLUGIN: &str = "SignPlugin";
-    /// `{path}` → `{author, status, hash, error?}`.
+    /// `{path}` → `{author, status, hash, error?}`. `status`: `ok` (signed,
+    /// its files match), `store` (installed from the store unsigned, a
+    /// deploy token's version, exactly what its record says: its author the
+    /// publisher), `unsigned`, `tampered` or `broken`.
     pub const VERIFY_PLUGIN: &str = "VerifyPlugin";
     /// `{}` → `{device: {id, name}, tools: [..]}`.
     pub const LIST_PLUGIN_TOOLS: &str = "ListPluginTools";
@@ -838,6 +846,7 @@ pub fn local_only(method: &str) -> bool {
         method,
         methods::ACCESS_TOKEN
             | methods::STEP_UP
+            | methods::CANCEL_STEP_UP
             // This device's background engine: whether it outlives its app.
             | methods::GET_BACKGROUND_SETTINGS
             | methods::SET_BACKGROUND_SETTINGS
@@ -1691,6 +1700,7 @@ mod tests {
             methods::APPLY_UPDATE,
             methods::ACCESS_TOKEN,
             methods::STEP_UP,
+            methods::CANCEL_STEP_UP,
             methods::DELETE_ACCOUNT,
             methods::SIGN_IN,
             methods::COMPLETE_SIGN_IN,

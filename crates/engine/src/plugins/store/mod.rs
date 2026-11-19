@@ -84,7 +84,7 @@ pub fn verify(raw: Vec<u8>, id: &str, version: &str, record: &PackageRecord, pub
     if record.key.as_deref().is_some_and(|key| Some(key) != package.key.as_deref()) {
         return Err(mismatch("who signed it"));
     }
-    let store = StoreSource { id: id.to_owned(), publisher, publisher_id, hash: package.hash.clone(), key: package.key.clone(), verified, verified_at: None, verified_alternative: None, instead_of_unverified: false, replaced: None };
+    let store = StoreSource { id: id.to_owned(), publisher, publisher_id, hash: package.hash.clone(), key: package.key.clone(), last_key: None, verified, verified_at: None, verified_alternative: None, instead_of_unverified: false, replaced: None };
     Ok((package, store))
 }
 
@@ -112,7 +112,7 @@ mod tests {
         let good = record(&raw, &package);
         let (verified, store) = verify(raw.clone(), "focus", "1.2.0", &good, &ada(), true).unwrap();
         assert_eq!(verified.hash, package.hash);
-        assert_eq!(store, StoreSource { id: "focus".into(), publisher: "ada".into(), publisher_id: ADA.into(), hash: package.hash.clone(), key: Some(key.public()), verified: true, verified_at: None, verified_alternative: None, instead_of_unverified: false, replaced: None });
+        assert_eq!(store, StoreSource { id: "focus".into(), publisher: "ada".into(), publisher_id: ADA.into(), hash: package.hash.clone(), key: Some(key.public()), last_key: None, verified: true, verified_at: None, verified_alternative: None, instead_of_unverified: false, replaced: None });
         assert_eq!(store.binding(), format!("store:{ADA}"), "bound to the owner's id, never the username");
 
         let refused = |raw: Vec<u8>, id: &str, version: &str, record: &PackageRecord, publisher: Option<&str>| {
@@ -145,9 +145,13 @@ mod tests {
         let tampered = serde_json::to_vec(&value).unwrap();
         let tampered_record = PackageRecord { sha256: signing::sha256_hex(&tampered), bytes: tampered.len() as u64, ..good.clone() };
         assert_eq!(refused(tampered, "focus", "1.2.0", &tampered_record, Some("ada")), "tampered");
-        // The record's key is optional; its hashes compare in any case.
-        let loose = PackageRecord { key: None, sha256: good.sha256.to_uppercase(), ..good.clone() };
-        assert!(verify(raw.clone(), "focus", "1.2.0", &loose, &ada(), true).is_ok());
+        // Its hashes compare in any case.
+        let loud = PackageRecord { sha256: good.sha256.to_uppercase(), ..good.clone() };
+        assert!(verify(raw.clone(), "focus", "1.2.0", &loud, &ada(), true).is_ok());
+        // A record naming no signer takes unsigned, and nothing else (a
+        // deploy token's version): this one, signed, is refused.
+        let unsigned_only = PackageRecord { key: None, ..good.clone() };
+        assert_eq!(refused(raw.clone(), "focus", "1.2.0", &unsigned_only, Some("ada")), "store_mismatch");
         // A record without the owner's id, or one that isn't one.
         for id in [None, Some("ada"), Some("pub_XYZ"), Some("pub_0123456789abcdef0123456789ABCDEF")] {
             let publisher = Publisher { id: id.map(str::to_owned), username: Some("ada".into()), verified: true };

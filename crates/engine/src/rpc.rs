@@ -3215,6 +3215,7 @@ impl AuthRpc {
                 | methods::SIGN_OUT
                 | methods::ACCESS_TOKEN
                 | methods::STEP_UP
+                | methods::CANCEL_STEP_UP
                 | methods::DELETE_ACCOUNT
                 | methods::LIST_ORGS
                 | methods::CREATE_ORG
@@ -3274,6 +3275,18 @@ impl RpcService for AuthRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "url": url }))
+            }
+            methods::CANCEL_STEP_UP => {
+                #[derive(Deserialize)]
+                struct P {
+                    #[serde(rename = "for")]
+                    action: String,
+                }
+                let p: P = parse_params(params)?;
+                let action = crate::StepUpFor::parse(p.action.trim())
+                    .ok_or_else(|| RpcError::Failed(format!("A step-up is called off for deploy_token (not \"{}\")", p.action.trim())))?;
+                self.auth.cancel_step_up(action);
+                RpcReply::value(&serde_json::json!({ "ok": true }))
             }
             methods::DELETE_ACCOUNT => {
                 #[derive(Deserialize)]

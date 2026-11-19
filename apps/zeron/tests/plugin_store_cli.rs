@@ -13,8 +13,8 @@ use std::process::Output;
 
 use fake_store::FakeStore;
 use serde_json::json;
-use zeron_engine::plugins::install;
 use zeron_engine::plugins::store::deploy_token::{DeployToken, Scope};
+use zeron_engine::plugins::{install, package, signing::SigningKey};
 
 const ICON: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\"><circle cx=\"8\" cy=\"8\" r=\"6\"/></svg>";
 
@@ -30,6 +30,16 @@ fn plugin(dir: &Path, version: &str) {
     std::fs::write(dir.join("icon.svg"), ICON).unwrap();
     std::fs::write(dir.join("README.md"), "# Focus Board\n\nWhat you're on.").unwrap();
     std::fs::write(dir.join("CHANGELOG.md"), format!("## {version}\n\n- Boards.\n")).unwrap();
+}
+
+/// Version `version` of focus-board as a device publishes it (signed, by
+/// its owner): a plugin's first version always comes so.
+fn from_a_device(store: &FakeStore, version: &str) {
+    let files: std::collections::BTreeMap<String, Vec<u8>> = [("init.luau".to_string(), b"return {}".to_vec())].into();
+    let manifest = json!({ "id": "focus-board", "name": "Focus Board", "version": version, "entry": "init.luau" });
+    let (key, _) = SigningKey::generate().unwrap();
+    let raw = package::pack(install::FORMAT, &key.sign_manifest(&manifest, &package::hashes(&files)), &files).unwrap();
+    store.add("ada", &raw, "listed", "");
 }
 
 struct Run {
@@ -89,6 +99,13 @@ async fn ci_checks_and_publishes_with_a_deploy_token() {
     assert_eq!(dry.status.code(), Some(0), "{}", text(&dry));
     assert!(text(&dry).contains("Not sent") && text(&dry).contains(&format!("deploy token {short}")), "{}", text(&dry));
     assert!(store.state.lock().unwrap().submitted.is_empty());
+
+    // A plugin's first version: never a token's (3), said plainly.
+    let first = run.zeron(&store, Some(&secret), &["publish", &folder_arg]).await;
+    assert_eq!(first.status.code(), Some(3), "{}", text(&first));
+    assert!(text(&first).contains("token_not_allowed: This deploy token may not publish this plugin (a plugin's first version is published from your computer)."), "{}", text(&first));
+    assert!(store.state.lock().unwrap().submitted.is_empty());
+    from_a_device(&store, "0.9.0");
 
     // Published: unsigned (the store records it as the token's), the token
     // its bearer.

@@ -336,6 +336,9 @@ struct AuthInner {
     /// ([`Auth::start_step_up`]), with what each is for: their exchange
     /// keeps the ticket and nothing else.
     step_up_states: Mutex<std::collections::HashMap<String, Option<StepUpFor>>>,
+    /// Step-up sign-ins called off ([`Auth::cancel_step_up`]): their
+    /// exchange, should it land, does nothing at all.
+    step_up_cancelled: Mutex<std::collections::HashSet<String>>,
     /// [`Auth::on_fresh_ticket`].
     fresh_ticket: Mutex<Option<FreshTicketHook>>,
 }
@@ -511,6 +514,7 @@ impl Auth {
                 runner_rejected: std::sync::atomic::AtomicBool::new(false),
                 step_up: Mutex::new(None),
                 step_up_states: Mutex::new(std::collections::HashMap::new()),
+                step_up_cancelled: Mutex::new(std::collections::HashSet::new()),
                 fresh_ticket: Mutex::new(None),
             }),
         }
@@ -832,6 +836,23 @@ impl Auth {
         }
     }
 
+    /// Call off a step-up begun for `action` (the person stopped waiting for
+    /// it): a sign-in for it that lands later earns no ticket, and a ticket
+    /// it already earned is gone. Another action's, or a sign-in's, stays.
+    pub fn cancel_step_up(&self, action: StepUpFor) {
+        let mut states = lock(&self.inner.step_up_states);
+        let called_off: Vec<String> = states.iter().filter(|(_, held)| **held == Some(action)).map(|(state, _)| state.clone()).collect();
+        for state in &called_off {
+            states.remove(state);
+        }
+        drop(states);
+        lock(&self.inner.step_up_cancelled).extend(called_off);
+        let mut slot = lock(&self.inner.step_up);
+        if slot.as_ref().is_some_and(|(_, _, held)| *held == Some(action)) {
+            *slot = None;
+        }
+    }
+
     /// Begin a fresh interactive sign-in as the account signed in now, for
     /// a step-up ticket alone (the session stays as it is). Returns the URL
     /// to open, as [`Self::start_sign_in`]; a sign-in as anyone else is
@@ -896,6 +917,10 @@ impl Auth {
     /// A code exchanged: a step-up keeps its ticket if it's the account
     /// signed in now (and changes nothing else); a sign-in signs in.
     async fn finish_exchange(&self, state: &str, result: SignInResult, generation: u64) -> Result<(), EngineError> {
+        // A step-up called off: nothing kept, nothing signed in.
+        if lock(&self.inner.step_up_cancelled).remove(state) {
+            return Ok(());
+        }
         let begun = lock(&self.inner.step_up_states).remove(state);
         if let Some(action) = begun {
             if self.user_id().as_deref() != Some(result.user.id.as_str()) {
@@ -936,6 +961,7 @@ impl Auth {
         sign_in.pending.clear();
         *lock(&self.inner.step_up) = None;
         lock(&self.inner.step_up_states).clear();
+        lock(&self.inner.step_up_cancelled).clear();
         *lock(&self.inner.stored) = None;
         *lock(&self.inner.access) = None;
         self.retry_refresh();
@@ -1938,6 +1964,19 @@ mod tests {
         // Expired, never.
         auth.keep_step_up(Some(("t-old".into(), Duration::ZERO)), Some(StepUpFor::DeployToken));
         assert_eq!(auth.take_step_up(StepUpFor::DeployToken), None);
+        // Called off: a ticket it earned is gone; a sign-in's stays.
+        auth.keep_step_up(Some(("t-token".into(), ttl)), Some(StepUpFor::DeployToken));
+        auth.cancel_step_up(StepUpFor::DeployToken);
+        assert_eq!(auth.take_step_up(StepUpFor::DeployToken), None, "called off");
+        auth.keep_step_up(Some(("t-sign-in".into(), ttl)), None);
+        auth.cancel_step_up(StepUpFor::DeployToken);
+        assert_eq!(auth.step_up().as_deref(), Some("t-sign-in"), "another's stays");
+        // And one still on its way: when it lands, it earns nothing.
+        lock(&auth.inner.step_up_states).insert("s-1".into(), Some(StepUpFor::DeployToken));
+        lock(&auth.inner.step_up_states).insert("s-2".into(), None);
+        auth.cancel_step_up(StepUpFor::DeployToken);
+        assert!(lock(&auth.inner.step_up_cancelled).contains("s-1"));
+        assert_eq!(lock(&auth.inner.step_up_states).get("s-2"), Some(&None), "a sign-in's own goes on");
         assert_eq!(StepUpFor::parse("deploy_token"), Some(StepUpFor::DeployToken));
         assert_eq!(StepUpFor::parse("deploy_key"), None);
         assert_eq!(StepUpFor::parse("delete_account"), None);

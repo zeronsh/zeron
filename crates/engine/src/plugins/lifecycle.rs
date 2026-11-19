@@ -353,6 +353,12 @@ impl Plugins {
             // it was verified (the consent window says so).
             if let (Some(before), Some(store)) = (&entry.store, source.store.as_mut().filter(|_| source.kind == install::STORE)) {
                 store.replaced = Some(install::ReplacedVersion { version: entry.item.version.clone(), verified: before.verified });
+                // Unsigned (a deploy token's): the key the version before
+                // was signed with carries on, so a later signed version
+                // signed by another still says its key changed.
+                if store.key.is_none() {
+                    store.last_key = entry.key().map(str::to_owned).or_else(|| before.last_key.clone());
+                }
             }
             if let Some(key) = entry.key().filter(|k| Some(*k) != package.key.as_deref()) {
                 let takes_over = match (&entry.store, source.store()) {
@@ -656,7 +662,7 @@ impl Plugins {
         // From the store: whether it's verified is the store's record's,
         // asked now, never what the check remembered (unknown: not).
         if let Some(store) = source.store.as_mut().filter(|_| source.kind == install::STORE) {
-            store.verified = self.verified_now(id, &found.version, &package.hash).await.map_err(failed)?;
+            store.verified = self.verified_now(id, &found.version, &package.hash, package.key.as_deref()).await.map_err(failed)?;
             if verified_only && !store.verified {
                 return Err(failed(install::failure(
                     install::reason::NOT_VERIFIED,

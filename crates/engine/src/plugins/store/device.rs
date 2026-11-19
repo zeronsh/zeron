@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use zeron_rpc::{RpcError, RpcReply, methods, parse_params};
 
 use super::client::{self, Caller, Installed as Asked, Offer, PackageRecord, Search, StoreClient, UpdatesAsk};
-use super::deploy_token::{DeployToken, Scope};
+use super::deploy_token::Scope;
 use super::notices;
 use super::publish;
 use crate::plugins::install::{self, Found, STORE, Source, failure};
@@ -213,7 +213,8 @@ struct Candidate {
     permissions: Vec<String>,
     allowed: Value,
     prerelease: bool,
-    /// The key that signed the version installed.
+    /// The key that signed the version installed; an unsigned one's (a
+    /// deploy token's), the newest signed version's before it.
     key: Option<String>,
     /// The version installed was verified (its record's, at install).
     verified: bool,
@@ -719,19 +720,13 @@ impl Plugins {
         if let Some(expires) = p.expires {
             body["expires"] = json!(expires);
         }
-        let made = match client.create_token(body, &caller).await {
+        // The token, read as a token is (else nothing usable came back), and
+        // its record as the list shows it; the copies read are wiped, and
+        // the one copy left goes to the app, which shows it once.
+        let (token, secret) = match client.create_token(body, &caller).await {
             Ok(made) => made,
             Err(error) => return not_ok(&error),
         };
-        // The secret, read as a token is (else nothing usable came back),
-        // and the rest as the list shows it.
-        let Some(secret) = made["token"].as_str().and_then(|t| DeployToken::parse(t).ok()) else {
-            return not_ok(&failure(client::reason::STORE_ERROR, "The store's answer had no token in it that could be read: revoke it from the list and make another"));
-        };
-        let mut token = made;
-        if let Some(fields) = token.as_object_mut() {
-            fields.remove("token");
-        }
         tracing::info!(short = %secret.short(), "store: a deploy token was made");
         json!({ "ok": true, "token": token, "secret": secret.as_str() })
     }
@@ -951,17 +946,18 @@ impl Plugins {
     /// Whether the store's record says version `version` of `id` (content
     /// `hash`) is verified, asked now (an update about to be taken): `false`
     /// when the store can't be reached, so taking it asks you. A record that
-    /// can't be read, names other content, is gone, or isn't installable
+    /// can't be read, names other content or another signer than `signer`
+    /// (the package's own: none, unsigned), is gone, or isn't installable
     /// (yanked, superseded, not listed) refuses the update: it never fails
     /// open.
-    pub(in crate::plugins) async fn verified_now(&self, id: &str, version: &str, hash: &str) -> Result<bool, String> {
+    pub(in crate::plugins) async fn verified_now(&self, id: &str, version: &str, hash: &str, signer: Option<&str>) -> Result<bool, String> {
         let Ok((client, caller)) = self.store_reader() else { return Ok(false) };
         match client.version(id, version, &caller).await {
             Ok((_, record)) if record.status != "listed" || record.yanked => {
                 Err(failure(client::reason::NOT_IN_STORE, format!("Version {version} of {id} can't be installed any more")))
             }
-            Ok((_, record)) if record.hash.eq_ignore_ascii_case(hash) => Ok(record.verified),
-            Ok(_) => Err(failure(client::reason::STORE_MISMATCH, format!("The store's record of {id} {version} names other content than the update found, so it wasn't taken"))),
+            Ok((_, record)) if record.hash.eq_ignore_ascii_case(hash) && record.key.as_deref() == signer => Ok(record.verified),
+            Ok(_) => Err(failure(client::reason::STORE_MISMATCH, format!("The store's record of {id} {version} names other content or another signer than the update found, so it wasn't taken"))),
             Err(error) if install::reason_of(&error) == Some(client::reason::STORE_UNREACHABLE) => Ok(false),
             Err(error) => Err(error),
         }
@@ -990,7 +986,7 @@ impl Plugins {
                     permissions: e.item.permissions.clone(),
                     allowed,
                     prerelease: state.prerelease.contains(&e.item.id),
-                    key: e.key().map(str::to_owned),
+                    key: e.key().map(str::to_owned).or_else(|| store.last_key.clone()),
                     verified: store.verified,
                     prefer: state.updates_for(&e.item.id),
                 })
@@ -1281,7 +1277,7 @@ impl Plugins {
             if package.hash != offer.hash || offer.key.as_deref().is_some_and(|k| Some(k) != package.key.as_deref()) {
                 return Err(failure(client::reason::STORE_MISMATCH, "The update kept isn't the store's"));
             }
-            let store = install::StoreSource { id: c.id.clone(), publisher, publisher_id, hash: package.hash.clone(), key: package.key.clone(), verified: offer.verified, verified_at: None, verified_alternative: None, instead_of_unverified: false, replaced: None };
+            let store = install::StoreSource { id: c.id.clone(), publisher, publisher_id, hash: package.hash.clone(), key: package.key.clone(), last_key: None, verified: offer.verified, verified_at: None, verified_alternative: None, instead_of_unverified: false, replaced: None };
             (package, store)
         } else {
             let raw = client.package(&c.id, &offer.version, caller, record.bytes).await?;

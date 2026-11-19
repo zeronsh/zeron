@@ -203,6 +203,9 @@ pub async fn run(
             let by = author(&reply["author"]);
             match status {
                 "ok" => println!("Signed by {by}. Its files match."),
+                // (A deploy token's version: unsigned, and exactly what the
+                // store's record says.)
+                "store" => println!("From the store, published by {by}. Its files are what the store's record says."),
                 "unsigned" => println!("It isn't signed."),
                 "tampered" => println!(
                     "{}.",
@@ -217,7 +220,7 @@ pub async fn run(
             {
                 println!("{reason}.");
             }
-            if status != "ok" {
+            if status != "ok" && status != "store" {
                 std::process::exit(1);
             }
         }

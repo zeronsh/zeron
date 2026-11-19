@@ -280,7 +280,7 @@ impl FakeStore {
     /// it's a deploy token's (`via: "deploy_token"`, its record naming no
     /// key).
     pub fn add(&self, owner: &str, raw: &[u8], state: &str, notes: &str) {
-        let package = install::parse_from_store(raw.to_vec(), false).expect("a valid package");
+        let package = install::parse(raw.to_vec()).or_else(|_| install::parse_from_store(raw.to_vec(), false)).expect("a valid package");
         let by_token = package.key.is_none();
         let engines = package.manifest.raw["engines"]["zeron"].as_str().map(str::to_owned);
         let mut all = self.state.lock().unwrap();
@@ -369,8 +369,9 @@ impl FakeStore {
         self.state.lock().unwrap().plugins.get_mut(id).unwrap().owner_account = account.to_owned();
     }
 
-    /// `owner` has id `id` in the store, with no version listed (its first
-    /// came from a device and was taken down, say): a key may publish it.
+    /// `owner` has id `id` in the store, with no version at all (an id
+    /// held, nothing published yet): a device may publish its first
+    /// version, a deploy token may not.
     pub fn claim(&self, id: &str, owner: &str) {
         self.state.lock().unwrap().plugins.entry(id.to_owned()).or_insert_with(|| StoredPlugin { owner: owner.to_owned(), ..Default::default() });
     }
@@ -654,10 +655,11 @@ impl FakeStore {
                     let token = state.deploy_tokens.get(hash)?;
                     Some((token.id.clone(), token.short.clone(), token.name.clone()))
                 });
-                // A token publishes existing plugins its account owns, in its
-                // scope; never a new id.
+                // A token publishes plugins its account owns, in its scope,
+                // that have a version already: never a new id, never a
+                // plugin's first version (that comes from a device).
                 if let Some((scope, _)) = &scope {
-                    let owned = state.plugins.get(*id).is_some_and(|p| p.owner == owner);
+                    let owned = state.plugins.get(*id).is_some_and(|p| p.owner == owner && !p.versions.is_empty());
                     if !owned || !scope.covers(id) {
                         return json_reply(403, json!({ "error": "token_not_allowed", "message": "This deploy token may not publish this plugin." }));
                     }

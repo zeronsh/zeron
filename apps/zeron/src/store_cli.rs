@@ -85,7 +85,7 @@ fn plain_line(word: &str) -> Option<&'static str> {
         "invalid_token" => "The deploy token is wrong, revoked or expired: make a new one (`zeron plugin token create`) and put it in ZERON_DEPLOY_TOKEN.",
         "token_not_allowed" => "This deploy token may not publish this plugin (a plugin's first version is published from your computer).",
         "session_required" => "A deploy token only publishes: this needs you signed in, with Zeron running on your computer.",
-        "unauthenticated" => "The store doesn't know who's asking: no deploy token reached it, and nobody is signed in.",
+        "unauthenticated" => "The store didn't accept who's asking (a 401 that said no more): check ZERON_DEPLOY_TOKEN, or sign in again.",
         "too_many_tokens" => "Your account has as many live deploy tokens as it can. Revoke one first (`zeron plugin token revoke <id>`).",
         _ => return None,
     })
@@ -103,13 +103,14 @@ fn failed(error: &str) -> anyhow::Error {
 /// a token, or is mistyped, stops here, before anything is sent (and the
 /// line never quotes it).
 fn deploy_token() -> anyhow::Result<Option<DeployToken>> {
-    match std::env::var(deploy_token::ENV) {
-        Ok(text) if !text.trim().is_empty() => DeployToken::parse(&text).map(Some).map_err(|why| {
-            let word = if why == deploy_token::DAMAGED { "damaged" } else { "not_a_token" };
-            exit(SETUP, format!("{word}: {}: {why}", deploy_token::ENV))
-        }),
-        _ => Ok(None),
+    let refused = |word: &str, why: &str| exit(SETUP, format!("{word}: {}: {why}", deploy_token::ENV));
+    let Some(raw) = std::env::var_os(deploy_token::ENV) else { return Ok(None) };
+    // (Set, but not text: never taken as no token at all.)
+    let Some(text) = raw.to_str() else { return Err(refused("not_a_token", deploy_token::NOT_A_TOKEN)) };
+    if text.trim().is_empty() {
+        return Ok(None);
     }
+    DeployToken::parse(text).map(Some).map_err(|why| refused(if why == deploy_token::DAMAGED { "damaged" } else { "not_a_token" }, &why))
 }
 
 /// Run `command` here when it needs no running Zeron: `check` always, and

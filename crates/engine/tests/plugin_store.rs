@@ -420,7 +420,7 @@ async fn a_package_that_isn_t_the_store_s_record_is_refused() {
     let older_package = install::parse(older.clone()).unwrap();
     store.state.lock().unwrap().serve_instead.insert(("focus".into(), "0.9.0".into()), older.clone());
     let offer = |version: &str, raw: &[u8], hash: &str, publisher: Option<&str>| {
-        json!({ "id": "focus", "version": version, "hash": hash, "sha256": sha256(raw), "bytes": raw.len(), "publisher": publisher, "publisher_id": fake_store::publisher_id("ada"), "verified": true })
+        json!({ "id": "focus", "version": version, "hash": hash, "sha256": sha256(raw), "bytes": raw.len(), "key": key.public(), "publisher": publisher, "publisher_id": fake_store::publisher_id("ada"), "verified": true })
     };
     store.state.lock().unwrap().offer_anyway.push(offer("0.9.0", &older, &older_package.hash, Some("ada")));
     let checked = d.check().await;
@@ -1211,10 +1211,13 @@ async fn a_version_published_with_a_token_installs_as_its_publisher_s() {
     assert_eq!(installed["plugin"]["author"], ada, "{installed}");
     assert_eq!((installed["plugin"]["source"]["kind"].as_str(), installed["plugin"]["source"]["verified"].as_bool()), (Some("store"), Some(true)));
     assert_eq!(d.allow("focus").await["status"], "on");
-    // Every scan after: still the publisher's.
+    // Every scan after: still the publisher's; and `zeron plugin verify`
+    // says so too (`store`), never "Unknown author".
     d.plugins.rescan().await;
     let item = d.item("focus").await;
     assert_eq!((item["author"].clone(), item["status"].as_str()), (ada.clone(), Some("on")), "{item}");
+    let verified = d.call(methods::VERIFY_PLUGIN, json!({ "path": item["dir"] })).await.unwrap();
+    assert_eq!((verified["status"].as_str(), verified["author"].clone()), (Some("store"), ada.clone()), "{verified}");
 
     // Another token's version, then a device's: updates as any.
     store.add("ada", &unsigned_package_of("focus", "1.1.0", &["ui.add"], "return 2"), "verified", "");
@@ -1264,4 +1267,58 @@ async fn a_version_published_with_a_token_installs_as_its_publisher_s() {
     let item = d.item("lab").await;
     assert_eq!(item["author"]["kind"], "unknown", "{item}");
     assert_ne!(item["status"], "on", "{item}");
+    let verified = d.call(methods::VERIFY_PLUGIN, json!({ "path": item["dir"] })).await.unwrap();
+    assert_eq!((verified["status"].as_str(), verified["author"]["kind"].as_str()), (Some("unsigned"), Some("unknown")), "{verified}");
+}
+
+/// Under a record that names no signer, the store takes unsigned and
+/// nothing else: a signed package there is refused; and an update kept
+/// unsigned is refused when its record names a signer by the time it's
+/// taken.
+#[tokio::test]
+async fn under_a_record_naming_no_signer_only_unsigned_is_taken() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "verified", "");
+    store.state.lock().unwrap().plugins.get_mut("focus").unwrap().versions[0].key = None;
+    let d = device(&store, Some("bob"));
+    let refused = d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap_err();
+    assert_eq!(word(&refused), "store_mismatch", "{refused}");
+    assert!(d.item("focus").await.is_null());
+
+    store.add("ada", &unsigned_package_of("board", "1.0.0", &["ui.add"], "return 1"), "verified", "");
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "board" })).await.unwrap();
+    assert_eq!(d.allow("board").await["status"], "on");
+    store.add("ada", &unsigned_package_of("board", "1.1.0", &["ui.add"], "return 2"), "verified", "");
+    assert_eq!(d.check().await["updates"][0]["version"], "1.1.0");
+    store.state.lock().unwrap().plugins.get_mut("board").unwrap().versions[1].key = Some(key.public());
+    let refused = d.call(methods::UPDATE_PLUGIN, json!({ "id": "board" })).await.unwrap_err();
+    assert_eq!(word(&refused), "store_mismatch", "{refused}");
+    assert_eq!(d.item("board").await["version"], "1.0.0");
+}
+
+/// An unsigned version (a deploy token's) between two signed ones doesn't
+/// hide a signing key change: the next signed update is held to the key
+/// the last signed version had.
+#[tokio::test]
+async fn a_key_change_across_a_token_s_version_still_shows() {
+    let store = FakeStore::start().await;
+    let (first, _) = SigningKey::generate().unwrap();
+    let (other, _) = SigningKey::generate().unwrap();
+    let d = device(&store, Some("bob"));
+    for id in ["focus", "board"] {
+        store.add("ada", &package_of(&first, id, "1.0.0", &["ui.add"], "return 1", json!({})), "verified", "");
+        d.call(methods::INSTALL_PLUGIN, json!({ "store": id })).await.unwrap();
+        assert_eq!(d.allow(id).await["status"], "on");
+        store.add("ada", &unsigned_package_of(id, "1.1.0", &["ui.add"], "return 2"), "verified", "");
+        d.check().await;
+        let updated = d.call(methods::UPDATE_PLUGIN, json!({ "id": id })).await.unwrap();
+        assert_eq!(updated["plugin"]["version"], "1.1.0", "{updated}");
+    }
+    store.add("ada", &package_of(&other, "focus", "1.2.0", &["ui.add"], "return 3", json!({})), "verified", "");
+    store.add("ada", &package_of(&first, "board", "1.2.0", &["ui.add"], "return 3", json!({})), "verified", "");
+    let checked = d.check().await;
+    let offered = |id: &str| checked["updates"].as_array().unwrap().iter().find(|u| u["id"] == id).cloned().unwrap();
+    assert_eq!(offered("focus")["new_key"], true, "{checked}");
+    assert!(offered("board")["new_key"] != true, "{checked}");
 }

@@ -96,6 +96,9 @@ pub mod reason {
     /// Replacing an installed store plugin's code is the person's to do
     /// (an update they click), never an agent's.
     pub const NEEDS_PERSON: &str = "needs_person";
+    /// What the store sent isn't what its record says (hash, version, key,
+    /// publisher): never installed (`store::client::reason` names it too).
+    pub const STORE_MISMATCH: &str = "store_mismatch";
     /// An update asked for as one of many (`verified_only`) isn't
     /// verified: taken on its own, with its own question.
     pub const NOT_VERIFIED: &str = "not_verified";
@@ -168,6 +171,11 @@ pub struct StoreSource {
     /// The key that signed it, as the store's record names it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// An unsigned version's (a deploy token's): the key the newest signed
+    /// version installed here before it was signed with, so a key change
+    /// across it still shows on the next signed update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_key: Option<String>,
     /// The version installed was verified (amendment 45), as the record it
     /// was installed from said, fetched at install time: never a card, a
     /// remembered offer, the manifest or a caller's word. A record here
@@ -310,9 +318,14 @@ pub fn parse(raw: Vec<u8>) -> Result<Package, String> {
 /// [`parse`] for a package the store serves: `signed` is whether its
 /// record names a signer. A version published with a deploy token is
 /// unsigned, its record naming none: taken by its contents, which the
-/// record's hash then vouches for.
+/// record's hash then vouches for. Under a record naming no signer, a
+/// signed package is refused: unsigned is taken there, and nothing else.
 pub fn parse_from_store(raw: Vec<u8>, signed: bool) -> Result<Package, String> {
-    parse_package(raw, signed)
+    let package = parse_package(raw, signed)?;
+    if !signed && package.key.is_some() {
+        return Err(failure(reason::STORE_MISMATCH, "It's signed, but the store's record names no signer, so it wasn't installed"));
+    }
+    Ok(package)
 }
 
 fn parse_package(raw: Vec<u8>, signed: bool) -> Result<Package, String> {

@@ -37,7 +37,7 @@ pub mod reason {
     pub const STORE_ERROR: &str = "store_error";
     /// What the store sent isn't what its record says (hash, version, key,
     /// publisher): never installed.
-    pub const STORE_MISMATCH: &str = "store_mismatch";
+    pub const STORE_MISMATCH: &str = crate::plugins::install::reason::STORE_MISMATCH;
 }
 
 /// How a request proves who sends it.
@@ -586,9 +586,22 @@ impl StoreClient {
         self.json(reqwest::Method::GET, "/store/v1/me/tokens", None, caller).await
     }
 
-    /// Make a deploy token: the answer carries it whole, this once.
-    pub async fn create_token(&self, body: Value, caller: &Caller) -> Result<Value, String> {
-        self.json(reqwest::Method::POST, "/store/v1/me/tokens", Some(body), caller).await
+    /// Make a deploy token: its record as the list shows it, and the token,
+    /// this once. The answer's bytes, and the token's text in what was read
+    /// of them, are wiped once read.
+    pub async fn create_token(&self, body: Value, caller: &Caller) -> Result<(Value, DeployToken), String> {
+        let body = (serde_json::to_vec(&body).unwrap_or_default(), "application/json");
+        let bytes = zeroize::Zeroizing::new(self.send(reqwest::Method::POST, "/store/v1/me/tokens", Some(body), caller, MAX_JSON_BYTES).await?);
+        let mut made = object(&bytes)?;
+        let unreadable = || failure(reason::STORE_ERROR, "The store's answer had no token in it that could be read: revoke it from the list and make another");
+        let token = match made.get_mut("token").map(Value::take) {
+            Some(Value::String(text)) => DeployToken::parse(&zeroize::Zeroizing::new(text)).map_err(|_| unreadable())?,
+            _ => return Err(unreadable()),
+        };
+        if let Some(fields) = made.as_object_mut() {
+            fields.remove("token");
+        }
+        Ok((made, token))
     }
 
     pub async fn revoke_token(&self, id: &str, caller: &Caller) -> Result<Value, String> {
@@ -648,7 +661,6 @@ fn refusal(status: u16, body: &[u8]) -> String {
         // it again is the fix.
         // (The edge's word for a plugin or version it doesn't show this caller.)
         (Some("not_found"), 404) => failure(reason::NOT_IN_STORE, if message.is_empty() { "The store has no such plugin".to_owned() } else { message }),
-        (Some("body_mismatch"), _) => failure("body_mismatch", "What reached the store isn't what was signed (it changed on the way): send it again"),
         (Some(word), _) => failure(word, if message.is_empty() { format!("The store refused it ({status})") } else { message }),
         (None, 404) => failure(reason::NOT_IN_STORE, "The store has no such plugin"),
         (None, 429) => failure(install::reason::RATE_LIMITED, "The store is turning away requests from here for now; try again later"),
