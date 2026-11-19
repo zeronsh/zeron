@@ -193,6 +193,11 @@ return function(props: Props): Node
 			else file(name),
 		w = size,
 		h = size,
+		-- (Its width held, too, where its box is sized with unbounded room:
+		-- there zgx gave a glyph's width from its source, not `w`, so a
+		-- glyph kept out of layout read as infinitely wide.)
+		min_w = size,
+		max_w = size,
 		shrink = 0,
 		-- A glyph says nothing a screen reader needs: what holds it is named.
 		aria_hidden = true,

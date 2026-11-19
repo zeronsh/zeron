@@ -1302,17 +1302,12 @@ local GivingRow = ui.component(function(p: { props: RowProps }): Node
 			end,
 			table.unpack(give_way.gives(nil)),
 		},
-		-- (Its part that stays, there only once it has moved here: kept out
-		-- of layout from its making, it was never laid out, and zgx gave its
-		-- icon no finite width.)
-		ui.show(function(): boolean
-			return at() >= 3
-		end, give_way.stays({
+		give_way.stays({
 			under = true,
 			hidden = function(): boolean
-				return false
+				return at() < 3
 			end,
-		})),
+		}),
 	})
 	return row_body(props, {
 		step = at,
