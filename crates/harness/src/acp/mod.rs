@@ -4899,10 +4899,13 @@ fn is_auth_required(error: &HarnessError) -> bool {
     matches!(error, HarnessError::Protocol(message) if message.contains("(code -32000)"))
 }
 
-const EFFORT_SUFFIXES: [(&str, &str, ReasoningLevel); 3] = [
+const EFFORT_SUFFIXES: [(&str, &str, ReasoningLevel); 4] = [
     ("-low", " (Low)", ReasoningLevel::Low),
     ("-medium", " (Medium)", ReasoningLevel::Medium),
     ("-high", " (High)", ReasoningLevel::High),
+    // (Gemini 4 Neon and Hydrogen, agy_acp_server 1.2: neither suffix is
+    // the end of another's.)
+    ("-xhigh", " (XHigh)", ReasoningLevel::XHigh),
 ];
 
 /// one picker row: either a single advertised model, or the effort variants
@@ -8296,6 +8299,52 @@ mod tests {
                 ("gemini-legacy".into(), "Gemini Legacy".into(), vec![]),
             ]
         );
+    }
+
+    /// agy_acp_server 1.2.1 signed in on a Cloud machine (wire capture): the
+    /// Gemini 4 family beside 3.8 Flash, each in its own efforts, and the
+    /// session opening on 3.8 Flash. Every family reaches the picker.
+    #[test]
+    fn antigravity_1_2_lists_every_gemini_4_family() {
+        let names = [
+            ("gemini-4-neon", "Gemini 4 Neon", &["high", "xhigh", "medium", "low"][..]),
+            ("gemini-4-carbon", "Gemini 4 Carbon", &["medium", "high", "low"][..]),
+            ("gemini-4-argon", "Gemini 4 Argon", &["medium", "high", "low"][..]),
+            ("gemini-4-hydrogen", "Gemini 4 Hydrogen", &["high", "xhigh", "medium", "low"][..]),
+            ("gemini-3.8-flash", "Gemini 3.8 Flash", &["high", "medium", "low"][..]),
+        ];
+        let title = |e: &str| if e == "xhigh" { "XHigh".to_owned() } else { format!("{}{}", e[..1].to_uppercase(), &e[1..]) };
+        let options: Vec<Value> = names
+            .iter()
+            .flat_map(|(id, name, efforts)| efforts.iter().map(move |e| json!({"value": format!("{id}-{e}"), "name": format!("{name} ({})", title(e))})))
+            .collect();
+        let live = json!({
+            "models": {
+                "currentModelId": "gemini-3.8-flash-high",
+                "availableModels": options.iter().map(|o| json!({"modelId": o["value"], "name": o["name"], "description": o["value"]})).collect::<Vec<_>>(),
+            },
+            "configOptions": [
+                {"id": "model", "category": "model", "type": "select", "currentValue": "gemini-3.8-flash-high", "options": options},
+                {"id": "mode", "category": "mode", "type": "select", "currentValue": "default", "options": [{"value": "default", "name": "Default"}]}
+            ]
+        });
+        let models = models_from_session(&live, &(antigravity_spec().models)());
+        let rows: Vec<(String, Vec<ReasoningLevel>)> =
+            group_effort_variants(models).into_iter().map(|m| (m.id, m.reasoning_levels)).collect();
+        use ReasoningLevel::{High, Low, Medium, XHigh};
+        assert_eq!(
+            rows,
+            [
+                ("gemini-4-neon".to_owned(), vec![Low, Medium, High, XHigh]),
+                ("gemini-4-carbon".to_owned(), vec![Low, Medium, High]),
+                ("gemini-4-argon".to_owned(), vec![Low, Medium, High]),
+                ("gemini-4-hydrogen".to_owned(), vec![Low, Medium, High, XHigh]),
+                ("gemini-3.8-flash".to_owned(), vec![Low, Medium, High]),
+            ]
+        );
+        // A pick of XHigh runs that variant; one a model lacks, its strongest.
+        assert_eq!(effort_variant_id(&live, "gemini-4-neon", Some(XHigh)), "gemini-4-neon-xhigh");
+        assert_eq!(effort_variant_id(&live, "gemini-4-carbon", Some(XHigh)), "gemini-4-carbon-high");
     }
 
     /// the pinned server fetches a signed-in account's flash list
