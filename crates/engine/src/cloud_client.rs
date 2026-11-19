@@ -476,6 +476,23 @@ impl CloudClient {
             .map_err(Failure::into_error)
     }
 
+    /// `GET /cloud/{orgId}/plan-usage`: subscriptions' usage as Cloud machines'
+    /// runs reported it, by account (`provider@slot`).
+    pub async fn reported_usage(
+        &self,
+    ) -> Result<std::collections::HashMap<String, ReportedUsage>, EngineError> {
+        #[derive(Deserialize)]
+        struct Reply {
+            #[serde(default)]
+            usage: std::collections::HashMap<String, ReportedUsage>,
+        }
+        self.target()?
+            .call::<Reply>(reqwest::Method::GET, &["cloud", "plan-usage"], &[], None, "Read Cloud's usage")
+            .await
+            .map(|reply| reply.usage)
+            .map_err(Failure::into_error)
+    }
+
     /// `POST /cloud/{orgId}/models {harness, models, accounts}`: the models
     /// `accounts` run `harness` with, as this device discovered them signing
     /// one in for Cloud, kept as theirs until a machine discovers its own.
@@ -1490,6 +1507,18 @@ pub struct CloudModelLists {
     /// Each agent's catalog per set of accounts, the newest first.
     #[serde(default)]
     pub catalogs: std::collections::HashMap<String, Vec<AccountCatalog>>,
+}
+
+/// A subscription's usage as a Cloud machine's run reported it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportedUsage {
+    #[serde(default)]
+    pub windows: Vec<zeron_proto::AgentUsageWindow>,
+    #[serde(default)]
+    pub plan_label: Option<String>,
+    /// Unix ms.
+    pub at: i64,
 }
 
 /// One set of accounts' catalog of an agent.

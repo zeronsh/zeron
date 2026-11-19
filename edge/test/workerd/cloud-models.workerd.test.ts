@@ -115,6 +115,36 @@ describe("catalogs per account", () => {
   });
 });
 
+describe("reported usage", () => {
+  it("a run's subscription usage is kept per account for its own user; malformed reports aren't", async () => {
+    const u = newUser();
+    const { deviceId, key } = await readySession(u);
+    const runner = `Bearer ${await runnerToken(u, deviceId, key)}`;
+    const report = {
+      accounts: "codex@c1",
+      windows: [{ label: "5h", usedFraction: 0.25, resetsAt: "2026-11-19T20:00:00Z" }, { label: "Week", usedFraction: 0.5 }],
+      planLabel: "ChatGPT Pro"
+    };
+    expect((await call("POST", "/runner/usage", runner, report)).status).toBe(200);
+    const read = async (bearer: string) =>
+      ((await (await call("GET", "/cloud/org1/plan-usage", bearer)).json()) as { usage: Record<string, { windows: unknown[]; planLabel?: string; at: number }> }).usage;
+    const kept = await read(userBearer(u));
+    expect(Object.keys(kept)).toEqual(["codex@c1"]);
+    expect(kept["codex@c1"]?.windows).toEqual(report.windows);
+    expect(kept["codex@c1"]?.planLabel).toBe("ChatGPT Pro");
+    expect(await read(userBearer(newUser()))).toEqual({});
+    expect((await call("POST", "/runner/usage", userBearer(u), report)).status).toBe(403);
+    for (const bad of [
+      { ...report, accounts: "codex@c1,claude@a1" },
+      { ...report, windows: [] },
+      { ...report, windows: [{ label: "5h", usedFraction: "half" }] },
+      { ...report, windows: Array(5).fill({ label: "x", usedFraction: 0 }) }
+    ]) {
+      expect((await call("POST", "/runner/usage", runner, bad)).status).toBe(400);
+    }
+  });
+});
+
 describe("parsePublishedModels", () => {
   it("keeps what parses, distinct, bounded in count and size", () => {
     const many = Array.from({ length: MAX_PUBLISHED_MODELS + 50 }, (_, i) => ({

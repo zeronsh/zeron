@@ -478,6 +478,9 @@ struct Inner {
     codex_check: tokio::sync::Mutex<CodexCheck>,
     /// Per agent: whether its CLI is installed ([`CredentialBroker::ensure_installed`]).
     installs: Mutex<HashMap<HarnessId, Arc<tokio::sync::Mutex<InstallCheck>>>>,
+    /// Per account: when its usage was last reported, and what it said
+    /// ([`CredentialBroker::report_usage`]).
+    usage_reported: Mutex<HashMap<String, (Instant, String)>>,
 }
 
 /// An agent's install check: done once it passes; a failed install is
@@ -534,6 +537,7 @@ impl CredentialBroker {
                 refresher: Mutex::new(None),
                 codex_check: tokio::sync::Mutex::new(CodexCheck::Unchecked),
                 installs: Mutex::new(HashMap::new()),
+                usage_reported: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -576,8 +580,39 @@ impl CredentialBroker {
             let _ = self.git_identity(&grant).await;
         }
         for provider in [VaultProvider::Claude, VaultProvider::Codex] {
-            let _ = self.grant_for_run(provider).await;
+            let granted = self.grant_for_run(provider).await;
+            if let (VaultProvider::Codex, GrantOutcome::Granted(grant)) = (provider, granted) {
+                self.report_codex_usage(&grant).await;
+            }
         }
+    }
+
+    /// ChatGPT's usage, read here with this machine's grant (ChatGPT answers
+    /// a machine, never the vault's Cloudflare servers) and reported as its
+    /// account's ([`Self::report_usage`]): a device's Cloud card shows it
+    /// before any ChatGPT run.
+    async fn report_codex_usage(&self, grant: &Grant) {
+        let reply = self
+            .inner
+            .http
+            .get(CODEX_USAGE_URL)
+            .bearer_auth(&grant.access_token)
+            .header("chatgpt-account-id", grant.account_id.as_deref().unwrap_or_default())
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await;
+        let body = match reply {
+            Ok(res) if res.status().is_success() => res.json::<Value>().await.ok(),
+            _ => None,
+        };
+        let Some((windows, plan)) = body
+            .as_ref()
+            .and_then(|body| crate::agent_accounts::usage_windows_from_reply(HarnessId::Codex, body))
+        else {
+            tracing::debug!("ChatGPT usage unreadable here");
+            return;
+        };
+        self.report_usage(&credential_part("codex", grant), windows, plan).await;
     }
 
     pub fn shutdown(&self) {
@@ -2858,6 +2893,80 @@ impl crate::registry::RunEnvironment for CredentialBroker {
     async fn credential(&self, harness: HarnessId, _chat_id: Option<&str>) -> Option<String> {
         CredentialBroker::credential(self, harness).await
     }
+
+    async fn record_usage(
+        &self,
+        _harness: HarnessId,
+        credential: &str,
+        windows: Vec<zeron_proto::AgentUsageWindow>,
+        plan_label: Option<String>,
+    ) {
+        CredentialBroker::report_usage(self, credential, windows, plan_label).await;
+    }
+}
+
+/// ChatGPT's usage view (`/wham/usage`), as Codex reads it.
+const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+
+/// How soon the same account's usage is reported again: the same figures
+/// within a minute, or any at all within ten seconds, aren't.
+const USAGE_REPORT_SAME: Duration = Duration::from_secs(60);
+const USAGE_REPORT_GAP: Duration = Duration::from_secs(10);
+
+impl CredentialBroker {
+    /// A run's subscription usage (`AgentEvent::PlanUsage`), kept on the edge
+    /// as its account's (`POST /runner/usage`): where a device's Cloud card
+    /// reads it when the vault can't ask the provider itself (ChatGPT turns
+    /// Cloudflare's servers away). Only a run on one account's subscription
+    /// (`credential_accounts`); best effort.
+    pub async fn report_usage(
+        &self,
+        credential: &str,
+        windows: Vec<zeron_proto::AgentUsageWindow>,
+        plan_label: Option<String>,
+    ) {
+        let Some(body) = usage_report(credential, &windows, plan_label.as_deref()) else {
+            return;
+        };
+        let account = body["accounts"].as_str().unwrap_or_default().to_owned();
+        let said = body.to_string();
+        {
+            let mut reported = self.inner.usage_reported.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some((at, last)) = reported.get(&account)
+                && (at.elapsed() < USAGE_REPORT_GAP || (*last == said && at.elapsed() < USAGE_REPORT_SAME))
+            {
+                return;
+            }
+            reported.insert(account, (Instant::now(), said));
+        }
+        let Ok(bearer) = self.inner.tokens.token().await else {
+            return;
+        };
+        let url = format!("{}/runner/usage", self.inner.identity.edge_url());
+        match self.inner.http.post(&url).bearer_auth(bearer).json(&body).send().await {
+            Ok(res) if res.status().is_success() || res.status().as_u16() == 404 => {}
+            Ok(res) => tracing::warn!(status = res.status().as_u16(), "usage report refused"),
+            Err(err) => tracing::warn!(error = %describe_http_error(err), "usage report failed"),
+        }
+    }
+}
+
+/// What [`CredentialBroker::report_usage`] sends: `{accounts, windows,
+/// planLabel?}`, for a run on exactly one account's subscription.
+fn usage_report(
+    credential: &str,
+    windows: &[zeron_proto::AgentUsageWindow],
+    plan_label: Option<&str>,
+) -> Option<Value> {
+    let account = credential_accounts(credential).filter(|a| !a.contains(','))?;
+    if windows.is_empty() {
+        return None;
+    }
+    let mut body = serde_json::json!({ "accounts": account, "windows": windows });
+    if let Some(plan) = plan_label.filter(|p| !p.is_empty()) {
+        body["planLabel"] = Value::String(plan.to_owned());
+    }
+    Some(body)
 }
 
 // ---------------------------------------------------------------------------
@@ -3508,6 +3617,21 @@ mod tests {
             generation: 3,
             slot: Some("s1".into()),
         }
+    }
+
+    /// A run's usage goes as its one account's; a run on several (Pi on a
+    /// ChatGPT and a Claude login) or none says nothing.
+    #[test]
+    fn a_runs_usage_is_its_one_accounts() {
+        let windows = vec![zeron_proto::AgentUsageWindow { label: "5h".into(), used_fraction: 0.25, resets_at: None }];
+        let body = usage_report("codex@c1:7", &windows, Some("ChatGPT Pro")).unwrap();
+        assert_eq!(body["accounts"], "codex@c1");
+        assert_eq!(body["windows"][0]["usedFraction"], 0.25);
+        assert_eq!(body["planLabel"], "ChatGPT Pro");
+        assert!(usage_report("codex@c1:7", &[], None).is_none());
+        assert!(usage_report("claude@a1:2,codex@c1:7", &windows, None).is_none());
+        assert!(usage_report("native", &windows, None).is_none());
+        assert!(usage_report("codex:7", &windows, None).is_none(), "an older vault names no account");
     }
 
     /// A fingerprint names each login's account and version; the accounts

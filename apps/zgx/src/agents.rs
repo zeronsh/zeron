@@ -749,7 +749,7 @@ impl Agents {
         let cloud = self.target.borrow().as_deref() == Some(zeron_proto::CLOUD_ACCOUNTS_DEVICE);
         let account_value = |account: &Json| {
             let reset = account["id"].as_str().and_then(|id| resets.get(id));
-            account_value(account, reset)
+            account_value(account, reset, cloud)
         };
         // Each agent whole, its accounts and sign-in with it: a list a page
         // keys by `id` and updates row by row.
@@ -775,7 +775,9 @@ impl Agents {
                 // its own way to add one (nil: one group, as ever).
                 let groups = harness_id(id).filter(|h| cloud || zeron_proto::providers::groups_by_provider(*h)).map(|harness| {
                     let list = accounts.get(id).map(Vec::as_slice).unwrap_or_default();
-                    let read_only = !zeron_proto::providers::switches_accounts(harness);
+                    // (Cloud's accounts are the vault's, every agent's switched
+                    // and removed here; on a computer, Hermes' are its own.)
+                    let read_only = !cloud && !zeron_proto::providers::switches_accounts(harness);
                     let groups: Vec<Value> = provider_groups_on(harness, list, cloud)
                         .into_iter()
                         .map(|g| {
@@ -1136,7 +1138,10 @@ impl Agents {
 
     fn device_value(&self) -> Value {
         let devices = self.device_accounts.borrow();
-        Value::record(devices.iter().map(|(key, device)| (key.as_str(), device_accounts_value(&device.accounts))))
+        Value::record(devices.iter().map(|(key, device)| {
+            let cloud = key == zeron_proto::CLOUD_ACCOUNTS_DEVICE;
+            (key.as_str(), device_accounts_value(&device.accounts, cloud))
+        }))
     }
 
     fn publish_devices(&self) {
@@ -1799,7 +1804,7 @@ fn banked(summary: &Json, spent: Option<&str>) -> (u64, Vec<Value>) {
 
 /// An account as the card takes it: who, on what plan, its two windows, in
 /// use or not; a Codex account's banked resets, and how its last went.
-fn account_value(account: &Json, reset: Option<&Reset>) -> Value {
+fn account_value(account: &Json, reset: Option<&Reset>, cloud: bool) -> Value {
     let windows = account["usageWindows"].as_array().cloned().unwrap_or_default();
     // The session is the first window; the week the one that says so, or the
     // second.
@@ -1829,7 +1834,7 @@ fn account_value(account: &Json, reset: Option<&Reset>) -> Value {
         ("session", Value::from(session)),
         ("week", Value::from(week_used)),
         ("active", Value::Bool(account["active"].as_bool().unwrap_or(false))),
-        ("switchable", Value::Bool(can_switch(account))),
+        ("switchable", Value::Bool(can_switch(account, cloud))),
         ("provider", account["provider"].as_str().map_or(Value::Nil, Value::from)),
         // An API key: no plan, so no windows to show; named by someone, or
         // going by its last four.
@@ -1919,16 +1924,18 @@ fn mark_switched(accounts: &mut [Json], harness: &str, account: &str) {
 }
 
 /// A device's accounts as the composer reads them, by agent: only an agent
-/// that signs in and reports its usage. `{ id, email, plan, active,
-/// can_switch, error?, windows = { { label, used } } }`.
-fn device_accounts_value(accounts: &[Json]) -> Value {
+/// that signs in (one reporting no usage, Antigravity, still shows who's in
+/// use and switches, with no meter). `cloud`: Cloud's accounts, the vault's.
+/// `{ id, email, plan, active, can_switch, error?, windows = { { label,
+/// used } } }`.
+fn device_accounts_value(accounts: &[Json], cloud: bool) -> Value {
     let mut by: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
     for account in accounts {
         let Some(harness) = account["harness"].as_str() else { continue };
         let Ok(id) = serde_json::from_value::<zeron_proto::HarnessId>(account["harness"].clone()) else {
             continue;
         };
-        if !(zeron_proto::providers::signs_in(id) && zeron_proto::providers::reports_usage(id)) {
+        if !zeron_proto::providers::signs_in(id) {
             continue;
         }
         let windows: Vec<Value> = account["usageWindows"]
@@ -1947,7 +1954,7 @@ fn device_accounts_value(accounts: &[Json]) -> Value {
             ("email", Value::from(account_name(account))),
             ("plan", Value::from(account["planLabel"].as_str().unwrap_or(""))),
             ("active", Value::Bool(account["active"].as_bool().unwrap_or(false))),
-            ("can_switch", Value::Bool(can_switch(account))),
+            ("can_switch", Value::Bool(can_switch(account, cloud))),
             ("windows", Value::List(windows.into())),
         ];
         // Its model provider, where its agent keeps a login per provider
@@ -1966,10 +1973,11 @@ fn device_accounts_value(accounts: &[Json]) -> Value {
 }
 
 /// Whether an account can be put in use: one the engine can swap to, of an
-/// agent whose logins Zeron switches (never Hermes' own pool).
-fn can_switch(account: &Json) -> bool {
+/// agent whose logins Zeron switches (never Hermes' own pool on a computer;
+/// Cloud's (`cloud`) are all the vault's, every agent's switched here).
+fn can_switch(account: &Json, cloud: bool) -> bool {
     account["switchable"].as_bool().unwrap_or(false)
-        && account["harness"].as_str().and_then(harness_id).is_some_and(zeron_proto::providers::switches_accounts)
+        && (cloud || account["harness"].as_str().and_then(harness_id).is_some_and(zeron_proto::providers::switches_accounts))
 }
 
 /// What an account goes by.
@@ -2135,7 +2143,7 @@ mod tests {
             json!({ "id": "b", "harness": "antigravity", "active": true, "switchable": true }),
             json!({ "id": "c", "harness": "hermes", "active": true, "switchable": true, "usageError": "no" }),
             json!({ "id": "d", "harness": "acp.someone", "active": true }),
-        ]);
+        ], false);
         let Value::Map(_) = &value else { panic!("a record") };
         let rows = value.field("claude-code").expect("claude").list().to_vec();
         assert_eq!(rows.len(), 1);
@@ -2143,12 +2151,17 @@ mod tests {
         assert!(rows[0].field("can_switch").is_some_and(Value::truthy));
         let windows = rows[0].field("windows").unwrap().list().to_vec();
         assert_eq!(windows[0].field("used").and_then(Value::as_f64), Some(1.0));
-        assert!(value.field("antigravity").is_none());
+        // Antigravity reports no usage: its account still shows, no meter.
+        let antigravity = value.field("antigravity").expect("antigravity").list().to_vec();
+        assert!(antigravity[0].field("windows").unwrap().list().is_empty());
         assert!(value.field("acp.someone").is_none());
-        // Hermes rotates its own logins: listed, not switched.
+        // Hermes rotates its own logins on a computer: listed, not switched…
         let hermes = value.field("hermes").expect("hermes").list().to_vec();
         assert!(!hermes[0].field("can_switch").is_some_and(Value::truthy));
         assert_eq!(hermes[0].field("error").map(text).as_deref(), Some("no"));
+        // …while Cloud's are the vault's, switched here like any other.
+        let cloud = device_accounts_value(&[json!({ "id": "c", "harness": "hermes", "active": false, "switchable": true })], true);
+        assert!(cloud.field("hermes").unwrap().list()[0].field("can_switch").is_some_and(Value::truthy));
     }
 
     #[test]
@@ -2189,7 +2202,7 @@ mod tests {
             json!({ "id": "o1", "harness": "pi", "provider": "openai-codex", "active": true, "switchable": true }),
             json!({ "id": "g1", "harness": "pi", "provider": "github-copilot", "active": true, "switchable": true }),
             json!({ "id": "x1", "harness": "grok", "provider": "issuer", "active": true, "switchable": true }),
-        ]);
+        ], false);
         let pi = value.field("pi").expect("pi").list().to_vec();
         assert_eq!(pi[0].field("provider").map(text).as_deref(), Some("openai-codex"));
         assert_eq!(pi[0].field("group").map(text).as_deref(), Some("ChatGPT"));
@@ -2218,20 +2231,20 @@ mod tests {
                 { "label": "Weekly", "usedFraction": 1.4 }
             ]
         });
-        let value = account_value(&account, None);
+        let value = account_value(&account, None, false);
         assert_eq!(value.field("session").and_then(Value::as_f64), Some(0.25));
         assert_eq!(value.field("week").and_then(Value::as_f64), Some(1.0));
         assert_eq!(value.field("plan").map(text).as_deref(), Some("Pro"));
         assert_eq!(value.field("session_resets"), None);
         let timed = account_value(&json!({
             "id": "a3", "usageWindows": [{ "label": "5h", "usedFraction": 1.0, "resetsAt": "2026-11-01T15:45:00Z" }]
-        }), None);
+        }), None, false);
         assert_eq!(timed.field("session_resets").and_then(Value::as_f64), Some(1_793_547_900.0));
         assert_eq!(epoch_secs("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(epoch_secs("2026-11-01T16:45:00.250+01:00"), Some(1_793_547_900));
         assert_eq!(epoch_secs("2000-02-29T12:00:00-05:30"), Some(951_845_400));
         assert_eq!(epoch_secs("soon"), None);
-        let bare = account_value(&json!({ "id": "a2", "active": false }), None);
+        let bare = account_value(&json!({ "id": "a2", "active": false }), None, false);
         assert_eq!(bare.field("email").map(text).as_deref(), Some("Signed in"));
         assert_eq!(bare.field("week").and_then(Value::as_f64), Some(0.));
         // Only an account with a credit summary (Codex's) banks anything.
@@ -2269,7 +2282,7 @@ mod tests {
 
     #[test]
     fn codex_accounts_bank_resets_soonest_first() {
-        let value = account_value(&codex(1000), None);
+        let value = account_value(&codex(1000), None, false);
         assert_eq!(value.field("banked").and_then(Value::as_f64), Some(3.));
         assert_eq!(ids(&value), ["soon", "late", "undated"]);
         let Some(Value::List(list)) = value.field("resets") else { panic!("no resets") };
@@ -2280,7 +2293,7 @@ mod tests {
         assert_eq!(list[2].field("expires"), None);
         assert_eq!(value.field("reset"), None);
         // None banked: a count of 0, no credits.
-        let none = account_value(&json!({ "id": "x", "codexResetCredits": { "availableCount": 0, "credits": [] } }), None);
+        let none = account_value(&json!({ "id": "x", "codexResetCredits": { "availableCount": 0, "credits": [] } }), None, false);
         assert_eq!(none.field("banked").and_then(Value::as_f64), Some(0.));
         assert!(ids(&none).is_empty());
     }
@@ -2289,19 +2302,19 @@ mod tests {
     fn a_reset_shows_what_it_did_until_fresh_usage_lands() {
         let used = Reset { state: "reset", why: None, credit: "soon".into(), at: 2000, generation: 1 };
         // Probed before the reset: the windows started over, that one spent.
-        let value = account_value(&codex(1000), Some(&used));
+        let value = account_value(&codex(1000), Some(&used), false);
         assert_eq!(value.field("session").and_then(Value::as_f64), Some(0.));
         assert_eq!(value.field("week").and_then(Value::as_f64), Some(0.));
         assert_eq!(value.field("banked").and_then(Value::as_f64), Some(2.));
         assert_eq!(ids(&value), ["late", "undated"]);
         assert_eq!(value.field("reset").and_then(|r| r.field("state")).map(text).as_deref(), Some("reset"));
         // Probed since: the usage and credits as they are now.
-        let fresh = account_value(&codex(3000), Some(&used));
+        let fresh = account_value(&codex(3000), Some(&used), false);
         assert_eq!(fresh.field("session").and_then(Value::as_f64), Some(1.));
         assert_eq!(fresh.field("banked").and_then(Value::as_f64), Some(3.));
         // A failure changes nothing but says why.
         let failed = Reset { state: "failed", why: Some("mismatch"), credit: "soon".into(), at: 2000, generation: 2 };
-        let value = account_value(&codex(1000), Some(&failed));
+        let value = account_value(&codex(1000), Some(&failed), false);
         assert_eq!(value.field("session").and_then(Value::as_f64), Some(1.));
         assert_eq!(value.field("banked").and_then(Value::as_f64), Some(3.));
         assert_eq!(value.field("reset").and_then(|r| r.field("why")).map(text).as_deref(), Some("mismatch"));

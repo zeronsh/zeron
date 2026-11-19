@@ -32,6 +32,7 @@
 //! - Interrupt: `session/cancel`, escalating SIGTERM → SIGKILL; the stream
 //!   always ends with `Done { status: Interrupted }`.
 
+mod antigravity_eligibility;
 mod antigravity_paths;
 mod devin_models;
 mod hermes_names;
@@ -3673,7 +3674,10 @@ impl AcpHarness {
         })
         .boxed();
         Ok(if self.spec.id == HarnessId::Antigravity {
-            system_message::strip_system_message_echoes(events)
+            antigravity_eligibility::explain_refusals(
+                system_message::strip_system_message_echoes(events),
+                antigravity_paths::home().ok(),
+            )
         } else {
             events
         })

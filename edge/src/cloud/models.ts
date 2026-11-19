@@ -168,6 +168,43 @@ export const parseAccounts = (value: unknown): string | undefined => {
   return shaped && sorted ? value : undefined;
 };
 
+/** One window of a subscription's usage, as a machine's run reported it
+ * (crates/proto `AgentUsageWindow`). */
+export interface UsageWindow {
+  readonly label: string;
+  readonly usedFraction: number;
+  readonly resetsAt?: string;
+}
+
+/** A subscription's usage as a machine's run reported it (`POST
+ * /runner/usage`), kept per account: what a Cloud card shows where the vault
+ * can't ask the provider itself (ChatGPT refuses Cloudflare's servers). */
+export interface ReportedUsage {
+  readonly windows: readonly UsageWindow[];
+  readonly planLabel?: string;
+  /** Unix ms. */
+  readonly at: number;
+}
+
+/** How many accounts' reported usage one Cloud account keeps. */
+export const MAX_USAGE_REPORTS = 32;
+
+/** A run's usage windows as kept: at most four, each well-formed, or
+ * undefined. */
+export const parseUsageWindows = (value: unknown): UsageWindow[] | undefined => {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 4) return undefined;
+  const windows: UsageWindow[] = [];
+  for (const raw of value) {
+    if (!isRecord(raw)) return undefined;
+    const label = text(raw.label, 40);
+    const used = raw.usedFraction;
+    if (!label || typeof used !== "number" || !Number.isFinite(used) || used < 0 || used > 100) return undefined;
+    const resetsAt = text(raw.resetsAt, 40);
+    windows.push({ label, usedFraction: used, ...(resetsAt ? { resetsAt } : {}) });
+  }
+  return windows;
+};
+
 /** The most models one agent's catalog keeps. */
 export const MAX_PUBLISHED_MODELS = 400;
 /** A catalog's stored size at most (a Durable Object value is ≤ 128 KiB). */

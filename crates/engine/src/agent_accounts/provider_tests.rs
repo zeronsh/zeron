@@ -302,6 +302,19 @@ fn grok_usage_uses_the_grok_build_share_of_the_period() {
     let snapshot = grok_usage_snapshot(&blended).unwrap();
     assert_eq!(snapshot.windows[0].label, "Period");
     assert!(grok_usage_snapshot(&serde_json::json!({ "config": {} })).is_none());
+    // A week with nothing used yet (live reply): protobuf JSON leaves the
+    // zero figures out.
+    let unused = serde_json::json!({ "config": {
+        "currentPeriod": { "type": "USAGE_PERIOD_TYPE_WEEKLY", "start": "2026-11-17T09:46:58Z", "end": "2026-11-24T09:46:58Z" },
+        "onDemandCap": { "val": 0 },
+        "isUnifiedBillingUser": true,
+        "billingPeriodEnd": "2026-11-24T09:46:58Z",
+    }});
+    let snapshot = grok_usage_snapshot(&unused).unwrap();
+    assert_eq!((snapshot.windows[0].label.as_str(), snapshot.windows[0].used_fraction), ("Week", 0.0));
+    assert!(snapshot.windows[0].resets_at.is_some());
+    let unused_build = serde_json::json!({ "config": { "productUsage": [{ "product": "GrokBuild" }], "currentPeriod": {} } });
+    assert_eq!(grok_usage_snapshot(&unused_build).unwrap().windows[0].used_fraction, 0.0);
 }
 
 #[tokio::test]

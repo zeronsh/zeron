@@ -50,6 +50,7 @@ import {
   isCloudAgent,
   parseAccounts,
   parsePublishedModels,
+  parseUsageWindows,
   type PublishedCatalogs
 } from "./models";
 
@@ -355,6 +356,25 @@ export const handleCloudRoute = async (
     );
   }
 
+  if (url.pathname === "/runner/usage") {
+    if (request.method !== "POST") return jsonError(405, "method_not_allowed", "POST only.");
+    if (auth.kind !== "runner" || !auth.deviceId || !auth.orgId) {
+      return jsonError(403, "forbidden", "Runner token required.");
+    }
+    const ns = env.CLOUD_ACCOUNTS;
+    if (!ns) return unavailable();
+    const body = await readJsonBody(request, MAX_RUNNER_BODY);
+    if (!isObject(body)) return jsonError(400, "bad_request", "Body must be a JSON object.");
+    // One account's: a run's subscription.
+    const account = parseAccounts(body.accounts);
+    if (!account || account.includes(",")) return jsonError(400, "bad_request", "Expected accounts: one provider@slot.");
+    const windows = parseUsageWindows(body.windows);
+    if (!windows) return jsonError(400, "bad_request", "Expected windows: one to four {label, usedFraction, resetsAt?}.");
+    const planLabel = typeof body.planLabel === "string" && body.planLabel.length <= 60 ? body.planLabel : undefined;
+    const runner = { orgId: auth.orgId, userId: auth.userId, deviceId: auth.deviceId };
+    return rpc(() => accountStub(ns, runner.orgId, runner.userId).reportUsage(runner, account, windows, planLabel));
+  }
+
   if (url.pathname === "/runner/wake-timing") {
     if (request.method !== "POST") return jsonError(405, "method_not_allowed", "POST only.");
     if (auth.kind !== "runner" || !auth.deviceId || !auth.orgId) {
@@ -440,6 +460,11 @@ export const handleCloudRoute = async (
       console.error("cloud models: published catalogs unreadable", String(e));
     }
     return json({ models: cloudModels(published.latest), catalogs: accountCatalogs(published.byAccount) });
+  }
+  if (rest.length === 1 && rest[0] === "plan-usage" && request.method === "GET") {
+    // Subscriptions' usage as machines' runs reported it, by account.
+    if (!ns) return json({ usage: {} });
+    return json({ usage: await accountStub(ns, orgId, auth.userId).reportedUsage(caller) });
   }
   if (rest.length === 1 && rest[0] === "models" && request.method === "POST") {
     // An agent's models as this account's own device discovered them while

@@ -533,10 +533,15 @@ async fn usage(
                 ..stale(cached.as_ref())
             },
         },
-        // Keep the last good windows beside the reason.
-        Err(error) => CachedUsage {
-            error: Some(error.to_string()),
-            ..stale(cached.as_ref())
+        // The vault can't ask (ChatGPT turns Cloudflare's servers away):
+        // what a machine's run last reported, else the last good windows
+        // beside the reason.
+        Err(error) => match reported_usage(cloud, provider, slot).await {
+            Some(reported) => reported,
+            None => CachedUsage {
+                error: Some(error.to_string()),
+                ..stale(cached.as_ref())
+            },
         },
     };
     usage_cache()
@@ -544,6 +549,27 @@ async fn usage(
         .unwrap_or_else(PoisonError::into_inner)
         .insert(key, fresh.clone());
     fresh
+}
+
+/// The usage a Cloud machine's run last reported for `provider`'s `slot`.
+async fn reported_usage(cloud: &CloudClient, provider: VaultProvider, slot: &str) -> Option<CachedUsage> {
+    let reports = cloud.reported_usage().await.ok()?;
+    reported_for(&reports, provider, slot)
+}
+
+fn reported_for(
+    reports: &HashMap<String, crate::cloud_client::ReportedUsage>,
+    provider: VaultProvider,
+    slot: &str,
+) -> Option<CachedUsage> {
+    let report = reports.get(&format!("{}@{slot}", provider.as_str()))?;
+    (!report.windows.is_empty()).then(|| CachedUsage {
+        windows: report.windows.clone(),
+        plan: report.plan_label.clone(),
+        error: None,
+        fetched_at: report.at,
+        at: Instant::now(),
+    })
 }
 
 fn stale(previous: Option<&CachedUsage>) -> CachedUsage {
@@ -750,6 +776,21 @@ mod tests {
             crate::credentials::credential_accounts("openrouter-key@o1:2,codex@c1:9,claude@a1:4"),
             "the same key a machine's catalog carries"
         );
+    }
+
+    /// A machine's reported usage stands in for the vault's, by account.
+    #[test]
+    fn reported_usage_is_the_accounts_own() {
+        let reports: HashMap<String, crate::cloud_client::ReportedUsage> = serde_json::from_value(serde_json::json!({
+            "codex@c1": { "windows": [{ "label": "5h", "usedFraction": 0.4, "resetsAt": null }], "planLabel": "ChatGPT Pro", "at": 5 },
+            "codex@c2": { "windows": [], "at": 6 }
+        }))
+        .unwrap();
+        let found = reported_for(&reports, VaultProvider::Codex, "c1").unwrap();
+        assert_eq!((found.windows.len(), found.plan.as_deref(), found.fetched_at), (1, Some("ChatGPT Pro"), 5));
+        assert!(found.error.is_none());
+        assert!(reported_for(&reports, VaultProvider::Codex, "c2").is_none(), "nothing in it");
+        assert!(reported_for(&reports, VaultProvider::Claude, "c1").is_none(), "another provider's");
     }
 
     #[test]

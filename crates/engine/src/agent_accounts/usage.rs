@@ -356,7 +356,9 @@ impl AgentAccounts {
 }
 
 /// Grok's `/billing?format=credits`: the current period, with the Grok Build
-/// product's share of it (the blended `creditUsagePercent` as fallback).
+/// product's share of it (the blended `creditUsagePercent` as fallback). The
+/// reply is protobuf JSON, which leaves out zero values: a period with no
+/// usage carries neither figure, and reads as nothing used.
 pub(super) fn grok_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnapshot> {
     let config = body.get("config")?;
     let period = config.get("currentPeriod");
@@ -366,11 +368,11 @@ pub(super) fn grok_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnaps
         .and_then(|products| {
             products.iter().find_map(|p| {
                 (p.get("product").and_then(|v| v.as_str()) == Some("GrokBuild"))
-                    .then(|| p.get("usagePercent").and_then(|v| v.as_f64()))
-                    .flatten()
+                    .then(|| p.get("usagePercent").and_then(|v| v.as_f64()).unwrap_or(0.0))
             })
         })
-        .or_else(|| config.get("creditUsagePercent").and_then(|v| v.as_f64()))?;
+        .or_else(|| config.get("creditUsagePercent").and_then(|v| v.as_f64()))
+        .or_else(|| (period.is_some() || config.get("billingPeriodEnd").is_some()).then_some(0.0))?;
     let label = match period.and_then(|p| p.get("type")).and_then(|v| v.as_str()) {
         Some("USAGE_PERIOD_TYPE_DAILY") => "Day",
         Some("USAGE_PERIOD_TYPE_WEEKLY") => "Week",

@@ -110,11 +110,14 @@ import {
 } from "./policy";
 import {
   MAX_ACCOUNT_CATALOGS,
+  MAX_USAGE_REPORTS,
   isCloudAgent,
   type CloudAgent,
   type PublishedCatalog,
   type PublishedCatalogs,
-  type PublishedModel
+  type PublishedModel,
+  type ReportedUsage,
+  type UsageWindow
 } from "./models";
 import { activeProviderName, sandboxProvider } from "./providers";
 import { WAKE_STAGE_TTL_MS, wakeTiming, type EngineTiming, type WakeStage, type WakeStages, type WakeTrace } from "./wake";
@@ -489,6 +492,8 @@ const SESSION_PREFIX = "session:";
 const MODELS_PREFIX = "models:";
 /** `catalog:{agent}|{accounts}`: an agent's catalog per set of accounts. */
 const ACCOUNT_CATALOG_PREFIX = "catalog:";
+/** `usage:{provider@slot}`: a subscription's usage, as a run reported it. */
+const USAGE_PREFIX = "usage:";
 /** A delete that crashed mid-way may be retried after this long. */
 const DELETE_STUCK_MS = 5 * 60_000;
 /** Waits before retrying a failed delete on its own; the last repeats. */
@@ -2089,6 +2094,37 @@ export class CloudAccount extends DurableObject<Env> {
       await this.ctx.storage.put(`${MODELS_PREFIX}${agent}`, catalog);
     }
     return { ok: true, value: { ok: true } };
+  }
+
+  /** `POST /runner/usage`: a machine's run reported its subscription's
+   * usage; kept as that account's. */
+  async reportUsage(
+    runner: CloudCaller & { deviceId: string },
+    account: string,
+    windows: readonly UsageWindow[],
+    planLabel?: string
+  ): Promise<CloudResult<{ ok: true }>> {
+    const s = this.sessionByDevice(runner.deviceId);
+    if (!s || !s.runnerKey || !this.matches(runner)) {
+      return fail(403, "revoked", "This Cloud device is not enrolled.");
+    }
+    const report: ReportedUsage = { windows, at: Date.now(), ...(planLabel ? { planLabel } : {}) };
+    await this.ctx.storage.put(`${USAGE_PREFIX}${account}`, report);
+    const kept = [...(await this.ctx.storage.list<ReportedUsage>({ prefix: USAGE_PREFIX }))].sort(([, a], [, b]) => b.at - a.at);
+    const stale = kept.slice(MAX_USAGE_REPORTS).map(([key]) => key);
+    if (stale.length > 0) await this.ctx.storage.delete(stale);
+    return { ok: true, value: { ok: true } };
+  }
+
+  /** The usage machines reported, by account (`GET /cloud/{orgId}/plan-usage`).
+   * Empty for anyone but this account's own user. */
+  async reportedUsage(caller: CloudCaller): Promise<Record<string, ReportedUsage>> {
+    const out: Record<string, ReportedUsage> = {};
+    if (!this.matches(caller)) return out;
+    for (const [key, report] of await this.ctx.storage.list<ReportedUsage>({ prefix: USAGE_PREFIX })) {
+      out[key.slice(USAGE_PREFIX.length)] = report;
+    }
+    return out;
   }
 
   /** Keep `catalog` as `accounts`' catalog of `agent`, and only the newest
