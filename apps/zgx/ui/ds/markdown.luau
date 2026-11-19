@@ -842,8 +842,14 @@ local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: C
 					return Links.take(target)
 				end
 			elseif open then
-				span.on_click = function()
+				-- A link too (its role, as a reader hears it), going where
+				-- the page opens it: zgx makes a run that only acts a button.
+				-- (Its click handled here, so a web address doesn't open
+				-- outside as well; zgx opens no other scheme.)
+				span.href = target
+				span.on_click = function(): boolean
 					open(target)
+					return true
 				end
 			end
 			-- Its menu, by its kind (ds/links), built as it opens.

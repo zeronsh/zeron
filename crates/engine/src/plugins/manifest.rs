@@ -36,6 +36,8 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     "files",
     "web",
     "windows",
+    // Drawing 3D scenes (`ui.scene3d`), the zgx grant `scene3d`.
+    "scene3d",
     "tools",
     "devices",
     "native",
