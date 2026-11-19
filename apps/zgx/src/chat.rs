@@ -99,6 +99,13 @@ struct Chats {
     /// shipping app's optimistic new chat): shown at once, their first message
     /// sending, watched once made (`chat.created`).
     creating: RefCell<HashMap<String, Json>>,
+    /// The config each new chat was sent from here with (its agent, model
+    /// and effort), until the engine's row records that agent: a chat just
+    /// made has none until its first send's `setChatConfig` lands (on Cloud,
+    /// once its machine is made), or its parent's (a side chat), and is
+    /// shown with this meanwhile, never with the Claude Code stand-in a row
+    /// without an agent gets, nor the agent it's leaving (`shown_config`).
+    starting: RefCell<HashMap<String, Json>>,
     /// Sends to a chat still being made (its first message not gone yet):
     /// shown, sending, and sent in order once its first message has gone.
     after_create: RefCell<HashMap<String, Vec<Value>>>,
@@ -1084,6 +1091,9 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         }
         c.creating.borrow_mut().insert(id.clone(), row.clone());
         c.made(&id, row);
+        // Its agent and model from the first frame: the composer's pick,
+        // not the stand-in of a row with no config yet.
+        c.starts_with(&id, merged_config(&Json::Null, &req));
         let view = pick(&req);
         let mut pending = view.pending.borrow_mut();
         let prompts = pending.entry(id).or_default();
@@ -1117,6 +1127,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     host.action("chat.create_failed", move |id| {
         let id = text(&id);
         c.creating.borrow_mut().remove(&id);
+        c.starting.borrow_mut().remove(&id);
         c.after_create.borrow_mut().remove(&id);
         c.made_here.borrow_mut().retain(|m| *m != id);
         c.chats.borrow_mut().remove(&id);
@@ -1356,6 +1367,10 @@ impl Chats {
                     }
                 }
                 me.made_here.borrow_mut().extend(kept);
+                // (A row recording the agent it was sent with is what shows.)
+                me.starting
+                    .borrow_mut()
+                    .retain(|id, sent| chats.get(id).is_none_or(|c| c["config"]["harness"] != sent["harness"]));
             }
             me.chats_heard.set(true);
             me.publish_views();
@@ -1878,6 +1893,24 @@ impl Chats {
 
     fn chat(&self, id: &str) -> Option<Json> {
         self.chats.borrow().get(id).cloned()
+    }
+
+    /// What chat `id` (its row `chat`) is shown running: the config it was
+    /// sent from here with (`starting`) until its row records that agent,
+    /// then its row's.
+    fn shown_config(&self, id: &str, chat: &Json) -> Json {
+        let config = &chat["config"];
+        match self.starting.borrow().get(id) {
+            Some(sent) if config["harness"] != sent["harness"] => sent.clone(),
+            _ => config.clone(),
+        }
+    }
+
+    /// Keep `config` as what new chat `id` runs until its row says so.
+    fn starts_with(&self, id: &str, config: Json) {
+        if config["harness"].is_string() {
+            self.starting.borrow_mut().insert(id.to_owned(), config);
+        }
     }
 
     /// Whether opening chat `id` marks it seen: when that changes what it
@@ -2640,10 +2673,17 @@ impl View {
             let Open { entries, older_todo, built, .. } = open;
             let mut list: Vec<Value> = Vec::with_capacity(entries.len());
             let mut seen = Subagents::default();
+            // The latest prompt and when it was sent (seconds).
+            let mut prompt: Option<(String, f64)> = None;
             for (at, e) in entries.iter_mut().enumerate() {
                 if e.id.is_empty() {
                     list.extend(e.json.as_ref().and_then(|json| message(json, context.model.as_deref())));
                     continue;
+                }
+                if let Some(json) = &e.json
+                    && json["role"].as_str() == Some("user")
+                {
+                    prompt = Some((e.id.to_string(), json["createdAt"].as_f64().unwrap_or(0.) / 1000.));
                 }
                 let row = match (built.get(&e.id), &e.json) {
                     (Some(row), _) => row.clone(),
@@ -2658,7 +2698,7 @@ impl View {
                     }
                     (None, None) => Built::default(),
                 };
-                list.extend(row.row);
+                list.extend(row.row.map(|shown| from_its_send(shown, &e.id, prompt.as_ref())));
                 seen.add(row.subagents.as_deref());
                 if at < whole_from && e.json.is_some() {
                     settle(e, at, older_todo);
@@ -2684,8 +2724,12 @@ impl View {
                 let awaited = open.waiting.iter().any(|w| {
                     w["messageId"].as_str().is_some_and(|m| Some(m) == last["id"].as_str()) && w["failure"].is_null()
                 });
+                // On Cloud the turn is the send's: its clock counts from it,
+                // through the machine coming up, as its reply's does
+                // (`from_its_send`), never again from the machine's start.
+                let cloud = chats.chat(&open.id).is_some_and(|c| on_cloud(&c));
                 let waiting = match turn {
-                    Some(turn) if running && turn + 1. >= sent => Some(("working", turn)),
+                    Some(turn) if running && turn + 1. >= sent => Some(("working", if cloud { sent.min(turn) } else { turn })),
                     _ if running || fresh || awaited => Some(("sending", sent)),
                     _ => None,
                 };
@@ -2750,6 +2794,13 @@ impl View {
         let chat = chats.chat(&id).unwrap_or(Json::Null);
         if chat.is_null() && !fresh {
             return Err("missing");
+        }
+        // A new chat shows the agent and model it's sent with at once, not
+        // the config it was made with (none, or a side chat's parent's)
+        // until its own lands.
+        if fresh {
+            chats.starts_with(&id, merged_config(&chat["config"], &req));
+            chats.publish_views();
         }
         let target = chats.target(&chat);
         let words = req.field("text").map(text).unwrap_or_default();
@@ -2924,6 +2975,9 @@ impl View {
                         // switch provider): the message never went, and the
                         // person is told, as for any send that fails.
                         eprintln!("zeron-zgx: chat: {id}: a new chat's agent wasn't set: {e}");
+                        // (It runs what its row says, then.)
+                        chats.starting.borrow_mut().remove(&id);
+                        chats.publish_views();
                         self.mark_failed(&id, &message_id, None);
                         return Err(engine::outcome(&e));
                     }
@@ -2948,6 +3002,8 @@ impl View {
             if let Some(c) = chats.chats.borrow_mut().get_mut(&id) {
                 c["config"] = config.clone();
             }
+            // (What it's shown running from here on.)
+            chats.starting.borrow_mut().remove(&id);
             chats.publish_views();
             if let Err(e) = engine::get()
                 .call("Mutate", json!({ "op": "setChatConfig", "chatId": id, "config": config }))
@@ -3187,11 +3243,12 @@ impl View {
         let chats = CHATS.with(Rc::clone);
         let id = args.field("id").map(text).unwrap_or_default();
         let chat = chats.chat(&id).ok_or("missing")?;
-        let config = merged_config(&chat["config"], &args);
+        let config = merged_config(&chats.shown_config(&id, &chat), &args);
         // Shown at once; the engine's word follows.
         if let Some(c) = chats.chats.borrow_mut().get_mut(&id) {
             c["config"] = config.clone();
         }
+        chats.starting.borrow_mut().remove(&id);
         chats.publish_views();
         engine::get()
             .call("Mutate", json!({ "op": "setChatConfig", "chatId": id, "config": config }))
@@ -4297,8 +4354,9 @@ enum Change {
 /// when it isn't this one).
 fn build_context(open: &mut Open, chats: &Chats) -> Rc<RowContext> {
     let chat = chats.chat(&open.id).unwrap_or(Json::Null);
-    let harness = chat["config"]["harness"].as_str().unwrap_or("claude-code").to_owned();
-    let model = chat["config"]["model"].as_str().map(|m| chats.label_of(&harness, Some(m)).unwrap_or_else(|| m.to_owned()));
+    let config = chats.shown_config(&open.id, &chat);
+    let harness = config["harness"].as_str().unwrap_or("claude-code").to_owned();
+    let model = config["model"].as_str().map(|m| chats.label_of(&harness, Some(m)).unwrap_or_else(|| m.to_owned()));
     if open.built_model.as_ref() != Some(&model) {
         // (Settled entries are the engine's now: the rows show the last name
         // until its copy comes, `model_moved`, and are built again from that.)
@@ -6271,7 +6329,7 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         "loading"
     };
     let chat = chat.unwrap_or(Json::Null);
-    let config = &chat["config"];
+    let config = &chats.shown_config(&open.id, &chat);
     let s = |j: &Json| j.as_str().map(Value::from).unwrap_or(Value::Nil);
     let harness = config["harness"].as_str().unwrap_or("claude-code");
     let model = config["model"]
@@ -6427,6 +6485,32 @@ fn todos(open: &Open) -> Value {
 /// How long a sent prompt reads "sending" with no turn to show for it, as
 /// the shipping app's grace before it calls a send undelivered.
 const SEND_GRACE_SECONDS: f64 = 60.;
+
+/// Whether a chat (its row) runs on Cloud: made there, or on a Cloud machine.
+fn on_cloud(chat: &Json) -> bool {
+    chat["cloud"].as_bool() == Some(true) || chat["deviceId"].as_str().is_some_and(|d| zeron_proto::is_cloud_device(d, ""))
+}
+
+/// A reply row (entry `id`), with when its turn began when that's before
+/// the reply itself (`turn_from`, what its working clock counts from): a
+/// Cloud machine's setup entry opens the turn of the message that brought
+/// the machine up, and that turn began at the send (`prompt`, the latest
+/// prompt and when it was sent), as its "Worked for" counts it (the
+/// engine's `count_duration_from`), not when the machine got to it.
+fn from_its_send(row: Value, id: &str, prompt: Option<&(String, f64)>) -> Value {
+    let Some((prompt, sent)) = prompt else { return row };
+    if zeron_proto::cloud_setup_message_id(id) != Some(prompt.as_str()) || *sent <= 0. {
+        return row;
+    }
+    let started = match row.field("started") {
+        Some(Value::Num(n)) => *n,
+        _ => return row,
+    };
+    if *sent >= started {
+        return row;
+    }
+    with_fields(row, [("turn_from", Value::Num(*sent))])
+}
 
 /// A record with more fields (or some replaced).
 fn with_fields<const N: usize>(record: Value, extra: [(&str, Value); N]) -> Value {
@@ -7512,6 +7596,53 @@ mod tests {
         );
         assert_eq!(agent(&chats).as_deref(), Some("codex"));
         assert!(matches!(session_value(&chats, &open, false).field("model"), None | Some(Value::Nil)));
+    }
+
+    /// A new chat shows the agent and model it was sent with from its first
+    /// frame: on Cloud its row has no config until Cloud has made it and
+    /// the first send's config lands, and was shown meanwhile as Claude Code
+    /// (the stand-in for a row with no agent), its default model in the chip.
+    #[test]
+    fn a_new_chat_shows_what_it_was_sent_with_until_its_row_does() {
+        let chats = Chats::default();
+        let open = Open { id: "c".into(), ..Open::default() };
+        chats.chats.borrow_mut().insert("c".into(), json!({ "id": "c", "cloud": true }));
+        let field = |chats: &Chats, k: &str| session_value(chats, &open, false).field(k).map(text);
+        assert_eq!(field(&chats, "harness").as_deref(), Some("claude-code"), "the stand-in, before");
+        let sent = Value::record([("model", Value::from("grok/grok-4.7")), ("harness", Value::from("grok")), ("effort", Value::from("high"))]);
+        chats.starts_with("c", merged_config(&Json::Null, &sent));
+        assert_eq!(field(&chats, "harness").as_deref(), Some("grok"));
+        assert_eq!(field(&chats, "agent").as_deref(), Some("grok"));
+        assert_eq!(field(&chats, "model").as_deref(), Some("grok/grok-4.7"));
+        assert_eq!(field(&chats, "effort").as_deref(), Some("high"));
+        // A side chat made with its parent's agent shows the one it's sent
+        // with, not its parent's, until that lands.
+        chats.chats.borrow_mut().insert("c".into(), json!({ "id": "c", "config": { "harness": "claude-code", "model": "opus" } }));
+        assert_eq!(field(&chats, "model").as_deref(), Some("grok/grok-4.7"));
+        // Landed: the row's own (a model the engine settled on, say).
+        chats.chats.borrow_mut().insert("c".into(), json!({ "id": "c", "config": { "harness": "grok", "model": "grok-4.7-build-fast" } }));
+        assert_eq!(field(&chats, "model").as_deref(), Some("grok/grok-4.7-build-fast"));
+        // No agent to show: nothing kept.
+        chats.starts_with("d", merged_config(&Json::Null, &Value::record([("effort", Value::from("high"))])));
+        assert!(!chats.starting.borrow().contains_key("d"));
+    }
+
+    /// A Cloud machine's setup opens the turn of the message that woke it:
+    /// its working clock counts from that send, through the wake, rather
+    /// than starting again when the machine got to it. Any other reply's
+    /// clock is its own.
+    #[test]
+    fn a_cloud_setup_replys_clock_counts_from_its_send() {
+        let reply = |id: &str, started: f64| Value::record([("id", Value::from(id)), ("started", Value::Num(started))]);
+        let prompt = ("m1".to_owned(), 100.);
+        let turn_from = |row: Value| row.field("turn_from").and_then(|v| if let Value::Num(n) = v { Some(*n) } else { None });
+        let setup = zeron_proto::cloud_setup_entry_id("m1");
+        assert_eq!(turn_from(from_its_send(reply(&setup, 160.), &setup, Some(&prompt))), Some(100.));
+        assert_eq!(turn_from(from_its_send(reply("r2", 160.), "r2", Some(&prompt))), None, "an ordinary reply");
+        let other = zeron_proto::cloud_setup_entry_id("m0");
+        assert_eq!(turn_from(from_its_send(reply(&other, 160.), &other, Some(&prompt))), None, "another message's setup");
+        assert_eq!(turn_from(from_its_send(reply(&setup, 90.), &setup, Some(&prompt))), None, "never later than the reply");
+        assert_eq!(turn_from(from_its_send(reply(&setup, 160.), &setup, None)), None);
     }
 
     #[test]

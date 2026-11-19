@@ -534,7 +534,7 @@ fn provider(id: HarnessId) -> ProviderSpec {
             // Only the official launcher can refresh itself (see
             // `is_muse_launcher`); a standalone binary is reinstalled.
             update_args: None,
-            manual_command: "curl -fsSL https://dev.meta.ai/install.sh | sh",
+            manual_command: "curl -fsSL https://dev.meta.ai/install.sh | bash",
         },
         // An agent from the ACP registry: its version is its record's, its
         // latest the registry's, and an update installs the registry's
