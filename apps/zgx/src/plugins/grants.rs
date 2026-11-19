@@ -279,6 +279,7 @@ pub fn capabilities(id: &str, permissions: &[String], change: &[String], replace
             "files" => out.push(Capability::Files),
             "web" => out.push(Capability::Web),
             "windows" => out.push(Capability::Windows),
+            "scene3d" => out.push(Capability::Scene3d),
             // The engine's: tools reach agents through Zeron's MCP server,
             // a native server runs beside agents.
             "tools" | "native" => {}
@@ -356,6 +357,13 @@ mod tests {
                 Capability::Fetch,
             ]
         );
+    }
+
+    #[test]
+    fn a_plugin_draws_3d_only_with_its_permission() {
+        // zgx asks for the `scene3d` grant before `ui.scene3d` draws.
+        assert!(capabilities("x", &s(&["scene3d"]), &[], &[]).contains(&Capability::Scene3d));
+        assert!(!capabilities("x", &s(&["windows"]), &[], &[]).contains(&Capability::Scene3d));
     }
 
     #[test]

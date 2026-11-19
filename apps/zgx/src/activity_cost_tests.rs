@@ -50,7 +50,7 @@ fn thread_cpu() -> Duration {
 }
 
 /// One call row's scene (kinds and boxes, no text) and every node above it to
-/// the root, for zgx's layout work to reproduce alone (`DEBUG_TREE=1`).
+/// the root, for zgx's layout work to reproduce alone (`ACTIVITY_TREE=1`).
 fn dump_row(bench: &mut Bench) {
     let Some(button) = bench.app.find("role:button ~\"package part8 --\"") else {
         eprintln!("TREE no row in view");
@@ -88,9 +88,9 @@ fn dump_row(bench: &mut Bench) {
 }
 
 thread_local! {
-    /// Whether `DEBUG_NODE` has shown its node.
+    /// Whether `ACTIVITY_NODE` has shown its node.
     static NODE_SHOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Whether frames show their damage now (`DEBUG_DAMAGE`: the scroll's).
+    /// Whether frames show their damage now (`ACTIVITY_DAMAGE`: the scroll's).
     static DAMAGE_SHOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -125,7 +125,7 @@ fn show_damage(scene: &zgx::scene::Scene, damage: &[zgx::scene::Rect]) {
             }
         }
     }
-    if std::env::var_os("DEBUG_DAMAGE_AT").is_some() {
+    if std::env::var_os("ACTIVITY_DAMAGE_AT").is_some() {
         for (rect, radius) in scene.backdrop_filters() {
             eprintln!("DAMAGE backdrop filter {:.1},{:.1} {:.1}x{:.1} radius {radius}", rect.x, rect.y, rect.width, rect.height);
         }
@@ -496,9 +496,9 @@ impl Bench {
         let gpu = draw.then(|| {
             let mut gpu = GpuRenderer::new((W * SCALE) as u32, (H * SCALE) as u32).expect("a GPU");
             gpu.set_scale_factor(SCALE);
-            // (`DEBUG_SCROLL_COPY`: copying scrolls as a window does; offscreen
+            // (`ACTIVITY_SCROLL_COPY`: copying scrolls as a window does; offscreen
             // on macOS the renderer repaints them instead.)
-            if std::env::var_os("DEBUG_SCROLL_COPY").is_some() {
+            if std::env::var_os("ACTIVITY_SCROLL_COPY").is_some() {
                 gpu.debug_allow_scroll_copies();
             }
             for font in crate::fonts() {
@@ -579,7 +579,7 @@ impl Bench {
         // ahead), then the frame's own work.
         let (mut spare, mut spare_calls) = (0, 0);
         let process_from = process_cpu();
-        let debug = std::env::var_os("DEBUG_FRAMES").is_some();
+        let debug = std::env::var_os("ACTIVITY_FRAMES").is_some();
         if debug {
             eprintln!("@SPARE");
         }
@@ -603,10 +603,10 @@ impl Bench {
         let drawn = !report.damage.is_empty();
         if drawn && let Some(gpu) = &mut self.gpu {
             let stats = gpu.render(&self.app.ui.scene.borrow(), &report.damage).expect("a frame drawn");
-            if std::env::var_os("DEBUG_GPU").is_some() && zgx::trace::enabled() {
+            if std::env::var_os("ACTIVITY_GPU").is_some() && zgx::trace::enabled() {
                 eprintln!("GPU {stats:?}");
             }
-            if std::env::var_os("DEBUG_DAMAGE").is_some() && DAMAGE_SHOWN.get() {
+            if std::env::var_os("ACTIVITY_DAMAGE").is_some() && DAMAGE_SHOWN.get() {
                 eprintln!("DAMAGE frame: {} rects, {} px repainted, {} scroll copies, {} layer repaints, {} backdrop copies", report.damage.len(), stats.damaged_pixels, stats.scroll_copies, stats.layer_repaints, stats.backdrop_copies);
                 show_damage(&self.app.ui.scene.borrow(), &report.damage);
             }
@@ -730,7 +730,7 @@ fn scenarios(n: usize, think: usize, open: bool) {
     }
     bench.settle(30);
     let ticks = bench.frames(60);
-    if std::env::var_os("DEBUG_TREE").is_some() && open {
+    if std::env::var_os("ACTIVITY_TREE").is_some() && open {
         dump_row(&mut bench);
     }
     row(n, think, label, "ticks", &ticks, 60, bench.nodes());
@@ -774,10 +774,10 @@ fn scenarios(n: usize, think: usize, open: bool) {
         let new = call(calls, 4);
         let id = new["id"].as_str().unwrap().to_owned();
         entry["parts"].as_array_mut().unwrap().push(new);
-        if std::env::var_os("DEBUG_FRAMES").is_some() {
+        if std::env::var_os("ACTIVITY_FRAMES").is_some() {
             eprintln!("@CALL {calls}");
         }
-        let tracing = std::env::var_os("DEBUG_TRACE").is_some() && calls == n + 2;
+        let tracing = std::env::var_os("ACTIVITY_TRACE").is_some() && calls == n + 2;
         if tracing {
             zgx::trace::set_enabled(true);
         }
@@ -787,8 +787,8 @@ fn scenarios(n: usize, think: usize, open: bool) {
         call_cost.add(&cost);
         if tracing {
             // (A few frames into the arrival's animations.)
-            // (`DEBUG_TRACE_FRAMES`: how many of the arrival's frames, 7 unless set.)
-            let traced: usize = std::env::var("DEBUG_TRACE_FRAMES").ok().and_then(|n| n.parse().ok()).unwrap_or(7);
+            // (`ACTIVITY_TRACE_FRAMES`: how many of the arrival's frames, 7 unless set.)
+            let traced: usize = std::env::var("ACTIVITY_TRACE_FRAMES").ok().and_then(|n| n.parse().ok()).unwrap_or(7);
             bench.frames(traced - 1);
             for frame in zgx::trace::frames(2 * traced) {
                 let mut runs = frame.runs.clone();
@@ -819,10 +819,10 @@ fn scenarios(n: usize, think: usize, open: bool) {
                     let k = format!("{:?}", scene.kind(id));
                     k.split(|c: char| c == '(' || c == '{' || c == ' ').next().unwrap_or("").to_owned()
                 };
-                // (`DEBUG_NODE=<n>`: that node's kind, what's above it, and the
+                // (`ACTIVITY_NODE=<n>`: that node's kind, what's above it, and the
                 // texts under the box above it.)
                 // (A number: that node, as the frame's runs name it.)
-                let asked = std::env::var("DEBUG_NODE").ok();
+                let asked = std::env::var("ACTIVITY_NODE").ok();
                 let numbered = asked.as_deref().and_then(|n| n.parse::<u32>().ok());
                 let pick = match numbered {
                     Some(n) => Some(n),
@@ -872,7 +872,7 @@ fn scenarios(n: usize, think: usize, open: bool) {
         let mut after = cost;
         for f in 0..60 {
             let frame = bench.frame();
-            if std::env::var_os("DEBUG_ARRIVAL").is_some() && calls == n + 2 {
+            if std::env::var_os("ACTIVITY_ARRIVAL").is_some() && calls == n + 2 {
                 let k = |phase: Phase| frame.phase(phase) / 1000;
                 eprintln!(
                     "ARRIVAL f{f:02} {}k | script {}k update {}k layout {}k paint {}k encode {}k | calls {} | proc {} µs",
@@ -929,10 +929,10 @@ fn scenarios(n: usize, think: usize, open: bool) {
     row(n, think, label, "rest", &rest, 60, bench.nodes());
     // From there on down past the turn, a wheel's step a frame.
     let mut scroll = Cost::default();
-    // (`DEBUG_DAMAGE`: each scroll frame's damage, `DEBUG_SCROLL_STEP` points a step.)
-    let step: f32 = std::env::var("DEBUG_SCROLL_STEP").ok().and_then(|s| s.parse().ok()).unwrap_or(120.);
+    // (`ACTIVITY_DAMAGE`: each scroll frame's damage, `ACTIVITY_SCROLL_STEP` points a step.)
+    let step: f32 = std::env::var("ACTIVITY_SCROLL_STEP").ok().and_then(|s| s.parse().ok()).unwrap_or(120.);
     DAMAGE_SHOWN.set(true);
-    let noting = std::env::var_os("DEBUG_DAMAGE").is_some();
+    let noting = std::env::var_os("ACTIVITY_DAMAGE").is_some();
     if noting {
         zgx::trace::set_enabled(true);
     }
@@ -999,7 +999,7 @@ fn activity_cost() {
 fn activity_goal() {
     profiled();
     // SAFETY: set before the renderer reads it, on this test's thread alone.
-    unsafe { std::env::set_var("DEBUG_SCROLL_COPY", "1") };
+    unsafe { std::env::set_var("ACTIVITY_SCROLL_COPY", "1") };
     let n: usize = std::env::var("ACTIVITY_GOAL_CALLS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000);
     let seconds: f64 = std::env::var("ACTIVITY_GOAL_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(20.);
     let report = |what: &str, cost: &Cost, frames: usize, ticks: usize, seconds: f64| {
@@ -1100,7 +1100,7 @@ fn activity_goal() {
 fn activity_goal_thinking() {
     profiled();
     // SAFETY: set before the renderer reads it, on this test's thread alone.
-    unsafe { std::env::set_var("DEBUG_SCROLL_COPY", "1") };
+    unsafe { std::env::set_var("ACTIVITY_SCROLL_COPY", "1") };
     let seconds: f64 = std::env::var("ACTIVITY_GOAL_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(120.);
     let think_kb: usize = std::env::var("ACTIVITY_GOAL_THINK").ok().and_then(|v| v.parse().ok()).unwrap_or(50);
     let report = |what: &str, cost: &Cost, frames: usize, ticks: usize, seconds: f64| {
@@ -1178,7 +1178,7 @@ fn activity_goal_thinking() {
     bench.settle(240);
     let mut cost = Cost::default();
     let ticks = 10 * 120;
-    let traced = std::env::var_os("DEBUG_GOAL_TRACE").is_some();
+    let traced = std::env::var_os("ACTIVITY_GOAL_TRACE").is_some();
     for tick in 0..ticks {
         let dy = if tick < ticks / 2 { 8. } else { -8. };
         if traced && tick == 300 {
@@ -1187,7 +1187,7 @@ fn activity_goal_thinking() {
         bench.app.scroll("transcript", dy);
         cost.add(&bench.frame());
         if traced && tick == 303 {
-            // (`DEBUG_GOAL_TRACE`: a few scroll frames' runs and what they laid out.)
+            // (`ACTIVITY_GOAL_TRACE`: a few scroll frames' runs and what they laid out.)
             for frame in zgx::trace::frames(8) {
                 let mut runs = frame.runs.clone();
                 runs.sort_by(|a, b| b.micros.total_cmp(&a.micros));
@@ -1386,8 +1386,8 @@ fn activity_row_cost() {
     }
     println!();
     assert_eq!(app.error(), None);
-    // (`DEBUG_ROW_TREE`: one row's nodes, kinds and boxes.)
-    if std::env::var_os("DEBUG_ROW_TREE").is_some() {
+    // (`ACTIVITY_ROW_TREE`: one row's nodes, kinds and boxes.)
+    if std::env::var_os("ACTIVITY_ROW_TREE").is_some() {
         let scene = app.ui.scene.borrow();
         let mut stack = vec![scene.root()];
         let mut verb = None;

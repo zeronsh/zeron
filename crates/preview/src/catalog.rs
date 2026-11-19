@@ -484,6 +484,7 @@ mod tests {
             origin: Some("chat:chat".into()),
             chat_id: Some("chat".into()),
             signing_in: false,
+            test_run: false,
         }
     }
     #[test]

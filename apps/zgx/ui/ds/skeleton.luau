@@ -39,7 +39,6 @@ function M.Row(props: { lead: number?, title: number?, byline: number?, line: nu
 	local lead = props.lead or 32
 	return ui.row {
 		w_full = true,
-		min_h = "$zeron.settings.row",
 		px = "$space.4",
 		py = "$space.3",
 		gap = "$space.3",

@@ -490,7 +490,7 @@ M.Page = ui.component(function(props: { plugin: string, here: any }): Node
 					end
 					table.insert(rows, ui.row {
 						w_full = true,
-						min_h = "$zeron.settings.row",
+						-- (No `min_h`: its content's 52, as a row's height is drawn.)
 						px = "$space.4",
 						py = "$space.3",
 						gap = "$space.3",

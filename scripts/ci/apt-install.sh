@@ -27,11 +27,20 @@ log "update"
 sudo timeout 120 apt-get update -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=15 \
   -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" -o Dir::Etc::sourceparts="-" 2>&1 | ts
 
+# Each attempt keeps what it finished (the .debs land in $dir), so a slow
+# mirror is retried for as long as attempts keep adding packages: 4 tries
+# with nothing new, or 12 in all. (A crawling mirror once needed more than
+# the 4 x 150 s this used to allow for a cold ~400 MB install.)
+debs() { ls "$dir"/*.deb 2>/dev/null | wc -l; }
 ok=0
-for attempt in 1 2 3 4; do
-  log "download attempt $attempt"
+stalled=0
+for attempt in $(seq 1 12); do
+  before=$(debs)
+  log "download attempt $attempt ($before debs so far)"
   sudo timeout 150 apt-get install "${APT[@]}" --download-only "$@" 2>&1 | ts
   if [ "${PIPESTATUS[0]}" = 0 ]; then ok=1; break; fi
+  if [ "$(debs)" -gt "$before" ]; then stalled=0; else stalled=$((stalled + 1)); fi
+  [ "$stalled" -ge 4 ] && break
 done
 [ "$ok" = 1 ] || { log "download failed"; exit 1; }
 log "install"
