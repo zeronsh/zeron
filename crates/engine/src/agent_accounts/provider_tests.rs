@@ -592,6 +592,13 @@ async fn antigravity_usage_is_its_projects_limits_and_its_paid_plan() {
     assert_eq!(accounts.antigravity_usage(&dead).await, Err(ProbeError::Unauthorized { status: 400 }));
     let keychain = slot("google:d", serde_json::Value::Null);
     assert!(matches!(accounts.antigravity_usage(&keychain).await, Err(ProbeError::NoCredentials { .. })));
+
+    // And the list the app asks for probes it.
+    accounts.write_slot(&filed).unwrap();
+    let listed = rows(&accounts.list(true).await.unwrap(), HarnessId::Antigravity);
+    let row = listed.iter().find(|a| a.email.as_deref() == Some("ada@gmail.com")).expect("listed");
+    assert_eq!(row.usage_windows.len(), 2, "{row:?}");
+    assert_eq!(row.plan_label.as_deref(), Some("Google AI Ultra"));
 }
 
 #[cfg(unix)]
