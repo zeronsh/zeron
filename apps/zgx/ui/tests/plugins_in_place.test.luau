@@ -802,3 +802,41 @@ test("all under its text, a row's switch begins a line of its own under its badg
 	expect(`{switch.x}`).to_be(`{name.x}`)
 	expect(switch.y > version.y + 12).to_be(true)
 end)
+
+test("a giving row's switch is copied under its text only once it has moved there", function()
+	local app = mount("plugins_fixture.luau")
+	app:command("update_found")
+	local function switches(): (number, number)
+		local shown, hidden = 0, 0
+		for line in app:tree("#catalog-card"):gmatch("[^\n]+") do
+			if line:find('switch "Focus"', 1, true) then
+				if line:find(" hidden", 1, true) then
+					hidden += 1
+				else
+					shown += 1
+				end
+			end
+		end
+		return shown, hidden
+	end
+	-- (A part kept out of layout from its making is never laid out: the
+	-- real renderer gave such a Remove's icon no finite width.)
+	for _, width in { 1000, 560, 470, 400, 330, 260, 200, 330, 560, 1000 } do
+		app:resize(width, 900)
+		app:frames(25)
+		local shown, hidden = switches()
+		local tree = app:tree("#catalog-card")
+		local name = tonumber(tree:match('text "Focus" (%-?[%d.]+),'))
+		local sw: number? = nil
+		for line in tree:gmatch("[^\n]+") do
+			if line:find('switch "Focus"', 1, true) and not line:find(" hidden", 1, true) then
+				sw = tonumber(line:match(" (%-?[%d.]+),"))
+			end
+		end
+		-- Shown once. Beside the text, no copy of it at all; under it, the
+		-- one beside out of layout.
+		expect(`{width} {shown}`).to_be(`{width} 1`)
+		local beside = sw ~= nil and name ~= nil and (sw :: number) > (name :: number) + 1
+		expect(`{width} {if beside then "beside" else "under"} {hidden}`).to_be(`{width} {if beside then "beside" else "under"} {if beside then 0 else 1}`)
+	end
+end)
