@@ -4103,6 +4103,7 @@
         "secret_body": "This is the only time Zeron shows it. Put it in your CI's secrets as ZERON_DEPLOY_TOKEN. Anyone with it can publish versions of the plugins it's for, as you.",
         "done": "I've copied it",
         "ends": "Ends {date}",
+        "ended": "Ended {date}",
         "revoke": "Revoke",
         "revoke_title": "Revoke {name}?",
         "revoke_body": "Anything publishing with it stops working at once. Versions it already sent stay as they are.",

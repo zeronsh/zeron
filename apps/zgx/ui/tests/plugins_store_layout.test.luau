@@ -826,3 +826,4 @@ test("a token's plugins are named whole at any count, every one shown in place w
 	settle(app)
 	expect(app:count('role:button "Show all"')).to_be(1)
 end)
+

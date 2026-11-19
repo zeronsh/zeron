@@ -272,6 +272,20 @@ test("a new token refused at the store's limits says which, with the numbers, an
 	end
 end)
 
+test("a token that has ended, listed until it's revoked, says when it ended", function()
+	local app = yours()
+	app:command("store_stub.token_ended")
+	app:click('role:tab "Installed"')
+	settle(app)
+	app:click('role:tab "Yours"')
+	settle(app)
+	app:scroll("#fixture-scroll", 2000)
+	app:frames(10)
+	local tree = app:tree()
+	expect(tree:find('"Last used [^"]+ on Pomodoro clock · Ended [^"]+"') ~= nil).to_be(true)
+	expect(tree).never.to_contain("Ends today")
+end)
+
 test("revoking a token asks first, then it's gone", function()
 	local app = keys_page()
 	app:click('role:button "Revoke"')

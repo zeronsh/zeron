@@ -18,6 +18,7 @@
 --   store_stub.no_notes    the engine has no notes on your plugin's folder
 --   store_stub.html_and_footnote  your plugin's README has HTML and math, its CHANGELOG a footnote (advice)
 --   store_stub.hostile_readme  Focus timer's README: 512 KiB of setext headings (before its page opens)
+--   store_stub.token_ended  a token that ended yesterday, still listed
 --   store_stub.tokens_full  a new token is refused: the account has 20 live
 --   store_stub.tokens_today a new token is refused: 10 made today
 --   store_stub.many_keys   the account has ten deploy tokens: names of every length,
@@ -978,6 +979,15 @@ ui.command {
 }
 -- Tokens granted to 1, 2, 3, 14 and 50 of yours, their ids store ids at
 -- full length (40): what a row says of each, and of every one in place.
+-- A token that ended yesterday, listed until it's revoked (as the store
+-- keeps it).
+ui.command {
+	id = "store_stub.token_ended",
+	title = "Store: a deploy token that ended yesterday, not yet revoked",
+	run = function()
+		table.insert(keys, { id = "t_old", short = "Qm4Rt8Wn", name = "Old CI", scope = { all = true }, created_at = NOW - 100 * DAY, last_used_at = NOW - 20 * DAY, last_used_plugin = "pomodoro-clock", expires_at = NOW - DAY })
+	end,
+}
 ui.command {
 	id = "store_stub.tokens_full",
 	title = "Store: the account has as many live deploy tokens as it can (20)",
@@ -1033,13 +1043,17 @@ ui.command {
 		for i, name in names do
 			-- (A token as the store lists it: its id and short id, never itself.)
 			local short = string.format("k%02dAbCdE", i)
-			-- (Ends from this very day, as the page reads it: noon of today,
-			-- of tomorrow, of five days on.)
+			-- (Ends from this very day, as the page reads it: the end of
+			-- today, noon of tomorrow, of five days on; from local midnight
+			-- as the clock less the time since it.)
 			local t = os.date("*t") :: any
-			local noon = os.time({ year = t.year, month = t.month, day = t.day, hour = 12 }) * 1000
+			local midnight = os.time() - (t.hour * 3600 + t.min * 60 + t.sec)
+			local noon = (midnight + 12 * 3600) * 1000
 			local ends: number? = nil
 			if name == "Ends today" then
-				ends = noon
+				-- (The last minute of today, whatever the hour now: one that
+				-- ended earlier today says it ended.)
+				ends = (midnight + 24 * 3600 - 60) * 1000
 			elseif name == "Ends tomorrow" then
 				ends = noon + DAY
 			elseif name == "Ends in five days" then

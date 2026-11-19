@@ -38,6 +38,11 @@ local function day_of(at: any): string?
 	return if type(at) == "number" and at > 0 then locale.date(at / 1000) else nil
 end
 
+-- Whether a token has ended: the store lists one until it's revoked.
+local function has_ended(at: any): boolean
+	return type(at) == "number" and at > 0 and at <= os.time() * 1000
+end
+
 -- How soon a token ends, in whole days from today (0: today), if it's within
 -- `SOON` of it; nil otherwise. (The store's site says the same.)
 local SOON = 14
@@ -45,8 +50,11 @@ local function ends_in(at: any): number?
 	if type(at) ~= "number" or at <= 0 then
 		return nil
 	end
-	local now = os.date("*t") :: any
-	local today = os.time({ year = now.year, month = now.month, day = now.day, hour = 0 })
+	-- (Today's start as the clock now less the time since local midnight:
+	-- zgx reads a date table as UTC while `os.date` says local time, so a
+	-- table would put today a time zone off.)
+	local t = os.date("*t") :: any
+	local today = os.time() - (t.hour * 3600 + t.min * 60 + t.sec)
 	local days = math.floor((at / 1000 - today) / 86400)
 	return if days <= SOON then math.max(0, days) else nil
 end
@@ -230,7 +238,10 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 				-- About to end: how soon, after whether it's still in use (so
 				-- whether it must be replaced first).
 				local n = soon()
-				local ending = if n == nil
+				-- (Ended, and listed until it's revoked: when.)
+				local ending = if has_ended(k.expires_at) and ends
+					then ui.t("plugins.store.key.ended", { date = ends }):get()
+					elseif n == nil
 					then (if ends then ui.t("plugins.store.key.ends", { date = ends }):get() else ui.t("plugins.store.key.no_end"):get())
 					elseif n == 0 then ui.t("plugins.store.key.ends_today"):get()
 					elseif n == 1 then ui.t("plugins.store.key.ends_tomorrow"):get()

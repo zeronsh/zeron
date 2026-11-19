@@ -4103,6 +4103,7 @@
         "secret_body": "这是 Zeron 唯一一次显示它。请把它作为 ZERON_DEPLOY_TOKEN 放进 CI 的密钥中。任何拿到它的人都能以你的身份发布它所对应插件的版本。",
         "done": "我已复制",
         "ends": "{date} 到期",
+        "ended": "已于 {date} 到期",
         "revoke": "吊销",
         "revoke_title": "吊销{name}？",
         "revoke_body": "用它发布的流程会立即停止。它已经发送的版本保持不变。",
