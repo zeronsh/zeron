@@ -1178,8 +1178,18 @@ pub(crate) async fn dispatch(
         methods::VAULT_STATUS => RpcReply::value(&cloud.vault_status().await.map_err(failed)?),
         methods::VAULT_PUT_API_KEY => {
             let p: PutKeyParams = params(raw)?;
+            // No devices named (a provider card's key): Cloud's own logical
+            // device, which every session machine draws grants through.
+            let devices = if p.authorized_devices.is_empty() {
+                let device = cloud.status().await.map_err(failed)?.device_id.ok_or_else(|| {
+                    RpcError::Failed("Turn Cloud on in Settings → Cloud first.".into())
+                })?;
+                vec![device]
+            } else {
+                p.authorized_devices
+            };
             let status = cloud
-                .put_api_key(p.provider, &p.key, p.authorized_devices)
+                .put_api_key(p.provider, &p.key, devices)
                 .await
                 .map_err(failed)?;
             // The key becomes its vendor's active key. No sign-in is

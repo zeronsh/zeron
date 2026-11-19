@@ -411,24 +411,6 @@ pub fn install(host: &ScriptHost) {
             a.add_key(id, provider, key, name).await
         }
     });
-    // An API key for Cloud's agents (Settings → Providers with Cloud
-    // shown): kept by the vault, authorized for the account's Cloud device
-    // (`device`), the key every Cloud machine uses from its next turn.
-    // Rejects with the engine's words, which never hold the key.
-    let a = agents.clone();
-    host.async_action("agents.cloud_key", move |args| {
-        let a = a.clone();
-        let provider = args.field("provider").map(text).unwrap_or_default();
-        let key = args.field("key").map(text).unwrap_or_default().trim().to_string();
-        let device = args.field("device").map(text).unwrap_or_default();
-        async move {
-            crate::plugins::preview::refuse("agents.cloud_key")?;
-            let params = cloud_key_params(&provider, &key, &device)?;
-            engine::get().call("VaultPutApiKey", params).await.map_err(|error| engine::outcome(&error).to_string())?;
-            a.load_accounts(true).await;
-            Ok(Value::Nil)
-        }
-    });
     // An API key's name (no secret: on whichever device shows it), rejecting
     // with the engine's words.
     let a = agents.clone();
@@ -613,9 +595,9 @@ fn provider_groups(harness: zeron_proto::HarnessId, accounts: &[Json]) -> Vec<Gr
 }
 
 /// [`provider_groups`] for the device shown: on Cloud (`cloud`) the groups
-/// are the credentials the agent runs on there, in its order, a sign-in
-/// only where Cloud takes one, and no key added in the card (Cloud's keys
-/// have their own section).
+/// are the credentials the agent runs on there (every agent's, not only
+/// those that sign in per provider), in its order, each with the sign-in
+/// and the API key Cloud takes for it — added from the card itself.
 fn provider_groups_on(harness: zeron_proto::HarnessId, accounts: &[Json], cloud: bool) -> Vec<Group> {
     use zeron_proto::providers::{
         account_group_label, api_key_option, api_key_options, cloud_credentials, cloud_login_options, login_option,
@@ -652,7 +634,16 @@ fn provider_groups_on(harness: zeron_proto::HarnessId, accounts: &[Json], cloud:
         .map(|provider| {
             let rows: Vec<usize> = (0..accounts.len()).filter(|&i| providers[i] == provider).collect();
             let (login, key) = if cloud {
-                (cloud_login(&provider), None)
+                let held: Vec<_> = cloud_credentials(harness).iter().filter(|c| c.group == provider).collect();
+                let keys: Vec<_> = held.iter().filter(|c| c.vault.is_api_key()).collect();
+                // An agent with one sign-in shows it on the group that sign-in
+                // fills (Cursor's mints a key, so look it up, don't guess).
+                let signed_into = zeron_proto::providers::cloud_login_vault(harness, None);
+                let only = cloud_login_options(harness)
+                    .into_iter()
+                    .find(|o| o.provider.is_none() && held.iter().any(|c| Some(c.vault) == signed_into))
+                    .map(|o| o.label.to_owned());
+                (cloud_login(&provider).or(only), keys.first().and_then(|c| c.vault.key_vendor()).map(String::from))
             } else {
                 (
                     login_option(harness, &provider).map(|o| o.label.to_owned()),
@@ -782,7 +773,7 @@ impl Agents {
                 // An agent that keeps a login per model provider: its
                 // accounts by provider, each group with its own in use and
                 // its own way to add one (nil: one group, as ever).
-                let groups = harness_id(id).filter(|h| zeron_proto::providers::groups_by_provider(*h)).map(|harness| {
+                let groups = harness_id(id).filter(|h| cloud || zeron_proto::providers::groups_by_provider(*h)).map(|harness| {
                     let list = accounts.get(id).map(Vec::as_slice).unwrap_or_default();
                     let read_only = !zeron_proto::providers::switches_accounts(harness);
                     let groups: Vec<Value> = provider_groups_on(harness, list, cloud)
@@ -806,12 +797,11 @@ impl Agents {
                     ("id", Value::from(id)),
                     ("name", Value::from(h["name"].as_str().unwrap_or(id))),
                     ("groups", groups.unwrap_or(Value::Nil)),
-                    // Whether its card adds an account by signing in: on Cloud,
-                    // only where Cloud takes that agent's sign-in (the rest run
-                    // on API keys, saved in Cloud's own section).
+                    // Whether its card adds an account: on Cloud, where Cloud
+                    // takes a sign-in or a key for it.
                     (
                         "can_add",
-                        Value::Bool(!cloud || harness.is_some_and(|h| !zeron_proto::providers::cloud_login_options(h).is_empty())),
+                        Value::Bool(!cloud || harness.is_some_and(|h| !zeron_proto::providers::cloud_credentials(h).is_empty())),
                     ),
                     // How it signs in on Cloud, where that differs from its own.
                     (
@@ -913,7 +903,6 @@ impl Agents {
             ("state", Value::from(state)),
             ("list", Value::List(list.into())),
             ("target", target),
-            ("cloud_keys", cloud_keys_value()),
         ])
     }
 
@@ -1535,6 +1524,9 @@ impl Agents {
     /// `AddAgentApiKey` on this Mac's engine — never addressed elsewhere:
     /// with another device shown, refused here, the key sent nowhere.
     async fn add_key(&self, id: String, provider: String, key: String, name: Option<String>) -> Result<Value, String> {
+        if self.target.borrow().as_deref() == Some(zeron_proto::CLOUD_ACCOUNTS_DEVICE) {
+            return self.add_cloud_key(&id, &provider, key.trim()).await;
+        }
         if self.target.borrow().is_some() {
             return Err("remote".into());
         }
@@ -1548,6 +1540,20 @@ impl Agents {
             Err(error) if engine::outcome(&error) == "offline" => Err("offline".into()),
             Err(error) => Err(error),
         }
+    }
+
+    /// A key added on a Cloud card: the vault keeps it (`VaultPutApiKey`),
+    /// for Cloud's device, as the key of the vendor that card group takes.
+    /// Rejects with the engine's words, which never hold the key.
+    async fn add_cloud_key(&self, id: &str, group: &str, key: &str) -> Result<Value, String> {
+        let provider = cloud_key_provider(id, group).ok_or("Cloud doesn't take that kind of key")?;
+        if key.is_empty() || key.len() > 4096 || key.chars().any(char::is_control) {
+            return Err("That isn't an API key".into());
+        }
+        let params = json!({ "provider": provider.as_str(), "key": key });
+        engine::get().call("VaultPutApiKey", params).await.map_err(|error| engine::outcome(&error).to_string())?;
+        self.load_accounts(true).await;
+        Ok(Value::Nil)
     }
 
     /// `RenameAgentAccount`, on the device shown.
@@ -2010,72 +2016,56 @@ fn epoch_secs(s: &str) -> Option<i64> {
 mod tests {
     use super::*;
 
-    /// Cloud's keys section: every vendor key, naming the agents that use it.
-    #[test]
-    fn cloud_keys_name_who_issues_them_and_who_uses_them() {
-        let keys = cloud_keys();
-        let anthropic = keys.iter().find(|k| k.provider == "anthropic-key").unwrap();
-        assert_eq!(anthropic.vendor, "Anthropic");
-        assert_eq!(anthropic.agents, ["Claude Code", "Hermes", "fx", "Pi", "OpenCode"]);
-        let meta = keys.iter().find(|k| k.provider == "meta-key").unwrap();
-        assert_eq!(meta.agents, ["Muse Code"]);
-        assert!(keys.iter().all(|k| !k.agents.is_empty()));
-        assert!(keys.iter().all(|k| k.provider.ends_with("-key")));
-    }
-
-    /// On Cloud, a per-provider agent's groups are what it runs on there:
-    /// every sign-in it offers on a computer, and no key added in the card.
+    /// On Cloud every agent's card is its groups: what it runs on there,
+    /// each with the sign-in and the API key Cloud takes for it.
     #[test]
     fn cloud_groups_follow_what_cloud_runs() {
-        let named = |groups: &[Group]| -> Vec<(String, Option<String>)> {
-            groups.iter().map(|g| (g.provider.clone(), g.login.clone())).collect()
+        let named = |groups: &[Group]| -> Vec<(String, Option<String>, Option<String>)> {
+            groups.iter().map(|g| (g.provider.clone(), g.login.clone(), g.key.clone())).collect()
         };
-        let pi = zeron_proto::HarnessId::Pi;
-        let groups = provider_groups_on(pi, &[json!({ "id": "codex:a", "harness": "pi", "provider": "openai-codex" })], true);
-        assert_eq!(
-            named(&groups),
-            [
-                ("openai-codex".to_string(), Some("ChatGPT".to_string())),
-                ("anthropic".to_string(), Some("Claude".to_string())),
-                ("github-copilot".to_string(), Some("GitHub Copilot".to_string())),
-            ]
-        );
-        assert!(groups.iter().all(|g| g.key.is_none()));
-        assert_eq!(groups[0].rows, [0]);
-        // OpenCode and Hermes: their own sign-ins first; a key-only group
-        // shows once it holds an account.
-        let opencode = provider_groups_on(
-            zeron_proto::HarnessId::Opencode,
-            &[json!({ "id": "openrouter-key:k", "harness": "opencode", "provider": "openrouter" })],
+        let row = |group: &str, login: Option<&str>, key: Option<&str>| {
+            (group.to_string(), login.map(String::from), key.map(String::from))
+        };
+        let pi = provider_groups_on(
+            zeron_proto::HarnessId::Pi,
+            &[json!({ "id": "codex:a", "harness": "pi", "provider": "openai-codex" })],
             true,
         );
         assert_eq!(
-            named(&opencode),
+            named(&pi)[..4],
             [
-                ("openai".to_string(), Some("ChatGPT".to_string())),
-                ("github-copilot".to_string(), Some("GitHub Copilot".to_string())),
-                ("openrouter".to_string(), None),
+                row("openai-codex", Some("ChatGPT"), None),
+                row("anthropic", Some("Claude"), Some("Anthropic")),
+                row("github-copilot", Some("GitHub Copilot"), None),
+                row("openai", None, Some("OpenAI")),
             ]
         );
+        assert_eq!(pi[0].rows, [0]);
         let hermes = provider_groups_on(zeron_proto::HarnessId::Hermes, &[], true);
         let logins: Vec<_> = hermes.iter().filter_map(|g| g.login.clone()).collect();
         assert_eq!(logins, ["ChatGPT", "Nous Portal", "xAI"]);
+        // An agent with one sign-in: its group holds it beside its key.
+        let claude = provider_groups_on(zeron_proto::HarnessId::ClaudeCode, &[], true);
+        assert_eq!(named(&claude), [row("anthropic", Some("Claude Code"), Some("Anthropic"))]);
+        let muse = provider_groups_on(zeron_proto::HarnessId::Muse, &[], true);
+        assert_eq!(named(&muse), [row("meta", Some("Muse Code"), Some("Meta"))]);
+        let cursor = provider_groups_on(zeron_proto::HarnessId::Cursor, &[], true);
+        assert_eq!(named(&cursor), [row("cursor", Some("Cursor"), Some("Cursor"))]);
     }
 
-    /// A Cloud API key goes to the vault for the account's Cloud device:
-    /// a vendor's key, a real key, Cloud on.
+    /// A key added on a Cloud card is the vault key its group takes.
     #[test]
-    fn a_cloud_key_is_one_cloud_runs_for_its_device() {
-        let ok = cloud_key_params("anthropic-key", "sk-ant-123", "cloud-acct").unwrap();
-        assert_eq!(ok, json!({ "provider": "anthropic-key", "key": "sk-ant-123", "authorizedDevices": ["cloud-acct"] }));
-        assert!(cloud_key_params("openai-key", "sk-1", "d").is_ok());
-        assert!(cloud_key_params("claude", "sk", "d").is_err(), "a login isn't a key");
-        assert!(cloud_key_params("openrouter-key", "sk-or-1", "d").is_ok(), "any vendor's key");
-        assert!(cloud_key_params("nope-key", "sk", "d").is_err());
-        assert!(cloud_key_params("anthropic-key", "", "d").is_err());
-        assert!(cloud_key_params("anthropic-key", "a\nb", "d").is_err());
-        assert!(cloud_key_params("anthropic-key", &"k".repeat(5000), "d").is_err());
-        assert!(cloud_key_params("anthropic-key", "sk", "").is_err(), "Cloud off");
+    fn a_cloud_cards_key_is_the_vendor_key_its_group_takes() {
+        use zeron_proto::VaultProvider as V;
+        assert_eq!(cloud_key_provider("claude-code", "anthropic"), Some(V::AnthropicKey));
+        assert_eq!(cloud_key_provider("pi", "openrouter"), Some(V::OpenrouterKey));
+        assert_eq!(cloud_key_provider("hermes", "gemini"), Some(V::GeminiKey));
+        assert_eq!(cloud_key_provider("opencode", "vercel"), Some(V::AiGatewayKey));
+        assert_eq!(cloud_key_provider("antigravity", "gemini"), Some(V::GeminiKey));
+        assert_eq!(cloud_key_provider("grok", "xai-key"), Some(V::XaiKey));
+        assert_eq!(cloud_key_provider("pi", "openai-codex"), None, "a sign-in's group takes no key");
+        assert_eq!(cloud_key_provider("devin", "devin"), None);
+        assert_eq!(cloud_key_provider("nope", "anthropic"), None);
     }
 
     /// Pi signed in to Claude, or another login put in use: Pi's models are
@@ -2358,60 +2348,16 @@ pub(crate) fn shown_target() -> Option<String> {
 }
 
 /// `params` addressed to the device Providers shows.
-/// Cloud's API keys, a row each in its "API keys" section: every vendor
-/// key the vault keeps (`provider`), whose it is (`vendor`) and which of
-/// Cloud's agents use it (`agents`, their names in the catalog's order).
-#[derive(Debug, PartialEq)]
-struct CloudKey {
-    provider: &'static str,
-    vendor: &'static str,
-    agents: Vec<&'static str>,
-}
-
-fn cloud_keys() -> Vec<CloudKey> {
-    use zeron_proto::providers::{cloud_credentials, provider_name};
-    zeron_proto::VaultProvider::ALL
-        .into_iter()
-        .filter_map(|provider| {
-            let vendor = provider.key_vendor()?;
-            let agents: Vec<&'static str> = zeron_proto::HarnessId::ALL
-                .into_iter()
-                .filter(|h| cloud_credentials(*h).iter().any(|c| c.vault == provider))
-                .map(provider_name)
-                .collect();
-            (!agents.is_empty()).then_some(CloudKey { provider: provider.as_str(), vendor, agents })
-        })
-        .collect()
-}
-
-fn cloud_keys_value() -> Value {
-    let rows: Vec<Value> = cloud_keys()
-        .into_iter()
-        .map(|k| {
-            Value::record([
-                ("provider", Value::from(k.provider)),
-                ("vendor", Value::from(k.vendor)),
-                ("agents", Value::from(k.agents.join(", ").as_str())),
-            ])
-        })
-        .collect();
-    Value::List(rows.into())
-}
-
-/// `VaultPutApiKey`'s params for a Cloud API key: a vendor's key the vault
-/// keeps, a key that's there and no longer than any key is, for the
-/// account's Cloud device. Else why not.
-pub(crate) fn cloud_key_params(provider: &str, key: &str, device: &str) -> Result<Json, String> {
-    if !zeron_proto::VaultProvider::parse(provider).is_some_and(zeron_proto::VaultProvider::is_api_key) {
-        return Err("Cloud doesn't take that kind of key".into());
-    }
-    if key.is_empty() || key.len() > 4096 || key.chars().any(char::is_control) {
-        return Err("That isn't an API key".into());
-    }
-    if device.is_empty() {
-        return Err("Turn Cloud on in Settings → Cloud first".into());
-    }
-    Ok(json!({ "provider": provider, "key": key, "authorizedDevices": [device] }))
+/// The vault key a Cloud card's group of agent `id` takes: the API-key
+/// credential in that group (`group`, as the card names it), or `group`
+/// itself where it names a vault key the agent runs on.
+fn cloud_key_provider(id: &str, group: &str) -> Option<zeron_proto::VaultProvider> {
+    let harness = harness_id(id)?;
+    let credentials = zeron_proto::providers::cloud_credentials(harness);
+    credentials
+        .iter()
+        .find(|c| c.vault.is_api_key() && (c.group == group || c.vault.as_str() == group))
+        .map(|c| c.vault)
 }
 
 pub(crate) fn addressed_to_shown(params: Json) -> Json {

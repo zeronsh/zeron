@@ -158,4 +158,28 @@ describe("muse", () => {
     expect(withoutRefreshTokens({ a: [{ refresh_token: "x" }] })).toEqual({ a: [{ refresh_token: "" }] });
     expect(parseMuseUpload({ museAuth: { providers: {} } }, NOW).ok).toBe(false);
   });
+
+  it("takes Muse 1.4's login as it writes it: no expiry, no refresh token", () => {
+    const written = {
+      schema_version: 1,
+      providers: {
+        meta: {
+          access_token: "meta-at-opaque",
+          obtained_via: "device_code",
+          mechanism: "oauth",
+          api_key: "mk-minted",
+          api_base_url: "https://api.meta.ai",
+          user_full_name: "Ada L",
+          user_email: "ada@meta.example"
+        }
+      }
+    };
+    const parsed = parseMuseUpload({ museAuth: written }, NOW);
+    if (!parsed.ok) throw new Error(parsed.message);
+    expect(museAdapter.hardExpiresAt!(parsed.secret)).toBeUndefined();
+    expect(museAdapter.account(parsed.secret)).toBe("ada@meta.example");
+    const grant = museAdapter.grant(parsed.secret, NOW);
+    expect(grant.expiresAt).toBe(NOW + HOUR);
+    expect(JSON.parse(grant.settings!.document!)).toEqual(written);
+  });
 });

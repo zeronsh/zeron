@@ -1668,15 +1668,7 @@
       },
       "couldnt_switch": "Couldn't switch accounts",
       "cloud": "Cloud",
-      "cloud_keys": {
-        "title": "API keys",
-        "section_description": "Cloud can also run agents on your own API keys. A key saved here is used on every Cloud machine, from the next turn, wherever no sign-in is in use. To use a key instead of a sign-in, pick it on the agent's card.",
-        "key": "{vendor} API key",
-        "description": "For {agent} on Cloud. Kept in Zeron's vault, never on this computer.",
-        "placeholder": "Paste a key",
-        "save": "Save",
-        "saved": "Saved for {agent} on Cloud"
-      }
+      "cloud_key_kept": "Kept in Zeron's vault for Cloud, never on this Mac. Every Cloud machine uses it from its next turn, wherever no sign-in is in use."
     },
     "devices": {
       "title": "Devices",

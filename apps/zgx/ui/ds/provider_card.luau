@@ -295,6 +295,10 @@ export type CardProps = {
 	-- An API key's name changed (empty: its default): a promise.
 	on_rename: ((a: Account, name: string) -> any)?,
 	keys_here: (() -> boolean)?,
+	-- Where an added key is kept, said under its field (nil: on this Mac,
+	-- in the agent's own settings); one kept elsewhere (Cloud's vault)
+	-- takes no name.
+	keys_kept: (() -> string)?,
 	key_request: (() -> string?)?,
 	key_request_seen: (() -> ())?,
 	-- How the agent signs in where it's shown, when that differs from its
@@ -1188,7 +1192,9 @@ local function key_dialog(c: CardProps, open: State<boolean>, choice: State<stri
 						autofocus = true,
 						input_ref = input,
 						hint = function(): string
-							return locale.s("ds.provider_card.key_kept", { agent = c.provider.name })
+							return if c.keys_kept
+								then c.keys_kept()
+								else locale.s("ds.provider_card.key_kept", { agent = c.provider.name })
 						end,
 						-- Why the key wasn't kept, in the provider's words.
 						error = function(): string?
@@ -1207,8 +1213,9 @@ local function key_dialog(c: CardProps, open: State<boolean>, choice: State<stri
 						end,
 					},
 					-- What to call it (it has no address of its own): left
-					-- blank, its provider and last four.
-					TextField {
+					-- blank, its provider and last four. (Cloud's vault keeps
+					-- no names.)
+					if c.keys_kept then nil else TextField {
 						value = name,
 						label = locale.t("ds.provider_card.key_name_optional"),
 						placeholder = locale.t("ds.provider_card.key_name_placeholder"),

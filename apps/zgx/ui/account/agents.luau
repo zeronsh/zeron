@@ -95,10 +95,7 @@ export type Agent = {
 	-- How it signs in on Cloud, where that differs from its own way.
 	cloud_note: string?,
 }
--- One of Cloud's API keys (its own section of Providers with Cloud shown):
--- the vault provider, whose key it is, and the agents that use it.
-export type CloudKey = { provider: string, vendor: string, agents: string }
-export type Now = { state: string, list: { Agent }, target: string?, cloud_keys: { CloudKey }? }
+export type Now = { state: string, list: { Agent }, target: string?}
 
 M.now = ui.shared("agents", { state = "looking", list = {} } :: Now)
 

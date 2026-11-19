@@ -1232,7 +1232,27 @@ impl EngineRpc {
                 if let Some(models) = self.cloud_models(p.harness).await {
                     return Some(RpcReply::value(&models));
                 }
-                Some(self.handle(method, local(&[])).await)
+                match self.handle(method, local(&[])).await {
+                    Ok(reply) => Some(Ok(reply)),
+                    // Not signed in (or installed) here, while Cloud is, and
+                    // no Cloud machine has run it yet to publish its list:
+                    // the agent's own fallback models, so it can be picked
+                    // for its first Cloud run (which publishes the real ones).
+                    Err(error) => {
+                        let fallback = self
+                            .registry
+                            .resolve(p.harness)
+                            .map(|harness| harness.fallback_models())
+                            .unwrap_or_default();
+                        if fallback.is_empty() {
+                            Some(Err(error))
+                        } else {
+                            tracing::info!(harness = p.harness.as_str(), %error,
+                                "Cloud models: fallback list until a Cloud machine publishes one");
+                            Some(RpcReply::value(&fallback))
+                        }
+                    }
+                }
             }
             methods::LIST_SKILLS | methods::LIST_COMMANDS if account => Some(
                 self.handle(method, local(&["chatId", "spaceId", "path"]))
