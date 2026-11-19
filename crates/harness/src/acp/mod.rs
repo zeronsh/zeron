@@ -1086,6 +1086,40 @@ pub fn antigravity_home() -> Result<PathBuf, HarnessError> {
     antigravity_paths::home()
 }
 
+/// The Antigravity home a sign-in signs in to, whose settings name its method:
+/// `env`'s `GEMINI_HOME` (the last one, as the child sees it) — a home of its
+/// own, a throwaway one, never takes this computer's choice — else `live`.
+fn signs_in_to(env: &[(String, std::ffi::OsString)], live: Option<&Path>) -> Option<PathBuf> {
+    env.iter()
+        .rev()
+        .find(|(key, _)| key == "GEMINI_HOME")
+        .map(|(_, home)| PathBuf::from(home))
+        .or_else(|| live.map(Path::to_path_buf))
+}
+
+/// The Google login Antigravity's server keeps in a file under `home`
+/// (`AGY_ACP_FORCE_FILE_STORAGE`, or where it has no Keychain): what a
+/// sign-in on this computer through Zeron writes.
+pub fn antigravity_token_file(home: &Path) -> PathBuf {
+    home.join("antigravity-acp").join("acp_token.json")
+}
+
+/// Whether Zeron's Antigravity runs read their login from `home`'s token file
+/// rather than the Keychain: once it holds a Google login (a refresh token),
+/// as a sign-in through Zeron leaves it. Without one the server keeps its
+/// own default, so a Keychain login made elsewhere still runs.
+pub fn antigravity_reads_token_file(home: &Path) -> bool {
+    std::fs::read(antigravity_token_file(home))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .is_some_and(|token| {
+            token
+                .get("refresh_token")
+                .and_then(Value::as_str)
+                .is_some_and(|t| !t.is_empty())
+        })
+}
+
 /// The auth method Antigravity's server saved in `settings.json` (it records
 /// every successful `authenticate`), canonicalized the way sign-in reads it.
 /// `None` when nothing is saved or the file can't be read.
@@ -1885,7 +1919,7 @@ impl AcpHarness {
         let gemini_home = (self.spec.id == HarnessId::Antigravity)
             .then(antigravity_paths::home)
             .transpose()?;
-        let configured_method = gemini_home
+        let configured_method = signs_in_to(&env, gemini_home.as_deref())
             .as_ref()
             .map(|home| {
                 configured_auth_method_in(&home.join("antigravity-acp").join("settings.json"))
@@ -2712,7 +2746,11 @@ impl AcpHarness {
         }
         self.registry_environment(&mut cmd);
         if self.spec.id == HarnessId::Antigravity {
-            cmd.env("GEMINI_HOME", antigravity_paths::home()?);
+            let home = antigravity_paths::home()?;
+            if antigravity_reads_token_file(&home) {
+                cmd.env("AGY_ACP_FORCE_FILE_STORAGE", "1");
+            }
+            cmd.env("GEMINI_HOME", home);
             match noop_browser() {
                 Ok(browser) => {
                     cmd.env("BROWSER", browser);
@@ -6997,6 +7035,41 @@ mod tests {
         let path = dir.join("settings.json");
         std::fs::write(&path, body).unwrap();
         (home, path)
+    }
+
+    /// Zeron's Antigravity reads the token file once it holds a Google login
+    /// (a sign-in through Zeron), and the Keychain otherwise.
+    #[test]
+    fn antigravity_reads_its_token_file_once_it_holds_a_google_login() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(!antigravity_reads_token_file(home.path()));
+        let file = antigravity_token_file(home.path());
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "{}").unwrap();
+        assert!(!antigravity_reads_token_file(home.path()), "no login in it");
+        std::fs::write(&file, r#"{"refresh_token":"","client_id":"c"}"#).unwrap();
+        assert!(!antigravity_reads_token_file(home.path()));
+        std::fs::write(&file, r#"{"refresh_token":"grt","client_id":"c"}"#).unwrap();
+        assert!(antigravity_reads_token_file(home.path()));
+    }
+
+    /// A sign-in into a home of its own reads that home's method, never this
+    /// computer's (a live home set to Gemini Enterprise would otherwise turn
+    /// a Google sign-in into an Enterprise one).
+    #[test]
+    fn a_sign_in_into_its_own_home_reads_that_homes_method() {
+        let live = Path::new("/live/.gemini");
+        assert_eq!(signs_in_to(&[], Some(live)).as_deref(), Some(live));
+        let env = vec![
+            ("GEMINI_HOME".to_string(), "/tmp/first".into()),
+            ("AGY_ACP_FORCE_FILE_STORAGE".to_string(), "1".into()),
+            ("GEMINI_HOME".to_string(), "/tmp/.login-1".into()),
+        ];
+        assert_eq!(
+            signs_in_to(&env, Some(live)).as_deref(),
+            Some(Path::new("/tmp/.login-1"))
+        );
+        assert_eq!(signs_in_to(&[], None), None);
     }
 
     #[test]

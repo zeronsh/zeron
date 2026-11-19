@@ -497,6 +497,21 @@ enum LoginFlow {
         /// sign-in needing the same port supersedes this one.
         port: Option<u16>,
     },
+    /// A sign-in whose agent isn't installed on this device yet: installed
+    /// first, then its own sign-in started (`inner`, once it has) and
+    /// followed under this login id (see
+    /// [`AgentAccounts::start_installing_login`]).
+    Installing {
+        harness: HarnessId,
+        started_at: Instant,
+        state: Arc<Mutex<TaskLoginState>>,
+        /// aborting drops the install (its process group goes with it) or
+        /// the follow-up loop.
+        handle: tokio::task::JoinHandle<()>,
+        /// The sign-in started once the agent was installed; cancelled with
+        /// this one.
+        inner: Arc<Mutex<Option<String>>>,
+    },
 }
 
 /// How a [`LoginFlow::Spawned`] child signals success.
@@ -520,12 +535,45 @@ struct TaskLoginState {
     requester: Option<String>,
 }
 
+/// What a sign-in's install step asks and runs instead of the harness
+/// installer ([`AgentAccounts::override_installer`]; tests).
+#[derive(Clone)]
+#[doc(hidden)]
+pub struct SignInInstaller {
+    pub installed: Arc<dyn Fn(HarnessId) -> bool + Send + Sync>,
+    pub install: Arc<
+        dyn Fn(HarnessId) -> futures::future::BoxFuture<'static, Result<(), String>> + Send + Sync,
+    >,
+}
+
+/// How often an installed agent's sign-in is followed for the login that
+/// installed it.
+const INSTALLED_SIGN_IN_POLL: Duration = Duration::from_millis(500);
+
+/// Whether `harness`'s sign-in on this device runs its own CLI, and so needs
+/// it installed first. Claude's, and the ChatGPT, Copilot and Claude
+/// sign-ins of OpenCode and Pi, are the engine's own OAuth; an agent from the
+/// ACP registry installs through its record.
+fn sign_in_runs_cli(harness: HarnessId) -> bool {
+    matches!(
+        harness,
+        HarnessId::Codex
+            | HarnessId::Cursor
+            | HarnessId::Grok
+            | HarnessId::Devin
+            | HarnessId::Hermes
+            | HarnessId::Muse
+            | HarnessId::Antigravity
+    )
+}
+
 impl LoginFlow {
     fn started_at(&self) -> Instant {
         match self {
             LoginFlow::Claude { started_at, .. }
             | LoginFlow::Spawned { started_at, .. }
-            | LoginFlow::Task { started_at, .. } => *started_at,
+            | LoginFlow::Task { started_at, .. }
+            | LoginFlow::Installing { started_at, .. } => *started_at,
         }
     }
 }
@@ -819,6 +867,9 @@ struct Inner {
     identities: Mutex<HashMap<String, IdentityLookup>>,
     /// Test seam: fixed CLI binaries per agent instead of PATH resolution.
     cli_overrides: Mutex<HashMap<HarnessId, PathBuf>>,
+    /// Test seam: what a sign-in's install step checks and runs instead of
+    /// the harness installer (see [`AgentAccounts::override_installer`]).
+    installer: Mutex<Option<SignInInstaller>>,
     /// The last snapshot a list, switch or removal made, for whoever follows
     /// them (plugins' usage and account events). Never holds a credential.
     snapshots: tokio::sync::watch::Sender<Option<AgentAccountsSnapshot>>,
@@ -920,6 +971,7 @@ impl AgentAccounts {
                 callback_routes,
                 identities: Mutex::new(HashMap::new()),
                 cli_overrides: Mutex::new(HashMap::new()),
+                installer: Mutex::new(None),
                 snapshots: tokio::sync::watch::channel(None).0,
                 pins: Mutex::new(pins),
                 pin_hook: Mutex::new(None),
@@ -963,6 +1015,38 @@ impl AgentAccounts {
     #[doc(hidden)]
     pub fn override_cli(&self, harness: HarnessId, path: impl Into<PathBuf>) {
         lock(&self.inner.cli_overrides).insert(harness, path.into());
+    }
+
+    /// Test seam: a sign-in's install step asks `installer` whether the agent
+    /// is installed and has it install it, instead of the harness installer.
+    #[doc(hidden)]
+    pub fn override_installer(&self, installer: SignInInstaller) {
+        *lock(&self.inner.installer) = Some(installer);
+    }
+
+    /// Whether `harness`'s CLI is installed here (a CLI override counts, unless
+    /// an installer override says otherwise).
+    fn agent_installed(&self, harness: HarnessId) -> bool {
+        if let Some(installer) = lock(&self.inner.installer).as_ref() {
+            return (installer.installed)(harness);
+        }
+        lock(&self.inner.cli_overrides).contains_key(&harness)
+            || zeron_harness::install::installed(harness)
+    }
+
+    /// Install `harness`'s CLI as Settings' Install does. Dropping the future
+    /// stops the installer and its process group.
+    async fn install_agent(&self, harness: HarnessId) -> Result<(), String> {
+        let seam = lock(&self.inner.installer).as_ref().map(|i| i.install.clone());
+        match seam {
+            Some(install) => install(harness).await,
+            None => zeron_harness::install::install_harness(
+                harness,
+                zeron_harness::CancellationToken::new(),
+            )
+            .await
+            .map_err(|error| error.to_string()),
+        }
     }
 
     /// The ACP harness for `harness`'s CLI, honouring [`Self::override_cli`].
@@ -1048,6 +1132,9 @@ impl AgentAccounts {
         let mut detected_more: Vec<(HarnessId, Detected)> = Vec::new();
         detected_more.extend(self.detect_grok().map(|d| (HarnessId::Grok, d)));
         detected_more.extend(self.detect_devin().map(|d| (HarnessId::Devin, d)));
+        let antigravity_file = self.detect_antigravity_file();
+        let antigravity_in_file = antigravity_file.is_some();
+        detected_more.extend(antigravity_file.map(|d| (HarnessId::Antigravity, d)));
         for harness in [HarnessId::Opencode, HarnessId::Pi] {
             let (resolved, unresolved) = self.detect_keyed(harness).await;
             detected_more.extend(resolved.into_iter().map(|d| (harness, d)));
@@ -1075,7 +1162,12 @@ impl AgentAccounts {
                 message,
             });
         }
-        let antigravity = self.detect_antigravity().await;
+        // A login Zeron can't read or switch (the Keychain's, a key, Gemini
+        // Enterprise): one row of its own, when no token file is live.
+        let antigravity = match antigravity_in_file {
+            true => None,
+            false => self.detect_antigravity().await,
+        };
 
         // Stable presentation order: provider, then slot creation order (never
         // active-first — switching must not reshuffle the cards). Hermes'
@@ -1088,6 +1180,7 @@ impl AgentAccounts {
             HarnessId::Devin,
             HarnessId::Opencode,
             HarnessId::Pi,
+            HarnessId::Antigravity,
             HarnessId::Muse,
         ]
         .into_iter()
@@ -1197,8 +1290,8 @@ impl AgentAccounts {
                 });
             }
         }
-        // Antigravity keeps exactly one login whose token zeron never reads:
-        // one active, unswitchable row, and no usage (it has no quota view).
+        // An Antigravity login whose token zeron can't read: one active,
+        // unswitchable row, and no usage (it has no quota view).
         if let Some(login) = antigravity {
             accounts.push(login.account());
         }
@@ -1268,6 +1361,7 @@ impl AgentAccounts {
                 self.write_grok_entry(slot.store_key.as_deref(), &slot.credentials)?
             }
             HarnessId::Devin => self.write_devin_credentials(&slot.credentials)?,
+            HarnessId::Antigravity => self.write_antigravity_token(&slot.credentials)?,
             // Nothing is swapped: runs are pointed at this account's root.
             HarnessId::Muse => self.set_muse_active(Some(&slot.id))?,
             HarnessId::Opencode | HarnessId::Pi => {
@@ -1458,6 +1552,7 @@ impl AgentAccounts {
             HarnessId::Cursor => self.detect_cursor().map(|d| d.account_key),
             HarnessId::Grok => self.detect_grok().map(|d| d.account_key),
             HarnessId::Devin => self.detect_devin().map(|d| d.account_key),
+            HarnessId::Antigravity => self.detect_antigravity_file().map(|d| d.account_key),
             HarnessId::Opencode | HarnessId::Pi => self
                 .detect_keyed_entry(harness, store_key?)
                 .await
@@ -1504,6 +1599,7 @@ impl AgentAccounts {
             HarnessId::Cursor => self.write_cursor_auth(&slot.credentials)?,
             HarnessId::Grok => self.write_grok_entry(store_key, &slot.credentials)?,
             HarnessId::Devin => self.write_devin_credentials(&slot.credentials)?,
+            HarnessId::Antigravity => self.write_antigravity_token(&slot.credentials)?,
             HarnessId::Opencode | HarnessId::Pi => {
                 if let Some(key) = store_key {
                     self.write_keyed_entry(slot.harness, key, Some(&slot.credentials))?;
@@ -1575,6 +1671,12 @@ impl AgentAccounts {
                 self.remove_grok_entry(&map_key)?;
             }
             HarnessId::Devin => remove_if_exists(&self.inner.config.devin_credentials_file)?,
+            // Its token file: a login it keeps elsewhere (the Keychain) runs
+            // again, as before a sign-in through Zeron.
+            HarnessId::Antigravity => {
+                let home = self.antigravity_home()?;
+                remove_if_exists(&zeron_harness::acp::antigravity_token_file(home))?
+            }
             HarnessId::Opencode | HarnessId::Pi => {
                 let key = store_key
                     .ok_or_else(|| EngineError::Other("That login names no provider.".into()))?;
@@ -1697,6 +1799,24 @@ impl AgentAccounts {
         requester: Option<&str>,
     ) -> Result<AgentLoginStart, EngineError> {
         self.sweep_flows();
+        // A new start supersedes an install still under way for this agent.
+        self.reap_installing_flows(harness);
+        if sign_in_runs_cli(harness) && !self.agent_installed(harness) {
+            return Ok(self.start_installing_login(harness, provider, requester));
+        }
+        self.start_installed_login(harness, provider, requester)
+            .await
+    }
+
+    /// `harness`'s sign-in, its CLI (when it runs one) installed: the
+    /// sign-in flow of each agent, and the callback route a remote login's
+    /// browser lands through.
+    async fn start_installed_login(
+        &self,
+        harness: HarnessId,
+        provider: Option<&str>,
+        requester: Option<&str>,
+    ) -> Result<AgentLoginStart, EngineError> {
         let provider = provider.filter(|p| !p.is_empty());
         let mut start = match harness {
             HarnessId::ClaudeCode => {
@@ -1707,7 +1827,7 @@ impl AgentAccounts {
             }
             HarnessId::Codex => self.start_codex_login(requester).await?,
             HarnessId::Cursor => self.start_cursor_login().await?,
-            HarnessId::Antigravity => self.start_antigravity_login(requester),
+            HarnessId::Antigravity => self.start_antigravity_login(requester)?,
             HarnessId::Grok => self.start_grok_login(requester).await?,
             HarnessId::Devin => self.start_devin_login(requester)?,
             // Every agent from the ACP registry: its own sign-in, `provider`
@@ -1917,6 +2037,110 @@ impl AgentAccounts {
             url,
             mode: AgentLoginMode::PasteCode,
             callback_port: None,
+        }
+    }
+
+    /// `harness`'s sign-in when its CLI isn't installed on this device: the
+    /// agent installs first (the poll says so, as Cloud's Antigravity
+    /// sign-in does), then its own sign-in starts and is followed under this
+    /// login id — its page, code, words and outcome — so the app sees one
+    /// sign-in, its page arriving with a poll. Cancelling it cancels both.
+    fn start_installing_login(
+        &self,
+        harness: HarnessId,
+        provider: Option<&str>,
+        requester: Option<&str>,
+    ) -> AgentLoginStart {
+        let login_id = new_id();
+        let name = zeron_proto::providers::provider_name(harness);
+        let state = Arc::new(Mutex::new(TaskLoginState {
+            message: Some(format!("Installing {name} on this computer…")),
+            requester: requester.map(str::to_string),
+            ..Default::default()
+        }));
+        let inner: Arc<Mutex<Option<String>>> = Arc::default();
+        let (provider, requester) = (provider.map(str::to_string), requester.map(str::to_string));
+        let (this, task_state, task_inner) = (self.clone(), state.clone(), inner.clone());
+        let handle = tokio::spawn(async move {
+            let outcome = async {
+                if let Err(error) = this.install_agent(harness).await {
+                    tracing::warn!(?harness, %error, "installing an agent for its sign-in failed");
+                    return Err(format!(
+                        "Couldn't install {name} on this computer ({error}) — install it first, \
+                         then sign in again."
+                    ));
+                }
+                lock(&task_state).message = None;
+                let start = this
+                    .start_installed_login(harness, provider.as_deref(), requester.as_deref())
+                    .await
+                    .map_err(|error| error.to_string())?;
+                *lock(&task_inner) = Some(start.login_id.clone());
+                if !start.url.is_empty() {
+                    lock(&task_state).url = Some(start.url);
+                }
+                loop {
+                    let poll = this
+                        .poll_login(&start.login_id)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    let finished = {
+                        let mut followed = lock(&task_state);
+                        if poll.url.is_some() {
+                            followed.url = poll.url;
+                        }
+                        followed.code = poll.code;
+                        match poll.status {
+                            AgentLoginStatus::Pending => {
+                                followed.message = poll.message;
+                                None
+                            }
+                            AgentLoginStatus::Done => Some(Ok(())),
+                            AgentLoginStatus::Error => Some(Err(poll
+                                .message
+                                .unwrap_or_else(|| format!("The {name} sign-in failed.")))),
+                        }
+                    };
+                    if let Some(finished) = finished {
+                        return finished;
+                    }
+                    tokio::time::sleep(INSTALLED_SIGN_IN_POLL).await;
+                }
+            }
+            .await;
+            // (Finished: nothing left to cancel with it.)
+            *lock(&task_inner) = None;
+            lock(&task_state).outcome = Some(outcome);
+        });
+        lock(&self.inner.flows).insert(
+            login_id.clone(),
+            LoginFlow::Installing {
+                harness,
+                started_at: Instant::now(),
+                state,
+                handle,
+                inner,
+            },
+        );
+        AgentLoginStart {
+            login_id,
+            url: String::new(),
+            mode: AgentLoginMode::Browser,
+            callback_port: None,
+        }
+    }
+
+    /// Cancel any install-then-sign-in still under way for `harness`.
+    fn reap_installing_flows(&self, harness: HarnessId) {
+        let stale: Vec<String> = lock(&self.inner.flows)
+            .iter()
+            .filter(|(_, f)| {
+                matches!(f, LoginFlow::Installing { harness: h, .. } if *h == harness)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in stale {
+            self.cancel_login(&id);
         }
     }
 
@@ -2599,12 +2823,116 @@ impl AgentAccounts {
         })
     }
 
-    /// Antigravity: its ACP server's own Google sign-in. The start replies at
-    /// once — a first sign-in may download a large server — and polls carry
-    /// the browser url once the server prints it. A server that already holds
+    /// Antigravity: its ACP server's Google sign-in (`oauth-personal`) into a
+    /// throwaway `GEMINI_HOME`, its token kept in a file there — never a
+    /// session already on this computer (the Keychain's), whose account
+    /// zeron can't name or switch, so "Sign in" always asks Google and the
+    /// account picked is the one saved. The token is saved as a slot named
+    /// by its Google account, and goes live when no other file login is
+    /// (Zeron's runs read it: `zeron_harness::acp::antigravity_reads_token_file`).
+    /// Polls carry the browser url once the server prints it.
+    fn start_antigravity_login(
+        &self,
+        requester: Option<&str>,
+    ) -> Result<AgentLoginStart, EngineError> {
+        if let Some(home) = &self.inner.config.antigravity_home
+            && zeron_harness::acp::antigravity_saved_auth_method(home)
+                .is_some_and(|method| method != "oauth-personal")
+        {
+            return Ok(self.start_antigravity_method_login(requester));
+        }
+        self.reap_spawned_flows(HarnessId::Antigravity);
+        let acp = self
+            .acp_harness(HarnessId::Antigravity)
+            .ok_or_else(|| EngineError::Other("Antigravity has no sign-in".into()))?;
+        let login_id = new_id();
+        let home = self.login_home(&login_id)?;
+        #[cfg(unix)]
+        let browser = self
+            .inner
+            .config
+            .private_root()
+            .ok()
+            .and_then(|root| ensure_noop_browser(&root));
+        #[cfg(not(unix))]
+        let browser = None;
+        let options = zeron_harness::acp::SignInOptions {
+            browser,
+            method: Some("oauth-personal".into()),
+            env: vec![
+                ("GEMINI_HOME".into(), home.clone().into()),
+                ("AGY_ACP_FORCE_FILE_STORAGE".into(), "1".into()),
+            ],
+            url_filter: None,
+        };
+        let state = Arc::new(Mutex::new(TaskLoginState {
+            requester: requester.map(str::to_string),
+            ..Default::default()
+        }));
+        let task_state = state.clone();
+        let this = self.clone();
+        let task_home = home.clone();
+        let handle = tokio::spawn(async move {
+            let progress_state = task_state.clone();
+            let signed_in = acp
+                .sign_in_with(options, move |progress| {
+                    if let zeron_harness::acp::SignInProgress::OpenBrowser(url) = progress {
+                        lock(&progress_state).url.get_or_insert(url);
+                    }
+                })
+                .await
+                .map_err(|e| e.to_string());
+            let token = signed_in.and_then(|()| {
+                antigravity_capture(&task_home)?
+                    .map(|found| found["material"]["antigravityToken"].clone())
+                    .ok_or_else(|| {
+                        "Antigravity reported a successful sign-in, but saved no Google login."
+                            .to_string()
+                    })
+            });
+            // Off the disk before anything else: the token lives on in this
+            // task until it's saved.
+            let _ = std::fs::remove_dir_all(&task_home);
+            let outcome = match token {
+                Ok(token) => {
+                    let email = this.google_email(&token).await;
+                    match antigravity_file_login(&token, email) {
+                        Some(detected) => this
+                            .save_new_login(HarnessId::Antigravity, &detected)
+                            .await
+                            .map_err(|e| e.to_string()),
+                        None => Err("Antigravity saved a Google login zeron can't read.".into()),
+                    }
+                }
+                Err(message) => Err(message),
+            };
+            lock(&task_state).outcome = Some(outcome);
+        });
+        lock(&self.inner.flows).insert(
+            login_id.clone(),
+            LoginFlow::Task {
+                harness: HarnessId::Antigravity,
+                started_at: Instant::now(),
+                state,
+                handle,
+                home: Some(home),
+                port: None,
+            },
+        );
+        Ok(AgentLoginStart {
+            login_id,
+            url: String::new(),
+            mode: AgentLoginMode::Browser,
+            callback_port: None,
+        })
+    }
+
+    /// Antigravity set to a sign-in other than a personal Google account's
+    /// (Gemini Enterprise, a key): its ACP server's own sign-in in its own
+    /// home, the method its settings name kept. A server that already holds
     /// a valid token answers `authenticate` without any browser at all, which
     /// is success: the poll reports done and the list shows the login.
-    fn start_antigravity_login(&self, requester: Option<&str>) -> AgentLoginStart {
+    fn start_antigravity_method_login(&self, requester: Option<&str>) -> AgentLoginStart {
         self.reap_spawned_flows(HarnessId::Antigravity);
         let login_id = new_id();
         let state = Arc::new(Mutex::new(TaskLoginState {
@@ -2623,10 +2951,13 @@ impl AgentAccounts {
         let browser = None;
         let home = self.inner.config.antigravity_home.clone();
         let keychain = self.inner.config.antigravity_keychain;
+        let acp = self
+            .acp_harness(HarnessId::Antigravity)
+            .unwrap_or_else(zeron_harness::AcpHarness::antigravity);
         let task_state = state.clone();
         let handle = tokio::spawn(async move {
             let progress_state = task_state.clone();
-            let mut outcome = zeron_harness::AcpHarness::antigravity()
+            let mut outcome = acp
                 .sign_in(browser, move |progress| {
                     if let zeron_harness::acp::SignInProgress::OpenBrowser(url) = progress {
                         lock(&progress_state).url = Some(url);
@@ -2929,7 +3260,9 @@ impl AgentAccounts {
                         callback_port: None,
                     });
                 }
-                Some(LoginFlow::Task { .. }) => unreachable!("task logins poll above"),
+                Some(LoginFlow::Task { .. } | LoginFlow::Installing { .. }) => {
+                    unreachable!("task logins poll above")
+                }
                 Some(LoginFlow::Spawned {
                     harness,
                     home,
@@ -3050,7 +3383,9 @@ impl AgentAccounts {
     /// for a remote requester before the poll hands the url out.
     fn poll_task_login(&self, login_id: &str) -> Option<AgentLoginPoll> {
         let state = match lock(&self.inner.flows).get(login_id) {
-            Some(LoginFlow::Task { state, .. }) => state.clone(),
+            Some(LoginFlow::Task { state, .. } | LoginFlow::Installing { state, .. }) => {
+                state.clone()
+            }
             _ => return None,
         };
         let poll = {
@@ -3192,6 +3527,19 @@ impl AgentAccounts {
                     let _ = std::fs::remove_dir_all(&home);
                 }
             }
+            Some(LoginFlow::Installing {
+                handle,
+                inner,
+                harness,
+                ..
+            }) => {
+                tracing::info!(%login_id, ?harness, "agent install for its sign-in cancelled");
+                handle.abort();
+                let started = lock(&inner).take();
+                if let Some(started) = started {
+                    self.cancel_login(&started);
+                }
+            }
             _ => {}
         }
     }
@@ -3262,6 +3610,53 @@ impl AgentAccounts {
             }),
             warning,
         )
+    }
+
+    /// Antigravity's live Google login in its token file — what a sign-in
+    /// through Zeron writes, and what Zeron's runs then read
+    /// ([`zeron_harness::acp::antigravity_reads_token_file`]) — unless its home
+    /// is set to another method, which runs instead.
+    fn detect_antigravity_file(&self) -> Option<Detected> {
+        let home = self.inner.config.antigravity_home.as_ref()?;
+        if zeron_harness::acp::antigravity_saved_auth_method(home)
+            .is_some_and(|method| method != "oauth-personal")
+        {
+            return None;
+        }
+        antigravity_file_login(
+            &read_json(&zeron_harness::acp::antigravity_token_file(home))?,
+            None,
+        )
+    }
+
+    fn antigravity_home(&self) -> Result<&Path, EngineError> {
+        self.inner.config.antigravity_home.as_deref().ok_or_else(|| {
+            EngineError::Other("Antigravity's home couldn't be found on this computer.".into())
+        })
+    }
+
+    /// Make `token` Antigravity's live login: its token file, as its server
+    /// writes it, and its settings' method the Google sign-in that file is
+    /// for (everything else in them kept).
+    fn write_antigravity_token(&self, token: &serde_json::Value) -> Result<(), EngineError> {
+        let home = self.antigravity_home()?;
+        let file = zeron_harness::acp::antigravity_token_file(home);
+        if let Some(dir) = file.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        write_file_atomic(&file, token.to_string().as_bytes(), true)?;
+        let settings_file = home.join("antigravity-acp").join("settings.json");
+        let mut settings = read_json(&settings_file)
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}));
+        if settings["auth"]["type"].as_str() != Some("oauth-personal") {
+            if !settings["auth"].is_object() {
+                settings["auth"] = serde_json::json!({});
+            }
+            settings["auth"]["type"] = serde_json::json!("oauth-personal");
+            write_file_atomic(&settings_file, settings.to_string().as_bytes(), true)?;
+        }
+        Ok(())
     }
 
     async fn detect_antigravity(&self) -> Option<AntigravityLogin> {
@@ -3556,6 +3951,10 @@ impl AgentAccounts {
                 // Muse reports its usage from runs (`record_muse_usage`); a
                 // probe's fresh host has observed none.
                 if harness == HarnessId::Muse {
+                    continue;
+                }
+                // Antigravity has no quota view to probe.
+                if harness == HarnessId::Antigravity {
                     continue;
                 }
                 let key = usage_key(harness, &slot.account_key);
@@ -4280,6 +4679,31 @@ impl AntigravityLogin {
 /// or its file fallback. Key-based methods keep the key in the environment,
 /// so the saved method is all there is. A first run saves no method; its
 /// default is the personal Google sign-in.
+/// An Antigravity Google token blob as a login: keyed by its refresh token,
+/// which Google never rotates (the blob names no account, and its access
+/// token changes at every refresh), named by `email` when it's known — a
+/// sign-in looks it up; the live file alone can't say, so a slot keeps the
+/// one it was saved with.
+fn antigravity_file_login(token: &serde_json::Value, email: Option<String>) -> Option<Detected> {
+    let refresh = str_field(token, "refresh_token")?;
+    str_field(token, "client_id")?;
+    let digest = Sha256::digest(refresh.as_bytes());
+    Some(Detected {
+        account_key: format!("google:{}", &crate::repos::hex(&digest)[..16]),
+        identity_known: email.is_some(),
+        profile: SlotProfile {
+            email: email.unwrap_or_else(|| "Google account".into()),
+            display_name: None,
+            organization: None,
+            plan: None,
+            auth_kind: AgentAuthKind::Oauth,
+        },
+        credentials: Some(token.clone()),
+        claude_config: None,
+        store_key: None,
+    })
+}
+
 async fn detect_antigravity_login(home: &Path, keychain: bool) -> Option<AntigravityLogin> {
     let method = zeron_harness::acp::antigravity_saved_auth_method(home)
         .unwrap_or_else(|| "oauth-personal".into());

@@ -1918,9 +1918,10 @@ fn mark_switched(accounts: &mut [Json], harness: &str, account: &str) {
     }
 }
 
-/// A device's accounts as the composer reads them, by agent: only an agent
-/// that signs in and reports its usage. `{ id, email, plan, active,
-/// can_switch, error?, windows = { { label, used } } }`.
+/// A device's accounts as the composer reads them, by agent: an agent that
+/// signs in and reports its usage or whose accounts Zeron switches (Antigravity
+/// reports none: its row names the account, with no ring). `{ id, email,
+/// plan, active, can_switch, error?, windows = { { label, used } } }`.
 fn device_accounts_value(accounts: &[Json]) -> Value {
     let mut by: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
     for account in accounts {
@@ -1928,7 +1929,9 @@ fn device_accounts_value(accounts: &[Json]) -> Value {
         let Ok(id) = serde_json::from_value::<zeron_proto::HarnessId>(account["harness"].clone()) else {
             continue;
         };
-        if !(zeron_proto::providers::signs_in(id) && zeron_proto::providers::reports_usage(id)) {
+        if !(zeron_proto::providers::signs_in(id)
+            && (zeron_proto::providers::reports_usage(id) || zeron_proto::providers::switches_accounts(id)))
+        {
             continue;
         }
         let windows: Vec<Value> = account["usageWindows"]
@@ -2128,11 +2131,12 @@ mod tests {
     }
 
     #[test]
-    fn a_device_lists_only_agents_that_sign_in_and_report_usage() {
+    fn a_device_lists_agents_that_sign_in_and_report_usage_or_switch_accounts() {
         let value = device_accounts_value(&[
             json!({ "id": "a", "harness": "claude-code", "email": "a@example.test", "active": true, "switchable": true,
                 "planLabel": "Max", "usageWindows": [{ "label": "Week", "usedFraction": 1.4 }] }),
-            json!({ "id": "b", "harness": "antigravity", "active": true, "switchable": true }),
+            json!({ "id": "b", "harness": "antigravity", "email": "b@gmail.test", "active": true, "switchable": true }),
+            json!({ "id": "b2", "harness": "antigravity", "email": "b2@gmail.test", "active": false, "switchable": true }),
             json!({ "id": "c", "harness": "hermes", "active": true, "switchable": true, "usageError": "no" }),
             json!({ "id": "d", "harness": "acp.someone", "active": true }),
         ]);
@@ -2143,7 +2147,13 @@ mod tests {
         assert!(rows[0].field("can_switch").is_some_and(Value::truthy));
         let windows = rows[0].field("windows").unwrap().list().to_vec();
         assert_eq!(windows[0].field("used").and_then(Value::as_f64), Some(1.0));
-        assert!(value.field("antigravity").is_none());
+        // Antigravity has no usage to show, but its Google accounts are
+        // named and switched from the composer's Account row (no ring).
+        let antigravity = value.field("antigravity").expect("antigravity").list().to_vec();
+        assert_eq!(antigravity.len(), 2);
+        assert_eq!(antigravity[0].field("email").map(text).as_deref(), Some("b@gmail.test"));
+        assert!(antigravity.iter().all(|a| a.field("can_switch").is_some_and(Value::truthy)));
+        assert!(antigravity[0].field("windows").unwrap().list().is_empty());
         assert!(value.field("acp.someone").is_none());
         // Hermes rotates its own logins: listed, not switched.
         let hermes = value.field("hermes").expect("hermes").list().to_vec();
