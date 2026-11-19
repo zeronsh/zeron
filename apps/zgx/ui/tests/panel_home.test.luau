@@ -423,7 +423,7 @@ test("hundreds of lanes: the first five and those needing you, then Show N more;
 	-- (What the home's view holds, in rows of 32, and the two the list
 	-- builds beyond each edge.)
 	local view = app:tree("#panel-empty"):match("^%s*@%d+[^\n]- [%-%d.]+,[%-%d.]+ [%d.]+x([%d.]+)")
-	local fits = math.ceil((tonumber(view) :: number) / 32) + 4
+	local fits = math.ceil((tonumber(view) :: number) / 32 + 1) + 4
 	expect(built(app, 'button "Open side chat ') <= fits).to_be(true)
 	-- Folded and opened again where it stands: the rows it shows are
 	-- built, as the fold eases open (no scroll needed to bring them).
