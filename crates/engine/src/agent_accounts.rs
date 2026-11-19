@@ -690,6 +690,18 @@ impl ProbeError {
     }
 }
 
+/// The kept usage, its probes that failed on a reply this build couldn't read
+/// due again at once: a start is often a new build, which may read it (a
+/// format error otherwise waits out its backoff through the update).
+fn retry_format_errors(mut entries: HashMap<String, UsageEntry>) -> HashMap<String, UsageEntry> {
+    for entry in entries.values_mut() {
+        if matches!(entry.error, Some(ProbeError::Schema)) {
+            entry.retry_at = None;
+        }
+    }
+    entries
+}
+
 /// Per-account usage state, persisted to `agent-accounts/usage-cache.json`
 /// so the first list after launch paints the last known windows instantly.
 /// All times are epoch millis (they must survive a restart).
@@ -956,7 +968,7 @@ impl AgentAccounts {
         let usage = std::fs::read_to_string(config.usage_cache_file())
             .ok()
             .and_then(|raw| serde_json::from_str::<UsageCacheFile>(&raw).ok())
-            .map(|file| file.entries)
+            .map(|file| retry_format_errors(file.entries))
             .unwrap_or_default();
         Self {
             inner: Arc::new(Inner {
@@ -6255,6 +6267,24 @@ fn stage_file_atomic(
 
 #[cfg(test)]
 mod tests {
+
+    /// A start retries a probe that failed on a reply the last build couldn't
+    /// read; any other failure keeps its backoff.
+    #[test]
+    fn a_start_retries_format_errors_only() {
+        let failed = |error: ProbeError| UsageEntry {
+            error: Some(error),
+            retry_at: Some(now_ms() + 60_000),
+            ..Default::default()
+        };
+        let entries = HashMap::from([
+            ("schema".to_string(), failed(ProbeError::Schema)),
+            ("limited".to_string(), failed(ProbeError::RateLimited { retry_after_secs: Some(600) })),
+        ]);
+        let entries = retry_format_errors(entries);
+        assert_eq!(entries["schema"].retry_at, None);
+        assert!(entries["limited"].retry_at.is_some());
+    }
 
     /// A Cloud sign-in's home is gone before its upload, unless its agent's
     /// new account has its models discovered there: then it stays through
