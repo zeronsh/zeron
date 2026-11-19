@@ -78,7 +78,7 @@ describe("the columns the rule names", () => {
   }, 120_000);
 
   test("Deploy tokens: every row's words start on one column, its header's, and its tiles end one gap before it, whatever the token holds", async () => {
-    for (const width of [1440, 1024, 390]) {
+    for (const width of [1440, 1024]) {
       const page = await open({ path: "/account/tokens", user: "user_ada" }, width, "dark");
       try {
         const starts = await page.evaluate(() => {
@@ -111,6 +111,40 @@ describe("the columns the rule names", () => {
           counts.add(Math.round(end));
         }
         expect(counts.size, `${width}: one place where every row's tiles end`).toBe(1);
+      } finally {
+        await page.context().close();
+      }
+    }
+  }, 120_000);
+
+  test("Deploy tokens on a phone: each row's tiles start on its name's column, its words on their own line under them, on the same column", async () => {
+    for (const width of [390, 768]) {
+      const page = await open({ path: "/account/tokens", user: "user_ada" }, width, "dark");
+      try {
+        const rows = await page.evaluate(() => {
+          const first = (el: Element | null) => {
+            const walker = document.createTreeWalker(el!, NodeFilter.SHOW_TEXT);
+            for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+              if (!n.textContent!.trim()) continue;
+              const r = document.createRange();
+              r.setStart(n, n.textContent!.search(/\S/));
+              r.setEnd(n, n.textContent!.search(/\S/) + 1);
+              return r.getClientRects()[0]!;
+            }
+            return null;
+          };
+          return [...document.querySelectorAll("ul > li.key:not(.was)")].map((row) => {
+            const tiles = row.querySelector(".scope .tiles, .scope > .all")!.getBoundingClientRect();
+            const words = first(row.querySelector(".scope > .w, .scope .count"))!;
+            return { name: first(row.querySelector(".kname .nm"))!.left, tiles: [tiles.left, tiles.bottom], words: [words.left, words.top] };
+          });
+        });
+        expect(rows.length).toBeGreaterThan(5);
+        for (const [i, r] of rows.entries()) {
+          expect(Math.abs(r.tiles[0]! - r.name), `${width}: row ${i + 1}'s tiles on its name's column`).toBeLessThanOrEqual(1);
+          expect(Math.abs(r.words[0]! - r.name), `${width}: row ${i + 1}'s words on its name's column`).toBeLessThanOrEqual(1);
+          expect(r.words[1]!, `${width}: row ${i + 1}'s words on their own line, under the tiles`).toBeGreaterThanOrEqual(r.tiles[1]!);
+        }
       } finally {
         await page.context().close();
       }
