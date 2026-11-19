@@ -297,15 +297,17 @@ describe("deploy tokens: who's calling", () => {
     const listed = (await tokensOf(userId))[0]!;
     expect(Math.abs(Date.now() - (listed.last_used_at as number))).toBeLessThan(60_000);
     expect(listed.last_used_plugin).toBe(pluginId);
-    // Reading its account's plugins is a use, of no plugin: the last one stays.
-    expect((await probe(token.token, "/store/v1/me/plugins", { method: "GET" })).status).toBe(200);
-    expect((await tokensOf(userId))[0]).toMatchObject({ last_used_plugin: pluginId });
   });
 
-  it("refuses anything but publishing and reading, before the token is looked up", async () => {
+  it("refuses anything but publishing, reads included, before the token is looked up", async () => {
     const { userId, pluginId } = await owned();
     const token = await made(userId, { plugins: [pluginId] });
     for (const [method, path] of [
+      // The owner's view (decline notes, unlisted plugins, token names), even
+      // for the plugins in its scope (contract "A token publishes and reads
+      // nothing").
+      ["GET", "/store/v1/me/plugins"],
+      ["POST", `/store/v1/plugins/${pluginId}/installed`],
       ["POST", `${versions(pluginId)}/1.0.0/yank`],
       ["POST", `${versions(pluginId)}/1.0.0/unyank`],
       ["GET", versions(pluginId)],
@@ -376,8 +378,13 @@ describe("deploy tokens: who's calling", () => {
     ];
     const answers = new Set<string>();
     for (const token of bad) {
-      for (const [method, path] of [["POST", versions(pluginId)], ["GET", "/store/v1/me/plugins"]] as const) {
-        const res = await probe(token, path, { method });
+      for (const path of [versions(pluginId), `${versions(pluginId)}/1.0.0/yank`]) {
+        const res = await probe(token, path);
+        if (path !== versions(pluginId)) {
+          // Anywhere else, refused before it's looked up: never a hint.
+          expect([res.status, await errorOf(res)], path).toEqual([401, "session_required"]);
+          continue;
+        }
         expect(res.status, `${token} ${path}`).toBe(401);
         const text = await res.text();
         expect(text).not.toContain(token);
@@ -472,7 +479,7 @@ describe("deploy tokens: never told", () => {
     expect(await keep(await tokenPublish(token, id, await makePackage({ id, version: "1.1.0", signer: null, files: { "extra.txt": "x" } })))).toBe(409);
     expect(await keep(await tokenPublish(token, id, new TextEncoder().encode("not a package")))).toBe(400);
     expect(await keep(await tokenPublish(token, uniqueId("ci"), await makePackage({ id, version: "1.2.0", signer: null })))).toBe(403);
-    expect(await keep(await api(token, "GET", "/store/v1/me/plugins"))).toBe(200);
+    expect(await keep(await api(token, "GET", "/store/v1/me/plugins"))).toBe(401);
     expect(await keep(await api(token, "GET", TOKENS))).toBe(401);
     expect(await keep(await api(token, "POST", `${versions(id)}/1.1.0/yank`))).toBe(401);
     expect(await keep(await api(a.userId, "GET", TOKENS))).toBe(200);

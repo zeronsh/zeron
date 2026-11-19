@@ -28,7 +28,7 @@ import { STORE_DATA } from "./data";
 import { authorCard, authorsOf, listingState, ownerCard, publisherId, publisherIds, versionInfo } from "./cards";
 import { type PluginRow, VERSION_ORDER, type VersionRow, auditIfChanged, pluginRow, relist, supersedeOlder, supersededAt, versionRow } from "./db";
 import { answer, fail, notFound, objectBody, rateLimited, refusedBody } from "./http";
-import { authenticatePublisher, readBody, sessionRequired, tokenInScope } from "./principal";
+import { authenticatePublisher, readBody, sessionRequired } from "./principal";
 import { allowWrite } from "./publish";
 import { purgeCatalog } from "./purge";
 import { decodeSegment } from "./serve";
@@ -38,11 +38,12 @@ export const MAX_REPORT_TEXT = 2000;
 export const REPORTS_PER_DAY = 10;
 
 export const handleMyPlugins = async (request: Request, env: Env, db: D1Database): Promise<Response> => {
-  const publisher = await authenticatePublisher(request, env, { usedFor: null });
+  // A signed-in person only: the owner's view holds decline notes, unlisted
+  // plugins and token names, so a deploy token reads none of it (401
+  // `session_required`, contract "A token publishes and reads nothing").
+  const publisher = await authenticatePublisher(request, env);
   if (publisher instanceof Response) return publisher;
-  const owned = (await db.prepare("SELECT * FROM plugins WHERE owner_id = ? ORDER BY created_at DESC, seq DESC").bind(publisher.userId).all<PluginRow>()).results;
-  // A deploy token sees the plugins in its scope, and only while its account owns them.
-  const plugins = publisher.via === "deploy_token" ? owned.filter((p) => tokenInScope(publisher, p)) : owned;
+  const plugins = (await db.prepare("SELECT * FROM plugins WHERE owner_id = ? ORDER BY created_at DESC, seq DESC").bind(publisher.userId).all<PluginRow>()).results;
   const versions = plugins.length
     ? (
         await db

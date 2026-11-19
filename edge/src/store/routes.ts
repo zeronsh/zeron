@@ -29,11 +29,10 @@ const allowRead = async (request: Request, env: Env): Promise<boolean> => {
   return !ip || !env.STORE_READS || (await env.STORE_READS.limit({ key: ip })).success;
 };
 
-/** What a deploy token may reach: publishing a version, and its account's
- * plugins in its scope. */
+/** What a deploy token may reach: publishing a version, and nothing else
+ * (contract "A token publishes and reads nothing"). */
 const deployTokenMayCall = (method: string, parts: readonly string[]): boolean =>
-  (method === "POST" && parts[2] === "plugins" && parts.length === 5 && parts[4] === "versions") ||
-  (method === "GET" && parts[2] === "me" && parts[3] === "plugins" && parts.length === 4);
+  method === "POST" && parts[2] === "plugins" && parts.length === 5 && parts[4] === "versions";
 
 const route = async (request: Request, env: Env, db: D1Database, bucket: R2Bucket, url: URL, parts: readonly string[]): Promise<Response> => {
   const method = request.method;

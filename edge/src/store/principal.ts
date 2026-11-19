@@ -5,9 +5,9 @@
  * accepts is here.
  *
  * - Publisher routes: a session bearer, a web session's cookie, or (to
- *   publish a version of a plugin in its scope, or read its account's
- *   plugins in its scope) a deploy token, `Authorization: Bearer zdt_…`
- *   (`tokenInScope` below). A token that isn't one (malformed, unknown,
+ *   publish a version of a plugin in its scope, and nothing else, not even
+ *   a read) a deploy token, `Authorization: Bearer zdt_…` (`tokenInScope`
+ *   below). A token that isn't one (malformed, unknown,
  *   revoked, expired, a deleted owner's) is 401 `invalid_token`; a live one
  *   asking for what it may not (a plugin outside its scope or its
  *   account's, a first version) is 403 `token_not_allowed`. Every other
@@ -101,11 +101,11 @@ const usernameOf = async (env: Env, userId: string): Promise<string | null> =>
 
 /**
  * Who publishes: a session bearer, a web session, or (with `tokens`, the
- * publish route and the account's plugin list) a deploy token, its last use
- * recorded for `usedFor` (the plugin it publishes; null to read). Without
- * `tokens`, a token is refused before it's looked up.
+ * publish route only) a deploy token, its last use recorded for `usedFor`
+ * (the plugin it publishes). Without `tokens`, a token is refused before
+ * it's looked up.
  */
-export const authenticatePublisher = async (req: Request, env: Env, tokens?: { readonly usedFor: string | null }): Promise<Publisher | Response> => {
+export const authenticatePublisher = async (req: Request, env: Env, tokens?: { readonly usedFor: string }): Promise<Publisher | Response> => {
   const header = req.headers.get("authorization");
   if (header !== null) {
     const token = headerBearer(req);

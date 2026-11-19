@@ -1518,7 +1518,7 @@ export class UserDirectory extends DurableObject<Env> {
    * owner deleted), all alike. The hash is compared in constant time against
    * each token of that short id (a public prefix), never looked up by it. A
    * publish it's used for records the plugin (`usedFor`). */
-  deployTokenHolder(short: string, hash: string, usedFor: string | null): DeployTokenHolder | undefined {
+  deployTokenHolder(short: string, hash: string, usedFor: string): DeployTokenHolder | undefined {
     const now = Date.now();
     const rows = this.ctx.storage.sql
       .exec("SELECT id, token_hash, user_id, short, name, scope_all, created_at, expires_at, revoked_at FROM deploy_tokens WHERE short = ?", short)
@@ -1529,7 +1529,7 @@ export class UserDirectory extends DurableObject<Env> {
     const userId = found.user_id as string;
     if (this.userRefusal(userId) === "deleted_user") return undefined;
     this.ctx.storage.sql.exec(
-      "UPDATE deploy_tokens SET last_used_at = ?, last_used_plugin = COALESCE(?, last_used_plugin) WHERE id = ?",
+      "UPDATE deploy_tokens SET last_used_at = ?, last_used_plugin = ? WHERE id = ?",
       now,
       usedFor,
       found.id as string

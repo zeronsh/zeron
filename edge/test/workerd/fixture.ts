@@ -181,7 +181,7 @@ const setTestOwner = async (env: Env, pluginId: string, userId: string | null, a
  * publisher routes (`POST /store/v1/plugins/:id/versions` and its version
  * actions, `GET /store/v1/me/plugins`) with the body's hash as the route
  * reads it after authentication (a deploy token where the real routes take
- * one: publishing, its last use that plugin, and the plugin list), admin
+ * one: publishing, its last use that plugin), admin
  * routes (`/store/v1/admin/*`), and a public one (`/store/v1/public`).
  */
 const storeStandIn = async (request: Request, env: Env, url: URL): Promise<Response | undefined> => {
@@ -193,8 +193,7 @@ const storeStandIn = async (request: Request, env: Env, url: URL): Promise<Respo
   if (path === "/store/v1/public") return json({ user: await optionalUser(request, env), credentials: hasCredentials(request) });
   const publishing = /^\/store\/v1\/plugins\/([^/]+)\/versions$/.exec(path);
   if (path === "/store/v1/me/plugins" || /^\/store\/v1\/plugins\/[^/]+\/versions(\/[^/]+\/[a-z]+)?$/.test(path)) {
-    const tokens =
-      publishing && request.method === "POST" ? { usedFor: publishing[1]! } : path === "/store/v1/me/plugins" && request.method === "GET" ? { usedFor: null } : undefined;
+    const tokens = publishing && request.method === "POST" ? { usedFor: publishing[1]! } : undefined;
     const publisher = await authenticatePublisher(request, env, tokens);
     if (publisher instanceof Response) return publisher;
     // `x-test-stream: 1`: read it as a package write would (bodyStream), not buffered.

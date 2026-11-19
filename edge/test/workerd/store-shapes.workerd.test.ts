@@ -77,7 +77,7 @@ describe("what a device reads (amendment 43)", () => {
 });
 
 describe("an author's own view", () => {
-  it("names the account's publisher id, with plugins or none, to a session and to its deploy token alike", async () => {
+  it("names the account's publisher id, with plugins or none, to a session", async () => {
     const a = await author();
     const none = (await (await call(a.userId, "GET", "/store/v1/me/plugins")).json()) as any;
     expect(none).toEqual({ publisher_id: await publisherId(a.userId), plugins: [] });

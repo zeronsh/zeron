@@ -494,7 +494,7 @@ describe("store author routes", () => {
     expect(open?.n).toBe(1);
   });
 
-  it("lets a deploy token reach only publishing and its account's plugins, refused elsewhere before it's looked up", async () => {
+  it("lets a deploy token reach only publishing, refused elsewhere before it's looked up", async () => {
     const a = await author();
     const id = uniqueId();
     await listed(a, id, "1.0.0");
@@ -508,18 +508,17 @@ describe("store author routes", () => {
       ["POST", `/store/v1/plugins/${id}/installed`],
       ["POST", `/store/v1/plugins/${id}/reports`, { reason: "broken", text: "" }],
       ["POST", "/store/v1/updates", { zeron: "0.4.0", plugins: [] }],
+      ["GET", "/store/v1/me/plugins"],
       ["GET", "/store/v1/admin/queue"]
     ];
     for (const [method, path, body] of outside) {
       const res = await call(undefined, method, path, body, key);
       expect([res.status, ((await res.json()) as { error: string }).error], `${method} ${path}`).toEqual([401, "session_required"]);
     }
-    // Publishing and the account's plugins are let through to the token's own
-    // checks, which refuse this one as any bad token: 401 invalid_token.
-    for (const [method, path, body] of [["POST", `/store/v1/plugins/${id}/versions`, new Uint8Array(4)], ["GET", "/store/v1/me/plugins", undefined]] as const) {
-      const res = await call(undefined, method, path, body, key);
-      expect([res.status, ((await res.json()) as { error: string }).error], path).toEqual([401, "invalid_token"]);
-    }
+    // Publishing is let through to the token's own checks, which refuse this
+    // one as any bad token: 401 invalid_token.
+    const res = await call(undefined, "POST", `/store/v1/plugins/${id}/versions`, new Uint8Array(4), key);
+    expect([res.status, ((await res.json()) as { error: string }).error]).toEqual([401, "invalid_token"]);
   });
 
   it("pages the audit log both ways", async () => {

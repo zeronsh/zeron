@@ -108,9 +108,9 @@ describe("the store with the edge's identity", () => {
     expect(auditText).not.toContain(token);
     expect((await json<{ entries: { action: string; detail: Record<string, unknown> }[] }>(audit)).entries.find((e) => e.action === "version.publish" && e.detail.via === "deploy_token")!.detail).toMatchObject({ token: created.short });
 
-    // Its account's plugins in its scope, and nothing else.
+    // It reads nothing, not even its own plugins (the owner's view is a person's).
     const mine = await call(undefined, "GET", "/store/v1/me/plugins", undefined, { authorization: `Bearer ${token}` });
-    expect((await json<{ plugins: { id: string }[] }>(mine)).plugins.map((p) => p.id)).toEqual([id]);
+    expect([mine.status, (await json<{ error: string }>(mine)).error]).toEqual([401, "session_required"]);
     // A live token asking for what it may not: one answer, 403, whether a
     // plugin outside its scope or a first version (CI says which: not this).
     const fresh = uniqueId();
@@ -154,7 +154,6 @@ describe("the store with the edge's identity", () => {
     expect((await json<{ tokens: Record<string, unknown>[] }>(await call(a.userId, "GET", "/store/v1/me/tokens"))).tokens.find((t) => t.id === created.id)).toMatchObject({ revoked_at: expect.any(Number) });
     const revoked = await tokenPublish(token, id, await makePackage({ id, version: "1.3.0", signer: null }));
     expect([revoked.status, (await json<{ error: string }>(revoked)).error]).toEqual([401, "invalid_token"]);
-    expect((await call(undefined, "GET", "/store/v1/me/plugins", undefined, { authorization: `Bearer ${token}` })).status).toBe(401);
   });
 
   it("an `all` token publishes what its account owns and claims later, never a plugin transferred in", async () => {
@@ -174,8 +173,6 @@ describe("the store with the edge's identity", () => {
     expect((await adminCall("POST", `/store/v1/admin/plugins/${theirs}/transfer`, { to_username: a.username })).status).toBe(200);
     const moved = await tokenPublish(token, theirs, await makePackage({ id: theirs, version: "1.1.0", signer: null }));
     expect([moved.status, (await json<{ error: string }>(moved)).error]).toEqual([403, "token_not_allowed"]);
-    const mine = (await json<{ plugins: { id: string }[] }>(await call(undefined, "GET", "/store/v1/me/plugins", undefined, { authorization: `Bearer ${token}` }))).plugins.map((p) => p.id).sort();
-    expect(mine).toEqual([before, later].sort());
   });
 
   it("refuses an admin's own bearer on every admin route, and takes their web session", async () => {
