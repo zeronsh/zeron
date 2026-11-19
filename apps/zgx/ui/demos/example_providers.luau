@@ -26,7 +26,19 @@ return {
 					shown:set("ready")
 				end)
 			end
-			return ui.column { w_full = true, gap = "$space.6", parts.cards(), parts.more() }
+			-- (Cloud: its API keys in place of the agents to install.)
+			local function on_cloud(): boolean
+				return parts.device:get() == "cloud"
+			end
+			return ui.column {
+				w_full = true,
+				gap = "$space.6",
+				parts.cards(),
+				ui.show(on_cloud, parts.cloud_keys()),
+				ui.show(function(): boolean
+					return not on_cloud()
+				end, parts.more()),
+			}
 		end
 		local function page(view: string): Node
 			if view ~= "agents" then
