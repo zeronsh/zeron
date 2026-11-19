@@ -724,10 +724,12 @@ test("Installed's rows built fresh at each width are as the same width reached b
 end)
 
 
-test("a giving row's stand-ins are there only while its step is in question, and hold none of its controls", function()
+test("a giving row's probe is there only while the row is narrow, and holds none of its controls", function()
 	local app = mount("plugins_fixture.luau")
 	app:command("update_found")
-	-- (A stand-in holds the row's badges, hidden: its versions.)
+	local function probes(): number
+		return app:count(".settings-stand-in")
+	end
 	local function hidden(pattern: string): number
 		local n = 0
 		for line in app:tree("#catalog-card"):gmatch("[^\n]+") do
@@ -741,17 +743,18 @@ test("a giving row's stand-ins are there only while its step is in question, and
 	-- they always were.
 	app:resize(1000, 900)
 	app:frames(30)
-	expect(hidden('text "1%.0%.0"')).to_be(0)
-	-- Narrow: the rows that give way have them, and in them no switch,
-	-- Remove or Update to move on a hover or a toggle.
+	expect(probes()).to_be(0)
+	-- Narrow: a row past step 0 holds one, its step-0 controls' box, and
+	-- in it no switch, Remove or Update to move on a hover or a toggle.
 	app:resize(300, 900)
 	app:frames(30)
-	expect(hidden('text "1%.0%.0"') > 0).to_be(true)
+	expect(probes() > 0).to_be(true)
 	expect(hidden("switch ")).to_be(0)
 	expect(hidden('button "Remove')).to_be(0)
 	expect(hidden('button "Update"')).to_be(0)
 	-- And wide again, gone.
 	app:resize(1000, 900)
 	app:frames(30)
-	expect(hidden('text "1%.0%.0"')).to_be(0)
+	expect(probes()).to_be(0)
 end)
+

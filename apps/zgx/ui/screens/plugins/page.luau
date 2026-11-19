@@ -304,7 +304,7 @@ local SETTLE_MS = 260
 
 -- (A row is built for one device: the rows are keyed by it, so a switch of
 -- device builds them again. `on` is that device, nil for this one.)
-local Control = ui.component(function(props: { now: State<any>, on: string?, under: boolean? }): Node
+local Control = ui.component(function(props: { now: State<any>, on: string?, under: boolean?, on_resize: ((size: { w: number, h: number }) -> ())? }): Node
 	local now, on_device = props.now, props.on
 	local on = ui.use_state(now:peek().status == "on")
 	ui.effect(function()
@@ -321,6 +321,7 @@ local Control = ui.component(function(props: { now: State<any>, on: string?, und
 	return ui.row {
 		gap = "$space.2",
 		items = "center",
+		on_resize = props.on_resize,
 		-- Its settings, when it's on here and has some: their page. (Its room
 		-- kept on every row, empty where there are none, so the versions line
 		-- up; under the text, where nothing lines up with it, the button
@@ -438,7 +439,14 @@ end)
 -- Update, at the end of the line saying what it changes: link-like (the
 -- markdown link's underline, the accent under the pointer), so the row's
 -- control and its version stay where every other row has them.
-local UpdateLink = ui.component(function(props: { now: State<any> }): Node
+-- Whether a row's Update shows: an update found, not refused, for a
+-- plugin that isn't built in or broken.
+local function update_shows(now: State<any>): boolean
+	local it: any = now:get()
+	return type(it.update) == "table" and it.update.refused == nil and not it.builtin and kind(it) ~= "broken"
+end
+
+local UpdateLink = ui.component(function(props: { now: State<any>, on_resize: ((size: { w: number, h: number }) -> ())? }): Node
 	local now = props.now
 	local function busy(): boolean
 		return updating:get() == now:get().id
@@ -454,10 +462,10 @@ local UpdateLink = ui.component(function(props: { now: State<any> }): Node
 		return if type(u) == "table" and u.verified == false then ui.t("plugins.page.update_asks"):get() else ui.t("plugins.page.update"):get()
 	end
 	return ui.show(function(): boolean
-		local it: any = now:get()
-		return type(it.update) == "table" and it.update.refused == nil and not it.builtin and kind(it) ~= "broken"
+		return update_shows(now)
 	end, ui.row {
 		role = "button",
+		on_resize = props.on_resize,
 		label = function(): string
 			return words()
 		end,
@@ -547,10 +555,8 @@ local function row(p: state.Item, _i: number, now: State<any>): Node
 			-- shows: the badges under the text first, then Update under its
 			-- sentence, then the switch and Remove under it too.)
 			give_way = {
-				gives = function(): Node
-					return ui.row {
-						gap = "$space.3",
-						items = "center",
+				gives = function(): { Node }
+					return {
 						ui.show(function(): boolean
 							return words.unverified(now:get())
 						end, ds.Badge { ui.t("plugins.words.unverified"), tone = "warning", class = "plugin-unverified" }),
@@ -563,9 +569,19 @@ local function row(p: state.Item, _i: number, now: State<any>): Node
 						},
 					}
 				end,
-				stays = function(under: boolean): Node
-					return Control { now = now, on = device_now(), under = under }
+				stays = function(under: boolean, on_resize: ((size: { w: number, h: number }) -> ())?): Node
+					return Control { now = now, on = device_now(), under = under, on_resize = on_resize }
 				end,
+				action = if store_line
+					then nil
+					else {
+						build = function(on_resize: (size: { w: number, h: number }) -> ()): Node
+							return UpdateLink { now = now, on_resize = on_resize }
+						end,
+						shows = function(): boolean
+							return update_shows(now)
+						end,
+					},
 			},
 		}
 	end

@@ -681,10 +681,18 @@ export type RowProps = {
 	-- the detail's action wraps under its sentence; then the part that
 	-- `stays` (a switch, Remove) moves under the text too, after it, in
 	-- their own order and gaps. Built afresh as they move, so builders.
-	-- Where they fit, the row is the row it always was.
-	-- (`stays(under)`: under the text, it may leave out what it keeps
-	-- beside it only to line up with other rows.)
-	give_way: { gives: () -> Node, stays: (under: boolean) -> Node }?,
+	-- Where they fit, the row is the row it always was, its controls one
+	-- row of `gives`' nodes then `stays`.
+	-- (`stays(under, on_resize)`: under the text, it may leave out what it
+	-- keeps beside it only to line up with other rows; beside it, its own
+	-- box reports its width to `on_resize`. `action`: the detail's action
+	-- as a giving row draws it, its box reporting its width, and whether
+	-- it shows.)
+	give_way: {
+		gives: () -> { Node },
+		stays: (under: boolean, on_resize: ((size: { w: number, h: number }) -> ())?) -> Node,
+		action: { build: (on_resize: (size: { w: number, h: number }) -> ()) -> Node, shows: () -> boolean }?,
+	}?,
 	-- The control under the text, full width.
 	stacked: boolean?,
 	-- The row leads somewhere: the whole row takes the click, a chevron
@@ -843,8 +851,14 @@ end
 -- (`RowProps.give_way`): 0 as it always was; 1 its first part under the
 -- text; 2 its detail's action under its sentence too; 3 its controls all
 -- under the text. (`measure`: where a width it reports goes, by what it
--- is: `text`, `act` the detail's action, `stays` beside the text.)
-type GiveWayRun = { step: number, measure: (what: string) -> ((size: { w: number, h: number }) -> ())? }
+-- is: `text`; `box` its controls' beside it; `stays` the part that stays,
+-- beside it; `act` the detail's action. `probe`: what lays out with it,
+-- at its corner.)
+type GiveWayRun = {
+	step: number,
+	measure: (what: string) -> ((size: { w: number, h: number }) -> ())?,
+	probe: Node?,
+}
 
 -- Whether a row's detail line shows: with words, or for its action.
 local function detail_shows(props: RowProps): boolean
@@ -853,6 +867,12 @@ local function detail_shows(props: RowProps): boolean
 end
 
 local function row_body(props: RowProps, gw: GiveWayRun?): Node
+	-- (A giving row's detail action reports its width where it's drawn.)
+	local detail_action: Node? = props.detail_action
+	if gw and props.give_way and props.give_way.action then
+		local on_resize = gw.measure("act")
+		detail_action = if on_resize then props.give_way.action.build(on_resize) else props.detail_action
+	end
 	local name = if props.private_label
 		then PrivateText {
 			props.label,
@@ -966,7 +986,7 @@ local function row_body(props: RowProps, gw: GiveWayRun?): Node
 						color = "$text.tertiary",
 						wrap = true,
 					},
-					if props.detail_action then ui.div { shrink = 0, on_resize = gw.measure("act"), props.detail_action } else nil,
+					detail_action,
 				}
 				else ui.row {
 					w_full = true,
@@ -983,7 +1003,7 @@ local function row_body(props: RowProps, gw: GiveWayRun?): Node
 						color = "$text.tertiary",
 						wrap = true,
 					},
-					if gw and props.detail_action then ui.div { shrink = 0, on_resize = gw.measure("act"), props.detail_action } else props.detail_action,
+					detail_action,
 				})
 			else nil,
 		-- (A giving row's controls under its text, a stacked row's step
@@ -997,7 +1017,7 @@ local function row_body(props: RowProps, gw: GiveWayRun?): Node
 				-- controls on the line under the badges, in the same order and
 				-- gaps, each part whole.)
 				flex_wrap = true,
-				ui.div { shrink = 0, props.give_way.gives() },
+				ui.row { shrink = 0, gap = "$space.3", items = "center", table.unpack(props.give_way.gives()) },
 				-- (Under the text it starts on the text's start: what it keeps
 				-- beside the text to line up with other rows it leaves out.)
 				if gw.step >= 3 then ui.div { shrink = 0, props.give_way.stays(true) } else nil,
@@ -1020,10 +1040,14 @@ local function row_body(props: RowProps, gw: GiveWayRun?): Node
 	end
 	local trail: Node? = props.control
 	if gw and props.give_way then
-		local stays = if gw.step < 3 then ui.div { shrink = 0, on_resize = gw.measure("stays"), props.give_way.stays(false) } else nil
-		trail = if gw.step == 0
-			then ui.row { gap = "$space.3", items = "center", ui.div { shrink = 0, props.give_way.gives() }, stays }
-			else stays
+		local stays = if gw.step < 3 then props.give_way.stays(false, gw.measure("stays")) else nil
+		if gw.step == 0 then
+			local nodes = table.clone(props.give_way.gives())
+			table.insert(nodes, stays)
+			trail = ui.row { gap = "$space.3", items = "center", table.unpack(nodes) }
+		else
+			trail = stays
+		end
 	end
 	if props.on_click then
 		trail = ui.row {
@@ -1056,6 +1080,7 @@ local function row_body(props: RowProps, gw: GiveWayRun?): Node
 		-- (A giving row is its container's width, never widened by what it
 		-- holds: that width decides its step.)
 		min_w = if gw then 0 else nil,
+		relative = if gw and gw.probe then true else nil,
 	}
 	if props.on_click then
 		row.role = "button"
@@ -1112,156 +1137,173 @@ local function row_body(props: RowProps, gw: GiveWayRun?): Node
 				max_w = ui.theme.get("zeron.settings.control") :: number?,
 				items = "center",
 				justify = "end",
+				on_resize = if gw then gw.measure("box") else nil,
 				trail,
 			})
 		end
+	end
+	if gw and gw.probe then
+		table.insert(row, gw.probe)
 	end
 	return ui.row(row)
 end
 
 -- A truncating row whose controls give way (`RowProps.give_way`): the
--- first step that leaves the name `NAME_LEAST` is the one shown. What the
--- text gets at a step is measured on the row shown at it; at the steps
--- it isn't shown at, on a stand-in under it: the row's frame at that
--- step, invisible, its badges and, for its controls, a blank box their
--- measured width, so it lays out again only as the row's width, what the
--- badges say or the controls' width moves (never on a hover or a toggle). The step is
--- the width's alone, the same from the first frame as when a resize comes
--- to it. A stand-in is there only while its step is in question: none
--- while the row's controls fit beside the name, as the row always was.
--- (Step 2's text is step 1's; 3 is all that's left.)
+-- first step that leaves the name `NAME_LEAST` is the one shown, worked
+-- out from widths it already has, never from laying out more. The row
+-- shown reports what its text gets; its controls' box at step 0 and at
+-- steps 1 and 2 (the part that stays), and its detail's action, are
+-- their own widths, which move only as what they say does. What the text
+-- would get at another step is then the same row less that step's box:
+-- room = text + box (+ the gap before it), text at a step = room - its
+-- box - the gap. Shown at step 0 it is the row it always was, node for
+-- node. Shown at another, the step-0 box isn't laid out beside the text,
+-- so a probe holds it, invisible, at the row's corner: its badges and a
+-- blank the controls' width, as zgx sizes them (a row of them, an absent
+-- badge's gap counted, 12 wider than laid out), on no width but its own.
+-- A width moving within a step moves nothing: only one that crosses what
+-- decides a step is read again.
 local GivingRow = ui.component(function(p: { props: RowProps }): Node
 	local props = p.props
-	-- What the text gets at steps 0 and 1 (-1: not laid out yet).
-	local texts = ui.use_state({ at0 = -1, at1 = -1 } :: { [string]: number })
-	-- The controls' own widths, as measured on the row shown.
-	local parts = ui.use_state({ stays = 0, act = 0 } :: { [string]: number })
-	-- (The step shown: what its row's text is measured at.)
+	local give_way = props.give_way :: any
+	-- The widths as last reported (-1: not yet), and a count that moves
+	-- when the step they decide may have.
+	local m = { text = -1, box0 = -1, box1 = -1, act = -1 }
+	local moved = ui.use_state(0)
+	-- (The step shown: what `text` was reported at.)
 	local shown = 0
-	local function set(state: any, key: any, w: number)
-		local now = state:peek()
-		if math.abs((now[key] or -1) - w) >= 0.5 then
-			local next = table.clone(now)
-			next[key] = w
-			state:set(next)
-		end
+	local function n(token: string, fallback: number): number
+		return (ui.theme.get(token) :: number?) or fallback
 	end
+	-- The detail's action beside its sentence, with its gap; 0 while its
+	-- line doesn't show.
 	local function act(): number
-		local w = parts:get().act
-		return if props.detail_action and w > 0 and detail_shows(props) then w + ((ui.theme.get("space.3") :: number?) or 12) else 0
-	end
-	-- Whether the text has room for the name and, beside it, the
-	-- detail's action (its sentence is the text's width).
-	local function fits(text: number): boolean
-		return text >= NAME_LEAST and text - act() >= NAME_LEAST
-	end
-	local function step(): number
-		local t = texts:get()
-		if t.at0 < 0 then
-			return shown
-		end
-		if fits(t.at0) then
+		local action = give_way.action
+		if not action or m.act <= 0 or not detail_shows(props) or not action.shows() then
 			return 0
 		end
-		if t.at1 < 0 then
-			return shown
-		end
-		if fits(t.at1) then
-			return 1
-		end
-		return if t.at1 >= NAME_LEAST then 2 else 3
+		return m.act + n("space.3", 12)
 	end
-	-- A stand-in at a step: wanted while the row is shown at another and
-	-- the step is in question (step 1's only once step 0 doesn't fit).
-	local function wanted(at: number): boolean
-		local s, t = step(), texts:get()
-		if parts:get().stays <= 0 then
-			return false
+	-- What the text gets at each step from what's known; nil where it isn't.
+	local function texts(): ({ [number]: number })?
+		if m.text < 0 or m.box0 < 0 or m.box1 < 0 then
+			return nil
 		end
-		return if at == 0 then s >= 1 else (s == 3 or (s == 0 and t.at0 >= 0 and not fits(t.at0)))
+		local beside = n("space.4", 16)
+		local room = if shown >= 3 then m.text else m.text + (if shown == 0 then m.box0 else m.box1) + beside
+		return { [0] = room - m.box0 - beside, [1] = room - m.box1 - beside }
 	end
-	local function blank(what: string): Node
-		return ui.div {
-			shrink = 0,
-			h = 1,
-			w = function(): number
-				return parts:get()[what]
+	local function decide(): number?
+		local t = texts()
+		if not t then
+			return nil
+		end
+		local a = act()
+		local function fits(w: number): boolean
+			return w >= NAME_LEAST and w - a >= NAME_LEAST
+		end
+		return if fits(t[0]) then 0 elseif fits(t[1]) then 1 elseif t[1] >= NAME_LEAST then 2 else 3
+	end
+	-- A width reported: kept, and the step looked at again only where it
+	-- may now be another.
+	local function put(key: string, w: number)
+		if math.abs(m[key] - w) < 0.5 then
+			return
+		end
+		local before = decide()
+		m[key] = w
+		if decide() ~= before then
+			moved:set(moved:peek() + 1)
+		end
+	end
+	local function step(): number
+		moved:get()
+		-- (A detail line or its action shown or hidden moves its part.)
+		act()
+		return decide() or shown
+	end
+	local function measure(what: string): ((size: { w: number, h: number }) -> ())?
+		return function(size: { w: number, h: number })
+			put(what, size.w)
+		end
+	end
+	-- What the controls' box at step 0 is, while it isn't beside the text.
+	local stays_w = ui.use_state(0)
+	local probe = ui.row {
+		class = "settings-stand-in", -- (Tests count them.)
+		absolute = true,
+		left = 0,
+		top = 0,
+		invisible = true,
+		pointer_events = "none",
+		w_full = true,
+		min_w = 0,
+		px = "$space.4",
+		gap = "$space.4",
+		-- (The box as the row's item after the text's room, as beside the
+		-- text: so sized.)
+		ui.div { grow = 1, basis = 0, min_w = 0 },
+		ui.row {
+		shrink = 0,
+		max_w = ui.theme.get("zeron.settings.control") :: number?,
+		items = "center",
+		justify = "end",
+		on_resize = measure("box0"),
+		ui.row {
+			gap = "$space.3",
+			items = "center",
+			table.unpack((function(): { Node }
+				local nodes = table.clone(give_way.gives())
+				table.insert(nodes, ui.div {
+					shrink = 0,
+					h = 1,
+					w = function(): number
+						return stays_w:get()
+					end,
+				})
+				return nodes
+			end)()),
+		},
+		},
+	}
+	local function run(at: number): GiveWayRun
+		return {
+			step = at,
+			probe = if at >= 1 then probe else nil,
+			measure = function(what: string): ((size: { w: number, h: number }) -> ())?
+				if what == "text" then
+					return measure("text")
+				elseif what == "box" then
+					return if at == 0 then measure("box0") elseif at <= 2 then measure("box1") else nil
+				elseif what == "stays" then
+					return function(size: { w: number, h: number })
+						if math.abs(stays_w:peek() - size.w) >= 0.5 then
+							stays_w:set(size.w)
+						end
+						-- (Shown at 0, the part that stays is step 1's box.)
+						if at == 0 then
+							put("box1", math.min(size.w, n("zeron.settings.control", math.huge)))
+						end
+					end
+				elseif what == "act" then
+					return measure("act")
+				end
+				return nil
 			end,
 		}
 	end
-	local frame: RowProps = {
-		label = "",
-		truncate = true,
-		lead = props.lead,
-		icon = props.icon,
-		give_way = {
-			-- (Its own badges, which move with nothing but what they say: as
-			-- zgx sizes a row of them beside the text, so must this.)
-			gives = (props.give_way :: any).gives,
-			stays = function(_: boolean): Node
-				return blank("stays")
-			end,
-		},
-	}
-	local function stand_in(at: number): Node
-		return ui.show(function(): boolean
-			return wanted(at)
-		end, ui.div {
-			absolute = true,
-			left = 0,
-			top = 0,
-			w_full = true,
-			invisible = true,
-			pointer_events = "none",
-			row_body(frame, {
-				step = at,
-				measure = function(what: string): ((size: { w: number, h: number }) -> ())?
-					return if what == "text"
-						then function(size: { w: number, h: number })
-							set(texts, `at{at}`, size.w)
-						end
-						else nil
-				end,
-			}),
-		})
+	local cases: { [string]: Node } = {}
+	for at = 0, 3 do
+		cases[tostring(at)] = ui.component(function(): Node
+			-- (Its text not yet reported at this step: what was is another's.)
+			shown = at
+			m.text = -1
+			return row_body(props, run(at))
+		end)({})
 	end
-	return ui.div {
-		w_full = true,
-		min_w = 0,
-		relative = true,
-		ui.presence(function(): string
-			return tostring(step())
-		end, function(k: string): Node
-			shown = tonumber(k) :: number
-			local at = shown
-			return row_body(props, {
-				step = at,
-				measure = function(what: string): ((size: { w: number, h: number }) -> ())?
-					if what == "text" then
-						-- (Step 2's text is step 1's; step 3's is neither.)
-						local which = if at == 2 then 1 else at
-						return if which <= 1
-							then function(size: { w: number, h: number })
-								-- (Shown at 0 with room, step 1's stand-in isn't
-								-- there to follow the width: what it measured
-								-- last is another width's.)
-								local was = texts:peek().at0
-								if which == 0 and math.abs(was - size.w) >= 0.5 and (was < 0 or fits(was)) then
-									set(texts, "at1", -1)
-								end
-								set(texts, `at{which}`, size.w)
-							end
-							else nil
-					end
-					return function(size: { w: number, h: number })
-						set(parts, what, size.w)
-					end
-				end,
-			})
-		end, { w_full = true }),
-		stand_in(0),
-		stand_in(1),
-	}
+	return ui.switch(function(): string
+		return tostring(step())
+	end, cases)
 end)
 
 function M.Row(props: RowProps): Node
