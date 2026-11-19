@@ -21,8 +21,13 @@ fn action(params: &Value) -> Option<Action> {
     }
 }
 
-/// Whether `access` lets the permission in `params` through unasked.
+/// Whether `access` lets the permission in `params` through unasked. Never
+/// in Auto: the agent's reviewer already passed what it approved, so every
+/// request that arrives is one it escalated, whatever its kind.
 pub(super) fn allowed_without_asking(access: AccessMode, params: &Value) -> bool {
+    if access == AccessMode::Auto {
+        return false;
+    }
     action(params).is_none_or(|action| approval::allowed_without_asking(access, action))
 }
 
@@ -48,7 +53,28 @@ pub(super) fn outcome(options: &[Value], allow: bool) -> Value {
 
 /// What a permission asks the person: the command or the files when the
 /// tool call carries them, else the tool's title.
+/// When the agent's reviewer says why it escalated (`_meta.autoReview.
+/// explanation`), the question carries that reason.
 pub(super) fn question(agent: &str, params: &Value) -> UserInputQuestion {
+    let mut question = base_question(agent, params);
+    if let Some(reason) = params["_meta"]["autoReview"]["explanation"]
+        .as_str()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+    {
+        let asked = question
+            .question
+            .trim_end_matches(" Allow it?")
+            .trim_end_matches('.');
+        question.question = format!(
+            "{asked}. {agent}'s auto review flagged this: {}. Allow it?",
+            reason.trim_end_matches('.')
+        );
+    }
+    question
+}
+
+fn base_question(agent: &str, params: &Value) -> UserInputQuestion {
     let tool = &params["toolCall"];
     match super::normalize::typed_call(tool) {
         ToolCall::Exec { command } if !command.is_empty() => approval::command(agent, &command),
@@ -104,6 +130,27 @@ mod tests {
         // No kind at all asks like a command would.
         let kindless = permission(json!({ "toolCallId": "t" }));
         assert!(!allowed_without_asking(AutoAcceptEdits, &kindless));
+    }
+
+    #[test]
+    fn auto_asks_about_everything_it_receives() {
+        for kind in ["read", "search", "think", "edit", "execute"] {
+            let params = permission(json!({ "toolCallId": "t", "kind": kind }));
+            assert!(!allowed_without_asking(AccessMode::Auto, &params), "{kind}");
+        }
+    }
+
+    #[test]
+    fn the_reviewers_reason_joins_the_question() {
+        let mut params =
+            permission(json!({ "kind": "execute", "rawInput": { "command": "git push" } }));
+        let plain = question("Grok", &params).question;
+        assert_eq!(plain, "Grok wants to run `git push`. Allow it?");
+        params["_meta"] = json!({ "autoReview": { "outcome": "blocked", "explanation": "Force-push is not allowed to auto-run." } });
+        assert_eq!(
+            question("Grok", &params).question,
+            "Grok wants to run `git push`. Grok's auto review flagged this: Force-push is not allowed to auto-run. Allow it?"
+        );
     }
 
     #[test]
