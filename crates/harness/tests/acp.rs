@@ -410,6 +410,33 @@ async fn resumed_first_class_model_is_switched_before_prompt() {
 }
 
 #[tokio::test]
+async fn grok_session_carries_its_permission_mode() {
+    const AUTO: &str = "mode=auto client=extension";
+    const YOLO: &str = "mode=yolo client=none";
+    for (access, auto_approve, resume, expected) in [
+        (AccessMode::Auto, false, None, AUTO),
+        (AccessMode::Auto, false, Some("s-loaded"), AUTO),
+        (AccessMode::FullAccess, false, None, YOLO),
+        (AccessMode::FullAccess, false, Some("s-loaded"), YOLO),
+        // auto_approve is full access whatever the mode asked for.
+        (AccessMode::Auto, true, None, YOLO),
+    ] {
+        let (controls, _steer, _token) = controls();
+        let mut req = request("scenario:permission-meta");
+        req.access = access;
+        req.auto_approve = auto_approve;
+        req.resume = resume.map(Into::into);
+        let events = run_to_end(&harness(), req, controls).await;
+        assert!(
+            events.contains(&AgentEvent::TextDelta {
+                text: expected.into()
+            }),
+            "{access:?} auto_approve {auto_approve} resume {resume:?}: {events:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn permission_requests_auto_accept_the_preferred_allow_option() {
     // Whatever the run's auto_approve: a Grok edit never waits on the user.
     for auto_approve in [true, false] {
@@ -1283,11 +1310,11 @@ async fn antigravity_models_group_effort_variants_into_one_row() {
 #[test]
 fn only_antigravity_offers_access_modes_beyond_full_access() {
     assert_eq!(AcpHarness::antigravity().access_modes(), AccessMode::ALL);
-    for harness in [
-        AcpHarness::grok(),
-        AcpHarness::devin(),
-        AcpHarness::hermes(),
-    ] {
+    assert_eq!(
+        AcpHarness::grok().access_modes(),
+        [AccessMode::Auto, AccessMode::FullAccess]
+    );
+    for harness in [AcpHarness::devin(), AcpHarness::hermes()] {
         assert_eq!(
             harness.access_modes(),
             [AccessMode::FullAccess],
@@ -3004,11 +3031,7 @@ async fn auto_without_a_safe_fallback_refuses_before_launch() {
         access: capped,
         ..request("must not run")
     };
-    for agent in [
-        AcpHarness::grok(),
-        AcpHarness::devin(),
-        AcpHarness::hermes(),
-    ] {
+    for agent in [AcpHarness::devin(), AcpHarness::hermes()] {
         let agent = agent.with_executable(PathBuf::from("/nonexistent/auto-must-not-launch"));
         assert!(!agent.reconfigures_in_place(&req, &req));
         let (controls, _sender, _token) = controls();

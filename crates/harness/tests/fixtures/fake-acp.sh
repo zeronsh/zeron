@@ -30,6 +30,7 @@ has "$line" '"method":"initialize"' || exit 1
 has "$line" '"protocolVersion":1' || exit 1
 has "$line" '"name":"zeron"' || exit 1
 has "$line" '"readTextFile":false' || exit 1
+INIT_LINE="$line"
 emit "{\"id\":$(rid "$line"),\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"loadSession\":true,\"_meta\":{\"availableCommands\":[{\"name\":\"compact\",\"description\":\"Compact the session\"},{\"name\":\"goal\",\"description\":\"Set a goal\",\"input\":{\"hint\":\"the goal\"}}]}},\"_meta\":{\"steering\":{\"supported\":true}}}}"
 
 # ---- session new / load ----------------------------------------------------
@@ -127,6 +128,18 @@ has "$promptline" '"method":"session/prompt"' || exit 1
 pid=$(rid "$promptline")
 
 case "$promptline" in
+
+*scenario:permission-meta*)
+  # Echo what the session params and initialize carried, for the Grok
+  # permission-mode tests: the mode on the session and the client type.
+  mode=none
+  has "$line" '"_meta":{"autoMode":true}' && mode=auto
+  has "$line" '"_meta":{"yoloMode":true}' && mode=yolo
+  client=none
+  has "$INIT_LINE" '"clientType":"extension"' && client=extension
+  update "{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"mode=$mode client=$client\"}}"
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  ;;
 
 *scenario:mcp*)
   has "$line" '"command":"/path with spaces/zeron"' || exit 1
