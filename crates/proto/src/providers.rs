@@ -445,9 +445,12 @@ pub fn cloud_login_vault(
     provider: Option<&str>,
 ) -> Option<crate::VaultProvider> {
     use crate::VaultProvider as V;
+    // An agent with one sign-in takes it whatever group asked (a Cloud
+    // card lists every agent's accounts by group).
+    let provider = provider.filter(|p| !p.is_empty() && groups_by_provider(harness));
     let option = cloud_login_options(harness)
         .into_iter()
-        .find(|o| o.provider == provider.filter(|p| !p.is_empty()))?;
+        .find(|o| o.provider == provider)?;
     Some(match (harness, option.provider) {
         (HarnessId::ClaudeCode, _) | (HarnessId::Pi, Some("anthropic")) => V::Claude,
         (HarnessId::Codex, _)
@@ -551,6 +554,9 @@ mod tests {
             Some(V::Codex)
         );
         assert_eq!(cloud_login_vault(HarnessId::Grok, None), Some(V::Grok));
+        // A one-sign-in agent's card group names it too.
+        assert_eq!(cloud_login_vault(HarnessId::Grok, Some("xai")), Some(V::Grok));
+        assert_eq!(cloud_login_vault(HarnessId::ClaudeCode, Some("anthropic")), Some(V::Claude));
         assert_eq!(cloud_key_providers(HarnessId::Grok), vec![V::XaiKey]);
     }
 

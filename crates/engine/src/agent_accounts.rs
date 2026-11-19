@@ -2394,6 +2394,26 @@ impl AgentAccounts {
         let task_state = state.clone();
         let this = self.clone();
         let handle = tokio::spawn(async move {
+            // Its sign-in is its ACP server's: a pinned archive Zeron
+            // installs itself (as Settings' Install does), so connecting it
+            // for Cloud never needs Antigravity set up on this computer.
+            if !zeron_harness::install::installed(HarnessId::Antigravity) {
+                lock(&task_state).message =
+                    Some("Installing Antigravity's sign-in on this computer…".into());
+                let installed = zeron_harness::install::install_harness(
+                    HarnessId::Antigravity,
+                    zeron_harness::CancellationToken::new(),
+                )
+                .await;
+                lock(&task_state).message = None;
+                if let Err(error) = installed {
+                    drop(shred);
+                    lock(&task_state).outcome = Some(Err(format!(
+                        "Couldn't install Antigravity's sign-in on this computer: {error}"
+                    )));
+                    return;
+                }
+            }
             let progress_state = task_state.clone();
             let signed_in = acp
                 .sign_in_with(options, move |progress| {

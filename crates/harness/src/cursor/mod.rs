@@ -372,6 +372,19 @@ impl Harness for CursorHarness {
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         self.model_catalog(false).await.map(|c| c.models)
     }
+    /// Cursor's own pick: the shim sends `auto` for a run that names no
+    /// model, so this is always a model Cursor runs.
+    fn fallback_models(&self) -> Vec<Model> {
+        vec![Model {
+            default: true,
+            id: "auto".into(),
+            label: "Auto".into(),
+            provider: None,
+            description: Some("Cursor picks the model".into()),
+            reasoning_levels: Vec::new(),
+            options: Vec::new(),
+        }]
+    }
 
     // No `commands()` override: @cursor/sdk 1.0.28 exposes no slash-command
     // listing (the cursor-agent TUI's slash commands are client-side only),

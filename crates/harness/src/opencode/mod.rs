@@ -635,6 +635,20 @@ impl Harness for OpencodeHarness {
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         self.model_catalog(true).await.map(|c| c.models)
     }
+    /// OpenCode's own default: an id with no `provider/` sets no model on
+    /// the session ([`model_selection`]), so OpenCode runs what it's
+    /// configured to.
+    fn fallback_models(&self) -> Vec<Model> {
+        vec![Model {
+            default: true,
+            id: "default".into(),
+            label: "Default".into(),
+            provider: None,
+            description: Some("OpenCode's own default model".into()),
+            reasoning_levels: Vec::new(),
+            options: Vec::new(),
+        }]
+    }
 
     async fn skills(
         &self,

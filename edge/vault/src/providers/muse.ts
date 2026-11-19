@@ -1,15 +1,18 @@
 /**
  * Muse Code's Meta sign-ins (`muse`): the whole `auth.json` Muse writes
- * (file-backed) — its `providers.meta` login (`access_token`, `expires_at` in
- * Unix seconds) beside whatever else the document holds. Muse refreshes no
- * OAuth token: it mints its model keys from the access token, which lasts
- * until `expires_at`. So the vault keeps the document, never refreshes it,
- * and turns the account `needs_reconnect` at its expiry; machines get the
- * document back with every refresh token emptied, and grants expire hourly
- * so a disconnect reaches them within the hour.
+ * (file-backed). Its `providers.meta` login, as Muse 1.4 writes it, is
+ * `{access_token, api_key, api_base_url, obtained_via, mechanism,
+ * user_full_name, user_email}`: no refresh token and no expiry — Muse mints
+ * its model keys (`api_key`) from the access token and refreshes nothing.
+ * So the vault keeps the document as it came and never refreshes it; an
+ * expiry, where the login names one (`expires_at` Unix seconds, or the
+ * token's JWT `exp`), turns the account `needs_reconnect` then. Machines get
+ * the document back with any refresh token emptied, and grants expire
+ * hourly so a disconnect reaches them within the hour.
  */
 import { keyId } from "../crypto";
 import { utf8 } from "../encoding";
+import { jwtExpMs } from "../jwt";
 import { HOUR_MS, isObject, nonEmptyString, type ParseResult, type ProviderAdapter } from "./types";
 
 const MAX_DOCUMENT = 32 * 1024;
@@ -17,8 +20,8 @@ const MAX_DOCUMENT = 32 * 1024;
 export interface MuseSecret {
   readonly document: Record<string, unknown>;
   readonly accessToken: string;
-  /** Unix ms. */
-  readonly expiresAt: number;
+  /** Unix ms; absent when the login names no expiry (Muse 1.4's don't). */
+  readonly expiresAt?: number;
   readonly email?: string;
 }
 
@@ -42,17 +45,15 @@ export const parseMuseUpload = (material: unknown, now: number): ParseResult<Mus
   const meta = providers && isObject(providers.meta) ? providers.meta : undefined;
   if (!meta || !nonEmptyString(meta.access_token)) return { ok: false, message: "muse auth.json holds no Meta login" };
   const seconds = meta.expires_at;
-  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) {
-    return { ok: false, message: "muse login has no expires_at" };
-  }
-  const expiresAt = seconds * 1000;
-  if (expiresAt <= now) return { ok: false, message: "muse login has already expired" };
+  const expiresAt =
+    typeof seconds === "number" && Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : jwtExpMs(meta.access_token);
+  if (expiresAt !== undefined && expiresAt <= now) return { ok: false, message: "muse login has already expired" };
   return {
     ok: true,
     secret: {
       document,
       accessToken: meta.access_token,
-      expiresAt,
+      ...(expiresAt !== undefined ? { expiresAt } : {}),
       ...(nonEmptyString(meta.user_email) ? { email: meta.user_email } : {})
     }
   };
@@ -71,7 +72,7 @@ export const museAdapter: ProviderAdapter<MuseSecret> = {
   hardExpiresAt: (secret) => secret.expiresAt,
   grant: (secret, now) => ({
     accessToken: secret.accessToken,
-    expiresAt: Math.min(now + HOUR_MS, secret.expiresAt),
+    expiresAt: Math.min(now + HOUR_MS, secret.expiresAt ?? Number.MAX_SAFE_INTEGER),
     ...(secret.email ? { account: secret.email } : {}),
     settings: { document: JSON.stringify(withoutRefreshTokens(secret.document)) }
   })
