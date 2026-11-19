@@ -30,6 +30,8 @@ export type Props = {
 	password: boolean?,
 	-- Something of the caller's at its end (a Kbd, a unit, a spinner).
 	trailing: Node?,
+	-- Hide the slot itself so the field's row leaves no gap for it.
+	trailing_hidden: (() -> boolean)?,
 	disabled: Props_disabled,
 	-- Its accessible name when it has no label to say it.
 	name: Label?,
@@ -76,11 +78,11 @@ export type Props = {
 -- A small square button inside a field (clear, reveal): no fill until the
 -- pointer is on it, as quiet as the placeholder until then.
 local function side_room(size: control.Size): number
-	return (control.H[size] - (if size == "sm" then 20 else 24)) / 2
+	return (control.H[size] - control.FIELD_BUTTON_H[size]) / 2
 end
 
 local function inner(icon: () -> Icon.Name, label: Label, size: control.Size, corner: any, on_click: () -> ()): Node
-	local box = if size == "sm" then 20 else 24
+	local box = control.FIELD_BUTTON_H[size]
 	return ui.button {
 		label = label,
 		w = box,
@@ -257,7 +259,7 @@ return ui.component(function(props: Props): Node
 		)
 	end
 	if props.trailing then
-		table.insert(children, ui.div { shrink = 0, color = "$text.tertiary", props.trailing })
+		table.insert(children, ui.div { hidden = props.trailing_hidden, shrink = 0, color = "$text.tertiary", props.trailing })
 	end
 
 	local frame: { [any]: any } = {
