@@ -129,7 +129,7 @@ impl MuseHarness {
         let models = catalog::models(&result?);
         if models.is_empty() {
             return Err(HarnessError::Protocol(
-                "Muse returned no models; run `muse` and sign in with /login".into(),
+                account::explain_no_models(&exe, &env, account::NO_MODELS).await,
             ));
         }
         Ok(models)
@@ -167,6 +167,7 @@ impl MuseHarness {
             } = controls;
             runner.input = Some(std::sync::Arc::from(request_input));
             runner.turn = turn;
+            runner.exe = Some(exe);
             let consumer = runner.tx.clone();
             let result = tokio::select! {
                 result = runner.run(&mut steering) => result,
