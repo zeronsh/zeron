@@ -268,7 +268,7 @@ private fun CloudAgentRows(
         val count = cloud.accounts[agent.login].orEmpty().size + cloud.accounts[agent.key].orEmpty().size
         val busy = signingIn == agent.login
         val active = cloud.activeAccount(agent)?.let { a ->
-            listOfNotNull(a.email ?: if (a.kind == "key") agent.keyName else null, a.plan).joinToString(" · ").ifEmpty { null }
+            listOfNotNull(CloudStore.keyLine(a, agent) ?: a.email, a.plan).joinToString(" · ").ifEmpty { null }
         }
         CloudRow(
             i, CloudStore.agents.size, agent.name,

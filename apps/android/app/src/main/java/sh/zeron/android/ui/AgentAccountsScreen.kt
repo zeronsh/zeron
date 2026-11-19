@@ -35,13 +35,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CompletableDeferred
@@ -147,8 +143,10 @@ fun AgentAccountsScreen(model: AppModel, target: AccountsTarget, signIn: Boolean
                     active = a.active, switchable = true, isKey = false, cloudProvider = agent.login,
                 )
             }
+            // A key reads by its last characters and, for a gateway's, where it goes (`…81e5 · via host`).
             val keys = cloud.accounts[agent.key].orEmpty().map { a ->
-                Account("${agent.key}:${a.slot}", agent.keyName, null, emptyList(), null, a.active, true, true, agent.key)
+                val detail = listOfNotNull(a.email, a.gateway?.let { "via $it" }).joinToString(" · ").ifEmpty { null }
+                Account("${agent.key}:${a.slot}", agent.keyName, detail, emptyList(), null, a.active, true, true, agent.key)
             }
             logins + keys
         }
@@ -368,10 +366,7 @@ fun AgentAccountsScreen(model: AppModel, target: AccountsTarget, signIn: Boolean
     }
 
     if (askKey && target is AccountsTarget.Cloud) {
-        ApiKeyDialog(target.agent, onDismiss = { askKey = false }) { key ->
-            askKey = false
-            run("api-key") { cloud.saveKey(key, target.agent) }
-        }
+        ApiKeySheet(target.agent, onDismiss = { askKey = false }) { key, baseUrl -> cloud.saveKey(key, baseUrl, target.agent) }
     }
     codeRequest?.let { request ->
         PasteCodeDialog(onDismiss = { request.complete(null) }, onCode = { request.complete(it) })
@@ -470,36 +465,6 @@ private fun InUseBadge() {
     Surface(shape = RoundedCornerShape(8.dp), color = tone.copy(alpha = 0.12f), contentColor = tone) {
         Text("In use", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
     }
-}
-
-/** Cloud sessions use this key instead of a subscription sign-in. */
-@Composable
-private fun ApiKeyDialog(agent: CloudStore.Agent, onDismiss: () -> Unit, onSave: (String) -> Unit) {
-    var key by remember { mutableStateOf("") }
-    val focus = remember { FocusRequester() }
-    LaunchedEffect(Unit) { focus.requestFocus() }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        icon = { ZIcon(ZIcons.Key, null) },
-        title = { Text(agent.keyName) },
-        text = {
-            Column {
-                Text("Cloud sessions use this key instead of a subscription sign-in.", style = MaterialTheme.typography.bodyMedium)
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
-                    key, { key = it.trim() },
-                    singleLine = true,
-                    placeholder = { Text(if (agent.key == "anthropic-key") "sk-ant-…" else "sk-…") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
-                    shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier.fillMaxWidth().focusRequester(focus),
-                )
-            }
-        },
-        confirmButton = { TextButton(onClick = { onSave(key) }, enabled = key.isNotEmpty()) { Text("Save key") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
 }
 
 /** Claude's paste fallback: the code the sign-in page shows. */

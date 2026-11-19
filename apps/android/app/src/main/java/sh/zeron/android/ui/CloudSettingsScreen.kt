@@ -139,7 +139,7 @@ fun CloudSettingsScreen(
                 val active = cloud.activeAccount(agent)
                 val detail = when {
                     active != null -> listOfNotNull(
-                        active.email ?: active.displayName ?: if (active.kind == "key") agent.keyName else null,
+                        CloudStore.keyLine(active, agent) ?: active.email ?: active.displayName,
                         active.plan,
                     ).joinToString(" · ").ifEmpty { "Signed in" } + if (active.needsReconnect) " · Sign in again" else ""
                     cloud.hasAccount(agent) -> "No login selected"

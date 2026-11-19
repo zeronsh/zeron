@@ -413,21 +413,32 @@ pub fn install(host: &ScriptHost) {
     });
     // An API key for Cloud's agents (Settings → Providers with Cloud
     // shown): kept by the vault, authorized for the account's Cloud device
-    // (`device`), the key every Cloud machine uses from its next turn.
-    // Rejects with the engine's words, which never hold the key.
+    // (`device`), the key every Cloud machine uses from its next turn; an
+    // Anthropic key's LLM gateway (`base_url`, none: Anthropic's own API)
+    // goes with it. Rejects with the engine's words, which never hold the
+    // key.
     let a = agents.clone();
     host.async_action("agents.cloud_key", move |args| {
         let a = a.clone();
         let provider = args.field("provider").map(text).unwrap_or_default();
         let key = args.field("key").map(text).unwrap_or_default().trim().to_string();
+        let base_url = args.field("base_url").map(text).unwrap_or_default();
         let device = args.field("device").map(text).unwrap_or_default();
         async move {
             crate::plugins::preview::refuse("agents.cloud_key")?;
-            let params = cloud_key_params(&provider, &key, &device)?;
+            let params = cloud_key_params(&provider, &key, &base_url, &device)?;
             engine::get().call("VaultPutApiKey", params).await.map_err(|error| engine::outcome(&error).to_string())?;
             a.load_accounts(true).await;
             Ok(Value::Nil)
         }
+    });
+    // A Cloud key's base URL as it's being typed, judged as the vault will
+    // keep it (`{ provider, url }`): the key dialog's verdict under the
+    // field, on every keystroke, so pure and quick.
+    host.function("agents.cloud_base_url", |args| {
+        let provider = args.field("provider").map(text).unwrap_or_default();
+        let url = args.field("url").map(text).unwrap_or_default();
+        base_url_verdict(&provider, &url)
     });
     // An API key's name (no secret: on whichever device shows it), rejecting
     // with the engine's words.
@@ -1788,6 +1799,8 @@ fn account_value(account: &Json, reset: Option<&Reset>) -> Value {
             "named",
             Value::Bool(account["authKind"].as_str() == Some("api-key") && account["displayName"].as_str().is_some()),
         ),
+        // A key for an LLM gateway: the host its requests go to.
+        ("gateway", account["gateway"].as_str().map_or(Value::Nil, Value::from)),
     ];
     if account["codexResetCredits"].is_object() {
         let (count, list) = banked(&account["codexResetCredits"], spent);
@@ -1970,14 +1983,54 @@ mod tests {
     /// Anthropic's or OpenAI's only, a real key, Cloud on.
     #[test]
     fn a_cloud_key_is_one_cloud_runs_for_its_device() {
-        let ok = cloud_key_params("anthropic-key", "sk-ant-123", "cloud-acct").unwrap();
+        let ok = cloud_key_params("anthropic-key", "sk-ant-123", "", "cloud-acct").unwrap();
         assert_eq!(ok, json!({ "provider": "anthropic-key", "key": "sk-ant-123", "authorizedDevices": ["cloud-acct"] }));
-        assert!(cloud_key_params("openai-key", "sk-1", "d").is_ok());
-        assert!(cloud_key_params("claude", "sk", "d").is_err(), "a login isn't a key");
-        assert!(cloud_key_params("anthropic-key", "", "d").is_err());
-        assert!(cloud_key_params("anthropic-key", "a\nb", "d").is_err());
-        assert!(cloud_key_params("anthropic-key", &"k".repeat(5000), "d").is_err());
-        assert!(cloud_key_params("anthropic-key", "sk", "").is_err(), "Cloud off");
+        assert!(cloud_key_params("openai-key", "sk-1", "", "d").is_ok());
+        assert!(cloud_key_params("claude", "sk", "", "d").is_err(), "a login isn't a key");
+        assert!(cloud_key_params("anthropic-key", "", "", "d").is_err());
+        assert!(cloud_key_params("anthropic-key", "a\nb", "", "d").is_err());
+        assert!(cloud_key_params("anthropic-key", &"k".repeat(5000), "", "d").is_err());
+        assert!(cloud_key_params("anthropic-key", "sk", "", "").is_err(), "Cloud off");
+    }
+
+    /// An Anthropic key's LLM gateway goes with it as the vault keeps it;
+    /// a base URL the vault would refuse never leaves, in its words; an
+    /// OpenAI key takes none.
+    #[test]
+    fn a_cloud_key_carries_its_gateway() {
+        let ok = cloud_key_params("anthropic-key", "sk-ant-1", "  https://llm.example.com/anthropic/ ", "d").unwrap();
+        assert_eq!(
+            ok,
+            json!({ "provider": "anthropic-key", "key": "sk-ant-1", "baseUrl": "https://llm.example.com/anthropic", "authorizedDevices": ["d"] })
+        );
+        assert_eq!(
+            cloud_key_params("anthropic-key", "sk", "http://llm.example.com", "d").unwrap_err(),
+            "Use an https:// base URL — the key is sent with every request."
+        );
+        assert_eq!(
+            cloud_key_params("anthropic-key", "sk", "https://llm.example.com/v1", "d").unwrap_err(),
+            "Leave /v1 off the base URL — Claude Code adds /v1/messages itself."
+        );
+        assert!(cloud_key_params("openai-key", "sk", "https://llm.example.com", "d").is_err());
+    }
+
+    /// The key dialog's word under the base URL as it's typed: nothing to
+    /// judge until there's a host, the vault's refusal, else where Claude
+    /// Code's requests go.
+    #[test]
+    fn a_base_url_is_judged_as_typed() {
+        let state = |provider: &str, raw: &str| text(base_url_verdict(provider, raw).field("state").unwrap());
+        assert_eq!(state("anthropic-key", ""), "empty");
+        assert_eq!(state("anthropic-key", "https://"), "typing");
+        assert_eq!(state("anthropic-key", "ftp://x.example.com"), "refused");
+        assert_eq!(state("openai-key", "https://llm.example.com"), "refused");
+        let ready = base_url_verdict("anthropic-key", "https://llm.example.com/anthropic/");
+        assert_eq!(text(ready.field("state").unwrap()), "ready");
+        assert_eq!(text(ready.field("url").unwrap()), "https://llm.example.com/anthropic");
+        assert_eq!(text(ready.field("host").unwrap()), "llm.example.com");
+        assert_eq!(text(ready.field("route").unwrap()), "https://llm.example.com/anthropic/v1/messages");
+        let refused = base_url_verdict("anthropic-key", "https://user:pw@llm.example.com");
+        assert_eq!(text(refused.field("why").unwrap()), "Leave credentials out of the base URL.");
     }
 
     /// Pi signed in to Claude, or another login put in use: Pi's models are
@@ -2259,23 +2312,53 @@ pub(crate) fn shown_target() -> Option<String> {
     AGENTS.with(|a| a.target.borrow().clone())
 }
 
-/// `params` addressed to the device Providers shows.
 /// `VaultPutApiKey`'s params for a Cloud API key: Anthropic's or OpenAI's
 /// alone, a key that's there and no longer than any key is, for the
-/// account's Cloud device. Else why not.
-pub(crate) fn cloud_key_params(provider: &str, key: &str, device: &str) -> Result<Json, String> {
-    if !matches!(provider, "anthropic-key" | "openai-key") {
+/// account's Cloud device; an Anthropic key's base URL as the vault keeps
+/// it (blank: none, Anthropic's own API). Else why not.
+pub(crate) fn cloud_key_params(provider: &str, key: &str, base_url: &str, device: &str) -> Result<Json, String> {
+    use zeron_proto::VaultProvider;
+    let Some(vault) = VaultProvider::parse(provider).filter(|p| matches!(p, VaultProvider::AnthropicKey | VaultProvider::OpenaiKey))
+    else {
         return Err("Cloud takes Anthropic and OpenAI keys".into());
-    }
+    };
     if key.is_empty() || key.len() > 4096 || key.chars().any(char::is_control) {
         return Err("That isn't an API key".into());
     }
+    let base_url = vault.api_base_url(base_url)?;
     if device.is_empty() {
         return Err("Turn Cloud on in Settings → Cloud first".into());
     }
-    Ok(json!({ "provider": provider, "key": key, "authorizedDevices": [device] }))
+    let mut params = json!({ "provider": provider, "key": key, "authorizedDevices": [device] });
+    if let Some(url) = base_url {
+        params["baseUrl"] = json!(url);
+    }
+    Ok(params)
 }
 
+/// A Cloud key's base URL as typed, as the key dialog says it: `{ state }`,
+/// "empty" (Anthropic's own API), "typing" (no host yet: nothing to judge),
+/// "refused" (`why`, the vault's words) or "ready" (`url` as kept, its
+/// `host`, and the `route` Claude Code's requests take).
+fn base_url_verdict(provider: &str, raw: &str) -> Value {
+    use zeron_proto::{BaseUrlCheck, VaultProvider};
+    let Some(vault) = VaultProvider::parse(provider) else {
+        return Value::record([("state", Value::from("refused")), ("why", Value::from("Cloud takes Anthropic and OpenAI keys"))]);
+    };
+    match vault.check_base_url(raw) {
+        BaseUrlCheck::Empty => Value::record([("state", Value::from("empty"))]),
+        BaseUrlCheck::Typing => Value::record([("state", Value::from("typing"))]),
+        BaseUrlCheck::Refused(why) => Value::record([("state", Value::from("refused")), ("why", Value::from(why))]),
+        BaseUrlCheck::Ready(url) => Value::record([
+            ("state", Value::from("ready")),
+            ("host", Value::from(zeron_proto::base_url_host(&url).as_str())),
+            ("route", Value::from(format!("{url}{}", zeron_proto::ANTHROPIC_MESSAGES_PATH).as_str())),
+            ("url", Value::from(url.as_str())),
+        ]),
+    }
+}
+
+/// `params` addressed to the device Providers shows.
 pub(crate) fn addressed_to_shown(params: Json) -> Json {
     addressed_to(shown_target().as_deref(), params)
 }

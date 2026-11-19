@@ -522,70 +522,56 @@ local function more(): Node
 	)
 end
 
--- Cloud's API keys: Anthropic's for Claude Code, OpenAI's for Codex, kept
--- by the vault. A key saved becomes its agent's account in use, every Cloud
--- machine's from its next turn (as signing in does).
-local CLOUD_KEYS = {
-	{ provider = "anthropic-key", agent = "Claude Code", label = "settings.providers.cloud_keys.anthropic" },
-	{ provider = "openai-key", agent = "Codex", label = "settings.providers.cloud_keys.openai" },
+-- Cloud's API keys: Anthropic's for Claude Code (its own API, or an LLM
+-- gateway of yours), OpenAI's for Codex, kept by the vault. Each a row that
+-- opens the key dialog (ds.ProviderCard.CloudKeyDialog); a key saved
+-- becomes its agent's account in use, every Cloud machine's from its next
+-- turn (as signing in does), and shows on its card.
+local CLOUD_KEYS: { any } = {
+	{
+		provider = "anthropic-key",
+		mark = "anthropic",
+		name = "Anthropic",
+		agent = "Claude Code",
+		gateway = true,
+		label = "settings.providers.cloud_keys.anthropic",
+		description = "settings.providers.cloud_keys.anthropic_description",
+	},
+	{
+		provider = "openai-key",
+		mark = "openai",
+		name = "OpenAI",
+		agent = "Codex",
+		label = "settings.providers.cloud_keys.openai",
+		description = "settings.providers.cloud_keys.description",
+	},
 }
-local function cloud_key_row(k: { provider: string, agent: string, label: string }): Node
-	return ui.component(function(): Node
-		local value = ui.use_state("")
-		local busy = ui.use_state(false)
-		local problem = ui.use_state("")
-		local function save()
-			local key = value:peek()
-			if busy:peek() or key == "" then
-				return
-			end
-			busy:set(true)
-			problem:set("")
-			host.call("agents.cloud_key", { provider = k.provider, key = key, device = cloud.device() or "" }):after(function()
-				busy:set(false)
-				value:set("")
-				toast.show { title = ui.t("settings.providers.cloud_keys.saved", { agent = k.agent }):get(), tone = "success" }
-			end, function(err: any)
-				busy:set(false)
-				problem:set(if type(err) == "table" and err.message then tostring(err.message) else tostring(err))
-			end)
+local key_open = ui.state("settings_cloud_key_open", false)
+local key_for = ui.state("settings_cloud_key_for", "")
+
+local function cloud_key(): any?
+	local id = key_for:get()
+	for _, k in CLOUD_KEYS do
+		if k.provider == id then
+			return k
 		end
-		return ds.Settings.Row {
-			label = ui.t(k.label),
-			description = function(): string
-				local p = problem:get()
-				return if p ~= "" then p else ui.t("settings.providers.cloud_keys.description", { agent = k.agent }):get()
-			end,
-			control = ui.row {
-				gap = "$space.2",
-				items = "center",
-				ds.TextField {
-					value = value,
-					password = true,
-					w = 220,
-					size = "sm",
-					name = ui.t(k.label),
-					placeholder = ui.t("settings.providers.cloud_keys.placeholder"),
-					on_commit = function()
-						save()
-					end,
-				},
-				ds.Button {
-					ui.t("settings.providers.cloud_keys.save"),
-					tone = "secondary",
-					size = "sm",
-					busy = function(): boolean
-						return busy:get()
-					end,
-					disabled = function(): boolean
-						return value:get() == ""
-					end,
-					on_click = save,
-				},
-			},
-		}
-	end)({})
+	end
+	return nil
 end
+
+local function cloud_key_row(k: any): Node
+	return ds.Settings.Row {
+		label = ui.t(k.label),
+		description = ui.t(k.description, { agent = k.agent }),
+		lead = ds.ProviderCard.KeyDisc(k.mark),
+		value = ui.t("settings.providers.cloud_keys.add"),
+		on_click = function()
+			key_for:set(k.provider)
+			key_open:set(true)
+		end,
+	}
+end
+
 local function cloud_keys(): Node
 	return ds.Settings.Section {
 		title = ui.t("settings.providers.cloud_keys.title"),
@@ -598,6 +584,36 @@ local function cloud_keys(): Node
 				cloud_key_row(CLOUD_KEYS[2]),
 			},
 		},
+	}
+end
+
+-- A gateway's base URL, judged as the vault will keep it (src/agents.rs,
+-- `agents.cloud_base_url`). Without a host to ask, nothing to judge yet.
+local function judge_base_url(url: string): any
+	local ok, verdict = pcall(host.call_sync, "agents.cloud_base_url", { provider = key_for:peek(), url = url })
+	return if ok and type(verdict) == "table" then verdict else { state = "typing" }
+end
+
+local function cloud_key_dialog(): Node
+	-- (Cloud left for a computer: no key to add for it.)
+	ui.effect(function()
+		if key_open:get() and now().target ~= "cloud" then
+			key_open:set(false)
+		end
+	end)
+	return ds.ProviderCard.CloudKeyDialog {
+		open = key_open,
+		key = cloud_key,
+		judge = judge_base_url,
+		on_save = function(provider: string, key: string, base_url: string?): any
+			return host.call("agents.cloud_key", { provider = provider, key = key, base_url = base_url, device = cloud.device() or "" })
+		end,
+		on_saved = function(k: any, gateway: string?)
+			local title = if gateway
+				then ui.t("settings.providers.cloud_keys.saved_gateway", { agent = k.agent, host = gateway })
+				else ui.t("settings.providers.cloud_keys.saved", { agent = k.agent })
+			toast.show { title = title:get(), tone = "success" }
+		end,
 	}
 end
 
@@ -928,6 +944,7 @@ function M.view(): Node
 		end, { w_full = true, enter = { opacity = { 0, 1 }, y = { 6, 0 }, duration = 160 }, exit = { opacity = 0, duration = 80 }, mode = "wait" }),
 		settings_dialog(),
 		resets_dialog(),
+		cloud_key_dialog(),
 		-- (Done: the failed sign-in goes, and the card looks again.)
 		sign_in_terminal.Dialog(function(id: string)
 			agents.dismiss(id)

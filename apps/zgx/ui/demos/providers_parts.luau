@@ -326,7 +326,10 @@ function M.card(provider: any, foot: (string | () -> string)?, opts: CardOptions
 	local o: CardOptions = opts or {}
 	return Card.Card {
 		provider = provider,
-		accounts = if provider.id == "codex" then M.codex_accounts else (M.ACCOUNTS[provider.id] or {}),
+		accounts = if provider.id == "codex"
+			then M.codex_accounts
+			elseif provider.id == "claude" then M.claude_accounts
+			else (M.ACCOUNTS[provider.id] or {}),
 		foot = foot,
 		enabled = M.enabled[provider.id],
 		active = function()
@@ -631,14 +634,122 @@ function M.page_for(view: string): Node
 	return ui.div {}
 end
 
+-- Cloud's API keys (Cloud chosen): Anthropic's for Claude Code, its own
+-- API or an LLM gateway; OpenAI's for Codex. Each opens the key dialog.
+M.CLOUD_KEYS = {
+	{
+		provider = "anthropic-key",
+		mark = "anthropic",
+		name = "Anthropic",
+		agent = "Claude Code",
+		gateway = true,
+		label = "Anthropic API key",
+		description = "For Claude Code on Cloud: Anthropic's API, or an LLM gateway of yours.",
+	},
+	{ provider = "openai-key", mark = "openai", name = "OpenAI", agent = "Codex", label = "OpenAI API key", description = "For Codex on Cloud." },
+}
+M.cloud_key_open = ui.state("ex_pv_cloud_key_open", false)
+M.cloud_key_for = ui.state("ex_pv_cloud_key_for", "anthropic-key")
+-- The gateway key saved last (its host), shown on Claude Code's card.
+M.gateway = ui.state("ex_pv_gateway", "llm-gateway.halcyon.dev")
+
+function M.cloud_keys(): Node
+	local rows: { Node } = {}
+	for i, k in M.CLOUD_KEYS do
+		if i > 1 then
+			table.insert(rows, ds.Settings.Rule())
+		end
+		table.insert(rows, ds.Settings.Row {
+			label = k.label,
+			description = k.description,
+			lead = Card.KeyDisc(k.mark),
+			value = "Add key",
+			on_click = function()
+				M.cloud_key_for:set(k.provider)
+				M.cloud_key_open:set(true)
+			end,
+		})
+	end
+	return ds.Settings.Section {
+		title = "API keys",
+		description = "Instead of signing in, Cloud can use an API key. A key saved here becomes the account its agent uses on every Cloud machine, from its next turn.",
+		ds.Settings.Group { ui.column { w_full = true, table.unpack(rows) } },
+	}
+end
+
+-- A base URL as the host judges it (src/agents.rs, `agents.cloud_base_url`),
+-- asked of the host where there is one; else its rules in brief.
+local function judge(url: string): any
+	local ok, verdict = pcall(ui.call_sync, "agents.cloud_base_url", { provider = M.cloud_key_for:peek(), url = url })
+	if ok and type(verdict) == "table" then
+		return verdict
+	end
+	local raw = (string.gsub(url, "^%s*(.-)%s*$", "%1"))
+	if raw == "" then
+		return { state = "empty" }
+	elseif string.sub("https://", 1, #raw) == string.lower(raw) then
+		return { state = "typing" }
+	elseif string.lower(string.sub(raw, 1, 8)) ~= "https://" then
+		return { state = "refused", why = "Use an https:// base URL — the key is sent with every request." }
+	end
+	local base = (string.gsub(raw, "/+$", ""))
+	if string.match(string.lower(base), "/v1$") then
+		return { state = "refused", why = "Leave /v1 off the base URL — Claude Code adds /v1/messages itself." }
+	end
+	local host = string.match(base, "^https://([^/?#]+)")
+	if not host then
+		return { state = "refused", why = "That base URL has no host." }
+	end
+	return { state = "ready", url = base, host = string.lower(host), route = base .. "/v1/messages" }
+end
+
+function M.cloud_key_dialog(): Node
+	return Card.CloudKeyDialog {
+		open = M.cloud_key_open,
+		key = function(): any
+			for _, k in M.CLOUD_KEYS do
+				if k.provider == M.cloud_key_for:get() then
+					return k
+				end
+			end
+			return nil
+		end,
+		judge = judge,
+		on_save = function(_provider: string, _key: string, base_url: string?): any
+			-- (Kept at once, as the vault answers.)
+			local p = {}
+			function p.after(_self: any, ok: ((any) -> ())?)
+				if ok then
+					ok(nil)
+				end
+			end
+			if base_url then
+				M.gateway:set(string.match(base_url, "^https://([^/]+)") or base_url)
+			end
+			return p
+		end,
+	}
+end
+
+-- Claude Code's accounts, and on Cloud its key for an LLM gateway (no
+-- plan: its last four, and where its requests go).
+function M.claude_accounts(): { any }
+	local out = table.clone(M.ACCOUNTS.claude)
+	if M.device:get() == "cloud" then
+		table.insert(out, { email = "Anthropic API key", plan = "…81e5", session = 0, week = 0, key = true, provider = "anthropic", gateway = M.gateway:get() })
+	end
+	return out
+end
+
 -- The dialogs the pages share: every agent's settings, the resets, the
--- account removal.
+-- account removal, Cloud's API key.
 function M.dialogs(): { Node }
 	local out: { Node } = {}
 	for _, p in M.INSTALLED do
 		table.insert(out, M.settings_dialog(p))
 	end
 	table.insert(out, M.resets_dialog())
+	table.insert(out, M.cloud_key_dialog())
 	table.insert(out, ds.Dialog {
 		open = M.removing,
 		title = "Remove mara@example.net?",

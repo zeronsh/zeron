@@ -267,9 +267,10 @@ class CloudStore(private val scope: CoroutineScope, private val client: () -> Co
         refreshAccounts()
     }
 
-    suspend fun saveKey(key: String, agent: Agent) {
-        val c = client() ?: return
-        c.vaultPutApiKey(agent.key, key)
+    /** Keeps `key` in Cloud's vault; `baseUrl`, an LLM gateway's, rides with it (an Anthropic key's only). */
+    suspend fun saveKey(key: String, baseUrl: String?, agent: Agent) {
+        val c = client() ?: throw CoreException.Closed()
+        c.vaultPutApiKey(agent.key, key, baseUrl = baseUrl)
         refreshAccounts()
     }
 
@@ -289,6 +290,14 @@ class CloudStore(private val scope: CoroutineScope, private val client: () -> Co
 
         /** The agents Cloud runs. */
         val harnesses = agents.map { it.harness }
+
+        /**
+         * An API key in one line, as iOS's Providers lists it: its name, then
+         * the gateway it goes to or its last characters (`Anthropic API key · via host`).
+         * Null for a sign-in.
+         */
+        fun keyLine(a: CloudAccountInfo, agent: Agent): String? =
+            if (a.kind == "api-key") listOfNotNull(agent.keyName, a.gateway?.let { "via $it" } ?: a.email).joinToString(" · ") else null
 
         /** Short enough for a snackbar beside its button. */
         const val OUT_OF_CREDITS = "Out of Cloud credits"

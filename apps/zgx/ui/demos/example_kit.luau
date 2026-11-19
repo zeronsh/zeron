@@ -51,44 +51,43 @@ export type Stage = {
 }
 
 function M.stage(props: Stage): Node
-	local screen: { any } = {}
-	for _, c in ipairs(props :: any) do
-		table.insert(screen, c)
-	end
-	return ui.column {
+	local window: { any } = {
+		id = "stage",
 		w_full = true,
-		gap = "$space.3",
-		items = "start",
-		if (props.states and props.state) or props.also
-			then ui.row {
-				gap = "$space.3",
-				items = "center",
-				flex_wrap = true,
-				if props.states and props.state
-					then ds.Segmented { value = props.state, options = props.states, label = "State" }
-					else nil,
-				props.also,
-			}
-			else nil,
-		table.unpack(props.overlays or {}),
-		ui.column {
-			id = "stage",
-			w_full = true,
-			max_w = props.w,
-			h = props.h,
-			shrink = 0,
-			relative = true,
-			rounded = "$radius.xl",
-			border = 1,
-			border_color = "$border.subtle",
-			bg = "$zeron.window",
-			overflow = "hidden",
-			table.unpack(screen),
-			lights(),
-			-- Toasts rise in the window's own corner, as they would in the app.
-			ds.toast.Host {},
-		},
+		max_w = props.w,
+		h = props.h,
+		shrink = 0,
+		relative = true,
+		rounded = "$radius.xl",
+		border = 1,
+		border_color = "$border.subtle",
+		bg = "$zeron.window",
+		overflow = "hidden",
 	}
+	for _, c in ipairs(props :: any) do
+		table.insert(window, c)
+	end
+	table.insert(window, lights())
+	-- Toasts rise in the window's own corner, as they would in the app.
+	table.insert(window, ds.toast.Host {})
+	local out: { any } = { w_full = true, gap = "$space.3", items = "start" }
+	if (props.states and props.state) or props.also then
+		table.insert(out, ui.row {
+			gap = "$space.3",
+			items = "center",
+			flex_wrap = true,
+			if props.states and props.state
+				then ds.Segmented { value = props.state, options = props.states, label = "State" }
+				else nil,
+			props.also,
+		})
+	end
+	-- Each overlay, every one (`table.unpack` mid-list keeps only the first).
+	for _, o in props.overlays or {} do
+		table.insert(out, o)
+	end
+	table.insert(out, ui.column(window))
+	return ui.column(out)
 end
 
 -- A step of setup, its footer's pills and a step's form: the app's own
