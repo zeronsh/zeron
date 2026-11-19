@@ -154,3 +154,34 @@ test("an agent with one login keeps its plain Account row", function()
 	expect(string.find(row, "ChatGPT", 1, true)).to_be(nil)
 	expect(row).to_contain("wing@example.test")
 end)
+
+test("an agent without usage still names and switches its accounts, with no ring", function()
+	local app = with_model("opus")
+	app:set_state("chat.catalog", {
+		state = "ready",
+		harnesses = { { id = "antigravity", label = "Antigravity", mark = "antigravity" } },
+		models = { { value = "antigravity/gemini-4-neon", label = "Gemini 4 Neon", harness = "antigravity" } },
+	})
+	app:set_state("agents.on_device", {
+		[""] = {
+			antigravity = {
+				{ id = "g1", email = "ada@gmail.test", plan = "", active = true, can_switch = true, windows = {} },
+				{ id = "g2", email = "bea@gmail.test", plan = "", active = false, can_switch = true, windows = {} },
+			},
+		},
+	})
+	app:set_state("chat_model", "antigravity/gemini-4-neon")
+	app:frames(10)
+	-- (No usage: no ring on the chip.)
+	expect(app:has("#model-picker-usage")).to_be(false)
+	open_panel(app)
+	local row = app:tree("#model-picker-account")
+	expect(row).to_contain("Account")
+	expect(row).to_contain("ada@gmail.test")
+	expect(string.find(row, "%", 1, true)).to_be(nil)
+	app:click("#model-picker-account")
+	app:frames(30)
+	app:click('~"bea@gmail.test"')
+	app:frames(30)
+	expect(app:state("calls")).to_contain("switch_on::antigravity:g2")
+end)

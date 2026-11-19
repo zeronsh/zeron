@@ -44,19 +44,17 @@ pub fn reports_usage(harness: HarnessId) -> bool {
     !matches!(harness, HarnessId::Antigravity | HarnessId::Fx)
 }
 
-/// Providers whose agent holds exactly ONE login (Antigravity): once it is
-/// connected there is nothing to add — signing in again only re-confirms it.
-pub fn keeps_one_login(harness: HarnessId) -> bool {
-    harness == HarnessId::Antigravity
+/// Providers whose agent holds exactly ONE login: once it is connected there
+/// is nothing to add. None now — Antigravity keeps each Google account it
+/// signs in to as a login of its own, switched like any other agent's.
+pub fn keeps_one_login(_harness: HarnessId) -> bool {
+    false
 }
 
 /// Whether zeron switches this agent's logins. Hermes rotates through its
-/// own credential pool (listed, never reordered); Antigravity keeps one.
+/// own credential pool (listed, never reordered); fx has none.
 pub fn switches_accounts(harness: HarnessId) -> bool {
-    !matches!(
-        harness,
-        HarnessId::Hermes | HarnessId::Antigravity | HarnessId::Fx
-    )
+    !matches!(harness, HarnessId::Hermes | HarnessId::Fx)
 }
 
 /// A standing note under a provider's Accounts label, for an agent whose
