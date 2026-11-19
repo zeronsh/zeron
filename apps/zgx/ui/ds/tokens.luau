@@ -182,7 +182,7 @@ function M.setup()
 				shadow = "{shadow.lg}",
 				-- Frosted, nothing under it: the glass is its depth.
 				rest = "0 0 0 0 #00000000",
-				radius = 26,
+				radius = 16,
 				text = 14,
 				line = 22,
 				-- The caret: the accent, two points wide, as Zeron's.
@@ -246,7 +246,7 @@ function M.setup()
 				-- capsule's), the header as tall as the pill's own line. The thumb
 				-- under the open tab: the menus' selected wash, as ⌘K's scopes.
 				deck = {
-					inset = 10,
+					inset = 8,
 					tab = 30,
 					thumb = "{zeron.menu.selected}",
 				},
@@ -800,9 +800,10 @@ function M.setup()
 		end)
 	end
 	ui.effect(function()
-		local chip = control.nest("$zeron.composer.radius", 1, "$zeron.composer.chip.inset")
-		local option = control.nest("$zeron.composer.radius", 1, control.nest("$zeron.composer.chip.inset", 8))
-		local tray_row = control.nest("$zeron.composer.tray.radius", 1, "$space.1")
+		local chip = math.max(4, control.nest("$zeron.composer.radius", 1, "$zeron.composer.chip.inset"))
+		local option = math.max(4, control.nest("$zeron.composer.radius", 1, control.nest("$zeron.composer.chip.inset", 8)))
+		local deck_radius = math.max(4, control.nest("$zeron.composer.radius", "$zeron.composer.deck.inset"))
+		local tray_row = math.max(4, control.nest("$zeron.composer.tray.radius", 1, "$space.1"))
 		ui.theme.tokens {
 			zeron = {
 				menu = { row_radius = control.nest("$radius.lg", 1, "$space.1") },
@@ -811,9 +812,10 @@ function M.setup()
 				inset = { inner_radius = control.nest("$zeron.inset.radius", 1) },
 				tag = { remove_radius = control.nest("$radius.md", 3) },
 				composer = {
+					deck = { radius = deck_radius },
 					chip = { radius = chip },
-					option = { radius = option, key_radius = control.nest(option, "$space.2") },
-					tray = { row_radius = tray_row, thumb_radius = control.nest(tray_row, "$space.1") },
+					option = { radius = option, key_radius = math.max(4, control.nest(option, "$space.2")) },
+					tray = { row_radius = tray_row, thumb_radius = math.max(4, control.nest(tray_row, "$space.1")) },
 				},
 			},
 		}

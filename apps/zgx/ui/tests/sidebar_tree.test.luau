@@ -41,24 +41,14 @@ local LABELS = {
 	["Ship the release"] = true,
 	["Answer the review"] = true,
 }
-type Row = { label: string, y: number, lead: number }
+type Row = { label: string, y: number }
 local function rows(app: any): { Row }
 	local out: { Row } = {}
-	local cur: Row? = nil
 	for line in app:tree(SIDE):gmatch("[^\n]+") do
 		local label = line:match(' button "([^"]+)"')
-		if label then
-			cur = nil
-			if LABELS[label] then
-				local y = tonumber(line:match(" %-?%d+,(%-?%d+) ")) :: number
-				cur = { label = label, y = y, lead = -1 }
-				table.insert(out, cur :: Row)
-			end
-		elseif cur and (cur :: Row).lead < 0 then
-			local x = line:match(" (%-?%d+),%-?%d+ %d+x%d+")
-			if x and (line:find(" img ", 1, true) or line:find(' text "', 1, true)) then
-				(cur :: Row).lead = tonumber(x) :: number
-			end
+		if label and LABELS[label] then
+			local y = tonumber(line:match(" %-?%d+,(%-?%d+) ")) :: number
+			table.insert(out, { label = label, y = y })
 		end
 	end
 	table.sort(out, function(a, b)
@@ -73,17 +63,28 @@ local function labels(app: any): string
 	end
 	return table.concat(out, ",")
 end
-local function lead(app: any, label: string, nth: number?): number
-	local i = 0
-	for _, r in rows(app) do
-		if r.label == label then
-			i += 1
-			if i == (nth or 1) then
-				return r.lead
+local function visible_box(line: string): { x: number, y: number, h: number }?
+	local x, y, w, h = line:match(" (%-?%d+),(%-?%d+) (%d+)x(%d+)")
+	local left, top, width, height = tonumber(x), tonumber(y), tonumber(w), tonumber(h)
+	if left and top and width and height and width > 0 and height > 0 and not line:find(" hidden", 1, true) then
+		return { x = left, y = top, h = height }
+	end
+	return nil
+end
+local function lead(app: any, label: string): number
+	local row = `{SIDE} >> role:button "{label}"[1]`
+	local title = visible_box(app:tree(`{row} >> "{label}"`):match("^[^\n]+") or "")
+	assert(title, `no visible title for "{label}"`)
+	local x = title.x
+	for line in app:tree(row):gmatch("[^\n]+") do
+		if line:find(" img ", 1, true) then
+			local icon = visible_box(line)
+			if icon and icon.y < title.y + title.h and icon.y + icon.h > title.y then
+				x = math.min(x, icon.x)
 			end
 		end
 	end
-	return -1
+	return x
 end
 local function order(app: any): string
 	return table.concat((app:state("shell_sidebar_order") :: any) or {}, ",")
@@ -385,9 +386,10 @@ test("a chat moved to pinned gains its project's tile, and moved back loses it, 
 	local app = mount("shell_fixture.luau")
 	app:resize(1400, 860)
 	app:frames(30)
+	app:command("fixture.project_icons")
+	app:frames(30)
 	local function tile(): boolean
-		-- (Atlas's tile draws its initial.)
-		return app:tree('#shell-sidebar >> role:button "Write the docs"'):find('text "A"', 1, true) ~= nil
+		return app:has(`#shell-sidebar >> role:button "Write the docs" >> "🚀"`)
 	end
 	expect(tile()).to_be(false)
 	app:set_state("shell_places", { pinned = { "a2" }, sections = {} })

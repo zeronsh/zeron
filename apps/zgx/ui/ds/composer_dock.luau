@@ -412,10 +412,10 @@ local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: num
 					h = tab_h,
 					shrink = 0,
 					pl = "$space.2",
-					pr = ui.raw(10, "a step past the count, so it sits off the capsule's curve"),
+					pr = ui.raw(10, "a step past the count"),
 					gap = "$zeron.space.tight",
 					items = "center",
-					rounded = ui.raw(tab_h / 2, "a capsule: the frame's corner less its edge and the header's inset"),
+					rounded = "$zeron.composer.deck.radius",
 					cursor = "pointer",
 					role = "tab",
 					selected = chosen,
@@ -489,7 +489,7 @@ local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: num
 		left = 0,
 		top = 0,
 		h = tab_h,
-		rounded = ui.raw(tab_h / 2, "the tab's capsule"),
+		rounded = "$zeron.composer.deck.radius",
 		bg = "$zeron.composer.deck.thumb",
 		pointer_events = "none",
 		opacity = ui.tween(ui.computed(function(): number
@@ -544,7 +544,7 @@ local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: num
 		shrink = 0,
 		items = "center",
 		justify = "center",
-		rounded = ui.raw(14, "round, as the pill's controls"),
+		rounded = "$zeron.composer.deck.radius",
 		color = "$text.tertiary",
 		cursor = "pointer",
 		role = "button",
@@ -607,7 +607,7 @@ local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: num
 			end), { duration = 180 }),
 			ui.column {
 				w_full = true,
-				p = ui.raw(inset, "the header's inset: its capsules concentric with the frame"),
+				p = ui.raw(inset, "the inset shared by the header and rows"),
 				ui.row(head_row),
 			},
 		},
@@ -1494,7 +1494,7 @@ end
 
 local function build(props: Props): ({ Tab }, State<Tray?>, { [string]: number }, () -> boolean)
 	local geometry = {
-		inset = n("zeron.composer.deck.inset", 10),
+		inset = n("zeron.composer.deck.inset", 8),
 		tab = n("zeron.composer.deck.tab", 30),
 		tab_gap = n("zeron.space.hair", 2),
 		row = n("zeron.composer.tray.row", 32),

@@ -6,7 +6,7 @@
 //! plain text: cut mid-letter at the row's end.)
 
 use zgx::scene::NodeKind;
-use zgx_script::{ScriptHost, testing::TestApp};
+use zgx_script::{ScriptHost, Value, testing::TestApp};
 
 const LONG: &str = "Everything to read again before the release goes out on Friday";
 
@@ -101,9 +101,6 @@ fn words_x(app: &mut TestApp, id: &str) -> f32 {
     panic!("{id} says nothing")
 }
 
-/// Under Star on GitHub, the connection line's words start where the
-/// banner's do, whichever glyph leads them (they stood 5 to the left after
-/// the offline dot, on them after the reconnecting ring).
 #[test]
 fn the_foot_s_words_share_one_edge() {
     for state in [
@@ -112,15 +109,19 @@ fn the_foot_s_words_share_one_edge() {
         "connection_reconnecting",
     ] {
         let mut app = mount();
+        app.host
+            .shared("engine.update", Value::Nil)
+            .set(Value::record([
+                ("stale", Value::Bool(true)),
+                ("ours", Value::Bool(false)),
+            ]));
         assert!(app.host.run_command(state));
         app.frames(30);
-        let (line, star) = (
-            words_x(&mut app, "connection-line"),
-            words_x(&mut app, "star-banner"),
-        );
+        let line = words_x(&mut app, "connection-line");
+        let update = words_x(&mut app, "engine-update");
         assert!(
-            (line - star).abs() < 0.5,
-            "{state}: the line's words at {line}, Star on GitHub's at {star}"
+            (line - update).abs() < 0.5,
+            "{state}: connection text at {line}, update text at {update}"
         );
     }
 }

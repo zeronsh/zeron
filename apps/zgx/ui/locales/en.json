@@ -2996,7 +2996,7 @@
     },
     "composer": {
       "account_not_switched": "Couldn't switch accounts",
-      "placeholder": "Ask anything, @ to mention…",
+      "placeholder": "Message the agent, @ to mention",
       "comments": "{n, plural, one {# comment} other {# comments}}",
       "edit_conflict": "The queued message changed meanwhile: your edit wasn't saved",
       "edit_not_saved": "Your edit wasn't saved",

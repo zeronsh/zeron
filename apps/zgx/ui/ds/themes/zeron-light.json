@@ -210,7 +210,7 @@
 			// stays light), the picture lifted off it by a soft shadow so a
 			// white screenshot keeps its edge.
 			"lightbox": { "scrim": "#f3f3f5eb", "shadow": "0 10 40 0 #00000024" },
-			"composer": { "tint": "#ffffff59", "tray": { "tint": "{zeron.composer.tint}" }, "solid": "#ffffff", "edge": "#3b475a1f", "shadow": "0 10 28 0 #00000017" },
+			"composer": { "tint": "#ffffff59", "tray": { "tint": "{zeron.composer.tint}" }, "solid": "#ffffff", "edge": "{border.subtle}", "shadow": "{shadow.sm}" },
 			// Frosted, as Zeron's (crates/ui/src): menus, popovers, the palette and
 			// dialogs the composer's dark tint / the overlay glass (popover.rs
 			// `surface_bg`), the island its overlay glass (shell.rs, theme.rs

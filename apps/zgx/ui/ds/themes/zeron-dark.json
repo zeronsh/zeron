@@ -229,7 +229,7 @@
 			// The lightbox: a deep scrim over a blur of the window, the picture
 			// on it with no edge of its own (dark reads it by light).
 			"lightbox": { "scrim": "#060607e0", "shadow": "0 0 0 0 #00000000" },
-			"composer": { "tint": "#08080826", "tray": { "tint": "{zeron.composer.tint}" }, "solid": "#18181b", "edge": "#c7d2de17", "shadow": "0 12 32 0 #00000066" },
+			"composer": { "tint": "#08080826", "tray": { "tint": "{zeron.composer.tint}" }, "solid": "#18181b", "edge": "#ffffff14", "shadow": "{zeron.composer.rest}" },
 			// Frosted, as Zeron's (crates/ui/src): menus, popovers, the palette and
 			// dialogs the composer's dark tint / the overlay glass (popover.rs
 			// `surface_bg`), the island its overlay glass (shell.rs, theme.rs

@@ -245,9 +245,9 @@ function M.Corner(props: CornerProps): Node
 	return ui.overlay {
 		shrink = 0,
 		relative = true,
-		min_w = 16,
+		min_w = 28,
 		h = 16,
-		items = "end",
+		items = "center",
 		justify = "center",
 		ui.div {
 			opacity = function(): number
@@ -276,7 +276,7 @@ function M.Corner(props: CornerProps): Node
 					return hovered:get() and jump() == nil
 				end,
 				-- (The button 3 points past the corner's 16 either side.)
-				ui.div { absolute = true, right = -3, top = -3, action }
+				ui.div { absolute = true, left = 0, right = 0, top = -3, items = "center", action }
 			)
 			else nil,
 	}

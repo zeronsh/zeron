@@ -21,6 +21,8 @@ local splits = require("@app/screens/shell/split")
 local M = {}
 
 local TAB_H, SLOT, LABEL_MAX, TILE = 28, 20, 160, 20
+local TAB_INSET = 4
+local FACE_INSET = SLOT + TAB_INSET
 local SLIDE = { duration = 150, ease = "out(3)" }
 local FADE, FADE_RATE = 36, 12
 -- A tab's stacked tiles, as a fanned hand of cards: at most this many, and for each
@@ -78,20 +80,40 @@ end)
 
 -- A tab's panes, as many as show (`STACK`), the one focused last first: the ones
 -- focused in that order, then the rest as they stand in the split.
-local function stack_of(key: string): { string }
+local function focused_panes(key: string): { string }
 	local peers = splits.panes(key)
 	local out: { string } = {}
 	for _, r in recent:get() do
-		if #out < STACK and table.find(peers, r) and chat_of(r) then
+		if table.find(peers, r) and chat_of(r) then
 			table.insert(out, r)
 		end
 	end
 	for _, peer in peers do
-		if #out < STACK and not table.find(out, peer) and chat_of(peer) then
+		if not table.find(out, peer) and chat_of(peer) then
 			table.insert(out, peer)
 		end
 	end
 	return out
+end
+
+type Mark = { chat: string, project: string, look: look.Look }
+local function stack_of(key: string): { Mark }
+	local out: { Mark } = {}
+	for _, id in focused_panes(key) do
+		local p = project_of(chat_of(id))
+		local mark = if p then look.custom(p) else nil
+		if mark then
+			table.insert(out, { chat = id, project = p.id, look = mark })
+			if #out == STACK then
+				break
+			end
+		end
+	end
+	return out
+end
+
+local function stack_width(count: number): number
+	return if count == 0 then 0 else TILE + FAN[count].x
 end
 
 -- What a tab's corner says: of its chats, any awaiting a person first, else any
@@ -112,7 +134,7 @@ end
 
 -- What a tab shows: of its chats, the one focused last.
 local function face(key: string): string
-	return stack_of(key)[1] or splits.panes(key)[1] or key
+	return focused_panes(key)[1] or splits.panes(key)[1] or key
 end
 
 -- A chat a drag carries, for the tabs: not a tab of them being moved.
@@ -200,54 +222,22 @@ local tile_exit = { opacity = 0, scale = 0.6, duration = 120, ease = "inQuad" }
 
 -- The tile for a pane's place in the stack: its project's. The focus moving
 -- swaps each place's pane, the new one springing up there.
-local function pane_tile(id: string, place: number): Node
-	return ui.presence(function(): string
-		local chat = stack_of(id)[place]
-		if not chat then
-			return ""
-		end
-		-- (A chat with no project shows the side chat's glyph: a real swap.)
-		return if project_of(chat_of(chat)) then chat else `{chat}\0loose`
-	end, function(which: string): Node
-		local chat = string.match(which, "^[^%z]*") or ""
-		if which ~= chat then
-			return ds.Tile { size = TILE, inside = ds.Icon { name = "side-chat", size = 14 } }
-		end
-		local function now(): any
-			return project_of(chat_of(chat))
-		end
-		return ds.Tile {
-			size = TILE,
-			label = function(): string?
-				local p = now()
-				return if p then p.name else "Chat"
-			end,
-			hue = function(): string?
-				local p = now()
-				return if p then look.of(p).hue else nil
-			end,
-			src = function(): string?
-				local p = now()
-				return if p then look.of(p).src else nil
-			end,
-			emoji = function(): string?
-				local p = now()
-				return if p then look.of(p).emoji else nil
-			end,
-			project = function(): string?
-				local p = now()
-				return if p then p.id else nil
-			end,
-		}
-	end, { w = TILE, h = TILE, shrink = 0, enter = tile_enter, exit = tile_exit })
+local function pane_tile(mark: Mark): Node
+	return ds.Tile {
+		size = TILE,
+		hue = mark.look.hue,
+		src = mark.look.src,
+		emoji = mark.look.emoji,
+		project = mark.project,
+	}
 end
 
 -- A tab's tiles: the pane focused last's in front at the far left, turned a little,
 -- its shadow on the others fanned out behind it to the right. (A tab of one pane
 -- has its tile alone and square: a turned node is a layer of its own.)
-local function tile(id: string): Node
+local function tile(id: string, marks: () -> { Mark }): Node
 	local function count(): number
-		return #stack_of(id)
+		return #marks()
 	end
 	local function stacked(): boolean
 		return count() >= 2
@@ -273,7 +263,17 @@ local function tile(id: string): Node
 			shadow = function(): any
 				return if stacked() and at == 1 then "$shadow.sm" else false
 			end,
-			pane_tile(id, at),
+			ui.presence(function(): string?
+				local mark = marks()[at]
+				if not mark then
+					return nil
+				end
+				local l = mark.look
+				return table.concat({ mark.chat, mark.project, l.hue, l.src or "", l.emoji or "" }, "\0")
+			end, function(): Node
+				local mark = marks()[at]
+				return if mark then pane_tile(mark) else ui.div {}
+			end, { w = TILE, h = TILE, shrink = 0, enter = tile_enter, exit = tile_exit }),
 		}
 	end
 	local shown_places: { any } = {
@@ -281,7 +281,7 @@ local function tile(id: string): Node
 		shrink = 0,
 		h = TILE,
 		w = motion.tween(ui.computed(function(): number
-			return TILE + FAN[math.clamp(count(), 1, STACK)].x
+			return stack_width(count())
 		end), SLIDE),
 	}
 	-- (Those behind first: each paints under the one after it.)
@@ -291,7 +291,9 @@ local function tile(id: string): Node
 		end, place(at)))
 	end
 	table.insert(shown_places, place(1))
-	return ui.div(shown_places)
+	return ui.show(function(): boolean
+		return count() > 0
+	end, ui.div(shown_places))
 end
 
 local function title(id: string): string
@@ -303,9 +305,10 @@ end
 -- preview): its tiles as they stand, its title, and room for its end.
 -- (Nothing here eases: a drag's preview has no clock for it.)
 local function still_face(key: string): Node
-	local count = #stack_of(key)
-	local places: { any } = { relative = true, shrink = 0, h = TILE, w = TILE + FAN[math.clamp(count, 1, STACK)].x }
-	for at = math.min(count, STACK), 1, -1 do
+	local marks = stack_of(key)
+	local count = #marks
+	local places: { any } = { relative = true, shrink = 0, h = TILE, w = stack_width(count) }
+	for at = count, 1, -1 do
 		local fan = FAN[at]
 		table.insert(places, ui.div {
 			absolute = true,
@@ -317,25 +320,28 @@ local function still_face(key: string): Node
 			rotate = if count >= 2 then fan.turn else 0,
 			bg = if count >= 2 then "$zeron.menu.solid" else "#00000000",
 			shadow = if count >= 2 and at == 1 then "$shadow.sm" else false,
-			pane_tile(key, at),
+			pane_tile(marks[at]),
 		})
 	end
 	return ui.row {
 		grow = 1,
 		min_w = 0,
 		h_full = true,
-		pl = ui.raw(4, "as far in as the tile is from its top"),
-		pr = ui.raw(4, "the tab's inset"),
+		px = ui.raw(FACE_INSET, "equal clearance for the tab's trailing control"),
 		gap = "$zeron.space.tight",
 		items = "center",
-		ui.div(places),
-		ds.FadeText { title(key), max_w = LABEL_MAX, min_w = 0, grow = 1, text_size = "$font.size.sm", weight = "$font.weight.medium" },
+		justify = "center",
+		if count > 0 then ui.div(places) else nil,
+		ds.FadeText { title(key), max_w = LABEL_MAX, min_w = 0, grow = 1, mb = if count > 0 then 2 else 0, text_size = "$font.size.sm", weight = "$font.weight.medium" },
 	}
 end
 
 local Tab = ui.component(function(props: { chat: string, strip: any }): Node
 	local id = props.chat
 	local strip = props.strip
+	local marks = ui.computed(function(): { Mark }
+		return stack_of(id)
+	end)
 	local hovered = ui.use_state(false)
 	-- A chat held over it, that dropping would bring in.
 	local held = ui.use_state(false)
@@ -383,10 +389,9 @@ local Tab = ui.component(function(props: { chat: string, strip: any }): Node
 			selected = active,
 			h = TAB_H,
 			shrink = 0,
-			pl = ui.raw(4, "as far in as the tile is from its top"),
-			pr = ui.raw(4, "the tab's inset"),
-			gap = "$zeron.space.tight",
+			px = ui.raw(FACE_INSET, "equal clearance for the tab's trailing control"),
 			items = "center",
+			justify = "center",
 			rounded = "$radius.lg",
 			cursor = "pointer",
 			relative = true,
@@ -480,20 +485,33 @@ local Tab = ui.component(function(props: { chat: string, strip: any }): Node
 			TabStrip.Wash(function(): boolean
 				return (hovered:get() or held:get()) and not active()
 			end),
-			tile(id),
-			ds.FadeText {
-				function(): string
-					return title(id)
-				end,
-				max_w = LABEL_MAX,
+			ui.row {
 				min_w = 0,
-				text_size = "$font.size.sm",
-				weight = "$font.weight.medium",
+				gap = "$zeron.space.tight",
+				items = "center",
+				x = motion.tween(hovered, { from = 0, to = -SLOT / 2, duration = 120, ease = SLIDE.ease }),
+				tile(id, function(): { Mark }
+					return marks:get()
+				end),
+				ds.FadeText {
+					function(): string
+						return title(id)
+					end,
+					mb = function(): number | string
+						return if #marks:get() > 0 then "$zeron.space.hair" else 0
+					end,
+					max_w = LABEL_MAX,
+					min_w = 0,
+					text_size = "$font.size.sm",
+					weight = "$font.weight.medium",
+				},
 			},
 			ui.row {
+				absolute = true,
+				right = TAB_INSET,
+				top = TAB_INSET,
 				w = SLOT,
 				h = SLOT,
-				shrink = 0,
 				items = "center",
 				justify = "center",
 				-- Its × under the pointer; else whether a chat of it awaits a person or
@@ -511,14 +529,14 @@ local Tab = ui.component(function(props: { chat: string, strip: any }): Node
 						label = "Close tab",
 						tooltip = false,
 						size = "sm",
-						tone = "quiet",
+						tone = "normal",
 						w = SLOT,
 						h = SLOT,
 						rounded = "$radius.sm",
 						on_click = function()
 							close(id)
 						end,
-						ds.Icon { name = "close", size = 12 },
+						ds.Icon { name = "close", size = 14 },
 					}
 				end, { shrink = 0 }),
 			},

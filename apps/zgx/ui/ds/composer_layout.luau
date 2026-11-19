@@ -9,6 +9,7 @@ local CONTROL, TEXT_SIDE, TEXT_OPEN_SIDE = 28, 8, 16
 local INSET_LINE = (ONE_LINE - CONTROL) / 2
 local ACTIONS, ACTIONS_OVER, HYSTERESIS = 42, 3, 32
 M.BORDER = 1
+local INSET_OPEN = 8 - M.BORDER
 
 export type Sample = { unwrapped_width: number, wrapped_height: number, line_height: number }
 export type Input = {
@@ -115,7 +116,7 @@ end
 -- Also used by the footer/tray to line up with the pill's controls; their
 -- own layout stays outside the text geometry calculation.
 local function chrome_of(control_corner: number)
-	local inset = control_corner - CONTROL / 2
+	local inset = math.max(INSET_OPEN, control_corner - CONTROL / 2)
 	return {
 		inset = inset,
 		tray_inset = inset + M.BORDER,

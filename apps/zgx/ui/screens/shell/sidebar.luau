@@ -24,11 +24,10 @@ local auth = require("@account/auth")
 local PrivateText = require("@ds/private_text")
 local status = require("@ds/status")
 local route = require("@app/screens/shell/route")
+local project_look = require("@app/screens/shell/project_look")
 local view = require("@app/screens/shell/view")
 local fit = require("@app/screens/shell/fit")
-local motion = require("@ds/motion")
 local boundary = require("@app/screens/shell/boundary")
-local control = require("@ds/control")
 local locale = require("@ds/locale")
 local ds_session_row = require("@ds/session_row")
 local activity = require("@app/screens/shell/activity")
@@ -459,8 +458,8 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 		local group = if p.repository then of_repository[p.repository] else nil
 		if not group then
 			local first = oldest_checkout(p, now.projects)
-			local l = route.look(first.id) or { hue = route.hue(first.id) }
-			group = { id = first.id, name = first.name, hue = l.hue, src = l.src, emoji = l.emoji, sessions = {} }
+			local l = project_look.custom(first)
+			group = { id = first.id, name = first.name, hue = l and l.hue, src = l and l.src, emoji = l and l.emoji, sessions = {} }
 			table.insert(out, group :: any)
 			if p.repository then
 				of_repository[p.repository] = group :: any
@@ -679,13 +678,6 @@ local function user(): User
 	return { name = locale.s("shell.sidebar.local") }
 end
 
--- What stands over you at the foot: the engine's update notice (C's
--- screens/engine/update: nothing unless this app's engine is out of date
--- and busy, or someone else's is; mounted always, as an idle engine of
--- ours is restarted from it), then Star on GitHub. (The list's gap between
--- them only while the notice says something: an empty one is no height and
--- takes no gap.)
-local star: () -> Node
 -- What the connection line says (production's connection pill: no
 -- surface, a faint caption; the amber dot when offline or a change wasn't
 -- saved, the working ring while reconnecting). Healthy: nothing.
@@ -707,10 +699,6 @@ local function connection_line(): Node
 			id = "connection-line",
 			w_full = true,
 			shrink = 0,
-			-- (Its dot on the foot's left edge: Star on GitHub's glyph's, the
-			-- filter's and the empty list's words'. Its words on Star on
-			-- GitHub's: the dot or the ring in a slot as wide as the star,
-			-- as far from them.)
 			px = "$space.2",
 			pb = "$space.2",
 			gap = "$zeron.space.tight",
@@ -742,84 +730,14 @@ local function connection_line(): Node
 end
 
 local function foot_notes(): Node
-	local notice_h = ui.use_state(0)
 	return ui.column {
 		w_full = true,
 		shrink = 0,
 		connection_line(),
-		ui.div {
-			w_full = true,
-			on_resize = function(size)
-				if notice_h:peek() ~= size.h then
-					notice_h:set(size.h)
-				end
-			end,
-			boundary.screen(boundary.named("shell.boundary.screen.update_notice"), "@app/screens/engine/update", function(update): Node
-				return update.Notice()
-			end, { pass = true }),
-		},
-		ui.div {
-			w_full = true,
-			mt = function(): any
-				return if notice_h:get() > 0 then "$zeron.list.gap" else 0
-			end,
-			star(),
-		},
+		boundary.screen(boundary.named("shell.boundary.screen.update_notice"), "@app/screens/engine/update", function(update): Node
+			return update.Notice()
+		end, { pass = true }),
 	}
-end
-
--- "Star on GitHub", over you at the foot, until it's put away (its × or
--- following it), and then never again on this Mac: Zeron's, to where its
--- landing page links.
-local REPO = "https://github.com/zeronsh/comet"
-local starred = ui.persist("shell_star_banner_dismissed", false)
-function star(): Node
-	local function away()
-		starred:set(true)
-	end
-	return ui.show(
-		function(): boolean
-			return not starred:get()
-		end,
-		-- A chip of the accent, a row's corner: its × as far from the chip's
-		-- edge at the end as from its top and foot, concentric.
-		ui.row {
-			id = "star-banner",
-			role = "link",
-			label = ui.t("shell.sidebar.star"),
-			w_full = true,
-			-- As tall as a row (you, under it).
-			h = ui.raw(30, "a sidebar row's height (ds/sidebar's SLOT)"),
-			shrink = 0,
-			pl = "$space.2",
-			-- (Its × as far in from the end as from the top: (30 − 22) / 2.)
-			pr = "$space.1",
-			gap = "$zeron.space.tight",
-			items = "center",
-			rounded = "$radius.lg",
-			bg = "$zeron.tone.accent.wash",
-			hover = { bg = "$zeron.tone.accent.edge" },
-			color = "$zeron.tone.accent.ink",
-			cursor = "pointer",
-			on_click = function()
-				ui.invoke("open_url", REPO)
-				away()
-			end,
-			-- A link's menu (ds/links): Open, as the click; Copy link.
-			context_menu = require("@ds/links").outside_menu(function(): string
-				return REPO
-			end, function()
-				ui.invoke("open_url", REPO)
-				away()
-			end),
-			ui.div { shrink = 0, y = 0.5, ds.Icon { name = "star-bold", size = 12 } },
-			ui.text { ui.t("shell.sidebar.star"), grow = 1, min_w = 0, text_size = "$font.size.xs", weight = "$font.weight.medium" },
-			ui.div {
-				theme = { zeron = { icon_button = { radius = control.nest("$radius.lg", "$space.1") } } },
-				ds.IconButton { icon = "close", label = ui.t("common.dismiss"), tooltip = locale.s("common.dismiss"), size = "sm", tone = "quiet", on_click = away },
-			},
-		}
-	)
 end
 
 -- Renaming a session: which, and the name being typed.

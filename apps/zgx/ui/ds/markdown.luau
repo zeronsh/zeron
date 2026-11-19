@@ -261,6 +261,7 @@ local function veil_chunks(v: Veil, text: string): { VeilChunk }
 end
 -- A link's or inline code's ink (ds/look).
 local accented_ink = look.accented_ink
+local link_ink = accented_ink("$zeron.accents.default")
 
 -- `color` (a token, or as written) at a chunk's fade now: as it is once it's done.
 local function veil_color(v: Veil, color: any, c: VeilChunk): any
@@ -788,7 +789,7 @@ local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: C
 		elseif r.a then
 			-- (Its ink the accent with "Accent colour throughout", as the
 			-- shipping app's; else the text's own.)
-			span.color = accented_ink(span.color)
+			span.color = link_ink
 			span.underline = true
 			span.underline_offset = 4
 			span.hover = { underline = true, color = "$accent" }

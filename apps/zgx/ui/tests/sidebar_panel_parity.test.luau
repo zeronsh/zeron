@@ -80,6 +80,7 @@ end
 
 test("every sidebar view option draws a side chat's row and group header as the sidebar's", function()
 	local app = open()
+	app:command("fixture.project_icons")
 	local checked = 0
 	for _, compact in { true, false } do
 		-- (Organize's every setting: one level, either, both in either

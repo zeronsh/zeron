@@ -33,6 +33,7 @@
 
 local tree_line = require("@self/tree_line")
 local Icon = require("@self/icon")
+local Kbd = require("@self/kbd")
 local Mark = require("@self/mark")
 local status = require("@self/status")
 local FadeText = require("@self/fade_text")
@@ -250,6 +251,7 @@ export type Props = {
 local WIDE, PAD, SLOT = 256, 8, 30
 -- How far it resizes (Zeron's: 242 to 400, 256 by default).
 local MIN_W, MAX_W = 242, 400
+local ACTION_CAP_MIN = 176
 -- A regular session row: two lines (the title's 17, a gap, the detail's 14)
 -- inside a compact row's top and bottom inset.
 local TALL = 46
@@ -2012,6 +2014,15 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		}, tall
 	end
 
+	local function action_cap(keys: string): Node?
+		if railed() then
+			return nil
+		end
+		return ui.show(function(): boolean
+			return not collapsed:get() and math.min(shown_w:get(), room()) >= ACTION_CAP_MIN
+		end, Kbd { text = ui.shortcut_text(keys), size = "sm", tone = "quiet" })
+	end
+
 	-- The top: a new chat and search, each a row (collapsed, its icon).
 	local top = ui.column {
 		-- Where plugins add beside New chat and Search.
@@ -2027,7 +2038,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			lead = Icon { name = "plus", size = 16 },
 			words = line(label(function(): string
 				return locale.s("ds.sidebar.new_chat")
-			end, nil, "$font.weight.medium"), hint(ui.shortcut_text("cmd+n"))),
+			end, nil, "$font.weight.medium"), action_cap("cmd+n")),
 			on_click = function()
 				if props.on_new then
 					props.on_new(nil)
@@ -2041,7 +2052,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			lead = Icon { name = "search", size = 16 },
 			words = line(label(function(): string
 				return locale.s("ds.sidebar.search")
-			end), hint(ui.shortcut_text("cmd+k"))),
+			end), action_cap("cmd+k")),
 			on_click = props.on_search,
 		},
 		if props.pages

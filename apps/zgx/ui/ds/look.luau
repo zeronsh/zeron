@@ -149,7 +149,7 @@ end
 -- a find's matches, @file tokens in the composer, and the conversation's
 -- list markers, quote rail and inline code. Off, each is the neutral it
 -- was. On by default; kept across launches.
-M.accented = ui.persist("accent_throughout", true)
+M.accented = ui.persist("accent_throughout", false)
 
 -- What a window overrides while it's on (ds/tokens' `zeron.accented.*`,
 -- each following the accent worn); nothing while it's off. (Links and
