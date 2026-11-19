@@ -2,8 +2,8 @@
 //! (`listing::check`, so every problem shows before anything is sent),
 //! signed and packed. The same steps whether the person publishes from
 //! Zeron's window or the CLI (signed with this device's key, uploaded with
-//! their session) or a CI job does (signed with a deploy key, the upload
-//! signed with it too).
+//! their session) or a CI job does (unsigned, uploaded with a deploy token:
+//! the store records the version as the token's).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -117,7 +117,22 @@ impl Prepared {
             return Err(WORDS.too_big.into());
         }
         let verified = install::parse(raw.clone())?;
-        if verified.hash != self.hash || verified.key != key.public() {
+        if verified.hash != self.hash || verified.key.as_deref() != Some(key.public().as_str()) {
+            return Err("It changed while it was being packed: try again".into());
+        }
+        Ok(raw)
+    }
+
+    /// It packed unsigned, for a deploy token to publish (the store records
+    /// it as the token's, its contents vouched for by the record's hash),
+    /// then read back as a device will (`install::parse_from_store`).
+    pub fn pack_unsigned(&self) -> Result<Vec<u8>, String> {
+        let raw = package::pack(FORMAT, &self.manifest.unsigned_value(), &self.files)?;
+        if raw.len() as u64 > MAX_PACKAGE_BYTES {
+            return Err(WORDS.too_big.into());
+        }
+        let verified = install::parse_from_store(raw.clone(), false)?;
+        if verified.hash != self.hash || verified.key.is_some() {
             return Err("It changed while it was being packed: try again".into());
         }
         Ok(raw)
@@ -143,8 +158,8 @@ impl Prepared {
 }
 
 /// Whether `version` is one the store will take beside the versions it
-/// already has of the plugin (`versions`: `/me/plugins`' `[{version,
-/// status}]`), as amendment 21 says: equal precedence to any version
+/// already has of the plugin (`versions`: `[{version, status}]`, the
+/// owner's view or its public list), as amendment 21 says: equal precedence to any version
 /// submitted is `version_exists`; a release must be above every release
 /// that isn't rejected or withdrawn, a pre-release above every version that
 /// isn't, else `not_newer`. (The store has the last word: this is what it
@@ -198,7 +213,6 @@ pub fn lines(problems: &[Problem]) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::plugins::listing::tests::listed;
-    use crate::plugins::store::deploy_key::DeployKey;
 
     fn folder(manifest: &Value, files: &BTreeMap<String, Vec<u8>>) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
@@ -222,17 +236,23 @@ mod tests {
         assert!(prepared.ok(), "{:?}", prepared.problems);
         assert_eq!(prepared.files.len(), files.len());
         assert_eq!(prepared.notes.as_deref(), Some("- Boards."));
-        let key = DeployKey::from_seed([9; 32]).unwrap();
-        let raw = prepared.pack(key.signing_key()).unwrap();
+        let key = SigningKey::from_seed(&[9; 32]).unwrap();
+        let raw = prepared.pack(&key).unwrap();
         let package = install::parse(raw).unwrap();
-        assert_eq!((package.key, package.hash.clone()), (key.public(), prepared.hash.clone()));
+        assert_eq!((package.key, package.hash.clone()), (Some(key.public()), prepared.hash.clone()));
+        // For a deploy token: unsigned, the same contents (the same hash),
+        // as a device takes it from the store; never as a sideload.
+        let unsigned = prepared.pack_unsigned().unwrap();
+        let package = install::parse_from_store(unsigned.clone(), false).unwrap();
+        assert_eq!((package.key, package.hash.clone()), (None, prepared.hash.clone()));
+        assert_eq!(install::reason_of(&install::parse(unsigned).unwrap_err()), Some("unsigned"));
         // An old signature in the folder doesn't matter: it's signed afresh.
         let (other, _) = SigningKey::generate().unwrap();
         let signed = other.sign_manifest(&manifest, &package::hashes(&files));
         let dir = folder(&signed, &files);
         let again = read(dir.path()).unwrap();
         assert_eq!(again.hash, prepared.hash, "the content hash leaves the signature out");
-        assert_eq!(install::parse(again.pack(key.signing_key()).unwrap()).unwrap().key, key.public());
+        assert_eq!(install::parse(again.pack(&key).unwrap()).unwrap().key, Some(key.public()));
         assert_eq!(again.shown()["ok"], true);
     }
 

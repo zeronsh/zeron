@@ -164,52 +164,52 @@ pub enum PluginCommand {
     },
     /// Publish a plugin to the store: it's live at once, for anyone to
     /// install, and marked verified once a reviewer has read it. In CI, set
-    /// ZERON_DEPLOY_KEY to a deploy key's secret (never pass it as an
-    /// argument): the folder is checked, signed with that key and sent, with
-    /// no Zeron running and no sign-in. Without it, your own plugin goes
-    /// through the running Zeron, signed with this device's key and sent
-    /// with your session. Exits 0 when published, 1 when it doesn't meet the
-    /// store's rules, 2 for a usage or set-up problem, 3 when the store
-    /// refuses the key or the account, 4 when the store can't be reached
-    /// (try again).
+    /// ZERON_DEPLOY_TOKEN to a deploy token (never pass it as an argument):
+    /// the folder is checked, packed and sent with the token, with no Zeron
+    /// running and no sign-in (the store records it as the token's, and
+    /// installs it as yours). Without it, your own plugin goes through the
+    /// running Zeron, signed with this device's key and sent with your
+    /// session. Exits 0 when published, 1 when it doesn't meet the store's
+    /// rules, 2 for a usage or set-up problem, 3 when the store refuses the
+    /// token or the account, 4 when the store can't be reached (try again).
     Publish {
-        /// The plugin's folder (with ZERON_DEPLOY_KEY), or the id of your
+        /// The plugin's folder (with ZERON_DEPLOY_TOKEN), or the id of your
         /// plugin in Zeron's plugins folder.
         target: String,
-        /// Check, sign and pack it, but don't send it.
+        /// Check and pack it, but don't send it.
         #[arg(long)]
         dry_run: bool,
     },
     /// Your plugins in the store: each version, whether Zeron has verified
-    /// it, and a reviewer's reason when it declined to. With
-    /// ZERON_DEPLOY_KEY, the plugins that key may publish (and no Zeron
-    /// needs to be running).
+    /// it, and a reviewer's reason when it declined to. Through the running
+    /// Zeron, with your session: never a deploy token's.
     Status {
         /// Only this plugin.
         id: Option<String>,
     },
-    /// Deploy keys: what a CI job publishes with. Each is your account's,
+    /// Deploy tokens: what a CI job publishes with. Each is your account's,
     /// for the plugins you name or all of yours, fixed when it's made. Made,
     /// listed and revoked through the running Zeron, with your session
-    /// (never with a deploy key); a plugin's first version comes from your
+    /// (never with a deploy token); a plugin's first version comes from your
     /// machine.
-    Key {
+    Token {
         #[command(subcommand)]
-        command: KeyCommand,
+        command: TokenCommand,
     },
     /// Stop new installs of a version (installed copies keep working).
-    /// Through the running Zeron, with your session: never a deploy key's.
+    /// Through the running Zeron, with your session: never a deploy token's.
     Yank { id: String, version: String },
     /// Undo `yank`.
     Unyank { id: String, version: String },
 }
 
 #[derive(Subcommand)]
-pub enum KeyCommand {
-    /// Make a deploy key: its secret is shown this once (Zeron keeps no
-    /// copy). Name the plugins it publishes (`--plugins a,b`), or `--all` of
-    /// yours, those you first publish later included; that can't change
-    /// afterwards. Making one needs a fresh sign-in, which this asks for.
+pub enum TokenCommand {
+    /// Make a deploy token: it's shown this once (neither Zeron nor the
+    /// store keeps it). Name the plugins it publishes (`--plugins a,b`), or
+    /// `--all` of yours, those you first publish later included; that can't
+    /// change afterwards. Making one needs a fresh sign-in, which this asks
+    /// for.
     Create {
         /// What it's for, like "GitHub Actions".
         #[arg(long)]
@@ -224,12 +224,12 @@ pub enum KeyCommand {
         #[arg(long, value_name = "DAYS")]
         expires_in_days: Option<u32>,
     },
-    /// List your deploy keys and what each publishes (never their secrets).
+    /// List your deploy tokens and what each publishes (never the tokens).
     List,
-    /// Revoke a deploy key: it publishes nothing from now on.
+    /// Revoke a deploy token: it publishes nothing from now on.
     Revoke {
-        /// The key, as `zeron plugin key list` shows it.
-        key: String,
+        /// The token's id, as `zeron plugin token list` shows it.
+        id: String,
     },
 }
 
@@ -516,9 +516,9 @@ mod tests {
             &["plugin", "check"],
             &["plugin", "publish"],
             &["plugin", "status"],
-            &["plugin", "key", "create"],
-            &["plugin", "key", "list"],
-            &["plugin", "key", "revoke"],
+            &["plugin", "token", "create"],
+            &["plugin", "token", "list"],
+            &["plugin", "token", "revoke"],
             &["plugin", "yank"],
             &["plugin", "unyank"],
             &["template", "use"],

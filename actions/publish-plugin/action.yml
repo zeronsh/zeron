@@ -1,16 +1,17 @@
 name: Publish a Zeron plugin
-description: Check a Zeron plugin against the store's rules and publish it (live at once, verified once Zeron has read it), signed with a deploy key.
+description: Check a Zeron plugin against the store's rules and publish it (live at once, verified once Zeron has read it) with a deploy token.
 author: Zeron
 branding:
   icon: upload-cloud
   color: gray-dark
 
 inputs:
-  key:
+  token:
     description: >-
-      The plugin's deploy key secret (zpk_…), from your repository's secrets.
-      Make one with `zeron plugin key create --name "GitHub Actions" --plugins <id>`.
-      Without it, the plugin is only checked (`zeron plugin check`).
+      A deploy token (zdt_…), from your repository's secrets. Make one with
+      `zeron plugin token create --name "GitHub Actions" --plugins <id>`, in
+      Zeron, or on the store's site. Without it, the plugin is only checked
+      (`zeron plugin check`).
     required: false
     default: ""
   path:
@@ -18,7 +19,7 @@ inputs:
     required: false
     default: "."
   dry-run:
-    description: "`true`: check, sign and pack the plugin, but don't publish it. `true` or `false` only: anything else fails the step."
+    description: "`true`: check and pack the plugin, but don't publish it. `true` or `false` only: anything else fails the step."
     required: false
     default: "false"
   zeron-version:
@@ -44,7 +45,7 @@ runs:
       # Inputs reach the script as environment variables, never pasted into
       # it: a path or version can't become a command.
       env:
-        ZERON_DEPLOY_KEY: ${{ inputs.key }}
+        ZERON_DEPLOY_TOKEN: ${{ inputs.token }}
         ZERON_PLUGIN_PATH: ${{ inputs.path }}
         ZERON_DRY_RUN: ${{ inputs.dry-run }}
         ZERON_VERSION: ${{ inputs.zeron-version }}

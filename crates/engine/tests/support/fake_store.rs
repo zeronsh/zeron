@@ -4,9 +4,9 @@
 //! the engine's store tests and the CLI's (`apps/zeron/tests`).
 //!
 //! Sessions are bearer tokens naming a username (`session:<username>`); a
-//! deploy key's signed request is checked as the contract says (a key of
-//! the account's, in scope for an owned plugin, signature, five minutes of
-//! skew). It can be made hostile on purpose (`serve_instead`,
+//! deploy token (`Bearer zdt_…`) is checked as the contract says (its form
+//! and checksum, then its hash: live, unexpired, in scope for a plugin its
+//! account owns). It can be made hostile on purpose (`serve_instead`,
 //! `offer_anyway`), or go offline.
 
 #![allow(dead_code)]
@@ -16,15 +16,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
-use ring::signature::{ED25519, UnparsedPublicKey};
 use serde_json::{Value, json};
 use sha2::Digest as _;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use zeron_engine::plugins::install;
-use zeron_engine::plugins::store::deploy_key::{self, Scope};
+use zeron_engine::plugins::store::deploy_token::{DeployToken, Scope};
 use zeron_engine::plugins::version::{Range, Version};
 
 #[derive(Clone, Debug)]
@@ -36,15 +34,16 @@ pub struct StoredVersion {
     pub verified: bool,
     pub raw: Vec<u8>,
     pub hash: String,
-    pub key: String,
+    /// Who signed it; none for a deploy token's (unsigned).
+    pub key: Option<String>,
     pub notes: String,
     pub engines: Option<String>,
     /// Taken down, with this reason.
     pub blocked: Option<String>,
-    /// `device` or `deploy_key`.
+    /// `device` or `deploy_token`.
     pub via: String,
-    /// The deploy key that sent it: `(key, name)`.
-    pub deploy_key: Option<(String, String)>,
+    /// The deploy token that sent it: `(id, short, name)`.
+    pub deploy_token: Option<(String, String, String)>,
     /// When the store took it (ms).
     pub published_at: i64,
     /// Yanked because a newer version was listed while this one wasn't
@@ -68,20 +67,25 @@ pub struct StoredPlugin {
     pub featured: bool,
 }
 
-/// A deploy key, as the store keeps it.
+/// A deploy token, as the store keeps it: never the token, its hash.
 #[derive(Clone, Debug)]
-pub struct StoredKey {
+pub struct StoredToken {
+    pub id: String,
+    pub short: String,
     pub owner: String,
     pub scope: Scope,
     pub name: String,
     pub expires_at: Option<i64>,
+    pub revoked: bool,
 }
 
 #[derive(Default)]
 pub struct State {
     pub plugins: BTreeMap<String, StoredPlugin>,
-    /// Deploy keys: public key → the key.
-    pub deploy_keys: BTreeMap<String, StoredKey>,
+    /// Deploy tokens: the token's SHA-256 (hex) → the token.
+    pub deploy_tokens: BTreeMap<String, StoredToken>,
+    /// Tokens made so far (each one's randomness).
+    pub tokens_made: u8,
     /// Each request: `(method, path, authorization)`.
     pub requests: Vec<(String, String, Option<String>)>,
     /// What the next package download of `(id, version)` serves instead.
@@ -92,8 +96,6 @@ pub struct State {
     pub submitted: Vec<(String, Vec<u8>, String)>,
     /// Updates asks, as sent.
     pub asks: Vec<Value>,
-    /// Each signed request's `X-Zeron-Content-SHA256`.
-    pub content_sha256: Vec<Option<String>>,
     /// Reports: `(id, body)`.
     pub reports: Vec<(String, Value)>,
     /// Blocks sent whatever the device asked (a hostile store).
@@ -137,8 +139,8 @@ fn bytes_of(state: &State, v: &StoredVersion) -> Value {
     if state.without_bytes { Value::Null } else { json!(v.raw.len()) }
 }
 
-/// Who sent a request: a username, and a deploy key's scope.
-type Who = (String, Option<Scope>);
+/// Who sent a request: a username, and a deploy token's scope and hash.
+type Who = (String, Option<(Scope, String)>);
 
 #[derive(Clone)]
 pub struct FakeStore {
@@ -274,9 +276,12 @@ impl FakeStore {
 
     /// Add version `raw` of its plugin, owned by `owner`: `verified` (listed
     /// and verified), `listed` (not verified) or `yanked`. Listed, it
-    /// supersedes older unverified versions, as a publish does.
+    /// supersedes older unverified versions, as a publish does. Unsigned,
+    /// it's a deploy token's (`via: "deploy_token"`, its record naming no
+    /// key).
     pub fn add(&self, owner: &str, raw: &[u8], state: &str, notes: &str) {
-        let package = install::parse(raw.to_vec()).expect("a valid package");
+        let package = install::parse(raw.to_vec()).or_else(|_| install::parse_from_store(raw.to_vec(), false)).expect("a valid package");
+        let by_token = package.key.is_none();
         let engines = package.manifest.raw["engines"]["zeron"].as_str().map(str::to_owned);
         let mut all = self.state.lock().unwrap();
         let published_at = all.tick();
@@ -294,8 +299,8 @@ impl FakeStore {
             notes: notes.to_owned(),
             engines,
             blocked: None,
-            via: "device".into(),
-            deploy_key: None,
+            via: if by_token { "deploy_token" } else { "device" }.into(),
+            deploy_token: by_token.then(|| ("tok_0000000000000000".to_owned(), "AAAAAAAA".to_owned(), "CI".to_owned())),
             published_at,
             superseded_by: None,
             publisher_account: String::new(),
@@ -364,8 +369,9 @@ impl FakeStore {
         self.state.lock().unwrap().plugins.get_mut(id).unwrap().owner_account = account.to_owned();
     }
 
-    /// `owner` has id `id` in the store, with no version listed (its first
-    /// came from a device and was taken down, say): a key may publish it.
+    /// `owner` has id `id` in the store, with no version at all (an id
+    /// held, nothing published yet): a device may publish its first
+    /// version, a deploy token may not.
     pub fn claim(&self, id: &str, owner: &str) {
         self.state.lock().unwrap().plugins.entry(id.to_owned()).or_insert_with(|| StoredPlugin { owner: owner.to_owned(), ..Default::default() });
     }
@@ -375,63 +381,62 @@ impl FakeStore {
         self.state.lock().unwrap().plugins.get_mut(id).unwrap().featured = true;
     }
 
-    /// A deploy key of `owner`'s, for `scope`.
-    pub fn add_deploy_key(&self, public: &str, scope: Scope, owner: &str) {
-        let key = StoredKey { owner: owner.to_owned(), scope, name: "CI".into(), expires_at: None };
-        self.state.lock().unwrap().deploy_keys.insert(public.to_owned(), key);
+    /// A deploy token of `owner`'s, named `name`, for `scope`, as the edge
+    /// makes one: the token, said this once.
+    pub fn add_deploy_token(&self, owner: &str, name: &str, scope: Scope) -> String {
+        let mut state = self.state.lock().unwrap();
+        state.tokens_made += 1;
+        let token = DeployToken::from_random(&[state.tokens_made; 32]);
+        let stored = StoredToken {
+            id: format!("tok_{:016}", state.tokens_made),
+            short: token.short().to_owned(),
+            owner: owner.to_owned(),
+            scope,
+            name: name.to_owned(),
+            expires_at: None,
+            revoked: false,
+        };
+        state.deploy_tokens.insert(token.hash(), stored);
+        token.as_str().to_owned()
     }
 
     pub fn installs(&self, id: &str) -> u32 {
         self.state.lock().unwrap().plugins.get(id).map_or(0, |p| p.installs)
     }
 
-    /// Who a request is: a session's username, or a deploy key's owner (with
-    /// its scope).
-    fn who(&self, method: &str, path: &str, headers: &BTreeMap<String, String>, body: &[u8]) -> Result<Option<Who>, (u16, Value)> {
+    /// Who a request is: a session's username, or a deploy token's owner
+    /// (with its scope), as the edge reads one: its form and checksum, then
+    /// its hash: unknown, revoked or expired answer 401 `invalid_token`; a
+    /// token only publishes (else 401 `session_required`), and only plugins
+    /// in its scope (else 403 `token_not_allowed`).
+    fn who(&self, method: &str, path: &str, headers: &BTreeMap<String, String>) -> Result<Option<Who>, (u16, Value)> {
         let Some(auth) = headers.get("authorization") else { return Ok(None) };
-        if let Some(token) = auth.strip_prefix("Bearer ") {
-            return Ok(token.strip_prefix("session:").map(|u| (u.to_owned(), None)));
-        }
-        let Some(rest) = auth.strip_prefix("ZeronKey ") else {
+        let Some(bearer) = auth.strip_prefix("Bearer ") else {
             return Err((401, json!({ "error": "unauthorized", "message": "Who's asking?" })));
         };
-        let field = |name: &str| rest.split(", ").find_map(|kv| kv.strip_prefix(&format!("{name}="))).unwrap_or("").to_owned();
-        let (key, ts, sig) = (field("key"), field("ts"), field("sig"));
-        let bad = |why: &str| Err((401, json!({ "error": "bad_signature", "message": why })));
-        let claimed = headers.get("x-zeron-content-sha256").cloned();
-        self.state.lock().unwrap().content_sha256.push(claimed.clone());
-        let Some(claimed) = claimed else { return bad("no X-Zeron-Content-SHA256") };
-        let Some(stored) = self.state.lock().unwrap().deploy_keys.get(&key).cloned() else {
-            return Err((403, json!({ "error": "key_not_allowed", "message": "That key isn't registered." })));
+        if let Some(user) = bearer.strip_prefix("session:") {
+            return Ok(Some((user.to_owned(), None)));
+        }
+        let bad = || Err((401, json!({ "error": "invalid_token", "message": "This deploy token is wrong, revoked or expired." })));
+        let Ok(token) = DeployToken::parse(bearer) else { return bad() };
+        let state = self.state.lock().unwrap();
+        let Some(stored) = state.deploy_tokens.get(&token.hash()).filter(|t| !t.revoked && t.expires_at.is_none_or(|at| at > chrono_now())).cloned() else {
+            return bad();
         };
-        let Ok(ts_ms) = ts.parse::<i64>() else { return bad("no time") };
-        if (chrono_now() - ts_ms).abs() > 5 * 60 * 1000 {
-            return bad("too old");
-        }
+        drop(state);
         let bare = path.split('?').next().unwrap_or(path);
-        // As the edge: the signature over the claimed hash first, then the
-        // body against it.
-        let message = format!("zeron-plugin-publish:v1\n{method}\n{bare}\n{claimed}\n{ts}");
-        let (Ok(key_bytes), Ok(sig_bytes)) = (B64URL.decode(&key), B64URL.decode(&sig)) else { return bad("not base64url") };
-        if UnparsedPublicKey::new(&ED25519, &key_bytes).verify(message.as_bytes(), &sig_bytes).is_err() {
-            return bad("the signature doesn't check out");
-        }
-        if sha256_hex(body) != claimed {
-            return Err((400, json!({ "error": "body_mismatch", "message": "The body isn't what X-Zeron-Content-SHA256 says." })));
-        }
-        // A deploy key publishes versions of its plugins and reads them.
         let bare_parts: Vec<&str> = bare.trim_start_matches('/').split('/').collect();
-        let allowed = matches!((method, bare_parts.as_slice()), ("POST", ["store", "v1", "plugins", _, "versions"]) | ("GET", ["store", "v1", "me", "plugins"]));
+        let allowed = matches!((method, bare_parts.as_slice()), ("POST", ["store", "v1", "plugins", _, "versions"]));
         if !allowed {
-            return Err((403, json!({ "error": "key_not_allowed", "message": "A deploy key publishes and reads status, nothing else." })));
+            return Err((401, json!({ "error": "session_required", "message": "A deploy token only publishes." })));
         }
-        Ok(Some((stored.owner, Some(stored.scope))))
+        Ok(Some((stored.owner, Some((stored.scope, token.hash())))))
     }
 
     fn answer(&self, method: &str, path: &str, headers: &BTreeMap<String, String>, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
         self.state.lock().unwrap().requests.push((method.to_owned(), path.to_owned(), headers.get("authorization").cloned()));
         let json_reply = |status: u16, value: Value| (status, "application/json", serde_json::to_vec(&value).unwrap());
-        let who = match self.who(method, path, headers, body) {
+        let who = match self.who(method, path, headers) {
             Ok(who) => who,
             Err((status, value)) => return json_reply(status, value),
         };
@@ -627,7 +632,8 @@ impl FakeStore {
             }
             ("POST", ["store", "v1", "plugins", id, "versions"]) => {
                 let Some((owner, scope)) = who else { return unauthorized() };
-                let package = match install::parse(body.to_vec()) {
+                // A token's is unsigned (a device's, signed): read as such.
+                let package = match install::parse_from_store(body.to_vec(), scope.is_none()) {
                     Ok(p) => p,
                     Err(e) => return json_reply(400, json!({ "error": "bad_package", "message": e })),
                 };
@@ -645,17 +651,17 @@ impl FakeStore {
                 }
                 let mut state = self.state.lock().unwrap();
                 let published_at = state.tick();
-                let deploy_key = scope.as_ref().and_then(|_| {
-                    let key = headers.get("authorization")?.split("key=").nth(1)?.split(',').next()?.to_owned();
-                    let name = state.deploy_keys.get(&key)?.name.clone();
-                    Some((key, name))
+                let deploy_token = scope.as_ref().and_then(|(_, hash)| {
+                    let token = state.deploy_tokens.get(hash)?;
+                    Some((token.id.clone(), token.short.clone(), token.name.clone()))
                 });
-                // A key publishes existing plugins its account owns, in its
-                // scope; never a new id.
-                if let Some(scope) = &scope {
-                    let owned = state.plugins.get(*id).is_some_and(|p| p.owner == owner);
+                // A token publishes plugins its account owns, in its scope,
+                // that have a version already: never a new id, never a
+                // plugin's first version (that comes from a device).
+                if let Some((scope, _)) = &scope {
+                    let owned = state.plugins.get(*id).is_some_and(|p| p.owner == owner && !p.versions.is_empty());
                     if !owned || !scope.covers(id) {
-                        return json_reply(403, json!({ "error": "key_not_allowed", "message": "This deploy key can't publish that plugin." }));
+                        return json_reply(403, json!({ "error": "token_not_allowed", "message": "This deploy token may not publish this plugin." }));
                     }
                 }
                 let plugin = state.plugins.entry((*id).to_owned()).or_insert_with(|| StoredPlugin { owner: owner.clone(), ..Default::default() });
@@ -665,7 +671,7 @@ impl FakeStore {
                 if plugin.versions.iter().any(|v| v.version == package.manifest.version) {
                     return json_reply(409, json!({ "error": "version_exists", "message": "That version was published already." }));
                 }
-                let via = if scope.is_some() { "deploy_key" } else { "device" };
+                let via = if scope.is_some() { "deploy_token" } else { "device" };
                 plugin.versions.push(StoredVersion {
                     version: package.manifest.version.clone(),
                     status: "listed".into(),
@@ -677,7 +683,7 @@ impl FakeStore {
                     engines: None,
                     blocked: None,
                     via: via.into(),
-                    deploy_key,
+                    deploy_token,
                     published_at,
                     superseded_by: None,
                     publisher_account: String::new(),
@@ -696,14 +702,14 @@ impl FakeStore {
                 let plugins: Vec<Value> = state
                     .plugins
                     .iter()
-                    .filter(|(id, p)| p.owner == owner && scope.as_ref().is_none_or(|s| s.covers(id)))
+                    .filter(|(id, p)| p.owner == owner && scope.as_ref().is_none_or(|(s, _)| s.covers(id)))
                     .map(|(id, p)| carded(&state, json!({
                         "id": id, "author": p.author(),
                         "versions": p.versions.iter().map(|v| {
                             let mut info = version_info(&state, v);
                             // (Who and which key sent it: the publish notice's.)
                             info["publisher_id"] = json!(publisher_id(&v.publisher_account));
-                            info["deploy_key"] = v.deploy_key.as_ref().map_or(Value::Null, |(key, name)| json!({ "key": key, "name": name }));
+                            info["deploy_token"] = v.deploy_token.as_ref().map_or(Value::Null, |(id, short, name)| json!({ "id": id, "short": short, "name": name }));
                             info["yanked_by"] = match (v.status.as_str(), &v.superseded_by) {
                                 ("yanked", Some(_)) => json!("superseded"),
                                 ("yanked", None) => json!("author"),
@@ -721,18 +727,18 @@ impl FakeStore {
                 let reply = json!({ "plugins": plugins, "publisher_id": publisher_id(account) });
                 json_reply(200, reply)
             }
-            ("GET", ["store", "v1", "me", "keys"]) => {
+            ("GET", ["store", "v1", "me", "tokens"]) => {
                 let Some((owner, None)) = who else { return unauthorized() };
                 let state = self.state.lock().unwrap();
-                let keys: Vec<Value> = state
-                    .deploy_keys
-                    .iter()
-                    .filter(|(_, k)| k.owner == owner)
-                    .map(|(key, k)| json!({ "key": key, "name": k.name, "scope": k.scope.to_value(), "expires_at": k.expires_at, "created_at": 1, "last_used_at": null, "last_used_plugin": null }))
+                let tokens: Vec<Value> = state
+                    .deploy_tokens
+                    .values()
+                    .filter(|t| t.owner == owner)
+                    .map(|t| json!({ "id": t.id, "short": t.short, "name": t.name, "scope": t.scope.to_value(), "expires_at": t.expires_at, "created_at": 1, "last_used_at": null, "revoked_at": if t.revoked { json!(2) } else { Value::Null } }))
                     .collect();
-                json_reply(200, json!({ "keys": keys }))
+                json_reply(200, json!({ "tokens": tokens }))
             }
-            ("POST", ["store", "v1", "me", "keys"]) => {
+            ("POST", ["store", "v1", "me", "tokens"]) => {
                 let Some((owner, None)) = who else { return unauthorized() };
                 let request: Value = serde_json::from_slice(body).unwrap_or_default();
                 if request["stepUp"].as_str().is_none_or(str::is_empty) {
@@ -747,37 +753,30 @@ impl FakeStore {
                         Err(e) => return json_reply(400, json!({ "error": "invalid_scope", "message": e })),
                     }
                 };
-                let mut state = self.state.lock().unwrap();
-                if let Scope::Plugins(ids) = &scope {
-                    let missing: Vec<&String> = ids.iter().filter(|id| state.plugins.get(*id).is_none_or(|p| p.owner != owner)).collect();
-                    if !missing.is_empty() {
-                        return json_reply(403, json!({ "error": "not_owner", "ids": missing, "message": "Not yours." }));
+                {
+                    let state = self.state.lock().unwrap();
+                    if let Scope::Plugins(ids) = &scope {
+                        let missing: Vec<&String> = ids.iter().filter(|id| state.plugins.get(*id).is_none_or(|p| p.owner != owner)).collect();
+                        if !missing.is_empty() {
+                            return json_reply(403, json!({ "error": "not_owner", "ids": missing, "message": "Not yours." }));
+                        }
                     }
                 }
-                // Proof v2: the account's key, its lifetime, its scope.
-                let Some(account) = state.plugins.values().find(|p| p.owner == owner).map(|p| p.account().to_owned()) else {
-                    return json_reply(403, json!({ "error": "not_owner", "ids": [], "message": "You have no plugins." }));
-                };
-                let (key, proof) = (request["key"].as_str().unwrap_or(""), request["proof"].as_str().unwrap_or(""));
-                let expires_at = request["expires"].as_i64();
-                let message = deploy_key::proof_message(&publisher_id(&account), expires_at, &scope, key);
-                let (Ok(key_bytes), Ok(sig)) = (B64URL.decode(key), B64URL.decode(proof)) else {
-                    return json_reply(400, json!({ "error": "invalid_proof", "message": "Not base64url." }));
-                };
-                if UnparsedPublicKey::new(&ED25519, &key_bytes).verify(message.as_bytes(), &sig).is_err() {
-                    return json_reply(400, json!({ "error": "invalid_proof", "message": "The proof doesn't check out." }));
-                }
                 let name = request["name"].as_str().unwrap_or("").to_owned();
-                state.deploy_keys.insert(key.to_owned(), StoredKey { owner, scope: scope.clone(), name: name.clone(), expires_at });
-                json_reply(201, json!({ "key": key, "name": name, "scope": scope.to_value(), "expires_at": expires_at, "created_at": 1 }))
+                let token = self.add_deploy_token(&owner, &name, scope.clone());
+                let mut state = self.state.lock().unwrap();
+                let hash = DeployToken::parse(&token).unwrap().hash();
+                let stored = state.deploy_tokens.get_mut(&hash).unwrap();
+                stored.expires_at = request["expires"].as_i64();
+                json_reply(201, json!({ "token": token, "id": stored.id, "short": stored.short, "name": name, "scope": scope.to_value(), "expires_at": stored.expires_at, "created_at": 1 }))
             }
-            ("DELETE", ["store", "v1", "me", "keys", key]) => {
+            ("DELETE", ["store", "v1", "me", "tokens", id]) => {
                 let Some((owner, None)) = who else { return unauthorized() };
                 let mut state = self.state.lock().unwrap();
-                if state.deploy_keys.get(*key).is_none_or(|k| k.owner != owner) {
-                    return not_found();
-                }
-                state.deploy_keys.remove(*key);
+                let Some(token) = state.deploy_tokens.values_mut().find(|t| t.id == *id && t.owner == owner) else {
+                    return json_reply(404, json!({ "error": "unknown_token", "message": "No such deploy token." }));
+                };
+                token.revoked = true;
                 json_reply(200, json!({ "revoked": true }))
             }
             ("POST", ["store", "v1", "plugins", id, "versions", version, action]) => {

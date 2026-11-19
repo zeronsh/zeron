@@ -1,6 +1,6 @@
 //! The store's HTTP routes at the edge (`/store/v1/…`, the plan's
 //! contract), as a device calls them: anonymously, with the signed-in
-//! session's bearer, or signed with a deploy key (CI).
+//! session's bearer, or a deploy token's (CI).
 //!
 //! Replies the device acts on (a plugin's record, its package, the batched
 //! update check) are read into types here, each field the contract names
@@ -18,7 +18,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::deploy_key::DeployKey;
+use super::deploy_token::DeployToken;
 use crate::plugins::install::{self, failure};
 use crate::plugins::listing;
 use crate::plugins::package::MAX_PACKAGE_BYTES;
@@ -37,7 +37,7 @@ pub mod reason {
     pub const STORE_ERROR: &str = "store_error";
     /// What the store sent isn't what its record says (hash, version, key,
     /// publisher): never installed.
-    pub const STORE_MISMATCH: &str = "store_mismatch";
+    pub const STORE_MISMATCH: &str = crate::plugins::install::reason::STORE_MISMATCH;
 }
 
 /// How a request proves who sends it.
@@ -48,8 +48,8 @@ pub enum Caller {
     /// The signed-in session's bearer, when there is one (none: as
     /// anonymous).
     Session(Arc<dyn zeron_rpc::TokenSource>),
-    /// A deploy key's signed request (CI).
-    DeployKey(Arc<DeployKey>),
+    /// A deploy token, as a bearer (CI).
+    DeployToken(Arc<DeployToken>),
 }
 
 /// The edge's store routes.
@@ -432,15 +432,13 @@ impl StoreClient {
                     request = request.bearer_auth(token);
                 }
             }
-            Caller::DeployKey(key) => {
-                // The path signed is the URL's path alone.
-                let bare = path.split('?').next().unwrap_or(path);
-                let empty = Vec::new();
-                let signed = body.as_ref().map_or(&empty, |(bytes, _)| bytes);
-                let ts = chrono::Utc::now().timestamp_millis();
-                request = request
-                    .header("Authorization", key.authorization(method.as_str(), bare, signed, ts))
-                    .header(super::deploy_key::CONTENT_SHA256_HEADER, crate::plugins::signing::sha256_hex(signed));
+            Caller::DeployToken(token) => {
+                // (Marked sensitive: never in a log or a debug print.)
+                let Ok(mut value) = reqwest::header::HeaderValue::from_str(&token.authorization()) else {
+                    return Err(plain(failure(super::deploy_token::reason::INVALID_TOKEN, super::deploy_token::DAMAGED)));
+                };
+                value.set_sensitive(true);
+                request = request.header(reqwest::header::AUTHORIZATION, value);
             }
         }
         if let Some((bytes, content_type)) = body {
@@ -583,17 +581,31 @@ impl StoreClient {
         self.json(reqwest::Method::POST, &path, None, caller).await
     }
 
-    /// The account's deploy keys (amendment 44).
-    pub async fn keys(&self, caller: &Caller) -> Result<Value, String> {
-        self.json(reqwest::Method::GET, "/store/v1/me/keys", None, caller).await
+    /// The account's deploy tokens (never their secrets).
+    pub async fn tokens(&self, caller: &Caller) -> Result<Value, String> {
+        self.json(reqwest::Method::GET, "/store/v1/me/tokens", None, caller).await
     }
 
-    pub async fn add_key(&self, body: Value, caller: &Caller) -> Result<Value, String> {
-        self.json(reqwest::Method::POST, "/store/v1/me/keys", Some(body), caller).await
+    /// Make a deploy token: its record as the list shows it, and the token,
+    /// this once. The answer's bytes, and the token's text in what was read
+    /// of them, are wiped once read.
+    pub async fn create_token(&self, body: Value, caller: &Caller) -> Result<(Value, DeployToken), String> {
+        let body = (serde_json::to_vec(&body).unwrap_or_default(), "application/json");
+        let bytes = zeroize::Zeroizing::new(self.send(reqwest::Method::POST, "/store/v1/me/tokens", Some(body), caller, MAX_JSON_BYTES).await?);
+        let mut made = object(&bytes)?;
+        let unreadable = || failure(reason::STORE_ERROR, "The store's answer had no token in it that could be read: revoke it from the list and make another");
+        let token = match made.get_mut("token").map(Value::take) {
+            Some(Value::String(text)) => DeployToken::parse(&zeroize::Zeroizing::new(text)).map_err(|_| unreadable())?,
+            _ => return Err(unreadable()),
+        };
+        if let Some(fields) = made.as_object_mut() {
+            fields.remove("token");
+        }
+        Ok((made, token))
     }
 
-    pub async fn revoke_key(&self, key: &str, caller: &Caller) -> Result<Value, String> {
-        self.json(reqwest::Method::DELETE, &format!("/store/v1/me/keys/{}", segment(key)), None, caller).await
+    pub async fn revoke_token(&self, id: &str, caller: &Caller) -> Result<Value, String> {
+        self.json(reqwest::Method::DELETE, &format!("/store/v1/me/tokens/{}", segment(id)), None, caller).await
     }
 
     /// Report a listed plugin (`reason`: malware, misleading, broken,
@@ -649,7 +661,6 @@ fn refusal(status: u16, body: &[u8]) -> String {
         // it again is the fix.
         // (The edge's word for a plugin or version it doesn't show this caller.)
         (Some("not_found"), 404) => failure(reason::NOT_IN_STORE, if message.is_empty() { "The store has no such plugin".to_owned() } else { message }),
-        (Some("body_mismatch"), _) => failure("body_mismatch", "What reached the store isn't what was signed (it changed on the way): send it again"),
         (Some(word), _) => failure(word, if message.is_empty() { format!("The store refused it ({status})") } else { message }),
         (None, 404) => failure(reason::NOT_IN_STORE, "The store has no such plugin"),
         (None, 429) => failure(install::reason::RATE_LIMITED, "The store is turning away requests from here for now; try again later"),
@@ -709,7 +720,7 @@ mod tests {
     async fn revoking_dot_dot_sends_nothing() {
         // (A closed port: had it been sent, the word would be store_unreachable.)
         let client = StoreClient::new("http://127.0.0.1:9");
-        let error = client.revoke_key("..", &Caller::Anonymous).await.unwrap_err();
+        let error = client.revoke_token("..", &Caller::Anonymous).await.unwrap_err();
         assert_eq!(install::reason_of(&error), Some(reason::NOT_IN_STORE), "{error}");
     }
 

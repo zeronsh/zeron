@@ -74,6 +74,8 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 # Already in the tree (zed-scap, through the app); only its system and disk
 # parts here, no threads pool.
 sysinfo = { version = "0.31.4", default-features = false, features = ["system", "disk"] }
+# A deploy token's checksum (zlib's CRC-32); already in the tree via flate2.
+crc32fast = "1.5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # The battery's IOKit power-source dictionary (device_stats.rs); already in the tree.

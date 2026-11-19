@@ -322,7 +322,9 @@ impl Plugins {
         install::compatible(&package.manifest).map_err(failed)?;
         // What a decision about it is bound to: its owner in the store, or
         // the key that signed it.
-        let binding = source.store().map_or_else(|| package.key.clone(), |s| s.binding());
+        // (Only the store's can be unsigned: anything else was refused.)
+        let signer = package.key.clone().unwrap_or_default();
+        let binding = source.store().map_or_else(|| signer.clone(), |s| s.binding());
         let mut old_binding = None;
         // Signed by another key than the installed one: only its author's
         // own (a new machine), which asks you again; or, from the store,
@@ -351,15 +353,21 @@ impl Plugins {
             // it was verified (the consent window says so).
             if let (Some(before), Some(store)) = (&entry.store, source.store.as_mut().filter(|_| source.kind == install::STORE)) {
                 store.replaced = Some(install::ReplacedVersion { version: entry.item.version.clone(), verified: before.verified });
+                // Unsigned (a deploy token's): the key the version before
+                // was signed with carries on, so a later signed version
+                // signed by another still says its key changed.
+                if store.key.is_none() {
+                    store.last_key = entry.key().map(str::to_owned).or_else(|| before.last_key.clone());
+                }
             }
-            if let Some(key) = entry.key().filter(|k| *k != package.key) {
+            if let Some(key) = entry.key().filter(|k| Some(*k) != package.key.as_deref()) {
                 let takes_over = match (&entry.store, source.store()) {
                     (Some(_), Some(_)) => true,
                     (None, Some(store)) => matches!(
                         &entry.item.author,
                         Author::Verified { username: Some(name), .. } if name.trim().eq_ignore_ascii_case(store.publisher.trim())
                     ),
-                    _ => self.same_account(key, &package.key, &id).await,
+                    _ => self.same_account(key, &signer, &id).await,
                 };
                 if takes_over {
                     rotated_from = Some(key.to_owned());
@@ -371,7 +379,7 @@ impl Plugins {
         let local = zeron_rpc::caller().is_local();
         let author = match source.store() {
             Some(store) => super::scan::store_author(store),
-            None => self.resolve_now(&package.key, Some(&id)).await,
+            None => self.resolve_now(&signer, Some(&id)).await,
         };
         let from_store = source.store().is_some();
         // A store version Zeron hasn't verified (by the record fetched for
@@ -409,7 +417,7 @@ impl Plugins {
                         id.clone(),
                         Decision {
                             allowed: true,
-                            author_key: Some(package.key.clone()),
+                            author_key: package.key.clone(),
                             permissions,
                             content_hash: None,
                             off: false,
@@ -550,7 +558,7 @@ impl Plugins {
                     &installed,
                     &fetched,
                     source,
-                    fetched.key != c.key && self.same_account(&c.key, &fetched.key, &c.id).await,
+                    fetched.key.as_deref() != Some(c.key.as_str()) && self.same_account(&c.key, fetched.key.as_deref().unwrap_or_default(), &c.id).await,
                 ) {
                     Some(found) => {
                         let keep = found.refused.is_none().then_some(&fetched);
@@ -640,7 +648,10 @@ impl Plugins {
             return Err(failed(refused));
         }
         let path = install::found_package_path(&self.inner.plugins_dir, id);
-        let package = blocking(move || package::read(&path, &install::WORDS).and_then(install::parse)).await?;
+        // Unsigned only as the store's, when its record named no signer (a
+        // deploy token's version); from anywhere else, signed.
+        let signed = found.source.as_ref().and_then(|s| s.store()).is_none_or(|s| s.key.is_some());
+        let package = blocking(move || package::read(&path, &install::WORDS).and_then(|raw| install::parse_from_store(raw, signed))).await?;
         if package.hash != found.hash {
             return Err(failed("The update changed since it was found; check again"));
         }
@@ -651,7 +662,7 @@ impl Plugins {
         // From the store: whether it's verified is the store's record's,
         // asked now, never what the check remembered (unknown: not).
         if let Some(store) = source.store.as_mut().filter(|_| source.kind == install::STORE) {
-            store.verified = self.verified_now(id, &found.version, &package.hash).await.map_err(failed)?;
+            store.verified = self.verified_now(id, &found.version, &package.hash, package.key.as_deref()).await.map_err(failed)?;
             if verified_only && !store.verified {
                 return Err(failed(install::failure(
                     install::reason::NOT_VERIFIED,
