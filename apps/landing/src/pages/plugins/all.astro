@@ -23,6 +23,7 @@ import { CATEGORIES } from "../../lib/store/nav.ts";
 import type { Category, PluginCard, Sort } from "../../lib/store/types.ts";
 import { pluginUrl } from "../../lib/store/urls.ts";
 import { categoryLine, EMPTY_BODY, store } from "../../lib/store/words.ts";
+import { lsb } from "../../lib/store/bearing.ts";
 
 export const prerender = false;
 
@@ -95,7 +96,7 @@ const when = (p: PluginCard) =>
     </nav>
     <header class="bhead">
       <div>
-        <h1>{heading}</h1>
+        <h1 class={lsb(heading)}>{heading}</h1>
         <p class="lead">{lead}</p>
       </div>
     </header>

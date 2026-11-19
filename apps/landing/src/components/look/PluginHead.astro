@@ -12,6 +12,7 @@ import { count } from "../../lib/store/format.ts";
 import { satisfies } from "../../lib/store/semver.ts";
 import type { PluginDetail, VersionInfo } from "../../lib/store/types.ts";
 import { memberUrl } from "../../lib/store/urls.ts";
+import { lsb } from "../../lib/store/bearing.ts";
 
 interface Props {
   plugin: PluginDetail & { version: string };
@@ -36,7 +37,7 @@ const first = plugin.categories[0] ?? null;
 <header class="head">
   <Tile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size="xl" />
   <div class="txt">
-    <h1><span class="name">{plugin.name}</span>{plugin.verified && <Seal size="l" />}</h1>
+    <h1 class={lsb(plugin.name)}><span class="name">{plugin.name}</span>{plugin.verified && <Seal size="l" />}</h1>
     <p class="by">
       <span>by {plugin.author.username ? <a href={memberUrl(plugin.author.username)}><b>@{plugin.author.username}</b></a> : <b>a former account</b>}</span>
       {category && <><i aria-hidden="true"></i><span>{category}</span></>}

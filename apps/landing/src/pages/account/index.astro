@@ -111,7 +111,7 @@ const gone = (p: MyPlugin) => p.listing === "suspended" || ["taken_down", "remov
                             <div><div class="nm name"><Words text={p.name} /></div><div class="id">{p.id}</div></div>
                           </div>
                           <div class="ver">
-                            <div class="top1">
+                            <div class="top1 pills">
                               {v && <b>{v.version}</b>}
                               <span class:list={["state", s.tone]}>{s.tone === "ok" && <Seal quiet />}{s.label}</span>
                             </div>

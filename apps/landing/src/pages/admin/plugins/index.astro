@@ -111,7 +111,7 @@ const submissionHref = (item: QueueItem) => `/admin/plugins/${encodeURIComponent
                           </div>
                         </div>
                         <div class="chg">
-                          <div class="lead1">
+                          <div class="lead1 pills">
                             {item.reports > 0 && <span class="state bad">{item.reports === 1 ? "1 report" : `${count(item.reports)} reports`}</span>}
                             {item.checks.fail > 0 && <span class="state bad">{item.checks.fail === 1 ? "A check failed" : `${count(item.checks.fail)} checks failed`}</span>}
                             <span>{c.line}</span>

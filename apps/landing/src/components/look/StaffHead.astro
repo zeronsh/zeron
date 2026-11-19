@@ -3,6 +3,8 @@
 // on what the list holds, and one row of tabs, the queue's lists and the
 // staff pages beside them, each with how many it holds where that's known.
 // On a phone the tabs scroll sideways, under one another's edge.
+import { lsb } from "../../lib/store/bearing.ts";
+
 interface Tab {
   label: string;
   href: string;
@@ -20,7 +22,7 @@ const { title, lead, tabs } = Astro.props;
 
 <div class="hd">
   <div>
-    <h1>{title}</h1>
+    <h1 class={lsb(title)}>{title}</h1>
     <p class="lead">{lead}</p>
   </div>
 </div>

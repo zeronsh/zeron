@@ -238,7 +238,10 @@ describe("an author's words stay in their place", () => {
     const { page, context } = await open("/admin/plugins/xss-probe/1.1.0", { as: "user_grace" });
     try {
       const [name, version] = await Promise.all([page.locator("h1 > .name").first().boundingBox(), page.locator("h1 > .vnum").boundingBox()]);
-      expect(version!.x).toBeGreaterThanOrEqual(name!.x + name!.width - 1);
+      // (After the name in reading order: further along its line, or on a line below it.)
+      const sameLine = Math.abs(version!.y - name!.y) < name!.height / 2;
+      if (sameLine) expect(version!.x).toBeGreaterThanOrEqual(name!.x + name!.width - 1);
+      else expect(version!.y).toBeGreaterThan(name!.y);
     } finally {
       await context.close();
     }

@@ -26,6 +26,7 @@ import { everListed, listingState, verificationState, versionState, type Tone } 
 import type { VersionInfo } from "../../../lib/store/types.ts";
 import { pluginUrl } from "../../../lib/store/urls.ts";
 import { statusWords, store } from "../../../lib/store/words.ts";
+import { lsb } from "../../../lib/store/bearing.ts";
 
 export const prerender = false;
 
@@ -94,7 +95,7 @@ const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions
           <header class="mhead">
             <Tile id={plugin.id} name={name} icon={plugin.icon} version={plugin.versions[0]?.version ?? plugin.version} size="l" />
             <div class="txt">
-              <h1><Words text={name} /></h1>
+              <h1 class={lsb(name)}><Words text={name} /></h1>
               <p class="by">
                 <span class="mono">{plugin.id}</span>
                 {listing && <><i aria-hidden="true"></i><span class:list={["state", TONE[listing.tone]]}>{listing.label}</span></>}
@@ -126,7 +127,7 @@ const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions
                     const live = v.status === "listed" || v.status === "yanked";
                     return (
                       <li class:list={["vr", { off: !live }]}>
-                        <div class="vn">
+                        <div class="vn pills">
                           <b class="mono">{v.version}</b>
                           {/* (Whether Zeron verified it beside the version, always first; where it stands after it.) */}
                           {(v.status === "listed" || v.status === "yanked") && <span class:list={["state", verified.tone]} data-kind="verified">{verified.seal && <Seal quiet />}{verified.label}</span>}

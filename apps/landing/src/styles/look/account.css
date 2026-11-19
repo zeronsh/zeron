@@ -20,7 +20,7 @@
 .sub a:focus-visible { outline-offset: -2px; }
 
 /* Signed out: the page's own invitation. */
-.please { margin-top: 32px; padding: 28px; border-radius: 18px; background: var(--surface); box-shadow: var(--shadow-1); max-width: 34em; }
+.please { margin-top: 32px; margin-left: -28px; padding: 28px; border-radius: 18px; background: var(--surface); box-shadow: var(--shadow-1); max-width: 34em; }
 .please h2 { font-size: 19px; line-height: 26px; }
 .please p { margin-top: 4px; color: var(--text-2); }
 .please .btn { margin-top: 18px; }
@@ -28,9 +28,9 @@
 .acct .empty .cmd { margin-top: 16px; }
 
 /* ---- Your plugins: each one, its newest version, and where that version stands ---- */
-.mine { margin-top: 28px; }
+.mine { margin-top: 28px; margin-inline: calc(-1 * var(--card)); }
 .mine ul, .keys ul { padding: 0; list-style: none; }
-.row { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1.45fr) minmax(0, 0.95fr) 80px 16px; gap: 32px; align-items: start; padding: 20px 24px; transition: background-color 0.12s var(--ease); }
+.row { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1.45fr) minmax(0, 0.95fr) 80px 16px; gap: 32px; align-items: start; padding: 20px var(--card); transition: background-color 0.12s var(--ease); }
 a.row:hover { background: color-mix(in srgb, var(--sunken) 55%, transparent); }
 a.row:hover > svg { transform: translateX(2px); stroke: var(--text); }
 a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
@@ -42,7 +42,7 @@ a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
 .who .nm { font-weight: 550; letter-spacing: -0.005em; line-height: 22px; text-wrap: balance; }
 .who .id { font: 450 12.5px/18px var(--mono); color: var(--text-3); margin-top: 2px; overflow-wrap: anywhere; }
 .ver { font-size: 14px; line-height: 20px; padding-top: 1px; min-width: 0; }
-.ver .top1 { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; min-height: 24px; }
+.ver .top1 { display: flex; align-items: center; flex-wrap: wrap; row-gap: 4px; min-height: 24px; }
 .ver b { font: 600 14px/20px var(--mono); letter-spacing: -0.01em; overflow-wrap: anywhere; }
 .ver small { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 13px; line-height: 18px; color: var(--text-3); }
 .ver small .seal { vertical-align: 0; }
@@ -67,12 +67,12 @@ a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
 .mvers { margin-top: 40px; }
 .mvers > h2 { display: flex; align-items: baseline; gap: 8px; font-size: 19px; line-height: 26px; }
 .mvers > h2 .num { font-size: 14px; font-weight: 450; color: var(--text-3); }
-.vlist { margin-top: 14px; }
+.vlist { margin-top: 14px; margin-inline: calc(-1 * var(--card)); }
 .vlist ul { padding: 0; list-style: none; }
-.vr { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.6fr) minmax(0, 0.8fr) 168px; gap: 32px; align-items: start; padding: 20px 24px; }
+.vr { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.6fr) minmax(0, 0.8fr) 168px; gap: 32px; align-items: start; padding: 20px var(--card); }
 .vlist li + li.vr, .vr.h + ul .vr { box-shadow: 0 -1px 0 var(--line); }
 .vr.h { padding-top: 14px; padding-bottom: 12px; font-size: 13px; line-height: 20px; color: var(--text-3); }
-.vn { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
+.vn { display: flex; flex-wrap: wrap; align-items: center; row-gap: 6px; min-width: 0; }
 .vn b { font: 600 14px/24px var(--mono); letter-spacing: -0.01em; overflow-wrap: anywhere; }
 .means { display: flex; flex-direction: column; gap: 10px; min-width: 0; font-size: 14px; line-height: 21px; color: var(--text-2); }
 .means > p { padding-top: 1px; }
@@ -85,31 +85,32 @@ a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
 
 /* ---- Deploy keys ---- */
 .keys { margin-top: 28px; }
-/* "Can publish" is two tracks: the tiles' (as wide as a key for many draws them: three tiles and
-   the count's, less the gap past it, so its words sit 12px from them) and its words'. A key for one
-   to three plugins, or all, spans both; a key for many puts its count and "Show all" in the words'
-   track, one under the other, and the whole list opens under the row. */
-.key { --gap: 32px; --tiles: calc(114px + 12px - var(--gap)); display: grid; grid-template-columns: minmax(0, 1.15fr) var(--tiles) minmax(0, 0.75fr) minmax(0, 1fr) 132px 72px; column-gap: var(--gap); align-items: center; padding: 20px 24px; }
-.key > .scope, .key.h > .sc { grid-column: span 2; }
+/* "Can publish" is two tracks: one slot for the tiles, always room for three and the count (so every row's
+   words, and the header's, start on one column, whatever the key holds), and the words' own. Its parts are
+   the row's grid items: a key for many puts its count and "Show all" in the words' track, one under the
+   other, and the whole list opens under the row. Every cell's first line sits on the tiles' line: the
+   tiles at the top, each cell's words 6px down, a 20px line centred on a 32px tile. */
+.card.keys { margin-inline: calc(-1 * var(--card)); }
+.key { --gap: 32px; --slot: calc(4 * 32px + 3 * 4px); display: grid; grid-template-columns: minmax(0, 1.15fr) calc(var(--slot) + 12px - var(--gap)) minmax(0, 0.75fr) minmax(0, 1fr) 132px 72px; column-gap: var(--gap); align-items: start; padding: 20px var(--card); }
+.key.h > .sc { grid-column: 3; }
 .keys li + li.key, .key.h + ul .key { box-shadow: 0 -1px 0 var(--line); }
 .key.h { padding-top: 14px; padding-bottom: 12px; font-size: 13px; line-height: 20px; color: var(--text-3); }
+.key:not(.h) > :is(.kname, .used, .ends), .scope > .w, .scope .count { padding-top: 6px; }
 .key .kname { min-width: 0; }
 .key .nm { font-weight: 550; letter-spacing: -0.005em; overflow-wrap: anywhere; text-wrap: balance; }
 .key .id { margin-top: 2px; font: 450 12.5px/18px var(--mono); color: var(--text-3); }
-.scope { display: flex; align-items: flex-start; gap: 12px; min-width: 0; }
-.scope .tiles { display: flex; flex: none; padding-top: 2px; }
-.scope .tiles .tile { margin-left: -6px; box-shadow: 0 0 0 2.5px var(--surface), inset 0 0 0 1px color-mix(in oklch, currentColor 12%, transparent); }
-.scope .tiles .tile:first-child { margin-left: 0; }
-/* A key for many plugins: three tiles, a count, and the whole list on request. */
-.scope .tiles .more { width: 36px; padding: 0; background: var(--sunken); color: var(--text-2); font: 600 11.5px/1 var(--sans); letter-spacing: -0.01em; box-shadow: 0 0 0 2.5px var(--surface); font-variant-numeric: tabular-nums; }
-.scope .w { min-width: 0; font-size: 14px; line-height: 20px; }
+.scope, .scope.many .w, .scope.many .every { display: contents; }
+.scope > .tiles, .scope > .all { grid-column: 2; margin-right: calc(12px - var(--gap)); }
+.scope > .w { grid-column: 3; min-width: 0; }
+/* The tiles side by side, never over one another; past three, the count, a tile of its own. */
+.scope .tiles { display: flex; gap: 4px; }
+.scope .tiles .more { width: 32px; height: 32px; padding: 0; border-radius: 27%; background: var(--sunken); color: var(--text-2); font: 600 11px/1 var(--sans); letter-spacing: -0.01em; font-variant-numeric: tabular-nums; box-shadow: inset 0 0 0 1px var(--line); }
+.scope .w { font-size: 14px; line-height: 20px; }
 .scope .w .names { overflow-wrap: anywhere; text-wrap: balance; }
 .scope .w small { display: block; font-size: 13px; color: var(--text-3); }
-.all { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 27%; background: var(--sunken); color: var(--text-2); flex: none; }
+.all { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 27%; background: var(--sunken); color: var(--text-2); }
 .all svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.scope.many, .scope.many .w, .scope.many .every { display: contents; }
-.key:has(.many) > :is(.kname, .used, .ends, .btn) { grid-row: 1 / 3; }
-.scope.many .tiles { grid-column: 2; grid-row: 1 / 3; align-self: center; margin-right: calc(12px - var(--gap)); padding: 0; }
+.key:has(.many) > :is(.kname, .used, .ends, .btn), .scope.many .tiles { grid-row: 1 / 3; }
 .scope.many .count { grid-column: 3; grid-row: 1; }
 .scope.many summary { grid-column: 3; grid-row: 2; justify-self: start; }
 .scope.many .every::details-content { grid-column: 2 / -1; grid-row: 3; }
@@ -118,12 +119,13 @@ a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
 .every summary:hover { color: var(--text); }
 .every summary svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; transform: rotate(90deg); transition: transform 0.12s var(--ease); }
 .every[open] summary svg { transform: rotate(-90deg); }
-.plist { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; padding: 12px; border-radius: 14px; background: var(--sunken); list-style: none; }
+.plist { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; margin-left: -17px; padding: 12px; border-radius: 14px; background: var(--sunken); list-style: none; }
 .pl { display: inline-flex; align-items: center; gap: 8px; min-height: 32px; max-width: 100%; padding: 4px 12px 4px 5px; border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-1); font-size: 13px; line-height: 18px; font-weight: 500; overflow-wrap: anywhere; text-wrap: balance; }
 .used { font-size: 14px; line-height: 20px; min-width: 0; }
 .used small { display: block; font-size: 13px; color: var(--text-3); overflow-wrap: anywhere; text-wrap: balance; }
 .ends { font-size: 14px; line-height: 20px; color: var(--text-2); }
-.key .btn { justify-self: end; margin-right: -10px; }
+.ends > .state { margin-left: calc(-1 * var(--pad)); }
+.key .btn { justify-self: end; margin-right: calc(-1 * var(--pad)); }
 .key.was { color: var(--text-2); }
 .key.was .nm { color: var(--text-2); }
 .gone { margin-top: 20px; }
@@ -152,7 +154,7 @@ a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
 .how code { font: 500 12.5px/1 var(--mono); padding: 2px 5px; border-radius: 5px; background: var(--sunken); color: var(--text); }
 
 /* A question before something that can't be taken back. */
-.askcard { max-width: 520px; margin-top: 8px; padding: 28px; overflow: visible; }
+.askcard { max-width: 520px; margin-top: 8px; margin-left: -28px; padding: 28px; overflow: visible; }
 .askcard h1 { font-size: 24px; line-height: 30px; letter-spacing: -0.02em; overflow-wrap: anywhere; }
 .askcard p { margin-top: 8px; color: var(--text-2); }
 .askcard .answers { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
@@ -161,11 +163,11 @@ a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
   .vr { grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.5fr) minmax(0, 0.8fr) auto; gap: 24px; }
   .row { grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) minmax(0, 0.9fr) 16px; gap: 24px; }
   .row .n, .row.h .r { display: none; }
-  .key { --gap: 20px; grid-template-columns: minmax(0, 1fr) var(--tiles) minmax(0, 0.6fr) minmax(0, 0.9fr) 112px 72px; }
+  .key { --gap: 20px; grid-template-columns: minmax(0, 1fr) calc(var(--slot) + 12px - var(--gap)) minmax(0, 0.6fr) minmax(0, 0.9fr) 112px 72px; }
 }
 @media (max-width: 860px) {
   .vr.h { display: none; }
-  .vr { grid-template-columns: minmax(0, 1fr) auto; gap: 12px 16px; padding: 18px 20px; }
+  .vr { grid-template-columns: minmax(0, 1fr) auto; gap: 12px 16px; padding: 18px var(--card); }
   .vr .vn { grid-column: 1; }
   .vr .act { grid-column: 2; grid-row: 1; }
   .vr .means, .vr .pub { grid-column: 1 / -1; }
@@ -176,22 +178,23 @@ a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
   .mhead .txt { flex-basis: calc(100% - 74px); }
   .mhead > .btn { margin-left: 74px; }
   .acct .hd { flex-direction: column; align-items: flex-start; gap: 20px; }
+  .acct .hd > .btn { margin-left: calc(-1 * var(--pad)); }
   .row.h, .key.h { display: none; }
-  .row { grid-template-columns: minmax(0, 1fr) auto; gap: 12px 16px; padding: 18px 20px; }
+  .row { grid-template-columns: minmax(0, 1fr) auto; gap: 12px 16px; padding: 18px var(--card); }
   .row .who { grid-column: 1; }
   .row > svg { grid-column: 2; grid-row: 1; align-self: center; }
   .row .ver, .row .pub { grid-column: 1 / -1; }
   .row .pub { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 0; }
   .row .pub small { margin: 0; }
-  .key { grid-template-columns: minmax(0, 1fr) auto; gap: 12px 16px; padding: 18px 20px; align-items: start; }
-  .key .kname { grid-column: 1; grid-row: 1; }
+  .key { grid-template-columns: minmax(0, 1fr) auto; gap: 12px 16px; padding: 18px var(--card); }
+  .key .kname { grid-column: 1; grid-row: 1; padding-top: 0; }
   .key .btn { grid-column: 2; grid-row: 1; }
-  .key .scope, .key .used, .key .ends { grid-column: 1 / -1; grid-row: auto; margin: 0; }
+  .key .used, .key .ends { grid-column: 1 / -1; grid-row: auto; margin: 0; padding-top: 0; }
   .key:has(.many) > :is(.used, .ends) { grid-row: auto; }
-  /* (A key for many, full width: its tiles, its count over "Show all", the list under them.) */
-  .key .scope.many { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 12px; }
-  .scope.many .tiles { grid-column: 1; margin-right: 0; }
-  .scope.many .count, .scope.many summary { grid-column: 2; }
+  /* (Full width: the tiles' slot, the words beside it, a key for many's list under them.) */
+  .key .scope, .key .scope.many { display: grid; grid-template-columns: var(--slot) minmax(0, 1fr); column-gap: 12px; grid-column: 1 / -1; }
+  .scope > .tiles, .scope > .all, .scope.many .tiles { grid-column: 1; margin-right: 0; }
+  .scope > .w, .scope.many .count, .scope.many summary { grid-column: 2; }
   .scope.many .every::details-content { grid-column: 1 / -1; }
   .key .used { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
   .how { grid-template-columns: minmax(0, 1fr); gap: 24px; }
@@ -201,8 +204,9 @@ a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
   .acct .crumbs { margin-top: -12px; }
   .acct h1 { font-size: 32px; line-height: 36px; }
   .sub { margin-top: 28px; gap: 22px; }
-  .please { padding: 22px 20px; }
-  .askcard { padding: 22px 20px; }
+  /* (As wide as the column, as wide as the screen: the cards hang the whole gutter.) */
+  .mine, .vlist, .card.keys { border-radius: 0; }
+  .please, .askcard { margin-inline: calc(-1 * var(--gutter)); padding: 22px var(--gutter); border-radius: 0; max-width: none; }
   .askcard .answers { flex-direction: column-reverse; }
   .askcard .answers .btn { width: 100%; }
 }

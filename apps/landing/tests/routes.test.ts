@@ -168,7 +168,7 @@ describe("All plugins (/plugins/all)", () => {
   test("search, category, keyword; the count when the list says it exactly", async () => {
     const timer = await html("/plugins/all?q=timer");
     expect(listed(timer.body)).toContain("focus-timer");
-    expect(timer.body).toContain("<h1>Results for “timer”</h1>");
+    expect(timer.body).toMatch(/<h1[^>]*>Results for “timer”<\/h1>/);
     // The count, always (amendment 38's total).
     expect(timer.body).toMatch(/<p id="results"><b class="num">\d+<\/b> plugins?<\/p>/);
     // (The field keeps the words.)
@@ -229,7 +229,8 @@ describe("a plugin's page", () => {
     expect(body).toMatch(/<main id="main" class="h\d+">/);
     expect(body.match(/<a class="slide"/g)).toHaveLength(2);
     // The README doesn't say the name again, and nothing in it outweighs the title.
-    expect(body.match(/<h[1-6][^>]*>(<span class="name">)?Focus timer/g)).toEqual(['<h1><span class="name">Focus timer']);
+    // (One heading names it; drawn its first letter's side bearing left: lib/store/bearing.ts.)
+    expect(body.match(/<h[1-6][^>]*>(<span class="name">)?Focus timer/g)).toEqual(['<h1 class="lsb-5"><span class="name">Focus timer']);
     expect(body).not.toMatch(/<article class="prose"[^>]*>[^]*?<h1/);
     // Its parts are pages of their own, each a real address; Report is in the rail.
     expect(body).toMatch(/<a href="\/plugins\/focus-timer" aria-current="page">Overview<\/a><a href="\/plugins\/focus-timer\/versions">Versions<span class="num">\d+<\/span><\/a><a href="\/plugins\/focus-timer\/asks">What it asks for<span class="num">\d+<\/span><\/a>/);

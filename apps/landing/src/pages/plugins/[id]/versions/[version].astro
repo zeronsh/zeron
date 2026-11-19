@@ -21,6 +21,7 @@ import { satisfies } from "../../../../lib/store/semver.ts";
 import { stoppedWhy } from "../../../../lib/store/states.ts";
 import { fileUrl, pluginUrl } from "../../../../lib/store/urls.ts";
 import { statusWords, store } from "../../../../lib/store/words.ts";
+import { lsb } from "../../../../lib/store/bearing.ts";
 
 export const prerender = false;
 
@@ -62,7 +63,7 @@ const base = pluginUrl(id);
         <header class="head one">
           <Tile id={p.id} name={p.name} icon={p.icon} version={p.version} size="l" />
           <div class="txt">
-            <h1><span class="name">{p.name}</span> <b class="vnum mono">{v.version}</b></h1>
+            <h1 class={lsb(p.name)}><span class="name">{p.name}</span> <b class="vnum mono">{v.version}</b></h1>
             <p class="by">
               <span>{newest ? "Its newest version" : `Published ${date(v.published_at)}`}</span>
               {newest && <><i aria-hidden="true"></i><span>Published {date(v.published_at)}</span></>}

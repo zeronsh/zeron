@@ -48,7 +48,7 @@ const now = Date.now();
       </a>
     )
   }
-  <div class="ver">
+  <div class="ver pills">
     <b class="mono">{version}</b>
     {verified ? <span class="state ok"><Seal quiet />{store("plugins.store.verified")}</span> : <span class="state no">{store("plugins.store.review.waiting")}</span>}
     {verified && verifiedAt !== null ? <time class="t3" datetime={new Date(verifiedAt).toISOString()}>{day(verifiedAt, now)}</time> : <time class="t3" datetime={new Date(publishedAt).toISOString()}>{since(publishedAt, now, true)}</time>}

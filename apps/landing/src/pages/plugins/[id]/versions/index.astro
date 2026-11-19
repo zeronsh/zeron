@@ -89,7 +89,7 @@ const pager = page.state === "ok" && page.versions ? pagerOf(`${pluginUrl(asked)
                         {isPrerelease(v.version) && <span class="new">Pre-release</span>}
                       </div>
                       <div class="vbody">
-                        <div class="st">
+                        <div class="st pills">
                           <span class:list={["state", p.tone]}>{p.tone === "ok" && <Seal quiet />}{p.label}</span>
                           <span>{said(v)}</span>
                         </div>

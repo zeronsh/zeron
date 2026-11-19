@@ -39,6 +39,7 @@ import { adminSession } from "../../../../lib/store/session.ts";
 import { fileUrl, memberUrl, pictureUrl, pluginUrl } from "../../../../lib/store/urls.ts";
 import { reportReasonWords, statusWords, store } from "../../../../lib/store/words.ts";
 import type { Check, PackageFile, VersionInfo } from "../../../../lib/store/types.ts";
+import { lsb } from "../../../../lib/store/bearing.ts";
 
 export const prerender = false;
 
@@ -225,7 +226,7 @@ const versions = record.ok ? record.data.versions : null;
           <header class="head one rv-head">
             <Tile id={s.plugin.id} name={name} icon={s.version.icon ?? s.plugin.icon} version={version} size="l" />
             <div class="txt">
-              <h1><span class="name"><Words text={name} /></span> <b class="vnum mono">{version}</b></h1>
+              <h1 class={lsb(name)}><span class="name"><Words text={name} /></span> <b class="vnum mono">{version}</b></h1>
               <p class="by">
                 <span>by {author ? <a href={memberUrl(author)}><b>@{author}</b></a> : "an account with no username"}</span>
                 <i aria-hidden="true"></i>

@@ -4,6 +4,7 @@
 // with how many it holds when that's known.
 import Icon from "./Icon.astro";
 import type { IconName } from "./icons.ts";
+import { lsb } from "../../lib/store/bearing.ts";
 
 interface Props {
   title: string;
@@ -20,7 +21,7 @@ const { title, lead, current, plugins = null, keys = null, action = null } = Ast
 
 <div class="hd">
   <div>
-    <h1>{title}</h1>
+    <h1 class={lsb(title)}>{title}</h1>
     <p class="lead">{lead}</p>
   </div>
   {
