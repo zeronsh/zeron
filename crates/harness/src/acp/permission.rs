@@ -51,12 +51,11 @@ pub(super) fn outcome(options: &[Value], allow: bool) -> Value {
     }
 }
 
-/// What a permission asks the person: the command or the files when the
-/// tool call carries them, else the tool's title.
 /// The stable prefix of the reviewer's note in an approval question:
 /// "<what it asks>. Auto review flagged this: <reason>. Allow it?". The zgx
-/// composer (`ask_value` in apps/zgx/src/chat.rs) splits on this exact text
-/// to show the reason apart from the command; keep the two in step.
+/// composer (`approval_parts` in apps/zgx/src/chat.rs) strips this exact
+/// suffix, given the question's `note`, to show the reason apart from the
+/// command; keep the two in step.
 pub(super) const REVIEW_NOTE: &str = " Auto review flagged this: ";
 
 /// Longest reviewer reason kept, in characters.
@@ -73,8 +72,10 @@ fn review_reason(text: &str) -> String {
     capped.trim_end_matches(['.', '!', '?']).to_owned()
 }
 
-/// When the agent's reviewer says why it escalated (`_meta.autoReview.
-/// explanation`), the question carries that reason after [`REVIEW_NOTE`].
+/// What a permission asks the person: the command or the files when the
+/// tool call carries them, else the tool's title. When the agent's reviewer
+/// says why it escalated (`_meta.autoReview.explanation`), the question
+/// carries that reason after [`REVIEW_NOTE`] and as `note`.
 pub(super) fn question(agent: &str, params: &Value) -> UserInputQuestion {
     let mut question = base_question(agent, params);
     let reason = review_reason(
@@ -85,6 +86,7 @@ pub(super) fn question(agent: &str, params: &Value) -> UserInputQuestion {
     if !reason.is_empty() {
         let asked = question.question.trim_end_matches(" Allow it?");
         question.question = format!("{asked}{REVIEW_NOTE}{reason}. Allow it?");
+        question.note = Some(reason);
     }
     question
 }
@@ -178,6 +180,10 @@ mod tests {
         assert!(reason.starts_with("Line one. Line two?!xxx"), "{reason}");
         assert!(reason.ends_with("…."), "{reason}");
         assert_eq!(reason.chars().count(), REVIEW_REASON_MAX + 2);
+        assert_eq!(
+            question("Grok", &params).note.as_deref(),
+            Some(reason.trim_end_matches('.'))
+        );
         params["_meta"]["autoReview"]["explanation"] = json!("Blocked!");
         assert!(question("Grok", &params).question.ends_with("flagged this: Blocked. Allow it?"));
     }

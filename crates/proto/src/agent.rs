@@ -1176,6 +1176,11 @@ pub struct UserInputQuestion {
     pub prefill: Option<String>,
     #[serde(default)]
     pub multiline: bool,
+    /// A short note from the agent's reviewer on why this is asked. Already
+    /// included in `question` for clients that only read text; a client that
+    /// knows the field can show it apart from what is asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
