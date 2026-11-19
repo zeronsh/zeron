@@ -304,7 +304,7 @@ local SETTLE_MS = 260
 
 -- (A row is built for one device: the rows are keyed by it, so a switch of
 -- device builds them again. `on` is that device, nil for this one.)
-local Control = ui.component(function(props: { now: State<any>, on: string? }): Node
+local Control = ui.component(function(props: { now: State<any>, on: string?, under: boolean? }): Node
 	local now, on_device = props.now, props.on
 	local on = ui.use_state(now:peek().status == "on")
 	ui.effect(function()
@@ -323,8 +323,25 @@ local Control = ui.component(function(props: { now: State<any>, on: string? }): 
 		items = "center",
 		-- Its settings, when it's on here and has some: their page. (Its room
 		-- kept on every row, empty where there are none, so the versions line
-		-- up. Another device's plugins' settings are that device's.)
-		ui.div {
+		-- up; under the text, where nothing lines up with it, the button
+		-- alone where there is one, nothing where there isn't. Another
+		-- device's plugins' settings are that device's.)
+		if props.under
+			then ui.show(function(): boolean
+				return on_device == nil and plugin_settings.has(now:get().id)
+			end, ds.IconButton {
+				icon = "settings-minimalistic",
+				label = function(): string
+					return ui.t("plugins.page.settings_of", { name = now:get().name }):get()
+				end,
+				size = "sm",
+				tone = "quiet",
+				hook = false,
+				on_click = function()
+					plugin_settings.open(now:peek().id)
+				end,
+			})
+			else ui.div {
 			w = function(): number
 				return (ui.theme.get("zeron.icon_button.sm") :: number?) or 22
 			end,
@@ -546,8 +563,8 @@ local function row(p: state.Item, _i: number, now: State<any>): Node
 						},
 					}
 				end,
-				stays = function(): Node
-					return Control { now = now, on = device_now() }
+				stays = function(under: boolean): Node
+					return Control { now = now, on = device_now(), under = under }
 				end,
 			},
 		}

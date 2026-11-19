@@ -303,8 +303,15 @@ end)
 
 test("one Zeron can't vouch for says Unknown author by its version, and where it came from", function()
 	local app = open()
+	-- (The badges shown: a giving row's copies laid out only to be
+	-- measured are hidden.)
 	local function badges(): number
-		local _, n = string.gsub(app:tree(), '"Unknown author"', "")
+		local n = 0
+		for line in string.gmatch(app:tree(), "[^\n]+") do
+			if string.find(line, '"Unknown author"', 1, true) and not string.find(line, " hidden", 1, true) then
+				n += 1
+			end
+		end
 		return n
 	end
 	-- Zeron's own, yours and a verified author's: never.
@@ -598,9 +605,16 @@ end)
 local function focus_row(app: any): { [string]: { x: number, y: number, w: number }? }
 	local tree = app:tree("#catalog-card")
 	local out: { [string]: { x: number, y: number, w: number }? } = {}
+	-- (What's shown: a giving row's copies laid out only to be measured
+	-- are hidden.)
 	local function box(pattern: string): { x: number, y: number, w: number }?
-		local x, y, w = tree:match(pattern .. " (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x")
-		return if x then { x = tonumber(x) :: number, y = tonumber(y) :: number, w = tonumber(w) :: number } else nil
+		for line in tree:gmatch("[^\n]+") do
+			local x, y, w = line:match(pattern .. " (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x")
+			if x and not line:find(" hidden", 1, true) then
+				return { x = tonumber(x) :: number, y = tonumber(y) :: number, w = tonumber(w) :: number }
+			end
+		end
+		return nil
 	end
 	local cx, _, cw = tree:match("#catalog%-card (%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x")
 	out.card = { x = tonumber(cx) :: number, y = 0, w = tonumber(cw) :: number }
@@ -665,4 +679,79 @@ test("Installed's rows give way short of room: the name keeps its least, every c
 	for width = 1100, 250, -10 do
 		expect(`{width} {layout(width)}`).to_be(`{width} {up[width]}`)
 	end
+end)
+
+-- A giving row's place is the width's alone, from its first frame: built
+-- fresh at a width, it is what the same width reached by resizing up or
+-- down gives. Its controls under the text start at the text's start.
+test("Installed's rows built fresh at each width are as the same width reached by resizing", function()
+	local function layout(app: any, width: number): string
+		local r = focus_row(app)
+		local name = r.name :: any
+		local sw = r.switch :: any
+		-- (On a line of its own under the badges: the switch on the text's
+		-- start, Focus having no settings of its own.)
+		-- (Beside the text it's past the name's least; nearer, it's on its
+		-- own line, and that starts on the text's start exactly.)
+		local v = r.version :: any
+		if sw.x < name.x + 96 and math.abs(sw.y - v.y) > 12 then
+			expect(`{width} start={sw.x}`).to_be(`{width} start={name.x}`)
+		end
+		return `{r.version.x},{r.version.y - name.y}|{sw.x},{sw.y - name.y}|{r.update.x},{r.update.y - name.y}`
+	end
+	local fresh: { [number]: string } = {}
+	for width = 200, 1000, 10 do
+		local app = mount("plugins_fixture.luau")
+		app:command("update_found")
+		app:resize(width, 900)
+		app:frames(30)
+		fresh[width] = layout(app, width)
+	end
+	local app = mount("plugins_fixture.luau")
+	app:command("update_found")
+	app:resize(200, 900)
+	app:frames(30)
+	for width = 200, 1000, 10 do
+		app:resize(width, 900)
+		app:frames(25)
+		expect(`up {width} {layout(app, width)}`).to_be(`up {width} {fresh[width]}`)
+	end
+	for width = 1000, 200, -10 do
+		app:resize(width, 900)
+		app:frames(25)
+		expect(`down {width} {layout(app, width)}`).to_be(`down {width} {fresh[width]}`)
+	end
+end)
+
+
+test("a giving row's stand-ins are there only while its step is in question, and hold none of its controls", function()
+	local app = mount("plugins_fixture.luau")
+	app:command("update_found")
+	-- (A stand-in holds the row's badges, hidden: its versions.)
+	local function hidden(pattern: string): number
+		local n = 0
+		for line in app:tree("#catalog-card"):gmatch("[^\n]+") do
+			if line:find(pattern) and line:find(" hidden", 1, true) then
+				n += 1
+			end
+		end
+		return n
+	end
+	-- Room for every row's controls beside its name: none, the rows as
+	-- they always were.
+	app:resize(1000, 900)
+	app:frames(30)
+	expect(hidden('text "1%.0%.0"')).to_be(0)
+	-- Narrow: the rows that give way have them, and in them no switch,
+	-- Remove or Update to move on a hover or a toggle.
+	app:resize(300, 900)
+	app:frames(30)
+	expect(hidden('text "1%.0%.0"') > 0).to_be(true)
+	expect(hidden("switch ")).to_be(0)
+	expect(hidden('button "Remove')).to_be(0)
+	expect(hidden('button "Update"')).to_be(0)
+	-- And wide again, gone.
+	app:resize(1000, 900)
+	app:frames(30)
+	expect(hidden('text "1%.0%.0"')).to_be(0)
 end)

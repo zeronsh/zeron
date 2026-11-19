@@ -557,3 +557,14 @@ test("a page a new version no longer draws goes, its declared rows staying", fun
 	expect(app:tree(PAGE)).to_contain('switch "Show the greeting"')
 	expect(app:error()).to_be_nil()
 end)
+
+test("thirty more plugins installed list as thirty more rows", function()
+	local app = open()
+	app:command("thirty_rows")
+	app:frames(20)
+	app:click(`{NAV} >> role:tab "Plugins"`)
+	app:frames(40)
+	for i = 1, 30 do
+		expect(`{i} {app:has(`role:switch "Plugin number {i}"`)}`).to_be(`{i} true`)
+	end
+end)
