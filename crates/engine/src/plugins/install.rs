@@ -1354,6 +1354,39 @@ pub(crate) mod tests {
         assert_eq!(reason_of(&forbidden), Some(reason::DOWNLOAD_FAILED), "{forbidden}");
     }
 
+    /// Unsigned is only ever the store's, by a record naming no key (a deploy
+    /// token's version): the same bytes from a link are refused as they
+    /// always were, and a signed package from one installs as ever.
+    #[tokio::test]
+    async fn an_unsigned_package_from_a_link_is_refused_as_ever() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        async fn serving(body: Vec<u8>) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let at = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                while let Ok((mut socket, _)) = listener.accept().await {
+                    let mut buf = [0u8; 2048];
+                    let _ = socket.read(&mut buf).await;
+                    let head = format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len());
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let _ = socket.write_all(&body).await;
+                }
+            });
+            format!("http://{at}/focus.zeron-plugin")
+        }
+        let files: BTreeMap<String, Vec<u8>> = [("init.luau".to_string(), b"return 1".to_vec())].into();
+        let manifest = json!({ "id": "focus", "name": "F", "version": "1.0.0", "entry": "init.luau" });
+        let unsigned = package::pack(FORMAT, &manifest, &files).unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let refused = fetch(&Origin::Link(serving(unsigned.clone()).await), scratch.path()).await.unwrap_err();
+        assert_eq!(reason_of(&refused), Some(reason::UNSIGNED), "{refused}");
+        assert!(parse_from_store(unsigned, false).is_ok_and(|p| p.key.is_none()), "the store's, by a record naming no key");
+        let (key, _) = SigningKey::generate().unwrap();
+        let signed = package::pack(FORMAT, &key.sign_manifest(&manifest, &package::hashes(&files)), &files).unwrap();
+        let (package, source) = fetch(&Origin::Link(serving(signed).await), scratch.path()).await.unwrap();
+        assert_eq!((package.key, source.kind.as_str()), (Some(key.public()), "link"));
+    }
+
     /// A package whose paths fold alike, its signature good: refused as it's
     /// read, naming the two paths, the same on every disk.
     #[test]

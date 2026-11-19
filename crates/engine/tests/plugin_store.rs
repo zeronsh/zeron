@@ -1241,6 +1241,19 @@ async fn a_version_published_with_a_token_installs_as_its_publisher_s() {
     assert!(matches!(word(&refused), "store_mismatch" | "unsigned"), "{refused}");
     assert!(d.item("board").await.is_null());
 
+    // Unsigned, under a record that names a key: not the store's (it took
+    // only a signed one), so whoever it is isn't known.
+    store.add("ada", &unsigned_package_of("pad", "1.0.0", &["ui.add"], "return 1"), "verified", "");
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "pad" })).await.unwrap();
+    assert_eq!(d.item("pad").await["author"], ada);
+    let pad_dir = std::path::PathBuf::from(d.item("pad").await["dir"].as_str().unwrap());
+    let source_path = pad_dir.join(install::SOURCE_FILE);
+    let mut source: Value = serde_json::from_slice(&std::fs::read(&source_path).unwrap()).unwrap();
+    source["store"]["key"] = json!(SigningKey::generate().unwrap().0.public());
+    std::fs::write(&source_path, serde_json::to_vec(&source).unwrap()).unwrap();
+    d.plugins.rescan().await;
+    assert_eq!(d.item("pad").await["author"]["kind"], "unknown");
+
     // Edited on disk: no longer what the store vouched for.
     store.add("ada", &unsigned_package_of("lab", "1.0.0", &["ui.add"], "return 1"), "verified", "");
     d.call(methods::INSTALL_PLUGIN, json!({ "store": "lab" })).await.unwrap();
