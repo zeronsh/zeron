@@ -128,8 +128,9 @@ const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions
                       <li class:list={["vr", { off: !live }]}>
                         <div class="vn">
                           <b class="mono">{v.version}</b>
-                          {status && <span class:list={["state", status.tone]} data-kind="status">{status.label}</span>}
+                          {/* (Whether Zeron verified it beside the version, always first; where it stands after it.) */}
                           {(v.status === "listed" || v.status === "yanked") && <span class:list={["state", verified.tone]} data-kind="verified">{verified.seal && <Seal quiet />}{verified.label}</span>}
+                          {status && <span class:list={["state", status.tone]} data-kind="status">{status.label}</span>}
                         </div>
                         <div class="means">
                           {/* (Superseded: why it takes no new installs comes first; the reviewer's words after.) */}
@@ -146,7 +147,8 @@ const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions
                               <footer>{`${v.status === "taken_down" ? "Taken down" : "Removed"} ${day(v.removal.at, now)}`}</footer>
                             </blockquote>
                           )}
-                          {v.blocked && <small>It was turned off on the devices that had it.</small>}
+                          {/* (Taken down says it was turned off already; said once.) */}
+                          {v.blocked && v.status !== "taken_down" && <small>It was turned off on the devices that had it.</small>}
                         </div>
                         <div class="pub">
                           <div><time datetime={new Date(v.published_at).toISOString()}>{day(v.published_at, now)}</time></div>
@@ -155,7 +157,7 @@ const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions
                         </div>
                         <div class="act">
                           {action && ask && (
-                            <a class:list={["btn sm", action === "yank" ? "ghost" : "sec"]} href={`${here}/versions/${encodeURIComponent(v.version)}/${action}`} data-dialog={dialogId(action, v.version)}>
+                            <a class="btn sec sm" href={`${here}/versions/${encodeURIComponent(v.version)}/${action}`} data-dialog={dialogId(action, v.version)}>
                               {ask.confirm}<span class="sr-only"> {v.version}</span>
                             </a>
                           )}

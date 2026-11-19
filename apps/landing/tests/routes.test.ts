@@ -730,6 +730,11 @@ describe("forms", () => {
     // A reviewer's words in full, never cut; staff's reason for a take-down beside it.
     expect(body).toContain("Until then this one stays listed, not verified.”");
     expect(body).toContain("Taken down: it sent the open chat&#39;s text to a host its README doesn&#39;t name.");
+    // Said once: taken down already says it was turned off on the devices that had it.
+    expect(body.match(/turned off on the devices that had it/g)).toHaveLength(1);
+    // Whether it's verified always first, beside the version; where it stands after it; one kind of button for each action.
+    for (const r of body.split('<li class="vr').slice(1)) if (r.includes('data-kind="status"') && r.includes('data-kind="verified"')) expect(r.indexOf('data-kind="verified"')).toBeLessThan(r.indexOf('data-kind="status"'));
+    expect([...body.matchAll(/<a class="([^"]+)" href="\/account\/plugins\/[^"]+\/(?:yank|unyank)"/g)].map((m) => m[1])).toEqual(["btn sec sm", "btn sec sm", "btn sec sm"]);
     // Its keys are the account's now: a way to them.
     expect(body).toContain('<a href="/account/keys">deploy keys</a>');
   });
