@@ -46,7 +46,7 @@ export function siteWorker(serviceBindings: Record<string, unknown>): Record<str
  * "broken", one that fails every request (the site's own pages must be
  * whole either way).
  */
-export async function startSite(options: { edge?: "fake" | "missing" | "broken" } = {}): Promise<Site> {
+export async function startSite(options: { edge?: "fake" | "missing" | "broken"; host?: string; port?: number } = {}): Promise<Site> {
   const edgeKind = options.edge ?? "fake";
   const fake =
     edgeKind === "fake"
@@ -63,7 +63,9 @@ export async function startSite(options: { edge?: "fake" | "missing" | "broken" 
           }
         : {};
   // (Miniflare 5 converts the v4 options wrangler gives.)
-  const mf = new Miniflare(convertV4MiniflareOptions({ workers: [siteWorker(edge), ...fake] } as never));
+  // (An address of its own when asked: the preview, fake-edge/serve.ts; a free one for the tests.)
+  const address = options.port === undefined ? {} : { host: options.host ?? "127.0.0.1", port: options.port };
+  const mf = new Miniflare(convertV4MiniflareOptions({ ...address, workers: [siteWorker(edge), ...fake] } as never));
   const url = await mf.ready;
   const fetch = async (path: string, init: RequestInit = {}) => (await mf.dispatchFetch(new URL(path, "https://zeron.sh"), { redirect: "manual", ...init } as never)) as unknown as Response;
   return {

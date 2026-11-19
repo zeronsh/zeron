@@ -88,7 +88,8 @@ button { background: none; border: 0; padding: 0; cursor: pointer; }
 .mono { font-family: var(--mono); font-feature-settings: "zero" 0; }
 .num { font-variant-numeric: tabular-nums; }
 pre, pre *, code, .mono, .fn { font-variant-ligatures: none; }
-.wrap { max-width: 1184px; margin: 0 auto; padding: 0 32px; }
+/* (Its sides alone: a page's own top and bottom, in a stylesheet that may load before this one, stay its own.) */
+.wrap { max-width: 1184px; margin-inline: auto; padding-inline: 32px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .icons { position: absolute; width: 0; height: 0; overflow: hidden; }
 /* (An app icon: components/look/AppIcon.astro.) */
@@ -304,7 +305,7 @@ dialog.question::backdrop { background: rgba(0, 0, 0, 0.36); }
 /* ---- phone ---- */
 .ph-only { display: none; }
 @media (max-width: 720px) {
-  .wrap { padding: 0 20px; }
+  .wrap { padding-inline: 20px; }
   .top .wrap { height: 56px; gap: 6px; }
   .nav, .signin, .find { display: none; }
   .find-icon { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 10px; color: var(--text); }
