@@ -305,7 +305,8 @@ ui.command {
 }
 -- Branch badge's installed version published from CI with its
 -- publisher's deploy token: not signed by the author's key, the store's
--- record trusted, the publisher its author (the engine says so).
+-- record trusted, and the engine reports it as any store install, its
+-- publisher its author (nothing else to read).
 ui.command {
 	id = "store.token_published",
 	title = "Branch badge runs a version its publisher sent with a deploy token",
@@ -314,7 +315,7 @@ ui.command {
 		p.version = "1.2.0"
 		p.hash = "branch-badge-1.2.0"
 		p.author = { kind = "verified", username = "grace" }
-		p.source = { kind = "store", id = "branch-badge", publisher = "grace", verified = false, via = "deploy_token" }
+		p.source = { kind = "store", id = "branch-badge", publisher = "grace", verified = false }
 		publish()
 	end,
 }
