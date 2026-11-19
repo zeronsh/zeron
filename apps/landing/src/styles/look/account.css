@@ -225,11 +225,12 @@ a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
   .key .btn { grid-column: 2; grid-row: 1; }
   .key .used, .key .ends { grid-column: 1 / -1; grid-row: auto; margin: 0; padding-top: 0; }
   .key:has(.many) > :is(.used, .ends) { grid-row: auto; }
-  /* (Full width: the tiles' slot, the words beside it, a key for many's list under them.) */
-  .key .scope, .key .scope.many { display: grid; grid-template-columns: var(--slot) minmax(0, 1fr); column-gap: 12px; grid-column: 1 / -1; }
-  .scope > .tiles, .scope > .all, .scope.many .tiles { grid-column: 1; margin-right: 0; }
-  .scope > .w, .scope.many .count, .scope.many summary { grid-column: 2; }
-  .scope.many .every::details-content { grid-column: 1 / -1; }
+  /* (Stacked, on the name's column: the tiles, then the words under them, then a token for many's list.) */
+  .key .scope, .key .scope.many { display: grid; grid-template-columns: minmax(0, 1fr); row-gap: 8px; grid-column: 1 / -1; }
+  .scope > .tiles, .scope > .all, .scope.many .tiles { grid-column: 1; grid-row: 1; justify-self: start; margin-right: 0; }
+  .scope > .w, .scope.many .count { grid-column: 1; grid-row: 2; padding-top: 0; }
+  .scope.many summary { grid-column: 1; grid-row: 3; margin-top: -8px; }
+  .scope.many .every::details-content { grid-column: 1; grid-row: 4; }
   .key .used { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
   .how { grid-template-columns: minmax(0, 1fr); gap: 24px; }
 }
