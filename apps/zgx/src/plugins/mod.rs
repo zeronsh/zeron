@@ -3434,8 +3434,10 @@ impl Bridge {
     /// host measures them (`ScriptHost::contribution_bounds`), never as the
     /// plugin reports them, saved for the agent to look at; none when none
     /// of its nodes shows (never the whole window: what else the window
-    /// shows isn't the plugin's to hand an agent). What the app marks
-    /// private in the cut is blank (`private_regions`).
+    /// shows isn't the plugin's to hand an agent). The margin round its
+    /// nodes is blurred and dimmed (where they sit reads, nothing beside
+    /// them), and what the app marks private in the cut is blank
+    /// (`private_regions`).
     fn picture(&self, plugin: &str) -> Result<Json, String> {
         let ui = self.ui.upgrade().ok_or("The window is closed")?;
         let root = ui.root();
@@ -3449,6 +3451,9 @@ impl Bridge {
         let region = surfaces::around(&found, 24., bounds.width, bounds.height)
             .ok_or("None of its nodes shows now, so there's nothing of it to picture")?;
         let (w, h, mut pixels) = surfaces::crop(image.pixels(), image.width(), image.height(), region, scale);
+        // (The margin shows where it sits, nothing beside it legible; what
+        // the app marks private, blank.)
+        surfaces::veil(&mut pixels, w, h, region, &found, scale);
         surfaces::blank(&mut pixels, w, h, region, &self.private_regions(), scale);
         let dir = engine::data_dir().ok_or("Zeron's data folder isn't known")?.join("plugins").join(".snapshots");
         let path = dir.join(format!("{plugin}.png"));

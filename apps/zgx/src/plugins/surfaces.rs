@@ -268,6 +268,86 @@ pub fn blank(rgba: &mut [u8], width: u32, height: u32, cut: Region, private: &[R
     }
 }
 
+/// How far the margin round a plugin's own nodes is blurred, in points, and
+/// how much of its light is kept: where it sits reads, nothing beside it.
+const VEIL_BLUR: f32 = 6.;
+const VEIL_KEEP: f32 = 0.45;
+
+/// A cut's pixels (`width` × `height`, of `cut` at `scale` pixels a point)
+/// with everything outside `own` (a plugin's own nodes, as the host
+/// measured them) blurred and dimmed: the margin round them shows where
+/// they sit, and nothing in it can be read.
+pub fn veil(rgba: &mut [u8], width: u32, height: u32, cut: Region, own: &[Region], scale: f32) {
+    let (w, h) = (width as usize, height as usize);
+    if w == 0 || h == 0 || rgba.len() < w * h * 4 {
+        return;
+    }
+    let radius = ((VEIL_BLUR * scale).round() as usize).max(1);
+    let blurred = box_blur(&rgba[..w * h * 4], w, h, radius);
+    // Each own box, in the cut's pixels.
+    let boxes: Vec<(usize, usize, usize, usize)> = own
+        .iter()
+        .map(|r| {
+            let x0 = ((r.x - cut.x) * scale).floor().max(0.) as usize;
+            let y0 = ((r.y - cut.y) * scale).floor().max(0.) as usize;
+            let x1 = (((r.x + r.w - cut.x) * scale).ceil().max(0.) as usize).min(w);
+            let y1 = (((r.y + r.h - cut.y) * scale).ceil().max(0.) as usize).min(h);
+            (x0, y0, x1, y1)
+        })
+        .collect();
+    for y in 0..h {
+        for x in 0..w {
+            if boxes.iter().any(|&(x0, y0, x1, y1)| x >= x0 && x < x1 && y >= y0 && y < y1) {
+                continue;
+            }
+            let i = (y * w + x) * 4;
+            for c in 0..3 {
+                rgba[i + c] = (blurred[i + c] as f32 * VEIL_KEEP).round() as u8;
+            }
+            rgba[i + 3] = blurred[i + 3];
+        }
+    }
+}
+
+/// `rgba` blurred by a box `radius` pixels each way, twice over (near a
+/// Gaussian's look, at a box's cost).
+fn box_blur(rgba: &[u8], w: usize, h: usize, radius: usize) -> Vec<u8> {
+    let mut a = rgba.to_vec();
+    let mut b = vec![0u8; a.len()];
+    for _ in 0..2 {
+        blur_pass(&a, &mut b, w, h, radius, true);
+        blur_pass(&b, &mut a, w, h, radius, false);
+    }
+    a
+}
+
+/// One box pass along rows (`across`) or columns, edges held.
+fn blur_pass(from: &[u8], to: &mut [u8], w: usize, h: usize, radius: usize, across: bool) {
+    let (lines, len) = if across { (h, w) } else { (w, h) };
+    let at = |line: usize, k: usize| if across { (line * w + k) * 4 } else { (k * w + line) * 4 };
+    let span = (2 * radius + 1) as u32;
+    for line in 0..lines {
+        let mut sum = [0u32; 4];
+        for k in 0..=2 * radius {
+            let j = at(line, k.saturating_sub(radius).min(len - 1));
+            for c in 0..4 {
+                sum[c] += from[j + c] as u32;
+            }
+        }
+        for k in 0..len {
+            let i = at(line, k);
+            for c in 0..4 {
+                to[i + c] = (sum[c] / span) as u8;
+            }
+            let out = at(line, k.saturating_sub(radius).min(len - 1));
+            let inn = at(line, (k + radius + 1).min(len - 1));
+            for c in 0..4 {
+                sum[c] = sum[c] + from[inn + c] as u32 - from[out + c] as u32;
+            }
+        }
+    }
+}
+
 /// `rgba` (`width` × `height` pixels) cut to `region`, in points at `scale`
 /// pixels each: the cut's size and pixels.
 pub fn crop(rgba: &[u8], width: u32, height: u32, region: Region, scale: f32) -> (u32, u32, Vec<u8>) {
@@ -403,6 +483,42 @@ mod tests {
         let mut whole = vec![255u8; (w * h * 4) as usize];
         blank(&mut whole, w, h, cut, &[Region { x: 0., y: 400., w: 50., h: 50. }], 1.);
         assert!(whole.iter().all(|&b| b == 255));
+    }
+
+    /// The margin round a plugin's own nodes shows where they sit and
+    /// nothing in it can be read: blurred and dimmed, its pixels no longer
+    /// the original's; the plugin's own nodes are as they show.
+    #[test]
+    fn the_margin_round_a_plugin_s_nodes_can_t_be_read() {
+        // A 40×20 cut at 1 pixel a point: text-like stripes everywhere (one
+        // light column, one dark), the plugin's own node its middle 10×10.
+        let (w, h) = (40u32, 20u32);
+        let mut px = Vec::with_capacity((w * h * 4) as usize);
+        for _y in 0..h {
+            for x in 0..w {
+                let v = if x % 2 == 0 { 255 } else { 0 };
+                px.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let original = px.clone();
+        let cut = Region { x: 100., y: 50., w: 40., h: 20. };
+        veil(&mut px, w, h, cut, &[Region { x: 115., y: 55., w: 10., h: 10. }], 1.);
+        let at = |p: &[u8], x: u32, y: u32| p[((y * w + x) * 4) as usize];
+        // Its own node: untouched.
+        for (x, y) in [(15, 5), (16, 9), (24, 14)] {
+            assert_eq!(at(&px, x, y), at(&original, x, y), "own ({x}, {y})");
+        }
+        // The margin: not the original's, the stripes gone (no column tells
+        // light from dark), and dimmer.
+        let margin = [(0, 0), (1, 0), (5, 18), (6, 18), (34, 2), (35, 2)];
+        assert!(margin.iter().all(|&(x, y)| at(&px, x, y) != at(&original, x, y)), "the margin isn't the original's");
+        for pair in margin.chunks(2) {
+            let (a, b) = (at(&px, pair[0].0, pair[0].1) as i32, at(&px, pair[1].0, pair[1].1) as i32);
+            assert!((a - b).abs() <= 8, "stripes still tell: {a} {b}");
+            assert!(a < 128, "dimmed: {a}");
+        }
+        // Its alpha kept: where it sits still reads.
+        assert_eq!(px[3], 255);
     }
 
     #[test]
