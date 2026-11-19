@@ -16,15 +16,20 @@
  * The edge returns a token once, when it is made, and keeps only its
  * SHA-256 (hex) and its short id. A token is never logged, never put in an
  * error or an audit row.
+ *
+ * The prefix, alphabet and lengths are the data file's (`deploy_token`, the
+ * engine's); the vectors' `deploy_token` cases hold this file to the CLI.
  */
 import { constantTimeEqual } from "../../cloud/crypto";
+import { STORE_DATA } from "../data";
 
-export const TOKEN_PREFIX = "zdt_";
-const ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-const BODY_LENGTH = 43;
-const CHECKSUM_LENGTH = 6;
-const SHORT_LENGTH = 8;
-const TOKEN_RE = /^zdt_[0-9A-Za-z]{49}$/;
+const FORMAT = STORE_DATA.deploy_token;
+export const TOKEN_PREFIX: string = FORMAT.prefix;
+const ALPHABET: string = FORMAT.alphabet;
+const BODY_LENGTH: number = FORMAT.body_len;
+const CHECKSUM_LENGTH: number = FORMAT.check_len;
+const SHORT_LENGTH: number = FORMAT.short_len;
+const TOKEN_RE = new RegExp(`^${TOKEN_PREFIX}[0-9A-Za-z]{${BODY_LENGTH + CHECKSUM_LENGTH}}$`);
 
 /** `n` in base62, left-padded with "0" to `width`. */
 const base62 = (n: bigint, width: number): string => {

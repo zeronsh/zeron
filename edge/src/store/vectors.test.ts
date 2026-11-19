@@ -20,6 +20,7 @@ import { idProblem, readManifest } from "./manifest";
 import { MAX_MANIFEST_JSON, MAX_MANIFEST_VALUES, PackageRefusal, checkSignature, contentHash, signaturePayload, verifyPackage } from "./package";
 import { MAX_PUBLISH_BODY_BYTES } from "./identity/body";
 import { plainPath } from "./paths";
+import { crc32, deployTokenHash, parseDeployToken, tokenChecksum, tokenFromBody } from "./identity/deploy-token";
 import { comparePrecedence, parseRange, parseVersion, satisfies } from "./semver";
 import { STORE_DATA } from "./data";
 
@@ -105,6 +106,62 @@ describe("engine vectors (docs/plugin-package-vectors.json)", () => {
         got = { ok: false, error: e.code };
       }
       expect(got, c.name).toEqual(c.result);
+    }
+  });
+
+  it("store packages: a deploy token's is unsigned, its content hash a signed one's", async () => {
+    const read = async (raw: Uint8Array, signed: boolean) => {
+      try {
+        const p = await verifyPackage(raw, undefined, signed);
+        return { ok: true, id: p.manifest.id, version: p.manifest.version, key: p.key, hash: p.hash, sha256: p.sha256, files: p.files.size, paths: [...p.files.keys()].sort(compareUtf8) };
+      } catch (e) {
+        if (!(e instanceof PackageRefusal)) throw e;
+        return { ok: false, error: e.code };
+      }
+    };
+    expect(v.store_packages.length).toBeGreaterThan(0);
+    for (const c of v.store_packages) {
+      const raw = fromB64(c.package_b64);
+      const signed = JSON.parse(new TextDecoder().decode(raw)).manifest?.signature !== undefined;
+      // As a device reads it: an unsigned one as a deploy token's, a signed
+      // one as it always is.
+      expect(await read(raw, signed), c.name).toEqual(c.result);
+      // The store takes a deploy token's package unsigned only: a signed one
+      // sent with a token is refused (contract ecad8670d).
+      if (signed && c.result.ok) expect(await read(raw, false), c.name).toEqual({ ok: false, error: "bad_signature" });
+    }
+    const [unsigned, signedToo] = v.store_packages.filter((c: any) => c.result.ok);
+    expect(unsigned.result.hash).toBe(signedToo.result.hash);
+  });
+
+  it("deploy tokens: the format, from the data file", () => {
+    const format = STORE_DATA.deploy_token;
+    expect(format).toMatchObject({ prefix: v.deploy_token.prefix, alphabet: v.deploy_token.alphabet, body_len: v.deploy_token.body_len, check_len: v.deploy_token.check_len, len: v.deploy_token.len, short_len: v.deploy_token.short_len });
+    expect([...format.alphabet].sort().join("")).toBe([..."0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"].sort().join(""));
+    expect(format.prefix.length + format.body_len + format.check_len).toBe(format.len);
+  });
+
+  it("deploy tokens: each fixed token, its body, checksum, short id and hash", async () => {
+    expect(v.deploy_token.tokens.length).toBeGreaterThan(0);
+    for (const c of v.deploy_token.tokens) {
+      // The body is the random bytes as one big-endian integer in base62.
+      const n = BigInt(`0x${c.random_hex}`);
+      let body = "";
+      for (let rest = n; rest > 0n; rest /= 62n) body = v.deploy_token.alphabet[Number(rest % 62n)] + body;
+      expect(body.padStart(v.deploy_token.body_len, "0"), c.token).toBe(c.body);
+      expect(crc32(new TextEncoder().encode(`${v.deploy_token.prefix}${c.body}`)), c.token).toBe(c.crc32);
+      expect(tokenChecksum(c.body), c.token).toBe(c.checksum);
+      expect(tokenFromBody(c.body), c.token).toBe(c.token);
+      expect(parseDeployToken(c.token), c.token).toEqual({ short: c.short });
+      expect(await deployTokenHash(c.token), c.token).toBe(c.sha256);
+    }
+  });
+
+  it("deploy tokens: reading one (the header's value, trimmed as HTTP trims it)", () => {
+    expect(v.deploy_token.reads.some((c: any) => c.ok) && v.deploy_token.reads.some((c: any) => !c.ok)).toBe(true);
+    for (const c of v.deploy_token.reads) {
+      // The edge tells none of the refusals apart (one 401 invalid_token).
+      expect(parseDeployToken(c.token.trim()), JSON.stringify(c.token)).toEqual(c.ok ? { short: c.short } : undefined);
     }
   });
 

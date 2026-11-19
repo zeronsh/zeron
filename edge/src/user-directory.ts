@@ -93,6 +93,7 @@ import type { Env } from "./env";
 import { json, jsonError } from "./http";
 import { adminAuthorized } from "./cloud/billing";
 import { constantTimeEqual } from "./cloud/crypto";
+import { STORE_DATA } from "./store/data";
 import { foldUsername } from "./username";
 import { deleteUserBlobs } from "./user-images";
 
@@ -134,7 +135,8 @@ export const isRole = (value: unknown): value is Role => (ROLES as readonly unkn
  * per account in 24 hours. A token's scope lists at most this many plugins. */
 export const MAX_LIVE_DEPLOY_TOKENS = 20;
 export const DEPLOY_TOKENS_PER_DAY = 10;
-export const MAX_DEPLOY_TOKEN_PLUGINS = 50;
+/** The engine's (the data file's `deploy_token.max_scope_plugins`). */
+export const MAX_DEPLOY_TOKEN_PLUGINS: number = STORE_DATA.deploy_token.max_scope_plugins;
 
 /** What a deploy token may publish, fixed when it is made: every plugin of
  * its account (owned then, or first published by it later; never one

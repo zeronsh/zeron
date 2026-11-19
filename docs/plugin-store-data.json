@@ -137,12 +137,15 @@
       ".com"
     ]
   },
-  "deploy_key": {
-    "content_sha256_header": "X-Zeron-Content-SHA256",
-    "max_skew_ms": 300000,
-    "proof_prefix": "zeron-deploy-key:v2:",
-    "request_prefix": "zeron-plugin-publish:v1\n",
-    "secret_prefix": "zpk_"
+  "deploy_token": {
+    "alphabet": "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+    "body_len": 43,
+    "check_len": 6,
+    "env": "ZERON_DEPLOY_TOKEN",
+    "len": 53,
+    "max_scope_plugins": 50,
+    "prefix": "zdt_",
+    "short_len": 8
   },
   "format": "zeron-plugin-store-data:v1",
   "key_proof_prefix": "zeron-plugin-key:v1:",
