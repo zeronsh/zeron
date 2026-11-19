@@ -37,3 +37,16 @@ end)
 test("an unknown word is shown as it came", function()
 	expect(said().something_new.came).to_be("something_new: the engine's English")
 end)
+
+test("a deploy token's refusals say what each means, as the contract has it", function()
+	local out = said()
+	for word, sentence in {
+		too_many_tokens = "You have 20 deploy tokens, the most an account can have. Revoke one to make another.",
+		invalid_token = "The store didn't take that deploy token: it's wrong, revoked or ended.",
+		token_not_allowed = "That deploy token can't publish this plugin. A plugin's first version is published from your computer.",
+		session_required = "This needs you signed in to Zeron, not a deploy token.",
+	} do
+		expect(`{word}: {out[word].came}`).to_be(`{word}: {sentence}`)
+		expect(`{word}: {out[word].alone}`).to_be(`{word}: {sentence}`)
+	end
+end)
