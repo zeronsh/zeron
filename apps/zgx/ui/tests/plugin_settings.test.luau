@@ -557,3 +557,39 @@ test("a page a new version no longer draws goes, its declared rows staying", fun
 	expect(app:tree(PAGE)).to_contain('switch "Show the greeting"')
 	expect(app:error()).to_be_nil()
 end)
+
+test("thirty more plugins installed list as thirty more rows", function()
+	local app = open()
+	app:command("thirty_rows")
+	app:frames(20)
+	app:click(`{NAV} >> role:tab "Plugins"`)
+	app:frames(40)
+	for i = 1, 30 do
+		expect(`{i} {app:has(`role:switch "Plugin number {i}"`)}`).to_be(`{i} true`)
+	end
+end)
+
+test("thirty plugins at a narrow window: every part of their rows, shown or out of layout, is of finite width", function()
+	local app = open()
+	app:command("thirty_rows")
+	app:frames(20)
+	app:click(`{NAV} >> role:tab "Plugins"`)
+	app:frames(40)
+	-- (Rows past the window's foot reach their narrow steps without ever
+	-- being laid out beside their text: their controls there, out of
+	-- layout, read as infinitely wide where a glyph took its width from
+	-- its source.)
+	-- (Straight to a narrow window, then through every step: the copies
+	-- beside and under the text.)
+	for _, width in { 560, 1000, 900, 800, 720, 640, 560 } do
+		app:resize(width, 940)
+		app:frames(40)
+		local bad = 0
+		for line in app:tree("#catalog-card", { all = true }):gmatch("[^\n]+") do
+			if line:match("inf[x ]") or line:match("xinf") then
+				bad += 1
+			end
+		end
+		expect(`{width} {bad}`).to_be(`{width} 0`)
+	end
+end)

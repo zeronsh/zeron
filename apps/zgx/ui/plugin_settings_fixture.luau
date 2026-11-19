@@ -153,6 +153,24 @@ local function publish()
 		} :: { any } do
 		table.insert(rows, row)
 	end
+	-- (A long Installed list, to measure its cost: every third row with an
+	-- update waiting, every fifth an author Zeron can't vouch for.)
+	for i = 1, model.many or 0 do
+		table.insert(rows, {
+			id = `row-{i}`,
+			name = `Plugin number {i}`,
+			version = `1.{i}.0`,
+			description = `What plugin number {i} does, in a sentence long enough to fade.`,
+			author = if i % 5 == 0 then { kind = "unknown" } else { kind = "verified", username = "ada" },
+			source = { kind = "release", url = `https://github.com/ada/plugin-{i}` },
+			update = if i % 3 == 0 then { version = `2.{i}.0`, added = { "links.open" }, removed = {} } else nil,
+			status = if i % 2 == 0 then "on" else "off",
+			permissions = {},
+			allowed = {},
+			ask = {},
+			hash = `row-{i}-1`,
+		})
+	end
 	if model.tally then
 		table.insert(rows, {
 			id = "tally",
@@ -262,6 +280,14 @@ state_stub.check_updates = function(): any
 	return nil
 end
 
+ui.command {
+	id = "thirty_rows",
+	title = "Thirty more plugins installed, some with updates",
+	run = function()
+		model.many = 30
+		publish()
+	end,
+}
 ui.command {
 	id = "greeter_unverified",
 	title = "Greeter is someone else's, unverified",

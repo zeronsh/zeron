@@ -304,8 +304,9 @@ local SETTLE_MS = 260
 
 -- (A row is built for one device: the rows are keyed by it, so a switch of
 -- device builds them again. `on` is that device, nil for this one.)
-local Control = ui.component(function(props: { now: State<any>, on: string? }): Node
+local Control = ui.component(function(props: { now: State<any>, on: string?, place: any }): Node
 	local now, on_device = props.now, props.on
+	local place = props.place
 	local on = ui.use_state(now:peek().status == "on")
 	ui.effect(function()
 		local want = now:get().status == "on"
@@ -318,31 +319,43 @@ local Control = ui.component(function(props: { now: State<any>, on: string? }): 
 		removing_on:set(on_device)
 		removing_open:set(true)
 	end
+	local function has_settings(): boolean
+		return on_device == nil and plugin_settings.has(now:get().id)
+	end
 	return ui.row {
 		gap = "$space.2",
 		items = "center",
+		-- (In a giving row, drawn beside the text and under it, out of
+		-- layout where it isn't: ds/settings GiveWayPlace.)
+		hidden = if place then place.hidden else nil,
+		on_resize = if place then place.on_resize else nil,
 		-- Its settings, when it's on here and has some: their page. (Its room
 		-- kept on every row, empty where there are none, so the versions line
-		-- up. Another device's plugins' settings are that device's.)
+		-- up; under the text, where nothing lines up with it, no room where
+		-- there are none. Another device's plugins' settings are that
+		-- device's.)
 		ui.div {
 			w = function(): number
 				return (ui.theme.get("zeron.icon_button.sm") :: number?) or 22
 			end,
 			shrink = 0,
-			ui.show(function(): boolean
-				return on_device == nil and plugin_settings.has(now:get().id)
-			end, ds.IconButton {
-			icon = "settings-minimalistic",
-			label = function(): string
-				return ui.t("plugins.page.settings_of", { name = now:get().name }):get()
-			end,
-			size = "sm",
-			tone = "quiet",
-			hook = false,
-			on_click = function()
-				plugin_settings.open(now:peek().id)
-			end,
-		}),
+			hidden = if place and place.under
+				then function(): boolean
+					return not has_settings()
+				end
+				else nil,
+			ui.show(has_settings, ds.IconButton {
+				icon = "settings-minimalistic",
+				label = function(): string
+					return ui.t("plugins.page.settings_of", { name = now:get().name }):get()
+				end,
+				size = "sm",
+				tone = "quiet",
+				hook = false,
+				on_click = function()
+					plugin_settings.open(now:peek().id)
+				end,
+			}),
 		},
 		ui.switch(function(): string
 			return kind(now:get())
@@ -421,36 +434,57 @@ end)
 -- Update, at the end of the line saying what it changes: link-like (the
 -- markdown link's underline, the accent under the pointer), so the row's
 -- control and its version stay where every other row has them.
-local UpdateLink = ui.component(function(props: { now: State<any> }): Node
+-- Whether a row's Update shows: an update found, not refused, for a
+-- plugin that isn't built in or broken.
+local function update_shows(now: State<any>): boolean
+	local it: any = now:get()
+	return type(it.update) == "table" and it.update.refused == nil and not it.builtin and kind(it) ~= "broken"
+end
+
+local UpdateLink = ui.component(function(props: { now: State<any>, on_resize: ((size: { w: number, h: number }) -> ())? }): Node
 	local now = props.now
 	local function busy(): boolean
 		return updating:get() == now:get().id
 	end
+	-- (One the store hasn't verified: "Update…", a question follows in the
+	-- consent window, as "Publish…" and "New key…" say. Verified, one
+	-- click. Drawn as it always was.)
+	local function words(): string
+		if busy() then
+			return ui.t("plugins.page.updating"):get()
+		end
+		local u: any = now:get().update
+		return if type(u) == "table" and u.verified == false then ui.t("plugins.page.update_asks"):get() else ui.t("plugins.page.update"):get()
+	end
 	return ui.show(function(): boolean
-		local it: any = now:get()
-		return type(it.update) == "table" and it.update.refused == nil and not it.builtin and kind(it) ~= "broken"
-	end, ds.Settings.InlineLink {
-		-- (A row's inline link, doing something here: a button.)
+		return update_shows(now)
+	end, ui.row {
 		role = "button",
-		-- (One the store hasn't verified: "Update…", a question follows in
-		-- the consent window, as "Publish…" and "New key…" say. Verified,
-		-- one click.)
+		on_resize = props.on_resize,
 		label = function(): string
-			if busy() then
-				return ui.t("plugins.page.updating"):get()
-			end
-			local u: any = now:get().update
-			return if type(u) == "table" and u.verified == false then ui.t("plugins.page.update_asks"):get() else ui.t("plugins.page.update"):get()
+			return words()
 		end,
 		focusable = function(): boolean
 			return not busy()
 		end,
 		disabled = busy,
+		shrink = 0,
+		cursor = "pointer",
+		color = "$text.primary",
+		hover = { color = "$accent" },
 		on_click = function()
 			if not busy() then
 				update(now:peek().id, now:peek().name)
 			end
 		end,
+		ui.text {
+			words,
+			text_size = "$font.size.sm",
+			line_height = "$font.line.sm",
+			weight = "$font.weight.medium",
+			underline = true,
+			underline_offset = 4,
+		},
 	})
 end)
 
@@ -512,20 +546,43 @@ local function row(p: state.Item, _i: number, now: State<any>): Node
 			truncate = true,
 			-- Its version, centred on the row beside its controls; before it,
 			-- Unknown author for one whose maker Zeron can't vouch for.
-			control = ui.row {
-				gap = "$space.3",
-				items = "center",
-				ui.show(function(): boolean
-					return words.unverified(now:get())
-				end, ds.Badge { ui.t("plugins.words.unverified"), tone = "warning", class = "plugin-unverified" }),
-				ds.Badge {
-					function(): string
-						return now:get().version
-					end,
-					tone = "neutral",
-					tabular = true,
-				},
-				Control { now = now, on = device_now() },
+			-- (Short of room, they give way so the name keeps its least and
+			-- shows: the badges under the text first, then Update under its
+			-- sentence, then the switch and Remove under it too.)
+			give_way = {
+				gives = function(hidden: (() -> boolean)?): { Node }
+					return {
+						ui.show(function(): boolean
+							return words.unverified(now:get())
+						end, ds.Badge { ui.t("plugins.words.unverified"), tone = "warning", class = "plugin-unverified", hidden = hidden }),
+						ds.Badge {
+							function(): string
+								return now:get().version
+							end,
+							tone = "neutral",
+							tabular = true,
+							hidden = hidden,
+						},
+					}
+				end,
+				stays = function(place: any): Node
+					return Control { now = now, on = device_now(), place = place }
+				end,
+				-- (Without Unknown author, the row of badges beside the text
+				-- kept its gap: zgx sizes a row with an absent child so.)
+				room = function(): number
+					return if words.unverified(now:get()) then 0 else (ui.theme.get("space.3") :: number?) or 12
+				end,
+				action = if store_line
+					then nil
+					else {
+						build = function(on_resize: (size: { w: number, h: number }) -> ()): Node
+							return UpdateLink { now = now, on_resize = on_resize }
+						end,
+						shows = function(): boolean
+							return update_shows(now)
+						end,
+					},
 			},
 		}
 	end

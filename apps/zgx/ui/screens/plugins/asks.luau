@@ -62,7 +62,7 @@ function M.line(l: words.Line): Node
 		items = "start",
 		ui.div {
 			pt = "$zeron.space.hair",
-			color = if l.risky then "$zeron.tone.danger.ink" else "$text.secondary",
+			color = if l.risky then "$zeron.asks.risky" else "$text.secondary",
 			ds.Icon { name = l.icon :: any, size = 16 },
 		},
 		ui.column {
@@ -76,7 +76,7 @@ function M.line(l: words.Line): Node
 				end,
 				text_size = "$font.size.md",
 				line_height = "$font.line.md",
-				color = if l.risky then "$zeron.tone.danger.ink" else "$text.primary",
+				color = if l.risky then "$zeron.asks.risky" else "$text.primary",
 				wrap = true,
 			},
 			if l.detail

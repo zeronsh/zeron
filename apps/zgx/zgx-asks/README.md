@@ -27,6 +27,7 @@ which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 | [atomic-selection](atomic-selection/ASK.md) | A selection that starts inside a formula copies half its TeX. |
 | [web-snapshot](web-snapshot/ASK.md) | The browser panel can't attach a picture of the page. |
 | [markdown-offsets](markdown-offsets/ASK.md) | Review comments on a Markdown preview can't anchor to the block that holds their line. |
+| [container-query-bounds](container-query-bounds/ASK.md) | A Settings row whose controls move under its name as it narrows lays out twice in the frame a resize crosses a step (bounds measured in the real font can't be a query's). |
 | [rich-span-boundary-break](rich-span-boundary-break/ASK.md) | A rich paragraph that must break at the boundary between two spans breaks the next span's word in two instead (a sentence's own link, Publish… in Yours, cut across lines). Zeron draws that link as a box after the sentence meanwhile. |
 | [text-underline](text-underline/ASK.md) | A text's underline is clipped by its own line box: offset 4 on a small 16 pt line draws nothing (every inline link in Zeron's rows read as bold words). Zeron underlines its row links 2 under the baseline meanwhile. |
 
