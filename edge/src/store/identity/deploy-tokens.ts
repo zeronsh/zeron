@@ -8,7 +8,7 @@
  * publishes a plugin's first version.
  *
  *   GET    /store/v1/me/tokens
- *     → { tokens: [{ id, short, name, scope, created_at, last_used_at, last_used_plugin, expires_at, revoked_at? }] }
+ *     → { tokens: [{ id, short, name, scope, created_at, last_used_at, last_used_plugin, expires_at, revoked_at }] }
  *   POST   /store/v1/me/tokens { name, scope, expires?, stepUp? }
  *     → 201 { token, id, short, name, scope, created_at, expires_at }   (the secret, this once)
  *   DELETE /store/v1/me/tokens/:id → { revoked: true }
@@ -58,7 +58,7 @@ const fresh = (value: unknown, status = 200): Response =>
   new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 
 /** A token as its owner's list shows it: times in epoch ms (null for
- * none), `revoked_at` only once revoked. Never the secret. */
+ * none). Never the secret. */
 const wireToken = (row: DeployTokenRow) => ({
   id: row.id,
   short: row.short,
@@ -68,7 +68,7 @@ const wireToken = (row: DeployTokenRow) => ({
   last_used_at: row.lastUsedAt,
   last_used_plugin: row.lastUsedPlugin,
   expires_at: row.expiresAt,
-  ...(row.revokedAt === null ? {} : { revoked_at: row.revokedAt })
+  revoked_at: row.revokedAt
 });
 
 /** Plugin `pluginId` left account `userId` (the store's transfer or

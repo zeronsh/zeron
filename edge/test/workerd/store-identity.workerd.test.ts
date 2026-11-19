@@ -67,16 +67,37 @@ describe("the store with the edge's identity", () => {
     const stranger = await call(b.userId, "POST", "/store/v1/me/tokens", { name: "CI", scope: { plugins: [id] }, stepUp: await stepUp(b.userId) });
     expect([stranger.status, await stranger.json()]).toEqual([403, expect.objectContaining({ error: "not_owner", ids: [id] })]);
 
-    // A version from CI, published with the token as a bearer.
-    const published = await tokenPublish(token, id, await makePackage({ id, version: "1.1.0", signer: await newSigner() }));
+    // A version from CI, published with the token as a bearer: unsigned, the
+    // token its publisher's word. A signed one is refused (a token's package
+    // never is), and a device's unsigned one too.
+    const signedByToken = await tokenPublish(token, id, await makePackage({ id, version: "1.1.0", signer: await newSigner() }));
+    expect([signedByToken.status, await signedByToken.json()]).toEqual([400, expect.objectContaining({ error: "bad_signature", reason: "bad_signature" })]);
+    const unsignedFromDevice = await publish(a.userId, id, await makePackage({ id, version: "1.1.0", signer: null }));
+    expect([unsignedFromDevice.status, await unsignedFromDevice.json()]).toEqual([400, expect.objectContaining({ error: "bad_signature", reason: "unsigned" })]);
+    const published = await tokenPublish(token, id, await makePackage({ id, version: "1.1.0", signer: null }));
     expect(published.status, await published.clone().text()).toBe(201);
     expect(await published.json()).toMatchObject({ status: "listed", verified: false });
-    const row = await env.STORE_DB.prepare("SELECT via, publisher_id, deploy_token_name, deploy_token_short FROM versions WHERE plugin_id = ? AND version = '1.1.0'").bind(id).first();
-    expect(row).toEqual({ via: "deploy_token", publisher_id: a.userId, deploy_token_name: "Nightly build", deploy_token_short: created.short });
+    const row = await env.STORE_DB.prepare(
+      "SELECT via, publisher_id, deploy_token_name, deploy_token_short, deploy_token_id, signer_key, content_hash, checks FROM versions WHERE plugin_id = ? AND version = '1.1.0'"
+    )
+      .bind(id)
+      .first<Record<string, unknown>>();
+    expect(row).toMatchObject({ via: "deploy_token", publisher_id: a.userId, deploy_token_name: "Nightly build", deploy_token_short: created.short, deploy_token_id: created.id, signer_key: null });
+    expect(JSON.parse(row!.checks as string)).toContainEqual({ id: "signature", level: "ok", message: "Unsigned: uploaded with a deploy token, which vouches for its publisher." });
+    // Every device reads who published it from the store's record: no key,
+    // the publisher, and the content hash it checks the package against.
+    const card = await json<{ versions: Record<string, unknown>[]; package: Record<string, unknown> }>(await call(undefined, "GET", `/store/v1/plugins/${id}`));
+    expect(card.versions[0]).toMatchObject({ version: "1.1.0", via: "deploy_token", key: null, hash: row!.content_hash });
+    expect(card.package).toMatchObject({ key: null, hash: row!.content_hash });
+    const firstHash = (await env.STORE_DB.prepare("SELECT content_hash FROM versions WHERE plugin_id = ? AND version = '1.0.0'").bind(id).first<{ content_hash: string }>())!.content_hash;
+    const offers = await json<{ updates: Record<string, unknown>[] }>(
+      await call(undefined, "POST", "/store/v1/updates", { zeron: "0.5.0", plugins: [{ id, version: "1.0.0", hash: firstHash }] })
+    );
+    expect(offers.updates).toEqual([expect.objectContaining({ id, version: "1.1.0", key: null, publisher: a.username, hash: row!.content_hash })]);
     // The author's devices see which token published which version (the notice).
     const own = (await json<{ plugins: { id: string; versions: Record<string, unknown>[] }[] }>(await call(a.userId, "GET", "/store/v1/me/plugins"))).plugins.find((p) => p.id === id)!;
-    expect(own.versions[0]).toMatchObject({ version: "1.1.0", via: "deploy_token", deploy_token: { short: created.short, name: "Nightly build" } });
-    expect(own.versions[1]).toMatchObject({ version: "1.0.0", via: "device", deploy_token: null });
+    expect(own.versions[0]).toMatchObject({ version: "1.1.0", via: "deploy_token", key: null, deploy_token: { id: created.id, short: created.short, name: "Nightly build" } });
+    expect(own.versions[1]).toMatchObject({ version: "1.0.0", via: "device", key: a.signer.key, deploy_token: null });
     const listed = await call(a.userId, "GET", "/store/v1/me/tokens");
     const listText = await listed.clone().text();
     expect(listText).not.toContain(token);
@@ -96,10 +117,10 @@ describe("the store with the edge's identity", () => {
     const unknown = `zdt_${"A".repeat(43)}${created.token.slice(-6)}`;
     const badChecksum = `${token.slice(0, -1)}${token.endsWith("A") ? "B" : "A"}`;
     const refusals = [
-      await tokenPublish(token, notInScope, await makePackage({ id: notInScope, version: "2.0.0", signer: await newSigner() })),
-      await tokenPublish(token, fresh, await makePackage({ id: fresh, version: "1.0.0", signer: await newSigner() })),
-      await tokenPublish(unknown, id, await makePackage({ id, version: "2.0.0", signer: await newSigner() })),
-      await tokenPublish(badChecksum, id, await makePackage({ id, version: "2.0.0", signer: await newSigner() }))
+      await tokenPublish(token, notInScope, await makePackage({ id: notInScope, version: "2.0.0", signer: null })),
+      await tokenPublish(token, fresh, await makePackage({ id: fresh, version: "1.0.0", signer: null })),
+      await tokenPublish(unknown, id, await makePackage({ id, version: "2.0.0", signer: null })),
+      await tokenPublish(badChecksum, id, await makePackage({ id, version: "2.0.0", signer: null }))
     ];
     const bodies = await Promise.all(refusals.map(async (r) => [r.status, await r.text()] as const));
     for (const [status, text] of bodies) {
@@ -117,12 +138,12 @@ describe("the store with the edge's identity", () => {
 
     // A transfer: the plugin leaves the account and every token's scope, for good.
     expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/transfer`, { to_username: b.username })).status).toBe(200);
-    const after = await tokenPublish(token, id, await makePackage({ id, version: "1.3.0", signer: await newSigner() }));
+    const after = await tokenPublish(token, id, await makePackage({ id, version: "1.3.0", signer: null }));
     expect([after.status, (await json<{ error: string }>(after)).error]).toEqual([401, "invalid_token"]);
     expect((await json<{ tokens: { id: string; scope: unknown }[] }>(await call(a.userId, "GET", "/store/v1/me/tokens"))).tokens.find((t) => t.id === created.id)!.scope).toEqual({ plugins: [] });
     // Coming back doesn't restore it.
     expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/transfer`, { to_username: a.username })).status).toBe(200);
-    expect((await tokenPublish(token, id, await makePackage({ id, version: "1.3.0", signer: await newSigner() }))).status).toBe(401);
+    expect((await tokenPublish(token, id, await makePackage({ id, version: "1.3.0", signer: null }))).status).toBe(401);
     // Revoked: nothing.
     expect(await json(await call(a.userId, "DELETE", `/store/v1/me/tokens/${created.id}`))).toEqual({ revoked: true });
     expect((await json<{ tokens: Record<string, unknown>[] }>(await call(a.userId, "GET", "/store/v1/me/tokens"))).tokens.find((t) => t.id === created.id)).toMatchObject({ revoked_at: expect.any(Number) });
@@ -135,16 +156,16 @@ describe("the store with the edge's identity", () => {
     const before = uniqueId("ci");
     expect((await publish(a.userId, before, await makePackage({ id: before, version: "1.0.0", signer: a.signer }))).status).toBe(201);
     const { token } = await deployToken(a.userId, { all: true });
-    expect((await tokenPublish(token, before, await makePackage({ id: before, version: "1.1.0", signer: await newSigner() }))).status).toBe(201);
+    expect((await tokenPublish(token, before, await makePackage({ id: before, version: "1.1.0", signer: null }))).status).toBe(201);
     // Claimed by the account later (from its device), then published with the token.
     const later = uniqueId("ci");
     expect((await publish(a.userId, later, await makePackage({ id: later, version: "1.0.0", signer: a.signer }))).status).toBe(201);
-    expect((await tokenPublish(token, later, await makePackage({ id: later, version: "1.1.0", signer: await newSigner() }))).status).toBe(201);
+    expect((await tokenPublish(token, later, await makePackage({ id: later, version: "1.1.0", signer: null }))).status).toBe(201);
     // Transferred in from someone else: never in an `all` scope.
     const theirs = uniqueId("ci");
     expect((await publish(b.userId, theirs, await makePackage({ id: theirs, version: "1.0.0", signer: b.signer }))).status).toBe(201);
     expect((await adminCall("POST", `/store/v1/admin/plugins/${theirs}/transfer`, { to_username: a.username })).status).toBe(200);
-    const moved = await tokenPublish(token, theirs, await makePackage({ id: theirs, version: "1.1.0", signer: await newSigner() }));
+    const moved = await tokenPublish(token, theirs, await makePackage({ id: theirs, version: "1.1.0", signer: null }));
     expect([moved.status, (await json<{ error: string }>(moved)).error]).toEqual([401, "invalid_token"]);
     const mine = (await json<{ plugins: { id: string }[] }>(await call(undefined, "GET", "/store/v1/me/plugins", undefined, { authorization: `Bearer ${token}` }))).plugins.map((p) => p.id).sort();
     expect(mine).toEqual([before, later].sort());

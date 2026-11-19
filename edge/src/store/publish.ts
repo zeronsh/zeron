@@ -164,7 +164,8 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
   if (body === "too_large") return fail(413, "too_large", `The store takes packages up to ${STORE_MAX_PACKAGE_BYTES / (1024 * 1024)} MB.`);
   let pkg;
   try {
-    pkg = await verifyPackage(body, STORE_MAX_PACKAGE_BYTES);
+    // From a device, signed; with a deploy token, not (contract a315eef5a).
+    pkg = await verifyPackage(body, STORE_MAX_PACKAGE_BYTES, publisher.via === "session");
   } catch (e) {
     if (e instanceof PackageRefusal) return refusal(e);
     throw e;
@@ -174,7 +175,7 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
   // someone else's id, a suspended plugin are refused here. From a device,
   // the package is signed by one of the account's live keys; with a deploy
   // token, the token is the publisher's word (contract a315eef5a).
-  if (publisher.via === "session" && !(await signingKeyAllowed(env, publisher, pkg.key))) {
+  if (publisher.via === "session" && !(await signingKeyAllowed(env, publisher, pkg.key!))) {
     return fail(403, "key_not_allowed", "The key that signed this package isn't one of this account's.");
   }
   if (plugin && plugin.owner_id !== publisher.userId) return fail(403, "id_taken", `"${id}" belongs to another account.`);
@@ -230,7 +231,6 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
     listing,
     warnings,
     kinds,
-    via: publisher.via,
     consent,
     base: base ? { version: base.version, consent: JSON.parse(base.permissions) as ConsentItem, manifest: base.manifest } : null,
     previous: previous?.version ?? null
@@ -261,7 +261,7 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
     // close to the insert as it gets.)
     const stillLive =
       publisher.via === "session"
-        ? await signingKeyAllowed(env, publisher, pkg.key)
+        ? await signingKeyAllowed(env, publisher, pkg.key!)
         : ((await userDirectoryStub(env)?.deployTokenLive(publisher.token!.id)) ?? false);
     if (!stillLive) {
       await maybeOrphaned(db, [pkgKey, blobKey]);
@@ -425,7 +425,7 @@ interface NewVersion {
   readonly order: Order;
   readonly sha256: string;
   readonly bytes: number;
-  readonly key: string;
+  readonly key: string | null;
   readonly hash: string;
   readonly filesCount: number;
   readonly filesBytes: number;
@@ -453,6 +453,7 @@ const insertVersion = (db: D1Database, publisher: Publisher, id: string, now: nu
     ["via", publisher.via === "session" ? "device" : "deploy_token"],
     ["deploy_token_name", publisher.token?.name ?? null],
     ["deploy_token_short", publisher.token?.short ?? null],
+    ["deploy_token_id", publisher.token?.id ?? null],
     ["signer_key", v.key],
     ["content_hash", v.hash],
     ["package_sha256", v.sha256],

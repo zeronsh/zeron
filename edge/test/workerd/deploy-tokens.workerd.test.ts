@@ -106,7 +106,7 @@ describe("deploy tokens: making one", () => {
     expect(text).not.toContain(token.token);
     expect(text).not.toContain(await deployTokenHash(token.token));
     expect(((await listed.json()) as { tokens: unknown[] }).tokens).toEqual([
-      { id: token.id, short: token.short, name: "GitHub Actions", scope: token.scope, created_at: token.created_at, last_used_at: null, last_used_plugin: null, expires_at: expires }
+      { id: token.id, short: token.short, name: "GitHub Actions", scope: token.scope, created_at: token.created_at, last_used_at: null, last_used_plugin: null, expires_at: expires, revoked_at: null }
     ]);
     // An `all` token that never expires; each a new secret.
     const all = await made(userId, { all: true });
@@ -247,7 +247,7 @@ describe("deploy tokens: making one", () => {
     const { userId, pluginId } = await owned();
     const token = await made(userId, { plugins: [pluginId] });
     const stranger = await person();
-    expect([(await api(stranger, "DELETE", `${TOKENS}/${token.id}`)).status, (await tokensOf(userId))[0]!.revoked_at]).toEqual([404, undefined]);
+    expect([(await api(stranger, "DELETE", `${TOKENS}/${token.id}`)).status, (await tokensOf(userId))[0]!.revoked_at]).toEqual([404, null]);
     const revoked = await api(userId, "DELETE", `${TOKENS}/${token.id}`);
     expect([revoked.status, await revoked.json()]).toEqual([200, { revoked: true }]);
     const revokedAt = async () => (await tokensOf(userId))[0]!.revoked_at;
@@ -276,7 +276,7 @@ describe("deploy tokens: making one", () => {
       const res = await api(token.token, method, path, body);
       expect([res.status, await errorOf(res)], `${method} ${path}`).toEqual([403, "token_not_allowed"]);
     }
-    expect((await tokensOf(userId)).map((t) => t.revoked_at)).toEqual([undefined]);
+    expect((await tokensOf(userId)).map((t) => t.revoked_at)).toEqual([null]);
     expect((await api(`runner:${userId}@org1:cloud-1`, "GET", TOKENS)).status).toBe(403);
     expect((await api(`runner:${userId}@org1:cloud-1`, "DELETE", `${TOKENS}/${token.id}`)).status).toBe(403);
   });
@@ -466,10 +466,12 @@ describe("deploy tokens: never told", () => {
       return res.status;
     };
     // Published, refused for every reason, listed, refused elsewhere, revoked.
-    expect(await keep(await tokenPublish(token, id, await makePackage({ id, version: "1.1.0", signer: await newPackageSigner() })))).toBe(201);
-    expect(await keep(await tokenPublish(token, id, await makePackage({ id, version: "1.1.0", signer: await newPackageSigner() })))).toBe(409);
+    expect(await keep(await tokenPublish(token, id, await makePackage({ id, version: "1.1.0", signer: null })))).toBe(201);
+    // (The same package again is a retry, answered alike; another is refused.)
+    expect(await keep(await tokenPublish(token, id, await makePackage({ id, version: "1.1.0", signer: null })))).toBe(201);
+    expect(await keep(await tokenPublish(token, id, await makePackage({ id, version: "1.1.0", signer: null, files: { "extra.txt": "x" } })))).toBe(409);
     expect(await keep(await tokenPublish(token, id, new TextEncoder().encode("not a package")))).toBe(400);
-    expect(await keep(await tokenPublish(token, uniqueId("ci"), await makePackage({ id, version: "1.2.0", signer: await newPackageSigner() })))).toBe(401);
+    expect(await keep(await tokenPublish(token, uniqueId("ci"), await makePackage({ id, version: "1.2.0", signer: null })))).toBe(401);
     expect(await keep(await api(token, "GET", "/store/v1/me/plugins"))).toBe(200);
     expect(await keep(await api(token, "GET", TOKENS))).toBe(403);
     expect(await keep(await api(token, "POST", `${versions(id)}/1.1.0/yank`))).toBe(403);
@@ -477,7 +479,7 @@ describe("deploy tokens: never told", () => {
     expect(await keep(await api(a.userId, "GET", `/store/v1/plugins/${id}`))).toBe(200);
     expect(await keep(await api(undefined, "GET", `/store/v1/plugins/${id}/versions`))).toBe(200);
     expect(await keep(await api(a.userId, "DELETE", `${TOKENS}/${tokenId}`))).toBe(200);
-    expect(await keep(await tokenPublish(token, id, await makePackage({ id, version: "1.3.0", signer: await newPackageSigner() })))).toBe(401);
+    expect(await keep(await tokenPublish(token, id, await makePackage({ id, version: "1.3.0", signer: null })))).toBe(401);
     expect(await keep(await api(token, "GET", "/store/v1/me/plugins"))).toBe(401);
     const audit = await env.STORE_DB!.prepare("SELECT action, detail FROM audit WHERE plugin_id = ?").bind(id).all<{ action: string; detail: string | null }>();
     const version = await env.STORE_DB!.prepare("SELECT * FROM versions WHERE plugin_id = ? AND version = '1.1.0'").bind(id).first();
@@ -487,7 +489,7 @@ describe("deploy tokens: never told", () => {
     expect(everything).not.toContain(hash);
     // Where it's named, it's by its short id and name.
     expect(audit.results.find((e) => e.action === "version.publish" && e.detail?.includes("deploy_token"))!.detail).toContain(short);
-    expect(version).toMatchObject({ via: "deploy_token", deploy_token_name: "Leak check", deploy_token_short: short });
+    expect(version).toMatchObject({ via: "deploy_token", deploy_token_name: "Leak check", deploy_token_short: short, deploy_token_id: tokenId, signer_key: null });
   });
 });
 

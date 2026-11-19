@@ -57,7 +57,7 @@ describe("one account reads another's deploy tokens", () => {
     const id = uniqueId("ci");
     expect((await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer }))).status).toBe(201);
     const { token } = await deployToken(a.userId, { plugins: [id] }, { name: "acme-prod-release-bot" });
-    expect((await tokenPublish(token, id, await makePackage({ id, version: "1.1.0", signer: await newSigner() }))).status).toBe(201);
+    expect((await tokenPublish(token, id, await makePackage({ id, version: "1.1.0", signer: null }))).status).toBe(201);
     expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/transfer`, { to_username: b.username })).status).toBe(200);
     const mine = (await json<{ plugins: { id: string; versions: Record<string, any>[] }[] }>(await call(b.userId, "GET", "/store/v1/me/plugins"))).plugins.find((p) => p.id === id)!;
     const shown = mine.versions.find((v) => v.version === "1.1.0")!;

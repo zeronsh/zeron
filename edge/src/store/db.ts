@@ -70,7 +70,8 @@ export interface VersionRow {
   readonly via: "device" | "deploy_token";
   readonly deploy_token_name: string | null;
   readonly deploy_token_short: string | null;
-  readonly signer_key: string;
+  readonly deploy_token_id: string | null;
+  readonly signer_key: string | null;
   readonly content_hash: string;
   readonly package_sha256: string;
   readonly package_bytes: number;

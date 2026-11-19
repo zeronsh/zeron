@@ -88,7 +88,8 @@ CREATE TABLE versions (
   via TEXT NOT NULL CHECK (via IN ('device', 'deploy_token')),
   deploy_token_name TEXT,                        -- the token's name when it published, if one did
   deploy_token_short TEXT,                       -- and its short id (never the secret)
-  signer_key TEXT NOT NULL,
+  deploy_token_id TEXT,                          -- and its id (for the owner to revoke it by)
+  signer_key TEXT,                               -- the device key that signed it; NULL from a deploy token (unsigned)
   content_hash TEXT NOT NULL,
   package_sha256 TEXT NOT NULL,
   package_bytes INTEGER NOT NULL,
@@ -111,7 +112,9 @@ CREATE TABLE versions (
   checks TEXT NOT NULL,                          -- checks.ts list, JSON
   published_at INTEGER NOT NULL,
   PRIMARY KEY (plugin_id, version),
-  UNIQUE (plugin_id, precedence)
+  UNIQUE (plugin_id, precedence),
+  -- A device's version is signed by its key; a deploy token's is unsigned.
+  CHECK ((via = 'device') = (signer_key IS NOT NULL))
 );
 CREATE INDEX versions_order ON versions (plugin_id, major, minor, patch, is_release, pre_key);
 CREATE INDEX versions_publisher ON versions (publisher_id, published_at);

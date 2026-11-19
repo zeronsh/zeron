@@ -164,14 +164,17 @@ const b64 = (bytes: Uint8Array): string => {
 export interface PackageOptions {
   readonly id: string;
   readonly version: string;
-  readonly signer: Signer;
+  /** Who signs it; null for an unsigned package, as CI sends one with a
+   * deploy token. */
+  readonly signer: Signer | null;
   /** Manifest fields over the defaults (undefined deletes one). */
   readonly manifest?: Record<string, unknown>;
   /** Files over the defaults (undefined deletes one). */
   readonly files?: Record<string, string | Uint8Array | undefined>;
 }
 
-/** A signed `.zeron-plugin`, as the engine packs one. */
+/** A `.zeron-plugin` as the engine packs one: signed by `signer`, or (null)
+ * unsigned, as `zeron plugin publish` sends one with a deploy token. */
 export const makePackage = async (o: PackageOptions): Promise<Uint8Array> => {
   const files: Record<string, string | Uint8Array | undefined> = {
     "init.luau": `return "${o.id} ${o.version}"`,
@@ -202,12 +205,14 @@ export const makePackage = async (o: PackageOptions): Promise<Uint8Array> => {
   const manifest = parseJsonText(JSON.stringify(manifestFields)) as JsonObject;
   const hashes = new Map<string, string>();
   for (const path of [...bytes.keys()].sort()) hashes.set(path, await sha256Hex(bytes.get(path)!));
-  const filesValue: JsonObject = new Map([...hashes].map(([k, v]) => [k, v as Json]));
-  const toSign: JsonObject = new Map(manifest);
-  toSign.set("signature", new Map<string, Json>([["key", o.signer.key], ["files", filesValue]]));
-  const sig = await o.signer.sign(encoder.encode(PAYLOAD_PREFIX + canonicalJson(toSign)));
   const signed = JSON.parse(canonicalJson(manifest)) as Record<string, unknown>;
-  signed.signature = { key: o.signer.key, files: Object.fromEntries(hashes), sig };
+  if (o.signer) {
+    const filesValue: JsonObject = new Map([...hashes].map(([k, v]) => [k, v as Json]));
+    const toSign: JsonObject = new Map(manifest);
+    toSign.set("signature", new Map<string, Json>([["key", o.signer.key], ["files", filesValue]]));
+    const sig = await o.signer.sign(encoder.encode(PAYLOAD_PREFIX + canonicalJson(toSign)));
+    signed.signature = { key: o.signer.key, files: Object.fromEntries(hashes), sig };
+  }
   return encoder.encode(
     JSON.stringify({ format: "zeron-plugin:v1", manifest: signed, files: Object.fromEntries([...bytes].map(([p, d]) => [p, b64(d)])) })
   );
