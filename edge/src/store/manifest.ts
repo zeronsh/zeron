@@ -15,12 +15,9 @@ import { type Json, type JsonObject, isArray, isObject } from "./json";
 
 export const MANIFEST_FILE = "zeron-plugin.json";
 
-export const KNOWN_PERMISSIONS: readonly string[] = [
-  "ui.add", "ui.change", "ui.replace", "profile.read", "sessions.read", "messages.read", "account.email", "files.read",
-  "panel.tabs", "pages.add", "github", "github.write", "links.open", "notifications", "navigate", "compose", "draft",
-  "network", "clipboard", "files", "web", "windows", "tools", "devices", "native", "commands", "service", "usage.read",
-  "accounts.read", "accounts.switch", "accounts.pin", "models.read", "models.set", "messages.send"
-];
+/** Every permission a manifest may ask for (manifest.rs `KNOWN_PERMISSIONS`,
+ * the data file's `known_permissions`): any other is the manifest's problem. */
+export const KNOWN_PERMISSIONS: readonly string[] = STORE_DATA.known_permissions;
 
 /** Ids no plugin may have at all (manifest.rs `RESERVED_IDS`): a device
  * refuses them too. The store's own further words (built-in plugins' ids,
