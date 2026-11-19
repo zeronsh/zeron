@@ -1364,7 +1364,7 @@ impl AgentAccounts {
         &self,
         requester: Option<&str>,
     ) -> Result<AgentLoginStart, EngineError> {
-        self.start_devin_login_with(requester, None)
+        self.start_devin_login_with(requester, None, None)
     }
 
     /// [`Self::start_devin_login`]; with `capture`, the new `credentials.toml`
@@ -1375,6 +1375,7 @@ impl AgentAccounts {
         &self,
         requester: Option<&str>,
         capture: Option<CaptureSink>,
+        catalog: Option<crate::sign_in_catalog::CatalogPublisher>,
     ) -> Result<AgentLoginStart, EngineError> {
         self.reap_spawned_flows(HarnessId::Devin);
         let acp = self
@@ -1450,9 +1451,14 @@ impl AgentAccounts {
                         "Devin reported a successful sign-in, but saved no credentials.".to_string()
                     })
             });
-            // Off the disk before anything else: a captured key lives on only
-            // in this task's memory until the vault has it.
-            let _ = std::fs::remove_dir_all(&task_home);
+            // Off the disk before anything else (a captured key lives on
+            // only in this task's memory until the vault has it), unless
+            // the new account's models are discovered there first.
+            let kept = super::SignInHome::keep(
+                HarnessId::Devin,
+                super::ShredOnDrop(task_home.clone()),
+                catalog.filter(|_| capture.is_some()),
+            );
             let outcome = match (credentials, capture) {
                 (Ok(credentials), Some(capture)) => {
                     capture(serde_json::json!({
@@ -1472,6 +1478,7 @@ impl AgentAccounts {
                 },
                 (Err(message), _) => Err(message),
             };
+            kept.after_upload(&outcome);
             lock(&task_state).outcome = Some(outcome);
         });
         lock(&self.inner.flows).insert(

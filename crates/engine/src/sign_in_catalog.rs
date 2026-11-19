@@ -46,8 +46,30 @@ pub fn discovers_at_sign_in(harness: HarnessId) -> bool {
 /// whose environment adds `env` (the agent's home: `GEMINI_HOME`,
 /// `GROK_HOME`, …). `None` when it lists none live or doesn't answer in time.
 pub async fn discover(harness: HarnessId, env: Vec<(String, OsString)>) -> Option<Vec<Model>> {
+    #[cfg(test)]
+    if let Some(exe) = test_exe::get() {
+        return discover_with(&exe, harness, env).await;
+    }
     let exe = std::env::current_exe().ok()?;
     discover_with(&exe, harness, env).await
+}
+
+/// What a test runs in this executable's place (the test binary would run
+/// its tests again).
+#[cfg(test)]
+pub(crate) mod test_exe {
+    use std::path::PathBuf;
+    use std::sync::{Mutex, PoisonError};
+
+    static EXE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+    pub(crate) fn set(exe: Option<PathBuf>) {
+        *EXE.lock().unwrap_or_else(PoisonError::into_inner) = exe;
+    }
+
+    pub(super) fn get() -> Option<PathBuf> {
+        EXE.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
 }
 
 async fn discover_with(exe: &Path, harness: HarnessId, env: Vec<(String, OsString)>) -> Option<Vec<Model>> {
@@ -129,7 +151,11 @@ pub fn home_env(harness: HarnessId, home: &Path) -> Vec<(String, OsString)> {
             ("XDG_CONFIG_HOME".into(), at(home.join("config"))),
             ("XDG_CACHE_HOME".into(), at(home.join("cache"))),
         ],
-        HarnessId::Muse => vec![("XDG_CONFIG_HOME".into(), at(home.join("config")))],
+        HarnessId::Muse => vec![
+            ("XDG_CONFIG_HOME".into(), at(home.join("config"))),
+            ("MUSE_AUTH_PATH".into(), at(home.join("config").join("muse").join("auth.json"))),
+            ("TBH_CREDENTIAL_BACKEND".into(), "file".into()),
+        ],
         // The SDK's store lives under `$HOME`, which also finds the agent:
         // its key goes as the variable a run takes instead.
         HarnessId::Cursor => std::fs::read(home.join("auth.json"))

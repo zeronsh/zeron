@@ -179,9 +179,12 @@ pub(crate) async fn dispatch(
                 .ok_or_else(|| {
                     RpcError::Failed("Turn Cloud on in Settings → Cloud first.".into())
                 })?;
+            // (The new account's models, where its agent can list them as
+            // it signs in: `sign_in_catalog`.)
+            let catalog = catalog_publisher(cloud.clone());
             let sink = crate::cloud_client::vault_upload_sink(cloud, vault, vec![device]);
             let start = accounts
-                .start_capture_login(p.harness, provider, sink)
+                .start_capture_login_with(p.harness, provider, sink, Some(catalog))
                 .await
                 .map_err(failed)?;
             RpcReply::value(&start)

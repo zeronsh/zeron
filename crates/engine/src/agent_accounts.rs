@@ -100,6 +100,7 @@ use zeron_proto::{
 };
 
 use crate::repos::home_dir;
+use crate::sign_in_catalog::CatalogPublisher;
 use crate::{EngineError, new_id, now_ms};
 
 /// What a relayed sign-in callback answered ([`AgentAccounts::relay_callback`]):
@@ -2101,6 +2102,21 @@ impl AgentAccounts {
         provider: Option<&str>,
         capture: CaptureSink,
     ) -> Result<AgentLoginStart, EngineError> {
+        self.start_capture_login_with(harness, provider, capture, None)
+            .await
+    }
+
+    /// [`Self::start_capture_login`]; with `catalog`, an agent whose new
+    /// account is all Cloud runs it on (`sign_in_catalog::discovers_at_sign_in`)
+    /// has its models discovered in the sign-in's home once the upload is
+    /// done, and they go to `catalog` (kept as that account's).
+    pub async fn start_capture_login_with(
+        &self,
+        harness: HarnessId,
+        provider: Option<&str>,
+        capture: CaptureSink,
+        catalog: Option<CatalogPublisher>,
+    ) -> Result<AgentLoginStart, EngineError> {
         self.sweep_flows();
         let provider = provider.filter(|p| !p.is_empty());
         // Logins several agents share go through one capture each: Pi's
@@ -2125,11 +2141,13 @@ impl AgentAccounts {
             (HarnessId::Hermes, Some(which @ ("nous" | "xai-oauth"))) => {
                 self.start_hermes_capture(which, capture).await?
             }
-            (HarnessId::Cursor, _) => self.start_cursor_capture(capture).await?,
-            (HarnessId::Grok, _) => self.start_grok_capture(capture).await?,
-            (HarnessId::Devin, _) => self.start_devin_login_with(None, Some(capture))?,
-            (HarnessId::Antigravity, _) => self.start_antigravity_capture(capture)?,
-            (HarnessId::Muse, _) => self.start_muse_capture(capture).await?,
+            (HarnessId::Cursor, _) => self.start_cursor_capture(capture, catalog).await?,
+            (HarnessId::Grok, _) => self.start_grok_capture(capture, catalog).await?,
+            (HarnessId::Devin, _) => {
+                self.start_devin_login_with(None, Some(capture), catalog)?
+            }
+            (HarnessId::Antigravity, _) => self.start_antigravity_capture(capture, catalog)?,
+            (HarnessId::Muse, _) => self.start_muse_capture(capture, catalog).await?,
             (other, _) => {
                 return Err(EngineError::Other(format!(
                     "{other:?} sign-ins can't be connected to Cloud"
@@ -2259,6 +2277,7 @@ impl AgentAccounts {
     async fn start_cursor_capture(
         &self,
         capture: CaptureSink,
+        catalog: Option<CatalogPublisher>,
     ) -> Result<AgentLoginStart, EngineError> {
         self.reap_spawned_flows(HarnessId::Cursor);
         let login_id = new_id();
@@ -2275,6 +2294,7 @@ impl AgentAccounts {
             scan_cursor_url,
             cursor_capture,
             capture,
+            catalog,
         )
         .await
     }
@@ -2285,6 +2305,7 @@ impl AgentAccounts {
     async fn start_grok_capture(
         &self,
         capture: CaptureSink,
+        catalog: Option<CatalogPublisher>,
     ) -> Result<AgentLoginStart, EngineError> {
         self.reap_spawned_flows(HarnessId::Grok);
         let login_id = new_id();
@@ -2309,6 +2330,7 @@ impl AgentAccounts {
             stores::scan_grok_url,
             grok_capture,
             capture,
+            catalog,
         )
         .await
     }
@@ -2349,6 +2371,7 @@ impl AgentAccounts {
             stores::scan_hermes_url,
             read,
             capture,
+            None,
         )
         .await
     }
@@ -2362,6 +2385,7 @@ impl AgentAccounts {
     fn start_antigravity_capture(
         &self,
         capture: CaptureSink,
+        catalog: Option<CatalogPublisher>,
     ) -> Result<AgentLoginStart, EngineError> {
         self.reap_spawned_flows(HarnessId::Antigravity);
         let acp = self
@@ -2429,8 +2453,7 @@ impl AgentAccounts {
                         .to_string()
                 })
             });
-            // Off the disk before anything else.
-            drop(shred);
+            let kept = SignInHome::keep(HarnessId::Antigravity, shred, catalog);
             let outcome = match found {
                 Ok(mut upload) => {
                     if let Some(email) = this.google_email(&upload["material"]["antigravityToken"]).await {
@@ -2440,6 +2463,7 @@ impl AgentAccounts {
                 }
                 Err(message) => Err(message),
             };
+            kept.after_upload(&outcome);
             lock(&task_state).outcome = Some(outcome);
         });
         lock(&self.inner.flows).insert(
@@ -2519,6 +2543,7 @@ impl AgentAccounts {
         scan_url: fn(&str) -> Option<String>,
         read: fn(&Path) -> Result<Option<serde_json::Value>, String>,
         capture: CaptureSink,
+        catalog: Option<CatalogPublisher>,
     ) -> Result<AgentLoginStart, EngineError> {
         command
             .stdin(zeron_harness::process::Stdio::null())
@@ -2571,13 +2596,12 @@ impl AgentAccounts {
                 .await
                 .unwrap_or_else(|_| Err("The sign-in timed out — start again.".into()));
             drop(kill);
-            // Off the disk before the upload: the credential lives on only
-            // in this task's memory until the capturer has it.
-            drop(shred);
+            let kept = SignInHome::keep(harness, shred, catalog);
             let outcome = match waited {
                 Ok(found) => capture(found).await,
                 Err(message) => Err(message),
             };
+            kept.after_upload(&outcome);
             lock(&task_state).outcome = Some(outcome);
         });
         lock(&self.inner.flows).insert(
@@ -5461,6 +5485,34 @@ impl Drop for KillOnDrop {
     }
 }
 
+/// A Cloud sign-in's throwaway home past its sign-in. Off the disk before
+/// the upload — the credential lives on only in the task's memory until the
+/// capturer has it — unless the new account's models are discovered there
+/// once the vault has it (`sign_in_catalog`): then it's shredded as that
+/// discovery ends, in seconds, on a task of its own.
+enum SignInHome {
+    Shredded,
+    Kept(HarnessId, ShredOnDrop, CatalogPublisher),
+}
+
+impl SignInHome {
+    fn keep(harness: HarnessId, shred: ShredOnDrop, catalog: Option<CatalogPublisher>) -> Self {
+        match catalog.filter(|_| crate::sign_in_catalog::discovers_at_sign_in(harness)) {
+            Some(catalog) => Self::Kept(harness, shred, catalog),
+            None => Self::Shredded,
+        }
+    }
+
+    /// The upload's done (`outcome`): discover and keep the models when it
+    /// went; the home goes either way.
+    fn after_upload(self, outcome: &Result<(), String>) {
+        if let (Self::Kept(harness, shred, catalog), Ok(())) = (self, outcome) {
+            let env = crate::sign_in_catalog::home_env(harness, &shred.0);
+            crate::sign_in_catalog::discover_then_publish(harness, env, shred, Some(catalog));
+        }
+    }
+}
+
 /// Securely deletes a captured sign-in's throwaway home when dropped: every
 /// regular file is overwritten with zeros and synced before the tree is
 /// removed. Best effort by nature — copy-on-write filesystems and SSD wear
@@ -5779,6 +5831,68 @@ fn stage_file_atomic(
 
 #[cfg(test)]
 mod tests {
+
+    /// A Cloud sign-in's home is gone before its upload, unless its agent's
+    /// new account has its models discovered there: then it stays through
+    /// the upload, the models go to the publisher, and it's gone as
+    /// discovery ends. A failed upload, or an agent that reaches several
+    /// providers (Hermes), keeps nothing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_sign_in_home_stays_only_for_its_new_accounts_models() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let home = |name: &str| {
+            let home = dir.path().join(name);
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join("auth.json"), "{}").unwrap();
+            home
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(HarnessId, Vec<String>)>();
+        let publisher: CatalogPublisher = Arc::new(move |harness, models: Vec<zeron_proto::Model>| {
+            let tx = tx.clone();
+            Box::pin(async move {
+                let _ = tx.send((harness, models.into_iter().map(|m| m.id).collect()));
+            })
+        });
+
+        let plain = home("plain");
+        let kept = SignInHome::keep(HarnessId::Grok, ShredOnDrop(plain.clone()), None);
+        assert!(!plain.exists(), "no publisher: gone before the upload");
+        kept.after_upload(&Ok(()));
+
+        let hermes = home("hermes");
+        let _kept = SignInHome::keep(HarnessId::Hermes, ShredOnDrop(hermes.clone()), Some(publisher.clone()));
+        assert!(!hermes.exists(), "Hermes reaches several providers: nothing to discover");
+
+        let failed = home("failed");
+        let kept = SignInHome::keep(HarnessId::Grok, ShredOnDrop(failed.clone()), Some(publisher.clone()));
+        assert!(failed.exists(), "kept through the upload");
+        kept.after_upload(&Err("refused".into()));
+        assert!(!failed.exists(), "a failed upload: gone, nothing discovered");
+
+        // The child lists models only when pointed at the home, and only
+        // while it's still there.
+        let grok = home("grok");
+        let script = dir.path().join("engine");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n[ \"$GROK_HOME\" = \"{}\" ] && [ -f \"$GROK_HOME/auth.json\" ] && echo '[{{\"id\":\"grok-4.7\",\"label\":\"Grok 4.7\"}}]'\n",
+                grok.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::sign_in_catalog::test_exe::set(Some(script));
+        let kept = SignInHome::keep(HarnessId::Grok, ShredOnDrop(grok.clone()), Some(publisher));
+        kept.after_upload(&Ok(()));
+        let published = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.unwrap().unwrap();
+        crate::sign_in_catalog::test_exe::set(None);
+        assert_eq!(published, (HarnessId::Grok, vec!["grok-4.7".to_string()]));
+        assert!(!grok.exists(), "gone once discovery ended");
+        assert!(rx.try_recv().is_err(), "nothing else was published");
+    }
     use super::*;
 
     /// A Keychain the engine can't use (the search and the write both

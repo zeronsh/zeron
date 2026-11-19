@@ -245,6 +245,7 @@ impl AgentAccounts {
     pub(super) async fn start_muse_capture(
         &self,
         capture: super::CaptureSink,
+        catalog: Option<crate::sign_in_catalog::CatalogPublisher>,
     ) -> Result<AgentLoginStart, EngineError> {
         self.reap_spawned_flows(HarnessId::Muse);
         let cli = self.muse_cli()?;
@@ -281,12 +282,12 @@ impl AgentAccounts {
                     "Muse reported a successful sign-in, but saved no Meta login.".to_string()
                 })
             });
-            // Off the disk before the upload.
-            drop(shred);
+            let kept = super::SignInHome::keep(HarnessId::Muse, shred, catalog);
             let outcome = match found {
                 Ok(upload) => capture(upload).await,
                 Err(message) => Err(message),
             };
+            kept.after_upload(&outcome);
             lock(&task_state).outcome = Some(outcome);
         });
         lock(&self.inner.flows).insert(
