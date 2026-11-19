@@ -1145,7 +1145,7 @@ impl AgentAccounts {
         let mut detected_more: Vec<(HarnessId, Detected)> = Vec::new();
         detected_more.extend(self.detect_grok().map(|d| (HarnessId::Grok, d)));
         detected_more.extend(self.detect_devin().map(|d| (HarnessId::Devin, d)));
-        let antigravity_file = self.detect_antigravity_file();
+        let antigravity_file = self.detect_antigravity_file().await;
         let antigravity_in_file = antigravity_file.is_some();
         detected_more.extend(antigravity_file.map(|d| (HarnessId::Antigravity, d)));
         for harness in [HarnessId::Opencode, HarnessId::Pi] {
@@ -1565,7 +1565,7 @@ impl AgentAccounts {
             HarnessId::Cursor => self.detect_cursor().map(|d| d.account_key),
             HarnessId::Grok => self.detect_grok().map(|d| d.account_key),
             HarnessId::Devin => self.detect_devin().map(|d| d.account_key),
-            HarnessId::Antigravity => self.detect_antigravity_file().map(|d| d.account_key),
+            HarnessId::Antigravity => self.detect_antigravity_file().await.map(|d| d.account_key),
             HarnessId::Opencode | HarnessId::Pi => self
                 .detect_keyed_entry(harness, store_key?)
                 .await
@@ -2733,7 +2733,7 @@ impl AgentAccounts {
             ("client_secret", blob["client_secret"].as_str().unwrap_or_default()),
         ];
         let endpoints = &self.inner.endpoints;
-        let token: serde_json::Value = self
+        let refreshed = self
             .inner
             .http
             .post(&endpoints.google_token)
@@ -2741,13 +2741,25 @@ impl AgentAccounts {
             .timeout(HTTP_TIMEOUT)
             .send()
             .await
-            .ok()?
-            .error_for_status()
-            .ok()?
-            .json()
-            .await
-            .ok()?;
-        let info: serde_json::Value = self
+            .and_then(reqwest::Response::error_for_status);
+        let token: serde_json::Value = match refreshed {
+            Ok(res) => res.json().await.ok()?,
+            Err(error) => {
+                tracing::warn!(error = %crate::http_error::describe_http_error(error), "Google login: no token to look its account up with");
+                return None;
+            }
+        };
+        // The refresh's `id_token` names the account (its `email` claim);
+        // the profile endpoint only when it doesn't.
+        if let Some(email) = token["id_token"]
+            .as_str()
+            .and_then(jwt_claims)
+            .and_then(|claims| str_field(&claims, "email"))
+            .filter(|email| email.contains('@'))
+        {
+            return Some(email);
+        }
+        let info = self
             .inner
             .http
             .get(&endpoints.google_userinfo)
@@ -2755,12 +2767,14 @@ impl AgentAccounts {
             .timeout(HTTP_TIMEOUT)
             .send()
             .await
-            .ok()?
-            .error_for_status()
-            .ok()?
-            .json()
-            .await
-            .ok()?;
+            .and_then(reqwest::Response::error_for_status);
+        let info: serde_json::Value = match info {
+            Ok(res) => res.json().await.ok()?,
+            Err(error) => {
+                tracing::warn!(error = %crate::http_error::describe_http_error(error), "Google login: its account didn't say who it is");
+                return None;
+            }
+        };
         str_field(&info, "email").filter(|email| email.contains('@'))
     }
 
@@ -2931,7 +2945,8 @@ impl AgentAccounts {
             let _ = std::fs::remove_dir_all(&task_home);
             let outcome = match token {
                 Ok(token) => {
-                    let email = this.google_email(&token).await;
+                    // (Remembered: the list names this login without asking again.)
+                    let email = this.antigravity_email(&token).await;
                     match antigravity_file_login(&token, email) {
                         Some(detected) => this
                             .save_new_login(HarnessId::Antigravity, &detected)
@@ -3652,17 +3667,46 @@ impl AgentAccounts {
     /// through Zeron writes, and what Zeron's runs then read
     /// ([`zeron_harness::acp::antigravity_reads_token_file`]) — unless its home
     /// is set to another method, which runs instead.
-    fn detect_antigravity_file(&self) -> Option<Detected> {
+    async fn detect_antigravity_file(&self) -> Option<Detected> {
         let home = self.inner.config.antigravity_home.as_ref()?;
         if zeron_harness::acp::antigravity_saved_auth_method(home)
             .is_some_and(|method| method != "oauth-personal")
         {
             return None;
         }
-        antigravity_file_login(
-            &read_json(&zeron_harness::acp::antigravity_token_file(home))?,
-            None,
-        )
+        let token = read_json(&zeron_harness::acp::antigravity_token_file(home))?;
+        let email = self.antigravity_email(&token).await;
+        antigravity_file_login(&token, email)
+    }
+
+    /// Whose Google login `token` is: asked once per login (its refresh
+    /// token's fingerprint), a failed lookup again after [`IDENTITY_RETRY`]
+    /// rather than the login staying a nameless "Google account".
+    async fn antigravity_email(&self, token: &serde_json::Value) -> Option<String> {
+        let refresh = str_field(token, "refresh_token")?;
+        let fingerprint = format!("antigravity:{}", crate::repos::hex(&Sha256::digest(refresh.as_bytes())));
+        let cached = lock(&self.inner.identities).get(&fingerprint).cloned();
+        match cached {
+            Some(IdentityLookup::Known(_, profile)) => return Some(profile.email),
+            Some(IdentityLookup::Failed(at)) if at.elapsed() < IDENTITY_RETRY => return None,
+            _ => {}
+        }
+        let email = self.google_email(token).await;
+        let lookup = match &email {
+            Some(email) => IdentityLookup::Known(
+                fingerprint.clone(),
+                SlotProfile {
+                    email: email.clone(),
+                    display_name: None,
+                    organization: None,
+                    plan: None,
+                    auth_kind: AgentAuthKind::Oauth,
+                },
+            ),
+            None => IdentityLookup::Failed(Instant::now()),
+        };
+        lock(&self.inner.identities).insert(fingerprint, lookup);
+        email
     }
 
     fn antigravity_home(&self) -> Result<&Path, EngineError> {

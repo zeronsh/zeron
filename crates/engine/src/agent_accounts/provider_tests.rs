@@ -942,15 +942,20 @@ done
 #[cfg(unix)]
 #[tokio::test]
 async fn antigravity_signs_in_to_a_google_account_each_switchable_by_its_address() {
-    // One address per sign-in, in order (each looks its account up once).
+    // Each Google login's address, in the `id_token` its refresh answers
+    // with (as Google's does), looked up once per login.
     let lookups = Arc::new(AtomicUsize::new(0));
     let seen = lookups.clone();
-    let google = MockServer::start(move |_, path, _| match path {
-        "/google/token" => (200, r#"{"access_token":"at"}"#.to_string()),
-        "/google/userinfo" => {
-            let n = seen.fetch_add(1, Ordering::SeqCst);
-            let who = if n == 0 { "ada@gmail.com" } else { "bea@gmail.com" };
-            (200, serde_json::json!({ "email": who }).to_string())
+    let google = MockServer::start(move |_, path, body| match path {
+        "/google/token" => {
+            seen.fetch_add(1, Ordering::SeqCst);
+            let who = if body.contains("refresh_token=grt-a") { "ada@gmail.com" } else { "bea@gmail.com" };
+            let claims = base64::Engine::encode(
+                &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                serde_json::json!({ "email": who }).to_string(),
+            );
+            let id_token = format!("e30.{claims}.sig");
+            (200, serde_json::json!({ "access_token": "at", "id_token": id_token }).to_string())
         }
         _ => (404, String::new()),
     })

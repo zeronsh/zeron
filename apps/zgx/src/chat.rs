@@ -1662,10 +1662,18 @@ impl Chats {
     /// models looked up again, as the agent now lists them (Pi signed in to
     /// Claude lists Claude's models). Here, that agent's alone; another
     /// device's, only while the composer runs on it.
+    /// Whether the picker lists `harness`'s models, or would: one installed
+    /// and on that listed none before (signed out, it had none, and a
+    /// sign-in is what brings them).
+    fn picks_from(&self, harness: &str) -> bool {
+        self.models.borrow().contains_key(harness)
+            || self.harnesses.borrow().iter().any(|h| h["id"].as_str() == Some(harness))
+    }
+
     fn accounts_changed(self: &Rc<Self>, device: &str, harness: &str) {
         let here = self.here.borrow().clone();
         if device.is_empty() || here.as_deref() == Some(device) {
-            if !self.models.borrow().contains_key(harness) {
+            if !self.picks_from(harness) {
                 return;
             }
             let (me, id) = (self.clone(), harness.to_owned());
@@ -7677,6 +7685,18 @@ mod tests {
         assert_eq!(turn_from(from_its_send(reply(&other, 160.), &other, Some(&prompt))), None, "another message's setup");
         assert_eq!(turn_from(from_its_send(reply(&setup, 90.), &setup, Some(&prompt))), None, "never later than the reply");
         assert_eq!(turn_from(from_its_send(reply(&setup, 160.), &setup, None)), None);
+    }
+
+    /// A sign-in looks up the models of an agent the picker lists, and of one
+    /// it would that had none (signed out); never one that's off or absent.
+    #[test]
+    fn a_sign_in_brings_an_agent_without_models_into_the_picker() {
+        let chats = Chats::default();
+        chats.models.borrow_mut().insert("codex".into(), vec![json!({ "id": "gpt" })]);
+        *chats.harnesses.borrow_mut() = vec![json!({ "id": "codex" }), json!({ "id": "antigravity" })];
+        assert!(chats.picks_from("codex"));
+        assert!(chats.picks_from("antigravity"), "listed, no models yet");
+        assert!(!chats.picks_from("hermes"), "not installed or turned off");
     }
 
     #[test]
