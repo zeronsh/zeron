@@ -457,7 +457,7 @@ describe("store author routes", () => {
       versions: [
         {
           version: "0.1.0-beta.1", status: "listed", prerelease: true, verified: false, via: "device", key: a.signer.key,
-          deploy_key: null, review: { decided: false, decision: null }, yanked_by: null, superseded: null
+          deploy_token: null, review: { decided: false, decision: null }, yanked_by: null, superseded: null
         }
       ]
     });
@@ -494,11 +494,13 @@ describe("store author routes", () => {
     expect(open?.n).toBe(1);
   });
 
-  it("lets a deploy key's request reach only publishing and its plugin's state", async () => {
+  it("lets a deploy token reach only publishing and its account's plugins, refused elsewhere before it's looked up", async () => {
     const a = await author();
     const id = uniqueId();
     await listed(a, id, "1.0.0");
-    const key = { authorization: "ZeronKey key=AAAA, ts=1, sig=AAAA" };
+    // (Not a live token: elsewhere it's refused without a lookup, so the answer
+    // is the same for any token, live or not.)
+    const key = { authorization: `Bearer zdt_${"A".repeat(49)}` };
     const outside: [string, string, unknown?][] = [
       ["GET", "/store/v1/plugins"],
       ["GET", `/store/v1/plugins/${id}`],
@@ -510,11 +512,14 @@ describe("store author routes", () => {
     ];
     for (const [method, path, body] of outside) {
       const res = await call(undefined, method, path, body, key);
-      expect([res.status, ((await res.json()) as { error: string }).error], `${method} ${path}`).toEqual([403, "key_not_allowed"]);
+      expect([res.status, ((await res.json()) as { error: string }).error], `${method} ${path}`).toEqual([403, "token_not_allowed"]);
     }
-    // Publishing and its state are let through to the key's own checks.
-    expect((await call(undefined, "POST", `/store/v1/plugins/${id}/versions`, new Uint8Array(4), key)).status).not.toBe(403);
-    expect((await call(undefined, "GET", "/store/v1/me/plugins", undefined, key)).status).not.toBe(403);
+    // Publishing and the account's plugins are let through to the token's own
+    // checks, which refuse this one as any bad token: 401 invalid_token.
+    for (const [method, path, body] of [["POST", `/store/v1/plugins/${id}/versions`, new Uint8Array(4)], ["GET", "/store/v1/me/plugins", undefined]] as const) {
+      const res = await call(undefined, method, path, body, key);
+      expect([res.status, ((await res.json()) as { error: string }).error], path).toEqual([401, "invalid_token"]);
+    }
   });
 
   it("pages the audit log both ways", async () => {

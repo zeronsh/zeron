@@ -7,7 +7,7 @@
  * writes per account (STORE_WRITES, in each route). Anything that throws is
  * one plain 500, with no detail.
  *
- * `/store/v1/me/keys` (deploy keys, amendment 44) is the identity lane's,
+ * `/store/v1/me/tokens` (deploy tokens) is the identity lane's,
  * mounted before this; here it is not found.
  */
 import type { Env } from "../env";
@@ -18,7 +18,9 @@ import { fail, notFound, rateLimited } from "./http";
 import { handlePublish } from "./publish";
 import { serveFile, servePackage } from "./serve";
 import { handleUpdates } from "./updates";
-import { withSessionCookie } from "./principal";
+import { tokenNotAllowed, withSessionCookie } from "./principal";
+import { headerBearer } from "./identity/callers";
+import { looksLikeDeployToken } from "./identity/deploy-token";
 
 const ID_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
 
@@ -27,18 +29,18 @@ const allowRead = async (request: Request, env: Env): Promise<boolean> => {
   return !ip || !env.STORE_READS || (await env.STORE_READS.limit({ key: ip })).success;
 };
 
-/** What a deploy key's signed request may reach (amendment 6): publishing
- * a version, and its plugin's state. */
-const deployKeyMayCall = (method: string, parts: readonly string[]): boolean =>
+/** What a deploy token may reach: publishing a version, and its account's
+ * plugins in its scope. */
+const deployTokenMayCall = (method: string, parts: readonly string[]): boolean =>
   (method === "POST" && parts[2] === "plugins" && parts.length === 5 && parts[4] === "versions") ||
   (method === "GET" && parts[2] === "me" && parts[3] === "plugins" && parts.length === 4);
 
 const route = async (request: Request, env: Env, db: D1Database, bucket: R2Bucket, url: URL, parts: readonly string[]): Promise<Response> => {
   const method = request.method;
   const read = method === "GET" || method === "HEAD";
-  if (/^ZeronKey\s/i.test(request.headers.get("authorization") ?? "") && !deployKeyMayCall(method, parts)) {
-    return fail(403, "key_not_allowed", "A deploy key can publish its plugin's versions and read its state, nothing else.");
-  }
+  // A deploy token anywhere else: refused before it's looked up.
+  const bearer = headerBearer(request);
+  if (bearer !== undefined && looksLikeDeployToken(bearer) && !deployTokenMayCall(method, parts)) return tokenNotAllowed();
   if (parts[2] === "admin") return handleAdmin(request, env, db, bucket, url, parts.slice(2));
   if (parts[2] === "me" && parts[3] === "plugins" && parts.length === 4 && read) return handleMyPlugins(request, env, db);
   if (parts[2] === "updates" && parts.length === 3 && method === "POST") {
@@ -70,7 +72,7 @@ export const handleStoreRoute = async (request: Request, env: Env, url: URL): Pr
   // Raw segments (empty ones kept, so `a//b` is no path), the leading one dropped.
   const parts = url.pathname.split("/").slice(1);
   if (parts[0] !== "store" || parts[1] !== "v1") return undefined;
-  // (`/store/v1/me/keys` is the identity lane's, mounted before this.)
+  // (`/store/v1/me/tokens` is the identity lane's, mounted before this.)
   if (parts[2] === "me" && parts[3] === "keys") return undefined;
   const db = env.STORE_DB;
   const bucket = env.PLUGIN_STORE;

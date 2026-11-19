@@ -141,7 +141,7 @@ export interface CheckInput {
   readonly warnings: readonly Problem[];
   /** Each file's kind as the store serves it. */
   readonly kinds: ReadonlyMap<string, FileKind>;
-  readonly via: "session" | "deploy_key";
+  readonly via: "session" | "deploy_token";
   readonly consent: ConsentItem;
   /** The last approved version's, the diff base; null for a first version. */
   readonly base: { readonly version: string; readonly consent: ConsentItem; readonly manifest: string } | null;
@@ -157,7 +157,7 @@ export const runChecks = (input: CheckInput): Check[] => {
   let total = 0;
   for (const bytes of pkg.files.values()) total += bytes.length;
 
-  add("signature", "ok", `Signed by ${pkg.key}, uploaded ${input.via === "deploy_key" ? "with a deploy key" : "from a signed-in device"}.`);
+  add("signature", "ok", `Signed by ${pkg.key}, uploaded ${input.via === "deploy_token" ? "with a deploy token" : "from a signed-in device"}.`);
   add("manifest", "ok", "The manifest follows every rule a device checks.");
   add("size", "ok", `${pkg.files.size} files, ${sizeText(total)} (${sizeText(pkg.bytes)} packaged).`);
   add("version", listing.version.pre.length ? "warn" : "ok", listing.version.pre.length ? `${listing.version.text} is a pre-release.` : `${listing.version.text}.`);

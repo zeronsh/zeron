@@ -12,13 +12,13 @@
  * Its R2 objects, if any were ever owed, go after the rows (`object_purges`,
  * recorded in the same transaction; every sweep finishes what any release
  * still owes before it releases anything new). The id leaves its owner's
- * deploy keys' lists (best effort: their scopes hold it no more in any case,
+ * deploy tokens' lists (best effort: their scopes hold it no more in any case,
  * user-directory.ts `scopeHoldsPlugin`).
  */
 import type { Env } from "../env";
 import { TAKEDOWN_DAYS } from "./catalog";
 import { FILES_KEY, PACKAGE_KEY } from "./db";
-import { dropFromDeployKeys } from "./principal";
+import { dropFromDeployTokens } from "./principal";
 
 export const UNUSED_ID_DAYS = 90;
 const DAY = 86_400_000;
@@ -78,9 +78,9 @@ export const finishReleases = async (db: D1Database, bucket: R2Bucket): Promise<
   return done;
 };
 
-/** After a release: the id leaves its former owner's deploy keys' lists. */
+/** After a release: the id leaves its former owner's deploy tokens' lists. */
 const forgetInKeys = async (env: Env, owner: string, id: string): Promise<void> => {
-  await dropFromDeployKeys(env, owner, id).catch((e) => console.error("store: couldn't drop a released id from deploy keys", id, String(e)));
+  await dropFromDeployTokens(env, owner, id).catch((e) => console.error("store: couldn't drop a released id from deploy tokens", id, String(e)));
 };
 
 /** Release `id` now if it is unused (an admin's: reservations aside). */

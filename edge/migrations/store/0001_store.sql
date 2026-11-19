@@ -15,8 +15,8 @@ CREATE TABLE plugins (
   kind TEXT NOT NULL DEFAULT 'plugin' CHECK (kind IN ('plugin')),
   owner_id TEXT NOT NULL,
   -- When the owner came to own it: its claim (= created_at), or its last
-  -- transfer. A deploy key scoped to `all` holds a plugin owned when the key
-  -- was made, or claimed by the account and never moved (amendment 44).
+  -- transfer. A deploy token scoped to `all` holds a plugin owned when the
+  -- token was made, or claimed by the account and never moved (a315eef5a).
   owner_since INTEGER NOT NULL,
   -- username.ts `skeleton` of the id: a new id that looks like an existing one is refused.
   skeleton TEXT NOT NULL UNIQUE,
@@ -85,8 +85,9 @@ CREATE TABLE versions (
   superseded_at INTEGER,
   superseded_by TEXT,
   publisher_id TEXT NOT NULL,
-  via TEXT NOT NULL CHECK (via IN ('device', 'deploy_key')),
-  deploy_key_name TEXT,                          -- the key's name when it published, if one did
+  via TEXT NOT NULL CHECK (via IN ('device', 'deploy_token')),
+  deploy_token_name TEXT,                        -- the token's name when it published, if one did
+  deploy_token_short TEXT,                       -- and its short id (never the secret)
   signer_key TEXT NOT NULL,
   content_hash TEXT NOT NULL,
   package_sha256 TEXT NOT NULL,

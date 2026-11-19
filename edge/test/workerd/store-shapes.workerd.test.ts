@@ -77,7 +77,7 @@ describe("what a device reads (amendment 43)", () => {
 });
 
 describe("an author's own view", () => {
-  it("names the account's publisher id, with plugins or none, to a session and to its deploy key alike", async () => {
+  it("names the account's publisher id, with plugins or none, to a session and to its deploy token alike", async () => {
     const a = await author();
     const none = (await (await call(a.userId, "GET", "/store/v1/me/plugins")).json()) as any;
     expect(none).toEqual({ publisher_id: await publisherId(a.userId), plugins: [] });
@@ -133,7 +133,7 @@ describe("store answers", () => {
     await take("publish", publish(a.userId, id, await makePackage({ id, version: "1.1.0", signer: a.signer, manifest: { permissions: ["ui.add", "links.open"] } })));
     await take("publish again", publish(a.userId, id, await makePackage({ id, version: "1.2.0", signer: a.signer })));
     await take("me/plugins", call(a.userId, "GET", "/store/v1/me/plugins"));
-    await take("me/keys", call(a.userId, "GET", "/store/v1/me/keys"));
+    await take("me/tokens", call(a.userId, "GET", "/store/v1/me/tokens"));
     // Admin: the queue, a version, the marks.
     await take("queue", adminCall("GET", "/store/v1/admin/queue"));
     await take("queue, all", adminCall("GET", "/store/v1/admin/queue?state=all"));

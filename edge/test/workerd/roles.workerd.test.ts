@@ -123,7 +123,7 @@ describe("the admin role", () => {
     }
   });
 
-  it("is by web session only: never a bearer, a runner token or a deploy key", async () => {
+  it("is by web session only: never a bearer, a runner token or a deploy token", async () => {
     const userId = await person();
     await grantAdmin(userId);
     // An admin's own bearer, org-scoped or not, even beside their live web session.
@@ -137,8 +137,9 @@ describe("the admin role", () => {
     }
     const runner = await admin(`runner:${userId}@org1:cloud-1`);
     expect(runner.status).toBe(403);
-    const key = await SELF.fetch("https://edge.test/store/v1/admin/queue", { headers: { authorization: `ZeronKey key=${"A".repeat(43)}, ts=1, sig=${"A".repeat(86)}` } });
-    expect(key.status).toBe(403);
+    // A deploy token is never staff, refused before it's looked up.
+    const token = await SELF.fetch("https://edge.test/store/v1/admin/queue", { headers: { authorization: `Bearer zdt_${"A".repeat(49)}` } });
+    expect(token.status).toBe(403);
     expect((await SELF.fetch("https://edge.test/store/v1/admin/queue")).status).toBe(401);
     expect((await SELF.fetch("https://edge.test/store/v1/admin/queue", { headers: { authorization: "Bearer " } })).status).toBe(403);
     // A bearer in the query string is never read here.

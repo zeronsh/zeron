@@ -5,8 +5,8 @@
  * A version that passes is listed and installable by everyone at once
  * (amendment 45); a reviewer's decision later only marks it verified.
  *
- * In order: who publishes (a signed-in device, or a deploy key whose scope
- * holds this id, an id its account owns already: a key never claims one),
+ * In order: who publishes (a signed-in device, or a deploy token whose scope
+ * holds this id, an id its account owns already: a token never claims one),
  * that they have a username, the body's size, the package exactly as a
  * device verifies it (package.ts), what the store needs to list it
  * (listing.ts, the engine's rules), that the key that signed it may sign
@@ -31,10 +31,11 @@ import { type FileKind, fileKind, isText, runChecks } from "./checks";
 import { type ConsentItem, consentItem } from "./consent";
 import { VERSION_ORDER, auditIfChanged, filesKey, packageKey, pluginRow, relist } from "./db";
 import { purgeCatalog } from "./purge";
-import { fail, answer, rateLimited, refusedBody } from "./http";
+import { fail, answer, rateLimited } from "./http";
 import { type Listing, type Problem, checkListing, listingOf } from "./listing";
 import { PackageRefusal, verifyPackage } from "./package";
-import { MAX_PUBLISH_BODY_BYTES, type Publisher, authenticatePublisher, keyInScope, readBody, signingKeyAllowed } from "./principal";
+import { MAX_PUBLISH_BODY_BYTES, type Publisher, authenticatePublisher, readBody, signingKeyAllowed, tokenInScope, tokenRefused } from "./principal";
+import { userDirectoryStub } from "../user-directory";
 import { isPrerelease, preKey, precedenceText } from "./semver";
 
 /**
@@ -149,20 +150,17 @@ const accepted = (id: string, version: string, status: string, verified: boolean
   answer({ id, version, status, verified, checks, superseded }, 201);
 
 export const handlePublish = async (request: Request, env: Env, db: D1Database, bucket: R2Bucket, id: string): Promise<Response> => {
-  const publisher = await authenticatePublisher(request, env);
+  const publisher = await authenticatePublisher(request, env, { usedFor: id });
   if (publisher instanceof Response) return publisher;
   if (!(await allowWrite(env, publisher.userId))) return rateLimited();
-  // Who may publish what, before the body is read: a deploy key only a
-  // plugin its account owns that its scope holds, never a new id.
+  // Who may publish what, before the body is read: a deploy token only a
+  // plugin its account owns now that its scope holds, never a first version;
+  // refused alike for every reason (`tokenRefused`).
   const plugin = await pluginRow(db, id);
-  if (publisher.via === "deploy_key") {
-    if (!plugin) return fail(403, "key_not_allowed", `"${id}" isn't in the store yet: publish its first version from a signed-in device.`);
-    if (!keyInScope(publisher, plugin)) return fail(403, "key_not_allowed", "This deploy key's scope doesn't hold this plugin.");
-  }
+  if (publisher.via === "deploy_token" && (!plugin || plugin.owner_id !== publisher.userId || !tokenInScope(publisher, plugin))) return tokenRefused();
   if (!publisher.username) return fail(403, "needs_username", "Publishing needs a username: every listing reads \"by @username\".");
 
   const body = await readBody(request, STORE_MAX_PACKAGE_BYTES);
-  if (body === "body_mismatch") return refusedBody(body);
   if (body === "too_large") return fail(413, "too_large", `The store takes packages up to ${STORE_MAX_PACKAGE_BYTES / (1024 * 1024)} MB.`);
   let pkg;
   try {
@@ -173,9 +171,11 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
   }
   if (pkg.manifest.id !== id) return fail(400, "bad_package", `The package is "${pkg.manifest.id}", not "${id}".`, { reason: "id_mismatch" });
   // Who may publish this, before any work on what it is: a stranger's key,
-  // someone else's id, a suspended plugin are refused here.
-  if (!(await signingKeyAllowed(env, publisher, id, pkg.key, plugin))) {
-    return fail(403, "key_not_allowed", "The key that signed this package isn't one of this account's that may sign this plugin.");
+  // someone else's id, a suspended plugin are refused here. From a device,
+  // the package is signed by one of the account's live keys; with a deploy
+  // token, the token is the publisher's word (contract a315eef5a).
+  if (publisher.via === "session" && !(await signingKeyAllowed(env, publisher, pkg.key))) {
+    return fail(403, "key_not_allowed", "The key that signed this package isn't one of this account's.");
   }
   if (plugin && plugin.owner_id !== publisher.userId) return fail(403, "id_taken", `"${id}" belongs to another account.`);
   if (plugin?.status === "suspended") return fail(403, "suspended", "This plugin is suspended: it can't take new versions.");
@@ -254,13 +254,20 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
   ];
   try {
     await Promise.all(writes.map(([, write]) => write()));
-    // The key that signed it may have been revoked while the objects were
-    // written: asked again, now, so the batch below runs only for a key
-    // live after the write. (The keys live in the user directory, which no
-    // D1 statement can read, so this is as close to the insert as it gets.)
-    if (!(await signingKeyAllowed(env, publisher, id, pkg.key, plugin))) {
+    // The key that signed it, or the token that sent it, may have been
+    // revoked while the objects were written: asked again, now, so the batch
+    // below runs only for one live after the write. (Keys and tokens live in
+    // the user directory, which no D1 statement can read, so this is as
+    // close to the insert as it gets.)
+    const stillLive =
+      publisher.via === "session"
+        ? await signingKeyAllowed(env, publisher, pkg.key)
+        : ((await userDirectoryStub(env)?.deployTokenLive(publisher.token!.id)) ?? false);
+    if (!stillLive) {
       await maybeOrphaned(db, [pkgKey, blobKey]);
-      return fail(403, "key_not_allowed", "The key that signed this package was revoked while it was being published.");
+      return publisher.via === "session"
+        ? fail(403, "key_not_allowed", "The key that signed this package was revoked while it was being published.")
+        : tokenRefused();
     }
 
     const files: [string, number, number, string, FileKind][] = [];
@@ -291,7 +298,12 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
         checks
       }),
       // A public act: in the log, by its author (amendment 45).
-      auditIfChanged(db, now, publisher.userId, "version.publish", id, version.text, { via: publisher.via === "session" ? "device" : "deploy_key", key: pkg.key }),
+      // (A token by its short id: never the secret.)
+      auditIfChanged(db, now, publisher.userId, "version.publish", id, version.text, {
+        via: publisher.via === "session" ? "device" : "deploy_token",
+        key: pkg.key,
+        ...(publisher.token ? { token: publisher.token.short } : {})
+      }),
       ...fileRows(db, id, version.text, pkg.sha256, files),
       // Every older unverified version it supersedes stops taking new
       // installs, for good, and leaves the review queue (amendment 45): a
@@ -438,8 +450,9 @@ const insertVersion = (db: D1Database, publisher: Publisher, id: string, now: nu
     ["pre_key", v.order[4]],
     ["status", "listed"],
     ["publisher_id", publisher.userId],
-    ["via", publisher.via === "session" ? "device" : "deploy_key"],
-    ["deploy_key_name", publisher.via === "deploy_key" ? (publisher.keyName ?? null) : null],
+    ["via", publisher.via === "session" ? "device" : "deploy_token"],
+    ["deploy_token_name", publisher.token?.name ?? null],
+    ["deploy_token_short", publisher.token?.short ?? null],
     ["signer_key", v.key],
     ["content_hash", v.hash],
     ["package_sha256", v.sha256],

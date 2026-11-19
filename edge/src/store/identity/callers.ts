@@ -1,8 +1,8 @@
 /**
  * Who is calling a store route, by each way the store accepts: a WorkOS
  * session bearer (the app, the CLI), a web session's cookie (the web site),
- * a deploy key's signed request (signed-request.ts). principal.ts decides
- * which a route takes.
+ * a deploy token (deploy-token.ts), a bearer of its own. principal.ts
+ * decides which a route takes.
  *
  * - A bearer comes only in `Authorization` (never `?token=`: query strings
  *   end up in logs). A runner token (a Cloud machine) is never a publisher

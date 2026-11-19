@@ -3,10 +3,9 @@ import { SELF, env } from "cloudflare:test";
 import { expect } from "vitest";
 import { b64urlEncode } from "../../src/cloud/crypto";
 import { PLUGIN_KEY_PROOF_PREFIX } from "../../src/plugin-keys";
-import { MAX_LIVE_STEP_UPS, STEP_UP_TTL_MS, newStepUpToken, stepUpHash } from "../../src/step-up";
 import { type Json, type JsonObject, canonicalJson, parseJsonText } from "../../src/store/json";
 import { PAYLOAD_PREFIX, sha256Hex } from "../../src/store/package";
-import { SITE, grantAdmin, person, sessionHeader, setCookies, webSignIn } from "./identity-helpers";
+import { SITE, grantAdmin, person, sessionHeader, setCookies, stepUp, webSignIn } from "./identity-helpers";
 
 /** Which staff account: two, for the tests where two admins race. */
 export const ADMIN = 1;
@@ -116,15 +115,28 @@ export const newSigner = async (): Promise<Signer> => {
 
 /** Bind `signer` to `userId` as one of their device keys. */
 export const registerKey = async (userId: string, signer: Signer): Promise<void> => {
-  const token = newStepUpToken();
-  await directory().issueStepUp(userId, (await stepUpHash(token))!, STEP_UP_TTL_MS, MAX_LIVE_STEP_UPS);
   const res = await call(userId, "POST", "/plugin-keys", {
     key: signer.key,
     proof: await signer.sign(encoder.encode(PLUGIN_KEY_PROOF_PREFIX + signer.key)),
-    stepUp: token
+    stepUp: await stepUp(userId)
   });
   expect(res.status).toBe(201);
 };
+
+/** A deploy token of `userId`'s, made as the app or the CLI makes one. */
+export const deployToken = async (
+  userId: string,
+  scope: { all: true } | { plugins: string[] },
+  extra: Record<string, unknown> = {}
+): Promise<{ token: string; id: string; short: string; name: string }> => {
+  const res = await call(userId, "POST", "/store/v1/me/tokens", { name: "CI", scope, stepUp: await stepUp(userId), ...extra });
+  expect(res.status, await res.clone().text()).toBe(201);
+  return (await res.json()) as { token: string; id: string; short: string; name: string };
+};
+
+/** Publish `pkg` with deploy token `token`, as CI does. */
+export const tokenPublish = (token: string, id: string, pkg: Uint8Array) =>
+  call(undefined, "POST", `/store/v1/plugins/${id}/versions`, pkg, { authorization: `Bearer ${token}` });
 
 /** A member with a username and a registered key: ready to publish. */
 export const author = async (prefix = "dv"): Promise<{ userId: string; username: string; signer: Signer }> => {

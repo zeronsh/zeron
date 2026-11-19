@@ -3,7 +3,7 @@
 Operator notes for shipping the edge's store: publishing, review, the
 catalog, files and update checks (`docs/plans/2026-11-17-plugin-store.md`).
 This is not user documentation. The identity pieces (web sign-in, staff
-roles, deploy keys) have their own notes,
+roles, deploy tokens) have their own notes,
 `docs/plans/2026-11-18-plugin-store-identity-rollout.md`. Do those notes'
 steps 1–4 first, because review needs a web session made staff. Do staging
 first, then production, in this order.
@@ -241,9 +241,9 @@ suspended, or its versions removed. On staging, leave it.
   - take the version down with a reason (devices turn it off at their
     next update check, and the take-down feed has it at once);
   - suspend the plugin, which takes it out of every list;
-  - then revoke its deploy keys (identity notes, step 5).
+  - then revoke its deploy tokens (identity notes, step 5).
 - **A leaked account**: suspend its plugins; the identity notes cover its
-  keys.
+  deploy tokens.
 - **The store itself misbehaving**: deploy the edge with the `STORE_DB`
   binding removed from that environment's `d1_databases`. Every store route
   then answers `503 unavailable`, and the rest of the edge is untouched. The
@@ -263,5 +263,5 @@ suspended, or its versions removed. On staging, leave it.
   `npx wrangler d1 time-travel restore zeron-store --timestamp <before>`.
   It restores the whole database to that moment. R2 objects are never
   rewritten, so they need no restore.
-- Deploy keys are the one thing not safe to leave live past a rollback
-  (identity notes, step 6).
+- Deploy tokens need nothing before a rollback: older code never reads
+  them (identity notes, step 6).

@@ -67,8 +67,9 @@ export interface VersionRow {
   readonly superseded_at: number | null;
   readonly superseded_by: string | null;
   readonly publisher_id: string;
-  readonly via: "device" | "deploy_key";
-  readonly deploy_key_name: string | null;
+  readonly via: "device" | "deploy_token";
+  readonly deploy_token_name: string | null;
+  readonly deploy_token_short: string | null;
   readonly signer_key: string;
   readonly content_hash: string;
   readonly package_sha256: string;
@@ -150,7 +151,7 @@ export const versionRow = (db: D1Database, id: string, version: string): Promise
   db.prepare("SELECT * FROM versions WHERE plugin_id = ? AND version = ?").bind(id, version).first<VersionRow>();
 
 /** Who owns store id `id`, since when, and when it was first claimed (for
- * the identity lane: a deploy key's scope is judged by it, amendment 44),
+ * the identity lane: a deploy token's scope is judged by it, a315eef5a),
  * or null when no one has claimed it. */
 export const pluginOwner = async (env: Pick<Env, "STORE_DB">, id: string): Promise<PluginOwnership | null> => {
   if (!env.STORE_DB) return null;

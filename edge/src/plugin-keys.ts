@@ -5,7 +5,7 @@
  * here (runner-policy.ts names no `/plugin-keys`).
  *
  *   POST   /plugin-keys { key, deviceId?, proof, stepUp } → 201 { key, registered: true }
- *   GET    /plugin-keys/:key[?plugin=id] → { key, username, mine, revoked, verified, fingerprint, firstSeen, revokedAt }
+ *   GET    /plugin-keys/:key → { key, username, mine, revoked, verified, fingerprint, firstSeen, revokedAt }
  *   GET    /plugin-keys[?since=ms] → { keys: [{ key, fingerprint, deviceId, createdAt, revokedAt }], now }
  *   DELETE /plugin-keys/:key                      → { revoked: true }
  *
@@ -26,17 +26,7 @@
  * lookup. Lookups and lists are `no-store`.
  *
  * Only `verified` keys may read as "Made by @username": not revoked, owner
- * holds a live username.
- *
- * A deploy key (store/identity/deploy-keys.ts) answers the same lookup,
- * plus `kind: "deploy"`, `expiresAt` and `expired` (and, to its owner
- * only, its `scope`; amendment 44). It vouches for the plugins its scope
- * holds only: it reads as verified only when the lookup names a plugin
- * (`GET /plugin-keys/:key?plugin=<id>`) its scope holds and its account
- * owns now, and it is neither revoked nor expired. Engines that don't name
- * the plugin (all before deploy keys) see it unverified, so it can't pass
- * as its owner's key for their other plugins. Lists (`GET /plugin-keys`) and DELETE here are devices'
- * keys only. To anyone but the owner, a live key whose owner has
+ * holds a live username. To anyone but the owner, a live key whose owner has
  * no username answers 404 like an unregistered one.
  *
  * Stored in the user directory (user-directory.ts, `plugin_keys`).
@@ -46,8 +36,6 @@ import { b64urlEncode, parseEd25519PublicKey, verifyEd25519 } from "./cloud/cryp
 import type { Env } from "./env";
 import { jsonError, readJsonBody } from "./http";
 import { stepUpHash, stepUpRequired } from "./step-up";
-import type { PluginOwnerLookup } from "./store/identity/deploy-keys";
-import { PLUGIN_ID_RE } from "./store/identity/signing";
 import { userDirectoryStub } from "./user-directory";
 
 export const PLUGIN_KEY_PROOF_PREFIX = "zeron-plugin-key:v1:";
@@ -76,8 +64,7 @@ export const handlePluginKeyRoute = async (
   request: Request,
   env: Env,
   auth: Verified,
-  url: URL,
-  pluginOwner: PluginOwnerLookup
+  url: URL
 ): Promise<Response | undefined> => {
   const parts = url.pathname.split("/").filter(Boolean);
   if (parts[0] !== "plugin-keys" || parts.length > 2) return undefined;
@@ -130,15 +117,8 @@ export const handlePluginKeyRoute = async (
   // The b64url alphabet needs no escaping, so an escaped key isn't one.
   const key = parseKey(parts[1]);
   if (request.method === "GET") {
-    const plugin = url.searchParams.get("plugin") ?? undefined;
-    // Who owns the named plugin now, and since when: a deploy key vouches
-    // only for a plugin its scope holds that its account owns.
-    const owner = key && plugin !== undefined && PLUGIN_ID_RE.test(plugin) ? await pluginOwner(env, plugin) : null;
-    const found = key ? await directory.pluginKey(key, auth.userId, plugin, owner) : undefined;
-    if (!found) return unknownKey();
-    // A key's scope (its account's plugin ids) is its owner's to read.
-    const { scope, ...shown } = found;
-    return fresh(found.mine && scope ? { ...shown, scope } : shown);
+    const found = key ? await directory.pluginKey(key, auth.userId) : undefined;
+    return found ? fresh(found) : unknownKey();
   }
   if (request.method !== "DELETE") return jsonError(405, "method_not_allowed", "GET or DELETE only.");
   if (!key || !(await directory.revokePluginKey(auth.userId, key))) return unknownKey();

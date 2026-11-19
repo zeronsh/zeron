@@ -25,10 +25,10 @@
  *
  * Staff roles and the store's identity routes:
  *   GET  /admin/roles, POST /admin/roles/{grant|revoke} — ADMIN_TOKEN (roles.ts)
- *   GET  /admin/deploy-keys, POST /admin/deploy-keys/revoke — ADMIN_TOKEN
- *     (store/identity/deploy-keys.ts: one plugin's, or all, before a rollback)
- *   GET|POST /store/v1/me/keys, DELETE /store/v1/me/keys/:key — deploy keys
- *     (store/identity/deploy-keys.ts; the signed-in account, checked there)
+ *   GET  /admin/deploy-tokens, POST /admin/deploy-tokens/revoke — ADMIN_TOKEN
+ *     (store/identity/deploy-tokens.ts: one plugin's, or all)
+ *   GET|POST /store/v1/me/tokens, DELETE /store/v1/me/tokens/:id — deploy tokens
+ *     (store/identity/deploy-tokens.ts; the signed-in account, checked there)
  *   GET  /session/:chatId/ws          — loro-protocol room (wss upgrade)
  *   GET  /tail/:chatId                — L2 instant-open tail JSON (§5)
  *   GET  /diff/:chatId                — latest working-tree diff (§6.1)
@@ -86,7 +86,7 @@
  *   GET  /store/v1/{categories,plugins,plugins/:id,plugins/:id/versions} — public, cached
  *   GET  /store/v1/plugins/:id/versions/:version/package, …/files/:version/*path
  *   POST /store/v1/updates                — batched update check
- *   POST /store/v1/plugins/:id/versions   — publish (session or deploy key)
+ *   POST /store/v1/plugins/:id/versions   — publish (session or deploy token)
  *   …    /store/v1/me/plugins, …/{withdraw,yank,unyank,installed,reports}, /store/v1/admin/*
  */
 import { authenticate } from "./auth";
@@ -130,7 +130,7 @@ import { releaseUnusedIds } from "./store/release";
 import { pluginOwner } from "./store/db";
 import { handleWebAuthRoute } from "./web-auth-routes";
 import { handleRoleAdminRoute } from "./roles";
-import { handleDeployKeyAdminRoute, handleDeployKeyRoute } from "./store/identity/deploy-keys";
+import { handleDeployTokenAdminRoute, handleDeployTokenRoute } from "./store/identity/deploy-tokens";
 import { withSessionCookie } from "./web-session";
 import installSh from "./install.sh";
 
@@ -204,14 +204,14 @@ export default {
     if (usersRouted) return usersRouted;
     const rolesRouted = await handleRoleAdminRoute(request, env, url);
     if (rolesRouted) return rolesRouted;
-    const deployKeyAdminRouted = await handleDeployKeyAdminRoute(request, env, url, pluginOwner);
-    if (deployKeyAdminRouted) return deployKeyAdminRouted;
+    const deployTokenAdminRouted = await handleDeployTokenAdminRoute(request, env, url, pluginOwner);
+    if (deployTokenAdminRouted) return deployTokenAdminRouted;
     // The store's own principals (store/principal.ts): before the bearer gate.
-    const deployKeysRouted = await handleDeployKeyRoute(request, env, url, pluginOwner);
-    if (deployKeysRouted) return withSessionCookie(request, deployKeysRouted);
+    const deployTokensRouted = await handleDeployTokenRoute(request, env, url, pluginOwner);
+    if (deployTokensRouted) return withSessionCookie(request, deployTokensRouted);
     const cardRouted = await publicCardGate(request, env, url, () => handlePublicCardRoute(request, env, ctx, url));
     if (cardRouted) return cardRouted;
-    // ── the plugin store (store/routes.ts), after its deploy-key routes:
+    // ── the plugin store (store/routes.ts), after its deploy-token routes:
     //    public reads need no sign-in; each other route asks
     //    store/principal.ts who the caller is ──────────────────────────────
     const storeRouted = await handleStoreRoute(request, env, url);
@@ -241,7 +241,7 @@ export default {
     if (usernameRouted) return usernameRouted;
     const onboardingRouted = await handleOnboardingRoute(request, env, auth, url);
     if (onboardingRouted) return onboardingRouted;
-    const pluginKeysRouted = await handlePluginKeyRoute(request, env, auth, url, pluginOwner);
+    const pluginKeysRouted = await handlePluginKeyRoute(request, env, auth, url);
     if (pluginKeysRouted) return pluginKeysRouted;
 
     const cloudRouted = await handleCloudRoute(request, env, auth, url);
