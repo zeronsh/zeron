@@ -1155,6 +1155,15 @@ impl Engine {
         // backs ListGithubRepos / CloneRepo); the heartbeat feeds idle sleep.
         // Attached before the host relay so relayed RPCs see the broker.
         if let Some(identity) = auth.runner_identity() {
+            // A Cloud machine's agents run on its newest Node: the image's
+            // default `node` can be older than npm-distributed agents need.
+            if runner::is_cloud_platform()
+                && let Some((dir, (major, minor, patch))) = zeron_harness::newest_node_dir()
+            {
+                tracing::info!(dir = %dir.display(), version = %format!("{major}.{minor}.{patch}"),
+                    "agents run on the machine's newest Node");
+                zeron_harness::prefer_node_dir(dir);
+            }
             let tokens: Arc<dyn zeron_rpc::TokenSource> = Arc::new(auth.clone());
             wake_trace::report_to(identity.edge_url(), tokens.clone());
             let broker = credentials::CredentialBroker::new(

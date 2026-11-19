@@ -234,10 +234,18 @@ fn configure(command: &mut Command) {
             command.env_remove(key);
         }
     }
-    // Preserve explicit PATH additions and include the user's login-shell toolchains.
-    let mut paths: Vec<_> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
+    // Preserve explicit PATH additions and include the user's login-shell
+    // toolchains; a preferred Node (a Cloud machine's newest) first, so an
+    // installer's npm installs with the Node the agent will run on.
+    let mut paths: Vec<_> = crate::preferred_node_dir()
+        .map(std::path::Path::to_path_buf)
+        .into_iter()
+        .collect();
+    paths.extend(
+        std::env::var_os("PATH")
+            .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+            .unwrap_or_default(),
+    );
     if let Some(path) = crate::shell_env::user_path() {
         paths.extend(std::env::split_paths(&path));
     }

@@ -136,6 +136,29 @@ pub fn credential_env(
         .collect()
 }
 
+/// The models of `harness`'s catalog its Cloud credentials can run. OpenCode
+/// lists every OpenAI model in `-flex` and `-fast` variants (OpenAI's flex
+/// and priority service tiers); a ChatGPT sign-in runs `-fast` but refuses
+/// `-flex` ("Unsupported service_tier: flex"), which only an API key takes.
+/// So with OpenAI reached through the sign-in alone, those aren't offered.
+fn usable_with(harness: HarnessId, models: Vec<Model>, env: &BTreeMap<String, String>) -> Vec<Model> {
+    if harness != HarnessId::Opencode || env.contains_key("OPENAI_API_KEY") {
+        return models;
+    }
+    let chatgpt = env
+        .get(zeron_harness::opencode::CREDENTIALS_ENV)
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|list| list.as_array().cloned())
+        .is_some_and(|list| list.iter().any(|c| c["integrationID"] == "openai"));
+    if !chatgpt {
+        return models;
+    }
+    models
+        .into_iter()
+        .filter(|m| !(m.id.starts_with("openai/") && m.id.ends_with("-flex")))
+        .collect()
+}
+
 /// Whether this agent's catalog is published (the edge keeps Claude Code's
 /// and Codex's by hand; registry agents don't run on Cloud).
 fn publishes(harness: HarnessId) -> bool {
@@ -183,9 +206,27 @@ impl ModelPublisher {
         {
             return false;
         }
-        let models = match registry.discover_models(harness).await {
-            Ok(models) if !models.is_empty() => models,
-            Ok(_) => return false,
+        // Only a list the agent gave now, with these credentials: a cached
+        // or built-in stand-in (an agent's fallback when discovery fails)
+        // would replace its real models everywhere.
+        // A run preparing the same agent meanwhile can change its discovery
+        // environment under the probe ("credentials changed"): once more.
+        let mut discovered = registry.discover_catalog(harness).await;
+        if discovered
+            .as_ref()
+            .is_err_and(|error| error.to_string().contains("credentials changed"))
+        {
+            discovered = registry.discover_catalog(harness).await;
+        }
+        let models = match discovered {
+            Ok(catalog) if catalog.source == "live" && !catalog.models.is_empty() => {
+                usable_with(harness, catalog.models, &zeron_harness::catalog_env::get(harness))
+            }
+            Ok(catalog) => {
+                tracing::info!(harness = harness.as_str(), source = catalog.source,
+                    "model catalogs: not live; not published");
+                return false;
+            }
             Err(error) => {
                 tracing::info!(harness = harness.as_str(), %error, "model catalogs: discovery failed; not published");
                 return false;
@@ -475,6 +516,42 @@ mod tests {
             vec![(HarnessId::Muse, vec!["model-for-boot".to_string()], "meta-key:boot".to_string())]
         );
         zeron_harness::catalog_env::set(HarnessId::Muse, BTreeMap::new());
+    }
+
+    #[test]
+    fn opencode_on_a_chatgpt_sign_in_lists_no_flex_tier() {
+        let model = |id: &str| Model {
+            id: id.into(),
+            label: id.into(),
+            description: None,
+            provider: None,
+            reasoning_levels: Vec::new(),
+            options: Vec::new(),
+            default: false,
+        };
+        let all = || {
+            vec![
+                model("openai/gpt-5.6-sol"),
+                model("openai/gpt-5.6-sol-fast"),
+                model("openai/gpt-5.6-sol-flex"),
+                model("openrouter/x-flex"),
+            ]
+        };
+        let ids = |models: Vec<Model>| models.into_iter().map(|m| m.id).collect::<Vec<_>>();
+        let signed_in = BTreeMap::from([(
+            zeron_harness::opencode::CREDENTIALS_ENV.to_string(),
+            r#"[{"integrationID":"openai","value":{"type":"oauth"}}]"#.to_string(),
+        )]);
+        assert_eq!(
+            ids(usable_with(HarnessId::Opencode, all(), &signed_in)),
+            ["openai/gpt-5.6-sol", "openai/gpt-5.6-sol-fast", "openrouter/x-flex"]
+        );
+        // An OpenAI key takes the flex tier; other agents are as listed.
+        let mut keyed = signed_in.clone();
+        keyed.insert("OPENAI_API_KEY".into(), "sk".into());
+        assert_eq!(usable_with(HarnessId::Opencode, all(), &keyed).len(), 4);
+        assert_eq!(usable_with(HarnessId::Pi, all(), &signed_in).len(), 4);
+        assert_eq!(usable_with(HarnessId::Opencode, all(), &BTreeMap::new()).len(), 4);
     }
 
     #[test]

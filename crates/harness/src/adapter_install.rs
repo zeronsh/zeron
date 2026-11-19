@@ -176,6 +176,14 @@ fn find_npm_with(
 }
 
 pub(crate) fn find_npm() -> Option<PathBuf> {
+    // A preferred Node's own npm: managed installs build for the Node they
+    // run on.
+    if let Some(dir) = crate::preferred_node_dir() {
+        let npm = dir.join(if cfg!(windows) { "npm.cmd" } else { "npm" });
+        if npm.is_file() {
+            return Some(npm);
+        }
+    }
     find_npm_with(
         &|key| std::env::var_os(key),
         crate::shell_env::user_path(),
@@ -267,18 +275,132 @@ fn launch_for_entry_with_node(
 
     let platform = crate::executable::Platform::current();
     let sibling = find_npm().and_then(|npm| node_sibling_for_npm(&npm, platform));
-    let node = supplied_node
-        .or(sibling)
-        .or_else(|| crate::executable::find_on_paths("node", Vec::new()))
-        .ok_or_else(|| {
-            HarnessError::NotInstalled(
-                "node (required to run the agent's npm-distributed ACP adapter; \
-                 searched PATH, the login shell's PATH, and fnm/nvm/volta/pnpm/bun \
-                 install dirs)"
-                    .into(),
-            )
-        })?;
+    let preferred = crate::preferred_node_dir()
+        .map(|dir| dir.join(if platform == crate::executable::Platform::Windows { "node.exe" } else { "node" }))
+        .filter(|node| node.is_file());
+    let first = supplied_node
+        .clone()
+        .or(preferred)
+        .or(sibling.clone())
+        .or_else(|| crate::executable::find_on_paths("node", Vec::new()));
+    // The packages installed beside the entry may need a newer Node than the
+    // first one found (@cursor/sdk 1.0.x: >=22.13, its native bindings built
+    // for that ABI segfault under 20): take the first that's new enough.
+    let node = match entry.parent().and_then(required_node) {
+        None => first,
+        Some(minimum) => {
+            let mut candidates: Vec<PathBuf> = supplied_node.into_iter().chain(sibling).chain(first).collect();
+            let name = if platform == crate::executable::Platform::Windows { "node.exe" } else { "node" };
+            candidates.extend(
+                crate::executable::node_manager_bins()
+                    .into_iter()
+                    .map(|dir| dir.join(name))
+                    .filter(|node| node.is_file()),
+            );
+            let mut seen = std::collections::HashSet::new();
+            candidates.retain(|node| seen.insert(node.clone()));
+            let found: Vec<(PathBuf, Option<NodeVersion>)> =
+                candidates.iter().map(|node| (node.clone(), node_version(node))).collect();
+            match found.iter().find(|(_, version)| version.is_some_and(|v| v >= minimum)) {
+                Some((node, _)) => Some(node.clone()),
+                None if found.is_empty() => None,
+                None => {
+                    let had: Vec<String> = found
+                        .iter()
+                        .filter_map(|(_, v)| v.map(|(a, b, c)| format!("v{a}.{b}.{c}")))
+                        .collect();
+                    return Err(HarnessError::NotInstalled(format!(
+                        "Node {}.{}.{} or newer (required by {}; found {})",
+                        minimum.0,
+                        minimum.1,
+                        minimum.2,
+                        entry.display(),
+                        if had.is_empty() { "none that runs".into() } else { had.join(", ") }
+                    )));
+                }
+            }
+        }
+    };
+    let node = node.ok_or_else(|| {
+        HarnessError::NotInstalled(
+            "node (required to run the agent's npm-distributed ACP adapter; \
+             searched PATH, the login shell's PATH, and fnm/nvm/volta/pnpm/bun \
+             install dirs)"
+                .into(),
+        )
+    })?;
     Ok((node, vec![entry.display().to_string()]))
+}
+
+type NodeVersion = (u64, u64, u64);
+
+/// The lowest Node version an `engines.node` range allows, read as npm's
+/// common forms write it: `>=22.13`, `>=22.13.0`, `^22.13.0`, `22.x`, and
+/// alternatives (`^20.19 || >=22.12`: the lowest of them). `None` for a range
+/// it can't read (nothing is then required).
+fn engines_minimum(range: &str) -> Option<NodeVersion> {
+    range
+        .split("||")
+        .map(|alternative| {
+            let alternative = alternative.trim();
+            if alternative.starts_with('<') {
+                return None;
+            }
+            // The operator, then the version (npm allows a space between).
+            let rest = alternative.trim_start_matches(|c: char| matches!(c, '>' | '=' | '^' | '~'));
+            let first = rest.split_whitespace().next()?;
+            let number = first.trim_start_matches('v');
+            if number.is_empty() {
+                return None;
+            }
+            let mut parts = number.split('.').map(|p| p.parse::<u64>().ok());
+            let major = parts.next()??;
+            let minor = parts.next().flatten().unwrap_or(0);
+            let patch = parts.next().flatten().unwrap_or(0);
+            Some((major, minor, patch))
+        })
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
+        .min()
+}
+
+/// The newest `engines.node` minimum among the packages an install dir
+/// depends on directly (its package.json's dependencies, read from
+/// node_modules). `None`: nothing requires one.
+fn required_node(dir: &Path) -> Option<NodeVersion> {
+    let read = |path: &Path| -> Option<serde_json::Value> {
+        serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+    };
+    let manifest = read(&dir.join("package.json"))?;
+    let dependencies = manifest.get("dependencies")?.as_object()?;
+    dependencies
+        .keys()
+        .filter_map(|name| {
+            let package = read(&dir.join("node_modules").join(name).join("package.json"))?;
+            engines_minimum(package.get("engines")?.get("node")?.as_str()?)
+        })
+        .max()
+}
+
+/// What `node --version` says (cached per path: a version manager's binary
+/// doesn't change under us mid-process).
+pub(crate) fn node_version(node: &Path) -> Option<NodeVersion> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PathBuf, Option<NodeVersion>>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(known) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(node) {
+        return *known;
+    }
+    let version = std::process::Command::new(node)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| engines_minimum(String::from_utf8_lossy(&out.stdout).trim()));
+    cache.lock().unwrap_or_else(|e| e.into_inner()).insert(node.to_path_buf(), version);
+    version
 }
 
 /// npm encodes fatal fs errors as `256 - errno` (npm/cli#4838 — often with no
@@ -651,6 +773,62 @@ pub(crate) async fn install_into(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engines_ranges_read_as_their_lowest_node() {
+        assert_eq!(engines_minimum(">=22.13"), Some((22, 13, 0)));
+        assert_eq!(engines_minimum(">= 22.13.1"), Some((22, 13, 1)));
+        assert_eq!(engines_minimum(">=22.13.1"), Some((22, 13, 1)));
+        assert_eq!(engines_minimum("^20.19.0 || >=22.12.0"), Some((20, 19, 0)));
+        assert_eq!(engines_minimum("22.x"), Some((22, 0, 0)));
+        assert_eq!(engines_minimum("v20.20.2"), Some((20, 20, 2)));
+        assert_eq!(engines_minimum("<18"), None);
+        assert_eq!(engines_minimum("*"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_package_needing_a_newer_node_runs_on_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let install = dir.path().join("pkg__sdk").join("1.0.0");
+        std::fs::create_dir_all(install.join("node_modules/@pkg/sdk")).unwrap();
+        std::fs::write(install.join("package.json"), r#"{"dependencies":{"@pkg/sdk":"1.0.0"}}"#).unwrap();
+        std::fs::write(
+            install.join("node_modules/@pkg/sdk/package.json"),
+            r#"{"name":"@pkg/sdk","engines":{"node":">=22.13"}}"#,
+        )
+        .unwrap();
+        let entry = install.join("shim.mjs");
+        std::fs::write(&entry, "// js").unwrap();
+        assert_eq!(required_node(&install), Some((22, 13, 0)));
+        let fake = |name: &str, version: &str| {
+            let node = dir.path().join(name);
+            std::fs::write(&node, format!("#!/bin/sh\necho {version}\n")).unwrap();
+            std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+            node
+        };
+        // Too old, given: refused, saying what it needs and what it found.
+        let old = fake("node20", "v20.20.2");
+        match launch_for_entry_with_node(&entry, Some(old.clone())) {
+            Err(HarnessError::NotInstalled(message)) => {
+                assert!(message.contains("Node 22.13.0 or newer"), "{message}");
+                assert!(message.contains("v20.20.2"), "{message}");
+            }
+            // (A machine with a newer node on its PATH or in nvm passes.)
+            Ok((node, _)) => assert_ne!(node, old),
+            Err(other) => panic!("{other:?}"),
+        }
+        // New enough, given: used.
+        let new = fake("node22", "v22.23.2");
+        assert_eq!(launch_for_entry_with_node(&entry, Some(new.clone())).unwrap().0, new);
+        // Nothing required: the first one, whatever its version.
+        let plain = dir.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::write(plain.join("package.json"), r#"{"dependencies":{}}"#).unwrap();
+        std::fs::write(plain.join("shim.mjs"), "// js").unwrap();
+        assert_eq!(launch_for_entry_with_node(&plain.join("shim.mjs"), Some(old.clone())).unwrap().0, old);
+    }
 
     use std::collections::HashMap;
 
