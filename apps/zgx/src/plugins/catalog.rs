@@ -39,7 +39,8 @@
 //!                                     fresh sign-in begun for it first
 //!                                     (StepUp `for: "deploy_token"`, each
 //!                                     one a token's); `cancel_step_up`
-//!                                     stops waiting for it; its answer
+//!                                     stops waiting for it (and asks the
+//!                                     engine's CancelStepUp); its answer
 //!                                     `{ ok, token, secret }`, `secret`
 //!                                     the token (`zdt_…`) this once
 //!   plugins.store.revoke_token { id }  RevokeDeployToken
@@ -310,8 +311,18 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine) {
             create_token(&e, params).await
         }
     });
-    host.action("plugins.store.cancel_step_up", |_| {
-        STEP_UP.with(|n| n.set(n.get() + 1));
+    let e = engine.clone();
+    host.async_action("plugins.store.cancel_step_up", move |_| {
+        let e = e.clone();
+        async move {
+            // (No more waiting here, and the engine lets go of a sign-in it
+            // began for a token: one finished anyway makes no token unasked.
+            // An engine without CancelStepUp yet answers no; nothing else
+            // to do then.)
+            STEP_UP.with(|n| n.set(n.get() + 1));
+            let _ = e("CancelStepUp", json!({ "for": "deploy_token" }), None).await;
+            Ok(Value::Nil)
+        }
     });
     let e = engine.clone();
     host.async_action("plugins.store.revoke_token", move |arg| {

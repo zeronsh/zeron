@@ -184,8 +184,15 @@ function M.create_token(args: { name: string, scope: Scope, expires: number? }):
 	return ui.call("plugins.store.create_token", args)
 end
 
+-- Stops waiting for that sign-in, and the engine lets go of it.
 function M.cancel_step_up()
-	ui.invoke("plugins.store.cancel_step_up", nil)
+	ui.call("plugins.store.cancel_step_up", nil):after(function() end, function() end)
+end
+
+-- A secret on the clipboard (a deploy token): kept by no clipboard history
+-- or cloud, and cleared in a minute if it's still there (src/secrets.rs).
+function M.copy_secret(text: string): any
+	return ui.call("secret.copy", { text = text })
 end
 
 function M.revoke_token(id: string): any

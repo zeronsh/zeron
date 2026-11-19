@@ -816,6 +816,15 @@ end
 stub.cancel_step_up = function()
 	note("cancel_step_up")
 end
+-- (The clipboard as it is in a test: plain, noted. The host's marks it a
+-- secret and clears it, src/secrets.rs.)
+stub.copy_secret = function(text: string): any
+	note("copy_secret")
+	ui.clipboard.write(text)
+	return answer(function(): any
+		return true
+	end)
+end
 stub.revoke_token = function(id: string): any
 	note(`revoke_token:{id}`)
 	return answer(function(): any

@@ -191,7 +191,12 @@ test("a deploy token is made for the plugins chosen, after a fresh sign-in, the 
 	settle(app, 400)
 	local dialog = app:tree("role:dialog")
 	expect(dialog).to_contain("Copy your token now")
-	expect(dialog).to_contain("zdt_")
+	-- Private while the screen may be seen, as an email address is: a
+	-- blurred stand-in, never the token, until it's shown.
+	expect(dialog).never.to_contain("zdt_")
+	app:click('#key-secret >> role:switch "Show token"')
+	settle(app)
+	expect(app:tree("role:dialog")).to_contain("zdt_")
 	-- Whole, wrapped inside the dialog: never cut behind a scroll.
 	local block = app:tree("#key-secret")
 	local bx, _, bw = block:match("#key%-secret (%-?%d+),(%-?%d+) (%d+)x")
@@ -204,10 +209,13 @@ test("a deploy token is made for the plugins chosen, after a fresh sign-in, the 
 	app:key("Escape")
 	settle(app)
 	expect(app:tree("role:dialog")).to_contain("zdt_")
-	-- (The code block's own Copy, as a chat reply's.)
-	app:click('role:dialog >> role:button "Copy code"')
+	-- Its Copy puts it on the clipboard as a secret (the host's), and says
+	-- how long it stays there.
+	app:click('#key-secret-copy')
 	settle(app)
+	expect(calls(app)).to_contain("copy_secret")
 	expect(app:clipboard()).to_contain("zdt_")
+	expect(app:has('#key-secret-copied >> "Copied. Zeron clears it from the clipboard in a minute."')).to_be(true)
 	app:click('role:dialog >> role:button "I\'ve copied it"')
 	settle(app)
 	-- Gone for good: never shown again.
@@ -284,6 +292,46 @@ test("a token that has ended, listed until it's revoked, says when it ended", fu
 	local tree = app:tree()
 	expect(tree:find('"Last used [^"]+ on Pomodoro clock · Ended [^"]+"') ~= nil).to_be(true)
 	expect(tree).never.to_contain("Ends today")
+end)
+
+test("a token finished while Yours was left is still shown once, as Yours comes back", function()
+	local app = keys_page()
+	app:click("#keys-new")
+	settle(app)
+	app:type('role:dialog >> role:textbox "Name"', "CI")
+	app:click('role:dialog >> role:button "Create token"')
+	settle(app)
+	-- Taken away (a link, an agent's or a plugin's opening another page:
+	-- the dialog is modal) as the sign-in finishes: the token made then.
+	app:set_state("screens/plugins/nav.luau::plugins_tab", "installed")
+	settle(app)
+	app:command("store_stub.signed_in_again")
+	settle(app, 400)
+	app:set_state("screens/plugins/nav.luau::plugins_tab", "yours")
+	settle(app, 400)
+	expect(app:tree("role:dialog")).to_contain("Copy your token now")
+	app:click('#key-secret >> role:switch "Show token"')
+	settle(app)
+	expect(app:tree("role:dialog")).to_contain("zdt_")
+end)
+
+test("another account signed in while Yours stays open lists its own tokens", function()
+	local app = keys_page()
+	app:set_state("account", { state = "signed_in", env = "staging", user = { id = "u_ada", email = "ada@example.com" } })
+	settle(app)
+	local function listed(): number
+		local n = 0
+		for line in calls(app):gmatch("[^\n]+") do
+			if line == "tokens" then
+				n += 1
+			end
+		end
+		return n
+	end
+	local before = listed()
+	app:set_state("account", { state = "signed_in", env = "staging", user = { id = "u_grace", email = "grace@example.com" } })
+	settle(app, 400)
+	expect(listed()).to_be(before + 1)
 end)
 
 test("revoking a token asks first, then it's gone", function()

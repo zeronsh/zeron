@@ -196,6 +196,16 @@ fn a_deploy_token_s_scope_is_all_or_one_to_fifty_store_ids_each_once() {
 }
 
 #[test]
+fn stopping_the_wait_for_a_token_s_sign_in_cancels_it_at_the_engine() {
+    let (out, asked) = run(r#"ui.call("plugins.store.cancel_step_up", nil)"#, json!({ "ok": true }));
+    assert_eq!(asked[0], ("CancelStepUp".into(), json!({ "for": "deploy_token" }), None));
+    assert_eq!(out, "ok:nil");
+    // (An engine without it yet: still stopped here, nothing said.)
+    let (out, _) = run(r#"ui.call("plugins.store.cancel_step_up", nil)"#, json!({ "ok": false, "error": "unknown_method" }));
+    assert_eq!(out, "ok:nil");
+}
+
+#[test]
 fn a_deploy_token_s_sign_in_is_begun_for_a_deploy_token() {
     // (Every reply says a sign-in is needed, its page no https one: the
     // browser never opens, the call ends there.)
