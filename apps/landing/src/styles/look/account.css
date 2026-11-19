@@ -100,7 +100,8 @@ a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
 .key .nm { font-weight: 550; letter-spacing: -0.005em; overflow-wrap: anywhere; text-wrap: balance; }
 .key .id { margin-top: 2px; font: 450 12.5px/18px var(--mono); color: var(--text-3); }
 .scope, .scope.many .w, .scope.many .every { display: contents; }
-.scope > .tiles, .scope > .all { grid-column: 2; margin-right: calc(12px - var(--gap)); }
+/* (The slot is fixed; its tiles end at its right edge, one gap before the words, however many there are.) */
+.scope > .tiles, .scope > .all { grid-column: 2; justify-self: end; margin-right: calc(12px - var(--gap)); }
 .scope > .w { grid-column: 3; min-width: 0; }
 /* The tiles side by side, never over one another; past three, the count, a tile of its own. */
 .scope .tiles { display: flex; gap: 4px; }

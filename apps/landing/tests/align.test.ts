@@ -77,7 +77,7 @@ describe("the columns the rule names", () => {
       }
   }, 120_000);
 
-  test("Deploy tokens: every row's words start on one column, its header's, whatever the token holds", async () => {
+  test("Deploy tokens: every row's words start on one column, its header's, and its tiles end one gap before it, whatever the token holds", async () => {
     for (const width of [1440, 1024, 390]) {
       const page = await open({ path: "/account/tokens", user: "user_ada" }, width, "dark");
       try {
@@ -95,12 +95,22 @@ describe("the columns the rule names", () => {
             return null;
           };
           const header = document.querySelector(".key.h > .sc");
-          const rows = [...document.querySelectorAll("ul > li.key:not(.was)")].map((row) => first(row.querySelector(".scope > .w, .scope .count")));
-          return { header: header && (header as HTMLElement).offsetParent ? first(header) : null, rows };
+          const live = [...document.querySelectorAll("ul > li.key:not(.was)")];
+          const rows = live.map((row) => first(row.querySelector(".scope > .w, .scope .count")));
+          // (Each row's tiles, or the grid of all of yours: where they end, however many.)
+          const ends = live.map((row) => row.querySelector(".scope .tiles, .scope > .all")!.getBoundingClientRect().right);
+          return { header: header && (header as HTMLElement).offsetParent ? first(header) : null, rows, ends };
         });
         const column = starts.header ?? starts.rows[0]!;
         expect(starts.rows.length).toBeGreaterThan(5);
         for (const [i, x] of starts.rows.entries()) expect(Math.abs(x! - column), `${width}: row ${i + 1}'s words`).toBeLessThanOrEqual(1);
+        // The tiles end one gap before the words, one tile or four, or the grid of all of yours.
+        const counts = new Set<number>();
+        for (const [i, end] of starts.ends.entries()) {
+          expect(Math.abs(column - end - 12), `${width}: row ${i + 1}'s tiles end 12 before its words`).toBeLessThanOrEqual(1);
+          counts.add(Math.round(end));
+        }
+        expect(counts.size, `${width}: one place where every row's tiles end`).toBe(1);
       } finally {
         await page.context().close();
       }
