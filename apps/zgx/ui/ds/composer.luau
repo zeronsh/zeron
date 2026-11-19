@@ -1279,6 +1279,8 @@ return ui.component(function(props: Props): Node
 		return running ~= nil and running:get() and not has_text() and not has_cargo() and not asking() and not dictating()
 	end
 
+	local draft_focused = ui.use_state(false)
+
 	-- Mentions at the caret.
 	local m = mentions.use {
 		field = field,
@@ -1373,6 +1375,13 @@ return ui.component(function(props: Props): Node
 		end
 	end
 
+	local function edge_control_radius()
+		local _ = ui.theme.current:get()
+		local inset = view_geometry:get().controls.leading.left
+		local radius = math.clamp(control.nest("$zeron.composer.radius", Layout.BORDER, inset), 6, control.H.sm / 2)
+		return ui.raw(radius, "follows the composer's corner at the current inset, at least the small button corner")
+	end
+
 	-- +, as a secondary button: a fill of its own, so it reads as a control
 	-- beside the draft (the microphone stays ghost). Dictating, it is the
 	-- way out.
@@ -1386,7 +1395,7 @@ return ui.component(function(props: Props): Node
 		Icon { name = "close", size = 16 },
 	}, Button {
 		tone = "secondary",
-		shape = "pill",
+		rounded = edge_control_radius,
 		size = "sm",
 		icon = true,
 		label = locale.t("ds.composer.attach"),
@@ -1611,7 +1620,7 @@ return ui.component(function(props: Props): Node
 	})
 	local function send_control(): Node
 		return Button {
-			shape = "pill",
+			rounded = edge_control_radius,
 			size = "sm",
 			icon = true,
 			label = function()
@@ -1645,7 +1654,7 @@ return ui.component(function(props: Props): Node
 		send_control()
 	)
 	local stop_button = Button {
-		shape = "pill",
+		rounded = edge_control_radius,
 		size = "sm",
 		icon = true,
 		label = locale.t("ds.composer.stop"),
@@ -1667,7 +1676,7 @@ return ui.component(function(props: Props): Node
 				return question() ~= nil
 			end, Button {
 				size = "sm",
-				shape = "pill",
+				rounded = edge_control_radius,
 				label = function()
 					local q = question()
 					return locale.s(if q and q.pages and (q.page or 1) < q.pages then "ds.composer.next" else "ds.composer.submit")
@@ -1714,7 +1723,7 @@ return ui.component(function(props: Props): Node
 				Button {
 					locale.t("ds.composer.allow"),
 					size = "sm",
-					shape = "pill",
+					rounded = edge_control_radius,
 					on_click = function()
 						if props.on_approve then
 							props.on_approve("once")
@@ -2026,12 +2035,14 @@ return ui.component(function(props: Props): Node
 					else m.on_caret,
 				on_change = if spoken then spoken.on_change else nil,
 				on_focus = function()
+					draft_focused:set(true)
 					m.on_focus(true)
 					if spoken and spoken.on_focus then
 						spoken.on_focus()
 					end
 				end,
 				on_blur = function()
+					draft_focused:set(false)
 					m.on_focus(false)
 					if spoken and spoken.on_blur then
 						spoken.on_blur()
@@ -2598,9 +2609,12 @@ return ui.component(function(props: Props): Node
 				top = 0,
 				bottom = 0,
 				pointer_events = "none",
+				snap = true,
 				rounded = "$zeron.composer.radius",
 				border = 1,
-				border_color = "$zeron.composer.edge",
+				border_color = function()
+					return if draft_focused:get() and ui.window.active:get() then "$zeron.focus.ring" else "$zeron.composer.edge"
+				end,
 				bg = function()
 					return if material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
 				end,

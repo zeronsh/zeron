@@ -385,9 +385,10 @@ test("a chat moved to pinned gains its project's tile, and moved back loses it, 
 	local app = mount("shell_fixture.luau")
 	app:resize(1400, 860)
 	app:frames(30)
+	app:command("fixture.project_icons")
+	app:frames(30)
 	local function tile(): boolean
-		-- (Atlas's tile draws its initial.)
-		return app:tree('#shell-sidebar >> role:button "Write the docs"'):find('text "A"', 1, true) ~= nil
+		return app:has(`#shell-sidebar >> role:button "Write the docs" >> "🚀"`)
 	end
 	expect(tile()).to_be(false)
 	app:set_state("shell_places", { pinned = { "a2" }, sections = {} })

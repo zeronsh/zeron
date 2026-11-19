@@ -739,8 +739,9 @@ function M.hunk_row(l: Line): Node
 		px = "$space.3",
 		gap = "$space.3",
 		items = "center",
-		bg = "$zeron.secondary.bg",
-		ui.text { ranges or l.text, literal = true, shrink = 0, font = "$font.mono", text_size = "$font.size.xs", color = "$text.tertiary" },
+		relative = true,
+		ui.div { absolute = true, left = 0, right = 0, top = 0, h = 1, bg = "$border.subtle", pointer_events = "none", aria_hidden = true },
+		ui.text { ranges or l.text, literal = true, shrink = 0, font = "$font.mono", text_size = "$font.size.xs", color = "$text.secondary", tabular = true },
 		if context and context ~= ""
 			then ui.text { context, literal = true, shrink = 0, font = "$font.mono", text_size = "$font.size.xs", color = "$text.secondary" }
 			else nil,

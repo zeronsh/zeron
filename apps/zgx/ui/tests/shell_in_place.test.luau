@@ -666,16 +666,10 @@ test("the composer is made once: the sessions arriving, changing and growing lea
 	expect(`field @{field()}`).to_be(`field @{first}`)
 end)
 
-test("signed out, the foot says Local; Star on GitHub shows over it until put away", function()
+test("signed out, the foot says Local without the GitHub banner", function()
 	local app = open()
-	expect(app:has(`{SIDE} >> "Local"`)).to_be(true)
-	expect(app:has(`{SIDE} >> #star-banner`)).to_be(true)
-	-- (Over you at the foot.)
-	expect(top_of(app, SIDE, "Star on GitHub") < top_of(app, SIDE, "Local")).to_be(true)
-	app:click(`#star-banner >> role:button "Dismiss"`)
-	app:frames(20)
+	expect(app:has(`{SIDE} >> role:button "Local"`)).to_be(true)
 	expect(app:has(`{SIDE} >> #star-banner`)).to_be(false)
-	expect(app:state("shell_star_banner_dismissed")).to_be(true)
 end)
 
 -- A node's rectangle (its first line in the tree under `scope`): x, y, w, h.

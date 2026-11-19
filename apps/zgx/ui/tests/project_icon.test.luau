@@ -16,8 +16,11 @@ local function open(): any
 	return app
 end
 
-test("the sidebar's project groups wear .project-icon, one each", function()
+test("the sidebar's marked project groups wear .project-icon, one each", function()
 	local app = open()
+	expect(app:count("#shell-sidebar >> .project-icon")).to_be(0)
+	app:command("fixture.project_icons")
+	settle(app)
 	expect(app:count("#shell-sidebar >> .project-icon")).to_be(2)
 end)
 

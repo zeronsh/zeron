@@ -33,6 +33,7 @@
 
 local tree_line = require("@self/tree_line")
 local Icon = require("@self/icon")
+local Kbd = require("@self/kbd")
 local Mark = require("@self/mark")
 local status = require("@self/status")
 local FadeText = require("@self/fade_text")
@@ -276,6 +277,7 @@ export type Props = {
 local WIDE, PAD, SLOT = 256, 8, 30
 -- How far it resizes (Zeron's: 242 to 400, 256 by default).
 local MIN_W, MAX_W = 242, 400
+local ACTION_CAP_MIN = 176
 -- A regular session row: two lines (the title's 17, a gap, the detail's 14)
 -- inside a compact row's top and bottom inset.
 local TALL = 46
@@ -583,16 +585,19 @@ return ui.component(function(props: Props): Node
 	end
 	-- A project's tile as it is now (its picture chosen again): its hue,
 	-- artwork and emoji, each followed in place by the tile that shows it.
+	local function current_project(p: Project): Project
+		return index:get().by_project[p.id] or p
+	end
+	local function has_mark(p: Project): boolean
+		return (p.src ~= nil and p.src ~= "") or (p.emoji ~= nil and p.emoji ~= "")
+	end
 	local function look(p: Project): (() -> string?, () -> string?, () -> string?)
-		local function now(): Project
-			return index:get().by_project[p.id] or p
-		end
 		return function(): string?
-			return now().hue
+			return current_project(p).hue
 		end, function(): string?
-			return now().src
+			return current_project(p).src
 		end, function(): string?
-			return now().emoji
+			return current_project(p).emoji
 		end
 	end
 	local pinned_ids = index:peek().pinned_ids
@@ -866,6 +871,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- button): its wash stops short of it.
 		less: number?,
 		selected: (() -> boolean)?,
+		session: boolean?,
 		hovered: State<boolean>?,
 		on_click: (() -> ())?,
 		-- (What plugins place by, and what's under them: ids, never records.)
@@ -992,12 +998,14 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		else
 			-- A sidebar's row: the design system's flat surface (its wash under
 			-- the pointer, its selected fill winning over hover and press).
+			local session = r.session == true and not railed()
 			body = Surface {
 				depth = "flat",
-				selected = function(): boolean
-					return is_selected ~= nil and is_selected()
-				end,
-
+				selected = if session then nil else is_selected,
+				hover = if session then { bg = "#00000000" } else nil,
+				active = if session then { bg = "#00000000" } else nil,
+				relative = session,
+				focus = if session then { outline = "$zeron.focus.width", outline_color = "$zeron.focus.ring", outline_offset = -2 } else nil,
 				on_click = r.on_click,
 				on_hover = function(inside: boolean)
 					hovered:set(inside)
@@ -1011,6 +1019,23 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				rounded = if railed() then "$radius.md" else nil,
 				-- (The rail's doesn't clip: a tile's badge hangs past its corner.)
 				overflow = if railed() then "visible" else "hidden",
+				if session then ui.show(function(): boolean
+					return (is_selected ~= nil and is_selected()) or hovered:get()
+				end, ui.div {
+					absolute = true,
+					left = function(): number
+						local gutter = indent()
+						return if gutter > 0 then gutter + 8 else 0
+					end,
+					right = 0,
+					top = 0,
+					bottom = 0,
+					pointer_events = "none",
+					bg = function(): string
+						return if is_selected and is_selected() then "$pressed" else "$hover"
+					end,
+					mask_gradient = { angle = 90, stops = { "#ffffff00", "#ffffffff" } },
+				}) else nil,
 				ui.row {
 					w = function(): number
 						return if railed() then RAIL_SLOT else room() - PAD * 2 - (r.less or 0)
@@ -1330,6 +1355,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- (Its project's tile, unless the group it stands in now is its project:
 		-- a row dragged to another list keeps its node.)
 		if p then
+			local hue, src, emoji = look(p)
 			title = ui.row {
 				grow = 1,
 				min_w = 0,
@@ -1337,11 +1363,12 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				items = "center",
 				ui.show(function(): boolean
 					local by_now = if place and place.by_now then place.by_now() else by
-					return details.project_icon:get() and not SessionRow.groups_by(by_now, "project")
-				end, ui.div { shrink = 0, y = OPTICAL, if p.icon then Tile { inside = Icon { name = p.icon, size = 10 }, size = 16 } else (function(): Node
-					local hue, src, emoji = look(p)
-					return Tile { label = p.name, hue = hue, src = src, emoji = emoji, size = 16, project = p.id }
-				end)() }),
+					return details.project_icon:get() and not SessionRow.groups_by(by_now, "project") and has_mark(current_project(p))
+				end, ui.div {
+					shrink = 0,
+					y = OPTICAL,
+					Tile { hue = hue, src = src, emoji = emoji, size = 16, project = p.id },
+				}),
 				title,
 			}
 		end
@@ -1351,11 +1378,13 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			class = "session-title",
 			grow = 1,
 			min_w = 0,
+			y = -1,
 			items = "center",
 			title,
 		}
 		local body = row {
 			class = "session-row",
+			session = true,
 			provide = { session = s.id },
 			ref = card_ref,
 			on_press = if in_flyout
@@ -1667,7 +1696,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- own), or the project's own artwork; and, when its sessions can't be
 	-- seen, a badge for the most pressing of them.
 	-- (`project`: a project's id, its tile then `.project-icon`.)
-	local function group_tile(hue: string | { bg: string, ink: string } | () -> string?, inside: Node, sessions: Sessions, hidden: () -> boolean, src: (string | () -> string?)?, emoji: (() -> string?)?, project: string?): Node
+	local function group_tile(hue: string | { bg: string, ink: string } | () -> string?, inside: Node?, sessions: Sessions, hidden: () -> boolean, src: (string | () -> string?)?, emoji: (() -> string?)?, project: string?): Node
 		local function badge(kind: status.Kind): Node
 			return ui.div {
 				absolute = true,
@@ -1828,6 +1857,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					if subset ~= nil and #own == 0 then
 						continue
 					end
+					local function marked(): boolean
+						return has_mark(current_project(p))
+					end
 					table.insert(groups, {
 						key = `{prefix}project:{p.id}`,
 						name = p.name,
@@ -1839,29 +1871,14 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						empty = if subset == nil and p.empty == true and #p.sessions == 0 then true else nil,
 						unused = if subset == nil and p.unused == true and #p.sessions == 0 then true else nil,
 						shows_tile = function(): boolean
-							return details.project_icon:get()
+							return details.project_icon:get() and marked()
 						end,
 						tile = function(hidden: () -> boolean, live: Sessions?): Node
-							-- (A group that isn't a folder, the chats in none, wears
-							-- its glyph on the chrome's quiet wash, not a letter.)
-							if p.icon then
-								return group_tile(QUIET, Icon { name = p.icon, size = 12 }, live or own, hidden)
-							end
 							local hue, src, emoji = look(p)
-							return group_tile(
-								function(): string?
-									return hue() or "gray"
-								end,
-								ui.text {
-									string.upper(string.sub(p.name, 1, 1)),
-									text_size = "$font.size.xs",
-									weight = "$font.weight.semibold",
-								},
-								live or own,
-								hidden,
-								src,
-								emoji,
-								p.id
+							return ui.show(
+								marked,
+								group_tile(hue, nil, live or own, hidden, src, emoji, p.id),
+								if railed() then group_tile(QUIET, Icon { name = p.icon or "folder", size = 12 }, live or own, hidden) else nil
 							)
 						end,
 					})
@@ -2065,6 +2082,15 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		}, tall
 	end
 
+	local function action_cap(keys: string): Node?
+		if railed() then
+			return nil
+		end
+		return ui.show(function(): boolean
+			return not collapsed:get() and math.min(card_w(), room()) >= ACTION_CAP_MIN
+		end, Kbd { text = ui.shortcut_text(keys), size = "sm", tone = "quiet" })
+	end
+
 	-- The top: a new chat and search, each a row (collapsed, its icon).
 	local top = ui.column {
 		-- Where plugins add beside New chat and Search.
@@ -2080,7 +2106,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			lead = Icon { name = "plus", size = 16 },
 			words = line(label(function(): string
 				return locale.s("ds.sidebar.new_chat")
-			end, nil, "$font.weight.medium"), hint(ui.shortcut_text("cmd+n"))),
+			end, nil, "$font.weight.medium"), action_cap("cmd+n")),
 			on_click = function()
 				if props.on_new then
 					props.on_new(nil)
@@ -2094,7 +2120,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			lead = Icon { name = "search", size = 16 },
 			words = line(label(function(): string
 				return locale.s("ds.sidebar.search")
-			end), hint(ui.shortcut_text("cmd+k"))),
+			end), action_cap("cmd+k")),
 			on_click = props.on_search,
 		},
 		if props.pages
@@ -3457,6 +3483,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			local n = now().name
 			return named(g.key, if type(n) == "function" then n() else n)
 		end
+		local function new_shown(): boolean
+			return g.new_in == true and hovered:get()
+		end
 		local header = row {
 			class = "section-header",
 			provide = if g.project then { project = g.project } else nil,
@@ -3470,20 +3499,27 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					return if t then gutter(t) else 0
 				end
 				else nil,
-			-- (The shared header's words, ds/session_row: folded, how many;
-			-- a project's new chat under the pointer, in their place.)
-			words = SessionRow.header_words(
-				name,
-				function(): string
-					return tostring(#sessions())
-				end,
-				hidden,
-				if g.new_in then new_corner(g, now) else nil,
-				if g.new_in
-					then function(): boolean
-						return hovered:get()
-					end
-					else nil
+			words = line(
+				FadeText {
+					name,
+					grow = 1,
+					mb = function(): number
+						return if g.shows_tile and g.shows_tile() then 2 else 0
+					end,
+					text_size = "$font.size.md",
+					weight = "$font.weight.medium",
+					color = "$text.primary",
+				},
+				ui.row {
+					shrink = 0,
+					items = "center",
+					ui.show(function(): boolean
+						return hidden() and not new_shown()
+					end, hint(function(): string
+						return tostring(#sessions())
+					end)),
+					if g.new_in then ui.show(new_shown, new_corner(g, now)) else nil,
+				}
 			),
 			on_click = function()
 				fold_set(group_fold(g.key), not open:peek())
@@ -3827,8 +3863,20 @@ fn layer(input:LayerInput)->vec4<f32> {
 			local function says(): string
 				return locale.s("ds.sidebar.empty_projects", { n = now().n or 0 })
 			end
+			local marked_groups = ui.computed(function(): { Group }
+				local marked: { Group } = {}
+				for _, g in now().gs or {} do
+					if g.shows_tile and g.shows_tile() then
+						table.insert(marked, g)
+						if #marked == EMPTY_TILES then
+							break
+						end
+					end
+				end
+				return marked
+			end)
 			local function group_at(i: number): Group?
-				return (now().gs or {})[i]
+				return marked_groups:get()[i]
 			end
 			local function project_at(i: number): Project?
 				local g = group_at(i)
@@ -3876,13 +3924,9 @@ fn layer(input:LayerInput)->vec4<f32> {
 					h = EMPTY_TILE,
 					Tile {
 						size = EMPTY_TILE,
-						label = function(): string
-							local p = project_at(i)
-							return if p then p.name else ""
-						end,
 						hue = function(): string?
 							local p = project_at(i)
-							return (p and p.hue) or "gray"
+							return if p then p.hue else nil
 						end,
 						src = function(): string?
 							local p = project_at(i)
@@ -3976,7 +4020,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 				},
 				-- (Gone from the header once they've landed in the rows.)
 				ui.show(function(): boolean
-					return flown() < 1 or not empties_open:get()
+					return shows(1) and (flown() < 1 or not empties_open:get())
 				end, ui.row {
 					class = "empty-projects-stack",
 					ref = stack_ref,

@@ -214,9 +214,20 @@ test("many empty projects opened: the list builds only the rows in view", functi
 	expect(shows(app, "Gone 1")).to_be(false)
 end)
 
-test("the row reads Empty, a stack of project tiles (at most 5), and the count", function()
-	-- The tiles in the row: the fixture's are letters, one each.
+test("the row reads Empty, a stack of configured project tiles (at most 5), and the count", function()
 	local app: any
+	local function configure_marks()
+		local now = table.clone(app:state("sessions"))
+		local projects = {}
+		for i, p in now.projects do
+			local marked = table.clone(p)
+			marked.icon = { emoji = "🚀" }
+			projects[i] = marked
+		end
+		now.projects = projects
+		app:set_state("sessions", now)
+		app:frames(30)
+	end
 	local function stacked(label: string): number
 		local n, inside, indent = 0, false, 0
 		for line in app:tree(SIDE):gmatch("[^\n]+") do
@@ -225,7 +236,7 @@ test("the row reads Empty, a stack of project tiles (at most 5), and the count",
 				inside, indent = true, pad
 			elseif inside and pad <= indent then
 				break
-			elseif inside and line:match(' text "[^"%d]" ') then
+			elseif inside and line:find(' text "🚀" ', 1, true) then
 				n += 1
 			end
 		end
@@ -235,6 +246,8 @@ test("the row reads Empty, a stack of project tiles (at most 5), and the count",
 	expect(shows(app, "2 empty projects")).to_be(true)
 	expect(app:has(`{SIDE} >> role:button "2 empty projects" >> "Empty"`)).to_be(true)
 	expect(app:has(`{SIDE} >> role:button "2 empty projects" >> "2"`)).to_be(true)
+	expect(stacked("2 empty projects")).to_be(0)
+	configure_marks()
 	expect(stacked("2 empty projects")).to_be(2)
 
 	-- Sixty: the stack stops at five, the word and the count whole.
@@ -246,6 +259,7 @@ test("the row reads Empty, a stack of project tiles (at most 5), and the count",
 	expect(shows(app, "60 empty projects")).to_be(true)
 	expect(app:has(`{SIDE} >> role:button "60 empty projects" >> "Empty"`)).to_be(true)
 	expect(app:has(`{SIDE} >> role:button "60 empty projects" >> "60"`)).to_be(true)
+	configure_marks()
 	expect(stacked("60 empty projects")).to_be(5)
 
 	-- No chevron, as Archived has none: nothing in the row but words and tiles.

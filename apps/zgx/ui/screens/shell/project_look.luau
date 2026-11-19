@@ -196,6 +196,21 @@ function M.artwork(p: sessions.Project): string?
 	return if a then a else nil
 end
 
+function M.custom(p: sessions.Project): Look?
+	local icon = p.icon
+	if not icon then
+		return nil
+	end
+	if icon.image and icon.image ~= "" then
+		local src = M.file(icon.image)
+		return if src then { hue = icon.hue or default.hue(p), src = src } else nil
+	end
+	if icon.emoji and icon.emoji ~= "" then
+		return { hue = icon.hue or default.hue(p), emoji = icon.emoji }
+	end
+	return nil
+end
+
 function M.of(p: sessions.Project): Look
 	local icon = p.icon
 	local hue = (icon and icon.hue) or default.hue(p)

@@ -353,7 +353,7 @@ test("a tab let go off the strip goes back to its place", function()
 	local app = all_open()
 	app:frames(20)
 	local was = box(app, "#session-tab-a2").x
-	app:drag("#session-tab-a2", "#star-banner")
+	app:drag("#session-tab-a2", '#shell-sidebar >> role:button "Local"')
 	app:frames(60)
 	expect(math.abs(box(app, "#session-tab-a2").x - was) <= 0.5).to_be(true)
 	expect(box(app, "#session-tab-a1").x < was).to_be(true)
@@ -371,9 +371,8 @@ local function split(app: any, chats: { string })
 	app:frames(30)
 end
 
-local function letter(app: any, tab: string, at: number): string?
-	local line = (app:tree(`#session-tab-{tab}-tile-{at}`) :: string):match("[^\n]+") or ""
-	return line:match('"(.-)"')
+local function shows_rocket(app: any, tab: string, at: number): boolean
+	return app:has(`#session-tab-{tab}-tile-{at} >> "🚀"`)
 end
 
 test("a chat alone has one tab, replaced as you navigate, until chats are composed", function()
@@ -430,9 +429,11 @@ test("a tab left with one chat is the tab for a chat alone, and ⌘W on it goes 
 	expect(app:error()).to_be_nil()
 end)
 
-test("a tab's panes stack, three at most, the pane focused at the far left", function()
+test("a tab's marked panes stack, three at most, the marked pane focused at the far left", function()
 	local app = all_open()
 	split(app, { "a1", "b1" })
+	expect(app:has("#session-tab-a1-tile-1")).to_be(false)
+	app:command("fixture.project_icons")
 	expect(app:wait("#session-tab-a1-tile-2", { timeout_ms = 2000 })).to_be(true)
 	expect(app:wait("#session-tab-a1-tile-3", { timeout_ms = 200 })).to_be(false)
 
@@ -444,7 +445,8 @@ test("a tab's panes stack, three at most, the pane focused at the far left", fun
 	-- (The pane focused at the far left, the others behind it to the right.)
 	expect(middle.x > front.x).to_be(true)
 	expect(back.x > middle.x).to_be(true)
-	expect(front.x < box(app, "#session-tab-a1").x + 8).to_be(true)
+	local tab = box(app, "#session-tab-a1")
+	expect(math.abs(front.x - tab.x - 24) <= 0.5).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
 
@@ -452,17 +454,19 @@ test("the pane focused comes to the front of the stack, the one before it behind
 	local app = mount("shell_fixture.luau")
 	app:resize(1400, 800)
 	app:frames(30)
+	app:command("fixture.project_icons")
+	app:frames(30)
 	open(app, "Fix the build")
 	open(app, "Ship the release")
 	split(app, { "a1", "b1" })
 	open(app, "Fix the build")
 	app:frames(40)
-	expect(letter(app, "a1", 1)).to_be("A")
-	expect(letter(app, "a1", 2)).to_be("B")
+	expect(shows_rocket(app, "a1", 1)).to_be(true)
+	expect(app:tree("#session-tab-a1-tile-2")).to_contain("img")
 	open(app, "Ship the release")
 	app:frames(40)
-	expect(letter(app, "a1", 1)).to_be("B")
-	expect(letter(app, "a1", 2)).to_be("A")
+	expect(app:tree("#session-tab-a1-tile-1")).to_contain("img")
+	expect(shows_rocket(app, "a1", 2)).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
 
