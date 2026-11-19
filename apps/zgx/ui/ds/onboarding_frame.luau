@@ -723,7 +723,6 @@ M.LIST_MEASURE = 560
 function M.Fact(props: { label: string | Message, value: string | Message | () -> string }): Node
 	return ui.row {
 		w_full = true,
-		min_h = "$zeron.settings.row",
 		px = "$space.4",
 		py = "$space.3",
 		gap = "$space.4",

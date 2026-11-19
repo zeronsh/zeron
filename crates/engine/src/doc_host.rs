@@ -102,6 +102,12 @@ const SYNC_ADMISSION_BATCH: usize = 4;
 /// while a pass leaves work in flight.
 const SYNC_PASS_SPACING: std::time::Duration = std::time::Duration::from_millis(100);
 const SYNC_CATCH_UP_QUANTUM_MS: i64 = 300_000;
+/// A chat opened again while its client still runs ([`ReopenRefresh`]) asks
+/// the room at most this often: switching between chats asks once each.
+const REOPEN_REFRESH_SPACING_MS: i64 = 15_000;
+/// How long that ask may take. A client that hasn't caught up by then is
+/// redialed: a fresh join, whose hello also wakes a relayed chat's host.
+const REOPEN_REFRESH_DEADLINE_MS: i64 = 20_000;
 /// A quiesce for a Cloud sleep the stop never followed lifts after this.
 const QUIESCE_LEASE: std::time::Duration = std::time::Duration::from_secs(180);
 
@@ -779,8 +785,40 @@ pub struct ChatDocHandle {
     chat2_local_sub: Mutex<Option<loro::Subscription>>,
     /// The relay layer's state for this chat. None with the flag off.
     relay: Mutex<Option<Arc<relay::ChatRelayState>>>,
+    /// An open of this chat while its client already runs (see [`ReopenRefresh`]).
+    reopen: Mutex<ReopenRefresh>,
+    /// This admission's client has been logged as caught up.
+    sync_caught_up_logged: AtomicBool,
     /// Doc subscription (drop = unsubscribe) — bumps the change watch on every commit.
     _sub: loro::Subscription,
+}
+
+/// A chat opened (a transcript watch, a focus) while its client already runs.
+/// A running client is otherwise never asked whether it's current: it was
+/// admitted once, and only a new admission joins the room again. One whose
+/// socket stopped delivering, or that missed a relayed chat's last frames
+/// while its host has since left the room, kept showing that stale copy to
+/// every viewer until this device wrote (2026-11-19: a remote turn read
+/// "Interrupted" until a send pulled its whole end in at once). Each such
+/// open of a chat another device hosts has the dispatcher ask the room
+/// again, and, on a relayed chat, ask the host directly; the room wakes a
+/// host that isn't there.
+#[derive(Default)]
+struct ReopenRefresh {
+    /// When an open asked, epoch ms. 0 = nothing to serve.
+    opened: i64,
+    /// When the dispatcher last asked the room ([`REOPEN_REFRESH_SPACING_MS`]).
+    asked_at: i64,
+    pending: Option<PendingRefresh>,
+}
+
+#[derive(Clone, Copy)]
+struct PendingRefresh {
+    /// [`zeron_sync::ChatClient::request_catch_up`]'s ticket.
+    catch_up: u64,
+    /// [`zeron_sync::chat_relay::RelayHandle::ask_host`]'s, on a relayed chat.
+    host: Option<u64>,
+    since: i64,
 }
 
 /// A running agent explicitly owns a writer lease until its final cleanup.
@@ -1918,6 +1956,7 @@ impl DocHost {
     /// start the change-driven task, and request budgeted sync when configured.
     pub fn open(&self, chat_id: &str) -> Result<Arc<ChatDocHandle>, EngineError> {
         let handle = self.open_local(chat_id)?;
+        Self::note_reopen(&handle);
         self.activate_sync(&handle);
         Ok(handle)
     }
@@ -1928,8 +1967,92 @@ impl DocHost {
         let handle = self.open_local(chat_id)?;
         let focus = self.inner.focus_clock.fetch_add(1, Ordering::AcqRel) + 1;
         handle.last_focus.fetch_max(focus, Ordering::AcqRel);
+        Self::note_reopen(&handle);
         self.activate_sync(&handle);
         Ok(())
+    }
+
+    /// Someone opened this chat. If its client is already running, the
+    /// dispatcher has it show it's current ([`ReopenRefresh`]); a client
+    /// still to be admitted joins afresh anyway.
+    fn note_reopen(handle: &ChatDocHandle) {
+        lock(&handle.reopen).opened = now_ms();
+    }
+
+    /// Serve [`ReopenRefresh`] for the running client of a chat another device
+    /// hosts: ask the room for its rows and queue again, and on a relayed chat
+    /// ask the host for what this copy lacks;
+    /// redial a client that hasn't caught up by the deadline. At most one ask
+    /// per [`REOPEN_REFRESH_SPACING_MS`]. True while an ask is under way.
+    fn serve_reopen(&self, handle: &ChatDocHandle) -> bool {
+        let (opened, pending) = {
+            let reopen = lock(&handle.reopen);
+            (reopen.opened, reopen.pending.is_some())
+        };
+        if opened == 0 && !pending {
+            return false;
+        }
+        // A chat this device hosts is written here: its doc is the copy
+        // others catch up with, and its own opens (every drain and run)
+        // must not each poke the room. Read before the client's lock: the
+        // registry has locks of its own.
+        if !pending && self.is_host(&handle.chat_id) {
+            lock(&handle.reopen).opened = 0;
+            return false;
+        }
+        let relay = lock(&handle.relay).clone();
+        let client = lock(&handle.chat2);
+        let mut reopen = lock(&handle.reopen);
+        let opened = std::mem::take(&mut reopen.opened);
+        let Some(client) = client.as_ref() else {
+            // Still dialing: its join is the catch-up.
+            reopen.pending = None;
+            return false;
+        };
+        let now = now_ms();
+        if opened != 0
+            && reopen.pending.is_none()
+            && now - reopen.asked_at >= REOPEN_REFRESH_SPACING_MS
+        {
+            reopen.asked_at = now;
+            let catch_up = client.request_catch_up();
+            // Rows don't carry a relayed chat: its host does, if it's there.
+            let host = relay
+                .as_ref()
+                .filter(|_| client.relay_room())
+                .map(|state| state.relay.ask_host());
+            reopen.pending = Some(PendingRefresh { catch_up, host, since: now });
+            tracing::info!(chat = %handle.chat_id, asks_host = host.is_some(),
+                "chat2 reopened while connected; asking the room for anything missed");
+        }
+        let Some(pending) = reopen.pending else {
+            return false;
+        };
+        let caught_up = client.catch_up_completed(pending.catch_up);
+        let answered = pending.host.is_none_or(|ticket| {
+            relay.as_ref().is_some_and(|state| state.relay.host_answered(ticket))
+        });
+        let elapsed_ms = now - pending.since;
+        if caught_up && answered {
+            reopen.pending = None;
+            tracing::info!(chat = %handle.chat_id, elapsed_ms, host_asked = pending.host.is_some(),
+                "chat2 reopen: caught up");
+            return false;
+        }
+        if elapsed_ms < REOPEN_REFRESH_DEADLINE_MS {
+            return true;
+        }
+        reopen.pending = None;
+        if caught_up {
+            // The room was asked to wake it; its join brings the rest.
+            tracing::info!(chat = %handle.chat_id, elapsed_ms,
+                "chat2 reopen: rows caught up; the host hasn't answered yet");
+        } else {
+            tracing::info!(chat = %handle.chat_id, elapsed_ms,
+                "chat2 reopen: catch-up didn't finish; redialing");
+            client.redial();
+        }
+        false
     }
 
     /// Materialize one authoritative local document without acquiring a network
@@ -2251,6 +2374,8 @@ impl DocHost {
             publication_failed: AtomicBool::new(false),
             chat2_local_sub: Mutex::new(None),
             relay: Mutex::new(None),
+            reopen: Mutex::new(ReopenRefresh::default()),
+            sync_caught_up_logged: AtomicBool::new(false),
             _sub: sub,
         });
         // Snapshot recovery may restore several independently edited rows.
@@ -2689,6 +2814,9 @@ impl DocHost {
                     // reclaim a slot. Only resident, non-closing clients
                     // acknowledge focus here.
                     handle.sync_focus_served.fetch_max(handle.last_focus.load(Ordering::Acquire), Ordering::AcqRel);
+                    // Acknowledging isn't proving: a reopened chat's client
+                    // shows it's current.
+                    unsettled |= host.serve_reopen(handle);
                     let mut captured = handle.sync_wake_version.load(Ordering::Acquire);
                     let pending_wake = host
                         .inner
@@ -2726,6 +2854,11 @@ impl DocHost {
                                 .complete_sync_job(&handle.chat_id, "wake", captured);
                     }
                     let caught_up = lock(&handle.chat2).as_ref().is_some_and(|c| c.caught_up());
+                    if caught_up && !handle.sync_caught_up_logged.swap(true, Ordering::AcqRel) {
+                        tracing::info!(chat = %handle.chat_id,
+                            elapsed_ms = now_ms() - handle.sync_last_started.load(Ordering::Acquire),
+                            "chat2 client caught up");
+                    }
                     // A quiet document can still be receiving its checkpoint
                     // or commands. Incomplete catch-up only yields via rotate's
                     // explicit service deadline, never the short reuse grace.
@@ -2901,6 +3034,9 @@ impl DocHost {
                     handle.sync_wake_version.store(wake_version.unwrap_or(0), Ordering::Release);
                     handle.wake_durable_mark.store(0, Ordering::Release);
                     handle.sync_wake_ticket.store(0, Ordering::Release);
+                    handle.sync_caught_up_logged.store(false, Ordering::Release);
+                    // A fresh join is the catch-up an open asks for.
+                    *lock(&handle.reopen) = ReopenRefresh { asked_at: now_ms(), ..Default::default() };
                     match action {
                         SyncAdmission::Join => {
                             let cursor = handle.persistence.as_ref().map_or(0, |p| p.cursor());

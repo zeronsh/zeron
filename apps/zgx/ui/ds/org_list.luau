@@ -77,7 +77,6 @@ end
 -- corners the card's less its edge and that inset (concentric).
 local function shape(props: { [any]: any }, wash: (() -> string)?, kids: { Node }): Node
 	props.w_full = true
-	props.min_h = "$zeron.settings.row"
 	props.px = "$space.4"
 	props.py = "$space.3"
 	props.gap = "$space.3"

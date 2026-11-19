@@ -550,7 +550,9 @@ function M.Row(props: RowProps): Node
 	end
 	local row: { [any]: any } = {
 		w_full = true,
-		min_h = "$zeron.settings.row",
+		-- (No `min_h`: a row is its content's height, 42 for one line, as it
+		-- has always drawn; `"$zeron.settings.row"` here, which zgx once
+		-- ignored, would hold it at 52.)
 		px = "$space.4",
 		py = "$space.3",
 		gap = if props.stacked then "$space.3" else "$space.4",

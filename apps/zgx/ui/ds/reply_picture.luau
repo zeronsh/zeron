@@ -675,7 +675,6 @@ function M.Line(props: LineProps): Node
 		class = "md-image-error",
 		self = "start",
 		max_w = "100%",
-		min_h = "$zeron.prose.small.line",
 		gap = "$space.2",
 		items = "center",
 		color = "$text.tertiary",
