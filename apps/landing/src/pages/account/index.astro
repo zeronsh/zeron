@@ -1,101 +1,146 @@
 ---
-// Your plugins: each one's place in the store and its newest version's
-// state, as a table. One person's page: never cached, never indexed.
-import PluginTile from "../../components/store/PluginTile.astro";
-import Glyph from "../../components/ui/Glyph.astro";
-import Toast from "../../components/kit/Toast.astro";
-import App from "../../layouts/App.astro";
+// Your plugins (the prototype's yours page): each plugin you publish, its
+// newest version and where it stands (verified, not yet, the reviewer's
+// note when Zeron didn't verify it, taken down or removed and why), when it
+// was published and from where (one of your devices, or a deploy key by its
+// name), and how many have it. One person's page: never cached, never
+// indexed. Signed out, it says so and offers sign-in, here.
+import AccountHead from "../../components/look/AccountHead.astro";
+import Flash from "../../components/look/Flash.astro";
+import Icon from "../../components/look/Icon.astro";
+import Seal from "../../components/look/Seal.astro";
+import SignInPlease from "../../components/look/SignInPlease.astro";
+import Tile from "../../components/look/Tile.astro";
+import Words from "../../components/look/Words.astro";
+import Store from "../../layouts/Store.astro";
+import "../../styles/look/account.css";
+import { count, day, since } from "../../lib/store/format.ts";
+import { hueClass } from "../../lib/store/hue.ts";
 import { takeFlash } from "../../lib/store/flash.ts";
-import { count, day } from "../../lib/store/format.ts";
 import { privatePage } from "../../lib/store/http.ts";
-import { requireSession } from "../../lib/store/session.ts";
-import { everListed, listingState, toneClass, verificationState, versionState } from "../../lib/store/states.ts";
+import type { MyPlugin } from "../../lib/store/types.ts";
+import { statusWords, store } from "../../lib/store/words.ts";
 
 export const prerender = false;
 
-const session = await requireSession(Astro);
-if (session instanceof Response) return session;
+const edge = Astro.locals.edge;
+// (Signed in, signed out, or not known: an edge that doesn't answer is never "signed out".)
+const who = await edge.who();
+const session = who.state === "in" ? who.session : null;
 privatePage(Astro);
-const toast = takeFlash(Astro.cookies);
-const result = await Astro.locals.edge.myPlugins();
-const plugins = result.ok ? result.data.plugins : [];
+if (who.state === "down") Astro.response.status = 503;
+const flash = takeFlash(Astro.cookies);
+const [result, keysResult] = session ? await Promise.all([edge.myPlugins(), edge.keys()]) : [null, null];
+const plugins = result?.ok ? result.data.plugins : [];
+const now = Date.now();
+const liveKeys = keysResult?.ok ? keysResult.data.keys.filter((k) => !k.revoked_at && !(k.expires_at !== null && k.expires_at < now)).length : null;
+
+/** Where a plugin's newest version stands: its pill, and the lines under it. */
+function standing(p: MyPlugin) {
+  const v = p.versions[0];
+  const verifiedOne = p.verified_version ? p.versions.find((x) => x.version === p.verified_version) : undefined;
+  const newestVerified = verifiedOne
+    ? `${store("plugins.store.summary.newest_verified", { version: verifiedOne.version })}${verifiedOne.verified_at ? `, since ${day(verifiedOne.verified_at, now)}` : ""}`
+    : null;
+  const none = `${store("plugins.store.summary.none_verified").replace(/^./, (c) => c.toUpperCase())}: agents can't install it until one is.`;
+  if (!v) return { tone: "quiet", label: "Nothing published", why: null, line: null, seal: false };
+  if (p.listing === "suspended") return { tone: "bad", label: "Suspended", why: "Zeron took it out of the store. Those who have it keep it.", line: null, seal: false };
+  if (v.status === "taken_down" || v.status === "removed") {
+    const reason = v.removal?.reason ?? v.review?.message ?? null;
+    const off = v.status === "taken_down" && v.removal ? ` Off since ${day(v.removal.at, now)}.` : "";
+    return { tone: "bad", label: statusWords(v.status), why: reason ? `“${reason}”${off}` : off.trim() || null, line: newestVerified, seal: Boolean(verifiedOne) };
+  }
+  if (v.yanked) return { tone: "quiet", label: statusWords("yanked"), why: null, line: newestVerified, seal: Boolean(verifiedOne) };
+  if (v.verified) return { tone: "ok", label: store("plugins.store.verified"), why: null, line: v.verified_at ? store("plugins.store.verified_on", { date: day(v.verified_at, now) }) : null, seal: false };
+  if (v.review?.decision === "declined")
+    return { tone: "bad", label: store("plugins.store.review.declined"), why: v.review.message ? store("plugins.store.review.declined_said", { words: v.review.message }) : null, line: newestVerified ?? none, seal: Boolean(verifiedOne) };
+  return { tone: "no", label: store("plugins.store.review.waiting"), why: null, line: newestVerified ?? none, seal: Boolean(verifiedOne) };
+}
+const gone = (p: MyPlugin) => p.listing === "suspended" || ["taken_down", "removed"].includes(p.versions[0]?.status ?? "");
 ---
 
-<App title="Your plugins · Zeron" description="The plugins you publish." noindex current="mine" session={session}>
-  <h1 slot="title" class="t-title">Your plugins{result.ok && <span class="title-count"> · {count(plugins.length)}</span>}</h1>
-
-  <div class="mine-body">
-    {
-      !session.username && (
-        <p class="notice">
-          <Glyph name="info-circle" size={16} />
-          <span><b>Claim a username first.</b> Zeron asks for one right after you sign in, and your plugins read “by @username”. Then you can publish.</span>
-        </p>
-      )
-    }
-    {
-      !result.ok ? (
-        <div class="panel">
+<Store title="Your plugins · Zeron" description="The plugins you publish." noindex current="publish" session={session}>
+  <div class="wrap acct">
+    <AccountHead
+      title="Your plugins"
+      lead="What you have published, and where each version stands. A new version is live the moment you send it; the check arrives when Zeron has verified it."
+      current="plugins"
+      plugins={result?.ok ? plugins.length : null}
+      keys={liveKeys}
+      action={session ? { label: "Publish a plugin", icon: "plus", href: "/plugins/publishing#send" } : null}
+    >
+      <Flash flash={flash} />
+      {
+        who.state === "down" ? (
           <div class="empty" role="status">
-            <span class="tile"><Glyph name="wifi-off" size={20} /></span>
-            <div class="words"><h2>Your plugins can't be loaded right now</h2><p>Try again in a moment.</p></div>
-            <div class="actions"><a class="btn secondary sm" href="/account">Try again</a></div>
+            <h2>{store("plugins.store.failed_title")}</h2>
+            <p>{store("plugins.store.failed_body")}</p>
+            <a class="btn sec" href={Astro.url.pathname}>{store("plugins.store.try_again")}</a>
           </div>
-        </div>
-      ) : plugins.length === 0 ? (
-        <div class="panel">
-          <div class="empty">
-            <span class="tile"><Glyph name="folder-with-files" size={20} /></span>
-            <div class="words">
-              <h2>You haven't published a plugin yet</h2>
-              <p>In Zeron: <b>Settings</b> › <b>Plugins</b> › <b>Yours</b> › <b>Publish…</b></p>
-              <p>Or from a terminal:</p>
-            </div>
-            <div class="copybox"><code tabindex="0">zeron plugin publish</code><button type="button" class="btn ghost icon xs" aria-label="Copy" data-copy><Glyph name="copy" size={14} /></button></div>
-            <p class="t-caption t-3">The first account to publish an id keeps it. An account can take up to 5 new ids a week.</p>
-          </div>
-        </div>
-      ) : (
-        <div class="panel">
-          <table class="table comfortable mine">
-            <caption class="sr-only">Your plugins</caption>
-            <colgroup><col /><col class="listing" /><col class="newest" /><col class="updated" /></colgroup>
-            <thead><tr><th scope="col">Plugin</th><th scope="col">In the store</th><th scope="col">Newest version</th><th scope="col" class="end">Published</th></tr></thead>
-            <tbody>
-              {plugins.map((p) => {
-                const newest = p.versions[0];
-                // (A newest version that's listed says whether it's verified; one that isn't, where it stands.)
-                const state = newest ? (newest.status === "listed" ? verificationState(newest) : versionState(newest)) : null;
-                const listing = listingState(p.listing, everListed(p.versions));
-                // (Steady is quiet: listed, its newest verified. A badge only where a row needs a look.)
-                const listedSteady = p.listing === "listed";
-                const newestSteady = listedSteady && newest?.status === "listed" && newest.verified;
-                return (
-                  <tr>
-                    <td>
-                      <span class="cell-main">
-                        <PluginTile id={p.id} name={p.name} icon={p.icon} version={newest?.version ?? p.version} size={32} class="plugin-tile" />
-                        <span class="cell-words">
-                          <a class="name name-link" href={`/account/plugins/${p.id}`}>{p.name}</a>
-                          <span class="id">{p.id}</span>
-                          <span class="meta">
-                            {listedSteady ? <span class="steady">{listing.label}</span> : <span class:list={["badge sm", toneClass(listing.tone)]}>{listing.label}</span>}
-                            {newest && state && <><span class="t-mono t-2">{newest.version}</span>{!newestSteady && <span class:list={["badge sm", toneClass(state.tone)]}>{state.label}</span>}</>}
-                          </span>
-                        </span>
-                      </span>
-                    </td>
-                    <td class="listing">{listedSteady ? <span class="steady">{listing.label}</span> : <span class:list={["badge sm", toneClass(listing.tone)]}>{listing.label}</span>}</td>
-                    <td class="newest">{newest && state ? <span class="newest-cell"><span class="t-mono">{newest.version}</span>{!newestSteady && <span class:list={["badge sm", toneClass(state.tone)]}>{state.label}</span>}</span> : <span class="t-3">{"—"}</span>}</td>
-                    <td class="updated end muted">{newest ? <time datetime={new Date(newest.published_at).toISOString()}>{day(newest.published_at)}</time> : "—"}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )
-    }
+        ) : !session ? (
+          <SignInPlease what="the plugins you publish" />
+        ) : (
+          <>
+            {!session.username && (
+              <p class="flash info">Claim a username first: Zeron asks for one right after you sign in, and your plugins read “by @username”. Then you can publish.</p>
+            )}
+            {!result?.ok ? (
+              <div class="empty" role="status">
+                <h2>{store("plugins.store.failed_title")}</h2>
+                <p>{store("plugins.store.failed_body")}</p>
+                <a class="btn sec" href="/account">{store("plugins.store.try_again")}</a>
+              </div>
+            ) : plugins.length === 0 ? (
+              <div class="empty">
+                <h2>Nothing published yet</h2>
+                <p>Publish a plugin from its folder, or from Zeron's Settings, under Plugins. It's live in the store the moment you send it.</p>
+                <span class="cmd"><code><em aria-hidden="true">$</em> zeron plugin publish</code><button type="button" data-copy="zeron plugin publish" aria-label="Copy the command"><Icon name="copy" /></button></span>
+              </div>
+            ) : (
+              <div class="card mine">
+                <div class="row h" aria-hidden="true"><span>Plugin</span><span>Newest version</span><span>Published</span><span class="r">Installs</span><span></span></div>
+                <ul aria-label="Your plugins">
+                  {plugins.map((p) => {
+                    const s = standing(p);
+                    const v = p.versions[0];
+                    return (
+                      <li>
+                        <a class:list={["row", hueClass(p.id), { off: gone(p) }]} href={`/account/plugins/${encodeURIComponent(p.id)}`}>
+                          <div class="who">
+                            <Tile id={p.id} name={p.name} icon={p.icon} version={v?.version ?? null} />
+                            <div><div class="nm name"><Words text={p.name} /></div><div class="id">{p.id}</div></div>
+                          </div>
+                          <div class="ver">
+                            <div class="top1">
+                              {v && <b>{v.version}</b>}
+                              <span class:list={["state", s.tone]}>{s.tone === "ok" && <Seal quiet />}{s.label}</span>
+                            </div>
+                            {s.why && <small class="why">{s.why}</small>}
+                            {s.line && <small>{s.seal && <Seal size="s" quiet />}{s.line}</small>}
+                          </div>
+                          <div class="pub">
+                            {v && <div><span class="sr-only">Published </span><time datetime={new Date(v.published_at).toISOString()}>{since(v.published_at, now, true)}</time></div>}
+                            {v?.via === "deploy_key" && <small><Icon name="key" />{v.deploy_key?.name ?? "A deploy key"}</small>}
+                            {v?.via === "device" && <small><Icon name="laptop" />One of your devices</small>}
+                          </div>
+                          <div class="n num">{count(p.installs)}<span class="sr-only"> installs</span></div>
+                          <Icon name="chev" />
+                        </a>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
+          </>
+        )
+      }
+
+      <section class="how" aria-label="How publishing works">
+        <div><h3><b>1</b>Send it from its folder</h3><p>Run <code>zeron plugin publish</code> in the plugin's folder, or use Publish in Zeron's Settings, under Plugins. The first version claims its id.</p></div>
+        <div><h3><b>2</b>It is live at once</h3><p>People can install the new version straight away. It says “Not verified yet”, and Zeron asks them before it installs.</p></div>
+        <div><h3><b>3</b>Zeron verifies it</h3><p>When a reviewer at Zeron has read the version, it gets the check. If they find a problem, you get their note saying what to change.</p></div>
+      </section>
+    </AccountHead>
   </div>
-  <Toast toast={toast} />
-</App>
+</Store>

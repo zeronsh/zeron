@@ -139,9 +139,10 @@ describe("signing in on the web", () => {
   });
 
   test("signed out, the account pages ask you to sign in, and the admin ones aren't there", async () => {
+    // (Your own pages say so and offer sign-in, here: never a redirect.)
     const account = await edge.site("/account");
-    expect(account.status).toBe(303);
-    expect(account.headers.get("location")).toBe("/auth/web/login?return_to=%2Faccount");
+    expect(account.status).toBe(200);
+    expect(await account.text()).toContain('<a class="btn pri" href="/auth/web/login?return_to=%2Faccount">Sign in</a>');
     expect((await edge.site("/admin/plugins")).status).toBe(404);
     // (A member who isn't staff gets the same 404 as an address that isn't there.)
     expect((await adaOnWeb.get("/admin/plugins")).response.status).toBe(404);
@@ -258,7 +259,7 @@ describe("an author's words, from a real package", () => {
     }
     await grace.post("/admin/plugins/probe/1.0.0/verify", { csrf: await grace.token("/admin/plugins/probe/1.0.0") });
     expect(grace.flash()).toBe("verified");
-    for (const path of ["/plugins", "/plugins/all", "/plugins/probe", "/plugins/all?q=probe"]) {
+    for (const path of ["/plugins", "/plugins/all", "/plugins/probe", "/plugins/probe/asks", "/plugins/probe/versions", "/plugins/all?q=probe"]) {
       const { response, body } = await new Browser().get(path);
       expect(response.status, path).toBe(200);
       inert(body);
@@ -267,7 +268,8 @@ describe("an author's words, from a real package", () => {
     // The link the author gave, as the edge parsed it, encoded.
     expect(page.body).toContain('href="https://example.com/a?b=%22%3E%3Cscript%3Ealert(%27homepage%27)%3C/script%3E"');
     expect(page.body).toContain('src="/plugins/probe/files/1.0.0/shots/one.png"');
-    expect(page.body).toContain("probe_tool");
+    // (Its tools, by name, on its own "What it asks for".)
+    expect((await new Browser().get("/plugins/probe/asks")).body).toContain("probe_tool");
   });
 });
 
@@ -285,8 +287,8 @@ describe("the catalog, from the edge's real listing", () => {
     expect(verified.body).toContain('href="/plugins/focus-timer"');
     expect(verified.body).not.toContain('href="/plugins/theme-sync"');
     // The count is the edge's total (amendment 38): exact, the public list's.
-    expect((await new Browser().get("/plugins/all")).body).toMatch(/All plugins<span class="title-count"> · \d+<\/span>/);
-    expect((await new Browser().get("/plugins/all?q=zzzzqqq")).body).toContain('<span class="title-count"> · 0</span>');
+    expect((await new Browser().get("/plugins/all")).body).toMatch(/<p id="results"><b class="num">\d+<\/b> plugins?<\/p>/);
+    expect((await new Browser().get("/plugins/all?q=zzzzqqq")).body).toContain('<b class="num">0</b> plugins');
     const git = await new Browser().get("/plugins/all?category=git");
     expect(git.body).toContain('href="/plugins/pr-review"');
     expect(git.body).not.toContain('href="/plugins/focus-timer"');
@@ -375,13 +377,15 @@ describe("an author's pages", () => {
     expect(keys.response.status).toBe(200);
     expect(keys.body).toContain(`/account/keys/${key}`);
     // (What it may publish, by the plugins' own names: the package's.)
-    expect(keys.body).toMatch(/May publish:\s*<a href="\/account\/plugins\/focus-timer">focus timer<\/a>, <a href="\/account\/plugins\/pr-review">/);
+    // (Two plugins, named in full: the app's "{a} and {b}".)
+    // (Each short name kept whole on its line: names break between one another.)
+    expect(keys.body).toContain('<div class="names">focus\u00a0timer and pr\u00a0review</div><small>2 plugins</small>');
     const csrf = await adaOnWeb.token("/account/keys");
     const revoked = await adaOnWeb.post(`/account/keys/${key}`, { csrf });
     expect(revoked.status).toBe(303);
     expect(revoked.headers.get("location")).toBe("/account/keys");
     expect(adaOnWeb.flash()).toBe("key_revoked");
-    expect((await adaOnWeb.get("/account/keys")).body).toMatch(/Revoked keys · 1/);
+    expect((await adaOnWeb.get("/account/keys")).body).toMatch(/Revoked and ended keys · 1/);
   });
 
   test("stop new installs of a version, and allow them again", async () => {
@@ -395,7 +399,10 @@ describe("an author's pages", () => {
   test("a version published is listed and waits to be verified; there's nothing to withdraw", async () => {
     await ada.publish("focus-timer", "1.1.0");
     const page = await adaOnWeb.get("/account/plugins/focus-timer");
-    expect(page.body).toMatch(/<span class="line version">1\.1\.0<\/span><\/td><td><span class="line"><span class="badge sm ok">Listed<\/span><span class="badge sm info">Not verified yet<\/span>/);
+    // (Listed: no pill for where it stands; whether it's verified: not yet.)
+    const row = page.body.split('<li class="vr').find((r) => r.includes('<b class="mono">1.1.0</b>'))!;
+    expect(row).not.toContain('data-kind="status"');
+    expect(row).toContain('<span class="state no" data-kind="verified">Not verified yet</span>');
     expect(page.body).not.toContain("/withdraw");
     expect((await grace.get("/admin/plugins")).body).toContain("/admin/plugins/focus-timer/1.1.0");
   });
@@ -413,18 +420,26 @@ describe("an update", () => {
     expect(mine.body).not.toContain("/versions/1.1.0/unyank");
     const queue = await grace.get("/admin/plugins");
     expect(queue.body).not.toContain("/admin/plugins/focus-timer/1.1.0");
-    expect(queue.body).toContain("+1 earlier");
+    expect(queue.body).toContain("1 earlier version unread");
     // In public too, from an edge that says why (dc45c3606 on); an older one says only that it takes none.
     const publicly = await new Browser().get("/plugins/focus-timer/versions/1.1.0");
     expect(publicly.response.status).toBe(200);
     expect(publicly.body).toMatch(process.env.E2E_OLD_EDGE ? /It takes no new installs\./ : /Replaced by 1\.2\.0 before it was verified\. Those who have it keep it working\./);
     const overview = await grace.get("/admin/plugins/focus-timer/1.2.0");
-    expect(overview.body).toContain("Update from 1.0.0, its newest verified version");
-    expect(overview.body).toContain("New or changed since 1.0.0");
-    expect(overview.body).toMatch(/Send messages to your agents as you\s*<span class="badge sm info">New<\/span>/);
+    expect(overview.body).toContain("Compared with 1.0.0, the newest verified version");
+    // The size check and Files count the same files, the manifest apart, in the same sizes (edge 9b48b31f1 on).
+    const sized = /(\d+) files, [\d.]+ (?:B|KB) \([\d.]+ (?:B|KB) packaged\)\./.exec(overview.body);
+    if (!process.env.E2E_OLD_EDGE) {
+      expect(sized).not.toBeNull();
+      expect(overview.body).toContain(`${sized![1]} files, `);
+      expect(overview.body).toMatch(new RegExp(`${sized![1]} files, [\\d.]+ (?:B|KB), and its manifest\\.`));
+    }
+    const sends = overview.body.split('<li class="ar').find((r) => r.includes("Send messages to your agents as you"))!;
+    expect(sends).toMatch(/^ risky new"/);
+    expect(sends).toContain('<span class="state no">New in 1.2.0</span>');
     // What it binds past its asks, from the edge's diff (amendment 41): a service where there was none.
     expect(overview.body).toContain("It adds a service");
-    expect(overview.body).toMatch(/<dt>Before<\/dt><dd><span>none<\/span><\/dd><\/div><div><dt>After<\/dt><dd><span>service\.luau<\/span><\/dd>/);
+    expect(overview.body).toMatch(/<dt>Before<\/dt><dd><code>none<\/code><\/dd><\/div><div><dt>After<\/dt><dd><code>service\.luau<\/code><\/dd>/);
     const changes = await grace.get("/admin/plugins/focus-timer/1.2.0?view=changes");
     expect(changes.response.status).toBe(200);
     expect(changes.body).toContain("init.luau");
@@ -522,8 +537,8 @@ describe("the audit log", () => {
 describe("Newest, from the edge's cards", () => {
   test("says the day each was first listed (amendment 39)", async () => {
     const { body } = await new Browser().get("/plugins/all?sort=new");
-    expect(body).toContain('<th scope="col" class="end">Published</th>');
-    expect(body).toMatch(/<td class="installs end">[A-Z][a-z]{2} \d{1,2}(, \d{4})?<\/td>/);
+    // (A verified card's foot says the day it was first listed; one not verified says that instead.)
+    expect(body).toMatch(/<span class="count">Published [A-Z][a-z]{2} \d{1,2}(, \d{4})?<\/span>/);
   });
 });
 
@@ -606,6 +621,7 @@ describe("signing out", () => {
     expect(out.status).toBe(303);
     expect(browser.cookies.has(SESSION)).toBe(false);
     // The old cookie, kept by someone, opens nothing.
-    expect((await edge.site("/account", { headers: { cookie: kept } })).status).toBe(303);
+    const reopened = await edge.site("/account", { headers: { cookie: kept } });
+    expect(await reopened.text()).toContain("<h2>Sign in to see the plugins you publish</h2>");
   });
 });

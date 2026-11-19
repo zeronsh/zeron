@@ -67,7 +67,7 @@ export class Edge {
   readonly #binding: EdgeBinding;
   readonly #origin: string;
   readonly #cookie: string | null;
-  #session: Promise<WebSession | null> | undefined;
+  #who: Promise<{ state: "in"; session: WebSession } | { state: "out" } | { state: "down" }> | undefined;
   readonly #from: string | null;
 
   /**
@@ -165,10 +165,24 @@ export class Edge {
   // ── Signed in ─────────────────────────────────────────────────────────
 
   /** The visitor's session, or null when they aren't signed in. */
-  session(): Promise<WebSession | null> {
-    // (Read once a request: the admin gate and the page ask the same thing.)
-    this.#session ??= this.#cookie ? this.#json<WebSession>("/auth/web/session", { signedIn: true }).then((result) => (result.ok ? result.data : null)) : Promise.resolve(null);
-    return this.#session;
+  async session(): Promise<WebSession | null> {
+    const who = await this.who();
+    return who.state === "in" ? who.session : null;
+  }
+
+  /**
+   * Who the visitor is: signed in (the session), signed out (no cookie, or
+   * one the edge says is no one's), or not known, the edge not answering. A
+   * page of your own says each differently: an edge that's down is never
+   * "signed out". (Read once a request: the admin gate and the page ask the same thing.)
+   */
+  who(): Promise<{ state: "in"; session: WebSession } | { state: "out" } | { state: "down" }> {
+    this.#who ??= this.#cookie
+      ? this.#json<WebSession>("/auth/web/session", { signedIn: true }).then((result) =>
+          result.ok ? { state: "in" as const, session: result.data } : result.status === 401 || result.status === 403 || result.error === "signed_out" ? { state: "out" as const } : { state: "down" as const },
+        )
+      : Promise.resolve({ state: "out" as const });
+    return this.#who;
   }
 
   myPlugins(): Promise<Result<MyPlugins>> {

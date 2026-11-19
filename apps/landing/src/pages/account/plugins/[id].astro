@@ -1,163 +1,182 @@
 ---
-// One of your plugins: every version you've published, where it stands and
-// whether a reviewer verified it (amendment 45: each is listed at once), what
-// the reviewer said, and the one thing you can do with each. Its deploy keys
-// are your account's (amendment 44): Deploy keys. Yours only: anyone else's
-// id is the 404 page.
-import Ask from "../../../components/kit/Ask.astro";
-import Toast from "../../../components/kit/Toast.astro";
-import PluginTile from "../../../components/store/PluginTile.astro";
-import Glyph from "../../../components/ui/Glyph.astro";
-import App from "../../../layouts/App.astro";
+// One of your plugins: every version you've published, where each stands
+// and whether Zeron verified it (amendment 45: each is listed at once),
+// what it means, the reviewer's words, how it was sent, and the one thing
+// you can do with it (stop new installs, or allow them again). Its deploy
+// keys are your account's (amendment 44): Deploy keys. Yours only: anyone
+// else's id is the 404 page. Signed out, it says so and offers sign-in.
+import AccountHead from "../../../components/look/AccountHead.astro";
+import Flash from "../../../components/look/Flash.astro";
+import Icon from "../../../components/look/Icon.astro";
+import Question from "../../../components/look/Question.astro";
+import Seal from "../../../components/look/Seal.astro";
+import SignInPlease from "../../../components/look/SignInPlease.astro";
+import Tile from "../../../components/look/Tile.astro";
+import Words from "../../../components/look/Words.astro";
+import Store from "../../../layouts/Store.astro";
+import "../../../styles/look/account.css";
 import { AUTHOR_ACTIONS, type AuthorAction } from "../../../lib/store/actions.ts";
 import { reasonLabel } from "../../../lib/store/admin.ts";
 import { takeFlash } from "../../../lib/store/flash.ts";
-import { day } from "../../../lib/store/format.ts";
+import { day, unbidi } from "../../../lib/store/format.ts";
+import { hueClass } from "../../../lib/store/hue.ts";
 import { privatePage } from "../../../lib/store/http.ts";
 import { isPluginId } from "../../../lib/store/names.ts";
-import { requireSession } from "../../../lib/store/session.ts";
-import { everListed, listingState, toneClass, verificationState, versionState } from "../../../lib/store/states.ts";
+import { everListed, listingState, verificationState, versionState, type Tone } from "../../../lib/store/states.ts";
 import type { VersionInfo } from "../../../lib/store/types.ts";
 import { pluginUrl } from "../../../lib/store/urls.ts";
-import { store } from "../../../lib/store/words.ts";
+import { statusWords, store } from "../../../lib/store/words.ts";
 
 export const prerender = false;
 
 const { id } = Astro.params;
 if (!isPluginId(id)) return new Response(null, { status: 404 });
-const session = await requireSession(Astro);
-if (session instanceof Response) return session;
-const mine = await Astro.locals.edge.myPlugins();
-const plugin = mine.ok ? mine.data.plugins.find((p) => p.id === id) : undefined;
-if (mine.ok && !plugin) return new Response(null, { status: 404 });
+const edge = Astro.locals.edge;
+// (Signed in, signed out, or not known: an edge that doesn't answer is never "signed out".)
+const who = await edge.who();
+const session = who.state === "in" ? who.session : null;
+const mine = session ? await edge.myPlugins() : null;
+const plugin = mine?.ok ? mine.data.plugins.find((p) => p.id === id) : undefined;
+if (mine?.ok && !plugin) return new Response(null, { status: 404 });
 privatePage(Astro);
-const toast = takeFlash(Astro.cookies);
+if (who.state === "down") Astro.response.status = 503;
+const flash = takeFlash(Astro.cookies);
 const here = `/account/plugins/${id}`;
+const name = unbidi(plugin?.name ?? id);
+const now = Date.now();
 
 /** The one thing that can be done with a version now. */
 // (A superseded version is the store's to stop: its author can't allow installs again; verifying it does.)
 const actionOf = (v: VersionInfo): AuthorAction | null => (v.status === "listed" ? "yank" : v.status === "yanked" && v.yanked_by !== "superseded" ? "unyank" : null);
 const dialogId = (action: string, version: string) => `${action}-${version.replace(/[^\w-]/g, "_")}`;
+/** A state's tone, as the look's pills say it. */
+const TONE: Record<Tone, string> = { success: "ok", danger: "bad", warning: "bad", info: "no", accent: "quiet", neutral: "quiet" };
+/** Whether Zeron verified it, for a version people can have: verified, not verified (a reviewer read it), or not yet. */
+function verifiedPill(v: VersionInfo): { tone: string; label: string; seal?: boolean } {
+  if (v.verified) return { tone: "ok", label: store("plugins.store.verified"), seal: true };
+  if (v.review?.decision === "declined") return { tone: "bad", label: store("plugins.store.not_verified") };
+  return { tone: "no", label: store("plugins.store.review.waiting") };
+}
+/** Where it stands, when that isn't simply listed: no new installs, taken down, removed. */
+function statusPill(v: VersionInfo): { tone: string; label: string } | null {
+  if (v.status === "listed") return null;
+  return { tone: v.status === "yanked" ? "quiet" : "bad", label: statusWords(v.status) };
+}
 
 /** Nothing of it can be installed: every version was taken down or removed. */
 const idle = plugin && plugin.versions.length > 0 && !plugin.versions.some((v) => v.status === "listed" || v.status === "yanked");
 const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions)) : null;
 ---
 
-<App title={`${plugin?.name ?? id} · Your plugins · Zeron`} description="One of your plugins." noindex current="mine" session={session}>
-  <nav slot="title" class="crumbs" aria-label="Where this is">
-    <a href="/account">Your plugins</a>
-    <Glyph name="alt-arrow-right" size={12} />
-    <span aria-current="page">{plugin?.name ?? id}</span>
-  </nav>
-
-  {
-    !plugin ? (
-      <div class="panel">
+<Store title={`${name} · Your plugins · Zeron`} description="One of your plugins." noindex current="publish" session={session} class={hueClass(id)}>
+  <div class="wrap acct">
+    <nav class="crumbs" aria-label="Where this is"><a href="/account">Your plugins</a><Icon name="chev" /><span aria-current="page">{name}</span></nav>
+    <Flash flash={flash} />
+    {
+      who.state === "down" ? (
         <div class="empty" role="status">
-          <span class="tile"><Glyph name="wifi-off" size={20} /></span>
-          <div class="words"><h1 class="t-heading">This plugin can't be loaded right now</h1><p>Try again in a moment.</p></div>
-          <div class="actions"><a class="btn secondary sm" href={here}>Try again</a></div>
+          <h1>{store("plugins.store.failed_title")}</h1>
+          <p>{store("plugins.store.failed_body")}</p>
+          <a class="btn sec" href={here}>{store("plugins.store.try_again")}</a>
         </div>
-      </div>
-    ) : (
-      <div class="mine-body">
-        <header class="mine-head">
-          <PluginTile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.versions[0]?.version ?? plugin.version} size={56} class="plugin-tile" />
-          <div class="who">
-            <h1 class="t-title">{plugin.name}</h1>
-            <p class="meta">
-              <span class="t-mono t-2">{plugin.id}</span>
-              {listing && <span class:list={["badge sm", toneClass(listing.tone)]}>{listing.label}</span>}
-            </p>
-          </div>
-          {plugin.listing === "listed" && <a class="see" href={pluginUrl(plugin.id)}>See it in the store<Glyph name="arrow-up-right" size={14} /></a>}
-        </header>
-
-        {idle && (
-          <p class="notice">
-            <Glyph name="info-circle" size={16} />
-            <span>No version of it can be installed: each was taken down or removed. Its id stays yours for 90 days after your last version; after that, anyone can take it.</span>
-          </p>
-        )}
-
-        <div class="plugin-main">
-          <nav class="tabs" aria-label="This plugin" data-tabs>
-            <a href="#versions" aria-current="page">Versions <span class="count">{plugin.versions.length}</span></a>
-            <a href="/account/keys">{store("plugins.store.keys")}</a>
-          </nav>
-          <div class="tab-panels">
-            <section class="tab-panel" id="versions" aria-label="Versions">
-              {plugin.versions.length === 0 ? (
-                <div class="panel">
-                  <div class="empty">
-                    <span class="tile"><Glyph name="document" size={20} /></span>
-                    <div class="words"><h2>{store("plugins.store.no_versions")}</h2><p>Versions you publish show here, each saying whether Zeron verified it.</p></div>
-                  </div>
-                </div>
-              ) : (
-                <div class="panel">
-                  <table class="table wrapping versions-table">
-                    <caption class="sr-only">{store("plugins.store.your_versions")}</caption>
-                    <colgroup><col class="version" /><col class="state" /><col /><col class="sent" /><col class="action" /></colgroup>
-                    <thead><tr><th scope="col">Version</th><th scope="col">State</th><th scope="col">What it means</th><th scope="col">Published</th><th scope="col" class="end"><span class="sr-only">What you can do</span></th></tr></thead>
-                    <tbody>
-                      {plugin.versions.map((v) => {
-                        const state = versionState(v);
-                        const verification = verificationState(v);
-                        const action = actionOf(v);
-                        const ask = action ? AUTHOR_ACTIONS[action].ask(plugin.name, v.version) : null;
-                        return (
-                          <tr>
-                            <td><span class="line version">{v.version}</span></td>
-                            <td><span class="line"><span class:list={["badge sm", toneClass(state.tone)]}>{state.label}</span>{(v.status === "listed" || v.status === "yanked") && <span class:list={["badge sm", toneClass(verification.tone)]}>{verification.label}</span>}</span></td>
-                            <td class="words">
-                              {v.review?.message ? (
-                                <>
-                                  {/* (Superseded: why it takes no new installs comes first; the reviewer's words after.) */}
-                                  {v.yanked_by === "superseded" && state.about}
-                                  <span class="said">“{v.review.message}”</span>
-                                  <span class="who">{[v.review.reason ? reasonLabel(v.review.reason) : null, v.review.decided_at ? `${v.status === "taken_down" ? "taken down" : v.status === "removed" ? "removed" : "reviewed"} ${day(v.review.decided_at)}` : null].filter(Boolean).join(" · ")}</span>
-                                </>
-                              ) : v.status === "listed" || v.status === "yanked" ? (
-                                `${state.about} ${verification.about}`
-                              ) : (
-                                state.about
-                              )}
-                              {v.removal?.reason && (
-                                <>
-                                  <span class="said">“{v.removal.reason}”</span>
-                                  <span class="who">{`${v.status === "taken_down" ? "taken down" : "removed"} ${day(v.removal.at)}`}</span>
-                                </>
-                              )}
-                              {v.via === "deploy_key" && <span class="who">Published by {v.deploy_key ? `the deploy key “${v.deploy_key.name}”` : "a deploy key"}.</span>}
-                              {v.blocked && <span class="who">It was turned off on the devices that had it.</span>}
-                            </td>
-                            <td><span class="line muted"><time datetime={new Date(v.published_at).toISOString()}>{day(v.published_at)}</time></span></td>
-                            <td class="end">
-                              <span class="line end">
-                                {action && ask && (
-                                  <a class="btn ghost sm" href={`${here}/versions/${encodeURIComponent(v.version)}/${action}`} data-dialog={dialogId(action, v.version)}>{ask.confirm}</a>
-                                )}
-                              </span>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </section>
-          </div>
+      ) : !session ? (
+        <AccountHead title="Your plugins" lead="What you have published, and where each version stands." current="plugins" plugins={null} keys={null}>
+          <SignInPlease what="the plugins you publish" />
+        </AccountHead>
+      ) : !plugin ? (
+        <div class="empty" role="status">
+          <h1>This plugin can't be loaded right now</h1>
+          <p>Try again in a moment.</p>
+          <a class="btn sec" href={here}>Try again</a>
         </div>
+      ) : (
+        <>
+          <header class="mhead">
+            <Tile id={plugin.id} name={name} icon={plugin.icon} version={plugin.versions[0]?.version ?? plugin.version} size="l" />
+            <div class="txt">
+              <h1><Words text={name} /></h1>
+              <p class="by">
+                <span class="mono">{plugin.id}</span>
+                {listing && <><i aria-hidden="true"></i><span class:list={["state", TONE[listing.tone]]}>{listing.label}</span></>}
+              </p>
+            </div>
+            {plugin.listing === "listed" && <a class="btn sec" href={pluginUrl(plugin.id)}>See it in the store<Icon name="out" /></a>}
+          </header>
 
-        {plugin.versions.map((v) => {
-          const action = actionOf(v);
-          return action ? <Ask id={dialogId(action, v.version)} ask={AUTHOR_ACTIONS[action].ask(plugin.name, v.version)} action={`${here}/versions/${encodeURIComponent(v.version)}/${action}`} csrf={session.csrf} /> : null;
-        })}
-      </div>
-    )
-  }
-  <Toast toast={toast} />
-</App>
+          {idle && <p class="flash info">No version of it can be installed: each was taken down or removed. Its id stays yours for 90 days after your last version; after that, anyone can take it.</p>}
+
+          <section class="mvers" aria-labelledby="versions-h">
+            <h2 id="versions-h">Versions<span class="num">{plugin.versions.length}</span></h2>
+            {plugin.versions.length === 0 ? (
+              <div class="empty">
+                <h2>{store("plugins.store.no_versions")}</h2>
+                <p>Versions you publish show here, each saying whether Zeron verified it.</p>
+              </div>
+            ) : (
+              <div class="card vlist">
+                <div class="vr h" aria-hidden="true"><span>Version</span><span>What it means</span><span>Published</span><span></span></div>
+                <ul aria-label={store("plugins.store.your_versions")}>
+                  {plugin.versions.map((v) => {
+                    const verified = verifiedPill(v);
+                    const status = statusPill(v);
+                    const state = versionState(v);
+                    const verification = verificationState(v);
+                    const action = actionOf(v);
+                    const ask = action ? AUTHOR_ACTIONS[action].ask(name, v.version) : null;
+                    const live = v.status === "listed" || v.status === "yanked";
+                    return (
+                      <li class:list={["vr", { off: !live }]}>
+                        <div class="vn">
+                          <b class="mono">{v.version}</b>
+                          {/* (Whether Zeron verified it beside the version, always first; where it stands after it.) */}
+                          {(v.status === "listed" || v.status === "yanked") && <span class:list={["state", verified.tone]} data-kind="verified">{verified.seal && <Seal quiet />}{verified.label}</span>}
+                          {status && <span class:list={["state", status.tone]} data-kind="status">{status.label}</span>}
+                        </div>
+                        <div class="means">
+                          {/* (Superseded: why it takes no new installs comes first; the reviewer's words after.) */}
+                          {((said) => said && <p>{said}</p>)(v.review?.message ? (v.yanked_by === "superseded" ? state.about : null) : live ? `${state.about} ${verification.about}` : state.about)}
+                          {v.review?.message && (
+                            <blockquote class="said-was">
+                              <p>“{v.review.message}”</p>
+                              <footer>{[v.review.reason ? reasonLabel(v.review.reason) : null, v.review.decided_at ? `${v.status === "taken_down" ? "taken down" : v.status === "removed" ? "removed" : "read"} ${day(v.review.decided_at, now)}` : null].filter(Boolean).join(" · ")}</footer>
+                            </blockquote>
+                          )}
+                          {v.removal?.reason && (
+                            <blockquote class="said-was">
+                              <p>“{v.removal.reason}”</p>
+                              <footer>{`${v.status === "taken_down" ? "Taken down" : "Removed"} ${day(v.removal.at, now)}`}</footer>
+                            </blockquote>
+                          )}
+                          {/* (Taken down says it was turned off already; said once.) */}
+                          {v.blocked && v.status !== "taken_down" && <small>It was turned off on the devices that had it.</small>}
+                        </div>
+                        <div class="pub">
+                          <div><time datetime={new Date(v.published_at).toISOString()}>{day(v.published_at, now)}</time></div>
+                          {v.via === "deploy_key" && <small><Icon name="key" />{v.deploy_key?.name ?? "A deploy key"}</small>}
+                          {v.via === "device" && <small><Icon name="laptop" />One of your devices</small>}
+                        </div>
+                        <div class="act">
+                          {action && ask && (
+                            <a class="btn sec sm" href={`${here}/versions/${encodeURIComponent(v.version)}/${action}`} data-dialog={dialogId(action, v.version)}>
+                              {ask.confirm}<span class="sr-only"> {v.version}</span>
+                            </a>
+                          )}
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
+            <p class="mkeys">Publishing from CI? Your account's <a href="/account/keys">deploy keys</a> can send new versions of it.</p>
+          </section>
+
+          {plugin.versions.map((v) => {
+            const action = actionOf(v);
+            return action ? <Question id={dialogId(action, v.version)} ask={AUTHOR_ACTIONS[action].ask(name, v.version)} action={`${here}/versions/${encodeURIComponent(v.version)}/${action}`} csrf={session.csrf} /> : null;
+          })}
+        </>
+      )
+    }
+  </div>
+</Store>

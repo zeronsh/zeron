@@ -5,7 +5,7 @@
 // fixtures' accounts in place of WorkOS.
 
 import { SITE_IDS } from "../src/lib/store/names.ts";
-import { audit, CATEGORIES, DAY, keys, NOW, plugins, reports, USERS, type FakePlugin, type FakeUser, type FakeVersion } from "./fixtures.ts";
+import { audit, CATEGORIES, DAY, keys, MANY_IDS, manyMore, NOW, plugins, reports, USERS, type FakePlugin, type FakeUser, type FakeVersion } from "./fixtures.ts";
 
 const COOKIE = "__Host-zeron_session";
 
@@ -29,6 +29,8 @@ const state = {
   down: false,
   /** A plugin shown with no pictures (POST /_fake/bare?id=…, empty for none): Featured with one that has none. */
   bare: null as string | null,
+  /** The store with nothing listed (POST /_fake/empty?on=1): a page's emptiest. */
+  empty: false,
 };
 
 // Programs the host rates (crates/plugin-guard/src/commands.rs), enough for the fixtures.
@@ -82,7 +84,7 @@ const shown = (v: FakeVersion) => v.status === "listed" || v.status === "yanked"
 const latest = (p: FakePlugin) => p.versions.find((v) => v.status === "listed" && !prerelease(v)) ?? p.versions.find((v) => v.status === "listed");
 /** The newest verified listed version, a release before a pre-release. */
 const verifiedVersion = (p: FakePlugin) => p.versions.find((v) => v.status === "listed" && v.verified && !prerelease(v)) ?? p.versions.find((v) => v.status === "listed" && v.verified);
-const listed = (p: FakePlugin) => p.status !== "suspended" && latest(p) !== undefined;
+const listed = (p: FakePlugin) => !state.empty && p.status !== "suspended" && latest(p) !== undefined;
 /** When it was first listed (amendment 39): its first version's day, never moved by a later one; null with no listed version. */
 const listedAt = (p: FakePlugin) => (latest(p) ? Math.min(...p.versions.filter(shown).map((v) => v.published_at)) : null);
 
@@ -387,10 +389,13 @@ const baseOf = (p: FakePlugin, v: FakeVersion) => p.versions.find((x) => x !== v
  */
 function queue(url: URL): Response {
   const view = url.searchParams.get("state") ?? "undecided";
-  if (!["undecided", "verified", "declined", "all"].includes(view)) return fail(400, "bad_request", "Unknown state.");
-  // (Undecided: listed, not yanked by the superseding rule; nothing that leaves the queue unread can be installed.)
+  if (!["undecided", "verified", "declined", "all", "taken_down"].includes(view)) return fail(400, "bad_request", "Unknown state.");
+  // (Undecided: listed, not yanked by the superseding rule; nothing that leaves the queue unread can be installed.
+  // Taken down: those not restored, edge 566c2a5ba.)
   const fits = (v: FakeVersion) =>
-    shown(v) && (view === "all" || (view === "undecided" ? !v.review.decided && v.yanked_by !== "superseded" : view === "verified" ? v.verified : v.review.decision === "declined"));
+    view === "taken_down"
+      ? v.status === "taken_down"
+      : shown(v) && (view === "all" || (view === "undecided" ? !v.review.decided && v.yanked_by !== "superseded" : view === "verified" ? v.verified : v.review.decision === "declined"));
   const row = (p: FakePlugin, v: FakeVersion, earlier: number) => {
     const base = baseOf(p, v);
     const asked = (v.manifest.permissions as string[]) ?? [];
@@ -415,6 +420,8 @@ function queue(url: URL): Response {
       submitted_at: v.published_at,
       published_at: v.published_at,
       publisher: { id: author(p.owner).id, username: userOf(p.owner).username },
+      // (The plugin's installs, in every state: edge 566c2a5ba.)
+      installs: p.installs,
       ...(base ? { base: base.version } : {}),
       new_asks: asked.filter((a) => !had.includes(a)),
       checks: { ok: v.checks.filter((c) => c.level === "ok").length, warn: v.checks.filter((c) => c.level === "warn").length, fail: v.checks.filter((c) => c.level === "fail").length },
@@ -433,8 +440,10 @@ function queue(url: URL): Response {
   });
   if (view === "undecided" && state.queueAs === "empty") items.length = 0;
   if (view === "undecided" && typeof state.queueAs === "number") items.push(...filler(state.queueAs - items.length));
-  // Plugins with open reports first; then oldest waiting first.
-  items.sort((a, b) => Number(b.reports > 0) - Number(a.reports > 0) || a.submitted_at - b.submitted_at);
+  // Plugins with open reports first; then oldest waiting first. (Taken down: the newest take-down first.)
+  const downAt = (item: { plugin: { id: string }; version: string }) => state.plugins.find((p) => p.id === item.plugin.id)?.versions.find((v) => v.version === item.version)?.removal?.at ?? 0;
+  if (view === "taken_down") items.sort((a, b) => downAt(b) - downAt(a));
+  else items.sort((a, b) => Number(b.reports > 0) - Number(a.reports > 0) || a.submitted_at - b.submitted_at);
   return json(paged(items, url, "items"));
 }
 
@@ -478,6 +487,7 @@ function filler(n: number) {
       submitted_at: NOW - (i * 5.5 + 1) * 3_600_000,
       published_at: NOW - (i * 5.5 + 1) * 3_600_000,
       publisher: { id: `pub_${i}`, username },
+      installs: (i * 137) % 5000,
       ...(update ? { base: `1.${i % 4}.0` } : {}),
       icon: null,
       new_asks: update && i % 5 === 1 ? (i % 2 ? ["commands"] : ["network"]) : [],
@@ -507,6 +517,9 @@ function submission(id: string, version: string): Response {
       id: author(p.owner).id,
       username: owner.username,
       created_at: owner.created_at,
+      // (When the account first listed a version, and its listed plugins, how many with a verified version: edge 566c2a5ba.)
+      first_published_at: theirs.length ? Math.min(...theirs.map(({ v: y }) => y.published_at)) : null,
+      plugins: { total: state.plugins.filter((x) => x.owner === p.owner && listed(x)).length, verified: state.plugins.filter((x) => x.owner === p.owner && listed(x) && x.versions.some((y) => y.verified)).length },
       decisions: { verified: theirs.filter(({ v: y }) => y.review.decision === "verified").length, declined: theirs.filter(({ v: y }) => y.review.decision === "declined").length },
       recent: theirs
         .map(({ plugin: x, v: y }) => ({ plugin_id: x.id, version: y.version, status: y.status, verified: y.verified, published_at: y.published_at }))
@@ -763,7 +776,21 @@ async function route(request: Request): Promise<Response> {
     state.bare = url.searchParams.get("id") || null;
     return json({ bare: state.bare });
   }
+  if (parts[0] === "_fake" && parts[1] === "empty" && method === "POST") {
+    state.empty = url.searchParams.get("on") === "1";
+    return json({ empty: state.empty });
+  }
   // (One plugin's version under another name, everywhere it is named: POST /_fake/rename?id=…&from=…&to=…. A version the app's link can't carry, without a fixture of its own.)
+  // (Ada's thirty more, and her "Every one" key naming all fifty: POST /_fake/many?on=1; without on=1, as before.)
+  if (parts[0] === "_fake" && parts[1] === "many" && method === "POST") {
+    const on = url.searchParams.get("on") === "1";
+    const extra = new Set(MANY_IDS);
+    state.plugins = state.plugins.filter((p) => !extra.has(p.id));
+    if (on) state.plugins.push(...manyMore());
+    const every = state.keys.find((k) => k.owner === "user_ada" && k.name === "Every one");
+    if (every) every.scope = { plugins: state.plugins.filter((p) => p.owner === "user_ada").map((p) => p.id).sort() };
+    return json({ many: on });
+  }
   if (parts[0] === "_fake" && parts[1] === "loose" && method === "POST") {
     state.loose = url.searchParams.get("on") === "1";
     return json({ loose: state.loose });

@@ -1,0 +1,39 @@
+---
+// The head of your own pages (the prototype's .acct .hd and .sub): its
+// title, a line on what it is, its one action, and the two pages, each
+// with how many it holds when that's known.
+import Icon from "./Icon.astro";
+import type { IconName } from "./icons.ts";
+
+interface Props {
+  title: string;
+  lead: string;
+  current: "plugins" | "keys";
+  /** How many plugins and live keys, when known (signed in). */
+  plugins?: number | null;
+  keys?: number | null;
+  /** The page's one action: a link, or a button that opens a popover. */
+  action?: { label: string; icon: IconName; href?: string; popover?: string } | null;
+}
+const { title, lead, current, plugins = null, keys = null, action = null } = Astro.props;
+---
+
+<div class="hd">
+  <div>
+    <h1>{title}</h1>
+    <p class="lead">{lead}</p>
+  </div>
+  {
+    action &&
+      (action.popover ? (
+        <button class="btn pri" type="button" popovertarget={action.popover}><Icon name={action.icon} />{action.label}</button>
+      ) : (
+        <a class="btn pri" href={action.href}><Icon name={action.icon} />{action.label}</a>
+      ))
+  }
+</div>
+<nav class="sub" aria-label="Your pages">
+  <a href="/account" aria-current={current === "plugins" ? "page" : undefined}>Your plugins{plugins !== null && <span class="num">{plugins}</span>}</a>
+  <a href="/account/keys" aria-current={current === "keys" ? "page" : undefined}>Deploy keys{keys !== null && <span class="num">{keys}</span>}</a>
+</nav>
+<slot />

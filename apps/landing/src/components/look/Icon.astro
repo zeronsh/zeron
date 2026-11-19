@@ -1,0 +1,13 @@
+---
+// One of the store's icons (Icons.astro), by name: decorative, beside words
+// that say the same.
+import type { IconName } from "./icons.ts";
+
+interface Props {
+  name: IconName;
+  class?: string;
+}
+const { name, class: className } = Astro.props;
+---
+
+<svg class={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href={`#i-${name}`} /></svg>

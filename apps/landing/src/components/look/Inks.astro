@@ -1,0 +1,19 @@
+---
+// The ink a plugin's own icon is drawn in: one filter for each of the 24
+// hues (lib/store/hue.ts), its flood the hue's ink in light and dark
+// (styles/look/store.css .ink), so an icon its author drew in any colour
+// shows in its plugin's. A filter per step, never a style on the page.
+import { HUE_STEPS } from "../../lib/store/hue.ts";
+const steps = Array.from({ length: HUE_STEPS }, (_, i) => i);
+---
+
+<svg class="icons" aria-hidden="true" focusable="false">
+  {
+    steps.map((i) => (
+      <filter id={`ink-${i}`} class={`h${i}`} color-interpolation-filters="sRGB">
+        <feFlood class="ink" result="ink" />
+        <feComposite in="ink" in2="SourceGraphic" operator="in" />
+      </filter>
+    ))
+  }
+</svg>

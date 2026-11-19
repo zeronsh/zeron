@@ -1,0 +1,26 @@
+---
+// A question asked before something that can't be taken back, as a page
+// (it works with no script): its title, what it does, Cancel back, and
+// the button that does it, in the danger's colour when it's one.
+import type { Ask } from "../../lib/store/actions.ts";
+import { unbidi } from "../../lib/store/format.ts";
+
+interface Props {
+  ask: Ask;
+  action: string;
+  csrf: string;
+  back: string;
+}
+const { ask, action, csrf, back } = Astro.props;
+---
+
+<form method="post" action={action} class="card askcard">
+  <input type="hidden" name="csrf" value={csrf} />
+  <h1>{unbidi(ask.title)}</h1>
+  {ask.words.map((w) => <p>{w}</p>)}
+  <slot />
+  <div class="answers">
+    <a class="btn sec" href={back}>Cancel</a>
+    <button class:list={["btn", ask.tone === "danger" ? "danger" : "pri"]} type="submit">{ask.confirm}</button>
+  </div>
+</form>

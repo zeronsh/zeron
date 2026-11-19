@@ -106,8 +106,10 @@ describe("a reviewer, start to finish", () => {
       // Signed out, the admin pages aren't there; signing in comes back to where it was asked.
       await page.goto(`${edge.origin}/admin/plugins`);
       expect(await page.title()).toMatch(/not found/i);
+      // (Your plugins, signed out, offers sign-in on the page itself; it comes back there.)
       await page.goto(`${edge.origin}/account`);
-      expect(page.url()).toBe(`${edge.origin}/account`);
+      await page.locator(".please").getByRole("link", { name: "Sign in" }).click();
+      await page.waitForURL(`${edge.origin}/account`);
       await expect.poll(() => page.getByText("@gracehop").first().isVisible()).toBe(true);
       const signedIn = await session(context);
       expect(signedIn).toMatchObject({ secure: true, httpOnly: true, sameSite: "Lax", path: "/" });
@@ -119,7 +121,7 @@ describe("a reviewer, start to finish", () => {
 
       await page.goto(`${edge.origin}/admin/plugins/focus-timer/1.0.0`);
       // (Verify asks once, its own button focused: a clean update is a click, then Enter.)
-      await page.getByRole("complementary", { name: "Decision" }).getByRole("link", { name: "Verify…", exact: true }).click();
+      await page.getByRole("complementary", { name: "Decision" }).getByRole("link", { name: "Mark 1.0.0 verified", exact: true }).click();
       const dialog = page.getByRole("dialog", { name: "Verify focus timer 1.0.0?" });
       await expect.poll(() => dialog.isVisible()).toBe(true);
       expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Verify");
@@ -127,7 +129,9 @@ describe("a reviewer, start to finish", () => {
       await page.waitForURL(`${edge.origin}/admin/plugins/focus-timer/1.0.0`);
       await expect.poll(() => page.getByText(VERIFIED).isVisible()).toBe(true);
 
-      await page.getByRole("button", { name: "Sign out" }).click();
+      // (Sign out is in your menu, under your name in the bar.)
+      await page.locator(".top button[data-me]").click();
+      await page.locator("#me-menu").getByRole("button", { name: "Sign out" }).click();
       await page.waitForURL(`${edge.origin}/`);
       expect(await session(context)).toBeUndefined();
       await page.goto(`${edge.origin}/admin/plugins`);

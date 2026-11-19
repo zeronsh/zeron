@@ -1,0 +1,15 @@
+---
+// What a form just did, said once on the page it came back to (the
+// session's flash, taken by the page itself before it renders:
+// lib/store/flash.ts), in the page's own language: a line under its head,
+// in its tone's ink.
+import type { takeFlash } from "../../lib/store/flash.ts";
+
+interface Props {
+  flash: ReturnType<typeof takeFlash>;
+}
+const { flash } = Astro.props;
+const tone = flash ? (flash.tone === "success" ? "ok" : flash.tone === "danger" ? "bad" : "info") : "";
+---
+
+{flash && <p class:list={["flash", tone]} role={flash.tone === "danger" ? "alert" : "status"}>{flash.message}</p>}

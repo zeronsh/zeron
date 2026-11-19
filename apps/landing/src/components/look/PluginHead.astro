@@ -1,0 +1,59 @@
+---
+// A plugin's head, the same on its Overview, Versions and asks (the
+// prototype's crumbs and .head): its tile, name (the seal when its newest
+// is verified), who made it, its category, how many have it, its summary;
+// and getting it (Get.astro).
+import Get from "./Get.astro";
+import Icon from "./Icon.astro";
+import Seal from "./Seal.astro";
+import Tile from "./Tile.astro";
+import { catalogHref } from "../../lib/store/catalog.ts";
+import { count } from "../../lib/store/format.ts";
+import { satisfies } from "../../lib/store/semver.ts";
+import type { PluginDetail, VersionInfo } from "../../lib/store/types.ts";
+import { memberUrl } from "../../lib/store/urls.ts";
+
+interface Props {
+  plugin: PluginDetail & { version: string };
+  /** The category's name, as the site names it. */
+  category: string | null;
+  /** The versions known here: for when the newest and the newest verified one were verified and published. */
+  versions: VersionInfo[];
+  /** The latest Zeron released (its Install is off when no released Zeron can install it). */
+  latestZeron: string | null;
+}
+const { plugin, category, versions, latestZeron } = Astro.props;
+const newest = versions.find((v) => v.version === plugin.version);
+const verifiedOne = plugin.verified_version ? versions.find((v) => v.version === plugin.verified_version) : undefined;
+const off = latestZeron && satisfies(latestZeron, plugin.engines?.zeron) === false ? { needs: plugin.engines?.zeron, latest: latestZeron } : null;
+const first = plugin.categories[0] ?? null;
+---
+
+<nav class="crumbs" aria-label="Where this is">
+  <a href="/plugins">Plugins</a>
+  {first && category && <><Icon name="chev" /><a href={catalogHref({ category: first })}>{category}</a></>}
+</nav>
+<header class="head">
+  <Tile id={plugin.id} name={plugin.name} icon={plugin.icon} version={plugin.version} size="xl" />
+  <div class="txt">
+    <h1><span class="name">{plugin.name}</span>{plugin.verified && <Seal size="l" />}</h1>
+    <p class="by">
+      <span>by {plugin.author.username ? <a href={memberUrl(plugin.author.username)}><b>@{plugin.author.username}</b></a> : <b>a former account</b>}</span>
+      {category && <><i aria-hidden="true"></i><span>{category}</span></>}
+      <i aria-hidden="true"></i><span class="num">{count(plugin.installs)} {plugin.installs === 1 ? "install" : "installs"}</span>
+    </p>
+    <p class="lead sum">{plugin.summary}</p>
+  </div>
+  <Get
+    id={plugin.id}
+    name={plugin.name}
+    version={plugin.version}
+    newest
+    verified={plugin.verified}
+    verifiedAt={newest?.verified_at ?? null}
+    publishedAt={newest?.published_at ?? plugin.updated_at}
+    verifiedVersion={plugin.verified_version}
+    verifiedVersionAt={verifiedOne?.verified_at ?? null}
+    off={off}
+  />
+</header>

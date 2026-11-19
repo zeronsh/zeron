@@ -1,0 +1,13 @@
+---
+// A line of words in which a word too long for any column (a plugin's name
+// with no spaces in it) may break inside itself, and only that word: the
+// line, set with text-wrap: balance, then splits into even parts, never a
+// one-letter tail, while every other word breaks only at its spaces. (A
+// break overflow-wrap makes inside a word is one balance can't move.)
+interface Props {
+  text: string;
+}
+const parts = Astro.props.text.split(/(\S{24,})/);
+---
+
+{parts.map((t, i) => (i % 2 ? <span class="lw">{t}</span> : t))}

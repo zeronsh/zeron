@@ -49,11 +49,22 @@ const PAGES: [string, string | undefined][] = [
   ["/account", "user_lin"],
   ["/account/plugins/session-badges", "user_ada"],
   ["/account/plugins/focus-timer", "user_ada"],
+  ["/account/plugins/worst-case-listing-at-every-limit-xyz12", "user_ada"],
+  ["/account/plugins/focus-timer", undefined],
   ["/account/plugins/session-badges/versions/1.2.1/yank", "user_ada"],
   ["/account/keys", "user_ada"],
+  ["/account/keys", undefined],
+  ["/account", "user_noor"],
+  ["/account", undefined],
+  ["/account/keys/Qm81LzR2sT3uV4wX5yZ6aB7cD8eF9gH0iJ1kL2mN3oP", "user_ada"],
   ["/plugins/all?verified=1", undefined],
   ["/plugins/worst-case-listing-at-every-limit-xyz12/versions", undefined],
   ["/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.4.0", undefined],
+  ["/plugins/worst-case-listing-at-every-limit-xyz12/asks", undefined],
+  ["/plugins/focus-timer/versions/1.1.0", undefined],
+  ["/plugins/focus-timer/versions/9.9.9", undefined],
+  ["/plugins/voice-memos", undefined],
+  ["/plugins/clipboard-sync", undefined],
   ["/admin/plugins", "user_grace"],
   ["/admin/plugins/session-badges", "user_grace"],
   ["/admin/plugins/crypto-ticker", "user_grace"],
@@ -82,19 +93,18 @@ const PAGES: [string, string | undefined][] = [
 /** The states a page opens into: each must be as clean as the page. */
 const OPENED: [string, string, string | undefined, (page: Page) => Promise<void>][] = [
   ["Verify, asked once", "/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", "user_grace", async (page) => {
-    // (Exact: "Don't verify…" holds the words too, and comes first in a phone's bar.)
-    await page.getByRole("link", { name: "Verify…", exact: true }).first().click();
+    await page.getByRole("link", { name: /^Mark .+ verified$/ }).first().click();
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
     expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Verify");
   }],
   ["Don't verify, written", "/admin/plugins/session-badges/1.2.1", "user_grace", async (page) => {
-    await page.getByRole("link", { name: "Don't verify…" }).first().click();
+    await page.getByRole("link", { name: /^Don't verify/ }).first().click();
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
     await page.getByRole("dialog").getByLabel("Reason").selectOption("listing");
     await page.getByRole("dialog").getByLabel("For the author").fill("Say what each panel shows.");
   }],
   ["Take down", "/admin/plugins/focus-timer/1.2.0", "user_grace", async (page) => {
-    await page.getByRole("link", { name: "Take down…" }).first().click();
+    await page.getByRole("link", { name: /^Take (this version )?down…$/ }).first().click();
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
   }],
   ["closing a report", "/admin/reports", "user_grace", async (page) => {
@@ -102,28 +112,32 @@ const OPENED: [string, string, string | undefined, (page: Page) => Promise<void>
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
   }],
   ["Remove", "/admin/plugins/focus-timer/1.2.0", "user_grace", async (page) => {
-    await page.getByRole("link", { name: "Remove…" }).first().click();
+    await page.getByRole("link", { name: /^Remove( it)?…$/ }).first().click();
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
   }],
-  ["the new key sheet", "/account/keys", "user_ada", async (page) => {
-    await page.locator("[data-dialog='new-key']").first().click();
-    await expect.poll(() => page.locator("dialog#new-key").isVisible()).toBe(true);
+  ["New key, where a key is made", "/account/keys", "user_ada", async (page) => {
+    await page.getByRole("button", { name: "New key" }).click();
+    await expect.poll(() => page.locator("#new-key").isVisible()).toBe(true);
+  }],
+  ["a key's fourteen plugins, shown", "/account/keys", "user_ada", async (page) => {
+    await page.getByText("Show all 14").click();
+    await expect.poll(() => page.getByRole("list", { name: "What GitHub Actions, the monorepo can publish" }).isVisible()).toBe(true);
   }],
   ["the stop new installs dialog", "/account/plugins/session-badges", "user_ada", async (page) => {
     await page.getByRole("link", { name: "Stop new installs" }).first().click();
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
   }],
-  ["the screenshots", "/plugins/focus-timer", undefined, async (page) => {
-    await page.getByRole("link", { name: /Picture 1 of/ }).first().click();
-    await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
+  ["the pictures, at the second", "/plugins/focus-timer", undefined, async (page) => {
+    await page.getByRole("button", { name: "Picture 2" }).click();
+    await expect.poll(() => page.getByRole("button", { name: "Picture 2" }).getAttribute("aria-current")).toBe("true");
   }],
   ["Install in Zeron's help", "/plugins/focus-timer", undefined, async (page) => {
     await page.evaluate(() => {
-      const a = document.querySelector<HTMLAnchorElement>("[data-install-link]")!;
+      const a = document.querySelector<HTMLAnchorElement>("a[data-install]")!;
       a.addEventListener("click", (e) => e.preventDefault(), { once: true });
       a.click();
     });
-    await expect.poll(() => page.locator("[data-install-help]").evaluate((d) => (d as HTMLDetailsElement).open), { timeout: 4_000 }).toBe(true);
+    await expect.poll(() => page.locator("#get-help-focus-timer").evaluate((d) => d.matches(":popover-open")), { timeout: 4_000 }).toBe(true);
   }],
 ];
 
@@ -223,7 +237,7 @@ describe("an author's words stay in their place", () => {
   test("a right-to-left override in a name reorders nothing after it", async () => {
     const { page, context } = await open("/admin/plugins/xss-probe/1.1.0", { as: "user_grace" });
     try {
-      const [name, version] = await Promise.all([page.locator("h1 > span").first().boundingBox(), page.locator("h1 > .v").boundingBox()]);
+      const [name, version] = await Promise.all([page.locator("h1 > .name").first().boundingBox(), page.locator("h1 > .vnum").boundingBox()]);
       expect(version!.x).toBeGreaterThanOrEqual(name!.x + name!.width - 1);
     } finally {
       await context.close();
@@ -231,24 +245,37 @@ describe("an author's words stay in their place", () => {
   });
 });
 
-describe("the account chip is the same on every page", () => {
-  test("signed in, a public page's chip has its name and Sign out, with the session's token", async () => {
+describe("who you are, in the bar of a public page", () => {
+  test("signed in, the bar has your name; its menu, Sign out with the session's token; Review only for staff", async () => {
     const { page, context } = await open("/plugins", { as: "user_ada" });
     try {
-      await expect.poll(() => page.locator(".sidebar-foot .account .name").textContent()).toBe("@ada");
-      const signOut = page.locator("form[data-signout]");
-      expect(await signOut.isVisible()).toBe(true);
+      const me = page.locator(".top button[data-me]");
+      await expect.poll(() => me.isVisible()).toBe(true);
+      expect(await me.locator("[data-handle]").textContent()).toBe("@ada");
+      expect(await page.locator(".top [data-signin]").isVisible()).toBe(false);
+      expect(await page.locator(".top .nav a[data-staff]").isVisible()).toBe(false);
+      await me.click();
+      const signOut = page.locator("#me-menu form[data-signout]");
+      await expect.poll(() => signOut.isVisible()).toBe(true);
       expect(await signOut.locator("input[name=csrf]").inputValue()).not.toBe("");
     } finally {
       await context.close();
     }
+    const staff = await open("/plugins", { as: "user_grace" });
+    try {
+      await expect.poll(() => staff.page.locator(".top .nav a[data-staff]").isVisible()).toBe(true);
+    } finally {
+      await staff.context.close();
+    }
   });
 
-  test("signed out, it says Sign in, and no Sign out", async () => {
+  test("signed out, it says Sign in, and no name and no Sign out", async () => {
     const { page, context } = await open("/plugins");
     try {
-      await expect.poll(() => page.locator(".sidebar-foot .account").evaluate((a) => a.classList.contains("is-pending"))).toBe(false);
-      expect(await page.locator("form[data-signout]").isVisible()).toBe(false);
+      await page.waitForLoadState("networkidle");
+      expect(await page.locator(".top [data-signin]").isVisible()).toBe(true);
+      expect(await page.locator(".top button[data-me]").isVisible()).toBe(false);
+      expect(await page.locator("form[data-signout]").first().isVisible()).toBe(false);
     } finally {
       await context.close();
     }
@@ -267,24 +294,26 @@ describe("by keyboard", () => {
       expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Cancel");
       await page.keyboard.press("Escape");
       await expect.poll(() => dialog.isVisible()).toBe(false);
-      expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Stop new installs");
+      // (Back on its opener, which names its version to a screen reader.)
+      expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Stop new installs 1.2.1");
     } finally {
       await context.close();
     }
   });
 
-  test("a screenshot opens large; arrows move between them; Escape closes", async () => {
+  test("a plugin's pictures: the strip takes focus, and an arrow brings the next one in, with no script needed", async () => {
     const { page, context } = await open("/plugins/focus-timer");
     try {
-      await page.getByRole("link", { name: "Picture 1 of 2, larger" }).focus();
-      await page.keyboard.press("Enter");
-      const box = page.getByRole("dialog", { name: "Focus timer, pictures" });
-      await expect.poll(() => box.isVisible()).toBe(true);
-      expect(await box.locator("figcaption").textContent()).toBe("1 of 2");
+      const strip = page.getByRole("group", { name: /2 pictures/ });
+      await strip.focus();
+      expect(await strip.evaluate((el) => el.scrollLeft)).toBe(0);
       await page.keyboard.press("ArrowRight");
-      expect(await box.locator("figcaption").textContent()).toBe("2 of 2");
-      await page.keyboard.press("Escape");
-      await expect.poll(() => box.isVisible()).toBe(false);
+      await page.keyboard.press("ArrowRight");
+      await page.keyboard.press("ArrowRight");
+      await expect.poll(() => strip.evaluate((el) => el.scrollLeft)).toBeGreaterThan(0);
+      // (The dots follow it.)
+      await page.keyboard.press("End");
+      await expect.poll(() => page.getByRole("button", { name: "Picture 2" }).getAttribute("aria-current")).toBe("true");
     } finally {
       await context.close();
     }
@@ -298,54 +327,65 @@ describe("by keyboard", () => {
       const before = page.url();
       // (Headless Chromium has no app for zeron:, so the link goes nowhere, as for someone without Zeron.)
       await page.evaluate(() => {
-        const a = document.querySelector<HTMLAnchorElement>("[data-install-link]")!;
+        const a = document.querySelector<HTMLAnchorElement>("a[data-install]")!;
         a.addEventListener("click", (e) => e.preventDefault(), { once: true });
         a.click();
       });
-      await expect.poll(() => page.locator("[data-install-help]").evaluate((d) => (d as HTMLDetailsElement).open), { timeout: 4_000 }).toBe(true);
+      await expect.poll(() => page.locator("#get-help-focus-timer").evaluate((d) => d.matches(":popover-open")), { timeout: 4_000 }).toBe(true);
       expect(page.url()).toBe(before);
-      expect(await page.getByText("Settings").first().isVisible()).toBe(true);
+      expect(await page.locator("#get-help-focus-timer").getByText("Download Zeron").isVisible()).toBe(true);
     } finally {
       await context.close();
     }
   });
 
-  test("All plugins: the sort and Next are links; while the next page comes, its rows' places are held", async () => {
+  test("Browse: each order, filter and page is a link, the list's whole state its address", async () => {
     const { page, context } = await open("/plugins/all");
     try {
-      // (The click and what it does at once, read before the next page can arrive.)
-      const now = await page.evaluate(() => {
-        const rows = document.querySelectorAll(".plugins .rows tr").length;
-        const rowHeight = document.querySelector(".plugins .rows tr")!.getBoundingClientRect().height;
-        [...document.querySelectorAll<HTMLAnchorElement>(".segmented a")].find((a) => a.textContent === "Newest")!.click();
-        const skeleton = document.querySelector(".plugins .skeleton-rows")!;
-        return { rows, rowHeight, heldHeight: skeleton.querySelector("tr")!.getBoundingClientRect().height, busy: document.querySelector("[data-list]")!.getAttribute("aria-busy"), shown: getComputedStyle(skeleton).display, held: skeleton.querySelectorAll("tr").length };
-      });
-      expect(now.busy).toBe("true");
-      // The skeleton rows stand where the rows were, as many and as tall.
-      expect(now.shown).toBe("table-row-group");
-      expect(now.held).toBe(now.rows);
-      expect(now.heldHeight).toBe(now.rowHeight);
+      await page.locator(".sort").getByRole("link", { name: "Newest" }).click();
       await page.waitForURL(/\/plugins\/all\?sort=new$/);
-      expect(await page.locator("[data-list]").getAttribute("aria-busy")).toBeNull();
+      await page.locator(".facets").getByRole("link", { name: /^Git/ }).click();
+      await page.waitForURL(/\/plugins\/all\?category=git&sort=new$/);
+      expect(await page.getByRole("heading", { level: 1 }).textContent()).toBe("Git");
+      await page.locator(".facets").getByRole("link", { name: "Verified only" }).click();
+      await page.waitForURL(/\/plugins\/all\?category=git&verified=1&sort=new$/);
     } finally {
       await context.close();
     }
   });
 
-  test("the search field: / puts you in it, Escape empties it, Enter leads to All plugins", async () => {
+  test("on a phone, the order and the filters open without a script, and Escape closes one with it", async () => {
+    const { page, context } = await open("/plugins/all?category=productivity", { width: 390 });
+    try {
+      const filters = page.locator("details.drop", { hasText: "Filters" });
+      await filters.locator("summary").click();
+      await expect.poll(() => filters.evaluate((d) => (d as HTMLDetailsElement).open)).toBe(true);
+      await expect.poll(() => filters.getByRole("link", { name: "Verified only" }).isVisible()).toBe(true);
+      await page.keyboard.press("Escape");
+      await expect.poll(() => filters.evaluate((d) => (d as HTMLDetailsElement).open)).toBe(false);
+      // (Opening one closes the other.)
+      const order = page.locator("details.drop").first();
+      await order.locator("summary").click();
+      await filters.locator("summary").click();
+      await expect.poll(() => order.evaluate((d) => (d as HTMLDetailsElement).open)).toBe(false);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("the search field: / puts you in the list's, Escape empties it, Enter searches within the category", async () => {
     const { page, context } = await open("/plugins/all?category=git");
     try {
       await page.keyboard.press("/");
-      const field = page.getByRole("searchbox", { name: "Search plugins" });
+      const field = page.getByRole("searchbox", { name: "Search in Git" });
       await expect.poll(() => field.evaluate((el) => el === document.activeElement)).toBe(true);
       await page.keyboard.type("timer");
       await page.keyboard.press("Escape");
       expect(await field.inputValue()).toBe("");
-      await page.keyboard.type("timer");
+      await page.keyboard.type("pr");
       await page.keyboard.press("Enter");
-      await page.waitForURL(/\/plugins\/all\?q=timer$/);
-      expect(await page.getByRole("heading", { level: 1 }).textContent()).toMatch(/^Results for “timer” · \d+$/);
+      await page.waitForURL(/\/plugins\/all\?q=pr&category=git$/);
+      expect(await page.getByRole("heading", { level: 1 }).textContent()).toBe("Results for “pr”");
     } finally {
       await context.close();
     }

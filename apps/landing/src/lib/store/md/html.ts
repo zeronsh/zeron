@@ -294,7 +294,7 @@ function writeBlocks(w: Writing, blocks: Block[], tight: boolean): void {
         for (const item of block.items) {
           out.open("li", item.task !== null ? [["class", "task-list-item"]] : []);
           if (item.task !== null) {
-            out.open("input", item.task ? [["type", "checkbox"], ["disabled", true], ["checked", true]] : [["type", "checkbox"], ["disabled", true]]);
+            out.open("input", item.task ? [["type", "checkbox"], ["disabled", true], ["checked", true], ["aria-label", "Done"]] : [["type", "checkbox"], ["disabled", true], ["aria-label", "To do"]]);
             out.text(" ");
           }
           // (A tight item's paragraphs are its text; anything else starts on its own line.)

@@ -45,9 +45,11 @@ for (const edge of ["missing", "broken"] as const) {
       expect((await site.fetch("/plugins/sitemap.xml")).status).toBe(503);
     });
 
-    test("signed-in pages send you to sign in, and the admin pages stay the 404", async () => {
+    test("your own pages say the store didn't answer (never that you're signed out), and the admin pages stay the 404", async () => {
       const cookie = "__Host-zeron_session=whatever";
-      expect((await site.fetch("/account", { headers: { cookie } })).status).toBe(303);
+      const account = await site.fetch("/account", { headers: { cookie } });
+      expect(account.status).toBe(503);
+      expect(await account.text()).toContain("The plugin store didn&#39;t answer");
       expect((await site.fetch("/admin/plugins", { headers: { cookie } })).status).toBe(404);
     });
   });
