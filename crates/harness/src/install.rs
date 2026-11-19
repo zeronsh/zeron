@@ -59,7 +59,7 @@ fn methods(id: HarnessId, platform: Platform) -> Vec<Method> {
         Fx => vec![Shell("curl -fsSL https://fx.sh/setup.sh | bash", "bash")],
         Antigravity => vec![Archive],
         Muse if windows => vec![PowerShell("irm https://dev.meta.ai/install.ps1 | iex")],
-        Muse => vec![Shell("curl -fsSL https://dev.meta.ai/install.sh | sh", "sh")],
+        Muse => vec![Shell("curl -fsSL https://dev.meta.ai/install.sh | bash", "bash")],
         ClaudeCode if windows => vec![PowerShell("irm https://claude.ai/install.ps1 | iex")],
         ClaudeCode => vec![Shell(
             "curl -fsSL https://claude.ai/install.sh | bash",
@@ -164,7 +164,7 @@ pub fn manual_command(id: HarnessId) -> Option<&'static str> {
         Grok => "npm install -g @xai-official/grok",
         Hermes => "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
         Devin => "curl -fsSL https://cli.devin.ai/install.sh | bash",
-        Muse => "curl -fsSL https://dev.meta.ai/install.sh | sh",
+        Muse => "curl -fsSL https://dev.meta.ai/install.sh | bash",
         Fx => "curl -fsSL https://fx.sh/setup.sh | bash",
         Antigravity | Mock | Registry(_) => return None,
     })
@@ -485,6 +485,33 @@ mod tests {
         hide_stand_ins(&mut other, "opencode");
         let kept = other.as_std_mut().get_envs().find(|(k, _)| *k == "PATH").and_then(|(_, v)| v.map(|v| v.to_os_string())).unwrap();
         assert_eq!(kept, path);
+    }
+
+    /// A vendor script runs under the shell it's written for, the one its
+    /// method requires: `sh` is dash on Linux (a Cloud machine's), and a
+    /// bash script piped to it fails on its first bashism (Muse Code's
+    /// `set -o pipefail`), though macOS's `sh` is bash and runs it. Muse's,
+    /// Claude Code's, Cursor's, OpenCode's, Grok's, Hermes', Devin's and fx's
+    /// are bash scripts; only Codex's and Pi's are POSIX `sh`.
+    #[test]
+    fn each_script_is_piped_to_the_shell_it_requires() {
+        for id in IDS {
+            for platform in [Platform::Unix, Platform::Mac] {
+                for method in methods(id, platform) {
+                    if let Method::Shell(script, shell) = method {
+                        assert!(script.ends_with(&format!("| {shell}")), "{id:?}: `{script}` isn't run by {shell}");
+                        let posix = matches!(id, HarnessId::Codex | HarnessId::Pi);
+                        assert_eq!(shell, if posix { "sh" } else { "bash" }, "{id:?}");
+                    }
+                }
+            }
+            if let Some(manual) = manual_command(id)
+                && manual.starts_with("curl")
+                && let Some(Method::Shell(script, _)) = methods(id, Platform::Unix).first()
+            {
+                assert_eq!(manual, *script, "{id:?}: the command shown is the one run");
+            }
+        }
     }
 
     #[test]

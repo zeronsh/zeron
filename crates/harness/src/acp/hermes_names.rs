@@ -33,6 +33,53 @@ fn catalog_provider(hermes: &str) -> &str {
     }
 }
 
+/// Whether Hermes can run model `id` (`<provider>:<model>`), among the
+/// models it lists (`ids`). `auto:<model>` is the default its config names
+/// with the provider left to auto-detection, which sends that model to the
+/// provider it's signed in to: its stock config names an OpenRouter model
+/// (`anthropic/claude-opus-4.6`), and a ChatGPT login, say, refuses that
+/// ("not supported when using Codex with a ChatGPT account"); Hermes's own
+/// sign-in leaves that default in place too. So it's one Hermes can run
+/// only when a provider it lists serves that model, or it lists none
+/// (nothing to tell by). Every other model is listed by a provider it has.
+pub(super) fn runnable<'a>(id: &str, ids: impl IntoIterator<Item = &'a str>) -> bool {
+    let Some(model) = id.strip_prefix("auto:") else {
+        return true;
+    };
+    let mut concrete = ids
+        .into_iter()
+        .filter_map(|other| other.split_once(':'))
+        .filter(|(provider, _)| *provider != "auto")
+        .peekable();
+    concrete.peek().is_none() || concrete.any(|(_, served)| served == model)
+}
+
+/// The models Hermes can run (`runnable`), the others left out.
+pub(super) fn keep_runnable(models: &mut Vec<Model>) {
+    let ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
+    models.retain(|m| runnable(&m.id, ids.iter().map(String::as_str)));
+}
+
+/// The model a Hermes session that was asked for none should run: none (its
+/// current one) unless it can't run that (`runnable`), then the first it
+/// can, from its `session/new` reply's models.
+pub(super) fn instead_of_current(session: &serde_json::Value) -> Option<String> {
+    let models = session.get("models")?;
+    let current = models.get("currentModelId")?.as_str()?;
+    let ids: Vec<&str> = models
+        .get("availableModels")?
+        .as_array()?
+        .iter()
+        .filter_map(|m| m.get("modelId").and_then(serde_json::Value::as_str))
+        .collect();
+    if runnable(current, ids.iter().copied()) {
+        return None;
+    }
+    ids.iter()
+        .find(|id| runnable(id, ids.iter().copied()))
+        .map(|id| (*id).to_owned())
+}
+
 /// Hermes's large-context picker variants (`openai-codex:gpt-6-luna-900k`)
 /// as a Context Window choice on their base model rather than rows of
 /// their own. Hermes adds `-900k` after each Codex model that has one, a
@@ -301,6 +348,48 @@ fn named_by_id(model: &Model) -> Option<(&str, &str)> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Hermes's stock default under auto-detection, `auto:anthropic/
+    /// claude-opus-4.6`, listed first beside a ChatGPT login's models (as a
+    /// Cloud machine's Hermes lists them): Codex refuses it, so it isn't
+    /// offered, and a session asked for no model runs Codex's first instead.
+    /// A default a listed provider serves, or one with nothing beside it,
+    /// stays.
+    #[test]
+    fn a_default_no_signed_in_provider_serves_isnt_run() {
+        let listed = ["auto:anthropic/claude-opus-4.6", "openai-codex:gpt-6.2-sol", "openai-codex:gpt-6.2-luna"];
+        assert!(!super::runnable(listed[0], listed));
+        assert!(super::runnable(listed[1], listed));
+        let served = ["auto:anthropic/claude-opus-4.6", "openrouter:anthropic/claude-opus-4.6"];
+        assert!(super::runnable(served[0], served));
+        assert!(super::runnable("auto:anthropic/claude-opus-4.6", ["auto:anthropic/claude-opus-4.6"]));
+
+        let mut models: Vec<zeron_proto::Model> = listed
+            .iter()
+            .map(|id| zeron_proto::Model {
+                id: (*id).into(),
+                label: (*id).into(),
+                description: None,
+                provider: None,
+                reasoning_levels: Vec::new(),
+                options: Vec::new(),
+                default: false,
+            })
+            .collect();
+        super::keep_runnable(&mut models);
+        assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), &listed[1..]);
+
+        let session = |current: &str| {
+            serde_json::json!({ "models": {
+                "currentModelId": current,
+                "availableModels": listed.iter().map(|id| serde_json::json!({ "modelId": id, "name": id })).collect::<Vec<_>>(),
+            }})
+        };
+        assert_eq!(super::instead_of_current(&session(listed[0])).as_deref(), Some("openai-codex:gpt-6.2-sol"));
+        assert_eq!(super::instead_of_current(&session("openai-codex:gpt-6.2-luna")), None, "one it can run stays");
+        assert_eq!(super::instead_of_current(&serde_json::json!({})), None);
+    }
+
     use super::*;
 
     fn model(id: &str, label: &str, provider: &str) -> Model {

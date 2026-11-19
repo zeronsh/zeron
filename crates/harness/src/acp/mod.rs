@@ -2884,6 +2884,7 @@ impl AcpHarness {
             let mut models = models_from_session(&session, &(self.spec.models)());
             if self.spec.id == HarnessId::Hermes {
                 hermes_names::fold_context_variants(&mut models);
+                hermes_names::keep_runnable(&mut models);
             }
             // Prompt-convention modes (Claude Ultrathink) extend any real
             // ladder — never an effort-less model's empty one.
@@ -5344,6 +5345,13 @@ async fn select_session_config(
             request.reasoning,
         )),
         model => model.map(str::to_owned),
+    };
+    // Asked for none, Hermes runs its config's default: never one it can't
+    // run (its stock OpenRouter default under a ChatGPT login), which its
+    // picker leaves out too, but the first it lists that it can.
+    let requested_model = match requested_model {
+        None if rules.harness == HarnessId::Hermes => hermes_names::instead_of_current(&session_response),
+        requested => requested,
     };
     if rules.harness == HarnessId::Antigravity {
         validate_config_model_selection(

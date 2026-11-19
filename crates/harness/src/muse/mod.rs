@@ -98,7 +98,7 @@ impl MuseHarness {
         )
         .ok_or_else(|| {
             HarnessError::NotInstalled(
-                "Muse Code CLI: install it (curl -fsSL https://dev.meta.ai/install.sh | sh) or \
+                "Muse Code CLI: install it (curl -fsSL https://dev.meta.ai/install.sh | bash) or \
                  set MUSE_EXECUTABLE"
                     .into(),
             )
