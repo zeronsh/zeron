@@ -109,7 +109,7 @@ describe("engine vectors (docs/plugin-package-vectors.json)", () => {
     }
   });
 
-  it("store packages: a deploy token's is unsigned, its content hash a signed one's", async () => {
+  it("store packages: a deploy token's is unsigned only, its content hash a signed one's", async () => {
     const read = async (raw: Uint8Array, signed: boolean) => {
       try {
         const p = await verifyPackage(raw, undefined, signed);
@@ -120,18 +120,27 @@ describe("engine vectors (docs/plugin-package-vectors.json)", () => {
       }
     };
     expect(v.store_packages.length).toBeGreaterThan(0);
+    // Each as the store reads a deploy token's publish, the record a device
+    // then reads naming no key: unsigned only. Where a device refuses a
+    // signed one (`store_mismatch`, or `tampered` before it), the store
+    // refuses it first, as its publish says it: `bad_signature`.
     for (const c of v.store_packages) {
       const raw = fromB64(c.package_b64);
       const signed = JSON.parse(new TextDecoder().decode(raw)).manifest?.signature !== undefined;
-      // As a device reads it: an unsigned one as a deploy token's, a signed
-      // one as it always is.
-      expect(await read(raw, signed), c.name).toEqual(c.result);
-      // The store takes a deploy token's package unsigned only: a signed one
-      // sent with a token is refused (contract ecad8670d).
-      if (signed && c.result.ok) expect(await read(raw, false), c.name).toEqual({ ok: false, error: "bad_signature" });
+      const got = await read(raw, false);
+      if (signed) {
+        expect(c.result.ok, c.name).toBe(false);
+        expect(got, c.name).toEqual({ ok: false, error: "bad_signature" });
+      } else {
+        expect(got, c.name).toEqual(c.result);
+      }
     }
-    const [unsigned, signedToo] = v.store_packages.filter((c: any) => c.result.ok);
-    expect(unsigned.result.hash).toBe(signedToo.result.hash);
+    // Its content hash is a signed package's of the same files, as a device
+    // computes it: the refused signed one, read as a device's own publish.
+    const unsigned = v.store_packages.find((c: any) => c.result.ok);
+    const mismatch = v.store_packages.find((c: any) => c.result.error === "store_mismatch");
+    const asSigned = await read(fromB64(mismatch.package_b64), true);
+    expect(asSigned).toMatchObject({ ok: true, hash: unsigned.result.hash, id: unsigned.result.id, version: unsigned.result.version });
   });
 
   it("deploy tokens: the format, from the data file", () => {
