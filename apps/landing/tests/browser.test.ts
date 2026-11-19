@@ -49,6 +49,8 @@ const PAGES: [string, string | undefined][] = [
   ["/account", "user_lin"],
   ["/account/plugins/session-badges", "user_ada"],
   ["/account/plugins/focus-timer", "user_ada"],
+  ["/account/plugins/worst-case-listing-at-every-limit-xyz12", "user_ada"],
+  ["/account/plugins/focus-timer", undefined],
   ["/account/plugins/session-badges/versions/1.2.1/yank", "user_ada"],
   ["/account/keys", "user_ada"],
   ["/account/keys", undefined],
@@ -292,7 +294,8 @@ describe("by keyboard", () => {
       expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Cancel");
       await page.keyboard.press("Escape");
       await expect.poll(() => dialog.isVisible()).toBe(false);
-      expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Stop new installs");
+      // (Back on its opener, which names its version to a screen reader.)
+      expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Stop new installs 1.2.1");
     } finally {
       await context.close();
     }

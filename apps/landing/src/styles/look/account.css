@@ -5,6 +5,9 @@
 
 .wrap.acct { padding-top: 56px; }
 .acct .crumbs { padding-top: 0; margin-top: -28px; margin-bottom: 20px; }
+/* (Each crumb on one line; the last, a plugin's name, cut: the head below says it whole.) */
+.acct .crumbs a { flex: none; }
+.acct .crumbs > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acct .hd { display: flex; align-items: flex-end; justify-content: space-between; gap: 48px; }
 .acct h1 { font-size: 40px; line-height: 44px; letter-spacing: -0.035em; }
 .acct .lead { margin-top: 12px; max-width: 37em; }
@@ -51,6 +54,34 @@ a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
 .row > svg { width: 16px; height: 16px; margin-top: 5px; fill: none; stroke: var(--text-3); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform 0.12s var(--ease), stroke 0.12s var(--ease); }
 .row.off .tile { filter: grayscale(1); opacity: 0.7; }
 .row.off .nm, .row.off .n { color: var(--text-2); }
+
+/* ---- One of your plugins: its versions, each where it stands, what that means, and what you can do ---- */
+.mhead { display: flex; align-items: center; gap: 18px; }
+.mhead .txt { flex: 1; min-width: 0; }
+.mhead h1 { font-size: 32px; line-height: 38px; letter-spacing: -0.03em; overflow-wrap: anywhere; text-wrap: balance; }
+.mhead .by { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 4px; color: var(--text-3); font-size: 14px; line-height: 20px; }
+.mhead .by .mono { font: 450 13px/20px var(--mono); overflow-wrap: anywhere; }
+.mhead .by i { width: 3px; height: 3px; border-radius: 50%; background: currentColor; opacity: 0.6; }
+.mhead > .btn { flex: none; }
+.acct > .flash { margin-top: 24px; }
+.mvers { margin-top: 40px; }
+.mvers > h2 { display: flex; align-items: baseline; gap: 8px; font-size: 19px; line-height: 26px; }
+.mvers > h2 .num { font-size: 14px; font-weight: 450; color: var(--text-3); }
+.vlist { margin-top: 14px; }
+.vlist ul { padding: 0; list-style: none; }
+.vr { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.6fr) minmax(0, 0.8fr) 168px; gap: 32px; align-items: start; padding: 20px 24px; }
+.vlist li + li.vr, .vr.h + ul .vr { box-shadow: 0 -1px 0 var(--line); }
+.vr.h { padding-top: 14px; padding-bottom: 12px; font-size: 13px; line-height: 20px; color: var(--text-3); }
+.vn { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
+.vn b { font: 600 14px/24px var(--mono); letter-spacing: -0.01em; overflow-wrap: anywhere; }
+.means { display: flex; flex-direction: column; gap: 10px; min-width: 0; font-size: 14px; line-height: 21px; color: var(--text-2); }
+.means > p { padding-top: 1px; }
+.means small { font-size: 13px; line-height: 20px; color: var(--text-3); }
+.vr .act { justify-self: end; }
+.vr.off .vn b { color: var(--text-2); }
+.mkeys { margin-top: 20px; font-size: 14px; line-height: 20px; color: var(--text-3); }
+.mkeys a { color: var(--text-2); font-weight: 500; border-radius: 4px; }
+.mkeys a:hover { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
 
 /* ---- Deploy keys ---- */
 .keys { margin-top: 28px; }
@@ -127,11 +158,23 @@ a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
 .askcard .answers { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
 
 @media (max-width: 1024px) {
+  .vr { grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.5fr) minmax(0, 0.8fr) auto; gap: 24px; }
   .row { grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) minmax(0, 0.9fr) 16px; gap: 24px; }
   .row .n, .row.h .r { display: none; }
   .key { --gap: 20px; grid-template-columns: minmax(0, 1fr) var(--tiles) minmax(0, 0.6fr) minmax(0, 0.9fr) 112px 72px; }
 }
 @media (max-width: 860px) {
+  .vr.h { display: none; }
+  .vr { grid-template-columns: minmax(0, 1fr) auto; gap: 12px 16px; padding: 18px 20px; }
+  .vr .vn { grid-column: 1; }
+  .vr .act { grid-column: 2; grid-row: 1; }
+  .vr .means, .vr .pub { grid-column: 1 / -1; }
+  .vr .pub { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 0; }
+  .vr .pub small { margin: 0; }
+  /* (The store's link under the name, in the name's column: the name keeps the row.) */
+  .mhead { flex-wrap: wrap; row-gap: 14px; }
+  .mhead .txt { flex-basis: calc(100% - 74px); }
+  .mhead > .btn { margin-left: 74px; }
   .acct .hd { flex-direction: column; align-items: flex-start; gap: 20px; }
   .row.h, .key.h { display: none; }
   .row { grid-template-columns: minmax(0, 1fr) auto; gap: 12px 16px; padding: 18px 20px; }

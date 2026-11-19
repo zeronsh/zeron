@@ -158,8 +158,6 @@ em.mi { font-style: normal; color: var(--danger); }
 .down { font-size: 13px; line-height: 20px; font-weight: 500; color: var(--danger); border-radius: 4px; }
 .down.quiet { color: var(--text-2); }
 .down:hover { text-decoration: underline; text-underline-offset: 3px; }
-.said-was { margin: 0; padding: 12px 14px; border-radius: 12px; background: var(--sunken); font-size: 14px; line-height: 21px; overflow-wrap: anywhere; }
-.said-was footer { margin-top: 4px; font-size: 13px; line-height: 20px; color: var(--text-3); }
 .rv-rail .facts a { border-radius: 4px; }
 .rv-rail .facts a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .rlist { display: flex; flex-direction: column; gap: 8px; padding: 0; list-style: none; }
@@ -179,11 +177,6 @@ em.mi { font-style: normal; color: var(--danger); }
 .decide-bar { display: none; }
 
 /* A question before a decision: a dialog, its fields, the author's view of what they'll read. */
-dialog.question { margin: auto; width: min(540px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 24px; border: 0; border-radius: 20px; background: var(--surface); color: var(--text); box-shadow: 0 24px 64px rgba(0, 0, 0, 0.24), 0 0 0 1px var(--line); overflow: auto; }
-dialog.question.sm { width: min(440px, calc(100vw - 32px)); }
-dialog.question::backdrop { background: rgba(0, 0, 0, 0.36); }
-.question h2 { font-size: 19px; line-height: 26px; letter-spacing: -0.01em; overflow-wrap: anywhere; }
-.question form > p { margin-top: 8px; font-size: 14px; line-height: 21px; color: var(--text-2); }
 .question .weigh-line { margin-top: 14px; padding: 10px 12px; border-radius: 10px; font-size: 13.5px; line-height: 20px; }
 .question .weigh-line.warn { color: var(--warn); background: var(--warn-wash); }
 .question .weigh-line.bad { color: var(--danger); background: var(--danger-wash); }
@@ -202,7 +195,6 @@ dialog.question::backdrop { background: rgba(0, 0, 0, 0.36); }
 .question .preview .said { margin-top: 6px; font-size: 14px; line-height: 21px; overflow-wrap: anywhere; }
 .question .preview .said.is-empty { color: var(--text-3); }
 .question .preview .who { margin-top: 4px; font-size: 12.5px; line-height: 18px; color: var(--text-3); }
-.question .answers { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
 
 @media (max-width: 1024px) {
   .files-view { grid-template-columns: minmax(0, 1fr); }
@@ -218,6 +210,4 @@ dialog.question::backdrop { background: rgba(0, 0, 0, 0.36); }
   .rv .ar { flex-wrap: wrap; }
   .rv .ar > .state, .rv .ar > .same { margin-left: 32px; }
   .before-after { grid-template-columns: minmax(0, 1fr); }
-  .question .answers { flex-direction: column-reverse; }
-  .question .answers .btn { width: 100%; }
 }

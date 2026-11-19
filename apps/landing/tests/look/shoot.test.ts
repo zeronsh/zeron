@@ -60,6 +60,11 @@ const SHOTS: Shot[] = [
   // (Fifty, the most a key may name, every one of them Ada's: its list open.)
   { page: "account", as: "keys-fifty", path: "/account/keys", user: "user_ada", fake: [["many", { on: "1" }]], act: async (page) => { await page.locator("details.every", { hasText: "Show all 50" }).locator("summary").click(); } },
   { page: "account", as: "keys-signed-out", path: "/account/keys" },
+  // One of your plugins: a version in every state; one plainly listed; Stop new installs, asked; asked as a page.
+  { page: "account", as: "plugin", path: "/account/plugins/worst-case-listing-at-every-limit-xyz12", user: "user_ada" },
+  { page: "account", as: "plugin-plain", path: "/account/plugins/session-badges", user: "user_ada" },
+  { page: "account", as: "plugin-stop", path: "/account/plugins/session-badges", user: "user_ada", act: async (page) => { await page.locator('a[data-dialog^="yank-"]').first().click(); } },
+  { page: "account", as: "plugin-stop-page", path: "/account/plugins/session-badges/versions/1.2.1/yank", user: "user_ada" },
   // The staff's: the queue waiting (reported first, every kind of row), empty, and a list already read.
   { page: "staff", as: "queue", path: "/admin/plugins", user: "user_grace" },
   { page: "staff", as: "queue-empty", path: "/admin/plugins", user: "user_grace", fake: [["queue", { as: "empty" }]] },

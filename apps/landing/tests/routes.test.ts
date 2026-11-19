@@ -34,9 +34,12 @@ const post = (path: string, cookie: string, fields: Record<string, string>, orig
 const flashOf = (response: Response) => response.headers.getSetCookie().find((c) => c.startsWith("__Host-zeron_flash="))?.split(";")[0] ?? "";
 
 /** A version's state on its author's page, as its row's badge says it. */
-const stateOf = (body: string, version: string) => new RegExp(`<span class="line version">${version.replace(/\./g, "\\.")}</span></td><td><span class="line"><span class="badge sm[^"]*">([^<]+)</span>`).exec(body)?.[1];
+/** A version's row on one of your plugins' pages. */
+const rowOf = (body: string, version: string) => body.split('<li class="vr').find((r) => r.includes(`<b class="mono">${version}</b>`)) ?? "";
+/** Where a version stands in its row: its status pill, or Listed when it has none (amendment 45). */
+const stateOf = (body: string, version: string) => (rowOf(body, version) ? (/<span class="state [a-z]+" data-kind="status">([^<]+)<\/span>/.exec(rowOf(body, version))?.[1] ?? "Listed") : undefined);
 /** A version's second badge in its row: whether a reviewer verified it (amendment 45), when it's listed or yanked. */
-const verifiedOf = (body: string, version: string) => new RegExp(`<span class="line version">${version.replace(/\./g, "\\.")}</span></td><td><span class="line"><span class="badge sm[^"]*">[^<]+</span><span class="badge sm[^"]*">([^<]+)</span>`).exec(body)?.[1];
+const verifiedOf = (body: string, version: string) => /data-kind="verified">(?:<svg[^]*?<\/svg>)?([^<]+)<\/span>/.exec(rowOf(body, version))?.[1];
 
 /** The session's CSRF token, as a page carries it in its forms. */
 const tokenOf = (body: string) => /name="csrf" value="([^"]+)"/.exec(body)?.[1] ?? "";
@@ -391,8 +394,8 @@ describe("public pages are the same for everyone (so a shared cache can keep the
 });
 
 describe("signed-in pages", () => {
-  test("signed out, Your plugins and Deploy keys say so and offer sign-in, here; never a redirect", async () => {
-    for (const path of ["/account", "/account/keys"]) {
+  test("signed out, Your plugins, one of them, its questions and Deploy keys say so and offer sign-in, here; never a redirect", async () => {
+    for (const path of ["/account", "/account/keys", "/account/plugins/focus-timer", "/account/plugins/focus-timer/versions/1.2.0/yank"]) {
       const { response, body } = await html(path);
       expect(response.status, path).toBe(200);
       expect(response.headers.get("cache-control"), path).toBe("private, no-store");
@@ -402,7 +405,7 @@ describe("signed-in pages", () => {
   });
 
   test("signed out, the pages that act send you to sign in and back (a path here, never anywhere else)", async () => {
-    for (const path of ["/account/plugins/focus-timer", "/plugins/focus-timer/report"]) {
+    for (const path of ["/plugins/focus-timer/report"]) {
       const response = await site.fetch(path);
       expect(response.status, path).toBe(303);
       expect(response.headers.get("location"), path).toBe(`/auth/web/login?return_to=${encodeURIComponent(path)}`);
@@ -727,8 +730,8 @@ describe("forms", () => {
     // A reviewer's words in full, never cut; staff's reason for a take-down beside it.
     expect(body).toContain("Until then this one stays listed, not verified.”");
     expect(body).toContain("Taken down: it sent the open chat&#39;s text to a host its README doesn&#39;t name.");
-    // Its keys are the account's now: the tab is a way to them.
-    expect(body).toContain('<a href="/account/keys">Deploy keys</a>');
+    // Its keys are the account's now: a way to them.
+    expect(body).toContain('<a href="/account/keys">deploy keys</a>');
   });
 
   test("in public, a version that takes no new installs says why: replaced before it was verified, or stopped by its author", async () => {

@@ -399,7 +399,10 @@ describe("an author's pages", () => {
   test("a version published is listed and waits to be verified; there's nothing to withdraw", async () => {
     await ada.publish("focus-timer", "1.1.0");
     const page = await adaOnWeb.get("/account/plugins/focus-timer");
-    expect(page.body).toMatch(/<span class="line version">1\.1\.0<\/span><\/td><td><span class="line"><span class="badge sm ok">Listed<\/span><span class="badge sm info">Not verified yet<\/span>/);
+    // (Listed: no pill for where it stands; whether it's verified: not yet.)
+    const row = page.body.split('<li class="vr').find((r) => r.includes('<b class="mono">1.1.0</b>'))!;
+    expect(row).not.toContain('data-kind="status"');
+    expect(row).toContain('<span class="state no" data-kind="verified">Not verified yet</span>');
     expect(page.body).not.toContain("/withdraw");
     expect((await grace.get("/admin/plugins")).body).toContain("/admin/plugins/focus-timer/1.1.0");
   });
@@ -424,6 +427,13 @@ describe("an update", () => {
     expect(publicly.body).toMatch(process.env.E2E_OLD_EDGE ? /It takes no new installs\./ : /Replaced by 1\.2\.0 before it was verified\. Those who have it keep it working\./);
     const overview = await grace.get("/admin/plugins/focus-timer/1.2.0");
     expect(overview.body).toContain("Compared with 1.0.0, the newest verified version");
+    // The size check and Files count the same files, the manifest apart, in the same sizes (edge 9b48b31f1 on).
+    const sized = /(\d+) files, [\d.]+ (?:B|KB) \([\d.]+ (?:B|KB) packaged\)\./.exec(overview.body);
+    if (!process.env.E2E_OLD_EDGE) {
+      expect(sized).not.toBeNull();
+      expect(overview.body).toContain(`${sized![1]} files, `);
+      expect(overview.body).toMatch(new RegExp(`${sized![1]} files, [\\d.]+ (?:B|KB), and its manifest\\.`));
+    }
     const sends = overview.body.split('<li class="ar').find((r) => r.includes("Send messages to your agents as you"))!;
     expect(sends).toMatch(/^ risky new"/);
     expect(sends).toContain('<span class="state no">New in 1.2.0</span>');

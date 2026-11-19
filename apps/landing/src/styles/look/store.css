@@ -264,6 +264,20 @@ a.card:focus-visible { outline-offset: 3px; }
 .rank { width: 20px; flex: none; font: 500 13px/20px var(--mono); color: var(--text-3); text-align: center; }
 
 /* ---- a page's own word when there is nothing, or the store didn't answer ---- */
+/* Someone's words, quoted: a reviewer's note, why staff stopped a version. */
+.said-was { margin: 0; padding: 12px 14px; border-radius: 12px; background: var(--sunken); font-size: 14px; line-height: 21px; overflow-wrap: anywhere; }
+.said-was footer { margin-top: 4px; font-size: 13px; line-height: 20px; color: var(--text-3); }
+/* A question before doing something (scripts/store.ts opens it; its opener is the same question as a page). */
+dialog.question { margin: auto; width: min(540px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 24px; border: 0; border-radius: 20px; background: var(--surface); color: var(--text); box-shadow: 0 24px 64px rgba(0, 0, 0, 0.24), 0 0 0 1px var(--line); overflow: auto; }
+dialog.question.sm { width: min(440px, calc(100vw - 32px)); }
+dialog.question::backdrop { background: rgba(0, 0, 0, 0.36); }
+.question h2 { font-size: 19px; line-height: 26px; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+.question form > p { margin-top: 8px; font-size: 14px; line-height: 21px; color: var(--text-2); }
+.question .answers { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+@media (max-width: 720px) {
+  .question .answers { flex-direction: column-reverse; }
+  .question .answers .btn { width: 100%; }
+}
 /* A list's pages: Previous, where you are, Next (Browse, Versions, the queue). */
 .pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 28px; padding-top: 20px; box-shadow: 0 -1px 0 var(--line); font-size: 13px; color: var(--text-3); }
 .empty { padding: 28px 0 8px; }

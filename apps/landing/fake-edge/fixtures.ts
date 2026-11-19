@@ -3,6 +3,7 @@
 // through, each kind of permission, and plugins written to break the page
 // (hostile names, keywords and READMEs), so the site is tried against them.
 
+import { bytes } from "../src/lib/store/format.ts";
 import { ICONS, screenshot } from "./art.ts";
 
 export const DAY = 86_400_000;
@@ -131,7 +132,6 @@ interface Spec {
 const OK_CHECKS: FakeVersion["checks"] = [
   { id: "signature", level: "ok", message: "Signed by WMWMWMWMWMWMWMWMWMWMWMWMWMWMWMWMWMWMWMWMWMW, uploaded from a signed-in device." },
   { id: "manifest", level: "ok", message: "The manifest follows every rule a device checks." },
-  { id: "size", level: "ok", message: "6 files, 0.0 MB (0.0 MB packaged)." },
   { id: "newer", level: "ok", message: "Later than the last version." },
   { id: "readme", level: "ok", message: "README.md is there." },
 ];
@@ -224,9 +224,13 @@ function build(spec: Spec): FakePlugin {
       screenshots: [...shots, ...(h.shots ?? [])],
       engines: { zeron: h.engines ?? ">=0.3.0" },
     };
+    // (The size check, as the edge words it: the package's files, the manifest apart, in the site's sizes, proposed to the edge lane.)
+    const total = Object.values(files).reduce((n, text) => n + text.length, 0);
+    const size = { id: "size", level: "ok" as const, message: `${Object.keys(files).length} files, ${bytes(total)} (${bytes(Math.round(total * 0.42))} packaged).` };
+    const ok = [...OK_CHECKS.slice(0, 2), size, ...OK_CHECKS.slice(2)];
     const checks = h.status === "undecided" && (h.permissions ?? spec.permissions ?? []).some((p) => p === "commands" || p === "native")
-      ? [...OK_CHECKS, { id: "risky", level: "warn" as const, message: "Asks to run programs on the computer as you." }]
-      : OK_CHECKS;
+      ? [...ok, { id: "risky", level: "warn" as const, message: "Asks to run programs on the computer as you." }]
+      : ok;
     const published = NOW - h.ago * DAY;
     // A verified version was verified half a day after it was published (a yanked one was, before it was yanked).
     const verifiedAt = h.status === "verified" || h.status === "yanked" ? (h.review?.decided_at ?? published + DAY / 2) : null;

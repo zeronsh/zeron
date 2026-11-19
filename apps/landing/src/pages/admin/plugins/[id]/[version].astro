@@ -309,7 +309,8 @@ const versions = record.ok ? record.data.versions : null;
                       <div>
                         <h2 id="changed-h">Files</h2>
                         <p class="sub2">
-                          {plural(files.length, "file")}, {bytes(files.reduce((n, f) => n + f.bytes, 0))}.{" "}
+                          {/* (Its package's files, as the size check counts them; the manifest travels beside them.) */}
+                          {plural(s.files.length, "file")}, {bytes(s.files.reduce((n, f) => n + f.bytes, 0))}, and its manifest.{" "}
                           {s.base ? (changes.length === 0 ? `None changed since ${s.base.version}.` : `${[changes.filter((c) => c.change === "modified").length && `${count(changes.filter((c) => c.change === "modified").length)} changed`, changes.filter((c) => c.change === "added").length && `${count(changes.filter((c) => c.change === "added").length)} added`, changes.filter((c) => c.change === "removed").length && `${count(changes.filter((c) => c.change === "removed").length)} taken out`].filter(Boolean).join(", ")} since ${s.base.version}.`) : "Its first version: every file is new."}
                         </p>
                       </div>
