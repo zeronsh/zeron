@@ -56,8 +56,17 @@ const assistProject = (assist: Record<string, unknown>): string | undefined => {
   return undefined;
 };
 
+/** Google answers Antigravity's limits only to an Antigravity client ("You do
+ * not have a valid license of this product" to any other): its server sends
+ * `antigravity/acp/<version>`. */
+export const ANTIGRAVITY_USER_AGENT = "antigravity/acp/zeron";
+
 const antigravityUsage = async (material: GrantMaterial, fetchFn: FetchFn): Promise<UsageOutcome> => {
-  const headers = { authorization: `Bearer ${material.accessToken}`, "content-type": "application/json" };
+  const headers = {
+    authorization: `Bearer ${material.accessToken}`,
+    "content-type": "application/json",
+    "user-agent": ANTIGRAVITY_USER_AGENT
+  };
   const tierResponse = await upstream(fetchFn, ANTIGRAVITY_TIER_URL, {
     method: "POST",
     headers,

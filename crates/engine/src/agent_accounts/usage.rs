@@ -38,6 +38,10 @@ const DEVIN_DEFAULT_API_SERVER: &str = "https://server.codeium.com";
 /// The CLI version the status call identifies as (the server wants one).
 const DEVIN_CLI_VERSION: &str = "3000.11.3";
 pub(super) const ANTIGRAVITY_API: &str = "https://cloudcode-pa.googleapis.com";
+/// The user agent Antigravity's requests carry: Google answers its limits
+/// only to an Antigravity client ("You do not have a valid license of this
+/// product" to any other); its server sends `antigravity/acp/<version>`.
+const ANTIGRAVITY_USER_AGENT: &str = "antigravity/acp/zeron";
 /// Who Antigravity's server says it is to `loadCodeAssist`.
 fn antigravity_client() -> serde_json::Value {
     serde_json::json!({ "ideType": "ANTIGRAVITY", "pluginType": "GEMINI" })
@@ -281,6 +285,7 @@ impl AgentAccounts {
                 .http
                 .post(format!("{api}/v1internal:loadCodeAssist"))
                 .bearer_auth(&access_token)
+                .header(reqwest::header::USER_AGENT, ANTIGRAVITY_USER_AGENT)
                 .json(&serde_json::json!({ "metadata": antigravity_client() })),
         )
         .await?;
@@ -294,6 +299,7 @@ impl AgentAccounts {
                 .http
                 .post(format!("{api}/v1internal:retrieveUserQuotaSummary"))
                 .bearer_auth(&access_token)
+                .header(reqwest::header::USER_AGENT, ANTIGRAVITY_USER_AGENT)
                 .json(&serde_json::json!({ "project": project })),
         )
         .await?;

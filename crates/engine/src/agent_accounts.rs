@@ -690,12 +690,14 @@ impl ProbeError {
     }
 }
 
-/// The kept usage, its probes that failed on a reply this build couldn't read
-/// due again at once: a start is often a new build, which may read it (a
-/// format error otherwise waits out its backoff through the update).
+/// The kept usage, its probes that failed on what this build couldn't read
+/// or ask due again at once: a start is often a new build, which may read a
+/// reply an older one couldn't, or ask an agent it had no usage view for
+/// (Antigravity's, once) — they'd otherwise wait out a backoff through the
+/// update. (A login with nothing to ask is found so again locally.)
 fn retry_format_errors(mut entries: HashMap<String, UsageEntry>) -> HashMap<String, UsageEntry> {
     for entry in entries.values_mut() {
-        if matches!(entry.error, Some(ProbeError::Schema)) {
+        if matches!(entry.error, Some(ProbeError::Schema | ProbeError::NoCredentials { .. })) {
             entry.retry_at = None;
         }
     }
@@ -6331,7 +6333,7 @@ mod tests {
     /// A start retries a probe that failed on a reply the last build couldn't
     /// read; any other failure keeps its backoff.
     #[test]
-    fn a_start_retries_format_errors_only() {
+    fn a_start_retries_what_an_older_build_couldnt_read_or_ask() {
         let failed = |error: ProbeError| UsageEntry {
             error: Some(error),
             retry_at: Some(now_ms() + 60_000),
@@ -6340,10 +6342,14 @@ mod tests {
         let entries = HashMap::from([
             ("schema".to_string(), failed(ProbeError::Schema)),
             ("limited".to_string(), failed(ProbeError::RateLimited { retry_after_secs: Some(600) })),
+            ("unasked".to_string(), failed(ProbeError::NoCredentials { why: NoCredentials::Missing })),
+            ("refused".to_string(), failed(ProbeError::Unauthorized { status: 401 })),
         ]);
         let entries = retry_format_errors(entries);
         assert_eq!(entries["schema"].retry_at, None);
+        assert_eq!(entries["unasked"].retry_at, None, "a build that couldn't ask");
         assert!(entries["limited"].retry_at.is_some());
+        assert!(entries["refused"].retry_at.is_some());
     }
 
     /// A Cloud sign-in's home is gone before its upload, unless its agent's

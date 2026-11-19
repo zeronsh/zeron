@@ -1,7 +1,7 @@
 import { exports } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GrantManyRequest, VaultProviderId } from "../../src/api";
-import { ANTIGRAVITY_TIER_URL, ANTIGRAVITY_USAGE_URL } from "../../src/providers/usage";
+import { ANTIGRAVITY_TIER_URL, ANTIGRAVITY_USAGE_URL, ANTIGRAVITY_USER_AGENT } from "../../src/providers/usage";
 import { json, mockUpstream, nextTs, runnerCaller, setup, signedGrant, value, vault } from "./helpers";
 import { fakeJwt, type TestDevice } from "../support";
 
@@ -244,6 +244,7 @@ describe("Hermes, Antigravity and Muse sign-ins", () => {
     expect(usage.body).toEqual({ groups, paidTier: { id: "g1-ultra-tier", name: "Google AI Ultra" } });
     const asked = upstream.calls.find((c) => c.url === ANTIGRAVITY_USAGE_URL)!;
     expect(new Headers(asked.init?.headers).get("authorization")).toBe("Bearer ya29.fresh");
+    expect(new Headers(asked.init?.headers).get("user-agent")).toBe(ANTIGRAVITY_USER_AGENT);
     // The login's own project, not the one loadCodeAssist would pick.
     expect(JSON.parse(String(asked.init?.body))).toEqual({ project: "proj-1" });
 
