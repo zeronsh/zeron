@@ -27305,6 +27305,18 @@
     },
     {
       "id_error": null,
+      "manifest": "{\"entry\":\"init.luau\",\"id\":\"focus\",\"name\":\"F\",\"permissions\":[\"ui.add\",\"scene3d\"],\"version\":\"1.0.0\"}",
+      "name": "a permission to draw 3D scenes (scene3d)",
+      "problem": null
+    },
+    {
+      "id_error": null,
+      "manifest": "{\"entry\":\"init.luau\",\"id\":\"focus\",\"name\":\"F\",\"permissions\":[\"scene4d\"],\"version\":\"1.0.0\"}",
+      "name": "a permission Zeron doesn't know (scene4d)",
+      "problem": "It asks for \"scene4d\", which isn't a permission Zeron knows"
+    },
+    {
+      "id_error": null,
       "manifest": "{\"entry\":\"init.luau\",\"id\":\"focus\",\"name\":\"Focus\",\"version\":\"1.0.0\"}",
       "name": "minimal_ok",
       "problem": null

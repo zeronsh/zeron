@@ -368,20 +368,6 @@ describe("store search", () => {
   });
 });
 
-describe("store manifest permissions (manifest.rs KNOWN_PERMISSIONS)", () => {
-  const manifest = (permissions: unknown) =>
-    readManifest(parseJsonText(JSON.stringify({ id: "focus", name: "Focus", version: "1.0.0", entry: "init.luau", permissions })) as JsonObject);
-
-  it("takes scene3d, as every device does (Zeron main c5f65ea0a)", () => {
-    expect(manifest(["ui.add", "scene3d"]).problem).toBeUndefined();
-    expect(manifest(["ui.add", "scene3d"]).permissions).toEqual(["ui.add", "scene3d"]);
-  });
-
-  it("refuses a permission Zeron doesn't know", () => {
-    expect(manifest(["scene4d"]).problem).toBe(`It asks for "scene4d", which isn't a permission Zeron knows`);
-  });
-});
-
 describe("store consent item", () => {
   it("rates programs and hosts as the engine does", () => {
     expect(fullControl("python3.12") && fullControl("Bash.exe") && !fullControl("jq")).toBe(true);
