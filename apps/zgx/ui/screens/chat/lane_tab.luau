@@ -914,7 +914,13 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		on_approve = asks.on_approve,
 		on_deny = asks.on_deny,
 		queue = asks.queue,
+		-- (Steer only where its agent takes a word mid-turn: else the row's
+		-- Send now stops the turn, as the host does.)
 		can_steer = function(): boolean
+			local s = session:get()
+			return running:get() and s ~= nil and s.steers == true
+		end,
+		turn_running = function(): boolean
 			return running:get()
 		end,
 		on_queue_send = asks.on_queue_send,

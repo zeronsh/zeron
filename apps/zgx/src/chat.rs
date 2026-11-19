@@ -1986,12 +1986,21 @@ impl Chats {
             .or_else(|| self.known_remotes.borrow().values().find_map(|r| find(&r.models)))
     }
 
+    /// Whether `harness` takes a word mid-turn: one that reads input only
+    /// between turns (`steeringMode: turn-boundary`: Antigravity, Hermes, fx)
+    /// would only hold a "steer" to the turn's end, so its queued row is sent
+    /// by stopping the turn instead. (This device's agents, else the
+    /// composer's other device's, else any other device's looked at.)
     fn steers(&self, harness: &str) -> bool {
-        self.harnesses
-            .borrow()
-            .iter()
-            .find(|h| h["id"].as_str() == Some(harness))
-            .is_some_and(|h| h["supportsSteering"].as_bool() == Some(true))
+        let steers = |list: &[Json]| {
+            list.iter().find(|h| h["id"].as_str() == Some(harness)).map(|h| {
+                h["supportsSteering"].as_bool() == Some(true) && h["steeringMode"].as_str() != Some("turn-boundary")
+            })
+        };
+        steers(&self.harnesses.borrow())
+            .or_else(|| self.remote.borrow().as_ref().and_then(|r| steers(&r.harnesses)))
+            .or_else(|| self.known_remotes.borrow().values().find_map(|r| steers(&r.harnesses)))
+            .unwrap_or(false)
     }
 
     /// The device to name for a call routed to the chat's host, when that
@@ -6464,6 +6473,9 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         ("access", Value::from(access)),
         ("plan", Value::Bool(config["plan"].as_bool() == Some(true))),
         ("running", Value::Bool(live)),
+        // Its agent takes a word mid-turn (a queued row's action is Steer,
+        // else Send now, which stops the turn).
+        ("steers", Value::Bool(chats.steers(harness))),
         ("context", open.context.map(Value::Num).unwrap_or(Value::Nil)),
         ("context_tokens", open.context_usage.0.map(Value::Num).unwrap_or(Value::Nil)),
         ("context_window", open.context_usage.1.map(Value::Num).unwrap_or(Value::Nil)),

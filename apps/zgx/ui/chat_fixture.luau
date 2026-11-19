@@ -105,6 +105,12 @@ local function publish(id: string, patch: { [string]: any }?)
 	local s = table.clone(META[id] or {})
 	s.id = id
 	s.state = if META[id] then "ready" else "missing"
+	-- (Its agent takes a word mid-turn, as Claude Code's does: a queued
+	-- row's action is Steer. A test of one that doesn't says `steers =
+	-- false`.)
+	if s.steers == nil then
+		s.steers = true
+	end
 	for k, v in patch or {} do
 		s[k] = v
 	end

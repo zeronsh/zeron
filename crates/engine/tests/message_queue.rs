@@ -605,6 +605,67 @@ async fn a_steer_command_for_a_turn_boundary_agent_waits_in_the_queue_for_the_tu
     core.shutdown().await;
 }
 
+/// A message sent mid-turn to an agent that reads input only between turns
+/// waits in the queue; a Stop leaves it there, paused with the person's own
+/// rows — never moved into the transcript unrun, where nothing would answer
+/// it — and Send now sends it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_keeps_a_message_sent_mid_turn_in_the_queue() {
+    let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
+
+    core.doc_host
+        .queue_message(CHAT, "opening", Vec::new())
+        .expect("queue opening");
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "opening"),
+        "the turn to start",
+    )
+    .await;
+    core.doc_host
+        .queue_command(
+            CHAT,
+            SessionCommandPayload::Steer {
+                prompt: "use chrome instead".into(),
+                message_id: Some("m-mid".into()),
+            },
+        )
+        .expect("queue steer command");
+    wait_for(
+        || queue_texts(&core) == vec!["use chrome instead".to_owned()],
+        "the message to wait in the queue",
+    )
+    .await;
+
+    core.doc_host
+        .queue_command(CHAT, SessionCommandPayload::Interrupt {})
+        .expect("queue interrupt");
+    wait_for(
+        || !core.sessions.turn_in_flight(CHAT),
+        "the stopped turn to settle",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(queue_texts(&core), vec!["use chrome instead".to_owned()], "still queued");
+    assert_eq!(user_messages(&core), vec!["opening".to_owned()], "not in the transcript");
+    assert!(
+        !prompts.lock().unwrap().iter().any(|p| p == "use chrome instead"),
+        "the Stop doesn't send it on by itself"
+    );
+
+    core.doc_host
+        .send_queued_now(CHAT, "m-mid")
+        .await
+        .expect("send it now");
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "use chrome instead"),
+        "Send now to send it",
+    )
+    .await;
+    assert!(queue_texts(&core).is_empty());
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
 /// A full mailbox must apply backpressure, never kill the healthy runtime.
 #[tokio::test]
 async fn saturated_steering_mailbox_waits_without_restarting_or_losing_messages() {
