@@ -3271,12 +3271,6 @@ impl Harness for AcpHarness {
     fn stops_turn_in_place(&self) -> bool {
         true
     }
-    /// The session's model, effort and model options are selected over the
-    /// protocol (`session/set_model`, `session/set_config_option`), so a
-    /// change applies between turns without a new agent. Clearing one back
-    /// to the agent's default cannot be expressed that way, and neither can
-    /// a change of access mode: the permissions the agent asks for follow
-    /// the session mode chosen at launch, so a new mode gets a new agent.
     /// The default comparison plus the access the run resolves to: it
     /// ignores `auto_approve`, which makes a run full access.
     fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {
@@ -3288,6 +3282,12 @@ impl Harness for AcpHarness {
             && live.plan == next.plan
             && self.access_for(live) == self.access_for(next)
     }
+    /// The session's model, effort and model options are selected over the
+    /// protocol (`session/set_model`, `session/set_config_option`), so a
+    /// change applies between turns without a new agent. Clearing one back
+    /// to the agent's default cannot be expressed that way, and neither can
+    /// a change of access mode: the permissions the agent asks for follow
+    /// the session mode chosen at launch, so a new mode gets a new agent.
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
         // `access_for` below: for Grok an Auto/Full change is a different
         // `_meta` on the session, so it gets a new agent like any mode.

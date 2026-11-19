@@ -6196,6 +6196,32 @@ fn single(questions: &[Json], label: &str) -> Vec<Json> {
         .collect()
 }
 
+/// The reviewer's note in an approval question, as the harness writes it
+/// (`REVIEW_NOTE` in crates/harness/src/acp/permission.rs).
+const REVIEW_NOTE: &str = " Auto review flagged this: ";
+
+/// An approval question as the card's command and detail. The command is the
+/// first backticked span of what is asked ("wants to run `x`"), looked for
+/// only before the reviewer's note; the reviewer's reason is the detail, and
+/// with no command the detail is the whole question, reason included.
+fn approval_parts(words: &str) -> (Option<&str>, Option<String>) {
+    let (asked, reason) = match words.split_once(REVIEW_NOTE) {
+        Some((asked, reason)) => (asked, Some(reason.trim_end_matches(" Allow it?"))),
+        None => (words, None),
+    };
+    let command = asked.split('`').nth(1).filter(|c| !c.is_empty());
+    let detail = match (command, reason) {
+        (Some(_), Some(reason)) => Some(format!("Auto review flagged this: {reason}")),
+        (Some(_), None) => None,
+        (None, Some(reason)) => Some(format!(
+            "{} Auto review flagged this: {reason}",
+            asked.trim_end()
+        )),
+        (None, None) => Some(words.to_owned()),
+    };
+    (command, detail)
+}
+
 /// What the composer shows of a question: an approval (what it would do),
 /// or the page of questions not yet answered.
 fn ask_value(part: &Json, answered: usize) -> Option<Value> {
@@ -6209,12 +6235,13 @@ fn ask_value(part: &Json, answered: usize) -> Option<Value> {
             "Approve file change" => "Make this change?",
             _ => "Allow this?",
         };
-        // The command, when the question quotes one ("wants to run `x`").
-        let command = words.split('`').nth(1).filter(|c| !c.is_empty());
+        let (command, detail) = approval_parts(words);
         let mut fields = vec![("title", Value::from(title))];
-        match command {
-            Some(c) => fields.push(("command", Value::from(c))),
-            None => fields.push(("detail", Value::from(words))),
+        if let Some(c) = command {
+            fields.push(("command", Value::from(c)));
+        }
+        if let Some(d) = detail {
+            fields.push(("detail", Value::from(d.as_str())));
         }
         return Some(Value::record([
             ("request", Value::from(request)),
@@ -9087,5 +9114,44 @@ mod tests {
         chats.keep_let_go(Some(open(false)));
         chats.keep_let_go(Some(open(true)));
         assert!(chats.take_let_go("m").is_none(), "neither copy is kept");
+    }
+}
+
+#[cfg(test)]
+mod approval_parts_tests {
+    use super::approval_parts;
+
+    #[test]
+    fn a_command_keeps_the_reviewers_reason_as_detail() {
+        let (command, detail) = approval_parts(
+            "Grok wants to run `git push`. Auto review flagged this: Force-push to `main` is blocked. Allow it?",
+        );
+        assert_eq!(command, Some("git push"));
+        assert_eq!(
+            detail.as_deref(),
+            Some("Auto review flagged this: Force-push to `main` is blocked.")
+        );
+    }
+
+    #[test]
+    fn a_backticked_reason_is_not_taken_for_a_command() {
+        let (command, detail) = approval_parts(
+            "Grok wants to use Read .env. Auto review flagged this: reads `~/.ssh/id_rsa`. Allow it?",
+        );
+        assert_eq!(command, None);
+        assert_eq!(
+            detail.as_deref(),
+            Some("Grok wants to use Read .env. Auto review flagged this: reads `~/.ssh/id_rsa`.")
+        );
+    }
+
+    #[test]
+    fn plain_questions_are_unchanged() {
+        assert_eq!(
+            approval_parts("Grok wants to run `ls`. Allow it?"),
+            (Some("ls"), None)
+        );
+        let words = "Grok wants to modify a.rs. Allow it?";
+        assert_eq!(approval_parts(words), (None, Some(words.to_owned())));
     }
 }

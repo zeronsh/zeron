@@ -455,7 +455,8 @@ async fn grok_resume_only_agent_gets_the_mode_on_session_resume() {
         req.access = access;
         req.auto_approve = false;
         req.resume = Some("s-loaded".into());
-        req.env.insert("FAKE_RESUME_ONLY".into(), "1".into());
+        req.env
+            .insert("FAKE_RESUME_ONLY".into(), "s-loaded".into());
         let events = run_to_end(&harness(), req, controls).await;
         assert!(
             events.contains(&AgentEvent::TextDelta {

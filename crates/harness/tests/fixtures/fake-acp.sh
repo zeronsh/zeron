@@ -31,7 +31,7 @@ has "$line" '"protocolVersion":1' || exit 1
 has "$line" '"name":"zeron"' || exit 1
 has "$line" '"readTextFile":false' || exit 1
 INIT_LINE="$line"
-# FAKE_RESUME_ONLY: advertise session/resume instead of session/load.
+# FAKE_RESUME_ONLY=<session id>: advertise session/resume instead of session/load.
 LOAD_CAP='"loadSession":true'
 [ -n "$FAKE_RESUME_ONLY" ] && LOAD_CAP='"sessionCapabilities":{"resume":{}}'
 emit "{\"id\":$(rid "$line"),\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{$LOAD_CAP,\"_meta\":{\"availableCommands\":[{\"name\":\"compact\",\"description\":\"Compact the session\"},{\"name\":\"goal\",\"description\":\"Set a goal\",\"input\":{\"hint\":\"the goal\"}}]}},\"_meta\":{\"steering\":{\"supported\":true}}}}"
@@ -43,8 +43,14 @@ MODEL_API=0
 if has "$line" '"sessionId":"existing-grok-session"'; then
   MODEL_API=1
 fi
+# Resume-only, a session/new (a fresh start) is a failure.
+[ -n "$FAKE_RESUME_ONLY" ] && has "$line" '"method":"session/new"' && exit 1
 if has "$line" '"method":"session/load"' || has "$line" '"method":"session/resume"'; then
   [ -n "$FAKE_RESUME_ONLY" ] && has "$line" '"method":"session/load"' && exit 1
+  # Resume-only: it must be a resume of exactly the requested session.
+  if [ -n "$FAKE_RESUME_ONLY" ]; then
+    has "$line" "\"sessionId\":\"$FAKE_RESUME_ONLY\"" || exit 1
+  fi
   if has "$line" '"sessionId":"load-fail"'; then
     emit "{\"id\":$(rid "$line"),\"error\":{\"code\":-32602,\"message\":\"unknown session\"}}"
     read -r line || exit 1
@@ -152,8 +158,10 @@ case "$promptline" in
   read -r answer || exit 1
   if has "$answer" '"optionId":"no"'; then
     update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"declined"}}'
-  else
+  elif has "$answer" '"outcome":"selected"' && has "$answer" '"optionId":"once"'; then
     update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"allowed"}}'
+  else
+    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"unexpected answer"}}'
   fi
   emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
   ;;
