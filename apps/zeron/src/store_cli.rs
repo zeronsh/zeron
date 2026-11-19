@@ -113,10 +113,10 @@ fn deploy_token() -> anyhow::Result<Option<DeployToken>> {
 }
 
 /// Run `command` here when it needs no running Zeron: `check` always, and
-/// with `ZERON_DEPLOY_TOKEN` set, `publish` and `status`: all a deploy token
-/// may do, so a leaked one can add an unverified version, which review
-/// reads, and nothing else. `Ok(Some(command))` hands it back for the
-/// running Zeron and its signed-in session.
+/// with `ZERON_DEPLOY_TOKEN` set, `publish`: all a deploy token may do, so
+/// a leaked one can add an unverified version, which review reads, and
+/// nothing else (not even read the account's plugins). `Ok(Some(command))`
+/// hands it back for the running Zeron and its signed-in session.
 pub async fn standalone(command: PluginCommand, data_dir: &Path) -> anyhow::Result<Option<PluginCommand>> {
     if let PluginCommand::Check { target } = &command {
         let prepared = read(&folder(target, data_dir)?)?;
@@ -127,8 +127,7 @@ pub async fn standalone(command: PluginCommand, data_dir: &Path) -> anyhow::Resu
         out!("{} {} meets the store's rules.", prepared.manifest.id, prepared.manifest.version);
         return Ok(None);
     }
-    let needs_store = matches!(command, PluginCommand::Publish { .. } | PluginCommand::Status { .. });
-    if !needs_store {
+    if !matches!(command, PluginCommand::Publish { .. }) {
         return Ok(Some(command));
     }
     let Some(token) = deploy_token()? else { return Ok(Some(command)) };
@@ -139,23 +138,19 @@ pub async fn standalone(command: PluginCommand, data_dir: &Path) -> anyhow::Resu
     match command {
         PluginCommand::Publish { target, dry_run } => {
             let mut prepared = read(&folder(&target, data_dir)?)?;
-            // Newer than what the store has (a deploy token reads its
-            // plugins' state), asked only of a plugin that meets the rules here; the
-            // store has the last word if it can't be asked.
-            let asked = if prepared.ok() { Some(store.my_plugins(&caller).await) } else { None };
-            match asked.unwrap_or_else(|| Err(String::new())) {
-                Ok(mine) => {
-                    let versions = mine["plugins"].as_array().into_iter().flatten().find(|p| p["id"] == prepared.manifest.id.as_str()).map(|p| p["versions"].clone());
-                    if let Some(Value::Array(versions)) = versions
-                        && let Some(problem) = publish::newer_problem(&prepared.manifest.version, &versions)
-                    {
-                        prepared.problems.push(problem);
+            // Newer than what the store lists of it (its public versions:
+            // a token reads nothing of the account's), asked only of a
+            // plugin that meets the rules here. The store has the last word:
+            // on what it doesn't list, and if it can't be asked.
+            if prepared.ok() {
+                match public_versions(&store, &prepared.manifest.id).await {
+                    Ok(versions) => {
+                        if let Some(problem) = publish::newer_problem(&prepared.manifest.version, &versions) {
+                            prepared.problems.push(problem);
+                        }
                     }
+                    Err(_) => eprintln!("note: couldn't ask the store which versions it has: it has the last word on whether this one is newer"),
                 }
-                Err(error) if !error.is_empty() => {
-                    eprintln!("note: couldn't ask the store which versions it has: it has the last word on whether this one is newer")
-                }
-                Err(_) => {}
             }
             say(&prepared);
             if !prepared.ok() {
@@ -170,10 +165,30 @@ pub async fn standalone(command: PluginCommand, data_dir: &Path) -> anyhow::Resu
             let reply = store.publish(&prepared.manifest.id, raw, &caller).await.map_err(|(e, _)| failed(&e))?;
             submitted(&what, &reply, &store.page_url(&prepared.manifest.id));
         }
-        PluginCommand::Status { id } => print_status(&store.my_plugins(&caller).await.map_err(|e| failed(&e))?, id.as_deref()),
-        _ => unreachable!("only publish and status get here"),
+        _ => unreachable!("only publish gets here"),
     }
     Ok(None)
+}
+
+/// Every version of `id` the store lists publicly (listed and yanked, the
+/// newest first), page by page (at most 20 of 50): none when it lists none
+/// (a plugin's first version, or one it doesn't show).
+async fn public_versions(store: &StoreClient, id: &str) -> Result<Vec<Value>, String> {
+    let mut all = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..20 {
+        let page = match store.versions(id, cursor.as_deref(), Some(50), &Caller::Anonymous).await {
+            Ok(page) => page,
+            Err(error) if install::reason_of(&error) == Some(zeron_engine::plugins::store::client::reason::NOT_IN_STORE) => return Ok(all),
+            Err(error) => return Err(error),
+        };
+        all.extend(page["versions"].as_array().cloned().unwrap_or_default());
+        match page["next_cursor"].as_str().filter(|c| !c.is_empty()) {
+            Some(next) => cursor = Some(next.to_owned()),
+            None => break,
+        }
+    }
+    Ok(all)
 }
 
 /// Why `command` can't run without the running Zeron, when it can't: one
@@ -183,11 +198,12 @@ pub fn needs_zeron(command: &PluginCommand) -> String {
         PluginCommand::Yank { .. } => "yank",
         PluginCommand::Unyank { .. } => "unyank",
         PluginCommand::Token { .. } => "token",
+        PluginCommand::Status { .. } => "status",
         _ => "publish",
     };
     if what != "publish" && std::env::var(deploy_token::ENV).is_ok_and(|s| !s.trim().is_empty()) {
         format!(
-            "`zeron plugin {what}` needs Zeron running here and signed in: a deploy token only publishes and reads status ({} can't do this)",
+            "`zeron plugin {what}` needs Zeron running here and signed in: a deploy token only publishes ({} can't do this)",
             deploy_token::ENV
         )
     } else if what == "publish" {

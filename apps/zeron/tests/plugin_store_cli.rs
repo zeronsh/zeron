@@ -112,28 +112,32 @@ async fn ci_checks_and_publishes_with_a_deploy_token() {
     assert_eq!(again.status.code(), Some(1), "{}", text(&again));
     assert!(text(&again).contains("error: version_exists"));
 
-    // status and yank, as the deploy token.
-    let status = run.zeron(&store, Some(&secret), &["status"]).await;
-    assert_eq!(status.status.code(), Some(0), "{}", text(&status));
-    assert!(text(&status).contains("focus-board\n  1.0.0  listed  not verified"), "{}", text(&status));
-    // A deploy token publishes and reads status, nothing else: yank, unyank
-    // and tokens are the signed-in person's (2, said plainly).
+    // A deploy token publishes, nothing else: status, yank, unyank and
+    // tokens are the signed-in person's (2, said plainly).
     let requests = store.state.lock().unwrap().requests.len();
-    for args in [&["yank", "focus-board", "1.0.0"][..], &["unyank", "focus-board", "1.0.0"], &["token", "list"]] {
+    for args in [&["status"][..], &["yank", "focus-board", "1.0.0"], &["unyank", "focus-board", "1.0.0"], &["token", "list"]] {
         let out = run.zeron(&store, Some(&secret), args).await;
         assert_eq!(out.status.code(), Some(2), "{args:?}: {}", text(&out));
-        assert!(text(&out).contains("a deploy token only publishes and reads status"), "{}", text(&out));
+        assert!(text(&out).contains("needs Zeron running here and signed in: a deploy token only publishes"), "{}", text(&out));
     }
     assert_eq!(store.state.lock().unwrap().requests.len(), requests, "nothing was sent");
 
     // 1.1.0 out before anyone verified 1.0.0: 1.0.0 takes no new installs,
-    // and both the publish and status say so.
+    // and the publish says so.
     plugin(&folder, "1.1.0");
     let newer = run.zeron(&store, Some(&secret), &["publish", &folder_arg]).await;
     assert_eq!(newer.status.code(), Some(0), "{}", text(&newer));
     assert!(text(&newer).contains("1.0.0 no longer takes new installs: 1.1.0 replaced it before it was verified"), "{}", text(&newer));
-    let status = run.zeron(&store, Some(&secret), &["status"]).await;
-    assert!(text(&status).contains("  1.0.0  yanked  not verified: superseded by 1.1.0"), "{}", text(&status));
+    // An older version: refused before it's sent, by the store's public
+    // list of the plugin's versions (the token reads nothing of yours).
+    plugin(&folder, "1.0.5");
+    let sent = store.state.lock().unwrap().submitted.len();
+    let older = run.zeron(&store, Some(&secret), &["publish", &folder_arg]).await;
+    assert_eq!(older.status.code(), Some(1), "{}", text(&older));
+    assert!(text(&older).contains("error: not_newer (version): Version 1.0.5 isn't later than 1.1.0"), "{}", text(&older));
+    assert_eq!(store.state.lock().unwrap().submitted.len(), sent, "nothing was sent");
+    let asked = store.state.lock().unwrap().requests.iter().rev().find(|r| r.1.starts_with("/store/v1/plugins/focus-board/versions?")).cloned().unwrap();
+    assert!(asked.2.is_none(), "the public list, asked with no token: {asked:?}");
 
     // "Zeron" in a listing is nobody's concern: published as any other.
     plugin(&folder, "1.2.0");

@@ -181,9 +181,8 @@ pub enum PluginCommand {
         dry_run: bool,
     },
     /// Your plugins in the store: each version, whether Zeron has verified
-    /// it, and a reviewer's reason when it declined to. With
-    /// ZERON_DEPLOY_TOKEN, the plugins that token may publish (and no Zeron
-    /// needs to be running).
+    /// it, and a reviewer's reason when it declined to. Through the running
+    /// Zeron, with your session: never a deploy token's.
     Status {
         /// Only this plugin.
         id: Option<String>,

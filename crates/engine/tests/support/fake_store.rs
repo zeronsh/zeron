@@ -406,9 +406,8 @@ impl FakeStore {
     /// Who a request is: a session's username, or a deploy token's owner
     /// (with its scope), as the edge reads one: its form and checksum, then
     /// its hash: unknown, revoked or expired answer 401 `invalid_token`; a
-    /// token only publishes and reads its plugins (else 401
-    /// `session_required`), and only plugins in its scope (else, at publish,
-    /// 403 `token_not_allowed`).
+    /// token only publishes (else 401 `session_required`), and only plugins
+    /// in its scope (else 403 `token_not_allowed`).
     fn who(&self, method: &str, path: &str, headers: &BTreeMap<String, String>) -> Result<Option<Who>, (u16, Value)> {
         let Some(auth) = headers.get("authorization") else { return Ok(None) };
         let Some(bearer) = auth.strip_prefix("Bearer ") else {
@@ -426,7 +425,7 @@ impl FakeStore {
         drop(state);
         let bare = path.split('?').next().unwrap_or(path);
         let bare_parts: Vec<&str> = bare.trim_start_matches('/').split('/').collect();
-        let allowed = matches!((method, bare_parts.as_slice()), ("POST", ["store", "v1", "plugins", _, "versions"]) | ("GET", ["store", "v1", "me", "plugins"]));
+        let allowed = matches!((method, bare_parts.as_slice()), ("POST", ["store", "v1", "plugins", _, "versions"]));
         if !allowed {
             return Err((401, json!({ "error": "session_required", "message": "A deploy token only publishes." })));
         }

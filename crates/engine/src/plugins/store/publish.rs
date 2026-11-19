@@ -158,8 +158,8 @@ impl Prepared {
 }
 
 /// Whether `version` is one the store will take beside the versions it
-/// already has of the plugin (`versions`: `/me/plugins`' `[{version,
-/// status}]`), as amendment 21 says: equal precedence to any version
+/// already has of the plugin (`versions`: `[{version, status}]`, the
+/// owner's view or its public list), as amendment 21 says: equal precedence to any version
 /// submitted is `version_exists`; a release must be above every release
 /// that isn't rejected or withdrawn, a pre-release above every version that
 /// isn't, else `not_newer`. (The store has the last word: this is what it

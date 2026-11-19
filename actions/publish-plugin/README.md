@@ -35,8 +35,8 @@ marked verified once Zeron has read it. It installs Zeron's Linux command line
        token: ${{ secrets.ZERON_DEPLOY_TOKEN }}
    ```
 
-A deploy token can publish new versions of its plugins and read their state,
-nothing else: yanking and managing tokens are yours, from your machine. A
+A deploy token can publish new versions of its plugins, nothing else:
+reading their state, yanking and managing tokens are yours, from your machine. A
 version it publishes is live for everyone at once, so treat the token like a
 password: if it leaks, whoever has it can publish versions of those plugins
 that people can install (marked not verified until Zeron reads them; devices
