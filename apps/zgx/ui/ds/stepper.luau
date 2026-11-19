@@ -74,6 +74,8 @@ return ui.component(function(props: Props): Node
 			hover = { bg = "$hover", color = "$text.primary" },
 			active = { bg = "$pressed", color = "$text.primary" },
 			disabled = at_end,
+			-- (Dimmed at its end, not again with the frame `field.wrap` dims.)
+			dim = at_end,
 			opacity = function()
 				return if at_end() then 0.35 else 1
 			end,

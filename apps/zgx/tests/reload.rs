@@ -49,6 +49,8 @@ const CALLS: &[&str] = &[
     "account.revoke_invite",
     "account.resend_invite",
     "account.rename_org",
+    "account.keeps_chats_local",
+    "account.keep_chats_local",
     "agents.complete",
     "agents.install",
     "agents.remove",
@@ -102,6 +104,7 @@ const INVOKES: &[&str] = &[
     "app.open_main",
     "appearance",
     "chat.catalog",
+    "chat.catalog_on",
     "chat.open",
     "done",
     "files.unwatch",
@@ -760,18 +763,21 @@ fn a_reload_keeps_the_sidebar_and_settings_where_they_were_scrolled() {
     // Settings' page, scrolled down.
     assert!(app.host.run_command("shell.settings"));
     app.frames(60);
-    for _ in 0..4 {
-        // (At a heading in view: the page runs on below the window.)
+    // (Scrolled at a heading in view: the page runs on below the window.)
+    let heading_in_view = |app: &mut TestApp| {
         let target = zgx_script::driver::parse("#settings-page >> role:heading").unwrap();
         app.ui.prepare_frame();
         let found = zgx_script::driver::find_all(&app.ui, &app.handle, &target).unwrap_or_default();
-        let id = found
+        found
             .into_iter()
             .find(|&id| {
                 let b = app.ui.scene.borrow().hit_bounds(id);
                 b.y > 40. && b.y < 560.
             })
-            .expect("a heading in view");
+            .expect("a heading in view")
+    };
+    for _ in 0..4 {
+        let id = heading_in_view(&mut app);
         zgx_script::driver::scroll(&mut app.ui, id, 150.);
         app.settle();
         app.frames(4);
@@ -793,7 +799,9 @@ fn a_reload_keeps_the_sidebar_and_settings_where_they_were_scrolled() {
     app.frames(30);
     assert_eq!(on_screen(&mut app, headings), before, "once settled after the reload: settings' page moved");
     let kept = scroll(&app);
-    let heading = app.target("#settings-page >> role:heading \"Links\"").expect("a heading in view");
+    // (Any heading in view: General's Links section, which this scrolled
+    // at, went with "Open pull requests in", 0d8a6eb3f.)
+    let heading = heading_in_view(&mut app);
     zgx_script::driver::scroll(&mut app.ui, heading, -100.);
     app.settle();
     app.frames(30);
