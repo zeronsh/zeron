@@ -869,9 +869,9 @@ pub fn prepare_live() -> PathBuf {
 pub const USE_ZERON_TEMPLATE: &str = "zeron.use-zeron-template";
 /// The host's own "Keep <template>…": the keep sheet for the one in preview.
 pub const KEEP_TEMPLATE: &str = "zeron.keep-template";
-/// The host's own "Deploy keys" (a publish notice's button): Settings →
-/// Plugins → Yours, where the account's deploy keys are.
-pub const OPEN_DEPLOY_KEYS: &str = "zeron.open-deploy-keys";
+/// The host's own "Deploy tokens" (a publish notice's button): Settings →
+/// Plugins → Yours, where the account's deploy tokens are.
+pub const OPEN_DEPLOY_TOKENS: &str = "zeron.open-deploy-tokens";
 
 /// One of the host's own commands (its menu items and its toasts' buttons:
 /// never a script's, `zeron.` being the host's).
@@ -891,7 +891,7 @@ pub fn host_command(id: &str) {
                 template_consent::keep(&b, &p.id);
             }
         }
-        OPEN_DEPLOY_KEYS => crate::links::show(crate::links::Target::PluginsTab("yours")),
+        OPEN_DEPLOY_TOKENS => crate::links::show(crate::links::Target::PluginsTab("yours")),
         other => eprintln!("zeron-zgx: no host command {other}"),
     }
 }
@@ -1445,7 +1445,7 @@ impl Bridge {
             self.store_updates.set(json_value(&frame["store_updates"]));
         }
         // Versions of the account's plugins published somewhere other than
-        // here (another device, a deploy key): said once each, staying, and
+        // here (another device, a deploy token): said once each, staying, and
         // let go of at the engine once said (it keeps them until then, so
         // one published while Zeron was closed is said when it opens).
         let mut said: Vec<String> = Vec::new();
@@ -1457,7 +1457,7 @@ impl Bridge {
                         name,
                         notice["version"].as_str().unwrap_or(""),
                         notice["via"].as_str().unwrap_or(""),
-                        notice["key_name"].as_str(),
+                        notice["token_name"].as_str(),
                         notice["words"].as_str().unwrap_or(""),
                     ));
                 }

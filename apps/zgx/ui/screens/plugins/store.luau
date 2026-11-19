@@ -37,12 +37,13 @@
 --                             field?, path?, words } }, warnings, listing,
 --                             notes, package = { files, bytes }, ticket? }
 --   store.publish(id, hash, ticket)  { id, version, status, checks }
---   store.keys()              { keys = { Key } }, the account's
---   store.create_key { name, scope, expires? }   { key, secret } once: a fresh
---                             sign-in first (`scope`: { all = true } or
---                             { plugins = { ids } })
+--   store.tokens()            { tokens = { Token } }, the account's deploy
+--                             tokens (never a token itself)
+--   store.create_token { name, scope, expires? }   { token = Token, secret },
+--                             `secret` the token this once: a fresh sign-in first
+--                             (`scope`: { all = true } or { plugins = { ids } })
 --   store.cancel_step_up()    stops waiting for that sign-in
---   store.revoke_key(key)
+--   store.revoke_token(id)
 --
 -- Shapes (the plan's contract and its amendments,
 -- docs/plans/2026-11-17-plugin-store.md):
@@ -56,7 +57,8 @@
 --             installed? }
 --   Version { version, status, published_at, notes?, engines?, yanked?,
 --             review? = { state, reason?, message?, decided_at? } }
---   Key     { key, name, created_at, last_used_at?, expires_at?, revoked_at? }
+--   Token   { id, short, name, scope, created_at, last_used_at?,
+--             last_used_plugin?, expires_at?, revoked_at? }
 
 local M = {}
 
@@ -168,21 +170,26 @@ function M.publish(id: string, hash: string, ticket: string): any
 	return ui.call("plugins.store.publish", { id = id, hash = hash, ticket = ticket })
 end
 
-function M.keys(): any
-	return ui.call("plugins.store.keys", nil)
+-- The account's deploy tokens ({ tokens }: each { id, short, name, scope,
+-- created_at, last_used_at, last_used_plugin, expires_at }; never the token).
+function M.tokens(): any
+	return ui.call("plugins.store.tokens", nil)
 end
 
 export type Scope = { all: boolean?, plugins: { string }? }
-function M.create_key(args: { name: string, scope: Scope, expires: number? }): any
-	return ui.call("plugins.store.create_key", args)
+-- A new one, after a fresh sign-in ({ ok, token = { id, short, name,
+-- scope, expires_at, created_at }, secret }: `secret` the token, `zdt_…`,
+-- this once).
+function M.create_token(args: { name: string, scope: Scope, expires: number? }): any
+	return ui.call("plugins.store.create_token", args)
 end
 
 function M.cancel_step_up()
 	ui.invoke("plugins.store.cancel_step_up", nil)
 end
 
-function M.revoke_key(key: string): any
-	return ui.call("plugins.store.revoke_key", { key = key })
+function M.revoke_token(id: string): any
+	return ui.call("plugins.store.revoke_token", { id = id })
 end
 
 -- What a report may say is wrong (the store's list).

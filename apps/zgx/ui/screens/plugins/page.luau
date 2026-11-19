@@ -855,7 +855,7 @@ local function catalog(): Node
 			end,
 		},
 		-- Under Installed's card, which updates its store plugins take here;
-		-- under Yours', the account's deploy keys (screens/plugins/keys).
+		-- under Yours', the account's deploy tokens (screens/plugins/keys).
 		below = {
 			installed = store_updates_section,
 			yours = function(): Node

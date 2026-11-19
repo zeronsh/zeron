@@ -253,7 +253,7 @@ mod tests {
         assert_eq!(last(), (None, Some("providers".into())));
     }
 
-    /// A notice's "Deploy keys" opens Settings → Plugins on Yours.
+    /// A notice's "Deploy tokens" opens Settings → Plugins on Yours.
     #[test]
     fn the_host_opens_a_plugins_tab() {
         show(Target::PluginsTab("yours"));

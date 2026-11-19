@@ -164,18 +164,18 @@ fn a_report_carries_its_reason_and_words_and_only_the_store_s_reasons() {
 }
 
 #[test]
-fn a_deploy_key_that_isn_t_allowed_says_so() {
+fn a_deploy_token_that_isn_t_allowed_says_so() {
     let (out, asked) = run(
-        r#"ui.call("plugins.store.create_key", { name = "CI", scope = { plugins = { "focus", "timer" } } })"#,
+        r#"ui.call("plugins.store.create_token", { name = "CI", scope = { plugins = { "focus", "timer" } } })"#,
         json!({ "ok": false, "error": "not_owner", "message": "Not yours: timer" }),
     );
-    assert_eq!(asked[0], ("CreateDeployKey".into(), json!({ "name": "CI", "scope": { "plugins": ["focus", "timer"] } }), None));
+    assert_eq!(asked[0], ("CreateDeployToken".into(), json!({ "name": "CI", "scope": { "plugins": ["focus", "timer"] } }), None));
     assert_eq!(out, "err:not_owner: Not yours: timer");
 }
 
 #[test]
-fn a_deploy_key_s_scope_is_all_or_one_to_fifty_store_ids_each_once() {
-    let (_, asked) = run(r#"ui.call("plugins.store.create_key", { name = "CI", scope = { all = true } })"#, json!({ "ok": true }));
+fn a_deploy_token_s_scope_is_all_or_one_to_fifty_store_ids_each_once() {
+    let (_, asked) = run(r#"ui.call("plugins.store.create_token", { name = "CI", scope = { all = true } })"#, json!({ "ok": true }));
     assert_eq!(asked[0].1, json!({ "name": "CI", "scope": { "all": true } }));
     for bad in [
         r#"{ name = "CI" }"#,
@@ -184,36 +184,36 @@ fn a_deploy_key_s_scope_is_all_or_one_to_fifty_store_ids_each_once() {
         r#"{ name = "CI", scope = { plugins = { "../etc" } } }"#,
         r#"{ name = "CI", scope = { all = false } }"#,
     ] {
-        let (out, asked) = run(&format!(r#"ui.call("plugins.store.create_key", {bad})"#), json!({ "ok": true }));
+        let (out, asked) = run(&format!(r#"ui.call("plugins.store.create_token", {bad})"#), json!({ "ok": true }));
         assert_eq!(out, "err:invalid_scope", "{bad}");
         assert!(asked.is_empty(), "{bad}");
     }
-    // The account's keys, and one revoked by its key alone.
-    let (_, asked) = run(r#"ui.call("plugins.store.keys", nil)"#, json!({ "keys": [] }));
-    assert_eq!(asked[0], ("ListDeployKeys".into(), json!({}), None));
-    let (_, asked) = run(r#"ui.call("plugins.store.revoke_key", { key = "k_gh" })"#, json!({ "ok": true }));
-    assert_eq!(asked[0], ("RevokeDeployKey".into(), json!({ "key": "k_gh" }), None));
+    // The account's tokens, and one revoked by its id alone.
+    let (_, asked) = run(r#"ui.call("plugins.store.tokens", nil)"#, json!({ "tokens": [] }));
+    assert_eq!(asked[0], ("ListDeployTokens".into(), json!({}), None));
+    let (_, asked) = run(r#"ui.call("plugins.store.revoke_token", { id = "t_gh" })"#, json!({ "ok": true }));
+    assert_eq!(asked[0], ("RevokeDeployToken".into(), json!({ "id": "t_gh" }), None));
 }
 
 #[test]
-fn a_deploy_key_s_sign_in_is_begun_for_a_deploy_key() {
+fn a_deploy_token_s_sign_in_is_begun_for_a_deploy_token() {
     // (Every reply says a sign-in is needed, its page no https one: the
     // browser never opens, the call ends there.)
     let (out, asked) = run(
-        r#"ui.call("plugins.store.create_key", { name = "CI", scope = { all = true } })"#,
+        r#"ui.call("plugins.store.create_token", { name = "CI", scope = { all = true } })"#,
         json!({ "ok": false, "error": "step_up_required", "url": "about:blank" }),
     );
     let methods: Vec<&str> = asked.iter().map(|(m, _, _)| m.as_str()).collect();
-    assert_eq!(methods, ["CreateDeployKey", "StepUp"]);
-    assert_eq!(asked[1].1, json!({ "for": "deploy_key" }));
+    assert_eq!(methods, ["CreateDeployToken", "StepUp"]);
+    assert_eq!(asked[1].1, json!({ "for": "deploy_token" }));
     assert_eq!(out, "err:failed");
 }
 
 #[test]
 fn a_preview_reads_the_catalog_but_never_your_own_account() {
     crate::plugins::preview::set(Some(crate::plugins::preview::Preview { id: "dusk".into(), name: "Dusk".into() }));
-    for call in [r#"ui.call("plugins.store.mine", nil)"#, r#"ui.call("plugins.store.keys", "focus")"#] {
-        let (out, asked) = run(call, json!({ "plugins": [], "keys": [] }));
+    for call in [r#"ui.call("plugins.store.mine", nil)"#, r#"ui.call("plugins.store.tokens", "focus")"#] {
+        let (out, asked) = run(call, json!({ "plugins": [], "tokens": [] }));
         assert!(out.starts_with("err:Dusk is a preview."), "{call}: {out}");
         assert!(asked.is_empty(), "{call} reached the engine: {asked:?}");
     }

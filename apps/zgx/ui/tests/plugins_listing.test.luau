@@ -982,3 +982,17 @@ test("a take-down of a plugin whose page is open reads its page again", function
 	local after = select(2, string.gsub(calls(app), "detail:focus%-timer", ""))
 	expect(after > before).to_be(true)
 end)
+
+test("a store plugin whose version came from CI with a deploy token is its publisher's, never Unknown author", function()
+	local app = mount("plugins_store_fixture.luau")
+	app:resize(1000, 900)
+	app:frames(10)
+	app:command("store.token_published")
+	settle(app)
+	-- (Not signed by the author's key: the store's record is trusted, and
+	-- the engine reports its publisher as its author.)
+	local tree = app:tree("#catalog-card")
+	expect(tree).to_contain('text "Branch badge"')
+	expect(tree).to_contain("by @grace")
+	expect(tree).never.to_contain("Unknown author")
+end)
