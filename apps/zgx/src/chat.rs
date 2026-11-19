@@ -818,10 +818,21 @@ struct Remote {
 /// A catalog looked at ahead of time, kept unless the device has one: one
 /// short of an agent's models gives way to a whole one.
 fn keep_known(known: &mut HashMap<String, Remote>, remote: Remote) {
-    if known.get(&remote.device).is_none_or(|r| !r.ready && remote.ready) {
-        known.insert(remote.device.clone(), remote);
+    let key = known_key(&remote.device).to_owned();
+    if known.get(&key).is_none_or(|r| !r.ready && remote.ready) {
+        known.insert(key, remote);
     }
 }
+
+/// Where `device`'s catalog is kept: every Cloud machine's is Cloud's (the
+/// engine answers for them all alike, from Cloud's accounts), so one looked
+/// at for any is every Cloud chat's, from its first frame.
+fn known_key(device: &str) -> &str {
+    if device == CLOUD || zeron_proto::is_cloud_device(device, "") { CLOUD } else { device }
+}
+
+/// The device the engine answers Cloud's catalog for.
+const CLOUD: &str = "cloud";
 
 #[derive(Clone, Copy, Default, PartialEq)]
 enum CatalogState {
@@ -1708,7 +1719,10 @@ impl Chats {
         if self.remote.borrow().as_ref().is_some_and(|r| r.device == device) {
             return;
         }
-        let known = self.known_remotes.borrow().get(device).cloned();
+        let known = self.known_remotes.borrow().get(known_key(device)).cloned().map(|mut known| {
+            known.device = device.to_owned();
+            known
+        });
         *self.remote.borrow_mut() = Some(known.unwrap_or_else(|| Remote {
             device: device.to_owned(),
             harnesses: Vec::new(),
@@ -1850,7 +1864,7 @@ impl Chats {
                         // while it's looked at again.
                         let mut kept = r.clone();
                         kept.ready = whole.get();
-                        me.known_remotes.borrow_mut().insert(device.clone(), kept);
+                        me.known_remotes.borrow_mut().insert(known_key(&device).to_owned(), kept);
                     }
                 }
                 me.publish_catalog();
@@ -1859,12 +1873,18 @@ impl Chats {
     }
 
     /// The other devices' catalogs looked at ahead of time, one at a time so
-    /// launch doesn't feel it, so a chat on one opens with its model known.
+    /// launch doesn't feel it, so a chat on one opens with its model known:
+    /// Cloud's first, with its accounts (one catalog and one set of accounts
+    /// for every Cloud chat, answered by this engine without waking any).
     async fn look_ahead(self: &Rc<Self>) {
         zgx::timer::sleep(LOOK_AHEAD_AFTER).await;
-        for device in crate::sessions::other_devices_online() {
+        let cloud = crate::sessions::uses_cloud().then(|| CLOUD.to_owned());
+        if cloud.is_some() {
+            crate::agents::look_ahead_device(CLOUD);
+        }
+        for device in cloud.into_iter().chain(crate::sessions::other_devices_online()) {
             // (One kept short of an agent's models is looked at again.)
-            if self.known_remotes.borrow().get(&device).is_some_and(|r| r.ready) {
+            if self.known_remotes.borrow().get(known_key(&device)).is_some_and(|r| r.ready) {
                 continue;
             }
             let params = json!({ "targetDeviceId": device, "includeRegistry": true });
@@ -7595,6 +7615,27 @@ mod tests {
         keep_known(&mut known, remote(true, "later"));
         keep_known(&mut known, remote(false, "later"));
         assert_eq!(known["laptop"].models["codex"][0]["id"], "whole");
+    }
+
+    /// Cloud's catalog, looked at for Cloud itself or for any chat's
+    /// machine, is kept once, as every Cloud chat's; another device's is its
+    /// own.
+    #[test]
+    fn every_cloud_chat_shares_cloud_s_one_catalog() {
+        assert_eq!(known_key("cloud"), "cloud");
+        assert_eq!(known_key("cloud-0929bb0c-b8d5-471c-bb9f-4c9d0017d910"), "cloud");
+        assert_eq!(known_key("a1720f07-d07e-4637-b2f4-dfe950814e42"), "a1720f07-d07e-4637-b2f4-dfe950814e42");
+        let mut known = HashMap::new();
+        let remote = |device: &str| Remote {
+            device: device.into(),
+            harnesses: vec![json!({ "id": "antigravity" })],
+            models: HashMap::new(),
+            ready: true,
+        };
+        keep_known(&mut known, remote("cloud"));
+        keep_known(&mut known, remote("cloud-1"));
+        assert_eq!(known.len(), 1);
+        assert!(known["cloud"].ready);
     }
 
     /// A chat on another device names its model before (or without) that

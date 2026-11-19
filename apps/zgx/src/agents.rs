@@ -224,6 +224,12 @@ thread_local! {
 }
 
 /// Keeps the icons a harness list carries (agents from the ACP registry).
+/// `key`'s accounts (`"cloud"`: Cloud's) looked at ahead of a composer on it,
+/// so one opens with its account and usage known.
+pub(crate) fn look_ahead_device(key: &str) {
+    AGENTS.with(Rc::clone).watch_device(key.to_owned());
+}
+
 pub(crate) fn remember_icons(list: &[Json]) {
     remember(list.iter().filter_map(|h| Some((h["id"].as_str()?.to_owned(), h["icon"].as_str()?.to_owned()))));
 }
