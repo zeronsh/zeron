@@ -724,43 +724,43 @@ test("Installed's rows built fresh at each width are as the same width reached b
 end)
 
 
-test("a giving row crossing a step moves its parts, never builds them again, and hides nothing", function()
+test("a giving row crossing a step moves its parts and builds nothing again", function()
 	local app = mount("plugins_fixture.luau")
 	app:command("update_found")
-	-- Focus's name, version, Update and switch, by their node ids.
+	-- Every node in the card, by its id, shown or out of layout.
 	local function ids(): string
-		local tree = app:tree("#catalog-card")
 		local out = {}
-		for _, pattern in { 'text "Focus"', 'switch "Focus"', 'button "Remove Focus"', 'button "Update"' } do
-			table.insert(out, tree:match("@(%d+) " .. pattern:gsub("%p", "%%%0")) or "none")
+		for id in app:tree("#catalog-card"):gmatch("@(%d+)") do
+			table.insert(out, id)
 		end
-		local versions = {}
-		for id in tree:gmatch('@(%d+) text "1%.0%.0"') do
-			table.insert(versions, id)
-		end
-		table.insert(out, versions[2] or "none")
+		table.sort(out)
 		return table.concat(out, " ")
 	end
-	local function hidden(): number
-		local n = 0
+	-- What's shown of Focus: its name, switch, Remove and Update, each once.
+	local function shown(): string
+		local n = {}
 		for line in app:tree("#catalog-card"):gmatch("[^\n]+") do
-			if line:find(" hidden", 1, true) then
-				n += 1
+			if not line:find(" hidden", 1, true) then
+				for _, pattern in { 'text "Focus"', 'switch "Focus"', 'button "Remove Focus"', 'button "Update"' } do
+					if line:find(pattern, 1, true) then
+						n[pattern] = (n[pattern] or 0) + 1
+					end
+				end
 			end
 		end
-		return n
+		return `{n['text "Focus"']} {n['switch "Focus"']} {n['button "Remove Focus"']} {n['button "Update"']}`
 	end
 	app:resize(1000, 900)
 	app:frames(30)
 	local wide = ids()
-	expect(wide:find("none", 1, true)).to_be(nil)
-	expect(hidden()).to_be(0)
-	-- Through every step and back: the same nodes, nothing kept hidden.
+	expect(shown()).to_be("1 1 1 1")
+	-- Through every step and back: the same nodes, each part shown once.
 	for _, width in { 470, 400, 330, 260, 200, 330, 1000 } do
 		app:resize(width, 900)
 		app:frames(25)
 		expect(`{width} {ids()}`).to_be(`{width} {wide}`)
-		expect(`{width} hidden {hidden()}`).to_be(`{width} hidden 0`)
+		expect(`{width} {shown()}`).to_be(`{width} 1 1 1 1`)
 	end
 end)
+
 

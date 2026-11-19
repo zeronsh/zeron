@@ -325,12 +325,10 @@ local Control = ui.component(function(props: { now: State<any>, on: string?, pla
 	return ui.row {
 		gap = "$space.2",
 		items = "center",
-		-- (In a giving row, its place there: ds/settings GiveWayPlace.)
+		-- (In a giving row, drawn beside the text and under it, out of
+		-- layout where it isn't: ds/settings GiveWayPlace.)
+		hidden = if place then place.hidden else nil,
 		on_resize = if place then place.on_resize else nil,
-		row_start = if place then place.row_start else nil,
-		col_start = if place then place.col_start else nil,
-		col_span = if place then place.col_span else nil,
-		mt = if place then place.mt else nil,
 		-- Its settings, when it's on here and has some: their page. (Its room
 		-- kept on every row, empty where there are none, so the versions line
 		-- up; under the text, where nothing lines up with it, no room where
@@ -341,9 +339,9 @@ local Control = ui.component(function(props: { now: State<any>, on: string?, pla
 				return (ui.theme.get("zeron.icon_button.sm") :: number?) or 22
 			end,
 			shrink = 0,
-			hidden = if place
+			hidden = if place and place.under
 				then function(): boolean
-					return place.under() and not has_settings()
+					return not has_settings()
 				end
 				else nil,
 			ui.show(has_settings, ds.IconButton {
@@ -552,17 +550,18 @@ local function row(p: state.Item, _i: number, now: State<any>): Node
 			-- shows: the badges under the text first, then Update under its
 			-- sentence, then the switch and Remove under it too.)
 			give_way = {
-				gives = function(): { Node }
+				gives = function(hidden: (() -> boolean)?): { Node }
 					return {
 						ui.show(function(): boolean
 							return words.unverified(now:get())
-						end, ds.Badge { ui.t("plugins.words.unverified"), tone = "warning", class = "plugin-unverified" }),
+						end, ds.Badge { ui.t("plugins.words.unverified"), tone = "warning", class = "plugin-unverified", hidden = hidden }),
 						ds.Badge {
 							function(): string
 								return now:get().version
 							end,
 							tone = "neutral",
 							tabular = true,
+							hidden = hidden,
 						},
 					}
 				end,

@@ -53,6 +53,9 @@ export type Props = {
 	-- Lit (a badge that's a link, under the pointer): a colour's wash and
 	-- ink stronger.
 	lit: (() -> boolean)?,
+	-- Out of layout and input, keeping its state (a row's badge that has
+	-- moved to its place under the text).
+	hidden: (boolean | () -> boolean)?,
 }
 
 -- How strong a badge's ink is on any colour (the sidebar's pull request
@@ -179,6 +182,7 @@ function M.Badge(props: Props): Node
 		border_color = if look == "outline" then ink else nil,
 		class = props.class,
 		max_w = props.max_w,
+		hidden = props.hidden,
 		tooltip = props.tooltip,
 		tooltip_delay = props.tooltip_delay,
 		label = props.label,
