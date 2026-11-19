@@ -7,9 +7,12 @@
  * - Publisher routes: a session bearer, a web session's cookie, or (to
  *   publish a version of a plugin in its scope, or read its account's
  *   plugins in its scope) a deploy token, `Authorization: Bearer zdt_…`
- *   (`tokenInScope` below). Every other route refuses a token before
- *   looking it up, so no route tells a live token from a dead one but by
- *   publishing with it.
+ *   (`tokenInScope` below). A token that isn't one (malformed, unknown,
+ *   revoked, expired, a deleted owner's) is 401 `invalid_token`; a live one
+ *   asking for what it may not (a plugin outside its scope or its
+ *   account's, a first version) is 403 `token_not_allowed`. Every other
+ *   route answers a token 401 `session_required` before looking it up, so
+ *   no route but these tells a live token from a dead one.
  * - Admin routes: a web session's cookie only (contract amendment 27), of an
  *   account holding the edge's `admin` role (roles.ts); never a bearer or a
  *   deploy token.
@@ -24,11 +27,12 @@ import type { Env } from "../env";
 import { jsonError } from "../http";
 import { SESSION_COOKIE, sendsCookie } from "../web-cookies";
 import { type DeployTokenScope, scopeHoldsPlugin, userDirectoryStub } from "../user-directory";
-import { bearerUser, cookieSession, forbidden, headerBearer, unauthenticated } from "./identity/callers";
+import { bearerUser, cookieSession, forbidden, headerBearer, sessionRequired, unauthenticated } from "./identity/callers";
 import { deployTokenHash, looksLikeDeployToken, parseDeployToken } from "./identity/deploy-token";
 
 export { BodyRefused, MAX_PUBLISH_BODY_BYTES, bodyStream, readBody } from "./identity/body";
 export { dropFromDeployTokens } from "./identity/deploy-tokens";
+export { sessionRequired } from "./identity/callers";
 export { withSessionCookie } from "../web-session";
 
 /**
@@ -82,13 +86,15 @@ export const tokenInScope = (publisher: Publisher, plugin: ScopedPlugin): boolea
       createdAt: plugin.created_at
     }));
 
-/** A deploy token refused, the same for every reason (malformed, unknown,
- * revoked, expired, out of scope, a first version, its account's plugin no
- * longer): nothing in it tells them apart, nor the token itself. */
-export const tokenRefused = (): Response => jsonError(401, "invalid_token", "This deploy token can't publish this plugin.");
+/** A deploy token that isn't one (malformed, a bad checksum, unknown,
+ * revoked, expired, a deleted owner's), the same for every reason, never
+ * quoting it. */
+export const invalidToken = (): Response => jsonError(401, "invalid_token", "This deploy token isn't valid: it may be mistyped, revoked or expired.");
 
-/** A deploy token where only a person may act: refused before it's looked up. */
-export const tokenNotAllowed = (): Response => jsonError(403, "token_not_allowed", "A deploy token can only publish.");
+/** A live deploy token asking for what it may not: a plugin outside its
+ * scope or its account's, or a plugin's first version. */
+export const tokenNotAllowed = (): Response => jsonError(403, "token_not_allowed", "This deploy token can't publish this plugin.");
+
 
 const usernameOf = async (env: Env, userId: string): Promise<string | null> =>
   (await userDirectoryStub(env)?.username(userId)) ?? null;
@@ -105,12 +111,12 @@ export const authenticatePublisher = async (req: Request, env: Env, tokens?: { r
     const token = headerBearer(req);
     if (!token) return unauthenticated();
     if (looksLikeDeployToken(token)) {
-      if (!tokens) return tokenNotAllowed();
+      if (!tokens) return sessionRequired();
       const parsed = parseDeployToken(token);
       const directory = userDirectoryStub(env);
-      if (!parsed || !directory) return tokenRefused();
+      if (!parsed || !directory) return invalidToken();
       const holder = await directory.deployTokenHolder(parsed.short, await deployTokenHash(token), tokens.usedFor);
-      if (!holder) return tokenRefused();
+      if (!holder) return invalidToken();
       return {
         userId: holder.userId,
         username: holder.username,
@@ -131,8 +137,12 @@ export const authenticatePublisher = async (req: Request, env: Env, tokens?: { r
 export const requireAdmin = async (req: Request, env: Env): Promise<{ userId: string } | Response> => {
   // Web session only (contract amendment 27): a bearer, which any local
   // process an engine hands its token to holds, skips the staff session's
-  // short lifetime, rotation and CSRF checks. A deploy token never is staff.
-  if (req.headers.get("authorization") !== null) return forbidden("Admin is by signing in on the web only.");
+  // short lifetime, rotation and CSRF checks. A deploy token never is staff,
+  // nor a session.
+  if (req.headers.get("authorization") !== null) {
+    const bearer = headerBearer(req);
+    return bearer !== undefined && looksLikeDeployToken(bearer) ? sessionRequired() : forbidden("Admin is by signing in on the web only.");
+  }
   const session = await cookieSession(req, env, true);
   if (!session) return unauthenticated();
   if (session instanceof Response) return session;

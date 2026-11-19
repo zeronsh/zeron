@@ -111,42 +111,49 @@ describe("the store with the edge's identity", () => {
     // Its account's plugins in its scope, and nothing else.
     const mine = await call(undefined, "GET", "/store/v1/me/plugins", undefined, { authorization: `Bearer ${token}` });
     expect((await json<{ plugins: { id: string }[] }>(mine)).plugins.map((p) => p.id)).toEqual([id]);
-    // Every refusal of a token is the same answer: a plugin outside its scope,
-    // a first version, an unknown token, a bad checksum.
+    // A live token asking for what it may not: one answer, 403, whether a
+    // plugin outside its scope or a first version (CI says which: not this).
     const fresh = uniqueId();
+    const notAllowed = [
+      await tokenPublish(token, notInScope, await makePackage({ id: notInScope, version: "2.0.0", signer: null })),
+      await tokenPublish(token, fresh, await makePackage({ id: fresh, version: "1.0.0", signer: null }))
+    ];
+    // A token that isn't one: another, 401, whether unknown or mistyped.
     const unknown = `zdt_${"A".repeat(43)}${created.token.slice(-6)}`;
     const badChecksum = `${token.slice(0, -1)}${token.endsWith("A") ? "B" : "A"}`;
-    const refusals = [
-      await tokenPublish(token, notInScope, await makePackage({ id: notInScope, version: "2.0.0", signer: null })),
-      await tokenPublish(token, fresh, await makePackage({ id: fresh, version: "1.0.0", signer: null })),
+    const invalid = [
       await tokenPublish(unknown, id, await makePackage({ id, version: "2.0.0", signer: null })),
       await tokenPublish(badChecksum, id, await makePackage({ id, version: "2.0.0", signer: null }))
     ];
-    const bodies = await Promise.all(refusals.map(async (r) => [r.status, await r.text()] as const));
-    for (const [status, text] of bodies) {
-      expect(status).toBe(401);
-      expect(text).toBe(bodies[0]![1]);
-      expect(text).not.toContain(token);
+    for (const [responses, status, error] of [[notAllowed, 403, "token_not_allowed"], [invalid, 401, "invalid_token"]] as const) {
+      const bodies = await Promise.all(responses.map(async (r) => [r.status, await r.text()] as const));
+      for (const [got, text] of bodies) {
+        expect(got).toBe(status);
+        expect(text).toBe(bodies[0]![1]);
+        expect(text).not.toContain(token);
+      }
+      expect(JSON.parse(bodies[0]![1])).toMatchObject({ error });
     }
-    expect(JSON.parse(bodies[0]![1])).toMatchObject({ error: "invalid_token" });
     expect(await env.STORE_DB.prepare("SELECT 1 FROM plugins WHERE id = ?").bind(fresh).first()).toBeNull();
-    // Anywhere else: refused before it's looked up.
+    // Anywhere else it isn't a session: refused before it's looked up.
     for (const [method, path] of [["POST", `/store/v1/plugins/${id}/versions/1.0.0/yank`], ["GET", "/store/v1/admin/queue"], ["GET", "/store/v1/me/tokens"]] as const) {
       const res = await call(undefined, method, path, undefined, { authorization: `Bearer ${token}` });
-      expect(res.status, path).toBe(403);
+      expect([res.status, (await json<{ error: string }>(res)).error], path).toEqual([401, "session_required"]);
     }
 
     // A transfer: the plugin leaves the account and every token's scope, for good.
     expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/transfer`, { to_username: b.username })).status).toBe(200);
     const after = await tokenPublish(token, id, await makePackage({ id, version: "1.3.0", signer: null }));
-    expect([after.status, (await json<{ error: string }>(after)).error]).toEqual([401, "invalid_token"]);
+    expect([after.status, (await json<{ error: string }>(after)).error]).toEqual([403, "token_not_allowed"]);
     expect((await json<{ tokens: { id: string; scope: unknown }[] }>(await call(a.userId, "GET", "/store/v1/me/tokens"))).tokens.find((t) => t.id === created.id)!.scope).toEqual({ plugins: [] });
     // Coming back doesn't restore it.
     expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/transfer`, { to_username: a.username })).status).toBe(200);
-    expect((await tokenPublish(token, id, await makePackage({ id, version: "1.3.0", signer: null }))).status).toBe(401);
-    // Revoked: nothing.
+    expect((await tokenPublish(token, id, await makePackage({ id, version: "1.3.0", signer: null }))).status).toBe(403);
+    // Revoked: not a token any more.
     expect(await json(await call(a.userId, "DELETE", `/store/v1/me/tokens/${created.id}`))).toEqual({ revoked: true });
     expect((await json<{ tokens: Record<string, unknown>[] }>(await call(a.userId, "GET", "/store/v1/me/tokens"))).tokens.find((t) => t.id === created.id)).toMatchObject({ revoked_at: expect.any(Number) });
+    const revoked = await tokenPublish(token, id, await makePackage({ id, version: "1.3.0", signer: null }));
+    expect([revoked.status, (await json<{ error: string }>(revoked)).error]).toEqual([401, "invalid_token"]);
     expect((await call(undefined, "GET", "/store/v1/me/plugins", undefined, { authorization: `Bearer ${token}` })).status).toBe(401);
   });
 
@@ -166,7 +173,7 @@ describe("the store with the edge's identity", () => {
     expect((await publish(b.userId, theirs, await makePackage({ id: theirs, version: "1.0.0", signer: b.signer }))).status).toBe(201);
     expect((await adminCall("POST", `/store/v1/admin/plugins/${theirs}/transfer`, { to_username: a.username })).status).toBe(200);
     const moved = await tokenPublish(token, theirs, await makePackage({ id: theirs, version: "1.1.0", signer: null }));
-    expect([moved.status, (await json<{ error: string }>(moved)).error]).toEqual([401, "invalid_token"]);
+    expect([moved.status, (await json<{ error: string }>(moved)).error]).toEqual([403, "token_not_allowed"]);
     const mine = (await json<{ plugins: { id: string }[] }>(await call(undefined, "GET", "/store/v1/me/plugins", undefined, { authorization: `Bearer ${token}` }))).plugins.map((p) => p.id).sort();
     expect(mine).toEqual([before, later].sort());
   });

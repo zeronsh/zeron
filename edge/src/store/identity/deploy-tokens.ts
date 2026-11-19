@@ -14,7 +14,8 @@
  *   DELETE /store/v1/me/tokens/:id → { revoked: true }
  *
  * Only the signed-in account manages its tokens: a session bearer (the app,
- * the CLI) or the web's cookie (the site), never a deploy token itself.
+ * the CLI) or the web's cookie (the site), never a deploy token itself
+ * (401 `session_required`).
  * Making one needs a fresh sign-in's step-up ticket, used up: `stepUp` from
  * `/auth/exchange` with a bearer, or with the web's cookie the ticket its
  * sign-in earned (signing in again on the site earns another). Without one:
@@ -41,7 +42,7 @@ import {
   type DeployTokenScope,
   type PluginOwnership
 } from "../../user-directory";
-import { cookieSession, bearerUser, forbidden, headerBearer, unauthenticated } from "./callers";
+import { cookieSession, bearerUser, forbidden, headerBearer, sessionRequired, unauthenticated } from "./callers";
 import { readBody } from "./body";
 import { DEPLOY_TOKEN_ID_RE, deployTokenHash, looksLikeDeployToken, newDeployToken, newDeployTokenId, parseDeployToken } from "./deploy-token";
 import { PLUGIN_ID_RE } from "./signing";
@@ -108,7 +109,7 @@ const signedIn = async (request: Request, env: Env): Promise<{ userId: string; s
     const token = headerBearer(request);
     if (!token) return unauthenticated();
     // A token manages nothing, its own kind included.
-    if (looksLikeDeployToken(token)) return jsonError(403, "token_not_allowed", "A deploy token can only publish.");
+    if (looksLikeDeployToken(token)) return sessionRequired();
     const user = await bearerUser(env, token);
     return user instanceof Response ? user : { userId: user.userId, sessionStepUp: null };
   }

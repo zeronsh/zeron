@@ -512,7 +512,7 @@ describe("store author routes", () => {
     ];
     for (const [method, path, body] of outside) {
       const res = await call(undefined, method, path, body, key);
-      expect([res.status, ((await res.json()) as { error: string }).error], `${method} ${path}`).toEqual([403, "token_not_allowed"]);
+      expect([res.status, ((await res.json()) as { error: string }).error], `${method} ${path}`).toEqual([401, "session_required"]);
     }
     // Publishing and the account's plugins are let through to the token's own
     // checks, which refuse this one as any bad token: 401 invalid_token.

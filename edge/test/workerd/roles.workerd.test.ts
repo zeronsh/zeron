@@ -137,9 +137,9 @@ describe("the admin role", () => {
     }
     const runner = await admin(`runner:${userId}@org1:cloud-1`);
     expect(runner.status).toBe(403);
-    // A deploy token is never staff, refused before it's looked up.
+    // A deploy token is never staff, nor a session: refused before it's looked up.
     const token = await SELF.fetch("https://edge.test/store/v1/admin/queue", { headers: { authorization: `Bearer zdt_${"A".repeat(49)}` } });
-    expect(token.status).toBe(403);
+    expect([token.status, ((await token.json()) as { error: string }).error]).toEqual([401, "session_required"]);
     expect((await SELF.fetch("https://edge.test/store/v1/admin/queue")).status).toBe(401);
     expect((await SELF.fetch("https://edge.test/store/v1/admin/queue", { headers: { authorization: "Bearer " } })).status).toBe(403);
     // A bearer in the query string is never read here.

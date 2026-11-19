@@ -274,7 +274,7 @@ describe("deploy tokens: making one", () => {
       ["DELETE", `${TOKENS}/${token.id}`, undefined]
     ] as const) {
       const res = await api(token.token, method, path, body);
-      expect([res.status, await errorOf(res)], `${method} ${path}`).toEqual([403, "token_not_allowed"]);
+      expect([res.status, await errorOf(res)], `${method} ${path}`).toEqual([401, "session_required"]);
     }
     expect((await tokensOf(userId)).map((t) => t.revoked_at)).toEqual([null]);
     expect((await api(`runner:${userId}@org1:cloud-1`, "GET", TOKENS)).status).toBe(403);
@@ -314,7 +314,7 @@ describe("deploy tokens: who's calling", () => {
       ["POST", "/store/v1/reports"]
     ] as const) {
       const res = await api(token.token, method, path);
-      expect([res.status, await errorOf(res)], `${method} ${path}`).toEqual([403, "token_not_allowed"]);
+      expect([res.status, await errorOf(res)], `${method} ${path}`).toEqual([401, "session_required"]);
     }
     // Not a use.
     expect((await tokensOf(userId))[0]).toMatchObject({ last_used_at: null });
@@ -342,8 +342,8 @@ describe("deploy tokens: who's calling", () => {
     // Out of its scope, or a plugin no one has.
     const other = newPlugin();
     await setOwner(other, userId, Date.now() - 60_000);
-    expect((await api(token.token, "POST", versions(other), endless())).status).toBe(401);
-    expect((await api(token.token, "POST", versions(newPlugin()), endless())).status).toBe(401);
+    expect((await api(token.token, "POST", versions(other), endless())).status).toBe(403);
+    expect((await api(token.token, "POST", versions(newPlugin()), endless())).status).toBe(403);
   });
 
   it("refuses every bad token with one answer: malformed, a bad checksum, unknown, revoked, expired, a deleted owner's", async () => {
@@ -384,7 +384,7 @@ describe("deploy tokens: who's calling", () => {
         answers.add(text);
       }
     }
-    expect([...answers]).toEqual([JSON.stringify({ error: "invalid_token", message: "This deploy token can't publish this plugin." })]);
+    expect([...answers]).toEqual([JSON.stringify({ error: "invalid_token", message: "This deploy token isn't valid: it may be mistyped, revoked or expired." })]);
     // The good one still is.
     expect((await probe(good.token, versions(pluginId))).status).toBe(200);
     // Any other bearer is a session's, refused as one.
@@ -471,10 +471,10 @@ describe("deploy tokens: never told", () => {
     expect(await keep(await tokenPublish(token, id, await makePackage({ id, version: "1.1.0", signer: null })))).toBe(201);
     expect(await keep(await tokenPublish(token, id, await makePackage({ id, version: "1.1.0", signer: null, files: { "extra.txt": "x" } })))).toBe(409);
     expect(await keep(await tokenPublish(token, id, new TextEncoder().encode("not a package")))).toBe(400);
-    expect(await keep(await tokenPublish(token, uniqueId("ci"), await makePackage({ id, version: "1.2.0", signer: null })))).toBe(401);
+    expect(await keep(await tokenPublish(token, uniqueId("ci"), await makePackage({ id, version: "1.2.0", signer: null })))).toBe(403);
     expect(await keep(await api(token, "GET", "/store/v1/me/plugins"))).toBe(200);
-    expect(await keep(await api(token, "GET", TOKENS))).toBe(403);
-    expect(await keep(await api(token, "POST", `${versions(id)}/1.1.0/yank`))).toBe(403);
+    expect(await keep(await api(token, "GET", TOKENS))).toBe(401);
+    expect(await keep(await api(token, "POST", `${versions(id)}/1.1.0/yank`))).toBe(401);
     expect(await keep(await api(a.userId, "GET", TOKENS))).toBe(200);
     expect(await keep(await api(a.userId, "GET", `/store/v1/plugins/${id}`))).toBe(200);
     expect(await keep(await api(undefined, "GET", `/store/v1/plugins/${id}/versions`))).toBe(200);

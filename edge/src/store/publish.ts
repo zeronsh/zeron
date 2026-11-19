@@ -34,7 +34,7 @@ import { purgeCatalog } from "./purge";
 import { fail, answer, rateLimited } from "./http";
 import { type Listing, type Problem, checkListing, listingOf } from "./listing";
 import { PackageRefusal, verifyPackage } from "./package";
-import { MAX_PUBLISH_BODY_BYTES, type Publisher, authenticatePublisher, readBody, signingKeyAllowed, tokenInScope, tokenRefused } from "./principal";
+import { MAX_PUBLISH_BODY_BYTES, type Publisher, authenticatePublisher, invalidToken, readBody, signingKeyAllowed, tokenInScope, tokenNotAllowed } from "./principal";
 import { userDirectoryStub } from "../user-directory";
 import { isPrerelease, preKey, precedenceText } from "./semver";
 
@@ -155,9 +155,9 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
   if (!(await allowWrite(env, publisher.userId))) return rateLimited();
   // Who may publish what, before the body is read: a deploy token only a
   // plugin its account owns now that its scope holds, never a first version;
-  // refused alike for every reason (`tokenRefused`).
+  // a live token asking for any other is 403 `token_not_allowed`.
   const plugin = await pluginRow(db, id);
-  if (publisher.via === "deploy_token" && (!plugin || plugin.owner_id !== publisher.userId || !tokenInScope(publisher, plugin))) return tokenRefused();
+  if (publisher.via === "deploy_token" && (!plugin || plugin.owner_id !== publisher.userId || !tokenInScope(publisher, plugin))) return tokenNotAllowed();
   if (!publisher.username) return fail(403, "needs_username", "Publishing needs a username: every listing reads \"by @username\".");
 
   const body = await readBody(request, STORE_MAX_PACKAGE_BYTES);
@@ -267,7 +267,7 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
       await maybeOrphaned(db, [pkgKey, blobKey]);
       return publisher.via === "session"
         ? fail(403, "key_not_allowed", "The key that signed this package was revoked while it was being published.")
-        : tokenRefused();
+        : invalidToken();
     }
 
     const files: [string, number, number, string, FileKind][] = [];

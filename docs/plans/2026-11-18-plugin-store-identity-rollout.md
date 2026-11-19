@@ -204,9 +204,11 @@ lists revoked grants too.
      owner's `/me/plugins` shows that version with `via: "deploy_token"`
      and `deploy_token: {short, name}`, and the token's `last_used_plugin`
      is A.
-  3. Publish B with it, and a new id with it: both 401 `invalid_token`,
-     the same answer as an unknown token. Scoping a token to a plugin the
-     account doesn't own is 403 `not_owner`.
+  3. Publish B with it, and a new id with it: both 403
+     `token_not_allowed`. A mistyped token is 401 `invalid_token`; the token
+     on any other route (`GET EDGE/store/v1/me/tokens`) is 401
+     `session_required`. Scoping a token to a plugin the account doesn't
+     own is 403 `not_owner`.
   4. Revoke it (`DELETE EDGE/store/v1/me/tokens/<id>` → `{"revoked":true}`)
      and see the next publish answer 401 `invalid_token`.
 

@@ -28,7 +28,7 @@ import { STORE_DATA } from "./data";
 import { authorCard, authorsOf, listingState, ownerCard, publisherId, publisherIds, versionInfo } from "./cards";
 import { type PluginRow, VERSION_ORDER, type VersionRow, auditIfChanged, pluginRow, relist, supersedeOlder, supersededAt, versionRow } from "./db";
 import { answer, fail, notFound, objectBody, rateLimited, refusedBody } from "./http";
-import { authenticatePublisher, readBody, tokenInScope, tokenNotAllowed } from "./principal";
+import { authenticatePublisher, readBody, sessionRequired, tokenInScope } from "./principal";
 import { allowWrite } from "./publish";
 import { purgeCatalog } from "./purge";
 import { decodeSegment } from "./serve";
@@ -131,7 +131,7 @@ export const handleAuthorAction = async (request: Request, env: Env, db: D1Datab
 const writer = async (request: Request, env: Env): Promise<{ userId: string } | Response> => {
   const caller = await authenticatePublisher(request, env);
   if (caller instanceof Response) return caller;
-  return caller.via === "session" ? caller : tokenNotAllowed();
+  return caller.via === "session" ? caller : sessionRequired();
 };
 
 export const handleInstalled = async (request: Request, env: Env, db: D1Database, id: string): Promise<Response> => {

@@ -28,6 +28,10 @@ export const headerBearer = (request: Request): string | undefined => {
 
 export const unauthenticated = (): Response => jsonError(401, "unauthenticated", "Sign in to do this.");
 export const forbidden = (message = "This account can't do this."): Response => jsonError(403, "forbidden", message);
+/** A deploy token where only a signed-in person may act (contract
+ * a315eef5a): it isn't a session. Refused before it's looked up. */
+export const sessionRequired = (): Response =>
+  jsonError(401, "session_required", "A deploy token only publishes versions: this needs a signed-in session.");
 
 /** The user a bearer names, or the answer refusing it: 401 when it doesn't
  * verify, 403 for a runner token. */

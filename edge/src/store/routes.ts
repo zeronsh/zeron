@@ -18,7 +18,7 @@ import { fail, notFound, rateLimited } from "./http";
 import { handlePublish } from "./publish";
 import { serveFile, servePackage } from "./serve";
 import { handleUpdates } from "./updates";
-import { tokenNotAllowed, withSessionCookie } from "./principal";
+import { sessionRequired, withSessionCookie } from "./principal";
 import { headerBearer } from "./identity/callers";
 import { looksLikeDeployToken } from "./identity/deploy-token";
 
@@ -40,7 +40,7 @@ const route = async (request: Request, env: Env, db: D1Database, bucket: R2Bucke
   const read = method === "GET" || method === "HEAD";
   // A deploy token anywhere else: refused before it's looked up.
   const bearer = headerBearer(request);
-  if (bearer !== undefined && looksLikeDeployToken(bearer) && !deployTokenMayCall(method, parts)) return tokenNotAllowed();
+  if (bearer !== undefined && looksLikeDeployToken(bearer) && !deployTokenMayCall(method, parts)) return sessionRequired();
   if (parts[2] === "admin") return handleAdmin(request, env, db, bucket, url, parts.slice(2));
   if (parts[2] === "me" && parts[3] === "plugins" && parts.length === 4 && read) return handleMyPlugins(request, env, db);
   if (parts[2] === "updates" && parts.length === 3 && method === "POST") {
