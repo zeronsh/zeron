@@ -119,6 +119,12 @@ pub(super) fn default_opencode_auth_file() -> PathBuf {
     xdg_data_home().join("opencode").join("auth.json")
 }
 
+pub(super) fn default_opencode_config_dir() -> PathBuf {
+    env_dir("XDG_CONFIG_HOME")
+        .unwrap_or_else(|| home_dir().join(".config"))
+        .join("opencode")
+}
+
 pub(super) fn default_pi_agent_dir() -> PathBuf {
     env_dir("PI_CODING_AGENT_DIR").unwrap_or_else(|| home_dir().join(".pi").join("agent"))
 }
@@ -165,6 +171,7 @@ pub(super) fn upstream_vendor(store_key: &str) -> &'static str {
         "github-copilot" | "copilot" => "GitHub",
         "nous" => "Nous",
         "xai-oauth" | "xai" => "xAI",
+        NAN_STORE_KEY => "NaN",
         _ => "the provider",
     }
 }
@@ -473,6 +480,84 @@ fn unresolved(store_key: &str, upstream: Upstream) -> Detected {
         claude_config: None,
         store_key: Some(store_key.to_string()),
         identity_known: false,
+    }
+}
+
+pub(super) const NAN_STORE_KEY: &str = "nan";
+const NAN_API_HOST: &str = "api.nan.builders";
+
+pub(super) fn is_config_login(harness: HarnessId, store_key: Option<&str>) -> bool {
+    matches!(harness, HarnessId::Opencode | HarnessId::Pi) && store_key == Some(NAN_STORE_KEY)
+}
+
+pub(super) fn is_nan_base_url(raw: &str) -> bool {
+    reqwest::Url::parse(raw.trim()).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url
+                .host_str()
+                .is_some_and(|host| host.eq_ignore_ascii_case(NAN_API_HOST))
+    })
+}
+
+pub(super) fn literal_api_key(raw: &str) -> Option<String> {
+    let key = raw.trim();
+    let is_reference = key.starts_with('!')
+        || key.contains('$')
+        || key.contains("{env:")
+        || key.contains("{file:");
+    (!key.is_empty() && !is_reference).then(|| key.to_string())
+}
+
+struct DeclaredProvider {
+    id: String,
+    base_url: Option<String>,
+    api_key: Option<String>,
+}
+
+fn declared_providers(harness: HarnessId, config: &serde_json::Value) -> Vec<DeclaredProvider> {
+    let (list, settings, base_url) = match harness {
+        HarnessId::Opencode => ("provider", Some("options"), "baseURL"),
+        _ => ("providers", None, "baseUrl"),
+    };
+    let Some(providers) = config.get(list).and_then(|p| p.as_object()) else {
+        return Vec::new();
+    };
+    providers
+        .iter()
+        .map(|(id, provider)| {
+            let settings = match settings {
+                Some(field) => provider.get(field),
+                None => Some(provider),
+            };
+            DeclaredProvider {
+                id: id.clone(),
+                base_url: settings.and_then(|s| str_field(s, base_url)),
+                api_key: settings.and_then(|s| str_field(s, "apiKey")),
+            }
+        })
+        .collect()
+}
+
+fn nan_slot(harness: HarnessId, key: String) -> Slot {
+    let account_key = format!("{NAN_STORE_KEY}:api-key:{}", hashed_key(&key));
+    let mut profile = SlotProfile {
+        email: String::new(),
+        display_name: None,
+        organization: None,
+        plan: None,
+        auth_kind: AgentAuthKind::ApiKey,
+    };
+    api_keys::name_key_profile(&mut profile, "NaN", Some(&key), None);
+    Slot {
+        id: slot_id_for(harness, &account_key),
+        harness,
+        account_key,
+        profile,
+        credentials: serde_json::json!({ "type": "api", "key": key }),
+        claude_config: None,
+        saved_at: 0,
+        created_at: None,
+        store_key: Some(NAN_STORE_KEY.to_string()),
     }
 }
 
@@ -1213,6 +1298,59 @@ impl AgentAccounts {
             }
         }
         (slots, active)
+    }
+
+    fn nan_providers(&self, harness: HarnessId) -> Vec<DeclaredProvider> {
+        let config = &self.inner.config;
+        let files = match harness {
+            HarnessId::Opencode => vec![
+                config.opencode_config_dir.join("opencode.json"),
+                config.opencode_config_dir.join("opencode.jsonc"),
+            ],
+            HarnessId::Pi => vec![config.pi_agent_dir.join("models.json")],
+            _ => return Vec::new(),
+        };
+        files
+            .iter()
+            .filter_map(|file| read_json(file))
+            .flat_map(|document| declared_providers(harness, &document))
+            .filter(|provider| provider.base_url.as_deref().is_some_and(is_nan_base_url))
+            .collect()
+    }
+
+    /// Whether `provider` (an auth.json entry's id) is declared in the
+    /// agent's config with NaN's base URL, so its key row can show NaN quota.
+    pub(super) fn is_nan_provider(&self, harness: HarnessId, provider: &str) -> bool {
+        self.nan_providers(harness)
+            .iter()
+            .any(|declared| declared.id == provider)
+    }
+
+    /// Rows for NaN keys written literally in the agent's config. A key kept
+    /// in auth.json already has its own row ([`super::api_keys`]); its quota
+    /// is attached there instead of listing the key twice.
+    pub(super) fn nan_slots(&self, harness: HarnessId) -> Vec<Slot> {
+        let auth_file = match harness {
+            HarnessId::Opencode => self.inner.config.opencode_auth_file.clone(),
+            HarnessId::Pi => self.inner.config.pi_agent_dir.join("auth.json"),
+            _ => return Vec::new(),
+        };
+        let stored_keys: Vec<String> = read_json(&auth_file)
+            .and_then(|auth| auth.as_object().cloned())
+            .into_iter()
+            .flat_map(|entries| entries.into_values())
+            .filter_map(|entry| api_keys::key_entry_secret(harness, &entry))
+            .collect();
+        let mut keys: Vec<String> = Vec::new();
+        for provider in self.nan_providers(harness) {
+            if let Some(key) = provider.api_key.and_then(|raw| literal_api_key(&raw))
+                && !stored_keys.contains(&key)
+                && !keys.contains(&key)
+            {
+                keys.push(key);
+            }
+        }
+        keys.into_iter().map(|key| nan_slot(harness, key)).collect()
     }
 
     // ── sign-ins through the CLI ────────────────────────────────────────────
