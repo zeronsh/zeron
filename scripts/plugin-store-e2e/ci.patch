@@ -38,7 +38,7 @@ index 000000000..a793032bc
 +# file, or this harness. scripts/plugin-store-e2e/run.sh runs the edge worker
 +# locally (its bundle in Miniflare, the store's D1 migrations, local R2, a
 +# WorkOS fake) and real `zeron headless` engines and the real CLI against it:
-+# publish, review, install, update, deploy keys, takedown, transfer and the
++# publish, review, install, update, deploy tokens, takedown, transfer and the
 +# refusals. Under a minute once built; nothing leaves the runner.
 +on:
 +  workflow_call:

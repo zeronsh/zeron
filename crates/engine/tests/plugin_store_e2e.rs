@@ -13,8 +13,9 @@
 //!
 //! The flow is amendments 44 and 45's: a version is live as soon as it's
 //! published and verified later; devices mark what isn't, ask before taking
-//! it, never take it in bulk, learn of take-downs from the feed; deploy keys
-//! are the account's, for the plugins they name.
+//! it, never take it in bulk, learn of take-downs from the feed; deploy
+//! tokens are the account's, for the plugins they name, and what one
+//! publishes (unsigned) installs as its publisher's (contract a315eef5a).
 
 #![cfg(unix)]
 
@@ -26,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use zeron_engine::plugins::signing::{self, SigningKey};
-use zeron_engine::plugins::store::deploy_key::{self, DeployKey};
+use zeron_engine::plugins::store::deploy_token::DeployToken;
 use zeron_engine::plugins::{install, package};
 use zeron_rpc::{RpcClient, methods};
 
@@ -404,6 +405,15 @@ async fn publish(device: &Device, id: &str) -> Value {
 /// A package of `id` at `version` meeting the store's rules, signed by `key`:
 /// `manifest_extra` merged into its manifest, `files_extra` added.
 fn store_package(key: &SigningKey, id: &str, version: &str, manifest_extra: Value, files_extra: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    package_signed_by(Some(key), id, version, manifest_extra, files_extra)
+}
+
+/// [`store_package`] unsigned: as a deploy token publishes it.
+fn token_package(id: &str, version: &str, manifest_extra: Value, files_extra: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    package_signed_by(None, id, version, manifest_extra, files_extra)
+}
+
+fn package_signed_by(key: Option<&SigningKey>, id: &str, version: &str, manifest_extra: Value, files_extra: &[(&str, Vec<u8>)]) -> Vec<u8> {
     let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     files.insert("init.luau".into(), b"return {}".to_vec());
     files.insert("icon.svg".into(), ICON.as_bytes().to_vec());
@@ -419,23 +429,20 @@ fn store_package(key: &SigningKey, id: &str, version: &str, manifest_extra: Valu
     for (k, v) in manifest_extra.as_object().unwrap() {
         manifest[k] = v.clone();
     }
-    let manifest = key.sign_manifest(&manifest, &package::hashes(&files));
+    let manifest = match key {
+        Some(key) => key.sign_manifest(&manifest, &package::hashes(&files)),
+        None => manifest,
+    };
     package::pack(install::FORMAT, &manifest, &files).unwrap()
 }
 
 impl Env {
-    /// `body` sent to `path` signed with deploy key `key` at `ts`; the body's
-    /// hash claimed as `claimed` (default: its own).
-    async fn signed(&self, key: &DeployKey, method: &str, path: &str, body: &[u8], ts: i64, claimed: Option<&[u8]>) -> (u16, Value) {
-        let claimed = claimed.unwrap_or(body);
-        let hash = signing::sha256_hex(claimed);
-        let message = deploy_key::request_message(method, path, &hash, ts);
-        let sig = key.signing_key().sign(message.as_bytes());
+    /// `body` sent to `path` with deploy token `token` as its bearer.
+    async fn with_token(&self, token: &str, method: &str, path: &str, body: &[u8]) -> (u16, Value) {
         let res = self
             .http
             .request(method.parse().unwrap(), format!("{}{path}", self.edge))
-            .header("authorization", format!("ZeronKey key={}, ts={ts}, sig={sig}", key.public()))
-            .header(deploy_key::CONTENT_SHA256_HEADER, hash)
+            .bearer_auth(token)
             .header("content-type", "application/json")
             .body(body.to_vec())
             .send()
@@ -444,13 +451,9 @@ impl Env {
         (res.status().as_u16(), res.json().await.unwrap_or_default())
     }
 
-    async fn publish_signed(&self, key: &DeployKey, id: &str, body: &[u8]) -> (u16, Value) {
-        self.signed(key, "POST", &format!("/store/v1/plugins/{id}/versions"), body, now_ms(), None).await
+    async fn publish_with(&self, token: &str, id: &str, body: &[u8]) -> (u16, Value) {
+        self.with_token(token, "POST", &format!("/store/v1/plugins/{id}/versions"), body).await
     }
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64
 }
 
 /// The plugin's offer in `device`'s update check, or null.
@@ -483,27 +486,30 @@ async fn wait_for(what: &str, mut ready: impl AsyncFnMut() -> bool) -> bool {
     true
 }
 
-/// A deploy key made on `device` for `scope`, through a step-up begun for
-/// it: the secret, as shown once. Neither the device's sign-in nor a step-up
-/// for nothing in particular makes one, and each key takes its own.
-async fn deploy_key_on(e: &Env, device: &Device, user: &str, scope: Value, name: &str) -> String {
-    let create = || device.call(methods::CREATE_DEPLOY_KEY, json!({ "name": name, "scope": scope }));
+/// A deploy token made on `device` for `scope`, through a step-up begun for
+/// it: the token, as shown once. Neither the device's sign-in nor a step-up
+/// for nothing in particular makes one, and each token takes its own.
+async fn deploy_token_on(e: &Env, device: &Device, user: &str, scope: Value, name: &str) -> String {
+    let create = || device.call(methods::CREATE_DEPLOY_TOKEN, json!({ "name": name, "scope": scope }));
     let refused = create().await.unwrap();
-    e.check("4", &format!("{user}'s sign-in alone doesn't make a deploy key"), refused["error"] == "step_up_required", &refused);
+    e.check("4", &format!("{user}'s sign-in alone doesn't make a deploy token"), refused["error"] == "step_up_required", &refused);
     e.step_up(device, user, None).await;
     let refused = create().await.unwrap();
     e.check("4", "nor a step-up for nothing in particular", refused["error"] == "step_up_required", &refused);
-    e.step_up(device, user, Some("deploy_key")).await;
+    e.step_up(device, user, Some("deploy_token")).await;
     let made = create().await.unwrap();
     // (The store keeps a scope's ids sorted.)
     let mut sorted = scope.clone();
     if let Some(ids) = sorted["plugins"].as_array_mut() {
         ids.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
     }
-    e.must("4", &format!("{user} makes a deploy key for {scope} through a step-up for it"), made["ok"] == true && made["key"]["scope"] == sorted, &made["key"]);
+    let secret = made["secret"].as_str().unwrap_or_default().to_owned();
+    let token = DeployToken::parse(&secret);
+    let ok = made["ok"] == true && made["token"]["scope"] == sorted && token.as_ref().is_ok_and(|t| made["token"]["short"] == t.short()) && made["token"].get("token").is_none();
+    e.must("4", &format!("{user} makes a deploy token for {scope} through a step-up for it: zdt_, its checksum good, its short id its first 8"), ok, &made["token"]);
     let again = create().await.unwrap();
-    e.check("4", "and the next key takes a step-up of its own", again["error"] == "step_up_required", &again);
-    made["secret"].as_str().unwrap().to_owned()
+    e.check("4", "and the next token takes a step-up of its own", again["error"] == "step_up_required", &again);
+    secret
 }
 
 // ── The steps ───────────────────────────────────────────────────────────────
@@ -579,7 +585,7 @@ async fn the_plugin_store_end_to_end() {
     // (Its first look at the account's publishes: a baseline, nothing noticed.)
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    // ── 4: two more plugins; a deploy key for two of the three ──
+    // ── 4: two more plugins; a deploy token for two of the three ──
     for id in [OTHER, THIRD] {
         author_plugin(&laptop, id, "1.0.0", &["ui.add"]).await;
         let published = publish(&laptop, id).await;
@@ -594,39 +600,42 @@ async fn the_plugin_store_end_to_end() {
     let from_laptop = list["store_notices"].as_array().into_iter().flatten().all(|n| n["via"] == "device");
     e.check("4", "the desk notices the laptop's publishes, as another device's", seen && from_laptop, &list["store_notices"]);
     e.check("4", "the laptop notices none of its own", notices(&laptop).await.is_empty(), notices(&laptop).await.join(", "));
-    let refused = laptop.call(methods::CREATE_DEPLOY_KEY, json!({ "name": "CI", "scope": { "plugins": [ID, "nobody-has-this-e2e"] } })).await.unwrap();
-    e.check("4", "a key for a plugin that isn't yours is refused, naming it", refused["error"] == "not_owner" && refused.to_string().contains("nobody-has-this-e2e"), &refused);
+    let refused = laptop.call(methods::CREATE_DEPLOY_TOKEN, json!({ "name": "CI", "scope": { "plugins": [ID, "nobody-has-this-e2e"] } })).await.unwrap();
+    e.check("4", "a token for a plugin that isn't yours is refused, naming it", refused["error"] == "not_owner" && refused.to_string().contains("nobody-has-this-e2e"), &refused);
     let scope = json!({ "plugins": [OTHER, ID] });
-    let secret = deploy_key_on(&e, &laptop, "user_ada", scope, "GitHub Actions").await;
-    let ada_key = DeployKey::from_secret(&secret).unwrap();
-    let keys = laptop.call(methods::LIST_DEPLOY_KEYS, json!({})).await.unwrap();
-    e.check("4", "the key list shows it with its scope", keys["keys"].as_array().is_some_and(|k| k.iter().any(|k| k["key"] == ada_key.public() && k["scope"] == json!({ "plugins": [ID, OTHER] }))), &keys);
+    let secret = deploy_token_on(&e, &laptop, "user_ada", scope, "GitHub Actions").await;
+    let ada_token = DeployToken::parse(&secret).unwrap();
+    let tokens = laptop.call(methods::LIST_DEPLOY_TOKENS, json!({})).await.unwrap();
+    let listed = tokens["tokens"].as_array().is_some_and(|t| t.iter().any(|t| t["short"] == ada_token.short() && t["scope"] == json!({ "plugins": [ID, OTHER] })));
+    e.check("4", "the token list shows it by its short id with its scope, never the token", listed && !tokens.to_string().contains(&secret[12..]), &tokens);
     let ci = e.work.join("ci-checkout").join(ID);
     checkout(&ada_dir, &ci);
     set_version(&ci, "1.1.0", &["ui.add", "links.open"], "- Opens links.");
     let ci_arg = ci.display().to_string();
-    let out = e.cli("ci", &["publish", &ci_arg], &[("ZERON_DEPLOY_KEY", &secret)]);
+    let out = e.cli("ci", &["publish", &ci_arg], &[("ZERON_DEPLOY_TOKEN", &secret)]);
     let said = text(&out);
-    e.must("4", "the CLI publishes 1.1.0 with only ZERON_DEPLOY_KEY: live now, not yet verified", out.status.success() && said.contains("live now, not yet verified") && said.contains(&format!("/plugins/{ID}")), &said);
-    e.check("4", "the CLI never says the secret", !said.contains(&secret[4..]), "");
+    e.must("4", "the CLI publishes 1.1.0 with only ZERON_DEPLOY_TOKEN: live now, not yet verified", out.status.success() && said.contains("live now, not yet verified") && said.contains(&format!("/plugins/{ID}")), &said);
+    e.check("4", "the CLI never says the token", !said.contains(&secret[12..]), "");
+    let (_, record) = e.get(&format!("/store/v1/plugins/{ID}/versions/1.1.0"), None).await;
+    e.check("4", "its record: published with a token, signed by no key", record["via"] == "deploy_token" && record["key"].is_null(), &record);
     let other_ci = e.work.join("ci-checkout").join(OTHER);
     checkout(&laptop.item(OTHER).await["dir"].as_str().map(PathBuf::from).unwrap(), &other_ci);
     set_version(&other_ci, "1.1.0", &["ui.add"], "- Notes.");
-    let out = e.cli("ci", &["publish", &other_ci.display().to_string()], &[("ZERON_DEPLOY_KEY", &secret)]);
-    e.check("4", &format!("the same key publishes {OTHER} 1.1.0"), out.status.success(), text(&out));
+    let out = e.cli("ci", &["publish", &other_ci.display().to_string()], &[("ZERON_DEPLOY_TOKEN", &secret)]);
+    e.check("4", &format!("the same token publishes {OTHER} 1.1.0"), out.status.success(), text(&out));
     let third_ci = e.work.join("ci-checkout").join(THIRD);
     checkout(&laptop.item(THIRD).await["dir"].as_str().map(PathBuf::from).unwrap(), &third_ci);
     set_version(&third_ci, "1.1.0", &["ui.add"], "- Third.");
-    let out = e.cli("ci", &["publish", &third_ci.display().to_string()], &[("ZERON_DEPLOY_KEY", &secret)]);
-    e.check("4", &format!("and is refused on {THIRD}, yours but outside its scope (exit 3)"), out.status.code() == Some(3) && text(&out).contains("key_not_allowed"), text(&out));
-    let noticed = wait_for("the laptop's notices of the key's publishes", async || {
+    let out = e.cli("ci", &["publish", &third_ci.display().to_string()], &[("ZERON_DEPLOY_TOKEN", &secret)]);
+    e.check("4", &format!("and is refused on {THIRD}, yours but outside its scope (exit 3)"), out.status.code() == Some(3) && text(&out).contains("token_not_allowed"), text(&out));
+    let noticed = wait_for("the laptop's notices of the token's publishes", async || {
         let n = notices(&laptop).await;
         n.contains(&format!("{ID}@1.1.0")) && n.contains(&format!("{OTHER}@1.1.0"))
     })
     .await;
     let list = laptop.call(methods::LIST_PLUGINS, json!({})).await.unwrap();
-    let named = list["store_notices"].as_array().into_iter().flatten().all(|n| n["via"] == "deploy_key" && n["key_name"] == "GitHub Actions");
-    e.check("4", "each version the key published is a notice on the author's devices, naming the key", noticed && named && !notices(&laptop).await.iter().any(|n| n.starts_with(THIRD)), &list["store_notices"]);
+    let named = list["store_notices"].as_array().into_iter().flatten().all(|n| n["via"] == "deploy_token" && n["token_name"] == "GitHub Actions");
+    e.check("4", "each version the token published is a notice on the author's devices, naming the token", noticed && named && !notices(&laptop).await.iter().any(|n| n.starts_with(THIRD)), &list["store_notices"]);
     laptop.call(methods::ACK_STORE_NOTICES, json!({ "ids": notices(&laptop).await })).await.unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
     e.check("4", "acknowledged, they go and don't come back", notices(&laptop).await.is_empty(), notices(&laptop).await.join(", "));
@@ -648,6 +657,8 @@ async fn the_plugin_store_end_to_end() {
     let updated = desk.call(methods::UPDATE_PLUGIN, json!({ "id": ID })).await;
     let ok = updated.as_ref().is_ok_and(|r| r["plugin"]["version"] == "1.1.0" && r["plugin"]["status"] == "pending" && r["plugin"]["source"]["verified"] == false);
     e.check("5", "the person takes it on its own: it asks, and is marked not verified", ok, format!("{updated:?}"));
+    let by = desk.item(ID).await;
+    e.check("5", "published with a token (unsigned), it's @ada-e2e's, never Unknown author", by["author"] == json!({ "kind": "verified", "username": "ada-e2e" }), &by["author"]);
     e.check("5", "the person allows it", desk.allow(ID).await["status"] == "on", "");
 
     // ── 6: decline, yank, and superseding ──
@@ -664,7 +675,7 @@ async fn the_plugin_store_end_to_end() {
     let out = e.cli_on(&laptop, &["unyank", ID, "1.1.0"]);
     e.check("6", "the author unyanks it", out.status.success(), text(&out));
     set_version(&ci, "1.2.0", &["ui.add", "links.open"], "- Faster.");
-    let out = e.cli("ci", &["publish", &ci_arg], &[("ZERON_DEPLOY_KEY", &secret)]);
+    let out = e.cli("ci", &["publish", &ci_arg], &[("ZERON_DEPLOY_TOKEN", &secret)]);
     e.must("6", "CI publishes 1.2.0, and says it supersedes 1.1.0, never verified", out.status.success() && text(&out).contains("1.1.0 no longer takes new installs: 1.2.0 replaced it before it was verified"), text(&out));
     let out = e.cli_on(&laptop, &["status", ID]);
     e.check("6", "status shows 1.1.0 yanked, superseded by 1.2.0", text(&out).contains("1.1.0  yanked  not verified: superseded by 1.2.0"), text(&out));
@@ -715,22 +726,16 @@ async fn the_plugin_store_end_to_end() {
     e.check("7", "the person allows it", phone.allow(ID).await["status"] == "on", "");
 
     // ── 8: a transfer ──
-    let bob_bearer = e.bearer(&phone).await;
-    let lookup = |key: String| {
-        let (e, bearer) = (&e, bob_bearer.clone());
-        async move { e.get(&format!("/plugin-keys/{key}?plugin={ID}"), Some(&bearer)).await }
-    };
-    let (_, before) = lookup(ada_key.public()).await;
-    e.check("8", "before: ada's deploy key reads as verified for its plugin", before["verified"] == true, &before);
     let (status, body) = e.admin(&staff, &format!("plugins/{ID}/transfer"), json!({ "to_username": "bob-e2e" })).await;
     e.must("8", "staff transfer it to @bob-e2e", status == 200, &body);
     set_version(&ci, "1.2.1", &["ui.add", "links.open"], "- After.");
-    let out = e.cli("ci", &["publish", &ci_arg], &[("ZERON_DEPLOY_KEY", &secret)]);
-    e.check("8", "the old owner's deploy key is refused on publish (exit 3)", out.status.code() == Some(3), text(&out));
-    let (_, after) = lookup(ada_key.public()).await;
-    e.check("8", "the old owner's deploy key reads unverified for the plugin", after["verified"] == false, &after);
+    let out = e.cli("ci", &["publish", &ci_arg], &[("ZERON_DEPLOY_TOKEN", &secret)]);
+    e.check("8", "the old owner's deploy token is refused on publish (exit 3)", out.status.code() == Some(3), text(&out));
+    let tokens = laptop.call(methods::LIST_DEPLOY_TOKENS, json!({})).await.unwrap();
+    let dropped = tokens["tokens"].as_array().is_some_and(|t| t.iter().any(|t| t["short"] == ada_token.short() && t["scope"] == json!({ "plugins": [OTHER] })));
+    e.check("8", "the transfer took the plugin out of the token's scope for good", dropped, &tokens);
     set_version(&other_ci, "1.2.0", &["ui.add"], "- Still mine.");
-    let out = e.cli("ci", &["publish", &other_ci.display().to_string()], &[("ZERON_DEPLOY_KEY", &secret)]);
+    let out = e.cli("ci", &["publish", &other_ci.display().to_string()], &[("ZERON_DEPLOY_TOKEN", &secret)]);
     e.check("8", &format!("while it still publishes {OTHER}"), out.status.success(), text(&out));
     let bob_laptop = e.device("bob-laptop").await;
     e.sign_in(&bob_laptop, "user_bob").await;
@@ -746,10 +751,7 @@ async fn the_plugin_store_end_to_end() {
     e.check("8", "updated, it's by @bob-e2e and asks again", ok, format!("{updated:?}"));
 
     // ── 9: the refusals, each against the real edge ──
-    let bob_secret = deploy_key_on(&e, &bob_laptop, "user_bob", json!({ "plugins": [ID] }), "CI").await;
-    let bob_key = DeployKey::from_secret(&bob_secret).unwrap();
-    let signer = bob_key.signing_key();
-    let path = format!("/store/v1/plugins/{ID}/versions");
+    let bob_secret = deploy_token_on(&e, &bob_laptop, "user_bob", json!({ "plugins": [ID] }), "CI").await;
     // (1.3.0 and 1.3.5 carry tools, for the permission diff below.)
     let tools_before = json!({ "permissions": ["ui.add", "tools"], "tools": [
         { "name": "lookup", "description": "Looks a word up." },
@@ -761,29 +763,29 @@ async fn the_plugin_store_end_to_end() {
         { "name": "new", "description": "Arrives." },
         { "name": "shape", "description": "Same words.", "input": { "type": "object", "properties": { "b": { "type": "string" } } } },
     ] });
-    let pkg = store_package(signer, ID, "1.3.0", tools_before, &[]);
-    let ts = now_ms();
-    let (first, body) = e.signed(&bob_key, "POST", &path, &pkg, ts, None).await;
-    e.check("9", "a signed publish lands, listed", first == 201 && body["status"] == "listed", &body);
-    let (status, body) = e.signed(&bob_key, "POST", &path, &pkg, ts, None).await;
-    e.check("9", "the same signed request again is refused as a replay", status == 401 && body["error"] == "replayed_request", format!("{status} {body}"));
+    let pkg = token_package(ID, "1.3.0", tools_before, &[]);
+    let (first, body) = e.publish_with(&bob_secret, ID, &pkg).await;
+    e.check("9", "a token's publish lands, listed", first == 201 && body["status"] == "listed", &body);
+    let mut typo = bob_secret.clone().into_bytes();
+    typo[10] = if typo[10] == b'A' { b'B' } else { b'A' };
+    let (status, body) = e.publish_with(&String::from_utf8(typo).unwrap(), ID, &token_package(ID, "1.3.1", json!({}), &[])).await;
+    e.check("9", "a mistyped token is refused as one that isn't known (401 bad_token)", status == 401 && body["error"] == "bad_token", format!("{status} {body}"));
+    let (status, body) = e.publish_with(&DeployToken::from_random(&[42; 32]).as_str().to_owned(), ID, &token_package(ID, "1.3.1", json!({}), &[])).await;
+    e.check("9", "and so is a well-formed one nobody made, alike", status == 401 && body["error"] == "bad_token", format!("{status} {body}"));
     let (status, body) = e.admin(&staff, &format!("versions/{ID}/1.3.0/verify"), json!({})).await;
     e.check("9", "staff verify 1.3.0", status == 200, &body);
-    // Bob's phone, his since before the transfer: his key's publish is a
+    // Bob's phone, his since before the transfer: his token's publish is a
     // notice; ada's versions, transferred in with the plugin, never were.
-    let noticed = wait_for("bob's phone to notice his key's publish", async || notices(&phone).await.contains(&format!("{ID}@1.3.0"))).await;
+    let noticed = wait_for("bob's phone to notice his token's publish", async || notices(&phone).await.contains(&format!("{ID}@1.3.0"))).await;
     let list = phone.call(methods::LIST_PLUGINS, json!({})).await.unwrap();
     let shown = list["store_notices"].as_array().cloned().unwrap_or_default();
-    let by_key = shown.iter().any(|n| n["id"] == format!("{ID}@1.3.0") && n["via"] == "deploy_key" && n["key_name"] == "CI");
+    let by_token = shown.iter().any(|n| n["id"] == format!("{ID}@1.3.0") && n["via"] == "deploy_token" && n["token_name"] == "CI");
     let ada_s = shown.iter().any(|n| ["1.0.0", "1.1.0", "1.2.0"].iter().any(|v| n["id"] == format!("{ID}@{v}")));
-    e.check("9", "the new owner's devices notice his first key publish, and none of the former owner's versions", noticed && by_key && !ada_s, &list["store_notices"]);
-    let other = store_package(signer, ID, "1.3.1", json!({}), &[]);
-    let (status, body) = e.signed(&bob_key, "POST", &path, &other, now_ms(), Some(&pkg)).await;
-    e.check("9", "a body that isn't the one its hash names is refused", status == 400 && body["error"] == "body_mismatch", format!("{status} {body}"));
-    let elsewhere = store_package(signer, OTHER, "9.0.0", json!({}), &[]);
-    let (status, body) = e.publish_signed(&bob_key, OTHER, &elsewhere).await;
-    e.check("9", "a key for another plugin is refused", status == 403 && body["error"] == "key_not_allowed", format!("{status} {body}"));
-    let (status, body) = e.publish_signed(&bob_key, ID, &store_package(signer, ID, "1.2.5", json!({}), &[])).await;
+    e.check("9", "the new owner's devices notice his first token publish, and none of the former owner's versions", noticed && by_token && !ada_s, &list["store_notices"]);
+    let elsewhere = token_package(OTHER, "9.0.0", json!({}), &[]);
+    let (status, body) = e.publish_with(&bob_secret, OTHER, &elsewhere).await;
+    e.check("9", "a token for another plugin is refused", status == 403 && body["error"] == "token_not_allowed", format!("{status} {body}"));
+    let (status, body) = e.publish_with(&bob_secret, ID, &token_package(ID, "1.2.5", json!({}), &[])).await;
     e.check("9", "a version that isn't newer is refused", body["error"] == "not_newer" || body["error"] == "version_exists", format!("{status} {body}"));
     // (On ada's third plugin, from her laptop: should the edge take one,
     // nothing below depends on that plugin.)
@@ -808,23 +810,23 @@ async fn the_plugin_store_end_to_end() {
     e.check("9", "and a description claiming it in look-alike letters, its word as written", status == 400 && body["error"] == "bad_listing" && fields(&body, "description", "\u{43e}fficial"), format!("{status} {body}"));
     let (status, body) = from_laptop("2.0.2", json!({ "name": "Zeron Third Board", "description": "Boards, by Zeron." })).await;
     e.check("9", "\"Zeron\" in a name or description is nobody's concern: published", status == 201, format!("{status} {body}"));
-    let big = store_package(signer, ID, "1.3.2", json!({}), &[("data.bin", vec![7u8; 16 * 1024 * 1024])]);
-    let (status, body) = e.publish_signed(&bob_key, ID, &big).await;
+    let big = token_package(ID, "1.3.2", json!({}), &[("data.bin", vec![7u8; 16 * 1024 * 1024])]);
+    let (status, body) = e.publish_with(&bob_secret, ID, &big).await;
     e.check("9", "a package over the store's limit is refused", status == 413 || body["error"] == "too_large", format!("{status} {body}"));
-    let colliding = store_package(signer, ID, "1.3.3", json!({}), &[("Notes.txt", b"a".to_vec()), ("notes.txt", b"b".to_vec())]);
-    let (status, body) = e.publish_signed(&bob_key, ID, &colliding).await;
+    let colliding = token_package(ID, "1.3.3", json!({}), &[("Notes.txt", b"a".to_vec()), ("notes.txt", b"b".to_vec())]);
+    let (status, body) = e.publish_with(&bob_secret, ID, &colliding).await;
     e.check("9", "a package whose paths collide on macOS and Windows is refused", status >= 400, format!("{status} {body}"));
-    let deep_text = String::from_utf8(store_package(signer, ID, "1.3.4", json!({}), &[])).unwrap();
+    let deep_text = String::from_utf8(token_package(ID, "1.3.4", json!({}), &[])).unwrap();
     let nest = format!("{}{}", "[".repeat(127), "]".repeat(127));
     let deep = format!("{{\"x\":{nest},{}", &deep_text[1..]).into_bytes();
-    let (status, body) = e.publish_signed(&bob_key, ID, &deep).await;
+    let (status, body) = e.publish_with(&bob_secret, ID, &deep).await;
     e.check("9", "a package nesting one level too deep is refused", status == 400, format!("{status} {body}"));
     let updated = desk.call(methods::UPDATE_PLUGIN, json!({ "id": ID, "verified_only": true })).await;
-    let ok = updated.as_ref().is_ok_and(|r| r["plugin"]["version"] == "1.3.0") && desk.allow(ID).await["status"] == "on";
-    e.check("9", "a device takes 1.3.0, with its tools", ok, format!("{updated:?}"));
-    let retried = store_package(signer, ID, "1.3.5", tools_after, &[]);
-    let (a, first_body) = e.publish_signed(&bob_key, ID, &retried).await;
-    let (b, second_body) = e.publish_signed(&bob_key, ID, &retried).await;
+    let ok = updated.as_ref().is_ok_and(|r| r["plugin"]["version"] == "1.3.0" && r["plugin"]["author"]["username"] == "bob-e2e") && desk.allow(ID).await["status"] == "on";
+    e.check("9", "a device takes 1.3.0 (a token's, unsigned), with its tools, as @bob-e2e's", ok, format!("{updated:?}"));
+    let retried = token_package(ID, "1.3.5", tools_after, &[]);
+    let (a, first_body) = e.publish_with(&bob_secret, ID, &retried).await;
+    let (b, second_body) = e.publish_with(&bob_secret, ID, &retried).await;
     e.check("9", "a publish retried with the same bytes gets the same answer", a == b && first_body == second_body, format!("{a} {first_body} / {b} {second_body}"));
     let (status, _) = e.get(&format!("/store/v1/plugins/{ID}/versions/1.3.5/package"), None).await;
     e.check("9", "and its package is served", status == 200, status);
@@ -844,8 +846,8 @@ async fn the_plugin_store_end_to_end() {
         && engine["tools_added"] == json!([{ "name": "new", "description": "Arrives." }])
         && engine["tools_removed"] == json!(["old"]);
     e.check("9", "the review's diff of 1.3.5 says what the device's offer says (tools added, changed, removed)", offer_135["version"] == "1.3.5" && same && expected, format!("store {store} / engine {offer_135}"));
-    let incompatible = store_package(signer, ID, "1.4.0", json!({ "engines": { "zeron": ">=99.0.0" } }), &[]);
-    let (status, body) = e.publish_signed(&bob_key, ID, &incompatible).await;
+    let incompatible = token_package(ID, "1.4.0", json!({ "engines": { "zeron": ">=99.0.0" } }), &[]);
+    let (status, body) = e.publish_with(&bob_secret, ID, &incompatible).await;
     e.check("9", "a version for another Zeron is taken by the store, superseding 1.3.5", status == 201 && body["superseded"] == json!(["1.3.5"]), format!("{status} {body}"));
     let (status, body) = e.admin(&staff, &format!("versions/{ID}/1.4.0/verify"), json!({})).await;
     e.check("9", "staff verify 1.4.0", status == 200, &body);
@@ -858,10 +860,8 @@ async fn the_plugin_store_end_to_end() {
     let (status, body) = e.admin_as(&staff, &format!("plugins/{ID}/feature"), json!({ "featured": true }), "https://evil.example", None).await;
     e.check("9", "a cross-site change with a valid session is refused", status == 403 && body["error"] == "bad_csrf", format!("{status} {body}"));
     set_version(&ci, "1.5.0", &["ui.add", "links.open"], "- Late.");
-    let out = e.cli("ci", &["publish", &ci_arg], &[("ZERON_DEPLOY_KEY", &secret)]);
-    e.check("9", "the former owner's deploy key is still refused on publish", out.status.code() == Some(3), text(&out));
-    let (_, after) = lookup(ada_key.public()).await;
-    e.check("9", "and still reads unverified for the plugin", after["verified"] == false, &after);
+    let out = e.cli("ci", &["publish", &ci_arg], &[("ZERON_DEPLOY_TOKEN", &secret)]);
+    e.check("9", "the former owner's deploy token is still refused on publish", out.status.code() == Some(3), text(&out));
     let claiming = e.work.join("claims").join(ID);
     checkout(&ci, &claiming);
     let path_m = claiming.join("zeron-plugin.json");
@@ -869,7 +869,7 @@ async fn the_plugin_store_end_to_end() {
     manifest["name"] = json!("Focus Board \u{2714}");
     std::fs::write(&path_m, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
     let requests_before = e.get(&format!("/store/v1/plugins/{ID}/versions?limit=50"), None).await.1["total"].clone();
-    let out = e.cli("ci", &["publish", &claiming.display().to_string()], &[("ZERON_DEPLOY_KEY", &bob_secret)]);
+    let out = e.cli("ci", &["publish", &claiming.display().to_string()], &[("ZERON_DEPLOY_TOKEN", &bob_secret)]);
     let after_total = e.get(&format!("/store/v1/plugins/{ID}/versions?limit=50"), None).await.1["total"].clone();
     e.check("9", "the CLI refuses a name with a check mark before sending it (exit 1, bad_listing)", out.status.code() == Some(1) && text(&out).contains("bad_listing") && requests_before == after_total, text(&out));
 
@@ -885,11 +885,19 @@ async fn the_plugin_store_end_to_end() {
     e.check("10", "staff see it, with its reason and the person's words", ok, format!("{status} {listed}"));
     let reports = format!("/store/v1/plugins/{ID}/reports");
     let body = serde_json::to_vec(&json!({ "reason": "other" })).unwrap();
-    let (status, answer) = e.signed(&bob_key, "POST", &reports, &body, now_ms(), None).await;
-    e.check("10", "a deploy key can't report", status == 403 && answer["error"] == "key_not_allowed", format!("{status} {answer}"));
+    let (status, answer) = e.with_token(&bob_secret, "POST", &reports, &body).await;
+    e.check("10", "a deploy token can't report", status == 403 && answer["error"] == "token_not_allowed", format!("{status} {answer}"));
     let installed = format!("/store/v1/plugins/{ID}/installed");
-    let (status, answer) = e.signed(&bob_key, "POST", &installed, b"{}", now_ms(), None).await;
-    e.check("10", "nor count an install", status == 403 && answer["error"] == "key_not_allowed", format!("{status} {answer}"));
+    let (status, answer) = e.with_token(&bob_secret, "POST", &installed, b"{}").await;
+    e.check("10", "nor count an install", status == 403 && answer["error"] == "token_not_allowed", format!("{status} {answer}"));
+    // Revoked: it publishes nothing from then on, refused as an unknown one.
+    let tokens = bob_laptop.call(methods::LIST_DEPLOY_TOKENS, json!({})).await.unwrap();
+    let bob_short = DeployToken::parse(&bob_secret).unwrap().short().to_owned();
+    let bob_id = tokens["tokens"].as_array().and_then(|t| t.iter().find(|t| t["short"] == bob_short.as_str())).map(|t| t["id"].as_str().unwrap_or_default().to_owned()).unwrap_or_default();
+    let revoked = bob_laptop.call(methods::REVOKE_DEPLOY_TOKEN, json!({ "id": bob_id })).await;
+    e.check("10", "bob revokes his token", revoked.is_ok(), format!("{revoked:?}"));
+    let (status, body) = e.publish_with(&bob_secret, ID, &token_package(ID, "1.5.0", json!({}), &[])).await;
+    e.check("10", "a revoked token publishes nothing (401 bad_token)", status == 401 && body["error"] == "bad_token", format!("{status} {body}"));
     let cookie = staff.cookie.lock().unwrap().clone();
     let res = e.http.post(format!("{}{reports}", e.site)).header("cookie", cookie).json(&json!({ "reason": "other" })).send().await.unwrap();
     let status = res.status().as_u16();

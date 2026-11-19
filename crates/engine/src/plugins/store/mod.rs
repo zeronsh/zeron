@@ -1,18 +1,21 @@
-//! The plugin store, device side: deploy keys, the store's HTTP client,
+//! The plugin store, device side: deploy tokens, the store's HTTP client,
 //! publishing, and installing and updating plugins from the store.
 //!
 //! A plugin from the store is a package like any other (`install::parse`
 //! verifies its signature over every file) that must also be exactly what
 //! the store's record says: its file's sha256, its content hash, its id and
-//! version, and the key that signed it when the record names one. Who made
-//! it is who owns its id in the store (the record's publisher), so its
-//! decision is bound to that owner (`StoreSource::binding`): an update
-//! signed by another of the owner's keys (a deploy key, a new machine)
-//! keeps what you allowed, and a new owner asks again. File, link,
-//! release and git installs keep their own rules.
+//! version, and the key that signed it when the record names one. A
+//! version published with a deploy token is unsigned and its record names
+//! no key: taken by its contents, which the record's hash vouches for, now
+//! and on every scan (`install::parse_from_store`, `scan::store_record`).
+//! Who made it is who owns its id in the store (the record's publisher),
+//! so its decision is bound to that owner (`StoreSource::binding`): an
+//! update signed by another of the owner's keys (a new machine), or none
+//! (a deploy token's), keeps what you allowed, and a new owner asks again.
+//! File, link, release and git installs keep their own rules: signed.
 
 pub mod client;
-pub mod deploy_key;
+pub mod deploy_token;
 mod device;
 pub mod notices;
 pub mod publish;
@@ -51,7 +54,9 @@ pub fn vouched(publisher: &Publisher) -> Result<(String, String), String> {
 
 /// The package `raw`, verified and checked against the store's record of
 /// `id` at `version` (`record`), published by `publisher`: the package and
-/// the store's record to keep beside it.
+/// the store's record to keep beside it. Signed by the key the record
+/// names; a record that names none (a deploy token's version) takes it
+/// unsigned, its contents vouched for by the record's hash alone.
 /// `verified`: the version's record says Zeron verified it (fetched with
 /// `record`, at install time).
 pub fn verify(raw: Vec<u8>, id: &str, version: &str, record: &PackageRecord, publisher: &Publisher, verified: bool) -> Result<(Package, StoreSource), String> {
@@ -66,7 +71,7 @@ pub fn verify(raw: Vec<u8>, id: &str, version: &str, record: &PackageRecord, pub
     if record.bytes != raw.len() as u64 {
         return Err(mismatch("its size"));
     }
-    let package = install::parse(raw)?;
+    let package = install::parse_from_store(raw, record.key.is_some())?;
     if package.id() != id {
         return Err(mismatch("its id"));
     }
@@ -76,10 +81,10 @@ pub fn verify(raw: Vec<u8>, id: &str, version: &str, record: &PackageRecord, pub
     if package.hash != record.hash.to_ascii_lowercase() {
         return Err(mismatch("its contents"));
     }
-    if record.key.as_deref().is_some_and(|key| key != package.key) {
+    if record.key.as_deref().is_some_and(|key| Some(key) != package.key.as_deref()) {
         return Err(mismatch("who signed it"));
     }
-    let store = StoreSource { id: id.to_owned(), publisher, publisher_id, hash: package.hash.clone(), key: Some(package.key.clone()), verified, verified_at: None, verified_alternative: None, instead_of_unverified: false, replaced: None };
+    let store = StoreSource { id: id.to_owned(), publisher, publisher_id, hash: package.hash.clone(), key: package.key.clone(), verified, verified_at: None, verified_alternative: None, instead_of_unverified: false, replaced: None };
     Ok((package, store))
 }
 
@@ -96,7 +101,7 @@ mod tests {
     }
 
     fn record(raw: &[u8], package: &Package) -> PackageRecord {
-        PackageRecord { hash: package.hash.clone(), sha256: signing::sha256_hex(raw), bytes: raw.len() as u64, key: Some(package.key.clone()) }
+        PackageRecord { hash: package.hash.clone(), sha256: signing::sha256_hex(raw), bytes: raw.len() as u64, key: package.key.clone() }
     }
 
     #[test]

@@ -204,8 +204,8 @@ pub struct ReplacedVersion {
 impl StoreSource {
     /// What a decision about a store plugin is bound to: who owns it in
     /// the store (their stable id, never the username), not the key it was
-    /// signed with (an author's deploy key and device keys sign the same
-    /// plugin). A new owner asks again.
+    /// signed with (an author's devices sign the same plugin, and a deploy
+    /// token's version isn't signed). A new owner asks again.
     pub fn binding(&self) -> String {
         format!("store:{}", self.publisher_id)
     }
@@ -264,7 +264,10 @@ pub const STORE: &str = "store";
 #[derive(Debug, Clone)]
 pub struct Package {
     pub manifest: Manifest,
-    pub key: String,
+    /// Who signed it. None only for a version the store took unsigned (a
+    /// deploy token's, `via: "deploy_token"`): trusted as the store's, by
+    /// its record's hash ([`parse_from_store`]).
+    pub key: Option<String>,
     pub files: BTreeMap<String, Vec<u8>>,
     /// The plugin's content hash, as a scan of it installed will say.
     pub hash: String,
@@ -301,7 +304,19 @@ fn colliding(files: &BTreeMap<String, Vec<u8>>) -> Option<String> {
 /// The plugin package `raw`, verified (signature over every file, a
 /// manifest Zeron can run, an id it can be installed under).
 pub fn parse(raw: Vec<u8>) -> Result<Package, String> {
-    let verified = package::parse(raw, FORMAT, signing::PAYLOAD_PREFIX, keep_path, &WORDS)?;
+    parse_package(raw, true)
+}
+
+/// [`parse`] for a package the store serves: `signed` is whether its
+/// record names a signer. A version published with a deploy token is
+/// unsigned, its record naming none: taken by its contents, which the
+/// record's hash then vouches for.
+pub fn parse_from_store(raw: Vec<u8>, signed: bool) -> Result<Package, String> {
+    parse_package(raw, signed)
+}
+
+fn parse_package(raw: Vec<u8>, signed: bool) -> Result<Package, String> {
+    let verified = package::parse(raw, FORMAT, signing::PAYLOAD_PREFIX, keep_path, &WORDS, signed)?;
     // What the store refuses at publish (amendment 31), refused here too,
     // before anything is written; the scan after writing stays the backstop.
     if let Some(words) = colliding(&verified.files) {
@@ -317,7 +332,7 @@ pub fn parse(raw: Vec<u8>) -> Result<Package, String> {
     }
     // What `scan::inspect` checks of a folder: the signature as a plugin's.
     let hashes = package::hashes(&verified.files);
-    if signing::check(&manifest, &hashes) != SigCheck::Valid(verified.key.clone()) {
+    if signing::check(&manifest, &hashes) != expected_sig(verified.key.as_deref()) {
         return Err(WORDS.bad_signature.into());
     }
     let hash = signing::content_hash(&manifest, &hashes);
@@ -412,29 +427,42 @@ pub fn not_newer(candidate: &str, installed: &str) -> String {
     failure(reason::NOT_NEWER, format!("Version {candidate} isn't later than the {installed} installed, so it won't replace it"))
 }
 
+/// What a folder of a package signed by `key` (none: unsigned) checks as.
+fn expected_sig(key: Option<&str>) -> SigCheck {
+    key.map_or(SigCheck::Unsigned, |key| SigCheck::Valid(key.to_owned()))
+}
+
 /// What was installed over, when it was an update.
 #[derive(Debug, Clone)]
 pub struct Replaced {
-    /// The key the replaced one was signed by.
-    pub key: String,
+    /// The key the replaced one was signed by; none for an unsigned one the
+    /// store vouched for.
+    pub key: Option<String>,
     pub version: String,
     pub permissions: Vec<String>,
     pub hash: String,
 }
 
 /// The installed plugin `id`'s key, version, permissions and hash, if it's
-/// signed and its files are what was signed.
-fn installed(dir: &Path) -> Result<(String, Replaced), String> {
+/// signed and its files are what was signed, or it's unsigned and exactly
+/// what the store vouched for (a deploy token's version). Second: whether
+/// it's the store's (installed from it, and still what it vouched for).
+fn installed(dir: &Path) -> Result<(Option<String>, Replaced, bool), String> {
     let inspected = scan::inspect(dir, true);
     let manifest = inspected.manifest.as_ref();
-    let SigCheck::Valid(key) = inspected.sig.clone() else {
-        return Err(failure(
-            reason::INSTALLED_UNSIGNED,
-            format!(
-                "{} is installed already, and it isn't signed. Remove it first to install this one.",
-                manifest.map_or(inspected.folder.as_str(), |m| m.name.as_str())
-            ),
-        ));
+    let from_store = scan::store_record(&inspected).is_some();
+    let key = match inspected.sig.clone() {
+        SigCheck::Valid(key) => Some(key),
+        SigCheck::Unsigned if from_store => None,
+        _ => {
+            return Err(failure(
+                reason::INSTALLED_UNSIGNED,
+                format!(
+                    "{} is installed already, and it isn't signed. Remove it first to install this one.",
+                    manifest.map_or(inspected.folder.as_str(), |m| m.name.as_str())
+                ),
+            ));
+        }
     };
     Ok((
         key.clone(),
@@ -444,19 +472,22 @@ fn installed(dir: &Path) -> Result<(String, Replaced), String> {
             permissions: manifest.map(|m| m.permissions.clone()).unwrap_or_default(),
             hash: inspected.hash,
         },
+        from_store,
     ))
 }
 
 /// Install `package` under `plugins_dir`, from `source`. Over an installed
 /// plugin only when the same key signed both, or the installed one's key is
 /// `rotated_from` (checked by the caller to be the same account's as the
-/// package's); never over anything else. Returns what it replaced.
+/// package's), or both are the store's (its record decides whose it is,
+/// signed or not); never over anything else. Returns what it replaced.
 pub fn install(plugins_dir: &Path, package: &Package, source: &Source, rotated_from: Option<&str>) -> Result<Option<Replaced>, String> {
     let id = package.id().to_owned();
     let dir = plugins_dir.join(&id);
     let replaced = if std::fs::symlink_metadata(&dir).is_ok() {
-        let (key, replaced) = installed(&dir)?;
-        if key != package.key && rotated_from != Some(key.as_str()) {
+        let (key, replaced, from_store) = installed(&dir)?;
+        let store_to_store = from_store && source.store().is_some();
+        if key != package.key && rotated_from.is_none_or(|r| key.as_deref() != Some(r)) && !store_to_store {
             return Err(failure(
                 reason::OTHER_SIGNER,
                 format!("A plugin called {id} is installed already, signed by someone else. Remove it first to install this one."),
@@ -483,7 +514,7 @@ pub fn install(plugins_dir: &Path, package: &Package, source: &Source, rotated_f
     let result = stage(&staged, package, source).and_then(|()| {
         // What's about to be installed is what was verified.
         let check = scan::inspect(&staged, false);
-        if check.sig != SigCheck::Valid(package.key.clone()) || check.hash != package.hash {
+        if check.sig != expected_sig(package.key.as_deref()) || check.hash != package.hash {
             return Err("It changed while it was being installed".to_string());
         }
         if replaced.is_some() {
@@ -1134,7 +1165,7 @@ pub fn compare(installed: &Installed<'_>, fetched: &Package, source: Source, sam
     let change = grant_change(permissions, &fetched.manifest.permissions);
     let refused = if fetched.id() != id {
         Some(failure(reason::DIFFERENT_PLUGIN, format!("The new version is a different plugin ({})", fetched.id())))
-    } else if fetched.key != key && !same_account {
+    } else if fetched.key.as_deref() != Some(key) && !same_account {
         Some(failure(reason::NEW_SIGNER, "The new version is signed by someone else, so it won't be installed"))
     } else if !newer(&fetched.manifest.version, version) {
         Some(not_newer(&fetched.manifest.version, version))
@@ -1151,7 +1182,7 @@ pub fn compare(installed: &Installed<'_>, fetched: &Package, source: Source, sam
         refused,
         source: Some(source),
         digest_diff: diff.grew().then(|| diff.to_value()),
-        new_key: fetched.key != key,
+        new_key: fetched.key.as_deref() != Some(key),
         new_owner: false,
         notes: String::new(),
         store_verified: None,
@@ -1183,7 +1214,7 @@ pub(crate) mod tests {
         let (key, _) = SigningKey::generate().unwrap();
         let raw = signed_package(&key, "focus", "1.0.0", &["ui.add"], "return 1");
         let package = parse(raw.clone()).unwrap();
-        assert_eq!((package.id(), package.key.as_str()), ("focus", key.public().as_str()));
+        assert_eq!((package.id(), package.key.as_deref()), ("focus", Some(key.public().as_str())));
         let source = Source { kind: "file".into(), url: None, path: Some("/x.zeron-plugin".into()), git_ref: None, commit: None, version: "1.0.0".into(), installed_at: 1, store: None };
         assert!(install(dir.path(), &package, &source, None).unwrap().is_none());
         let installed = scan::inspect(&dir.path().join("focus"), true);
@@ -1380,7 +1411,7 @@ pub(crate) mod tests {
         assert_eq!(reason_of(&parse(package::pack(FORMAT, &manifest, &files).unwrap()).unwrap_err()), Some(reason::PATHS_COLLIDE));
         let manifest = Manifest::from_value(manifest).unwrap();
         let hash = signing::content_hash(&manifest, &package::hashes(&files));
-        let package = Package { manifest, key: key.public(), files, hash };
+        let package = Package { manifest, key: Some(key.public()), files, hash };
         let source = Source { kind: "file".into(), url: None, path: None, git_ref: None, commit: None, version: String::new(), installed_at: 0, store: None };
         let installed = install(dir.path(), &package, &source, None);
         if ignores_case {

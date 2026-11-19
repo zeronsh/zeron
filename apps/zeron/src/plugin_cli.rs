@@ -146,7 +146,7 @@ pub async fn run(
     ipc_port: u16,
     data_dir: &std::path::Path,
 ) -> anyhow::Result<()> {
-    // `check` needs no running Zeron; nor does the store with a deploy key.
+    // `check` needs no running Zeron; nor does the store with a deploy token.
     let Some(command) = crate::store_cli::standalone(command, data_dir).await? else {
         return Ok(());
     };
@@ -248,7 +248,7 @@ pub async fn run(
         PluginCommand::Check { .. }
         | PluginCommand::Publish { .. }
         | PluginCommand::Status { .. }
-        | PluginCommand::Key { .. }
+        | PluginCommand::Token { .. }
         | PluginCommand::Yank { .. }
         | PluginCommand::Unyank { .. } => unreachable!("the store's commands ran above"),
     }

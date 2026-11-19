@@ -347,15 +347,15 @@ const STEP_UP_TTL: Duration = Duration::from_secs(10 * 60);
 /// alone, once ([`Auth::take_step_up`]), never whatever comes next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StepUpFor {
-    /// Making a plugin's deploy key (`CreateDeployKey`).
-    DeployKey,
+    /// Making a plugin's deploy token (`CreateDeployToken`).
+    DeployToken,
 }
 
 impl StepUpFor {
-    /// `StepUp`'s `for`: `deploy_key`.
+    /// `StepUp`'s `for`: `deploy_token`.
     pub fn parse(word: &str) -> Option<Self> {
         match word {
-            "deploy_key" => Some(Self::DeployKey),
+            "deploy_token" => Some(Self::DeployToken),
             _ => None,
         }
     }
@@ -1925,20 +1925,21 @@ mod tests {
         let auth = Auth::new(AuthConfig::new("https://edge.invalid", dir.path()));
         let ttl = Duration::from_secs(60);
         // A sign-in's ticket: what registering a key and deleting the
-        // account take, never a deploy key's.
+        // account take, never a deploy token's.
         auth.keep_step_up(Some(("t-sign-in".into(), ttl)), None);
         assert_eq!(auth.step_up().as_deref(), Some("t-sign-in"));
-        assert_eq!(auth.take_step_up(StepUpFor::DeployKey), None);
+        assert_eq!(auth.take_step_up(StepUpFor::DeployToken), None);
         assert_eq!(auth.step_up().as_deref(), Some("t-sign-in"), "kept for what it's for");
-        // A step-up begun for a deploy key: that alone, once.
-        auth.keep_step_up(Some(("t-key".into(), ttl)), Some(StepUpFor::DeployKey));
+        // A step-up begun for a deploy token: that alone, once.
+        auth.keep_step_up(Some(("t-key".into(), ttl)), Some(StepUpFor::DeployToken));
         assert_eq!(auth.step_up(), None, "not a sign-in's");
-        assert_eq!(auth.take_step_up(StepUpFor::DeployKey).as_deref(), Some("t-key"));
-        assert_eq!(auth.take_step_up(StepUpFor::DeployKey), None, "used once");
+        assert_eq!(auth.take_step_up(StepUpFor::DeployToken).as_deref(), Some("t-key"));
+        assert_eq!(auth.take_step_up(StepUpFor::DeployToken), None, "used once");
         // Expired, never.
-        auth.keep_step_up(Some(("t-old".into(), Duration::ZERO)), Some(StepUpFor::DeployKey));
-        assert_eq!(auth.take_step_up(StepUpFor::DeployKey), None);
-        assert_eq!(StepUpFor::parse("deploy_key"), Some(StepUpFor::DeployKey));
+        auth.keep_step_up(Some(("t-old".into(), Duration::ZERO)), Some(StepUpFor::DeployToken));
+        assert_eq!(auth.take_step_up(StepUpFor::DeployToken), None);
+        assert_eq!(StepUpFor::parse("deploy_token"), Some(StepUpFor::DeployToken));
+        assert_eq!(StepUpFor::parse("deploy_key"), None);
         assert_eq!(StepUpFor::parse("delete_account"), None);
     }
 

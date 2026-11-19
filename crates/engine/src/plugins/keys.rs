@@ -28,23 +28,8 @@ pub const KEY_NOT_KNOWN: &str = "Its author's key isn't known";
 pub const COULD_NOT_CHECK: &str = "Couldn't check who made it";
 pub const CHECKING: &str = "Checking who made it";
 pub const NO_USERNAME: &str = "Its author hasn't claimed a username";
-/// A deploy key vouches for the one plugin it was made for, and only while
-/// it's live (contract amendments 16 and 28).
-pub const DEPLOY_KEY_ELSEWHERE: &str = "It's signed with a deploy key made for another plugin";
-pub const DEPLOY_KEY_EXPIRED: &str = "It's signed with a deploy key that has expired";
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// A deploy key, as the edge describes one (`kind: "deploy"`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeployKeyInfo {
-    /// The one plugin it may publish.
-    pub plugin: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<i64>,
-    #[serde(default)]
-    pub expired: bool,
-}
 
 /// What the edge says about a key, asked about one plugin (`?plugin=`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,12 +38,9 @@ pub enum Lookup {
         username: Option<String>,
         mine: bool,
         revoked: bool,
-        /// The edge's word: not revoked, its owner holds a username, and (a
-        /// deploy key) it's live and made for the plugin asked about.
+        /// The edge's word: not revoked, and its owner holds a username.
         /// `None` from an edge before it said so.
         verified: Option<bool>,
-        /// A deploy key's plugin and expiry; none for a device's key.
-        deploy: Option<DeployKeyInfo>,
     },
     /// 404: nobody registered it.
     Unknown,
@@ -96,8 +78,7 @@ pub struct KeyRow {
 #[async_trait]
 pub trait KeyDirectory: Send + Sync + 'static {
     /// Who `key` is, asked about `plugin` (what it signed; none for a
-    /// template or this device's own key): a deploy key reads as verified
-    /// only for its own plugin.
+    /// template or this device's own key).
     async fn lookup(&self, key: &str, plugin: Option<&str>) -> Result<Lookup, String>;
     /// `step_up`: the ticket of the sign-in just made, which a new key needs.
     async fn register(&self, key: &str, device_id: &str, proof: &str, step_up: Option<&str>) -> Result<(), RegisterError>;
@@ -139,14 +120,6 @@ struct LookupReply {
     revoked: bool,
     #[serde(default)]
     verified: Option<bool>,
-    #[serde(default)]
-    kind: Option<String>,
-    #[serde(default)]
-    plugin: Option<String>,
-    #[serde(default, rename = "expiresAt")]
-    expires_at: Option<i64>,
-    #[serde(default)]
-    expired: bool,
 }
 
 #[async_trait]
@@ -167,17 +140,11 @@ impl KeyDirectory for EdgeDirectory {
             404 => Ok(Lookup::Unknown),
             200 => {
                 let reply: LookupReply = response.json().await.map_err(|e| e.to_string())?;
-                let deploy = (reply.kind.as_deref() == Some("deploy")).then(|| DeployKeyInfo {
-                    plugin: reply.plugin.unwrap_or_default(),
-                    expires_at: reply.expires_at,
-                    expired: reply.expired,
-                });
                 Ok(Lookup::Found {
                     username: reply.username,
                     mine: reply.mine,
                     revoked: reply.revoked,
                     verified: reply.verified,
-                    deploy,
                 })
             }
             status => Err(format!("plugin-keys lookup: HTTP {status}")),
@@ -268,9 +235,6 @@ pub struct CachedKey {
     pub revoked: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified: Option<bool>,
-    /// A deploy key's plugin and expiry.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deploy: Option<DeployKeyInfo>,
     /// The plugin the lookup asked about (none: a template, this device's key).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin: Option<String>,
@@ -283,23 +247,21 @@ pub struct CachedKey {
 impl CachedKey {
     /// The edge's answer about a key, asked about `plugin`.
     pub fn from_lookup(lookup: &Lookup, account: &str, now: i64, plugin: Option<&str>) -> Self {
-        let (username, mine, revoked, verified, deploy) = match lookup {
+        let (username, mine, revoked, verified) = match lookup {
             Lookup::Found {
                 username,
                 mine,
                 revoked,
                 verified,
-                deploy,
-            } => (username.clone(), *mine, *revoked, *verified, deploy.clone()),
+            } => (username.clone(), *mine, *revoked, *verified),
             // Unknown keys answer like revoked ones.
-            Lookup::Unknown => (None, false, true, Some(false), None),
+            Lookup::Unknown => (None, false, true, Some(false)),
         };
         Self {
             username,
             mine,
             revoked,
             verified,
-            deploy,
             plugin: plugin.map(str::to_owned),
             checked_at: now,
             account: account.to_owned(),
@@ -317,13 +279,6 @@ impl CachedKey {
         let username = self.username.as_deref().map(str::trim).filter(|u| !u.is_empty());
         if self.revoked {
             Author::unknown(KEY_NOT_KNOWN)
-        } else if let Some(deploy) = &self.deploy
-            && (deploy.expired || self.plugin.as_deref() != Some(deploy.plugin.as_str()))
-        {
-            // Whatever the edge's `verified` says (an older edge's said
-            // nothing of plugins): a deploy key vouches for its own plugin,
-            // while it's live, and for nothing else.
-            Author::unknown(if deploy.expired { DEPLOY_KEY_EXPIRED } else { DEPLOY_KEY_ELSEWHERE })
         } else if self.verified == Some(false) || username.is_none() {
             Author::unknown(NO_USERNAME)
         } else {
@@ -353,8 +308,8 @@ pub fn same_account(old: &CachedKey, new: &CachedKey) -> bool {
         .is_some_and(|was| !was.is_empty() && was.eq_ignore_ascii_case(&name))
 }
 
-/// Where a lookup of `key` about `plugin` is kept: a deploy key's answer
-/// depends on the plugin asked about (amendment 16).
+/// Where a lookup of `key` about `plugin` is kept: the edge's answer is
+/// about that plugin (its owner can change by a transfer).
 pub fn cache_key(key: &str, plugin: Option<&str>) -> String {
     match plugin {
         Some(plugin) => format!("{key}?plugin={plugin}"),
@@ -664,7 +619,7 @@ pub(crate) mod tests {
 
     impl FakeDirectory {
         pub fn found(username: Option<&str>, mine: bool) -> Lookup {
-            Lookup::Found { username: username.map(str::to_owned), mine, revoked: false, verified: None, deploy: None }
+            Lookup::Found { username: username.map(str::to_owned), mine, revoked: false, verified: None }
         }
     }
 
@@ -675,16 +630,7 @@ pub(crate) mod tests {
                 return Err("offline".into());
             }
             self.asked.lock().unwrap().push((key.to_owned(), plugin.map(str::to_owned)));
-            let found = self.keys.lock().unwrap().get(key).cloned().unwrap_or(Lookup::Unknown);
-            // As the edge answers (amendment 16): a deploy key is verified
-            // only for its own plugin, while it's live.
-            Ok(match found {
-                Lookup::Found { username, mine, revoked, verified: _, deploy: Some(deploy) } => {
-                    let verified = !revoked && !deploy.expired && plugin == Some(deploy.plugin.as_str());
-                    Lookup::Found { username, mine, revoked, verified: Some(verified), deploy: Some(deploy) }
-                }
-                other => other,
-            })
+            Ok(self.keys.lock().unwrap().get(key).cloned().unwrap_or(Lookup::Unknown))
         }
         async fn register(
             &self,
@@ -720,7 +666,7 @@ pub(crate) mod tests {
     #[test]
     fn plugins_key_same_account_is_a_live_key_of_the_same_username() {
         let key = |username: Option<&str>, revoked: bool, verified: Option<bool>| {
-            CachedKey::from_lookup(&Lookup::Found { username: username.map(str::to_owned), mine: false, revoked, verified, deploy: None }, "u", 0, Some("focus"))
+            CachedKey::from_lookup(&Lookup::Found { username: username.map(str::to_owned), mine: false, revoked, verified }, "u", 0, Some("focus"))
         };
         let ada = key(Some("ada"), false, Some(true));
         assert!(same_account(&ada, &key(Some("ada"), false, Some(true))));
@@ -771,7 +717,7 @@ pub(crate) mod tests {
         assert_eq!(stale, Err(Author::verified("ada")));
         assert_eq!(for_granting(stale.clone(), false), Author::unknown(CHECKING));
         assert_eq!(for_granting(stale, true), Author::unknown(COULD_NOT_CHECK));
-        let revoked = Lookup::Found { username: Some("x".into()), mine: false, revoked: true, verified: None, deploy: None };
+        let revoked = Lookup::Found { username: Some("x".into()), mine: false, revoked: true, verified: None };
         assert_eq!(
             CachedKey::from_lookup(&revoked, "u1", now, None).author(),
             Author::unknown(KEY_NOT_KNOWN)
@@ -802,11 +748,11 @@ pub(crate) mod tests {
             FakeDirectory::found(None, false),
             FakeDirectory::found(Some(" "), false),
             FakeDirectory::found(None, true),
-            Lookup::Found { username: Some("ada".into()), mine: false, revoked: false, verified: Some(false), deploy: None },
+            Lookup::Found { username: Some("ada".into()), mine: false, revoked: false, verified: Some(false) },
         ] {
             assert_eq!(CachedKey::from_lookup(&lookup, "u1", 0, None).author(), Author::unknown(NO_USERNAME), "{lookup:?}");
         }
-        let edge_says = Lookup::Found { username: Some("ada".into()), mine: false, revoked: false, verified: Some(true), deploy: None };
+        let edge_says = Lookup::Found { username: Some("ada".into()), mine: false, revoked: false, verified: Some(true) };
         assert_eq!(CachedKey::from_lookup(&edge_says, "u1", 0, None).author(), Author::verified("ada"));
     }
 

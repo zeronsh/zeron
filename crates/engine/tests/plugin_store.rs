@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 
 use fake_store::FakeStore;
 use zeron_engine::plugins::store::client::StoreClient;
-use zeron_engine::plugins::store::deploy_key::DeployKey;
+use zeron_engine::plugins::store::deploy_token::{DeployToken, Scope};
 use zeron_engine::plugins::{Plugins, install, package, signing::SigningKey};
 use zeron_rpc::{RpcReply, StaticToken, methods};
 
@@ -29,6 +29,13 @@ fn package_of(key: &SigningKey, id: &str, version: &str, permissions: &[&str], b
         manifest[k] = v;
     }
     let manifest = key.sign_manifest(&manifest, &package::hashes(&files));
+    package::pack(install::FORMAT, &manifest, &files).unwrap()
+}
+
+/// [`package_of`] unsigned: as a deploy token publishes it.
+fn unsigned_package_of(id: &str, version: &str, permissions: &[&str], body: &str) -> Vec<u8> {
+    let files: BTreeMap<String, Vec<u8>> = [("init.luau".to_string(), body.as_bytes().to_vec())].into();
+    let manifest = json!({ "id": id, "name": "Focus", "version": version, "entry": "init.luau", "permissions": permissions });
     package::pack(install::FORMAT, &manifest, &files).unwrap()
 }
 
@@ -86,9 +93,9 @@ fn word(error: &str) -> &str {
 #[tokio::test]
 async fn install_from_the_store_and_update_by_the_owners_other_key() {
     let store = FakeStore::start().await;
-    let deploy = DeployKey::from_seed([5; 32]).unwrap();
+    let (desk, _) = SigningKey::generate().unwrap();
     let (laptop, _) = SigningKey::generate().unwrap();
-    store.add("ada", &package_of(deploy.signing_key(), "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "verified", "");
+    store.add("ada", &package_of(&desk, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "verified", "");
     let d = device(&store, Some("bob"));
 
     let installed = d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
@@ -657,7 +664,7 @@ async fn an_offer_the_device_can_t_read_hides_nothing_else() {
 }
 
 #[tokio::test]
-async fn reports_compatibility_for_another_zeron_and_deploy_keys_for_owned_plugins_only() {
+async fn reports_compatibility_for_another_zeron_and_deploy_tokens_for_owned_plugins_only() {
     let store = FakeStore::start().await;
     let (key, _) = SigningKey::generate().unwrap();
     store.add("ada", &package_of(&key, "focus", "1.0.0", &[], "return 1", json!({ "engines": { "zeron": ">=0.5.0" } })), "verified", "");
@@ -675,22 +682,30 @@ async fn reports_compatibility_for_another_zeron_and_deploy_keys_for_owned_plugi
     assert!(!body["text"].as_str().unwrap().contains('\u{202e}'));
     assert!(d.call(methods::STORE_REPORT, json!({ "id": "focus", "reason": "boring" })).await.is_err());
 
-    // A key that isn't one (`zeron plugin key revoke focus ..`): nothing sent.
+    // A token id that isn't one (`zeron plugin token revoke ..`): nothing sent.
     let sent = store.state.lock().unwrap().requests.len();
-    for key in ["..", ".", "", "%2e%2e", "abc"] {
-        let refused = d.call(methods::REVOKE_DEPLOY_KEY, json!({ "key": key })).await.unwrap_err();
-        assert!(refused.contains("isn't a deploy key"), "{key}: {refused}");
+    for id in ["..", ".", "", "%2e%2e", "a/b"] {
+        let refused = d.call(methods::REVOKE_DEPLOY_TOKEN, json!({ "id": id })).await.unwrap_err();
+        assert!(refused.contains("isn't a deploy token's id"), "{id}: {refused}");
     }
     assert_eq!(store.state.lock().unwrap().requests.len(), sent);
 
-    // bob owns no focus in the store: no deploy key for it, said by id
-    // before any sign-in is asked for; a scope that isn't one is refused.
-    let refused = d.call(methods::CREATE_DEPLOY_KEY, json!({ "name": "CI", "scope": { "plugins": ["focus", "board"] } })).await.unwrap();
+    // bob has nothing in the store: no token yet; then, owning notes but no
+    // focus, none for focus, said by id before any sign-in is asked for. A
+    // scope that isn't one is refused.
+    let refused = d.call(methods::CREATE_DEPLOY_TOKEN, json!({ "name": "CI", "scope": { "all": true } })).await.unwrap();
+    assert_eq!(refused["error"], "not_published", "{refused}");
+    store.add("bob", &package_of(&key, "notes", "1.0.0", &[], "return 1", json!({})), "verified", "");
+    let refused = d.call(methods::CREATE_DEPLOY_TOKEN, json!({ "name": "CI", "scope": { "plugins": ["focus", "board"] } })).await.unwrap();
     assert_eq!((refused["error"].as_str(), refused["ids"].clone()), (Some("not_owner"), json!(["board", "focus"])), "{refused}");
     for scope in [json!({}), json!({ "all": true, "plugins": ["focus"] }), json!({ "plugins": [] })] {
-        let refused = d.call(methods::CREATE_DEPLOY_KEY, json!({ "name": "CI", "scope": scope })).await.unwrap();
+        let refused = d.call(methods::CREATE_DEPLOY_TOKEN, json!({ "name": "CI", "scope": scope })).await.unwrap();
         assert_eq!(refused["error"], "invalid_scope", "{scope}: {refused}");
     }
+    // Without a step-up begun for it: refused, nothing made.
+    let refused = d.call(methods::CREATE_DEPLOY_TOKEN, json!({ "name": "CI", "scope": { "plugins": ["notes"] } })).await.unwrap();
+    assert_eq!(refused["error"], "step_up_required", "{refused}");
+    assert!(store.state.lock().unwrap().deploy_tokens.is_empty());
 }
 
 /// Whether this Zeron is at least `v`.
@@ -778,11 +793,13 @@ async fn every_publish_not_made_here_is_noticed_once_and_kept_until_the_app_has_
     d.plugins.check_publishes().await;
     assert!(notices(d.call(methods::LIST_PLUGINS, json!({})).await.unwrap()).is_empty());
 
-    // A deploy key publishes 1.1.0; the laptop 1.2.0; this device 1.3.0.
-    let ci = DeployKey::from_seed([9; 32]).unwrap();
-    store.add_deploy_key(&ci.public(), zeron_engine::plugins::store::deploy_key::Scope::All, "ann");
-    let by_key = StoreClient::new(&store.url).publish("focus", package_of(&laptop, "focus", "1.1.0", &["ui.add"], "return 2", json!({})), &zeron_engine::plugins::store::client::Caller::DeployKey(Arc::new(ci))).await;
-    assert!(by_key.is_ok(), "{by_key:?}");
+    // A deploy token publishes 1.1.0 (unsigned); the laptop 1.2.0; this
+    // device 1.3.0.
+    let ci = store.add_deploy_token("ann", "CI", Scope::All);
+    let by_token = StoreClient::new(&store.url)
+        .publish("focus", unsigned_package_of("focus", "1.1.0", &["ui.add"], "return 2"), &zeron_engine::plugins::store::client::Caller::DeployToken(Arc::new(DeployToken::parse(&ci).unwrap())))
+        .await;
+    assert!(by_token.is_ok(), "{by_token:?}");
     store.add("ann", &package_of(&laptop, "focus", "1.2.0", &["ui.add"], "return 3", json!({})), "listed", "");
     let here = zeron_engine::plugins::signing::load_or_create_key(d._dir.path()).unwrap();
     store.add("ann", &package_of(&here, "focus", "1.3.0", &["ui.add"], "return 4", json!({})), "listed", "");
@@ -791,7 +808,8 @@ async fn every_publish_not_made_here_is_noticed_once_and_kept_until_the_app_has_
     let list = d.call(methods::LIST_PLUGINS, json!({})).await.unwrap();
     assert_eq!(notices(list.clone()), ["focus@1.1.0", "focus@1.2.0"], "{list}");
     let shown = &list["store_notices"];
-    assert_eq!((shown[0]["via"].as_str(), shown[0]["key_name"].as_str()), (Some("deploy_key"), Some("CI")), "{shown}");
+    assert_eq!((shown[0]["via"].as_str(), shown[0]["token_name"].as_str()), (Some("deploy_token"), Some("CI")), "{shown}");
+    assert!(shown[0]["words"].as_str().unwrap().contains("your deploy token \"CI\""), "{shown}");
     assert_eq!(shown[1]["via"], "device");
     assert!(shown[1]["words"].as_str().unwrap().contains("another of your devices"), "{shown}");
 
@@ -1173,4 +1191,64 @@ fn a_version_is_at_most_32_characters() {
     let manifest = zeron_engine::plugins::manifest::Manifest::from_value(manifest).unwrap();
     let (problems, _) = zeron_engine::plugins::listing::check(&manifest, &files);
     assert!(problems.iter().any(|p| p.rule == "not_semver"), "{problems:?}");
+}
+
+// ── Deploy tokens (contract a315eef5a) ──────────────────────────────────────
+
+/// A version published with a deploy token is unsigned: installed from the
+/// store, it's the publisher's (never "Unknown author"), trusted by the
+/// record's hash as any store install is, on every scan; it updates to
+/// another token's version or a device's; edited on disk, it's no longer
+/// the store's. Unsigned is only ever the store's: never from a file, and
+/// never for a version whose record names a signer.
+#[tokio::test]
+async fn a_version_published_with_a_token_installs_as_its_publisher_s() {
+    let store = FakeStore::start().await;
+    store.add("ada", &unsigned_package_of("focus", "1.0.0", &["ui.add"], "return 1"), "verified", "");
+    let d = device(&store, Some("bob"));
+    let installed = d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    let ada = json!({ "kind": "verified", "username": "ada" });
+    assert_eq!(installed["plugin"]["author"], ada, "{installed}");
+    assert_eq!((installed["plugin"]["source"]["kind"].as_str(), installed["plugin"]["source"]["verified"].as_bool()), (Some("store"), Some(true)));
+    assert_eq!(d.allow("focus").await["status"], "on");
+    // Every scan after: still the publisher's.
+    d.plugins.rescan().await;
+    let item = d.item("focus").await;
+    assert_eq!((item["author"].clone(), item["status"].as_str()), (ada.clone(), Some("on")), "{item}");
+
+    // Another token's version, then a device's: updates as any.
+    store.add("ada", &unsigned_package_of("focus", "1.1.0", &["ui.add"], "return 2"), "verified", "");
+    assert_eq!(d.check().await["updates"][0]["version"], "1.1.0");
+    let updated = d.call(methods::UPDATE_PLUGIN, json!({ "id": "focus" })).await.unwrap();
+    assert_eq!((updated["plugin"]["version"].as_str(), updated["plugin"]["author"].clone(), updated["plugin"]["status"].as_str()), (Some("1.1.0"), ada.clone(), Some("on")), "{updated}");
+    let (desk, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&desk, "focus", "1.2.0", &["ui.add"], "return 3", json!({})), "verified", "");
+    assert_eq!(d.check().await["updates"][0]["new_key"], Value::Null, "no key to have changed from");
+    let updated = d.call(methods::UPDATE_PLUGIN, json!({ "id": "focus" })).await.unwrap();
+    assert_eq!((updated["plugin"]["version"].as_str(), updated["plugin"]["author"].clone()), (Some("1.2.0"), ada.clone()), "{updated}");
+
+    // Unsigned from a file: refused, as any unsigned sideload.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("notes.zeron-plugin");
+    std::fs::write(&file, unsigned_package_of("notes", "1.0.0", &[], "return 1")).unwrap();
+    let refused = d.call(methods::INSTALL_PLUGIN, json!({ "path": file.display().to_string() })).await.unwrap_err();
+    assert_eq!(word(&refused), "unsigned", "{refused}");
+    // Unsigned bytes for a version whose record names a signer: refused.
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "board", "1.0.0", &[], "return 1", json!({})), "verified", "");
+    store.state.lock().unwrap().serve_instead.insert(("board".into(), "1.0.0".into()), unsigned_package_of("board", "1.0.0", &[], "return 1"));
+    let refused = d.call(methods::INSTALL_PLUGIN, json!({ "store": "board" })).await.unwrap_err();
+    assert!(matches!(word(&refused), "store_mismatch" | "unsigned"), "{refused}");
+    assert!(d.item("board").await.is_null());
+
+    // Edited on disk: no longer what the store vouched for.
+    store.add("ada", &unsigned_package_of("lab", "1.0.0", &["ui.add"], "return 1"), "verified", "");
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "lab" })).await.unwrap();
+    assert_eq!(d.allow("lab").await["status"], "on");
+    let entry = d.item("lab").await["dir"].as_str().unwrap().to_owned();
+    std::fs::write(std::path::Path::new(&entry).join("init.luau"), b"return 'changed'").unwrap();
+    d.plugins.rescan().await;
+    let item = d.item("lab").await;
+    assert_eq!(item["author"]["kind"], "unknown", "{item}");
+    assert_ne!(item["status"], "on", "{item}");
 }

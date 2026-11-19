@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Publish a Zeron plugin from CI: install Zeron's Linux command line (the
 # release's `zeron-engine`, checked against the release's sha256), then run
-# `zeron plugin publish <folder>` with the deploy key in ZERON_DEPLOY_KEY.
-# Without a key it only checks (`zeron plugin check`): what a pull request
-# from a fork, which gets no secrets, can still run.
+# `zeron plugin publish <folder>` with the deploy token in
+# ZERON_DEPLOY_TOKEN. Without a token it only checks (`zeron plugin check`):
+# what a pull request from a fork, which gets no secrets, can still run.
 #
 # Env (the action sets these from its inputs):
-#   ZERON_DEPLOY_KEY   the deploy key's secret (zpk_…), or empty
+#   ZERON_DEPLOY_TOKEN the deploy token (zdt_…), or empty
 #   ZERON_PLUGIN_PATH  the plugin's folder (default .)
-#   ZERON_DRY_RUN      true: check, sign and pack, don't publish; false (or
+#   ZERON_DRY_RUN      true: check and pack, don't publish; false (or
 #                      unset): publish. Anything else is refused.
 #   ZERON_VERSION      latest, or a release's version (held: the release's
 #                      manifest must name that version)
@@ -91,8 +91,8 @@ echo "Zeron $("$zeron" --version | awk '{print $2}') ($arch)"
 export ZERON_DATA_DIR="$work/data"
 folder="${ZERON_PLUGIN_PATH:-.}"
 
-if [ -z "${ZERON_DEPLOY_KEY:-}" ]; then
-  echo "No deploy key (the key input is empty): checking only."
+if [ -z "${ZERON_DEPLOY_TOKEN:-}" ]; then
+  echo "No deploy token (the token input is empty): checking only."
   exec "$zeron" plugin check -- "$folder"
 fi
 args=(plugin publish)

@@ -7,7 +7,7 @@
 //
 // It's Miniflare rather than `wrangler dev` for one reason: WorkOS. Sign-in
 // is a code exchange the edge makes with WorkOS, and only that exchange
-// mints the step-up ticket a new signing key or deploy key needs. Miniflare
+// mints the step-up ticket a new signing key or deploy token needs. Miniflare
 // takes an outbound service, as the edge's own workerd tests do
 // (vitest.workerd.config.ts), so WorkOS is a local fake here: it signs real
 // ES256 access tokens and serves their JWKS, and the edge runs in WorkOS

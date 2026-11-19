@@ -2,8 +2,9 @@
 //! agree with, every expected value made by this crate's own code:
 //! canonical JSON, content hashes, signatures, packages, path rules,
 //! manifests, limits, strict versions and their order, "newer", ranges,
-//! the store's listing rules, changelog notes, deploy keys and signed
-//! requests, and what a plugin asks for as its consent sheet rates it
+//! the store's listing rules, changelog notes, deploy tokens, packages as
+//! the store serves them unsigned, and what a plugin asks for as its
+//! consent sheet rates it
 //! (the tables behind the ratings, as data the edge imports).
 //!
 //! Inputs come from two places: the cases written below, and `corpus.json`
@@ -33,7 +34,7 @@ use super::listing::{self, CATEGORIES};
 use super::manifest::{self, Manifest};
 use super::package::{self, MAX_PACKAGE_BYTES};
 use super::signing::{self, FileHashes, PAYLOAD_PREFIX, SigCheck, SigningKey, TEMPLATE_PAYLOAD_PREFIX};
-use super::store::deploy_key::{self, DeployKey};
+use super::store::deploy_token::{self, DeployToken};
 use super::version::{self, Range, Version};
 
 const CORPUS: &str = include_str!("corpus.json");
@@ -298,8 +299,13 @@ fn packed(key: Option<&SigningKey>, manifest: &Value, files: &BTreeMap<String, V
 /// name), then the manifest's: `bad_manifest` (one Zeron won't run),
 /// `bad_id`, `missing_entry`.
 fn package_result(raw: Vec<u8>) -> Value {
+    package_result_by(raw, install::parse)
+}
+
+/// [`package_result`], read by `parse`.
+fn package_result_by(raw: Vec<u8>, parse: impl Fn(Vec<u8>) -> Result<install::Package, String>) -> Value {
     let sha256 = signing::sha256_hex(&raw);
-    match install::parse(raw.clone()) {
+    match parse(raw.clone()) {
         Ok(p) => json!({
             "ok": true, "id": p.id(), "version": p.manifest.version, "key": p.key, "hash": p.hash, "sha256": sha256,
             "files": p.files.len(), "paths": p.files.keys().collect::<Vec<_>>(),
@@ -321,6 +327,33 @@ fn package_result(raw: Vec<u8>) -> Value {
             json!({ "ok": false, "error": word })
         }
     }
+}
+
+/// What a device makes of a package the store serves with a record naming
+/// no signer (a deploy token's version, `via: "deploy_token"`, `key: null`):
+/// unsigned, taken by its contents (the record's `hash` must be its content
+/// hash); one that is signed all the same must still check out.
+fn store_package_cases() -> Value {
+    let key = author();
+    let manifest = json!({ "id": "focus", "name": "Focus", "version": "1.0.0", "entry": "init.luau", "permissions": ["ui.add"] });
+    let good = files(&[("init.luau", b"return 1"), ("ui/badge.luau", b"return {}")]);
+    let signed = packed(Some(&key), &manifest, &good);
+    let mut changed: Value = serde_json::from_slice(&signed).unwrap();
+    changed["files"]["init.luau"] = json!(B64.encode(b"return 2"));
+    let mut no_entry = good.clone();
+    no_entry.remove("init.luau");
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        ("unsigned (a deploy token's)", packed(None, &manifest, &good)),
+        ("signed all the same", signed.clone()),
+        ("signed, a file changed after signing", serde_json::to_vec(&changed).unwrap()),
+        ("unsigned, its entry file missing", packed(None, &manifest, &no_entry)),
+    ];
+    Value::Array(
+        cases
+            .into_iter()
+            .map(|(name, raw)| json!({ "name": name, "package_b64": B64.encode(&raw), "result": package_result_by(raw, |raw| install::parse_from_store(raw, false)) }))
+            .collect(),
+    )
 }
 
 fn package_cases() -> Value {
@@ -1196,57 +1229,57 @@ fn changelog_cases() -> Value {
     )
 }
 
-// ── Deploy keys and signed requests ─────────────────────────────────────────
+// ── Deploy tokens ────────────────────────────────────────────────────────────
 
-/// A signed request's two headers, as sent.
-fn headers(authorization: String, body_sha256: &str) -> Value {
-    let mut headers = serde_json::Map::new();
-    headers.insert("authorization".into(), json!(authorization));
-    headers.insert(deploy_key::CONTENT_SHA256_HEADER.to_ascii_lowercase(), json!(body_sha256));
-    Value::Object(headers)
-}
-
-fn deploy_key_cases() -> Value {
-    let key = DeployKey::from_seed([3; 32]).unwrap();
-    let request = |method: &str, path: &str, body: &[u8], ts: i64| {
-        let body_sha256 = signing::sha256_hex(body);
-        json!({
-            "method": method, "path": path, "body_b64": B64.encode(body), "body_sha256": body_sha256, "ts": ts,
-            "message": deploy_key::request_message(method, path, &body_sha256, ts),
-            "headers": headers(key.authorization(method, path, body, ts), &body_sha256),
+fn deploy_token_cases() -> Value {
+    let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let counting: [u8; 32] = std::array::from_fn(|n| n as u8);
+    let tokens: Vec<Value> = [[0u8; 32], [7u8; 32], [0xffu8; 32], counting]
+        .iter()
+        .map(|random| {
+            let token = DeployToken::from_random(random);
+            let text = token.as_str();
+            let (before, checksum) = text.split_at(deploy_token::LEN - deploy_token::CHECK_LEN);
+            json!({
+                "random_hex": hex(random), "token": text, "body": &before[deploy_token::PREFIX.len()..], "checksum": checksum,
+                "crc32": crc32fast::hash(before.as_bytes()), "short": token.short(), "sha256": token.hash(),
+            })
         })
+        .collect();
+    let good = DeployToken::from_random(&counting).as_str().to_owned();
+    let mut typo = good.clone().into_bytes();
+    typo[10] = if typo[10] == b'A' { b'B' } else { b'A' };
+    let typo = String::from_utf8(typo).unwrap();
+    let wrong_check = format!("{}{}", &good[..deploy_token::LEN - 1], if good.ends_with('0') { '1' } else { '0' });
+    let read = |text: &str| match DeployToken::parse(text) {
+        Ok(token) => json!({ "token": text, "ok": true, "short": token.short() }),
+        Err(error) if error == deploy_token::NOT_A_TOKEN => json!({ "token": text, "ok": false, "error": "not_a_token" }),
+        Err(error) if error == deploy_token::DAMAGED => json!({ "token": text, "ok": false, "error": "damaged" }),
+        Err(error) => panic!("a refusal without a word: {error}"),
     };
-    // Proof of possession, v2: one account's key (its publisher id), one
-    // lifetime (`expires_at`, or never), one scope (`*`, or the ids sorted
-    // and joined with `,`), the key last.
-    let publisher_id = "pub_0123456789abcdef0123456789abcdef";
-    let proofs: Vec<Value> = [
-        (deploy_key::Scope::All, None),
-        (deploy_key::Scope::plugins(&["git".into(), "focus".into()]).unwrap(), Some(1_800_000_000_000_i64)),
+    let reads: Vec<Value> = [
+        format!("  {good}\n"),
+        "ghp_0123456789".to_owned(),
+        good.replacen("zdt_", "zdk_", 1),
+        format!("{}-", &good[..deploy_token::LEN - 1]),
+        good[..deploy_token::LEN - 1].to_owned(),
+        format!("{good}0"),
+        typo,
+        wrong_check,
     ]
     .iter()
-    .map(|(scope, expires_at)| {
-        json!({
-            "publisher_id": publisher_id, "expires_at": expires_at,
-            "scope": scope.to_value(), "scope_text": scope.text(),
-            "message": deploy_key::proof_message(publisher_id, *expires_at, scope, &key.public()),
-            "proof": key.proof(publisher_id, *expires_at, scope),
-        })
-    })
+    .map(|t| read(t))
     .collect();
     json!({
-        "secret_prefix": deploy_key::SECRET_PREFIX,
-        "secret": key.secret(),
-        "public": key.public(),
-        "proofs": proofs,
-        "max_skew_ms": deploy_key::MAX_SKEW_MS,
-        "content_sha256_header": deploy_key::CONTENT_SHA256_HEADER,
-        "request": request("POST", "/store/v1/plugins/focus/versions", br#"{"format":"zeron-plugin:v1"}"#, 1_763_000_000_000),
-        "get": request("GET", "/store/v1/me/plugins", b"", 1_763_000_000_000),
-        "bad_secrets": [
-            { "secret": "ghp_notours", "error": "not_a_secret" },
-            { "secret": &key.secret()[..key.secret().len() - 2], "error": "damaged" },
-        ],
+        "about": "A deploy token is prefix, body, checksum. body: the 32 random bytes as one big-endian unsigned integer in base62 (alphabet in value order), most significant digit first, left-padded with '0' to body_len. checksum: CRC-32 (zlib's, ISO-HDLC: reflected polynomial 0xEDB88320, initial 0xFFFFFFFF, final xor 0xFFFFFFFF) of the ASCII of prefix + body, in base62 the same way, left-padded to check_len. short: the first short_len characters of body. sha256: the SHA-256 (hex) of the whole token's ASCII, all the store keeps. Reading one (reads): surrounding whitespace ignored; anything but prefix and base62 characters is not_a_token; the wrong length or a checksum that doesn't match is damaged. It's published with as `Authorization: Bearer <token>`.",
+        "prefix": deploy_token::PREFIX,
+        "alphabet": std::str::from_utf8(deploy_token::ALPHABET).unwrap(),
+        "body_len": deploy_token::BODY_LEN,
+        "check_len": deploy_token::CHECK_LEN,
+        "len": deploy_token::LEN,
+        "short_len": deploy_token::SHORT_LEN,
+        "tokens": tokens,
+        "reads": reads,
     })
 }
 
@@ -1300,7 +1333,7 @@ fn consent_item_cases() -> Value {
 /// `docs/plugin-store-data.json`: the store's rules as data, small enough
 /// for the edge to import at run time (its Worker never bundles the test
 /// vectors): formats and prefixes, limits, categories, kept ids, report
-/// reasons, deploy-key constants, and the tables behind the consent
+/// reasons, deploy-token constants, and the tables behind the consent
 /// sheet's ratings.
 fn data() -> Value {
     json!({
@@ -1310,12 +1343,15 @@ fn data() -> Value {
         "payload_prefix": PAYLOAD_PREFIX,
         "template_payload_prefix": TEMPLATE_PAYLOAD_PREFIX,
         "key_proof_prefix": signing::KEY_PROOF_PREFIX,
-        "deploy_key": {
-            "secret_prefix": deploy_key::SECRET_PREFIX,
-            "proof_prefix": deploy_key::PROOF_PREFIX,
-            "request_prefix": deploy_key::REQUEST_PREFIX,
-            "content_sha256_header": deploy_key::CONTENT_SHA256_HEADER,
-            "max_skew_ms": deploy_key::MAX_SKEW_MS,
+        "deploy_token": {
+            "prefix": deploy_token::PREFIX,
+            "alphabet": std::str::from_utf8(deploy_token::ALPHABET).unwrap(),
+            "body_len": deploy_token::BODY_LEN,
+            "check_len": deploy_token::CHECK_LEN,
+            "len": deploy_token::LEN,
+            "short_len": deploy_token::SHORT_LEN,
+            "max_scope_plugins": deploy_token::MAX_SCOPE_PLUGINS,
+            "env": deploy_token::ENV,
         },
         "limits": {
             "max_files": super::files::MAX_FILES,
@@ -1429,13 +1465,14 @@ fn build() -> Value {
         "signatures": signature_cases(),
         "manifests": manifest_cases(),
         "packages": package_cases(),
+        "store_packages": store_package_cases(),
         "paths": path_cases(),
         "semver": semver_cases(),
         "newer": newer_cases(),
         "ranges": range_cases(),
         "listing": listing_cases(),
         "changelog": changelog_cases(),
-        "deploy_key": deploy_key_cases(),
+        "deploy_token": deploy_token_cases(),
         "consent_items": consent_item_cases(),
     })
 }
@@ -1507,7 +1544,7 @@ fn numbers_survive_sign_pack_parse_verify() {
         let before = signing::canonical_json(&manifest);
         let raw = package::pack(FORMAT, &key.sign_manifest(&manifest, &package::hashes(&files)), &files).unwrap();
         let parsed = install::parse(raw).unwrap_or_else(|e| panic!("{number}: {e}"));
-        assert_eq!(parsed.key, key.public(), "{number}");
+        assert_eq!(parsed.key, Some(key.public()), "{number}");
         assert_eq!(signing::canonical_json(&parsed.manifest.unsigned_value()), before, "{number} changed on its way");
         let expected = signing::content_hash(&Manifest::from_value(manifest).unwrap(), &package::hashes(&files));
         assert_eq!(parsed.hash, expected, "{number}");
@@ -1539,8 +1576,12 @@ fn vectors_say_what_the_code_does() {
         assert!(signatures.contains(&word), "{word} has a case");
     }
     assert!(v["canonical_json"].as_array().unwrap().iter().any(|c| c["error"] == true));
-    let secret = v["deploy_key"]["secret"].as_str().unwrap();
-    assert_eq!(DeployKey::from_secret(secret).unwrap().public(), v["deploy_key"]["public"]);
+    for token in v["deploy_token"]["tokens"].as_array().unwrap() {
+        let read = DeployToken::parse(token["token"].as_str().unwrap()).unwrap();
+        assert_eq!((read.short(), read.hash()), (token["short"].as_str().unwrap(), token["sha256"].as_str().unwrap().to_owned()));
+    }
+    let store = &v["store_packages"][0]["result"];
+    assert_eq!((store["ok"].as_bool(), &store["key"]), (Some(true), &Value::Null), "a token's package, taken unsigned");
     // git and gh are the programs held to rules of their own.
     for program in zeron_plugin_guard::commands::HELD_TO_ITS_OWN_RULES {
         assert!(zeron_plugin_guard::commands::held_to_its_own_rules(program));

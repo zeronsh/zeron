@@ -8975,6 +8975,7 @@ dependencies = [
  "bytes",
  "chrono",
  "core-foundation 0.10.1",
+ "crc32fast",
  "dunce",
  "fff-search",
  "flate2",

@@ -6,7 +6,7 @@
 //! may search and read the store, install from it (it lands waiting for the
 //! person, as any install does) and check one of the person's plugins
 //! against its rules; submitting a plugin, acting on its versions and its
-//! deploy keys are the person's, in Zeron's window or the CLI. Submitting
+//! deploy tokens are the person's, in Zeron's window or the CLI. Submitting
 //! also needs the ticket `PreparePluginPublish` gives this device's app or
 //! CLI for the plugin as checked (`reviews::Kind::Publish`), so what's sent
 //! is what the person saw checked.
@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use zeron_rpc::{RpcError, RpcReply, methods, parse_params};
 
 use super::client::{self, Caller, Installed as Asked, Offer, PackageRecord, Search, StoreClient, UpdatesAsk};
-use super::deploy_key::{DeployKey, Scope};
+use super::deploy_token::{DeployToken, Scope};
 use super::notices;
 use super::publish;
 use crate::plugins::install::{self, Found, STORE, Source, failure};
@@ -75,9 +75,9 @@ pub fn handles(method: &str) -> bool {
             | methods::PUBLISH_PLUGIN
             | methods::STORE_MY_PLUGINS
             | methods::STORE_VERSION_ACTION
-            | methods::LIST_DEPLOY_KEYS
-            | methods::CREATE_DEPLOY_KEY
-            | methods::REVOKE_DEPLOY_KEY
+            | methods::LIST_DEPLOY_TOKENS
+            | methods::CREATE_DEPLOY_TOKEN
+            | methods::REVOKE_DEPLOY_TOKEN
             | methods::STORE_REPORT
             | methods::ACK_STORE_NOTICES
     )
@@ -165,7 +165,7 @@ struct VersionActionParams {
 }
 
 #[derive(Deserialize)]
-struct CreateKeyParams {
+struct CreateTokenParams {
     name: String,
     /// `{all: true}` or `{plugins: [id…]}` (amendment 44).
     scope: ScopeParams,
@@ -187,7 +187,7 @@ impl ScopeParams {
         match (self.all, &self.plugins) {
             (true, None) => Ok(Scope::All),
             (false, Some(ids)) => Scope::plugins(ids),
-            _ => Err("A key's scope is all of your plugins ({all: true}) or the ones it names ({plugins: [...]})".into()),
+            _ => Err("A token's scope is all of your plugins ({all: true}) or the ones it names ({plugins: [...]})".into()),
         }
     }
 }
@@ -198,8 +198,8 @@ struct AckNoticesParams {
 }
 
 #[derive(Deserialize)]
-struct RevokeKeyParams {
-    key: String,
+struct RevokeTokenParams {
+    id: String,
 }
 
 /// A store plugin installed here, as the update check asks about it.
@@ -544,13 +544,13 @@ impl Plugins {
                     Err(error) => not_ok(&error),
                 })
             }
-            methods::LIST_DEPLOY_KEYS => {
+            methods::LIST_DEPLOY_TOKENS => {
                 let (client, caller) = self.store_as_person().await.map_err(failed)?;
-                RpcReply::value(&client.keys(&caller).await.map_err(failed)?)
+                RpcReply::value(&client.tokens(&caller).await.map_err(failed)?)
             }
-            methods::CREATE_DEPLOY_KEY => {
-                let p: CreateKeyParams = parse_params(params)?;
-                RpcReply::value(&self.create_deploy_key(p).await)
+            methods::CREATE_DEPLOY_TOKEN => {
+                let p: CreateTokenParams = parse_params(params)?;
+                RpcReply::value(&self.create_deploy_token(p).await)
             }
             methods::STORE_REPORT => {
                 let p: ReportParams = parse_params(params)?;
@@ -574,14 +574,15 @@ impl Plugins {
                 self.publish_list();
                 RpcReply::value(&json!({}))
             }
-            methods::REVOKE_DEPLOY_KEY => {
-                let p: RevokeKeyParams = parse_params(params)?;
-                if !super::deploy_key::valid_public(p.key.trim()) {
-                    return Err(failed("That isn't a deploy key: give its key as `zeron plugin key list` shows it"));
+            methods::REVOKE_DEPLOY_TOKEN => {
+                let p: RevokeTokenParams = parse_params(params)?;
+                let id = p.id.trim();
+                if id.is_empty() || id.len() > 64 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+                    return Err(failed("That isn't a deploy token's id: give it as `zeron plugin token list` shows it"));
                 }
                 let (client, caller) = self.store_as_person().await.map_err(failed)?;
-                client.revoke_key(p.key.trim(), &caller).await.map_err(failed)?;
-                RpcReply::value(&json!({ "revoked": p.key.trim() }))
+                client.revoke_token(id, &caller).await.map_err(failed)?;
+                RpcReply::value(&json!({ "revoked": id }))
             }
             _ => Err(RpcError::UnknownMethod(method.to_owned())),
         }
@@ -615,7 +616,7 @@ impl Plugins {
         let entry = self.entry(id).ok_or_else(|| failed(format!("There's no plugin {id}")))?;
         if !entry.item.own || entry.item.builtin {
             return Err(failed(
-                "Only a plugin you're making on this device can be published from here (a folder anywhere publishes with `zeron plugin publish <folder>` and a deploy key)",
+                "Only a plugin you're making on this device can be published from here (a folder anywhere publishes with `zeron plugin publish <folder>` and a deploy token)",
             ));
         }
         Ok(PathBuf::from(&entry.item.dir))
@@ -672,64 +673,67 @@ impl Plugins {
         }
     }
 
-    /// A deploy key for the account (amendment 44), its scope fixed now,
-    /// made here and registered at the edge with a step-up begun for it and
-    /// its proof: its secret, shown this once.
-    async fn create_deploy_key(&self, p: CreateKeyParams) -> Value {
+    /// A deploy token for the account (contract a315eef5a), its scope fixed
+    /// now, made by the edge with a step-up begun for it: its secret, in
+    /// the answer this once, never kept or logged here.
+    async fn create_deploy_token(&self, p: CreateTokenParams) -> Value {
         let scope = match p.scope.scope() {
             Ok(scope) => scope,
             Err(error) => return not_ok(&failure("invalid_scope", error)),
         };
         let name = plain(&p.name, 64);
         if name.is_empty() {
-            return not_ok(&failure("invalid", "Give the key a name (where it's used, like \"GitHub Actions\")"));
+            return not_ok(&failure("invalid", "Give the token a name (where it's used, like \"GitHub Actions\")"));
         }
         let (client, caller) = match self.store_as_person().await {
             Ok(store) => store,
             Err(error) => return not_ok(&error),
         };
-        // A key publishes plugins you have in the store already (a first
+        // A token publishes plugins you have in the store already (a first
         // version comes from a signed-in device): said here, by id, before
-        // the step-up; and the account's publisher id, which its proof binds.
+        // the step-up.
         let mine = match client.my_plugins(&caller).await {
             Ok(mine) => mine,
             Err(error) => return not_ok(&error),
         };
         let owned: Vec<&str> = mine["plugins"].as_array().into_iter().flatten().filter_map(|plugin| plugin["id"].as_str()).collect();
+        if owned.is_empty() {
+            return not_ok(&failure(
+                "not_published",
+                "You have no plugin in the store yet: publish one from this device (`zeron plugin publish <id>`), then make a deploy token",
+            ));
+        }
         if let Scope::Plugins(ids) = &scope {
             let missing: Vec<&str> = ids.iter().map(String::as_str).filter(|id| !owned.contains(id)).collect();
             if !missing.is_empty() {
                 return not_owner(&missing);
             }
         }
-        let Some(publisher_id) = own_publisher_id(&mine) else {
-            return not_ok(&failure(
-                "not_published",
-                "You have no plugin in the store yet: publish one from this device (`zeron plugin publish <id>`), then make a deploy key",
-            ));
-        };
-        // A step-up begun for this (`StepUp {for: "deploy_key"}`), used up
+        // A step-up begun for this (`StepUp {for: "deploy_token"}`), used up
         // here: a sign-in's ticket, or one already spent, isn't one.
-        let step_up = lock(&self.inner.deploy_key_step_up).clone().and_then(|f| f());
+        let step_up = lock(&self.inner.deploy_token_step_up).clone().and_then(|f| f());
         let Some(step_up) = step_up else {
-            return not_ok(&failure("step_up_required", "Making a deploy key needs a fresh sign-in for it"));
+            return not_ok(&failure("step_up_required", "Making a deploy token needs a fresh sign-in for it"));
         };
-        let key = match DeployKey::generate() {
-            Ok(key) => key,
-            Err(error) => return not_ok(&error),
-        };
-        let proof = key.proof(&publisher_id, p.expires, &scope);
-        let mut body = json!({ "key": key.public(), "name": name, "scope": scope.to_value(), "proof": proof, "stepUp": step_up });
+        let mut body = json!({ "name": name, "scope": scope.to_value(), "stepUp": step_up });
         if let Some(expires) = p.expires {
             body["expires"] = json!(expires);
         }
-        match client.add_key(body, &caller).await {
-            Ok(registered) => {
-                tracing::info!(scope = %scope.text(), key = %key.public(), "store: a deploy key was made");
-                json!({ "ok": true, "key": registered, "secret": key.secret() })
-            }
-            Err(error) => not_ok(&error),
+        let made = match client.create_token(body, &caller).await {
+            Ok(made) => made,
+            Err(error) => return not_ok(&error),
+        };
+        // The secret, read as a token is (else nothing usable came back),
+        // and the rest as the list shows it.
+        let Some(secret) = made["token"].as_str().and_then(|t| DeployToken::parse(t).ok()) else {
+            return not_ok(&failure(client::reason::STORE_ERROR, "The store's answer had no token in it that could be read: revoke it from the list and make another"));
+        };
+        let mut token = made;
+        if let Some(fields) = token.as_object_mut() {
+            fields.remove("token");
         }
+        tracing::info!(short = %secret.short(), "store: a deploy token was made");
+        json!({ "ok": true, "token": token, "secret": secret.as_str() })
     }
 
     /// One file of a store version, from this device's cache or fetched
@@ -1267,15 +1271,17 @@ impl Plugins {
         // (`verified` here is the offer's, for the update's sheet; taking
         // it asks the store's record again: `Plugins::update`.)
         let (package, store) = if kept.is_some() {
-            // Verified when it was found; read back as any kept update is.
-            let package = tokio::task::spawn_blocking(move || package::read(&kept_path, &install::WORDS).and_then(install::parse))
+            // Verified when it was found; read back as any kept update is
+            // (unsigned only when its offer names no signer).
+            let signed = offer.key.is_some();
+            let package = tokio::task::spawn_blocking(move || package::read(&kept_path, &install::WORDS).and_then(|raw| install::parse_from_store(raw, signed)))
                 .await
                 .map_err(|_| "Couldn't read it".to_string())??;
             let (publisher, publisher_id) = super::vouched(&publisher)?;
-            if package.hash != offer.hash || offer.key.as_deref().is_some_and(|k| k != package.key) {
+            if package.hash != offer.hash || offer.key.as_deref().is_some_and(|k| Some(k) != package.key.as_deref()) {
                 return Err(failure(client::reason::STORE_MISMATCH, "The update kept isn't the store's"));
             }
-            let store = install::StoreSource { id: c.id.clone(), publisher, publisher_id, hash: package.hash.clone(), key: Some(package.key.clone()), verified: offer.verified, verified_at: None, verified_alternative: None, instead_of_unverified: false, replaced: None };
+            let store = install::StoreSource { id: c.id.clone(), publisher, publisher_id, hash: package.hash.clone(), key: package.key.clone(), verified: offer.verified, verified_at: None, verified_alternative: None, instead_of_unverified: false, replaced: None };
             (package, store)
         } else {
             let raw = client.package(&c.id, &offer.version, caller, record.bytes).await?;
@@ -1305,7 +1311,8 @@ impl Plugins {
             digest_diff: diff.grew().then(|| diff.to_value()),
             // (The store's record decides whose it is: shown, so the update
             // can say its signing key changed.)
-            new_key: c.key.as_deref().is_some_and(|key| key != package.key),
+            // (Unsigned, a deploy token's: no key to have changed.)
+            new_key: c.key.as_deref().zip(package.key.as_deref()).is_some_and(|(was, now)| was != now),
             new_owner,
             notes: notes(&offer.notes, listing::MAX_NOTES_BYTES),
             store_verified: Some(offer.verified),
@@ -1444,8 +1451,6 @@ impl Plugins {
     }
 }
 
-/// `{ok: false, error: "not_published"}`: a deploy key is for a plugin you
-/// have in the store already.
 /// The store's page for `id`: its newest listed version, its newest
 /// verified one, who owns it.
 async fn store_detail(client: &StoreClient, caller: &Caller, id: &str) -> Result<client::Detail, RpcError> {
@@ -1464,12 +1469,12 @@ fn agent_unverified(id: &str, version: &str) -> RpcError {
     ))
 }
 
-/// `{ok: false, error: "not_owner", ids}`: a key's scope names plugins
+/// `{ok: false, error: "not_owner", ids}`: a token's scope names plugins
 /// that aren't the account's in the store.
 fn not_owner(ids: &[&str]) -> Value {
     let mut value = not_ok(&failure(
         "not_owner",
-        format!("{} isn't yours in the store: a key publishes plugins you already have there (a first version comes from a signed-in device)", ids.join(", ")),
+        format!("{} isn't yours in the store: a token publishes plugins you already have there (a first version comes from a signed-in device)", ids.join(", ")),
     ));
     value["ids"] = json!(ids);
     value

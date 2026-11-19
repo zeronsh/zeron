@@ -1,9 +1,9 @@
 //! Publishes this device didn't make (amendment 45). A version is public as
 //! soon as it's published, so every publish of the account's plugins that
 //! wasn't sent from here raises a notice on the account's devices: which
-//! version, and whether another device or which deploy key sent it. A
+//! version, and whether another device or which deploy token sent it. A
 //! device reads them from the owner's view of its versions (`/me/plugins`:
-//! `via`, `key`, `deploy_key`), keeps each until the app has shown it, and
+//! `via`, `key`, `deploy_token`), keeps each until the app has shown it, and
 //! raises one once per version.
 
 use std::collections::BTreeMap;
@@ -42,11 +42,11 @@ pub struct PublishNotice {
     /// The plugin's name in the store, when it gave one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// `device` (another of the account's devices) or `deploy_key`.
+    /// `device` (another of the account's devices) or `deploy_token`.
     pub via: String,
-    /// The deploy key's name, when one sent it and the store still names it.
+    /// The deploy token's name, when one sent it and the store still names it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub key_name: Option<String>,
+    pub token_name: Option<String>,
     /// When the store took it (ms).
     pub at: i64,
 }
@@ -55,9 +55,9 @@ impl PublishNotice {
     /// In a sentence, for a banner or a host that doesn't know `via`.
     pub fn words(&self) -> String {
         let what = format!("{} {}", self.name.as_deref().unwrap_or(&self.plugin), self.version);
-        match (self.via.as_str(), &self.key_name) {
-            ("deploy_key", Some(key)) => format!("{what} was published with your deploy key \"{key}\". It's live now. If that wasn't you, revoke the key and yank the version."),
-            ("deploy_key", None) => format!("{what} was published with one of your deploy keys. It's live now. If that wasn't you, revoke the key and yank the version."),
+        match (self.via.as_str(), &self.token_name) {
+            ("deploy_token", Some(token)) => format!("{what} was published with your deploy token \"{token}\". It's live now. If that wasn't you, revoke the token and yank the version."),
+            ("deploy_token", None) => format!("{what} was published with one of your deploy tokens. It's live now. If that wasn't you, revoke the token and yank the version."),
             _ => format!("{what} was published from another of your devices. It's live now. If that wasn't you, yank it and sign that device out."),
         }
     }
@@ -70,7 +70,7 @@ impl PublishNotice {
             "version": self.version,
             "name": self.name,
             "via": self.via,
-            "key_name": self.key_name,
+            "token_name": self.token_name,
             "at": self.at,
             "words": self.words(),
         })
@@ -121,8 +121,8 @@ pub fn look(seen: Option<&Seen>, mine: &Value, own_key: &str, clean: impl Fn(&st
             plugin: id.to_owned(),
             version: clean(version),
             name: name.map(&clean).filter(|n| !n.is_empty()),
-            via: if via == "deploy_key" { "deploy_key" } else { "device" }.to_owned(),
-            key_name: v["deploy_key"]["name"].as_str().map(&clean).filter(|n| !n.is_empty()),
+            via: if via == "deploy_token" { "deploy_token" } else { "device" }.to_owned(),
+            token_name: v["deploy_token"]["name"].as_str().map(&clean).filter(|n| !n.is_empty()),
             at,
         });
     }
@@ -154,10 +154,10 @@ mod tests {
 
     fn mine(versions: &[(&str, &str, i64, &str, &str, Option<&str>)]) -> Value {
         let mut plugins: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
-        for (id, version, at, via, key, key_name) in versions {
+        for (id, version, at, via, key, token_name) in versions {
             plugins.entry(id).or_default().push(json!({
-                "version": version, "published_at": at, "via": via, "key": key,
-                "deploy_key": key_name.map(|name| json!({ "key": "DK", "name": name })),
+                "version": version, "published_at": at, "via": via, "key": if *via == "deploy_token" { Value::Null } else { json!(key) },
+                "deploy_token": token_name.map(|name| json!({ "id": "dt_1", "short": "Ab12Cd34", "name": name })),
             }));
         }
         json!({ "plugins": plugins.into_iter().map(|(id, versions)| json!({ "id": id, "name": "Focus", "versions": versions })).collect::<Vec<_>>() })
@@ -177,14 +177,14 @@ mod tests {
             ("focus", "1.0.0", 100, "device", "OTHER", None),
             ("focus", "1.1.0", 200, "device", "MINE", None),
             ("focus", "1.2.0", 300, "device", "OTHER", None),
-            ("focus", "1.3.0", 400, "deploy_key", "DK", Some("ci")),
+            ("focus", "1.3.0", 400, "deploy_token", "", Some("ci")),
         ]);
         let (seen, notices) = look(Some(&seen), &now, "MINE", same);
         assert_eq!(notices.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["focus@1.2.0", "focus@1.3.0"]);
         assert_eq!(notices[0].via, "device");
         assert!(notices[0].words().contains("another of your devices"), "{}", notices[0].words());
-        assert_eq!(notices[1].key_name.as_deref(), Some("ci"));
-        assert!(notices[1].words().starts_with("Focus 1.3.0 was published with your deploy key \"ci\""), "{}", notices[1].words());
+        assert_eq!((notices[1].via.as_str(), notices[1].token_name.as_deref()), ("deploy_token", Some("ci")));
+        assert!(notices[1].words().starts_with("Focus 1.3.0 was published with your deploy token \"ci\""), "{}", notices[1].words());
 
         // Once per version.
         let (_, again) = look(Some(&seen), &now, "MINE", same);
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn waiting_notices_are_kept_unique_and_few() {
-        let notice = |n: i64| PublishNotice { id: format!("p@1.0.{n}"), plugin: "p".into(), version: format!("1.0.{n}"), name: None, via: "device".into(), key_name: None, at: n };
+        let notice = |n: i64| PublishNotice { id: format!("p@1.0.{n}"), plugin: "p".into(), version: format!("1.0.{n}"), name: None, via: "device".into(), token_name: None, at: n };
         let mut waiting = vec![notice(0)];
         add(&mut waiting, (0..25).map(notice).collect());
         assert_eq!(waiting.len(), MAX_WAITING);

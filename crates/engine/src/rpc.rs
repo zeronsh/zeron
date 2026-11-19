@@ -3265,7 +3265,7 @@ impl RpcService for AuthRpc {
                 let action = match p.action.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
                     None => None,
                     Some(word) => Some(crate::StepUpFor::parse(word).ok_or_else(|| {
-                        RpcError::Failed(format!("A step-up is for deploy_key, or for nothing in particular (not \"{word}\")"))
+                        RpcError::Failed(format!("A step-up is for deploy_token, or for nothing in particular (not \"{word}\")"))
                     })?),
                 };
                 let url = self

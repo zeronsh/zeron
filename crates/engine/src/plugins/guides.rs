@@ -15,7 +15,7 @@ pub const DIR: &str = "docs";
 pub const README: &str = "README.md";
 
 /// What each guide covers, said in the replies that link it.
-pub const PLUGINS_SUMMARY: &str = "How to write a Zeron plugin: the manifest and permissions, placing by selector (zeron.place, the stable element names and what each provides), context (zeron.context, need, live; records per grant), actions, tools for agents, commands, services (service.luau run headless on each device, zeron.service(device):call from windows, failure reasons), the loop (create_plugin, edit, plugin_status with snapshot, fix), sharing and installing (the store: search_plugins, install_plugin with store), publishing to the store (README.md, the listing fields, strict versions, check_plugin, review, yank, deploy keys and the GitHub Action) and three worked examples.";
+pub const PLUGINS_SUMMARY: &str = "How to write a Zeron plugin: the manifest and permissions, placing by selector (zeron.place, the stable element names and what each provides), context (zeron.context, need, live; records per grant), actions, tools for agents, commands, services (service.luau run headless on each device, zeron.service(device):call from windows, failure reasons), the loop (create_plugin, edit, plugin_status with snapshot, fix), sharing and installing (the store: search_plugins, install_plugin with store), publishing to the store (README.md, the listing fields, strict versions, check_plugin, review, yank, deploy tokens and the GitHub Action) and three worked examples.";
 pub const TEMPLATES_SUMMARY: &str = "How to write a Zeron template: how it's laid over Zeron's own with per-file fallback, the folder map (app.luau, screens/, ds/ tokens and themes), the rules (tokens, concentric corners, data in place, reloads, keeping element names), what's never templated, the loop (create_template, use_template, edit, template_status) and two worked examples.";
 
 /// Both guides in `<data_dir>/docs/`, written where missing or changed (an
@@ -74,7 +74,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&templates).unwrap(), TEMPLATES);
         assert!(PLUGINS.contains("zeron.place") && TEMPLATES.contains("template_status"));
         // The store: the guide has its section, and the summary names it.
-        assert!(PLUGINS.contains("## Publishing to the store") && PLUGINS.contains("ZERON_DEPLOY_KEY"));
+        assert!(PLUGINS.contains("## Publishing to the store") && PLUGINS.contains("ZERON_DEPLOY_TOKEN"));
         assert!(PLUGINS_SUMMARY.contains("publishing to the store") && PLUGINS_SUMMARY.contains("check_plugin"));
         assert!(plugin_readme("Focus", &plugins).contains(&plugins.display().to_string()));
         assert!(template_readme("Dusk", &templates).contains("isn't part of the interface"));
