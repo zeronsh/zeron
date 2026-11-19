@@ -1,6 +1,7 @@
--- A project's tile: its initial on its hue (the palette's 500, inked in its
--- 50). One tile wherever a project shows: the sidebar, a dropdown, the
--- composer's project.
+-- A project's tile: its initial on its hue (`zeron.tile`: the palette's
+-- 500, darker only where that reads under 3:1; inked in its 50). One tile
+-- wherever a project shows: the sidebar, a dropdown, the composer's
+-- project.
 --
 -- `Tile { label = "Zeron", hue = "violet", size = 18 }`; `inside` puts a
 -- glyph where the initial goes (pinned's pin), and `hue` may be nil for a
@@ -131,12 +132,14 @@ local function tile(props: Props): Node
 			h = size,
 			shrink = 0,
 			rounded = radius,
+			-- (Its hue's fill, under its 50: every hue's initial 3:1 or more,
+			-- as large text needs, each as near its 500 as that allows.)
 			bg = if type(hue) == "function"
 				then function(): string
 					local h = hue()
-					return if h then `$palette.{h}.500` else "$zeron.secondary.bg"
+					return if h then `$zeron.tile.{h}` else "$zeron.secondary.bg"
 				end
-				elseif hue then `$palette.{hue}.500`
+				elseif hue then `$zeron.tile.{hue}`
 				else "$zeron.secondary.bg",
 			color = if type(hue) == "function"
 				then function(): string

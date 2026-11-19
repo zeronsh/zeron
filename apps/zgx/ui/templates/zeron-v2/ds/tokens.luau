@@ -444,6 +444,34 @@ function M.setup()
 				warning = { ink = "{warning}", wash = "alpha({warning}, 0.12)", edge = "alpha({warning}, 0.28)" },
 				danger = { ink = "{danger}", wash = "alpha({danger}, 0.12)", edge = "alpha({danger}, 0.28)" },
 			},
+			-- What a risky ask is said in (screens/plugins/asks: the consent
+			-- window, a store plugin's page): the danger's ink, deeper where
+			-- a theme's danger ink reads under 4.5:1 on its window.
+			asks = { risky = "{zeron.tone.danger.ink}" },
+			-- A letter tile's fill under its 50 (ds/tile), by hue: its 500
+			-- where that reads 3:1 or more, as large text needs; else its 500
+			-- made only as much darker as reaching 3.1:1 takes, in the same
+			-- hue (OKLCH), its chroma kept where it can be.
+			tile = {
+				gray = "#8c8c93",
+				red = "{palette.red.500}",
+				orange = "#da6f2e",
+				amber = "#c17f04",
+				yellow = "#a68b00",
+				lime = "#6f9a24",
+				green = "#3da052",
+				emerald = "#0ea06f",
+				teal = "#059e8e",
+				cyan = "#059bac",
+				sky = "#0197cc",
+				blue = "#498cf0",
+				indigo = "{palette.indigo.500}",
+				violet = "{palette.violet.500}",
+				purple = "{palette.purple.500}",
+				fuchsia = "{palette.fuchsia.500}",
+				pink = "{palette.pink.500}",
+				rose = "{palette.rose.500}",
+			},
 			-- A badge on any colour (a pull request's state, a tone's ink): the
 			-- colour laid under it this faint, its ink this strong (the
 			-- sidebar's pull request badge, generalised).
