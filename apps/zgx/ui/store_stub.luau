@@ -18,6 +18,8 @@
 --   store_stub.no_notes    the engine has no notes on your plugin's folder
 --   store_stub.html_and_footnote  your plugin's README has HTML and math, its CHANGELOG a footnote (advice)
 --   store_stub.hostile_readme  Focus timer's README: 512 KiB of setext headings (before its page opens)
+--   store_stub.tokens_full  a new token is refused: the account has 20 live
+--   store_stub.tokens_today a new token is refused: 10 made today
 --   store_stub.many_keys   the account has ten deploy tokens: names of every length,
 --                          one ending today, one tomorrow, one in five days
 --   store_stub.long_featured   the first featured says 300 characters of itself, the second nothing
@@ -638,6 +640,9 @@ local store_checked = true
 -- (Tests: an answer the engine can't give, to see the page stays honest.)
 local force_problem = ui.state("store_stub_force_problem", false)
 local signed_in_again = false
+-- What the store says to a new token instead of making it: nil, or
+-- "too_many_tokens" (20 live), "rate_limited" (10 made today).
+local token_refusal: string? = nil
 
 -- (Tests: your own account's calls, yours, a version sent, a plugin's keys,
 -- failing with this word as the engine gives it, alone: a session that
@@ -766,6 +771,13 @@ stub.create_token = function(args: any): any
 	local p: any = { settled = false, waiters = {} }
 	local function settle()
 		p.settled = true
+		if token_refusal then
+			p.err = { message = `{token_refusal}: the edge's English` }
+			for _, w in p.waiters do
+				w()
+			end
+			return
+		end
 		local token = "zdt_7Hq2Lm9Xc4Rt8Wn1Bv6Zp3Ks5Dj0Fg2Ya9Ue7Io4Tr1Q8k3Lp"
 		local k = { id = `t_{#keys + 1}`, short = string.sub(token, 5, 12), name = args.name, scope = args.scope, created_at = NOW, expires_at = args.expires }
 		table.insert(keys, k)
@@ -966,6 +978,20 @@ ui.command {
 }
 -- Tokens granted to 1, 2, 3, 14 and 50 of yours, their ids store ids at
 -- full length (40): what a row says of each, and of every one in place.
+ui.command {
+	id = "store_stub.tokens_full",
+	title = "Store: the account has as many live deploy tokens as it can (20)",
+	run = function()
+		token_refusal = "too_many_tokens"
+	end,
+}
+ui.command {
+	id = "store_stub.tokens_today",
+	title = "Store: the account has made as many deploy tokens today as it can (10)",
+	run = function()
+		token_refusal = "rate_limited"
+	end,
+}
 ui.command {
 	id = "store_stub.wide_keys",
 	title = "Store: tokens for 1, 2, 3, 14 and 50 plugins",

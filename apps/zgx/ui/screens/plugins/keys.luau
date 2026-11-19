@@ -496,6 +496,10 @@ M.Section = ui.component(function(props: { plugins: () -> { Owned } }): Node
 					if p == "timed_out" then
 						return ui.t("plugins.store.key.timed_out"):get()
 					end
+					-- (Made too many today: the store's limit, said plainly.)
+					if p == "rate_limited" or string.match(p, "^rate_limited: ") then
+						return ui.t("plugins.store.key.made_today"):get()
+					end
 					return require("@app/screens/plugins/publish").failure(p)
 				end,
 				w_full = true,

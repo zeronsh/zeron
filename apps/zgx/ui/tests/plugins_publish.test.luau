@@ -254,6 +254,24 @@ test("waiting on the sign-in can be stopped; a token for all your plugins is the
 	expect(calls(app)).to_contain("cancel_step_up")
 end)
 
+test("a new token refused at the store's limits says which, with the numbers, and what to do", function()
+	for _, case in {
+		{ "store_stub.tokens_full", "You have 20 deploy tokens, the most an account can have. Revoke one to make another." },
+		{ "store_stub.tokens_today", "You've made 10 deploy tokens today. You can make more tomorrow." },
+	} do
+		local app = keys_page()
+		app:command(case[1])
+		app:command("store_stub.signed_in_again")
+		app:click("#keys-new")
+		settle(app)
+		app:type('role:dialog >> role:textbox "Name"', "CI")
+		app:click('role:dialog >> role:button "Create token"')
+		settle(app, 400)
+		expect(app:has(`role:dialog >> "{case[2]}"`)).to_be(true)
+		expect(app:tree("role:dialog")).never.to_contain("the edge's English")
+	end
+end)
+
 test("revoking a token asks first, then it's gone", function()
 	local app = keys_page()
 	app:click('role:button "Revoke"')
