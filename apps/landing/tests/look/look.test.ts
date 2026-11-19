@@ -58,8 +58,8 @@ const PAGES = [
   "/plugins/all?q=zzzzqqq",
 ];
 
-/** Your own pages, signed in as Ada (every state of a plugin and a key) and as no one. */
-const YOURS: [string, string | undefined][] = [["/account", "user_ada"], ["/account/keys", "user_ada"], ["/account", undefined], ["/account/keys", "user_noor"], ["/account/keys/Qm81LzR2sT3uV4wX5yZ6aB7cD8eF9gH0iJ1kL2mN3oP", "user_ada"]];
+/** Your own pages, signed in as Ada (every state of a plugin and a token) and as no one. */
+const YOURS: [string, string | undefined][] = [["/account", "user_ada"], ["/account/tokens", "user_ada"], ["/account", undefined], ["/account/tokens", "user_noor"], ["/account/tokens/tok_0OZtGptZyNgbeUuc", "user_ada"], ["/account/tokens/new", "user_ada"]];
 
 describe("nothing runs off the side", () => {
   for (const [path, user] of [...PAGES.map((p): [string, string | undefined] => [p, undefined]), ...YOURS]) {

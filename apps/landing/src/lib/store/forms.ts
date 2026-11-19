@@ -84,6 +84,7 @@ export function flashFor(result: Result<unknown>, done: FlashWord): FlashWord {
   switch (result.error) {
     case "conflict":
     case "not_found":
+    case "unknown_token":
       return "conflict";
     case "invalid_state":
       return done === "reserved" ? "id_in_use" : "conflict";

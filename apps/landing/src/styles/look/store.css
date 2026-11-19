@@ -88,15 +88,25 @@ button { background: none; border: 0; padding: 0; cursor: pointer; }
 .mono { font-family: var(--mono); font-feature-settings: "zero" 0; }
 .num { font-variant-numeric: tabular-nums; }
 pre, pre *, code, .mono, .fn { font-variant-ligatures: none; }
-.wrap { max-width: 1184px; margin: 0 auto; padding: 0 32px; }
+/* (Its sides alone: a page's own top and bottom, in a stylesheet that may load before this one, stay its own.) */
+.wrap { max-width: 1184px; margin-inline: auto; padding-inline: var(--gutter); }
+
+/* Text lines up with text, not with boxes (Wing's rule). A column's text, every run of it, puts its ink on
+   the column; a box that holds text (a card, a row's wash, a note, a field, a button, a chip, a pill) hangs
+   out past the column by its own inline padding, `--pad`, so its text lands there too. A card of rows hangs
+   by the rows' inset, `--card`. On a phone a box as wide as the column is as wide as the screen: it hangs
+   the whole gutter, with the gutter for its padding (tests/align: the measure of it). */
+:root { --gutter: 32px; --card: 24px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .icons { position: absolute; width: 0; height: 0; overflow: hidden; }
 /* (An app icon: components/look/AppIcon.astro.) */
 .glyph { display: inline-block; flex: none; width: 18px; height: 18px; }
 .glyph svg { display: block; width: 100%; height: 100%; }
 
-/* Focus, the one ring: the accent, 2 outside whatever has it, its own corner. */
+/* Focus, the one ring: the accent, 2 outside whatever has it, its own corner. In a group whose fills sit 2 px
+   apart, the ring is drawn inside the item, so it never meets a neighbour's hover or the chosen one. */
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+:is(.nav, .sort, .catlist, .vmini, .flist, .drop .pop) a:focus-visible, .menu :is(a, button):focus-visible, .item:focus-visible { outline-offset: -2px; }
 :focus:not(:focus-visible) { outline: none; }
 .skip { position: absolute; left: 16px; top: -48px; z-index: 30; padding: 8px 14px; border-radius: 10px; background: var(--text); color: var(--bg); font-size: 14px; font-weight: 550; }
 .skip:focus-visible { top: 10px; }
@@ -136,6 +146,8 @@ pre, pre *, code, .mono, .fn { font-variant-ligatures: none; }
 /* A menu that opens over the page (the account's, and the phone's): the platform's popover. */
 .menu { position: fixed; inset: auto; margin: 0; padding: 6px; min-width: 220px; border: 0; border-radius: 14px; background: var(--surface); color: var(--text); box-shadow: var(--shadow-2); }
 .menu:popover-open { display: flex; flex-direction: column; }
+/* (The two menus of choices, yours and the phone's: 2 px between any two, so a hovered one never meets another.) */
+#me-menu:popover-open, #nav-menu:popover-open { gap: 2px; }
 .menu a, .menu button { display: flex; align-items: center; gap: 10px; width: 100%; height: 36px; padding: 0 10px; border-radius: 9px; font-size: 14px; font-weight: 450; color: var(--text-2); text-align: left; }
 .menu a:hover, .menu button:hover { background: var(--sunken); color: var(--text); }
 .menu a[aria-current] { color: var(--text); font-weight: 550; }
@@ -149,6 +161,9 @@ pre, pre *, code, .mono, .fn { font-variant-ligatures: none; }
 
 /* ---- type ---- */
 h1 { font-size: 52px; line-height: 56px; font-weight: 600; letter-spacing: -0.04em; }
+/* (A heading drawn its first letter's side bearing left, in 64ths of its em: its ink on the column. lib/store/bearing.ts.) */
+.lsb-n1 { margin-left: calc(1em / 64); } .lsb-1 { margin-left: calc(-1em / 64); } .lsb-2 { margin-left: calc(-2em / 64); }
+.lsb-3 { margin-left: calc(-3em / 64); } .lsb-4 { margin-left: calc(-4em / 64); } .lsb-5 { margin-left: calc(-5em / 64); }
 h2 { font-size: 21px; line-height: 28px; font-weight: 600; letter-spacing: -0.02em; }
 h3 { font-size: 15px; line-height: 22px; font-weight: 600; letter-spacing: -0.005em; }
 .lead { font-size: 17px; line-height: 26px; color: var(--text-2); letter-spacing: -0.005em; }
@@ -186,37 +201,37 @@ h3 { font-size: 15px; line-height: 22px; font-weight: 600; letter-spacing: -0.00
 .seal path:first-child { fill: currentColor; }
 .seal path:last-child { fill: none; stroke: var(--surface); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 .seal.s { width: 15px; height: 15px; vertical-align: -2px; } .seal.l { width: 26px; height: 26px; vertical-align: -3px; }
-.state { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px 0 7px; border-radius: 12px; font-size: 12px; font-weight: 550; letter-spacing: 0.005em; white-space: nowrap; }
+.state { --pad: 9px; display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 var(--pad); border-radius: 12px; font-size: 12px; font-weight: 550; letter-spacing: 0.005em; white-space: nowrap; }
 .state.ok { color: var(--verified); background: var(--verified-wash); }
-.state.no { color: var(--warn); background: var(--warn-wash); padding-left: 9px; }
-.state.bad { color: var(--danger); background: var(--danger-wash); padding-left: 9px; }
-.state.quiet { color: var(--text-2); background: var(--sunken); padding-left: 9px; }
+.state.no { color: var(--warn); background: var(--warn-wash); }
+.state.bad { color: var(--danger); background: var(--danger-wash); }
+.state.quiet { color: var(--text-2); background: var(--sunken); }
 .state .seal { width: 14px; height: 14px; vertical-align: 0; }
 
 /* ---- buttons, chips, links ---- */
-.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 40px; padding: 0 16px; border-radius: 11px; font-size: 14px; font-weight: 550; letter-spacing: -0.005em; white-space: nowrap; transition: background-color 0.12s var(--ease), box-shadow 0.12s var(--ease), color 0.12s var(--ease), transform 0.08s var(--ease); }
+.btn { --pad: 16px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 40px; padding: 0 var(--pad); border-radius: 11px; font-size: 14px; font-weight: 550; letter-spacing: -0.005em; white-space: nowrap; transition: background-color 0.12s var(--ease), box-shadow 0.12s var(--ease), color 0.12s var(--ease), transform 0.08s var(--ease); }
 .btn:active:not([aria-disabled]) { transform: translateY(0.5px) scale(0.99); }
 .btn.pri { background: var(--text); color: var(--bg); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.14); }
 .btn.pri:hover { background: color-mix(in srgb, var(--text) 86%, var(--bg)); }
 .btn.sec { background: var(--surface); box-shadow: var(--shadow-1); }
 .btn.sec:hover { box-shadow: var(--shadow-2); }
-.btn.ghost { color: var(--text-2); padding: 0 10px; }
+.btn.ghost { --pad: 10px; color: var(--text-2); }
 .btn.ghost:hover { color: var(--text); background: var(--sunken); }
-.btn.lg { height: 46px; padding: 0 20px; font-size: 15px; border-radius: 13px; }
-.btn.sm { height: 32px; padding: 0 12px; font-size: 13px; border-radius: 9px; }
+.btn.lg { --pad: 20px; height: 46px; font-size: 15px; border-radius: 13px; }
+.btn.sm { --pad: 12px; height: 32px; font-size: 13px; border-radius: 9px; }
 .btn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
 /* Zeron's mark keeps its own whole-pixel size, filled, never stroked (an icon's stroke ran its cells together). */
 .btn svg.mark, svg.mark { width: auto; height: auto; fill: currentColor; stroke: none; }
 /* (On a 1x screen its one-pixel gaps are snapped to the pixel grid; at 2x and over, its corners keep their curve.) */
 @media (max-resolution: 1.5dppx) { svg.mark { shape-rendering: crispEdges; } }
 .btn[aria-disabled] { color: var(--text-3); box-shadow: inset 0 0 0 1px var(--line); background: none; cursor: default; }
-.chip { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 12px; border-radius: 16px; font-size: 13px; font-weight: 500; color: var(--text-2); box-shadow: inset 0 0 0 1px var(--line-2); white-space: nowrap; transition: background-color 0.12s var(--ease), color 0.12s var(--ease); }
+.chip { --pad: 12px; display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 var(--pad); border-radius: 16px; font-size: 13px; font-weight: 500; color: var(--text-2); box-shadow: inset 0 0 0 1px var(--line-2); white-space: nowrap; transition: background-color 0.12s var(--ease), color 0.12s var(--ease); }
 .chip:hover { color: var(--text); background: var(--sunken); }
 .chip:active { background: color-mix(in srgb, var(--sunken) 70%, var(--line-2)); }
 .chip[aria-current], .chip.solid { background: var(--text); color: var(--bg); box-shadow: none; }
 .chip[aria-current]:hover, .chip.solid:hover { background: color-mix(in srgb, var(--text) 86%, var(--bg)); }
 .chip b { font-weight: 500; color: var(--text-3); }
-.tag { display: inline-flex; align-items: center; height: 24px; padding: 0 9px; border-radius: 7px; font-size: 12px; color: var(--text-2); background: var(--sunken); }
+.tag { --pad: 9px; display: inline-flex; align-items: center; height: 24px; padding: 0 var(--pad); border-radius: 7px; font-size: 12px; color: var(--text-2); background: var(--sunken); }
 a.tag:hover { color: var(--text); background: color-mix(in srgb, var(--sunken) 70%, var(--line-2)); }
 .link { color: var(--text); font-weight: 500; box-shadow: 0 1px 0 var(--line-2); transition: box-shadow 0.12s var(--ease); }
 .link:hover { box-shadow: 0 1px 0 var(--text-3); }
@@ -226,7 +241,7 @@ a.tag:hover { color: var(--text); background: color-mix(in srgb, var(--sunken) 7
 .more:hover svg { transform: translateX(2px); }
 
 /* ---- a command to copy (Discover, Your plugins, New key) ---- */
-.cmd { display: inline-flex; align-items: center; gap: 4px; height: 40px; padding: 0 4px 0 14px; border-radius: 11px; background: var(--surface); box-shadow: var(--shadow-1); flex: none; }
+.cmd { --pad: 14px; display: inline-flex; align-items: center; gap: 4px; height: 40px; padding: 0 4px 0 var(--pad); border-radius: 11px; background: var(--surface); box-shadow: var(--shadow-1); flex: none; }
 .cmd code { font: 500 13px/1 var(--mono); white-space: nowrap; }
 .cmd em { font-style: normal; color: var(--text-3); }
 .cmd button { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; color: var(--text-3); transition: color 0.12s var(--ease), background-color 0.12s var(--ease); }
@@ -238,7 +253,7 @@ a.tag:hover { color: var(--text); background: color-mix(in srgb, var(--sunken) 7
 /* (Its words in the page's own ground: 4.6:1 on light's red, 7:1 on dark's.) */
 .btn.danger { background: var(--danger); color: var(--bg); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18); }
 .btn.danger:hover { background: color-mix(in srgb, var(--danger) 88%, #000); }
-.flash { margin-top: 20px; padding: 12px 16px; border-radius: 12px; font-size: 14px; line-height: 20px; background: var(--sunken); color: var(--text-2); }
+.flash { margin-top: 20px; margin-inline: -16px; padding: 12px 16px; border-radius: 12px; font-size: 14px; line-height: 20px; background: var(--sunken); color: var(--text-2); }
 .flash.ok { background: var(--verified-wash); color: var(--verified); }
 .flash.bad { background: var(--danger-wash); color: var(--danger); }
 .flash.info { background: var(--warn-wash); color: var(--warn); }
@@ -261,11 +276,11 @@ a.card:focus-visible { outline-offset: 3px; }
 .item .nm .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .item .sm { color: var(--text-2); font-size: 14px; line-height: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .item .meta { flex: none; text-align: right; color: var(--text-3); font-size: 13px; line-height: 20px; }
-.rank { width: 20px; flex: none; font: 500 13px/20px var(--mono); color: var(--text-3); text-align: center; }
+.rank { width: 20px; flex: none; font: 500 13px/20px var(--mono); color: var(--text-3); }
 
 /* ---- a page's own word when there is nothing, or the store didn't answer ---- */
 /* Someone's words, quoted: a reviewer's note, why staff stopped a version. */
-.said-was { margin: 0; padding: 12px 14px; border-radius: 12px; background: var(--sunken); font-size: 14px; line-height: 21px; overflow-wrap: anywhere; }
+.said-was { margin: 0 -14px; padding: 12px 14px; border-radius: 12px; background: var(--sunken); font-size: 14px; line-height: 21px; overflow-wrap: anywhere; }
 .said-was footer { margin-top: 4px; font-size: 13px; line-height: 20px; color: var(--text-3); }
 /* A question before doing something (scripts/store.ts opens it; its opener is the same question as a page). */
 dialog.question { margin: auto; width: min(540px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 24px; border: 0; border-radius: 20px; background: var(--surface); color: var(--text); box-shadow: 0 24px 64px rgba(0, 0, 0, 0.24), 0 0 0 1px var(--line); overflow: auto; }
@@ -284,6 +299,15 @@ dialog.question::backdrop { background: rgba(0, 0, 0, 0.36); }
 .empty h2 { font-size: 19px; line-height: 26px; }
 .empty p { margin-top: 4px; color: var(--text-2); max-width: 36em; }
 .empty .btn { margin-top: 16px; }
+/* (A box that begins a line on the column hangs out by its padding: its words on the column. In a row of words
+   and pills that may wrap, every pill hangs and the row's gap grows by as much: the pill a line begins with
+   hangs, the rest keep their gap.) */
+.pills { --pill-gap: 10px; column-gap: calc(var(--pill-gap) + 9px); }
+.pills > .state { margin-left: -9px; }
+/* (A list's pages: Previous hangs at the column's start, Next at its end.) */
+.pager > :first-child { margin-left: calc(-1 * var(--pad)); }
+.pager > :last-child { margin-right: calc(-1 * var(--pad)); }
+.empty > .btn, .empty > .cmd, .please > .btn, .hang { margin-left: calc(-1 * var(--pad)); }
 
 .foot { margin-top: 96px; padding: 28px 0 40px; box-shadow: 0 -1px 0 var(--line); color: var(--text-3); font-size: 13px; line-height: 20px; }
 .foot .wrap { display: flex; flex-wrap: wrap; gap: 8px 24px; }
@@ -304,7 +328,9 @@ dialog.question::backdrop { background: rgba(0, 0, 0, 0.36); }
 /* ---- phone ---- */
 .ph-only { display: none; }
 @media (max-width: 720px) {
-  .wrap { padding: 0 20px; }
+  :root { --gutter: 24px; --card: var(--gutter); }
+  /* (As wide as the column, as wide as the screen.) */
+  .flash { margin-inline: calc(-1 * var(--gutter)); padding-inline: var(--gutter); border-radius: 0; }
   .top .wrap { height: 56px; gap: 6px; }
   .nav, .signin, .find { display: none; }
   .find-icon { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 10px; color: var(--text); }

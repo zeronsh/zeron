@@ -52,11 +52,12 @@ const PAGES: [string, string | undefined][] = [
   ["/account/plugins/worst-case-listing-at-every-limit-xyz12", "user_ada"],
   ["/account/plugins/focus-timer", undefined],
   ["/account/plugins/session-badges/versions/1.2.1/yank", "user_ada"],
-  ["/account/keys", "user_ada"],
-  ["/account/keys", undefined],
+  ["/account/tokens", "user_ada"],
+  ["/account/tokens", undefined],
+  ["/account/tokens/new", "user_ada"],
   ["/account", "user_noor"],
   ["/account", undefined],
-  ["/account/keys/Qm81LzR2sT3uV4wX5yZ6aB7cD8eF9gH0iJ1kL2mN3oP", "user_ada"],
+  ["/account/tokens/tok_0OZtGptZyNgbeUuc", "user_ada"],
   ["/plugins/all?verified=1", undefined],
   ["/plugins/worst-case-listing-at-every-limit-xyz12/versions", undefined],
   ["/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.4.0", undefined],
@@ -115,11 +116,19 @@ const OPENED: [string, string, string | undefined, (page: Page) => Promise<void>
     await page.getByRole("link", { name: /^Remove( it)?…$/ }).first().click();
     await expect.poll(() => page.getByRole("dialog").isVisible()).toBe(true);
   }],
-  ["New key, where a key is made", "/account/keys", "user_ada", async (page) => {
-    await page.getByRole("button", { name: "New key" }).click();
-    await expect.poll(() => page.locator("#new-key").isVisible()).toBe(true);
+  ["New token, its form", "/account/tokens", "user_ada", async (page) => {
+    await page.getByRole("link", { name: "New token" }).click();
+    await expect.poll(() => page.getByRole("dialog", { name: "New deploy token" }).isVisible()).toBe(true);
+    await page.getByLabel("Chosen plugins").check();
+    await page.getByLabel("Focus timer", { exact: true }).check();
   }],
-  ["a key's fourteen plugins, shown", "/account/keys", "user_ada", async (page) => {
+  ["a token, shown once", "/account/tokens", "user_ada", async (page) => {
+    await page.getByRole("link", { name: "New token" }).click();
+    await page.getByRole("dialog").getByLabel("Name", { exact: true }).fill("Release CI");
+    await Promise.all([page.waitForURL("**/account/tokens"), page.getByRole("button", { name: "Create token" }).click()]);
+    await expect.poll(() => page.getByRole("heading", { name: "Copy your token now" }).isVisible()).toBe(true);
+  }],
+  ["a token's fourteen plugins, shown", "/account/tokens", "user_ada", async (page) => {
     await page.getByText("Show all 14").click();
     await expect.poll(() => page.getByRole("list", { name: "What GitHub Actions, the monorepo can publish" }).isVisible()).toBe(true);
   }],
@@ -233,12 +242,80 @@ describe("a package's pictures can't run", () => {
   });
 });
 
+describe("a deploy token, shown once", () => {
+  test("made from the dialog: shown on the page that made it, copied from there, and gone from the page and its history once it's left", async () => {
+    const { page, context } = await open("/account/tokens", { as: "user_ada" });
+    try {
+      await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+      await page.getByRole("link", { name: "New token" }).click();
+      const dialog = page.getByRole("dialog", { name: "New deploy token" });
+      await dialog.getByLabel("Name", { exact: true }).fill("Release CI");
+      await dialog.getByLabel("Ends").selectOption("30");
+      await dialog.getByLabel("Chosen plugins").check();
+      await dialog.getByLabel("Focus timer", { exact: true }).check();
+      // (What the browser sends: the form's fields, never a token; what comes back has it.)
+      const sent: string[] = [];
+      page.on("request", (r) => sent.push(`${r.method()} ${r.url()} ${r.postData() ?? ""}`));
+      await Promise.all([page.waitForLoadState("networkidle"), dialog.getByRole("button", { name: "Create token" }).click()]);
+      const token = (await page.locator("#the-token").textContent())!.trim();
+      expect(token).toMatch(/^zdt_[0-9A-Za-z]{49}$/);
+      // The address is the list's at once: a reload, or a return, never posts again or shows it.
+      expect(new URL(page.url()).pathname).toBe("/account/tokens");
+      expect(sent.join("\n")).not.toContain("zdt_");
+      // Copy puts it on the clipboard.
+      await page.getByRole("button", { name: "Copy the token" }).click();
+      expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(token);
+      // Nothing the page keeps holds it.
+      const kept = await page.evaluate(() => JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage }, cookie: document.cookie, history: history.state, address: location.href }));
+      expect(kept).not.toContain("zdt_");
+      // I've copied it: the list, the token named but never shown, and no step back to it.
+      await Promise.all([page.waitForURL("**/account/tokens"), page.getByRole("link", { name: "I've copied it" }).click()]);
+      await page.waitForLoadState("networkidle");
+      expect(await page.content()).not.toContain("zdt_");
+      await expect.poll(() => page.getByText("Release CI").first().isVisible()).toBe(true);
+      await page.goBack({ waitUntil: "networkidle" }).catch(() => undefined);
+      expect(await page.content()).not.toContain("zdt_");
+      expect(sent.join("\n")).not.toContain(token);
+    } finally {
+      await context.close();
+      await site.fake("tokens");
+    }
+  }, 60_000);
+
+  test("signed in a while ago: Create token signs in again first, then the form comes back as it was", async () => {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, reducedMotion: "reduce" });
+    const page = await context.newPage();
+    try {
+      await page.goto(new URL("/auth/web/callback?as=user_ada&fresh=0&return_to=/account/tokens", site.url).href);
+      await page.getByRole("link", { name: "New token" }).click();
+      const dialog = page.getByRole("dialog", { name: "New deploy token" });
+      await expect.poll(() => dialog.getByText("Zeron will ask you to sign in again first.").isVisible()).toBe(true);
+      await dialog.getByLabel("Name", { exact: true }).fill("Nightly");
+      await dialog.getByRole("button", { name: "Create token" }).click();
+      // (The fake's sign-in: pick the account.)
+      await page.waitForURL("**/auth/web/login**");
+      await page.getByRole("link", { name: /Ada/ }).click();
+      await page.waitForURL("**/account/tokens/new?again=1**");
+      expect(await page.getByLabel("Name", { exact: true }).inputValue()).toBe("Nightly");
+      await expect.poll(() => page.getByText("You signed in again. Create the token to finish.").isVisible()).toBe(true);
+      await page.getByRole("button", { name: "Create token" }).click();
+      await expect.poll(() => page.getByRole("heading", { name: "Copy your token now" }).isVisible()).toBe(true);
+    } finally {
+      await context.close();
+      await site.fake("tokens");
+    }
+  }, 60_000);
+});
+
 describe("an author's words stay in their place", () => {
   test("a right-to-left override in a name reorders nothing after it", async () => {
     const { page, context } = await open("/admin/plugins/xss-probe/1.1.0", { as: "user_grace" });
     try {
       const [name, version] = await Promise.all([page.locator("h1 > .name").first().boundingBox(), page.locator("h1 > .vnum").boundingBox()]);
-      expect(version!.x).toBeGreaterThanOrEqual(name!.x + name!.width - 1);
+      // (After the name in reading order: further along its line, or on a line below it.)
+      const sameLine = Math.abs(version!.y - name!.y) < name!.height / 2;
+      if (sameLine) expect(version!.x).toBeGreaterThanOrEqual(name!.x + name!.width - 1);
+      else expect(version!.y).toBeGreaterThan(name!.y);
     } finally {
       await context.close();
     }

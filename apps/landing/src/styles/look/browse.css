@@ -13,7 +13,8 @@
 /* The facets: where you are in the catalogue, and how to narrow it. */
 .facets { display: flex; flex-direction: column; gap: 32px; position: sticky; top: 88px; padding-top: 4px; }
 .facet-h { font-size: 13px; line-height: 20px; font-weight: 500; letter-spacing: 0; color: var(--text-3); margin-bottom: 8px; }
-.catlist { display: flex; flex-direction: column; margin: 0 -10px; }
+/* (2 px between any two items, so a hovered one never meets the chosen one edge to edge.) */
+.catlist { display: flex; flex-direction: column; gap: 2px; margin: 0 -10px; }
 .catlist a { display: flex; justify-content: space-between; align-items: center; gap: 12px; height: 34px; padding: 0 10px; border-radius: 9px; font-size: 14px; color: var(--text-2); transition: background-color 0.12s var(--ease), color 0.12s var(--ease); }
 .catlist a:hover { color: var(--text); background: color-mix(in srgb, var(--sunken) 70%, transparent); }
 .catlist a .num { font-size: 13px; color: var(--text-3); }
@@ -27,18 +28,18 @@
 .pick a[aria-current] { color: var(--text); }
 .pick a[aria-current] i { box-shadow: inset 0 0 0 5px var(--text); }
 .pick .seal { margin-left: -4px; }
-.tags { display: flex; flex-wrap: wrap; gap: 6px; padding: 0; list-style: none; }
+.tags { display: flex; flex-wrap: wrap; gap: 6px; margin-left: -9px; padding: 0; list-style: none; }
 /* (A chip no wider than the rail, its ellipsis inside it; the whole keyword in its title and address.) */
 .tags li { min-width: 0; max-width: 100%; }
 .tags .tag { display: block; max-width: 100%; line-height: 24px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tags .tag[aria-current] { background: var(--text); color: var(--bg); }
 
 /* The search, in what's chosen. */
-.bfind { position: relative; display: flex; align-items: center; height: 48px; border-radius: 14px; background: var(--surface); box-shadow: var(--shadow-1); color: var(--text-3); transition: box-shadow 0.12s var(--ease); }
+.bfind { --pad: 16px; position: relative; display: flex; align-items: center; height: 48px; margin-inline: calc(-1 * var(--pad)); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow-1); color: var(--text-3); transition: box-shadow 0.12s var(--ease); }
 .bfind:hover { box-shadow: 0 0 0 1px var(--line-2); }
 .bfind:focus-within { box-shadow: 0 0 0 1px var(--line-2), 0 0 0 4px color-mix(in srgb, var(--focus) 22%, transparent); }
-.bfind > svg { position: absolute; left: 16px; width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; pointer-events: none; }
-.bfind input[type="search"] { flex: 1; min-width: 0; height: 100%; padding: 0 44px 0 44px; border: 0; border-radius: inherit; background: none; font-size: 15px; color: var(--text); }
+.bfind > svg { position: absolute; left: var(--pad); width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; pointer-events: none; }
+.bfind input[type="search"] { flex: 1; min-width: 0; height: 100%; padding: 0 44px 0 calc(var(--pad) + 28px); border: 0; border-radius: inherit; background: none; font-size: 15px; color: var(--text); }
 .bfind input::placeholder { color: var(--text-3); }
 .bfind input:focus-visible { outline: none; }
 .bfind input::-webkit-search-cancel-button { display: none; }
@@ -54,9 +55,9 @@
 .sort a[aria-current] { color: var(--text); background: var(--sunken); font-weight: 550; }
 
 /* The results: two a row, each a card. */
-.results { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; margin-top: 16px; padding: 0; list-style: none; }
+.results { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; margin-top: 16px; margin-inline: -18px; padding: 0; list-style: none; }
 .results li { display: flex; }
-.res { flex: 1; display: flex; gap: 16px; padding: 18px 20px 16px 18px; border-radius: 16px; min-width: 0; }
+.res { flex: 1; display: flex; gap: 16px; padding: 18px 18px 16px; border-radius: 16px; min-width: 0; }
 .res .txt { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .res .nm { display: flex; align-items: center; gap: 6px; font-size: 16px; line-height: 22px; font-weight: 600; letter-spacing: -0.012em; min-width: 0; }
 .res .nm .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -76,7 +77,7 @@
 .drop summary svg { width: 13px; height: 13px; fill: none; stroke: var(--text-3); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; transform: rotate(90deg); transition: transform 0.12s var(--ease); }
 .drop[open] summary svg { transform: rotate(-90deg); }
 .drop summary .n { display: grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; font-size: 11px; line-height: 1; font-weight: 600; background: var(--text); color: var(--bg); }
-.drop .pop { position: absolute; right: 0; top: calc(100% + 6px); z-index: 5; display: flex; flex-direction: column; min-width: 200px; padding: 6px; border-radius: 14px; background: var(--surface); box-shadow: var(--shadow-2); }
+.drop .pop { position: absolute; right: 0; top: calc(100% + 6px); z-index: 5; display: flex; flex-direction: column; gap: 2px; min-width: 200px; padding: 6px; border-radius: 14px; background: var(--surface); box-shadow: var(--shadow-2); }
 .drop .pop > a { display: flex; align-items: center; height: 36px; padding: 0 10px; border-radius: 9px; font-size: 14px; color: var(--text-2); }
 .drop .pop > a:hover { background: var(--sunken); color: var(--text); }
 .drop .pop > a[aria-current] { color: var(--text); font-weight: 550; }
@@ -92,24 +93,25 @@
   .browse { grid-template-columns: minmax(0, 1fr); gap: 16px; margin-top: 20px; }
   .facets { position: static; padding: 0; gap: 0; }
   .facets .wide-facet, .facets .facet-h { display: none; }
-  .catlist { flex-direction: row; gap: 8px; overflow-x: auto; margin: 0 -32px; padding: 2px 32px; scrollbar-width: none; }
+  .catlist { flex-direction: row; gap: 8px; overflow-x: auto; margin: 0 calc(-1 * var(--gutter)); padding: 2px var(--gutter) 2px calc(var(--gutter) - 12px); scrollbar-width: none; }
   .catlist a { flex: none; gap: 7px; height: 32px; padding: 0 12px; border-radius: 16px; font-size: 13px; font-weight: 500; box-shadow: inset 0 0 0 1px var(--line-2); }
   .catlist a[aria-current] { background: var(--text); color: var(--bg); box-shadow: none; font-weight: 500; }
   .catlist a[aria-current] .num { color: color-mix(in srgb, var(--bg) 62%, var(--text)); }
   .sort { display: none; }
-  .fbar { display: flex; gap: 8px; }
+  .fbar { display: flex; gap: 8px; margin-left: -12px; }
 }
 @media (max-width: 720px) {
   .crumbs { padding-top: 20px; }
   .bhead { padding-top: 14px; }
   .bhead h1 { font-size: 30px; line-height: 34px; }
   .bhead .lead { margin-top: 6px; }
-  .catlist { margin: 0 -20px; padding: 2px 20px; }
   .bfind { height: 46px; }
   .bfind .kbd { display: none; }
   .rhead { margin-top: 14px; }
   .results { gap: 10px; margin-top: 12px; }
-  .res { gap: 14px; padding: 16px 16px 14px; }
+  /* (As wide as the column, as wide as the screen.) */
+  .results { margin-inline: calc(-1 * var(--gutter)); }
+  .res { gap: 14px; padding: 16px var(--gutter) 14px; border-radius: 0; }
   .res .tile.l { width: 44px; height: 44px; font-size: 19px; }
   .res p { min-height: 0; }
 }

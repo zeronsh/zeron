@@ -64,13 +64,6 @@ export function waitedFor(ms: number, now = Date.now()): string {
   return "Under a minute";
 }
 
-/**
- * A deploy key's public half, short, the one way it is shown everywhere:
- * its first 6 and last 4 characters ("k5Yh3x…g2Wq"), in mono, the whole key
- * in its title. Enough to tell keys apart at a glance.
- */
-export const shortKey = (key: string) => (key.length > 12 ? `${key.slice(0, 6)}…${key.slice(-4)}` : key);
-
 /** "1.2 MB". */
 export function bytes(n: number): string {
   if (n < 1024) return `${n} B`;

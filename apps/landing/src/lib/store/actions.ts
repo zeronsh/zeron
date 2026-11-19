@@ -38,6 +38,3 @@ export const revokeAsk = (name: string): Ask => ({
   tone: "danger",
   flash: "key_revoked",
 });
-
-/** A deploy key's public half, as the edge names it (base64url). */
-export const isKey = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(value);

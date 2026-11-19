@@ -20,6 +20,7 @@ import { CATEGORIES } from "../../lib/store/nav.ts";
 import type { Category, PluginCard } from "../../lib/store/types.ts";
 import { pictureUrl, pluginUrl } from "../../lib/store/urls.ts";
 import { categoryLine, EMPTY_BODY, store } from "../../lib/store/words.ts";
+import { lsb } from "../../lib/store/bearing.ts";
 
 export const prerender = false;
 
@@ -74,7 +75,7 @@ const n = (value: number | undefined) => (value === undefined ? "—" : count(va
   <section class="intro wrap">
     <div class="hd">
       <div>
-        <h1>Plugins</h1>
+        <h1 class={lsb("Plugins")}>Plugins</h1>
         <p class="lead">Panels, commands and tools for your agents, made by people who use Zeron. Anyone can publish. A check marks what Zeron has verified.</p>
       </div>
       {

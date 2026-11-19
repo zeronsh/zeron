@@ -7,23 +7,23 @@
 .nums dd { margin: 2px 0 0; font-size: 26px; line-height: 32px; font-weight: 600; letter-spacing: -0.03em; display: flex; align-items: center; gap: 6px; }
 
 /* The search, large: a real field. */
-.bigfind { position: relative; display: flex; align-items: center; height: 56px; margin-top: 36px; border-radius: 16px; background: var(--surface); box-shadow: var(--shadow-2); color: var(--text-3); transition: box-shadow 0.12s var(--ease); }
+.bigfind { --pad: 18px; position: relative; display: flex; align-items: center; height: 56px; margin-top: 36px; margin-inline: calc(-1 * var(--pad)); border-radius: 16px; background: var(--surface); box-shadow: var(--shadow-2); color: var(--text-3); transition: box-shadow 0.12s var(--ease); }
 .bigfind:focus-within { box-shadow: var(--shadow-2), 0 0 0 4px color-mix(in srgb, var(--focus) 22%, transparent); }
-.bigfind > svg { position: absolute; left: 18px; width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; pointer-events: none; }
-.bigfind input { flex: 1; min-width: 0; height: 100%; padding: 0 48px 0 50px; border: 0; border-radius: inherit; background: none; font-size: 16px; color: var(--text); }
+.bigfind > svg { position: absolute; left: var(--pad); width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; pointer-events: none; }
+.bigfind input { flex: 1; min-width: 0; height: 100%; padding: 0 48px 0 calc(var(--pad) + 32px); border: 0; border-radius: inherit; background: none; font-size: 16px; color: var(--text); }
 .bigfind input::placeholder { color: var(--text-3); }
 .bigfind input:focus-visible { outline: none; }
 .bigfind input::-webkit-search-cancel-button { display: none; }
 .bigfind .kbd { position: absolute; right: 16px; }
 
-.cats { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; align-items: center; }
+.cats { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; margin-left: -12px; align-items: center; }
 .cats .grow { flex: 1; }
-.chip.only { gap: 6px; padding-left: 9px; }
+.chip.only { --pad: 9px; gap: 6px; padding-left: var(--pad); }
 
 section.blk { margin-top: 72px; }
 
 /* Featured: one large, two beside it. */
-.bento { display: grid; grid-template-columns: 1.55fr 1fr; gap: 16px; }
+.bento { display: grid; grid-template-columns: 1.55fr 1fr; gap: 16px; margin-inline: -22px; }
 .bento.single { grid-template-columns: minmax(0, 1fr); }
 .bento .side { display: grid; grid-template-rows: 1fr 1fr; gap: 16px; }
 .bento .side:has(> :only-child) { grid-template-rows: 1fr; }
@@ -65,7 +65,7 @@ section.blk { margin-top: 72px; }
 .idx:hover p { color: var(--text); }
 
 /* New, said honestly: live, not yet verified. */
-.fresh { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 0; list-style: none; }
+.fresh { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-inline: -18px; padding: 0; list-style: none; }
 .fresh li { display: flex; }
 .fresh .card { flex: 1; padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; border-radius: 16px; }
 .fresh .hd { display: flex; align-items: center; gap: 12px; min-width: 0; }
@@ -74,8 +74,9 @@ section.blk { margin-top: 72px; }
 .fresh .hd .by { color: var(--text-3); font-size: 13px; line-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fresh p { flex: 1; color: var(--text-2); font-size: 14px; line-height: 21px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .fresh .ft { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.fresh .ft > .state { margin-left: calc(-1 * var(--pad)); }
 
-.make { display: flex; align-items: center; gap: 24px; margin-top: 72px; padding: 24px 28px; border-radius: 20px; background: var(--sunken); }
+.make { display: flex; align-items: center; gap: 24px; margin-top: 72px; margin-inline: -28px; padding: 24px 28px; border-radius: 20px; background: var(--sunken); }
 .make .txt { flex: 1; min-width: 0; }
 .make p { color: var(--text-2); margin-top: 2px; }
 
@@ -98,19 +99,23 @@ section.blk { margin-top: 72px; }
   .intro { padding-top: 36px; }
   .nums { gap: 28px; padding: 0; }
   .nums dd { font-size: 22px; line-height: 28px; }
-  .bigfind { height: 52px; margin-top: 24px; border-radius: 14px; }
+  .bigfind { --pad: 14px; height: 52px; margin-top: 24px; border-radius: 14px; }
   .bigfind input { padding-right: 16px; text-overflow: ellipsis; }
   .bigfind .kbd { display: none; }
-  .cats { flex-wrap: nowrap; overflow-x: auto; margin: 16px -20px 0; padding: 2px 20px; scrollbar-width: none; }
+  .cats { flex-wrap: nowrap; overflow-x: auto; margin: 16px calc(-1 * var(--gutter)) 0; padding: 2px var(--gutter) 2px calc(var(--gutter) - 9px); scrollbar-width: none; }
   .cats .chip { flex: none; }
   .cats .grow { display: none; }
   .cats .only { order: -1; }
   section.blk { margin-top: 52px; }
+  /* (As wide as the column, as wide as the screen.) */
+  .bento, .fresh { margin-inline: calc(-1 * var(--gutter)); }
+  .bento .card, .fresh .card { border-radius: 0; }
+  .fresh .card { padding-inline: var(--gutter); }
   .bento { gap: 12px; }
   .bento .side { gap: 12px; }
   .f-big .stage { height: 216px; }
   .f-big .shot { left: 28px; top: 28px; width: calc(100% + 132px); height: calc(100% + 32px); border-radius: 12px; }
-  .f-big .cap { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 0 14px; padding: 16px 18px 18px; }
+  .f-big .cap { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 0 14px; padding: 16px var(--gutter) 18px; }
   .f-big .cap .txt { display: contents; }
   .f-big .cap > .tile { width: 44px; height: 44px; font-size: 19px; grid-row: 1 / span 2; }
   .f-big .nm { font-size: 17px; }
@@ -133,6 +138,7 @@ section.blk { margin-top: 72px; }
   .fresh { grid-template-columns: minmax(0, 1fr); }
   .fresh li:nth-child(3) { display: flex; }
   .sec-head .more { flex: none; }
-  .make { flex-direction: column; align-items: stretch; gap: 16px; margin-top: 52px; padding: 20px; }
+  .make .cmd { margin-left: calc(-1 * var(--pad)); }
+  .make { flex-direction: column; align-items: stretch; gap: 16px; margin-top: 52px; margin-inline: calc(-1 * var(--gutter)); padding: 20px var(--gutter); border-radius: 0; }
   .cmd { justify-content: space-between; }
 }

@@ -30,6 +30,11 @@ const devPages = {
       injectRoute({ pattern: "/_dev/edge", entrypoint: "./src/dev/edge.ts", prerender: false });
       injectRoute({ pattern: "/_dev/fake", entrypoint: "./src/dev/fake.ts", prerender: false });
     },
+    // (The site's CSP lists the build's own styles; `astro dev` injects its styles inline, unlisted, so a
+    // browser draws every page bare. Said on start, with the way to see the site as it ships.)
+    "astro:server:start": ({ logger }) => {
+      logger.warn("A browser shows these pages unstyled: the site's CSP blocks the styles `astro dev` injects. To see the site as it ships, with the fake store: npm run preview:fake");
+    },
   },
 };
 

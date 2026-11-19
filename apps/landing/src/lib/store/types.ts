@@ -35,6 +35,12 @@ export type ErrorWord =
   | "not_owner"
   | "not_verified"
   | "bad_listing"
+  | "step_up_required"
+  | "invalid_name"
+  | "invalid_expiry"
+  | "too_many_tokens"
+  | "unknown_token"
+  | "session_required"
   | "unauthenticated"
   | "bad_cursor"
   | "bad_path"
@@ -43,6 +49,8 @@ export type ErrorWord =
 export interface EdgeError {
   error: ErrorWord;
   message?: string;
+  /** The plugin ids a refusal names (a token's scope: `invalid_scope`, `not_owner`). */
+  ids?: string[];
 }
 
 /** `verified`: newest verification first, only plugins with a verified listed version (contract ee380cca3). */
@@ -154,22 +162,22 @@ export interface VersionInfo {
   prerelease?: boolean;
   /** Taken down and turned off on the devices that have it. */
   blocked?: boolean;
-  /** How it was published: from a device, or by a deploy key. */
-  via?: "device" | "deploy_key";
+  /** How it was published: from a device, or by a deploy token. */
+  via?: "device" | "deploy_token";
   /** This version's section of CHANGELOG.md (markdown), or null. */
   notes: string | null;
   engines: { zeron?: string } | null;
   yanked: boolean;
-  /** What was signed (amendment 1). */
-  key?: string;
+  /** The device's key that signed it (amendment 1); null for a version a deploy token sent, unsigned, the store's record vouching for it (a315eef5a). */
+  key?: string | null;
   hash?: string;
   sha256?: string;
   bytes?: number;
   /** The owner's and an admin's view. */
   review?: Review;
   checks?: Check[];
-  /** The deploy key that published it (owner and staff; null when a device did). */
-  deploy_key?: { key: string; name: string } | null;
+  /** The deploy token that published it (owner and staff; null when a device did): its id, short id and name. */
+  deploy_token?: { id: string; short: string; name: string } | null;
   /** Why staff took it down or removed it, and when (owner and staff). */
   removal?: { at: number; reason: string | null };
   /**
@@ -188,8 +196,8 @@ export interface PackageInfo {
   bytes: number;
   sha256: string;
   hash: string;
-  /** The public key that signed it (b64url). */
-  key?: string;
+  /** The public key that signed it (b64url); null for a version a deploy token sent. */
+  key?: string | null;
 }
 
 export interface PluginDetail extends PluginCard {
@@ -281,21 +289,36 @@ export interface MyPlugins {
   plugins: MyPlugin[];
 }
 
-/** What a deploy key may publish (amendment 44): all the account's plugins, or the ones named (sorted). */
-export type KeyScope = { all: true } | { plugins: string[] };
+/** What a deploy token may publish: all the account's plugins, or the ones named (sorted). */
+export type TokenScope = { all: true } | { plugins: string[] };
 
-/** A deploy key, the account's (amendment 44). */
-export interface DeployKey {
-  /** The public key (base64url). */
-  key: string;
+/**
+ * A deploy token, the account's (contract a315eef5a): named only by its short id (the 8 characters after
+ * `zdt_`) beside its name. The token itself comes once, in the answer that made it (NewToken), never again.
+ */
+export interface DeployToken {
+  id: string;
+  short: string;
   name: string;
-  scope: KeyScope;
+  scope: TokenScope;
   created_at: number;
   last_used_at: number | null;
   /** The plugin it last published a version of. */
   last_used_plugin: string | null;
   expires_at: number | null;
-  revoked_at?: number | null;
+  /** Null while it's live. */
+  revoked_at: number | null;
+}
+
+/** The answer that makes a token: the token itself, shown once and kept nowhere. */
+export interface NewToken {
+  token: string;
+  id: string;
+  short: string;
+  name: string;
+  scope: TokenScope;
+  created_at: number;
+  expires_at: number | null;
 }
 
 export const REPORT_REASONS = ["malware", "misleading", "broken", "copyright", "other"] as const;

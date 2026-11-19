@@ -4,6 +4,7 @@
 // the button that does it, in the danger's colour when it's one.
 import type { Ask } from "../../lib/store/actions.ts";
 import { unbidi } from "../../lib/store/format.ts";
+import { lsb } from "../../lib/store/bearing.ts";
 
 interface Props {
   ask: Ask;
@@ -16,7 +17,7 @@ const { ask, action, csrf, back } = Astro.props;
 
 <form method="post" action={action} class="card askcard">
   <input type="hidden" name="csrf" value={csrf} />
-  <h1>{unbidi(ask.title)}</h1>
+  <h1 class={lsb(ask.title)}>{unbidi(ask.title)}</h1>
   {ask.words.map((w) => <p>{w}</p>)}
   <slot />
   <div class="answers">

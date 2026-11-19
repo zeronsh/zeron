@@ -4,23 +4,24 @@
 // with how many it holds when that's known.
 import Icon from "./Icon.astro";
 import type { IconName } from "./icons.ts";
+import { lsb } from "../../lib/store/bearing.ts";
 
 interface Props {
   title: string;
   lead: string;
-  current: "plugins" | "keys";
-  /** How many plugins and live keys, when known (signed in). */
+  current: "plugins" | "tokens";
+  /** How many plugins and live tokens, when known (signed in). */
   plugins?: number | null;
-  keys?: number | null;
-  /** The page's one action: a link, or a button that opens a popover. */
-  action?: { label: string; icon: IconName; href?: string; popover?: string } | null;
+  tokens?: number | null;
+  /** The page's one action: a link (opening `dialog` in place, with the script), or a button that opens a popover. */
+  action?: { label: string; icon: IconName; href?: string; popover?: string; dialog?: string } | null;
 }
-const { title, lead, current, plugins = null, keys = null, action = null } = Astro.props;
+const { title, lead, current, plugins = null, tokens = null, action = null } = Astro.props;
 ---
 
 <div class="hd">
   <div>
-    <h1>{title}</h1>
+    <h1 class={lsb(title)}>{title}</h1>
     <p class="lead">{lead}</p>
   </div>
   {
@@ -28,12 +29,12 @@ const { title, lead, current, plugins = null, keys = null, action = null } = Ast
       (action.popover ? (
         <button class="btn pri" type="button" popovertarget={action.popover}><Icon name={action.icon} />{action.label}</button>
       ) : (
-        <a class="btn pri" href={action.href}><Icon name={action.icon} />{action.label}</a>
+        <a class="btn pri" href={action.href} data-dialog={action.dialog}><Icon name={action.icon} />{action.label}</a>
       ))
   }
 </div>
 <nav class="sub" aria-label="Your pages">
   <a href="/account" aria-current={current === "plugins" ? "page" : undefined}>Your plugins{plugins !== null && <span class="num">{plugins}</span>}</a>
-  <a href="/account/keys" aria-current={current === "keys" ? "page" : undefined}>Deploy keys{keys !== null && <span class="num">{keys}</span>}</a>
+  <a href="/account/tokens" aria-current={current === "tokens" ? "page" : undefined}>Deploy tokens{tokens !== null && <span class="num">{tokens}</span>}</a>
 </nav>
 <slot />

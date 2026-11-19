@@ -1,0 +1,70 @@
+{
+ "tokens": [
+  {
+   "random_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+   "token": "zdt_00000000000000000000000000000000000000000000Hpxfg",
+   "short": "00000000",
+   "sha256": "4109273ff1573a9c10e2266c3ec5ad581766fc408deca8a1735b8649474f5e84"
+  },
+  {
+   "random_hex": "0707070707070707070707070707070707070707070707070707070707070707",
+   "token": "zdt_1fJjkkpe9PiTw9KSulA8Ghct30vZz4HpdQ5c5b9cPF14FMQ8V",
+   "short": "1fJjkkpe",
+   "sha256": "0f99cf5f30a14e813f3877583930fac4e6a7566a022b41aad57cc11444661ec9"
+  },
+  {
+   "random_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+   "token": "zdt_yhjskwdA6OZ1AL1YmHWZWm8LLG7HjnuCA2j5rOw8Xp130T4iS",
+   "short": "yhjskwdA",
+   "sha256": "006ac47f54f338615bb3e2505960ca80e14ce21b3d5431cc40636c7ce678b523"
+  },
+  {
+   "random_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+   "token": "zdt_003aUlTJC7tjlCTQj2uNU3MFagCXG9LRKRcwGkBIDlf0dSDXw",
+   "short": "003aUlTJ",
+   "sha256": "2bf925757c99d7985f195feb57f5ca760669ae26bc919e7f528a9b634a9161ae"
+  }
+ ],
+ "reads": [
+  {
+   "ok": true,
+   "short": "003aUlTJ",
+   "token": "  zdt_003aUlTJC7tjlCTQj2uNU3MFagCXG9LRKRcwGkBIDlf0dSDXw\n"
+  },
+  {
+   "error": "not_a_token",
+   "ok": false,
+   "token": "ghp_0123456789"
+  },
+  {
+   "error": "not_a_token",
+   "ok": false,
+   "token": "zdk_003aUlTJC7tjlCTQj2uNU3MFagCXG9LRKRcwGkBIDlf0dSDXw"
+  },
+  {
+   "error": "not_a_token",
+   "ok": false,
+   "token": "zdt_003aUlTJC7tjlCTQj2uNU3MFagCXG9LRKRcwGkBIDlf0dSDX-"
+  },
+  {
+   "error": "damaged",
+   "ok": false,
+   "token": "zdt_003aUlTJC7tjlCTQj2uNU3MFagCXG9LRKRcwGkBIDlf0dSDX"
+  },
+  {
+   "error": "damaged",
+   "ok": false,
+   "token": "zdt_003aUlTJC7tjlCTQj2uNU3MFagCXG9LRKRcwGkBIDlf0dSDXw0"
+  },
+  {
+   "error": "damaged",
+   "ok": false,
+   "token": "zdt_003aUlAJC7tjlCTQj2uNU3MFagCXG9LRKRcwGkBIDlf0dSDXw"
+  },
+  {
+   "error": "damaged",
+   "ok": false,
+   "token": "zdt_003aUlTJC7tjlCTQj2uNU3MFagCXG9LRKRcwGkBIDlf0dSDX0"
+  }
+ ]
+}

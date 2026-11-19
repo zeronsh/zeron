@@ -58,6 +58,11 @@ class Browser {
 
   /** A form on the site's pages, posted as a browser posts it (its Origin, the page's token). */
   async post(path: string, fields: Record<string, string>): Promise<Response> {
+    return this.postAll(path, Object.entries(fields));
+  }
+
+  /** The same, with a field named more than once (a form's ticked boxes). */
+  async postAll(path: string, fields: [string, string][]): Promise<Response> {
     return this.keep(
       await edge.site(path, {
         method: "POST",
@@ -365,27 +370,60 @@ describe("a version taken down: its pictures", () => {
 });
 
 describe("an author's pages", () => {
-  test("their plugins, each with its versions; the account's deploy keys, each with what it may publish", async () => {
+  test("their plugins, each with its versions", async () => {
     const account = await adaOnWeb.get("/account");
     expect(account.body).toContain('href="/account/plugins/focus-timer"');
     const page = await adaOnWeb.get("/account/plugins/focus-timer");
     expect(page.response.status).toBe(200);
     expect(page.body).toContain("1.0.0");
-    // (Amendment 44: keys are the account's, with a scope.)
-    const key = await ada.deployKey(["focus-timer", "pr-review"], "ci");
-    const keys = await adaOnWeb.get("/account/keys");
-    expect(keys.response.status).toBe(200);
-    expect(keys.body).toContain(`/account/keys/${key}`);
-    // (What it may publish, by the plugins' own names: the package's.)
-    // (Two plugins, named in full: the app's "{a} and {b}".)
-    // (Each short name kept whole on its line: names break between one another.)
-    expect(keys.body).toContain('<div class="names">focus\u00a0timer and pr\u00a0review</div><small>2 plugins</small>');
-    const csrf = await adaOnWeb.token("/account/keys");
-    const revoked = await adaOnWeb.post(`/account/keys/${key}`, { csrf });
+  });
+
+  test("a deploy token made on the site with a fresh sign-in, shown once, publishes from CI; revoked, it publishes nothing", async () => {
+    // (Signed in this moment: the sign-in's ticket, which making a token spends.)
+    const web = await signInOnTheWeb("user_ada", "/account/tokens/new");
+    const form = await web.get("/account/tokens/new");
+    expect(form.response.status).toBe(200);
+    expect(form.body).not.toContain("Zeron will ask you to sign in again first.");
+    const csrf = await web.token("/account/tokens/new");
+    const made = await web.postAll("/account/tokens/new", [["csrf", csrf], ["name", "GitHub Actions"], ["ends", "30"], ["scope", "chosen"], ["plugins", "focus-timer"], ["plugins", "theme-sync"]]);
+    expect(made.status).toBe(200);
+    expect(made.headers.get("cache-control")).toBe("private, no-store");
+    const body = await made.text();
+    const tokens = [...body.matchAll(/zdt_[0-9A-Za-z]+/g)].map((m) => m[0]);
+    expect(tokens).toHaveLength(1);
+    const token = tokens[0]!;
+    expect(token).toMatch(/^zdt_[0-9A-Za-z]{49}$/);
+    expect(body).toContain(`<code id="the-token" translate="no">${token}</code>`);
+    const short = token.slice(4, 12);
+
+    // The list names it by its short id, with what it may publish by the plugins' own names (the packages'), and never shows it.
+    const list = await web.get("/account/tokens");
+    expect(list.body).toContain(`<div class="id">${short}</div>`);
+    expect(list.body).toContain('<div class="names">focus\u00a0timer and theme\u00a0sync</div><small>2 plugins</small>');
+    expect(list.body).not.toContain("zdt_");
+    const id = /href="\/account\/tokens\/(tok_[0-9A-Za-z]{16})"/.exec(list.body)![1]!;
+
+    // The ticket is spent: another goes to sign in again first.
+    const again = await web.postAll("/account/tokens/new", [["csrf", csrf], ["name", "Another"], ["ends", "30"], ["scope", "all"]]);
+    expect(again.status).toBe(303);
+    expect(again.headers.get("location")).toMatch(/^\/auth\/web\/login\?return_to=%2Faccount%2Ftokens%2Fnew%3Fagain%3D1%26name%3DAnother/);
+
+    // CI publishes with it; the author's page says which token sent it.
+    const published = await ada.publishWithToken(token, "theme-sync", "0.2.0");
+    expect(published.status, await published.clone().text()).toBe(201);
+    const mine = await web.get("/account/plugins/theme-sync");
+    expect(mine.body).toMatch(/0\.2\.0[\s\S]*<small><svg[^>]*>[\s\S]*?<\/svg>GitHub Actions<\/small>/);
+    expect((await web.get("/account/tokens")).body).toMatch(/<time datetime="[^"]+">[^<]+<\/time><\/div><small>on\u00a0theme sync<\/small>/);
+
+    // Revoked from the site, it publishes nothing.
+    const ask = await web.get(`/account/tokens/${id}`);
+    expect(ask.body).toContain("Revoke GitHub Actions?");
+    const revoked = await web.post(`/account/tokens/${id}`, { csrf: await web.token(`/account/tokens/${id}`) });
     expect(revoked.status).toBe(303);
-    expect(revoked.headers.get("location")).toBe("/account/keys");
-    expect(adaOnWeb.flash()).toBe("key_revoked");
-    expect((await adaOnWeb.get("/account/keys")).body).toMatch(/Revoked and ended keys · 1/);
+    expect(revoked.headers.get("location")).toBe("/account/tokens");
+    expect(web.flash()).toBe("key_revoked");
+    expect((await web.get("/account/tokens")).body).toMatch(/Revoked and ended tokens · 1/);
+    expect((await ada.publishWithToken(token, "theme-sync", "0.3.0")).status).toBe(401);
   });
 
   test("stop new installs of a version, and allow them again", async () => {
@@ -544,7 +582,7 @@ describe("Newest, from the edge's cards", () => {
 
 describe("every page, with what the real edge holds", () => {
   const PUBLIC = ["/plugins", "/plugins/all", "/plugins/all?category=productivity", "/plugins/all?keyword=focus", "/plugins/all?sort=new", "/plugins/all?verified=1", "/plugins/focus-timer", "/plugins/focus-timer/versions", "/plugins/focus-timer/versions/1.1.0", "/plugins/probe", "/plugins/sitemap.xml"];
-  const MEMBER = ["/account", "/account/keys", "/account/plugins/focus-timer", "/account/plugins/theme-sync", "/account/plugins/focus-timer/versions/1.0.0/yank", "/plugins/focus-timer/report"];
+  const MEMBER = ["/account", "/account/tokens", "/account/tokens/new", "/account/plugins/focus-timer", "/account/plugins/theme-sync", "/account/plugins/focus-timer/versions/1.0.0/yank", "/plugins/focus-timer/report"];
   const STAFF = [
     "/admin/plugins",
     "/admin/plugins/focus-timer",

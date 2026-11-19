@@ -8,6 +8,7 @@ import Store from "../../layouts/Store.astro";
 import "../../styles/look/plugin.css";
 import { store } from "../../lib/store/words.ts";
 import Icon from "./Icon.astro";
+import { lsb } from "../../lib/store/bearing.ts";
 
 interface Props {
   state: "missing" | "down";
@@ -26,7 +27,7 @@ const title = state === "down" ? store("plugins.store.failed_title") : what === 
   <div class="wrap">
     <nav class="crumbs" aria-label="Where this is"><a href="/plugins">Plugins</a>{back && <><Icon name="chev" /><a href={back.href}>{back.name}</a></>}</nav>
     <section class="gone" role={state === "down" ? "status" : undefined}>
-      <h1>{title}</h1>
+      <h1 class={lsb(title)}>{title}</h1>
       {
         state === "down" ? (
           <>

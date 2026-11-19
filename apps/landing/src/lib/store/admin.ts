@@ -69,7 +69,7 @@ export function pluginAsk(action: PluginAction, name: string): Ask {
     case "unfeature":
       return { title: `Stop featuring ${name}?`, words: ["It leaves the featured row."], confirm: "Stop featuring", tone: "primary", flash };
     case "transfer":
-      return { title: `Move ${name} to another account?`, words: ["Its new owner publishes its versions from now on. Its current owner can't, and their deploy keys for it stop working."], confirm: "Move it", tone: "danger", flash };
+      return { title: `Move ${name} to another account?`, words: ["Its new owner publishes its versions from now on. Its current owner can't, and their deploy tokens for it stop working."], confirm: "Move it", tone: "danger", flash };
   }
 }
 

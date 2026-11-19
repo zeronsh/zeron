@@ -2,7 +2,7 @@
 // Your plugins (the prototype's yours page): each plugin you publish, its
 // newest version and where it stands (verified, not yet, the reviewer's
 // note when Zeron didn't verify it, taken down or removed and why), when it
-// was published and from where (one of your devices, or a deploy key by its
+// was published and from where (one of your devices, or a deploy token by its
 // name), and how many have it. One person's page: never cached, never
 // indexed. Signed out, it says so and offers sign-in, here.
 import AccountHead from "../../components/look/AccountHead.astro";
@@ -30,10 +30,10 @@ const session = who.state === "in" ? who.session : null;
 privatePage(Astro);
 if (who.state === "down") Astro.response.status = 503;
 const flash = takeFlash(Astro.cookies);
-const [result, keysResult] = session ? await Promise.all([edge.myPlugins(), edge.keys()]) : [null, null];
+const [result, tokensResult] = session ? await Promise.all([edge.myPlugins(), edge.tokens()]) : [null, null];
 const plugins = result?.ok ? result.data.plugins : [];
 const now = Date.now();
-const liveKeys = keysResult?.ok ? keysResult.data.keys.filter((k) => !k.revoked_at && !(k.expires_at !== null && k.expires_at < now)).length : null;
+const liveTokens = tokensResult?.ok ? tokensResult.data.tokens.filter((k) => !k.revoked_at && !(k.expires_at !== null && k.expires_at < now)).length : null;
 
 /** Where a plugin's newest version stands: its pill, and the lines under it. */
 function standing(p: MyPlugin) {
@@ -66,7 +66,7 @@ const gone = (p: MyPlugin) => p.listing === "suspended" || ["taken_down", "remov
       lead="What you have published, and where each version stands. A new version is live the moment you send it; the check arrives when Zeron has verified it."
       current="plugins"
       plugins={result?.ok ? plugins.length : null}
-      keys={liveKeys}
+      tokens={liveTokens}
       action={session ? { label: "Publish a plugin", icon: "plus", href: "/plugins/publishing#send" } : null}
     >
       <Flash flash={flash} />
@@ -111,7 +111,7 @@ const gone = (p: MyPlugin) => p.listing === "suspended" || ["taken_down", "remov
                             <div><div class="nm name"><Words text={p.name} /></div><div class="id">{p.id}</div></div>
                           </div>
                           <div class="ver">
-                            <div class="top1">
+                            <div class="top1 pills">
                               {v && <b>{v.version}</b>}
                               <span class:list={["state", s.tone]}>{s.tone === "ok" && <Seal quiet />}{s.label}</span>
                             </div>
@@ -120,7 +120,7 @@ const gone = (p: MyPlugin) => p.listing === "suspended" || ["taken_down", "remov
                           </div>
                           <div class="pub">
                             {v && <div><span class="sr-only">Published </span><time datetime={new Date(v.published_at).toISOString()}>{since(v.published_at, now, true)}</time></div>}
-                            {v?.via === "deploy_key" && <small><Icon name="key" />{v.deploy_key?.name ?? "A deploy key"}</small>}
+                            {v?.via === "deploy_token" && <small><Icon name="key" />{v.deploy_token?.name ?? "A deploy token"}</small>}
                             {v?.via === "device" && <small><Icon name="laptop" />One of your devices</small>}
                           </div>
                           <div class="n num">{count(p.installs)}<span class="sr-only"> installs</span></div>

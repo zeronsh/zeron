@@ -1,0 +1,85 @@
+// Every page of the look, in its full states and its spare ones: who's
+// looking, the fake's switches for it, and what to do on it first.
+import type { Page } from "playwright";
+
+export interface AlignPage {
+  /** A short name for the sheet and the failures. */
+  name: string;
+  path: string;
+  /** Signed in as this fake account. */
+  user?: string;
+  /** The fake's switches, set before and reset after (POST /_fake/<what>?<params>). */
+  fake?: [string, Record<string, string>][];
+  /** What to do on it before it's measured (open a dialog, send a form). */
+  act?: (page: Page) => Promise<void>;
+}
+
+/** New token's dialog, filled in, its plugins chosen. */
+const newToken = async (page: Page) => {
+  await page.getByRole("link", { name: "New token" }).click();
+  const dialog = page.getByRole("dialog", { name: "New deploy token" });
+  await dialog.getByLabel("Name", { exact: true }).fill("Release CI");
+  await dialog.getByLabel("Chosen plugins").check();
+  await dialog.getByLabel("Focus timer", { exact: true }).check();
+};
+
+/**
+ * Where the rule can't hold, and why: a code view's line numbers stand right-aligned in their gutter (the
+ * longest starts where the shorter end), and a diff's hunk heads sit in its table, a code view of its own.
+ */
+export const EXCEPTIONS: [string, string][] = [
+  ["pre.numbers, td.n", "line numbers, right-aligned in a code view's gutter"],
+  ["tr.hunk", "a diff's hunk head, in the code view's own table"],
+  ["li li", "a list inside a list item steps in under it, as its level"],
+  [".stage", "a screenshot set into its card's coloured stage: a picture, placed by the stage"],
+  ["p code, li > code:not(:first-child)", "code inside a sentence that wraps to a line's start keeps its chip's 5 px"],
+];
+
+/** The columns of the look: the page's, Browse's two, a plugin's rail and its Get, Files' two, a dialog's. */
+export const COLUMNS = [".wrap", ".facets", ".browse > section", ".rail", ".get", ".tree-pane", ".viewer", "dialog.question"];
+
+export const ALIGN_PAGES: AlignPage[] = [
+  // Discover, Browse.
+  { name: "discover", path: "/plugins" },
+  { name: "discover-empty", path: "/plugins", fake: [["empty", { on: "1" }]] },
+  { name: "discover-down", path: "/plugins", fake: [["down", { on: "1" }]] },
+  { name: "browse", path: "/plugins/all" },
+  { name: "browse-category", path: "/plugins/all?category=productivity&keyword=focus" },
+  { name: "browse-none", path: "/plugins/all?q=nothing-matches-this" },
+  // A plugin: every part; none of its optional parts; its versions, its asks, one version.
+  { name: "plugin", path: "/plugins/focus-timer" },
+  { name: "plugin-worst", path: "/plugins/worst-case-listing-at-every-limit-xyz12" },
+  { name: "plugin-bare", path: "/plugins/first-light" },
+  { name: "plugin-no-pictures", path: "/plugins/focus-timer", fake: [["bare", { id: "focus-timer" }]] },
+  { name: "versions", path: "/plugins/focus-timer/versions" },
+  { name: "versions-one", path: "/plugins/first-light/versions" },
+  { name: "asks", path: "/plugins/worst-case-listing-at-every-limit-xyz12/asks" },
+  { name: "version", path: "/plugins/focus-timer/versions/1.2.0" },
+  { name: "version-not-verified", path: "/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.5.0" },
+  { name: "not-here", path: "/plugins/no-such-plugin" },
+  // Yours.
+  { name: "yours", path: "/account", user: "user_ada" },
+  { name: "yours-none", path: "/account", user: "user_noor" },
+  { name: "yours-signed-out", path: "/account" },
+  { name: "tokens", path: "/account/tokens", user: "user_ada" },
+  { name: "tokens-none", path: "/account/tokens", user: "user_noor" },
+  { name: "revoke", path: "/account/tokens/tok_0OZtGptZyNgbeUuc", user: "user_ada" },
+  { name: "new-token", path: "/account/tokens/new?again=1&name=Nightly&ends=365&scope=chosen&plugins=focus-timer%2Cweather", user: "user_ada" },
+  { name: "new-token-dialog", path: "/account/tokens", user: "user_ada", act: newToken },
+  { name: "token-shown", path: "/account/tokens", user: "user_ada", fake: [["tokens", {}]], act: async (page) => {
+    await newToken(page);
+    await Promise.all([page.waitForLoadState("networkidle"), page.getByRole("dialog").getByRole("button", { name: "Create token" }).click()]);
+    await page.getByRole("heading", { name: "Copy your token now" }).waitFor();
+  } },
+  { name: "mine", path: "/account/plugins/worst-case-listing-at-every-limit-xyz12", user: "user_ada" },
+  { name: "mine-stop", path: "/account/plugins/session-badges/versions/1.2.1/yank", user: "user_ada" },
+  // Review.
+  { name: "queue", path: "/admin/plugins", user: "user_grace" },
+  { name: "queue-empty", path: "/admin/plugins", user: "user_grace", fake: [["queue", { as: "empty" }]] },
+  { name: "review", path: "/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", user: "user_grace" },
+  { name: "review-first", path: "/admin/plugins/first-light/0.1.0", user: "user_grace" },
+  { name: "review-files", path: "/admin/plugins/xss-probe/1.1.0?view=files", user: "user_grace" },
+  { name: "review-changes", path: "/admin/plugins/xss-probe/1.1.0?view=changes", user: "user_grace" },
+];
+
+export const RESET: [string, Record<string, string>][] = [["empty", {}], ["down", {}], ["bare", {}], ["queue", {}], ["tokens", {}]];

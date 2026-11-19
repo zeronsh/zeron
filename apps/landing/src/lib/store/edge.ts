@@ -9,7 +9,9 @@ import type {
   AuditPage,
   CatalogPage,
   Category,
-  DeployKey,
+  DeployToken,
+  NewToken,
+  TokenScope,
   EdgeError,
   ErrorWord,
   KeywordCount,
@@ -28,14 +30,14 @@ import type {
 } from "./types.ts";
 import { ADMIN_PAGE } from "./paging.ts";
 
-export type Result<T> = { ok: true; data: T } | { ok: false; status: number; error: ErrorWord; message?: string };
+export type Result<T> = { ok: true; data: T } | { ok: false; status: number; error: ErrorWord; message?: string; ids?: string[] };
 
 const ERROR_WORDS = new Set<string>([
   "not_found", "signed_out", "forbidden", "bad_request", "bad_csrf", "rate_limited", "suspended",
   "needs_username", "id_taken", "id_reserved", "not_semver", "version_exists", "not_newer", "bad_package",
   "bad_signature", "key_not_allowed", "missing_readme", "missing_listing", "too_large", "conflict", "invalid_state",
   "unauthenticated", "bad_cursor", "bad_path", "site_id", "invalid_scope", "not_owner", "not_verified",
-  "bad_listing",
+  "bad_listing", "step_up_required", "invalid_name", "invalid_expiry", "too_many_tokens", "unknown_token", "session_required",
 ]);
 
 /** A binding: what `env.EDGE` is, and what a test hands in instead. */
@@ -189,17 +191,22 @@ export class Edge {
     return this.#json("/store/v1/me/plugins", { signedIn: true });
   }
 
-  /** The account's deploy keys (amendment 44: the account's, each with its scope). */
-  keys(): Promise<Result<{ keys: DeployKey[] }>> {
-    return this.#json("/store/v1/me/keys", { signedIn: true });
+  /** The account's deploy tokens (contract a315eef5a: the account's, each with its scope; never a secret). */
+  tokens(): Promise<Result<{ tokens: DeployToken[] }>> {
+    return this.#json("/store/v1/me/tokens", { signedIn: true });
+  }
+
+  /** Makes a deploy token with the fresh sign-in this session earned (the edge spends it): the answer holds the token, once. */
+  createToken(body: { name: string; scope: TokenScope; expires?: number }, csrf: string): Promise<Result<NewToken>> {
+    return this.#json("/store/v1/me/tokens", { method: "POST", csrf, body });
   }
 
   versionAction(id: string, version: string, action: "yank" | "unyank", csrf: string): Promise<Result<unknown>> {
     return this.#json(`/store/v1/plugins/${segment(id)}/versions/${segment(version)}/${action}`, { method: "POST", csrf, body: {} });
   }
 
-  revokeKey(key: string, csrf: string): Promise<Result<unknown>> {
-    return this.#json(`/store/v1/me/keys/${segment(key)}`, { method: "DELETE", csrf });
+  revokeToken(id: string, csrf: string): Promise<Result<unknown>> {
+    return this.#json(`/store/v1/me/tokens/${segment(id)}`, { method: "DELETE", csrf });
   }
 
   report(id: string, body: { reason: string; text: string }, csrf: string): Promise<Result<unknown>> {
@@ -297,10 +304,11 @@ export class Edge {
   }
 }
 
-function failure(status: number, payload: unknown): { ok: false; status: number; error: ErrorWord; message?: string } {
+function failure(status: number, payload: unknown): { ok: false; status: number; error: ErrorWord; message?: string; ids?: string[] } {
   const body = (payload ?? {}) as Partial<EdgeError>;
   const word = typeof body.error === "string" && ERROR_WORDS.has(body.error) ? (body.error as ErrorWord) : status === 404 ? "not_found" : status === 401 ? "signed_out" : status === 403 ? "forbidden" : status === 429 ? "rate_limited" : "unknown";
-  return { ok: false, status: status || 502, error: word, message: typeof body.message === "string" ? body.message : undefined };
+  const ids = Array.isArray(body.ids) ? body.ids.filter((id): id is string => typeof id === "string").slice(0, 50) : undefined;
+  return { ok: false, status: status || 502, error: word, message: typeof body.message === "string" ? body.message : undefined, ...(ids?.length ? { ids } : {}) };
 }
 
 /**

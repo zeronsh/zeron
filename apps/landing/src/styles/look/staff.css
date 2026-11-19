@@ -5,9 +5,9 @@
 .staff-tabs a { flex: none; }
 
 /* ---- The queue: what arrived, what it asks for against its newest verified version, how long it has waited ---- */
-.q { margin-top: 28px; }
+.q { margin-top: 28px; margin-inline: calc(-1 * var(--card)); }
 .q ul { padding: 0; list-style: none; }
-.qr { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) 176px 84px; gap: 32px; align-items: start; padding: 20px 24px; transition: background-color 0.12s var(--ease); }
+.qr { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) 176px 84px; gap: 32px; align-items: start; padding: 20px var(--card); transition: background-color 0.12s var(--ease); }
 .q li + li .qr, .qr.h + ul .qr { box-shadow: 0 -1px 0 var(--line); }
 .qr.h { padding-top: 14px; padding-bottom: 12px; font-size: 13px; line-height: 20px; color: var(--text-3); }
 /* (The whole row opens it: its name's link stretched over the row; "Read" is that link's look.) */
@@ -21,8 +21,9 @@
 .qr .nm b { font: 550 13.5px/22px var(--mono); letter-spacing: -0.01em; color: var(--text-2); margin-left: 4px; white-space: nowrap; }
 .qr .by { margin-top: 2px; font-size: 13px; line-height: 20px; color: var(--text-3); overflow-wrap: anywhere; }
 .chg { min-width: 0; font-size: 14px; line-height: 22px; }
-.chg .lead1 { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-weight: 500; }
-.chg ul { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; color: var(--text-2); }
+.chg .lead1 { display: flex; flex-wrap: wrap; align-items: center; row-gap: 4px; font-weight: 500; }
+/* (A list's marks hang outside its column, its words on it.) */
+.chg ul { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; margin-left: -18px; color: var(--text-2); }
 .chg li { position: relative; padding-left: 18px; line-height: 20px; }
 .chg li::before { content: ""; position: absolute; left: 4px; top: 8px; width: 4px; height: 4px; border-radius: 50%; background: var(--text-3); }
 .chg li.add { color: var(--warn); }
@@ -40,7 +41,8 @@
 }
 @media (max-width: 720px) {
   .qr.h { display: none; }
-  .qr { grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 18px 20px; }
+  .qr { grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 18px var(--card); }
+  .q { border-radius: 0; }
   .chg { padding-left: 58px; }
   .wait { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding-left: 58px; color: var(--text-2); }
   .wait small { margin: 0; }
@@ -54,7 +56,8 @@
 /* (The crumbs' last, the version here, cut as the plugin pages' crumbs are: the head below says it whole.) */
 .rv .crumbs > span { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rv-head { align-items: center; }
-.rv-head > .state { flex: none; }
+/* (Where it stands, at the head's far end: the rail's column holds no Get here.) */
+.rv-head > .state { justify-self: end; }
 .rv-head h1 .name { text-wrap: balance; }
 .rv-cols { margin-top: 36px; }
 .rv-main > .tabs { margin-bottom: 32px; }
@@ -78,7 +81,7 @@
 .before-after dt { color: var(--text-3); }
 .before-after dd { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin: 4px 0 0; }
 .before-after dd code { max-width: 100%; }
-.moved { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; padding: 0; list-style: none; font-size: 13px; line-height: 20px; color: var(--text-2); }
+.moved { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; margin-left: -18px; padding: 0; list-style: none; font-size: 13px; line-height: 20px; color: var(--text-2); }
 .moved li { position: relative; padding-left: 18px; overflow-wrap: anywhere; }
 .moved li::before { position: absolute; left: 2px; top: 0; font: 600 13px/20px var(--mono); }
 .moved .add::before { content: "+"; color: var(--warn); }
@@ -92,8 +95,8 @@
 
 /* Its files: what changed since the newest verified version, marked; the rest folded. */
 .fh { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; }
-.files { margin-top: 14px; border-radius: 16px; }
-.flist { display: flex; flex-direction: column; padding: 6px; list-style: none; }
+.files { margin-top: 14px; margin-inline: -18px; border-radius: 16px; }
+.flist { display: flex; flex-direction: column; gap: 2px; padding: 6px; list-style: none; }
 .flist a { display: flex; align-items: center; gap: 12px; min-height: 34px; padding: 6px 12px; border-radius: 9px; transition: background-color 0.12s var(--ease); }
 .flist a:hover { background: var(--sunken); }
 .flist a:focus-visible { outline-offset: -2px; }
@@ -139,7 +142,7 @@ em.mi { font-style: normal; color: var(--danger); }
 .file-head .more svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 .file-picture { display: block; max-width: 100%; margin-bottom: 12px; border-radius: 12px; box-shadow: var(--shadow-1); }
 .changes-view { display: flex; flex-direction: column; gap: 16px; }
-.change-block { overflow: hidden; border-radius: 16px; scroll-margin-top: 84px; }
+.change-block { overflow: hidden; margin-inline: -18px; border-radius: 16px; scroll-margin-top: 84px; }
 .dh { display: flex; align-items: center; gap: 12px; padding: 12px 18px; font-size: 13px; line-height: 20px; box-shadow: 0 1px 0 var(--line); }
 .dh .fn:hover { text-decoration: underline; text-underline-offset: 3px; }
 .change-block .diff { border-radius: 0; box-shadow: none; background: none; }
@@ -147,7 +150,7 @@ em.mi { font-style: normal; color: var(--danger); }
 .change-block .diff :is(.added, .removed) :is(.n, .hljs-comment) { color: var(--text-2); }
 
 /* The decision, which never scrolls away; then who sent it, what's reported, its versions. */
-.decide { display: flex; flex-direction: column; gap: 10px; padding: 20px; border-radius: 18px; background: var(--surface); box-shadow: var(--shadow-2); }
+.decide { display: flex; flex-direction: column; gap: 10px; margin-inline: -20px; padding: 20px; border-radius: 18px; background: var(--surface); box-shadow: var(--shadow-2); }
 .decide h2 { font-size: 15px; line-height: 22px; }
 .decide p { font-size: 14px; line-height: 21px; color: var(--text-2); }
 .decide p.t3 { color: var(--text-3); }
@@ -160,12 +163,13 @@ em.mi { font-style: normal; color: var(--danger); }
 .down:hover { text-decoration: underline; text-underline-offset: 3px; }
 .rv-rail .facts a { border-radius: 4px; }
 .rv-rail .facts a:hover { text-decoration: underline; text-underline-offset: 3px; }
-.rlist { display: flex; flex-direction: column; gap: 8px; padding: 0; list-style: none; }
+.rlist { display: flex; flex-direction: column; gap: 8px; margin-inline: -14px; padding: 0; list-style: none; }
 .rlist a { display: grid; justify-items: start; gap: 6px; padding: 12px 14px; border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-1); transition: box-shadow 0.12s var(--ease); }
 .rlist a:hover { box-shadow: var(--shadow-2); }
+.rlist a > .state { margin-left: calc(-1 * var(--pad)); }
 .rlist .rt { font-size: 14px; line-height: 20px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 .rlist small { font-size: 13px; line-height: 20px; color: var(--text-3); }
-.vmini { display: flex; flex-direction: column; margin: -4px -10px 0; padding: 0; list-style: none; }
+.vmini { display: flex; flex-direction: column; gap: 2px; margin: -4px -10px 0; padding: 0; list-style: none; }
 .vmini a { display: grid; grid-template-columns: 88px minmax(0, 1fr) auto; align-items: center; gap: 8px; min-height: 38px; padding: 6px 10px; border-radius: 9px; font-size: 13px; line-height: 20px; color: var(--text-3); transition: background-color 0.12s var(--ease); }
 .vmini a:hover { background: color-mix(in srgb, var(--sunken) 60%, transparent); }
 .vmini a[aria-current] { background: var(--surface); box-shadow: var(--shadow-1); }
@@ -201,12 +205,17 @@ em.mi { font-style: normal; color: var(--danger); }
   .tree-pane { position: static; max-height: none; }
 }
 @media (max-width: 860px) {
-  .rv-head { flex-wrap: wrap; }
+  .rv-head > .state { grid-column: 2; justify-self: start; margin-top: 10px; }
   .rv { padding-bottom: 8px; }
   .decide-bar { position: sticky; bottom: 0; z-index: 5; display: flex; gap: 8px; padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(12px); box-shadow: 0 -1px 0 var(--line); }
   .decide-bar .btn { flex: 1; padding: 0 10px; }
 }
 @media (max-width: 720px) {
+  /* (As wide as the column, as wide as the screen.) */
+  .files, .change-block, .decide { margin-inline: calc(-1 * var(--gutter)); border-radius: 0; }
+  .rv .asklist > .ar:is(:first-child, :last-child) { border-radius: 0; }
+  .flist { padding-inline: calc(var(--gutter) - 12px); }
+  .dh, .unchanged summary, .sub2.pad, .decide { padding-inline: var(--gutter); }
   .rv .ar { flex-wrap: wrap; }
   .rv .ar > .state, .rv .ar > .same { margin-left: 32px; }
   .before-after { grid-template-columns: minmax(0, 1fr); }

@@ -168,7 +168,7 @@ describe("All plugins (/plugins/all)", () => {
   test("search, category, keyword; the count when the list says it exactly", async () => {
     const timer = await html("/plugins/all?q=timer");
     expect(listed(timer.body)).toContain("focus-timer");
-    expect(timer.body).toContain("<h1>Results for “timer”</h1>");
+    expect(timer.body).toMatch(/<h1[^>]*>Results for “timer”<\/h1>/);
     // The count, always (amendment 38's total).
     expect(timer.body).toMatch(/<p id="results"><b class="num">\d+<\/b> plugins?<\/p>/);
     // (The field keeps the words.)
@@ -229,7 +229,8 @@ describe("a plugin's page", () => {
     expect(body).toMatch(/<main id="main" class="h\d+">/);
     expect(body.match(/<a class="slide"/g)).toHaveLength(2);
     // The README doesn't say the name again, and nothing in it outweighs the title.
-    expect(body.match(/<h[1-6][^>]*>(<span class="name">)?Focus timer/g)).toEqual(['<h1><span class="name">Focus timer']);
+    // (One heading names it; drawn its first letter's side bearing left: lib/store/bearing.ts.)
+    expect(body.match(/<h[1-6][^>]*>(<span class="name">)?Focus timer/g)).toEqual(['<h1 class="lsb-5"><span class="name">Focus timer']);
     expect(body).not.toMatch(/<article class="prose"[^>]*>[^]*?<h1/);
     // Its parts are pages of their own, each a real address; Report is in the rail.
     expect(body).toMatch(/<a href="\/plugins\/focus-timer" aria-current="page">Overview<\/a><a href="\/plugins\/focus-timer\/versions">Versions<span class="num">\d+<\/span><\/a><a href="\/plugins\/focus-timer\/asks">What it asks for<span class="num">\d+<\/span><\/a>/);
@@ -394,13 +395,13 @@ describe("public pages are the same for everyone (so a shared cache can keep the
 });
 
 describe("signed-in pages", () => {
-  test("signed out, Your plugins, one of them, its questions and Deploy keys say so and offer sign-in, here; never a redirect", async () => {
-    for (const path of ["/account", "/account/keys", "/account/plugins/focus-timer", "/account/plugins/focus-timer/versions/1.2.0/yank"]) {
+  test("signed out, Your plugins, one of them, its questions and Deploy tokens say so and offer sign-in, here; never a redirect", async () => {
+    for (const path of ["/account", "/account/tokens", "/account/tokens/new", "/account/plugins/focus-timer", "/account/plugins/focus-timer/versions/1.2.0/yank"]) {
       const { response, body } = await html(path);
       expect(response.status, path).toBe(200);
       expect(response.headers.get("cache-control"), path).toBe("private, no-store");
       expect(body, path).toContain(`<a class="btn pri" href="/auth/web/login?return_to=${encodeURIComponent(path)}">Sign in</a>`);
-      expect(body, path).toMatch(/<h2>Sign in to see (the plugins you publish|your deploy keys)<\/h2>/);
+      expect(body, path).toMatch(/<h2>Sign in to see (the plugins you publish|your deploy tokens)<\/h2>/);
     }
   });
 
@@ -735,8 +736,8 @@ describe("forms", () => {
     // Whether it's verified always first, beside the version; where it stands after it; one kind of button for each action.
     for (const r of body.split('<li class="vr').slice(1)) if (r.includes('data-kind="status"') && r.includes('data-kind="verified"')) expect(r.indexOf('data-kind="verified"')).toBeLessThan(r.indexOf('data-kind="status"'));
     expect([...body.matchAll(/<a class="([^"]+)" href="\/account\/plugins\/[^"]+\/(?:yank|unyank)"/g)].map((m) => m[1])).toEqual(["btn sec sm", "btn sec sm", "btn sec sm"]);
-    // Its keys are the account's now: a way to them.
-    expect(body).toContain('<a href="/account/keys">deploy keys</a>');
+    // Its tokens are the account's: a way to them.
+    expect(body).toContain('<a href="/account/tokens">deploy tokens</a>');
   });
 
   test("in public, a version that takes no new installs says why: replaced before it was verified, or stopped by its author", async () => {
@@ -750,17 +751,22 @@ describe("forms", () => {
     expect((await html("/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.1.0")).body).toContain("Its author stopped new installs of it.");
   });
 
-  test("the account's deploy keys: each with what it can publish, never cut; keys short; the revoked and ended apart", async () => {
-    const { body } = await html("/account/keys", await site.signIn("user_ada"));
+  test("the account's deploy tokens: each with what it can publish, never cut; its short id; the revoked and ended apart", async () => {
+    const { body } = await html("/account/tokens", await site.signIn("user_ada"));
     // Twelve live, each with Revoke; five revoked or ended, in their group.
-    expect(body.match(/<a class="btn ghost sm" href="\/account\/keys\/[\w-]+">Revoke/g)).toHaveLength(12);
+    expect(body.match(/<a class="btn ghost sm" href="\/account\/tokens\/tok_[0-9A-Za-z]{16}">Revoke/g)).toHaveLength(12);
     // (Three named in full; all twenty of Ada's by name, counted, every one on request.)
     expect(body).toMatch(/<div class="names">[^<,]+, [^<,]+, [^<,]+<\/div><small>3 plugins<\/small>/);
     expect(body).toContain('<div class="count">20 plugins</div>');
     expect(body).toContain('<span class="tile s more">+17</span>');
-    expect(body).toMatch(/<details class="gone"><summary>Revoked and ended keys · 5/);
+    expect(body).toMatch(/<details class="gone"><summary>Revoked and ended tokens · 5/);
     expect(body).toMatch(/<span class="state quiet">Ended [A-Z][a-z]{2} \d{1,2}<\/span>/);
-    for (const m of body.matchAll(/<div class="id" title="([^"]+)">([^<]+)<\/div>/g)) expect(m[2]).toBe(`${m[1]!.slice(0, 6)}…${m[1]!.slice(-4)}`);
+    // Each by its short id, the store's: never more of a token, which this page never has.
+    const ids = [...body.matchAll(/<div class="id">([^<]*)<\/div>/g)].map((m) => m[1]);
+    expect(ids).toHaveLength(17);
+    for (const id of ids) expect(id).toMatch(/^[0-9A-Za-z]{8}$/);
+    expect(body).toContain('<div class="id">xJVb81Wo</div>');
+    expect(body).not.toMatch(/zdt_[0-9A-Za-z]/);
     // All of yours; one to three named in full; past three, three tiles, "+n", and every one on request.
     expect(body).toMatch(/All your plugins<\/div><small>\d+ today, and any you publish later<\/small>/);
     // (A name with no spaces breaks inside itself, evenly; every other word only at its spaces. "on" stays with the plugin it names.)
@@ -780,15 +786,23 @@ describe("forms", () => {
     expect(body).not.toMatch(/text-overflow|…<\/div><small>\d+ plugins?/);
     // Ending within 14 days: the warning's pill, in days.
     expect(body).toMatch(/<span class="state no">Ends in \d+ days?<\/span>/);
-    // A key is made on your computer: New key says where, and nothing here makes or shows a secret.
-    expect(body).toContain('<div class="menu newkey" id="new-key" popover>');
-    expect(body).not.toMatch(/zpk_[A-Za-z0-9]/);
+    // New token: a link to its page, which the script opens in place as the dialog holding the same form.
+    expect(body).toContain('<a class="btn pri" href="/account/tokens/new" data-dialog="new-token">');
+    expect(body).toMatch(/<dialog class="question" id="new-token" aria-labelledby="new-token-title" closedby="any">\s*<h2 id="new-token-title">New deploy token<\/h2>\s*<form method="post" action="\/account\/tokens\/new" class="tokform">/);
   });
 
-  test("a key for fifty plugins, the most a key may name: three tiles, +47, and all fifty, by name, on request", async () => {
+  test("Deploy keys' old addresses lead to Deploy tokens for good", async () => {
+    for (const path of ["/account/keys", "/account/keys/k5Yh3xQ2b8VtYwGm1rPz0nLc4dEa6sJu9oKi7fBg2Wq"]) {
+      const response = await site.fetch(path);
+      expect(response.status, path).toBe(301);
+      expect(response.headers.get("location"), path).toBe("/account/tokens");
+    }
+  });
+
+  test("a token for fifty plugins, the most a token may name: three tiles, +47, and all fifty, by name, on request", async () => {
     try {
       await site.fake("many", { on: "1" });
-      const { body } = await html("/account/keys", await site.signIn("user_ada"));
+      const { body } = await html("/account/tokens", await site.signIn("user_ada"));
       const every = body.slice(body.indexOf(">Every one<"), body.indexOf("</ul>", body.indexOf(">Every one<")));
       expect(every).toContain('<div class="count">50 plugins</div>');
       expect(every).toContain('<span class="tile s more">+47</span>');
@@ -798,18 +812,168 @@ describe("forms", () => {
     } finally {
       await site.fake("many");
     }
-    expect((await html("/account/keys", await site.signIn("user_ada"))).body).toContain('<div class="count">20 plugins</div>');
+    expect((await html("/account/tokens", await site.signIn("user_ada"))).body).toContain('<div class="count">20 plugins</div>');
   });
 
-  test("revoking a key asks first, then the key stops", async () => {
-    const ada = await site.signIn("user_ada");
-    const key = "k5Yh3xQ2b8VtYwGm1rPz0nLc4dEa6sJu9oKi7fBg2Wq";
-    const ask = await html(`/account/keys/${key}`, ada);
-    expect(ask.body).toContain("Revoke GitHub Actions?");
-    const response = await post(`/account/keys/${key}`, ada, { csrf: tokenOf(ask.body) });
-    expect(response.headers.get("location")).toBe("/account/keys");
-    expect(flashOf(response)).toBe("__Host-zeron_flash=key_revoked");
-    expect((await html(`/account/keys/${key}`, ada)).response.status).toBe(404);
+  test("revoking a token asks first, then the token stops", async () => {
+    try {
+      const ada = await site.signIn("user_ada");
+      const id = "tok_08ctRRy5a3tUlC6k";
+      const ask = await html(`/account/tokens/${id}`, ada);
+      expect(ask.body).toContain("Revoke GitHub Actions?");
+      const response = await post(`/account/tokens/${id}`, ada, { csrf: tokenOf(ask.body) });
+      expect(response.headers.get("location")).toBe("/account/tokens");
+      expect(flashOf(response)).toBe("__Host-zeron_flash=key_revoked");
+      expect((await html(`/account/tokens/${id}`, ada)).response.status).toBe(404);
+      // (Not a token's id: the site's 404, never asked of the edge.)
+      expect((await html("/account/tokens/k5Yh3xQ2b8VtYwGm1rPz0nLc4dEa6sJu9oKi7fBg2Wq", ada)).response.status).toBe(404);
+    } finally {
+      await site.fake("tokens");
+    }
+  });
+
+  describe("making a deploy token", () => {
+    /** The token a page shows, every place it's in it. */
+    const tokensIn = (text: string) => [...text.matchAll(/zdt_[0-9A-Za-z]+/g)].map((m) => m[0]);
+    /** Signed in this moment (a fresh sign-in: its ticket unspent), or as a session whose ticket is spent or old. */
+    const signedIn = async (user: string, fresh = true) => {
+      if (fresh) return site.signIn(user);
+      const response = await site.fetch(`/auth/web/callback?as=${user}&fresh=0&return_to=/`);
+      return response.headers.get("set-cookie")!.split(";")[0]!;
+    };
+    const make = async (cookie: string, fields: Record<string, string> | [string, string][]) => {
+      const form = await html("/account/tokens/new", cookie);
+      const body = new URLSearchParams(fields);
+      body.set("csrf", tokenOf(form.body));
+      const response = await site.fetch("/account/tokens/new", { method: "POST", headers: { cookie, origin: "https://zeron.sh", "content-type": "application/x-www-form-urlencoded" }, body: body.toString() });
+      return { response, body: response.status === 303 ? "" : await response.text() };
+    };
+
+    test("the form, then the token from the edge's answer, once: in the page's words, never an address, a field or anything kept", async () => {
+      try {
+        const ada = await signedIn("user_ada");
+        const form = await html("/account/tokens/new", ada);
+        expect(form.response.status).toBe(200);
+        expect(form.response.headers.get("cache-control")).toBe("private, no-store");
+        // Name, Ends, Can publish; fresh from signing in, nothing to say about signing in again.
+        expect(form.body).toContain('<input id="page-token-name" class="input" type="text" name="name" value placeholder="GitHub Actions" maxlength="64" required autocomplete="off" spellcheck="false">');
+        expect([...form.body.matchAll(/<option value="([^"]+)"( selected)?>([^<]+)<\/option>/g)].map((m) => `${m[1]}${m[2] ?? ""} ${m[3]}`)).toEqual(["30 In 30 days", "90 selected In 90 days", "365 In a year", "never Never"]);
+        expect(form.body).toContain('<input type="radio" name="scope" value="all" checked>');
+        expect(form.body.match(/<input type="checkbox" name="plugins" value="[a-z0-9-]+">/g)).toHaveLength(20);
+        expect(form.body).not.toContain("Zeron will ask you to sign in again first.");
+
+        const made = await make(ada, [["name", "Release CI"], ["ends", "30"], ["scope", "chosen"], ["plugins", "focus-timer"], ["plugins", "theme-sync"]]);
+        expect(made.response.status).toBe(200);
+        expect(made.response.headers.get("cache-control")).toBe("private, no-store");
+        expect(made.response.headers.get("referrer-policy")).toBe("no-referrer");
+        expect(made.response.headers.getSetCookie().join("\n")).not.toMatch(/zdt_/);
+        expect(made.body).toContain("<h1 id=\"made-title\"");
+        expect(made.body).toContain("Copy your token now");
+        expect(made.body).toContain("Put it in your CI&#39;s secrets as ZERON_DEPLOY_TOKEN.");
+        // Once, in the code block, as the store makes one: never in an attribute, a field, or a script's data.
+        const [token, ...more] = tokensIn(made.body);
+        expect(more).toEqual([]);
+        expect(token).toMatch(/^zdt_[0-9A-Za-z]{49}$/);
+        const { readToken } = await import("../fake-edge/token.ts");
+        expect(readToken(token!).ok).toBe(true);
+        expect(made.body).toContain(`<code id="the-token" translate="no">${token}</code>`);
+        expect(made.body).toContain('<button type="button" data-copy-of="the-token" aria-label="Copy the token">');
+        expect(made.body).not.toMatch(/="[^"]*zdt_/);
+        expect(made.body).not.toMatch(/<input[^>]*zdt_|<textarea/);
+        // What it is: its name and short id (the token's first characters), what it publishes, when it ends; then done.
+        const short = token!.slice(4, 12);
+        expect(made.body).toContain(`<dd>Release CI <span class="id">${short}</span></dd>`);
+        expect(made.body).toContain("<dd>Focus timer, Theme sync</dd>");
+        expect(made.body).toContain('<a class="btn pri" href="/account/tokens" data-secret-done>I&#39;ve copied it</a>');
+
+        // The list has it by name and short id, and never the token.
+        const list = await html("/account/tokens", ada);
+        expect(list.body).toContain(`<div class="id">${short}</div>`);
+        expect(list.body).toContain(">Release CI<");
+        expect(tokensIn(list.body)).toEqual([]);
+        expect(list.body.match(/<a class="btn ghost sm" href="\/account\/tokens\/tok_/g)).toHaveLength(13);
+
+        // The sign-in's ticket is spent: another token signs in again first, and comes back to the form as it was, with no token anywhere in the address.
+        const again = await make(ada, [["name", "Second"], ["ends", "never"], ["scope", "all"]]);
+        expect(again.response.status).toBe(303);
+        const location = again.response.headers.get("location")!;
+        expect(location).toBe(`/auth/web/login?${new URLSearchParams({ return_to: "/account/tokens/new?again=1&name=Second&ends=never&scope=all" })}`);
+        expect(tokensIn(decodeURIComponent(location))).toEqual([]);
+        expect((await html("/account/tokens", ada)).body.match(/<a class="btn ghost sm" href="\/account\/tokens\/tok_/g)).toHaveLength(13);
+      } finally {
+        await site.fake("tokens");
+      }
+    });
+
+    test("without a fresh sign-in: the form says so, and the post signs in again first, then comes back to the form filled in", async () => {
+      try {
+        const stale = await signedIn("user_ada", false);
+        const form = await html("/account/tokens/new", stale);
+        expect(form.body).toContain('<p class="note">Zeron will ask you to sign in again first.</p>');
+        const list = await html("/account/tokens", stale);
+        expect(list.body).toContain('<p class="note">Zeron will ask you to sign in again first.</p>');
+        const sent = await make(stale, [["name", "Nightly"], ["ends", "365"], ["scope", "chosen"], ["plugins", "focus-timer"], ["plugins", "weather"]]);
+        expect(sent.response.status).toBe(303);
+        const back = "/account/tokens/new?again=1&name=Nightly&ends=365&scope=chosen&plugins=focus-timer%2Cweather";
+        expect(sent.response.headers.get("location")).toBe(`/auth/web/login?${new URLSearchParams({ return_to: back })}`);
+        // (Nothing was made.)
+        expect((await html("/account/tokens", stale)).body.match(/<a class="btn ghost sm" href="\/account\/tokens\/tok_/g)).toHaveLength(12);
+        // Signed in again, the form as it was, and a word that it's ready.
+        const fresh = await signedIn("user_ada");
+        const filled = await html(back, fresh);
+        expect(filled.body).toContain('name="name" value="Nightly"');
+        expect(filled.body).toContain('<option value="365" selected>');
+        expect(filled.body).toContain('<input type="radio" name="scope" value="chosen" checked>');
+        expect(filled.body).toContain('<input type="checkbox" name="plugins" value="focus-timer" checked>');
+        expect(filled.body).toContain('<input type="checkbox" name="plugins" value="weather" checked>');
+        expect(filled.body.match(/name="plugins" value="[a-z0-9-]+" checked/g)).toHaveLength(2);
+        expect(filled.body).toContain('<p class="note ok">You signed in again. Create the token to finish.</p>');
+      } finally {
+        await site.fake("tokens");
+      }
+    });
+
+    test("the store's refusals, each said beside what it's about, the form kept as it was", async () => {
+      try {
+        // (The form's own: a name, and a plugin when choosing; never asked of the store.)
+        const noName = await make(await signedIn("user_ada"), [["name", " "], ["ends", "90"], ["scope", "all"]]);
+        expect(noName.response.status).toBe(400);
+        expect(noName.body).toContain('aria-invalid="true" aria-describedby="page-token-said"');
+        expect(noName.body).toContain('<p class="said" id="page-token-said">Name the token in 1 to 64 characters.</p>');
+        const noneChosen = await make(await signedIn("user_ada"), [["name", "CI"], ["ends", "90"], ["scope", "chosen"]]);
+        expect(noneChosen.response.status).toBe(400);
+        expect(noneChosen.body).toContain("Choose at least one plugin it can publish.");
+        // (Someone else's plugin: not_owner, by name.)
+        const theirs = await make(await signedIn("user_ada"), [["name", "CI"], ["ends", "90"], ["scope", "chosen"], ["plugins", "pr-radar"]]);
+        expect(theirs.response.status).toBe(403);
+        expect(theirs.body).toContain("You don&#39;t own pr-radar any more. Choose again.");
+        expect(theirs.body).toContain('name="name" value="CI"');
+        // Twenty live, the most: the next is refused, and says what to do.
+        for (let i = 0; i < 8; i++) expect((await make(await signedIn("user_ada"), [["name", `CI ${i}`], ["ends", "30"], ["scope", "all"]])).response.status).toBe(200);
+        const full = await make(await signedIn("user_ada"), [["name", "One more"], ["ends", "30"], ["scope", "all"]]);
+        expect(full.response.status).toBe(409);
+        expect(full.body).toContain('<p class="said" role="alert">You have 20 deploy tokens, the most an account can have. Revoke one to make another.</p>');
+        expect(tokensIn(full.body)).toEqual([]);
+        // Ten a day: the eleventh waits for tomorrow.
+        for (let i = 0; i < 10; i++) expect((await make(await signedIn("user_noor"), [["name", `N ${i}`], ["ends", "30"], ["scope", "all"]])).response.status).toBe(200);
+        const slow = await make(await signedIn("user_noor"), [["name", "N 10"], ["ends", "30"], ["scope", "all"]]);
+        expect(slow.response.status).toBe(429);
+        expect(slow.body).toContain("You&#39;ve made 10 deploy tokens today. You can make more tomorrow.");
+      } finally {
+        await site.fake("tokens");
+      }
+    });
+
+    test("a post from elsewhere, or without the page's token, makes nothing", async () => {
+      const ada = await signedIn("user_ada");
+      const fields = { name: "Forged", ends: "30", scope: "all" };
+      const forged = await site.fetch("/account/tokens/new", { method: "POST", headers: { cookie: ada, origin: "https://evil.example", "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ ...fields, csrf: tokenOf((await html("/account/tokens/new", ada)).body) }).toString() });
+      expect(forged.status).toBe(403);
+      const noCsrf = await post("/account/tokens/new", ada, fields);
+      expect(noCsrf.status).toBe(303);
+      expect(flashOf(noCsrf)).toBe("__Host-zeron_flash=expired");
+      expect((await html("/account/tokens", ada)).body.match(/<a class="btn ghost sm" href="\/account\/tokens\/tok_/g)).toHaveLength(12);
+    });
   });
 
   test("a confirm page asks first; the post does it once and says so once", async () => {

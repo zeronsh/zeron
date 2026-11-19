@@ -10,6 +10,7 @@
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
+    "preview:fake": "astro build && node --experimental-strip-types --no-warnings=ExperimentalWarning fake-edge/serve.ts",
     "check": "astro check",
     "test": "astro build && vitest run",
     "deploy": "npm ci && npm run check && npm test && wrangler deploy",

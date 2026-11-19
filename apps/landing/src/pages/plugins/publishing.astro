@@ -4,7 +4,7 @@
 // engine's guide's (apps/zgx/docs/plugins.md, "Publishing to the store"),
 // said for a person on the web (amendments 44 and 45: a version is listed
 // once it passes the automatic checks, and a reviewer verifies it; deploy
-// keys are the account's); the reasons are the reviewers' own list
+// tokens, contract a315eef5a, are the account's); the reasons are the reviewers' own list
 // (lib/store/admin.ts). The same for everyone, kept by shared caches as the
 // store's other public pages are. (Rendered by the Worker, not built: a
 // built page would share the landing pages' styles, which stay as they are.)
@@ -108,30 +108,30 @@ const PARTS = [
     </ul>
 
     <h2 id="ci">Publishing from CI</h2>
-    <p>A <strong>deploy key</strong> lets a CI job, such as a GitHub Action, send new versions without your session. A key is your account's, made in Zeron on your machine, with a scope you choose then and can't change: the plugins it names, or all of yours, those you publish later included. A plugin's first version always comes from your machine; a key sends the ones after it.</p>
-    <p>Make one in Zeron, or from a terminal with Zeron running and signed in:</p>
-    <pre tabindex="0"><code>{`zeron plugin key create --name "GitHub Actions" --plugins focus-timer,focus-board
-zeron plugin key create --name "All my plugins" --all
-zeron plugin key create --name "Release CI" --plugins focus-timer --expires-in-days 90
-zeron plugin key list
-zeron plugin key revoke <key>`}</code></pre>
+    <p>A <strong>deploy token</strong> lets a CI job, such as a GitHub Action, send new versions without your session. A token is your account's, with a scope you choose when you make it and can't change: the plugins it names, or all of yours, those you publish later included. A plugin's first version always comes from your machine; a token sends the ones after it.</p>
+    <p>Make one on <a href="/account/tokens">Deploy tokens</a>, in Zeron (Settings, Plugins, Deploy tokens), or from a terminal with Zeron running and signed in:</p>
+    <pre tabindex="0"><code>{`zeron plugin token create --name "GitHub Actions" --plugins focus-timer,focus-board
+zeron plugin token create --name "All my plugins" --all
+zeron plugin token create --name "Release CI" --plugins focus-timer --expires-in-days 90
+zeron plugin token list
+zeron plugin token revoke <id>`}</code></pre>
     <ul>
-      <li><code>key create</code> asks you to sign in again first. <code>--name</code> says what it's for. Its scope is <code>--plugins a,b</code> (plugins you already have in the store) or <code>--all</code> (every plugin of yours, those you first publish later included, never one transferred to you), fixed once made: another set of plugins is another key. <code>--expires-in-days</code> stops it working after that many days.</li>
-      <li>Its secret (<code>zpk_…</code>) is printed once, and Zeron keeps no copy.</li>
-      <li><code>key list</code> shows your live keys: each one's name, what it publishes, when it was made and last used, and when it ends; never their secrets. So does <a href="/account/keys">Deploy keys</a>.</li>
-      <li><code>key revoke</code> takes the key as <code>key list</code> shows it. It publishes nothing from then on; what it published stays.</li>
-      <li>An account has at most 20 live keys, and makes at most 10 a day.</li>
+      <li>Making one asks you to sign in again first, wherever you make it. <code>--name</code> says what it's for. Its scope is <code>--plugins a,b</code> (plugins you already have in the store, up to 50) or <code>--all</code> (every plugin of yours, those you first publish later included, never one transferred to you), fixed once made: another set of plugins is another token. <code>--expires-in-days</code> stops it working after that many days.</li>
+      <li>The token (<code>zdt_…</code>) is shown once, as it's made. Neither Zeron nor the store keeps it, so one that's lost can't be shown again: revoke it and make another.</li>
+      <li><code>token list</code> shows your tokens: each one's id, its short id (the first characters of the token), name and what it publishes; never the tokens themselves. So does <a href="/account/tokens">Deploy tokens</a>, with when each was last used and when it ends.</li>
+      <li><code>token revoke</code> takes the id <code>token list</code> shows. It publishes nothing from then on; what it published stays.</li>
+      <li>An account has at most 20 live tokens, and makes at most 10 a day.</li>
     </ul>
-    <p>Put the secret in your CI's secrets as <code>ZERON_DEPLOY_KEY</code>, then publish with it. It's read from the environment only, never from an argument, and needs no Zeron running and nobody signed in:</p>
-    <pre tabindex="0"><code>{`ZERON_DEPLOY_KEY=zpk_… zeron plugin publish <folder>`}</code></pre>
-    <p>It exits 0 when published, 1 when the plugin doesn't meet the store's rules, 2 for a set-up problem, 3 when the store refused the key or the account, and 4 when the store couldn't be reached.</p>
-    <p>A key sends new versions of the plugins in its scope, nothing else, and each is listed as any version is, not yet verified; your devices tell you when a key publishes one. A version it sends is installable at once, so treat a key like a password: if one leaks, revoke it (from <a href="/account/keys">Deploy keys</a>, Zeron, or <code>zeron plugin key revoke</code>) and stop new installs of what it sent.</p>
-    <p>On GitHub, the publish action installs Zeron's command line and sends the plugin with your key:</p>
+    <p>Put the token in your CI's secrets as <code>ZERON_DEPLOY_TOKEN</code>, then publish with it. It's read from the environment only, never from an argument, and needs no Zeron running and nobody signed in:</p>
+    <pre tabindex="0"><code>{`ZERON_DEPLOY_TOKEN=zdt_… zeron plugin publish <folder>`}</code></pre>
+    <p>It exits 0 when published, 1 when the plugin doesn't meet the store's rules, 2 for a set-up problem (a mistyped token among them: it's checked before anything is sent), 3 when the store refused the token or the account, and 4 when the store couldn't be reached.</p>
+    <p>A token sends new versions of the plugins in its scope, nothing else, and each is listed as any version is, not yet verified; your devices tell you when a token publishes one, by its name. A version it sends is installable at once, so treat a token like a password: if one leaks, revoke it (from <a href="/account/tokens">Deploy tokens</a>, Zeron, or <code>zeron plugin token revoke</code>) and stop new installs of what it sent.</p>
+    <p>On GitHub, the publish action installs Zeron's command line and sends the plugin with your token:</p>
     <pre tabindex="0"><code>{`- uses: actions/checkout@v4
 - uses: zeronsh/zeron/actions/publish-plugin@v0.4.0
   with:
-    key: \${{ secrets.ZERON_DEPLOY_KEY }}`}</code></pre>
-    <p>Pin it to a Zeron release tag or a commit, never a branch: the step holds your key. Without a key (a pull request from a fork gets no secrets) it only checks.</p>
+    token: \${{ secrets.ZERON_DEPLOY_TOKEN }}`}</code></pre>
+    <p>Pin it to a Zeron release tag or a commit, never a branch: the step holds your token. Without a token (a pull request from a fork gets no secrets) it only checks.</p>
 
     <p class="guide-next"><a class="btn secondary sm" href="/account"><Glyph name="folder-with-files" size={14} />Your plugins</a></p>
   </article>

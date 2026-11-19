@@ -4,9 +4,14 @@
 .crumbs a { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 4px; transition: color 0.12s var(--ease); }
 .crumbs a:hover { color: var(--text); }
 
+/* The rail's width and the gap before it: the page's two columns under the head, and the head's own
+   last column (Get), one column from the button down, gallery or not. */
+:root { --rail: 340px; --rail-gap: 72px; }
+
 /* ---- the head ---- */
-.head { display: flex; align-items: flex-start; gap: 24px; padding-top: 24px; }
-.head .txt { flex: 1; min-width: 0; padding-top: 2px; }
+.head { display: grid; grid-template-columns: auto minmax(0, 1fr) calc(var(--rail) + var(--rail-gap) - 24px); column-gap: 24px; align-items: start; padding-top: 24px; }
+.head .txt { min-width: 0; padding-top: 2px; }
+.head > .get { margin-left: calc(var(--rail-gap) - 24px); }
 .head h1 { font-size: 40px; line-height: 44px; letter-spacing: -0.035em; display: flex; align-items: center; gap: 10px; min-width: 0; }
 .head h1 .name { min-width: 0; overflow-wrap: anywhere; }
 .head .by { margin-top: 6px; color: var(--text-3); font-size: 14px; line-height: 20px; display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: center; }
@@ -22,16 +27,19 @@
 .head.one .by { margin-top: 2px; }
 
 /* ---- getting it ---- */
-.get { flex: none; width: 296px; display: flex; flex-direction: column; gap: 10px; padding-top: 4px; }
-.get .btn { width: 100%; }
+/* (Get's boxes, the button and a note, share their edges: each hangs past the column by as much, the note's
+   words on the column, the button's centred.) */
+.get { --get-hang: 20px; display: flex; flex-direction: column; gap: 10px; padding-top: 4px; min-width: 0; }
+.get .btn { align-self: stretch; margin-inline: calc(-1 * var(--get-hang)); }
 /* (The mark at its own whole-pixel size, never scaled: components/look/ZeronMark.astro.) */
 .get .btn .mark { flex: none; fill: currentColor; }
-.get .ver { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px; font-size: 13px; line-height: 20px; color: var(--text-2); }
+/* (The lines under the button on the column's text edge, as the rail's are.) */
+.get .ver { --pill-gap: 6px; display: flex; align-items: center; flex-wrap: wrap; row-gap: 6px; font-size: 13px; line-height: 20px; color: var(--text-2); }
 .get .ver b { font-weight: 550; color: var(--text); }
-.get .alt { text-align: center; font-size: 13px; line-height: 20px; color: var(--text-3); }
+.get .alt { font-size: 13px; line-height: 20px; color: var(--text-3); }
 .get .alt button { color: var(--text-2); box-shadow: 0 1px 0 var(--line-2); border-radius: 2px; font-size: inherit; line-height: inherit; transition: color 0.12s var(--ease); }
 .get .alt button:hover { color: var(--text); }
-.get .note { padding: 12px 14px; border-radius: 12px; background: var(--warn-wash); color: var(--warn); font-size: 13px; line-height: 19px; }
+.get .note { margin-inline: calc(-1 * var(--get-hang)); padding: 12px var(--get-hang); border-radius: 12px; background: var(--warn-wash); color: var(--warn); font-size: 13px; line-height: 19px; }
 .get .note b { font-weight: 600; }
 .get .note a { box-shadow: 0 1px 0 color-mix(in srgb, currentColor 40%, transparent); font-weight: 550; border-radius: 2px; }
 .get .note a:hover { box-shadow: 0 1px 0 currentColor; }
@@ -62,7 +70,7 @@
 .gallery .dots button[aria-current]::before { width: 16px; opacity: 0.85; }
 
 /* ---- the page under its head ---- */
-.cols2 { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 72px; margin-top: 40px; align-items: start; }
+.cols2 { display: grid; grid-template-columns: minmax(0, 1fr) var(--rail); gap: var(--rail-gap); margin-top: 40px; align-items: start; }
 .cols2.after-head { margin-top: 44px; }
 .tabs { display: flex; gap: 28px; box-shadow: inset 0 -1px 0 var(--line); overflow-x: auto; scrollbar-width: none; }
 .tabs a { position: relative; flex: none; padding: 0 0 12px; font-size: 15px; line-height: 22px; font-weight: 500; color: var(--text-3); display: flex; gap: 7px; align-items: baseline; border-radius: 4px 4px 0 0; transition: color 0.12s var(--ease); }
@@ -90,17 +98,19 @@
 .prose del { color: var(--text-3); }
 .prose a { color: var(--text); font-weight: 500; box-shadow: 0 1px 0 var(--line-2); border-radius: 2px; transition: box-shadow 0.12s var(--ease); }
 .prose a:hover { box-shadow: 0 1px 0 var(--text-3); }
-.prose ul, .prose ol { padding-left: 22px; }
+/* (A list's markers hang outside the column, its words on it; a list inside an item keeps its step in.) */
+.prose ul, .prose ol { padding-left: 0; }
+.prose li > :is(ul, ol) { padding-left: 22px; }
 .prose li + li, .prose li > ul, .prose li > ol { margin-top: 6px; }
 .prose li::marker { color: var(--text-3); }
 .prose ul.contains-task-list { list-style: none; padding-left: 0; }
 .prose .task-list-item { display: flex; gap: 10px; align-items: baseline; }
 .prose .task-list-item input { flex: none; width: 15px; height: 15px; margin: 0; transform: translateY(2px); accent-color: var(--verified); }
 .prose code { font: 500 0.85em/1 var(--mono); padding: 2px 4px; border-radius: 5px; background: var(--sunken); color: var(--text); }
-.prose pre { padding: 16px 18px; border-radius: 14px; background: var(--sunken); font: 450 13.5px/22px var(--mono); overflow-x: auto; overflow-wrap: normal; white-space: pre; }
+.prose pre { margin-inline: -18px; padding: 16px 18px; border-radius: 14px; background: var(--sunken); font: 450 13.5px/22px var(--mono); overflow-x: auto; overflow-wrap: normal; white-space: pre; }
 .prose pre code { padding: 0; background: none; font: inherit; color: var(--text); }
 .prose pre:focus-visible { outline-offset: 2px; }
-.prose blockquote { padding: 2px 0 2px 18px; box-shadow: inset 2px 0 0 oklch(var(--ink-l) var(--ink-c) var(--h, 270) / 0.5); color: var(--text-2); }
+.prose blockquote { margin-left: -18px; padding: 2px 0 2px 18px; box-shadow: inset 2px 0 0 oklch(var(--ink-l) var(--ink-c) var(--h, 270) / 0.5); color: var(--text-2); }
 .prose hr { height: 1px; border: 0; background: var(--line); margin: 32px 0; }
 /* (A picture at its own width, capped by the column's, never scaled up; the code blocks' corner.) */
 .prose img { display: block; width: auto; max-width: 100%; height: auto; border-radius: 14px; box-shadow: var(--shadow-1); }
@@ -139,7 +149,7 @@
 .facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 16px; font-size: 14px; line-height: 20px; }
 .facts dt { color: var(--text-3); } .facts dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
 .facts .okline { display: inline-flex; align-items: center; gap: 6px; color: var(--verified); font-weight: 500; }
-.tags { display: flex; flex-wrap: wrap; gap: 6px; padding: 0; list-style: none; }
+.tags { display: flex; flex-wrap: wrap; gap: 6px; margin-left: -9px; padding: 0; list-style: none; }
 .tags li { min-width: 0; max-width: 100%; }
 .tags .tag { display: block; max-width: 100%; line-height: 24px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .links { display: flex; flex-direction: column; gap: 8px; padding: 0; list-style: none; font-size: 14px; line-height: 20px; }
@@ -154,11 +164,12 @@
 .vlist { margin-top: 20px; padding: 0; list-style: none; }
 .v { display: grid; grid-template-columns: 148px minmax(0, 1fr) auto; gap: 24px; padding: 24px 0; box-shadow: 0 -1px 0 var(--line); align-items: start; }
 .v:first-child { box-shadow: none; padding-top: 8px; }
-.v .vno { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; font: 600 17px/24px var(--mono); letter-spacing: -0.02em; min-width: 0; }
+/* (A tag the line begins with hangs by its padding; the gap grows by as much: store.css .pills.) */
+.v .vno { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px; font: 600 17px/24px var(--mono); letter-spacing: -0.02em; min-width: 0; }
 .v .vno a { overflow-wrap: anywhere; border-radius: 4px; }
 .v .vno a:hover { box-shadow: 0 1px 0 var(--line-2); }
-.v .new { font: 500 11px/18px var(--sans); letter-spacing: 0.02em; padding: 0 6px; border-radius: 6px; color: var(--text-2); box-shadow: inset 0 0 0 1px var(--line-2); }
-.v .st { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; font-size: 13px; line-height: 20px; color: var(--text-3); }
+.v .new { margin-left: -6px; font: 500 11px/18px var(--sans); letter-spacing: 0.02em; padding: 0 6px; border-radius: 6px; color: var(--text-2); box-shadow: inset 0 0 0 1px var(--line-2); }
+.v .st { display: flex; align-items: center; flex-wrap: wrap; row-gap: 6px; font-size: 13px; line-height: 20px; color: var(--text-3); }
 .v .notes { margin-top: 12px; padding-top: 0; font-size: 15px; line-height: 24px; }
 .v .notes > * + * { margin-top: 10px; }
 .v .notes :is(h1, h2, h3) { font-size: 15px; line-height: 22px; margin-top: 16px; }
@@ -168,8 +179,8 @@
 .v.old .vno a { color: var(--text-2); }
 
 /* ---- What it asks for, all of it ---- */
-.warnline { margin-top: 18px; padding: 12px 14px; border-radius: 12px; background: var(--danger-wash); color: var(--danger); font-size: 14px; line-height: 20px; max-width: 44em; }
-.asklist { margin-top: 18px; border-radius: 16px; background: var(--surface); box-shadow: var(--shadow-1); padding: 0; list-style: none; }
+.warnline { margin-top: 18px; margin-left: -14px; padding: 12px 14px; border-radius: 12px; background: var(--danger-wash); color: var(--danger); font-size: 14px; line-height: 20px; max-width: 44em; }
+.asklist { margin-top: 18px; margin-inline: -18px; border-radius: 16px; background: var(--surface); box-shadow: var(--shadow-1); padding: 0; list-style: none; }
 .asklist-none { margin-top: 18px; color: var(--text-2); }
 .ar { display: flex; align-items: flex-start; gap: 14px; padding: 14px 18px; font-size: 15px; line-height: 22px; }
 .ar + .ar { box-shadow: 0 -1px 0 var(--line); }
@@ -179,6 +190,9 @@
 .ar small { display: block; margin-top: 2px; font-size: 13px; line-height: 20px; color: var(--text-2); }
 .ar.risky .t, .ar.risky .glyph { color: var(--danger); }
 .literal, .items { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; padding: 0; list-style: none; }
+/* (Each name's chip hangs by its padding; a tool's words under it stay on the column.) */
+.literal { margin-left: -6px; }
+.items li > code:first-child { margin-left: -6px; }
 .items { flex-direction: column; gap: 6px; }
 .items li { font-size: 13px; line-height: 20px; color: var(--text-2); }
 .items li span { display: block; }
@@ -190,16 +204,14 @@
 .gone { padding: 56px 0 24px; max-width: 40em; }
 .gone h1 { font-size: 40px; line-height: 44px; letter-spacing: -0.035em; }
 .gone .lead { margin-top: 12px; }
-.gone .btn { margin-top: 24px; }
+.gone .btn { margin-top: 24px; margin-left: calc(-1 * var(--pad)); }
 
 @media (max-width: 1024px) {
-  .cols2 { grid-template-columns: minmax(0, 1fr) 280px; gap: 48px; }
-  .get { width: 264px; }
+  :root { --rail: 280px; --rail-gap: 48px; }
 }
 @media (max-width: 860px) {
-  .head { flex-wrap: wrap; }
-  .head .txt { flex-basis: calc(100% - 108px); }
-  .get { width: 100%; max-width: 420px; margin-left: 108px; }
+  .head { grid-template-columns: auto minmax(0, 1fr); }
+  .head > .get { grid-column: 2; max-width: 420px; margin: 20px 0 0; }
   .cols2 { grid-template-columns: minmax(0, 1fr); gap: 44px; }
   .rail { position: static; }
 }
@@ -212,15 +224,20 @@
   .head h1 .seal.l { width: 22px; height: 22px; }
   .head .by { font-size: 13px; margin-top: 4px; }
   .head .sum { grid-column: 1 / -1; margin-top: 16px; }
-  .get { grid-column: 1 / -1; width: auto; max-width: none; margin: 20px 0 0; padding: 0; }
+  .head > .get { grid-column: 1 / -1; max-width: none; margin: 20px 0 0; padding: 0; }
   .head.one { grid-template-columns: 56px minmax(0, 1fr); }
   .head.one h1 { font-size: 26px; line-height: 32px; }
   .head.one .vnum { font-size: 21px; line-height: 32px; }
   .gallery { margin: 28px -20px 0; height: 248px; border-radius: 0; }
-  .gallery .track { padding: 28px 20px 0; gap: 16px; scroll-padding: 0 20px; }
+  .gallery .track { padding: 28px var(--gutter) 0; gap: 16px; scroll-padding: 0 var(--gutter); }
   .gallery .slide { width: min(520px, calc(100% - 40px)); height: calc(100% + 40px); border-radius: 12px; }
   .cols2, .cols2.after-head { margin-top: 32px; }
-  .tabs { gap: 22px; margin: 0 -20px; padding: 0 20px; }
+  .tabs { gap: 22px; margin: 0 calc(-1 * var(--gutter)); padding: 0 var(--gutter); }
+  /* (As wide as the column, as wide as the screen.) */
+  .prose pre, .warnline { margin-inline: calc(-1 * var(--gutter)); padding-inline: var(--gutter); border-radius: 0; max-width: none; }
+  .get { --get-hang: 16px; }
+  .asklist { margin-inline: calc(-1 * var(--gutter)); border-radius: 0; }
+  .asklist .ar { padding-inline: var(--gutter); }
   .prose { padding-top: 22px; }
   .prose h1, .prose h2 { margin-top: 32px; }
   .prose table { font-size: 14px; }

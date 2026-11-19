@@ -31,7 +31,7 @@ export const BROWSE: readonly NavItem[] = [
 
 export const PUBLISH: readonly NavItem[] = [
   { id: "mine", label: "Your plugins", href: "/account", icon: "folder-with-files" },
-  { id: "keys", label: "Deploy keys", href: "/account/keys", icon: "lock-keyhole-unlocked" },
+  { id: "tokens", label: "Deploy tokens", href: "/account/tokens", icon: "lock-keyhole-unlocked" },
   { id: "guide", label: "Publishing guide", href: "/plugins/publishing", icon: "document" },
 ];
 
