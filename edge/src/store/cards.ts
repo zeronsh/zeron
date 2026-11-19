@@ -140,9 +140,10 @@ export const versionInfo = (v: VersionRow, full = false) => ({
     ? {
         review: reviewOf(v),
         checks: parseJson(v.checks, []),
-        // Which of the owner's deploy keys published it, by its name then
+        // Which of the owner's deploy tokens published it, by its name and
+        // short id then (never more of it)
         // (a notice on the author's own devices; amendment 44).
-        deploy_key: v.via === "deploy_key" ? { key: v.signer_key, name: v.deploy_key_name } : null,
+        deploy_token: v.via === "deploy_token" ? { id: v.deploy_token_id, short: v.deploy_token_short, name: v.deploy_token_name } : null,
         ...(v.status === "taken_down" || v.status === "removed" ? { removal: { at: v.removed_at, reason: v.removal_reason } } : {})
       }
     : {})

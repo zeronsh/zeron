@@ -297,7 +297,7 @@ describe("store catalog", () => {
     // A public page carries no owner-only field, cached or not, whoever asks.
     for (const res of [first, signedIn, await call(undefined, "GET", `/store/v1/plugins/${id}`)]) {
       const detail = (await res.json()) as { versions: Record<string, unknown>[] };
-      for (const version of detail.versions) for (const field of ["review", "checks", "deploy_key", "removal"]) expect(version, field).not.toHaveProperty(field);
+      for (const version of detail.versions) for (const field of ["review", "checks", "deploy_token", "removal"]) expect(version, field).not.toHaveProperty(field);
     }
   });
 });

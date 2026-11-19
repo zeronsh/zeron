@@ -37,7 +37,7 @@ import { authorCard, authorsOf, listingState, ownerCard, parseStoredJson, publis
 import { ASK_PATHS, type ConsentItem, askParts, askPartsOf, asksChanged, consentDiff } from "./consent";
 import { LISTED, VERSION_ORDER, type VersionRow, auditIfChanged, pluginRow, relist, supersedeOlder, supersededAt, versionRow } from "./db";
 import { answer, fail, notFound, objectBody, refusedBody } from "./http";
-import { dropFromDeployKeys, readBody, requireAdmin } from "./principal";
+import { dropFromDeployTokens, readBody, requireAdmin } from "./principal";
 import { purgeCatalog, purgeTakedowns } from "./purge";
 import { isUnused, releaseId } from "./release";
 import { SITE_IDS } from "./listing";
@@ -592,7 +592,7 @@ const pluginAction = async (env: Env, db: D1Database, adminId: string, id: strin
       if (to === plugin.owner_id) return fail(409, "invalid_state", "They already own it.");
       conflict = await change(
         db,
-        // Its new owner holds it from now (a deploy key's `all` never takes it
+        // Its new owner holds it from now (a deploy token's `all` never takes it
         // in), and always later than it was claimed or last moved, even in the
         // same millisecond: a moved plugin never reads as never moved.
         db
@@ -603,9 +603,9 @@ const pluginAction = async (env: Env, db: D1Database, adminId: string, id: strin
         username!,
         "It changed hands meanwhile: look again."
       );
-      // It leaves the old owner's deploy keys' lists (their scopes hold it no
+      // It leaves the old owner's deploy tokens' lists (their scopes hold it no
       // more in any case: its owner and `owner_since` changed).
-      if (!conflict) await dropFromDeployKeys(env, plugin.owner_id, id).catch((e) => console.error("store: couldn't drop a transferred plugin from deploy keys", id, String(e)));
+      if (!conflict) await dropFromDeployTokens(env, plugin.owner_id, id).catch((e) => console.error("store: couldn't drop a transferred plugin from deploy tokens", id, String(e)));
       break;
     }
     default:

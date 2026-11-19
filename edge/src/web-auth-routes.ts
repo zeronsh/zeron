@@ -31,7 +31,7 @@
  *
  * A web sign-in always asks for credentials (`max_age=0`, workos.ts), so it
  * earns a step-up ticket (step-up.ts), kept with the session: what a fresh
- * sign-in allows (registering a deploy key) works from the web for
+ * sign-in allows (making a deploy token) works from the web for
  * `STEP_UP_TTL_MS` after it. Signing out ends the session and its WorkOS
  * session.
  */

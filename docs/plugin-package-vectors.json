@@ -1663,71 +1663,94 @@
       "name": "complex_manifest"
     }
   ],
-  "deploy_key": {
-    "bad_secrets": [
+  "deploy_token": {
+    "about": "A deploy token is prefix, body, checksum. body: the 32 random bytes as one big-endian unsigned integer in base62 (alphabet in value order), most significant digit first, left-padded with '0' to body_len. checksum: CRC-32 (zlib's, ISO-HDLC: reflected polynomial 0xEDB88320, initial 0xFFFFFFFF, final xor 0xFFFFFFFF) of the ASCII of prefix + body, in base62 the same way, left-padded to check_len. short: the first short_len characters of body. sha256: the SHA-256 (hex) of the whole token's ASCII, all the store keeps. Reading one (reads): surrounding whitespace ignored; anything but prefix and base62 characters is not_a_token; the wrong length or a checksum that doesn't match is damaged. It's published with as `Authorization: Bearer <token>`.",
+    "alphabet": "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+    "body_len": 43,
+    "check_len": 6,
+    "len": 53,
+    "prefix": "zdt_",
+    "reads": [
       {
-        "error": "not_a_secret",
-        "secret": "ghp_notours"
+        "ok": true,
+        "short": "003aUlTJ",
+        "token": "  zdt_003aUlTJC7tjlCTQj2uNU3MFagCXG9LRKRcwGkBIDlf0dSDXw\n"
+      },
+      {
+        "error": "not_a_token",
+        "ok": false,
+        "token": "ghp_0123456789"
+      },
+      {
+        "error": "not_a_token",
+        "ok": false,
+        "token": "zdk_003aUlTJC7tjlCTQj2uNU3MFagCXG9LRKRcwGkBIDlf0dSDXw"
+      },
+      {
+        "error": "not_a_token",
+        "ok": false,
+        "token": "zdt_003aUlTJC7tjlCTQj2uNU3MFagCXG9LRKRcwGkBIDlf0dSDX-"
       },
       {
         "error": "damaged",
-        "secret": "zpk_AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwNkiq"
-      }
-    ],
-    "content_sha256_header": "X-Zeron-Content-SHA256",
-    "get": {
-      "body_b64": "",
-      "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "headers": {
-        "authorization": "ZeronKey key=7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E, ts=1763000000000, sig=uCoSu6dElhKhA_DJbSlPjt0ob2KlFKDgh-gfLyWcqs7_bSmrZ7ty95QbZpAq_OAMcJmwXnSamMuFyr39AObZBg",
-        "x-zeron-content-sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-      },
-      "message": "zeron-plugin-publish:v1\nGET\n/store/v1/me/plugins\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n1763000000000",
-      "method": "GET",
-      "path": "/store/v1/me/plugins",
-      "ts": 1763000000000
-    },
-    "max_skew_ms": 300000,
-    "proofs": [
-      {
-        "expires_at": null,
-        "message": "zeron-deploy-key:v2:pub_0123456789abcdef0123456789abcdef:never:*:7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E",
-        "proof": "0xJS8snOlv5db_dgOlXAyH8Qy09BZw2ZX0yrcika59_kEecQrcx2e5VfXqvmBlWgpfALtGzKsZoMGlvvZN4zDQ",
-        "publisher_id": "pub_0123456789abcdef0123456789abcdef",
-        "scope": {
-          "all": true
-        },
-        "scope_text": "*"
+        "ok": false,
+        "token": "zdt_003aUlTJC7tjlCTQj2uNU3MFagCXG9LRKRcwGkBIDlf0dSDX"
       },
       {
-        "expires_at": 1800000000000,
-        "message": "zeron-deploy-key:v2:pub_0123456789abcdef0123456789abcdef:1800000000000:focus,git:7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E",
-        "proof": "ah8u1x0q_z6w7tx16qoDoeS3nb-lbzdB7eN9qXJ7opdqPvexyJHUduUxu-_6hqN7di9fZUxajU1Hhd1kvVTxCw",
-        "publisher_id": "pub_0123456789abcdef0123456789abcdef",
-        "scope": {
-          "plugins": [
-            "focus",
-            "git"
-          ]
-        },
-        "scope_text": "focus,git"
+        "error": "damaged",
+        "ok": false,
+        "token": "zdt_003aUlTJC7tjlCTQj2uNU3MFagCXG9LRKRcwGkBIDlf0dSDXw0"
+      },
+      {
+        "error": "damaged",
+        "ok": false,
+        "token": "zdt_003aUlAJC7tjlCTQj2uNU3MFagCXG9LRKRcwGkBIDlf0dSDXw"
+      },
+      {
+        "error": "damaged",
+        "ok": false,
+        "token": "zdt_003aUlTJC7tjlCTQj2uNU3MFagCXG9LRKRcwGkBIDlf0dSDX0"
       }
     ],
-    "public": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E",
-    "request": {
-      "body_b64": "eyJmb3JtYXQiOiJ6ZXJvbi1wbHVnaW46djEifQ==",
-      "body_sha256": "70f3ba660353a3950b0d1ae05439d85de429c0f60ba0871266030193174efe70",
-      "headers": {
-        "authorization": "ZeronKey key=7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E, ts=1763000000000, sig=CUgEppcMj5ix5gOT_329hAHIYGhbJs29lynECL9ikJZH-WymAd57wIImye9WObhhV1K-jhcRHL_UAN4JSjxaAQ",
-        "x-zeron-content-sha256": "70f3ba660353a3950b0d1ae05439d85de429c0f60ba0871266030193174efe70"
+    "short_len": 8,
+    "tokens": [
+      {
+        "body": "0000000000000000000000000000000000000000000",
+        "checksum": "0Hpxfg",
+        "crc32": 263581820,
+        "random_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+        "sha256": "4109273ff1573a9c10e2266c3ec5ad581766fc408deca8a1735b8649474f5e84",
+        "short": "00000000",
+        "token": "zdt_00000000000000000000000000000000000000000000Hpxfg"
       },
-      "message": "zeron-plugin-publish:v1\nPOST\n/store/v1/plugins/focus/versions\n70f3ba660353a3950b0d1ae05439d85de429c0f60ba0871266030193174efe70\n1763000000000",
-      "method": "POST",
-      "path": "/store/v1/plugins/focus/versions",
-      "ts": 1763000000000
-    },
-    "secret": "zpk_AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwNkiqXF",
-    "secret_prefix": "zpk_"
+      {
+        "body": "1fJjkkpe9PiTw9KSulA8Ghct30vZz4HpdQ5c5b9cPF1",
+        "checksum": "4FMQ8V",
+        "crc32": 3891520055,
+        "random_hex": "0707070707070707070707070707070707070707070707070707070707070707",
+        "sha256": "0f99cf5f30a14e813f3877583930fac4e6a7566a022b41aad57cc11444661ec9",
+        "short": "1fJjkkpe",
+        "token": "zdt_1fJjkkpe9PiTw9KSulA8Ghct30vZz4HpdQ5c5b9cPF14FMQ8V"
+      },
+      {
+        "body": "yhjskwdA6OZ1AL1YmHWZWm8LLG7HjnuCA2j5rOw8Xp1",
+        "checksum": "30T4iS",
+        "crc32": 2755328140,
+        "random_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "sha256": "006ac47f54f338615bb3e2505960ca80e14ce21b3d5431cc40636c7ce678b523",
+        "short": "yhjskwdA",
+        "token": "zdt_yhjskwdA6OZ1AL1YmHWZWm8LLG7HjnuCA2j5rOw8Xp130T4iS"
+      },
+      {
+        "body": "003aUlTJC7tjlCTQj2uNU3MFagCXG9LRKRcwGkBIDlf",
+        "checksum": "0dSDXw",
+        "crc32": 583002364,
+        "random_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "sha256": "2bf925757c99d7985f195feb57f5ca760669ae26bc919e7f528a9b634a9161ae",
+        "short": "003aUlTJ",
+        "token": "zdt_003aUlTJC7tjlCTQj2uNU3MFagCXG9LRKRcwGkBIDlf0dSDXw"
+      }
+    ]
   },
   "format": "zeron-plugin-package-vectors:v1",
   "listing": [
@@ -36107,6 +36130,49 @@
       "payload": "zeron-plugin:v1\n{\"desc\":\"a\\u0000b\\u001f \\\"\\\\/\",\"id\":\"focus\",\"name\":\"Zürich 😀 \",\"signature\":{\"files\":{\"ui/café.luau\":\"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881\",\".txt\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"😀.txt\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"},\"key\":\"gTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5Q\"},\"\":2,\"😀\":1}",
       "prefix": "zeron-plugin:v1\n",
       "result": "valid"
+    }
+  ],
+  "store_packages": [
+    {
+      "name": "unsigned (a deploy token's)",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJ2ZXJzaW9uIjoiMS4wLjAifX0=",
+      "result": {
+        "files": 2,
+        "hash": "8559ddea34a83a98fcc456dd31056b62827be004078eff3fb152fa8694a72776",
+        "id": "focus",
+        "key": null,
+        "ok": true,
+        "paths": [
+          "init.luau",
+          "ui/badge.luau"
+        ],
+        "sha256": "6cc0c67f19609ee3664b0c0f5ddacd6188e6920f46ae12922d53c9f6f2c511be",
+        "version": "1.0.0"
+      }
+    },
+    {
+      "name": "signed, under a record naming no signer: refused",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlERT0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsiaW5pdC5sdWF1IjoiNDg2ZDlhZmZiNjBkYmIwMDYzYjAzZDhlMjNhNmNjZjYzNjRjZTIwM2RjM2E5ZjU2ZjIwZTc1MGViNDFlY2FkZSIsInVpL2JhZGdlLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1In0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJVU0loc0c0NE5TOFpyUkZ6ZFBPRjlKSXhjYVNsRzhYWFd5WXUzTGFaMGthSTVFWWthSjMyOG1DaWxBZHMxWlZ6cFFNQ0h4Q2x4QnBsYnJOMF9sZlJEZyJ9LCJ2ZXJzaW9uIjoiMS4wLjAifX0=",
+      "result": {
+        "error": "store_mismatch",
+        "ok": false
+      }
+    },
+    {
+      "name": "signed, a file changed after signing",
+      "package_b64": "eyJmaWxlcyI6eyJpbml0Lmx1YXUiOiJjbVYwZFhKdUlEST0iLCJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJzaWduYXR1cmUiOnsiZmlsZXMiOnsiaW5pdC5sdWF1IjoiNDg2ZDlhZmZiNjBkYmIwMDYzYjAzZDhlMjNhNmNjZjYzNjRjZTIwM2RjM2E5ZjU2ZjIwZTc1MGViNDFlY2FkZSIsInVpL2JhZGdlLmx1YXUiOiI3ZGY4ZjBjZDllMWNkMGIyMDRhNzYwNzgzNjcxYzBjY2NhNGEzMjU4ZGM3YzUxZjU5ZTllMjI5NWM2YzI1MzE1In0sImtleSI6ImlvamozWFFKOFpYOVV0c3RQTHBkY3NwbkNiOGRsQkliODNTSUFiUVBiMXciLCJzaWciOiJVU0loc0c0NE5TOFpyUkZ6ZFBPRjlKSXhjYVNsRzhYWFd5WXUzTGFaMGthSTVFWWthSjMyOG1DaWxBZHMxWlZ6cFFNQ0h4Q2x4QnBsYnJOMF9sZlJEZyJ9LCJ2ZXJzaW9uIjoiMS4wLjAifX0=",
+      "result": {
+        "error": "tampered",
+        "ok": false
+      }
+    },
+    {
+      "name": "unsigned, its entry file missing",
+      "package_b64": "eyJmaWxlcyI6eyJ1aS9iYWRnZS5sdWF1IjoiY21WMGRYSnVJSHQ5In0sImZvcm1hdCI6Inplcm9uLXBsdWdpbjp2MSIsIm1hbmlmZXN0Ijp7ImVudHJ5IjoiaW5pdC5sdWF1IiwiaWQiOiJmb2N1cyIsIm5hbWUiOiJGb2N1cyIsInBlcm1pc3Npb25zIjpbInVpLmFkZCJdLCJ2ZXJzaW9uIjoiMS4wLjAifX0=",
+      "result": {
+        "error": "missing_entry",
+        "ok": false
+      }
     }
   ]
 }

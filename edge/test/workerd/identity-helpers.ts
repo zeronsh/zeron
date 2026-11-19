@@ -1,5 +1,5 @@
 /**
- * Helpers for the identity tests (web sign-in, roles, deploy keys): people
+ * Helpers for the identity tests (web sign-in, roles, deploy tokens): people
  * in WorkOS (workos-fake.ts) and the directory, browsers that sign in on
  * the web site, and ed25519 signers.
  */

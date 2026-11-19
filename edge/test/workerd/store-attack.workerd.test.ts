@@ -2,15 +2,11 @@
  * The identity lane's probes of b467e6299, kept as they were written: each
  * failed then. The take-down feed's `after` read two ways; a restore and an
  * unyank listing an older unverified version beside a newer one; a new
- * owner reading the former owner's deploy-key names.
+ * owner reading the former owner's deploy-key names (now deploy tokens').
  */
 import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { b64urlEncode } from "../../src/cloud/crypto";
-import { deployKeyProofMessage, publishSigningString, scopeText, sha256Hex } from "../../src/store/identity/signing";
-import { publisherId } from "../../src/store/cards";
-import { stepUp } from "./identity-helpers";
-import { type Signer, adminCall, author, call, makePackage, publish, published, uniqueId } from "./store-helpers";
+import { adminCall, author, call, deployToken, makePackage, newSigner, publish, published, tokenPublish, uniqueId } from "./store-helpers";
 
 const json = async <T = Record<string, any>>(res: Response) => (await res.json()) as T;
 const feed = async (query: string) => json(await SELF.fetch(`https://edge.test/store/v1/takedowns${query}`));
@@ -54,34 +50,18 @@ describe("a restore relists an older unverified version beside a newer one", () 
   });
 });
 
-describe("one account reads another's deploy keys", () => {
-  it("a plugin's new owner sees the former owner's deploy key names in /me/plugins", async () => {
+describe("one account reads another's deploy tokens", () => {
+  it("a plugin's new owner never sees the former owner's deploy token names in /me/plugins", async () => {
     const a = await author();
     const b = await author();
     const id = uniqueId("ci");
     expect((await publish(a.userId, id, await makePackage({ id, version: "1.0.0", signer: a.signer }))).status).toBe(201);
-    const pair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"])) as CryptoKeyPair;
-    const key = b64urlEncode(new Uint8Array((await crypto.subtle.exportKey("raw", pair.publicKey)) as ArrayBuffer));
-    const sign = async (m: Uint8Array) => b64urlEncode(new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, pair.privateKey, m)));
-    const signer: Signer = { key, sign };
-    const scope = { plugins: [id] };
-    const proof = await sign(new TextEncoder().encode(deployKeyProofMessage(await publisherId(a.userId), null, scopeText(scope)!, key)));
-    const made = await call(a.userId, "POST", "/store/v1/me/keys", { key, name: "acme-prod-release-bot", scope, proof, stepUp: await stepUp(a.userId) });
-    expect(made.status).toBe(201);
-    const pkg = await makePackage({ id, version: "1.1.0", signer });
-    const ts = String(Date.now());
-    const hash = await sha256Hex(pkg);
-    const sig = await sign(new TextEncoder().encode(publishSigningString("POST", `/store/v1/plugins/${id}/versions`, hash, ts)));
-    const res = await SELF.fetch(`https://edge.test/store/v1/plugins/${id}/versions`, {
-      method: "POST",
-      headers: { authorization: `ZeronKey key=${key}, ts=${ts}, sig=${sig}`, "x-zeron-content-sha256": hash },
-      body: pkg
-    });
-    expect(res.status).toBe(201);
+    const { token } = await deployToken(a.userId, { plugins: [id] }, { name: "acme-prod-release-bot" });
+    expect((await tokenPublish(token, id, await makePackage({ id, version: "1.1.0", signer: null }))).status).toBe(201);
     expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/transfer`, { to_username: b.username })).status).toBe(200);
     const mine = (await json<{ plugins: { id: string; versions: Record<string, any>[] }[] }>(await call(b.userId, "GET", "/store/v1/me/plugins"))).plugins.find((p) => p.id === id)!;
     const shown = mine.versions.find((v) => v.version === "1.1.0")!;
-    expect(shown.deploy_key?.name ?? null).toBeNull();
+    expect(shown.deploy_token?.name ?? null).toBeNull();
   });
 });
 

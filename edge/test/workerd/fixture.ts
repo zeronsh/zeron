@@ -1,7 +1,9 @@
 import { handleAttachmentBlob } from "../../src/attachment-blobs";
 import { chatRoute } from "../../src/chat-route";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
-import { authenticate } from "../../src/auth";
+import { authenticate, bearerFromRequest } from "../../src/auth";
+import { sessionRequired } from "../../src/store/identity/callers";
+import { looksLikeDeployToken } from "../../src/store/identity/deploy-token";
 import { handlePublicCardRoute, handleUsernameRoute } from "../../src/card-routes";
 import { publicCardGate } from "../../src/card-gate";
 import { handleAdminRoute } from "../../src/cloud/billing";
@@ -28,7 +30,7 @@ import { handleStoreRoute } from "../../src/store/routes";
 import { pluginOwner } from "../../src/store/db";
 import { handleWebAuthRoute } from "../../src/web-auth-routes";
 import { handleRoleAdminRoute } from "../../src/roles";
-import { handleDeployKeyAdminRoute, handleDeployKeyRoute } from "../../src/store/identity/deploy-keys";
+import { handleDeployTokenAdminRoute, handleDeployTokenRoute } from "../../src/store/identity/deploy-tokens";
 import { sha256Hex } from "../../src/store/identity/signing";
 import { BodyRefused, authenticatePublisher, hasCredentials, bodyStream, optionalUser, readBody, requireAdmin, withSessionCookie } from "../../src/store/principal";
 export { DeviceRoom } from "../../src/device-room";
@@ -153,7 +155,7 @@ const json = (value: unknown, status = 200) =>
 /**
  * `POST /__test/owner {pluginId, userId}`: make `userId` own store id
  * `pluginId` in the real catalog (null: no one), so the identity tests'
- * deploy keys meet the store's own `pluginOwner`: claimed now, or moved to
+ * deploy tokens meet the store's own `pluginOwner`: claimed now, or moved to
  * them now (`owner_since` as the store's transfer sets it), or at `at`. A plugin made here has no
  * version; its skeleton is its id behind a prefix no real id has, so it
  * never stands in a real publish's lookalike check.
@@ -177,11 +179,12 @@ const setTestOwner = async (env: Env, pluginId: string, userId: string | null, a
 /**
  * The identity lane's principal probes, reached only by a request carrying
  * `x-test-principal` (every other store request goes to the real routes):
- * each answers who its principal says is calling, on the real paths (a
- * deploy key signs those): publisher routes (`POST /store/v1/plugins/:id/versions`
- * and its version actions, `GET /store/v1/me/plugins`) with the body's hash
- * as the route reads it after authentication, admin routes
- * (`/store/v1/admin/*`), and a public one (`/store/v1/public`).
+ * each answers who its principal says is calling, on the real paths:
+ * publisher routes (`POST /store/v1/plugins/:id/versions` and its version
+ * actions, `GET /store/v1/me/plugins`) with the body's hash as the route
+ * reads it after authentication (a deploy token where the real routes take
+ * one: publishing), admin
+ * routes (`/store/v1/admin/*`), and a public one (`/store/v1/public`).
  */
 const storeStandIn = async (request: Request, env: Env, url: URL): Promise<Response | undefined> => {
   const path = url.pathname;
@@ -190,8 +193,10 @@ const storeStandIn = async (request: Request, env: Env, url: URL): Promise<Respo
     return admin instanceof Response ? admin : json({ admin });
   }
   if (path === "/store/v1/public") return json({ user: await optionalUser(request, env), credentials: hasCredentials(request) });
+  const publishing = /^\/store\/v1\/plugins\/([^/]+)\/versions$/.exec(path);
   if (path === "/store/v1/me/plugins" || /^\/store\/v1\/plugins\/[^/]+\/versions(\/[^/]+\/[a-z]+)?$/.test(path)) {
-    const publisher = await authenticatePublisher(request, env);
+    const tokens = publishing && request.method === "POST" ? { publishing: true as const } : undefined;
+    const publisher = await authenticatePublisher(request, env, tokens);
     if (publisher instanceof Response) return publisher;
     // `x-test-stream: 1`: read it as a package write would (bodyStream), not buffered.
     if (request.headers.get("x-test-stream") === "1") {
@@ -234,15 +239,15 @@ export default {
     if (webAuth) return webAuth;
     const roles = await handleRoleAdminRoute(request, env, url);
     if (roles) return roles;
-    const deployKeyAdmin = await handleDeployKeyAdminRoute(request, env, url, pluginOwner);
-    if (deployKeyAdmin) return deployKeyAdmin;
+    const deployTokenAdmin = await handleDeployTokenAdminRoute(request, env, url, pluginOwner);
+    if (deployTokenAdmin) return deployTokenAdmin;
     if (url.pathname === "/__test/owner" && request.method === "POST") {
       const { pluginId, userId, at } = (await request.json()) as { pluginId: string; userId: string | null; at?: number };
       await setTestOwner(env, pluginId, userId, at);
       return json({ ok: true });
     }
-    const deployKeys = await handleDeployKeyRoute(request, env, url, pluginOwner);
-    if (deployKeys) return withSessionCookie(request, deployKeys);
+    const deployTokens = await handleDeployTokenRoute(request, env, url, pluginOwner);
+    if (deployTokens) return withSessionCookie(request, deployTokens);
     if (request.headers.has("x-test-principal")) {
       const probe = await storeStandIn(request, env, url);
       if (probe) return withSessionCookie(request, probe);
@@ -251,6 +256,8 @@ export default {
     if (card) return card;
     const store = await handleStoreRoute(request, env, url);
     if (store) return store;
+    const bearer = bearerFromRequest(request);
+    if (bearer !== undefined && looksLikeDeployToken(bearer)) return sessionRequired();
     const auth = await authenticate(env, request);
     if (!auth) return new Response("Unauthorized", { status: 401 });
     const refused = runnerRefusal(auth, request.method, url);
@@ -259,7 +266,7 @@ export default {
     if (username) return username;
     const onboarding = await handleOnboardingRoute(request, env, auth, url);
     if (onboarding) return onboarding;
-    const pluginKeys = await handlePluginKeyRoute(request, env, auth, url, pluginOwner);
+    const pluginKeys = await handlePluginKeyRoute(request, env, auth, url);
     if (pluginKeys) return pluginKeys;
     const cloud = await handleCloudRoute(request, env, auth, url);
     if (cloud) return cloud;

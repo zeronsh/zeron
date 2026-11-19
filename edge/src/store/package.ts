@@ -17,6 +17,9 @@
  * 3. The signature (`manifest.signature = {key, files, sig}`): `files` must
  *    equal every file's sha256, `sig` an ed25519 signature by `key` over
  *    `"zeron-plugin:v1\n" + canonical(manifest with signature = {key, files})`.
+ *    Or, for a package published with a deploy token (`signed: false`), no
+ *    `signature` at all: the token is the publisher's word, and the store's
+ *    record the device's (contract a315eef5a).
  * 4. The manifest's rules (manifest.ts), its id, its entry file present.
  *
  * Then the content hash: sha256 of `canonical(manifest without signature) +
@@ -78,8 +81,9 @@ export interface VerifiedPackage {
   /** The manifest's canonical JSON without its signature: what the
    * content hash covers (the signature's file hashes are kept per file). */
   readonly manifestCanonical: string;
-  /** The signer's public key, b64url without padding. */
-  readonly key: string;
+  /** The signer's public key, b64url without padding; null for an unsigned
+   * package (a deploy token's). */
+  readonly key: string | null;
   /** Every file, by path, in path order: views of `blob`. */
   readonly files: ReadonlyMap<string, Uint8Array>;
   /** Every file's bytes, one after another in path order. */
@@ -326,13 +330,15 @@ const readFiles = (raw: Uint8Array, files: Span): Map<string, Span | null> => {
  * The package `raw`, verified as install.rs `parse` verifies it, or a
  * `PackageRefusal` naming the engine's reason. `maxBytes` is the caller's
  * ceiling on the file itself (the engine's, or the store's lower one).
+ * `signed: false` reads a deploy token's package: one with no signature,
+ * refused if it has one.
  *
  * The whole document is checked first, as serde_json reads it, without
  * building it (scan.ts); then only the manifest is built, under
  * `MAX_MANIFEST_JSON` and `MAX_MANIFEST_VALUES`, and each file's base64 is
  * decoded from the request's bytes into one buffer.
  */
-export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTES): Promise<VerifiedPackage> => {
+export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTES, signed = true): Promise<VerifiedPackage> => {
   if (raw.length > maxBytes) refuse("too_big");
   let parts: ReturnType<typeof readParts>;
   try {
@@ -377,9 +383,13 @@ export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTE
   if (total > MAX_BYTES) refuse("too_big");
   const hashes = new Map<string, string>();
   for (const [rel, bytes] of decoded) hashes.set(rel, await sha256Hex(bytes));
-  const checked = await checkSignature(PAYLOAD_PREFIX, manifestValue, hashes);
-  if ("invalid" in checked) {
-    return refuse(checked.invalid === "files_differ" ? "tampered" : checked.invalid);
+  let key: string | null = null;
+  if (signed) {
+    const checked = await checkSignature(PAYLOAD_PREFIX, manifestValue, hashes);
+    if ("invalid" in checked) return refuse(checked.invalid === "files_differ" ? "tampered" : checked.invalid);
+    key = checked.valid;
+  } else if (manifestValue.has("signature")) {
+    return refuse("bad_signature", "A package published with a deploy token isn't signed: the token is its publisher's word");
   }
   // Paths a device would write as one file, or a file where a folder must
   // be (amendment 42): refused as a device refuses them, after the
@@ -394,7 +404,7 @@ export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTE
   return {
     manifest,
     manifestCanonical: canonicalJson(unsignedOf(manifestValue)),
-    key: checked.valid,
+    key,
     files: decoded,
     blob: blob.subarray(0, total),
     hashes,

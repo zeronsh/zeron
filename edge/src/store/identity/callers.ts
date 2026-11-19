@@ -1,8 +1,8 @@
 /**
  * Who is calling a store route, by each way the store accepts: a WorkOS
  * session bearer (the app, the CLI), a web session's cookie (the web site),
- * a deploy key's signed request (signed-request.ts). principal.ts decides
- * which a route takes.
+ * a deploy token (deploy-token.ts), a bearer of its own. principal.ts
+ * decides which a route takes.
  *
  * - A bearer comes only in `Authorization` (never `?token=`: query strings
  *   end up in logs). A runner token (a Cloud machine) is never a publisher
@@ -28,6 +28,10 @@ export const headerBearer = (request: Request): string | undefined => {
 
 export const unauthenticated = (): Response => jsonError(401, "unauthenticated", "Sign in to do this.");
 export const forbidden = (message = "This account can't do this."): Response => jsonError(403, "forbidden", message);
+/** A deploy token where only a signed-in person may act (contract
+ * a315eef5a): it isn't a session. Refused before it's looked up. */
+export const sessionRequired = (): Response =>
+  jsonError(401, "session_required", "A deploy token only publishes versions: this needs a signed-in session.");
 
 /** The user a bearer names, or the answer refusing it: 401 when it doesn't
  * verify, 403 for a runner token. */

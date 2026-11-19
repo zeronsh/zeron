@@ -6,7 +6,7 @@
  *   POST /store/v1/plugins/:id/installed              → { counted }
  *   POST /store/v1/plugins/:id/reports { reason, text, version? } → { id }
  *
- * A deploy key reads only the plugins in its scope its account owns, and
+ * A deploy token reads only the plugins in its scope its account owns, and
  * changes nothing here: yank and unyank need a signed-in session.
  *
  * Version transitions an author makes: listed → yanked (no new installs,
@@ -18,18 +18,17 @@
  *
  * `/me/plugins` is the owner's view: every version in every state, each
  * with its review (a declined one's reason and words are its author's to
- * read), how it was published (`via`, the signing `key`, and the deploy key
- * by its name then), so a device can raise a notice for each publish it
- * didn't make (amendment 44), and why a yank or a removal happened. It
- * names the account's `publisher_id` too, plugins or none: what a device's
- * proof for a new deploy key binds (amendment 44, proof v2).
+ * read), how it was published (`via`, the signing `key`, and the deploy
+ * token by its name and short id then), so a device can raise a notice for
+ * each publish it didn't make, and why a yank or a removal happened. It
+ * names the account's `publisher_id` too, plugins or none.
  */
 import type { Env } from "../env";
 import { STORE_DATA } from "./data";
 import { authorCard, authorsOf, listingState, ownerCard, publisherId, publisherIds, versionInfo } from "./cards";
 import { type PluginRow, VERSION_ORDER, type VersionRow, auditIfChanged, pluginRow, relist, supersedeOlder, supersededAt, versionRow } from "./db";
 import { answer, fail, notFound, objectBody, rateLimited, refusedBody } from "./http";
-import { authenticatePublisher, keyInScope, readBody } from "./principal";
+import { authenticatePublisher, readBody, sessionRequired } from "./principal";
 import { allowWrite } from "./publish";
 import { purgeCatalog } from "./purge";
 import { decodeSegment } from "./serve";
@@ -39,11 +38,12 @@ export const MAX_REPORT_TEXT = 2000;
 export const REPORTS_PER_DAY = 10;
 
 export const handleMyPlugins = async (request: Request, env: Env, db: D1Database): Promise<Response> => {
+  // A signed-in person only: the owner's view holds decline notes, unlisted
+  // plugins and token names, so a deploy token reads none of it (401
+  // `session_required`, contract "A token publishes and reads nothing").
   const publisher = await authenticatePublisher(request, env);
   if (publisher instanceof Response) return publisher;
-  const owned = (await db.prepare("SELECT * FROM plugins WHERE owner_id = ? ORDER BY created_at DESC, seq DESC").bind(publisher.userId).all<PluginRow>()).results;
-  // A deploy key sees the plugins in its scope, and only while its account owns them.
-  const plugins = publisher.via === "deploy_key" ? owned.filter((p) => keyInScope(publisher, p)) : owned;
+  const plugins = (await db.prepare("SELECT * FROM plugins WHERE owner_id = ? ORDER BY created_at DESC, seq DESC").bind(publisher.userId).all<PluginRow>()).results;
   const versions = plugins.length
     ? (
         await db
@@ -67,9 +67,9 @@ export const handleMyPlugins = async (request: Request, env: Env, db: D1Database
           // The account that published it, fixed at publish: a plugin
           // transferred in raises no notice for its former owner's versions.
           publisher_id: publishers.get(v.publisher_id)!,
-          // A deploy key's name is its account's: a version a former owner
+          // A deploy token's name is its account's: a version a former owner
           // published shows none to whoever owns the plugin now.
-          ...(v.publisher_id === publisher.userId ? {} : { deploy_key: null }),
+          ...(v.publisher_id === publisher.userId ? {} : { deploy_token: null }),
           superseded: v.superseded_at !== null ? { at: v.superseded_at, by: v.superseded_by } : null
         }))
       };
@@ -127,12 +127,12 @@ export const handleAuthorAction = async (request: Request, env: Env, db: D1Datab
 /**
  * The signed-in person a write is from: the app's bearer, or the web
  * session's cookie with the site's Origin and CSRF token (else `403
- * bad_csrf`). Never `optionalUser`, which is for reads; never a deploy key.
+ * bad_csrf`). Never `optionalUser`, which is for reads; never a deploy token.
  */
 const writer = async (request: Request, env: Env): Promise<{ userId: string } | Response> => {
   const caller = await authenticatePublisher(request, env);
   if (caller instanceof Response) return caller;
-  return caller.via === "session" ? caller : fail(403, "key_not_allowed", "A deploy key can't do this.");
+  return caller.via === "session" ? caller : sessionRequired();
 };
 
 export const handleInstalled = async (request: Request, env: Env, db: D1Database, id: string): Promise<Response> => {

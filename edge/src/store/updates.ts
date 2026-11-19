@@ -50,7 +50,7 @@ interface Row {
   readonly removal_reason: string | null;
   readonly verification: string;
   readonly verified_at: number | null;
-  readonly signer_key: string;
+  readonly signer_key: string | null;
   readonly content_hash: string;
   readonly package_sha256: string;
   readonly package_bytes: number;
