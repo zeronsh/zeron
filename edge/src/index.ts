@@ -89,7 +89,9 @@
  *   POST /store/v1/plugins/:id/versions   — publish (session or deploy token)
  *   …    /store/v1/me/plugins, …/{withdraw,yank,unyank,installed,reports}, /store/v1/admin/*
  */
-import { authenticate } from "./auth";
+import { authenticate, bearerFromRequest } from "./auth";
+import { sessionRequired } from "./store/identity/callers";
+import { looksLikeDeployToken } from "./store/identity/deploy-token";
 import { chatRoute } from "./chat-route";
 import { dialDeviceRoom } from "./device-link";
 import { deviceParam, forward } from "./forward";
@@ -217,6 +219,10 @@ export default {
     const storeRouted = await handleStoreRoute(request, env, url);
     if (storeRouted) return storeRouted;
 
+    // A deploy token (store/identity/deploy-token.ts) only publishes to the
+    // store, above: anywhere else it isn't a session, in any auth mode.
+    const bearer = bearerFromRequest(request);
+    if (bearer !== undefined && looksLikeDeployToken(bearer)) return sessionRequired();
     const auth = await authenticate(env, request);
     if (!auth) return json({ error: "unauthenticated" }, 401);
 

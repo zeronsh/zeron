@@ -1505,8 +1505,7 @@ export class UserDirectory extends DurableObject<Env> {
       .one().n as number;
   }
 
-  /** Token `id` was used to publish `pluginId` (allowed: in its scope, its
-   * account's, not a first version): its last use. */
+  /** Token `id` published a version of `pluginId`: its last use. */
   deployTokenUsed(id: string, pluginId: string): void {
     this.ctx.storage.sql.exec("UPDATE deploy_tokens SET last_used_at = ?, last_used_plugin = ? WHERE id = ?", Date.now(), pluginId, id);
   }
@@ -1523,7 +1522,7 @@ export class UserDirectory extends DurableObject<Env> {
    * whose it is; undefined for anything else (unknown, revoked, expired, its
    * owner deleted), all alike. The hash is compared in constant time against
    * each token of that short id (a public prefix), never looked up by it.
-   * Not a use: that's `deployTokenUsed`, once a publish is allowed. */
+   * Not a use: that's `deployTokenUsed`, once a publish succeeds. */
   deployTokenHolder(short: string, hash: string): DeployTokenHolder | undefined {
     const now = Date.now();
     const rows = this.ctx.storage.sql

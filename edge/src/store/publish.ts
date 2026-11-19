@@ -152,14 +152,20 @@ const accepted = (id: string, version: string, status: string, verified: boolean
 export const handlePublish = async (request: Request, env: Env, db: D1Database, bucket: R2Bucket, id: string): Promise<Response> => {
   const publisher = await authenticatePublisher(request, env, { publishing: true });
   if (publisher instanceof Response) return publisher;
+  const res = await publishAs(publisher, request, env, db, bucket, id);
+  // A deploy token's last use is a version it published (or the same one
+  // again), never an attempt refused.
+  if (res.status === 201 && publisher.token) await userDirectoryStub(env)?.deployTokenUsed(publisher.token.id, id);
+  return res;
+};
+
+const publishAs = async (publisher: Publisher, request: Request, env: Env, db: D1Database, bucket: R2Bucket, id: string): Promise<Response> => {
   if (!(await allowWrite(env, publisher.userId))) return rateLimited();
   // Who may publish what, before the body is read: a deploy token only a
   // plugin its account owns now that its scope holds, never a first version;
   // a live token asking for any other is 403 `token_not_allowed`.
   const plugin = await pluginRow(db, id);
   if (publisher.via === "deploy_token" && (!plugin || plugin.owner_id !== publisher.userId || !tokenInScope(publisher, plugin))) return tokenNotAllowed();
-  // Allowed: the token's last use (never an attempt it was refused).
-  if (publisher.token) await userDirectoryStub(env)?.deployTokenUsed(publisher.token.id, id);
   if (!publisher.username) return fail(403, "needs_username", "Publishing needs a username: every listing reads \"by @username\".");
 
   const body = await readBody(request, STORE_MAX_PACKAGE_BYTES);

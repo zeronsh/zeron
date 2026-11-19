@@ -1,7 +1,9 @@
 import { handleAttachmentBlob } from "../../src/attachment-blobs";
 import { chatRoute } from "../../src/chat-route";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
-import { authenticate } from "../../src/auth";
+import { authenticate, bearerFromRequest } from "../../src/auth";
+import { sessionRequired } from "../../src/store/identity/callers";
+import { looksLikeDeployToken } from "../../src/store/identity/deploy-token";
 import { handlePublicCardRoute, handleUsernameRoute } from "../../src/card-routes";
 import { publicCardGate } from "../../src/card-gate";
 import { handleAdminRoute } from "../../src/cloud/billing";
@@ -254,6 +256,8 @@ export default {
     if (card) return card;
     const store = await handleStoreRoute(request, env, url);
     if (store) return store;
+    const bearer = bearerFromRequest(request);
+    if (bearer !== undefined && looksLikeDeployToken(bearer)) return sessionRequired();
     const auth = await authenticate(env, request);
     if (!auth) return new Response("Unauthorized", { status: 401 });
     const refused = runnerRefusal(auth, request.method, url);
