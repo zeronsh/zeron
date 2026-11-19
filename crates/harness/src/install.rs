@@ -227,6 +227,33 @@ fn post_install(id: HarnessId) -> Result<(), HarnessError> {
     )))
 }
 
+/// Take out of the installer's PATH every directory where `cli` is a sandbox
+/// image's lazy-installer stand-in ([`crate::executable::is_lazy_installer`]):
+/// an agent's installer that finds it takes the agent for installed (OpenCode's
+/// "already installed", the stand-in answering `--version`) or reinstalls it
+/// where the image put it (Pi's npm under a root-owned `/usr/local`), and the
+/// real CLI never lands where Zeron looks for it.
+fn hide_stand_ins(command: &mut Command, cli: &str) {
+    let std = command.as_std_mut();
+    let path = std
+        .get_envs()
+        .find(|(key, _)| *key == "PATH")
+        .and_then(|(_, value)| value.map(std::ffi::OsStr::to_os_string))
+        .or_else(|| std::env::var_os("PATH"));
+    let Some(path) = path else { return };
+    let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    let kept: Vec<&PathBuf> = dirs
+        .iter()
+        .filter(|dir| !crate::executable::is_lazy_installer(&dir.join(cli)))
+        .collect();
+    if kept.len() == dirs.len() {
+        return;
+    }
+    if let Ok(joined) = std::env::join_paths(kept) {
+        std.env("PATH", joined);
+    }
+}
+
 fn configure(command: &mut Command) {
     crate::acp::child::configure(command);
     for (key, _) in std::env::vars_os() {
@@ -329,7 +356,9 @@ pub async fn install_harness(id: HarnessId, cancel: CancellationToken) -> Result
             result = tokio::time::timeout(DEADLINE, crate::acp::install_harness(id)) => result.unwrap_or_else(|_| Err(HarnessError::Install("installation timed out after 15 minutes".into()))),
         }
     } else {
-        run(command(method)?, cancel, DEADLINE).await
+        let mut command = command(method)?;
+        hide_stand_ins(&mut command, cli_and_dir(id).0);
+        run(command, cancel, DEADLINE).await
     };
     invalidate_versions(id);
     result?;
@@ -426,6 +455,37 @@ mod tests {
         HarnessId::Antigravity,
         HarnessId::Mock,
     ];
+
+    #[cfg(unix)]
+    #[test]
+    fn an_installer_never_sees_an_images_stand_in_for_its_agent() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("image-bin");
+        let tools = dir.path().join("tools");
+        std::fs::create_dir_all(&image).unwrap();
+        std::fs::create_dir_all(&tools).unwrap();
+        let shim = image.join("pi");
+        std::fs::write(&shim, "#!/bin/sh\n# ascii-harness-shim\nexec lazy pi \"$@\"\n").unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths([&tools, &image]).unwrap();
+        let mut command = Command::new("sh");
+        command.env("PATH", &path);
+        hide_stand_ins(&mut command, "pi");
+        let kept = command
+            .as_std_mut()
+            .get_envs()
+            .find(|(k, _)| *k == "PATH")
+            .and_then(|(_, v)| v.map(|v| v.to_os_string()))
+            .unwrap();
+        assert_eq!(std::env::split_paths(&kept).collect::<Vec<_>>(), vec![tools.clone()]);
+        // Another agent's installer keeps that directory.
+        let mut other = Command::new("sh");
+        other.env("PATH", &path);
+        hide_stand_ins(&mut other, "opencode");
+        let kept = other.as_std_mut().get_envs().find(|(k, _)| *k == "PATH").and_then(|(_, v)| v.map(|v| v.to_os_string())).unwrap();
+        assert_eq!(kept, path);
+    }
 
     #[test]
     fn platform_and_prerequisite_matrix() {

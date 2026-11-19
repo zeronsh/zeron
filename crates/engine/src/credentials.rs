@@ -2387,24 +2387,38 @@ fn write_hermes(
     let record = hermes_record(vault, grant, now).ok_or("not a Hermes login")?;
     let now_iso = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     update_json_store_at(&hermes_auth_file(home), &hermes_lock(home), flock, |map| {
-        if let Some(existing) = map.get("providers").and_then(|p| p.get(id)) {
-            if hermes_refresh(existing).is_some_and(|t| !t.trim().is_empty()) {
-                return false;
+        let mut changed = false;
+        let current = map.get("providers").and_then(|p| p.get(id));
+        let native = current.is_some_and(|r| hermes_refresh(r).is_some_and(|t| !t.trim().is_empty()));
+        let fresh = current.is_some_and(|r| hermes_access(r) == Some(grant.access_token.as_str()));
+        if !native && !fresh {
+            let providers = map
+                .entry("providers")
+                .or_insert_with(|| json!({}));
+            if !providers.is_object() {
+                *providers = json!({});
             }
-            if hermes_access(existing) == Some(grant.access_token.as_str()) {
-                return false;
-            }
+            providers[id] = record;
+            changed = true;
         }
-        let providers = map
-            .entry("providers")
-            .or_insert_with(|| json!({}));
-        if !providers.is_object() {
-            *providers = json!({});
+        // Hermes runs on its `active_provider` (what `hermes model` and
+        // `hermes auth add` set): without one it reports no provider
+        // connected, whatever logins it holds. One that names nothing
+        // Hermes holds is no choice either.
+        let held = |name: &str| map.get("providers").and_then(|p| p.get(name)).is_some();
+        let chosen = map
+            .get("active_provider")
+            .and_then(Value::as_str)
+            .is_some_and(|name| held(name));
+        if !chosen {
+            map.insert("active_provider".into(), json!(id));
+            changed = true;
         }
-        providers[id] = record;
-        map.entry("version").or_insert_with(|| json!(1));
-        map.insert("updated_at".into(), json!(now_iso));
-        true
+        if changed {
+            map.entry("version").or_insert_with(|| json!(1));
+            map.insert("updated_at".into(), json!(now_iso));
+        }
+        changed
     })
 }
 
@@ -2424,6 +2438,9 @@ fn clear_hermes(home: &Path, vault: VaultProvider) {
             .is_some_and(|r| hermes_refresh(r) == Some(""));
         if managed {
             providers.remove(id);
+            if map.get("active_provider").and_then(Value::as_str) == Some(id) {
+                map.remove("active_provider");
+            }
         }
         managed
     });
@@ -3707,7 +3724,9 @@ mod tests {
         assert!(!auth.to_string().contains("must-not-leak"));
         // Everything of Hermes' own stays.
         assert_eq!(providers["anthropic"]["tokens"]["refresh_token"], "own-rt");
-        assert_eq!(auth["active_provider"], "nous");
+        // Its active provider named nothing it held: the first login written
+        // is the one Hermes runs on (without one it says none is connected).
+        assert_eq!(auth["active_provider"], "openai-codex");
         assert_eq!(auth["credential_pool"]["openrouter"][0]["id"], "x");
         assert_eq!(auth["updated_at"], iso);
         assert!(hermes_record_managed(home, VaultProvider::Nous));
@@ -3724,9 +3743,24 @@ mod tests {
         let auth = read_json(&home.join("auth.json")).unwrap();
         assert!(auth["providers"].get("openai-codex").is_none());
         assert!(auth["providers"].get("nous").is_none());
+        assert!(auth.get("active_provider").is_none(), "it named a login now gone");
         assert_eq!(auth["providers"]["anthropic"]["tokens"]["access_token"], "own");
         // Written under Hermes' own lock file.
         assert!(home.join("auth.lock").exists());
+    }
+
+    #[test]
+    fn a_provider_hermes_was_set_to_stays_its_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("auth.json"),
+            r#"{"active_provider":"anthropic","providers":{"anthropic":{"tokens":{"access_token":"own","refresh_token":"own-rt"}}}}"#,
+        )
+        .unwrap();
+        write_hermes(dir.path(), VaultProvider::Codex, &grant("chatgpt-at"), chrono::Utc::now()).unwrap();
+        let auth = read_json(&dir.path().join("auth.json")).unwrap();
+        assert_eq!(auth["active_provider"], "anthropic");
+        assert_eq!(auth["providers"]["openai-codex"]["tokens"]["access_token"], "chatgpt-at");
     }
 
     #[test]
