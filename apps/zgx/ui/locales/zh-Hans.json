@@ -3569,6 +3569,9 @@
         "windows": {
           "title": "打开自己的窗口"
         },
+        "scene3d": {
+          "title": "绘制 3D 场景"
+        },
         "tools": {
           "title": "为你的智能体提供工具"
         },
