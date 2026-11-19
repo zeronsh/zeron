@@ -209,6 +209,81 @@ impl ModelPublisher {
     }
 }
 
+/// How long after boot the first agents' catalogs are primed: the run that
+/// woke the machine goes first.
+const PRIME_AFTER: Duration = Duration::from_secs(20);
+
+/// Whether a machine can list `harness`'s models without installing
+/// anything for it first: its CLI is there, or (Cursor) it runs on an SDK its
+/// own discovery installs.
+fn discoverable_here(harness: HarnessId) -> bool {
+    harness == HarnessId::Cursor || zeron_harness::install::installed(harness)
+}
+
+impl ModelPublisher {
+    /// After a boot, publish the catalog of every agent this account has
+    /// connected that the machine can list without installing anything: so
+    /// the picker shows an agent's real models before its first Cloud run,
+    /// once any machine has woken. One agent at a time; an agent with no
+    /// credential is skipped (its preparation refuses). Preparing writes the
+    /// agent's credential files and its discovery environment — what its
+    /// first run would do anyway.
+    pub fn prime(&self) {
+        self.prime_with(PRIME_AFTER, discoverable_here);
+    }
+
+    fn prime_with(&self, after: Duration, discoverable: fn(HarnessId) -> bool) -> Option<tokio::task::JoinHandle<()>> {
+        tokio::runtime::Handle::try_current().ok()?;
+        let weak = Arc::downgrade(&self.inner);
+        Some(tokio::spawn(async move {
+            tokio::time::sleep(after).await;
+            for harness in HarnessId::ALL.into_iter().filter(|h| publishes(*h)) {
+                let Some(inner) = weak.upgrade() else { return };
+                let Some(registry) = inner.registry.upgrade() else {
+                    return;
+                };
+                if !discoverable(harness) {
+                    continue;
+                }
+                let mut request = zeron_proto::RunRequest {
+                    mcp: None,
+                    prompt: String::new(),
+                    harness: Some(harness),
+                    model: None,
+                    reasoning: None,
+                    model_options: serde_json::Map::new(),
+                    cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+                    sandbox: zeron_proto::SandboxLevel::ReadOnly,
+                    auto_approve: false,
+                    access: Default::default(),
+                    plan: false,
+                    attachments: Vec::new(),
+                    resume: None,
+                    worktree: None,
+                    env: Default::default(),
+                    extra_mcp: Vec::new(),
+                };
+                // Preparing hands the publisher this agent's credentials and
+                // starts its discovery ([`CatalogPublisher::prepared`]); the
+                // next agent waits for it (a bounded wait: discovery has its
+                // own timeouts).
+                drop(registry);
+                let prepared = match inner.registry.upgrade() {
+                    Some(registry) => registry.prepare_run(harness, None, &mut request).await.is_ok(),
+                    None => return,
+                };
+                if prepared {
+                    let deadline = Instant::now() + Duration::from_secs(120);
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    while lock(&inner.busy).contains(&harness) && Instant::now() < deadline {
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                }
+            }
+        }))
+    }
+}
+
 impl CatalogPublisher for ModelPublisher {
     fn prepared(&self, harness: HarnessId, env: &BTreeMap<String, String>) {
         if !publishes(harness) {
@@ -233,6 +308,10 @@ mod tests {
     use futures::stream::BoxStream;
     use zeron_harness::{Harness, HarnessError, RunControls};
     use zeron_proto::{AgentEvent, ReasoningLevel, RunRequest, SteeringMode};
+
+    /// The catalog environment is process-wide: tests that set Muse's take
+    /// turns.
+    static CATALOG_ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// An agent whose catalog names the key discovery ran with.
     struct KeyedAgent;
@@ -329,6 +408,7 @@ mod tests {
 
     #[tokio::test]
     async fn publishes_what_the_runs_credentials_discover_once_per_fingerprint() {
+        let _turn = CATALOG_ENV.lock().await;
         let registry = Arc::new(HarnessRegistry::new());
         registry.register(Arc::new(KeyedAgent));
         let key = Arc::new(Mutex::new("k1".to_string()));
@@ -372,6 +452,27 @@ mod tests {
         assert_eq!(
             lock(&sink.0).last().cloned(),
             Some((HarnessId::Muse, vec!["model-for-k2".to_string()], "meta-key:k2".to_string()))
+        );
+        zeron_harness::catalog_env::set(HarnessId::Muse, BTreeMap::new());
+    }
+
+    #[tokio::test]
+    async fn a_boot_publishes_connected_agents_it_can_list_without_a_run() {
+        let _turn = CATALOG_ENV.lock().await;
+        let registry = Arc::new(HarnessRegistry::new());
+        registry.register(Arc::new(KeyedAgent));
+        registry.set_run_environment(Arc::new(Fingerprint(Arc::new(Mutex::new("boot".into())))));
+        let sink = Arc::new(Recorder::default());
+        let publisher = ModelPublisher::new(&registry, sink.clone());
+        registry.set_catalog_publisher(Arc::new(publisher.clone()));
+        // Nothing here can be listed: nothing is prepared or published.
+        publisher.prime_with(Duration::ZERO, |_| false).unwrap().await.unwrap();
+        assert!(lock(&sink.0).is_empty());
+        // Muse can: its catalog, with the credentials a run would have.
+        publisher.prime_with(Duration::ZERO, |h| h == HarnessId::Muse).unwrap().await.unwrap();
+        assert_eq!(
+            lock(&sink.0).clone(),
+            vec![(HarnessId::Muse, vec!["model-for-boot".to_string()], "meta-key:boot".to_string())]
         );
         zeron_harness::catalog_env::set(HarnessId::Muse, BTreeMap::new());
     }

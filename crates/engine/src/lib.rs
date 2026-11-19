@@ -1166,14 +1166,18 @@ impl Engine {
             broker.start();
             // Each agent's models as this machine's credentials list them,
             // kept on the edge for every device's picker while Cloud sleeps.
+            let publisher = model_publish::ModelPublisher::new(
+                &core.registry,
+                Arc::new(model_publish::EdgeSink::new(
+                    identity.edge_url(),
+                    tokens.clone(),
+                )),
+            );
             core.registry
-                .set_catalog_publisher(Arc::new(model_publish::ModelPublisher::new(
-                    &core.registry,
-                    Arc::new(model_publish::EdgeSink::new(
-                        identity.edge_url(),
-                        tokens.clone(),
-                    )),
-                )));
+                .set_catalog_publisher(Arc::new(publisher.clone()));
+            // Connected agents' catalogs, published soon after a boot, so a
+            // picker lists them before their first run here.
+            publisher.prime();
             let sessions = core.sessions.clone();
             let commands = core.commands.clone();
             let activity = runner::RelayActivity::default();
