@@ -556,49 +556,52 @@ fn hermes_spec() -> AcpAgentSpec {
 
 /// google's builds as the acp registry lists them (`antigravity-acp`); `None`
 /// on platforms without one, where only an explicit override can launch.
+/// (1.2.1 couldn't go on with a conversation whose checkpoint it was killed
+/// writing — "could not find doneCh for checkpoint" every turn after; 1.5.0
+/// carries on with it.)
 fn antigravity_archive() -> Option<crate::archive_install::ArchivePin> {
     let (url, entry, sha512) = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         (
-            "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-1.2.1-darwin-arm64.zip",
+            "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-1.5.0-darwin-arm64.zip",
             "agy_acp_server.par",
-            "c0049b1f423ffdf0e6a79a6caa104a27b6368522b1eb2c67d9eeed1424af2a07898a66b475b0824a734a0bdd01264473a7d67d1550357a8607fb136507b0afae",
+            "141f73cff7085b4ab6d3cc6e148a85dcb1add045d6d57e53c8e5e36d1d406cde392ceb3dce9e5520c54c741e107bdbf76cc7df9ef8628bb05225cb8b5c85b844",
         )
     } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
         (
-            "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-1.2.1-darwin-x86_64.zip",
+            "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-1.5.0-darwin-x86_64.zip",
             "agy_acp_server.par",
-            "790541c7e7bbbac1cb15bb4a77b02c53f30c997090487fbf42df16846e2e5d8d4f1cec92038d88956fbec33331ebacefe8faf974aad0690aadc2332215712ff2",
+            "0459ec0772efcdfd0ab6a209dca0d57c2120d56535b8a6f265acf6c578b96ebbeb6bd9d793dfc021a04936733bf31207c70bbce7e55875e133b28f9f6aa5eabe",
         )
     } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         (
-            "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.2.1-linux-x86_64.zip",
+            "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.5.0-linux-x86_64.zip",
             "agy_acp_server.par",
-            "dd9b778479dbfc753661d63ff66a3235e7249e8451af12adc11d26509172de1ff50452c3af57684009bb944314bd587b2be200bab17df743a2706ce4067d6731",
+            "5dad51168529f6920e28bcb3af284f2c8bdbafd9d0d7062b186793e39ff6e3b3457a49ed10774661380559610771ed24b4ed33098c2e166254c64fccaa3e0d30",
         )
     } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
         (
-            "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.2.1-linux-arm64.zip",
+            "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.5.0-linux-arm64.zip",
             "agy_acp_server.par",
-            "d907f928609ff2232bfeeec9177fe925d3e02e1773295cfb30097e5c4e134758021bff916ba5ae2e2e2ff81d374564349f268f92a4577bc88370537011473e29",
+            "891fa17158127bad56addb5e398c364eb0de4cf31f6a2a35cac991a9f32ab03726200d08abf299643b1c41ed61232ea027888f0c2aed1cbeb2d3a2ae1e13b840",
         )
     } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
         (
-            "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-1.2.1-windows-x86_64.zip",
+            "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-1.5.0-windows-x86_64.zip",
             "agy_acp_server.exe",
-            "515c0af1d00164ca3a608f4ef04caa4ef8045ffa94a3ef2405c9b43c87c7a74c9f71a232c81917353dc3f2d49b69230f935d2ebfa28f7ee021b5aa088f3fa554",
+            "a583af1f539ea51ed6ae7861a8821ae9176211048e49da714abb8c540e785c2e3fdb41c71bc95ba7f09b569d10e2aea367fa206ed0cfdb5af419b2f430e5f0ad",
         )
     } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
         (
-            "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-1.2.1-windows-arm64.zip",
+            "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-1.5.0-windows-arm64.zip",
             "agy_acp_server.exe",
-            "ae3f4c2d2255c03d4d9548e10a760a107c41c99e4c6c710bd82758791e4fd497b75bdef0cd2cfd7fdff1a5bb2fee7afd81f5d043da92ab52dce5505dd2aa58b3",
+            "779c450461532a860c2021bcc6d9b286cf6a7047dc5d4bc69801314e07dfa57e8d2d179b36dac742dc5ca93dc424f829abf81b5b2f767c58dc3cfcd08aaba3d7",
         )
     } else {
         return None;
     };
     Some(crate::archive_install::ArchivePin {
         name: "antigravity-acp",
-        version: "1.2.1",
+        version: "1.5.0",
         url,
         entry,
         sha512,
