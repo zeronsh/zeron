@@ -608,6 +608,57 @@ fn antigravity_archive() -> Option<crate::archive_install::ArchivePin> {
     })
 }
 
+/// the build pinned before 1.5.0, whose installs stay trusted (and run until
+/// one of 1.5.0 is made): the digests of 1.2.1's archives.
+fn antigravity_previous_archive() -> Option<crate::archive_install::ArchivePin> {
+    let (url, entry, sha512) = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        (
+            "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-1.2.1-darwin-arm64.zip",
+            "agy_acp_server.par",
+            "c0049b1f423ffdf0e6a79a6caa104a27b6368522b1eb2c67d9eeed1424af2a07898a66b475b0824a734a0bdd01264473a7d67d1550357a8607fb136507b0afae",
+        )
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        (
+            "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-1.2.1-darwin-x86_64.zip",
+            "agy_acp_server.par",
+            "790541c7e7bbbac1cb15bb4a77b02c53f30c997090487fbf42df16846e2e5d8d4f1cec92038d88956fbec33331ebacefe8faf974aad0690aadc2332215712ff2",
+        )
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        (
+            "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.2.1-linux-x86_64.zip",
+            "agy_acp_server.par",
+            "dd9b778479dbfc753661d63ff66a3235e7249e8451af12adc11d26509172de1ff50452c3af57684009bb944314bd587b2be200bab17df743a2706ce4067d6731",
+        )
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        (
+            "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.2.1-linux-arm64.zip",
+            "agy_acp_server.par",
+            "d907f928609ff2232bfeeec9177fe925d3e02e1773295cfb30097e5c4e134758021bff916ba5ae2e2e2ff81d374564349f268f92a4577bc88370537011473e29",
+        )
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        (
+            "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-1.2.1-windows-x86_64.zip",
+            "agy_acp_server.exe",
+            "515c0af1d00164ca3a608f4ef04caa4ef8045ffa94a3ef2405c9b43c87c7a74c9f71a232c81917353dc3f2d49b69230f935d2ebfa28f7ee021b5aa088f3fa554",
+        )
+    } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
+        (
+            "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-1.2.1-windows-arm64.zip",
+            "agy_acp_server.exe",
+            "ae3f4c2d2255c03d4d9548e10a760a107c41c99e4c6c710bd82758791e4fd497b75bdef0cd2cfd7fdff1a5bb2fee7afd81f5d043da92ab52dce5505dd2aa58b3",
+        )
+    } else {
+        return None;
+    };
+    Some(crate::archive_install::ArchivePin {
+        name: "antigravity-acp",
+        version: "1.2.1",
+        url,
+        entry,
+        sha512,
+    })
+}
+
 fn antigravity_legacy_archive() -> Option<crate::archive_install::ArchivePin> {
     let (url, entry, sha512) = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         (
@@ -690,7 +741,7 @@ fn antigravity_registry_platform() -> Option<&'static str> {
 /// completed installs whose marker proves their origin: a digest pinned by
 /// this or an earlier build, or google's verified code signature.
 fn trusted_antigravity_installs() -> Vec<(semver::Version, PathBuf)> {
-    let pins: Vec<_> = [antigravity_archive(), antigravity_legacy_archive()]
+    let pins: Vec<_> = [antigravity_archive(), antigravity_previous_archive(), antigravity_legacy_archive()]
         .into_iter()
         .flatten()
         .collect();
@@ -7432,6 +7483,12 @@ mod tests {
         assert!(harness.installed());
         assert_eq!(harness.executable_path(), Some(legacy_server.clone()));
         assert!(is_managed_antigravity_server(&legacy_server));
+        // The build pinned before this one stays trusted: an install of it
+        // runs until one of the current pin is made.
+        if let Some(previous) = antigravity_previous_archive() {
+            let previous_server = install(previous.version, previous.sha512);
+            assert_eq!(harness.executable_path(), Some(previous_server));
+        }
 
         let current_server = install(current.version, current.sha512);
         install("9.0.0", "tampered");
