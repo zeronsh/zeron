@@ -5,7 +5,8 @@
 // fixtures' accounts in place of WorkOS.
 
 import { SITE_IDS } from "../src/lib/store/names.ts";
-import { audit, CATEGORIES, DAY, keys, MANY_IDS, manyMore, NOW, plugins, reports, USERS, type FakePlugin, type FakeUser, type FakeVersion } from "./fixtures.ts";
+import { makeToken, tokenHash, tokenId, TOKEN_ID } from "./token.ts";
+import { audit, CATEGORIES, DAY, tokens, MANY_IDS, manyMore, NOW, plugins, reports, USERS, type FakePlugin, type FakeUser, type FakeVersion } from "./fixtures.ts";
 
 const COOKIE = "__Host-zeron_session";
 
@@ -13,14 +14,15 @@ const state = {
   plugins: plugins(),
   reports: reports(),
   audit: audit(),
-  keys: keys(),
+  tokens: tokens(),
   reservations: [
     { id: "zeron-tools", user: "user_grace", note: "For the team's own plugins.", created_at: NOW - 40 * DAY },
     { id: "linear", user: null, note: "Held until Linear asks for it.", created_at: NOW - 12 * DAY },
   ] as { id: string; user: string | null; note: string | null; created_at: number }[],
   /** session id → user id, csrf */
   /** `rotated`: a staff session already replaced on its first privileged use. */
-  sessions: new Map<string, { user: string; csrf: string; rotated?: boolean }>(),
+  /** `fresh_until`: the step-up ticket a sign-in earned (spent by making a deploy token), good until then. */
+  sessions: new Map<string, { user: string; csrf: string; rotated?: boolean; fresh_until?: number | null }>(),
   /** The queue as a screenshot asks for it (POST /_fake/queue, astro dev's /_dev/queue): empty, or this long. Null: as it is. */
   queueAs: null as null | "empty" | number,
   /** A version answered with another's record (POST /_fake/loose?on=1): a page must say only what the record names. */
@@ -150,17 +152,18 @@ function versionInfo(v: FakeVersion, full: boolean) {
     yanked_by: v.status === "yanked" ? v.yanked_by : null,
     superseded_by: v.status === "yanked" && v.yanked_by === "superseded" ? (v.superseded?.by ?? null) : null,
     prerelease: v.version.includes("-"),
-    key: "k5Yh3xQ2b8VtYwGm1rPz0nLc4dEa6sJu9oKi7fBg2Wq",
+    // (A device's key signs a version; a deploy token's version is sent unsigned, and names no key.)
+    key: v.via === "deploy_token" ? null : "k5Yh3xQ2b8VtYwGm1rPz0nLc4dEa6sJu9oKi7fBg2Wq",
     hash: `b3:${hash(v.version + bytes)}`,
     sha256: hash(JSON.stringify(v.manifest)).slice(0, 64),
     bytes,
-    // (The owner's and staff's: the reviewer's decision, the key that published it, why staff stopped it; never the public's.)
+    // (The owner's and staff's: the reviewer's decision, the token that published it, why staff stopped it; never the public's.)
     ...(full
       ? {
           review: v.review,
           checks: v.checks,
           blocked: v.blocked === true,
-          deploy_key: v.deploy_key,
+          deploy_token: v.deploy_token,
           superseded: v.superseded,
           ...(v.removal ? { removal: v.removal } : {}),
         }
@@ -360,7 +363,7 @@ function rotate(request: Request, response: Response): Response {
   if (!s || !found || found.rotated || !isAdmin(s.user)) return response;
   found.rotated = true;
   const next = crypto.randomUUID();
-  state.sessions.set(next, { user: s.user.id, csrf: s.csrf, rotated: true });
+  state.sessions.set(next, { user: s.user.id, csrf: s.csrf, rotated: true, fresh_until: found.fresh_until ?? null });
   const headers = new Headers(response.headers);
   headers.append("set-cookie", `${COOKIE}=${next}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=1800`);
   return new Response(response.body, { status: response.status, headers });
@@ -706,6 +709,76 @@ async function adminAction(request: Request, parts: string[]): Promise<Response>
   return notFound();
 }
 
+// ── Deploy tokens ───────────────────────────────────────────────────────
+
+const STEP_UP_MS = 10 * 60_000;
+const MOST_LIVE_TOKENS = 20;
+const MOST_TOKENS_A_DAY = 10;
+const MOST_SCOPE = 50;
+const PLUGIN_ID = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
+
+/** Whether this session holds a step-up ticket it hasn't spent (a sign-in in the last ten minutes). */
+const fresh = (id: string) => {
+  const until = state.sessions.get(id)?.fresh_until;
+  return typeof until === "number" && until > Date.now();
+};
+
+const wireToken = ({ owner: _, hash: __, ...t }: (typeof state.tokens)[number]) => t;
+const refuse = (status: number, error: string, message: string, extra: Record<string, unknown> = {}, headers: Record<string, string> = {}) =>
+  new Response(JSON.stringify({ error, message, ...extra }), { status, headers: { "content-type": "application/json", "cache-control": "no-store", ...headers } });
+
+/** `/store/v1/me/tokens[/:id]`, as the edge answers it (edge/src/store/identity/deploy-tokens.ts). */
+async function tokenRoute(request: Request, method: string, id: string | undefined, depth: number): Promise<Response> {
+  if (depth > 5) return notFound();
+  const allowed = id === undefined ? ["GET", "POST"] : ["DELETE"];
+  if (!allowed.includes(method)) return new Response(JSON.stringify({ error: "method_not_allowed" }), { status: 405, headers: { "content-type": "application/json", allow: allowed.join(", ") } });
+  // (A token manages nothing, its own kind included.)
+  if (request.headers.get("authorization")?.match(/^Bearer zdt_/i)) return refuse(401, "session_required", "This needs a signed-in session, not a deploy token.");
+  const s = session(request);
+  if (!s) return fail(401, "signed_out");
+  if (method === "GET") return json({ tokens: state.tokens.filter((t) => t.owner === s.user.id).map(wireToken) });
+  const who = writer(request);
+  if (who instanceof Response) return who;
+  if (method === "DELETE") {
+    const t = TOKEN_ID.test(id!) ? state.tokens.find((x) => x.owner === s.user.id && x.id === id) : undefined;
+    if (!t || t.revoked_at !== null) return refuse(404, "unknown_token", "You have no such deploy token.");
+    t.revoked_at = Date.now();
+    return json({ revoked: true });
+  }
+  const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+  const name = typeof body?.name === "string" ? body.name.trim() : "";
+  if (name.length < 1 || name.length > 64 || /[\u0000-\u001f\u007f]/.test(name)) return refuse(400, "invalid_name", "Name the token in 1–64 characters.");
+  const now = Date.now();
+  const expires = body?.expires ?? null;
+  if (expires !== null && !(Number.isSafeInteger(expires) && (expires as number) > now && (expires as number) <= now + 5 * 365 * DAY)) return refuse(400, "invalid_expiry", "expires must be a future time in epoch milliseconds, within 5 years.");
+  const raw = body?.scope as Record<string, unknown> | undefined;
+  let scope: { all: true } | { plugins: string[] };
+  const badScope = (message: string, ids?: unknown[]) => refuse(400, "invalid_scope", message, ids?.length ? { ids: ids.map(String) } : {});
+  if (raw && typeof raw === "object" && !Array.isArray(raw) && Object.keys(raw).length === 1 && raw.all === true) scope = { all: true };
+  else if (raw && typeof raw === "object" && Object.keys(raw).length === 1 && Array.isArray(raw.plugins)) {
+    const ids = raw.plugins as unknown[];
+    if (ids.length < 1 || ids.length > MOST_SCOPE) return badScope(`A token's scope lists 1 to ${MOST_SCOPE} plugins.`);
+    const bad = ids.filter((x) => typeof x !== "string" || !PLUGIN_ID.test(x));
+    if (bad.length) return badScope("Each plugin is a plugin id.", bad);
+    const repeated = ids.filter((x, i) => ids.indexOf(x) !== i);
+    if (repeated.length) return badScope("Name each plugin once.", [...new Set(repeated)]);
+    scope = { plugins: (ids as string[]).slice().sort() };
+    const notOwned = scope.plugins.filter((p) => state.plugins.find((x) => x.id === p)?.owner !== s.user.id);
+    if (notOwned.length) return refuse(403, "not_owner", `You don't own ${notOwned.join(", ")} in the store.`, { ids: notOwned });
+  } else return badScope("scope is { all: true } or { plugins: [id, …] }.");
+  // The account's limits, then the fresh sign-in, spent only by a token made (the edge's order: user-directory.ts).
+  const own = state.tokens.filter((t) => t.owner === s.user.id);
+  if (own.filter((t) => t.created_at > now - DAY).length >= MOST_TOKENS_A_DAY) return refuse(429, "rate_limited", "Too many new deploy tokens today (10). Try again tomorrow.", {}, { "retry-after": "3600" });
+  if (own.filter((t) => t.revoked_at === null && (t.expires_at === null || t.expires_at > now)).length >= MOST_LIVE_TOKENS) return refuse(409, "too_many_tokens", "This account has as many live deploy tokens as it can (20). Revoke one first.");
+  if (!fresh(s.id)) return refuse(403, "step_up_required", "Sign in again to do this. A fresh sign-in is needed, not just this device's session.");
+  state.sessions.get(s.id)!.fresh_until = null;
+  const { token, short } = makeToken(crypto.getRandomValues(new Uint8Array(32)));
+  const row = { owner: s.user.id, id: tokenId(crypto.getRandomValues(new Uint8Array(11))), short, hash: await tokenHash(token), scope, last_used_plugin: null, name, created_at: now, last_used_at: null, expires_at: expires as number | null, revoked_at: null };
+  state.tokens.unshift(row);
+  // The secret, this once.
+  return new Response(JSON.stringify({ token, id: row.id, short, name, scope, created_at: now, expires_at: row.expires_at }), { status: 201, headers: { "content-type": "application/json", "cache-control": "no-store" } });
+}
+
 // ── Sign-in (the fake's own: pick an account) ───────────────────────────
 
 const safeReturn = (value: string | null) => (value && value.startsWith("/") && !value.startsWith("//") && !value.startsWith("/\\") ? value : "/");
@@ -723,7 +796,10 @@ function callback(url: URL): Response {
   const user = USERS.find((u) => u.id === url.searchParams.get("as"));
   if (!user) return fail(400, "bad_request");
   const id = crypto.randomUUID();
-  state.sessions.set(id, { user: user.id, csrf: crypto.randomUUID().replace(/-/g, "") });
+  // (Every web sign-in asks for credentials, so it earns a step-up ticket: ten minutes, used once. The fake's
+  // `fresh=0` signs in without one, as a session whose ticket is spent or old.)
+  const ticket = url.searchParams.get("fresh") === "0" ? null : Date.now() + STEP_UP_MS;
+  state.sessions.set(id, { user: user.id, csrf: crypto.randomUUID().replace(/-/g, ""), fresh_until: ticket });
   return new Response(null, {
     status: 303,
     // (The edge sends the browser back to an absolute address on the site.)
@@ -760,7 +836,7 @@ async function route(request: Request): Promise<Response> {
     if (parts[2] === "session" && method === "GET") {
       const s = session(request);
       if (!s) return fail(401, "signed_out");
-      return json({ user: { name: s.user.name, email: `${s.user.id.slice(5)}@example.com` }, username: s.user.username, roles: s.user.roles, csrf: s.csrf, expires_at: NOW + DAY, fresh_sign_in: false });
+      return json({ user: { name: s.user.name, email: `${s.user.id.slice(5)}@example.com` }, username: s.user.username, roles: s.user.roles, csrf: s.csrf, expires_at: NOW + DAY, fresh_sign_in: fresh(s.id) });
     }
     return notFound();
   }
@@ -776,18 +852,23 @@ async function route(request: Request): Promise<Response> {
     state.bare = url.searchParams.get("id") || null;
     return json({ bare: state.bare });
   }
+  // (Every account's deploy tokens as the fixtures have them, those a test made gone: POST /_fake/tokens.)
+  if (parts[0] === "_fake" && parts[1] === "tokens" && method === "POST") {
+    state.tokens = tokens();
+    return json({ tokens: state.tokens.length });
+  }
   if (parts[0] === "_fake" && parts[1] === "empty" && method === "POST") {
     state.empty = url.searchParams.get("on") === "1";
     return json({ empty: state.empty });
   }
   // (One plugin's version under another name, everywhere it is named: POST /_fake/rename?id=…&from=…&to=…. A version the app's link can't carry, without a fixture of its own.)
-  // (Ada's thirty more, and her "Every one" key naming all fifty: POST /_fake/many?on=1; without on=1, as before.)
+  // (Ada's thirty more, and her "Every one" token naming all fifty: POST /_fake/many?on=1; without on=1, as before.)
   if (parts[0] === "_fake" && parts[1] === "many" && method === "POST") {
     const on = url.searchParams.get("on") === "1";
     const extra = new Set(MANY_IDS);
     state.plugins = state.plugins.filter((p) => !extra.has(p.id));
     if (on) state.plugins.push(...manyMore());
-    const every = state.keys.find((k) => k.owner === "user_ada" && k.name === "Every one");
+    const every = state.tokens.find((k) => k.owner === "user_ada" && k.name === "Every one");
     if (every) every.scope = { plugins: state.plugins.filter((p) => p.owner === "user_ada").map((p) => p.id).sort() };
     return json({ many: on });
   }
@@ -875,20 +956,8 @@ async function route(request: Request): Promise<Response> {
     // (`{publisher_id, plugins}`: the contract after e3daa69b4.)
     return s ? json({ publisher_id: publisherOf(s.user.id), plugins: mine(s.user) }) : fail(401, "signed_out");
   }
-  // The account's deploy keys (amendment 44): listed and revoked here; made only on a device.
-  if (a === "me" && b === "keys") {
-    const s = session(request);
-    if (!s) return fail(401, "signed_out");
-    if (c === undefined && method === "GET") return json({ keys: state.keys.filter((k) => k.owner === s.user.id).map(({ owner: _, ...k }) => k) });
-    if (c && method === "DELETE") {
-      const who = writer(request);
-      if (who instanceof Response) return who;
-      const k = state.keys.find((x) => x.owner === who.user.id && x.key === c);
-      if (!k) return notFound();
-      k.revoked_at ??= Date.now();
-      return json({ revoked: true });
-    }
-  }
+  // The account's deploy tokens (contract a315eef5a): listed, made with a fresh sign-in, revoked.
+  if (a === "me" && b === "tokens") return tokenRoute(request, method, c, parts.length);
   if (a === "admin") {
     if (b === "reservations" && method === "DELETE" && c) {
       const who = adminWriter(request);

@@ -100,6 +100,8 @@ export const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAA
 export interface PackageOptions {
   manifest?: Record<string, unknown>;
   files?: Record<string, string | Uint8Array | undefined>;
+  /** As a deploy token sends one: no signature at all (the token vouches for its publisher). */
+  unsigned?: boolean;
 }
 
 export class Publisher {
@@ -163,6 +165,11 @@ export class Publisher {
     for (const [k, v] of Object.entries(fields)) if (v === undefined) delete fields[k];
     const manifest = parseJsonText(JSON.stringify(fields)) as Map<string, unknown>;
     const hashes = new Map([...bytes.keys()].sort().map((p) => [p, createHash("sha256").update(bytes.get(p)!).digest("hex")]));
+    if (o.unsigned) {
+      return new TextEncoder().encode(
+        JSON.stringify({ format: "zeron-plugin:v1", manifest: JSON.parse(canonicalJson(manifest)), files: Object.fromEntries([...bytes].map(([p, d]) => [p, d.toString("base64")])) }),
+      );
+    }
     const toSign = new Map(manifest);
     toSign.set("signature", new Map<string, unknown>([["key", this.key], ["files", new Map(hashes)]]));
     const sig = b64url(sign(null, Buffer.from(prefix + canonicalJson(toSign)), this.privateKey));
@@ -173,18 +180,9 @@ export class Publisher {
     );
   }
 
-  /** A deploy key for `id`, as `zeron plugin key create` makes one (a fresh sign-in's ticket with it). */
-  /** Make a deploy key, the account's (amendment 44), for the plugins named (sorted), as Zeron makes one on the author's machine. */
-  async deployKey(plugins: string[], name: string): Promise<string> {
-    const exchanged = await json(fetch(`${this.edge}/auth/exchange`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: `code:${this.userId}` }) }));
-    const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-    const key = publicKey.export({ format: "jwk" }).x as string;
-    // (The proof binds the account, the key's lifetime and its scope: "zeron-deploy-key:v2:" + publisher id + ":never:" + its ids + ":" + key.)
-    const publisher = `pub_${createHash("sha256").update(`zeron-publisher:v1:${this.userId}`).digest("hex").slice(0, 32)}`;
-    const ids = [...plugins].sort();
-    const proof = b64url(sign(null, Buffer.from(`zeron-deploy-key:v2:${publisher}:never:${ids.join(",")}:${key}`), privateKey));
-    await json(fetch(`${this.edge}/store/v1/me/keys`, { method: "POST", headers: { authorization: `Bearer ${this.bearer}`, "content-type": "application/json" }, body: JSON.stringify({ key, name, scope: { plugins: ids }, proof, stepUp: (exchanged.stepUp as { token: string }).token }) }));
-    return key;
+  /** Publish a version with a deploy token, as CI does (`ZERON_DEPLOY_TOKEN`): the package unsigned, the token its bearer. */
+  async publishWithToken(token: string, id: string, version: string, o: PackageOptions = {}): Promise<Response> {
+    return fetch(`${this.edge}/store/v1/plugins/${id}/versions`, { method: "POST", headers: { authorization: `Bearer ${token}` }, body: await this.package(id, version, { ...o, unsigned: true }) });
   }
 
   /** Publish a version (listed at once, not verified: amendment 45). */

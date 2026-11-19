@@ -41,10 +41,12 @@ for (const field of document.querySelectorAll<HTMLInputElement>("input[data-sear
 if (location.hash === "#q") document.getElementById("q")?.focus();
 
 // ── Copy ───────────────────────────────────────────────────────────────
-// A command's copy button: its words to the clipboard, and it says so.
+// A command's copy button: its words to the clipboard, and it says so. (A
+// deploy token's copies the words of the element it names: the token is
+// written on the page once, never into an attribute as well.)
 document.addEventListener("click", async (event) => {
-  const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>("[data-copy]") : null;
-  const text = button?.dataset.copy;
+  const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>("[data-copy], [data-copy-of]") : null;
+  const text = button?.dataset.copy ?? (button?.dataset.copyOf ? document.getElementById(button.dataset.copyOf)?.textContent?.trim() : undefined);
   if (!button || !text) return;
   try {
     await navigator.clipboard.writeText(text);
@@ -59,6 +61,26 @@ document.addEventListener("click", async (event) => {
     // (No clipboard: the words are there to select.)
   }
 });
+
+// ── A deploy token, shown once ─────────────────────────────────────────
+// The page that made it is the only one that shows it. Its address becomes
+// Deploy tokens' at once, so a reload or a return lands on the list, never
+// on the post again; "I've copied it" leaves it without a step back to it;
+// and leaving takes the token off the page, so no back-forward cache keeps
+// it (a page come back from one goes to the list).
+const secret = document.querySelector<HTMLElement>("[data-secret]");
+if (secret) {
+  const list = "/account/tokens";
+  history.replaceState(null, "", list);
+  const forget = () => secret.querySelectorAll("#the-token").forEach((el) => (el.textContent = ""));
+  window.addEventListener("pagehide", forget);
+  window.addEventListener("pageshow", (event) => event.persisted && location.replace(list));
+  secret.querySelector("[data-secret-done]")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    forget();
+    location.replace(list);
+  });
+}
 
 // ── A plugin's pictures ────────────────────────────────────────────────
 // The strip scrolls by itself (keyboard, touch, trackpad); the dots follow

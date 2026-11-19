@@ -28,6 +28,7 @@ try {
         const page = await context.newPage();
         if (p.user) await page.goto(new URL(`/auth/web/callback?as=${p.user}&return_to=/plugins`, site.url).href);
         await page.goto(new URL(p.path, site.url).href, { waitUntil: "networkidle" });
+        if (p.act) await p.act(page);
         await page.evaluate(() => document.fonts.ready);
         const report = await page.evaluate(inkAudit, { columns: COLUMNS, window: 40, tolerance: 1, exceptions: EXCEPTIONS });
         const key = `${p.name}-${width}-${scheme}`;

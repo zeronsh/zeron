@@ -1,4 +1,4 @@
-/* Your pages: Your plugins and Deploy keys (the prototype's yours.css and keys.css), with their states. */
+/* Your pages: Your plugins and Deploy tokens (the prototype's yours.css and keys.css), with their states. */
 .crumbs { display: flex; align-items: center; gap: 6px; padding-top: 28px; font-size: 13px; line-height: 20px; color: var(--text-3); }
 .crumbs svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .crumbs a:hover { color: var(--text); }
@@ -83,7 +83,7 @@ a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
 .mkeys a { color: var(--text-2); font-weight: 500; border-radius: 4px; }
 .mkeys a:hover { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
 
-/* ---- Deploy keys ---- */
+/* ---- Deploy tokens ---- */
 .keys { margin-top: 28px; }
 /* "Can publish" is two tracks: one slot for the tiles, always room for three and the count (so every row's
    words, and the header's, start on one column, whatever the key holds), and the words' own. Its parts are
@@ -136,15 +136,48 @@ a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
 .gone[open] summary svg { transform: rotate(-90deg); }
 .gone .keys { margin-top: 12px; }
 
-/* New key: where a key is made (never here). */
-.newkey.menu { inset: 0; margin: auto; height: fit-content; width: min(480px, calc(100vw - 32px)); padding: 22px 24px; gap: 12px; font-size: 14px; line-height: 21px; color: var(--text-2); }
-.newkey h2 { font-size: 19px; line-height: 26px; color: var(--text); }
-.newkey code { font: 500 12.5px/1 var(--mono); }
-/* (The command wraps, never scrolls in a box nothing can focus.) */
-.newkey .cmd { align-self: stretch; justify-content: space-between; height: auto; min-height: 40px; padding-top: 6px; padding-bottom: 6px; }
-.newkey .cmd code { white-space: normal; overflow-wrap: anywhere; line-height: 18px; }
-.newkey a.more { display: inline-flex; width: auto; height: auto; padding: 0; }
-.newkey a.more:hover { background: none; }
+/* New deploy token: its form, in Deploy tokens' dialog or as a page of its own (components/look/TokenForm.astro).
+   Each field a box that holds text, so it hangs by its padding, its words on the form's column. */
+.tokform { display: grid; gap: 20px; margin-top: 18px; }
+.tokform .tf { min-width: 0; margin: 0; padding: 0; border: 0; }
+.tokform .field-label { display: block; margin-bottom: 6px; padding: 0; font-size: 13px; line-height: 20px; font-weight: 500; color: var(--text-2); }
+.tokform .field { position: relative; }
+.tokform :is(.input, select) { --pad: 12px; display: block; width: calc(100% + 2 * var(--pad)); margin-inline: calc(-1 * var(--pad)); height: 40px; padding: 0 var(--pad); border: 0; border-radius: 10px; background: var(--bg); color: var(--text); font-size: 14px; line-height: 20px; box-shadow: inset 0 0 0 1px var(--line-2); }
+.tokform select { appearance: none; padding-right: 36px; }
+.tokform .input::placeholder { color: var(--text-3); }
+.tokform :is(.input, select):focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.tokform .input[aria-invalid] { box-shadow: inset 0 0 0 1px var(--danger); }
+.tokform .field .chevron { position: absolute; right: 0; top: 50%; translate: 0 -50%; color: var(--text-3); pointer-events: none; }
+.tokform .opt { display: grid; grid-template-columns: 16px minmax(0, 1fr); column-gap: 10px; align-items: start; padding: 6px 0; cursor: pointer; }
+.tokform .opt input { width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--text); }
+.tokform .opt b { display: block; font-size: 14px; line-height: 20px; font-weight: 500; }
+.tokform .opt small { display: block; font-size: 13px; line-height: 18px; color: var(--text-3); }
+.tokform .opt:has(input:disabled) { cursor: default; opacity: 0.55; }
+/* (Chosen plugins: each to tick, the list in its own well; with all of yours, nothing to choose.) */
+.tokform .picks { --pad: 12px; display: grid; gap: 2px; max-height: 248px; overflow: auto; margin: 6px calc(-1 * var(--pad)) 0; padding: 6px var(--pad); border-radius: 12px; background: var(--sunken); list-style: none; }
+.tokform .scopes:has(input[value="all"]:checked) .picks { display: none; }
+.tokform .pick-pl { display: flex; align-items: center; gap: 10px; min-height: 36px; font-size: 14px; line-height: 20px; overflow-wrap: anywhere; cursor: pointer; }
+.tokform .pick-pl input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--text); }
+.tokform .pick-pl > span:last-child { min-width: 0; padding-block: 8px; }
+.tokform .said { margin-top: 6px; font-size: 13px; line-height: 18px; color: var(--danger); }
+.tokform > .said { margin-top: 0; }
+.tokform .note { font-size: 13.5px; line-height: 20px; color: var(--text-2); }
+.tokform .answers { display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px; }
+.askcard.newtoken { max-width: 560px; }
+
+/* The token, shown once: its words, the token to copy, what it is, and done. */
+.reveal { max-width: 600px; }
+.reveal .secret { --pad: 14px; display: flex; align-items: center; gap: 8px; margin: 20px calc(-1 * var(--pad)) 0; padding: 8px 6px 8px var(--pad); border-radius: 12px; background: var(--sunken); box-shadow: inset 0 0 0 1px var(--line); }
+.reveal .secret code { flex: 1; min-width: 0; font: 500 13.5px/20px var(--mono); color: var(--text); overflow-wrap: anywhere; user-select: all; }
+.reveal .secret button { display: grid; place-items: center; flex: none; width: 32px; height: 32px; border-radius: 8px; color: var(--text-2); transition: color 0.12s var(--ease), background-color 0.12s var(--ease); }
+.reveal .secret button:hover { color: var(--text); background: var(--surface); }
+.reveal .secret button.is-done { color: var(--verified); }
+.reveal .secret svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.reveal .made { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 20px; margin-top: 20px; font-size: 14px; line-height: 20px; }
+.reveal .made > div { display: contents; }
+.reveal .made dt { color: var(--text-3); }
+.reveal .made dd { margin: 0; overflow-wrap: anywhere; }
+.reveal .made .id { margin-left: 6px; font: 450 12.5px/20px var(--mono); color: var(--text-3); }
 
 /* How it works, in three. */
 .how { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 32px; margin-top: 56px; padding-top: 28px; box-shadow: 0 -1px 0 var(--line); }

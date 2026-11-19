@@ -93,7 +93,7 @@ const hiddenUntilKnown = (id: Section) => id === "review" && isPublic;
       <div class="menu" id="me-menu" popover>
         <p class="who"><b data-handle>{handle}</b>Signed in to Zeron</p>
         <a href="/account">Your plugins</a>
-        <a href="/account/keys">Deploy keys</a>
+        <a href="/account/tokens">Deploy tokens</a>
         <a href="/plugins/publishing">Publishing guide</a>
         <hr />
         <form method="post" action="/auth/web/logout" data-signout>
@@ -111,7 +111,7 @@ const hiddenUntilKnown = (id: Section) => id === "review" && isPublic;
       {(isPublic || !session) && <a href={signInUrl(here)} data-signin>Sign in</a>}
       {(isPublic || session) && (
         <>
-          <a href="/account/keys" hidden={isPublic} data-signed-in>Deploy keys</a>
+          <a href="/account/tokens" hidden={isPublic} data-signed-in>Deploy tokens</a>
           <form method="post" action="/auth/web/logout" hidden={isPublic} data-signout>
             <input type="hidden" name="csrf" value={session?.csrf ?? ""} />
             <button type="submit">Sign out <span class="t3" data-handle>{handle}</span></button>

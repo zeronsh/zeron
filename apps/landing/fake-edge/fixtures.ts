@@ -5,6 +5,7 @@
 
 import { bytes } from "../src/lib/store/format.ts";
 import { ICONS, screenshot } from "./art.ts";
+import { makeToken, tokenId } from "./token.ts";
 
 export const DAY = 86_400_000;
 /** The fixtures' "now": fixed, so the tests see the same dates every run. */
@@ -68,9 +69,9 @@ export interface FakeVersion {
   notes: string | null;
   engines: { zeron?: string } | null;
   review: FakeReview;
-  via: "device" | "deploy_key";
-  /** The deploy key that published it, when one did. */
-  deploy_key: { key: string; name: string } | null;
+  via: "device" | "deploy_token";
+  /** The deploy token that published it, when one did: its id, short id and name, never more. */
+  deploy_token: { id: string; short: string; name: string } | null;
   /** Who stopped its new installs: its author, or the store when a newer version superseded it unverified. */
   yanked_by: "author" | "superseded" | null;
   superseded: { at: number; by: string } | null;
@@ -253,7 +254,7 @@ function build(spec: Spec): FakePlugin {
       engines: { zeron: h.engines ?? ">=0.3.0" },
       review,
       via: h.via ?? "device",
-      deploy_key: h.via === "deploy_key" ? { key: "k5Yh3xQ2b8VtYwGm1rPz0nLc4dEa6sJu9oKi7fBg2Wq", name: "GitHub Actions" } : null,
+      deploy_token: h.via === "deploy_token" ? githubActions() : null,
       yanked_by: h.status === "yanked" ? ("author" as const) : null,
       superseded: null,
       removal: staff ? { at: h.review?.decided_at ?? published + DAY, reason: h.review?.message ?? h.review?.reason ?? null } : null,
@@ -356,7 +357,7 @@ Footnotes are shown as typed.[^1] Questions and ideas are welcome on [the reposi
       { version: "1.0.0", status: "verified", ago: 120, notes: "First release." },
       { version: "1.1.0", status: "verified", ago: 60, notes: "- Pauses when your computer sleeps.\n- A sound at the end, if you want one." },
       // (A picture smaller than the reading column: drawn at its own size, never scaled up.)
-      { version: "1.2.0", status: "verified", ago: 9, via: "deploy_key", notes: "### New\n\n- Breaks that follow your agents: a long run gets a long break.\n\n### Fixed\n\n- The timer kept counting after its chat closed.", files: { "shots/small.svg": '<svg xmlns="http://www.w3.org/2000/svg" width="360" height="200" viewBox="0 0 360 200"><rect width="360" height="200" fill="#1b1726"/><circle cx="180" cy="100" r="56" fill="none" stroke="#ad98fe" stroke-width="10"/><path d="M180 64v40l24 16" fill="none" stroke="#ad98fe" stroke-width="10" stroke-linecap="round"/></svg>' } },
+      { version: "1.2.0", status: "verified", ago: 9, via: "deploy_token", notes: "### New\n\n- Breaks that follow your agents: a long run gets a long break.\n\n### Fixed\n\n- The timer kept counting after its chat closed.", files: { "shots/small.svg": '<svg xmlns="http://www.w3.org/2000/svg" width="360" height="200" viewBox="0 0 360 200"><rect width="360" height="200" fill="#1b1726"/><circle cx="180" cy="100" r="56" fill="none" stroke="#ad98fe" stroke-width="10"/><path d="M180 64v40l24 16" fill="none" stroke="#ad98fe" stroke-width="10" stroke-linecap="round"/></svg>' } },
       { version: "1.3.0-beta.1", status: "undecided", ago: 1, notes: "Try the new compact look." },
     ],
   },
@@ -815,12 +816,20 @@ export function audit(): FakeAudit[] {
   ];
 }
 
-/** A deploy key, the account's (amendment 44), with its scope fixed when made. */
-export interface FakeKey {
+/**
+ * A deploy token, the account's (contract a315eef5a), with its scope fixed
+ * when made. As the store, the fake keeps a made token's hash and short id,
+ * never its secret; a fixture's id and short id are a real token's, made
+ * the store's way from fixed bytes, the same every run.
+ */
+export interface FakeToken {
   owner: string;
+  id: string;
+  short: string;
+  /** The SHA-256 of the secret, in hex (one the fake made; a fixture's secret was never kept). */
+  hash: string | null;
   scope: { all: true } | { plugins: string[] };
   last_used_plugin: string | null;
-  key: string;
   name: string;
   created_at: number;
   last_used_at: number | null;
@@ -828,19 +837,32 @@ export interface FakeKey {
   revoked_at: number | null;
 }
 
-export function keys(): FakeKey[] {
-  // (Keys for many of Ada's plugins: the keys page names three, then counts, and lists the rest on request.)
+function fixed(n: number, salt: number) {
+  return Uint8Array.from({ length: 32 }, (_, j) => (n * 151 + j * j * 29 + j * 11 + salt) & 0xff);
+}
+/** Fixture token `n`'s id and short id. */
+export function fixtureToken(n: number) {
+  return { id: tokenId(fixed(n, 101)), short: makeToken(fixed(n, 7)).short };
+}
+/** The token that published Focus timer's 1.2.0: "GitHub Actions", the sixth below. */
+export function githubActions() {
+  return { ...fixtureToken(5), name: "GitHub Actions" };
+}
+
+export function tokens(): FakeToken[] {
+  // (Tokens for many of Ada's plugins: the page names three, then counts, and lists the rest on request.)
   const adas = plugins().filter((p) => p.owner === "user_ada").map((p) => p.id).sort();
-  return [
-    // (Each key's first three, as its row draws them, three different plugins: no two tiles alike side by side.)
-    { owner: "user_ada", scope: { plugins: adas.slice(6) }, last_used_plugin: "focus-timer", key: "Mn4pQ7rS1tU2vW3xY5zA6bC8dE9fG0hJ2kL3mN4oP5q", name: "GitHub Actions, the monorepo", created_at: NOW - 30 * DAY, last_used_at: NOW - 2 * 3_600_000, expires_at: NOW + 300 * DAY, revoked_at: null },
-    { owner: "user_ada", scope: { plugins: ["cloud-costs", "standup-notes", "token-meter", "weather"] }, last_used_plugin: null, key: "Qm81LzR2sT3uV4wX5yZ6aB7cD8eF9gH0iJ1kL2mN3oP", name: "Docs site build", created_at: NOW - 6 * DAY, last_used_at: null, expires_at: null, revoked_at: null },
-    { owner: "user_ada", scope: { plugins: adas.slice(4, 6) }, last_used_plugin: "focus-timer", key: "Rr7sT8uV9wX0yZ1aB2cD3eF4gH5iJ6kL7mN8oP9qR0s", name: "An old runner, ended", created_at: NOW - 400 * DAY, last_used_at: NOW - 40 * DAY, expires_at: NOW - 5 * DAY, revoked_at: null },
-    // (Three, named in full; and every one of Ada's by name: twenty, or fifty, the most a key may name, with /_fake/many.)
-    { owner: "user_ada", scope: { plugins: ["agent-relay", "quick-links", "theme-sync"] }, last_used_plugin: null, key: "Tt1uV2wX3yZ4aB5cD6eF7gH8iJ9kL0mN1oP2qR3sT4u", name: "Three of them", created_at: NOW - 3 * DAY, last_used_at: null, expires_at: NOW + 200 * DAY, revoked_at: null },
-    { owner: "user_ada", scope: { plugins: adas }, last_used_plugin: null, key: "Ww5xY6zA7bC8dE9fG0hJ1kL2mN3oP4qR5sT6uV7wX8y", name: "Every one", created_at: NOW - 1 * DAY, last_used_at: null, expires_at: null, revoked_at: null },
-    { owner: "user_ada", scope: { plugins: ["focus-timer"] }, last_used_plugin: "focus-timer", key: "k5Yh3xQ2b8VtYwGm1rPz0nLc4dEa6sJu9oKi7fBg2Wq", name: "GitHub Actions", created_at: NOW - 50 * DAY, last_used_at: NOW - 9 * DAY, expires_at: NOW + 315 * DAY, revoked_at: null },
-    { owner: "user_ada", scope: { all: true }, last_used_plugin: "session-badges", key: "Zt8nQ1wE4rT7yU0iO3pA6sD9fG2hJ5kL8zX1cV4bN7m", name: "Old laptop script", created_at: NOW - 110 * DAY, last_used_at: NOW - 100 * DAY, expires_at: null, revoked_at: NOW - 60 * DAY },
+  type Row = Omit<FakeToken, "id" | "short" | "hash">;
+  const rows: Row[] = [
+    // (Each token's first three, as its row draws them, three different plugins: no two tiles alike side by side.)
+    { owner: "user_ada", scope: { plugins: adas.slice(6) }, last_used_plugin: "focus-timer", name: "GitHub Actions, the monorepo", created_at: NOW - 30 * DAY, last_used_at: NOW - 2 * 3_600_000, expires_at: NOW + 300 * DAY, revoked_at: null },
+    { owner: "user_ada", scope: { plugins: ["cloud-costs", "standup-notes", "token-meter", "weather"] }, last_used_plugin: null, name: "Docs site build", created_at: NOW - 6 * DAY, last_used_at: null, expires_at: null, revoked_at: null },
+    { owner: "user_ada", scope: { plugins: adas.slice(4, 6) }, last_used_plugin: "focus-timer", name: "An old runner, ended", created_at: NOW - 400 * DAY, last_used_at: NOW - 40 * DAY, expires_at: NOW - 5 * DAY, revoked_at: null },
+    // (Three, named in full; and every one of Ada's by name: twenty, or fifty, the most a token may name, with /_fake/many.)
+    { owner: "user_ada", scope: { plugins: ["agent-relay", "quick-links", "theme-sync"] }, last_used_plugin: null, name: "Three of them", created_at: NOW - 3 * DAY, last_used_at: null, expires_at: NOW + 200 * DAY, revoked_at: null },
+    { owner: "user_ada", scope: { plugins: adas }, last_used_plugin: null, name: "Every one", created_at: NOW - 1 * DAY, last_used_at: null, expires_at: null, revoked_at: null },
+    { owner: "user_ada", scope: { plugins: ["focus-timer"] }, last_used_plugin: "focus-timer", name: "GitHub Actions", created_at: NOW - 50 * DAY, last_used_at: NOW - 9 * DAY, expires_at: NOW + 315 * DAY, revoked_at: null },
+    { owner: "user_ada", scope: { all: true }, last_used_plugin: "session-badges", name: "Old laptop script", created_at: NOW - 110 * DAY, last_used_at: NOW - 100 * DAY, expires_at: null, revoked_at: NOW - 60 * DAY },
     // The worst case's ten: live and revoked, used and never, ending soon and never.
     ...[
       ["GitHub Actions: release on tag, the main repository's workflow", 40, 1, 300, null],
@@ -850,7 +872,7 @@ export function keys(): FakeKey[] {
       ["Backup runner", 15, null, 365, null],
       ["Release candidate pipeline", 60, 2, null, null],
       ["Old CI", 300, 250, null, 200],
-      ["A key that was leaked in a log", 120, 119, 200, 118],
+      ["A token that was leaked in a log", 120, 119, 200, 118],
       ["Test", 20, 19, 30, 10],
       ["Contributor's fork", 8, 3, 3, null],
     ].map(([name, made, used, ends, revoked], i) => ({
@@ -858,8 +880,6 @@ export function keys(): FakeKey[] {
       owner: "user_ada",
       scope: i % 3 === 0 ? ({ all: true } as const) : { plugins: ["worst-case-listing-at-every-limit-xyz12", ...(i % 3 === 2 ? ["focus-timer"] : [])].sort() },
       last_used_plugin: used === null ? null : "worst-case-listing-at-every-limit-xyz12",
-      // (Each its own 43 characters of base64url, as an ed25519 key is.)
-      key: Array.from({ length: 43 }, (_, j) => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"[(i * 131 + j * j * 17 + j * 7 + 3) % 64]).join(""),
       name: name as string,
       created_at: NOW - (made as number) * DAY,
       last_used_at: used === null ? null : NOW - (used as number) * DAY,
@@ -867,4 +887,5 @@ export function keys(): FakeKey[] {
       revoked_at: revoked === null ? null : NOW - (revoked as number) * DAY,
     })),
   ];
+  return rows.map((row, n) => ({ ...row, ...fixtureToken(n), hash: null }));
 }

@@ -1,0 +1,103 @@
+---
+// New deploy token's form (contract a315eef5a; the app's words): its name,
+// when it ends, what it can publish (all your plugins, now and later, or
+// the ones you tick), and Create token. Made only with a fresh sign-in: a
+// session without one is told it'll sign in again first, and the post
+// sends it there and back to this form as it was filled in. In a dialog
+// on Deploy tokens (Cancel closes it), or as a page of its own (Cancel goes
+// back): the same form, posting to the same place. Nothing it holds is the
+// token: that's made by the post and shown once by the page that answers it.
+import Tile from "./Tile.astro";
+import Words from "./Words.astro";
+import { count } from "../../lib/store/format.ts";
+import { ENDS, MOST_PLUGINS, type Refusal, type TokenFields } from "../../lib/store/tokens.ts";
+import type { MyPlugin } from "../../lib/store/types.ts";
+import { store } from "../../lib/store/words.ts";
+
+interface Props {
+  /** Its element ids start with this: a page may hold the form twice (its dialog, a page). */
+  id: string;
+  csrf: string;
+  fields: TokenFields;
+  /** Your plugins, to choose from. */
+  plugins: Pick<MyPlugin, "id" | "name" | "icon" | "version">[];
+  /** Whether this session's sign-in is fresh enough to make one now. */
+  fresh: boolean;
+  /** Back from signing in again for it. */
+  again?: boolean;
+  refusal?: Refusal | null;
+  /** In a dialog: Cancel closes it. Else Cancel is a link here. */
+  dialog?: boolean;
+  back: string;
+}
+const { id, csrf, fields, plugins, fresh, again = false, refusal = null, dialog = false, back } = Astro.props;
+const said = (field: Refusal["field"]) => (refusal && refusal.field === field ? `${id}-said` : undefined);
+---
+
+<form method="post" action="/account/tokens/new" class="tokform">
+  <input type="hidden" name="csrf" value={csrf} />
+  <div class="tf">
+    <label class="field-label" for={`${id}-name`}>{store("plugins.store.key.name")}</label>
+    <input
+      id={`${id}-name`}
+      class="input"
+      type="text"
+      name="name"
+      value={fields.name}
+      placeholder={store("plugins.store.key.name_placeholder")}
+      maxlength="64"
+      required
+      autocomplete="off"
+      spellcheck="false"
+      aria-invalid={said("name") ? "true" : undefined}
+      aria-describedby={said("name")}
+    />
+    {said("name") && <p class="said" id={said("name")}>{refusal!.message}</p>}
+  </div>
+  <div class="tf">
+    <label class="field-label" for={`${id}-ends`}>{store("plugins.store.key.expiry_label")}</label>
+    <div class="field">
+      <select id={`${id}-ends`} name="ends">
+        {ENDS.map((e) => <option value={e} selected={e === fields.ends}>{store(`plugins.store.key.expiry.${e}`)}</option>)}
+      </select>
+      <svg class="chevron" width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
+    </div>
+  </div>
+  <fieldset class="tf scopes" aria-describedby={said("plugins")}>
+    <legend class="field-label">{store("plugins.store.key.scope.label")}</legend>
+    <label class="opt">
+      <input type="radio" name="scope" value="all" checked={fields.scope === "all"} />
+      <span><b>{store("plugins.store.key.scope.all")}</b><small>{count(plugins.length)} today, and any you publish later</small></span>
+    </label>
+    <label class="opt">
+      <input type="radio" name="scope" value="chosen" checked={fields.scope === "chosen"} disabled={plugins.length === 0} />
+      <span><b>{store("plugins.store.key.scope.chosen")}</b><small>Only these, up to {MOST_PLUGINS}</small></span>
+    </label>
+    {
+      plugins.length > 0 && (
+        <ul class="picks" aria-label="Plugins it can publish">
+          {plugins.map((p) => (
+            <li>
+              <label class="pick-pl">
+                <input type="checkbox" name="plugins" value={p.id} checked={fields.plugins.includes(p.id)} />
+                <Tile id={p.id} name={p.name} icon={p.icon} version={p.version} size="xs" />
+                <span><Words text={p.name} /></span>
+              </label>
+            </li>
+          ))}
+        </ul>
+      )
+    }
+    {said("plugins") && <p class="said" id={said("plugins")}>{refusal!.message}</p>}
+  </fieldset>
+  {refusal && refusal.field === null && <p class="said" role="alert">{refusal.message}</p>}
+  {!fresh ? <p class="note">{store("plugins.store.key.new_body")}</p> : again && <p class="note ok">You signed in again. Create the token to finish.</p>}
+  <div class="answers">
+    {dialog ? (
+      <button class="btn sec" type="submit" formmethod="dialog" formnovalidate>Cancel</button>
+    ) : (
+      <a class="btn sec" href={back}>Cancel</a>
+    )}
+    <button class="btn pri" type="submit">{store("plugins.store.key.create")}</button>
+  </div>
+</form>

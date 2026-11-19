@@ -6,7 +6,7 @@ import type { AstroCookies } from "astro";
 export const FLASH = {
   yanked: { message: "New installs stopped. Those who have it keep it working.", tone: "success" },
   unyanked: { message: "It can be installed again.", tone: "success" },
-  key_revoked: { message: "Key revoked. It can't publish anything now.", tone: "success" },
+  key_revoked: { message: "Token revoked. It can't publish anything now.", tone: "success" },
   verified: { message: "Verified. Anyone installing it sees so.", tone: "success" },
   declined: { message: "Not verified. It stays listed; the author can read why.", tone: "success" },
   taken_down: { message: "Taken down, and turned off on the devices that have it.", tone: "success" },

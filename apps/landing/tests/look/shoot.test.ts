@@ -17,6 +17,8 @@ interface Shot {
   as: string;
   path: string;
   user?: string;
+  /** Signed in a while ago: the sign-in's ticket for a deploy token spent or old. */
+  stale?: boolean;
   /** The fake's switches before it's taken (POST /_fake/<what>?<params>), reset after. */
   fake?: [string, Record<string, string>][];
   /** What to do on the page first (open a disclosure, follow Next), at the widths given. */
@@ -55,11 +57,11 @@ const SHOTS: Shot[] = [
   { page: "account", as: "plugins", path: "/account", user: "user_ada" },
   { page: "account", as: "plugins-signed-out", path: "/account" },
   { page: "account", as: "plugins-none", path: "/account", user: "user_noor" },
-  { page: "account", as: "keys", path: "/account/keys", user: "user_ada" },
-  { page: "account", as: "keys-all-open", path: "/account/keys", user: "user_ada", act: async (page) => { await page.locator("details.every summary").first().click(); await page.locator("details.gone summary").click(); } },
-  // (Fifty, the most a key may name, every one of them Ada's: its list open.)
-  { page: "account", as: "keys-fifty", path: "/account/keys", user: "user_ada", fake: [["many", { on: "1" }]], act: async (page) => { await page.locator("details.every", { hasText: "Show all 50" }).locator("summary").click(); } },
-  { page: "account", as: "keys-signed-out", path: "/account/keys" },
+  { page: "account", as: "tokens", path: "/account/tokens", user: "user_ada" },
+  { page: "account", as: "tokens-all-open", path: "/account/tokens", user: "user_ada", act: async (page) => { await page.locator("details.every summary").first().click(); await page.locator("details.gone summary").click(); } },
+  // (Fifty, the most a token may name, every one of them Ada's: its list open.)
+  { page: "account", as: "tokens-fifty", path: "/account/tokens", user: "user_ada", fake: [["many", { on: "1" }]], act: async (page) => { await page.locator("details.every", { hasText: "Show all 50" }).locator("summary").click(); } },
+  { page: "account", as: "tokens-signed-out", path: "/account/tokens" },
   // One of your plugins: a version in every state; one plainly listed; Stop new installs, asked; asked as a page.
   { page: "account", as: "plugin", path: "/account/plugins/worst-case-listing-at-every-limit-xyz12", user: "user_ada" },
   { page: "account", as: "plugin-plain", path: "/account/plugins/session-badges", user: "user_ada" },
@@ -78,11 +80,18 @@ const SHOTS: Shot[] = [
   { page: "staff", as: "review-decline", path: "/admin/plugins/session-badges/1.2.1", user: "user_grace", act: async (page) => { await page.locator('a[data-dialog="reject"]').first().click(); await page.locator("#reject-message").fill("The README doesn't say what it reads, or where it sends it."); } },
   { page: "staff", as: "review-verified", path: "/admin/plugins/focus-timer/1.2.0", user: "user_grace" },
   { page: "staff", as: "review-taken-down", path: "/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.2.0", user: "user_grace" },
-  { page: "account", as: "keys-none", path: "/account/keys", user: "user_noor" },
-  { page: "account", as: "revoke", path: "/account/keys/Qm81LzR2sT3uV4wX5yZ6aB7cD8eF9gH0iJ1kL2mN3oP", user: "user_ada" },
-  { page: "account", as: "new-key", path: "/account/keys", user: "user_ada", widths: [1440, 390], act: async (page) => { await page.getByRole("button", { name: "New key" }).click(); } },
+  { page: "account", as: "tokens-none", path: "/account/tokens", user: "user_noor" },
+  { page: "account", as: "revoke", path: "/account/tokens/tok_0OZtGptZyNgbeUuc", user: "user_ada" },
+  // New token: its form in the dialog, all of yours and chosen; signed in a while ago; as a page; refused; the token shown once; the list after.
+  { page: "account", as: "new-token", path: "/account/tokens", user: "user_ada", act: async (page) => { await page.getByRole("link", { name: "New token" }).click(); await page.getByRole("dialog").getByLabel("Name", { exact: true }).fill("GitHub Actions, release"); } },
+  { page: "account", as: "new-token-chosen", path: "/account/tokens", user: "user_ada", act: async (page) => { await page.getByRole("link", { name: "New token" }).click(); const d = page.getByRole("dialog"); await d.getByLabel("Name", { exact: true }).fill("Release CI"); await d.getByLabel("Chosen plugins").check(); await d.getByLabel("Focus timer", { exact: true }).check(); await d.getByLabel("Theme sync").check(); } },
+  { page: "account", as: "new-token-stale", path: "/account/tokens", user: "user_ada", stale: true, act: async (page) => { await page.getByRole("link", { name: "New token" }).click(); await page.getByRole("dialog").getByLabel("Name", { exact: true }).fill("Nightly"); } },
+  { page: "account", as: "new-token-page", path: "/account/tokens/new?again=1&name=Nightly&ends=365&scope=chosen&plugins=focus-timer%2Cweather", user: "user_ada" },
+  { page: "account", as: "new-token-refused", path: "/account/tokens/new", user: "user_ada", act: async (page) => { await page.getByLabel("Name", { exact: true }).fill("CI"); await page.getByLabel("Chosen plugins").check(); await Promise.all([page.waitForLoadState("networkidle"), page.getByRole("button", { name: "Create token" }).click()]); } },
+  { page: "account", as: "token-shown", path: "/account/tokens", user: "user_ada", fake: [["tokens", {}]], act: async (page) => { await page.getByRole("link", { name: "New token" }).click(); const d = page.getByRole("dialog"); await d.getByLabel("Name", { exact: true }).fill("Release CI"); await d.getByLabel("Ends").selectOption("30"); await d.getByLabel("Chosen plugins").check(); await d.getByLabel("Focus timer", { exact: true }).check(); await Promise.all([page.waitForLoadState("networkidle"), d.getByRole("button", { name: "Create token" }).click()]); } },
+  { page: "account", as: "tokens-after", path: "/account/tokens", user: "user_ada", fake: [["tokens", {}]], act: async (page) => { await page.getByRole("link", { name: "New token" }).click(); const d = page.getByRole("dialog"); await d.getByLabel("Name", { exact: true }).fill("Release CI"); await Promise.all([page.waitForLoadState("networkidle"), d.getByRole("button", { name: "Create token" }).click()]); await Promise.all([page.waitForURL("**/account/tokens"), page.getByRole("link", { name: "I've copied it" }).click()]); await page.waitForLoadState("networkidle"); } },
 ];
-const RESET: [string, Record<string, string>][] = [["empty", {}], ["down", {}], ["bare", {}], ["many", {}], ["queue", {}]];
+const RESET: [string, Record<string, string>][] = [["empty", {}], ["down", {}], ["bare", {}], ["many", {}], ["queue", {}], ["tokens", {}]];
 
 let site: Site;
 let browser: Browser;
@@ -103,7 +112,7 @@ test.skipIf(!DIR)("pictures of the store's pages", async () => {
       for (const scheme of ["light", "dark"] as const) {
         const context = await browser.newContext({ viewport: { width, height: 900 }, deviceScaleFactor: width < 700 ? 3 : 2, colorScheme: scheme, reducedMotion: "reduce" });
         const page = await context.newPage();
-        if (shot.user) await page.goto(new URL(`/auth/web/callback?as=${shot.user}&return_to=/plugins`, site.url).href);
+        if (shot.user) await page.goto(new URL(`/auth/web/callback?as=${shot.user}${shot.stale ? "&fresh=0" : ""}&return_to=/plugins`, site.url).href);
         await page.goto(new URL(shot.path, site.url).href, { waitUntil: "networkidle" });
         if (shot.act) {
           await shot.act(page);

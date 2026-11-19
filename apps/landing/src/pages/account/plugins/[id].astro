@@ -3,7 +3,7 @@
 // and whether Zeron verified it (amendment 45: each is listed at once),
 // what it means, the reviewer's words, how it was sent, and the one thing
 // you can do with it (stop new installs, or allow them again). Its deploy
-// keys are your account's (amendment 44): Deploy keys. Yours only: anyone
+// tokens are your account's (contract a315eef5a): Deploy tokens. Yours only: anyone
 // else's id is the 404 page. Signed out, it says so and offers sign-in.
 import AccountHead from "../../../components/look/AccountHead.astro";
 import Flash from "../../../components/look/Flash.astro";
@@ -81,7 +81,7 @@ const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions
           <a class="btn sec" href={here}>{store("plugins.store.try_again")}</a>
         </div>
       ) : !session ? (
-        <AccountHead title="Your plugins" lead="What you have published, and where each version stands." current="plugins" plugins={null} keys={null}>
+        <AccountHead title="Your plugins" lead="What you have published, and where each version stands." current="plugins" plugins={null} tokens={null}>
           <SignInPlease what="the plugins you publish" />
         </AccountHead>
       ) : !plugin ? (
@@ -153,7 +153,7 @@ const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions
                         </div>
                         <div class="pub">
                           <div><time datetime={new Date(v.published_at).toISOString()}>{day(v.published_at, now)}</time></div>
-                          {v.via === "deploy_key" && <small><Icon name="key" />{v.deploy_key?.name ?? "A deploy key"}</small>}
+                          {v.via === "deploy_token" && <small><Icon name="key" />{v.deploy_token?.name ?? "A deploy token"}</small>}
                           {v.via === "device" && <small><Icon name="laptop" />One of your devices</small>}
                         </div>
                         <div class="act">
@@ -169,7 +169,7 @@ const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions
                 </ul>
               </div>
             )}
-            <p class="mkeys">Publishing from CI? Your account's <a href="/account/keys">deploy keys</a> can send new versions of it.</p>
+            <p class="mkeys">Publishing from CI? Your account's <a href="/account/tokens">deploy tokens</a> can send new versions of it.</p>
           </section>
 
           {plugin.versions.map((v) => {

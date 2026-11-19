@@ -51,6 +51,7 @@ try {
       const page = await context.newPage();
       if (p.user) await page.goto(new URL(`/auth/web/callback?as=${p.user}&return_to=/plugins`, site.url).href);
       await page.goto(new URL(p.path, site.url).href, { waitUntil: "networkidle" });
+      if (p.act) await p.act(page);
       await page.evaluate(() => document.fonts.ready);
       const key = `${p.name}-${width}-${scheme}`;
       // Hover and press, each interactive thing in its turn.

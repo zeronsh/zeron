@@ -1,5 +1,6 @@
 // Every page of the look, in its full states and its spare ones: who's
 // looking, the fake's switches for it, and what to do on it first.
+import type { Page } from "playwright";
 
 export interface AlignPage {
   /** A short name for the sheet and the failures. */
@@ -9,7 +10,18 @@ export interface AlignPage {
   user?: string;
   /** The fake's switches, set before and reset after (POST /_fake/<what>?<params>). */
   fake?: [string, Record<string, string>][];
+  /** What to do on it before it's measured (open a dialog, send a form). */
+  act?: (page: Page) => Promise<void>;
 }
+
+/** New token's dialog, filled in, its plugins chosen. */
+const newToken = async (page: Page) => {
+  await page.getByRole("link", { name: "New token" }).click();
+  const dialog = page.getByRole("dialog", { name: "New deploy token" });
+  await dialog.getByLabel("Name", { exact: true }).fill("Release CI");
+  await dialog.getByLabel("Chosen plugins").check();
+  await dialog.getByLabel("Focus timer", { exact: true }).check();
+};
 
 /**
  * Where the rule can't hold, and why: a code view's line numbers stand right-aligned in their gutter (the
@@ -23,8 +35,8 @@ export const EXCEPTIONS: [string, string][] = [
   ["p code, li > code:not(:first-child)", "code inside a sentence that wraps to a line's start keeps its chip's 5 px"],
 ];
 
-/** The columns of the look: the page's, Browse's two, a plugin's rail and its Get, Files' two. */
-export const COLUMNS = [".wrap", ".facets", ".browse > section", ".rail", ".get", ".tree-pane", ".viewer"];
+/** The columns of the look: the page's, Browse's two, a plugin's rail and its Get, Files' two, a dialog's. */
+export const COLUMNS = [".wrap", ".facets", ".browse > section", ".rail", ".get", ".tree-pane", ".viewer", "dialog.question"];
 
 export const ALIGN_PAGES: AlignPage[] = [
   // Discover, Browse.
@@ -49,9 +61,16 @@ export const ALIGN_PAGES: AlignPage[] = [
   { name: "yours", path: "/account", user: "user_ada" },
   { name: "yours-none", path: "/account", user: "user_noor" },
   { name: "yours-signed-out", path: "/account" },
-  { name: "keys", path: "/account/keys", user: "user_ada" },
-  { name: "keys-none", path: "/account/keys", user: "user_noor" },
-  { name: "revoke", path: "/account/keys/Qm81LzR2sT3uV4wX5yZ6aB7cD8eF9gH0iJ1kL2mN3oP", user: "user_ada" },
+  { name: "tokens", path: "/account/tokens", user: "user_ada" },
+  { name: "tokens-none", path: "/account/tokens", user: "user_noor" },
+  { name: "revoke", path: "/account/tokens/tok_0OZtGptZyNgbeUuc", user: "user_ada" },
+  { name: "new-token", path: "/account/tokens/new?again=1&name=Nightly&ends=365&scope=chosen&plugins=focus-timer%2Cweather", user: "user_ada" },
+  { name: "new-token-dialog", path: "/account/tokens", user: "user_ada", act: newToken },
+  { name: "token-shown", path: "/account/tokens", user: "user_ada", fake: [["tokens", {}]], act: async (page) => {
+    await newToken(page);
+    await Promise.all([page.waitForLoadState("networkidle"), page.getByRole("dialog").getByRole("button", { name: "Create token" }).click()]);
+    await page.getByRole("heading", { name: "Copy your token now" }).waitFor();
+  } },
   { name: "mine", path: "/account/plugins/worst-case-listing-at-every-limit-xyz12", user: "user_ada" },
   { name: "mine-stop", path: "/account/plugins/session-badges/versions/1.2.1/yank", user: "user_ada" },
   // Review.
@@ -63,4 +82,4 @@ export const ALIGN_PAGES: AlignPage[] = [
   { name: "review-changes", path: "/admin/plugins/xss-probe/1.1.0?view=changes", user: "user_grace" },
 ];
 
-export const RESET: [string, Record<string, string>][] = [["empty", {}], ["down", {}], ["bare", {}], ["queue", {}]];
+export const RESET: [string, Record<string, string>][] = [["empty", {}], ["down", {}], ["bare", {}], ["queue", {}], ["tokens", {}]];

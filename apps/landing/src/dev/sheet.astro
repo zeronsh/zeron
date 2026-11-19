@@ -206,7 +206,7 @@ const stateName = { rest: "Rest", "is-hover": "Hover", "is-focus": "Focus", "is-
         <div class="segmented" role="group" aria-label="Filter"><a href="#" aria-current="page">In review <span class="t-label t-3">12</span></a><a href="#">Approved</a><a href="#">Not approved</a></div>
       </div>
       <nav class="tabs" aria-label="Tabs, medium"><a href="#" aria-current="page">Overview</a><a href="#" class="is-hover">Changelog</a><a href="#">Permissions <span class="count">4</span></a></nav>
-      <nav class="tabs sm" aria-label="Tabs, small"><a href="#" aria-current="page">Versions <span class="count">6</span></a><a href="#">Deploy keys <span class="count">2</span></a></nav>
+      <nav class="tabs sm" aria-label="Tabs, small"><a href="#" aria-current="page">Versions <span class="count">6</span></a><a href="#">Deploy tokens <span class="count">2</span></a></nav>
     </section>
 
     <section class="block">
@@ -291,7 +291,7 @@ const stateName = { rest: "Rest", "is-hover": "Hover", "is-focus": "Focus", "is-
 
     <section class="block">
       <h2 class="t-heading">A table whose rows wrap</h2>
-      <p class="t-text t-2">Every cell starts on one 28-high line, 12 under the row's top, so a first line, a badge and a button share a middle (12 + 14 = 26); words at 13 / 20 begin 4 lower (16 + 10). An action column of 176 at the row's end, the button's words on its edge. 52 at the least. A deploy key is shown one way everywhere: its first 6 and last 4 characters, mono 12, the whole key in its title (k5Yh3x…g2Wq).</p>
+      <p class="t-text t-2">Every cell starts on one 28-high line, 12 under the row's top, so a first line, a badge and a button share a middle (12 + 14 = 26); words at 13 / 20 begin 4 lower (16 + 10). An action column of 176 at the row's end, the button's words on its edge. 52 at the least. A deploy token is shown one way everywhere: its short id, the token's first 8 characters after zdt_, mono 12 (0aB3xQ9z); never the token.</p>
       <div class="panel">
         <table class="table wrapping versions-table">
           <colgroup><col class="version" /><col class="state" /><col /><col class="sent" /><col class="action" /></colgroup>
@@ -339,7 +339,7 @@ const stateName = { rest: "Rest", "is-hover": "Hover", "is-focus": "Focus", "is-
         </div>
         <div class="stage sheet-stage">
           <div class="sheet static" role="presentation">
-            <div class="head"><h2>New deploy key</h2><p>A key is made on your computer, where its secret stays. Make it in Zeron, or with the command.</p></div>
+            <div class="head"><h2>New deploy token</h2><p>Name it, choose what it can publish, and sign in again. The token is shown once, as it's made.</p></div>
             <div class="body">
               <div class="copybox"><code tabindex="0">zeron plugin key create focus-timer</code><button type="button" class="btn ghost icon xs" aria-label="Copy"><Glyph name="copy" size={14} /></button></div>
             </div>
@@ -357,7 +357,7 @@ const stateName = { rest: "Rest", "is-hover": "Hover", "is-focus": "Focus", "is-
       <div class="panel">
         <div class="empty">
           <span class="tile"><Glyph name="lock-keyhole-unlocked" size={20} /></span>
-          <div class="words"><h3>No deploy keys</h3><p>A key lets a CI job send new versions of this plugin. Every version still waits for review.</p></div>
+          <div class="words"><h3>No deploy tokens</h3><p>A token lets a CI job send new versions of this plugin. Every version still waits for review.</p></div>
           <div class="actions"><button type="button" class="btn secondary sm"><Glyph name="plus" size={14} />New key…</button></div>
         </div>
       </div>

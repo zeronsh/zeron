@@ -2,7 +2,7 @@
 // look in its full and spare states, at a desktop's width and a phone's, in
 // both schemes (align/ink.ts the measure, align/pages.ts the pages and the
 // rule's exceptions). Then what the rule asks by name: a plugin's Get is its
-// rail's column; Deploy keys' words start on one column, its header's; and
+// rail's column; Deploy tokens' words start on one column, its header's; and
 // no two of a group's items that fill (hover, chosen, focus) ever touch.
 import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
@@ -22,11 +22,12 @@ afterAll(async () => {
   await site?.dispose();
 });
 
-async function open(p: Pick<AlignPage, "path" | "user">, width: number, scheme: "light" | "dark"): Promise<Page> {
+async function open(p: Pick<AlignPage, "path" | "user" | "act">, width: number, scheme: "light" | "dark"): Promise<Page> {
   const context = await browser.newContext({ viewport: { width, height: 900 }, colorScheme: scheme, reducedMotion: "reduce" });
   const page = await context.newPage();
   if (p.user) await page.goto(new URL(`/auth/web/callback?as=${p.user}&return_to=/plugins`, site.url).href);
   await page.goto(new URL(p.path, site.url).href, { waitUntil: "networkidle" });
+  if (p.act) await p.act(page);
   await page.evaluate(() => document.fonts.ready);
   return page;
 }
@@ -76,9 +77,9 @@ describe("the columns the rule names", () => {
       }
   }, 120_000);
 
-  test("Deploy keys: every row's words start on one column, its header's, whatever the key holds", async () => {
+  test("Deploy tokens: every row's words start on one column, its header's, whatever the token holds", async () => {
     for (const width of [1440, 1024, 390]) {
-      const page = await open({ path: "/account/keys", user: "user_ada" }, width, "dark");
+      const page = await open({ path: "/account/tokens", user: "user_ada" }, width, "dark");
       try {
         const starts = await page.evaluate(() => {
           const first = (el: Element | null) => {

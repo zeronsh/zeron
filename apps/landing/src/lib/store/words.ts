@@ -32,12 +32,12 @@ export const STORE_WORDS = {
   // Your plugins' line under a newest version (the app's Yours).
   "plugins.store.summary.newest_verified": "{version} is the newest verified",
   "plugins.store.summary.none_verified": "nothing verified yet",
-  // What a deploy key may publish, and when it was used (the app's keys).
+  // What a deploy token may publish, and when it was used (the app's tokens).
   "plugins.store.key.scope.label": "Can publish",
   "plugins.store.key.scope.two": "{a} and {b}",
   "plugins.store.key.not_used_made": "Not used yet · made {date}",
-  // The account's deploy keys (amendment 44).
-  "plugins.store.keys_body": "A deploy key lets a CI job, such as a GitHub Action, publish new versions of your plugins without your session. Each key publishes the plugins chosen when it's made.",
+  // The account's deploy tokens (contract a315eef5a).
+  "plugins.store.keys_body": "A deploy token lets a CI job, such as a GitHub Action, publish new versions of your plugins without your session. Each token publishes the plugins chosen when it's made.",
   "plugins.store.key.scope.all": "All your plugins",
   "plugins.store.key.last_used_on": "Last used {date} on {plugin}",
   // What its author can do to it, and the question each asks first.
@@ -47,12 +47,26 @@ export const STORE_WORDS = {
   "plugins.store.confirm.yank.body": "Nobody can install it anymore. Those who have it keep it working. You can allow installs again later.",
   "plugins.store.confirm.unyank.title": "Allow installs of {name} {version}?",
   "plugins.store.confirm.unyank.body": "It can be installed again.",
-  // Deploy keys.
-  "plugins.store.keys": "Deploy keys",
-  "plugins.store.keys_none": "No keys yet.",
-  "plugins.store.keys_failed": "Couldn't see your keys",
-  "plugins.store.key.new": "New key…",
-  "plugins.store.key.new_title": "New deploy key",
+  // Deploy tokens.
+  "plugins.store.keys": "Deploy tokens",
+  "plugins.store.keys_none": "No tokens yet.",
+  "plugins.store.keys_failed": "Couldn't see your tokens",
+  "plugins.store.key.new": "New token…",
+  "plugins.store.key.new_title": "New deploy token",
+  // Making a deploy token: the form, the sign-in again, the token shown once (contract a315eef5a).
+  "plugins.store.key.new_body": "Zeron will ask you to sign in again first.",
+  "plugins.store.key.name_placeholder": "GitHub Actions",
+  "plugins.store.key.expiry.30": "In 30 days",
+  "plugins.store.key.expiry.90": "In 90 days",
+  "plugins.store.key.expiry.365": "In a year",
+  "plugins.store.key.create": "Create token",
+  "plugins.store.key.secret_title": "Copy your token now",
+  "plugins.store.key.secret_body": "This is the only time Zeron shows it. Put it in your CI's secrets as ZERON_DEPLOY_TOKEN. Anyone with it can publish versions of the plugins it's for, as you.",
+  "plugins.store.key.done": "I've copied it",
+  "plugins.store.key.made_today": "You've made 10 deploy tokens today. You can make more tomorrow.",
+  "plugins.store.key.revoke_failed": "Couldn't revoke the token",
+  "plugins.store.key.scope.chosen": "Chosen plugins",
+  "plugins.store.sign_in_to_see_keys": "Sign in to see your tokens",
   "plugins.store.key.name": "Name",
   "plugins.store.key.not_used": "Not used yet",
   "plugins.store.key.no_end": "Doesn't expire",

@@ -200,7 +200,7 @@ const standing = s ? pill(s.version) : null;
 // (The list it's on, for the crumbs: waiting, verified or not verified; one stopped is on none.)
 const list = !s || !shown ? null : s.version.verified ? { label: "Verified", href: "/admin/plugins?state=verified" } : review?.decision === "declined" ? { label: "Not verified", href: "/admin/plugins?state=declined" } : { label: "Waiting", href: "/admin/plugins" };
 const now = Date.now();
-const via = s?.version.via === "deploy_key" ? (s.version.deploy_key?.name ? ` with the key “${s.version.deploy_key.name}”` : " with a deploy key") : s?.version.via === "device" ? " from one of their devices" : "";
+const via = s?.version.via === "deploy_token" ? (s.version.deploy_token?.name ? ` with the token “${s.version.deploy_token.name}”` : " with a deploy token") : s?.version.via === "device" ? " from one of their devices" : "";
 const openReports = record.ok ? record.data.reports.filter((r) => r.status === "open") : null;
 const VERSIONS_SHOWN = 8;
 const versions = record.ok ? record.data.versions : null;
