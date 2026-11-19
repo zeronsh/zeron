@@ -4749,6 +4749,7 @@ fn map_questions(props: &Value) -> Vec<(String, UserInputQuestion)> {
                     Some((
                         key,
                         UserInputQuestion {
+                            note: None,
                             id: new_message_id(),
                             header: q
                                 .get("header")

@@ -304,9 +304,14 @@ fn grok_spec() -> AcpAgentSpec {
         skill_dirs: Vec::new,
         hidden_commands: &[],
         drops_unstarted_cancelled_prompt: true,
-        // Grok's Auto mode approves through its own classifier and asks only
-        // about what it would deny, so most actions never reach a permission.
-        access_modes: FULL_ACCESS_ONLY,
+        // Grok Build's own Auto permission mode (`_meta.autoMode` on the
+        // session, see `with_permission_meta`): its safety classifier lets
+        // safe actions through and what it escalates is asked of the person
+        // (see `run_initialize_params`). Full access is `_meta.yoloMode`,
+        // always-approve. Grok advertises no session mode or config option
+        // for either, and without one a session follows the user's own
+        // `[ui] permission_mode`, so both are always sent.
+        access_modes: &[AccessMode::Auto, AccessMode::FullAccess],
     }
 }
 
@@ -3266,6 +3271,17 @@ impl Harness for AcpHarness {
     fn stops_turn_in_place(&self) -> bool {
         true
     }
+    /// The default comparison plus the access the run resolves to: it
+    /// ignores `auto_approve`, which makes a run full access.
+    fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {
+        live.model == next.model
+            && live.reasoning == next.reasoning
+            && crate::same_model_options(&live.model_options, &next.model_options)
+            && live.cwd == next.cwd
+            && live.access == next.access
+            && live.plan == next.plan
+            && self.access_for(live) == self.access_for(next)
+    }
     /// The session's model, effort and model options are selected over the
     /// protocol (`session/set_model`, `session/set_config_option`), so a
     /// change applies between turns without a new agent. Clearing one back
@@ -3273,6 +3289,8 @@ impl Harness for AcpHarness {
     /// a change of access mode: the permissions the agent asks for follow
     /// the session mode chosen at launch, so a new mode gets a new agent.
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
+        // `access_for` below: for Grok an Auto/Full change is a different
+        // `_meta` on the session, so it gets a new agent like any mode.
         live.cwd == next.cwd
             && self.access_for(next).is_some()
             && self.access_for(live) == self.access_for(next)
@@ -3739,9 +3757,10 @@ fn initialize_params(harness: HarnessId) -> Value {
         // separate subagentControl extension: Zeron has no matching UI yet.
         capabilities["_meta"] = json!({ "cognition.ai/subagentSupport": true });
     }
-    // Grok gets no `_meta.clientType`, deliberately: naming a client type
-    // that can show a prompt turns the actions its Auto-mode classifier
-    // denies into permission requests, which zeron accepts like any other.
+    // No `_meta.clientType` here. Grok's is added only for an Auto run, by
+    // `run_initialize_params`: a client type that can show a prompt turns
+    // the actions its Auto-mode classifier blocks into permission requests,
+    // which full access must never see.
     json!({
         "protocolVersion": 1,
         "clientInfo": {
@@ -3754,6 +3773,42 @@ fn initialize_params(harness: HarnessId) -> Value {
         // the diff pane, and commands belong to the agent's own sandbox.
         "clientCapabilities": capabilities,
     })
+}
+
+/// `initialize` params for a run under `access`. Grok in Auto is told its
+/// client is an `extension`: a client type that can show a prompt is what
+/// turns the actions its classifier blocks into `session/request_permission`
+/// (carrying `_meta.autoReview` with the verdict and why) instead of a
+/// refusal. Only Auto: in full access nothing is asked, and any other client
+/// type is not wanted there. Verified on grok 1.0.89: with no client type
+/// or `cli` a blocked action is a failed tool call ("Auto mode blocked this
+/// action"), never a request.
+fn run_initialize_params(harness: HarnessId, access: AccessMode) -> Value {
+    let mut params = initialize_params(harness);
+    if harness == HarnessId::Grok && access == AccessMode::Auto {
+        params["_meta"] = json!({ "clientType": "extension" });
+    }
+    params
+}
+
+/// Grok Build's permission mode for a session, set on `session/new`,
+/// `session/load` and `session/resume` alike so a restored session keeps the
+/// run's mode (without it the user's `[ui] permission_mode` applies). Auto is
+/// `autoMode`, which on a load also takes a session that was in always-approve
+/// back to auto, provided the same request does not write `yoloMode`; full
+/// access is `yoloMode`. Merged into any `_meta` already on the params. Other
+/// agents' params are untouched.
+fn with_permission_meta(harness: HarnessId, access: AccessMode, mut params: Value) -> Value {
+    let meta = match (harness, access) {
+        (HarnessId::Grok, AccessMode::Auto) => json!({ "autoMode": true }),
+        (HarnessId::Grok, AccessMode::FullAccess) => json!({ "yoloMode": true }),
+        _ => return params,
+    };
+    match params.get_mut("_meta").and_then(Value::as_object_mut) {
+        Some(existing) => existing.extend(meta.as_object().cloned().unwrap_or_default()),
+        None => params["_meta"] = meta,
+    }
+    params
 }
 
 /// `session/cancel` params. Grok treats a cancel carrying a user gesture as
@@ -4484,6 +4539,11 @@ fn handle_server_request_live(
     access: AccessMode,
     agent_name: &str,
 ) -> Vec<AgentEvent> {
+    // A request for another session is refused. Not confirmed on grok
+    // 1.0.89 whether a subagent's Auto-mode escalation is ever forwarded over
+    // ACP (a probe saw none; the spawn itself escalated on the parent), so if
+    // one is, it is refused here rather than asked about; accepting the ids
+    // `GrokSubagentTracker` knows is the fix.
     if params
         .get("sessionId")
         .and_then(Value::as_str)
@@ -4524,6 +4584,7 @@ fn handle_server_request_live(
         })
         .collect();
     let question = UserInputQuestion {
+        note: None,
         id: new_message_id(),
         header: "Agent question".into(),
         question: params
@@ -4707,14 +4768,18 @@ async fn open_session(
     load_timeout: Duration,
     event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
 ) -> Result<(String, Value), HarnessError> {
-    let params = json!({
-        "cwd": request.cwd,
-        "mcpServers": acp_session_mcp_servers(
-            request.mcp.as_ref(),
-            &request.extra_mcp,
-            takes_http_mcp(init),
-        ),
-    });
+    let params = with_permission_meta(
+        harness,
+        access,
+        json!({
+            "cwd": request.cwd,
+            "mcpServers": acp_session_mcp_servers(
+                request.mcp.as_ref(),
+                &request.extra_mcp,
+                takes_http_mcp(init),
+            ),
+        }),
+    );
     if let Some(resume) = &request.resume {
         let method = restore_method(init, harness);
         let mut restore = params.clone();
@@ -5459,7 +5524,7 @@ async fn run_session(session: Session) {
     // ---- handshake + session (interruptible) ------------------------------
     let setup = async {
         let init = client
-            .request("initialize", initialize_params(harness))
+            .request("initialize", run_initialize_params(harness, access))
             .await?;
         let steer_ext = steering_supported(&init);
         let init_commands = scan_available_commands(&init);
@@ -7533,6 +7598,57 @@ mod tests {
         // permission requests (see `initialize_params`).
         assert!(initialize_params(HarnessId::Grok).get("_meta").is_none());
         assert!(initialize_params(HarnessId::Hermes).get("_meta").is_none());
+    }
+
+    #[test]
+    fn grok_offers_auto_and_full_access_only() {
+        assert_eq!(
+            AcpHarness::grok().access_modes(),
+            &[AccessMode::Auto, AccessMode::FullAccess]
+        );
+    }
+
+    #[test]
+    fn only_grok_in_auto_names_a_client_type() {
+        let auto = run_initialize_params(HarnessId::Grok, AccessMode::Auto);
+        assert_eq!(auto["_meta"], json!({ "clientType": "extension" }));
+        for access in [AccessMode::FullAccess, AccessMode::Supervised] {
+            assert_eq!(
+                run_initialize_params(HarnessId::Grok, access),
+                initialize_params(HarnessId::Grok)
+            );
+        }
+        for harness in [HarnessId::Hermes, HarnessId::Devin, HarnessId::Cursor] {
+            assert_eq!(
+                run_initialize_params(harness, AccessMode::Auto),
+                initialize_params(harness)
+            );
+        }
+    }
+
+    #[test]
+    fn grok_session_params_carry_the_permission_mode() {
+        let base = json!({ "cwd": "/w", "mcpServers": [] });
+        let auto = with_permission_meta(HarnessId::Grok, AccessMode::Auto, base.clone());
+        assert_eq!(auto["_meta"], json!({ "autoMode": true }));
+        let full = with_permission_meta(HarnessId::Grok, AccessMode::FullAccess, base.clone());
+        assert_eq!(full["_meta"], json!({ "yoloMode": true }));
+        // An Auto restore never writes `yoloMode` (see the resume-only
+        // integration test for the restore requests themselves).
+        assert!(auto["_meta"].get("yoloMode").is_none());
+        // Merged with an existing `_meta`, not replacing it.
+        let merged = with_permission_meta(
+            HarnessId::Grok,
+            AccessMode::Auto,
+            json!({ "cwd": "/w", "_meta": { "other": 1 } }),
+        );
+        assert_eq!(merged["_meta"], json!({ "other": 1, "autoMode": true }));
+        // Everything else is byte-for-byte unchanged.
+        for harness in [HarnessId::Devin, HarnessId::Hermes, HarnessId::Codex] {
+            for access in [AccessMode::Auto, AccessMode::FullAccess] {
+                assert_eq!(with_permission_meta(harness, access, base.clone()), base);
+            }
+        }
     }
 
     #[test]

@@ -268,6 +268,7 @@ fn fanout_settle(i: usize) -> Vec<AgentEvent> {
 fn question_script() -> Vec<UserInputQuestion> {
     vec![
         UserInputQuestion {
+            note: None,
             id: "q-sync".into(),
             header: "Question".into(),
             question: "Which sync strategy should the rewrite use?".into(),
@@ -281,6 +282,7 @@ fn question_script() -> Vec<UserInputQuestion> {
             multi_select: false,
         },
         UserInputQuestion {
+            note: None,
             id: "q-gates".into(),
             header: "Question".into(),
             question: "Which suites should gate the merge?".into(),

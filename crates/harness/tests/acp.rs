@@ -409,6 +409,111 @@ async fn resumed_first_class_model_is_switched_before_prompt() {
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
 }
 
+#[test]
+fn grok_runtime_is_not_shared_across_always_approve_and_auto() {
+    let auto = RunRequest {
+        auto_approve: false,
+        access: AccessMode::Auto,
+        ..request("p")
+    };
+    let approved = RunRequest {
+        auto_approve: true,
+        ..auto.clone()
+    };
+    let grok = AcpHarness::grok();
+    assert!(grok.same_runtime(&auto, &auto));
+    assert!(grok.same_runtime(&approved, &approved));
+    assert!(!grok.same_runtime(&auto, &approved));
+    assert!(!grok.same_runtime(&approved, &auto));
+}
+
+#[tokio::test]
+async fn grok_supervised_and_edits_run_in_auto_never_always_approve() {
+    for access in [AccessMode::Supervised, AccessMode::AutoAcceptEdits] {
+        let (controls, _steer, _token) = controls();
+        let mut req = request("scenario:permission-meta");
+        req.access = access;
+        req.auto_approve = false;
+        let events = run_to_end(&harness(), req, controls).await;
+        assert!(
+            events.contains(&AgentEvent::TextDelta {
+                text: "mode=auto client=extension".into()
+            }),
+            "{access:?}: {events:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn grok_resume_only_agent_gets_the_mode_on_session_resume() {
+    for (access, expected) in [
+        (AccessMode::Auto, "mode=auto client=extension"),
+        (AccessMode::FullAccess, "mode=yolo client=none"),
+    ] {
+        let (controls, _steer, _token) = controls();
+        let mut req = request("scenario:permission-meta");
+        req.access = access;
+        req.auto_approve = false;
+        req.resume = Some("s-loaded".into());
+        req.env
+            .insert("FAKE_RESUME_ONLY".into(), "s-loaded".into());
+        let events = run_to_end(&harness(), req, controls).await;
+        assert!(
+            events.contains(&AgentEvent::TextDelta {
+                text: expected.into()
+            }),
+            "{access:?}: {events:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn auto_asks_about_a_reviewer_escalated_read() {
+    for (answer, reply) in [("Yes", "allowed"), ("No", "declined")] {
+        let (controls, asked) = answering_controls(Some(answer));
+        let mut req = request("scenario:auto-read-escalation");
+        req.access = AccessMode::Auto;
+        req.auto_approve = false;
+        let events = run_to_end(&harness(), req, controls).await;
+        let asked = asked.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1, "{answer}: {asked:?} {events:?}");
+        assert!(asked[0].contains("Reads a secrets file"), "{asked:?}");
+        assert!(
+            events.contains(&AgentEvent::TextDelta {
+                text: reply.into()
+            }),
+            "{answer}: {events:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn grok_session_carries_its_permission_mode() {
+    const AUTO: &str = "mode=auto client=extension";
+    const YOLO: &str = "mode=yolo client=none";
+    for (access, auto_approve, resume, expected) in [
+        (AccessMode::Auto, false, None, AUTO),
+        (AccessMode::Auto, false, Some("s-loaded"), AUTO),
+        (AccessMode::FullAccess, false, None, YOLO),
+        (AccessMode::FullAccess, false, Some("s-loaded"), YOLO),
+        // auto_approve is full access whatever the mode asked for.
+        (AccessMode::Auto, true, None, YOLO),
+    ] {
+        let (controls, _steer, _token) = controls();
+        let mut req = request("scenario:permission-meta");
+        req.access = access;
+        req.auto_approve = auto_approve;
+        req.resume = resume.map(Into::into);
+        let events = run_to_end(&harness(), req, controls).await;
+        assert!(
+            events.contains(&AgentEvent::TextDelta {
+                text: expected.into()
+            }),
+            "{access:?} auto_approve {auto_approve} resume {resume:?}: {events:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn permission_requests_auto_accept_the_preferred_allow_option() {
     // Whatever the run's auto_approve: a Grok edit never waits on the user.
@@ -1283,11 +1388,11 @@ async fn antigravity_models_group_effort_variants_into_one_row() {
 #[test]
 fn only_antigravity_offers_access_modes_beyond_full_access() {
     assert_eq!(AcpHarness::antigravity().access_modes(), AccessMode::ALL);
-    for harness in [
-        AcpHarness::grok(),
-        AcpHarness::devin(),
-        AcpHarness::hermes(),
-    ] {
+    assert_eq!(
+        AcpHarness::grok().access_modes(),
+        [AccessMode::Auto, AccessMode::FullAccess]
+    );
+    for harness in [AcpHarness::devin(), AcpHarness::hermes()] {
         assert_eq!(
             harness.access_modes(),
             [AccessMode::FullAccess],
@@ -1322,8 +1427,8 @@ fn a_new_access_mode_needs_a_new_agent_where_it_is_honored() {
         ..supervised.clone()
     };
     assert!(AcpHarness::antigravity().reconfigures_in_place(&full, &auto_approved));
-    // Grok runs every mode with full access, so nothing changes.
-    assert!(AcpHarness::grok().reconfigures_in_place(&full, &supervised));
+    // Grok runs Supervised in Auto, a different mode from full access.
+    assert!(!AcpHarness::grok().reconfigures_in_place(&full, &supervised));
 }
 
 /// Controls whose input bridge answers every question `answer` (`None`
@@ -3004,11 +3109,7 @@ async fn auto_without_a_safe_fallback_refuses_before_launch() {
         access: capped,
         ..request("must not run")
     };
-    for agent in [
-        AcpHarness::grok(),
-        AcpHarness::devin(),
-        AcpHarness::hermes(),
-    ] {
+    for agent in [AcpHarness::devin(), AcpHarness::hermes()] {
         let agent = agent.with_executable(PathBuf::from("/nonexistent/auto-must-not-launch"));
         assert!(!agent.reconfigures_in_place(&req, &req));
         let (controls, _sender, _token) = controls();

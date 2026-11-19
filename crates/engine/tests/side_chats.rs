@@ -452,6 +452,7 @@ async fn a_fork_settles_the_running_subagent_chips_it_copies() {
                     id: "a1-input".into(),
                     request_id: "q-1".into(),
                     questions: vec![zeron_proto::UserInputQuestion {
+                        note: None,
                         id: "q1".into(),
                         header: "Pick".into(),
                         question: "Which one?".into(),

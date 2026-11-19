@@ -1013,7 +1013,7 @@ fn full_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
-            access_modes: vec![AccessMode::FullAccess],
+            access_modes: vec![AccessMode::Auto, AccessMode::FullAccess],
             supports_plan: false,
         },
         Box::new(|| zeron_harness::AcpHarness::grok().installed()),
@@ -1272,6 +1272,10 @@ mod tests {
                 ReasoningLevel::Medium,
                 ReasoningLevel::High
             ]
+        );
+        assert_eq!(
+            grok.access_modes(),
+            &[AccessMode::Auto, AccessMode::FullAccess]
         );
         // Cursor, Devin, Hermes and Pi mirror their specs the same way.
         let cursor = registry.resolve(HarnessId::Cursor).unwrap();

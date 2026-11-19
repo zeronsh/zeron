@@ -372,8 +372,9 @@ pub trait Harness: Send + Sync {
     /// The [`AccessMode`]s this driver honors, least to most trusting. A
     /// request for any other runs with full access (the composer offers
     /// only these), except Auto: it falls back only to a stricter mode
-    /// listed here, and the engine refuses it when there is none
-    /// ([`AccessMode::honored_by`]).
+    /// listed here, and the engine refuses it when there is none. A request
+    /// for Supervised or Auto-accept edits, when Auto is listed and they
+    /// are not, runs in Auto ([`AccessMode::honored_by`]).
     fn access_modes(&self) -> &[AccessMode] {
         &[AccessMode::FullAccess]
     }

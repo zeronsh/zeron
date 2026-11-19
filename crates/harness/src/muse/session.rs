@@ -802,6 +802,7 @@ impl Runner {
         let questions: Vec<UserInputQuestion> = raw
             .iter()
             .map(|q| UserInputQuestion {
+                note: None,
                 id: string(q, "id").into(),
                 header: string(q, "header").into(),
                 question: string(q, "question").into(),
@@ -999,6 +1000,7 @@ mod tests {
 
     fn question(multi: bool) -> UserInputQuestion {
         UserInputQuestion {
+            note: None,
             id: "q".into(),
             header: "h".into(),
             question: "?".into(),
