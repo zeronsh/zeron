@@ -18,7 +18,7 @@ export const MANIFEST_FILE = "zeron-plugin.json";
 export const KNOWN_PERMISSIONS: readonly string[] = [
   "ui.add", "ui.change", "ui.replace", "profile.read", "sessions.read", "messages.read", "account.email", "files.read",
   "panel.tabs", "pages.add", "github", "github.write", "links.open", "notifications", "navigate", "compose", "draft",
-  "network", "clipboard", "files", "web", "windows", "tools", "devices", "native", "commands", "service", "usage.read",
+  "network", "clipboard", "files", "web", "windows", "scene3d", "tools", "devices", "native", "commands", "service", "usage.read",
   "accounts.read", "accounts.switch", "accounts.pin", "models.read", "models.set", "messages.send"
 ];
 
