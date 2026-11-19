@@ -317,6 +317,7 @@ fn usage_harness(provider: VaultProvider) -> Option<HarnessId> {
     match provider {
         VaultProvider::Claude => Some(HarnessId::ClaudeCode),
         VaultProvider::Codex => Some(HarnessId::Codex),
+        VaultProvider::Antigravity => Some(HarnessId::Antigravity),
         _ => None,
     }
 }

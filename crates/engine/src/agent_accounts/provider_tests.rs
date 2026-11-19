@@ -150,6 +150,7 @@ fn mocked(base: &str) -> ProbeEndpoints {
         nous_portal: base.to_string(),
         google_token: format!("{base}/google/token"),
         google_userinfo: format!("{base}/google/userinfo"),
+        antigravity_api: base.to_string(),
         allow_slot_refresh: true,
         allow_loopback_http: true,
     }
@@ -511,6 +512,86 @@ async fn a_rejected_saved_grok_token_refreshes_once_against_its_issuer() {
     let refused = accounts.grok_usage(&evil, false).await;
     assert_eq!(refused, Err(ProbeError::UntrustedEndpoint));
     assert_eq!(issuer_hits.load(Ordering::SeqCst), before);
+}
+
+/// Antigravity's usage is its `/usage`: a fresh access token from the
+/// login's refresh token, its tiers from `loadCodeAssist`, then its
+/// project's limits (the token file's `project_id`; else the one
+/// `loadCodeAssist` names). A dead refresh token reads "sign in again".
+#[tokio::test]
+async fn antigravity_usage_is_its_projects_limits_and_its_paid_plan() {
+    let server = MockServer::start(|method, path, body| match (method, path) {
+        ("POST", "/google/token") if body.contains("refresh_token=dead") => (400, r#"{"error":"invalid_grant"}"#.into()),
+        ("POST", "/google/token") => {
+            assert!(body.contains("client_secret=sec") || body.contains("refresh_token=grt-b"), "{body}");
+            (200, r#"{"access_token":"at-fresh","expires_in":3599}"#.into())
+        }
+        ("POST", "/v1internal:loadCodeAssist") => (
+            200,
+            serde_json::json!({
+                "cloudaicompanionProject": "proj-from-assist",
+                "currentTier": { "id": "free-tier", "name": "Antigravity" },
+                "paidTier": { "id": "g1-ultra-tier", "name": "Google AI Ultra" }
+            })
+            .to_string(),
+        ),
+        ("POST", "/v1internal:retrieveUserQuotaSummary") => {
+            let project = serde_json::from_str::<serde_json::Value>(body).unwrap()["project"].clone();
+            let left = if project == "proj-file" { 0.6 } else { 0.1 };
+            (
+                200,
+                serde_json::json!({ "groups": [{
+                    "displayName": "Claude and GPT models",
+                    "buckets": [
+                        { "window": "weekly", "remainingFraction": 1, "resetTime": "2026-11-26T21:17:50Z" },
+                        { "window": "5h", "remainingFraction": left, "resetTime": "2026-11-20T02:17:50Z" }
+                    ]
+                }] })
+                .to_string(),
+            )
+        }
+        _ => (404, String::new()),
+    })
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, _) = accounts_with(tmp.path(), mocked(&server.base));
+    let slot = |key: &str, credentials: serde_json::Value| Slot {
+        id: slot_id_for(HarnessId::Antigravity, key),
+        harness: HarnessId::Antigravity,
+        account_key: key.into(),
+        profile: SlotProfile {
+            email: "ada@gmail.com".into(),
+            display_name: None,
+            organization: None,
+            plan: None,
+            auth_kind: AgentAuthKind::Oauth,
+        },
+        credentials,
+        claude_config: None,
+        saved_at: 1,
+        created_at: None,
+        store_key: None,
+    };
+    let filed = slot(
+        "google:a",
+        serde_json::json!({ "refresh_token": "grt-a", "client_id": "cid", "client_secret": "sec", "project_id": "proj-file" }),
+    );
+    let usage = accounts.antigravity_usage(&filed).await.unwrap();
+    let labels: Vec<&str> = usage.windows.iter().map(|w| w.label.as_str()).collect();
+    assert_eq!(labels, ["Claude & GPT Session", "Claude & GPT Week"]);
+    assert!((usage.windows[0].used_fraction - 0.4).abs() < 1e-6, "{usage:?}");
+    assert_eq!(usage.plan_label.as_deref(), Some("Google AI Ultra"));
+    // The access token it asked with is the refreshed one.
+    assert_eq!(server.hits("POST /v1internal:retrieveUserQuotaSummary"), 1);
+
+    let unfiled = slot("google:b", serde_json::json!({ "refresh_token": "grt-b", "client_id": "cid" }));
+    let usage = accounts.antigravity_usage(&unfiled).await.unwrap();
+    assert!((usage.windows[0].used_fraction - 0.9).abs() < 1e-6, "loadCodeAssist's project: {usage:?}");
+
+    let dead = slot("google:c", serde_json::json!({ "refresh_token": "dead", "client_id": "cid" }));
+    assert_eq!(accounts.antigravity_usage(&dead).await, Err(ProbeError::Unauthorized { status: 400 }));
+    let keychain = slot("google:d", serde_json::Value::Null);
+    assert!(matches!(accounts.antigravity_usage(&keychain).await, Err(ProbeError::NoCredentials { .. })));
 }
 
 #[cfg(unix)]

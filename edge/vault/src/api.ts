@@ -471,7 +471,7 @@ export interface VaultRpc {
     provider: VaultProviderId,
     slot: string
   ): Promise<VaultResult<readonly VaultAccountView[]>>;
-  /** Plan usage of one Claude or Codex login, read by the vault (users only;
+  /** Plan usage of one Claude, Codex or Antigravity login, read by the vault (users only;
    * `not_found` for providers without a usage view). */
   accountUsage(caller: VaultCaller, provider: VaultProviderId, slot: string): Promise<VaultResult<VaultUsageView>>;
 }

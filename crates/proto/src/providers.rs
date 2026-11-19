@@ -41,7 +41,7 @@ pub fn provider_name(harness: HarnessId) -> &'static str {
 /// Whether the provider reports plan usage. One that doesn't shows no meters
 /// and no "usage unavailable" note — there is nothing missing. Pure.
 pub fn reports_usage(harness: HarnessId) -> bool {
-    !matches!(harness, HarnessId::Antigravity | HarnessId::Fx)
+    harness != HarnessId::Fx
 }
 
 /// Providers whose agent holds exactly ONE login: once it is connected there

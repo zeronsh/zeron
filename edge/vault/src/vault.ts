@@ -352,7 +352,7 @@ export class Vault implements VaultRpc {
     });
   }
 
-  /** Plan usage of one Claude or Codex login (users only). */
+  /** Plan usage of one Claude, Codex or Antigravity login (users only). */
   accountUsage(caller: VaultCaller, provider: VaultProviderId, slot: string): Promise<VaultResult<VaultUsageView>> {
     return this.run(caller, {}, async (userId) => {
       if (!isProvider(provider)) return fail("bad_request", "unknown provider");

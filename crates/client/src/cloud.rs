@@ -380,6 +380,7 @@ impl Client {
         let harness = match provider {
             VaultProvider::Claude => zeron_proto::HarnessId::ClaudeCode,
             VaultProvider::Codex => zeron_proto::HarnessId::Codex,
+            VaultProvider::Antigravity => zeron_proto::HarnessId::Antigravity,
             _ => return Ok(None),
         };
         if self.inner.is_demo() {

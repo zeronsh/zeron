@@ -16,6 +16,10 @@
 //! - **Copilot** (OpenCode / Pi `github-copilot`):
 //!   `api.github.com/copilot_internal/user` — premium-request quota.
 //! - **Nous** (Hermes `nous`): the portal's `/api/oauth/account` credits.
+//! - **Antigravity**: Google Code Assist's `retrieveUserQuotaSummary` (what
+//!   its `/usage` reads) — each group of models' 5-hour and weekly limits —
+//!   with `loadCodeAssist`'s paid tier as the plan. Google refresh tokens
+//!   don't rotate: every probe takes a fresh access token.
 //!
 //! None of these refresh a per-provider store's tokens: those rotate, and
 //! the agent (or Hermes' pool) owns them — a rejected token reads "switch to
@@ -33,6 +37,33 @@ const DEVIN_STATUS_RPC: &str = "exa.seat_management_pb.SeatManagementService/Get
 const DEVIN_DEFAULT_API_SERVER: &str = "https://server.codeium.com";
 /// The CLI version the status call identifies as (the server wants one).
 const DEVIN_CLI_VERSION: &str = "3000.11.3";
+pub(super) const ANTIGRAVITY_API: &str = "https://cloudcode-pa.googleapis.com";
+/// Who Antigravity's server says it is to `loadCodeAssist`.
+fn antigravity_client() -> serde_json::Value {
+    serde_json::json!({ "ideType": "ANTIGRAVITY", "pluginType": "GEMINI" })
+}
+
+/// The Code Assist project `loadCodeAssist` names (a string, or `{id}`).
+fn antigravity_project(assist: &serde_json::Value) -> Option<String> {
+    let project = assist.get("cloudaicompanionProject")?;
+    project
+        .as_str()
+        .or_else(|| project.get("id")?.as_str())
+        .filter(|p| !p.is_empty())
+        .map(str::to_owned)
+}
+
+/// `quota` with `loadCodeAssist`'s tiers beside its groups: the reply
+/// [`zeron_proto::plan_usage::antigravity`] reads (the vault's is the same).
+fn with_tiers(quota: &mut serde_json::Value, assist: &serde_json::Value) {
+    if let Some(quota) = quota.as_object_mut() {
+        for tier in ["paidTier", "currentTier"] {
+            if let Some(value) = assist.get(tier) {
+                quota.insert(tier.into(), value.clone());
+            }
+        }
+    }
+}
 
 impl AgentAccounts {
     pub(super) async fn grok_usage(
@@ -210,6 +241,64 @@ impl AgentAccounts {
             }
         }
         Ok(snapshot)
+    }
+
+    /// Antigravity's limits, as its `/usage` reads them: an access token
+    /// from the login's refresh token (Google's don't rotate, so the live
+    /// login's is as safe to use as a saved one's), its tiers and project
+    /// from `loadCodeAssist`, then the project's `retrieveUserQuotaSummary`.
+    pub(super) async fn antigravity_usage(&self, slot: &Slot) -> Result<UsageSnapshot, ProbeError> {
+        let missing = ProbeError::NoCredentials {
+            why: NoCredentials::Missing,
+        };
+        let token = &slot.credentials;
+        let refresh_token = str_field(token, "refresh_token").ok_or(missing.clone())?;
+        let client_id = str_field(token, "client_id").ok_or(missing)?;
+        let client_secret = str_field(token, "client_secret").unwrap_or_default();
+        let refreshed = probe_json(
+            "antigravity",
+            "refresh",
+            self.inner.http.post(&self.inner.endpoints.google_token).form(&[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh_token.as_str()),
+                ("client_id", client_id.as_str()),
+                ("client_secret", client_secret.as_str()),
+            ]),
+        )
+        .await
+        .map_err(|error| match error {
+            // invalid_grant: the login is dead — "sign in again".
+            ProbeError::Http { status: 400, .. } => ProbeError::Unauthorized { status: 400 },
+            other => other,
+        })?;
+        let access_token =
+            str_field(&refreshed, "access_token").ok_or_else(|| schema_error("antigravity", &refreshed))?;
+        let api = self.inner.endpoints.antigravity_api.trim_end_matches('/');
+        let assist = probe_json(
+            "antigravity",
+            "tier",
+            self.inner
+                .http
+                .post(format!("{api}/v1internal:loadCodeAssist"))
+                .bearer_auth(&access_token)
+                .json(&serde_json::json!({ "metadata": antigravity_client() })),
+        )
+        .await?;
+        let project = str_field(token, "project_id")
+            .or_else(|| antigravity_project(&assist))
+            .ok_or_else(|| schema_error("antigravity", &assist))?;
+        let mut quota = probe_json(
+            "antigravity",
+            "usage",
+            self.inner
+                .http
+                .post(format!("{api}/v1internal:retrieveUserQuotaSummary"))
+                .bearer_auth(&access_token)
+                .json(&serde_json::json!({ "project": project })),
+        )
+        .await?;
+        with_tiers(&mut quota, &assist);
+        antigravity_usage_snapshot(&quota).ok_or_else(|| schema_error("antigravity", &quota))
     }
 
     /// A per-provider login (OpenCode / Pi entry, Hermes pool entry): probe

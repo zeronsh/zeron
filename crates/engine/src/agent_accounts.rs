@@ -811,6 +811,9 @@ struct ProbeEndpoints {
     /// its account with them.
     google_token: String,
     google_userinfo: String,
+    /// Google's Code Assist API, where Antigravity's plan and limits are
+    /// read (`loadCodeAssist`, `retrieveUserQuotaSummary`).
+    antigravity_api: String,
     allow_slot_refresh: bool,
     /// Test seam: admit `http://127.0.0.1` for credential-DEFINED endpoints
     /// (Grok issuer, Devin server, …) so mock servers can stand in. Always
@@ -838,6 +841,7 @@ impl Default for ProbeEndpoints {
             nous_portal: usage::NOUS_PORTAL.into(),
             google_token: "https://oauth2.googleapis.com/token".into(),
             google_userinfo: "https://openidconnect.googleapis.com/v1/userinfo".into(),
+            antigravity_api: usage::ANTIGRAVITY_API.into(),
             allow_slot_refresh: true,
             allow_loopback_http: false,
         }
@@ -4116,6 +4120,7 @@ impl AgentAccounts {
             HarnessId::Cursor => self.cursor_usage(slot).await,
             HarnessId::Grok => self.grok_usage(slot, is_active).await,
             HarnessId::Devin => self.devin_usage(slot).await,
+            HarnessId::Antigravity => self.antigravity_usage(slot).await,
             HarnessId::Opencode | HarnessId::Pi | HarnessId::Hermes => {
                 self.keyed_usage(harness, slot).await
             }
@@ -5385,9 +5390,20 @@ pub(crate) fn usage_windows_from_reply(
     let snapshot = match harness {
         HarnessId::ClaudeCode => claude_usage_windows(body),
         HarnessId::Codex => codex_usage_snapshot(body),
+        HarnessId::Antigravity => antigravity_usage_snapshot(body),
         _ => None,
     }?;
     Some((snapshot.windows, snapshot.plan_label))
+}
+
+/// Antigravity's limits per group of models, and its paid plan
+/// ([`zeron_proto::plan_usage::antigravity`]).
+pub(super) fn antigravity_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnapshot> {
+    zeron_proto::plan_usage::antigravity(body).map(|(windows, plan_label)| UsageSnapshot {
+        windows,
+        plan_label,
+        codex_reset_credits: None,
+    })
 }
 
 /// Codex `/wham/usage`: primary/secondary windows + the live plan.

@@ -185,3 +185,61 @@ test("an agent without usage still names and switches its accounts, with no ring
 	app:frames(30)
 	expect(app:state("calls")).to_contain("switch_on::antigravity:g2")
 end)
+
+test("Antigravity's usage is the model's group's: Gemini's for Gemini, the others' named when Gemini has none", function()
+	local app = with_model("opus")
+	app:set_state("chat.catalog", {
+		state = "ready",
+		harnesses = { { id = "antigravity", label = "Antigravity", mark = "antigravity" } },
+		models = {
+			{ value = "antigravity/gemini-4-neon", label = "Gemini 4 Neon", harness = "antigravity" },
+			{ value = "antigravity/claude-opus-5-5", label = "Claude Opus 5.5", harness = "antigravity" },
+		},
+	})
+	local function accounts(windows: { any })
+		app:set_state("agents.on_device", {
+			[""] = {
+				antigravity = {
+					{ id = "g1", email = "ada@gmail.test", plan = "Google AI Ultra", active = true, can_switch = true, windows = windows },
+				},
+			},
+		})
+		app:frames(10)
+	end
+	-- The row's figure, and its account's words in the list it opens.
+	local function shown(): (string, string)
+		open_panel(app)
+		local row = app:tree("#model-picker-account")
+		app:click("#model-picker-account")
+		app:frames(30)
+		local list = app:tree()
+		app:key("Escape")
+		app:key("Escape")
+		app:frames(30)
+		return row, list
+	end
+	accounts({ window("Claude & GPT Session", 0.4), window("Claude & GPT Week", 0.1) })
+	-- A Claude model: its group's limits, by their own names, and the ring.
+	app:set_state("chat_model", "antigravity/claude-opus-5-5")
+	app:frames(10)
+	expect(app:has("#model-picker-usage")).to_be(true)
+	local row, list = shown()
+	expect(row).to_contain("40%")
+	expect(list).to_contain("Session 40% · Week 10%")
+	expect(string.find(list, "Claude & GPT Session", 1, true)).to_be(nil)
+	-- Gemini, which Google sets no limit for here: no ring, and the limits
+	-- there are say whose.
+	app:set_state("chat_model", "antigravity/gemini-4-neon")
+	app:frames(10)
+	expect(app:has("#model-picker-usage")).to_be(false)
+	row, list = shown()
+	expect(string.find(row, "%", 1, true)).to_be(nil)
+	expect(list).to_contain("Google AI Ultra · Claude & GPT: Session 40% · Week 10%")
+	-- A Gemini limit: Gemini's alone.
+	accounts({ window("Gemini Session", 0.7), window("Gemini Week", 0.2), window("Claude & GPT Session", 0.4) })
+	expect(app:has("#model-picker-usage")).to_be(true)
+	row, list = shown()
+	expect(row).to_contain("70%")
+	expect(list).to_contain("Session 70% · Week 20%")
+	expect(string.find(list, "40%", 1, true)).to_be(nil)
+end)

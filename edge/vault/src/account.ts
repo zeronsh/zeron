@@ -633,7 +633,7 @@ export class VaultAccount extends DurableObject<Env> {
     });
   }
 
-  /** Plan usage of one Claude or Codex account, read here; the token never
+  /** Plan usage of one Claude, Codex or Antigravity account, read here; the token never
    * leaves. Refreshes the token first when due (same path as grants). */
   usage(userId: string, provider: VaultProviderId, slot: string): Promise<VaultResult<VaultUsageView>> {
     const owner = this.claim(userId, provider);

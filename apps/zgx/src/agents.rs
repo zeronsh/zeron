@@ -1924,8 +1924,8 @@ fn mark_switched(accounts: &mut [Json], harness: &str, account: &str) {
 }
 
 /// A device's accounts as the composer reads them, by agent: only an agent
-/// that signs in (one reporting no usage, Antigravity, still shows who's in
-/// use and switches, with no meter). `cloud`: Cloud's accounts, the vault's.
+/// that signs in (one with no usage read yet still shows who's in use and
+/// switches, with no meter). `cloud`: Cloud's accounts, the vault's.
 /// `{ id, email, plan, active, can_switch, error?, windows = { { label,
 /// used } } }`.
 fn device_accounts_value(accounts: &[Json], cloud: bool) -> Value {
@@ -2151,7 +2151,7 @@ mod tests {
         assert!(rows[0].field("can_switch").is_some_and(Value::truthy));
         let windows = rows[0].field("windows").unwrap().list().to_vec();
         assert_eq!(windows[0].field("used").and_then(Value::as_f64), Some(1.0));
-        // Antigravity reports no usage: its account still shows, no meter.
+        // No usage read yet: its account still shows, no meter.
         let antigravity = value.field("antigravity").expect("antigravity").list().to_vec();
         assert!(antigravity[0].field("windows").unwrap().list().is_empty());
         assert!(value.field("acp.someone").is_none());

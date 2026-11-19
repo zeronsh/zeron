@@ -1,6 +1,7 @@
 import { exports } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GrantManyRequest, VaultProviderId } from "../../src/api";
+import { ANTIGRAVITY_TIER_URL, ANTIGRAVITY_USAGE_URL } from "../../src/providers/usage";
 import { json, mockUpstream, nextTs, runnerCaller, setup, signedGrant, value, vault } from "./helpers";
 import { fakeJwt, type TestDevice } from "../support";
 
@@ -218,5 +219,38 @@ describe("Hermes, Antigravity and Muse sign-ins", () => {
     expect(upstream.count("https://oauth2.googleapis.com/token")).toBe(1);
     // Nothing a machine gets holds a refresh token.
     expect(JSON.stringify(reply)).not.toMatch(/nous-rt|xai-rt|google-rt|meta-rt/);
+  });
+
+  it("reads an Antigravity login's limits for its project, with its tiers beside them", async () => {
+    const ctx = await setup();
+    await put(ctx, "antigravity", {
+      antigravityToken: {
+        client_id: "1071006060591-abc.apps.googleusercontent.com",
+        client_secret: "GOCSPX-test",
+        refresh_token: "1//google-rt",
+        scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+        project_id: "proj-1"
+      }
+    });
+    const slot = value(await vault().accounts(ctx.caller, "antigravity"))[0]!.slot;
+    const groups = [{ displayName: "Claude and GPT models", buckets: [{ window: "5h", remainingFraction: 0.4 }] }];
+    let tier = () => json({ cloudaicompanionProject: "proj-assist", paidTier: { id: "g1-ultra-tier", name: "Google AI Ultra" } });
+    const upstream = mockUpstream({
+      "https://oauth2.googleapis.com/token": () => json({ access_token: "ya29.fresh", expires_in: 3599 }),
+      [ANTIGRAVITY_TIER_URL]: () => tier(),
+      [ANTIGRAVITY_USAGE_URL]: () => json({ groups })
+    });
+    const usage = value(await vault().accountUsage(ctx.caller, "antigravity", slot));
+    expect(usage.body).toEqual({ groups, paidTier: { id: "g1-ultra-tier", name: "Google AI Ultra" } });
+    const asked = upstream.calls.find((c) => c.url === ANTIGRAVITY_USAGE_URL)!;
+    expect(new Headers(asked.init?.headers).get("authorization")).toBe("Bearer ya29.fresh");
+    // The login's own project, not the one loadCodeAssist would pick.
+    expect(JSON.parse(String(asked.init?.body))).toEqual({ project: "proj-1" });
+
+    // Refused by Google: an upstream failure, the login left connected.
+    tier = () => json({ error: { code: 403 } }, 403);
+    const refused = await vault().accountUsage(ctx.caller, "antigravity", slot);
+    expect(!refused.ok && refused.error).toBe("upstream");
+    expect(value(await vault().accounts(ctx.caller, "antigravity"))[0]!.status).toBe("connected");
   });
 });
