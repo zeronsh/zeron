@@ -1,5 +1,10 @@
 //! Explicit, user-requested CLI installation. Catalog probes never call this module's executor.
-use std::{path::PathBuf, time::Duration};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, Mutex, OnceLock, PoisonError},
+    time::Duration,
+};
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 use zeron_proto::HarnessId;
@@ -342,8 +347,34 @@ fn shell_command(script: &str) -> Result<Command, HarnessError> {
     Ok(cmd)
 }
 
-/// Only the explicit Install RPC may call this; dropping the future also kills its process group.
+/// One install of an agent at a time, whoever asks (Settings' Install, a
+/// sign-in installing its agent first): a second waits for the first.
+fn install_lock(id: HarnessId) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<HarnessId, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(id)
+        .or_default()
+        .clone()
+}
+
+/// Only the explicit Install RPC (and a sign-in installing its agent first)
+/// may call this; dropping the future also kills its process group. An
+/// install of the same agent under way is waited for, and one that leaves it
+/// installed is all this one does.
 pub async fn install_harness(id: HarnessId, cancel: CancellationToken) -> Result<(), HarnessError> {
+    let lock = install_lock(id);
+    let waited = lock.try_lock().is_err();
+    let _held = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(HarnessError::Install("installation cancelled".into())),
+        held = lock.lock() => held,
+    };
+    if waited && installed(id) {
+        return Ok(());
+    }
     let method = selected(id).ok_or_else(|| {
         HarnessError::Install(
             "No supported installer or required tools available on this device".into(),
@@ -512,6 +543,24 @@ mod tests {
                 assert_eq!(manual, *script, "{id:?}: the command shown is the one run");
             }
         }
+    }
+
+    /// A second install of the same agent waits for the first, and does no
+    /// more once it left the agent installed; a cancel while waiting stops
+    /// it at once.
+    #[tokio::test]
+    async fn one_install_of_an_agent_at_a_time() {
+        // (An agent no other test installs.)
+        let id = HarnessId::Fx;
+        let held = install_lock(id).lock_owned().await;
+        let cancel = CancellationToken::new();
+        let waiting = tokio::spawn(install_harness(id, cancel.clone()));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiting.is_finished(), "waits while another installs");
+        cancel.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(5), waiting).await.unwrap().unwrap();
+        assert!(matches!(result, Err(HarnessError::Install(ref m)) if m.contains("cancelled")), "{result:?}");
+        drop(held);
     }
 
     #[test]
