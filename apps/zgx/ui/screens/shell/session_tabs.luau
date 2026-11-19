@@ -497,8 +497,8 @@ local Tab = ui.component(function(props: { chat: string, strip: any }): Node
 					function(): string
 						return title(id)
 					end,
-					mb = function(): number
-						return if #marks:get() > 0 then 2 else 0
+					mb = function(): number | string
+						return if #marks:get() > 0 then "$zeron.space.hair" else 0
 					end,
 					max_w = LABEL_MAX,
 					min_w = 0,

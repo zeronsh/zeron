@@ -349,11 +349,12 @@ local PLACE_CHEVRON = 14
 -- The footer's chips: one height, one corner (the menus' row corner),
 -- each lead (a glyph's 12) 6 in all round, and as far from its words.
 local CHIP_H, CHIP_RADIUS = 24, "$radius.lg"
+local PLACE_GLYPH, PLACE_PAD = 12, "zeron.space.tight"
 -- Its words lifted a point, as the footer's other chips' are (ds/dropdown's
 -- chip): centred by their capitals, lowercase reads low beside a glyph. (A
 -- margin under them of twice that: their box stays centred, a point up.)
 local LIFT = "$zeron.space.hair"
-type Folded = { level: number, access_at: { [string]: number }, where_icon: number?, model_at: { [string]: number }? }
+type Folded = { level: number, access_at: { [string]: number }, model_at: { [string]: number }? }
 local FOOTER_SIDES, FOOTER_GAP = 20, 4
 -- With cargo or a question over the draft, the draft keeps the strip's
 -- `below` over it (the theme's; read as the composer is built) rather than
@@ -1002,8 +1003,8 @@ local function place_line(p: Place): { Child }
 		},
 		ui.presence(lead, function(kind: string): Node
 			-- (Its kind named, for tests: "place-lead-worktree".)
-			return ui.div { class = `place-lead-{kind}`, Icon { name = kind :: Icon.Name, size = 12 } }
-		end, { shrink = 0, w = 12, h = 12, items = "center", justify = "center", id = "composer-place-lead" }),
+			return ui.div { class = `place-lead-{kind}`, Icon { name = kind :: Icon.Name, size = PLACE_GLYPH } }
+		end, { shrink = 0, w = PLACE_GLYPH, h = PLACE_GLYPH, items = "center", justify = "center", id = "composer-place-lead" }),
 		ui.show(function(): boolean
 			return unfolded() and has_device()
 		end, ui.row {
@@ -1158,7 +1159,6 @@ return ui.component(function(props: Props): Node
 	local right_w = kept("right_w", 0)
 	local model_w = kept("model_w", 0)
 	local access_w = kept("access_w", 0)
-	local where_w = kept("where_w", 0)
 	local name_w = kept("name_w", 0)
 	local branch_w = kept("branch_w", 0)
 	local device_w = kept("device_w", 0)
@@ -1454,7 +1454,6 @@ return ui.component(function(props: Props): Node
 	for k, v in was.access_at do
 		access_at[tonumber(k) :: number] = v
 	end
-	local where_icon: number? = was.where_icon
 	local model_at: { [number]: number } = {}
 	for k, v in was.model_at or {} do
 		model_at[tonumber(k) :: number] = v
@@ -1477,8 +1476,7 @@ return ui.component(function(props: Props): Node
 			return level
 		end
 		local a = if props.access then access_w:get() else 0
-		local w = if props.branch then where_w:get() else 0
-		if (props.access and a <= 0) or (props.branch and w <= 0) then
+		if props.access and a <= 0 then
 			return level
 		end
 		local says = `{props.model:get()}/{props.effort:get()}`
@@ -1489,22 +1487,20 @@ return ui.component(function(props: Props): Node
 			model_says = says
 		end
 		access_at[math.min(left_fold(level), 2)] = a
-		-- (Its widest: with no room at all it's squeezed under the icon's width.)
-		if left_fold(level) >= 3 then
-			where_icon = math.max(where_icon or 0, w)
-		end
 		model_at[model_fold(level)] = m
 		-- The footer's room: less its sides, what's on the right but the model,
 		-- and the gaps.
 		local chips = (if props.branch then 1 else 0) + (if props.access then 1 else 0)
 		local room = f - FOOTER_SIDES - FOOTER_GAP * math.max(chips, 1) - (r - m)
+		-- (Its widest: with no room at all it's squeezed under the icon's width.)
+	local where_icon = PLACE_GLYPH + 2 * ((ui.theme.get(PLACE_PAD) :: number?) or 6)
 		-- What fold `lv` takes; nil, not yet measured.
 		local function needs(lv: number): number?
 			local left = left_fold(lv)
 			local access_w = access_at[math.min(left, 2)]
 			local where_w = if not props.branch then 0 elseif left >= 3 then where_icon else where_min(left)
 			local chip_w = model_at[model_fold(lv)]
-			if access_w == nil or where_w == nil or chip_w == nil then
+			if access_w == nil or chip_w == nil then
 				return nil
 			end
 			return access_w + where_w + chip_w
@@ -1541,7 +1537,7 @@ return ui.component(function(props: Props): Node
 		for k, v in model_at do
 			chip_at[tostring(k)] = v
 		end
-		folded:set { level = now, access_at = at, where_icon = where_icon, model_at = chip_at }
+		folded:set { level = now, access_at = at, model_at = chip_at }
 	end)
 
 	local model = ui.presence(side, function(at: string): Node
@@ -2294,7 +2290,7 @@ return ui.component(function(props: Props): Node
 				return ui.button {
 					label = label :: any,
 					h = CHIP_H,
-					px = "$zeron.space.tight",
+					px = `${PLACE_PAD}`,
 					gap = "$zeron.space.tight",
 					items = "center",
 					min_w = 0,
@@ -2389,7 +2385,6 @@ return ui.component(function(props: Props): Node
 			table.insert(
 				left,
 				ui.row {
-					on_resize = measure(where_w, "w"),
 					min_w = 0,
 					if static
 						then ui.show(function(): boolean

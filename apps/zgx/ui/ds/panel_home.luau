@@ -173,7 +173,7 @@ end
 -- A lane's group, as the sidebar would group it (its view's Organize):
 -- a project's (its tile: hue and initial, or its own picture), a device's
 -- (this Mac's laptop, another's server); nil, one list with no groups.
-export type LaneGroup = { key: string, name: string, kind: "project" | "device", hue: string?, src: string?, emoji: string?, here: boolean? }
+export type LaneGroup = { key: string, name: string, kind: "project" | "device", hue: string?, src: string?, emoji: string?, project: string?, here: boolean? }
 -- A lane, as it comes: what it is, and where it runs. Its `status` as it
 -- should show (done or failed only while unseen); `at` when it last moved,
 -- `created` when it was made (the view's Sort); its project and device
@@ -264,6 +264,10 @@ local function at_work(l: Lane): boolean
 	return l.status == "working" or l.status == "running"
 end
 
+local function has_mark(mark: { src: string?, emoji: string? }?): boolean
+	return mark ~= nil and ((mark.src ~= nil and mark.src ~= "") or (mark.emoji ~= nil and mark.emoji ~= ""))
+end
+
 -- A lane as a session's row reads it (ds/session_row): its state one the
 -- sidebar draws ("running" is working; a word it doesn't know, none).
 local function as_session(l: Lane): SessionRow.Session
@@ -348,9 +352,9 @@ function M.Lanes(props: LanesProps): Node
 		if level == "project" then
 			local p = l.project
 			if p then
-				return { key = `{prefix}project:{p.id}`, name = p.name, kind = "project", hue = p.hue or "gray", src = p.src, emoji = p.emoji, project = p.id }
+				return { key = `{prefix}project:{p.id}`, name = p.name, kind = "project", hue = p.hue, src = p.src, emoji = p.emoji, project = p.id }
 			end
-			return { key = `{prefix}project:none`, name = locale.s("shell.sidebar.chats"), kind = "project", hue = "gray" }
+			return { key = `{prefix}project:none`, name = locale.s("shell.sidebar.chats"), kind = "project" }
 		end
 		local d = l.device
 		return {
@@ -681,16 +685,14 @@ function M.Lanes(props: LanesProps): Node
 	-- sidebar's groups draw it (a project's tile hidden by the view, a
 	-- little further in, as the sidebar's); an inner group's past its
 	-- outer group's gutter. With no groups, none.
-	local function trunk_of(g: LaneGroup?): number
-		if g and g.kind == "project" and not on("project_icon") then
-			return 12.5
-		end
-		return SessionRow.SLOT / 2
+	local function shows_tile(group: LaneGroup): boolean
+		return group.kind == "device" or (on("project_icon") and has_mark(group))
 	end
 	local function trunk_at(path: { LaneGroup }, depth: number): number
 		local x = 0
 		for i = 1, depth do
-			x = (if i > 1 then x + SessionRow.BEND + SessionRow.REACH else 0) + trunk_of(path[i])
+			local trunk = if shows_tile(path[i]) then SessionRow.SLOT / 2 else 12.5
+			x = (if i > 1 then x + SessionRow.BEND + SessionRow.REACH else 0) + trunk
 		end
 		return x
 	end
@@ -753,6 +755,10 @@ function M.Lanes(props: LanesProps): Node
 		local gkey = first.gkey
 		if first.kind == "group" then
 			local g = first.group :: LaneGroup
+			local function group(): LaneGroup
+				local it = now:get() :: Item?
+				return (if it then it.group else nil) or g
+			end
 			local on_new = props.on_new
 			local plus: Node? = nil
 			if on_new then
@@ -786,19 +792,20 @@ function M.Lanes(props: LanesProps): Node
 					-- (A project's tile as the view's "Project icon" shows it,
 					-- as the sidebar's group headers; a device's always.)
 					leads = if g.kind == "project" then function(): boolean
-						return on("project_icon")
+						return shows_tile(group())
 					end else nil,
 					name = function(): string
-						local it = now:get() :: Item
-						return if it.group then it.group.name else ""
+						return group().name
 					end,
 					lead = function(badge: () -> any): Node
 						if g.kind == "project" then
-							return SessionRow.tile(ui.text {
-								string.upper(string.sub(g.name, 1, 1)),
-								text_size = "$font.size.xs",
-								weight = "$font.weight.semibold",
-							}, badge, g.hue or "gray", g.src, g.emoji, g.project)
+							return ui.presence(function(): string?
+								local p = group()
+								return if has_mark(p) then `{p.hue or ""}\0{p.src or ""}\0{p.emoji or ""}` else nil
+							end, function(): Node
+								local p = group()
+								return SessionRow.tile(ui.div {}, badge, p.hue, p.src, p.emoji, p.project)
+							end)
 						end
 						return SessionRow.tile(Icon { name = if g.here then "laptop" else "remote-server", size = 12 }, badge)
 					end,
@@ -848,20 +855,17 @@ function M.Lanes(props: LanesProps): Node
 					return on("branch") and lane().branch ~= nil
 				end,
 				-- Its project's tile beside its title, while the view shows it.
-				title_lead = ui.presence(function(): string
+				title_lead = ui.presence(function(): string?
 					local p = lane().project
-					return if p then `{p.name}\0{p.hue or ""}\0{p.src or ""}\0{p.emoji or ""}` else ""
-				end, function(_key: string): Node
+					return if p and has_mark(p) then `{p.id}\0{p.hue or ""}\0{p.src or ""}\0{p.emoji or ""}` else nil
+				end, function(): Node
 					local p = lane().project
-					if not p then
-						return ui.div {}
-					end
-					return Tile { label = p.name, hue = p.hue, src = p.src, emoji = p.emoji, size = 16, project = p.id }
+					return if p then Tile { hue = p.hue, src = p.src, emoji = p.emoji, size = 16, project = p.id } else ui.div {}
 				end),
 				-- (Where its group isn't its project, and the view shows project
 				-- icons: as the sidebar's rows.)
 				title_lead_shown = function(): boolean
-					return on("project_icon") and lane().project ~= nil and not SessionRow.groups_by(organize(), "project")
+					return on("project_icon") and has_mark(lane().project) and not SessionRow.groups_by(organize(), "project")
 				end,
 				class = "panel-home-lane",
 				lead = if props.icon

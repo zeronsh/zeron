@@ -202,7 +202,7 @@ test("composer place: on the tray the chips keep the pill's inset, lined up with
 	local access, ring = box('role:button "Access"'), box("#composer-context")
 	-- + sits 12 above the pill's edge (11 inside its hairline); the chips
 	-- A tight step (6) below the pill: 18 from +'s foot to the chips' top.
-	expect(access[2] - (plus[2] + plus[4])).to_be(18)
+	expect(access[2] - (plus[2] + plus[4])).to_be(14)
 	-- Their outer edges on +'s and Send's.
 	expect(access[1]).to_be(plus[1])
 	expect(ring[1] + ring[3]).to_be(send[1] + send[3])
@@ -210,7 +210,7 @@ test("composer place: on the tray the chips keep the pill's inset, lined up with
 	app:set_state("test_place_art", false)
 	rested(app)
 	access, plus = box('role:button "Access"'), box('role:button "Attach"')
-	expect(access[2] - (plus[2] + plus[4])).to_be(20)
+	expect(access[2] - (plus[2] + plus[4])).to_be(16)
 	expect(app:error()).to_be(nil)
 end)
 

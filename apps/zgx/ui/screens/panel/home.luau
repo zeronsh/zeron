@@ -33,6 +33,7 @@ local Tile = require("@ds/tile")
 local Tooltip = require("@ds/tooltip")
 local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
+local project_look = require("@app/screens/shell/project_look")
 local boundary = require("@app/screens/shell/boundary")
 local store = require("@app/screens/chat/store")
 local Dock = require("@app/screens/chat/dock")
@@ -835,8 +836,8 @@ local function lanes(props: Props, sid: string): Node
 	-- second line and title's tile, ds/panel_home, as the view shows them).
 	local function project_data(id: string?): any
 		local p = project_of(id)
-		local l = if p then route.look(p.id) else nil
-		return if p then { id = p.id, name = p.name, hue = if l then l.hue else route.hue(p.id), src = if l then l.src else nil, emoji = if l then l.emoji else nil } else nil
+		local l = if p then project_look.custom(p) else nil
+		return if p then { id = p.id, name = p.name, hue = l and l.hue, src = l and l.src, emoji = l and l.emoji } else nil
 	end
 	local function device_data(id: string?): any
 		local d = device_of(id)

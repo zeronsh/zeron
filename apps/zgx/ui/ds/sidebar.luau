@@ -1005,7 +1005,6 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				hover = if session then { bg = "#00000000" } else nil,
 				active = if session then { bg = "#00000000" } else nil,
 				relative = session,
-				focus = if session then { outline = "$zeron.focus.width", outline_color = "$zeron.focus.ring", outline_offset = -2 } else nil,
 				on_click = r.on_click,
 				on_hover = function(inside: boolean)
 					hovered:set(inside)
@@ -3503,8 +3502,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				FadeText {
 					name,
 					grow = 1,
-					mb = function(): number
-						return if g.shows_tile and g.shows_tile() then 2 else 0
+					mb = function(): number | string
+						return if g.shows_tile and g.shows_tile() then "$zeron.space.hair" else 0
 					end,
 					text_size = "$font.size.md",
 					weight = "$font.weight.medium",
@@ -3863,11 +3862,12 @@ fn layer(input:LayerInput)->vec4<f32> {
 			local function says(): string
 				return locale.s("ds.sidebar.empty_projects", { n = now().n or 0 })
 			end
-			local marked_groups = ui.computed(function(): { Group }
-				local marked: { Group } = {}
+			type MarkedGroup = { key: string, project: string }
+			local marked_groups = ui.computed(function(): { MarkedGroup }
+				local marked: { MarkedGroup } = {}
 				for _, g in now().gs or {} do
-					if g.shows_tile and g.shows_tile() then
-						table.insert(marked, g)
+					if g.project and g.shows_tile and g.shows_tile() then
+						table.insert(marked, { key = g.key, project = g.project })
 						if #marked == EMPTY_TILES then
 							break
 						end
@@ -3875,12 +3875,12 @@ fn layer(input:LayerInput)->vec4<f32> {
 				end
 				return marked
 			end)
-			local function group_at(i: number): Group?
+			local function group_at(i: number): MarkedGroup?
 				return marked_groups:get()[i]
 			end
 			local function project_at(i: number): Project?
 				local g = group_at(i)
-				return if g then index:get().by_project[g.project :: string] else nil
+				return if g then index:get().by_project[g.project] else nil
 			end
 			-- How many tiles the width keeps.
 			local function fit(): number
