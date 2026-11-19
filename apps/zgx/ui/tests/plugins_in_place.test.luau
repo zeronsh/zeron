@@ -724,7 +724,7 @@ test("Installed's rows built fresh at each width are as the same width reached b
 end)
 
 
-test("a giving row crossing a step moves its parts and builds nothing again", function()
+test("a giving row crossing a step past 0 moves its parts and builds nothing again; at 0 it builds no line under its text", function()
 	local app = mount("plugins_fixture.luau")
 	app:command("update_found")
 	-- Every node in the card, by its id, shown or out of layout.
@@ -750,12 +750,27 @@ test("a giving row crossing a step moves its parts and builds nothing again", fu
 		end
 		return `{n['text "Focus"']} {n['switch "Focus"']} {n['button "Remove Focus"']} {n['button "Update"']}`
 	end
+	local function hidden(): number
+		local n = 0
+		for line in app:tree("#catalog-card"):gmatch("[^\n]+") do
+			if line:find(" hidden", 1, true) then
+				n += 1
+			end
+		end
+		return n
+	end
+	-- Where everything fits: nothing kept out of layout, the rows as they
+	-- always were.
 	app:resize(1000, 900)
 	app:frames(30)
-	local wide = ids()
+	expect(hidden()).to_be(0)
 	expect(shown()).to_be("1 1 1 1")
-	-- Through every step and back: the same nodes, each part shown once.
-	for _, width in { 470, 400, 330, 260, 200, 330, 1000 } do
+	-- Every row past step 0, through the steps past it and back: the same
+	-- nodes, each part shown once.
+	app:resize(330, 900)
+	app:frames(25)
+	local wide = ids()
+	for _, width in { 300, 260, 230, 200, 260, 330 } do
 		app:resize(width, 900)
 		app:frames(25)
 		expect(`{width} {ids()}`).to_be(`{width} {wide}`)
@@ -764,3 +779,26 @@ test("a giving row crossing a step moves its parts and builds nothing again", fu
 end)
 
 
+
+test("all under its text, a row's switch begins a line of its own under its badges, on its name's start", function()
+	local app = mount("plugins_fixture.luau")
+	app:resize(200, 900)
+	app:frames(30)
+	-- Compact sidebar: its version alone, room for the switch beside it,
+	-- and still its switch on a line of its own.
+	local tree = app:tree("#catalog-card")
+	local function box(pattern: string): { x: number, y: number }?
+		for line in tree:gmatch("[^\n]+") do
+			local x, y = line:match(pattern .. " (%-?[%d.]+),(%-?[%d.]+) ")
+			if x and not line:find(" hidden", 1, true) then
+				return { x = tonumber(x) :: number, y = tonumber(y) :: number }
+			end
+		end
+		return nil
+	end
+	local name = box('text "Compact sidebar"') :: any
+	local version = box('text "1%.0%.0"') :: any
+	local switch = box('switch "Compact sidebar"') :: any
+	expect(`{switch.x}`).to_be(`{name.x}`)
+	expect(switch.y > version.y + 12).to_be(true)
+end)

@@ -864,8 +864,8 @@ end
 
 -- A giving row's step and what it lays out with (`RowProps.give_way`):
 -- 0 as it always was; 1 its badges under the text; 2 its detail's action
--- under its sentence too; 3 its controls all under the text, after the
--- badges (on a line of their own where both don't fit on one).
+-- under its sentence too; 3 its controls all under the text, on a line
+-- of their own under the badges.
 type GiveWayRun = {
 	-- The step laid out now.
 	step: () -> number,
@@ -1164,14 +1164,15 @@ local function row_body(props: RowProps, gw: GiveWayRun?): Node
 end
 
 -- A truncating row whose controls give way (`RowProps.give_way`): the
--- first step that leaves the name `NAME_LEAST` is the one shown. Its
--- badges and the part that stays are drawn in both their places, beside
--- the text as the row always had them and on a line under it, the one
--- they aren't in out of layout and input (`hidden`, keeping its state):
--- a step sets only which, and the detail's line its wrap (its words
--- taking the whole line put its action under them), so nothing is built
--- again as a row crosses one: only layout runs. At step 0 it is laid out
--- as the row always was, the line under it out of layout. The step is
+-- first step that leaves the name `NAME_LEAST` is the one shown. Past
+-- step 0 its badges and the part that stays are drawn in both their
+-- places, beside the text as the row always had them and on a line under
+-- it, the one they aren't in out of layout and input (`hidden`, keeping
+-- its state): a step among those sets only which, and the detail's line
+-- its wrap (its words taking the whole line put its action under them),
+-- so nothing is built again: only layout runs. At step 0 it is the row
+-- it always was, the line under it not built (built as a row leaves step
+-- 0, let go as it comes back). The step is
 -- worked out from widths it already has: the text's, at the step laid
 -- out, and the controls' box beside it at step 0 and at steps 1 and 2
 -- (the part that stays), and the detail's action. What the text would get
@@ -1281,15 +1282,15 @@ local GivingRow = ui.component(function(p: { props: RowProps }): Node
 	}))
 	local trail = ui.row { gap = "$space.3", items = "center", table.unpack(nodes) }
 	-- Under the text, from step 1: its badges, then from step 3 the part
-	-- that stays, in their order and gaps, wrapping where both don't fit.
-	local under = ui.row {
+	-- that stays on a line of its own under them, on the text's start.
+	-- (There only past step 0: a row whose controls fit beside its name is
+	-- the row it always was, this line not built.)
+	local under = ui.show(function(): boolean
+		return at() >= 1
+	end, ui.column {
 		pt = "$zeron.space.snug",
 		gap = "$space.3",
-		items = "center",
-		flex_wrap = true,
-		hidden = function(): boolean
-			return at() == 0
-		end,
+		items = "start",
 		ui.row {
 			shrink = 0,
 			gap = "$space.3",
@@ -1307,7 +1308,7 @@ local GivingRow = ui.component(function(p: { props: RowProps }): Node
 				return at() < 3
 			end,
 		}),
-	}
+	})
 	return row_body(props, {
 		step = at,
 		trail = trail,
