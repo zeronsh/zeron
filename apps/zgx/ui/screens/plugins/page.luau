@@ -304,8 +304,9 @@ local SETTLE_MS = 260
 
 -- (A row is built for one device: the rows are keyed by it, so a switch of
 -- device builds them again. `on` is that device, nil for this one.)
-local Control = ui.component(function(props: { now: State<any>, on: string?, under: boolean?, on_resize: ((size: { w: number, h: number }) -> ())? }): Node
+local Control = ui.component(function(props: { now: State<any>, on: string?, place: any }): Node
 	local now, on_device = props.now, props.on
+	local place = props.place
 	local on = ui.use_state(now:peek().status == "on")
 	ui.effect(function()
 		local want = now:get().status == "on"
@@ -318,19 +319,34 @@ local Control = ui.component(function(props: { now: State<any>, on: string?, und
 		removing_on:set(on_device)
 		removing_open:set(true)
 	end
+	local function has_settings(): boolean
+		return on_device == nil and plugin_settings.has(now:get().id)
+	end
 	return ui.row {
 		gap = "$space.2",
 		items = "center",
-		on_resize = props.on_resize,
+		-- (In a giving row, its place there: ds/settings GiveWayPlace.)
+		on_resize = if place then place.on_resize else nil,
+		row_start = if place then place.row_start else nil,
+		col_start = if place then place.col_start else nil,
+		col_span = if place then place.col_span else nil,
+		mt = if place then place.mt else nil,
 		-- Its settings, when it's on here and has some: their page. (Its room
 		-- kept on every row, empty where there are none, so the versions line
-		-- up; under the text, where nothing lines up with it, the button
-		-- alone where there is one, nothing where there isn't. Another
-		-- device's plugins' settings are that device's.)
-		if props.under
-			then ui.show(function(): boolean
-				return on_device == nil and plugin_settings.has(now:get().id)
-			end, ds.IconButton {
+		-- up; under the text, where nothing lines up with it, no room where
+		-- there are none. Another device's plugins' settings are that
+		-- device's.)
+		ui.div {
+			w = function(): number
+				return (ui.theme.get("zeron.icon_button.sm") :: number?) or 22
+			end,
+			shrink = 0,
+			hidden = if place
+				then function(): boolean
+					return place.under() and not has_settings()
+				end
+				else nil,
+			ui.show(has_settings, ds.IconButton {
 				icon = "settings-minimalistic",
 				label = function(): string
 					return ui.t("plugins.page.settings_of", { name = now:get().name }):get()
@@ -341,26 +357,7 @@ local Control = ui.component(function(props: { now: State<any>, on: string?, und
 				on_click = function()
 					plugin_settings.open(now:peek().id)
 				end,
-			})
-			else ui.div {
-			w = function(): number
-				return (ui.theme.get("zeron.icon_button.sm") :: number?) or 22
-			end,
-			shrink = 0,
-			ui.show(function(): boolean
-				return on_device == nil and plugin_settings.has(now:get().id)
-			end, ds.IconButton {
-			icon = "settings-minimalistic",
-			label = function(): string
-				return ui.t("plugins.page.settings_of", { name = now:get().name }):get()
-			end,
-			size = "sm",
-			tone = "quiet",
-			hook = false,
-			on_click = function()
-				plugin_settings.open(now:peek().id)
-			end,
-		}),
+			}),
 		},
 		ui.switch(function(): string
 			return kind(now:get())
@@ -569,8 +566,13 @@ local function row(p: state.Item, _i: number, now: State<any>): Node
 						},
 					}
 				end,
-				stays = function(under: boolean, on_resize: ((size: { w: number, h: number }) -> ())?): Node
-					return Control { now = now, on = device_now(), under = under, on_resize = on_resize }
+				stays = function(place: any): Node
+					return Control { now = now, on = device_now(), place = place }
+				end,
+				-- (Without Unknown author, the row of badges beside the text
+				-- kept its gap: zgx sizes a row with an absent child so.)
+				room = function(): number
+					return if words.unverified(now:get()) then 0 else (ui.theme.get("space.3") :: number?) or 12
 				end,
 				action = if store_line
 					then nil

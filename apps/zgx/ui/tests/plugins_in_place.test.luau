@@ -724,37 +724,43 @@ test("Installed's rows built fresh at each width are as the same width reached b
 end)
 
 
-test("a giving row's probe is there only while the row is narrow, and holds none of its controls", function()
+test("a giving row crossing a step moves its parts, never builds them again, and hides nothing", function()
 	local app = mount("plugins_fixture.luau")
 	app:command("update_found")
-	local function probes(): number
-		return app:count(".settings-stand-in")
+	-- Focus's name, version, Update and switch, by their node ids.
+	local function ids(): string
+		local tree = app:tree("#catalog-card")
+		local out = {}
+		for _, pattern in { 'text "Focus"', 'switch "Focus"', 'button "Remove Focus"', 'button "Update"' } do
+			table.insert(out, tree:match("@(%d+) " .. pattern:gsub("%p", "%%%0")) or "none")
+		end
+		local versions = {}
+		for id in tree:gmatch('@(%d+) text "1%.0%.0"') do
+			table.insert(versions, id)
+		end
+		table.insert(out, versions[2] or "none")
+		return table.concat(out, " ")
 	end
-	local function hidden(pattern: string): number
+	local function hidden(): number
 		local n = 0
 		for line in app:tree("#catalog-card"):gmatch("[^\n]+") do
-			if line:find(pattern) and line:find(" hidden", 1, true) then
+			if line:find(" hidden", 1, true) then
 				n += 1
 			end
 		end
 		return n
 	end
-	-- Room for every row's controls beside its name: none, the rows as
-	-- they always were.
 	app:resize(1000, 900)
 	app:frames(30)
-	expect(probes()).to_be(0)
-	-- Narrow: a row past step 0 holds one, its step-0 controls' box, and
-	-- in it no switch, Remove or Update to move on a hover or a toggle.
-	app:resize(300, 900)
-	app:frames(30)
-	expect(probes() > 0).to_be(true)
-	expect(hidden("switch ")).to_be(0)
-	expect(hidden('button "Remove')).to_be(0)
-	expect(hidden('button "Update"')).to_be(0)
-	-- And wide again, gone.
-	app:resize(1000, 900)
-	app:frames(30)
-	expect(probes()).to_be(0)
+	local wide = ids()
+	expect(wide:find("none", 1, true)).to_be(nil)
+	expect(hidden()).to_be(0)
+	-- Through every step and back: the same nodes, nothing kept hidden.
+	for _, width in { 470, 400, 330, 260, 200, 330, 1000 } do
+		app:resize(width, 900)
+		app:frames(25)
+		expect(`{width} {ids()}`).to_be(`{width} {wide}`)
+		expect(`{width} hidden {hidden()}`).to_be(`{width} hidden 0`)
+	end
 end)
 
