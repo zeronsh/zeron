@@ -21,8 +21,11 @@ import { readJsonObject, upstream, type FetchFn, type GrantMaterial } from "./ty
 
 export const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 export const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
-export const ANTIGRAVITY_TIER_URL = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
-export const ANTIGRAVITY_USAGE_URL = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
+/** The Code Assist host Antigravity runs on, and counts its use at: the
+ * production host (`cloudcode-pa`) answers the same account untouched limits. */
+const ANTIGRAVITY_API = "https://daily-cloudcode-pa.googleapis.com";
+export const ANTIGRAVITY_TIER_URL = `${ANTIGRAVITY_API}/v1internal:loadCodeAssist`;
+export const ANTIGRAVITY_USAGE_URL = `${ANTIGRAVITY_API}/v1internal:retrieveUserQuotaSummary`;
 
 export type UsageOutcome =
   | { readonly kind: "ok"; readonly body: Record<string, unknown> }

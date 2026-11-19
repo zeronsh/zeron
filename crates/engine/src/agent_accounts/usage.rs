@@ -16,7 +16,7 @@
 //! - **Copilot** (OpenCode / Pi `github-copilot`):
 //!   `api.github.com/copilot_internal/user` — premium-request quota.
 //! - **Nous** (Hermes `nous`): the portal's `/api/oauth/account` credits.
-//! - **Antigravity**: Google Code Assist's `retrieveUserQuotaSummary` (what
+//! - **Antigravity**: Google Code Assist's `retrieveUserQuotaSummary` on the host it runs on (what
 //!   its `/usage` reads) — each group of models' 5-hour and weekly limits —
 //!   with `loadCodeAssist`'s paid tier as the plan. Google refresh tokens
 //!   don't rotate: every probe takes a fresh access token.
@@ -37,7 +37,9 @@ const DEVIN_STATUS_RPC: &str = "exa.seat_management_pb.SeatManagementService/Get
 const DEVIN_DEFAULT_API_SERVER: &str = "https://server.codeium.com";
 /// The CLI version the status call identifies as (the server wants one).
 const DEVIN_CLI_VERSION: &str = "3000.11.3";
-pub(super) const ANTIGRAVITY_API: &str = "https://cloudcode-pa.googleapis.com";
+/// The Code Assist host Antigravity runs on, and counts its use at: the
+/// production host answers the same account untouched limits.
+pub(super) const ANTIGRAVITY_API: &str = "https://daily-cloudcode-pa.googleapis.com";
 /// The user agent Antigravity's requests carry: Google answers its limits
 /// only to an Antigravity client ("You do not have a valid license of this
 /// product" to any other); its server sends `antigravity/acp/<version>`.
