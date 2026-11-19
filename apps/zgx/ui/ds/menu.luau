@@ -118,7 +118,6 @@ function M.look(props: { [any]: any }, tall: boolean?): { [any]: any }
 	props.gap = "$space.2"
 	props.rounded = M.row_radius()
 	if tall then
-		props.min_h = "$zeron.menu.row"
 		props.py = "$space.2"
 		props.items = props.items or "start"
 	else

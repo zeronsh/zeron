@@ -130,7 +130,6 @@ M.Question = ui.component(function(props: QuestionProps): Node
 		table.insert(
 			rows,
 			ui.row {
-				min_h = "$zeron.composer.option.h",
 				-- Its wash and ring hang past the text's edge: the number cap
 				-- sits on the edge the title and the answer share.
 				mx = ui.raw(-8, "the row's wash hangs a step past the text's edge"),
