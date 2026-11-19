@@ -87,6 +87,7 @@ struct Chats {
     models: RefCell<HashMap<String, Vec<Json>>>,
     catalog: RefCell<Vec<Shared>>,
     catalog_state: Cell<CatalogState>,
+    catalog_again: Cell<bool>,
     views: RefCell<Vec<Weak<View>>>,
     /// The engine's live session and chat lists, heard as changes.
     listening: RefCell<Vec<engine::lists::Listening>>,
@@ -1125,9 +1126,11 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         }
     });
     let c = chats.clone();
-    host.action("chat.catalog", move |_| {
-        let c = c.clone();
-        engine::get().spawn(async move { c.load_catalog(true).await });
+    host.action("chat.catalog", move |args| {
+        let device = args.field("device").map(text).unwrap_or_else(|| {
+            c.remote.borrow().as_ref().map(|r| r.device.clone()).unwrap_or_default()
+        });
+        c.refresh_catalog(&device);
     });
     // The composer's device: its catalog is `chat.catalog` from now on (nil
     // or this device: this one's).
@@ -1537,6 +1540,9 @@ impl Chats {
     /// The agents that can take a chat, and each one's models.
     async fn load_catalog(self: &Rc<Self>, again: bool) {
         if self.catalog_state.get() == CatalogState::Loading {
+            if again {
+                self.catalog_again.set(true);
+            }
             return;
         }
         if self.catalog_state.get() == CatalogState::Ready && !again {
@@ -1548,7 +1554,7 @@ impl Chats {
             Ok(list) => list,
             Err(error) => {
                 eprintln!("zeron-zgx: chat: the agents didn't list: {error}");
-                self.catalog_state.set(CatalogState::Looking);
+                self.finish_catalog(CatalogState::Looking);
                 return;
             }
         };
@@ -1573,13 +1579,10 @@ impl Chats {
             .collect();
         crate::agents::remember_icons(&harnesses);
         *self.harnesses.borrow_mut() = harnesses;
-        if !again {
-            self.models.borrow_mut().retain(|id, _| ids.contains(id));
-        }
+        self.models.borrow_mut().retain(|id, _| ids.contains(id));
         let left = Rc::new(Cell::new(ids.len()));
         if ids.is_empty() {
-            self.catalog_state.set(CatalogState::Ready);
-            self.publish_catalog();
+            self.finish_catalog(CatalogState::Ready);
         }
         for id in ids {
             let (me, left) = (self.clone(), left.clone());
@@ -1597,10 +1600,29 @@ impl Chats {
                 }
                 left.set(left.get() - 1);
                 if left.get() == 0 {
-                    me.catalog_state.set(CatalogState::Ready);
+                    me.finish_catalog(CatalogState::Ready);
+                } else {
+                    me.publish_catalog();
                 }
-                me.publish_catalog();
             });
+        }
+    }
+
+    fn finish_catalog(self: &Rc<Self>, state: CatalogState) {
+        self.catalog_state.set(state);
+        self.publish_catalog();
+        if self.catalog_again.replace(false) {
+            let me = self.clone();
+            engine::get().spawn(async move { me.load_catalog(true).await });
+        }
+    }
+
+    fn refresh_catalog(self: &Rc<Self>, device: &str) {
+        if device.is_empty() || self.here.borrow().as_deref() == Some(device) {
+            let me = self.clone();
+            engine::get().spawn(async move { me.load_catalog(true).await });
+        } else if self.remote.borrow().as_ref().is_some_and(|r| r.device == device) {
+            self.reload_remote();
         }
     }
 
@@ -1650,7 +1672,7 @@ impl Chats {
     fn accounts_changed(self: &Rc<Self>, device: &str, harness: &str) {
         let here = self.here.borrow().clone();
         if device.is_empty() || here.as_deref() == Some(device) {
-            if !self.models.borrow().contains_key(harness) {
+            if !self.harnesses.borrow().iter().any(|h| h["id"].as_str() == Some(harness)) {
                 return;
             }
             let (me, id) = (self.clone(), harness.to_owned());
@@ -1947,6 +1969,10 @@ impl Chats {
 /// An agent's logins on a device changed (src/agents.rs): its models again.
 pub(crate) fn accounts_changed(device: &str, harness: &str) {
     CHATS.with(|c| c.clone().accounts_changed(device, harness));
+}
+
+pub(crate) fn catalog_changed(device: &str) {
+    CHATS.with(|c| c.refresh_catalog(device));
 }
 
 pub(crate) fn made(params: &Json) {
@@ -7362,6 +7388,18 @@ mod tests {
         assert!(super::held_elsewhere(Some("mac"), "phone"));
         assert!(!super::held_elsewhere(Some("mac"), "mac"));
         assert!(!super::held_elsewhere(None, "mac"));
+    }
+
+    #[test]
+    fn catalog_refresh_during_a_load_is_queued_until_it_finishes() {
+        let chats = Rc::new(Chats::default());
+        chats.catalog_state.set(super::CatalogState::Loading);
+        tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(chats.load_catalog(true));
+        assert!(chats.catalog_again.get());
+        assert!(chats.catalog_state.get() == super::CatalogState::Loading);
+        chats.finish_catalog(super::CatalogState::Ready);
+        assert!(!chats.catalog_again.get());
+        assert!(chats.catalog_state.get() == super::CatalogState::Ready);
     }
 
     #[test]

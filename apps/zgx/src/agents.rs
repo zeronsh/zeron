@@ -1476,6 +1476,7 @@ impl Agents {
                 remember_icons(&list);
                 *self.harnesses.borrow_mut() = list;
                 self.publish();
+                crate::chat::catalog_changed(self.target.borrow().as_deref().unwrap_or_default());
                 Ok(Value::Nil)
             }
             Ok(_) => Ok(Value::Nil),

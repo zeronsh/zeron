@@ -1274,6 +1274,7 @@ function M.model_accounts(device: () -> string?): any
 			end)
 		end,
 		on_accounts_open = function()
+			require("@app/screens/chat/store").load_catalog(account_key(device()))
 			agents.refresh_device(account_key(device()))
 		end,
 	}
