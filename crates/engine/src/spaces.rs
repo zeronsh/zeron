@@ -505,9 +505,8 @@ async fn spaces_task(
     mut spaces_rx: watch::Receiver<Vec<Space>>,
     cancel: CancellationToken,
 ) {
-    let mut repair = tokio::time::interval(REPAIR_INTERVAL);
-    repair.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    repair.tick().await; // consume the immediate first tick
+    // On the beat grid (`zeron_sync::wake`): it wakes with the sockets' pings.
+    let mut repair = zeron_sync::wake::beat_interval(REPAIR_INTERVAL);
     {
         let Some(inner) = inner.upgrade() else { return };
         let spaces = spaces_rx.borrow().clone();

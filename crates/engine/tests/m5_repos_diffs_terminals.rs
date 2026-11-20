@@ -2572,6 +2572,48 @@ async fn rpc_dispatch_for_m5_methods() {
         .expect("OpenTerminal");
     let terminal_id = session["id"].as_str().expect("terminal id").to_string();
     assert_eq!(session["cwd"], repo_path);
+    assert_eq!(
+        core.terminals.chats().get(&terminal_id).map(String::as_str),
+        Some("chat-term")
+    );
+
+    // A chat another device runs (seen here, as a Cloud machine sees every
+    // chat): its folder is a path there, and its session row is its host's,
+    // so the terminal neither starts in it nor joins it. (No project: a
+    // project's chats run on the project's device.)
+    client
+        .call(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "createChat",
+                "chatId": "chat-elsewhere",
+                "deviceId": "another-device",
+                "cwd": repo_path,
+            }),
+        )
+        .await
+        .expect("createChat elsewhere");
+    assert_eq!(
+        core.workspace.chat("chat-elsewhere").unwrap().unwrap().device_id,
+        "another-device"
+    );
+    let elsewhere = client
+        .call(
+            methods::OPEN_TERMINAL,
+            serde_json::json!({ "chatId": "chat-elsewhere", "cols": 80, "rows": 24 }),
+        )
+        .await
+        .expect("OpenTerminal for a chat run elsewhere");
+    assert_ne!(elsewhere["cwd"], repo_path);
+    let elsewhere_id = elsewhere["id"].as_str().expect("terminal id");
+    assert!(!core.terminals.chats().contains_key(elsewhere_id));
+    client
+        .call(
+            methods::CLOSE_TERMINAL,
+            serde_json::json!({ "terminalId": elsewhere_id }),
+        )
+        .await
+        .expect("CloseTerminal elsewhere");
 
     // New-chat canvas: no chat row. The space id in chatId is enough even
     // when the UI still sends `~` (spaces watch not landed) or omits cwd.

@@ -24,6 +24,8 @@ import {
   type GithubListingView,
   type GithubRepoView,
   type Grant,
+  type GrantManyReply,
+  type GrantManyRequest,
   type GrantRequest,
   type PutCredentialRequest,
   type VaultCaller,
@@ -40,7 +42,7 @@ import type { Env } from "./env";
 import { accountStub, devicesStub } from "./names";
 import { installUrl, isRepoFullName } from "./providers/github-app";
 import { fail, ok, type VaultFailure } from "./result";
-import { isCaller, isFlowId, isGrantRequest, isId, isProvider, parseDeviceList } from "./validate";
+import { isCaller, isFlowId, isGrantManyRequest, isGrantRequest, isId, isProvider, parseDeviceList } from "./validate";
 
 export class Vault implements VaultRpc {
   constructor(private readonly env: Env) {}
@@ -186,6 +188,69 @@ export class Vault implements VaultRpc {
     });
   }
 
+  /**
+   * Several providers' grants in one round trip, for an agent that runs on
+   * several credentials at once (Pi: a ChatGPT login, a Copilot login and
+   * vendor keys). One signature over the joined provider list spends one
+   * `ts`; the device checks (enrolled, not revoked, user not disabled) apply
+   * once, and each provider's own (authorized, connected, active) apply per
+   * provider, concurrently. A provider with nothing to grant is `missing`.
+   */
+  grantMany(caller: VaultCaller, request: GrantManyRequest): Promise<VaultResult<GrantManyReply>> {
+    return this.run(caller, { runner: true }, async (userId) => {
+      if (!isGrantManyRequest(request)) {
+        return fail("bad_request", "expected {providers (sorted, distinct, no github), deviceId, ts, sig}");
+      }
+      if (caller.kind === "runner" && caller.deviceId !== request.deviceId) {
+        return fail("forbidden", "runners may only request grants for their own device");
+      }
+      const verified = await devicesStub(this.env, userId).verifyGrant(userId, caller.orgId, {
+        provider: request.providers[0]!,
+        subject: request.providers.join(","),
+        deviceId: request.deviceId,
+        ts: request.ts,
+        sig: request.sig
+      });
+      if (!verified.ok) return verified;
+      const results = await Promise.all(
+        request.providers.map(async (provider) => {
+          try {
+            return {
+              provider,
+              result: await accountStub(this.env, userId, provider).grant(
+                userId,
+                provider,
+                request.deviceId,
+                verified.value.parentId
+              )
+            };
+          } catch (error) {
+            console.error(
+              JSON.stringify({ event: "vault.error", provider, message: error instanceof Error ? error.message : String(error) })
+            );
+            return { provider, result: fail("unavailable", "internal vault error", 500) };
+          }
+        })
+      );
+      const grants: Grant[] = [];
+      const missing: { provider: VaultProviderId; error: VaultFailure["error"]; message: string }[] = [];
+      for (const { provider, result } of results) {
+        if (result.ok) grants.push(result.value);
+        else missing.push({ provider, error: result.error, message: result.message });
+      }
+      await this.audit(userId, {
+        event: grants.length > 0 ? "grant" : "grant_denied",
+        orgId: caller.orgId,
+        deviceId: request.deviceId,
+        detail: [
+          ...grants.map((grant) => `${grant.provider}@${grant.generation}`),
+          ...missing.map((miss) => `${miss.provider}:${miss.error}`)
+        ].join(" ")
+      });
+      return ok({ grants, missing });
+    });
+  }
+
   githubDeviceStart(caller: VaultCaller, authorizedDevices: readonly string[]): Promise<VaultResult<GithubDeviceStart>> {
     return this.run(caller, {}, async (userId) => {
       const devices = parseDeviceList(authorizedDevices);
@@ -287,7 +352,7 @@ export class Vault implements VaultRpc {
     });
   }
 
-  /** Plan usage of one Claude or Codex login (users only). */
+  /** Plan usage of one Claude, Codex or Antigravity login (users only). */
   accountUsage(caller: VaultCaller, provider: VaultProviderId, slot: string): Promise<VaultResult<VaultUsageView>> {
     return this.run(caller, {}, async (userId) => {
       if (!isProvider(provider)) return fail("bad_request", "unknown provider");

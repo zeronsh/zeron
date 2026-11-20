@@ -132,40 +132,12 @@ describe("attachment bytes", () => {
     expect(new Uint8Array(await mine!.arrayBuffer())).toEqual(PNG);
   });
 
-  it("a machine that doesn't host the chat is refused, whatever it asks", async () => {
+  it("any of the person's machines may reach them, whichever hosts the chat", async () => {
     const { user, otherMachine, path } = await world();
     await (await put(user, path, PNG)).body?.cancel();
-    for (const [method, send] of [
-      ["GET", () => call("GET", path, otherMachine)],
-      ["HEAD", () => call("HEAD", path, otherMachine)],
-      ["DELETE", () => call("DELETE", path, otherMachine)],
-      ["PUT", () => put(otherMachine, path, PNG)]
-    ] as const) {
-      const reply = await send();
-      expect(reply.status, method).toBe(403);
-      if (method !== "HEAD") expect(await reply.json(), method).toMatchObject({ error: "not_host" });
-      else await reply.body?.cancel();
-    }
-    const still = await call("GET", path, user);
-    expect(new Uint8Array(await still.arrayBuffer())).toEqual(PNG);
-  });
-
-  it("the machine that started a delegate may reach the delegate's attachments", async () => {
-    const { user, host, cloud, other, otherMachine } = await world();
-    const parent = `parent-${rand()}`;
-    const child = `child-${rand()}`;
-    await push(
-      user,
-      [
-        upsert("chats", parent, { deviceId: cloud, title: "parent" }, "laptop"),
-        upsert("chats", child, { deviceId: other, parentChatId: parent, title: "child" }, "laptop")
-      ],
-      "laptop"
-    );
-    const path = `/blob/${child}/attachments/up-${rand()}`;
-    const stored = await put(host, path, PNG);
-    expect(stored.status, await stored.clone().text()).toBe(200);
-    expect((await call("GET", path, otherMachine)).status).toBe(200);
+    const read = await call("GET", path, otherMachine);
+    expect(read.status).toBe(200);
+    expect(new Uint8Array(await read.arrayBuffer())).toEqual(PNG);
   });
 
   it("refuses anything over the engine's upload cap before storing it", async () => {

@@ -23,6 +23,7 @@ local prefs = require("@app/screens/settings/prefs")
 local registry = require("@account/registry")
 local add_agent = require("@app/screens/settings/add_agent")
 local sign_in_terminal = require("@app/screens/settings/sign_in_terminal")
+local cloud = require("@account/cloud")
 
 local M = {}
 
@@ -108,6 +109,20 @@ local function here(): string?
 	end
 	return nil
 end
+-- Cloud, as one choice after the computers (never its machines): the
+-- accounts every Cloud machine uses, kept by the vault, which the engine
+-- answers for (crates/engine cloud_accounts: Claude Code and Codex, their
+-- logins and API keys). Offered while Cloud is on.
+local CLOUD = "cloud"
+local function on_cloud(): boolean
+	return now().target == CLOUD
+end
+local function cloud_choice(): { any }
+	if cloud.on() or on_cloud() then
+		return { { value = CLOUD, label = ui.t("settings.providers.cloud"):get(), icon = "cloud" } }
+	end
+	return {}
+end
 -- The device shown: the engine's target, else this one.
 local function shown_device(): string?
 	return now().target or here()
@@ -115,6 +130,9 @@ end
 -- (In the locale shown: read where it's drawn.)
 local function device_name(): string
 	local id = shown_device()
+	if id == CLOUD then
+		return ui.t("settings.providers.cloud"):get()
+	end
 	for _, d in computers() do
 		if d.id == id then
 			return if d.here then ui.t("settings.providers.this_mac"):get() else d.name
@@ -124,8 +142,11 @@ local function device_name(): string
 end
 local function choose_device(id: string)
 	agents.target(if id == here() then nil else id)
-	-- (The registry as that device sees it: what it has added, its builds.)
-	registry.load()
+	-- (The registry as that device sees it: what it has added, its builds.
+	-- Cloud runs only Zeron's own.)
+	if id ~= CLOUD then
+		registry.load()
+	end
 end
 
 -- Which of the page's views shows: the agents, the registry ("add"), or
@@ -152,7 +173,8 @@ local function kind(): string
 	if s == "looking" or s == "unavailable" then
 		return s
 	end
-	return "found"
+	-- (Cloud's page is another: its accounts, its keys, nothing to add.)
+	return if now().target == "cloud" then "cloud" else "found"
 end
 
 -- Which agent's settings are open (none: "").
@@ -223,6 +245,9 @@ local function card(row: State<agents.Agent>): Node
 	-- no accounts, and signs in its own way. (Its updates come as any
 	-- agent's: the engine's update coordinator, the registry its feed.)
 	local from_registry = (first :: any).registry == true
+	-- Cloud's (made for it: the cards are keyed by the device shown): on
+	-- every Cloud machine, its accounts alone managed here.
+	local cloud_card = on_cloud()
 	-- The switch follows the engine; a flip goes to it, and its answer
 	-- comes back in the row.
 	local on = ui.use_state(first.enabled)
@@ -234,7 +259,7 @@ local function card(row: State<agents.Agent>): Node
 			if flipped ~= said then
 				on:set(said)
 			end
-		elseif flipped ~= said then
+		elseif flipped ~= said and not cloud_card then
 			agents.set_enabled(id, flipped)
 		end
 	end)
@@ -250,6 +275,7 @@ local function card(row: State<agents.Agent>): Node
 			return (row:get() :: any).updating == true
 		end,
 		sign_in_only = from_registry,
+		fixed = cloud_card,
 		login_note = function(): string?
 			return (row:get() :: any).login_note
 		end,
@@ -329,7 +355,7 @@ local function card(row: State<agents.Agent>): Node
 			end
 			return nil
 		end,
-		settings = true,
+		settings = not cloud_card,
 		on_settings = function()
 			load_subagents()
 			open_settings:set(id)
@@ -337,13 +363,57 @@ local function card(row: State<agents.Agent>): Node
 		on_add = function()
 			agents.sign_in(id)
 		end,
+		-- On Cloud: whether it takes a sign-in or a key there, and how it
+		-- signs in where that's its own.
+		can_add = function(): boolean
+			return (row:get() :: any).can_add ~= false
+		end,
+		note = function(): string?
+			return (row:get() :: any).cloud_note
+		end,
+		-- An agent with a login per model provider: its accounts by provider,
+		-- each group adding its own.
+		groups = if first.groups
+			then function()
+				return (row:get().groups or {}) :: any
+			end
+			else nil,
+		login_for = function(): string?
+			return row:get().login_for
+		end,
+		on_add_to = function(provider: string)
+			agents.sign_in_to(id, provider)
+		end,
+		-- API keys: typed on this Mac for this Mac's agents, or for Cloud's
+		-- (kept by its vault, never on this Mac); never for another computer.
+		on_add_key = function(provider: string, key: string, name: string?): any
+			return agents.add_key(id, provider, key, name)
+		end,
+		on_rename = function(acc, name: string): any
+			return agents.rename(id, acc.id, name)
+		end,
+		keys_here = function(): boolean
+			return agents.now:get().target == nil or on_cloud()
+		end,
+		keys_kept = if cloud_card
+			then function(): string
+				return ui.t("settings.providers.cloud_key_kept"):get()
+			end
+			else nil,
+		key_request = function(): string?
+			local agent, provider = string.match(agents.key_request:get(), "^([^:]+):(.+)$")
+			return if agent == id then provider else nil
+		end,
+		key_request_seen = function()
+			agents.key_request:set("")
+		end,
 		on_code = function(code: string)
 			agents.complete(id, code)
 		end,
 		settle = function(next: string)
 			local login = row:peek().login
 			if next == "waiting" then
-				agents.sign_in(id)
+				agents.retry(row:peek())
 			elseif login == "waiting" or login == "code" then
 				agents.cancel(id)
 			else
@@ -352,7 +422,17 @@ local function card(row: State<agents.Agent>): Node
 		end,
 		on_switch = function(acc)
 			if acc.id then
-				agents.switch(id, acc.id)
+				-- (Refused or out of reach: said, never swallowed.)
+				agents.switch(id, acc.id):after(function() end, function(err: any)
+					local message = if type(err) == "table" then err.message else nil
+					toast.show {
+						title = ui.t("settings.providers.couldnt_switch"):get(),
+						body = if message == "offline"
+							then ui.t("settings.providers.cant_reach", { device = device_name() }):get()
+							else message,
+						tone = "danger",
+					}
+				end)
 			end
 		end,
 		on_remove = function(acc)
@@ -381,7 +461,13 @@ local function cards(): Node
 			gap = "$space.4",
 			ui.each(ui.computed(installed), function(_a: agents.Agent, _i: number, row: State<agents.Agent>): Node
 				return card(row)
-			end, { key = by_id }),
+			end, {
+				-- (By the device shown too: a card is made for its device,
+				-- Cloud's unlike a computer's.)
+				key = function(a: agents.Agent): string
+					return `{now().target or ""}|{a.id}`
+				end,
+			}),
 		}
 	)
 end
@@ -457,6 +543,9 @@ local function body(k: string): Node
 		return ds.ProviderCard.Unavailable(function()
 			return device_name()
 		end, agents.load)
+	end
+	if k == "cloud" then
+		return ui.column { w_full = true, gap = "$space.6", cards() }
 	end
 	return ui.column { w_full = true, gap = "$space.6", cards(), more() }
 end
@@ -727,7 +816,7 @@ local function agents_page(): Node
 		-- Agents are per device: which one's (a choice once there's more
 		-- than this one).
 		-- (The same choice as Plugins': screens/settings/devices.)
-		trail = devices_page.picker(shown_device, choose_device),
+		trail = devices_page.picker(shown_device, choose_device, cloud_choice),
 		-- (At the top right, on the title's line, as Plugins' is.)
 		trail_top = true,
 		ui.presence(kind, body, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
@@ -752,6 +841,10 @@ function M.view(): Node
 	-- (Once a visit: a hot reload doesn't ask again.) The page opens on the
 	-- agents; the registry is looked at too, for what it has to add.
 	visits.once("providers", function()
+		-- (Whether Cloud is on, for its choice.)
+		if cloud.now:peek().phase == "unknown" then
+			cloud.load()
+		end
 		agents.load()
 		registry.load()
 		if view:peek() ~= "agents" then

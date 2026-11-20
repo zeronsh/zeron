@@ -135,7 +135,7 @@ impl Catalog {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = cmd.spawn()?;
+        let mut child = crate::process::spawn_agent(&mut cmd)?;
         let mut stdout = child.stdout.take().expect("piped stdout");
         let mut stderr = child.stderr.take().expect("piped stderr");
         let mut out = Vec::new();
@@ -470,6 +470,7 @@ fn parse_catalog(bytes: &[u8]) -> Result<(Vec<Model>, Vec<Group>), HarnessError>
                     .id
                     .clone(),
                 label,
+                provider: None,
                 description,
                 reasoning_levels,
                 options,
@@ -496,6 +497,7 @@ fn parse_catalog(bytes: &[u8]) -> Result<(Vec<Model>, Vec<Group>), HarnessError>
             default: false,
             id: FUSION.into(),
             label: fusion_label.unwrap_or_else(|| "Fusion".into()),
+            provider: None,
             description: fusion_description,
             reasoning_levels: fusion_levels,
             options,

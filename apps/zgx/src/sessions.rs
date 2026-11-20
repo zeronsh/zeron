@@ -35,6 +35,8 @@
 //!                                  without one, `device` hosts it; `parent`:
 //!                                  a side chat of that chat, where it is;
 //!                                  `cloud`: on a Cloud machine of its own,
+//!                                  reaching `reach` (`devices` | `isolated`;
+//!                                  none: the account's default),
 //!                                  `{ id, cwd }`, or why not in words)
 //!   sessions.fork({ source, parent?, id? })  a side chat starting as a copy of
 //!                                  `source` (`ForkSideChat`): its id, or the
@@ -191,6 +193,21 @@ struct RowWith {
     working_side_chats: u32,
     known_project: bool,
     agent_icon: Option<String>,
+    /// The last turn its agent finished, as its session row marks it
+    /// (`lastCompletedTurn`): what a "finished" chime rings on moving.
+    turn: Option<String>,
+}
+
+/// A session row's finished turn, and whether the row is fresh: written in
+/// the last `SESSION_STALE_MS`, so a turn's end just published rather than
+/// an old row a sync or reconnect brings back (the shipping app's chime
+/// rule, crates/engine/src/desktop_notify.rs `SessionNotificationState`).
+fn finished_turn(session: Option<&Session>, at: chrono::DateTime<chrono::Utc>) -> (Option<String>, bool) {
+    let Some(s) = session else {
+        return (None, false);
+    };
+    let fresh = at.signed_duration_since(s.updated_at).num_milliseconds() <= zeron_proto::view::SESSION_STALE_MS;
+    (s.last_completed_turn.clone(), fresh)
 }
 
 /// `slot` holds `item` now; whether that's new.
@@ -621,6 +638,7 @@ fn child_row(rows: &mut HashMap<String, Row>, c: &Json, id: &str, parent: &str, 
         working_side_chats: 0,
         known_project: false,
         agent_icon: harness.and_then(crate::agents::registry_icon),
+        turn: None,
     };
     if rows.get(id).is_some_and(|row| row.with == with) {
         return;
@@ -681,6 +699,7 @@ fn top_row(
         working_side_chats,
         known_project: project.is_some(),
         agent_icon: harness.and_then(crate::agents::registry_icon),
+        turn: finished_turn(session, at).0,
     };
     if let Some(row) = rows.get(id).filter(|row| row.with == with) {
         return row.value.clone();
@@ -721,6 +740,12 @@ fn top_row(
         // it woke (Unix seconds).
         ("sleep_until", with.sleep.filter(|s| s.0).map_or(Value::Nil, |s| Value::from(s.1 as f64))),
         ("woke", with.sleep.filter(|s| !s.0).map_or(Value::Nil, |s| Value::from(s.1 as f64))),
+        // The last turn its agent finished (an opaque mark), and whether its
+        // session row was fresh when that was read: the chimes ring
+        // "finished" on this moving, never on the status alone ("done" is
+        // only unseen activity, which your own send makes too).
+        ("turn", with.turn.as_deref().map_or(Value::Nil, Value::from)),
+        ("turn_fresh", Value::from(finished_turn(session, at).1)),
     ]);
     rows.insert(id.to_owned(), Row { moved: moved(c), updated: updated as f64, marks, with, value: value.clone() });
     value
@@ -1529,6 +1554,9 @@ impl Sessions {
         if let Some(branch) = field("branch") {
             params["branch"] = Json::from(branch);
         }
+        if let Some(reach) = field("reach").filter(|r| matches!(r.as_str(), "devices" | "isolated")) {
+            params["cloudReach"] = Json::from(reach);
+        }
         if let Some(config) = args
             .field("config")
             .filter(|c| !matches!(c, Value::Nil))
@@ -1627,6 +1655,12 @@ impl Sessions {
             me.publish();
         });
     }
+}
+
+/// Whether the person uses Cloud: a device of Cloud's (its logical device,
+/// or a chat's machine) is among theirs.
+pub(crate) fn uses_cloud() -> bool {
+    SESSIONS.with(|s| s.devices.borrow().as_array().into_iter().flatten().any(is_cloud))
 }
 
 /// A device row of Cloud's: the logical Cloud device or a session's machine
@@ -2514,6 +2548,33 @@ mod tests {
         chats.as_array_mut().unwrap().remove(2);
         s.heard(super::Slot::Chats, chats);
         assert!(!s.rows.borrow().contains_key("b"));
+    }
+
+    /// A chat's finished turn (what the "done" chime rings on, issue #1437):
+    /// its session's `lastCompletedTurn`, published as it moves, and whether
+    /// the row saying so is fresh.
+    #[test]
+    fn a_chat_s_finished_turn_is_published_as_it_moves() {
+        let now = now_seconds();
+        let s = with_children("2099-01-01T00:00:00Z");
+        s.heard.set(true);
+        let row = |turn: &str, ago: i64| {
+            json!([{ "chatId": "p", "deviceId": "d", "status": "idle", "updatedAt": iso(now - ago), "lastCompletedTurn": turn }])
+        };
+        s.set_live(row("t1", 1));
+        s.publish();
+        let p = s.value();
+        assert_eq!(chat(&p, "p").field("turn").map(crate::auth::text).as_deref(), Some("t1"));
+        assert!(chat(&p, "p").field("turn_fresh").is_some_and(zgx_script::Value::truthy));
+        let before = s.published.get();
+        s.heard(Slot::Live, row("t2", 0));
+        assert_eq!(s.published.get(), before + 1, "a finish is shown at once");
+        assert_eq!(chat(&s.value(), "p").field("turn").map(crate::auth::text).as_deref(), Some("t2"));
+        // An end published long ago (a sync, a reconnect): not fresh.
+        s.heard(Slot::Live, row("t3", 600));
+        let p = s.value();
+        assert_eq!(chat(&p, "p").field("turn").map(crate::auth::text).as_deref(), Some("t3"));
+        assert!(!chat(&p, "p").field("turn_fresh").is_some_and(zgx_script::Value::truthy));
     }
 
     #[test]

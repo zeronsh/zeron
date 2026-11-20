@@ -1248,10 +1248,11 @@ fn on_cloud() -> bool {
     on_cloud_platform(std::env::var("ZERON_DEVICE_PLATFORM").ok().as_deref())
 }
 
-/// Release files a Cloud machine never runs: the desktop app's background
-/// engine (78 MB). A Cloud machine runs `zeron headless`, which links the
-/// engine, and its disk is copied back in on every wake.
-pub const CLOUD_UNUSED_FILES: &[&str] = &["zeron-engine"];
+/// Release files a Cloud machine never runs: none. (`zeron-engine` was here
+/// until 2026-11-15, when `zeron headless` linked the engine. Since 0.3.0 the
+/// release's `zeron` is the zgx app, whose `zeron headless` runs the
+/// `zeron-engine` beside it: a machine without it never came online.)
+pub const CLOUD_UNUSED_FILES: &[&str] = &[];
 
 /// Remove [`CLOUD_UNUSED_FILES`] from the version folder `dir`.
 pub fn strip_cloud_unused(dir: &Path) {
@@ -1956,6 +1957,13 @@ pub struct Updater {
     /// Set by `zeron headless`: this process is the installed service and may
     /// restart itself into a newer installed binary.
     service: Arc<AtomicBool>,
+    /// The OS's wake events reach the loop ([`Updater::follow_wakes`]): it
+    /// sleeps straight to the next check rather than looking at the wall
+    /// clock each [`SCHEDULE_TICK`] in case the machine slept meanwhile.
+    follows_wakes: Arc<AtomicBool>,
+    /// A newer installed binary is heard of as it is installed
+    /// ([`Updater::follow_installs`]): a service needn't look each minute.
+    follows_installs: Arc<AtomicBool>,
     /// A boot's update is under way ([`Updater::hold_background_updates`]).
     boot_update: Arc<AtomicBool>,
     /// Flips to true exactly once; the check loop selects against it so
@@ -2005,6 +2013,8 @@ impl Updater {
             wake_tx: Arc::new(wake_tx),
             forced: Arc::new(AtomicBool::new(false)),
             service: Arc::new(AtomicBool::new(false)),
+            follows_wakes: Arc::new(AtomicBool::new(false)),
+            follows_installs: Arc::new(AtomicBool::new(false)),
             boot_update: Arc::new(AtomicBool::new(false)),
             shutdown_tx: Arc::new(shutdown_tx),
             check_task: Arc::new(std::sync::Mutex::new(None)),
@@ -2051,6 +2061,47 @@ impl Updater {
     pub fn poke(&self) {
         self.wake_tx
             .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+    }
+
+    /// The caller pokes ([`Updater::poke`]) as the installation changes
+    /// (file-system events on it), so a service that restarts into a newer
+    /// installed binary ([`Updater::restart_when_superseded`]) learns of one
+    /// without looking each minute.
+    pub fn follow_installs(&self) {
+        self.follows_installs.store(true, Ordering::SeqCst);
+        self.poke();
+    }
+
+    /// Look at the clock as the machine wakes (`wakes`: the system's wake
+    /// events), so the loop needn't look each minute: a check that came due
+    /// while it slept runs as it wakes, and otherwise the loop sleeps until
+    /// the next one. A service that restarts into a newer installed binary
+    /// still looks each minute unless its installs are heard of too
+    /// ([`Updater::follow_installs`]).
+    pub fn follow_wakes(&self, mut wakes: tokio::sync::broadcast::Receiver<()>) {
+        self.follows_wakes.store(true, Ordering::SeqCst);
+        let updater = self.clone();
+        let mut shutdown = self.shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            loop {
+                let woke = tokio::select! {
+                    // (Gone with the check loop.)
+                    _ = shutdown.wait_for(|stop| *stop) => return,
+                    woke = wakes.recv() => woke,
+                };
+                match woke {
+                    Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        updater.poke();
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        updater.follows_wakes.store(false, Ordering::SeqCst);
+                        updater.poke();
+                        return;
+                    }
+                }
+            }
+        });
+        self.poke();
     }
 
     /// Called by `zeron headless`: when this process is the installed engine
@@ -2119,7 +2170,16 @@ impl Updater {
                     if self.service.load(Ordering::SeqCst) && !self.boot_update.load(Ordering::SeqCst) {
                         superseded.poll(|| self.quiescent_now());
                     }
-                    let wait = schedule.wait(SystemTime::now());
+                    let most = if self.follows_wakes.load(Ordering::SeqCst)
+                        && (!self.service.load(Ordering::SeqCst)
+                            || (self.follows_installs.load(Ordering::SeqCst)
+                                && !superseded.waiting))
+                    {
+                        CHECK_INTERVAL
+                    } else {
+                        SCHEDULE_TICK
+                    };
+                    let wait = schedule.wait(SystemTime::now(), most);
                     tokio::select! {
                         _ = tokio::time::sleep(wait) => {}
                         _ = wakes.changed() => {}
@@ -2822,12 +2882,13 @@ impl Schedule {
         self.next_due = Some(now + delay);
     }
 
-    /// Monotonic sleep until the next look at the clock.
-    fn wait(&self, now: SystemTime) -> Duration {
+    /// Monotonic sleep until the next look at the clock: at most `most`
+    /// ([`SCHEDULE_TICK`], unless the machine's wakes are heard).
+    fn wait(&self, now: SystemTime, most: Duration) -> Duration {
         self.next_due
             .and_then(|due| due.duration_since(now).ok())
             .unwrap_or(Duration::ZERO)
-            .clamp(Duration::from_secs(1), SCHEDULE_TICK)
+            .clamp(Duration::from_secs(1), most.max(Duration::from_secs(1)))
     }
 }
 
@@ -2839,6 +2900,9 @@ impl Schedule {
 struct SupersededRestart {
     attempted: Option<String>,
     deferred_logged: bool,
+    /// A newer installed version waits for quiet: looked at each minute
+    /// until it restarts into it.
+    waiting: bool,
 }
 
 impl SupersededRestart {
@@ -2862,9 +2926,11 @@ impl SupersededRestart {
         restart: impl FnOnce() -> anyhow::Result<()>,
     ) {
         if !version_newer(installed, running) || self.attempted.as_deref() == Some(installed) {
+            self.waiting = false;
             return;
         }
-        if !quiescent() {
+        self.waiting = !quiescent();
+        if self.waiting {
             if !self.deferred_logged {
                 self.deferred_logged = true;
                 tracing::info!(
@@ -3692,9 +3758,11 @@ mod tests {
         assert_eq!(folders(&app_root), ["0.2.10", "0.2.11", "0.2.12", "current"]);
     }
 
+    /// `zeron headless` runs the `zeron-engine` beside it: a Cloud machine
+    /// keeps it in every version (it once left it out, and never came online).
     #[cfg(unix)]
     #[test]
-    fn a_cloud_machine_keeps_no_desktop_engine() {
+    fn a_cloud_machine_keeps_the_engine_its_headless_runs() {
         let tmp = tempfile::tempdir().unwrap();
         let app_root = tmp.path().join("app");
         versions_installed(&app_root, &["0.2.10", "0.2.11"]);
@@ -3708,7 +3776,7 @@ mod tests {
         strip_unused_from_versions(&app_root);
 
         for ver in ["0.2.10", "0.2.11"] {
-            assert!(!app_root.join(ver).join("zeron-engine").exists(), "{ver}");
+            assert!(app_root.join(ver).join("zeron-engine").exists(), "{ver}");
             assert!(app_root.join(ver).join("zeron").exists(), "{ver}");
         }
         assert!(app_root.join("notes").join("zeron-engine").exists());
@@ -3742,7 +3810,9 @@ mod tests {
         // A machine that slept through the deadline is due the moment it
         // looks at the clock again — no monotonic remainder to wait out.
         assert!(schedule.due(start + Duration::from_secs(9 * 60 * 60)));
-        assert_eq!(schedule.wait(start), SCHEDULE_TICK);
+        assert_eq!(schedule.wait(start, SCHEDULE_TICK), SCHEDULE_TICK);
+        // Hearing the machine's wakes, it sleeps until the check is due.
+        assert_eq!(schedule.wait(start, CHECK_INTERVAL), CHECK_INTERVAL);
         // A clock that jumped backwards does not postpone checks.
         assert!(schedule.due(start - Duration::from_secs(24 * 60 * 60)));
 
@@ -4169,11 +4239,11 @@ mod tests {
         assert!(staged.join("zeron").is_file());
     }
 
-    /// The release carries the desktop's background engine; a Cloud machine
-    /// stages the release without it, anywhere else keeps it.
+    /// The release carries `zeron-engine`, which `zeron headless` runs: a
+    /// Cloud machine stages it as anywhere else does.
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_cloud_machine_stages_a_release_without_the_desktop_engine() {
+    async fn a_cloud_machine_stages_a_release_with_its_engine() {
         let tmp = tempfile::tempdir().unwrap();
         let pkg = tmp.path().join("pkg");
         std::fs::create_dir_all(pkg.join("zeron-pkg")).unwrap();
@@ -4190,7 +4260,7 @@ mod tests {
             .into(),
             ..Manifest::default()
         };
-        for (cloud, kept) in [(true, false), (false, true)] {
+        for (cloud, kept) in [(true, true), (false, true)] {
             let app_root = tmp.path().join(format!("app-{cloud}"));
             std::fs::create_dir_all(&app_root).unwrap();
             let (base, server) = serve_forever(bytes.clone()).await;

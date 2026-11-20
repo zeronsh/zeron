@@ -43,6 +43,28 @@ final class IPadLayoutTests: XCTestCase {
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Wrangler deploy hygiene'")).firstMatch.waitForExistence(timeout: 5))
     }
 
+    /// The sidebar closes from its header; while it's away the main column
+    /// brings it back and offers New Session.
+    func testSidebarHidesAndComesBack() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = launch(["-route", "chat:chat-deploy"])
+        XCTAssertTrue(app.scrollViews["transcript"].waitForExistence(timeout: 10))
+        let row = app.cells["session-chat-deploy"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["sidebar-show"].exists, "nothing to bring back while the sidebar shows")
+        app.buttons["sidebar-hide"].tap()
+        let show = app.buttons["sidebar-show"]
+        XCTAssertTrue(show.waitForExistence(timeout: 5))
+        XCTAssertTrue(row.waitForNonExistence(timeout: 5), "the sidebar is gone")
+        snapshot(app, "ipad-sidebar-hidden")
+        app.buttons["detail-new-session"].tap()
+        XCTAssertTrue(app.textViews["composer-input"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["detail-new-session"].exists, "no New Session on the new-session page")
+        show.tap()
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "the sidebar is back")
+        XCTAssertTrue(show.waitForNonExistence(timeout: 5))
+    }
+
     func testNewSessionFromSidebarAndSearch() {
         XCUIDevice.shared.orientation = .landscapeLeft
         let app = launch(["-route", "chat:chat-deploy"])

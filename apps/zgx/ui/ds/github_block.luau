@@ -296,7 +296,6 @@ return function(p: Props): Node
 			-- description can't carry.
 			ui.row {
 				w_full = true,
-				min_h = "$zeron.settings.row",
 				px = "$space.4",
 				py = "$space.3",
 				gap = "$space.4",

@@ -896,3 +896,64 @@ async fn frames_for_a_room_that_has_gone_are_counted() {
     }
     until("the drops to be counted", || relay.stats().room_frames_dropped >= 3).await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn asking_the_host_brings_what_no_frame_or_announce_did() {
+    // The end of a turn whose frames and announce the room lost (or that went out
+    // while this device's socket was away): nothing tells the viewer it's behind.
+    let room = Room::default();
+    let host = Device::host("host");
+    let viewer = Device::viewer("viewer");
+    viewer.relay.set_host(Some("host".into()));
+    let _sockets = (room.join("host", &host.relay), room.join("viewer", &viewer.relay));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    host.stream("seen ");
+    converged(&[&host, &viewer]).await;
+    // Past the host's settle announce for "seen", then ops nobody hears of.
+    tokio::time::sleep(super::ANNOUNCE_SETTLE + Duration::from_secs(1)).await;
+    host.commit("never relayed");
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    assert_eq!(viewer.body(), "seen ", "nothing heals it by itself");
+
+    let ticket = viewer.relay.ask_host();
+    assert!(!viewer.relay.host_answered(ticket));
+    let asked = tokio::time::Instant::now();
+    converged(&[&host, &viewer]).await;
+    until("the host's answer", || viewer.relay.host_answered(ticket)).await;
+    assert!(asked.elapsed() < Duration::from_secs(5), "took {:?}", asked.elapsed());
+
+    // Asking when there's nothing to fetch is answered too, with nothing.
+    let rounds = viewer.relay.stats().sync_rounds;
+    let again = viewer.relay.ask_host();
+    until("the second answer", || viewer.relay.host_answered(again)).await;
+    assert_eq!(viewer.relay.stats().sync_rounds, rounds + 1, "one round per ask");
+    assert_eq!(viewer.body(), host.body());
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_ask_of_a_host_that_has_left_is_answered_when_it_joins() {
+    // The host left the room once its turn ended (an idle host closes its socket).
+    // The ask goes nowhere until the host is back: the edge wakes it for the ask,
+    // and its join restarts the round.
+    let room = Room::default();
+    let host = Device::host("host");
+    let viewer = Device::viewer("viewer");
+    viewer.relay.set_host(Some("host".into()));
+    let host_socket = room.join("host", &host.relay);
+    let _viewer_socket = room.join("viewer", &viewer.relay);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    host.stream("seen ");
+    converged(&[&host, &viewer]).await;
+    host.commit("written as the host left");
+    host_socket.cancel();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let ticket = viewer.relay.ask_host();
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert!(!viewer.relay.host_answered(ticket), "nobody to answer");
+    let _back = room.join("host", &host.relay);
+    let joined = tokio::time::Instant::now();
+    converged(&[&host, &viewer]).await;
+    until("the host's answer", || viewer.relay.host_answered(ticket)).await;
+    assert!(joined.elapsed() < Duration::from_secs(5), "took {:?}", joined.elapsed());
+}

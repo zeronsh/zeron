@@ -21,20 +21,38 @@ use zeron_update::windows::{self, Completion};
 
 use crate::about::APP_VERSION;
 
+/// Why this launch can't go on, as `main`'s error: said as written
+/// ("Error: …"), exit status 1.
+pub struct Failed(String);
+
+impl std::fmt::Debug for Failed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::fmt::Display for Failed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Failed {}
+
 /// Complete this installation if it needs it; returns once this process may
 /// go on. Exits instead when the newer `zeron.exe` the feed had by then ran
-/// in its place, or when the person gives up.
-pub fn complete_if_needed(argv: &[String]) {
+/// in its place; fails when the person gives up (or isn't asked: a command).
+pub fn complete_if_needed(argv: &[String]) -> Result<(), Failed> {
     windows::set_packaged();
     // Answered without the folder: the old updater checks a staged copy so.
     if matches!(argv.get(1).map(String::as_str), Some("--version" | "-V" | "--help" | "-h" | "help")) {
-        return;
+        return Ok(());
     }
     let Ok(exe) = std::env::current_exe() else {
-        return;
+        return Ok(());
     };
     let Some(directory) = windows::incomplete_install(&exe, APP_VERSION) else {
-        return;
+        return Ok(());
     };
     // A window launch: nothing, a link, or the update's relaunch.
     let window = argv
@@ -42,14 +60,13 @@ pub fn complete_if_needed(argv: &[String]) {
         .is_none_or(|arg| arg.starts_with("--") || arg.starts_with("zeron:"));
     loop {
         match complete(&directory) {
-            Ok(Completion::Complete | Completion::Installed) => return,
+            Ok(Completion::Complete | Completion::Installed) => return Ok(()),
             Ok(Completion::Updated(version)) => {
-                run_installed(&directory, &argv[1..], &version);
+                return Err(run_installed(&directory, &argv[1..], &version));
             }
             Err(error) => {
-                eprintln!("Error: Zeron couldn't finish installing this update: {error}");
                 if !window || !ask_to_retry(&error) {
-                    std::process::exit(1);
+                    return Err(Failed(format!("Zeron couldn't finish installing this update: {error}")));
                 }
             }
         }
@@ -68,15 +85,13 @@ fn complete(directory: &Path) -> Result<Completion, String> {
 }
 
 /// The feed had a newer release, now installed as `zeron.exe`: it runs this
-/// launch instead, and its exit is this one's.
-fn run_installed(directory: &Path, args: &[String], version: &str) -> ! {
+/// launch instead, and its exit is this one's. Returns only when it
+/// couldn't start.
+fn run_installed(directory: &Path, args: &[String], version: &str) -> Failed {
     let installed = directory.join("zeron.exe");
     match std::process::Command::new(&installed).args(args).status() {
         Ok(status) => std::process::exit(status.code().unwrap_or(1)),
-        Err(error) => {
-            eprintln!("Error: Zeron {version} is installed, but couldn't start: {error}");
-            std::process::exit(1);
-        }
+        Err(error) => Failed(format!("Zeron {version} is installed, but couldn't start: {error}")),
     }
 }
 

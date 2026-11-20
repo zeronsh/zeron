@@ -401,6 +401,79 @@ async fn revoked_captured_session_stays_on_its_synced_cache() {
 }
 
 #[tokio::test]
+async fn signed_in_with_chats_kept_local_opens_the_local_workspace_offline() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("session.json"),
+        r#"{"refreshToken":"dead","user":{"id":"user_1","email":"u@example.com"},"orgId":"org_1"}"#,
+    )
+    .unwrap();
+    zeron_proto::set_keep_chats_local(dir.path(), true).unwrap();
+    // An edge that refuses everything and notes each request's line.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let edge_url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = requests.clone();
+    let edge_task = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                let mut request = [0u8; 4096];
+                let n = stream.read(&mut request).await.unwrap_or(0);
+                let line = String::from_utf8_lossy(&request[..n]).lines().next().unwrap_or("").to_string();
+                if !line.starts_with("HEAD / ") {
+                    seen.lock().unwrap().push(line);
+                }
+                let _ = stream
+                    .write_all(b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                    .await;
+            });
+        }
+    });
+    let config = config(dir.path(), edge_url, Some("client_test"), None);
+    let auth = Engine::build_auth(&config).await;
+    let scope = Engine::initial_workspace_scope(&auth);
+
+    // Signed in, but the workspace is the local one.
+    assert!(auth.loaded_workos_session());
+    assert!(auth.keeps_chats_local());
+    assert_eq!(scope, WorkspaceScope::Local);
+    let profile = Engine::resolve_profile(&config, &auth, scope)
+        .unwrap()
+        .expect("the local profile always resolves");
+    let runtime = Engine::assemble_runtime(&config, auth.clone(), profile)
+        .await
+        .unwrap();
+    assert_eq!(runtime.workspace_scope(), WorkspaceScope::Local);
+    assert!(dir.path().join("profiles/local").is_dir());
+    assert!(!dir.path().join("orgs").exists());
+
+    // No rooms: the only requests are the sign-in's own refresh and the
+    // public release checks a local workspace makes signed out too.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    for line in requests.lock().unwrap().iter() {
+        assert!(
+            line.starts_with("POST /auth/refresh ") || line.starts_with("GET /releases/"),
+            "a local workspace reached the edge: {line}"
+        );
+    }
+    runtime.shutdown().await;
+    edge_task.abort();
+
+    // Turned off, a saved session opens the synced workspace again. (The
+    // refusing edge revoked the first one, so it's saved afresh.)
+    std::fs::write(
+        dir.path().join("session.json"),
+        r#"{"refreshToken":"dead","user":{"id":"user_1","email":"u@example.com"},"orgId":"org_1"}"#,
+    )
+    .unwrap();
+    zeron_proto::set_keep_chats_local(dir.path(), false).unwrap();
+    let synced = self::config(dir.path(), "http://127.0.0.1:9".into(), Some("client_test"), None);
+    let auth = Engine::build_auth(&synced).await;
+    assert_eq!(Engine::initial_workspace_scope(&auth), WorkspaceScope::Synced);
+}
+
+#[tokio::test]
 async fn transient_refresh_failure_keeps_synced_recovery_supervisors_alive() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(

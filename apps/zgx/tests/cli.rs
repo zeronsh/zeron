@@ -67,7 +67,8 @@ fn the_engine_s_subcommands_run_in_the_helper_beside_the_app() {
     let dir = scratch("helper");
     let zeron = zeron_in(&dir);
     let heard = dir.join("heard");
-    let helper = dir.join("Zeron Engine");
+    // (The helper's name here: "Zeron Engine" on macOS, zeron-engine on Linux.)
+    let helper = dir.join(zeron_launch::ENGINE_EXECUTABLES[0]);
     std::fs::write(&helper, format!("#!/bin/sh\necho \"$@\" > '{}'\nexit 7\n", heard.display())).unwrap();
     std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
     let status = Command::new(&zeron).args(["plugin", "list"]).env("ZERON_DATA_DIR", &dir).status().unwrap();

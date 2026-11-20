@@ -554,6 +554,57 @@ pub fn delta_from_known<E: Borrow<SessionMessageEntry>>(
     TranscriptFrame::Delta { upsert, append: Vec::new(), remove, parts: Vec::new(), count: next.len() }
 }
 
+/// For a reader holding `known` (as [`delta_from_known`] takes it), what it
+/// can be sent from the transcript's newest entries alone (`tail`: whole
+/// entries, a suffix of the transcript) before the rest is read: the entries
+/// it holds that changed, and the new ones after the last of `tail` it holds
+/// (in order, newest last). Sent as an opening tail (`historyPending`), which
+/// a reader holding rows takes into them: each it holds replaced where it
+/// is, each new one put after them all. (A new entry before one it holds
+/// would land out of place: it's left for the whole delta.)
+///
+/// Returns them, and `known` as the reader holds it once it has taken them:
+/// what the whole delta that follows is measured from.
+pub fn tail_since_known<E: Borrow<SessionMessageEntry>>(
+    known: &[(String, u64)],
+    tail: &[E],
+) -> (Vec<SessionMessageEntry>, Vec<(String, u64)>) {
+    let tail: Vec<&SessionMessageEntry> = tail.iter().map(Borrow::borrow).collect();
+    // (The reader takes a tail entry into the first row with its id.)
+    let mut known_at: HashMap<&str, usize> = HashMap::with_capacity(known.len());
+    for (i, (id, _)) in known.iter().enumerate() {
+        known_at.entry(id.as_str()).or_insert(i);
+    }
+    let last_held = tail.iter().rposition(|e| known_at.contains_key(e.id.as_str()));
+    let mut sent = Vec::new();
+    let mut changed: Vec<(usize, u64)> = Vec::new();
+    let mut added: Vec<(String, u64)> = Vec::new();
+    for (i, entry) in tail.iter().copied().enumerate() {
+        match known_at.get(entry.id.as_str()) {
+            Some(&at) => {
+                let sum = entry_sum_of(entry);
+                if sum != known[at].1 {
+                    changed.push((at, sum));
+                    sent.push(entry.clone());
+                }
+            }
+            None if last_held.is_none_or(|held| i > held)
+                && !added.iter().any(|(id, _)| *id == entry.id) =>
+            {
+                added.push((entry.id.clone(), entry_sum_of(entry)));
+                sent.push(entry.clone());
+            }
+            None => {}
+        }
+    }
+    let mut holds = known.to_vec();
+    for (at, sum) in changed {
+        holds[at].1 = sum;
+    }
+    holds.extend(added);
+    (sent, holds)
+}
+
 /// A frame that could not be applied cleanly — the consumer's copy has
 /// diverged (skew, missed frame) and it should resubscribe for a reset.
 #[derive(Debug, thiserror::Error)]
@@ -903,6 +954,7 @@ mod tests {
             exit_code: None,
             output_truncated: false,
             output_lines: None,
+            review: None,
             preview_paths: Vec::new(),
         }
     }
@@ -1180,5 +1232,89 @@ mod context_update_tests {
                 .pending_input
                 .is_none()
         );
+    }
+
+    /// A reader holding rows, sent first what changed among the newest
+    /// entries (taken as the app takes an opening tail: in place, new ones
+    /// after all it holds), then the delta from what it then holds, lands on
+    /// the transcript: whatever changed, wherever, and whatever changed
+    /// between the two reads.
+    #[test]
+    fn a_reader_takes_the_tail_then_the_rest_and_lands_on_the_transcript() {
+        let entry = |id: &str, text: &str| SessionMessageEntry {
+            id: id.into(),
+            role: crate::schema::MessageRole::Assistant,
+            parts: vec![MessagePart::Text { id: "t0".into(), text: text.into() }],
+            created_at: 0,
+            device_id: "dev".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        };
+        let held: Vec<_> = (0..30).map(|i| entry(&format!("e{i}"), "done")).collect();
+        let known: Vec<(String, u64)> = held.iter().map(|e| (e.id.clone(), entry_sum_of(e))).collect();
+        // The app's `heard_frame` with rows held and `historyPending`.
+        let take_tail = |rows: &mut Vec<SessionMessageEntry>, sent: Vec<SessionMessageEntry>| {
+            for entry in sent {
+                match rows.iter_mut().find(|e| e.id == entry.id) {
+                    Some(row) => *row = entry,
+                    None => rows.push(entry),
+                }
+            }
+        };
+        // `first`: the transcript as the tail is read; `then`: as the whole
+        // read finds it.
+        let check = |first: &[SessionMessageEntry], then: &[SessionMessageEntry], tail: usize| {
+            let (sent, holds) = tail_since_known(&known, &first[first.len() - tail..]);
+            let mut rows = held.clone();
+            take_tail(&mut rows, sent.clone());
+            assert_eq!(
+                holds,
+                rows.iter().map(|e| (e.id.clone(), entry_sum_of(e))).collect::<Vec<_>>(),
+                "holds is what the reader holds"
+            );
+            let frame = delta_from_known(&holds, then);
+            let json = serde_json::to_value(&frame).unwrap();
+            apply_transcript_frame(&mut rows, serde_json::from_value(json).unwrap()).unwrap();
+            assert_eq!(rows, then);
+            (sent.into_iter().map(|e| e.id).collect::<Vec<_>>(), frame)
+        };
+        // Away: e27 changed, e30 and e31 came, e5 changed, e9 went.
+        let mut now = held.clone();
+        now[27] = entry("e27", "changed");
+        now[5] = entry("e5", "changed");
+        now.remove(9);
+        now.push(entry("e30", "new"));
+        now.push(entry("e31", "new"));
+        let (sent, frame) = check(&now, &now, 8);
+        assert_eq!(sent, ["e27", "e30", "e31"], "only what changed in the tail");
+        let TranscriptFrame::Delta { upsert, remove, .. } = frame else { panic!("a delta") };
+        assert_eq!(upsert.iter().map(|u| u.entry.id.as_str()).collect::<Vec<_>>(), ["e5", "e10"]);
+        assert_eq!(remove, ["e9"]);
+        // Nothing changed: nothing first, and the delta is empty.
+        let (sent, frame) = check(&held, &held, 8);
+        assert!(sent.is_empty() && frame.is_empty_delta());
+        // A new entry before one held (a provider switch's seam, written
+        // before the unanswered prompt): left for the delta, which places it.
+        let mut seam = held.clone();
+        seam.insert(29, entry("switch", "seam"));
+        let (sent, _) = check(&seam, &seam, 8);
+        assert!(sent.is_empty());
+        // More new than the tail reads: all of the tail is new, after it all.
+        let mut many = held.clone();
+        many.extend((30..50).map(|i| entry(&format!("e{i}"), "new")));
+        let (sent, _) = check(&many, &many, 8);
+        assert_eq!(sent.len(), 8);
+        // Changed between the reads: a new entry gone, a change undone, a
+        // change changed again.
+        let mut then = now.clone();
+        then.retain(|e| e.id != "e31");
+        let at = then.iter().position(|e| e.id == "e27").unwrap();
+        then[at] = entry("e27", "done");
+        check(&now, &then, 8);
+        let mut then = now.clone();
+        let at = then.iter().position(|e| e.id == "e30").unwrap();
+        then[at] = entry("e30", "grew more");
+        check(&now, &then, 8);
     }
 }

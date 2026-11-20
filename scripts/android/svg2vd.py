@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert Zeron's line icons (desktop crates/ui/assets/icons, iOS tab and
+"""Convert Zeron's line icons (desktop assets/icons, iOS tab and
 tool icons) into Android VectorDrawables, so every platform draws the same
 glyphs. Handles the subset those icons use: <g>/<path>/<circle>/<rect>,
 inherited fill/stroke attributes, caps, joins and even-odd fills.
@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 SOURCES = [
-    ("", os.path.join(ROOT, "crates/ui/assets/icons/*.svg")),
+    ("", os.path.join(ROOT, "assets/icons/*.svg")),
     ("", os.path.join(ROOT, "apps/ios/Zeron/Assets.xcassets/TabIcons/*/*.svg")),
     ("", os.path.join(ROOT, "apps/ios/Zeron/Assets.xcassets/ToolIcons/*/*.svg")),
     # Android-only glyphs (share sheet, camera) in the same Solar Linear style.

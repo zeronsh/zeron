@@ -139,9 +139,19 @@ export type Find = {
 -- it has shown; what's new is a chunk, fading exactly once, its time following how fast
 -- text is coming. Kept by the reply's key, so a row made again doesn't fade again.
 local VEIL_MIN, VEIL_MAX, VEIL_EMA_SEED, VEIL_GAP_MAX = 120, 400, 160, 1000
+local VEIL_SETTLE = 50
 type VeilChunk = { from: number, to: number, started: number, ms: number, boost: number }
 type VeilElem = { text: string, chunks: { VeilChunk }, ema: number, last: number? }
-type Veil = { elems: { [string]: VeilElem }, block: number, n: number, seeding: boolean, tick: State<number>?, ticking: any }
+type Veil = {
+	elems: { [string]: VeilElem },
+	block: number,
+	n: number,
+	seeding: boolean,
+	tick: State<number>?,
+	ticking: any,
+	clocks: number?,
+	ends: number?,
+}
 local VEILS: { [string]: Veil } = {}
 local veil_count = 0
 local function veil_of(key: string, seeding: boolean): Veil
@@ -156,6 +166,38 @@ local function veil_of(key: string, seeding: boolean): Veil
 		VEILS[key] = v
 	end
 	return v
+end
+-- The veil's clock (`v.tick`) run until its fades have ended (`v.ends`). The
+-- fades are timed by `ui.now()`, the wall clock, and the clock by the frames',
+-- which can run a little ahead of it: a few frames past the end, and again
+-- if the wall clock isn't there yet, so the last frame paints the ink and not
+-- a hair short of it.
+local function veil_tick(v: Veil)
+	local tick = v.tick
+	if not tick then
+		return
+	end
+	if v.ticking then
+		v.ticking:cancel()
+	end
+	-- (Ended, it goes: a table of 400 replies' clips would keep them for nothing.
+	-- By number: a callback holding its own clip would keep both for good.)
+	local clock = (v.clocks or 0) + 1
+	v.clocks = clock
+	v.ticking = anime.animate(tick, {
+		value = tick:peek() + 1,
+		duration = math.max((v.ends or 0) - ui.now(), 0) + VEIL_SETTLE,
+		ease = "linear",
+		onComplete = function()
+			if v.clocks ~= clock then
+				return
+			end
+			v.ticking = nil
+			if ui.now() < (v.ends or 0) then
+				veil_tick(v)
+			end
+		end,
+	})
 end
 -- What of `text` is still fading, after what's newly arrived is added.
 local function veil_chunks(v: Veil, text: string): { VeilChunk }
@@ -208,26 +250,12 @@ local function veil_chunks(v: Veil, text: string): { VeilChunk }
 	for _, c in going do
 		c.boost = 1 + 0.3 * math.max(#going - 2, 0)
 	end
-	-- A clock for what's fading, its frames what the colours below follow.
-	local tick = v.tick
-	if tick and longest > 0 then
-		if v.ticking then
-			v.ticking:cancel()
-		end
-		-- (Ended, it goes: a table of 400 replies' clips would keep them for nothing.
-		-- By number: a callback holding its own clip would keep both for good.)
-		local clock = (v.clocks or 0) + 1
-		v.clocks = clock
-		v.ticking = anime.animate(tick, {
-			value = tick:peek() + 1,
-			duration = longest,
-			ease = "linear",
-			onComplete = function()
-				if v.clocks == clock then
-					v.ticking = nil
-				end
-			end,
-		})
+	-- A clock for what's fading, its frames what the colours below follow: on
+	-- until the last of the reply's fades ends (another paragraph's may end
+	-- later than this one's).
+	if v.tick and longest > 0 then
+		v.ends = math.max(v.ends or 0, now + longest)
+		veil_tick(v)
 	end
 	return going
 end
@@ -783,8 +811,14 @@ local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: C
 					return Links.take(target)
 				end
 			elseif open then
-				span.on_click = function()
+				-- A link too (its role, as a reader hears it), going where
+				-- the page opens it: zgx makes a run that only acts a button.
+				-- (Its click handled here, so a web address doesn't open
+				-- outside as well; zgx opens no other scheme.)
+				span.href = target
+				span.on_click = function(): boolean
 					open(target)
+					return true
 				end
 			end
 			-- Its menu, by its kind (ds/links), built as it opens.

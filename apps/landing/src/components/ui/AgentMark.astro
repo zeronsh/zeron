@@ -1,0 +1,30 @@
+---
+import type { AgentMark } from "../../data/agents.ts";
+
+interface Props {
+  mark: AgentMark;
+}
+---
+
+<i class="agent-mark" data-mark={Astro.props.mark} aria-hidden="true"></i>
+
+<style>
+  .agent-mark {
+    display: inline-block;
+    flex: none;
+    width: 1em;
+    height: 1em;
+    background: currentColor;
+    -webkit-mask: var(--mark) no-repeat center / contain;
+    mask: var(--mark) no-repeat center / contain;
+  }
+  [data-mark="claude"] { --mark: url("../../assets/agents/claude.svg"); }
+  [data-mark="openai"] { --mark: url("../../assets/agents/openai.svg"); }
+  [data-mark="cursor"] { --mark: url("../../assets/agents/cursor.svg"); }
+  [data-mark="opencode"] { --mark: url("../../assets/agents/opencode.svg"); }
+  [data-mark="antigravity"] { --mark: url("../../assets/agents/antigravity.svg"); }
+  [data-mark="devin"] { --mark: url("../../assets/agents/devin.svg"); }
+  [data-mark="grok"] { --mark: url("../../assets/agents/grok.svg"); }
+  [data-mark="hermes"] { --mark: url("../../assets/agents/hermes.svg"); }
+  [data-mark="pi"] { --mark: url("../../assets/agents/pi.svg"); }
+</style>

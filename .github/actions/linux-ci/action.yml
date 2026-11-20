@@ -58,7 +58,7 @@ runs:
         path: ~/apt-debs/*.deb
         key: apt-debs-v1-${{ inputs.apt-cache }}-${{ hashFiles('scripts/ci/apt-install.sh') }}
 
-    # Exported for the rest of the job. Tests and the browser fixture are built in
+    # Exported for the rest of the job. Tests are built in
     # the dev profile without debug info (smaller, faster to link). CARGO_* variables
     # are part of the rust-cache key, so every job sharing a cache must set the same.
     - name: Build settings

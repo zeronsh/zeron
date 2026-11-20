@@ -41,6 +41,7 @@ import {
   markDeliveredByOthers, queueHolds, queueLength, queueRows, versionIncludes
 } from "./chat-relay";
 import { AUTH_ORG_HEADER, AUTH_USER_HEADER, type Env } from "./env";
+import { RUNNER_DROP_PATH, admittedRunner, applyDrop, parseDrop, revoked, runnerDroppedKey, type RunnerDrop } from "./runner-revocation";
 import {
   ensureChatWakes, finishChatWake, MAX_WAKE_ATTEMPTS, PERMANENT_WAKE_REJECTIONS,
   pendingChatWake, queueChatWake, retryChatWake, validWakeRoute
@@ -101,6 +102,9 @@ interface SocketState {
   relay?: boolean;
   /** The caller's org, to find the chat's registry. Only with the layer on. */
   orgId?: string;
+  /** A Cloud runner its session's reach admitted here, revocably
+   * (runner-revocation.ts). */
+  runner?: RunnerDrop;
 }
 
 interface PushOutcome {
@@ -169,6 +173,9 @@ export class ChatRoom implements DurableObject {
       // dial one owns it).
       if (!owner) setMeta(sql, "owner", userId);
       else if (owner !== userId) return json({ error: "forbidden" }, 403);
+      // Admitted before its session was isolated, arriving after: refused.
+      const runner = admittedRunner(request);
+      if (runner && revoked(runner, getMeta(sql, runnerDroppedKey(runner.device)))) return json({ error: "forbidden" }, 403);
       const device = url.searchParams.get("device") ?? "";
       const chatId = url.searchParams.get("chatId") ?? "";
       // An unroutable wake hint never refuses the push: the rows are the
@@ -177,11 +184,26 @@ export class ChatRoom implements DurableObject {
       const hostDevice = hint && validWakeRoute(chatId, hint) ? hint : "";
       const pair = new WebSocketPair();
       this.ctx.acceptWebSocket(pair[1]);
-      const state: SocketState = { userId, device, chatId, hostDevice };
+      const state: SocketState = { userId, device, chatId, hostDevice, ...(runner ? { runner } : {}) };
       const orgId = request.headers.get(AUTH_ORG_HEADER);
       if (orgId) state.orgId = orgId;
       pair[1].serializeAttachment(state);
       return new Response(null, { status: 101, webSocket: pair[0] });
+    }
+
+    // A Cloud runner isolated: close its sockets its reach admitted
+    // (internal: the registry sends it; chatRoute never routes here).
+    if (url.pathname === RUNNER_DROP_PATH && request.method === "POST") {
+      if (owner && owner !== userId) return json({ error: "forbidden" }, 403);
+      const drop = parseDrop(await request.json().catch(() => null));
+      if (!drop) return json({ error: "bad_request" }, 400);
+      const closed = applyDrop(
+        drop,
+        { get: (key) => getMeta(sql, key), set: (key, value) => setMeta(sql, key, value) },
+        this.ctx.getWebSockets(),
+        (socket) => (socket.deserializeAttachment() as SocketState | null)?.runner
+      );
+      return json({ closed });
     }
 
     if (url.pathname === "/checkpoint" && request.method === "POST") {

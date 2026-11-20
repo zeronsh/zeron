@@ -113,6 +113,23 @@ function M.value(v: unknown): unknown
 	return v
 end
 
+-- A control's `dim`: whether it looks disabled, by its own `disabled` (a
+-- value, a state or a function) alone. Inside a disabled container a
+-- control is disabled too, to input and assistive technology, and would
+-- dim as if disabled itself; Zeron's containers that disable what they
+-- hold (a field's frame, a settings row out of reach) dim themselves
+-- (`$zeron.disabled`), so what they hold isn't dimmed again.
+function M.dim(disabled: unknown): boolean | () -> boolean
+	if disabled == nil or disabled == false then
+		return false
+	elseif disabled == true then
+		return true
+	end
+	return function(): boolean
+		return M.value(disabled) == true
+	end
+end
+
 -- (A message, `ui.t`, reads as its text there too: a userdata with a
 -- `get`, read as a state is, so it follows the locale where it's read.)
 

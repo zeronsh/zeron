@@ -54,7 +54,7 @@ class ReservationTests(unittest.TestCase):
             job("linux / core-tests", "ubuntu-24.04"),
             job("windows / tests", "windows-2022", "in_progress", None),
             job("macos / macos-native", "macos-latest", conclusion="failure"),
-            job("macos / macos-frame-source", "macos-latest", conclusion="skipped"),
+            job("ios / ios-tests", "macos-latest", conclusion="skipped"),
         ]
         self.assertEqual(held(declared, jobs), {"linux": 2, "windows": 2, "macos": 0})
 
