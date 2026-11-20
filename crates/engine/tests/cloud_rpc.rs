@@ -1205,6 +1205,7 @@ async fn a_message_that_waited_days_for_its_machine_goes_once_when_woken() {
             auto_approve: true,
             access: Default::default(),
             plan: false,
+            code_mode: false,
             attachments: Vec::new(),
             worktree: None,
             resume: None,

@@ -99,6 +99,7 @@ fn make_request(
         auto_approve: true,
         access: AccessMode::FullAccess,
         plan: false,
+        code_mode: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,

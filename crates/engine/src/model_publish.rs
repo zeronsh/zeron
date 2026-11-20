@@ -303,6 +303,7 @@ impl ModelPublisher {
                     auto_approve: false,
                     access: Default::default(),
                     plan: false,
+                    code_mode: false,
                     attachments: Vec::new(),
                     resume: None,
                     worktree: None,

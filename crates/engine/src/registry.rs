@@ -111,6 +111,8 @@ struct HarnessPrefsFile {
     /// Harnesses the user turned native subagents off for: their runs
     /// delegate through side chats only.
     native_subagents_off: Vec<HarnessId>,
+    /// Harnesses the user turned Code Mode on for.
+    code_mode_on: Vec<HarnessId>,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
     #[serde(skip_serializing)]
@@ -135,6 +137,16 @@ pub struct NativeSubagentSettings {
     pub switchable: Vec<HarnessId>,
     /// The ones turned off: their runs delegate through side chats only.
     pub off: Vec<HarnessId>,
+}
+
+/// Per-device Code Mode preferences (Settings → Providers).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CodeModeSettings {
+    /// Registered harnesses that support enabling Code Mode.
+    pub supported: Vec<HarnessId>,
+    /// The ones with Code Mode enabled.
+    pub enabled: Vec<HarnessId>,
 }
 
 type Factory = Box<dyn Fn() -> Result<Arc<dyn Harness>, HarnessError> + Send + Sync>;
@@ -736,6 +748,48 @@ impl HarnessRegistry {
         Ok(())
     }
 
+    /// Whether runs of `id` enable Code Mode on this device. Off by default;
+    /// on only by the user's choice for a harness that supports it.
+    pub fn code_mode(&self, id: HarnessId) -> bool {
+        zeron_harness::supports_code_mode(id) && self.prefs().code_mode_on.contains(&id)
+    }
+
+    pub fn code_mode_settings(&self) -> CodeModeSettings {
+        let registered: Vec<HarnessId> = self.order().iter().copied().collect();
+        CodeModeSettings {
+            supported: registered
+                .into_iter()
+                .filter(|id| zeron_harness::supports_code_mode(*id))
+                .collect(),
+            enabled: self
+                .prefs()
+                .code_mode_on
+                .iter()
+                .copied()
+                .filter(|id| zeron_harness::supports_code_mode(*id))
+                .collect(),
+        }
+    }
+
+    /// Turn `id`'s Code Mode on or off and persist. Each chat picks the
+    /// change up at its next turn once its background work is done: a parked
+    /// session still holding some is kept as it started.
+    pub fn set_code_mode(&self, id: HarnessId, on: bool) -> Result<(), String> {
+        if !zeron_harness::supports_code_mode(id) {
+            return Err(format!("{id:?} does not support Code Mode"));
+        }
+        {
+            let mut prefs = self.prefs();
+            match (on, prefs.code_mode_on.contains(&id)) {
+                (true, false) => prefs.code_mode_on.push(id),
+                (false, true) => prefs.code_mode_on.retain(|h| *h != id),
+                _ => return Ok(()),
+            }
+        }
+        self.persist_prefs();
+        Ok(())
+    }
+
     pub fn register(&self, harness: Arc<dyn Harness>) {
         let id = harness.id();
         if self.slots().insert(id, Slot::Ready(harness)).is_none() {
@@ -803,10 +857,15 @@ impl HarnessRegistry {
         self.order().retain(|h| *h != id);
         let changed = {
             let mut prefs = self.prefs();
-            let before = prefs.disabled.len() + prefs.native_subagents_off.len();
+            let before =
+                prefs.disabled.len() + prefs.native_subagents_off.len() + prefs.code_mode_on.len();
             prefs.disabled.retain(|h| *h != id);
             prefs.native_subagents_off.retain(|h| *h != id);
-            before != prefs.disabled.len() + prefs.native_subagents_off.len()
+            prefs.code_mode_on.retain(|h| *h != id);
+            before
+                != prefs.disabled.len()
+                    + prefs.native_subagents_off.len()
+                    + prefs.code_mode_on.len()
         };
         if changed {
             self.persist_prefs();
@@ -1754,6 +1813,52 @@ mod tests {
         *reloaded.prefs() = serde_json::from_str(r#"{"nativeSubagentsOff":["opencode"]}"#).unwrap();
         assert!(reloaded.native_subagents(HarnessId::Opencode));
     }
+
+    #[test]
+    fn code_mode_switches_on_per_harness_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        test_slot(&registry, HarnessId::ClaudeCode, true);
+        test_slot(&registry, HarnessId::Codex, true);
+        test_slot(&registry, HarnessId::Muse, true);
+        test_slot(&registry, HarnessId::Opencode, true);
+        assert!(!registry.code_mode(HarnessId::Codex));
+        assert!(!registry.code_mode(HarnessId::Muse));
+        assert_eq!(
+            registry.code_mode_settings().supported,
+            vec![HarnessId::Codex, HarnessId::Muse]
+        );
+        assert!(registry.code_mode_settings().enabled.is_empty());
+
+        // Unsupported harnesses are refused.
+        assert!(registry.set_code_mode(HarnessId::ClaudeCode, true).is_err());
+        assert!(registry.set_code_mode(HarnessId::Opencode, true).is_err());
+
+        registry.set_code_mode(HarnessId::Codex, true).unwrap();
+        registry.set_code_mode(HarnessId::Codex, true).unwrap();
+        registry.set_code_mode(HarnessId::Muse, true).unwrap();
+        assert!(registry.code_mode(HarnessId::Codex));
+        assert!(registry.code_mode(HarnessId::Muse));
+
+        let reloaded = HarnessRegistry::new();
+        reloaded.load_prefs(dir.path());
+        assert_eq!(
+            reloaded.code_mode_settings().enabled,
+            vec![HarnessId::Codex, HarnessId::Muse]
+        );
+        assert!(reloaded.code_mode(HarnessId::Codex));
+        assert!(reloaded.code_mode(HarnessId::Muse));
+
+        reloaded.set_code_mode(HarnessId::Codex, false).unwrap();
+        assert!(!reloaded.code_mode(HarnessId::Codex));
+        assert!(reloaded.code_mode(HarnessId::Muse));
+
+        // Only a harness that supports Code Mode ever runs with it.
+        *reloaded.prefs() = serde_json::from_str(r#"{"codeModeOn":["claude-code"]}"#).unwrap();
+        assert!(!reloaded.code_mode(HarnessId::ClaudeCode));
+        assert!(reloaded.code_mode_settings().enabled.is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -1806,6 +1911,7 @@ mod title_tests {
         assert_eq!(prefs.titles, TitleSettings::default());
         assert_eq!(prefs.disabled, vec![HarnessId::Codex]);
         assert!(prefs.native_subagents_off.is_empty());
+        assert!(prefs.code_mode_on.is_empty());
     }
 }
 

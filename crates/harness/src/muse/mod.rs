@@ -148,6 +148,7 @@ impl MuseHarness {
             Mode::Session {
                 sandbox: !full_access(&request)
                     && request.sandbox != zeron_proto::SandboxLevel::DangerFullAccess,
+                code_mode: request.code_mode,
             }
         };
         let host = Host::spawn(&exe, Path::new(&request.cwd), mode, &request.env)?;
@@ -312,6 +313,7 @@ fn launch_matches(live: &RunRequest, next: &RunRequest) -> bool {
     live.cwd == next.cwd
         && full_access(live) == full_access(next)
         && live.sandbox == next.sandbox
+        && live.code_mode == next.code_mode
         && live.env == next.env
         && live.mcp == next.mcp
         && live.extra_mcp == next.extra_mcp

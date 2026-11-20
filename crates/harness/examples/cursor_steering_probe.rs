@@ -21,6 +21,7 @@ async fn main() -> anyhow::Result<()> {
         model_options: Default::default(), cwd: workspace.path().to_string_lossy().into_owned(),
         sandbox: SandboxLevel::DangerFullAccess, auto_approve: true,
         access: Default::default(), plan: false,
+ code_mode: false,
         attachments: vec![], worktree: None, resume: None,
         env: Default::default(),
         extra_mcp: Vec::new(),

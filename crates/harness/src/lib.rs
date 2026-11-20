@@ -1015,6 +1015,19 @@ pub fn switches_native_subagents(id: HarnessId) -> bool {
     matches!(id, HarnessId::ClaudeCode)
 }
 
+/// Drivers that support an opt-in Code Mode where the agent scripts tool calls
+/// in JavaScript instead of emitting one JSON tool call per turn:
+/// - Codex (`features.code_mode = true` on `thread/start` and `thread/resume`)
+/// - Muse Code (`-c run.code_mode="additive"` on `muse serve`)
+///
+/// Claude Code's experimental Code Mode is excluded because Claude Code
+/// refuses it outside an interactive terminal (`-p` / `stream-json`).
+/// OpenCode 2.x and Hermes enable their code-execution tools by default rather
+/// than behind an opt-in mode switch.
+pub fn supports_code_mode(id: HarnessId) -> bool {
+    matches!(id, HarnessId::Codex | HarnessId::Muse)
+}
+
 #[cfg(test)]
 mod path_tests {
     use super::child_path_entries;

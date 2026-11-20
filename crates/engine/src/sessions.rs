@@ -212,6 +212,10 @@ struct RunHandle {
     /// server, so with no IPC port served ([`Inner::zeron_mcp`] returns
     /// `None`) the provider keeps its subagents.
     side_chats_only: bool,
+    /// Launched with Code Mode enabled (Settings → Providers): a parked
+    /// session whose setting has since flipped is replaced before its next
+    /// turn.
+    code_mode: bool,
 }
 
 /// Which CLI binary a run of `harness` launches now: its real path, size and
@@ -1258,6 +1262,10 @@ impl SessionsEngine {
             tracing::info!(chat = %chat_id, "auto-resume skipped: the chat moved on");
             return Ok(String::new());
         }
+        // Code Mode is owned by this host's provider settings and stamped in
+        // `drive_run`; normalize here so parked-session routing and mid-turn
+        // guards go through `code_mode_changed`.
+        request.code_mode = false;
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.run_id.clone(),
@@ -1271,6 +1279,7 @@ impl SessionsEngine {
                 h.binary.clone(),
                 h.runtime_config.harness.clone(),
                 h.side_chats_only,
+                h.code_mode,
             )
         });
         if let Some((
@@ -1285,6 +1294,7 @@ impl SessionsEngine {
             binary,
             live_harness,
             side_chats_only,
+            code_mode,
         )) = routed
         {
             if idle {
@@ -1297,8 +1307,8 @@ impl SessionsEngine {
                 };
             }
             // A parked session started with another account (Cloud), from a
-            // CLI binary since updated, or with native subagents since
-            // switched: replace it.
+            // CLI binary since updated, or with native subagents or Code Mode
+            // since switched: replace it.
             let route = if self
                 .credential_changed(chat_id, harness_id, credential.as_deref())
                 .await
@@ -1306,6 +1316,7 @@ impl SessionsEngine {
                     .binary_changed(chat_id, harness_id, live_harness, binary.as_deref())
                     .await
                 || self.native_subagents_changed(chat_id, harness_id, side_chats_only)
+                || self.code_mode_changed(chat_id, harness_id, code_mode)
             {
                 None
             } else {
@@ -1463,6 +1474,7 @@ impl SessionsEngine {
                 .flatten()
         };
         let side_chats_only = self.inner.side_chats_only(chat_id, harness_id);
+        let code_mode = self.inner.registry.code_mode(harness_id);
 
         // Engine-owned resume (zeron sessions.ts:736 — every dispatch read the
         // chat's stored harness session): callers always send `resume: None`;
@@ -1625,6 +1637,7 @@ impl SessionsEngine {
                 credential,
                 binary,
                 side_chats_only,
+                code_mode,
             },
         );
         drop(runs);
@@ -1686,6 +1699,7 @@ impl SessionsEngine {
             },
             turn,
             side_chats_only,
+            code_mode,
             title,
         ));
         Ok(run_id)
@@ -1767,6 +1781,27 @@ impl SessionsEngine {
         }
         tracing::info!(chat = %chat_id, harness = ?harness_id,
             "native subagents switched; replacing the parked session");
+        true
+    }
+
+    /// Whether a session parked between turns launched with Code Mode
+    /// otherwise than a run would launch now (Settings → Providers). Same
+    /// guards as [`Self::credential_changed`].
+    fn code_mode_changed(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+        started_code_mode: bool,
+    ) -> bool {
+        let code_mode = self.inner.registry.code_mode(harness_id);
+        if started_code_mode == code_mode
+            || self.turn_in_flight(chat_id)
+            || self.holds_background_work(chat_id)
+        {
+            return false;
+        }
+        tracing::info!(chat = %chat_id, harness = ?harness_id,
+            "code mode switched; replacing the parked session");
         true
     }
 
@@ -2525,6 +2560,7 @@ impl SessionsEngine {
                     auto_approve: false,
                     access: Default::default(),
                     plan: false,
+                    code_mode: false,
                     attachments: Vec::new(),
                     resume: None,
                     worktree: None,
@@ -4650,6 +4686,7 @@ async fn drive_run(
     resume_state: RunResumeState,
     turn: TurnControl,
     side_chats_only: bool,
+    code_mode: bool,
     mut title: Option<crate::titles::TitleAfterFirstOutput>,
 ) {
     let device_id = inner.device_id.clone();
@@ -4688,15 +4725,20 @@ async fn drive_run(
             taken = inner.take_warm(&chat_id, harness_id) => taken,
         }
     };
-    // Launched with native subagents switched otherwise than now: its Zeron
-    // server and the CLI's flags are another runtime's.
-    if warm
-        .as_ref()
-        .is_some_and(|taken| taken.parked.side_chats_only != side_chats_only)
-        && let Some(taken) = warm.take()
+    // Launched with native subagents or Code Mode switched otherwise than now:
+    // its Zeron server and the CLI's flags are another runtime's.
+    if let Some(reason) = warm.as_ref().and_then(|taken| {
+        if taken.parked.side_chats_only != side_chats_only {
+            Some("native subagents switched")
+        } else if taken.parked.code_mode != code_mode {
+            Some("code mode switched")
+        } else {
+            None
+        }
+    }) && let Some(taken) = warm.take()
     {
         inner
-            .discard_taken(harness.as_ref(), &chat_id, taken, "native subagents switched")
+            .discard_taken(harness.as_ref(), &chat_id, taken, reason)
             .await;
     }
     if let Some(taken) = warm.as_mut()
@@ -4719,6 +4761,7 @@ async fn drive_run(
         .get()
         .map(crate::plugins::Plugins::native_mcp_servers)
         .unwrap_or_default();
+    request.code_mode = code_mode;
     // The MCP servers the agent starts from this run's config: the only
     // children it may hold when stopped idle (see the reaper).
     let mut known_servers: Vec<zeron_harness::process::KnownServer> = request
@@ -7255,6 +7298,7 @@ mod tests {
             auto_approve: true,
             access: Default::default(),
             plan: false,
+            code_mode: false,
             resume: None,
             attachments: Vec::new(),
             worktree: None,

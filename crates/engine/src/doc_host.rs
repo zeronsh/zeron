@@ -7321,6 +7321,7 @@ impl DocHost {
             auto_approve: false,
             access: config.as_ref().map(|c| c.access).unwrap_or_default(),
             plan: config.as_ref().is_some_and(|c| c.plan),
+            code_mode: false,
             attachments: Vec::new(),
             resume: None,
             worktree: None,
