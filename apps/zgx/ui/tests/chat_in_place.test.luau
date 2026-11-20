@@ -992,3 +992,32 @@ test("consecutive sends settle flush at the top with no upward scroll drift", fu
 	expect(math.abs((y_of_id(app, id2 :: string) :: number) - landed2) <= 2).to_be(true)
 end)
 
+test("sending while composer shrinks and clamps scroll offset downward never hangs", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	app:command("catalog_grows")
+	settle(app)
+	open(app, "s1")
+	-- Switch provider and type a multi-line draft so clearing the composer on
+	-- send shrinks the foot padding and clamps max_scroll downward while the
+	-- send's glide starts.
+	app:set_state("chat_model", "gpt")
+	settle(app)
+	app:type('role:textbox "Message"', "Line 1")
+	for i = 2, 5 do
+		app:key("Shift+Enter")
+		app:type('role:textbox "Message"', `Line {i}`)
+	end
+	app:key("Shift+Enter")
+	app:type('role:textbox "Message"', "Testing")
+	settle(app)
+	app:key("Enter")
+	-- Grow viewport taller immediately after send starts gliding so max_scroll
+	-- drops below `freeze_at` during the pre-rise window.
+	app:resize(900, 820)
+	settle(app)
+	expect(app:wait('~"Testing"', { timeout_ms = 1000 })).to_be(true)
+	expect(app:wait('~"Codex"', { timeout_ms = 1000 })).to_be(true)
+end)
+
+

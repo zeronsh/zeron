@@ -1559,22 +1559,25 @@ local function Transcript(props: Props): Node
 	-- A send's glide under way (from its step off the end to its landing).
 	local gliding = ui.state(`transcript_gliding{kept}`, false)
 	local glide: any = nil
-	-- While a send has stepped off the end and pushed its new rows, hold the
-	-- scroll offset here until `start_rise` begins the animation: if `ui.list`'s
-	-- `follow_end` tries to teleport to the new end on a short chat (`from == 0`,
-	-- where `limit` jumps from 0 only after the new row's runway measures), this
-	-- puts `offset` back synchronously before paint (zero overhead when idle).
+	-- While a send has stepped off the end and pushed its new rows, pull back
+	-- only if `ui.list`'s `follow_end` jumps `offset` forward past `freeze_at`
+	-- (e.g. a short chat whose `from == 0` when the new row's runway first
+	-- measures). Never push `offset` upward when the list clamps it down to
+	-- `max_scroll`, and strictly bound corrections so a reactive cycle inside
+	-- `Runtime::flush` is impossible.
 	local freeze_at: number? = nil
+	local freeze_budget = 0
 	ui.effect(function()
 		if not gliding:get() then
 			return
 		end
 		local pin_off = freeze_at
-		if pin_off == nil then
+		if pin_off == nil or freeze_budget <= 0 then
 			return
 		end
 		local cur = offset:get()
-		if math.abs(cur - pin_off) > 0.5 then
+		if cur > pin_off + 0.5 then
+			freeze_budget -= 1
 			offset:set(pin_off)
 		end
 	end)
@@ -1681,6 +1684,7 @@ local function Transcript(props: Props): Node
 		local base_h = math.max(r.need(), r.outer_h())
 		local start = math.max(0, from - GLIDE_CLEAR)
 		freeze_at = start
+		freeze_budget = 3
 		ui.batch(function()
 			gliding:set(true)
 			held:set { id = last.id, h = base_h }
@@ -1694,6 +1698,7 @@ local function Transcript(props: Props): Node
 				return
 			end
 			freeze_at = nil
+			freeze_budget = 0
 			ui.batch(function()
 				held:set { id = "", h = 0 }
 				gliding:set(false)
@@ -1728,8 +1733,15 @@ local function Transcript(props: Props): Node
 					return
 				end
 				freeze_at = nil
-				local target = offset:peek() + (row_el.y :: number) - (list_el.y :: number)
-				if target <= offset:peek() + 0.5 then
+				freeze_budget = 0
+				local cur_off = offset:peek()
+				local target = cur_off + (row_el.y :: number) - (list_el.y :: number)
+				-- If `follow_end` moved `offset` forward before `start_rise` ran
+				-- (e.g. a short chat whose `from == 0`), animate from `start`
+				-- rather than cutting; never step above `cur_off` (which may
+				-- have been clamped to `max_scroll`).
+				local glide_start = math.min(cur_off, start)
+				if target <= glide_start + 0.5 then
 					-- Already at or past target: still release held room cleanly
 					-- and verify landing so we never drift upward.
 					local h = held:peek()
@@ -1764,7 +1776,7 @@ local function Transcript(props: Props): Node
 					return
 				end
 				glide = anime.animate(offset, {
-					value = { offset:peek(), target },
+					value = { glide_start, target },
 					duration = motion.ms(GLIDE_MS),
 					ease = "outQuad",
 					onComplete = function()
@@ -2111,6 +2123,7 @@ local function Transcript(props: Props): Node
 		if gliding:peek() then
 			glides += 1
 			freeze_at = nil
+			freeze_budget = 0
 			if glide then
 				glide:pause()
 				glide = nil
@@ -2794,6 +2807,7 @@ local function Transcript(props: Props): Node
 		end_held = not restoring
 		wheeled_at, focused_at, resizing_until, resized_at = -math.huge, -math.huge, 0, -math.huge
 		freeze_at = nil
+		freeze_budget = 0
 		ui.batch(function()
 			at_end:set(not restoring)
 			placing:set(restoring)
