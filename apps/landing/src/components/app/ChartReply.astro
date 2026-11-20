@@ -1,0 +1,51 @@
+---
+// A reply with a visual, as a session's transcript draws it, in HTML: the
+// same paragraph, title, legend and grouped bar chart, to the point, that
+// public/hero/chrome.js `drawReply` draws (and tools/native checked against
+// the app). The chart's labels are the system's face, as in the app.
+import Stage from "./Stage.astro";
+
+const SERIES = [
+  { name: "Compile", colour: "#9277b0", values: [42, 38, 51, 47, 33, 29] },
+  { name: "Link", colour: "#58c2b2", values: [12, 14, 11, 16, 9, 8] },
+  { name: "Test", colour: "#e9a64b", values: [20, 22, 19, 25, 18, 21] },
+];
+const MONTHS = ["Jun", "Jul", "Aug", "Sep", "Oct", "Nov"];
+const lines = ["Compile is still the biggest share, but it has dropped since August,", "when the workspace was split. Here are the last six months, by", "step:"];
+
+// The column's left, the title's top, the visual's width (the app's numbers).
+const X = 24, Y = 108, CW = 464;
+const top = Y + 72, left = X + 32.93, pw = CW - 32.93 - 6, ph = 120;
+const vy = (v: number) => top + ph - (v / 60) * ph;
+const band = pw / 6, group = band * 0.68, per = group / 3, gap = Math.min(2, per * 0.15), bw = per - gap;
+const ticks = [0, 10, 20, 30, 40, 50, 60];
+const bars = MONTHS.flatMap((_, i) => SERIES.map((series, si) => ({ x: left + i * band + (band - group) / 2 + si * per + gap / 2, y: vy(series.values[i]!), h: vy(0) - vy(series.values[i]!), colour: series.colour })));
+const px = (n: number) => `${Math.round(n * 100) / 100}px`;
+const label = "A reply in Zeron: a sentence about build times, then a grouped bar chart titled Where the build's time goes, with compile, link and test time for June to November.";
+---
+
+<Stage width={512} height={346} label={label} class={Astro.props.class}>
+  {lines.map((line, i) => <p class="text" style={`left:${X}px;top:${Y - 84 + 24 * i}px`}>{line}</p>)}
+  <p class="title" style={`left:${X}px;top:${Y}px`}>Where the build's time goes</p>
+  <div class="legend" style={`left:${X}px;top:${Y + 36}px`}>
+    {SERIES.map((series) => <span><i style={`background:${series.colour}`} />{series.name}</span>)}
+  </div>
+  {ticks.map((t) => <i class:list={["tick", { zero: t === 0 }]} style={`left:${px(left)};top:${px(vy(t) - 0.5)};width:${px(pw)}`} />)}
+  {ticks.map((t) => <span class="value" style={`left:${X}px;top:${px(vy(t) - 8.5)};width:${px(left - 8 - X)}`}>{t} s</span>)}
+  {bars.map((bar) => <i class="bar" style={`left:${px(bar.x)};top:${px(bar.y)};width:${px(bw)};height:${px(bar.h)};background:${bar.colour}`} />)}
+  {MONTHS.map((month, i) => <span class="month" style={`left:${px(left + i * band)};top:${px(top + ph + 6)};width:${px(band)}`}>{month}</span>)}
+</Stage>
+
+<style>
+  .text { font-size: 15px; line-height: 24px; }
+  .title { font-size: 16px; font-weight: 600; line-height: 24px; }
+  .legend { display: flex; gap: 16px; font-size: 13px; line-height: 20px; color: rgb(237 237 239 / 0.6); }
+  .legend span { position: static; display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { position: static; width: 8px; height: 8px; border-radius: 50%; }
+  .tick { height: 1px; background: #ffffff0a; }
+  .tick.zero { background: #ffffff12; }
+  .bar { border-radius: 3px 3px 0 0; }
+  .value, .month { font-family: system-ui, sans-serif; font-size: 12px; line-height: 17px; color: rgb(237 237 239 / 0.42); }
+  .value { text-align: right; }
+  .month { text-align: center; }
+</style>

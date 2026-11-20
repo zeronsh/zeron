@@ -590,6 +590,10 @@
         "supervised_hint": "运行命令和更改文件前先询问。",
         "edits": "自动接受编辑",
         "edits_hint": "应用编辑，执行其他操作前先询问。",
+        "auto": "自动",
+        "auto_hint": "由智能体自己的审查判断：安全的操作直接执行，有风险的会询问你。",
+        "auto_unavailable": "自动模式不可用",
+        "auto_unavailable_hint": "此智能体不支持自动模式。请选择其他访问模式或智能体。",
         "full": "完全访问",
         "full_hint": "运行命令和编辑时不询问。"
       },
@@ -606,6 +610,13 @@
         "worktree_hint": "拥有独立分支的隔离副本。"
       },
       "work_in": "工作位置",
+      "reach": {
+        "label": "访问范围",
+        "devices": "所有设备",
+        "devices_hint": "可与你的其他设备协作：访问它们的对话，并在其上运行命令。",
+        "isolated": "隔离",
+        "isolated_hint": "仅限其自身的机器及其启动的对话。"
+      },
       "project": {
         "label": "项目",
         "search": "搜索项目…",
@@ -626,6 +637,7 @@
       "dictate": "听写",
       "queue_message": "将消息加入队列",
       "send_message": "发送消息",
+      "send_auto_unavailable": "此智能体不支持自动模式。请选择其他访问模式后再发送。",
       "stop": "停止",
       "back": "返回",
       "next": "下一步",
@@ -718,7 +730,18 @@
       "show_all_lines": "显示全部 {n} 行",
       "open_subagent": "打开子智能体 {title}",
       "subagent": "子智能体",
-      "worked_for": "运行了 {secs} 秒 · {summary}"
+      "worked_for": "运行了 {secs} 秒 · {summary}",
+      "review": {
+        "reviewing": "审查中…",
+        "approved": "已自动批准",
+        "denied": "已被自动审查拦截",
+        "timed-out": "审查超时",
+        "reviewing_hint": "智能体的审查正在检查此操作，之后才会执行。",
+        "approved_hint": "智能体的审查判断此操作安全，已允许执行。",
+        "denied_hint": "智能体的审查拦截了此操作，它没有执行。",
+        "timed-out_hint": "智能体的审查未能及时做出判断，此操作没有执行。",
+        "risk": "风险：{risk}"
+      }
     },
     "transcript": {
       "copy_message": "拷贝消息",
@@ -913,6 +936,7 @@
       "use_reset": "使用一次重置",
       "connect": "连接 {name} 账户",
       "add_account": "添加账户",
+      "how_it_signs_in": "在 Cloud 上如何登录",
       "signing_in_to": "正在登录 {name}",
       "signing_in_hint": "等待你在浏览器中完成操作。切换账户前不会更改任何内容。",
       "signing_in": "正在登录",
@@ -1150,6 +1174,11 @@
         "description": "在所有位置模糊显示，方便共享屏幕。点按即可查看。",
         "terms": "屏幕共享 录屏 模糊 马赛克 隐私 遮盖 screen sharing recording blur blurred mosaic private censor redact"
       },
+      "keep_chats_local": {
+        "label": "将对话保留在此设备上",
+        "description": "保持登录，但此设备的对话、对话列表和项目不会同步到 Zeron 的服务器。你的其他设备看不到它们，此设备也看不到其他设备的。切换时 Zeron 会重启其引擎。",
+        "terms": "同步 本地 离线 隐私 服务器 云端 上传 对话 记录 设备 sync synced local only offline private privacy server cloud upload chats transcripts devices"
+      },
       "links_in": {
         "external": "默认浏览器。",
         "tab": "对话旁边的浏览器标签页。"
@@ -1182,6 +1211,12 @@
         "terms": "共同作者 署名 机器人 提交消息 co-author coauthor attribution bot commit message",
         "cloud": "Cloud 始终启用",
         "on": "智能体的提交会将 zeronsh[bot] 添加为共同作者"
+      },
+      "keep_running": {
+        "label": "退出后让 Zeron 继续运行",
+        "on": "对话会继续进行，其他设备也能访问它们。",
+        "off": "退出时，Zeron 会在对话完成后停止。",
+        "terms": "后台 退出 关闭 引擎 智能体 运行 停止 内存 电池 background quit close engine agents"
       }
     },
     "engine": {
@@ -1633,16 +1668,7 @@
       },
       "couldnt_switch": "无法切换账户",
       "cloud": "云端",
-      "cloud_keys": {
-        "title": "API 密钥",
-        "section_description": "云端也可以使用 API 密钥，而不必登录。在此保存的密钥会成为该代理在每台云端机器上使用的账户，从下一轮开始生效。",
-        "anthropic": "Anthropic API 密钥",
-        "openai": "OpenAI API 密钥",
-        "description": "用于云端的 {agent}。保存在 Zeron 的密钥库中，不会存放在这台电脑上。",
-        "placeholder": "粘贴密钥",
-        "save": "保存",
-        "saved": "云端的 {agent} 现在使用此密钥"
-      }
+      "cloud_key_kept": "保存在 Zeron 的保管库中供 Cloud 使用，绝不存放在这台 Mac 上。每台 Cloud 机器从下一轮起，在未使用登录的地方使用它。"
     },
     "devices": {
       "title": "设备",
@@ -2022,6 +2048,12 @@
         "terms": "machine size vcpu memory disk credits rate xlarge large small standard 机器 规格 内存 磁盘 额度",
         "description": "新 Cloud 对话使用的规格。更大的机器消耗额度更快。",
         "failed": "无法更改默认机器。请稍后再试。"
+      },
+      "reach": {
+        "title": "新对话的访问范围",
+        "terms": "reach access devices isolated isolate remote commands security 访问 范围 设备 隔离 命令 安全",
+        "description": "新的 Cloud 对话是否可与你的其他设备协作（访问它们的对话并在其上运行命令），还是仅限于其自身的机器。你可以在每个对话的输入框中单独更改。",
+        "failed": "无法更改新 Cloud 对话的访问范围。请稍后再试。"
       }
     },
     "billing": {
@@ -3355,6 +3387,12 @@
       "old": "此版本 Zeron 需要更新的引擎",
       "old_tip": "引擎版本低于此版本的要求。打开“关于与更新”即可回到稳定版。",
       "short_old": "需要更新的引擎"
+    },
+    "quit": {
+      "working": "{n, plural, other {还有 # 个对话正在进行。}}",
+      "detail": "要在后台继续运行直到完成，还是现在停止？",
+      "keep": "继续运行",
+      "stop": "立即停止"
     }
   },
   "account": {
@@ -3381,6 +3419,9 @@
         "expired": "你已退出登录。请重新登录以继续。",
         "failed": "登录未完成。请重试。"
       }
+    },
+    "cloud": {
+      "reach_not_changed": "无法更改此 Cloud 对话的访问范围。"
     }
   },
   "plugins": {
@@ -3519,6 +3560,9 @@
         },
         "windows": {
           "title": "打开自己的窗口"
+        },
+        "scene3d": {
+          "title": "绘制 3D 场景"
         },
         "tools": {
           "title": "为你的智能体提供工具"

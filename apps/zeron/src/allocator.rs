@@ -15,6 +15,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// The VM tag mimalloc maps the heap with.
 pub const HEAP_VM_TAG: std::ffi::c_long = 254;
 
+/// mimalloc v2's `mi_option_purge_delay` (`mimalloc.h`; the bindings don't
+/// name it). Freed memory is handed back to the system after this many
+/// milliseconds (10 by default) — but only the next time that thread
+/// allocates or collects, which an engine at rest does rarely: after a burst
+/// (agents streaming), what it freed stayed counted against it until some
+/// later work. 0 hands it back as it's freed. Measured over five agents
+/// streaming: the engine's CPU the same (1.98%), its footprint once they're
+/// done 32 MB instead of 42.
+const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
+
 static TAGGED: AtomicBool = AtomicBool::new(false);
 
 /// [`mimalloc::MiMalloc`], tagging its regions [`HEAP_VM_TAG`] from the first
@@ -27,8 +37,17 @@ fn tag_heap() {
         // Only stores the option (no allocation); racing threads store the
         // same value.
         unsafe { libmimalloc_sys::mi_option_set(libmimalloc_sys::mi_option_os_tag, HEAP_VM_TAG) };
+        unsafe { libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 0) };
         TAGGED.store(true, Ordering::Relaxed);
     }
+}
+
+/// mimalloc's forced collect: what its threads freed (exited threads'
+/// pages too) goes back to the system. The engine calls it after dropping
+/// a large short-lived allocation ([`zeron_engine::heap`]).
+pub fn trim() {
+    // SAFETY: mimalloc's collect frees nothing in use.
+    unsafe { libmimalloc_sys::mi_collect(true) };
 }
 
 unsafe impl GlobalAlloc for Allocator {
@@ -59,6 +78,15 @@ unsafe impl GlobalAlloc for Allocator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Freed memory goes back as it's freed (`MI_OPTION_PURGE_DELAY`), from
+    /// the first allocation on.
+    #[test]
+    fn freed_memory_is_handed_back_at_once() {
+        let held = vec![0u8; 1 << 20];
+        drop(held);
+        assert_eq!(unsafe { libmimalloc_sys::mi_option_get(MI_OPTION_PURGE_DELAY) }, 0);
+    }
 
     /// `struct vm_region_extended_info` (`mach/vm_region.h`).
     #[repr(C)]

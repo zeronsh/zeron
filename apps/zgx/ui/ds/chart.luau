@@ -419,7 +419,10 @@ return ui.component(function(props: Props): Node
 							}
 						),
 					})
-				end, { flex_wrap = true, items = "center", gap_x = "$space.4", gap_y = "$space.1" }),
+				-- (Its entries side by side as they have always drawn: the
+				-- `gap_x`/`gap_y` tokens it had took effect only once zgx read
+				-- tokens there.)
+				end, { flex_wrap = true, items = "center" }),
 			}
 		),
 		ui.canvas {

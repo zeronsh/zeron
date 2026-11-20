@@ -124,6 +124,7 @@ local engine: { [string]: any } = {
 	},
 	GetTitleSettings = {},
 	GetNativeSubagents = { switchable = { "claude-code" }, off = {} },
+	GetBackgroundSettings = { keepRunningAfterQuit = true },
 }
 local banners = { desktop = true, background_only = true, agent_updates = true }
 
@@ -295,7 +296,7 @@ local answers: { [string]: (arg: any) -> any } = {
 				local w = table.clone(engine[get])
 				w.settings = arg.params
 				engine[get] = w
-			elseif m == "SetTitleSettings" then
+			elseif m == "SetTitleSettings" or m == "SetBackgroundSettings" then
 				engine[get] = arg.params
 			end
 			return settled(engine[get])
@@ -433,17 +434,37 @@ end
 local agents = require("@account/agents")
 local function agents_of(target: string?): any
 	-- Cloud (the engine answers for it from the vault): Claude Code and
-	-- Codex, always installed; Codex with an account, so on.
+	-- Codex, always installed; Codex with an account, so on. Muse Code
+	-- signs in there as on a computer. Its keys, a row per vendor, as the
+	-- engine lists them.
 	if target == "cloud" then
-		local function one(id: string, name: string, mark: string, accounts: { any }): any
-			return { id = id, name = name, mark = mark, installed = true, can_install = false, enabled = #accounts > 0, version = nil, installing = false, login = "idle", accounts = accounts }
+		-- As the engine lists Cloud's cards: every agent's accounts by the
+		-- group they fill, each group with its sign-in and its API key.
+		local function one(id: string, name: string, mark: string, group: any, accounts: { any }): any
+			group.accounts = accounts
+			return {
+				id = id,
+				name = name,
+				mark = mark,
+				installed = true,
+				can_install = false,
+				can_add = true,
+				enabled = #accounts > 0,
+				version = nil,
+				installing = false,
+				login = "idle",
+				accounts = accounts,
+				groups = { group },
+			}
 		end
+		local codex = { { id = "c1", email = "ada@example.com", plan = "Pro", session = 0.1, week = 0.2, active = true } }
 		return {
 			state = "ready",
 			target = target,
 			list = {
-				one("claude-code", "Claude Code", "claude", {}),
-				one("codex", "Codex", "openai", { { id = "c1", email = "ada@example.com", plan = "Pro", session = 0.1, week = 0.2, active = true } }),
+				one("claude-code", "Claude Code", "claude", { id = "anthropic", name = "Anthropic", login = "Claude Code", key = "Anthropic" }, {}),
+				one("codex", "Codex", "openai", { id = "openai", name = "OpenAI", login = "Codex", key = "OpenAI" }, codex),
+				one("muse", "Muse Code", "muse", { id = "meta", name = "Meta", login = "Muse Code", key = "Meta" }, {}),
 			},
 		}
 	end
@@ -494,6 +515,20 @@ local function set_login(id: string, login: string, account: any?)
 	end
 	now.list = list
 	agents.now:set(now)
+end
+-- A key added on a card: kept (Cloud's vault, or this Mac's agent).
+agent_stub.add_key = function(id: string, provider: string, _key: string, _name: string?): any
+	log(`agents.add_key:{id}:{provider}`)
+	local p = {}
+	function p.after(_self: any, ok: ((any) -> ())?, _bad: ((any) -> ())?)
+		if ok then
+			ok(nil)
+		end
+	end
+	return p
+end
+agent_stub.sign_in_to = function(id: string, provider: string)
+	log(`agents.sign_in_to:{id}:{provider}`)
 end
 agent_stub.sign_in = function(id: string)
 	log(`agents.sign_in:{id}`)
@@ -598,6 +633,10 @@ ui.command {
 			mono = t["font.mono"],
 			secondary = t["text.secondary"],
 			tertiary = t["text.tertiary"],
+			-- (The page's and sidebar's fill and edge, when the window's
+			-- theme says its own.)
+			page_bg = t["zeron.inset.bg"],
+			page_edge = t["zeron.inset.edge"],
 			-- "Accent colour throughout": a status dot, a find's highlight,
 			-- an @file token, a list marker, and a link's ink (nil: the
 			-- text's own).

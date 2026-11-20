@@ -5,7 +5,7 @@
 -- drag reorders them, its × closes the tab, and a split with it (the sessions go on,
 -- in the sidebar).
 --
---   session_tabs.Strip { left = fn, right = fn }
+--   session_tabs.Strip { window_x = fn, width = fn, start = fn, right = fn }
 
 local ds = require("@ds")
 local ContextMenu = require("@ds/context_menu")
@@ -527,13 +527,24 @@ local Tab = ui.component(function(props: { chat: string, strip: any }): Node
 end)
 
 -- `window_x`: how far the page's room stands from the window's left, followed
--- as the sidebar moves. `start`: where the tabs start in the window.
-function M.Strip(props: { window_x: () -> number, start: () -> number, right: () -> number }): Node
+-- as the sidebar moves. `width`: the window's. `start`: where the tabs start
+-- in the window. `right`: how far they keep from its right edge.
+function M.Strip(props: { window_x: () -> number, width: () -> number, start: () -> number, right: () -> number }): Node
 	-- Each edge fades in full as soon as tabs run a little past it: a band only
 	-- as wide as the overflow (`fade_overflow`) is a hard edge while that's a
 	-- few points. Over the last few, as the end comes to rest, it goes.
 	local offset = ui.state("shell_session_tabs_offset", 0)
-	local view, content = ui.ref(), ui.ref()
+	local content = ui.ref()
+	local start_at = ui.computed(props.start)
+	-- The strip's room where it comes to rest: the window's width less where
+	-- the tabs start and what they keep clear of at its right (the strip runs
+	-- the window's width, `left = -window_x` to its right edge). From where
+	-- each is going, not the scroll view's width: that eases with the tabs'
+	-- start (the sidebar's "…", the controls' slide in and out of full
+	-- screen), and what read it would run each frame of the move.
+	local rest_room = ui.computed(function(): number
+		return math.max(0, props.width() - start_at:get() - props.right())
+	end)
 	local strip = TabStrip.new {
 		key = "session_tab",
 		items = function(): { string }
@@ -566,7 +577,7 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 	}
 	local function bands(): { number }
 		local at = offset:get()
-		local past = (content.width or 0) - (view.width or 0) - at
+		local past = (content.width or 0) - rest_room:get() - at
 		return { math.clamp(at * FADE_RATE, 0, FADE), math.clamp(past * FADE_RATE, 0, FADE) }
 	end
 	-- The tab showing, always clear of the overflow and its fade: as it's opened,
@@ -576,7 +587,7 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 		local s = route.session:get()
 		local list = shown:get()
 		local total = content.width or 0
-		local room = view.width or 0
+		local room = rest_room:get()
 		-- (Read so it runs again once a carried tab has landed.)
 		strip.order:get()
 		if not s or room <= 0 then
@@ -619,7 +630,7 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 		end
 	end)
 	-- Where they start, eased as the sidebar's "…" before them comes and goes.
-	local start = motion.tween(ui.computed(props.start), motion.sidebar)
+	local start = motion.tween(start_at, motion.sidebar)
 	-- From the window's left whatever the sidebar is doing, so they stay put as
 	-- it moves. (Only the tabs' own part takes the pointer: the sidebar's "…"
 	-- lies under the rest, past the margin.)
@@ -652,7 +663,6 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 			end,
 			strip.Frame(ui.scroll_x {
 				id = "session-tabs-scroll",
-				ref = view,
 				offset = offset,
 				grow = 1,
 				min_w = 0,

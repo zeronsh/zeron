@@ -35,6 +35,8 @@
 //!                                  without one, `device` hosts it; `parent`:
 //!                                  a side chat of that chat, where it is;
 //!                                  `cloud`: on a Cloud machine of its own,
+//!                                  reaching `reach` (`devices` | `isolated`;
+//!                                  none: the account's default),
 //!                                  `{ id, cwd }`, or why not in words)
 //!   sessions.fork({ source, parent?, id? })  a side chat starting as a copy of
 //!                                  `source` (`ForkSideChat`): its id, or the
@@ -1552,6 +1554,9 @@ impl Sessions {
         if let Some(branch) = field("branch") {
             params["branch"] = Json::from(branch);
         }
+        if let Some(reach) = field("reach").filter(|r| matches!(r.as_str(), "devices" | "isolated")) {
+            params["cloudReach"] = Json::from(reach);
+        }
         if let Some(config) = args
             .field("config")
             .filter(|c| !matches!(c, Value::Nil))
@@ -1650,6 +1655,12 @@ impl Sessions {
             me.publish();
         });
     }
+}
+
+/// Whether the person uses Cloud: a device of Cloud's (its logical device,
+/// or a chat's machine) is among theirs.
+pub(crate) fn uses_cloud() -> bool {
+    SESSIONS.with(|s| s.devices.borrow().as_array().into_iter().flatten().any(is_cloud))
 }
 
 /// A device row of Cloud's: the logical Cloud device or a session's machine

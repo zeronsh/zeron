@@ -52,9 +52,11 @@ local dock = require("@self/composer_dock")
 local ask = require("@self/composer_ask")
 local mentions = require("@self/composer_mentions")
 local locale = require("@self/locale")
+local Tooltip = require("@self/tooltip")
 local VoiceWave = require("@self/voice_wave").VoiceWave
 local context_usage = require("@self/context_usage")
 local TextMetrics = require("@self/composer_metrics")
+local Draft = require("@self/draft_text")
 local Layout = require("@self/composer_layout")
 local ComposerMotion = require("@self/composer_motion")
 local EditorMenu = require("@self/editor_menu")
@@ -97,8 +99,20 @@ export type Notice = {
 	quiet: boolean?,
 }
 export type Answer = { values: { string }, text: string }
--- Where an existing chat works (`branch_fixed`).
-export type Fixed = { device: string?, name: string?, worktree: boolean, project: string?, hue: string?, src: string?, emoji: string? }
+-- Where an existing chat works (`branch_fixed`). On Cloud (`cloud`): a
+-- machine of its own, and what it reaches (`reach`: "devices" | "isolated",
+-- nil while not known).
+export type Fixed = {
+	device: string?,
+	name: string?,
+	worktree: boolean,
+	project: string?,
+	hue: string?,
+	src: string?,
+	emoji: string?,
+	cloud: boolean?,
+	reach: string?,
+}
 export type Sizes = { rest: number, target: number, presented: number, active: boolean, ready: boolean, settling: boolean, context: number }
 export type Props = {
 	on_sizes: ((sizes: Sizes) -> ())?,
@@ -123,9 +137,12 @@ export type Props = {
 	-- A turn is running: Send becomes Stop while the draft is empty, and
 	-- queues what is typed.
 	running: State<boolean>?,
-	-- What the agent may do unasked: "supervised", "edits" or "full"; and
-	-- plan mode (explore and propose before changing anything).
+	-- What the agent may do unasked: "supervised", "edits", "auto" or
+	-- "full"; and plan mode (explore and propose before changing anything).
 	access: State<string?>?,
+	-- The chat's agent has an auto mode of its own (Claude Code's, Codex's
+	-- auto-review): the picker offers Auto.
+	access_auto: (() -> boolean)?,
 	plan: State<boolean>?,
 	-- The model (a ModelPicker: its agents' tabs, its models, its reasoning,
 	-- Fast mode and its other options' picks).
@@ -175,9 +192,16 @@ export type Props = {
 	branches_empty: ((query: string) -> Dropdown.Empty)?,
 	-- Where an existing chat works, fixed (its branch, live, whether its
 	-- folder is a worktree, and its project's name, hue and artwork): the
-	-- chip says so and opens nothing, as a chat can't move. Nil (a new
-	-- chat): the picker.
+	-- chip says so, and its panel shows where it works with nothing to
+	-- change, as a chat can't move; but a Cloud chat's reach, which
+	-- `on_reach` changes. Nil (a new chat): the picker.
 	branch_fixed: (() -> Fixed?)?,
+	on_reach: ((reach: string) -> ())?,
+	-- On Cloud, what a new chat's machine reaches ("devices" | "isolated";
+	-- nil: `reach_default`, the account's). No default (an edge that can't
+	-- keep one), no choice.
+	reach: State<string?>?,
+	reach_default: (() -> string?)?,
 	on_send: ((text: string) -> ())?,
 	on_stop: (() -> ())?,
 	-- A bare Escape no one else took (no mention list, question or
@@ -215,6 +239,8 @@ export type Props = {
 	-- The trays behind it (ds/composer_dock's).
 	queue: State<{ dock.Queued }>?,
 	can_steer: (boolean | () -> boolean)?,
+	-- A turn runs (the queue's Send now stops it, for an agent that can't steer).
+	turn_running: (() -> boolean)?,
 	on_queue_send: ((id: string) -> ())?,
 	on_queue_edit: ((id: string) -> ())?,
 	on_queue_remove: ((id: string) -> ())?,
@@ -362,23 +388,32 @@ end
 -- The access modes, as Zeron offers them; their icons (Central Icons,
 -- centralicons.com, round outlined, radius 2, stroke 1.5) say what each
 -- does: it waits for you (a raised hand), edits go through (a pencil with
--- sparkles), nothing is held back (an open padlock). (Made as they're
--- read, in the locale's words.)
-local function ACCESS(): { Dropdown.Item }
-	return {
-	worded({ value = "supervised", icon = "access-supervised" }, {
-		label = "ds.composer.access.supervised",
-		description = "ds.composer.access.supervised_hint",
-	}),
-	worded({ value = "edits", icon = "access-edits" }, {
-		label = "ds.composer.access.edits",
-		description = "ds.composer.access.edits_hint",
-	}),
-	worded({ value = "full", icon = "access-full" }, {
+-- sparkles), the agent's reviewer vets each action (a shield), nothing is
+-- held back (an open padlock). Auto only where the agent has one (`auto`),
+-- or while it's the mode chosen. (Made as they're read, in the locale's
+-- words.)
+local function ACCESS(auto: boolean, chosen: string?): { Dropdown.Item }
+	local items = {
+		worded({ value = "supervised", icon = "access-supervised" }, {
+			label = "ds.composer.access.supervised",
+			description = "ds.composer.access.supervised_hint",
+		}),
+		worded({ value = "edits", icon = "access-edits" }, {
+			label = "ds.composer.access.edits",
+			description = "ds.composer.access.edits_hint",
+		}),
+	}
+	if auto or chosen == "auto" then
+		table.insert(items, worded({ value = "auto", icon = "shield-check", disabled = not auto }, {
+			label = if auto then "ds.composer.access.auto" else "ds.composer.access.auto_unavailable",
+			description = if auto then "ds.composer.access.auto_hint" else "ds.composer.access.auto_unavailable_hint",
+		}))
+	end
+	table.insert(items, worded({ value = "full", icon = "access-full" }, {
 		label = "ds.composer.access.full",
 		description = "ds.composer.access.full_hint",
-	}),
-	}
+	}))
+	return items
 end
 
 -- Plan mode's row at the access panel's foot: an item's shape, its icon on
@@ -434,6 +469,21 @@ local function CHECKOUTS(): { Choice }
 	}
 end
 
+-- What a Cloud chat's machine reaches, as Zeron offers it: the person's
+-- other devices, or nothing past itself and the chats it starts.
+local function REACHES(): { Choice }
+	return {
+	worded({ value = "devices", icon = "monitor" }, {
+		label = "ds.composer.reach.devices",
+		description = "ds.composer.reach.devices_hint",
+	}),
+	worded({ value = "isolated", icon = "shield-check" }, {
+		label = "ds.composer.reach.isolated",
+		description = "ds.composer.reach.isolated_hint",
+	}),
+	}
+end
+
 -- A menu row, the menus' own: compact, full width, washed under the
 -- pointer.
 local function menu_row(props: ContainerProps): Node
@@ -462,17 +512,77 @@ local function list_of(given: any): any
 	return given or {}
 end
 
+-- A choice's own tile (a project's hue or artwork), else its icon: one or
+-- the other, following the choice. (`ink`: the icon's, a row's that can't
+-- change.)
+local function choice_mark(current: () -> Choice, ink: string?): Node
+	return ui.presence(function(): string
+		local c = current()
+		return if c.hue or c.src or c.emoji then "tile" else "icon"
+	end, function(kind: string): Node
+		if kind == "tile" then
+			return Tile {
+				label = function(): string?
+					return current().label
+				end,
+				hue = function(): string?
+					return current().hue
+				end,
+				src = function(): string?
+					return current().src
+				end,
+				emoji = function(): string?
+					return current().emoji
+				end,
+				-- (A project's choice: its tile `.project-icon`.)
+				project = function(): string?
+					return (current() :: any).project
+				end,
+				size = 18,
+			}
+		end
+		return glyph(function(): Icon.Name
+			return current().icon or "monitor"
+		end, ink)
+	end)
+end
+
+-- A row of the panel's head saying a choice that can't be changed (where
+-- an existing chat works): a submenu row's mark and name, dimmed, opening
+-- nothing.
+local function fixed_row(label: Message, current: () -> Choice): Node
+	return ui.menu_item(Menu.look {
+		label = label,
+		disabled = true,
+		cursor = "default",
+		hover = {},
+		active = {},
+		choice_mark(current, "$text.disabled"),
+		FadeText {
+			function()
+				return current().label
+			end,
+			text_size = "$font.size.md",
+			color = "$text.disabled",
+			grow = 1,
+		},
+	})
+end
+
 local function submenu(
 	siblings: { State<boolean> },
 	label: Message,
 	value: State<string?>,
 	choices: { Choice } | () -> { Choice },
-	fallback: number,
+	-- The row shown while nothing is chosen (a function follows a default).
+	fallback: number | () -> number,
 	-- (A string: Dropdown names its field by it only so.)
 	search: string?,
 	actions: { Dropdown.Action }?,
 	-- Choices named by the row but not listed (one an action picks).
-	unlisted: ({ Choice } | () -> { Choice })?
+	unlisted: ({ Choice } | () -> { Choice })?,
+	-- Told of a pick, after `value` takes it.
+	on_choose: ((v: string) -> ())?
 ): Node
 	local function current(): Choice
 		local v = value:get()
@@ -485,7 +595,8 @@ local function submenu(
 			end
 		end
 		-- (None yet, as a list still coming: a blank row.)
-		return listed[fallback] or listed[1] or { value = "", label = "" }
+		local at: number = if type(fallback) == "function" then fallback() else fallback
+		return listed[at] or listed[1] or { value = "", label = "" }
 	end
 	local own: State<boolean>? = nil
 	local function close_siblings()
@@ -497,6 +608,7 @@ local function submenu(
 	end
 	return Dropdown {
 		on_open = close_siblings,
+		on_choose = on_choose,
 		value = value,
 		items = choices,
 		actions = actions,
@@ -535,37 +647,7 @@ local function submenu(
 						end
 					end
 				end,
-				-- The choice's own tile (a project's hue or artwork), else its
-				-- icon: one or the other, following the choice.
-				ui.presence(function(): string
-					local c = current()
-					return if c.hue or c.src or c.emoji then "tile" else "icon"
-				end, function(kind: string): Node
-					if kind == "tile" then
-						return Tile {
-							label = function(): string?
-								return current().label
-							end,
-							hue = function(): string?
-								return current().hue
-							end,
-							src = function(): string?
-								return current().src
-							end,
-							emoji = function(): string?
-								return current().emoji
-							end,
-							-- (A project's choice: its tile `.project-icon`.)
-							project = function(): string?
-								return (current() :: any).project
-							end,
-							size = 18,
-						}
-					end
-					return glyph(function(): Icon.Name
-						return current().icon or "monitor"
-					end)
-				end),
+				choice_mark(current),
 				FadeText {
 					function()
 						return current().label
@@ -622,15 +704,18 @@ local function on_cloud(device: State<string?>?, devices: any): boolean
 end
 
 -- The head of where-it-works's panel: "Work in", then the device it runs
--- on, the project there and the checkout, each a row opening its choices
--- beside the panel (the project's with "New project" under them).
+-- on, the project there and the checkout (on Cloud, what its machine
+-- reaches instead), each a row opening its choices beside the panel (the
+-- project's with "New project" under them).
 local function work_in(
 	project: State<string?>?,
 	projects: ({ Project } | State<{ Project }> | () -> { Project })?,
 	on_new_project: (() -> ())?,
 	checkout: State<string?>?,
 	device: State<string?>?,
-	devices: ({ Device } | State<{ Device }> | () -> { Device })?
+	devices: ({ Device } | State<{ Device }> | () -> { Device })?,
+	reach: State<string?>?,
+	reach_default: (() -> string?)?
 ): Node
 	local siblings: { State<boolean> } = {}
 	local rows: { Node } = {
@@ -724,6 +809,65 @@ local function work_in(
 			ui.show(function(): boolean
 				return (project == nil or project:get() ~= NO_PROJECT) and not plain() and not on_cloud(device, devices)
 			end, submenu(siblings, locale.t("ds.composer.checkout.label"), checkout, CHECKOUTS, 2))
+		)
+	end
+	if reach and reach_default then
+		-- On Cloud, in the checkout's place: whether its machine reaches your
+		-- other devices (none chosen: the account's default).
+		table.insert(
+			rows,
+			ui.show(function(): boolean
+				return on_cloud(device, devices) and reach_default() ~= nil
+			end, submenu(siblings, locale.t("ds.composer.reach.label"), reach, REACHES, function(): number
+				return if reach_default() == "isolated" then 2 else 1
+			end))
+		)
+	end
+	return ui.column { w_full = true, table.unpack(rows) }
+end
+
+-- The same head for an existing chat, which can't move: where it works,
+-- said in rows that open nothing; and on Cloud, what its machine reaches,
+-- which `on_reach` changes (shown at once, the chat's own following).
+local function fixed_work_in(fixed: () -> Fixed?, on_reach: ((reach: string) -> ())?): Node
+	local function f(): Fixed
+		return fixed() or { worktree = false }
+	end
+	local rows: { Node } = {
+		Menu.Heading { locale.t("ds.composer.work_in") },
+		ui.show(function(): boolean
+			return f().device ~= nil
+		end, fixed_row(locale.t("ds.composer.device.label"), function(): Choice
+			local it = f()
+			return { value = it.device or "", label = it.device or "", icon = if it.cloud then "cloud" else "monitor" }
+		end)),
+		fixed_row(locale.t("ds.composer.project.label"), function(): Choice
+			local it = f()
+			if it.project then
+				return { value = it.project, label = it.project, hue = it.hue, src = it.src, emoji = it.emoji }
+			end
+			return worded({ value = NO_PROJECT, icon = "folder" }, { label = "ds.composer.project.none" })
+		end),
+		ui.show(function(): boolean
+			local it = f()
+			return it.project ~= nil and not it.cloud
+		end, fixed_row(locale.t("ds.composer.checkout.label"), function(): Choice
+			return CHECKOUTS()[if f().worktree then 2 else 1]
+		end)),
+	}
+	if on_reach then
+		local reach = ui.use_state(nil :: string?)
+		ui.effect(function()
+			local now = f().reach
+			if reach:peek() ~= now then
+				reach:set(now)
+			end
+		end)
+		table.insert(
+			rows,
+			ui.show(function(): boolean
+				return f().cloud == true and f().reach ~= nil
+			end, submenu({}, locale.t("ds.composer.reach.label"), reach, REACHES, 1, nil, nil, nil, on_reach))
 		)
 	end
 	return ui.column { w_full = true, table.unpack(rows) }
@@ -1000,12 +1144,14 @@ return ui.component(function(props: Props): Node
 		-- Past the cap a draft is measured no more: its size changes nothing
 		-- (Layout.estimate). The type's line height changed (tracked), it is
 		-- measured again.
-		estimate = function(text: string, line_height: number): Layout.Sample?
+		estimate = function(line_height: number): Layout.Sample?
 			local line = ui.theme.get("zeron.composer.line")
 			if type(line) == "number" and math.abs(line - line_height) > 0.01 then
 				return nil
 			end
-			return Layout.estimate(text, line_height)
+			-- Its line breaks counted where it's held, up to the cap's.
+			local capped = Layout.capped_lines(line_height)
+			return Layout.estimate_lines(1 + #value:find("\n", { limit = capped - 1 }), line_height)
 		end,
 	}
 	local head_h_seen = kept("head_h", 0)
@@ -1046,10 +1192,19 @@ return ui.component(function(props: Props): Node
 	end
 
 	local function has_text(): boolean
-		return string.find(value:get(), "%S") ~= nil
+		return Draft.has_text(value)
 	end
 	local function disabled(): boolean
 		return read(props.disabled) == true
+	end
+	-- Auto is chosen on an agent without it ("Auto unavailable"): nothing is
+	-- sent until another mode or agent is picked (the engine would refuse
+	-- the run).
+	local function access_blocked(): boolean
+		return props.access ~= nil
+			and props.access_auto ~= nil
+			and props.access:get() == "auto"
+			and not props.access_auto()
 	end
 	local function dictating(): boolean
 		return props.dictating ~= nil and props.dictating:get()
@@ -1109,6 +1264,9 @@ return ui.component(function(props: Props): Node
 			return
 		end
 		if not string.find(text, "%S") and not has_cargo() then
+			return
+		end
+		if access_blocked() then
 			return
 		end
 		if props.on_send then
@@ -1176,7 +1334,7 @@ return ui.component(function(props: Props): Node
 			cargo = has_cargo(),
 			asking = asking(),
 			dictating = dictating(),
-			multiline = string.find(value:get(), "\n") ~= nil,
+			multiline = Draft.multiline(value),
 		}
 	end
 	local target_geometry = ui.use_state(Layout.calculate(layout_input(), previous_text_expanded:peek()))
@@ -1418,7 +1576,10 @@ return ui.component(function(props: Props): Node
 				end
 				else nil,
 			value = props.access,
-			items = ACCESS,
+			items = function(): { Dropdown.Item }
+				local chosen = props.access and props.access:get()
+				return ACCESS(props.access_auto ~= nil and props.access_auto(), chosen)
+			end,
 			tone = "chip",
 			label = locale.t("ds.composer.access.label") :: any,
 			search = false,
@@ -1450,20 +1611,41 @@ return ui.component(function(props: Props): Node
 		on_click = props.on_dictate,
 		Icon { name = "microphone", size = 18 },
 	})
-	local send_button = Button {
-		shape = "pill",
-		size = "sm",
-		icon = true,
-		label = function()
-			return locale.s(if running and running:get() then "ds.composer.queue_message" else "ds.composer.send_message")
-		end,
-		disabled = function()
-			return disabled() or not (has_text() or has_cargo() or dictating())
-		end,
-		on_press = if spoken then spoken.on_send_press else nil,
-		on_click = send,
-		Icon { name = "arrow-up", size = 14 },
-	}
+	local function send_control(): Node
+		return Button {
+			shape = "pill",
+			size = "sm",
+			icon = true,
+			label = function()
+				return locale.s(if running and running:get() then "ds.composer.queue_message" else "ds.composer.send_message")
+			end,
+			disabled = function()
+				return disabled() or access_blocked() or not (has_text() or has_cargo() or dictating())
+			end,
+			on_press = if spoken then spoken.on_send_press else nil,
+			on_click = send,
+			Icon { name = "arrow-up", size = 14 },
+		}
+	end
+	-- Held by an unavailable Auto, it says why when rested on. (A tooltip is
+	-- set once, not followed, and a disabled button hears no pointer: the
+	-- held one is a button of its own under a box that carries the words.)
+	local send_button = ui.show(
+		access_blocked,
+		ui.div {
+			relative = true,
+			send_control(),
+			ui.div {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				tooltip = Tooltip { locale.t("ds.composer.send_auto_unavailable") },
+			},
+		},
+		send_control()
+	)
 	local stop_button = Button {
 		shape = "pill",
 		size = "sm",
@@ -2023,7 +2205,16 @@ return ui.component(function(props: Props): Node
 			-- Built for each chip it heads (a node lives in one place).
 			local function head_node(): Node?
 				return if checkout or props.device or props.project
-					then work_in(props.project, props.projects :: any, props.on_new_project, checkout, props.device, props.devices :: any)
+					then work_in(
+						props.project,
+						props.projects :: any,
+						props.on_new_project,
+						checkout,
+						props.device,
+						props.devices :: any,
+						props.reach,
+						props.reach_default
+					)
 					else nil
 			end
 			-- In a project, its refs: the branch chip, its search and its
@@ -2088,6 +2279,29 @@ return ui.component(function(props: Props): Node
 				end
 				return nil
 			end
+			-- The chip: [glyph] device › project › branch, washed under the
+			-- pointer and while its panel is open, as a chip is.
+			local function chip(menu: Dropdown.Menu, label: Message | () -> string, place: Place): Node
+				return ui.button {
+					label = label :: any,
+					h = CHIP_H,
+					px = "$zeron.space.tight",
+					gap = "$zeron.space.tight",
+					items = "center",
+					min_w = 0,
+					rounded = CHIP_RADIUS,
+					text_size = "$font.size.sm",
+					weight = "$font.weight.medium",
+					bg = function(): string
+						return if menu.open:get() then "$hover" else "#00000000"
+					end,
+					color = "$text.tertiary",
+					hover = { bg = "$hover", color = "$text.secondary" },
+					active = { bg = "$pressed", color = "$text.secondary" },
+					on_click = menu.toggle,
+					table.unpack(place_line(place)),
+				}
+			end
 			local picker = Dropdown {
 				value = props.branch,
 				label = locale.t("ds.composer.branch.label") :: any,
@@ -2098,80 +2312,69 @@ return ui.component(function(props: Props): Node
 				list_when = in_project,
 				width = 280,
 				head = head_node(),
-				-- The chip: [tile] project › [glyph] branch, washed under the
-				-- pointer and while its panel is open, as a chip is.
 				trigger = function(menu: Dropdown.Menu): Node
-					return ui.button {
-						label = locale.t("ds.composer.branch.label"),
-						h = CHIP_H,
-						px = "$zeron.space.tight",
-						gap = "$zeron.space.tight",
-						items = "center",
-						min_w = 0,
-						rounded = CHIP_RADIUS,
-						text_size = "$font.size.sm",
-						weight = "$font.weight.medium",
-						bg = function(): string
-							return if menu.open:get() then "$hover" else "#00000000"
-						end,
-						color = "$text.tertiary",
-						hover = { bg = "$hover", color = "$text.secondary" },
-						active = { bg = "$pressed", color = "$text.secondary" },
-						on_click = menu.toggle,
-						table.unpack(place_line {
-							device = chosen_device,
-							project = chosen_project,
-							in_project = in_project,
-							branch = branch_name,
-							glyph = runs_in,
-							folded = folded,
-							on_measures = place_measures,
-						}),
-					}
-				end,
-			}
-			-- An existing chat's: where it works, said, opening nothing.
-			local fixed = props.branch_fixed
-			local static: Node? = if fixed
-				then ui.row {
-					h = CHIP_H,
-					px = "$zeron.space.tight",
-					gap = "$zeron.space.tight",
-					items = "center",
-					min_w = 0,
-					text_size = "$font.size.sm",
-					weight = "$font.weight.medium",
-					color = "$text.tertiary",
-					label = function(): string
-						local f = fixed()
-						return locale.s("ds.composer.branch.fixed", { name = if f and f.name then f.name else "" })
-					end,
-					table.unpack(place_line {
-						device = function(): string?
-							local f = fixed()
-							return if f then f.device else nil
-						end,
-						project = function(): Project?
-							local f = fixed()
-							if f and f.project then
-								return { value = f.project, label = f.project, hue = f.hue, src = f.src, emoji = f.emoji }
-							end
-							return nil
-						end,
-						in_project = function(): boolean
-							return true
-						end,
-						branch = function(): string
-							local f = fixed()
-							return if f and f.name then f.name else locale.s("ds.composer.branch.no_ref")
-						end,
-						glyph = function(): Icon.Name?
-							local f = fixed()
-							return if f and f.worktree then "worktree" else nil
-						end,
+					return chip(menu, locale.t("ds.composer.branch.label"), {
+						device = chosen_device,
+						project = chosen_project,
+						in_project = in_project,
+						branch = branch_name,
+						glyph = runs_in,
 						folded = folded,
 						on_measures = place_measures,
-					}),
+					})
+				end,
+			}
+			-- An existing chat's: where it works, said; its panel says so too
+			-- (nothing there to change, as a chat can't move), but for what a
+			-- Cloud chat's machine reaches.
+			local fixed = props.branch_fixed
+			local static: Node? = if fixed
+				then Dropdown {
+					value = ui.use_state(nil :: string?),
+					label = locale.t("ds.composer.branch.label") :: any,
+					items = {},
+					search = false,
+					list_when = function(): boolean
+						return false
+					end,
+					width = 280,
+					head = fixed_work_in(fixed, props.on_reach),
+					trigger = function(menu: Dropdown.Menu): Node
+						return chip(menu, function(): string
+							local f = fixed()
+							return locale.s("ds.composer.branch.fixed", { name = if f and f.name then f.name else "" })
+						end, {
+							device = function(): string?
+								local f = fixed()
+								return if f then f.device else nil
+							end,
+							project = function(): Project?
+								local f = fixed()
+								if f and f.project then
+									return { value = f.project, label = f.project, hue = f.hue, src = f.src, emoji = f.emoji }
+								end
+								return nil
+							end,
+							in_project = function(): boolean
+								return true
+							end,
+							branch = function(): string
+								local f = fixed()
+								return if f and f.name then f.name else locale.s("ds.composer.branch.no_ref")
+							end,
+							-- Where it runs off the branch: Cloud's machine, a
+							-- worktree, or the project's own folder.
+							glyph = function(): Icon.Name?
+								local f = fixed()
+								if f and f.cloud then
+									return "cloud"
+								end
+								return if f and f.worktree then "worktree" else nil
+							end,
+							folded = folded,
+							on_measures = place_measures,
+						})
+					end,
 				}
 				else nil
 			table.insert(
@@ -2288,6 +2491,7 @@ return ui.component(function(props: Props): Node
 		trays, tray_pill = dock.parts {
 			queue = props.queue,
 			can_steer = props.can_steer,
+			turn_running = props.turn_running,
 			on_queue_send = props.on_queue_send,
 			on_queue_edit = props.on_queue_edit,
 			on_queue_remove = props.on_queue_remove,

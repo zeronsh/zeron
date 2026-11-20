@@ -227,7 +227,7 @@ fn clamp_size(cols: u16, rows: u16) -> PtySize {
 }
 
 /// The user's interactive shell: `$SHELL`, else the platform default.
-fn selected_shell() -> String {
+pub(crate) fn selected_shell() -> String {
     if cfg!(windows) {
         return windows_shell(|name| std::env::var_os(name), |path| path.is_file());
     }
@@ -275,7 +275,7 @@ fn windows_shell(
 /// prints a banner as it starts unless told `-NoLogo`. Its last part, split
 /// at either slash: a Windows path reads the same wherever it's asked
 /// (`std::path` splits at `\` only on Windows, and the tests run on all).
-fn is_powershell(shell: &str) -> bool {
+pub(crate) fn is_powershell(shell: &str) -> bool {
     let file = shell.rsplit(['/', '\\']).next().unwrap_or(shell);
     let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
     matches!(stem.to_ascii_lowercase().as_str(), "pwsh" | "powershell")
@@ -967,10 +967,27 @@ async fn pump_output(
 /// process. Only EXITED sessions are swept after [`EXITED_TTL`]: they're inert
 /// replay buffers held so a returning viewer can show the tail + exit status.
 async fn reaper_task(inner: Weak<TerminalsInner>) {
-    let mut tick = tokio::time::interval(REAPER_INTERVAL);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    tick.tick().await; // consume the immediate first tick
+    let Some(mut opened) = inner.upgrade().map(|inner| inner.opened_tx.subscribe()) else {
+        return;
+    };
+    // On the beat grid (`zeron_sync::wake`): it wakes with the sockets' pings.
+    let mut tick = zeron_sync::wake::beat_interval(REAPER_INTERVAL);
     loop {
+        // With no terminal, open or exited, there is nothing to sweep and
+        // nothing to report: sleep until one opens.
+        opened.borrow_and_update();
+        let Some(none) = inner
+            .upgrade()
+            .map(|inner| lock(&inner.sessions).is_empty())
+        else {
+            break;
+        };
+        if none {
+            if opened.changed().await.is_err() {
+                break;
+            }
+            continue;
+        }
         tick.tick().await;
         let Some(inner) = inner.upgrade() else { break };
         let mut sessions = lock(&inner.sessions);

@@ -29,6 +29,7 @@ local LinkMenu = require("@app/screens/chat/link_menu")
 local Shared = require("@app/screens/chat/shared")
 local boundary = require("@app/screens/shell/boundary")
 local Quote = require("@ds/quote")
+local Draft = require("@ds/draft_text")
 local Carried = require("@app/screens/chat/carried")
 local Completions = require("@app/screens/chat/completions")
 local Invocations = require("@app/screens/chat/invocations")
@@ -366,6 +367,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 				out.harness = c.harness
 			end
 		end
+		if not out.harness and type(m) == "string" then
+			out.harness = string.match(m, "^([^/]+)/")
+		end
 		return out
 	end
 	-- Where its first message makes it: nil, its parent's place as it is;
@@ -478,6 +482,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		placeholder = locale.s("chat.lane_tab.placeholder"),
 		running = running,
 		access = access,
+		access_auto = function(): boolean
+			return store.offers_auto(model:get())
+		end,
 		plan = plan,
 		model = model,
 		effort = effort,
@@ -505,7 +512,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			if mine then
 				return mine
 			end
-			local link = machine.cloud_link(string.find(draft:get(), "%S") ~= nil)
+			local link = machine.cloud_link(Draft.has_text(draft))
 			return if link then LinkNotice.of { cloud = link } else nil
 		end),
 		on_dismiss_notice = function()
@@ -591,10 +598,10 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			-- transcript's send steps clear of the end (it glides to the top,
 			-- its reply's room opening under it), then goes to the host with
 			-- that id, so the host's copy is the same row.
-			-- (While a turn runs it's queued instead: it shows in the queue, and
-			-- what's picked waits for the turn it will run in.)
+			-- (While a turn runs it's queued instead: it shows in the queue,
+			-- carrying what's picked so it runs on that agent/model.)
 			local queued = not is_unsent and running:peek()
-			local req: { [string]: any } = if queued then {} else picks()
+			local req: { [string]: any } = picks()
 			req.attachments = pack.attachments
 			req.appshots = Appshots.of_cargo(chips)
 			local function failed(err: any)
@@ -617,10 +624,20 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			end
 			local mid = store.new_id()
 			req.message_id = mid
+			local catalog = store.catalog:peek()
+			local from_h = T.session_harness(catalog, session:peek())
+			local to_h = req.harness or (if type(req.model) == "string" then string.match(req.model, "^([^/]+)/") else nil)
+			local sw = if not is_unsent then T.switch_row(catalog, from_h, to_h, mid) else nil
 			local sent: any = nil
 			T.send(function()
 				local here = view.messages:index_of("id", mid) ~= nil
 				if not here then
+					if sw and view.messages:len() > 0 then
+						local tail = view.messages:at(view.messages:len())
+						if (not tail or tail.role ~= "switch") and view.messages:index_of("id", sw.id) == nil then
+							view.messages:push(sw)
+						end
+					end
 					-- (On its way from this moment: the line under it says so.)
 					view.messages:push { id = mid, role = "user", text = typed, attachments = Carried.shown(pack), waiting = "sending" }
 				end
@@ -649,7 +666,13 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		on_approve = asks.on_approve,
 		on_deny = asks.on_deny,
 		queue = asks.queue,
+		-- (Steer only where its agent takes a word mid-turn: else the row's
+		-- Send now stops the turn, as the host does.)
 		can_steer = function(): boolean
+			local s = session:get()
+			return running:get() and s ~= nil and s.steers == true
+		end,
+		turn_running = function(): boolean
 			return running:get()
 		end,
 		on_queue_send = asks.on_queue_send,

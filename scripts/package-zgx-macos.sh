@@ -2,7 +2,7 @@
 # Zeron.app, stable or beta: the zgx interface (apps/zgx, built with its
 # `beta` feature, which makes it the Zeron app) as the Zeron app itself —
 # the same bundle id, name, signing,
-# entitlements and `zeron://` scheme as scripts/package-macos.sh's — with
+# entitlements and `zeron://` scheme as the old app's Zeron.app — with
 # the engine it's given inside, built from the same commit, so a tester keeps
 # Zeron.app's data and device:
 #
@@ -27,8 +27,10 @@
 #   ZGX_TARGET_DIR      where to build it (apps/zgx/target)
 #   ZGX_DMG=0           no dmg
 #   CARGO_FLAGS         extra cargo flags (CI: --locked)
-# Signing and notarization are scripts/package-macos.sh's: CODESIGN_IDENTITY,
-# NOTARY_KEY_PATH + NOTARY_KEY_ID + NOTARY_ISSUER_ID.
+#   CODESIGN_IDENTITY   "Developer ID Application: …" to sign (ad hoc otherwise)
+#   NOTARY_KEY_PATH + NOTARY_KEY_ID + NOTARY_ISSUER_ID
+#                       an App Store Connect API key (.p8): all three set →
+#                       notarize and staple the app and the dmg
 
 set -euo pipefail
 
@@ -148,15 +150,15 @@ for dir in "$APP/Contents/Resources/plugins-builtin/"*/; do
 done
 
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
-cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$ROOT/apps/zgx/fonts/"*-OFL.txt "$APP/Contents/Resources/licenses/fonts/"
+cp "$ROOT/assets/fonts/licenses/"* "$ROOT/apps/zgx/fonts/"*-OFL.txt "$APP/Contents/Resources/licenses/fonts/"
 cp "$ROOT/THIRD_PARTY_NOTICES.md" "$ROOT/LICENSE" "$APP/Contents/Resources/licenses/"
 cp "$ROOT/crates/voice/NOTICE.md" "$APP/Contents/Resources/licenses/parakeet-v3.txt"
 
-# Zeron's icon, as scripts/package-macos.sh's.
+# Zeron's icon.
 "$ROOT/scripts/macos-app-icon.sh" "$APP/Contents/Resources"
 
-# Signed as scripts/package-macos.sh signs Zeron.app: the engine (its
-# identifier), then the bundle.
+# Signed inside out: the engine (its identifier), then the bundle that seals
+# it. Hardened runtime and a secure timestamp are notarization's requirements.
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   codesign --entitlements "$ENTITLEMENTS" --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" --identifier sh.zeron.app.engine "$APP/Contents/MacOS/Zeron Engine"
   codesign --entitlements "$ENTITLEMENTS" --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP"
@@ -219,7 +221,7 @@ dmgbuild.build_dmg(
         "show_pathbar": False,
         "show_sidebar": False,
         "default_view": "icon-view",
-        # Window and icon geometry as scripts/package-macos.sh's (the same art).
+        # Window and icon geometry must match scripts/dmg-background.py.
         "window_rect": ((200, 120), (660, 400)),
         "icon_size": 104,
         "text_size": 12,

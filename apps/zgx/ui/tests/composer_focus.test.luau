@@ -185,3 +185,35 @@ test("a rename's field opened on another chat keeps the keys", function()
 	app:frames(60)
 	expect(has_keys(app)).to_be(false)
 end)
+
+-- ⌘N and a key typed straight after it, before any frame: in ⌘N's own
+-- handling the new chat's composer has the keys and its draft is the new
+-- chat's (empty), so the key is the new chat's; the chat left keeps its draft
+-- as it was. Whether the composer had the keys before ⌘N or not.
+test("a key typed straight after ⌘N goes to the new chat, never the one left", function()
+	for _, had_keys in { true, false } do
+		local app = shell()
+		app:type(BOX, "Left as it was")
+		settle(app)
+		if not had_keys then
+			away(app)
+		end
+		app:command("shell.new_chat")
+		-- (No frame yet, no timer run: what ⌘N's handling did, alone.)
+		expect(`{had_keys}: {has_keys(app)}`).to_be(`{had_keys}: true`)
+		expect(`{had_keys}: {app:text(BOX)}`).to_be(`{had_keys}: `)
+		expect(app:state("shell_route_path")).never.to_contain("/session/")
+		app:type(BOX, "xy")
+		settle(app)
+		expect(`{had_keys}: {app:text(BOX)}`).to_be(`{had_keys}: xy`)
+		app:click(`{SIDE} >> role:button "Fix the build"`)
+		settle(app)
+		expect(`{had_keys}: {app:text(BOX)}`).to_be(`{had_keys}: Left as it was`)
+		app:command("shell.new_chat")
+		settle(app)
+		expect(`{had_keys}: {app:text(BOX)}`).to_be(`{had_keys}: xy`)
+		-- (A new chat's draft is kept across launches: emptied for the next.)
+		app:fill(BOX, "")
+		settle(app)
+	end
+end)

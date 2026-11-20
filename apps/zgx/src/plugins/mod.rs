@@ -202,8 +202,17 @@ struct Gh {
     watches: github::Watches<Watch>,
 }
 
+/// How long Settings → Plugins waits for what asked it to settle: past the
+/// launch (its first publish), then a moment.
+const PAGE_SETTLE_LAUNCH: std::time::Duration = std::time::Duration::from_millis(1500);
+const PAGE_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub struct Bridge {
     host: ScriptHost,
+    /// A publish of Settings → Plugins on its way (`publish_page`), and
+    /// whether one has been made.
+    page_due: Cell<bool>,
+    page_published: Cell<bool>,
     /// Where each plugin's requests may go, as its manifest names them.
     network: network::Network,
     windows: WindowFactory,
@@ -297,6 +306,9 @@ pub struct Bridge {
     /// (`plugins.remote`; never loaded here).
     pub(crate) remote: remote::Remote,
     me: RefCell<Weak<Bridge>>,
+    /// The window's first load is still to come (until `set_view`):
+    /// plugins applied before it load with it, no reload.
+    first_load: Cell<bool>,
 }
 
 /// What plugins may read and ask of the app, each behind its permission,
@@ -346,6 +358,36 @@ pub fn expose_own(host: &ScriptHost, id: &str) {
 /// finished (no organization chosen): then they're asked again once it is
 /// (`auth::set_up`), on the same connection, so plugins load as setup
 /// finishes, with no relaunch. Settings → Plugins says so meanwhile.
+/// How long a launch waits for an engine already running to say which
+/// plugins it allows: an answer is a few milliseconds; past this the
+/// window doesn't wait, and they come with the connection as ever.
+const PRELOAD_WAIT: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// The plugins an engine that's already running allows (`WatchPlugins`'
+/// first word), heard before the window's first load, which then loads
+/// them with it. Otherwise their list came with the connection, after the
+/// first frame, and loading them took a reload of every script in the
+/// window (a fifth of a second on an M5 Max, as the first keys are typed);
+/// the list the connection brings is now the one loaded, and changes
+/// nothing. Only what the engine says is loaded, as ever: with no engine
+/// running (a cold start), or none answering in `PRELOAD_WAIT`, nothing.
+fn preload(b: &Rc<Bridge>) {
+    let Some((port, data_dir)) = engine::get().ipc_endpoint() else { return };
+    // No engine was running at launch (none holds its data dir, or the one
+    // that does is the one this launch started, still coming up): there's
+    // none yet to ask, so none is dialled, as on a cold start before (on
+    // Windows, a port nobody listens on takes the whole wait to say so).
+    if engine::get().started_engine() || !zeron_launch::data_dir_held(&data_dir) {
+        return;
+    }
+    let Some(list) = crate::engine::rpc::ask_now(port, &data_dir, "WatchPlugins", json!({}), PRELOAD_WAIT) else {
+        return;
+    };
+    if list.get("plugins").is_some_and(Json::is_array) {
+        b.heard(&list);
+    }
+}
+
 fn connect(b: &Rc<Bridge>, rpc: &Rpc) {
     // Zeron's own plugins, shipped beside the app's scripts: the engine
     // scans them with yours (each connection: an engine started again
@@ -550,6 +592,8 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         network: plugin_network,
         windows: cx.windows.clone(),
         page: host.shared("plugins", page_value("loading", None, &[], &[])),
+        page_due: Cell::new(false),
+        page_published: Cell::new(false),
         menus: host.shared("plugins.menus", vlist(Vec::new())),
         requests: host.shared("plugins.request", vlist(Vec::new())),
         request_list: RefCell::default(),
@@ -598,6 +642,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         reviewed: Cell::new(false),
         remote: remote::Remote::new(host.shared("plugins.remote", remote::Remote::initial())),
         me: RefCell::default(),
+        first_load: Cell::new(true),
     });
     *bridge.me.borrow_mut() = Rc::downgrade(&bridge);
     BRIDGE.with(|b| *b.borrow_mut() = Rc::downgrade(&bridge));
@@ -623,6 +668,10 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             b.later_blame(error.to_string());
         }
     });
+
+    // A launch whose engine already runs (it outlives the app): the plugins
+    // it has allowed, in the window's first load (`preload`).
+    preload(&bridge);
 
     let weak = Rc::downgrade(&bridge);
     engine::get().on_connect(move |rpc| {
@@ -756,27 +805,43 @@ pub fn prepare_live() -> PathBuf {
         preview::set_template_running(id != live::BUILTIN);
         preview::set((!preview::trusted(&root, &id)).then(|| preview::Preview { name: template_name(&root, &id), id: id.clone() }));
     }
-    if let Err(error) = live::sync_zeron(&crate::ui_dir(), &root) {
-        eprintln!("zeron-zgx: Zeron's own interface wasn't copied ({error}); running it from ui/");
-        return fallback;
-    }
     // The built-in themes once installed as templates, retired: one in use
     // gives way to the default template, wearing that theme
     // (retired_themes.rs).
     if let Some(data) = crate::engine::data_dir() {
         retired_themes::retire(&root, &data);
     }
+    let ui = crate::ui_dir();
     let id = live::active(&root);
+    // `.live` as the last launch left it, from the same Zeron and template:
+    // it runs as it is (live::LaunchStamp), nothing read or written.
+    let stamp = live::LaunchStamp::now(&ui, &root, &id);
+    if stamp.still_laid(&ui, &root) {
+        let (_, overlay) = live::plan(&root, &id, &Default::default(), false);
+        LIVE_OVERLAY.with(|o| *o.borrow_mut() = overlay);
+        let laid = live::Laid { ui_stamp: stamp.ui, id, template_stamp: stamp.template, ..Default::default() };
+        LIVE_LAID.with(|l| *l.borrow_mut() = laid);
+        return root.join(live::LIVE).join("app.luau");
+    }
+    if let Err(error) = live::sync_zeron(&ui, &root) {
+        eprintln!("zeron-zgx: Zeron's own interface wasn't copied ({error}); running it from ui/");
+        return fallback;
+    }
+    zgx::profile::mark("Zeron's own interface copied");
     match live::compose(&root, &id, &Default::default(), false) {
         Ok((_, overlay)) => {
             LIVE_OVERLAY.with(|o| *o.borrow_mut() = overlay);
-            let template_stamp = if id == live::BUILTIN { String::new() } else { live::template_stamp(&root.join(&id)) };
-            let laid = live::Laid { ui_stamp: live::ui_stamp(&crate::ui_dir()), id, template_stamp, ..Default::default() };
-            LIVE_LAID.with(|l| *l.borrow_mut() = laid);
             // (Pictures of templates taken from the window, before their
             // previews were drawn from their colours: gone.)
             let _ = std::fs::remove_dir_all(root.join(".previews"));
             let _ = std::fs::remove_dir_all(root.join(live::LIVE).join("previews"));
+            // What the next launch can run as it is: `.live` as this left it.
+            let laid_now = live::LaunchStamp::now(&ui, &root, &id);
+            if let Err(error) = laid_now.write(&root) {
+                eprintln!("zeron-zgx: the launch stamp wasn't kept ({error})");
+            }
+            let laid = live::Laid { ui_stamp: laid_now.ui, id, template_stamp: laid_now.template, ..Default::default() };
+            LIVE_LAID.with(|l| *l.borrow_mut() = laid);
             root.join(live::LIVE).join("app.luau")
         }
         Err(error) => {
@@ -1087,6 +1152,7 @@ fn dev_service(host: &ScriptHost, id: &str) {
 /// elements in it.
 pub fn set_view(handle: zgx::compose::ViewHandle) {
     if let Some(b) = BRIDGE.with(|b| b.borrow().upgrade()) {
+        b.first_load.set(false);
         *b.view.borrow_mut() = Some(handle);
         b.publish_page();
     }
@@ -1422,7 +1488,10 @@ impl Bridge {
         }
         *self.loaded.borrow_mut() = want.clone();
         self.host.set_plugins(want);
-        self.reload();
+        // (Before the window's first load: that load takes them.)
+        if !self.first_load.get() {
+            self.reload();
+        }
     }
 
     fn reload(&self) {
@@ -1784,7 +1853,32 @@ impl Bridge {
         ]));
     }
 
+    /// Settings → Plugins brought up to date, once what asked has settled:
+    /// asks in a row (a launch makes several: the view known, the engine's
+    /// list, its look) make one, after [`PAGE_SETTLE`] ([`PAGE_SETTLE_LAUNCH`]
+    /// for a launch's first). It walks every element of the window (a tenth
+    /// of a second of a launch's main thread), and nothing a launch shows
+    /// reads it.
     fn publish_page(&self) {
+        if cfg!(test) {
+            return self.publish_page_now();
+        }
+        if self.page_due.replace(true) {
+            return;
+        }
+        let settle = if self.page_published.get() { PAGE_SETTLE } else { PAGE_SETTLE_LAUNCH };
+        let me = Rc::downgrade(&self.me());
+        self.tasks.spawn(async move {
+            zgx::timer::sleep(settle).await;
+            if let Some(b) = me.upgrade() {
+                b.page_due.set(false);
+                b.page_published.set(true);
+                b.publish_page_now();
+            }
+        });
+    }
+
+    fn publish_page_now(&self) {
         // A plugin that failed here shows so, with why, whatever the engine
         // says of it; one placed where the template in use has nothing says
         // where it won't show, and one whose place zgx refused says why.

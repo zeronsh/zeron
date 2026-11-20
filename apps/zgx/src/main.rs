@@ -60,6 +60,7 @@ mod mermaid;
 mod plugins;
 mod previews;
 mod projects;
+mod quit_prompt;
 mod relaunch;
 mod session_home;
 mod sessions;
@@ -121,6 +122,8 @@ mod drop_tests;
 mod picker_settle_tests;
 #[cfg(test)]
 mod fit_tests;
+#[cfg(test)]
+mod access_mode_tests;
 // (Unix only: it reads thread CPU time through libc.)
 #[cfg(all(test, unix))]
 mod slide_bench_tests;
@@ -133,6 +136,8 @@ mod scroll_script_tests;
 mod transcript_scroll_tests;
 #[cfg(test)]
 mod transcript_paint_tests;
+#[cfg(test)]
+mod long_thread_tests;
 #[cfg(test)]
 mod editor_scroll_tests;
 #[cfg(test)]
@@ -244,7 +249,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // may not have brought: bring it in first (src/windows_install.rs).
     #[cfg(all(windows, feature = "beta"))]
     {
-        windows_install::complete_if_needed(&argv);
+        windows_install::complete_if_needed(&argv)?;
         if let Some(dir) = std::env::current_exe().ok().as_deref().and_then(zeron_update::windows::install_directory) {
             zeron_launch::set_full_app_engine(
                 zeron_update::windows::version_files(&dir, about::APP_VERSION).join("engine").join("zeron.exe"),
@@ -254,12 +259,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if cfg!(feature = "beta") || !dev_launch(&argv[1..]) {
         match zeron_cli::run(about::APP_VERSION, zeron_cli::Engines::Helper) {
             zeron_cli::Launch::Done(result) => {
-                // (As a `main` returning it would: the error, exit status 1.)
-                if let Err(error) = result {
-                    eprintln!("Error: {error:?}");
-                    std::process::exit(1);
-                }
-                return Ok(());
+                // (Its error is `main`'s: "Error: …", exit status 1.)
+                return result.map_err(Into::into);
             }
             zeron_cli::Launch::Window { open_url: url, safe_mode } => {
                 open_url = url;
@@ -334,6 +335,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // requires find them compiled. (After the last `set_var` above: it
     // starts a thread.)
     compile_ahead(&screen);
+    // The engine, if none is running, started as the launch begins (on a
+    // thread of its own), not once the first window is up: it's ready about
+    // when the window is.
+    if matches!(screen, Screen::Intro | Screen::Onboarding | Screen::Main) {
+        engine::start_ahead();
+    }
 
     let mut application = Application::new();
     for font in fonts() {
@@ -373,6 +380,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             links::open(url);
         }
     })?;
+    // Quitting with "Keep Zeron running after you quit" off: the engine
+    // stops once its work is done, asking first about any still running
+    // (src/quit_prompt.rs). (Not for a relaunch: the app is coming back.)
+    if !relaunch::asked() {
+        quit_prompt::after_quit();
+    }
     // Quitting: an update downloaded and never restarted for installs now,
     // so the next launch is on it (src/about.rs).
     about::install_on_quit();
@@ -550,7 +563,9 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
         let state = zgx_script::app_data_dir(APP_ID).map(|dir| dir.join("script-state").join("app.luau"));
         carried_settings::carry(from.as_deref(), state.as_deref());
     }
-    let host = script_host_at(cx, plugins::prepare_live(), "app.luau");
+    let live = plugins::prepare_live();
+    zgx::profile::mark("templates laid");
+    let host = script_host_at(cx, live, "app.luau");
     host.shared("window", "main");
     // Plugins and your templates (src/plugins): the main window's alone.
     plugins::install(cx, &host);
@@ -698,7 +713,7 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     // ds/transcript's trace (`ZERON_ZGX_TRACE_TRANSCRIPT=1`): the hover lane
     // and the rows' heights as they change, a line each on stdout.
     if std::env::var("ZERON_ZGX_TRACE_TRANSCRIPT").is_ok_and(|v| v == "1") {
-        host.shared("debug.trace_transcript", true);
+        host.shared("trace.transcript", true);
     }
     // How much the desktop blurs behind the glass (`window.blur`), for the
     // glass's tint (ds/material).
@@ -1099,6 +1114,12 @@ fn serve_with(
     cx.on_closed(move || {
         reloading.borrow_mut().take();
         if let Some((host, devtools, commands, corner)) = keep.borrow_mut().take() {
+            // The scripts' last word before what they saved is written: a
+            // save still waiting on a timer (the new chat's draft,
+            // ui/screens/chat/shared.luau) goes now, as no timer fires
+            // after this. (Read at once: setting it runs what follows it.)
+            host.shared("app.closing", Value::Bool(false))
+                .set(Value::Bool(true));
             host.save();
             drop(devtools);
             drop(commands);

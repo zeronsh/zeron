@@ -363,6 +363,14 @@ local function card(row: State<agents.Agent>): Node
 		on_add = function()
 			agents.sign_in(id)
 		end,
+		-- On Cloud: whether it takes a sign-in or a key there, and how it
+		-- signs in where that's its own.
+		can_add = function(): boolean
+			return (row:get() :: any).can_add ~= false
+		end,
+		note = function(): string?
+			return (row:get() :: any).cloud_note
+		end,
 		-- An agent with a login per model provider: its accounts by provider,
 		-- each group adding its own.
 		groups = if first.groups
@@ -376,7 +384,8 @@ local function card(row: State<agents.Agent>): Node
 		on_add_to = function(provider: string)
 			agents.sign_in_to(id, provider)
 		end,
-		-- API keys: typed on this Mac for this Mac's agents only.
+		-- API keys: typed on this Mac for this Mac's agents, or for Cloud's
+		-- (kept by its vault, never on this Mac); never for another computer.
 		on_add_key = function(provider: string, key: string, name: string?): any
 			return agents.add_key(id, provider, key, name)
 		end,
@@ -384,8 +393,13 @@ local function card(row: State<agents.Agent>): Node
 			return agents.rename(id, acc.id, name)
 		end,
 		keys_here = function(): boolean
-			return agents.now:get().target == nil
+			return agents.now:get().target == nil or on_cloud()
 		end,
+		keys_kept = if cloud_card
+			then function(): string
+				return ui.t("settings.providers.cloud_key_kept"):get()
+			end
+			else nil,
 		key_request = function(): string?
 			local agent, provider = string.match(agents.key_request:get(), "^([^:]+):(.+)$")
 			return if agent == id then provider else nil
@@ -522,85 +536,6 @@ local function more(): Node
 	)
 end
 
--- Cloud's API keys: Anthropic's for Claude Code, OpenAI's for Codex, kept
--- by the vault. A key saved becomes its agent's account in use, every Cloud
--- machine's from its next turn (as signing in does).
-local CLOUD_KEYS = {
-	{ provider = "anthropic-key", agent = "Claude Code", label = "settings.providers.cloud_keys.anthropic" },
-	{ provider = "openai-key", agent = "Codex", label = "settings.providers.cloud_keys.openai" },
-}
-local function cloud_key_row(k: { provider: string, agent: string, label: string }): Node
-	return ui.component(function(): Node
-		local value = ui.use_state("")
-		local busy = ui.use_state(false)
-		local problem = ui.use_state("")
-		local function save()
-			local key = value:peek()
-			if busy:peek() or key == "" then
-				return
-			end
-			busy:set(true)
-			problem:set("")
-			host.call("agents.cloud_key", { provider = k.provider, key = key, device = cloud.device() or "" }):after(function()
-				busy:set(false)
-				value:set("")
-				toast.show { title = ui.t("settings.providers.cloud_keys.saved", { agent = k.agent }):get(), tone = "success" }
-			end, function(err: any)
-				busy:set(false)
-				problem:set(if type(err) == "table" and err.message then tostring(err.message) else tostring(err))
-			end)
-		end
-		return ds.Settings.Row {
-			label = ui.t(k.label),
-			description = function(): string
-				local p = problem:get()
-				return if p ~= "" then p else ui.t("settings.providers.cloud_keys.description", { agent = k.agent }):get()
-			end,
-			control = ui.row {
-				gap = "$space.2",
-				items = "center",
-				ds.TextField {
-					value = value,
-					password = true,
-					w = 220,
-					size = "sm",
-					name = ui.t(k.label),
-					placeholder = ui.t("settings.providers.cloud_keys.placeholder"),
-					on_commit = function()
-						save()
-					end,
-				},
-				ds.Button {
-					ui.t("settings.providers.cloud_keys.save"),
-					tone = "secondary",
-					size = "sm",
-					busy = function(): boolean
-						return busy:get()
-					end,
-					disabled = function(): boolean
-						return value:get() == ""
-					end,
-					on_click = save,
-				},
-			},
-		}
-	end)({})
-end
-local function cloud_keys(): Node
-	return ds.Settings.Section {
-		title = ui.t("settings.providers.cloud_keys.title"),
-		description = ui.t("settings.providers.cloud_keys.section_description"),
-		ds.Settings.Group {
-			ui.column {
-				w_full = true,
-				cloud_key_row(CLOUD_KEYS[1]),
-				ds.Settings.Rule(),
-				cloud_key_row(CLOUD_KEYS[2]),
-			},
-		},
-	}
-end
-
 local function body(k: string): Node
 	if k == "looking" then
 		return ds.ProviderCard.Loading()
@@ -610,7 +545,7 @@ local function body(k: string): Node
 		end, agents.load)
 	end
 	if k == "cloud" then
-		return ui.column { w_full = true, gap = "$space.6", cards(), cloud_keys() }
+		return ui.column { w_full = true, gap = "$space.6", cards() }
 	end
 	return ui.column { w_full = true, gap = "$space.6", cards(), more() }
 end

@@ -16,7 +16,10 @@ only once an account has been connected *for Cloud* (Settings → Providers, wit
 the device switcher). Cloud is listed there as one entry, never its session machines; no other
 device list shows it.
 
-- v1 providers on Cloud: **Codex** and **Claude Code** only.
+- Providers on Cloud: every built-in agent — Claude Code, Codex, Cursor, Devin, Grok, Hermes,
+  fx, Pi, OpenCode, Antigravity and Muse Code — each on the vault credentials listed in
+  "Providers" (agents added from the ACP registry stay on the devices that added them). A
+  machine installs an agent's CLI the first time a session runs it.
 - v1 repositories on Cloud: **GitHub repositories** the user installed the Zeron GitHub App on.
   Each session sandbox clones its project's repository from the branch picked in the composer;
   agents get a one-hour GitHub App installation token for `git push` and `gh pr create`, so
@@ -130,38 +133,88 @@ next token refresh fails and that engine goes dark within one token lifetime.
 
 The sandbox runs full-access agents on arbitrary repository code, so anything that can read
 `runner-key` can mint runner tokens. A runner token therefore acts as **its session's device**
-(the JWT's verified `dev` claim), never as the whole user — and never as a neighbouring
-session. Enforced at the edge:
+(the JWT's verified `dev` claim), never as the whole user. What else it reaches is its
+session's **reach**, which only the person sets:
+
+- **`devices`** (the default). Like any of the person's devices, it reaches their other
+  devices and every one of their chats: a Cloud chat's agent lists and messages chats on the
+  laptop, starts chats there, and runs commands on any online device (`run_command`), as an
+  agent on the laptop can. Through a client link to one of their computers that is that
+  computer's whole remote interface, so a compromised session can act as the person while
+  one of their computers is online.
+- **`isolated`**. Its own machine, and the delegates it starts (below): it sees no other
+  chat, touches none, and reaches no other device's room.
+
+The account's default is `PUT /cloud/{org}/reach {reach}` (Settings → Cloud); a session takes
+it at creation unless the composer picks one (`POST /cloud/{org}/sessions {…, reach}`), and
+`POST /cloud/{org}/sessions/{chatId}/reach {reach}` changes one session's (the composer's
+place menu). A delegate always takes its parent's reach, whatever it asks. Runner bearers are
+refused on all three (no `/cloud/*` but delegation; `CloudAccount` refuses any machine
+caller too), and on the engine they are local-only methods (`CloudSetReach`,
+`CloudSessionSetReach`): neither an agent's token nor another device (a Cloud machine among
+them) may call them, and a reach named in an agent's `CreateChat` is ignored.
+
+The reach is enforced where it is kept, in the user's registry (`RegistryRoom`, meta
+`runnerReach:{device}`, absent = `devices`); `CloudAccount` tells it first and records it
+once it holds. Enforced at the edge:
 
 - **Paths** (`edge/src/runner-policy.ts`, 403): no `/auth/*` org routes, no `/cloud/*`, no
-  `/vault/*` except `POST /vault/{org}/grant` for its own device. `/device/{id}/*` only for its
-  own id; for any other device only `GET /device/{id}/status` (read-only liveness) — no
-  client/host sockets, nudges or sidecars. No legacy loro rooms (`/session`, `/tail`,
-  `/stats`, `/diff`, `/snapshot`, `/append`, `/workspace`). On `/registry/{org}` only row sync
-  (`ws`, `GET rows`, `POST push`) — no `stats`, `push-target` (APNs titles) or `reset`.
-- **Chat-scoped data** (`edge/src/runner-access.ts`): `/chat2/{chatId}/*` and
-  `/blob/{chatId}/*` only while registry row `chats/{chatId}` is live and its
-  `fields.deviceId` equals the runner's device; otherwise 403 `not_host`. Positive answers are
-  cached per isolate for ≤5 min; refusals are never cached.
+  `/vault/*` except `POST /vault/{org}/grant` for its own device. `/device/{id}/*` fully for
+  its own id; for any other device a client socket (`ws`, role client — that device's RPC
+  surface: chats, terminals, files) and the command nudge as its reach allows (below), and
+  `GET /device/{id}/status` — never the host role or that device's sidecars. No legacy loro
+  rooms (`/session`, `/tail`, `/stats`, `/diff`, `/snapshot`, `/append`, `/workspace`). On
+  `/registry/{org}` only row sync (`ws`, `GET rows`, `POST push`) — no `stats`,
+  `push-target` (APNs titles) or `reset`.
+- **Other chats and devices** (`edge/src/runner-access.ts`, asking the registry's
+  `/runner-admit`): in either reach, the chats it hosts and its delegates' (a subagent's doc
+  by the chat that spawned it), and its delegates' Cloud machines. With `devices`, also any
+  live chat and any of the person's devices; such an admission carries the runner's
+  revocation epoch, and the room is recorded. Only admissions that hold in every reach are
+  cached (per isolate, 5 minutes); the rest are asked each time, so a change takes effect at
+  once. Covers `/chat2/{chatId}/*`, `/blob/{chatId}/*`, attachment blobs, and another
+  device's `ws`/`nudge`.
+- **Revocation** (`edge/src/runner-revocation.ts`): isolating a session bumps its epoch and
+  sends each recorded room a drop; a `ChatRoom` or `DeviceRoom` closes the runner's sockets
+  admitted at an older epoch (4403) and remembers the epoch, refusing a dial admitted before
+  the change that arrives after it. Its registry sockets close too (1012), and its next
+  state is `full`, so what it held of other devices' rows goes. A room whose drop fails stays
+  recorded, and the change answers 503 until a retry closes it.
 - **Registry** (`edge/src/registry-runner.ts`; the Worker stamps `x-zeron-runner-device`
-  on runner forwards and strips any inbound value). Writes: `devices` only its own row;
-  `chats`, `spaces`, `sessions` only when the existing live row is hosted by the runner AND
-  the row after the op still is (no claiming, handing away or ownerless rows); deletes need a
-  live owned row; tombstones are never revived; every other kind (`preferences`,
-  `sidebarPins`, anything new) is refused. Refused ops are skipped individually (an
-  `{t:"error", code:"not_owner"}` frame each, plus `rejected` in the ack); the rest of the
-  batch applies. Reads (hello/backfill, live `rows` broadcasts, `GET /rows`): every `devices`
-  row, the hosted rows the runner owns, the projects (spaces) of the chats it hosts, and
-  tombstones of hosted kinds (they carry no fields); laptop chats, other projects and other
-  sessions' chats and session rows — titles, previews, status — never reach it.
+  on runner forwards and strips any inbound value). Writes, either reach: `devices` only its
+  own row; `chats`, `spaces`, `sessions` when the existing live row is hosted by the runner
+  AND the row after the op still is (no claiming, handing away or ownerless rows); a
+  delegate's chat and session rows may be deleted; deletes otherwise need a live owned row;
+  tombstones are never revived; every other kind (`preferences`, `sidebarPins`, anything
+  new) is refused. With `devices`, a chat hosted elsewhere may have any field set but its
+  host (`deviceId`: a chat is never re-homed), and a new chat row may be hosted by any device
+  (a chat it starts there); isolated, a delegate may only be renamed or archived. Another
+  device's `spaces` and `sessions` rows stay its own. Refused ops are skipped individually
+  (an `{t:"error", code:"not_owner"}` frame each, plus `rejected` in the ack); the rest of
+  the batch applies. Reads (hello/backfill, live `rows` broadcasts, `GET /rows`): with
+  `devices`, every `devices`, `chats`, `spaces` and `sessions` row; isolated, every
+  `devices` row, the rows it hosts, the projects of the chats it hosts, its delegates and
+  their session rows, and tombstones; never the user's own kinds. A machine whose view
+  changed (a reach changed, or one that synced while it saw only its own rows) holds a
+  cursor that doesn't match what it now sees, so its next state is `full`
+  (`RegistryRoom.runnerBehind`, recorded per device as the seq it was sent at; sent again,
+  at most three times, until the machine's cursor passes that seq).
   Presence is unfiltered, but a runner socket's presence/attribution device is pinned to its
   verified id.
+- **Waking**: a Cloud machine's send (`POST /device/{id}/nudge`) wakes any of the person's
+  sleeping sessions while its reach is `devices`, as their other devices' sends do; isolated,
+  only its delegates (`CloudAccount.autoWake`).
+- **Engine** (`crates/engine/src/rpc/agent_gate.rs`): what an agent may do is the same on
+  Cloud as on a computer. It runs commands (`RunCommand`, `ReadCommandOutput`, `StopCommand`,
+  `ListBackgroundCommands`, here or on another device) only from a chat with full access (what every
+  harness already runs unconfined). A command running on a Cloud machine counts as background work in its heartbeat,
+  so the machine stays awake for it.
 
 User bearers are unaffected by all of the above.
 
 #### Delegation
 
-The one widening: a session's machine may start and manage **delegates** of the chat it runs
+A session's machine may start and manage **delegates** of the chat it runs
 (Zeron MCP `create_chat { cloud: true }`), one level deep. A delegate is a Cloud session of
 its own, on its own machine, recorded with `parentChatId` = the parent's chat.
 
@@ -173,21 +226,24 @@ its own, on its own machine, recorded with `parentChatId` = the parent's chat.
   hold: credits, and `CLOUD_MAX_AWAKE` machines at once. A runner request without
   `parentChatId` is refused (a machine never acts as the user).
 - **Its chat row** is written by the edge, as the user (`chats/{chatId}`: the new machine as
-  host, `parentChatId`, the parent's `spaceId`, `roomGen: 2`, the asked-for `config`): a
-  runner may write only rows it hosts, and only the edge knows which machine it just made.
+  host, `parentChatId`, the parent's `spaceId`, `roomGen: 2`, the asked-for `config`): only
+  the edge knows which machine it just made.
 - **Manage** (`DELETE /cloud/{org}/sessions/{chatId}`, `POST …/{wake|sleep}`): only sessions
   whose `parentChatId` is its chat. Retry, the session list, projects, billing and Cloud
   on/off stay the user's.
-- **See and reach**: the registry shows the runner its delegates' chat and session rows
-  (`RunnerScope.children`), and lets it rename, archive or delete them — never re-home them.
-  `/chat2/{chatId}/*` and `/blob/{chatId}/*` admit it when it hosts the chat's parent
-  (`/chat-host` answers `parentHost`). `/device/{id}/*` admits a client socket (never the host
-  role) and the command nudge for a device hosting one of its delegates
-  (`runnerDeviceGate`, via the registry's `/device-parents`). No other main chat — on the
-  laptop or another session — becomes visible.
+- **Delete**: the registry lets it delete its delegates' chat and session rows
+  (`runnerChildren`) — never re-home them.
 
-A stolen runner key therefore reaches at most: starting machines on the repository its
-session already has (bounded by credits and the awake limit), and its own delegates.
+A stolen runner key therefore reaches what any of the person's devices reaches. Directly, at
+the edge: their chats (reading them, messaging them, starting chats on their devices) and
+starting machines on the repository its session already has (bounded by credits and the awake
+limit); the edge still refuses it the account (`/auth/*`, `/cloud/*`), the vault beyond its own
+grant, hosting another device's room, and the person's preferences. But through a client link
+to one of their online computers it reaches that computer's whole RPC surface, which acts with
+that computer's own session: running commands and opening terminals there, its files, and the
+calls that computer makes for the person (account, vault, Cloud and billing). So in practice a
+compromised session machine can act as the person while any of their computers is online —
+the trade-off accepted for Cloud chats working with every device as a computer's chats do.
 
 ### Workflows (Cloudflare Workflows)
 
@@ -583,23 +639,55 @@ unreadable (that user reconnects), which doubles as the emergency response to a 
 The key source is pluggable (`KekProvider`), so an external key manager can replace the
 secret later without touching records' format.
 
-### Providers (v1)
+### Providers
 
 | Provider id | Material | Refresh |
 | --- | --- | --- |
 | `codex` | ChatGPT OAuth token set from `codex login` (`id_token`, `access_token`, `refresh_token`, `account_id`) | `POST https://auth.openai.com/oauth/token` (`grant_type=refresh_token`, Codex public client id) |
 | `claude` | Claude Code credential blob from a sign-in through Claude's own OAuth flow (`claudeAiOauth`), or a long-lived `claude setup-token` token | `POST https://platform.claude.com/v1/oauth/token` (`grant_type=refresh_token`, Claude Code client id); setup tokens never refresh |
 | `github` | GitHub App user token + refresh token (never granted; see "GitHub") | `POST https://github.com/login/oauth/access_token` with `GITHUB_APP_CLIENT_ID/SECRET` (vault secrets) |
-| `anthropic-key` | User's own Anthropic API key | none (static) |
-| `openai-key` | User's own OpenAI API key | none (static) |
+| `grok` | The xAI OIDC token set `grok login --device-auth` writes to `auth.json` (`{grokAuth: entry, scope: "{issuer}::{client_id}"}`) | `POST {oidc_issuer}/oauth2/token` (form, `grant_type=refresh_token`, the entry's own `oidc_client_id`); the issuer must be an `https` `x.ai` host |
+| `xai-oauth` | Hermes' `providers["xai-oauth"]` record (`{xaiOauth}`: an xAI OAuth token set with Hermes' API scopes) | `POST {token_endpoint}` (default `https://auth.x.ai/oauth2/token`, an `x.ai` host only; Hermes' public client); kept ≥ 2 h (or half its life) from expiry, since Hermes refreshes an hour ahead itself |
+| `nous` | Hermes' `providers.nous` record (`{nousAuth}`) | `POST {portal}/api/oauth/token` (form `grant_type=refresh_token`, `client_id=hermes-cli`; refresh token in the `x-nous-refresh-token` header); portal an `https` `nousresearch.com` host. Single-use refresh tokens: reuse revokes the session |
+| `antigravity` | Antigravity's `acp_token.json` (`{antigravityToken}`: `client_id`, `client_secret`, `refresh_token`, `scopes`, `project_id`; no access token) | `POST https://oauth2.googleapis.com/token`; Google refresh tokens don't rotate; refreshed once < 50 min remain |
+| `muse` | Muse's whole `auth.json` (`{museAuth}`), its `providers.meta` login | none: Muse mints its model keys from the access token, which lasts until `expires_at`; then `needs_reconnect` |
+| `copilot` | `{copilotToken, login}`: the GitHub token of Copilot's editor app (device flow), which agents exchange for Copilot sessions themselves | none (does not expire; revoked on GitHub) |
+| `devin` | `{devinCredentials}`: Devin's `credentials.toml` as a table (`windsurf_api_key` and its server urls), written by Devin's own browser sign-in | none (long-lived) |
+| `cursor-key` | `{key, expiresAt?}`: a Cursor user API key, minted by Cursor's browser sign-in (named, expiring) or pasted | none; an expiring one turns `needs_reconnect` at its expiry |
+| `anthropic-key`, `openai-key`, `openrouter-key`, `gemini-key`, `xai-key`, `deepseek-key`, `ai-gateway-key`, `meta-key` | `{key}`: the user's own API key for that vendor | none (static) |
+
+Every sign-in an agent offers on a computer, it offers on Cloud (`cloud_login_options` =
+`login_options`). Logins and keys are per account, not per agent: one ChatGPT sign-in runs
+Codex, Pi, OpenCode and Hermes on Cloud; one Claude sign-in runs Claude Code and Pi; one Copilot
+sign-in runs Pi and OpenCode; one OpenRouter key serves every agent that reaches OpenRouter.
+Which agent runs on which credential is one table, `zeron_proto::providers::cloud_credentials`:
+
+| Agent | Cloud credentials (preference order within a group) | How the machine hands them over |
+| --- | --- | --- |
+| Claude Code | `claude`, else `anthropic-key` | credential file (empty refresh token), else `ANTHROPIC_API_KEY` |
+| Codex | `codex`, else `openai-key` | managed `CODEX_HOME/auth.json` |
+| Cursor | `cursor-key` | `CURSOR_API_KEY` |
+| Devin | `devin` | `$XDG_DATA_HOME/devin/credentials.toml` (0600) |
+| Grok | `grok`, else `xai-key` | `~/.grok/auth.json` entry (empty refresh token, rewritten ahead of expiry), else `XAI_API_KEY` |
+| Pi | `codex`, `claude`, `copilot`, every vendor key | `auth.json` `openai-codex` / `anthropic` entries (empty refresh token, under Pi's lock); `COPILOT_GITHUB_TOKEN`; vendor env vars |
+| OpenCode | `codex`, `copilot`, vendor keys | the logins through OpenCode's own credential API (`/api/credential`) when its server starts; keys as env vars |
+| Hermes | `codex`, `nous`, `xai-oauth`, vendor keys | `$HERMES_HOME/auth.json` `providers.*` records (empty refresh token, fresh `last_refresh`, under `auth.lock`); keys as env vars |
+| fx | `ai-gateway-key`, `openai-key`, `anthropic-key` | `AI_GATEWAY_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` |
+| Antigravity | `antigravity`, else `gemini-key` | `acp_token.json` (access token, empty refresh token; a runtime is replaced before its token runs out), else `GEMINI_API_KEY`; `settings.json` `auth.type` to match |
+| Muse Code | `muse`, else `meta-key` | its `auth.json` (refresh tokens emptied), else `META_API_KEY` |
+
+Saving a key in Cloud's "API keys" list never signs a login out (a login is shared by several
+agents); within one card's group a machine runs the login first, and activating the key on that
+card is how to prefer it.
 
 **Claude subscriptions.** Anthropic's published Claude Code terms restrict third parties from
 storing or intermediating Claude.ai credentials "unless we've mutually agreed otherwise".
 Zeron holds Claude logins in the vault under its arrangement with Anthropic for running
 Claude Code on users' Cloud devices (confirmed by Wing, 2026-10-01; keep the written
-confirmation on file next to this doc). Scope it to that purpose: Claude grants are delivered
-only to the unmodified Claude Code CLI on the user's own devices, never to another harness or
-SDK, and sign-in always completes through Claude's own OAuth flow. Alternatives that need no
+confirmation on file next to this doc). Claude grants are delivered only to the user's own
+Cloud machines: to the unmodified Claude Code CLI, and — by Wing's decision of 2026-11-18 — to
+Pi's Claude provider, which signs in with the same Claude client; sign-in always completes
+through Claude's own OAuth flow. Alternatives that need no
 vault: the CLI's own `claude auth login` inside the Cloud device, or the user's own Anthropic
 API key (`anthropic-key`).
 
@@ -615,6 +703,21 @@ API key (`anthropic-key`).
   github.com; the *vault* polls GitHub and stores the result, so the token never transits a
   device. Separately, the user installs the App on the accounts / repositories Cloud may reach
   (`githubInstallUrl` in the vault status → `github.com/apps/{slug}/installations/new`).
+- **Grok**: `grok login --device-auth` into a throwaway `GROK_HOME`; its `auth.json` entry is
+  uploaded and the home shredded.
+- **Cursor**: Cursor's own browser sign-in (the SDK's PKCE flow) mints a named user API key into
+  a throwaway store; the key and its expiry are uploaded.
+- **Devin**: Devin's own browser sign-in (ACP `authenticate`) into a throwaway
+  `XDG_DATA_HOME`; its `credentials.toml` is uploaded.
+- **GitHub Copilot** (Pi): GitHub's device flow with Copilot's editor app, run by the laptop's
+  engine; the token is uploaded with its login.
+- **ChatGPT for Pi, OpenCode and Hermes**: the Codex capture above (one `codex` login); Claude
+  for Pi: the Claude capture (one `claude` login); Copilot for OpenCode: the Copilot capture.
+- **Hermes' Nous Portal and xAI**: `hermes auth add <provider>` (device code) into a throwaway
+  `HERMES_HOME`; its `providers.<id>` record is uploaded.
+- **Antigravity**: its ACP `authenticate` into a throwaway `GEMINI_HOME` with file storage
+  forced (`AGY_ACP_FORCE_FILE_STORAGE=1`); `acp_token.json` is uploaded.
+- **Muse**: its own sign-in into a throwaway config root, file-backed; `auth.json` is uploaded.
 - **API keys**: pasted on the laptop, uploaded once.
 
 The vault only refreshes. It owns each refresh token from upload on.
@@ -629,6 +732,13 @@ is in the credential's `authorizedDevices`, the user is not disabled, and the gl
 when within 10 minutes of expiry (Codex: when `last_refresh` is older than 7 days or the JWT has
 <1 h left). The consumer caches a grant until expiry (offline fallback) and never sees a
 refresh token.
+
+An agent that runs on several credentials (Pi) asks for them in one round trip: `POST
+/vault/{orgId}/grants {providers, deviceId, ts, sig}` signs `zeron-vault-grant\n{userId}\n
+{deviceId}\n{providers joined by ","}\n{ts}` (the providers sorted and distinct; `github` is
+never batched, it needs its repository) and answers `{grants, missing: [{provider, error,
+message}]}`. One signature spends one `ts`. A machine whose edge predates the route (404) asks
+one provider at a time.
 
 Failure semantics: a refresh that returns `invalid_grant` marks the account `needs_reconnect`
 and stops issuing grants. An ambiguous failure (timeout/5xx) keeps the current generation and
@@ -757,7 +867,8 @@ refresh contract changes is caught within a day, before users' grants start fail
 - **Runner mode** (`ZERON_RUNNER_ENROLL` or an existing `{data_dir}/runner.json`): `Auth`
   gains a runner token source (enroll once, then signed `/runner/token`); scope is `Synced`
   for the runner's `{orgId, userId}`. Platform comes from `ZERON_DEVICE_PLATFORM` (`cloud`).
-  The runner posts heartbeats and restricts its harness catalog to Codex + Claude Code.
+  The runner posts heartbeats and registers the built-in agents only (`CLOUD_HARNESSES`): no
+  agent from the ACP registry.
 - **Session machines** (`ZERON_CLOUD_*`, persisted to `cloud-session.json`): the device row
   carries `cloud-session`; at boot the engine clones the project into `ZERON_CLOUD_PATH` (with
   the GitHub grant's credential store; retried with backoff) and checks out
@@ -787,12 +898,20 @@ refresh contract changes is caught within a day, before users' grants start fail
   Codex from a vault grant (managed `CODEX_HOME` with the access token, empty refresh token;
   re-granted before expiry), Claude from a vault grant (Claude Code's credential file with the
   access token and an empty refresh token, rewritten before expiry), else the native sandbox
-  login, else `anthropic-key`. GitHub grants (App installation tokens for the session
+  login, else `anthropic-key`. Every other agent runs on what `cloud_credentials` lists for it
+  (see "Providers"): its grants are drawn in one batched call, keys become its environment
+  variables, and its logins go where the agent reads them (Grok's `auth.json` entry, Devin's
+  `credentials.toml`, Pi's `openai-codex` / `anthropic` entries, Hermes' `providers.*` records
+  under its `auth.lock`, Antigravity's `acp_token.json` and `settings.json` auth type, Muse's
+  `auth.json`, OpenCode's `/api/credential` through its harness), always with an empty refresh
+  token and rewritten ahead of expiry. A login the sandbox made itself (a real refresh
+  token) is left alone. The first run of an agent whose CLI the machine lacks installs it (once;
+  a failed install is retried after ten minutes). GitHub grants (App installation tokens for the session
   repository, requested with `repo`) are kept fresh in a git credential store file (`{data_dir}/cloud/git-credentials`, 0600,
   wired as git's `credential.https://github.com.helper`) and `gh`'s `hosts.yml`, so `git`
   keeps working in sessions that outlive the spawn-time `GH_TOKEN`. Secrets ride a
   `#[serde(skip)]` field on `RunRequest`, so they are never persisted in the session doc, the
-  journal or logs. On platform `cloud` only Codex and Claude Code are registered: nothing else
+  journal or logs. On platform `cloud` only the built-in agents are registered: nothing else
   is probed, update-checked or installable (some providers' images install a harness the first
   time its binary is invoked).
 - **Projects' GitHub repositories**: SpacesSync stamps `githubRepo` (the `origin` remote's
@@ -812,8 +931,15 @@ refresh contract changes is caught within a day, before users' grants start fail
   404ing. `ListCloudBranches {repo, defaultBranch?}` lists the branches a session can start from
   (GitHub's, default first; `GET /vault/{org}/github/branches?repo=`). A side chat
   (`parentChatId`) whose parent runs on a session machine is hosted on that same machine. `ListHarnesses` / `ListModels` aimed at any Cloud
-  device are answered by the asking engine (Codex + Claude Code), and anything else aimed at the
-  logical device fails fast — it has no engine.
+  device are answered by the asking engine (every built-in agent; models from the edge's list
+  where it has one, else the asking device's own catalog), and anything else aimed at the
+  logical device fails fast — it has no engine. The edge's list is Claude Code's and Codex's
+  kept by hand, and every other agent's as a Cloud machine last discovered it: after a run
+  prepares its credentials, the machine hands the agent's credential variables to its model
+  discovery (`zeron_harness::catalog_env`, part of the catalog's cache key), discovers, and
+  sends the catalog with the run's credential fingerprint (`POST /runner/models`; once per
+  agent and fingerprint per 10 minutes, at once for a new fingerprint). The account keeps the
+  last one per agent, so pickers list it while every machine sleeps.
 - **Laptop side**: `CloudStatus` / `CloudEnable` / `CloudDelete` / `CloudUsage`,
   `CloudSessions` / `CloudSessionWake` / `CloudSessionSleep` / `CloudSessionDelete`,
   `ListCloudBranches`, `VaultStatus`, `VaultConnectCodex` / `VaultConnectClaude`, `VaultPutApiKey`,
@@ -831,6 +957,7 @@ the bearer's `org_id`.
 
 | Route | Bearer | Body → reply |
 | --- | --- | --- |
+| `GET /cloud/{orgId}/models` | user | → `{models: {harness: Model[]}}`: Claude Code's and Codex's kept by hand, every other agent's as a machine last published it |
 | `GET /cloud/{orgId}` | user | → `CloudStatus` (account), with `machines: [{id, name, vcpu, memoryGB, diskGiB, creditMultiplier}]` and `machine` (the default) |
 | `POST /cloud/{orgId}/enable` | user | `{}` → `CloudStatus` (instant; mints the logical device id) |
 | `DELETE /cloud/{orgId}` | user | → `CloudStatus` (`deleting` → `off`; deletes every session sandbox after capturing usage) |
@@ -847,8 +974,9 @@ the bearer's `org_id`.
 | `POST /runner/token` | none | `{orgId, userId, deviceId, ts, sig}` → `{accessToken, expiresAt}` |
 | `POST /runner/wake-timing` | runner | `{sent?, token?, firstOutput?, version?, updateResult?, …}` (`EngineTiming`, `wake.ts`) → `{ok: true}`: its side of the wake, counted once |
 | `POST /runner/wake-stage` | runner | `{stage: "updating" \| null}` → `{ok: true}`: shown as `CloudSession.stage` |
+| `POST /runner/models` | runner | `{harness, models, credential}` → `{ok: true}`: the agent's catalog as this machine discovered it (≤ 400 models, unparseable ones dropped; never `claude-code`/`codex`'s, which stay hand-kept) |
 | `POST /runner/heartbeat` | runner | `{activeRuns, clients, backgroundRuns?, waitingRuns?, diskUsedBytes?, diskTotalBytes?}` → `{ok: true, diskCapacityGiB?}` (per session device) |
-| `GET /vault/{orgId}` | user | → `VaultStatusView` |
+| `GET /vault/{orgId}` | user | → `VaultStatusView`. Lists only the providers named in `x-zeron-vault-providers` (comma-separated); without the header, the original five (`codex`, `claude`, `github`, `anthropic-key`, `openai-key`). Every route answering a status filters it alike |
 | `PUT /vault/{orgId}/credentials/{provider}` | user | `PutCredentialRequest` → `VaultStatusView` |
 | `PATCH /vault/{orgId}/credentials/{provider}` | user | `{authorizedDevices}` → `VaultStatusView` |
 | `DELETE /vault/{orgId}/credentials/{provider}` | user | → `VaultStatusView` |
@@ -856,6 +984,7 @@ the bearer's `org_id`.
 | `POST /vault/{orgId}/devices/{deviceId}/revoke` | user | → `VaultStatusView` |
 | `POST /vault/{orgId}/disable` | user | `{disabled}` → `VaultStatusView` |
 | `POST /vault/{orgId}/grant` | user or runner | `GrantRequest` → `Grant` |
+| `POST /vault/{orgId}/grants` | user or runner | `GrantManyRequest` `{providers, deviceId, ts, sig}` → `{grants, missing}` |
 | `POST /vault/{orgId}/github/device` | user | `{authorizedDevices}` → `GithubDeviceStart` |
 | `POST /vault/{orgId}/github/device/{flowId}` | user | → `GithubDevicePoll` |
 
@@ -863,7 +992,8 @@ Types are in `edge/vault/src/api.ts` (TypeScript) and `crates/proto/src/cloud.rs
 Signatures are base64url (no padding) Ed25519 over UTF-8:
 
 - runner token: `zeron-runner-token\n{orgId}\n{userId}\n{deviceId}\n{ts}`
-- vault grant: `zeron-vault-grant\n{userId}\n{deviceId}\n{provider}\n{ts}`
+- vault grant: `zeron-vault-grant\n{userId}\n{deviceId}\n{provider}\n{ts}` (a batch: the sorted
+  providers joined by `,` in place of `{provider}`)
 
 `ZERON_RUNNER_ENROLL` = `{orgId}.{userId}.{deviceId}.{code}` (`code` is 32 random bytes,
 base64url). After enrollment the engine persists `{data_dir}/runner.json`

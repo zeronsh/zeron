@@ -1,0 +1,25 @@
+---
+// Zeron's mark: twelve cells of a 5 × 3 grid. Drawn from rects so it takes
+// the colour of the text around it.
+interface Props {
+  class?: string;
+}
+const cells = [
+  [0, 0], [1, 0], [2, 0], [4, 0],
+  [0, 1], [1, 1], [3, 1], [4, 1],
+  [0, 2], [2, 2], [3, 2], [4, 2],
+];
+---
+
+<svg class:list={["mark", Astro.props.class]} viewBox="0 0 49 29" aria-hidden="true">
+  {cells.map(([x, y]) => <rect x={x * 10} y={y * 10} width="9" height="9" rx="2.7" />)}
+</svg>
+
+<style>
+  .mark {
+    flex: none;
+    width: auto;
+    height: 1em;
+    fill: currentColor;
+  }
+</style>

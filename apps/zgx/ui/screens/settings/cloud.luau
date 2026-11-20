@@ -25,6 +25,7 @@ M.TITLE = "Cloud"
 M.ROWS = {
 	{ key = "usage", title = ui.t("settings.cloud.usage.title"), terms = ui.t("settings.cloud.usage.terms") },
 	{ key = "machine", title = ui.t("settings.cloud.machine.title"), terms = ui.t("settings.cloud.machine.terms") },
+	{ key = "reach", title = ui.t("settings.cloud.reach.title"), terms = ui.t("settings.cloud.reach.terms") },
 	{ key = "github", title = "GitHub", terms = ui.t("settings.cloud.github.terms") },
 	{ key = "repos", title = ui.t("settings.cloud.repos.title"), terms = ui.t("settings.cloud.repos.terms") },
 }
@@ -392,6 +393,56 @@ local function default_machine(): Node
 						line_height = "$font.line.sm",
 						color = "$zeron.tone.danger.ink",
 					}),
+				},
+			}
+		),
+	})
+end
+
+-- What new chats' machines reach: your other devices, or only themselves
+-- (the composer's own row under Cloud changes one chat's). Chosen: shown at
+-- once, put back if refused (account/cloud). (An edge that predates choosing
+-- says none: no section.)
+local reach_chosen = ui.state("settings_cloud_reach", "devices" :: string?)
+local function default_reach(): Node
+	local chosen = reach_chosen
+	ui.effect(function()
+		local now = cloud.reach()
+		if chosen:peek() ~= now then
+			chosen:set(now)
+		end
+	end)
+	return ui.show(function(): boolean
+		local st = cloud.now:get().status
+		return st ~= nil and st.reach ~= nil
+	end, ds.Settings.Section {
+		title = ui.t("settings.cloud.reach.title"),
+		description = ui.t("settings.cloud.reach.description"),
+		row(
+			"reach",
+			ds.Settings.Group {
+				ds.Settings.Row {
+					label = ui.t("settings.cloud.reach.title"),
+					description = function(): string
+						return if cloud.now:get().reach_failure ~= nil
+							then ui.t("settings.cloud.reach.failed"):get()
+							elseif chosen:get() == "isolated" then ui.t("ds.composer.reach.isolated_hint"):get()
+							else ui.t("ds.composer.reach.devices_hint"):get()
+					end,
+					control = ds.Select {
+						value = chosen,
+						name = ui.t("settings.cloud.reach.title"),
+						w = 160,
+						options = function(): { { value: string, label: string } }
+							return {
+								{ value = "devices", label = ui.t("ds.composer.reach.devices"):get() },
+								{ value = "isolated", label = ui.t("ds.composer.reach.isolated"):get() },
+							}
+						end,
+						on_change = function(reach: any)
+							cloud.set_reach(reach)
+						end,
+					},
 				},
 			}
 		),
@@ -790,6 +841,7 @@ function M.view(): Node
 			gap = "$space.6",
 			usage(),
 			default_machine(),
+			default_reach(),
 			github_section(),
 			repositories(),
 		}),

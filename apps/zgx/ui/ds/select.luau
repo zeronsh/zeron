@@ -104,6 +104,8 @@ return ui.component(function(props: Props): Node
 		ref = box,
 		label = props.label or props.name,
 		disabled = props.disabled,
+		-- (Not again inside a row that dims itself out of reach: `control.dim`.)
+		dim = control.dim(props.disabled),
 		h = control.H[size],
 		px = control.PAD[size],
 		pr = "$space.2",

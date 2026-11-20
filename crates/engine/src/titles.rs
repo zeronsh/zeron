@@ -90,6 +90,7 @@ impl TitleGenerator {
             return Ok(()); // already named
         }
 
+        tracing::debug!(target: "first_word", chat = %chat_id, "title: start");
         let generated = self.run_title_model(harness_id, prompt, cwd).await;
         // Fallback so a chat is always named even if the model run produced nothing.
         let fallback: String = prompt
@@ -247,6 +248,56 @@ impl TitleGenerator {
             }
         }
         None
+    }
+}
+
+/// A new chat's title, held until its agent has answered: the agent's first
+/// output, or its run ending without any. Titling starts a second agent
+/// process (a small model), and started beside the chat's own agent it
+/// competed with that agent's startup — the moments before the first word —
+/// for the CPU. Started once the reply is coming, the title still lands a
+/// moment after the first word.
+pub(crate) struct TitleAfterFirstOutput {
+    titles: TitleGenerator,
+    chat_id: String,
+    harness: HarnessId,
+    prompt: String,
+    cwd: String,
+    fired: bool,
+}
+
+impl TitleAfterFirstOutput {
+    pub(crate) fn new(titles: TitleGenerator, chat_id: &str, harness: HarnessId, prompt: &str, cwd: &str) -> Self {
+        Self {
+            titles,
+            chat_id: chat_id.to_owned(),
+            harness,
+            prompt: prompt.to_owned(),
+            cwd: cwd.to_owned(),
+            fired: false,
+        }
+    }
+
+    /// Start titling now (once).
+    pub(crate) fn fire(&mut self) {
+        if std::mem::replace(&mut self.fired, true) {
+            return;
+        }
+        // (Dropped outside a runtime, a shutdown's: nothing to start it on.)
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        tracing::debug!(target: "first_word", chat = %self.chat_id, "title: released");
+        self.titles
+            .maybe_generate(&self.chat_id, self.harness, &self.prompt, &self.cwd);
+    }
+}
+
+/// A run that ends before any output (a failed start, a Stop) still titles
+/// its chat, as it did when titling started with the run.
+impl Drop for TitleAfterFirstOutput {
+    fn drop(&mut self) {
+        self.fire();
     }
 }
 

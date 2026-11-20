@@ -178,6 +178,8 @@ impl CursorHarness {
         let mut cmd = Command::new(&exe);
         cmd.args(&args);
         crate::compose_child_path(&mut cmd, &exe);
+        // (A Cloud machine's Cursor key: crate::catalog_env.)
+        crate::apply_run_env(&mut cmd, &crate::catalog_env::get(HarnessId::Cursor));
         cmd.arg("models")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -345,6 +347,7 @@ impl Harness for CursorHarness {
         let binary = binary.canonicalize().unwrap_or(binary);
         let mut hash = Sha256::new();
         hash.update(catalog::credential_context()?);
+        crate::catalog_env::hash_into(&mut hash, HarnessId::Cursor);
         hash.update(binary.as_os_str().as_encoded_bytes());
         hash.update(Self::sdk_version().as_bytes());
         if let Ok(metadata) = binary.metadata() {
@@ -368,6 +371,19 @@ impl Harness for CursorHarness {
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         self.model_catalog(false).await.map(|c| c.models)
+    }
+    /// Cursor's own pick: the shim sends `auto` for a run that names no
+    /// model, so this is always a model Cursor runs.
+    fn fallback_models(&self) -> Vec<Model> {
+        vec![Model {
+            default: true,
+            id: "auto".into(),
+            label: "Auto".into(),
+            provider: None,
+            description: Some("Cursor picks the model".into()),
+            reasoning_levels: Vec::new(),
+            options: Vec::new(),
+        }]
     }
 
     // No `commands()` override: @cursor/sdk 1.0.28 exposes no slash-command
@@ -408,7 +424,7 @@ impl Harness for CursorHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
             let cwd = (!request.cwd.is_empty()).then(|| std::path::Path::new(&request.cwd));
             crate::executable::spawn_error(e, cwd, || exe.display().to_string())
         })?;
@@ -1185,6 +1201,30 @@ fn map_shim_frame(frame: &Value, interrupted: bool) -> Vec<AgentEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Cloud machine's Cursor key reaches model discovery, and a new key
+    /// is a new catalog (not the last one served from cache).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn discovery_runs_with_the_catalog_env_and_a_new_key_is_a_new_catalog() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let shim = dir.path().join("shim");
+        std::fs::write(
+            &shim,
+            "#!/bin/sh\nprintf '{\"ev\":\"models\",\"items\":[{\"id\":\"%s\",\"displayName\":\"M\"}]}\\n' \"$CURSOR_API_KEY\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let harness = CursorHarness::new().with_executable(&shim);
+        let ids = |models: Vec<Model>| models.into_iter().map(|m| m.id).collect::<Vec<_>>();
+        let key = |v: &str| std::collections::BTreeMap::from([("CURSOR_API_KEY".to_string(), v.to_string())]);
+        crate::catalog_env::set(HarnessId::Cursor, key("key-a"));
+        assert_eq!(ids(harness.models().await.unwrap()), ["key-a"]);
+        crate::catalog_env::set(HarnessId::Cursor, key("key-b"));
+        assert_eq!(ids(harness.models().await.unwrap()), ["key-b"]);
+        crate::catalog_env::set(HarnessId::Cursor, Default::default());
+    }
 
     #[test]
     fn decodes_cursor_tool_vocabulary() {

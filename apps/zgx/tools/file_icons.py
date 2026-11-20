@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""File icons for the design system: Zeron's Symbols set (crates/ui/assets/
+"""File icons for the design system: Zeron's Symbols set (assets/
 file-icons, miguelsolorio/vscode-symbols, MIT) copied under ui/assets/
 icons/files/, each twice (as drawn for light, and with its darker accents
 lifted for dark, as Zeron's `dark_icon_svg` does), and the theme's lookup
