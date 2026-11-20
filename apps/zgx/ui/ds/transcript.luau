@@ -57,6 +57,7 @@ local control = require("@self/control")
 local Quote = require("@self/quote")
 local SelectionMenu = require("@self/selection_menu")
 local Rail = require("@self/rail")
+local PromptRail = require("@self/prompt_rail")
 local motion = require("@self/motion")
 local locale = require("@self/locale")
 
@@ -298,6 +299,7 @@ local TAIL = 32
 -- a prompt's under the switch seam over it.
 local TURN_GAP = 16
 local SEAM_GAP = 6
+local PROMPT_GUTTER = 40
 
 -- `ZERON_ZGX_TRACE_TRANSCRIPT=1`: the transcript's hover and layout, a line
 -- each to the app's output (off, nothing is made or printed).
@@ -1334,10 +1336,9 @@ local GLIDE_CLEAR = 1
 local LANDING_MS = 2000
 local function to_end(list: Ref, offset: State<number>, rows: number)
 	local el = list:peek()
-	if el and rows > 0 then
-		el:scroll_to_row(rows, { align = "end" })
+	if not (el and rows > 0 and el:scroll_to_row(rows, { align = "end" })) then
+		offset:set(PAST_END)
 	end
-	offset:set(PAST_END)
 end
 -- The prompts sent from this window (kept across a reload): only a turn
 -- sent here holds the runway under its prompt, as Zeron reserves the view
@@ -1535,7 +1536,26 @@ local function Transcript(props: Props): Node
 		return prompt_id
 	end
 
+	local scrub_frame: (() -> ())? = nil
+	local scrub_done: ((boolean) -> ())? = nil
+	local function finish_prompt_scroll(landed: boolean)
+		if scrub_frame then
+			scrub_frame()
+			scrub_frame = nil
+		end
+		local done = scrub_done
+		scrub_done = nil
+		if done then
+			done(landed)
+		end
+	end
+	local function cancel_prompt_scroll()
+		finish_prompt_scroll(false)
+	end
+	ui.on_cleanup(cancel_prompt_scroll)
+
 	local function show_end()
+		cancel_prompt_scroll()
 		waiting = nil
 		to_end(list, offset, count:peek())
 	end
@@ -1591,6 +1611,7 @@ local function Transcript(props: Props): Node
 	local wheeled_at = -math.huge
 	local glide_from: (push: () -> (), from: number, last: Message, r: any, landing: string?) -> ()
 	local function send_here(push: () -> (), landing: string?)
+		cancel_prompt_scroll()
 		waiting = nil
 		local n = count:peek()
 		local from = offset:peek()
@@ -1670,6 +1691,7 @@ local function Transcript(props: Props): Node
 		sending = send_here
 	end
 	glide_from = function(push: () -> (), from: number, last: Message, r: any, landing: string?)
+		cancel_prompt_scroll()
 		if glide then
 			glide:pause()
 			glide = nil
@@ -2061,6 +2083,86 @@ local function Transcript(props: Props): Node
 		end
 		return ui.theme.get("zeron.prose.measure") :: number
 	end
+	local prompt_position = ui.use_state(1)
+	local viewport_row = 1
+	local placed = ui.use_state(0)
+	local prompts = ui.computed(function()
+		local result = {}
+		for i = 1, messages:len() do
+			local message = messages:at(i)
+			if message and message.role == "user" and not message.sender then
+				table.insert(result, { id = message.id, row = i, text = message.text })
+			end
+		end
+		return result
+	end)
+	local has_prompt_rail = ui.computed(function(): boolean
+		return prompts:len() > 1
+	end)
+	local function prompt_y(id: string): number?
+		local mounted = rows[id]
+		local el = if mounted then mounted.outer:peek() else nil
+		return if el and el.height and el.height > 0 then el.y else nil
+	end
+	ui.effect(function()
+		placed:get()
+		local off, ending, placing_now = offset:get(), at_end:get(), placing:get()
+		local n = prompts:len()
+		local view = list:get()
+		if n < 2 then
+			prompt_position:set(1)
+			return
+		end
+		if waiting or placing_now or not view or (list.height or 0) <= 0 or view.y == nil then
+			return
+		end
+		if ending or off >= PAST_END / 2 then
+			viewport_row = count:peek()
+			prompt_position:set(n)
+			return
+		elseif off <= 0 then
+			viewport_row = 1
+			prompt_position:set(1)
+			return
+		end
+		local top = view.y :: number
+		local first, first_y, height = nil, math.huge, 0
+		for _, mounted in rows do
+			local el = mounted.outer:peek()
+			local h = mounted.outer.height or 0
+			local y = if el then el.y else nil
+			if y and h > 0 and y + h > top and y < first_y then
+				first, first_y, height = mounted.index, y, h
+			end
+		end
+		if not first then
+			return
+		end
+		viewport_row = first:get() + math.clamp((top - first_y) / height, 0, 1)
+		local low, high = 1, n
+		while low <= high do
+			local mid = math.floor((low + high) / 2)
+			if prompts:at(mid).row <= viewport_row then
+				low = mid + 1
+			else
+				high = mid - 1
+			end
+		end
+		if high < 1 or high >= n then
+			prompt_position:set(math.clamp(high, 1, n))
+			return
+		end
+		local before, after = prompts:at(high), prompts:at(high + 1)
+		local y0, y1 = prompt_y(before.id), prompt_y(after.id)
+		local fraction = if y0 and y1 and y0 <= top and top <= y1 and y1 > y0
+			then (top - y0) / (y1 - y0)
+			else (viewport_row - before.row) / (after.row - before.row)
+		prompt_position:set(high + fraction)
+	end)
+	local function row_inset(): number
+		local side = props.side or (ui.theme.get("space.5") :: number)
+		return if has_prompt_rail:get() then math.max(side, PROMPT_GUTTER) else side
+	end
 	local function remember()
 		-- (Not yet back where it was: nothing new to say.)
 		if waiting then
@@ -2112,6 +2214,7 @@ local function Transcript(props: Props): Node
 	-- rows, heard before the list takes it): what tells their scroll from
 	-- the list moving itself as rows measure.
 	local function wheeled(): boolean?
+		cancel_prompt_scroll()
 		wheeled_at = ui.now()
 		-- (Taken somewhere of their own: a place still to come back to is
 		-- let go.)
@@ -2131,6 +2234,123 @@ local function Transcript(props: Props): Node
 			gliding:set(false)
 		end
 		return nil
+	end
+	local function take_prompt_scroll()
+		wheeled()
+		end_held = false
+		here, returning, reading = nil, nil, nil
+	end
+	local function scrub_to_prompt(id: string, row: number, duration: number?, done: ((boolean) -> ())?, report: ((number) -> ())?)
+		local el = list:peek()
+		if not el or not el.height or el.height <= 0 then
+			if done then
+				done(false)
+			end
+			return
+		end
+		take_prompt_scroll()
+		scrub_done = done
+		placing:set(false)
+		if motion.reduced_now() then
+			finish_prompt_scroll(el:scroll_to_row(row, { align = "start" }))
+			return
+		end
+		local span = duration or 120
+		local time, easing, stalled = 0, 0, 0
+		local last_at = ui.now() - (if duration then 0 else 16)
+		local last_offset: number? = nil
+		local last_delta, rail_progress = 0, 0
+		local unmounted_travel, unmounted_from = 0, 0
+		local function advance()
+			scrub_frame = nil
+			local view = list:peek()
+			local index = messages:index_of("id", id)
+			if not index or not view or not view.y or not view.height or view.height <= 0 then
+				finish_prompt_scroll(false)
+				return
+			end
+			if motion.reduced_now() then
+				finish_prompt_scroll(view:scroll_to_row(index, { align = "start" }))
+				return
+			end
+			local at = ui.now()
+			local elapsed = math.clamp(at - last_at, 1, 24)
+			last_at = at
+			local current = offset:peek()
+			stalled = if current == last_offset then stalled + 1 else 0
+			local travelled = if last_offset then math.clamp((current - last_offset) * math.sign(last_delta), 0, math.abs(last_delta)) else 0
+			last_offset = current
+			if current >= PAST_END / 2 then
+				if stalled >= 3 then
+					finish_prompt_scroll(false)
+				else
+					scrub_frame = ui.after(16, advance)
+				end
+				return
+			end
+			time += elapsed
+			local next_easing = (1 - math.cos(math.pi * math.min(1, time / span))) / 2
+			local fraction = if easing < 1 then (next_easing - easing) / (1 - easing) else 0
+			easing = next_easing
+			local speed = view.height / 96
+			local speed_limit = speed * math.min(1, time / (span / 4))
+			local target = rows[id]
+			local node = target and target.outer:peek()
+			local delta: number
+			if node and node.y then
+				local gap = math.max(-current, node.y - view.y)
+				if gap > 0 then
+					local last = messages:at(messages:len())
+					local tail = last and rows[last.id]
+					local bottom = tail and tail.outer:peek()
+					if bottom and bottom.y and bottom.height then
+						gap = math.min(gap, math.max(0, bottom.y + bottom.height - view.y - view.height))
+					end
+				end
+				local distance = math.abs(gap)
+				if distance <= 0.5 then
+					finish_prompt_scroll(true)
+					return
+				end
+				if report then
+					rail_progress += (1 - rail_progress) * travelled / (travelled + distance)
+					unmounted_travel, unmounted_from = 0, rail_progress
+				end
+				local braking = math.sqrt(distance * speed / 32) * elapsed
+				local step = if fraction > 0 then distance * fraction else distance * (1 - math.exp(-elapsed / 36))
+				delta = math.sign(gap) * math.min(distance, math.max(1, math.min(step, braking, speed_limit * elapsed)))
+			else
+				local nearest, direction = math.huge, if index < viewport_row then -1 else 1
+				for _, mounted in rows do
+					local distance = index - mounted.index:peek()
+					if distance ~= 0 and math.abs(distance) < nearest then
+						nearest, direction = math.abs(distance), math.sign(distance)
+					end
+				end
+				delta = direction * speed_limit * elapsed
+				if report then
+					unmounted_travel += travelled
+					local interim = 0.85 * unmounted_travel / (unmounted_travel + view.height)
+					rail_progress = math.max(rail_progress, unmounted_from + (1 - unmounted_from) * interim)
+				end
+			end
+			if stalled >= 3 then
+				finish_prompt_scroll(false)
+				return
+			end
+			if report and travelled > 0 then
+				report(rail_progress)
+			end
+			local next_offset = math.max(0, current + delta)
+			last_delta = next_offset - current
+			offset:set(next_offset)
+			scrub_frame = ui.after(16, advance)
+		end
+		if duration then
+			scrub_frame = ui.after(16, advance)
+		else
+			advance()
+		end
 	end
 	-- When focus last came to something in the list (Tab, ⇧Tab to a row's
 	-- control): taken there, the reader is somewhere of their own.
@@ -2559,7 +2779,7 @@ local function Transcript(props: Props): Node
 			w_full = true,
 			justify = "center",
 			items = "start",
-			px = if props.side then ui.raw(props.side, "a little wider than the composer") else "$space.5",
+			px = row_inset,
 			pt = function(): number
 				return ui.raw(pt(), "Zeron's gaps over a message (transcript.rs top_gap_for)")
 			end,
@@ -2746,8 +2966,10 @@ local function Transcript(props: Props): Node
 				end
 			end,
 			on_focus = function()
+				cancel_prompt_scroll()
 				focused_at = ui.now()
 			end,
+			on_press = cancel_prompt_scroll,
 			follow = true,
 			at_end = at_end,
 			height = ESTIMATE,
@@ -2783,11 +3005,11 @@ local function Transcript(props: Props): Node
 	-- glide, the hover and a selection's bar, the reading place and its
 	-- sizes. (The list's own `on_mount` then opens it where it should.)
 	-- (Each chat shown in it, for the scrollbar.)
-	local placed = ui.use_state(0)
 	local function fresh(id: string?)
 		if id == showing then
 			return
 		end
+		cancel_prompt_scroll()
 		showing = id
 		shown_turn += 1
 		opened_at = ui.now()
@@ -2816,6 +3038,8 @@ local function Transcript(props: Props): Node
 			pin:set { id = "", h = 0 }
 			hover:set("")
 			spot:set(nil)
+			viewport_row = if restoring then 1 else count:peek()
+			prompt_position:set(if restoring then 1 else math.max(1, prompts:len()))
 			sized:set(sized:peek() + 1)
 		end)
 		-- (Its place told once it has stood 150 ms, as a view just made's.)
@@ -2859,6 +3083,21 @@ local function Transcript(props: Props): Node
 					end, { w_full = true, h_full = true })
 					else List(),
 			},
+		},
+		PromptRail {
+			prompts = prompts,
+			position = prompt_position,
+			session = props.session,
+			gutter = PROMPT_GUTTER,
+			view_width = function(): number
+				return list.width or 0
+			end,
+			scrub = scrub_to_prompt,
+			cancel_scrub = cancel_prompt_scroll,
+			jump = function(id: string)
+				take_prompt_scroll()
+				go_back({ id = id, dy = 0 })
+			end,
 		},
 		-- The scrollbar, over the list and never faded, running its whole
 		-- height: at the window's edge, beside the composer rather than
