@@ -242,11 +242,20 @@ impl Process {
         command: Value,
         backlog: &mut Vec<Value>,
     ) -> Result<Value, HarnessError> {
+        self.try_query(command, backlog).await?
+    }
+    /// [`Self::query`], keeping Pi's own refusal (the inner `Err`) apart
+    /// from a broken process or pipe (the outer `Err`).
+    async fn try_query(
+        &mut self,
+        command: Value,
+        backlog: &mut Vec<Value>,
+    ) -> Result<Result<Value, HarnessError>, HarnessError> {
         let id = self.transport.client.request(command)?;
         loop {
             let frame = self.next().await?;
             if frame["type"] == "response" && frame["id"] == id {
-                return response_data(frame);
+                return Ok(response_data(frame));
             }
             if frame["type"] == "extension_ui_request" {
                 self.dialogs.request(self.transport.client.clone(), &frame);
