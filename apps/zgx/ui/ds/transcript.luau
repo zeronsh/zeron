@@ -1336,9 +1336,10 @@ local GLIDE_CLEAR = 1
 local LANDING_MS = 2000
 local function to_end(list: Ref, offset: State<number>, rows: number)
 	local el = list:peek()
-	if not (el and rows > 0 and el:scroll_to_row(rows, { align = "end" })) then
-		offset:set(PAST_END)
+	if el and rows > 0 then
+		el:scroll_to_row(rows, { align = "end" })
 	end
+	offset:set(PAST_END)
 end
 -- The prompts sent from this window (kept across a reload): only a turn
 -- sent here holds the runway under its prompt, as Zeron reserves the view
@@ -2083,7 +2084,7 @@ local function Transcript(props: Props): Node
 		end
 		return ui.theme.get("zeron.prose.measure") :: number
 	end
-	local prompt_position = ui.use_state(1)
+	local prompt_position = ui.state(`transcript_prompt_position{kept}`, 1)
 	local viewport_row = 1
 	local placed = ui.use_state(0)
 	local prompts = ui.computed(function()
@@ -2096,8 +2097,10 @@ local function Transcript(props: Props): Node
 		end
 		return result
 	end)
-	local has_prompt_rail = ui.computed(function(): boolean
-		return prompts:len() > 1
+	local prompt_gutter = ui.computed(function(): number
+		local side = props.side or (ui.theme.get("space.5") :: number)
+		local width = list.width or 0
+		return math.min(PROMPT_GUTTER, math.max(side, (width - measure()) / 2))
 	end)
 	local function prompt_y(id: string): number?
 		local mounted = rows[id]
@@ -2109,11 +2112,11 @@ local function Transcript(props: Props): Node
 		local off, ending, placing_now = offset:get(), at_end:get(), placing:get()
 		local n = prompts:len()
 		local view = list:get()
-		if n < 2 then
-			prompt_position:set(1)
+		if waiting or placing_now or not view or (list.height or 0) <= 0 or view.y == nil then
 			return
 		end
-		if waiting or placing_now or not view or (list.height or 0) <= 0 or view.y == nil then
+		if n < 2 then
+			prompt_position:set(1)
 			return
 		end
 		if ending or off >= PAST_END / 2 then
@@ -2159,10 +2162,6 @@ local function Transcript(props: Props): Node
 			else (viewport_row - before.row) / (after.row - before.row)
 		prompt_position:set(high + fraction)
 	end)
-	local function row_inset(): number
-		local side = props.side or (ui.theme.get("space.5") :: number)
-		return if has_prompt_rail:get() then math.max(side, PROMPT_GUTTER) else side
-	end
 	local function remember()
 		-- (Not yet back where it was: nothing new to say.)
 		if waiting then
@@ -2779,7 +2778,7 @@ local function Transcript(props: Props): Node
 			w_full = true,
 			justify = "center",
 			items = "start",
-			px = row_inset,
+			px = if props.side then ui.raw(props.side, "a little wider than the composer") else "$space.5",
 			pt = function(): number
 				return ui.raw(pt(), "Zeron's gaps over a message (transcript.rs top_gap_for)")
 			end,
@@ -3053,6 +3052,21 @@ local function Transcript(props: Props): Node
 		h_full = true,
 		-- The lightbox a message's pictures open in (one a window draws).
 		Lightbox.Host(),
+		PromptRail {
+			prompts = prompts,
+			position = prompt_position,
+			session = props.session,
+			gutter = prompt_gutter,
+			view_width = function(): number
+				return list.width or 0
+			end,
+			scrub = scrub_to_prompt,
+			cancel_scrub = cancel_prompt_scroll,
+			jump = function(id: string)
+				take_prompt_scroll()
+				go_back({ id = id, dy = 0 })
+			end,
+		},
 		on_hover = function(inside: boolean)
 			if not inside then
 				hover:set("")
@@ -3083,21 +3097,6 @@ local function Transcript(props: Props): Node
 					end, { w_full = true, h_full = true })
 					else List(),
 			},
-		},
-		PromptRail {
-			prompts = prompts,
-			position = prompt_position,
-			session = props.session,
-			gutter = PROMPT_GUTTER,
-			view_width = function(): number
-				return list.width or 0
-			end,
-			scrub = scrub_to_prompt,
-			cancel_scrub = cancel_prompt_scroll,
-			jump = function(id: string)
-				take_prompt_scroll()
-				go_back({ id = id, dy = 0 })
-			end,
 		},
 		-- The scrollbar, over the list and never faded, running its whole
 		-- height: at the window's edge, beside the composer rather than

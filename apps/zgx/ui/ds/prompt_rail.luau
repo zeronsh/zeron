@@ -51,7 +51,7 @@ type Target = { index: number, id: string }
 type Press = { x: number, y: number, target: Target?, moved: boolean }
 
 return ui.component(function(props: any): Node
-	local position = ui.use_state(1)
+	local position = ui.use_state(props.position:peek())
 	local hover_y = ui.use_state(nil :: number?)
 	local pressed = ui.use_state(nil :: number?)
 	local centered = ui.use_state(false)
@@ -67,7 +67,7 @@ return ui.component(function(props: any): Node
 	local last_y, last_time, velocity = 0, 0, 0
 	local prompts = props.prompts
 	local function inside(e: PointerEvent): boolean
-		return e.local_x >= 0 and e.local_x <= props.gutter and e.local_y >= 0 and e.local_y <= HEIGHT
+		return e.local_x >= 0 and e.local_x <= props.gutter:peek() and e.local_y >= 0 and e.local_y <= HEIGHT
 	end
 
 	local function current_session(): string?
@@ -303,7 +303,7 @@ return ui.component(function(props: any): Node
 		end
 	end)
 	local preview_width = ui.computed(function(): number
-		return math.clamp(props.view_width() - props.gutter - 16, 0, 248)
+		return math.clamp(props.view_width() - props.gutter:get() - 16, 0, 248)
 	end)
 	local ticks = ui.computed(function()
 		local first, last = bounds(position:get(), prompts:len())
@@ -476,10 +476,10 @@ return ui.component(function(props: any): Node
 				end
 				return ui.div {
 					absolute = true,
-					left = 8,
+					left = "20%",
 					top = 0,
 					y = function(): number return project(distance()) - TICK_HEIGHT / 2 end,
-					w = 12,
+					w = "30%",
 					h = TICK_HEIGHT,
 					origin = { 0, 0.5 },
 					scale_x = function(): number
@@ -500,7 +500,7 @@ return ui.component(function(props: any): Node
 			ui.div {
 				id = "prompt-jump-preview",
 				absolute = true,
-				left = props.gutter + 6,
+				left = function(): number return props.gutter:get() + 6 end,
 				top = 0,
 				y = preview_y,
 				w = preview_width,
@@ -525,5 +525,5 @@ return ui.component(function(props: any): Node
 				},
 			},
 		}
-	end, { absolute = true, left = 0, top = "50%", y = -CENTER, w = props.gutter, h = HEIGHT })
+	end, { absolute = true, left = 0, top = "50%", y = -CENTER, w = props.gutter, h = HEIGHT, z = 1 })
 end)
