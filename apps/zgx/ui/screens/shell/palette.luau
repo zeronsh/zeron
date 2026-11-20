@@ -59,6 +59,7 @@ local function session_items(): { Item }
 				time = c.updated,
 				agent = c.agent,
 				project = if p then p.name else nil,
+				project_id = if p then p.id else nil,
 				hue = if p then (route.look(p.id) or { hue = route.hue(p.id) }).hue else nil,
 				src = if p then (route.look(p.id) or {}).src else nil,
 				emoji = if p then (route.look(p.id) or {}).emoji else nil,
@@ -98,11 +99,12 @@ local function projects_page(): any
 		placeholder = locale.s("shell.palette.search_projects"),
 		items = function(): { Item }
 			local out: { Item } = {}
-			for _, p in sessions.now:get().projects do
+			for _, p in sessions.projects:get() do
 				table.insert(out, {
 					id = `project:{p.id}`,
 					label = p.name,
 					section = locale.s("shell.palette.projects"),
+					project = p.id,
 					hue = (route.look(p.id) or { hue = route.hue(p.id) }).hue,
 					src = (route.look(p.id) or {}).src,
 					emoji = (route.look(p.id) or {}).emoji,

@@ -73,6 +73,7 @@ export default defineConfig({
           SANDBOX_PROVIDER: "boat",
           CLOUD_TTL_SECONDS: "7200",
           CLOUD_IDLE_MINUTES: "20",
+          CLOUD_WAKE_SLOW_SECONDS: "3",
           CLOUD_STARTING_CREDITS: "1000",
           STRIPE_SECRET_KEY: "sk_test_fake",
           STRIPE_WEBHOOK_SECRET: "whsec_test_fake",

@@ -119,6 +119,9 @@ fun SessionRow.colorIndex(): Int = (project?.colorIndex ?: projectColorIndex("ho
 @Composable
 fun successColor(): Color = if (LocalDarkTheme.current) Color(0xFF34D399) else Color(0xFF15803D)
 
+@Composable
+fun warningColor(): Color = if (LocalDarkTheme.current) Color(0xFFFACC15) else Color(0xFFA16207)
+
 /** Live status at the trailing edge of a session row (desktop wording). */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable

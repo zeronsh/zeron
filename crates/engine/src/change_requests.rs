@@ -1,4 +1,10 @@
-//! Demand-driven checkout change-request cache and polling streams.
+//! Demand-driven checkout change-request cache and streams.
+//!
+//! A watched checkout's Git state (its branch, upstream, remotes) is read
+//! again only when the files Git reads it from change: file-system events on
+//! its git directories ([`GitWatch`]), gated by a cheap fingerprint of those
+//! files ([`GitFingerprint`]), so a checkout left alone runs no Git at all.
+//! The provider (GitHub) is asked again on its own schedule (`refresh`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -9,12 +15,13 @@ use std::time::Duration;
 use futures::future::{BoxFuture, Shared};
 use futures::stream::BoxStream;
 use futures::{FutureExt, StreamExt};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, watch};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use zeron_proto::CheckoutChangeRequestStatus;
 
+use crate::fs_watch::{FsWatch, FsWatchHub};
 use crate::repos::{CheckoutIdentity, Repos};
 use crate::source_control::{
     BranchHeadContext, ChangeRequestError, ChangeRequestResolver, CheckoutChangeRequestLookup,
@@ -25,11 +32,26 @@ const WITH_CHANGE_REQUEST_TTL: Duration = Duration::from_secs(2 * 60);
 const WITHOUT_CHANGE_REQUEST_TTL: Duration = Duration::from_secs(45);
 const FAILURE_INITIAL_BACKOFF: Duration = Duration::from_secs(20);
 const FAILURE_MAX_BACKOFF: Duration = Duration::from_secs(15 * 60);
+/// How often a checkout whose git directories aren't watched (the watch
+/// failed, or isn't live yet) is inspected again, as every checkout once was.
 const CONTEXT_POLL_INTERVAL: Duration = Duration::from_secs(15);
+/// Git changes several of its files at once (a checkout writes HEAD, the
+/// index and a reflog): a burst of events is one look, this long after it.
+const GIT_EVENT_SETTLE: Duration = Duration::from_millis(250);
+/// A checkout on its repository's default branch: a pull request whose head
+/// is that branch is rare (a release pull request), so it is asked about
+/// seldom. Every chat started in a project's main folder sits there, and each
+/// was asking GitHub every 45 s.
+const DEFAULT_BRANCH_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// What one provider question is of. Checkouts of one repository on one
+/// branch ask GitHub the same thing, so they share the answer: `scope` is
+/// empty when the remote names the repository, and the checkout's id only
+/// when it doesn't (that lookup fails without asking GitHub anyway).
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChangeRequestCacheKey {
-    pub checkout_id: String,
+    pub scope: String,
     pub branch: String,
     pub upstream_ref: String,
     pub remote: String,
@@ -42,6 +64,8 @@ struct Timing {
     failure_initial_backoff: Duration,
     failure_max_backoff: Duration,
     context_poll_interval: Duration,
+    default_branch_ttl: Duration,
+    git_event_settle: Duration,
 }
 
 impl Default for Timing {
@@ -52,6 +76,8 @@ impl Default for Timing {
             failure_initial_backoff: FAILURE_INITIAL_BACKOFF,
             failure_max_backoff: FAILURE_MAX_BACKOFF,
             context_poll_interval: CONTEXT_POLL_INTERVAL,
+            default_branch_ttl: DEFAULT_BRANCH_TTL,
+            git_event_settle: GIT_EVENT_SETTLE,
         }
     }
 }
@@ -59,6 +85,17 @@ impl Default for Timing {
 struct CacheEntry {
     state: AsyncMutex<CacheState>,
     demand: AtomicUsize,
+    /// When what it holds goes stale (its `next_refresh`, readable without
+    /// the async lock): an entry nobody watches is kept until then, so a
+    /// watch that goes and comes back (a row scrolled away and back, a
+    /// plugin's watch started again) is answered without asking GitHub.
+    stale_at: Mutex<Instant>,
+}
+
+impl CacheEntry {
+    fn is_stale(&self, now: Instant) -> bool {
+        now >= *self.stale_at.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 struct CacheState {
@@ -71,11 +108,16 @@ struct CacheState {
 type InspectionRun = Shared<BoxFuture<'static, Result<CheckoutSourceContext, ChangeRequestError>>>;
 
 /// The latest Git inspection of one watched path. Every subscription on the
-/// path shares it, so a project with many chats runs Git once per poll
-/// interval instead of once per chat. Any waiter can drive the shared run,
-/// so a subscription that stops being polled mid-inspection blocks no one.
+/// path shares it, so a project with many chats runs Git once per change
+/// instead of once per chat. Any waiter can drive the shared run, so a
+/// subscription that stops being polled mid-inspection blocks no one.
 struct Inspection {
     started: Instant,
+    /// What the checkout's Git files were as it started: while they stay so
+    /// it answers (for a poll interval, if they aren't watched).
+    inputs: Option<GitFingerprint>,
+    /// The watch of the subscription that started it: kept while that lasts.
+    watch: Weak<GitWatch>,
     run: InspectionRun,
 }
 
@@ -85,8 +127,140 @@ struct Inner {
     lookup: Arc<dyn CheckoutChangeRequestLookup>,
     entries: Mutex<HashMap<ChangeRequestCacheKey, Arc<CacheEntry>>>,
     inspections: Mutex<HashMap<PathBuf, Inspection>>,
+    /// Each watched git dir's events, shared by its subscriptions.
+    git_watches: Mutex<HashMap<PathBuf, Weak<GitWatch>>>,
     timing: Timing,
     shutdown: CancellationToken,
+}
+
+/// File-system events on one checkout's git directories, for as long as a
+/// subscription holds it: `changed` ticks on each. Watched: the git dir
+/// (HEAD; a worktree's own config), the common dir (config, packed-refs) and
+/// its `refs` (an upstream's remote-tracking branch, `<remote>/HEAD`).
+struct GitWatch {
+    git_dir: PathBuf,
+    changed: watch::Receiver<u64>,
+    watches: Vec<FsWatch>,
+}
+
+impl GitWatch {
+    /// Blocking (the hub canonicalizes): from the blocking pool.
+    fn start(git_dir: &Path) -> Self {
+        let (tx, changed) = watch::channel(0_u64);
+        let tx = Arc::new(tx);
+        let hub = FsWatchHub::global();
+        let common = common_dir(git_dir);
+        let mut dirs = vec![(git_dir.to_path_buf(), notify::RecursiveMode::NonRecursive)];
+        if common != git_dir {
+            dirs.push((common.clone(), notify::RecursiveMode::NonRecursive));
+        }
+        dirs.push((common.join("refs"), notify::RecursiveMode::Recursive));
+        let watches = dirs
+            .into_iter()
+            .map(|(dir, mode)| {
+                let tx = tx.clone();
+                hub.watch(&dir, mode, move |_event| {
+                    // Any event, and the rescan a watch sends as it goes
+                    // live: the fingerprint says whether it mattered.
+                    tx.send_modify(|n| *n = n.wrapping_add(1));
+                })
+            })
+            .collect();
+        Self {
+            git_dir: git_dir.to_path_buf(),
+            changed,
+            watches,
+        }
+    }
+
+    /// Whether every directory's watch is installed: events then say when
+    /// Git's state can have changed.
+    fn live(&self) -> bool {
+        self.watches.iter().all(FsWatch::is_live)
+    }
+}
+
+/// The git dir's common dir (a linked worktree's main `.git`): `commondir`
+/// names it, relative to the git dir or absolute.
+fn common_dir(git_dir: &Path) -> PathBuf {
+    match std::fs::read_to_string(git_dir.join("commondir")) {
+        Ok(common) => git_dir.join(common.trim()),
+        Err(_) => git_dir.to_path_buf(),
+    }
+}
+
+/// What a checkout inspection reads from Git, cheaply (a few `stat`s and
+/// HEAD): its answer can't change while this doesn't. HEAD's content (the
+/// branch), the configs (upstream, remotes, push default; system and global
+/// ones too), packed refs, and every remote-tracking ref (an upstream
+/// resolves once its branch is pushed; `<remote>/HEAD` names the default
+/// branch). A commit, `git status`, an index write: none of these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitFingerprint {
+    head: Option<Vec<u8>>,
+    stamps: Vec<(PathBuf, Option<(u64, i128, u64)>)>,
+}
+
+impl GitFingerprint {
+    /// Blocking: from the blocking pool.
+    fn read(git_dir: &Path) -> Self {
+        fn stamp(path: &Path) -> Option<(u64, i128, u64)> {
+            #[cfg(unix)]
+            use std::os::unix::fs::MetadataExt;
+            let meta = std::fs::metadata(path).ok()?;
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos() as i128);
+            #[cfg(unix)]
+            let inode = meta.ino();
+            #[cfg(not(unix))]
+            let inode = 0;
+            Some((inode, mtime, meta.len()))
+        }
+        let common = common_dir(git_dir);
+        let mut paths = vec![
+            common.join("config"),
+            git_dir.join("config.worktree"),
+            common.join("packed-refs"),
+            "/etc/gitconfig".into(),
+        ];
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            let xdg = std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".config"));
+            paths.push(home.join(".gitconfig"));
+            paths.push(xdg.join("git/config"));
+        }
+        // Remote-tracking refs, walked (a handful of folders; refs a fetch
+        // packed are in packed-refs).
+        let mut dirs = vec![common.join("refs/remotes")];
+        while let Some(dir) = dirs.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    dirs.push(path);
+                } else {
+                    paths.push(path);
+                }
+            }
+        }
+        paths.sort();
+        Self {
+            head: std::fs::read(git_dir.join("HEAD")).ok(),
+            stamps: paths
+                .into_iter()
+                .map(|path| {
+                    let stamp = stamp(&path);
+                    (path, stamp)
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Shared host-side cache. It owns no polling task: a stream drives refreshes only
@@ -122,6 +296,7 @@ impl CheckoutChangeRequests {
                 lookup,
                 entries: Mutex::new(HashMap::new()),
                 inspections: Mutex::new(HashMap::new()),
+                git_watches: Mutex::new(HashMap::new()),
                 timing,
                 shutdown: CancellationToken::new(),
             }),
@@ -174,20 +349,28 @@ impl CheckoutChangeRequests {
             requested_branch,
             lease: None,
             last_emitted: None,
+            git: None,
         };
         futures::stream::unfold(state, |mut state| async move {
+            if state.git.is_none() {
+                let git = state.service.git_watch(&state.identity.git_dir).await;
+                // Events from here on: the first inspection reads the files
+                // as they are now.
+                let mut changed = git.changed.clone();
+                changed.borrow_and_update();
+                state.git = Some((git, changed));
+            }
             loop {
                 if state.service.inner.shutdown.is_cancelled() {
                     return None;
                 }
-                let mut source = match state.service.inspect(&state.cwd).await {
+                let mut source = match state.service.inspect(&state).await {
                     Ok(source) => source,
                     Err(error) => {
                         tracing::debug!(%error, "change request checkout inspection unavailable");
-                        if !state
-                            .sleep(state.service.inner.timing.context_poll_interval)
-                            .await
-                        {
+                        // Until Git's files change (a branch checked out
+                        // again, a repository made).
+                        if !state.wait(None).await {
                             return None;
                         }
                         continue;
@@ -208,7 +391,12 @@ impl CheckoutChangeRequests {
                     state.lease = Some(state.service.acquire(key.clone()));
                 }
                 let (snapshot, next_refresh) = state.service.refresh(&key, &source).await;
-                if let Some(snapshot) = snapshot {
+                if let Some(mut snapshot) = snapshot {
+                    // (The answer may be another checkout's of the same
+                    // repository and branch: told as this one's.)
+                    snapshot.checkout_id = state.identity.id.clone();
+                    snapshot.cwd = source.checkout_root.to_string_lossy().into_owned();
+                    snapshot.branch = source.branch.local_branch.clone();
                     let semantic = SemanticStatus::from(&snapshot);
                     if state.last_emitted.as_ref() != Some(&semantic) {
                         state.last_emitted = Some(semantic);
@@ -216,9 +404,7 @@ impl CheckoutChangeRequests {
                     }
                 }
 
-                let until_refresh = next_refresh.saturating_duration_since(Instant::now());
-                let delay = until_refresh.min(state.service.inner.timing.context_poll_interval);
-                if !state.sleep(delay).await {
+                if !state.wait(next_refresh).await {
                     return None;
                 }
             }
@@ -226,10 +412,61 @@ impl CheckoutChangeRequests {
         .boxed()
     }
 
-    /// Inspect `cwd`, joining an inspection started less than a poll
-    /// interval ago. Concurrent callers for one path share one run instead of
-    /// each starting their own Git processes.
-    async fn inspect(&self, cwd: &Path) -> Result<CheckoutSourceContext, ChangeRequestError> {
+    /// The watch on `git_dir`, shared with every subscription on it.
+    async fn git_watch(&self, git_dir: &Path) -> Arc<GitWatch> {
+        let shared = |watches: &HashMap<PathBuf, Weak<GitWatch>>| {
+            watches.get(git_dir).and_then(Weak::upgrade)
+        };
+        if let Some(watch) = shared(
+            &self
+                .inner
+                .git_watches
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        ) {
+            return watch;
+        }
+        let dir = git_dir.to_owned();
+        let started = tokio::task::spawn_blocking(move || GitWatch::start(&dir))
+            .await
+            .unwrap_or_else(|_| GitWatch {
+                // (Never live: the subscription polls.)
+                git_dir: git_dir.to_owned(),
+                changed: watch::channel(0).1,
+                watches: Vec::new(),
+            });
+        let mut watches = self
+            .inner
+            .git_watches
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // (Another subscription may have started one meanwhile.)
+        if let Some(watch) = shared(&watches) {
+            return watch;
+        }
+        watches.retain(|_, watch| watch.strong_count() > 0);
+        let watch = Arc::new(started);
+        watches.insert(watch.git_dir.clone(), Arc::downgrade(&watch));
+        watch
+    }
+
+    /// Inspect the subscription's path, joining the inspection of it that
+    /// still answers: one taken with Git's files as they are now (watched,
+    /// any time ago; unwatched, less than a poll interval ago). Concurrent
+    /// callers for one path share one run instead of each starting their own
+    /// Git processes.
+    async fn inspect(
+        &self,
+        state: &SubscriptionState,
+    ) -> Result<CheckoutSourceContext, ChangeRequestError> {
+        let cwd = state.cwd.as_path();
+        let live = state.git.as_ref().is_some_and(|(git, _)| git.live());
+        // Read before Git runs: a change made while it runs shows up as a
+        // different fingerprint next time.
+        let git_dir = state.identity.git_dir.clone();
+        let inputs = tokio::task::spawn_blocking(move || GitFingerprint::read(&git_dir))
+            .await
+            .ok();
         let max_age = self.inner.timing.context_poll_interval;
         let run = {
             let mut inspections = self
@@ -237,10 +474,17 @@ impl CheckoutChangeRequests {
                 .inspections
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            // Forget paths no subscription has inspected for two intervals.
-            inspections.retain(|_, inspection| inspection.started.elapsed() < max_age * 2);
+            // Forget paths no subscription watches any more, once two
+            // intervals old.
+            inspections.retain(|_, inspection| {
+                inspection.watch.strong_count() > 0 || inspection.started.elapsed() < max_age * 2
+            });
             match inspections.get(cwd) {
-                Some(inspection) if inspection.started.elapsed() < max_age => {
+                Some(inspection)
+                    if inputs.is_some()
+                        && inspection.inputs == inputs
+                        && (live || inspection.started.elapsed() < max_age) =>
+                {
                     inspection.run.clone()
                 }
                 _ => {
@@ -253,6 +497,11 @@ impl CheckoutChangeRequests {
                         cwd.to_owned(),
                         Inspection {
                             started: Instant::now(),
+                            inputs,
+                            watch: state
+                                .git
+                                .as_ref()
+                                .map_or_else(Weak::new, |(git, _)| Arc::downgrade(git)),
                             run: run.clone(),
                         },
                     );
@@ -270,6 +519,11 @@ impl CheckoutChangeRequests {
                 .entries
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
+            // Entries nobody watches go once stale.
+            let now = Instant::now();
+            entries.retain(|_, entry| {
+                entry.demand.load(Ordering::Acquire) > 0 || !entry.is_stale(now)
+            });
             let entry = entries
                 .entry(key.clone())
                 .or_insert_with(|| {
@@ -281,6 +535,7 @@ impl CheckoutChangeRequests {
                             last_error: None,
                         }),
                         demand: AtomicUsize::new(0),
+                        stale_at: Mutex::new(Instant::now()),
                     })
                 })
                 .clone();
@@ -301,7 +556,7 @@ impl CheckoutChangeRequests {
         &self,
         key: &ChangeRequestCacheKey,
         source: &CheckoutSourceContext,
-    ) -> (Option<CheckoutChangeRequestStatus>, Instant) {
+    ) -> (Option<CheckoutChangeRequestStatus>, Option<Instant>) {
         let entry = {
             let entries = self
                 .inner
@@ -313,18 +568,26 @@ impl CheckoutChangeRequests {
         let mut state = entry.state.lock().await;
         let now = Instant::now();
         if now < state.next_refresh {
-            return (state.last_success.clone(), state.next_refresh);
+            let unsupported = state.last_error == Some(ChangeRequestError::UnsupportedRepository);
+            return (
+                state.last_success.clone(),
+                (!unsupported).then_some(state.next_refresh),
+            );
         }
 
         match self.inner.lookup.resolve_github_source(source).await {
             Ok(change_request) => {
-                let ttl = if change_request.is_some() {
+                let on_default_branch = source.default_branch.as_deref()
+                    == Some(source.branch.head_branch.as_str());
+                let ttl = if on_default_branch {
+                    self.inner.timing.default_branch_ttl
+                } else if change_request.is_some() {
                     self.inner.timing.with_change_request_ttl
                 } else {
                     self.inner.timing.without_change_request_ttl
                 };
                 let snapshot = CheckoutChangeRequestStatus {
-                    checkout_id: key.checkout_id.clone(),
+                    checkout_id: String::new(),
                     device_id: self.inner.device_id.clone(),
                     cwd: source.checkout_root.to_string_lossy().into_owned(),
                     branch: source.branch.local_branch.clone(),
@@ -333,23 +596,37 @@ impl CheckoutChangeRequests {
                 };
                 state.last_success = Some(snapshot.clone());
                 state.next_refresh = Instant::now() + ttl;
+                *entry.stale_at.lock().unwrap_or_else(PoisonError::into_inner) = state.next_refresh;
                 state.failures = 0;
                 state.last_error = None;
-                (Some(snapshot), state.next_refresh)
+                (Some(snapshot), Some(state.next_refresh))
             }
             Err(error) => {
                 state.failures = state.failures.saturating_add(1);
-                let delay = failure_backoff(
-                    self.inner.timing.failure_initial_backoff,
-                    self.inner.timing.failure_max_backoff,
-                    state.failures,
-                );
+                // A remote GitHub can't be asked about (none, or another
+                // host's) stays so until the checkout's Git files change,
+                // which inspects it again (and keys another entry): nothing
+                // to ask meanwhile.
+                let unsupported = error == ChangeRequestError::UnsupportedRepository;
+                let delay = if unsupported {
+                    self.inner.timing.failure_max_backoff
+                } else {
+                    failure_backoff(
+                        self.inner.timing.failure_initial_backoff,
+                        self.inner.timing.failure_max_backoff,
+                        state.failures,
+                    )
+                };
                 state.next_refresh = Instant::now() + delay;
+                *entry.stale_at.lock().unwrap_or_else(PoisonError::into_inner) = state.next_refresh;
                 if state.last_error != Some(error) {
                     tracing::warn!(%error, "change request refresh failed; retaining last success");
                     state.last_error = Some(error);
                 }
-                (state.last_success.clone(), state.next_refresh)
+                (
+                    state.last_success.clone(),
+                    (!unsupported).then_some(state.next_refresh),
+                )
             }
         }
     }
@@ -377,7 +654,12 @@ impl Drop for DemandLease {
         let is_cached_entry = entries
             .get(&self.key)
             .is_some_and(|entry| Arc::ptr_eq(entry, &self.entry));
-        if is_cached_entry && self.entry.demand.load(Ordering::Acquire) == 0 {
+        // A fresh answer is kept for the next watch of it (`acquire` lets it
+        // go once stale); a stale one goes now.
+        if is_cached_entry
+            && self.entry.demand.load(Ordering::Acquire) == 0
+            && self.entry.is_stale(Instant::now())
+        {
             entries.remove(&self.key);
         }
     }
@@ -390,13 +672,48 @@ struct SubscriptionState {
     requested_branch: Option<String>,
     lease: Option<DemandLease>,
     last_emitted: Option<SemanticStatus>,
+    /// The checkout's git dirs, watched while this lasts, and the events
+    /// this subscription has seen.
+    git: Option<(Arc<GitWatch>, watch::Receiver<u64>)>,
 }
 
 impl SubscriptionState {
-    async fn sleep(&self, duration: Duration) -> bool {
+    /// Until Git's files change (events on the git dirs, then a settle),
+    /// the provider is due (`refresh_at`), or, while the git dirs aren't
+    /// watched, a poll interval. False at shutdown.
+    async fn wait(&mut self, refresh_at: Option<Instant>) -> bool {
+        let timing = self.service.inner.timing;
+        let shutdown = self.service.inner.shutdown.clone();
+        let Some((git, changed)) = self.git.as_mut() else {
+            return false;
+        };
+        let poll_at = (!git.live()).then(|| Instant::now() + timing.context_poll_interval);
+        let wake_at = match (refresh_at, poll_at) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let deadline = async {
+            match wake_at {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
-            _ = self.service.inner.shutdown.cancelled() => false,
-            _ = tokio::time::sleep(duration) => true,
+            _ = shutdown.cancelled() => false,
+            () = deadline => true,
+            changed_ = changed.changed() => {
+                if changed_.is_err() {
+                    // (Can't be while the watch is held; were it gone, a
+                    // poll interval, as unwatched.)
+                    tokio::time::sleep(timing.context_poll_interval).await;
+                    return !shutdown.is_cancelled();
+                }
+                // Let the burst finish: one look after it.
+                while let Ok(Ok(())) =
+                    tokio::time::timeout(timing.git_event_settle, changed.changed()).await
+                {}
+                !shutdown.is_cancelled()
+            }
         }
     }
 }
@@ -438,7 +755,7 @@ fn cache_key(checkout_id: &str, source: &CheckoutSourceContext) -> ChangeRequest
         })
         .unwrap_or_default();
     ChangeRequestCacheKey {
-        checkout_id: checkout_id.to_owned(),
+        scope: if remote.is_empty() { checkout_id.to_owned() } else { String::new() },
         branch: source.branch.local_branch.clone(),
         upstream_ref: source.branch.upstream_ref.clone().unwrap_or_default(),
         remote,
@@ -571,6 +888,8 @@ mod tests {
             failure_initial_backoff: Duration::from_secs(1),
             failure_max_backoff: Duration::from_secs(2),
             context_poll_interval: Duration::from_millis(5),
+            default_branch_ttl: Duration::from_secs(60),
+            git_event_settle: Duration::from_millis(5),
         }
     }
 
@@ -747,6 +1066,8 @@ mod tests {
             failure_initial_backoff: Duration::from_millis(1),
             failure_max_backoff: Duration::from_millis(1),
             context_poll_interval: Duration::from_millis(1),
+            default_branch_ttl: Duration::from_millis(1),
+            git_event_settle: Duration::from_millis(1),
         };
         let service = service(lookup.clone(), timing);
         let key = cache_key("checkout-1", &source);
@@ -790,7 +1111,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropping_last_subscriber_evicts_cache_and_stops_refresh_work() {
+    async fn dropping_last_subscriber_stops_refresh_work_and_a_stale_entry_goes() {
         let lookup = FakeLookup::new(
             source("feature/status"),
             [Ok(Some(pull_request(90))), Ok(Some(pull_request(91)))],
@@ -801,16 +1122,60 @@ mod tests {
         drop(stream);
 
         tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(lookup.resolve_count(), 1, "nobody watching: nothing asked");
 
-        assert_eq!(lookup.resolve_count(), 1);
-        assert!(service.inner.entries.lock().unwrap().is_empty());
-
-        // A later observer gets a fresh entry rather than reviving the
-        // abandoned snapshot retained by an inactive checkout.
+        // Stale by now: a later observer asks again (and the stale entry
+        // nobody watched is gone).
         let mut renewed = service.watch_checkout(PathBuf::from("/checkout"), identity());
         let renewed_status = renewed.next().await.unwrap();
         assert_eq!(renewed_status.change_request.unwrap().number, 91);
         assert_eq!(lookup.resolve_count(), 2);
+        assert_eq!(service.inner.entries.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_watch_that_goes_and_comes_back_within_its_ttl_asks_nothing() {
+        let lookup = FakeLookup::new(source("feature/status"), [Ok(Some(pull_request(90)))]);
+        let service = service(lookup.clone(), Timing::default());
+        for _ in 0..20 {
+            let mut stream = service.watch_checkout(PathBuf::from("/checkout"), identity());
+            assert_eq!(stream.next().await.unwrap().change_request.unwrap().number, 90);
+        }
+        assert_eq!(lookup.resolve_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn checkouts_of_one_repository_and_branch_share_one_provider_query() {
+        let lookup = FakeLookup::new(source("feature/status"), [Ok(Some(pull_request(90)))]);
+        let service = service(lookup.clone(), Timing::default());
+        let other = CheckoutIdentity {
+            id: "checkout-2".into(),
+            root: PathBuf::from("/clone"),
+            git_dir: PathBuf::from("/clone/.git"),
+        };
+        let mut first = service.watch_checkout(PathBuf::from("/checkout"), identity());
+        let first = first.next().await.unwrap();
+        let mut second = service.watch_checkout(PathBuf::from("/clone"), other);
+        let second = second.next().await.unwrap();
+        assert_eq!(lookup.resolve_count(), 1);
+        assert_eq!(second.change_request, first.change_request);
+        // Each is told as its own checkout.
+        assert_eq!((first.checkout_id.as_str(), second.checkout_id.as_str()), ("checkout-1", "checkout-2"));
+    }
+
+    #[tokio::test]
+    async fn the_default_branch_is_asked_about_seldom() {
+        let lookup = FakeLookup::new(source("main"), [Ok(None), Ok(None)]);
+        let service = service(lookup.clone(), fast_timing());
+        let mut stream = service.watch_checkout(PathBuf::from("/checkout"), identity());
+        assert_eq!(stream.next().await.unwrap().change_request, None);
+        // Many of the 10 ms no-PR TTLs later, still the one question.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), stream.next())
+                .await
+                .is_err()
+        );
+        assert_eq!(lookup.resolve_count(), 1);
     }
 
     #[tokio::test]
@@ -823,5 +1188,132 @@ mod tests {
         service.shutdown();
 
         assert!(stream.next().await.is_none());
+    }
+
+    /// A checkout on disk: its git dir with HEAD on `branch` and a config.
+    fn checkout_on_disk(branch: &str) -> (tempfile::TempDir, CheckoutIdentity) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let git_dir = root.join(".git");
+        std::fs::create_dir_all(git_dir.join("refs/heads")).unwrap();
+        std::fs::write(git_dir.join("HEAD"), format!("ref: refs/heads/{branch}\n")).unwrap();
+        std::fs::write(git_dir.join("config"), "[core]\n").unwrap();
+        let identity = CheckoutIdentity {
+            id: "checkout-1".into(),
+            root,
+            git_dir,
+        };
+        (dir, identity)
+    }
+
+    /// Until the subscription's git dir watch is installed.
+    async fn until_watched(service: &CheckoutChangeRequests) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let live = service
+                    .inner
+                    .git_watches
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .filter_map(Weak::upgrade)
+                    .any(|git| git.live());
+                if live {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the git dir's watch goes live");
+    }
+
+    /// A checkout left alone runs no Git: it is inspected again when its
+    /// git files change (a branch checked out), not on a timer, however
+    /// short the poll interval, and not for files that don't decide the
+    /// answer (the index).
+    #[tokio::test]
+    async fn a_watched_checkout_runs_git_again_only_when_its_git_files_change() {
+        let (_dir, identity) = checkout_on_disk("feature/one");
+        let git_dir = identity.git_dir.clone();
+        let lookup = FakeLookup::new(
+            source("feature/one"),
+            [Ok(Some(pull_request(1))), Ok(Some(pull_request(2)))],
+        );
+        let timing = Timing {
+            with_change_request_ttl: Duration::from_secs(60),
+            without_change_request_ttl: Duration::from_secs(60),
+            git_event_settle: Duration::from_millis(20),
+            ..fast_timing()
+        };
+        let service = service(lookup.clone(), timing);
+        let mut stream = service.watch_checkout(identity.root.clone(), identity);
+        assert_eq!(stream.next().await.unwrap().branch, "feature/one");
+        until_watched(&service).await;
+        // (The watch's own rescan as it went live settles first.)
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let inspected = lookup.inspect_count();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), stream.next())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            lookup.inspect_count(),
+            inspected,
+            "no Git while nothing changed"
+        );
+
+        std::fs::write(git_dir.join("index"), "staged").unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), stream.next())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            lookup.inspect_count(),
+            inspected,
+            "the index decides nothing here"
+        );
+
+        lookup.set_source(source("feature/two"));
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/two\n").unwrap();
+        let switched = tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("inspected again as HEAD changed")
+            .unwrap();
+        assert_eq!(switched.branch, "feature/two");
+        assert_eq!(switched.change_request.unwrap().number, 2);
+    }
+
+    /// A remote GitHub can't be asked about is asked nothing more until the
+    /// checkout's Git files change: no retry timer.
+    #[tokio::test]
+    async fn an_unsupported_repository_is_not_asked_again_on_a_timer() {
+        let (_dir, identity) = checkout_on_disk("feature/one");
+        let lookup = FakeLookup::new(
+            source("feature/one"),
+            [Err(ChangeRequestError::UnsupportedRepository)],
+        );
+        let timing = Timing {
+            // (A retry would come at the first backoff.)
+            failure_initial_backoff: Duration::from_millis(10),
+            failure_max_backoff: Duration::from_secs(60),
+            ..fast_timing()
+        };
+        let service = service(lookup.clone(), timing);
+        let mut stream = service.watch_checkout(identity.root.clone(), identity);
+        // (Nothing to emit: driven by a task of its own.)
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(status) = stream.next().await {
+                let _ = tx.send(status);
+            }
+        });
+        until_watched(&service).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(rx.try_recv().is_err());
+        assert_eq!(lookup.resolve_count(), 1);
     }
 }

@@ -2,7 +2,8 @@
 -- at the title's end shows another device's plugins, and everything done
 -- there names that device (switching, reviewing, removing, installing,
 -- updating, checking sources); a device that's away says so in plain
--- words; and a file installs only on this computer. On the page in
+-- words; and a file on this computer installs on any of them (sent
+-- there, src/plugins/remote.rs `send_file`). On the page in
 -- ui/plugins_devices_fixture.luau.
 
 local function open(): any
@@ -150,7 +151,7 @@ test("a computer that's away says so, and is looked at again when it's back", fu
 	expect(app:tree()).to_contain("Checkout status")
 end)
 
-test("a file installs only on this computer; a link installs on any computer", function()
+test("a file on this computer or a link installs on any computer", function()
 	local app = open()
 	app:click('role:button "Install"')
 	app:frames(20)
@@ -162,8 +163,8 @@ test("a file installs only on this computer; a link installs on any computer", f
 	app:click('role:button "Install"')
 	app:frames(20)
 	expect(app:tree()).to_contain("Install a plugin on devbox")
-	expect(app:has('role:button "Choose File"')).to_be(false)
-	expect(app:tree()).to_contain("installs only on the computer it")
+	expect(app:has('role:button "Choose File"')).to_be(true)
+	expect(app:tree()).never.to_contain("installs only on the computer it")
 	app:type('role:textbox "Link"', "ada/clock")
 	app:click('role:dialog >> role:button "Install"')
 	app:frames(20)

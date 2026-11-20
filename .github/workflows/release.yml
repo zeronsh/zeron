@@ -1,13 +1,17 @@
 name: release
 
-# Build release artifacts and publish them:
-#   - Linux headless tarballs (x86_64 + aarch64) via scripts/package-linux.sh
-#   - macOS dmg (Apple silicon) via scripts/package-macos.sh
-#   - Windows per-user installer, portable zip, and updater exe (x86_64) via
-#     scripts/package-windows.ps1
+# Build release artifacts and publish them. The app is the zgx one
+# (apps/zgx), built by zgx-build.yml as betas are:
+#   - Linux tarballs (x86_64 + aarch64): the app, its engine, scripts
+#   - macOS dmg and the updater's app tarball (Apple silicon, macOS 13+)
+#   - Windows per-user installer, portable zip, and the standalone exe that
+#     the old app's updater installs (it completes itself from the zip)
 # then create a GitHub Release AND upload everything to the
 # `comet-native-releases` R2 bucket (served at zeron.sh/releases/* for
 # `curl -fsSL https://zeron.sh/install.sh | sh`), bumping latest.txt.
+#
+# Every shipped Zeron installs these (crates/update at v0.2.138 reads the same
+# names, checksums and `--version` answers).
 #
 # Trigger: push a tag `v<version>` matching the workspace version in
 # Cargo.toml (bump it in the same commit), or run manually via
@@ -17,138 +21,50 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: Which to build.
+        type: string
+        default: macos linux windows
 
 permissions:
   contents: write
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: version (the workspace's; a tag's must be it)
+        id: version
+        run: |
+          workspace="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "${GITHUB_REF_NAME#v}" != "$workspace" ]; then
+            echo "tag $GITHUB_REF_NAME isn't the workspace's v$workspace"; exit 1
+          fi
+          echo "version=$workspace" >>"$GITHUB_OUTPUT"
+
   cursor-compatibility:
     uses: ./.github/workflows/cursor-compatibility.yml
 
-  linux:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04 # x86_64
-          - runner: ubuntu-24.04-arm # aarch64
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: gpui system deps
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libx11-dev libxcb1-dev libx11-xcb-dev \
-            libfontconfig1-dev libfreetype-dev libasound2-dev \
-            libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
-      - name: rust toolchain (rust-toolchain.toml)
-        run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: package
-        run: scripts/package-linux.sh
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: linux-${{ runner.arch }}
-          path: target/package/*.tar.gz
-          if-no-files-found: error
-
-  # Every platform must build before publishing the release and updater manifest.
-  #
-  # Signing/notarization (both optional — absent secrets fall back to an
-  # ad-hoc-signed build):
-  #   MACOS_CERT_P12 / MACOS_CERT_PASSWORD — base64 "Developer ID Application"
-  #     certificate + private key (.p12) and its export password.
-  #   AC_API_KEY_P8 / AC_API_KEY_ID / AC_API_ISSUER_ID — App Store Connect API
-  #     key (raw .p8 contents), for notarytool. All three present → the package
-  #     script notarizes and staples the app + dmg (no Gatekeeper warning).
-  # They live in the `apple-release` environment, which only release tags and
-  # main may use: a run from any other branch gets no environment, so no
-  # credentials, and builds ad-hoc-signed.
-  macos:
-    runs-on: macos-latest # Apple silicon
-    environment: ${{ (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main') && 'apple-release' || '' }}
-    env:
-      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
-      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
-      AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
-      AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
-      AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: rust toolchain (rust-toolchain.toml)
-        run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: import Developer ID certificate
-        if: env.MACOS_CERT_P12 != ''
-        run: |
-          keychain="$RUNNER_TEMP/release.keychain-db"
-          pass="$(openssl rand -hex 16)"
-          security create-keychain -p "$pass" "$keychain"
-          security set-keychain-settings -lut 3600 "$keychain"
-          security unlock-keychain -p "$pass" "$keychain"
-          printf '%s' "$MACOS_CERT_P12" | base64 -d >"$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
-            -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
-          rm -f "$RUNNER_TEMP/cert.p12"
-          # Allow codesign to use the imported key without a UI prompt.
-          security set-key-partition-list -S apple-tool:,apple: \
-            -s -k "$pass" "$keychain" >/dev/null
-          security list-keychains -d user -s "$keychain" login.keychain-db
-          identity="$(security find-identity -v -p codesigning "$keychain" \
-            | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)"
-          [ -n "$identity" ] || { echo "p12 contains no Developer ID Application identity"; exit 1; }
-          echo "CODESIGN_IDENTITY=$identity" >>"$GITHUB_ENV"
-      - name: notary credentials
-        if: env.AC_API_KEY_P8 != ''
-        run: |
-          printf '%s' "$AC_API_KEY_P8" >"$RUNNER_TEMP/ac_api_key.p8"
-          {
-            echo "NOTARY_KEY_PATH=$RUNNER_TEMP/ac_api_key.p8"
-            echo "NOTARY_KEY_ID=$AC_API_KEY_ID"
-            echo "NOTARY_ISSUER_ID=$AC_API_ISSUER_ID"
-          } >>"$GITHUB_ENV"
-      - name: package dmg
-        run: scripts/package-macos.sh
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: macos-${{ runner.arch }}
-          path: |
-            target/package/*.dmg
-            target/package/*.tar.gz
-          if-no-files-found: error
-
-  windows:
-    runs-on: windows-2022
-    timeout-minutes: 90
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: rust toolchain (rust-toolchain.toml)
-        run: rustup show active-toolchain || rustup toolchain install
-      - name: Locate Windows SDK shader compiler
-        run: |
-          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/fxc.exe" |
-            Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $fxc) { throw 'Windows SDK fxc.exe is required for GPUI release shaders' }
-          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: package installer and portable app
-        run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: windows-${{ runner.arch }}
-          path: |
-            target/package/*.zip
-            target/package/*.exe
-          if-no-files-found: error
+  zgx:
+    needs: version
+    uses: ./.github/workflows/zgx-build.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.version.outputs.version }}
+      platforms: ${{ github.event_name == 'push' && 'macos linux windows' || inputs.platforms }}
+      # The edge's, as the betas': stable at its root, the beta channel in its
+      # `beta/`. (The old app's installs name the GitHub release marked
+      # latest; their first package moves them here.)
+      windows-feed: https://zeron.sh/releases
 
   publish:
+    # Every platform must build before publishing the release and updater manifest.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [cursor-compatibility, linux, macos, windows]
+    needs: [version, cursor-compatibility, zgx]
     runs-on: ubuntu-latest
     environment: cloudflare
     env:
@@ -174,7 +90,10 @@ jobs:
           echo "VERSION=$ver" >> "$GITHUB_ENV"
       - name: updater manifest
         run: |
-          manifest=$(jq -n --arg version "$VERSION" '{version: $version, files: {}}')
+          # The app needs macOS 13 (Ghostty's floor). A Mac below it is held on
+          # the release it has, and told why (crates/update `offer`, in every
+          # Zeron since 0.2.136).
+          manifest=$(jq -n --arg version "$VERSION" '{version: $version, minimumMacOS: "13.0", files: {}}')
           for f in dist/*; do
             sha=$(sha256sum "$f" | cut -d' ' -f1)
             manifest=$(jq --arg name "$(basename "$f")" --arg sha "$sha" \
@@ -210,5 +129,44 @@ jobs:
           # (crates/update) verifies downloads against it. Published before
           # latest.txt so no client ever sees a version without its checksums.
           put manifest.json manifest.json
+          # This release's own, beside its files: a Windows install finishing
+          # itself takes its own version's package by it, whatever the latest
+          # is by then (crates/update `windows::pinned_release`).
+          put "manifest-$VERSION.json" manifest.json
           printf '%s' "$VERSION" > latest.txt
           put latest.txt latest.txt
+          # The beta channel carries every release: a beta
+          # download (the website's) gets each stable release too, unless a
+          # newer beta is already there, and stays on beta (crates/update
+          # `follows_channels`). The same files under beta/, the manifest last.
+          # Read from the bucket itself, not a cache; on any doubt, leave it.
+          beta=""
+          if npx wrangler@4 r2 object get comet-native-releases/beta/manifest.json --file beta-current.json --remote; then
+            beta="$(jq -r '.version // empty' beta-current.json)"
+          fi
+          if [ -z "$beta" ]; then
+            # Loudly: claim-only betas reach stable through this copy alone.
+            # Re-run the job once the bucket answers.
+            echo "::error::couldn't read the beta channel's manifest, so this release isn't in the beta channel"
+            exit 1
+          elif python3 - "$VERSION" "$beta" <<'PY'
+          import re, sys
+          def key(v):
+              m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?", v.strip())
+              if not m:
+                  return None
+              major, minor, patch, beta = m.groups()
+              # A release outranks its betas.
+              return (int(major), int(minor), int(patch), beta is None, int(beta or 0))
+          new, old = key(sys.argv[1]), key(sys.argv[2])
+          sys.exit(0 if new and (old is None or new > old) else 1)
+          PY
+          then
+            for f in dist/*; do
+              put "beta/$(basename "$f")" "$f"
+            done
+            put "beta/manifest-$VERSION.json" manifest.json
+            put beta/manifest.json manifest.json
+          else
+            echo "the beta channel's $beta is newer than $VERSION: left as it is"
+          fi

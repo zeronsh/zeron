@@ -144,12 +144,54 @@ function M.code_family(): string
 	return if type(own) == "string" and own ~= "" then own else "mono"
 end
 
+-- "Accent colour throughout" (Settings → Appearance): the accent in more
+-- places, as the shipping app has it: links, the working dot and its icon,
+-- a find's matches, @file tokens in the composer, and the conversation's
+-- list markers, quote rail and inline code. Off, each is the neutral it
+-- was. On by default; kept across launches.
+M.accented = ui.persist("accent_throughout", true)
+
+-- What a window overrides while it's on (ds/tokens' `zeron.accented.*`,
+-- each following the accent worn); nothing while it's off. (Links and
+-- inline code: `accented_ink`.)
+function M.accented_theme(on: boolean?): { [string]: any }?
+	if on == nil then
+		on = M.accented:get()
+	end
+	if not on then
+		return nil
+	end
+	return {
+		["zeron.status.working"] = "$zeron.accented.ink",
+		["zeron.status.dot.working"] = "$zeron.accented.ink",
+		["zeron.editor.match"] = "$zeron.accented.find",
+		["zeron.editor.match_current"] = "$zeron.accented.find_current",
+		["zeron.composer.token.file"] = "$zeron.accented.ink",
+		["zeron.prose.marker"] = "$zeron.accented.ink",
+		["zeron.prose.quote_rail"] = "$zeron.accented.rail",
+		["zeron.prose.code_wash"] = "$zeron.accented.code_wash",
+	}
+end
+
+-- What has no ink of its own (a link, inline code: the text's) takes
+-- while it's on: the accent; off, `own` (nil: the text's), following the
+-- switch. (A token can't say "the text's own", so this isn't one of the
+-- window's overrides.)
+function M.accented_ink(own: any): () -> any
+	return function(): any
+		if M.accented:get() then
+			return "$zeron.accented.ink"
+		end
+		return if type(own) == "function" then own() else own
+	end
+end
+
 -- What the main window wears over its theme (ds/palettes, worn by
--- ds/tokens): the text size, the fonts chosen, and an accent chosen over
--- the theme's own.
+-- ds/tokens): the text size, the fonts chosen, an accent chosen over the
+-- theme's own, and the accent throughout.
 function M.window_theme(): { [string]: any }?
 	local out: { [string]: any }? = nil
-	for _, part in { M.text_theme(), M.font_theme(), M.theme() } do
+	for _, part in { M.text_theme(), M.font_theme(), M.theme(), M.accented_theme() } do
 		if part then
 			out = out or {}
 			for k, v in part do

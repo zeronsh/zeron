@@ -8,13 +8,13 @@ name: CI
 #           (scripts/ci/reuse.py; every job records its pass as its last
 #           step). Pull requests get the fast tier: Windows,
 #           macOS, voice and Android only when the change looks platform
-#           specific, and the Windows packaging, iOS simulator and macOS
-#           fixtures only for their own files; the `ci:full` label (then
-#           re-run) or the CI_PR_TIER=full repository variable runs everything.
+#           specific, and the Windows packaging and iOS simulator only for
+#           their own files; the `ci:full` label (then re-run) or the
+#           CI_PR_TIER=full repository variable runs everything.
 #           Main, the merge queue and manual runs get the full tier; the
-#           nightly schedule runs everything, slow tests included. Voice and
-#           the Linux browser fixture run only nightly, manually or with
-#           `ci:full`. Fork pull requests reuse only main's passes.
+#           nightly schedule runs everything, slow tests included. Voice runs
+#           only nightly, manually or with `ci:full`. Fork pull requests reuse
+#           only main's passes.
 #   admit   waits until every runner the run needs is free, so that once a
 #           run starts, none of its jobs queues behind another run's
 #           (scripts/ci/admit.py). Its name carries the reservation; other runs
@@ -44,7 +44,7 @@ on:
     branches: [main]
   merge_group:
   workflow_dispatch:
-  # Nightly: every suite and job in full (slow tests and fixtures included), nothing reused.
+  # Nightly: every suite and job in full (slow tests included), nothing reused.
   schedule:
     - cron: '23 6 * * *'
 
@@ -126,18 +126,7 @@ jobs:
     uses: ./.github/workflows/ui-tests.yml
     with:
       core: true
-      ui: false
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).core || '' }}
-
-  linux-ui:
-    needs: [plan, admit]
-    if: fromJSON(needs.plan.outputs.suites).ui
-    uses: ./.github/workflows/ui-tests.yml
-    with:
-      core: false
-      ui: true
-      browser: ${{ contains(fromJSON(needs.plan.outputs.flags).ui || fromJSON('[]'), 'browser') }}
-      pass-key: ${{ fromJSON(needs.plan.outputs.keys).ui || '' }}
 
   cursor:
     needs: [plan, admit]
@@ -183,20 +172,8 @@ jobs:
     uses: ./.github/workflows/macos.yml
     with:
       native: true
-      frame-source: false
       ios: false
-      fixtures: ${{ contains(fromJSON(needs.plan.outputs.flags).macos || fromJSON('[]'), 'fixtures') }}
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).macos || '' }}
-
-  frame-source:
-    needs: [plan, admit]
-    if: fromJSON(needs.plan.outputs.suites).frame_source
-    uses: ./.github/workflows/macos.yml
-    with:
-      native: false
-      frame-source: true
-      ios: false
-      pass-key: ${{ fromJSON(needs.plan.outputs.keys).frame_source || '' }}
 
   ios:
     needs: [plan, admit]
@@ -204,7 +181,6 @@ jobs:
     uses: ./.github/workflows/macos.yml
     with:
       native: false
-      frame-source: false
       ios: true
       skip: ${{ toJSON(fromJSON(needs.plan.outputs.skip).ios || fromJSON('[]')) }}
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).ios || '' }}
@@ -224,9 +200,16 @@ jobs:
     with:
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).android || '' }}
 
+  zgx:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.suites).zgx
+    uses: ./.github/workflows/zgx-tests.yml
+    with:
+      pass-key: ${{ fromJSON(needs.plan.outputs.keys).zgx || '' }}
+
   result:
     name: CI result
-    needs: [plan, admit, linux-core, linux-ui, cursor, edge, installer, voice, windows, macos, frame-source, ios, android]
+    needs: [plan, admit, linux-core, cursor, edge, installer, voice, windows, macos, ios, android, zgx]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

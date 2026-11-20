@@ -605,7 +605,12 @@ mod tests {
         assert_eq!(fit(&d[4], &json!("shift+k")), None, "a shortcut holds Control, Option or Command");
         assert_eq!(fit(&d[4], &json!("")), Some(json!("")), "or is none");
         assert_eq!(fit(&d[5], &json!("relative/path")), None);
-        assert_eq!(fit(&d[5], &json!("/Users/me/Pictures")), Some(json!("/Users/me/Pictures")));
+        // A folder is absolute as this platform reads it.
+        let pictures = if cfg!(windows) { r"C:\Users\me\Pictures" } else { "/Users/me/Pictures" };
+        assert_eq!(fit(&d[5], &json!(pictures)), Some(json!(pictures)));
+        if cfg!(windows) {
+            assert_eq!(fit(&d[5], &json!("/Users/me/Pictures")), None, "rooted, but on no drive");
+        }
         assert_eq!(fit(&d[0], &json!("yes")), None);
     }
 

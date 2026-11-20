@@ -29,9 +29,10 @@ impl SessionsEngine {
         }
         let inner = Arc::downgrade(&self.inner);
         let task = tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            tick.tick().await;
+            // Only checks: a refresh is stored once a heartbeat old, so this
+            // bounds terminal leases to a heartbeat plus one tick apart.
+            // On the beat grid, with the sockets' pings (`zeron_sync::wake`).
+            let mut tick = zeron_sync::wake::beat_interval(super::HEARTBEAT_CHECK);
             let mut previous = Vec::<Session>::new();
             loop {
                 let Some(inner) = inner.upgrade() else { break };
@@ -49,7 +50,8 @@ impl SessionsEngine {
                 );
                 // Unrelated native transitions must not turn terminal leases
                 // into per-event registry writes. Refresh them at most every
-                // ten seconds unless an actual program report changed.
+                // heartbeat (each refresh is a stored write) unless an actual
+                // program report changed.
                 for row in &mut current {
                     if let Some(old) = previous_by_id.get(row.chat_id.as_str())
                         && old.terminal_activity == row.terminal_activity
@@ -57,7 +59,8 @@ impl SessionsEngine {
                             .terminal_activity
                             .as_ref()
                             .is_some_and(|a| a.report.state.active())
-                        && (now - old.updated_at).num_milliseconds() < 10_000
+                        && (now - old.updated_at).num_milliseconds()
+                            < zeron_proto::view::SESSION_HEARTBEAT_MS
                     {
                         let native_at = native
                             .borrow()
@@ -107,6 +110,9 @@ impl SessionsEngine {
                         true
                     }
                 });
+                // Only an active terminal report's lease moves with the
+                // clock (`project`); everything else changes by the watches.
+                let leasing = leases_running(&current);
                 previous = current
                     .into_iter()
                     .filter(|row| !unpublished.contains(&row.chat_id))
@@ -116,7 +122,7 @@ impl SessionsEngine {
                     changed = native.changed() => if changed.is_err() { break },
                     changed = terminals.changed() => if changed.is_err() { break },
                     changed = chats.changed() => if changed.is_err() { break },
-                    _ = tick.tick() => {},
+                    _ = tick.tick(), if leasing => {},
                 }
             }
         });
@@ -154,6 +160,18 @@ impl SessionsEngine {
         }
         tx.send_replace(final_rows);
     }
+}
+
+/// Whether a row holds a lease the clock refreshes: a terminal program
+/// reporting itself active ([`project`] stamps it now, and once a heartbeat
+/// old it is stored again). Without one the projection is a function of the
+/// watches alone, and the loop sleeps until they change.
+fn leases_running(rows: &[Session]) -> bool {
+    rows.iter().any(|row| {
+        row.terminal_activity
+            .as_ref()
+            .is_some_and(|activity| activity.report.state.active())
+    })
 }
 
 fn project(

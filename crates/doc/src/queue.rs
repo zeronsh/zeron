@@ -17,11 +17,12 @@
 
 use loro::ToJson;
 use serde::{Deserialize, Serialize};
+use zeron_proto::ChatConfig;
 
 use crate::schema::{DocError, SessionDoc};
 
 /// One unsent message waiting its turn.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueuedMessage {
     /// Stable through promotion: the host uses this as the transcript user
@@ -49,6 +50,11 @@ pub struct QueuedMessage {
     /// `ReviewRequired`; they never silently become sendable again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_gate: Option<QueueDeliveryGate>,
+    /// Chat configuration selected when this row was queued (agent, model,
+    /// reasoning effort, model options). When set, the host dispatches this
+    /// row with these run-target settings and updates the chat's saved config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<ChatConfig>,
 }
 
 /// Why a queued row is not currently eligible for automatic or explicit
@@ -96,6 +102,7 @@ impl QueuedMessage {
             issued_at: 0,
             edited_at: None,
             delivery_gate: None,
+            config: None,
         }
     }
 }
@@ -123,11 +130,23 @@ impl SessionDoc {
         if item.text.trim().is_empty() {
             return Err(DocError::Schema("queued message text required".into()));
         }
+        let _row = self.queue_row_guard();
         let queue = self.doc().get_movable_list("queue");
         let map = queue.push_container(loro::LoroMap::new())?;
         write_queued_map(&map, item)?;
-        self.doc().commit();
+        self.commit();
         Ok(())
+    }
+
+    /// A row goes in one write at a time, and another thread can see it between
+    /// them. Taken then, it left with its id and none of the rest (no
+    /// `holdForTurnEnd`, no attachments), and the next write failed on a deleted
+    /// container: the send failed, or the row vanished. So taking a row waits for
+    /// whoever is still writing one.
+    fn queue_row_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.queue_rows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Put a row back at `index` (clamped). The host's undo for a send that
@@ -142,9 +161,10 @@ impl SessionDoc {
             return Err(DocError::Schema("queued message text required".into()));
         }
         let queue = self.doc().get_movable_list("queue");
+        let _row = self.queue_row_guard();
         let map = queue.insert_container(index.min(queue.len()), loro::LoroMap::new())?;
         write_queued_map(&map, item)?;
-        self.doc().commit();
+        self.commit();
         Ok(())
     }
 
@@ -172,7 +192,7 @@ impl SessionDoc {
         }
         map.insert("text", text)?;
         map.insert("editedAt", now_ms)?;
-        self.doc().commit();
+        self.commit();
         Ok(true)
     }
 
@@ -200,7 +220,7 @@ impl SessionDoc {
                 map.delete("deliveryGate")?;
             }
         }
-        self.doc().commit();
+        self.commit();
         Ok(true)
     }
 
@@ -259,7 +279,7 @@ impl SessionDoc {
             map.insert("editedAt", now_ms)?;
         }
         map.delete("deliveryGate")?;
-        self.doc().commit();
+        self.commit();
         Ok(true)
     }
 
@@ -275,7 +295,7 @@ impl SessionDoc {
             return Ok(false);
         }
         queue.mov(from, to)?;
-        self.doc().commit();
+        self.commit();
         Ok(true)
     }
 
@@ -286,7 +306,7 @@ impl SessionDoc {
             return Ok(false);
         };
         queue.delete(index, 1)?;
-        self.doc().commit();
+        self.commit();
         Ok(true)
     }
 
@@ -294,6 +314,7 @@ impl SessionDoc {
     /// `None` when it is already gone, which is the race we want: two devices
     /// popping the same row means exactly one of them gets it.
     pub fn take_queued(&self, id: &str) -> Result<Option<QueuedMessage>, DocError> {
+        let _row = self.queue_row_guard();
         let queue = self.doc().get_movable_list("queue");
         let Some(index) = index_of(&queue, id) else {
             return Ok(None);
@@ -309,7 +330,7 @@ impl SessionDoc {
             return Ok(None);
         }
         queue.delete(index, 1)?;
-        self.doc().commit();
+        self.commit();
         Ok(item)
     }
 
@@ -359,6 +380,12 @@ fn write_queued_map(map: &loro::LoroMap, item: &QueuedMessage) -> Result<(), Doc
             crate::schema::loro_value_from_json(&serde_json::to_value(gate)?),
         )?;
     }
+    if let Some(config) = &item.config {
+        map.insert(
+            "config",
+            crate::schema::loro_value_from_json(&serde_json::to_value(config)?),
+        )?;
+    }
     Ok(())
 }
 
@@ -402,6 +429,10 @@ fn queued_from_json(v: serde_json::Value) -> Option<QueuedMessage> {
                 })
             }),
         },
+        config: v
+            .get("config")
+            .filter(|c| !c.is_null())
+            .and_then(|c| serde_json::from_value(c.clone()).ok()),
     })
 }
 
@@ -411,6 +442,37 @@ mod tests {
 
     fn doc() -> SessionDoc {
         SessionDoc::init("chat-1").unwrap()
+    }
+
+    /// Seen as a flake and as a real failed send: a drain taking a row another
+    /// thread was still filling in.
+    #[test]
+    fn a_row_is_whole_the_moment_anything_can_take_it() {
+        const ROWS: usize = 400;
+        let doc = doc();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        std::thread::scope(|scope| {
+            let taker = scope.spawn(|| {
+                let mut taken = 0;
+                while taken < ROWS {
+                    assert!(std::time::Instant::now() < deadline, "rows went missing: {taken} of {ROWS}");
+                    for row in doc.read_queue().unwrap() {
+                        if let Some(got) = doc.take_queued(&row.id).unwrap() {
+                            assert!(got.hold_for_turn_end, "taken half written: {got:?}");
+                            assert_eq!(got.attachments, ["a.png"], "taken half written");
+                            taken += 1;
+                        }
+                    }
+                }
+            });
+            for n in 0..ROWS {
+                let mut row = item(&format!("row-{n}"), "text");
+                row.hold_for_turn_end = true;
+                row.attachments = vec!["a.png".into()];
+                doc.push_queued(&row).unwrap();
+            }
+            taker.join().unwrap();
+        });
     }
 
     fn item(id: &str, text: &str) -> QueuedMessage {
@@ -423,6 +485,7 @@ mod tests {
             issued_at: 1_000,
             edited_at: None,
             delivery_gate: None,
+            config: None,
         }
     }
 
@@ -677,5 +740,37 @@ mod tests {
             "every row survives exactly once"
         );
         assert!(left.iter().any(|i| i.text == "b-edited"));
+    }
+
+    #[test]
+    fn queued_config_round_trips_through_moves_and_edits() {
+        let d = doc();
+        let cfg = ChatConfig {
+            harness: zeron_proto::HarnessId::Antigravity,
+            model: Some("gemini-4-neon".into()),
+            reasoning: Some(zeron_proto::ReasoningLevel::High),
+            model_options: serde_json::Map::new(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            access: zeron_proto::AccessMode::FullAccess,
+            plan: false,
+        };
+        let mut switched = item("q-switch", "try neon");
+        switched.config = Some(cfg.clone());
+        d.push_queued(&item("q-plain", "plain")).unwrap();
+        d.push_queued(&switched).unwrap();
+
+        d.move_queued("q-switch", 0).unwrap();
+        d.set_queued_text("q-switch", "try neon edited", 2_000).unwrap();
+
+        let rows = d.read_queue().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, "q-switch");
+        assert_eq!(rows[0].text, "try neon edited");
+        assert_eq!(rows[0].config.as_ref(), Some(&cfg));
+        assert_eq!(rows[1].id, "q-plain");
+        assert_eq!(rows[1].config, None);
+
+        let taken = d.take_queued("q-switch").unwrap().unwrap();
+        assert_eq!(taken.config.as_ref(), Some(&cfg));
     }
 }

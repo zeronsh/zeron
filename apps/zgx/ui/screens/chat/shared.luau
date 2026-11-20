@@ -13,10 +13,13 @@ local Quote = require("@ds/quote")
 local Annotation = require("@ds/annotation")
 local sessions = require("@account/sessions")
 local agents = require("@account/agents")
+local cloud = require("@account/cloud")
 local locale = require("@ds/locale")
 local toast = require("@ds/toast")
 local ChatLinks = require("@app/screens/chat/chat_links")
+local route = require("@app/screens/shell/route")
 
+local Draft = require("@ds/draft_text")
 local M = {}
 
 -- The draft, what it carries, the options picked in a question being
@@ -41,15 +44,107 @@ M.shown = ui.shared("chat.transcript.session", nil :: string?)
 -- Where in it the reader was (ds/transcript's `keep`), for a page made
 -- again; nil at the end.
 M.anchor = ui.shared("chat.transcript.anchor", nil :: any)
--- The transcript's "Scroll to end" pill: its width while it shows (the
--- composer's folded trays' pill moves aside for it).
-M.jump_width = ui.shared("chat.transcript.jump_width", nil :: number?)
--- The composer's folded trays' pill: its width while it shows (the two
--- pills, both showing, centre together).
-M.pill_width = ui.shared("chat.composer.pill_width", nil :: number?)
+-- The two pills over a composer, a centred pair: its transcript's "Jump to
+-- latest" (`"jump"`) and the composer's folded trays' pill (`"waiting"`),
+-- each's width while it shows, nil while it doesn't. Every pane has its
+-- own pair, by its key: the chat page's transcript `"page"`, a lane's (a
+-- split's pane, a panel tab) `lane.<slot>`, its composer the same; the
+-- window's composer `"window"`. Each says only its own width; what stands
+-- beside it reads the other's: the window's composer the transcript at its
+-- foot (`at_foot`), a split's focused pane the window's composer, any
+-- other pane its own composer. (One width for the whole window had every
+-- pane's pills reading the one the chat page last said.)
+local pill_widths: { [string]: State<number?> } = {}
+function M.pill_width_of(kind: "jump" | "waiting", key: string): State<number?>
+	local k = `{kind}|{key}`
+	local s = pill_widths[k]
+	if not s then
+		s = ui.shared(`chat.pills.{k}`, nil :: number?)
+		pill_widths[k] = s
+	end
+	return s :: State<number?>
+end
+-- The pill whose width it says, as one said by one pill alone: nil from a
+-- pill made again after another took its key (a chat page made anew, its
+-- old transcript going after) clears only its own.
+local pill_owner: { [string]: any } = {}
+function M.pill_teller(kind: "jump" | "waiting", key: string): (w: number?) -> ()
+	local me = {}
+	local s = M.pill_width_of(kind, key)
+	local k = `{kind}|{key}`
+	return function(w: number?)
+		if w == nil and pill_owner[k] ~= me then
+			return
+		end
+		pill_owner[k] = if w == nil then nil else me
+		if s:peek() ~= w then
+			s:set(w)
+		end
+	end
+end
+-- The transcript at the window's composer's foot (its pair's key): the
+-- chat page's, or in a split the focused pane's (screens/shell/page).
+M.at_foot = ui.shared("chat.pills.at_foot", "page")
+-- (The chat page's pair, by its old names.)
+M.jump_width = M.pill_width_of("jump", "page")
+M.pill_width = M.pill_width_of("waiting", "window")
 -- Each chat's place as it was left (its `anchor`; none, its end), by
 -- session id: switched back to, a chat opens where it was read.
 M.places = ui.shared("chat.transcript.places", {} :: { [string]: any })
+-- The same across launches: each chat's place as last read, the chat shown
+-- with its place as it is read, each with when (os.time), the most recent
+-- `KEPT_PLACES` of them. A launch starts from them, so the chat it opens,
+-- and any other gone back to, opens where it was read.
+local KEPT_PLACES = 200
+local saved_places = ui.persist("chat_places", {} :: { [string]: any })
+do
+	local saved = saved_places:peek()
+	if next(M.places:peek()) == nil and type(saved) == "table" and next(saved) ~= nil then
+		local all: { [string]: any } = {}
+		for id, kept in saved do
+			if type(kept) == "table" and type(kept.place) == "table" then
+				all[id] = kept.place
+			end
+		end
+		M.places:set(all)
+	end
+end
+ui.effect(function()
+	local places = M.places:get()
+	local shown = M.shown:get()
+	local reading = M.anchor:get()
+	local before = saved_places:peek()
+	local now = os.time()
+	local all: { [string]: any } = {}
+	local count = 0
+	for id, place in places do
+		if id ~= shown then
+			local was = if type(before) == "table" then before[id] else nil
+			-- (When it was read: kept while its place is as it was.)
+			local at = if type(was) == "table" and was.at and was.place and was.place.id == place.id and was.place.dy == place.dy then was.at else now
+			all[id] = { place = place, at = at }
+			count += 1
+		end
+	end
+	if shown and reading ~= nil then
+		all[shown] = { place = reading, at = now }
+		count += 1
+	end
+	-- The most recent kept.
+	if count > KEPT_PLACES then
+		local order: { { id: string, at: number } } = {}
+		for id, kept in all do
+			table.insert(order, { id = id, at = tonumber(kept.at) or 0 })
+		end
+		table.sort(order, function(a: { id: string, at: number }, b: { id: string, at: number }): boolean
+			return a.at > b.at
+		end)
+		for i = KEPT_PLACES + 1, #order do
+			all[order[i].id] = nil
+		end
+	end
+	saved_places:set(all)
+end)
 -- Every other chat's draft, by key (a session's id; "" a new chat's), and
 -- the key of the one shown.
 local kept = ui.shared("chat.composer.drafts", {} :: { [string]: any })
@@ -66,6 +161,87 @@ local function chip_id(kind: string): string
 	made:set(n)
 	return `{kind}{n}`
 end
+
+-- The new-chat page's draft (its words, what it carries, the passages
+-- quoted into it), kept across launches as its settings are
+-- (screens/chat/composer's `chat_new_defaults`); a chat's isn't.
+local saved_new = ui.persist("chat_new_draft", nil :: any)
+do
+	-- A launch (nothing out yet, nothing put away for a new chat): the new
+	-- page's draft as it was left, out as the new chat's (put away under
+	-- "" if a chat shows first, as any move does).
+	local all = kept:peek()
+	local was = saved_new:peek()
+	if type(was) == "table" and all[""] == nil and here:peek() == "" and M.text:peek() == "" and #M.cargo:peek() == 0 then
+		ui.batch(function()
+			M.text:set(if type(was.text) == "string" then was.text else "")
+			M.cargo:set(if type(was.cargo) == "table" then was.cargo else {})
+			M.quotes:set(if type(was.quotes) == "table" then was.quotes else {})
+			-- (Its chips' ids taken: one made from here never repeats one.)
+			local top = made:peek()
+			for _, c in M.cargo:peek() do
+				local n = tonumber(string.match(tostring(c.id or ""), "(%d+)$"))
+				if n and n > top then
+					top = n
+				end
+			end
+			if top ~= made:peek() then
+				made:set(top)
+			end
+		end)
+	end
+end
+-- Saved as it changes, at most every SAVE_EVERY ms: each save reads the
+-- whole draft (into the saved state, then its file), and a long one read
+-- at every keystroke cost a copy of it each.
+local SAVE_EVERY = 250
+local saved_at = -math.huge
+local function save_new()
+	saved_at = ui.now()
+	local now: any = nil
+	if here:peek() == "" then
+		local text, cargo, quotes = M.text:peek(), M.cargo:peek(), M.quotes:peek()
+		if text ~= "" or #cargo > 0 then
+			now = { text = text, cargo = cargo, quotes = quotes }
+		end
+	else
+		local put = kept:peek()[""]
+		if put then
+			now = { text = put.text, cargo = put.cargo, quotes = put.quotes }
+		end
+	end
+	if now ~= nil or saved_new:peek() ~= nil then
+		saved_new:set(now)
+	end
+end
+ui.effect(function()
+	-- What it's saved from, followed (the draft's edits, not the draft).
+	if here:get() == "" then
+		M.text:len()
+		M.cargo:get()
+		M.quotes:get()
+	else
+		kept:len()
+	end
+	-- (A run's timer goes as the next run begins: steady typing saves every
+	-- SAVE_EVERY, and the last keystroke's once it has waited that long.)
+	local wait = SAVE_EVERY - (ui.now() - saved_at)
+	if wait <= 0 then
+		save_new()
+	else
+		ui.after(wait, save_new)
+	end
+end)
+-- The window closing (the app quitting, or the window closed): Zeron's
+-- window sets `app.closing` (src/main.rs) before it writes what the scripts
+-- saved, and a save still waiting its turn goes now. (A timer never fires
+-- once the window has closed, and the last keystrokes were lost with it.)
+local closing = ui.shared("app.closing", false)
+ui.effect(function()
+	if closing:get() == true then
+		save_new()
+	end
+end)
 
 -- Whether a file's name is a picture the window can draw. (zgx decodes
 -- no GIF or HEIC yet: those are file chips, so a thumbnail never fails.)
@@ -87,6 +263,15 @@ end
 function M.showing(): string
 	return here:peek()
 end
+
+-- The chat the draft in `text` is (a new chat's ""), followed: it changes
+-- with `text` as a move puts one draft away and takes out the next.
+function M.owner(): string
+	return here:get()
+end
+
+-- `showing`, read as it changes.
+M.showing_now = M.owner
 
 function M.show(key: string)
 	local was = here:peek()
@@ -121,7 +306,59 @@ function M.take(): (string, { any })
 		M.cargo:set({})
 		M.quotes:set({})
 	end)
+	-- A new chat's draft, sent: saved empty at once, not on the throttle's
+	-- next turn, which a quit in between would never reach (the message
+	-- coming back as the draft at the next launch).
+	if here:peek() == "" then
+		save_new()
+	end
 	return text, cargo
+end
+
+-- The draft shown, lifted out whole to be put back later (a plugin's
+-- `zeron.take_draft`): its words as typed, its chips and the passages
+-- quoted in it, the composer cleared. Nil when there's nothing to lift.
+function M.lift(): { text: string, cargo: { any }, quotes: { [string]: string } }?
+	local text, cargo, quotes = M.text:peek(), M.cargo:peek(), M.quotes:peek()
+	if text == "" and #cargo == 0 then
+		return nil
+	end
+	ui.batch(function()
+		M.text:set("")
+		M.cargo:set({})
+		M.quotes:set({})
+	end)
+	return { text = text, cargo = cargo, quotes = quotes }
+end
+
+-- A lifted draft put back on the draft shown (`zeron.put_draft`). Onto an
+-- empty composer it's as it was; onto words already there, its words follow
+-- them after a blank line and its chips follow theirs, its files numbered
+-- after those there.
+function M.lay(d: { text: string, cargo: { any }, quotes: { [string]: string } })
+	local here_text, here_cargo = M.text:peek(), M.cargo:peek()
+	ui.batch(function()
+		if here_text == "" and #here_cargo == 0 then
+			M.text:set(d.text)
+			M.cargo:set(d.cargo)
+			M.quotes:set(d.quotes)
+			return
+		end
+		local quotes = table.clone(M.quotes:peek())
+		for line, passage in d.quotes do
+			quotes[line] = passage
+		end
+		M.quotes:set(quotes)
+		if d.text ~= "" then
+			M.text:set(if here_text == "" then d.text else `{here_text}\n\n{d.text}`)
+		end
+		for _, item in d.cargo do
+			local moved = table.clone(item)
+			moved.mention = nil
+			M.push_cargo(nil, moved)
+		end
+	end)
+	M.focus:add(1)
 end
 
 -- A passage of the transcript, quoted into the draft (its line marks it)
@@ -228,6 +465,17 @@ function M.set_cargo_of(key: string, list: { any })
 end
 
 function M.push_cargo(key: string?, item: any)
+	-- A file or a picture: its number in the draft, the next after any
+	-- there (an `@` mention of it names it by that: ds/attachment_mentions).
+	if item.path and item.mention == nil then
+		local top = 0
+		for _, other in M.peek_cargo(key) do
+			if type(other.mention) == "number" and other.mention > top then
+				top = other.mention
+			end
+		end
+		item.mention = top + 1
+	end
 	if key == nil or here:peek() == key then
 		M.cargo:push(item)
 		return
@@ -326,11 +574,26 @@ end
 
 -- The composer's model picker, opened from elsewhere (the shell's ⌘/):
 -- bumped, it opens. `open_model_picker` says whether there was a composer
--- to open it in.
+-- to open it in. `composer_shown` counts the composers mounted now
+-- (screens/chat/composer: a swapped one mounts before the old one goes):
+-- `composer_mounted`/`composer_gone` change it. A template's composer
+-- written before it counted sets true or false, read as one or none (its
+-- `false` on cleanup clears the count whole: a limit of mixing the two,
+-- only while such a composer and a counted one swap).
 M.open_model = ui.shared("chat.composer.open_model", 0)
-M.composer_shown = ui.shared("chat.composer.shown", false)
+M.composer_shown = ui.shared("chat.composer.shown", 0)
+local function composers(): number
+	local n: any = M.composer_shown:peek()
+	return if type(n) == "number" then n elseif n then 1 else 0
+end
+function M.composer_mounted()
+	M.composer_shown:set(composers() + 1)
+end
+function M.composer_gone()
+	M.composer_shown:set(math.max(0, composers() - 1))
+end
 function M.open_model_picker(): boolean
-	if not M.composer_shown:peek() then
+	if composers() <= 0 then
 		return false
 	end
 	M.open_model:set(M.open_model:peek() + 1)
@@ -465,6 +728,15 @@ function M.mention_chat(id: string, key: string?)
 			title, mark = c.title, c.agent
 		end
 	end
+	if title == nil then
+		for _, list in sessions.now:peek().children or {} do
+			for _, c in list do
+				if c.id == id then
+					title, mark = c.title, c.agent
+				end
+			end
+		end
+	end
 	M.push_cargo(key, { id = chip_id("chat"), kind = "chat", name = ChatLinks.title(title), chat = id, mark = mark })
 end
 
@@ -513,7 +785,7 @@ function M.chat_link(title: string, id: string): string
 end
 
 -- A drag from inside the window that drops here: the files pane's files
--- (their paths). Other drags (a session, a tab, a section) aren't ours.
+-- (their paths, also carried by file tabs). Other drags aren't file context.
 local function workspace_paths(payload: any): { string }?
 	if type(payload) == "table" and type(payload.paths) == "table" and #payload.paths > 0 then
 		return payload.paths
@@ -718,6 +990,49 @@ function M.draft_of(key: string): { text: string, cargo: { any }, chosen: { [str
 	}
 end
 
+-- Follows chat `key`'s draft as `draft_of` does, wherever it is, without
+-- reading its words (a long draft isn't copied for it): what follows it to
+-- learn that it changed reads it only then (a split pane's mirror of it).
+function M.track_draft_of(key: string)
+	if here:get() == key then
+		M.text:len()
+		M.cargo:get()
+		M.chosen:get()
+	else
+		kept:len()
+	end
+end
+
+-- The options picked in chat `key`'s question, as `draft_of` reads them,
+-- without its words.
+function M.chosen_of(key: string): { [string]: boolean }
+	if here:get() == key then
+		return M.chosen:get()
+	end
+	local d = kept:get()[key]
+	return if d and type(d.chosen) == "table" then d.chosen else {}
+end
+
+-- The length of chat `key`'s draft's words, in bytes, as `draft_of`
+-- reads them (out in the composer, its draft not copied for it).
+function M.draft_size_of(key: string): number
+	if here:peek() == key then
+		return Draft.size(M.text)
+	end
+	local d = kept:peek()[key]
+	return if d and type(d.text) == "string" then #d.text else 0
+end
+
+-- Chat `key`'s draft's words as they are, read without following them
+-- (`draft_of` follows them): what a plugin's `zeron.compose` adds to.
+function M.peek_text_of(key: string): string
+	if here:peek() == key then
+		return M.text:peek()
+	end
+	local d = kept:peek()[key]
+	return if d and type(d.text) == "string" then d.text else ""
+end
+
 -- Chat `key`'s draft changed where it's shown by its id (`field`: "text"
 -- or "chosen"): written wherever it is, as `draft_of` reads it.
 function M.set_draft_of(key: string, field: string, value: any)
@@ -786,7 +1101,7 @@ end
 
 -- Which of `sessions`' devices is this one.
 local here_device = ui.computed(function(): string?
-	for _, d in sessions.now:get().devices or {} do
+	for _, d in sessions.devices:get() or {} do
 		if d.here then
 			return d.id
 		end
@@ -795,9 +1110,19 @@ local here_device = ui.computed(function(): string?
 end)
 
 -- The accounts' key for a device: "" for this one, whose engine answers
--- for itself.
+-- for itself; "cloud" for any of Cloud's (a chat's machine, or the
+-- account's Cloud device), whose accounts are the vault's, every Cloud
+-- machine's alike, as Settings → Providers shows them (this engine answers
+-- for "cloud": crates/engine cloud_accounts). A machine can't be asked:
+-- its accounts aren't its own, and asking would wake it.
 local function account_key(device: string?): string
-	return if device == nil or device == here_device:get() then "" else device
+	if device == nil or device == here_device:get() then
+		return ""
+	end
+	if cloud.on_device(device) or device == cloud.device() then
+		return "cloud"
+	end
+	return device
 end
 
 -- Models of Cursor's own pool (Composer, Grok), not the third-party one.
@@ -811,8 +1136,33 @@ local function cursor_pool(model: string): string
 	return "Other"
 end
 
+-- Antigravity's limits are its group of models' ("Gemini Session",
+-- "Claude & GPT Week": zeron_proto's ANTIGRAVITY_USAGE_*): the model's.
+local function antigravity_group(model: string): string
+	local id = string.lower(string.match(model, "^[^/]+/(.+)$") or model)
+	return if string.find(id, "gemini", 1, true) then "Gemini" else "Claude & GPT"
+end
+
+-- The windows `model` draws from, named within its group ("Session"), for
+-- an agent that limits groups of models apart (Antigravity); nil: all of
+-- the account's are.
+local function group_windows(account: any, harness: string, model: string): { any }?
+	if harness ~= "antigravity" then
+		return nil
+	end
+	local group = `{antigravity_group(model)} `
+	local mine = {}
+	for _, w in account.windows do
+		if string.sub(w.label, 1, #group) == group then
+			table.insert(mine, { label = string.sub(w.label, #group + 1), used = w.used })
+		end
+	end
+	return mine
+end
+
 -- What the ring reads: the fuller window; for Cursor, the pool the model
--- draws from, if that's reported. Nil: nothing reported.
+-- draws from, if that's reported; for Antigravity, the model's group's
+-- fuller one. Nil: nothing reported.
 local function account_used(account: any, harness: string, model: string): number?
 	if harness == "cursor" then
 		local id = string.match(model, "^[^/]+/(.+)$") or model
@@ -824,7 +1174,7 @@ local function account_used(account: any, harness: string, model: string): numbe
 		end
 	end
 	local most: number? = nil
-	for _, w in account.windows do
+	for _, w in group_windows(account, harness, model) or account.windows do
 		most = if most then math.max(most, w.used) else w.used
 	end
 	return most
@@ -832,30 +1182,80 @@ end
 
 -- An account's windows in words, or why it has none to show: one not in use
 -- says what's wrong with it, as a signed-out one's old figures would mislead.
-local function account_detail(account: any): string
+-- Antigravity's are its model's group's; a group Google sets no limit for
+-- (Gemini on Google AI Ultra) shows the others', each group named once
+-- ("Claude & GPT: Session 40% · Week 10%").
+local function account_detail(account: any, harness: string, model: string): string
 	if account.error and (not account.active or #account.windows == 0) then
 		return account.error
 	end
+	local function said(w: any): string
+		return `{w.label} {math.floor(w.used * 100 + 0.5)}%`
+	end
+	local mine = group_windows(account, harness, model)
 	local parts: { string } = {}
-	for _, w in account.windows do
-		table.insert(parts, `{w.label} {math.floor(w.used * 100 + 0.5)}%`)
+	if mine and #mine == 0 then
+		-- ("<group> <span>": the span is the label's last word.)
+		local group: string? = nil
+		for _, w in account.windows do
+			local named, span = string.match(w.label, "^(.+) (%S+)$")
+			local part = said({ label = span or w.label, used = w.used })
+			if named and named ~= group then
+				group = named
+				part = `{named}: {part}`
+			end
+			table.insert(parts, part)
+		end
+	else
+		for _, w in mine or account.windows do
+			table.insert(parts, said(w))
+		end
 	end
 	return table.concat(parts, " · ")
 end
 
+-- Whether `harness` keeps a login per model provider (Pi, OpenCode,
+-- Hermes): Zeron signs in to its providers one by one, or its accounts say
+-- their provider.
+local function per_provider(harness: string, list: { any }?): boolean
+	if agents.logins:get()[harness] ~= nil then
+		return true
+	end
+	for _, a in list or {} do
+		if a.provider ~= nil then
+			return true
+		end
+	end
+	return false
+end
+
 -- The composer's accounts on `device` (ds.ModelPicker's `accounts`,
--- `on_account`, `on_accounts_open`), whichever computer it is: asked for as
--- it's first seen.
+-- `account_group`, `on_account`, `on_accounts_open`), whichever computer it
+-- is: asked for as it's first seen. An agent that keeps a login per model
+-- provider shows only the model's provider's: switching its ChatGPT
+-- account never touches its Claude one.
 function M.model_accounts(device: () -> string?): any
 	ui.effect(function()
 		agents.watch_device(account_key(device()))
 	end)
+	local function listed(harness: string): { any }?
+		local on = agents.on_device:get()[account_key(device())]
+		return on and on[harness]
+	end
 	return {
-		accounts = function(harness: string, model: string): { any }?
-			local on = agents.on_device:get()[account_key(device())]
-			local list = on and on[harness]
-			if not list then
+		accounts = function(harness: string, model: string, provider: string?): { any }?
+			local all = listed(harness)
+			if not all then
 				return nil
+			end
+			local list = all
+			if provider and per_provider(harness, all) then
+				list = {}
+				for _, a in all do
+					if a.provider == provider then
+						table.insert(list, a)
+					end
+				end
 			end
 			local out = table.create(#list)
 			for i, a in list do
@@ -866,10 +1266,53 @@ function M.model_accounts(device: () -> string?): any
 					active = a.active,
 					can_switch = a.can_switch,
 					used = account_used(a, harness, model),
-					detail = account_detail(a),
+					detail = account_detail(a, harness, model),
 				}
 			end
 			return out
+		end,
+		-- The model's provider, named, and adding one of its accounts: Settings
+		-- → Providers, on the composer's device, its sign-in under way there.
+		account_group = function(harness: string, provider: string?): any
+			if not provider or not per_provider(harness, listed(harness)) then
+				return nil
+			end
+			local offer = (agents.logins:get()[harness] or {})[provider]
+			local name = if offer then offer.name else nil
+			for _, a in listed(harness) or {} do
+				if not name and a.provider == provider then
+					name = a.group
+				end
+			end
+			if not name then
+				return nil
+			end
+			local key = account_key(device())
+			-- Another account: a sign-in, on the composer's device; else an
+			-- API key, typed in Settings — on this Mac alone (a key never
+			-- travels to another device).
+			if offer and offer.login then
+				return {
+					name = name,
+					add = locale.s("ds.provider_card.add_named_account", { name = offer.login }),
+					on_add = function()
+						agents.target(if key == "" then nil else key)
+						route.settings("providers")
+						agents.sign_in_to(harness, provider)
+					end,
+				}
+			elseif offer and offer.key and key == "" then
+				return {
+					name = name,
+					add = locale.s("ds.model_picker.add_key", { name = offer.key }),
+					on_add = function()
+						agents.target(nil)
+						route.settings("providers")
+						agents.key_request:set(`{harness}:{provider}`)
+					end,
+				}
+			end
+			return { name = name }
 		end,
 		on_account = function(harness: string, id: string)
 			agents.switch_on(account_key(device()), harness, id):after(function() end, function()

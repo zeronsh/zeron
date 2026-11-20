@@ -13,7 +13,8 @@
 #   zeron-sync, zeron-update   lib only (session-sync-regressions)
 #   zeron-cli, zeron-launch, zeron-notify   `zeron`'s command line, the engine
 #                  helper's start-up and the zeron:// links, shared by the apps
-#   zeron-engine   lib + the integration tests named below. Engine has many other
+#   zeron-engine   lib + the integration tests named below (plugin_services: the
+#                  plugin host's services, end to end; also on macOS in zgx-tests.yml). Engine has many other
 #                  integration binaries (live agents etc.) that no workflow ran, so
 #                  they are listed instead of globbed to avoid compiling them.
 #   voice (moved from voice-tests.yml offline-linux, which ran them as 14 separate
@@ -39,8 +40,9 @@ for f in crates/harness/tests/*.rs crates/preview/tests/*.rs crates/doc/tests/*.
   [[ "$skip" == *" $name "* ]] || tests+=(--test "$name")
 done
 # `misc` (harness, engine and preview): the small suites, one binary each.
-# The orb geometry tests live in zeron-orb's `geometry`.
-for t in misc geometry session_publication restart_resume side_chats message_queue voice_runtime device_routing device_room; do
+# The orb geometry tests live in zeron-orb's `geometry`. `restart_hook`
+# stays a binary of its own: the hook it checks is process-wide.
+for t in misc geometry session_publication restart_resume side_chats message_queue voice_runtime device_routing device_room plugin_services restart_hook; do
   tests+=(--test "$t")
 done
 

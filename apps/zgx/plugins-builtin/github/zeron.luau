@@ -69,13 +69,31 @@
 --   zeron.on_message(function(message) end)
 --       what arrives: { from = { id, name }, data, at }      ("devices")
 --   zeron.open(route)    "home", { session = id }, { settings = page } ("navigate")
---   zeron.compose(text)  text into the message box, for you to send   ("compose")
+--   zeron.compose(text, { replace?, session? })
+--                        text into the message box, for you to send: after
+--                        what's there, or in place of its words (`replace =
+--                        true`, its chips kept); the chat shown's draft, or
+--                        `session`'s                                ("compose")
 --   zeron.compose_comment { file, line, note, to?, side?, snippet?, key?, session? }
 --                        a review comment chip on a session's draft, sent as
 --                        Zeron's review comments block (file:line, the note,
 --                        the code under it)                              ("compose")
 --   zeron.composed()     in a build: your comments still on a draft, by key
 --                        ({ [key] = { session, hovered } }), reactive    ("compose")
+--   zeron.draft()        the composer's draft as you type it: { session?,
+--                        text, attachments = { { kind, name } } }, reactive
+--                                                                 ("draft")
+--   zeron.take_draft(key), zeron.put_draft(key), zeron.swap_draft(key),
+--   zeron.drop_draft(key)
+--                        the draft taken whole (words, chips, quotes) and
+--                        kept by Zeron under your key, the composer
+--                        cleared; put back on the draft shown; the two
+--                        traded; let go                           ("draft")
+--   zeron.drafts()       what Zeron keeps for you, by key: { session?, text,
+--                        attachments, at }, reactive              ("draft")
+--   zeron.draft_of(session)
+--                        a promise of another chat's draft, as `draft()`
+--                        says it, read once ("" a new chat's)     ("draft")
 --   zeron.toast(text)    a short note at the window's foot   (always)
 --   zeron.notify { title, body?, session? }  a notification, as Zeron's
 --                        own (Settings → Notifications)     ("notifications")
@@ -245,7 +263,9 @@ return function(id: string): any
 			return nil
 		end
 		local r = records:get() or {}
-		if name == "session" or name == "message" then
+		-- (A project's, as `.project-icon` gives it: its name, device and
+		-- icon with "sessions.read".)
+		if name == "session" or name == "message" or name == "project" then
 			local found = (r[name .. "s"] or {})[value]
 			local out = { id = value }
 			for k, v in found or {} do
@@ -1029,7 +1049,28 @@ return function(id: string): any
 	-- Its service's events (`zeron.emit` in service.luau), by device
 	-- (`@here`: this device's) and event.
 	local service_listeners: { [string]: { [string]: { (any, any) -> () } } } = {}
+	-- Its `zeron.on` listeners (usage, accounts, models, turns), by key.
+	local agent_listeners: { [string]: { event: string, opts: any, fn: (any, string) -> () } } = {}
 	local function heard_event(message: any)
+		-- Zeron's own (`zeron:<event>`), for one of its listeners.
+		local event = message.event
+		if type(event) == "string" and string.sub(event, 1, 6) == "zeron:" then
+			local wrapped = message.data or {}
+			if wrapped.listener == "@notice" then
+				-- What Zeron says of it (a listener failing, a loop stopped): its row says so.
+				local notice = (wrapped.data and wrapped.data.notice) or "A listener failed"
+				ui.invoke(`{prefix}.problem`, { error = notice, at = "zeron.on" })
+				return
+			end
+			local listener = agent_listeners[wrapped.listener or ""]
+			if listener then
+				local ok, why = pcall(listener.fn, wrapped.data, string.sub(event, 7))
+				if not ok then
+					print(`{id}: a {listener.event} listener failed: {why}`)
+				end
+			end
+			return
+		end
 		local keys = { message.from and message.from.id or "" }
 		if message.here then
 			table.insert(keys, "@here")
@@ -1155,6 +1196,148 @@ return function(id: string): any
 		return service
 	end
 
+	-- ── Agents: usage, accounts, models, and their events ─────────────────
+	-- Each asks the engine, which checks what this device (or `device`,
+	-- another of yours) allowed this plugin: "usage.read", "accounts.read",
+	-- "accounts.switch", "accounts.pin", "models.read", "models.set". Each is a promise; a
+	-- refusal fails it with "<reason>: <words>" (`zeron.reason(err)`:
+	-- not_allowed, paced, already, loop, not_found, offline, …).
+	local function agents(op: string, args: any?, device: string?): any
+		return ui.call(`{prefix}.agents`, {
+			op = op,
+			args = if args == nil then {} else args,
+			device = device or ui.null,
+		})
+	end
+
+	-- Each provider's accounts' usage, as Zeron last read it (never a new
+	-- read): { { provider, account, active, plan?, fetched_at?, error?,
+	-- windows = { { label, used, remaining, resets_at? } } } }.
+	function M.usage(opts: { provider: string?, device: string? }?): any
+		local o = opts or {}
+		return agents("usage", { provider = o.provider }, o.device)
+	end
+
+	-- Read usage again now (once every 5 minutes, per plugin).
+	function M.usage_refresh(opts: { device: string? }?): any
+		return agents("usage_refresh", {}, opts and opts.device)
+	end
+
+	-- The saved accounts ("accounts.read"): { { provider, account, active,
+	-- switchable, email?, name?, organization?, plan? } }.
+	function M.accounts(opts: { provider: string?, device: string? }?): any
+		local o = opts or {}
+		return agents("accounts", { provider = o.provider }, o.device)
+	end
+
+	-- Make a saved account the active one ("accounts.switch"), on this
+	-- device or `device`, at once; with `when_idle`, once that provider's
+	-- chats there are done.
+	function M.switch_account(s: { provider: string, account: string, when_idle: boolean?, device: string? }): any
+		return agents("switch_account", { provider = s.provider, account = s.account, when_idle = s.when_idle }, s.device)
+	end
+
+	-- Run one chat on a saved account of its own ("accounts.pin"), on this
+	-- device or `device`, while the active account stays as it is. No
+	-- `account` takes the pin back. { provider, chat, account? }.
+	function M.pin_account(s: { provider: string, chat: string, account: string?, device: string? }): any
+		return agents("pin_account", { provider = s.provider, chat = s.chat, account = s.account }, s.device)
+	end
+
+	-- The chats pinned to an account ("accounts.read"): { { provider,
+	-- account, since, chat? } } (`chat` with "sessions.read").
+	function M.pins(opts: { provider: string?, device: string? }?): any
+		local o = opts or {}
+		return agents("pins", { provider = o.provider }, o.device)
+	end
+
+	-- A harness's models ("models.read"): { { id, label, efforts, options } }.
+	function M.models(harness: string, opts: { device: string? }?): any
+		return agents("models", { harness = harness }, opts and opts.device)
+	end
+
+	-- A chat's model, effort and options ("models.read").
+	function M.chat_model(chat: string): any
+		return agents("chat_model", { chat = chat })
+	end
+
+	-- Set a chat's model, effort or options ("models.set"), for its next
+	-- turn, on the provider it has.
+	function M.set_model(s: { chat: string, model: string?, effort: string?, options: { [string]: string }? }): any
+		return agents("set_model", { chat = s.chat, model = s.model, effort = s.effort, options = s.options })
+	end
+
+	-- What a new chat starts with here ("models.set").
+	function M.set_default_model(s: { harness: string, model: string, effort: string? }): any
+		return agents("set_default_model", { harness = s.harness, model = s.model, effort = s.effort })
+	end
+
+	-- A message into a chat ("messages.send"), as you'd send it from the
+	-- composer: a turn of its own when nothing runs; while a turn runs,
+	-- queued for its end (`mode = "queue"`, the default) or steering it
+	-- (`"steer"`). `attachments`: files' paths on the chat's device (they
+	-- need "files.read" too). A promise of { status, chat, delivery, id }.
+	function M.send_message(s: { chat: string, text: string, attachments: { string }?, mode: string? }): any
+		return agents("send_message", { chat = s.chat, text = s.text, attachments = s.attachments, mode = s.mode })
+	end
+
+	-- A new chat, sent its first message ("messages.send"): `device`,
+	-- `project` (a project's id), `harness`, `model`, `effort`, `cwd` as you'd
+	-- pick them. A promise of { status, chat, id }, `chat` the new chat's id.
+	function M.new_chat(s: { prompt: string, device: string?, project: string?, harness: string?, model: string?, effort: string?, cwd: string? }): any
+		return agents("new_chat", {
+			prompt = s.prompt,
+			device = s.device,
+			project = s.project,
+			harness = s.harness,
+			model = s.model,
+			effort = s.effort,
+			cwd = s.cwd,
+		})
+	end
+
+	-- The question (or approval) a chat waits on, answered ("messages.send"):
+	-- `answers` by question id, `{ [question] = label or { labels } }` (or a
+	-- list of { question, labels }); `request` names one, else the latest.
+	function M.answer(s: { chat: string, answers: any, request: string? }): any
+		return agents("answer", { chat = s.chat, answers = s.answers, request = s.request })
+	end
+
+	-- `fn(data, event)` for each `event` on this device while a window is
+	-- open: "usage.changed", "usage.threshold" (`opts.below`: percent
+	-- remaining), "usage.reset", "limit.hit", "account.switched",
+	-- "account.signed_out", "login.expired", "model.changed",
+	-- "models.updated", "turn.started", "turn.finished", "turn.errored",
+	-- "chat.awaiting_input", "chat.input_answered". `opts.provider`,
+	-- `account`, `window` and `chat` narrow it. Told as it changes, never
+	-- by polling. Returns a function that stops it. (A service's own
+	-- `zeron.on` hears them with no window open.)
+	local next_listener = 0
+	local function listen_all()
+		local list = {}
+		for key, l in agent_listeners do
+			table.insert(list, { key = key, event = l.event, opts = l.opts })
+		end
+		ui.call(`{prefix}.agents`, { op = "listen", args = {}, device = ui.null, listeners = list })
+			:after(nil, function(why)
+				print(`{id}: listening for Zeron's events: {why}`)
+			end)
+	end
+	function M.on(event: string, fn: (any, string) -> (), opts: { [string]: any }?): () -> ()
+		assert(type(event) == "string" and event ~= "", "zeron.on(event, fn)")
+		assert(type(fn) == "function", "zeron.on(event, fn)")
+		next_listener += 1
+		local key = `w{next_listener}`
+		agent_listeners[key] = { event = event, opts = opts or {}, fn = fn }
+		listen_all()
+		return function()
+			if agent_listeners[key] then
+				agent_listeners[key] = nil
+				listen_all()
+			end
+		end
+	end
+
 	-- A failed service call's reason: "offline", "not_installed",
 	-- "not_approved", "off", "version_mismatch", "timeout", "failed", …
 	function M.reason(err: any): string
@@ -1178,8 +1361,16 @@ return function(id: string): any
 		ui.invoke(`{prefix}.open_url`, url)
 	end
 
-	function M.compose(text: string)
-		ui.invoke("zeron.compose.insert", text)
+	-- `text` into a chat's draft, for the person to send ("compose"): after
+	-- what's there, on a line of its own; with `replace = true`, in place of
+	-- its words (what it carries stays). The chat shown's draft, or
+	-- `session`'s ("" a new chat's).
+	function M.compose(text: string, opts: { replace: boolean?, session: string? }?)
+		if opts and (opts.replace or opts.session) then
+			ui.invoke("zeron.compose.insert", { text = text, replace = opts.replace == true, session = opts.session or ui.null })
+		else
+			ui.invoke("zeron.compose.insert", text)
+		end
 	end
 
 	-- A review comment on a file or a diff, as a chip on a session's draft
@@ -1207,6 +1398,57 @@ return function(id: string): any
 	local composed = ui.shared(`{prefix}.composed`, {} :: { [string]: any })
 	function M.composed(): { [string]: { session: string?, hovered: boolean } }
 		return composed:get() or {}
+	end
+
+	-- The composer's draft as you type it: the chat it's for (nil, a new
+	-- chat), its words, and what it carries, each chip's kind ("file",
+	-- "image", "chat", …) and name, never a file's path. Read in a build or
+	-- an effect: it changes as the draft does. Nil until Zeron says.
+	-- (Reached on first read: only a plugin allowed "draft" may.)
+	local draft: any = nil
+	function M.draft(): { session: string?, text: string, attachments: { { kind: string, name: string } } }?
+		draft = draft or ui.shared("zeron.draft", nil :: any)
+		return draft:get()
+	end
+
+	-- The draft shown, taken whole (its words, its chips, the passages
+	-- quoted in it) and kept by Zeron under `key`, yours, the composer
+	-- cleared; what that key kept before is replaced. An empty draft isn't
+	-- taken. Up to 16 kept at once.
+	function M.take_draft(key: string)
+		ui.invoke(`{prefix}.draft`, { op = "take", key = key })
+	end
+
+	-- What `key` kept, put back on the draft shown as it was taken (after
+	-- what's there, if the composer isn't empty), and no longer kept.
+	function M.put_draft(key: string)
+		ui.invoke(`{prefix}.draft`, { op = "put", key = key })
+	end
+
+	-- The draft shown and what `key` keeps, traded: either may be empty, so
+	-- one call sets the draft aside, brings it back, or swaps the two.
+	function M.swap_draft(key: string)
+		ui.invoke(`{prefix}.draft`, { op = "swap", key = key })
+	end
+
+	-- What `key` kept, let go of.
+	function M.drop_draft(key: string)
+		ui.invoke(`{prefix}.draft`, { op = "drop", key = key })
+	end
+
+	-- What Zeron keeps for you, by key: the chat each was taken from, its
+	-- words, what it carries (as `draft()` says it) and when (os.time).
+	-- Read in a build: it changes as you take and put back.
+	local drafts = ui.shared(`{prefix}.drafts`, {} :: { [string]: any })
+	function M.drafts(): { [string]: { session: string?, text: string, attachments: { { kind: string, name: string } }, at: number } }
+		return drafts:get() or {}
+	end
+
+	-- Chat `session`'s draft as it is now, unsent: shown or not (`draft()`
+	-- follows the one shown). A promise of { session?, text, attachments }
+	-- as `draft()` says it ("" a new chat's draft, with no session).
+	function M.draft_of(session: string): any
+		return ui.call(`{prefix}.draft_of`, session)
 	end
 
 	function M.toast(text: string)

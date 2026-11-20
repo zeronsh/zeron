@@ -19,6 +19,30 @@ pub mod frame_type {
     pub const PROBE: u8 = 0x09;
     pub const PROBE_OK: u8 = 0x0a;
     pub const ERROR: u8 = 0x0b;
+    // The relay layer (docs/design/relay-layer.md).
+    pub const RELAY: u8 = 0x0c;
+    pub const ANNOUNCE: u8 = 0x0d;
+    pub const SYNC_REQ: u8 = 0x0e;
+    pub const SYNC_DATA: u8 = 0x0f;
+    pub const ENQUEUE: u8 = 0x10;
+    pub const QUEUED: u8 = 0x11;
+    pub const QUEUE_REQ: u8 = 0x12;
+    pub const QUEUE_DONE: u8 = 0x13;
+    pub const DELIVERED: u8 = 0x14;
+    pub const LEGACY_PEER: u8 = 0x15;
+}
+
+/// Frames a room forwards to the relay layer's task, not the row protocol.
+pub fn is_relay_frame(kind: u8) -> bool {
+    matches!(
+        kind,
+        frame_type::RELAY
+            | frame_type::ANNOUNCE
+            | frame_type::SYNC_REQ
+            | frame_type::SYNC_DATA
+            | frame_type::QUEUE_DONE
+            | frame_type::LEGACY_PEER
+    )
 }
 
 /// Headers are ids + a few integers; anything bigger is a peer bug.
@@ -70,6 +94,16 @@ pub fn decode(bytes: &[u8]) -> Option<WireFrame> {
 pub struct HelloHeader<'a> {
     pub cursor: u64,
     pub device: &'a str,
+    /// `Some(1)` asks for the relay layer. Absent, the frame is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay: Option<u8>,
+    /// `Some(3)`: this device knows the chat is on generation 3, so a host that's
+    /// away is worth waking.
+    #[serde(rename = "gen", skip_serializing_if = "Option::is_none")]
+    pub room_gen: Option<u8>,
+    /// `Some(1)`: this device is the chat's host and is relaying.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relaying: Option<u8>,
 }
 
 #[derive(Debug, Serialize)]

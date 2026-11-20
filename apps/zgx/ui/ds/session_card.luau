@@ -83,7 +83,7 @@ return function(props: Props): Node
 				if type(t) ~= "number" then
 					return t or ""
 				end
-				local secs = os.time() - t
+				local secs = status.since(t)
 				return if secs < 60 then locale.s("time.just_now") else locale.s("ds.session_card.ago", { when = status.ago(secs) })
 			end),
 			ui.show(function(): boolean

@@ -645,26 +645,40 @@ local function at_path(node: Node, path: { number }, depth: number, change: (n: 
 	return { kind = node.kind, children = kids, shares = node.shares }
 end
 
--- A divider dragged: the part before it to `share` of what the row or column
--- shares out, the part after it taking up the difference, each at least `least`.
-function M.resize(path: { number }, at: number, start: { number }, moved: number, least: number)
+-- The row or column at `path` given the shares `change` makes of its own.
+local function set_shares(path: { number }, change: (n: Node) -> { number })
 	local current = M.current:peek()
 	if not current then
 		return
 	end
 	local key = key_of(current)
 	local tree = at_path(current, path, 1, function(n: Node): Node
-		local shares = table.clone(start)
-		local both = shares[at] + shares[at + 1]
-		local first = math.clamp(shares[at] + moved, math.min(least, both / 2), math.max(both - least, both / 2))
-		shares[at], shares[at + 1] = first, both - first
-		return { kind = n.kind, children = n.children, shares = shares }
+		return { kind = n.kind, children = n.children, shares = change(n) }
 	end)
 	local list: { Node } = {}
 	for _, t in trees:peek() do
 		table.insert(list, if key_of(t) == key then keyed(tree, key) else t)
 	end
 	trees:set(list)
+end
+-- The page's least either side of a divider, as a share of what's shared out
+-- (`least`), and where the part before it is held between.
+function M.bounds(start: { number }, at: number, least: number): (number, number)
+	local both = start[at] + start[at + 1]
+	return math.min(least, both / 2), math.max(both - least, both / 2)
+end
+-- A divider dragged: the part before it to `share` of what the row or column
+-- shares out, the part after it taking up the difference, each at least `least`.
+-- `over`: a share past that as the divider bounces at its limit (ds/seam).
+function M.resize(path: { number }, at: number, start: { number }, moved: number, least: number, over: number?)
+	set_shares(path, function(): { number }
+		local shares = table.clone(start)
+		local both = shares[at] + shares[at + 1]
+		local lo, hi = M.bounds(start, at, least)
+		local first = math.clamp(shares[at] + moved, lo, hi) + (over or 0)
+		shares[at], shares[at + 1] = first, both - first
+		return shares
+	end)
 end
 -- A divider's row or column's shares now.
 function M.shares_at(path: { number }): { number }
@@ -719,6 +733,7 @@ end
 -- a pane just added). A pane just added opens out of the gap it comes in at, as its
 -- neighbours make room, at its full size all along (`opening_size`).
 local settle = ui.state("split.settle", 1)
+local SETTLE_MS, SETTLE_EASE = 280, "outQuint"
 local settle_from: { [string]: Box } = {}
 local settle_new: { [string]: boolean } = {}
 local settling: any = nil
@@ -818,8 +833,34 @@ ui.effect(function()
 	end
 	settle_from = from
 	settle:set(0)
-	settling = anime.animate(settle, { value = 1, duration = 280, ease = "outQuint" })
+	settling = anime.animate(settle, { value = 1, duration = SETTLE_MS, ease = SETTLE_EASE })
 end)
+
+-- A divider double-clicked: the panes of its row or column at equal shares
+-- again, easing there from where they show, as a pane coming or going does.
+function M.even(path: { number })
+	local count = #M.shares_at(path)
+	if count < 2 then
+		return
+	end
+	local from = M.shown_frames:peek()
+	set_shares(path, function(): { number }
+		local shares: { number } = {}
+		for i = 1, count do
+			shares[i] = 1 / count
+		end
+		return shares
+	end)
+	if motion.reduced_now() then
+		return
+	end
+	if settling then
+		settling:cancel()
+	end
+	settle_from, settle_new = from, {}
+	settle:set(0)
+	settling = anime.animate(settle, { value = 1, duration = SETTLE_MS, ease = SETTLE_EASE })
+end
 
 -- The size a pane just added is opening to, while it opens (what it holds stays at
 -- that size, its edge revealing it); else nil.
@@ -836,6 +877,12 @@ function M.opening_size(id: string): { w: number, h: number }?
 		w = (b.right.p - b.left.p) * area.w + b.right.q - b.left.q,
 		h = (b.bottom.p - b.top.p) * area.h + b.bottom.q - b.top.q,
 	}
+end
+
+-- Whether a pane was just added and is opening out of its gap (its
+-- content's fade in, ds/motion `content`): false once it's open.
+function M.just_added(id: string): boolean
+	return settle:peek() < 1 and settle_new[id] == true and settle_from[id] ~= nil
 end
 
 M.across = ui.computed(function(): number

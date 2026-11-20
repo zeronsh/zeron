@@ -173,6 +173,7 @@ pub(crate) fn prove_and_commit(core: &EngineCore, config: &EngineConfig) {
             Ok(Err(err)) => tracing::error!(error = %err, "stale-session recovery failed"),
             Err(err) => tracing::error!(error = %err, "stale-session recovery panicked"),
         }
+        crate::wake_update::finished("updated");
         doc_host.lift_quiesce();
         tokio::time::sleep(TIDY_AFTER).await;
         transaction::tidy_latest(&proof.data_dir);

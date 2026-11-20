@@ -144,6 +144,11 @@ impl RpcClient {
         }
     }
 
+    /// Calls awaiting a reply and streams still open on this client.
+    pub fn outstanding(&self) -> usize {
+        self.shared.lock().len()
+    }
+
     /// Why the connection failed (an oversized frame, a reset socket), once
     /// [`Self::closed`] resolved; `None` for a clean close.
     pub fn close_reason(&self) -> Option<String> {

@@ -24,6 +24,11 @@ case "$PLATFORM" in
 esac
 PROFILE=mobile
 if [[ "${CONFIGURATION:-Debug}" == "Release" ]]; then PROFILE=mobile-dist; fi
+# A published core (mobile-dist: TestFlight, the App Store) runs Luau
+# (zeron-visual's) without its asserts, a fifth of script time; a development
+# one keeps them. The library's build alone: the bindings tool is the host's.
+LUAU_ENV=""
+if [[ "$PROFILE" == "mobile-dist" ]]; then LUAU_ENV="LUAU_CXXFLAGS=-DNDEBUG"; fi
 
 OUT="$ROOT/target/ios-core/$PLATFORM"
 mkdir -p "$OUT/include"
@@ -50,14 +55,21 @@ run_cargo() {
     PATH="$CARGO_DIRS:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
     IPHONEOS_DEPLOYMENT_TARGET=26.0 \
     CARGO_TARGET_DIR="$ROOT/target" \
+    ${CORE_ENV:-} \
     cargo "$@"
 }
 
 cd "$ROOT"
-run_cargo build --locked -p zeron-mobile --lib --profile "$PROFILE" --target "$TARGET"
+CORE_ENV="$LUAU_ENV" run_cargo build --locked -p zeron-mobile --lib --profile "$PROFILE" --target "$TARGET"
 run_cargo build --locked -p zeron-mobile --bin uniffi-bindgen --features bindgen --profile mobile
 
 LIB="$ROOT/target/$TARGET/$PROFILE/libzeron_mobile.a"
+# With its asserts, each LUAU_ASSERT keeps its Luau source file's path
+# (Luau/Common.h's __FILE__), VM/src/l*.cpp; with NDEBUG, none.
+if [[ "$PROFILE" == "mobile-dist" ]] && LC_ALL=C grep -aqE 'VM[\\/]src[\\/]l[a-z]+\.cpp' "$LIB"; then
+  echo "error: $LIB was built with Luau's asserts: build it with LUAU_CXXFLAGS=-DNDEBUG" >&2
+  exit 1
+fi
 cp -p "$LIB" "$OUT/libzeron_mobile.a"
 
 GEN="$OUT/gen"

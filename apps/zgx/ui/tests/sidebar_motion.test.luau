@@ -37,6 +37,10 @@ end
 test("a group going first glides there, its rows the same nodes, focus kept", function()
 	local app = open()
 	-- Answer the review chosen (focused), Borealis under Atlas.
+	-- (Arriving on its chat gives the composer the keys; pressed again,
+	-- its chat already open, the row keeps them.)
+	app:click(`{SIDE} >> role:button "Answer the review"`)
+	app:frames(10)
 	app:click(`{SIDE} >> role:button "Answer the review"`)
 	app:frames(10)
 	local from = top(app, "Borealis")
@@ -91,6 +95,27 @@ test("with motion reduced, a group going first is there at once", function()
 	app:frames(30)
 	expect(top(app, "Borealis")).to_be(landed)
 	expect(landed < top(app, "Atlas")).to_be(true)
+end)
+
+test("folded away, a group going first is there at once: opened, it's where it ends, ⌘1–9 following meanwhile", function()
+	local app = open()
+	local before = (app:state("shell_sidebar_order") :: any)[1]
+	app:click('#titlebar >> role:button "Toggle sidebar"')
+	app:frames(60)
+	expect(app:state("shell_collapsed")).to_be(true)
+	app:command("borealis_moves")
+	app:frames(2)
+	-- (⌘1–9 and the next session read its order: it follows while away.)
+	local first = (app:state("shell_sidebar_order") :: any)[1]
+	expect(first).never.to_be(before)
+	app:click('#titlebar >> role:button "Toggle sidebar"')
+	app:frames(1)
+	-- Nothing glides as it comes back: every row is where it lands.
+	local landed, atlas = top(app, "Borealis"), top(app, "Atlas")
+	app:frames(40)
+	expect(top(app, "Borealis")).to_be(landed)
+	expect(top(app, "Atlas")).to_be(atlas)
+	expect(landed < atlas).to_be(true)
 end)
 
 -- A row's y through `n` frames (one a frame), as `act` folds or opens.

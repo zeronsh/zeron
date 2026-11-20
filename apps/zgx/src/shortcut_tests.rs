@@ -207,14 +207,141 @@ fn the_shortcuts_reach_their_commands_from_any_focus() {
             press(&mut w, "ctrl+tab", "shell.next_session", false, &|w| w.route() != session);
             press(&mut w, "ctrl+shift+tab", "shell.previous_session", true, &|w| w.route() == session);
         }
-        // ⌘N a new chat, then ⌘[ back, ⌘] forward and ⌘[ back again from
-        // where focus went (putting it back would move the history).
+        // ⌘N a new chat, then back, forward and back again from where
+        // focus went (putting it back would move the history): ⌘[ ⌘] on a
+        // Mac, Alt+←/→ elsewhere (zgx's router's keys there).
+        let (back, forward) = if cfg!(target_os = "macos") { ("cmd+[", "cmd+]") } else { ("alt+arrowleft", "alt+arrowright") };
         press(&mut w, "cmd+n", "shell.new_chat", false, &|w| w.route() == "/");
-        press(&mut w, "cmd+[", "router.back", true, &|w| w.route() == session);
-        press(&mut w, "cmd+]", "router.forward", true, &|w| w.route() == "/");
-        press(&mut w, "cmd+[", "router.back", true, &|w| w.route() == session);
+        press(&mut w, back, "router.back", true, &|w| w.route() == session);
+        press(&mut w, forward, "router.forward", true, &|w| w.route() == "/");
+        press(&mut w, back, "router.back", true, &|w| w.route() == session);
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// ⌘N's new chat is ready in the frame it first shows (ademark's A3: ⌘N,
+/// then a key every 50 ms, timed to the first frame the keys read in the
+/// new chat's composer, with the old chat gone). From a session whose
+/// composer has the keys, what's typed right after ⌘N, with no frame
+/// between, is the new chat's draft, not the session's; that first frame
+/// shows the new chat, the session's page gone, its composer already where
+/// it rests (it snaps there: nothing glides into place). From focus
+/// anywhere else, the first frame gives the composer the keys.
+#[test]
+fn keys_typed_right_after_command_n_land_in_the_new_chat_in_its_first_frame() {
+    let field = "#chat-composer >> role:textbox";
+    let draft = |w: &mut Window| -> String {
+        let node = w.app.find(field).expect("the composer's field");
+        let editor = w.app.ui.editor_within(node).expect("its editor");
+        editor.editor.borrow().text().to_string()
+    };
+    let composer = |w: &mut Window| -> zgx::scene::Rect {
+        let node = w.app.find("#chat-composer").expect("the composer");
+        w.app.ui.scene.borrow().transformed_bounds(node)
+    };
+    let mut w = mount();
+    w.app.ui.scene.borrow_mut().resize(1600., 1000.);
+    w.app.click("#shell-sidebar >> role:button \"Fix the build\"");
+    w.app.frames(30);
+    let session = w.route();
+    for at in [Focus::Composer, Focus::Nothing, Focus::Sidebar] {
+        if w.route() != session {
+            w.app.click("#shell-sidebar >> role:button \"Fix the build\"");
+            w.app.frames(30);
+        }
+        focus(&mut w, at);
+        assert_eq!(draft(&mut w), "", "{at:?}: the session's draft starts empty");
+        // ⌘N as the menu runs it, then the first keys: no frame between
+        // for a composer that had the keys, the first frame for any other
+        // focus.
+        w.heard.borrow_mut().clear();
+        w.app.keys("cmd+n");
+        let heard: Vec<String> = w.heard.borrow_mut().drain(..).collect();
+        assert_eq!(heard, ["shell.new_chat"], "{at:?}: ⌘N reached the new chat");
+        assert!(w.app.host.run_command("shell.new_chat"));
+        if !matches!(at, Focus::Composer) {
+            w.app.frame();
+        }
+        w.app.ui.dispatch(InputEvent::Text("ad".into()));
+        w.app.settle();
+        w.app.frame();
+        assert_eq!(w.route(), "/", "{at:?}: a new chat");
+        assert!(w.app.find("#chat-session").is_none(), "{at:?}: the session's page is gone in the first frame");
+        assert!(w.app.find("#chat-home").is_some(), "{at:?}: the new chat's page shows in the first frame");
+        assert_eq!(draft(&mut w), "ad", "{at:?}: the keys are the new chat's draft");
+        let first = composer(&mut w);
+        w.app.frames(30);
+        let rest = composer(&mut w);
+        assert!(
+            (first.y - rest.y).abs() < 0.5 && (first.height - rest.height).abs() < 0.5 && (first.x - rest.x).abs() < 0.5,
+            "{at:?}: the composer rests where the first frame put it: {first:?}, then {rest:?}"
+        );
+        // (The draft goes, so the next new chat starts empty.)
+        w.app.click(field);
+        w.app.keys("cmd+a");
+        w.app.key(zgx::input::Key::Backspace);
+        w.app.frames(10);
+        w.app.click("#shell-sidebar >> role:button \"Fix the build\"");
+        w.app.frames(30);
+        assert_eq!(draft(&mut w), "", "{at:?}: nothing typed reached the session's draft");
+    }
+}
+
+/// Alt+←/→ step the history on Windows and Linux (zgx's router binds them
+/// there, ⌘[ ⌘] on macOS, where ⌥← ⌥→ are the caret's word-jump and must
+/// not): from anywhere, text fields included, as a browser's are (the
+/// caret's word-jump on Windows and Linux is Ctrl+←/→).
+#[test]
+fn alt_arrows_step_the_history_on_windows_and_linux_only() {
+    let mac = cfg!(target_os = "macos");
+    let mut wrong = Vec::new();
+    for at in [Focus::Nothing, Focus::Composer] {
+        let mut w = mount();
+        w.app.click("#shell-sidebar >> role:button \"Fix the build\"");
+        w.app.frames(20);
+        let session = w.route();
+        w.press("cmd+n");
+        assert_eq!(w.route(), "/");
+        let (back, forward) = if mac { ("cmd+[", "cmd+]") } else { ("alt+arrowleft", "alt+arrowright") };
+        focus(&mut w, at);
+        let heard = w.press(back);
+        if heard.as_deref() != Some("router.back") || w.route() != session {
+            wrong.push(format!("{at:?}: {back} reached {heard:?}, at {}", w.route()));
+        }
+        focus(&mut w, at);
+        let heard = w.press(forward);
+        if heard.as_deref() != Some("router.forward") || w.route() != "/" {
+            wrong.push(format!("{at:?}: {forward} reached {heard:?}, at {}", w.route()));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// The mouse's side buttons (X1, X2) go back and forward, over the chat or
+/// a session's tab.
+#[test]
+fn the_mouse_side_buttons_step_the_history() {
+    use zgx::input::{InputEvent, PointerButton};
+    let mut w = mount();
+    w.app.click("#shell-sidebar >> role:button \"Fix the build\"");
+    w.app.frames(20);
+    let session = w.route();
+    w.press("cmd+n");
+    assert_eq!(w.route(), "/");
+    let side = |w: &mut Window, n: u16, id: &str| {
+        let b = w.app.bounds(id);
+        let (x, y) = (b.x + b.width / 2., b.y + b.height / 2.);
+        w.app.ui.dispatch(InputEvent::PointerDown { x, y, button: PointerButton::Other(n) });
+        w.app.ui.dispatch(InputEvent::PointerUp { x, y, button: PointerButton::Other(n) });
+        w.app.frames(30);
+    };
+    side(&mut w, 4, "#shell-chats");
+    assert_eq!(w.route(), session, "X1 didn't go back");
+    side(&mut w, 5, "#shell-chats");
+    assert_eq!(w.route(), "/", "X2 didn't go forward");
+    // Over the sidebar too (not a node with a handler of its own).
+    side(&mut w, 4, "#shell-sidebar");
+    assert_eq!(w.route(), session, "X1 over the sidebar didn't go back");
 }
 
 /// ⌘W: the visible panel's active tab, wherever the keyboard is; else the chat's tab
@@ -445,6 +572,21 @@ fn command_slash_opens_the_model_picker() {
     }
 }
 
+/// ⌘/ still finds a composer that replaced another: the new one mounts
+/// before the old one's cleanup runs (ui/tests/chat_actions.test.luau).
+#[test]
+fn command_slash_survives_a_swapped_composer() {
+    let ui = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui");
+    let report = zgx_script::test_runner::run(&ui, Some("after the composer is swapped"), |outcome| {
+        if let Some(failure) = &outcome.failure {
+            eprintln!("{}: {failure}", outcome.name);
+        }
+    })
+    .expect("chat tests load");
+    assert_eq!(report.outcomes.len(), 1, "{report:?}");
+    assert_eq!(report.failed(), 0, "{report:?}");
+}
+
 /// Holds ⌘ (and `shift`) as the window reports a modifier alone (zgx's
 /// `ui.modifiers`, which `app.keys` never sets: it presses and lets go at
 /// once). ⌘ is what `cmd` shortcuts are pressed with: Command on macOS,
@@ -548,9 +690,12 @@ fn a_rebound_shortcut_takes_effect_at_once() {
     let recorder = "#settings-page >> role:button ~\"Change Toggle terminal\"";
     w.app.click(recorder);
     w.app.frames(5);
-    w.app.keys("ctrl+alt+t");
+    // (A key besides the command key: Control on a Mac, Super elsewhere,
+    // where Ctrl is the command key.)
+    let other = if cfg!(target_os = "macos") { "ctrl+alt+t" } else { "meta+alt+t" };
+    w.app.keys(other);
     w.app.frames(10);
-    assert_eq!(published(&w, "shell.toggle_terminal").as_deref(), Some("ctrl+alt+t"), "rebound at once");
+    assert_eq!(published(&w, "shell.toggle_terminal").as_deref(), Some(other), "rebound at once");
     assert!(w.app.texts().iter().any(|t| t.contains("Reset")), "a rebound row offers Reset");
 
     // ⌘B is Toggle sidebar's: recorded (the recorder takes every key while
@@ -558,7 +703,7 @@ fn a_rebound_shortcut_takes_effect_at_once() {
     w.app.click(recorder);
     w.app.frames(5);
     assert_eq!(w.press("cmd+b"), None, "⌘B goes to the recorder, not its command");
-    assert_eq!(published(&w, "shell.toggle_terminal").as_deref(), Some("ctrl+alt+t"), "a taken key is refused");
+    assert_eq!(published(&w, "shell.toggle_terminal").as_deref(), Some(other), "a taken key is refused");
     assert_eq!(published(&w, "shell.toggle_sidebar").as_deref(), Some("cmd+b"));
     let said = w.app.texts();
     assert!(

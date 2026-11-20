@@ -321,9 +321,9 @@ final class BillingViewController: UIViewController, SFSafariViewControllerDeleg
         return button
     }
 
-    /// "about 750 hours" of the default machine.
+    /// "about 750 small-machine hours": a credit is a minute of a small machine.
     static func hours(_ credits: Double) -> String {
-        "about \(CloudUI.credits((credits / 60).rounded())) hours"
+        "about \(CloudUI.credits((credits / 60).rounded())) small-machine hours"
     }
 
     // MARK: Payments

@@ -16,13 +16,14 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
 use zeron_proto::{
-    BillingLink, BillingStatus, CloudSession, CloudSessions, CloudStatus, CloudUsage,
+    BillingLink, BillingStatus, CloudReach, CloudSession, CloudSessions, CloudStatus, CloudUsage,
     GithubConnectProgress, GithubDeviceFlow, GithubRepo, HarnessId, VaultAccount,
     VaultAccountProfile, VaultProvider, VaultStatus,
 };
+use zeron_proto::{CLOUD_STATES_HEADER, CLOUD_STATES_UNDERSTOOD};
 
 #[derive(Deserialize)]
 struct AccountList {
@@ -78,6 +79,11 @@ impl SessionAction {
         }
     }
 }
+
+/// Starts the error of a wake the edge refused as too small for the machine's
+/// disk, so a client can tell it from any other failure across the RPC's
+/// plain-text errors. The edge's own sentence follows it.
+pub const DISK_TOO_SMALL: &str = "disk_too_small";
 
 /// Shown for anything forwarded to the logical Cloud device, which has no
 /// engine: work happens on a session's own device.
@@ -243,14 +249,16 @@ impl CloudClient {
         }
     }
 
-    /// `POST /cloud/{orgId}/sessions` with `{chatId, spaceId, repo, branch?}` — idempotent
-    /// per chat; mints the session device and starts provisioning.
+    /// `POST /cloud/{orgId}/sessions` with `{chatId, spaceId, repo, branch?,
+    /// reach?}` — idempotent per chat; mints the session device and starts
+    /// provisioning. No `reach`: the account's default.
     pub async fn create_session(
         &self,
         chat_id: &str,
         space_id: &str,
         repo: &GithubRepo,
         branch: Option<&str>,
+        reach: Option<CloudReach>,
     ) -> Result<CloudSession, EngineError> {
         let mut body = serde_json::json!({
             "chatId": chat_id,
@@ -264,6 +272,9 @@ impl CloudClient {
         if let Some(branch) = branch {
             body["branch"] = serde_json::Value::String(branch.to_owned());
         }
+        if let Some(reach) = reach {
+            body["reach"] = reach.as_str().into();
+        }
         self.target()?
             .call::<CloudSession>(
                 reqwest::Method::POST,
@@ -271,6 +282,109 @@ impl CloudClient {
                 &[],
                 Some(body),
                 "Start a Cloud session",
+            )
+            .await
+            .map_err(Failure::into_error)
+    }
+
+    /// `PUT /cloud/{orgId}/machine`: the size new sessions start on.
+    pub async fn set_machine(&self, machine: &str) -> Result<CloudStatus, EngineError> {
+        require_id(machine, "machine")?;
+        self.target()?
+            .call::<CloudStatus>(
+                reqwest::Method::PUT,
+                &["cloud", "machine"],
+                &[],
+                Some(serde_json::json!({ "machine": machine })),
+                "Set the Cloud machine size",
+            )
+            .await
+            .map_err(Failure::into_error)
+    }
+
+    /// `PUT /cloud/{orgId}/reach`: the reach new sessions start with.
+    pub async fn set_reach(&self, reach: CloudReach) -> Result<CloudStatus, EngineError> {
+        self.target()?
+            .call::<CloudStatus>(
+                reqwest::Method::PUT,
+                &["cloud", "reach"],
+                &[],
+                Some(serde_json::json!({ "reach": reach })),
+                "Set what Cloud chats reach",
+            )
+            .await
+            .map_err(Failure::into_error)
+    }
+
+    /// `POST /cloud/{orgId}/sessions/{chatId}/reach {reach}`.
+    pub async fn set_session_reach(
+        &self,
+        chat_id: &str,
+        reach: CloudReach,
+    ) -> Result<CloudSession, EngineError> {
+        require_id(chat_id, "chatId")?;
+        self.target()?
+            .call::<CloudSession>(
+                reqwest::Method::POST,
+                &["cloud", "sessions", chat_id, "reach"],
+                &[],
+                Some(serde_json::json!({ "reach": reach })),
+                "Change what this Cloud chat reaches",
+            )
+            .await
+            .map_err(Failure::into_error)
+    }
+
+    /// `POST /cloud/{orgId}/sessions/{chatId}/wake {machine?, wake?}`.
+    pub async fn wake_session(
+        &self,
+        chat_id: &str,
+        machine: Option<&str>,
+        wake: Option<bool>,
+    ) -> Result<CloudSession, EngineError> {
+        require_id(chat_id, "chatId")?;
+        let mut body = serde_json::Map::new();
+        if let Some(machine) = machine {
+            require_id(machine, "machine")?;
+            body.insert("machine".into(), machine.into());
+        }
+        if let Some(wake) = wake {
+            body.insert("wake".into(), wake.into());
+        }
+        self.target()?
+            .call::<CloudSession>(
+                reqwest::Method::POST,
+                &["cloud", "sessions", chat_id, "wake"],
+                &[],
+                Some(serde_json::Value::Object(body)),
+                SessionAction::Wake.verb(),
+            )
+            .await
+            .map_err(Failure::into_error)
+    }
+
+    /// `POST /cloud/{orgId}/sessions/{chatId}/retry {machine?}`: a failed
+    /// lifecycle again, or a fresh machine once its data expired.
+    pub async fn retry_session(
+        &self,
+        chat_id: &str,
+        machine: Option<&str>,
+    ) -> Result<CloudSession, EngineError> {
+        require_id(chat_id, "chatId")?;
+        let body = match machine {
+            Some(machine) => {
+                require_id(machine, "machine")?;
+                serde_json::json!({ "machine": machine })
+            }
+            None => serde_json::json!({}),
+        };
+        self.target()?
+            .call::<CloudSession>(
+                reqwest::Method::POST,
+                &["cloud", "sessions", chat_id, "retry"],
+                &[],
+                Some(body),
+                "Start a fresh Cloud machine",
             )
             .await
             .map_err(Failure::into_error)
@@ -340,6 +454,69 @@ impl CloudClient {
                 "Delete the Cloud session",
             )
             .await
+            .map_err(Failure::into_error)
+    }
+
+    /// `GET /cloud/{orgId}/models`: the models Cloud's machines run, by agent:
+    /// Claude Code's and Codex's kept on the edge by hand (a new one needs no
+    /// app release), every other agent's as a machine of this account last
+    /// discovered it with Cloud's credentials (`crate::model_publish`), and
+    /// that agent's catalog per set of accounts beside it. Each model is as
+    /// the edge wrote it; [`cloud_models`] reads them leniently.
+    pub async fn models(&self) -> Result<CloudModelLists, EngineError> {
+        self.target()?
+            .call::<CloudModelLists>(
+                reqwest::Method::GET,
+                &["cloud", "models"],
+                &[],
+                None,
+                "Read Cloud's models",
+            )
+            .await
+            .map_err(Failure::into_error)
+    }
+
+    /// `GET /cloud/{orgId}/plan-usage`: subscriptions' usage as Cloud machines'
+    /// runs reported it, by account (`provider@slot`).
+    pub async fn reported_usage(
+        &self,
+    ) -> Result<std::collections::HashMap<String, ReportedUsage>, EngineError> {
+        #[derive(Deserialize)]
+        struct Reply {
+            #[serde(default)]
+            usage: std::collections::HashMap<String, ReportedUsage>,
+        }
+        self.target()?
+            .call::<Reply>(reqwest::Method::GET, &["cloud", "plan-usage"], &[], None, "Read Cloud's usage")
+            .await
+            .map(|reply| reply.usage)
+            .map_err(Failure::into_error)
+    }
+
+    /// `POST /cloud/{orgId}/models {harness, models, accounts}`: the models
+    /// `accounts` run `harness` with, as this device discovered them signing
+    /// one in for Cloud, kept as theirs until a machine discovers its own.
+    pub async fn publish_account_models(
+        &self,
+        harness: zeron_proto::HarnessId,
+        models: &[zeron_proto::Model],
+        accounts: &str,
+    ) -> Result<(), EngineError> {
+        let body = serde_json::json!({
+            "harness": harness.as_str(),
+            "models": models,
+            "accounts": accounts,
+        });
+        self.target()?
+            .call::<serde_json::Value>(
+                reqwest::Method::POST,
+                &["cloud", "models"],
+                &[],
+                Some(body),
+                "Keep Cloud's models",
+            )
+            .await
+            .map(|_| ())
             .map_err(Failure::into_error)
     }
 
@@ -501,12 +678,9 @@ impl CloudClient {
         key: &str,
         authorized_devices: Vec<String>,
     ) -> Result<VaultStatus, EngineError> {
-        if !matches!(
-            provider,
-            VaultProvider::AnthropicKey | VaultProvider::OpenaiKey
-        ) {
+        if !provider.is_api_key() {
             return Err(EngineError::Other(format!(
-                "{} is not an API-key provider (use anthropic-key or openai-key)",
+                "{} is not an API-key provider",
                 provider.as_str()
             )));
         }
@@ -570,7 +744,7 @@ impl CloudClient {
             .await
     }
 
-    async fn put_credential_with(
+    pub(crate) async fn put_credential_with(
         &self,
         provider: VaultProvider,
         material: serde_json::Value,
@@ -678,6 +852,20 @@ impl CloudClient {
             .map_err(Failure::into_error)
     }
 
+    /// `DELETE /vault/{orgId}/accounts/github/{slot}`: one GitHub login, the
+    /// others left as they are.
+    async fn github_forget(&self, slot: &str) -> Result<Vec<VaultAccount>, EngineError> {
+        require_id(slot, "account id")?;
+        self.vault_forget(VaultProvider::Github, slot).await
+    }
+
+    /// `POST /vault/{orgId}/accounts/github/active {slot}`: the login new
+    /// sessions try first.
+    async fn github_activate(&self, slot: &str) -> Result<Vec<VaultAccount>, EngineError> {
+        require_id(slot, "account id")?;
+        self.vault_activate(VaultProvider::Github, Some(slot)).await
+    }
+
     /// `PATCH /vault/{orgId}/credentials/{provider}` with `{authorizedDevices}`.
     pub async fn authorize(
         &self,
@@ -779,8 +967,12 @@ pub(crate) fn handles(method: &str) -> bool {
             | methods::BILLING_CHECKOUT
             | methods::BILLING_PORTAL
             | methods::CLOUD_SESSIONS
+            | methods::CLOUD_SET_MACHINE
+            | methods::CLOUD_SET_REACH
+            | methods::CLOUD_SESSION_SET_REACH
             | methods::CLOUD_SESSION_WAKE
             | methods::CLOUD_SESSION_SLEEP
+            | methods::CLOUD_SESSION_RETRY
             | methods::CLOUD_SESSION_DELETE
             | methods::VAULT_STATUS
             | methods::VAULT_CONNECT_CODEX
@@ -791,7 +983,37 @@ pub(crate) fn handles(method: &str) -> bool {
             | methods::VAULT_REVOKE_DEVICE
             | methods::GITHUB_CONNECT_START
             | methods::GITHUB_CONNECT_POLL
+            | methods::GITHUB_ACCOUNTS
+            | methods::GITHUB_ACCOUNT_FORGET
+            | methods::GITHUB_ACCOUNT_ACTIVATE
     )
+}
+
+#[derive(Deserialize)]
+struct MachineParams {
+    machine: String,
+}
+
+#[derive(Deserialize)]
+struct ReachParams {
+    reach: CloudReach,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatReachParams {
+    chat_id: String,
+    reach: CloudReach,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SizedChatParams {
+    chat_id: String,
+    #[serde(default)]
+    machine: Option<String>,
+    #[serde(default)]
+    wake: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -851,6 +1073,12 @@ struct FlowParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SlotParams {
+    slot: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ChatParams {
     chat_id: String,
 }
@@ -890,16 +1118,49 @@ pub(crate) async fn dispatch(
     method: &str,
     raw: serde_json::Value,
 ) -> Result<RpcReply, RpcError> {
+    if matches!(
+        method,
+        methods::VAULT_PUT_API_KEY | methods::VAULT_DISCONNECT | methods::VAULT_CONNECT_CODEX | methods::VAULT_CONNECT_CLAUDE
+    ) {
+        // (Which accounts Cloud runs an agent on may change.)
+        crate::cloud_accounts::forget_active_accounts();
+    }
     match method {
         methods::CLOUD_STATUS => RpcReply::value(&cloud.status().await.map_err(failed)?),
         methods::CLOUD_ENABLE => RpcReply::value(&cloud.enable().await.map_err(failed)?),
         methods::CLOUD_DELETE => RpcReply::value(&cloud.delete().await.map_err(failed)?),
         methods::CLOUD_SESSIONS => RpcReply::value(&cloud.sessions().await.map_err(failed)?),
-        methods::CLOUD_SESSION_WAKE => {
-            let p: ChatParams = params(raw)?;
+        methods::CLOUD_SET_MACHINE => {
+            let p: MachineParams = params(raw)?;
+            RpcReply::value(&cloud.set_machine(&p.machine).await.map_err(failed)?)
+        }
+        methods::CLOUD_SET_REACH => {
+            let p: ReachParams = params(raw)?;
+            RpcReply::value(&cloud.set_reach(p.reach).await.map_err(failed)?)
+        }
+        methods::CLOUD_SESSION_SET_REACH => {
+            let p: ChatReachParams = params(raw)?;
             RpcReply::value(
                 &cloud
-                    .session_action(&p.chat_id, SessionAction::Wake)
+                    .set_session_reach(&p.chat_id, p.reach)
+                    .await
+                    .map_err(failed)?,
+            )
+        }
+        methods::CLOUD_SESSION_WAKE => {
+            let p: SizedChatParams = params(raw)?;
+            RpcReply::value(
+                &cloud
+                    .wake_session(&p.chat_id, p.machine.as_deref(), p.wake)
+                    .await
+                    .map_err(failed)?,
+            )
+        }
+        methods::CLOUD_SESSION_RETRY => {
+            let p: SizedChatParams = params(raw)?;
+            RpcReply::value(
+                &cloud
+                    .retry_session(&p.chat_id, p.machine.as_deref())
                     .await
                     .map_err(failed)?,
             )
@@ -960,20 +1221,26 @@ pub(crate) async fn dispatch(
         methods::VAULT_STATUS => RpcReply::value(&cloud.vault_status().await.map_err(failed)?),
         methods::VAULT_PUT_API_KEY => {
             let p: PutKeyParams = params(raw)?;
+            // No devices named (a provider card's key): Cloud's own logical
+            // device, which every session machine draws grants through.
+            let devices = if p.authorized_devices.is_empty() {
+                let device = cloud.status().await.map_err(failed)?.device_id.ok_or_else(|| {
+                    RpcError::Failed("Turn Cloud on in Settings → Cloud first.".into())
+                })?;
+                vec![device]
+            } else {
+                p.authorized_devices
+            };
             let status = cloud
-                .put_api_key(p.provider, &p.key, p.authorized_devices)
+                .put_api_key(p.provider, &p.key, devices)
                 .await
                 .map_err(failed)?;
-            // A new key is the account Cloud uses from now on — machines
-            // prefer an active subscription login, so clear that one.
-            let login = match p.provider {
-                VaultProvider::AnthropicKey => Some(VaultProvider::Claude),
-                VaultProvider::OpenaiKey => Some(VaultProvider::Codex),
-                _ => None,
-            };
-            if let Some(login) = login {
-                cloud.vault_activate(login, None).await.map_err(failed)?;
-            }
+            // The key becomes its vendor's active key. No sign-in is
+            // cleared: logins are shared by several agents (one ChatGPT
+            // login runs Codex, Pi, OpenCode and Hermes), so a key saved for
+            // one must not sign the others out. Machines use it wherever no
+            // sign-in is in use; preferring it over a sign-in is the card's
+            // own switch (`ActivateAgentAccount`).
             RpcReply::value(&status)
         }
         methods::VAULT_AUTHORIZE => {
@@ -1006,6 +1273,23 @@ pub(crate) async fn dispatch(
             let p: FlowParams = params(raw)?;
             RpcReply::value(&cloud.github_poll(&p.flow_id).await.map_err(failed)?)
         }
+        methods::GITHUB_ACCOUNTS => {
+            let accounts = cloud
+                .vault_accounts(VaultProvider::Github)
+                .await
+                .map_err(failed)?;
+            RpcReply::value(&serde_json::json!({ "accounts": accounts }))
+        }
+        methods::GITHUB_ACCOUNT_FORGET => {
+            let p: SlotParams = params(raw)?;
+            let accounts = cloud.github_forget(&p.slot).await.map_err(failed)?;
+            RpcReply::value(&serde_json::json!({ "accounts": accounts }))
+        }
+        methods::GITHUB_ACCOUNT_ACTIVATE => {
+            let p: SlotParams = params(raw)?;
+            let accounts = cloud.github_activate(&p.slot).await.map_err(failed)?;
+            RpcReply::value(&serde_json::json!({ "accounts": accounts }))
+        }
         methods::VAULT_CONNECT_CODEX | methods::VAULT_CONNECT_CLAUDE => {
             let p: DevicesParams = params(raw)?;
             // Refuse before any browser opens: nowhere to upload to.
@@ -1017,9 +1301,14 @@ pub(crate) async fn dispatch(
             } else {
                 HarnessId::ClaudeCode
             };
-            let capture = vault_upload_sink(cloud, harness, p.authorized_devices);
+            let vault = if harness == HarnessId::Codex {
+                VaultProvider::Codex
+            } else {
+                VaultProvider::Claude
+            };
+            let capture = vault_upload_sink(cloud, vault, p.authorized_devices);
             let start = accounts
-                .start_capture_login(harness, capture)
+                .start_capture_login(harness, None, capture)
                 .await
                 .map_err(failed)?;
             RpcReply::value(&start)
@@ -1029,25 +1318,66 @@ pub(crate) async fn dispatch(
 }
 
 /// Where a capture-only sign-in on this device lands: the vault, as a login
-/// of `harness`'s subscription provider usable by `devices`.
+/// of `vault` usable by `devices`. Codex's capture is its `auth.json`,
+/// Claude's `{credential, profile}`; every other sign-in hands over its
+/// upload as `{provider, material, profile?}`, which must name `vault`.
 pub(crate) fn vault_upload_sink(
     cloud: CloudClient,
-    harness: HarnessId,
+    vault: VaultProvider,
     devices: Vec<String>,
 ) -> CaptureSink {
     Arc::new(move |captured| {
         let cloud = cloud.clone();
         let devices = devices.clone();
         Box::pin(async move {
-            let uploaded = if harness == HarnessId::Codex {
-                cloud.put_codex_auth(captured, devices).await
-            } else {
-                let (credential, profile) = split_capture(captured);
-                cloud.put_claude_auth(credential, devices, profile).await
+            let uploaded = match vault {
+                VaultProvider::Codex => cloud.put_codex_auth(captured, devices).await,
+                VaultProvider::Claude => {
+                    let (credential, profile) = split_capture(captured);
+                    cloud.put_claude_auth(credential, devices, profile).await
+                }
+                _ => {
+                    let upload = CapturedUpload::read(captured)
+                        .filter(|upload| upload.provider == vault)
+                        .ok_or_else(|| {
+                            format!("The {} sign-in returned nothing to keep.", vault.as_str())
+                        })?;
+                    cloud
+                        .put_credential_with(vault, upload.material, devices, upload.profile)
+                        .await
+                }
             };
             uploaded.map(drop).map_err(|e| e.to_string())
         })
     })
+}
+
+/// A captured sign-in's own upload: `{provider, material, profile?}`.
+struct CapturedUpload {
+    provider: VaultProvider,
+    material: serde_json::Value,
+    profile: Option<VaultAccountProfile>,
+}
+
+impl CapturedUpload {
+    fn read(captured: serde_json::Value) -> Option<Self> {
+        let serde_json::Value::Object(mut map) = captured else {
+            return None;
+        };
+        let provider = VaultProvider::parse(map.get("provider")?.as_str()?)?;
+        let material = map
+            .remove("material")
+            .filter(serde_json::Value::is_object)?;
+        let profile = map
+            .remove("profile")
+            .and_then(|p| serde_json::from_value::<VaultAccountProfile>(p).ok())
+            .filter(|p| *p != VaultAccountProfile::default());
+        Some(Self {
+            provider,
+            material,
+            profile,
+        })
+    }
 }
 
 /// A captured sign-in: `{credential, profile}` (Claude's, with the identity
@@ -1125,7 +1455,17 @@ impl Target {
         let is_read = method == reqwest::Method::GET;
         let is_delete = method == reqwest::Method::DELETE;
         let token = self.token.token().await.map_err(token_error)?;
-        let mut request = self.http.request(method, url).bearer_auth(token);
+        let mut request = self
+            .http
+            .request(method, url)
+            .bearer_auth(token)
+            .header(CLOUD_STATES_HEADER, CLOUD_STATES_UNDERSTOOD)
+            // The vault providers this build parses: the edge lists no other
+            // in `VaultStatus` (an older build sees the original five).
+            .header(
+                zeron_proto::VAULT_PROVIDERS_HEADER,
+                zeron_proto::vault_providers_understood(),
+            );
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -1156,6 +1496,77 @@ impl Target {
     }
 }
 
+
+/// `GET /cloud/{orgId}/models`'s reply (and the copy kept for when the edge is
+/// out of reach). An older edge's has no `catalogs`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CloudModelLists {
+    /// Each agent's newest catalog (Claude Code's and Codex's hand-kept).
+    #[serde(default)]
+    pub models: std::collections::HashMap<String, Vec<serde_json::Value>>,
+    /// Each agent's catalog per set of accounts, the newest first.
+    #[serde(default)]
+    pub catalogs: std::collections::HashMap<String, Vec<AccountCatalog>>,
+}
+
+/// A subscription's usage as a Cloud machine's run reported it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportedUsage {
+    #[serde(default)]
+    pub windows: Vec<zeron_proto::AgentUsageWindow>,
+    #[serde(default)]
+    pub plan_label: Option<String>,
+    /// Unix ms.
+    pub at: i64,
+}
+
+/// One set of accounts' catalog of an agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountCatalog {
+    /// `provider@slot` pairs, sorted, `,`-joined
+    /// (`crate::credentials::credential_accounts`).
+    pub accounts: String,
+    #[serde(default)]
+    pub models: Vec<serde_json::Value>,
+}
+
+impl CloudModelLists {
+    /// The models `harness` runs with on Cloud: those discovered with the
+    /// accounts Cloud runs it on now (`accounts`), else its newest catalog
+    /// (another account's, or a machine's that named none). `None` with
+    /// nothing listed for it.
+    pub fn for_harness(&self, harness: &str, accounts: Option<&str>) -> Option<&[serde_json::Value]> {
+        let matched = accounts.and_then(|accounts| {
+            self.catalogs
+                .get(harness)?
+                .iter()
+                .find(|c| c.accounts == accounts && !c.models.is_empty())
+        });
+        match matched {
+            Some(catalog) => Some(&catalog.models),
+            None => self.models.get(harness).map(Vec::as_slice),
+        }
+    }
+}
+
+/// The edge's models, as this engine's catalog takes them: each read alone, so/// The edge's models, as this engine's catalog takes them: each read alone, so
+/// one this build can't read (a reasoning level it doesn't know, say) drops
+/// that level or that model, never the list.
+pub fn cloud_models(listed: &[serde_json::Value]) -> Vec<zeron_proto::Model> {
+    listed
+        .iter()
+        .filter_map(|m| {
+            let mut m = m.clone();
+            if let Some(levels) = m.get_mut("reasoningLevels").and_then(|l| l.as_array_mut()) {
+                levels.retain(|l| {
+                    serde_json::from_value::<zeron_proto::ReasoningLevel>(l.clone()).is_ok()
+                });
+            }
+            serde_json::from_value::<zeron_proto::Model>(m).ok()
+        })
+        .collect()
+}
 
 fn available_vault(status: VaultStatus) -> VaultStatus {
     VaultStatus {
@@ -1218,6 +1629,11 @@ fn edge_error(status: u16, body: &[u8], what: &str) -> EngineError {
         (_, status) => format!("{what} failed ({status})."),
     });
     tracing::warn!(status, code = code.as_deref().unwrap_or(""), %what, "cloud: edge refused");
+    // The one refusal a client acts on rather than shows: kept in the text, as
+    // an RPC's error is only text.
+    if code.as_deref().is_some_and(|c| c.contains("too_small")) {
+        return EngineError::Other(format!("{DISK_TOO_SMALL}: {text}"));
+    }
     EngineError::Other(text)
 }
 
@@ -1233,6 +1649,8 @@ mod tests {
         method: String,
         target: String,
         authorization: Option<String>,
+        cloud_states: Option<String>,
+        vault_providers: Option<String>,
         body: serde_json::Value,
     }
 
@@ -1275,6 +1693,8 @@ mod tests {
                         let target = request_line.next().unwrap_or("").to_string();
                         let mut length = 0usize;
                         let mut authorization = None;
+                        let mut cloud_states = None;
+                        let mut vault_providers = None;
                         for line in lines {
                             if let Some((name, value)) = line.split_once(':') {
                                 let value = value.trim();
@@ -1282,6 +1702,12 @@ mod tests {
                                     length = value.parse().unwrap_or(0);
                                 } else if name.eq_ignore_ascii_case("authorization") {
                                     authorization = Some(value.to_string());
+                                } else if name.eq_ignore_ascii_case(CLOUD_STATES_HEADER) {
+                                    cloud_states = Some(value.to_string());
+                                } else if name
+                                    .eq_ignore_ascii_case(zeron_proto::VAULT_PROVIDERS_HEADER)
+                                {
+                                    vault_providers = Some(value.to_string());
                                 }
                             }
                         }
@@ -1301,6 +1727,8 @@ mod tests {
                             method,
                             target,
                             authorization,
+                            cloud_states,
+                            vault_providers,
                             body,
                         });
                         let reply = reply.to_string();
@@ -1380,6 +1808,7 @@ mod tests {
                 assert_eq!(body["branch"], "feature/x");
                 assert_eq!(body["repo"]["fullName"], "acme/app");
                 assert_eq!(body["repo"]["defaultBranch"], "main");
+                assert_eq!(body["reach"], "isolated");
                 (
                     200,
                     serde_json::json!({"chatId": "chat-2", "deviceId": "cloud-s2",
@@ -1468,6 +1897,43 @@ mod tests {
         }
     }
 
+    /// The catalog for the accounts Cloud runs an agent on now, else its
+    /// newest; an older edge's reply (no `catalogs`) still reads.
+    #[test]
+    fn the_accounts_catalog_wins_over_the_newest() {
+        let lists: CloudModelLists = serde_json::from_value(serde_json::json!({
+            "models": { "grok": [{ "id": "grok-4.7" }] },
+            "catalogs": { "grok": [
+                { "accounts": "grok@paid", "models": [{ "id": "grok-4.7-build-fast" }], "at": 2 },
+                { "accounts": "grok@free", "models": [{ "id": "grok-4.7" }], "at": 1 }
+            ]}
+        }))
+        .unwrap();
+        let ids = |models: Option<&[serde_json::Value]>| {
+            models.map(|m| m.iter().map(|v| v["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>())
+        };
+        assert_eq!(ids(lists.for_harness("grok", Some("grok@paid"))), Some(vec!["grok-4.7-build-fast".into()]));
+        assert_eq!(ids(lists.for_harness("grok", Some("grok@other"))), Some(vec!["grok-4.7".into()]), "unknown accounts: the newest");
+        assert_eq!(ids(lists.for_harness("grok", None)), Some(vec!["grok-4.7".into()]));
+        assert_eq!(lists.for_harness("pi", Some("codex@c1")), None);
+        let older: CloudModelLists = serde_json::from_value(serde_json::json!({ "models": { "pi": [{ "id": "a" }] } })).unwrap();
+        assert_eq!(ids(older.for_harness("pi", Some("codex@c1"))), Some(vec!["a".into()]));
+    }
+
+    #[test]
+    fn cloud_models_are_read_one_at_a_time() {
+        let listed = vec![
+            serde_json::json!({ "id": "opus", "label": "Opus", "reasoningLevels": ["low", "ultrathink", "someday"], "options": [] }),
+            serde_json::json!({ "label": "No id" }),
+            serde_json::json!({ "id": "sonnet", "label": "Sonnet" }),
+        ];
+        let models = cloud_models(&listed);
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["opus", "sonnet"]);
+        // A level this build doesn't know goes; the model stays.
+        assert_eq!(models[0].reasoning_levels.len(), 2);
+    }
+
     #[tokio::test]
     async fn cloud_lifecycle_against_the_edge() {
         let edge = MockEdge::start(edge).await;
@@ -1498,8 +1964,10 @@ mod tests {
                     private: true,
                     description: None,
                     pushed_at: 0,
+                    ..Default::default()
                 },
                 Some("feature/x"),
+                Some(CloudReach::Isolated),
             )
             .await
             .unwrap();
@@ -1515,6 +1983,62 @@ mod tests {
             busy.to_string(),
             "All 5 of your Cloud sessions that may run at once are busy."
         );
+        // Every call says which states this build can parse: without it the
+        // edge answers as it must to an engine that can't read them.
+        assert!(
+            edge.requests()
+                .iter()
+                .all(|r| r.cloud_states.as_deref() == Some(CLOUD_STATES_UNDERSTOOD)),
+            "{:?}",
+            edge.requests()
+        );
+        // ... and which vault providers: the edge lists no other.
+        let understood = zeron_proto::vault_providers_understood();
+        assert!(
+            edge.requests()
+                .iter()
+                .all(|r| r.vault_providers.as_deref() == Some(understood.as_str())),
+            "{:?}",
+            edge.requests()
+        );
+        // The size picked rides the wake, and only then.
+        let _ = client.wake_session("chat-1", Some("xlarge"), None).await;
+        let _ = client.wake_session("chat-1", Some("large"), Some(false)).await;
+        let _ = client.retry_session("chat-1", Some("large")).await;
+        let _ = client.set_machine("small").await;
+        let sent: Vec<(String, serde_json::Value)> = edge
+            .requests()
+            .into_iter()
+            .rev()
+            .take(4)
+            .map(|r| (r.target.clone(), r.body.clone()))
+            .collect();
+        assert_eq!(sent[3].1, serde_json::json!({ "machine": "xlarge" }));
+        assert_eq!(sent[2].1, serde_json::json!({ "machine": "large", "wake": false }));
+        assert!(sent[1].0.ends_with("/sessions/chat-1/retry"), "{}", sent[1].0);
+        assert_eq!(sent[1].1, serde_json::json!({ "machine": "large" }));
+        assert!(sent[0].0.ends_with("/machine"), "{}", sent[0].0);
+        assert_eq!(sent[0].1, serde_json::json!({ "machine": "small" }));
+        // A reach, the account's and one session's, as the person picked it.
+        let _ = client.set_reach(CloudReach::Isolated).await;
+        let _ = client
+            .set_session_reach("chat-1", CloudReach::Devices)
+            .await;
+        let sent: Vec<(String, serde_json::Value)> = edge
+            .requests()
+            .into_iter()
+            .rev()
+            .take(2)
+            .map(|r| (r.target.clone(), r.body.clone()))
+            .collect();
+        assert!(sent[1].0.ends_with("/cloud/org_1/reach"), "{}", sent[1].0);
+        assert_eq!(sent[1].1, serde_json::json!({ "reach": "isolated" }));
+        assert!(
+            sent[0].0.ends_with("/sessions/chat-1/reach"),
+            "{}",
+            sent[0].0
+        );
+        assert_eq!(sent[0].1, serde_json::json!({ "reach": "devices" }));
         // A malformed chat id never reaches the edge.
         assert!(
             client
@@ -1632,6 +2156,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn saving_a_key_signs_no_agent_out() {
+        fn edge(method: &str, target: &str, _: &serde_json::Value) -> (u16, serde_json::Value) {
+            match method {
+                "PUT" if target.starts_with("/vault/org_1/credentials/") => (200, vault_view()),
+                _ => (404, serde_json::json!({"error": "not_found"})),
+            }
+        }
+        let edge = MockEdge::start(edge).await;
+        let client = edge.client("org_1");
+        let tmp = tempfile::tempdir().unwrap();
+        let accounts = AgentAccounts::new(crate::agent_accounts::AgentAccountsConfig::detect(
+            tmp.path(),
+        ));
+        // An OpenAI key beside the ChatGPT login Codex, Pi, OpenCode and
+        // Hermes share: saved, and nothing else changes.
+        for provider in ["openai-key", "anthropic-key", "xai-key", "gemini-key"] {
+            dispatch(
+                client.clone(),
+                &accounts,
+                zeron_rpc::methods::VAULT_PUT_API_KEY,
+                serde_json::json!({
+                    "provider": provider, "key": "sk-saved-key-1", "authorizedDevices": ["cloud-1"]
+                }),
+            )
+            .await
+            .unwrap();
+        }
+        let requests = edge.requests();
+        assert_eq!(requests.iter().filter(|r| r.method == "PUT").count(), 4);
+        assert!(
+            requests.iter().all(|r| !r.target.ends_with("/active")),
+            "{:?}",
+            requests.iter().map(|r| &r.target).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
     async fn vault_status_keys_and_github_against_the_edge() {
         let edge = MockEdge::start(edge).await;
         let client = edge.client("org_1");
@@ -1719,6 +2280,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_size_too_small_is_told_apart_across_the_rpcs_plain_text_errors() {
+        fn edge(_: &str, target: &str, _: &serde_json::Value) -> (u16, serde_json::Value) {
+            if target.ends_with("/data-expired/wake") {
+                return (
+                    409,
+                    serde_json::json!({"error": "data_expired", "message": "Its files are gone."}),
+                );
+            }
+            (
+                409,
+                serde_json::json!({
+                    "error": "machine_too_small",
+                    "message": "This machine needs 118.3 GiB of disk; a large machine holds 111.8 GiB.",
+                    "machine": "large", "neededGiB": 118.3, "capacityGiB": 111.8
+                }),
+            )
+        }
+        let edge = MockEdge::start(edge).await;
+        let client = edge.client("org_1");
+        let refused = client
+            .wake_session("chat-1", Some("large"), None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refused.starts_with("disk_too_small: "), "{refused}");
+        assert!(refused.contains("118.3 GiB"), "{refused}");
+        // Any other refusal stays the edge's own sentence.
+        let expired = client
+            .wake_session("data-expired", None, None)
+            .await
+            .unwrap_err();
+        assert_eq!(expired.to_string(), "Its files are gone.");
+    }
+
+    #[tokio::test]
     async fn missing_routes_and_unavailable_runtimes_read_as_unavailable() {
         let edge = MockEdge::start(edge).await;
         // Vault binding / cloud routes not deployed on this edge.
@@ -1753,6 +2349,33 @@ mod tests {
             assert!(client.github_start(vec![]).await.is_err());
         }
         assert_eq!(edge.requests().len(), calls);
+    }
+
+    #[test]
+    fn a_captured_upload_names_its_provider_material_and_identity() {
+        let upload = CapturedUpload::read(serde_json::json!({
+            "provider": "grok",
+            "material": {"grokAuth": {"key": "k"}, "scope": "https://auth.x.ai::c"},
+            "profile": {"email": "ada@x.ai"},
+        }))
+        .unwrap();
+        assert_eq!(upload.provider, VaultProvider::Grok);
+        assert_eq!(upload.material["scope"], "https://auth.x.ai::c");
+        assert_eq!(upload.profile.unwrap().email.as_deref(), Some("ada@x.ai"));
+        // An empty profile is no profile; anything malformed is nothing.
+        let bare = CapturedUpload::read(serde_json::json!({
+            "provider": "devin", "material": {"devinCredentials": {}}, "profile": {},
+        }))
+        .unwrap();
+        assert!(bare.profile.is_none());
+        for junk in [
+            serde_json::json!({"provider": "nope", "material": {}}),
+            serde_json::json!({"provider": "devin", "material": "x"}),
+            serde_json::json!({"material": {}}),
+            serde_json::json!([]),
+        ] {
+            assert!(CapturedUpload::read(junk.clone()).is_none(), "{junk}");
+        }
     }
 
     #[test]

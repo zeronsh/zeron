@@ -160,6 +160,14 @@ final class AppModel {
                 : ""
             DispatchQueue.main.async {
                 guard let self else { return }
+                #if DEBUG
+                // A simulator shares its Mac's network, so a rig plays airplane mode
+                // with this and an edge URL it can take away.
+                if ProcessInfo.processInfo.arguments.contains("-network-offline") {
+                    self.client?.setNetworkOnline(online: false)
+                    return
+                }
+                #endif
                 self.client?.setNetworkOnline(online: p.status == .satisfied)
                 if let last = self.pathShape, last != shape, !shape.isEmpty {
                     self.client?.networkPathChanged()
@@ -250,7 +258,8 @@ final class AppModel {
             deviceId: Self.deviceId,
             deviceName: UIDevice.current.name,
             platform: "ios",
-            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0",
+            relayLayer: Self.runsRelayLayer
         )
         do {
             client = try CoreClient(config: config, credentials: credentials, listener: bridge)
@@ -269,6 +278,17 @@ final class AppModel {
             client = nil
             return false
         }
+    }
+
+    /// Whether this build follows relayed chats (docs/design/relay-mobile.md). The
+    /// room's answer decides the rest, so an edge with the flag off changes nothing.
+    /// `-no-relay-layer` behaves as a shipped build does, for testing an old phone in
+    /// an account of new devices.
+    static var runsRelayLayer: Bool {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-no-relay-layer") { return false }
+        #endif
+        return true
     }
 
     /// `-edge <url>` points at a local `wrangler dev` edge; otherwise production.
@@ -845,19 +865,30 @@ final class AppModel {
     /// A Cloud chat created whose first message didn't go out yet.
     private var unsentCloudChat: (key: String, chatId: String)?
 
-    /// The agents Cloud runs.
-    static let cloudHarnesses = ["claude-code", "codex"]
+    /// The agents Cloud runs: every built-in one (mirrors
+    /// `zeron_proto::CLOUD_HARNESSES`).
+    static let cloudHarnesses = [
+        "claude-code", "codex", "cursor", "devin", "grok", "hermes", "fx", "pi", "opencode", "antigravity", "muse",
+    ]
 
     /// Cloud's models, as the edge lists them (no computer or Cloud machine
     /// is asked).
     func cloudModels() async -> [ModelChoice] {
         guard let client else { return [] }
-        var out: [ModelChoice] = []
-        for h in Self.cloudHarnesses {
-            let label = HarnessNames.label(h)
-            out += await client.cloudModels(harness: h).map { ModelChoice(harness: h, harnessLabel: label, id: $0.id, label: $0.label, efforts: $0.reasoningLevels, detail: $0.description) }
+        // One request per agent, all at once; the list keeps the agents' order.
+        let lists = await withTaskGroup(of: (Int, [ModelChoice]).self) { group in
+            for (i, h) in Self.cloudHarnesses.enumerated() {
+                group.addTask {
+                    let label = HarnessNames.label(h)
+                    let models = await client.cloudModels(harness: h).map { ModelChoice(harness: h, harnessLabel: label, id: $0.id, label: $0.label, efforts: $0.reasoningLevels, detail: $0.description) }
+                    return (i, models)
+                }
+            }
+            var byIndex: [Int: [ModelChoice]] = [:]
+            for await (i, models) in group { byIndex[i] = models }
+            return byIndex
         }
-        return out
+        return Self.cloudHarnesses.indices.flatMap { lists[$0] ?? [] }
     }
 
     func listFolders(deviceId: String, path: String?) async -> FolderListing? {

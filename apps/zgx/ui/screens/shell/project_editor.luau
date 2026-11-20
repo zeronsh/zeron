@@ -13,7 +13,9 @@
 --            photo is, cut here and kept by Zeron's edge.
 -- What's chosen is the project's on every device (sessions.set_project_icon).
 --
---   editor.open(id, start?)  asks about that project
+--   editor.open(id, start?, also?)  asks about that project (`also`: other
+--                    projects, by id, given what's saved too: Settings →
+--                    Projects' one row for a repository on Cloud's machines)
 --   editor.Dialog()   the dialog, placed once in the window
 
 local ds = require("@ds")
@@ -30,6 +32,7 @@ local M = {}
 type Picture = { path: string, w: number, h: number }
 local open = ui.state("project_edit_open", false)
 local editing = ui.state("project_edit_id", nil :: string?)
+local also = ui.state("project_edit_also", {} :: { string })
 local name = ui.state("project_edit_name", "")
 local kind = ui.state("project_edit_kind", "default")
 local emoji = ui.state("project_edit_emoji", nil :: string?)
@@ -74,7 +77,7 @@ local RING = 26
 
 local function project(): sessions.Project?
 	local id = editing:get()
-	for _, p in sessions.now:get().projects do
+	for _, p in sessions.projects:get() do
 		if p.id == id then
 			return p
 		end
@@ -94,7 +97,7 @@ end
 
 -- `start` opens it somewhere else than as the project is (a fixture's
 -- captures): `{ kind?, emoji?, hue?, picture?, zoom?, centre? }`.
-function M.open(id: string, start: { [string]: any }?)
+function M.open(id: string, start: { [string]: any }?, others: { string }?)
 	local p: sessions.Project? = nil
 	for _, q in sessions.now:peek().projects do
 		if q.id == id then
@@ -107,6 +110,7 @@ function M.open(id: string, start: { [string]: any }?)
 	local icon = p.icon or {}
 	ui.batch(function()
 		editing:set(id)
+		also:set(others or {})
 		name:set(p.name)
 		emoji:set(icon.emoji)
 		image:set(icon.image)
@@ -286,7 +290,7 @@ local function head(): Node
 			return ""
 		end
 		local device = ""
-		for _, d in sessions.now:get().devices do
+		for _, d in sessions.devices:get() do
 			if d.id == p.device then
 				device = d.name
 			end
@@ -626,20 +630,51 @@ local function save()
 			projects.forget_icon(before.image)
 		end
 	end
+	-- (And the others it was opened with, those still there.)
+	local targets: { sessions.Project } = { p :: sessions.Project }
+	for _, other in also:peek() do
+		for _, q in sessions.now:peek().projects do
+			if q.id == other and q.id ~= id then
+				table.insert(targets, q)
+			end
+		end
+	end
 	local function apply()
-		if new_name ~= p.name then
-			sessions.rename_project(id, new_name)
+		for _, q in targets do
+			if new_name ~= q.name then
+				sessions.rename_project(q.id, new_name)
+			end
 		end
 		local icon = wanted()
-		if same(icon, before) then
+		local left, refused = 0, false
+		for _, q in targets do
+			if not same(icon, q.icon) then
+				left += 1
+			end
+		end
+		if left == 0 then
 			done()
 			return
 		end
-		sessions.set_project_icon(id, icon):after(done, function(err: any)
-			busy:set(false)
-			local word = if type(err) == "table" then err.message elseif type(err) == "string" then err else nil
-			failed:set(if word == "outdated" or word == "gone" or word == "offline" then `save_{word}` else "save")
-		end)
+		for _, q in targets do
+			if same(icon, q.icon) then
+				continue
+			end
+			sessions.set_project_icon(q.id, icon):after(function()
+				left -= 1
+				if left == 0 and not refused then
+					done()
+				end
+			end, function(err: any)
+				if refused then
+					return
+				end
+				refused = true
+				busy:set(false)
+				local word = if type(err) == "table" then err.message elseif type(err) == "string" then err else nil
+				failed:set(if word == "outdated" or word == "gone" or word == "offline" then `save_{word}` else "save")
+			end)
+		end
 	end
 	-- A picture placed now: cut and kept first, then worn.
 	if kind:peek() == "image" and picture:peek() then
@@ -652,7 +687,7 @@ local function save()
 		end, function(err: any)
 			busy:set(false)
 			local word = if type(err) == "table" then err.message elseif type(err) == "string" then err else nil
-			failed:set(if word == "offline" or word == "signed_out" or word == "too_large" then word else "upload")
+			failed:set(if word == "offline" or word == "signed_out" or word == "too_large" or word == "unavailable" then word else "upload")
 		end)
 		return
 	end

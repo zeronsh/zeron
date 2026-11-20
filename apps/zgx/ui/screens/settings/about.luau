@@ -362,7 +362,7 @@ function M.view(): Node
 							}),
 						},
 					}),
-					-- The release channel (a macOS app install).
+					-- The release channel (an install that follows channels).
 					-- (A row that comes and goes brings its own hairline: none under the
 					-- one above while it's away.)
 					ui.show(function(): boolean
@@ -377,9 +377,12 @@ function M.view(): Node
 							if a.channel_note then
 								return a.channel_note
 							end
-							return if a.channel == "beta"
-								then ui.t("settings.about.beta.on"):get()
-								else ui.t("settings.about.beta.off", { version = a.beta_minimum or "13.0" }):get()
+							if a.channel == "beta" then
+								return ui.t("settings.about.beta.on"):get()
+							end
+							return if a.beta_minimum
+								then ui.t("settings.about.beta.off", { version = a.beta_minimum }):get()
+								else ui.t("settings.about.beta.off_any"):get()
 						end,
 						control = ds.Switch { value = beta, label = ui.t("settings.about.beta.label"), on_change = M.set_beta },
 						}),

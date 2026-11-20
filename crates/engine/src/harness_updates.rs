@@ -534,7 +534,7 @@ fn provider(id: HarnessId) -> ProviderSpec {
             // Only the official launcher can refresh itself (see
             // `is_muse_launcher`); a standalone binary is reinstalled.
             update_args: None,
-            manual_command: "curl -fsSL https://dev.meta.ai/install.sh | sh",
+            manual_command: "curl -fsSL https://dev.meta.ai/install.sh | bash",
         },
         // An agent from the ACP registry: its version is its record's, its
         // latest the registry's, and an update installs the registry's
@@ -958,7 +958,17 @@ impl HarnessUpdateCoordinator {
             return;
         }
         let coordinator = self.clone();
+        // A Cloud machine is woken by a message: a check started now spawns
+        // the CLI twice on a disk still arriving, and if it finds a release
+        // the install holds the message's run back until it ends.
+        let settle = crate::runner::is_cloud_platform().then_some(crate::runner::CLOUD_BOOT_SETTLE);
         *worker = Some(tokio::spawn(async move {
+            if let Some(settle) = settle {
+                tokio::select! {
+                    _ = coordinator.inner.shutdown.cancelled() => return,
+                    _ = tokio::time::sleep(settle) => {}
+                }
+            }
             let mut retry = FIRST_RETRY;
             'checks: loop {
                 // Shutdown must not wait out slow probes or registry requests.

@@ -11,8 +11,8 @@
  *
  * Test controls (plain HTTP from inside the tests):
  *   GET  https://boat.test/__state            sandboxes + call log
- *   POST https://boat.test/__fail             {sandboxId?, op, status, code, action?, times?}
- *   POST https://boat.test/__set              {sandboxId, rate?, state?, runningReads?, quiesceExit?}
+ *   POST https://boat.test/__fail             {sandboxId?, op, status, code, message?, action?, times?}
+ *   POST https://boat.test/__set              {sandboxId, rate?, state?, runningReads?, quiesceExit?, dataExpiredAt?, stoppedAt?, hydrated?, error?, healthReason?, stallResumes?}
  *   POST https://boat.test/__extra            {id, state, createdAt}: a sandbox nobody created via the API
  */
 import { Response, type Request } from "miniflare";
@@ -31,6 +31,19 @@ interface FakeSandbox {
   runningReads: number;
   /** Exit status of `zeron quiesce` (75 = the engine is busy). */
   quiesceExit?: number;
+  dataExpiredAt?: string | null;
+  stoppedAt?: string | null;
+  hydrated?: boolean;
+  error?: string | null;
+  healthReason?: string | null;
+  /** As real Boat answers a resume that doesn't fit: accepted, then the sandbox
+   * reads `error` with this text. A resume on another type gets past it. */
+  resumeFails?: string;
+  /** The next this-many resumes stick in `provisioning` (no command runs, the
+   * state never moves) until the sandbox is stopped: seen on real Boat for
+   * 7 to 11 minutes. */
+  stallResumes?: number;
+  stuck?: boolean;
 }
 
 interface Call {
@@ -47,6 +60,7 @@ interface Failure {
   op: string;
   status: number;
   code: string;
+  message?: string;
   action?: string;
   times: number;
 }
@@ -79,14 +93,19 @@ export const createBoatFake = () => {
     createdAt: s.createdAt,
     archiveAfter: null,
     desktopAvailable: false,
-    snapshotAvailable: true
+    snapshotAvailable: true,
+    dataExpiredAt: s.dataExpiredAt ?? null,
+    stoppedAt: s.stoppedAt ?? null,
+    error: s.error ?? null,
+    healthReason: s.healthReason ?? null,
+    hydrated: s.hydrated ?? true
   });
   const injected = (op: string, sandboxId?: string) => {
     const i = failures.findIndex((f) => f.op === op && (!f.sandboxId || f.sandboxId === sandboxId));
     if (i < 0) return undefined;
     const f = failures[i]!;
     if (--f.times <= 0) failures.splice(i, 1);
-    return error(f.status, f.code, `${f.code} (injected)`, f.action);
+    return error(f.status, f.code, f.message ?? `${f.code} (injected)`, f.action);
   };
   const newId = () => {
     let id = "bx_";
@@ -111,7 +130,7 @@ export const createBoatFake = () => {
     if (url.pathname === "/__set") {
       const s = sandboxes.get(body.sandboxId);
       if (!s) return reply(404, { ok: false });
-      Object.assign(s, body.rate === undefined ? {} : { rate: body.rate }, body.state === undefined ? {} : { state: body.state }, body.runningReads === undefined ? {} : { runningReads: body.runningReads }, body.quiesceExit === undefined ? {} : { quiesceExit: body.quiesceExit });
+      Object.assign(s, body.rate === undefined ? {} : { rate: body.rate }, body.state === undefined ? {} : { state: body.state }, body.runningReads === undefined ? {} : { runningReads: body.runningReads }, body.quiesceExit === undefined ? {} : { quiesceExit: body.quiesceExit }, body.dataExpiredAt === undefined ? {} : { dataExpiredAt: body.dataExpiredAt }, body.stoppedAt === undefined ? {} : { stoppedAt: body.stoppedAt }, body.hydrated === undefined ? {} : { hydrated: body.hydrated }, body.error === undefined ? {} : { error: body.error }, body.healthReason === undefined ? {} : { healthReason: body.healthReason }, body.resumeFails === undefined ? {} : { resumeFails: body.resumeFails }, body.stallResumes === undefined ? {} : { stallResumes: body.stallResumes });
       return reply(200, { ok: true });
     }
     if (url.pathname === "/__extra") {
@@ -171,8 +190,11 @@ export const createBoatFake = () => {
 
     switch (`${request.method} ${action ?? ""}`) {
       case "GET ": {
-        if (sandbox.state === "provisioning") sandbox.state = "idle";
-        else if (sandbox.state === "archiving") sandbox.state = "archived";
+        if (sandbox.state === "provisioning" && !sandbox.stuck) sandbox.state = "idle";
+        else if (sandbox.state === "archiving") {
+          sandbox.state = "archived";
+          sandbox.stoppedAt = new Date().toISOString();
+        }
         return reply(200, { ok: true, type: "sandbox.info", sandbox: view(sandbox) });
       }
       case "PATCH ":
@@ -183,13 +205,37 @@ export const createBoatFake = () => {
         sandbox.deleted = true;
         return reply(202, { ok: true, type: "sandbox.deleting", operation: { id: `bdop_${sandbox.id}`, status: "pending", stage: "removing" } });
       case "POST stop":
+        sandbox.stuck = false;
         if (sandbox.state !== "archived") sandbox.state = "archiving";
         return reply(202, { ok: true, type: "sandbox.stopping", status: "archiving", sandbox: view(sandbox) });
       case "POST resume":
+        if (sandbox.dataExpiredAt) return error(409, "snapshot_data_expired", "This sandbox's data was deleted 14 days after it stopped.");
+        if (body?.type !== undefined && ["ready", "idle", "running"].includes(sandbox.state)) {
+          return error(409, "sandbox_running_stop_first", "Stop it first.");
+        }
+        if (sandbox.resumeFails && (body?.type === undefined || body.type === sandbox.type)) {
+          // Seen on real Boat: asking again on the same type right after.
+          if (sandbox.state === "error") return error(409, "resume_failed", "Agent resume already in progress");
+          sandbox.state = "error";
+          sandbox.error = sandbox.resumeFails;
+          return reply(202, { ok: true, type: "sandbox.resuming", status: "resuming" });
+        }
+        sandbox.error = null;
         sandbox.state = "provisioning";
+        sandbox.stoppedAt = null;
+        if ((sandbox.stallResumes ?? 0) > 0) {
+          sandbox.stallResumes! -= 1;
+          sandbox.stuck = true;
+        }
+        if (body?.type !== undefined) sandbox.type = body.type;
         if (body?.ttlSeconds !== undefined) sandbox.ttlSeconds = body.ttlSeconds;
         return reply(202, { ok: true, type: "sandbox.resuming", status: "resuming", sandbox: view(sandbox) });
       case "POST commands": {
+        if (sandbox.state === "error") return error(409, "sandbox_not_running", "No machine to run that on.");
+        if (sandbox.stuck) return error(409, "sandbox_not_ready", "Sandbox is still provisioning.");
+        // Boat holds a command sent during start-up until the machine can run
+        // it, so one that ran means the machine is up.
+        if (sandbox.state === "provisioning") sandbox.state = "idle";
         const quiesce = typeof body?.command === "string" && body.command.includes(" quiesce");
         const exitCode = quiesce ? (sandbox.quiesceExit ?? 0) : 0;
         // As Boat answers a command that ran but failed: ok, not success.

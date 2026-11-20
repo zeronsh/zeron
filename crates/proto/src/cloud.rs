@@ -28,14 +28,35 @@ pub const CLOUD_ACCOUNT_CAPABILITY: &str = "cloud-account";
 /// Device lists hide these; the logical Cloud device stands for them.
 pub const CLOUD_SESSION_CAPABILITY: &str = "cloud-session";
 
-/// Harnesses a Cloud device offers in v1 (wire `HarnessId` names).
-pub const CLOUD_HARNESSES: &[&str] = &["codex", "claude-code"];
+/// Harnesses a Cloud device offers (wire `HarnessId` names): every built-in
+/// agent. How each signs in there is [`crate::providers::cloud_credentials`].
+/// Agents added from the ACP registry stay on the devices that added them.
+pub const CLOUD_HARNESSES: &[&str] = &[
+    "codex",
+    "claude-code",
+    "cursor",
+    "devin",
+    "grok",
+    "hermes",
+    "fx",
+    "pi",
+    "opencode",
+    "antigravity",
+    "muse",
+];
 
 /// A Cloud session machine's own setup steps — started or woke, cloned the
 /// project, checked out the session branch — shown as tool chips that open
 /// the first answer after it boots: `ToolCall::Unknown { name, input }` whose
-/// input carries this key (`"start"`, `"wake"`, `"clone"`, `"branch"`).
+/// input carries this key (`"start"`, `"wake"`, `"update"`, `"clone"`, `"branch"`).
 pub const CLOUD_SETUP_KEY: &str = "cloudSetup";
+
+/// [`CloudSession::stage`] while its machine installs a release before answering.
+pub const CLOUD_STAGE_UPDATING: &str = "updating";
+/// `CloudSession::stage` while a wake takes far longer than normal (a resume
+/// stuck at the provider, or a machine up with no engine yet): the edge kicks
+/// it, and the apps say it's taking longer than usual.
+pub const CLOUD_STAGE_SLOW: &str = "slow";
 
 /// The setup step a tool call records, if it is one ([`CLOUD_SETUP_KEY`]).
 pub fn cloud_setup_step(call: &crate::ToolCall) -> Option<&str> {
@@ -72,6 +93,13 @@ pub fn is_cloud_device(device_id: &str, platform: &str) -> bool {
     platform == CLOUD_PLATFORM || device_id.starts_with(CLOUD_DEVICE_PREFIX)
 }
 
+/// Names the states beyond the ones every shipped engine knows that this client
+/// can parse, on its requests to the edge's session routes.
+pub const CLOUD_STATES_HEADER: &str = "x-zeron-cloud-states";
+
+/// What this build sends in [`CLOUD_STATES_HEADER`].
+pub const CLOUD_STATES_UNDERSTOOD: &str = "data_expired";
+
 /// Lifecycle state of the Cloud account (`Off` · `Ready` · `Deleting` ·
 /// `Error`) or of one session's sandbox (any).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -94,6 +122,62 @@ pub enum CloudState {
     Deleting,
     /// Last lifecycle step failed; see `error` / `failed_action`.
     Error,
+    /// Session: the provider deleted the stopped machine's disk. The transcript
+    /// is safe; `CloudSessionRetry` starts a fresh machine on the same repo and
+    /// branch. The one state whose wire name has an underscore. An edge only
+    /// sends it to a client naming it in [`CLOUD_STATES_HEADER`]: to an engine
+    /// without this variant, it would fail the whole session list.
+    #[serde(rename = "data_expired", alias = "dataExpired")]
+    DataExpired,
+    /// A state this build doesn't know yet (a newer edge).
+    #[serde(other)]
+    Unknown,
+}
+
+/// One size of Cloud machine, as the edge offers it. The edge's list is the
+/// truth: clients show what it says and never assume a set of sizes.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudMachine {
+    /// What's sent back to pick it (`small`, `default`, `large`, `xlarge`).
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub vcpu: f64,
+    #[serde(default, rename = "memoryGB")]
+    pub memory_gb: f64,
+    /// What a machine of this size holds: the limit a wake is refused against.
+    #[serde(default, rename = "diskGiB")]
+    pub disk_gib: f64,
+    /// Credits per minute relative to the standard machine (xlarge: 5.56).
+    #[serde(default)]
+    pub credit_multiplier: f64,
+}
+
+/// How full a session machine's disk is, against what its size holds.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudDisk {
+    #[serde(default, rename = "usedGiB")]
+    pub used_gib: f64,
+    #[serde(default, rename = "capacityGiB")]
+    pub capacity_gib: f64,
+    /// `ok` · `warn` · `critical` (a string: a level this build doesn't know
+    /// must not fail the whole list).
+    #[serde(default)]
+    pub level: String,
+}
+
+/// Why a session can't wake on the machine it has.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudWakeBlocked {
+    /// `disk_too_small`.
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default, rename = "neededGiB", skip_serializing_if = "Option::is_none")]
+    pub needed_gib: Option<f64>,
 }
 
 /// `CloudStatus` / `CloudEnable` / `CloudDelete` reply: the account.
@@ -129,10 +213,42 @@ pub struct CloudStatus {
     /// or wake at zero or below. `None` from an edge that predates credits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credits: Option<f64>,
+    /// Every machine size a user can pick.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub machines: Vec<CloudMachine>,
+    /// The account's default size: what new sessions start on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
+    /// The account's default reach: what new sessions start with. `None`
+    /// from an edge that predates choosing (every session reaches devices).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach: Option<CloudReach>,
+}
+
+/// What a Cloud session reaches beyond its own machine. Only the person sets
+/// it (Settings → Cloud, the composer): never an agent, never a machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudReach {
+    /// The person's other devices, as a chat on one of them reaches them:
+    /// their chats, and commands on them.
+    #[default]
+    Devices,
+    /// Its own machine and the chats it delegates to, nothing else.
+    Isolated,
+}
+
+impl CloudReach {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CloudReach::Devices => "devices",
+            CloudReach::Isolated => "isolated",
+        }
+    }
 }
 
 /// One Cloud session: a top-level chat run on Cloud and its sandbox.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudSession {
     pub chat_id: String,
@@ -153,10 +269,32 @@ pub struct CloudSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_active_at: Option<i64>,
     pub created_at: i64,
+    /// The size it is on, or will come back on when picked asleep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
+    /// What it reaches beyond its machine. `None` from an older edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach: Option<CloudReach>,
+    /// Omitted until its engine first reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<CloudDisk>,
+    /// Waiting for the user to pick a size its disk fits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_blocked: Option<CloudWakeBlocked>,
+    /// Unix ms the provider deletes its disk, while it sleeps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<f64>,
+    /// How far a waking machine has got, where the edge says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    /// Unix ms the machine last found its chat store damaged and rebuilt it
+    /// from the server copy of its chats. Older edges omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_recovered_at: Option<f64>,
 }
 
 /// `CloudSessions` reply.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudSessions {
     #[serde(default)]
@@ -198,7 +336,7 @@ pub struct CloudUsage {
     pub available: bool,
 }
 
-/// One monthly plan. A credit is a minute of the default machine.
+/// One monthly plan. A credit is a minute of a small machine.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BillingPlan {
@@ -276,21 +414,60 @@ pub struct BillingLink {
     pub url: String,
 }
 
-/// Credentials the vault can hold.
+/// Credentials the vault can hold. Logins (`codex`, `claude`, `grok`, …) are
+/// one account's sign-in; `*-key` providers are the user's own API keys,
+/// one vendor's each, used by every agent that reaches that vendor
+/// ([`crate::providers::cloud_credentials`] says which agent takes which).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum VaultProvider {
-    /// ChatGPT sign-in for Codex (uploaded from a laptop's `codex login`).
+    /// ChatGPT sign-in (a `codex login` token set). Codex runs on it, and so
+    /// does Pi's ChatGPT provider: the vault is its only refresher.
     Codex,
     /// Claude subscription sign-in for Claude Code (uploaded from a laptop's
     /// sign-in through Claude's own OAuth flow, or a `claude setup-token`).
+    /// Claude Code runs on it, and so does Pi's Claude provider.
     Claude,
     /// GitHub App user token (device flow).
     Github,
-    /// The user's own Anthropic API key (Claude Code).
+    /// The user's own Anthropic API key.
     AnthropicKey,
-    /// The user's own OpenAI API key (Codex).
+    /// The user's own OpenAI API key.
     OpenaiKey,
+    /// The user's own OpenRouter API key.
+    OpenrouterKey,
+    /// The user's own Google Gemini API key.
+    GeminiKey,
+    /// The user's own xAI API key.
+    XaiKey,
+    /// The user's own DeepSeek API key.
+    DeepseekKey,
+    /// The user's own Vercel AI Gateway API key.
+    AiGatewayKey,
+    /// The user's own Meta API key (Muse Code's `META_API_KEY`).
+    MetaKey,
+    /// A Cursor user API key: minted by Cursor's own browser sign-in (named
+    /// and expiring) or pasted from cursor.com/settings.
+    CursorKey,
+    /// A GitHub Copilot sign-in: the GitHub token of Copilot's editor app
+    /// (device flow), which agents exchange for Copilot sessions themselves.
+    Copilot,
+    /// A Devin sign-in: the long-lived key (and its servers) Devin's own
+    /// browser sign-in writes to `credentials.toml`.
+    Devin,
+    /// A Grok (xAI) sign-in: the OIDC token set `grok login` writes. The
+    /// vault refreshes it; machines get its access token only.
+    Grok,
+    /// Hermes' xAI sign-in (`hermes auth add xai-oauth`): its own xAI OAuth
+    /// grant (API scopes), refreshed by the vault at xAI.
+    XaiOauth,
+    /// Hermes' Nous Portal sign-in, refreshed by the vault at the portal.
+    Nous,
+    /// Antigravity's Google sign-in, refreshed by the vault at Google.
+    Antigravity,
+    /// Muse Code's Meta sign-in: its long-lived access token, used until it
+    /// expires (Muse mints its model keys from it).
+    Muse,
 }
 
 impl VaultProvider {
@@ -298,12 +475,26 @@ impl VaultProvider {
         Self::ALL.into_iter().find(|p| p.as_str() == value)
     }
 
-    pub const ALL: [VaultProvider; 5] = [
+    pub const ALL: [VaultProvider; 19] = [
         VaultProvider::Codex,
         VaultProvider::Claude,
         VaultProvider::Github,
         VaultProvider::AnthropicKey,
         VaultProvider::OpenaiKey,
+        VaultProvider::OpenrouterKey,
+        VaultProvider::GeminiKey,
+        VaultProvider::XaiKey,
+        VaultProvider::DeepseekKey,
+        VaultProvider::AiGatewayKey,
+        VaultProvider::MetaKey,
+        VaultProvider::CursorKey,
+        VaultProvider::Copilot,
+        VaultProvider::Devin,
+        VaultProvider::Grok,
+        VaultProvider::XaiOauth,
+        VaultProvider::Nous,
+        VaultProvider::Antigravity,
+        VaultProvider::Muse,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -313,8 +504,86 @@ impl VaultProvider {
             VaultProvider::Github => "github",
             VaultProvider::AnthropicKey => "anthropic-key",
             VaultProvider::OpenaiKey => "openai-key",
+            VaultProvider::OpenrouterKey => "openrouter-key",
+            VaultProvider::GeminiKey => "gemini-key",
+            VaultProvider::XaiKey => "xai-key",
+            VaultProvider::DeepseekKey => "deepseek-key",
+            VaultProvider::AiGatewayKey => "ai-gateway-key",
+            VaultProvider::MetaKey => "meta-key",
+            VaultProvider::CursorKey => "cursor-key",
+            VaultProvider::Copilot => "copilot",
+            VaultProvider::Devin => "devin",
+            VaultProvider::Grok => "grok",
+            VaultProvider::XaiOauth => "xai-oauth",
+            VaultProvider::Nous => "nous",
+            VaultProvider::Antigravity => "antigravity",
+            VaultProvider::Muse => "muse",
         }
     }
+
+    /// A pasted API key (`{key}` material), as opposed to a sign-in.
+    pub fn is_api_key(self) -> bool {
+        self.as_str().ends_with("-key")
+    }
+
+    /// Who issues the key, for a pasted API key: "OpenRouter".
+    pub fn key_vendor(self) -> Option<&'static str> {
+        Some(match self {
+            VaultProvider::AnthropicKey => "Anthropic",
+            VaultProvider::OpenaiKey => "OpenAI",
+            VaultProvider::OpenrouterKey => "OpenRouter",
+            VaultProvider::GeminiKey => "Google Gemini",
+            VaultProvider::XaiKey => "xAI",
+            VaultProvider::DeepseekKey => "DeepSeek",
+            VaultProvider::AiGatewayKey => "Vercel AI Gateway",
+            VaultProvider::MetaKey => "Meta",
+            VaultProvider::CursorKey => "Cursor",
+            _ => return None,
+        })
+    }
+
+    /// The sign-in a machine prefers over this API key, for the agent whose
+    /// card both sit on: saving the key as the one to use steps that login
+    /// aside, as on a laptop (Claude Code, Codex and Grok run a login first).
+    pub fn login_it_replaces(self) -> Option<VaultProvider> {
+        match self {
+            VaultProvider::AnthropicKey => Some(VaultProvider::Claude),
+            VaultProvider::OpenaiKey => Some(VaultProvider::Codex),
+            VaultProvider::XaiKey => Some(VaultProvider::Grok),
+            VaultProvider::GeminiKey => Some(VaultProvider::Antigravity),
+            VaultProvider::MetaKey => Some(VaultProvider::Muse),
+            _ => None,
+        }
+    }
+}
+
+/// Request header naming the vault providers a client understands
+/// (comma-separated wire names). The edge lists only those in `VaultStatus`;
+/// a client that sends none (built before this header) sees the original
+/// five, so a provider added later never fails its whole status read.
+pub const VAULT_PROVIDERS_HEADER: &str = "x-zeron-vault-providers";
+
+/// [`VAULT_PROVIDERS_HEADER`]'s value for this build.
+pub fn vault_providers_understood() -> String {
+    VaultProvider::ALL
+        .iter()
+        .map(|p| p.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// `connections`, keeping only providers this build knows: an edge newer
+/// than the client may list more, and one unknown entry must not fail the
+/// whole status.
+fn known_connections<'de, D>(deserializer: D) -> Result<Vec<VaultConnection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -373,6 +642,9 @@ pub struct VaultAccount {
     pub organization: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
+    /// GitHub logins: their picture on github.com.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
     #[serde(default)]
     pub authorized_devices: Vec<String>,
     #[serde(default)]
@@ -414,7 +686,7 @@ pub struct VaultDevice {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultStatus {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "known_connections")]
     pub connections: Vec<VaultConnection>,
     #[serde(default)]
     pub devices: Vec<VaultDevice>,
@@ -459,12 +731,16 @@ pub struct GithubConnectProgress {
     /// GitHub login once connected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// Connected, but as a login already connected: nothing was added (GitHub
+    /// approves as whoever the browser is signed in as).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub already_connected: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 /// One repository from `ListGithubRepos`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GithubRepo {
     /// `owner/name`.
@@ -477,6 +753,16 @@ pub struct GithubRepo {
     /// Unix ms of the last push, for sorting.
     #[serde(default)]
     pub pushed_at: i64,
+    /// The GitHub App installation that gives access to it. Access comes from
+    /// here; logins say who may use it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installation_id: Option<i64>,
+    /// The connected login a new session on it would use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// Every connected login that reaches it, the one above first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accounts: Vec<String>,
 }
 
 #[cfg(test)]
@@ -492,7 +778,53 @@ mod tests {
     }
 
     #[test]
+    fn a_provider_this_build_doesnt_know_never_fails_the_status() {
+        let status: VaultStatus = serde_json::from_value(serde_json::json!({
+            "available": true,
+            "connections": [
+                {"provider": "codex", "status": "connected", "updatedAt": 1},
+                {"provider": "some-later-key", "status": "connected", "updatedAt": 2},
+                {"provider": "grok", "status": "needsReconnect", "updatedAt": 3},
+            ],
+        }))
+        .unwrap();
+        let providers: Vec<_> = status.connections.iter().map(|c| c.provider).collect();
+        assert_eq!(providers, vec![VaultProvider::Codex, VaultProvider::Grok]);
+        assert!(
+            vault_providers_understood()
+                .split(',')
+                .all(|p| VaultProvider::parse(p).is_some())
+        );
+    }
+
+    #[test]
+    fn keys_and_logins_say_what_they_are() {
+        for provider in VaultProvider::ALL {
+            assert_eq!(
+                provider.is_api_key(),
+                provider.key_vendor().is_some(),
+                "{provider:?}"
+            );
+        }
+        assert_eq!(
+            VaultProvider::XaiKey.login_it_replaces(),
+            Some(VaultProvider::Grok)
+        );
+        assert_eq!(VaultProvider::OpenrouterKey.login_it_replaces(), None);
+    }
+
+    #[test]
     fn status_defaults_tolerate_missing_fields() {
+        // What an edge adds later never fails the list it's in.
+        let unknown: CloudState = serde_json::from_str(r#""hibernating""#).unwrap();
+        assert_eq!(unknown, CloudState::Unknown);
+        let expired: CloudState = serde_json::from_str(r#""data_expired""#).unwrap();
+        assert_eq!(expired, CloudState::DataExpired);
+        // What this build names is what it parses.
+        for state in CLOUD_STATES_UNDERSTOOD.split(',') {
+            let parsed: CloudState = serde_json::from_value(state.trim().into()).unwrap();
+            assert_ne!(parsed, CloudState::Unknown, "{state}");
+        }
         let status: CloudStatus = serde_json::from_str(r#"{"state":"sleeping"}"#).unwrap();
         assert_eq!(status.state, CloudState::Sleeping);
         assert!(!status.available);

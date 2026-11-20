@@ -147,6 +147,12 @@ const CODEX_XHIGH: &[&str] = &["low", "medium", "high", "xhigh"];
 
 /// Static fallback = the engine's `default_enabled()` pair. ACP agents
 /// appear only through a device's live catalog (opt-in per device).
+/// A device's agents, when they're known without asking it: a Cloud device's
+/// (the account's, or a session's machine) are Claude Code and Codex.
+pub fn harnesses_without_asking(device_id: &str) -> Option<Vec<HarnessInfo>> {
+    zeron_proto::is_cloud_device(device_id, "").then(fallback_harnesses)
+}
+
 pub fn fallback_harnesses() -> Vec<HarnessInfo> {
     vec![
         HarnessInfo::fallback("claude-code", "Claude Code"),
@@ -658,6 +664,14 @@ impl DiskCatalog {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_cloud_device_s_agents_are_known_without_asking_it() {
+        let ids = |d: &str| super::harnesses_without_asking(d).map(|l| l.into_iter().map(|h| h.id).collect::<Vec<_>>());
+        assert_eq!(ids("cloud-s-chat-1"), Some(vec!["claude-code".to_string(), "codex".to_string()]));
+        assert_eq!(ids("mac-123"), None);
+    }
+
     use super::*;
 
     #[test]

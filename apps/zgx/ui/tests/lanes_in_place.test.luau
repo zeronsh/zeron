@@ -234,8 +234,22 @@ test("a message that didn't go says so above the side chat's composer, never ove
 	app:type('.side-chat-tab >> role:textbox', "lost words")
 	app:key("Enter")
 	-- An alert of the composer's deck: in its pill, opened to read.
-	app:wait('.side-chat-tab >> role:button "Open Alerts"', { timeout_ms = 3000 })
-	app:click('.side-chat-tab >> role:button "Open Alerts"')
+	local alerts = '.side-chat-tab >> role:button "Open Alerts"'
+	-- The presence node exists on its first, transparent enter frame.
+	-- Advance the test clock until it shows before trying to press it.
+	local shown = false
+	for _ = 1, 180 do -- At most the same three seconds, at 60 Hz.
+		app:frames(1)
+		if app:has(alerts) then
+			local first = app:tree(alerts):match("[^\n]+") or ""
+			if not first:find(" hidden", 1, true) then
+				shown = true
+				break
+			end
+		end
+	end
+	expect(shown).to_be(true)
+	app:click(alerts)
 	app:frames(30)
 	expect(app:has('.side-chat-tab >> "Your message didn\'t send"')).to_be(true)
 	-- Above the composer's box, not a toast over it.

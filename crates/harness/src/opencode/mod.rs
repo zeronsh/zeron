@@ -81,7 +81,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use zeron_proto::{
-    AccessMode, AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice,
+    AccessMode, AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice, ModelProvider,
     ReasoningLevel, RunRequest, SlashCommand, SteeringMode, TodoItem, TodoStatus, ToolCall,
     UserInputAnswer, UserInputQuestion,
 };
@@ -445,7 +445,9 @@ impl OpencodeHarness {
         cwd: Option<&str>,
         mcp: Option<&zeron_proto::McpServer>,
     ) -> Result<Server, HarnessError> {
-        self.server_with_env(cwd, mcp, &[], &Default::default(), AccessMode::FullAccess)
+        // (A Cloud machine's credential keys for OpenCode: crate::catalog_env.)
+        let env = crate::catalog_env::get(self.id());
+        self.server_with_env(cwd, mcp, &[], &env, AccessMode::FullAccess)
             .await
     }
 
@@ -460,7 +462,15 @@ impl OpencodeHarness {
         run_env: &std::collections::BTreeMap<String, String>,
         access: AccessMode,
     ) -> Result<Server, HarnessError> {
-        if let Some(base) = &self.base_url {
+        // A Cloud machine's logins for OpenCode ride the run environment but
+        // never reach the server's process: they're installed through its
+        // credential API once it's up (`credentials`).
+        let mut run_env = run_env.clone();
+        let logins = run_env
+            .remove(credentials::CREDENTIALS_ENV)
+            .map(|raw| credentials::parse(&raw))
+            .transpose()?;
+        let mut server = if let Some(base) = &self.base_url {
             if !extra_mcp.is_empty() {
                 tracing::warn!(
                     target: "zeron_harness::opencode",
@@ -468,19 +478,27 @@ impl OpencodeHarness {
                     "attached to an existing opencode server; plugin MCP servers are skipped"
                 );
             }
-            return Ok(Server::attached(base.clone()));
+            Server::attached(base.clone())
+        } else {
+            let exe = self.resolve_executable()?;
+            Server::spawn_with_extras(
+                &exe,
+                cwd,
+                self.startup_timeout,
+                mcp,
+                extra_mcp,
+                &run_env,
+                access,
+            )
+            .await?
+        };
+        if let Some(logins) = logins
+            && let Err(error) = credentials::install(&server, &logins).await
+        {
+            server.shutdown(self.kill_grace).await;
+            return Err(error);
         }
-        let exe = self.resolve_executable()?;
-        Server::spawn_with_extras(
-            &exe,
-            cwd,
-            self.startup_timeout,
-            mcp,
-            extra_mcp,
-            run_env,
-            access,
-        )
-        .await
+        Ok(server)
     }
 
     /// One short-lived server answers both discovery calls. Also primes the
@@ -1016,7 +1034,7 @@ impl Server {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
             let cwd = cwd.map(std::path::Path::new);
             fatal(crate::executable::spawn_error(e, cwd, || {
                 crate::executable::binary_hint(exe)
@@ -1659,8 +1677,13 @@ fn models_from_providers(providers: &ProviderCatalog) -> Vec<Model> {
                 levels.sort();
                 levels.dedup();
                 Model {
+                    default: false,
                     id: format!("{provider_id}/{model_id}"),
                     label,
+                    provider: Some(ModelProvider {
+                        id: provider_id.to_owned(),
+                        name: provider_name.to_owned(),
+                    }),
                     description: Some(provider_name.to_owned()),
                     reasoning_levels: levels,
                     options: Vec::new(),
@@ -4744,6 +4767,7 @@ fn map_questions(props: &Value) -> Vec<(String, UserInputQuestion)> {
                     Some((
                         key,
                         UserInputQuestion {
+                            note: None,
                             id: new_message_id(),
                             header: q
                                 .get("header")
@@ -5632,6 +5656,9 @@ impl SseDecoder {
     }
 }
 
+mod credentials;
+pub use credentials::CREDENTIALS_ENV;
+
 #[cfg(test)]
 mod tests;
 
@@ -5993,12 +6020,14 @@ mod mcp_injection_tests {
             command: "/opt/zeron/zeron".into(),
             args: vec!["mcp".into()],
             env: Default::default(),
+            http: None,
         };
         let extra = zeron_proto::McpServer {
             name: "plugin-focus".into(),
             command: "/data/plugins/.loaded/focus/0123/bin/server".into(),
             args: vec!["--stdio".into()],
             env: [("FOCUS".to_owned(), "1".to_owned())].into_iter().collect(),
+            http: None,
         };
         assert_eq!(
             mcp_configs(Some("{\"model\":\"keep\"}".into()), None, &[], Protocol::V1).unwrap(),
@@ -6063,6 +6092,7 @@ http.createServer((req, res) => {{
                 command: "/path with spaces/zeron".into(),
                 args: vec!["mcp".into()],
                 env: [("ZERON_CHAT_ID".into(), "first".into())].into(),
+                http: None,
             };
             let mut second = first.clone();
             second.env.insert("ZERON_CHAT_ID".into(), "second".into());
@@ -6155,6 +6185,7 @@ http.createServer((req, res) => {
             command: "zeron".into(),
             args: vec!["mcp".into()],
             env: Default::default(),
+            http: None,
         };
         let mut server = Server::spawn(
             &exe,
@@ -6234,6 +6265,7 @@ http.createServer((req, res) => {
                     assert_eq!((edit, bash), (&json!("allow"), &json!("ask")))
                 }
                 AccessMode::Supervised => assert_eq!((edit, bash), (&json!("ask"), &json!("ask"))),
+                AccessMode::Auto => unreachable!("OpenCode has no auto mode to offer"),
             }
         }
     }
@@ -6281,6 +6313,7 @@ if (process.argv.includes('--version')) {{
             command: "zeron".into(),
             args: vec!["mcp".into()],
             env: Default::default(),
+            http: None,
         };
         for _ in 0..2 {
             let mut server = Server::spawn(
@@ -6307,6 +6340,7 @@ if (process.argv.includes('--version')) {{
             command: "/path with spaces/zeron".into(),
             args: vec!["mcp".into()],
             env: [("ZERON_CHAT_ID".into(), "first".into())].into(),
+            http: None,
         };
         for protocol in [Protocol::V1, Protocol::V2] {
             let inherited = match protocol {

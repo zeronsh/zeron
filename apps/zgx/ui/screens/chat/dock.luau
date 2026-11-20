@@ -25,6 +25,16 @@ local M = {}
 M.GAP = 8
 M.FOOTER = 32
 M.REST = 81
+-- The title bar's height (Zeron's): a new chat's composer centres under it,
+-- lifted a little over the middle of the room there (by LIFT).
+M.TITLE_H = 38
+M.LIFT = 48
+-- How far a new chat's composer's middle stands under its page's middle
+-- (over it, as it's less than 0). What stands beside it, as the panel's
+-- home, lines up with it by the same rule.
+function M.hero_offset(): number
+	return M.TITLE_H / 2 - M.LIFT
+end
 -- Its sides' room from the page's edges.
 M.SIDES = ui.raw(32, "the composer's room from the page's edges")
 

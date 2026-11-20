@@ -25,5 +25,18 @@ pub const TAIL_MESSAGE_COUNT: usize = 64;
 pub const TERMINAL_OUTPUT_BATCH_MS: u64 = 4;
 /// Default TTL for durable commands.
 pub const COMMAND_DEFAULT_TTL_MS: i64 = 24 * 60 * 60 * 1000;
+/// TTL for a command to a chat hosted on Cloud: its machine may be asleep, or
+/// waiting on its person (a size to pick), for days, and the message should
+/// still run when it comes back.
+pub const CLOUD_COMMAND_TTL_MS: i64 = 7 * COMMAND_DEFAULT_TTL_MS;
+
+/// The TTL a sender gives a command, by where its chat runs.
+pub fn command_ttl_ms(cloud_host: bool) -> i64 {
+    if cloud_host {
+        CLOUD_COMMAND_TTL_MS
+    } else {
+        COMMAND_DEFAULT_TTL_MS
+    }
+}
 /// Current session doc schema version (`meta.schemaVersion`).
 pub const SESSION_SCHEMA_VERSION: u32 = 1;

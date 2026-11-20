@@ -1,0 +1,32 @@
+---
+// A Zeron session with its panel open, recreated in HTML from the app
+// itself: every box, word and icon is placed where the app's layout tree
+// places it, in the app's own colours, and diffed against a native capture
+// (tools/recreate). The markup, masks and theme values are generated;
+// don't edit them by hand.
+//
+// Whole, it is the window. With `crop` it is a piece of it: that part of
+// the 1320 × 840 stage, as wide as the box it is put in. Being HTML, a
+// piece shown large is as sharp as the window itself.
+import fragment from "./session.fragment.html?raw";
+import "./session.icons.css";
+import "./session.vars.css";
+import "./zw.css";
+
+interface Props {
+  theme?: "dark" | "light";
+  /** x, y, width, height, in the stage's points. */
+  crop?: [number, number, number, number];
+  /** Not for readers: a second copy on a page, or a piece used as a picture. */
+  decorative?: boolean;
+  class?: string;
+}
+const { theme = "dark", crop = [0, 0, 1320, 840], decorative = false, class: className } = Astro.props;
+const [x, y, w, h] = crop;
+const label =
+  "Zeron with a session open. The sidebar groups eight sessions under four projects, run by Claude Code, Codex and Grok; two are still working. In the open one, Claude Code explains and fixes a rate limiter bug, and the Changes panel beside it shows the diff of window.ts.";
+---
+
+<div class:list={["zw-fit", className]} style={`--zx:${x};--zy:${y};--zw:${w};--zh:${h}`}>
+  <div class:list={["zw", "zw-session", theme === "light" ? "t1" : "t0"]} role={decorative ? undefined : "img"} aria-label={decorative ? undefined : label} aria-hidden={decorative ? "true" : undefined} set:html={fragment} />
+</div>

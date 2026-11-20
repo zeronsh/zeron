@@ -21,13 +21,20 @@ xnotify() { # $1 = update json object body — grok's extension channel (the
   emit "{\"method\":\"_x.ai/session_notification\",\"params\":{\"sessionId\":\"$SID\",\"update\":$1}}"
 }
 
+# (A warm start's test counts launches.)
+[ -n "$FAKE_LAUNCH_LOG" ] && echo "launch $$" >> "$FAKE_LAUNCH_LOG"
+
 # ---- handshake -------------------------------------------------------------
 read -r line || exit 1 # initialize
 has "$line" '"method":"initialize"' || exit 1
 has "$line" '"protocolVersion":1' || exit 1
 has "$line" '"name":"zeron"' || exit 1
 has "$line" '"readTextFile":false' || exit 1
-emit "{\"id\":$(rid "$line"),\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"loadSession\":true,\"_meta\":{\"availableCommands\":[{\"name\":\"compact\",\"description\":\"Compact the session\"},{\"name\":\"goal\",\"description\":\"Set a goal\",\"input\":{\"hint\":\"the goal\"}}]}},\"_meta\":{\"steering\":{\"supported\":true}}}}"
+INIT_LINE="$line"
+# FAKE_RESUME_ONLY=<session id>: advertise session/resume instead of session/load.
+LOAD_CAP='"loadSession":true'
+[ -n "$FAKE_RESUME_ONLY" ] && LOAD_CAP='"sessionCapabilities":{"resume":{}}'
+emit "{\"id\":$(rid "$line"),\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{$LOAD_CAP,\"_meta\":{\"availableCommands\":[{\"name\":\"compact\",\"description\":\"Compact the session\"},{\"name\":\"goal\",\"description\":\"Set a goal\",\"input\":{\"hint\":\"the goal\"}}]}},\"_meta\":{\"steering\":{\"supported\":true}}}}"
 
 # ---- session new / load ----------------------------------------------------
 read -r line || exit 1
@@ -36,7 +43,14 @@ MODEL_API=0
 if has "$line" '"sessionId":"existing-grok-session"'; then
   MODEL_API=1
 fi
-if has "$line" '"method":"session/load"'; then
+# Resume-only, a session/new (a fresh start) is a failure.
+[ -n "$FAKE_RESUME_ONLY" ] && has "$line" '"method":"session/new"' && exit 1
+if has "$line" '"method":"session/load"' || has "$line" '"method":"session/resume"'; then
+  [ -n "$FAKE_RESUME_ONLY" ] && has "$line" '"method":"session/load"' && exit 1
+  # Resume-only: it must be a resume of exactly the requested session.
+  if [ -n "$FAKE_RESUME_ONLY" ]; then
+    has "$line" "\"sessionId\":\"$FAKE_RESUME_ONLY\"" || exit 1
+  fi
   if has "$line" '"sessionId":"load-fail"'; then
     emit "{\"id\":$(rid "$line"),\"error\":{\"code\":-32602,\"message\":\"unknown session\"}}"
     read -r line || exit 1
@@ -124,6 +138,33 @@ has "$promptline" '"method":"session/prompt"' || exit 1
 pid=$(rid "$promptline")
 
 case "$promptline" in
+
+*scenario:permission-meta*)
+  # Echo what the session params and initialize carried, for the Grok
+  # permission-mode tests: the mode on the session and the client type.
+  mode=none
+  has "$line" '"_meta":{"autoMode":true}' && mode=auto
+  has "$line" '"_meta":{"yoloMode":true}' && mode=yolo
+  client=none
+  has "$INIT_LINE" '"clientType":"extension"' && client=extension
+  update "{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"mode=$mode client=$client\"}}"
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  ;;
+
+*scenario:auto-read-escalation*)
+  # Auto: the reviewer escalates even a read; the agent proceeds only if the
+  # person said yes (allow_once) and reports a no (reject_once).
+  emit "{\"id\":91,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"$SID\",\"toolCall\":{\"toolCallId\":\"r1\",\"kind\":\"read\",\"title\":\"Read .env\"},\"options\":[{\"optionId\":\"once\",\"name\":\"Allow once\",\"kind\":\"allow_once\"},{\"optionId\":\"no\",\"name\":\"Reject\",\"kind\":\"reject_once\"}],\"_meta\":{\"autoReview\":{\"outcome\":\"blocked\",\"explanation\":\"Reads a secrets file.\"}}}}"
+  read -r answer || exit 1
+  if has "$answer" '"optionId":"no"'; then
+    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"declined"}}'
+  elif has "$answer" '"outcome":"selected"' && has "$answer" '"optionId":"once"'; then
+    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"allowed"}}'
+  else
+    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"unexpected answer"}}'
+  fi
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  ;;
 
 *scenario:mcp*)
   has "$line" '"command":"/path with spaces/zeron"' || exit 1

@@ -27,8 +27,8 @@ test("a message sent while a side chat works is queued, not put in its transcrip
 	app:key("Enter")
 	app:frames(10)
 	expect(calls(app)).to_contain("send:side-a:one more thing")
-	-- (Waiting for the turn it runs in: what's picked isn't sent with it.)
-	expect(calls(app)).to_contain("pick:side-a::::")
+	-- Carries what's picked so the queued message runs on that agent/model.
+	expect(calls(app)).to_contain("pick:side-a:codex/gpt-6.1:codex:medium:edits")
 	expect(app:has('.side-chat-tab >> "one more thing"')).to_be(false)
 	expect(app:text(BOX)).to_be("")
 end)
@@ -66,6 +66,57 @@ test("a side chat's queue shows, and a row steers mid-turn", function()
 	app:click('.side-chat-tab >> role:button "Steer"')
 	app:frames(10)
 	expect(calls(app)).to_contain("queue:side-a:send:q1")
+end)
+
+-- A node's y in the tree, by its id (its first line), or nil.
+local function y_of_id(app: any, id: string): number?
+	return tonumber((app:tree("#" .. id):match("[^\n]+") or ""):match(" %-?%d+,(%-?%d+) "))
+end
+
+test("a side chat's steered prompt rises to its top, its runway under it, as a send's does", function()
+	local app = open()
+	-- A prompt sent in it first: it holds its runway.
+	app:type(BOX, "first words")
+	app:key("Enter")
+	app:frames(60)
+	local ms = app:state("chat.lane.tab1.messages")
+	local sent = ms[#ms].id
+	local top = y_of_id(app, sent) :: number
+	app:command("side_running")
+	app:command("side_queue_one")
+	app:frames(20)
+	app:click(BOX)
+	app:key("cmd+enter")
+	app:frames(4)
+	expect(calls(app)).to_contain("queue:side-a:send:q1")
+	app:command("side_steer_lands")
+	local ys: { number } = {}
+	local lowest = top
+	for _ = 1, 60 do
+		app:frames(1)
+		local y = y_of_id(app, "q1")
+		if y then
+			table.insert(ys, y)
+		end
+		local was = y_of_id(app, sent)
+		if was and was > lowest then
+			lowest = was
+		end
+	end
+	-- The prompt sent never falls back (its runway dropped; only the
+	-- glide's one-point step clear of the end, as a send's); the steered
+	-- one rises from the foot, a frame at a time, to where the sent one stood.
+	expect(lowest - top <= 1).to_be(true)
+	expect(#ys > 10).to_be(true)
+	expect(ys[1] - ys[#ys] > 100).to_be(true)
+	local between = 0
+	for i = 2, #ys do
+		if ys[i] < ys[1] - 2 and ys[i] > ys[#ys] + 2 then
+			between += 1
+		end
+	end
+	expect(between >= 6).to_be(true)
+	expect(math.abs(ys[#ys] - top) <= 2).to_be(true)
 end)
 
 test("⌘↩ with an empty draft steers the newest queued message", function()

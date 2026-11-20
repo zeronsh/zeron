@@ -84,3 +84,54 @@ test("a chat's subagents run in the Running tray, and a row opens its subagent",
 	expect(app:state("calls")).to_contain("open_subagent:s2:d3")
 	expect(app:error()).to_be(nil)
 end)
+
+test("child chats a Zeron chat started run in the Subagents tray, as subagents do; the person's own side chats don't", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	app:command("go_s2")
+	app:frames(30)
+	expect(app:has('role:button "Open Subagents"')).to_be(false)
+	app:command("child_chats")
+	app:frames(30)
+	-- The pill, as for subagents.
+	expect(app:has('role:button "Open Subagents"')).to_be(true)
+	app:click('role:button "Open Subagents"')
+	app:frames(30)
+	-- The working one is a row of its own; no Stop, as a subagent has none.
+	expect(app:has('role:button "Open audit the parser"')).to_be(true)
+	expect(app:has('role:button "Stop audit the parser"')).to_be(false)
+	-- The one at rest is folded with the finished.
+	expect(app:has('role:button "Open draft the release notes"')).to_be(false)
+	app:click('role:button "Show 1 finished"')
+	app:frames(30)
+	expect(app:has('role:button "Open draft the release notes"')).to_be(true)
+	-- The person's own side chat isn't here.
+	expect(app:has('~"my own side chat"')).to_be(false)
+	-- A row opens its chat in the panel, as a side chat's tab.
+	app:click('role:button "Open audit the parser"')
+	app:frames(5)
+	expect(app:state("calls")).to_contain("open_lane:s2:side_chat:k1")
+	app:click('role:button "Open draft the release notes"')
+	app:frames(5)
+	expect(app:state("calls")).to_contain("open_lane:s2:side_chat:k2")
+	expect(app:state("calls")).never.to_contain(":k3")
+	expect(app:error()).to_be(nil)
+end)
+
+test("child chats a Zeron chat started share the tray with the agent's own subagents", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	app:command("go_s2")
+	app:frames(30)
+	app:command("subagents_running")
+	app:command("child_chats")
+	app:frames(30)
+	app:click('role:button "Open Subagents"')
+	app:frames(30)
+	for _, title in { "scan the repo", "read the docs", "audit the parser" } do
+		expect(app:has(`role:button "Open {title}"`)).to_be(true)
+	end
+	-- Both finished fold together.
+	expect(app:has('role:button "Show 2 finished"')).to_be(true)
+	expect(app:has('~"my own side chat"')).to_be(false)
+end)

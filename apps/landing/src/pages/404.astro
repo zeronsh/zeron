@@ -1,0 +1,18 @@
+---
+import Button from "../components/ui/Button.astro";
+import Base from "../layouts/Base.astro";
+---
+
+<Base title="Page not found · Zeron" downloads="/#downloads">
+  <div class="wrap missing">
+    <h1>There is no page here</h1>
+    <p class="lead">The link may be old, or the address mistyped.</p>
+    <Button href="/" tone="secondary" size="lg">Back to zeron.sh</Button>
+  </div>
+</Base>
+
+<style>
+  .missing { padding-block: clamp(96px, 16vw, 200px); }
+  h1 { font-size: clamp(32px, 4vw, 48px); letter-spacing: -0.03em; }
+  .lead { margin: 14px 0 28px; }
+</style>

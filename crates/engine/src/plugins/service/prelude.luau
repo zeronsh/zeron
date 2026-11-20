@@ -112,6 +112,8 @@ local timers: { { seconds: number, fn: (any) -> () } } = {}
 local stops: { () -> () } = {}
 -- `zeron.watch`es, by id: each one's folders and listener.
 local watches: { [number]: { folders: { string }, fn: (any) -> () } } = {}
+-- `zeron.on` listeners, by place: the event each hears, its options.
+local listeners: { { event: string, opts: any, fn: (any, any) -> () } } = {}
 
 local function dispatch(kind: string, name: string, args: any, call: any, reply: number)
 	local fn
@@ -122,6 +124,9 @@ local function dispatch(kind: string, name: string, args: any, call: any, reply:
 	elseif kind == "timer" then
 		local timer = timers[tonumber(string.sub(name, 2)) or 0]
 		fn = timer and timer.fn
+	elseif kind == "event" then
+		local listener = listeners[tonumber(string.sub(name, 2)) or 0]
+		fn = listener and listener.fn
 	end
 	if not fn then
 		host.unknown(reply)
@@ -145,7 +150,11 @@ local function describe(): any
 	for i, timer in timers do
 		table.insert(timer_list, { key = `#{i}`, seconds = timer.seconds })
 	end
-	return { methods = methods, tools = tool_names, timers = timer_list }
+	local listener_list = {}
+	for i, listener in listeners do
+		table.insert(listener_list, { key = `@{i}`, event = listener.event, opts = listener.opts })
+	end
+	return { methods = methods, tools = tool_names, timers = timer_list, listeners = listener_list }
 end
 
 local function done(id: number, ok: boolean, value: any)
@@ -278,6 +287,116 @@ local function service(id: string): any
 	-- "posted", "off", "held", "paced" or "unavailable".
 	function M.notify(n: { title: string, body: string?, session: string? }): any
 		return op("notify", { title = n.title, body = n.body, session = n.session })
+	end
+
+	-- ── Agents: usage, accounts, models, and their events ─────────────────
+	-- Each asks the engine, which checks this device's grants for this
+	-- plugin ("usage.read", "accounts.read", "accounts.switch",
+	-- "models.read", "models.set"). Each is a promise; a refusal fails it
+	-- with "<reason>: <words>" (paced, loop, not_allowed, …).
+
+	-- `fn(data, event)` for each `event` on this device (usage.threshold,
+	-- turn.finished, …), with no window open: Zeron starts the service to
+	-- tell it. Register listeners at the top level, in the same order each
+	-- time: they're known by their place. `opts`: a threshold's `below`
+	-- (percent remaining), and `provider`, `account`, `window` to narrow.
+	-- A `run.preparing` listener's return value is its answer: `{ account }`
+	-- pins the chat about to run for the first time to that saved account
+	-- (it has `prepare_wait`, 3 s, to say; "accounts.pin"). Say nothing and
+	-- the chat runs on the active account. Every other event ignores it.
+	function M.on(event: string, fn: (any, string) -> any, opts: { [string]: any }?)
+		assert(type(event) == "string" and event ~= "", "zeron.on(event, fn)")
+		assert(type(fn) == "function", "zeron.on(event, fn)")
+		table.insert(listeners, {
+			event = event,
+			opts = opts or {},
+			fn = function(data: any, call: any)
+				return fn(data, (call and call.event) or event)
+			end,
+		})
+	end
+
+	local function agents(name: string, args: { [string]: any }?): any
+		local a = table.clone(args or {})
+		a.op = name
+		return op("agents", a)
+	end
+
+	-- Each provider's accounts' usage, as Zeron last read it (never a new
+	-- read): { { provider, account, active, plan?, fetched_at?, error?,
+	-- windows = { { label, used, remaining, resets_at? } } } }.
+	function M.usage(opts: { provider: string? }?): any
+		return agents("usage", opts)
+	end
+
+	-- Read usage again now (5 minutes apart at most, per plugin).
+	function M.usage_refresh(): any
+		return agents("usage_refresh", {})
+	end
+
+	-- The saved accounts ("accounts.read"): { { provider, account, active,
+	-- switchable, email?, name?, organization?, plan? } }.
+	function M.accounts(opts: { provider: string? }?): any
+		return agents("accounts", opts)
+	end
+
+	-- Make a saved account the active one ("accounts.switch"), at once;
+	-- with `when_idle`, once that provider's chats here have finished
+	-- (within 30 minutes).
+	function M.switch_account(s: { provider: string, account: string, when_idle: boolean? }): any
+		return agents("switch_account", s)
+	end
+
+	-- Run one chat on a saved account of its own ("accounts.pin"), while
+	-- the active account stays as it is: for the chat's next run, on the
+	-- provider it has. No `account` takes the pin back. A promise of
+	-- { provider, chat, account? }; `already` when nothing changes.
+	function M.pin_account(s: { provider: string, chat: string, account: string? }): any
+		return agents("pin_account", s)
+	end
+
+	-- The chats pinned to an account ("accounts.read"): { { provider,
+	-- account, since, chat? } } (`chat` with "sessions.read").
+	function M.pins(opts: { provider: string? }?): any
+		return agents("pins", opts)
+	end
+
+	-- A harness's models ("models.read"): { { id, label, efforts, options } }.
+	function M.models(harness: string): any
+		return agents("models", { harness = harness })
+	end
+
+	-- A chat's model, effort and options ("models.read").
+	function M.chat_model(chat: string): any
+		return agents("chat_model", { chat = chat })
+	end
+
+	-- Set a chat's model, effort or options ("models.set"): for its next
+	-- turn, on the provider it has.
+	function M.set_model(s: { chat: string, model: string?, effort: string?, options: { [string]: string }? }): any
+		return agents("set_model", s)
+	end
+
+	-- A message into a chat ("messages.send"), as you'd send it from the
+	-- composer: a turn of its own when nothing runs; while a turn runs,
+	-- queued for its end (`mode = "queue"`, the default) or steering it
+	-- (`"steer"`). `attachments`: files' paths on the chat's device (they
+	-- need "files.read" too). A promise of { status, chat, delivery, id }.
+	function M.send_message(s: { chat: string, text: string, attachments: { string }?, mode: string? }): any
+		return agents("send_message", s)
+	end
+
+	-- A new chat, sent its first message ("messages.send"): a promise of
+	-- { status, chat, id }, `chat` the new chat's id.
+	function M.new_chat(s: { prompt: string, device: string?, project: string?, harness: string?, model: string?, effort: string?, cwd: string? }): any
+		return agents("new_chat", s)
+	end
+
+	-- The question (or approval) a chat waits on, answered ("messages.send"):
+	-- `answers` by question id, `{ [question] = label or { labels } }` (or a
+	-- list of { question, labels }); `request` names one, else the latest.
+	function M.answer(s: { chat: string, answers: any, request: string? }): any
+		return agents("answer", s)
 	end
 
 	-- A promise done after `seconds`.

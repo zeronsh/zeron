@@ -161,13 +161,15 @@ async fn start(arg: Value) -> Result<Value, String> {
     let dir = claims_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let claim = dir.join(format!("{}-{}", std::process::id(), operation_nonce()));
-    let line = format!(
+    // (In base64: no quote inside it for a shell to read as its own, `runnable`.)
+    let open = base64::engine::general_purpose::STANDARD.encode(Json::Object(params).to_string());
+    let line = runnable(format!(
         "{} terminal-bridge --port {port} --data {} --open {} --claim {}",
         quote(&exe.to_string_lossy()),
         quote(&data.to_string_lossy()),
-        quote(&Json::Object(params).to_string()),
+        quote(&open),
         quote(&claim.to_string_lossy()),
-    );
+    ));
     note_issued(&line);
     Ok(Value::record([("command", Value::from(line.as_str())), ("claim", Value::from(claim.to_string_lossy().as_ref()))]))
 }
@@ -239,9 +241,42 @@ fn await_claim(claim: &std::path::Path, wait: Duration) -> Result<String, String
 /// What an app that stopped waiting leaves in a claim.
 const GONE: &str = "gone";
 
-/// A word for `/bin/sh -c`, quoted.
+/// A word of the bridge's command line, quoted for how zgx's terminal runs
+/// it: through `/bin/sh -c` on Unix; on Windows the whole line is
+/// CreateProcess's command line (zgx-terminal's `shell()`, no shell between),
+/// so its words are read back by the C runtime's rules (CommandLineToArgvW,
+/// Rust's own `args`). A POSIX `'…'` word there names a program whose name
+/// starts with a quote, and the terminal couldn't start ("cannot find the
+/// file specified").
 fn quote(word: &str) -> String {
+    if cfg!(windows) { quote_windows(word) } else { quote_posix(word) }
+}
+
+/// A word for `/bin/sh -c`.
+fn quote_posix(word: &str) -> String {
     format!("'{}'", word.replace('\'', "'\\''"))
+}
+
+/// A word for a Windows command line: in double quotes, a quote escaped as
+/// `\"`, and the backslashes before a quote (or the closing one) doubled, so
+/// a folder's trailing `\` doesn't escape the closing quote.
+fn quote_windows(word: &str) -> String {
+    let mut quoted = String::with_capacity(word.len() + 2);
+    quoted.push('"');
+    let mut backslashes = 0;
+    for c in word.chars() {
+        if c == '\\' {
+            backslashes += 1;
+            continue;
+        }
+        let escapes = if c == '"' { backslashes * 2 + 1 } else { backslashes };
+        quoted.extend(std::iter::repeat_n('\\', escapes));
+        backslashes = 0;
+        quoted.push(c);
+    }
+    quoted.extend(std::iter::repeat_n('\\', backslashes * 2));
+    quoted.push('"');
+    quoted
 }
 
 /// The bridge's command line for terminal `arg.id` (on `device`, another
@@ -262,8 +297,40 @@ fn command(arg: Value, device: Option<String>) -> Result<Value, String> {
     if let Some(device) = device {
         line.push_str(&format!(" --device {}", quote(&device)));
     }
+    let line = runnable(line);
     note_issued(&line);
     Ok(Value::from(line.as_str()))
+}
+
+/// The line zgx's terminal runs for the bridge's `line`. The Windows beta is
+/// a GUI program (main.rs `windows_subsystem`), and Windows attaches none to
+/// the pseudoconsole it's started on: the bridge would have no console, its
+/// shell opened and nothing shown. So cmd.exe, a console program, is started
+/// on it, waits for the bridge, and the bridge attaches to its console
+/// (`attach_console`). Each word is in quotes with none inside (the open
+/// parameters are base64), so cmd takes nothing in them for its own syntax.
+#[cfg(all(windows, feature = "beta"))]
+fn runnable(line: String) -> String {
+    let cmd = std::env::var("ComSpec").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into());
+    format!("{} /d /s /c \"{line}\"", quote(&cmd))
+}
+#[cfg(not(all(windows, feature = "beta")))]
+fn runnable(line: String) -> String {
+    line
+}
+
+/// The console of the cmd.exe that started this bridge (`runnable`), when
+/// it has none of its own (a GUI program's).
+#[cfg(all(windows, feature = "beta"))]
+fn attach_console() {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole, GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE};
+    // SAFETY: the process's own standard handle, and a mode for it to fill.
+    unsafe {
+        let mut mode = 0;
+        if GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mut mode) == 0 {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -294,10 +361,14 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--port" => port = value.parse().ok(),
             "--data" => data = Some(PathBuf::from(value)),
             "--terminal" => terminal = Some(value.clone()),
-            "--open" => match serde_json::from_str::<Json>(value) {
-                Ok(Json::Object(params)) => open = Some(params),
-                _ => return Err("--open takes OpenTerminal's parameters".into()),
-            },
+            // (As JSON, or JSON in base64: `start`'s.)
+            "--open" => {
+                let decoded = base64::engine::general_purpose::STANDARD.decode(value).ok().and_then(|bytes| String::from_utf8(bytes).ok());
+                match serde_json::from_str::<Json>(decoded.as_deref().unwrap_or(value)) {
+                    Ok(Json::Object(params)) => open = Some(params),
+                    _ => return Err("--open takes OpenTerminal's parameters".into()),
+                }
+            }
             "--claim" => claim = Some(PathBuf::from(value)),
             "--device" => device = Some(value.clone()),
             other => return Err(format!("unknown flag {other}")),
@@ -344,7 +415,30 @@ fn window_size() -> Option<(u16, u16)> {
         (libc::ioctl(0, libc::TIOCGWINSZ, &mut size) == 0 && size.ws_col > 0).then_some((size.ws_col, size.ws_row))
     }
 }
-#[cfg(not(unix))]
+/// The visible window of the console this bridge writes to: the
+/// pseudoconsole zgx's terminal sized (cmd.exe's, `attach_console`), which
+/// follows the tab as zgx resizes it. Windows says nothing as it changes:
+/// the bridge looks on each of its turns (`bridge`), as cheap as a call.
+#[cfg(windows)]
+fn window_size() -> Option<(u16, u16)> {
+    use windows_sys::Win32::System::Console::{CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo, GetStdHandle, STD_OUTPUT_HANDLE};
+    // SAFETY: the process's own standard handle, and a struct for it to fill.
+    let info = unsafe {
+        let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
+        (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &mut info) != 0).then_some(info)
+    }?;
+    console_window_size(info.srWindow.Left, info.srWindow.Top, info.srWindow.Right, info.srWindow.Bottom)
+}
+
+/// Columns and rows of a console window's inclusive rectangle, if it has any.
+#[cfg(any(windows, test))]
+fn console_window_size(left: i16, top: i16, right: i16, bottom: i16) -> Option<(u16, u16)> {
+    let cols = i32::from(right) - i32::from(left) + 1;
+    let rows = i32::from(bottom) - i32::from(top) + 1;
+    (cols > 0 && rows > 0).then(|| (cols.min(i32::from(u16::MAX)) as u16, rows.min(i32::from(u16::MAX)) as u16))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn window_size() -> Option<(u16, u16)> {
     None
 }
@@ -449,6 +543,78 @@ impl Drop for Raw {
     }
 }
 
+/// The console's modes and code pages as found, put back as the bridge ends.
+#[cfg(windows)]
+struct Raw(Option<RawWas>);
+#[cfg(windows)]
+struct RawWas {
+    input: u32,
+    output: u32,
+    input_cp: u32,
+    output_cp: u32,
+}
+#[cfg(windows)]
+impl Raw {
+    /// Its console in raw mode, as `cfmakeraw` puts a Unix one: a cooked
+    /// console echoed each line before the shell at the other end did (every
+    /// line shown twice), ended it with a carriage return and a line feed
+    /// (PowerShell read the second as a continued line, `>>`), and took
+    /// Ctrl+C as a signal to every process on it, cmd.exe and the bridge
+    /// included, leaving the tab with nothing behind it. Raw, what's typed goes
+    /// on as it is (Ctrl+C as its byte, which the shell's own console turns
+    /// into its interrupt), in the terminal's sequences; what the shell wrote
+    /// comes out as it is, in UTF-8.
+    fn new() -> Self {
+        use windows_sys::Win32::System::Console::{
+            DISABLE_NEWLINE_AUTO_RETURN, ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleCP, GetConsoleMode, GetConsoleOutputCP, GetStdHandle,
+            STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetConsoleCP, SetConsoleMode, SetConsoleOutputCP,
+        };
+        // SAFETY: the process's own standard handles, modes read from them
+        // and changed; nothing if either isn't a console.
+        unsafe {
+            let (stdin, stdout) = (GetStdHandle(STD_INPUT_HANDLE), GetStdHandle(STD_OUTPUT_HANDLE));
+            let (mut input, mut output) = (0, 0);
+            if GetConsoleMode(stdin, &mut input) == 0 || GetConsoleMode(stdout, &mut output) == 0 {
+                return Raw(None);
+            }
+            let was = RawWas { input, output, input_cp: GetConsoleCP(), output_cp: GetConsoleOutputCP() };
+            SetConsoleMode(stdin, raw_input_mode(input));
+            SetConsoleMode(stdout, output | ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN);
+            const UTF8: u32 = 65001;
+            SetConsoleCP(UTF8);
+            SetConsoleOutputCP(UTF8);
+            Raw(Some(was))
+        }
+    }
+}
+#[cfg(windows)]
+impl Drop for Raw {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Console::{GetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetConsoleCP, SetConsoleMode, SetConsoleOutputCP};
+        if let Some(was) = &self.0 {
+            // SAFETY: restores what `new` read from the same handles.
+            unsafe {
+                SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), was.input);
+                SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), was.output);
+                SetConsoleCP(was.input_cp);
+                SetConsoleOutputCP(was.output_cp);
+            }
+        }
+    }
+}
+
+/// A console input mode made raw: no echo, no lines, no Ctrl+C signal;
+/// keys as the terminal's sequences. (Its other flags are left as found.)
+#[cfg(any(windows, test))]
+fn raw_input_mode(mode: u32) -> u32 {
+    // (windows-sys's values, here so the rule is tested everywhere.)
+    const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
+    const ENABLE_LINE_INPUT: u32 = 0x0002;
+    const ENABLE_ECHO_INPUT: u32 = 0x0004;
+    const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+    (mode & !(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT)) | ENABLE_VIRTUAL_TERMINAL_INPUT
+}
+
 /// Sends a call. On a socket that doesn't block, what doesn't go at once
 /// waits in tungstenite's buffer (`rpc::would_block`) for the socket to
 /// have room.
@@ -499,6 +665,8 @@ fn resizes() -> Option<std::os::fd::OwnedFd> {
 
 /// Runs the bridge; returns the process's exit code.
 pub fn bridge(args: &[String]) -> i32 {
+    #[cfg(all(windows, feature = "beta"))]
+    attach_console();
     let args = match parse(args) {
         Ok(args) => args,
         Err(why) => {
@@ -517,7 +685,7 @@ pub fn bridge(args: &[String]) -> i32 {
     };
     // (A device given is another's: the app only passes it then.)
     let mut device = args.device.clone();
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let _raw = Raw::new();
     let mut size = None;
     // A new one: opened here, at the size zgx gave this pseudoterminal, so
@@ -593,7 +761,7 @@ pub fn bridge(args: &[String]) -> i32 {
     let mut look_at_size = true;
     loop {
         // Its size, told as it changes (zgx resizes its pseudoterminal, and
-        // says so with SIGWINCH).
+        // says so with SIGWINCH; on Windows, looked at each turn).
         let now = if look_at_size { window_size() } else { size };
         look_at_size = cfg!(not(unix));
         if now.is_some() && now != size {
@@ -712,7 +880,9 @@ pub fn bridge(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, quote, said};
+    use super::{parse, quote, quote_posix, quote_windows, said};
+    #[cfg(windows)]
+    use std::path::PathBuf;
 
     #[test]
     fn a_claim_changes_hands_once_and_a_late_one_is_never_left_with_no_one() {
@@ -739,6 +909,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A Windows console made raw: no echo, no lines, no Ctrl+C signal, keys
+    /// as sequences, and whatever else it had kept.
+    #[test]
+    fn a_raw_console_neither_echoes_nor_cooks_nor_signals() {
+        // A cooked console's defaults: processed, line, echo, insert, quick
+        // edit, extended flags.
+        let cooked = 0x0001 | 0x0002 | 0x0004 | 0x0020 | 0x0040 | 0x0080;
+        assert_eq!(super::raw_input_mode(cooked), 0x0020 | 0x0040 | 0x0080 | 0x0200);
+        assert_eq!(super::raw_input_mode(0x0200), 0x0200);
+    }
+
+    /// A console's size is its visible window's: inclusive edges.
+    #[test]
+    fn a_consoles_size_is_its_windows() {
+        assert_eq!(super::console_window_size(0, 0, 79, 23), Some((80, 24)));
+        // Scrolled down its buffer: still the window's size.
+        assert_eq!(super::console_window_size(0, 900, 39, 947), Some((40, 48)));
+        assert_eq!(super::console_window_size(5, 5, 4, 10), None);
+    }
+
     #[test]
     fn an_older_engine_says_to_update() {
         assert_eq!(said("unknown method: TerminalStatus".into()), "Update Zeron to use terminals here.");
@@ -747,7 +937,15 @@ mod tests {
 
     #[test]
     fn quotes_and_parses_the_bridge_line() {
-        assert_eq!(quote("a b'c"), "'a b'\\''c'");
+        assert_eq!(quote_posix("a b'c"), "'a b'\\''c'");
+        // Paths with spaces, each platform's way (both checked everywhere).
+        assert_eq!(quote_posix("/Users/Some One/Zeron.app/zeron-zgx"), "'/Users/Some One/Zeron.app/zeron-zgx'");
+        assert_eq!(quote_windows(r"C:\Program Files\Zeron\zeron.exe"), r#""C:\Program Files\Zeron\zeron.exe""#);
+        // A folder's trailing backslash must not escape the closing quote.
+        assert_eq!(quote_windows(r"C:\Users\me\AppData\Local\Zeron\"), r#""C:\Users\me\AppData\Local\Zeron\\""#);
+        assert_eq!(quote_windows(r#"{"chatId":"c1"}"#), r#""{\"chatId\":\"c1\"}""#);
+        assert_eq!(quote_windows(r#"a\"b"#), r#""a\\\"b""#);
+        assert_eq!(quote_windows(""), r#""""#);
         let args: Vec<String> = ["--port", "27897", "--data", "/tmp/d", "--terminal", "t1", "--device", "dev"]
             .iter()
             .map(|s| s.to_string())
@@ -767,5 +965,50 @@ mod tests {
         assert_eq!(parsed.open.unwrap()["chatId"], "c1");
         let args: Vec<String> = ["--port", "1", "--data", "/d", "--open", "{}"].iter().map(|s| s.to_string()).collect();
         assert!(parse(&args).is_err(), "a new one needs somewhere to leave its id");
+    }
+
+    /// The bridge line as Windows itself splits it (CommandLineToArgvW, the
+    /// rules a C runtime or Rust's `args` read a CreateProcess command line
+    /// by): every word comes back whole, the program first, and the bridge's
+    /// own parser reads the rest. Spaces, a trailing backslash, quotes and
+    /// backslashes in the JSON.
+    #[cfg(windows)]
+    #[test]
+    fn windows_reads_the_bridge_line_back_whole() {
+        use windows_sys::Win32::{Foundation::LocalFree, UI::Shell::CommandLineToArgvW};
+        fn split(line: &str) -> Vec<String> {
+            let wide: Vec<u16> = line.encode_utf16().chain([0]).collect();
+            let mut count = 0;
+            // SAFETY: a NUL-terminated line; the array is freed below.
+            let argv = unsafe { CommandLineToArgvW(wide.as_ptr(), &mut count) };
+            assert!(!argv.is_null());
+            let words = (0..count as usize)
+                .map(|i| {
+                    // SAFETY: `count` NUL-terminated strings.
+                    let word = unsafe { *argv.add(i) };
+                    let len = (0..).take_while(|&j| unsafe { *word.add(j) } != 0).count();
+                    String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(word, len) })
+                })
+                .collect();
+            // SAFETY: the array CommandLineToArgvW allocated.
+            unsafe { LocalFree(argv.cast()) };
+            words
+        }
+        let exe = r"C:\Users\Some One\AppData\Local\Programs\Zeron\zeron.exe";
+        let data = r"C:\Users\Some One\AppData\Local\Zeron\";
+        let open = r#"{"chatId":"c 1","root":"C:\\work\\a \"b\""}"#;
+        let claim = r"C:\Temp\zeron-zgx-terminals\12-34";
+        let line = format!(
+            "{} terminal-bridge --port 27654 --data {} --open {} --claim {}",
+            quote(exe),
+            quote(data),
+            quote(open),
+            quote(claim)
+        );
+        let words = split(&line);
+        assert_eq!(words, [exe, "terminal-bridge", "--port", "27654", "--data", data, "--open", open, "--claim", claim]);
+        let parsed = parse(&words[2..]).unwrap();
+        assert_eq!(parsed.data, PathBuf::from(data));
+        assert_eq!(parsed.open.unwrap()["root"], r#"C:\work\a "b""#);
     }
 }

@@ -80,8 +80,11 @@ export interface SessionView {
 export const status = async (u: TestUser) =>
   (await call("GET", `/cloud/${u.orgId}`, userBearer(u))).json() as Promise<AccountStatus>;
 
+/** As a current client: it names the states an older one can't parse. */
+export const CURRENT_CLIENT = { "x-zeron-cloud-states": "data_expired" };
+
 export const sessions = async (u: TestUser) =>
-  ((await (await call("GET", `/cloud/${u.orgId}/sessions`, userBearer(u))).json()) as { sessions: SessionView[] }).sessions;
+  ((await (await call("GET", `/cloud/${u.orgId}/sessions`, userBearer(u), undefined, CURRENT_CLIENT)).json()) as { sessions: SessionView[] }).sessions;
 
 export const session = async (u: TestUser, chatId: string) => (await sessions(u)).find((s) => s.chatId === chatId);
 

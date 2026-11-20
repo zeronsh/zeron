@@ -10,10 +10,10 @@
 -- Plugins are per device (what each runs, what each allowed), so the page
 -- has Providers' device choice at its title's end (screens/settings/
 -- devices `picker`): another device's plugins are listed, allowed, turned
--- on or off, installed, updated and removed there, the engine carrying
--- each call (`targetDeviceId`, src/plugins/remote.rs). What's this
--- device's alone isn't offered there: a plugin's settings (its windows
--- here read them), its folder, and installing from a file on this one. A
+-- on or off, installed (from a link, or a file here sent there), updated
+-- and removed there, the engine carrying each call (`targetDeviceId`,
+-- src/plugins/remote.rs). What's this device's alone isn't offered there:
+-- a plugin's settings (its windows here read them) and its folder. A
 -- device that's away says so in place of its list.
 --
 -- Allowing happens in a window of its own (screens/plugins/consent),
@@ -21,7 +21,7 @@
 -- must not be able to allow anything themselves.
 --
 -- Someone else's plugins come in by Install… (a link: a package, a GitHub
--- release, a git repository; or, on this device, a .zeron-plugin file):
+-- release, a git repository; or a .zeron-plugin file on this computer):
 -- the engine checks the signature, then it waits for the consent window
 -- like any other. Each one's source is checked for a newer version as the
 -- page opens on a device (the engine checks every few hours too); a row
@@ -64,7 +64,7 @@ end
 
 local function shown_device(): sessions.Device?
 	local id = device()
-	for _, d in sessions.now:get().devices or {} do
+	for _, d in sessions.devices:get() or {} do
 		if (id and d.id == id) or (not id and d.here) then
 			return d
 		end
@@ -120,7 +120,7 @@ local function failed(title: string | Message): (err: any) -> ()
 		local message = if type(err) == "table" and err.message then tostring(err.message) else nil
 		ds.toast.show {
 			title = title,
-			body = if message == "offline" then ui.t("plugins.page.cant_reach", { device = where }) else message,
+			body = if message == "offline" then ui.t("plugins.page.cant_reach", { device = where }) elseif message then words.failure(message) else nil,
 			tone = "warning",
 		}
 	end
@@ -164,8 +164,8 @@ local function install(from: { path: string?, url: string?, device: string? })
 	end)
 end
 
--- Install's file: a .zeron-plugin (this device's alone), installed with
--- the dialog open as a link is.
+-- Install's file: a .zeron-plugin on this computer, installed with the
+-- dialog open as a link is, here or on the device shown (sent there).
 local function choose_file()
 	if install_busy:peek() then
 		return
@@ -174,7 +174,7 @@ local function choose_file()
 		local files = ui.open_files({ title = ui.t("plugins.page.install_title"):get(), filters = package_filter() }):await()
 		local file = files and files[1]
 		if file then
-			install { path = file.path }
+			install { path = file.path, device = device() }
 		end
 	end)
 end
@@ -577,8 +577,7 @@ local function dialogs(): { Node }
 				w_full = true,
 			},
 		},
-		-- Install…: a link on any device; a file only here (a file on this
-		-- device isn't on another, so there it says so instead).
+		-- Install…: a link, or a file on this computer, on any device.
 		ds.Dialog {
 			open = installing,
 			title = function(): string
@@ -610,9 +609,7 @@ local function dialogs(): { Node }
 				select_on_focus = true,
 				w_full = true,
 			},
-			ui.show(function(): boolean
-				return device() == nil
-			end, ds.Button {
+			ds.Button {
 				id = "plugins-choose-file",
 				tone = "secondary",
 				size = "sm",
@@ -621,19 +618,7 @@ local function dialogs(): { Node }
 				end,
 				on_click = choose_file,
 				ui.t("plugins.page.choose_file"),
-			}),
-			ui.show(function(): boolean
-				return device() ~= nil
-			end, ui.text {
-				id = "plugins-file-elsewhere",
-				function(): string
-					return ui.t("plugins.page.file_here_only", { device = device_name() }):get()
-				end,
-				text_size = "$font.size.sm",
-				line_height = "$font.line.sm",
-				color = "$text.secondary",
-				wrap = true,
-			}),
+			},
 		},
 	}
 end

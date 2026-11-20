@@ -170,6 +170,9 @@ pub struct PendingSend {
     pub kind: PendingKind,
     pub sent_at_ms: i64,
     pub state: SendState,
+    /// Still on this device, failed or uploading: Remove applies
+    /// (`SessionHandle::remove_send`), and it then never goes out.
+    pub removable: bool,
 }
 
 impl From<&zc::PendingSend> for PendingSend {
@@ -185,6 +188,7 @@ impl From<&zc::PendingSend> for PendingSend {
             },
             sent_at_ms: p.sent_at_ms,
             state: p.state.into(),
+            removable: p.removable,
         }
     }
 }
@@ -228,6 +232,35 @@ pub struct ContextUsage {
     pub window: Option<u64>,
 }
 
+/// Why a transcript with nothing in it has nothing in it. Anything stored on this
+/// device always shows, so this is only about a chat it has never loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum TranscriptLoad {
+    /// Show the transcript: it has content, or the chat really is empty.
+    Ready,
+    /// "Syncing…"
+    Syncing,
+    /// "Reconnecting…"
+    Reconnecting,
+    /// "Offline — this chat loads when you're back online". No spinner.
+    Offline,
+    /// "This chat lives on another device — it loads when that device is back
+    /// online". No spinner: nothing is lost, and nothing's happening here.
+    HostAway,
+}
+
+impl From<zc::TranscriptLoad> for TranscriptLoad {
+    fn from(load: zc::TranscriptLoad) -> Self {
+        match load {
+            zc::TranscriptLoad::Ready => Self::Ready,
+            zc::TranscriptLoad::Syncing => Self::Syncing,
+            zc::TranscriptLoad::Reconnecting => Self::Reconnecting,
+            zc::TranscriptLoad::Offline => Self::Offline,
+            zc::TranscriptLoad::HostAway => Self::HostAway,
+        }
+    }
+}
+
 /// Everything the composer and its status strip render.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct ComposerState {
@@ -254,6 +287,8 @@ pub struct ComposerState {
     /// Scroll-to-own-send target.
     pub last_submitted_message_id: Option<String>,
     pub context_usage: Option<ContextUsage>,
+    /// What to show in place of an empty transcript, if anything.
+    pub transcript_load: TranscriptLoad,
 }
 
 impl From<&zc::ComposerState> for ComposerState {
@@ -349,6 +384,7 @@ impl From<&zc::ComposerState> for ComposerState {
                 tokens: u.tokens,
                 window: u.window,
             }),
+            transcript_load: c.transcript_load.into(),
         }
     }
 }
@@ -368,6 +404,10 @@ pub struct TranscriptStatus {
     pub working_since_ms: Option<i64>,
     /// Id of the newest entry (host or echo).
     pub last_entry_id: Option<String>,
+    /// The chat's Cloud machine rebuilt its chat store from the server copy
+    /// at this Unix ms: show a quiet note ("This chat was restored from its
+    /// server copy") until [`SessionHandle::dismiss_restored_note`].
+    pub restored_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -490,7 +530,14 @@ impl SessionHandle {
             working: snap.working,
             working_since_ms: snap.working_since_ms,
             last_entry_id: snap.entries.last().map(|e| e.id.clone()),
+            restored_at_ms: snap.restored_at_ms,
         }
+    }
+
+    /// Dismiss the restored-from-server note (for every chat on the machine,
+    /// until it is rebuilt again).
+    pub fn dismiss_restored_note(&self) {
+        self.inner.dismiss_restored_note();
     }
 
     /// Plain text of one entry's text parts (copy / share).
@@ -644,5 +691,11 @@ impl SessionHandle {
     /// "Not delivered — tap to retry".
     pub fn retry_delivery(&self) -> CoreResult<()> {
         Ok(self.inner.retry_delivery()?)
+    }
+
+    /// Remove a pending send that's `removable`: it never goes out. `false`
+    /// when it already went.
+    pub fn remove_send(&self, message_id: String) -> CoreResult<bool> {
+        Ok(self.inner.remove_send(&message_id)?)
     }
 }

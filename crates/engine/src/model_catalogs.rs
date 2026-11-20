@@ -10,6 +10,12 @@ use zeron_harness::{
 };
 use zeron_proto::Model;
 
+/// The saved catalog's shape. 2: models name their provider (`provider`),
+/// and an agent's `<Provider> · <model>` label is split into the two; a
+/// catalog an older engine saved has neither, so it's fetched again rather
+/// than shown as it was.
+const SCHEMA: u32 = 3;
+
 #[derive(Serialize, Deserialize)]
 struct Saved {
     schema_version: u32,
@@ -26,7 +32,7 @@ fn location(root: &Path, harness: &dyn Harness, context: &ModelContext) -> PathB
 }
 fn read(path: &Path, context: &ModelContext) -> Option<Vec<Model>> {
     let saved: Saved = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    (saved.schema_version == 1
+    (saved.schema_version == SCHEMA
         && saved.binary_version == context.binary_version
         && !saved.catalog.is_empty())
     .then_some(saved.catalog)
@@ -37,7 +43,7 @@ fn save(path: &Path, context: &ModelContext, models: &[Model]) -> std::io::Resul
     }
     std::fs::create_dir_all(path.parent().unwrap())?;
     let bytes = serde_json::to_vec(&Saved {
-        schema_version: 1,
+        schema_version: SCHEMA,
         fetched_at: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -105,6 +111,17 @@ async fn list_inner(
     force: bool,
     lease: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
 ) -> Result<Vec<Model>, HarnessError> {
+    // Applied to what is served, never to what is saved: the disk copy stays
+    // the CLI's own answer, so a later list (or none) re-applies cleanly.
+    let hosted = crate::hosted_models::HostedModels::shared(root);
+    let overlay = |catalog: ModelCatalog, cli: Option<&str>| {
+        let source = if catalog.source == "static" {
+            crate::hosted_models::Source::BuiltIn
+        } else {
+            crate::hosted_models::Source::Cli
+        };
+        hosted.apply(harness.id(), catalog.models, cli, source)
+    };
     let Some(context) = harness.model_context().map_err(|error| {
         let failure = CatalogFailure::from(error);
         tracing::warn!(code = %failure.code, error = %failure, "Model discovery context unavailable");
@@ -113,7 +130,7 @@ async fn list_inner(
         return harness
             .model_catalog(force)
             .await
-            .map(|catalog| catalog.models);
+            .map(|catalog| overlay(catalog, None));
     };
     let path = location(root, harness.as_ref(), &context);
     let disk = read(&path, &context);
@@ -153,7 +170,10 @@ async fn list_inner(
             result
         }
     });
-    let result = if disk.is_some() {
+    // A kept catalog answers at once while the refresh runs on, unless the
+    // caller asked for this one (`force`: a sign-in just changed what the
+    // agent lists, and the kept one is the last account's).
+    let result = if disk.is_some() && !force {
         tokio::time::timeout(Duration::from_millis(100), &mut refresh)
             .await
             .ok()
@@ -203,7 +223,7 @@ async fn list_inner(
         }
     };
     tracing::info!(harness = ?harness.id(), source = catalog.source, binary_path = %context.binary_path.display(), binary_version = ?context.binary_version, model_count = catalog.models.len(), "Model discovery");
-    Ok(catalog.models)
+    Ok(overlay(catalog, context.binary_version.as_deref()))
 }
 
 #[cfg(test)]
@@ -218,8 +238,10 @@ mod tests {
     }
     fn models() -> Vec<Model> {
         vec![Model {
+            default: false,
             id: "live".into(),
             label: "Live".into(),
+            provider: None,
             description: None,
             reasoning_levels: vec![],
             options: vec![],
@@ -312,7 +334,8 @@ mod tests {
         probe.delay.store(true, SeqCst);
         let gate = Arc::new(tokio::sync::RwLock::new(()));
         let lease = Arc::new(gate.clone().read_owned().await);
-        list_with_lease(dir.path(), probe, true, Some(lease))
+        // (Unforced: the kept catalog answers while the probe runs on.)
+        list_with_lease(dir.path(), probe, false, Some(lease))
             .await
             .unwrap();
         assert!(
@@ -432,6 +455,20 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(250)).await;
         assert_eq!(read(&path, &context), Some(models()));
     }
+    /// Asked for this one (a sign-in just changed what the agent lists), a
+    /// slow probe is waited for: the kept catalog is the last account's.
+    #[tokio::test]
+    async fn a_forced_list_waits_for_the_probe_over_the_kept_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = Probe::new();
+        let context = probe.model_context().unwrap().unwrap();
+        let path = location(dir.path(), probe.as_ref(), &context);
+        let mut old = models();
+        old[0].id = "old-live".into();
+        save(&path, &context, &old).unwrap();
+        probe.delay.store(true, SeqCst);
+        assert_eq!(list(dir.path(), probe, true).await.unwrap(), models());
+    }
     #[tokio::test]
     async fn account_swap_during_probe_never_publishes_or_persists_old_account() {
         let dir = tempfile::tempdir().unwrap();
@@ -457,7 +494,7 @@ mod tests {
         let mut wrong = context.clone();
         wrong.binary_version = Some("2.0.0".into());
         assert!(read(&path, &wrong).is_none());
-        for value in ["broken".to_owned(), serde_json::json!({"schema_version":2,"fetched_at":0,"binary_version":"1.0.0","catalog":models()}).to_string(), serde_json::json!({"schema_version":1,"fetched_at":0,"binary_version":"1.0.0","catalog":[]}).to_string()] {
+        for value in ["broken".to_owned(), serde_json::json!({"schema_version":SCHEMA + 1,"fetched_at":0,"binary_version":"1.0.0","catalog":models()}).to_string(), serde_json::json!({"schema_version":1,"fetched_at":0,"binary_version":"1.0.0","catalog":models()}).to_string(), serde_json::json!({"schema_version":SCHEMA,"fetched_at":0,"binary_version":"1.0.0","catalog":[]}).to_string()] {
             std::fs::write(&path, value).unwrap(); assert!(read(&path, &context).is_none());
         }
     }

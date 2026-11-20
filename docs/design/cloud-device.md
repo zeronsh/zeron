@@ -16,7 +16,10 @@ only once an account has been connected *for Cloud* (Settings → Providers, wit
 the device switcher). Cloud is listed there as one entry, never its session machines; no other
 device list shows it.
 
-- v1 providers on Cloud: **Codex** and **Claude Code** only.
+- Providers on Cloud: every built-in agent — Claude Code, Codex, Cursor, Devin, Grok, Hermes,
+  fx, Pi, OpenCode, Antigravity and Muse Code — each on the vault credentials listed in
+  "Providers" (agents added from the ACP registry stay on the devices that added them). A
+  machine installs an agent's CLI the first time a session runs it.
 - v1 repositories on Cloud: **GitHub repositories** the user installed the Zeron GitHub App on.
   Each session sandbox clones its project's repository from the branch picked in the composer;
   agents get a one-hour GitHub App installation token for `git push` and `gh pr create`, so
@@ -80,10 +83,11 @@ catalog restricted to Codex + Claude Code, so opening a composer never wakes a s
 3. **Sleep.** After `CLOUD_IDLE_MINUTES` without activity (no turn running, no one doing anything on it)
    the session's sandbox is stopped. Archiving a chat lets it sleep.
 4. **Wake.** A send to the chat nudges its host device; a nudge to a sleeping session device
-   wakes it, and the queued command runs once the engine reconnects. Merely viewing a sleeping
-   chat (or its sidebar row) does not wake it: client dials to a sleeping session device get
-   the ordinary offline answer, and the UI offers an explicit Wake for files, terminals and
-   diffs.
+   wakes it, and the queued command runs once the engine reconnects. A send also recovers a
+   session in `error` that still has a sandbox, unless the failure is one a retry can't fix
+   ("Machine sizes"). Merely viewing a sleeping chat (or its sidebar row) does not wake it:
+   client dials to a sleeping session device get the ordinary offline answer, and the UI offers
+   an explicit Wake for files, terminals and diffs.
 5. **Delete.** Deleting the chat (or Cloud) runs the DeleteWorkflow: revoke the
    session device, stop, capture final usage, delete the sandbox. The transcript stays.
 
@@ -129,38 +133,88 @@ next token refresh fails and that engine goes dark within one token lifetime.
 
 The sandbox runs full-access agents on arbitrary repository code, so anything that can read
 `runner-key` can mint runner tokens. A runner token therefore acts as **its session's device**
-(the JWT's verified `dev` claim), never as the whole user — and never as a neighbouring
-session. Enforced at the edge:
+(the JWT's verified `dev` claim), never as the whole user. What else it reaches is its
+session's **reach**, which only the person sets:
+
+- **`devices`** (the default). Like any of the person's devices, it reaches their other
+  devices and every one of their chats: a Cloud chat's agent lists and messages chats on the
+  laptop, starts chats there, and runs commands on any online device (`run_command`), as an
+  agent on the laptop can. Through a client link to one of their computers that is that
+  computer's whole remote interface, so a compromised session can act as the person while
+  one of their computers is online.
+- **`isolated`**. Its own machine, and the delegates it starts (below): it sees no other
+  chat, touches none, and reaches no other device's room.
+
+The account's default is `PUT /cloud/{org}/reach {reach}` (Settings → Cloud); a session takes
+it at creation unless the composer picks one (`POST /cloud/{org}/sessions {…, reach}`), and
+`POST /cloud/{org}/sessions/{chatId}/reach {reach}` changes one session's (the composer's
+place menu). A delegate always takes its parent's reach, whatever it asks. Runner bearers are
+refused on all three (no `/cloud/*` but delegation; `CloudAccount` refuses any machine
+caller too), and on the engine they are local-only methods (`CloudSetReach`,
+`CloudSessionSetReach`): neither an agent's token nor another device (a Cloud machine among
+them) may call them, and a reach named in an agent's `CreateChat` is ignored.
+
+The reach is enforced where it is kept, in the user's registry (`RegistryRoom`, meta
+`runnerReach:{device}`, absent = `devices`); `CloudAccount` tells it first and records it
+once it holds. Enforced at the edge:
 
 - **Paths** (`edge/src/runner-policy.ts`, 403): no `/auth/*` org routes, no `/cloud/*`, no
-  `/vault/*` except `POST /vault/{org}/grant` for its own device. `/device/{id}/*` only for its
-  own id; for any other device only `GET /device/{id}/status` (read-only liveness) — no
-  client/host sockets, nudges or sidecars. No legacy loro rooms (`/session`, `/tail`,
-  `/stats`, `/diff`, `/snapshot`, `/append`, `/workspace`). On `/registry/{org}` only row sync
-  (`ws`, `GET rows`, `POST push`) — no `stats`, `push-target` (APNs titles) or `reset`.
-- **Chat-scoped data** (`edge/src/runner-access.ts`): `/chat2/{chatId}/*` and
-  `/blob/{chatId}/*` only while registry row `chats/{chatId}` is live and its
-  `fields.deviceId` equals the runner's device; otherwise 403 `not_host`. Positive answers are
-  cached per isolate for ≤5 min; refusals are never cached.
+  `/vault/*` except `POST /vault/{org}/grant` for its own device. `/device/{id}/*` fully for
+  its own id; for any other device a client socket (`ws`, role client — that device's RPC
+  surface: chats, terminals, files) and the command nudge as its reach allows (below), and
+  `GET /device/{id}/status` — never the host role or that device's sidecars. No legacy loro
+  rooms (`/session`, `/tail`, `/stats`, `/diff`, `/snapshot`, `/append`, `/workspace`). On
+  `/registry/{org}` only row sync (`ws`, `GET rows`, `POST push`) — no `stats`,
+  `push-target` (APNs titles) or `reset`.
+- **Other chats and devices** (`edge/src/runner-access.ts`, asking the registry's
+  `/runner-admit`): in either reach, the chats it hosts and its delegates' (a subagent's doc
+  by the chat that spawned it), and its delegates' Cloud machines. With `devices`, also any
+  live chat and any of the person's devices; such an admission carries the runner's
+  revocation epoch, and the room is recorded. Only admissions that hold in every reach are
+  cached (per isolate, 5 minutes); the rest are asked each time, so a change takes effect at
+  once. Covers `/chat2/{chatId}/*`, `/blob/{chatId}/*`, attachment blobs, and another
+  device's `ws`/`nudge`.
+- **Revocation** (`edge/src/runner-revocation.ts`): isolating a session bumps its epoch and
+  sends each recorded room a drop; a `ChatRoom` or `DeviceRoom` closes the runner's sockets
+  admitted at an older epoch (4403) and remembers the epoch, refusing a dial admitted before
+  the change that arrives after it. Its registry sockets close too (1012), and its next
+  state is `full`, so what it held of other devices' rows goes. A room whose drop fails stays
+  recorded, and the change answers 503 until a retry closes it.
 - **Registry** (`edge/src/registry-runner.ts`; the Worker stamps `x-zeron-runner-device`
-  on runner forwards and strips any inbound value). Writes: `devices` only its own row;
-  `chats`, `spaces`, `sessions` only when the existing live row is hosted by the runner AND
-  the row after the op still is (no claiming, handing away or ownerless rows); deletes need a
-  live owned row; tombstones are never revived; every other kind (`preferences`,
-  `sidebarPins`, anything new) is refused. Refused ops are skipped individually (an
-  `{t:"error", code:"not_owner"}` frame each, plus `rejected` in the ack); the rest of the
-  batch applies. Reads (hello/backfill, live `rows` broadcasts, `GET /rows`): every `devices`
-  row, the hosted rows the runner owns, the projects (spaces) of the chats it hosts, and
-  tombstones of hosted kinds (they carry no fields); laptop chats, other projects and other
-  sessions' chats and session rows — titles, previews, status — never reach it.
+  on runner forwards and strips any inbound value). Writes, either reach: `devices` only its
+  own row; `chats`, `spaces`, `sessions` when the existing live row is hosted by the runner
+  AND the row after the op still is (no claiming, handing away or ownerless rows); a
+  delegate's chat and session rows may be deleted; deletes otherwise need a live owned row;
+  tombstones are never revived; every other kind (`preferences`, `sidebarPins`, anything
+  new) is refused. With `devices`, a chat hosted elsewhere may have any field set but its
+  host (`deviceId`: a chat is never re-homed), and a new chat row may be hosted by any device
+  (a chat it starts there); isolated, a delegate may only be renamed or archived. Another
+  device's `spaces` and `sessions` rows stay its own. Refused ops are skipped individually
+  (an `{t:"error", code:"not_owner"}` frame each, plus `rejected` in the ack); the rest of
+  the batch applies. Reads (hello/backfill, live `rows` broadcasts, `GET /rows`): with
+  `devices`, every `devices`, `chats`, `spaces` and `sessions` row; isolated, every
+  `devices` row, the rows it hosts, the projects of the chats it hosts, its delegates and
+  their session rows, and tombstones; never the user's own kinds. A machine whose view
+  changed (a reach changed, or one that synced while it saw only its own rows) holds a
+  cursor that doesn't match what it now sees, so its next state is `full`
+  (`RegistryRoom.runnerBehind`, recorded per device as the seq it was sent at; sent again,
+  at most three times, until the machine's cursor passes that seq).
   Presence is unfiltered, but a runner socket's presence/attribution device is pinned to its
   verified id.
+- **Waking**: a Cloud machine's send (`POST /device/{id}/nudge`) wakes any of the person's
+  sleeping sessions while its reach is `devices`, as their other devices' sends do; isolated,
+  only its delegates (`CloudAccount.autoWake`).
+- **Engine** (`crates/engine/src/rpc/agent_gate.rs`): what an agent may do is the same on
+  Cloud as on a computer. It runs commands (`RunCommand`, `ReadCommandOutput`, `StopCommand`,
+  `ListBackgroundCommands`, here or on another device) only from a chat with full access (what every
+  harness already runs unconfined). A command running on a Cloud machine counts as background work in its heartbeat,
+  so the machine stays awake for it.
 
 User bearers are unaffected by all of the above.
 
 #### Delegation
 
-The one widening: a session's machine may start and manage **delegates** of the chat it runs
+A session's machine may start and manage **delegates** of the chat it runs
 (Zeron MCP `create_chat { cloud: true }`), one level deep. A delegate is a Cloud session of
 its own, on its own machine, recorded with `parentChatId` = the parent's chat.
 
@@ -172,21 +226,24 @@ its own, on its own machine, recorded with `parentChatId` = the parent's chat.
   hold: credits, and `CLOUD_MAX_AWAKE` machines at once. A runner request without
   `parentChatId` is refused (a machine never acts as the user).
 - **Its chat row** is written by the edge, as the user (`chats/{chatId}`: the new machine as
-  host, `parentChatId`, the parent's `spaceId`, `roomGen: 2`, the asked-for `config`): a
-  runner may write only rows it hosts, and only the edge knows which machine it just made.
+  host, `parentChatId`, the parent's `spaceId`, `roomGen: 2`, the asked-for `config`): only
+  the edge knows which machine it just made.
 - **Manage** (`DELETE /cloud/{org}/sessions/{chatId}`, `POST …/{wake|sleep}`): only sessions
   whose `parentChatId` is its chat. Retry, the session list, projects, billing and Cloud
   on/off stay the user's.
-- **See and reach**: the registry shows the runner its delegates' chat and session rows
-  (`RunnerScope.children`), and lets it rename, archive or delete them — never re-home them.
-  `/chat2/{chatId}/*` and `/blob/{chatId}/*` admit it when it hosts the chat's parent
-  (`/chat-host` answers `parentHost`). `/device/{id}/*` admits a client socket (never the host
-  role) and the command nudge for a device hosting one of its delegates
-  (`runnerDeviceGate`, via the registry's `/device-parents`). No other main chat — on the
-  laptop or another session — becomes visible.
+- **Delete**: the registry lets it delete its delegates' chat and session rows
+  (`runnerChildren`) — never re-home them.
 
-A stolen runner key therefore reaches at most: starting machines on the repository its
-session already has (bounded by credits and the awake limit), and its own delegates.
+A stolen runner key therefore reaches what any of the person's devices reaches. Directly, at
+the edge: their chats (reading them, messaging them, starting chats on their devices) and
+starting machines on the repository its session already has (bounded by credits and the awake
+limit); the edge still refuses it the account (`/auth/*`, `/cloud/*`), the vault beyond its own
+grant, hosting another device's room, and the person's preferences. But through a client link
+to one of their online computers it reaches that computer's whole RPC surface, which acts with
+that computer's own session: running commands and opening terminals there, its files, and the
+calls that computer makes for the person (account, vault, Cloud and billing). So in practice a
+compromised session machine can act as the person while any of their computers is online —
+the trade-off accepted for Cloud chats working with every device as a computer's chats do.
 
 ### Workflows (Cloudflare Workflows)
 
@@ -211,20 +268,28 @@ Linux release from `{edge}/releases/`, writes `~/.zeron/env` (0600) from the per
 `zeron headless` as the exec user with `Restart=always`. Enabled units restart on resume
 (verified on Boat: a resumed sandbox lands on a new machine in ~4 s with the service up).
 
-**WakeWorkflow** — `resume` → poll until ready → `waitForEvent("online", 5 min)` (the
-runner's first token after resume); on timeout it runs one idempotent
-`sudo systemctl restart zeron-cloud` before failing.
+**WakeWorkflow** — one step (`edge/src/cloud/wake.ts`, `fastWake`): `resume`, then at once
+`systemctl start --no-block zeron-cloud` (Boat holds a command until the machine can run it,
+so this races the machine's own start of its enabled units), polling the state every 250 ms,
+then easing off (no Workflow sleep: those cost whole seconds). A resume during a stop is taken
+(it keeps the machine); a refused one falls back to the slow poll. A wake onto another size stops
+the machine first, so that never applies to it. A resume refused for good comes back typed, as
+"A wake refused for want of disk" says. Then
+`waitForEvent("online", 90 s)` (the runner's first token after resume); on timeout it runs one
+idempotent `sudo systemctl restart zeron-cloud` and waits 5 more minutes before failing. None of
+this gates the queued message: the engine drains it as soon as it joins its room, so the
+workflow only decides when the session reads `ready`.
 
 **SleepWorkflow** — `zeron quiesce` → `sudo systemctl stop zeron-cloud` → `stop` → poll until
 stopped. A refused stop is retried (the provider bills nothing while a stop is refused); it is
 never forced.
 - *Quiesce* (headless IPC `QuiesceForSleep`): the engine starts no new work from here on, so a
   send arriving now waits in its chat for the woken machine instead of starting a turn the stop
-  would kill (the engine marks a command handled before running it, so a killed turn is never
-  retried). A turn in flight or a message already waiting makes it exit 75: the sleep is
-  declined and the session stays `ready` (idle sleep retries a full idle window later). A
-  quiesce the stop never follows lifts itself after 3 minutes. An engine that can't answer
-  (gone, or older than the handshake) doesn't block the sleep.
+  would cut off ("A killed turn"). A turn in flight or a message already waiting makes it exit
+  75: the sleep is declined and the session stays `ready` (idle sleep retries a full idle window
+  later). A quiesce the stop never follows lifts itself after 3 minutes. An engine that can't
+  answer (gone, or older than the handshake) doesn't block the sleep. Accepted, the engine clears
+  rebuildable caches before it answers ("Disk").
 - *Stop the engine*: Boat reports a sandbox stopped once its disk snapshot is taken while the
   machine may run on a moment; an engine still connected then acknowledged a send's nudge and
   wrote changes the snapshot never saw. Stopped first, it has drained to disk and its device
@@ -242,7 +307,8 @@ A registry it can't read skips the pass; it never deletes on doubt. The finished
 registry: no device lists it, and the dial gate (`WorkspaceHost::peer_liveness`) reads a deleted
 device as dark, so nothing dials it again.
 
-Idle policy: the runner posts `POST /runner/heartbeat {activeRuns, clients}` every 60 s, where
+Idle policy: the runner posts `POST /runner/heartbeat {activeRuns, clients, backgroundRuns,
+waitingRuns, diskUsedBytes, diskTotalBytes}` every 60 s, where
 `clients` counts interactive relay requests it served since the previous heartbeat — sends, terminal
 input, file writes, actions — never requests that only look (lists, reads, searches, watches, status:
 `runner::passive`), and never open links or streams, so an app merely displaying a Cloud chat
@@ -250,6 +316,216 @@ doesn't keep its machine awake.
 The DO alarm puts the device to sleep after `CLOUD_IDLE_MINUTES` (default 10) without activity.
 When the provider requires auto-stop (Boat trial: ≤2 h), the DO re-extends the TTL while runs
 are active, and a provider-initiated stop is detected and recorded as sleep.
+
+### Machine sizes
+
+The sizes live in one place, `MACHINES` in `edge/src/cloud/policy.ts`, and clients read them from
+`CloudStatus.machines`. `diskGiB` is what a size *holds*, the limit a resume is refused against. It
+counts what the machine added, not the base image `df` also counts (about 20.5 GiB on Boat,
+`SandboxCapabilities.diskOverheadGiB`): a `default` machine reading 62 GiB in `df` fits, and one
+reading 72.4 doesn't.
+
+| Size | vCPU | Memory | Holds | Credits | Source |
+| --- | --- | --- | --- | --- | --- |
+| `small` | 2 | 4 GB | 51.2 GiB | 0.5× | Refused at the same figure as `default` on a shrink |
+| `default` | 4 | 8 GB | 51.2 GiB | 1× | Boat's refusal text (its table says 51) |
+| `large` | 8 | 16 GB | 111.8 GiB | 2× | Boat's refusal text (its table says 111) |
+| `xlarge` | 16 | 32 GB | 251 GiB | 5.56× (50/9) | Boat's table (rounded down) |
+
+A session's size starts as the account's default (`PUT /cloud/{org}/machine`, or the operator's
+`POST /admin/cloud/machine`, whichever came last, over `CLOUD_MACHINE`), and only a wake changes
+it: a provider changes size only on a resume, so a sandbox already up is stopped first. A size is
+always the user's call, and never a machine's: runner bearers can't pick one.
+
+**A wake refused for want of disk.** The provider module turns its refusal into a typed
+`SandboxFailure` (`disk_too_small`, with `neededGiB` when it gave a figure); nothing above
+`providers/boat.ts` reads Boat's wording. It is never retried, and never upsized on its own, since
+credits change. The session reads `error` with `wakeBlocked: {reason: "disk_too_small", neededGiB}`
+and a send leaves it alone. A wake on a size smaller than `neededGiB` is refused up front
+(`409 machine_too_small`, with `machine`, `neededGiB` and `capacityGiB`); a bigger one clears the
+block. A refused *shrink* leaves the machine stopped and wakeable on its own size: the session reads
+`sleeping`, with `wakeBlocked` saying what the smaller size couldn't take.
+
+Boat refuses in two ways, both seen on real machines:
+
+- **A resume on the size it's on** is accepted (`202`). The sandbox then reads `error`, with "needs
+  51.8 GiB of disk but the largest 'default' machine holds 51.2 GiB" on it. Asking again on the same
+  size right away answers `409 resume_failed`. A resume on a bigger type gets it out, so a wake
+  resumes a sandbox in the provider's error state rather than giving up on it.
+- **A resume to a smaller type** is refused outright: `400 type_too_small`, "uses 77.7 GB of disk,
+  which does not fit a 'default' machine (76.0 GB)". That's decimal GB with the base image in, and
+  the same machine read "needs 51.8 GiB" above.
+
+**Metering across a resize.** Credits come from the provider's billable seconds, which carry the
+multiplier of the size that was running, so nothing here splits a stretch by size. The sandbox row
+records the size it is on, which is what the live estimate between meter reads spends at, and a
+resize schedules a reconcile. A day's `sandboxType` shows its last size.
+
+### Disk
+
+The heartbeat reports the machine's disk as `df` reads it. The edge takes off the base image and
+judges the rest against what the size holds, `warn` from 80% and `critical` from 90%, so a machine
+warns before it can no longer fit its size. The heartbeat's reply carries `diskCapacityGiB` for the
+engine's cleanup, in `df`'s terms (what the size holds, plus the base image).
+
+**Lazy hydration.** A resumed disk copies its files in on demand, so `df` under-reads until that's
+done (seen: 26 GiB right after a resume Boat said needed 118.9). The edge therefore keeps a
+high-water mark: a higher reading always counts; a lower one counts only once the disk is all
+there. From a wake on, `diskHydrating` holds it. A lower reading asks the provider at most every 5
+minutes (`SandboxInfo.hydrated`, Boat's `hydrated`), and the flag clears on `true`, or on a provider
+that doesn't say. A refused resume's `neededGiB` also raises the mark, since it's the provider's own
+figure.
+
+**Pre-sleep cleanup** (`crates/engine/src/cloud_disk.rs`), once quiesce has accepted the sleep,
+budgeted 25 s of the 60 the edge gives it. It deletes from an allow-list: always
+Codex's own downloads in the managed `CODEX_HOME` (`cache/`, about 60 MB of plugin catalog, and
+`plugins/cache/`, about 30 MB of the account's plugin bundles), which every wake would otherwise copy
+back in while the engine starts, and which Codex fetches again itself, in the background, once it
+runs (never its `auth.json`, sessions, databases or settings); always `target/*/incremental`; then, only while the disk is still over the warning level and asking again
+before each, `target/*/deps` and named package-manager download caches in the home directory. A
+`target` counts only if Cargo marked it as its own (`.rustc_info.json` and a `CACHEDIR.TAG` with
+Cargo's signature) and git tracks nothing in it, which also rules out anything outside a repository.
+Symlinks are never followed. A cache is renamed before it is deleted, so running out of time leaves
+nothing half-emptied for a build to trust, and the next sleep finishes it. It touches no login
+(`~/.claude`, where a parked Claude child may hold `.oauth_refresh.lock`), and kills no process. A
+failure is logged, and the sleep goes on. Right after a wake the disk reads low, so only the
+always-safe first tier runs.
+
+### Data expiry
+
+A provider may delete a stopped sandbox's disk (Boat: 14 days after it stopped, reported as
+`dataExpiredAt`; `SandboxCapabilities.stoppedRetentionMs`). `CloudSession.expiresAt` says when,
+while it sleeps.
+
+**A scheduled resume and stop keeps it.** A resume restarts the provider's clock, so a machine 12
+days into its sleep comes up on its own size and goes straight back to sleep (`refreshing`,
+ledger `refresh`). Its idle age doesn't change, a send meanwhile keeps it up, a failed attempt goes
+back to sleep unseen, and it retries hourly. It never evicts anyone: it waits for a free slot. It's
+skipped for a session blocked on disk (the user must pick a size, and `expiresAt` says by when) and
+at zero credits.
+
+Cost: machine seconds only, about a minute per machine per 12 days. That's $0.0006 on `default` and
+$0.0033 on `xlarge`, billed to the user as usual (about 1 credit on `default`, 6 on `xlarge`). A
+resume counts as a start, but starts are a rate limit (200 a day on Boat's $20 plan) before they are
+a charge. The alternative, a saved snapshot, is $0.056 a day past the included count ($1.68 for 30
+days, 10 included per $20 of plan), and restoring one means a new sandbox and re-enrollment.
+
+**When it's gone anyway** (no credits, a user who didn't act, or the provider's refusal
+`snapshot_data_expired`), the session reads `data_expired`, for a client that says it can read that
+(`x-zeron-cloud-states: data_expired`). A shipped engine's `CloudState` is a closed enum, and one
+state it doesn't know would fail its whole session list, so a client that doesn't say gets `error`
+with `failedAction: "wake"` and `dataExpired: true` on every session route. A send or a wake starts
+nothing: an empty machine must be asked for. `POST …/retry {machine?}` starts a fresh one: the same session
+device, chat, repository and base branch, a new sandbox and a newly enrolled key. The clone checks
+out the session's branch from `origin` if it was pushed, so only unpushed work is lost. The
+transcript lives in the chat's room, regardless.
+
+### A killed turn
+
+The engine marks a command handled before running it, so the command plane never runs it twice.
+What follows a machine dying mid-turn is a resume or a clear failure, never silence:
+
+- **Consumed, never resolved** (killed between the ledger write and the outcome): the drain's dead
+  command sweep rejects it, and the sender sees "Not delivered".
+- **Running, journal open** (the usual case): boot recovery (`SessionsEngine::recover_stale`) stamps
+  the streaming reply and re-dispatches the turn, resuming the provider's session, if it is under
+  12 hours old and has revivals left. That happens during assembly, ahead of the credential broker,
+  so the run waits for the broker (`HarnessRegistry::expect_run_environment`): without it the agent
+  has no login and can't find its own conversation.
+- **Running, but it can't resume** (stale, out of revivals, nothing to run it with): the note goes
+  on the reply. A kill before the reply reached disk leaves no reply to stamp, so the note gets an
+  entry of its own, as does a revival that fails to start.
+- **A disk older than the room** (a machine that died can return to its last snapshot): recovery
+  sees no open journal. Once the room has caught up, a reply still streaming from this device with
+  no run behind it, or a `Run` marked applied that this disk's ledger has never seen, gets a note
+  (`DocHost::settle_rolled_back_turn`, Cloud machines only). A message still pending just runs.
+- **Nobody around to boot it**: a machine that goes silent with a turn in flight would stay stuck
+  until the next send. Once its heartbeats are 3 minutes late and it last reported work, the edge
+  stops it and wakes it straight back, so boot recovery runs. A machine the provider lost ends in
+  `error`.
+
+### Engine updates on Cloud
+
+A Cloud machine runs a *system* unit, `zeron-cloud.service`, not the user unit installs elsewhere
+use. `zeron_update::service_unit()` knows it from `ZERON_DEVICE_PLATFORM=cloud` (written by the
+installer on every machine), and `ServiceScope::of(unit)` picks the manager: `sudo -n systemctl` to
+act, plain `systemctl` to read.
+
+That only helps an engine new enough to have it. One older than this logs "update available" and
+stays where it is (seen on 0.2.114), so a machine provisioned earlier keeps its engine, and everything
+that needs a newer one, until something installs it. `zeron update` works from there: it installs and
+switches `current`, its restart fails (it looks for the user unit), and the next start runs the new
+version.
+
+**A wake updates before it answers** (`crates/engine/src/wake_update.rs`), so a machine that sleeps
+most of the time still answers on the latest release. Before it starts any work, including turns a
+dying machine left to resume, the engine looks for a release (`manifest.json`, within 5 s). The token
+and the rooms go on meanwhile, so with nothing to update the check only costs what it outlasts them
+by. With something newer it installs it (120 s), restarts, and the update trial below takes over,
+which holds work until the new version is proven. A wake on the latest release, including a first
+boot, goes straight on.
+
+The message always gets answered. A check that hangs or fails, a failed or slow download, a refused
+restart and a restart that never comes all lift the hold on the version already running, and the
+background updater tries again once it's idle. It can't loop: a release it went back from or failed
+to install isn't tried again from a boot, and one that merely failed to download waits 6 hours
+(`update-boot-skip.json`). A new version that fails its trial gives way to the old one, which finds
+the rollback, doesn't try again, and answers. One that hangs gives way after 5 minutes, not the 10 an
+update nobody is waiting on gets.
+
+Nothing running is cut off. Nothing starts a turn while work is held, and a terminal someone opened
+ends the attempt. Past the wake, an update arriving mid-turn goes to the background path, which
+waits until no run or terminal is live and, on Cloud, no message is waiting.
+
+**Only the running version stays.** Each release is a folder of its own (`~/.zeron/app/<version>`,
+about 270 MB), and a resume copies the whole disk back in, all at once, while the engine starts:
+every old version kept was read in beside the one starting, and on staging a machine three updates
+in answered in about 39 s instead of 18 (send to first output, n=8 each), its release check alone
+taking 7 to 23 s. So once an update settles (committed, or given up), and on every start after,
+`prune_installed_versions` removes the older versions and the one an update gave up on. A Cloud
+machine (`ZERON_DEVICE_PLATFORM=cloud`) keeps none of them: going back there is a reinstall, which
+downloads anyway. Other Linux installs keep the newest older one, to go back to by hand. Never
+`current`, the running executable's folder, or a newer version (an update being staged).
+
+A Cloud machine keeps the release's `zeron-engine` (78 MB). From 2026-11-07 to 2026-11-15 the
+installer, the updater and the tidy left it out, when the unit's `zeron headless` linked the engine;
+since 0.3.0 the release's `zeron` is the zgx app, whose `zeron headless` runs that `zeron-engine`, so
+a machine without it exited at once and never enrolled. The installer keeps it now, and a repair
+(`~/.zeron/repair-engine`, the unit's `ExecStartPre=-`, set up by the installer and every wake) puts
+it back before each start if an older updater left it out (edge/src/cloud/install-script.ts).
+
+A longer wake reads as updating: the engine says so (`POST /runner/wake-stage`), `CloudSession.stage`
+is `updating` while it lasts (a stage nobody clears stops showing after 10 minutes), the desktop's
+waiting word follows it, and the answer's setup steps include "Updated Zeron to X".
+
+### Waking
+
+What a wake is made of, in order, and who owns each part. The target is a send to a running
+agent in under 5 s; today's floor is below.
+
+| Stage | Owner | What keeps it short |
+| --- | --- | --- |
+| Send → nudge → `autoWake` → workflow | us | sender polls its durable job every 100 ms; the rest is a Worker and a DO |
+| Resume accepted, machine `ready` | Boat | "a few seconds"; every resume lands on a new machine and is a reboot (no memory, no processes) |
+| Engine started | us | `zeron-cloud-boot.service` (active through the snapshot, so it starts on any resume) races the exec; the unit no longer waits on `network-online.target` |
+| Binary loads | Boat's lazy disk | `~/.zeron/app` isn't in the base image, so it downloads on every resume; Boat's playbook (`~/.ascii/playbook.json`) fetches what we opened first, first; everything else on the disk downloads at the same time, so old engine versions are removed ("Engine updates on Cloud") |
+| First token, room joined | us | connect timeout 3 s and 250 ms retries (a restored machine often loses its first connection) |
+| Release check | us | one small request beside the rest of the boot; a newer release is installed first ("Engine updates on Cloud") |
+| Command → agent running | us | grants and git identity primed at boot; for 2 minutes after boot no agent CLI check (its install would hold the run) |
+
+The sleep's stop command brings machines provisioned before these units up to date, since
+nothing re-runs the installer.
+
+**Measuring.** Every wake writes a `wake_timing` ledger entry (detail: JSON, `WakeTiming` in
+`wake.ts`) and a `cloud.wake_timing` log line: when the machine is up, and again once the engine
+reports its side (`POST /runner/wake-timing`, once per wake, at the run's first output).
+`GET /admin/cloud/wakes?orgId&userId` (`ADMIN_TOKEN`) lists one user's. `at` is each stage in ms
+after the wake was requested (`sent` is negative and on the sender's clock); `spans` has the
+totals; `asleepMs` says whether a longer idle window would have caught it. A wake with no `sent`
+had no send behind it (an explicit wake, or a dark machine brought back to recover its turn); a
+refresh writes no timeline. `updateResult` says how its look for a release ended (`current`, `updated`,
+`wentBack`, `installFailed`...), `version` which version answered, and `spans.updateStartedToReleased`
+what an update added.
 
 ### Portability
 
@@ -263,7 +539,8 @@ purely by `ZERON_*` env) is provider-neutral. Sandbox references are stored as
 `{provider, sandboxId}`, so a user can hold sandboxes on two providers during a migration and
 billing stays exact.
 
-A provider must guarantee: idempotent create, a disk that persists across stop/resume,
+Optional for a provider: `resume` on another size, `failure` on a refusal a retry can't fix,
+`stoppedRetentionMs`, and `SandboxInfo.{stoppedAt, hydrated}`. A provider must guarantee: idempotent create, a disk that persists across stop/resume,
 enabled systemd units restarting on resume, per-sandbox env visible to exec, and usage readable
 until deletion. Moving users needs no migration step: new sessions start on the new provider,
 existing ones keep theirs until deleted; transcripts live in sync rooms and repositories on
@@ -294,8 +571,13 @@ from our lifecycle events.
   per day (`GET /cloud/{orgId}/usage?from&to`). Operators bill from
   `GET /admin/cloud/usage?month=YYYY-MM[&format=csv]` (`ADMIN_TOKEN`), and each closed month
   is written to R2 at `usage/{YYYY-MM}.json`.
-- **Credits.** One credit is one minute of a small machine: 60 of Boat's billable seconds
-  (which already carry the machine-size multiplier, so larger machines use more per minute).
+- **Credits.** One credit is one minute of a small machine: 30 of Boat's billable seconds
+  (which already carry the machine-size multiplier, so a minute costs 2 credits on a standard
+  machine, 4 on large and about 11 on xlarge). Balances are worked out from the raw seconds, so
+  the rate goes by the UTC day the usage fell on: days before `CLOUD_CREDIT_RATE_FROM` stay at 60
+  seconds a credit, and from that day on it's `CLOUD_CREDIT_SECONDS`. Without a real day in
+  `CLOUD_CREDIT_RATE_FROM`, every day stays at 60. Set it to a whole UTC day after the deploy, and
+  don't move it once that day has come: that would re-price the days in between.
   The balance is credits granted (a one-time `CLOUD_STARTING_CREDITS` on first enable; operator
   grants via `POST /admin/cloud/credits {orgId, userId, credits, reason}`) minus credits used,
   less awake machines' time since their meters were last read. At zero or below, new sessions
@@ -321,7 +603,8 @@ binding from the main Worker, which passes the **verified** identity. It has its
 
 ### Multiple accounts
 
-A provider holds several accounts; grants always come from the active one, and every Cloud
+A provider holds several accounts. Agent logins and API keys work this way (GitHub's are all in
+use at once: see "GitHub"): grants always come from the active one, and every Cloud
 machine uses it from its next turn (the engine re-checks a cached grant older than 30 s before
 a run). Uploading the same login again replaces its own account instead of adding one —
 identity is never secret material: Claude's profile `email|organization` (sent beside the
@@ -356,23 +639,55 @@ unreadable (that user reconnects), which doubles as the emergency response to a 
 The key source is pluggable (`KekProvider`), so an external key manager can replace the
 secret later without touching records' format.
 
-### Providers (v1)
+### Providers
 
 | Provider id | Material | Refresh |
 | --- | --- | --- |
 | `codex` | ChatGPT OAuth token set from `codex login` (`id_token`, `access_token`, `refresh_token`, `account_id`) | `POST https://auth.openai.com/oauth/token` (`grant_type=refresh_token`, Codex public client id) |
 | `claude` | Claude Code credential blob from a sign-in through Claude's own OAuth flow (`claudeAiOauth`), or a long-lived `claude setup-token` token | `POST https://platform.claude.com/v1/oauth/token` (`grant_type=refresh_token`, Claude Code client id); setup tokens never refresh |
 | `github` | GitHub App user token + refresh token (never granted; see "GitHub") | `POST https://github.com/login/oauth/access_token` with `GITHUB_APP_CLIENT_ID/SECRET` (vault secrets) |
-| `anthropic-key` | User's own Anthropic API key | none (static) |
-| `openai-key` | User's own OpenAI API key | none (static) |
+| `grok` | The xAI OIDC token set `grok login --device-auth` writes to `auth.json` (`{grokAuth: entry, scope: "{issuer}::{client_id}"}`) | `POST {oidc_issuer}/oauth2/token` (form, `grant_type=refresh_token`, the entry's own `oidc_client_id`); the issuer must be an `https` `x.ai` host |
+| `xai-oauth` | Hermes' `providers["xai-oauth"]` record (`{xaiOauth}`: an xAI OAuth token set with Hermes' API scopes) | `POST {token_endpoint}` (default `https://auth.x.ai/oauth2/token`, an `x.ai` host only; Hermes' public client); kept ≥ 2 h (or half its life) from expiry, since Hermes refreshes an hour ahead itself |
+| `nous` | Hermes' `providers.nous` record (`{nousAuth}`) | `POST {portal}/api/oauth/token` (form `grant_type=refresh_token`, `client_id=hermes-cli`; refresh token in the `x-nous-refresh-token` header); portal an `https` `nousresearch.com` host. Single-use refresh tokens: reuse revokes the session |
+| `antigravity` | Antigravity's `acp_token.json` (`{antigravityToken}`: `client_id`, `client_secret`, `refresh_token`, `scopes`, `project_id`; no access token) | `POST https://oauth2.googleapis.com/token`; Google refresh tokens don't rotate; refreshed once < 50 min remain |
+| `muse` | Muse's whole `auth.json` (`{museAuth}`), its `providers.meta` login | none: Muse mints its model keys from the access token, which lasts until `expires_at`; then `needs_reconnect` |
+| `copilot` | `{copilotToken, login}`: the GitHub token of Copilot's editor app (device flow), which agents exchange for Copilot sessions themselves | none (does not expire; revoked on GitHub) |
+| `devin` | `{devinCredentials}`: Devin's `credentials.toml` as a table (`windsurf_api_key` and its server urls), written by Devin's own browser sign-in | none (long-lived) |
+| `cursor-key` | `{key, expiresAt?}`: a Cursor user API key, minted by Cursor's browser sign-in (named, expiring) or pasted | none; an expiring one turns `needs_reconnect` at its expiry |
+| `anthropic-key`, `openai-key`, `openrouter-key`, `gemini-key`, `xai-key`, `deepseek-key`, `ai-gateway-key`, `meta-key` | `{key}`: the user's own API key for that vendor | none (static) |
+
+Every sign-in an agent offers on a computer, it offers on Cloud (`cloud_login_options` =
+`login_options`). Logins and keys are per account, not per agent: one ChatGPT sign-in runs
+Codex, Pi, OpenCode and Hermes on Cloud; one Claude sign-in runs Claude Code and Pi; one Copilot
+sign-in runs Pi and OpenCode; one OpenRouter key serves every agent that reaches OpenRouter.
+Which agent runs on which credential is one table, `zeron_proto::providers::cloud_credentials`:
+
+| Agent | Cloud credentials (preference order within a group) | How the machine hands them over |
+| --- | --- | --- |
+| Claude Code | `claude`, else `anthropic-key` | credential file (empty refresh token), else `ANTHROPIC_API_KEY` |
+| Codex | `codex`, else `openai-key` | managed `CODEX_HOME/auth.json` |
+| Cursor | `cursor-key` | `CURSOR_API_KEY` |
+| Devin | `devin` | `$XDG_DATA_HOME/devin/credentials.toml` (0600) |
+| Grok | `grok`, else `xai-key` | `~/.grok/auth.json` entry (empty refresh token, rewritten ahead of expiry), else `XAI_API_KEY` |
+| Pi | `codex`, `claude`, `copilot`, every vendor key | `auth.json` `openai-codex` / `anthropic` entries (empty refresh token, under Pi's lock); `COPILOT_GITHUB_TOKEN`; vendor env vars |
+| OpenCode | `codex`, `copilot`, vendor keys | the logins through OpenCode's own credential API (`/api/credential`) when its server starts; keys as env vars |
+| Hermes | `codex`, `nous`, `xai-oauth`, vendor keys | `$HERMES_HOME/auth.json` `providers.*` records (empty refresh token, fresh `last_refresh`, under `auth.lock`); keys as env vars |
+| fx | `ai-gateway-key`, `openai-key`, `anthropic-key` | `AI_GATEWAY_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` |
+| Antigravity | `antigravity`, else `gemini-key` | `acp_token.json` (access token, empty refresh token; a runtime is replaced before its token runs out), else `GEMINI_API_KEY`; `settings.json` `auth.type` to match |
+| Muse Code | `muse`, else `meta-key` | its `auth.json` (refresh tokens emptied), else `META_API_KEY` |
+
+Saving a key in Cloud's "API keys" list never signs a login out (a login is shared by several
+agents); within one card's group a machine runs the login first, and activating the key on that
+card is how to prefer it.
 
 **Claude subscriptions.** Anthropic's published Claude Code terms restrict third parties from
 storing or intermediating Claude.ai credentials "unless we've mutually agreed otherwise".
 Zeron holds Claude logins in the vault under its arrangement with Anthropic for running
 Claude Code on users' Cloud devices (confirmed by Wing, 2026-10-01; keep the written
-confirmation on file next to this doc). Scope it to that purpose: Claude grants are delivered
-only to the unmodified Claude Code CLI on the user's own devices, never to another harness or
-SDK, and sign-in always completes through Claude's own OAuth flow. Alternatives that need no
+confirmation on file next to this doc). Claude grants are delivered only to the user's own
+Cloud machines: to the unmodified Claude Code CLI, and — by Wing's decision of 2026-11-18 — to
+Pi's Claude provider, which signs in with the same Claude client; sign-in always completes
+through Claude's own OAuth flow. Alternatives that need no
 vault: the CLI's own `claude auth login` inside the Cloud device, or the user's own Anthropic
 API key (`anthropic-key`).
 
@@ -388,6 +703,21 @@ API key (`anthropic-key`).
   github.com; the *vault* polls GitHub and stores the result, so the token never transits a
   device. Separately, the user installs the App on the accounts / repositories Cloud may reach
   (`githubInstallUrl` in the vault status → `github.com/apps/{slug}/installations/new`).
+- **Grok**: `grok login --device-auth` into a throwaway `GROK_HOME`; its `auth.json` entry is
+  uploaded and the home shredded.
+- **Cursor**: Cursor's own browser sign-in (the SDK's PKCE flow) mints a named user API key into
+  a throwaway store; the key and its expiry are uploaded.
+- **Devin**: Devin's own browser sign-in (ACP `authenticate`) into a throwaway
+  `XDG_DATA_HOME`; its `credentials.toml` is uploaded.
+- **GitHub Copilot** (Pi): GitHub's device flow with Copilot's editor app, run by the laptop's
+  engine; the token is uploaded with its login.
+- **ChatGPT for Pi, OpenCode and Hermes**: the Codex capture above (one `codex` login); Claude
+  for Pi: the Claude capture (one `claude` login); Copilot for OpenCode: the Copilot capture.
+- **Hermes' Nous Portal and xAI**: `hermes auth add <provider>` (device code) into a throwaway
+  `HERMES_HOME`; its `providers.<id>` record is uploaded.
+- **Antigravity**: its ACP `authenticate` into a throwaway `GEMINI_HOME` with file storage
+  forced (`AGY_ACP_FORCE_FILE_STORAGE=1`); `acp_token.json` is uploaded.
+- **Muse**: its own sign-in into a throwaway config root, file-backed; `auth.json` is uploaded.
 - **API keys**: pasted on the laptop, uploaded once.
 
 The vault only refreshes. It owns each refresh token from upload on.
@@ -403,6 +733,13 @@ when within 10 minutes of expiry (Codex: when `last_refresh` is older than 7 day
 <1 h left). The consumer caches a grant until expiry (offline fallback) and never sees a
 refresh token.
 
+An agent that runs on several credentials (Pi) asks for them in one round trip: `POST
+/vault/{orgId}/grants {providers, deviceId, ts, sig}` signs `zeron-vault-grant\n{userId}\n
+{deviceId}\n{providers joined by ","}\n{ts}` (the providers sorted and distinct; `github` is
+never batched, it needs its repository) and answers `{grants, missing: [{provider, error,
+message}]}`. One signature spends one `ts`. A machine whose edge predates the route (404) asks
+one provider at a time.
+
 Failure semantics: a refresh that returns `invalid_grant` marks the account `needs_reconnect`
 and stops issuing grants. An ambiguous failure (timeout/5xx) keeps the current generation and
 retries on the next grant; the DO persists a new generation before returning it.
@@ -411,23 +748,89 @@ retries on the next grant; the DO persists a new generation before returning it.
 
 The standard GitHub App model: sessions act as the App, never as the user.
 
-- The **user token** (device flow) stays in the vault. It lists the user's repositories for
+- Each **user token** (device flow) stays in the vault. It lists the user's repositories for
   the device menu's Cloud row and proves which App installations the user can reach.
 - A `github` grant names the session repository (`repo: "owner/name"`, required). The vault
   lists `/user/installations` with the user token, picks the installation on `owner` (not
-  suspended), and mints `POST /app/installations/{id}/access_tokens` with an RS256 App JWT
-  (`GITHUB_APP_PRIVATE_KEY`, `iss` = client id). The one-hour token reaches every repository
-  of that installation — the usual reach of a GitHub App. Minted tokens are cached sealed per
-  installation and reused while more than 15 minutes remain; the installation lookup runs on
-  every grant, so a user who loses access to an account stops getting its tokens at once.
+  suspended), reads the repository with the user token, and mints `POST
+  /app/installations/{id}/access_tokens` with an RS256 App JWT (`GITHUB_APP_PRIVATE_KEY`, `iss` =
+  client id): a one-hour token for that one repository, read-only when the login can't push.
+  Minted tokens are cached sealed per repository and access level and reused while more than 15
+  minutes remain; both checks run on every grant, so a user who loses access stops getting tokens
+  at once.
 - Because installations are found through the user's own token, a caller can never name an
   installation it doesn't belong to (the GitHub-documented check; an `installation_id` from a
   setup redirect is never trusted).
 - No installation on `owner` → `not_found` with a `github_app_not_installed:` message carrying
-  the install link. A 401 on the lookup → `needs_reconnect`. A 401/403 on minting is our App's
-  credentials, never the user's: `unavailable`, the connection stays connected.
-- Commits keep the sandbox's git author; pushes and pull requests show as the App. The daily
-  canary also checks the App credentials (`GET /app`).
+  the install link, aimed at `owner` when GitHub names its id. A 401 on the lookup →
+  `needs_reconnect`. A 401/403 on minting is our App's credentials, never the user's:
+  `unavailable`, the connection stays connected.
+- Commits are the session's login's (its name and GitHub noreply address, in the run's
+  environment), co-authored by `zeronsh[bot]`; pushes and pull requests show as the App. The
+  daily canary also checks the App credentials (`GET /app`).
+
+#### Several logins
+
+A user connects up to 10 GitHub logins, each through its own device flow (a work and a personal
+one, say). They are all in use at once; connecting never removes one. The same login again
+replaces itself (`alreadyConnected` in the poll: GitHub approves as whoever the browser is signed
+in as, so the app says to switch accounts there).
+
+**Logins and installations are separate records.** A login is a person's identity: who a session
+acts for, who authors its commits, what they may reach. An installation of the App is repository
+access, and belongs to no login. The github `VaultAccount` keeps `accounts` (logins),
+`github_installations`, and `github_login_installations` (which login reaches which), and each
+session's `github_sessions` row records both its login and its installation. Reply shapes keep
+them apart too: a repository names its `installationId` and the logins that reach it (`account`,
+`accounts`), and `GET github/repos` lists `installations` with `reachedBy`. Nothing requires an
+installation to be reached through one person, which is what leaves room for an organization to
+hold them later. (Nothing shares them yet: all of this is per user.)
+
+Rules:
+
+- **Repositories** merge across logins, deduplicated by name; each names the login a new session
+  would use. One login failing leaves the others' repositories and appears in `unavailable`
+  (`needs_reconnect` or `upstream`); the listing fails only when no login answered.
+- **A new session** takes the first login that can push, else the first that can read, in this
+  order: the active one (the most recently connected, unless the user picked another with
+  `POST accounts/github/active`), then the others, most recently connected first. A login that
+  can push always beats one that can only read. A read-only pick isn't kept while another login
+  couldn't answer, since that one might push.
+- **A session keeps its login and installation** from its first grant, whatever is connected or
+  chosen later. The vault holds this per device and repository, so machines need no change and a
+  side chat on the same machine shares it. A delegate
+  (`create_child_session`) takes its parent's: the main Worker names the parent's device
+  (`inheritFrom`, runners only, never from a request's body) at its first grant.
+- **A dead login** (`needs_reconnect`) refuses its sessions' grants by name
+  (`github_account_needs_reconnect:`). They never move to another login that reaches the
+  repository, since that would change who authors the commits. Refreshes are single-flighted per
+  login, so one login's rotation can't touch another's.
+- **Disconnecting one** (`DELETE accounts/github/{slot}`) deletes its token and revokes its
+  tokens with GitHub at once: its user token (`DELETE /applications/{client_id}/token`, with the
+  App's client id and secret) and every installation token minted for its sessions
+  (`DELETE /installation/token`, as the token itself), so a token already on a machine stops
+  working mid-turn. Installation tokens are recorded with the login they were minted for
+  (`github_tokens`, kept until they expire) and never shared between logins, so this never
+  touches another login's sessions. The disconnect succeeds whether or not GitHub answers: what
+  it didn't revoke waits in `github_revocations` and is retried on the object's alarm (1, 2,
+  4… minutes, at most an hour apart) until GitHub answers, or until the token would have expired
+  anyway. A token GitHub no longer knows counts as revoked. One minted while its login was being
+  disconnected is revoked and never handed out. The sessions stay on the login: the next grant
+  refuses with `github_account_disconnected:` and how to reconnect, and the engine ends the run
+  there saying so, removing the git credentials. The same login connected again resumes them, as
+  sessions hold its identity rather than its row. New sessions use whichever logins are left.
+  `DELETE credentials/github` still wipes every login, revoking all of theirs.
+- **A session's login that lost the repository** refuses with `github_account_no_access:`, again
+  without moving.
+- **Installing the App**: `githubInstallUrl` is GitHub's chooser for the browser's account; a
+  repository whose owner has no installation links straight to that owner
+  (`/installations/new/permissions?suggested_target_id=`). `installations[].manageUrl` is where an
+  installation's repositories are chosen.
+
+A login stored before identities existed takes one from its name when the object starts, and rows
+that doubled up that way merge, keeping the newest. A login GitHub wouldn't name at connect time
+learns its name at first use, its sessions with it. Old clients read the same shapes with fields
+added, and an old engine's "Disconnect" still means all of GitHub.
 
 ### Admin
 
@@ -444,7 +847,9 @@ The standard GitHub App model: sessions act as the App, never as the user.
 | `POST /vault/{orgId}/devices/enroll` | Enroll the caller's device key (laptops) |
 | `POST /vault/{orgId}/devices/{deviceId}/revoke` | Per-device revoke |
 | `POST /vault/{orgId}/github/device` | Start GitHub device flow → `{userCode, verificationUri, interval, flowId}` |
-| `POST /vault/{orgId}/github/device/{flowId}` | Poll; on success the vault stores the token |
+| `POST /vault/{orgId}/github/device/{flowId}` | Poll; on success the vault stores the token (`alreadyConnected` when that login was connected) |
+| `GET /vault/{orgId}/github/repos?q=` | `{repos, installations, unavailable?}`: every login's repositories, merged |
+| `GET /vault/{orgId}/github/branches?repo=` | Branch names, through the first login that sees the repository |
 
 Kill switches: per device (revoke), per user (`POST /vault/{orgId}/disable`), and global
 (`VAULT_DISABLED` var; or drop a leaked key via rotation).
@@ -462,7 +867,8 @@ refresh contract changes is caught within a day, before users' grants start fail
 - **Runner mode** (`ZERON_RUNNER_ENROLL` or an existing `{data_dir}/runner.json`): `Auth`
   gains a runner token source (enroll once, then signed `/runner/token`); scope is `Synced`
   for the runner's `{orgId, userId}`. Platform comes from `ZERON_DEVICE_PLATFORM` (`cloud`).
-  The runner posts heartbeats and restricts its harness catalog to Codex + Claude Code.
+  The runner posts heartbeats and registers the built-in agents only (`CLOUD_HARNESSES`): no
+  agent from the ACP registry.
 - **Session machines** (`ZERON_CLOUD_*`, persisted to `cloud-session.json`): the device row
   carries `cloud-session`; at boot the engine clones the project into `ZERON_CLOUD_PATH` (with
   the GitHub grant's credential store; retried with backoff) and checks out
@@ -492,13 +898,20 @@ refresh contract changes is caught within a day, before users' grants start fail
   Codex from a vault grant (managed `CODEX_HOME` with the access token, empty refresh token;
   re-granted before expiry), Claude from a vault grant (Claude Code's credential file with the
   access token and an empty refresh token, rewritten before expiry), else the native sandbox
-  login, else `anthropic-key`. GitHub grants (App installation tokens for the session
-  repository's owner, requested with `repo`) become `GH_TOKEN`/`GITHUB_TOKEN` at spawn and
-  are kept fresh in a git credential store file (`{data_dir}/cloud/git-credentials`, 0600,
+  login, else `anthropic-key`. Every other agent runs on what `cloud_credentials` lists for it
+  (see "Providers"): its grants are drawn in one batched call, keys become its environment
+  variables, and its logins go where the agent reads them (Grok's `auth.json` entry, Devin's
+  `credentials.toml`, Pi's `openai-codex` / `anthropic` entries, Hermes' `providers.*` records
+  under its `auth.lock`, Antigravity's `acp_token.json` and `settings.json` auth type, Muse's
+  `auth.json`, OpenCode's `/api/credential` through its harness), always with an empty refresh
+  token and rewritten ahead of expiry. A login the sandbox made itself (a real refresh
+  token) is left alone. The first run of an agent whose CLI the machine lacks installs it (once;
+  a failed install is retried after ten minutes). GitHub grants (App installation tokens for the session
+  repository, requested with `repo`) are kept fresh in a git credential store file (`{data_dir}/cloud/git-credentials`, 0600,
   wired as git's `credential.https://github.com.helper`) and `gh`'s `hosts.yml`, so `git`
   keeps working in sessions that outlive the spawn-time `GH_TOKEN`. Secrets ride a
   `#[serde(skip)]` field on `RunRequest`, so they are never persisted in the session doc, the
-  journal or logs. On platform `cloud` only Codex and Claude Code are registered: nothing else
+  journal or logs. On platform `cloud` only the built-in agents are registered: nothing else
   is probed, update-checked or installable (some providers' images install a harness the first
   time its binary is invoked).
 - **Projects' GitHub repositories**: SpacesSync stamps `githubRepo` (the `origin` remote's
@@ -518,8 +931,15 @@ refresh contract changes is caught within a day, before users' grants start fail
   404ing. `ListCloudBranches {repo, defaultBranch?}` lists the branches a session can start from
   (GitHub's, default first; `GET /vault/{org}/github/branches?repo=`). A side chat
   (`parentChatId`) whose parent runs on a session machine is hosted on that same machine. `ListHarnesses` / `ListModels` aimed at any Cloud
-  device are answered by the asking engine (Codex + Claude Code), and anything else aimed at the
-  logical device fails fast — it has no engine.
+  device are answered by the asking engine (every built-in agent; models from the edge's list
+  where it has one, else the asking device's own catalog), and anything else aimed at the
+  logical device fails fast — it has no engine. The edge's list is Claude Code's and Codex's
+  kept by hand, and every other agent's as a Cloud machine last discovered it: after a run
+  prepares its credentials, the machine hands the agent's credential variables to its model
+  discovery (`zeron_harness::catalog_env`, part of the catalog's cache key), discovers, and
+  sends the catalog with the run's credential fingerprint (`POST /runner/models`; once per
+  agent and fingerprint per 10 minutes, at once for a new fingerprint). The account keeps the
+  last one per agent, so pickers list it while every machine sleeps.
 - **Laptop side**: `CloudStatus` / `CloudEnable` / `CloudDelete` / `CloudUsage`,
   `CloudSessions` / `CloudSessionWake` / `CloudSessionSleep` / `CloudSessionDelete`,
   `ListCloudBranches`, `VaultStatus`, `VaultConnectCodex` / `VaultConnectClaude`, `VaultPutApiKey`,
@@ -537,18 +957,26 @@ the bearer's `org_id`.
 
 | Route | Bearer | Body → reply |
 | --- | --- | --- |
-| `GET /cloud/{orgId}` | user | → `CloudStatus` (account) |
+| `GET /cloud/{orgId}/models` | user | → `{models: {harness: Model[]}}`: Claude Code's and Codex's kept by hand, every other agent's as a machine last published it |
+| `GET /cloud/{orgId}` | user | → `CloudStatus` (account), with `machines: [{id, name, vcpu, memoryGB, diskGiB, creditMultiplier}]` and `machine` (the default) |
 | `POST /cloud/{orgId}/enable` | user | `{}` → `CloudStatus` (instant; mints the logical device id) |
 | `DELETE /cloud/{orgId}` | user | → `CloudStatus` (`deleting` → `off`; deletes every session sandbox after capturing usage) |
-| `GET /cloud/{orgId}/sessions` | user | → `{sessions: CloudSession[]}` |
+| `GET /cloud/{orgId}/sessions` | user | → `{sessions: CloudSession[]}`, each with `machine`, and when known `disk: {usedGiB, capacityGiB, level}`, `wakeBlocked: {reason, neededGiB}`, `expiresAt` (Unix ms) |
 | `POST /cloud/{orgId}/sessions` | user | `{chatId, spaceId, repo {fullName, cloneUrl, defaultBranch}, branch?}` → `CloudSession` (idempotent per chat; starts provisioning) |
-| `POST /cloud/{orgId}/sessions/{chatId}/wake` · `/sleep` | user | → `CloudSession` |
+| `PUT /cloud/{orgId}/machine` | user | `{machine}` → `CloudStatus` (the size new sessions start on) |
+| `POST /cloud/{orgId}/sessions/{chatId}/wake` | user | `{machine?, wake?}` → `CloudSession`. `wake: false` only records the size for its next wake. `409`: `machine_too_small` {`machine`, `neededGiB`, `capacityGiB`}, `machine_awake`, `data_expired` |
+| `POST /cloud/{orgId}/sessions/{chatId}/sleep` | user | → `CloudSession` |
+| `POST /cloud/{orgId}/sessions/{chatId}/retry` | user | `{machine?}` → `CloudSession`: a failed lifecycle again; a fresh machine once `data_expired` |
+| any session route | | `x-zeron-cloud-states: data_expired` lets a reply say `state: "data_expired"`; without it, that session reads `state: "error", failedAction: "wake", dataExpired: true` |
 | `DELETE /cloud/{orgId}/sessions/{chatId}` | user | → `CloudSession` (`deleting` → removed) |
 | `GET /vault/{orgId}/github/repos?q=` | user | → `{repos: GithubRepo[]}` (the vault calls GitHub) |
 | `POST /runner/enroll` | none | `{orgId, userId, deviceId, code, publicKey}` → `{ok: true}` |
 | `POST /runner/token` | none | `{orgId, userId, deviceId, ts, sig}` → `{accessToken, expiresAt}` |
-| `POST /runner/heartbeat` | runner | `{activeRuns, clients}` → `{ok: true}` (per session device) |
-| `GET /vault/{orgId}` | user | → `VaultStatusView` |
+| `POST /runner/wake-timing` | runner | `{sent?, token?, firstOutput?, version?, updateResult?, …}` (`EngineTiming`, `wake.ts`) → `{ok: true}`: its side of the wake, counted once |
+| `POST /runner/wake-stage` | runner | `{stage: "updating" \| null}` → `{ok: true}`: shown as `CloudSession.stage` |
+| `POST /runner/models` | runner | `{harness, models, credential}` → `{ok: true}`: the agent's catalog as this machine discovered it (≤ 400 models, unparseable ones dropped; never `claude-code`/`codex`'s, which stay hand-kept) |
+| `POST /runner/heartbeat` | runner | `{activeRuns, clients, backgroundRuns?, waitingRuns?, diskUsedBytes?, diskTotalBytes?}` → `{ok: true, diskCapacityGiB?}` (per session device) |
+| `GET /vault/{orgId}` | user | → `VaultStatusView`. Lists only the providers named in `x-zeron-vault-providers` (comma-separated); without the header, the original five (`codex`, `claude`, `github`, `anthropic-key`, `openai-key`). Every route answering a status filters it alike |
 | `PUT /vault/{orgId}/credentials/{provider}` | user | `PutCredentialRequest` → `VaultStatusView` |
 | `PATCH /vault/{orgId}/credentials/{provider}` | user | `{authorizedDevices}` → `VaultStatusView` |
 | `DELETE /vault/{orgId}/credentials/{provider}` | user | → `VaultStatusView` |
@@ -556,6 +984,7 @@ the bearer's `org_id`.
 | `POST /vault/{orgId}/devices/{deviceId}/revoke` | user | → `VaultStatusView` |
 | `POST /vault/{orgId}/disable` | user | `{disabled}` → `VaultStatusView` |
 | `POST /vault/{orgId}/grant` | user or runner | `GrantRequest` → `Grant` |
+| `POST /vault/{orgId}/grants` | user or runner | `GrantManyRequest` `{providers, deviceId, ts, sig}` → `{grants, missing}` |
 | `POST /vault/{orgId}/github/device` | user | `{authorizedDevices}` → `GithubDeviceStart` |
 | `POST /vault/{orgId}/github/device/{flowId}` | user | → `GithubDevicePoll` |
 
@@ -563,7 +992,8 @@ Types are in `edge/vault/src/api.ts` (TypeScript) and `crates/proto/src/cloud.rs
 Signatures are base64url (no padding) Ed25519 over UTF-8:
 
 - runner token: `zeron-runner-token\n{orgId}\n{userId}\n{deviceId}\n{ts}`
-- vault grant: `zeron-vault-grant\n{userId}\n{deviceId}\n{provider}\n{ts}`
+- vault grant: `zeron-vault-grant\n{userId}\n{deviceId}\n{provider}\n{ts}` (a batch: the sorted
+  providers joined by `,` in place of `{provider}`)
 
 `ZERON_RUNNER_ENROLL` = `{orgId}.{userId}.{deviceId}.{code}` (`code` is 32 random bytes,
 base64url). After enrollment the engine persists `{data_dir}/runner.json`

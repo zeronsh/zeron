@@ -20,7 +20,7 @@ impl PlatformMeasurer for FixedFallback {
 }
 
 fn font(name: &str) -> Vec<u8> {
-    std::fs::read(format!("{}/../ui/assets/fonts/{name}.ttf", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    std::fs::read(format!("{}/../../assets/fonts/{name}.ttf", env!("CARGO_MANIFEST_DIR"))).unwrap()
 }
 
 pub(crate) fn text_system() -> Arc<TextSystem> {
@@ -165,6 +165,7 @@ fn messages_the_agent_sent_show_as_one_line_naming_the_recipient() {
         exit_code: None,
         output_truncated: false,
         output_lines: None,
+        review: None,
     };
     let mut w = worker(390.0);
     w.input = TranscriptInput {
@@ -206,6 +207,7 @@ fn transcript_one(text: &str) -> TranscriptInput {
 #[test]
 fn question_chip_reads_what_was_answered() {
     let question = |id: &str, header: &str| zeron_proto::UserInputQuestion {
+        note: None,
         id: id.into(),
         header: header.into(),
         question: format!("{header}?"),
@@ -688,6 +690,7 @@ fn running_subagent_shows_a_spinner_after_its_spawn_resolves() {
         exit_code: None,
         output_truncated: false,
         output_lines: None,
+        review: None,
     };
     let frame_for = |status: SubagentStatus| {
         let mut w = worker(390.0);

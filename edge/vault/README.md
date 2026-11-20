@@ -1,8 +1,13 @@
 # zeron-vault
 
 The credential vault Worker (design: `docs/design/cloud-device.md`, "Credential vault"). It
-holds users' provider credentials (Codex, Claude, GitHub, API keys) encrypted, refreshes them,
-and hands enrolled devices short-lived **grants**: access tokens only, never refresh tokens.
+holds users' provider credentials encrypted, refreshes them, and hands enrolled devices
+short-lived **grants**: access tokens only, never refresh tokens. Providers: sign-ins `codex`,
+`claude`, `github`, `grok`, `xai-oauth`, `nous`, `antigravity`, `muse`, `copilot`, `devin`, and
+the user's own API keys (`anthropic-key`,
+`openai-key`, `openrouter-key`, `gemini-key`, `xai-key`, `deepseek-key`, `ai-gateway-key`,
+`meta-key`, `cursor-key`). Which agent runs on which is `docs/design/cloud-device.md`,
+"Providers".
 
 ## Trust boundary
 
@@ -12,27 +17,37 @@ and hands enrolled devices short-lived **grants**: access tokens only, never ref
   (WorkOS user or runner JWT). The vault re-validates every field it receives.
 - **Grants need a device signature.** The device key (Ed25519, enrolled per device) signs
   `zeron-vault-grant\n{userId}\n{deviceId}\n{provider}\n{ts}`. The `ts` must be within ±120 s and
-  strictly greater than the device's last one. The device must be enrolled, not revoked, and
+  strictly greater than the device's last one. `grantMany` signs the same statement with the
+  providers (sorted, distinct, never `github`) joined by `,` in place of `{provider}`: one
+  signature, one `ts`, every provider's own checks applied to each. The device must be enrolled, not revoked, and
   listed in the credential's `authorizedDevices`. Runner callers may only request grants for
   their own device.
 - **Cloud sessions are children.** Each Cloud session sandbox enrolls its own key with
   `parentId` = the account's logical Cloud device. A credential connected once for that parent
   covers every session. Revoking the parent (even one that never enrolled a key) refuses all its
   children, present and future. Revoking a session touches only that session.
-- **Vault-side GitHub calls.** `githubRepos` lists the repositories of the App installations
-  the GitHub connection can reach, using the stored user token inside the vault, and returns
-  metadata only. Pagination follows `next` links on `api.github.com` only.
-- **GitHub grants are installation tokens.** The user token never leaves the vault. A `github`
+- **Vault-side GitHub calls.** `githubRepos` and `githubListing` list the repositories of the
+  App installations every connected GitHub login can reach, merged, using the stored user tokens
+  inside the vault, and return metadata only. Pagination follows `next` links on
+  `api.github.com` only.
+- **GitHub grants are installation tokens.** User tokens never leave the vault. A `github`
   grant names `repo` (`owner/name`); the vault finds the installation on `owner` among the
-  user's own installations (`/user/installations`, so nobody can name someone else's) and mints
-  a one-hour installation token with an App JWT. Minted tokens are cached sealed per
-  installation and reused while more than 15 minutes remain.
+  session login's own installations (`/user/installations`, so nobody can name someone else's)
+  and mints a one-hour installation token for that repository with an App JWT. Minted tokens are
+  cached sealed per repository and access level and reused while more than 15 minutes remain.
+- **Logins and installations are separate records.** A session keeps both from its first grant
+  (`github_sessions`); docs/design/cloud-device.md, "Several logins", states the rules.
 - **Nothing decrypts from storage alone.** Records are AES-256-GCM under a KEK held as a
   Worker secret (`VAULT_KEK`), never in Durable Object storage, and imported as a
   non-extractable key. AAD `{userId}|{provider}|{generation}` binds each ciphertext to its slot.
   The trade-off of not running an external KMS: secrets and DO storage are separate stores in
   the same Cloudflare account, so a storage dump alone decrypts nothing, but a compromise of
   the Cloudflare account itself could reach both.
+- **Refresh tokens go only to their issuer.** Grok's and Hermes' xAI token endpoints must be
+  `https` `x.ai` hosts and Nous' portal an `https` `nousresearch.com` host, checked at upload and
+  again before every refresh; Antigravity refreshes at `oauth2.googleapis.com` whatever its file
+  names; Devin's server urls must be Devin /
+  Windsurf / Codeium hosts. A grant's `settings` carry only those non-secret fields.
 - **One refresher per account.** Each `(user, provider)` is its own Durable Object, with a
   single-flight refresh gate. A new generation is persisted before any grant built from it is
   returned. Zero runtime dependencies (WebCrypto only).
@@ -97,14 +112,15 @@ the first 16 hex chars of SHA-256 of the key. Seals always use `VAULT_KEK`. Open
 
 ## Canary
 
-A daily cron (`0 6 * * *`) force-refreshes `CANARY_USER_ID`'s codex, claude and github
-credentials through the same gate real grants use, and checks the GitHub App's credentials
+A daily cron (`0 6 * * *`) force-refreshes `CANARY_USER_ID`'s codex, claude, github, grok,
+xai-oauth, nous and antigravity credentials through the same gate real grants use, and checks the GitHub App's credentials
 (`GET /app` with an App JWT; status `app_valid` / `app_rejected`). For a Claude setup token, which cannot be
 refreshed, it checks that more than 30 days remain. Each result is stored in that account DO's
 `canary` table and logged as `{"event":"vault.canary","provider","ok","status"}`.
 
-To set it up, create a dedicated user, connect its credentials through the normal app flows,
-then set `CANARY_USER_ID` to that user's id. Alert on `vault.canary` lines with `ok=false` in
+To set it up, create a dedicated user, connect its credentials through the normal app flows
+(each of the above: until one is connected its canary reports `missing`), then set `CANARY_USER_ID`
+to that user's id. Alert on `vault.canary` lines with `ok=false` in
 Workers observability. Statuses: `refreshed` / `valid` (ok); `missing`, `needs_reconnect`,
 `upstream`, `expiring`, `not_refreshable`, `error`.
 
@@ -118,8 +134,9 @@ Workers observability. Statuses: `refreshed` / `valid` (ok); `missing`, `needs_r
 | Global, crypto | Delete `VAULT_KEK` (keep the offline copy) | Nothing can be decrypted (503) until it is restored |
 
 Consumers cache grants until `expiresAt`, so a kill switch stops new grants immediately, and
-already-issued tokens age out on their own. API keys get 1 h grants for this reason, and GitHub
-grants are one-hour installation tokens.
+already-issued tokens age out on their own. API keys, Copilot and Devin get 1 h grants for this
+reason (a Cursor sign-in key never past its own expiry), and GitHub grants are one-hour
+installation tokens.
 
 ## Development
 

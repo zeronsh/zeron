@@ -57,7 +57,12 @@ export type Session = {
 	-- Its folder on that device.
 	cwd: string?,
 	harness: string?,
+	-- The agent its config records (nil until that's known): whose `/` list
+	-- its composer reads when the catalog doesn't name its model.
+	agent: string?,
 	model: string?,
+	-- Its model's name: its catalog's, else its id (chat.rs `session_value`).
+	model_label: string?,
 	effort: string?,
 	fast: boolean?,
 	-- The choices made of the model's options (option id to choice id).
@@ -113,6 +118,24 @@ M.session = ui.shared("chat.session", nil :: Session?)
 M.messages = ui.shared("chat.messages", {} :: { Message })
 M.draft = ui.shared("chat.draft", { id = "", text = "" } :: Draft)
 M.catalog = ui.shared("chat.catalog", { state = "looking", harnesses = {}, models = {} } :: Catalog)
+
+-- Whether the agent `model` ("<harness>/<id>") runs on has an auto mode of
+-- its own (the catalog's `auto`): the access picker offers Auto, and the
+-- composer sends in it. An agent the catalog doesn't list yet (it's still
+-- loading) counts as having one, so a chat in Auto can send at once; the
+-- engine still refuses Auto where it can't run.
+function M.offers_auto(model: string?): boolean
+	if not model then
+		return true
+	end
+	local harness = string.match(model, "^([^/]+)/")
+	for _, h in (M.catalog:get() :: any).harnesses do
+		if h.id == harness then
+			return h.auto == true
+		end
+	end
+	return true
+end
 -- A call nothing waits on: its failure lands in the session's notice (the
 -- host sets it), so the script needn't hear it.
 local function quietly(p: any)
@@ -131,6 +154,26 @@ function M.open(id: string?)
 	end
 	watching:set(key)
 	ui.invoke("chat.open", id)
+end
+-- A session opened by the route: watched in the same step as the route
+-- moves to it (screens/shell/route `opening`), as the page would a moment
+-- later. (Looked up as it's called: what stands in for `open` then is what's told.)
+route.opening = function(id: string)
+	M.open(id)
+end
+
+-- A new chat on Cloud, opened before Cloud has made it (`req`: the send it
+-- will get, its `session` the id it's made with): known to the host as a chat
+-- on Cloud, its first message showing, sending. `created` once Cloud has made
+-- it (the host watches it then); `create_failed` if Cloud didn't.
+function M.creating(req: Request)
+	ui.invoke("chat.creating", req)
+end
+function M.created(id: string)
+	ui.invoke("chat.created", id)
+end
+function M.create_failed(id: string)
+	ui.invoke("chat.create_failed", id)
 end
 
 -- A message's id, made here so its prompt shows the moment it's sent
@@ -155,6 +198,27 @@ function M.send(req: Request): any
 	return ui.call("chat.send", req)
 end
 
+-- A new chat's agent, started before its first message (screens/chat/warm),
+-- for the id the chat will be made with. A promise of the engine's word
+-- ("started", "renewed", "unsupported"; nil: none could start).
+function M.warm(id: string, req: Request, typed: boolean): any
+	local p = ui.call("chat.warm", { id = id, req = req, typed = typed })
+	quietly(p)
+	return p
+end
+-- Stop that agent.
+function M.unwarm(id: string)
+	quietly(ui.call("chat.unwarm", { id = id }))
+end
+-- Its draft was cleared: the host stops it if it stays so.
+function M.warm_cleared(id: string)
+	quietly(ui.call("chat.warm_cleared", { id = id }))
+end
+-- Its send took it: a start or stop still on its way for it is moot.
+function M.warm_taken(id: string)
+	ui.invoke("chat.warm_taken", id)
+end
+
 -- A project's branch, as git where it lives has it: whether it's the
 -- folder's current one, and the worktree it's checked out in.
 export type Ref = { name: string, current: boolean, worktree: string? }
@@ -169,6 +233,13 @@ end
 -- promise of its path, nil when the clipboard holds none.
 function M.paste_image(): any
 	return ui.call("chat.paste_image", nil)
+end
+
+-- A send in this device's outbox (still uploading, or stopped) taken out for
+-- good, with its prompt shown as on its way: a promise of whether it was
+-- still there. An engine from before it can refuses it "unsupported".
+function M.remove_held(id: string, item: string, message: string?): any
+	return ui.call("chat.remove_held", { id = id, item = item, message = message })
 end
 
 -- A prompt that wasn't delivered, sent again.

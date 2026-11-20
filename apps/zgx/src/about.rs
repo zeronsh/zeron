@@ -136,6 +136,14 @@ impl Desktop {
                 Ok(false) => {}
                 Err(error) => eprintln!("zeron-zgx: updates: couldn't claim the beta channel: {error}"),
             }
+        } else {
+            // A stable release has reached a beta download: it's on stable now,
+            // unless its person chose beta (crates/update `channel`).
+            match zeron_update::channel::release_claim_for_stable_build(&data_dir) {
+                Ok(true) => eprintln!("zeron-zgx: updates: this computer now gets stable updates"),
+                Ok(false) => {}
+                Err(error) => eprintln!("zeron-zgx: updates: couldn't leave the beta channel: {error}"),
+            }
         }
         let edge = crate::auth::endpoint().edge;
         let checker = {
@@ -268,9 +276,12 @@ impl Desktop {
         let status = status.as_ref();
         let channel = zeron_update::channel::read(&self.data_dir).channel;
         fields.push(("self_updating", Value::Bool(self.self_updating())));
-        fields.push(("channels", Value::Bool(matches!(self.install, InstallKind::MacApp { .. }))));
+        fields.push(("channels", Value::Bool(self.install.follows_channels())));
         fields.push(("channel", Value::from(channel.as_str())));
-        fields.push(("beta_minimum", Value::from(zeron_update::channel::BETA_MINIMUM_MACOS)));
+        // (The floor is macOS's alone.)
+        if matches!(self.install, InstallKind::MacApp { .. }) {
+            fields.push(("beta_minimum", Value::from(zeron_update::channel::BETA_MINIMUM_MACOS)));
+        }
         if let Some(note) = self.note.borrow().as_deref() {
             fields.push(("channel_note", Value::from(note)));
         }

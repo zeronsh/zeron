@@ -218,8 +218,32 @@ pub async fn run(
                 println!("{}", line(item));
             }
         }
+        PluginCommand::Export { id, to } => {
+            // `to` is already a full path (the parser made it one).
+            let mut params = json!({ "id": id });
+            if let Some(to) = to {
+                params["to"] = json!(to.display().to_string());
+            }
+            let reply = call(methods::EXPORT_PLUGIN, params).await?;
+            println!(
+                "Saved {id} to {} ({}).",
+                str_of(&reply, "path"),
+                size(reply["bytes"].as_u64().unwrap_or(0))
+            );
+            println!("Share that file: anyone installs it from the file or a link to it.");
+        }
     }
     Ok(())
+}
+
+/// `512 bytes`, `12.3 KB`, `4.1 MB`.
+fn size(bytes: u64) -> String {
+    match bytes {
+        1 => "1 byte".into(),
+        0..1024 => format!("{bytes} bytes"),
+        1024..1_048_576 => format!("{:.1} KB", bytes as f64 / 1024.0),
+        _ => format!("{:.1} MB", bytes as f64 / 1_048_576.0),
+    }
 }
 
 fn looks_like_id(text: &str) -> bool {
@@ -280,5 +304,18 @@ fn plain(error: zeron_rpc::RpcError) -> String {
             "This Zeron is too old for plugins. Update it first.".into()
         }
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::size;
+
+    #[test]
+    fn sizes_read_in_plain_words() {
+        assert_eq!(size(1), "1 byte");
+        assert_eq!(size(512), "512 bytes");
+        assert_eq!(size(12_595), "12.3 KB");
+        assert_eq!(size(4_299_161), "4.1 MB");
     }
 }

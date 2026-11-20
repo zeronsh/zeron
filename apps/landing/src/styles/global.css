@@ -1,0 +1,241 @@
+/* zeron.sh wears the app's own dark theme. Every colour, radius and control
+   size here is a token from apps/zgx/ui/ds/themes/zeron-dark.json, so the
+   site and the window pictured on it are one design. Change them there
+   first. Fonts come from astro.config.mjs (Geist and Geist Mono, the app's). */
+
+:root {
+  color-scheme: dark;
+
+  --window: #0e0e10;
+  /* The page sits a step under the app's window, so a window on it reads as lifted. */
+  --page-bg: #08080a;
+  --glass-tint: #0d0d0dcc;
+  --surface: #ffffff08;
+  --surface-raised: #ffffff0f;
+  --text: #ededef;
+  /* Muted text is the primary at less opacity, as in the app: it takes the
+     colour of whatever is behind it. */
+  --text-2: rgb(237 237 239 / 0.64);
+  --text-3: rgb(237 237 239 / 0.46);
+  --border: #ffffff12;
+  --border-subtle: #ffffff0a;
+  --border-strong: #ffffff2e;
+  --line: rgb(255 255 255 / 0.08);
+  --line-strong: rgb(255 255 255 / 0.16);
+  --accent: #9277b0;
+  --accent-soft: #b9a3d2;
+  --hover: #ffffff0d;
+  --selected: #ffffff1a;
+  --success: #34d399;
+
+  --primary-bg: #ececee;
+  --primary-hover: #ffffff;
+  --primary-active: #d2d2d7;
+  --primary-text: #0b0b0c;
+  --secondary-bg: #ffffff14;
+  --secondary-hover: #ffffff1f;
+  --secondary-active: #ffffff29;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+
+  --sans: var(--font-sans);
+  --mono: var(--font-mono);
+
+  --gutter: clamp(20px, 4vw, 40px);
+  --page: 1200px;
+  --nav-height: 60px;
+  --section: clamp(88px, 11vw, 152px);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+* { margin: 0; padding: 0; }
+html {
+  background: var(--page-bg);
+  scroll-behavior: smooth;
+  scroll-padding-top: 32px;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+body {
+  min-height: 100vh;
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--text);
+  background: var(--page-bg);
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: clip;
+}
+::selection { background: color-mix(in srgb, var(--accent) 60%, transparent); color: #fff; }
+a { color: inherit; text-decoration: none; }
+img, svg, picture { display: block; max-width: 100%; }
+img { height: auto; }
+ul, ol { list-style: none; }
+button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+code, pre, kbd { font-family: var(--mono); }
+:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 80%, white); outline-offset: 3px; border-radius: var(--radius-sm); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+}
+
+.wrap {
+  width: 100%;
+  max-width: calc(var(--page) + 2 * var(--gutter));
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Type: the app's styles, at a page's sizes. */
+h1, h2, h3 { font-weight: 600; text-wrap: balance; }
+h2 {
+  font-size: clamp(28px, 3.2vw, 40px);
+  line-height: 1.12;
+  letter-spacing: -0.025em;
+}
+h3 { font-size: 17px; line-height: 1.35; letter-spacing: -0.01em; }
+.lead {
+  font-size: clamp(17px, 1.45vw, 19px);
+  line-height: 1.55;
+  color: var(--text-2);
+  text-wrap: pretty;
+}
+.muted { color: var(--text-2); }
+.faint { color: var(--text-3); }
+
+.section { padding-top: var(--section); }
+
+/* A section opens with a statement: its first sentence in ink, the rest quiet. */
+.statement {
+  max-width: 21em;
+  font-size: clamp(24px, 2.9vw, 38px);
+  font-weight: 550;
+  line-height: 1.18;
+  letter-spacing: -0.028em;
+  color: var(--text-3);
+  text-wrap: pretty;
+}
+.statement b { font-weight: inherit; color: var(--text); }
+
+/* Cards. One line colour for everything inside the page: a card's ring and
+   every divider in it are --line, and the ring is drawn above the card's
+   content, so nothing a card holds can paint over its edge or its corners. */
+.bento { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 16px; margin-top: clamp(36px, 5vw, 64px); }
+.bento + .also { margin-top: 40px; }
+/* Under a section's cards, what else there is to say: three columns under one rule, without boxes. */
+.also { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 32px 40px; padding-top: 36px; border-top: 1px solid var(--line); }
+.also li { color: var(--text-2); }
+.also h3 { margin-top: 14px; font-size: 16px; font-weight: 550; color: var(--text); }
+.also p { margin: 6px 0 0; max-width: 26em; font-size: 15px; line-height: 1.5; text-wrap: pretty; }
+.also .command { margin-top: 16px; }
+.also .command code { font-size: 12px; }
+@media (max-width: 800px) {
+  .also { grid-template-columns: minmax(0, 1fr); }
+}
+.card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  isolation: isolate;
+  background: linear-gradient(180deg, #111113 0%, #0b0b0d 100%);
+  border-radius: 16px;
+}
+.card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px var(--line), inset 0 1px 0 0 rgb(255 255 255 / 0.03);
+  pointer-events: none;
+  transition: box-shadow 0.25s;
+}
+.card:hover::after { box-shadow: inset 0 0 0 1px var(--line-strong), inset 0 1px 0 0 rgb(255 255 255 / 0.03); }
+.card-copy { padding: 28px 28px 0; }
+.card-copy h3 { font-size: 18px; font-weight: 550; letter-spacing: -0.02em; }
+.card-copy p { margin-top: 6px; max-width: 29em; font-size: 15px; line-height: 1.5; color: var(--text-2); text-wrap: pretty; }
+/* What a card shows sits at its foot, under the words. */
+.card-visual { margin-top: auto; padding-top: 28px; }
+.card-visual.flush > * { border-top: 1px solid var(--line); }
+.span-12 { grid-column: span 12; }
+.span-7 { grid-column: span 7; }
+.span-6 { grid-column: span 6; }
+.span-5 { grid-column: span 5; }
+.span-4 { grid-column: span 4; }
+@media (max-width: 900px) {
+  .span-7, .span-6, .span-5, .span-4 { grid-column: span 12; }
+}
+/* A piece of the app inside a card: set in from the left under the words,
+   running off the card to the right and below, dissolving before the edge.
+   It leans out a little under the pointer. */
+.piece {
+  margin-left: 28px;
+  border-radius: 10px 0 0 0;
+  overflow: hidden;
+  box-shadow: 0 0 0 1px var(--line);
+  -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent 99%), linear-gradient(to right, #000 80%, transparent 99.5%);
+  mask-image: linear-gradient(to bottom, #000 60%, transparent 99%), linear-gradient(to right, #000 80%, transparent 99.5%);
+  -webkit-mask-composite: source-in;
+  mask-composite: intersect;
+  transition: translate 0.5s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+/* A piece that isn't faded: it is cut by the card's own edge (one with a light theme in it, which a fade would turn to a glow). */
+.piece.plain { -webkit-mask-image: none; mask-image: none; }
+/* A piece shown whole: set in on every side, all four corners. */
+.piece.whole { margin: 0 28px 28px; border-radius: 12px; -webkit-mask-image: none; mask-image: none; }
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .card:hover .piece { translate: -6px -6px; }
+}
+
+/* Parts of the page rise in as they are reached (the script in Base arms this). */
+@media (prefers-reduced-motion: no-preference) {
+  .js [data-reveal] { opacity: 0; translate: 0 20px; filter: blur(6px); transition: opacity 0.8s cubic-bezier(0.2, 0.7, 0.2, 1), translate 0.8s cubic-bezier(0.2, 0.7, 0.2, 1), filter 0.8s; transition-delay: calc(var(--i, 0) * 90ms); }
+  .js [data-reveal].is-in { opacity: 1; translate: none; filter: none; }
+  .bento > :nth-child(2) { --i: 1; }
+  .bento > :nth-child(3) { --i: 2; }
+}
+
+/* The page arrives in order: each part rises out of a blur, a beat after the last. */
+@media (prefers-reduced-motion: no-preference) {
+  .rise { animation: rise 0.9s cubic-bezier(0.2, 0.7, 0.2, 1) both; animation-delay: calc(var(--i, 0) * 90ms); }
+  @keyframes rise {
+    from { opacity: 0; filter: blur(8px); translate: 0 14px; }
+    to { opacity: 1; filter: none; translate: none; }
+  }
+}
+
+/* Prose pages (the privacy policy). */
+.prose { max-width: 720px; padding-block: clamp(48px, 7vw, 88px) clamp(72px, 9vw, 120px); }
+.prose h1 { font-size: clamp(32px, 4vw, 44px); line-height: 1.1; letter-spacing: -0.03em; }
+.prose .updated { margin-top: 12px; font-size: 14px; color: var(--text-3); }
+.prose .lede { margin-top: 28px; font-size: 17px; color: var(--text); }
+.prose h2 { margin-top: 56px; padding-top: 28px; border-top: 1px solid var(--border); font-size: 22px; letter-spacing: -0.02em; }
+.prose h3 { margin-top: 28px; font-size: 16px; }
+.prose p, .prose li { font-size: 15.5px; line-height: 1.7; color: var(--text-2); }
+.prose p { margin-top: 14px; }
+.prose ul { margin-top: 12px; padding-left: 20px; list-style: disc; }
+.prose li + li { margin-top: 6px; }
+.prose li::marker { color: var(--text-3); }
+.prose strong { font-weight: 500; color: var(--text); }
+.prose a { color: var(--accent-soft); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent) 60%, transparent); text-underline-offset: 3px; }
+.prose a:hover { text-decoration-color: var(--accent-soft); }
+.prose code { font-size: 0.9em; color: var(--text); }
+.prose .table-scroll { margin-top: 16px; overflow-x: auto; }
+.prose table { width: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.6; }
+.prose th, .prose td { padding: 10px 14px 10px 0; text-align: left; vertical-align: top; border-top: 1px solid var(--border); }
+.prose th { font-weight: 500; color: var(--text); white-space: nowrap; }
+.prose td { color: var(--text-2); }
+.prose thead th { border-top: 0; font-size: 13px; font-weight: 400; color: var(--text-3); }

@@ -13,6 +13,7 @@
 -- page, plain on the page.
 
 local Button = require("@self/button")
+local material = require("@self/material")
 local IconButton = require("@self/icon_button").IconButton
 local Icon = require("@self/icon")
 local TextArea = require("@self/text_area")
@@ -267,7 +268,7 @@ M.ReplyComposer = ui.component(function(props: ComposerProps): Node
 				items = "center",
 				rounded = "$radius.lg",
 				border = 1,
-				bg = "$zeron.field.bg",
+				bg = material.pick("$zeron.field.glass", "$zeron.field.bg"),
 				border_color = "$zeron.field.edge",
 				role = "button",
 				label = props.placeholder or locale.t("ds.comment.reply"),
@@ -382,7 +383,7 @@ function M.Thread(props: ThreadProps): Node
 		gap = "$space.4",
 		p = if props.card then "$space.4" else nil,
 		rounded = if props.card then "$radius.xl" else nil,
-		bg = if props.card then "$zeron.settings.card" else nil,
+		bg = if props.card then material.pick("$zeron.settings.comment", "$zeron.settings.card") else nil,
 		border = if props.card then 1 else nil,
 		border_color = if props.card then "$zeron.settings.edge" else nil,
 		head,

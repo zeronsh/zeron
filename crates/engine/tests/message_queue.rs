@@ -110,6 +110,7 @@ impl Harness for HeldHarness {
             // Only the engine can mint a request id it will honour, so the
             // question has to go through controls rather than the stream.
             (controls.request_input)(vec![UserInputQuestion {
+                note: None,
                 id: "q1".into(),
                 header: "Choose".into(),
                 question: "which one?".into(),
@@ -123,31 +124,34 @@ impl Harness for HeldHarness {
         let steering = controls.steering;
         let prompts = self.prompts.clone();
         let gate = self.mailbox_gate.lock().unwrap().take();
+        let harness_id = self.id;
+        let session_id = format!("sess-queue-{}", harness_id.as_str());
+        let done_session_id = session_id.clone();
         let started = futures::stream::iter(vec![Ok(AgentEvent::SessionStarted {
-            harness: HarnessId::Mock,
-            model: "mock-1".into(),
+            harness: harness_id,
+            model: request.model.clone().unwrap_or_else(|| "mock-1".into()),
             tools: vec![],
             cwd: request.cwd.clone(),
-            session_id: "sess-queue".into(),
+            session_id,
             assistant_message_id: format!("a-{}", request.prompt),
         })]);
         let done = futures::stream::unfold(
-            (finish, steering, prompts, false),
-            |(mut finish, mut steering, prompts, ended)| async move {
+            (finish, steering, prompts, done_session_id, false),
+            |(mut finish, mut steering, prompts, done_session_id, ended)| async move {
                 if ended {
                     return None;
                 }
                 let (event, ended) = tokio::select! {
-                    _ = finish.recv() => (AgentEvent::Done { status: DoneStatus::Completed, result: None, error: None, session_id: Some("sess-queue".into()) }, true),
+                    _ = finish.recv() => (AgentEvent::Done { status: DoneStatus::Completed, result: None, error: None, session_id: Some(done_session_id.clone()) }, true),
                     steer = steering.recv() => match steer {
                         Some(message) => {
                             prompts.lock().unwrap().push(message.prompt);
                             (AgentEvent::Steered { assistant_message_id: None, next_assistant_message_id: Some(uuid::Uuid::new_v4().to_string()) }, false)
                         }
-                        None => (AgentEvent::Done { status: DoneStatus::Completed, result: None, error: None, session_id: Some("sess-queue".into()) }, true),
+                        None => (AgentEvent::Done { status: DoneStatus::Completed, result: None, error: None, session_id: Some(done_session_id.clone()) }, true),
                     }
                 };
-                Some((Ok(event), (finish, steering, prompts, ended)))
+                Some((Ok(event), (finish, steering, prompts, done_session_id, ended)))
             },
         );
         let gated = futures::stream::once(async move {
@@ -260,8 +264,13 @@ async fn setup_with(
 fn assemble_at(path: &std::path::Path, harness: Arc<HeldHarness>) -> EngineCore {
     let registry = HarnessRegistry::new();
     registry.register(harness);
-    EngineCore::assemble(path, Arc::new(registry), HarnessId::Mock, None)
-        .expect("engine core assembles")
+    let core = EngineCore::assemble(path, Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    // As the engine's own boot says (deferred.rs): this one serves no IPC
+    // port. Left unsaid, a turn revived on boot waits out
+    // `ipc_port_ready`'s whole limit for a port never coming.
+    core.sessions.set_no_ipc_port();
+    core
 }
 
 async fn create_chat(core: &EngineCore) {
@@ -594,6 +603,67 @@ async fn a_steer_command_for_a_turn_boundary_agent_waits_in_the_queue_for_the_tu
         user_message_id(&core, "and also this").as_deref(),
         Some("m-steer")
     );
+    assert!(queue_texts(&core).is_empty());
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+/// A message sent mid-turn to an agent that reads input only between turns
+/// waits in the queue; a Stop leaves it there, paused with the person's own
+/// rows — never moved into the transcript unrun, where nothing would answer
+/// it — and Send now sends it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_keeps_a_message_sent_mid_turn_in_the_queue() {
+    let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
+
+    core.doc_host
+        .queue_message(CHAT, "opening", Vec::new())
+        .expect("queue opening");
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "opening"),
+        "the turn to start",
+    )
+    .await;
+    core.doc_host
+        .queue_command(
+            CHAT,
+            SessionCommandPayload::Steer {
+                prompt: "use chrome instead".into(),
+                message_id: Some("m-mid".into()),
+            },
+        )
+        .expect("queue steer command");
+    wait_for(
+        || queue_texts(&core) == vec!["use chrome instead".to_owned()],
+        "the message to wait in the queue",
+    )
+    .await;
+
+    core.doc_host
+        .queue_command(CHAT, SessionCommandPayload::Interrupt {})
+        .expect("queue interrupt");
+    wait_for(
+        || !core.sessions.turn_in_flight(CHAT),
+        "the stopped turn to settle",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(queue_texts(&core), vec!["use chrome instead".to_owned()], "still queued");
+    assert_eq!(user_messages(&core), vec!["opening".to_owned()], "not in the transcript");
+    assert!(
+        !prompts.lock().unwrap().iter().any(|p| p == "use chrome instead"),
+        "the Stop doesn't send it on by itself"
+    );
+
+    core.doc_host
+        .send_queued_now(CHAT, "m-mid")
+        .await
+        .expect("send it now");
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "use chrome instead"),
+        "Send now to send it",
+    )
+    .await;
     assert!(queue_texts(&core).is_empty());
     let _ = harness.finish.send(());
     core.shutdown().await;
@@ -1431,6 +1501,71 @@ async fn an_acquired_edit_blocks_turn_end_and_commit_sends_the_new_text() {
     core.shutdown().await;
 }
 
+/// 2026-11-11, work-laptop: the person tapped Edit on a queued message on
+/// the Mac hosting the chat and was told it was "being edited on another
+/// device". The lease was their own: the same window asking again (its
+/// Acquired reply lost to a dropped app socket, or the chat reopened) must
+/// take its lease over. Any other editor, even on the same device, is still
+/// locked out until the lease ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_same_editor_asking_again_takes_its_own_lease_over() {
+    let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
+    core.doc_host
+        .queue_message(CHAT, "opening", Vec::new())
+        .expect("queue opening");
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "opening"),
+        "opening turn",
+    )
+    .await;
+    let id = core
+        .doc_host
+        .queue_message(CHAT, "mine", Vec::new())
+        .expect("queue row");
+
+    let BeginQueueEditOutcome::Acquired {
+        lease_id: first, ..
+    } = core
+        .doc_host
+        .begin_queued_message_edit(CHAT, &id, "laptop", "window-1")
+        .await
+        .expect("first begin")
+    else {
+        panic!("first edit must be acquired");
+    };
+    let again = core
+        .doc_host
+        .begin_queued_message_edit(CHAT, &id, "laptop", "window-1")
+        .await
+        .expect("second begin");
+    let BeginQueueEditOutcome::Acquired {
+        lease_id: second,
+        text,
+        ..
+    } = again
+    else {
+        panic!("the same editor must get its own lease back, got {again:?}");
+    };
+    assert_ne!(first, second, "a fresh lease generation");
+    assert_eq!(text, "mine");
+
+    // Another window on the same device, and another device, stay locked.
+    for (device, instance) in [("laptop", "window-2"), ("phone", "window-1")] {
+        let outcome = core
+            .doc_host
+            .begin_queued_message_edit(CHAT, &id, device, instance)
+            .await
+            .expect("other begin");
+        assert!(
+            matches!(&outcome, BeginQueueEditOutcome::Locked { owner_device_id, .. } if owner_device_id == "laptop"),
+            "{device}/{instance} must be locked out, got {outcome:?}"
+        );
+    }
+
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn only_one_editor_wins_and_an_expired_edit_requires_review() {
     let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
@@ -1964,6 +2099,77 @@ async fn a_send_during_a_turn_boundary_turn_waits_for_the_turn_end() {
     core.shutdown().await;
 }
 
+/// Two messages sent while the host was away (a Cloud machine asleep): by the
+/// time the second is read, the first has just started a turn. The sender never
+/// saw that turn, so the second waits for it and is a turn of its own, rather
+/// than a steer that cut the first off with an empty reply.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_send_issued_before_the_running_turn_started_is_the_next_turn_not_a_steer() {
+    let (core, harness, prompts) = setup(SteeringMode::StepBoundary).await;
+    core.doc_host
+        .queue_message(CHAT, "opening", Vec::new())
+        .expect("queue opening");
+    wait_for(|| prompts.lock().unwrap().len() == 1, "the opening turn").await;
+    let template = core.sessions.last_request(CHAT).expect("a request");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while core.sessions.turn_in_flight(CHAT) {
+        assert!(tokio::time::Instant::now() < deadline, "the opening turn never ended");
+        let _ = harness.finish.send(());
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // Both sent a minute ago, two seconds apart, while the host was away.
+    let sent = |id: &str, prompt: &str, ago_ms: i64| {
+        let mut request = template.clone();
+        request.prompt = prompt.into();
+        let issued_at = chrono::Utc::now().timestamp_millis() - ago_ms;
+        zeron_doc::SessionCommandEntry {
+            id: format!("cmd-{id}"),
+            payload: SessionCommandPayload::Run {
+                message_id: format!("m-{id}"),
+                request,
+            },
+            issued_by: "phone".into(),
+            issued_at,
+            based_on: None,
+            expires_at: Some(issued_at + 3_600_000),
+            status: zeron_doc::SessionCommandStatus::Pending,
+            resolution: None,
+        }
+    };
+    let doc = core.doc_host.open(CHAT).unwrap();
+    doc.doc()
+        .queue_command(&sent("first", "first, sent while away", 60_000))
+        .unwrap();
+    doc.doc()
+        .queue_command(&sent("second", "second, sent while away", 58_000))
+        .unwrap();
+    core.doc_host.enqueue_wakeup(CHAT).expect("wake the host");
+    wait_for(
+        || queue_texts(&core) == vec!["second, sent while away"],
+        "the second to wait for the first turn",
+    )
+    .await;
+    assert_eq!(
+        *prompts.lock().unwrap(),
+        vec!["opening", "first, sent while away"],
+        "the second was steered into the first turn"
+    );
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while prompts.lock().unwrap().len() < 3 {
+        assert!(tokio::time::Instant::now() < deadline, "the second never ran");
+        let _ = harness.finish.send(());
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        *prompts.lock().unwrap(),
+        vec!["opening", "first, sent while away", "second, sent while away"]
+    );
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
 /// An agent that reads input mid-turn still gets a plain send immediately.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_send_during_a_mid_turn_steerable_turn_steers_it_immediately() {
@@ -1983,5 +2189,329 @@ async fn a_send_during_a_mid_turn_steerable_turn_steers_it_immediately() {
     assert_eq!(user_messages(&core), vec!["opening", "steer me"]);
     assert_eq!(harness.requests.lock().unwrap().len(), 1);
     let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+/// A send reaches the agent while the open chat's transcript publish is
+/// still going: the publish runs beside the drains, never before them (a
+/// long chat's whole transcript read per change, before the drain, was V3
+/// Release's "sending…"). The publish is held where it hands the transcript
+/// to its watchers (a held read of the watch holds its `send_replace`), so
+/// the test needs no clock: with the publish before the drain, the send
+/// can't reach the agent until the hold ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_send_reaches_the_agent_while_the_open_chats_publish_is_held() {
+    let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
+    let handle = core.doc_host.open(CHAT).unwrap();
+    // Watched, as the app watches the open chat.
+    let watch = handle.watch_messages();
+    {
+        let held = watch.borrow();
+        // (Off this thread: anything on the send's own path that published
+        // would wait on `held` and must fail the wait below, not hang here.)
+        let doc_host = core.doc_host.clone();
+        let queued = tokio::task::spawn_blocking(move || {
+            doc_host.queue_message(CHAT, "sent while publishing", Vec::new())
+        });
+        wait_for(
+            || prompts.lock().unwrap().iter().any(|p| p == "sent while publishing"),
+            "the send to reach the agent while the publish is held",
+        )
+        .await;
+        drop(held);
+        queued.await.unwrap().expect("queue message");
+    }
+    // Released, publishing goes on: the watcher sees the send (in the
+    // publish after the held one, which read the chat before the drain).
+    wait_for(
+        || {
+            watch.borrow().entries.iter().any(|e| {
+                e.role == MessageRole::User
+                    && e.parts.iter().any(|part| {
+                        matches!(part, MessagePart::Text { text, .. } if text == "sent while publishing")
+                    })
+            })
+        },
+        "the publish to land once released",
+    )
+    .await;
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+async fn setup_two_providers() -> (
+    EngineCore,
+    Arc<HeldHarness>,
+    Arc<Mutex<Vec<String>>>,
+    Arc<HeldHarness>,
+    Arc<Mutex<Vec<String>>>,
+) {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.keep();
+    let (codex, codex_prompts) =
+        HeldHarness::build_as(HarnessId::Codex, SteeringMode::StepBoundary, false);
+    let (ag, ag_prompts) =
+        HeldHarness::build_as(HarnessId::Antigravity, SteeringMode::TurnBoundary, false);
+    let registry = HarnessRegistry::new();
+    registry.register(codex.clone());
+    registry.register(ag.clone());
+    let core = EngineCore::assemble(&path.join("data"), Arc::new(registry), HarnessId::Codex, None)
+        .expect("engine core assembles");
+    core.sessions.set_no_ipc_port();
+    create_chat(&core).await;
+    core.workspace
+        .set_chat_config(
+            CHAT,
+            &zeron_proto::ChatConfig {
+                harness: HarnessId::Codex,
+                model: Some("gpt-5.4".into()),
+                reasoning: Some(ReasoningLevel::Medium),
+                model_options: serde_json::Map::new(),
+                sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                access: zeron_proto::AccessMode::FullAccess,
+                plan: false,
+            },
+        )
+        .expect("set initial codex config");
+    (core, codex, codex_prompts, ag, ag_prompts)
+}
+
+fn switch_seams(core: &EngineCore) -> Vec<(Option<String>, Option<String>)> {
+    core.doc_host
+        .open(CHAT)
+        .ok()
+        .and_then(|h| h.doc().read_entries().ok())
+        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|e| e.parts)
+        .filter_map(|p| match p {
+            MessagePart::Switch {
+                from_harness,
+                to_harness,
+                ..
+            } => Some((from_harness, to_harness)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn antigravity_config() -> zeron_proto::ChatConfig {
+    zeron_proto::ChatConfig {
+        harness: HarnessId::Antigravity,
+        model: Some("gemini-4-neon".into()),
+        reasoning: None,
+        model_options: serde_json::Map::new(),
+        sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+        access: zeron_proto::AccessMode::FullAccess,
+        plan: false,
+    }
+}
+
+/// Regression: picking a new provider while a turn is running and queuing a
+/// message must run that queued message on the new provider at turn end,
+/// update the chat's saved config, and write the provider-switch seam.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queued_provider_switch_drains_onto_new_provider_with_switch_seam() {
+    let (core, codex, codex_prompts, ag, ag_prompts) = setup_two_providers().await;
+
+    core.doc_host
+        .queue_message(CHAT, "opening on codex", Vec::new())
+        .expect("queue opening");
+    wait_for(
+        || codex_prompts.lock().unwrap().iter().any(|p| p == "opening on codex"),
+        "opening turn on codex",
+    )
+    .await;
+
+    // While Codex is still running, queue a message targeting Antigravity.
+    let switched_id = core
+        .doc_host
+        .queue_message_with_config(
+            CHAT,
+            "try neon next",
+            Vec::new(),
+            true,
+            Vec::new(),
+            Some(antigravity_config()),
+        )
+        .expect("queue switched message");
+    assert_eq!(queue_texts(&core), vec!["try neon next"]);
+
+    // Finish Codex's turn: drain_queue must dispatch the queued message on Antigravity.
+    let _ = codex.finish.send(());
+    wait_for(
+        || ag_prompts.lock().unwrap().iter().any(|p| p.contains("try neon next")),
+        "queued switch message to dispatch on antigravity",
+    )
+    .await;
+
+    assert_eq!(
+        codex_prompts.lock().unwrap().as_slice(),
+        &["opening on codex"],
+        "codex must never receive the antigravity-targeted queued message"
+    );
+    assert_eq!(
+        user_message_id(&core, "try neon next").as_deref(),
+        Some(switched_id.as_str())
+    );
+    assert_eq!(
+        switch_seams(&core),
+        vec![(Some("codex".into()), Some("antigravity".into()))],
+        "switch seam must be written before the switched queued message"
+    );
+    wait_for(
+        || {
+            core.workspace
+                .chat_config(CHAT)
+                .is_some_and(|c| c.harness == HarnessId::Antigravity && c.model.as_deref() == Some("gemini-4-neon"))
+        },
+        "chat config to update to antigravity",
+    )
+    .await;
+
+    let _ = ag.finish.send(());
+    core.shutdown().await;
+}
+
+/// Clicking "Send now" on a queued message that targets another provider
+/// interrupts the running turn, switches providers, and writes the seam.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn send_queued_now_with_provider_switch_interrupts_and_switches() {
+    let (core, codex, codex_prompts, ag, ag_prompts) = setup_two_providers().await;
+
+    core.doc_host
+        .queue_message(CHAT, "opening on codex", Vec::new())
+        .expect("queue opening");
+    wait_for(
+        || codex_prompts.lock().unwrap().iter().any(|p| p == "opening on codex"),
+        "opening turn on codex",
+    )
+    .await;
+
+    let switched_id = core
+        .doc_host
+        .queue_message_with_config(
+            CHAT,
+            "interrupt with neon",
+            Vec::new(),
+            true,
+            Vec::new(),
+            Some(antigravity_config()),
+        )
+        .expect("queue switched message");
+
+    assert!(
+        core.doc_host
+            .send_queued_now(CHAT, &switched_id)
+            .await
+            .expect("send_queued_now")
+    );
+
+    wait_for(
+        || ag_prompts.lock().unwrap().iter().any(|p| p.contains("interrupt with neon")),
+        "switched message to run on antigravity after interrupt",
+    )
+    .await;
+    assert_eq!(
+        codex_prompts.lock().unwrap().as_slice(),
+        &["opening on codex"]
+    );
+    assert_eq!(
+        switch_seams(&core),
+        vec![(Some("codex".into()), Some("antigravity".into()))]
+    );
+    let entries = core
+        .doc_host
+        .open(CHAT)
+        .expect("open chat")
+        .doc()
+        .read_entries()
+        .expect("read entries");
+    let opening_ix = entries
+        .iter()
+        .position(|e| {
+            e.role == zeron_doc::MessageRole::User
+                && e.parts
+                    .iter()
+                    .any(|p| matches!(p, MessagePart::Text { text, .. } if text == "opening on codex"))
+        })
+        .expect("opening user message");
+    let switch_ix = entries
+        .iter()
+        .position(|e| e.parts.iter().any(|p| matches!(p, MessagePart::Switch { .. })))
+        .expect("switch seam");
+    let switched_ix = entries
+        .iter()
+        .position(|e| e.id == switched_id)
+        .expect("switched user message");
+    assert!(
+        opening_ix < switch_ix && switch_ix + 1 == switched_ix,
+        "switch seam must sit after Codex's interrupted prompt ({opening_ix}) and directly above the switched prompt ({switched_ix}), got switch at {switch_ix}: {entries:#?}"
+    );
+    assert_eq!(
+        core.workspace.chat_config(CHAT).map(|c| c.harness),
+        Some(HarnessId::Antigravity)
+    );
+
+    let _ = codex.finish.send(());
+    let _ = ag.finish.send(());
+    core.shutdown().await;
+}
+
+/// Defense in depth: even if a client calls SteerQueuedMessageNow on a queued
+/// row that targets a different provider, the host must never steer it into
+/// the running turn of the old provider — it waits for turn end and switches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn steer_queued_now_with_provider_switch_never_steers_into_old_provider() {
+    let (core, codex, codex_prompts, ag, ag_prompts) = setup_two_providers().await;
+
+    core.doc_host
+        .queue_message(CHAT, "opening on codex", Vec::new())
+        .expect("queue opening");
+    wait_for(
+        || codex_prompts.lock().unwrap().iter().any(|p| p == "opening on codex"),
+        "opening turn on codex",
+    )
+    .await;
+
+    let switched_id = core
+        .doc_host
+        .queue_message_with_config(
+            CHAT,
+            "do not feed codex",
+            Vec::new(),
+            true,
+            Vec::new(),
+            Some(antigravity_config()),
+        )
+        .expect("queue switched message");
+
+    assert!(
+        core.doc_host
+            .steer_queued_now(CHAT, &switched_id)
+            .await
+            .expect("steer_queued_now")
+    );
+    // Still queued while Codex runs; Codex must NOT have received it.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert_eq!(
+        codex_prompts.lock().unwrap().as_slice(),
+        &["opening on codex"]
+    );
+    assert_eq!(queue_texts(&core), vec!["do not feed codex"]);
+
+    // Once Codex finishes, it drains onto Antigravity with the switch seam.
+    let _ = codex.finish.send(());
+    wait_for(
+        || ag_prompts.lock().unwrap().iter().any(|p| p.contains("do not feed codex")),
+        "deferred switched row to run on antigravity",
+    )
+    .await;
+    assert_eq!(
+        switch_seams(&core),
+        vec![(Some("codex".into()), Some("antigravity".into()))]
+    );
+
+    let _ = ag.finish.send(());
     core.shutdown().await;
 }

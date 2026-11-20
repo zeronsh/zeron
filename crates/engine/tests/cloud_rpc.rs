@@ -188,6 +188,139 @@ async fn cloud_rpcs_reach_the_edge_as_the_user_and_are_never_forwarded() {
 /// Records every request line + body.
 type Requests = Arc<Mutex<Vec<(String, String)>>>;
 
+#[tokio::test]
+async fn waking_on_a_size_and_the_default_size_reach_the_edge() {
+    let (edge_url, seen) = scripted_edge(|request, body| {
+        if request.contains("/machine") {
+            return (
+                200,
+                r#"{"state":"ready","deviceId":"cloud-abc","available":true,"machine":"large"}"#
+                    .to_string(),
+            );
+        }
+        if request.contains("/retry") {
+            return (
+                200,
+                r#"{"chatId":"chat-1","deviceId":"cloud-s1","spaceId":"sp","state":"provisioning","createdAt":1}"#
+                    .to_string(),
+            );
+        }
+        if request.contains("/wake") {
+            if body.contains("\"small\"") {
+                return (
+                    409,
+                    r#"{"error":"machine_too_small","message":"That machine holds 20 GB."}"#
+                        .to_string(),
+                );
+            }
+            return (
+                200,
+                r#"{"chatId":"chat-1","deviceId":"cloud-s1","spaceId":"sp","state":"starting","createdAt":1,"machine":"xlarge"}"#
+                    .to_string(),
+            );
+        }
+        if request.starts_with("GET /cloud/") {
+            return (
+                200,
+                r#"{"state":"ready","deviceId":"cloud-abc","available":true,"machine":"large"}"#
+                    .to_string(),
+            );
+        }
+        (404, r#"{"error":"not_found"}"#.to_string())
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble(
+        dir.path(),
+        Arc::new(default_registry()),
+        HarnessId::Mock,
+        Some(EdgeConfig::with_static_token(edge_url, "dev-user")),
+    )
+    .unwrap();
+    let client = memory_client(core.rpc_service());
+    let org = core.workspace.org_id().to_string();
+
+    let woke: zeron_proto::CloudSession = client
+        .call_as(
+            methods::CLOUD_SESSION_WAKE,
+            serde_json::json!({ "chatId": "chat-1", "machine": "xlarge" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(woke.state, CloudState::Starting);
+    assert_eq!(woke.machine.as_deref(), Some("xlarge"));
+    // A caller from before sizes (only a chat id) still wakes it as it is.
+    let _: zeron_proto::CloudSession = client
+        .call_as(
+            methods::CLOUD_SESSION_WAKE,
+            serde_json::json!({ "chatId": "chat-1" }),
+        )
+        .await
+        .unwrap();
+    let fresh: zeron_proto::CloudSession = client
+        .call_as(
+            methods::CLOUD_SESSION_RETRY,
+            serde_json::json!({ "chatId": "chat-1", "machine": "large" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fresh.state, CloudState::Provisioning);
+    let refused = client
+        .call_as::<zeron_proto::CloudSession>(
+            methods::CLOUD_SESSION_WAKE,
+            serde_json::json!({ "chatId": "chat-1", "machine": "small" }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("disk_too_small"),
+        "the typed refusal survives the RPC: {refused}"
+    );
+    let status: CloudStatus = client
+        .call_as(
+            methods::CLOUD_SET_MACHINE,
+            serde_json::json!({ "machine": "large" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status.machine.as_deref(), Some("large"));
+
+    let seen = seen.lock().unwrap().clone();
+    let wake = format!("POST /cloud/{org}/sessions/chat-1/wake");
+    let wakes: Vec<serde_json::Value> = seen
+        .iter()
+        .filter(|(request, _)| *request == wake)
+        .map(|(_, body)| serde_json::from_str(body).unwrap())
+        .collect();
+    assert_eq!(
+        wakes,
+        vec![
+            serde_json::json!({ "machine": "xlarge" }),
+            serde_json::json!({}),
+            serde_json::json!({ "machine": "small" }),
+        ]
+    );
+    let retry = format!("POST /cloud/{org}/sessions/chat-1/retry");
+    let (_, body) = seen
+        .iter()
+        .find(|(request, _)| *request == retry)
+        .unwrap_or_else(|| panic!("{retry} not called: {seen:?}"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(body).unwrap(),
+        serde_json::json!({ "machine": "large" })
+    );
+    let put = format!("PUT /cloud/{org}/machine");
+    let (_, body) = seen
+        .iter()
+        .find(|(request, _)| *request == put)
+        .unwrap_or_else(|| panic!("{put} not called: {seen:?}"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(body).unwrap(),
+        serde_json::json!({ "machine": "large" })
+    );
+    core.shutdown().await;
+}
+
 async fn scripted_edge(
     respond: impl Fn(&str, &str) -> (u16, String) + Send + Sync + 'static,
 ) -> (String, Requests) {
@@ -261,8 +394,36 @@ async fn scripted_edge(
 
 /// The edge's side of Cloud sessions (and the vault's GitHub reads), enough
 /// for the engine.
+/// Whether the test edge's `GET /cloud/{org}/models` answers (a test turns it
+/// off to see the last list kept stand in).
+static MODELS_UP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 fn cloud_edge(request: &str, body: &str) -> (u16, String) {
     let json: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    if request.starts_with("GET /cloud/") && request.ends_with("/models") {
+        if !MODELS_UP.load(std::sync::atomic::Ordering::SeqCst) {
+            return (503, r#"{"error":"unavailable"}"#.into());
+        }
+        return (
+            200,
+            r#"{"models":{"claude-code":[{"id":"cloud-opus","label":"Cloud Opus","reasoningLevels":["low","high","ultrathink"],"options":[]}],"codex":[{"id":"cloud-codex","label":"Cloud Codex","reasoningLevels":["low"],"options":[]}]}}"#
+                .into(),
+        );
+    }
+    // The vault's accounts: one ChatGPT login, nothing else connected.
+    if request.starts_with("GET /vault/") && request.contains("/accounts/") {
+        if request.ends_with("/accounts/codex") {
+            return (
+                200,
+                r#"{"accounts":[{"slot":"a1","status":"connected","active":true,"kind":"oauth","account":"me@example.com","email":"me@example.com","authorizedDevices":["cloud-acct"],"createdAt":1,"updatedAt":1}]}"#
+                    .into(),
+            );
+        }
+        if request.contains("/usage") {
+            return (404, r#"{"error":"not_found","message":"no usage"}"#.into());
+        }
+        return (200, r#"{"accounts":[]}"#.into());
+    }
     if request.starts_with("GET ") && request.contains("/github/repos") {
         return (
             200,
@@ -397,6 +558,86 @@ async fn chats_run_on_cloud_get_their_own_session_machines() {
     assert_eq!(side.device_id, "cloud-s-chat-1");
     assert_eq!(side.cwd.as_deref(), Some("/home/user/app"));
 
+    // An agent naming another of the person's devices starts its chat
+    // there; naming the parent's machine, or none, it shares that machine.
+    use zeron_rpc::RpcService as _;
+    let rpc = core.rpc_service();
+    let agent_creates = |chat_id: &str, device: Option<String>| {
+        let mut op = serde_json::json!({
+            "op": "createChat", "chatId": chat_id, "spaceId": "sp-app", "parentChatId": "chat-1",
+            "config": { "harness": "mock", "sandbox": "workspace-write", "access": "full-access" },
+        });
+        if let Some(device) = device {
+            op["deviceId"] = serde_json::json!(device);
+        }
+        zeron_rpc::with_caller(
+            zeron_rpc::Caller::Agent { chat: None },
+            rpc.handle(methods::MUTATE, op),
+        )
+    };
+    agent_creates("side-here", Some(core.workspace.device_id().to_owned()))
+        .await
+        .unwrap();
+    assert_eq!(
+        core.workspace.chat("side-here").unwrap().unwrap().device_id,
+        core.workspace.device_id()
+    );
+    agent_creates("side-there", Some("cloud-s-chat-1".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        core.workspace
+            .chat("side-there")
+            .unwrap()
+            .unwrap()
+            .device_id,
+        "cloud-s-chat-1"
+    );
+    agent_creates("side-unnamed", None).await.unwrap();
+    assert_eq!(
+        core.workspace
+            .chat("side-unnamed")
+            .unwrap()
+            .unwrap()
+            .device_id,
+        "cloud-s-chat-1"
+    );
+
+    // What a new machine reaches: the person's pick goes to the edge; an
+    // agent's is never taken (the account's default applies).
+    let session_bodies = |chat_id: &str| -> Vec<serde_json::Value> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|(request, _)| request.starts_with("POST ") && request.ends_with("/sessions"))
+            .filter_map(|(_, body)| serde_json::from_str::<serde_json::Value>(body).ok())
+            .filter(|body| body["chatId"] == chat_id)
+            .collect()
+    };
+    assert!(session_bodies("chat-1")[0].get("reach").is_none());
+    create(
+        &client,
+        serde_json::json!({
+        "chatId": "chat-isolated", "spaceId": "sp-app", "cloud": true, "cloudReach": "isolated" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(session_bodies("chat-isolated")[0]["reach"], "isolated");
+    zeron_rpc::with_caller(
+        zeron_rpc::Caller::Agent { chat: None },
+        rpc.handle(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "createChat", "chatId": "chat-by-agent", "spaceId": "sp-app",
+                "cloud": true, "cloudReach": "devices",
+                "config": { "harness": "mock", "sandbox": "workspace-write", "access": "full-access" },
+            }),
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(session_bodies("chat-by-agent")[0].get("reach").is_none());
+
     // Without Cloud picked, the same project runs here.
     create(
         &client,
@@ -462,6 +703,18 @@ async fn chats_run_on_cloud_get_their_own_session_machines() {
                 "sp-app",
                 "https://github.com/acme/app.git",
                 Some("dev")
+            ),
+            (
+                "chat-isolated",
+                "sp-app",
+                "https://github.com/acme/app.git",
+                None
+            ),
+            (
+                "chat-by-agent",
+                "sp-app",
+                "https://github.com/acme/app.git",
+                None
             ),
             (
                 "chat-fail",
@@ -530,8 +783,8 @@ async fn catalogs_for_cloud_devices_are_answered_here() {
     });
     let client = memory_client(core.rpc_service());
 
-    // Harnesses for any Cloud device: Codex and Claude Code, both usable
-    // there, without dialing anything (no peer links exist here).
+    // Harnesses for any Cloud device: every built-in agent, without dialing
+    // anything (no peer links exist here).
     for target in ["cloud-acct", "cloud-s-chat-1"] {
         let harnesses: Vec<serde_json::Value> = client
             .call_as(
@@ -540,12 +793,11 @@ async fn catalogs_for_cloud_devices_are_answered_here() {
             )
             .await
             .unwrap();
-        let ids: Vec<&str> = harnesses.iter().filter_map(|h| h["id"].as_str()).collect();
-        assert_eq!(ids.len(), 2, "{harnesses:?}");
-        assert!(
-            ids.contains(&"codex") && ids.contains(&"claude-code"),
-            "{ids:?}"
-        );
+        let mut ids: Vec<&str> = harnesses.iter().filter_map(|h| h["id"].as_str()).collect();
+        ids.sort_unstable();
+        let mut cloud: Vec<&str> = zeron_proto::CLOUD_HARNESSES.to_vec();
+        cloud.sort_unstable();
+        assert_eq!(ids, cloud, "{harnesses:?}");
         assert!(harnesses.iter().all(|h| h["installed"] == true));
     }
     let refused = client
@@ -556,8 +808,67 @@ async fn catalogs_for_cloud_devices_are_answered_here() {
         .await
         .unwrap_err();
     assert!(
-        refused.to_string().contains("Codex and Claude Code only"),
+        refused.to_string().contains("doesn't run on Cloud"),
         "{refused}"
+    );
+
+    // A Cloud chat's composer asks its session machine for accounts: they
+    // come from the vault, the same for every machine, never by dialing the
+    // machine (which may be asleep).
+    for target in ["cloud-s-chat-1", "cloud"] {
+        let snapshot: serde_json::Value = client
+            .call_as(
+                methods::LIST_AGENT_ACCOUNTS,
+                serde_json::json!({ "targetDeviceId": target }),
+            )
+            .await
+            .unwrap();
+        let codex: Vec<&serde_json::Value> = snapshot["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["harness"] == "codex")
+            .collect();
+        assert_eq!(codex.len(), 1, "{target}: {snapshot}");
+        assert_eq!(codex[0]["id"], "codex:a1");
+        assert_eq!(codex[0]["active"], true);
+    }
+
+    // Models for a chat on a session machine (asleep, or gone): Cloud's, as
+    // the edge lists them, whatever this computer has installed or signed in.
+    // Nothing dials the machine.
+    for (target, harness, id) in [
+        ("cloud-s-chat-1", "codex", "cloud-codex"),
+        ("cloud-s-chat-1", "claude-code", "cloud-opus"),
+        ("cloud-acct", "claude-code", "cloud-opus"),
+    ] {
+        let models: Vec<serde_json::Value> = client
+            .call_as(
+                methods::LIST_MODELS,
+                serde_json::json!({ "targetDeviceId": target, "harness": harness }),
+            )
+            .await
+            .unwrap();
+        let ids: Vec<&str> = models.iter().filter_map(|m| m["id"].as_str()).collect();
+        assert_eq!(ids, [id], "{target} {harness}");
+    }
+    // The edge out of reach: the last list read.
+    MODELS_UP.store(false, std::sync::atomic::Ordering::SeqCst);
+    let kept: Vec<serde_json::Value> = client
+        .call_as(
+            methods::LIST_MODELS,
+            serde_json::json!({ "targetDeviceId": "cloud-s-chat-1", "harness": "codex" }),
+        )
+        .await
+        .unwrap();
+    MODELS_UP.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(kept[0]["id"], "cloud-codex");
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .all(|(r, _)| !r.contains("cloud-s-chat-1")),
+        "no request names the machine"
     );
 
     // The logical device has no engine: anything else fails fast.
@@ -628,7 +939,11 @@ async fn deleting_a_cloud_chat_deletes_its_machine() {
     })
     .await
     .unwrap_or_else(|_| panic!("{expected} not called: {:?}", deletes(&seen)));
-    assert_eq!(deletes(&seen), vec![expected], "only the Cloud chat's machine");
+    assert_eq!(
+        deletes(&seen),
+        vec![expected],
+        "only the Cloud chat's machine"
+    );
     core.shutdown().await;
 }
 
@@ -646,9 +961,8 @@ async fn provider_switch_is_refused_for_a_host_that_cannot_switch() {
     )
     .unwrap();
     let client = memory_client(core.rpc_service());
-    let config = |harness: &str| {
-        serde_json::json!({ "harness": harness, "sandbox": "workspace-write" })
-    };
+    let config =
+        |harness: &str| serde_json::json!({ "harness": harness, "sandbox": "workspace-write" });
     let cwd = dir.path().display().to_string();
     for (chat, device) in [
         ("old-host-chat", "cloud-old-machine".to_string()),
@@ -670,11 +984,308 @@ async fn provider_switch_is_refused_for_a_host_that_cannot_switch() {
             serde_json::json!({ "op": "setChatConfig", "chatId": chat, "config": config(harness) }),
         )
     };
-    let refused = switch("old-host-chat", "codex").await.unwrap_err().to_string();
+    let refused = switch("old-host-chat", "codex")
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(refused.contains("newer Zeron"), "{refused}");
     // The same provider (a model or effort change) still goes through.
     switch("old-host-chat", "claude-code").await.unwrap();
     // This engine hosts its own chats and switches them.
     switch("own-chat", "codex").await.unwrap();
+    core.shutdown().await;
+}
+
+/// GitHub's logins through the engine: listed, one disconnected, one made the
+/// first new sessions try; a repository names who reaches it; and an edge from
+/// before several logins answers shapes these calls still read.
+#[tokio::test]
+async fn github_logins_are_listed_and_changed_one_at_a_time() {
+    fn login(slot: &str, account: &str, active: bool) -> serde_json::Value {
+        serde_json::json!({
+            "slot": slot, "status": "connected", "active": active, "kind": "github",
+            "account": account, "avatarUrl": format!("https://github.com/{account}.png?size=64"),
+            "authorizedDevices": ["cloud-acct"], "createdAt": 1, "updatedAt": 2
+        })
+    }
+    let (edge_url, seen) = scripted_edge(|request, _body| {
+        if request.starts_with("GET ") && request.ends_with("/accounts/github") {
+            let accounts = [login("awork", "work-me", false), login("ahome", "home-me", true)];
+            return (200, serde_json::json!({ "accounts": accounts }).to_string());
+        }
+        if request.starts_with("DELETE ") && request.ends_with("/accounts/github/awork") {
+            let accounts = [login("ahome", "home-me", true)];
+            return (200, serde_json::json!({ "accounts": accounts }).to_string());
+        }
+        if request.starts_with("POST ") && request.ends_with("/accounts/github/active") {
+            let accounts = [login("awork", "work-me", true), login("ahome", "home-me", false)];
+            return (200, serde_json::json!({ "accounts": accounts }).to_string());
+        }
+        // The vault's accounts: one ChatGPT login, nothing else connected.
+    if request.starts_with("GET /vault/") && request.contains("/accounts/") {
+        if request.ends_with("/accounts/codex") {
+            return (
+                200,
+                r#"{"accounts":[{"slot":"a1","status":"connected","active":true,"kind":"oauth","account":"me@example.com","email":"me@example.com","authorizedDevices":["cloud-acct"],"createdAt":1,"updatedAt":1}]}"#
+                    .into(),
+            );
+        }
+        if request.contains("/usage") {
+            return (404, r#"{"error":"not_found","message":"no usage"}"#.into());
+        }
+        return (200, r#"{"accounts":[]}"#.into());
+    }
+    if request.starts_with("GET ") && request.contains("/github/repos") {
+            let reply = serde_json::json!({
+                "repos": [{
+                    "fullName": "work-org/api", "cloneUrl": "https://github.com/work-org/api.git",
+                    "defaultBranch": "main", "private": true, "pushedAt": 1,
+                    "installationId": 100, "account": "work-me", "accounts": ["work-me", "home-me"]
+                }, {
+                    // As an old vault answers.
+                    "fullName": "old/shape", "cloneUrl": "https://github.com/old/shape.git",
+                    "defaultBranch": "main", "private": false, "pushedAt": 0
+                }],
+                "installations": [{ "id": 100, "target": "work-org", "reachedBy": ["work-me", "home-me"] }]
+            });
+            return (200, reply.to_string());
+        }
+        if request.starts_with("POST ") && request.contains("/github/device/flow1") {
+            return (
+                200,
+                r#"{"state":"connected","account":"work-me","alreadyConnected":true}"#.into(),
+            );
+        }
+        if request.starts_with("GET /cloud/") {
+            return (200, r#"{"state":"ready","deviceId":"cloud-acct","available":true}"#.into());
+        }
+        (404, r#"{"error":"not_found","message":"no route"}"#.into())
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble(
+        dir.path(),
+        Arc::new(default_registry()),
+        HarnessId::Mock,
+        Some(EdgeConfig::with_static_token(edge_url, "dev-user")),
+    )
+    .unwrap();
+    let client = memory_client(core.rpc_service());
+
+    let listed: serde_json::Value = client
+        .call_as(methods::GITHUB_ACCOUNTS, serde_json::json!({}))
+        .await
+        .unwrap();
+    assert_eq!(listed["accounts"][0]["account"], "work-me");
+    assert_eq!(
+        listed["accounts"][0]["avatarUrl"],
+        "https://github.com/work-me.png?size=64"
+    );
+    assert_eq!(listed["accounts"][1]["active"], true);
+
+    let left: serde_json::Value = client
+        .call_as(
+            methods::GITHUB_ACCOUNT_FORGET,
+            serde_json::json!({ "slot": "awork" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(left["accounts"].as_array().unwrap().len(), 1);
+    assert_eq!(left["accounts"][0]["account"], "home-me");
+
+    let picked: serde_json::Value = client
+        .call_as(
+            methods::GITHUB_ACCOUNT_ACTIVATE,
+            serde_json::json!({ "slot": "awork" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(picked["accounts"][0]["active"], true);
+
+    // A slot goes into a path: nothing but an id gets there.
+    for method in [
+        methods::GITHUB_ACCOUNT_FORGET,
+        methods::GITHUB_ACCOUNT_ACTIVATE,
+    ] {
+        let refused = client
+            .call(
+                method,
+                serde_json::json!({ "slot": "../credentials/github" }),
+            )
+            .await;
+        assert!(refused.is_err(), "{method}");
+    }
+
+    let repos: serde_json::Value = client
+        .call_as(methods::LIST_GITHUB_REPOS, serde_json::json!({}))
+        .await
+        .unwrap();
+    assert_eq!(repos["repos"][0]["account"], "work-me");
+    assert_eq!(
+        repos["repos"][0]["accounts"],
+        serde_json::json!(["work-me", "home-me"])
+    );
+    assert_eq!(repos["repos"][0]["installationId"], 100);
+    assert_eq!(repos["repos"][1]["fullName"], "old/shape");
+    assert!(repos["repos"][1].get("account").is_none());
+
+    let polled: serde_json::Value = client
+        .call_as(
+            methods::GITHUB_CONNECT_POLL,
+            serde_json::json!({ "flowId": "flow1" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(polled["alreadyConnected"], true);
+
+    let seen = seen.lock().unwrap().clone();
+    let org = core.workspace.org_id().to_string();
+    for wanted in [
+        format!("GET /vault/{org}/accounts/github"),
+        format!("DELETE /vault/{org}/accounts/github/awork"),
+        format!("POST /vault/{org}/accounts/github/active"),
+    ] {
+        assert!(
+            seen.iter().any(|(request, _)| *request == wanted),
+            "{wanted}: {seen:?}"
+        );
+    }
+    assert!(
+        !seen
+            .iter()
+            .any(|(request, _)| request.contains("credentials/github"))
+    );
+    core.shutdown().await;
+}
+
+/// A message that reached a Cloud chat's doc and then waited — its machine
+/// couldn't be woken — for longer than its clock gives it still goes once
+/// the person wakes the machine: it goes again, once, with its clock started
+/// now. One still within its time is left to go as it is.
+#[tokio::test]
+async fn a_message_that_waited_days_for_its_machine_goes_once_when_woken() {
+    use zeron_doc::{SessionCommandEntry, SessionCommandPayload, SessionCommandStatus};
+    let (edge_url, seen) = scripted_edge(|request, _| {
+        if request.contains("/wake") {
+            return (
+                200,
+                r#"{"chatId":"cloud-chat","deviceId":"cloud-s1","spaceId":"sp","state":"starting","createdAt":1,"machine":"xlarge"}"#
+                    .to_string(),
+            );
+        }
+        (404, r#"{"error":"not_found"}"#.to_string())
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble(
+        dir.path(),
+        Arc::new(default_registry()),
+        HarnessId::Mock,
+        Some(EdgeConfig::with_static_token(edge_url, "dev-user")),
+    )
+    .unwrap();
+    let client = memory_client(core.rpc_service());
+    let cwd = dir.path().display().to_string();
+    core.workspace
+        .create_chat("cloud-chat", None, Some("cloud-session-1"), None, Some(cwd))
+        .unwrap();
+    let handle = core.doc_host.open("cloud-chat").unwrap();
+    const DAY: i64 = 24 * 60 * 60 * 1000;
+    let now = chrono::Utc::now().timestamp_millis();
+    let run = |prompt: &str, message: &str| SessionCommandPayload::Run {
+        request: zeron_proto::RunRequest {
+            mcp: None,
+            prompt: prompt.into(),
+            harness: None,
+            model: None,
+            reasoning: None,
+            model_options: Default::default(),
+            cwd: "/tmp".into(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            auto_approve: true,
+            access: Default::default(),
+            plan: false,
+            attachments: Vec::new(),
+            worktree: None,
+            resume: None,
+            env: Default::default(),
+            extra_mcp: Vec::new(),
+        },
+        message_id: message.into(),
+    };
+    for (id, message, issued_at) in [
+        ("cmd-ten-days", "m-ten-days", now - 10 * DAY),
+        // Its clock runs out while the machine boots.
+        ("cmd-nearly", "m-nearly", now - DAY + 10 * 60 * 1000),
+        ("cmd-an-hour", "m-an-hour", now - 60 * 60 * 1000),
+    ] {
+        handle
+            .doc()
+            .queue_command(&SessionCommandEntry {
+                id: id.into(),
+                payload: run("Fix the flaky test", message),
+                issued_by: "phone".into(),
+                issued_at,
+                based_on: None,
+                expires_at: Some(issued_at + DAY),
+                status: SessionCommandStatus::Pending,
+                resolution: None,
+            })
+            .unwrap();
+    }
+    let attempts = |message: &str| -> Vec<SessionCommandEntry> {
+        handle
+            .doc()
+            .read_commands()
+            .unwrap()
+            .into_iter()
+            .filter(|c| {
+                matches!(&c.payload,
+                    SessionCommandPayload::Run { message_id, .. } if message_id == message)
+            })
+            .collect()
+    };
+    let wake = || async {
+        let _: zeron_proto::CloudSession = client
+            .call_as(
+                methods::CLOUD_SESSION_WAKE,
+                serde_json::json!({ "chatId": "cloud-chat", "machine": "xlarge" }),
+            )
+            .await
+            .unwrap();
+    };
+
+    wake().await;
+    let old = attempts("m-ten-days");
+    assert_eq!(old.len(), 2, "the original and one re-issue: {old:?}");
+    assert_eq!(old[0].status, SessionCommandStatus::Rejected);
+    let why = old[0].resolution.clone().unwrap_or_default();
+    assert!(why.contains("ran out"), "{why}");
+    let again = &old[1];
+    assert_eq!(again.payload, old[0].payload, "the same message, as it was");
+    assert!(again.issued_at >= now, "its clock starts at the wake");
+    assert!(
+        again.effective_expiry() > chrono::Utc::now().timestamp_millis() + DAY / 2,
+        "a full clock from now: {again:?}"
+    );
+    assert_eq!(attempts("m-nearly").len(), 2, "one about to run out goes again too");
+    assert_eq!(
+        attempts("m-an-hour").len(),
+        1,
+        "one still within its time goes as it is"
+    );
+
+    // Woken again: nothing sends twice.
+    wake().await;
+    assert_eq!(attempts("m-ten-days").len(), 2);
+    assert_eq!(attempts("m-nearly").len(), 2);
+    assert_eq!(attempts("m-an-hour").len(), 1);
+    let wakes = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(request, _)| request.ends_with("/sessions/cloud-chat/wake"))
+        .count();
+    assert_eq!(wakes, 2, "both wakes reached the edge");
     core.shutdown().await;
 }

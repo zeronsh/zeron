@@ -2,7 +2,8 @@
 //! `packages/harness/src/claude.ts` (which itself mirrors Claude Code's own
 //! picker via t3code's catalog).
 //!
-//! Runtime initialize discovery appends concrete model ids to this curated list.
+//! Runtime initialize discovery appends concrete model ids to this curated list
+//! and fills ID-only labels for configured models with discovered display names.
 //! Curated rows retain their labels, effort ladders, and option sets because the
 //! CLI can under-report supported modes. The shared initialize probe also supplies
 //! slash commands and is cached by credential and binary context.
@@ -104,6 +105,17 @@ pub(crate) fn context_window() -> ModelOption {
     }
 }
 
+/// The Context Window select for models whose plain id already runs with the
+/// 1M window (the Fable models, Opus 4.7+, Sonnet 5+). Left unset, they run
+/// at 1M, so the select says so; 200K is an explicit choice that the launch
+/// enforces with `CLAUDE_CODE_DISABLE_1M_CONTEXT` (zeronsh/zeron#1083).
+fn native_1m_context_window() -> ModelOption {
+    ModelOption {
+        default_choice: "1m".into(),
+        ..context_window()
+    }
+}
+
 const FULL_LADDER: &[ReasoningLevel] = &[
     ReasoningLevel::Low,
     ReasoningLevel::Medium,
@@ -133,8 +145,10 @@ fn model(
     options: Vec<ModelOption>,
 ) -> Model {
     Model {
+        default: false,
         id: id.into(),
         label: label.into(),
+        provider: None,
         description: (!description.is_empty()).then(|| description.into()),
         reasoning_levels: ladder.to_vec(),
         options,
@@ -158,6 +172,40 @@ pub(crate) fn configured_models() -> Vec<Model> {
     models_with_settings(&root.join("settings.json"))
 }
 
+/// The catalog when discovery is unavailable: the configured models without
+/// the curated rows this Claude Code (`cli`, its version) is too old for.
+pub(crate) fn fallback_models(cli: Option<&str>) -> Vec<Model> {
+    let mut models = configured_models();
+    models.retain(|model| !too_old_for(&model.id, cli));
+    models
+}
+
+/// The oldest Claude Code that lists each curated model (T3 Code's model
+/// manifest, Nov 2026). An older CLI doesn't report the model at all.
+const MIN_CLI: &[(&str, &str)] = &[
+    ("claude-fable-5-2", "2.1.290"),
+    ("claude-fable-5-1", "2.1.257"),
+    ("claude-opus-5-5", "2.1.280"),
+    ("claude-opus-5", "2.1.219"),
+    ("claude-opus-4-8", "2.1.154"),
+    ("claude-opus-4-7", "2.1.111"),
+    ("claude-sonnet-5-5", "2.1.284"),
+    ("claude-haiku-5-5", "2.1.293"),
+];
+
+/// Whether `cli` (a Claude Code version) is known and older than the one
+/// `id` needs. An unknown or unparsable version is never too old.
+fn too_old_for(id: &str, cli: Option<&str>) -> bool {
+    let Some(cli) = cli.and_then(|v| semver::Version::parse(v.trim()).ok()) else {
+        return false;
+    };
+    MIN_CLI
+        .iter()
+        .find(|(model, _)| *model == id)
+        .and_then(|(_, min)| semver::Version::parse(min).ok())
+        .is_some_and(|min| cli < min)
+}
+
 fn models_with_settings(path: &std::path::Path) -> Vec<Model> {
     let mut models = static_models();
     let settings = std::fs::read(path)
@@ -168,6 +216,7 @@ fn models_with_settings(path: &std::path::Path) -> Vec<Model> {
         [
             "ANTHROPIC_MODEL",
             "ANTHROPIC_SMALL_FAST_MODEL",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
             "ANTHROPIC_DEFAULT_OPUS_MODEL",
             "ANTHROPIC_DEFAULT_SONNET_MODEL",
             "ANTHROPIC_DEFAULT_HAIKU_MODEL",
@@ -180,18 +229,68 @@ fn models_with_settings(path: &std::path::Path) -> Vec<Model> {
         .filter_map(|v| v.as_str())
         .map(str::trim)
         .filter(|id| !id.is_empty())
+        // `"model": "sonnet"` names whatever the CLI resolves that alias to;
+        // the alias itself is no row (discovery drops it the same way).
+        .filter(|id| !is_alias(id))
     {
         if !models.iter().any(|m| m.id == id) {
             models.push(Model {
+                default: false,
                 id: id.into(),
                 label: id.into(),
+                provider: None,
                 description: None,
                 reasoning_levels: FULL_LADDER.to_vec(),
                 options: vec![],
             });
         }
     }
+    sort_best_first(&mut models);
     models
+}
+
+/// The CLI's bare aliases (`sonnet`, `opus[1m]`, …): they resolve per account
+/// and per CLI release, so they can't be a row or a persisted selection.
+fn is_alias(id: &str) -> bool {
+    matches!(
+        id.strip_suffix("[1m]").unwrap_or(id),
+        "default" | "opus" | "sonnet" | "haiku" | "fable"
+    )
+}
+
+/// Families best-first; ids of any other family sort after them.
+const FAMILIES: &[&str] = &["fable", "opus", "sonnet", "haiku"];
+
+/// `claude-fable-5-2[1m]` -> (0, [5, 2]); `claude-haiku-4-5-20251001` -> (3, [4, 5]).
+/// The family is any `-`-separated token, so the older `claude-3-5-sonnet`
+/// spelling ranks too; dated snapshot suffixes are not version parts.
+fn family_and_version(id: &str) -> (usize, Vec<u32>) {
+    let id = id.strip_suffix("[1m]").unwrap_or(id);
+    let mut family = FAMILIES.len();
+    let mut version = Vec::new();
+    for token in id.split('-') {
+        if let Some(rank) = FAMILIES.iter().position(|f| *f == token) {
+            family = family.min(rank);
+        } else if token.len() < 8
+            && let Ok(part) = token.parse::<u32>()
+        {
+            version.push(part);
+        }
+    }
+    if family == FAMILIES.len() {
+        version.clear();
+    }
+    (family, version)
+}
+
+/// Best first: by family (Fable, Opus, Sonnet, Haiku, then the rest), newest
+/// version first within one. Stable, so other ids keep their order and a
+/// `[1m]` row stays next to its base.
+fn sort_best_first(models: &mut [Model]) {
+    models.sort_by_cached_key(|model| {
+        let (family, version) = family_and_version(&model.id);
+        (family, std::cmp::Reverse(version))
+    });
 }
 
 #[cfg(test)]
@@ -203,6 +302,7 @@ fn settings_models_keep_manifest_and_full_ladder() {
         &path,
         serde_json::json!({"model":"gateway/model", "env": {
             "ANTHROPIC_MODEL":"gateway/model", "ANTHROPIC_SMALL_FAST_MODEL":"fast",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL":"gateway/astra",
             "ANTHROPIC_DEFAULT_OPUS_MODEL":"opus", "ANTHROPIC_DEFAULT_SONNET_MODEL":"sonnet",
             "ANTHROPIC_DEFAULT_HAIKU_MODEL":"haiku"
         }})
@@ -211,7 +311,12 @@ fn settings_models_keep_manifest_and_full_ladder() {
     .unwrap();
     let models = models_with_settings(&path);
     assert_eq!(&models[..static_models().len()], static_models());
-    assert_eq!(models.len(), static_models().len() + 5);
+    // gateway/model, fast and gateway/astra; the opus/sonnet/haiku aliases are no rows.
+    assert_eq!(models.len(), static_models().len() + 3);
+    assert!(models.iter().any(|model| model.id == "gateway/astra"));
+    for alias in ["opus", "sonnet", "haiku"] {
+        assert!(models.iter().all(|model| model.id != alias));
+    }
     for model in &models[static_models().len()..] {
         assert_eq!(model.label, model.id);
         assert_eq!(model.reasoning_levels, FULL_LADDER);
@@ -220,11 +325,30 @@ fn settings_models_keep_manifest_and_full_ladder() {
     assert_eq!(models_with_settings(&path), static_models());
 }
 
-/// Overlay only new concrete model IDs; curated metadata remains authoritative.
+#[cfg(test)]
 pub(super) fn with_discovered_models(
-    mut models: Vec<Model>,
+    models: Vec<Model>,
     response: &serde_json::Value,
 ) -> Result<Vec<Model>, crate::HarnessError> {
+    with_discovered_models_for(models, response, None)
+}
+
+/// Append new concrete model IDs and fill ID-only labels on existing rows;
+/// curated metadata remains authoritative. A curated row this Claude Code
+/// (`cli`, its version) is too old for is dropped unless the CLI reports it.
+pub(super) fn with_discovered_models_for(
+    mut models: Vec<Model>,
+    response: &serde_json::Value,
+    cli: Option<&str>,
+) -> Result<Vec<Model>, crate::HarnessError> {
+    fn entry_text<'a>(entry: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+        entry
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    }
+
     let entries = response
         .get("response")
         .and_then(|v| v.get("models"))
@@ -233,24 +357,31 @@ pub(super) fn with_discovered_models(
         .ok_or_else(|| {
             crate::HarnessError::Protocol("Claude returned an empty model catalog".into())
         })?;
+    // Alias rows can precede the concrete row and carry generic names such as
+    // "Default (recommended)". Prefer concrete names regardless of entry order.
+    let mut concrete_labels = std::collections::HashMap::new();
+    for entry in entries {
+        if let Some(id) = entry_text(entry, "value")
+            && entry_text(entry, "resolvedModel").is_none_or(|resolved| resolved == id)
+            && let Some(label) = entry_text(entry, "displayName")
+        {
+            concrete_labels.entry(id).or_insert(label);
+        }
+    }
     let mut default = None;
     let mut valid = false;
+    let mut reported = std::collections::HashSet::new();
     for entry in entries {
-        let text = |key: &str| {
-            entry
-                .get(key)
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-        };
+        let text = |key: &str| entry_text(entry, key);
         let Some(id) = text("resolvedModel").or_else(|| text("value")) else {
             continue;
         };
+        let label = concrete_labels
+            .get(id)
+            .copied()
+            .or_else(|| text("displayName"));
         // Bare aliases cannot become persisted selections. Prefer resolvedModel.
-        if matches!(
-            id.strip_suffix("[1m]").unwrap_or(id),
-            "default" | "opus" | "sonnet" | "haiku" | "fable"
-        ) {
+        if is_alias(id) {
             continue;
         }
         valid = true;
@@ -262,7 +393,13 @@ pub(super) fn with_discovered_models(
         if text("value") == Some("default") {
             default = Some(id.to_owned());
         }
-        if models.iter().any(|model| model.id == id) {
+        reported.insert(id.strip_suffix("[1m]").unwrap_or(id).to_owned());
+        if let Some(model) = models.iter_mut().find(|model| model.id == id) {
+            if model.label == model.id
+                && let Some(label) = label
+            {
+                model.label = label.into();
+            }
             continue;
         }
         let mut ladder = Vec::new();
@@ -289,8 +426,10 @@ pub(super) fn with_discovered_models(
             ladder.extend([ReasoningLevel::Ultracode, ReasoningLevel::Ultrathink]);
         }
         models.push(Model {
+            default: false,
             id: id.into(),
-            label: text("displayName").unwrap_or(id).into(),
+            label: label.unwrap_or(id).into(),
+            provider: None,
             description: text("description").map(str::to_owned),
             reasoning_levels: ladder,
             options: vec![],
@@ -301,21 +440,25 @@ pub(super) fn with_discovered_models(
             "Claude returned an empty model catalog".into(),
         ));
     }
-    if let Some(default) = default {
-        // The picker folds long-context duplicates into their curated base.
-        // Put that base immediately behind the concrete default so folding
-        // keeps the CLI's default family first without changing curated rows.
-        if let Some(base) = default.strip_suffix("[1m]")
-            && let Some(index) = models.iter().position(|m| m.id == base)
-        {
-            let model = models.remove(index);
-            models.insert(0, model);
-        }
-        if let Some(index) = models.iter().position(|m| m.id == default) {
-            let model = models.remove(index);
-            models.insert(0, model);
+    models.retain(|model| {
+        reported.contains(model.id.strip_suffix("[1m]").unwrap_or(&model.id))
+            || !too_old_for(&model.id, cli)
+    });
+    // The CLI's default is marked, not moved: rows stay best-first and
+    // clients preselect the marked row. Pickers fold a long-context row into
+    // its listed base, so a `[1m]` default marks that base.
+    let default = default.map(|id| match id.strip_suffix("[1m]") {
+        Some(base) if models.iter().any(|m| m.id == base) => base.to_owned(),
+        _ => id,
+    });
+    if let Some(default) = default
+        && models.iter().any(|m| m.id == default)
+    {
+        for model in &mut models {
+            model.default = model.id == default;
         }
     }
+    sort_best_first(&mut models);
     Ok(models)
 }
 
@@ -325,28 +468,39 @@ fn snapshot_base(id: &str) -> Option<&str> {
     (date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit())).then_some(base)
 }
 
+/// Written best-first (`sort_best_first` keeps it so). Options follow what
+/// the CLI's initialize reports per model (`supportsFastMode`,
+/// `supportsThinkingOff`); it reports no 1M flag, so only the rows that
+/// already carried the context-window select keep it.
 pub fn static_models() -> Vec<Model> {
-    vec![
+    let mut models = vec![
+        model(
+            "claude-fable-5-2",
+            "Fable 5.2",
+            "For your toughest challenges",
+            FULL_LADDER,
+            vec![toggle("fastMode", "Fast Mode")],
+        ),
         model(
             "claude-fable-5-1",
             "Fable 5.1",
-            "Most intelligent model for building agents",
+            "Previous generation Fable",
             FULL_LADDER,
-            vec![context_window()],
+            vec![native_1m_context_window()],
         ),
         model(
             "claude-fable-5",
             "Fable 5",
-            "Previous generation Fable",
+            "Older generation Fable",
             FULL_LADDER,
-            vec![context_window()],
+            vec![native_1m_context_window()],
         ),
         model(
             "claude-opus-5-5",
             "Opus 5.5",
             "Best for everyday, complex tasks",
             FULL_LADDER,
-            vec![context_window(), toggle("fastMode", "Fast Mode")],
+            vec![native_1m_context_window(), toggle("fastMode", "Fast Mode")],
         ),
         model(
             "claude-opus-4-8",
@@ -363,25 +517,388 @@ pub fn static_models() -> Vec<Model> {
             vec![toggle("fastMode", "Fast Mode")],
         ),
         model(
+            "claude-sonnet-5-5",
+            "Sonnet 5.5",
+            "Most efficient for simpler tasks",
+            XHIGH_LADDER,
+            vec![],
+        ),
+        model(
             "claude-sonnet-5",
             "Sonnet 5",
-            "Balanced speed and intelligence",
+            "Previous generation Sonnet",
             XHIGH_LADDER,
-            vec![context_window()],
+            vec![native_1m_context_window()],
+        ),
+        model(
+            "claude-haiku-5-5",
+            "Haiku 5.5",
+            "Fastest for quick answers",
+            XHIGH_LADDER,
+            vec![],
         ),
         model(
             "claude-haiku-4-5",
             "Haiku 4.5",
-            "Fastest model for everyday tasks",
+            "Previous generation Haiku",
             &[],
             vec![toggle("thinking", "Thinking")],
         ),
-    ]
+    ];
+    // The CLI's default as of 2.1.322, for when discovery is unavailable;
+    // a live catalog marks the CLI's own default instead.
+    for model in &mut models {
+        model.default = model.id == "claude-opus-5-5";
+    }
+    models
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovered_names_complete_configured_models_without_replacing_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({"model":"gateway/sol", "env": {
+                "ANTHROPIC_DEFAULT_FABLE_MODEL":"gateway/astra",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL":"gateway/sol",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL":"gateway/terra",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL":"gateway/luna"
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        let configured = models_with_settings(&path);
+        let response = serde_json::json!({"response":{"models":[
+            {"value":"default", "resolvedModel":"gateway/sol", "displayName":"Default (recommended)", "supportedEffortLevels":["low"]},
+            {"value":"gateway/sol", "displayName":"  GPT Sol  "},
+            {"value":"gateway/sol", "displayName":"Another Sol label"},
+            {"value":"gateway/terra", "displayName":"GPT Terra"},
+            {"value":"gateway/luna", "displayName":"GPT Luna"},
+            {"value":"gateway/astra", "displayName":"GPT Astra"},
+            {"value":"gateway/new", "displayName":"New gateway model"},
+            {"value":"claude-opus-5-5", "displayName":"Opus", "supportedEffortLevels":["low"]}
+        ]}});
+        let models = with_discovered_models(configured.clone(), &response).unwrap();
+        for (id, label) in [
+            ("gateway/sol", "GPT Sol"),
+            ("gateway/terra", "GPT Terra"),
+            ("gateway/luna", "GPT Luna"),
+            ("gateway/astra", "GPT Astra"),
+        ] {
+            let mut expected = configured.iter().find(|m| m.id == id).unwrap().clone();
+            expected.label = label.into();
+            expected.default = id == "gateway/sol";
+            assert_eq!(models.iter().find(|m| m.id == id), Some(&expected));
+            assert_eq!(models.iter().filter(|m| m.id == id).count(), 1);
+        }
+        let defaults: Vec<_> = models
+            .iter()
+            .filter(|m| m.default)
+            .map(|m| &*m.id)
+            .collect();
+        assert_eq!(defaults, ["gateway/sol"]);
+        assert_eq!(
+            models.iter().find(|m| m.id == "gateway/new").unwrap().label,
+            "New gateway model"
+        );
+        for mut curated in static_models() {
+            curated.default = false;
+            assert_eq!(models.iter().find(|m| m.id == curated.id), Some(&curated));
+        }
+    }
+
+    #[test]
+    fn concrete_names_take_priority_over_alias_names_in_either_order() {
+        let alias = serde_json::json!({
+            "value":"default", "resolvedModel":"gateway/sol",
+            "displayName":"Default (recommended)"
+        });
+        let concrete = serde_json::json!({
+            "value":"gateway/sol", "resolvedModel":"gateway/sol",
+            "displayName":"GPT Sol"
+        });
+        for entries in [
+            vec![alias.clone(), concrete.clone()],
+            vec![concrete, alias.clone()],
+        ] {
+            let response = serde_json::json!({"response":{"models":entries}});
+            for configured in [
+                vec![],
+                vec![model("gateway/sol", "gateway/sol", "", FULL_LADDER, vec![])],
+            ] {
+                let models = with_discovered_models(configured, &response).unwrap();
+                assert_eq!(models.len(), 1);
+                assert_eq!(models[0].id, "gateway/sol");
+                assert_eq!(models[0].label, "GPT Sol");
+            }
+        }
+        // An alias still provides a fallback name when no concrete name exists.
+        let response = serde_json::json!({"response":{"models":[
+            alias,
+            {"value":"gateway/sol", "displayName":"  "}
+        ]}});
+        let models = with_discovered_models(vec![], &response).unwrap();
+        assert_eq!(models[0].label, "Default (recommended)");
+    }
+
+    #[test]
+    fn missing_discovered_names_preserve_the_configured_id_label() {
+        let configured = vec![model(
+            "gateway/model",
+            "gateway/model",
+            "",
+            FULL_LADDER,
+            vec![],
+        )];
+        for entry in [
+            serde_json::json!({"value":"gateway/model"}),
+            serde_json::json!({"value":"gateway/model", "displayName":"  "}),
+            serde_json::json!({"value":"gateway/model", "displayName":null}),
+        ] {
+            let response = serde_json::json!({"response":{"models":[entry]}});
+            assert_eq!(
+                with_discovered_models(configured.clone(), &response).unwrap(),
+                configured
+            );
+        }
+    }
+
+    /// The models of a real `initialize` answer (CLI 2.1.322, Nov 2026).
+    fn initialize_2_1_322() -> serde_json::Value {
+        serde_json::from_str(include_str!("testdata/initialize-models-2.1.322.json")).unwrap()
+    }
+
+    fn ids(models: &[Model]) -> Vec<&str> {
+        models.iter().map(|m| &*m.id).collect()
+    }
+
+    #[test]
+    fn a_real_catalog_lists_best_first_and_marks_the_cli_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"model":"sonnet"}"#).unwrap();
+        let models =
+            with_discovered_models(models_with_settings(&path), &initialize_2_1_322()).unwrap();
+        assert_eq!(
+            ids(&models),
+            [
+                "claude-fable-5-2",
+                "claude-fable-5-1",
+                "claude-fable-5",
+                "claude-opus-5-5",
+                "claude-opus-5",
+                "claude-opus-4-8",
+                "claude-opus-4-7",
+                "claude-opus-4-6",
+                "claude-sonnet-5-5",
+                "claude-sonnet-5",
+                "claude-sonnet-4-6",
+                "claude-haiku-5-5",
+                "claude-haiku-4-5",
+            ]
+        );
+        let defaults: Vec<_> = models
+            .iter()
+            .filter(|m| m.default)
+            .map(|m| &*m.id)
+            .collect();
+        assert_eq!(defaults, ["claude-opus-5-5"]);
+        // Curated rows keep their curated metadata.
+        let fable = &models[0];
+        assert_eq!(fable.label, "Fable 5.2");
+        assert_eq!(fable.reasoning_levels, FULL_LADDER);
+        assert_eq!(ids_of_options(fable), ["fastMode"]);
+        assert_eq!(
+            models[1].description.as_deref(),
+            Some("Previous generation Fable")
+        );
+    }
+
+    fn ids_of_options(model: &Model) -> Vec<&str> {
+        model.options.iter().map(|o| &*o.id).collect()
+    }
+
+    #[test]
+    fn the_curated_list_is_already_best_first_with_one_default() {
+        let models = static_models();
+        let mut sorted = models.clone();
+        sort_best_first(&mut sorted);
+        assert_eq!(sorted, models);
+        assert_eq!(models.iter().filter(|m| m.default).count(), 1);
+    }
+
+    #[test]
+    fn order_is_by_family_then_newest_version_with_others_after() {
+        let mut models: Vec<_> = [
+            "gateway/sol",
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-5",
+            "claude-opus-5-5[1m]",
+            "claude-fable-5-2",
+            "claude-opus-5-5",
+            "claude-3-5-sonnet-20241022",
+            "claude-fable-5-3",
+            "claude-opus-10",
+            "claude-fable-5",
+            "custom-model",
+            "claude-sonnet-5-5",
+        ]
+        .into_iter()
+        .map(|id| model(id, id, "", &[], vec![]))
+        .collect();
+        sort_best_first(&mut models);
+        assert_eq!(
+            ids(&models),
+            [
+                // A future release sorts first with no curated row.
+                "claude-fable-5-3",
+                "claude-fable-5-2",
+                "claude-fable-5",
+                "claude-opus-10",
+                // A long-context row stays beside its base, in list order.
+                "claude-opus-5-5[1m]",
+                "claude-opus-5-5",
+                "claude-sonnet-5-5",
+                "claude-sonnet-5",
+                "claude-3-5-sonnet-20241022",
+                "claude-haiku-4-5-20251001",
+                // Unknown families keep their relative order, last.
+                "gateway/sol",
+                "custom-model",
+            ]
+        );
+    }
+
+    #[test]
+    fn settings_aliases_are_no_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        for alias in [
+            "sonnet", "opus", "haiku", "fable", "default", "opus[1m]", " sonnet ",
+        ] {
+            std::fs::write(
+                &path,
+                serde_json::json!({"model": alias, "env": {"ANTHROPIC_MODEL": alias}}).to_string(),
+            )
+            .unwrap();
+            assert_eq!(models_with_settings(&path), static_models(), "{alias}");
+        }
+        // A concrete id from settings is a row, in its best-first place.
+        std::fs::write(&path, r#"{"model":"claude-opus-4-1"}"#).unwrap();
+        let models = models_with_settings(&path);
+        let at = |id: &str| models.iter().position(|m| m.id == id).unwrap();
+        assert!(at("claude-opus-4-7") < at("claude-opus-4-1"));
+        assert!(at("claude-opus-4-1") < at("claude-sonnet-5-5"));
+    }
+
+    #[test]
+    fn a_long_context_default_marks_its_listed_base() {
+        let response = serde_json::json!({"response":{"models":[
+            {"value":"default", "resolvedModel":"claude-opus-5-5[1m]", "displayName":"Default"},
+            {"value":"claude-fable-5-2", "displayName":"Fable 5.2"},
+        ]}});
+        let models = with_discovered_models(static_models(), &response).unwrap();
+        assert_eq!(models[0].id, "claude-fable-5-2");
+        let defaults: Vec<_> = models
+            .iter()
+            .filter(|m| m.default)
+            .map(|m| &*m.id)
+            .collect();
+        assert_eq!(defaults, ["claude-opus-5-5"]);
+        let at = |id: &str| models.iter().position(|m| m.id == id).unwrap();
+        assert_eq!(at("claude-opus-5-5") + 1, at("claude-opus-5-5[1m]"));
+        // With no base listed, the long-context row itself is the default.
+        let models = with_discovered_models(vec![], &response).unwrap();
+        let defaults: Vec<_> = models
+            .iter()
+            .filter(|m| m.default)
+            .map(|m| &*m.id)
+            .collect();
+        assert_eq!(defaults, ["claude-opus-5-5[1m]"]);
+    }
+
+    #[test]
+    fn curated_rows_an_old_cli_is_too_old_for_are_dropped() {
+        let response = serde_json::json!({"response":{"models":[
+            {"value":"default", "resolvedModel":"claude-opus-4-8", "displayName":"Default"},
+            {"value":"claude-opus-4-8", "displayName":"Opus 4.8"},
+        ]}});
+        let live = |cli| with_discovered_models_for(static_models(), &response, cli).unwrap();
+        // 2.1.200: older than Opus 5 (2.1.219) and everything after it.
+        let old = live(Some("2.1.200"));
+        assert_eq!(
+            ids(&old),
+            [
+                "claude-fable-5",
+                "claude-opus-4-8",
+                "claude-opus-4-7",
+                "claude-sonnet-5",
+                "claude-haiku-4-5"
+            ]
+        );
+        let defaults: Vec<_> = old.iter().filter(|m| m.default).map(|m| &*m.id).collect();
+        assert_eq!(defaults, ["claude-opus-4-8"]);
+        // Each model at exactly its minimum stays, one patch below goes.
+        for (id, min) in MIN_CLI {
+            let min = semver::Version::parse(min).unwrap();
+            let below = semver::Version::new(min.major, min.minor, min.patch - 1).to_string();
+            assert!(!too_old_for(id, Some(&min.to_string())), "{id}");
+            assert!(too_old_for(id, Some(&below)), "{id}");
+        }
+        // The fallback drops them the same way.
+        let fallback = fallback_models(Some("2.1.285"));
+        for id in ["claude-fable-5-2", "claude-haiku-5-5"] {
+            assert!(fallback.iter().all(|m| m.id != id), "{id}");
+        }
+        for id in ["claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1"] {
+            assert!(fallback.iter().any(|m| m.id == id), "{id}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_cli_version_keeps_every_curated_row() {
+        let response = serde_json::json!({"response":{"models":[
+            {"value":"claude-opus-4-8", "displayName":"Opus 4.8"},
+        ]}});
+        for cli in [None, Some(""), Some("not a version")] {
+            let models = with_discovered_models_for(static_models(), &response, cli).unwrap();
+            assert_eq!(ids(&models), ids(&static_models()), "{cli:?}");
+            assert_eq!(
+                ids(&fallback_models(cli)),
+                ids(&configured_models()),
+                "{cli:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_model_the_cli_reports_stays_whatever_its_version() {
+        // A CLI below Fable 5.2's 2.1.290 that lists it anyway (a gateway, a
+        // backport): its curated row stays, and so does a long-context or
+        // dated spelling of a reported model.
+        let response = serde_json::json!({"response":{"models":[
+            {"value":"fable", "resolvedModel":"claude-fable-5-2", "displayName":"Fable 5.2"},
+            {"value":"claude-haiku-5-5-20261001", "displayName":"Haiku 5.5"},
+            {"value":"default", "resolvedModel":"claude-opus-5-5[1m]", "displayName":"Default"},
+        ]}});
+        let models =
+            with_discovered_models_for(static_models(), &response, Some("2.1.250")).unwrap();
+        let fable = models.iter().find(|m| m.id == "claude-fable-5-2").unwrap();
+        assert_eq!(fable, &static_models()[0]);
+        for id in ["claude-haiku-5-5", "claude-opus-5-5", "claude-opus-5-5[1m]"] {
+            assert!(models.iter().any(|m| m.id == id), "{id}");
+        }
+        // Not reported and too old: gone. Not reported but old enough: kept.
+        for id in ["claude-fable-5-1", "claude-sonnet-5-5"] {
+            assert!(models.iter().all(|m| m.id != id), "{id}");
+        }
+        assert!(models.iter().any(|m| m.id == "claude-opus-4-8"));
+    }
 
     #[test]
     fn effort_maps_special_modes() {

@@ -22,6 +22,11 @@ pub struct ClientConfig {
     pub platform: String,
     /// App version string (diagnostics only).
     pub app_version: String,
+    /// Run the relay layer (docs/design/relay-mobile.md): say so to the rooms, and
+    /// take relayed chats. Off, every byte on the wire is what a shipped phone sends,
+    /// and this device holds its account's chats on stored rows. The room's answer
+    /// decides the rest, so a release can turn this on before any edge flag is.
+    pub relay_layer: bool,
 }
 
 impl ClientConfig {
@@ -33,6 +38,7 @@ impl ClientConfig {
             device_name: "iPhone".into(),
             platform: "ios".into(),
             app_version: env!("CARGO_PKG_VERSION").into(),
+            relay_layer: false,
         }
     }
 

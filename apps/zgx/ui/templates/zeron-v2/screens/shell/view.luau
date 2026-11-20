@@ -78,6 +78,11 @@ function M.toggle_expanded()
 	end
 	M.expanded_panels:set_key(id, if M.expanded:peek() then nil else true)
 end
+-- The sidebar's width as it shows, each frame as it folds or comes back
+-- (its column, the window's gap before its card included).
+M.sidebar_shown = ui.state("shell_sidebar_shown", 0)
+-- Counts the sidebar's edge double-clicked (its width put back).
+M.seam_reset = ui.state("shell_seam_reset", 0)
 -- The command palette (⌘K), open.
 M.palette = ui.state("shell_palette_open", false)
 -- New project's palette, open (screens/shell/add_project).

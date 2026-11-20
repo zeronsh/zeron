@@ -108,6 +108,44 @@ test("a pick goes with the message, and the session takes it then", function()
 	expect(app:state("chat.composer.picks").s2).to_be(nil)
 end)
 
+test("picking another provider while running sends it on the queued message and keeps the pick", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	app:command("catalog_grows")
+	settle(app)
+	open(app, "s2")
+	local before = running_with(app)
+	app:command("start_reply")
+	settle(app)
+	app:set_state("chat_model", "gpt")
+	settle(app)
+	app:type('role:textbox "Message"', "Switch on next turn")
+	app:key("Enter")
+	settle(app)
+	local calls = app:state("calls")
+	expect(calls).to_contain("send:s2:Switch on next turn")
+	expect(calls).to_contain("took:s2:codex|gpt|")
+	-- The running session stays on its live provider until the queued message dispatches,
+	-- while the picker keeps showing GPT so the user sees what they picked.
+	expect(running_with(app)).to_be(before)
+	expect(app:state("chat_model")).to_be("gpt")
+	expect(app:state("chat.composer.picks").s2.model).to_be("gpt")
+end)
+
+test("a queued message that switches provider offers Send now instead of Steer", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	open(app, "s1")
+	app:command("queue_switch")
+	settle(app)
+	app:click('role:button "Open Queued"')
+	settle(app)
+	app:hover('role:listitem "1. Switch to GPT"')
+	settle(app)
+	expect(app:has('role:button "Send now"')).to_be(true)
+	expect(app:has('role:button "Steer"')).to_be(false)
+end)
+
 test("an unsent pick stays with its chat; picking the session's own again leaves none", function()
 	local app = mount("chat_fixture.luau")
 	app:resize(900, 700)
@@ -655,6 +693,23 @@ test("the model picker opens from a shortcut", function()
 	expect(listed()).to_be(true)
 end)
 
+-- A composer that replaced another still takes the shortcut: a page that
+-- swaps its composer mounts the new one before the old one's cleanup runs,
+-- and a flag that cleanup cleared left ⌘/ doing nothing under the new one
+-- (seen on Windows, on the new chat page). screens/chat/shared counts the
+-- composers mounted instead; a template's composer from before the count
+-- (true or false) still reads as one or none.
+test("the model picker opens from a shortcut after the composer is swapped", function()
+	local app = mount("composer_count_fixture.luau")
+	app:command("overlap")
+	app:frames(2)
+	expect(app:state("calls")).to_be("none:false,swapped:true,gone:false,floor:0")
+	app:command("legacy")
+	app:frames(2)
+	expect(app:state("calls")).to_contain("true:true,counted:true,false:false")
+	expect(app:error()).to_be(nil)
+end)
+
 -- An agent's completion settings (Settings → Providers): "Use $ for skills"
 -- off makes `$` ordinary text; "Separate / commands" off lists the skills
 -- under `/` with the commands (Zeron's composer.rs `completion_trigger`).
@@ -770,7 +825,8 @@ test("a chat mentioned (a session dropped from the sidebar) goes as production's
 	settle(app)
 	app:wait("#never-shown", { timeout_ms = 100 })
 	local calls = app:state("calls")
-	expect(calls).to_contain("send:s2:Compare with [")
+	-- (In its block after the words, as an attachment: carried.luau.)
+	expect(calls).to_contain("send:s2:Compare with\n\nChats attached:\n- [")
 	expect(calls).to_contain("](zeron-chat:s1)")
 	-- (Once, though mentioned twice.)
 	local _, n = string.gsub(calls, "zeron%-chat:s1", "")

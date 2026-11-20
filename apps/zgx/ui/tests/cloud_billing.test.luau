@@ -119,7 +119,7 @@ test("Billing shows the credits, the plans and a pack", function()
 	local app = open("Billing")
 	expect(app:state("shell_route_path")).to_be("/settings/billing")
 	expect(shows(app, PAGE, "44,099")).to_be(true)
-	expect(shows(app, PAGE, "about 735 hours")).to_be(true)
+	expect(shows(app, PAGE, "about 735 small-machine hours")).to_be(true)
 	expect(shows(app, PAGE, "Of 45,000")).to_be(true)
 	for _, name in { "Base", "Pro", "Max" } do
 		expect(app:has(`{PAGE} >> role:group "{name} plan"`)).to_be(true)

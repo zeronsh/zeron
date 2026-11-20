@@ -6,6 +6,20 @@ use zgx::input::{InputEvent, Modifiers, PointerButton};
 use zgx::scene::NodeId;
 use zgx_script::{ScriptHost, testing::TestApp};
 
+#[test]
+fn panel_tabs_attach_context_to_composers() {
+    let ui = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui");
+    for (filter, count) in [("panel context:", 4), ("a tab dragged over another", 1)] {
+        let report = zgx_script::test_runner::run(&ui, Some(filter), |outcome| {
+            if let Some(failure) = &outcome.failure {
+                eprintln!("{}: {failure}", outcome.name);
+            }
+        }).expect("panel context tests load");
+        assert_eq!(report.outcomes.len(), count);
+        assert_eq!(report.failed(), 0, "{report:?}");
+    }
+}
+
 pub(crate) fn mount() -> TestApp {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/shell_fixture.luau");
     let app = TestApp::new(|runtime| ScriptHost::new(runtime, path));

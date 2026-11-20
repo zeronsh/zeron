@@ -348,7 +348,7 @@ function M.Lanes(props: LanesProps): Node
 		if level == "project" then
 			local p = l.project
 			if p then
-				return { key = `{prefix}project:{p.id}`, name = p.name, kind = "project", hue = p.hue or "gray", src = p.src, emoji = p.emoji }
+				return { key = `{prefix}project:{p.id}`, name = p.name, kind = "project", hue = p.hue or "gray", src = p.src, emoji = p.emoji, project = p.id }
 			end
 			return { key = `{prefix}project:none`, name = locale.s("shell.sidebar.chats"), kind = "project", hue = "gray" }
 		end
@@ -643,6 +643,9 @@ function M.Lanes(props: LanesProps): Node
 	local shown = ui.use_state(height:peek())
 	local target = shown:peek()
 	local going: any = nil
+	-- (By number: a callback holding its own clip would keep both for good, what
+	-- Rust keeps of a clip being out of the collector's sight.)
+	local slide = 0
 	ui.effect(function()
 		local to = height:get()
 		if to == target then
@@ -654,13 +657,14 @@ function M.Lanes(props: LanesProps): Node
 		if going then
 			going:cancel()
 		end
-		local this: any = nil
-		this = anime.animate(shown, motion.params({
+		slide += 1
+		local this = slide
+		going = anime.animate(shown, motion.params({
 			value = to,
 			duration = SLIDE.duration,
 			ease = SLIDE.ease,
 			onComplete = function()
-				if going == this then
+				if slide == this then
 					going = nil
 				end
 				if away then
@@ -669,7 +673,6 @@ function M.Lanes(props: LanesProps): Node
 				end
 			end,
 		}))
-		going = this
 	end)
 	local function list_h(): number
 		return math.floor(math.min(shown:get(), drawn_h:get()) + 0.5)
@@ -795,7 +798,7 @@ function M.Lanes(props: LanesProps): Node
 								string.upper(string.sub(g.name, 1, 1)),
 								text_size = "$font.size.xs",
 								weight = "$font.weight.semibold",
-							}, badge, g.hue or "gray", g.src, g.emoji)
+							}, badge, g.hue or "gray", g.src, g.emoji, g.project)
 						end
 						return SessionRow.tile(Icon { name = if g.here then "laptop" else "remote-server", size = 12 }, badge)
 					end,
@@ -853,7 +856,7 @@ function M.Lanes(props: LanesProps): Node
 					if not p then
 						return ui.div {}
 					end
-					return Tile { label = p.name, hue = p.hue, src = p.src, emoji = p.emoji, size = 16 }
+					return Tile { label = p.name, hue = p.hue, src = p.src, emoji = p.emoji, size = 16, project = p.id }
 				end),
 				-- (Where its group isn't its project, and the view shows project
 				-- icons: as the sidebar's rows.)

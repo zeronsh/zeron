@@ -8,6 +8,8 @@
 -- "name:detail" each). `ui.command`s change the data as the edge would on
 -- its own, or make the next change fail:
 --   settings_stub.sign_in          signed in as Ada, in org_1 (else signed out)
+--   settings_stub.restoring        the engine hasn't answered yet
+--   settings_stub.signed_out       the engine says signed out
 --   settings_stub.open_account     a way in to `settings/account` (a link)
 --   settings_stub.member_joins     someone accepts an invitation
 --   settings_stub.refuse_next      the next change is refused ("refused")
@@ -122,6 +124,7 @@ local engine: { [string]: any } = {
 	},
 	GetTitleSettings = {},
 	GetNativeSubagents = { switchable = { "claude-code" }, off = {} },
+	GetBackgroundSettings = { keepRunningAfterQuit = true },
 }
 local banners = { desktop = true, background_only = true, agent_updates = true }
 
@@ -137,6 +140,9 @@ end
 local answers: { [string]: (arg: any) -> any } = {
 	["account.me"] = function()
 		return settled(table.clone(me))
+	end,
+	["dictation.call"] = function(arg: any)
+		return settled(if arg.op == "status" then { installed = false, size = 670479942 } elseif arg.op == "inputs" then {} else nil)
 	end,
 	["account.rename"] = function(name: string)
 		local r = change(nil)
@@ -290,7 +296,7 @@ local answers: { [string]: (arg: any) -> any } = {
 				local w = table.clone(engine[get])
 				w.settings = arg.params
 				engine[get] = w
-			elseif m == "SetTitleSettings" then
+			elseif m == "SetTitleSettings" or m == "SetBackgroundSettings" then
 				engine[get] = arg.params
 			end
 			return settled(engine[get])
@@ -427,6 +433,41 @@ end
 -- a switch of device shows whose.
 local agents = require("@account/agents")
 local function agents_of(target: string?): any
+	-- Cloud (the engine answers for it from the vault): Claude Code and
+	-- Codex, always installed; Codex with an account, so on. Muse Code
+	-- signs in there as on a computer. Its keys, a row per vendor, as the
+	-- engine lists them.
+	if target == "cloud" then
+		-- As the engine lists Cloud's cards: every agent's accounts by the
+		-- group they fill, each group with its sign-in and its API key.
+		local function one(id: string, name: string, mark: string, group: any, accounts: { any }): any
+			group.accounts = accounts
+			return {
+				id = id,
+				name = name,
+				mark = mark,
+				installed = true,
+				can_install = false,
+				can_add = true,
+				enabled = #accounts > 0,
+				version = nil,
+				installing = false,
+				login = "idle",
+				accounts = accounts,
+				groups = { group },
+			}
+		end
+		local codex = { { id = "c1", email = "ada@example.com", plan = "Pro", session = 0.1, week = 0.2, active = true } }
+		return {
+			state = "ready",
+			target = target,
+			list = {
+				one("claude-code", "Claude Code", "claude", { id = "anthropic", name = "Anthropic", login = "Claude Code", key = "Anthropic" }, {}),
+				one("codex", "Codex", "openai", { id = "openai", name = "OpenAI", login = "Codex", key = "OpenAI" }, codex),
+				one("muse", "Muse Code", "muse", { id = "meta", name = "Meta", login = "Muse Code", key = "Meta" }, {}),
+			},
+		}
+	end
 	local name = if target then "Codex" else "Claude Code"
 	local id = if target then "codex" else "claude-code"
 	return {
@@ -475,6 +516,20 @@ local function set_login(id: string, login: string, account: any?)
 	now.list = list
 	agents.now:set(now)
 end
+-- A key added on a card: kept (Cloud's vault, or this Mac's agent).
+agent_stub.add_key = function(id: string, provider: string, _key: string, _name: string?): any
+	log(`agents.add_key:{id}:{provider}`)
+	local p = {}
+	function p.after(_self: any, ok: ((any) -> ())?, _bad: ((any) -> ())?)
+		if ok then
+			ok(nil)
+		end
+	end
+	return p
+end
+agent_stub.sign_in_to = function(id: string, provider: string)
+	log(`agents.sign_in_to:{id}:{provider}`)
+end
 agent_stub.sign_in = function(id: string)
 	log(`agents.sign_in:{id}`)
 	set_login(id, "code")
@@ -503,6 +558,22 @@ auths.sign_out = function(done: (() -> ())?)
 		done()
 	end
 end
+
+-- The launch before the engine has answered, and the engine saying signed out.
+ui.command {
+	id = "settings_stub.restoring",
+	title = "The engine hasn't answered yet",
+	run = function()
+		auth.account:set({ state = "restoring", env = "staging" } :: any)
+	end,
+}
+ui.command {
+	id = "settings_stub.signed_out",
+	title = "The engine says signed out",
+	run = function()
+		auth.account:set({ state = "signed_out", env = "staging" } :: any)
+	end,
+}
 
 ui.command {
 	id = "settings_stub.member_joins",
@@ -562,6 +633,22 @@ ui.command {
 			mono = t["font.mono"],
 			secondary = t["text.secondary"],
 			tertiary = t["text.tertiary"],
+			-- (The page's and sidebar's fill and edge, when the window's
+			-- theme says its own.)
+			page_bg = t["zeron.inset.bg"],
+			page_edge = t["zeron.inset.edge"],
+			-- "Accent colour throughout": a status dot, a find's highlight,
+			-- an @file token, a list marker, and a link's ink (nil: the
+			-- text's own).
+			working_dot = t["zeron.status.dot.working"],
+			working = t["zeron.status.working"],
+			find = t["zeron.editor.match"],
+			file_token = t["zeron.composer.token.file"],
+			marker = t["zeron.prose.marker"],
+			link = require("@ds/look").accented_ink(nil)(),
+			-- What the accent's own token is, and what the theme's says.
+			accented_ink = ui.theme.get("zeron.accented.ink"),
+			accent_ink = ui.theme.get("accent"),
 		})
 	end,
 }

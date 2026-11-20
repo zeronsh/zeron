@@ -180,6 +180,8 @@ private fun MainNav(model: AppModel) {
     }
     // A debug `companion` extra opens over the launch route's chat, once.
     var companionPending by rememberSaveable { mutableStateOf(model.launch.companion) }
+    // And a rig's `send-on-open` is sent there, once.
+    var sendPending by rememberSaveable { mutableStateOf(model.launch.sendOnOpen) }
 
     /** A session page with its companions wired to the nav stack (phone) or the inspector (large screens). */
     @Composable
@@ -200,6 +202,7 @@ private fun MainNav(model: AppModel) {
                 if (beside) shell.push(id, InspectorPage.Subagent(parent, doc, title, running)) else nav.navigate(Routes.subagent(parent, doc, title, running))
             },
             openCompanion = companionPending?.takeIf { id == launchChat }?.also { companionPending = null },
+            sendOnOpen = sendPending?.takeIf { id == launchChat }?.also { sendPending = null },
             onOpenAccounts = { target, signIn -> nav.navigate(Routes.accounts(target.encode(), signIn)) },
             onOpenBilling = { if (wide) shell.settings = Routes.BILLING else nav.navigate(Routes.BILLING) },
             onShowCompanions = if (beside) ({ section -> shell.toggleCompanions(id, section) }) else null,

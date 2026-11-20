@@ -19,8 +19,13 @@ uuid.workspace = true
 chrono.workspace = true
 async-trait.workspace = true
 futures.workspace = true
+bytes = "1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 
 [dev-dependencies]
 zeron-theme.workspace = true
 zeron-visual.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

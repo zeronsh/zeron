@@ -33,7 +33,7 @@ pub use device_room::{
     NudgeHandler, PeerLiveness, PeerLivenessProbe, StaticToken, TokenError, TokenSource,
     decode_device_frame, device_room_ws_url, encode_device_frame, is_liveness_probe,
 };
-pub use server::{serve_connection, serve_ws_listener, serve_ws_listener_scoped};
+pub use server::{agent_service, serve_connection, serve_ws_listener, serve_ws_listener_scoped};
 
 /// RPC method names — single source of truth for both ends.
 /// Full surface: docs/research/feature-inventory.md §2.
@@ -90,6 +90,12 @@ pub mod methods {
     pub const LIST_SKILLS: &str = "ListSkills";
     pub const LIST_COMMANDS: &str = "ListCommands";
     pub const QUEUE_COMMAND: &str = "QueueCommand";
+    /// `WarmStart {chatId, request, typed}` → `{outcome}`: start (or renew) a
+    /// new chat's agent before its first message, for the id the chat will
+    /// be created with (engine `warm_start`).
+    pub const WARM_START: &str = "WarmStart";
+    /// `WarmStop {chatId}`: stop that warm start.
+    pub const WARM_STOP: &str = "WarmStop";
     pub const TAKE_PROJECT_ACTION_SETUP: &str = "TakeProjectActionSetup";
     /// Peer-to-peer delivery fallback: the SENDER's engine forwards a queued
     /// command entry (client-minted id and all) straight over the device-room
@@ -150,6 +156,18 @@ pub mod methods {
     /// list): current set first, then a fresh snapshot per landed chunk —
     /// the sending thumbnail's percent-ring feed. No params; IPC-only.
     pub const WATCH_TRANSFERS: &str = "WatchTransfers";
+    /// Sends waiting for their attachment bytes to reach the edge's store
+    /// (`zeron_proto::HeldSendStatus` list): current set first, then every
+    /// change. No params; IPC-only.
+    pub const WATCH_HELD_SENDS: &str = "WatchHeldSends";
+    /// One chat's messages not yet taken by its agent
+    /// (`zeron_proto::WaitingMessage` list), `{chatId}`: current set first, then
+    /// every change. IPC-only.
+    pub const WATCH_WAITING_MESSAGES: &str = "WatchWaitingMessages";
+    /// Remove a send from this device's outbox, failed or still uploading:
+    /// `{chatId, id}` (the id `WatchHeldSends` / `WatchWaitingMessages` give)
+    /// → `{removed}`. `false`: it already went out, or was already removed.
+    pub const REMOVE_HELD_SEND: &str = "RemoveHeldSend";
     pub const WATCH_CHATS: &str = "WatchChats";
     pub const WATCH_SIDEBAR_PREFERENCES: &str = "WatchSidebarPreferences";
     pub const WATCH_DEVICES: &str = "WatchDevices";
@@ -158,13 +176,19 @@ pub mod methods {
     pub const WATCH_SPACES: &str = "WatchSpaces";
     /// Entity mutations against the workspace doc (feature-inventory §2 DataRpc).
     /// Params are tagged `{op: createChat|createSpace|renameSpace|setSpaceIcon|
-    /// deleteSpace|renameChat|setChatArchived|deleteChat|renameDevice|markChatSeen, …}`.
+    /// deleteSpace|renameChat|setChatArchived|deleteChat|renameDevice|removeDevice|
+    /// markChatSeen, …}`.
     pub const MUTATE: &str = "Mutate";
     /// This engine's identity → `{deviceId}` (IPC-only; never relay-forwarded —
     /// the answer is about whichever engine you are directly connected to).
     pub const LOCAL_DEVICE: &str = "LocalDevice";
     /// This engine runtime's fixed device and workspace identity.
     pub const ENGINE_INFO: &str = "EngineInfo";
+    /// What a device's machine can say about itself (OS, CPU, memory,
+    /// storage, GPU, load, battery, Zeron's version): `{targetDeviceId?}` →
+    /// `DeviceStats`. Another of the account's devices answers through its
+    /// relay within a few seconds, or the call says it's offline or too old.
+    pub const DEVICE_STATS: &str = "DeviceStats";
     /// Readiness barrier for the engine runtime. The call completes once stores
     /// and journals are assembled, or fails with the assembly error.
     pub const ENGINE_READY: &str = "EngineReady";
@@ -172,6 +196,15 @@ pub mod methods {
     /// Headed IPC owners do not implement this method: closing another app's
     /// engine behind its windows would leave that process unusable.
     pub const STOP_ENGINE: &str = "StopEngine";
+    /// "Keep Zeron running after you quit": `{ keepRunningAfterQuit }`
+    /// (the background engine's; this device's app only).
+    pub const GET_BACKGROUND_SETTINGS: &str = "GetBackgroundSettings";
+    pub const SET_BACKGROUND_SETTINGS: &str = "SetBackgroundSettings";
+    /// A quitting app asks what's still working: `{ keepRunning, working }`.
+    pub const QUIT_CHECK: &str = "QuitCheck";
+    /// The app quits with the setting off: the engine stops once nothing is
+    /// pending; `{ stopWork: true }` stops the chats still working first.
+    pub const APP_QUITTING: &str = "AppQuitting";
     /// Headless IPC only: stop starting work ahead of a Cloud sleep (the
     /// edge runs `zeron quiesce` before stopping the machine). Replies
     /// `{"quiesced":true}` or `{"quiesced":false,"busy":"<why>"}`.
@@ -281,6 +314,24 @@ pub mod methods {
     pub const CLOSE_TERMINAL: &str = "CloseTerminal";
     /// Whether closing a terminal would end a program running in it.
     pub const TERMINAL_STATUS: &str = "TerminalStatus";
+    /// `{command, cwd?, chatId?, timeoutMs?, background?}` → `RunOutcome`:
+    /// one shell command run to its end on the target device (no PTY, no
+    /// session), its output capped and its process group killed at the
+    /// timeout; with `background`, → `CommandStatus` of one left running.
+    /// Relay-forwardable, as are the three below (Zeron MCP's `run_command`,
+    /// `command_output`, `stop_command`, `list_commands`).
+    pub const RUN_COMMAND: &str = "RunCommand";
+    /// `{id}` → `CommandStatus`: a background command's output since it was
+    /// last read, and whether it still runs.
+    pub const READ_COMMAND_OUTPUT: &str = "ReadCommandOutput";
+    /// `{id}` → `CommandStatus`: stop a background command and all it started.
+    pub const STOP_COMMAND: &str = "StopCommand";
+    /// `{chatId?}` → `[CommandStatus]`: the background commands a chat started.
+    pub const LIST_BACKGROUND_COMMANDS: &str = "ListBackgroundCommands";
+    /// `{chatId}` → stream of `[CommandStatus]`: [`LIST_BACKGROUND_COMMANDS`]
+    /// now and each time one starts or ends. The chat's host follows its
+    /// agent's commands on other devices with it (its background band).
+    pub const WATCH_BACKGROUND_COMMANDS: &str = "WatchBackgroundCommands";
     /// Checkout-diff stream for the target device's chats (DataRpc,
     /// relay-forwardable — diffs are produced where the checkout lives).
     pub const WATCH_CHECKOUT_DIFFS: &str = "WatchCheckoutDiffs";
@@ -312,6 +363,18 @@ pub mod methods {
     pub const LIST_AGENT_ACCOUNTS: &str = "ListAgentAccounts";
     pub const ACTIVATE_AGENT_ACCOUNT: &str = "ActivateAgentAccount";
     pub const FORGET_AGENT_ACCOUNT: &str = "ForgetAgentAccount";
+    /// `{harness, provider, key}`: an API key for one model provider of an
+    /// agent that keeps a login per provider (Pi, OpenCode, Hermes), checked
+    /// with the provider and stored as the agent's own CLI stores it. This
+    /// device's own IPC only ([`local_only`]): never forwarded to, or
+    /// accepted from, another device — the key goes nowhere but its agent's
+    /// store and its provider. Answers the snapshot (keys shown by their
+    /// last four characters).
+    pub const ADD_AGENT_API_KEY: &str = "AddAgentApiKey";
+    /// `{harness, accountId, name}`: an API key's name (no secret: it
+    /// travels to the device that holds the key like any account action).
+    /// An empty name restores its default ("OpenRouter ···a1b2").
+    pub const RENAME_AGENT_ACCOUNT: &str = "RenameAgentAccount";
     pub const START_AGENT_LOGIN: &str = "StartAgentLogin";
     /// `{loginId, requesterDeviceId, path}`: replay a sign-in's browser
     /// callback the requesting device caught on its own loopback (a phone
@@ -365,10 +428,25 @@ pub mod methods {
     pub const CLOUD_DELETE: &str = "CloudDelete";
     /// `{}` → `CloudSessions`.
     pub const CLOUD_SESSIONS: &str = "CloudSessions";
-    /// `{chatId}` → `CloudSession`. Wake/sleep one session's sandbox; sending
-    /// to a sleeping session wakes it on its own (the host nudge).
+    /// `{machine}` → `CloudStatus`. The size new sessions start on.
+    pub const CLOUD_SET_MACHINE: &str = "CloudSetMachine";
+    /// `{reach: "devices" | "isolated"}` → `CloudStatus`. The reach new
+    /// sessions start with. The person's alone ([`local_only`]).
+    pub const CLOUD_SET_REACH: &str = "CloudSetReach";
+    /// `{chatId, reach}` → `CloudSession`. Whether that session reaches the
+    /// person's other devices; isolating closes it out of what it reached.
+    /// The person's alone ([`local_only`]).
+    pub const CLOUD_SESSION_SET_REACH: &str = "CloudSessionSetReach";
+    /// `{chatId, machine?, wake?}` → `CloudSession`. Wake one session's sandbox
+    /// (on `machine`, when given; `wake: false` only records the size for its
+    /// next wake); sending to a sleeping session wakes it on its own (the host
+    /// nudge). A size its disk doesn't fit is refused.
     pub const CLOUD_SESSION_WAKE: &str = "CloudSessionWake";
+    /// `{chatId}` → `CloudSession`.
     pub const CLOUD_SESSION_SLEEP: &str = "CloudSessionSleep";
+    /// `{chatId, machine?}` → `CloudSession`. Retry a failed lifecycle; on a
+    /// session whose data expired, a fresh machine on the same repo and branch.
+    pub const CLOUD_SESSION_RETRY: &str = "CloudSessionRetry";
     /// `{chatId}` → `CloudSession` (`Deleting`). Deletes the sandbox and
     /// anything uncommitted in it; the transcript stays.
     pub const CLOUD_SESSION_DELETE: &str = "CloudSessionDelete";
@@ -429,9 +507,16 @@ pub mod methods {
     pub const GITHUB_CONNECT_START: &str = "GithubConnectStart";
     /// `{flowId}` → `GithubConnectProgress`.
     pub const GITHUB_CONNECT_POLL: &str = "GithubConnectPoll";
-    /// Repositories the account's vault-held GitHub connection can see,
+    /// The GitHub logins connected for Cloud: `{}` → `{accounts: VaultAccount[]}`.
+    pub const GITHUB_ACCOUNTS: &str = "GithubAccounts";
+    /// Disconnect one login, leaving the others: `{slot}` → `{accounts}`. Its
+    /// sessions stay on it, and say so, until it's connected again.
+    pub const GITHUB_ACCOUNT_FORGET: &str = "GithubAccountForget";
+    /// The login new sessions try first: `{slot}` → `{accounts}`.
+    pub const GITHUB_ACCOUNT_ACTIVATE: &str = "GithubAccountActivate";
+    /// Repositories the account's vault-held GitHub logins can see, merged,
     /// newest push first: `{query?}` → `{repos: GithubRepo[]}`. Answered via
-    /// the edge (the vault calls GitHub; the token never leaves it), so any
+    /// the edge (the vault calls GitHub; the tokens never leave it), so any
     /// signed-in device can list them; a Cloud session device answers with
     /// its own grant. Fails with a `github_not_connected:`-prefixed message
     /// when GitHub isn't connected.
@@ -454,9 +539,11 @@ pub mod methods {
     pub const DECIDE_PLUGIN: &str = "DecidePlugin";
     /// `{id, hash}` → `{review}`: a one-time capability for one decision
     /// about plugin `id` as shown (`hash`) — `DecidePlugin {allow: true}` or
-    /// `SignPlugin {id}` — good for a few minutes. Minted for the consent
-    /// window's own host only: full-token local IPC, never an agent, never
-    /// another device.
+    /// `SignPlugin {id}` — good for a few minutes, and only to whoever asked
+    /// for it. Minted for a consent window's own host only: this device's
+    /// (full-token local IPC), or another of the account's devices' over the
+    /// verified device link (`targetDeviceId`: its sheet shows this device's
+    /// plugin). Never an agent. A peer's review allows; it never signs.
     pub const REVIEW_PLUGIN: &str = "ReviewPlugin";
     /// `{id, off}` → `PluginItem` (an allowed plugin only).
     pub const SET_PLUGIN_OFF: &str = "SetPluginOff";
@@ -497,6 +584,19 @@ pub mod methods {
     /// with a reason unless the plugin is installed, on and allowed here,
     /// in the same version, by the same author. A peer may call it.
     pub const SERVE_PLUGIN_CALL: &str = "ServePluginCall";
+    /// The app (a plugin's window): `{plugin, op, args?, device?}` →
+    /// `{ok: true, value}` | `{ok: false, reason, message}`. The agents'
+    /// usage, accounts and models as that plugin was allowed them on this
+    /// device, or on `device` (sent there as [`SERVE_PLUGIN_AGENTS`]).
+    /// `op: "listen"` with `listeners: [{key, event, opts}]` says what its
+    /// windows here listen for (`zeron.on`).
+    pub const PLUGIN_AGENTS: &str = "PluginAgents";
+    /// Peer to peer over the device link: `{plugin, version, authorKey?,
+    /// op, args?}` → as `PluginAgents`. Refused unless the caller is a
+    /// device the link verified and the plugin is installed and on here,
+    /// in the same version, by the same author; then what this device
+    /// allowed it decides. A peer may call it.
+    pub const SERVE_PLUGIN_AGENTS: &str = "ServePluginAgents";
     /// `{}` → stream (the app) of `{plugin, from: {id, name}, data, at}`.
     pub const WATCH_PLUGIN_CHANNEL: &str = "WatchPluginChannel";
     /// `{}` → `{key, registered}`.
@@ -595,7 +695,15 @@ pub mod methods {
     /// installed, verified first; it waits for you in the app (`waiting`)
     /// unless it's signed by your own key. Over an installed one only when
     /// the same key signed both (an update).
+    ///
+    /// From another of your devices (`targetDeviceId`), a file there comes
+    /// as `{upload, name?}`: what `StagePluginPackage` took, and its name.
     pub const INSTALL_PLUGIN: &str = "InstallPlugin";
+    /// `{upload?, data}` → `{upload, bytes}`: a piece (base64, at most
+    /// 384 KiB) of a `.zeron-plugin` file on its way to this device from
+    /// another of yours, added to `upload` (none: a new one). Then
+    /// `InstallPlugin {upload}`. Good only to whoever sent it, for minutes.
+    pub const STAGE_PLUGIN_PACKAGE: &str = "StagePluginPackage";
     /// `{id?}` → `{updates: [{id, name, version, added, removed,
     /// refused?}], errors: [{id, name, error}]}`: each installed plugin's
     /// source checked for a new version (listed on its item as `update`).
@@ -604,8 +712,10 @@ pub mod methods {
     /// (checked first when none was found yet). Refused when someone else
     /// signed it or it was changed; new permissions wait for you again.
     pub const UPDATE_PLUGIN: &str = "UpdatePlugin";
-    /// `{id, to?}` → `{path}`: a plugin as a `.zeron-plugin` package (an
-    /// own plugin is re-signed first), into the folder or file `to`.
+    /// `{id, to?}` → `{path, bytes}`: a plugin as a `.zeron-plugin` package
+    /// (an own plugin is re-signed first), into the folder or file `to`
+    /// (absolute), else `<data dir>/plugin-exports`. Only this device's own
+    /// app or CLI names `to`: an agent's export goes to plugin-exports.
     pub const EXPORT_PLUGIN: &str = "ExportPlugin";
     /// `{source, title, body, session?}` → `{outcome: "posted" | "off" |
     /// "held" | "paced" | "unavailable"}`: a banner asked for (a plugin's),
@@ -622,8 +732,14 @@ pub fn local_only(method: &str) -> bool {
         method,
         methods::ACCESS_TOKEN
             | methods::STEP_UP
+            // This device's background engine: whether it outlives its app.
+            | methods::GET_BACKGROUND_SETTINGS
+            | methods::SET_BACKGROUND_SETTINGS
+            | methods::QUIT_CHECK
+            | methods::APP_QUITTING
+            // An API key typed into this device's app: stored here alone.
+            | methods::ADD_AGENT_API_KEY
             | methods::DELETE_ACCOUNT
-            | methods::REVIEW_PLUGIN
             | methods::REVIEW_TEMPLATE
             // Plugins: authoring, tools and the window's channel stay this
             // device's. Your other devices may list, review, allow, turn
@@ -640,6 +756,7 @@ pub fn local_only(method: &str) -> bool {
             | methods::PLUGIN_TOOL_RESULT
             | methods::PLUGIN_SEND
             | methods::CALL_PLUGIN_SERVICE
+            | methods::PLUGIN_AGENTS
             | methods::WATCH_PLUGIN_CHANNEL
             | methods::PLUGIN_SIGNING_KEY
             | methods::LIST_TEMPLATES
@@ -665,22 +782,42 @@ pub fn local_only(method: &str) -> bool {
             | methods::SET_BUILTIN_PLUGINS
             | methods::POST_NOTIFICATION
             | methods::EXPORT_PLUGIN
+            // What a Cloud chat reaches: this device's app sets it, never
+            // another device (a Cloud machine among them) and never an agent.
+            | methods::CLOUD_SET_REACH
+            | methods::CLOUD_SESSION_SET_REACH
     )
 }
 
 /// Methods a peer device may not have answered here even though they're
-/// relay-forwardable: allowing a plugin is this device's person's decision,
-/// made in this device's consent window; and a file path names a file on
-/// the caller's device, never this one. Declining, turning off, removing,
-/// and installing from a link (which lands waiting here) stay open to your
-/// other devices (Settings → Plugins' device switcher).
+/// relay-forwardable: a file path names a file on the caller's device,
+/// never this one (it sends the file itself: `StagePluginPackage`).
+///
+/// Your other devices manage this device's plugins (Settings → Plugins'
+/// device switcher): list, install (from a link or a file sent here),
+/// review, allow, decline, turn off, update and remove. Allowing still
+/// needs a review minted for exactly what that device's consent window
+/// showed, good only to that device (`plugins/reviews.rs`); an agent's
+/// token can't mint one anywhere, and its engine forwards a mint or an
+/// allow only for its own app (engine `rpc.rs`).
 pub fn peer_refused(method: &str, params: &serde_json::Value) -> bool {
     if local_only(method) {
         return true;
     }
     match method {
-        methods::DECIDE_PLUGIN => params.get("allow").is_none_or(|allow| allow != &serde_json::Value::Bool(false)),
         methods::INSTALL_PLUGIN => params.get("path").is_some_and(|path| !path.is_null()),
+        _ => false,
+    }
+}
+
+/// Methods only this device's own app may send on to another device: what
+/// a consent window does (a review, an allow) and sending it a file. Never
+/// an agent's, whose engine refuses to carry them.
+pub fn app_forward_only(method: &str, params: &serde_json::Value) -> bool {
+    match method {
+        methods::REVIEW_PLUGIN | methods::STAGE_PLUGIN_PACKAGE => true,
+        methods::DECIDE_PLUGIN => params.get("allow").is_none_or(|allow| allow != &serde_json::Value::Bool(false)),
+        methods::INSTALL_PLUGIN => params.get("upload").is_some_and(|upload| !upload.is_null()),
         _ => false,
     }
 }
@@ -694,6 +831,9 @@ pub fn peer_refused(method: &str, params: &serde_json::Value) -> bool {
 /// credentials (`AccessToken`, sign-in, `StepUp`, `DeleteAccount`),
 /// terminals, files, vault and agent logins, and a command's whole output
 /// (`ReadToolOutput`: an agent reads a chat as its doc keeps it).
+/// Running a command (`RunCommand`, on any of the person's devices) is
+/// here, and the engine allows it only to an agent whose chat runs with
+/// full access (its agent gate).
 pub fn agent_allowed(method: &str) -> bool {
     matches!(
         method,
@@ -701,6 +841,7 @@ pub fn agent_allowed(method: &str) -> bool {
         methods::ENGINE_INFO
             | methods::LOCAL_DEVICE
             | methods::WATCH_DEVICES
+            | methods::DEVICE_STATS
             | methods::WATCH_SPACES
             | methods::WATCH_CHATS
             | methods::WATCH_SESSIONS
@@ -717,13 +858,22 @@ pub fn agent_allowed(method: &str) -> bool {
             | methods::PUBLISH_IMAGE
             // Saying what the calling chat's agent waits on.
             | methods::AWAIT_BACKGROUND
+            // Commands on any of the person's devices (Zeron MCP's
+            // run_command & co.): full access only (the engine's agent gate).
+            | methods::RUN_COMMAND
+            | methods::READ_COMMAND_OUTPUT
+            | methods::STOP_COMMAND
+            | methods::LIST_BACKGROUND_COMMANDS
             // Plugins: authoring, installing (lands waiting for the person),
-            // checking for updates, and their tools.
+            // checking for updates, exporting (to Zeron's plugin-exports
+            // folder only: the engine refuses an agent's `to`), and their
+            // tools.
             | methods::LIST_PLUGINS
             | methods::PLUGIN_STATUS
             | methods::NEW_PLUGIN
             | methods::INSTALL_PLUGIN
             | methods::CHECK_PLUGIN_UPDATES
+            | methods::EXPORT_PLUGIN
             | methods::LIST_PLUGIN_TOOLS
             | methods::WATCH_PLUGIN_TOOLS
             | methods::CALL_PLUGIN_TOOL
@@ -942,6 +1092,15 @@ mod tests {
     }
 
     #[test]
+    fn what_a_cloud_chat_reaches_is_set_by_this_devices_app_alone() {
+        for method in [methods::CLOUD_SET_REACH, methods::CLOUD_SESSION_SET_REACH] {
+            assert!(local_only(method), "{method}");
+            assert!(peer_refused(method, &serde_json::Value::Null), "{method}");
+            assert!(!agent_allowed(method), "{method}");
+        }
+    }
+
+    #[test]
     fn plugin_methods_are_local_only_but_managing_delivering_and_serving() {
         for method in [
             methods::NEW_PLUGIN,
@@ -979,6 +1138,10 @@ mod tests {
         }
         assert!(!local_only(methods::PLUGIN_DELIVER));
         assert!(!local_only(methods::SERVE_PLUGIN_CALL));
+        assert!(local_only(methods::PLUGIN_AGENTS));
+        assert!(!local_only(methods::SERVE_PLUGIN_AGENTS));
+        // Never an agent's: a plugin's grants are its own.
+        assert!(!agent_allowed(methods::PLUGIN_AGENTS) && !agent_allowed(methods::SERVE_PLUGIN_AGENTS));
         // Your other devices manage this one's plugins (Settings → Plugins).
         for method in [
             methods::LIST_PLUGINS,
@@ -987,6 +1150,8 @@ mod tests {
             methods::SET_PLUGIN_OFF,
             methods::REMOVE_PLUGIN,
             methods::INSTALL_PLUGIN,
+            methods::STAGE_PLUGIN_PACKAGE,
+            methods::REVIEW_PLUGIN,
             methods::CHECK_PLUGIN_UPDATES,
             methods::UPDATE_PLUGIN,
             methods::PLUGIN_STATUS,
@@ -1320,6 +1485,7 @@ mod tests {
         for method in [
             methods::DECIDE_PLUGIN,
             methods::REVIEW_PLUGIN,
+            methods::STAGE_PLUGIN_PACKAGE,
             methods::SIGN_PLUGIN,
             methods::PLUGIN_SIGNING_KEY,
             methods::DECIDE_TEMPLATE,
@@ -1339,7 +1505,6 @@ mod tests {
             methods::OPEN_TERMINAL,
             methods::WRITE_TERMINAL,
             methods::WRITE_WORKSPACE_FILE,
-            methods::EXPORT_PLUGIN,
             // The window's own watch of the theme files.
             methods::WATCH_THEMES,
             methods::READ_TOOL_OUTPUT,
@@ -1351,6 +1516,17 @@ mod tests {
             }
         }
         let asked = agent.call(methods::LIST_PLUGINS, serde_json::json!({})).await.unwrap();
+        assert!(asked.as_str().unwrap().starts_with("Agent"), "{asked}");
+        // Exporting a plugin reaches the engine as the agent's, which keeps
+        // it to Zeron's plugin-exports folder (R29).
+        let asked = agent.call(methods::EXPORT_PLUGIN, serde_json::json!({})).await.unwrap();
+        assert!(asked.as_str().unwrap().starts_with("Agent"), "{asked}");
+        // A command reaches the engine as the agent's, which runs it only
+        // for a chat with full access.
+        let asked = agent
+            .call(methods::RUN_COMMAND, serde_json::json!({}))
+            .await
+            .unwrap();
         assert!(asked.as_str().unwrap().starts_with("Agent"), "{asked}");
         // The theme tools' methods, exactly: data only.
         for method in [methods::LIST_THEMES, methods::GET_THEME, methods::CREATE_THEME, methods::UPDATE_THEME, methods::DELETE_THEME, methods::USE_THEME] {
@@ -1366,17 +1542,42 @@ mod tests {
         }
     }
 
+    /// Your other devices review, allow and install plugins here (the
+    /// review decides who may allow, `plugins/reviews.rs`); a path on their
+    /// disk, signing with this device's key, templates' consent and
+    /// credentials stay this device's.
     #[test]
-    fn peers_may_decline_but_never_allow() {
+    fn peers_may_review_allow_and_install_but_not_sign_or_name_a_path() {
         let hash = "ab".repeat(32);
-        assert!(peer_refused(methods::DECIDE_PLUGIN, &serde_json::json!({"id": "x", "allow": true, "hash": hash})));
-        assert!(peer_refused(methods::DECIDE_PLUGIN, &serde_json::json!({"id": "x", "allow": "yes"})));
+        assert!(!peer_refused(methods::DECIDE_PLUGIN, &serde_json::json!({"id": "x", "allow": true, "hash": hash, "review": "r"})));
         assert!(!peer_refused(methods::DECIDE_PLUGIN, &serde_json::json!({"id": "x", "allow": false})));
+        assert!(!peer_refused(methods::REVIEW_PLUGIN, &serde_json::json!({"id": "x", "hash": hash})));
+        assert!(!peer_refused(methods::STAGE_PLUGIN_PACKAGE, &serde_json::json!({"data": ""})));
+        assert!(!peer_refused(methods::INSTALL_PLUGIN, &serde_json::json!({"upload": "u"})));
         assert!(peer_refused(methods::INSTALL_PLUGIN, &serde_json::json!({"path": "/x"})));
         assert!(!peer_refused(methods::INSTALL_PLUGIN, &serde_json::json!({"url": "https://x", "path": null})));
-        assert!(peer_refused(methods::REVIEW_PLUGIN, &serde_json::json!({})));
+        assert!(peer_refused(methods::REVIEW_TEMPLATE, &serde_json::json!({})));
         assert!(peer_refused(methods::SIGN_PLUGIN, &serde_json::json!({})));
         assert!(peer_refused(methods::DELETE_ACCOUNT, &serde_json::json!({})));
+    }
+
+    /// What a consent window sends another device is never an agent's: no
+    /// agent token reaches these here, and its engine won't carry them.
+    #[test]
+    fn approvals_and_files_go_to_another_device_only_from_the_app() {
+        for (method, params) in [
+            (methods::REVIEW_PLUGIN, serde_json::json!({})),
+            (methods::STAGE_PLUGIN_PACKAGE, serde_json::json!({})),
+            (methods::DECIDE_PLUGIN, serde_json::json!({"allow": true})),
+            (methods::DECIDE_PLUGIN, serde_json::json!({"allow": "yes"})),
+            (methods::INSTALL_PLUGIN, serde_json::json!({"upload": "u"})),
+        ] {
+            assert!(app_forward_only(method, &params), "{method} {params}");
+            assert!(!agent_allowed(method) || method == methods::INSTALL_PLUGIN, "{method}");
+        }
+        assert!(!app_forward_only(methods::DECIDE_PLUGIN, &serde_json::json!({"allow": false})));
+        assert!(!app_forward_only(methods::INSTALL_PLUGIN, &serde_json::json!({"url": "https://x"})));
+        assert!(!app_forward_only(methods::LIST_PLUGINS, &serde_json::json!({})));
     }
 
     #[tokio::test]

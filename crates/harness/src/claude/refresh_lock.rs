@@ -64,7 +64,10 @@ pub(crate) fn config_dir_for(env: &std::collections::BTreeMap<String, String>) -
     )
 }
 
-fn config_dir_with(secure_storage: Option<OsString>, config: Option<OsString>) -> PathBuf {
+pub(crate) fn config_dir_with(
+    secure_storage: Option<OsString>,
+    config: Option<OsString>,
+) -> PathBuf {
     let default = || crate::executable::home_or_current_dir().join(".claude");
     match secure_storage {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),

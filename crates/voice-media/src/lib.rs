@@ -88,6 +88,9 @@ impl NativeHost {
         cmd.current_dir(path.parent().unwrap())
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        // No console window for the helper under a windowless engine.
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000);
         cmd
     }
     pub async fn open(

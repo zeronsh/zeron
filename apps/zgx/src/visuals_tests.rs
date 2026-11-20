@@ -119,6 +119,18 @@ fn a_failing_handler_is_contained_with_its_message() {
 #[test]
 fn scenes_and_shaders_render_on_the_gpu_thread() {
     let mut app = mount(None);
+    // A machine with no GPU adapter at all (a CI runner without a Vulkan
+    // driver): a scene falls back to the software renderer and shows; a
+    // shader can't, and says so in place, as a reader's would.
+    if let Some(why) = zeron_visual_gpu::unavailable_reason() {
+        eprintln!("no GPU here ({why}): checking the software scene and the shader's notice");
+        let error = "#visual-shader >> .visual-error";
+        app.wait_until(|app| app.find(error).is_some());
+        assert!(has(&mut app, error), "the shader without a GPU: no notice\n{}", app.tree());
+        assert!(!has(&mut app, "#visual-scene >> .visual-error"), "the scene without a GPU\n{}", app.tree());
+        assert!(has(&mut app, "#visual-scene >> img \"Materials\""), "the scene without a GPU: not drawn\n{}", app.tree());
+        return;
+    }
     let drawn = |id: &str| crate::visuals::surfaces(id);
     let ready = app.wait_until(|_| {
         let (shaders, _) = drawn("v:fixture-shader");
@@ -128,6 +140,120 @@ fn scenes_and_shaders_render_on_the_gpu_thread() {
     assert!(ready, "frames: shader {:?}, scene {:?}", drawn("v:fixture-shader"), drawn("v:fixture-scene"));
     assert!(!has(&mut app, "#visual-shader >> .visual-error"), "{}", app.tree());
     assert!(!has(&mut app, "#visual-scene >> .visual-error"), "{}", app.tree());
+}
+
+const COUNTER: &str = r#"
+local count = 0
+local scale = math.random(1, 1000000)
+return function()
+    return ui.column {
+        ui.text("count " .. count .. " of " .. scale),
+        ui.button { label = "Add", on_click = function() count += 1 end },
+    }
+end
+"#;
+
+#[test]
+fn a_visual_at_rest_lets_its_vm_go_and_shows_the_same_thing() {
+    crate::visuals::preload("rest-same", "Rest", COUNTER);
+    let shown = crate::visuals::snapshot("rest-same");
+    let versions = crate::visuals::versions("rest-same");
+    assert!(crate::visuals::awake("rest-same"));
+    crate::visuals::rest();
+    assert!(!crate::visuals::awake("rest-same"), "nothing here to lose");
+    assert_eq!(crate::visuals::snapshot("rest-same"), shown);
+    assert_eq!(crate::visuals::versions("rest-same"), versions, "nothing rebuilds");
+}
+
+#[test]
+fn a_control_used_after_rest_acts_on_the_same_visual_and_keeps_its_vm() {
+    crate::visuals::preload("rest-control", "Rest", COUNTER);
+    let scale = |shown: &zgx_script::Value| {
+        let text = format!("{shown:?}");
+        text.split("count ").nth(1).and_then(|s| s.split('"').next()).map(str::to_string).expect("its text")
+    };
+    let first = scale(&crate::visuals::snapshot("rest-control"));
+    assert!(first.starts_with("0 of "), "{first}");
+    crate::visuals::rest();
+    // (Handler 0 is the button: the same number in the tree it restarted to.)
+    crate::visuals::event("rest-control", 0);
+    let second = scale(&crate::visuals::snapshot("rest-control"));
+    assert_eq!(second, first.replacen('0', "1", 1), "the same random data, one click on");
+    // It has state its source doesn't give now: rest keeps it.
+    crate::visuals::rest();
+    assert!(crate::visuals::awake("rest-control"));
+    crate::visuals::event("rest-control", 0);
+    assert!(scale(&crate::visuals::snapshot("rest-control")).starts_with("2 of "));
+}
+
+fn canvas_arg(pointer: bool) -> zgx_script::Value {
+    use zgx_script::Value;
+    let mut fields = vec![("h", Value::Num(0.)), ("w", Value::Num(100.)), ("ht", Value::Num(50.)), ("t", Value::Num(0.))];
+    if pointer {
+        fields.extend([("px", Value::Num(1.)), ("py", Value::Num(1.))]);
+    }
+    Value::record(fields)
+}
+
+#[test]
+fn a_still_canvas_draws_the_same_after_rest_without_rebuilding() {
+    let id = "rest-canvas";
+    crate::visuals::preload(
+        id,
+        "Rest",
+        r#"
+local dots = {}
+for i = 1, 8 do dots[i] = math.random(0, 100) end
+return ui.canvas { height = 50, draw = function(g, w, h)
+    for i, x in dots do g:circle(x, i, 1) end
+end }
+"#,
+    );
+    let before = crate::visuals::draw(id, canvas_arg(false));
+    let versions = crate::visuals::versions(id);
+    crate::visuals::rest();
+    assert!(!crate::visuals::awake(id));
+    assert_eq!(crate::visuals::draw(id, canvas_arg(false)), before);
+    assert_eq!(crate::visuals::versions(id), versions, "waking draws nothing again by itself");
+    // Drawn for the pointer, it may hold what the pointer did.
+    crate::visuals::draw(id, canvas_arg(true));
+    crate::visuals::rest();
+    assert!(crate::visuals::awake(id));
+}
+
+#[test]
+fn what_draws_over_time_keeps_its_vm_but_a_shader_needs_none() {
+    let id = "rest-animated";
+    crate::visuals::preload(
+        id,
+        "Rest",
+        r#"
+local n = 0
+return ui.canvas { height = 50, animate = true, draw = function(g) n += 1 end }
+"#,
+    );
+    crate::visuals::rest();
+    assert!(crate::visuals::awake(id), "its script may carry on from the last draw");
+
+    let id = "rest-shader";
+    crate::visuals::preload(
+        id,
+        "Rest",
+        r#"
+return ui.shader { height = 50, code = "void mainImage(out vec4 c, in vec2 p) { c = vec4(1.0); }" }
+"#,
+    );
+    assert_eq!(crate::visuals::snapshot(id).field("error"), None);
+    crate::visuals::rest();
+    assert!(!crate::visuals::awake(id), "a shader never runs the script");
+}
+
+#[test]
+fn a_visual_that_failed_keeps_what_it_has() {
+    let id = "rest-failed";
+    crate::visuals::preload(id, "Rest", "return function() error('no') end");
+    crate::visuals::rest();
+    assert!(crate::visuals::awake(id), "its message stays, and so does the VM that gave it");
 }
 
 #[test]

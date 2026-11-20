@@ -2,7 +2,8 @@
 -- header over a hairline, hairlines between rows, a row washed under the
 -- pointer. Its first column's text lines up with the words around it; the
 -- wash hangs past the text either side by a cell's padding. Columns share
--- the width evenly unless given one (`w`), each cell holding to one line.
+-- the width evenly unless given one (`w`); what's too long for its column
+-- wraps, the header's too, and a row's cells line up along their first line.
 -- For a reply's markdown table, see ds/markdown; this is for data a screen
 -- or a visual lays out itself, whose cells may be any node.
 --
@@ -41,7 +42,7 @@ return function(props: Props): Node
 			w = if col.w then ui.raw(col.w, "the column's width, as the data asks") else nil,
 			px = "$space.3",
 			py = "$space.2",
-			items = "center",
+			items = "start",
 			justify = JUSTIFY[col.align or "start"],
 			overflow = "hidden",
 			content,
@@ -65,7 +66,8 @@ return function(props: Props): Node
 					ui.text {
 						col.label or "",
 						literal = true,
-						truncate = true,
+						wrap = true,
+						min_w = 0,
 						text_size = "$zeron.visual.text.sm.size",
 						line_height = "$zeron.visual.text.sm.line",
 						weight = "$font.weight.medium",

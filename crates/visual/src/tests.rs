@@ -251,6 +251,25 @@ fn charts_and_tables_parse() {
     assert_eq!(table.columns[1].align, Align::End);
 }
 
+// show_visual's hover advice, as written there, checks clean: a line kept
+// for what a pick shows, the same height before and after.
+#[test]
+fn the_hover_advice_example_checks_clean() {
+    check(
+        r#"
+        local s = ui.state { picked = false }
+        return function()
+          return ui.column { gap = 8,
+            ui.row { hover = true, on_click = function() s.picked = "us-east, 182 ms" end, ui.text "us-east" },
+            ui.text { s.picked or " " },
+          }
+        end
+        "#,
+        1,
+    )
+    .unwrap();
+}
+
 #[test]
 fn check_exercises_every_control_and_reports_where_it_broke() {
     let report = check(

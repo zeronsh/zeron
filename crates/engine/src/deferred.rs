@@ -229,8 +229,17 @@ impl DeferredEngine {
                 Ok(runtime) => {
                     let service: Arc<dyn RpcService> = runtime.core().rpc_service();
                     if let Some(port) = served_ipc_port {
-                        runtime.core().sessions.set_ipc_port(port);
+                        // (Its bearer first: a run revived on boot waits
+                        // on the port, then reads both.)
                         runtime.core().sessions.set_ipc_token_file(ipc_token_file);
+                        // Agents' Zeron tools come from this engine itself.
+                        if let Err(err) = runtime.core().sessions.serve_mcp_endpoint(service.clone()).await {
+                            tracing::warn!(error = %err, "agent MCP endpoint not served; agents get `zeron mcp`");
+                        }
+                        runtime.core().sessions.set_ipc_port(port);
+                    } else {
+                        // None is coming: a revived run needn't wait for one.
+                        runtime.core().sessions.set_no_ipc_port();
                     }
                     on_ready(&runtime);
                     *runtime_slot.lock().await = Some(runtime);

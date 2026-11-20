@@ -145,8 +145,9 @@ export const adminAuthorized = async (request: Request, adminToken: string): Pro
   return token !== "" && constantTimeEqual(given, expected);
 };
 
-/** `/admin/cloud/usage`, `/admin/cloud/credits`, `/admin/cloud/machine` and
- * `/admin/cloud/limits` — undefined when not one of them. */
+/** `/admin/cloud/usage`, `/admin/cloud/credits`, `/admin/cloud/machine`,
+ * `/admin/cloud/limits` and `/admin/cloud/wakes` — undefined when not one of
+ * them. */
 export const handleAdminRoute = async (
   request: Request,
   env: BillingEnv,
@@ -160,6 +161,7 @@ export const handleAdminRoute = async (
   if (url.pathname === "/admin/cloud/credits") return grantCredits(request, env);
   if (url.pathname === "/admin/cloud/machine") return setMachine(request, env);
   if (url.pathname === "/admin/cloud/limits") return setLimits(request, env);
+  if (url.pathname === "/admin/cloud/wakes") return listWakes(request, env, url);
   if (request.method !== "GET") return jsonError(405, "method_not_allowed", "GET only.");
   const month = url.searchParams.get("month") ?? monthKey(Date.now());
   if (!isMonthKey(month)) return jsonError(400, "bad_request", "month must be YYYY-MM.");
@@ -177,7 +179,36 @@ export const handleAdminRoute = async (
 
 const ADMIN_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
-const ADMIN_PATHS = new Set(["/admin/cloud/usage", "/admin/cloud/credits", "/admin/cloud/machine", "/admin/cloud/limits"]);
+const ADMIN_PATHS = new Set([
+  "/admin/cloud/usage",
+  "/admin/cloud/credits",
+  "/admin/cloud/machine",
+  "/admin/cloud/limits",
+  "/admin/cloud/wakes"
+]);
+
+/** `GET /admin/cloud/wakes?orgId&userId`: one user's recent wakes, each with
+ * when every stage happened (wake.ts, `WakeTiming`), to compare before and
+ * after a change. The same lines go to the Worker's logs as `cloud.wake_timing`
+ * for numbers across users. */
+const listWakes = async (request: Request, env: BillingEnv, url: URL): Promise<Response> => {
+  if (request.method !== "GET") return jsonError(405, "method_not_allowed", "GET only.");
+  if (!env.CLOUD_ACCOUNTS) return jsonError(503, "unavailable", "Cloud is not configured.");
+  const orgId = url.searchParams.get("orgId") ?? "";
+  const userId = url.searchParams.get("userId") ?? "";
+  if (!ADMIN_ID_RE.test(orgId) || !ADMIN_ID_RE.test(userId)) {
+    return jsonError(400, "bad_request", "Expected ?orgId=&userId=.");
+  }
+  const entries = await deviceStub(env, orgId, userId).wakeTimings();
+  // A wake is written when its machine is up and again with its engine's
+  // report: the later entry has everything the earlier one did.
+  const wakes = new Map<string, unknown>();
+  for (const { at, chatId, sandboxId, detail } of entries) {
+    const timing = JSON.parse(detail ?? "{}") as { requestedAt?: number };
+    wakes.set(`${chatId}:${timing.requestedAt}`, { at, chatId, sandboxId, ...timing });
+  }
+  return json({ wakes: [...wakes.values()] });
+};
 
 /** "No limit" for an account: high enough never to bind, still a number
  * (the status view reports it, and JSON has no Infinity). */

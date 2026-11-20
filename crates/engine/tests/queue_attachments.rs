@@ -13,6 +13,9 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use tokio::sync::mpsc;
 
+use zeron_engine::doc_host::{
+    BeginQueueEditOutcome, FinishQueueEditAction, FinishQueueEditOutcome,
+};
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::{
@@ -342,5 +345,197 @@ async fn a_row_with_files_sent_now_or_drained_keeps_them() {
     rig.ledger.release.notify_one();
     wait_for(|| read_for(&rig, "after the turn").is_some(), "the drain").await;
     assert_eq!(read_for(&rig, "after the turn").unwrap().1, files);
+    rig.core.sessions.shutdown().await;
+}
+
+/// Files alone, sent while a turn runs: the app's `QueueMessage` has no
+/// words to give. It goes as a run's does, and never comes back refused
+/// (2026-11-07: a screenshot said "Your message didn't send", twice).
+#[tokio::test]
+async fn files_with_no_words_queue_and_reach_the_agent() {
+    let rig = rig();
+    running(&rig).await;
+    let files = files(&rig);
+    let client = zeron_rpc::memory_client(rig.core.rpc_service());
+    client
+        .call(
+            zeron_rpc::methods::QUEUE_MESSAGE,
+            serde_json::json!({
+                "chatId": CHAT,
+                "text": "",
+                "attachments": files,
+                "holdForTurnEnd": true,
+            }),
+        )
+        .await
+        .expect("a message of files alone is queued");
+    assert_eq!(queued(&rig), 1, "it waits in the queue, its files with it");
+    rig.ledger.release.notify_one();
+    wait_for(
+        || read_for(&rig, "See the attached image(s).").is_some(),
+        "the drain",
+    )
+    .await;
+    assert_eq!(
+        read_for(&rig, "See the attached image(s).").unwrap().1,
+        files
+    );
+    rig.core.sessions.shutdown().await;
+}
+
+/// Still refused: nothing at all.
+#[tokio::test]
+async fn a_message_with_no_words_and_no_files_is_refused() {
+    let rig = rig();
+    assert!(
+        rig.core
+            .doc_host
+            .queue_message_with_behavior(CHAT, "  ", Vec::new(), true)
+            .is_err()
+    );
+    rig.core.sessions.shutdown().await;
+}
+
+async fn edit_lease(rig: &Rig, id: &str) -> (String, String) {
+    let BeginQueueEditOutcome::Acquired {
+        lease_id,
+        base_text_hash,
+        ..
+    } = rig
+        .core
+        .doc_host
+        .begin_queued_message_edit(CHAT, id, "phone", "view-1")
+        .await
+        .unwrap()
+    else {
+        panic!("the edit is acquired");
+    };
+    (lease_id, base_text_hash)
+}
+
+/// An edit that clears the words of a row keeping its files leaves the row;
+/// taking the files off as well is how it goes.
+#[tokio::test]
+async fn clearing_the_words_of_a_row_with_files_keeps_it() {
+    let rig = rig();
+    running(&rig).await;
+    let files = files(&rig);
+    let id = queue(&rig, "look at these", files.clone());
+    let (lease, hash) = edit_lease(&rig, &id).await;
+    assert!(matches!(
+        rig.core
+            .doc_host
+            .finish_queued_message_edit_with_attachments(
+                CHAT,
+                &id,
+                &lease,
+                FinishQueueEditAction::Commit,
+                Some(""),
+                Some(&hash),
+                Some(&files),
+            )
+            .await
+            .unwrap(),
+        FinishQueueEditOutcome::Committed
+    ));
+    let rows = rig
+        .core
+        .doc_host
+        .open(CHAT)
+        .unwrap()
+        .doc()
+        .read_queue()
+        .unwrap();
+    assert_eq!(rows.len(), 1, "the row stays");
+    assert_eq!(rows[0].text, "See the attached image(s).");
+    assert_eq!(rows[0].attachments, files);
+
+    let (lease, hash) = edit_lease(&rig, &id).await;
+    rig.core
+        .doc_host
+        .finish_queued_message_edit_with_attachments(
+            CHAT,
+            &id,
+            &lease,
+            FinishQueueEditAction::Commit,
+            Some(""),
+            Some(&hash),
+            Some(&[]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(queued(&rig), 0, "no words and no files: it goes");
+    rig.core.sessions.shutdown().await;
+}
+
+/// Another Windows user's (or device's) path for an upload this device also
+/// holds: what reached the agent on 2026-11-07 as `C:\Users\ADMIN\…`, from a
+/// chat running as `HP MEDIA`.
+const THEIRS: &str = r"C:\Users\ADMIN\AppData\Local\Zeron\uploads\2fbd2b3b-image.png";
+
+/// The same upload committed on this device: its path here.
+async fn committed_here(rig: &Rig) -> String {
+    let client = zeron_rpc::memory_client(rig.core.rpc_service());
+    client
+        .call(
+            zeron_rpc::methods::UPLOAD_CHUNK,
+            serde_json::json!({
+                "uploadId": "2fbd2b3b-9c1e",
+                "seq": 0,
+                "data": base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\n"),
+            }),
+        )
+        .await
+        .unwrap();
+    let reply = client
+        .call(
+            zeron_rpc::methods::UPLOAD_COMMIT,
+            serde_json::json!({ "uploadId": "2fbd2b3b-9c1e", "fileName": "image.png" }),
+        )
+        .await
+        .unwrap();
+    reply["path"].as_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn a_row_naming_another_users_path_reaches_the_agent_by_this_devices_copy() {
+    let rig = rig();
+    running(&rig).await;
+    let here = committed_here(&rig).await;
+    // Steered in.
+    let id = queue(&rig, "steered with it", vec![THEIRS.into()]);
+    assert!(rig.core.doc_host.steer_queued_now(CHAT, &id).await.unwrap());
+    wait_for(|| read_for(&rig, "steered with it").is_some(), "the steer").await;
+    let (prompt, got) = read_for(&rig, "steered with it").unwrap();
+    assert_eq!(got, vec![here.clone()]);
+    assert!(
+        prompt.contains(&here) && !prompt.contains("ADMIN"),
+        "got: {prompt}"
+    );
+    // Drained at the turn's end.
+    queue(&rig, "drained with it", vec![THEIRS.into()]);
+    rig.ledger.release.notify_one();
+    wait_for(|| read_for(&rig, "drained with it").is_some(), "the drain").await;
+    let (prompt, got) = read_for(&rig, "drained with it").unwrap();
+    assert_eq!(got, vec![here.clone()]);
+    assert!(
+        prompt.contains(&here) && !prompt.contains("ADMIN"),
+        "got: {prompt}"
+    );
+    rig.core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_path_this_device_cant_place_goes_as_it_was() {
+    let rig = rig();
+    running(&rig).await;
+    // No copy here: nothing to rebase it to.
+    let id = queue(&rig, "nothing here", vec![THEIRS.into()]);
+    assert!(rig.core.doc_host.steer_queued_now(CHAT, &id).await.unwrap());
+    wait_for(|| read_for(&rig, "nothing here").is_some(), "the steer").await;
+    assert_eq!(
+        read_for(&rig, "nothing here").unwrap().1,
+        vec![THEIRS.to_string()]
+    );
     rig.core.sessions.shutdown().await;
 }

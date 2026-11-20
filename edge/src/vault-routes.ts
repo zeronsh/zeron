@@ -13,13 +13,16 @@
  * dependency-free, so no vault code enters this bundle.
  */
 import {
+  LEGACY_VAULT_PROVIDERS,
   VAULT_PROVIDERS,
   type EnrollDeviceRequest,
+  type GrantManyRequest,
   type GrantRequest,
   type PutCredentialRequest,
   type VaultCaller,
   type VaultProviderId,
-  type VaultResult
+  type VaultResult,
+  type VaultStatusView
 } from "../vault/src/api";
 import type { Verified } from "./auth";
 import type { Env } from "./env";
@@ -57,6 +60,36 @@ const accountProfile = (value: unknown): Record<string, string> | null => {
     out[key] = field;
   }
   return out;
+};
+
+/** Header naming the providers a client understands (crates/proto
+ * `VAULT_PROVIDERS_HEADER`). A status lists only those: an older client reads
+ * provider names strictly and would refuse the whole status over one it
+ * doesn't know. Without the header, the providers every client knows. */
+export const VAULT_PROVIDERS_HEADER = "x-zeron-vault-providers";
+
+export const understoodProviders = (request: Request): ReadonlySet<string> => {
+  const header = request.headers.get(VAULT_PROVIDERS_HEADER);
+  if (header === null) return new Set(LEGACY_VAULT_PROVIDERS);
+  return new Set(
+    header
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean)
+  );
+};
+
+/** A status as `understood` can read it. Statuses are what every vault call
+ * that changes something answers, so all of them pass through here. */
+const forClient = <T>(result: VaultResult<T>, understood: ReadonlySet<string>): VaultResult<T> => {
+  if (!result.ok || !isObject(result.value) || !Array.isArray((result.value as { connections?: unknown }).connections)) {
+    return result;
+  }
+  const status = result.value as unknown as VaultStatusView;
+  return {
+    ok: true,
+    value: { ...status, connections: status.connections.filter((c) => understood.has(c.provider)) } as unknown as T
+  };
 };
 
 /** `VaultResult` → HTTP. The vault picks the status; anything outside the
@@ -98,9 +131,10 @@ export const handleVaultRoute = async (
     return isObject(parsed) ? parsed : bad("Body must be a JSON object.");
   };
 
+  const understood = understoodProviders(request);
   const call = async <T>(run: () => Promise<VaultResult<T>>): Promise<Response> => {
     try {
-      return vaultResponse(await run());
+      return vaultResponse(forClient(await run(), understood));
     } catch (e) {
       console.error("vault rpc failed", String(e));
       return json({ error: "unavailable", message: "The credential vault is unavailable." }, 503);
@@ -215,33 +249,67 @@ export const handleVaultRoute = async (
       return json({ error: "forbidden", message: "A runner may only request grants for itself." }, 403);
     }
     // A Cloud machine's GitHub access is its own chat's repository, nothing
-    // else the user's GitHub reaches.
+    // else the user's GitHub reaches. A delegate's first grant takes the
+    // GitHub login of the session that started it; only this Worker says so,
+    // never a request's body.
+    let inheritFrom: string | undefined;
     if (auth.kind === "runner" && provider === "github") {
-      const own =
+      const cloud =
         env.CLOUD_ACCOUNTS && auth.orgId
-          ? await env.CLOUD_ACCOUNTS.get(env.CLOUD_ACCOUNTS.idFromName(cloudAccountName(auth.orgId, auth.userId))).repoOfDevice(
-              { orgId: auth.orgId, userId: auth.userId },
-              deviceId
-            )
+          ? env.CLOUD_ACCOUNTS.get(env.CLOUD_ACCOUNTS.idFromName(cloudAccountName(auth.orgId, auth.userId)))
           : undefined;
+      const owner = { orgId: auth.orgId ?? "", userId: auth.userId };
+      const own = cloud ? await cloud.repoOfDevice(owner, deviceId) : undefined;
       if (!own || typeof repo !== "string" || repo.toLowerCase() !== own.toLowerCase()) {
         return json({ error: "forbidden", message: "A Cloud machine may only get GitHub access to its own chat's repository." }, 403);
       }
+      inheritFrom = await cloud?.parentDeviceOf(owner, deviceId);
     }
-    const req: GrantRequest = { provider, deviceId, ts, sig, ...(repo !== undefined ? { repo } : {}) };
+    const req: GrantRequest = {
+      provider,
+      deviceId,
+      ts,
+      sig,
+      ...(repo !== undefined ? { repo } : {}),
+      ...(inheritFrom !== undefined ? { inheritFrom } : {})
+    };
     return call(() => vault.grant(caller, req));
   }
 
+  // POST /vault/{orgId}/grants — several providers' grants at once (user or
+  // runner). Never `github`: a Cloud machine's GitHub grant is checked
+  // against its own chat's repository above, one at a time.
+  if (rest[0] === "grants" && rest.length === 1 && method === "POST") {
+    const b = await body();
+    if (b instanceof Response) return b;
+    const { providers, deviceId, ts, sig } = b;
+    if (
+      !Array.isArray(providers) ||
+      providers.length === 0 ||
+      providers.length > VAULT_PROVIDERS.length ||
+      !providers.every((p) => isProvider(p) && p !== "github")
+    ) {
+      return bad("Expected providers: a list of providers other than github.");
+    }
+    if (typeof deviceId !== "string" || !ID_RE.test(deviceId)) return bad("Bad deviceId.");
+    if (typeof ts !== "number" || !Number.isSafeInteger(ts)) return bad("Bad ts.");
+    if (typeof sig !== "string" || !KEY_RE.test(sig)) return bad("Bad sig.");
+    if (auth.kind === "runner" && deviceId !== auth.deviceId) {
+      return json({ error: "forbidden", message: "A runner may only request grants for itself." }, 403);
+    }
+    const req: GrantManyRequest = { providers: providers as VaultProviderId[], deviceId, ts, sig };
+    return call(() => vault.grantMany(caller, req));
+  }
+
   // GET /vault/{orgId}/github/repos?q= — the repositories the user's GitHub
-  // connection can see, for picking a Cloud project. The vault calls GitHub
-  // itself; the token never leaves it. Runners are refused by runner-policy.
+  // logins can see, merged, for picking a Cloud project; beside them the App
+  // installations they come through and any login that didn't answer. The
+  // vault calls GitHub itself; the tokens never leave it. Runners are refused
+  // by runner-policy.
   if (rest[0] === "github" && rest[1] === "repos" && rest.length === 2 && method === "GET") {
     const query = url.searchParams.get("q") ?? undefined;
     if (query !== undefined && query.length > 200) return bad("Query too long.");
-    return call(async () => {
-      const result = await vault.githubRepos(caller, query);
-      return result.ok ? { ok: true as const, value: { repos: result.value } } : result;
-    });
+    return call(() => vault.githubListing(caller, query));
   }
 
   // GET /vault/{orgId}/github/branches?repo=owner/name — branch names for

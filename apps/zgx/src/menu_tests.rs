@@ -178,8 +178,7 @@ fn every_menu_is_concentric_and_evenly_inset() {
         &mut app,
         "the session menu",
         |app| {
-            app.click("#shell-sidebar >> role:button \"Fix the build\"");
-            app.frames(10);
+            crate::focus_tests::keys_on_row(app, "#shell-sidebar >> role:button \"Fix the build\"");
             app.keys("shift+F10");
         },
         "role:menuitem \"Rename\"",

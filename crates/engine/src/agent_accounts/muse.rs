@@ -124,7 +124,7 @@ impl AgentAccounts {
 
     /// The environment that points Muse at account `name`'s config root,
     /// with its mirror refreshed.
-    fn muse_env(&self, name: &str) -> Result<BTreeMap<String, String>, EngineError> {
+    pub(super) fn muse_env(&self, name: &str) -> Result<BTreeMap<String, String>, EngineError> {
         let home = self.muse_home(name)?;
         private_dir(&home)?;
         let root = home.join("config");
@@ -227,6 +227,77 @@ impl AgentAccounts {
                 handle,
                 // Cancelled (dialog closed, superseded): the root goes too.
                 home: Some(pending_home),
+                port: None,
+            },
+        );
+        Ok(AgentLoginStart {
+            login_id,
+            url,
+            mode: AgentLoginMode::Browser,
+            callback_port: None,
+        })
+    }
+
+    /// A Muse sign-in for Cloud: Muse's own device-code sign-in against a
+    /// throwaway, file-backed config root (never one of this device's
+    /// accounts), whose `auth.json` goes to `capture` as a `muse` upload
+    /// once Muse signed in. The root is shredded on every exit path.
+    pub(super) async fn start_muse_capture(
+        &self,
+        capture: super::CaptureSink,
+        catalog: Option<crate::sign_in_catalog::CatalogPublisher>,
+    ) -> Result<AgentLoginStart, EngineError> {
+        self.reap_spawned_flows(HarnessId::Muse);
+        let cli = self.muse_cli()?;
+        let login_id = new_id();
+        let home = self.login_home(&login_id)?;
+        let shred = super::ShredOnDrop(home.clone());
+        let config = home.join("config");
+        let auth_file = config.join("muse").join("auth.json");
+        private_dir(&config.join("muse"))?;
+        let env = BTreeMap::from([
+            (
+                "XDG_CONFIG_HOME".to_string(),
+                config.to_string_lossy().into_owned(),
+            ),
+            (
+                "MUSE_AUTH_PATH".to_string(),
+                auth_file.to_string_lossy().into_owned(),
+            ),
+            ("TBH_CREDENTIAL_BACKEND".to_string(), "file".to_string()),
+        ]);
+        let login = msp::start_device_login(&cli, &env)
+            .await
+            .map_err(muse_error)?;
+        let url = login.verification_url.clone();
+        let state = std::sync::Arc::new(std::sync::Mutex::new(TaskLoginState {
+            url: Some(url.clone()),
+            message: Some(format!("Enter the code {} on Meta.", login.user_code)),
+            ..Default::default()
+        }));
+        let task_state = state.clone();
+        let handle = tokio::spawn(async move {
+            let found = login.finish().await.and_then(|_| {
+                super::muse_capture(&auth_file).ok_or_else(|| {
+                    "Muse reported a successful sign-in, but saved no Meta login.".to_string()
+                })
+            });
+            let kept = super::SignInHome::keep(HarnessId::Muse, shred, catalog);
+            let outcome = match found {
+                Ok(upload) => capture(upload).await,
+                Err(message) => Err(message),
+            };
+            kept.after_upload(&outcome);
+            lock(&task_state).outcome = Some(outcome);
+        });
+        lock(&self.inner.flows).insert(
+            login_id.clone(),
+            LoginFlow::Task {
+                harness: HarnessId::Muse,
+                started_at: std::time::Instant::now(),
+                state,
+                handle,
+                home: Some(home),
                 port: None,
             },
         );
@@ -392,6 +463,7 @@ impl crate::registry::RunEnvironment for MuseRunEnvironment {
     async fn prepare(
         &self,
         harness: HarnessId,
+        _chat_id: Option<&str>,
         request: &mut zeron_proto::RunRequest,
     ) -> Result<(), String> {
         if harness != HarnessId::Muse {
@@ -405,7 +477,7 @@ impl crate::registry::RunEnvironment for MuseRunEnvironment {
         Ok(())
     }
 
-    async fn credential(&self, harness: HarnessId) -> Option<String> {
+    async fn credential(&self, harness: HarnessId, _chat_id: Option<&str>) -> Option<String> {
         (harness == HarnessId::Muse)
             .then(|| {
                 self.0
@@ -607,7 +679,7 @@ for line in sys.stdin:
 
         // None kept yet: Muse runs on its own login.
         assert_eq!(
-            env.credential(HarnessId::Muse).await.as_deref(),
+            env.credential(HarnessId::Muse, None).await.as_deref(),
             Some(OWN_LOGIN)
         );
 
@@ -658,14 +730,14 @@ for line in sys.stdin:
 
         // A run gets the selected account's root; switching changes it.
         let mut request = run_request();
-        env.prepare(HarnessId::Muse, &mut request).await.unwrap();
+        env.prepare(HarnessId::Muse, None, &mut request).await.unwrap();
         let root_a = request.env["XDG_CONFIG_HOME"].clone();
         assert_eq!(request.env["TBH_CREDENTIAL_BACKEND"], "file");
         assert_eq!(
             std::fs::read_to_string(Path::new(&root_a).join("muse/auth.json")).unwrap(),
             r#"{"email": "a@example.com"}"#
         );
-        let before = env.credential(HarnessId::Muse).await;
+        let before = env.credential(HarnessId::Muse, None).await;
         let listed = rows(
             accounts
                 .activate(HarnessId::Muse, &listed[1].2)
@@ -673,13 +745,13 @@ for line in sys.stdin:
                 .unwrap(),
         );
         assert!(listed[1].1 && !listed[0].1);
-        assert_ne!(env.credential(HarnessId::Muse).await, before);
+        assert_ne!(env.credential(HarnessId::Muse, None).await, before);
         let mut request = run_request();
-        env.prepare(HarnessId::Muse, &mut request).await.unwrap();
+        env.prepare(HarnessId::Muse, None, &mut request).await.unwrap();
         assert_ne!(request.env["XDG_CONFIG_HOME"], root_a);
         // Other agents are untouched; the user's own login never moved.
         let mut other = run_request();
-        env.prepare(HarnessId::ClaudeCode, &mut other)
+        env.prepare(HarnessId::ClaudeCode, None, &mut other)
             .await
             .unwrap();
         assert!(other.env.is_empty());
@@ -698,7 +770,7 @@ for line in sys.stdin:
         assert_eq!(listed.len(), 1);
         assert_eq!(std::fs::read_to_string(fake.join("logouts")).unwrap(), "1");
         assert_eq!(
-            env.credential(HarnessId::Muse).await.as_deref(),
+            env.credential(HarnessId::Muse, None).await.as_deref(),
             Some(OWN_LOGIN)
         );
     }

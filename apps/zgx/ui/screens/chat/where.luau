@@ -5,11 +5,14 @@
 --
 -- - Devices: your computers, this one first; one whose presence has gone
 --   quiet (no beat in 70 s) is shown, dimmed, with when it was last seen,
---   and can't be picked. Then Cloud, while it's on and can open the
---   project's GitHub repository (account/cloud): the chat runs on a machine
---   of its own that clones the repository, from the ref chosen among
---   GitHub's branches (`ListCloudBranches`). On Cloud, the projects are
---   those Cloud can open, on whichever device.
+--   and can't be picked. Then Cloud, while it's on and can open a
+--   project's GitHub repository (account/cloud), whichever project is chosen
+--   now: the chat runs on a machine of its own that clones the repository,
+--   from the ref chosen among GitHub's branches (`ListCloudBranches`). On
+--   Cloud, the projects are those Cloud can open, on whichever device, and
+--   never none (a Cloud chat needs a repository): picking Cloud keeps the
+--   project if Cloud can open it, else the one last used on Cloud, else the
+--   first.
 -- - Projects: the chosen device's, searchable, "No project" among them.
 --   Picking another device brings that device's projects (the one last used
 --   there, else its first); picking a project on another device moves the
@@ -18,7 +21,8 @@
 -- - Refs: the project's branches from git where it is (`ListRefs`, forwarded
 --   to its device), the current first; the chip shows the one chosen, else
 --   the project's current branch.
--- - Remembered: the last device, and the last project on each device.
+-- - Remembered: the last device (never Cloud: chosen afresh), and the last
+--   project on each device, Cloud's too.
 -- - Sent: a local checkout runs in the project's folder (or, for a ref
 --   checked out in a worktree of its own, in that worktree), the ref named
 --   on the chat; a worktree is made off the ref as the run starts (HEAD if
@@ -34,6 +38,7 @@
 local sessions = require("@account/sessions")
 local cloud = require("@account/cloud")
 local route = require("@app/screens/shell/route")
+local cloud_projects = require("@app/screens/shell/cloud_projects")
 local store = require("@app/screens/chat/store")
 
 local M = {}
@@ -129,7 +134,7 @@ function M.bind(c: Choices)
 	end
 
 	local function computers(): { sessions.Device }
-		return sessions.computers(sessions.now:get().devices)
+		return sessions.computers(sessions.devices:get())
 	end
 	local function device_row(id: string?): sessions.Device?
 		for _, d in computers() do
@@ -143,7 +148,7 @@ function M.bind(c: Choices)
 		if id == nil or id == M.NO_PROJECT then
 			return nil
 		end
-		for _, p in sessions.now:get().projects do
+		for _, p in sessions.projects:get() do
 			if p.id == id then
 				return p
 			end
@@ -173,7 +178,7 @@ function M.bind(c: Choices)
 	end
 	local function on_device(device: string?): { sessions.Project }
 		local out = {}
-		for _, p in sessions.now:get().projects do
+		for _, p in sessions.projects:get() do
 			-- (On Cloud: those it can open, on whichever device.)
 			if if device == M.CLOUD then cloud_repo(p) ~= nil else p.device == device then
 				table.insert(out, p)
@@ -181,17 +186,13 @@ function M.bind(c: Choices)
 		end
 		return out
 	end
-	-- Cloud is offered for the project chosen (or, on Cloud already, while
-	-- it can open any).
+	-- Cloud is offered while it can open any project, whichever is chosen
+	-- (picking it brings one it can open).
 	local function cloud_offered(): boolean
 		if not cloud.on() then
 			return false
 		end
-		local p = project_row(c.project:get())
-		if p then
-			return cloud_repo(p) ~= nil
-		end
-		return on_cloud() and #on_device(M.CLOUD) > 0
+		return #on_device(M.CLOUD) > 0
 	end
 
 	-- The devices offered: yours, this one first; one out of reach dimmed,
@@ -213,15 +214,7 @@ function M.bind(c: Choices)
 			})
 		end
 		if cloud_offered() then
-			local repo = cloud_repo(project_row(c.project:get()))
-			table.insert(out, {
-				value = M.CLOUD,
-				label = "Cloud",
-				cloud = true,
-				description = if repo
-					then ui.t("chat.where.device.cloud_from", { repo = repo.name }):get()
-					else ui.t("chat.where.device.cloud"):get(),
-			})
+			table.insert(out, { value = M.CLOUD, label = "Cloud", cloud = true })
 		end
 		return out
 	end)
@@ -230,11 +223,44 @@ function M.bind(c: Choices)
 	-- longer there, stays named (warned, dimmed) so the choice reads as it is.
 	local projects = ui.computed(function(): { any }
 		local out = {}
-		for _, p in on_device(c.device:get()) do
-			local l = route.look(p.id) or { hue = route.hue(p.id) }
-			table.insert(out, { value = p.id, label = p.name, hue = l.hue, src = l.src, emoji = l.emoji, plain = not p.git or nil })
-		end
 		local chosen = c.project:get()
+		local list = on_device(c.device:get())
+		-- On Cloud, Cloud's machines' copies of a repository once (each Cloud
+		-- chat's machine has its own): where the first stands, reading as
+		-- screens/shell/cloud_projects says, the one chosen kept chosen.
+		local copies: { [string]: { sessions.Project } } = {}
+		if c.device:get() == M.CLOUD then
+			for _, p in list do
+				if lives_on_cloud(p) then
+					local key = cloud_projects.key(p)
+					copies[key] = copies[key] or {}
+					table.insert(copies[key], p)
+				end
+			end
+		end
+		local listed: { [string]: boolean } = {}
+		for _, p in list do
+			local key = if lives_on_cloud(p) then cloud_projects.key(p) else nil
+			local group = if key then copies[key] else nil
+			if group then
+				if listed[key :: string] then
+					continue
+				end
+				listed[key :: string] = true
+				local lead = cloud_projects.lead(group)
+				local value = lead.id
+				for _, q in group do
+					if q.id == chosen then
+						value = q.id
+					end
+				end
+				local l = route.look(lead.id) or { hue = route.hue(lead.id) }
+				table.insert(out, { value = value, label = lead.name, hue = l.hue, src = l.src, emoji = l.emoji, project = lead.id, plain = not lead.git or nil })
+				continue
+			end
+			local l = route.look(p.id) or { hue = route.hue(p.id) }
+			table.insert(out, { value = p.id, label = p.name, hue = l.hue, src = l.src, emoji = l.emoji, project = p.id, plain = not p.git or nil })
+		end
 		if chosen and chosen ~= M.NO_PROJECT then
 			local found = false
 			for _, p in out do
@@ -294,13 +320,12 @@ function M.bind(c: Choices)
 		if not c.active() then
 			return
 		end
-		local now = sessions.now:get()
 		local d = c.device:get()
 		if d and (device_row(d) or d == M.CLOUD) then
 			return
 		end
 		local last = M.remembered:peek().device
-		local pick = if last and device_row(last) then last else now.here
+		local pick = if last and device_row(last) then last else sessions.here:get()
 		if pick and pick ~= d then
 			c.device:set(pick)
 		end
@@ -317,9 +342,10 @@ function M.bind(c: Choices)
 		device_was = d
 		local chosen = c.project:peek()
 		local here = on_device(d)
+		-- (On Cloud, never none: its machine clones a project's repository.)
 		local function there(id: string?): boolean
 			if id == M.NO_PROJECT then
-				return true
+				return d ~= M.CLOUD
 			end
 			for _, p in here do
 				if p.id == id then
@@ -341,7 +367,7 @@ function M.bind(c: Choices)
 		local d = c.device:get()
 		-- (Only once the sessions have come: before, every device has no
 		-- projects, and none would be picked for good.)
-		if not c.active() or c.project:get() ~= nil or not d or sessions.now:get().state ~= "ready" then
+		if not c.active() or c.project:get() ~= nil or not d or sessions.state:get() ~= "ready" then
 			return
 		end
 		local here = on_device(d)
@@ -367,11 +393,23 @@ function M.bind(c: Choices)
 			return
 		end
 		local d, p = c.device:get(), c.project:get()
-		-- (Cloud is chosen afresh each time: its projects are its own.)
-		if not d or not device_row(d) or sessions.now:get().state ~= "ready" then
+		if not d or sessions.state:get() ~= "ready" then
 			return
 		end
 		local r = M.remembered:peek()
+		-- (Cloud is chosen afresh each time; the project used there is kept,
+		-- for the next time it's picked.)
+		if d == M.CLOUD then
+			if p and p ~= M.NO_PROJECT and project_row(p) and r.projects[M.CLOUD] ~= p then
+				local next = table.clone(r.projects)
+				next[M.CLOUD] = p
+				M.remembered:set { device = r.device, projects = next }
+			end
+			return
+		end
+		if not device_row(d) then
+			return
+		end
 		local projects = r.projects
 		local keep_project = p ~= nil and (p == M.NO_PROJECT or project_row(p) ~= nil)
 		if r.device == d and (not keep_project or projects[d] == p) then

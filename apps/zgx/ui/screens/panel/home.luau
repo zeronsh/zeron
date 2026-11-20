@@ -35,6 +35,7 @@ local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
 local boundary = require("@app/screens/shell/boundary")
 local store = require("@app/screens/chat/store")
+local Dock = require("@app/screens/chat/dock")
 local api = require("@app/screens/panel/home_api")
 local Previews = require("@app/screens/panel/previews")
 -- Which finished lanes you've seen (their tabs in front).
@@ -117,7 +118,7 @@ local function chat_of(id: string?): sessions.Chat?
 	return nil
 end
 local function device_of(id: string?): sessions.Device?
-	for _, d in sessions.now:get().devices do
+	for _, d in sessions.devices:get() do
 		if d.id == id then
 			return d
 		end
@@ -128,7 +129,7 @@ local function project_of(id: string?): sessions.Project?
 	if not id then
 		return nil
 	end
-	for _, p in sessions.now:get().projects do
+	for _, p in sessions.projects:get() do
 		if p.id == id then
 			return p
 		end
@@ -172,6 +173,10 @@ export type Props = {
 	-- A web address in a browser tab of the session's panel (a port's).
 	open_url: ((session: string, url: string) -> ())?,
 	showing: () -> boolean,
+	-- How far its top stands under the panel's (its tab strip): its block
+	-- lines up with a new chat's composer beside it, which stands by the
+	-- panel's whole height.
+	above: number?,
 }
 
 -- ---------------------------------------------------------------------------
@@ -267,6 +272,7 @@ local function info(sid: string): Node
 						return if l then l.emoji else nil
 					end,
 					size = 16,
+					project = id,
 				},
 				label = function(): string
 					local now = project_of(id)
@@ -1199,7 +1205,7 @@ end
 
 -- A subagent row's menu, on a secondary click: open it.
 function M.subagent_menu(open: () -> ()): { any }
-	return { { label = locale.s("common.open"), icon = "bot", on_select = open } }
+	return { { label = locale.s("common.open"), icon = "side-chat", on_select = open } }
 end
 
 -- ---------------------------------------------------------------------------
@@ -1279,10 +1285,25 @@ M.Page = ui.component(function(props: Props): Node
 		table.insert(parts, lanes(props, sid))
 	end
 
-	-- Where it stands: at its top, level with the transcript's first
-	-- message beside it, so a part opening or closing grows it downward and
-	-- nothing above moves. Taller than the panel, it scrolls.
+	-- Where it stands: in the panel's middle, its rows no wider than a
+	-- list of rows is in ds (`zeron.form.list`: a row's icon, its words and
+	-- the key at its end), each row's whole width still its target; and level with a
+	-- new chat's composer, by the composer's own rule (screens/chat/dock:
+	-- a little over the middle of the room under the title bar, read over
+	-- the panel's whole height). What it's in is at least as tall as the
+	-- scroll's window (measured) and centres it, the lift as room under it,
+	-- never more than the room left: taller than the panel, it starts at the
+	-- top and scrolls, nothing pushed out of reach.
 	local view = ui.ref()
+	local block = ui.ref()
+	local room = ui.use_state(0)
+	-- (Its middle that far over the scroll's: the composer's offset from the
+	-- page's middle, less half the strip over it.)
+	local lift = (props.above or 0) / 2 - Dock.hero_offset()
+	local function under(): number
+		local spare = room:get() - (block.height or 0)
+		return ui.raw(math.clamp(2 * lift, 0, math.max(spare, 0)), "the composer's lift, as room under the block")
+	end
 	return ui.scroll {
 		ref = view,
 		id = "panel-empty",
@@ -1291,7 +1312,6 @@ M.Page = ui.component(function(props: Props): Node
 		w_full = true,
 		grow = 1,
 		min_h = 0,
-		items = "center",
 		overscroll = "contain",
 		-- (Its edges fade where there's more to scroll to, as the sidebar's
 		-- and Settings' lists do.)
@@ -1300,13 +1320,29 @@ M.Page = ui.component(function(props: Props): Node
 		-- (What plugins' rows on it read: the session, and the letters it
 		-- passes on.)
 		provide = { session = sid, panel_key = passed },
+		on_resize = function(size: { w: number, h: number })
+			if room:peek() ~= size.h then
+				room:set(size.h)
+			end
+		end,
 		ui.column {
 			w_full = true,
-			max_w = 380,
-			px = "$space.4",
-			pb = "$space.6",
-			gap = "$space.5",
-			table.unpack(parts),
+			min_h = function(): number
+				return room:get()
+			end,
+			justify = "center",
+			items = "center",
+			pb = under,
+			ui.column {
+				id = "panel-home-block",
+				ref = block,
+				w_full = true,
+				max_w = ui.theme.get("zeron.form.list") :: number?,
+				px = "$space.4",
+				py = "$space.6",
+				gap = "$space.5",
+				table.unpack(parts),
+			},
 		},
 	}
 end)

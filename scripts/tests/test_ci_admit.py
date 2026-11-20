@@ -54,7 +54,7 @@ class ReservationTests(unittest.TestCase):
             job("linux / core-tests", "ubuntu-24.04"),
             job("windows / tests", "windows-2022", "in_progress", None),
             job("macos / macos-native", "macos-latest", conclusion="failure"),
-            job("macos / macos-frame-source", "macos-latest", conclusion="skipped"),
+            job("ios / ios-tests", "macos-latest", conclusion="skipped"),
         ]
         self.assertEqual(held(declared, jobs), {"linux": 2, "windows": 2, "macos": 0})
 
@@ -287,8 +287,8 @@ class PriorityAndLockTests(unittest.TestCase):
         snap = Snapshot([waiter(5, 1, linux=3, macos=2)], [held_(macos=6)], locked={90})
         d = decide(5, need(linux=3, macos=2), snap, self.BIG)
         self.assertEqual(d.used["macos"], 6 + full["macos"])
-        self.assertFalse(d.admit)  # 6 + 3 locked + 2 > 10
-        snap.holding = [held_(macos=5)]
+        self.assertFalse(d.admit)  # 6 + 4 locked + 2 > 10
+        snap.holding = [held_(macos=4)]
         self.assertTrue(decide(5, need(linux=3, macos=2), snap, self.BIG).admit)
 
     def test_the_locked_pull_request_goes_ahead_of_everyone_into_its_reservation(self):

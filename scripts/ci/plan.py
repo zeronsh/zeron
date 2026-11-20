@@ -16,7 +16,7 @@ environment (see main()); outputs are written to $GITHUB_OUTPUT:
                inputs and are skipped (Windows and voice skip single jobs; the
                other suites only run or skip as a whole)
   flags        JSON object, suite -> optional steps to run (fast tier: only
-               for their own files): ui "browser", macos "fixtures"
+               for their own files; FLAG_PATHS, none at present)
   pr           the pull request number (pull requests only), for the admit job name
 
 Reuse. A selected suite whose inputs (scripts/ci/reuse.py) are unchanged since
@@ -54,24 +54,22 @@ from reuse import matches  # noqa: E402
 # (scripts/tests/test_ci_plan.py checks).
 SUITE_JOBS: dict[str, list[tuple[str, str]]] = {
     "core": [("core-tests", "linux")],  # ui-tests.yml
-    "ui": [("ui-tests", "linux")],  # ui-tests.yml (UI + Linux browser)
     "cursor": [("cursor-compatibility", "linux")],  # cursor-compatibility.yml
     "edge": [("edge", "linux")],  # preview-tests.yml
     "installer": [("desktop-entry", "linux")],  # linux-installer.yml
     "voice": [("offline-linux", "linux"), ("windows-runtime", "windows")],  # voice-tests.yml
     "windows": [("tests", "windows"), ("app", "windows")],  # windows.yml
     "macos": [("macos-native", "macos")],  # macos.yml
-    "frame_source": [("macos-frame-source", "macos")],  # macos.yml
     "ios": [("ios-core", "linux"), ("ios-tests", "macos")],  # macos.yml (+ android publish below)
     "android": [("apk", "linux")],  # android.yml (+ publish on main, added below)
+    "zgx": [("zgx-macos", "macos"), ("zgx-linux", "linux")],  # zgx-tests.yml
 }
 # Run only nightly, manually or with `ci:full` (see the module docstring): voice
 # (the AEC3 audio stack and the packaged Windows media runtime; no failures of
 # their own in the two weeks measured, and the rest of voice is tested in
-# core-tests, ios-core and the Windows tests) and the Linux native browser
-# fixture (its failures were window-timing flakes and package downloads).
+# core-tests, ios-core and the Windows tests).
 NIGHTLY_SUITES = ("voice",)
-NIGHTLY_FLAGS = (("ui", "browser"),)
+NIGHTLY_FLAGS: tuple[tuple[str, str], ...] = ()
 # Suites whose jobs are independent, so one can be skipped while another runs.
 SPLITTABLE = ("voice", "windows")
 
@@ -100,12 +98,19 @@ MOBILE_CORE = [
 VOICE_PATHS = ["crates/audio/**", "crates/voice-media/**", "dist/voice/**", "scripts/package-voice-runtime.py",
                "scripts/codex-voice-remote-smoke.py", "scripts/tests/*voice*", ".github/workflows/voice-tests.yml"]
 
+# The zgx suite's own files, and the crates it builds: main() replaces ZGX_CORE
+# with the closure of reuse.SUITE_PACKAGES["zgx"]; this list is the fallback.
+ZGX_PATHS = ["apps/zgx/**", "scripts/ci/nextest.toml", "scripts/ci/test-zgx.sh", "scripts/ci/zgx-known-failures.txt",
+             ".github/workflows/zgx-tests.yml"]
+ZGX_CORE = [
+    "crates/engine/**", "crates/plugin-guard/**", "crates/zatex/**", "crates/theme/**",
+    "crates/preview-label/**", "crates/cli/**", "crates/launch/**", "crates/notify/**",
+    "crates/proto/**", "crates/update/**", "crates/visual/**", "crates/visual-gpu/**",
+]
+
 BROAD: dict[str, list[str]] = {
     "core": CARGO + ["crates/**", "apps/zeron/**", "scripts/ci/**", ".github/actions/linux-ci/**",
                      ".github/workflows/ui-tests.yml"],
-    "ui": CARGO + ["crates/**", "scripts/ci/**", ".github/actions/linux-ci/**",
-                   "scripts/test-linux-browser.sh", "scripts/test-browser-storage.py",
-                   ".github/workflows/ui-tests.yml"],
     "cursor": CARGO + ["crates/harness/**", "crates/doc/**", "crates/engine/**",
                        "scripts/*cursor-sdk*", ".github/workflows/cursor-*.yml"],
     "edge": ["edge/**", ".github/workflows/preview-tests.yml"],
@@ -116,14 +121,14 @@ BROAD: dict[str, list[str]] = {
     "windows": CARGO + ["crates/**", "apps/zeron/**", "dist/windows/**", "scripts/test-windows-*.ps1",
                         "scripts/package-windows.ps1", ".github/actions/windows-ci-setup/**",
                         ".github/workflows/windows.yml"],
-    "macos": CARGO + ["crates/**", "apps/zeron/**", "edge/**", "scripts/run-macos-browser-fixture.sh",
-                      "scripts/test-browser-storage.py", "scripts/ci/run-macos-fixture.sh",
-                      "dist/macos/Info.plist", ".github/workflows/macos.yml"],
-    # Tests the pinned GPUI checkout: only when the pin moves (see gpui_moved()).
-    "frame_source": [".github/workflows/macos.yml"],
+    "macos": CARGO + ["crates/**", "apps/zeron/**", "dist/macos/Info.plist", ".github/workflows/macos.yml"],
     "ios": CARGO + MOBILE_CORE + ["apps/ios/**", "scripts/ios/**", ".github/workflows/macos.yml"],
     "android": CARGO + ["apps/android/**", "crates/**", "scripts/android/**", "apps/ios/Zeron/Fonts/**",
                         "apps/ios/Zeron/Assets.xcassets/**", ".github/workflows/android.yml"],
+    # The zgx interface (its own workspace: apps/zgx/Cargo.lock) with its Rust and
+    # Luau UI tests, and the engine's plugin host (also on macOS here; core-tests
+    # runs it on Linux).
+    "zgx": CARGO + ZGX_PATHS + ZGX_CORE,
 }
 
 # Fast tier: the files that always select the platform suite...
@@ -135,8 +140,6 @@ FAST_PATHS: dict[str, list[str]] = {
                         "crates/launch/**"],
     "macos": CARGO + ["apps/zeron/**", "crates/update/**", "crates/cli/**", "crates/launch/**",
                       "crates/preview/**", "crates/text/**",
-                      "edge/package.json", "edge/package-lock.json", "scripts/run-macos-browser-fixture.sh",
-                      "scripts/test-browser-storage.py", "scripts/ci/run-macos-fixture.sh",
                       "dist/macos/Info.plist", ".github/workflows/macos.yml"],
     # The Rust is the same code the Linux suites test (no Android cfg), so a pull
     # request builds the APK for the app, the FFI crate and dependency changes.
@@ -148,8 +151,8 @@ FAST_PATHS: dict[str, list[str]] = {
 # Fast tier: jobs and steps of a selected suite that only run for their own files.
 # On the full tier everything runs.
 JOB_PATHS: dict[tuple[str, str], list[str]] = {
-    # Release build, packaging, installer and startup probes (`tests` already
-    # compiles the app).
+    # Release build, packaging, installer and CLI start-up probes (`tests`
+    # already compiles the binary).
     ("windows", "app"): CARGO + ["apps/zeron/**", "dist/windows/**", "scripts/test-windows-*.ps1",
                                  "scripts/package-windows.ps1", ".github/actions/windows-ci-setup/**",
                                  ".github/workflows/windows.yml", "crates/update/**"],
@@ -158,18 +161,9 @@ JOB_PATHS: dict[tuple[str, str], list[str]] = {
     ("ios", "ios-tests"): CARGO + ["apps/ios/**", "scripts/ios/**", "crates/mobile/**", "crates/mobile-bindgen/**",
                                    "crates/client/**", ".github/workflows/macos.yml"],
 }
-# Fast tier: optional steps (flags passed to the suite workflow, and part of its fingerprint).
-FLAG_PATHS: dict[tuple[str, str], list[str]] = {
-    # Native browser fixture on X11/Wayland/OpenGL.
-    ("ui", "browser"): CARGO + ["crates/ui/src/browser/**", "crates/ui/examples/browser-fixture*",
-                                "scripts/test-linux-browser.sh", "scripts/test-browser-storage.py",
-                                ".github/workflows/ui-tests.yml"],
-    # WebKit browser fixture and the preview (HMR) fixture.
-    ("macos", "fixtures"): CARGO + ["crates/ui/src/browser/**", "crates/ui/examples/browser-fixture*",
-                                    "crates/ui/examples/preview-fixture*", "crates/preview/**", "edge/**",
-                                    "scripts/run-macos-browser-fixture.sh", "scripts/test-browser-storage.py",
-                                    "scripts/ci/run-macos-fixture.sh", ".github/workflows/macos.yml"],
-}
+# Fast tier: optional steps (flags passed to the suite workflow, and part of its
+# fingerprint), (suite, flag) -> the files that turn them on. None at present.
+FLAG_PATHS: dict[tuple[str, str], list[str]] = {}
 
 # A version bump (workspace version in Cargo.toml and the workspace packages'
 # versions in Cargo.lock) changes no code: it selects nothing and is left out of
@@ -189,9 +183,9 @@ PLATFORM_PATHS = {
 }
 PLATFORM_CODE = {
     "windows": re.compile(PLATFORM_CFG + r"|cfg!?\(\s*windows\b|\bwindows(?:_sys)?::|\bwin32|\bwinapi\b|\bmsvc\b|\bhwnd\b"
-                          r"|direct3d|directwrite|\bdwrite|\bd3d1[12]|gpui_windows", re.IGNORECASE),
+                          r"|direct3d|directwrite|\bdwrite|\bd3d1[12]", re.IGNORECASE),
     "macos": re.compile(PLATFORM_CFG + r"|\bobjc2?\b|\bcocoa\b|\bappkit\b|core_?text|\bwebkit|wkwebview"
-                        r"|\bns(?:view|window|string|app|event)\b|gpui_macos|\bcore_foundation", re.IGNORECASE),
+                        r"|\bns(?:view|window|string|app|event)\b|\bcore_foundation", re.IGNORECASE),
 }
 COMMENT = re.compile(r"^\s*(?://|/\*|\*)")
 
@@ -238,31 +232,24 @@ def version_only(f: dict) -> bool:
     return bool(changed) and all(VERSION_LINE.match(line) for line in changed)
 
 
-def gpui_moved(files: list[dict]) -> bool:
-    """Whether the pinned GPUI (zeronsh/zui) checkout changed."""
-    for f in files:
-        if f["filename"] not in ("Cargo.toml", "Cargo.lock"):
-            continue
-        patch = f.get("patch")
-        if patch is None or re.search(r"^[+-].*(gpui|zui)", patch, re.MULTILINE):
-            return True
-    return False
-
-
 def plan(files: list[dict] | None, tier: str, mobile: list[str] | None = None,
-         nightly: bool = False) -> dict[str, bool]:
+         nightly: bool = False, zgx: list[str] | None = None) -> dict[str, bool]:
     """files: [{"filename", "previous_filename"?, "patch"?}], or None for "everything".
+
+    `mobile`, `zgx`: the crate directories (`crates/x/**`) the iOS/Android and
+    zgx suites build, when the workspace could be read.
 
     `nightly`: the nightly schedule, a manual run or `ci:full`, which also run NIGHTLY_SUITES.
     """
-    suites = select(files, tier, mobile)
+    suites = select(files, tier, mobile, zgx)
     if not nightly:
         for suite in NIGHTLY_SUITES:
             suites[suite] = False
     return suites
 
 
-def select(files: list[dict] | None, tier: str, mobile: list[str] | None) -> dict[str, bool]:
+def select(files: list[dict] | None, tier: str, mobile: list[str] | None,
+           zgx: list[str] | None = None) -> dict[str, bool]:
     if files is None:
         return {suite: True for suite in SUITE_JOBS}
     files = [f for f in files if not version_only(f)]
@@ -273,8 +260,9 @@ def select(files: list[dict] | None, tier: str, mobile: list[str] | None) -> dic
     broad = dict(BROAD)
     if mobile is not None:
         broad["ios"] = CARGO + mobile + ["apps/ios/**", "scripts/ios/**", ".github/workflows/macos.yml"]
+    if zgx is not None:
+        broad["zgx"] = CARGO + ZGX_PATHS + zgx
     suites = {suite: any(matches(p, broad[suite]) for p in paths) for suite in SUITE_JOBS}
-    suites["frame_source"] = suites["frame_source"] or gpui_moved(files)
     if tier == "fast":
         for suite in PLATFORM_FAST_SUITES:
             if not suites[suite]:
@@ -433,7 +421,12 @@ def main() -> int:
         mobile = [d + "/**" for d in sorted(reuse.Workspace(".").closure(["zeron-mobile"]))] + ["crates/mobile-bindgen/**"]
     except (OSError, ValueError, KeyError) as error:
         print(f"::warning::could not read the workspace ({error}); using the static mobile core list")
-    selected = plan(files, tier, mobile, nightly)
+    zgx = None
+    try:
+        zgx = [d + "/**" for d in sorted(reuse.Workspace(".").closure(reuse.SUITE_PACKAGES["zgx"]))]
+    except (OSError, ValueError, KeyError) as error:
+        print(f"::warning::could not read the workspace ({error}); using the static zgx crate list")
+    selected = plan(files, tier, mobile, nightly, zgx)
     off, flags = gated(files, tier, selected, nightly)
     # What a job does depends on its gated jobs and flags too: they are part of the fingerprint.
     variants = {suite: " ".join(f"-{j}" for j in off.get(suite, [])) + " " + " ".join(flags.get(suite, []))
@@ -499,7 +492,7 @@ def main() -> int:
         lines += ["", "Windows, macOS and Android run on pull requests only when the change looks "
                   "platform specific. Add the `ci:full` label and re-run for everything."]
     if not nightly:
-        lines += ["", "Nightly only (or with `ci:full`): voice and the Linux native browser fixture."]
+        lines += ["", "Nightly only (or with `ci:full`): voice."]
     files_read = {path for paths in extra.values() for path in paths}
     if files_read:
         lines += ["", "Files outside their packages that Rust suites read (part of their fingerprints): "

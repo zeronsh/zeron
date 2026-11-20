@@ -460,14 +460,22 @@ return ui.column {
         assert!(focused(&app, &editor));
 
         // Outside the selection (here a caret), as macOS has it: the word
-        // there selected, and the menu about it.
+        // there selected, and the menu about it. Elsewhere (zgx's editor,
+        // as GTK's and Windows' fields have it), the caret goes there and
+        // nothing is selected.
         let off = middle(editor.text_area(3..4).unwrap());
         secondary_click(&mut app, off);
-        assert_eq!(field(&said(&app), "selected"), Value::from("there"));
-        assert_eq!(editor.selection(), (1, 6));
-        app.desktop.as_ref().unwrap().copy("");
-        choose(&mut app, off, "Copy");
-        assert_eq!(app.desktop.as_ref().unwrap().clipboard(), "there");
+        if cfg!(target_os = "macos") {
+            assert_eq!(field(&said(&app), "selected"), Value::from("there"));
+            assert_eq!(editor.selection(), (1, 6));
+            app.desktop.as_ref().unwrap().copy("");
+            choose(&mut app, off, "Copy");
+            assert_eq!(app.desktop.as_ref().unwrap().clipboard(), "there");
+        } else {
+            assert_eq!(field(&said(&app), "selected"), Value::from(""));
+            let (start, end) = editor.selection();
+            assert!(start == end && (3..=4).contains(&start), "a caret under the pointer: {:?}", editor.selection());
+        }
         assert_eq!(app.error(), None);
     }
 }

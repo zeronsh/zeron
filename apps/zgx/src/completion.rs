@@ -16,6 +16,7 @@
 use std::{cell::RefCell, future::Future, pin::Pin, rc::Rc, task::Poll};
 
 use serde_json::{Map, Value as Json, json};
+use zeron_proto::invocation::{Invocation, SkillCommand};
 use zgx_script::{ScriptHost, Value};
 
 use crate::engine;
@@ -175,13 +176,6 @@ fn display_name(name: &str) -> String {
         .join(" ")
 }
 
-/// `Invocation::link`: `[/name](zeron-invoke:<hex of its JSON>)`.
-fn link(prefix: char, name: &str, invocation: &Json) -> String {
-    let bytes = serde_json::to_vec(invocation).unwrap_or_default();
-    let payload: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    let label = name.replace('\\', "\\\\").replace('[', "\\[").replace(']', "\\]").replace('`', "\\`");
-    format!("[{prefix}{label}](zeron-invoke:{payload})")
-}
 
 /// The shipping composer's `invocation_candidates`.
 fn candidates(commands: &[Json], skills: &[Json]) -> Vec<Row> {
@@ -210,7 +204,7 @@ fn candidates(commands: &[Json], skills: &[Json]) -> Vec<Row> {
             name: name.to_string(),
             label: format!("/{name}"),
             detail,
-            link: link('/', name, &json!({ "kind": "command", "name": name })),
+            link: Invocation::Command { name: name.to_string() }.link(),
         });
     }
     for s in skills {
@@ -220,10 +214,15 @@ fn candidates(commands: &[Json], skills: &[Json]) -> Vec<Row> {
         let name = s["name"].as_str().unwrap_or("");
         let path = s["path"].as_str().unwrap_or("");
         let description = s["description"].as_str().unwrap_or("");
-        let mut invocation = json!({ "kind": "skill", "name": name, "path": path });
-        if s["command"].is_object() {
-            invocation["command"] = s["command"].clone();
-        }
+        // The engine's own reference, byte for byte: it reads only a link
+        // that is exactly what `Invocation::link` writes, and leaves any
+        // other as the words it is (a skill's slash command, with its keys
+        // in another order, reached Claude Code as a bare link).
+        let invocation = Invocation::Skill {
+            name: name.to_string(),
+            path: path.to_string(),
+            command: serde_json::from_value::<SkillCommand>(s["command"].clone()).ok(),
+        };
         rows.push(Row {
             kind: "skill",
             name: name.to_string(),
@@ -233,7 +232,7 @@ fn candidates(commands: &[Json], skills: &[Json]) -> Vec<Row> {
             } else {
                 format!("{description} — {path}")
             },
-            link: link('$', name, &invocation),
+            link: invocation.link(),
         });
     }
     rows
@@ -281,6 +280,38 @@ mod tests {
         assert_eq!(decode(&rows[1].link), json!({ "kind": "skill", "name": "a[b]", "path": "/s/x.md" }));
     }
 
+    /// A picked chip reaches the agent as if its slash command were typed:
+    /// the engine reads the reference and Claude Code gets `/plugin:skill
+    /// args` at the start of the message (the only way a skill only its
+    /// user may start, `disable-model-invocation`, runs), for a plugin's
+    /// skill and a plain one, and a command, alike.
+    #[test]
+    fn a_picked_skill_reaches_claude_code_as_its_slash_command() {
+        use zeron_proto::{
+            HarnessId,
+            invocation::{harness_prompt, invocation_links},
+        };
+        let rows = candidates(
+            &[json!({ "name": "review" }), json!({ "name": "pstack:poteto-mode" }), json!({ "name": "tidy" })],
+            &[
+                json!({ "name": "pstack:poteto-mode", "path": "/p/pstack/skills/poteto-mode/SKILL.md", "description": "Poteto", "enabled": true, "command": { "name": "pstack:poteto-mode", "harness": "claude-code" } }),
+                json!({ "name": "tidy", "path": "/h/.claude/skills/tidy/SKILL.md", "description": "Tidy", "enabled": true, "command": { "name": "tidy", "harness": "claude-code" } }),
+            ],
+        );
+        let sent = |label: &str| {
+            let row = rows.iter().find(|r| r.label == label).unwrap();
+            let prompt = format!("{} focus on tests", row.link);
+            assert_eq!(invocation_links(&prompt).len(), 1, "the engine doesn't read {}", row.link);
+            harness_prompt(&prompt, HarnessId::ClaudeCode)
+        };
+        assert_eq!(sent("Poteto Mode"), "/pstack:poteto-mode focus on tests");
+        assert_eq!(sent("Tidy"), "/tidy focus on tests");
+        assert_eq!(sent("/review"), "/review focus on tests");
+        // Codex keeps the reference: it builds its own skill input from it.
+        let poteto = &rows.iter().find(|r| r.label == "Poteto Mode").unwrap().link;
+        assert_eq!(invocation_links(&harness_prompt(poteto, HarnessId::Codex)).len(), 1);
+    }
+
     /// Real lists from a live engine, when `ZGX_LIVE_INVOCATIONS` names a
     /// folder of `ListCommands-<harness>.json` and `ListSkills-<harness>.json`
     /// (an isolated engine's answers): every row merges, and every link reads
@@ -303,6 +334,7 @@ mod tests {
             assert!(commands + skills > 0, "{harness} listed nothing");
             for r in &rows {
                 let back = decode(&r.link);
+                assert_eq!(zeron_proto::invocation::invocation_links(&r.link).len(), 1, "the engine doesn't read {}", r.link);
                 assert_eq!(back["name"], json!(r.name), "{}", r.link);
                 assert_eq!(back["kind"], json!(r.kind));
             }

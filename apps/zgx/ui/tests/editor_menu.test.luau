@@ -61,8 +61,12 @@ test("editor menu: a secondary click in an editor opens the design system's menu
 	local panel = string.match(app:tree("role:menu"), "^[^\n]*") or ""
 	expect(string.find(panel, " 232x", 1, true) ~= nil).to_be(true)
 	expect(string.find(app:tree('role:menuitem "Cut"'), " 222x28", 1, true) ~= nil).to_be(true)
-	expect(app:has('role:menuitem "Cut" >> "⌘X"')).to_be(true)
-	expect(app:has('role:menuitem "Paste" >> "⌘V"')).to_be(true)
+	-- (As this platform writes them: ⌘X on macOS, Ctrl+X elsewhere.)
+	local function keyed(item: string, key: string): boolean
+		return app:has(`role:menuitem "{item}" >> "⌘{key}"`) or app:has(`role:menuitem "{item}" >> "Ctrl+{key}"`)
+	end
+	expect(keyed("Cut", "X")).to_be(true)
+	expect(keyed("Paste", "V")).to_be(true)
 	-- A ds field has it too.
 	rows = open(app, 'role:textbox "Field"', FULL)
 	expect(rows[2].name).to_be("Cut")

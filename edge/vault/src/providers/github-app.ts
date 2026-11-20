@@ -10,13 +10,13 @@
  *    never minted for, whatever id a caller names.
  * 2. With an App JWT (RS256, signed by `GITHUB_APP_PRIVATE_KEY`, `iss` = the
  *    client id), `POST /app/installations/{id}/access_tokens`: a one-hour
- *    token for every repository of that installation, acting as the App.
+ *    token for that one repository, acting as the App.
  *
  * GitHub downloads App keys as PKCS#1 (`BEGIN RSA PRIVATE KEY`); WebCrypto
  * only imports PKCS#8, so a PKCS#1 key is wrapped in a PrivateKeyInfo first.
  */
 import { fromBase64, toBase64Url, utf8 } from "../encoding";
-import { GITHUB_API, nextPage } from "./github-repos";
+import { GITHUB_API, nextPage, toInstallation, type FoundInstallation } from "./github-repos";
 import { isObject, nonEmptyString, upstream, type FetchFn } from "./types";
 
 /** GitHub caps App JWTs at 10 minutes; `iat` is backdated for clock drift. */
@@ -31,8 +31,20 @@ const RSA_ALGORITHM_IDENTIFIER = [0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86
 
 export const isRepoFullName = (value: unknown): value is string => typeof value === "string" && REPO_RE.test(value);
 
-export const installUrl = (slug: string): string =>
-  `https://github.com/apps/${encodeURIComponent(slug)}/installations/new`;
+/** Where the App gets installed: GitHub's chooser of accounts and
+ * organizations, or the page for one of them when its id is known. */
+export const installUrl = (slug: string, targetId?: number): string => {
+  const base = `https://github.com/apps/${encodeURIComponent(slug)}/installations/new`;
+  return targetId === undefined ? base : `${base}/permissions?suggested_target_id=${targetId}`;
+};
+
+/** Where an installation's repositories are chosen. */
+export const manageInstallationUrl = (id: number, target?: string, targetType?: string): string | undefined => {
+  if (targetType === "Organization" && target) {
+    return `https://github.com/organizations/${encodeURIComponent(target)}/settings/installations/${id}`;
+  }
+  return targetType === "User" ? `https://github.com/settings/installations/${id}` : undefined;
+};
 
 const derLength = (length: number): number[] => {
   if (length < 0x80) return [length];
@@ -94,7 +106,7 @@ const headers = (bearer: string) => ({
 });
 
 export type InstallationLookup =
-  | { readonly kind: "found"; readonly id: number }
+  | ({ readonly kind: "found" } & FoundInstallation)
   /** No usable installation of the App on `owner` that the user can reach. */
   | { readonly kind: "none" }
   /** GitHub answered 401: the user token is dead. */
@@ -120,10 +132,14 @@ export const findInstallation = async (
       return { kind: "failed", reason: "unexpected GitHub response" };
     }
     for (const item of body.installations) {
-      if (!isObject(item) || typeof item.id !== "number" || !isObject(item.account)) continue;
-      const login = item.account.login;
-      if (typeof login === "string" && login.toLowerCase() === wanted && !item.suspended_at) {
-        return { kind: "found", id: item.id };
+      const found = toInstallation(item);
+      if (found?.target?.toLowerCase() === wanted && !found.suspended) {
+        return {
+          kind: "found",
+          id: found.id,
+          target: found.target,
+          ...(found.targetType ? { targetType: found.targetType } : {})
+        };
       }
     }
     url = nextPage(response.headers.get("link"));
@@ -193,6 +209,53 @@ export const mintInstallationToken = async (
     return { kind: "failed", reason: "unexpected GitHub response" };
   }
   return { kind: "ok", token: body.token, expiresAt };
+};
+
+/** The numeric id of an account or organization, for an install link aimed at
+ * it. Best effort: the link works without it. */
+export const accountId = async (userToken: string, login: string, fetchFn: FetchFn): Promise<number | undefined> => {
+  const response = await upstream(fetchFn, `${GITHUB_API}/users/${encodeURIComponent(login)}`, { headers: headers(userToken) });
+  if (!response?.ok) return undefined;
+  const body: unknown = await response.json().catch(() => undefined);
+  return isObject(body) && typeof body.id === "number" ? body.id : undefined;
+};
+
+/** What revoking a token came to. `gone`: GitHub no longer knows it (expired,
+ * revoked already): as good as revoked. `retry`: GitHub didn't say. */
+export type Revocation = "revoked" | "gone" | "retry";
+
+/** Revoke an installation token, authenticated as itself: GitHub's one way to
+ * end one before its hour is up. */
+export const revokeInstallationToken = async (token: string, fetchFn: FetchFn): Promise<Revocation> => {
+  const response = await upstream(fetchFn, `${GITHUB_API}/installation/token`, { method: "DELETE", headers: headers(token) });
+  if (!response) return "retry";
+  if (response.status === 204 || response.ok) return "revoked";
+  return response.status === 401 || response.status === 404 ? "gone" : "retry";
+};
+
+/** Revoke a user token of the App's (`DELETE /applications/{client_id}/token`,
+ * authenticated with the App's client id and secret). A 401/403 is our App's
+ * credentials, so another try later. */
+export const revokeUserToken = async (
+  clientId: string,
+  clientSecret: string,
+  accessToken: string,
+  fetchFn: FetchFn
+): Promise<Revocation> => {
+  const response = await upstream(fetchFn, `${GITHUB_API}/applications/${encodeURIComponent(clientId)}/token`, {
+    method: "DELETE",
+    headers: {
+      accept: "application/vnd.github+json",
+      authorization: `Basic ${btoa(`${clientId}:${clientSecret}`)}`,
+      "content-type": "application/json",
+      "user-agent": "zeron-vault",
+      "x-github-api-version": "2022-11-28"
+    },
+    body: JSON.stringify({ access_token: accessToken })
+  });
+  if (!response) return "retry";
+  if (response.status === 204 || response.ok) return "revoked";
+  return response.status === 404 || response.status === 422 ? "gone" : "retry";
 };
 
 /** Canary: do the App credentials still sign in? (`GET /app` with the JWT.) */

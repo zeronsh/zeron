@@ -27,6 +27,7 @@ impl DocsStore {
                 params![doc, kind],
             )?;
             tx.commit()?;
+            self.note_sync_jobs_changed();
             Ok(())
         })
     }
@@ -44,7 +45,11 @@ impl DocsStore {
     pub fn reconcile_page(&self, version: i64, ids: &[String]) -> Result<(), StoreError> {
         store_blocking(|| {
             let mut conn = self.conn();
-            let tx = conn.transaction()?;
+            // IMMEDIATE: it reads, then writes. A deferred transaction whose
+            // read predates another connection's commit (the snapshot
+            // connection's) fails its first write at once with
+            // SQLITE_BUSY_SNAPSHOT; this one waits for the write lock first.
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let current: Option<i64> = tx
                 .query_row(
                     "SELECT version FROM chat_sync_jobs WHERE doc_id='*' AND kind='reconcile'",
@@ -71,6 +76,7 @@ impl DocsStore {
                 )?;
             }
             tx.commit()?;
+            self.note_sync_jobs_changed();
             Ok(())
         })
     }
@@ -90,10 +96,13 @@ impl DocsStore {
 
     pub fn complete_sync_job(&self, doc: &str, kind: &str, version: i64) -> Result<(), StoreError> {
         store_blocking(|| {
-            self.conn().execute(
+            let removed = self.conn().execute(
                 "DELETE FROM chat_sync_jobs WHERE doc_id=?1 AND kind=?2 AND version=?3",
                 params![doc, kind, version],
             )?;
+            if removed > 0 {
+                self.note_sync_jobs_changed();
+            }
             Ok(())
         })
     }
@@ -198,6 +207,28 @@ mod tests {
             store.pending_viewer_deliveries("", 1).unwrap(),
             vec!["chat-001"]
         );
+    }
+
+    /// Another connection commits while a page is starting (the snapshot
+    /// connection, on every save): the page waits for the write lock and
+    /// lands, rather than failing with SQLITE_BUSY_SNAPSHOT.
+    #[test]
+    fn a_reconcile_page_waits_out_another_connections_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(DocsStore::open(dir.path()).unwrap());
+        store.schedule_sync_job("*", "reconcile").unwrap();
+        let (version, _) = store.reconciliation_progress().unwrap().unwrap();
+        let other = rusqlite::Connection::open(dir.path().join("docs.sqlite3")).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE; UPDATE sync_job_clock SET value = value + 100 WHERE id = 1;").unwrap();
+        let paging = {
+            let store = store.clone();
+            std::thread::spawn(move || store.reconcile_page(version, &["a".into()]))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        other.execute_batch("COMMIT;").unwrap();
+        paging.join().unwrap().expect("the page failed instead of waiting");
+        assert_eq!(store.reconciliation_progress().unwrap(), Some((version, "a".into())));
+        assert_eq!(store.pending_sync_docs("", 10).unwrap(), vec!["a"]);
     }
 
     #[test]

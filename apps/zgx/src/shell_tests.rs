@@ -397,8 +397,7 @@ fn a_session_is_renamed_in_its_row() {
     assert!(app.find(field).is_none(), "Esc closes it");
     assert!(!calls(&app).contains("Nope"), "Esc keeps the old name");
     // Its menu's Rename: the same field, in the row.
-    app.click("#sidebar >> role:button \"Tidy the tests\"");
-    app.frames(10);
+    crate::focus_tests::keys_on_row(&mut app, "#sidebar >> role:button \"Tidy the tests\"");
     app.keys("shift+F10");
     assert!(app.wait_until(|app| app.find("role:menuitem \"Rename\"").is_some()));
     app.frames(30);
@@ -428,8 +427,7 @@ fn a_sessions_copy_menu_copies_and_says_so() {
     let mut app = TestApp::with_desktop(|runtime| ScriptHost::new(runtime, path.clone()));
     app.ui.scene.borrow_mut().resize(W, H);
     app.frames(30);
-    app.click("#sidebar >> role:button \"Write the docs\"");
-    app.frames(10);
+    crate::focus_tests::keys_on_row(&mut app, "#sidebar >> role:button \"Write the docs\"");
     app.keys("shift+F10");
     assert!(app.wait_until(|app| app.find("role:menuitem \"Copy\"").is_some()));
     app.frames(20);
@@ -446,8 +444,7 @@ fn a_sessions_copy_menu_copies_and_says_so() {
     let mut app = TestApp::with_desktop(|runtime| ScriptHost::new(runtime, path.clone()));
     app.ui.scene.borrow_mut().resize(W, H);
     app.frames(30);
-    app.click("#sidebar >> role:button \"Tidy the tests\"");
-    app.frames(10);
+    crate::focus_tests::keys_on_row(&mut app, "#sidebar >> role:button \"Tidy the tests\"");
     app.keys("shift+F10");
     assert!(app.wait_until(|app| app.find("role:menuitem \"Copy\"").is_some()));
     app.frames(20);
@@ -477,8 +474,7 @@ fn deleting_a_session_asks_first() {
         })
     };
     let ask = |app: &mut TestApp| {
-        app.click("#sidebar >> role:button \"Tidy the tests\"");
-        app.frames(10);
+        crate::focus_tests::keys_on_row(app, "#sidebar >> role:button \"Tidy the tests\"");
         app.keys("shift+F10");
         assert!(app.wait_until(|app| app.find("role:menuitem \"Delete…\"").is_some()));
         app.frames(20);
@@ -635,4 +631,69 @@ fn removing_a_project_asks_first() {
         }),
         "its sessions with it"
     );
+}
+
+/// A tab carried near an end of its strip scrolls the strip under it, as
+/// long as it's held there; let go, it lands among the others. (Five chats
+/// composed in tabs in a window 800 wide: the top bar's strip overflows,
+/// scrolled to its end, the last tab showing.)
+#[test]
+fn a_tab_carried_near_an_end_of_its_strip_scrolls_it() {
+    let mut app = mount();
+    app.ui.scene.borrow_mut().resize(800., H);
+    app.frames(30);
+    assert!(app.host.run_command("partner_chats"));
+    app.frames(10);
+    app.click("#shell-sidebar >> role:button \"Answer the review\"");
+    app.frames(30);
+    let rows: Vec<String> = ["a1", "a2", "a3", "b1", "b2"]
+        .iter()
+        .enumerate()
+        .map(|(i, id)| format!(r#"{{"kind":"row","key":"{id}","children":[{{"kind":"leaf","id":"{id}"}},{{"kind":"leaf","id":"p{}"}}]}}"#, i + 1))
+        .collect();
+    let tabs = zgx_script::Value::from_json(&format!("[{}]", rows.join(","))).unwrap();
+    app.host.set_state("screens/shell/split.luau::inset_split_trees", tabs).unwrap();
+    app.frames(60);
+    let room = app.bounds("#session-tabs-scroll");
+    let first = app.bounds("#session-tab-a1").x;
+    assert!(first < room.x - 1., "the strip overflows, scrolled past its start: a1 at {first}, the strip at {}", room.x);
+    // b2 carried to the strip's start and held there.
+    let from = app.bounds("#session-tab-b2");
+    let (x, y) = (from.x + from.width / 2., from.y + from.height / 2.);
+    let button = PointerButton::Primary;
+    app.ui.dispatch(InputEvent::PointerMove { x, y });
+    app.ui.dispatch(InputEvent::PointerDown { x, y, button });
+    app.frames(2);
+    let to = room.x + 8.;
+    for i in 1..=20 {
+        let px = x + (to - x) * i as f32 / 20.;
+        app.ui.dispatch(InputEvent::PointerMove { x: px, y });
+        app.frames(1);
+    }
+    let held = app.bounds("#session-tab-a1").x;
+    app.frames(60);
+    let after = app.bounds("#session-tab-a1").x;
+    assert!(after > held + 20., "held near the start, the strip scrolls toward it: a1 {held} then {after}");
+    app.ui.dispatch(InputEvent::PointerUp { x: to, y, button });
+    app.ui.input.forget_clicks();
+    app.frames(60);
+    // Carried off the strip, down over the page, and held there: the window
+    // keeps all its room (the tab stays its strip's, taking none of it).
+    let shell = app.bounds("#shell");
+    let from = app.bounds("#session-tab-a2");
+    let (x, y) = (from.x + from.width / 2., from.y + from.height / 2.);
+    app.ui.dispatch(InputEvent::PointerMove { x, y });
+    app.ui.dispatch(InputEvent::PointerDown { x, y, button });
+    app.frames(2);
+    for i in 1..=20 {
+        app.ui.dispatch(InputEvent::PointerMove { x: x + i as f32 * 5., y: y + i as f32 * 15. });
+        app.frames(1);
+    }
+    app.frames(20);
+    let held = app.bounds("#shell");
+    assert_eq!(held, shell, "held off the strip, the window's content keeps its room");
+    app.ui.dispatch(InputEvent::PointerUp { x: x + 100., y: y + 300., button });
+    app.ui.input.forget_clicks();
+    app.frames(60);
+    assert_eq!(app.error(), None);
 }

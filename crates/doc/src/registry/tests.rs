@@ -617,6 +617,61 @@ fn field_mutators_round_trip() {
     assert_eq!(dev.last_seen_at, Some(ts(6_000)));
 }
 
+/// Host stamps repeat on every turn; one that says nothing new pushes
+/// nothing (each push is a stored row in the room and a broadcast).
+#[test]
+fn repeated_host_stamps_push_only_what_changed() {
+    let mut ws = RegistryDoc::new("dev-a");
+    ws.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    ws.take_pushable();
+    let pushed = |ws: &mut RegistryDoc| -> Vec<Vec<String>> {
+        ws.take_pushable()
+            .into_iter()
+            .flat_map(|b| b.ops)
+            .map(|op| op.set.unwrap_or_default().into_keys().collect())
+            .collect()
+    };
+    let context = |branch: &str, at: i64| zeron_proto::ConversationSourceContext {
+        checkout_id: "co-1".into(),
+        repo_root: "/repo".into(),
+        cwd: "/repo".into(),
+        branch: branch.into(),
+        head_sha: None,
+        observed_at: ts(at),
+    };
+
+    assert!(ws.set_chat_harness_session("chat-1", "hs-1", "/repo", Some("claude")).unwrap());
+    assert_eq!(pushed(&mut ws).len(), 1);
+    assert!(ws.set_chat_harness_session("chat-1", "hs-1", "/repo", Some("claude")).unwrap());
+    assert!(pushed(&mut ws).is_empty(), "the same session again");
+    ws.set_chat_harness_session("chat-1", "hs-2", "/repo", Some("claude")).unwrap();
+    assert_eq!(pushed(&mut ws), vec![vec!["harnessSessionId".to_string()]]);
+
+    ws.set_chat_source_context("chat-1", &context("main", 1_000)).unwrap();
+    assert_eq!(pushed(&mut ws).len(), 1);
+    ws.set_chat_source_context("chat-1", &context("main", 9_000)).unwrap();
+    assert!(pushed(&mut ws).is_empty(), "only the observation time moved");
+    ws.set_chat_source_context("chat-1", &context("feature", 9_000)).unwrap();
+    assert_eq!(pushed(&mut ws), vec![vec!["branch".to_string(), "sourceContext".to_string()]]);
+
+    ws.set_chat_branch("chat-1", "feature").unwrap();
+    ws.set_chat_checkout("chat-1", "co-1").unwrap();
+    ws.set_chat_room_gen("chat-1", 2).unwrap();
+    assert_eq!(pushed(&mut ws), vec![vec!["roomGen".to_string()]]);
+    ws.set_chat_room_gen("chat-1", 2).unwrap();
+    ws.set_chat_cwd("chat-1", "/tmp").unwrap();
+    assert_eq!(pushed(&mut ws), vec![vec!["cwd".to_string()]]);
+
+    // A missing field reads as null: clearing it again is no write either.
+    ws.set_chat_harness_session("chat-1", "hs-2", "/repo", None).unwrap();
+    assert_eq!(pushed(&mut ws), vec![vec!["harnessSessionHarness".to_string()]]);
+    ws.set_chat_harness_session("chat-1", "hs-2", "/repo", None).unwrap();
+    assert!(pushed(&mut ws).is_empty());
+    let row = ws.chat("chat-1").unwrap().unwrap();
+    assert_eq!(row.harness_session_id.as_deref(), Some("hs-2"));
+    assert_eq!(row.branch.as_deref(), Some("feature"));
+}
+
 #[test]
 fn delete_chat_tombstones_row_and_session() {
     let mut ws = RegistryDoc::new("dev-a");
@@ -2476,6 +2531,49 @@ fn a_deleted_device_row_reads_as_deleted_not_unknown() {
 }
 
 #[test]
+fn a_device_removed_from_another_is_gone_everywhere_and_comes_back_on_its_own_boot() {
+    let mut a = RegistryDoc::new("dev-a");
+    a.upsert_device(&device("dev-a", "Laptop")).unwrap();
+    let mut b = RegistryDoc::new("dev-b");
+    b.upsert_device(&device("dev-b", "Old box")).unwrap();
+    let mut box_chat = chat("chat-b", "dev-b");
+    box_chat.space_id = Some("sp-b".into());
+    b.upsert_chat(&box_chat).unwrap();
+    b.upsert_space(&space("sp-b", "dev-b", "/srv/app")).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0u64;
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(a.read_devices().unwrap().len(), 2);
+
+    // Removed from the laptop: gone there at once, then on the box too.
+    assert!(a.delete_device("dev-b").unwrap());
+    assert!(a.read_devices().unwrap().iter().all(|d| d.id != "dev-b"));
+    assert!(a.device_deleted("dev-b"));
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    for ws in [&a, &b] {
+        let ids: Vec<String> = ws.read_devices().unwrap().into_iter().map(|d| d.id).collect();
+        assert_eq!(ids, vec!["dev-a".to_string()]);
+        assert!(ws.device_deleted("dev-b"));
+        // Its chats and projects stay, readable.
+        assert_eq!(ws.read_chats().unwrap().len(), 1);
+        assert_eq!(ws.read_spaces().unwrap().len(), 1);
+    }
+    // Already gone: nothing to do, nothing pushed; a rename finds no row.
+    assert!(!a.delete_device("dev-b").unwrap());
+    assert!(!a.delete_device("never-heard-of").unwrap());
+    assert!(!a.rename_device("dev-b", "x").unwrap());
+    assert_eq!(a.pending_len(), 0);
+
+    // Zeron opening on the box again revives its row everywhere.
+    b.upsert_device(&device("dev-b", "Old box")).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    for ws in [&a, &b] {
+        assert!(!ws.device_deleted("dev-b"));
+        assert_eq!(ws.read_devices().unwrap().len(), 2);
+    }
+}
+
+#[test]
 fn a_chat_sleeps_wakes_once_and_clears() {
     use zeron_proto::{ChatSleep, SleepState};
     let mut ws = RegistryDoc::new("dev-a");
@@ -2546,4 +2644,584 @@ fn a_wait_replicates_and_an_unreadable_one_costs_only_the_wait() {
     let read = viewer.read_sessions().unwrap();
     assert_eq!(read.len(), 1);
     assert_eq!(read[0].waiting, None);
+}
+
+// ── a repository's name and icon, on every copy ─────────────────────────────
+
+const REPOSITORY: &str = "commit:root1";
+
+/// A copy of a repository as its owner adds it: created, then stamped.
+fn add_copy(doc: &mut RegistryDoc, id: &str, path: &str, repository: Option<&str>) {
+    let device = doc.device_id().to_owned();
+    doc.upsert_space(&space(id, &device, path)).unwrap();
+    doc.set_space_git(id, true, None, repository, None, ts(2_000)).unwrap();
+}
+
+fn shown_name(doc: &RegistryDoc, id: &str) -> String {
+    doc.space(id).unwrap().expect("the row").display_name().to_owned()
+}
+
+fn rocket() -> zeron_proto::SpaceIcon {
+    zeron_proto::SpaceIcon { emoji: Some("🚀".into()), image: None, hue: Some("violet".into()) }
+}
+
+fn shown_emoji(doc: &RegistryDoc, id: &str) -> Option<String> {
+    doc.space(id).unwrap().expect("the row").icon.and_then(|icon| icon.emoji)
+}
+
+/// A copy already in the registry from before look rows: written at
+/// `created_ms`, with what its device chose on each field's own clock.
+fn existing_copy(
+    doc: &mut RegistryDoc,
+    id: &str,
+    device: &str,
+    path: &str,
+    created_ms: i64,
+    name: Option<(&str, i64)>,
+    icon: Option<(&str, i64)>,
+) {
+    let mut set = fields([
+        ("id", json!(id)),
+        ("deviceId", json!(device)),
+        ("path", json!(path)),
+        ("repositoryId", json!(REPOSITORY)),
+        ("createdAt", json!(1_500)),
+    ]);
+    let mut clocks = BTreeMap::new();
+    if let Some((name, ms)) = name {
+        set.insert("name".into(), json!(name));
+        clocks.insert("name".to_owned(), encode_hlc(ms, 0, device));
+    }
+    if let Some((emoji, ms)) = icon {
+        set.insert("icon".into(), json!({ "emoji": emoji }));
+        clocks.insert("icon".to_owned(), encode_hlc(ms, 0, device));
+    }
+    doc.enqueue_ops(vec![RowOp {
+        kind: KIND_SPACES.into(),
+        id: id.into(),
+        op: OpKind::Upsert,
+        set: Some(set),
+        hlc: encode_hlc(created_ms, 0, device),
+        clocks: Some(clocks),
+    }]);
+}
+
+#[test]
+fn a_rename_on_one_device_shows_on_every_copy_of_the_repository() {
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    add_copy(&mut a, "sp-a", "/home/a/flint", Some(REPOSITORY));
+    add_copy(&mut b, "sp-b", "/Users/b/flint-copy", Some(REPOSITORY));
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(shown_name(&a, "sp-b"), "flint-copy", "no choice yet: its own folder");
+
+    assert!(a.rename_space("sp-a", Some("Flint")).unwrap());
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    for doc in [&a, &b] {
+        assert_eq!(shown_name(doc, "sp-a"), "Flint");
+        assert_eq!(shown_name(doc, "sp-b"), "Flint");
+        assert!(doc.read_spaces().unwrap().iter().all(|s| s.name.as_deref() == Some("Flint")));
+    }
+
+    // Set from the other copy, on a later clock, it moves back the other way.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert!(b.rename_space("sp-b", Some("Flint 2")).unwrap());
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(shown_name(&a, "sp-a"), "Flint 2");
+
+    // Cleared, each copy is its own folder again.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert!(a.rename_space("sp-a", None).unwrap());
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(shown_name(&b, "sp-a"), "flint");
+    assert_eq!(shown_name(&b, "sp-b"), "flint-copy");
+}
+
+#[test]
+fn an_icon_set_on_one_device_shows_on_every_copy_and_clears_for_all() {
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    add_copy(&mut a, "sp-a", "/home/a/flint", Some(REPOSITORY));
+    add_copy(&mut b, "sp-b", "/Users/b/flint", Some(REPOSITORY));
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+
+    assert!(b.set_space_icon("sp-b", Some(&rocket())).unwrap());
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    for doc in [&a, &b] {
+        assert_eq!(doc.space("sp-a").unwrap().unwrap().icon, Some(rocket()));
+        assert_eq!(doc.space("sp-b").unwrap().unwrap().icon, Some(rocket()));
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert!(a.set_space_icon("sp-a", None).unwrap());
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    for doc in [&a, &b] {
+        assert_eq!(shown_emoji(doc, "sp-a"), None);
+        assert_eq!(shown_emoji(doc, "sp-b"), None);
+    }
+}
+
+#[test]
+fn a_device_adding_the_repository_later_inherits_both() {
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    let mut a = RegistryDoc::new("dev-a");
+    add_copy(&mut a, "sp-a", "/home/a/flint", Some(REPOSITORY));
+    server_round(&mut server, &mut seq, &mut [&mut a]);
+    a.rename_space("sp-a", Some("Flint")).unwrap();
+    a.set_space_icon("sp-a", Some(&rocket())).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a]);
+
+    // Joins well after, and its own create writes `name: null` on a newer
+    // clock than the rename: that is no clear.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let mut c = RegistryDoc::new("dev-c");
+    c.apply_state(seq, true, 0, server.values().cloned().collect());
+    add_copy(&mut c, "sp-c", "/srv/flint-three", Some(REPOSITORY));
+    assert_eq!(shown_name(&c, "sp-c"), "Flint");
+    assert_eq!(shown_emoji(&c, "sp-c").as_deref(), Some("🚀"));
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut c]);
+    assert_eq!(shown_name(&a, "sp-a"), "Flint", "the newcomer changes nobody");
+    assert_eq!(shown_name(&a, "sp-c"), "Flint");
+    assert_eq!(shown_emoji(&a, "sp-a").as_deref(), Some("🚀"));
+}
+
+#[test]
+fn a_copy_stamped_after_it_was_named_joins_with_its_choice() {
+    let mut doc = RegistryDoc::new("dev-a");
+    add_copy(&mut doc, "sp-a", "/a/flint", Some(REPOSITORY));
+    doc.upsert_space(&space("sp-b", "dev-a", "/b/flint")).unwrap();
+    doc.rename_space("sp-b", Some("Named early")).unwrap();
+    assert_eq!(shown_name(&doc, "sp-a"), "flint", "not known as a copy yet");
+    doc.set_space_git("sp-b", true, None, Some(REPOSITORY), None, ts(2_000)).unwrap();
+    assert_eq!(shown_name(&doc, "sp-a"), "Named early");
+}
+
+#[test]
+fn copies_that_already_disagree_settle_on_the_most_recently_set() {
+    // Whatever order the rows arrive in, on any reader.
+    let mut one = RegistryDoc::new("reader-1");
+    existing_copy(&mut one, "sp-a", "dev-a", "/a/flint", 1_000_000_000_000, Some(("Older", 1_000_000_000_100)), Some(("🆕", 1_000_000_000_400)));
+    existing_copy(&mut one, "sp-b", "dev-b", "/b/flint", 1_000_000_000_000, Some(("Newer", 1_000_000_000_300)), Some(("🐢", 1_000_000_000_200)));
+    let mut two = RegistryDoc::new("reader-2");
+    existing_copy(&mut two, "sp-b", "dev-b", "/b/flint", 1_000_000_000_000, Some(("Newer", 1_000_000_000_300)), Some(("🐢", 1_000_000_000_200)));
+    existing_copy(&mut two, "sp-a", "dev-a", "/a/flint", 1_000_000_000_000, Some(("Older", 1_000_000_000_100)), Some(("🆕", 1_000_000_000_400)));
+    for doc in [&one, &two] {
+        for id in ["sp-a", "sp-b"] {
+            // Each field on its own clock: the name from one, the icon from the other.
+            assert_eq!(shown_name(doc, id), "Newer");
+            assert_eq!(shown_emoji(doc, id).as_deref(), Some("🆕"));
+        }
+    }
+
+    // And a choice made now beats them all.
+    assert!(one.rename_space("sp-a", Some("Now")).unwrap());
+    assert_eq!(shown_name(&one, "sp-b"), "Now");
+}
+
+#[test]
+fn a_name_written_only_at_creation_is_no_choice_unless_it_says_something() {
+    // (A create naming the row after its folder, on a newer clock than the
+    // real rename: the rename stands.)
+    let mut doc = RegistryDoc::new("reader");
+    existing_copy(&mut doc, "sp-a", "dev-a", "/a/flint", 1_000_000_000_000, Some(("Chosen", 1_000_000_000_100)), None);
+    let mut folder = space("sp-b", "dev-b", "/b/flint");
+    folder.name = Some("flint".into());
+    folder.repository_id = Some(REPOSITORY.into());
+    doc.upsert_space(&folder).unwrap();
+    assert_eq!(shown_name(&doc, "sp-b"), "Chosen");
+
+    // A name migrated from before the registry shares one clock with its row,
+    // and is someone's choice: it still counts.
+    let mut doc = RegistryDoc::new("reader");
+    let migrated = encode_hlc(1_000_000_000_500, 0, "migration");
+    doc.enqueue_ops(vec![RowOp {
+        kind: KIND_SPACES.into(),
+        id: "sp-m".into(),
+        op: OpKind::Upsert,
+        set: Some(fields([
+            ("id", json!("sp-m")),
+            ("deviceId", json!("dev-m")),
+            ("path", json!("/m/flint")),
+            ("name", json!("Migrated")),
+            ("repositoryId", json!(REPOSITORY)),
+            ("createdAt", json!(1_500)),
+        ])),
+        hlc: migrated,
+        clocks: None,
+    }]);
+    add_copy(&mut doc, "sp-a", "/a/flint", Some(REPOSITORY));
+    assert_eq!(shown_name(&doc, "sp-a"), "Migrated");
+}
+
+#[test]
+fn local_and_folder_projects_keep_their_own_name_and_icon() {
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    let local = Some("local:abc");
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    add_copy(&mut a, "local-a", "/a/scratch", local);
+    add_copy(&mut b, "local-b", "/b/scratch", local);
+    a.upsert_space(&space("folder-a", "dev-a", "/a/notes")).unwrap();
+    b.upsert_space(&space("folder-b", "dev-b", "/b/notes")).unwrap();
+    a.rename_space("local-a", Some("Mine")).unwrap();
+    a.set_space_icon("local-a", Some(&rocket())).unwrap();
+    a.rename_space("folder-a", Some("My notes")).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+
+    for doc in [&a, &b] {
+        assert_eq!(shown_name(doc, "local-a"), "Mine", "shown everywhere, as ever");
+        assert_eq!(shown_emoji(doc, "local-a").as_deref(), Some("🚀"));
+        assert_eq!(shown_name(doc, "local-b"), "scratch");
+        assert_eq!(shown_emoji(doc, "local-b"), None);
+        assert_eq!(shown_name(doc, "folder-a"), "My notes");
+        assert_eq!(shown_name(doc, "folder-b"), "notes");
+    }
+}
+
+#[test]
+fn an_older_engine_writing_only_its_own_row_still_reaches_every_copy() {
+    let mut doc = RegistryDoc::new("dev-a");
+    add_copy(&mut doc, "sp-a", "/a/flint", Some(REPOSITORY));
+    add_copy(&mut doc, "sp-b", "/b/flint", Some(REPOSITORY));
+    assert!(doc.rename_space("sp-a", Some("From a new engine")).unwrap());
+    doc.set_space_icon("sp-a", Some(&rocket())).unwrap();
+
+    // What 0.2.126 (or a Cloud runner, refused the look row) writes.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    doc.write(KIND_SPACES, "sp-b", OpKind::Update, fields([("name", json!("From an old engine"))]));
+    assert_eq!(shown_name(&doc, "sp-a"), "From an old engine");
+
+    // Its clear is a clock on its own row too, and only a later one.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    doc.write(KIND_SPACES, "sp-b", OpKind::Update, fields([("icon", Value::Null)]));
+    assert_eq!(shown_emoji(&doc, "sp-a"), None);
+}
+
+#[test]
+fn an_older_engine_still_reads_the_name_and_icon_on_the_row_they_were_set_on() {
+    // It reads a Space's row and nothing else, so the row a device changed
+    // carries the change, and no other copy's row is touched.
+    let mut doc = RegistryDoc::new("dev-a");
+    add_copy(&mut doc, "sp-a", "/a/flint", Some(REPOSITORY));
+    add_copy(&mut doc, "sp-b", "/b/flint", Some(REPOSITORY));
+    let before = doc.overlay_row(KIND_SPACES, "sp-b").unwrap();
+    doc.rename_space("sp-a", Some("Flint")).unwrap();
+    doc.set_space_icon("sp-a", Some(&rocket())).unwrap();
+
+    let own = doc.overlay_row(KIND_SPACES, "sp-a").unwrap();
+    assert_eq!(own.fields.get("name"), Some(&json!("Flint")));
+    assert_eq!(own.fields.get("icon"), Some(&json!(rocket())));
+    assert_eq!(doc.overlay_row(KIND_SPACES, "sp-b").unwrap(), before);
+}
+
+#[test]
+fn a_look_outlives_a_deleted_copy_and_comes_back_with_the_next() {
+    let mut doc = RegistryDoc::new("dev-a");
+    add_copy(&mut doc, "sp-a", "/a/flint", Some(REPOSITORY));
+    doc.rename_space("sp-a", Some("Flint")).unwrap();
+    doc.delete_space("sp-a").unwrap();
+    assert!(doc.read_spaces().unwrap().is_empty());
+    add_copy(&mut doc, "sp-b", "/b/flint", Some(REPOSITORY));
+    assert_eq!(shown_name(&doc, "sp-b"), "Flint");
+}
+
+#[test]
+fn an_unreadable_look_never_loses_a_project_row() {
+    let mut doc = RegistryDoc::new("dev-a");
+    add_copy(&mut doc, "sp-a", "/a/flint", Some(REPOSITORY));
+    doc.rename_space("sp-a", Some("Flint")).unwrap();
+    doc.set_space_icon("sp-a", Some(&rocket())).unwrap();
+    // A later writer's values this build can't read: every look row replaced.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    for row in doc.overlay_rows("repositoryLooks") {
+        doc.write(&row.kind, &row.id, OpKind::Update, fields([("name", json!(7)), ("icon", json!("🚀"))]));
+    }
+    assert_eq!(doc.read_spaces().unwrap().len(), 1);
+    assert_eq!(shown_name(&doc, "sp-a"), "Flint");
+    assert_eq!(shown_emoji(&doc, "sp-a").as_deref(), Some("🚀"));
+
+    // Nothing readable left at all: no icon, and still the row.
+    doc.write(KIND_SPACES, "sp-a", OpKind::Update, fields([("icon", json!({ "image": "file:///etc/passwd" }))]));
+    assert_eq!(doc.read_spaces().unwrap().len(), 1);
+    assert_eq!(shown_emoji(&doc, "sp-a"), None);
+}
+
+/// The publish path reconciles pins against the chats `read_all` already
+/// read: same outcome as the self-reading form, and the lists `read_all`
+/// returns are the same before and after (pins live in other rows).
+#[test]
+fn sidebar_reconcile_with_read_chats_matches_and_leaves_lists_alone() {
+    let build = || {
+        let mut doc = RegistryDoc::new("desktop");
+        pin_sessions(&mut doc, &["live", "archived", "deleted"]);
+        let mut archived = chat("archived", "desktop");
+        archived.archived = true;
+        doc.upsert_chat(&archived).unwrap();
+        doc.delete_chat("deleted").unwrap();
+        doc
+    };
+    let mut reference = build();
+    let mut publishing = build();
+    let before = publishing.read_all().unwrap();
+    for authoritative in [false, true, true] {
+        let expected = reference.reconcile_sidebar_pins(authoritative).unwrap();
+        let state = publishing.read_all().unwrap();
+        let got = publishing
+            .reconcile_sidebar_pins_with(authoritative, state.chats.iter().map(|c| c.id.as_str()))
+            .unwrap();
+        assert_eq!(got, expected);
+        assert_eq!(publishing.sidebar_preferences(), reference.sidebar_preferences());
+    }
+    assert_eq!(
+        publishing.sidebar_preferences().unwrap().pinned_session_ids,
+        ["live", "archived"]
+    );
+    assert_eq!(publishing.read_all().unwrap(), before);
+}
+
+/// Every kind of mutation, in random order, with typed reads after each:
+/// the read cache (row_cache) must match a full read every time. In debug
+/// builds each cached read checks itself against a full one, so a mutation
+/// path that forgets to record its rows panics here.
+#[test]
+fn cached_reads_match_full_reads_under_every_mutation() {
+    let mut seed = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % n
+    };
+    let statuses = [SessionStatus::Idle, SessionStatus::Working, SessionStatus::AwaitingInput];
+    let mut doc = RegistryDoc::new("host");
+    // A second replica stands in for the server: its pending ops become
+    // authoritative rows for `doc`.
+    let mut other = RegistryDoc::new("peer");
+    let mut server_seq = 0u64;
+    let mut local_only = false;
+    for step in 0..3_000 {
+        let id = format!("c{}", next(24));
+        match next(11) {
+            0 => doc.upsert_chat(&chat(&id, "host")).unwrap(),
+            1 => {
+                doc.rename_chat(&id, &format!("title {step}")).unwrap();
+            }
+            2 => {
+                doc.delete_chat(&id).unwrap();
+            }
+            3 => doc
+                .upsert_session(&session(&id, "host", statuses[next(3) as usize]))
+                .unwrap(),
+            4 => {
+                // The server acks the oldest pushed batch.
+                let pushed = doc.take_pushable();
+                if let Some(batch) = pushed.first() {
+                    server_seq += 1;
+                    doc.ack_batch(&batch.batch, server_seq);
+                }
+            }
+            5 | 6 => {
+                // A peer's writes arrive as authoritative rows.
+                if next(2) == 0 {
+                    other.upsert_chat(&chat(&id, "peer")).unwrap();
+                } else {
+                    other
+                        .upsert_session(&session(&id, "peer", statuses[next(3) as usize]))
+                        .unwrap();
+                }
+                let rows: Vec<RegistryRow> = other
+                    .take_pushable()
+                    .iter()
+                    .flat_map(|b| &b.ops)
+                    .filter_map(|op| apply_op(None, op).0)
+                    .collect();
+                server_seq += 1;
+                let _ = doc.apply_rows(server_seq, rows);
+            }
+            7 => {
+                // A full state frame: the peer's rows replace ours.
+                let rows: Vec<RegistryRow> = other
+                    .read_chats()
+                    .unwrap()
+                    .iter()
+                    .map(|c| {
+                        let mut row = RegistryRow {
+                            kind: KIND_CHATS.into(),
+                            id: c.id.clone(),
+                            seq: server_seq,
+                            deleted: false,
+                            del_hlc: None,
+                            fields: Default::default(),
+                            clocks: Default::default(),
+                        };
+                        row.fields.insert("id".into(), json!(c.id));
+                        row.fields.insert("deviceId".into(), json!(c.device_id));
+                        row.fields.insert("createdAt".into(), json!(c.created_at.timestamp_millis()));
+                        row
+                    })
+                    .collect();
+                server_seq += 1;
+                let _ = doc.apply_state(server_seq, next(2) == 0, 0, rows);
+            }
+            8 => {
+                local_only = !local_only;
+                doc.set_local_only(local_only);
+            }
+            9 => doc.mark_disconnected(),
+            _ => {
+                doc.set_chat_archived(&id, next(2) == 0).unwrap();
+            }
+        }
+        if next(3) > 0 {
+            // Reads in between steps (some steps stack before a read).
+            doc.read_chats().unwrap();
+            doc.read_sessions().unwrap();
+            doc.read_devices().unwrap();
+        }
+    }
+    doc.read_chats().unwrap();
+    doc.read_sessions().unwrap();
+}
+
+/// A steady stream of session-status changes re-parses only the session
+/// that changed, and no chat row: a full read on every change (hundreds of
+/// rows each) must not come back.
+#[test]
+fn a_session_status_stream_parses_only_the_rows_that_changed() {
+    let mut doc = RegistryDoc::new("host");
+    doc.set_local_only(true);
+    for i in 0..300 {
+        doc.upsert_chat(&chat(&format!("c{i}"), "host")).unwrap();
+        doc.upsert_session(&session(&format!("c{i}"), "host", SessionStatus::Idle)).unwrap();
+    }
+    // Warm: the first reads parse everything once.
+    doc.read_chats().unwrap();
+    doc.read_sessions().unwrap();
+    let chats_version = doc.kind_version(KIND_CHATS);
+    let statuses = [SessionStatus::Working, SessionStatus::Idle];
+    let before = doc.rows_parsed();
+    for turn in 0..200 {
+        let id = format!("c{}", turn % 5);
+        doc.upsert_session(&session(&id, "host", statuses[turn % 2])).unwrap();
+        let sessions = doc.read_sessions().unwrap();
+        assert_eq!(sessions.len(), 300);
+    }
+    let parsed = doc.rows_parsed() - before;
+    // Tests also run a full check per read; that one isn't counted.
+    assert!(parsed <= 200, "{parsed} rows parsed for 200 one-row changes");
+    assert_eq!(doc.kind_version(KIND_CHATS), chats_version, "a session change counted as a chat change");
+}
+
+fn same_replica(a: &RegistryDoc, b: &RegistryDoc) {
+    assert_eq!(a.read_chats().unwrap(), b.read_chats().unwrap());
+    assert_eq!(a.read_sessions().unwrap(), b.read_sessions().unwrap());
+    assert_eq!(a.read_devices().unwrap(), b.read_devices().unwrap());
+    assert_eq!(a.cursor(), b.cursor());
+    // A load coalesces the queued writes (nothing is in flight after one),
+    // as a whole-snapshot load always has: compare what they show and that
+    // something still waits to be pushed, not the op count.
+    assert_eq!(a.pending_len() == 0, b.pending_len() == 0);
+}
+
+/// A whole save, then deltas of what changed: loading them gives back the
+/// same replica, rows, cursor and pending writes alike.
+#[test]
+fn a_registry_saved_as_deltas_loads_back_the_same() {
+    let mut doc = RegistryDoc::new("host");
+    let mut peer = RegistryDoc::new("peer");
+    for i in 0..50 {
+        doc.upsert_chat(&chat(&format!("c{i}"), "host")).unwrap();
+    }
+    let base = doc.to_bytes().unwrap();
+    doc.mark_saved();
+    let mut deltas = Vec::new();
+    for step in 0..60u64 {
+        let id = format!("c{}", step % 7);
+        match step % 4 {
+            0 => doc.upsert_session(&session(&id, "host", SessionStatus::Working)).unwrap(),
+            1 => {
+                doc.rename_chat(&id, &format!("t{step}")).unwrap();
+            }
+            2 => {
+                peer.upsert_session(&session(&format!("p{step}"), "peer", SessionStatus::Idle)).unwrap();
+                let rows: Vec<RegistryRow> = peer
+                    .take_pushable()
+                    .iter()
+                    .flat_map(|b| &b.ops)
+                    .filter_map(|op| apply_op(None, op).0)
+                    .collect();
+                let _ = doc.apply_rows(step + 1, rows);
+            }
+            _ => {
+                if let Some(batch) = doc.take_pushable().first() {
+                    doc.ack_batch(&batch.batch.clone(), step);
+                }
+            }
+        }
+        deltas.push(doc.delta_bytes().unwrap().expect("incremental"));
+        doc.mark_saved();
+    }
+    let (loaded, clean) = RegistryDoc::from_saved(&base, &deltas, &[], "host").unwrap();
+    assert!(clean);
+    same_replica(&doc, &loaded);
+}
+
+/// One session-status change is one row in a delta, not the registry.
+#[test]
+fn a_session_status_change_saves_one_row_not_the_registry() {
+    let mut doc = RegistryDoc::new("host");
+    doc.set_local_only(true);
+    for i in 0..300 {
+        doc.upsert_chat(&chat(&format!("c{i}"), "host")).unwrap();
+        doc.upsert_session(&session(&format!("c{i}"), "host", SessionStatus::Idle)).unwrap();
+    }
+    let whole = doc.to_bytes().unwrap().len();
+    doc.mark_saved();
+    let statuses = [SessionStatus::Working, SessionStatus::Idle];
+    for turn in 0..100 {
+        doc.upsert_session(&session(&format!("c{}", turn % 5), "host", statuses[turn % 2])).unwrap();
+        let delta = doc.delta_bytes().unwrap().expect("incremental").len();
+        assert!(delta < 2_000, "a one-row change saved {delta} B (whole registry {whole} B)");
+        doc.mark_saved();
+    }
+    assert!(whole > 100_000, "fixture too small: {whole} B");
+}
+
+/// A full state replace changes every row: only a whole save records it.
+#[test]
+fn a_full_replace_needs_a_whole_save() {
+    let mut doc = RegistryDoc::new("host");
+    doc.upsert_chat(&chat("c1", "host")).unwrap();
+    doc.mark_saved();
+    let _ = doc.apply_state(5, true, 0, Vec::new());
+    assert!(doc.delta_bytes().unwrap().is_none());
+    doc.mark_saved();
+    doc.upsert_chat(&chat("c2", "host")).unwrap();
+    assert!(doc.delta_bytes().unwrap().is_some());
+}
+
+/// A delta that doesn't decode ends the chain: what follows contributes its
+/// pending writes (nothing else holds them), not its rows or cursor, and
+/// the load says the next save should be whole.
+#[test]
+fn a_broken_delta_chain_keeps_its_pending_writes() {
+    let mut doc = RegistryDoc::new("host");
+    let base = doc.to_bytes().unwrap();
+    doc.mark_saved();
+    doc.upsert_chat(&chat("kept", "host")).unwrap();
+    let first = doc.delta_bytes().unwrap().unwrap();
+    doc.mark_saved();
+    doc.upsert_chat(&chat("after", "host")).unwrap();
+    let after = doc.delta_bytes().unwrap().unwrap();
+    let (loaded, clean) =
+        RegistryDoc::from_saved(&base, &[first, b"not json".to_vec(), after], &[], "host").unwrap();
+    assert!(!clean);
+    let ids: Vec<String> = loaded.read_chats().unwrap().into_iter().map(|c| c.id).collect();
+    assert_eq!(ids, ["after", "kept"], "the pending write after the break was lost");
 }

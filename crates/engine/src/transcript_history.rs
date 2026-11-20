@@ -86,7 +86,7 @@ impl TranscriptHistory {
     pub(crate) fn snapshot(
         &mut self,
         doc: &LoroDoc,
-        entries: &[SessionMessageEntry],
+        entries: &[impl std::borrow::Borrow<SessionMessageEntry>],
     ) -> Arc<TranscriptBaseline> {
         if !self.dirty {
             return self.baseline.clone();
@@ -94,7 +94,7 @@ impl TranscriptHistory {
         self.dirty = false;
         let mut roots = HashSet::new();
         let mut joined_ids = HashMap::new();
-        for entry in entries {
+        for entry in entries.iter().map(std::borrow::Borrow::borrow) {
             let joined = match &entry.continuation_of {
                 Some(root) if roots.contains(root) => root,
                 _ => &entry.id,

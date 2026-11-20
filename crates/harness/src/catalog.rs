@@ -200,8 +200,10 @@ mod tests {
     };
     fn models(id: &str) -> Vec<Model> {
         vec![Model {
+            default: false,
             id: id.into(),
             label: id.into(),
+            provider: None,
             description: None,
             reasoning_levels: vec![],
             options: vec![],

@@ -28,6 +28,9 @@ local function fonts(app: any): (string?, string?)
 end
 
 local function open(app: any, picker: string)
+	-- (Below the page's fold: scrolled to first.)
+	app:scroll(PAGE, 200)
+	app:frames(10)
 	app:click(`{PAGE} >> role:button "{picker}"`)
 	app:frames(30)
 end

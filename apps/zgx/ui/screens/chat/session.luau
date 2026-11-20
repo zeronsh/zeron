@@ -15,10 +15,12 @@ local route = require("@app/screens/shell/route")
 -- Its side chats and subagents, in a card at the top right (the title
 -- bar's "Show session details").
 local lanes = require("@app/screens/chat/lanes")
+local TurnGlue = require("@app/screens/chat/turn_glue")
 local shared = require("@app/screens/chat/shared")
 local prefs = require("@app/screens/settings/prefs")
 local ReplyImages = require("@app/screens/chat/reply_images")
 local FileLinks = require("@app/screens/chat/file_links")
+local LinkChips = require("@app/screens/chat/link_chips")
 local LinkMenu = require("@app/screens/chat/link_menu")
 local Find = require("@app/screens/chat/find")
 local boundary = require("@app/screens/shell/boundary")
@@ -35,7 +37,7 @@ local sent_pictures = ReplyImages.for_attachments(function(): any
 	if not s or s.state == "missing" then
 		return nil
 	end
-	return { id = s.id, device = s.device, cwd = s.cwd, here = sessions.now:get().here }
+	return { id = s.id, device = s.device, cwd = s.cwd, here = sessions.here:get() }
 end)
 
 export type Id = string | () -> string? | State<string?> | nil
@@ -64,8 +66,15 @@ local function resolve(id: Id): () -> string?
 end
 
 -- Placeholder rows while a transcript comes: a prompt, a reply's lines.
+-- How long a chat being read shows nothing before its skeleton: a chat
+-- kept here has come by then.
+local SKELETON_AFTER = 400
+-- How many session pages have been made, naming each one's own state.
+local made = 0
+
 local function loading(): Node
 	return ui.column {
+		id = "chat-session-loading",
 		w_full = true,
 		h_full = true,
 		items = "center",
@@ -127,8 +136,8 @@ local function Session(id: Id?): Node
 	-- reader left it), else its latest; the one left keeps its place for
 	-- coming back. (Only when the id moves: what the route reads changes as
 	-- sessions do, and a page made again by a reload stays where it was.)
-	-- The transcript is made anew for it (keyed by `shown`, below), which
-	-- puts the view there.
+	-- The transcript stays; its rows' list is made anew for it (its
+	-- `session`, `shown`, below), which puts the view there.
 	local entering: { id: string, at_end: boolean }? = nil
 	ui.effect(function()
 		local s = which()
@@ -148,6 +157,25 @@ local function Session(id: Id?): Node
 			end)
 		end
 	end)
+	-- A chat still being read, for long enough to say so (`SKELETON_AFTER`):
+	-- before then nothing shows at all. One kept on this device comes in a
+	-- frame or two from its copy here (the engine reads it first, whatever
+	-- its host's state), and shows no skeleton on its way.
+	-- (A state of its own each page, made at the top level too: a page
+	-- built outside a component.)
+	made += 1
+	local waited = ui.state(`chat_session_waited_{made}`, "")
+	ui.effect(function()
+		local want = which()
+		waited:set("")
+		if want then
+			ui.after(SKELETON_AFTER, function()
+				if which() == want then
+					waited:set(want)
+				end
+			end)
+		end
+	end)
 	-- What shows: the transcript once its session is the one asked for and
 	-- has come; a word when it can't be had.
 	local kind = ui.computed(function(): string
@@ -157,7 +185,7 @@ local function Session(id: Id?): Node
 			return "missing"
 		end
 		if not s or s.id ~= want or s.state == "loading" then
-			return "loading"
+			return if waited:get() == want then "loading" else "waiting"
 		end
 		return s.state
 	end)
@@ -191,7 +219,9 @@ local function Session(id: Id?): Node
 			return false
 		end,
 		ui.presence(kind, function(k: string): Node
-			if k == "loading" then
+			if k == "waiting" then
+				return ui.div { w_full = true, h_full = true }
+			elseif k == "loading" then
 				return loading()
 			elseif k == "missing" then
 				return ds.EmptyState {
@@ -234,79 +264,87 @@ local function Session(id: Id?): Node
 					min_h = 0,
 					-- (The find bar floats over its top end.)
 					relative = true,
-					-- Made anew for each session shown (`shown`, which the switch
-					-- sets with its place): a chat switched to opens where it was
-					-- left, or at its latest.
-					ui.presence(function(): string
-						return shared.shown:get() or ""
-					end, function(id: string): Node
-						return T.Transcript {
-							-- Settings' "Conversation width", followed as it moves.
-							-- (A little wider than the composer each side, so it's
-							-- seen fading as it passes behind.)
-							measure = function(): number
-								return prefs.conversation_width:get() + 24
-							end,
-							side = 20,
-							fade_lead = 12,
-							messages = store.messages,
-							offset = offset,
-							-- Made again (a reload, a template saved), it comes
-							-- back where it was.
-							keep = shared.anchor,
-							-- (A chat switched back to: whether it was left at its end.)
-							was_at_end = if entering and entering.id == id then entering.at_end else nil,
-							-- Under the docked composer: the conversation runs
-							-- behind it, its end held clear of it.
-							foot = room.foot,
-							beside = function(): number?
-								return shared.pill_width:get()
-							end,
-							on_jump_width = function(w: number?)
-								if shared.jump_width:peek() ~= w then
-									shared.jump_width:set(w)
-								end
-							end,
-							draft = store.draft,
-							-- Settings' compact transcript: each reply's work
-							-- folded into one group.
-							compact = function(): boolean
-								return prefs.compact_transcript:get()
-							end,
-							on_mention = shared.mention,
-							chat_of = shared.chat_of,
-							open_sender = function(chat: string, title: string)
-								local s = which()
-								if s then
-									lanes.open(s, { kind = "side_chat", id = chat, title = title })
-								end
-							end,
-							on_retry = function(message: string)
-								local s = which()
-								if s then
-									store.retry(s, message)
-								end
-							end,
-							on_attach = shared.attach_quote,
-							pictures = pictures,
-							sent_pictures = sent_pictures,
-							-- A subagent's spawn opens its lane, a panel tab
-							-- (the shipping app's `OpenSubagent`).
-							on_open_subagent = function(sub: any)
-								local s = which()
-								if s then
-									lanes.open_subagent(s, sub)
-								end
-							end,
-							open_link = open_link,
-							-- Their context menus (screens/chat/link_menu).
-							link_menu = LinkMenu(open_link, function(): any
-								return store.session:peek()
-							end),
-							-- ⌘F's find (screens/chat/find): its matches marked.
-							find = Find.marks(),
-						}
-					end),
+					-- One for every session shown: its rows are each session's
+					-- (`shown`, which the switch sets with its place), a chat
+					-- switched to opening where it was left, or at its latest;
+					-- the rest of it (its scrollbar, the way back to the latest,
+					-- a selection's bar) stays as it is.
+					T.Transcript {
+						-- Settings' "Conversation width", followed as it moves.
+						-- (A little wider than the composer each side, so it's
+						-- seen fading as it passes behind.)
+						measure = function(): number
+							return prefs.conversation_width:get() + 24
+						end,
+						side = 20,
+						fade_lead = 12,
+						messages = store.messages,
+						offset = offset,
+						-- Made again (a reload, a template saved), it comes
+						-- back where it was.
+						keep = shared.anchor,
+						-- The session shown: another one swaps its rows.
+						session = shared.shown,
+						-- (A chat switched back to: whether it was left at its end.)
+						was_at_end = function(id: string): boolean?
+							return if entering and entering.id == id then entering.at_end else nil
+						end,
+						-- Under the docked composer: the conversation runs
+						-- behind it, its end held clear of it.
+						foot = room.foot,
+						-- (Its pair with the window's composer: shared's
+						-- `pill_width_of`.)
+						beside = function(): number?
+							return shared.pill_width_of("waiting", "window"):get()
+						end,
+						on_jump_width = shared.pill_teller("jump", "page"),
+						draft = store.draft,
+						-- Settings' compact transcript: each reply's work
+						-- folded into one group.
+						compact = function(): boolean
+							return prefs.compact_transcript:get()
+						end,
+						on_mention = shared.mention,
+						chat_of = shared.chat_of,
+						open_sender = function(chat: string, title: string)
+							local s = which()
+							if s then
+								lanes.open(s, { kind = "side_chat", id = chat, title = title })
+							end
+						end,
+						-- An unfinished turn whose host is gone says so, not
+						-- its working word (screens/chat/turn_state).
+						turn_state = TurnGlue.of(function(): any
+							return store.session:get()
+						end, store.messages),
+						on_retry = function(message: string)
+							local s = which()
+							if s then
+								store.retry(s, message)
+							end
+						end,
+						on_attach = shared.attach_quote,
+						pictures = pictures,
+						sent_pictures = sent_pictures,
+						-- A subagent's spawn opens its lane, a panel tab
+						-- (the shipping app's `OpenSubagent`).
+						on_open_subagent = function(sub: any)
+							local s = which()
+							if s then
+								lanes.open_subagent(s, sub)
+							end
+						end,
+						open_link = open_link,
+						-- Their context menus (screens/chat/link_menu).
+						link_chip = LinkChips(function(): any
+							return store.session:peek()
+						end),
+						link_menu = LinkMenu(open_link, function(): any
+							return store.session:peek()
+						end),
+						-- ⌘F's find (screens/chat/find): its matches marked.
+						find = Find.marks(),
+					},
 					Find.Bar(),
 				},
 			}

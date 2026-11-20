@@ -10,9 +10,15 @@
 //! What scripts see, `github`:
 //!   { phase = "checking" | "unavailable" | "idle" | "starting" | "waiting"
 //!            | "failed" | "connected",
-//!     code?, account?, repos = { "owner/name" }, failure? }
+//!     code?, account?, repos = { "owner/name" }, failure?,
+//!     accounts = { { slot, login, avatar?, status = "connected"
+//!                    | "needs_reconnect" } },
+//!     already? }
 //! (`failure` is what went wrong, said for the screen: a code that expired,
-//! turned down, or GitHub out of reach.)
+//! turned down, or GitHub out of reach. `accounts`: every login connected for
+//! Cloud, empty from an engine or vault from before several logins, which
+//! leaves `account` to name the one there is. `already`: the login just
+//! approved was connected before, so nothing was added.)
 //! and call:
 //!   github.load (an action)       where the account stands
 //!   github.connect (an action)    asks GitHub for a code, then waits for it
@@ -22,6 +28,7 @@
 //!   github.choose (an action)     GitHub's page for the repositories Cloud
 //!                                 can open
 //!   github.disconnect (an action) GitHub no longer used by Cloud
+//!   github.forget ({ slot })      one login disconnected, the others kept
 
 use std::{
     cell::{Cell, RefCell},
@@ -46,12 +53,60 @@ enum Phase {
     Connected,
 }
 
+/// A GitHub login connected for Cloud.
+#[derive(Clone, Debug, PartialEq)]
+struct Account {
+    slot: String,
+    login: String,
+    avatar: Option<String>,
+    connected: bool,
+    devices: Vec<String>,
+}
+
+/// The logins from `GithubAccounts`.
+fn accounts_from(answer: &Json) -> Vec<Account> {
+    answer["accounts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|a| {
+            Some(Account {
+                slot: a["slot"].as_str()?.into(),
+                login: a["account"].as_str().unwrap_or_default().into(),
+                avatar: a["avatarUrl"].as_str().filter(|u| u.starts_with("https://")).map(Into::into),
+                connected: a["status"].as_str() != Some("needsReconnect"),
+                devices: a["authorizedDevices"]
+                    .as_array()
+                    .map(|d| d.iter().filter_map(|d| d.as_str().map(Into::into)).collect())
+                    .unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+/// Whether GitHub works for Cloud: some login does. Without a list (an engine
+/// or vault from before several logins), the one connection the status names.
+fn usable(accounts: &[Account], connection: Option<&Json>, cloud: &str) -> bool {
+    if accounts.is_empty() {
+        return connection.is_some_and(|c| {
+            c["status"].as_str() != Some("needsReconnect")
+                && c["authorizedDevices"]
+                    .as_array()
+                    .is_some_and(|d| d.iter().any(|d| d.as_str() == Some(cloud)))
+        });
+    }
+    accounts.iter().any(|a| a.connected && a.devices.iter().any(|d| d == cloud))
+}
+
 struct GitHub {
     shared: RefCell<Vec<Shared>>,
     phase: Cell<Phase>,
     code: RefCell<Option<String>>,
     verification: RefCell<Option<String>>,
     account: RefCell<Option<String>>,
+    accounts: RefCell<Vec<Account>>,
+    /// The login just approved, when it was connected already.
+    already: RefCell<Option<String>>,
     repos: RefCell<Vec<String>>,
     failure: RefCell<Option<String>>,
     /// The logical Cloud device, once Cloud is on.
@@ -84,7 +139,8 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     host.action("github.cancel", move |_| {
         if g.phase.get() == Phase::Waiting || g.phase.get() == Phase::Starting {
             g.next_generation();
-            g.set(Phase::Idle);
+            let usable = usable(&g.accounts.borrow(), None, &g.cloud.borrow().clone().unwrap_or_default());
+            g.set(if usable { Phase::Connected } else { Phase::Idle });
         }
     });
     let g = github.clone();
@@ -100,10 +156,26 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
             open_page(url);
         }
     });
-    let g = github;
+    let g = github.clone();
     host.action("github.disconnect", move |_| {
         start_disconnect(g.clone());
     });
+    let g = github;
+    host.action("github.forget", move |args| {
+        if let Some(slot) = args.field("slot").map(crate::auth::text).filter(|s| !s.is_empty()) {
+            start_forget(g.clone(), slot);
+        }
+    });
+}
+
+/// One login disconnected, unless an unkept preview asks, or a connection is
+/// under way (it holds the state of this): whether it started.
+fn start_forget(g: Rc<GitHub>, slot: String) -> bool {
+    if matches!(g.phase.get(), Phase::Starting | Phase::Waiting) || crate::plugins::preview::refuse_aloud("github.forget") {
+        return false;
+    }
+    engine::get().spawn(async move { g.forget(slot).await });
+    true
 }
 
 /// GitHub disconnected, unless an unkept preview asks: whether it started.
@@ -139,6 +211,8 @@ impl GitHub {
             code: RefCell::default(),
             verification: RefCell::default(),
             account: RefCell::default(),
+            accounts: RefCell::default(),
+            already: RefCell::default(),
             repos: RefCell::default(),
             failure: RefCell::default(),
             cloud: RefCell::default(),
@@ -159,10 +233,25 @@ impl GitHub {
         };
         let text = |v: &RefCell<Option<String>>| v.borrow().as_deref().map_or(Value::Nil, Value::from);
         let repos: Vec<Value> = self.repos.borrow().iter().map(|r| Value::from(r.as_str())).collect();
+        let accounts: Vec<Value> = self
+            .accounts
+            .borrow()
+            .iter()
+            .map(|a| {
+                Value::record([
+                    ("slot", Value::from(a.slot.as_str())),
+                    ("login", Value::from(a.login.as_str())),
+                    ("avatar", a.avatar.as_deref().map_or(Value::Nil, Value::from)),
+                    ("status", Value::from(if a.connected { "connected" } else { "needs_reconnect" })),
+                ])
+            })
+            .collect();
         Value::record([
             ("phase", Value::from(phase)),
             ("code", text(&self.code)),
             ("account", text(&self.account)),
+            ("accounts", Value::List(accounts.into())),
+            ("already", text(&self.already)),
             ("repos", Value::List(repos.into())),
             ("failure", text(&self.failure)),
         ])
@@ -241,8 +330,8 @@ impl GitHub {
         self.set(Phase::Unavailable);
     }
 
-    /// The vault's GitHub: connected for Cloud (its account and
-    /// repositories), or not.
+    /// The vault's GitHub: connected for Cloud (its logins and repositories),
+    /// or not.
     async fn refresh_vault(&self, generation: u64) {
         let vault = match engine::get().call("VaultStatus", json!({})).await {
             Ok(vault) => vault,
@@ -263,12 +352,20 @@ impl GitHub {
             .and_then(|c| c.iter().find(|c| c["provider"].as_str() == Some("github")))
             .cloned();
         *self.vault.borrow_mut() = vault;
-        let connected = connection.as_ref().is_some_and(|c| {
-            c["status"].as_str() != Some("needsReconnect")
-                && c["authorizedDevices"]
-                    .as_array()
-                    .is_some_and(|d| d.iter().any(|d| d.as_str() == Some(cloud.as_str())))
-        });
+        // (An engine or vault from before several logins doesn't answer: the
+        // connection in the status stands for its one.)
+        let accounts = match engine::get().call("GithubAccounts", json!({})).await {
+            Ok(answer) => accounts_from(&answer),
+            Err(error) => {
+                eprintln!("zeron-zgx: github: no list of logins: {error}");
+                Vec::new()
+            }
+        };
+        if self.generation.get() != generation {
+            return;
+        }
+        let connected = usable(&accounts, connection.as_ref(), &cloud);
+        *self.accounts.borrow_mut() = accounts;
         if !connected {
             *self.account.borrow_mut() = None;
             self.repos.borrow_mut().clear();
@@ -306,6 +403,7 @@ impl GitHub {
         };
         *self.failure.borrow_mut() = None;
         *self.code.borrow_mut() = None;
+        *self.already.borrow_mut() = None;
         self.set(Phase::Starting);
         // Every device already allowed keeps its access; Cloud is added.
         let mut devices: Vec<String> = self.vault.borrow()["connections"]
@@ -364,6 +462,9 @@ impl GitHub {
                         *self.code.borrow_mut() = None;
                         if let Some(account) = progress["account"].as_str() {
                             *self.account.borrow_mut() = Some(account.into());
+                            if progress["alreadyConnected"].as_bool() == Some(true) {
+                                *self.already.borrow_mut() = Some(account.into());
+                            }
                         }
                         self.set(Phase::Connected);
                         self.refresh_vault(generation).await;
@@ -391,6 +492,22 @@ impl GitHub {
                         }
                         return;
                     }
+                }
+            }
+        }
+    }
+
+    /// One login disconnected; the others carry on. Its chats stay on it and
+    /// say so until it's connected again.
+    async fn forget(self: Rc<Self>, slot: String) {
+        let generation = self.next_generation();
+        *self.already.borrow_mut() = None;
+        match engine::get().call("GithubAccountForget", json!({ "slot": slot })).await {
+            Ok(_) => self.refresh_vault(generation).await,
+            Err(error) => {
+                eprintln!("zeron-zgx: github: didn't disconnect a login: {error}");
+                if self.generation.get() == generation {
+                    self.publish();
                 }
             }
         }
@@ -443,5 +560,42 @@ mod disconnect_tests {
         assert!(!start_disconnect(g.clone()));
         preview::set(None);
         assert!(start_disconnect(g));
+    }
+
+    #[test]
+    fn logins_are_read_from_the_engine() {
+        let accounts = accounts_from(&json!({ "accounts": [
+            { "slot": "a1", "account": "work-me", "status": "connected", "authorizedDevices": ["cloud-1"],
+              "avatarUrl": "https://github.com/work-me.png?size=64" },
+            { "slot": "a2", "account": "home-me", "status": "needsReconnect", "avatarUrl": "http://not-this" },
+            { "account": "no-slot" },
+        ] }));
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0].login, "work-me");
+        assert_eq!(accounts[0].avatar.as_deref(), Some("https://github.com/work-me.png?size=64"));
+        assert!(accounts[0].connected);
+        assert_eq!(accounts[1].avatar, None);
+        assert!(!accounts[1].connected);
+    }
+
+    #[test]
+    fn github_works_while_any_login_does() {
+        let account = |connected: bool, device: &str| Account {
+            slot: "s".into(),
+            login: "l".into(),
+            avatar: None,
+            connected,
+            devices: vec![device.into()],
+        };
+        assert!(usable(&[account(false, "cloud"), account(true, "cloud")], None, "cloud"));
+        assert!(!usable(&[account(false, "cloud")], None, "cloud"));
+        assert!(!usable(&[account(true, "laptop")], None, "cloud"));
+        // Without a list, the one connection the status names.
+        let one = json!({ "status": "connected", "authorizedDevices": ["cloud"] });
+        assert!(usable(&[], Some(&one), "cloud"));
+        assert!(!usable(&[], Some(&one), "other"));
+        let dead = json!({ "status": "needsReconnect", "authorizedDevices": ["cloud"] });
+        assert!(!usable(&[], Some(&dead), "cloud"));
+        assert!(!usable(&[], None, "cloud"));
     }
 }

@@ -4,7 +4,9 @@
 -- Only something to send (`intent`: a draft, a send in flight, queued
 -- messages) earns the clause saying when it will go; an empty composer
 -- never claims a message is waiting, and says nothing of an unreachable
--- host.
+-- host. A chat on Cloud (`cloud`) says its machine's own state in the host's
+-- place (screens/chat/cloud_machine): a machine asleep isn't unreachable, and
+-- one that can never wake mustn't promise the message will go.
 --
 --   link_notice({ connection = "reconnecting", intent = true })
 --     → { text = "Reconnecting — messages will send once …", spinner = true }
@@ -28,9 +30,11 @@ export type Link = {
 	-- Its name, for "Can't reach …".
 	host: string?,
 	intent: boolean?,
+	-- The chat's on Cloud: its machine's line, if it has one to say.
+	cloud: { line: Notice? }?,
 }
 
-export type Notice = { text: string, tone: string?, spinner: boolean? }
+export type Notice = { text: string, tone: string?, spinner: boolean?, action: string? }
 
 function M.of(link: Link): Notice?
 	local intent = link.intent == true
@@ -50,6 +54,9 @@ function M.of(link: Link): Notice?
 				else say("reconnecting", "Reconnecting…"),
 			spinner = true,
 		}
+	end
+	if link.cloud then
+		return link.cloud.line
 	end
 	if link.host_unreachable and intent then
 		local host = link.host or say("the_host", "the host")

@@ -28,6 +28,8 @@ const UPLOAD_PARALLEL: usize = 3;
 /// registry has been live long enough to have heard its beats.
 const DARK_AFTER_MS: i64 = 5 * 60_000;
 const LIVENESS_WARMUP_MS: i64 = 60_000;
+/// A PR-status watch retries a host that presence says is up from this.
+const WATCH_RETRY_MIN: Duration = Duration::from_millis(500);
 
 pub(crate) fn deadline(method: &str) -> Duration {
     match method {
@@ -52,6 +54,8 @@ fn map_rpc(device_id: &str, method: &str, err: RpcError) -> ClientError {
 pub(crate) struct Relay {
     links: Arc<LinkCache>,
     watches: Mutex<HashMap<WatchKey, CancellationToken>>,
+    /// Bumped whenever presence says a device came back: wakes parked watches.
+    alive: tokio::sync::watch::Sender<u64>,
     /// Devices whose engine lacks WatchCheckoutChangeRequest (cleared on
     /// registry reconnect).
     unsupported: Mutex<HashSet<String>>,
@@ -112,8 +116,15 @@ impl Relay {
         Self {
             links,
             watches: Mutex::new(HashMap::new()),
+            alive: tokio::sync::watch::Sender::new(0),
             unsupported: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Let go of every host's socket until something next calls one.
+    pub(crate) fn release(&self) {
+        self.stop_watches();
+        self.links.close_all();
     }
 
     pub(crate) fn shutdown(&self) {
@@ -126,6 +137,7 @@ impl Relay {
     /// Presence says `device_id` is alive again: dial immediately next time.
     pub(crate) fn peer_alive(&self, device_id: &str) {
         self.links.reset_cooldown(device_id);
+        self.alive.send_modify(|beats| *beats = beats.wrapping_add(1));
     }
 
     /// One unary call with a deadline; a stale cached link is retried once
@@ -345,12 +357,23 @@ impl Relay {
     }
 }
 
-/// One `WatchCheckoutChangeRequest` stream, retried 0.5s→5s forever (last
-/// snapshot kept through gaps); an engine without the method marks the
-/// device unsupported.
+/// The longest a change request watch waits between tries, for when presence is
+/// wrong: a host that beats but doesn't answer. One watch per open checkout.
+const WATCH_RETRY_MAX: Duration = Duration::from_secs(120);
+
+fn next_watch_retry(wait: Duration) -> Duration {
+    (wait * 2).min(WATCH_RETRY_MAX)
+}
+
+/// One `WatchCheckoutChangeRequest` stream for as long as the chat is listed. It only
+/// dials a host whose presence is fresh: an offline host parks it, with no traffic,
+/// until a beat says the host is back, and then it dials at once. A host that beats
+/// but doesn't answer is retried 0.5s→2min. The last status stays in the workspace
+/// through all of it, so a chat on an offline host keeps showing its PR. An engine
+/// without the method marks the device unsupported.
 fn spawn_watch(weak: Weak<ClientInner>, key: WatchKey, cancel: CancellationToken) {
     crate::runtime::shared().spawn(async move {
-        let mut backoff = Duration::from_millis(500);
+        let mut backoff = WATCH_RETRY_MIN;
         loop {
             if cancel.is_cancelled() {
                 return;
@@ -358,7 +381,17 @@ fn spawn_watch(weak: Weak<ClientInner>, key: WatchKey, cancel: CancellationToken
             let Some(inner) = weak.upgrade() else { return };
             let Some(live) = inner.live() else { return };
             let links = live.relay.links.clone();
+            // Subscribed before reading presence, so a beat in between still wakes us.
+            let mut alive = live.relay.alive.subscribe();
+            let fresh = inner.presence_fresh(&key.device_id);
             drop(inner);
+            if !fresh {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    _ = alive.changed() => backoff = WATCH_RETRY_MIN,
+                }
+                continue;
+            }
             let result = async {
                 let client = links.client(&key.device_id).await?;
                 client
@@ -386,7 +419,7 @@ fn spawn_watch(weak: Weak<ClientInner>, key: WatchKey, cancel: CancellationToken
                     if status.device_id != key.device_id || status.cwd != key.cwd {
                         continue;
                     }
-                    backoff = Duration::from_millis(500);
+                    backoff = WATCH_RETRY_MIN;
                     let Some(inner) = weak.upgrade() else { return };
                     inner.workspace.put_change_request(status);
                     inner.recompute_workspace();
@@ -405,8 +438,28 @@ fn spawn_watch(weak: Weak<ClientInner>, key: WatchKey, cancel: CancellationToken
             tokio::select! {
                 _ = cancel.cancelled() => return,
                 _ = tokio::time::sleep(backoff) => {}
+                // The host came back from being stale: try now, from the start of the curve.
+                _ = alive.changed() => backoff = WATCH_RETRY_MIN / 2,
             }
-            backoff = (backoff * 2).min(Duration::from_secs(5));
+            backoff = next_watch_retry(backoff);
         }
     });
+}
+
+#[cfg(test)]
+mod watch_retry_tests {
+    use super::*;
+
+    #[test]
+    fn a_host_thats_away_is_retried_ever_more_slowly() {
+        let mut wait = Duration::from_millis(500);
+        let mut waits = Vec::new();
+        for _ in 0..10 {
+            wait = next_watch_retry(wait);
+            waits.push(wait);
+        }
+        assert_eq!(waits[0], Duration::from_secs(1));
+        assert_eq!(*waits.last().unwrap(), WATCH_RETRY_MAX);
+        assert!(waits.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
 }

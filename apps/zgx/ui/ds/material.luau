@@ -35,20 +35,26 @@ function M.glass_theme(): { [string]: any }?
 	return if thicker then { background = thicker } else nil
 end
 
--- What a theme wears where nothing shows through, for one whose glass tones
--- would all but vanish on its solid window (`zeron.solid`): the page's card
--- and its edge, and muted text. Nil over glass, and for a theme that doesn't
--- name its own.
+-- What a theme wears where nothing shows through: the islands' solid fill,
+-- and, for a theme whose glass tones would all but vanish on its solid
+-- window (`zeron.solid`), muted text that holds. Nil over glass. (The page
+-- and sidebar keep the theme's own fill and edge.)
 function M.solid_theme(): { [string]: any }?
-	if M.see_through() or ui.theme.get("zeron.solid.card") == nil then
+	if M.see_through() then
 		return nil
 	end
-	return {
-		["zeron.inset.bg"] = "$zeron.solid.card",
-		["zeron.inset.edge"] = "$zeron.solid.edge",
-		["text.secondary"] = "$zeron.solid.secondary",
-		["text.tertiary"] = "$zeron.solid.tertiary",
+	-- The islands' glass (ds/island) turns to the menus' solid fill,
+	-- unblurred: by its tokens, so an island the engine animates (the title
+	-- bar's, sliding in and out of full screen) runs no script per frame.
+	local out: { [string]: any } = {
+		["zeron.island.tint"] = "$zeron.menu.solid",
+		["zeron.island.blur"] = 0,
 	}
+	if ui.theme.get("zeron.solid.secondary") ~= nil then
+		out["text.secondary"] = "$zeron.solid.secondary"
+		out["text.tertiary"] = "$zeron.solid.tertiary"
+	end
+	return out
 end
 
 -- Windows' Transparency effects off (zgx reports macOS's alone, as
@@ -75,6 +81,14 @@ end
 -- shows through sharp).
 function M.menus_see_through(): boolean
 	return M.see_through() and not (menus_blur ~= nil and menus_blur:get() == false)
+end
+
+-- A fill that follows `see_through()`: `tint` frosted, `solid` opaque (`bg =
+-- material.pick("$zeron.settings.tint", "$zeron.settings.card")`).
+function M.pick(tint: string, solid: string): () -> string
+	return function(): string
+		return if M.see_through() then tint else solid
+	end
 end
 
 return M

@@ -1,0 +1,111 @@
+---
+// The app in each of its themes, with its frosted glass window over a
+// desktop. The window is the generated recreation (ThemesWindow); the list
+// beside it is what tools/recreate captured (themes.themes.json).
+import desktop from "../../assets/desktop.webp";
+import ThemesWindow from "../app/ThemesWindow.astro";
+import themes from "../app/themes.themes.json";
+import Icon from "../ui/Icon.astro";
+
+const NAMES: Record<string, string> = { "zeron-dark": "Zeron", "tokyo-night": "Tokyo Night", catppuccin: "Catppuccin", dracula: "Dracula", gruvbox: "Gruvbox", "github-light": "GitHub Light" };
+---
+
+<section class="section" id="yours">
+  <div class="wrap">
+    <h2 class="statement" data-reveal><b>Make it your own.</b> Change how Zeron looks with themes, and what it can do with plugins.</h2>
+    <div class="bento">
+      <article class="card span-12 themes" data-reveal>
+        <div class="controls">
+          <div class="card-copy">
+            <h3>Pick a theme</h3>
+            <p>Zeron comes with themes for light and dark, and its window is frosted glass, so your desktop shows through it.</p>
+          </div>
+          <div class="list" role="radiogroup" aria-label="Theme" data-themes>
+            {
+              themes.map((theme, index) => (
+                <button type="button" role="radio" aria-checked={index === 0 ? "true" : "false"} data-index={index}>
+                  <i style={`background:${theme.window};color:${theme.accent}`} />
+                  <span>{NAMES[theme.id] ?? theme.id}</span>
+                </button>
+              ))
+            }
+          </div>
+        </div>
+        <div class="pane" style={`--desktop: url(${desktop.src})`}>
+          <ThemesWindow id="themes-window" class="glass" />
+        </div>
+      </article>
+    </div>
+    <ul class="also" data-reveal>
+      <li>
+        <Icon name="plug-circle" size={18} />
+        <h3>Plugins</h3>
+        <p>Add panels, commands and status lines to Zeron, or ask an agent to write a plugin for you.</p>
+      </li>
+      <li>
+        <Icon name="palette" size={18} />
+        <h3>VS Code themes</h3>
+        <p>Import any VS Code theme, including its syntax and terminal colours.</p>
+      </li>
+      <li>
+        <Icon name="gallery" size={18} />
+        <h3>Scenes</h3>
+        <p>Put artwork behind new chats that moves with your pointer.</p>
+      </li>
+    </ul>
+  </div>
+</section>
+
+<script>
+  // The window wears the theme chosen: its stage's class says which (t0, t1, …).
+  const list = document.querySelector<HTMLElement>("[data-themes]");
+  const stage = document.getElementById("themes-window");
+  if (list && stage) {
+    const buttons = [...list.querySelectorAll<HTMLButtonElement>("[data-index]")];
+    const choose = (button: HTMLButtonElement, focus = false) => {
+      for (const other of buttons) {
+        const on = other === button;
+        other.setAttribute("aria-checked", String(on));
+        other.tabIndex = on ? 0 : -1;
+        stage.classList.toggle(`t${other.dataset.index}`, on);
+      }
+      if (focus) button.focus();
+    };
+    for (const [index, button] of buttons.entries()) {
+      button.tabIndex = index === 0 ? 0 : -1;
+      button.addEventListener("click", () => choose(button));
+      button.addEventListener("keydown", (event) => {
+        const step = event.key === "ArrowDown" || event.key === "ArrowRight" ? 1 : event.key === "ArrowUp" || event.key === "ArrowLeft" ? -1 : 0;
+        if (!step) return;
+        event.preventDefault();
+        choose(buttons[(index + step + buttons.length) % buttons.length]!, true);
+      });
+    }
+  }
+</script>
+
+<style>
+  .themes { display: grid; grid-template-columns: 316px minmax(0, 1fr); }
+  .controls { display: flex; flex-direction: column; padding-bottom: 20px; border-right: 1px solid var(--line); }
+  /* The app's menu rows: a wash under the pointer, firmer on the one chosen. */
+  .list { display: grid; gap: 2px; margin-top: 22px; padding: 0 16px; }
+  .list button { display: flex; align-items: center; gap: 12px; height: 40px; padding: 0 12px; font-size: 14px; font-weight: 500; color: var(--text-2); text-align: left; border-radius: var(--radius-lg); transition: background-color 0.12s, color 0.12s; }
+  .list button:hover { color: var(--text); background: var(--hover); }
+  .list button[aria-checked="true"] { color: var(--text); background: var(--selected); }
+  /* A theme's mark: its window's colour, its accent at the heart. */
+  .list i { position: relative; flex: none; width: 20px; height: 20px; border-radius: 6px; box-shadow: inset 0 0 0 1px rgb(128 128 128 / 0.35); }
+  .list i::after { content: ""; position: absolute; inset: 6px; background: currentColor; border-radius: 50%; }
+
+  /* The desktop, out of focus, and the glass window on it, running off the card. */
+  .pane { position: relative; min-height: 480px; overflow: hidden; background: #1a1a1f; }
+  .pane::before { content: ""; position: absolute; inset: -60px; background: var(--desktop) center / cover; filter: blur(28px) saturate(1.15); }
+  .pane :global(.glass) { position: absolute; left: 44px; top: 44px; width: 1188px; overflow: visible; border-radius: 12px; }
+  .pane :global(.glass .zw) { border-radius: 13px; box-shadow: 0 0 0 1px rgb(255 255 255 / 0.16), 0 30px 80px -10px rgb(0 0 0 / 0.6); -webkit-backdrop-filter: blur(40px) saturate(1.6); backdrop-filter: blur(40px) saturate(1.6); transition: background-color 0.25s; }
+  @media (max-width: 900px) {
+    .themes { grid-template-columns: minmax(0, 1fr); }
+    .controls { border-right: 0; border-bottom: 1px solid var(--line); }
+    .list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .pane { min-height: 400px; }
+    .pane :global(.glass) { left: 20px; top: 20px; width: 1000px; }
+  }
+</style>

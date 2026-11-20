@@ -14,8 +14,11 @@ import type {
   EnrollDeviceRequest,
   GithubDevicePoll,
   GithubDeviceStart,
+  GithubListingView,
   GithubRepoView,
   Grant,
+  GrantManyReply,
+  GrantManyRequest,
   GrantRequest,
   PutCredentialRequest,
   VaultCaller,
@@ -78,6 +81,10 @@ export class VaultApi extends WorkerEntrypoint<Env> implements VaultRpc {
     return this.vault().grant(caller, request);
   }
 
+  grantMany(caller: VaultCaller, request: GrantManyRequest): Promise<VaultResult<GrantManyReply>> {
+    return this.vault().grantMany(caller, request);
+  }
+
   githubDeviceStart(caller: VaultCaller, authorizedDevices: readonly string[]): Promise<VaultResult<GithubDeviceStart>> {
     return this.vault().githubDeviceStart(caller, authorizedDevices);
   }
@@ -88,6 +95,10 @@ export class VaultApi extends WorkerEntrypoint<Env> implements VaultRpc {
 
   githubRepos(caller: VaultCaller, query?: string): Promise<VaultResult<readonly GithubRepoView[]>> {
     return this.vault().githubRepos(caller, query);
+  }
+
+  githubListing(caller: VaultCaller, query?: string): Promise<VaultResult<GithubListingView>> {
+    return this.vault().githubListing(caller, query);
   }
 
   githubBranches(caller: VaultCaller, repo: string): Promise<VaultResult<readonly string[]>> {

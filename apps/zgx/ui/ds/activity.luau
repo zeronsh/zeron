@@ -26,9 +26,13 @@ local status = require("@self/status")
 local ToolDetail = require("@self/tool_detail")
 local Markdown = require("@self/markdown")
 local locale = require("@self/locale")
+local ReplyPicture = require("@self/reply_picture")
 local FoldButton = require("@self/fold_button")
+local Tooltip = require("@self/tooltip")
 
-export type Kind = "exec" | "read" | "edit" | "write" | "search" | "glob" | "web" | "todo" | "agent" | "thought"
+-- (`cloud`, `git`: a Cloud machine's own setup steps, the machine and its
+-- checkout.)
+export type Kind = "exec" | "read" | "edit" | "write" | "search" | "glob" | "web" | "todo" | "agent" | "thought" | "cloud" | "git"
 -- One tool: what kind, what it did ("Read", "transcript.rs"), and for an
 -- edit the lines it added and removed; `failed` tints its glyph.
 export type Tool = {
@@ -49,6 +53,10 @@ export type Tool = {
 	added: number?,
 	removed: number?,
 	failed: boolean?,
+	-- Auto's reviewer on it (the agent's own: Codex's auto-review, Claude
+	-- Code's auto mode): "reviewing", "approved", "denied" or "timed-out",
+	-- its risk ("low" to "critical") and why, as the reviewer said.
+	review: { status: string, risk: string?, reason: string? }?,
 	-- What its row opens to beyond its call (ds/tool_detail): its output
 	-- (as the harness gave it, escapes and all, growing while it runs), a
 	-- command's exit code, its files' counts, an older doc's diff, and the
@@ -60,6 +68,10 @@ export type Tool = {
 	diff_ref: string?,
 	stats: { ToolDetail.Stat }?,
 	diff: ToolDetail.Diff?,
+	-- The pictures its result carried (a Read of a screenshot), as the
+	-- engine keeps them: copies on the chat's host, which the row opens to
+	-- (Zeron's chip previews, crates/ui tool_images.rs).
+	pictures: { { path: string, name: string? } }?,
 }
 
 export type Writing = { words: (id: string) -> string?, seeded: () -> boolean }
@@ -81,13 +93,25 @@ export type Props = {
 	-- A subagent's spawn row (its tool's `subagent`): what opens it (its
 	-- lane). Without it, the row opens its call as any does.
 	open_subagent: ((sub: any) -> ())?,
+	-- Where a tool's pictures are read from (ds/transcript's
+	-- `shown_pictures`: files on the chat's host). Without it, none show.
+	pictures: ReplyPicture.Pictures?,
 	-- A thought being written: `words`, a thought's words as they arrive, by
 	-- its id (nil for one not being written: the reply's draft holds them,
 	-- so a tick of them doesn't build its rows again); `seeded`, whether what
 	-- a row finds as it's made stays as it is rather than fading in (a chat
 	-- opened mid-thought).
 	thought: Writing?,
+	-- Where it shows (a transcript's list and its scroll): its rows built
+	-- only near the view (`Window`).
+	window: Window?,
 }
+
+-- A transcript's view, for a group windowed in it: `key` names the group
+-- (its runs' heights are kept by it), `view` is the scroll it shows in,
+-- `offset` its scroll; `at_end`, whether the view rests at its end; `row`,
+-- the list's row holding the group (ds/markdown's `window`, the same).
+export type Window = { key: string, view: Ref, offset: State<number>, at_end: State<boolean>?, row: Ref? }
 
 local GLYPH: { [Kind]: Icon.Name } = {
 	exec = "terminal",
@@ -98,8 +122,10 @@ local GLYPH: { [Kind]: Icon.Name } = {
 	glob = "folder-with-files",
 	web = "global",
 	todo = "checklist",
-	agent = "bot",
+	agent = "side-chat",
 	thought = "chat-round-line",
+	cloud = "cloud",
+	git = "git-branch",
 }
 
 -- The tree, in points: the trunk's x (under the working loader's middle, so
@@ -116,6 +142,26 @@ local GUTTER = 48
 local ROW, HEADER = 28, 26
 -- How long the tree takes to open and fold.
 local FOLD = 200
+-- How a row joining the tree arrives.
+local ENTER: any = { opacity = { 0, 1 }, y = { -6, 0 }, duration = 360, ease = "outExpo" }
+
+-- Each row's height as last laid out, by its group and its tool: a group
+-- made again (its row scrolled back) holds each row as it was. A plain
+-- table, a key at a time; it starts again as it fills.
+local KEPT_MOST = 8192
+local MEASURED: { [string]: number } = {}
+local kept_count: { [any]: number } = {}
+local function kept_set(t: { [string]: any }, k: string, value: any)
+	if t[k] == nil then
+		local n = (kept_count[t] or 0) + 1
+		if n > KEPT_MOST then
+			table.clear(t)
+			n = 1
+		end
+		kept_count[t] = n
+	end
+	t[k] = value
+end
 
 -- The summary: each kind counted, in the order an agent tends to work.
 -- (Each kind's phrase a message, `{n, plural, …}`: its key.)
@@ -196,6 +242,101 @@ end
 -- scrolled back): each tool's call by its id, each group by its key. One
 -- map each, holding only what's open (or, for a group, chosen), not a
 -- state per tool.
+
+-- A tool's pictures under its opened row: small thumbnails in a row (the
+-- theme's `zeron.prose.picture.thumb`), each opening in the lightbox among
+-- the others, a lightbox group of their own.
+local function tool_pictures(now: () -> Tool, shown: ReplyPicture.Pictures): Node
+	local function entries(): { ReplyPicture.Entry }
+		local out = {}
+		for _, it in now().pictures or {} do
+			table.insert(out, { src = it.path, alt = it.name or "" })
+		end
+		return out
+	end
+	return ReplyPicture.Thumbs { pictures = shown, items = entries, group = `tool:{now().id}`, set = entries }
+end
+
+-- A row's call and what it did, as it opens (`row`): `now`, its tool;
+-- `pictures`, where its result's pictures are read from (without it, they
+-- don't show).
+local Opened = ui.component(function(props: { now: () -> Tool, pictures: ReplyPicture.Pictures? }): Node
+	local now = props.now
+	local pictures = props.pictures
+	return ui.column {
+		w_full = true,
+		ui.show(function(): boolean
+			return now().call ~= nil
+		end, call_block(now)),
+		if pictures
+			then ui.show(
+				function(): boolean
+					local list = now().pictures
+					return list ~= nil and #list > 0
+				end,
+				ui.div {
+					ml = ui.raw(GUTTER, "under the line's words, past the tree's gutter"),
+					mt = "$space.1",
+					mb = "$space.1",
+					tool_pictures(now, pictures),
+				}
+			)
+			else nil,
+		ui.show(
+			function(): boolean
+				return ToolDetail.has(now() :: any)
+			end,
+			ui.div {
+				ml = ui.raw(GUTTER, "under the line's words, past the tree's gutter"),
+				mb = "$space.1",
+				ToolDetail.ToolDetail { tool = now :: any },
+			}
+		),
+	}
+end)
+
+-- A row's line, as FadeText makes it (ds/fade_text: a box that clips the
+-- text at its own width, fading its end while it overflows), built here
+-- directly: a long group makes thousands.
+local function target_line(now: () -> Tool): Node
+	local clip, text = ui.ref(), ui.ref()
+	return ui.row {
+		ref = clip,
+		shrink = 1,
+		min_w = 0,
+		overflow = "hidden",
+		items = "center",
+		fade_x = function()
+			local over = (text.width or 0) > (clip.width or 0) + 0.5
+			return { 0, if over then 24 else 0 }
+		end,
+		ui.text {
+			function(): string
+				return line_of(now())
+			end,
+			ref = text,
+			shrink = 0,
+			literal = true,
+			font = "$font.mono",
+			text_size = "$font.size.sm",
+			color = "$text.primary",
+		},
+	}
+end
+
+-- A row's branch (`tree_line.branch`), made once for each height and
+-- whether the trunk goes on: rows of a height share it.
+local BRANCHES: { [string]: any } = {}
+local function branch_of(h: number, on: boolean): any
+	local k = `{h}:{on}`
+	local path = BRANCHES[k]
+	if path == nil then
+		path = tree_line.branch { x = TRUNK, mid = ROW / 2, tip = BRANCH_END, h = h, bend = BEND, on = on }
+		kept_set(BRANCHES, k, path)
+	end
+	return path
+end
+
 local CALLS_OPEN = ui.state("activity_calls_open", {} :: { [string]: boolean })
 local GROUPS_CHOSEN = ui.state("activity_groups_chosen", {} :: { [string]: boolean })
 
@@ -225,7 +366,71 @@ local THOUGHT_ROOM = THOUGHT_BUTTON + 6
 -- taken off the words' height to count their lines.
 local THOUGHT_GAP = 12
 
-local function thought_row(now: () -> Tool, below: () -> boolean, writing: Writing?, group: string?): Node
+-- How many gaps between blocks (`\n`, blank space, `\n`) a thought's words
+-- hold, counted as they grow: words that only gained an end are counted
+-- from the last gap that could still change, not from their start, so a
+-- long thought being written costs each tick its new words alone.
+local GAP = "\n%s*\n"
+-- (How much of the words' start and end is looked at to know they only grew.)
+local EDGE = 64
+local function gap_counter(): (text: string) -> number
+	local seen, seen_len = "", 0
+	-- Gaps wholly before `from` (none of them reaching the end then), and
+	-- where to look on from.
+	local settled, from = 0, 1
+	local head, tail = "", ""
+	local counted = 0
+	return function(text: string): number
+		if text == seen then
+			return counted
+		end
+		if not (seen_len > 0
+			and #text > seen_len
+			and string.sub(text, 1, #head) == head
+			and string.sub(text, seen_len - #tail + 1, seen_len) == tail)
+		then
+			-- (Not grown from what was counted: counted afresh.)
+			settled, from = 0, 1
+		end
+		local n = settled
+		local at = from
+		while true do
+			local s, e = string.find(text, GAP, at)
+			if not s or not e then
+				break
+			end
+			n += 1
+			-- (One that runs to the end may run on as words come.)
+			if e < #text then
+				settled, from = n, e + 1
+			end
+			at = e + 1
+		end
+		-- No gap starts before the blank space the words end in (one there
+		-- would end before it, and is counted): the next look starts there.
+		local q = #text
+		while q >= from do
+			local b = string.byte(text, q)
+			if b ~= 32 and b ~= 9 and b ~= 10 and b ~= 13 and b ~= 11 and b ~= 12 then
+				break
+			end
+			q -= 1
+		end
+		from = math.max(from, q + 1)
+		seen, seen_len, counted = text, #text, n
+		head = string.sub(text, 1, EDGE)
+		tail = string.sub(text, math.max(1, #text - EDGE + 1))
+		return n
+	end
+end
+
+local function thought_row(
+	now: () -> Tool,
+	below: () -> boolean,
+	writing: Writing?,
+	group: string?,
+	resized: ((size: { w: number, h: number }) -> ())?
+): Node
 	local id = now().id
 	local line = ui.theme.get("zeron.prose.small.line") :: number
 	local folded_h = THOUGHT_LINES * line
@@ -257,12 +462,9 @@ local function thought_row(now: () -> Tool, below: () -> boolean, writing: Writi
 	end
 	-- About how many lines the words run to: their height in lines of the
 	-- prose, less the gaps between their blocks.
+	local gaps = gap_counter()
 	local function lines(): number
-		local gaps = 0
-		for _ in string.gmatch(words(), "\n%s*\n") do
-			gaps += 1
-		end
-		return math.max(1, math.floor(((body.height or 0) - gaps * THOUGHT_GAP) / line + 0.5))
+		return math.max(1, math.floor(((body.height or 0) - gaps(words()) * THOUGHT_GAP) / line + 0.5))
 	end
 	-- The clip: four lines while folded; open, as tall as the words. Not
 	-- measured yet (just mounted: a tool group opening), four lines too, a
@@ -294,6 +496,7 @@ local function thought_row(now: () -> Tool, below: () -> boolean, writing: Writi
 		w_full = true,
 		relative = true,
 		class = "thought",
+		on_resize = resized,
 		-- No branch: the trunk alone, past the words to a tool below, when
 		-- one follows; nothing when the thought ends the group.
 		ui.canvas {
@@ -376,23 +579,81 @@ local function thought_row(now: () -> Tool, below: () -> boolean, writing: Writi
 	}
 end
 
+-- (A tool that may come to have a result opens: whether it has one isn't
+-- known as its row is made.)
+local OPENS: { [string]: boolean } = { exec = true, read = true, edit = true, write = true, search = true, glob = true, web = true }
+-- Kinds whose row counts lines added and removed (an edit's).
+local COUNTS: { [string]: boolean } = { edit = true, write = true }
+
+-- Auto's reviewer on a call: its glyph becomes a shield in the verdict's
+-- hue (let through quiet, stopped in danger's, timed out in warning's), its
+-- risk and why in the tooltip. A call no reviewer looked at keeps its own.
+local REVIEW_TONE: { [string]: string } = {
+	reviewing = "$text.tertiary",
+	approved = "$text.secondary",
+	denied = "$danger",
+	["timed-out"] = "$warning",
+}
+local function reviewed(now: () -> Tool): () -> boolean
+	return function(): boolean
+		return now().review ~= nil
+	end
+end
+local function review_glyph(now: () -> Tool, size: number): Node
+	local function review(): any
+		return now().review
+	end
+	return ui.div {
+		color = function(): string
+			local r = review()
+			return if r then REVIEW_TONE[r.status] or "$text.secondary" else "$text.secondary"
+		end,
+		tooltip = Tooltip {
+			function(): string
+				local r = review()
+				if not r then
+					return ""
+				end
+				local lines = { locale.s(`ds.activity.review.{r.status}`), locale.s(`ds.activity.review.{r.status}_hint`) }
+				if r.risk then
+					table.insert(lines, locale.s("ds.activity.review.risk", { risk = r.risk }))
+				end
+				if r.reason then
+					table.insert(lines, r.reason)
+				end
+				return table.concat(lines, "\n")
+			end,
+		},
+		Icon { name = "shield-check", size = size },
+	}
+end
+
 -- (`below`: a tool with a branch follows, so the trunk runs on under this
--- one; `running`: it is the one in flight, its glyph the working loader.)
+-- one; `running`: it is the one in flight, its glyph the working loader;
+-- `resized`: told the row's size as it's laid out; `settled`: it is before
+-- the group's last, so never the one in flight.)
+-- A row is built often (each comes into view, a long group's thousands), so
+-- what can't change once a tool has started is read once as it's made (its
+-- kind, its verb, its glyph); only what a tool's result changes follows it.
 local function row(
 	now: () -> Tool,
 	below: () -> boolean,
 	running: () -> boolean,
 	open_subagent: ((sub: any) -> ())?,
 	writing: Writing?,
-	group: string?
+	group: string?,
+	resized: ((size: { w: number, h: number }) -> ())?,
+	settled: boolean?,
+	pictures: ReplyPicture.Pictures?
 ): Node
-	if now().kind == "thought" then
-		return thought_row(now, below, writing, group)
+	local t = now()
+	if t.kind == "thought" then
+		return thought_row(now, below, writing, group, resized)
 	end
 	local function tint(): string
 		return if now().failed then "$danger" else "$text.secondary"
 	end
-	local id = now().id
+	local id = t.id
 	local function has_call(): boolean
 		return now().call ~= nil
 	end
@@ -401,9 +662,14 @@ local function row(
 	local function has_detail(): boolean
 		return ToolDetail.has(now() :: any)
 	end
+	-- The pictures its result carried, where they can be read.
+	local function has_pictures(): boolean
+		local list = now().pictures
+		return pictures ~= nil and list ~= nil and #list > 0
+	end
 	-- Open as the reader left it (opened or closed), else closed.
 	local function showing(): boolean
-		if not (has_call() or has_detail()) then
+		if not (has_call() or has_detail() or has_pictures()) then
 			return false
 		end
 		return CALLS_OPEN:get()[id] == true
@@ -412,13 +678,33 @@ local function row(
 	local function lane(): any
 		return if open_subagent then (now() :: any).subagent else nil
 	end
-	-- (A tool that may come to have a result opens: whether it has one
-	-- isn't known as its row is made.)
-	local OPENS: { [string]: boolean } = { exec = true, read = true, edit = true, write = true, search = true, glob = true, web = true }
-	local opens = has_call() or lane() ~= nil or OPENS[now().kind] == true
+	local opens = t.call ~= nil or lane() ~= nil or OPENS[t.kind] == true or has_pictures()
+	-- (Only a subagent's spawn says more than its line: one that may open
+	-- its lane follows it.)
+	local label: string | () -> string = if t.target then `{t.verb} {line_of(t)}` else t.verb
+	-- A Cloud machine's step says how far it is as it goes ("Waking its Cloud
+	-- machine — cloning the repository…"): its words follow it.
+	local verb: string | () -> string = t.verb
+	if t.kind == "cloud" or t.kind == "git" then
+		verb = function(): string
+			return now().verb
+		end
+		label = verb
+	end
+	if open_subagent and t.kind == "agent" then
+		label = function(): string
+			local sub = lane()
+			if sub then
+				return locale.s("ds.activity.open_subagent", { title = sub.title or locale.s("ds.activity.subagent") })
+			end
+			local n = now()
+			return if n.target then `{n.verb} {line_of(n)}` else n.verb
+		end
+	end
 	return ui.column {
 		w_full = true,
 		relative = true,
+		on_resize = resized,
 		-- The branch, and the trunk on down past an opened call.
 		ui.canvas {
 			absolute = true,
@@ -429,7 +715,7 @@ local function row(
 			pointer_events = "none",
 			draw = function(c, _, h)
 				local mid = ROW / 2
-				c:fill(tree_line.branch { x = TRUNK, mid = mid, tip = BRANCH_END, h = h, bend = BEND, on = below() }, "$zeron.tree")
+				c:fill(branch_of(h, below()), "$zeron.tree")
 			end,
 		},
 		ui.button {
@@ -447,14 +733,7 @@ local function row(
 			focusable = opens,
 			focus = if opens then control.ring else { border = 0 },
 			selectable = false,
-			label = function(): string
-				local t = now()
-				local sub = lane()
-				if sub then
-					return locale.s("ds.activity.open_subagent", { title = sub.title or locale.s("ds.activity.subagent") })
-				end
-				return if t.target then `{t.verb} {line_of(t)}` else t.verb
-			end,
+			label = label,
 			-- (A tool's call comes with it: whether it opens is known as its
 			-- row is made.)
 			expanded = if opens then showing else nil,
@@ -465,23 +744,36 @@ local function row(
 					open_subagent(sub)
 					return
 				end
-				if has_call() or has_detail() then
+				if has_call() or has_detail() or has_pictures() then
 					local all = table.clone(CALLS_OPEN:peek())
 					all[id] = not showing()
 					CALLS_OPEN:set(all)
 				end
 			end,
+			-- (A row before the group's last never runs: its glyph alone, placed
+			-- and coloured itself. The last may be the one in flight.)
+			-- Its glyph, in a box of its own off the line (what shows in it
+			-- never moves the line): Auto's reviewer looked at it, a shield in
+			-- the glyph's place.
 			ui.div {
 				absolute = true,
 				left = GLYPH_LEFT,
 				top = (ROW - GLYPH_SIZE) / 2,
-				color = tint,
-				ui.show(running, status.StatusIcon { kind = "working", size = GLYPH_SIZE }, Icon {
-					name = function(): Icon.Name
-						return GLYPH[now().kind]
-					end,
-					size = GLYPH_SIZE,
-				}),
+				w = GLYPH_SIZE,
+				h = GLYPH_SIZE,
+				ui.show(
+					reviewed(now),
+					review_glyph(now, GLYPH_SIZE),
+					ui.div {
+						color = tint,
+						if settled
+							then Icon { name = GLYPH[t.kind], size = GLYPH_SIZE }
+							else ui.show(running, status.StatusIcon { kind = "working", size = GLYPH_SIZE }, Icon {
+								name = GLYPH[t.kind],
+								size = GLYPH_SIZE,
+							}),
+					}
+				),
 			},
 			ui.row {
 				pl = ui.raw(GUTTER, "past the tree's gutter"),
@@ -490,15 +782,17 @@ local function row(
 				gap = "$space.1",
 				items = "center",
 				ui.text {
-					function(): string
-						return now().verb
-					end,
+					verb,
 					literal = true,
 					shrink = 0,
 					text_size = "$font.size.sm",
 					color = "$text.secondary",
 				},
-				ui.show(
+				-- (Its line as the tool goes on: a command's input may still
+				-- be arriving as it starts.)
+				if t.target
+					then target_line(now)
+					else ui.show(
 					function(): boolean
 						return now().target ~= nil
 					end,
@@ -514,7 +808,8 @@ local function row(
 					}
 				),
 				-- An edit's lines, added and removed, in their hues.
-				ui.show(
+				if COUNTS[t.kind] or t.added ~= nil
+					then ui.show(
 					function(): boolean
 						return now().added ~= nil
 					end,
@@ -528,8 +823,10 @@ local function row(
 						text_size = "$font.size.xs",
 						color = "$success",
 					}
-				),
-				ui.show(
+				)
+					else nil,
+				if COUNTS[t.kind] or t.removed ~= nil
+					then ui.show(
 					function(): boolean
 						local r = now().removed
 						return r ~= nil and r > 0
@@ -544,26 +841,17 @@ local function row(
 						text_size = "$font.size.xs",
 						color = "$danger",
 					}
-				),
+				)
+					else nil,
 			},
 		},
-		ui.show(
-			showing,
-			ui.column {
-				w_full = true,
-				ui.show(has_call, call_block(now)),
-				ui.show(
-					has_detail,
-					ui.div {
-						ml = ui.raw(GUTTER, "under the line's words, past the tree's gutter"),
-						mb = "$space.1",
-						ToolDetail.ToolDetail { tool = now :: any },
-					}
-				),
-			}
-		),
+		-- What it opens to, made only once it's opened (a component's body
+		-- runs as it mounts: closed, nothing of it is made).
+		ui.show(showing, Opened { now = now, pictures = pictures }),
 	}
 end
+
+
 
 return ui.component(function(props: Props): Node
 	local live = props.live or function()
@@ -596,17 +884,20 @@ return ui.component(function(props: Props): Node
 	end
 	local opened = ui.computed(open)
 	local tools = ui.computed(props.tools)
-	-- Each tool by its id: a row finds its own at once, not by a walk of
-	-- the group.
-	local by_id = ui.computed(function(): { [string]: Tool }
-		local out: { [string]: Tool } = {}
-		for _, x in tools:get() do
-			out[x.id] = x
-		end
-		return out
-	end)
 	local count = ui.computed(function(): number
 		return #tools:get()
+	end)
+	-- Where the last tool with a branch (any but a thought) is: the trunk
+	-- runs on below every row before it. (Looked for from the end: it is
+	-- the last tool, or a thought or two before it.)
+	local last_branch = ui.computed(function(): number
+		local list = tools:get()
+		for i = #list, 1, -1 do
+			if list[i].kind ~= "thought" then
+				return i
+			end
+		end
+		return 0
 	end)
 	local title = ui.computed(function(): string
 		local given = if props.summary then props.summary() else nil
@@ -617,35 +908,16 @@ return ui.component(function(props: Props): Node
 		end
 		return s
 	end)
-	-- Each tool's place in the list, to know the last (the one in flight
-	-- while the group works).
-	local function last_of(t: Tool): () -> boolean
-		return function(): boolean
-			local list = tools:get()
-			return list[#list] ~= nil and list[#list].id == t.id
-		end
-	end
-	-- Whether the trunk runs on below a tool: one with a branch (any but a
-	-- thought) comes after it. (A thought draws no branch, so the tree ends
-	-- at the last tool call.)
-	local function below_of(t: Tool): () -> boolean
-		return function(): boolean
-			local seen = false
-			for _, x in tools:get() do
-				if seen and x.kind ~= "thought" then
-					return true
-				end
-				if x.id == t.id then
-					seen = true
-				end
-			end
-			return false
-		end
-	end
 	-- The rows exist while the tree is open or folding: folded away, they'd
 	-- be built for nothing as a list scrolls, and a selection across the
 	-- reply would take text no one can see.
 	local mounted = ui.use_state(opened:peek())
+	-- (The tree itself, its list and what keeps its rows' heights, is made
+	-- the first time it opens: a finished reply's groups, folded, most of a
+	-- long thread's, never make one. `unfolded`: one made by opening eases
+	-- open from nothing, as one made earlier does.)
+	local tree_made = ui.use_state(opened:peek())
+	local unfolded = ui.use_state(opened:peek())
 	local folding: (() -> ())? = nil
 	ui.effect(function()
 		local on = opened:get()
@@ -654,7 +926,10 @@ return ui.component(function(props: Props): Node
 			folding = nil
 		end
 		if on then
-			mounted:set(true)
+			ui.batch(function()
+				tree_made:set(true)
+				mounted:set(true)
+			end)
 		elseif mounted:peek() then
 			folding = ui.after(FOLD, function()
 				folding = nil
@@ -662,6 +937,139 @@ return ui.component(function(props: Props): Node
 			end)
 		end
 	end)
+	local Tree = ui.component(function(_: {}): Node
+		-- The rows: a list virtualized by the view around it (the transcript's),
+		-- each call a row of its own, built only as the view shows it, the rows
+		-- about to come into it built ahead in the time frames leave over
+		-- (zgx's `ahead`), so a scroll or the tree opening builds what shows
+		-- alone. A row follows its tool in place (its item as a state), and
+		-- holds its height in `heights`: a call's line is ROW, one opened or a
+		-- thought its own, as it was last laid out.
+		local own_key = key or tostring(own)
+		local heights = ui.use_state({} :: { number })
+		local listed: { string } = {}
+		-- Calls arriving while the rows are made: each plays `ENTER` as it is
+		-- first built, as a row joining a `ui.each` does.
+		local arriving: { [string]: boolean } = {}
+		local was_mounted = false
+		-- A row's height as it is first laid out: a call's line, ROW, or as it
+		-- was last laid out if opened; a thought, as it was if it's short or
+		-- opened, else its four lines folded before it knows it's long (its
+		-- button's room comes a frame on, as the words are measured).
+		local line = ui.theme.get("zeron.prose.small.line") :: number
+		local first_folded = THOUGHT_LINES * line + (ROW - line)
+		local function height_of(t: Tool): number
+			local h = MEASURED[`{own_key}:{t.id}`]
+			local open = CALLS_OPEN:peek()[t.id] == true
+			if t.kind ~= "thought" then
+				return if open and h then h else ROW
+			end
+			if h and (open or h <= first_folded) then
+				return h
+			end
+			return first_folded
+		end
+		ui.effect(function()
+			local list = tools:get()
+			local m = mounted:get()
+			local n = #list
+			-- (Rows that were there before: the same calls in the same places,
+			-- looked at at the ends; anything else is written whole.)
+			local same = #listed <= n
+				and (#listed == 0 or (list[1].id == listed[1] and list[#listed].id == listed[#listed]))
+			ui.batch(function()
+				if not same then
+					heights:set({})
+					table.clear(listed)
+				end
+				for i = #listed + 1, n do
+					local t = list[i]
+					listed[i] = t.id
+					if m and was_mounted then
+						arriving[t.id] = true
+					end
+					heights:push(height_of(t))
+				end
+			end)
+			was_mounted = m
+		end)
+		local function row_view(t: Tool, index: State<number>, item: State<Tool>): Node
+			local id = t.id
+			local function place(): number
+				return index:get()
+			end
+			-- Its height, as laid out, for the rows after it.
+			local function resized(size: { w: number, h: number })
+				local k = `{own_key}:{id}`
+				if MEASURED[k] ~= size.h then
+					kept_set(MEASURED, k, size.h)
+				end
+				local i = index:peek()
+				local held = heights:peek()[i]
+				if held ~= nil and held ~= size.h then
+					heights:set_key(i, size.h)
+				end
+			end
+			local function made(): Node
+				return row(function(): Tool
+					return item:get()
+				end, function(): boolean
+					return place() < last_branch:get()
+				end, function(): boolean
+					return live() and place() == count:get()
+				end, props.open_subagent, props.thought, props.key, resized, place() < count:peek(), props.pictures)
+			end
+			-- (A call arriving joins as a row joining a `ui.each` does; the rest
+			-- are made as they come into view, as they were.)
+			if arriving[id] then
+				arriving[id] = nil
+				return ui.presence(function(): string
+					return "row"
+				end, made, { enter = ENTER, initial = true, w_full = true })
+			end
+			return made()
+		end
+
+		return ui.column {
+			w_full = true,
+			overflow = "hidden",
+			layout = "height",
+			layout_clip = true,
+			layout_duration = FOLD,
+			layout_ease = "outQuart",
+			max_h = function(): number
+				return if opened:get() and unfolded:get() then 1e6 else 0
+			end,
+			on_mount = function()
+				if not unfolded:peek() then
+					ui.after(0, function()
+						unfolded:set(true)
+					end)
+				end
+			end,
+			if props.body
+				then ui.presence(function(): string?
+					return if mounted:get() then "body" else nil
+				end, function(): Node
+					return (props.body :: () -> Node)()
+				end, { w_full = true })
+				else ui.show(
+				mounted,
+				ui.list {
+					w_full = true,
+					virtualize = "ancestor",
+					data = tools,
+					key = "id",
+					heights = heights,
+					row = row_view,
+				}
+			),
+		}
+	end)
+
+	-- (Made while it works: its line rolls and its loader shows as it goes.
+	-- Made done, it stays done: a finished reply's group never works again.)
+	local working = live()
 	return ui.column {
 		w_full = true,
 		ui.show(
@@ -697,48 +1105,14 @@ return ui.component(function(props: Props): Node
 				-- While it works, the working loader before the summary, its
 				-- ring over the trunk below; done, the summary alone, on the
 				-- reply's left edge.
-				ui.show(live, status.StatusIcon { kind = "working", size = LOADER }),
-				FadeText { title, roll = true, grow = 1, text_size = "$font.size.sm" },
+				if working then ui.show(live, status.StatusIcon { kind = "working", size = LOADER }) else nil,
+				-- (Its box fills the header: its width easing would show nothing,
+				-- and lay the header out every frame of a roll. A group made once
+				-- it's done keeps its line: nothing to roll.)
+				FadeText { title, roll = working, glide = false, grow = 1, text_size = "$font.size.sm" },
 			}
 		),
-		-- The tree: its rows, each arriving under the last.
-		ui.column {
-			w_full = true,
-			overflow = "hidden",
-			layout = "height",
-			layout_clip = true,
-			layout_duration = FOLD,
-			layout_ease = "outQuart",
-			max_h = function(): number
-				return if opened:get() then 1e6 else 0
-			end,
-			if props.body
-				then ui.presence(function(): string?
-					return if mounted:get() then "body" else nil
-				end, function(): Node
-					return (props.body :: () -> Node)()
-				end, { w_full = true })
-				else ui.show(
-				mounted,
-				ui.each(tools, function(t: Tool)
-					local last = last_of(t)
-					-- (An animated list's rows have no row state: the tool as
-					-- it is now, found by its id.)
-					local now = ui.computed(function(): Tool
-						return by_id:get()[t.id] or t
-					end)
-					return row(function(): Tool
-						return now:get()
-					end, below_of(t), function(): boolean
-						return live() and last()
-					end, props.open_subagent, props.thought, props.key)
-				end, {
-					key = function(t: Tool): string
-						return t.id
-					end,
-					enter = { opacity = { 0, 1 }, y = { -6, 0 }, duration = 360, ease = "outExpo" },
-				})
-			),
-		},
+		-- The tree: its rows, each arriving under the last (made once it opens).
+		ui.show(tree_made, Tree {}),
 	}
 end)

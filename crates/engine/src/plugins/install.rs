@@ -12,8 +12,10 @@
 //!
 //! Installing never decides for you, except for a plugin signed by your own
 //! key (`mod.rs`): someone else's waits for the consent window, the app's
-//! own. An update must be signed by the key the installed one was; one
-//! asking for more than you allowed waits for you again.
+//! own. An update must be signed by the key the installed one was, or by
+//! another live key the edge verifies to the same account (the author on a
+//! new machine), which asks you again; one asking for more than you allowed
+//! waits for you again.
 //!
 //! Where each came from is kept beside its files in `.source.json` (a dot
 //! file, so never part of what's signed). An update found is kept in
@@ -44,13 +46,66 @@ pub const UPDATES_DIR: &str = ".updates";
 const GIT_TIMEOUT: Duration = Duration::from_secs(120);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Why installing or updating a plugin failed, as the app shows it in your
+/// language: each failure reads `"<reason>: <words>"` (the convention plugin
+/// ops fail with, `agents::Failure::text`), the reason one of these, the
+/// words English for whoever reads it raw (an agent, the CLI). The app's
+/// screens/plugins/words.luau `failure` maps each to a sentence of its
+/// locale; an error without one is shown as it reads.
+pub mod reason {
+    pub const NOT_A_PACKAGE: &str = "not_a_package";
+    pub const UNSIGNED: &str = "unsigned";
+    pub const TAMPERED: &str = "tampered";
+    pub const BAD_SIGNATURE: &str = "bad_signature";
+    pub const TOO_BIG: &str = "too_big";
+    pub const BAD_FILE: &str = "bad_file";
+    /// `git` isn't installed (or can't be run) on the device.
+    pub const GIT_MISSING: &str = "git_missing";
+    pub const GIT_TIMEOUT: &str = "git_timeout";
+    /// Private, missing, or the branch is wrong: git doesn't say which.
+    pub const REPO_UNREADABLE: &str = "repo_unreadable";
+    pub const REF_NOT_FOUND: &str = "ref_not_found";
+    pub const NO_MANIFEST: &str = "no_manifest";
+    /// GitHub answered 403 or 429: too many requests from here for now.
+    pub const RATE_LIMITED: &str = "rate_limited";
+    pub const GITHUB_UNREACHABLE: &str = "github_unreachable";
+    pub const RELEASE_NOT_FOUND: &str = "release_not_found";
+    /// The release carries no `.zeron-plugin` (or `.zeron-template`).
+    pub const NO_PACKAGE: &str = "no_package";
+    pub const DOWNLOAD_FAILED: &str = "download_failed";
+    pub const NOT_A_LINK: &str = "not_a_link";
+    pub const HTTPS_ONLY: &str = "https_only";
+    /// One by the same id is installed, signed by another key.
+    pub const OTHER_SIGNER: &str = "other_signer";
+    /// An update found is signed by another key than the installed one.
+    pub const NEW_SIGNER: &str = "new_signer";
+    /// One by the same id is installed and isn't signed.
+    pub const INSTALLED_UNSIGNED: &str = "installed_unsigned";
+    pub const NOT_NEWER: &str = "not_newer";
+    pub const DIFFERENT_PLUGIN: &str = "different_plugin";
+    pub const UP_TO_DATE: &str = "up_to_date";
+    /// Reinstalling: where it came from isn't known, or is gone.
+    pub const NO_SOURCE: &str = "no_source";
+}
+
+/// `"<reason>: <words>"`.
+pub fn failure(reason: &str, words: impl std::fmt::Display) -> String {
+    format!("{reason}: {words}")
+}
+
+/// The reason `error` carries, if it carries one of [`reason`]'s.
+pub fn reason_of(error: &str) -> Option<&str> {
+    let (code, _) = error.split_once(": ")?;
+    (!code.is_empty() && code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')).then_some(code)
+}
+
 pub const WORDS: Words = Words {
-    not_a_package: "That isn't a Zeron plugin",
-    unsigned: "It isn't signed, so there's no telling who made it",
-    tampered: "Its files don't match its signature: it was changed after it was signed",
-    bad_signature: "Its signature doesn't check out",
-    too_big: "It's too big for a plugin",
-    bad_file: "It has a file Zeron won't write ({rel})",
+    not_a_package: "not_a_package: That isn't a Zeron plugin",
+    unsigned: "unsigned: It isn't signed, so there's no telling who made it",
+    tampered: "tampered: Its files don't match its signature: it was changed after it was signed",
+    bad_signature: "bad_signature: Its signature doesn't check out",
+    too_big: "too_big: It's too big for a plugin",
+    bad_file: "bad_file: It has a file Zeron won't write ({rel})",
 };
 
 /// Where a plugin came from (`.source.json`).
@@ -212,12 +267,14 @@ pub fn newer(candidate: &str, installed: &str) -> bool {
 }
 
 pub fn not_newer(candidate: &str, installed: &str) -> String {
-    format!("Version {candidate} isn't later than the {installed} installed, so it won't replace it")
+    failure(reason::NOT_NEWER, format!("Version {candidate} isn't later than the {installed} installed, so it won't replace it"))
 }
 
 /// What was installed over, when it was an update.
 #[derive(Debug, Clone)]
 pub struct Replaced {
+    /// The key the replaced one was signed by.
+    pub key: String,
     pub version: String,
     pub permissions: Vec<String>,
     pub hash: String,
@@ -229,14 +286,18 @@ fn installed(dir: &Path) -> Result<(String, Replaced), String> {
     let inspected = scan::inspect(dir, true);
     let manifest = inspected.manifest.as_ref();
     let SigCheck::Valid(key) = inspected.sig.clone() else {
-        return Err(format!(
-            "{} is installed already, and it isn't signed. Remove it first to install this one.",
-            manifest.map_or(inspected.folder.as_str(), |m| m.name.as_str())
+        return Err(failure(
+            reason::INSTALLED_UNSIGNED,
+            format!(
+                "{} is installed already, and it isn't signed. Remove it first to install this one.",
+                manifest.map_or(inspected.folder.as_str(), |m| m.name.as_str())
+            ),
         ));
     };
     Ok((
-        key,
+        key.clone(),
         Replaced {
+            key,
             version: manifest.map(|m| m.version.clone()).unwrap_or_default(),
             permissions: manifest.map(|m| m.permissions.clone()).unwrap_or_default(),
             hash: inspected.hash,
@@ -245,16 +306,18 @@ fn installed(dir: &Path) -> Result<(String, Replaced), String> {
 }
 
 /// Install `package` under `plugins_dir`, from `source`. Over an installed
-/// plugin only when the same key signed both; never over anything else.
-/// Returns what it replaced.
-pub fn install(plugins_dir: &Path, package: &Package, source: &Source) -> Result<Option<Replaced>, String> {
+/// plugin only when the same key signed both, or the installed one's key is
+/// `rotated_from` (checked by the caller to be the same account's as the
+/// package's); never over anything else. Returns what it replaced.
+pub fn install(plugins_dir: &Path, package: &Package, source: &Source, rotated_from: Option<&str>) -> Result<Option<Replaced>, String> {
     let id = package.id().to_owned();
     let dir = plugins_dir.join(&id);
     let replaced = if std::fs::symlink_metadata(&dir).is_ok() {
         let (key, replaced) = installed(&dir)?;
-        if key != package.key {
-            return Err(format!(
-                "A plugin called {id} is installed already, signed by someone else. Remove it first to install this one."
+        if key != package.key && rotated_from != Some(key.as_str()) {
+            return Err(failure(
+                reason::OTHER_SIGNER,
+                format!("A plugin called {id} is installed already, signed by someone else. Remove it first to install this one."),
             ));
         }
         // Signed downgrades (or a different build under the same version)
@@ -359,7 +422,7 @@ pub fn https_link(link: &str) -> Option<String> {
 /// `…/tree/<branch>/<folder>`), or any `https` git repository.
 pub fn origin(link: &str, git_ref: Option<&str>, path: Option<&str>) -> Result<Origin, String> {
     let link = link.trim();
-    let not_one = || "That link isn't a plugin package or a git repository".to_string();
+    let not_one = || failure(reason::NOT_A_LINK, "That link isn't a plugin package or a git repository");
     if link.is_empty() || link.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(not_one());
     }
@@ -376,7 +439,7 @@ pub fn origin(link: &str, git_ref: Option<&str>, path: Option<&str>) -> Result<O
         return Err("That branch or tag can't be used".into());
     }
     let Some(link) = https_link(link) else {
-        return Err("Plugins come from https links".into());
+        return Err(failure(reason::HTTPS_ONLY, "Plugins come from https links"));
     };
     let bare = link.split(['?', '#']).next().unwrap_or(&link).trim_end_matches('/');
     if bare.ends_with(&format!(".{EXTENSION}")) {
@@ -427,15 +490,19 @@ pub async fn download(url: &str) -> Result<Vec<u8>, String> {
         .get(url)
         .send()
         .await
-        .map_err(|_| "Couldn't download it".to_string())?;
+        .map_err(|_| failure(reason::DOWNLOAD_FAILED, "Couldn't download it"))?;
+    let status = response.status().as_u16();
+    if status == 429 || (status == 403 && github_host(url)) {
+        return Err(rate_limited());
+    }
     if !response.status().is_success() {
-        return Err(format!("Couldn't download it ({})", response.status().as_u16()));
+        return Err(failure(reason::DOWNLOAD_FAILED, format!("Couldn't download it ({status})")));
     }
     if response.content_length().is_some_and(|n| n > MAX_PACKAGE_BYTES) {
         return Err(WORDS.too_big.into());
     }
     let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| "Couldn't download it".to_string())? {
+    while let Some(chunk) = response.chunk().await.map_err(|_| failure(reason::DOWNLOAD_FAILED, "Couldn't download it"))? {
         bytes.extend_from_slice(&chunk);
         if bytes.len() as u64 > MAX_PACKAGE_BYTES {
             return Err(WORDS.too_big.into());
@@ -456,16 +523,33 @@ pub async fn release_asset_of(repo: &str, tag: Option<&str>, extension: &str) ->
         Some(tag) => format!("https://api.github.com/repos/{repo}/releases/tags/{tag}"),
         None => format!("https://api.github.com/repos/{repo}/releases/latest"),
     };
-    let response = http()
-        .get(&api)
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-        .map_err(|_| "Couldn't reach GitHub".to_string())?;
-    if !response.status().is_success() {
-        return Err("That release can't be found".into());
+    let ask = |token: Option<&str>| {
+        let mut request = http().get(&api).header("Accept", "application/vnd.github+json");
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        request.send()
+    };
+    let unreachable = |_| failure(reason::GITHUB_UNREACHABLE, "Couldn't reach GitHub");
+    // As you, when you've signed in to GitHub here (GitHub allows a person
+    // far more requests than a device asking anonymously); anonymously
+    // again when that sign-in is turned away (expired, revoked).
+    let token = github_token().await;
+    let mut response = ask(token.as_deref()).await.map_err(unreachable)?;
+    if token.is_some() && response.status().as_u16() == 401 {
+        response = ask(None).await.map_err(unreachable)?;
     }
-    let release: Value = response.json().await.map_err(|_| "Couldn't read that release".to_string())?;
+    match response.status().as_u16() {
+        403 | 429 => return Err(rate_limited()),
+        _ if !response.status().is_success() => {
+            return Err(failure(reason::RELEASE_NOT_FOUND, "That release can't be found"));
+        }
+        _ => {}
+    }
+    let release: Value = response
+        .json()
+        .await
+        .map_err(|_| failure(reason::RELEASE_NOT_FOUND, "Couldn't read that release"))?;
     release["assets"]
         .as_array()
         .into_iter()
@@ -473,7 +557,67 @@ pub async fn release_asset_of(repo: &str, tag: Option<&str>, extension: &str) ->
         .find(|a| a["name"].as_str().is_some_and(|n| n.ends_with(&format!(".{extension}"))))
         .and_then(|a| a["browser_download_url"].as_str())
         .map(str::to_owned)
-        .ok_or_else(|| format!("That release has no .{extension} file"))
+        .ok_or_else(|| failure(reason::NO_PACKAGE, format!("That release has no .{extension} file")))
+}
+
+/// GitHub's words for too many requests (a 403 or 429 from it).
+fn rate_limited() -> String {
+    failure(
+        reason::RATE_LIMITED,
+        "GitHub is turning away requests from this device for now (too many in a short while). Try again later, or sign in with GitHub's own tool (`gh auth login`) so Zeron asks as you",
+    )
+}
+
+/// Whether `url` is GitHub's (where a release's files are served from too).
+fn github_host(url: &str) -> bool {
+    let host = url.trim_start_matches("https://").split(['/', '?', '#']).next().unwrap_or("");
+    host == "github.com" || host.ends_with(".github.com") || host.ends_with(".githubusercontent.com")
+}
+
+/// How long a GitHub sign-in read from `gh` is used before it's read again.
+const TOKEN_FOR: Duration = Duration::from_secs(10 * 60);
+
+/// Your GitHub token on this device, if you have one: `GITHUB_TOKEN` or
+/// `GH_TOKEN`, else what `gh auth token` gives (read at most every few
+/// minutes). Only ever sent to api.github.com, to look up releases.
+async fn github_token() -> Option<String> {
+    if cfg!(test) {
+        return None;
+    }
+    for name in ["GITHUB_TOKEN", "GH_TOKEN"] {
+        if let Some(token) = std::env::var(name).ok().map(|t| t.trim().to_owned()).filter(|t| !t.is_empty()) {
+            return Some(token);
+        }
+    }
+    static READ: std::sync::Mutex<Option<(std::time::Instant, Option<String>)>> = std::sync::Mutex::new(None);
+    if let Some((at, token)) = READ.lock().ok().and_then(|r| r.clone())
+        && at.elapsed() < TOKEN_FOR
+    {
+        return token;
+    }
+    let mut cmd = tokio::process::Command::new("gh");
+    cmd.args(["auth", "token", "--hostname", "github.com"])
+        .env("GH_PROMPT_DISABLED", "1")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.as_std_mut().creation_flags(0x08000000);
+    }
+    let token = tokio::time::timeout(Duration::from_secs(5), cmd.output())
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|t| t.trim().to_owned())
+        .filter(|t| !t.is_empty() && t.len() < 512 && !t.chars().any(char::is_whitespace));
+    if let Ok(mut read) = READ.lock() {
+        *read = Some((std::time::Instant::now(), token.clone()));
+    }
+    token
 }
 
 async fn git(args: &[&str], cwd: Option<&Path>) -> Result<String, String> {
@@ -490,12 +634,22 @@ async fn git(args: &[&str], cwd: Option<&Path>) -> Result<String, String> {
     if let Some(cwd) = cwd {
         cmd.current_dir(cwd);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.as_std_mut().creation_flags(0x08000000);
+    }
     let output = tokio::time::timeout(GIT_TIMEOUT, cmd.output())
         .await
-        .map_err(|_| "The repository took too long to answer".to_string())?
-        .map_err(|_| "git isn't available".to_string())?;
+        .map_err(|_| failure(reason::GIT_TIMEOUT, "The repository took too long to answer"))?
+        .map_err(|_| {
+            failure(
+                reason::GIT_MISSING,
+                "git isn't available on this device: install git, or install the plugin from a .zeron-plugin file or a GitHub release instead",
+            )
+        })?;
     if !output.status.success() {
-        return Err("Couldn't read that repository (is it public, and is the branch right?)".into());
+        return Err(failure(reason::REPO_UNREADABLE, "Couldn't read that repository (is it public, and is the branch right?)"));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
@@ -508,7 +662,7 @@ pub async fn git_head(url: &str, git_ref: Option<&str>) -> Result<String, String
         .next()
         .filter(|sha| sha.len() >= 40)
         .map(str::to_owned)
-        .ok_or_else(|| "That branch or tag can't be found".to_string())
+        .ok_or_else(|| failure(reason::REF_NOT_FOUND, "That branch or tag can't be found"))
 }
 
 /// `url` at `git_ref`, cloned into `scratch`: the plugin in it (at `path`)
@@ -524,16 +678,7 @@ pub async fn from_git(url: &str, git_ref: Option<&str>, path: Option<&str>, scra
     let result = async {
         git(&args, None).await?;
         let commit = git(&["rev-parse", "HEAD"], Some(&clone)).await?;
-        let folder = match path {
-            Some(path) => clone.join(path),
-            None => clone.clone(),
-        };
-        if !folder.join(MANIFEST_FILE).is_file() {
-            return Err(match path {
-                Some(path) => format!("There's no zeron-plugin.json in {path}"),
-                None => "There's no zeron-plugin.json at the top of that repository".into(),
-            });
-        }
+        let folder = plugin_folder(&clone, path)?;
         let raw = tokio::task::spawn_blocking(move || pack_folder(&folder))
             .await
             .map_err(|_| "Couldn't read it".to_string())??;
@@ -542,6 +687,29 @@ pub async fn from_git(url: &str, git_ref: Option<&str>, path: Option<&str>, scra
     .await;
     let _ = std::fs::remove_dir_all(&clone);
     result
+}
+
+/// The plugin's folder at `path` in the repository cloned to `clone`, which
+/// must stay inside it however its links point (a folder linked out of the
+/// clone would pack files from this computer), with its own
+/// `zeron-plugin.json` (not a link).
+fn plugin_folder(clone: &Path, path: Option<&str>) -> Result<PathBuf, String> {
+    let missing = || match path {
+        Some(path) => failure(reason::NO_MANIFEST, format!("There's no zeron-plugin.json in {path}")),
+        None => failure(reason::NO_MANIFEST, "There's no zeron-plugin.json at the top of that repository"),
+    };
+    let root = std::fs::canonicalize(clone).map_err(|_| "Couldn't read that repository".to_string())?;
+    let folder = match path {
+        Some(path) => std::fs::canonicalize(clone.join(path)).map_err(|_| missing())?,
+        None => root.clone(),
+    };
+    if !folder.starts_with(&root) {
+        return Err(format!("{} isn't inside that repository", path.unwrap_or_default()));
+    }
+    if !std::fs::symlink_metadata(folder.join(MANIFEST_FILE)).is_ok_and(|m| m.is_file()) {
+        return Err(missing());
+    }
+    Ok(folder)
 }
 
 /// The package `origin` names, and where it came from (its `Source`,
@@ -579,6 +747,31 @@ pub async fn fetch(origin: &Origin, scratch: &Path) -> Result<(Package, Source),
         .await
         .map_err(|_| "Couldn't read it".to_string())??;
     Ok((package, source))
+}
+
+/// `source` fetched again as it is now, whatever changed: what reinstalling
+/// a plugin installs.
+pub async fn refetch(source: &Source, scratch: &Path) -> Result<(Package, Source), String> {
+    let gone = || failure(reason::NO_SOURCE, "Where it came from isn't known, so it can't be installed again from there");
+    let origin = match source.kind.as_str() {
+        "file" => {
+            let path = source.path.clone().map(PathBuf::from).filter(|p| p.is_file()).ok_or_else(|| {
+                failure(reason::NO_SOURCE, "The file it was installed from isn't there any more")
+            })?;
+            let package = tokio::task::spawn_blocking(move || package::read(&path, &WORDS).and_then(parse))
+                .await
+                .map_err(|_| "Couldn't read it".to_string())??;
+            return Ok((package, source.clone()));
+        }
+        "link" => Origin::Link(source.url.clone().ok_or_else(gone)?),
+        "release" => {
+            let url = source.url.as_deref().ok_or_else(gone)?;
+            Origin::Release { repo: url.trim_start_matches("https://github.com/").to_owned(), tag: source.git_ref.clone() }
+        }
+        "git" => Origin::Git { url: source.url.clone().ok_or_else(gone)?, git_ref: source.git_ref.clone(), path: source.path.clone() },
+        _ => return Err(gone()),
+    };
+    fetch(&origin, scratch).await
 }
 
 /// Where `source` is now, if it may have changed: `None` when it surely
@@ -645,6 +838,10 @@ pub struct Found {
     /// grows anything: installing it waits for you.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digest_diff: Option<Value>,
+    /// Signed by another of its author's keys (a new machine): installing it
+    /// asks you again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub new_key: bool,
 }
 
 impl Found {
@@ -656,6 +853,9 @@ impl Found {
         }
         if let Some(diff) = &self.digest_diff {
             value["digest_diff"] = diff.clone();
+        }
+        if self.new_key {
+            value["new_key"] = json!(true);
         }
         value
     }
@@ -716,16 +916,18 @@ pub struct Installed<'a> {
 
 /// What a check of `installed` found in `fetched`: nothing new, or an
 /// update (refused when someone else signed it, or it isn't later).
-pub fn compare(installed: &Installed<'_>, fetched: &Package, source: Source) -> Option<Found> {
+/// `same_account`: `fetched`'s key, though not the installed one's, is a
+/// live key of the same account (checked by the caller).
+pub fn compare(installed: &Installed<'_>, fetched: &Package, source: Source, same_account: bool) -> Option<Found> {
     let Installed { id, key, version, permissions, hash, allowed } = *installed;
     if fetched.hash == hash {
         return None;
     }
     let change = grant_change(permissions, &fetched.manifest.permissions);
     let refused = if fetched.id() != id {
-        Some(format!("The new version is a different plugin ({})", fetched.id()))
-    } else if fetched.key != key {
-        Some("The new version is signed by someone else, so it won't be installed".to_string())
+        Some(failure(reason::DIFFERENT_PLUGIN, format!("The new version is a different plugin ({})", fetched.id())))
+    } else if fetched.key != key && !same_account {
+        Some(failure(reason::NEW_SIGNER, "The new version is signed by someone else, so it won't be installed"))
     } else if !newer(&fetched.manifest.version, version) {
         Some(not_newer(&fetched.manifest.version, version))
     } else {
@@ -741,6 +943,7 @@ pub fn compare(installed: &Installed<'_>, fetched: &Package, source: Source) -> 
         refused,
         source: Some(source),
         digest_diff: diff.grew().then(|| diff.to_value()),
+        new_key: fetched.key != key,
     })
 }
 
@@ -768,7 +971,7 @@ pub(crate) mod tests {
         let package = parse(raw.clone()).unwrap();
         assert_eq!((package.id(), package.key.as_str()), ("focus", key.public().as_str()));
         let source = Source { kind: "file".into(), url: None, path: Some("/x.zeron-plugin".into()), git_ref: None, commit: None, version: "1.0.0".into(), installed_at: 1 };
-        assert!(install(dir.path(), &package, &source).unwrap().is_none());
+        assert!(install(dir.path(), &package, &source, None).unwrap().is_none());
         let installed = scan::inspect(&dir.path().join("focus"), true);
         assert_eq!(installed.sig, SigCheck::Valid(key.public()));
         assert_eq!(installed.hash, package.hash);
@@ -781,12 +984,12 @@ pub(crate) mod tests {
 
         // An update by the same key replaces it; by another key, refused.
         let newer = parse(signed_package(&key, "focus", "1.1.0", &["ui.add", "links.open"], "return 2")).unwrap();
-        let replaced = install(dir.path(), &newer, &source).unwrap().unwrap();
+        let replaced = install(dir.path(), &newer, &source, None).unwrap().unwrap();
         assert_eq!((replaced.version.as_str(), replaced.hash.as_str()), ("1.0.0", package.hash.as_str()));
         assert_eq!(grant_change(&replaced.permissions, &newer.manifest.permissions), GrantChange { added: vec!["links.open".into()], removed: vec![] });
         let (eve, _) = SigningKey::generate().unwrap();
         let theirs = parse(signed_package(&eve, "focus", "9.0.0", &[], "return 3")).unwrap();
-        assert!(install(dir.path(), &theirs, &source).unwrap_err().contains("signed by someone else"));
+        assert!(install(dir.path(), &theirs, &source, None).unwrap_err().contains("signed by someone else"));
         assert_eq!(scan::inspect(&dir.path().join("focus"), true).hash, newer.hash);
 
         // A package carrying its own zeron-plugin.json as a file, refused.
@@ -794,7 +997,7 @@ pub(crate) mod tests {
         files.insert("init.luau".to_string(), b"return 1".to_vec());
         files.insert(MANIFEST_FILE.to_string(), b"{}".to_vec());
         let manifest = key.sign_manifest(&json!({ "id": "sneaky", "name": "S", "version": "1", "entry": "init.luau" }), &package::hashes(&files));
-        assert!(parse(package::pack(FORMAT, &manifest, &files).unwrap()).unwrap_err().starts_with("It has a file Zeron won't write"));
+        assert!(parse(package::pack(FORMAT, &manifest, &files).unwrap()).unwrap_err().starts_with("bad_file: It has a file Zeron won't write"));
         // Zeron's own name, refused.
         assert!(parse(signed_package(&key, "zeron", "1", &[], "return 1")).is_err());
     }
@@ -840,13 +1043,70 @@ pub(crate) mod tests {
         let record = crate::plugins::capability::record(&installed.manifest);
         let key_public = key.public();
         let was = Installed { id: "focus", key: &key_public, version: "1.0.0", permissions: &perms, hash: &installed.hash, allowed: &record };
-        assert_eq!(compare(&was, &installed, source.clone()), None);
+        assert_eq!(compare(&was, &installed, source.clone(), false), None);
         let later = parse(signed_package(&key, "focus", "1.1.0", &["github"], "return 2")).unwrap();
-        let found = compare(&was, &later, source.clone()).unwrap();
+        let found = compare(&was, &later, source.clone(), false).unwrap();
         assert_eq!((found.version.as_str(), found.added.clone(), found.removed.clone(), found.refused.clone()), ("1.1.0", vec!["github".to_string()], vec!["ui.add".to_string()], None));
         assert_eq!(found.digest_diff.unwrap()["permissions_added"], json!(["github"]));
         let theirs = parse(signed_package(&eve, "focus", "2.0.0", &[], "return 3")).unwrap();
-        assert!(compare(&was, &theirs, source).unwrap().refused.is_some());
+        assert!(compare(&was, &theirs, source, false).unwrap().refused.is_some());
+    }
+
+    /// R25(d): a git install's `path` was joined to the clone as written,
+    /// so a folder in the repository linked out of it packed this
+    /// computer's files.
+    #[cfg(unix)]
+    #[test]
+    fn a_git_plugin_folder_stays_inside_the_clone() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join(MANIFEST_FILE), b"{}").unwrap();
+        let clone = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(clone.path().join("plugins/focus")).unwrap();
+        std::fs::write(clone.path().join("plugins/focus").join(MANIFEST_FILE), b"{}").unwrap();
+        std::os::unix::fs::symlink(outside.path(), clone.path().join("plugins/out")).unwrap();
+        std::fs::create_dir_all(clone.path().join("plugins/linked")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join(MANIFEST_FILE), clone.path().join("plugins/linked").join(MANIFEST_FILE)).unwrap();
+
+        let inside = plugin_folder(clone.path(), Some("plugins/focus")).unwrap();
+        assert!(inside.ends_with("plugins/focus"));
+        assert!(plugin_folder(clone.path(), Some("plugins/out")).unwrap_err().contains("isn't inside"));
+        assert!(plugin_folder(clone.path(), Some("plugins/linked")).unwrap_err().contains("There's no zeron-plugin.json"));
+        assert!(plugin_folder(clone.path(), Some("plugins/none")).unwrap_err().contains("There's no zeron-plugin.json"));
+        assert!(plugin_folder(clone.path(), None).unwrap_err().contains("at the top"));
+    }
+
+    /// Install failures carry a reason the app says in your language; GitHub
+    /// turning requests away reads as that, never as "can't be found".
+    #[tokio::test]
+    async fn failures_carry_their_reason() {
+        assert_eq!(reason_of(WORDS.tampered), Some(reason::TAMPERED));
+        assert_eq!(reason_of(&not_newer("1", "2")), Some(reason::NOT_NEWER));
+        assert_eq!(reason_of("Its files don't match: x"), None, "English with a colon isn't a reason");
+        assert_eq!(reason_of(&origin("ftp://x", None, None).unwrap_err()), Some(reason::HTTPS_ONLY));
+        assert!(github_host("https://github.com/a/b/releases/download/v1/x.zeron-plugin"));
+        assert!(github_host("https://objects.githubusercontent.com/x"));
+        assert!(!github_host("https://github.com.evil.example/x") && !github_host("https://example.com/github.com"));
+
+        // A server answering each request with `status`.
+        async fn answering(status: u16) -> String {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let at = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                while let Ok((mut socket, _)) = listener.accept().await {
+                    let mut buf = [0u8; 2048];
+                    let _ = socket.read(&mut buf).await;
+                    let reply = format!("HTTP/1.1 {status} X\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+                    let _ = socket.write_all(reply.as_bytes()).await;
+                }
+            });
+            format!("http://{at}/x.zeron-plugin")
+        }
+        let limited = download(&answering(429).await).await.unwrap_err();
+        assert_eq!(reason_of(&limited), Some(reason::RATE_LIMITED), "{limited}");
+        // (A 403 from anywhere but GitHub is that server's no.)
+        let forbidden = download(&answering(403).await).await.unwrap_err();
+        assert_eq!(reason_of(&forbidden), Some(reason::DOWNLOAD_FAILED), "{forbidden}");
     }
 
     /// R23: an update was any package with another hash under the same key,
@@ -860,18 +1120,18 @@ pub(crate) mod tests {
         let (key, _) = SigningKey::generate().unwrap();
         let source = Source { kind: "file".into(), url: None, path: None, git_ref: None, commit: None, version: String::new(), installed_at: 0 };
         let v2 = parse(signed_package(&key, "focus", "2.0.0", &[], "return 2")).unwrap();
-        install(dir.path(), &v2, &source).unwrap();
+        install(dir.path(), &v2, &source, None).unwrap();
         let v1 = parse(signed_package(&key, "focus", "1.0.0", &[], "return 1")).unwrap();
-        assert!(install(dir.path(), &v1, &source).unwrap_err().contains("isn't later"));
+        assert!(install(dir.path(), &v1, &source, None).unwrap_err().contains("isn't later"));
         let same_version = parse(signed_package(&key, "focus", "2.0.0", &[], "return 666")).unwrap();
-        assert!(install(dir.path(), &same_version, &source).unwrap_err().contains("isn't later"));
+        assert!(install(dir.path(), &same_version, &source, None).unwrap_err().contains("isn't later"));
         // The same package again is no change.
-        assert!(install(dir.path(), &v2, &source).is_ok());
+        assert!(install(dir.path(), &v2, &source, None).is_ok());
         let perms = Vec::new();
         let record = crate::plugins::capability::record(&v2.manifest);
         let key_public = key.public();
         let was = Installed { id: "focus", key: &key_public, version: "2.0.0", permissions: &perms, hash: &v2.hash, allowed: &record };
-        assert!(compare(&was, &v1, source).unwrap().refused.unwrap().contains("isn't later"));
+        assert!(compare(&was, &v1, source, false).unwrap().refused.unwrap().contains("isn't later"));
         assert_eq!(scan::inspect(&dir.path().join("focus"), true).hash, v2.hash);
     }
 }

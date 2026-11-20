@@ -97,7 +97,19 @@ fn composer(app: &mut TestApp) {
     app.click("#chat-composer >> role:textbox");
 }
 fn session(app: &mut TestApp) {
-    app.click("#shell-sidebar >> role:button \"Fix the build\"");
+    keys_on_row(app, "#shell-sidebar >> role:button \"Fix the build\"");
+}
+
+/// A sidebar row with the keyboard: clicked (its chat opened, which gives
+/// the composer the keys: c865bf3be, ui/tests/composer_focus), then the
+/// keyboard put back on the row, as Tab or a second click there would, for
+/// what is pressed on the row itself (Shift+F10's menu, ⌘K and back).
+pub(crate) fn keys_on_row(app: &mut TestApp, row: &str) {
+    app.click(row);
+    app.frames(10);
+    let target = app.target(row).unwrap_or_else(|e| panic!("{row}: {e:?}"));
+    assert!(app.ui.input.focus(&app.ui.scene, Some(target)), "{row} takes the keyboard");
+    app.frames(2);
 }
 fn palette(app: &mut TestApp) {
     assert!(app.host.run_command("shell.palette"));

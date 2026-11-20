@@ -1,0 +1,24 @@
+<section class="logos" aria-label="Used by developers from">
+  <div class="wrap inner">
+    <p>Used by developers from</p>
+    <ul>
+      <li><a href="https://cursor.com" target="_blank" rel="noopener" aria-label="Cursor"><i class="logo cursor"></i></a></li>
+      <li><a href="https://unsloth.ai" target="_blank" rel="noopener" aria-label="Unsloth"><i class="logo unsloth"></i></a></li>
+      <li><a href="https://www.thecontextcompany.com" target="_blank" rel="noopener" aria-label="The Context Company"><i class="logo context"></i></a></li>
+    </ul>
+  </div>
+</section>
+
+<style>
+  .logos { position: relative; margin-top: -24px; }
+  .inner { display: flex; flex-wrap: wrap; align-items: center; gap: 18px 44px; padding-block: 28px; border-block: 1px solid var(--line); }
+  p { font-size: 14px; color: var(--text-3); }
+  ul { display: flex; flex-wrap: wrap; align-items: center; gap: 18px 44px; }
+  a { display: block; color: var(--text-2); transition: color 0.12s; }
+  a:hover { color: var(--text); }
+  /* The companies' marks as masks, in the page's own ink. */
+  .logo { display: block; background: currentColor; -webkit-mask: var(--logo) no-repeat center / contain; mask: var(--logo) no-repeat center / contain; }
+  .cursor { --logo: url("../../assets/logos/cursor.svg"); width: 88px; height: 21px; }
+  .unsloth { --logo: url("../../assets/logos/unsloth.png"); width: 84px; height: 26px; }
+  .context { --logo: url("../../assets/logos/the-context-company.png"); width: 174px; height: 15px; }
+</style>

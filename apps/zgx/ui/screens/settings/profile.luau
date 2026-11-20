@@ -691,7 +691,7 @@ function M.view(): Node
 	end
 	-- Where you're signed in: your devices, not Cloud sessions' machines.
 	local devices = ui.computed(function(): { sessions.Device }
-		return sessions.computers(sessions.now:get().devices)
+		return sessions.computers(sessions.devices:get())
 	end)
 	return ui.column {
 		ref = room,
@@ -702,7 +702,7 @@ function M.view(): Node
 		-- once, so a field being typed in keeps its focus.)
 		-- Signed out: nothing to fill in, only the way in.
 		ui.show(function(): boolean
-			return not auth.signed_in:get()
+			return auth.state:get() == "signed_out" or auth.state:get() == "waiting"
 		end, signed_out(narrow)),
 		ui.show(auth.signed_in, ds.Settings.Page {
 				title = ui.t("settings.profile.title"),
@@ -854,7 +854,7 @@ function M.view(): Node
 								end,
 								description = function()
 									local p = d:get().platform
-									return if p == "macos" then "macOS" elseif p == "linux" then "Linux" elseif p == "ios" then "iOS" else p
+									return if p == "macos" then "macOS" elseif p == "linux" then "Linux" elseif p == "windows" then "Windows" elseif p == "ios" then "iOS" elseif p == "android" then "Android" else p
 								end,
 								icon = device_icon(d:peek().platform),
 								badge = if d:peek().here then ds.Badge { ui.t("settings.profile.devices.this") } else nil,

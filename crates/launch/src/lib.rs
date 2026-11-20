@@ -28,8 +28,27 @@ pub const MANAGED_ENV: &str = "ZERON_MANAGED_ENGINE";
 /// executable elsewhere.
 pub const APP_ENV: &str = "ZERON_APP";
 
-/// The engine executable beside the app at `app_exe`, if there is one.
+static FULL_APP_ENGINE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// This app's engine is another release's whole app binary, which runs the
+/// engine as its [`ENGINE_SUBCOMMAND`] (a Windows release has no separate
+/// engine executable): the zgx beta on Windows, which carries stable's. Set
+/// once, before anything asks. Nothing else sets it, so other builds resolve
+/// their engine as ever.
+pub fn set_full_app_engine(binary: PathBuf) {
+    let _ = FULL_APP_ENGINE.set(binary);
+}
+
+fn full_app_engine() -> Option<&'static Path> {
+    FULL_APP_ENGINE.get().map(PathBuf::as_path).filter(|path| path.is_file())
+}
+
+/// The engine executable for the app at `app_exe`, if there is one: beside it,
+/// or the one [`set_full_app_engine`] named.
 pub fn engine_executable(app_exe: &Path) -> Option<PathBuf> {
+    if let Some(engine) = full_app_engine() {
+        return Some(engine.to_path_buf());
+    }
     let dir = app_exe.parent().unwrap_or(Path::new("."));
     ENGINE_EXECUTABLES
         .iter()
@@ -41,6 +60,11 @@ pub fn engine_executable(app_exe: &Path) -> Option<PathBuf> {
 /// the engine executable beside it, else the app binary's
 /// [`ENGINE_SUBCOMMAND`].
 pub fn engine_command(app_exe: &Path) -> Command {
+    if let Some(engine) = full_app_engine() {
+        let mut command = Command::new(engine);
+        command.arg(ENGINE_SUBCOMMAND);
+        return command;
+    }
     match engine_executable(app_exe) {
         Some(engine) => Command::new(engine),
         None => {
@@ -141,6 +165,22 @@ pub fn spawn_detached(command: &mut Command) -> std::io::Result<Child> {
     command.spawn()
 }
 
+/// Whether an engine holds `data_dir` (its `engine.lock`, crates/engine's
+/// `InstanceLock`): one starting up, or one still shutting down.
+///
+/// Asked by trying it, and letting go at once. An engine that finds it taken
+/// for that moment tries again.
+pub fn data_dir_held(data_dir: &Path) -> bool {
+    let Ok(lock) = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(data_dir.join("engine.lock"))
+    else {
+        return false;
+    };
+    matches!(lock.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+}
+
 /// Reap `child` whenever it exits, so a background engine that stops while
 /// the app runs never lingers as a zombie.
 pub fn reap(mut child: Child) {
@@ -179,10 +219,61 @@ pub fn exec_helper(app_exe: &Path, args: impl IntoIterator<Item = OsString>) -> 
     }
     #[cfg(not(unix))]
     {
-        match command.status() {
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => return error,
+        };
+        // Only for an update's trial (`ZERON_INSTALLED_AT`, crates/update):
+        // otherwise this one must outlive the helper's own clean shutdown
+        // (Ctrl+C reaches both, and a job would cut the helper's short).
+        #[cfg(windows)]
+        if std::env::var_os("ZERON_INSTALLED_AT").is_some() {
+            ends_with_this_process(&child);
+        }
+        match child.wait() {
             Ok(status) => std::process::exit(status.code().unwrap_or(1)),
             Err(error) => error,
         }
+    }
+}
+
+/// Windows can't replace a process, so this one waits on the helper in its
+/// place. In an update's trial, whatever stops this one must stop the helper
+/// too: the watchdog ends a failed trial by terminating the process it
+/// started, which is this one, and the helper (the engine) must not outlive
+/// it to hold the data the old version is restoring. A job that ends with this process does
+/// it, however it ends. What the helper starts in turn (agents, its own
+/// successor) leaves the job. Best effort: without a job, it's as before.
+#[cfg(windows)]
+fn ends_with_this_process(child: &std::process::Child) {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, SetInformationJobObject,
+    };
+    // SAFETY: plain Win32 calls on a job handle created here and the child's
+    // live process handle; the information struct is zeroed and sized.
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return;
+        }
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        limits.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+        let set = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            (&raw const limits).cast(),
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        if set == 0 || AssignProcessToJobObject(job, child.as_raw_handle()) == 0 {
+            CloseHandle(job);
+        }
+        // Otherwise the handle stays open for this process's life: closing it,
+        // at its end, is what ends the helper.
     }
 }
 
@@ -222,6 +313,20 @@ mod tests {
             app_path(Path::new("/home/me/.zeron/app/current/zeron")),
             PathBuf::from("/home/me/.zeron/app/current/zeron")
         );
+    }
+
+    #[test]
+    fn a_data_dir_is_held_while_its_lock_is() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!data_dir_held(dir.path()), "no lock file: nobody holds it");
+        let lock = std::fs::File::create(dir.path().join("engine.lock")).unwrap();
+        assert!(!data_dir_held(dir.path()), "a lock file nobody locks");
+        lock.try_lock().unwrap();
+        assert!(data_dir_held(dir.path()));
+        lock.unlock().unwrap();
+        assert!(!data_dir_held(dir.path()));
+        // Asking lets go at once: the engine can take it after.
+        lock.try_lock().unwrap();
     }
 
     #[test]

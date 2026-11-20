@@ -62,8 +62,10 @@ pub(super) fn models(result: &Value) -> Vec<Model> {
             Some((
                 row["isDefault"] == true,
                 Model {
+                    default: false,
                     id: id.into(),
                     label,
+                    provider: None,
                     description: row["description"]
                         .as_str()
                         .filter(|d| !d.trim().is_empty())

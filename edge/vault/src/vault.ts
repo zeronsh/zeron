@@ -21,8 +21,11 @@ import {
   type EnrollDeviceRequest,
   type GithubDevicePoll,
   type GithubDeviceStart,
+  type GithubListingView,
   type GithubRepoView,
   type Grant,
+  type GrantManyReply,
+  type GrantManyRequest,
   type GrantRequest,
   type PutCredentialRequest,
   type VaultCaller,
@@ -39,7 +42,7 @@ import type { Env } from "./env";
 import { accountStub, devicesStub } from "./names";
 import { installUrl, isRepoFullName } from "./providers/github-app";
 import { fail, ok, type VaultFailure } from "./result";
-import { isCaller, isFlowId, isGrantRequest, isId, isProvider, parseDeviceList } from "./validate";
+import { isCaller, isFlowId, isGrantManyRequest, isGrantRequest, isId, isProvider, parseDeviceList } from "./validate";
 
 export class Vault implements VaultRpc {
   constructor(private readonly env: Env) {}
@@ -168,7 +171,9 @@ export class Vault implements VaultRpc {
         request.provider,
         request.deviceId,
         verified.value.parentId,
-        request.repo
+        request.repo,
+        // Only a runner's delegate inherits, and only as the main Worker said.
+        caller.kind === "runner" ? request.inheritFrom : undefined
       );
       await this.audit(userId, {
         event: grant.ok ? "grant" : "grant_denied",
@@ -180,6 +185,69 @@ export class Vault implements VaultRpc {
           .join(" ")
       });
       return grant;
+    });
+  }
+
+  /**
+   * Several providers' grants in one round trip, for an agent that runs on
+   * several credentials at once (Pi: a ChatGPT login, a Copilot login and
+   * vendor keys). One signature over the joined provider list spends one
+   * `ts`; the device checks (enrolled, not revoked, user not disabled) apply
+   * once, and each provider's own (authorized, connected, active) apply per
+   * provider, concurrently. A provider with nothing to grant is `missing`.
+   */
+  grantMany(caller: VaultCaller, request: GrantManyRequest): Promise<VaultResult<GrantManyReply>> {
+    return this.run(caller, { runner: true }, async (userId) => {
+      if (!isGrantManyRequest(request)) {
+        return fail("bad_request", "expected {providers (sorted, distinct, no github), deviceId, ts, sig}");
+      }
+      if (caller.kind === "runner" && caller.deviceId !== request.deviceId) {
+        return fail("forbidden", "runners may only request grants for their own device");
+      }
+      const verified = await devicesStub(this.env, userId).verifyGrant(userId, caller.orgId, {
+        provider: request.providers[0]!,
+        subject: request.providers.join(","),
+        deviceId: request.deviceId,
+        ts: request.ts,
+        sig: request.sig
+      });
+      if (!verified.ok) return verified;
+      const results = await Promise.all(
+        request.providers.map(async (provider) => {
+          try {
+            return {
+              provider,
+              result: await accountStub(this.env, userId, provider).grant(
+                userId,
+                provider,
+                request.deviceId,
+                verified.value.parentId
+              )
+            };
+          } catch (error) {
+            console.error(
+              JSON.stringify({ event: "vault.error", provider, message: error instanceof Error ? error.message : String(error) })
+            );
+            return { provider, result: fail("unavailable", "internal vault error", 500) };
+          }
+        })
+      );
+      const grants: Grant[] = [];
+      const missing: { provider: VaultProviderId; error: VaultFailure["error"]; message: string }[] = [];
+      for (const { provider, result } of results) {
+        if (result.ok) grants.push(result.value);
+        else missing.push({ provider, error: result.error, message: result.message });
+      }
+      await this.audit(userId, {
+        event: grants.length > 0 ? "grant" : "grant_denied",
+        orgId: caller.orgId,
+        deviceId: request.deviceId,
+        detail: [
+          ...grants.map((grant) => `${grant.provider}@${grant.generation}`),
+          ...missing.map((miss) => `${miss.provider}:${miss.error}`)
+        ].join(" ")
+      });
+      return ok({ grants, missing });
     });
   }
 
@@ -206,17 +274,30 @@ export class Vault implements VaultRpc {
     });
   }
 
-  /** The repositories the user's GitHub connection reaches (users only), for
-   * the add-project flow. Metadata only — the token stays in the vault. */
+  /** The repositories the user's GitHub logins reach (users only), for the
+   * add-project flow. Metadata only — the tokens stay in the vault. */
   githubRepos(caller: VaultCaller, query?: string): Promise<VaultResult<readonly GithubRepoView[]>> {
     return this.run(caller, {}, async (userId) => {
-      if (query !== undefined && (typeof query !== "string" || query.length > 200)) {
-        return fail("bad_request", "query must be a string of at most 200 characters");
-      }
-      const disabled = await this.userDisabled(userId);
-      if (disabled) return disabled;
+      const refused = await this.listingRefused(userId, query);
+      if (refused) return refused;
       return accountStub(this.env, userId, "github").githubRepos(userId, query);
     });
+  }
+
+  /** `githubRepos`, with the installations and any login that didn't answer. */
+  githubListing(caller: VaultCaller, query?: string): Promise<VaultResult<GithubListingView>> {
+    return this.run(caller, {}, async (userId) => {
+      const refused = await this.listingRefused(userId, query);
+      if (refused) return refused;
+      return accountStub(this.env, userId, "github").githubListing(userId, query);
+    });
+  }
+
+  private async listingRefused(userId: string, query: string | undefined): Promise<VaultFailure | undefined> {
+    if (query !== undefined && (typeof query !== "string" || query.length > 200)) {
+      return fail("bad_request", "query must be a string of at most 200 characters");
+    }
+    return this.userDisabled(userId);
   }
 
   /** Branch names of `repo` (users only), for a new session's base branch. */
@@ -271,7 +352,7 @@ export class Vault implements VaultRpc {
     });
   }
 
-  /** Plan usage of one Claude or Codex login (users only). */
+  /** Plan usage of one Claude, Codex or Antigravity login (users only). */
   accountUsage(caller: VaultCaller, provider: VaultProviderId, slot: string): Promise<VaultResult<VaultUsageView>> {
     return this.run(caller, {}, async (userId) => {
       if (!isProvider(provider)) return fail("bad_request", "unknown provider");

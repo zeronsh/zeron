@@ -174,6 +174,47 @@ fn watch(bridge: &Rc<Bridge>, device: &str, run: u64) {
     *bridge.remote.watch.borrow_mut() = Some(handle);
 }
 
+/// The most of a plugin file one call carries to another device (decoded):
+/// a request crosses the relay as one message, so a file goes in pieces
+/// (the engine's `plugins::uploads::PIECE`).
+pub const PIECE: usize = 384 << 10;
+/// The largest plugin file sent (the engine's package limit, rounded).
+const MAX_FILE: u64 = 64 << 20;
+
+/// Sends the `.zeron-plugin` file at `path` (on this device) to another,
+/// piece by piece through `stage` (`StagePluginPackage` there): the upload
+/// it's held as there, for `install_sent`.
+pub async fn send_file<F, Fut>(path: &str, stage: F) -> Result<String, String>
+where
+    F: Fn(Json) -> Fut,
+    Fut: std::future::Future<Output = Result<Json, String>>,
+{
+    use base64::Engine as _;
+    let meta = std::fs::metadata(path).map_err(|_| "That file can't be found.".to_string())?;
+    if !meta.is_file() {
+        return Err("That isn't a file.".into());
+    }
+    if meta.len() > MAX_FILE {
+        return Err("That plugin file is too big".into());
+    }
+    let raw = std::fs::read(path).map_err(|e| format!("Couldn't read it: {e}"))?;
+    let mut upload = Json::Null;
+    // (An empty file is still sent, for the engine to say what it isn't.)
+    let pieces: Vec<&[u8]> = if raw.is_empty() { vec![&[][..]] } else { raw.chunks(PIECE).collect() };
+    for piece in pieces {
+        let staged = stage(json!({ "upload": upload, "data": base64::engine::general_purpose::STANDARD.encode(piece) })).await?;
+        upload = staged["upload"].clone();
+    }
+    upload.as_str().map(str::to_owned).ok_or_else(|| "The other device didn't take the file".into())
+}
+
+/// `InstallPlugin`'s params for a file sent there: the upload, and the
+/// file's name (never its folder here).
+pub fn install_sent(path: &str, upload: &str) -> Json {
+    let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    json!({ "upload": upload, "name": name })
+}
+
 /// `params` addressed to `device` (none: this one's engine).
 pub fn addressed(device: Option<&str>, mut params: Json) -> Json {
     if let (Some(device), Some(object)) = (device, params.as_object_mut()) {
@@ -212,6 +253,44 @@ mod tests {
         assert_eq!(id_and_device(&Value::from("focus")), ("focus".into(), None));
         let here = Value::record([("id", Value::from("focus")), ("device", Value::from(""))]);
         assert_eq!(id_and_device(&here), ("focus".into(), None));
+    }
+
+    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(future)
+    }
+
+    /// A file here installed on another device goes there in pieces, and
+    /// installs as what it was sent as, by its name alone.
+    #[test]
+    fn a_file_goes_to_another_device_in_pieces() {
+        use base64::Engine as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("focus.zeron-plugin");
+        let raw: Vec<u8> = (0..(PIECE * 2 + 10)).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &raw).unwrap();
+        let sent = RefCell::new(Vec::<Json>::new());
+        let upload = block_on(send_file(path.to_str().unwrap(), |piece| {
+            sent.borrow_mut().push(piece);
+            async { Ok(json!({ "upload": "u1" })) }
+        }))
+        .unwrap();
+        assert_eq!(upload, "u1");
+        let sent = sent.into_inner();
+        assert_eq!(sent.len(), 3);
+        assert_eq!(sent[0]["upload"], Json::Null, "a new upload");
+        assert!(sent[1..].iter().all(|p| p["upload"] == "u1"), "then added to");
+        let back: Vec<u8> = sent
+            .iter()
+            .flat_map(|p| base64::engine::general_purpose::STANDARD.decode(p["data"].as_str().unwrap()).unwrap())
+            .collect();
+        assert_eq!(back, raw);
+        assert_eq!(
+            install_sent(path.to_str().unwrap(), "u1"),
+            json!({ "upload": "u1", "name": "focus.zeron-plugin" })
+        );
+        // The device saying no stops it there.
+        let refused = block_on(send_file(path.to_str().unwrap(), |_| async { Err("offline".to_string()) }));
+        assert_eq!(refused, Err("offline".into()));
     }
 
     #[test]

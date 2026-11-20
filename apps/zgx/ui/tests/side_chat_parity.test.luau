@@ -90,6 +90,15 @@ test("@ in a side chat offers the files of where it works", function()
 	expect(calls(app)).to_contain("search:side-a:lib")
 end)
 
+test("@ in a side chat searches on the device it runs on", function()
+	local app = open()
+	app:type(BOX, "@lib")
+	app:frames(30)
+	app:wait('"lib.rs"', { timeout_ms = 1000 })
+	expect(calls(app)).to_contain("search_on:d")
+	expect(calls(app)).never.to_contain("search_on:here")
+end)
+
 test("@ in a new side chat searches its project", function()
 	local app = mount("lanes_fixture.luau")
 	app:resize(1200, 900)
@@ -265,4 +274,21 @@ test("its device gone, a side chat's composer is disabled", function()
 	app:frames(10)
 	local attach = '.side-chat-tab >> role:button "Attach"'
 	expect(app:tree(attach)).to_contain("disabled")
+end)
+
+test("a side chat sent from another computer reads that computer's accounts, not this one's", function()
+	local app = open()
+	app:set_state("private_text_hidden", false)
+	app:set_state("agents.on_device", {
+		[""] = { ["codex"] = { { id = "a1", email = "mine@example.test", plan = "Max", active = true, can_switch = true, windows = {} } } },
+		box = { ["codex"] = { { id = "b1", email = "box@example.test", plan = "Team", active = true, can_switch = true, windows = {} } } },
+	})
+	app:command("side_on_box")
+	app:frames(20)
+	expect(calls(app)).to_contain("watch_device:box")
+	app:click('.side-chat-tab >> role:button "Model"')
+	app:frames(30)
+	local row = app:tree("#model-picker-account")
+	expect(row).to_contain("box@example.test")
+	expect((string.find(row, "mine@example.test", 1, true))).to_be(nil)
 end)

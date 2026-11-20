@@ -9,11 +9,14 @@ local function open(): any
 	return app
 end
 
--- The focused node's line, as the tree says.
+-- The focused node's line, as the tree says. (The window's dump stops
+-- past a budget: the title bar, drawn last, is read on its own too.)
 local function focused(app: any): string
-	for line in app:tree():gmatch("[^\n]+") do
-		if line:find(" focused", 1, true) then
-			return line
+	for _, dump in { app:tree(), app:tree("#titlebar") } do
+		for line in dump:gmatch("[^\n]+") do
+			if line:find(" focused", 1, true) then
+				return line
+			end
 		end
 	end
 	return ""

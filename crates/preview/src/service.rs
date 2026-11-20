@@ -26,10 +26,25 @@ use tokio_util::sync::CancellationToken;
 /// cycle already proves the same process still owns the same port. Sockets
 /// that did not answer HTTP (a server bound but not yet serving) are retried
 /// with a capped exponential backoff instead of on every cycle.
+///
+/// Nor is a socket probed before it has stayed up [`PROBE_SETTLE`]: a test
+/// suite's fixture server answers a scripted number of connections and is
+/// gone in moments, and a probe taking one of them fails the test.
 #[derive(Default)]
 pub(crate) struct ProbeMemory {
     verdicts: HashMap<(u32, u64, SocketAddr), Verdict>,
+    /// When each listed socket was first seen by a scan.
+    first_seen: HashMap<(u32, u64, SocketAddr), Instant>,
 }
+/// How long a listener must have stayed up (seen by an earlier scan, this
+/// long before) before discovery connects to it. A test's fixture server
+/// lives for its test — milliseconds to a second or two — while a dev
+/// server stays up for minutes or hours, so 3 s spares nearly every fixture
+/// (those of test runners Zeron recognises are never probed at all:
+/// [`discovery::Listener::is_test_run`]) and costs a dev server about 3 s
+/// before it is listed. It is above [`SCAN_CADENCE`], so a listener is never
+/// probed by the scan right after the one that first saw it.
+const PROBE_SETTLE: Duration = Duration::from_secs(3);
 enum Verdict {
     Http,
     NotHttp {
@@ -38,10 +53,75 @@ enum Verdict {
     },
 }
 const NOT_HTTP_INITIAL_BACKOFF: Duration = Duration::from_secs(4);
-const NOT_HTTP_MAX_BACKOFF: Duration = Duration::from_secs(60);
+/// How often discovery scans while something Zeron started is alive.
+const SCAN_CADENCE: Duration = Duration::from_secs(2);
+/// The longest discovery waits between scans while only processes left
+/// running (an agent's warm session, a server left up) keep it going and
+/// nothing about them changes: see [`ScanPace`].
+const SCAN_RESTING_MAX: Duration = Duration::from_secs(30);
 
-/// (servers already confirmed HTTP, listeners to probe this cycle)
-type Planned<T> = (Vec<(T, discovery::Listener)>, Vec<(T, discovery::Listener)>);
+/// What keeps discovery scanning: a live run or terminal, or processes a
+/// chat started that are still alive (`owned`: which ones, and what they
+/// listen on, as a signature).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Activity {
+    live: bool,
+    owned: Option<u64>,
+}
+
+impl Activity {
+    fn active(&self) -> bool {
+        self.live || self.owned.is_some()
+    }
+}
+
+/// The wait before discovery's next scan. Every [`SCAN_CADENCE`] while a run
+/// works or a terminal is open, or while what's alive changes. Once only
+/// processes left running keep it going, unchanged — an agent's warm
+/// session, which an engine at rest holds for every recent chat — each scan
+/// waits twice as long as the last, up to [`SCAN_RESTING_MAX`]: a scan reads
+/// every process on the machine, and its every-2-s cadence was most of an
+/// idle engine's work. A run or terminal starting, the chats changing, or an
+/// open preview losing its process wakes it at once
+/// ([`PreviewService::rescan`]).
+#[derive(Default)]
+struct ScanPace {
+    resting: u32,
+    last: Option<Activity>,
+}
+
+impl ScanPace {
+    fn next(&mut self, activity: Activity) -> Duration {
+        let unchanged = self.last.replace(activity) == Some(activity);
+        if activity.live || !unchanged {
+            self.resting = 0;
+            return SCAN_CADENCE;
+        }
+        self.resting = self.resting.saturating_add(1).min(8);
+        (SCAN_CADENCE * 2u32.pow(self.resting)).min(SCAN_RESTING_MAX)
+    }
+
+    /// A wake: the next scan starts over at the full cadence.
+    fn reset(&mut self) {
+        self.resting = 0;
+        self.last = None;
+    }
+}
+const NOT_HTTP_MAX_BACKOFF: Duration = Duration::from_secs(60);
+/// The least wait before the scan that probes a listener done settling
+/// (its time may have come while this scan probed others).
+const SETTLED_RESCAN_MIN: Duration = Duration::from_millis(100);
+
+/// One cycle's candidates, sorted by [`ProbeMemory::plan`].
+pub(crate) struct Planned<T> {
+    /// Servers already confirmed HTTP.
+    pub known: Vec<(T, discovery::Listener)>,
+    /// Listeners to probe this cycle.
+    pub probe: Vec<(T, discovery::Listener)>,
+    /// When the first listener still settling ([`PROBE_SETTLE`]) may be
+    /// probed: the scan after that lists it.
+    pub settling_until: Option<Instant>,
+}
 
 fn probe_key(listener: &discovery::Listener) -> (u32, u64, SocketAddr) {
     (listener.pid, listener.started_at, listener.address)
@@ -49,8 +129,10 @@ fn probe_key(listener: &discovery::Listener) -> (u32, u64, SocketAddr) {
 
 impl ProbeMemory {
     /// Splits this cycle's candidates into servers already known to speak
-    /// HTTP and listeners that need a probe now. Verdicts for sockets that
-    /// are no longer listed are forgotten so a reused port is probed afresh.
+    /// HTTP, listeners that need a probe now, and listeners not up long
+    /// enough to probe yet ([`PROBE_SETTLE`]). Sockets that are no longer
+    /// listed are forgotten — their verdicts and when they were first seen —
+    /// so a reused port is probed afresh, after settling afresh.
     pub(crate) fn plan<T>(
         &mut self,
         candidates: Vec<(T, discovery::Listener)>,
@@ -59,16 +141,31 @@ impl ProbeMemory {
         let present: std::collections::HashSet<_> =
             candidates.iter().map(|(_, l)| probe_key(l)).collect();
         self.verdicts.retain(|key, _| present.contains(key));
-        let mut known = Vec::new();
-        let mut probe = Vec::new();
+        self.first_seen.retain(|key, _| present.contains(key));
+        let mut planned = Planned {
+            known: Vec::new(),
+            probe: Vec::new(),
+            settling_until: None,
+        };
         for candidate in candidates {
-            match self.verdicts.get(&probe_key(&candidate.1)) {
-                Some(Verdict::Http) => known.push(candidate),
+            let key = probe_key(&candidate.1);
+            // First seen by this scan: an earlier one must have seen it too,
+            // PROBE_SETTLE before, for it to be probed.
+            let eligible = *self.first_seen.entry(key).or_insert(now) + PROBE_SETTLE;
+            match self.verdicts.get(&key) {
+                Some(Verdict::Http) => planned.known.push(candidate),
                 Some(Verdict::NotHttp { retry_at, .. }) if *retry_at > now => {}
-                _ => probe.push(candidate),
+                _ if eligible > now => {
+                    planned.settling_until = Some(
+                        planned
+                            .settling_until
+                            .map_or(eligible, |until| until.min(eligible)),
+                    );
+                }
+                _ => planned.probe.push(candidate),
             }
         }
-        (known, probe)
+        planned
     }
     pub(crate) fn record(&mut self, listener: &discovery::Listener, http: bool, now: Instant) {
         let key = probe_key(listener);
@@ -103,6 +200,8 @@ struct Inner {
     peers: std::sync::OnceLock<Peers>,
     /// Engine-provided stream services peers may open, by id prefix.
     streams: StreamServices,
+    /// Wakes a parked discovery scan ([`PreviewService::rescan`]).
+    scan_wake: Arc<tokio::sync::Notify>,
 }
 /// Stream services beyond previews (terminals), keyed by service id prefix.
 /// Each handler sees the authenticated peer that opened the stream and
@@ -122,19 +221,25 @@ pub struct Scope {
     pub terminals: HashMap<String, String>,
     /// Ports agent CLIs serve their own protocol on (`opencode serve`).
     pub reserved_ports: HashSet<u16>,
+    /// A run or terminal here is live now. Discovery keeps its cadence
+    /// while it is, even before the agent's own process exists.
+    pub live: bool,
 }
 pub type Projects = Arc<dyn Fn() -> Scope + Send + Sync>;
 
 /// This scan's candidates (`None` when the process table could not be read),
-/// each with the checkout it is listed under.
+/// each with the checkout it is listed under, and whether anything that
+/// could start one is alive: a live run or terminal, or a process one of
+/// them started ([`discovery::Owned`]). Only then is the next scan due.
 fn candidates(
     scope: Scope,
     origins: &mut discovery::Origins,
-) -> Option<Vec<(PathBuf, discovery::Listener)>> {
+) -> Option<(Vec<(PathBuf, discovery::Listener)>, Activity)> {
     let Scope {
         chats,
         terminals,
         reserved_ports,
+        live,
     } = scope;
     let mut canonical = HashMap::new();
     let chats: HashMap<String, PathBuf> = chats
@@ -154,11 +259,31 @@ fn candidates(
         .into_iter()
         .collect();
     if roots.is_empty() {
-        return Some(Vec::new());
+        return Some((Vec::new(), Activity { live, owned: None }));
     }
     roots.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
-    let listeners = discovery::listeners(origins)?;
-    Some(
+    // The origins a listed server can have (see the filter below).
+    let accept = |origin: &str| match origin.split_once(':') {
+        Some(("chat", chat)) => chats.contains_key(chat),
+        Some(("terminal", terminal)) => terminals.get(terminal).is_some_and(|chat| chats.contains_key(chat)),
+        _ => false,
+    };
+    let owned = discovery::owned(origins, &accept)?;
+    let listeners = discovery::owned_listeners(origins, &owned)?;
+    let active = Activity {
+        live,
+        owned: (!owned.is_empty()).then(|| {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            owned.signature().hash(&mut hasher);
+            let mut ports: Vec<(u32, SocketAddr)> =
+                listeners.iter().map(|l| (l.pid, l.address)).collect();
+            ports.sort_unstable();
+            ports.hash(&mut hasher);
+            hasher.finish()
+        }),
+    };
+    Some((
         listeners
             .into_iter()
             .filter(|l| {
@@ -167,6 +292,7 @@ fn candidates(
                     && !reserved_ports.contains(&l.address.port())
                     && l.pid != std::process::id()
                     && !l.is_authentication_command()
+                    && !l.is_test_run()
                     && !l.signing_in
             })
             .filter_map(|mut listener| {
@@ -187,12 +313,14 @@ fn candidates(
                 Some((root, listener))
             })
             .collect(),
-    )
+        active,
+    ))
 }
 impl PreviewService {
     pub fn new(file: PathBuf, device_id: String, device_name: String) -> anyhow::Result<Self> {
         let signaling_wake = Arc::new(tokio::sync::Notify::new());
         Ok(Self(Arc::new(Inner {
+            scan_wake: Arc::new(tokio::sync::Notify::new()),
             catalog: Catalog::open(file, device_id, device_name)?,
             stop: CancellationToken::new(),
             started: AtomicBool::new(false),
@@ -245,6 +373,12 @@ impl PreviewService {
     }
     pub fn catalog(&self) -> &Catalog {
         &self.0.catalog
+    }
+    /// Scan for development servers now: a run or terminal here started or
+    /// changed state. Discovery parks while nothing Zeron started is alive,
+    /// and only this wakes it.
+    pub fn rescan(&self) {
+        self.0.scan_wake.notify_one();
     }
     /// The registry the agent-login flows publish their callback ports to.
     pub fn callback_routes(&self) -> CallbackRoutes {
@@ -302,6 +436,7 @@ impl PreviewService {
             self.0.catalog.clone(),
             self.0.callback_routes.clone(),
             self.0.streams.clone(),
+            self.0.scan_wake.clone(),
         ));
         let local = mux::local(connector.clone(), self.0.stop.child_token());
         let (peers, output) = Peers::new(
@@ -345,9 +480,18 @@ impl PreviewService {
         self.0.tasks.lock().unwrap().push(listener_task);
         let catalog = self.0.catalog.clone();
         let stop = self.0.stop.clone();
+        let wake = self.0.scan_wake.clone();
+        // Every 2 s while a run or terminal is alive, or what a chat left
+        // running changes: a server one starts is listed by the first scan
+        // once it has stayed up PROBE_SETTLE, 3–5 s after it binds. While
+        // only unchanged processes left running keep it going, it slows
+        // down ([`ScanPace`]), but never past a listener's PROBE_SETTLE. With none alive no
+        // listener could be listed, so the scan parks until a run or
+        // terminal changes state, or an open preview loses its process.
         let scanner = tokio::spawn(async move {
             let mut memory = ProbeMemory::default();
             let mut origins = discovery::Origins::default();
+            let mut pace = ScanPace::default();
             loop {
                 let memory = &mut memory;
                 let origins = &mut origins;
@@ -359,26 +503,30 @@ impl PreviewService {
                         (candidates(projects(), &mut origins), origins)
                     })
                     .await;
-                    let candidates = match scanned {
-                        Ok((Some(candidates), kept)) => {
+                    let (candidates, active) = match scanned {
+                        Ok((Some(scanned), kept)) => {
                             *origins = kept;
-                            candidates
+                            scanned
                         }
                         // A failed enumeration says nothing about what runs:
-                        // keep the services already listed.
+                        // keep the services already listed, and look again.
                         Ok((None, kept)) => {
                             *origins = kept;
                             tracing::debug!(
                                 "preview scan could not read processes; keeping the last result"
                             );
-                            return;
+                            return (Activity { live: true, owned: None }, None);
                         }
                         Err(error) => {
                             tracing::warn!(%error, "preview scan failed; keeping the last result");
-                            return;
+                            return (Activity { live: true, owned: None }, None);
                         }
                     };
-                    let (mut servers, probe) = memory.plan(candidates, Instant::now());
+                    let Planned {
+                        known: mut servers,
+                        probe,
+                        settling_until,
+                    } = memory.plan(candidates, Instant::now());
                     let probed: Vec<_> = stream::iter(probe)
                         .map(|(root, listener)| async move {
                             let http = discovery::is_http(listener.address).await;
@@ -397,9 +545,34 @@ impl PreviewService {
                     if let Err(error) = catalog.replace_local(servers) {
                         tracing::warn!(%error, "could not update preview services");
                     }
+                    (active, settling_until)
                 };
-                tokio::select! { _ = stop.cancelled() => break, _ = scan => {} }
-                tokio::select! { _ = stop.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(2)) => {} }
+                let (activity, settling_until) = tokio::select! { _ = stop.cancelled() => break, scanned = scan => scanned };
+                if !activity.active() && settling_until.is_none() {
+                    pace.reset();
+                    tokio::select! { _ = stop.cancelled() => break, _ = wake.notified() => {} }
+                    continue;
+                }
+                let mut wait = pace.next(activity);
+                // A listener waiting out PROBE_SETTLE is probed by the first
+                // scan after it may be, however slow the pace has grown.
+                if let Some(until) = settling_until {
+                    wait = wait.min(
+                        until
+                            .saturating_duration_since(Instant::now())
+                            .max(SETTLED_RESCAN_MIN),
+                    );
+                }
+                if wait <= SCAN_CADENCE {
+                    // (A wake meanwhile is served by this cadence.)
+                    tokio::select! { _ = stop.cancelled() => break, _ = tokio::time::sleep(wait) => {} }
+                } else {
+                    tokio::select! {
+                        _ = stop.cancelled() => break,
+                        _ = tokio::time::sleep(wait) => {}
+                        _ = wake.notified() => pace.reset(),
+                    }
+                }
             }
         });
         let mut tasks = self.0.tasks.lock().unwrap();
@@ -428,7 +601,7 @@ impl PreviewService {
         }
     }
 }
-struct LocalConnector(Catalog, CallbackRoutes, StreamServices);
+struct LocalConnector(Catalog, CallbackRoutes, StreamServices, Arc<tokio::sync::Notify>);
 #[async_trait::async_trait]
 impl Connector for LocalConnector {
     async fn connect(&self, id: &str) -> anyhow::Result<BoxIo> {
@@ -462,6 +635,10 @@ impl Connector for LocalConnector {
         let (pid, started_at) = (route.listener.pid, route.listener.started_at);
         let valid =
             tokio::task::spawn_blocking(move || discovery::same_process(pid, started_at)).await?;
+        if !valid {
+            // Rediscovery: the scan may be parked.
+            self.3.notify_one();
+        }
         anyhow::ensure!(valid, "preview process changed; waiting for rediscovery");
         Ok(Box::new(
             tokio::net::TcpStream::connect(route.listener.address).await?,
@@ -512,55 +689,243 @@ mod tests {
             origin: Some("chat:chat".into()),
             chat_id: Some("chat".into()),
             signing_in: false,
+            test_run: false,
         }
+    }
+    fn at(t0: Instant, secs: u64) -> Instant {
+        t0 + Duration::from_secs(secs)
     }
     #[test]
     fn a_confirmed_http_server_is_never_probed_again() {
         let mut memory = ProbeMemory::default();
         let t0 = Instant::now();
-        let (known, probe) = memory.plan(vec![((), listener(7, 8081))], t0);
-        assert!(known.is_empty());
-        assert_eq!(probe.len(), 1);
-        memory.record(&probe[0].1, true, t0);
-        for cycle in 1..1_000u64 {
-            let now = t0 + Duration::from_secs(2 * cycle);
-            let (known, probe) = memory.plan(vec![((), listener(7, 8081))], now);
-            assert_eq!(known.len(), 1, "cycle {cycle} must reuse the verdict");
-            assert!(probe.is_empty(), "cycle {cycle} must not send a request");
+        let planned = memory.plan(vec![((), listener(7, 8081))], t0);
+        assert!(planned.known.is_empty() && planned.probe.is_empty(), "settling");
+        let planned = memory.plan(vec![((), listener(7, 8081))], at(t0, 3));
+        assert!(planned.known.is_empty());
+        assert_eq!(planned.probe.len(), 1);
+        memory.record(&planned.probe[0].1, true, at(t0, 3));
+        for cycle in 2..1_000u64 {
+            let now = at(t0, 2 * cycle);
+            let planned = memory.plan(vec![((), listener(7, 8081))], now);
+            assert_eq!(planned.known.len(), 1, "cycle {cycle} must reuse the verdict");
+            assert!(planned.probe.is_empty(), "cycle {cycle} must not send a request");
+            assert_eq!(planned.settling_until, None);
         }
     }
     #[test]
     fn non_http_listeners_back_off_and_reused_ports_are_probed_afresh() {
         let mut memory = ProbeMemory::default();
         let t0 = Instant::now();
-        let (_, probe) = memory.plan(vec![((), listener(7, 8081))], t0);
-        memory.record(&probe[0].1, false, t0);
-        let (_, probe) = memory.plan(vec![((), listener(7, 8081))], t0 + Duration::from_secs(2));
-        assert!(probe.is_empty(), "the very next cycle is skipped");
-        let (_, probe) = memory.plan(vec![((), listener(7, 8081))], t0 + Duration::from_secs(5));
-        assert_eq!(probe.len(), 1, "retried after the initial backoff");
-        memory.record(&probe[0].1, false, t0 + Duration::from_secs(5));
-        let (_, probe) = memory.plan(vec![((), listener(7, 8081))], t0 + Duration::from_secs(10));
-        assert!(probe.is_empty(), "backoff doubled");
-        // A different process on the same port carries no verdict over.
-        let (_, probe) = memory.plan(vec![((), listener(8, 8081))], t0 + Duration::from_secs(10));
-        assert_eq!(probe.len(), 1);
-        // The original socket, once absent, is forgotten and re-probed on return.
-        memory.record(&probe[0].1, true, t0);
-        let (known, probe) =
-            memory.plan(vec![((), listener(7, 8081))], t0 + Duration::from_secs(11));
-        assert!(known.is_empty());
-        assert_eq!(probe.len(), 1);
+        let probe = |memory: &mut ProbeMemory, pid, secs| {
+            memory.plan(vec![((), listener(pid, 8081))], at(t0, secs)).probe
+        };
+        assert!(probe(&mut memory, 7, 0).is_empty(), "settling");
+        let probed = probe(&mut memory, 7, 3);
+        assert_eq!(probed.len(), 1);
+        memory.record(&probed[0].1, false, at(t0, 3));
+        assert!(probe(&mut memory, 7, 5).is_empty(), "the very next cycle is skipped");
+        let probed = probe(&mut memory, 7, 8);
+        assert_eq!(probed.len(), 1, "retried after the initial backoff");
+        memory.record(&probed[0].1, false, at(t0, 8));
+        assert!(probe(&mut memory, 7, 13).is_empty(), "backoff doubled");
+        // A different process on the same port carries nothing over: no
+        // verdict, and not the time the first was seen either.
+        assert!(probe(&mut memory, 8, 13).is_empty(), "a new listener settles first");
+        let probed = probe(&mut memory, 8, 16);
+        assert_eq!(probed.len(), 1);
+        memory.record(&probed[0].1, true, at(t0, 16));
+        // The original socket, once absent, is forgotten: settled and
+        // probed afresh on its return.
+        assert!(probe(&mut memory, 7, 17).is_empty());
+        let planned = memory.plan(vec![((), listener(7, 8081))], at(t0, 20));
+        assert!(planned.known.is_empty());
+        assert_eq!(planned.probe.len(), 1);
+    }
+    /// A listener is probed only once it has stayed up PROBE_SETTLE: seen by
+    /// an earlier scan that long ago. A test's fixture server, up for a
+    /// moment, is never connected to.
+    #[test]
+    fn listeners_are_probed_only_once_they_have_stayed_up() {
+        let t0 = Instant::now();
+        // Seen once, however late the scan: an earlier scan must have seen it.
+        let mut memory = ProbeMemory::default();
+        let planned = memory.plan(vec![((), listener(7, 8081))], at(t0, 60));
+        assert!(planned.probe.is_empty());
+        assert_eq!(planned.settling_until, Some(at(t0, 60) + PROBE_SETTLE));
+        // A fixture up across two scans, gone by the third: never probed.
+        let mut memory = ProbeMemory::default();
+        for secs in [0, 2] {
+            assert!(memory.plan(vec![((), listener(7, 8081))], at(t0, secs)).probe.is_empty());
+        }
+        let planned = memory.plan(Vec::<((), _)>::new(), at(t0, 4));
+        assert!(planned.probe.is_empty() && planned.settling_until.is_none());
+        // Back again (the next test's fixture on the same port, say): it
+        // settles afresh, not from when the first was seen.
+        assert!(memory.plan(vec![((), listener(7, 8081))], at(t0, 6)).probe.is_empty());
+        assert!(memory.plan(vec![((), listener(7, 8081))], at(t0, 8)).probe.is_empty());
+        assert_eq!(memory.plan(vec![((), listener(7, 8081))], at(t0, 9)).probe.len(), 1);
+        // Just short of PROBE_SETTLE is not enough; the earliest listener
+        // still settling says when the next scan is due.
+        let mut memory = ProbeMemory::default();
+        memory.plan(vec![((), listener(7, 8081))], t0);
+        let both = || vec![((), listener(7, 8081)), ((), listener(9, 8082))];
+        let planned = memory.plan(both(), at(t0, 2));
+        assert_eq!(planned.settling_until, Some(t0 + PROBE_SETTLE));
+        let planned = memory.plan(both(), t0 + PROBE_SETTLE - Duration::from_millis(1));
+        assert!(planned.probe.is_empty());
+        let planned = memory.plan(both(), t0 + PROBE_SETTLE);
+        assert_eq!(planned.probe.len(), 1);
+        assert_eq!(planned.probe[0].1.pid, 7);
+        assert_eq!(planned.settling_until, Some(at(t0, 2) + PROBE_SETTLE));
+        assert!(PROBE_SETTLE > SCAN_CADENCE, "never the scan right after the first sighting");
+    }
+    /// A chat's development server is found by the scan of what Zeron
+    /// started, and with nothing Zeron started alive the scan finds nothing
+    /// to do: the loop parks instead of scanning again.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_chats_server_is_found_and_nothing_alive_parks_the_scan() {
+        let folder = tempfile::tempdir().unwrap();
+        let chat = format!("idle-test-{}", std::process::id());
+        let scope = |live| Scope {
+            chats: vec![(chat.clone(), folder.path().to_path_buf())],
+            terminals: HashMap::new(),
+            reserved_ports: HashSet::new(),
+            live,
+        };
+        let mut origins = discovery::Origins::default();
+        let (found, active) = candidates(scope(false), &mut origins).unwrap();
+        assert!(found.is_empty());
+        assert!(!active.active(), "nothing of this chat runs: nothing to scan for");
+        let (_, active) = candidates(scope(true), &mut origins).unwrap();
+        assert!(active.active(), "a live run keeps the cadence before its process exists");
+
+        // What an agent of this chat starts: a listener in its folder.
+        struct Kill(std::process::Child);
+        impl Drop for Kill {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = std::process::Command::new("python3")
+            .args([
+                "-c",
+                "import socket,sys,time\ns=socket.socket()\ns.bind(('127.0.0.1',0))\ns.listen()\nprint(s.getsockname()[1],flush=True)\ntime.sleep(60)",
+            ])
+            .current_dir(folder.path())
+            .env(zeron_proto::ORIGIN_ENV, zeron_proto::chat_origin(&chat))
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let server = Kill(child);
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(stdout), &mut line).unwrap();
+        let port: u16 = line.trim().parse().unwrap();
+        let (found, active) = candidates(scope(false), &mut origins).unwrap();
+        assert!(active.active() && !active.live, "a process the chat started is alive");
+        let (_, again) = candidates(scope(false), &mut origins).unwrap();
+        assert_eq!(again, active, "the same process, listening the same: unchanged");
+        assert!(
+            found.iter().any(|(_, l)| l.address.port() == port
+                && l.pid == server.0.id()
+                && l.chat_id.as_deref() == Some(chat.as_str())),
+            "the chat's server is listed: {:?}",
+            found.iter().map(|(_, l)| (l.pid, l.address)).collect::<Vec<_>>()
+        );
+        drop(server);
+        let (found, active) = candidates(scope(false), &mut origins).unwrap();
+        assert!(found.is_empty() && !active.active(), "gone with its process");
+    }
+    /// A fixture server a chat's test run starts is no candidate: its own
+    /// command (`python3 -c …`) says nothing, but the process that started
+    /// it is a test runner. The same server under a plain shell is listed.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_test_runs_fixture_server_is_never_a_candidate() {
+        let folder = tempfile::tempdir().unwrap();
+        let chat = format!("fixture-test-{}", std::process::id());
+        let scope = || Scope {
+            chats: vec![(chat.clone(), folder.path().to_path_buf())],
+            terminals: HashMap::new(),
+            reserved_ports: HashSet::new(),
+            live: true,
+        };
+        struct Kill(std::process::Child);
+        impl Drop for Kill {
+            fn drop(&mut self) {
+                // (Closing its stdin ends the server; the shells follow.)
+                drop(self.0.stdin.take());
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        // An agent's shell (this test's child, never judged itself) runs
+        // `runner`, named so by `exec -a`, which starts the server: an
+        // agent → `vitest` → fixture chain, without vitest.
+        let server = |runner: &str| {
+            let mut child = std::process::Command::new("bash")
+                .args([
+                    "-c",
+                    r#"(exec -a "$RUNNER" bash -c 'python3 -c "$SERVER"; true'); true"#,
+                ])
+                .env("RUNNER", runner)
+                .env(
+                    "SERVER",
+                    "import socket,sys\ns=socket.socket()\ns.bind(('127.0.0.1',0))\ns.listen()\nprint(s.getsockname()[1],flush=True)\nsys.stdin.read()",
+                )
+                .current_dir(folder.path())
+                .env(zeron_proto::ORIGIN_ENV, zeron_proto::chat_origin(&chat))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let stdout = child.stdout.take().unwrap();
+            let mut line = String::new();
+            std::io::BufRead::read_line(&mut std::io::BufReader::new(stdout), &mut line).unwrap();
+            (Kill(child), line.trim().parse::<u16>().unwrap())
+        };
+        let (_dev, dev_port) = server("bash");
+        let (_fixture, fixture_port) = server("vitest");
+        let mut origins = discovery::Origins::default();
+        let (found, _) = candidates(scope(), &mut origins).unwrap();
+        let ports: Vec<u16> = found.iter().map(|(_, l)| l.address.port()).collect();
+        assert!(ports.contains(&dev_port), "the dev server is listed: {ports:?}");
+        assert!(!ports.contains(&fixture_port), "the fixture is not: {ports:?}");
+    }
+    #[test]
+    fn scans_slow_down_only_while_what_runs_is_unchanged() {
+        let warm = Activity { live: false, owned: Some(1) };
+        let mut pace = ScanPace::default();
+        assert_eq!(pace.next(warm), SCAN_CADENCE, "first sight of it");
+        let waits: Vec<_> = (0..6).map(|_| pace.next(warm).as_secs()).collect();
+        assert_eq!(waits, [4, 8, 16, 30, 30, 30]);
+        // A process starting or exiting, or a new listener: full cadence.
+        assert_eq!(pace.next(Activity { live: false, owned: Some(2) }), SCAN_CADENCE);
+        assert_eq!(pace.next(Activity { live: false, owned: Some(2) }).as_secs(), 4);
+        // A run working keeps the cadence however long nothing changes.
+        let live = Activity { live: true, owned: Some(2) };
+        for _ in 0..5 {
+            assert_eq!(pace.next(live), SCAN_CADENCE);
+        }
+        // A wake starts over.
+        assert_eq!(pace.next(warm), SCAN_CADENCE);
+        assert_eq!(pace.next(warm).as_secs(), 4);
+        pace.reset();
+        assert_eq!(pace.next(warm), SCAN_CADENCE);
     }
     #[test]
     fn backoff_is_capped() {
         let mut memory = ProbeMemory::default();
         let mut now = Instant::now();
+        memory.plan(vec![((), listener(7, 8081))], now);
         for _ in 0..20 {
             memory.record(&listener(7, 8081), false, now);
             now += NOT_HTTP_MAX_BACKOFF;
         }
-        let (_, probe) = memory.plan(vec![((), listener(7, 8081))], now);
+        let probe = memory.plan(vec![((), listener(7, 8081))], now).probe;
         assert_eq!(probe.len(), 1, "still retried once per max backoff");
     }
 }

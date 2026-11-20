@@ -188,7 +188,7 @@ end
 function M.when(s: Session): string
 	local t = s.time
 	if type(t) == "number" then
-		return status.ago(math.max(0, os.time() - t))
+		return status.ago(status.since(t))
 	end
 	return t or ""
 end
@@ -600,7 +600,7 @@ function M.Section(props: SectionProps): Node
 		cursor = if foldable then "pointer" else nil,
 		hover = if foldable then { color = "$text.secondary" } else nil,
 		on_click = if foldable then props.on_toggle else nil,
-		ui.text {
+		FadeText {
 			props.title,
 			grow = 1,
 			text_size = "$font.size.xs",
@@ -634,13 +634,14 @@ end
 
 -- A group's tile (18, in a row's slot): `inside` on its hue (or the
 -- chrome's quiet wash), and (`badge`) a dot for its most pressing session
--- while its rows can't be seen.
-function M.tile(inside: Node, badge: (() -> status.Kind?)?, hue: string?, src: string?, emoji: string?): Node
+-- while its rows can't be seen. `project`: a project's id, its tile then
+-- `.project-icon` (ds/tile).
+function M.tile(inside: Node, badge: (() -> status.Kind?)?, hue: string?, src: string?, emoji: string?, project: string?): Node
 	return ui.div {
 		relative = true,
 		w = 18,
 		h = 18,
-		Tile { hue = hue, inside = inside, size = 18, src = src, emoji = emoji },
+		Tile { hue = hue, inside = inside, size = 18, src = src, emoji = emoji, project = project },
 		if badge
 			then ui.presence(badge, function(kind: status.Kind): Node
 				return ui.div { absolute = true, right = -3, top = -3, status.StatusDot { kind = kind, size = 8 } }
@@ -1049,6 +1050,7 @@ function M.Fold(props: FoldProps): Node
 	local mounted = ui.use_state(was)
 	local amount = ui.use_state(if was then 1 else 0)
 	local going: any = nil
+	local folds = 0
 	ui.effect(function()
 		local on = props.open()
 		if on == was then
@@ -1062,13 +1064,15 @@ function M.Fold(props: FoldProps): Node
 		if on then
 			mounted:set(true)
 		end
-		local this: any = nil
-		this = anime.animate(amount, motion.params({
+		-- (By number: a callback holding its own clip would keep both for good.)
+		folds += 1
+		local this = folds
+		going = anime.animate(amount, motion.params({
 			value = if on then 1 else 0,
 			duration = if on then M.FOLD.open else M.FOLD.close,
 			ease = M.FOLD.ease,
 			onComplete = function()
-				if going == this then
+				if folds == this then
 					going = nil
 				end
 				if not props.open() then
@@ -1076,7 +1080,6 @@ function M.Fold(props: FoldProps): Node
 				end
 			end,
 		}))
-		going = this
 	end)
 	return ui.show(
 		function(): boolean

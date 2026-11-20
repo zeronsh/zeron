@@ -621,7 +621,14 @@ pub async fn fetch(origin: &Origin) -> Result<(Package, Source), String> {
         Origin::Release { repo, tag } => {
             let asset = install::release_asset_of(repo, tag.as_deref(), EXTENSION).await.map_err(|error| {
                 // (A repository with no release yet, or none with a template.)
-                if tag.is_none() { "That repository has no release with a template in it".to_string() } else { error }
+                // (Anything else, GitHub turning requests away among them,
+                // says what it is.)
+                let missing = matches!(install::reason_of(&error), Some(install::reason::RELEASE_NOT_FOUND | install::reason::NO_PACKAGE));
+                if tag.is_none() && missing {
+                    install::failure(install::reason::NO_PACKAGE, "That repository has no release with a template in it")
+                } else {
+                    error
+                }
             })?;
             (
                 install::download(&asset).await?,
@@ -742,6 +749,7 @@ pub fn compare(dir: &Path, id: &str, key: &str, hash: &str, fetched: &Package, s
         refused,
         source: Some(source),
         digest_diff: None,
+        new_key: false,
     })
 }
 

@@ -1,0 +1,9 @@
+{
+  "id": "keep-going",
+  "name": "Keep going",
+  "version": "1.0.0",
+  "description": "Sends \"continue\" to a chat whose turn ends asking for it (its reply's last line is [continue]), with no window open.",
+  "entry": "init.luau",
+  "service": "service.luau",
+  "permissions": ["service", "sessions.read", "messages.read", "messages.send"]
+}

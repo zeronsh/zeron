@@ -1,9 +1,12 @@
 # Example plugins
 
-Seven plugins, each proving one thing Zeron's plugins can do. They are **not built in**: install one by copying its folder into a Zeron data dir's `plugins/`, then sign it or allow it (`install.sh` does both for a scratch engine).
+Twelve plugins, each proving one thing Zeron's plugins can do. They are **not built in**: install one by copying its folder into a Zeron data dir's `plugins/`, then sign it or allow it (`install.sh` does both for a scratch engine).
 
 | Folder | Proves | Asks for | Who signs it |
 |---|---|---|---|
+| `account-rotate` | Your agents' usage and accounts, and their events, in a service with no window open: when the active Claude Code account drops below 10% remaining, it switches to the next saved account with more left, once that provider's running chats have finished (`when_idle`); its window says so in a toast | `service`, `usage.read`, `accounts.read`, `accounts.switch` | you: the switch is always asked, even for your own |
+| `account-pin` | A chat's account, decided by a plugin: right before a new Claude Code chat's first run Zeron asks it (`run.preparing`), and it answers with the saved account that has the fewest chats (`zeron.pins`); the active account is never switched, so other chats and your terminals keep running on it. The window says so in a toast | `service`, `accounts.read`, `accounts.pin`, `sessions.read` | you: pinning is always asked, even for your own |
+| `keep-going` | Sending messages from a service with no window open (`messages.send`): when a chat's turn finishes and its reply ends with the line `[continue]`, it sends that chat "continue", as the composer would; a loop of its own is stopped at 16 in a row | `service`, `sessions.read`, `messages.read`, `messages.send` | you: sending messages is always asked, even for your own |
 | `checkout-status` | A service (`service.luau`, run headless by the engine on each device): a session row's menu asks the service on that session's device for its checkout's branch and changes (running that device's `git`), and agents get the same through a tool with no window open | `ui.add`, `sessions.read`, `files.read`, `service`, `commands` (`git`), `tools` | you, installed and allowed on each device that should answer |
 | `compact-sidebar` | Replacing a whole screen module (`ui.override` of `@app/screens/shell/sidebar`, wrapping `@app-original`) | `ui.replace` | you: loads once you've allowed `ui.replace` |
 | `focus` | A title-bar button (`zeron.place` at `#titlebar-actions`) and a filtered sidebar (`sidebar.filter`) | `ui.add`, `ui.change` | another account: the consent sheet shows "Made by @…" |
@@ -28,13 +31,15 @@ A plugin is a folder in `<data>/plugins/<id>/`:
 
 **Signing your own.** Use `zeron plugin new <id>` (or New plugin in Settings → Plugins, or an agent's `create_plugin` tool), or `zeron plugin sign <id>`. Either way, your plugins stay yours as you and your agents edit them.
 
+**Sharing your own.** `zeron plugin export <id>` (or an agent's `export_plugin` tool) signs it again and saves it as one `.zeron-plugin` file in Zeron's `plugin-exports` folder; `--to <path>` saves it elsewhere (agents can't choose). Attach that file to a GitHub release, or send it.
+
 **Installing someone else's.**
 - **The person:** Settings → Plugins → Install… takes a `.zeron-plugin` file or a link. The link can point to a package, a GitHub release that carries one, or a git repository (`owner/repo`, or `…/tree/<branch>/<folder>`).
 - **An agent:** uses `install_plugin`.
 - **Before it runs:** the signature is checked over every file first. Anyone else's waits until you allow what it asks; one signed by your own key turns on at once.
 - **Where it came from** is kept in its folder's `.source.json`. Zeron checks there for updates, when Settings → Plugins opens and every few hours.
 - **A row with an update** says what the update adds to or drops from what the plugin asks, and has Update.
-- **An update must be signed by the same key**, or it's refused. One that asks for something new waits for you again.
+- **An update must be signed by the same key**, or by another of your account's live keys (a new machine; it asks people again), or it's refused. One that asks for something new waits for you again.
 - **Removing it** takes away its folder, its storage and everything it placed.
 
 ## Templates: Zeron's whole interface, yours

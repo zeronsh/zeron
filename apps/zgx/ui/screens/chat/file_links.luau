@@ -206,6 +206,13 @@ local function inside(path: string, root: string?): string?
 	return if rest ~= "" then rest else nil
 end
 
+-- Whether a link is a file of the chat's (in its folder `root`): a reply
+-- draws it as the chip a prompt's mention is (ds/markdown `link_chip`).
+function M.chip(target: string, root: string?): boolean
+	local r = M.resolve(target, root)
+	return r ~= nil and not r.outside
+end
+
 function M.resolve(target: string, root: string?): Resolved?
 	target = string.match(target, "^%s*(.-)%s*$") or target
 	if target == "" then

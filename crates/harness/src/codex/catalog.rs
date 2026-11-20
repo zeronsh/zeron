@@ -118,8 +118,10 @@ fn model(
     options: Vec<ModelOption>,
 ) -> Model {
     Model {
+        default: false,
         id: id.into(),
         label: label.into(),
+        provider: None,
         description: (!description.is_empty()).then(|| description.into()),
         reasoning_levels: ladder.to_vec(),
         options,

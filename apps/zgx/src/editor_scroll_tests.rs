@@ -141,6 +141,11 @@ fn left_column(app: &mut TestApp) -> u32 {
     caret(app).1
 }
 
+/// The keys to a line's end and start: ⌘→ and ⌘← on a Mac; End and Home
+/// elsewhere, where Ctrl (`cmd`) with an arrow moves a word.
+const LINE_END: &str = if cfg!(target_os = "macos") { "cmd+right" } else { "end" };
+const LINE_START: &str = if cfg!(target_os = "macos") { "cmd+left" } else { "home" };
+
 #[test]
 fn a_sideways_swipe_brings_back_what_the_caret_scrolled_away() {
     let mut app = mount();
@@ -149,14 +154,14 @@ fn a_sideways_swipe_brings_back_what_the_caret_scrolled_away() {
     let b = app.bounds(EDITOR);
     let view = app.bounds("#file-viewer");
     click_at(&mut app, b.x + 40., (view.y + 50.).max(b.y + 4.));
-    app.keys("cmd+right");
+    app.keys(LINE_END);
     app.frames(10);
     let (_, end_col) = caret(&mut app);
     assert!(end_col > 300, "the caret never reached the line's end (column {end_col})");
     let scrolled = left_column(&mut app);
     assert!(scrolled > 40, "the code never scrolled to the caret (left edge at column {scrolled})");
     // A sideways swipe back: to the line's start.
-    app.keys("cmd+right");
+    app.keys(LINE_END);
     app.frames(6);
     wheel(&mut app, -100_000., 0.);
     assert_eq!(left_column(&mut app), 1, "a sideways swipe didn't bring the code back");
@@ -164,9 +169,9 @@ fn a_sideways_swipe_brings_back_what_the_caret_scrolled_away() {
     wheel(&mut app, 400., 0.);
     let swiped = left_column(&mut app);
     assert!(swiped > 20, "a sideways swipe didn't move the code out (column {swiped})");
-    // The caret to the line's start (⌘←, as Home): back to the start, as an
+    // The caret to the line's start (⌘←, or Home): back to the start, as an
     // editor does.
-    app.keys("cmd+left");
+    app.keys(LINE_START);
     app.frames(6);
     assert_eq!(left_column(&mut app), 1, "the caret at the line's start didn't bring the code back");
 }
@@ -181,7 +186,7 @@ fn a_moving_window_of_lines_keeps_the_sideways_scroll() {
     // Sideways a way: the caret to the line's end, then part way back by
     // swipe. (Headless, the textarea learns how far it can scroll as it's
     // drawn or as the caret moves; the caret does here.)
-    app.keys("cmd+right");
+    app.keys(LINE_END);
     app.frames(6);
     wheel(&mut app, -1000., 0.);
     // (Read off where the code stands, not by a click: a caret placed at the

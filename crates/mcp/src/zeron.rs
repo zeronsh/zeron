@@ -25,6 +25,10 @@ use zeron_rpc::{RpcClient, RpcError, RpcSubscription, connect_ipc_as_agent, meth
 /// First-item wait for a watch snapshot. Localhost; the engine answers
 /// watch attaches in milliseconds unless it is still assembling stores.
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a read waits on a chat's host before settling for this engine's
+/// replica. A sleeping Cloud machine is never woken by a read (only sends
+/// wake one), so a dark host must cost a read seconds, not the call.
+const HOST_READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// Gap between resubscribes when a watch stream ends at a lifecycle
 /// boundary (chat2 cutover etc.) — the same contract the UI follows.
 const RESUBSCRIBE_DELAY: Duration = Duration::from_millis(300);
@@ -394,6 +398,31 @@ impl Zeron {
     /// The full transcript: attach, take the opening `reset` frame, detach.
     pub async fn transcript(&self, chat_id: &str) -> anyhow::Result<Vec<SessionMessageEntry>> {
         self.transcript_on(chat_id, None).await
+    }
+
+    /// One window of a chat's transcript: from its host within
+    /// [`HOST_READ_TIMEOUT`] (freshest), else from this engine's replica of
+    /// the chat, as a sleeping or unreachable host can't answer.
+    pub async fn window_of(&self, chat: &Chat, window: TranscriptWindow) -> anyhow::Result<TranscriptView> {
+        if self.local_device_id().await.ok().as_deref() == Some(chat.device_id.as_str()) {
+            return self.transcript_window(&chat.id, None, window).await;
+        }
+        match tokio::time::timeout(
+            HOST_READ_TIMEOUT,
+            self.transcript_window(&chat.id, Some(&chat.device_id), window.clone()),
+        )
+        .await
+        {
+            Ok(Ok(view)) => Ok(view),
+            Ok(Err(err)) => {
+                tracing::debug!(chat = %chat.id, error = %err, "host transcript unavailable; reading the local replica");
+                self.transcript_window(&chat.id, None, window).await
+            }
+            Err(_) => {
+                tracing::debug!(chat = %chat.id, "host transcript slow; reading the local replica");
+                self.transcript_window(&chat.id, None, window).await
+            }
+        }
     }
 
     pub async fn transcript_on(

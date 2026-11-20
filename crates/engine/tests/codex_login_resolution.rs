@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use zeron_engine::{AgentAccounts, AgentAccountsConfig};
-use zeron_proto::{AgentLoginMode, HarnessId};
+use zeron_proto::{AgentLoginMode, AgentLoginStatus, HarnessId};
 
 fn test_accounts(root: &Path) -> AgentAccounts {
     let config = AgentAccountsConfig {
@@ -68,20 +68,31 @@ async fn login_child() {
     let root = std::env::temp_dir().join(format!("zeron-codex-login-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let accounts = test_accounts(&root);
-    let result = accounts.start_login(HarnessId::Codex).await;
     if expected == "true" {
-        let start = result.expect("login starts");
+        let start = accounts.start_login(HarnessId::Codex).await.expect("login starts");
         assert_eq!(start.mode, AgentLoginMode::Browser);
         assert_eq!(start.url, FAKE_URL);
         accounts.cancel_login(&start.login_id);
     } else {
-        let error = result
-            .expect_err("login must fail without a CLI")
-            .to_string();
-        assert!(
-            error.contains("codex"),
-            "error should name the missing CLI: {error}"
-        );
+        // No CLI anywhere: the sign-in installs Codex first (as Settings'
+        // Install does). One that can't be installed (offline here) fails the
+        // sign-in, naming what's missing.
+        accounts.override_installer(zeron_engine::agent_accounts::SignInInstaller {
+            installed: std::sync::Arc::new(|_| false),
+            install: std::sync::Arc::new(|_| Box::pin(async { Err("offline".to_string()) })),
+        });
+        let start = accounts.start_login(HarnessId::Codex).await.expect("the sign-in starts by installing");
+        let mut poll = accounts.poll_login(&start.login_id).await.expect("poll");
+        for _ in 0..100 {
+            if poll.status != AgentLoginStatus::Pending {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            poll = accounts.poll_login(&start.login_id).await.expect("poll");
+        }
+        assert_eq!(poll.status, AgentLoginStatus::Error, "{poll:?}");
+        let message = poll.message.unwrap_or_default();
+        assert!(message.contains("Codex") && message.contains("offline"), "names what's missing: {message}");
     }
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -143,8 +154,10 @@ fn codex_login_runs_the_npm_cmd_shim() {
     probe(&bin, None, true);
 }
 
+/// No CLI anywhere: the sign-in installs it first, and one that can't be
+/// installed fails naming it.
 #[test]
-fn codex_login_without_any_cli_fails_with_a_named_error() {
+fn codex_login_without_any_cli_installs_it_or_fails_naming_it() {
     if std::path::Path::new("/opt/homebrew/bin/codex").exists()
         || std::path::Path::new("/usr/local/bin/codex").exists()
     {

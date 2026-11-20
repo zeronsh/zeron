@@ -3,6 +3,7 @@
  * sessions for child chats (each on a machine of its own), sees and manages
  * those children, and nothing else — no other main chat, no grandchildren.
  */
+import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { encodeHlc, type Op } from "../../src/registry-core";
 import {
@@ -13,12 +14,43 @@ import {
   readySession,
   runnerKey,
   runnerToken,
+  session,
   userBearer,
   waitForSession,
   type TestUser
 } from "./cloud-helpers";
 
+/** A child of `parent` on a machine of its own, enrolled (ready), with its
+ * runner's bearer. */
+const readyChild = async (u: TestUser, runner: string, parent: string) => {
+  const chatId = `child-${crypto.randomUUID().slice(0, 8)}`;
+  const started = await call("POST", `/cloud/${u.orgId}/sessions`, runner, {
+    chatId,
+    parentChatId: parent,
+    config: { harness: "codex" }
+  });
+  expect(started.status, await started.clone().text()).toBe(200);
+  const { deviceId } = (await started.json()) as { deviceId: string };
+  const key = await runnerKey();
+  expect((await enroll(u, deviceId, await enrollCodeFor(deviceId), key.publicKey)).status).toBe(200);
+  const bearer = `Bearer ${await runnerToken(u, deviceId, key)}`;
+  await waitForSession(u, chatId, "ready");
+  return { chatId, deviceId, bearer };
+};
+
 const rand = () => crypto.randomUUID().slice(0, 8);
+
+describe("a machine and machine sizes", () => {
+  it("can wake its delegate, but never chooses the size it wakes on", async () => {
+    const u: TestUser = { ...newUser("dg"), orgId: "org1" };
+    const main = await readySession(u);
+    const bearer = `Bearer ${await runnerToken(u, main.deviceId, main.key)}`;
+    const child = await readyChild(u, bearer, main.chatId);
+    const sized = await call("POST", `/cloud/${u.orgId}/sessions/${child.chatId}/wake`, bearer, { machine: "xlarge" });
+    expect(sized.status).toBe(403);
+    expect((await call("POST", `/cloud/${u.orgId}/sessions/${child.chatId}/wake`, bearer, {})).status).toBe(200);
+  });
+});
 let clock = 0;
 const upsert = (kind: string, id: string, set: Op["set"], device: string): Op => ({
   kind,
@@ -111,7 +143,7 @@ describe("Cloud delegates", () => {
     expect(((await again.json()) as { deviceId: string }).deviceId).toBe(deviceId);
   });
 
-  it("sees and reaches its children, never another main chat", async () => {
+  it("sees and reaches its children and every other chat, but hosts only its own room", async () => {
     const { u, main, other, runner } = await world();
     const child = `child-${rand()}`;
     const { deviceId } = (await (await startChild(u, runner, child, main.chatId)).json()) as { deviceId: string };
@@ -119,19 +151,20 @@ describe("Cloud delegates", () => {
     const seen = await rows(runner);
     expect(find(seen, "chats", child)).toBeDefined();
     expect(find(seen, "chats", main.chatId)).toBeDefined();
-    expect(find(seen, "chats", other.chatId)).toBeUndefined();
+    expect(find(seen, "chats", other.chatId)).toBeDefined();
 
-    // Chat rooms: its child's, not the other main chat's.
+    // Chat rooms: its child's, and any other chat's.
     expect((await call("GET", `/chat2/${child}/stats`, runner)).status).toBe(200);
-    expect((await call("GET", `/chat2/${other.chatId}/stats`, runner)).status).toBe(403);
-    // Device rooms: a client link and the nudge to its child's machine only.
-    const link = await call("GET", `/device/${deviceId}/ws?role=client`, runner, undefined, { upgrade: "websocket" });
-    expect(link.status).toBe(101);
-    link.webSocket!.accept();
-    link.webSocket!.close();
+    expect((await call("GET", `/chat2/${other.chatId}/stats`, runner)).status).toBe(200);
+    // Device rooms: a client link to any machine, never the host role.
+    for (const device of [deviceId, other.deviceId]) {
+      const link = await call("GET", `/device/${device}/ws?role=client`, runner, undefined, { upgrade: "websocket" });
+      expect(link.status, device).toBe(101);
+      link.webSocket!.accept();
+      link.webSocket!.close();
+    }
     expect((await call("GET", `/device/${deviceId}/ws?role=host`, runner, undefined, { upgrade: "websocket" })).status).toBe(403);
-    expect((await call("GET", `/device/${other.deviceId}/ws?role=client`, runner, undefined, { upgrade: "websocket" })).status).toBe(403);
-    expect((await call("POST", `/device/${other.deviceId}/nudge`, runner, { chatId: other.chatId })).status).toBe(403);
+    expect((await call("GET", `/device/${other.deviceId}/ws?role=host`, runner, undefined, { upgrade: "websocket" })).status).toBe(403);
   });
 
   it("manages its children's machines, and only theirs", async () => {
@@ -170,5 +203,64 @@ describe("Cloud delegates", () => {
     const grandchild = await startChild(u, childRunner, `g-${rand()}`, child);
     expect(grandchild.status).toBe(403);
     expect(await grandchild.json()).toMatchObject({ error: "too_deep" });
+  });
+
+  it("wakes a sleeping Cloud chat when it sends to it, as a person's send would", async () => {
+    const { u, main, runner } = await world();
+    const child = await readyChild(u, runner, main.chatId);
+    expect((await call("POST", `/cloud/${u.orgId}/sessions/${child.chatId}/sleep`, runner, {})).status).toBe(200);
+    await waitForSession(u, child.chatId, "sleeping");
+    expect((await call("POST", `/device/${child.deviceId}/nudge`, runner, { chatId: child.chatId })).status).toBe(200);
+    await waitForSession(u, child.chatId, "starting");
+  });
+
+  it("wakes another of the person's sleeping Cloud chats it sends to, not only its children", async () => {
+    const { u, other, runner } = await world();
+    expect((await session(u, other.chatId))?.state).toBe("sleeping");
+    expect((await call("POST", `/device/${other.deviceId}/nudge`, runner, { chatId: other.chatId })).status).toBe(200);
+    await waitForSession(u, other.chatId, "starting");
+  });
+
+  it("wakes its sleeping parent once it stops working: finished, or waiting on an answer", async () => {
+    const { u, user, main, runner } = await world();
+    const child = await readyChild(u, runner, main.chatId);
+    const state = async () => (await session(u, main.chatId))?.state;
+    const beat = (body: Record<string, number>) =>
+      call("POST", "/runner/heartbeat", child.bearer, { activeRuns: 0, clients: 0, ...body });
+    expect((await beat({ activeRuns: 1 })).status).toBe(200);
+    expect((await call("POST", `/cloud/${u.orgId}/sessions/${main.chatId}/sleep`, user, {})).status).toBe(200);
+    await waitForSession(u, main.chatId, "sleeping");
+    // Still working: the parent sleeps on.
+    expect((await beat({ activeRuns: 1 })).status).toBe(200);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(await state()).toBe("sleeping");
+    // Waiting on an answer counts as stopped: the parent has to hear of it.
+    expect((await beat({ activeRuns: 1, waitingRuns: 1 })).status).toBe(200);
+    await waitForSession(u, main.chatId, "starting");
+  });
+
+  it("a delegate's GitHub grant names its parent's machine; a main chat's names none, and no body can", async () => {
+    const { u, main, runner } = await world();
+    const github = { provider: "github", ts: Date.now(), sig: "c2ln", repo: "acme/app" };
+    const lastGrant = async () => (await env.VAULT.calls()).filter((c) => c.method === "grant").at(-1)!.args[1];
+
+    const asMain = { ...github, deviceId: main.deviceId };
+    expect((await call("POST", "/vault/org1/grant", runner, { ...asMain, inheritFrom: "cloud-other" })).status).toBe(200);
+    expect(await lastGrant()).toEqual(asMain);
+
+    const { deviceId } = (await (await startChild(u, runner, `child-${rand()}`, main.chatId)).json()) as { deviceId: string };
+    const key = await runnerKey();
+    expect((await enroll(u, deviceId, await enrollCodeFor(deviceId), key.publicKey)).status).toBe(200);
+    const childRunner = `Bearer ${await runnerToken(u, deviceId, key)}`;
+    const asChild = { ...github, deviceId };
+    expect((await call("POST", "/vault/org1/grant", childRunner, { ...asChild, inheritFrom: "cloud-other" })).status).toBe(200);
+    expect(await lastGrant()).toEqual({ ...asChild, inheritFrom: main.deviceId });
+    // Still its own repository only.
+    expect((await call("POST", "/vault/org1/grant", childRunner, { ...asChild, repo: "acme/other" })).status).toBe(403);
+
+    // Another provider's grant asks nothing of the session.
+    const codex = { provider: "codex", deviceId, ts: Date.now(), sig: "c2ln" };
+    expect((await call("POST", "/vault/org1/grant", childRunner, codex)).status).toBe(200);
+    expect(await lastGrant()).toEqual(codex);
   });
 });

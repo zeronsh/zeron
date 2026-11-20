@@ -623,3 +623,22 @@ async fn r13_revoking_a_devices_key_tells_that_device() {
     call(&f.plugins, methods::PLUGIN_SIGNING_KEY, serde_json::json!({ "revoke": "B-KEY" })).await.unwrap();
     assert_eq!(shim::revoked(&fake), vec!["B-KEY".to_string()]);
 }
+
+/// Signed out (a directory to ask, as a production engine has, but no
+/// account), the key checks have nothing to do: no rescan of every plugin
+/// folder each half minute (`KEYS_RETRY`) while nothing changes.
+#[tokio::test(start_paused = true)]
+async fn signed_out_no_rescan_every_half_minute() {
+    let f = fixture();
+    let fake = Arc::new(FakeDirectory::default());
+    f.plugins.set_directory(fake.clone());
+    f.plugins.set_account(|| None);
+    f.plugins.start();
+    // (Past the start's own scans and the first look for updates.)
+    tokio::time::sleep(super::lifecycle::FIRST_CHECK + std::time::Duration::from_secs(10)).await;
+    let scans = || f.plugins.inner.scans.load(std::sync::atomic::Ordering::SeqCst);
+    let settled = scans();
+    assert!(settled >= 1, "the start's own scan");
+    tokio::time::sleep(std::time::Duration::from_secs(150)).await;
+    assert_eq!(scans(), settled, "rescanned with nothing to look up");
+}

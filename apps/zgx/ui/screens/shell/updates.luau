@@ -27,9 +27,7 @@ local M = {}
 local BUTTON_H, TILE, GAP_CUT = 28, 20, 2.5
 -- How far along each circle stands: enough of the one behind shows to know it.
 local STEP = 15
--- A circle's mark: a little right of its middle on those behind, to sit in the
--- middle of what shows of them.
-local MARK_SIDE, MARK_NUDGE = 11, 2
+local MARK_SIDE = 11
 local MOST = 3
 local GLYPH = 16
 -- The button's insets: its circles as far in as they are from its top, its
@@ -861,8 +859,11 @@ local function tile(at: number): Node
 			then ui.svg { src = CRESCENT, tint = "$zeron.mark.bg", absolute = true, left = 0, top = 0, w = TILE, h = TILE }
 			else ui.div { absolute = true, left = 0, top = 0, w = TILE, h = TILE, rounded = "$radius.full", bg = "$zeron.mark.bg" },
 		ui.row {
+			id = `updates-mark-{at}-glyph`,
 			absolute = true,
-			left = if behind then MARK_NUDGE else 0,
+			-- (In its circle's middle, behind or not: the one in front
+			-- may cover some of it.)
+			left = 0,
 			top = 0,
 			w = TILE,
 			h = TILE,

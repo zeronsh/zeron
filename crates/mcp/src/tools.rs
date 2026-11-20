@@ -22,6 +22,7 @@ use zeron_proto::{
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
 use crate::zeron::{HarnessInfo, TranscriptFollow, TurnOutcome, Zeron, session_for, short};
 
+mod commands;
 mod plugins;
 mod themes;
 pub use plugins::ListedTool;
@@ -29,9 +30,24 @@ pub(crate) use plugins::is_plugin_tool_name;
 
 /// Default and ceiling for the blocking waits.
 const MAX_BATCH: usize = 32;
-/// Cloud runs these agents (Codex and Claude Code): a Cloud chat's harness.
-const CLOUD_HARNESSES: &[HarnessId] = &[HarnessId::ClaudeCode, HarnessId::Codex];
+/// Cloud runs these agents (every built-in one): a Cloud chat's harness, the
+/// first the default. Mirrors `zeron_proto::CLOUD_HARNESSES`.
+const CLOUD_HARNESSES: &[HarnessId] = &[
+    HarnessId::ClaudeCode,
+    HarnessId::Codex,
+    HarnessId::Cursor,
+    HarnessId::Devin,
+    HarnessId::Grok,
+    HarnessId::Hermes,
+    HarnessId::Fx,
+    HarnessId::Pi,
+    HarnessId::Opencode,
+    HarnessId::Antigravity,
+    HarnessId::Muse,
+];
 const DEFAULT_WAIT: Duration = Duration::from_secs(600);
+/// A device seen this recently is online (the app's sidebar says the same).
+const ONLINE_SECS: i64 = 70;
 const MAX_WAIT: Duration = Duration::from_secs(3600);
 
 #[derive(Debug, Clone, Serialize)]
@@ -50,6 +66,8 @@ pub struct Tools {
     /// Which plugin tools the client was last shown ([`Self::list_all`],
     /// [`Self::watch_plugin_tools`]).
     plugins: plugins::PluginState,
+    /// Each device's folder after this chat's last command there.
+    command_state: commands::CommandState,
 }
 
 fn chat_key_schema(extra: Value) -> Value {
@@ -67,6 +85,8 @@ fn chat_key_schema(extra: Value) -> Value {
     json!({ "type": "object", "properties": properties, "required": ["chat"] })
 }
 
+const DEVICE_STATS: &str = "device_stats";
+
 fn device_schema() -> Value {
     json!({ "type": "string", "description": "Host device id or exact name. Omit for the local engine." })
 }
@@ -80,8 +100,13 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "list_devices",
-            description: "Devices in this workspace (the local engine's device is flagged). Chats and projects are hosted on a device.",
+            description: "Devices in this workspace (the local engine's device is flagged). Chats and projects are hosted on a device. `online`: seen in the last 70 s (always true for this one); run_command reaches any online device.",
             input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDef {
+            name: DEVICE_STATS,
+            description: "One device's machine stats, asked live of that device (local when omitted): OS (name, version, kernel, architecture), CPU (model, physical and logical cores), memory (total and available bytes), storage (the volumes holding Zeron's data and the home folder, plus every local volume: mount point, filesystem, total/available/used bytes), GPU names where the platform says them cheaply, uptime, load average (Unix), battery, and the Zeron engine version. Any field is null when that machine can't say. Another device answers within about 5 s, or the error says it's offline (with when it was last seen) or its Zeron is too old. Reports are cached for 5 s.",
+            input_schema: json!({ "type": "object", "properties": { "device": device_schema() } }),
         },
         ToolDef {
             name: "list_projects",
@@ -126,7 +151,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "create_chat",
-            description: "Create a child of your chat to delegate work to (kind subagent, the default when you speak from a chat or pass parent: listed under that chat's Subagents and in its transcript's subagent block), a side chat (kind side: only when the person should treat it as a side conversation of their own), or a standalone session (kind chat, no parent). Any connected provider works (see list_harnesses), whichever provider you run on. Delegation is one level deep: a chat that has a parent cannot create chats. With cloud, the chat runs on a Cloud machine of its own (Codex or Claude Code), from a Cloud chat or a project with a GitHub repository. Select a project and/or device; catalogs are validated on that host. Optionally send a first prompt and wait for the reply. For parallel delegation use create_chats, or launch with wait=false and wait only after all chats have started.",
+            description: "Create a child of your chat to delegate work to (kind subagent, the default when you speak from a chat or pass parent: listed under that chat's Subagents and in its transcript's subagent block), a side chat (kind side: only when the person should treat it as a side conversation of their own), or a standalone session (kind chat, no parent). Any connected provider works (see list_harnesses), whichever provider you run on. Delegation is one level deep: a chat that has a parent cannot create chats. With cloud, the chat runs on a Cloud machine of its own (any built-in agent), from a Cloud chat or a project with a GitHub repository. Select a project and/or device; catalogs are validated on that host. Optionally send a first prompt and wait for the reply. For parallel delegation use create_chats, or launch with wait=false and wait only after all chats have started.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -138,12 +163,12 @@ fn catalog() -> Vec<ToolDef> {
                     "model": { "type": "string", "description": "Model id from list_models on the chosen device. Omit for the harness default." },
                     "reasoning": { "type": "string", "description": "Reasoning level the model supports (e.g. low, medium, high, max)." },
                     "sandbox": { "type": "string", "enum": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write", "description": "Never wider than the sandbox of the chat you are speaking from: more is lowered to it (accessCapped)." },
-                    "access": { "type": "string", "enum": ["supervised", "auto-accept-edits", "full-access"], "description": "What the agent may do without asking: supervised asks before commands and file changes, auto-accept-edits applies edits and asks before the rest, full-access asks nothing. Questions go to the person in the chat. Must be one of the harness's accessModes (list_harnesses). Defaults to the access of the chat you are speaking from, and never exceeds it: more is lowered to it (the reply's accessCapped says so)." },
+                    "access": { "type": "string", "enum": ["supervised", "auto-accept-edits", "auto", "full-access"], "description": "What the agent may do without asking: supervised asks before commands and file changes, auto-accept-edits applies edits and asks before the rest, auto lets the agent's own reviewer (Claude Code's auto mode, Codex's auto-review) approve safe actions and ask about the rest, full-access asks nothing. Questions go to the person in the chat. Must be one of the harness's accessModes (list_harnesses). Defaults to the access of the chat you are speaking from, and never exceeds it: more is lowered to it (the reply's accessCapped says so)." },
                     "plan": { "type": "boolean", "default": false, "description": "Plan mode: explore and propose a plan before changing anything. Only for harnesses with supportsPlan." },
                     "title": { "type": "string", "description": "Sidebar title. Otherwise the engine titles it from the first exchange." },
                     "branch": { "type": "string", "description": "Branch label to record on the chat." },
                     "cwd": { "type": "string", "description": "Working directory override (an existing worktree path). Defaults to the project folder." },
-                    "cloud": { "type": "boolean", "default": false, "description": "Run on a Cloud machine of its own (cloning the project's GitHub repository) instead of the project's device. From a Cloud chat, the child clones the same repository; without cloud it shares this machine." },
+                    "cloud": { "type": "boolean", "default": false, "description": "Run on a Cloud machine of its own (cloning the project's GitHub repository) instead of the project's device. From a Cloud chat, the child clones the same repository; without cloud it shares this machine, unless device or project names another of the person's devices." },
                     "prompt": { "type": "string", "description": "First message to send right away." },
                     "wait": { "type": "boolean", "default": false, "description": "With prompt: block until the first turn finishes and return the reply." },
                     "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
@@ -292,6 +317,7 @@ fn catalog() -> Vec<ToolDef> {
     });
     tools.extend(plugins::catalog());
     tools.extend(themes::catalog());
+    tools.extend(commands::catalog());
     tools
 }
 
@@ -442,6 +468,14 @@ warning, danger (status only); border (hairlines, gridlines); chart1, chart2, ch
 chart5, chart6 (series, in order; \
 chart1 is the accent). They follow the reader's theme, light or dark, on frosted glass or an opaque \
 surface, so never assume a background color.\n\
+\n\
+Hover must not move the page. A visual sits in a transcript, so anything you show only while the \
+pointer is on something (a custom readout, a detail line, a hint, a row's or canvas's hover state) must \
+not change the visual's height, or everything under it jumps as the pointer crosses it. Reserve its \
+space at rest (a placeholder or an empty line of the same height, e.g. ui.text { s.picked or \" \" }), \
+or draw it where it takes no layout space (inside a ui.canvas with g.pointer, or a scene point's hint). \
+Don't add or remove nodes, or lengthen text onto another line, on hover. ui.chart's hover readout \
+never changes the chart's height.\n\
 \n\
 Style, enforced: layout nodes have no fill, border, shadow, padding, or font props. A visual is part \
 of the reply, not a widget, so lay content directly on the chat with type, spacing, and alignment: no \
@@ -802,6 +836,7 @@ impl Tools {
             zeron,
             pending_turns: Default::default(),
             plugins: Default::default(),
+            command_state: Default::default(),
         }
     }
 
@@ -841,6 +876,7 @@ impl Tools {
         let result = match name {
             "whoami" => self.whoami().await,
             "list_devices" => self.list_devices().await,
+            DEVICE_STATS => self.device_stats(parse(args)?).await,
             "list_projects" => self.list_projects(parse(args)?).await,
             "list_harnesses" => self.list_harnesses(parse(args)?).await,
             "list_models" => self.list_models(parse(args)?).await,
@@ -864,6 +900,7 @@ impl Tools {
             plugins::PLUGIN_STATUS => return self.plugin_status(args).await,
             plugins::INSTALL_PLUGIN => return self.install_plugin(args).await,
             plugins::UPDATE_PLUGIN => return self.update_plugin(args).await,
+            plugins::EXPORT_PLUGIN => return self.export_plugin(args).await,
             plugins::LIST_TEMPLATES
             | plugins::CREATE_TEMPLATE
             | plugins::USE_TEMPLATE
@@ -874,6 +911,9 @@ impl Tools {
             }
             plugins::EXPORT_TEMPLATE | plugins::IMPORT_TEMPLATE => {
                 return self.template_packages(name, args).await;
+            }
+            command if commands::NAMES.contains(&command) => {
+                return self.commands(command, args).await;
             }
             theme if themes::NAMES.contains(&theme) => {
                 return self.themes(theme, args).await;
@@ -949,15 +989,47 @@ impl Tools {
     async fn list_devices(&self) -> anyhow::Result<Value> {
         let (devices, local) =
             tokio::try_join!(self.zeron.devices(), self.zeron.local_device_id())?;
+        let now = chrono::Utc::now();
         Ok(json!({
             "devices": devices.iter().map(|d| json!({
                 "id": d.id,
                 "name": d.name,
                 "platform": d.platform,
                 "local": d.id == local,
+                "online": d.id == local
+                    || d.last_seen_at.is_some_and(|at| now - at <= chrono::Duration::seconds(ONLINE_SECS)),
                 "lastSeenAt": d.last_seen_at,
                 "version": d.version,
             })).collect::<Vec<_>>()
+        }))
+    }
+
+    /// The chosen device's machine stats (`DeviceStats`, routed by
+    /// `targetDeviceId`). The engine words a remote failure (offline, too
+    /// old, no answer); only this engine lacking the method is said here.
+    async fn device_stats(&self, args: DeviceArgs) -> anyhow::Result<Value> {
+        let (devices, local) =
+            tokio::try_join!(self.zeron.devices(), self.zeron.local_device_id())?;
+        let device = self.zeron.resolve_device_id(args.device.as_deref()).await?;
+        let mut params = json!({});
+        if device != local {
+            params["targetDeviceId"] = json!(device);
+        }
+        let stats = match self
+            .zeron
+            .call_rpc(zeron_rpc::methods::DEVICE_STATS, params)
+            .await
+        {
+            Ok(stats) => stats,
+            Err(zeron_rpc::RpcError::UnknownMethod(_)) => anyhow::bail!(
+                "This device's running Zeron is too old to report stats: update Zeron and restart it"
+            ),
+            Err(error) => anyhow::bail!("{error}"),
+        };
+        let name = devices.iter().find(|d| d.id == device).map(|d| d.name.clone());
+        Ok(json!({
+            "device": { "id": device, "name": name, "local": device == local },
+            "stats": stats,
         }))
     }
 
@@ -1068,7 +1140,7 @@ impl Tools {
         // The chat's facts don't depend on reaching its host.
         match self
             .zeron
-            .transcript_window(&chat.id, Some(&chat.device_id), TranscriptWindow::tail(1))
+            .window_of(&chat, TranscriptWindow::tail(1))
             .await
         {
             Ok(view) => {
@@ -1160,7 +1232,7 @@ impl Tools {
                 let id: HarnessId = parse_enum("harness", raw).map_err(anyhow::Error::msg)?;
                 anyhow::ensure!(
                     CLOUD_HARNESSES.contains(&id),
-                    "Cloud runs Codex and Claude Code only"
+                    "Cloud doesn't run {raw}: it runs the built-in agents only"
                 );
                 id
             }
@@ -1399,9 +1471,8 @@ impl Tools {
         let limit = args.limit.unwrap_or(40).clamp(1, 500);
         let view = self
             .zeron
-            .transcript_window(
-                &chat.id,
-                Some(&chat.device_id),
+            .window_of(
+                &chat,
                 TranscriptWindow {
                     limit,
                     offset: args.offset,
@@ -1624,7 +1695,7 @@ impl Tools {
             Some(id) => id,
             None => self
                 .zeron
-                .transcript_window(&chat.id, Some(&chat.device_id), TranscriptWindow::tail(1))
+                .window_of(&chat, TranscriptWindow::tail(1))
                 .await?
                 .info
                 .pending_input
@@ -1972,9 +2043,14 @@ mod tests {
         accounts: Option<Value>,
         remote_accounts: Option<Value>,
         beta_remote: bool,
+        /// `dev-remote` is asleep: every read addressed to it fails, the way
+        /// a dial to a sleeping Cloud machine does.
+        remote_dark: bool,
         extra_chats: Vec<Value>,
         catalog_error: Option<&'static str>,
         reads: Mutex<Vec<(String, Value)>>,
+        /// `DeviceStats` reply; absent = an engine without the method.
+        stats: Option<Value>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1997,6 +2073,15 @@ mod tests {
                 }
             }
             let remote = params["targetDeviceId"] == "dev-remote";
+            if remote && self.remote_dark && method != methods::LIST_HARNESSES {
+                self.reads
+                    .lock()
+                    .unwrap()
+                    .push((method.into(), params.clone()));
+                return Err(RpcError::Transport(
+                    "peer dev-remote: device is offline (no recent presence)".into(),
+                ));
+            }
             Ok(match method {
                 methods::LOCAL_DEVICE => RpcReply::Value(json!({ "deviceId": "dev-local" })),
                 methods::ENGINE_INFO => RpcReply::Value(json!({
@@ -2117,6 +2202,13 @@ mod tests {
                     }
                     RpcReply::Value(json!({ "commandId": "cmd-1", "id": "q-1" }))
                 }
+                methods::DEVICE_STATS if self.stats.is_some() => {
+                    self.reads
+                        .lock()
+                        .unwrap()
+                        .push((method.into(), params.clone()));
+                    RpcReply::Value(self.stats.clone().unwrap_or_default())
+                }
                 other => return Err(RpcError::UnknownMethod(other.into())),
             })
         }
@@ -2138,6 +2230,56 @@ mod tests {
             assert_eq!(def.input_schema["type"], "object", "{}", def.name);
             assert!(!def.description.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn device_stats_asks_the_chosen_device_and_names_it() {
+        let def = catalog().into_iter().find(|d| d.name == DEVICE_STATS).expect("listed");
+        assert_eq!(def.input_schema["properties"]["device"]["type"], "string");
+        assert!(def.input_schema.get("required").is_none(), "device is optional");
+
+        let stats = json!({
+            "os": { "name": "Darwin", "arch": "arm64" },
+            "memory": { "totalBytes": 34359738368u64, "availableBytes": null },
+            "zeron": { "engineVersion": "0.2.139" }
+        });
+        let world = Arc::new(World { stats: Some(stats.clone()), ..Default::default() });
+        let tools = tools(world.clone(), Origin::default());
+        assert!(tools.has(DEVICE_STATS));
+
+        // Local: no target, the engine answers for itself.
+        let local = tools.call(DEVICE_STATS, json!({})).await.unwrap();
+        assert_eq!(local["device"], json!({ "id": "dev-local", "name": "Laptop", "local": true }));
+        assert_eq!(local["stats"], stats, "the report passes through as is, nulls kept");
+        // By name: routed to that device.
+        let remote = tools.call(DEVICE_STATS, json!({ "device": "worker" })).await.unwrap();
+        assert_eq!(remote["device"], json!({ "id": "dev-remote", "name": "Worker", "local": false }));
+        let reads = world.reads.lock().unwrap().clone();
+        let targets: Vec<&Value> = reads
+            .iter()
+            .filter(|(m, _)| m == methods::DEVICE_STATS)
+            .map(|(_, p)| &p["targetDeviceId"])
+            .collect();
+        assert_eq!(targets, [&Value::Null, &json!("dev-remote")]);
+
+        // Not one of this account's devices: refused before anything is asked.
+        let error = tools.call(DEVICE_STATS, json!({ "device": "someone-elses" })).await.unwrap_err();
+        assert!(error.contains("no device matches"), "{error}");
+        assert_eq!(world.reads.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn device_stats_says_when_a_device_is_away_or_this_engine_is_old() {
+        let dark = Arc::new(World { stats: Some(json!({})), remote_dark: true, ..Default::default() });
+        let error = tools(dark, Origin::default())
+            .call(DEVICE_STATS, json!({ "device": "dev-remote" }))
+            .await
+            .unwrap_err();
+        assert!(error.contains("offline"), "{error}");
+
+        let old = Arc::new(World::default());
+        let error = tools(old, Origin::default()).call(DEVICE_STATS, json!({})).await.unwrap_err();
+        assert!(error.contains("too old to report stats"), "{error}");
     }
 
     #[test]
@@ -2814,12 +2956,12 @@ mod tests {
             .unwrap();
         assert_eq!(sent["cloud"], true);
         assert_eq!(sent["parentChatId"], "chat-alpha-1");
-        // Only Cloud's agents.
+        // Every built-in agent runs there; one added from the ACP registry doesn't.
         let refused = alpha
-            .call("create_chat", json!({"cloud": true, "harness": "cursor"}))
+            .call("create_chat", json!({"cloud": true, "harness": "acp.gemini"}))
             .await
             .unwrap_err();
-        assert!(refused.contains("Codex and Claude Code"), "{refused}");
+        assert!(refused.contains("built-in agents only"), "{refused}");
     }
 
     #[tokio::test]
@@ -3289,6 +3431,37 @@ mod tests {
                 _ => self.world.handle(method, params).await,
             }
         }
+    }
+
+    /// A sleeping host can't be read, and only a send wakes it: the send must go
+    /// out through this engine's doc regardless, and reading the chat falls back
+    /// to the local replica.
+    #[tokio::test]
+    async fn a_send_to_a_sleeping_host_still_goes_out() {
+        let world = Arc::new(World {
+            beta_remote: true,
+            remote_dark: true,
+            ..Default::default()
+        });
+        let tools = tools(world.clone(), Origin::default());
+        let result = tools
+            .call("send_message", json!({"chat":"Beta", "text":"go"}))
+            .await
+            .unwrap();
+        assert_eq!(result["sent"]["delivery"], "run");
+        {
+            let writes = world.writes.lock().unwrap();
+            let (method, params) = writes.last().unwrap();
+            assert_eq!(method, methods::QUEUE_COMMAND);
+            assert!(params.get("targetDeviceId").is_none(), "a local doc write, which wakes the host");
+        }
+        let read = tools
+            .call("read_chat", json!({"chat":"Beta"}))
+            .await
+            .unwrap();
+        assert!(read["total"].as_u64().unwrap() > 0);
+        let info = tools.call("get_chat", json!({"chat":"Beta"})).await.unwrap();
+        assert!(info["messageCount"].as_u64().unwrap() > 0);
     }
 
     #[tokio::test]

@@ -43,6 +43,22 @@ end)
 
 -- The choices as a select lists them, in the locale shown (a computed
 -- reading their messages: they follow it).
+-- The question asked when the app quits with work still running and
+-- "Keep Zeron running after you quit" off (src/quit_prompt.rs), in the
+-- language shown: by then the scripts are gone, so the host keeps it.
+-- (Many chats are worded with 999999, which the host replaces.)
+ui.effect(function()
+	local words = {
+		one = ui.t("engine.quit.working", { n = 1 }):get(),
+		other = ui.t("engine.quit.working", { n = 999999 }):get(),
+		detail = ui.t("engine.quit.detail"):get(),
+		keep = ui.t("engine.quit.keep"):get(),
+		stop = ui.t("engine.quit.stop"):get(),
+	}
+	-- (A fixture or a test host has no such action.)
+	pcall(ui.invoke, "app.quit_words", words)
+end)
+
 function M.options(): { { value: string, label: string } }
 	local out = {}
 	for _, l in M.LANGUAGES do

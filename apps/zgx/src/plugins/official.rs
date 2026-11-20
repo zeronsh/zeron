@@ -335,8 +335,11 @@ mod tests {
         let now: BTreeMap<String, String> = overlay()
             .into_iter()
             .map(|rel| {
+                // As the repository holds it: a Windows checkout writes CRLF
+                // (core.autocrlf), and the record is of LF.
                 let bytes = std::fs::read(ui().join(&rel)).unwrap_or_default();
-                (rel, live::hash(&bytes))
+                let text = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
+                (rel, live::hash(text.as_bytes()))
             })
             .collect();
         if std::env::var_os("ZERON_V2_BLESS").is_some() {

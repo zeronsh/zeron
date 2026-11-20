@@ -12,6 +12,7 @@
 local Icon = require("@self/icon")
 local Hint = require("@self/hint")
 local control = require("@self/control")
+local material = require("@self/material")
 local EditorMenu = require("@self/editor_menu")
 
 local M = {}
@@ -205,7 +206,7 @@ function M.frame(props: FrameProps): Node
 			if joined() then
 				return "$zeron.menu.solid"
 			end
-			return if hovered:get() and not focused:get() then "$zeron.field.hover" else "$zeron.field.bg"
+			return if material.see_through() then (if hovered:get() and not focused:get() then "$zeron.field.glass_hover" else "$zeron.field.glass") elseif hovered:get() and not focused:get() then "$zeron.field.hover" else "$zeron.field.bg"
 		end,
 		border_color = function()
 			if invalid() then
@@ -271,6 +272,8 @@ end
 -- type, the accent caret, and the frame told of its focus.
 function M.input(props: InputProps, size: control.Size, focused: State<boolean>): InputProps
 	local p = table.clone(props)
+	-- (Inside the frame `wrap` dims while disabled.)
+	p.dim = control.dim(props.disabled)
 	p.bg = "#00000000"
 	p.border = 0
 	p.rounded = 0

@@ -30,11 +30,14 @@ import {
 } from "./install-script";
 import { cloudAccountName, parseMachine, parseTemplate, parseTtlSeconds } from "./policy";
 import { sandboxProvider } from "./providers";
+import { MAX_WAKE_KICKS, fastWake, slowWakeMs, type WakeStages } from "./wake";
 import {
   SandboxError,
   classifyFailure,
   effectiveTtl,
   stopRetryable,
+  type SandboxFailure,
+  type SandboxMachine,
   type SandboxProvider,
   type SandboxState
 } from "./sandbox-provider";
@@ -44,6 +47,12 @@ type StepConfig = Parameters<WorkflowStep["do"]>[1] & object;
 /** Provider calls: idempotent reads/actions, retried with backoff. */
 const PROVIDER_STEP = {
   retries: { limit: 6, delay: "5 seconds", backoff: "exponential" },
+  timeout: "2 minutes"
+} as const satisfies StepConfig;
+
+/** The wake's one step: quick to retry, since a user is waiting on it. */
+const FAST_WAKE_STEP = {
+  retries: { limit: 3, delay: "2 seconds", backoff: "exponential" },
   timeout: "2 minutes"
 } as const satisfies StepConfig;
 
@@ -115,29 +124,42 @@ const pollSandbox = async (
 };
 
 /** Bring the sandbox up from whatever state it is in: wait out a stop in
- * progress, resume if stopped, then wait until it is ready. */
+ * progress, resume if stopped (on `machine`, when one is given), then wait
+ * until it is ready. A resume refused in a way a retry can't fix is returned,
+ * not thrown: a thrown error reaches the caller as text once it crosses a step. */
 const ensureRunning = async (
   step: WorkflowStep,
   provider: SandboxProvider,
   sandboxId: string,
   ttlSeconds: number | null,
-  label: string
-): Promise<void> => {
+  label: string,
+  machine?: SandboxMachine
+): Promise<SandboxFailure | undefined> => {
   let state = await readState(step, provider, sandboxId, `${label}-state`);
-  if (state === "error" || state === "deleted") gone(state);
+  if (state === "deleted") gone(state);
   if (state === "stopping") {
     state = await pollSandbox(step, provider, sandboxId, `${label}-stopped`, (s) => s === "stopped", 40);
   }
-  if (state === "stopped") {
-    await step.do(`${label}-resume`, PROVIDER_STEP, async () => {
-      await providerCall("wake the Cloud sandbox", () => provider.resume(sandboxId, { ttlSeconds }));
-      return true;
+  // The provider's error state keeps the disk (a resume that didn't fit lands
+  // there), and a resume is what leaves it; a refusal says why it can't.
+  if (state === "stopped" || state === "error") {
+    const refused = await step.do(`${label}-resume`, PROVIDER_STEP, async (): Promise<SandboxFailure | null> => {
+      try {
+        await provider.resume(sandboxId, { ttlSeconds, ...(machine ? { machine } : {}) });
+        return null;
+      } catch (e) {
+        if (e instanceof SandboxError && e.failure) return e.failure;
+        const failure = classifyFailure(e, "wake the Cloud sandbox");
+        throw failure.retryable ? new Error(failure.message) : new NonRetryableError(failure.message);
+      }
     });
+    if (refused) return refused;
   }
   if (state !== "ready") {
     const final = await pollSandbox(step, provider, sandboxId, `${label}-ready`, (s) => s === "ready", 60);
     if (final !== "ready") throw new NonRetryableError("The Cloud sandbox didn't start in time.");
   }
+  return undefined;
 };
 
 /**
@@ -183,7 +205,7 @@ const awaitSignal = async (
   type: "enrolled" | "online",
   suffix: string,
   check: () => Promise<boolean>,
-  timeout: "5 minutes" | "10 minutes"
+  timeout: "90 seconds" | "5 minutes" | "10 minutes" | number
 ): Promise<boolean> => {
   if (await step.do(`check-${type}${suffix}`, DO_STEP, check)) return true;
   try {
@@ -285,7 +307,8 @@ export class ProvisionWorkflow extends WorkflowEntrypoint<Env, ProvisionParams> 
         }
       }
       const id = sandboxId;
-      await ensureRunning(step, provider, id, ttlSeconds, "boot");
+      const refused = await ensureRunning(step, provider, id, ttlSeconds, "boot");
+      if (refused) throw new NonRetryableError(refused.kind === "data_expired" ? "The Cloud sandbox's data was deleted." : "The Cloud sandbox's disk doesn't fit its machine size.");
       await step.do(
         "install-engine",
         { retries: { limit: 3, delay: "15 seconds", backoff: "exponential" }, timeout: "11 minutes", sensitive: "output" },
@@ -314,9 +337,12 @@ export class ProvisionWorkflow extends WorkflowEntrypoint<Env, ProvisionParams> 
 }
 
 /**
- * WakeWorkflow — resume the sandbox, start the engine, and wait for its first
- * contact. If the engine stays silent, one idempotent `systemctl restart`
- * before giving up.
+ * WakeWorkflow — resume the sandbox and start the engine in one step
+ * (`fastWake`: no Workflow sleep between polls, and the start races the
+ * machine's own boot), then wait for its first contact. Nothing here gates the
+ * queued message: the engine drains it the moment it joins its room, so this
+ * Workflow's latency only delays the session reading `ready`. If the engine
+ * stays silent, one idempotent `systemctl restart` before giving up.
  */
 export class WakeWorkflow extends WorkflowEntrypoint<Env, LifecycleParams> {
   async run(event: WorkflowEvent<LifecycleParams>, step: WorkflowStep): Promise<void> {
@@ -324,22 +350,96 @@ export class WakeWorkflow extends WorkflowEntrypoint<Env, LifecycleParams> {
     const account = accountStub(this.env, p);
     try {
       const provider = requireProvider(this.env, p.provider);
-      await ensureRunning(step, provider, p.sandboxId, ttlFor(this.env, provider), "wake");
-      // Start the engine rather than trust the resume to: a machine resumed
-      // from its sleep snapshot comes back with the unit stopped, and waited
-      // out the full silence below (5 minutes) before the restart.
-      await step.do("start-engine", { retries: { limit: 2, delay: "5 seconds", backoff: "constant" }, timeout: "2 minutes" }, async () => {
-        try {
-          const result = await provider.exec(p.sandboxId, { command: START_ENGINE_COMMAND, timeoutSeconds: 60 });
-          return { exitCode: result.exitCode };
-        } catch (e) {
-          // Best effort: the wait (and its restart) below still covers it.
-          console.warn("cloud wake: starting the engine failed", String(e));
-          return { exitCode: null };
+      const ttlSeconds = ttlFor(this.env, provider);
+      const machine = p.machine;
+      // A size changes only on a resume, so a machine already up (a wake after
+      // a failure that left it running) stops first.
+      if (machine) await stopSandbox(step, provider, p.sandboxId, "change the machine's size");
+      const slowMs = slowWakeMs(this.env.CLOUD_WAKE_SLOW_SECONDS);
+      const wakeUp = (name: string) =>
+        step.do(name, FAST_WAKE_STEP, () =>
+          providerCall("wake the Cloud sandbox", () =>
+            fastWake(provider, p.sandboxId, {
+              ttlSeconds,
+              startCommand: START_ENGINE_COMMAND,
+              deadlineMs: slowMs,
+              ...(machine ? { machine } : {})
+            })
+          )
+        );
+      let wake = await wakeUp("wake-up");
+      if (wake.state === "error" || wake.state === "deleted") gone(wake.state);
+      // Far slower than any normal resume: the user hears so (the stage
+      // `slow`), and the stuck resume is stopped and asked again, which is what
+      // got the provider's stuck placements moving. The slow poll after still
+      // covers one that's merely slow.
+      const slow: Pick<WakeStages, "slow" | "slowReason" | "kickedAt" | "kicks"> = {};
+      for (let kick = 1; !wake.refused && wake.state !== "ready" && kick <= MAX_WAKE_KICKS; kick++) {
+        if (slow.slow === undefined) {
+          const reason = `resume still ${wake.state} after ${Math.round(slowMs / 1000)} s`;
+          slow.slow = await step.do("say-slow", DO_STEP, () => account.wfSlowWake(p.chatId, p.generation, reason));
+          slow.slowReason = reason;
         }
-      });
+        const stopped = await step.do(`kick-stop-${kick}`, PROVIDER_STEP, async () => {
+          try {
+            await provider.stop(p.sandboxId);
+            return true;
+          } catch (e) {
+            console.warn("cloud wake: stopping a stuck resume failed", failureMessage(e));
+            return false;
+          }
+        });
+        if (!stopped) break;
+        const state = await pollSandbox(step, provider, p.sandboxId, `kick-stopped-${kick}`, (s) => s === "stopped", 30);
+        if (state !== "stopped") break;
+        wake = await wakeUp(`wake-up-kick-${kick}`);
+        slow.kickedAt = wake.stages.started;
+        slow.kicks = kick;
+        if (wake.state === "error" || wake.state === "deleted") gone(wake.state);
+      }
+      // Refused for good, or: a stop in progress that refused the resume, or a
+      // slow restore, which the slow path sees through.
+      const refused =
+        wake.refused ??
+        (wake.state === "ready" ? undefined : await ensureRunning(step, provider, p.sandboxId, ttlSeconds, "wake", machine));
+      if (refused) {
+        await step.do("mark-refused", DO_STEP, () => account.wfWakeRefused(p.chatId, p.generation, refused));
+        return;
+      }
+      if (machine) {
+        await step.do("record-size", DO_STEP, () => account.wfResumedOn(p.chatId, p.generation, machine));
+      }
       const online = () => account.wfOnline(p.chatId, p.generation);
-      let up = await awaitSignal(step, "online", "", online, "5 minutes");
+      const stages: WakeStages = { ...wake.stages, ...slow };
+      // The start didn't get through, and the boot hasn't brought it up either.
+      if (wake.stages.engineExit !== 0 && !(await step.do("check-online-first", DO_STEP, online))) {
+        stages.engineRetried = await step.do(
+          "start-engine",
+          { retries: { limit: 2, delay: "5 seconds", backoff: "constant" }, timeout: "2 minutes" },
+          async () => {
+            try {
+              await provider.exec(p.sandboxId, { command: START_ENGINE_COMMAND, timeoutSeconds: 60 });
+            } catch (e) {
+              // Best effort: the wait (and its restart) below still covers it.
+              console.warn("cloud wake: starting the engine failed", String(e));
+            }
+            return Date.now();
+          }
+        );
+      }
+      // A minute and a half for its engine to be heard from, as before; past
+      // the slow mark (well past any normal start: the token comes within
+      // seconds of the engine running) the session says so meanwhile.
+      const onlineMs = 90_000;
+      let up = await awaitSignal(step, "online", "", online, Math.min(slowMs, onlineMs));
+      if (!up) {
+        const reason = `machine up, engine not heard from after ${Math.round(Math.min(slowMs, onlineMs) / 1000)} s`;
+        if (stages.slow === undefined) {
+          stages.slow = await step.do("say-slow-engine", DO_STEP, () => account.wfSlowWake(p.chatId, p.generation, reason));
+          stages.slowReason = reason;
+        }
+        up = await awaitSignal(step, "online", "-slow", online, Math.max(onlineMs - slowMs, 30_000));
+      }
       if (!up) {
         await step.do(
           "restart-engine",
@@ -354,10 +454,33 @@ export class WakeWorkflow extends WorkflowEntrypoint<Env, LifecycleParams> {
         up = await awaitSignal(step, "online", "-2", online, "5 minutes");
       }
       if (!up) {
-        throw new NonRetryableError("The Cloud engine didn't come back after waking (no contact within 10 minutes).");
+        throw new NonRetryableError("The Cloud engine didn't come back after waking (no contact within 7 minutes).");
       }
-      await step.do("mark-ready", DO_STEP, () => account.wfReady(p.chatId, p.generation));
+      await step.do("mark-ready", DO_STEP, () => account.wfReady(p.chatId, p.generation, stages));
     } catch (e) {
+      // A machine that failed after the resume was accepted (its placement
+      // fell through) says why on the sandbox itself.
+      const refused = await step.do("read-refusal", PROVIDER_STEP, async (): Promise<SandboxFailure | null> => {
+        try {
+          return (await requireProvider(this.env, p.provider).get(p.sandboxId)).failure ?? null;
+        } catch {
+          return null;
+        }
+      });
+      if (refused) {
+        await step.do("mark-refused", DO_STEP, () => account.wfWakeRefused(p.chatId, p.generation, refused));
+        return;
+      }
+      // A machine that came up with no engine bills until its TTL, for a chat
+      // that reads `error`. A send resumes it just the same from stopped.
+      await step.do("stop-after-failure", PROVIDER_STEP, async () => {
+        try {
+          await requireProvider(this.env, p.provider).stop(p.sandboxId);
+        } catch (stop) {
+          console.warn("cloud wake: stopping after a failed wake failed", String(stop));
+        }
+        return true;
+      });
       await step.do("mark-error", DO_STEP, () => account.wfFailed(p.chatId, p.generation, failureMessage(e)));
     }
   }
@@ -369,10 +492,11 @@ export class WakeWorkflow extends WorkflowEntrypoint<Env, LifecycleParams> {
  *
  * Quiesce first: the engine starts no new work from here on (a send arriving
  * now waits in its chat for the woken machine instead of starting a turn the
- * stop would kill — the engine marks a command handled before running it, so
- * a killed turn is never retried). A turn in flight or a message already
- * waiting declines the sleep: the session stays `ready`. An engine that
- * can't answer (gone, or too old for the handshake) doesn't block the sleep.
+ * stop would cut off, which boot recovery could only pick up from where it
+ * stopped). A turn in flight or a message already waiting declines the sleep:
+ * the session stays `ready`. The engine also clears rebuildable caches before
+ * it answers. An engine that can't answer (gone, or too old for the handshake)
+ * doesn't block the sleep.
  *
  * The engine goes first. A provider reports the sandbox stopped once its disk
  * snapshot is taken, and the machine may run on a moment longer: an engine
@@ -389,6 +513,24 @@ export class SleepWorkflow extends WorkflowEntrypoint<Env, LifecycleParams> {
     const account = accountStub(this.env, p);
     try {
       const provider = requireProvider(this.env, p.provider);
+      // Already down (stopped behind our back, or mid-stop): there's no engine to
+      // ask or stop, and the snapshot that counts is taken. Asking anyway only
+      // waits out the commands' timeouts before the stop, and a turn that machine
+      // was running waits as long to resume.
+      const before = await step.do("state-before", PROVIDER_STEP, async (): Promise<SandboxState | null> => {
+        try {
+          return (await provider.get(p.sandboxId)).state;
+        } catch {
+          return null;
+        }
+      });
+      if (before === "stopped" || before === "stopping") {
+        if ((await stopSandbox(step, provider, p.sandboxId, "put Cloud to sleep")) === "error") {
+          throw new NonRetryableError("The Cloud sandbox is in an error state.");
+        }
+        await step.do("mark-sleeping", DO_STEP, () => account.wfStopped(p.chatId, p.generation));
+        return;
+      }
       const quiesce = await step.do(
         "quiesce-engine",
         { retries: { limit: 1, delay: "5 seconds", backoff: "constant" }, timeout: "2 minutes" },

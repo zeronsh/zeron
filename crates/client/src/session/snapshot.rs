@@ -107,6 +107,10 @@ pub struct SessionSnapshot {
     /// Content is present (local snapshot loaded or first sync landed). False
     /// = show a loader, not an empty chat.
     pub hydrated: bool,
+    /// The chat's Cloud machine rebuilt its chat store from the server copy
+    /// at this Unix ms: show a quiet, dismissable note
+    /// ([`crate::SessionHandle::dismiss_restored_note`]).
+    pub restored_at_ms: Option<i64>,
     pub delta: SnapshotDelta,
     pub(crate) index: Arc<HashMap<String, usize>>,
 }
@@ -220,6 +224,9 @@ pub struct PendingSend {
     pub kind: PendingKind,
     pub sent_at_ms: i64,
     pub state: SendState,
+    /// Still in this device's outbox, failed or uploading: it can be removed
+    /// (`SessionHandle::remove_send`), and then never goes out.
+    pub removable: bool,
 }
 
 /// The unresolved question the composer should answer instead of typing.
@@ -245,6 +252,9 @@ pub struct HostCapabilities {
     /// The host moves the chat to another provider between turns; older
     /// hosts would resume one provider's session under another.
     pub provider_switch: bool,
+    /// The host fetches attachment bytes from the edge's store, so a send to
+    /// it needn't reach it directly.
+    pub attachment_store: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,6 +288,61 @@ pub struct RoomState {
     pub degraded: bool,
 }
 
+/// Why a transcript with nothing in it has nothing in it. Anything stored on this
+/// device always shows, so this is only ever about a chat it has never loaded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TranscriptLoad {
+    /// Show the transcript: it has content, or the chat really is empty.
+    #[default]
+    Ready,
+    /// The room or the host is still answering.
+    Syncing,
+    /// The room can't be reached, though the network looks fine.
+    Reconnecting,
+    /// No network: "Offline — this chat loads when you're back online".
+    Offline,
+    /// Its room stores nothing and its host is away: "This chat lives on another
+    /// device — it loads when that device is back online". Nothing is lost.
+    HostAway,
+}
+
+/// What [`transcript_load`] decides from.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct LoadInputs {
+    pub has_content: bool,
+    pub has_messages: bool,
+    pub network: bool,
+    pub generation: u32,
+    /// The room has answered this device: stored rows and any checkpoint are in.
+    pub room_answered: bool,
+    pub host_online: bool,
+    /// Long enough that "still syncing" would be an endless spinner.
+    pub waited_too_long: bool,
+}
+
+pub(crate) fn transcript_load(i: LoadInputs) -> TranscriptLoad {
+    // A retired legacy room has nothing to dial: what's here is all there is.
+    if i.has_content || !i.has_messages || i.generation < 2 {
+        return TranscriptLoad::Ready;
+    }
+    if !i.network {
+        return TranscriptLoad::Offline;
+    }
+    if !i.room_answered {
+        return if i.waited_too_long { TranscriptLoad::Reconnecting } else { TranscriptLoad::Syncing };
+    }
+    // A stored chat's room has told it everything.
+    if i.generation < zeron_proto::relay_gen::RELAY_ROOM_GEN {
+        return TranscriptLoad::Ready;
+    }
+    // A relayed chat's room stores nothing, so only its host can fill this copy.
+    if i.host_online && !i.waited_too_long {
+        TranscriptLoad::Syncing
+    } else {
+        TranscriptLoad::HostAway
+    }
+}
+
 /// Everything the composer and its status strip render. Transcript rows are
 /// NOT here — they live in [`SessionSnapshot`].
 #[derive(Debug, Clone, PartialEq)]
@@ -302,4 +367,74 @@ pub struct ComposerState {
     /// The last message this device submitted (scroll-to-own-send target).
     pub last_submitted_message_id: Option<String>,
     pub context_usage: Option<ContextUsage>,
+    /// What to show in place of an empty transcript, if anything.
+    pub transcript_load: TranscriptLoad,
+}
+
+#[cfg(test)]
+mod load_tests {
+    use super::*;
+
+    fn relayed() -> LoadInputs {
+        LoadInputs {
+            has_messages: true,
+            network: true,
+            generation: 3,
+            room_answered: true,
+            host_online: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn what_is_stored_here_always_shows() {
+        for has_content in [LoadInputs { has_content: true, network: false, ..relayed() },
+            LoadInputs { has_content: true, host_online: false, waited_too_long: true, ..relayed() }] {
+            assert_eq!(transcript_load(has_content), TranscriptLoad::Ready);
+        }
+    }
+
+    #[test]
+    fn a_chat_with_no_messages_is_really_empty() {
+        let empty = LoadInputs { has_messages: false, host_online: false, ..relayed() };
+        assert_eq!(transcript_load(empty), TranscriptLoad::Ready);
+    }
+
+    #[test]
+    fn no_network_says_offline_before_anything_else() {
+        let i = LoadInputs { network: false, room_answered: false, ..relayed() };
+        assert_eq!(transcript_load(i), TranscriptLoad::Offline);
+        let stored = LoadInputs { network: false, generation: 2, room_answered: false, ..relayed() };
+        assert_eq!(transcript_load(stored), TranscriptLoad::Offline);
+    }
+
+    #[test]
+    fn a_relayed_chat_waits_on_its_host_and_never_forever() {
+        assert_eq!(transcript_load(relayed()), TranscriptLoad::Syncing);
+        let away = LoadInputs { host_online: false, ..relayed() };
+        assert_eq!(transcript_load(away), TranscriptLoad::HostAway);
+        // Online by presence but not answering is the same to someone waiting.
+        let silent = LoadInputs { waited_too_long: true, ..relayed() };
+        assert_eq!(transcript_load(silent), TranscriptLoad::HostAway);
+    }
+
+    #[test]
+    fn a_stored_chat_believes_its_room() {
+        let stored = LoadInputs { generation: 2, host_online: false, ..relayed() };
+        assert_eq!(transcript_load(stored), TranscriptLoad::Ready);
+    }
+
+    #[test]
+    fn a_room_that_doesnt_answer_stops_spinning() {
+        let i = LoadInputs { room_answered: false, ..relayed() };
+        assert_eq!(transcript_load(i), TranscriptLoad::Syncing);
+        let i = LoadInputs { waited_too_long: true, ..i };
+        assert_eq!(transcript_load(i), TranscriptLoad::Reconnecting);
+    }
+
+    #[test]
+    fn a_retired_room_has_nothing_to_wait_for() {
+        let i = LoadInputs { generation: 1, network: false, room_answered: false, ..relayed() };
+        assert_eq!(transcript_load(i), TranscriptLoad::Ready);
+    }
 }

@@ -20,6 +20,21 @@ local said = ui.state("calls", "")
 local function note(what: string)
 	said:set(if said:peek() == "" then what else `{said:peek()},{what}`)
 end
+-- (The composer's accounts: `agents.on_device` set by a test, what's asked of
+-- a device noted.)
+do
+	local stub_agents = require("@account/agents") :: any
+	stub_agents.watch_device = function(key: string)
+		note(`watch_device:{key}`)
+	end
+	stub_agents.refresh_device = function(key: string)
+		note(`refresh_device:{key}`)
+	end
+	stub_agents.switch_on = function(key: string, id: string, account: string): any
+		note(`switch_on:{key}:{id}:{account}`)
+		return { after = function(_: any, done: (any) -> ()) done(nil) end }
+	end
+end
 
 -- A promise settled at once, as a host's does later.
 local function settled(ok: boolean, value: any): any
@@ -44,7 +59,7 @@ local function publish()
 	sessions.now:set({
 		state = "ready",
 		here = "d",
-		devices = { { id = "d", name = "Mac", platform = "macos", here = true } },
+		devices = { { id = "d", name = "Mac", platform = "macos", here = true }, { id = "box", name = "Box", platform = "linux", here = false } },
 		projects = {
 			{ id = "p1", name = "atlas", device = "d", path = "/proj", git = true },
 			{ id = "p2", name = "zephyr", device = "d", path = "/zephyr", git = true },
@@ -206,7 +221,7 @@ stub_lanes.watch = function(slot: string, id: string?, frozen: boolean?, _chat: 
 		lanes.view(slot).messages:set({ { id = `{id}-m`, role = "assistant", text = `This is {id}` } })
 		-- (A side chat as the host publishes it: side-a runs Codex's GPT-6.1.)
 		if id == "side-a" then
-			lanes.view(slot).session:set({ id = id, state = "ready", harness = "codex", model = "codex/gpt-6.1", effort = "medium", access = "edits", project = "p1", device = "d", branch = "feature", cwd = "/proj/.zeron/worktrees/feature", running = false, context_tokens = 52000, context_window = 200000 })
+			lanes.view(slot).session:set({ id = id, state = "ready", harness = "codex", model = "codex/gpt-6.1", effort = "medium", access = "edits", project = "p1", device = "d", branch = "feature", cwd = "/proj/.zeron/worktrees/feature", running = false, steers = true, context_tokens = 52000, context_window = 200000 })
 		end
 	end
 end
@@ -229,6 +244,12 @@ end }
 ui.command { id = "side_queue_one", title = "A message waits in its queue", run = function()
 	side_says({ queue = { { id = "q1", text = "Queued words" } } })
 end }
+-- The engine's copy of its steered message landing: the queued row's id is
+-- its prompt's, and it leaves the queue.
+ui.command { id = "side_steer_lands", title = "Its steered message joins its transcript", run = function()
+	lanes.view("tab1").messages:push({ id = "q1", role = "user", text = "Queued words" })
+	side_says({ queue = {} })
+end }
 ui.command { id = "side_approval", title = "It asks for approval", run = function()
 	side_says({ ask = { request = "r1", kind = "approval", approval = { title = "Run this command?", command = "rm -rf build", cwd = "/proj" } } })
 end }
@@ -244,6 +265,9 @@ ui.command { id = "side_attach_passage", title = "A passage attached to it", run
 end }
 ui.command { id = "side_edit_lost", title = "Its edit let go", run = function()
 	side_says({ queue = { { id = "q1", text = "Queued words" } } })
+end }
+ui.command { id = "side_on_box", title = "It runs on another computer", run = function()
+	side_says({ device = "box" })
 end }
 ui.command { id = "side_offline", title = "Its device goes away", run = function()
 	side_says({ state = "offline" })
@@ -284,6 +308,7 @@ end
 local files_stub = require("@app/screens/files/api") :: any
 files_stub.search = function(target: any, query: string): any
 	note(`search:{target.chat or target.space or "?"}:{query}`)
+	note(`search_on:{target.device or "here"}`)
 	local found = {}
 	for _, path in { "src/lib.rs", "README.md" } do
 		if query == "" or string.find(string.lower(path), string.lower(query), 1, true) then

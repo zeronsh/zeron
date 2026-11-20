@@ -316,6 +316,10 @@ async fn follow(
 ) {
     let mut backoff = Duration::from_millis(400);
     loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = zeron_sync::wake::until_awake() => {}
+        }
         let Some(inner) = weak.upgrade() else { return };
         let hub = inner.remote_terminals.clone();
         let wake = inner.terminals_wake.clone();

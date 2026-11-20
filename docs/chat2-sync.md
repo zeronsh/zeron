@@ -77,6 +77,9 @@ check. Host uploads are debounced/batched per commit tick, fire-and-forget (a lo
 upload degrades to "full output unavailable", never blocks the doc). UI fetches on
 expand; offline shows the summary + a greyed affordance.
 
+Attachment bytes on their way to a Cloud machine use this bucket too, under a route of their
+own (`/blob/{chatId}/attachments/{uploadId}`; see `docs/design/cloud-attachments.md`).
+
 **A3. UI.** Tool-part expansion fetches `outputRef` lazily; render summary inline.
 
 Estimate: 2–3 days. Ships in the next release; immediately cuts new-session growth ~7×.
@@ -91,9 +94,12 @@ anywhere in the class.** With this, `edge/src/session-doc/` (the TS schema mirro
 the wasm bundling alias eventually die with s2.
 
 **Storage** (DO SQLite):
-- `rows(seq INTEGER PRIMARY KEY, device TEXT, batch_id TEXT UNIQUE, bytes BLOB)` —
+- `rows(seq INTEGER PRIMARY KEY, device TEXT, batch_id TEXT, bytes BLOB)` —
   opaque Loro update blobs. Per-row cap 1 MB (post-strip updates are KB-scale;
-  oversized rows are rejected at the header, matching today's discipline).
+  oversized rows are rejected at the header, matching today's discipline). A push
+  writes only this row (one billed row; two in rooms created while `batch_id` was
+  indexed). The head is derived from the rows and the floor; the stored head copy
+  and per-device push counts flush with the alarm, at most every five minutes.
 - checkpoint blob via `blobs.ts` chunking + `meta`: `owner`, `seqFloor`,
   `checkpointFrontier BLOB` (opaque, client-written), `checkpointSize`,
   `checkpointSeq`, `tailDirty`.

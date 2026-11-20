@@ -337,6 +337,17 @@ fn text(value: Option<&Value>) -> String {
     }
 }
 
+/// Whether `path` is a whole path on whichever device it names a file of:
+/// a Mac's or Linux's (`/Users/…`), or Windows' (`C:\Users\…`, `C:/…`, or
+/// a share's `\\server\…`). Not `Path::is_absolute`, which asks this
+/// device's own rules; the chat's device checks the path itself.
+fn host_absolute(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    path.starts_with('/')
+        || path.starts_with("\\\\")
+        || (bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'\\' | b'/'))
+}
+
 fn opt_text(value: Option<&Value>) -> Option<String> {
     let t = text(value);
     (!t.is_empty()).then_some(t)
@@ -752,7 +763,7 @@ impl Files {
         let path = text(arg.field("path"));
         let checkout = text(arg.field("checkout"));
         // (A file outside the project goes by its own path, no checkout.)
-        if checkout.is_empty() && !path.starts_with('/') {
+        if checkout.is_empty() && !host_absolute(&path) {
             return Err("The project's checkout isn't known.".into());
         }
         params.insert("path".into(), Json::String(path));
@@ -872,7 +883,7 @@ impl Files {
             params.remove("chatId");
         }
         let path = text(arg.field("path"));
-        if !path.starts_with('/') {
+        if !host_absolute(&path) {
             return Err("That picture isn't a path on the chat's device.".into());
         }
         params.insert("path".into(), Json::String(path));
@@ -1280,6 +1291,24 @@ fn make(root: &Path, relative: &str, dir: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::make;
+
+    /// A picture on a Windows device goes by its drive's path as a Mac's
+    /// goes by `/`, whichever device asks.
+    #[test]
+    fn host_absolute_takes_every_devices_whole_paths() {
+        use super::host_absolute;
+        for path in [
+            "/Users/me/uploads/a.png",
+            r"C:\Users\HP MEDIA\AppData\Local\Zeron\uploads\a.png",
+            "d:/work/a.png",
+            r"\\server\share\a.png",
+        ] {
+            assert!(host_absolute(path), "{path}");
+        }
+        for path in ["", "a.png", r"uploads\a.png", "C:", "C:a.png", "1:/a.png"] {
+            assert!(!host_absolute(path), "{path}");
+        }
+    }
 
     /// A picture's chunk as the engine sends it (`ReadAttachmentChunk`).
     fn chunk(mime: &str, data: &[u8], next: u64, done: bool) -> serde_json::Value {

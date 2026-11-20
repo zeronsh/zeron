@@ -15,6 +15,10 @@ local _stub = require("@app/files_stub")
 local sessions = require("@account/sessions")
 local store = require("@app/screens/chat/store")
 local route = require("@app/screens/shell/route")
+-- (The sidebar these tests were written on, as shell_fixture's: one list,
+-- where a chat's menu has Move to; Activity off.)
+require("@app/screens/shell/activity").on:set(false)
+require("@app/screens/shell/sidebar").options.organize:set({})
 local lanes = require("@app/screens/chat/lanes")
 
 local said = ui.state("calls", "")

@@ -97,6 +97,16 @@ pub fn plain(rel: &str) -> bool {
 /// that `keep` keeps. Dot folders are skipped.
 pub fn files(dir: &Path, keep: impl Fn(&str) -> bool) -> BTreeMap<String, PathBuf> {
     let mut out = BTreeMap::new();
+    walk(dir, keep, |rel, path, _| {
+        out.insert(rel, path);
+    });
+    out
+}
+
+/// Each regular file under `dir` that `keep` keeps, as [`files`] finds them,
+/// handed to `each` with its folder entry (which has its size and time
+/// written: on Windows without opening the file, which `fs::metadata` does).
+fn walk(dir: &Path, keep: impl Fn(&str) -> bool, mut each: impl FnMut(String, PathBuf, &std::fs::DirEntry)) {
     let mut stack = vec![dir.to_path_buf()];
     while let Some(at) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&at) else { continue };
@@ -110,11 +120,10 @@ pub fn files(dir: &Path, keep: impl Fn(&str) -> bool) -> BTreeMap<String, PathBu
                     stack.push(path);
                 }
             } else if kind.is_file() && plain(&rel) && keep(&rel) {
-                out.insert(rel, path);
+                each(rel, path, &entry);
             }
         }
     }
-    out
 }
 
 /// Writes `bytes` to `path` unless it holds them already (through a file
@@ -137,13 +146,33 @@ pub fn put(path: &Path, bytes: &[u8]) -> std::io::Result<bool> {
 /// touching only what differs and leaving `keep`'s paths alone: how many
 /// files changed.
 pub fn mirror(to: &Path, want: &BTreeMap<String, PathBuf>, keep: impl Fn(&str) -> bool) -> std::io::Result<usize> {
-    let mut changed = 0;
-    for (rel, from) in want {
+    mirror_reading(to, want, keep, |_, _| {})
+}
+
+/// [`mirror`], handing each wanted file's bytes to `read` as they're read.
+///
+/// The files are read and written on several threads: on Windows, the
+/// antivirus scans each file as it's first read and as it's written, one at
+/// a time on the thread doing it, so a thousand files laid down one by one
+/// (a first launch, Zeron's own copied twice over) took six seconds before
+/// the window could open, and a few at once take a fraction of that.
+fn mirror_reading(
+    to: &Path,
+    want: &BTreeMap<String, PathBuf>,
+    keep: impl Fn(&str) -> bool,
+    read: impl Fn(&str, &[u8]) + Sync,
+) -> std::io::Result<usize> {
+    let changed = std::sync::atomic::AtomicUsize::new(0);
+    let jobs: Vec<(&String, &PathBuf)> = want.iter().collect();
+    in_parallel(&jobs, |&(rel, from)| {
         let bytes = std::fs::read(from)?;
+        read(rel, &bytes);
         if put(&to.join(rel), &bytes)? {
-            changed += 1;
+            changed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-    }
+        Ok(())
+    })?;
+    let mut changed = changed.into_inner();
     for (rel, path) in files(to, |_| true) {
         if !want.contains_key(&rel) && !keep(&rel) {
             std::fs::remove_file(path)?;
@@ -153,6 +182,39 @@ pub fn mirror(to: &Path, want: &BTreeMap<String, PathBuf>, keep: impl Fn(&str) -
     Ok(changed)
 }
 
+/// The most threads [`in_parallel`] uses: past this, laying files down
+/// went no faster on Windows (Defender's own scanning was the limit).
+const MAX_FILE_THREADS: usize = 8;
+
+/// `work` for each of `jobs`, on up to [`MAX_FILE_THREADS`] threads, each
+/// taking the next job as it finishes one: the first error, once every
+/// thread has stopped (no new job is started after an error).
+fn in_parallel<T: Sync>(jobs: &[T], work: impl Fn(&T) -> std::io::Result<()> + Sync) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(MAX_FILE_THREADS).min(jobs.len());
+    if threads <= 1 {
+        return jobs.iter().try_for_each(work);
+    }
+    let (next, failed, error) = (AtomicUsize::new(0), AtomicBool::new(false), std::sync::Mutex::new(None));
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                while !failed.load(Ordering::Relaxed) {
+                    let Some(job) = jobs.get(next.fetch_add(1, Ordering::Relaxed)) else { break };
+                    if let Err(e) = work(job) {
+                        failed.store(true, Ordering::Relaxed);
+                        error.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert(e);
+                    }
+                }
+            });
+        }
+    });
+    match error.into_inner().unwrap_or_else(|p| p.into_inner()) {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
 /// `.zeron`, as `ui/` has it now: the app's files, their hashes, the catalog
 /// of screens (what each draws, the hooks it declares) and Zeron's manifest;
 /// and the official templates beside it, as this build ships them
@@ -160,11 +222,12 @@ pub fn mirror(to: &Path, want: &BTreeMap<String, PathBuf>, keep: impl Fn(&str) -
 pub fn sync_zeron(ui: &Path, templates: &Path) -> std::io::Result<usize> {
     let dir = templates.join(ZERON);
     let want = files(ui, |rel| !not_the_app(rel));
-    let changed = mirror(&dir, &want, |rel| rel == "zeron-template.json")?;
-    let hashes: BTreeMap<String, String> = want
-        .iter()
-        .filter_map(|(rel, path)| std::fs::read(path).ok().map(|b| (rel.clone(), hash(&b))))
-        .collect();
+    // Each file's hash from the bytes the copy read (`ui/` read once).
+    let hashes = std::sync::Mutex::new(BTreeMap::new());
+    let changed = mirror_reading(&dir, &want, |rel| rel == "zeron-template.json", |rel, bytes| {
+        hashes.lock().unwrap_or_else(|p| p.into_inner()).insert(rel.to_string(), hash(bytes));
+    })?;
+    let hashes: BTreeMap<String, String> = hashes.into_inner().unwrap_or_else(|p| p.into_inner());
     let json = |v: serde_json::Value| serde_json::to_vec_pretty(&v).unwrap_or_default();
     put(&dir.join(".hashes.json"), &json(serde_json::json!(hashes)))?;
     put(&dir.join(".catalog.json"), &json(super::templates::catalog(ui)))?;
@@ -219,6 +282,14 @@ pub struct Overlay {
 /// `failed` files (Zeron's show in their place) and the paths never templated.
 /// Zeron's own alone for `BUILTIN`, or `whole_failed`. How many files changed.
 pub fn compose(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_failed: bool) -> std::io::Result<(usize, Overlay)> {
+    let (want, overlay) = plan(templates, id, failed, whole_failed);
+    let changed = mirror(&templates.join(LIVE), &want, |_| false)?;
+    Ok((changed, overlay))
+}
+
+/// What `compose` lays down, each file's source by its path in `.live`, and
+/// the overlay that is: folders listed, nothing read.
+pub fn plan(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_failed: bool) -> (BTreeMap<String, PathBuf>, Overlay) {
     let mut want = files(&templates.join(ZERON), |rel| !template_meta(rel));
     let mut from_template = BTreeSet::new();
     if id != BUILTIN && !whole_failed {
@@ -240,8 +311,64 @@ pub fn compose(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_fail
             want.insert(rel, path);
         }
     }
-    let changed = mirror(&templates.join(LIVE), &want, |_| false)?;
-    Ok((changed, Overlay { template: id.to_string(), from_template }))
+    (want, Overlay { template: id.to_string(), from_template })
+}
+
+/// Beside the templates: what a launch last laid `.live` down from, and
+/// `.live` as that left it (`LaunchStamp`).
+pub const LAUNCH_STAMP: &str = ".launch-stamp.json";
+
+/// What a launch lays `.live` down from, as it stands (each file's path,
+/// size and time written; nothing read): this Zeron, `ui/`, the active
+/// template, and `.live` itself. A launch that finds the one the last left
+/// needs neither `sync_zeron` nor `compose`, which read every file of
+/// Zeron's (twice) to write none: a quarter of a second of a warm launch
+/// spent before the window, more from a cold disk. Anything changed since
+/// (an update, a template edited or switched, `.live` written by anyone)
+/// stamps differently, and the launch lays everything down as before.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaunchStamp {
+    pub zeron: String,
+    pub ui: String,
+    pub id: String,
+    pub template: String,
+    pub live: String,
+}
+
+impl LaunchStamp {
+    /// `ui/` and template `id` under `templates` as they stand now.
+    pub fn now(ui: &Path, templates: &Path, id: &str) -> Self {
+        Self {
+            zeron: ZERON_VERSION.to_string(),
+            ui: ui_stamp(ui),
+            id: id.to_string(),
+            template: if id == BUILTIN { String::new() } else { template_stamp(&templates.join(id)) },
+            live: listed_stamp(&templates.join(LIVE), |_| true),
+        }
+    }
+
+    /// The one the last launch left, if any.
+    pub fn read(templates: &Path) -> Option<Self> {
+        let v = read_json(&templates.join(LAUNCH_STAMP));
+        let field = |k: &str| v[k].as_str().map(str::to_string);
+        Some(Self { zeron: field("zeron")?, ui: field("ui")?, id: field("id")?, template: field("template")?, live: field("live")? })
+    }
+
+    pub fn write(&self, templates: &Path) -> std::io::Result<bool> {
+        let v = serde_json::json!({
+            "zeron": self.zeron, "ui": self.ui, "id": self.id, "template": self.template, "live": self.live,
+        });
+        put(&templates.join(LAUNCH_STAMP), &serde_json::to_vec_pretty(&v).unwrap_or_default())
+    }
+
+    /// Whether `.live` can run as it is: laid from just this, and whole
+    /// (Zeron's copy and its hashes there, the official templates too).
+    pub fn still_laid(&self, ui: &Path, templates: &Path) -> bool {
+        Self::read(templates).as_ref() == Some(self)
+            && templates.join(LIVE).join("app.luau").is_file()
+            && templates.join(ZERON).join(".hashes.json").is_file()
+            && !super::official::missing(ui, templates)
+    }
 }
 
 /// The files of `.live` an error names, first mention first: each
@@ -249,27 +376,41 @@ pub fn compose(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_fail
 /// app's modules) or through `.live` (as given, or as the system resolves
 /// it: macOS's `/var/…` is `/private/var/…` to scripts). The VM's own name
 /// before "runtime error" is who ran it, not where it failed, and is skipped.
+///
+/// Windows names them with `\` (`screens\card.luau:3`, `C:\…\.live\…`):
+/// read as `/`, the way `files` names a template's files, so a template
+/// file that breaks there falls back like anywhere. (A token stops at a `:`,
+/// so `.live`'s spellings are matched without their drive, or `\\?\`.)
 pub fn named(error: &str, templates: &Path) -> Vec<String> {
     let live = templates.join(LIVE);
-    let mut spellings = vec![format!("{}/", live.to_string_lossy())];
+    let spelt = |path: &Path| {
+        let text = path.to_string_lossy().replace('\\', "/");
+        let text = text.strip_prefix("//?/").unwrap_or(&text);
+        let text = match text.as_bytes() {
+            [drive, b':', ..] if drive.is_ascii_alphabetic() => &text[2..],
+            _ => text,
+        };
+        format!("{text}/")
+    };
+    let mut spellings = vec![spelt(&live)];
     if let Ok(real) = std::fs::canonicalize(&live) {
-        spellings.push(format!("{}/", real.to_string_lossy()));
+        spellings.push(spelt(&real));
     }
     let body = match error.find(": runtime error: ") {
         Some(at) => &error[at + ": runtime error: ".len()..],
         None => error,
     };
-    let is_path = |c: char| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '@');
-    let mut out = Vec::new();
+    let is_path = |c: char| c.is_ascii_alphanumeric() || matches!(c, '/' | '\\' | '.' | '_' | '-' | '@');
+    let mut out: Vec<String> = Vec::new();
     let mut from = 0;
     while let Some(at) = body[from..].find(".luau:") {
         let end = from + at + ".luau".len();
         let start = body[..end].rfind(|c: char| !is_path(c)).map(|i| i + 1).unwrap_or(0);
-        let token = &body[start..end];
+        let token = body[start..end].replace('\\', "/");
         let rel = spellings
             .iter()
             .find_map(|s| token.find(s.as_str()).map(|i| &token[i + s.len()..]))
-            .unwrap_or(token);
+            .unwrap_or(&token);
         if plain(rel) && live.join(rel).is_file() && !out.iter().any(|r| r == rel) {
             out.push(rel.to_string());
         }
@@ -289,23 +430,41 @@ pub fn blame(error: &str, templates: &Path, overlay: &Overlay) -> Option<String>
 /// last written. A save changes it, so a failure recorded against it is
 /// tried again once the file is edited.
 pub fn file_stamp(path: &Path) -> String {
-    match std::fs::metadata(path) {
-        Ok(meta) => {
-            let at = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).unwrap_or_default();
-            format!("{}:{}", meta.len(), at.as_nanos())
-        }
-        Err(_) => String::new(),
-    }
+    std::fs::metadata(path).map(|meta| stamp_of(&meta)).unwrap_or_default()
+}
+
+fn stamp_of(meta: &std::fs::Metadata) -> String {
+    let at = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).unwrap_or_default();
+    format!("{}:{}", meta.len(), at.as_nanos())
 }
 
 /// Everything in `dir` that `keep` keeps, as it stands (each file's path,
 /// size and time written; nothing read): a template or `ui/` edited reads
 /// as new. A stat each, where reading the bytes was most of a look's time.
 pub fn stamp(dir: &Path, keep: impl Fn(&str) -> bool) -> String {
+    stamped(dir, keep, |_, path| file_stamp(path))
+}
+
+/// [`stamp`], each file's size and time as its folder lists them: for the
+/// folders only Zeron's installer and this app write (`ui/`, `.live`), whose
+/// files are replaced whole. On Windows, asking each file opened and closed
+/// it (40 µs a file): an eighth of a second of every launch, for `ui/` and
+/// `.live`'s thousand files each. (NTFS can list a file edited through
+/// another of its links with its old size and time: so not for templates,
+/// which anyone edits.)
+pub fn listed_stamp(dir: &Path, keep: impl Fn(&str) -> bool) -> String {
+    stamped(dir, keep, |entry, path| entry.metadata().map(|meta| stamp_of(&meta)).unwrap_or_else(|_| file_stamp(path)))
+}
+
+fn stamped(dir: &Path, keep: impl Fn(&str) -> bool, stamp: impl Fn(&std::fs::DirEntry, &Path) -> String) -> String {
+    let mut stamps = BTreeMap::new();
+    walk(dir, keep, |rel, path, entry| {
+        stamps.insert(rel, stamp(entry, &path));
+    });
     let mut h = DefaultHasher::new();
-    for (rel, path) in files(dir, keep) {
+    for (rel, stamp) in stamps {
         rel.hash(&mut h);
-        file_stamp(&path).hash(&mut h);
+        stamp.hash(&mut h);
     }
     format!("{:016x}", h.finish())
 }
@@ -319,7 +478,7 @@ pub fn template_stamp(dir: &Path) -> String {
 /// `ui/`'s app files (and the official templates') as they stand:
 /// unchanged, `.zeron` needn't be copied again.
 pub fn ui_stamp(ui: &Path) -> String {
-    stamp(ui, synced)
+    listed_stamp(ui, synced)
 }
 
 /// What of `ui/` a sync copies: the app's files, and the official templates'.
@@ -397,9 +556,11 @@ pub fn watched(templates: &Path, ui: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     (files_, dirs)
 }
 
-/// Whether `ui` is what a macOS app bundle shipped.
+/// Whether `ui` is what a release shipped: a macOS app bundle's, or this
+/// installed version's own folder (Windows' `beta\<version>\ui`, which an
+/// update never changes: it installs the next version beside it).
 fn in_app_bundle(ui: &Path) -> bool {
-    ui.ends_with("Contents/Resources/ui")
+    ui.ends_with("Contents/Resources/ui") || crate::bundled_ui().as_deref() == Some(ui)
 }
 
 /// `root` and every folder under it that `keep` keeps (by its path from
@@ -601,6 +762,110 @@ mod tests {
         std::fs::metadata(path).unwrap().modified().unwrap()
     }
 
+    /// The files an error names, however the platform spells them: `/`, or
+    /// Windows' `\` (as zgx names the app's modules there, and in full
+    /// paths through `.live`); what isn't in `.live`, and the VM that ran
+    /// it, aren't.
+    #[test]
+    fn an_error_names_its_files_with_either_separator() {
+        let templates = dir("named");
+        let live = templates.join(LIVE);
+        write(&live, "screens/card.luau", "return 1");
+        write(&live, "app.luau", "return 1");
+        let names = |error: &str| named(error, &templates);
+        assert_eq!(names("app.luau: runtime error: screens/card.luau:3: broke"), vec!["screens/card.luau"]);
+        assert_eq!(
+            names("app.luau: runtime error: screens\\card.luau:3: broke later\nstack traceback:\n\t[C]: in function 'error'\n\tscreens\\card.luau:3: in function <screens\\card.luau:3>"),
+            vec!["screens/card.luau"],
+            "Windows' own spelling, named once"
+        );
+        let full = format!("{}\\screens\\card.luau", live.to_string_lossy().replace('/', "\\"));
+        assert_eq!(names(&format!("app.luau: runtime error: {full}:3: broke")), vec!["screens/card.luau"], "through .live, with `\\`");
+        assert_eq!(names("app.luau: runtime error: screens\\other.luau:1: not the template's"), Vec::<String>::new());
+        assert_eq!(names("screens\\card.luau: runtime error: elsewhere"), Vec::<String>::new(), "the VM that ran it");
+        assert_eq!(
+            names("app.luau: runtime error: screens\\other.luau:1: from\n\tscreens\\card.luau:3: in function"),
+            vec!["screens/card.luau"]
+        );
+        let _ = std::fs::remove_dir_all(&templates);
+    }
+
+    /// A mirror laid down on several threads is the one laid down one file
+    /// at a time: every file's bytes, what changed counted once, the ones it
+    /// doesn't want removed, and laying it again changes (or rewrites)
+    /// nothing.
+    #[test]
+    fn a_mirror_on_several_threads_lays_every_file_once() {
+        let root = dir("mirror-threads");
+        let (from, to) = (root.join("from"), root.join("to"));
+        for i in 0..300 {
+            write(&from, &format!("screens/s{}/f{i}.luau", i % 7), &format!("-- file {i}"));
+        }
+        write(&to, "screens/stale.luau", "-- not wanted");
+        write(&to, "screens/s0/f0.luau", "-- file 0");
+        let want = files(&from, |_| true);
+        assert_eq!(mirror(&to, &want, |_| false).unwrap(), 299 + 1, "every new file and the stale one, not the one already there");
+        for (rel, path) in &want {
+            assert_eq!(read(&to, rel), std::fs::read_to_string(path).unwrap(), "{rel}");
+        }
+        assert!(!to.join("screens/stale.luau").exists());
+        let at = mtime(&to.join("screens/s3/f10.luau"));
+        assert_eq!(mirror(&to, &want, |_| false).unwrap(), 0);
+        assert_eq!(mtime(&to.join("screens/s3/f10.luau")), at, "nothing rewritten");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Several threads stop at the first error, and say it.
+    #[test]
+    fn work_on_several_threads_says_its_first_error() {
+        let ran = std::sync::atomic::AtomicUsize::new(0);
+        let jobs: Vec<usize> = (0..64).collect();
+        let result = in_parallel(&jobs, |&job| {
+            ran.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if job == 5 { Err(std::io::Error::other("job 5")) } else { Ok(()) }
+        });
+        assert_eq!(result.unwrap_err().to_string(), "job 5");
+        assert!(ran.into_inner() <= jobs.len());
+        let done = std::sync::atomic::AtomicUsize::new(0);
+        in_parallel(&jobs, |_| {
+            done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(done.into_inner(), jobs.len(), "all of them, once");
+    }
+
+    /// `.zeron`'s hashes, taken from the bytes its copy read, are each file's.
+    #[test]
+    fn zeron_s_hashes_are_its_files() {
+        let root = dir("hashes");
+        let (ui, t) = (root.join("ui"), root.join("templates"));
+        write(&ui, "app.luau", "-- app");
+        write(&ui, "screens/shell/sidebar.luau", "-- sidebar");
+        sync_zeron(&ui, &t).unwrap();
+        let hashes = read_json(&t.join(ZERON).join(".hashes.json"));
+        assert_eq!(hashes["app.luau"], hash(b"-- app"));
+        assert_eq!(hashes["screens/shell/sidebar.luau"], hash(b"-- sidebar"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A folder stamped as its listing says is stamped as asking each file
+    /// says (the launch stamps written before read the same), and a file
+    /// replaced restamps it.
+    #[test]
+    fn a_listed_stamp_is_the_files_own() {
+        let root = dir("listed-stamp");
+        write(&root, "app.luau", "-- app");
+        write(&root, "screens/a.luau", "-- a");
+        write(&root, ".hidden/x.luau", "-- not stamped");
+        assert_eq!(listed_stamp(&root, |_| true), stamp(&root, |_| true));
+        let before = listed_stamp(&root, |_| true);
+        put(&root.join("screens/a.luau"), b"-- a, changed").unwrap();
+        assert_ne!(listed_stamp(&root, |_| true), before);
+        assert_eq!(listed_stamp(&root, |_| true), stamp(&root, |_| true));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A templates folder with a small Zeron and a template `t`.
     fn setup(name: &str) -> PathBuf {
         let root = dir(name);
@@ -799,12 +1064,66 @@ mod tests {
         assert_ne!(survey(&ui, &t, Some(&saved.ui_stamp)).template_stamp, used.template_stamp);
     }
 
+    /// A launch lays `.live` down once; the next, finding everything as the
+    /// last left it, runs it as it is. Anything changed since lays it down
+    /// again: `ui/` (an update), the template switched or edited, `.live`
+    /// written by anyone, a file of it gone.
+    #[test]
+    fn a_launch_runs_live_as_it_is_only_while_nothing_changed() {
+        let root = dir("launch-stamp");
+        let ui = root.join("ui");
+        write(&ui, "app.luau", "-- app");
+        write(&ui, "screens/x.luau", "-- x");
+        let t = root.join("templates");
+        let lay = |id: &str| {
+            sync_zeron(&ui, &t).unwrap();
+            compose(&t, id, &Default::default(), false).unwrap();
+            LaunchStamp::now(&ui, &t, id).write(&t).unwrap();
+        };
+        let runs_as_is = |id: &str| LaunchStamp::now(&ui, &t, id).still_laid(&ui, &t);
+        // Nothing laid yet.
+        assert!(!runs_as_is(BUILTIN));
+        lay(BUILTIN);
+        assert!(runs_as_is(BUILTIN));
+        assert!(runs_as_is(BUILTIN), "looking writes nothing");
+        // Zeron's own changed (an update): laid again, then as it is.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        write(&ui, "screens/x.luau", "-- x, updated");
+        assert!(!runs_as_is(BUILTIN));
+        lay(BUILTIN);
+        assert!(runs_as_is(BUILTIN));
+        assert_eq!(read(&t.join(LIVE), "screens/x.luau"), "-- x, updated");
+        // `.live` written by someone else, or a file of it gone.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        write(&t.join(LIVE), "screens/x.luau", "-- not this Zeron's");
+        assert!(!runs_as_is(BUILTIN));
+        lay(BUILTIN);
+        std::fs::remove_file(t.join(LIVE).join("app.luau")).unwrap();
+        assert!(!runs_as_is(BUILTIN));
+        lay(BUILTIN);
+        assert!(runs_as_is(BUILTIN));
+        // Another template in use, then one of its files edited.
+        write(&t, "mine/zeron-template.json", r#"{"name":"Mine"}"#);
+        write(&t, "mine/screens/x.luau", "-- mine");
+        assert!(!runs_as_is("mine"));
+        lay("mine");
+        assert!(runs_as_is("mine"));
+        assert_eq!(read(&t.join(LIVE), "screens/x.luau"), "-- mine");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        write(&t, "mine/screens/x.luau", "-- mine, edited");
+        assert!(!runs_as_is("mine"));
+        // (The overlay a launch that skips the copy still knows.)
+        let (_, overlay) = plan(&t, "mine", &Default::default(), false);
+        assert!(overlay.from_template.contains("screens/x.luau"));
+    }
+
     #[test]
     fn ui_is_watched_by_its_folders_scripts_and_themes() {
         let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
         let t = setup("watched");
         let (files_, dirs) = watched(&t, &ui);
-        let rel = |p: &PathBuf| p.strip_prefix(&ui).map(|r| r.to_string_lossy().into_owned()).unwrap_or_default();
+        // (By `/`, as on every platform: Windows' paths say `\`.)
+        let rel = |p: &PathBuf| p.strip_prefix(&ui).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
         assert!(files_.iter().any(|p| rel(p) == "app.luau"));
         assert!(files_.iter().any(|p| rel(p).starts_with("ds/themes/") && rel(p).ends_with(".json")));
         assert!(!files_.iter().any(|p| rel(p).ends_with(".svg") || rel(p).ends_with(".webp")), "art is heard by its folder");

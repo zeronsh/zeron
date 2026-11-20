@@ -37,6 +37,31 @@ describe("/vault routes → VAULT service binding", () => {
     expect((await call("POST", "/vault/org1/github/device/f1", bearer)).status).toBe(200);
     expect((await lastCall("githubDevicePoll")).args).toEqual([caller, "f1"]);
 
+    // The repositories across logins, as an old client still parses them, with
+    // the App installations they come through alongside.
+    const listing = (await (await call("GET", "/vault/org1/github/repos?q=app", bearer)).json()) as {
+      repos: Record<string, unknown>[];
+      installations: Record<string, unknown>[];
+    };
+    expect(listing.repos[0]).toMatchObject({
+      fullName: "acme/app",
+      cloneUrl: "https://github.com/acme/app.git",
+      defaultBranch: "main",
+      private: true,
+      pushedAt: 2,
+      installationId: 7,
+      account: "ada"
+    });
+    expect(listing.installations).toEqual([{ id: 7, target: "acme", targetType: "Organization", reachedBy: ["ada"] }]);
+    expect((await lastCall("githubListing")).args).toEqual([caller, "app"]);
+
+    // A login is forgotten by its own route, and a user's grant names no parent
+    // whatever its body says.
+    expect(await (await call("DELETE", "/vault/org1/accounts/github/a1", bearer)).json()).toEqual({ accounts: [] });
+    expect((await lastCall("forgetAccount")).args).toEqual([caller, "github", "a1"]);
+    expect((await call("POST", "/vault/org1/grant", bearer, { ...grant, inheritFrom: "cloud-other" })).status).toBe(200);
+    expect((await lastCall("grant")).args).toEqual([caller, grant]);
+
     expect(await (await call("GET", "/vault/org1/github/branches?repo=acme/app", bearer)).json()).toEqual({
       branches: ["main", "dev"]
     });
@@ -56,6 +81,43 @@ describe("/vault routes → VAULT service binding", () => {
       body: { five_hour: { utilization: 10 } }
     });
     expect((await lastCall("accountUsage")).args).toEqual([caller, "claude", "a1"]);
+  });
+
+  it("batches grants for several providers, never github", async () => {
+    const u = newUser();
+    const bearer = userBearer(u);
+    const caller = { userId: u.userId, orgId: "org1", kind: "user" };
+    const batch = { providers: ["copilot", "grok", "openrouter-key"], deviceId: "laptop-2", ts: 1_800_000_000_000, sig: "c2ln" };
+    const reply = (await (await call("POST", "/vault/org1/grants", bearer, batch)).json()) as { grants: { provider: string }[] };
+    expect(reply.grants.map((g) => g.provider)).toEqual(["copilot", "grok", "openrouter-key"]);
+    expect((await lastCall("grantMany")).args).toEqual([caller, batch]);
+    for (const providers of [[], ["github"], ["nope"], "grok"]) {
+      expect((await call("POST", "/vault/org1/grants", bearer, { ...batch, providers })).status, JSON.stringify(providers)).toBe(400);
+    }
+  });
+
+  it("lists in a status only the providers the client says it understands", async () => {
+    const u = newUser("rebind");
+    const bearer = userBearer(u);
+    for (const provider of ["codex", "grok", "openrouter-key"]) {
+      expect((await call("PATCH", `/vault/org1/credentials/${provider}`, bearer, { authorizedDevices: ["cloud-1"] })).status).toBe(200);
+    }
+    const providers = async (headers: Record<string, string> = {}) =>
+      ((await (await call("GET", "/vault/org1", bearer, undefined, headers)).json()) as { connections: { provider: string }[] }).connections.map(
+        (c) => c.provider
+      );
+    // A client from before the header: the original five only.
+    expect(await providers()).toEqual(["codex"]);
+    expect(await providers({ "x-zeron-vault-providers": "codex, grok,openrouter-key,some-later-key" })).toEqual([
+      "codex",
+      "grok",
+      "openrouter-key"
+    ]);
+    // Every status a change answers with is filtered the same way.
+    const patched = (await (
+      await call("PATCH", "/vault/org1/credentials/grok", bearer, { authorizedDevices: ["cloud-1"] })
+    ).json()) as { connections: { provider: string }[] };
+    expect(patched.connections.map((c) => c.provider)).toEqual(["codex"]);
   });
 
   it("validates shapes before calling the vault", async () => {
