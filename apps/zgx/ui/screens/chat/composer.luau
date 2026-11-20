@@ -235,7 +235,28 @@ local function Composer(): Node
 				end
 			elseif s then
 				-- (Its own pick, unsent, over what the session runs with.)
-				local pick = shared.picks:peek()[id] or {}
+				local all_picks = shared.picks:peek()
+				local raw_pick = all_picks[id]
+				if raw_pick then
+					local any_kept = false
+					for k in DRAFTED do
+						local pv = raw_pick[k]
+						if pv ~= nil then
+							local own = (s :: any)[k]
+							if not equal(own, pv) and not (pv == false and own == nil) then
+								any_kept = true
+								break
+							end
+						end
+					end
+					if not any_kept then
+						local next = table.clone(all_picks)
+						next[id] = nil
+						shared.picks:set(next)
+						raw_pick = nil
+					end
+				end
+				local pick = raw_pick or {}
 				for _, k in FIELDS do
 					local v = (s :: any)[k]
 					if DRAFTED[k] and pick[k] ~= nil then
@@ -967,11 +988,12 @@ local function Composer(): Node
 			-- arrives as the same row.
 			-- (While a turn runs it's queued instead: it shows in the queue.)
 			-- The chat's unsent pick goes with it (the run takes that agent,
-			-- model and effort, and the session with them); queued, it waits
-			-- for the turn it will run in.
+			-- model and effort, and the session with them); while a turn runs
+			-- the queued message carries the pick so it runs on the chosen
+			-- agent/model when promoted or drained.
 			local pick = shared.picks:peek()[id]
 			local req: { [string]: any } = { session = id, text = text_out, attachments = attachments, appshots = Appshots.of_cargo(carried) }
-			if pick and not running:peek() then
+			if pick then
 				for k, v in pick do
 					req[k] = v
 				end
@@ -981,13 +1003,20 @@ local function Composer(): Node
 							req.harness = m.harness
 						end
 					end
+					if not req.harness then
+						req.harness = string.match(pick.model, "^([^/]+)/")
+					end
 				end
 			end
 			local function deliver(message_id: string?)
+				local queued = message_id == nil
 				req.message_id = message_id
 				store.send(req :: any):after(function()
 					-- Sent with it: the session has it now; no pick left.
-					if req.model or req.effort or req.fast ~= nil or req.options then
+					-- While a turn is running, keep the pick visible in the
+					-- composer until the session adopts it so the picker
+					-- doesn't snap back to the old provider mid-turn.
+					if not queued and (req.model or req.effort or req.fast ~= nil or req.options) then
 						local all = table.clone(shared.picks:peek())
 						-- (By what it holds, not which table: a state's snapshot
 						-- read again needn't be the same table.)
@@ -1020,6 +1049,9 @@ local function Composer(): Node
 			-- engine's) can reach the list before the glide is ready, and
 			-- the prompt is there once, whoever adds it first.
 			local mid = store.new_id()
+			local catalog = store.catalog:peek()
+			local from_h = T.session_harness(catalog, store.session:peek())
+			local sw = T.switch_row(catalog, from_h, req.harness, mid)
 			-- (To the transcript at its foot: in a split, the focused pane's,
 			-- which shows its lane's list, the prompt joining it there too.)
 			local lane = foot_lane(id)
@@ -1030,6 +1062,12 @@ local function Composer(): Node
 			T.send(function()
 				for _, list in lists do
 					if list:index_of("id", mid) == nil then
+						if sw and list:len() > 0 then
+							local tail = list:at(list:len())
+							if (not tail or tail.role ~= "switch") and list:index_of("id", sw.id) == nil then
+								list:push(sw)
+							end
+						end
 						list:push {
 							id = mid,
 							role = "user",

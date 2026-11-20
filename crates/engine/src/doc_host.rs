@@ -1165,6 +1165,7 @@ impl ChatDocHandle {
         from: (HarnessId, &str),
         to: (HarnessId, &str),
         created_at: i64,
+        before_message_id: Option<&str>,
     ) -> Result<bool, DocError> {
         let ((from_id, from), (to_id, to)) = (from, to);
         let entries = self.doc.read_entries_shared()?;
@@ -1175,11 +1176,24 @@ impl ChatDocHandle {
             return Ok(false);
         }
         let id = format!("switch:{created_at}");
-        // The send that switches wrote its message first: the seam goes
-        // before it (and any other unanswered message), so it reads as the
-        // new provider's question, not the old one's.
-        let unanswered = entries.iter().rev().take_while(|entry| entry.role == MessageRole::User).count();
-        self.doc.insert_message_before_last(unanswered, &SessionMessageEntry {
+        // Place the seam directly above the message that triggers this switch.
+        // If that message is already in the transcript (e.g., written by the
+        // client before dispatch), insert right before it; otherwise append at
+        // the end so the message written next lands right below the seam. Never
+        // walk back past an earlier unanswered user message that belonged to
+        // the outgoing provider (such as an interrupted turn).
+        let before = match before_message_id {
+            Some(msg_id) => entries
+                .iter()
+                .rposition(|entry| entry.id == msg_id)
+                .map_or(0, |ix| entries.len() - ix),
+            None => entries
+                .iter()
+                .rev()
+                .take_while(|entry| entry.role == MessageRole::User)
+                .count(),
+        };
+        self.doc.insert_message_before_last(before, &SessionMessageEntry {
             id: id.clone(),
             role: MessageRole::System,
             parts: vec![MessagePart::Switch {
@@ -4620,6 +4634,28 @@ impl DocHost {
         hold_for_turn_end: bool,
         transfers: Vec<crate::uploads::AttachmentTransfer>,
     ) -> Result<String, EngineError> {
+        self.queue_message_with_config(
+            chat_id,
+            text,
+            attachments,
+            hold_for_turn_end,
+            transfers,
+            None,
+        )
+    }
+
+    /// [`Self::queue_message_with_transfers`] plus an optional `ChatConfig`
+    /// selected when the message was queued (e.g., switching provider or model
+    /// while the previous turn is still running).
+    pub fn queue_message_with_config(
+        &self,
+        chat_id: &str,
+        text: &str,
+        attachments: Vec<String>,
+        hold_for_turn_end: bool,
+        transfers: Vec<crate::uploads::AttachmentTransfer>,
+        config: Option<zeron_proto::ChatConfig>,
+    ) -> Result<String, EngineError> {
         let handle = self.open(chat_id)?;
         let id = new_id();
         let item = QueuedMessage {
@@ -4631,6 +4667,7 @@ impl DocHost {
             issued_at: now_ms(),
             edited_at: None,
             delivery_gate: None,
+            config,
         };
         if self.hold_row_if_needed(chat_id, &item, &transfers)? {
             self.unarchive_on_send(chat_id);
@@ -5140,12 +5177,15 @@ impl DocHost {
                 "queued message is blocked for editing or review".into(),
             ));
         }
-        if self
-            .sessions()
-            .is_some_and(|sessions| sessions.defers_to_turn_end(chat_id, None))
-        {
+        if self.sessions().is_some_and(|sessions| {
+            sessions.defers_to_turn_end(chat_id, None)
+                || candidate
+                    .config
+                    .as_ref()
+                    .is_some_and(|cfg| !sessions.live_run_matches_config(chat_id, cfg))
+        }) {
             // Send next: lead the ordinary rows; the drain delivers it the
-            // moment the current turn ends.
+            // moment the current turn ends (and applies its target config).
             let Some(item) = handle.doc.take_queued(id)? else {
                 return Ok(false);
             };
@@ -5426,7 +5466,12 @@ impl DocHost {
             queued_message_prompt(&item.text, &attachments)
         };
         self.resolve_attachment_refs(&mut prompt, &mut attachments);
-        if send == QueueSend::Steer {
+        if send == QueueSend::Steer
+            && item
+                .config
+                .as_ref()
+                .is_none_or(|cfg| sessions.live_run_matches_config(chat_id, cfg))
+        {
             match sessions
                 .steer_now(
                     chat_id,
@@ -5473,12 +5518,30 @@ impl DocHost {
                 "no live run and no prior run config".into(),
             ));
         };
+        if let Some(cfg) = &item.config {
+            request.harness = Some(cfg.harness);
+            request.model = cfg.model.clone();
+            request.reasoning = cfg.reasoning;
+            request.model_options = cfg.model_options.clone();
+        }
         request.prompt = prompt;
         request.resume = None; // dispatch re-derives the harness session
         request.attachments = attachments;
         let harness = self.harness_for_request(chat_id, &request);
         self.dispatch_with_source_context(&sessions, chat_id, harness, request, Some(message_id))
             .await?;
+        if let Some(cfg) = &item.config
+            && let Some(ws) = self.workspace()
+        {
+            let mut updated = ws.chat_config(chat_id).unwrap_or_else(|| cfg.clone());
+            updated.harness = cfg.harness;
+            updated.model = cfg.model.clone();
+            updated.reasoning = cfg.reasoning;
+            updated.model_options = cfg.model_options.clone();
+            if let Err(err) = ws.set_chat_config(chat_id, &updated) {
+                tracing::warn!(chat = %chat_id, error = %err, "queued row chat config update failed");
+            }
+        }
         Ok(())
     }
 
@@ -6604,6 +6667,7 @@ impl DocHost {
                 issued_at: entry.issued_at.min(now_ms()),
                 edited_at: None,
                 delivery_gate: None,
+                config: None,
             };
             let queued = handle.doc.read_queue().is_ok_and(|q| q.iter().any(|r| r.id == row.id));
             if !queued && let Err(err) = handle.doc.insert_queued(0, &row) {
@@ -6740,7 +6804,7 @@ impl DocHost {
                 // host got around to draining a queued command. Idempotent by
                 // id, so the dispatch path's own execution-time write dedupes
                 // to a no-op. A provider switch's seam lands with it, above.
-                sessions.note_provider_switch(chat_id, harness, handle);
+                sessions.note_provider_switch(chat_id, harness, handle, Some(message_id));
                 if let Err(err) = handle.write_user_message(
                     message_id,
                     &request.prompt,
@@ -6929,6 +6993,7 @@ impl DocHost {
             issued_at: issued_at.min(now_ms()),
             edited_at: None,
             delivery_gate: None,
+            config: None,
         };
         if handle.doc.read_queue()?.iter().any(|row| row.id == item.id) {
             return Ok(()); // a redelivered command: already held

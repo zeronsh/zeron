@@ -84,6 +84,10 @@ pub struct TurnControl {
     processes: std::sync::Arc<background::BackgroundWork>,
     /// The agent process's pid (0: none, or not known).
     agent_pid: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// Host-prepared prompt carrying the chat's prior transcript, consumed by
+    /// a driver ONLY when resuming `RunRequest::resume` fails as unrestorable
+    /// and it falls back to a fresh session in-place.
+    recovery_prompt: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl TurnControl {
@@ -95,6 +99,24 @@ impl TurnControl {
     /// Driver: resolves once per [`Self::stop_turn`].
     pub async fn stop_requested(&self) {
         self.stop.notified().await;
+    }
+
+    /// Host: supply the transcript-wrapped prompt a driver should send if
+    /// resuming `RunRequest::resume` fails as unrestorable and it starts fresh.
+    pub fn set_recovery_prompt(&self, prompt: Option<String>) {
+        *self
+            .recovery_prompt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = prompt;
+    }
+
+    /// Driver: consume the host's recovery prompt when falling back from an
+    /// unrestorable resumed session to a fresh one.
+    pub fn take_recovery_prompt(&self) -> Option<String> {
+        self.recovery_prompt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 
     /// Driver: how many background tasks the runtime currently holds.

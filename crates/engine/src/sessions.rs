@@ -1022,12 +1022,42 @@ impl SessionsEngine {
         lock(&self.inner.runs).get(chat_id).map(|h| h.runtime_config.harness_id)
     }
 
+    /// Whether the chat's live turn (if one is in flight) already runs with
+    /// `config`'s harness, model, reasoning, and model options — i.e., whether
+    /// a queued row carrying `config` may steer into the live turn rather than
+    /// waiting for or starting a fresh turn on the new configuration.
+    pub fn live_run_matches_config(
+        &self,
+        chat_id: &str,
+        config: &zeron_proto::ChatConfig,
+    ) -> bool {
+        if !self.turn_in_flight(chat_id) {
+            return true;
+        }
+        let runs = lock(&self.inner.runs);
+        let Some(handle) = runs.get(chat_id) else {
+            return true;
+        };
+        let r = &handle.runtime_config.request;
+        handle.runtime_config.harness_id == config.harness
+            && r.model == config.model
+            && r.reasoning == config.reasoning
+            && r.model_options == config.model_options
+    }
+
     /// Mark the provider-switch seam for a send about to run on `harness_id`
     /// now, with its message, rather than once the dispatch has replaced the
     /// outgoing provider's runtime (seconds later). Idempotent: the dispatch's
     /// own note finds the seam already written.
-    pub fn note_provider_switch(&self, chat_id: &str, harness_id: HarnessId, doc: &ChatDocHandle) {
-        self.inner.note_provider_switch(chat_id, harness_id, doc);
+    pub fn note_provider_switch(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+        doc: &ChatDocHandle,
+        before_message_id: Option<&str>,
+    ) {
+        self.inner
+            .note_provider_switch(chat_id, harness_id, doc, before_message_id);
     }
 
     /// Whether an accepted agent update gates the chat's live run, so a new
@@ -1421,7 +1451,7 @@ impl SessionsEngine {
             // has changed provider: mark the seam above this message, before
             // the resume lookup below turns the foreign session id away.
             self.inner
-                .note_provider_switch(chat_id, harness_id, &handle);
+                .note_provider_switch(chat_id, harness_id, &handle, Some(&user_id));
             handle.write_user_message(&user_id, &request.prompt, now_ms())?;
         }
         let credential = self.inner.registry.run_credential(harness_id, Some(chat_id)).await;
@@ -3684,7 +3714,13 @@ impl Inner {
     /// [`Self::resume_for`]. On the first switch, the outgoing provider's
     /// session is recorded as having seen the whole transcript so far, so a
     /// switch back can resume it.
-    fn note_provider_switch(&self, chat_id: &str, harness_id: HarnessId, doc: &ChatDocHandle) {
+    fn note_provider_switch(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+        doc: &ChatDocHandle,
+        before_message_id: Option<&str>,
+    ) {
         let entries = doc.doc().read_entries().unwrap_or_default();
         let owned = || self.owned_session(chat_id);
         let previous = match crate::doc_host::latest_switch(&entries) {
@@ -3728,6 +3764,7 @@ impl Inner {
             (previous, &label(previous)),
             (harness_id, &label(harness_id)),
             now_ms(),
+            before_message_id,
         ) {
             Ok(true) => tracing::info!(
                 chat = %chat_id,
@@ -3807,50 +3844,6 @@ impl Inner {
                 })?
             }
         };
-        let history: Vec<_> = entries[..end]
-            .iter()
-            .map(|entry| {
-                let text = entry
-                    .parts
-                    .iter()
-                    .filter_map(|part| match part {
-                        zeron_doc::MessagePart::Text { text, .. } => Some(text.clone()),
-                        zeron_doc::MessagePart::Tool { call, output, .. } => Some(format!(
-                            "Tool: {}\n{}",
-                            serde_json::to_string(call).unwrap_or_default(),
-                            clip_chars(
-                                output.as_deref().unwrap_or_default(),
-                                HISTORY_TOOL_OUTPUT_CHARS
-                            )
-                        )),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                (entry.role, clip_chars(&text, HISTORY_MESSAGE_CHARS))
-            })
-            .filter(|(_, text)| !text.is_empty())
-            .map(|(role, text)| serde_json::json!({ "role": role, "text": text }))
-            .collect();
-        // Newest messages win the budget: what was just said matters most.
-        let mut budget = HISTORY_REPLAY_CHARS;
-        let mut kept = history
-            .iter()
-            .rev()
-            .take_while(|message| {
-                let cost = message.to_string().len();
-                let fits = cost <= budget;
-                budget = budget.saturating_sub(cost);
-                fits
-            })
-            .count();
-        // A single message over the whole budget still goes out (clipped).
-        kept = kept.max(1.min(history.len()));
-        let omitted = history.len() - kept;
-        let history = &history[omitted..];
-        if history.is_empty() {
-            return None;
-        }
         let intro = if watermark.is_some() {
             "While you were away, this conversation continued with a different AI provider. The messages you missed are below; answer the final request as the continuation of the whole conversation. Tool calls listed below ran on the other provider — do not assume their state is still live."
         } else if switched {
@@ -3858,17 +3851,93 @@ impl Inner {
         } else {
             "Continue this side conversation using the following prior conversation as context."
         };
-        let omitted_note = if omitted > 0 {
-            format!("({omitted} earlier messages omitted for length.)\n")
-        } else {
-            String::new()
-        };
-        Some(format!(
-            "{intro}\n{omitted_note}<conversation>\n{}\n</conversation>\n\n{}",
-            serde_json::to_string(history).unwrap_or_default(),
-            prompt
-        ))
+        format_history_prompt(&entries[..end], prompt, intro)
     }
+
+    /// `prompt` wrapped with the chat's prior transcript (`current` excluded)
+    /// for recovering into a fresh provider session when the old one is lost
+    /// or corrupted. Returns `None` for native slash commands or empty history.
+    fn recovery_history_prompt(
+        &self,
+        doc: &SessionDoc,
+        harness_id: HarnessId,
+        prompt: &str,
+        current: Option<&str>,
+    ) -> Option<String> {
+        if native_command(prompt, harness_id) {
+            return None;
+        }
+        let mut entries = doc.read_entries().unwrap_or_default();
+        entries.retain(|entry| Some(entry.id.as_str()) != current);
+        format_history_prompt(
+            &entries,
+            prompt,
+            "Your previous session could not be restored, so this turn is continuing in a fresh session. The earlier conversation is below as context; answer the final request as the direct continuation of that conversation. Tool calls listed below ran in the previous session — do not assume their state is still live.",
+        )
+    }
+}
+
+/// Format `entries` within [`HISTORY_REPLAY_CHARS`] (newest messages win) in
+/// front of `prompt`, or `None` if `entries` carry no replayable text/tools.
+fn format_history_prompt(
+    entries: &[zeron_doc::SessionMessageEntry],
+    prompt: &str,
+    intro: &str,
+) -> Option<String> {
+    let history: Vec<_> = entries
+        .iter()
+        .map(|entry| {
+            let text = entry
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    zeron_doc::MessagePart::Text { text, .. } => Some(text.clone()),
+                    zeron_doc::MessagePart::Tool { call, output, .. } => Some(format!(
+                        "Tool: {}\n{}",
+                        serde_json::to_string(call).unwrap_or_default(),
+                        clip_chars(
+                            output.as_deref().unwrap_or_default(),
+                            HISTORY_TOOL_OUTPUT_CHARS
+                        )
+                    )),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (entry.role, clip_chars(&text, HISTORY_MESSAGE_CHARS))
+        })
+        .filter(|(_, text)| !text.is_empty())
+        .map(|(role, text)| serde_json::json!({ "role": role, "text": text }))
+        .collect();
+    // Newest messages win the budget: what was just said matters most.
+    let mut budget = HISTORY_REPLAY_CHARS;
+    let mut kept = history
+        .iter()
+        .rev()
+        .take_while(|message| {
+            let cost = message.to_string().len();
+            let fits = cost <= budget;
+            budget = budget.saturating_sub(cost);
+            fits
+        })
+        .count();
+    // A single message over the whole budget still goes out (clipped).
+    kept = kept.max(1.min(history.len()));
+    let omitted = history.len() - kept;
+    let history = &history[omitted..];
+    if history.is_empty() {
+        return None;
+    }
+    let omitted_note = if omitted > 0 {
+        format!("({omitted} earlier messages omitted for length.)\n")
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "{intro}\n{omitted_note}<conversation>\n{}\n</conversation>\n\n{}",
+        serde_json::to_string(history).unwrap_or_default(),
+        prompt
+    ))
 }
 
 /// Whether the provider routes this prompt as a native command: a command
@@ -4073,6 +4142,11 @@ fn resume_rejected(error: &str) -> bool {
         "conversation not found",
         "session not found",
         "thread not found",
+        "failed to setup trajectory",
+        "failed to load/create db trajectory",
+        "donech for checkpoint",
+        "file is not a database",
+        "database disk image is malformed",
     ]
     .iter()
     .any(|phrase| error.contains(phrase))
@@ -4695,6 +4769,17 @@ async fn drive_run(
             .fork_history_sent
             .store(true, std::sync::atomic::Ordering::Release);
     }
+    // If a resumed provider session is lost or corrupted on disk, give the
+    // driver the prior transcript to replay into the fresh fallback session so
+    // the conversation continues with context instead of starting blank.
+    if !resume_state.idle && request.resume.is_some() && !carried_history {
+        controls.turn.set_recovery_prompt(inner.recovery_history_prompt(
+            &doc,
+            harness_id,
+            &request.prompt,
+            Some(&resume_state.user_message_id),
+        ));
+    }
     // Startup can stop before the SDK saves user text, with no new session
     // ID or receipt. Bridge that unacknowledged tail from our transcript;
     // a fresh session needs all prior user text, not just the latest tail.
@@ -4732,12 +4817,23 @@ async fn drive_run(
         }
     }
     let mut prepared_events = std::collections::VecDeque::new();
-    // The provider lost the conversation this run was meant to resume: the
-    // reply opens by saying it starts over in a new session.
+    // The provider lost the conversation this run was meant to resume: carry
+    // the chat's prior transcript into the fresh session and note it.
     if !resume_state.idle
         && resumed_session.is_none()
         && lock(&inner.fresh_start_notices).remove(&chat_id)
     {
+        if !carried_history
+            && let Some(prompt) = inner.recovery_history_prompt(
+                &doc,
+                harness_id,
+                &request.prompt,
+                Some(&resume_state.user_message_id),
+            )
+        {
+            request.prompt = prompt;
+            carried_history = true;
+        }
         prepared_events.push_back(AgentEvent::Error {
             message: FRESH_START_NOTICE.into(),
         });

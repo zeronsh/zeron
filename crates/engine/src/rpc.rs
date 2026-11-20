@@ -195,6 +195,10 @@ struct QueueMessageParams {
     /// chat's row waits until they're in the edge's store.
     #[serde(default)]
     transfers: Vec<crate::uploads::AttachmentTransfer>,
+    /// Chat config picked when this message was queued (e.g. a provider or
+    /// model switch made while the previous turn was still running).
+    #[serde(default)]
+    config: Option<ChatConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4129,14 +4133,28 @@ impl RpcService for EngineRpc {
             }
             methods::QUEUE_MESSAGE => {
                 let p: QueueMessageParams = parse_params(params)?;
+                if let Some(cfg) = &p.config {
+                    let switching = self
+                        .workspace
+                        .chat(&p.chat_id)
+                        .map_err(|e| RpcError::Failed(e.to_string()))?
+                        .and_then(|chat| chat.config)
+                        .is_some_and(|current| current.harness != cfg.harness);
+                    if switching && !self.host_switches_providers(&p.chat_id) {
+                        return Err(RpcError::Failed(
+                            "This chat's computer needs a newer Zeron to switch provider".into(),
+                        ));
+                    }
+                }
                 let id = self
                     .doc_host
-                    .queue_message_with_transfers(
+                    .queue_message_with_config(
                         &p.chat_id,
                         &p.text,
                         p.attachments,
                         p.hold_for_turn_end,
                         p.transfers,
+                        p.config,
                     )
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "id": id }))

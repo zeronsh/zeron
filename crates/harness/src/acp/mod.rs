@@ -34,6 +34,7 @@
 
 mod antigravity_eligibility;
 mod antigravity_paths;
+mod ccpa_thoughts;
 mod devin_models;
 mod hermes_names;
 /// How long Hermes's model names may take to read before the list goes
@@ -67,7 +68,8 @@ pub(crate) use crate::process::owned as child;
 use crate::process::{Command, Stdio};
 use crate::scratch::ScratchDir;
 use crate::{
-    CancellationToken, Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child,
+    CancellationToken, Harness, HarnessError, RunControls, Signal, TurnControl, send_signal,
+    shutdown_child,
 };
 use child::Child;
 use normalize::{map_update, parse_commands, preferred_allow_option};
@@ -200,7 +202,7 @@ fn default_effort_values(
         ReasoningLevel::Low => vec!["low", "minimal"],
         ReasoningLevel::Medium => vec!["medium"],
         ReasoningLevel::High => vec!["high"],
-        ReasoningLevel::XHigh => vec!["xhigh", "x-high", "high"],
+        ReasoningLevel::XHigh => vec!["xhigh", "extra_high", "x-high", "high"],
         ReasoningLevel::Max => vec!["max", "xhigh", "high"],
         ReasoningLevel::Ultra | ReasoningLevel::Ultracode | ReasoningLevel::Ultrathink => {
             vec!["ultra", "max", "high"]
@@ -1333,17 +1335,19 @@ fn antigravity_spec() -> AcpAgentSpec {
                 },
             ]
         },
-        // No preemption: agy_acp_server 1.1.1 never answers a prompt (or any
-        // later one) when a cancel lands as it starts replying after a tool
-        // (verified on the wire). Steers wait for the turn end instead.
-        steering_mode: SteeringMode::TurnBoundary,
+        // Step-boundary preemption verified on agy_acp_server 1.5.0: cancelling
+        // mid-text, mid-tool, immediately on tool completion, and before any
+        // output settles `cancelled` and answers the follow-up cleanly.
+        steering_mode: SteeringMode::StepBoundary,
         reasoning_levels: &[],
         prompt_transform: identity_transform,
         effort_values: default_effort_values,
         ladder_extras: &[],
         prompt_complete_extension: false,
-        prompt_stall: None,
-        stall_hint: "The agent process is likely wedged.",
+        // Generous bound (30s past CCPA's own 300s HTTP timeout) so silent
+        // xhigh thinking never false-positives while wedged turns still settle.
+        prompt_stall: Some(Duration::from_secs(330)),
+        stall_hint: "Antigravity stopped responding. Send your message again to resume.",
         effort_in_model_id: true,
         // the personal oauth method is only the first-run default; sign-in
         // preserves any method already selected in antigravity's settings.
@@ -1802,8 +1806,14 @@ struct WarmAgent {
     spawned: Spawned,
 }
 
+/// Per-child resources whose lifetimes match the spawned ACP subprocess.
+struct ChildGuards {
+    _scratch: Option<ScratchDir>,
+    _thoughts_proxy: Option<ccpa_thoughts::ThoughtsProxy>,
+}
+
 /// What `spawn_agent` hands a run.
-type Spawned = (Option<ScratchDir>, Child, crate::StderrTail, CancellationToken);
+type Spawned = (ChildGuards, Child, crate::StderrTail, CancellationToken);
 
 fn lock_warm<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1811,10 +1821,10 @@ fn lock_warm<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 /// End a warm start no message reached.
 async fn retire_warm(warm: WarmAgent, kill_grace: Duration) {
-    let (scratch, mut child, _, _) = warm.spawned;
+    let (guards, mut child, _, _) = warm.spawned;
     drop(child.stdin.take());
     child.shutdown(kill_grace).await;
-    drop(scratch);
+    drop(guards);
 }
 
 /// [`retire_warm`], in the background.
@@ -1898,8 +1908,8 @@ impl AcpHarness {
     /// sign-in stored.
     pub async fn sign_out(&self) -> Result<(), HarnessError> {
         let home = std::env::var("HOME").ok();
-        let (_scratch, mut child, _stderr, sign_in_prompted) = self
-            .spawn_agent(home.as_deref(), false, &[], None, &Default::default())
+        let (_guards, mut child, _stderr, sign_in_prompted) = self
+            .spawn_agent(home.as_deref(), false, &[], None, &Default::default(), false)
             .await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => {
@@ -2785,15 +2795,8 @@ impl AcpHarness {
         extra_args: &[String],
         _mcp: Option<&zeron_proto::McpServer>,
         run_env: &std::collections::BTreeMap<String, String>,
-    ) -> Result<
-        (
-            Option<ScratchDir>,
-            Child,
-            crate::StderrTail,
-            CancellationToken,
-        ),
-        HarnessError,
-    > {
+        enable_thoughts_proxy: bool,
+    ) -> Result<Spawned, HarnessError> {
         let (exe, args) = self.resolve_program(block_on_install).await?;
         let mut cmd = Command::new(&exe);
         cmd.args(args);
@@ -2826,7 +2829,24 @@ impl AcpHarness {
         if let Some(dir) = &scratch {
             dir.apply(&mut cmd);
         }
+        let thoughts_proxy = if self.spec.id == HarnessId::Antigravity && enable_thoughts_proxy {
+            match ccpa_thoughts::ThoughtsProxy::start(run_env).await {
+                Ok(proxy) => proxy,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "Antigravity CCPA thoughts proxy failed to start; running without thought summary injection"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         crate::apply_run_env(&mut cmd, run_env);
+        if let Some(proxy) = &thoughts_proxy {
+            cmd.env(ccpa_thoughts::CCPA_BASE_URL_ENV, proxy.base_url());
+        }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -2857,7 +2877,11 @@ impl AcpHarness {
                 tail.close();
             });
         }
-        Ok((scratch, child, stderr_tail, sign_in_prompted))
+        let guards = ChildGuards {
+            _scratch: scratch,
+            _thoughts_proxy: thoughts_proxy,
+        };
+        Ok((guards, child, stderr_tail, sign_in_prompted))
     }
 
     /// Short-lived discovery run for [`Harness::commands`]: initialize, scan
@@ -2869,13 +2893,14 @@ impl AcpHarness {
         &self,
         cwd: Option<&std::path::Path>,
     ) -> Result<Vec<SlashCommand>, HarnessError> {
-        let (_scratch, mut child, _stderr, sign_in_prompted) = self
+        let (_guards, mut child, _stderr, sign_in_prompted) = self
             .spawn_agent(
                 cwd.and_then(|p| p.to_str()),
                 false,
                 &[],
                 None,
                 &Default::default(),
+                false,
             )
             .await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
@@ -2950,8 +2975,8 @@ impl AcpHarness {
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
         // (A Cloud machine's credential keys for this agent: crate::catalog_env.)
         let env = crate::catalog_env::get(self.id());
-        let (_scratch, mut child, stderr_tail, sign_in_prompted) = self
-            .spawn_agent(None, false, &[], None, &env)
+        let (_guards, mut child, stderr_tail, sign_in_prompted) = self
+            .spawn_agent(None, false, &[], None, &env, false)
             .await?;
         let (client, incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => {
@@ -3059,7 +3084,7 @@ fn reasoning_from_value(value: &str) -> Option<ReasoningLevel> {
         "low" => Some(ReasoningLevel::Low),
         "medium" => Some(ReasoningLevel::Medium),
         "high" => Some(ReasoningLevel::High),
-        "xhigh" => Some(ReasoningLevel::XHigh),
+        "xhigh" | "extrahigh" => Some(ReasoningLevel::XHigh),
         "max" => Some(ReasoningLevel::Max),
         "ultra" => Some(ReasoningLevel::Ultra),
         "ultracode" => Some(ReasoningLevel::Ultracode),
@@ -3153,6 +3178,36 @@ fn models_from_session_wire(session_response: &Value, catalog: &[Model]) -> Vec<
         .iter()
         .filter_map(trait_from_config_option)
         .collect();
+    // agy_acp_server 1.5+ exposes grouped model families in `configOptions[model]`
+    // alongside only the *current* model's `thought_level` options (e.g. flash's
+    // low/medium/high), while `models.availableModels` still lists every concrete
+    // `<family>-<level>` variant. Recover each family's exact ladder from those
+    // variants so models with extra levels (Neon/Hydrogen XHigh) keep them in the
+    // picker instead of inheriting the default model's narrower ladder.
+    let wire_variant_levels: std::collections::HashMap<String, Vec<ReasoningLevel>> =
+        session_response
+            .get("models")
+            .and_then(|m| m.get("availableModels"))
+            .and_then(Value::as_array)
+            .map(|available| {
+                let choices = available.iter().filter_map(|m| {
+                    let id = m.get("modelId").and_then(Value::as_str)?;
+                    let name = m.get("name").and_then(Value::as_str).unwrap_or(id);
+                    Some((id, name))
+                });
+                effort_groups(choices)
+                    .into_iter()
+                    .filter(|group| !group.variants.is_empty())
+                    .map(|group| {
+                        let mut levels: Vec<ReasoningLevel> =
+                            group.variants.into_iter().map(|(level, _)| level).collect();
+                        levels.sort_unstable();
+                        levels.dedup();
+                        (group.id, levels)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
     let exact = |id: &str| catalog.iter().find(|m| norm_id(&m.id) == norm_id(id));
     // Family-alias catalog row: the claude adapter advertises bare aliases
@@ -3190,10 +3245,15 @@ fn models_from_session_wire(session_response: &Value, catalog: &[Model]) -> Vec<
                 .and_then(|m| m.description.clone())
                 .or_else(|| description.map(str::to_owned))
                 .or_else(|| known.and_then(|m| m.description.clone())),
-            reasoning_levels: match known.filter(|m| !m.reasoning_levels.is_empty()) {
-                Some(m) => m.reasoning_levels.clone(),
-                None => ladder.clone(),
-            },
+            reasoning_levels: wire_variant_levels
+                .get(id)
+                .cloned()
+                .or_else(|| {
+                    known
+                        .filter(|m| !m.reasoning_levels.is_empty())
+                        .map(|m| m.reasoning_levels.clone())
+                })
+                .unwrap_or_else(|| ladder.clone()),
             options,
         }
     };
@@ -3614,7 +3674,14 @@ impl Harness for AcpHarness {
         self.discard_warm(key).await;
         // (Never an install on the way: a warm start only uses what's there.)
         let spawned = self
-            .spawn_agent(Some(&request.cwd), false, &[], request.mcp.as_ref(), &request.env)
+            .spawn_agent(
+                Some(&request.cwd),
+                false,
+                &[],
+                request.mcp.as_ref(),
+                &request.env,
+                true,
+            )
             .await?;
         let warm = WarmAgent {
             cwd: request.cwd.clone(),
@@ -3673,7 +3740,7 @@ impl AcpHarness {
                 self.spec.display_name
             ))
         })?;
-        let (scratch, mut child, stderr_tail, sign_in_prompted) = match spawned {
+        let (guards, mut child, stderr_tail, sign_in_prompted) = match spawned {
             Some(spawned) => spawned,
             None => {
                 self.spawn_agent(
@@ -3682,6 +3749,7 @@ impl AcpHarness {
                     &[],
                     request.mcp.as_ref(),
                     &request.env,
+                    true,
                 )
                 .await?
             }
@@ -3731,7 +3799,7 @@ impl AcpHarness {
         };
         tokio::spawn(run_session(Session {
             child,
-            scratch,
+            guards,
             client,
             incoming,
             event_tx,
@@ -3782,7 +3850,7 @@ impl AcpHarness {
 
 struct Session {
     child: Child,
-    scratch: Option<ScratchDir>,
+    guards: ChildGuards,
     client: RpcClient,
     incoming: mpsc::Receiver<Incoming>,
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
@@ -4589,6 +4657,11 @@ impl PendingQuestions {
         }
     }
 
+    /// Whether no user question or permission dialog is awaiting an answer.
+    fn is_empty(&self) -> bool {
+        self.lock().is_empty()
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Value>> {
         self.unanswered
             .lock()
@@ -4829,16 +4902,48 @@ fn restore_method(init: &Value, harness: HarnessId) -> &'static str {
     }
 }
 
-/// Whether a failed restore means the agent no longer has the session, so
+/// Corrupted SQLite trajectory/checkpoint errors returned by Antigravity's
+/// `localharness_external` when a session DB was torn mid-write (e.g. a kill
+/// mid-turn). Narrow to explicit trajectory/SQLite corruption phrases so
+/// transient network/auth/MCP errors remain retryable.
+fn antigravity_session_corrupt(message: &str) -> bool {
+    [
+        "failed to setup trajectory",
+        "failed to load/create db trajectory",
+        "load trajectory",
+        "donech for checkpoint",
+        "file is not a database",
+        "database disk image is malformed",
+        "malformed database schema",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+/// `agy_acp_server` catches `AntigravityCancelledError` on `session/cancel`
+/// and emits its exception message as an `agent_message_chunk` right before
+/// settling `stopReason: "cancelled"`. Suppress that synthetic chunk whenever
+/// a stop, steer-preempt, or interrupt is in flight so it never pollutes the
+/// assistant's transcript.
+fn is_synthetic_cancel_chunk(harness: HarnessId, event: &AgentEvent) -> bool {
+    harness == HarnessId::Antigravity
+        && matches!(
+            event,
+            AgentEvent::TextDelta { text }
+                if text.trim() == "The request was cancelled by the client."
+        )
+}
+
+/// Whether a failed restore means the agent no longer has a usable session, so
 /// starting fresh loses nothing a retry would recover: ACP's
-/// resource-not-found code, no restore method at all, or a message that
-/// names the session as missing ("Session not found" from Devin). A bare
-/// "not found" is not enough: a missing MCP server command or model fails
-/// a load in the same words while the session is fine. Grok is the one
-/// exception: for an unknown session its only answer is a generic
-/// "Path not found." (FS_NOT_FOUND, verified on 1.0.46), and a missing
-/// working directory cannot be the cause there — the agent was started in
-/// it. Anything else — the load timing out, the agent exiting or its pipe
+/// resource-not-found code, no restore method at all, a message that names the
+/// session as missing ("Session not found" from Devin), or a corrupted
+/// Antigravity trajectory database. A bare "not found" is not enough: a missing
+/// MCP server command or model fails a load in the same words while the session
+/// is fine. Grok is the one exception: for an unknown session its only answer
+/// is a generic "Path not found." (FS_NOT_FOUND, verified on 1.0.46), and a
+/// missing working directory cannot be the cause there — the agent was started
+/// in it. Anything else — the load timing out, the agent exiting or its pipe
 /// closing before an answer, any other refusal — keeps the session for the
 /// next message.
 fn session_unrestorable(harness: HarnessId, error: &HarnessError) -> bool {
@@ -4852,13 +4957,16 @@ fn session_unrestorable(harness: HarnessId, error: &HarnessError) -> bool {
         || (harness == HarnessId::Grok
             && message.contains("path not found")
             && message.contains("fs_not_found"))
+        || (harness == HarnessId::Antigravity && antigravity_session_corrupt(&message))
 }
 
 /// `session/new`, or for a resumed run the advertised restore with a visible
 /// fallback to a fresh session when the agent no longer has it (see
 /// [`session_unrestorable`]); any other restore failure errors the run and
 /// keeps the session. auth_required propagates so setup can sign in and
-/// retry.
+/// retry. Returns `(session_id, response, recovered_prompt)` where
+/// `recovered_prompt` is populated from `turn_control` when falling back to a
+/// fresh session so the agent receives the prior conversation history.
 #[allow(clippy::too_many_arguments)]
 async fn open_session(
     client: &RpcClient,
@@ -4869,8 +4977,9 @@ async fn open_session(
     access: AccessMode,
     agent_name: &str,
     load_timeout: Duration,
+    turn_control: &TurnControl,
     event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
-) -> Result<(String, Value), HarnessError> {
+) -> Result<(String, Value, Option<String>), HarnessError> {
     let params = with_permission_meta(
         harness,
         access,
@@ -4883,6 +4992,7 @@ async fn open_session(
             ),
         }),
     );
+    let mut fallback: Option<(String, HarnessError)> = None;
     if let Some(resume) = &request.resume {
         let method = restore_method(init, harness);
         let mut restore = params.clone();
@@ -4903,7 +5013,7 @@ async fn open_session(
             request_draining(client, incoming, access, method, restore).await
         };
         match restored {
-            Ok(response) => return Ok((resume.clone(), response)),
+            Ok(response) => return Ok((resume.clone(), response, None)),
             Err(e) if is_auth_required(&e) => return Err(e),
             // A slow or interrupted restore is retried by the next message;
             // starting fresh would replace the stored session for good.
@@ -4912,15 +5022,13 @@ async fn open_session(
                     "{agent_name} could not restore session {resume}; the next message tries again: {e}"
                 )));
             }
-            // A missing/foreign session falls back to a fresh one.
+            // A missing/corrupted session falls back to a fresh one.
             Err(e) => {
                 tracing::debug!(
                     target: "zeron_harness::acp",
                     "{method} failed (starting fresh): {e}"
                 );
-                let _ = send(event_tx, AgentEvent::Error {
-                    message: format!("{agent_name} could not restore session {resume}; starting a new session without the previous context: {e}"),
-                }).await;
+                fallback = Some((resume.clone(), e));
             }
         }
     }
@@ -4930,7 +5038,23 @@ async fn open_session(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
-    Ok((session_id, new))
+    let recovered_prompt = if let Some((resume, e)) = fallback {
+        let recovery = turn_control.take_recovery_prompt();
+        let message = if recovery.is_some() {
+            format!(
+                "{agent_name} could not restore session {resume}; started a new session with prior conversation history: {e}"
+            )
+        } else {
+            format!(
+                "{agent_name} could not restore session {resume}; starting a new session without the previous context: {e}"
+            )
+        };
+        let _ = send(event_tx, AgentEvent::Error { message }).await;
+        recovery
+    } else {
+        None
+    };
+    Ok((session_id, new, recovered_prompt))
 }
 
 /// The sign-in a run may perform on its own after auth_required: the method
@@ -4995,12 +5119,14 @@ fn is_auth_required(error: &HarnessError) -> bool {
     matches!(error, HarnessError::Protocol(message) if message.contains("(code -32000)"))
 }
 
-const EFFORT_SUFFIXES: [(&str, &str, ReasoningLevel); 4] = [
+const EFFORT_SUFFIXES: [(&str, &str, ReasoningLevel); 6] = [
+    ("-minimal", " (Minimal)", ReasoningLevel::Minimal),
     ("-low", " (Low)", ReasoningLevel::Low),
     ("-medium", " (Medium)", ReasoningLevel::Medium),
     ("-high", " (High)", ReasoningLevel::High),
-    // (Gemini 4 Neon and Hydrogen, agy_acp_server 1.2: neither suffix is
-    // the end of another's.)
+    // Gemini 4 Neon and Hydrogen: agy_acp_server 1.2 labeled "(XHigh)",
+    // 1.5+ labels "(Extra High)" with the same `-xhigh` variant id suffix.
+    ("-xhigh", " (Extra High)", ReasoningLevel::XHigh),
     ("-xhigh", " (XHigh)", ReasoningLevel::XHigh),
 ];
 
@@ -5088,14 +5214,22 @@ fn group_effort_variants(models: Vec<Model>) -> Vec<Model> {
         .collect()
 }
 
-/// the advertised variant id for a grouped model: the picked level when the
-/// model offers it, else its strongest level. Ids the agent already
-/// advertises (chats saved with a full variant id) pass through untouched.
-fn effort_variant_id(
+/// Resolve `(model, reasoning)` against an effort-variant agent's advertised
+/// `configOptions[model]`:
+/// - Direct hit on an advertised choice passes through untouched.
+/// - On 1.2.x servers (suffixed choices like `gemini-4-neon-xhigh`), maps a
+///   grouped family id (`gemini-4-neon` + `XHigh`) to the matching advertised
+///   variant id (or the family's strongest level).
+/// - On 1.5+ servers (grouped choices like `gemini-4-neon` + a separate
+///   `thought_level` option), maps a saved legacy variant id
+///   (`gemini-4-neon-xhigh`, or an alias listed in `models.availableModels`
+///   such as `gemini-pro-agent`) back to its advertised family id and infers
+///   its effort level when `reasoning` is unset.
+fn resolve_effort_model(
     session_response: &Value,
     model: &str,
     reasoning: Option<ReasoningLevel>,
-) -> String {
+) -> (String, Option<ReasoningLevel>) {
     let choices: Vec<(&str, &str)> = session_response
         .get("configOptions")
         .and_then(Value::as_array)
@@ -5117,31 +5251,71 @@ fn effort_variant_id(
         })
         .unwrap_or_default();
     if choices.iter().any(|(id, _)| *id == model) {
-        return model.to_owned();
+        return (model.to_owned(), reasoning);
     }
-    let groups = effort_groups(choices);
-    let Some(group) = groups.iter().find(|group| group.id == model) else {
-        return model.to_owned();
-    };
-    let offered = |level: ReasoningLevel| {
-        group
-            .variants
-            .iter()
-            .find(|(variant_level, _)| *variant_level == level)
-            .map(|(_, id)| (*id).to_owned())
-    };
-    reasoning
-        .and_then(offered)
-        .or_else(|| {
-            [
-                ReasoningLevel::High,
-                ReasoningLevel::Medium,
-                ReasoningLevel::Low,
-            ]
-            .into_iter()
-            .find_map(offered)
-        })
-        .unwrap_or_else(|| model.to_owned())
+    let groups = effort_groups(choices.iter().copied());
+    if let Some(group) = groups.iter().find(|group| group.id == model) {
+        let offered = |level: ReasoningLevel| {
+            group
+                .variants
+                .iter()
+                .find(|(variant_level, _)| *variant_level == level)
+                .map(|(_, id)| (*id).to_owned())
+        };
+        let resolved = reasoning
+            .and_then(offered)
+            .or_else(|| {
+                [
+                    ReasoningLevel::High,
+                    ReasoningLevel::Medium,
+                    ReasoningLevel::Low,
+                ]
+                .into_iter()
+                .find_map(offered)
+            })
+            .unwrap_or_else(|| model.to_owned());
+        return (resolved, reasoning);
+    }
+    // Legacy saved variant id against a 1.5+ grouped `configOptions[model]`.
+    if let Some((base, level)) = EFFORT_SUFFIXES.iter().find_map(|(id_suffix, _, level)| {
+        model
+            .strip_suffix(id_suffix)
+            .filter(|base| choices.iter().any(|(id, _)| id == base))
+            .map(|base| (base, *level))
+    }) {
+        return (base.to_owned(), reasoning.or(Some(level)));
+    }
+    if let Some(available) = session_response
+        .get("models")
+        .and_then(|m| m.get("availableModels"))
+        .and_then(Value::as_array)
+    {
+        let wire_choices = available.iter().filter_map(|m| {
+            let id = m.get("modelId").and_then(Value::as_str)?;
+            let name = m.get("name").and_then(Value::as_str).unwrap_or(id);
+            Some((id, name))
+        });
+        for group in effort_groups(wire_choices) {
+            if choices.iter().any(|(id, _)| *id == group.id)
+                && let Some((level, _)) = group.variants.iter().find(|(_, id)| *id == model)
+            {
+                return (group.id, reasoning.or(Some(*level)));
+            }
+        }
+    }
+    (model.to_owned(), reasoning)
+}
+
+/// the advertised variant id for a grouped model: the picked level when the
+/// model offers it, else its strongest level. Ids the agent already
+/// advertises (chats saved with a full variant id) pass through untouched.
+#[cfg(test)]
+fn effort_variant_id(
+    session_response: &Value,
+    model: &str,
+    reasoning: Option<ReasoningLevel>,
+) -> String {
+    resolve_effort_model(session_response, model, reasoning).0
 }
 
 /// Await a setup request while draining incoming messages, so a `session/load`
@@ -5442,11 +5616,12 @@ async fn select_session_config(
     // an explicit model switch is strict: prompting with a different
     // model than the picker shows is worse than surfacing the RPC error.
     let requested_model: Option<String> = match request.model.as_deref() {
-        Some(model) if rules.effort_in_model_id => Some(effort_variant_id(
-            &session_response,
-            model,
-            request.reasoning,
-        )),
+        Some(model) if rules.effort_in_model_id => {
+            let (resolved, inferred_reasoning) =
+                resolve_effort_model(&session_response, model, request.reasoning);
+            request.reasoning = inferred_reasoning;
+            Some(resolved)
+        }
         model => model.map(str::to_owned),
     };
     // Asked for none, Hermes runs its config's default, unless it can't run
@@ -5499,13 +5674,23 @@ async fn select_session_config(
         &request.model_options,
         rules.access,
     );
-    // Devin's effort and speed choices depend on the selected model:
-    // switch the model first, then choose them from what it offers.
-    let deferred = rules.harness == HarnessId::Devin
+    // Devin's and Antigravity 1.5+'s effort/speed choices depend on the
+    // selected model: switch the model first, then choose them from the
+    // updated `configOptions` it returns (e.g. flash lacks `xhigh`, which
+    // only appears after switching to Neon or Hydrogen). Keep any mode switch
+    // computed from the initial session state so a model-switch response that
+    // omits or resets `mode.currentValue` can never skip leaving YOLO.
+    let deferred = matches!(rules.harness, HarnessId::Devin | HarnessId::Antigravity)
         && sets
             .iter()
             .any(|(id, _)| is_model_config_option(&options_snapshot, id));
+    let mut initial_mode_sets = Vec::new();
     if deferred {
+        initial_mode_sets = sets
+            .iter()
+            .filter(|(id, _)| config_option_category(&options_snapshot, id) == Some("mode"))
+            .cloned()
+            .collect();
         sets.retain(|(id, _)| is_model_config_option(&options_snapshot, id));
     }
     let mut pass = 0;
@@ -5584,6 +5769,11 @@ async fn select_session_config(
             rules.access,
         );
         sets.retain(|(id, _)| !is_model_config_option(&options_snapshot, id));
+        for mode_set in std::mem::take(&mut initial_mode_sets) {
+            if !sets.iter().any(|(id, _)| id == &mode_set.0) {
+                sets.push(mode_set);
+            }
+        }
     }
     Ok(options_snapshot)
 }
@@ -5591,7 +5781,7 @@ async fn select_session_config(
 async fn run_session(session: Session) {
     let Session {
         // Locals drop in reverse binding order: reap the child before cleanup.
-        scratch: _scratch,
+        guards: _guards,
         mut child,
         client,
         mut incoming,
@@ -5650,7 +5840,7 @@ async fn run_session(session: Session) {
         // auth_required gets one sign-in and retry; agents that sign in
         // from Settings never start a sign-in mid-chat and point there.
         let mut authenticated = false;
-        let (session_id, session_response) = loop {
+        let (session_id, session_response, recovered_prompt) = loop {
             match open_session(
                 &client,
                 &mut incoming,
@@ -5660,6 +5850,7 @@ async fn run_session(session: Session) {
                 access,
                 agent_name,
                 session_load_timeout,
+                &turn_control,
                 &event_tx,
             )
             .await
@@ -5699,12 +5890,13 @@ async fn run_session(session: Session) {
             devin_selection.clone(),
         )
         .await?;
-        Ok::<(String, bool, bool, Vec<SlashCommand>, Value), HarnessError>((
+        Ok::<(String, bool, bool, Vec<SlashCommand>, Value, Option<String>), HarnessError>((
             session_id,
             steer_ext,
             inline_images,
             init_commands,
             session_options,
+            recovered_prompt,
         ))
     };
     let mut setup_exit = None;
@@ -5766,7 +5958,14 @@ async fn run_session(session: Session) {
             }
         }
     };
-    let (session_id, steer_ext, inline_images, init_commands, mut session_options) = match res {
+    let (
+        session_id,
+        steer_ext,
+        inline_images,
+        init_commands,
+        mut session_options,
+        recovered_prompt,
+    ) = match res {
         Ok(v) => v,
         Err(e) => {
             // A child that dies before the handshake used to surface only
@@ -5882,9 +6081,11 @@ async fn run_session(session: Session) {
     let mut prompt_stall_deadline: Option<tokio::time::Instant> =
         prompt_stall.map(|d| tokio::time::Instant::now() + d);
     // The prompt in flight (re-sent by a preempt when the agent drops an
-    // unstarted cancelled prompt).
+    // unstarted cancelled prompt). When an unrestorable resumed session fell
+    // back to a fresh one, send the host's transcript-wrapped recovery prompt.
+    let initial_prompt = recovered_prompt.as_deref().unwrap_or(&request.prompt);
     let mut current_prompt = PromptInput::new(
-        prompt_transform(request.reasoning, &request.prompt),
+        prompt_transform(request.reasoning, initial_prompt),
         &request.attachments,
         inline_images,
     )
@@ -5916,6 +6117,8 @@ async fn run_session(session: Session) {
     // steer's prompt in the same session, the way Codex `turn/steer` behaves.
     let mut preempt_pending = false;
     let mut preempt_sent = false;
+    // When a steer-preempt cancel goes unanswered (bound by `stop_timeout`).
+    let mut preempt_deadline: Option<tokio::time::Instant> = None;
     // The prompt (`prompt_seq`) that last showed progress (text, thought,
     // tool or plan). Pi and Devin keep a prompt cancelled before that in
     // their history; Grok drops it, so its preempt re-sends the text.
@@ -6022,6 +6225,7 @@ async fn run_session(session: Session) {
             res = async { turn.as_mut().expect("guarded by if").await }, if turn.is_some() => {
                 turn = None;
                 stop_deadline = None;
+                preempt_deadline = None;
                 if res.is_err() && client.is_closed() {
                     break 'main;
                 }
@@ -6097,6 +6301,14 @@ async fn run_session(session: Session) {
                             let events =
                                 session_update_events(&method, &params, &session_id, &mut subagents);
                             for ev in events {
+                                if (preempt_sent
+                                    || stopping
+                                    || interrupted
+                                    || cancel_flush_deadline.is_some())
+                                    && is_synthetic_cancel_chunk(harness, &ev)
+                                {
+                                    continue;
+                                }
                                 if !send(&event_tx, ev).await {
                                     consumer_gone = true;
                                     break;
@@ -6250,7 +6462,7 @@ async fn run_session(session: Session) {
                                 | Some("config_option_update")
                                 | Some("current_mode_update")
                         );
-                    if !boilerplate {
+                    if !boilerplate && harness != HarnessId::Antigravity {
                         prompt_stall_deadline = None;
                     }
                     if method == "session/update" {
@@ -6314,9 +6526,28 @@ async fn run_session(session: Session) {
                         session_update_events(&method, &params, &session_id, &mut subagents);
                     for ev in events {
                         track_open_tools(&ev, &mut open_tools);
+                        if (preempt_sent
+                            || stopping
+                            || interrupted
+                            || cancel_flush_deadline.is_some())
+                            && is_synthetic_cancel_chunk(harness, &ev)
+                        {
+                            continue;
+                        }
                         if !send(&event_tx, ev).await {
                             break 'main;
                         }
+                    }
+                    // Antigravity keeps a sliding stall watchdog across the whole
+                    // turn whenever no local tool or user question is open, so a
+                    // post-tool wedge cannot spin Working forever while long tool
+                    // executions and permission prompts remain unpenalized.
+                    if harness == HarnessId::Antigravity && !boilerplate && turn.is_some() {
+                        prompt_stall_deadline = if open_tools.is_empty() && questions.is_empty() {
+                            prompt_stall.map(|d| tokio::time::Instant::now() + d)
+                        } else {
+                            None
+                        };
                     }
                     // A waiting steer preempts once no tool is open and the
                     // agent is generating again.
@@ -6327,6 +6558,7 @@ async fn run_session(session: Session) {
                     {
                         client.notify("session/cancel", Some(cancel_params(harness, &session_id)));
                         preempt_sent = true;
+                        preempt_deadline = Some(tokio::time::Instant::now() + stop_timeout);
                     }
                 }
                 Some(Incoming::Request { id, method, params }) => {
@@ -6435,6 +6667,14 @@ async fn run_session(session: Session) {
                                     let events =
                                         session_update_events(&method, &params, &session_id, &mut subagents);
                                     for ev in events {
+                                        if (preempt_sent
+                                            || stopping
+                                            || interrupted
+                                            || cancel_flush_deadline.is_some())
+                                            && is_synthetic_cancel_chunk(harness, &ev)
+                                        {
+                                            continue;
+                                        }
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;
                                             break;
@@ -6844,6 +7084,7 @@ async fn run_session(session: Session) {
                         {
                             client.notify("session/cancel", Some(cancel_params(harness, &session_id)));
                             preempt_sent = true;
+                            preempt_deadline = Some(tokio::time::Instant::now() + stop_timeout);
                         }
                     }
                 }
@@ -6869,6 +7110,7 @@ async fn run_session(session: Session) {
                 deferred.clear();
                 released = None;
                 preempt_pending = false;
+                preempt_deadline = None;
                 if turn.is_some() {
                     stopping = true;
                     stop_deadline = Some(tokio::time::Instant::now() + stop_timeout);
@@ -6938,27 +7180,73 @@ async fn run_session(session: Session) {
                 }
             },
 
+            // A steer's preempt cancel went unanswered: retire the wedged
+            // process with Done { Errored } (NOT Interrupted!) so the engine
+            // re-dispatches the unconfirmed steer in a fresh process once
+            // `child.shutdown` finishes reaping this one.
+            _ = tokio::time::sleep_until(preempt_deadline.unwrap_or_else(tokio::time::Instant::now)),
+                if preempt_deadline.is_some() && !interrupted && !stopping =>
+            {
+                preempt_deadline = None;
+                if turn.is_some() && preempt_sent {
+                    tracing::warn!(
+                        target: "zeron_harness::acp",
+                        "{agent_name} did not settle a steer-preempt cancel within {}s; retiring the process",
+                        stop_timeout.as_secs()
+                    );
+                    let (prev, _next) = rotate(&mut assistant_message_id);
+                    let _ = send(
+                        &event_tx,
+                        AgentEvent::AssistantMessageCompleted { assistant_message_id: prev },
+                    )
+                    .await;
+                    done_current = true;
+                    let _ = send(
+                        &event_tx,
+                        AgentEvent::Done {
+                            status: DoneStatus::Errored,
+                            result: None,
+                            error: Some(format!(
+                                "{agent_name} did not cancel the current turn in time to apply the steer; retiring the process."
+                            )),
+                            session_id: Some(session_id.clone()),
+                        },
+                    )
+                    .await;
+                    break 'main;
+                }
+            },
+
             // Prompt-stall watchdog: a prompt was sent and NOTHING has come
-            // back on the wire at all — no queue bookkeeping, no updates, no
-            // requests. Healthy grok acknowledges within milliseconds; total
-            // silence past the bound is a wedged agent (stale shared leader,
-            // launch-time update check). Surface a visible error instead of
-            // indefinite Working.
+            // back on the wire at all (or for Antigravity, total silence past
+            // the bound with no open tools or user questions). Surface a
+            // visible error instead of indefinite Working.
             _ = tokio::time::sleep_until(
                 prompt_stall_deadline.unwrap_or_else(tokio::time::Instant::now),
-            ), if prompt_stall_deadline.is_some() && turn.is_some() && !interrupted => {
-                let _ = send(
-                    &event_tx,
-                    AgentEvent::Error {
-                        message: format!(
-                            "{agent_name} did not respond to the prompt at all \
-                             (no wire activity for {}s). {}",
-                            prompt_stall.map(|d| d.as_secs()).unwrap_or(0),
-                            stall_hint,
-                        ),
-                    },
-                )
-                .await;
+            ), if prompt_stall_deadline.is_some()
+                && turn.is_some()
+                && open_tools.is_empty()
+                && questions.is_empty()
+                && !interrupted
+                && !stopping
+                && !preempt_sent =>
+            {
+                let message = if progress_seq == prompt_seq {
+                    format!(
+                        "{agent_name} stopped responding mid-turn \
+                         (no wire activity for {}s). {}",
+                        prompt_stall.map(|d| d.as_secs()).unwrap_or(0),
+                        stall_hint,
+                    )
+                } else {
+                    format!(
+                        "{agent_name} did not respond to the prompt at all \
+                         (no wire activity for {}s). {}",
+                        prompt_stall.map(|d| d.as_secs()).unwrap_or(0),
+                        stall_hint,
+                    )
+                };
+                let _ = send(&event_tx, AgentEvent::Error { message }).await;
                 done_current = true;
                 let _ = send(
                     &event_tx,
@@ -8676,6 +8964,199 @@ mod tests {
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].name, "compact");
         assert!(scan_available_commands(&json!({ "protocolVersion": 1 })).is_empty());
+    }
+
+    fn antigravity_1_5_session_response() -> Value {
+        json!({
+            "sessionId": "agy-150",
+            "configOptions": [
+                {
+                    "id": "model",
+                    "name": "Model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "gemini-3.8-flash",
+                    "options": [
+                        { "value": "gemini-3.8-flash", "name": "Gemini 3.8 Flash" },
+                        { "value": "gemini-4-neon", "name": "Gemini 4 Neon" },
+                        { "value": "gemini-4-hydrogen", "name": "Gemini 4 Hydrogen" },
+                        { "value": "gemini-4-carbon", "name": "Gemini 4 Carbon" },
+                        { "value": "gemini-4-argon", "name": "Gemini 4 Argon" },
+                        { "value": "gemini-3.1-pro", "name": "Gemini 3.1 Pro" }
+                    ]
+                },
+                {
+                    "id": "thinking_level",
+                    "name": "Thinking Level",
+                    "category": "thought_level",
+                    "type": "select",
+                    "currentValue": "high",
+                    "options": [
+                        { "value": "low", "name": "Low" },
+                        { "value": "medium", "name": "Medium" },
+                        { "value": "high", "name": "High" }
+                    ]
+                },
+                {
+                    "id": "mode",
+                    "name": "Session Mode",
+                    "category": "mode",
+                    "type": "select",
+                    "currentValue": "default",
+                    "options": [
+                        { "value": "default", "name": "Default" },
+                        { "value": "auto_edit", "name": "Auto Edit" },
+                        { "value": "yolo", "name": "YOLO" }
+                    ]
+                }
+            ],
+            "models": {
+                "currentModelId": "gemini-3.8-flash-high",
+                "availableModels": [
+                    { "modelId": "gemini-3.8-flash-low", "name": "Gemini 3.8 Flash (Low)" },
+                    { "modelId": "gemini-3.8-flash-medium", "name": "Gemini 3.8 Flash (Medium)" },
+                    { "modelId": "gemini-3.8-flash-high", "name": "Gemini 3.8 Flash (High)" },
+                    { "modelId": "gemini-4-neon-low", "name": "Gemini 4 Neon (Low)" },
+                    { "modelId": "gemini-4-neon-medium", "name": "Gemini 4 Neon (Medium)" },
+                    { "modelId": "gemini-4-neon-high", "name": "Gemini 4 Neon (High)" },
+                    { "modelId": "gemini-4-neon-xhigh", "name": "Gemini 4 Neon (Extra High)" },
+                    { "modelId": "gemini-4-hydrogen-low", "name": "Gemini 4 Hydrogen (Low)" },
+                    { "modelId": "gemini-4-hydrogen-medium", "name": "Gemini 4 Hydrogen (Medium)" },
+                    { "modelId": "gemini-4-hydrogen-high", "name": "Gemini 4 Hydrogen (High)" },
+                    { "modelId": "gemini-4-hydrogen-xhigh", "name": "Gemini 4 Hydrogen (Extra High)" },
+                    { "modelId": "gemini-4-carbon-low", "name": "Gemini 4 Carbon (Low)" },
+                    { "modelId": "gemini-4-carbon-medium", "name": "Gemini 4 Carbon (Medium)" },
+                    { "modelId": "gemini-4-carbon-high", "name": "Gemini 4 Carbon (High)" },
+                    { "modelId": "gemini-4-argon-low", "name": "Gemini 4 Argon (Low)" },
+                    { "modelId": "gemini-4-argon-medium", "name": "Gemini 4 Argon (Medium)" },
+                    { "modelId": "gemini-4-argon-high", "name": "Gemini 4 Argon (High)" },
+                    { "modelId": "gemini-pro-agent", "name": "Gemini 3.1 Pro (High)" },
+                    { "modelId": "gemini-3.1-pro-low", "name": "Gemini 3.1 Pro (Low)" }
+                ]
+            }
+        })
+    }
+
+    #[test]
+    fn antigravity_1_5_discovers_per_model_effort_levels_from_available_models() {
+        let models = models_from_session_wire(&antigravity_1_5_session_response(), &[]);
+        let levels = |id: &str| {
+            models
+                .iter()
+                .find(|m| m.id == id)
+                .unwrap_or_else(|| panic!("missing model {id}: {models:?}"))
+                .reasoning_levels
+                .clone()
+        };
+        assert_eq!(
+            levels("gemini-4-neon"),
+            vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+                ReasoningLevel::XHigh,
+            ]
+        );
+        assert_eq!(
+            levels("gemini-4-hydrogen"),
+            vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+                ReasoningLevel::XHigh,
+            ]
+        );
+        for id in ["gemini-3.8-flash", "gemini-4-carbon", "gemini-4-argon"] {
+            assert_eq!(
+                levels(id),
+                vec![
+                    ReasoningLevel::Low,
+                    ReasoningLevel::Medium,
+                    ReasoningLevel::High,
+                ],
+                "unexpected levels for {id}"
+            );
+        }
+        assert_eq!(
+            levels("gemini-3.1-pro"),
+            vec![ReasoningLevel::Low, ReasoningLevel::High]
+        );
+    }
+
+    #[test]
+    fn antigravity_1_5_maps_legacy_variant_ids_and_infers_effort() {
+        let session = antigravity_1_5_session_response();
+        assert_eq!(
+            resolve_effort_model(&session, "gemini-4-neon-xhigh", None),
+            ("gemini-4-neon".into(), Some(ReasoningLevel::XHigh))
+        );
+        assert_eq!(
+            resolve_effort_model(&session, "gemini-4-neon-xhigh", Some(ReasoningLevel::Low)),
+            ("gemini-4-neon".into(), Some(ReasoningLevel::Low))
+        );
+        assert_eq!(
+            resolve_effort_model(&session, "gemini-pro-agent", None),
+            ("gemini-3.1-pro".into(), Some(ReasoningLevel::High))
+        );
+        assert_eq!(
+            resolve_effort_model(&session, "gemini-4-neon", Some(ReasoningLevel::XHigh)),
+            ("gemini-4-neon".into(), Some(ReasoningLevel::XHigh))
+        );
+        let (unknown, level) = resolve_effort_model(&session, "unknown-model", None);
+        assert_eq!(unknown, "unknown-model");
+        assert_eq!(level, None);
+        assert!(
+            validate_config_model_selection(&session, Some(&unknown), &Default::default()).is_err()
+        );
+    }
+
+    #[test]
+    fn antigravity_session_unrestorable_matches_corrupt_trajectory_db_but_keeps_transient_errors() {
+        for corrupt in [
+            "session/resume failed (code -32603): failed to setup trajectory: file is not a database",
+            "session/resume failed (code -32603): failed to load/create db trajectory",
+            "session/load failed (code -32603): doneCh for checkpoint never closed",
+            "session/resume failed (code -32603): sqlite3: database disk image is malformed",
+            "session/resume failed (code -32603): malformed database schema (steps)",
+            "session/resume failed (code -32603): failed to load trajectory from store",
+        ] {
+            assert!(
+                session_unrestorable(HarnessId::Antigravity, &HarnessError::Protocol(corrupt.into())),
+                "expected unrestorable: {corrupt}"
+            );
+        }
+        for retryable in [
+            "session/resume failed (code -32000): Authentication required",
+            "session/resume timed out after 30s",
+            "session/resume failed (code -32603): connection reset by peer",
+            "session/resume failed (code -32603): MCP server failed to start",
+        ] {
+            assert!(
+                !session_unrestorable(
+                    HarnessId::Antigravity,
+                    &HarnessError::Protocol(retryable.into())
+                ),
+                "expected retryable: {retryable}"
+            );
+        }
+        assert!(!session_unrestorable(
+            HarnessId::Antigravity,
+            &HarnessError::Io(std::io::Error::other("broken pipe"))
+        ));
+    }
+
+    #[test]
+    fn antigravity_synthetic_cancel_chunk_detection() {
+        let cancel = AgentEvent::TextDelta {
+            text: "The request was cancelled by the client.\n".into(),
+        };
+        let real = AgentEvent::TextDelta {
+            text: "Here is the answer.".into(),
+        };
+        assert!(is_synthetic_cancel_chunk(HarnessId::Antigravity, &cancel));
+        assert!(!is_synthetic_cancel_chunk(HarnessId::Antigravity, &real));
+        assert!(!is_synthetic_cancel_chunk(HarnessId::Grok, &cancel));
+        assert!(!is_synthetic_cancel_chunk(HarnessId::Devin, &cancel));
     }
 }
 

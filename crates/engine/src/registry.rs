@@ -1153,16 +1153,16 @@ fn full_registry() -> HarnessRegistry {
         Box::new(|| Ok(Arc::new(zeron_harness::OpencodeHarness::new()) as Arc<dyn Harness>)),
     );
     // antigravity over acp (google's agy_acp_server), same lazy pattern: the
-    // static descriptor mirrors AcpHarness::antigravity() exactly. No steering
-    // extension (turn boundaries), and effort is baked into the model ids, so
-    // the ladder lives on each model rather than the harness.
+    // static descriptor mirrors AcpHarness::antigravity() exactly. Step-boundary
+    // preemption (verified on 1.5.0), and effort lives on each model rather than
+    // the harness.
     registry.register_lazy(
         HarnessDescriptor {
             icon: None,
             id: HarnessId::Antigravity,
             name: "Antigravity".into(),
             supports_steering: true,
-            steering_mode: SteeringMode::TurnBoundary,
+            steering_mode: SteeringMode::StepBoundary,
             reasoning_levels: Vec::new(),
             installed: true,
             can_install: false,
@@ -1359,7 +1359,7 @@ mod tests {
         let antigravity = registry.resolve(HarnessId::Antigravity).unwrap();
         assert_eq!(antigravity.id(), HarnessId::Antigravity);
         assert_eq!(antigravity.display_name(), "Antigravity");
-        assert_eq!(antigravity.steering_mode(), SteeringMode::TurnBoundary);
+        assert_eq!(antigravity.steering_mode(), SteeringMode::StepBoundary);
         assert!(antigravity.reasoning_levels().is_empty());
         let pi = registry.resolve(HarnessId::Pi).unwrap();
         assert_eq!(pi.id(), HarnessId::Pi);
