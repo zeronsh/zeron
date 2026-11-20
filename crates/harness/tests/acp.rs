@@ -1285,7 +1285,7 @@ fn antigravity_descriptor_surface_matches_registry_expectations() {
     assert_eq!(antigravity.id(), HarnessId::Antigravity);
     assert_eq!(antigravity.display_name(), "Antigravity");
     assert!(antigravity.supports_steering());
-    assert_eq!(antigravity.steering_mode(), SteeringMode::TurnBoundary);
+    assert_eq!(antigravity.steering_mode(), SteeringMode::StepBoundary);
     assert!(antigravity.reasoning_levels().is_empty());
 }
 
@@ -3142,4 +3142,415 @@ async fn auto_without_a_safe_fallback_refuses_before_launch() {
         ..explicit.clone()
     };
     assert!(AcpHarness::devin().reconfigures_in_place(&full, &explicit));
+}
+
+#[cfg(unix)]
+fn write_executable_script(dir: &tempfile::TempDir, name: &str, script: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.path().join(name);
+    std::fs::write(&path, script).expect("write script");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
+    path
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn antigravity_1_5_two_pass_switches_model_before_xhigh_effort() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = write_executable_script(
+        &dir,
+        "fake-agy-150.py",
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+def opts(model, effort, mode):
+    efforts = [
+        {"value": "low", "name": "Low"},
+        {"value": "medium", "name": "Medium"},
+        {"value": "high", "name": "High"},
+    ]
+    if model in ("gemini-4-neon", "gemini-4-hydrogen"):
+        efforts.append({"value": "xhigh", "name": "Extra High"})
+    return [
+        {
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": model,
+            "options": [
+                {"value": "gemini-3.8-flash", "name": "Gemini 3.8 Flash"},
+                {"value": "gemini-4-neon", "name": "Gemini 4 Neon"},
+            ],
+        },
+        {
+            "id": "thinking_level",
+            "name": "Thinking Level",
+            "category": "thought_level",
+            "type": "select",
+            "currentValue": effort,
+            "options": efforts,
+        },
+        {
+            "id": "mode",
+            "name": "Session Mode",
+            "category": "mode",
+            "type": "select",
+            "currentValue": mode,
+            "options": [
+                {"value": "default", "name": "Default"},
+                {"value": "yolo", "name": "YOLO"},
+            ],
+        },
+    ]
+
+model, effort, mode = "gemini-3.8-flash", "high", "default"
+sets = []
+for raw in sys.stdin:
+    msg = json.loads(raw)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": "agy-150", "configOptions": opts(model, effort, mode)}})
+    elif method == "session/set_config_option":
+        cid = msg["params"]["configId"]
+        val = msg["params"]["value"]
+        sets.append(f"{cid}={val}")
+        if cid == "model":
+            model = val
+        elif cid == "thinking_level":
+            effort = val
+        elif cid == "mode":
+            mode = val
+        send({"jsonrpc": "2.0", "id": mid, "result": {"configOptions": opts(model, effort, mode)}})
+    elif method == "session/prompt":
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "agy-150",
+            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "sets:" + ";".join(sets)}}
+        }})
+        send({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}})
+        break
+"#,
+    );
+    let harness = AcpHarness::antigravity().with_executable(&script);
+    let mut req = request("hi");
+    req.model = Some("gemini-4-neon".into());
+    req.reasoning = Some(ReasoningLevel::XHigh);
+    req.access = AccessMode::FullAccess;
+    let (controls, _steer, _token) = controls();
+    let events = run_to_end(&harness, req, controls).await;
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "sets:model=gemini-4-neon;thinking_level=xhigh;mode=yolo");
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn antigravity_step_boundary_steer_waits_for_tool_suppresses_cancel_chunk_and_continues() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = write_executable_script(
+        &dir,
+        "fake-agy-steer.py",
+        r#"#!/usr/bin/env python3
+import json, sys, threading, time
+
+lock = threading.Lock()
+def send(obj):
+    with lock:
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
+
+cancel_event = threading.Event()
+tool_done = threading.Event()
+cancel_seen_before_tool_done = False
+prompt_count = 0
+
+def handle_prompt(mid, text):
+    global prompt_count
+    prompt_count += 1
+    if prompt_count == 1:
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "agy-steer",
+            "update": {"sessionUpdate": "tool_call", "toolCallId": "tc-1", "title": "Read file", "kind": "read", "status": "in_progress"}
+        }})
+        time.sleep(0.25)
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "agy-steer",
+            "update": {"sessionUpdate": "tool_call_update", "toolCallId": "tc-1", "status": "completed", "rawOutput": "ok"}
+        }})
+        tool_done.set()
+        cancel_event.wait(timeout=5.0)
+        # Real agy_acp_server 1.5.0 emits this synthetic chunk on cancel.
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "agy-steer",
+            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "The request was cancelled by the client."}}
+        }})
+        send({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "cancelled"}})
+    else:
+        marker = "EARLY_CANCEL" if cancel_seen_before_tool_done else "AFTER_TOOL"
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "agy-steer",
+            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": f"{marker}:{text}"}}
+        }})
+        send({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}})
+
+for raw in sys.stdin:
+    msg = json.loads(raw)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": "agy-steer"}})
+    elif method == "session/cancel":
+        if not tool_done.is_set():
+            cancel_seen_before_tool_done = True
+        cancel_event.set()
+    elif method == "session/prompt":
+        prompt_text = msg["params"]["prompt"][0]["text"]
+        threading.Thread(target=handle_prompt, args=(mid, prompt_text), daemon=True).start()
+"#,
+    );
+    let harness = AcpHarness::antigravity().with_executable(&script);
+    let (controls, steer_tx, _token) = controls();
+    let mut stream = harness.run(request("first turn"), controls).await.unwrap();
+    let mut events = Vec::new();
+    let mut steered_sent = false;
+    while let Some(item) = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("turn finished")
+    {
+        let ev = item.expect("stream event");
+        if matches!(ev, AgentEvent::ToolCall { .. }) && !steered_sent {
+            steered_sent = true;
+            steer_tx.send(SteerMessage::text("pivot now")).await.unwrap();
+        }
+        let is_done = matches!(ev, AgentEvent::Done { .. });
+        events.push(ev);
+        if is_done {
+            break;
+        }
+    }
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !text.contains("cancelled by the client"),
+        "synthetic cancel chunk leaked: {text:?}"
+    );
+    assert!(
+        text.contains("AFTER_TOOL:pivot now"),
+        "expected steer after tool completion: {text:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Steered { .. })),
+        "missing Steered event: {events:?}"
+    );
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn antigravity_wedged_preempt_cancel_errors_instead_of_hanging_or_interrupting() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = write_executable_script(
+        &dir,
+        "fake-agy-wedged-cancel.py",
+        r#"#!/usr/bin/env python3
+import json, sys, time
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for raw in sys.stdin:
+    msg = json.loads(raw)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": "agy-wedge"}})
+    elif method == "session/prompt":
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "agy-wedge",
+            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "partial"}}
+        }})
+    elif method == "session/cancel":
+        # Wedge: ignore cancel and never resolve session/prompt.
+        time.sleep(30)
+"#,
+    );
+    let harness = AcpHarness::antigravity()
+        .with_executable(&script)
+        .with_stop_timeout(Duration::from_millis(350))
+        .with_graces(Duration::from_millis(100), Duration::from_millis(200));
+    let (controls, steer_tx, _token) = controls();
+    let mut stream = harness.run(request("first"), controls).await.unwrap();
+    let mut events = Vec::new();
+    let mut sent = false;
+    while let Some(item) = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("wedged preempt settled within stop_timeout")
+    {
+        let ev = item.expect("stream event");
+        if matches!(ev, AgentEvent::TextDelta { .. }) && !sent {
+            sent = true;
+            steer_tx.send(SteerMessage::text("steer me")).await.unwrap();
+        }
+        events.push(ev);
+    }
+    let done = dones(&events);
+    assert_eq!(done.len(), 1, "{events:?}");
+    assert_eq!(
+        done[0].0,
+        DoneStatus::Errored,
+        "wedged steer cancel must error (not interrupt) so the engine can re-dispatch the steer: {events:?}"
+    );
+    assert!(
+        done[0]
+            .1
+            .as_deref()
+            .is_some_and(|e| e.contains("did not cancel the current turn in time")),
+        "{done:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn antigravity_corrupt_resume_recovers_with_prior_history_from_turn_control() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = write_executable_script(
+        &dir,
+        "fake-agy-corrupt.py",
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for raw in sys.stdin:
+    msg = json.loads(raw)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {
+            "protocolVersion": 1,
+            "agentCapabilities": {"loadSession": True, "sessionCapabilities": {"resume": {}}}
+        }})
+    elif method == "session/resume":
+        send({"jsonrpc": "2.0", "id": mid, "error": {
+            "code": -32603,
+            "message": "failed to setup trajectory: file is not a database"
+        }})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": "agy-fresh"}})
+    elif method == "session/prompt":
+        prompt_text = msg["params"]["prompt"][0]["text"]
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "agy-fresh",
+            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ECHO:" + prompt_text}}
+        }})
+        send({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}})
+        break
+"#,
+    );
+    let harness = AcpHarness::antigravity().with_executable(&script);
+    let mut req = request("what was the secret?");
+    req.resume = Some("corrupt-db-session".into());
+    let (controls, _steer, _token) = controls();
+    controls.turn.set_recovery_prompt(Some(
+        "<conversation>[{\"role\":\"user\",\"text\":\"secret is OBSIDIAN-742\"}]</conversation>\n\nwhat was the secret?".into(),
+    ));
+    let events = run_to_end(&harness, req, controls).await;
+    let notice = events.iter().find_map(|e| match e {
+        AgentEvent::Error { message } => Some(message.as_str()),
+        _ => None,
+    });
+    assert!(
+        notice.is_some_and(|m| m.contains("prior conversation history")),
+        "expected history-recovery notice: {events:?}"
+    );
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        text.contains("OBSIDIAN-742") && text.ends_with("what was the secret?"),
+        "expected replayed history in fresh prompt: {text:?}"
+    );
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn antigravity_streams_agent_thought_chunk_as_reasoning_delta() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = write_executable_script(
+        &dir,
+        "fake-agy-thoughts.py",
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for raw in sys.stdin:
+    msg = json.loads(raw)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": "agy-think"}})
+    elif method == "session/prompt":
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "agy-think",
+            "update": {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "Checking factors..."}}
+        }})
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "agy-think",
+            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "42"}}
+        }})
+        send({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}})
+        break
+"#,
+    );
+    let harness = AcpHarness::antigravity().with_executable(&script);
+    let (controls, _steer, _token) = controls();
+    let events = run_to_end(&harness, request("think"), controls).await;
+    assert!(
+        events.contains(&AgentEvent::ReasoningDelta {
+            text: "Checking factors...".into()
+        }),
+        "expected ReasoningDelta: {events:?}"
+    );
+    assert!(
+        events.contains(&AgentEvent::TextDelta { text: "42".into() }),
+        "expected TextDelta: {events:?}"
+    );
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
 }
