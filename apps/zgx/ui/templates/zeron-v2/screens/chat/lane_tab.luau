@@ -621,10 +621,20 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			end
 			local mid = store.new_id()
 			req.message_id = mid
+			local catalog = store.catalog:peek()
+			local from_h = T.session_harness(catalog, session:peek())
+			local to_h = req.harness or (if type(req.model) == "string" then string.match(req.model, "^([^/]+)/") else nil)
+			local sw = if not is_unsent then T.switch_row(catalog, from_h, to_h, mid) else nil
 			local sent: any = nil
 			T.send(function()
 				local here = view.messages:index_of("id", mid) ~= nil
 				if not here then
+					if sw and view.messages:len() > 0 then
+						local tail = view.messages:at(view.messages:len())
+						if (not tail or tail.role ~= "switch") and view.messages:index_of("id", sw.id) == nil then
+							view.messages:push(sw)
+						end
+					end
 					-- (On its way from this moment: the line under it says so.)
 					view.messages:push { id = mid, role = "user", text = typed, attachments = Carried.shown(pack), waiting = "sending" }
 				end

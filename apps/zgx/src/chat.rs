@@ -142,6 +142,9 @@ struct Chats {
     /// Moves with each chat let go of: only the last one's look at the
     /// footprint, once the app has rested, counts.
     let_go_turn: Cell<u64>,
+    /// Optimistic provider-switch seams recorded on send until the engine's
+    /// real `switch:<ts>` system entry arrives right before `before_message_id`.
+    pending_switches: RefCell<HashMap<String, Vec<PendingSwitch>>>,
 }
 
 /// A transcript's entry. A settled one, built into its row and older than
@@ -905,6 +908,191 @@ impl Pending {
             ("at", self.at.as_deref().map_or(Value::Nil, Value::from)),
             ("copy", copy_value(&words)),
         ])
+    }
+}
+
+/// An optimistic provider-switch seam inserted directly before
+/// `before_message_id` from the moment the user sends until the engine's real
+/// `switch:<ts>` system entry arrives (surviving the brief window where the
+/// user message enters the doc before `write_provider_switch` runs).
+#[derive(Clone)]
+struct PendingSwitch {
+    before_message_id: String,
+    id: String,
+    from: String,
+    to: String,
+    from_mark: Option<String>,
+    to_mark: Option<String>,
+    to_harness: String,
+}
+
+impl PendingSwitch {
+    fn value(&self) -> Value {
+        Value::record([
+            ("id", Value::from(self.id.as_str())),
+            ("role", Value::from("switch")),
+            ("text", Value::from("")),
+            ("from", Value::from(self.from.as_str())),
+            ("to", Value::from(self.to.as_str())),
+            ("from_mark", self.from_mark.as_deref().map_or(Value::Nil, Value::from)),
+            ("to_mark", self.to_mark.as_deref().map_or(Value::Nil, Value::from)),
+        ])
+    }
+}
+
+fn known_harness_name(id: &str) -> &str {
+    match id {
+        "claude-code" => "Claude Code",
+        "codex" => "Codex",
+        "cursor" => "Cursor",
+        "grok" => "Grok",
+        "devin" => "Devin",
+        "opencode" => "OpenCode",
+        "pi" => "Pi",
+        "hermes" => "Hermes",
+        "antigravity" => "Antigravity",
+        "muse" => "Muse",
+        "mock" => "Mock",
+        _ => id,
+    }
+}
+
+fn latest_doc_switch_harness(entries: &[Entry]) -> Option<String> {
+    entries.iter().rev().find_map(|entry| {
+        let json = entry.json.as_ref()?;
+        if json["role"].as_str() != Some("system") {
+            return None;
+        }
+        json["parts"]
+            .as_array()?
+            .iter()
+            .find(|p| p["kind"].as_str() == Some("switch"))
+            .and_then(|p| p["toHarness"].as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    })
+}
+
+impl Chats {
+    fn harness_display_name(&self, id: &str) -> String {
+        let find = |list: &[Json]| {
+            list.iter()
+                .find(|h| h["id"].as_str() == Some(id))
+                .and_then(|h| h["name"].as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        };
+        find(&self.harnesses.borrow())
+            .or_else(|| self.remote.borrow().as_ref().and_then(|r| find(&r.harnesses)))
+            .or_else(|| self.known_remotes.borrow().values().find_map(|r| find(&r.harnesses)))
+            .unwrap_or_else(|| known_harness_name(id).to_owned())
+    }
+
+    fn record_pending_switch(
+        &self,
+        chat_id: &str,
+        before_message_id: &str,
+        from_harness: &str,
+        to_harness: &str,
+    ) {
+        if from_harness.is_empty() || to_harness.is_empty() || from_harness == to_harness {
+            return;
+        }
+        let sw = PendingSwitch {
+            before_message_id: before_message_id.to_owned(),
+            id: format!("switch:{before_message_id}"),
+            from: single_line(&self.harness_display_name(from_harness)),
+            to: single_line(&self.harness_display_name(to_harness)),
+            from_mark: switch_mark(from_harness),
+            to_mark: switch_mark(to_harness),
+            to_harness: to_harness.to_owned(),
+        };
+        let mut all = self.pending_switches.borrow_mut();
+        let entry = all.entry(chat_id.to_owned()).or_default();
+        entry.retain(|existing| existing.before_message_id != before_message_id);
+        entry.push(sw);
+    }
+
+    fn forget_pending_switch(&self, chat_id: &str, before_message_id: &str) {
+        let mut all = self.pending_switches.borrow_mut();
+        if let Some(list) = all.get_mut(chat_id) {
+            list.retain(|sw| sw.before_message_id != before_message_id);
+            if list.is_empty() {
+                all.remove(chat_id);
+            }
+        }
+    }
+
+    fn latest_pending_switch_harness(&self, chat_id: &str, exclude_message_id: &str) -> Option<String> {
+        self.pending_switches
+            .borrow()
+            .get(chat_id)?
+            .iter()
+            .rev()
+            .find(|sw| sw.before_message_id != exclude_message_id)
+            .map(|sw| sw.to_harness.clone())
+    }
+
+    fn apply_pending_switches(&self, chat_id: &str, list: &mut Vec<Value>) {
+        let mut all = self.pending_switches.borrow_mut();
+        let Some(switches) = all.get_mut(chat_id) else {
+            return;
+        };
+        let mut keep = Vec::with_capacity(switches.len());
+        for sw in switches.drain(..) {
+            let pos = list.iter().position(|row| {
+                row.field("id").and_then(|v| match v {
+                    Value::Str(s) => Some(s.as_ref()),
+                    _ => None,
+                }) == Some(sw.before_message_id.as_str())
+            });
+            let Some(pos) = pos else {
+                let pending_in_any_view = self.views().into_iter().any(|v| {
+                    v.pending
+                        .borrow()
+                        .get(chat_id)
+                        .is_some_and(|prompts| prompts.iter().any(|p| p.id == sw.before_message_id))
+                });
+                if list.is_empty() || pending_in_any_view {
+                    keep.push(sw);
+                }
+                continue;
+            };
+            let already_preceded_by_switch = pos > 0
+                && list[pos - 1].field("role").and_then(|v| match v {
+                    Value::Str(s) => Some(s.as_ref()),
+                    _ => None,
+                }) == Some("switch");
+            if already_preceded_by_switch {
+                // Engine's real `switch:<ts>` landed directly before this prompt.
+                continue;
+            }
+            let reply_already_started = list[pos + 1..].iter().any(|row| {
+                row.field("role").and_then(|v| match v {
+                    Value::Str(s) => Some(s.as_ref()),
+                    _ => None,
+                }) == Some("assistant")
+            });
+            if reply_already_started {
+                // Turn started without a switch entry; drop the optimistic seam.
+                continue;
+            }
+            let already_has_id = list.iter().any(|row| {
+                row.field("id").and_then(|v| match v {
+                    Value::Str(s) => Some(s.as_ref()),
+                    _ => None,
+                }) == Some(sw.id.as_str())
+            });
+            if !already_has_id {
+                list.insert(pos, sw.value());
+            }
+            keep.push(sw);
+        }
+        if keep.is_empty() {
+            all.remove(chat_id);
+        } else {
+            *switches = keep;
+        }
     }
 }
 
@@ -2783,6 +2971,7 @@ impl View {
                 list.extend(pending.iter().map(Pending::value));
             }
             one_row_per_id(&mut list);
+            chats.apply_pending_switches(&open.id, &mut list);
             list
         };
         // The list first: a reply that ended takes its words into its row
@@ -2853,6 +3042,7 @@ impl View {
         let prompts = pending.entry(id.clone()).or_default();
         // (Shown already while its chat was being made: `chat.creating`.)
         prompts.retain(|p| p.id != message_id);
+        let had_earlier_pending = !prompts.is_empty();
         prompts.push(Pending {
             id: message_id.clone(),
             words: words.clone(),
@@ -2865,6 +3055,42 @@ impl View {
             transfers: Vec::new(),
         });
         drop(pending);
+        if !fresh && !chats.running(&id) {
+            let to_h = req
+                .field("harness")
+                .map(text)
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    req.field("model")
+                        .map(text)
+                        .and_then(|m| m.split_once('/').map(|(h, _)| h.to_owned()))
+                        .filter(|s| !s.is_empty())
+                });
+            let (has_doc_entries, doc_switch_h) = self
+                .open
+                .borrow()
+                .as_ref()
+                .filter(|o| o.id == id)
+                .map(|o| (!o.entries.is_empty(), latest_doc_switch_harness(&o.entries)))
+                .unwrap_or((false, None));
+            let has_messages = has_doc_entries || had_earlier_pending;
+            if has_messages && let Some(to_h) = to_h {
+                let from_h = chats
+                    .latest_pending_switch_harness(&id, &message_id)
+                    .or(doc_switch_h)
+                    .or_else(|| {
+                        chats
+                            .shown_config(&id, &chat)
+                            .get("harness")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned)
+                    });
+                if let Some(from_h) = from_h {
+                    chats.record_pending_switch(&id, &message_id, &from_h, &to_h);
+                }
+            }
+        }
         self.publish_messages();
         // To a chat Cloud is still making: after its first message, which
         // goes once it's made (`chat.send`'s flush).
@@ -3134,6 +3360,8 @@ impl View {
                 pending.remove(id);
             }
         }
+        drop(pending);
+        CHATS.with(|c| c.forget_pending_switch(id, message_id));
     }
 
     /// A send taken out of this device's outbox (`RemoveHeldSend`, #1256): it

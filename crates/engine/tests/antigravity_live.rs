@@ -514,3 +514,73 @@ async fn antigravity_1_5_live_e2e_discovery_steer_stop_and_corrupt_recovery() {
     );
     eprintln!("ALL 6 LIVE CHECKS PASSED!");
 }
+
+#[tokio::test]
+#[ignore = "hits live Antigravity CCPA backend using isolated GEMINI_HOME"]
+async fn antigravity_live_neon_streams_reasoning_summaries() {
+    let bin = antigravity_binary();
+    assert!(bin.is_file(), "missing Antigravity binary at {}", bin.display());
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let data_dir = tmp.path().join("zeron-data");
+    let work_dir = tmp.path().join("work");
+    std::fs::create_dir_all(&work_dir).expect("mkdir work");
+    let gemini_home = prepare_isolated_gemini_home(&tmp);
+
+    let core = assemble(&data_dir, &bin);
+    pre_title(&core, &work_dir);
+
+    let req = make_request(
+        &work_dir,
+        &gemini_home,
+        "gemini-4-neon",
+        ReasoningLevel::High,
+        "Compute 17 * 23 step by step, then answer with just the number.",
+    );
+    core.doc_host
+        .queue_command(
+            CHAT,
+            SessionCommandPayload::Run {
+                request: req,
+                message_id: "neon-think-1".into(),
+            },
+        )
+        .expect("queue_command succeeds");
+    wait_for(
+        || complete_assistant_count(&core) >= 1,
+        120,
+        "Neon reasoning turn completes",
+    )
+    .await;
+
+    let entries = entries_now(&core);
+    let assistant = entries
+        .iter()
+        .rev()
+        .find(|e| e.role == MessageRole::Assistant)
+        .expect("assistant entry present");
+    let reasoning: String = assistant
+        .parts
+        .iter()
+        .filter_map(|p| match p {
+            MessagePart::Reasoning { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let text = entry_text(assistant);
+    eprintln!("LIVE NEON REASONING ({} chars): {:?}", reasoning.len(), reasoning);
+    eprintln!("LIVE NEON ANSWER: {:?}", text);
+
+    core.shutdown().await;
+
+    assert!(
+        !reasoning.trim().is_empty(),
+        "expected non-empty Reasoning parts from gemini-4-neon via CCPA thoughts proxy; parts={:?}",
+        assistant.parts
+    );
+    assert!(
+        text.contains("391"),
+        "expected answer containing 391, got: {text:?}"
+    );
+}
+

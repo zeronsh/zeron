@@ -853,3 +853,142 @@ test("the conversation width setting widens the transcript and the composer", fu
 	local w = widest_reply()
 	expect(w > 660 + 24 and w <= 900 + 24).to_be(true)
 end)
+
+test("switching provider shows its seam immediately on send and frames it inside the runway", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	app:command("catalog_grows")
+	open(app, "s1")
+	-- Pick a model on Codex (switching away from s1's Claude Code).
+	app:click('role:button "Model"')
+	settle(app)
+	app:click(".folded")
+	settle(app)
+	app:click('role:tab "Codex"')
+	settle(app)
+	app:click('role:option ~"GPT-5.5"')
+	settle(app)
+
+	app:type('role:textbox "Message"', "Tear it to pieces")
+	app:key("Enter")
+	local id: string? = nil
+	local seam_id: string? = nil
+	local saw_seam_on_first_frame = false
+	local ys: { number } = {}
+	local pill = false
+	for _ = 1, 60 do
+		app:frames(1)
+		if not id then
+			local ms = app:state("chat.messages")
+			local tail = ms[#ms]
+			if tail and tail.text == "Tear it to pieces" then
+				id = tail.id
+				local prev = ms[#ms - 1]
+				if prev and prev.role == "switch" then
+					seam_id = prev.id
+					saw_seam_on_first_frame = true
+				end
+			end
+		end
+		if id then
+			local y = y_of_id(app, id)
+			if y then
+				table.insert(ys, y)
+			end
+		end
+		pill = pill or app:has('role:button "Jump to latest"')
+	end
+	expect(saw_seam_on_first_frame).to_be(true)
+	expect(seam_id).never.to_be_nil()
+	expect(eased(ys)).to_be_nil()
+	expect(pill).to_be(false)
+
+	-- After landing: the switch seam sits cleanly inside the top of #transcript,
+	-- NOT clipped off the top, with the user prompt right beneath it.
+	local _, list_y = box(app, "#transcript")
+	local seam_y = y_in(app:tree("#transcript"), '"Codex"')
+	local prompt_y = y_of_id(app, id :: string)
+	expect(seam_y ~= nil and prompt_y ~= nil).to_be(true)
+	expect((seam_y :: number) >= list_y).to_be(true)
+	expect((seam_y :: number) - list_y < 60).to_be(true)
+	expect((prompt_y :: number) > (seam_y :: number)).to_be(true)
+
+	-- Holds steady as the engine copy, reply, and tools arrive.
+	app:command("engine_copy")
+	settle(app)
+	expect(math.abs((y_in(app:tree("#transcript"), '"Codex"') :: number) - (seam_y :: number)) <= 2).to_be(true)
+	expect(math.abs((y_of_id(app, id :: string) :: number) - (prompt_y :: number)) <= 2).to_be(true)
+	app:command("start_reply")
+	app:command("stream_words")
+	app:command("add_tool")
+	settle(app)
+	expect((y_in(app:tree("#transcript"), '"Codex"') :: number) >= list_y).to_be(true)
+	expect(math.abs((y_of_id(app, id :: string) :: number) - (prompt_y :: number)) <= 2).to_be(true)
+	app:command("end_reply")
+	settle(app)
+	expect(math.abs((y_in(app:tree("#transcript"), '"Codex"') :: number) - (seam_y :: number)) <= 2).to_be(true)
+end)
+
+test("a short chat's next message glides smoothly into its runway instead of cutting", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	open(app, "s2")
+	local ys, pill, id = glide(app, "Follow up on short chat")
+	expect(pill).to_be(false)
+	expect(id).never.to_be_nil()
+	local from, to = ys[1], ys[#ys]
+	expect(from ~= nil and to ~= nil).to_be(true)
+	-- Starts below the first turn and glides smoothly to the top (not a 1-frame cut).
+	expect((from :: number) > 150).to_be(true)
+	expect((to :: number) < 120).to_be(true)
+	local between = 0
+	for i = 2, #ys do
+		local step = ys[i - 1] - ys[i]
+		expect(step >= -0.5).to_be(true)
+		expect(step <= 0.25 * ((from :: number) - (to :: number))).to_be(true)
+		if ys[i] < (from :: number) - 2 and ys[i] > (to :: number) + 2 then
+			between += 1
+		end
+	end
+	expect(between >= 5).to_be(true)
+	-- Stays pinned after settling and as the reply streams (no upward drift).
+	settle(app)
+	expect(math.abs((y_of_id(app, id :: string) :: number) - (to :: number)) <= 2).to_be(true)
+	app:command("engine_copy")
+	app:command("start_reply")
+	app:command("stream_words")
+	settle(app)
+	expect(math.abs((y_of_id(app, id :: string) :: number) - (to :: number)) <= 2).to_be(true)
+end)
+
+test("consecutive sends settle flush at the top with no upward scroll drift", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	open(app, "s1")
+	local ys1, pill1, id1 = glide(app, "First turn here")
+	expect(eased(ys1)).to_be_nil()
+	expect(pill1).to_be(false)
+	local landed1 = ys1[#ys1]
+	settle(app)
+	expect(math.abs((y_of_id(app, id1 :: string) :: number) - landed1) <= 2).to_be(true)
+
+	app:command("engine_copy")
+	app:command("start_reply")
+	for _ = 1, 4 do
+		app:command("stream_words")
+		app:frames(2)
+	end
+	app:command("end_reply")
+	settle(app)
+
+	local ys2, pill2, id2 = glide(app, "Second turn right after")
+	expect(eased(ys2)).to_be_nil()
+	expect(pill2).to_be(false)
+	local landed2 = ys2[#ys2]
+	local _, list_y = box(app, "#transcript")
+	expect(landed2 >= list_y).to_be(true)
+	expect(landed2 - list_y < 60).to_be(true)
+	settle(app)
+	expect(math.abs((y_of_id(app, id2 :: string) :: number) - landed2) <= 2).to_be(true)
+end)
+

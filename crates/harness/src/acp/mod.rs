@@ -34,6 +34,7 @@
 
 mod antigravity_eligibility;
 mod antigravity_paths;
+mod ccpa_thoughts;
 mod devin_models;
 mod hermes_names;
 /// How long Hermes's model names may take to read before the list goes
@@ -1805,8 +1806,14 @@ struct WarmAgent {
     spawned: Spawned,
 }
 
+/// Per-child resources whose lifetimes match the spawned ACP subprocess.
+struct ChildGuards {
+    _scratch: Option<ScratchDir>,
+    _thoughts_proxy: Option<ccpa_thoughts::ThoughtsProxy>,
+}
+
 /// What `spawn_agent` hands a run.
-type Spawned = (Option<ScratchDir>, Child, crate::StderrTail, CancellationToken);
+type Spawned = (ChildGuards, Child, crate::StderrTail, CancellationToken);
 
 fn lock_warm<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1814,10 +1821,10 @@ fn lock_warm<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 /// End a warm start no message reached.
 async fn retire_warm(warm: WarmAgent, kill_grace: Duration) {
-    let (scratch, mut child, _, _) = warm.spawned;
+    let (guards, mut child, _, _) = warm.spawned;
     drop(child.stdin.take());
     child.shutdown(kill_grace).await;
-    drop(scratch);
+    drop(guards);
 }
 
 /// [`retire_warm`], in the background.
@@ -1901,8 +1908,8 @@ impl AcpHarness {
     /// sign-in stored.
     pub async fn sign_out(&self) -> Result<(), HarnessError> {
         let home = std::env::var("HOME").ok();
-        let (_scratch, mut child, _stderr, sign_in_prompted) = self
-            .spawn_agent(home.as_deref(), false, &[], None, &Default::default())
+        let (_guards, mut child, _stderr, sign_in_prompted) = self
+            .spawn_agent(home.as_deref(), false, &[], None, &Default::default(), false)
             .await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => {
@@ -2788,15 +2795,8 @@ impl AcpHarness {
         extra_args: &[String],
         _mcp: Option<&zeron_proto::McpServer>,
         run_env: &std::collections::BTreeMap<String, String>,
-    ) -> Result<
-        (
-            Option<ScratchDir>,
-            Child,
-            crate::StderrTail,
-            CancellationToken,
-        ),
-        HarnessError,
-    > {
+        enable_thoughts_proxy: bool,
+    ) -> Result<Spawned, HarnessError> {
         let (exe, args) = self.resolve_program(block_on_install).await?;
         let mut cmd = Command::new(&exe);
         cmd.args(args);
@@ -2829,7 +2829,24 @@ impl AcpHarness {
         if let Some(dir) = &scratch {
             dir.apply(&mut cmd);
         }
+        let thoughts_proxy = if self.spec.id == HarnessId::Antigravity && enable_thoughts_proxy {
+            match ccpa_thoughts::ThoughtsProxy::start(run_env).await {
+                Ok(proxy) => proxy,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "Antigravity CCPA thoughts proxy failed to start; running without thought summary injection"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         crate::apply_run_env(&mut cmd, run_env);
+        if let Some(proxy) = &thoughts_proxy {
+            cmd.env(ccpa_thoughts::CCPA_BASE_URL_ENV, proxy.base_url());
+        }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -2860,7 +2877,11 @@ impl AcpHarness {
                 tail.close();
             });
         }
-        Ok((scratch, child, stderr_tail, sign_in_prompted))
+        let guards = ChildGuards {
+            _scratch: scratch,
+            _thoughts_proxy: thoughts_proxy,
+        };
+        Ok((guards, child, stderr_tail, sign_in_prompted))
     }
 
     /// Short-lived discovery run for [`Harness::commands`]: initialize, scan
@@ -2872,13 +2893,14 @@ impl AcpHarness {
         &self,
         cwd: Option<&std::path::Path>,
     ) -> Result<Vec<SlashCommand>, HarnessError> {
-        let (_scratch, mut child, _stderr, sign_in_prompted) = self
+        let (_guards, mut child, _stderr, sign_in_prompted) = self
             .spawn_agent(
                 cwd.and_then(|p| p.to_str()),
                 false,
                 &[],
                 None,
                 &Default::default(),
+                false,
             )
             .await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
@@ -2953,8 +2975,8 @@ impl AcpHarness {
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
         // (A Cloud machine's credential keys for this agent: crate::catalog_env.)
         let env = crate::catalog_env::get(self.id());
-        let (_scratch, mut child, stderr_tail, sign_in_prompted) = self
-            .spawn_agent(None, false, &[], None, &env)
+        let (_guards, mut child, stderr_tail, sign_in_prompted) = self
+            .spawn_agent(None, false, &[], None, &env, false)
             .await?;
         let (client, incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => {
@@ -3652,7 +3674,14 @@ impl Harness for AcpHarness {
         self.discard_warm(key).await;
         // (Never an install on the way: a warm start only uses what's there.)
         let spawned = self
-            .spawn_agent(Some(&request.cwd), false, &[], request.mcp.as_ref(), &request.env)
+            .spawn_agent(
+                Some(&request.cwd),
+                false,
+                &[],
+                request.mcp.as_ref(),
+                &request.env,
+                true,
+            )
             .await?;
         let warm = WarmAgent {
             cwd: request.cwd.clone(),
@@ -3711,7 +3740,7 @@ impl AcpHarness {
                 self.spec.display_name
             ))
         })?;
-        let (scratch, mut child, stderr_tail, sign_in_prompted) = match spawned {
+        let (guards, mut child, stderr_tail, sign_in_prompted) = match spawned {
             Some(spawned) => spawned,
             None => {
                 self.spawn_agent(
@@ -3720,6 +3749,7 @@ impl AcpHarness {
                     &[],
                     request.mcp.as_ref(),
                     &request.env,
+                    true,
                 )
                 .await?
             }
@@ -3769,7 +3799,7 @@ impl AcpHarness {
         };
         tokio::spawn(run_session(Session {
             child,
-            scratch,
+            guards,
             client,
             incoming,
             event_tx,
@@ -3820,7 +3850,7 @@ impl AcpHarness {
 
 struct Session {
     child: Child,
-    scratch: Option<ScratchDir>,
+    guards: ChildGuards,
     client: RpcClient,
     incoming: mpsc::Receiver<Incoming>,
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
@@ -5751,7 +5781,7 @@ async fn select_session_config(
 async fn run_session(session: Session) {
     let Session {
         // Locals drop in reverse binding order: reap the child before cleanup.
-        scratch: _scratch,
+        guards: _guards,
         mut child,
         client,
         mut incoming,
@@ -6271,7 +6301,10 @@ async fn run_session(session: Session) {
                             let events =
                                 session_update_events(&method, &params, &session_id, &mut subagents);
                             for ev in events {
-                                if (preempt_sent || stopping || interrupted)
+                                if (preempt_sent
+                                    || stopping
+                                    || interrupted
+                                    || cancel_flush_deadline.is_some())
                                     && is_synthetic_cancel_chunk(harness, &ev)
                                 {
                                     continue;
@@ -6493,7 +6526,10 @@ async fn run_session(session: Session) {
                         session_update_events(&method, &params, &session_id, &mut subagents);
                     for ev in events {
                         track_open_tools(&ev, &mut open_tools);
-                        if (preempt_sent || stopping || interrupted)
+                        if (preempt_sent
+                            || stopping
+                            || interrupted
+                            || cancel_flush_deadline.is_some())
                             && is_synthetic_cancel_chunk(harness, &ev)
                         {
                             continue;
@@ -6631,6 +6667,14 @@ async fn run_session(session: Session) {
                                     let events =
                                         session_update_events(&method, &params, &session_id, &mut subagents);
                                     for ev in events {
+                                        if (preempt_sent
+                                            || stopping
+                                            || interrupted
+                                            || cancel_flush_deadline.is_some())
+                                            && is_synthetic_cancel_chunk(harness, &ev)
+                                        {
+                                            continue;
+                                        }
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;
                                             break;

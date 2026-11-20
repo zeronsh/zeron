@@ -3554,3 +3554,82 @@ for raw in sys.stdin:
     );
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn antigravity_stop_turn_suppresses_synthetic_cancel_chunk() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = write_executable_script(
+        &dir,
+        "fake-agy-stop-turn.py",
+        r#"#!/usr/bin/env python3
+import json, os, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+prompt_mid = None
+for raw in sys.stdin:
+    msg = json.loads(raw)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": "agy-stop"}})
+    elif method == "session/prompt":
+        prompt_mid = mid
+        proxy_url = os.environ.get("AGY_ACP_CCPA_BASE_URL", "")
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "agy-stop",
+            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "WORKING:" + proxy_url}}
+        }})
+    elif method == "session/cancel" and prompt_mid is not None:
+        # Mirror real agy_acp_server 1.5.0: emits synthetic cancel chunk before settling cancelled.
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "agy-stop",
+            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "The request was cancelled by the client."}}
+        }})
+        send({"jsonrpc": "2.0", "id": prompt_mid, "result": {"stopReason": "cancelled"}})
+        prompt_mid = None
+        break
+"#,
+    );
+    let harness = AcpHarness::antigravity().with_executable(&script);
+    let (controls, steer, _token) = controls();
+    let turn = controls.turn.clone();
+    let mut stream = harness.run(request("long task"), controls).await.unwrap();
+    let mut events = Vec::new();
+    let mut stopped = false;
+    while let Some(item) = stream.next().await {
+        let ev = item.unwrap();
+        if !stopped && matches!(&ev, AgentEvent::TextDelta { text } if text.starts_with("WORKING:")) {
+            stopped = true;
+            turn.stop_turn();
+        }
+        let is_done = matches!(ev, AgentEvent::Done { .. });
+        events.push(ev);
+        if is_done {
+            drop(steer);
+            break;
+        }
+    }
+    let texts: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        texts.iter().any(|t| t.starts_with("WORKING:http://127.0.0.1:")),
+        "expected loopback AGY_ACP_CCPA_BASE_URL proxy in child env: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t.contains("cancelled by the client")),
+        "synthetic cancel chunk must be suppressed on stop_turn: {texts:?}"
+    );
+    assert_eq!(dones(&events), vec![(DoneStatus::Interrupted, None)]);
+}
+

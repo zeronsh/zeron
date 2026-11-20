@@ -990,6 +990,9 @@ local function Composer(): Node
 							req.harness = m.harness
 						end
 					end
+					if not req.harness then
+						req.harness = string.match(pick.model, "^([^/]+)/")
+					end
 				end
 			end
 			local function deliver(message_id: string?)
@@ -1024,9 +1027,18 @@ local function Composer(): Node
 			-- engine's) can reach the list before the glide is ready, and
 			-- the prompt is there once, whoever adds it first.
 			local mid = store.new_id()
+			local catalog = store.catalog:peek()
+			local from_h = T.session_harness(catalog, store.session:peek())
+			local sw = T.switch_row(catalog, from_h, req.harness, mid)
 			T.send(function()
 				local here = store.messages:index_of("id", mid) ~= nil
 				if not here then
+					if sw and store.messages:len() > 0 then
+						local tail = store.messages:at(store.messages:len())
+						if (not tail or tail.role ~= "switch") and store.messages:index_of("id", sw.id) == nil then
+							store.messages:push(sw)
+						end
+					end
 					store.messages:push {
 						id = mid,
 						role = "user",
