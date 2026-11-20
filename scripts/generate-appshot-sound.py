@@ -68,6 +68,6 @@ def write(path, frames):
 
 if __name__ == '__main__':
     frames, peak = render(APPSHOT)
-    output = Path(__file__).resolve().parents[1] / 'crates/ui/assets/sounds/appshot.wav'
+    output = Path(__file__).resolve().parents[1] / 'assets/sounds/appshot.wav'
     write(output, frames)
     print(f'{output}: {len(frames) / RATE:.2f}s, stereo, peak {20 * math.log10(peak):.1f} dBFS')

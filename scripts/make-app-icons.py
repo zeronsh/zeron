@@ -243,7 +243,7 @@ def main():
 
     # The logo the apps draw themselves. Desktop and zgx tint it, iOS and Android
     # take its shape only. After changing it, run apps/zgx/tools/icon_svgs.py.
-    (ROOT / "crates/ui/assets/icons/zeron-logo.svg").write_text(logo_svg("currentColor"))
+    (ROOT / "assets/icons/zeron-logo.svg").write_text(logo_svg("currentColor"))
     (ROOT / "apps/zgx/ui/assets/icons/ui/zeron-logo.svg").write_text(logo_svg("currentColor"))
     (ROOT / "apps/ios/Zeron/Assets.xcassets/zeron-logo.imageset/zeron-logo.svg").write_text(logo_svg("#000000"))
     (ROOT / "apps/android/icons/zeron.svg").write_text(logo_svg("#000000"))

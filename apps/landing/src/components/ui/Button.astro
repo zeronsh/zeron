@@ -1,0 +1,55 @@
+---
+// The app's buttons (apps/zgx/ui/ds/button.luau): the same tones, heights
+// and corners, as links.
+import type { HTMLAttributes } from "astro/types";
+
+interface Props extends HTMLAttributes<"a"> {
+  tone?: "primary" | "secondary" | "ghost";
+  size?: "sm" | "md" | "lg";
+}
+const { tone = "primary", size = "md", class: className, ...rest } = Astro.props;
+---
+
+<a class:list={["button", tone, size, className]} {...rest}><slot /></a>
+
+<style>
+  .button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    font-weight: 500;
+    white-space: nowrap;
+    border-radius: var(--radius-lg);
+    transition: background-color 0.12s, color 0.12s;
+  }
+  .sm { height: 28px; padding: 0 10px; font-size: 13px; border-radius: var(--radius-md); }
+  .md { height: 32px; padding: 0 12px; font-size: 14px; }
+  .lg { height: 40px; padding: 0 18px; font-size: 15px; }
+
+  .primary { color: var(--primary-text); background: var(--primary-bg); }
+  .primary:hover { background: var(--primary-hover); }
+  .primary:active { background: var(--primary-active); }
+  .secondary { color: var(--text); background: var(--secondary-bg); }
+  .secondary:hover { background: var(--secondary-hover); }
+  .secondary:active { background: var(--secondary-active); }
+  .ghost { color: var(--text-2); }
+  .ghost:hover { color: var(--text); background: var(--secondary-bg); }
+  .ghost:active { background: var(--secondary-hover); }
+
+  /* src/scripts/downloads.ts names the visitor's system on the main buttons. */
+  .button[data-os]::before {
+    content: "";
+    flex: none;
+    width: 1.05em;
+    height: 1.05em;
+    background: currentColor;
+    -webkit-mask: var(--os) no-repeat center / contain;
+    mask: var(--os) no-repeat center / contain;
+  }
+  .button[data-os="macos"] { --os: url("../../assets/platforms/apple.svg"); }
+  .button[data-os^="windows"] { --os: url("../../assets/platforms/windows.svg"); }
+  .button[data-os^="linux"] { --os: url("../../assets/platforms/linux.svg"); }
+  .button[data-os="android"] { --os: url("../../assets/platforms/android.svg"); }
+  .button.sm[data-os]::before { display: none; }
+</style>

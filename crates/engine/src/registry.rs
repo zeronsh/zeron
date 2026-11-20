@@ -140,14 +140,27 @@ pub struct NativeSubagentSettings {
 type Factory = Box<dyn Fn() -> Result<Arc<dyn Harness>, HarnessError> + Send + Sync>;
 type InstalledProbe = Box<dyn Fn() -> bool + Send + Sync>;
 
-/// The harnesses a Cloud device (`ZERON_DEVICE_PLATFORM=cloud`) registers —
+/// The harnesses a Cloud device (`ZERON_DEVICE_PLATFORM=cloud`) registers (every
+/// built-in agent; agents from the ACP registry stay off it) —
 /// the typed twin of [`zeron_proto::CLOUD_HARNESSES`]. Everything else is not
 /// merely disabled but absent: never probed (`--version`, install detection,
 /// model discovery, update checks). The rule is generic to the `cloud`
 /// platform; the motivating example is a hosted sandbox whose preinstalled
 /// CLIs are lazy installer shims (Boat's, at the time of writing) that
 /// download and install the real agent when merely probed.
-pub const CLOUD_HARNESS_IDS: &[HarnessId] = &[HarnessId::Codex, HarnessId::ClaudeCode];
+pub const CLOUD_HARNESS_IDS: &[HarnessId] = &[
+    HarnessId::Codex,
+    HarnessId::ClaudeCode,
+    HarnessId::Cursor,
+    HarnessId::Devin,
+    HarnessId::Grok,
+    HarnessId::Hermes,
+    HarnessId::Fx,
+    HarnessId::Pi,
+    HarnessId::Opencode,
+    HarnessId::Antigravity,
+    HarnessId::Muse,
+];
 
 /// How long a run waits for an expected [`RunEnvironment`]: far longer than the
 /// engine's assembly, on any disk.
@@ -223,6 +236,16 @@ pub struct HarnessRegistry {
     account_environment: Mutex<Option<Arc<dyn RunEnvironment>>>,
     /// Credits Zeron in agents' commits ([`crate::commit_credit`]).
     commit_credit: std::sync::OnceLock<Arc<crate::commit_credit::CommitCredit>>,
+    /// Told of every run's prepared environment (Cloud runner only): it
+    /// keeps the account's model catalogs current on the edge.
+    catalog_publisher: std::sync::OnceLock<Arc<dyn CatalogPublisher>>,
+}
+
+/// Hears each run's prepared environment (the Cloud runner's catalog
+/// publisher, [`crate::model_publish`]). Must return at once: it is on the
+/// run's start path.
+pub trait CatalogPublisher: Send + Sync {
+    fn prepared(&self, harness: HarnessId, env: &std::collections::BTreeMap<String, String>);
 }
 
 impl Default for HarnessRegistry {
@@ -238,6 +261,23 @@ impl HarnessRegistry {
     ) -> Result<Vec<zeron_proto::Model>, HarnessError> {
         let lease = Arc::new(self.execution_lease(id).await);
         self.discover_models_with_lease(id, lease).await
+    }
+
+    /// `id`'s catalog discovered now, with where it came from (`live`, or a
+    /// cached / built-in stand-in when discovery failed): what a Cloud
+    /// machine publishes only when it's live.
+    pub async fn discover_catalog(
+        &self,
+        id: HarnessId,
+    ) -> Result<zeron_harness::ModelCatalog, HarnessError> {
+        let lease = Arc::new(self.execution_lease(id).await);
+        let harness = self.resolve(id)?;
+        tokio::spawn(async move {
+            let _lease = lease;
+            harness.model_catalog(true).await
+        })
+        .await
+        .map_err(|error| HarnessError::Protocol(format!("model discovery task failed: {error}")))?
     }
 
     /// A caller such as titling already holds a lease. Reacquiring after an
@@ -309,6 +349,7 @@ impl HarnessRegistry {
             run_environment_ready: tokio::sync::watch::channel(true).0,
             account_environment: Mutex::new(None),
             commit_credit: std::sync::OnceLock::new(),
+            catalog_publisher: std::sync::OnceLock::new(),
         }
     }
 
@@ -374,7 +415,15 @@ impl HarnessRegistry {
         if let Some(credit) = self.commit_credit.get() {
             credit.apply(&mut request.env);
         }
+        if let Some(publisher) = self.catalog_publisher.get() {
+            publisher.prepared(harness, &request.env);
+        }
         Ok(())
+    }
+
+    /// Install the catalog publisher (Cloud runner only; once).
+    pub fn set_catalog_publisher(&self, publisher: Arc<dyn CatalogPublisher>) {
+        let _ = self.catalog_publisher.set(publisher);
     }
 
     /// [`RunEnvironment::credential`] (`None` without a provider).
@@ -916,7 +965,7 @@ fn full_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
-            access_modes: AccessMode::ALL.to_vec(),
+            access_modes: AccessMode::WITH_AUTO.to_vec(),
             supports_plan: true,
         },
         Box::new(|| zeron_harness::ClaudeHarness::new().installed()),
@@ -947,7 +996,7 @@ fn full_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
-            access_modes: AccessMode::ALL.to_vec(),
+            access_modes: AccessMode::WITH_AUTO.to_vec(),
             supports_plan: true,
         },
         Box::new(|| zeron_harness::CodexHarness::new().installed()),
@@ -1013,7 +1062,7 @@ fn full_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
-            access_modes: vec![AccessMode::FullAccess],
+            access_modes: vec![AccessMode::Auto, AccessMode::FullAccess],
             supports_plan: false,
         },
         Box::new(|| zeron_harness::AcpHarness::grok().installed()),
@@ -1104,16 +1153,16 @@ fn full_registry() -> HarnessRegistry {
         Box::new(|| Ok(Arc::new(zeron_harness::OpencodeHarness::new()) as Arc<dyn Harness>)),
     );
     // antigravity over acp (google's agy_acp_server), same lazy pattern: the
-    // static descriptor mirrors AcpHarness::antigravity() exactly. No steering
-    // extension (turn boundaries), and effort is baked into the model ids, so
-    // the ladder lives on each model rather than the harness.
+    // static descriptor mirrors AcpHarness::antigravity() exactly. Step-boundary
+    // preemption (verified on 1.5.0), and effort lives on each model rather than
+    // the harness.
     registry.register_lazy(
         HarnessDescriptor {
             icon: None,
             id: HarnessId::Antigravity,
             name: "Antigravity".into(),
             supports_steering: true,
-            steering_mode: SteeringMode::TurnBoundary,
+            steering_mode: SteeringMode::StepBoundary,
             reasoning_levels: Vec::new(),
             installed: true,
             can_install: false,
@@ -1273,6 +1322,10 @@ mod tests {
                 ReasoningLevel::High
             ]
         );
+        assert_eq!(
+            grok.access_modes(),
+            &[AccessMode::Auto, AccessMode::FullAccess]
+        );
         // Cursor, Devin, Hermes and Pi mirror their specs the same way.
         let cursor = registry.resolve(HarnessId::Cursor).unwrap();
         assert_eq!(cursor.id(), HarnessId::Cursor);
@@ -1306,7 +1359,7 @@ mod tests {
         let antigravity = registry.resolve(HarnessId::Antigravity).unwrap();
         assert_eq!(antigravity.id(), HarnessId::Antigravity);
         assert_eq!(antigravity.display_name(), "Antigravity");
-        assert_eq!(antigravity.steering_mode(), SteeringMode::TurnBoundary);
+        assert_eq!(antigravity.steering_mode(), SteeringMode::StepBoundary);
         assert!(antigravity.reasoning_levels().is_empty());
         let pi = registry.resolve(HarnessId::Pi).unwrap();
         assert_eq!(pi.id(), HarnessId::Pi);
@@ -1921,28 +1974,17 @@ mod gate_tests {
     }
 
     #[test]
-    fn cloud_platform_registers_only_codex_and_claude() {
+    fn cloud_platform_registers_the_built_in_agents_only() {
         let registry = registry_for_platform(zeron_proto::CLOUD_PLATFORM);
-        let ids: Vec<HarnessId> = registry.descriptors().iter().map(|d| d.id).collect();
-        assert_eq!(
-            ids,
-            vec![HarnessId::Mock, HarnessId::ClaudeCode, HarnessId::Codex]
-        );
-        for hidden in [
-            HarnessId::Cursor,
-            HarnessId::Devin,
-            HarnessId::Grok,
-            HarnessId::Hermes,
-            HarnessId::Fx,
-            HarnessId::Pi,
-            HarnessId::Opencode,
-            HarnessId::Antigravity,
-            HarnessId::Muse,
-        ] {
-            assert!(!registry.is_registered(hidden), "{hidden:?}");
-            // Never resolved, so never probed or spawned.
-            assert!(registry.resolve(hidden).is_err(), "{hidden:?}");
-        }
+        let mut ids: Vec<HarnessId> = registry.descriptors().iter().map(|d| d.id).collect();
+        ids.retain(|id| *id != HarnessId::Mock);
+        let mut expected = CLOUD_HARNESS_IDS.to_vec();
+        ids.sort_by_key(|id| id.as_str());
+        expected.sort_by_key(|id| id.as_str());
+        assert_eq!(ids, expected);
+        // Agents added from the ACP registry stay off Cloud.
+        let agent = HarnessId::from_slug("acp.gemini").unwrap();
+        assert!(!registry.is_registered(agent));
         let enabled = registry.enabled_set();
         assert!(
             enabled.iter().all(|id| CLOUD_HARNESS_IDS.contains(id)),

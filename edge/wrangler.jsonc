@@ -207,13 +207,16 @@
     // seconds, charged from the UTC day in CLOUD_CREDIT_RATE_FROM on. Usage on
     // earlier days stays at 60 seconds a credit, so balances don't move.
     //
-    // CLOUD_CREDIT_RATE_FROM is a placeholder until the deployer sets it to a
-    // real YYYY-MM-DD; until then every day stays at 60. Pick a whole UTC day
-    // AFTER the day of the deploy, so that no day is charged at both rates.
-    // Once that day has come, leave it alone: moving or removing it re-prices
-    // the days in between.
+    // CLOUD_CREDIT_RATE_FROM is the first UTC day at the new rate, a whole
+    // day after the deploy that set it, so that no day is charged at both
+    // rates. It lives here, not only in the dashboard: an edge deploy from
+    // this file replaces the dashboard's vars (no keep_vars), and the
+    // hand-set 2026-11-13 was overwritten by the auto-deploys of Nov 13-17
+    // (every day since read 60). Wing chose 2026-11-20 on 2026-11-19, so no
+    // day is re-priced. Now that day is set, leave it alone: moving or
+    // removing it re-prices the days in between.
     "CLOUD_CREDIT_SECONDS": "30",
-    "CLOUD_CREDIT_RATE_FROM": "SET-AT-DEPLOY",
+    "CLOUD_CREDIT_RATE_FROM": "2026-11-20",
     // Where session engines reach the edge when no request names it (a wake
     // that re-provisions a session whose first provision failed).
     "CLOUD_EDGE_URL": "https://edge.zeron.sh",

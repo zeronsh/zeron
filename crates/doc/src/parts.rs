@@ -6,7 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 use zeron_proto::{
-    AgentEvent, SUBAGENT_INPUT_KEEP, ToolCall, ToolDiff, UserInputAnswer, UserInputQuestion,
+    AgentEvent, SUBAGENT_INPUT_KEEP, ToolCall, ToolDiff, ToolReview, UserInputAnswer,
+    UserInputQuestion,
 };
 
 use crate::constants::MSG_INLINE_MAX;
@@ -321,6 +322,10 @@ pub enum MessagePart {
         /// is read from the host.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output_lines: Option<u64>,
+        /// The agent's own reviewer on this call, in Auto: reviewing it, or
+        /// its verdict (approved, denied, timed out) with its risk and why.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        review: Option<ToolReview>,
     },
     #[serde(rename_all = "camelCase")]
     Input {
@@ -539,7 +544,23 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     exit_code: None,
                     output_truncated: false,
                     output_lines: None,
+                    review: None,
                 });
+            }
+        }
+        AgentEvent::ToolReviewed { id, review } => {
+            // (A review names a call already shown; one for a call that
+            // isn't, a network check with no call, has nowhere to go.)
+            for p in out.iter_mut() {
+                if let MessagePart::Tool {
+                    id: pid,
+                    review: slot,
+                    ..
+                } = p
+                    && pid == id
+                {
+                    *slot = Some(review.clone());
+                }
             }
         }
         AgentEvent::ToolResult {
@@ -941,6 +962,54 @@ pub fn join_continuations(entries: Vec<Vec<MessagePart>>) -> Vec<MessagePart> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_review_folds_onto_its_call_and_a_later_one_replaces_it() {
+        use zeron_proto::ToolReviewStatus;
+        let mut parts = Vec::new();
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolCall {
+                id: "c1".into(),
+                call: ToolCall::Exec {
+                    command: "rm -rf x".into(),
+                },
+            },
+        );
+        let review = |status| AgentEvent::ToolReviewed {
+            id: "c1".into(),
+            review: ToolReview {
+                status,
+                risk: Some("high".into()),
+                reason: Some("outside the workspace".into()),
+            },
+        };
+        fold_event_into_parts(&mut parts, &review(ToolReviewStatus::Reviewing));
+        fold_event_into_parts(&mut parts, &review(ToolReviewStatus::Denied));
+        // One for a call that isn't shown changes nothing.
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolReviewed {
+                id: "elsewhere".into(),
+                review: ToolReview {
+                    status: ToolReviewStatus::Approved,
+                    risk: None,
+                    reason: None,
+                },
+            },
+        );
+        match &parts[..] {
+            [
+                MessagePart::Tool {
+                    review: Some(r), ..
+                },
+            ] => {
+                assert_eq!(r.status, ToolReviewStatus::Denied);
+                assert_eq!(r.reason.as_deref(), Some("outside the workspace"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
 
     fn text_delta(s: &str) -> AgentEvent {
         AgentEvent::TextDelta { text: s.into() }
@@ -1346,6 +1415,7 @@ mod tests {
                 exit_code: None,
                 output_truncated: false,
                 output_lines: None,
+                review: None,
             },
         ];
         let chunks = split_parts(&parts);

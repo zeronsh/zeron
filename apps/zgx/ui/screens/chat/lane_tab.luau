@@ -28,6 +28,7 @@ local LinkChips = require("@app/screens/chat/link_chips")
 local LinkMenu = require("@app/screens/chat/link_menu")
 local boundary = require("@app/screens/shell/boundary")
 local Quote = require("@ds/quote")
+local Draft = require("@ds/draft_text")
 -- (The chat page's places in its chats, which a split's panes share.)
 local Shared = require("@app/screens/chat/shared")
 local Asks = require("@app/screens/chat/asks")
@@ -233,22 +234,53 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		-- picks, one draft per chat (screens/chat/shared), shown here and
 		-- written back as they change, wherever it's kept. Never the focused
 		-- chat's: the focus moving changes nothing this shows.)
+		--
+		-- Each side's write is told to the other by its length (`pulled`,
+		-- `pushed`), so its echo isn't read back: both read the whole draft
+		-- and compared it at every keystroke, both ways (3 ms a key at
+		-- 30,000 lines). By length, so a write that changed nothing, and so
+		-- came back as no run, never hides the next change. `known`: this
+		-- pane's draft's length as last seen, so the mirror from the chat's
+		-- draft reads this one's only where the lengths agree.
+		local pulled, pushed, known = nil :: number?, nil :: number?, -1
 		ui.effect(function()
+			Shared.track_draft_of(chat)
+			local echo = pushed
+			pushed = nil
+			local size = Shared.draft_size_of(chat)
+			if echo ~= nil and size == echo then
+				return
+			end
 			local d = Shared.draft_of(chat)
-			if draft:peek() ~= d.text then
+			if size ~= known or draft:peek() ~= d.text then
+				pulled, known = size, size
 				draft:set(d.text)
 			end
 			chosen:set(d.chosen)
 		end)
+		local first = true
 		ui.effect(function()
-			local text = draft:get()
-			if Shared.draft_of(chat).text ~= text then
-				Shared.set_draft_of(chat, "text", text)
+			local size = Draft.size(draft)
+			known = size
+			local echo = pulled
+			pulled = nil
+			if echo ~= nil and size == echo then
+				return
 			end
+			-- (Typed: it differs. Made: it may not.)
+			local text = draft:peek()
+			if first then
+				first = false
+				if Shared.draft_of(chat).text == text then
+					return
+				end
+			end
+			pushed = size
+			Shared.set_draft_of(chat, "text", text)
 		end)
 		ui.effect(function()
 			local picked = chosen:get()
-			if Shared.draft_of(chat).chosen ~= picked then
+			if Shared.chosen_of(chat) ~= picked then
 				Shared.set_draft_of(chat, "chosen", picked)
 			end
 		end)
@@ -543,6 +575,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 				out.harness = c.harness
 			end
 		end
+		if not out.harness and type(m) == "string" then
+			out.harness = string.match(m, "^([^/]+)/")
+		end
 		return out
 	end
 	-- Where its first message makes it: nil, its parent's place as it is;
@@ -680,6 +715,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		placeholder = locale.s(if split then "chat.composer.placeholder" else "chat.lane_tab.placeholder"),
 		running = running,
 		access = access,
+		access_auto = function(): boolean
+			return store.offers_auto(model:get())
+		end,
 		plan = plan,
 		model = model,
 		effort = effort,
@@ -707,7 +745,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			if mine then
 				return mine
 			end
-			local link = machine.cloud_link(string.find(draft:get(), "%S") ~= nil)
+			local link = machine.cloud_link(Draft.has_text(draft))
 			return if link then LinkNotice.of { cloud = link } else nil
 		end),
 		on_dismiss_notice = function()
@@ -727,6 +765,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			return store.catalog:get().models
 		end,
 		accounts = accounts.accounts,
+		account_group = accounts.account_group,
 		on_account = accounts.on_account,
 		on_accounts_open = accounts.on_accounts_open,
 		-- What its context holds: the chat page's ring and card, from the
@@ -795,10 +834,10 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			-- transcript's send steps clear of the end (it glides to the top,
 			-- its reply's room opening under it), then goes to the host with
 			-- that id, so the host's copy is the same row.
-			-- (While a turn runs it's queued instead: it shows in the queue, and
-			-- what's picked waits for the turn it will run in.)
+			-- (While a turn runs it's queued instead: it shows in the queue,
+			-- carrying what's picked so it runs on that agent/model.)
 			local queued = not is_unsent and running:peek()
-			local req: { [string]: any } = if queued then {} else picks()
+			local req: { [string]: any } = picks()
 			req.attachments = pack.attachments
 			req.appshots = Appshots.of_cargo(chips)
 			local function failed(err: any)
@@ -821,10 +860,20 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			end
 			local mid = store.new_id()
 			req.message_id = mid
+			local catalog = store.catalog:peek()
+			local from_h = T.session_harness(catalog, session:peek())
+			local to_h = req.harness or (if type(req.model) == "string" then string.match(req.model, "^([^/]+)/") else nil)
+			local sw = if not is_unsent then T.switch_row(catalog, from_h, to_h, mid) else nil
 			local sent: any = nil
 			T.send(function()
 				local here = view.messages:index_of("id", mid) ~= nil
 				if not here then
+					if sw and view.messages:len() > 0 then
+						local tail = view.messages:at(view.messages:len())
+						if (not tail or tail.role ~= "switch") and view.messages:index_of("id", sw.id) == nil then
+							view.messages:push(sw)
+						end
+					end
 					-- (On its way from this moment: the line under it says so.)
 					view.messages:push { id = mid, role = "user", text = typed, attachments = Carried.shown(pack), waiting = "sending" }
 				end
@@ -861,7 +910,13 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		on_approve = asks.on_approve,
 		on_deny = asks.on_deny,
 		queue = asks.queue,
+		-- (Steer only where its agent takes a word mid-turn: else the row's
+		-- Send now stops the turn, as the host does.)
 		can_steer = function(): boolean
+			local s = session:get()
+			return running:get() and s ~= nil and s.steers == true
+		end,
+		turn_running = function(): boolean
 			return running:get()
 		end,
 		on_queue_send = asks.on_queue_send,

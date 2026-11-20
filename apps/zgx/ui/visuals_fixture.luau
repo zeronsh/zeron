@@ -230,7 +230,6 @@ return ui.scroll {
 		id = "reply",
 		selectable = true,
 		w_full = true,
-		max_w = "$zeron.prose.measure",
 		p = "$space.6",
 		gap = "$space.7",
 		blocks,

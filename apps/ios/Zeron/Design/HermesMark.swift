@@ -1,5 +1,5 @@
 // Hermes brand mark path data — extracted verbatim from the desktop asset
-// (crates/ui/assets/icons/hermes-mark.svg, 24x24 viewBox, even-odd fill; its
+// (assets/icons/hermes-mark.svg, 24x24 viewBox, even-odd fill; its
 // three <path> elements concatenate — each opens with an absolute M). Split
 // out of BrandMarks.swift because the path constant dwarfs the enum.
 

@@ -20,6 +20,7 @@ local ChatLinks = require("@app/screens/chat/chat_links")
 local locale = require("@ds/locale")
 local route = require("@app/screens/shell/route")
 local mentions = require("@ds/composer_mentions")
+local Draft = require("@ds/draft_text")
 local prefs = require("@app/screens/settings/prefs")
 local Invocations = require("@app/screens/chat/invocations")
 local store = require("@app/screens/chat/store")
@@ -149,6 +150,13 @@ function M.bind(b: Bind): { [string]: any }
 		end
 		return out
 	end
+	-- Whether the draft has an `@` anywhere: `@`'s other chats are listed
+	-- only then. (They're made from every chat, and the chat list changes
+	-- every few seconds while chats work on any device: each change made
+	-- them all again for a list no one had open.)
+	local at_typed = ui.computed(function(): boolean
+		return Draft.holds(b.text, "@")
+	end)
 	local lists = ui.computed(function(): any
 		local given = table.clone(sources:get())
 		-- `@`: the files found, then the other chats, then what's carried.
@@ -158,8 +166,10 @@ function M.bind(b: Bind): { [string]: any }
 			item.section = "files"
 			table.insert(at, item)
 		end
-		for _, c in chats() do
-			table.insert(at, c)
+		if at_typed:get() then
+			for _, c in chats() do
+				table.insert(at, c)
+			end
 		end
 		for _, a in attachments() do
 			table.insert(at, a)
@@ -197,8 +207,8 @@ function M.bind(b: Bind): { [string]: any }
 	-- so a reload with it open reads nothing.
 	local invocations_open = ui.state(`{b.key}_invocations_open`, nil :: string?)
 	ui.effect(function()
-		local text = b.text:get()
-		local t = mentions.token(text, #text)
+		-- (At the draft's end, read there: a long draft isn't copied for it.)
+		local t = Draft.end_token(b.text)
 		local wanted = t ~= nil and (t.trigger == "/" or (t.trigger == "$" and prefs.completion(b.agent()).dollar))
 		local key = if wanted then invocation_key() else nil
 		if key == invocations_open:peek() then
@@ -213,8 +223,8 @@ function M.bind(b: Bind): { [string]: any }
 	-- What was last searched for: kept, so a reload doesn't search again.
 	local searched = ui.state(`{b.key}_mention_searched`, nil :: string?)
 	ui.effect(function()
-		local text = b.text:get()
-		local t = mentions.token(text, #text)
+		-- (At the draft's end, read there: a long draft isn't copied for it.)
+		local t = Draft.end_token(b.text)
 		if not t or t.trigger ~= "@" then
 			return
 		end

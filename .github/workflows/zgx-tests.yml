@@ -4,8 +4,9 @@ name: zgx tests
 # crate it or the engine's plugin host builds changes. zgx-beta.yml only builds.
 #
 #   apps/zgx's unit tests (`cargo test --bin zeron-zgx`: src/plugins/*_tests.rs
-#   among them) and its Luau UI tests (`zgx test ui`, the zgx CLI at the rev
-#   apps/zgx/Cargo.toml pins), on macOS and Linux, the known failures let
+#   among them), its integration tests (`cargo test --test '*'`:
+#   apps/zgx/tests/*.rs) and its Luau UI tests (`zgx test ui`, the zgx CLI at
+#   the rev apps/zgx/Cargo.toml pins), on macOS and Linux, the known failures let
 #   through (scripts/ci/test-zgx.sh, scripts/ci/zgx-known-failures.txt);
 #   and on macOS the engine's plugin tests (its lib's `plugins::` tests and
 #   tests/plugin_services.rs), which core-tests runs on Linux.
@@ -86,6 +87,9 @@ jobs:
             --git https://github.com/zeronsh/zgx --rev "$REV" zgx-script --bin zgx --features inspect --root ~/zgx-cli
       - name: apps/zgx unit tests
         run: scripts/ci/test-zgx.sh rust
+      - name: apps/zgx integration tests
+        if: ${{ !cancelled() }}
+        run: scripts/ci/test-zgx.sh tests
       - name: apps/zgx Luau UI tests
         if: ${{ !cancelled() }}
         run: scripts/ci/test-zgx.sh ui ~/zgx-cli/bin/zgx
@@ -143,6 +147,9 @@ jobs:
             --git https://github.com/zeronsh/zgx --rev "$REV" zgx-script --bin zgx --features inspect --root ~/zgx-cli
       - name: apps/zgx unit tests
         run: scripts/ci/test-zgx.sh rust
+      - name: apps/zgx integration tests
+        if: ${{ !cancelled() }}
+        run: scripts/ci/test-zgx.sh tests
       - name: apps/zgx Luau UI tests
         if: ${{ !cancelled() }}
         run: scripts/ci/test-zgx.sh ui ~/zgx-cli/bin/zgx

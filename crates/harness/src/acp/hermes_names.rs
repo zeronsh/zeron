@@ -1,0 +1,654 @@
+//! Hermes's models by the names its own catalog gives them.
+//!
+//! Hermes's ACP adapter labels a model with its id (`claude-opus-5-5`), but
+//! keeps the models.dev catalog it reads context windows from beside its
+//! config (`$HERMES_HOME/models_dev_cache.json`), and that names each model
+//! as its maker does ("Claude Opus 5.5"). A model it doesn't list keeps its
+//! id. Zeron only reads the file; Hermes refreshes it.
+use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    path::Path,
+};
+use zeron_proto::Model;
+
+/// The models.dev provider a Hermes provider's models are listed under, as
+/// Hermes maps them (`agent/models_dev.py`); any other is its own id.
+fn catalog_provider(hermes: &str) -> &str {
+    match hermes {
+        "openai-codex" | "openai-api" => "openai",
+        "novita" => "novita-ai",
+        "kimi" | "kimi-coding" | "kimi-coding-cn" | "moonshot" => "kimi-for-coding",
+        "minimax-oauth" => "minimax",
+        "qwen-oauth" => "alibaba",
+        "ai-gateway" => "vercel",
+        "opencode-zen" => "opencode",
+        "kilocode" => "kilo",
+        "fireworks" => "fireworks-ai",
+        "gemini" => "google",
+        "xai-oauth" => "xai",
+        "meta-ai" => "meta",
+        other => other,
+    }
+}
+
+/// Whether Hermes can run model `id` (`<provider>:<model>`), among the
+/// models it lists (`ids`). `auto:<model>` is the default its config names
+/// with the provider left to auto-detection, which sends that model to the
+/// provider it's signed in to: its stock config names an OpenRouter model
+/// (`anthropic/claude-opus-4.6`), and a ChatGPT login, say, refuses that
+/// ("not supported when using Codex with a ChatGPT account"); Hermes's own
+/// sign-in leaves that default in place too. So it's one Hermes can run
+/// only when a provider it lists serves that model, or it lists none
+/// (nothing to tell by). Every other model is listed by a provider it has.
+pub(super) fn runnable<'a>(id: &str, ids: impl IntoIterator<Item = &'a str>) -> bool {
+    let Some(model) = id.strip_prefix("auto:") else {
+        return true;
+    };
+    let mut concrete = ids
+        .into_iter()
+        .filter_map(|other| other.split_once(':'))
+        .filter(|(provider, _)| *provider != "auto")
+        .peekable();
+    concrete.peek().is_none() || concrete.any(|(_, served)| served == model)
+}
+
+/// The models Hermes can run (`runnable`), the others left out.
+pub(super) fn keep_runnable(models: &mut Vec<Model>) {
+    let ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
+    models.retain(|m| runnable(&m.id, ids.iter().map(String::as_str)));
+}
+
+/// The model Hermes runs when a chat names none, from its `session/new`
+/// reply's models: its current one (its config's default) if it can run that
+/// (`runnable`), else the first of the provider it's set to (`active`, as
+/// its auto-detection would pick it: a Cloud machine's Hermes lists the
+/// Claude login it finds beside its ChatGPT one, Claude's models first),
+/// else the first it can run. The picker marks the same one (`mark_default`).
+pub(super) fn chosen_for_none(session: &serde_json::Value, active: Option<&str>) -> Option<String> {
+    let models = session.get("models")?;
+    let ids: Vec<&str> = models
+        .get("availableModels")?
+        .as_array()?
+        .iter()
+        .filter_map(|m| m.get("modelId").and_then(serde_json::Value::as_str))
+        .collect();
+    if let Some(current) = models.get("currentModelId").and_then(serde_json::Value::as_str)
+        && ids.contains(&current)
+        && runnable(current, ids.iter().copied())
+    {
+        return Some(current.to_owned());
+    }
+    let ok = |id: &&&str| runnable(id, ids.iter().copied());
+    active
+        .and_then(|active| {
+            ids.iter()
+                .filter(ok)
+                .find(|id| id.split_once(':').is_some_and(|(provider, _)| provider == active))
+        })
+        .or_else(|| ids.iter().find(ok))
+        .map(|id| (*id).to_owned())
+}
+
+/// Marks the model a chat that names none runs (`chosen`) as the catalog's
+/// default, so the picker starts a new chat on it.
+pub(super) fn mark_default(models: &mut [Model], chosen: Option<&str>) {
+    for model in models.iter_mut() {
+        model.default = Some(model.id.as_str()) == chosen;
+    }
+}
+
+/// The provider Hermes runs on when its config leaves the choice to
+/// auto-detection: `active_provider` in `$HERMES_HOME/auth.json`, which its
+/// own sign-in sets (and Zeron's, on a Cloud machine). A small file, read
+/// as Hermes's catalog is (`name_models`).
+pub(super) async fn active_provider() -> Option<String> {
+    active_provider_in(&hermes_home()).await
+}
+
+async fn active_provider_in(home: &Path) -> Option<String> {
+    let bytes = tokio::fs::read(home.join("auth.json")).await.ok()?;
+    if bytes.len() > MAX_AUTH_BYTES {
+        return None;
+    }
+    let auth: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    auth.get("active_provider")?
+        .as_str()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_owned)
+}
+
+/// The most of Hermes's `auth.json` read.
+const MAX_AUTH_BYTES: usize = 4 << 20;
+
+fn hermes_home() -> std::path::PathBuf {
+    crate::model_context::root(
+        "HERMES_HOME",
+        crate::executable::home_or_current_dir().join(".hermes"),
+    )
+}
+
+/// Hermes's large-context picker variants (`openai-codex:gpt-6-luna-900k`)
+/// as a Context Window choice on their base model rather than rows of
+/// their own. Hermes adds `-900k` after each Codex model that has one, a
+/// Hermes-side name for the same model with the 900K window; the base runs
+/// with Codex's 272K (`hermes_cli/codex_models.py`). A run that picks 900K
+/// sends the variant's id (`pick_model_value`). A variant whose base isn't
+/// listed stays its own row.
+pub(super) fn fold_context_variants(models: &mut Vec<Model>) {
+    const SUFFIX: &str = "-900k";
+    let ids: HashSet<String> = models.iter().map(|m| m.id.clone()).collect();
+    let folded: HashSet<String> = ids
+        .iter()
+        .filter(|id| {
+            id.strip_suffix(SUFFIX)
+                .is_some_and(|base| ids.contains(base))
+        })
+        .cloned()
+        .collect();
+    if folded.is_empty() {
+        return;
+    }
+    models.retain(|m| !folded.contains(&m.id));
+    for model in models.iter_mut() {
+        if folded.contains(&format!("{}{SUFFIX}", model.id))
+            && !model.options.iter().any(|o| o.id == "contextWindow")
+        {
+            model.options.push(zeron_proto::ModelOption {
+                id: "contextWindow".into(),
+                label: "Context Window".into(),
+                choices: vec![
+                    zeron_proto::ModelOptionChoice {
+                        id: "272k".into(),
+                        label: "272K".into(),
+                    },
+                    zeron_proto::ModelOptionChoice {
+                        id: "900k".into(),
+                        label: "900K".into(),
+                    },
+                ],
+                default_choice: "272k".into(),
+            });
+        }
+    }
+}
+
+/// Renames each Hermes model whose label is still its bare id (the provider
+/// already split off) after the catalog in Hermes's home, if there is one.
+/// Blocking file work: call off the async runtime.
+pub(super) fn name_models(models: &mut [Model]) {
+    name_models_from(models, &hermes_home().join("models_dev_cache.json"));
+}
+
+/// The most of Hermes's catalog read (it's a few MB).
+const MAX_CATALOG_BYTES: u64 = 64 << 20;
+
+/// Catalog key → name, for the models asked about, by catalog provider.
+type Names = HashMap<String, HashMap<String, String>>;
+
+fn name_models_from(models: &mut [Model], catalog: &Path) {
+    // The keys each model may be listed under: its id, and the id with
+    // dots as dashes (Hermes writes `claude-fable-5.1`; the catalog keys
+    // `claude-fable-5-1`).
+    let mut wanted: HashMap<String, HashSet<String>> = HashMap::new();
+    for (provider, id) in models.iter().filter_map(named_by_id) {
+        let keys = wanted
+            .entry(catalog_provider(provider).to_owned())
+            .or_default();
+        keys.insert(id.replace('.', "-"));
+        keys.insert(id.to_owned());
+    }
+    if wanted.is_empty() {
+        return;
+    }
+    // Streamed through a small buffer and kept only where asked for: the
+    // file is several MB of every provider's models, and holding it (or a
+    // map of it) would cost far more than the few names wanted.
+    // Only a regular file of a sane size: a FIFO (or a device) there would
+    // block the read forever, a runaway file would be parsed for minutes.
+    // (Checked on the open handle: one swapped for a FIFO after a check of
+    // its path would still block.)
+    let file = match crate::bounded_file::open(catalog, MAX_CATALOG_BYTES) {
+        Ok((file, _)) => file,
+        Err(err) => {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!(
+                    error = %err,
+                    "Hermes's model catalog isn't a file of a usable size; models keep their ids"
+                );
+            }
+            return;
+        }
+    };
+    let mut reader = serde_json::Deserializer::from_reader(std::io::BufReader::with_capacity(
+        64 * 1024,
+        std::io::Read::take(file, MAX_CATALOG_BYTES),
+    ));
+    let names = match (Catalog { wanted: &wanted }).deserialize(&mut reader) {
+        Ok(names) => names,
+        Err(error) => {
+            tracing::debug!(%error, "Hermes's model catalog didn't parse; models keep their ids");
+            return;
+        }
+    };
+    for model in models.iter_mut() {
+        let Some((provider, id)) = named_by_id(model) else {
+            continue;
+        };
+        let Some(listed) = names.get(catalog_provider(provider)) else {
+            continue;
+        };
+        let name = listed
+            .get(id)
+            .or_else(|| listed.get(&id.replace('.', "-")))
+            .cloned();
+        if let Some(name) = name {
+            model.label = name;
+        }
+    }
+}
+
+/// The catalog's top level: provider id → provider, reading only the
+/// providers asked for and skipping the rest without keeping anything.
+struct Catalog<'a> {
+    wanted: &'a HashMap<String, HashSet<String>>,
+}
+
+impl<'de> DeserializeSeed<'de> for Catalog<'_> {
+    type Value = Names;
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Names, D::Error> {
+        d.deserialize_map(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Catalog<'_> {
+    type Value = Names;
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a models.dev catalog")
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Names, A::Error> {
+        let mut names = Names::new();
+        while let Some(provider) = map.next_key_seed(pick(|k| self.wanted.contains_key(k)))? {
+            match provider.and_then(|p| Some((self.wanted.get(&p)?, p))) {
+                Some((keys, provider)) => {
+                    let found = map.next_value_seed(Provider { keys })?;
+                    if !found.is_empty() {
+                        names.insert(provider, found);
+                    }
+                }
+                None => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        Ok(names)
+    }
+}
+
+/// A map key, kept (allocated) only if `.0` wants it: the catalog's
+/// thousands of other keys are only compared, in the parser's own buffer.
+struct Pick<F>(F);
+
+/// (A function, so a closure's `&str` is taken as any lifetime.)
+fn pick<F: Fn(&str) -> bool>(wants: F) -> Pick<F> {
+    Pick(wants)
+}
+
+impl<'de, F: Fn(&str) -> bool> DeserializeSeed<'de> for Pick<F> {
+    type Value = Option<String>;
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Option<String>, D::Error> {
+        d.deserialize_str(self)
+    }
+}
+
+impl<'de, F: Fn(&str) -> bool> Visitor<'de> for Pick<F> {
+    type Value = Option<String>;
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a key")
+    }
+    fn visit_str<E>(self, key: &str) -> Result<Option<String>, E> {
+        Ok((self.0)(key).then(|| key.to_owned()))
+    }
+}
+
+/// A provider: its `models`, the rest skipped.
+struct Provider<'a> {
+    keys: &'a HashSet<String>,
+}
+
+impl<'de> DeserializeSeed<'de> for Provider<'_> {
+    type Value = HashMap<String, String>;
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        d.deserialize_map(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Provider<'_> {
+    type Value = HashMap<String, String>;
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a models.dev provider")
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut found = HashMap::new();
+        while let Some(field) = map.next_key_seed(pick(|k| k == "models"))? {
+            if field.is_some() {
+                found = map.next_value_seed(Models { keys: self.keys })?;
+            } else {
+                map.next_value::<IgnoredAny>()?;
+            }
+        }
+        Ok(found)
+    }
+}
+
+/// A provider's models: the name of each asked for, the rest skipped.
+struct Models<'a> {
+    keys: &'a HashSet<String>,
+}
+
+impl<'de> DeserializeSeed<'de> for Models<'_> {
+    type Value = HashMap<String, String>;
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        d.deserialize_map(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Models<'_> {
+    type Value = HashMap<String, String>;
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a provider's models")
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        #[derive(serde::Deserialize)]
+        struct Entry {
+            #[serde(default)]
+            name: Option<String>,
+        }
+        let mut found = HashMap::new();
+        while let Some(key) = map.next_key_seed(pick(|k| self.keys.contains(k)))? {
+            if let Some(key) = key {
+                let name = map
+                    .next_value::<Entry>()?
+                    .name
+                    .map(|n| n.trim().to_owned())
+                    .filter(|n| !n.is_empty());
+                if let Some(name) = name {
+                    found.insert(key, name);
+                }
+            } else {
+                map.next_value::<IgnoredAny>()?;
+            }
+        }
+        Ok(found)
+    }
+}
+
+/// `(provider, model id)` of a model labelled by its id alone.
+fn named_by_id(model: &Model) -> Option<(&str, &str)> {
+    let provider = model.provider.as_ref()?;
+    let (_, id) = model.id.split_once(':')?;
+    (model.label == id).then_some((provider.id.as_str(), id))
+}
+
+#[cfg(test)]
+mod tests {
+
+    /// Hermes's stock default under auto-detection, `auto:anthropic/
+    /// claude-opus-4.6`, listed first beside a ChatGPT login's models (as a
+    /// Cloud machine's Hermes lists them): Codex refuses it, so it isn't
+    /// offered, and a session asked for no model runs Codex's first instead.
+    /// A default a listed provider serves, or one with nothing beside it,
+    /// stays.
+    #[test]
+    fn a_default_no_signed_in_provider_serves_isnt_run() {
+        let listed = ["auto:anthropic/claude-opus-4.6", "openai-codex:gpt-6.2-sol", "openai-codex:gpt-6.2-luna"];
+        assert!(!super::runnable(listed[0], listed));
+        assert!(super::runnable(listed[1], listed));
+        let served = ["auto:anthropic/claude-opus-4.6", "openrouter:anthropic/claude-opus-4.6"];
+        assert!(super::runnable(served[0], served));
+        assert!(super::runnable("auto:anthropic/claude-opus-4.6", ["auto:anthropic/claude-opus-4.6"]));
+
+        let mut models: Vec<zeron_proto::Model> = listed
+            .iter()
+            .map(|id| zeron_proto::Model {
+                id: (*id).into(),
+                label: (*id).into(),
+                description: None,
+                provider: None,
+                reasoning_levels: Vec::new(),
+                options: Vec::new(),
+                default: false,
+            })
+            .collect();
+        super::keep_runnable(&mut models);
+        assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), &listed[1..]);
+
+        let session = |current: &str, ids: &[&str]| {
+            serde_json::json!({ "models": {
+                "currentModelId": current,
+                "availableModels": ids.iter().map(|id| serde_json::json!({ "modelId": id, "name": id })).collect::<Vec<_>>(),
+            }})
+        };
+        let chosen = |current: &str, ids: &[&str], active: Option<&str>| super::chosen_for_none(&session(current, ids), active);
+        assert_eq!(chosen(listed[0], &listed, None).as_deref(), Some("openai-codex:gpt-6.2-sol"));
+        assert_eq!(chosen("openai-codex:gpt-6.2-luna", &listed, None).as_deref(), Some("openai-codex:gpt-6.2-luna"), "one it can run stays");
+        assert_eq!(super::chosen_for_none(&serde_json::json!({}), None), None);
+        // A Cloud machine's Hermes beside a ChatGPT and a Claude login lists
+        // Claude's first; set to Codex, it runs Codex's.
+        let both = [
+            "auto:anthropic/claude-opus-4.6",
+            "anthropic:claude-fable-5-2",
+            "anthropic:claude-opus-5-5",
+            "openai-codex:gpt-6.2-sol",
+        ];
+        assert_eq!(chosen(both[0], &both, Some("openai-codex")).as_deref(), Some("openai-codex:gpt-6.2-sol"));
+        assert_eq!(chosen(both[0], &both, None).as_deref(), Some("anthropic:claude-fable-5-2"));
+        assert_eq!(chosen(both[0], &both, Some("nous")).as_deref(), Some("anthropic:claude-fable-5-2"), "a provider it lists nothing of");
+        // The picker marks the same one.
+        let mut rows: Vec<zeron_proto::Model> = both
+            .iter()
+            .map(|id| zeron_proto::Model {
+                id: (*id).into(),
+                label: (*id).into(),
+                description: None,
+                provider: None,
+                reasoning_levels: Vec::new(),
+                options: Vec::new(),
+                default: false,
+            })
+            .collect();
+        super::keep_runnable(&mut rows);
+        super::mark_default(&mut rows, Some("openai-codex:gpt-6.2-sol"));
+        assert_eq!(rows.iter().filter(|m| m.default).map(|m| m.id.as_str()).collect::<Vec<_>>(), ["openai-codex:gpt-6.2-sol"]);
+    }
+
+    /// Hermes's provider is the `active_provider` its `auth.json` names.
+    #[tokio::test]
+    async fn the_provider_hermes_is_set_to_is_read_from_its_auth_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("auth.json"), r#"{"active_provider":"openai-codex","providers":{}}"#).unwrap();
+        assert_eq!(super::active_provider_in(dir.path()).await.as_deref(), Some("openai-codex"));
+        std::fs::write(dir.path().join("auth.json"), r#"{"providers":{}}"#).unwrap();
+        assert_eq!(super::active_provider_in(dir.path()).await, None);
+        assert_eq!(super::active_provider_in(&dir.path().join("missing")).await, None);
+    }
+
+    use super::*;
+
+    fn model(id: &str, label: &str, provider: &str) -> Model {
+        Model {
+            id: id.into(),
+            label: label.into(),
+            provider: Some(zeron_proto::ModelProvider {
+                id: provider.into(),
+                name: provider.into(),
+            }),
+            description: None,
+            reasoning_levels: vec![],
+            options: vec![],
+            default: false,
+        }
+    }
+
+    /// Hermes's `-900k` rows fold into their base's Context Window; one
+    /// without a listed base stays.
+    #[test]
+    fn hermes_large_context_variants_are_a_context_window_choice() {
+        let mut models = vec![
+            model("openai-codex:gpt-6-luna", "gpt-6-luna", "openai-codex"),
+            model(
+                "openai-codex:gpt-6-luna-900k",
+                "gpt-6-luna-900k",
+                "openai-codex",
+            ),
+            model(
+                "openai-codex:gpt-6.1-terra",
+                "gpt-6.1-terra",
+                "openai-codex",
+            ),
+            model("openai-codex:gpt-9-900k", "gpt-9-900k", "openai-codex"),
+        ];
+        fold_context_variants(&mut models);
+        let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "openai-codex:gpt-6-luna",
+                "openai-codex:gpt-6.1-terra",
+                "openai-codex:gpt-9-900k"
+            ]
+        );
+        let window = models[0]
+            .options
+            .iter()
+            .find(|o| o.id == "contextWindow")
+            .unwrap();
+        assert_eq!(window.default_choice, "272k");
+        assert_eq!(
+            window
+                .choices
+                .iter()
+                .map(|c| c.label.as_str())
+                .collect::<Vec<_>>(),
+            ["272K", "900K"]
+        );
+        assert!(models[1].options.is_empty());
+        // Picking 900K sends the variant; the default sends the model.
+        let available = ["openai-codex:gpt-6-luna", "openai-codex:gpt-6-luna-900k"];
+        assert_eq!(
+            super::super::pick_model_value("openai-codex:gpt-6-luna", &available, Some("900k"))
+                .as_deref(),
+            Some("openai-codex:gpt-6-luna-900k")
+        );
+        assert_eq!(
+            super::super::pick_model_value("openai-codex:gpt-6-luna", &available, Some("272k"))
+                .as_deref(),
+            Some("openai-codex:gpt-6-luna")
+        );
+        // A chat that saved the variant itself still runs it.
+        assert_eq!(
+            super::super::pick_model_value("openai-codex:gpt-6-luna-900k", &available, None)
+                .as_deref(),
+            Some("openai-codex:gpt-6-luna-900k")
+        );
+    }
+
+    /// A catalog that isn't a regular file of a usable size is passed over
+    /// at once: a FIFO would block a read forever.
+    #[cfg(unix)]
+    #[test]
+    fn a_catalog_that_isnt_a_plain_file_of_a_usable_size_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("models_dev_cache.json");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let mut models = vec![model(
+            "anthropic:claude-opus-5-5",
+            "claude-opus-5-5",
+            "anthropic",
+        )];
+        let started = std::time::Instant::now();
+        name_models_from(&mut models, &fifo);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(models[0].label, "claude-opus-5-5");
+        // Past the size cap (sparse: no disk spent): skipped unread.
+        let big = dir.path().join("big.json");
+        let file = std::fs::File::create(&big).unwrap();
+        file.set_len(MAX_CATALOG_BYTES + 1).unwrap();
+        name_models_from(&mut models, &big);
+        assert_eq!(models[0].label, "claude-opus-5-5");
+        // A symlink to an endless device: refused once opened, not read.
+        let zero = dir.path().join("zero.json");
+        std::os::unix::fs::symlink("/dev/zero", &zero).unwrap();
+        let started = std::time::Instant::now();
+        name_models_from(&mut models, &zero);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(models[0].label, "claude-opus-5-5");
+    }
+
+    /// Hermes's own catalog names its models; one it doesn't list keeps
+    /// its id, and a label Hermes wrote itself is left as it is.
+    #[test]
+    fn hermes_models_read_as_its_catalog_names_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = dir.path().join("models_dev_cache.json");
+        // The shape of a real models.dev cache, trimmed.
+        std::fs::write(
+            &catalog,
+            r#"{
+              "anthropic": {"id": "anthropic", "name": "Anthropic", "models": {
+                "claude-opus-5-5": {"id": "claude-opus-5-5", "name": "Claude Opus 5.5", "reasoning": true},
+                "claude-fable-5-1": {"id": "claude-fable-5-1", "name": "Claude Fable 5.1"}
+              }},
+              "openai": {"id": "openai", "models": {
+                "gpt-6-luna": {"id": "gpt-6-luna", "name": "GPT-6 Luna"}
+              }}
+            }"#,
+        )
+        .unwrap();
+        let mut models = vec![
+            model("anthropic:claude-opus-5-5", "claude-opus-5-5", "anthropic"),
+            model(
+                "anthropic:claude-fable-5.1",
+                "claude-fable-5.1",
+                "anthropic",
+            ),
+            model("openai-codex:gpt-6-luna", "gpt-6-luna", "openai-codex"),
+            model(
+                "openai-codex:gpt-6-luna-900k",
+                "gpt-6-luna-900k",
+                "openai-codex",
+            ),
+            model("ollama:llama3", "llama3", "ollama"),
+            model("anthropic:claude-opus-5-5", "My Opus", "anthropic"),
+        ];
+        name_models_from(&mut models, &catalog);
+        let labels: Vec<_> = models.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Claude Opus 5.5",
+                "Claude Fable 5.1",
+                "GPT-6 Luna",
+                "gpt-6-luna-900k",
+                "llama3",
+                "My Opus"
+            ]
+        );
+        // No catalog, or one that doesn't parse: ids, and no error.
+        let mut models = vec![model(
+            "anthropic:claude-opus-5-5",
+            "claude-opus-5-5",
+            "anthropic",
+        )];
+        name_models_from(&mut models, &dir.path().join("missing.json"));
+        std::fs::write(&catalog, "not json").unwrap();
+        name_models_from(&mut models, &catalog);
+        assert_eq!(models[0].label, "claude-opus-5-5");
+    }
+}

@@ -91,6 +91,12 @@ return ui.component(function(props: { [any]: any }): Node
 			end
 		end
 	end
+	-- The interface's family unless one is given, as `ds.Text` sets it: its
+	-- texts come and go in a region of their own, and one left to inherit it
+	-- has fallen back to the platform's standard font (Times on macOS).
+	if style.font == nil then
+		style.font = "$font.sans"
+	end
 	local function size(): number
 		local v = style.text_size
 		if type(v) == "number" then

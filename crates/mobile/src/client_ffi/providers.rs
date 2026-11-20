@@ -93,7 +93,7 @@ pub struct AgentLoginRules {
     pub name: String,
     /// The agent has accounts Zeron can sign in to at all.
     pub signs_in: bool,
-    /// Zeron switches between its accounts (not Hermes, not Antigravity).
+    /// Zeron switches between its accounts (not Hermes' own pool).
     pub switches: bool,
     /// It holds one login: once connected there is nothing to add.
     pub keeps_one_login: bool,
