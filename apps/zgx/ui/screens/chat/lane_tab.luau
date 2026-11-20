@@ -592,6 +592,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 				out.harness = c.harness
 			end
 		end
+		if not out.harness and type(m) == "string" then
+			out.harness = string.match(m, "^([^/]+)/")
+		end
 		return out
 	end
 	-- Where its first message makes it: nil, its parent's place as it is;
@@ -848,10 +851,10 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			-- transcript's send steps clear of the end (it glides to the top,
 			-- its reply's room opening under it), then goes to the host with
 			-- that id, so the host's copy is the same row.
-			-- (While a turn runs it's queued instead: it shows in the queue, and
-			-- what's picked waits for the turn it will run in.)
+			-- (While a turn runs it's queued instead: it shows in the queue,
+			-- carrying what's picked so it runs on that agent/model.)
 			local queued = not is_unsent and running:peek()
-			local req: { [string]: any } = if queued then {} else picks()
+			local req: { [string]: any } = picks()
 			req.attachments = pack.attachments
 			req.appshots = Appshots.of_cargo(chips)
 			local function failed(err: any)

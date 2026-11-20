@@ -4620,6 +4620,28 @@ impl DocHost {
         hold_for_turn_end: bool,
         transfers: Vec<crate::uploads::AttachmentTransfer>,
     ) -> Result<String, EngineError> {
+        self.queue_message_with_config(
+            chat_id,
+            text,
+            attachments,
+            hold_for_turn_end,
+            transfers,
+            None,
+        )
+    }
+
+    /// [`Self::queue_message_with_transfers`] plus an optional `ChatConfig`
+    /// selected when the message was queued (e.g., switching provider or model
+    /// while the previous turn is still running).
+    pub fn queue_message_with_config(
+        &self,
+        chat_id: &str,
+        text: &str,
+        attachments: Vec<String>,
+        hold_for_turn_end: bool,
+        transfers: Vec<crate::uploads::AttachmentTransfer>,
+        config: Option<zeron_proto::ChatConfig>,
+    ) -> Result<String, EngineError> {
         let handle = self.open(chat_id)?;
         let id = new_id();
         let item = QueuedMessage {
@@ -4631,6 +4653,7 @@ impl DocHost {
             issued_at: now_ms(),
             edited_at: None,
             delivery_gate: None,
+            config,
         };
         if self.hold_row_if_needed(chat_id, &item, &transfers)? {
             self.unarchive_on_send(chat_id);
@@ -5140,12 +5163,15 @@ impl DocHost {
                 "queued message is blocked for editing or review".into(),
             ));
         }
-        if self
-            .sessions()
-            .is_some_and(|sessions| sessions.defers_to_turn_end(chat_id, None))
-        {
+        if self.sessions().is_some_and(|sessions| {
+            sessions.defers_to_turn_end(chat_id, None)
+                || candidate
+                    .config
+                    .as_ref()
+                    .is_some_and(|cfg| !sessions.live_run_matches_config(chat_id, cfg))
+        }) {
             // Send next: lead the ordinary rows; the drain delivers it the
-            // moment the current turn ends.
+            // moment the current turn ends (and applies its target config).
             let Some(item) = handle.doc.take_queued(id)? else {
                 return Ok(false);
             };
@@ -5426,7 +5452,12 @@ impl DocHost {
             queued_message_prompt(&item.text, &attachments)
         };
         self.resolve_attachment_refs(&mut prompt, &mut attachments);
-        if send == QueueSend::Steer {
+        if send == QueueSend::Steer
+            && item
+                .config
+                .as_ref()
+                .is_none_or(|cfg| sessions.live_run_matches_config(chat_id, cfg))
+        {
             match sessions
                 .steer_now(
                     chat_id,
@@ -5473,12 +5504,30 @@ impl DocHost {
                 "no live run and no prior run config".into(),
             ));
         };
+        if let Some(cfg) = &item.config {
+            request.harness = Some(cfg.harness);
+            request.model = cfg.model.clone();
+            request.reasoning = cfg.reasoning;
+            request.model_options = cfg.model_options.clone();
+        }
         request.prompt = prompt;
         request.resume = None; // dispatch re-derives the harness session
         request.attachments = attachments;
         let harness = self.harness_for_request(chat_id, &request);
         self.dispatch_with_source_context(&sessions, chat_id, harness, request, Some(message_id))
             .await?;
+        if let Some(cfg) = &item.config
+            && let Some(ws) = self.workspace()
+        {
+            let mut updated = ws.chat_config(chat_id).unwrap_or_else(|| cfg.clone());
+            updated.harness = cfg.harness;
+            updated.model = cfg.model.clone();
+            updated.reasoning = cfg.reasoning;
+            updated.model_options = cfg.model_options.clone();
+            if let Err(err) = ws.set_chat_config(chat_id, &updated) {
+                tracing::warn!(chat = %chat_id, error = %err, "queued row chat config update failed");
+            }
+        }
         Ok(())
     }
 
@@ -6604,6 +6653,7 @@ impl DocHost {
                 issued_at: entry.issued_at.min(now_ms()),
                 edited_at: None,
                 delivery_gate: None,
+                config: None,
             };
             let queued = handle.doc.read_queue().is_ok_and(|q| q.iter().any(|r| r.id == row.id));
             if !queued && let Err(err) = handle.doc.insert_queued(0, &row) {
@@ -6929,6 +6979,7 @@ impl DocHost {
             issued_at: issued_at.min(now_ms()),
             edited_at: None,
             delivery_gate: None,
+            config: None,
         };
         if handle.doc.read_queue()?.iter().any(|row| row.id == item.id) {
             return Ok(()); // a redelivered command: already held

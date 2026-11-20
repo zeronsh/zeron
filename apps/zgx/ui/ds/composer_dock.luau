@@ -66,6 +66,9 @@ export type Queued = {
 	age: string?,
 	-- false: it can't be taken back from here (no Remove).
 	removable: boolean?,
+	-- Targets a different provider, model, effort, or model option than the
+	-- chat's current turn: cannot steer mid-turn (Send now interrupts instead).
+	reconfigures: boolean?,
 }
 export type TodoState = "done" | "doing" | "pending"
 export type Todo = { id: string, text: string, state: TodoState }
@@ -857,6 +860,9 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 	local function action(): string
 		if now().cargo and #(now().cargo :: { cargo.Item }) > 0 then
 			return "send_now"
+		end
+		if now().reconfigures then
+			return if props.turn_running and props.turn_running() then "send_now" else "send_next"
 		end
 		if steer() then
 			return "steer"

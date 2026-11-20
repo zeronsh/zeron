@@ -1022,6 +1022,29 @@ impl SessionsEngine {
         lock(&self.inner.runs).get(chat_id).map(|h| h.runtime_config.harness_id)
     }
 
+    /// Whether the chat's live turn (if one is in flight) already runs with
+    /// `config`'s harness, model, reasoning, and model options — i.e., whether
+    /// a queued row carrying `config` may steer into the live turn rather than
+    /// waiting for or starting a fresh turn on the new configuration.
+    pub fn live_run_matches_config(
+        &self,
+        chat_id: &str,
+        config: &zeron_proto::ChatConfig,
+    ) -> bool {
+        if !self.turn_in_flight(chat_id) {
+            return true;
+        }
+        let runs = lock(&self.inner.runs);
+        let Some(handle) = runs.get(chat_id) else {
+            return true;
+        };
+        let r = &handle.runtime_config.request;
+        handle.runtime_config.harness_id == config.harness
+            && r.model == config.model
+            && r.reasoning == config.reasoning
+            && r.model_options == config.model_options
+    }
+
     /// Mark the provider-switch seam for a send about to run on `harness_id`
     /// now, with its message, rather than once the dispatch has replaced the
     /// outgoing provider's runtime (seconds later). Idempotent: the dispatch's

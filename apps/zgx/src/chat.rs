@@ -3172,6 +3172,7 @@ impl View {
             .collect();
         let words = crate::appshots::with_appshots(&words, &shots);
         let prompt = with_attachments(&words, &paths, images);
+        let config = merged_config(&chat["config"], &req);
         if !fresh && chats.running(&id) {
             // Queued: it shows in the queue, not the transcript.
             self.forget_pending(&id, &message_id);
@@ -3183,13 +3184,23 @@ impl View {
             if !transfers.is_empty() {
                 params["transfers"] = json!(transfers);
             }
+            let queue_has_config = self
+                .open
+                .borrow()
+                .as_ref()
+                .filter(|o| o.id == id)
+                .is_some_and(|o| o.queue.iter().any(|q| !q["config"].is_null()));
+            if !config["harness"].is_null()
+                && (runs_otherwise(&chat["config"], &config) || queue_has_config)
+            {
+                params["config"] = config;
+            }
             return engine::get()
                 .call("QueueMessage", params)
                 .await
                 .map(|_| ())
                 .map_err(|e| engine::outcome(&e));
         }
-        let config = merged_config(&chat["config"], &req);
         // A chat just made takes the config it was started with. (Never one
         // without an agent: the engine turns that away as bad params, and
         // the chat keeps the config it was made with: a side chat's, its
@@ -3689,8 +3700,15 @@ impl View {
         let (method, params) = match args.field("op").map(text).as_deref() {
             Some("remove") => ("RemoveQueuedMessage", routed(params)),
             Some("send") => {
+                let row_reconfigures = self
+                    .open
+                    .borrow()
+                    .as_ref()
+                    .filter(|o| o.id == id)
+                    .and_then(|o| o.queue.iter().find(|q| q["id"].as_str() == Some(item.as_str())))
+                    .is_some_and(|q| !q["config"].is_null() && runs_otherwise(&chat["config"], &q["config"]));
                 let harness = chat["config"]["harness"].as_str().unwrap_or_default();
-                let method = if chats.running(&id) && chats.steers(harness) {
+                let method = if chats.running(&id) && chats.steers(harness) && !row_reconfigures {
                     "SteerQueuedMessageNow"
                 } else {
                     "SendQueuedMessageNow"
@@ -6676,6 +6694,9 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
                 if held_elsewhere(chats.here.borrow().as_deref(), who) {
                     fields.push(("locked", Value::from("Being edited on another device")));
                 }
+            }
+            if !q["config"].is_null() && runs_otherwise(&config, &q["config"]) {
+                fields.push(("reconfigures", Value::Bool(true)));
             }
             Value::record(fields)
         })

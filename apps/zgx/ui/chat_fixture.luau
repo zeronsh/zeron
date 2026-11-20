@@ -382,15 +382,19 @@ stub.send = function(req: any)
 	end
 	-- Sent with a pick (another agent, model or effort): the run takes it,
 	-- and the session with it, as the host does once the run is sent.
+	-- (While a turn is already running, the message queues with that pick and
+	-- the session stays on the live provider until the queued turn dispatches.)
 	if req.session and not req.fresh and (req.model or req.effort or req.fast ~= nil) then
 		note(`took:{req.session}:{req.harness or "-"}|{req.model or "-"}|{req.effort or "-"}`)
-		local patch: { [string]: any } = {}
-		for _, k in { "harness", "model", "effort", "fast" } do
-			if req[k] ~= nil then
-				patch[k] = req[k]
+		if not (META[req.session] and META[req.session].running) then
+			local patch: { [string]: any } = {}
+			for _, k in { "harness", "model", "effort", "fast" } do
+				if req[k] ~= nil then
+					patch[k] = req[k]
+				end
 			end
+			publish(req.session, patch)
 		end
-		publish(req.session, patch)
 	end
 	if req.fresh then
 		note(`run:{req.cwd or "-"}|{if req.worktree then "worktree" else "local"}|{req.branch or "-"}`)
@@ -622,6 +626,19 @@ ui.command {
 	run = function()
 		if opened then
 			publish(opened, { queue = { { id = "q1", text = "Queued words" } } })
+		end
+	end,
+}
+ui.command {
+	id = "queue_switch",
+	title = "A provider-switching message waits in the queue while steering is available",
+	run = function()
+		if opened then
+			publish(opened, {
+				running = true,
+				steers = true,
+				queue = { { id = "q-sw", text = "Switch to GPT", reconfigures = true } },
+			})
 		end
 	end,
 }
