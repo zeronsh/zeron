@@ -19,7 +19,8 @@
 -- The queue's rows are Zeron's (crates/ui/src/queue.rs): a grip, its
 -- thumbnails, its first line, and at its end Edit, Remove and one primary
 -- action: "Send now" for a message with cargo (it interrupts), "Steer" where
--- the agent takes a word mid-turn, else "Send next". Rows drag into a new
+-- the agent takes a word mid-turn, "Send now" mid-turn where it doesn't (it
+-- stops the turn), else "Send next". Rows drag into a new
 -- order (or Alt+↑/↓). A row being edited says so. The plan's rows are the
 -- todo panel's (todo_panel.rs): done, in progress (the working ring while
 -- the turn is live), pending; a long plan folds to the step in progress and
@@ -123,6 +124,9 @@ export type Props = {
 	queue: State<{ Queued }>?,
 	-- Whether the agent takes a word mid-turn (a row's action is then Steer).
 	can_steer: (boolean | () -> boolean)?,
+	-- A turn runs: a row its agent can't take mid-turn is sent by stopping it
+	-- (Send now); with none running, it's simply next (Send next).
+	turn_running: (() -> boolean)?,
 	on_queue_send: ((id: string) -> ())?,
 	on_queue_edit: ((id: string) -> ())?,
 	on_queue_remove: ((id: string) -> ())?,
@@ -847,13 +851,17 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 		return if type(s) == "function" then s() else s == true
 	end
 	-- Its one action: Send now for a message with cargo (it interrupts),
-	-- Steer where the agent takes a word mid-turn, else Send next. (Its
-	-- kind; `words`, as it reads.)
+	-- Steer where the agent takes a word mid-turn, Send now while a turn
+	-- runs that its agent would only take at its end (it stops the turn),
+	-- else Send next. (Its kind; `words`, as it reads.)
 	local function action(): string
 		if now().cargo and #(now().cargo :: { cargo.Item }) > 0 then
 			return "send_now"
 		end
-		return if steer() then "steer" else "send_next"
+		if steer() then
+			return "steer"
+		end
+		return if props.turn_running and props.turn_running() then "send_now" else "send_next"
 	end
 	local function words(): string
 		return locale.s(`ds.composer_dock.{action()}`)

@@ -90,6 +90,10 @@ export type Message = {
 	-- When it began (`ui.now() / 1000`), and how long it worked, once done.
 	started: number?,
 	worked: number?,
+	-- When its turn began, before the reply did (a Cloud machine's setup
+	-- opens the turn of the message that woke it, begun at the send): what
+	-- its working clock counts from, so the wake doesn't start it again.
+	turn_from: number?,
 	-- A person's newest, its reply not yet begun: on its way ("sending"),
 	-- its turn under way ("working", since `since`), or not delivered
 	-- ("failed", to send again). The line under it says so at once, in its
@@ -1305,7 +1309,8 @@ local function reply(
 					mt = ui.raw(8, "the block gap less the indicator's own line spacing"),
 					Working {
 						since = function(): number
-							return now().started or ui.now() / 1000
+							local m = now()
+							return m.turn_from or m.started or ui.now() / 1000
 						end,
 						seed = seed_of(m.id),
 					},

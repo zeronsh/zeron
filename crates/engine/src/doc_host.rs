@@ -5383,31 +5383,16 @@ impl DocHost {
         }
     }
 
-    /// A Stop cancels the messages sent during the turn it stops: the sends
-    /// and steers held for that turn's end leave the queue (the user's own
-    /// queued rows stay, paused) and land in the transcript unrun — never
-    /// to start the stopped work again in the next runtime.
+    /// A Stop holds back the messages sent during the turn it stops: the
+    /// sends and steers waiting for that turn's end stay in the queue, as
+    /// the person's own rows do, paused with them — never to start the
+    /// stopped work again by themselves, and never out of reach (sent, edited
+    /// or removed there like any other row). They're no longer the turn's:
+    /// a row goes on its own once the person sends again.
     fn cancel_held_sends(&self, handle: &Arc<ChatDocHandle>) {
-        let held: Vec<String> = {
-            let mut sends = lock(&handle.held_sends);
-            let mut steered = lock(&handle.steered_rows);
-            let ids = sends.keys().cloned().chain(steered.drain(..)).collect();
-            sends.clear();
-            ids
-        };
-        let mut changed = false;
-        for id in held {
-            let Ok(Some(row)) = handle.doc.take_queued(&id) else {
-                continue;
-            };
-            changed = true;
-            if let Err(err) = handle.write_user_message(&row.id, &row.text, row.issued_at) {
-                tracing::warn!(chat = %handle.chat_id, error = %err, "cancelled held send write failed");
-            }
-        }
-        if changed {
-            handle.publish_queue();
-        }
+        lock(&handle.held_sends).clear();
+        lock(&handle.steered_rows).clear();
+        handle.publish_queue();
     }
 
     /// Send one taken queue row.
@@ -6600,18 +6585,33 @@ impl DocHost {
     ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
         let chat_id = &handle.chat_id;
         if let Some(message_id) = self.cancelled_by_stop(handle, entry) {
-            // Still the user's message: it stays in the transcript, unrun.
-            let prompt = match &entry.payload {
-                SessionCommandPayload::Run { request, .. } => request.prompt.clone(),
-                SessionCommandPayload::Steer { prompt, .. } => prompt.clone(),
-                _ => String::new(),
+            // Still the user's message: it waits at the head of the paused
+            // queue, to send, edit or remove — never stranded unrun in the
+            // transcript, where nothing would ever answer it.
+            let (prompt, attachments) = match &entry.payload {
+                SessionCommandPayload::Run { request, .. } => {
+                    (request.prompt.clone(), request.attachments.clone())
+                }
+                SessionCommandPayload::Steer { prompt, .. } => (prompt.clone(), Vec::new()),
+                _ => (String::new(), Vec::new()),
             };
-            if let Err(err) =
-                handle.write_user_message(&message_id, &prompt, entry.issued_at.min(now_ms()))
-            {
-                tracing::warn!(chat = %chat_id, error = %err, "cancelled message write failed");
+            let row = QueuedMessage {
+                id: message_id,
+                text: prompt,
+                attachments,
+                hold_for_turn_end: false,
+                issued_by: entry.issued_by.clone(),
+                issued_at: entry.issued_at.min(now_ms()),
+                edited_at: None,
+                delivery_gate: None,
+            };
+            let queued = handle.doc.read_queue().is_ok_and(|q| q.iter().any(|r| r.id == row.id));
+            if !queued && let Err(err) = handle.doc.insert_queued(0, &row) {
+                tracing::warn!(chat = %chat_id, error = %err, "message cancelled by a Stop not kept in the queue");
             }
-            tracing::info!(chat = %chat_id, "prompt sent before a Stop that has acted: cancelled");
+            handle.queue_paused.store(true, Ordering::Release);
+            handle.publish_queue();
+            tracing::info!(chat = %chat_id, "prompt sent before a Stop that has acted: held in the queue");
             return Ok((
                 SessionCommandStatus::Applied,
                 Some("cancelled by the Stop sent after it".into()),

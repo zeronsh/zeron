@@ -30,8 +30,21 @@ pub(crate) use plugins::is_plugin_tool_name;
 
 /// Default and ceiling for the blocking waits.
 const MAX_BATCH: usize = 32;
-/// Cloud runs these agents (Codex and Claude Code): a Cloud chat's harness.
-const CLOUD_HARNESSES: &[HarnessId] = &[HarnessId::ClaudeCode, HarnessId::Codex];
+/// Cloud runs these agents (every built-in one): a Cloud chat's harness, the
+/// first the default. Mirrors `zeron_proto::CLOUD_HARNESSES`.
+const CLOUD_HARNESSES: &[HarnessId] = &[
+    HarnessId::ClaudeCode,
+    HarnessId::Codex,
+    HarnessId::Cursor,
+    HarnessId::Devin,
+    HarnessId::Grok,
+    HarnessId::Hermes,
+    HarnessId::Fx,
+    HarnessId::Pi,
+    HarnessId::Opencode,
+    HarnessId::Antigravity,
+    HarnessId::Muse,
+];
 const DEFAULT_WAIT: Duration = Duration::from_secs(600);
 /// A device seen this recently is online (the app's sidebar says the same).
 const ONLINE_SECS: i64 = 70;
@@ -138,7 +151,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "create_chat",
-            description: "Create a child of your chat to delegate work to (kind subagent, the default when you speak from a chat or pass parent: listed under that chat's Subagents and in its transcript's subagent block), a side chat (kind side: only when the person should treat it as a side conversation of their own), or a standalone session (kind chat, no parent). Any connected provider works (see list_harnesses), whichever provider you run on. Delegation is one level deep: a chat that has a parent cannot create chats. With cloud, the chat runs on a Cloud machine of its own (Codex or Claude Code), from a Cloud chat or a project with a GitHub repository. Select a project and/or device; catalogs are validated on that host. Optionally send a first prompt and wait for the reply. For parallel delegation use create_chats, or launch with wait=false and wait only after all chats have started.",
+            description: "Create a child of your chat to delegate work to (kind subagent, the default when you speak from a chat or pass parent: listed under that chat's Subagents and in its transcript's subagent block), a side chat (kind side: only when the person should treat it as a side conversation of their own), or a standalone session (kind chat, no parent). Any connected provider works (see list_harnesses), whichever provider you run on. Delegation is one level deep: a chat that has a parent cannot create chats. With cloud, the chat runs on a Cloud machine of its own (any built-in agent), from a Cloud chat or a project with a GitHub repository. Select a project and/or device; catalogs are validated on that host. Optionally send a first prompt and wait for the reply. For parallel delegation use create_chats, or launch with wait=false and wait only after all chats have started.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1219,7 +1232,7 @@ impl Tools {
                 let id: HarnessId = parse_enum("harness", raw).map_err(anyhow::Error::msg)?;
                 anyhow::ensure!(
                     CLOUD_HARNESSES.contains(&id),
-                    "Cloud runs Codex and Claude Code only"
+                    "Cloud doesn't run {raw}: it runs the built-in agents only"
                 );
                 id
             }
@@ -2943,12 +2956,12 @@ mod tests {
             .unwrap();
         assert_eq!(sent["cloud"], true);
         assert_eq!(sent["parentChatId"], "chat-alpha-1");
-        // Only Cloud's agents.
+        // Every built-in agent runs there; one added from the ACP registry doesn't.
         let refused = alpha
-            .call("create_chat", json!({"cloud": true, "harness": "cursor"}))
+            .call("create_chat", json!({"cloud": true, "harness": "acp.gemini"}))
             .await
             .unwrap_err();
-        assert!(refused.contains("Codex and Claude Code"), "{refused}");
+        assert!(refused.contains("built-in agents only"), "{refused}");
     }
 
     #[tokio::test]

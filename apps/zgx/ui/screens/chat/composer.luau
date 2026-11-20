@@ -1428,7 +1428,13 @@ local function Composer(): Node
 			end,
 			on_escape = store.escape,
 			queue = shown_queue,
+			-- (Steer only where its agent takes a word mid-turn: else the row's
+			-- Send now stops the turn, as the host does.)
 			can_steer = function(): boolean
+				local s = open()
+				return running:get() and s ~= nil and s.steers == true
+			end,
+			turn_running = function(): boolean
 				return running:get()
 			end,
 			-- (A held row is the hold's: it goes on its own, or is let go.)

@@ -16,7 +16,7 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
 use zeron_proto::{
     BillingLink, BillingStatus, CloudReach, CloudSession, CloudSessions, CloudStatus, CloudUsage,
@@ -457,21 +457,15 @@ impl CloudClient {
             .map_err(Failure::into_error)
     }
 
-    /// `GET /cloud/{orgId}/models`: the models Cloud's machines run, by agent
-    /// (`claude-code`, `codex`), kept on the edge by hand so a new one needs no
-    /// app release. Each model is as the edge wrote it; [`cloud_models`] reads
-    /// them leniently.
-    pub async fn models(
-        &self,
-    ) -> Result<std::collections::HashMap<String, Vec<serde_json::Value>>, EngineError> {
-        #[derive(Deserialize)]
-        struct Models {
-            #[serde(default)]
-            models: std::collections::HashMap<String, Vec<serde_json::Value>>,
-        }
-        let reply = self
-            .target()?
-            .call::<Models>(
+    /// `GET /cloud/{orgId}/models`: the models Cloud's machines run, by agent:
+    /// Claude Code's and Codex's kept on the edge by hand (a new one needs no
+    /// app release), every other agent's as a machine of this account last
+    /// discovered it with Cloud's credentials (`crate::model_publish`), and
+    /// that agent's catalog per set of accounts beside it. Each model is as
+    /// the edge wrote it; [`cloud_models`] reads them leniently.
+    pub async fn models(&self) -> Result<CloudModelLists, EngineError> {
+        self.target()?
+            .call::<CloudModelLists>(
                 reqwest::Method::GET,
                 &["cloud", "models"],
                 &[],
@@ -479,8 +473,51 @@ impl CloudClient {
                 "Read Cloud's models",
             )
             .await
-            .map_err(Failure::into_error)?;
-        Ok(reply.models)
+            .map_err(Failure::into_error)
+    }
+
+    /// `GET /cloud/{orgId}/plan-usage`: subscriptions' usage as Cloud machines'
+    /// runs reported it, by account (`provider@slot`).
+    pub async fn reported_usage(
+        &self,
+    ) -> Result<std::collections::HashMap<String, ReportedUsage>, EngineError> {
+        #[derive(Deserialize)]
+        struct Reply {
+            #[serde(default)]
+            usage: std::collections::HashMap<String, ReportedUsage>,
+        }
+        self.target()?
+            .call::<Reply>(reqwest::Method::GET, &["cloud", "plan-usage"], &[], None, "Read Cloud's usage")
+            .await
+            .map(|reply| reply.usage)
+            .map_err(Failure::into_error)
+    }
+
+    /// `POST /cloud/{orgId}/models {harness, models, accounts}`: the models
+    /// `accounts` run `harness` with, as this device discovered them signing
+    /// one in for Cloud, kept as theirs until a machine discovers its own.
+    pub async fn publish_account_models(
+        &self,
+        harness: zeron_proto::HarnessId,
+        models: &[zeron_proto::Model],
+        accounts: &str,
+    ) -> Result<(), EngineError> {
+        let body = serde_json::json!({
+            "harness": harness.as_str(),
+            "models": models,
+            "accounts": accounts,
+        });
+        self.target()?
+            .call::<serde_json::Value>(
+                reqwest::Method::POST,
+                &["cloud", "models"],
+                &[],
+                Some(body),
+                "Keep Cloud's models",
+            )
+            .await
+            .map(|_| ())
+            .map_err(Failure::into_error)
     }
 
     /// `GET /vault/{orgId}/github/repos[?q=]` — the vault calls GitHub with
@@ -641,12 +678,9 @@ impl CloudClient {
         key: &str,
         authorized_devices: Vec<String>,
     ) -> Result<VaultStatus, EngineError> {
-        if !matches!(
-            provider,
-            VaultProvider::AnthropicKey | VaultProvider::OpenaiKey
-        ) {
+        if !provider.is_api_key() {
             return Err(EngineError::Other(format!(
-                "{} is not an API-key provider (use anthropic-key or openai-key)",
+                "{} is not an API-key provider",
                 provider.as_str()
             )));
         }
@@ -710,7 +744,7 @@ impl CloudClient {
             .await
     }
 
-    async fn put_credential_with(
+    pub(crate) async fn put_credential_with(
         &self,
         provider: VaultProvider,
         material: serde_json::Value,
@@ -1084,6 +1118,13 @@ pub(crate) async fn dispatch(
     method: &str,
     raw: serde_json::Value,
 ) -> Result<RpcReply, RpcError> {
+    if matches!(
+        method,
+        methods::VAULT_PUT_API_KEY | methods::VAULT_DISCONNECT | methods::VAULT_CONNECT_CODEX | methods::VAULT_CONNECT_CLAUDE
+    ) {
+        // (Which accounts Cloud runs an agent on may change.)
+        crate::cloud_accounts::forget_active_accounts();
+    }
     match method {
         methods::CLOUD_STATUS => RpcReply::value(&cloud.status().await.map_err(failed)?),
         methods::CLOUD_ENABLE => RpcReply::value(&cloud.enable().await.map_err(failed)?),
@@ -1180,20 +1221,26 @@ pub(crate) async fn dispatch(
         methods::VAULT_STATUS => RpcReply::value(&cloud.vault_status().await.map_err(failed)?),
         methods::VAULT_PUT_API_KEY => {
             let p: PutKeyParams = params(raw)?;
+            // No devices named (a provider card's key): Cloud's own logical
+            // device, which every session machine draws grants through.
+            let devices = if p.authorized_devices.is_empty() {
+                let device = cloud.status().await.map_err(failed)?.device_id.ok_or_else(|| {
+                    RpcError::Failed("Turn Cloud on in Settings → Cloud first.".into())
+                })?;
+                vec![device]
+            } else {
+                p.authorized_devices
+            };
             let status = cloud
-                .put_api_key(p.provider, &p.key, p.authorized_devices)
+                .put_api_key(p.provider, &p.key, devices)
                 .await
                 .map_err(failed)?;
-            // A new key is the account Cloud uses from now on — machines
-            // prefer an active subscription login, so clear that one.
-            let login = match p.provider {
-                VaultProvider::AnthropicKey => Some(VaultProvider::Claude),
-                VaultProvider::OpenaiKey => Some(VaultProvider::Codex),
-                _ => None,
-            };
-            if let Some(login) = login {
-                cloud.vault_activate(login, None).await.map_err(failed)?;
-            }
+            // The key becomes its vendor's active key. No sign-in is
+            // cleared: logins are shared by several agents (one ChatGPT
+            // login runs Codex, Pi, OpenCode and Hermes), so a key saved for
+            // one must not sign the others out. Machines use it wherever no
+            // sign-in is in use; preferring it over a sign-in is the card's
+            // own switch (`ActivateAgentAccount`).
             RpcReply::value(&status)
         }
         methods::VAULT_AUTHORIZE => {
@@ -1254,9 +1301,14 @@ pub(crate) async fn dispatch(
             } else {
                 HarnessId::ClaudeCode
             };
-            let capture = vault_upload_sink(cloud, harness, p.authorized_devices);
+            let vault = if harness == HarnessId::Codex {
+                VaultProvider::Codex
+            } else {
+                VaultProvider::Claude
+            };
+            let capture = vault_upload_sink(cloud, vault, p.authorized_devices);
             let start = accounts
-                .start_capture_login(harness, capture)
+                .start_capture_login(harness, None, capture)
                 .await
                 .map_err(failed)?;
             RpcReply::value(&start)
@@ -1266,25 +1318,66 @@ pub(crate) async fn dispatch(
 }
 
 /// Where a capture-only sign-in on this device lands: the vault, as a login
-/// of `harness`'s subscription provider usable by `devices`.
+/// of `vault` usable by `devices`. Codex's capture is its `auth.json`,
+/// Claude's `{credential, profile}`; every other sign-in hands over its
+/// upload as `{provider, material, profile?}`, which must name `vault`.
 pub(crate) fn vault_upload_sink(
     cloud: CloudClient,
-    harness: HarnessId,
+    vault: VaultProvider,
     devices: Vec<String>,
 ) -> CaptureSink {
     Arc::new(move |captured| {
         let cloud = cloud.clone();
         let devices = devices.clone();
         Box::pin(async move {
-            let uploaded = if harness == HarnessId::Codex {
-                cloud.put_codex_auth(captured, devices).await
-            } else {
-                let (credential, profile) = split_capture(captured);
-                cloud.put_claude_auth(credential, devices, profile).await
+            let uploaded = match vault {
+                VaultProvider::Codex => cloud.put_codex_auth(captured, devices).await,
+                VaultProvider::Claude => {
+                    let (credential, profile) = split_capture(captured);
+                    cloud.put_claude_auth(credential, devices, profile).await
+                }
+                _ => {
+                    let upload = CapturedUpload::read(captured)
+                        .filter(|upload| upload.provider == vault)
+                        .ok_or_else(|| {
+                            format!("The {} sign-in returned nothing to keep.", vault.as_str())
+                        })?;
+                    cloud
+                        .put_credential_with(vault, upload.material, devices, upload.profile)
+                        .await
+                }
             };
             uploaded.map(drop).map_err(|e| e.to_string())
         })
     })
+}
+
+/// A captured sign-in's own upload: `{provider, material, profile?}`.
+struct CapturedUpload {
+    provider: VaultProvider,
+    material: serde_json::Value,
+    profile: Option<VaultAccountProfile>,
+}
+
+impl CapturedUpload {
+    fn read(captured: serde_json::Value) -> Option<Self> {
+        let serde_json::Value::Object(mut map) = captured else {
+            return None;
+        };
+        let provider = VaultProvider::parse(map.get("provider")?.as_str()?)?;
+        let material = map
+            .remove("material")
+            .filter(serde_json::Value::is_object)?;
+        let profile = map
+            .remove("profile")
+            .and_then(|p| serde_json::from_value::<VaultAccountProfile>(p).ok())
+            .filter(|p| *p != VaultAccountProfile::default());
+        Some(Self {
+            provider,
+            material,
+            profile,
+        })
+    }
 }
 
 /// A captured sign-in: `{credential, profile}` (Claude's, with the identity
@@ -1366,7 +1459,13 @@ impl Target {
             .http
             .request(method, url)
             .bearer_auth(token)
-            .header(CLOUD_STATES_HEADER, CLOUD_STATES_UNDERSTOOD);
+            .header(CLOUD_STATES_HEADER, CLOUD_STATES_UNDERSTOOD)
+            // The vault providers this build parses: the edge lists no other
+            // in `VaultStatus` (an older build sees the original five).
+            .header(
+                zeron_proto::VAULT_PROVIDERS_HEADER,
+                zeron_proto::vault_providers_understood(),
+            );
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -1398,7 +1497,60 @@ impl Target {
 }
 
 
-/// The edge's models, as this engine's catalog takes them: each read alone, so
+/// `GET /cloud/{orgId}/models`'s reply (and the copy kept for when the edge is
+/// out of reach). An older edge's has no `catalogs`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CloudModelLists {
+    /// Each agent's newest catalog (Claude Code's and Codex's hand-kept).
+    #[serde(default)]
+    pub models: std::collections::HashMap<String, Vec<serde_json::Value>>,
+    /// Each agent's catalog per set of accounts, the newest first.
+    #[serde(default)]
+    pub catalogs: std::collections::HashMap<String, Vec<AccountCatalog>>,
+}
+
+/// A subscription's usage as a Cloud machine's run reported it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportedUsage {
+    #[serde(default)]
+    pub windows: Vec<zeron_proto::AgentUsageWindow>,
+    #[serde(default)]
+    pub plan_label: Option<String>,
+    /// Unix ms.
+    pub at: i64,
+}
+
+/// One set of accounts' catalog of an agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountCatalog {
+    /// `provider@slot` pairs, sorted, `,`-joined
+    /// (`crate::credentials::credential_accounts`).
+    pub accounts: String,
+    #[serde(default)]
+    pub models: Vec<serde_json::Value>,
+}
+
+impl CloudModelLists {
+    /// The models `harness` runs with on Cloud: those discovered with the
+    /// accounts Cloud runs it on now (`accounts`), else its newest catalog
+    /// (another account's, or a machine's that named none). `None` with
+    /// nothing listed for it.
+    pub fn for_harness(&self, harness: &str, accounts: Option<&str>) -> Option<&[serde_json::Value]> {
+        let matched = accounts.and_then(|accounts| {
+            self.catalogs
+                .get(harness)?
+                .iter()
+                .find(|c| c.accounts == accounts && !c.models.is_empty())
+        });
+        match matched {
+            Some(catalog) => Some(&catalog.models),
+            None => self.models.get(harness).map(Vec::as_slice),
+        }
+    }
+}
+
+/// The edge's models, as this engine's catalog takes them: each read alone, so/// The edge's models, as this engine's catalog takes them: each read alone, so
 /// one this build can't read (a reasoning level it doesn't know, say) drops
 /// that level or that model, never the list.
 pub fn cloud_models(listed: &[serde_json::Value]) -> Vec<zeron_proto::Model> {
@@ -1498,6 +1650,7 @@ mod tests {
         target: String,
         authorization: Option<String>,
         cloud_states: Option<String>,
+        vault_providers: Option<String>,
         body: serde_json::Value,
     }
 
@@ -1541,6 +1694,7 @@ mod tests {
                         let mut length = 0usize;
                         let mut authorization = None;
                         let mut cloud_states = None;
+                        let mut vault_providers = None;
                         for line in lines {
                             if let Some((name, value)) = line.split_once(':') {
                                 let value = value.trim();
@@ -1550,6 +1704,10 @@ mod tests {
                                     authorization = Some(value.to_string());
                                 } else if name.eq_ignore_ascii_case(CLOUD_STATES_HEADER) {
                                     cloud_states = Some(value.to_string());
+                                } else if name
+                                    .eq_ignore_ascii_case(zeron_proto::VAULT_PROVIDERS_HEADER)
+                                {
+                                    vault_providers = Some(value.to_string());
                                 }
                             }
                         }
@@ -1570,6 +1728,7 @@ mod tests {
                             target,
                             authorization,
                             cloud_states,
+                            vault_providers,
                             body,
                         });
                         let reply = reply.to_string();
@@ -1738,6 +1897,29 @@ mod tests {
         }
     }
 
+    /// The catalog for the accounts Cloud runs an agent on now, else its
+    /// newest; an older edge's reply (no `catalogs`) still reads.
+    #[test]
+    fn the_accounts_catalog_wins_over_the_newest() {
+        let lists: CloudModelLists = serde_json::from_value(serde_json::json!({
+            "models": { "grok": [{ "id": "grok-4.7" }] },
+            "catalogs": { "grok": [
+                { "accounts": "grok@paid", "models": [{ "id": "grok-4.7-build-fast" }], "at": 2 },
+                { "accounts": "grok@free", "models": [{ "id": "grok-4.7" }], "at": 1 }
+            ]}
+        }))
+        .unwrap();
+        let ids = |models: Option<&[serde_json::Value]>| {
+            models.map(|m| m.iter().map(|v| v["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>())
+        };
+        assert_eq!(ids(lists.for_harness("grok", Some("grok@paid"))), Some(vec!["grok-4.7-build-fast".into()]));
+        assert_eq!(ids(lists.for_harness("grok", Some("grok@other"))), Some(vec!["grok-4.7".into()]), "unknown accounts: the newest");
+        assert_eq!(ids(lists.for_harness("grok", None)), Some(vec!["grok-4.7".into()]));
+        assert_eq!(lists.for_harness("pi", Some("codex@c1")), None);
+        let older: CloudModelLists = serde_json::from_value(serde_json::json!({ "models": { "pi": [{ "id": "a" }] } })).unwrap();
+        assert_eq!(ids(older.for_harness("pi", Some("codex@c1"))), Some(vec!["a".into()]));
+    }
+
     #[test]
     fn cloud_models_are_read_one_at_a_time() {
         let listed = vec![
@@ -1807,6 +1989,15 @@ mod tests {
             edge.requests()
                 .iter()
                 .all(|r| r.cloud_states.as_deref() == Some(CLOUD_STATES_UNDERSTOOD)),
+            "{:?}",
+            edge.requests()
+        );
+        // ... and which vault providers: the edge lists no other.
+        let understood = zeron_proto::vault_providers_understood();
+        assert!(
+            edge.requests()
+                .iter()
+                .all(|r| r.vault_providers.as_deref() == Some(understood.as_str())),
             "{:?}",
             edge.requests()
         );
@@ -1961,6 +2152,43 @@ mod tests {
         assert!(
             error.to_string().contains("Subscribe or buy credits first"),
             "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn saving_a_key_signs_no_agent_out() {
+        fn edge(method: &str, target: &str, _: &serde_json::Value) -> (u16, serde_json::Value) {
+            match method {
+                "PUT" if target.starts_with("/vault/org_1/credentials/") => (200, vault_view()),
+                _ => (404, serde_json::json!({"error": "not_found"})),
+            }
+        }
+        let edge = MockEdge::start(edge).await;
+        let client = edge.client("org_1");
+        let tmp = tempfile::tempdir().unwrap();
+        let accounts = AgentAccounts::new(crate::agent_accounts::AgentAccountsConfig::detect(
+            tmp.path(),
+        ));
+        // An OpenAI key beside the ChatGPT login Codex, Pi, OpenCode and
+        // Hermes share: saved, and nothing else changes.
+        for provider in ["openai-key", "anthropic-key", "xai-key", "gemini-key"] {
+            dispatch(
+                client.clone(),
+                &accounts,
+                zeron_rpc::methods::VAULT_PUT_API_KEY,
+                serde_json::json!({
+                    "provider": provider, "key": "sk-saved-key-1", "authorizedDevices": ["cloud-1"]
+                }),
+            )
+            .await
+            .unwrap();
+        }
+        let requests = edge.requests();
+        assert_eq!(requests.iter().filter(|r| r.method == "PUT").count(), 4);
+        assert!(
+            requests.iter().all(|r| !r.target.ends_with("/active")),
+            "{:?}",
+            requests.iter().map(|r| &r.target).collect::<Vec<_>>()
         );
     }
 
@@ -2121,6 +2349,33 @@ mod tests {
             assert!(client.github_start(vec![]).await.is_err());
         }
         assert_eq!(edge.requests().len(), calls);
+    }
+
+    #[test]
+    fn a_captured_upload_names_its_provider_material_and_identity() {
+        let upload = CapturedUpload::read(serde_json::json!({
+            "provider": "grok",
+            "material": {"grokAuth": {"key": "k"}, "scope": "https://auth.x.ai::c"},
+            "profile": {"email": "ada@x.ai"},
+        }))
+        .unwrap();
+        assert_eq!(upload.provider, VaultProvider::Grok);
+        assert_eq!(upload.material["scope"], "https://auth.x.ai::c");
+        assert_eq!(upload.profile.unwrap().email.as_deref(), Some("ada@x.ai"));
+        // An empty profile is no profile; anything malformed is nothing.
+        let bare = CapturedUpload::read(serde_json::json!({
+            "provider": "devin", "material": {"devinCredentials": {}}, "profile": {},
+        }))
+        .unwrap();
+        assert!(bare.profile.is_none());
+        for junk in [
+            serde_json::json!({"provider": "nope", "material": {}}),
+            serde_json::json!({"provider": "devin", "material": "x"}),
+            serde_json::json!({"material": {}}),
+            serde_json::json!([]),
+        ] {
+            assert!(CapturedUpload::read(junk.clone()).is_none(), "{junk}");
+        }
     }
 
     #[test]

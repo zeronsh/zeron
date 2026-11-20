@@ -32,6 +32,7 @@
 //! - Interrupt: `session/cancel`, escalating SIGTERM → SIGKILL; the stream
 //!   always ends with `Done { status: Interrupted }`.
 
+mod antigravity_eligibility;
 mod antigravity_paths;
 mod devin_models;
 mod hermes_names;
@@ -555,7 +556,61 @@ fn hermes_spec() -> AcpAgentSpec {
 
 /// google's builds as the acp registry lists them (`antigravity-acp`); `None`
 /// on platforms without one, where only an explicit override can launch.
+/// (1.2.1 couldn't go on with a conversation whose checkpoint it was killed
+/// writing — "could not find doneCh for checkpoint" every turn after; 1.5.0
+/// carries on with it.)
 fn antigravity_archive() -> Option<crate::archive_install::ArchivePin> {
+    let (url, entry, sha512) = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        (
+            "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-1.5.0-darwin-arm64.zip",
+            "agy_acp_server.par",
+            "141f73cff7085b4ab6d3cc6e148a85dcb1add045d6d57e53c8e5e36d1d406cde392ceb3dce9e5520c54c741e107bdbf76cc7df9ef8628bb05225cb8b5c85b844",
+        )
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        (
+            "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-1.5.0-darwin-x86_64.zip",
+            "agy_acp_server.par",
+            "0459ec0772efcdfd0ab6a209dca0d57c2120d56535b8a6f265acf6c578b96ebbeb6bd9d793dfc021a04936733bf31207c70bbce7e55875e133b28f9f6aa5eabe",
+        )
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        (
+            "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.5.0-linux-x86_64.zip",
+            "agy_acp_server.par",
+            "5dad51168529f6920e28bcb3af284f2c8bdbafd9d0d7062b186793e39ff6e3b3457a49ed10774661380559610771ed24b4ed33098c2e166254c64fccaa3e0d30",
+        )
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        (
+            "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.5.0-linux-arm64.zip",
+            "agy_acp_server.par",
+            "891fa17158127bad56addb5e398c364eb0de4cf31f6a2a35cac991a9f32ab03726200d08abf299643b1c41ed61232ea027888f0c2aed1cbeb2d3a2ae1e13b840",
+        )
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        (
+            "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-1.5.0-windows-x86_64.zip",
+            "agy_acp_server.exe",
+            "a583af1f539ea51ed6ae7861a8821ae9176211048e49da714abb8c540e785c2e3fdb41c71bc95ba7f09b569d10e2aea367fa206ed0cfdb5af419b2f430e5f0ad",
+        )
+    } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
+        (
+            "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-1.5.0-windows-arm64.zip",
+            "agy_acp_server.exe",
+            "779c450461532a860c2021bcc6d9b286cf6a7047dc5d4bc69801314e07dfa57e8d2d179b36dac742dc5ca93dc424f829abf81b5b2f767c58dc3cfcd08aaba3d7",
+        )
+    } else {
+        return None;
+    };
+    Some(crate::archive_install::ArchivePin {
+        name: "antigravity-acp",
+        version: "1.5.0",
+        url,
+        entry,
+        sha512,
+    })
+}
+
+/// the build pinned before 1.5.0, whose installs stay trusted (and run until
+/// one of 1.5.0 is made): the digests of 1.2.1's archives.
+fn antigravity_previous_archive() -> Option<crate::archive_install::ArchivePin> {
     let (url, entry, sha512) = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         (
             "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-1.2.1-darwin-arm64.zip",
@@ -686,7 +741,7 @@ fn antigravity_registry_platform() -> Option<&'static str> {
 /// completed installs whose marker proves their origin: a digest pinned by
 /// this or an earlier build, or google's verified code signature.
 fn trusted_antigravity_installs() -> Vec<(semver::Version, PathBuf)> {
-    let pins: Vec<_> = [antigravity_archive(), antigravity_legacy_archive()]
+    let pins: Vec<_> = [antigravity_archive(), antigravity_previous_archive(), antigravity_legacy_archive()]
         .into_iter()
         .flatten()
         .collect();
@@ -1089,6 +1144,40 @@ fn configured_auth_method_in(path: &Path) -> Result<Option<ConfiguredAuthMethod>
 /// the directory whose `antigravity-acp/` holds its settings and tokens.
 pub fn antigravity_home() -> Result<PathBuf, HarnessError> {
     antigravity_paths::home()
+}
+
+/// The Antigravity home a sign-in signs in to, whose settings name its method:
+/// `env`'s `GEMINI_HOME` (the last one, as the child sees it) — a home of its
+/// own, a throwaway one, never takes this computer's choice — else `live`.
+fn signs_in_to(env: &[(String, std::ffi::OsString)], live: Option<&Path>) -> Option<PathBuf> {
+    env.iter()
+        .rev()
+        .find(|(key, _)| key == "GEMINI_HOME")
+        .map(|(_, home)| PathBuf::from(home))
+        .or_else(|| live.map(Path::to_path_buf))
+}
+
+/// The Google login Antigravity's server keeps in a file under `home`
+/// (`AGY_ACP_FORCE_FILE_STORAGE`, or where it has no Keychain): what a
+/// sign-in on this computer through Zeron writes.
+pub fn antigravity_token_file(home: &Path) -> PathBuf {
+    home.join("antigravity-acp").join("acp_token.json")
+}
+
+/// Whether Zeron's Antigravity runs read their login from `home`'s token file
+/// rather than the Keychain: once it holds a Google login (a refresh token),
+/// as a sign-in through Zeron leaves it. Without one the server keeps its
+/// own default, so a Keychain login made elsewhere still runs.
+pub fn antigravity_reads_token_file(home: &Path) -> bool {
+    std::fs::read(antigravity_token_file(home))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .is_some_and(|token| {
+            token
+                .get("refresh_token")
+                .and_then(Value::as_str)
+                .is_some_and(|t| !t.is_empty())
+        })
 }
 
 /// The auth method Antigravity's server saved in `settings.json` (it records
@@ -1890,7 +1979,7 @@ impl AcpHarness {
         let gemini_home = (self.spec.id == HarnessId::Antigravity)
             .then(antigravity_paths::home)
             .transpose()?;
-        let configured_method = gemini_home
+        let configured_method = signs_in_to(&env, gemini_home.as_deref())
             .as_ref()
             .map(|home| {
                 configured_auth_method_in(&home.join("antigravity-acp").join("settings.json"))
@@ -2717,7 +2806,11 @@ impl AcpHarness {
         }
         self.registry_environment(&mut cmd);
         if self.spec.id == HarnessId::Antigravity {
-            cmd.env("GEMINI_HOME", antigravity_paths::home()?);
+            let home = antigravity_paths::home()?;
+            if antigravity_reads_token_file(&home) {
+                cmd.env("AGY_ACP_FORCE_FILE_STORAGE", "1");
+            }
+            cmd.env("GEMINI_HOME", home);
             match noop_browser() {
                 Ok(browser) => {
                     cmd.env("BROWSER", browser);
@@ -2855,8 +2948,10 @@ impl AcpHarness {
     /// wire is the source of truth — the spec's static catalog only enriches
     /// matching entries and names the pick when the agent advertises nothing.
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
+        // (A Cloud machine's credential keys for this agent: crate::catalog_env.)
+        let env = crate::catalog_env::get(self.id());
         let (_scratch, mut child, stderr_tail, sign_in_prompted) = self
-            .spawn_agent(None, false, &[], None, &Default::default())
+            .spawn_agent(None, false, &[], None, &env)
             .await?;
         let (client, incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => {
@@ -2882,6 +2977,11 @@ impl AcpHarness {
             let mut models = models_from_session(&session, &(self.spec.models)());
             if self.spec.id == HarnessId::Hermes {
                 hermes_names::fold_context_variants(&mut models);
+                hermes_names::keep_runnable(&mut models);
+                // (What a chat naming no model runs: `run`'s choice too.)
+                let active = hermes_names::active_provider().await;
+                let chosen = hermes_names::chosen_for_none(&session, active.as_deref());
+                hermes_names::mark_default(&mut models, chosen.as_deref());
             }
             // Prompt-convention modes (Claude Ultrathink) extend any real
             // ladder — never an effort-less model's empty one.
@@ -3666,7 +3766,10 @@ impl AcpHarness {
         })
         .boxed();
         Ok(if self.spec.id == HarnessId::Antigravity {
-            system_message::strip_system_message_echoes(events)
+            antigravity_eligibility::explain_refusals(
+                system_message::strip_system_message_echoes(events),
+                antigravity_paths::home().ok(),
+            )
         } else {
             events
         })
@@ -4892,10 +4995,13 @@ fn is_auth_required(error: &HarnessError) -> bool {
     matches!(error, HarnessError::Protocol(message) if message.contains("(code -32000)"))
 }
 
-const EFFORT_SUFFIXES: [(&str, &str, ReasoningLevel); 3] = [
+const EFFORT_SUFFIXES: [(&str, &str, ReasoningLevel); 4] = [
     ("-low", " (Low)", ReasoningLevel::Low),
     ("-medium", " (Medium)", ReasoningLevel::Medium),
     ("-high", " (High)", ReasoningLevel::High),
+    // (Gemini 4 Neon and Hydrogen, agy_acp_server 1.2: neither suffix is
+    // the end of another's.)
+    ("-xhigh", " (XHigh)", ReasoningLevel::XHigh),
 ];
 
 /// one picker row: either a single advertised model, or the effort variants
@@ -5342,6 +5448,16 @@ async fn select_session_config(
             request.reasoning,
         )),
         model => model.map(str::to_owned),
+    };
+    // Asked for none, Hermes runs its config's default, unless it can't run
+    // that (its stock OpenRouter default under a ChatGPT login): then the
+    // model its picker marks (`hermes_names::chosen_for_none`).
+    let requested_model = match requested_model {
+        None if rules.harness == HarnessId::Hermes => {
+            let active = hermes_names::active_provider().await;
+            hermes_names::chosen_for_none(&session_response, active.as_deref())
+        }
+        requested => requested,
     };
     if rules.harness == HarnessId::Antigravity {
         validate_config_model_selection(
@@ -7044,6 +7160,41 @@ mod tests {
         (home, path)
     }
 
+    /// Zeron's Antigravity reads the token file once it holds a Google login
+    /// (a sign-in through Zeron), and the Keychain otherwise.
+    #[test]
+    fn antigravity_reads_its_token_file_once_it_holds_a_google_login() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(!antigravity_reads_token_file(home.path()));
+        let file = antigravity_token_file(home.path());
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "{}").unwrap();
+        assert!(!antigravity_reads_token_file(home.path()), "no login in it");
+        std::fs::write(&file, r#"{"refresh_token":"","client_id":"c"}"#).unwrap();
+        assert!(!antigravity_reads_token_file(home.path()));
+        std::fs::write(&file, r#"{"refresh_token":"grt","client_id":"c"}"#).unwrap();
+        assert!(antigravity_reads_token_file(home.path()));
+    }
+
+    /// A sign-in into a home of its own reads that home's method, never this
+    /// computer's (a live home set to Gemini Enterprise would otherwise turn
+    /// a Google sign-in into an Enterprise one).
+    #[test]
+    fn a_sign_in_into_its_own_home_reads_that_homes_method() {
+        let live = Path::new("/live/.gemini");
+        assert_eq!(signs_in_to(&[], Some(live)).as_deref(), Some(live));
+        let env = vec![
+            ("GEMINI_HOME".to_string(), "/tmp/first".into()),
+            ("AGY_ACP_FORCE_FILE_STORAGE".to_string(), "1".into()),
+            ("GEMINI_HOME".to_string(), "/tmp/.login-1".into()),
+        ];
+        assert_eq!(
+            signs_in_to(&env, Some(live)).as_deref(),
+            Some(Path::new("/tmp/.login-1"))
+        );
+        assert_eq!(signs_in_to(&[], None), None);
+    }
+
     #[test]
     fn antigravity_sign_in_preserves_an_advertised_configured_method() {
         let initialized = all_antigravity_auth_methods();
@@ -7332,6 +7483,12 @@ mod tests {
         assert!(harness.installed());
         assert_eq!(harness.executable_path(), Some(legacy_server.clone()));
         assert!(is_managed_antigravity_server(&legacy_server));
+        // The build pinned before this one stays trusted: an install of it
+        // runs until one of the current pin is made.
+        if let Some(previous) = antigravity_previous_archive() {
+            let previous_server = install(previous.version, previous.sha512);
+            assert_eq!(harness.executable_path(), Some(previous_server));
+        }
 
         let current_server = install(current.version, current.sha512);
         install("9.0.0", "tampered");
@@ -8279,6 +8436,52 @@ mod tests {
                 ("gemini-legacy".into(), "Gemini Legacy".into(), vec![]),
             ]
         );
+    }
+
+    /// agy_acp_server 1.2.1 signed in on a Cloud machine (wire capture): the
+    /// Gemini 4 family beside 3.8 Flash, each in its own efforts, and the
+    /// session opening on 3.8 Flash. Every family reaches the picker.
+    #[test]
+    fn antigravity_1_2_lists_every_gemini_4_family() {
+        let names = [
+            ("gemini-4-neon", "Gemini 4 Neon", &["high", "xhigh", "medium", "low"][..]),
+            ("gemini-4-carbon", "Gemini 4 Carbon", &["medium", "high", "low"][..]),
+            ("gemini-4-argon", "Gemini 4 Argon", &["medium", "high", "low"][..]),
+            ("gemini-4-hydrogen", "Gemini 4 Hydrogen", &["high", "xhigh", "medium", "low"][..]),
+            ("gemini-3.8-flash", "Gemini 3.8 Flash", &["high", "medium", "low"][..]),
+        ];
+        let title = |e: &str| if e == "xhigh" { "XHigh".to_owned() } else { format!("{}{}", e[..1].to_uppercase(), &e[1..]) };
+        let options: Vec<Value> = names
+            .iter()
+            .flat_map(|(id, name, efforts)| efforts.iter().map(move |e| json!({"value": format!("{id}-{e}"), "name": format!("{name} ({})", title(e))})))
+            .collect();
+        let live = json!({
+            "models": {
+                "currentModelId": "gemini-3.8-flash-high",
+                "availableModels": options.iter().map(|o| json!({"modelId": o["value"], "name": o["name"], "description": o["value"]})).collect::<Vec<_>>(),
+            },
+            "configOptions": [
+                {"id": "model", "category": "model", "type": "select", "currentValue": "gemini-3.8-flash-high", "options": options},
+                {"id": "mode", "category": "mode", "type": "select", "currentValue": "default", "options": [{"value": "default", "name": "Default"}]}
+            ]
+        });
+        let models = models_from_session(&live, &(antigravity_spec().models)());
+        let rows: Vec<(String, Vec<ReasoningLevel>)> =
+            group_effort_variants(models).into_iter().map(|m| (m.id, m.reasoning_levels)).collect();
+        use ReasoningLevel::{High, Low, Medium, XHigh};
+        assert_eq!(
+            rows,
+            [
+                ("gemini-4-neon".to_owned(), vec![Low, Medium, High, XHigh]),
+                ("gemini-4-carbon".to_owned(), vec![Low, Medium, High]),
+                ("gemini-4-argon".to_owned(), vec![Low, Medium, High]),
+                ("gemini-4-hydrogen".to_owned(), vec![Low, Medium, High, XHigh]),
+                ("gemini-3.8-flash".to_owned(), vec![Low, Medium, High]),
+            ]
+        );
+        // A pick of XHigh runs that variant; one a model lacks, its strongest.
+        assert_eq!(effort_variant_id(&live, "gemini-4-neon", Some(XHigh)), "gemini-4-neon-xhigh");
+        assert_eq!(effort_variant_id(&live, "gemini-4-carbon", Some(XHigh)), "gemini-4-carbon-high");
     }
 
     /// the pinned server fetches a signed-in account's flash list
