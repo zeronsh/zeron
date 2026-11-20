@@ -26,9 +26,8 @@ fn ui() -> PathBuf {
 /// `set_aside`).
 type Held = Vec<std::rc::Rc<dyn std::any::Any>>;
 
-/// The thread as the engine holds it (`/longthread <steps>`), built into its
-/// rows as a chat's view builds them, and what holds what they set aside.
-fn long_thread(steps: usize) -> (Value, Held) {
+/// The thread's two entries: the prompt and its long reply.
+fn long_thread_entries(steps: usize) -> (Json, Json) {
     let mut parts: Vec<Json> = Vec::with_capacity(steps * 2 + 1);
     for n in 1..=steps {
         let mut text = format!("Step {n} of {steps}. I read src/invoices.ts and noted what step {n} needs from it.");
@@ -48,6 +47,13 @@ fn long_thread(steps: usize) -> (Value, Held) {
     let at = 1_794_000_000_000_i64;
     let prompt = json!({ "id": "lt-u", "role": "user", "parts": [{ "id": "lt-up", "kind": "text", "text": format!("/longthread {steps}") }], "createdAt": at });
     let reply = json!({ "id": "lt-a", "role": "assistant", "status": "complete", "parts": parts, "createdAt": at + 1000, "durationMs": 28 });
+    (prompt, reply)
+}
+
+/// The thread as the engine holds it (`/longthread <steps>`), built into its
+/// rows as a chat's view builds them, and what holds what they set aside.
+fn long_thread(steps: usize) -> (Value, Held) {
+    let (prompt, reply) = long_thread_entries(steps);
     let mut held: Held = Vec::new();
     let rows: Vec<Value> = [prompt, reply]
         .iter()
@@ -163,4 +169,130 @@ fn a_long_thread_scrolled_up_passes_through_every_step_to_its_first() {
     let end = shown(&mut app);
     assert!(end.iter().any(|(words, _)| words == "All steps done. LONGTHREAD-END"), "back at its end: {end:?}");
     assert_eq!(app.error(), None);
+}
+
+/// This thread's instructions retired in user mode so far (Linux,
+/// `perf_event_open`: needs `kernel.perf_event_paranoid` to allow it, or
+/// root), or none.
+#[cfg(target_os = "linux")]
+fn instructions() -> Option<impl Fn() -> u64> {
+    // perf_event_attr, 128 bytes: type HARDWARE (0) and its size, config
+    // INSTRUCTIONS (1), and in its flags exclude_kernel and exclude_hv.
+    let mut attr = [0u64; 16];
+    attr[0] = 128 << 32;
+    attr[1] = 1;
+    attr[5] = (1 << 5) | (1 << 6);
+    // SAFETY: perf_event_open(attr, this thread, any cpu, no group, no flags).
+    let fd = unsafe { libc::syscall(libc::SYS_perf_event_open, attr.as_ptr(), 0, -1, -1, 0) } as i32;
+    (fd >= 0).then_some(move || {
+        let mut count = 0u64;
+        // SAFETY: A counter's read is one u64.
+        unsafe { libc::read(fd, std::ptr::from_mut(&mut count).cast(), 8) };
+        count
+    })
+}
+
+/// What the long reply's functions cost a call, by the app's own code or by
+/// the reply module (`ZERON_ZGX_REPLY_MODULE=<library>`): run once each way
+/// and compare.
+///
+///   sudo -E env ZERON_ZGX_REPLY_MODULE=<library or a path of the same length> \
+///     <the release test binary> reply_module_costs --ignored --nocapture
+///
+/// Instructions are this thread's, in user mode; a script's loop of `CALLS`
+/// calls, less the same loop calling a function that does nothing.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "a benchmark: release, with a counter (root, or perf_event_paranoid <= 2)"]
+fn reply_module_costs() {
+    const CALLS: usize = 20_000;
+    const ROUNDS: usize = 21;
+    let count = instructions().expect("perf_event_open: run as root or allow it");
+    let steps = 1000;
+    let (rows, _held) = long_thread(steps);
+    // The reply's runs, as its row lists them.
+    let reply = &rows.list()[1];
+    let runs = reply.field("runs").expect("a long reply's runs").list().to_vec();
+    let key = |i: usize| match runs[i].field("key") {
+        Some(Value::Str(k)) => k.to_string(),
+        _ => unreachable!(),
+    };
+    let (first, last) = (key(0), key(runs.len() - 1));
+    let script = format!(
+        r#"
+        local function loop(name, arg)
+            return function()
+                for _ = 1, {CALLS} do ui.call_sync(name, arg) end
+            end
+        end
+        ui.command {{ id = "nothing", title = "n", run = loop("bench.nothing", {{ id = "lt-a", key = "{last}" }}) }}
+        ui.command {{ id = "run", title = "r", run = loop("chat.reply_run", {{ id = "lt-a", key = "{last}" }}) }}
+        ui.command {{ id = "run_first", title = "f", run = loop("chat.reply_run", {{ id = "lt-a", key = "{first}" }}) }}
+        ui.command {{ id = "blocks", title = "b", run = loop("chat.reply_blocks", "lt-a") }}
+        ui.command {{ id = "run_of", title = "o", run = loop("chat.reply_run_of", {{ id = "lt-a", block = "{first}" }}) }}
+        return ui.column {{}}
+        "#
+    );
+    let app = TestApp::new(move |runtime| {
+        let host = ScriptHost::inline(runtime, "bench", script);
+        crate::chat::reply_functions(&host);
+        host.function("bench.nothing", |_| Value::Nil);
+        // (A loop of 20,000 calls is one script call: past its time budget
+        // in neither build, but nothing here is about budgets.)
+        host
+    });
+    assert_eq!(app.error(), None);
+    // After the host loaded: the rows the scripts ask about are this arm's.
+    let (rows, _held) = long_thread(steps);
+    drop(rows);
+    let median = |mut all: Vec<u64>| {
+        all.sort_unstable();
+        (all[all.len() / 2], all[0], all[all.len() - 1])
+    };
+    let timed = |command: &str| {
+        let mut counts = Vec::with_capacity(ROUNDS);
+        let mut nanos = Vec::with_capacity(ROUNDS);
+        for _ in 0..ROUNDS {
+            let (at, from) = (std::time::Instant::now(), count());
+            assert!(app.host.run_command(command));
+            counts.push(count() - from);
+            nanos.push(at.elapsed().as_nanos() as u64);
+        }
+        assert_eq!(app.error(), None, "{command}");
+        (median(counts), median(nanos))
+    };
+    // Whole, to set aside again and again.
+    let whole = crate::chat::built_unset(&long_thread_entries(steps).1, Some("Opus")).unwrap();
+    let mut by_module = false;
+    let mut aside_counts = Vec::new();
+    let mut aside_nanos = Vec::new();
+    // (`REPLY_BENCH_ASIDE=<rounds>`: more of them, for a profile.)
+    let aside_rounds = std::env::var("REPLY_BENCH_ASIDE").ok().and_then(|n| n.parse().ok()).unwrap_or(ROUNDS);
+    for _ in 0..aside_rounds {
+        let row = whole.clone();
+        let (at, from) = (std::time::Instant::now(), count());
+        let (kept, hold, module) = crate::chat::set_aside_as_shown(row);
+        drop((kept, hold));
+        aside_counts.push(count() - from);
+        aside_nanos.push(at.elapsed().as_nanos() as u64);
+        by_module = module;
+    }
+    let arm = if by_module { "module" } else { "linked" };
+    let ((nothing, ..), _) = timed("nothing");
+    println!("arm={arm} calls={CALLS} rounds={ROUNDS} runs={} blocks={}", runs.len(), steps * 2 + 1);
+    println!("BENCH {arm} empty_loop_instr_per_call {:.1}", nothing as f64 / CALLS as f64);
+    for command in ["run", "run_first", "blocks", "run_of"] {
+        let ((mid, low, high), (ns, ..)) = timed(command);
+        let per = |n: u64| (n as f64 - nothing as f64) / CALLS as f64;
+        println!(
+            "BENCH {arm} {command} instr_per_call {:.1} min {:.1} max {:.1} total_per_call {:.1} ns_per_call {:.1}",
+            per(mid),
+            per(low),
+            per(high),
+            mid as f64 / CALLS as f64,
+            ns as f64 / CALLS as f64
+        );
+    }
+    let ((mid, low, high), (ns, ..)) = (median(aside_counts), median(aside_nanos));
+    println!("BENCH {arm} set_aside instr {mid} min {low} max {high} ns {ns}");
 }

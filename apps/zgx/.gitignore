@@ -4,3 +4,4 @@ ui/.zgx/
 **/locales/.lock
 # Translation scratch, never shipped.
 /tools/i18n-work/
+/modules/*/target

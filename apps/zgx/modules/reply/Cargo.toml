@@ -1,0 +1,28 @@
+# Long replies' blocks, set aside from their rows (src/chat.rs `set_aside`),
+# as a native module: built on its own, loaded by the app as it starts, and
+# called by the transcript's scripts (`chat.reply_run` and the rest).
+#
+# A workspace of its own: its build is this crate and zgx's module
+# interface, nothing of the app or of zgx. A change here rebuilds this
+# library alone.
+
+[workspace]
+
+[package]
+name = "zeron-reply"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+zgx-module = { git = "https://github.com/zeronsh/zgx", rev = "b52564734dc2aa7f32dc8f9dcb0e64d0a6f90bdc" }
+# The hash a run's sum is made with, the app's own (src/chat.rs `block_sum`).
+rustc-hash = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

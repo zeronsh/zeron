@@ -324,8 +324,11 @@ struct Built {
     subagents: Option<Rc<[Value]>>,
     /// Folded, its compressed bytes' length (what a chat kept is weighed by).
     folded: usize,
-    /// A long reply's blocks, held here rather than in its row (`set_aside`).
-    aside: Option<Rc<Aside>>,
+    /// A long reply's blocks, held here rather than in its row (`set_aside`):
+    /// an `Aside`, or the reply module's hold on its own (`ModuleHold`).
+    /// (Held for as long as the row is; only tests read it.)
+    #[cfg_attr(not(test), allow(dead_code))]
+    aside: Option<Rc<dyn std::any::Any>>,
 }
 
 /// A long settled reply's blocks and tools, kept out of its row. A script is
@@ -526,10 +529,72 @@ pub(crate) fn reply_run_of(arg: &Value) -> Value {
         .unwrap_or(Value::Nil)
 }
 
+/// The reply module (modules/reply: this file's `set_aside` and the three
+/// functions below, built as a library of its own), where a launch names
+/// one: `ZERON_ZGX_REPLY_MODULE=<its library>`. Else, and for any other
+/// value, the code here.
+fn reply_module_path() -> Option<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(std::env::var_os("ZERON_ZGX_REPLY_MODULE")?);
+    path.is_file().then_some(path)
+}
+
+/// The reply module's two doors for this file: a row set aside, and its
+/// hold let go.
+#[derive(Clone)]
+struct ReplyModule {
+    set_aside: Rc<dyn Fn(Value) -> Value>,
+    release: Rc<dyn Fn(Value)>,
+}
+
+/// The module's hold on a reply set aside, let go with the row that had it.
+struct ModuleHold {
+    hold: Value,
+    release: Rc<dyn Fn(Value)>,
+}
+impl Drop for ModuleHold {
+    fn drop(&mut self) {
+        (self.release)(std::mem::take(&mut self.hold));
+    }
+}
+
+impl ReplyModule {
+    /// `set_aside`, by the module.
+    fn set_aside(&self, row: Value) -> (Value, Option<ModuleHold>) {
+        let answer = (self.set_aside)(row.clone());
+        match (answer.field("row"), answer.field("hold")) {
+            (Some(kept), Some(hold)) => {
+                (kept.clone(), Some(ModuleHold { hold: hold.clone(), release: self.release.clone() }))
+            }
+            _ => (row, None),
+        }
+    }
+}
+
+thread_local! {
+    /// The reply module, once a host loaded it.
+    static REPLY_MODULE: RefCell<Option<ReplyModule>> = const { RefCell::new(None) };
+}
+
 /// A long reply's blocks, set aside from its row (`set_aside`), for the
 /// scripts: a run as the transcript builds it, all of them for a find, and
 /// which run holds a block.
 pub(crate) fn reply_functions(host: &ScriptHost) {
+    if let Some(path) = reply_module_path() {
+        // SAFETY: The app's own module (modules/reply), at a path the
+        // person running this build named.
+        match unsafe { host.load_module(&path) } {
+            Ok(()) => {
+                let function = |name| host.registered_function(name).expect("the reply module's function");
+                let module = ReplyModule {
+                    set_aside: function("chat.reply_set_aside"),
+                    release: host.registered_action("chat.reply_release").expect("the reply module's action"),
+                };
+                REPLY_MODULE.set(Some(module));
+                return;
+            }
+            Err(error) => eprintln!("zeron-zgx: the reply module didn't load ({error}); using the app's own"),
+        }
+    }
     host.function("chat.reply_run", |arg| reply_run(&arg));
     host.function("chat.reply_blocks", |id| reply_blocks(&id));
     host.function("chat.reply_run_of", |arg| reply_run_of(&arg));
@@ -541,7 +606,28 @@ pub(crate) fn reply_functions(host: &ScriptHost) {
 pub(crate) fn built_as_shown(entry: &Json, model: Option<&str>) -> (Option<Value>, Option<Rc<dyn std::any::Any>>) {
     let context = Rc::new(RowContext { doc: "doc".into(), device: None, model: model.map(Into::into) });
     let built = built_for(entry, &context, false);
-    (built.row, built.aside.map(|aside| aside as Rc<dyn std::any::Any>))
+    (built.row, built.aside)
+}
+
+/// `entry`'s row built whole, nothing set aside, and the setting aside as a
+/// view does it (the reply module's where one is loaded, else `set_aside`),
+/// apart: what `reply_module_costs` times.
+#[cfg(test)]
+pub(crate) fn built_unset(entry: &Json, model: Option<&str>) -> Option<Value> {
+    built_entry(entry, "doc", None, model)
+}
+#[cfg(test)]
+pub(crate) fn set_aside_as_shown(row: Value) -> (Value, Option<Rc<dyn std::any::Any>>, bool) {
+    match REPLY_MODULE.with_borrow(Clone::clone) {
+        Some(module) => {
+            let (row, hold) = module.set_aside(row);
+            (row, hold.map(|hold| Rc::new(hold) as Rc<dyn std::any::Any>), true)
+        }
+        None => {
+            let (row, aside) = set_aside(row);
+            (row, aside.map(|aside| aside as Rc<dyn std::any::Any>), false)
+        }
+    }
 }
 
 /// `entry` built: its row, folded if `fold`, which a row that shows or may
@@ -553,10 +639,16 @@ fn built_for(entry: &Json, context: &Rc<RowContext>, fold: bool) -> Built {
     let row = built_entry(entry, doc, device.as_deref(), model.as_deref());
     let subagents = row.as_ref().and_then(subagents_in);
     let (row, aside) = match row {
-        Some(row) if !fold => {
-            let (row, aside) = set_aside(row);
-            (Some(row), aside)
-        }
+        Some(row) if !fold => match REPLY_MODULE.with_borrow(Clone::clone) {
+            Some(module) => {
+                let (row, hold) = module.set_aside(row);
+                (Some(row), hold.map(|hold| Rc::new(hold) as Rc<dyn std::any::Any>))
+            }
+            None => {
+                let (row, aside) = set_aside(row);
+                (Some(row), aside.map(|aside| aside as Rc<dyn std::any::Any>))
+            }
+        },
         row => (row, None),
     };
     let mut folded = 0;
