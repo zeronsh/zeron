@@ -1540,6 +1540,11 @@
         "terms": "subagent delegate side chats tasks spawn",
         "description": "Off, it delegates through side chats."
       },
+      "code_mode": {
+        "label": "Code mode",
+        "terms": "code mode javascript script tool calls programmatic",
+        "description": "Run multi-step tool calls as code in one turn."
+      },
       "update_policy": {
         "label": "Update policy",
         "terms": "automatic upgrade version cli"

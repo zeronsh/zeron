@@ -817,14 +817,18 @@ impl Harness for CodexHarness {
             && service_tier(live) == service_tier(next)
             && run_access(live) == run_access(next)
             && live.plan == next.plan
+            && live.code_mode == next.code_mode
     }
     /// `turn/start` carries model, effort, service tier, approval policy,
     /// sandbox and collaboration mode, and each sticks for later turns — so
     /// a change applies from the next turn without a new app-server.
     /// Clearing a model, effort or tier back to the default cannot be
     /// expressed that way (an omitted parameter keeps the previous value).
+    /// Code Mode is a `thread/start`/`thread/resume` config override, so
+    /// switching it starts a fresh thread.
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
+            && live.code_mode == next.code_mode
             && (next.model.is_some() || live.model.is_none())
             && (to_effort(next.reasoning).is_some() || to_effort(live.reasoning).is_none())
             && (service_tier(next).is_some() || service_tier(live).is_none())
@@ -1609,6 +1613,13 @@ async fn run_session(session: Session) {
                 .as_object_mut()
                 .expect("thread/start config overrides are an object")
                 .extend(codex_extra_mcp_overrides(&request.extra_mcp));
+        }
+        if !title_only && request.code_mode {
+            p.entry("config")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .expect("thread/start config overrides are an object")
+                .insert("features.code_mode".into(), true.into());
         }
         p.insert("approvalPolicy".into(), approval_policy.into());
         p.insert("sandbox".into(), sandbox_mode(sandbox).into());
@@ -3309,6 +3320,7 @@ mod tests {
             auto_approve: false,
             access,
             plan,
+            code_mode: false,
             attachments: Vec::new(),
             worktree: None,
             resume: None,
@@ -3406,6 +3418,10 @@ mod tests {
         let mut moved = run_request(AccessMode::Supervised, false);
         moved.cwd = "/elsewhere".into();
         assert!(!harness.reconfigures_in_place(&live, &moved));
+        let mut code_mode = run_request(AccessMode::FullAccess, false);
+        code_mode.code_mode = true;
+        assert!(!harness.same_runtime(&live, &code_mode));
+        assert!(!harness.reconfigures_in_place(&live, &code_mode));
         assert_eq!(harness.access_modes(), &AccessMode::WITH_AUTO);
         assert!(harness.supports_plan());
     }

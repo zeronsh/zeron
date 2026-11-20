@@ -124,6 +124,7 @@ local engine: { [string]: any } = {
 	},
 	GetTitleSettings = {},
 	GetNativeSubagents = { switchable = { "claude-code" }, off = {} },
+	GetCodeMode = { supported = { "codex", "muse" }, enabled = {} },
 	GetBackgroundSettings = { keepRunningAfterQuit = true },
 }
 local banners = { desktop = true, background_only = true, agent_updates = true }
@@ -298,6 +299,16 @@ local answers: { [string]: (arg: any) -> any } = {
 				engine[get] = w
 			elseif m == "SetTitleSettings" or m == "SetBackgroundSettings" then
 				engine[get] = arg.params
+			elseif m == "SetCodeMode" then
+				local cur = engine[get]
+				local enabled = table.clone(cur.enabled)
+				local idx = table.find(enabled, arg.params.harness)
+				if arg.params.enabled and not idx then
+					table.insert(enabled, arg.params.harness)
+				elseif not arg.params.enabled and idx then
+					table.remove(enabled, idx)
+				end
+				engine[get] = { supported = cur.supported, enabled = enabled }
 			end
 			return settled(engine[get])
 		end

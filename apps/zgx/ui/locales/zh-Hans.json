@@ -1540,6 +1540,11 @@
         "terms": "子智能体 委派 侧边对话 任务 创建 subagent delegate side chats tasks spawn",
         "description": "关闭时，通过侧边对话委派任务。"
       },
+      "code_mode": {
+        "label": "代码模式",
+        "terms": "代码模式 脚本 工具调用 编程 code mode javascript script tool calls programmatic",
+        "description": "在一轮中以代码方式执行多步工具调用。"
+      },
       "update_policy": {
         "label": "更新策略",
         "terms": "自动 升级 版本 命令行 automatic upgrade version cli"
