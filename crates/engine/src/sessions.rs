@@ -1049,8 +1049,15 @@ impl SessionsEngine {
     /// now, with its message, rather than once the dispatch has replaced the
     /// outgoing provider's runtime (seconds later). Idempotent: the dispatch's
     /// own note finds the seam already written.
-    pub fn note_provider_switch(&self, chat_id: &str, harness_id: HarnessId, doc: &ChatDocHandle) {
-        self.inner.note_provider_switch(chat_id, harness_id, doc);
+    pub fn note_provider_switch(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+        doc: &ChatDocHandle,
+        before_message_id: Option<&str>,
+    ) {
+        self.inner
+            .note_provider_switch(chat_id, harness_id, doc, before_message_id);
     }
 
     /// Whether an accepted agent update gates the chat's live run, so a new
@@ -1444,7 +1451,7 @@ impl SessionsEngine {
             // has changed provider: mark the seam above this message, before
             // the resume lookup below turns the foreign session id away.
             self.inner
-                .note_provider_switch(chat_id, harness_id, &handle);
+                .note_provider_switch(chat_id, harness_id, &handle, Some(&user_id));
             handle.write_user_message(&user_id, &request.prompt, now_ms())?;
         }
         let credential = self.inner.registry.run_credential(harness_id, Some(chat_id)).await;
@@ -3707,7 +3714,13 @@ impl Inner {
     /// [`Self::resume_for`]. On the first switch, the outgoing provider's
     /// session is recorded as having seen the whole transcript so far, so a
     /// switch back can resume it.
-    fn note_provider_switch(&self, chat_id: &str, harness_id: HarnessId, doc: &ChatDocHandle) {
+    fn note_provider_switch(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+        doc: &ChatDocHandle,
+        before_message_id: Option<&str>,
+    ) {
         let entries = doc.doc().read_entries().unwrap_or_default();
         let owned = || self.owned_session(chat_id);
         let previous = match crate::doc_host::latest_switch(&entries) {
@@ -3751,6 +3764,7 @@ impl Inner {
             (previous, &label(previous)),
             (harness_id, &label(harness_id)),
             now_ms(),
+            before_message_id,
         ) {
             Ok(true) => tracing::info!(
                 chat = %chat_id,

@@ -1165,6 +1165,7 @@ impl ChatDocHandle {
         from: (HarnessId, &str),
         to: (HarnessId, &str),
         created_at: i64,
+        before_message_id: Option<&str>,
     ) -> Result<bool, DocError> {
         let ((from_id, from), (to_id, to)) = (from, to);
         let entries = self.doc.read_entries_shared()?;
@@ -1175,11 +1176,24 @@ impl ChatDocHandle {
             return Ok(false);
         }
         let id = format!("switch:{created_at}");
-        // The send that switches wrote its message first: the seam goes
-        // before it (and any other unanswered message), so it reads as the
-        // new provider's question, not the old one's.
-        let unanswered = entries.iter().rev().take_while(|entry| entry.role == MessageRole::User).count();
-        self.doc.insert_message_before_last(unanswered, &SessionMessageEntry {
+        // Place the seam directly above the message that triggers this switch.
+        // If that message is already in the transcript (e.g., written by the
+        // client before dispatch), insert right before it; otherwise append at
+        // the end so the message written next lands right below the seam. Never
+        // walk back past an earlier unanswered user message that belonged to
+        // the outgoing provider (such as an interrupted turn).
+        let before = match before_message_id {
+            Some(msg_id) => entries
+                .iter()
+                .rposition(|entry| entry.id == msg_id)
+                .map_or(0, |ix| entries.len() - ix),
+            None => entries
+                .iter()
+                .rev()
+                .take_while(|entry| entry.role == MessageRole::User)
+                .count(),
+        };
+        self.doc.insert_message_before_last(before, &SessionMessageEntry {
             id: id.clone(),
             role: MessageRole::System,
             parts: vec![MessagePart::Switch {
@@ -6790,7 +6804,7 @@ impl DocHost {
                 // host got around to draining a queued command. Idempotent by
                 // id, so the dispatch path's own execution-time write dedupes
                 // to a no-op. A provider switch's seam lands with it, above.
-                sessions.note_provider_switch(chat_id, harness, handle);
+                sessions.note_provider_switch(chat_id, harness, handle, Some(message_id));
                 if let Err(err) = handle.write_user_message(
                     message_id,
                     &request.prompt,

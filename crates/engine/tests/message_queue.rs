@@ -2420,6 +2420,34 @@ async fn send_queued_now_with_provider_switch_interrupts_and_switches() {
         switch_seams(&core),
         vec![(Some("codex".into()), Some("antigravity".into()))]
     );
+    let entries = core
+        .doc_host
+        .open(CHAT)
+        .expect("open chat")
+        .doc()
+        .read_entries()
+        .expect("read entries");
+    let opening_ix = entries
+        .iter()
+        .position(|e| {
+            e.role == zeron_doc::MessageRole::User
+                && e.parts
+                    .iter()
+                    .any(|p| matches!(p, MessagePart::Text { text, .. } if text == "opening on codex"))
+        })
+        .expect("opening user message");
+    let switch_ix = entries
+        .iter()
+        .position(|e| e.parts.iter().any(|p| matches!(p, MessagePart::Switch { .. })))
+        .expect("switch seam");
+    let switched_ix = entries
+        .iter()
+        .position(|e| e.id == switched_id)
+        .expect("switched user message");
+    assert!(
+        opening_ix < switch_ix && switch_ix + 1 == switched_ix,
+        "switch seam must sit after Codex's interrupted prompt ({opening_ix}) and directly above the switched prompt ({switched_ix}), got switch at {switch_ix}: {entries:#?}"
+    );
     assert_eq!(
         core.workspace.chat_config(CHAT).map(|c| c.harness),
         Some(HarnessId::Antigravity)
