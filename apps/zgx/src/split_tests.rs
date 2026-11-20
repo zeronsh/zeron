@@ -646,7 +646,7 @@ impl Host {
                     ("role", s("assistant")),
                     ("text", s("")),
                     ("streaming", Value::Bool(true)),
-                    ("tools", Value::List(std::rc::Rc::from(tools))),
+                    ("tools", Value::List(zgx_script::Slice::from(tools))),
                 ]));
             }
             let mut session = vec![
@@ -665,13 +665,13 @@ impl Host {
                 let question = Value::record([
                     ("header", s("Question")),
                     ("text", s(&format!("Which way for {id}?"))),
-                    ("options", Value::List(std::rc::Rc::from(vec![option("left"), option("right")]))),
+                    ("options", Value::List(zgx_script::Slice::from(vec![option("left"), option("right")]))),
                 ]);
                 session.push(("ask", Value::record([("request", s(&format!("q-{id}"))), ("kind", s("question")), ("question", question)])));
             }
             let draft = Value::record([("id", s(&live)), ("text", s(r.reply.as_deref().unwrap_or("")))]);
             let record = Value::record([
-                ("messages", Value::List(std::rc::Rc::from(messages))),
+                ("messages", Value::List(zgx_script::Slice::from(messages))),
                 ("draft", draft),
                 ("session", Value::record(session)),
             ]);
@@ -926,7 +926,7 @@ fn the_side_opened_wins_in_a_split() {
     let row = |ids: &[&str]| {
         let leaf = |id: &str| Value::record([("kind", Value::from("leaf")), ("id", Value::from(id))]);
         let kids: Vec<Value> = ids.iter().map(|id| leaf(id)).collect();
-        Value::List(std::rc::Rc::from(vec![Value::record([("kind", Value::from("row")), ("children", Value::List(std::rc::Rc::from(kids)))])]))
+        Value::List(zgx_script::Slice::from(vec![Value::record([("kind", Value::from("row")), ("children", Value::List(zgx_script::Slice::from(kids)))])]))
     };
     const PANEL: &str = "#titlebar >> role:button \"Panel\"";
     const SIDEBAR: &str = "#titlebar >> role:button \"Toggle sidebar\"";
@@ -977,7 +977,7 @@ fn a_side_giving_way_steps_nothing() {
     use zgx_script::Value;
     let leaf = |id: &str| Value::record([("kind", Value::from("leaf")), ("id", Value::from(id))]);
     let kids = vec![leaf("a1"), leaf("a2")];
-    let tree = Value::List(std::rc::Rc::from(vec![Value::record([("kind", Value::from("row")), ("children", Value::List(std::rc::Rc::from(kids)))])]));
+    let tree = Value::List(zgx_script::Slice::from(vec![Value::record([("kind", Value::from("row")), ("children", Value::List(zgx_script::Slice::from(kids)))])]));
     let mut app = mount(&scratch("no-steps"));
     app.ui.scene.borrow_mut().resize(1100., H);
     app.frames(30);
@@ -1214,10 +1214,10 @@ fn reply_of_visuals(app: &TestApp, ids: &[(&str, bool)]) {
             }
             let messages = vec![
                 Value::record([("id", s(&format!("{id}-q"))), ("role", s("user")), ("text", s("Show me the numbers."))]),
-                Value::record([("id", s(&format!("{id}-r"))), ("role", s("assistant")), ("text", s("")), ("blocks", Value::List(std::rc::Rc::from(blocks)))]),
+                Value::record([("id", s(&format!("{id}-r"))), ("role", s("assistant")), ("text", s("")), ("blocks", Value::List(zgx_script::Slice::from(blocks)))]),
             ];
             let session = Value::record([("id", s(id)), ("state", s("ready")), ("running", Value::Bool(false))]);
-            (id.to_string(), Value::record([("messages", Value::List(std::rc::Rc::from(messages))), ("session", session)]))
+            (id.to_string(), Value::record([("messages", Value::List(zgx_script::Slice::from(messages))), ("session", session)]))
         })
         .collect();
     app.host.shared("fixture.chats", Value::Nil).set(Value::record(chats));
@@ -1365,7 +1365,7 @@ fn long_chats(app: &TestApp, ids: &[&str], streaming: Option<(&str, usize)>) {
                 draft = Value::record([("id", s(&format!("{id}-live"))), ("text", s(&text.join(" ")))]);
             }
             let session = Value::record([("id", s(id)), ("state", s("ready")), ("running", Value::Bool(streaming.is_some_and(|(sid, _)| sid == *id)))]);
-            (id.to_string(), Value::record([("messages", Value::List(std::rc::Rc::from(messages))), ("draft", draft), ("session", session)]))
+            (id.to_string(), Value::record([("messages", Value::List(zgx_script::Slice::from(messages))), ("draft", draft), ("session", session)]))
         })
         .collect();
     app.host.shared("fixture.chats", Value::Nil).set(Value::record(chats));
@@ -1396,8 +1396,8 @@ fn costs(fixture: &Path, count: usize) -> String {
         use zgx_script::Value;
         let leaf = |id: &str| Value::record([("kind", Value::from("leaf")), ("id", Value::from(id))]);
         let kids: Vec<Value> = ids.iter().map(|id| leaf(id)).collect();
-        let tree = Value::record([("kind", Value::from("row")), ("children", Value::List(std::rc::Rc::from(kids)))]);
-        let set = app.host.set_state("screens/shell/split.luau::inset_split_trees", Value::List(std::rc::Rc::from(vec![tree])));
+        let tree = Value::record([("kind", Value::from("row")), ("children", Value::List(zgx_script::Slice::from(kids)))]);
+        let set = app.host.set_state("screens/shell/split.luau::inset_split_trees", Value::List(zgx_script::Slice::from(vec![tree])));
         assert!(set.is_ok(), "{set:?}");
     }
     open(&mut app, "Fix the build");
@@ -1521,8 +1521,8 @@ fn a_dragged_edge_reflows_the_page_live_keeping_the_reading_place() {
         if panes > 1 {
             use zgx_script::Value;
             let kids: Vec<Value> = IDS[..panes].iter().map(|id| Value::record([("kind", Value::from("leaf")), ("id", Value::from(*id))])).collect();
-            let tree = Value::record([("kind", Value::from("row")), ("children", Value::List(std::rc::Rc::from(kids)))]);
-            app.host.set_state("screens/shell/split.luau::inset_split_trees", Value::List(std::rc::Rc::from(vec![tree]))).unwrap();
+            let tree = Value::record([("kind", Value::from("row")), ("children", Value::List(zgx_script::Slice::from(kids)))]);
+            app.host.set_state("screens/shell/split.luau::inset_split_trees", Value::List(zgx_script::Slice::from(vec![tree]))).unwrap();
         }
         open(&mut app, "Fix the build");
         app.frames(30);
@@ -1859,8 +1859,8 @@ fn split_of(app: &mut TestApp, ids: &[&str]) {
     if ids.len() > 1 {
         use zgx_script::Value;
         let kids: Vec<Value> = ids.iter().map(|id| Value::record([("kind", Value::from("leaf")), ("id", Value::from(*id))])).collect();
-        let tree = Value::record([("kind", Value::from("row")), ("children", Value::List(std::rc::Rc::from(kids)))]);
-        app.host.set_state("screens/shell/split.luau::inset_split_trees", Value::List(std::rc::Rc::from(vec![tree]))).unwrap();
+        let tree = Value::record([("kind", Value::from("row")), ("children", Value::List(zgx_script::Slice::from(kids)))]);
+        app.host.set_state("screens/shell/split.luau::inset_split_trees", Value::List(zgx_script::Slice::from(vec![tree]))).unwrap();
     }
 }
 

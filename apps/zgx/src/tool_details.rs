@@ -28,6 +28,7 @@
 //! round each change, each line its kind (" ", "+", "-", "hunk"), its old
 //! and new numbers, its text.
 
+use zgx_script::Field;
 use serde_json::{Value as Json, json};
 use zgx_script::{ScriptHost, Value};
 
@@ -457,7 +458,7 @@ mod tests {
     fn output_drops_trailing_blanks_and_counts_what_it_leaves_out() {
         let text = (1..=30).map(|i| format!("{i}\n")).collect::<String>() + "\n\n";
         let Some(Value::Map(fields)) = output_value(&text, 24) else { panic!() };
-        let get = |k: &str| fields.iter().find(|(n, _)| &**n == k).map(|(_, v)| v.clone()).unwrap();
+        let get = |k: &str| fields.iter().find(|Field(n, _)| &**n == k).map(|Field(_, v)| v.clone()).unwrap();
         let Value::List(lines) = get("lines") else { panic!() };
         assert_eq!(lines.len(), 24);
         assert!(matches!(get("more"), Value::Num(n) if n == 6.0));

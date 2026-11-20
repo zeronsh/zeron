@@ -61,7 +61,7 @@ pub fn session_records(permissions: &[String], list: &Value) -> (Value, Value) {
     };
     let text = |v: Option<&Value>| -> Option<Rc<str>> {
         match v {
-            Some(Value::Str(s)) => Some(s.clone()),
+            Some(Value::Str(s)) => Some(s.rc()),
             _ => None,
         }
     };
@@ -87,7 +87,7 @@ pub fn session_records(permissions: &[String], list: &Value) -> (Value, Value) {
         }
         // Its folder, with "files.read" (a path is a file's path).
         if files && let Some(cwd) = cwd {
-            fields.push((Rc::from("cwd"), Value::Str(cwd)));
+            fields.push((Rc::from("cwd"), Value::Str(cwd.into())));
         }
         sessions.push((id, Value::record(fields)));
     }
@@ -101,7 +101,7 @@ pub fn session_records(permissions: &[String], list: &Value) -> (Value, Value) {
         let mut fields = pick(project, &["name", "device", "icon"]);
         if files {
             if let Some(path) = text(project.field("path")) {
-                fields.push((Rc::from("path"), Value::Str(path)));
+                fields.push((Rc::from("path"), Value::Str(path.into())));
             }
             // Which repository it is, with its folder: which of its clones is on
             // this device, and the oldest, name it.
@@ -123,9 +123,9 @@ pub fn published(permissions: &[String], change: &[String], sources: &Sources, l
     }
     let (sessions, projects) = session_records(permissions, list);
     let Value::Map(fields) = &rest else { return rest };
-    let mut fields: Vec<(Rc<str>, Value)> = fields.to_vec();
-    fields.push((Rc::from("sessions"), sessions));
-    fields.push((Rc::from("projects"), projects));
+    let mut fields: Vec<zgx_script::Field> = fields.to_vec();
+    fields.push(zgx_script::Field("sessions".into(), sessions));
+    fields.push(zgx_script::Field("projects".into(), projects));
     Value::record(fields)
 }
 

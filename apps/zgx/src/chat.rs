@@ -41,6 +41,9 @@
 //! and sent by the engine through the edge's store: `WatchHeldSends`). `ZERON_ZGX_MOCK=1` offers the engine's
 //! mock agent, for trying a turn without a paid one.
 
+use zgx_script::Str;
+use zgx_script::Slice;
+use zgx_script::Field;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -321,7 +324,7 @@ fn compressed(bytes: &[u8]) -> Box<[u8]> {
 #[derive(Clone, Default)]
 struct Built {
     row: Option<Value>,
-    subagents: Option<Rc<[Value]>>,
+    subagents: Option<zgx_script::List>,
     /// Folded, its compressed bytes' length (what a chat kept is weighed by).
     folded: usize,
     /// A long reply's blocks, held here rather than in its row (`set_aside`):
@@ -342,8 +345,8 @@ struct Built {
 /// (`chat.reply_run`), the end's alone as it opens.
 struct Aside {
     /// Each run: its key (its first block's id) and its blocks.
-    runs: Vec<(Rc<str>, Rc<[Value]>)>,
-    blocks: Rc<[Value]>,
+    runs: Vec<(zgx_script::Str, zgx_script::List)>,
+    blocks: zgx_script::List,
 }
 
 /// More blocks than this, a settled reply's are set aside (ds/transcript's
@@ -382,7 +385,7 @@ fn guess_block(block: &Value) -> f64 {
                     *chars = 0;
                 }
             };
-            let text = s("text").unwrap_or_else(|| Rc::from(""));
+            let text = s("text").unwrap_or_else(|| zgx_script::Str::from(""));
             for line in text.split('\n') {
                 if line.trim_start().starts_with("```") {
                     if fenced {
@@ -437,7 +440,7 @@ fn block_sum(block: &Value) -> u64 {
 /// it's a settled reply of more than LONG_REPLY blocks; else as it is.
 fn set_aside(row: Value) -> (Value, Option<Rc<Aside>>) {
     let Value::Map(fields) = &row else { return (row, None) };
-    let field = |key: &str| fields.iter().find(|(k, _)| &**k == key).map(|(_, v)| v);
+    let field = |key: &str| fields.iter().find(|Field(k, _)| &**k == key).map(|Field(_, v)| v);
     let settled = matches!(field("role"), Some(Value::Str(r)) if &**r == "assistant")
         && matches!(field("streaming"), Some(Value::Bool(false)));
     let (Some(Value::Str(id)), Some(Value::List(blocks))) = (field("id"), field("blocks")) else {
@@ -448,7 +451,7 @@ fn set_aside(row: Value) -> (Value, Option<Rc<Aside>>) {
     }
     let id_of = |b: &Value| match b.field("id") {
         Some(Value::Str(s)) => s.clone(),
-        _ => Rc::from(""),
+        _ => zgx_script::Str::from(""),
     };
     // Cut as ds/transcript cuts them: a run ends before a block that starts
     // one, or once it holds RUN_MOST.
@@ -464,7 +467,7 @@ fn set_aside(row: Value) -> (Value, Option<Rc<Aside>>) {
     let mut runs = Vec::with_capacity(cuts.len());
     let mut listed = Vec::with_capacity(cuts.len());
     for (from, to) in cuts {
-        let slice: Rc<[Value]> = blocks[from..to].iter().cloned().collect();
+        let slice: zgx_script::List = blocks[from..to].iter().cloned().collect();
         let key = id_of(&slice[0]);
         let guess = slice.iter().map(|b| guess_block(b) + 12.).sum::<f64>() - 12.;
         let sum = slice.iter().fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(block_sum(b)));
@@ -478,13 +481,13 @@ fn set_aside(row: Value) -> (Value, Option<Rc<Aside>>) {
     }
     let aside = Rc::new(Aside { runs, blocks: blocks.clone() });
     let mut kept: Vec<(&str, Value)> =
-        fields.iter().filter(|(k, _)| !matches!(&**k, "blocks" | "tools")).map(|(k, v)| (&**k, v.clone())).collect();
+        fields.iter().filter(|Field(k, _)| !matches!(&**k, "blocks" | "tools")).map(|Field(k, v)| (&**k, v.clone())).collect();
     kept.push(("runs", Value::List(listed.into())));
     ASIDE.with_borrow_mut(|held| {
         if held.len() >= 64 {
             held.retain(|_, a| a.strong_count() > 0);
         }
-        held.insert(id.clone(), Rc::downgrade(&aside));
+        held.insert(id.rc(), Rc::downgrade(&aside));
     });
     (Value::record(kept), Some(aside))
 }
@@ -496,7 +499,7 @@ fn aside_of(id: &str) -> Option<Rc<Aside>> {
 
 fn text_field(arg: &Value, key: &str) -> Rc<str> {
     match arg.field(key) {
-        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Str(s)) => s.rc(),
         _ => Rc::from(""),
     }
 }
@@ -524,7 +527,7 @@ pub(crate) fn reply_run_of(arg: &Value) -> Value {
     aside_of(&text_field(arg, "id"))
         .and_then(|aside| {
             let holds = |b: &Value| matches!(b.field("id"), Some(Value::Str(s)) if *s == block);
-            aside.runs.iter().find(|(_, blocks)| blocks.iter().any(holds)).map(|(k, _)| Value::Str(k.clone()))
+            aside.runs.iter().find(|(_, blocks)| blocks.iter().any(holds)).map(|(k, _)| Value::Str(k.clone().into()))
         })
         .unwrap_or(Value::Nil)
 }
@@ -1008,7 +1011,7 @@ impl Pending {
 fn one_row_per_id(list: &mut Vec<Value>) {
     let mut ids: std::collections::HashSet<Rc<str>> = std::collections::HashSet::with_capacity(list.len());
     list.retain(|row| match row.field("id") {
-        Some(Value::Str(id)) => ids.insert(id.clone()),
+        Some(Value::Str(id)) => ids.insert(id.rc()),
         _ => true,
     });
 }
@@ -1095,8 +1098,8 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     chats.asks_shared.borrow_mut().push(host.shared("chat.asks", chats.asks_value()));
     let view = Rc::new(View {
         session: host.shared("chat.session", Value::Nil),
-        messages: host.shared("chat.messages", Value::List(Rc::from([]))),
-        subagents: host.shared("chat.subagents", Value::List(Rc::from([]))),
+        messages: host.shared("chat.messages", Value::List(zgx_script::Slice::from([]))),
+        subagents: host.shared("chat.subagents", Value::List(zgx_script::Slice::from([]))),
         draft: host.shared("chat.draft", draft_value("", "")),
         rpc: RefCell::default(),
         open: RefCell::default(),
@@ -1361,8 +1364,8 @@ fn lane_view(host: &ScriptHost, slot: &str) -> Rc<View> {
     let chats = CHATS.with(Rc::clone);
     let view = Rc::new(View {
         session: host.shared(&format!("chat.lane.{slot}.session"), Value::Nil),
-        messages: host.shared(&format!("chat.lane.{slot}.messages"), Value::List(Rc::from([]))),
-        subagents: host.shared(&format!("chat.lane.{slot}.subagents"), Value::List(Rc::from([]))),
+        messages: host.shared(&format!("chat.lane.{slot}.messages"), Value::List(zgx_script::Slice::from([]))),
+        subagents: host.shared(&format!("chat.lane.{slot}.subagents"), Value::List(zgx_script::Slice::from([]))),
         draft: host.shared(&format!("chat.lane.{slot}.draft"), draft_value("", "")),
         rpc: RefCell::default(),
         open: RefCell::default(),
@@ -2346,8 +2349,8 @@ impl View {
         if has_rows {
             self.publish_messages();
         } else {
-            self.messages.set(Value::List(Rc::from([])));
-            self.subagents.set(Value::List(Rc::from([])));
+            self.messages.set(Value::List(zgx_script::Slice::from([])));
+            self.subagents.set(Value::List(zgx_script::Slice::from([])));
         }
         self.draft.set(draft_value("", ""));
         self.subscribe();
@@ -2375,8 +2378,8 @@ impl View {
         self.generation.set(self.generation.get() + 1);
         self.snapshot.set(true);
         *self.open.borrow_mut() = Some(Open { id: id.clone(), ..Open::default() });
-        self.messages.set(Value::List(Rc::from([])));
-        self.subagents.set(Value::List(Rc::from([])));
+        self.messages.set(Value::List(zgx_script::Slice::from([])));
+        self.subagents.set(Value::List(zgx_script::Slice::from([])));
         self.draft.set(draft_value("", ""));
         self.publish_session();
         let generation = self.generation.get();
@@ -4055,7 +4058,7 @@ fn merged_config(config: &Json, args: &Value) -> Json {
         {
             next.insert(key.clone(), v.clone());
         }
-        for (key, choice) in picked.iter() {
+        for Field(key, choice) in picked.iter() {
             if let Value::Str(choice) = choice
                 && !choice.is_empty()
             {
@@ -4924,26 +4927,28 @@ struct RowBuild {
     tools: HashMap<*const Json, Option<Value>>,
 }
 
-fn share_word(text: &mut Rc<str>, own: &mut std::collections::HashSet<Rc<str>>) {
+fn share_word(text: &mut zgx_script::Str, own: &mut std::collections::HashSet<Rc<str>>) {
+    // (A value's string and an `Rc<str>` are one text held two ways: none
+    // of these copies it.)
     if text.len() <= COMMON_LEN {
         let shared = COMMON.with_borrow_mut(|common| {
             if let Some(known) = common.get(&**text) {
                 return Some(known.clone());
             }
             (common.len() < COMMON_MOST).then(|| {
-                common.insert(text.clone());
-                text.clone()
+                common.insert(text.rc());
+                text.rc()
             })
         });
         if let Some(shared) = shared {
-            *text = shared;
+            *text = shared.into();
             return;
         }
     }
     match own.get(&**text) {
-        Some(known) => *text = known.clone(),
+        Some(known) => *text = known.into(),
         None => {
-            own.insert(text.clone());
+            own.insert(text.rc());
         }
     }
 }
@@ -4952,24 +4957,24 @@ fn share_parts(value: &mut Value, seen: &mut Seen) {
     match value {
         Value::Str(text) => share_word(text, &mut seen.words),
         Value::List(items) => {
-            if let Some(items) = Rc::get_mut(items) {
+            if let Some(items) = Slice::get_mut(items) {
                 items.iter_mut().for_each(|item| share_parts(item, seen));
             }
         }
         Value::Map(fields) => {
-            if let Some(fields) = Rc::get_mut(fields) {
-                for (key, field) in fields.iter_mut() {
+            if let Some(fields) = Slice::get_mut(fields) {
+                for Field(key, field) in fields.iter_mut() {
                     share_word(key, &mut seen.words);
                     share_parts(field, seen);
                 }
             }
             // (A record with an id, as a tool is: its one copy.)
             let Some(Value::Str(id)) = value.field("id").cloned() else { return };
-            match seen.records.get(&id) {
+            match seen.records.get(&*id) {
                 Some(known) if *known == *value => *value = known.clone(),
                 Some(_) => {}
                 None => {
-                    seen.records.insert(id, value.clone());
+                    seen.records.insert(id.into(), value.clone());
                 }
             }
         }
@@ -5271,7 +5276,7 @@ fn is_image_note(text: &str) -> bool {
 
 /// A transcript's subagents: each spawn that names its doc, once, in the order they
 /// were spawned, with when their turn began (a message's `tools` hold all of its).
-fn subagents_in(message: &Value) -> Option<Rc<[Value]>> {
+fn subagents_in(message: &Value) -> Option<zgx_script::List> {
     let Some(Value::List(tools)) = message.field("tools") else { return None };
     let found: Vec<Value> = tools
         .iter()
@@ -5298,7 +5303,7 @@ impl Subagents {
     fn add(&mut self, found: Option<&[Value]>) {
         for sub in found.into_iter().flatten() {
             if let Some(Value::Str(reference)) = sub.field("ref")
-                && self.1.insert(reference.clone())
+                && self.1.insert(reference.rc())
             {
                 self.0.push(sub.clone());
             }
@@ -6624,7 +6629,7 @@ fn todos(open: &Open) -> Value {
     let latest = latest_todo(open.entries.iter().rev().filter_map(|e| e.json.as_ref()))
         .or(open.older_todo.as_ref().map(|(_, part)| part));
     let Some(part) = latest else {
-        return Value::List(Rc::from([]));
+        return Value::List(zgx_script::Slice::from([]));
     };
     let items: Vec<Value> = part["call"]["items"]
         .as_array()
@@ -6681,10 +6686,10 @@ fn from_its_send(row: Value, id: &str, prompt: Option<&(String, f64)>) -> Value 
 /// A record with more fields (or some replaced).
 fn with_fields<const N: usize>(record: Value, extra: [(&str, Value); N]) -> Value {
     let Value::Map(fields) = &record else { return record };
-    let mut all: Vec<(std::rc::Rc<str>, Value)> = fields.iter().cloned().collect();
+    let mut all: Vec<zgx_script::Field> = fields.to_vec();
     for (key, value) in extra {
-        all.retain(|(k, _)| &**k != key);
-        all.push((key.into(), value));
+        all.retain(|Field(k, _)| &**k != key);
+        all.push(Field(key.into(), value));
     }
     Value::record(all)
 }
@@ -7311,8 +7316,8 @@ mod tests {
         let mut row = Value::record([
             ("text", Value::from(words)),
             ("copy", Value::from(words)),
-            ("tools", Value::List(Rc::from([tool()]))),
-            ("blocks", Value::List(Rc::from([Value::record([("kind", Value::from("group")), ("tools", Value::List(Rc::from([tool()])))])]))),
+            ("tools", Value::List(zgx_script::Slice::from([tool()]))),
+            ("blocks", Value::List(zgx_script::Slice::from([Value::record([("kind", Value::from("group")), ("tools", Value::List(zgx_script::Slice::from([tool()])))])]))),
         ]);
         let before = row.clone();
         // (Built just now: nothing else holds its parts.)
@@ -7324,9 +7329,9 @@ mod tests {
         let tools = row.field("tools").unwrap().list();
         let grouped = row.field("blocks").unwrap().list()[0].field("tools").unwrap().list();
         let (Value::Map(one), Value::Map(two)) = (&tools[0], &grouped[0]) else { panic!("records") };
-        assert!(Rc::ptr_eq(one, two), "one copy of a tool");
+        assert!(Slice::ptr_eq(one, two), "one copy of a tool");
         let (Some(Value::Str(text)), Some(Value::Str(copy))) = (row.field("text"), row.field("copy")) else { panic!("words") };
-        assert!(Rc::ptr_eq(text, copy), "one copy of its words");
+        assert!(Str::ptr_eq(text, copy), "one copy of its words");
     }
 
     /// A settled reply's tools are built once, for all its layouts, and read
@@ -7346,7 +7351,7 @@ mod tests {
         let tools = row.field("tools").unwrap().list();
         let grouped = row.field("blocks").unwrap().list()[0].field("tools").unwrap().list();
         let (Value::Map(one), Value::Map(two)) = (&tools[1], &grouped[1]) else { panic!("records") };
-        assert!(Rc::ptr_eq(one, two), "one tool, in both layouts");
+        assert!(Slice::ptr_eq(one, two), "one tool, in both layouts");
         // (Built for this row alone: nothing's kept for the next.)
         assert!(super::ROW_BUILD.with_borrow(Option::is_none));
     }
@@ -8361,7 +8366,7 @@ mod tests {
         let picked = merged_config(&chat, &Value::record([("options", Value::record([("lead", Value::from("b"))]))]));
         assert!(runs_otherwise(&chat, &picked));
         assert_eq!(picked["modelOptions"], json!({ "lead": "b" }));
-        let none = merged_config(&chat, &Value::record([("options", Value::record::<&str>([]))]));
+        let none = merged_config(&chat, &Value::record([("options", Value::record::<zgx_script::Field>([]))]));
         assert_eq!(none["modelOptions"], json!({}));
     }
 
@@ -8902,8 +8907,8 @@ mod tests {
         let view = |open: Open| {
             Rc::new(View {
                 session: app.host.shared("t.session", Value::Nil),
-                messages: app.host.shared("t.messages", Value::List(Rc::from([]))),
-                subagents: app.host.shared("t.subagents", Value::List(Rc::from([]))),
+                messages: app.host.shared("t.messages", Value::List(zgx_script::Slice::from([]))),
+                subagents: app.host.shared("t.subagents", Value::List(zgx_script::Slice::from([]))),
                 draft: app.host.shared("t.draft", draft_value("", "")),
                 rpc: RefCell::default(),
                 open: RefCell::new(Some(open)),
@@ -8958,8 +8963,8 @@ mod tests {
         let app = TestApp::new(|runtime| ScriptHost::inline(runtime, "app", "return ui.text { \"x\" }"));
         let view = Rc::new(View {
             session: app.host.shared("t.session", Value::Nil),
-            messages: app.host.shared("t.messages", Value::List(Rc::from([]))),
-            subagents: app.host.shared("t.subagents", Value::List(Rc::from([]))),
+            messages: app.host.shared("t.messages", Value::List(zgx_script::Slice::from([]))),
+            subagents: app.host.shared("t.subagents", Value::List(zgx_script::Slice::from([]))),
             draft: app.host.shared("t.draft", draft_value("", "")),
             rpc: RefCell::default(),
             open: RefCell::new(Some(Open { id: "c".into(), ..Open::default() })),
@@ -8999,8 +9004,8 @@ mod tests {
         let held: Vec<Entry> = (0..50).map(|i| Entry::new(reply(&format!("a{i}"), "done"))).collect();
         let view = Rc::new(View {
             session: app.host.shared("t.session", Value::Nil),
-            messages: app.host.shared("t.messages", Value::List(Rc::from([]))),
-            subagents: app.host.shared("t.subagents", Value::List(Rc::from([]))),
+            messages: app.host.shared("t.messages", Value::List(zgx_script::Slice::from([]))),
+            subagents: app.host.shared("t.subagents", Value::List(zgx_script::Slice::from([]))),
             draft: app.host.shared("t.draft", draft_value("", "")),
             rpc: RefCell::default(),
             open: RefCell::new(Some(Open { id: "c".into(), entries: held, heard: true, has_whole: true, ..Open::default() })),
@@ -9087,8 +9092,8 @@ mod tests {
         let held: Vec<Entry> = [prompt("u0"), reply("a0"), prompt("u1"), writing(thought)].into_iter().map(Entry::new).collect();
         let view = Rc::new(View {
             session: app.host.shared("t.session", Value::Nil),
-            messages: app.host.shared("t.messages", Value::List(Rc::from([]))),
-            subagents: app.host.shared("t.subagents", Value::List(Rc::from([]))),
+            messages: app.host.shared("t.messages", Value::List(zgx_script::Slice::from([]))),
+            subagents: app.host.shared("t.subagents", Value::List(zgx_script::Slice::from([]))),
             draft: app.host.shared("t.draft", draft_value("", "")),
             rpc: RefCell::default(),
             open: RefCell::new(Some(Open { id: "c".into(), entries: held, heard: true, has_whole: true, ..Open::default() })),
@@ -9137,8 +9142,8 @@ mod tests {
         let held: Vec<Entry> = (0..10).map(|i| Entry::new(reply(&format!("a{i}"), "done"))).collect();
         let view = Rc::new(View {
             session: app.host.shared("t.session", Value::Nil),
-            messages: app.host.shared("t.messages", Value::List(Rc::from([]))),
-            subagents: app.host.shared("t.subagents", Value::List(Rc::from([]))),
+            messages: app.host.shared("t.messages", Value::List(zgx_script::Slice::from([]))),
+            subagents: app.host.shared("t.subagents", Value::List(zgx_script::Slice::from([]))),
             draft: app.host.shared("t.draft", draft_value("", "")),
             rpc: RefCell::default(),
             open: RefCell::new(Some(Open { id: "c".into(), entries: held, heard: true, has_whole: true, ..Open::default() })),
@@ -9193,8 +9198,8 @@ mod tests {
         let held: Vec<Entry> = [prompt("u0"), reply("a0")].into_iter().map(Entry::new).collect();
         let view = Rc::new(View {
             session: app.host.shared("t.session", Value::Nil),
-            messages: app.host.shared("t.messages", Value::List(Rc::from([]))),
-            subagents: app.host.shared("t.subagents", Value::List(Rc::from([]))),
+            messages: app.host.shared("t.messages", Value::List(zgx_script::Slice::from([]))),
+            subagents: app.host.shared("t.subagents", Value::List(zgx_script::Slice::from([]))),
             draft: app.host.shared("t.draft", draft_value("", "")),
             rpc: RefCell::default(),
             open: RefCell::new(Some(Open { id: "c".into(), entries: held, heard: true, has_whole: true, ..Open::default() })),

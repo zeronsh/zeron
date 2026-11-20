@@ -19,7 +19,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-zgx-module = { git = "https://github.com/zeronsh/zgx", rev = "0f9a27c4a1e43c473255a24f778c4c23c10eadbb" }
+zgx-module = { git = "https://github.com/zeronsh/zgx", rev = "add70b6cbafe86defec64c4bd9d1c48ced0e94fa" }
 # The hash a run's sum is made with, the app's own (src/chat.rs `block_sum`).
 rustc-hash = "2"
 
