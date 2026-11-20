@@ -1,0 +1,43 @@
+---
+// The repository's star count, filled in by the browser and cached for an
+// hour so repeat visits stay under GitHub's unauthenticated rate limit.
+import { SITE } from "../../data/site.ts";
+---
+
+<span class="stars" data-stars data-api={SITE.githubApi} hidden></span>
+
+<script>
+  const KEY = "zeron-gh-stars";
+  const targets = [...document.querySelectorAll<HTMLElement>("[data-stars]")];
+  const show = (count: number) => {
+    const text = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(count).toLowerCase();
+    for (const el of targets) {
+      el.textContent = text;
+      el.hidden = false;
+    }
+  };
+  const api = targets[0]?.dataset.api;
+  if (api) {
+    let cached: { n: number; at: number } | null = null;
+    try {
+      cached = JSON.parse(localStorage.getItem(KEY) ?? "null");
+    } catch {}
+    if (cached && Number.isFinite(cached.n)) show(cached.n);
+    if (!cached || Date.now() - cached.at >= 3600e3) {
+      fetch(api, { credentials: "omit" })
+        .then((response) => (response.ok ? response.json() : Promise.reject()))
+        .then(({ stargazers_count: n }) => {
+          if (!Number.isFinite(n)) return;
+          show(n);
+          try {
+            localStorage.setItem(KEY, JSON.stringify({ n, at: Date.now() }));
+          } catch {}
+        })
+        .catch(() => {});
+    }
+  }
+</script>
+
+<style>
+  .stars { font-variant-numeric: tabular-nums; }
+</style>

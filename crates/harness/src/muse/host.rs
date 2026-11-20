@@ -79,7 +79,7 @@ impl Host {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = Child::new(cmd.spawn().map_err(|e| {
+        let mut child = Child::new(crate::process::spawn_agent(&mut cmd).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 HarnessError::NotInstalled(crate::executable::binary_hint(exe))
             } else {

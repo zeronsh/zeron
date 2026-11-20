@@ -106,6 +106,23 @@ local function step(s: any): State?
 	return nil
 end
 
+-- A send's machine step (`shown`) where there's now nothing to say (`now`):
+-- kept while that machine is up or coming up and the prompt is still on its
+-- way, until the machine's own setup steps replace it. Once it's up its first
+-- step is on its way, and a "Sending…" between the two read as the machine
+-- starting over. Anything else said (`now`), a failed wake, or a send still
+-- uploading takes its place.
+function M.keep_step(shown: State?, now: State?, t: Turn): State?
+	if now ~= nil or shown == nil or not t.sending or t.wake_failed or t.held then
+		return now
+	end
+	local state = t.cloud and t.cloud.state
+	if state == "ready" or state == "starting" or state == "provisioning" then
+		return shown
+	end
+	return now
+end
+
 local function interrupted(why: string?): State
 	if why then
 		return { text = why }

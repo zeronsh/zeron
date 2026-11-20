@@ -27,7 +27,7 @@ use super::status::{Author, Decision, Status};
 use super::{Plugins, failed, lock, now_secs};
 
 /// The first check after the engine starts, then how often.
-const FIRST_CHECK: Duration = Duration::from_secs(90);
+pub(super) const FIRST_CHECK: Duration = Duration::from_secs(90);
 const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 
 #[derive(Deserialize)]

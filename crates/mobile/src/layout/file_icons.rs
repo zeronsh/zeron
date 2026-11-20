@@ -26,7 +26,7 @@ struct IconDefinition {
 }
 
 static MANIFEST: LazyLock<Manifest> = LazyLock::new(|| {
-    let mut m: Manifest = serde_json::from_str(include_str!("../../../ui/src/file-icons.json")).expect("bundled file-icon manifest");
+    let mut m: Manifest = serde_json::from_str(include_str!("file-icons.json")).expect("bundled file-icon manifest");
     m.file_extensions = m.file_extensions.into_iter().map(|(k, v)| (k.to_ascii_lowercase(), v)).collect();
     m.file_names = m.file_names.into_iter().map(|(k, v)| (k.to_ascii_lowercase(), v)).collect();
     m

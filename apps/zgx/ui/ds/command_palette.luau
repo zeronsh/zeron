@@ -1735,6 +1735,22 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 			-- lengths, breathing one after another.
 			local widths = { 168, 120, 212, 144, 96 }
 			local breath = ui.use_state(0.4)
+			-- The breathing goes with the row: a loop on a state is the
+			-- script's, not the row's, and one left behind wanted every
+			-- frame of the display for as long as the app ran (each page
+			-- the palette loaded left five).
+			local waiting: (() -> ())? = nil
+			local breathing: any = nil
+			ui.on_cleanup(function()
+				if waiting then
+					waiting()
+					waiting = nil
+				end
+				if breathing then
+					breathing:cancel()
+					breathing = nil
+				end
+			end)
 			return ui.div {
 				w_full = true,
 				h = r.h,
@@ -1744,8 +1760,9 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 					if motion.reduced_now() then
 						return
 					end
-					ui.after((r.count or 1) * 90, function()
-						anime.animate(breath, { value = 0.9, duration = 700, ease = "inOutSine", loop = true, alternate = true })
+					waiting = ui.after((r.count or 1) * 90, function()
+						waiting = nil
+						breathing = anime.animate(breath, { value = 0.9, duration = 700, ease = "inOutSine", loop = true, alternate = true })
 					end)
 				end,
 				ui.row {

@@ -14,6 +14,9 @@ fail_turn() { # $1 = request id, $2 = message
   emit "{\"method\":\"turn/failed\",\"params\":{\"turn\":{\"id\":\"t-bad\",\"error\":{\"message\":\"$2\"}}}}"
 }
 
+# (A warm start's test counts launches.)
+[ -n "$FAKE_LAUNCH_LOG" ] && echo "launch $$" >> "$FAKE_LAUNCH_LOG"
+
 # ---- handshake -------------------------------------------------------------
 read -r line || exit 1 # initialize
 has "$line" '"method":"initialize"' || exit 1

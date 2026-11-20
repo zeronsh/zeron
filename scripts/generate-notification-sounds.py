@@ -77,7 +77,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--variants-dir', type=Path, help='Also export all cues for audition.')
     args = parser.parse_args()
-    assets = Path(__file__).resolve().parents[1] / 'crates/ui/assets/sounds'
+    assets = Path(__file__).resolve().parents[1] / 'assets/sounds'
     for name in ['done', 'request']:
         write_cue(name, assets / f'{name}.wav')
     if args.variants_dir:

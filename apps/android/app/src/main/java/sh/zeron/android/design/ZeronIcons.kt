@@ -10,7 +10,7 @@ import androidx.compose.ui.res.painterResource
 import sh.zeron.android.R
 
 /**
- * Zeron's icon set — the same glyphs the desktop (crates/ui/assets/icons,
+ * Zeron's icon set — the same glyphs the desktop (assets/icons,
  * Solar Linear + Zeron's hand-drawn additions) and iOS draw, compiled to
  * VectorDrawables at build time by scripts/android/svg2vd.py.
  */

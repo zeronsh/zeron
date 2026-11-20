@@ -92,6 +92,8 @@ local old_edge = ui.state("cloud_stub_old_edge", false)
 local chosen_machine = ui.state("cloud_stub_machine", "default")
 local refuse_wake = ui.state("cloud_stub_refuse_wake", false)
 local refuse_machine = ui.state("cloud_stub_refuse_machine", false)
+local chosen_reach = ui.state("cloud_stub_reach", "devices")
+local refuse_reach = ui.state("cloud_stub_refuse_reach", false)
 -- The chat's session, as the edge says it now.
 local session_now = ui.state("cloud_stub_session", nil :: any)
 
@@ -110,6 +112,7 @@ local function status(): cloud.Status
 		max_awake = 5,
 		machines = if old_edge:peek() then nil else MACHINES,
 		machine = if old_edge:peek() then nil else chosen_machine:peek(),
+		reach = if old_edge:peek() then nil else chosen_reach:peek(),
 	}
 end
 
@@ -239,6 +242,24 @@ c.ask_set_machine = function(machine: string): any
 	end
 	chosen_machine:set(machine)
 	return answer(status())
+end
+c.ask_set_reach = function(reach: string): any
+	log(`cloud.set_reach:{reach}`)
+	if refuse_reach:peek() then
+		return settled(nil, "failed")
+	end
+	chosen_reach:set(reach)
+	return answer(status())
+end
+c.ask_set_session_reach = function(chat: string, reach: string): any
+	log(`cloud.set_session_reach:{chat}:{reach}`)
+	if refuse_reach:peek() then
+		return settled(nil, "failed")
+	end
+	local s = table.clone(session_now:peek() or {})
+	s.reach = reach
+	session_now:set(s)
+	return answer(s)
 end
 c.branches = function(repo: string, default: string?): any
 	log(`cloud.branches:{repo}`)
@@ -533,7 +554,15 @@ local chat_id, device_id = "s2", "cloud-s2"
 -- often it's read.
 local RESTORED_AT = os.time() - 3600
 local function session_of(fields: { [string]: any }): any
-	local s: { [string]: any } = { chat = chat_id, device = device_id, state = "sleeping", space = "atlas", repo = "acme/atlas", machine = "default" }
+	local s: { [string]: any } = {
+		chat = chat_id,
+		device = device_id,
+		state = "sleeping",
+		space = "atlas",
+		repo = "acme/atlas",
+		machine = "default",
+		reach = "devices",
+	}
 	for k, v in fields do
 		s[k] = v
 	end

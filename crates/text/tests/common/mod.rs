@@ -12,7 +12,7 @@ use zeron_text::*;
 
 pub fn font_bytes(name: &str) -> Vec<u8> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../ui/assets/fonts")
+        .join("../../assets/fonts")
         .join(name);
     std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
 }

@@ -186,6 +186,12 @@ export const RUNNER_DEVICE_HEADER = "x-zeron-runner-device";
  * spaces. Same strip-then-stamp discipline. */
 export const RUNNER_ACCOUNT_HEADER = "x-zeron-runner-account";
 
+/** Companion of RUNNER_DEVICE_HEADER on a forward into another chat's or
+ * device's room that the runner reaches only through its session's
+ * `devices` reach: the revocation epoch the registry admitted it at
+ * (runner-revocation.ts). Same strip-then-stamp discipline. */
+export const RUNNER_EPOCH_HEADER = "x-zeron-runner-epoch";
+
 /** Header the Worker stamps on a device-room client dial whose calling device
  * it verified (device-link.ts): a runner's own device, or a device that
  * proved possession of its registered plugin key. DeviceRoom puts it on every

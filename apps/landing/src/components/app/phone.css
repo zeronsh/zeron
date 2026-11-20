@@ -1,0 +1,18 @@
+/* The iOS app's session screen, recreated: a fixed 402 × 874 point stage
+   (an iPhone 17 Pro), placed by hand against the app's own screenshot
+   (docs/screenshots/message-captions/ios-dark.png; tools/recreate/phone_check.py
+   diffs it). The app's text is Geist, as here; its glyphs are SF Symbols,
+   which a web page can't carry, so those are drawn here as plain shapes. */
+.zp { position: relative; width: 402px; height: 874px; overflow: hidden; background: #060606; color: #f2f2f4; font-family: var(--font-sans); font-size: 16.5px; line-height: 25px; text-align: left; -webkit-font-smoothing: antialiased; font-synthesis: none; }
+.zp > * { position: absolute; margin: 0; }
+.zp .glass { background: #1b1b1b; border-radius: 22px; box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.09); }
+.zp .bubble { background: #19191c; border-radius: 22px; }
+.zp .dim { color: rgb(242 242 244 / 0.6); }
+.zp .faint { color: rgb(242 242 244 / 0.42); }
+.zp svg { position: absolute; overflow: visible; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; }
+.zp .solid { fill: currentColor; stroke: none; }
+.zp .caption { display: flex; align-items: center; gap: 6px; font-size: 13.5px; line-height: 18px; white-space: nowrap; overflow: hidden; -webkit-mask-image: linear-gradient(90deg, #000 86%, transparent); mask-image: linear-gradient(90deg, #000 86%, transparent); }
+.zp .caption b { font-weight: 550; color: rgb(242 242 244 / 0.78); }
+.zp .caption i { flex: none; width: 14px; height: 14px; background: rgb(242 242 244 / 0.7); -webkit-mask: url("../../assets/agents/openai.svg") center / contain no-repeat; mask: url("../../assets/agents/openai.svg") center / contain no-repeat; }
+.zp-fit { container-type: inline-size; aspect-ratio: 402 / 874; overflow: hidden; }
+.zp-fit > .zp { transform-origin: 0 0; scale: tan(atan2(100cqw, 402px)); }

@@ -433,6 +433,32 @@ Page = ui.component(function(props: Props): Node
 	-- Annotation mode, as the bar's toggle shows it.
 	local mode = ui.use_state(annotating:peek()[id] == true)
 
+	-- This navigation, as the page tells it: whether its own document came
+	-- (committed: the page's content, not the host's error page), whether
+	-- its process ended after, and whether its failure was dismissed. Each
+	-- starts over with the next navigation (a reload, Try again).
+	-- A failure after the page committed is no page missing: the page drew,
+	-- and it's what to show (a 429 or 5xx page, Google's "unusual traffic"
+	-- check: WebView2 calls a page with an error status a failed
+	-- navigation; WebKit a load interrupted once the page was in).
+	local committed = ui.use_state(false)
+	local crashed = ui.use_state(false)
+	local dismissed = ui.use_state(false)
+	-- The page that didn't load, over where it would be (`trouble`).
+	local function failed(): boolean
+		if not has_page(web) or web.error == nil or dismissed:get() then
+			return false
+		end
+		return crashed:get() or not committed:get()
+	end
+	local function dismiss(): boolean
+		if not failed() then
+			return false
+		end
+		dismissed:set(true)
+		return true
+	end
+
 	-- Made with an address and no page yet (a saved tab, a link opened):
 	-- the page loads. (A reload finds the page where it was: nothing moves.)
 	-- A new tab with a home page set opens on it (once: the start page is
@@ -556,7 +582,7 @@ Page = ui.component(function(props: Props): Node
 		end
 	end
 	local function start_annotating()
-		if not has_page(web) or web.error then
+		if not has_page(web) or failed() then
 			if mode:peek() then
 				mode:set(false)
 			end
@@ -969,6 +995,11 @@ Page = ui.component(function(props: Props): Node
 					return true
 				end
 				if e.key == "Escape" then
+					-- (Nothing typed to take back: the failure over the page
+					-- dismissed, as from anywhere else in the tab.)
+					if address:peek() == last_url and dismiss() then
+						return true
+					end
 					-- (Back to the page's address, as a browser's.)
 					suggestions.quiet(last_url)
 					address:set(last_url)
@@ -1064,7 +1095,7 @@ Page = ui.component(function(props: Props): Node
 			tooltip = ui.t("panel.browser.annotate_tooltip", { key = ui.shortcut_text(if shell_keys then shell_keys.combo("panel.annotate") else "cmd+shift+i") }):get(),
 			tooltip_side = "bottom",
 			disabled = function(): boolean
-				return not can_leave() or web.error ~= nil
+				return not can_leave() or failed()
 			end,
 			on_change = function(on: boolean)
 				if on then
@@ -1533,7 +1564,21 @@ Page = ui.component(function(props: Props): Node
 					on_state(value.state)
 				end
 			end,
+			on_error = function(url: string, _why: string)
+				-- (The page's process ended: no navigation's, and nothing left
+				-- drawn, committed or not.)
+				if url == "" then
+					crashed:set(true)
+				end
+			end,
 			on_navigate = function(e: any)
+				if type(e) == "table" and e.kind == "started" then
+					committed:set(false)
+					crashed:set(false)
+					dismissed:set(false)
+				elseif type(e) == "table" and e.kind == "committed" then
+					committed:set(true)
+				end
 				-- Another page: its picker is gone with the last, so the mode
 				-- ends (the shipping app's; its marks come back by restore).
 				if type(e) == "table" and e.kind == "committed" and annotating:peek()[id] then
@@ -1572,9 +1617,7 @@ Page = ui.component(function(props: Props): Node
 			or string.find(l, "internet connection", 1, true) ~= nil
 			or string.find(l, "not connected", 1, true) ~= nil
 	end
-	local trouble = ui.show(function(): boolean
-		return has_page(web) and web.error ~= nil
-	end, ui.column {
+	local trouble = ui.show(failed, ui.column {
 		absolute = true,
 		left = 0,
 		right = 0,
@@ -1623,6 +1666,14 @@ Page = ui.component(function(props: Props): Node
 						web:reload()
 					end,
 				},
+				-- What the page drew anyway, under (Escape too): until the
+				-- next navigation.
+				secondary = {
+					label = ui.t("panel.browser.dismiss_error") :: any,
+					on_click = function()
+						dismiss()
+					end,
+				},
 			}
 		end, { w_full = true, grow = 1, min_h = 0 }),
 	})
@@ -1634,6 +1685,14 @@ Page = ui.component(function(props: Props): Node
 		w_full = true,
 		grow = 1,
 		min_h = 0,
+		-- A bare Escape nothing in the tab took (the error's buttons, the
+		-- bar's): the failure dismissed, the page under it shown.
+		on_key = function(e: any): boolean?
+			if e.key == "Escape" and not (e.shift or e.cmd or e.alt or e.ctrl) and dismiss() then
+				return true
+			end
+			return nil
+		end,
 		bar,
 		problem_line,
 		find_bar,
