@@ -19,4 +19,4 @@ dependencies = [
 [[package]]
 name = "zgx-module"
 version = "0.1.10"
-source = "git+https://github.com/zeronsh/zgx?rev=b52564734dc2aa7f32dc8f9dcb0e64d0a6f90bdc#b52564734dc2aa7f32dc8f9dcb0e64d0a6f90bdc"
+source = "git+https://github.com/zeronsh/zgx?rev=0f9a27c4a1e43c473255a24f778c4c23c10eadbb#0f9a27c4a1e43c473255a24f778c4c23c10eadbb"

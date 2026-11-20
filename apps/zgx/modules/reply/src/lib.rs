@@ -6,10 +6,10 @@
 //! `chat.reply_release` as it lets one go; the transcript's scripts call
 //! the other three, as they did.
 
-use std::{cell::RefCell, rc::Rc};
+use std::rc::Rc;
 
 use rustc_hash::FxHashMap;
-use zgx_module::{Host, Ref, Value};
+use zgx_module::{Host, Ref, State, Value};
 
 struct Aside {
     /// Each run: its key (its first block's id) and its blocks.
@@ -25,15 +25,17 @@ const LONG_REPLY: usize = 48;
 const RUN: u64 = 32;
 const RUN_MOST: usize = 64;
 
-thread_local! {
-    /// The long replies set aside, by their entry's id: the latest built of
-    /// each, while the app holds it.
-    static ASIDE: RefCell<FxHashMap<Box<str>, std::rc::Weak<Aside>>> = RefCell::default();
+/// The module's own state, one for each thread (`Host::state`): the long
+/// replies set aside.
+#[derive(Default)]
+struct Held {
+    /// By their entry's id: the latest built of each, while the app holds
+    /// it.
+    aside: FxHashMap<Box<str>, std::rc::Weak<Aside>>,
     /// What the app holds, by the number it was given for it.
-    static HELD: RefCell<FxHashMap<u64, Rc<Aside>>> = RefCell::default();
-    static NEXT: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    held: FxHashMap<u64, Rc<Aside>>,
+    last: u64,
 }
-
 /// Whether block `id` starts a run (ds/transcript's `starts_run`: the same
 /// sum, so both cut a reply into the same runs).
 fn starts_run(id: &str) -> bool {
@@ -138,11 +140,10 @@ struct Read<'a> {
 /// `row` (an entry's, built whole) with its blocks and tools set aside, if
 /// it's a settled reply of more than LONG_REPLY blocks: `{ row, hold }`,
 /// `hold` what to release it by. Else nil, and the row is as it was.
-fn set_aside(row: Ref) -> Value {
-    let fields = row.record();
-    let settled = fields.get("role").and_then(Ref::str) == Some("assistant")
-        && fields.get("streaming").and_then(Ref::bool) == Some(false);
-    let (Some(id), Some(blocks)) = (fields.get("id").and_then(Ref::str), fields.get("blocks")) else {
+fn set_aside(state: State<Held>, row: Ref) -> Value {
+    let [role, streaming, id, blocks] = row.get(["role", "streaming", "id", "blocks"]);
+    let settled = role.and_then(Ref::str) == Some("assistant") && streaming.and_then(Ref::bool) == Some(false);
+    let (Some(id), Some(blocks)) = (id.and_then(Ref::str), blocks) else {
         return Value::NIL;
     };
     if !blocks.is_list() || !settled || blocks.len() <= LONG_REPLY {
@@ -188,22 +189,23 @@ fn set_aside(row: Ref) -> Value {
     }
     let aside = Rc::new(Aside { runs, blocks: blocks.to_owned() });
     let mut kept: Vec<(&str, Value)> =
-        fields.iter().filter(|(k, _)| !matches!(*k, "blocks" | "tools")).map(|(k, v)| (k, v.to_owned())).collect();
+        row.fields().filter(|(k, _)| !matches!(*k, "blocks" | "tools")).map(|(k, v)| (k, v.to_owned())).collect();
     kept.push(("runs", Value::list(listed)));
-    ASIDE.with_borrow_mut(|held| {
-        if held.len() >= 64 {
-            held.retain(|_, a| a.strong_count() > 0);
+    let hold = state.with(|held| {
+        if held.aside.len() >= 64 {
+            held.aside.retain(|_, a| a.strong_count() > 0);
         }
-        held.insert(id.into(), Rc::downgrade(&aside));
+        held.aside.insert(id.into(), Rc::downgrade(&aside));
+        held.last += 1;
+        held.held.insert(held.last, aside);
+        held.last
     });
-    let hold = NEXT.replace(NEXT.get() + 1);
-    HELD.with_borrow_mut(|held| held.insert(hold, aside));
     Value::record([("row", Value::record(kept)), ("hold", Value::from(hold as f64))])
 }
 
 /// The reply set aside as `id`, while something holds it.
-fn aside_of(id: &str) -> Option<Rc<Aside>> {
-    ASIDE.with_borrow(|held| held.get(id).and_then(std::rc::Weak::upgrade))
+fn aside_of(state: State<Held>, id: &str) -> Option<Rc<Aside>> {
+    state.with(|held| held.aside.get(id).and_then(std::rc::Weak::upgrade))
 }
 
 fn text<'a>(value: Option<Ref<'a>>) -> &'a str {
@@ -212,27 +214,27 @@ fn text<'a>(value: Option<Ref<'a>>) -> &'a str {
 
 /// A long reply's run (`{ id, key }`), as `chat.reply_run` hands it to the
 /// transcript building it: its blocks; nil once the reply is let go of.
-fn reply_run(arg: Ref) -> Value {
+fn reply_run(state: State<Held>, arg: Ref) -> Value {
     let [id, key] = arg.get(["id", "key"]);
     let key = text(key);
-    aside_of(text(id))
+    aside_of(state, text(id))
         .and_then(|aside| aside.runs.iter().find(|(k, _)| text_of(k) == key).map(|(_, blocks)| blocks.clone()))
         .unwrap_or(Value::NIL)
 }
 
 /// A long reply's blocks, all of them (`chat.reply_blocks`, given its id):
 /// what a find in the chat reads. Nil once the reply is let go of.
-fn reply_blocks(id: Ref) -> Value {
+fn reply_blocks(state: State<Held>, id: Ref) -> Value {
     let Some(id) = id.str() else { return Value::NIL };
-    aside_of(id).map_or(Value::NIL, |aside| aside.blocks.clone())
+    aside_of(state, id).map_or(Value::NIL, |aside| aside.blocks.clone())
 }
 
 /// The key of the run of a long reply (`{ id, block }`) that holds that
 /// block (`chat.reply_run_of`), nil if none does.
-fn reply_run_of(arg: Ref) -> Value {
+fn reply_run_of(state: State<Held>, arg: Ref) -> Value {
     let [id, block] = arg.get(["id", "block"]);
     let block = text(block);
-    aside_of(text(id))
+    aside_of(state, text(id))
         .and_then(|aside| {
             let holds = |b: Ref| b.field("id").and_then(Ref::str) == Some(block);
             aside.runs.iter().find(|(_, blocks)| blocks.get().items().any(holds)).map(|(k, _)| k.clone())
@@ -241,13 +243,16 @@ fn reply_run_of(arg: Ref) -> Value {
 }
 
 zgx_module::module!(|host: &Host| {
-    host.function("chat.reply_run", reply_run);
-    host.function("chat.reply_blocks", reply_blocks);
-    host.function("chat.reply_run_of", reply_run_of);
-    host.function("chat.reply_set_aside", set_aside);
-    host.action("chat.reply_release", |hold| {
+    let state = host.state::<Held>();
+    host.function("chat.reply_run", move |arg| reply_run(state, arg));
+    host.function("chat.reply_blocks", move |id| reply_blocks(state, id));
+    host.function("chat.reply_run_of", move |arg| reply_run_of(state, arg));
+    host.function("chat.reply_set_aside", move |row| set_aside(state, row));
+    host.action("chat.reply_release", move |hold| {
         if let Some(hold) = hold.num() {
-            HELD.with_borrow_mut(|held| held.remove(&(hold as u64)));
+            // (Dropped after `with`: an `Aside`'s values are freed outside it.)
+            let aside = state.with(|held| held.held.remove(&(hold as u64)));
+            drop(aside);
         }
     });
 });

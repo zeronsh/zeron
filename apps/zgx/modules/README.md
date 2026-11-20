@@ -18,12 +18,19 @@ Both ways pass the same tests (`cargo test --bin zeron-zgx`, with and without
 the variable), and `reply_module_costs` in `src/long_thread_tests.rs` measures
 one against the other.
 
-Measured on Linux (Ryzen 9 5900X), release, medians of 5 runs of 21 rounds:
+Measured on Linux (Ryzen 9 5900X), release, medians of 5 runs of 21 rounds,
+the two ways interleaved. Instructions are the calling thread's, in user mode:
 
 | | Linked in | Module |
 | --- | --- | --- |
-| `ui.call_sync("chat.reply_blocks", id)` | 2,359 instructions, 176 ns | 2,407, 179 ns |
-| `ui.call_sync("chat.reply_run", { id, key })` | 7,138 instructions, 567 ns | 7,301, 593 ns |
-| A 2,001-block reply set aside | 3.44 M instructions, 234 µs | 3.81 M, 277 µs |
-| Rebuild after a one-line edit, dev | 3.13 s (the app) | 0.17 s |
-| Rebuild after a one-line edit, release | 101.1 s (the app) | 1.93 s |
+| `ui.call_sync("chat.reply_blocks", id)` | 2,359 instructions, 171 ns | 2,358, 161 ns |
+| `ui.call_sync("chat.reply_run", { id, key })` | 7,138 instructions, 568 ns | 7,013, 554 ns |
+| A 2,001-block reply set aside | 3.45 M instructions, 227 µs | 1.94 M, 152 µs |
+| Rebuild after a one-line edit, dev | 3.13 s (the app) | 0.18 s |
+| Rebuild after a one-line edit, release | 101.1 s (the app) | 2.21 s |
+
+The module reads the app's values where they are, as the app's own code
+does, so the boundary itself costs one indirect call (7 instructions, by
+zgx's `module_call_bench`). It comes out under the linked-in code because
+it reads each block's fields once and borrows the strings the original
+clones, not because of where it is built.
