@@ -592,12 +592,21 @@ impl SessionsEngine {
         &self,
         service: Arc<dyn zeron_rpc::RpcService>,
     ) -> std::io::Result<()> {
+        let data_dir = self.inner.mcp_data_dir();
         let factory: zeron_mcp::http::ToolsFactory = Arc::new(move |origin: &zeron_mcp::Origin| {
             let chat = origin.chat_id.clone().unwrap_or_default();
-            Arc::new(zeron_mcp::Tools::new(Arc::new(zeron_mcp::Zeron::with_client(
+            let zeron = Arc::new(zeron_mcp::Zeron::with_client(
                 zeron_rpc::memory_client(zeron_rpc::agent_service(service.clone(), chat)),
                 origin.clone(),
-            ))))
+            ));
+            let settings = zeron_proto::mcp_settings::AgentTools::for_run(data_dir.as_deref());
+            let tools = zeron_mcp::Tools::new(zeron).with_zeron_enabled(settings.tools);
+            let tools = if settings.computer {
+                tools.with_computer(Arc::new(zeron_mcp::Computer::new()))
+            } else {
+                tools
+            };
+            Arc::new(tools)
         });
         let endpoint = zeron_mcp::http::McpHttpServer::bind(factory).await?;
         *lock(&self.inner.mcp_endpoint) = Some(Arc::new(endpoint));
@@ -3160,9 +3169,16 @@ impl Inner {
             })
     }
 
+    fn mcp_data_dir(&self) -> Option<std::path::PathBuf> {
+        lock(&self.ipc_token_file)
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            .map(std::path::Path::to_owned)
+    }
+
     /// Zeron's own MCP server for a run of `chat_id`, stamped with the
     /// originating chat + device so the agent's side chats link back here.
-    /// None when the engine serves neither its MCP endpoint nor an IPC port.
+    /// None when disabled or when neither endpoint is available.
     ///
     /// With the engine's MCP endpoint up ([`SessionsEngine::serve_mcp_endpoint`]),
     /// the engine serves the tools itself: the run gets a token of its own
@@ -3190,6 +3206,11 @@ impl Inner {
         side_chats_only: bool,
         waits: bool,
     ) -> Option<(zeron_proto::McpServer, Option<zeron_mcp::http::Grant>)> {
+        let data_dir = self.mcp_data_dir();
+        let settings = zeron_proto::mcp_settings::AgentTools::for_run(data_dir.as_deref());
+        if !settings.tools && !settings.computer {
+            return None;
+        }
         let command = crate::managed::mcp_executable()?.to_str()?.to_owned();
         let mut env: std::collections::BTreeMap<String, String> = [
             (zeron_proto::McpServer::CHAT_ID_ENV.to_owned(), chat_id.to_owned()),
@@ -3202,6 +3223,9 @@ impl Inner {
                 zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV.to_owned(),
                 "1".to_owned(),
             );
+        }
+        if let Some(dir) = data_dir.as_deref().and_then(std::path::Path::to_str) {
+            env.insert("ZERON_DATA_DIR".to_owned(), dir.into());
         }
         if waits {
             env.insert(

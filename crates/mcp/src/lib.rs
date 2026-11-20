@@ -16,6 +16,8 @@
 //! environment. Every send from such an agent is then attributed to its
 //! originating chat, and a chat can never message itself.
 
+pub mod computer;
+mod helpers;
 pub mod http;
 mod jsonrpc;
 pub mod proxy;
@@ -23,6 +25,7 @@ mod tools;
 mod transcript;
 mod zeron;
 
+pub use computer::Computer;
 pub use jsonrpc::serve_stdio;
 pub use tools::{ListedTool, ToolDef, Tools};
 pub use transcript::{RenderOptions, RenderedMessage, render_entries};
@@ -65,7 +68,72 @@ impl McpConfig {
 
 /// Run the MCP server on this process's stdin/stdout until stdin closes.
 pub async fn run(config: McpConfig) -> anyhow::Result<()> {
-    let zeron = Zeron::new(config.ipc_port, config.data_dir, config.origin);
-    let tools = Tools::new(std::sync::Arc::new(zeron));
+    let settings = zeron_proto::mcp_settings::AgentTools::for_run(config.data_dir.as_deref());
+    let origin = config.origin.clone();
+    let zeron = std::sync::Arc::new(Zeron::new(config.ipc_port, config.data_dir, config.origin));
+    let mut tools = Tools::new(zeron.clone()).with_zeron_enabled(settings.tools);
+    if settings.computer {
+        let computer = std::sync::Arc::new(Computer::new());
+        if let Some(chat_id) = origin.chat_id {
+            tokio::spawn(watch_turns(
+                zeron.clone(),
+                chat_id,
+                origin.device_id,
+                std::sync::Arc::downgrade(&computer),
+            ));
+        }
+        tools = tools.with_computer(computer);
+    }
     serve_stdio(std::sync::Arc::new(tools)).await
+}
+
+/// Follow this chat's session and end the computer's turn when the
+/// chat stops working — the turn finished, or the user pressed Stop. Long-
+/// lived harness processes (Codex app-server, ACP, Pi) keep this bridge
+/// alive across turns, so without this a running action would outlive Stop
+/// and the agent cursor would linger. Ends with the bridge.
+async fn watch_turns(
+    zeron: std::sync::Arc<Zeron>,
+    chat_id: String,
+    device_id: Option<String>,
+    computer: std::sync::Weak<Computer>,
+) {
+    use zeron_proto::{Session, SessionStatus};
+    const RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+    let mut working = false;
+    loop {
+        if computer.strong_count() == 0 {
+            return;
+        }
+        let mut sessions = match zeron
+            .subscribe(zeron_rpc::methods::WATCH_SESSIONS, serde_json::json!({}))
+            .await
+        {
+            Ok(sessions) => sessions,
+            Err(error) => {
+                tracing::debug!(%error, "computer use: session watch unavailable");
+                tokio::time::sleep(RETRY).await;
+                continue;
+            }
+        };
+        while let Some(item) = sessions.recv().await {
+            let Ok(rows) = serde_json::from_value::<Vec<Session>>(item) else {
+                continue;
+            };
+            let mine = rows.iter().filter(|s| s.chat_id == chat_id);
+            let row = mine
+                .clone()
+                .find(|s| device_id.as_deref() == Some(s.device_id.as_str()))
+                .or_else(|| mine.max_by_key(|s| s.updated_at));
+            let now_working = row.is_some_and(|s| s.status == SessionStatus::Working);
+            if working && !now_working {
+                let Some(computer) = computer.upgrade() else {
+                    return;
+                };
+                computer.turn_ended().await;
+            }
+            working = now_working;
+        }
+        tokio::time::sleep(RETRY).await;
+    }
 }

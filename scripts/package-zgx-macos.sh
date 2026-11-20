@@ -157,6 +157,19 @@ cp "$ROOT/crates/voice/NOTICE.md" "$APP/Contents/Resources/licenses/parakeet-v3.
 # Zeron's icon.
 "$ROOT/scripts/macos-app-icon.sh" "$APP/Contents/Resources"
 
+# Keep the optional computer-use helpers beside the engine so that notarization
+# sees them as nested executables. The driver itself is installed separately.
+"$ROOT/scripts/build-window-indicator.sh" >/dev/null
+for helper in zeron-window-indicator zeron-escape-monitor; do
+  path="$APP/Contents/MacOS/$helper"
+  install -m 755 "$ROOT/target/computer-helpers/$helper" "$path"
+  if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
+    codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$path"
+  else
+    codesign --force --sign - "$path"
+  fi
+done
+
 # Signed inside out: the engine (its identifier), then the bundle that seals
 # it. Hardened runtime and a secure timestamp are notarization's requirements.
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then

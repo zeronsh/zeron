@@ -164,7 +164,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: CREATE_PLUGIN,
-            description: "Create a Zeron plugin on this device: a folder with a manifest (zeron-plugin.json), init.luau to edit, and zeron.luau, the SDK. Zeron signs it as yours and loads it, and re-signs and reloads it as you save; the person allows once, in Zeron, any permissions it asks for. `id` is lowercase letters, digits and dashes (2-40). `permissions` are what the plugin may do (ui.add, ui.change, ui.replace, profile.read, sessions.read, messages.read, account.email, files.read, panel.tabs, pages.add, github, github.write, navigate, compose, draft, network, clipboard, files, web, windows, tools, devices, native, commands: with a manifest `commands` list of programs it runs, as you). The reply links the authoring guide (`guide`): read it before writing.",
+            description: "Scaffold and load a signed Luau plugin (`init.luau`, `zeron-plugin.json`, `zeron.luau`) on this device; Zeron re-signs and reloads on save. Reply returns `guide` (read before coding).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -178,12 +178,12 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: LIST_PLUGINS,
-            description: "Zeron plugins on this device: id, name, status (on, off, pending review, tampered, broken), who made it, and its folder.",
+            description: "List plugins on this device with id, name, status (on, off, pending, tampered, broken), author, and folder.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
             name: PLUGIN_STATUS,
-            description: "Where a Zeron plugin's UI landed, to check your work without a person: its status (on, off, pending review, tampered, broken, and why), what it was allowed, and, from Zeron's window on this device, each zeron.place it made (its selector, how, how many elements it matched and their boxes in the window), what its row in Settings says (a node that needs what its place doesn't give, places this template doesn't have, an error that stopped it) and its pages. With snapshot: true, also a PNG of the window cut to around its nodes (the whole window when none shows): read the file at `snapshot` to look. Edit the plugin, save, and ask again.",
+            description: "Inspect a plugin's status, allowed permissions, live zeron.place matches, Settings errors, and pages. With `snapshot: true`, saves a cropped PNG at `snapshot`.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -195,7 +195,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: INSTALL_PLUGIN,
-            description: "Install someone's Zeron plugin from a .zeron-plugin file (`path`) or a link (`url`): a link to a .zeron-plugin file, a GitHub release (…/releases/latest or …/releases/tag/<tag>, its .zeron-plugin asset), or a git repository (owner/repo, its GitHub page, …/tree/<branch>/<folder>, or any https git URL; `ref` a branch or tag, `folder` where the plugin is in it). Zeron checks the signature over every file first: an unsigned or changed plugin is refused. Whatever you install waits for the person to allow it in Zeron's window, which shows who signed it and what it asks: you can't allow it for them (`waiting` says so). Installing over a plugin already installed is an update, and only when the same key signed both.",
+            description: "Install a signed plugin from a `.zeron-plugin` file (`path`) or `url` (file, GitHub release, or https git repo with optional `ref`/`folder`). Unsigned/tampered packages fail; user must approve in Zeron.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -208,7 +208,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: UPDATE_PLUGIN,
-            description: "Check whether a plugin installed from someone else has a newer version at the source it came from (its file, link, release or repository): its version and what it changes in what the plugin asks (`added`, `removed`); without an id, check every installed plugin. Installing an update is the person's, in Zeron (Settings → Plugins): you can't update it for them, so tell them what you found.",
+            description: "Check whether third-party installed plugins (or one `id`) have newer versions and permission changes at their source. Only checks; the user installs updates in Settings -> Plugins.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -219,7 +219,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: EXPORT_PLUGIN,
-            description: "Share a Zeron plugin: save it as one signed .zeron-plugin file that anyone can install (install_plugin, or Settings → Plugins), e.g. to attach to a GitHub release. Your own plugin is signed again first, so the file matches its folder as it is now; someone else's keeps their signature. It's saved in Zeron's plugin-exports folder as <id>-<version>.zeron-plugin (an earlier export of that version there is replaced). Returns the file's `path` and its size in `bytes`. To save it somewhere else, the person runs `zeron plugin export <id> --to <path>`.",
+            description: "Export a signed `.zeron-plugin` archive into Zeron's plugin-exports folder (`<id>-<version>.zeron-plugin`), re-signing your own plugin first. Returns `path` and `bytes`.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -230,17 +230,17 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: DESCRIBE_ELEMENTS,
-            description: "Where a Zeron plugin can place its nodes: Zeron's named elements, each with its selector (#id or .class), where it is in words, what it is, what it provides to what's placed in it (session, message, file, project, panel; everything has profile, appearance and route), whether the window running now has it (a template may rename or leave out elements), and whether it's stable (kept across Zeron's updates and by every template: place by those where you can). Place with zeron.place { at = \"<selector>\", before | after | replace = function() return <node> end }; selectors also take `#a >> .b` (inside) and role:button \"Name\". In the built node read what's provided with zeron.context(name) (nil where absent) or zeron.need(name) (it draws nothing there, and Settings says why). Records hold only what the plugin was allowed: sessions.read, messages.read, profile.read, account.email, files.read (without it a file is an id of the plugin's own, never its path). The reply links the plugin authoring guide (`guide`).",
+            description: "List Zeron's named UI elements (`#id`, `.class`), context provided (`zeron.context`/`need`), stability, and live window availability for `zeron.place`. Reply includes `guide`.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
             name: LIST_TEMPLATES,
-            description: "Zeron's templates on this device. A template is a whole copy of Zeron's interface (its Luau app: app.luau, screens/, ds/, assets/) that you can rewrite; it inherits Zeron's own for any file it lacks. Each one's id, name, folder, whether it's the one in use, and its status: ok, errors (some files fall back to Zeron's own; template_status says why), out_of_date (made for another version of Zeron: Zeron has updated since; template_status names the files whose Zeron original changed) or broken. Zeron's own comes first. One installed from someone's package (import_template) has `imported` (who signed it); packages waiting for the person to allow them are under `pending`.",
+            description: "List UI templates on this device (status, folder, active flag, imported author, and pending consent packages). Missing files fall back to Zeron's built-in UI.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
             name: CREATE_TEMPLATE,
-            description: "Make a new template on this device: a whole copy of Zeron's interface (or of another template, with `from`) in its own folder, to rewrite. Returns its folder, its files and a short map of the app. Delete any file to inherit Zeron's own. While Zeron is open and the template is in use (use_template), each edit shows live as you save it. A file with an error falls back to Zeron's own for that file, and template_status says why. `id` is lowercase letters, digits and dashes (2-40). The reply links the authoring guide (`guide`): read it before writing.",
+            description: "Copy Zeron's Luau UI (or another template via `from`) into a new template folder; active edits reload live and reply returns `guide`. Delete any file to inherit Zeron's own.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -253,7 +253,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: USE_TEMPLATE,
-            description: "Run Zeron's window with a template: it switches live while Zeron is open. `zeron` is Zeron's own interface. Only templates installed on this device can be used. Unless the person has kept this template in Zeron, it runs as a preview (`preview`): Zeron shows them a bar to Keep or Revert it, and holds back what only a kept template may do until they keep it. You can't keep it for them; ask them to look.",
+            description: "Switch Zeron's window live to an installed template (or `zeron`). Runs as a preview until the user chooses Keep in Zeron.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -264,7 +264,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: TEMPLATE_STATUS,
-            description: "How a template is doing: whether it's in use, the error that broke it (root_error), the files with errors (each falls back to Zeron's own, with the error), the files out of date (Zeron's own has changed since they were copied), how many files it has, and how many it inherits from Zeron.",
+            description: "Inspect a template's active state, `root_error`, per-file errors (falling back to Zeron's own), out-of-date files, and custom vs inherited counts.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -275,7 +275,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: DELETE_TEMPLATE,
-            description: "Delete a template: its folder is set aside in the templates folder's .removed. Deleting the one in use switches the window back to Zeron's own. Zeron's own can't be deleted.",
+            description: "Remove a template into `.removed` (cannot delete `zeron`). If active, the window switches back to `zeron`.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -286,12 +286,12 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: DESCRIBE_APP,
-            description: "What Zeron's interface is made of, to find your way in a template: its screens (each one's module, file, what it draws, and the elements it names: #ids and .classes, which plugins place by; keep them to keep plugins working) and a short map of the app's folders. For where plugins can place in the window running now, use describe_elements. The reply links the template authoring guide (`guide`).",
+            description: "Map Zeron's template app folders, screens, files, and named `#id`/`.class` selectors plugins target; reply includes `guide`. Use `describe_elements` for the live window.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
             name: EXPORT_TEMPLATE,
-            description: "Share a template: save it as one signed .zeron-template file, signed with this device's key (the person's Zeron account vouches for it, as for their plugins). It holds the template's own files and its preview; the files no template may replace (screens/plugins, screens/templates, account/, .luaurc) are left out. Zeron's own can't be exported. It's saved in Zeron's exports folder (an earlier export of it there is replaced). Returns the file's path, how many files it holds and the key that signed it.",
+            description: "Export a template (excluding `zeron` and protected system files) as a signed `.zeron-template` file in Zeron's exports folder. Returns `path`, file count, and signing key.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -302,7 +302,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: IMPORT_TEMPLATE,
-            description: "Install a template from a .zeron-template file (`path`) or a link (`url`: to a .zeron-template file, or a GitHub repository or release with one; a template from a link is checked there for updates). Zeron checks its signature over every file first: an unsigned or changed package is refused. One signed on this device installs at once (using it still runs as a preview until the person keeps it). Anyone else's waits for the person: a template runs as Zeron's own code with all its powers, so they must allow it in Zeron's window (Templates shows it waiting, with who signed it); you can't allow it for them. The reply says which: `installed` (its id), or `pending` with `needs_consent`. Files no template may replace are never installed (`ignored` names them). list_templates shows it once installed.",
+            description: "Install a signed `.zeron-template` from `path` or `url` (file, GitHub repo, or release). Self-signed installs immediately (as preview); others wait for user consent in Zeron.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -361,6 +361,11 @@ impl Tools {
     /// tools. Without an engine (or one without plugins) it is the static
     /// catalog alone.
     pub async fn list_all(&self) -> Vec<ListedTool> {
+        // chat tools turned off in Settings turn plugin tools off too
+        // (`call` refuses everything but computer use then).
+        if !self.zeron_enabled() {
+            return Vec::new();
+        }
         let mut tools: Vec<ListedTool> = self.list().into_iter().map(ListedTool::from).collect();
         let reply = tokio::time::timeout(
             LIST_TIMEOUT,
@@ -392,6 +397,9 @@ impl Tools {
     /// client last saw. Returns when the engine has no such method, or when
     /// `changed` closes.
     pub async fn watch_plugin_tools(&self, changed: mpsc::Sender<()>) {
+        if !self.zeron_enabled() {
+            return;
+        }
         let mut retry = FIRST_RETRY;
         loop {
             match self

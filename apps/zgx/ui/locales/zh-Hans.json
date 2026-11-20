@@ -1212,6 +1212,26 @@
         "cloud": "Cloud 始终启用",
         "on": "智能体的提交会将 zeronsh[bot] 添加为共同作者"
       },
+      "agent_tools": {
+        "title": "智能体工具",
+        "description": "适用于此设备上新启动的智能体。不会影响其他 MCP 服务器。",
+        "enabled": {
+          "label": "Zeron MCP",
+          "description": "允许智能体使用选中的内置工具。关闭后，新智能体将不再连接 Zeron MCP 服务器。"
+        },
+        "tools": {
+          "label": "聊天与可视化工具",
+          "description": "允许智能体管理 Zeron 聊天、委派任务并展示可视化内容。"
+        },
+        "computer": {
+          "label": "电脑操控",
+          "description": "允许智能体读取和操控此 Mac 上的应用。需要安装 CuaDriver.app 并授予 macOS 隐私权限。"
+        },
+        "awake": {
+          "label": "保持 Mac 唤醒",
+          "description": "本机智能体工作时，即使合盖也不会进入系统睡眠。空闲 20 秒后恢复正常睡眠。初次设置需要管理员授权。"
+        }
+      },
       "keep_running": {
         "label": "退出后让 Zeron 继续运行",
         "on": "对话会继续进行，其他设备也能访问它们。",

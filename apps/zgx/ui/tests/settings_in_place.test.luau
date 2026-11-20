@@ -63,6 +63,23 @@ test("the pages list under Personal, Devices and Organization", function()
 	expect(shows(app, PAGE, "Credit Zeron in commits")).to_be(true)
 end)
 
+test("the Zeron MCP switch remembers its tool groups", function()
+	local app = open()
+	local switch = `{PAGE} >> role:switch "Zeron MCP"`
+	local tools = `{PAGE} >> role:switch "Chat and visual tools"`
+	expect(app:has(switch)).to_be(true)
+	app:scroll(PAGE, 420)
+	app:frames(5)
+	app:click(tools)
+	app:frames(5)
+	app:click(switch)
+	app:frames(5)
+	expect(app:tree(switch)).to_contain("unchecked")
+	app:click(switch)
+	app:frames(5)
+	expect(app:tree(tools)).to_contain("unchecked")
+end)
+
 test("the search finds a page and a setting, and opens the setting's page at it", function()
 	local app = open()
 	app:type(`{NAV} >> #settings-search`, "task completed")

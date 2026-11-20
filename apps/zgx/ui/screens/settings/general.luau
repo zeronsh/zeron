@@ -15,6 +15,7 @@ local prefs = require("@app/screens/settings/prefs")
 local search = require("@app/screens/settings/search")
 local visits = require("@app/screens/settings/visits")
 local chat = require("@app/screens/chat/store")
+local mac = ui.shared("platform", ""):peek() == "macos"
 local language = require("@app/screens/language")
 
 local M = {}
@@ -22,7 +23,7 @@ local M = {}
 M.ID = "general"
 M.TITLE = "General"
 
-search.index(M.ID, ui.t("settings.general.title"), ui.t("settings.general.terms"), {
+local index = {
 	{ key = "language", title = ui.t("settings.general.language.label"), terms = ui.t("settings.general.language.terms") },
 	{ key = "send_with", title = ui.t("settings.general.send_with.label"), terms = ui.t("settings.general.send_with.terms") },
 	{ key = "compact_mode", title = ui.t("settings.general.compact_mode.label"), terms = ui.t("settings.general.compact_mode.terms") },
@@ -34,7 +35,11 @@ search.index(M.ID, ui.t("settings.general.title"), ui.t("settings.general.terms"
 	{ key = "thread_naming", title = ui.t("settings.general.thread_naming.label"), terms = ui.t("settings.general.thread_naming.terms") },
 	{ key = "worktrees", title = ui.t("settings.general.worktrees.label"), section = ui.t("settings.general.git"), terms = ui.t("settings.general.worktrees.terms") },
 	{ key = "commit_credit", title = ui.t("settings.general.commit_credit.label"), section = ui.t("settings.general.git"), terms = ui.t("settings.general.commit_credit.terms") },
-})
+}
+for _, key in (if mac then { "enabled", "tools", "computer", "awake" } else { "enabled", "tools" }) do
+	table.insert(index, { key = key, title = ui.t(`settings.general.agent_tools.{key}.label`), terms = ui.t(`settings.general.agent_tools.{key}.description`) })
+end
+search.index(M.ID, ui.t("settings.general.title"), ui.t("settings.general.terms"), index)
 
 -- The engine's settings for this Mac, as last heard: nil until asked.
 type Credit = { enabled: boolean, cloud: boolean? }
@@ -90,7 +95,12 @@ local function set_keep_local(on: boolean)
 	end)
 end
 
+local tool_settings = ui.state("agent_tool_settings", nil :: { [string]: boolean }?)
+local awake = ui.state("keep_awake", nil :: any)
+local function got_awake(v: any) awake:set(v) end
 local function load_all()
+	host.call("settings.agent_tools.get"):after(function(v: any) tool_settings:set(v) end, function() tool_settings:set(nil) end)
+	if mac then host.call("settings.awake.get"):after(got_awake, function() awake:set(nil) end) end
 	host.call("account.keeps_chats_local"):after(function(on: any)
 		keep_local:set(on == true)
 	end, function() end)
@@ -229,6 +239,52 @@ local function row(key: string, props: any): Node
 	return search.anchor(key, ds.Settings.Row(props))
 end
 
+local function tool_row(key: string): Node
+	local label = ui.t(`settings.general.agent_tools.{key}.label`)
+	return row(key, {
+		label = label,
+		description = ui.t(`settings.general.agent_tools.{key}.description`),
+		control = engine_switch(label, function()
+			local current = tool_settings:get()
+			return current and current[key]
+		end, function(on: boolean)
+			local before = tool_settings:peek()
+			tool_settings:set(nil)
+			host.call("settings.agent_tools.set", { key = key, enabled = on }):after(function(v: any)
+				tool_settings:set(v)
+			end, function(err: any)
+				tool_settings:set(before)
+				toast.show { title = ui.t("settings.engine.couldnt_save"):get(), body = says(err.message):get(), tone = "danger" }
+			end)
+		end, function()
+			local current = tool_settings:get()
+			return current == nil or (key ~= "enabled" and not current.enabled)
+		end),
+	})
+end
+
+local function awake_row(): Node
+	local label = ui.t("settings.general.agent_tools.awake.label")
+	return row("awake", {
+		label = label,
+		description = function()
+			local v = awake:get()
+			return if v and v.error then v.error else ui.t("settings.general.agent_tools.awake.description"):get()
+		end,
+		control = engine_switch(label, function()
+			local v = awake:get()
+			return v and v.enabled
+		end, function(on: boolean)
+			local before = awake:peek()
+			awake:set(nil)
+			host.call("settings.awake.set", { enabled = on }):after(got_awake, function(err: any)
+				awake:set(before)
+				toast.show { title = ui.t("settings.engine.couldnt_save"):get(), body = err.message, tone = "danger" }
+			end)
+		end, function() return awake:get() == nil end),
+	})
+end
+
 function M.view(): Node
 	visits.once("general", function()
 		load_all()
@@ -297,6 +353,14 @@ function M.view(): Node
 						return background:get() == nil
 					end),
 				}),
+				if mac then awake_row() else nil,
+			},
+		},
+		ds.Settings.Section {
+			title = ui.t("settings.general.agent_tools.title"),
+			description = ui.t("settings.general.agent_tools.description"),
+			ds.Settings.Group {
+				tool_row("enabled"), tool_row("tools"), if mac then tool_row("computer") else nil,
 			},
 		},
 		ds.Settings.Section {

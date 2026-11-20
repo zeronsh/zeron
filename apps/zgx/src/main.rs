@@ -53,6 +53,8 @@ mod heap;
 mod images;
 mod intro_handoff;
 mod links;
+#[cfg(target_os = "macos")]
+mod keep_awake;
 mod pasted;
 mod math;
 mod menu_bar;
@@ -388,6 +390,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // Quitting: an update downloaded and never restarted for installs now,
     // so the next launch is on it (src/about.rs).
+    #[cfg(target_os = "macos")]
+    keep_awake::shutdown();
     about::install_on_quit();
     // Reload Zeron: the windows closed, a fresh launch in this one's place.
     relaunch::after_quit();
@@ -861,6 +865,8 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         visuals::install(cx, &host);
         // Settings' account, organization and engine calls (src/settings.rs).
         settings::install(cx, &host);
+        #[cfg(target_os = "macos")]
+        keep_awake::install(&host);
         // The installed fonts, for Settings → Appearance's font pickers
         // (src/fonts.rs).
         fonts::install(&host);

@@ -77,6 +77,8 @@ pub const BLOCKED: &[&str] = &[
     "chat.remove_held",
     // (Only one that says what an agent may do unasked: `chat.configure`.)
     "chat.configure",
+    "settings.agent_tools.set",
+    "settings.awake.set",
     "agents.install",
     "agents.set_key",
     // (An API key, and what an agent's keys are called.)

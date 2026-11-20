@@ -1118,7 +1118,13 @@ impl Sessions {
         let stale = self.live_rows.borrow().stale.next_after(now);
         let offline = next_offline(&self.devices.borrow(), self.here.borrow().as_deref(), now);
         let wake = self.wakes.borrow().next_after(now);
-        let Some(at) = stale.into_iter().chain(offline).chain(wake).min() else { return };
+        #[cfg(not(target_os = "macos"))]
+        let awake: Option<i64> = None;
+        #[cfg(target_os = "macos")]
+        let awake = crate::keep_awake::observe(
+            self.here.borrow().as_deref(), self.live_rows.borrow().by_chat.values().flatten(), now,
+        );
+        let Some(at) = stale.into_iter().chain(offline).chain(wake).chain(awake).min() else { return };
         // (One sooner is already set; it looks again for this one then.)
         if self.due.get().is_some_and(|due| due <= at) {
             return;
