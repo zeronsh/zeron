@@ -636,13 +636,29 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- Regular's second line: where it runs (what its group doesn't say),
 	-- then its branch, as the view shows them (ds/session_row's rule, the
 	-- panel home's lists' too).
+	-- (Chats named alike, by title: each is told apart by where it runs, by
+	-- its id and nothing else, in a compact row too. See `alike`.)
+	local alike_titles = ui.computed(function(): { [string]: number }
+		local count: { [string]: number } = {}
+		for _, s in index:get().by_id do
+			local t = string.lower(s.title)
+			count[t] = (count[t] or 0) + 1
+		end
+		return count
+	end)
+	local function alike(s: Session): boolean
+		return (alike_titles:get()[string.lower(s.title)] or 0) > 1
+	end
 	local function detail(s: Session, by: Organize): string
 		local p = project_of(s.id)
-		return SessionRow.detail(if p then p.name else nil, s.device, s.branch, by, details.location:get(), details.branch:get())
+		-- (A chat sharing its title shows where it runs, whatever the view
+		-- shows: else the rows read the same.)
+		return SessionRow.detail(if p then p.name else nil, s.device, s.branch, by, details.location:get() or alike(s), details.branch:get())
 	end
-	-- A session's height: regular, two lines while it has a second to show.
+	-- A session's height: regular, two lines while it has a second to show
+	-- (a compact row too while its title is another's).
 	local function session_h(s: Session, by: Organize): number
-		if compact:get() or detail(s, by) == "" then
+		if (compact:get() and not alike(s)) or detail(s, by) == "" then
 			return SLOT
 		end
 		return TALL
@@ -1203,7 +1219,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- The session as it stands: what the row shows of it follows it.
 		local cur = now_of(s)
 		local function second_line(): boolean
-			return not compact:get() and detail(cur(), by) ~= ""
+			return (not compact:get() or alike(cur())) and detail(cur(), by) ~= ""
 		end
 		-- Regular's second line: where it runs, and on what (its branch's
 		-- glyph leading while the branch shows).
