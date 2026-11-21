@@ -688,7 +688,7 @@ function M.Nav(props: NavProps): Node
 				color = function()
 					return if on() then "$text.primary" else "$text.secondary"
 				end,
-				hover = { color = "$text.primary" },
+				hover = { color = "$text.primary", bg = if lead_row then "$hover" else nil },
 				focus = { outline = "$zeron.focus.width", outline_color = "$zeron.focus.ring", outline_offset = -2 },
 				on_click = function()
 					if props.on_choose then
