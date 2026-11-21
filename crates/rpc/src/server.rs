@@ -390,7 +390,7 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>, tokens
                     inner: service,
                     chat,
                     pinned: false,
-                }),
+                }) as Arc<dyn RpcService>,
                 "agent",
                 chat_claimed,
             )
