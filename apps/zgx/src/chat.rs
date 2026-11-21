@@ -544,25 +544,33 @@ fn reply_module_path() -> Option<std::path::PathBuf> {
 /// hold let go.
 #[derive(Clone)]
 struct ReplyModule {
-    set_aside: Rc<dyn Fn(Value) -> Value>,
-    release: Rc<dyn Fn(Value)>,
+    set_aside: zgx_script::RegisteredFunction,
+    release: zgx_script::RegisteredAction,
 }
 
 /// The module's hold on a reply set aside, let go with the row that had it.
 struct ModuleHold {
     hold: Value,
-    release: Rc<dyn Fn(Value)>,
+    release: zgx_script::RegisteredAction,
 }
 impl Drop for ModuleHold {
     fn drop(&mut self) {
-        (self.release)(std::mem::take(&mut self.hold));
+        if let Err(error) = (self.release)(std::mem::take(&mut self.hold)) {
+            eprintln!("zeron-zgx: {error}");
+        }
     }
 }
 
 impl ReplyModule {
-    /// `set_aside`, by the module.
+    /// `set_aside`, by the module; as it was if the module can't.
     fn set_aside(&self, row: Value) -> (Value, Option<ModuleHold>) {
-        let answer = (self.set_aside)(row.clone());
+        let answer = match (self.set_aside)(row.clone()) {
+            Ok(answer) => answer,
+            Err(error) => {
+                eprintln!("zeron-zgx: {error}");
+                return (row, None);
+            }
+        };
         match (answer.field("row"), answer.field("hold")) {
             (Some(kept), Some(hold)) => {
                 (kept.clone(), Some(ModuleHold { hold: hold.clone(), release: self.release.clone() }))
