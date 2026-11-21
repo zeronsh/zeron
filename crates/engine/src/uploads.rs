@@ -756,6 +756,11 @@ fn sanitize(file_name: &str) -> String {
     }
 }
 
+/// Whether an attachment ref (a path or `pending://id/name`) names a picture.
+pub(crate) fn names_an_image(reference: &str) -> bool {
+    mime_by_ext(Path::new(reference)).is_some()
+}
+
 fn mime_by_ext(path: &Path) -> Option<&'static str> {
     match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
         "png" => Some("image/png"),
