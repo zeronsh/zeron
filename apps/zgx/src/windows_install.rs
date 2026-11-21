@@ -19,7 +19,7 @@ use std::path::Path;
 
 use zeron_update::windows::{self, Completion};
 
-use crate::about::APP_VERSION;
+use crate::about::app_version;
 
 /// Why this launch can't go on, as `main`'s error: said as written
 /// ("Error: …"), exit status 1.
@@ -51,7 +51,7 @@ pub fn complete_if_needed(argv: &[String]) -> Result<(), Failed> {
     let Ok(exe) = std::env::current_exe() else {
         return Ok(());
     };
-    let Some(directory) = windows::incomplete_install(&exe, APP_VERSION) else {
+    let Some(directory) = windows::incomplete_install(&exe, app_version()) else {
         return Ok(());
     };
     // A window launch: nothing, a link, or the update's relaunch.
@@ -80,7 +80,7 @@ fn complete(directory: &Path) -> Result<Completion, String> {
         .build()
         .map_err(|error| error.to_string())?;
     runtime
-        .block_on(windows::complete_install(zeron_cli::DEFAULT_EDGE_URL, directory, APP_VERSION))
+        .block_on(windows::complete_install(zeron_cli::DEFAULT_EDGE_URL, directory, app_version()))
         .map_err(|error| format!("{error:#}"))
 }
 

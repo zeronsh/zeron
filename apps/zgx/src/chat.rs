@@ -536,8 +536,13 @@ pub(crate) fn reply_run_of(arg: &Value) -> Value {
 /// one: `ZERON_ZGX_REPLY_MODULE=<its library>`. Else, and for any other
 /// value, the code here.
 fn reply_module_path() -> Option<std::path::PathBuf> {
-    let path = std::path::PathBuf::from(std::env::var_os("ZERON_ZGX_REPLY_MODULE")?);
-    path.is_file().then_some(path)
+    if let Some(path) = std::env::var_os("ZERON_ZGX_REPLY_MODULE") {
+        let path = std::path::PathBuf::from(path);
+        return path.is_file().then_some(path);
+    }
+    // An install's bundle carries it (already checked against its manifest).
+    let bundle = crate::bundle()?;
+    bundle.modules.iter().find(|(name, _)| name == "reply").map(|(_, library)| library.clone())
 }
 
 /// The reply module's two doors for this file: a row set aside, and its

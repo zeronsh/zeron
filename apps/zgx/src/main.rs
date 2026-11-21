@@ -239,7 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (This app's own version for crates/update, before `zeron update` or
     // the app's updater compares releases with it: a beta's isn't the
     // workspace's.)
-    zeron_update::set_app_version(about::APP_VERSION);
+    zeron_update::set_app_version(about::app_version());
     // The Zeron app's updater follows the channel on record on every
     // platform, a stable build's too (crates/update `follows_channels`).
     #[cfg(feature = "beta")]
@@ -252,12 +252,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         windows_install::complete_if_needed(&argv)?;
         if let Some(dir) = std::env::current_exe().ok().as_deref().and_then(zeron_update::windows::install_directory) {
             zeron_launch::set_full_app_engine(
-                zeron_update::windows::version_files(&dir, about::APP_VERSION).join("engine").join("zeron.exe"),
+                zeron_update::windows::version_files(&dir, about::app_version()).join("engine").join("zeron.exe"),
             );
         }
     }
     if cfg!(feature = "beta") || !dev_launch(&argv[1..]) {
-        match zeron_cli::run(about::APP_VERSION, zeron_cli::Engines::Helper) {
+        match zeron_cli::run(about::app_version(), zeron_cli::Engines::Helper) {
             zeron_cli::Launch::Done(result) => {
                 // (Its error is `main`'s: "Error: …", exit status 1.)
                 return result.map_err(Into::into);
@@ -672,7 +672,7 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     // A long chat's heap, past 32 MB, collected aiming for 150% of what's in
     // use rather than Luau's double: its rows' nodes, which the collector
     // can't see the size of, go sooner (zgx #1837, the carry it replaces).
-    let host = plugins::lend_design_system(ScriptHost::new(&cx.ui.runtime, path).app_id(APP_ID).large_heap_goal(150), &lent);
+    let host = plugins::lend_design_system(ui_host(&cx.ui.runtime, path).app_id(APP_ID).large_heap_goal(150), &lent);
     // The network, for `ui.fetch` and remote images: the app's scripts, and
     // plugins granted "network" (zgx's own transport; a plugin without the
     // grant reaches none).
@@ -1364,6 +1364,9 @@ fn bundled_ui() -> Option<PathBuf> {
     static BUNDLED: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     BUNDLED
         .get_or_init(|| {
+            if let Some(bundle) = bundle() {
+                return Some(bundle.ui.clone());
+            }
             let exe = std::env::current_exe().ok()?;
             let dir = exe.parent()?;
             let ui = if cfg!(target_os = "macos") {
@@ -1378,10 +1381,66 @@ fn bundled_ui() -> Option<PathBuf> {
         .clone()
 }
 
+/// The bundle this executable was installed with (`zgx build`'s: its
+/// scripts as bytecode, its native modules, its version), checked against
+/// its manifest as it is opened: beside it on Linux, `Contents/Resources`
+/// on macOS. None for a build run from its checkout, or on Windows (whose
+/// install doesn't carry one yet). One that doesn't check out stops the app.
+pub(crate) fn bundle() -> Option<&'static zgx_script::app_bundle::Opened> {
+    static BUNDLE: std::sync::OnceLock<Option<zgx_script::app_bundle::Opened>> = std::sync::OnceLock::new();
+    BUNDLE
+        .get_or_init(|| {
+            if cfg!(windows) {
+                return None;
+            }
+            let exe = std::env::current_exe().ok()?;
+            let dir = exe.parent()?;
+            let root = if cfg!(target_os = "macos") { dir.parent()?.join("Resources") } else { dir.to_path_buf() };
+            if !zgx_script::app_bundle::is_bundle(&root) {
+                return None;
+            }
+            match zgx_script::app_bundle::open(&root) {
+                Ok(opened) => {
+                    if std::env::var_os("ZGX_BUNDLE_TIMING").is_some() {
+                        eprintln!(
+                            "zeron-zgx: bundle checked in {:.2} ms ({})",
+                            opened.checked_in.as_secs_f64() * 1e3,
+                            if opened.hashed { "hashed" } else { "known" }
+                        );
+                    }
+                    Some(opened)
+                }
+                Err(why) => {
+                    eprintln!("zeron-zgx: {why}");
+                    std::process::exit(1);
+                }
+            }
+        })
+        .as_ref()
+}
+
+/// A host for the script at `path` under `ui/`: from the bundle's folder, as
+/// its build compiled it, where the app was installed with one; else from
+/// the disk, as source.
+pub(crate) fn ui_host(runtime: &zgx::reactive::Runtime, path: PathBuf) -> ScriptHost {
+    match bundle() {
+        Some(bundle) if path.starts_with(&bundle.ui) => {
+            let entry = path.strip_prefix(&bundle.ui).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+            ScriptHost::from_files(
+                runtime,
+                zgx_script::ScriptFiles::Folder(bundle.ui.clone()),
+                &entry,
+                zgx_script::Code::VerifiedBytecode,
+            )
+        }
+        _ => ScriptHost::new(runtime, path),
+    }
+}
+
 /// This version's own folder beside the executable on Windows.
 fn windows_version_files(dir: &std::path::Path) -> Option<PathBuf> {
     #[cfg(windows)]
-    return Some(zeron_update::windows::version_files(dir, about::APP_VERSION));
+    return Some(zeron_update::windows::version_files(dir, about::app_version()));
     #[cfg(not(windows))]
     {
         let _ = dir;

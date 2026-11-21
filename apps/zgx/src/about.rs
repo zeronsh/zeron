@@ -43,8 +43,12 @@ use zgx_script::{ScriptHost, Shared, Value};
 
 use crate::engine::{self, rpc::Watch};
 
-/// This app's version: a beta build's own (`0.2.136-beta.1`), else Zeron's.
-pub const APP_VERSION: &str = env!("ZERON_APP_VERSION");
+/// This app's version: its bundle's (the manifest `zgx build` wrote beside
+/// it, which a release sets), else a beta build's own (`0.2.136-beta.1`),
+/// else Zeron's.
+pub fn app_version() -> &'static str {
+    crate::bundle().map_or(env!("ZERON_APP_VERSION"), |bundle| bundle.version.as_str())
+}
 
 #[derive(Default)]
 struct About {
@@ -126,12 +130,12 @@ impl Desktop {
             return None;
         }
         let data_dir = engine::data_dir()?;
-        zeron_update::set_app_version(APP_VERSION);
+        zeron_update::set_app_version(app_version());
         zeron_update::channel::set_data_dir(&data_dir);
         // A beta's first launch puts this computer on the beta channel (once per
         // build: a later choice of Stable in it sticks).
-        if zeron_update::Channel::of_version(APP_VERSION) == Channel::Beta {
-            match zeron_update::channel::claim_for_beta_build(&data_dir, APP_VERSION) {
+        if zeron_update::Channel::of_version(app_version()) == Channel::Beta {
+            match zeron_update::channel::claim_for_beta_build(&data_dir, app_version()) {
                 Ok(true) => eprintln!("zeron-zgx: updates: this computer now gets beta updates"),
                 Ok(false) => {}
                 Err(error) => eprintln!("zeron-zgx: updates: couldn't claim the beta channel: {error}"),
@@ -177,7 +181,7 @@ impl Desktop {
         // is on disk already, and only wants reopening on (`moved_on_to`).
         if let InstallKind::MacApp { bundle } = &self.install
             && let Some(on_disk) = zeron_update::bundle_app_version(bundle)
-            && already_there(&on_disk, &latest, APP_VERSION)
+            && already_there(&on_disk, &latest, app_version())
         {
             return None;
         }
@@ -372,7 +376,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
                 // Its engine already updated this Mac, from another device: the
                 // new bundle is on disk, so this window only has to reopen on it.
                 // (The engine is new already, and stays up.)
-                let moved_on = moved_on_to(&a.status.borrow(), APP_VERSION);
+                let moved_on = moved_on_to(&a.status.borrow(), app_version());
                 if let (Some(version), InstallKind::MacApp { bundle }) = (moved_on, &desktop.install) {
                     zeron_update::relaunch_after_exit(std::path::Path::new("/usr/bin/open"), bundle);
                     if let Some(windows) = a.windows.borrow().as_ref() {
@@ -554,7 +558,7 @@ impl About {
         };
         let checked_at = theirs.max(ours);
         let mut fields = vec![
-            ("app_version", Value::from(APP_VERSION)),
+            ("app_version", Value::from(app_version())),
             ("app_build", Value::from(app_build().as_str())),
             ("available", Value::Bool(self.available())),
             ("self_updating", Value::Bool(false)),
@@ -566,7 +570,7 @@ impl About {
             fields.retain(|(key, _)| !matches!(*key, "self_updating" | "channels" | "switch" | "flow"));
             desktop.fields(&mut fields);
             if matches!(desktop.install, InstallKind::MacApp { .. })
-                && let Some(version) = moved_on_to(&status, APP_VERSION)
+                && let Some(version) = moved_on_to(&status, app_version())
             {
                 fields.push(("moved_on_to", Value::from(version.as_str())));
             }
@@ -668,7 +672,7 @@ mod tests {
         let value = about.value();
         assert!(!value.field("self_updating").is_some_and(Value::truthy));
         assert!(!value.field("channels").is_some_and(Value::truthy));
-        assert_eq!(value.field("app_version").map(|v| v.to_json()).as_deref(), Some(format!("\"{APP_VERSION}\"").as_str()));
+        assert_eq!(value.field("app_version").map(|v| v.to_json()).as_deref(), Some(format!("\"{}\"", app_version()).as_str()));
     }
 
     #[test]

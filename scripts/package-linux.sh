@@ -22,6 +22,14 @@
 # a stable release from before that isn't.
 # Without them: the old app (apps/zeron), kept for a release that has to go
 # back to it.
+#
+# With ZGX_BUNDLE=1 as well (zgx's runtime work; production doesn't use it
+# yet), the app as zgx's runtime and a bundle: its binary built only when its
+# Rust changed (cached by a hash of every tracked file but its scripts,
+# builtin plugins and modules, in $ZGX_CACHE/runtimes), built without its
+# version, which the bundle's manifest carries; its scripts compiled to
+# bytecode and its native modules taken from zgx's cache or built, by `zgx
+# build` ($ZGX, the zgx tool, else `zgx` on PATH).
 
 set -euo pipefail
 
@@ -62,11 +70,48 @@ if [[ -n "$ZGX_VERSION" ]]; then
   # A workspace of its own (its own lock, patches). Built from its folder:
   # cargo reads .cargo/config.toml by where it runs, not by the manifest, and
   # the build's flags are there (Luau's NDEBUG), as scripts/package-zgx-macos.sh.
-  (cd "$ROOT/apps/zgx" && ZERON_BETA_VERSION="$ZGX_VERSION" cargo build --release --locked --features beta \
-    --manifest-path "$ROOT/apps/zgx/Cargo.toml" --target-dir "$ROOT/apps/zgx/target")
-  BIN="$ROOT/apps/zgx/target/release/zeron-zgx"
-  [[ "$("$BIN" --version)" == "zeron $ZGX_VERSION" ]] ||
-    { echo "$BIN isn't the $ZGX_VERSION app (it says '$("$BIN" --version)')" >&2; exit 1; }
+  if [[ -n "${ZGX_BUNDLE:-}" ]]; then
+    # The runtime: Zeron's binary, by a key of everything it's built from.
+    ZGX_CACHE="${ZGX_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/zgx}"
+    started=$(date +%s.%N)
+    key=$(python3 - "$ROOT" <<'KEY'
+import hashlib, os, subprocess, sys
+root = sys.argv[1]
+files = subprocess.run(["git", "ls-files", "-z"], cwd=root, capture_output=True, check=True).stdout.split(b"\0")
+shipped = (b"apps/zgx/ui/", b"apps/zgx/plugins-builtin/", b"apps/zgx/modules/")
+hasher = hashlib.sha256()
+hasher.update(subprocess.run(["rustc", "-vV"], capture_output=True, check=True).stdout)
+hasher.update(b"release beta\0")
+for name in sorted(files):
+    if not name or name.startswith(shipped):
+        continue
+    try:
+        with open(os.path.join(root, name.decode()), "rb") as file:
+            data = file.read()
+    except (FileNotFoundError, IsADirectoryError):
+        data = b"<none>"
+    hasher.update(name + b"\0" + len(data).to_bytes(8, "little") + data)
+print(hasher.hexdigest()[:32])
+KEY
+)
+    cached="$ZGX_CACHE/runtimes/zeron-zgx/$key/zeron-zgx"
+    if [[ -x "$cached" ]]; then
+      echo "runtime: unchanged ($key), keyed in $(echo "$(date +%s.%N) - $started" | bc) s"
+    else
+      echo "runtime: building ($key)"
+      (cd "$ROOT/apps/zgx" && cargo build --release --locked --features beta \
+        --manifest-path "$ROOT/apps/zgx/Cargo.toml" --target-dir "$ROOT/apps/zgx/target")
+      mkdir -p "$(dirname "$cached")"
+      cp "$ROOT/apps/zgx/target/release/zeron-zgx" "$cached.$$" && mv "$cached.$$" "$cached"
+    fi
+    BIN="$cached"
+  else
+    (cd "$ROOT/apps/zgx" && ZERON_BETA_VERSION="$ZGX_VERSION" cargo build --release --locked --features beta \
+      --manifest-path "$ROOT/apps/zgx/Cargo.toml" --target-dir "$ROOT/apps/zgx/target")
+    BIN="$ROOT/apps/zgx/target/release/zeron-zgx"
+    [[ "$("$BIN" --version)" == "zeron $ZGX_VERSION" ]] ||
+      { echo "$BIN isn't the $ZGX_VERSION app (it says '$("$BIN" --version)')" >&2; exit 1; }
+  fi
   # Luau without its asserts (a fifth of script time): zgx-script compiles its
   # warning about them in only when they're on (cfg luau_asserts).
   if LC_ALL=C grep -aq "Luau was built with its asserts" "$BIN"; then
@@ -117,10 +162,25 @@ install -m 644 "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$STAGE/"
 mkdir -p "$STAGE/licenses/fonts"
 cp "$ROOT/assets/fonts/licenses/"* "$STAGE/licenses/fonts/"
 cp "$ROOT/crates/voice/NOTICE.md" "$STAGE/licenses/parakeet-v3.txt"
+if [[ -n "$ZGX_VERSION" && -n "${ZGX_BUNDLE:-}" ]]; then
+  # The scripts as `zgx build` writes them: the folder as shipped below,
+  # with a zgx.json naming the app, its version and its modules.
+  APP="$OUT_DIR/.app"
+  rm -rf "$APP" "$OUT_DIR/.bundle"
+  rsync -a --exclude '.zgx/' --exclude '/tests/' --exclude '.lock' --exclude '.DS_Store' \
+    "$ROOT/apps/zgx/ui/" "$APP/"
+  printf '{ "app_id": "zeron", "version": "%s", "modules": { "reply": "%s" } }\n' \
+    "$ZGX_VERSION" "$ROOT/apps/zgx/modules/reply" >"$APP/zgx.json"
+  "${ZGX:-zgx}" build --out "$OUT_DIR/.bundle" --version "$ZGX_VERSION" "$APP"
+  cp -r "$OUT_DIR/.bundle/manifest.json" "$OUT_DIR/.bundle/ui" "$OUT_DIR/.bundle/modules" "$STAGE/"
+  rm -rf "$APP" "$OUT_DIR/.bundle"
+  [[ "$("$STAGE/zeron" --version)" == "zeron $ZGX_VERSION" ]] ||
+    { echo "$STAGE/zeron isn't the $ZGX_VERSION app (it says '$("$STAGE/zeron" --version)')" >&2; exit 1; }
+fi
 if [[ -n "$ZGX_VERSION" ]]; then
   # The scripts and Zeron's own plugins, as scripts/package-zgx-macos.sh: read
   # beside the binary. Not zgx's generated types or the tests.
-  rsync -a --exclude '.zgx/' --exclude '/tests/' --exclude '.lock' --exclude '.DS_Store' \
+  [[ -n "${ZGX_BUNDLE:-}" ]] || rsync -a --exclude '.zgx/' --exclude '/tests/' --exclude '.lock' --exclude '.DS_Store' \
     "$ROOT/apps/zgx/ui/" "$STAGE/ui/"
   rsync -a --exclude '.zgx/' --exclude '.DS_Store' \
     "$ROOT/apps/zgx/plugins-builtin/" "$STAGE/plugins-builtin/"

@@ -64,3 +64,38 @@ zgx's values have types of its own on this pin (`Str`, `List`, `Map`,
 (104 lines in 12 files; zgx's `docs/design/runtime.md` appendix has each
 pattern). A `Str` is not an `Rc<str>`: what keeps a value's string here
 keeps a `Str`, and nothing in `src/` turns one into the other.
+
+## Releases without a Rust build
+
+On this branch, `scripts/package-linux.sh` with `ZGX_BUNDLE=1` packages the
+app as zgx's runtime and a bundle (zgx's `docs/modules.md`, `zgx build`):
+
+- The binary is built only when its Rust changed. Its key is a hash of
+  every tracked file but `ui/`, `plugins-builtin/` and `modules/`, plus the
+  compiler; built for a key, it is kept in zgx's cache. The version is no
+  longer compiled in: the bundle's manifest carries it, read at launch.
+- The scripts ship as bytecode, with a manifest of hashes; each native
+  module is taken from zgx's cache, or built for release if its sources
+  changed.
+
+A change to the host's Rust still rebuilds the binary, as before. Only
+changes to Luau files and to modules skip it.
+
+Measured on Linux (Ryzen 9 5900X), engine given prebuilt in both:
+
+| A beta release where only… | Today | Bundle |
+| --- | --- | --- |
+| a Luau file changed | 111.5 s, 111.8 s | 10.7 s, 10.7 s |
+| the `reply` module changed | (as above: the app rebuilds) | 12.6 s, 12.6 s (module built in 1.9 s) |
+
+The first bundle release on a new key builds the binary once (117.8 s).
+
+Startup, ms from the process's start to zgx's marks, the median of 15
+interleaved launches under Xvfb, without the engine:
+
+| | App built | First frame presented |
+| --- | --- | --- |
+| Today, first launch | 84.5 | 189.9 |
+| Bundle, first launch (its scripts hashed: 26 ms) | 71.2 | 176.3 |
+| Today, later launches | 84.3 | 145.4 |
+| Bundle, later launches (checked by stamps: 5.5 ms) | 71.5 | 133.9 |
