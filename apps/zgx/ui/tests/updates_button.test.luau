@@ -283,17 +283,37 @@ test("what's under way can't be skipped", function()
 end)
 
 test("a long line fades at its end, beside Skip and its action", function()
-	local long = row("here", "Muse Code", "muse", "retry")
-	long.phase = "failed"
-	long.message = "verification returned something much longer than this row has any room for"
+	local long = row("here", "Muse Code", "muse", "update")
+	long.latest = "1.1 with a version string much longer than this row has any room for"
 	local app = open({ long })
 	app:click("#updates-button")
 	app:frames(10)
 	expect(app:has("#update-skip-here:muse")).to_be(true)
 	expect(app:has("#update-action-here:muse")).to_be(true)
 	-- At its own width, past the row's room: faded, not cut to an ellipsis.
-	local width = string.match(app:tree("#update-row-here:muse"), 'text "verification.-" %-?%d+,%-?%d+ (%d+)x')
+	local width = string.match(app:tree("#update-row-here:muse"), 'text "1.0 → 1.1 with.-" %-?%d+,%-?%d+ (%d+)x')
 	expect((tonumber(width) or 0) > 340).to_be(true)
+end)
+
+test("a failure says why in full, wrapped inside its row, with a mark by the name", function()
+	local long = row("here", "Cursor", "cursor", "retry")
+	long.phase = "failed"
+	long.message = "cursor-agent failed (exit code 1): EACCES: permission denied, rename '/usr/local/lib/node_modules/cursor-agent'"
+	local app = open({ long })
+	app:click("#updates-button")
+	app:frames(10)
+	expect(app:has("#update-skip-here:cursor")).to_be(true)
+	expect(app:has("#update-action-here:cursor")).to_be(true)
+	local tree = app:tree("#update-row-here:cursor")
+	local _, row_w = string.match(tree, "^%s*@%d+[^\n]- (%-?%d+),%-?%d+ (%d+)x")
+	-- The whole reason, under the name and its actions, no wider than the
+	-- row: on lines, not faded off.
+	local w, h = string.match(tree, 'text "cursor%-agent failed.-" %-?%d+,%-?%d+ (%d+)x(%d+)')
+	expect(w ~= nil).to_be(true)
+	expect(tonumber(w) :: number <= tonumber(row_w) :: number).to_be(true)
+	expect(tonumber(h) :: number > 20).to_be(true)
+	-- The mark by the name: a small glyph after "Cursor", on its line.
+	expect(string.find(tree, 'text "Cursor"[^\n]*\n%s*@%d+ img %d+,%d+ 12x12') ~= nil).to_be(true)
 end)
 
 test("Skip sits before a row's action, and actions keep the row's end", function()
