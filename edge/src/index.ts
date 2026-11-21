@@ -43,6 +43,7 @@
  *   GET|PUT  /chat2/:chatId/tail      — host-published sidecars, served verbatim
  *   GET|PUT  /chat2/:chatId/diff
  *   GET  /chat2/:chatId/stats
+ *   POST /chat2/:chatId/heal           — a host's heal the stored checkpoint already covers
  *   POST /chat2/:chatId/reset
  *
  * Cloud device + credential vault (docs/design/cloud-device.md):

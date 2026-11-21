@@ -213,3 +213,12 @@ it("moves the backup deadline a day on when rows land during the upload", async 
     expect(await state.storage.getAlarm()).toBe(due);
   });
 });
+
+it("the worker routes a heal claim to the chat's room, for its owner only", async () => {
+  const chat = `heal-route-${crypto.randomUUID()}`;
+  const claim = (headers: Record<string, string>) =>
+    SELF.fetch(`https://edge/chat2/${chat}/heal`, { method: "POST", headers: { ...headers, "x-chat2-version": btoa(String.fromCharCode(1, 5, 2)) } });
+  // Reached the room: nothing stored there yet, so nothing covers the claim.
+  expect((await claim(auth)).status).toBe(409);
+  expect((await SELF.fetch(`https://edge/chat2/${chat}/heal`, { headers: auth })).status).toBe(404);
+});
