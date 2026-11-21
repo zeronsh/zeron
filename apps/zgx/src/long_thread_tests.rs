@@ -201,13 +201,18 @@ fn instructions() -> Option<impl Fn() -> u64> {
 ///
 /// Instructions are this thread's, in user mode; a script's loop of `CALLS`
 /// calls, less the same loop calling a function that does nothing.
+///
+/// Where no counter is allowed, count from outside (cachegrind, which needs
+/// no privileges): `REPLY_BENCH_CASE=<nothing|run|run_first|blocks|run_of|aside>`
+/// runs that one loop `REPLY_BENCH_ROUNDS` times and nothing else, so two
+/// runs of different rounds differ by the rounds between them alone.
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "a benchmark: release, with a counter (root, or perf_event_paranoid <= 2)"]
 fn reply_module_costs() {
     const CALLS: usize = 20_000;
     const ROUNDS: usize = 21;
-    let count = instructions().expect("perf_event_open: run as root or allow it");
+    let only = std::env::var("REPLY_BENCH_CASE").ok();
     let steps = 1000;
     let (rows, _held) = long_thread(steps);
     // The reply's runs, as its row lists them.
@@ -218,6 +223,7 @@ fn reply_module_costs() {
         _ => unreachable!(),
     };
     let (first, last) = (key(0), key(runs.len() - 1));
+    let blocks = steps * 2 + 1;
     let script = format!(
         r#"
         local function loop(name, arg)
@@ -230,21 +236,53 @@ fn reply_module_costs() {
         ui.command {{ id = "run_first", title = "f", run = loop("chat.reply_run", {{ id = "lt-a", key = "{first}" }}) }}
         ui.command {{ id = "blocks", title = "b", run = loop("chat.reply_blocks", "lt-a") }}
         ui.command {{ id = "run_of", title = "o", run = loop("chat.reply_run_of", {{ id = "lt-a", block = "{first}" }}) }}
+        ui.command {{ id = "check", title = "c", run = function()
+            assert(#ui.call_sync("chat.reply_blocks", "lt-a") == {blocks}, "chat.reply_blocks")
+            assert(#ui.call_sync("chat.reply_run", {{ id = "lt-a", key = "{last}" }}) > 0, "chat.reply_run, the last")
+            assert(#ui.call_sync("chat.reply_run", {{ id = "lt-a", key = "{first}" }}) > 0, "chat.reply_run, the first")
+            assert(ui.call_sync("chat.reply_run_of", {{ id = "lt-a", block = "{first}" }}) == "{first}", "chat.reply_run_of")
+        end }}
         return ui.column {{}}
         "#
     );
     let app = TestApp::new(move |runtime| {
-        let host = ScriptHost::inline(runtime, "bench", script);
+        // (Counted from outside, a loop runs some hundred times slower: its
+        // budgets are lengthened to match, the same in both arms.)
+        let limits = zgx_script::Limits::default();
+        let limits = zgx_script::Limits { load: limits.load * 1000, call: limits.call * 1000, ..limits };
+        let host = ScriptHost::inline(runtime, "bench", script).limits(limits);
         crate::chat::reply_functions(&host);
         host.function("bench.nothing", |_| Value::Nil);
-        // (A loop of 20,000 calls is one script call: past its time budget
-        // in neither build, but nothing here is about budgets.)
         host
     });
     assert_eq!(app.error(), None);
     // After the host loaded: the rows the scripts ask about are this arm's.
     let (rows, _held) = long_thread(steps);
     drop(rows);
+    // Whole, to set aside again and again.
+    let whole = crate::chat::built_unset(&long_thread_entries(steps).1, Some("Opus")).unwrap();
+    // The loops read a reply that is held: let go of, each function answers
+    // nil at once, and a loop of those measures nothing of the functions.
+    // (Setting it aside again takes its place and lets go of it, so the
+    // loops come first.)
+    assert!(app.host.run_command("check"));
+    assert_eq!(app.error(), None, "the reply's functions answer while it's held");
+    if let Some(case) = only {
+        let rounds: usize = std::env::var("REPLY_BENCH_ROUNDS").ok().and_then(|n| n.parse().ok()).unwrap_or(1);
+        let arm = if crate::chat::reply_by_module() { "module" } else { "linked" };
+        for _ in 0..rounds {
+            if case == "aside" {
+                let (kept, hold, _) = crate::chat::set_aside_as_shown(whole.clone());
+                drop((kept, hold));
+            } else {
+                assert!(app.host.run_command(&case), "{case}");
+            }
+        }
+        assert_eq!(app.error(), None, "{case}");
+        println!("BENCH {arm} {case} rounds={rounds} calls={CALLS}");
+        return;
+    }
+    let count = instructions().expect("perf_event_open: run as root or allow it");
     let median = |mut all: Vec<u64>| {
         all.sort_unstable();
         (all[all.len() / 2], all[0], all[all.len() - 1])
@@ -261,25 +299,9 @@ fn reply_module_costs() {
         assert_eq!(app.error(), None, "{command}");
         (median(counts), median(nanos))
     };
-    // Whole, to set aside again and again.
-    let whole = crate::chat::built_unset(&long_thread_entries(steps).1, Some("Opus")).unwrap();
-    let mut by_module = false;
-    let mut aside_counts = Vec::new();
-    let mut aside_nanos = Vec::new();
-    // (`REPLY_BENCH_ASIDE=<rounds>`: more of them, for a profile.)
-    let aside_rounds = std::env::var("REPLY_BENCH_ASIDE").ok().and_then(|n| n.parse().ok()).unwrap_or(ROUNDS);
-    for _ in 0..aside_rounds {
-        let row = whole.clone();
-        let (at, from) = (std::time::Instant::now(), count());
-        let (kept, hold, module) = crate::chat::set_aside_as_shown(row);
-        drop((kept, hold));
-        aside_counts.push(count() - from);
-        aside_nanos.push(at.elapsed().as_nanos() as u64);
-        by_module = module;
-    }
-    let arm = if by_module { "module" } else { "linked" };
+    let arm = if crate::chat::reply_by_module() { "module" } else { "linked" };
     let ((nothing, ..), _) = timed("nothing");
-    println!("arm={arm} calls={CALLS} rounds={ROUNDS} runs={} blocks={}", runs.len(), steps * 2 + 1);
+    println!("arm={arm} calls={CALLS} rounds={ROUNDS} runs={} blocks={blocks}", runs.len());
     println!("BENCH {arm} empty_loop_instr_per_call {:.1}", nothing as f64 / CALLS as f64);
     for command in ["run", "run_first", "blocks", "run_of"] {
         let ((mid, low, high), (ns, ..)) = timed(command);
@@ -292,6 +314,18 @@ fn reply_module_costs() {
             mid as f64 / CALLS as f64,
             ns as f64 / CALLS as f64
         );
+    }
+    let mut aside_counts = Vec::new();
+    let mut aside_nanos = Vec::new();
+    // (`REPLY_BENCH_ASIDE=<rounds>`: more of them, for a profile.)
+    let aside_rounds = std::env::var("REPLY_BENCH_ASIDE").ok().and_then(|n| n.parse().ok()).unwrap_or(ROUNDS);
+    for _ in 0..aside_rounds {
+        let row = whole.clone();
+        let (at, from) = (std::time::Instant::now(), count());
+        let (kept, hold, _) = crate::chat::set_aside_as_shown(row);
+        drop((kept, hold));
+        aside_counts.push(count() - from);
+        aside_nanos.push(at.elapsed().as_nanos() as u64);
     }
     let ((mid, low, high), (ns, ..)) = (median(aside_counts), median(aside_nanos));
     println!("BENCH {arm} set_aside instr {mid} min {low} max {high} ns {ns}");

@@ -618,6 +618,11 @@ pub(crate) fn built_as_shown(entry: &Json, model: Option<&str>) -> (Option<Value
 pub(crate) fn built_unset(entry: &Json, model: Option<&str>) -> Option<Value> {
     built_entry(entry, "doc", None, model)
 }
+/// Whether this thread's host loaded the reply module.
+#[cfg(test)]
+pub(crate) fn reply_by_module() -> bool {
+    REPLY_MODULE.with_borrow(Option::is_some)
+}
 #[cfg(test)]
 pub(crate) fn set_aside_as_shown(row: Value) -> (Value, Option<Rc<dyn std::any::Any>>, bool) {
     match REPLY_MODULE.with_borrow(Clone::clone) {
