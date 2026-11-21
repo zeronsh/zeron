@@ -12176,6 +12176,11 @@ public struct SessionRow: Equatable, Hashable {
     public var sendState: SendState?
     public var parentChatId: String?
     /**
+     * A task's coordinator (its parent started the task): its children are
+     * the task's agents, and it lists under Tasks rather than Side chats.
+     */
+    public var isTask: Bool
+    /**
      * 2 = chat2; 1 = legacy (not dialable).
      */
     public var roomGen: UInt32
@@ -12217,6 +12222,10 @@ public struct SessionRow: Equatable, Hashable {
          * Oldest unadopted send from this device (open sessions only).
          */sendState: SendState?, parentChatId: String?, 
         /**
+         * A task's coordinator (its parent started the task): its children are
+         * the task's agents, and it lists under Tasks rather than Side chats.
+         */isTask: Bool, 
+        /**
          * 2 = chat2; 1 = legacy (not dialable).
          */roomGen: UInt32) {
         self.id = id
@@ -12249,6 +12258,7 @@ public struct SessionRow: Equatable, Hashable {
         self.pullRequest = pullRequest
         self.sendState = sendState
         self.parentChatId = parentChatId
+        self.isTask = isTask
         self.roomGen = roomGen
     }
 
@@ -12298,6 +12308,7 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
                 pullRequest: FfiConverterOptionTypePullRequest.read(from: &buf), 
                 sendState: FfiConverterOptionTypeSendState.read(from: &buf), 
                 parentChatId: FfiConverterOptionString.read(from: &buf), 
+                isTask: FfiConverterBool.read(from: &buf), 
                 roomGen: FfiConverterUInt32.read(from: &buf)
         )
     }
@@ -12333,6 +12344,7 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
         FfiConverterOptionTypePullRequest.write(value.pullRequest, into: &buf)
         FfiConverterOptionTypeSendState.write(value.sendState, into: &buf)
         FfiConverterOptionString.write(value.parentChatId, into: &buf)
+        FfiConverterBool.write(value.isTask, into: &buf)
         FfiConverterUInt32.write(value.roomGen, into: &buf)
     }
 }
@@ -21622,6 +21634,19 @@ public func agentLoginRules(harness: String) -> AgentLoginRules  {
 })
 }
 /**
+ * The mention link for a chat (`[title](zeron-chat:id)`): the agent reads
+ * it as a chat it can open. `None` for an id the link can't carry.
+ */
+public func chatMentionLink(chatId: String, title: String) -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_chat_mention_link(
+        FfiConverterString.lower(chatId),
+        FfiConverterString.lower(title),uniffiCallStatus
+    )
+})
+}
+/**
  * The canonical mention link the host understands (`[name](zeron-file:path)`).
  */
 public func fileMentionLink(path: String, isDir: Bool) -> String  {
@@ -21806,6 +21831,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_agent_login_rules() != 18451) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_chat_mention_link() != 56766) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_file_mention_link() != 14340) {
