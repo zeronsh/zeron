@@ -726,12 +726,26 @@ struct UsageEntry {
     /// Fingerprint of the credentials the last failure was against.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     credentials: Option<String>,
+    /// The last failure was about the credentials themselves (a rejected
+    /// token, none at all, an untrusted endpoint). Re-probing the same
+    /// fingerprint cannot succeed, so leave the account alone until the
+    /// credentials change (re-login, or the CLI refreshing its token).
+    #[serde(default, skip_serializing_if = "is_false")]
+    quiet_until_credentials_change: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl UsageEntry {
     /// Whether a forced list should probe this account now.
     fn probe_due(&self, credentials: &str, now: i64) -> bool {
         if now - self.checked_at < FORCED_MIN_INTERVAL.as_millis() as i64 {
+            return false;
+        }
+        let credentials_changed = self.credentials.as_deref() != Some(credentials);
+        if self.quiet_until_credentials_change && !credentials_changed {
             return false;
         }
         match (self.retry_at, &self.error) {
@@ -744,7 +758,7 @@ impl UsageEntry {
                     ProbeError::Unauthorized { .. }
                         | ProbeError::NoCredentials { .. }
                         | ProbeError::UntrustedEndpoint
-                ) && self.credentials.as_deref() != Some(credentials)
+                ) && credentials_changed
             }
             _ => true,
         }
@@ -759,9 +773,16 @@ impl UsageEntry {
                 self.error = None;
                 self.retry_at = None;
                 self.credentials = None;
+                self.quiet_until_credentials_change = false;
             }
             Err(error) => {
                 self.retry_at = Some(now + error.backoff().as_millis() as i64);
+                self.quiet_until_credentials_change = matches!(
+                    &error,
+                    ProbeError::Unauthorized { .. }
+                        | ProbeError::NoCredentials { .. }
+                        | ProbeError::UntrustedEndpoint
+                );
                 self.error = Some(error);
                 self.credentials = Some(credentials);
             }
@@ -4046,7 +4067,7 @@ impl AgentAccounts {
                         provider = harness_slug(harness),
                         slot = %slot.id,
                         retry_at = ?entry.retry_at,
-                        "usage probe skipped (backoff or fresh)"
+                        "usage probe skipped (backoff, fresh, or unchanged rejected credentials)"
                     );
                     continue;
                 }
@@ -4126,6 +4147,9 @@ impl AgentAccounts {
         };
         if let Err(error) = &result {
             // Expected, quiet outcomes (API-key logins have no windows).
+            // The slot is quiet until its credentials change (see
+            // `UsageEntry::probe_due`), so one rejected fingerprint produces
+            // one outcome line; the per-step detail in `probe_json` is DEBUG.
             if !matches!(error, ProbeError::NoCredentials { .. }) {
                 tracing::warn!(
                     provider = harness_slug(harness),
@@ -5192,7 +5216,8 @@ fn credentials_fingerprint(credentials: &serde_json::Value) -> String {
 }
 
 /// Send one probe request and decode its JSON body, classifying every
-/// failure. Logs provider/step/status/class/Retry-After — never the request
+/// failure. Per-step detail is DEBUG; `probe_usage` logs the single outcome
+/// at WARN. Logs provider/step/status/class/Retry-After — never the request
 /// (bearer tokens) or the response body (it can echo account details).
 async fn probe_json(
     provider: &'static str,
@@ -5205,7 +5230,7 @@ async fn probe_json(
             let error = ProbeError::Network {
                 timeout: err.is_timeout(),
             };
-            tracing::warn!(
+            tracing::debug!(
                 provider,
                 step,
                 class = error.class(),
@@ -5219,7 +5244,7 @@ async fn probe_json(
     if !status.is_success() {
         let retry_after_secs = retry_after_secs(response.headers(), Utc::now());
         let error = classify_status(status.as_u16(), retry_after_secs);
-        tracing::warn!(
+        tracing::debug!(
             provider,
             step,
             status = status.as_u16(),
@@ -5230,7 +5255,7 @@ async fn probe_json(
         return Err(error);
     }
     response.json().await.map_err(|_| {
-        tracing::warn!(
+        tracing::debug!(
             provider,
             step,
             class = "schema",
@@ -7000,14 +7025,37 @@ mod probe_tests {
     #[test]
     fn a_rejected_token_reprobes_once_the_credentials_change() {
         let mut entry = UsageEntry::default();
-        entry.record(
-            Err(ProbeError::Unauthorized { status: 401 }),
-            "old".into(),
-            1_000,
-        );
+        let rejected = ProbeError::Unauthorized { status: 401 };
+        let after_backoff = 1_000 + rejected.backoff().as_millis() as i64 + 1;
+        entry.record(Err(rejected), "old".into(), 1_000);
         let soon = 1_000 + FORCED_MIN_INTERVAL.as_millis() as i64 + 1;
         assert!(!entry.probe_due("old", soon));
         assert!(entry.probe_due("refreshed", soon));
+        // Once the backoff passes, the same rejected token is still not
+        // probed again: re-sending it cannot succeed. Only a new fingerprint
+        // (a re-login, or the CLI refreshing its token) lifts the hold.
+        assert!(!entry.probe_due("old", after_backoff));
+        assert!(entry.probe_due("refreshed", after_backoff));
+        // A success clears the hold.
+        entry.record(Ok(snapshot()), "refreshed".into(), after_backoff + 1);
+        assert!(!entry.quiet_until_credentials_change);
+    }
+
+    #[test]
+    fn credential_scoped_failures_wait_for_the_fingerprint_to_change() {
+        for error in [
+            ProbeError::NoCredentials {
+                why: NoCredentials::Missing,
+            },
+            ProbeError::UntrustedEndpoint,
+        ] {
+            let after_backoff = 1_000 + error.backoff().as_millis() as i64 + 1;
+            let mut entry = UsageEntry::default();
+            entry.record(Err(error), "old".into(), 1_000);
+            assert!(entry.quiet_until_credentials_change);
+            assert!(!entry.probe_due("old", after_backoff));
+            assert!(entry.probe_due("new", after_backoff));
+        }
     }
 
     #[test]
@@ -7069,6 +7117,20 @@ mod probe_tests {
         assert_eq!(entry.fetched_at, Some(5));
         // The fingerprint is a digest, never the credential blob.
         assert!(!json.contains("accessToken"));
+        // An older cache without the hold loads it as off, and a credential
+        // failure persists it on.
+        let old: UsageEntry = serde_json::from_str(r#"{"checkedAt": 1}"#).unwrap();
+        assert!(!old.quiet_until_credentials_change);
+        let mut rejected = UsageEntry::default();
+        rejected.record(
+            Err(ProbeError::Unauthorized { status: 401 }),
+            "c".into(),
+            2,
+        );
+        let json = serde_json::to_string(&rejected).unwrap();
+        assert!(json.contains("quietUntilCredentialsChange"));
+        let back: UsageEntry = serde_json::from_str(&json).unwrap();
+        assert!(back.quiet_until_credentials_change);
     }
 }
 
