@@ -7,7 +7,7 @@
 -- type, newest updates first, a page at a time; a row opens the pull
 -- request in the page's own panel (Zeron's right pane: resized, expanded,
 -- tabbed as a chat's), the viewer drawing it (viewer.luau). GitHub is asked
--- through gh on this Mac (pulls.luau).
+-- through gh for local projects and through the owning engine for remote ones.
 --
 -- The page is a settings-like column: its title (and a way to ask again),
 -- under it the project's picker and the repository it found, the filters
@@ -272,12 +272,15 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 			if not h.more and not h.quiet then
 				state:set("loading")
 			end
-			pulls.list(r, {
+			local options = {
 				filter = chosen.filter,
 				after = if h.more then paging:peek().next else nil,
 				refresh = h.refresh == true,
 				cached = not h.more and not h.refresh,
-			}):after(function(page: any)
+			}
+			local project = zeron.projects()[p]
+			local task = if project and project.here == false then zeron.github.list(p, r, options) else pulls.list(r, options)
+			task:after(function(page: any)
 				if mine ~= asked then
 					return
 				end
@@ -309,7 +312,10 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 		-- The project's repository, then its list.
 		local function find_repository()
 			local p = chosen.project
+			asked += 1
+			local mine = asked
 			repo:set(nil)
+			failed:set(nil)
 			items:set({})
 			open:set(nil)
 			if not p then
@@ -317,10 +323,12 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 				return
 			end
 			state:set("loading")
-			-- (Its folder on this Mac: gh says which repository it is.)
-			local folder = (zeron.context_of("project", p) or {}).path
-			pulls.repository(folder):after(function(r: any)
-				if chosen.project ~= p then
+			local project = zeron.projects()[p]
+			local remote = project and project.here == false
+			local task = if remote then zeron.github.repository(p)
+				else pulls.repository((zeron.context_of("project", p) or {}).path)
+			task:after(function(r: any)
+				if mine ~= asked then
 					return
 				end
 				if type(r) == "string" and r ~= "" then
@@ -329,11 +337,16 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 				else
 					state:set("norepo")
 				end
-			end, function(_why: any)
-				if chosen.project ~= p then
+			end, function(err: any)
+				if mine ~= asked then
 					return
 				end
-				state:set("norepo")
+				if remote then
+					failed:set(if type(err) == "table" and err.message then tostring(err.message) else tostring(err))
+					state:set("failed")
+				else
+					state:set("norepo")
+				end
 			end)
 		end
 		find_repository()
@@ -550,7 +563,7 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 					return EmptyState {
 						icon = "git-branch",
 						title = zeron.s("board.empty.norepo_title"),
-						body = zeron.s("board.empty.norepo_body"),
+						body = zeron.s("pulls.no_repo"),
 						fill = true,
 					}
 				elseif key == "failed" then
@@ -561,7 +574,11 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 						action = {
 							label = zeron.s("board.try_again"),
 							on_click = function()
-								load({ refresh = true })
+								if repo:peek() then
+									load({ refresh = true })
+								else
+									find_repository()
+								end
 							end,
 						},
 					}
