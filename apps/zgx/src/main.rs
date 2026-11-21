@@ -409,8 +409,11 @@ fn dev_launch(args: &[String]) -> bool {
 /// again as the window opens: a file that changes then compiles at its
 /// require, as before), else ui/'s; the gallery or a fixture.
 fn compile_ahead(screen: &Screen) {
-    // (A bundle's scripts are compiled: its build's bytecode.)
-    if bundle().is_some() {
+    // A bundle's scripts are compiled already (its build's bytecode): they
+    // are read and checked ahead instead, the bytes checked handed to the
+    // load.
+    if let Some(bundle) = bundle() {
+        bundle.read_ahead();
         return;
     }
     let ui = ui_dir();
