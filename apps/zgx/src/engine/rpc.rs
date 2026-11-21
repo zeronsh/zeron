@@ -163,6 +163,13 @@ fn dial_within(port: u16, token: Option<&str>, within: Duration) -> Result<Socke
             .headers_mut()
             .insert(tungstenite::http::header::AUTHORIZATION, value);
     }
+    // The engine's connection log names the client that dropped. This dialer
+    // is the desktop window; the engine treats the name as a claim, not an
+    // authority.
+    request.headers_mut().insert(
+        tungstenite::http::HeaderName::from_static("x-zeron-client"),
+        tungstenite::http::HeaderValue::from_static("desktop"),
+    );
     // A long reply can be large; local IPC allows up to 256 MiB.
     const LIMIT: usize = 256 << 20;
     let config = tungstenite::protocol::WebSocketConfig::default()

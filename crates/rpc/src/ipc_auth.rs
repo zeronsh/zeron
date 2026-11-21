@@ -34,6 +34,10 @@ pub const AGENT_TOKEN_FILE_NAME: &str = "ipc-token-agent";
 /// Handshake header naming the chat an agent's MCP server serves: claimed,
 /// for the record only ([`crate::Caller::Agent`]).
 pub const CHAT_HEADER: &str = "x-zeron-chat";
+/// Handshake header naming the client kind (`desktop`, `cli`, `mcp`) for
+/// connection logs: claimed, never an authority. The server bounds and
+/// sanitizes it before logging.
+pub const CLIENT_HEADER: &str = "x-zeron-client";
 
 /// `{data_dir}/ipc-token`.
 pub fn token_path(data_dir: &Path) -> PathBuf {

@@ -11,7 +11,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{
 };
 use tokio_tungstenite::tungstenite::http::StatusCode;
 
-use crate::ipc_auth::IpcTokens;
+use crate::ipc_auth::{CLIENT_HEADER, IpcTokens};
 use crate::{ClientFrame, RpcError, RpcReply, RpcService, ServerFrame};
 
 /// The terminal a call must take effect in order for: its input and size.
@@ -283,6 +283,20 @@ impl RpcService for AgentGuard {
     }
 }
 
+/// The handshake's claimed client kind (`x-zeron-client`), sanitized for a
+/// log line: printable ASCII only, at most 64 characters. Claimed, never an
+/// authority.
+fn handshake_client_name(req: &HandshakeRequest) -> Option<String> {
+    let value = req.headers().get(CLIENT_HEADER)?.to_str().ok()?;
+    let name: String = value
+        .chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .take(64)
+        .collect();
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
 async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>, tokens: Arc<IpcTokens>) {
     // Two independent gates, both required:
     //
@@ -300,7 +314,9 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>, tokens
     // trait requires; it can't be boxed away here.
     // Set by the handshake when the agent-scoped token was presented: the
     // chat it says it serves.
+    let peer = stream.peer_addr().ok();
     let scope: std::sync::Mutex<Option<Option<String>>> = std::sync::Mutex::new(None);
+    let client: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
     #[allow(clippy::result_large_err)]
     let authorize = |req: &HandshakeRequest, resp: HandshakeResponse| {
         if let Some(origin) = req.headers().get("origin") {
@@ -327,6 +343,9 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>, tokens
             *err.status_mut() = StatusCode::UNAUTHORIZED;
             return Err(err);
         };
+        *client
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = handshake_client_name(req);
         if agent {
             let chat = req
                 .headers()
@@ -349,24 +368,60 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>, tokens
     {
         Ok(ws) => ws,
         Err(err) => {
-            tracing::warn!(error = %err, "rpc: websocket handshake failed");
+            tracing::warn!(peer = ?peer, error = %err, "rpc: websocket handshake failed");
             return;
         }
     };
+    let connected_at = std::time::Instant::now();
     let (out_tx, out_rx) = mpsc::channel::<String>(256);
     let (in_tx, in_rx) = mpsc::channel::<String>(256);
 
+    let scope = scope
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let client = client
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (service, scope, chat_claimed): (Arc<dyn RpcService>, &'static str, bool) = match scope {
+        Some(chat) => {
+            let chat_claimed = chat.is_some();
+            (
+                Arc::new(AgentGuard {
+                    inner: service,
+                    chat,
+                    pinned: false,
+                }),
+                "agent",
+                chat_claimed,
+            )
+        }
+        None => (service, "full", false),
+    };
+
     // Pump: socket <-> string channels. Ends when either side closes.
     let pump = tokio::spawn(async move {
-        if let Some(reason) = crate::ws::pump(ws, out_rx, in_tx).await {
-            tracing::warn!(%reason, "rpc: lost a viewport connection");
+        match crate::ws::pump(ws, out_rx, in_tx).await {
+            Some(reason) => tracing::warn!(
+                %reason,
+                peer = ?peer,
+                client = client.as_deref().unwrap_or("unknown"),
+                scope,
+                chat_claimed,
+                age_ms = connected_at.elapsed().as_millis() as u64,
+                "rpc: lost a viewport connection"
+            ),
+            None => tracing::debug!(
+                peer = ?peer,
+                client = client.as_deref().unwrap_or("unknown"),
+                scope,
+                chat_claimed,
+                age_ms = connected_at.elapsed().as_millis() as u64,
+                close = "clean",
+                "rpc: viewport connection closed"
+            ),
         }
     });
 
-    let service: Arc<dyn RpcService> = match scope.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner) {
-        Some(chat) => Arc::new(AgentGuard { inner: service, chat, pinned: false }),
-        None => service,
-    };
     serve_connection(service, out_tx, in_rx).await;
     pump.abort();
 }
@@ -376,6 +431,35 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
     use std::time::Duration;
+
+    #[test]
+    fn handshake_client_names_are_bounded_and_printable() {
+        let request = |value: Option<&str>| -> HandshakeRequest {
+            let mut builder = tokio_tungstenite::tungstenite::http::Request::builder()
+                .uri("ws://127.0.0.1:1");
+            if let Some(value) = value {
+                builder = builder.header(CLIENT_HEADER, value);
+            }
+            builder.body(()).unwrap()
+        };
+        assert_eq!(
+            handshake_client_name(&request(Some("desktop"))),
+            Some("desktop".into())
+        );
+        assert_eq!(
+            handshake_client_name(&request(Some("desktop 2"))),
+            Some("desktop 2".into())
+        );
+        assert_eq!(handshake_client_name(&request(Some(""))), None);
+        assert_eq!(handshake_client_name(&request(None)), None);
+        let long = "x".repeat(100);
+        assert_eq!(
+            handshake_client_name(&request(Some(long.as_str())))
+                .unwrap()
+                .len(),
+            64
+        );
+    }
 
     /// Records the order calls reach it in, by terminal; a call for the
     /// terminal "stuck" never finishes (a write to a program that never
