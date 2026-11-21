@@ -3273,6 +3273,100 @@ fn reasoning_from_value(value: &str) -> Option<ReasoningLevel> {
     }
 }
 
+/// A value a select config option advertises, flattened out of either shape:
+/// a flat `options` array of `{value, name}` entries, or the grouped shape ACP
+/// uses when values belong to families (one group per provider, say). Grouped
+/// entries stay in the protocol's two spellings: v1's `group` and v2's
+/// `groupId`.
+struct SelectChoice<'a> {
+    /// The opaque key the agent expects back in `session/set_config_option`.
+    value: &'a str,
+    /// The agent's display name, when it wrote one.
+    name: Option<&'a str>,
+    /// The agent's description (models may carry one).
+    description: Option<&'a str>,
+    /// The group's display name, for telling identically named values apart.
+    group: Option<&'a str>,
+}
+
+impl<'a> SelectChoice<'a> {
+    fn label(&self) -> &'a str {
+        self.name.unwrap_or(self.value)
+    }
+}
+
+/// Flatten a select option's advertised values, preserving advertised order.
+/// A group with no values is skipped without dropping the groups after it; a
+/// malformed entry yields nothing rather than failing discovery.
+fn select_choices(option: &Value) -> Vec<SelectChoice<'_>> {
+    let Some(items) = option.get("options").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut choices = Vec::new();
+    for item in items {
+        let group = item
+            .get("group")
+            .and_then(Value::as_str)
+            .or_else(|| item.get("groupId").and_then(Value::as_str));
+        if group.is_some() {
+            let Some(values) = item.get("options").and_then(Value::as_array) else {
+                continue;
+            };
+            // The label comes from the group's display name; its id is only
+            // the fallback when an agent omits one.
+            let group = item.get("name").and_then(Value::as_str).or(group);
+            for item in values {
+                let Some(value) = item.get("value").and_then(Value::as_str) else {
+                    continue;
+                };
+                choices.push(SelectChoice {
+                    value,
+                    name: item.get("name").and_then(Value::as_str),
+                    description: item.get("description").and_then(Value::as_str),
+                    group,
+                });
+            }
+        } else if let Some(value) = item.get("value").and_then(Value::as_str) {
+            choices.push(SelectChoice {
+                value,
+                name: item.get("name").and_then(Value::as_str),
+                description: item.get("description").and_then(Value::as_str),
+                group: None,
+            });
+        }
+    }
+    choices
+}
+
+/// Display labels for flattened choices: the agent's name, falling back to the
+/// value. A label advertised in more than one group is prefixed with its group
+/// name, so two providers' "DeepSeek Flash" stay distinguishable while the
+/// opaque values stay byte-for-byte unchanged.
+fn select_labels(choices: &[SelectChoice<'_>]) -> Vec<String> {
+    let mut groups_per_label: std::collections::HashMap<&str, Vec<&str>> =
+        std::collections::HashMap::new();
+    for choice in choices {
+        let groups = groups_per_label.entry(choice.label()).or_default();
+        let group = choice.group.unwrap_or("");
+        if !groups.contains(&group) {
+            groups.push(group);
+        }
+    }
+    choices
+        .iter()
+        .map(|choice| match choice.group {
+            Some(group)
+                if groups_per_label
+                    .get(choice.label())
+                    .is_some_and(|groups| groups.len() > 1) =>
+            {
+                format!("{group} \u{b7} {}", choice.label())
+            }
+            _ => choice.label().to_owned(),
+        })
+        .collect()
+}
+
 /// Derive the model list a `session/new` response advertises. The `model`
 /// config option's choices come FIRST, the legacy first-class `models` state
 /// is only a fallback: the org adapters enumerate one `availableModels` entry
@@ -3344,14 +3438,11 @@ fn models_from_session_wire(session_response: &Value, catalog: &[Model]) -> Vec<
     let mut ladder: Vec<ReasoningLevel> = config_options
         .iter()
         .find(|o| o.get("category").and_then(Value::as_str) == Some("thought_level"))
-        .and_then(|o| o.get("options").and_then(Value::as_array))
-        .map(|opts| {
-            opts.iter()
-                .filter_map(|o| o.get("value").and_then(Value::as_str))
-                .filter_map(reasoning_from_value)
-                .collect()
-        })
-        .unwrap_or_default();
+        .map(select_choices)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|choice| reasoning_from_value(choice.value))
+        .collect();
     ladder.sort_unstable();
     ladder.dedup();
     let wire_options: Vec<ModelOption> = config_options
@@ -3438,20 +3529,17 @@ fn models_from_session_wire(session_response: &Value, catalog: &[Model]) -> Vec<
         }
     };
 
-    let model_select: Vec<&Value> = config_options
+    let model_select = config_options
         .iter()
         .find(|o| {
             o.get("category").and_then(Value::as_str) == Some("model")
                 && o.get("id").and_then(Value::as_str) != Some("provider")
         })
-        .and_then(|o| o.get("options").and_then(Value::as_array))
-        .map(|opts| opts.iter().collect())
+        .map(select_choices)
         .unwrap_or_default();
     if !model_select.is_empty() {
-        let raw_ids: Vec<&str> = model_select
-            .iter()
-            .filter_map(|o| o.get("value").and_then(Value::as_str))
-            .collect();
+        let raw_ids: Vec<&str> = model_select.iter().map(|choice| choice.value).collect();
+        let labels = select_labels(&model_select);
         // `default` is an ALIAS row (Claude Code's "Default (recommended)"),
         // duplicating whichever real model the CLI resolves it to — dropped
         // whenever a real row exists (it read as clutter in the picker, user
@@ -3460,13 +3548,14 @@ fn models_from_session_wire(session_response: &Value, catalog: &[Model]) -> Vec<
         let has_real = raw_ids.iter().any(|id| norm_id(id) != "default");
         return model_select
             .iter()
-            .filter_map(|o| {
-                let id = o.get("value").and_then(Value::as_str)?;
+            .enumerate()
+            .filter_map(|(index, choice)| {
+                let id = choice.value;
                 if has_real && norm_id(id) == "default" {
                     return None;
                 }
-                let name = o.get("name").and_then(Value::as_str);
-                let description = o.get("description").and_then(Value::as_str);
+                let name = choice.name.map(|_| labels[index].as_str());
+                let description = choice.description;
                 let mut options = wire_options.clone();
                 if let Some(base) = strip_context_hint(id) {
                     // A 1M variant with its bare base advertised too folds
@@ -3542,20 +3631,14 @@ fn trait_from_config_option(option: &Value) -> Option<ModelOption> {
     let label = option.get("name").and_then(Value::as_str).unwrap_or(id);
     match option.get("type").and_then(Value::as_str)? {
         "select" => {
-            let choices: Vec<ModelOptionChoice> = option
-                .get("options")
-                .and_then(Value::as_array)?
+            let choices = select_choices(option);
+            let labels = select_labels(&choices);
+            let choices: Vec<ModelOptionChoice> = choices
                 .iter()
-                .filter_map(|c| {
-                    let id = c.get("value").and_then(Value::as_str)?;
-                    Some(ModelOptionChoice {
-                        id: id.to_owned(),
-                        label: c
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .unwrap_or(id)
-                            .to_owned(),
-                    })
+                .zip(labels)
+                .map(|(choice, label)| ModelOptionChoice {
+                    id: choice.value.to_owned(),
+                    label,
                 })
                 .collect();
             let default_choice = option
@@ -4360,6 +4443,7 @@ fn first_class_model_change(
             options.iter().any(|option| {
                 option.get("type").and_then(Value::as_str) == Some("select")
                     && option.get("category").and_then(Value::as_str) == Some("model")
+                    && !select_choices(option).is_empty()
             })
         });
     if has_model_config {
@@ -4412,14 +4496,13 @@ fn validate_config_model_selection(
     else {
         return Ok(());
     };
-    let available: Vec<&str> = option
-        .get("options")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default()
+    let available: Vec<&str> = select_choices(option)
         .iter()
-        .filter_map(|choice| choice.get("value").and_then(Value::as_str))
+        .map(|choice| choice.value)
         .collect();
+    if available.is_empty() {
+        return Ok(());
+    }
     let window = model_options.get("contextWindow").and_then(Value::as_str);
     if pick_model_value(requested, &available, window).is_some() {
         return Ok(());
@@ -4496,14 +4579,8 @@ fn config_option_sets(
         let kind = option.get("type").and_then(Value::as_str).unwrap_or("");
         let category = option.get("category").and_then(Value::as_str);
         let current = option.get("currentValue");
-        let available: Vec<&str> = option
-            .get("options")
-            .and_then(Value::as_array)
-            .map(|a| a.as_slice())
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|o| o.get("value").and_then(Value::as_str))
-            .collect();
+        let choices = select_choices(option);
+        let available: Vec<&str> = choices.iter().map(|choice| choice.value).collect();
 
         let wanted: Option<Value> = match (kind, category) {
             ("select", Some("model")) => model
@@ -5410,7 +5487,7 @@ fn resolve_effort_model(
     model: &str,
     reasoning: Option<ReasoningLevel>,
 ) -> (String, Option<ReasoningLevel>) {
-    let choices: Vec<(&str, &str)> = session_response
+    let model_choices = session_response
         .get("configOptions")
         .and_then(Value::as_array)
         .and_then(|options| {
@@ -5419,17 +5496,12 @@ fn resolve_effort_model(
                     && o.get("id").and_then(Value::as_str) != Some("provider")
             })
         })
-        .and_then(|o| o.get("options").and_then(Value::as_array))
-        .map(|choices| {
-            choices
-                .iter()
-                .filter_map(|c| {
-                    let id = c.get("value").and_then(Value::as_str)?;
-                    Some((id, c.get("name").and_then(Value::as_str).unwrap_or(id)))
-                })
-                .collect()
-        })
+        .map(select_choices)
         .unwrap_or_default();
+    let choices: Vec<(&str, &str)> = model_choices
+        .iter()
+        .map(|choice| (choice.value, choice.label()))
+        .collect();
     if choices.iter().any(|(id, _)| *id == model) {
         return (model.to_owned(), reasoning);
     }
@@ -8660,6 +8732,198 @@ mod tests {
             vec!["fast-mode"]
         );
         assert_eq!(models[0].options[0].default_choice, "off");
+    }
+
+    /// ACP's grouped select shape (v1 `group`, v2 `groupId`): one entry per
+    /// family, values one level down. dsh advertises its models exactly like
+    /// this, with `[provider, model]` arrays as opaque values.
+    fn grouped_config_session_response() -> Value {
+        json!({
+            "sessionId": "dsh-1",
+            "configOptions": [
+                {
+                    "id": "model",
+                    "name": "Model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "[\"deepseek-official\",\"deepseek-v4.1-flash\"]",
+                    "options": [
+                        {
+                            "group": "deepseek-official",
+                            "name": "DeepSeek",
+                            "options": [
+                                { "value": "[\"deepseek-official\",\"deepseek-flash\"]", "name": "DeepSeek Flash" },
+                                { "value": "[\"deepseek-official\",\"deepseek-v4.1-flash\"]", "name": "DeepSeek V4.1 Flash" },
+                            ],
+                        },
+                        {
+                            "groupId": "opencode-go",
+                            "name": "OpenCode Go",
+                            "options": [
+                                { "value": "[\"opencode-go\",\"deepseek-v4.1-flash\"]", "name": "DeepSeek V4.1 Flash" },
+                                { "value": "[\"opencode-go\",\"deepseek-flash\"]", "name": "DeepSeek Flash" },
+                            ],
+                        },
+                    ],
+                },
+                {
+                    "id": "effort",
+                    "name": "Reasoning effort",
+                    "category": "thought_level",
+                    "type": "select",
+                    "currentValue": "medium",
+                    "options": [
+                        {
+                            "group": "basic",
+                            "name": "Basic",
+                            "options": [
+                                { "value": "low", "name": "Low" },
+                                { "value": "medium", "name": "Medium" },
+                            ],
+                        },
+                        {
+                            "group": "advanced",
+                            "name": "Advanced",
+                            "options": [{ "value": "high", "name": "High" }],
+                        },
+                    ],
+                },
+                {
+                    "id": "fast_mode",
+                    "name": "Fast mode",
+                    "category": "model_config",
+                    "type": "select",
+                    "currentValue": "off",
+                    "options": [{
+                        "group": "speed",
+                        "name": "Speed",
+                        "options": [
+                            { "value": "off", "name": "Off" },
+                            { "value": "on", "name": "On" },
+                        ],
+                    }],
+                },
+            ],
+        })
+    }
+
+    #[test]
+    fn grouped_config_options_flatten_models_effort_and_traits() {
+        let models = models_from_session(&grouped_config_session_response(), &[]);
+        // Every value of every group, in advertised order — not an empty list.
+        assert_eq!(
+            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec![
+                "[\"deepseek-official\",\"deepseek-flash\"]",
+                "[\"deepseek-official\",\"deepseek-v4.1-flash\"]",
+                "[\"opencode-go\",\"deepseek-v4.1-flash\"]",
+                "[\"opencode-go\",\"deepseek-flash\"]",
+            ]
+        );
+        // The same display name in two groups keeps both rows distinguishable;
+        // the opaque values stay byte-for-byte as advertised.
+        assert_eq!(
+            models.iter().map(|m| m.label.as_str()).collect::<Vec<_>>(),
+            vec![
+                "DeepSeek \u{b7} DeepSeek Flash",
+                "DeepSeek \u{b7} DeepSeek V4.1 Flash",
+                "OpenCode Go \u{b7} DeepSeek V4.1 Flash",
+                "OpenCode Go \u{b7} DeepSeek Flash",
+            ]
+        );
+        // A grouped thought_level ladder is flattened too, then ordered.
+        assert_eq!(
+            models[0].reasoning_levels,
+            vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+            ]
+        );
+        // Any other grouped select passes through as a trait.
+        let fast = models[0]
+            .options
+            .iter()
+            .find(|o| o.id == "fast_mode")
+            .expect("fast mode trait");
+        assert_eq!(fast.default_choice, "off");
+        assert_eq!(
+            fast.choices
+                .iter()
+                .map(|c| (c.id.as_str(), c.label.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("off", "Off"), ("on", "On")]
+        );
+    }
+
+    #[test]
+    fn grouped_config_option_switches_accept_the_opaque_values() {
+        let response = grouped_config_session_response();
+        let no_opts = serde_json::Map::new();
+        let model = "[\"opencode-go\",\"deepseek-v4.1-flash\"]";
+        // Validation and the outgoing switch both see the flattened values.
+        assert!(validate_config_model_selection(&response, Some(model), &no_opts).is_ok());
+        assert_eq!(
+            config_option_sets(
+                &response,
+                Some(model),
+                &["high"],
+                &no_opts,
+                AccessMode::FullAccess
+            ),
+            vec![
+                ("model".to_owned(), json!({ "value": model })),
+                ("effort".to_owned(), json!({ "value": "high" })),
+            ]
+        );
+        // Already-current values need no request at all.
+        assert_eq!(
+            config_option_sets(
+                &response,
+                Some("[\"deepseek-official\",\"deepseek-v4.1-flash\"]"),
+                &["medium"],
+                &no_opts,
+                AccessMode::FullAccess
+            ),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn an_empty_grouped_model_option_falls_back_to_legacy_models() {
+        let response = json!({
+            "sessionId": "s-1",
+            "models": {
+                "currentModelId": "legacy-1",
+                "availableModels": [
+                    { "modelId": "legacy-1", "name": "Legacy One" },
+                    { "modelId": "legacy-2", "name": "Legacy Two" },
+                ],
+            },
+            "configOptions": [{
+                "id": "model",
+                "name": "Model",
+                "category": "model",
+                "type": "select",
+                "currentValue": "legacy-1",
+                "options": [
+                    { "group": "empty", "name": "Empty", "options": [] },
+                    { "group": "missing", "name": "Missing" },
+                ],
+            }],
+        });
+        // An unusable grouped option must not shadow the legacy list.
+        let models = models_from_session(&response, &[]);
+        assert_eq!(
+            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["legacy-1", "legacy-2"]
+        );
+        assert_eq!(models[0].label, "Legacy One");
+        // Nor may it suppress the legacy `session/set_model` switch.
+        assert_eq!(
+            first_class_model_change(&response, Some("legacy-2")).unwrap(),
+            Some("legacy-2".to_owned())
+        );
     }
 
     #[test]
