@@ -120,6 +120,9 @@ describe("cloud install script", { timeout: 60_000 }, () => {
     expect(readFileSync(join(units, "zeron-cloud.service.d", "repair-engine.conf"), "utf8")).toBe(
       `[Service]\nExecStartPre=-${join(data, "repair-engine")}\n`
     );
+    // A runaway program an agent runs dies alone when the kernel kills it for
+    // memory; the engine's unit carries on.
+    expect(readFileSync(join(units, "zeron-cloud.service"), "utf8")).toContain("\nOOMPolicy=continue\n");
     const envFile = join(data, "env");
     expect(statSync(envFile).mode & 0o777).toBe(0o600);
     expect(readFileSync(envFile, "utf8")).toBe(
@@ -297,6 +300,11 @@ describe("cloud install script", { timeout: 60_000 }, () => {
     expect(calls()).toEqual(["systemctl daemon-reload", "systemctl start --no-block zeron-cloud.service"]);
     expect(readFileSync(join(home, ".zeron", "repair-engine"), "utf8")).toBe(REPAIR_ENGINE_SCRIPT);
     expect(readFileSync(join(units, "zeron-cloud.service.d", "repair-engine.conf"), "utf8")).toContain("ExecStartPre=-");
+    // And its unit, written before OOMPolicy=continue, gets it as a drop-in
+    // (with the repair's, one daemon-reload).
+    expect(readFileSync(join(units, "zeron-cloud.service.d", "oom-policy.conf"), "utf8")).toBe(
+      "[Service]\nOOMPolicy=continue\n"
+    );
     clearCalls();
     start();
     expect(calls()).toEqual(["systemctl start --no-block zeron-cloud.service"]);
