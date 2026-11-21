@@ -409,6 +409,10 @@ fn dev_launch(args: &[String]) -> bool {
 /// again as the window opens: a file that changes then compiles at its
 /// require, as before), else ui/'s; the gallery or a fixture.
 fn compile_ahead(screen: &Screen) {
+    // (A bundle's scripts are compiled: its build's bytecode.)
+    if bundle().is_some() {
+        return;
+    }
     let ui = ui_dir();
     let ahead = |dir: &std::path::Path, entry: &str| {
         let ds = dir.join("ds");

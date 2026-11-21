@@ -790,6 +790,17 @@ pub(crate) async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Sen
 pub fn prepare_live() -> PathBuf {
     let fallback = crate::ui_dir().join("app.luau");
     let Some(root) = templates_root() else { return fallback };
+    // An install's bundle: its scripts are its build's bytecode, which loads
+    // only from the bundle, never from a copy in `.live` (where a template's
+    // own files are source and nothing is checked). Zeron's own interface
+    // runs from there; a template laid over it would need Zeron's files as
+    // source, which a bundle doesn't carry yet.
+    if crate::bundle().is_some() {
+        if live::active(&root) != live::BUILTIN {
+            eprintln!("zeron-zgx: templates don't run from a bundle yet; Zeron's own interface runs");
+        }
+        return fallback;
+    }
     // The per-screen templates' copies (Oct 31, development only): gone.
     let _ = std::fs::remove_dir_all(root.join(".loaded"));
     // Safe mode (preview.rs): as Zeron last closed, ⌥ held now, or a
