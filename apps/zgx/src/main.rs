@@ -409,11 +409,22 @@ fn dev_launch(args: &[String]) -> bool {
 /// again as the window opens: a file that changes then compiles at its
 /// require, as before), else ui/'s; the gallery or a fixture.
 fn compile_ahead(screen: &Screen) {
-    // A bundle's scripts are compiled already (its build's bytecode): they
-    // are read and checked ahead instead, the bytes checked handed to the
-    // load.
-    if let Some(bundle) = bundle() {
-        bundle.read_ahead();
+    // A bundle's scripts are compiled already (its build's bytecode): the
+    // bundle is opened (its modules' libraries checked) and its scripts read
+    // and checked ahead instead, on a thread, the bytes checked handed to
+    // the load. Whatever asks for the bundle first waits for it only if
+    // it isn't open yet.
+    if bundle_root().is_some() {
+        let opened = std::thread::Builder::new().name("zeron-bundle".into()).spawn(|| {
+            if let Some(bundle) = bundle() {
+                bundle.read_ahead();
+            }
+        });
+        if opened.is_err() {
+            if let Some(bundle) = bundle() {
+                bundle.read_ahead();
+            }
+        }
         return;
     }
     let ui = ui_dir();
@@ -1397,15 +1408,7 @@ pub(crate) fn bundle() -> Option<&'static zgx_script::app_bundle::Opened> {
     static BUNDLE: std::sync::OnceLock<Option<zgx_script::app_bundle::Opened>> = std::sync::OnceLock::new();
     BUNDLE
         .get_or_init(|| {
-            if cfg!(windows) {
-                return None;
-            }
-            let exe = std::env::current_exe().ok()?;
-            let dir = exe.parent()?;
-            let root = if cfg!(target_os = "macos") { dir.parent()?.join("Resources") } else { dir.to_path_buf() };
-            if !zgx_script::app_bundle::is_bundle(&root) {
-                return None;
-            }
+            let root = bundle_root()?;
             match zgx_script::app_bundle::open(&root) {
                 Ok(opened) => {
                     if std::env::var_os("ZGX_BUNDLE_TIMING").is_some() {
@@ -1423,6 +1426,18 @@ pub(crate) fn bundle() -> Option<&'static zgx_script::app_bundle::Opened> {
             }
         })
         .as_ref()
+}
+
+/// Where the install's bundle is, if it has one, without opening it
+/// (`bundle` opens it).
+fn bundle_root() -> Option<PathBuf> {
+    if cfg!(windows) {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let root = if cfg!(target_os = "macos") { dir.parent()?.join("Resources") } else { dir.to_path_buf() };
+    zgx_script::app_bundle::is_bundle(&root).then_some(root)
 }
 
 /// A host for the script at `path` under `ui/`: from the bundle's folder, as
