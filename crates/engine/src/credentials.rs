@@ -80,12 +80,13 @@
 //!     is replaced while more than 75 minutes remain: Hermes would start its
 //!     own refresh an hour ahead.
 //!   - Antigravity: on its Google login, `acp_token.json` holding the access
-//!     token and its expiry (its refresh fields present but empty) and
-//!     `auth.type = oauth-personal`; it reads the token once per connection,
-//!     so a run starts on one with 50 minutes left and a session whose token
-//!     runs low reads as another credential (replaced at its next turn). On
-//!     the key: `GEMINI_API_KEY`, and `auth.type = gemini-api-key` in its
-//!     `settings.json` (only when absent or plain JSON).
+//!     token (refresh fields present but empty) and `auth.type = oauth-personal`,
+//!     plus a loopback CCPA reverse proxy (`AGY_ACP_CCPA_BASE_URL`) that injects
+//!     live vault tokens on every CCPA request (and retries once on 401) while
+//!     writing a far-future `expiry` in `acp_token.json` so `agy_acp_server`'s
+//!     in-memory credentials never expire mid-turn. On the key: `GEMINI_API_KEY`,
+//!     and `auth.type = gemini-api-key` in its `settings.json` (only when absent
+//!     or plain JSON).
 //!   - Muse: its whole `auth.json` document as the vault holds it (refresh
 //!     tokens empty), with `TBH_CREDENTIAL_BACKEND=file`; a file the broker
 //!     didn't write (its SHA-256 is kept) is Muse's own and stays.
@@ -103,6 +104,8 @@
 //! falls back to a cached, still-unexpired grant. A 4xx (`not_authorized`,
 //! `not_found`, `needs_reconnect`, revoked, kill switch) means "not connected":
 //! the cache entry and any file it backed are dropped.
+
+mod antigravity_proxy;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -481,6 +484,10 @@ struct Inner {
     /// Per account: when its usage was last reported, and what it said
     /// ([`CredentialBroker::report_usage`]).
     usage_reported: Mutex<HashMap<String, (Instant, String)>>,
+    /// Lazy loopback CCPA auth reverse proxy for Antigravity vault runs.
+    antigravity_proxy: Mutex<Option<antigravity_proxy::AntigravityProxy>>,
+    /// Serializes lazy startup of [`Self::antigravity_proxy`].
+    antigravity_proxy_init: tokio::sync::Mutex<()>,
 }
 
 /// An agent's install check: done once it passes; a failed install is
@@ -538,6 +545,8 @@ impl CredentialBroker {
                 codex_check: tokio::sync::Mutex::new(CodexCheck::Unchecked),
                 installs: Mutex::new(HashMap::new()),
                 usage_reported: Mutex::new(HashMap::new()),
+                antigravity_proxy: Mutex::new(None),
+                antigravity_proxy_init: tokio::sync::Mutex::new(()),
             }),
         }
     }
@@ -619,6 +628,56 @@ impl CredentialBroker {
         if let Some(task) = lock(&self.inner.refresher).take() {
             task.abort();
         }
+        let _ = lock(&self.inner.antigravity_proxy).take();
+    }
+
+    fn has_antigravity_proxy(&self) -> bool {
+        lock(&self.inner.antigravity_proxy).is_some()
+    }
+
+    async fn ensure_antigravity_proxy(&self, fixed_upstream: Option<String>) -> Option<String> {
+        if let Some(proxy) = lock(&self.inner.antigravity_proxy).as_ref() {
+            return Some(proxy.base_url().to_owned());
+        }
+        let _guard = self.inner.antigravity_proxy_init.lock().await;
+        if let Some(proxy) = lock(&self.inner.antigravity_proxy).as_ref() {
+            return Some(proxy.base_url().to_owned());
+        }
+        match antigravity_proxy::AntigravityProxy::start(
+            Arc::downgrade(&self.inner),
+            fixed_upstream,
+        )
+        .await
+        {
+            Ok(proxy) => {
+                let url = proxy.base_url().to_owned();
+                *lock(&self.inner.antigravity_proxy) = Some(proxy);
+                Some(url)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "credentials: failed to start Antigravity CCPA auth proxy; falling back to static token"
+                );
+                None
+            }
+        }
+    }
+
+    /// Fetch a live Antigravity access token for the loopback CCPA proxy.
+    /// Uses [`GRANT_SLACK`] (5m) rather than [`ANTIGRAVITY_MIN_LIFE`] (50m) so
+    /// ongoing requests reuse valid cached tokens and transparently refresh
+    /// ahead of real Google expiry. When `force_refresh` is true (after an
+    /// upstream 401), bypasses the cache once to ask the vault directly.
+    async fn antigravity_proxy_grant(&self, force_refresh: bool) -> GrantOutcome {
+        if !force_refresh {
+            return self
+                .grant_within(VaultProvider::Antigravity, GRANT_SLACK, Some(RUN_REVALIDATE))
+                .await;
+        }
+        let _gate = self.inner.grant_gate.lock().await;
+        let fetched = self.fetch(VaultProvider::Antigravity).await;
+        self.record(VaultProvider::Antigravity, fetched)
     }
 
     // -- grants -------------------------------------------------------------
@@ -995,6 +1054,22 @@ impl CredentialBroker {
                         request
                             .env
                             .insert("GEMINI_API_KEY".into(), grant.access_token.clone());
+                    }
+                    if harness == HarnessId::Antigravity
+                        && credential.vault == VaultProvider::Antigravity
+                    {
+                        let caller_upstream = request
+                            .env
+                            .get(antigravity_proxy::CCPA_BASE_URL_ENV)
+                            .cloned()
+                            .filter(|u| !u.trim().is_empty());
+                        if let Some(proxy_url) =
+                            self.ensure_antigravity_proxy(caller_upstream).await
+                        {
+                            request
+                                .env
+                                .insert(antigravity_proxy::CCPA_BASE_URL_ENV.into(), proxy_url);
+                        }
                     }
                     self.write_agent_file(harness, credential.vault, grant)
                         .await;
@@ -1771,6 +1846,7 @@ impl CredentialBroker {
         let record = devin_record(&self.inner.config.data_dir);
         let grant = grant.clone();
         let muse_record = muse_record(&self.inner.config.data_dir);
+        let antigravity_proxied = self.has_antigravity_proxy();
         let written = tokio::task::spawn_blocking(move || match (harness, vault) {
             (HarnessId::Grok, VaultProvider::Grok) => write_grok_entry(&agents.grok_home, &grant),
             (HarnessId::Pi, VaultProvider::Codex) => write_pi_codex(&agents.pi_agent_dir, &grant),
@@ -1783,7 +1859,7 @@ impl CredentialBroker {
                 write_hermes(&agents.hermes_home, vault, &grant, chrono::Utc::now())
             }
             (HarnessId::Antigravity, VaultProvider::Antigravity) => match &agents.antigravity_home {
-                Some(home) => write_antigravity_login(home, &grant),
+                Some(home) => write_antigravity_login(home, &grant, antigravity_proxied),
                 None => Ok(()),
             },
             (HarnessId::Muse, VaultProvider::Muse) => {
@@ -2615,12 +2691,18 @@ fn write_antigravity_key_method(home: &Path) -> Result<(), String> {
 /// `acp_token.json` for an `antigravity` grant: the access token and its
 /// expiry (naive UTC, as google-auth reads it), the client and project, and
 /// the keys a refresh would need there but EMPTY (google-auth requires them
-/// present; the vault refreshes).
-fn antigravity_token_json(grant: &Grant) -> Value {
-    let expiry = chrono::DateTime::from_timestamp_millis(grant.expires_at)
-        .unwrap_or_default()
-        .format("%Y-%m-%dT%H:%M:%S")
-        .to_string();
+/// present; the vault refreshes). When `proxied` is true, writes a far-future
+/// expiry so `agy_acp_server`'s in-memory `Credentials.valid` never trips
+/// mid-turn while the loopback proxy injects fresh vault tokens on every call.
+fn antigravity_token_json(grant: &Grant, proxied: bool) -> Value {
+    let expiry = if proxied {
+        antigravity_proxy::PROXIED_TOKEN_EXPIRY.to_owned()
+    } else {
+        chrono::DateTime::from_timestamp_millis(grant.expires_at)
+            .unwrap_or_default()
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string()
+    };
     let scopes: Vec<&str> = grant
         .settings
         .get("scopes")
@@ -2639,12 +2721,12 @@ fn antigravity_token_json(grant: &Grant) -> Value {
 
 /// Antigravity on the vault's Google login: its token file (unless one of
 /// Antigravity's own is there) and the personal sign-in method.
-fn write_antigravity_login(home: &Path, grant: &Grant) -> Result<(), String> {
+fn write_antigravity_login(home: &Path, grant: &Grant, proxied: bool) -> Result<(), String> {
     if antigravity_token_exists(home) {
         return Ok(());
     }
     let file = antigravity_token_file(home);
-    let desired = antigravity_token_json(grant);
+    let desired = antigravity_token_json(grant, proxied);
     if read_json(&file).as_ref() != Some(&desired) {
         if let Some(dir) = file.parent() {
             private_dir(dir).map_err(|e| e.to_string())?;
@@ -3969,7 +4051,7 @@ mod tests {
             ("project_id".to_string(), "proj-1".to_string()),
             ("scopes".to_string(), "https://www.googleapis.com/auth/cloud-platform openid".to_string()),
         ]);
-        write_antigravity_login(home, &g).unwrap();
+        write_antigravity_login(home, &g, false).unwrap();
         let token = read_json(&antigravity_token_file(home)).unwrap();
         assert_eq!(
             token,
@@ -3983,6 +4065,11 @@ mod tests {
                 "project_id": "proj-1",
             })
         );
+        write_antigravity_login(home, &g, true).unwrap();
+        let proxied_token = read_json(&antigravity_token_file(home)).unwrap();
+        assert_eq!(proxied_token["expiry"], antigravity_proxy::PROXIED_TOKEN_EXPIRY);
+        assert_eq!(proxied_token["token"], "ya29.token");
+        assert_eq!(proxied_token["refresh_token"], "");
         let settings = read_json(&home.join("antigravity-acp/settings.json")).unwrap();
         assert_eq!(settings["auth"]["type"], "oauth-personal");
         // The broker's file isn't Antigravity's own login.
@@ -3992,7 +4079,7 @@ mod tests {
         // Antigravity's own (a refresh token) stays, and is used.
         std::fs::write(antigravity_token_file(home), r#"{"refresh_token":"1//own"}"#).unwrap();
         assert!(antigravity_token_exists(home));
-        write_antigravity_login(home, &g).unwrap();
+        write_antigravity_login(home, &g, true).unwrap();
         clear_antigravity_login(home);
         assert_eq!(read_json(&antigravity_token_file(home)).unwrap()["refresh_token"], "1//own");
     }

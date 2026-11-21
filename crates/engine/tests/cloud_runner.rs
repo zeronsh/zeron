@@ -2485,3 +2485,110 @@ async fn background_refresh_replaces_logins_agents_would_refresh_themselves() {
     assert_eq!(read(&token)["token"], "ya29.2");
     assert_eq!(read(&pi)["anthropic"]["access"], "claude-2");
 }
+
+#[tokio::test]
+async fn antigravity_ccpa_proxy_rotates_vault_tokens_mid_turn() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    let google = |token: &str, secs: i64, generation: i64| {
+        json!({"provider": "antigravity", "accessToken": token, "expiresAt": in_ms(secs), "generation": generation,
+               "settings": {"client_id": "1071.apps.googleusercontent.com", "project_id": "proj",
+                            "scopes": "https://www.googleapis.com/auth/cloud-platform"}})
+    };
+    rig.grant("antigravity", 200, google("ya29.initial", 3600, 1));
+
+    // Mock upstream CCPA server that rejects `ya29.initial` with 401 and
+    // accepts `ya29.rotated` with streamed SSE chunks.
+    let seen_auth = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen_auth_clone = seen_auth.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = listener.local_addr().unwrap();
+    let upstream_task = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let seen = seen_auth_clone.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let text = String::from_utf8_lossy(&buf[..n]);
+                let auth = text
+                    .lines()
+                    .find_map(|line| {
+                        let (k, v) = line.split_once(':')?;
+                        k.eq_ignore_ascii_case("authorization")
+                            .then(|| v.trim().to_owned())
+                    })
+                    .unwrap_or_default();
+                seen.lock().unwrap().push(auth.clone());
+                let (status_line, ct, body) = if auth == "Bearer ya29.rotated" {
+                    ("200 OK", "text/event-stream", "data: {\"ok\":true}\n\n")
+                } else {
+                    ("401 Unauthorized", "application/json", "{\"error\":\"expired\"}")
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status_line}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+
+    let broker = rig.broker(identity, "http://127.0.0.1:9");
+    let mut request = run_request();
+    request.env.insert(
+        "AGY_ACP_CCPA_BASE_URL".into(),
+        format!("http://{upstream_addr}"),
+    );
+    broker
+        .prepare(HarnessId::Antigravity, &mut request)
+        .await
+        .unwrap();
+
+    // `prepare` wrote a far-future expiry so `agy_acp_server`'s in-memory
+    // credentials never trip mid-turn, and pointed `AGY_ACP_CCPA_BASE_URL` at
+    // the broker's loopback auth proxy.
+    let token_doc = read(&rig.home.join(".gemini/antigravity-acp/acp_token.json"));
+    assert_eq!(token_doc["token"], "ya29.initial");
+    assert_eq!(token_doc["refresh_token"], "");
+    assert_eq!(token_doc["expiry"], "2099-01-01T00:00:00");
+    let proxy_url = request
+        .env
+        .get("AGY_ACP_CCPA_BASE_URL")
+        .expect("broker sets AGY_ACP_CCPA_BASE_URL")
+        .clone();
+    assert!(
+        proxy_url.starts_with("http://127.0.0.1:") && proxy_url != format!("http://{upstream_addr}"),
+        "expected loopback proxy URL, got {proxy_url}"
+    );
+
+    // Simulate >50m into a single turn: the vault now issues `ya29.rotated`
+    // while the running `agy_acp_server` still sends its stale startup token.
+    rig.grant("antigravity", 200, google("ya29.rotated", 3600, 2));
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!(
+            "{proxy_url}/v1internal:streamGenerateContent?alt=sse"
+        ))
+        .header("authorization", "Bearer ya29.initial")
+        .header("content-type", "application/json")
+        .body(r#"{"model":"gemini-4-neon"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp.text().await.unwrap(), "data: {\"ok\":true}\n\n");
+    assert_eq!(
+        *seen_auth.lock().unwrap(),
+        vec!["Bearer ya29.initial", "Bearer ya29.rotated"]
+    );
+
+    broker.shutdown();
+    upstream_task.abort();
+}

@@ -275,6 +275,43 @@ local specs: { [string]: { [string]: any } } = {
 		caps_type = true,
 		decorators = true,
 	},
+	zig = {
+		line = SLASHES,
+		strings = { DOUBLE },
+		keywords = set(
+			"addrspace align allowzero and anyframe anytype asm async await break callconv catch comptime const continue defer else enum errdefer error export extern fn for if inline linksection noalias noinline nosuspend or orelse packed pub resume return struct suspend switch test threadlocal try union unreachable usingnamespace var volatile while"
+		),
+		constants = set("true false null undefined"),
+		types = set(
+			"bool void noreturn type anyerror anyopaque comptime_int comptime_float c_char c_short c_ushort c_int c_uint c_long c_ulong c_longlong c_ulonglong c_longdouble f16 f32 f64 f80 f128 usize isize i8 i16 i32 i64 i128 u8 u16 u32 u64 u128"
+		),
+		defs = set("fn"),
+		decls = set("struct enum union error"),
+		caps_type = true,
+		chars = true,
+		zig_multiline = true,
+		zig_builtins = true,
+		zig_int_types = true,
+	},
+	odin = {
+		line = SLASHES,
+		block = BLOCK,
+		nest = true,
+		strings = { DOUBLE, { open = "`", escape = false, multi = true } },
+		keywords = set(
+			"asm auto_cast bit_field bit_set break case cast context continue defer distinct do dynamic else enum fallthrough for foreign if import in map matrix not_in or_break or_continue or_else or_return package proc return struct switch transmute union using when where"
+		),
+		constants = set("true false nil"),
+		types = set(
+			"bool b8 b16 b32 b64 int i8 i16 i32 i64 i128 i16le i32le i64le i128le i16be i32be i64be i128be uint u8 u16 u32 u64 u128 u16le u32le u64le u128le u16be u32be u64be u128be uintptr byte rune f16 f32 f64 f16le f32le f64le f16be f32be f64be complex32 complex64 complex128 quaternion64 quaternion128 quaternion256 string cstring rawptr any typeid"
+		),
+		caps_type = true,
+		chars = true,
+		decorators = true,
+		directives = true,
+		odin_attrs = true,
+		odin_decls = true,
+	},
 }
 
 local M = {}
