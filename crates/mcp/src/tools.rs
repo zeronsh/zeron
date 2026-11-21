@@ -60,6 +60,9 @@ pub struct ToolDef {
 
 pub struct Tools {
     zeron: Arc<Zeron>,
+    zeron_enabled: bool,
+    /// Zeron computer use: `cua-driver` tools proxied as `computer_*`.
+    computer: Option<Arc<crate::computer::Computer>>,
     // Remember successful sends on this MCP connection so wait_for_turn after
     // wait:false also waits for a newly created chat with no session row yet.
     pending_turns: tokio::sync::Mutex<HashMap<String, Arc<PendingTurn>>>,
@@ -151,26 +154,26 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "create_chat",
-            description: "Create a child of your chat to delegate work to (kind subagent, the default when you speak from a chat or pass parent: listed under that chat's Subagents and in its transcript's subagent block), a side chat (kind side: only when the person should treat it as a side conversation of their own), or a standalone session (kind chat, no parent). Any connected provider works (see list_harnesses), whichever provider you run on. Delegation is one level deep: a chat that has a parent cannot create chats. With cloud, the chat runs on a Cloud machine of its own (any built-in agent), from a Cloud chat or a project with a GitHub repository. Select a project and/or device; catalogs are validated on that host. Optionally send a first prompt and wait for the reply. For parallel delegation use create_chats, or launch with wait=false and wait only after all chats have started.",
+            description: "Create a delegated subagent (default when called from a chat or with `parent`), side chat (`kind: side`), or standalone session (`kind: chat`, no parent). Any connected provider works (see list_harnesses); delegation is one level deep. `cloud: true` runs on a Cloud machine (any built-in agent, from a Cloud chat or GitHub-backed project). Catalogs validate on the selected project/device. Use `create_chats` or `wait: false` for parallel delegation.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "kind": { "type": "string", "enum": ["subagent", "side", "chat"], "description": "subagent (default with a parent or origin chat): delegated work, listed under the parent's Subagents. side: a side conversation for the person, needs a parent or origin. chat: standalone, no parent allowed. Omitted: subagent with a parent/origin, chat otherwise." },
-                    "project": { "type": "string", "description": "Project id, path, or name. Belongs to a specific device; when device is supplied, search only there. Optional." },
-                    "device": { "type": "string", "description": "Host device (id or name). With project, it must own that project. Without either, use the local engine." },
-                    "parent": { "type": "string", "description": "Parent chat to record (id, prefix, or title). Defaults to the chat you are speaking from." },
-                    "harness": { "type": "string", "description": "Harness id (see list_harnesses with the chosen device). Prefers a connected provider, claude-code first." },
-                    "model": { "type": "string", "description": "Model id from list_models on the chosen device. Omit for the harness default." },
-                    "reasoning": { "type": "string", "description": "Reasoning level the model supports (e.g. low, medium, high, max)." },
-                    "sandbox": { "type": "string", "enum": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write", "description": "Never wider than the sandbox of the chat you are speaking from: more is lowered to it (accessCapped)." },
-                    "access": { "type": "string", "enum": ["supervised", "auto-accept-edits", "auto", "full-access"], "description": "What the agent may do without asking: supervised asks before commands and file changes, auto-accept-edits applies edits and asks before the rest, auto lets the agent's own reviewer (Claude Code's auto mode, Codex's auto-review) approve safe actions and ask about the rest, full-access asks nothing. Questions go to the person in the chat. Must be one of the harness's accessModes (list_harnesses). Defaults to the access of the chat you are speaking from, and never exceeds it: more is lowered to it (the reply's accessCapped says so)." },
-                    "plan": { "type": "boolean", "default": false, "description": "Plan mode: explore and propose a plan before changing anything. Only for harnesses with supportsPlan." },
-                    "title": { "type": "string", "description": "Sidebar title. Otherwise the engine titles it from the first exchange." },
-                    "branch": { "type": "string", "description": "Branch label to record on the chat." },
-                    "cwd": { "type": "string", "description": "Working directory override (an existing worktree path). Defaults to the project folder." },
-                    "cloud": { "type": "boolean", "default": false, "description": "Run on a Cloud machine of its own (cloning the project's GitHub repository) instead of the project's device. From a Cloud chat, the child clones the same repository; without cloud it shares this machine, unless device or project names another of the person's devices." },
-                    "prompt": { "type": "string", "description": "First message to send right away." },
-                    "wait": { "type": "boolean", "default": false, "description": "With prompt: block until the first turn finishes and return the reply." },
+                    "kind": { "type": "string", "enum": ["subagent", "side", "chat"], "description": "subagent (default with parent/origin), side (user side chat), or chat (standalone, no parent)." },
+                    "project": { "type": "string", "description": "Project id, path, or name (scoped to device if given)." },
+                    "device": { "type": "string", "description": "Host device id or name; omit for local engine." },
+                    "parent": { "type": "string", "description": "Parent chat (id, prefix, or title); defaults to current chat." },
+                    "harness": { "type": "string", "description": "Harness id (list_harnesses); prefers connected, claude-code first." },
+                    "model": { "type": "string", "description": "Model id from list_models; omit for default." },
+                    "reasoning": { "type": "string", "description": "Reasoning effort (e.g. low, medium, high, max)." },
+                    "sandbox": { "type": "string", "enum": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write", "description": "Capped by caller's sandbox (`accessCapped`)." },
+                    "access": { "type": "string", "enum": ["supervised", "auto-accept-edits", "auto", "full-access"], "description": "Approval level from harness accessModes; defaults to & capped by caller (`accessCapped`)." },
+                    "plan": { "type": "boolean", "default": false, "description": "Plan before editing (needs supportsPlan)." },
+                    "title": { "type": "string", "description": "Sidebar title (auto-titled if omitted)." },
+                    "branch": { "type": "string", "description": "Branch label." },
+                    "cwd": { "type": "string", "description": "Working dir override (existing worktree)." },
+                    "cloud": { "type": "boolean", "default": false, "description": "Run on a Cloud machine (needs GitHub repo or Cloud parent)." },
+                    "prompt": { "type": "string", "description": "Initial prompt." },
+                    "wait": { "type": "boolean", "default": false, "description": "With prompt: wait for first turn reply." },
                     "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
                 }
             }),
@@ -281,6 +284,21 @@ fn catalog() -> Vec<ToolDef> {
         }),
     });
     tools.push(ToolDef {
+        name: VISUAL_GUIDE,
+        description: VISUAL_GUIDE_DESCRIPTION,
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "topic": {
+                    "type": "string",
+                    "enum": ["all", "layout", "charts", "canvas", "scene3d", "shader"],
+                    "default": "all",
+                    "description": "Guide section (default all)."
+                }
+            }
+        }),
+    });
+    tools.push(ToolDef {
         name: SHOW_IMAGE,
         description: SHOW_IMAGE_DESCRIPTION,
         input_schema: json!({
@@ -325,6 +343,9 @@ fn catalog() -> Vec<ToolDef> {
 /// Zeron launched (`ZERON_CHAT_ID` set).
 const SHOW_VISUAL: &str = "show_visual";
 
+/// Luau reference guide for `show_visual`; offered alongside `show_visual`.
+const VISUAL_GUIDE: &str = "visual_guide";
+
 /// Shows an image file in the CALLING chat; offered like `show_visual`.
 const SHOW_IMAGE: &str = "show_image";
 
@@ -351,12 +372,15 @@ already sees the image, so the reply should not announce or describe it: add onl
 doesn't show.";
 
 const SHOW_VISUAL_DESCRIPTION: &str = "\
-Show an interactive visual (chart, table, dashboard, diagram, simulation, 3D view) inline in this \
-chat, above your final text reply; call it before writing that reply. Use it when a visual says more \
-than prose. The reader already sees it, so the reply should not announce, locate, or restate it: add \
-only what the visual doesn't say. To show an image file as it is (a screenshot, a photo), use \
-show_image instead.\n\
-\n\
+Render an interactive Luau visual (`title` + `script`, optional `assets`) inline above your final reply; don't restate it in text (use `show_image` for image files).\n\
+Runs in a deterministic sandbox (no I/O/network); build state (`ui.state`) and data at top level, ending with `return function() return ui.column { ... } end` (pre-checked before display).\n\
+Style is enforced: no cards, boxes, or hex colors (use theme tokens; hex only on 3D materials).\n\
+Call `visual_guide` first before writing complex Luau visuals, charts, layouts, Canvas, 3D scenes, or GLSL shaders.";
+
+const VISUAL_GUIDE_DESCRIPTION: &str = "\
+Luau reference guide for `show_visual` (syntax, layout/controls/tokens, charts, 2D canvas, 3D scenes/assets, and GLSL shaders). Call before writing non-trivial visuals.";
+
+const GUIDE_INTRO: &str = "\
 A visual is a Luau script (Lua 5.1 plus `+=`, `continue`, and `if` expressions). Zeron runs it in a \
 sandbox (no I/O or network; math.random is seeded, so data is the same on every render) and renders \
 what it returns with Zeron's own native interface. Build data and state at the top level, then return \
@@ -378,7 +402,9 @@ Zeron runs the script before showing it (setup, render, every draw, and each tab
 button once) and returns the first error with its line; fix it and call again.\n\
 \n\
 Nodes are props tables: children are the array part, strings are plain text, nil and false children \
-are skipped, and lists of nodes flatten (so ui.map results can be children). Unknown props are errors.\n\
+are skipped, and lists of nodes flatten (so ui.map results can be children). Unknown props are errors.";
+
+const GUIDE_LAYOUT_CORE: &str = "\
 - ui.column { gap = 8, align = \"start|center|end\", ... }, ui.row { gap = 12, align, justify = \
 \"start|center|end|between\", wrap = true, ... }, ui.grid { columns = 3, gap = 16, ... }. Any node \
 takes width = px or grow = true inside a row (sliders, charts, tables, canvases, and scenes fill a \
@@ -391,16 +417,22 @@ it the hover wash.\n\
 figure over a muted label; tone colors the delta.\n\
 - ui.table { columns = { \"Region\", { label = \"p95\", align = \"end\" } }, rows = { { \"us-east\", 182 }, \
 ... } }: laid out like a markdown table (bold header, hairline row rules), numbers right-aligned; cells \
-are strings, numbers, or nodes.\n\
+are strings, numbers, or nodes.";
+
+const GUIDE_CHARTS: &str = "\
 - ui.chart { type = \"bar|line|area|scatter\", height = 220, x = { labels }, series = { { name, values = \
 { ... }, color } }, stacked, horizontal (bar), min, max, unit = \"ms\", prefix = \"$\", decimals, legend }. \
 Scatter series take points = { { x, y }, ... } (x_unit, x_decimals). Axes, gridlines, the legend, and a \
-hover readout are built in.\n\
+hover readout are built in.";
+
+const GUIDE_LAYOUT_CONTROLS: &str = "\
 - ui.rule {} is a hairline divider; ui.space { size = 16 }; ui.link { label, url = \"https://...\" } \
 opens like a chat link.\n\
 - Controls: ui.tabs { options = { ... }, value, on_change = function(option) end }, ui.toggle { label, \
 value = bool, on_change = function(on) end }, ui.slider { label, value, min, max, step, unit, on_change \
-= function(n) end }, ui.button { label, on_click = function() end, primary = bool }.\n\
+= function(n) end }, ui.button { label, on_click = function() end, primary = bool }.";
+
+const GUIDE_CANVAS: &str = "\
 - ui.canvas { height = 240, draw = function(g, w, h, t) ... end, animate = bool, on_click = \
 function(x, y) end }: 2D drawing in pixels, origin top-left, w = the reply column's width. \
 g:line(x1, y1, x2, y2, { color, width, dash }), g:polyline(pts, { color, width }), g:polygon(pts, \
@@ -409,7 +441,9 @@ stroke }), g:arc(x, y, r, a0, a1, { color } or { fill, inner = radius } for pie 
 radians clockwise from 3 o'clock), g:text(x, y, str, { size, color, weight, align = \
 \"start|center|end\", baseline = \"top|middle|bottom\", mono }). pts are { x1, y1, x2, y2, ... } or \
 { { x, y }, ... }. g.pointer is { x, y, down } while the pointer is over the canvas (draw hover \
-effects with it); t is seconds, and animate = true redraws every frame while visible.\n\
+effects with it); t is seconds, and animate = true redraws every frame while visible.";
+
+const GUIDE_SCENE3D: &str = "\
 - ui.scene { height = 320, draw = function(s, t) ... end, orbit = true, spin = 0.3 (turntable \
 radians per second), camera = { yaw = 0.6, pitch = 0.45, zoom = 1 }, animate = bool }: real 3D, y up, \
 rendered on the GPU with depth, soft shadows from a key light, and bloom. Zeron frames the camera on \
@@ -424,7 +458,9 @@ f = function(x, z) return y end or values = { { ... } }, detail = 32, colors = {
 color }, s:line(a, b, { color, width }), s:path(points, { color, width }), s:point(at, { radius, \
 color, hint = \"shown on hover\" }), s:label(at, text, { color, size }), s:grid { size = 10, step = 1 }, \
 s:axes { size = 1, labels = { \"x\", \"y\", \"z\" } }. Physical colors may be \"#rrggbb\" in scenes \
-(a material's own color: gold, glass, wood), and only there.\n\
+(a material's own color: gold, glass, wood), and only there.";
+
+const GUIDE_ASSETS: &str = "\
 - Assets: pass real files in show_visual's assets (name -> path) and scripts use them by name. \
 s:model { asset = \"prism.glb\", at, rotate = { x, y, z } degrees, scale, fit = 2 (center it and size \
 its longest side), color and material props override the model's own } draws a glTF model with its \
@@ -435,7 +471,9 @@ background = true also draws it behind the scene. s:sprite { at, size = 48 (pixe
 asset = \"flare.png\" } adds a camera-facing light (a flare or glint; a soft round glow without an \
 asset) that blooms. ui.shader takes textures = { \"rock.jpg\", ... } as iTexture0-iTexture3 \
 (repeating, mipmapped). Find or make assets with your own tools (download, convert KTX2 or EXR to PNG \
-or HDR) before calling.\n\
+or HDR) before calling.";
+
+const GUIDE_SHADER: &str = "\
 - ui.shader { height = 360, code = [[ GLSL ]], buffers = { [[ GLSL ]], ... }, inputs = { speed = \
 s.speed }, blend = \"alpha|light|opaque\", bloom = 0-3, orbit = bool, spin, camera = { yaw, pitch, \
 zoom }, animate = true }: GPU shaders for what geometry can't express: raymarched SDFs and \
@@ -456,27 +494,32 @@ misses. bloom = 0.6-1.5 adds a soft glow around bright light. \
 The width varies with the reader (a phone is about 350px wide, often narrower than the shader is \
 tall): scale the scene by min(iResolution.x, iResolution.y), not one axis, and keep the subject \
 centered with room on both sides, so it fits and stays centered at any aspect. \
-GLSL errors come back with the pass and line number.\n\
+GLSL errors come back with the pass and line number.";
+
+const GUIDE_HELPERS: &str = "\
 - Helpers: ui.scale(d0, d1, r0, r1) returns a mapping function; ui.ticks(lo, hi, n); ui.fmt(n, { unit, \
 prefix, decimals }) groups digits; ui.map(list, function(v, i) end); ui.range(a, b, step); ui.clamp; \
 ui.lerp; ui.series(i) is \"chart<i>\"; ui.color(token, alpha); ui.mix(a, b, t). print(...) output comes \
-back to you.\n\
-\n\
+back to you.";
+
+const GUIDE_COLORS: &str = "\
 Colors are theme tokens, never hex or color names (except scene materials): text; muted (labels, axes, captions); faint \
 (tertiary notes); accent (the one thing to notice); on-accent (text on an accent mark); success, \
 warning, danger (status only); border (hairlines, gridlines); chart1, chart2, chart3, chart4, \
 chart5, chart6 (series, in order; \
 chart1 is the accent). They follow the reader's theme, light or dark, on frosted glass or an opaque \
-surface, so never assume a background color.\n\
-\n\
+surface, so never assume a background color.";
+
+const GUIDE_HOVER: &str = "\
 Hover must not move the page. A visual sits in a transcript, so anything you show only while the \
 pointer is on something (a custom readout, a detail line, a hint, a row's or canvas's hover state) must \
 not change the visual's height, or everything under it jumps as the pointer crosses it. Reserve its \
 space at rest (a placeholder or an empty line of the same height, e.g. ui.text { s.picked or \" \" }), \
 or draw it where it takes no layout space (inside a ui.canvas with g.pointer, or a scene point's hint). \
 Don't add or remove nodes, or lengthen text onto another line, on hover. ui.chart's hover readout \
-never changes the chart's height.\n\
-\n\
+never changes the chart's height.";
+
+const GUIDE_STYLE: &str = "\
 Style, enforced: layout nodes have no fill, border, shadow, padding, or font props. A visual is part \
 of the reply, not a widget, so lay content directly on the chat with type, spacing, and alignment: no \
 cards, tiles, boxed panels, banners, or canvas backgrounds. Stats are a row of plain ui.stat figures; \
@@ -485,6 +528,37 @@ in Zeron's interface font at the reader's text size: body for most text, sm and 
 notes, lg and xl for headings, 2xl for a headline figure. The width is the reply column (about 720px, \
 as narrow as 360px), so lay out fluidly with grow, wrap, and grid, and give charts, canvases, and \
 scenes heights of 160-420px.";
+
+fn visual_guide_text(topic: VisualGuideTopic) -> String {
+    let parts: &[&str] = match topic {
+        VisualGuideTopic::All => &[
+            GUIDE_INTRO, GUIDE_LAYOUT_CORE, GUIDE_CHARTS, GUIDE_LAYOUT_CONTROLS,
+            GUIDE_CANVAS, GUIDE_SCENE3D, GUIDE_ASSETS, GUIDE_SHADER, GUIDE_HELPERS,
+            "", GUIDE_COLORS, "", GUIDE_HOVER, "", GUIDE_STYLE,
+        ],
+        VisualGuideTopic::Layout => &[
+            GUIDE_INTRO, GUIDE_LAYOUT_CORE, GUIDE_LAYOUT_CONTROLS, GUIDE_HELPERS,
+            "", GUIDE_COLORS, "", GUIDE_HOVER, "", GUIDE_STYLE,
+        ],
+        VisualGuideTopic::Charts => &[
+            GUIDE_INTRO, GUIDE_CHARTS, GUIDE_HELPERS,
+            "", GUIDE_COLORS, "", GUIDE_HOVER, "", GUIDE_STYLE,
+        ],
+        VisualGuideTopic::Canvas => &[
+            GUIDE_INTRO, GUIDE_CANVAS, GUIDE_HELPERS,
+            "", GUIDE_COLORS, "", GUIDE_HOVER, "", GUIDE_STYLE,
+        ],
+        VisualGuideTopic::Scene3d => &[
+            GUIDE_INTRO, GUIDE_SCENE3D, GUIDE_ASSETS,
+            "", GUIDE_COLORS, "", GUIDE_HOVER, "", GUIDE_STYLE,
+        ],
+        VisualGuideTopic::Shader => &[
+            GUIDE_INTRO, GUIDE_SHADER, GUIDE_ASSETS, GUIDE_HELPERS,
+            "", GUIDE_HOVER, "", GUIDE_STYLE,
+        ],
+    };
+    parts.join("\n")
+}
 
 /// Read `show_visual`'s asset files (paths relative to the agent's working
 /// directory), base64-encoded by name for the engine.
@@ -601,6 +675,24 @@ struct ShowVisualArgs {
     title: String,
     #[serde(default)]
     assets: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum VisualGuideTopic {
+    #[default]
+    All,
+    Layout,
+    Charts,
+    Canvas,
+    Scene3d,
+    Shader,
+}
+
+#[derive(Deserialize, Default)]
+struct VisualGuideArgs {
+    #[serde(default)]
+    topic: Option<VisualGuideTopic>,
 }
 
 #[derive(Deserialize)]
@@ -834,10 +926,33 @@ impl Tools {
     pub fn new(zeron: Arc<Zeron>) -> Self {
         Self {
             zeron,
+            zeron_enabled: true,
+            computer: None,
             pending_turns: Default::default(),
             plugins: Default::default(),
             command_state: Default::default(),
         }
+    }
+
+    /// Chat/visual tools and their instructions, independent of the driver.
+    pub fn with_zeron_enabled(mut self, enabled: bool) -> Self {
+        self.zeron_enabled = enabled;
+        self
+    }
+
+    pub fn zeron_enabled(&self) -> bool {
+        self.zeron_enabled
+    }
+
+    /// Attach the computer-use proxy (started in the background).
+    pub fn with_computer(mut self, computer: Arc<crate::computer::Computer>) -> Self {
+        computer.warm();
+        self.computer = Some(computer);
+        self
+    }
+
+    pub fn computer(&self) -> Option<&Arc<crate::computer::Computer>> {
+        self.computer.as_ref()
     }
 
     /// Whether the host launched this server's agent without its own
@@ -854,12 +969,15 @@ impl Tools {
     }
 
     pub fn list(&self) -> Vec<ToolDef> {
+        if !self.zeron_enabled {
+            return Vec::new();
+        }
         let in_chat = self.zeron.origin().chat_id.is_some();
         let waits = self.waits_on_background();
         catalog()
             .into_iter()
             .filter(|tool| match tool.name {
-                SHOW_VISUAL | SHOW_IMAGE => in_chat,
+                SHOW_VISUAL | VISUAL_GUIDE | SHOW_IMAGE => in_chat,
                 WAIT_ON_BACKGROUND => waits,
                 _ => true,
             })
@@ -873,6 +991,9 @@ impl Tools {
     /// `Ok` is the tool's structured result; `Err` is a message the model
     /// should read (surfaced as `isError`, never as a protocol error).
     pub async fn call(&self, name: &str, args: Value) -> Result<Value, String> {
+        if !self.zeron_enabled {
+            return Err("Zeron chat and visual tools are disabled in Settings > General.".into());
+        }
         let result = match name {
             "whoami" => self.whoami().await,
             "list_devices" => self.list_devices().await,
@@ -892,6 +1013,7 @@ impl Tools {
             "respond_to_input" => self.respond_to_input(parse(args)?).await,
             "archive_chat" => self.archive_chat(parse(args)?).await,
             SHOW_VISUAL => self.show_visual(parse(args)?).await,
+            VISUAL_GUIDE => self.visual_guide(parse(args)?),
             SHOW_IMAGE => self.show_image(parse(args)?).await,
             WAIT_ON_BACKGROUND => self.wait_on_background(parse(args)?).await,
             plugins::CREATE_PLUGIN => return self.create_plugin(args).await,
@@ -1620,6 +1742,16 @@ impl Tools {
         }))
     }
 
+    fn visual_guide(&self, args: VisualGuideArgs) -> anyhow::Result<Value> {
+        let _chat_id = self
+            .zeron
+            .origin()
+            .chat_id
+            .as_ref()
+            .context("visual_guide only works from an agent Zeron launched in a chat")?;
+        Ok(Value::String(visual_guide_text(args.topic.unwrap_or_default())))
+    }
+
     async fn show_image(&self, args: ShowImageArgs) -> anyhow::Result<Value> {
         use base64::Engine as _;
         let chat_id = self
@@ -2285,12 +2417,10 @@ mod tests {
 
     #[test]
     fn the_show_visual_example_passes_its_own_check() {
-        let start = SHOW_VISUAL_DESCRIPTION.find("local s = ui.state").unwrap();
-        let end = start
-            + SHOW_VISUAL_DESCRIPTION[start..]
-                .find("\n\nZeron runs the script")
-                .unwrap();
-        let report = zeron_visual::check(&SHOW_VISUAL_DESCRIPTION[start..end], 1).unwrap();
+        let guide = visual_guide_text(VisualGuideTopic::All);
+        let start = guide.find("local s = ui.state").unwrap();
+        let end = start + guide[start..].find("\n\nZeron runs the script").unwrap();
+        let report = zeron_visual::check(&guide[start..end], 1).unwrap();
         assert_eq!(report.interactions, 2, "both tabs");
     }
 
@@ -2299,6 +2429,7 @@ mod tests {
         let world = Arc::new(World::default());
         let outside = tools(world.clone(), Origin::default());
         assert!(!outside.has("show_visual"));
+        assert!(!outside.has("visual_guide"));
         assert!(
             outside
                 .call(
@@ -2308,6 +2439,7 @@ mod tests {
                 .await
                 .is_err()
         );
+        assert!(outside.call("visual_guide", json!({})).await.is_err());
 
         let inside = tools(
             world.clone(),
@@ -2318,9 +2450,11 @@ mod tests {
             },
         );
         assert!(inside.has("show_visual"));
+        assert!(inside.has("visual_guide"));
         // The guidance names every color the runtime accepts.
+        let full_guide = visual_guide_text(VisualGuideTopic::All);
         for name in zeron_visual::TOKEN_NAMES {
-            assert!(SHOW_VISUAL_DESCRIPTION.contains(name), "{name}");
+            assert!(full_guide.contains(name), "{name}");
         }
         let shown = inside
             .call(
@@ -2335,6 +2469,99 @@ mod tests {
         assert_eq!(method, methods::PUBLISH_VISUAL);
         assert_eq!(params["chatId"], "chat-alpha-1");
         assert_eq!(params["script"], "return ui.text 'chart'");
+    }
+
+    #[tokio::test]
+    async fn visual_guide_returns_full_and_topic_sections() {
+        let inside = tools(
+            Arc::new(World::default()),
+            Origin {
+                chat_id: Some("chat-alpha-1".into()),
+                device_id: Some("dev-local".into()),
+                ..Default::default()
+            },
+        );
+
+        let default_guide = inside.call("visual_guide", json!({})).await.unwrap();
+        let all_guide = inside
+            .call("visual_guide", json!({ "topic": "all" }))
+            .await
+            .unwrap();
+        assert_eq!(default_guide, all_guide);
+        let all_text = all_guide.as_str().unwrap();
+        for needle in ["ui.column", "ui.chart", "ui.canvas", "ui.scene", "ui.shader"] {
+            assert!(all_text.contains(needle), "all guide missing {needle}");
+        }
+
+        let charts = inside
+            .call("visual_guide", json!({ "topic": "charts" }))
+            .await
+            .unwrap();
+        let charts_text = charts.as_str().unwrap();
+        assert!(charts_text.contains("Scatter series"));
+        assert!(!charts_text.contains("void mainImage"));
+        assert!(!charts_text.contains("s:box"));
+        assert!(charts_text.len() < all_text.len());
+
+        let layout = inside
+            .call("visual_guide", json!({ "topic": "layout" }))
+            .await
+            .unwrap();
+        let layout_text = layout.as_str().unwrap();
+        assert!(layout_text.contains("ui.grid"));
+        assert!(layout_text.contains("ui.slider"));
+        assert!(!layout_text.contains("s:box"));
+        assert!(!layout_text.contains("g:arc"));
+
+        let canvas = inside
+            .call("visual_guide", json!({ "topic": "canvas" }))
+            .await
+            .unwrap();
+        let canvas_text = canvas.as_str().unwrap();
+        assert!(canvas_text.contains("g:arc"));
+        assert!(!canvas_text.contains("void mainImage"));
+        assert!(!canvas_text.contains("s:box"));
+
+        let scene3d = inside
+            .call("visual_guide", json!({ "topic": "scene3d" }))
+            .await
+            .unwrap();
+        let scene3d_text = scene3d.as_str().unwrap();
+        assert!(scene3d_text.contains("s:box"));
+        assert!(scene3d_text.contains("s:model"));
+        assert!(!scene3d_text.contains("Scatter series"));
+        assert!(!scene3d_text.contains("void mainImage"));
+
+        let shader = inside
+            .call("visual_guide", json!({ "topic": "shader" }))
+            .await
+            .unwrap();
+        let shader_text = shader.as_str().unwrap();
+        assert!(shader_text.contains("void mainImage"));
+        assert!(shader_text.contains("iTexture0"));
+        assert!(!shader_text.contains("ui.table"));
+        assert!(!shader_text.contains("s:box"));
+
+        assert!(
+            inside
+                .call("visual_guide", json!({ "topic": "bogus" }))
+                .await
+                .is_err()
+        );
+
+        let reply = crate::jsonrpc::handle_request(
+            &inside,
+            json!(11),
+            "tools/call",
+            json!({ "name": "visual_guide", "arguments": { "topic": "charts" } }),
+        )
+        .await;
+        assert_eq!(reply["result"]["isError"], false);
+        assert_eq!(
+            reply["result"]["content"][0]["text"].as_str(),
+            Some(charts_text)
+        );
+        assert_eq!(reply["result"]["structuredContent"]["result"], charts);
     }
 
     #[tokio::test]
@@ -2751,6 +2978,22 @@ mod tests {
             assert_eq!(dispatched.len(), 2);
             assert_ne!(dispatched[0].1["chatId"], dispatched[1].1["chatId"]);
         }
+    }
+
+    #[tokio::test]
+    async fn disabled_zeron_catalog_and_instructions_are_empty() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default()).with_zeron_enabled(false);
+        assert!(tools.list().is_empty());
+        assert!(!tools.has("whoami"));
+        let init = crate::jsonrpc::handle_request(&tools, json!(1), "initialize", json!({})).await;
+        assert_eq!(init["result"]["instructions"], "");
+        let list = crate::jsonrpc::handle_request(&tools, json!(2), "tools/list", json!({})).await;
+        assert_eq!(list["result"]["tools"], json!([]));
+        let call = crate::jsonrpc::handle_request(&tools, json!(3), "tools/call", json!({"name":"whoami"})).await;
+        assert!(call["error"].is_object());
+        assert!(tools.call("whoami", json!({})).await.is_err());
+        assert!(world.writes.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

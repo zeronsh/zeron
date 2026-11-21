@@ -105,6 +105,28 @@ const ENGINE_METHODS: &[&str] = &[
 ];
 
 pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
+    use zeron_proto::mcp_settings::AgentTools;
+    fn tool_state(p: AgentTools) -> Value {
+        Value::record([("enabled", Value::Bool(p.enabled)), ("tools", Value::Bool(p.tools)), ("computer", Value::Bool(p.computer))])
+    }
+    host.async_action("settings.agent_tools.get", |_| async {
+        let dir = crate::engine::data_dir().ok_or("offline")?;
+        Ok(tool_state(AgentTools::load(&dir).map_err(|_| "failed")?))
+    });
+    host.async_action("settings.agent_tools.set", |args| async move {
+        crate::plugins::preview::refuse("settings.agent_tools.set")?;
+        let dir = crate::engine::data_dir().ok_or("offline")?;
+        let mut p = AgentTools::load(&dir).map_err(|_| "failed")?;
+        let Some(Value::Bool(on)) = args.field("enabled") else { return Err("invalid".into()) };
+        match text(args.field("key").ok_or("invalid")?).as_str() {
+            "enabled" => p.enabled = *on,
+            "tools" => p.tools = *on,
+            "computer" if cfg!(target_os = "macos") => p.computer = *on,
+            _ => return Err("invalid".into()),
+        }
+        p.save(&dir).map_err(|_| "failed")?;
+        Ok(tool_state(p))
+    });
     host.async_action("account.me", |_| async { crate::plugins::preview::refuse("account.me")?; me("GET", None).await });
     host.async_action("account.rename", |name| {
         let body = json!({ "name": text(&name) });

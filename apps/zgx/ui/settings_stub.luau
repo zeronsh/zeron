@@ -127,6 +127,7 @@ local engine: { [string]: any } = {
 	GetCodeMode = { supported = { "codex", "muse" }, enabled = {} },
 	GetBackgroundSettings = { keepRunningAfterQuit = true },
 }
+local agent_tools: { [string]: boolean } = { enabled = true, tools = true, computer = false }
 local banners = { desktop = true, background_only = true, agent_updates = true }
 
 local function find(list: { any }, id: string): number?
@@ -283,6 +284,15 @@ local answers: { [string]: (arg: any) -> any } = {
 	["account.rename_org"] = function()
 		return change(nil)
 	end,
+	["settings.agent_tools.get"] = function() return settled(table.clone(agent_tools)) end,
+	["settings.agent_tools.set"] = function(arg: any)
+		local r = change(nil)
+		if r.error then return r end
+		agent_tools[arg.key] = arg.enabled
+		return settled(table.clone(agent_tools))
+	end,
+	["settings.awake.get"] = function() return settled({ enabled = false }) end,
+	["settings.awake.set"] = function(arg: any) return settled({ enabled = arg.enabled }) end,
 	["settings.engine"] = function(arg: any)
 		local m = arg.method
 		if string.sub(m, 1, 3) == "Set" then

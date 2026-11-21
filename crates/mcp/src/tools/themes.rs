@@ -18,27 +18,14 @@ pub(super) const USE_THEME: &str = "use_theme";
 
 pub(super) const NAMES: [&str; 6] = [LIST_THEMES, GET_THEME, CREATE_THEME, UPDATE_THEME, DELETE_THEME, USE_THEME];
 
-/// A palette's fields, said once for every tool that takes one.
-macro_rules! palette_said {
-    () => {
-        "A palette is one scheme's colours, each \"#rrggbb\" (or \"#rrggbbaa\"): background (the window), raised (chips, selected rows), text, muted, faint (three text inks), accent, danger, warning, success, and syntax: 12 code colours in this order: comment, keyword, string, number, type, function, property, variable, punctuation, tag, attribute, invalid. Optional: shell (sidebar and title bar), card, terminal (its background) and ansi (16 terminal colours). Example dark palette: {\"background\":\"#14181f\",\"raised\":\"#232a35\",\"text\":\"#d8dee9\",\"muted\":\"#a3acb9\",\"faint\":\"#7c8594\",\"accent\":\"#7aa2f7\",\"danger\":\"#f7768e\",\"warning\":\"#e0af68\",\"success\":\"#9ece6a\",\"syntax\":[\"#5c6773\",\"#c792ea\",\"#c3e88d\",\"#f78c6c\",\"#ffcb6b\",\"#82aaff\",\"#d8dee9\",\"#d8dee9\",\"#a3acb9\",\"#f7768e\",\"#ffcb6b\",\"#f7768e\"]}. The window keeps text and code readable: `adjusted` in the reply lists any colour it wears darker or lighter than given."
+/// Palette schema shared by `light` and `dark` across `create_theme` and `update_theme`.
+fn palette_schema(scheme: &str, removable: bool) -> Value {
+    let description = if removable {
+        format!("New {scheme} palette (same shape as create_theme), or null to remove.")
+    } else {
+        format!("The {scheme} palette (see description).")
     };
-}
-
-
-fn palette_schema(scheme: &str) -> Value {
-    json!({
-        "type": ["object", "null"],
-        "description": format!("The {scheme} palette (see the tool's description). In update_theme, null takes the {scheme} version away."),
-        "properties": {
-            "background": { "type": "string" }, "raised": { "type": "string" },
-            "text": { "type": "string" }, "muted": { "type": "string" }, "faint": { "type": "string" },
-            "accent": { "type": "string" }, "danger": { "type": "string" }, "warning": { "type": "string" }, "success": { "type": "string" },
-            "syntax": { "type": "array", "items": { "type": "string" }, "minItems": 12, "maxItems": 12 },
-            "shell": { "type": "string" }, "card": { "type": "string" }, "terminal": { "type": "string" },
-            "ansi": { "type": "array", "items": { "type": "string" }, "minItems": 16, "maxItems": 16 }
-        }
-    })
+    json!({ "type": ["object", "null"], "description": description })
 }
 
 pub(super) fn catalog() -> Vec<ToolDef> {
@@ -46,60 +33,54 @@ pub(super) fn catalog() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: LIST_THEMES,
-            description: "Every theme Zeron's window can wear on this device: built in, a template's own, and yours (imported or made with create_theme). Each has its id, name, source (\"built in\", \"a template's\" or \"yours\"), whether you can change it (editable: yours only), its variant for each scheme (variants: {light?, dark?}) and the schemes it's worn for now (in_use). `wearing` says what light and dark wear now; `guide` is the full reference (docs/themes.md).",
+            description: "List themes on this device (`built in`, `a template's`, or `yours` with `editable: true`), their `variants` (`light`/`dark`), `in_use`, `wearing`, and `guide` (docs/themes.md).",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
             name: GET_THEME,
-            description: "A theme's colours: a palette for each scheme it has (light, dark), in the shape create_theme and update_theme take, so you can read one, change it and save it back. Built-in and template themes are read-only: to change one, call create_theme with its colours and a new name. `adjusted` lists what the window wears instead of a colour too faint to read.",
+            description: "Read a theme's `light`/`dark` palettes in create_theme/update_theme shape (plus `adjusted` if any colour was shifted for contrast). Built-in and template themes are read-only; copy with create_theme to modify.",
             input_schema: json!({ "type": "object", "properties": { "id": id("A theme's id, from list_themes.") }, "required": ["id"] }),
         },
         ToolDef {
             name: CREATE_THEME,
-            description: concat!(
-                "Make a theme of yours on this device, from palettes (`light`, `dark`: one at least) or from a VS Code colour theme (`vscode`: its JSON, with colors and tokenColors). Returns its id, its variant ids and `adjusted`. To wear it, call use_theme. ",
-                palette_said!()
-            ),
+            description: "Create a custom theme from palettes (`light`, `dark`: at least one) or a VS Code theme JSON (`vscode`). Call `use_theme` to wear it. Palette keys (`#rrggbb` or `#rrggbbaa`): `background`, `raised`, `text`, `muted`, `faint`, `accent`, `danger`, `warning`, `success`, `syntax` (12 code colours in this order: comment, keyword, string, number, type, function, property, variable, punctuation, tag, attribute, invalid), plus optional `shell`, `card`, `terminal`, `ansi` (16 colours). Example: {\"background\":\"#14181f\",\"raised\":\"#232a35\",\"text\":\"#d8dee9\",\"muted\":\"#a3acb9\",\"faint\":\"#7c8594\",\"accent\":\"#7aa2f7\",\"danger\":\"#f7768e\",\"warning\":\"#e0af68\",\"success\":\"#9ece6a\",\"syntax\":[\"#5c6773\",\"#c792ea\",\"#c3e88d\",\"#f78c6c\",\"#ffcb6b\",\"#82aaff\",\"#d8dee9\",\"#d8dee9\",\"#a3acb9\",\"#f7768e\",\"#ffcb6b\",\"#f7768e\"]}. `adjusted` lists contrast tweaks.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "What it's called (one line, at most 80 characters). With `vscode`, the theme's own name by default." },
-                    "light": palette_schema("light"),
-                    "dark": palette_schema("dark"),
-                    "vscode": { "type": ["object", "string"], "description": "Instead of palettes: a VS Code colour theme's JSON (as an object or as text), with no `include`." }
+                    "name": { "type": "string", "description": "Theme name (1 line, <=80 chars); defaults to vscode theme name." },
+                    "light": palette_schema("light", false),
+                    "dark": palette_schema("dark", false),
+                    "vscode": { "type": ["object", "string"], "description": "VS Code colour theme JSON (object or string, no `include`) instead of palettes." }
                 }
             }),
         },
         ToolDef {
             name: UPDATE_THEME,
-            description: concat!(
-                "Change one of your themes (list_themes: editable): rename it, give a scheme a new palette, or take a scheme away with null. Its ids stay, so while it's worn the window restyles at once. To change a built-in or template theme, make a copy with create_theme instead. ",
-                palette_said!()
-            ),
+            description: "Update one of your themes (`editable: true` in list_themes): rename, replace `light`/`dark` palettes (same shape as create_theme), or pass null to remove a scheme. Active schemes restyle live.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "id": id("One of your themes' ids, from list_themes (editable: true)."),
-                    "name": { "type": "string", "description": "A new name." },
-                    "light": palette_schema("light"),
-                    "dark": palette_schema("dark")
+                    "name": { "type": "string", "description": "New name." },
+                    "light": palette_schema("light", true),
+                    "dark": palette_schema("dark", true)
                 },
                 "required": ["id"]
             }),
         },
         ToolDef {
             name: DELETE_THEME,
-            description: "Delete one of your themes from this device (built-in and template themes can't be deleted). A scheme it was worn for goes back to the template's theme, or to Zeron's.",
+            description: "Delete one of your themes (built-in and template themes can't be deleted); worn schemes revert to the template or Zeron default.",
             input_schema: json!({ "type": "object", "properties": { "id": id("One of your themes' ids, from list_themes.") }, "required": ["id"] }),
         },
         ToolDef {
             name: USE_THEME,
-            description: "Wear a theme: any theme from list_themes, or a variant of one. The window changes at once. `slot` is \"light\", \"dark\" or \"both\" (the default: each scheme the theme has). A theme with only a dark version can't be worn for light.",
+            description: "Wear any theme or variant from list_themes right away (`slot`: \"light\", \"dark\", or \"both\", default \"both\").",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "id": id("A theme's id (or one of its variants'), from list_themes."),
-                    "slot": { "type": "string", "enum": ["light", "dark", "both"], "description": "Which scheme wears it (default both)." }
+                    "id": id("Theme or variant id, from list_themes."),
+                    "slot": { "type": "string", "enum": ["light", "dark", "both"], "description": "Target scheme (default both)." }
                 },
                 "required": ["id"]
             }),
@@ -280,8 +261,15 @@ mod tests {
     fn every_theme_tool_is_listed_once_with_its_palette_said() {
         let defs = catalog();
         assert_eq!(defs.iter().map(|d| d.name).collect::<Vec<_>>(), NAMES);
-        for def in &defs[2..4] {
-            assert!(def.description.contains("12 code colours in this order") && def.description.contains("\"background\":\"#14181f\""), "{}", def.name);
-        }
+        let create = &defs[2];
+        assert!(
+            create.description.contains("12 code colours in this order")
+                && create.description.contains("\"background\":\"#14181f\""),
+            "{}",
+            create.name
+        );
+        let update = &defs[3];
+        assert!(!update.description.contains("\"background\":\"#14181f\""));
+        assert!(update.description.contains("create_theme"));
     }
 }

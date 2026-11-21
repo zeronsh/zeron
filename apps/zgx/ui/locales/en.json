@@ -1212,6 +1212,26 @@
         "cloud": "Always on for Cloud",
         "on": "Agents' commits add zeronsh[bot] as a co-author"
       },
+      "agent_tools": {
+        "title": "Agent tools",
+        "description": "Applies to new agents on this device. Your other MCP servers are not affected.",
+        "enabled": {
+          "label": "Zeron MCP",
+          "description": "Give agents access to the selected built-in tools. Turn off to start agents without the Zeron MCP server."
+        },
+        "tools": {
+          "label": "Chat and visual tools",
+          "description": "Let agents work with Zeron chats, delegate tasks and show visuals."
+        },
+        "computer": {
+          "label": "Computer use",
+          "description": "Let agents read and control apps on this Mac. Requires CuaDriver.app and macOS privacy permissions."
+        },
+        "awake": {
+          "label": "Keep Mac awake",
+          "description": "Prevent system sleep, even with the lid closed, while local agents work. Sleep resumes after 20 seconds of inactivity. Setup asks for administrator permission."
+        }
+      },
       "keep_running": {
         "label": "Keep Zeron running after you quit",
         "on": "Chats keep working, and other devices can reach them.",

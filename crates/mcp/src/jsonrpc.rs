@@ -11,6 +11,11 @@
 //! a bad line is skipped, never fatal, and a reply too big for the client to
 //! read is cut down rather than sent whole. A long call reports progress, as
 //! clients abort a call that goes quiet; `notifications/cancelled` stops one.
+//!
+//! a cancelled computer action also interrupts the driver's native
+//! input, as Synara's Stop does. When stdin closes the computer's turn ends:
+//! running input is interrupted and the agent cursor hidden before the
+//! process exits.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -19,6 +24,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
+use tokio::task::AbortHandle;
 
 use crate::tools::Tools;
 
@@ -45,8 +51,8 @@ For parallel work, start every chat before waiting on any: `create_chats` or `se
 (or `wait: false`, then `wait_for_turn`).\n\
 \n\
 Where `show_visual` is offered and a chart, table, diagram, dashboard, or 3D view would say \
-more than prose, show one with it before your final reply, and don't restate it there. Show \
-an image file with `show_image`.";
+more than prose, call `visual_guide` first and show one with it before your final reply, and \
+don't restate it there. Show an image file with `show_image`.";
 
 /// Appended to [`INSTRUCTIONS`] where the agent is offered
 /// `wait_on_background` ([`zeron_proto::McpServer::WAITS_ON_BACKGROUND_ENV`]).
@@ -61,10 +67,10 @@ const SIDE_CHATS_ONLY: &str = "\n\n\
 Your own subagent tools are turned off in Zeron's settings: where you would start a \
 subagent, delegate through Zeron chats instead, with `create_chats` (or `create_chat`).";
 
-/// What `initialize` tells the agent: with when to say it waits where it's
-/// offered `wait_on_background`, and the side-chat rule when its host turned
-/// the agent's own subagents off.
-pub(crate) fn instructions(waits: bool, side_chats_only: bool) -> std::borrow::Cow<'static, str> {
+/// The chat tools' part of what `initialize` / `server/discover` tells the agent:
+/// with when to say it waits where it's offered `wait_on_background`, and the
+/// side-chat rule when its host turned the agent's own subagents off.
+fn chat_instructions(waits: bool, side_chats_only: bool) -> std::borrow::Cow<'static, str> {
     if !waits && !side_chats_only {
         return INSTRUCTIONS.into();
     }
@@ -72,6 +78,16 @@ pub(crate) fn instructions(waits: bool, side_chats_only: bool) -> std::borrow::C
     let side_chats = if side_chats_only { SIDE_CHATS_ONLY } else { "" };
     format!("{INSTRUCTIONS}{waits}{side_chats}").into()
 }
+
+/// appended when the computer-use driver is available.
+const COMPUTER_INSTRUCTIONS: &str = "\n\n\
+Computer use: tools prefixed `computer_` control this Mac through cua-driver \
+(screenshots, accessibility trees, clicks, typing, app and window control, browser \
+automation). The user sees an agent cursor labelled Zeron wherever you act. If a tool reports missing Accessibility or Screen Recording \
+permission, ask the user to grant it to Zeron in System Settings > Privacy & Security.\n\n";
+
+/// How long `initialize` waits for the driver so its guidance can be included.
+const COMPUTER_INIT_WAIT: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// How often a call still running reports progress. Clients abort a call
 /// that sends nothing for long enough (Claude Code: 30 minutes); a Zeron
@@ -82,13 +98,14 @@ const PROGRESS_EVERY: Duration = Duration::from_secs(30);
 /// connection, for good, on a message past 16 MiB.
 const MAX_REPLY_BYTES: usize = 8 * 1024 * 1024;
 
-/// Requests in flight, by id, so `notifications/cancelled` can stop one.
-type InFlight = Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>>;
-
 const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
+
+/// Requests in flight by id (JSON text), so a cancellation can abort them.
+/// The flag marks computer actions, whose cancellation interrupts input.
+type InFlight = Arc<Mutex<HashMap<String, (AbortHandle, bool)>>>;
 
 /// Serve MCP on this process's stdin/stdout until stdin closes.
 pub async fn serve_stdio(tools: Arc<Tools>) -> anyhow::Result<()> {
@@ -147,9 +164,31 @@ pub async fn serve_stdio(tools: Arc<Tools>) -> anyhow::Result<()> {
     // The watch holds a writer handle: stop it so the writer can drain.
     list_watch.abort();
     let _ = list_watch.await;
+    // The client went away (turn over, Stop, or harness exit): leave no
+    // input running and no agent cursor on screen behind it.
+    if let Some(computer) = tools.computer() {
+        computer.turn_ended().await;
+    }
     drop(out_tx);
     let _ = writer.await;
     Ok(())
+}
+
+/// `notifications/cancelled`: abort the request; a computer action also
+/// interrupts the driver's input (the action may already be running).
+fn cancel(tools: &Arc<Tools>, params: &Value, in_flight: &InFlight) {
+    let Some(id) = params.get("requestId") else {
+        return;
+    };
+    let Some((handle, action)) = lock(in_flight).remove(&id.to_string()) else {
+        return;
+    };
+    handle.abort();
+    if action && let Some(computer) = tools.computer().cloned() {
+        tokio::spawn(async move {
+            computer.stop_input().await;
+        });
+    }
 }
 
 /// The notification a client re-lists its tools on.
@@ -204,9 +243,14 @@ fn route(
     let params = object.get("params").cloned().unwrap_or(Value::Null);
     match (id, method) {
         (Some(id), Some(method)) => {
+            let key = id.to_string();
+            let action = method == "tools/call"
+                && params
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(crate::computer::Computer::is_action_tool);
             let tools = tools.clone();
             let out = out.clone();
-            let key = id.to_string();
             let token = params
                 .get("_meta")
                 .and_then(|meta| meta.get("progressToken"))
@@ -225,20 +269,16 @@ fn route(
                 let _ = out.send(cap_reply(response).to_string()).await;
                 lock(&registry).remove(&done_key);
             });
-            requests.insert(key, task.abort_handle());
-            None
-        }
-        (None, Some(method)) if method == "notifications/cancelled" => {
-            // The client gave up on a request: stop it (a wait holding a
-            // subscription to the engine releases it) and send nothing back.
-            let key = params.get("requestId").map(Value::to_string);
-            if let Some(task) = key.and_then(|key| lock(in_flight).remove(&key)) {
-                task.abort();
-            }
+            requests.insert(key, (task.abort_handle(), action));
             None
         }
         (None, Some(method)) => {
             tracing::debug!(method, "mcp: notification");
+            if method == "notifications/cancelled" {
+                // The client gave up on a request: stop it (a wait holding a
+                // subscription to the engine releases it) and send nothing back.
+                cancel(tools, &params, in_flight);
+            }
             None
         }
         // A response to a server-initiated request: we never send any.
@@ -248,6 +288,21 @@ fn route(
             INVALID_REQUEST,
             "missing method",
         )),
+    }
+}
+
+pub(crate) async fn instructions(tools: &Tools) -> String {
+    let base = if tools.zeron_enabled() {
+        chat_instructions(tools.waits_on_background(), tools.side_chats_only())
+    } else {
+        "".into()
+    };
+    let Some(computer) = tools.computer() else {
+        return base.into_owned();
+    };
+    match tokio::time::timeout(COMPUTER_INIT_WAIT, computer.instructions()).await {
+        Ok(Some(driver)) => format!("{base}{COMPUTER_INSTRUCTIONS}{driver}"),
+        _ => base.into_owned(),
     }
 }
 
@@ -274,16 +329,48 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
                         "name": "zeron",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
-                    "instructions": instructions(tools.waits_on_background(), tools.side_chats_only()),
+                    "instructions": instructions(tools).await,
                 }),
             )
         }
         "ping" => ok_response(id, json!({})),
-        "tools/list" => ok_response(id, json!({ "tools": tools.list_all().await })),
+        "tools/list" => {
+            // The static catalog and the engine's plugin tools, then Zeron's
+            // computer-use tools from the driver.
+            let mut list: Vec<Value> = tools
+                .list_all()
+                .await
+                .into_iter()
+                .filter_map(|tool| serde_json::to_value(tool).ok())
+                .collect();
+            if let Some(computer) = tools.computer() {
+                list.extend(computer.tools().await);
+            }
+            ok_response(id, json!({ "tools": list }))
+        }
         "tools/call" => {
             let Some(name) = params.get("name").and_then(Value::as_str) else {
                 return error_response(id, INVALID_PARAMS, "tools/call needs a tool name");
             };
+            if let Some(computer) = tools.computer()
+                && crate::computer::Computer::is_computer_tool(name)
+            {
+                let arguments = params
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                // The driver's result (text + screenshots) passes through verbatim.
+                return match computer.call(name, arguments).await {
+                    Ok(result) => ok_response(id, result),
+                    Err(message) => ok_response(
+                        id,
+                        json!({
+                            "content": [{ "type": "text", "text": message }],
+                            "isError": true,
+                        }),
+                    ),
+                };
+            }
             if !tools.has(name) && !crate::tools::is_plugin_tool_name(name) {
                 return error_response(id, INVALID_PARAMS, &format!("unknown tool: {name}"));
             }
@@ -295,7 +382,7 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
                 Ok(value) => ok_response(
                     id,
                     json!({
-                        "content": [{ "type": "text", "text": pretty(&value) }],
+                        "content": [{ "type": "text", "text": compact(&value) }],
                         "structuredContent": wrap_structured(value),
                         "isError": false,
                     }),
@@ -377,10 +464,10 @@ fn wrap_structured(value: Value) -> Value {
     }
 }
 
-fn pretty(value: &Value) -> String {
+fn compact(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
-        other => serde_json::to_string_pretty(other).unwrap_or_default(),
+        other => serde_json::to_string(other).unwrap_or_default(),
     }
 }
 
@@ -428,6 +515,9 @@ mod tests {
                         .boxed(),
                 )),
                 methods::LIST_PLUGIN_TOOLS => Ok(RpcReply::Value(item(&["p__one"]))),
+                methods::CALL_PLUGIN_TOOL => {
+                    Ok(RpcReply::Value(json!({ "ok": true, "value": { "a": 1, "b": [2, 3] } })))
+                }
                 other => Err(RpcError::UnknownMethod(other.into())),
             }
         }
@@ -481,8 +571,8 @@ mod tests {
 
     #[test]
     fn side_chats_only_instructions_add_the_delegation_rule() {
-        assert_eq!(instructions(false, false), INSTRUCTIONS);
-        let side_chats = instructions(false, true);
+        assert_eq!(chat_instructions(false, false), INSTRUCTIONS);
+        let side_chats = chat_instructions(false, true);
         assert!(side_chats.starts_with(INSTRUCTIONS));
         assert!(side_chats.ends_with("with `create_chats` (or `create_chat`)."));
     }
@@ -526,11 +616,29 @@ mod tests {
     #[test]
     fn only_an_agent_offered_wait_on_background_is_told_when_to_use_it() {
         assert!(!INSTRUCTIONS.contains("wait_on_background"));
-        let waits = instructions(true, false);
+        let waits = chat_instructions(true, false);
         assert!(waits.starts_with(INSTRUCTIONS));
         assert!(waits.contains("call `wait_on_background`"));
-        let both = instructions(true, true);
+        let both = chat_instructions(true, true);
         assert!(both.contains("call `wait_on_background`"));
         assert!(both.ends_with("with `create_chats` (or `create_chat`)."));
+    }
+
+    #[tokio::test]
+    async fn tool_call_text_is_compact_json_and_strings_stay_plain() {
+        assert_eq!(compact(&json!({ "a": 1, "b": [2, 3] })), "{\"a\":1,\"b\":[2,3]}");
+        assert_eq!(compact(&Value::String("line1\nline2".into())), "line1\nline2");
+
+        let tools = watching_tools();
+        let reply = handle_request(
+            &tools,
+            json!(9),
+            "tools/call",
+            json!({ "name": "p__one", "arguments": {} }),
+        )
+        .await;
+        assert_eq!(reply["result"]["isError"], false);
+        assert_eq!(reply["result"]["content"][0]["text"], "{\"a\":1,\"b\":[2,3]}");
+        assert_eq!(reply["result"]["structuredContent"], json!({ "a": 1, "b": [2, 3] }));
     }
 }

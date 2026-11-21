@@ -148,6 +148,19 @@ impl Drop for Grant {
         for (_, stream) in lock(&self.state.listens).drain() {
             stream.abort();
         }
+        // end any active computer-use turn when this run's grant drops.
+        if let Some(computer) = self
+            .state
+            .tools
+            .get()
+            .and_then(|tools| tools.computer().cloned())
+        {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    computer.turn_ended().await;
+                });
+            }
+        }
     }
 }
 
@@ -575,6 +588,7 @@ async fn handle(inner: Arc<Inner>, request: Request<hyper::body::Incoming>) -> R
             match method.as_str() {
                 "server/discover" => {
                     let tools = tools_for(&inner, &grant);
+                    let instructions = crate::jsonrpc::instructions(&tools).await;
                     json_response(
                         StatusCode::OK,
                         &json!({
@@ -585,10 +599,7 @@ async fn handle(inner: Arc<Inner>, request: Request<hyper::body::Incoming>) -> R
                                 "supportedVersions": MODERN_VERSIONS,
                                 "capabilities": { "tools": { "listChanged": true } },
                                 "_meta": { META_SERVER_INFO: server_info() },
-                                "instructions": crate::jsonrpc::instructions(
-                                    tools.waits_on_background(),
-                                    tools.side_chats_only(),
-                                ),
+                                "instructions": instructions,
                                 "ttlMs": TOOLS_TTL_MS,
                                 "cacheScope": "private",
                             },
@@ -695,6 +706,16 @@ fn sse_body<G: Send + 'static>(rx: mpsc::Receiver<Bytes>, guard: G) -> Body {
     BodyExt::boxed_unsync(StreamBody::new(stream))
 }
 
+/// Dropping an HTTP response or cancelling its request also stops driver input.
+struct CancelInput(Option<Arc<crate::Computer>>);
+impl Drop for CancelInput {
+    fn drop(&mut self) {
+        if let Some(computer) = self.0.take() && let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move { computer.stop_input().await; });
+        }
+    }
+}
+
 /// `tools/call`: run on a task of its own, answered on an SSE stream (with
 /// progress and keep-alives while it runs) when the client takes one, else
 /// as one JSON object once it ends.
@@ -718,6 +739,7 @@ fn call(
     let registry = Arc::downgrade(grant);
     let done_key = key.clone();
     let mut in_flight = lock(&grant.in_flight);
+    let mut input = CancelInput(params["name"].as_str().filter(|name| crate::Computer::is_action_tool(name)).and_then(|_| tools.computer().cloned()));
     let task = tokio::spawn(async move {
         let work = handle_request(&tools, id, &method, params);
         tokio::pin!(work);
@@ -747,6 +769,7 @@ fn call(
                 }
             }
         };
+        input.0.take(); // A completed action must not interrupt the next one.
         let response = cap_reply(response);
         let response = if modern { modernize(response, "tools/call") } else { response };
         let bytes = if streams {
