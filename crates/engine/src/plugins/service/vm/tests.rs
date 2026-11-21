@@ -295,3 +295,129 @@ fn json_round_trips_through_luau() {
         assert_eq!(back, expected);
     }
 }
+
+/// Run the shipped Git service with foreign path strings. Only the host's
+/// folder list and command execution are replaced; validation stays in Luau.
+#[tokio::test]
+async fn git_checkout_paths_keep_their_platform_semantics() {
+    struct Folders {
+        roots: Vec<String>,
+        runs: Mutex<Vec<Json>>,
+    }
+    impl Ops for Folders {
+        fn start(&self, kind: &str, args: Json, done: Done) {
+            match kind {
+                "folders" => done(Ok(json!(self.roots))),
+                "run" => {
+                    self.runs.lock().unwrap().push(args);
+                    done(Err("git reached".into()));
+                }
+                _ => panic!("unexpected op: {kind}"),
+            }
+        }
+        fn emit(&self, _event: &str, _data: Json) {}
+        fn log(&self, _line: &str) {}
+    }
+    let source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../apps/zgx/plugins-builtin/git/service.luau"
+    ));
+    let dir = folder(&[("service.luau", source)]);
+    for (root, cwd, refusal) in [
+        (r"C:\work\project", r"C:\work\project", None),
+        (r"C:\work\project", r"C:\work\project\src", None),
+        (r"C:\work\project\", "C:/work/project/src", None),
+        ("C:/work/project/", r"C:\work/project\src", None),
+        ("c:/work/project", r"c:\work\project", None),
+        (r"C:\", r"C:\", None),
+        ("C:/", "C:/", None),
+        (r"C:\", r"C:\work", None),
+        ("/work/project", "/work/project/src", None),
+        (r"/work/a\b", r"/work/a\b", None),
+        ("/work", r"/work/a\..\b", None),
+        (
+            r"C:\work\project",
+            r"C:\work\project-other",
+            Some("not_a_checkout:"),
+        ),
+        (
+            r"C:\work\project",
+            r"D:\work\project",
+            Some("not_a_checkout:"),
+        ),
+        (
+            r"C:\work\project",
+            r"C:\work\project\..\outside",
+            Some("no_checkout:"),
+        ),
+        (
+            r"C:\work\project",
+            r"C:/work/project/..\outside",
+            Some("no_checkout:"),
+        ),
+        (
+            r"C:\work\project",
+            r"C:\work\project\.\src",
+            Some("no_checkout:"),
+        ),
+        (
+            r"C:\work\project",
+            "C:/work/project/../outside",
+            Some("no_checkout:"),
+        ),
+        (r"C:\work\project", "C:work/project", Some("no_checkout:")),
+        (r"C:\work\project", "C:", Some("no_checkout:")),
+        (r"C:\work\project", r"\work\project", Some("no_checkout:")),
+        (
+            "/work/project",
+            "/work/project/../outside",
+            Some("no_checkout:"),
+        ),
+        (
+            "/work/project",
+            "/work/project-other",
+            Some("not_a_checkout:"),
+        ),
+        ("/work/project", "work/project", Some("no_checkout:")),
+        ("/work/project", "", Some("no_checkout:")),
+        (r"/work/a\b", "/work/a/b", Some("not_a_checkout:")),
+    ] {
+        let ops = Arc::new(Folders {
+            roots: vec![root.into()],
+            runs: Mutex::default(),
+        });
+        let (vm, loaded) = Vm::start(
+            Spec {
+                plugin: "git".into(),
+                ..spec(dir.path(), Limits::default())
+            },
+            ops.clone(),
+        );
+        loaded.await.unwrap().unwrap();
+        for method in ["history", "status", "changes"] {
+            let result = ask(&vm, method, json!({ "cwd": cwd })).await.unwrap();
+            let runs = std::mem::take(&mut *ops.runs.lock().unwrap());
+            if let Some(code) = refusal {
+                assert!(
+                    matches!(&result, Err(Failure::Error(why)) if why.starts_with(code)),
+                    "{method} {root:?} {cwd:?}: {result:?}"
+                );
+                assert!(runs.is_empty(), "refused path reached git: {runs:?}");
+            } else {
+                assert_eq!(
+                    result,
+                    Err(Failure::Error("git reached".into())),
+                    "{method} {root:?} {cwd:?}"
+                );
+                assert_eq!(runs.len(), 1, "{runs:?}");
+                assert_eq!(runs[0]["program"], "git");
+                assert_eq!(runs[0]["args"][0], "-C");
+                assert_eq!(
+                    runs[0]["args"][1], cwd,
+                    "the command must keep the original path"
+                );
+            }
+        }
+        vm.stop();
+    }
+}
