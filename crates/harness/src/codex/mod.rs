@@ -219,6 +219,20 @@ pub fn login_command(codex_home: &std::path::Path) -> Result<Command, HarnessErr
     Ok(cmd)
 }
 
+/// The Visualize plugin emits HTML references that only the Codex UI can
+/// render. Select the skill by name so both local and remote copies yield
+/// to Zeron’s `show_visual` during discovery and in the model’s turn.
+fn app_server_command(exe: &Path) -> Command {
+    let mut cmd = Command::new(exe);
+    cmd.args([
+        "app-server",
+        "-c",
+        r#"skills.config=[{name="visualize:visualize",enabled=false}]"#,
+    ]);
+    crate::compose_child_path(&mut cmd, exe);
+    cmd
+}
+
 /// The Codex harness. Construct with [`CodexHarness::new`]; tests point it at a
 /// fake app server with [`CodexHarness::with_executable`].
 pub struct CodexHarness {
@@ -323,12 +337,10 @@ impl CodexHarness {
     /// skills are separate from the slash-command catalog.
     async fn discover_skills(&self, cwd: Option<&std::path::Path>) -> Result<Value, HarnessError> {
         let exe = self.resolve_executable()?;
-        let mut cmd = Command::new(&exe);
-        cmd.arg("app-server");
+        let mut cmd = app_server_command(&exe);
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
         }
-        crate::compose_child_path(&mut cmd, &exe);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -379,9 +391,7 @@ impl CodexHarness {
     /// successful picker response.
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
         let exe = self.resolve_executable()?;
-        let mut cmd = Command::new(&exe);
-        cmd.arg("app-server");
-        crate::compose_child_path(&mut cmd, &exe);
+        let mut cmd = app_server_command(&exe);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -1107,9 +1117,7 @@ struct AppServer {
 }
 
 fn spawn_app_server(exe: &Path, request: &RunRequest) -> Result<AppServer, HarnessError> {
-    let mut cmd = Command::new(exe);
-    cmd.arg("app-server");
-    crate::compose_child_path(&mut cmd, exe);
+    let mut cmd = app_server_command(exe);
     // Host-resolved credentials (a Cloud device's managed CODEX_HOME,
     // GH_TOKEN, …). Absent on laptops: the CLI's own login is used.
     crate::apply_run_env(&mut cmd, &request.env);
