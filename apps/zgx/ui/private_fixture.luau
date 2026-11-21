@@ -53,4 +53,11 @@ return ui.column {
 		ui.text { "Signed in as", text_size = "$font.size.md" },
 		ds.PrivateText { "mara@halcyon.dev", text_size = "$font.size.md" },
 	},
+	-- In a row pressed as a whole (a menu's): no reveal of its own.
+	ui.row {
+		id = "private-pressed",
+		gap = "$space.1",
+		ui.text { "Account", text_size = "$font.size.md" },
+		ds.PrivateText { "theo.lindqvist@halcyon.dev", reveal = false, text_size = "$font.size.md" },
+	},
 }

@@ -59,6 +59,9 @@ end
 
 -- How far the stand-in is blurred: its letters gone, its shape kept.
 local BLUR = 3
+-- How long the pointer rests on an address that has no reveal of its own
+-- (in a row pressed as a whole) before it shows: longer than a pass.
+local REST_MS = 800
 
 -- Props that style the text (the rest of a PrivateText's are its box's).
 local TEXT = { text_size = true, line_height = true, weight = true, color = true, font = true, align = true }
@@ -142,6 +145,25 @@ local Hidden = ui.component(function(p: { props: Props, value: () -> string }): 
 			return false
 		end
 		box.focus = { outline = "$zeron.focus.width", outline_color = "$zeron.focus.ring", outline_offset = ui.raw(2, "the ring clear of the text's own ink") }
+	else
+		-- (The click is the row's, so the pointer resting on the address
+		-- shows it instead, and leaving hides it again: in a menu's row,
+		-- the model picker's account, still the owner's to read. Resting,
+		-- not passing: a pointer crossing it on the way to a press, on a
+		-- shared screen, shows nothing.)
+		local inside_now = false
+		box.on_hover = function(inside: boolean)
+			inside_now = inside
+			if not inside then
+				shown:set(false)
+				return
+			end
+			ui.after(REST_MS, function()
+				if inside_now then
+					shown:set(true)
+				end
+			end)
+		end
 	end
 	-- Which shows: the stand-in or the address (a real swap; the address
 	-- arrives with a short fade, and goes at once).
