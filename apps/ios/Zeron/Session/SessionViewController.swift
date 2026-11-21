@@ -56,7 +56,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         companionsItem = UIBarButtonItem(image: UIImage(systemName: "square.stack.3d.up"), primaryAction: UIAction { [weak self] _ in
             self?.showCompanions(section: nil)
         })
-        companionsItem.accessibilityLabel = "Agents, side chats and terminals"
+        companionsItem.accessibilityLabel = "Changes, agents, side chats and terminals"
         companionsItem.accessibilityIdentifier = "session-companions"
         // The session has its own composer, so the tab bar's voice control
         // steps aside with the accessory; the call stays a tap away up here.
@@ -378,7 +378,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     override var keyCommands: [UIKeyCommand]? {
         [
             UIKeyCommand(title: "Terminal", action: #selector(terminalCommand), input: "j", modifierFlags: .command),
-            UIKeyCommand(title: "Agents, Side Chats & Terminals", action: #selector(companionsCommand), input: "0", modifierFlags: [.command, .alternate]),
+            UIKeyCommand(title: "Changes, Agents, Side Chats & Terminals", action: #selector(companionsCommand), input: "0", modifierFlags: [.command, .alternate]),
         ]
     }
 

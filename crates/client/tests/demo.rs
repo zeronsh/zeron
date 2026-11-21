@@ -685,3 +685,17 @@ fn activity_sleep_wake_and_stop_waiting() {
     let again = zeron_client::runtime::shared().block_on(client.stop_waiting("chat-ios-keyboard")).unwrap();
     assert!(!again, "nothing left to stop");
 }
+
+#[test]
+fn checkout_changes_use_the_sessions_host_and_folder() {
+    let (client, _dir) = demo(fast());
+    let diff = zeron_client::runtime::shared().block_on(client.checkout_changes("chat-deploy")).unwrap();
+    assert_eq!((diff.additions, diff.deletions), (4, 2));
+    assert_eq!(diff.files.len(), 2);
+    assert!(diff.patch.contains("Welcome back"));
+    let workspace = client.workspace();
+    let row = workspace.session("chat-deploy").unwrap();
+    assert_eq!(diff.device_id, row.device_id);
+    assert_eq!(Some(diff.cwd.as_str()), row.cwd.as_deref());
+    assert!(zeron_client::runtime::shared().block_on(client.checkout_changes("missing-chat")).is_err());
+}
