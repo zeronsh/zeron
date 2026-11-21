@@ -1152,7 +1152,30 @@ impl RegistryDoc {
         folded
     }
 
+    // A local edit must sort after any clock already observed on its row,
+    // including a tombstone restored from an older snapshot.
+    fn observe_row_clock(&mut self, kind: &str, id: &str) {
+        let Some(clock) = self.authoritative.get(kind)
+            .and_then(|rows| rows.get(id))
+            .and_then(RegistryRow::max_clock)
+        else {
+            return;
+        };
+        let mut parts = clock.splitn(3, '-');
+        let (Some(ms), Some(counter), Some(_)) = (parts.next(), parts.next(), parts.next()) else {
+            return;
+        };
+        if ms.len() == 13 && counter.len() == 6
+            && let (Ok(ms), Ok(counter)) = (ms.parse::<i64>(), counter.parse::<u32>())
+            && (ms, counter) > (self.clock.last_ms, self.clock.counter)
+        {
+            self.clock.last_ms = ms;
+            self.clock.counter = counter;
+        }
+    }
+
     fn write(&mut self, kind: &str, id: &str, op: OpKind, set: BTreeMap<String, Value>) {
+        self.observe_row_clock(kind, id);
         let hlc = self.next_hlc();
         self.enqueue_ops(vec![RowOp {
             kind: kind.to_string(),
@@ -1194,6 +1217,9 @@ impl RegistryDoc {
     }
 
     fn delete_row_ops(&mut self, keys: &[(&str, &str)]) {
+        for &(kind, id) in keys {
+            self.observe_row_clock(kind, id);
+        }
         let hlc = self.next_hlc();
         let ops = keys
             .iter()

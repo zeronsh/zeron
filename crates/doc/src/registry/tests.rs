@@ -2535,6 +2535,8 @@ fn a_device_removed_from_another_is_gone_everywhere_and_comes_back_on_its_own_bo
     let mut a = RegistryDoc::new("dev-a");
     a.upsert_device(&device("dev-a", "Laptop")).unwrap();
     let mut b = RegistryDoc::new("dev-b");
+    // B's write is ahead of A's wall clock. Causal ordering must still win.
+    b.clock.last_ms = RegistryDoc::now_ms() + 60_000;
     b.upsert_device(&device("dev-b", "Old box")).unwrap();
     let mut box_chat = chat("chat-b", "dev-b");
     box_chat.space_id = Some("sp-b".into());
