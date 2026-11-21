@@ -227,6 +227,14 @@ def main():
         1024,
     )
     tinted.convert("RGB").save(ios / "AppIcon1024-tinted.png")
+    # The icon Settings offers in its place: Dark, whatever the system's look.
+    # An app can't load its own icons as images, so the picker gets pictures of
+    # the two, 40 points square at 3x.
+    catalog = ios.parent
+    dark_icon.save(catalog / "AppIconDark.appiconset/AppIconDark1024.png")
+    tinted.convert("RGB").save(catalog / "AppIconDark.appiconset/AppIconDark1024-tinted.png")
+    for name, icon in (("light", light_icon), ("dark", dark_icon)):
+        icon.resize((120, 120), Image.LANCZOS).save(catalog / f"app-icon-{name}.imageset/app-icon-{name}.png")
 
     # Android.
     (ROOT / "apps/android/app/src/main/res/drawable/ic_launcher_foreground.xml").write_text(android_foreground())
