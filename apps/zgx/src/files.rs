@@ -1161,14 +1161,14 @@ fn git_files(status: &Json) -> Option<Value> {
     if !status.is_object() || !status["complete"].as_bool().unwrap_or(false) {
         return None;
     }
-    let fields: Vec<(Rc<str>, Value)> = status["files"]
+    let fields: Vec<(zgx_script::Str, Value)> = status["files"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|file| {
             let path = file["path"].as_str().filter(|p| !p.is_empty() && !p.starts_with('/'))?;
             let kind = git_kind(file["index"].as_str().unwrap_or(""), file["worktree"].as_str().unwrap_or(""));
-            Some((Rc::from(path), Value::from(kind)))
+            Some((zgx_script::Str::from(path), Value::from(kind)))
         })
         .collect();
     // (Sorted, as a map's keys must be: by `record`.)

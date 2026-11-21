@@ -59,23 +59,23 @@ pub fn session_records(permissions: &[String], list: &Value) -> (Value, Value) {
             _ => Vec::new(),
         }
     };
-    let text = |v: Option<&Value>| -> Option<Rc<str>> {
+    let text = |v: Option<&Value>| -> Option<zgx_script::Str> {
         match v {
-            Some(Value::Str(s)) => Some(s.rc()),
+            Some(Value::Str(s)) => Some(s.clone()),
             _ => None,
         }
     };
-    let pick = |from: &Value, keys: &[&str]| -> Vec<(Rc<str>, Value)> {
+    let pick = |from: &Value, keys: &[&str]| -> Vec<(zgx_script::Str, Value)> {
         keys.iter()
-            .filter_map(|k| from.field(k).filter(|v| !matches!(v, Value::Nil)).map(|v| (Rc::from(*k), v.clone())))
+            .filter_map(|k| from.field(k).filter(|v| !matches!(v, Value::Nil)).map(|v| (zgx_script::Str::from(*k), v.clone())))
             .collect()
     };
     let projects_in = items("projects");
-    let folders: HashMap<Rc<str>, Rc<str>> = projects_in
+    let folders: HashMap<zgx_script::Str, zgx_script::Str> = projects_in
         .iter()
         .filter_map(|p| Some((text(p.field("id"))?, text(p.field("path"))?)))
         .collect();
-    let mut sessions: Vec<(Rc<str>, Value)> = Vec::new();
+    let mut sessions: Vec<(zgx_script::Str, Value)> = Vec::new();
     for chat in items("chats") {
         let Some(id) = text(chat.field("id")) else { continue };
         let mut fields = pick(&chat, &["title", "status", "project", "device", "updated", "created", "branch", "source_branch"]);
@@ -83,17 +83,17 @@ pub fn session_records(permissions: &[String], list: &Value) -> (Value, Value) {
         // Each project's folder: a session elsewhere is in a worktree of its
         // own (said as yes or no; the path is files.read's).
         if let (Some(cwd), Some(path)) = (&cwd, text(chat.field("project")).and_then(|p| folders.get(&p).cloned())) {
-            fields.push((Rc::from("worktree"), Value::Bool(cwd.trim_end_matches('/') != path.trim_end_matches('/'))));
+            fields.push((zgx_script::Str::from("worktree"), Value::Bool(cwd.trim_end_matches('/') != path.trim_end_matches('/'))));
         }
         // Its folder, with "files.read" (a path is a file's path).
         if files && let Some(cwd) = cwd {
-            fields.push((Rc::from("cwd"), Value::Str(cwd.into())));
+            fields.push((zgx_script::Str::from("cwd"), Value::Str(cwd.into())));
         }
         sessions.push((id, Value::record(fields)));
     }
     // Each project by its name (never its path).
     let here = text(list.field("here"));
-    let mut projects: Vec<(Rc<str>, Value)> = Vec::new();
+    let mut projects: Vec<(zgx_script::Str, Value)> = Vec::new();
     for project in &projects_in {
         let Some(id) = text(project.field("id")) else { continue };
         // (Its icon as its people chose it: what a plugin drawing projects'
@@ -101,13 +101,13 @@ pub fn session_records(permissions: &[String], list: &Value) -> (Value, Value) {
         let mut fields = pick(project, &["name", "device", "icon"]);
         if files {
             if let Some(path) = text(project.field("path")) {
-                fields.push((Rc::from("path"), Value::Str(path.into())));
+                fields.push((zgx_script::Str::from("path"), Value::Str(path.into())));
             }
             // Which repository it is, with its folder: which of its clones is on
             // this device, and the oldest, name it.
             fields.extend(pick(project, &["repository", "created"]));
             let device = text(project.field("device"));
-            fields.push((Rc::from("here"), Value::Bool(device.is_some() && device == here)));
+            fields.push((zgx_script::Str::from("here"), Value::Bool(device.is_some() && device == here)));
         }
         projects.push((id, Value::record(fields)));
     }

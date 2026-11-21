@@ -41,7 +41,6 @@
 //! and sent by the engine through the edge's store: `WatchHeldSends`). `ZERON_ZGX_MOCK=1` offers the engine's
 //! mock agent, for trying a turn without a paid one.
 
-use zgx_script::Str;
 use zgx_script::Slice;
 use zgx_script::Field;
 use std::{
@@ -360,7 +359,7 @@ const RUN_MOST: usize = 64;
 thread_local! {
     /// The long replies set aside, by their entry's id: the latest built of
     /// each, while a view's rows (or a chat kept) hold it.
-    static ASIDE: RefCell<rustc_hash::FxHashMap<Rc<str>, std::rc::Weak<Aside>>> = RefCell::default();
+    static ASIDE: RefCell<rustc_hash::FxHashMap<zgx_script::Str, std::rc::Weak<Aside>>> = RefCell::default();
 }
 
 /// Whether block `id` starts a run (ds/transcript's `starts_run`: the same
@@ -487,7 +486,7 @@ fn set_aside(row: Value) -> (Value, Option<Rc<Aside>>) {
         if held.len() >= 64 {
             held.retain(|_, a| a.strong_count() > 0);
         }
-        held.insert(id.rc(), Rc::downgrade(&aside));
+        held.insert(id.clone(), Rc::downgrade(&aside));
     });
     (Value::record(kept), Some(aside))
 }
@@ -497,10 +496,10 @@ fn aside_of(id: &str) -> Option<Rc<Aside>> {
     ASIDE.with_borrow(|held| held.get(id).and_then(std::rc::Weak::upgrade))
 }
 
-fn text_field(arg: &Value, key: &str) -> Rc<str> {
+fn text_field(arg: &Value, key: &str) -> zgx_script::Str {
     match arg.field(key) {
-        Some(Value::Str(s)) => s.rc(),
-        _ => Rc::from(""),
+        Some(Value::Str(s)) => s.clone(),
+        _ => zgx_script::Str::default(),
     }
 }
 
@@ -658,7 +657,7 @@ fn built_for(entry: &Json, context: &Rc<RowContext>, fold: bool) -> Built {
     let row = match row {
         Some(_) if fold && entry["status"].as_str() != Some("streaming") => match (entry["id"].as_str(), serde_json::to_vec(entry)) {
             (Some(id), Ok(bytes)) => Some(Value::folded(
-                id.into(),
+                id,
                 FoldedEntry {
                     bytes: {
                         let bytes = compressed(&bytes);
@@ -1009,9 +1008,9 @@ impl Pending {
 /// again). A prompt pending here comes after the transcript's own rows, so
 /// the engine's copy of it is the one kept.
 fn one_row_per_id(list: &mut Vec<Value>) {
-    let mut ids: std::collections::HashSet<Rc<str>> = std::collections::HashSet::with_capacity(list.len());
+    let mut ids: std::collections::HashSet<zgx_script::Str> = std::collections::HashSet::with_capacity(list.len());
     list.retain(|row| match row.field("id") {
-        Some(Value::Str(id)) => ids.insert(id.rc()),
+        Some(Value::Str(id)) => ids.insert(id.clone()),
         _ => true,
     });
 }
@@ -4877,15 +4876,15 @@ fn settle(entry: &mut Entry, at: usize, older_todo: &mut Option<(usize, Json)>) 
 /// every record its keys. Only one of each stays, shared.
 #[derive(Default)]
 struct Seen {
-    words: std::collections::HashSet<Rc<str>>,
-    records: HashMap<Rc<str>, Value>,
+    words: std::collections::HashSet<zgx_script::Str>,
+    records: HashMap<zgx_script::Str, Value>,
 }
 
 /// A short word is kept for every row, while there are few of them.
 const COMMON_LEN: usize = 16;
 const COMMON_MOST: usize = 4096;
 thread_local! {
-    static COMMON: RefCell<std::collections::HashSet<Rc<str>>> = RefCell::default();
+    static COMMON: RefCell<std::collections::HashSet<zgx_script::Str>> = RefCell::default();
     /// The settled row being built (`built_entry`): its tools so far, by the
     /// part each is of, each built once however many of its layouts show it.
     static ROW_BUILD: RefCell<Option<RowBuild>> = const { RefCell::new(None) };
@@ -4927,28 +4926,26 @@ struct RowBuild {
     tools: HashMap<*const Json, Option<Value>>,
 }
 
-fn share_word(text: &mut zgx_script::Str, own: &mut std::collections::HashSet<Rc<str>>) {
-    // (A value's string and an `Rc<str>` are one text held two ways: none
-    // of these copies it.)
+fn share_word(text: &mut zgx_script::Str, own: &mut std::collections::HashSet<zgx_script::Str>) {
     if text.len() <= COMMON_LEN {
         let shared = COMMON.with_borrow_mut(|common| {
             if let Some(known) = common.get(&**text) {
                 return Some(known.clone());
             }
             (common.len() < COMMON_MOST).then(|| {
-                common.insert(text.rc());
-                text.rc()
+                common.insert(text.clone());
+                text.clone()
             })
         });
         if let Some(shared) = shared {
-            *text = shared.into();
+            *text = shared;
             return;
         }
     }
     match own.get(&**text) {
-        Some(known) => *text = known.into(),
+        Some(known) => *text = known.clone(),
         None => {
-            own.insert(text.rc());
+            own.insert(text.clone());
         }
     }
 }
@@ -5297,13 +5294,13 @@ fn subagents_in(message: &Value) -> Option<zgx_script::List> {
 
 /// A transcript's subagents as its rows are added, each once, in order.
 #[derive(Default)]
-struct Subagents(Vec<Value>, std::collections::HashSet<Rc<str>>);
+struct Subagents(Vec<Value>, std::collections::HashSet<zgx_script::Str>);
 
 impl Subagents {
     fn add(&mut self, found: Option<&[Value]>) {
         for sub in found.into_iter().flatten() {
             if let Some(Value::Str(reference)) = sub.field("ref")
-                && self.1.insert(reference.rc())
+                && self.1.insert(reference.clone())
             {
                 self.0.push(sub.clone());
             }
@@ -7331,7 +7328,7 @@ mod tests {
         let (Value::Map(one), Value::Map(two)) = (&tools[0], &grouped[0]) else { panic!("records") };
         assert!(Slice::ptr_eq(one, two), "one copy of a tool");
         let (Some(Value::Str(text)), Some(Value::Str(copy))) = (row.field("text"), row.field("copy")) else { panic!("words") };
-        assert!(Str::ptr_eq(text, copy), "one copy of its words");
+        assert!(zgx_script::Str::ptr_eq(text, copy), "one copy of its words");
     }
 
     /// A settled reply's tools are built once, for all its layouts, and read

@@ -23,19 +23,20 @@ the two ways interleaved. Instructions are the calling thread's, in user mode:
 
 | | Linked in | Module |
 | --- | --- | --- |
-| `ui.call_sync("chat.reply_blocks", id)` | 2,367 instructions, 181 ns | 2,366, 172 ns |
-| `ui.call_sync("chat.reply_run", { id, key })` | 7,085 instructions, 589 ns | 6,959, 570 ns |
-| A 2,001-block reply set aside | 3.45 M instructions, 249 µs | 2.00 M, 156 µs |
+| `ui.call_sync("chat.reply_blocks", id)` | 2,347.3 instructions, 175 ns | 2,347.0, 166 ns |
+| `ui.call_sync("chat.reply_run", { id, key })` | 7,010 instructions, 574 ns | 6,909, 559 ns |
+| A 2,001-block reply set aside | 3.42 M instructions, 234 µs | 1.99 M, 151 µs |
 | Rebuild after a one-line edit, dev | 3.13 s (the app) | 0.18 s |
 | Rebuild after a one-line edit, release | 101.1 s (the app) | 2.21 s |
 
 The module reads the app's values where they are, as the app's own code
 does, so the boundary itself costs an indirect call and the argument's
-general drop (16 instructions, by zgx's `module_call_bench`). It comes out
+general drop (10 instructions, by zgx's `module_call_bench`). It comes out
 under the linked-in code because it reads each block's fields once and
 borrows the strings the original clones, not because of where it is built.
 
 zgx's values have types of its own on this pin (`Str`, `List`, `Map`,
 `Field`), which is what lets a module read them; `src/` moved with them
-(98 lines in 11 files, zgx's `docs/design/runtime.md` appendix has each
-pattern).
+(104 lines in 12 files; zgx's `docs/design/runtime.md` appendix has each
+pattern). A `Str` is not an `Rc<str>`: what keeps a value's string here
+keeps a `Str`, and nothing in `src/` turns one into the other.
