@@ -1,0 +1,278 @@
+{
+  "page": {
+    "pulls": "Pull requests"
+  },
+  "command": {
+    "refresh": "Actualiser les pull requests"
+  },
+  "badge": {
+    "open": "Ouvrir la pull request {number} : {title}",
+    "plain": "Pull request"
+  },
+  "notices": {
+    "title": "Pull request #{number} {said}",
+    "merged": "merge effectué",
+    "closed": "fermée sans merge",
+    "review_wanted": "attend votre revue",
+    "changes": "a reçu des demandes de modifications",
+    "failing": "a des vérifications en échec"
+  },
+  "time": {
+    "just_now": "à l’instant",
+    "minutes": "il y a {n, plural, =0 {# minute} one {# minute} other {# minutes}}",
+    "hours": "il y a {n, plural, =0 {# heure} one {# heure} other {# heures}}",
+    "days": "il y a {n, plural, =0 {# jour} one {# jour} other {# jours}}"
+  },
+  "people": {
+    "someone": "quelqu’un",
+    "you": "Vous"
+  },
+  "board": {
+    "title": "Pull requests",
+    "refresh": "Actualiser",
+    "project": "Projet",
+    "choose_project": "Choisir un projet",
+    "search_projects": "Rechercher des projets…",
+    "hint": "Les pull requests ouvertes du dépôt GitHub d’un projet.",
+    "filter": "Filtrer",
+    "filters": {
+      "authored": "Créées par moi",
+      "reviewing": "À relire",
+      "all": "Toutes"
+    },
+    "search": "Rechercher des pull requests",
+    "status": {
+      "draft": "Brouillon",
+      "changes": "Modifications demandées",
+      "conflicts": "Conflits de merge",
+      "approved": "Approuvée",
+      "ci_failing": "CI en échec",
+      "ci_pending": "CI en attente",
+      "ci_passed": "CI réussie"
+    },
+    "empty": {
+      "authored_title": "Aucune pull request créée par vous",
+      "authored_body": "Vos pull requests ouvertes dans ce dépôt apparaîtront ici.",
+      "reviewing_title": "Aucune revue demandée",
+      "reviewing_body": "Les pull requests qui attendent votre revue apparaîtront ici.",
+      "all_title": "Aucune pull request ouverte",
+      "all_body": "Ce dépôt n’a aucune pull request ouverte. Les nouvelles apparaîtront ici.",
+      "nomatch_title": "Rien ne correspond à « {q} »",
+      "nomatch_body": "Essayez un autre mot ou un autre filtre.",
+      "choose_title": "Choisissez un projet",
+      "choose_body": "Choisissez un projet pour voir ses pull requests.",
+      "norepo_title": "Aucun dépôt sur GitHub",
+      "norepo_body": "Aucun dépôt GitHub trouvé pour le dossier de ce projet sur ce Mac."
+    },
+    "failed_title": "Impossible de charger les pull requests",
+    "try_again": "Réessayer",
+    "load_more": "Afficher plus",
+    "count": "{shown} sur {total}"
+  },
+  "checks": {
+    "not_reported": "Sans statut",
+    "passed": "Réussie",
+    "check": "Vérification",
+    "see_failed": "Voir ce qui a échoué",
+    "details": "Détails",
+    "none": "Aucune vérification signalée",
+    "unavailable": "CI indisponible",
+    "none_body": "Cette pull request n’a aucune vérification.",
+    "unavailable_body": "Le détail des vérifications est indisponible. Ouvrez cette pull request sur GitHub."
+  },
+  "viewer": {
+    "tabs": {
+      "summary": "Résumé",
+      "code": "Code",
+      "activity": "Activité"
+    },
+    "refresh": "Actualiser",
+    "open_github": "Ouvrir sur GitHub",
+    "more": "Plus",
+    "menu": {
+      "reopen": "Rouvrir la pull request",
+      "ready": "Marquer comme prête",
+      "draft": "Convertir en brouillon",
+      "close": "Fermer la pull request"
+    },
+    "loading": "Chargement",
+    "loading_pr": "Chargement de la pull request…",
+    "failed_title": "Impossible de charger la pull request",
+    "try_again": "Réessayer",
+    "no_pr": "Aucune pull request dans cet onglet.",
+    "description": "Description",
+    "no_description": "Aucune description fournie.",
+    "review": "Revue",
+    "comment": "Commenter",
+    "approve": "Approuver",
+    "approving": "Approbation…",
+    "request_changes": "Demander des modifications",
+    "requesting_changes": "Demande de modifications…",
+    "leave_review": "Laisser une revue",
+    "leave_comment": "Laisser un commentaire",
+    "couldnt_send": "Envoi impossible : {why}",
+    "busy": "Un autre envoi vers GitHub est en cours.",
+    "edit_comment": "Modifier le commentaire",
+    "cancel": "Annuler",
+    "save": "Enregistrer",
+    "delete": "Supprimer",
+    "delete_comment": "Supprimer le commentaire",
+    "delete_ask": "Supprimer ce commentaire ?",
+    "edit": "Modifier",
+    "comment_line": "Commenter cette ligne",
+    "outdated": "Obsolète",
+    "verdict": {
+      "approved": "A approuvé",
+      "changes": "A demandé des modifications",
+      "dismissed": "Revue écartée",
+      "commented": "A commenté",
+      "when": "{verdict} {when}"
+    },
+    "pictures": {
+      "show": "Afficher {name}",
+      "hide": "Masquer {name}",
+      "view": "Voir {name}",
+      "image": "image"
+    },
+    "code": {
+      "loading": "Chargement du diff…",
+      "failed": "Impossible de charger le diff.",
+      "empty": "Aucune modification à afficher ici.",
+      "cut": "Les {n} premières lignes.",
+      "open_file": "Ouvrir {path} sur GitHub",
+      "send_failed": "Envoi à GitHub impossible",
+      "no_files_title": "Aucun fichier modifié",
+      "no_files_body": "Cette pull request ne modifie aucun fichier."
+    },
+    "merge": {
+      "title": "Merge",
+      "how": "Méthode de merge",
+      "draft_title": "Brouillon",
+      "draft_body": "Marquez-la comme prête pour la revue avant le merge.",
+      "ready": "Marquer comme prête",
+      "marking_ready": "Marquage comme prête…",
+      "conflicts_title": "Conflits avec {base}",
+      "conflicts_body": "Des fichiers qu’elle modifie ont aussi changé sur {base}. Résolvez les conflits sur la branche, puis faites le merge.",
+      "behind_title": "En retard sur {base}",
+      "behind_body": "{base} a avancé : ce dépôt exige d’abord une branche à jour.",
+      "update": "Mettre à jour la branche",
+      "updating": "Mise à jour…",
+      "not_yet_title": "Pas encore",
+      "not_yet_body": "Le merge n’est pas encore possible : {said}.",
+      "why": {
+        "changes": "des modifications ont été demandées",
+        "review": "il lui faut une approbation",
+        "check_failed": "une vérification a échoué",
+        "checks_running": "des vérifications sont encore en cours",
+        "rules": "les règles du dépôt ne sont pas encore respectées",
+        "join": " et "
+      },
+      "checking_title": "Vérification",
+      "checking_body": "GitHub vérifie si le merge est possible.",
+      "ready_title": "Prête pour le merge",
+      "unstable_body": "Des vérifications ont échoué, mais aucune n’est requise par ce dépôt.",
+      "approved_by": "Approuvée par {names}",
+      "names_join": ", ",
+      "names_last": " et ",
+      "every_check": "toutes les vérifications ont réussi",
+      "no_conflicts": "aucun conflit avec {base}",
+      "parts_join": ", ",
+      "couldnt": {
+        "merge": "Échec du merge",
+        "close": "Impossible de la fermer",
+        "reopen": "Impossible de la rouvrir",
+        "draft": "Impossible de la passer en brouillon",
+        "ready": "Impossible de la marquer comme prête",
+        "update": "Impossible de mettre à jour la branche",
+        "other": "GitHub a refusé"
+      },
+      "merged_title": "Merge de #{number} dans {base} effectué",
+      "merged_by_when": "Par {by} {when}.",
+      "merged_by": "Par {by}.",
+      "merged_when": "Merge effectué {when}.",
+      "merged_plain": "Merge effectué.",
+      "closed_title": "Fermée",
+      "closed_when": "Fermée sans merge {when}.",
+      "closed_plain": "Fermée sans merge.",
+      "reopen": "Rouvrir la pull request",
+      "squash": "Squash et fusion",
+      "squash_body": "{n, plural, =0 {Les commits deviennent} one {Le commit devient} other {Les # commits deviennent}} un seul sur {base}, avec le titre comme message.",
+      "merge_commit": "Commit de merge",
+      "merge_commit_body": "Les commits tels quels, réunis par un commit de merge.",
+      "rebase": "Rebase et fusion",
+      "rebase_body": "Les commits rejoués sur {base}, un par un.",
+      "delete_branch": "Supprimer la branche ensuite",
+      "delete_branch_body": "{branch} sera supprimée de GitHub. Ses conversations gardent leur historique.",
+      "merging": "Merge en cours…",
+      "merge_pr": "Merge de la pull request",
+      "branch_kept": "Impossible de supprimer {branch} : {why}.",
+      "working": "En cours",
+      "ready_end": "."
+    },
+    "activity": {
+      "resolved": "Résolu",
+      "unresolved": "Non résolu",
+      "outdated": "Obsolète",
+      "reply": "Répondre",
+      "where_join": " · ",
+      "open_where": "Ouvrir {at} sur GitHub",
+      "verbs": {
+        "approved": "a approuvé",
+        "changes": "a demandé des modifications",
+        "reviewed": "a fait une revue",
+        "dismissed": "a vu sa revue écartée",
+        "commented": "a commenté"
+      },
+      "empty_title": "Aucune activité pour l’instant",
+      "empty_body": "Les commentaires et les revues apparaîtront ici. Lancez la discussion ci-dessous."
+    },
+    "details": "Détails"
+  },
+  "gh": {
+    "no_cli": "La CLI GitHub (gh) n’est pas installée sur ce Mac : installez-la, puis connectez-vous avec `gh auth login`.",
+    "sign_in": "Connectez-vous à GitHub sur ce Mac avec `gh auth login`.",
+    "not_found": "GitHub ne le trouve pas ou votre compte n’y a pas accès.",
+    "rate_limit": "Quota de requêtes GitHub atteint. Réessayez dans quelques minutes.",
+    "rate_limit_until": "Quota de requêtes GitHub atteint. Zeron réessaiera à {at}.",
+    "no_answer": "GitHub n’a pas répondu.",
+    "unreadable": "La réponse de GitHub est illisible.",
+    "said_no": "GitHub a refusé."
+  },
+  "pulls": {
+    "not_pr": "Ce n’est pas une pull request sur GitHub.",
+    "not_found": "GitHub ne trouve pas cette pull request ou votre compte n’y a pas accès.",
+    "not_merged": "GitHub n’a pas effectué le merge.",
+    "no_folder": "Le dossier de ce projet n’est pas sur ce Mac.",
+    "no_repo": "Aucun dépôt GitHub trouvé pour ce dossier."
+  },
+  "git_slot": {
+    "create": "Créer une pull request"
+  },
+  "git_history": {
+    "open_pr": "Ouvrir la pull request #{number} : {title}",
+    "view": "Voir sur GitHub",
+    "copy_link": "Copier le lien GitHub",
+    "copied": "Lien copié",
+    "not_github": "Ce dépôt n’est pas sur GitHub",
+    "picture": "{login} sur GitHub"
+  },
+  "panel_row": {
+    "label": "Pull request #{number}, {state} : {title}",
+    "state": {
+      "open": "ouverte",
+      "draft": "brouillon",
+      "merged": "merge effectué",
+      "closed": "fermée"
+    },
+    "checks": {
+      "passing": "Réussies",
+      "failing": "En échec",
+      "running": "En cours"
+    },
+    "checks_said": {
+      "passing": "Vérifications réussies",
+      "failing": "Vérifications en échec",
+      "running": "Vérifications en cours"
+    }
+  }
+}

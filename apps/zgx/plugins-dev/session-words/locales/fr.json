@@ -1,0 +1,10 @@
+{
+  "status": {
+    "working": "En cours",
+    "input": "Action requise",
+    "approval": "Attend votre accord",
+    "failed": "Arrêté",
+    "done": "Terminé"
+  },
+  "minutes": "{n, plural, =0 {# minute} one {# minute} other {# minutes}}"
+}

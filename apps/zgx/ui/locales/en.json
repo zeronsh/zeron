@@ -2,7 +2,8 @@
   "language": {
     "system": "System",
     "en": "English",
-    "zh_hans": "简体中文"
+    "zh_hans": "简体中文",
+    "fr": "Français"
   },
   "time": {
     "now": "now",
@@ -1141,7 +1142,7 @@
     "general": {
       "language": {
         "label": "Language",
-        "terms": "language locale translation chinese english 中文 简体 语言",
+        "terms": "language locale translation chinese english 中文 简体 语言 french français",
         "system": "Follows your computer's preferred language.",
         "chosen": "The menu bar changes the next time Zeron opens."
       },
