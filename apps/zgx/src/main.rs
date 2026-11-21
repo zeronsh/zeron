@@ -1407,9 +1407,8 @@ pub(crate) fn bundle() -> Option<&'static zgx_script::app_bundle::Opened> {
                 Ok(opened) => {
                     if std::env::var_os("ZGX_BUNDLE_TIMING").is_some() {
                         eprintln!(
-                            "zeron-zgx: bundle checked in {:.2} ms ({})",
-                            opened.checked_in.as_secs_f64() * 1e3,
-                            if opened.hashed { "hashed" } else { "known" }
+                            "zeron-zgx: bundle checked in {:.2} ms",
+                            opened.checked_in.as_secs_f64() * 1e3
                         );
                     }
                     Some(opened)
@@ -1432,7 +1431,7 @@ pub(crate) fn ui_host(runtime: &zgx::reactive::Runtime, path: PathBuf) -> Script
             let entry = path.strip_prefix(&bundle.ui).unwrap_or(&path).to_string_lossy().replace('\\', "/");
             ScriptHost::from_files(
                 runtime,
-                zgx_script::ScriptFiles::Folder(bundle.ui.clone()),
+                bundle.files(),
                 &entry,
                 zgx_script::Code::VerifiedBytecode,
             )
