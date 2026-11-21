@@ -100,6 +100,35 @@ async fn run_to_end(
     .expect("run finished in time")
 }
 
+/// `/mcp`, `/model`, `/config`: commands the CLI answers itself, with no
+/// model turn. The turn ends and its reply is shown (it used to end empty).
+#[tokio::test]
+async fn a_command_the_cli_runs_itself_shows_its_reply() {
+    let (controls, _steer, _token) = controls("A");
+    let events = run_to_end(&harness(), request("/mcp scenario:local-command"), controls).await;
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        text,
+        "3 MCP servers: 1 connected. Use `/mcp` in the terminal for details."
+    );
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+}
+
 #[tokio::test]
 async fn happy_path_normalizes_events_and_tags_subagents() {
     let (controls, _steer, _token) = controls("A");

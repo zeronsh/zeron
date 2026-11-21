@@ -679,6 +679,10 @@ pub(crate) struct Normalizer {
     turn_error_shown: bool,
     /// This turn already said it is retrying the API.
     retry_noticed: bool,
+    /// The open assistant message streamed text deltas. A message the CLI
+    /// writes itself (a command it runs locally, such as `/mcp` or
+    /// `/model`) streams nothing: its text is only in the assistant frame.
+    streamed_text: bool,
 }
 
 impl Normalizer {
@@ -698,6 +702,7 @@ impl Normalizer {
             session_id: None,
             turn_error_shown: false,
             retry_noticed: false,
+            streamed_text: false,
         }
     }
 
@@ -1259,9 +1264,12 @@ impl Normalizer {
                     };
                 }
                 match f.event.delta.kind.as_str() {
-                    "text_delta" => vec![AgentEvent::TextDelta {
-                        text: f.event.delta.text,
-                    }],
+                    "text_delta" => {
+                        self.streamed_text = true;
+                        vec![AgentEvent::TextDelta {
+                            text: f.event.delta.text,
+                        }]
+                    }
                     "thinking_delta" => vec![AgentEvent::ReasoningDelta {
                         text: f.event.delta.thinking,
                     }],
@@ -1388,6 +1396,26 @@ impl Normalizer {
                     out.push(AgentEvent::Error {
                         message: assistant_error_text(code),
                     });
+                }
+                // A reply the CLI wrote itself (`model: "<synthetic>"`: the
+                // output of a command it runs locally, such as `/mcp`,
+                // `/model` or `/config`) never streams. Its text is shown
+                // from the frame, or the turn ends with no reply at all. A
+                // synthetic failure carries `error`, shown above instead.
+                if !std::mem::take(&mut self.streamed_text)
+                    && f.error.is_none()
+                    && f.message.model.as_deref() == Some("<synthetic>")
+                {
+                    let text = f
+                        .message
+                        .blocks()
+                        .filter(|b| b.kind == "text" && !b.text.is_empty())
+                        .map(|b| b.text)
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    if !text.is_empty() {
+                        out.push(AgentEvent::TextDelta { text });
+                    }
                 }
                 // The enclosing assistant frame closes the streamed message
                 // item; rotate so post-boundary deltas get a fresh id.
@@ -3164,6 +3192,72 @@ mod tests {
             Some(AgentEvent::Done { status, error, .. }) => (*status, error.clone()),
             other => panic!("no done: {other:?}"),
         }
+    }
+
+    /// A command the CLI runs itself answers with a synthetic assistant
+    /// frame and no stream events (live 2.1.326, `/mcp`). Its text is the
+    /// reply; without it the turn ended with nothing to show.
+    #[test]
+    fn a_local_commands_reply_is_shown() {
+        let mut norm = Normalizer::new();
+        let frame = |raw: &str| crate::claude::wire::parse_frame(raw).unwrap();
+        let events = norm.normalize(
+            frame(r#"{"type":"assistant","message":{"id":"b3eaef8a","model":"<synthetic>","role":"assistant","stop_reason":"end_turn","type":"message","content":[{"type":"text","text":"64 MCP servers: 1 connected. Use `/mcp` in the terminal for details."}]},"parent_tool_use_id":null,"session_id":"s"}"#),
+            false,
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    AgentEvent::TextDelta { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            ["64 MCP servers: 1 connected. Use `/mcp` in the terminal for details."]
+        );
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::AssistantMessageCompleted { .. })
+        ));
+
+        // A streamed reply's closing frame repeats its text: not shown twice.
+        norm.normalize(
+            frame(r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}}"#),
+            false,
+        );
+        let closing = norm.normalize(
+            frame(r#"{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"Hi"}]}}"#),
+            false,
+        );
+        assert!(
+            !closing
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TextDelta { .. }))
+        );
+
+        // A model's own reply never comes from the frame.
+        let model = norm.normalize(
+            frame(r#"{"type":"assistant","message":{"model":"claude-fable-5","content":[{"type":"text","text":"Hi"}]}}"#),
+            false,
+        );
+        assert!(
+            !model
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TextDelta { .. }))
+        );
+    }
+
+    /// A synthetic failure is an error part, not a reply as well.
+    #[test]
+    fn a_synthetic_failure_is_not_also_a_reply() {
+        let events = normalize_one(
+            r#"{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"Invalid API key · Fix external API key"}]},"error":"authentication_failed","api_error_status":401}"#,
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TextDelta { .. }))
+        );
     }
 
     #[test]
