@@ -72,6 +72,8 @@ export default function (pi) {
         pi.registerTool({
           name: `${config.name}_${tool.name}`, label: `Zeron: ${tool.name}`,
           description: tool.description, parameters: tool.inputSchema,
+          // Oh My Pi defers extension tools behind discovery by default; Pi ignores this.
+          loadMode: "essential",
           async execute(_id, args, signal) {
             const result = await rpc("tools/call", {name: tool.name, arguments: args}, signal);
             if (result.isError) throw new Error(result.content?.filter(c => c.type === "text").map(c => c.text).join("\n") || "Zeron tool failed");
