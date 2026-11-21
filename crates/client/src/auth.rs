@@ -25,10 +25,12 @@ use crate::lock;
 /// Refresh this long before `exp` (legacy AppConfig: 60s early margin).
 pub const EARLY_REFRESH_SECS: i64 = 60;
 
-/// Production endpoints (edge/wrangler.jsonc). Mobile always talks to prod —
-/// a stale override once broke sign-in in the worst ghost way.
-pub const PRODUCTION_EDGE_URL: &str = "https://edge.zeron.sh";
-pub const WORKOS_CLIENT_ID: &str = "client_01KWD0EAKZKD50YCQJNYSRE4BY";
+/// Zeron's own server (edge/wrangler.jsonc), the one an app talks to until
+/// someone points it at another (crate::server). The server an account signed
+/// in to is stored with its credentials, never read from anywhere else: a
+/// stale override once broke sign-in in the worst ghost way.
+pub const PRODUCTION_EDGE_URL: &str = zeron_proto::server::OFFICIAL_URL;
+pub const WORKOS_CLIENT_ID: &str = zeron_proto::server::OFFICIAL_WORKOS_CLIENT_ID;
 pub const WORKOS_API_BASE: &str = "https://api.workos.com";
 /// OAuth redirect: `zeron://callback?code=…&state=…`.
 pub const CALLBACK_SCHEME: &str = "zeron";
@@ -73,11 +75,13 @@ fn percent_decode(value: &str) -> String {
 }
 
 /// WorkOS AuthKit authorization-code URL (the ASWebAuthenticationSession
-/// start URL). `state` is the caller's CSRF nonce.
-pub fn workos_authorize_url(state: &str) -> String {
+/// start URL) for the server whose sign-in goes through `client_id`
+/// ([`crate::server::Server::workos_client_id`]). `state` is the caller's
+/// CSRF nonce.
+pub fn workos_authorize_url(client_id: &str, state: &str) -> String {
     format!(
         "{WORKOS_API_BASE}/user_management/authorize?response_type=code&client_id={}&redirect_uri={}&provider=authkit&state={}",
-        percent_encode(WORKOS_CLIENT_ID),
+        percent_encode(client_id),
         percent_encode(&format!("{CALLBACK_SCHEME}://callback")),
         percent_encode(state),
     )
@@ -452,10 +456,10 @@ mod tests {
 
     #[test]
     fn authorize_url_and_callback_round_trip() {
-        let url = workos_authorize_url("s t&1");
-        assert!(
-            url.starts_with("https://api.workos.com/user_management/authorize?response_type=code")
-        );
+        let url = workos_authorize_url("client_acme", "s t&1");
+        assert!(url.starts_with(
+            "https://api.workos.com/user_management/authorize?response_type=code&client_id=client_acme&"
+        ));
         assert!(url.contains("redirect_uri=zeron%3A%2F%2Fcallback"));
         assert!(url.contains("state=s%20t%261"));
         assert_eq!(

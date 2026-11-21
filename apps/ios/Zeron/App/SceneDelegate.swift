@@ -64,6 +64,11 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
         #endif
         showOnboardingIfNeeded()
+        // Opened by an invite: its sheet once the first screen is up (after
+        // the onboarding, when that's on its way in).
+        if let address = connectionOptions.urlContexts.lazy.compactMap({ ServerLink.address(from: $0.url) }).first {
+            DispatchQueue.main.async { [weak self] in self?.openServerLink(address) }
+        }
         #if DEBUG
         TerminalProbe.runIfAsked(app: app, router: window.rootViewController as? AppRouter)
         #endif
@@ -180,12 +185,25 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
     }
 
-    /// `zeron://voice` (the call's Live Activity) returns to the stage.
+    /// `zeron://voice` (the call's Live Activity) returns to the stage;
+    /// `zeron://server?address=` (an invite) opens the server sheet on it.
     func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
+        if let address = URLContexts.lazy.compactMap({ ServerLink.address(from: $0.url) }).first {
+            return openServerLink(address)
+        }
         guard URLContexts.contains(where: { $0.url.scheme == "zeron" && $0.url.host == "voice" }),
               app.voice.live, let root = window?.rootViewController
         else { return }
         root.presentVoiceStage(app: app, source: nil)
+    }
+
+    /// An invite's server, in the sheet over whatever is on screen, signed in
+    /// or out. It only fills the sheet in: switching still takes a tap. The
+    /// demo has no account (so no server), and a sign-in under way keeps its
+    /// own server: neither takes a link.
+    @MainActor private func openServerLink(_ address: String) {
+        guard !app.isDemo, !WorkOSSignIn.isRunning, let root = window?.rootViewController else { return }
+        ServerSheetViewController.open(invite: address, app: app, over: root)
     }
 
     func sceneDidEnterBackground(_ scene: UIScene) {

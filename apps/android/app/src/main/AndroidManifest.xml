@@ -50,6 +50,8 @@
                 <!-- Cloud: a provider sign-in, GitHub or Stripe hands back here. -->
                 <data android:host="signed-in" />
                 <data android:host="cloud" />
+                <!-- zeron://server?address=… invites to a self-hosted server (ServerLink). -->
+                <data android:host="server" />
             </intent-filter>
         </activity>
         <provider

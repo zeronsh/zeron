@@ -2177,6 +2177,10 @@
         "org": "属于 {org}。你的会话会在所有设备间同步。",
         "sync": "你的会话会在所有设备间同步。"
       },
+      "server": {
+        "label": "服务器",
+        "terms": "服务器 自托管 地址 域名 self-hosted self hosted own server edge relay host address url domain"
+      },
       "card": {
         "label": "会员卡",
         "terms": "分享 拷贝 链接 share copy link x twitter",
@@ -2584,6 +2588,7 @@
         "shell_previous_session": "上一个会话",
         "session_n": "会话 {i}",
         "shell_palette": "搜索",
+        "shell_connect_server": "连接到服务器…",
         "shell_check_updates": "检查更新…",
         "shell_settings": "设置",
         "shell_find": "查找",
@@ -2762,6 +2767,7 @@
     }
   },
   "onboarding": {
+    "connect_server": "连接到服务器…",
     "skip_for_now": "暂时跳过",
     "not_now": "以后再说",
     "signin": {
@@ -3423,6 +3429,46 @@
         "offline": "无法连接到 Zeron。请检查连接，然后重试。",
         "expired": "你已退出登录。请重新登录以继续。",
         "failed": "登录未完成。请重试。"
+      }
+    },
+    "server": {
+      "zeron": "Zeron",
+      "identity": "服务器，{server}",
+      "identity_host": "服务器，{server}，{host}",
+      "title": "选择服务器",
+      "body": "Zeron 通过服务器同步你的对话。可以使用 Zeron 的服务器，也可以使用你或你的团队自己运行的服务器。",
+      "label": "服务器",
+      "self_hosted": "自托管",
+      "self_hosted_description": "你自己的服务器",
+      "address": "服务器地址",
+      "placeholder": "zeron.example.com",
+      "separate": "自托管服务器上的账户与你的 Zeron 账户相互独立。",
+      "connect": "连接",
+      "connect_to": "连接到 {server}",
+      "use_zeron": "使用 Zeron",
+      "guide": "运行你自己的服务器",
+      "environment": "Zeron 启动时由此版本的 ZERON_ZGX_* 环境变量指定了此服务器。不带这些变量重新打开 Zeron 即可选择其他服务器。",
+      "switch_title": "切换到 {server}？",
+      "switch_body": "你将在这台电脑上退出登录，然后在设置向导中登录 {server}。",
+      "switch": "退出登录并切换",
+      "says": {
+        "empty": "请输入服务器地址。",
+        "invalid": "这不是服务器地址。地址应类似 zeron.example.com。",
+        "scheme": "请使用 https:// 地址。",
+        "credentials": "请勿在地址中包含用户名和密码。",
+        "path": "只需输入服务器地址，例如 zeron.example.com，后面不要加其他内容。",
+        "insecure": "请使用 https://。Zeron 仅在连接你自己网络中的服务器时使用 http://。",
+        "unreachable": "无法连接到 {host}。请检查地址和网络连接。",
+        "not_zeron": "{host} 不是 Zeron 服务器。",
+        "outdated": "{host} 运行的 Zeron 服务器版本较旧，需要其所有者更新。",
+        "needs_newer_app": "{host} 需要更新版本的 Zeron。请更新 Zeron 后再连接。",
+        "dev_server": "{host} 是开发服务器，应用无法登录。需要先设置 WorkOS 登录。",
+        "not_configured": "{host} 尚未完成登录设置。",
+        "not_configured_missing": "{host} 尚未完成登录设置（缺少 {missing}）。",
+        "unavailable": "{host} 暂时没有响应（错误 {status}）。请稍后再试。",
+        "offline": "服务器未更改：Zeron 引擎没有响应。请稍后再试。",
+        "set_by_environment": "Zeron 启动时由此版本的 ZERON_ZGX_* 环境变量指定了服务器，因此无法在此更改。",
+        "failed": "服务器未更改。请重试。"
       }
     },
     "cloud": {

@@ -11,6 +11,7 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Job
 import sh.zeron.android.design.Appearance
 import sh.zeron.android.design.ThemeMode
 import kotlinx.coroutines.MainScope
@@ -42,6 +43,7 @@ import uniffi.zeron_core.NewSession
 import uniffi.zeron_core.SandboxLevel
 import uniffi.zeron_core.SendRequest
 import uniffi.zeron_core.BusyPolicy
+import uniffi.zeron_core.ServerInfo
 import uniffi.zeron_core.SessionRow
 import uniffi.zeron_core.SessionTarget
 import uniffi.zeron_core.StreamSpeed
@@ -50,9 +52,10 @@ import uniffi.zeron_core.WorkspaceSnapshot
 import uniffi.zeron_core.WorktreeSpec
 import uniffi.zeron_core.authExchangeCode
 import uniffi.zeron_core.authListOrgs
-import uniffi.zeron_core.authProductionEdgeUrl
 import uniffi.zeron_core.authRefresh
 import uniffi.zeron_core.parseAuthCallback
+import uniffi.zeron_core.serverInfo
+import uniffi.zeron_core.serverOfficial
 import uniffi.zeron_core.workosAuthorizeUrl
 import java.io.File
 import java.util.UUID
@@ -85,7 +88,7 @@ data class LaunchOptions(
     val voiceSelfTest: Boolean = false,
     /** `--es dev-user <id> --es dev-org <id>`: a dev bearer for an `AUTH_MODE=dev` edge, not persisted (debuggable builds). */
     val dev: Pair<String, String>? = null,
-    /** `--es edge <url>`: a local edge in place of production (debuggable builds). */
+    /** `--es edge <url>`: a local edge in place of any other server, signed in through Zeron's WorkOS client (debuggable builds). */
     val edge: String? = null,
     /** `--ez no-relay-layer true`: behave as a build without the relay layer does, an old phone in an account of new devices (debuggable builds). */
     val noRelayLayer: Boolean = false,
@@ -241,13 +244,14 @@ class AppModel(private val app: Application) {
         if (options.remoteVoice) voice.forced = true
         if (options.voicePreview && voice.preview() && options.voiceStage) voice.requestStage()
         if (options.voiceSelfTest) voice.selfTest()
-        val stored = credentials.stored()
+        val account = credentials.account()
         when {
-            options.dev != null -> start(Credentials.Dev(options.dev.first, options.dev.second))
+            options.dev != null -> start(Credentials.Dev(options.dev.first, options.dev.second), signedOutServer())
             // A `route` with nobody signed in opens on the demo (screenshots, tests).
-            options.demo || options.route != null && stored == null -> start(Credentials.Demo(demoOptions()))
-            stored != null -> start(stored)
+            options.demo || options.route != null && account == null -> startDemo()
+            account != null -> start(account.credentials, accountServer(account))
         }
+        if (_client.value == null) _server.value = signedOutServer()
         // Relative times ("4m") and staleness age without events.
         scope.launch {
             while (true) {
@@ -271,26 +275,28 @@ class AppModel(private val app: Application) {
 
     private val coreDir get() = File(app.filesDir, "core")
 
-    /** Local docs belong to one identity: another account starts empty. */
-    private fun claimCoreDir(credentials: Credentials) {
-        val owner = when (credentials) {
-            is Credentials.WorkOs -> "${credentials.userId}/${credentials.orgId}"
-            is Credentials.Dev -> "${credentials.userId}/${credentials.orgId}"
+    /** Local docs belong to one identity on one server: another account starts empty. */
+    private fun claimCoreDir(credentials: Credentials, server: ServerInfo) {
+        val (userId, orgId) = when (credentials) {
+            is Credentials.WorkOs -> credentials.userId to credentials.orgId
+            is Credentials.Dev -> credentials.userId to credentials.orgId
             is Credentials.Demo -> return
         }
+        val owner = coreOwner(server.url.takeUnless { server.isOfficial }, userId, orgId)
         val marker = File(coreDir, ".owner")
         if (runCatching { marker.readText() }.getOrNull() != owner) coreDir.deleteRecursively()
         coreDir.mkdirs()
         marker.writeText(owner)
     }
 
-    private fun start(credentials: Credentials): Boolean {
+    /** [signedIn]: a sign-in just finished, so its credentials are kept, with [server]. */
+    private fun start(credentials: Credentials, server: ServerInfo, signedIn: Boolean = false): Boolean {
         val demo = credentials is Credentials.Demo
         val dir = if (demo) File(app.filesDir, "demo") else coreDir
-        if (!demo) claimCoreDir(credentials)
+        if (!demo) claimCoreDir(credentials, server)
         dir.mkdirs()
         val config = CoreConfig(
-            edgeUrl = edgeUrl,
+            edgeUrl = server.url,
             dataDir = dir.path,
             deviceId = deviceId,
             deviceName = deviceName(),
@@ -302,7 +308,8 @@ class AppModel(private val app: Application) {
         )
         return try {
             val client = CoreClient(config, credentials, listener)
-            if (credentials is Credentials.WorkOs) this.credentials.store(credentials)
+            if (signedIn && credentials is Credentials.WorkOs) this.credentials.store(credentials, StoredServer.of(server))
+            _server.value = server
             _client.value = client
             client.setNetworkOnline(networkPath.online)
             refreshWorkspace()
@@ -317,10 +324,79 @@ class AppModel(private val app: Application) {
     }
 
     fun startDemo() {
-        start(Credentials.Demo(demoOptions()))
+        start(Credentials.Demo(demoOptions()), signedOutServer())
     }
 
-    val edgeUrl: String get() = launch.edge ?: authProductionEdgeUrl()
+    // ── server ─────────────────────────────────────────────────────────────
+
+    val officialServer: ServerInfo by lazy { serverOfficial() }
+
+    /** The `edge` launch extra's server: it wins over every other. */
+    private val launchServer: ServerInfo?
+        get() = launch.edge?.let { serverInfo(it, officialServer.workosClientId, null) }
+
+    /** The server to sign in to (settings `server`); none is Zeron's own. */
+    private var chosenServer: StoredServer?
+        get() = StoredServer.fromJson(settings.getString("server", null))
+        set(value) = settings.edit().apply { if (value == null) remove("server") else putString("server", value.toJson()) }.apply()
+
+    private val _server by lazy { MutableStateFlow(signedOutServer()) }
+
+    /** The server everything talks to: the signed-in account's, else the one sign-in goes to. */
+    val server: StateFlow<ServerInfo> get() = _server
+
+    /** A launch argument set the server: the choice in the app is set aside. */
+    val serverFromLaunch: Boolean get() = launch.edge != null
+
+    private fun accountServer(account: CredentialStore.Account): ServerInfo =
+        pickServer(launchServer, signedIn = true, account = account.server?.info(), chosen = null, official = officialServer)
+
+    private fun signedOutServer(): ServerInfo =
+        pickServer(launchServer, signedIn = false, account = null, chosen = chosenServer?.info(), official = officialServer)
+
+    /** Where the next sign-in goes (signed in, the account keeps its own until it signs out). */
+    fun chooseServer(server: ServerInfo) {
+        chosenServer = StoredServer.of(server)
+        // A sign-in begun on another server can't finish on this one.
+        authState = null
+        if (_client.value == null) _server.value = signedOutServer()
+    }
+
+    /** Sign out (as Settings' Sign out does) to sign in on [server] next. */
+    fun switchServer(server: ServerInfo) {
+        signOut()
+        chooseServer(server)
+    }
+
+    /**
+     * The server sheet, opened from the welcome's menu or chip, Settings'
+     * Server row, or a `zeron://server` link. One sheet for all of them, held
+     * here so a link never stacks a second sheet on one already open.
+     */
+    data class ServerSheetRequest(
+        /** A link's address: the sheet fills it in and looks it up at once. */
+        val address: String? = null,
+        /** Each link is new, so the same one twice refills the open sheet. */
+        val serial: Long = 0,
+    )
+
+    private val _serverSheet = MutableStateFlow<ServerSheetRequest?>(null)
+    val serverSheet: StateFlow<ServerSheetRequest?> = _serverSheet.asStateFlow()
+    private var serverLinks = 0L
+
+    /** A tap that opens the sheet (one already open stays as it is). */
+    fun openServerSheet() {
+        if (_serverSheet.value == null) _serverSheet.value = ServerSheetRequest()
+    }
+
+    /** `zeron://server?address=…`: the sheet opens (or refills) on [address]. Choosing it still takes a tap. */
+    fun openServerLink(address: String) {
+        _serverSheet.value = ServerSheetRequest(address, ++serverLinks)
+    }
+
+    fun closeServerSheet() {
+        _serverSheet.value = null
+    }
 
     private val deviceId: String
         get() {
@@ -336,11 +412,27 @@ class AppModel(private val app: Application) {
 
     // ── sign-in ────────────────────────────────────────────────────────────
 
-    /** The WorkOS authorize URL to open in a Custom Tab. */
+    private val _signingIn = MutableStateFlow(false)
+
+    /** A sign-in under way (the browser is up, or its code is being exchanged): the server can't change under it. */
+    val signingIn: StateFlow<Boolean> = _signingIn.asStateFlow()
+    private var exchanging = false
+    private var browserReturn: Job? = null
+
+    /** The WorkOS authorize URL (of the server sign-in goes to) to open in a Custom Tab. */
     fun beginSignIn(): String {
         val state = UUID.randomUUID().toString()
         authState = state
-        return workosAuthorizeUrl(state)
+        _signingIn.value = true
+        // Back without the callback (the browser was closed, or the sign-in failed there): it's over.
+        browserReturn?.cancel()
+        browserReturn = scope.launch {
+            browser.resumes.first()
+            // The callback (if any) is delivered just before the resume.
+            delay(900)
+            if (!exchanging) _signingIn.value = false
+        }
+        return workosAuthorizeUrl(server.value.workosClientId, state)
     }
 
     /** `zeron://callback?code=…`: code → tokens → org → client. */
@@ -353,7 +445,16 @@ class AppModel(private val app: Application) {
                     return
                 }
                 authState = null
-                scope.launch { signIn(cb.code) }
+                exchanging = true
+                _signingIn.value = true
+                scope.launch {
+                    try {
+                        signIn(cb.code)
+                    } finally {
+                        exchanging = false
+                        _signingIn.value = false
+                    }
+                }
             }
             is AuthCallback.Error -> signInError.value = cb.description ?: cb.error
             null -> Unit
@@ -361,9 +462,10 @@ class AppModel(private val app: Application) {
     }
 
     private suspend fun signIn(code: String) {
+        val server = server.value
         try {
-            val exchange = authExchangeCode(edgeUrl, code)
-            val orgs = authListOrgs(edgeUrl, exchange.tokens.accessToken)
+            val exchange = authExchangeCode(server.url, code)
+            val orgs = authListOrgs(server.url, exchange.tokens.accessToken)
             if (orgs.isEmpty()) {
                 signInError.value = "This account isn't in an organization yet."
                 return
@@ -373,11 +475,11 @@ class AppModel(private val app: Application) {
                 orgChoice.value = orgs to choice
                 choice.await().also { orgChoice.value = null } ?: return
             }
-            val tokens = authRefresh(edgeUrl, exchange.tokens.refreshToken, org.organizationId)
+            val tokens = authRefresh(server.url, exchange.tokens.refreshToken, org.organizationId)
             val user = exchange.user
             val name = listOfNotNull(user.firstName, user.lastName).map { it.trim() }.filter { it.isNotEmpty() }.joinToString(" ")
             credentials.profile = CredentialStore.Profile(name.ifEmpty { null }, user.email, org.name)
-            if (!start(Credentials.WorkOs(user.id, org.organizationId, tokens))) {
+            if (!start(Credentials.WorkOs(user.id, org.organizationId, tokens), server, signedIn = true)) {
                 signInError.value = "Couldn't open your workspace. Try signing in again."
             }
         } catch (e: Exception) {
@@ -389,8 +491,9 @@ class AppModel(private val app: Application) {
     private fun backfillProfile() {
         val stored = credentials.stored() as? Credentials.WorkOs ?: return
         if (credentials.profile.orgName != null) return
+        val edge = server.value.url
         scope.launch {
-            val orgs = runCatching { authListOrgs(edgeUrl, stored.tokens.accessToken) }.getOrNull() ?: return@launch
+            val orgs = runCatching { authListOrgs(edge, stored.tokens.accessToken) }.getOrNull() ?: return@launch
             val org = orgs.firstOrNull { it.organizationId == stored.orgId } ?: return@launch
             credentials.profile = credentials.profile.copy(orgName = org.name)
             refreshWorkspace()
@@ -420,6 +523,8 @@ class AppModel(private val app: Application) {
             credentials.clear()
             if (forget) coreDir.deleteRecursively()
         }
+        // The chosen server stays: the sign-in screen shows the one they use.
+        _server.value = signedOutServer()
         // Nothing of the account stays in memory (or seeds the next one's new session).
         lastDraft = NewSessionDraft()
         newSessionText = ""

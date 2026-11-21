@@ -22,6 +22,7 @@
 import { bearerFromRequest, verifyToken } from "./auth";
 import { forgetCard } from "./card-cache";
 import type { Env } from "./env";
+import { escapeHtml } from "./http";
 import { cleanImage } from "./image-check";
 import { nameProblem, orgNameProblem } from "./names";
 import { MAX_LIVE_STEP_UPS, STEP_UP_TTL_MS, newStepUpToken, stepUpHash, stepUpRequired } from "./step-up";
@@ -1034,15 +1035,8 @@ const invite = async (
 // Headless sign-in callback
 // ---------------------------------------------------------------------------
 
-/** Query params land verbatim in the page — escape them. (WorkOS codes/states
- * are URL-safe tokens, but this URL accepts anything.) */
-export const escapeHtml = (s: string): string =>
-  s
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+// (Query params land verbatim in the page, escaped: `escapeHtml`. WorkOS
+// codes/states are URL-safe tokens, but this URL accepts anything.)
 
 const cliPage = (body: string): string => `<!doctype html>
 <html lang="en">

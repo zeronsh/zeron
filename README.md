@@ -45,6 +45,8 @@ zeron daemon start
 
 Devices signed in to the same account can read and write each other's workspace files, so only sign in devices you trust. Existing local sessions are never uploaded.
 
+Sync runs through Zeron's server by default. To run your own on your Cloudflare account, see [Self-hosting a Zeron server](docs/self-hosting.md).
+
 ## Sponsors
 
 Thank you to [The Context Company](https://www.thecontextcompany.com/) for sponsoring Zeron. You can help fund Zeron's development too by [becoming a sponsor on GitHub](https://github.com/sponsors/zeronsh).

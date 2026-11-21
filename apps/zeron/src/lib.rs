@@ -38,17 +38,25 @@ pub fn engine_config_from_env() -> zeron_engine::EngineConfig {
     zeron_engine::heap::set_trim(allocator::trim);
     // Dev-mode bearer (no WorkOS): an explicit token enables sync.
     let edge_token = std::env::var("ZERON_EDGE_TOKEN").ok();
+    let data_dir = paths::data_dir();
+    // The server chosen for the data dir (the desktop app's Settings), unless
+    // the environment names one.
+    let chosen = zeron_proto::server::chosen(&data_dir, |key| std::env::var(key).ok());
+    let (edge_url, workos_client_id) = match chosen {
+        Some(server) => (server.url, Some(server.workos_client_id)),
+        // Real auth against production by default; see
+        // `workos_client_id_from_env` for the dev-mode escape hatches.
+        None => (edge_url_from_env(), workos_client_id_from_env(&edge_token)),
+    };
     zeron_engine::EngineConfig {
-        data_dir: paths::data_dir(),
-        edge_url: edge_url_from_env(),
+        data_dir,
+        edge_url,
         ipc_port: zeron_cli::ipc_port_from_env(),
         default_harness: harness_from_env(),
         // WorkOS mode: the signed-in session's org wins; ZERON_ORG_ID (dev
         // default "dev-org") scopes the workspace room otherwise.
         org_id: std::env::var("ZERON_ORG_ID").ok(),
-        // Real auth against production by default; see
-        // `workos_client_id_from_env` for the dev-mode escape hatches.
-        workos_client_id: workos_client_id_from_env(&edge_token),
+        workos_client_id,
         edge_token,
     }
 }

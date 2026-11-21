@@ -39,6 +39,8 @@ const CALLS: &[&str] = &[
     "account.orgs",
     "account.sign_in",
     "account.sign_out",
+    "account.find_server",
+    "account.use_server",
     "account.username",
     "account.me",
     "account.rename",

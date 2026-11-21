@@ -66,7 +66,8 @@ pub type CoreResult<T> = Result<T, CoreError>;
 /// Static per-install configuration.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct CoreConfig {
-    /// Edge base URL (`auth_production_edge_url()` for prod).
+    /// Edge base URL: the `url` of the server the credentials belong to
+    /// (`ServerInfo`; `server_official()` until someone picks another).
     pub edge_url: String,
     /// Writable directory for registry/doc snapshots and caches, scoped by
     /// the platform to the signed-in identity (sign-out wipes it).

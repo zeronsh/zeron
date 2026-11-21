@@ -182,7 +182,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
                     Some(bin) => build_of(bin).await,
                     None => None,
                 };
-                let started = manager::started_build(config);
+                let started = manager::started_build(&config);
                 let judged = judge(running.as_deref(), on_disk.as_deref(), started.as_deref());
                 if said != Some(judged) {
                     let (stale, ours) = judged;
@@ -221,7 +221,7 @@ fn install_restart(host: &ScriptHost) {
         }
         let info = rpc.call("EngineInfo", json!({})).await?;
         let running = info["build"].as_str().map(str::to_owned);
-        if config.startable().is_none() || running.is_none() || running != manager::started_build(config) {
+        if config.startable().is_none() || running.is_none() || running != manager::started_build(&config) {
             return Err("This engine wasn't started by this app.".into());
         }
         eprintln!("zeron-zgx: engine: starting the engine on disk in place of an older one");

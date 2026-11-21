@@ -6,6 +6,8 @@
  *
  * Routes:
  *   GET  /health
+ *   GET  /.well-known/zeron           — public: format version + sign-in client (discovery.ts)
+ *   GET  /                            — public, self-hosted only: the server's invite page (join.ts)
  *   POST /auth/exchange               — WorkOS code → tokens
  *   POST /auth/refresh                — WorkOS refresh → fresh tokens
  *   GET  /auth/orgs                   — caller's active org memberships
@@ -73,6 +75,8 @@
  */
 import { authenticate } from "./auth";
 import { chatRoute } from "./chat-route";
+import { discoveryRoute } from "./discovery";
+import { joinRoute } from "./join";
 import { dialDeviceRoom } from "./device-link";
 import { deviceParam, forward } from "./forward";
 import { handleAuthRoute } from "./auth-routes";
@@ -141,6 +145,13 @@ export default {
     if (url.pathname === "/health") {
       return json({ ok: true, auth: env.AUTH_MODE === "dev" ? "dev" : "workos" });
     }
+    // What an app pointed at this server needs before sign-in (its WorkOS
+    // client): self-hosting types an address, nothing else.
+    const discovered = discoveryRoute(request, env, url);
+    if (discovered) return discovered;
+    // A self-hosted server's address, opened in a browser: its invite.
+    const joined = joinRoute(request, env, url);
+    if (joined) return joined;
 
     // ── public install surface (also routed from zeron.sh): the
     //    `curl | sh` installer and the release artifacts it downloads ───────

@@ -51,6 +51,42 @@ pub fn parse_conversation_link(url: &str) -> Result<ConversationDeepLink, &'stat
     })
 }
 
+/// The longest address an invite carries (a URL with a port and a path to
+/// spare); a longer one is no server's.
+pub const SERVER_INVITE_MAX: usize = 512;
+
+/// A self-hosted server's invite, as its own page hands it out ("Open in
+/// Zeron", edge/src/discovery.ts): the address to look up, which the apps
+/// offer and never switch to without a click.
+///
+///   zeron://server?address=<address>
+pub fn server_invite_link(address: &str) -> String {
+    format!("zeron://server?address={}", encode_component(address))
+}
+
+/// The address an invite carries, trimmed: one line, no longer than
+/// [`SERVER_INVITE_MAX`]. What it names is the lookup's to judge.
+pub fn parse_server_invite(url: &str) -> Result<String, &'static str> {
+    let rest = url.strip_prefix("zeron://server").ok_or("not a Zeron server invite")?;
+    let query = rest
+        .strip_prefix("/?")
+        .or_else(|| rest.strip_prefix('?'))
+        .ok_or("missing server address")?;
+    let encoded = query
+        .split('&')
+        .find_map(|part| part.strip_prefix("address="))
+        .ok_or("missing server address")?;
+    let address = decode_component(encoded)?;
+    let address = address.trim();
+    if address.is_empty() {
+        return Err("missing server address");
+    }
+    if address.len() > SERVER_INVITE_MAX || address.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("invalid server address");
+    }
+    Ok(address.to_owned())
+}
+
 /// A string as one part of a link (RFC 3986 unreserved characters kept).
 pub fn encode_component(value: &str) -> String {
     let mut out = String::new();
@@ -106,6 +142,30 @@ mod tests {
         assert!(parse_conversation_link("https://example.com").is_err());
         assert!(parse_conversation_link("zeron://open/chat/id").is_err());
         assert!(parse_conversation_link("zeron://open/chat/%GG?workspace=x").is_err());
+    }
+
+    #[test]
+    fn a_server_invite_round_trips_its_address() {
+        for address in ["zeron.acme.com", "https://zeron.acme.com", "http://192.168.1.20:8787/edge"] {
+            assert_eq!(parse_server_invite(&server_invite_link(address)).as_deref(), Ok(address));
+        }
+        assert_eq!(
+            parse_server_invite("zeron://server/?from=web&address=%20zeron.acme.com%20").as_deref(),
+            Ok("zeron.acme.com")
+        );
+    }
+
+    #[test]
+    fn a_server_invite_without_one_line_of_address_is_refused() {
+        assert!(parse_server_invite("zeron://server").is_err());
+        assert!(parse_server_invite("zeron://server?address=").is_err());
+        assert!(parse_server_invite("zeron://server?address=%20%20").is_err());
+        assert!(parse_server_invite("zeron://server?address=a%0Ab").is_err());
+        assert!(parse_server_invite("zeron://server?address=a%20b").is_err());
+        assert!(parse_server_invite("zeron://server?address=%GG").is_err());
+        assert!(parse_server_invite(&server_invite_link(&"a".repeat(SERVER_INVITE_MAX + 1))).is_err());
+        assert!(parse_server_invite("zeron://serverx?address=a").is_err());
+        assert!(parse_server_invite("https://zeron.acme.com").is_err());
     }
 
     #[test]

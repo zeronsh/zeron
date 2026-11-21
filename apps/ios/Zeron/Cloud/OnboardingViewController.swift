@@ -39,7 +39,15 @@ final class OnboardingViewController: UIViewController {
     private let progress = UIStackView()
     private let page = UIView()
     private let footer = UIStackView()
+    /// Signed out, on Sync: More in the corner (another server, the guide),
+    /// and over the heading the server logging in uses, when it isn't Zeron's.
+    private var more: WelcomeMoreButton?
+    private var identity: ServerIdentityView?
     private var providers: ProvidersViewController?
+
+    /// The middle of the top row (the progress), down from the safe area's
+    /// top. The welcome puts its More there too.
+    static let topRowCenter: CGFloat = 24
 
     static func shouldShow(for app: AppModel) -> Bool {
         guard let client = app.client, !app.isDemo else { return false }
@@ -101,7 +109,7 @@ final class OnboardingViewController: UIViewController {
         let width = page.widthAnchor.constraint(equalToConstant: 560)
         width.priority = .defaultHigh
         NSLayoutConstraint.activate([
-            progress.topAnchor.constraint(equalTo: guide.topAnchor, constant: 14),
+            progress.centerYAnchor.constraint(equalTo: guide.topAnchor, constant: Self.topRowCenter),
             progress.leadingAnchor.constraint(equalTo: page.leadingAnchor),
             progress.heightAnchor.constraint(equalToConstant: 20),
             page.topAnchor.constraint(equalTo: progress.bottomAnchor, constant: 18),
@@ -114,6 +122,17 @@ final class OnboardingViewController: UIViewController {
             footer.trailingAnchor.constraint(equalTo: page.trailingAnchor),
             footer.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -12),
         ])
+        if !app.isSignedIn {
+            let more = WelcomeMoreButton(app: app, host: self)
+            self.more = more
+            identity = ServerIdentityView(app: app, host: self, centered: false)
+            // Level with the progress, its glyph's edge on the page's.
+            view.addSubview(more)
+            NSLayoutConstraint.activate([
+                more.centerYAnchor.constraint(equalTo: progress.centerYAnchor),
+                more.trailingAnchor.constraint(equalTo: page.trailingAnchor, constant: WelcomeMoreButton.glyphInset),
+            ])
+        }
         if app.isSignedIn {
             cloudToken = cloud.observe { [weak self] in self?.refresh() }
             cloud.refresh()
@@ -211,6 +230,7 @@ final class OnboardingViewController: UIViewController {
 
     /// Back on the left; Skip and the way forward on the right.
     private func renderFooter() {
+        renderMore()
         footer.arrangedSubviews.forEach { $0.removeFromSuperview() }
         guard step != .done else {
             footer.isHidden = true
@@ -257,6 +277,26 @@ final class OnboardingViewController: UIViewController {
         case .done:
             break
         }
+    }
+
+    /// More, on Sync only (where logging in picks a server): it fades with
+    /// the page, and holds still while the browser is up.
+    private func renderMore() {
+        guard let more else { return }
+        let shown = step == .sync && !app.isSignedIn
+        more.isEnabled = !loggingIn
+        identity?.isEnabled = !loggingIn
+        more.isUserInteractionEnabled = shown
+        // The page and its way forward first; More last, as on the welcome.
+        // Off the list on other steps: a listed view is read even when faded.
+        view.accessibilityElements = [progress, page, footer] + (shown ? [more] : [])
+        let alpha: CGFloat = shown ? 1 : 0
+        guard more.alpha != alpha else { return }
+        guard view.window != nil, !UIAccessibility.isReduceMotionEnabled else {
+            more.alpha = alpha
+            return
+        }
+        UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) { more.alpha = alpha }
     }
 
     private func appearancePage() -> UIView {
@@ -316,6 +356,12 @@ final class OnboardingViewController: UIViewController {
 
     private func syncPage() -> UIView {
         let header = heading("Sync your work", "Log in to keep your chats, projects and settings in step everywhere you use Zeron.")
+        if let identity, !app.isSignedIn {
+            // The server logging in uses, over the title; on Zeron's it's
+            // hidden and the stack closes its room.
+            header.insertArrangedSubview(identity, at: 0)
+            header.setCustomSpacing(16, after: identity)
+        }
         let rows = [
             ("iphone.and.arrow.forward", "On every device", "Pick up a chat on your phone or another computer, right where you left it."),
             ("laptopcomputer", "Run agents anywhere", "Start work on any of your machines from whichever one you're at."),

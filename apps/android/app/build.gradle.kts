@@ -127,6 +127,7 @@ dependencies {
     implementation(libs.webrtc)
     debugImplementation(libs.compose.ui.tooling)
     testImplementation(libs.junit)
+    testImplementation(libs.org.json)
 }
 
 kotlin {

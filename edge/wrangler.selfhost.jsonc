@@ -1,0 +1,77 @@
+{
+  // A Zeron server of your own: this edge on your Cloudflare account, signing
+  // in through your WorkOS environment. The guide is docs/self-hosting.md;
+  // in short:
+  //
+  //   npx wrangler r2 bucket create zeron-blobs
+  //   npx wrangler r2 bucket create zeron-releases
+  //   (set WORKOS_CLIENT_ID and SERVER_NAME below)
+  //   npx wrangler secret put WORKOS_API_KEY --config wrangler.selfhost.jsonc
+  //   npx wrangler deploy --config wrangler.selfhost.jsonc
+  //   curl https://<your edge>/.well-known/zeron
+  //
+  // What it leaves out, every one optional in src/env.ts: Zeron Cloud
+  // (machines, billing), member card pages, iOS push, the credential vault
+  // and the hosted model list. The apps work without them.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Durable Object storage belongs to the Worker's name: rename it before
+  // the first deploy, never after (every room would start empty).
+  "name": "zeron-edge",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-01",
+  "compatibility_flags": ["nodejs_compat"],
+  // https://zeron-edge.<your subdomain>.workers.dev is an address the apps
+  // take as it is. A domain of your own instead (or as well), on a zone in
+  // this Cloudflare account:
+  //   "routes": [{ "pattern": "zeron.example.com", "custom_domain": true }],
+  "workers_dev": true,
+  // As the official edge's (wrangler.jsonc): src/install.sh as a string, and
+  // loro-crdt's WASM inlined (workerd can't fetch it at runtime).
+  "rules": [{ "type": "Text", "globs": ["**/*.sh"], "fallthrough": true }],
+  "alias": { "loro-crdt": "loro-crdt/base64" },
+  "durable_objects": {
+    "bindings": [
+      { "name": "SESSION_ROOMS", "class_name": "SessionRoom" },
+      { "name": "DEVICE_ROOMS", "class_name": "DeviceRoom" },
+      { "name": "PREVIEW_ROOMS", "class_name": "PreviewRoom" },
+      { "name": "REGISTRY_ROOMS", "class_name": "RegistryRoom" },
+      { "name": "CHAT_ROOMS", "class_name": "ChatRoom" },
+      // Your WorkOS users and organizations, kept by the webhook (below).
+      { "name": "USER_DIRECTORY", "class_name": "UserDirectory" }
+    ]
+  },
+  // The official edge's migrations, tag for tag (CloudAccount and CloudIndex
+  // are made and stay unused): a later release's new tag copies over as it
+  // is. Never edit or remove a tag once deployed.
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["SessionRoom", "DeviceRoom"] },
+    { "tag": "v2", "new_sqlite_classes": ["RegistryRoom"] },
+    { "tag": "v3", "new_sqlite_classes": ["ChatRoom"] },
+    { "tag": "v4", "new_sqlite_classes": ["PreviewRoom"] },
+    { "tag": "v5", "new_sqlite_classes": ["CloudAccount", "CloudIndex"] },
+    { "tag": "v6", "new_sqlite_classes": ["UserDirectory"] }
+  ],
+  "r2_buckets": [
+    // Attachments, images and backups.
+    { "binding": "BLOBS", "bucket_name": "zeron-blobs" },
+    // Bound because the Worker expects it; stays empty (Zeron's own
+    // releases are served from zeron.sh).
+    { "binding": "RELEASES", "bucket_name": "zeron-releases" }
+  ],
+  "vars": {
+    // Required: your WorkOS environment's client id ("client_…", WorkOS
+    // dashboard → API Keys). Public: apps read it from /.well-known/zeron,
+    // which names it as missing while it's empty. Its API key is a secret:
+    //   npx wrangler secret put WORKOS_API_KEY --config wrangler.selfhost.jsonc
+    "WORKOS_CLIENT_ID": "",
+    "AUTH_MODE": "workos",
+    // What the apps call this server ("Server · Acme"). Empty: its address.
+    "SERVER_NAME": "",
+    // Chat rooms relay live turns to every device ("1": for everyone).
+    "CHAT_RELAY_LAYER": "1"
+    // Optional secret, for the user directory: the signing secret of a WorkOS
+    // webhook to https://<your edge>/workos/webhook (docs/self-hosting.md).
+    //   npx wrangler secret put WORKOS_WEBHOOK_SECRET --config wrangler.selfhost.jsonc
+  },
+  "observability": { "enabled": true }
+}

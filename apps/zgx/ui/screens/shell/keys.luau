@@ -59,6 +59,9 @@ end
 for _, k in
 	{
 		{ id = "shell.palette", title = "Search", key = "cmd+k", group = "App", menu = "File", reserved = true },
+		-- (Where the account lives: Settings → Account, its server's dialog
+		-- open. No key: Finder's ⌘K is Search here.)
+		{ id = "shell.connect_server", title = "Connect to Server…", key = "", group = "App", menu = "File", rule = true },
 		-- (The application menu's, over Services, as Zeron's was: macOS's
 		-- first menu. `Application` is zgx-desktop's APPLICATION_MENU.)
 		{ id = "shell.check_updates", title = "Check for Updates…", key = "", group = "App", menu = "Application", rule = true },

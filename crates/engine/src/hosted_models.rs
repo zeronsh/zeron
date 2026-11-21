@@ -413,12 +413,17 @@ pub struct HostedModels {
 }
 
 impl HostedModels {
-    /// For the engine's own edge (`ZERON_EDGE_URL`, production's when unset).
+    /// For the engine's own edge: the server chosen for its data dir unless
+    /// the environment names one (as the engine's config resolves it), else
+    /// `ZERON_EDGE_URL`, else production's.
     pub fn for_engine(data_dir: &Path) -> Arc<Self> {
-        let edge = std::env::var("ZERON_EDGE_URL")
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_EDGE.into());
+        let edge = match zeron_proto::server::chosen(data_dir, |key| std::env::var(key).ok()) {
+            Some(server) => server.url,
+            None => std::env::var("ZERON_EDGE_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| DEFAULT_EDGE.into()),
+        };
         let url = list_url(&edge);
         if url.is_none() {
             tracing::info!(%edge, "Hosted model list off: edge is not HTTPS on zeron.sh");
