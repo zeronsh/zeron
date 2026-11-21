@@ -8,10 +8,13 @@
 -- The lists are keyed by membership and invitation id (`Settings.Each`),
 -- so one leaving, arriving or changing role changes that row alone. Only
 -- the list's own states swap: loading, failed, found, no one by that name.
+-- Signed out, there's no organization to ask for: the way in, not a failure.
 
 local ds = require("@ds")
 local Menu = require("@ds/menu")
 local api = require("@account/api")
+local auth = require("@account/auth")
+local host = require("@app/screens/settings/host")
 local store = require("@app/screens/settings/store")
 local search = require("@app/screens/settings/search")
 local locale = require("@ds/locale")
@@ -399,7 +402,16 @@ local function rename_org()
 	end)
 end
 
+-- Signed out, or signing in in the browser.
+local function signed_out(): boolean
+	local s = auth.state:get()
+	return s == "signed_out" or s == "waiting"
+end
+
 local function page_kind(): string
+	if signed_out() then
+		return "signed_out"
+	end
 	local s = store.state("org")
 	if s == "failed" then
 		return "failed"
@@ -421,6 +433,19 @@ local function page_body(key: string): Node
 				label = ui.t("common.retry") :: any,
 				on_click = function()
 					visits.again("members", store.load_org)
+				end,
+			},
+		}
+	elseif key == "signed_out" then
+		return ds.EmptyState {
+			icon = "users-group-rounded",
+			title = ui.t("settings.members.signed_out") :: any,
+			body = ui.t("settings.members.signed_out_body") :: any,
+			size = "sm",
+			action = {
+				label = ui.t("settings.members.sign_in") :: any,
+				on_click = function()
+					host.invoke("app.onboard")
 				end,
 			},
 		}
@@ -501,8 +526,25 @@ local function page_body(key: string): Node
 	}
 end
 
+-- (Asked only signed in: signed out, the edge only refuses.)
+local function load_org()
+	if auth.signed_in:peek() then
+		store.load_org()
+	end
+end
+
 function M.view(): Node
-	visits.once("members", store.load_org)
+	visits.once("members", load_org)
+	-- Signed in while the page shows (the browser's way in): the organization
+	-- asked for then. (Only on the change: a rebuild asks nothing.)
+	local was = auth.state:peek()
+	ui.effect(function()
+		local now = auth.state:get()
+		if now == "signed_in" and was ~= "signed_in" then
+			visits.again("members", load_org)
+		end
+		was = now
+	end)
 	return ui.column {
 		w_full = true,
 		items = "center",
@@ -516,7 +558,9 @@ function M.view(): Node
 			trail = ui.row {
 				gap = "$space.2",
 				items = "center",
-				ds.SearchField { value = query, placeholder = ui.t("settings.members.find") :: any, size = "sm", w = 180, name = ui.t("settings.members.find") :: any },
+				ui.show(function()
+					return not signed_out()
+				end, ds.SearchField { value = query, placeholder = ui.t("settings.members.find") :: any, size = "sm", w = 180, name = ui.t("settings.members.find") :: any }),
 				ui.show(function()
 					return store.admin:get()
 				end, ds.Button {
