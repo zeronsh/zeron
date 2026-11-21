@@ -1315,6 +1315,63 @@ pub fn antigravity_saved_auth_method(home: &Path) -> Option<String> {
         .map(|method| method.canonical)
 }
 
+/// Whether Antigravity's local conversation SQLite DB currently records an
+/// active (`PENDING` = 1 or `RUNNING` = 2) background task step (such as a
+/// `schedule` timer/cron or background command, all of which populate
+/// `task_details` and emit no open ACP `tool_call` frame while sleeping).
+///
+/// Checked only on the rare occasion that Antigravity's prompt-stall deadline
+/// elapses with zero wire or CCPA activity; missing DBs or schema differences
+/// fail closed (`false`) so genuinely wedged runs still settle.
+async fn antigravity_has_active_background_task(
+    run_env: &std::collections::BTreeMap<String, String>,
+    session_id: &str,
+) -> bool {
+    if session_id.is_empty()
+        || session_id.contains('/')
+        || session_id.contains('\\')
+        || session_id.contains("..")
+    {
+        return false;
+    }
+    let home = run_env
+        .get("GEMINI_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| antigravity_home().ok());
+    let Some(home) = home else {
+        return false;
+    };
+    let db_path = home
+        .join("antigravity-acp")
+        .join("conversations")
+        .join(format!("{session_id}.db"));
+    tokio::task::spawn_blocking(move || antigravity_db_has_active_background_task(&db_path))
+        .await
+        .unwrap_or(false)
+}
+
+fn antigravity_db_has_active_background_task(db_path: &Path) -> bool {
+    if !db_path.is_file() {
+        return false;
+    }
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let Ok(conn) = rusqlite::Connection::open_with_flags(db_path, flags) else {
+        return false;
+    };
+    let _ = conn.busy_timeout(Duration::from_millis(200));
+    // CortexStepStatus::PENDING (1) / RUNNING (2) on steps that carry
+    // background `task_details` (timers, crons, background commands).
+    conn.query_row(
+        "SELECT 1 FROM steps WHERE status IN (1, 2) \
+         AND task_details IS NOT NULL AND length(task_details) > 0 LIMIT 1",
+        [],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
 fn sign_in_auth_method(
     initialized: &Value,
     default_method: &str,
@@ -1932,7 +1989,7 @@ struct WarmAgent {
 /// Per-child resources whose lifetimes match the spawned ACP subprocess.
 struct ChildGuards {
     _scratch: Option<ScratchDir>,
-    _thoughts_proxy: Option<ccpa_thoughts::ThoughtsProxy>,
+    thoughts_proxy: Option<ccpa_thoughts::ThoughtsProxy>,
 }
 
 /// What `spawn_agent` hands a run.
@@ -3002,7 +3059,7 @@ impl AcpHarness {
         }
         let guards = ChildGuards {
             _scratch: scratch,
-            _thoughts_proxy: thoughts_proxy,
+            thoughts_proxy,
         };
         Ok((guards, child, stderr_tail, sign_in_prompted))
     }
@@ -5904,7 +5961,7 @@ async fn select_session_config(
 async fn run_session(session: Session) {
     let Session {
         // Locals drop in reverse binding order: reap the child before cleanup.
-        guards: _guards,
+        guards,
         mut child,
         client,
         mut incoming,
@@ -6203,6 +6260,10 @@ async fn run_session(session: Session) {
     };
     let mut prompt_stall_deadline: Option<tokio::time::Instant> =
         prompt_stall.map(|d| tokio::time::Instant::now() + d);
+    let mut ccpa_activity = guards
+        .thoughts_proxy
+        .as_ref()
+        .map(ccpa_thoughts::ThoughtsProxy::subscribe_activity);
     // The prompt in flight (re-sent by a preempt when the agent drops an
     // unstarted cancelled prompt). When an unrestorable resumed session fell
     // back to a fresh one, send the host's transcript-wrapped recovery prompt.
@@ -7340,10 +7401,33 @@ async fn run_session(session: Session) {
                 }
             },
 
+            // Antigravity CCPA liveness heartbeat: any LLM request start or
+            // streaming SSE chunk through the loopback thoughts proxy (including
+            // subagents, workflows, and post-timer wakeups) proves the server is
+            // actively working even while ACP stdout is quiet.
+            changed = async {
+                match ccpa_activity.as_mut() {
+                    Some(rx) => rx.changed().await,
+                    None => std::future::pending().await,
+                }
+            }, if ccpa_activity.is_some() => {
+                if changed.is_err() {
+                    ccpa_activity = None;
+                } else if harness == HarnessId::Antigravity
+                    && turn.is_some()
+                    && open_tools.is_empty()
+                    && questions.is_empty()
+                {
+                    prompt_stall_deadline =
+                        prompt_stall.map(|d| tokio::time::Instant::now() + d);
+                }
+            },
+
             // Prompt-stall watchdog: a prompt was sent and NOTHING has come
             // back on the wire at all (or for Antigravity, total silence past
-            // the bound with no open tools or user questions). Surface a
-            // visible error instead of indefinite Working.
+            // the bound with no open tools, user questions, CCPA HTTP activity,
+            // or active background tasks). Surface a visible error instead of
+            // indefinite Working.
             _ = tokio::time::sleep_until(
                 prompt_stall_deadline.unwrap_or_else(tokio::time::Instant::now),
             ), if prompt_stall_deadline.is_some()
@@ -7354,6 +7438,18 @@ async fn run_session(session: Session) {
                 && !stopping
                 && !preempt_sent =>
             {
+                if harness == HarnessId::Antigravity
+                    && antigravity_has_active_background_task(&request.env, &session_id).await
+                {
+                    tracing::debug!(
+                        target: "zeron_harness::acp",
+                        %session_id,
+                        "deferring Antigravity prompt-stall watchdog while a background task is active"
+                    );
+                    prompt_stall_deadline =
+                        prompt_stall.map(|d| tokio::time::Instant::now() + d);
+                    continue;
+                }
                 let message = if progress_seq == prompt_seq {
                     format!(
                         "{agent_name} stopped responding mid-turn \
