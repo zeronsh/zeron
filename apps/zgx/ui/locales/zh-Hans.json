@@ -2563,7 +2563,8 @@
     "page": {
       "plugin": "插件",
       "plugin_off": "其插件目前未启用。",
-      "resize_files": "调整文件区域大小"
+      "resize_files": "调整文件区域大小",
+      "close_pane": "Remove from split"
     },
     "keys": {
       "title": {
