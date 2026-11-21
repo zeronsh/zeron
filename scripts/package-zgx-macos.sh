@@ -54,6 +54,13 @@ ENTITLEMENTS="$ROOT/dist/macos/Zeron.entitlements"
 read -r -a CARGO_EXTRA <<<"${CARGO_FLAGS:-}"
 mkdir -p "$OUT_DIR"
 
+#   ZGX_BUNDLE=1        zgx's runtime work (production doesn't use it yet): the
+#                       interface built only when its Rust changed (cached in
+#                       $ZGX_CACHE/runtimes by scripts/zgx-runtime-key.py's
+#                       key), without its version, which the bundle carries;
+#                       its scripts as bytecode and its native modules, by
+#                       `zgx build` ($ZGX, the zgx tool, else `zgx` on PATH),
+#                       in Contents/Resources
 # The engine: the binary given, or the one in a bundle or tarball.
 ENGINE_SRC="${ZGX_ENGINE:-}"
 [[ -n "$ENGINE_SRC" ]] || die "ZGX_ENGINE: a built engine, a Zeron.app, its app tarball or its Zeron Engine"
@@ -82,7 +89,25 @@ LC_ALL=C grep -aq "Multi-device controller for coding agents" "$ENGINE_BIN" ||
 
 # The interface: apps/zgx is a workspace of its own (its own lock, patches).
 ZGX_BIN="${ZGX_BIN:-}"
-if [[ -z "$ZGX_BIN" ]]; then
+if [[ -z "$ZGX_BIN" && -n "${ZGX_BUNDLE:-}" ]]; then
+  # The runtime: the interface's binary, by a key of everything it's built from.
+  ZGX_CACHE="${ZGX_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/zgx}"
+  started=$(date +%s)
+  key=$(python3 "$ROOT/scripts/zgx-runtime-key.py" "$ROOT" "release beta")
+  cached="$ZGX_CACHE/runtimes/zeron-zgx/$key/zeron-zgx"
+  if [[ -x "$cached" ]]; then
+    echo "runtime: unchanged ($key)"
+  else
+    echo "runtime: building ($key)"
+    target_dir="${ZGX_TARGET_DIR:-$ROOT/apps/zgx/target}"
+    [[ "$target_dir" == /* ]] || target_dir="$PWD/$target_dir"
+    (cd "$ROOT/apps/zgx" && cargo build --release ${CARGO_EXTRA[@]+"${CARGO_EXTRA[@]}"} \
+      --features beta --target-dir "$target_dir")
+    mkdir -p "$(dirname "$cached")"
+    cp "$target_dir/release/zeron-zgx" "$cached.$$" && mv "$cached.$$" "$cached"
+  fi
+  ZGX_BIN="$cached"
+elif [[ -z "$ZGX_BIN" ]]; then
   target_dir="${ZGX_TARGET_DIR:-$ROOT/apps/zgx/target}"
   [[ "$target_dir" == /* ]] || target_dir="$PWD/$target_dir"
   # (From its folder: cargo reads .cargo/config.toml by where it runs, not by
@@ -92,8 +117,9 @@ if [[ -z "$ZGX_BIN" ]]; then
   ZGX_BIN="$target_dir/release/zeron-zgx"
 fi
 # Only an app build of this version may go in: the updater stages it by
-# `zeron --version`, and a development build is staging's.
-[[ "$("$ZGX_BIN" --version)" == "zeron $VERSION" ]] ||
+# `zeron --version`, and a development build is staging's. (A bundle's says
+# its manifest's, checked once it's in place.)
+[[ -n "${ZGX_BUNDLE:-}" || "$("$ZGX_BIN" --version)" == "zeron $VERSION" ]] ||
   die "$ZGX_BIN isn't the $VERSION app (it says '$("$ZGX_BIN" --version)')"
 # Luau without its asserts (a fifth of script time): zgx-script compiles its
 # warning about them in only when they're on (cfg luau_asserts).
@@ -139,8 +165,24 @@ plutil -lint "$PLIST" >/dev/null
 
 # The scripts and Zeron's own plugins (read where they lie: templates and
 # plugins live in the data dir). Not zgx's generated types or the tests.
-rsync -a --exclude '.zgx/' --exclude '/tests/' --exclude '.lock' --exclude '.DS_Store' \
-  "$ROOT/apps/zgx/ui/" "$APP/Contents/Resources/ui/"
+if [[ -n "${ZGX_BUNDLE:-}" ]]; then
+  # As `zgx build` writes them: the folder as shipped otherwise, with a
+  # zgx.json naming the app, its version and its modules.
+  BUILT="$OUT_DIR/.app" BUNDLE="$OUT_DIR/.bundle"
+  rm -rf "$BUILT" "$BUNDLE"
+  rsync -a --exclude '.zgx/' --exclude '/tests/' --exclude '.lock' --exclude '.DS_Store' \
+    "$ROOT/apps/zgx/ui/" "$BUILT/"
+  printf '{ "app_id": "zeron", "version": "%s", "modules": { "reply": "%s" } }\n' \
+    "$VERSION" "$ROOT/apps/zgx/modules/reply" >"$BUILT/zgx.json"
+  "${ZGX:-zgx}" build --out "$BUNDLE" --version "$VERSION" "$BUILT"
+  cp -R "$BUNDLE/manifest.json" "$BUNDLE/ui" "$BUNDLE/modules" "$APP/Contents/Resources/"
+  rm -rf "$BUILT" "$BUNDLE"
+  [[ "$("$APP/Contents/MacOS/zeron" --version)" == "zeron $VERSION" ]] ||
+    die "$APP isn't the $VERSION app (it says '$("$APP/Contents/MacOS/zeron" --version)')"
+else
+  rsync -a --exclude '.zgx/' --exclude '/tests/' --exclude '.lock' --exclude '.DS_Store' \
+    "$ROOT/apps/zgx/ui/" "$APP/Contents/Resources/ui/"
+fi
 rsync -a --exclude '.zgx/' --exclude '.DS_Store' \
   "$ROOT/apps/zgx/plugins-builtin/" "$APP/Contents/Resources/plugins-builtin/"
 # Each ships the canonical SDK, whatever copy sits in its folder (examples_tests

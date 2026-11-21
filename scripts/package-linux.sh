@@ -74,26 +74,7 @@ if [[ -n "$ZGX_VERSION" ]]; then
     # The runtime: Zeron's binary, by a key of everything it's built from.
     ZGX_CACHE="${ZGX_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/zgx}"
     started=$(date +%s.%N)
-    key=$(python3 - "$ROOT" <<'KEY'
-import hashlib, os, subprocess, sys
-root = sys.argv[1]
-files = subprocess.run(["git", "ls-files", "-z"], cwd=root, capture_output=True, check=True).stdout.split(b"\0")
-shipped = (b"apps/zgx/ui/", b"apps/zgx/plugins-builtin/", b"apps/zgx/modules/")
-hasher = hashlib.sha256()
-hasher.update(subprocess.run(["rustc", "-vV"], capture_output=True, check=True).stdout)
-hasher.update(b"release beta\0")
-for name in sorted(files):
-    if not name or name.startswith(shipped):
-        continue
-    try:
-        with open(os.path.join(root, name.decode()), "rb") as file:
-            data = file.read()
-    except (FileNotFoundError, IsADirectoryError):
-        data = b"<none>"
-    hasher.update(name + b"\0" + len(data).to_bytes(8, "little") + data)
-print(hasher.hexdigest()[:32])
-KEY
-)
+    key=$(python3 "$ROOT/scripts/zgx-runtime-key.py" "$ROOT" "release beta")
     cached="$ZGX_CACHE/runtimes/zeron-zgx/$key/zeron-zgx"
     if [[ -x "$cached" ]]; then
       echo "runtime: unchanged ($key), keyed in $(echo "$(date +%s.%N) - $started" | bc) s"
