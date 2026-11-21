@@ -359,7 +359,8 @@ private fun ProjectChip(
 
 /**
  * One entry per project — checkouts of one repository, on any device, are
- * one entry listing their hosts; the host chip then picks which.
+ * one entry listing their hosts; the host chip then picks which. A search
+ * (name, hosts, paths) and the sort sit at the foot, in thumb reach.
  */
 @Composable
 private fun ProjectSheet(
@@ -372,21 +373,48 @@ private fun ProjectSheet(
 ) {
     val sheet = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val picked = projects.firstOrNull { it.id == draft.projectId }
-    val groups = remember(projects) {
-        projects.groupBy { it.groupKey }.values.sortedBy { it.first().groupName.lowercase() }
+    var query by remember { mutableStateOf("") }
+    var sort by rememberPickerSort("projects", ProjectSorts)
+    val all = remember(projects) { projects.groupBy { it.groupKey }.values.toList() }
+    val groups = remember(all, query, sort) {
+        val sorted = PickerSearch.sorted(
+            all,
+            sort,
+            name = { it.first().groupName },
+            // Latest session activity in any checkout, else when it was added.
+            recent = { members -> members.maxOf { p -> p.sessions.maxOfOrNull { it.lastActivityMs } ?: p.createdAtMs } },
+            created = { members -> members.maxOf { it.createdAtMs } },
+        )
+        PickerSearch.filter(sorted, query, { it.first().groupName }) { members ->
+            members.flatMap { listOf(it.name, it.deviceName, it.path, it.githubRepo) }
+        }
     }
+    val searching = query.isNotBlank()
     androidx.compose.material3.ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheet,
         containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
     ) {
-        androidx.compose.foundation.lazy.LazyColumn(contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp)) {
+        androidx.compose.foundation.lazy.LazyColumn(
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 8.dp),
+            modifier = Modifier.weight(1f, fill = false),
+        ) {
             item {
                 Text(
                     "Project",
                     style = MaterialTheme.typography.headlineSmallEmphasized,
                     modifier = Modifier.padding(start = 24.dp, bottom = 16.dp),
                 )
+            }
+            if (searching && groups.isEmpty()) {
+                item("no-match") {
+                    Text(
+                        "No projects match \u201c${query.trim()}\u201d.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp),
+                    )
+                }
             }
             groups.forEachIndexed { i, members ->
                 val first = members.first()
@@ -411,7 +439,8 @@ private fun ProjectSheet(
                     }
                 }
             }
-            item("none") {
+            // Searching lists projects only.
+            if (!searching) item("none") {
                 Spacer(Modifier.size(16.dp))
                 ProjectRow(
                     selected = draft.projectId == null,
@@ -423,7 +452,7 @@ private fun ProjectSheet(
                     mono = false,
                 ) { onPick(draft.copy(projectId = null, hostId = draft.hostId ?: picked?.deviceId ?: projects.firstOrNull()?.deviceId, worktree = false)) }
             }
-            item("new") {
+            if (!searching) item("new") {
                 ProjectRow(
                     selected = false,
                     index = 1,
@@ -435,7 +464,7 @@ private fun ProjectSheet(
                     onClick = onNewProject,
                 )
             }
-            if (onNewCloudProject != null) {
+            if (onNewCloudProject != null && !searching) {
                 item("new-cloud") {
                     ProjectRow(
                         selected = false,
@@ -450,8 +479,19 @@ private fun ProjectSheet(
                 }
             }
         }
+        PickerSearchBar(
+            query,
+            { query = it },
+            placeholder = "Search projects",
+            sort = sort,
+            sorts = ProjectSorts,
+            onSort = { sort = it },
+            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 16.dp),
+        )
     }
 }
+
+private val ProjectSorts = listOf(PickerSort.Name, PickerSort.Recent, PickerSort.Newest)
 
 @Composable
 private fun ProjectRow(

@@ -295,9 +295,23 @@ fun MentionSuggestions(model: ComposerModel, search: suspend (String) -> List<Fi
     }
 }
 
-/** An expressive choice menu: one group, inline section labels, a trailing check on the choice. */
+/**
+ * An expressive choice menu: one group, inline section labels, a trailing
+ * check on the choice. Long ones ([PickerSearch.SEARCH_AT] choices or more)
+ * open as a [ChoiceSheet] instead, searchable from the bottom; [searchable]
+ * forces the sheet for menus that grow with the workspace.
+ */
 @Composable
-fun ChoiceMenu(expanded: Boolean, onDismiss: () -> Unit, sections: List<MenuSection>) {
+fun ChoiceMenu(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    sections: List<MenuSection>,
+    searchable: Boolean = sections.sumOf { it.choices.size } >= PickerSearch.SEARCH_AT,
+) {
+    if (searchable) {
+        if (expanded) ChoiceSheet(onDismiss, sections)
+        return
+    }
     DropdownMenuPopup(expanded = expanded, onDismissRequest = onDismiss) {
         val groups = sections.filter { it.choices.isNotEmpty() }
         val all = groups.sumOf { it.choices.size }
@@ -333,4 +347,98 @@ fun ChoiceMenu(expanded: Boolean, onDismiss: () -> Unit, sections: List<MenuSect
             }
         }
     }
+}
+
+/**
+ * A long [ChoiceMenu] as a sheet: the first section's title heads it, the
+ * choices scroll, and a search with the sort sits at the foot — where a thumb
+ * already is, right above the keyboard.
+ */
+@Composable
+private fun ChoiceSheet(onDismiss: () -> Unit, sections: List<MenuSection>) {
+    val sheet = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val heading = sections.firstNotNullOfOrNull { it.title }
+    var query by remember { mutableStateOf("") }
+    var sort by rememberPickerSort("menu:${heading.orEmpty()}", ChoiceSorts)
+    val shown = sections
+        .map { it.title to PickerSearch.arrange(it.choices, query, sort) }
+        .filter { it.second.isNotEmpty() }
+    androidx.compose.material3.ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheet,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+    ) {
+        androidx.compose.foundation.lazy.LazyColumn(
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 8.dp),
+            modifier = Modifier.weight(1f, fill = false),
+        ) {
+            heading?.let { title ->
+                item("heading") {
+                    Text(title, style = MaterialTheme.typography.headlineSmallEmphasized, modifier = Modifier.padding(start = 24.dp, bottom = 16.dp))
+                }
+            }
+            if (shown.isEmpty()) {
+                item("no-match") {
+                    Text(
+                        "Nothing matches “${query.trim()}”.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp),
+                    )
+                }
+            }
+            shown.forEachIndexed { s, (title, choices) ->
+                if (title != null && title != heading) {
+                    item("section-$s") {
+                        Text(
+                            title,
+                            style = MaterialTheme.typography.titleSmallEmphasized,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 24.dp, top = 16.dp, bottom = 8.dp),
+                        )
+                    }
+                }
+                choices.forEachIndexed { i, choice ->
+                    item("choice-$s-$i-${choice.label}") {
+                        ChoiceRow(choice, i, choices.size) {
+                            choice.onClick()
+                            onDismiss()
+                        }
+                    }
+                }
+            }
+        }
+        PickerSearchBar(
+            query,
+            { query = it },
+            placeholder = "Search",
+            sort = sort,
+            sorts = ChoiceSorts,
+            onSort = { sort = it },
+            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 16.dp),
+        )
+    }
+}
+
+private val ChoiceSorts = listOf(PickerSort.Default, PickerSort.Name)
+
+@Composable
+private fun ChoiceRow(choice: MenuChoice, index: Int, count: Int, onClick: () -> Unit) {
+    androidx.compose.material3.SegmentedListItem(
+        onClick = onClick,
+        shapes = segmentedShapes(index, count),
+        colors = androidx.compose.material3.ListItemDefaults.segmentedColors(
+            containerColor = if (choice.selected) MaterialTheme.colorScheme.secondaryContainer else cardColor(),
+        ),
+        leadingContent = choice.leading,
+        supportingContent = choice.supporting?.let { text ->
+            { Text(text, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+        },
+        trailingContent = if (choice.selected) {
+            { ZIcon(ZIcons.Check, "Selected", Modifier.size(20.dp)) }
+        } else {
+            null
+        },
+        modifier = Modifier.padding(horizontal = 16.dp).padding(bottom = androidx.compose.material3.ListItemDefaults.SegmentedGap),
+    ) { Text(choice.label, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis) }
 }

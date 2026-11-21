@@ -247,7 +247,8 @@ fun VoiceMenu(controller: VoiceController, expanded: Boolean, onDismiss: () -> U
             MenuSection(
                 "Voice",
                 (listOf<String?>(null) + s.styles).map { style ->
-                    MenuChoice(VoiceController.styleLabel(style), style == selectedStyle) { controller.selectStyle(style) }
+                    // "Codex default" stays first when the list is sorted.
+                    MenuChoice(VoiceController.styleLabel(style), style == selectedStyle, fixed = style == null) { controller.selectStyle(style) }
                 },
             ),
         )
