@@ -11,6 +11,7 @@
 -- `tone` may be a function (a menu item's, following whether it is
 -- enabled).
 
+local control = require("@self/control")
 local locale = require("@self/locale")
 
 -- The look of a cap (or of the plain run).
@@ -27,7 +28,7 @@ local recipe = ui.variants {
 			plain = {},
 		},
 		size = {
-			sm = { h = 18, min_w = 18, text_size = "$font.size.xs" },
+			sm = { h = control.SMALL_CAP_H, min_w = control.SMALL_CAP_H, text_size = "$font.size.xs" },
 			md = { h = 20, min_w = 20, text_size = "$font.size.sm" },
 		},
 		tone = {

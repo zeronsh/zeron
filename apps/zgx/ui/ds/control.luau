@@ -9,6 +9,9 @@ export type Size = "sm" | "md" | "lg"
 
 -- A control's height, corner, type and inner padding at each size.
 M.H = { sm = 28, md = 32, lg = 40 } :: { [Size]: number }
+-- The controls at a field's end: its clear/reveal button and shortcut caps.
+M.FIELD_BUTTON_H = { sm = 20, md = 24, lg = 24 } :: { [Size]: number }
+M.SMALL_CAP_H = 18
 M.RADIUS = { sm = "$radius.md", md = "$radius.lg", lg = "$radius.lg" } :: { [Size]: string }
 M.TEXT = { sm = "$font.size.sm", md = "$font.size.md", lg = "$font.size.lg" } :: { [Size]: string }
 M.PAD = { sm = "$space.2", md = "$zeron.space.snug", lg = "$space.3" } :: { [Size]: string }
