@@ -17,6 +17,8 @@
 --   sessions.children(id)  a chat's side chats, newest first (tracked)
 --   sessions.archive(id), sessions.unarchive(id)
 --   sessions.rename(id, title)
+--   sessions.retitle(id)   a title the titler writes from its own messages:
+--                          a promise, or the engine's words for why not
 --   sessions.rename_project(id, name)
 --   sessions.set_project_icon(id, icon)  its picture, whole, everywhere: a
 --                          promise ({ emoji?, image?, hue? }; nil, its
@@ -197,6 +199,10 @@ end
 
 function M.rename(id: string, title: string)
 	ui.call("sessions.rename", { id = id, title = title }):after(function() end, quietly())
+end
+
+function M.retitle(id: string): any
+	return ui.call("sessions.retitle", id)
 end
 
 function M.rename_project(id: string, name: string)

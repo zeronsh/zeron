@@ -380,6 +380,27 @@ stub.unarchive = function(id: string)
 	end
 	publish()
 end
+-- (`session_retitle_fails`: the host can't name it.)
+local retitle_refused = false
+stub.retitle = function(id: string): any
+	note(`retitle:{id}`)
+	if retitle_refused then
+		return {
+			after = function(_, _ok: any, failed: any)
+				if failed then
+					failed("no title could be generated")
+				end
+			end,
+		}
+	end
+	return {
+		after = function(_, ok: any)
+			if ok then
+				ok(nil)
+			end
+		end,
+	}
+end
 -- (`archived_delete_fails`: the host refuses those it names.)
 local refused: { [string]: boolean } = {}
 stub.delete = function(id: string): any
@@ -1055,6 +1076,13 @@ ui.command {
 	title = "The host refuses to delete “Tidy the tests”",
 	run = function()
 		refused.a3 = true
+	end,
+}
+ui.command {
+	id = "session_retitle_fails",
+	title = "The host can't title “Tidy the tests”",
+	run = function()
+		retitle_refused = true
 	end,
 }
 ui.command {

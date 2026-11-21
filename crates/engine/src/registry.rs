@@ -697,6 +697,13 @@ impl HarnessRegistry {
         self.prefs().titles.clone()
     }
 
+    /// Whether an enabled harness can generate titles (the menu's show/hide).
+    pub fn titles_available(&self) -> bool {
+        self.enabled_set()
+            .iter()
+            .any(|id| zeron_harness::supports_titles(*id))
+    }
+
     pub fn set_title_settings(&self, mut settings: TitleSettings) -> Result<(), String> {
         if let Some(id) = settings.harness {
             if !zeron_harness::supports_titles(id) || !self.enabled_set().contains(&id) {

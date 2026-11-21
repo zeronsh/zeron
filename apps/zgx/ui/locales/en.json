@@ -2455,7 +2455,8 @@
         "delete": "Delete…",
         "rename": "Rename…",
         "remove": "Remove…",
-        "edit_project": "Edit project…"
+        "edit_project": "Edit project…",
+        "retitle": "Regenerate title"
       },
       "project": {
         "rename_title": "Rename project",
@@ -2529,7 +2530,8 @@
         "couldnt_delete": "Couldn’t delete “{title}”",
         "rename_title": "Rename session",
         "name": "Name",
-        "name_placeholder": "Session name"
+        "name_placeholder": "Session name",
+        "couldnt_retitle": "Couldn’t retitle “{title}”"
       }
     },
     "boundary": {

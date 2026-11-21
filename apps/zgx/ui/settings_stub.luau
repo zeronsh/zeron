@@ -10,6 +10,8 @@
 --   settings_stub.sign_in          signed in as Ada, in org_1 (else signed out)
 --   settings_stub.restoring        the engine hasn't answered yet
 --   settings_stub.signed_out       the engine says signed out
+--   settings_stub.titles_off       no enabled agent can title (RetitleChat
+--                                  hidden: GetTitleSettings' `available`)
 --   settings_stub.open_account     a way in to `settings/account` (a link)
 --   settings_stub.member_joins     someone accepts an invitation
 --   settings_stub.refuse_next      the next change is refused ("refused")
@@ -24,6 +26,7 @@ local M = {}
 
 local calls = ui.state("settings_stub_calls", {} :: { string })
 local refuse = ui.state("settings_stub_refuse", false)
+local titles_available = ui.state("settings_stub_titles_available", true)
 local role = ui.state("settings_stub_role", "admin")
 local about_next = ui.state("settings_stub_about_next", "ok")
 local delete_word = ui.state("settings_stub_delete_word", "ok")
@@ -312,6 +315,11 @@ local answers: { [string]: (arg: any) -> any } = {
 			end
 			return settled(engine[get])
 		end
+		if m == "GetTitleSettings" then
+			local t = table.clone(engine[m])
+			t.available = titles_available:peek()
+			return settled(t)
+		end
 		return settled(engine[m])
 	end,
 	["notifications.get"] = function()
@@ -583,6 +591,13 @@ ui.command {
 	title = "The engine says signed out",
 	run = function()
 		auth.account:set({ state = "signed_out", env = "staging" } :: any)
+	end,
+}
+ui.command {
+	id = "settings_stub.titles_off",
+	title = "No enabled agent can title",
+	run = function()
+		titles_available:set(false)
 	end,
 }
 

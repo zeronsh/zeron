@@ -77,6 +77,9 @@ pub mod methods {
     /// replies with the device's fresh `ListHarnesses` catalog.
     pub const GET_TITLE_SETTINGS: &str = "GetTitleSettings";
     pub const SET_TITLE_SETTINGS: &str = "SetTitleSettings";
+    /// Regenerate a chat's title from its user messages (`{chatId}` →
+    /// `{title}`; fails when no title-capable harness can run).
+    pub const RETITLE_CHAT: &str = "RetitleChat";
     /// Whether agents' commits on this device credit Zeron
     /// (`{enabled, cloud}`; set with `{enabled}`).
     pub const GET_COMMIT_CREDIT: &str = "GetCommitCredit";
