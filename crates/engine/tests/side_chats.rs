@@ -152,6 +152,7 @@ async fn fork_is_frozen_durable_idempotent_and_has_an_independent_provider_sessi
             id: "fork:side".into(),
             source_chat_id: "main".into(),
             source_title: "Main conversation".into(),
+            clean: false,
         }]
     );
     client.call(methods::FORK_SIDE_CHAT, params).await.unwrap();

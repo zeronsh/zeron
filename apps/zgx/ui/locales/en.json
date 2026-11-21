@@ -2920,6 +2920,8 @@
       "need_conversation": "Start a conversation before creating a side chat.",
       "new_side_chat": "New side chat",
       "side_chat": "Side chat",
+      "btw": "Btw",
+      "btw_send_failed": "The side question didn't send.",
       "couldnt_create": "Couldn't create the side chat."
     },
     "zeron_commands": {
@@ -2930,7 +2932,9 @@
       "files": "Zeron: open project files",
       "terminal": "Zeron: open a terminal",
       "rename": "Zeron: rename this conversation",
-      "stop": "Zeron: stop the active run"
+      "stop": "Zeron: stop the active run",
+      "btw": "Zeron: ask a side question with this chat's context",
+      "side": "Zeron: ask a side question (/btw's alias)"
     },
     "find": {
       "no_results": "No results",
@@ -2999,6 +3003,8 @@
       "edit_not_saved": "Your edit wasn't saved",
       "didnt_send": "Your message didn't send",
       "didnt_remove": "Couldn't remove that message",
+      "btw_needs_prompt": "Type a question after /btw or /side.",
+      "btw_needs_chat": "Open a conversation before using /btw.",
       "starting_cloud": "Starting a Cloud machine…",
       "starting": "Starting the chat…",
       "didnt_start": "The chat didn't start",

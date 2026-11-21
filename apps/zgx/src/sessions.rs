@@ -1585,7 +1585,13 @@ impl Sessions {
         // (The caller's id, where its tab shows "Forking…" first: the same id
         // tried again is the same fork.)
         let id = field("id").filter(|id| plain_id(id)).unwrap_or_else(new_id);
-        let params = fork_params(&self.chats.borrow(), &id, &source, field("parent").as_deref());
+        let params = fork_params(
+            &self.chats.borrow(),
+            &id,
+            &source,
+            field("parent").as_deref(),
+            args.field("clean").is_some_and(Value::truthy),
+        );
         engine::get().call("ForkSideChat", params).await?;
         Ok(Value::from(id.as_str()))
     }
@@ -1758,9 +1764,9 @@ fn where_parent_is(chats: &Json, parent: &str) -> Option<Json> {
 
 /// `ForkSideChat`'s params: the copy `id` of `source`, under `parent` (the
 /// source by default), made on the source's device.
-fn fork_params(chats: &Json, id: &str, source: &str, parent: Option<&str>) -> Json {
+fn fork_params(chats: &Json, id: &str, source: &str, parent: Option<&str>, clean: bool) -> Json {
     let device = chats.as_array().into_iter().flatten().find(|c| c["id"].as_str() == Some(source)).and_then(|c| c["deviceId"].as_str());
-    let mut params = json!({ "chatId": id, "sourceChatId": source, "parentChatId": parent.unwrap_or(source) });
+    let mut params = json!({ "chatId": id, "sourceChatId": source, "parentChatId": parent.unwrap_or(source), "clean": clean });
     if let Some(device) = device {
         params["targetDeviceId"] = Json::from(device);
     }
@@ -2685,11 +2691,11 @@ mod tests {
         );
         assert!(super::where_parent_is(&chats, "nope").is_none());
         assert_eq!(
-            super::fork_params(&chats, "new", "p", None),
-            serde_json::json!({ "chatId": "new", "sourceChatId": "p", "parentChatId": "p", "targetDeviceId": "mac" })
+            super::fork_params(&chats, "new", "p", None, false),
+            serde_json::json!({ "chatId": "new", "sourceChatId": "p", "parentChatId": "p", "clean": false, "targetDeviceId": "mac" })
         );
         // A side chat's own fork hangs beside it, under its parent.
-        assert_eq!(super::fork_params(&chats, "new", "p", Some("top"))["parentChatId"], "top");
+        assert_eq!(super::fork_params(&chats, "new", "p", Some("top"), false)["parentChatId"], "top");
     }
 
     #[test]

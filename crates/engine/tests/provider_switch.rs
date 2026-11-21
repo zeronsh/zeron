@@ -790,6 +790,7 @@ async fn a_switched_side_chat_counts_only_its_own_seams() {
                 id: "fork:main".into(),
                 source_chat_id: "parent".into(),
                 source_title: "Parent".into(),
+                clean: false,
             },
         ),
     ] {

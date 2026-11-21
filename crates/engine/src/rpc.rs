@@ -3876,6 +3876,10 @@ impl RpcService for EngineRpc {
                     /// side chat's parent so the copy lists as a sibling.
                     #[serde(default)]
                     parent_chat_id: Option<String>,
+                    /// A `/btw` fork: keep the copied history for the model,
+                    /// but start its UI below the seam.
+                    #[serde(default)]
+                    clean: bool,
                 }
                 let p: ForkParams = parse_params(params)?;
                 let parent_chat_id = p
@@ -3994,6 +3998,7 @@ impl RpcService for EngineRpc {
                                 id: marker_id,
                                 source_chat_id: source.id.clone(),
                                 source_title,
+                                clean: p.clean,
                             }],
                             created_at: chrono::Utc::now().timestamp_millis(),
                             device_id: self.doc_host.device_id().to_owned(),

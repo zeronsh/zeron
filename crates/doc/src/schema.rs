@@ -106,6 +106,10 @@ struct DocPartJson {
     source_chat_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_title: Option<String>,
+    /// A `/btw` fork's clean view: the doc keeps the copied history for the
+    /// model, but the UI starts below the seam.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    clean: Option<bool>,
     /// Provider switch seam (`kind: "switch"`, additive): display names of
     /// the provider before and after.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -273,11 +277,13 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             id,
             source_chat_id,
             source_title,
+            clean,
         } => DocPartJson {
             id: id.clone(),
             kind: "fork".into(),
             source_chat_id: Some(source_chat_id.clone()),
             source_title: Some(source_title.clone()),
+            clean: clean.then_some(true),
             ..Default::default()
         },
         MessagePart::Switch {
@@ -368,6 +374,7 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
             id: p.id,
             source_chat_id: p.source_chat_id.unwrap_or_default(),
             source_title: p.source_title.unwrap_or_default(),
+            clean: p.clean.unwrap_or(false),
         },
         "switch" => MessagePart::Switch {
             id: p.id,
@@ -1649,6 +1656,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
             map.insert(key, value.as_str())?;
         }
     }
+    if let Some(clean) = doc_part.clean {
+        map.insert("clean", clean)?;
+    }
     if let Some(output) = &doc_part.output {
         map.insert("output", output.as_str())?;
     }
@@ -2732,6 +2742,7 @@ mod tests {
             id: "fork:side".into(),
             source_chat_id: "main".into(),
             source_title: "Main conversation".into(),
+            clean: true,
         };
         doc.push_message(&SessionMessageEntry {
             duration_ms: None,

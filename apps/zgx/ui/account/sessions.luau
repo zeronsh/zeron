@@ -11,9 +11,11 @@
 --                          parent? }: with `parent`, a side chat of it, where it is;
 --                          with `cloud`, on a Cloud machine of its own: a
 --                          promise of { id, cwd }, or why not in words)
---   sessions.fork(source, parent?, id?)  a side chat starting as a copy of
---                          `source` (Fork chat): a promise of its id, or the
---                          engine's words for why not
+--   sessions.fork(source, parent?, id?, clean?)  a side chat starting as a copy
+--                          of `source` (Fork chat): a promise of its id, or the
+--                          engine's words for why not. `clean` is `/btw`'s:
+--                          the model keeps the copied history, the chat's UI
+--                          starts below it.
 --   sessions.children(id)  a chat's side chats, newest first (tracked)
 --   sessions.archive(id), sessions.unarchive(id)
 --   sessions.rename(id, title)
@@ -176,8 +178,8 @@ function M.create(req: { [string]: any }): any
 	return ui.call("sessions.create", req)
 end
 
-function M.fork(source: string, parent: string?, id: string?): any
-	return ui.call("sessions.fork", { source = source, parent = parent, id = id })
+function M.fork(source: string, parent: string?, id: string?, clean: boolean?): any
+	return ui.call("sessions.fork", { source = source, parent = parent, id = id, clean = clean })
 end
 
 function M.children(id: string?): { Child }

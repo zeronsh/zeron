@@ -137,8 +137,11 @@ stub_sessions.link = function(id: string): any
 	note(`link:{id}`)
 	return settled(true, `https://zeron.sh/c/{id}`)
 end
-stub_sessions.fork = function(source: string, _parent: string?, id: string?): any
+stub_sessions.fork = function(source: string, _parent: string?, id: string?, clean: boolean?): any
 	note(`fork:{source}:{id}`)
+	if clean then
+		note("fork_clean")
+	end
 	if fork_fails:peek() then
 		return settled(false, { message = "Wait for a completed response before starting a side chat" })
 	end

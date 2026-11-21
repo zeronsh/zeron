@@ -195,8 +195,17 @@ function M.bind(b: Bind): { [string]: any }
 				table.insert(slash, skill)
 			end
 		end
-		-- Then Zeron's own (named clear of the agent's).
+		-- Then Zeron's own (named clear of the agent's, except the reserved
+		-- side-question commands, which keep their names and replace the
+		-- agent's row of the same name).
 		for _, row in ZeronCommands.rows(taken, b.in_chat()) do
+			if row.reserved then
+				for i = #slash, 1, -1 do
+					if slash[i].value == row.value then
+						table.remove(slash, i)
+					end
+				end
+			end
 			table.insert(slash, row)
 		end
 		given["/"] = slash
@@ -277,7 +286,11 @@ function M.bind(b: Bind): { [string]: any }
 		-- Zeron's own runs (its token gone).
 		on_mention = function(item: any, trigger: string, token: string)
 			if item.zeron then
-				b.run(item.zeron)
+				-- A command that takes arguments leaves its token (and a
+				-- space) for the prompt that follows it.
+				if not item.args then
+					b.run(item.zeron)
+				end
 			elseif trigger == "@" then
 				Invocations.remember(item, trigger, token)
 			else
@@ -305,6 +318,14 @@ function M.bind(b: Bind): { [string]: any }
 		-- anything carried stays).
 		command_of = function(draft: string): string?
 			return ZeronCommands.of_text(draft, (lists:peek() or {})["/"] or {})
+		end,
+		-- A Zeron command's arguments (`/btw explain this` -> "btw",
+		-- "explain this"). While the agent's list is still coming (a
+		-- pasted `/btw …` never opened it), Zeron's own names decide, so
+		-- the command works without the list being read first.
+		command_args = function(draft: string): (string?, string?)
+			local rows = (lists:peek() or {})["/"]
+			return ZeronCommands.split(draft, rows or ZeronCommands.rows({}, b.in_chat()))
 		end,
 	}
 end

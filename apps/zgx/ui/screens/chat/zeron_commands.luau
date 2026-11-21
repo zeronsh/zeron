@@ -13,7 +13,7 @@ local locale = require("@ds/locale")
 
 local M = {}
 
-export type Command = { name: string, detail: string, chat: boolean }
+export type Command = { name: string, detail: string, chat: boolean, args: boolean?, reserved: boolean? }
 
 M.CATALOG = {
 	{ name = "model", detail = "Zeron: choose agent, model, and reasoning", chat = false },
@@ -24,29 +24,40 @@ M.CATALOG = {
 	{ name = "terminal", detail = "Zeron: open a terminal", chat = true },
 	{ name = "rename", detail = "Zeron: rename this conversation", chat = true },
 	{ name = "stop", detail = "Zeron: stop the active run", chat = true },
+	-- Side questions: Zeron's own, even if the agent advertises the name
+	-- (#347's built-in precedence), and listed even before a chat.
+	{ name = "btw", detail = "Zeron: ask a side question with this chat's context", chat = true, args = true, reserved = true },
+	{ name = "side", detail = "Zeron: ask a side question (/btw's alias)", chat = true, args = true, reserved = true },
 } :: { Command }
 
 -- The rows the `/` list ends with: Zeron's commands, named clear of the
 -- agent's (`taken`: the names it uses), in a chat or not. (Each `detail`
 -- in the locale shown, chat.zeron_commands.<name>; the catalog keeps the
--- English.)
+-- English.) The reserved side-question commands are listed even without a
+-- chat, so they can be found; their composer notices say a conversation
+-- comes first.
 function M.rows(taken: { [string]: boolean }, in_chat: boolean): { any }
 	local out = {}
 	for _, c in M.CATALOG do
-		if c.chat and not in_chat then
+		if c.chat and not in_chat and not c.reserved then
 			continue
 		end
 		local name = c.name
-		while taken[name] do
-			name = `zeron:{name}`
+		if not c.reserved then
+			while taken[name] do
+				name = `zeron:{name}`
+			end
 		end
 		table.insert(out, {
 			value = name,
 			label = `/{name}`,
 			detail = locale.s(`chat.zeron_commands.{c.name}`),
 			icon = "command",
-			-- (Taken, its token goes: ds/mention_tokens.)
-			consume = true,
+			-- (Taken, its token goes: ds/mention_tokens. A command that takes
+			-- arguments leaves its token so the prompt can follow it.)
+			consume = not c.args,
+			args = c.args,
+			reserved = c.reserved,
 			zeron = c.name,
 		})
 	end
@@ -66,6 +77,22 @@ function M.of_text(text: string, rows: { any }): string?
 		end
 	end
 	return nil
+end
+
+-- A Zeron command's draft and its arguments: `/btw explain this` gives
+-- ("btw", "explain this"). Nil unless the first token is one of Zeron's
+-- (the agent's own `btw`, if it has one, is left for the agent).
+function M.split(text: string, rows: { any }): (string?, string?)
+	local token, rest = string.match(text, "^/([%w%./_:%-]+)%s+(.*)$")
+	if not token then
+		return nil, nil
+	end
+	for _, r in rows do
+		if r.zeron and r.value == token then
+			return r.zeron, rest
+		end
+	end
+	return nil, nil
 end
 
 -- Runs Zeron's command `name` for the chat `session` (if one is open).

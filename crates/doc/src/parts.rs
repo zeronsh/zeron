@@ -358,6 +358,10 @@ pub enum MessagePart {
         /// without a registry lookup, and a later rename or delete of the
         /// source does not rewrite history.
         source_title: String,
+        /// `/btw` forks keep the copied history above the seam in the doc for
+        /// the model, but the side chat's UI starts below it: a clean view.
+        #[serde(default)]
+        clean: bool,
     },
     /// The seam where a chat changed provider: the turns above ran on
     /// `from`, the turns below run on `to`. Written by the host engine when

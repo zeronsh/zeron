@@ -341,16 +341,22 @@ function M.send_first(id: string, text: string, picks: { [string]: any }?, place
 end
 
 -- Forks under way or failed, by the new chat's id: { source, state =
--- "forking" | "failed", error? }. Its tab says so meanwhile.
+-- "forking" | "failed", error?, clean?, prompt? }. Its tab says so meanwhile.
 M.forks = ui.state("chat_lanes_forks", {} :: { [string]: any })
 
-local function start_fork(id: string, source: string)
-	set_in(M.forks, id, { source = source, state = "forking" })
-	sessions.fork(source, nil, id):after(function()
+local function start_fork(id: string, source: string, clean: boolean?, prompt: string?)
+	set_in(M.forks, id, { source = source, state = "forking", clean = clean, prompt = prompt })
+	sessions.fork(source, nil, id, clean):after(function()
 		set_in(M.forks, id, nil)
+		if prompt then
+			-- `/btw`'s prompt goes to the clean side chat once the copy exists.
+			store.send({ session = id, text = prompt }):after(function() end, function()
+				ds.toast.show { title = locale.s("chat.lanes.btw_send_failed"), tone = "danger" }
+			end)
+		end
 	end, function(err: any)
 		local why = if type(err) == "table" and err.message then tostring(err.message) else tostring(err)
-		set_in(M.forks, id, { source = source, state = "failed", error = why })
+		set_in(M.forks, id, { source = source, state = "failed", error = why, clean = clean, prompt = prompt })
 	end)
 end
 
@@ -364,13 +370,28 @@ function M.fork(session: string?)
 	end
 	local id = M.new_id()
 	M.open(session, { kind = "side_chat", id = id, title = locale.s("chat.lanes.side_chat") })
-	start_fork(id, session)
+	start_fork(id, session, false)
+end
+
+-- `/btw <prompt>` (or its `/side` alias): a clean side chat with this one's
+-- context in the model, opened in the panel; the prompt is its first turn.
+-- The copied history stays in the doc, but the chat's UI starts below the
+-- fork seam.
+function M.btw(session: string?, prompt: string, which: string?)
+	if not session then
+		ds.toast.show { title = locale.s("chat.lanes.need_conversation"), tone = "warning" }
+		return
+	end
+	local id = M.new_id()
+	local title = if which == "side" then locale.s("chat.lanes.side_chat") else locale.s("chat.lanes.btw")
+	M.open(session, { kind = "side_chat", id = id, title = title })
+	start_fork(id, session, true, prompt)
 end
 
 function M.retry_fork(id: string)
 	local f = M.forks:peek()[id]
 	if f then
-		start_fork(id, f.source)
+		start_fork(id, f.source, f.clean, f.prompt)
 	end
 end
 

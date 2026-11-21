@@ -207,6 +207,18 @@ impl Entry {
         self.kept_bytes.set(None);
         self.json.as_mut()
     }
+
+    /// A `/btw` seam: the copied history above it is the model's, not the
+    /// UI's. Kept whole (never settled or folded) so an old seam still says
+    /// so when the chat is opened again.
+    fn clean_fork(&self) -> bool {
+        self.json.as_ref().is_some_and(|json| {
+            json["role"].as_str() == Some("system")
+                && json["parts"].as_array().into_iter().flatten().any(|part| {
+                    part["kind"].as_str() == Some("fork") && part["clean"].as_bool() == Some(true)
+                })
+        })
+    }
 }
 
 /// `entry["field"]`: as the engine sent it; nil for one settled.
@@ -2838,7 +2850,7 @@ impl View {
                 .enumerate()
                 .take(whole_from)
                 .rev()
-                .filter(|(_, e)| !e.id.is_empty() && !built.contains_key(&e.id))
+                .filter(|(_, e)| !e.id.is_empty() && !built.contains_key(&e.id) && !e.clean_fork())
                 .filter_map(|(at, e)| Some((at, e.id.to_string(), e.json.take()?)))
                 .collect();
             if !off.is_empty() {
@@ -2896,11 +2908,17 @@ impl View {
             let context = build_context(open, &chats);
             let whole_from = open.entries.len().saturating_sub(WHOLE_TAIL);
             let Open { entries, older_todo, built, .. } = open;
+            // A `/btw` side chat keeps the source's copied history in the doc
+            // (the model reads it) but starts its UI at the seam below it.
+            let clean_cut = entries.iter().position(Entry::clean_fork);
             let mut list: Vec<Value> = Vec::with_capacity(entries.len());
             let mut seen = Subagents::default();
             // The latest prompt and when it was sent (seconds).
             let mut prompt: Option<(String, f64)> = None;
             for (at, e) in entries.iter_mut().enumerate() {
+                if clean_cut.is_some_and(|cut| at <= cut) {
+                    continue;
+                }
                 if e.id.is_empty() {
                     list.extend(e.json.as_ref().and_then(|json| message(json, context.model.as_deref())));
                     continue;
@@ -5011,7 +5029,8 @@ fn settle_off(open: &mut Open, folded: FoldedOff, context: &Rc<RowContext>) {
 
 /// `entry`, built, down to its id and sum; a plan in it is kept (`todos`).
 fn settle(entry: &mut Entry, at: usize, older_todo: &mut Option<(usize, Json)>) {
-    if entry.json.is_none() {
+    // A `/btw` seam stays whole: the clean cut outlives the newest window.
+    if entry.json.is_none() || entry.clean_fork() {
         return;
     }
     entry.sum = entry.sum();
@@ -9575,6 +9594,34 @@ mod tests {
         chats.keep_let_go(Some(open(true)));
         assert!(chats.take_let_go("m").is_none(), "neither copy is kept");
     }
+
+    #[test]
+    fn a_clean_fork_seam_is_kept_whole_once_old() {
+        use serde_json::json;
+        let mut marker = Entry::new(json!({
+            "id": "fork:side",
+            "role": "system",
+            "parts": [{
+                "id": "fork:side",
+                "kind": "fork",
+                "sourceChatId": "main",
+                "sourceTitle": "Main conversation",
+                "clean": true,
+            }],
+        }));
+        let mut older_todo = None;
+        settle(&mut marker, 0, &mut older_todo);
+        assert!(marker.clean_fork());
+        assert!(marker.json.is_some(), "the seam stays whole: the clean cut outlives the newest window");
+
+        let mut ordinary = Entry::new(json!({
+            "id": "turn",
+            "role": "user",
+            "parts": [{ "id": "t0", "kind": "text", "text": "Hello" }],
+        }));
+        settle(&mut ordinary, 1, &mut older_todo);
+        assert!(ordinary.json.is_none(), "everything else settles");
+    }
 }
 
 #[cfg(test)]
@@ -9643,4 +9690,5 @@ mod approval_parts_tests {
         let words = "Grok wants to modify a.rs. Allow it?";
         assert_eq!(approval_parts(words, None), (None, Some(words.to_owned())));
     }
+
 }

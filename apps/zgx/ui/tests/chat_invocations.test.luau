@@ -45,6 +45,61 @@ test("`/` lists the agent's commands, read as it opens, narrowing as the name is
 	expect(reads(app)).to_be(1)
 end)
 
+test("/btw opens a clean side chat and sends its prompt there", function()
+	local app = chat()
+	app:type("role:textbox", "/btw explain the tests")
+	settle(app)
+	app:key("Enter")
+	settle(app)
+	expect(app:text("role:textbox")).to_be("")
+	expect(app:state("calls")).to_contain("fork:")
+	local id = (app:state("calls") or ""):match("fork:s2:([%w%-]+):true")
+	expect(id ~= nil).to_be(true)
+	expect(app:state("calls")).to_contain(`send:{id}:explain the tests`)
+	expect(app:state("calls")).never.to_contain("send:s2:/btw")
+end)
+
+test("/side is /btw's alias and opens the same clean side chat", function()
+	local app = chat()
+	app:type("role:textbox", "/side explain the tests")
+	settle(app)
+	app:key("Enter")
+	settle(app)
+	local id = (app:state("calls") or ""):match("fork:s2:([%w%-]+):true")
+	expect(id ~= nil).to_be(true)
+	expect(app:state("calls")).to_contain(`send:{id}:explain the tests`)
+	expect(app:state("calls")).never.to_contain("send:s2:/side")
+end)
+
+test("Zeron's reserved /btw and /side win over the agent's own commands", function()
+	local app = chat()
+	app:type("role:textbox", "/")
+	settle(app)
+	expect(app:has('role:option "/zeron:btw"')).to_be(false)
+	expect(app:has('role:option "/btw"')).to_be(true)
+	expect(app:has('role:option "/side"')).to_be(true)
+	local rows = 0
+	for line in app:tree():gmatch("[^\n]+") do
+		if line:find('option "/btw"', 1, true) then
+			rows += 1
+		end
+	end
+	expect(rows).to_be(1)
+end)
+
+test("`/btw` and `/side` are listed before a chat exists too, to say a conversation comes first", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	app:command("go_home")
+	settle(app)
+	app:type("role:textbox", "/")
+	settle(app)
+	expect(app:has('role:option "/settings"')).to_be(true)
+	expect(app:has('role:option "/files"')).to_be(false)
+	expect(app:has('role:option "/btw"')).to_be(true)
+	expect(app:has('role:option "/side"')).to_be(true)
+end)
+
 test("`$` lists the skills; with the agent's `$` off it's plain text, and with `/` not separate, `/` lists them too", function()
 	local app = chat()
 	app:type("role:textbox", "$")

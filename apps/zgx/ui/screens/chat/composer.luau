@@ -964,9 +964,32 @@ local function Composer(): Node
 			end_edit("commit")
 			return
 		end
+		-- `/btw <prompt>` or `/side <prompt>`: a clean side chat with this
+		-- one's context, its prompt sent once the fork exists
+		-- (screens/chat/lanes).
+		local zeron_with_args, btw_prompt = completions.command_args(shared.text:peek())
+		if zeron_with_args == "btw" or zeron_with_args == "side" then
+			local id = session_id:peek()
+			if not id then
+				own_notice:set { tone = "warning", key = "chat.composer.btw_needs_chat", dismissable = true }
+				return
+			end
+			if btw_prompt == nil or btw_prompt == "" then
+				own_notice:set { tone = "info", key = "chat.composer.btw_needs_prompt", dismissable = true }
+				return
+			end
+			shared.text:set("")
+			require("@app/screens/chat/lanes").btw(id, btw_prompt, zeron_with_args)
+			return
+		end
 		-- A draft that is only one of Zeron's own commands runs it (its
 		-- token goes; anything carried stays).
 		local zeron = completions.command_of(shared.text:peek())
+		if zeron == "btw" or zeron == "side" then
+			-- A bare `/btw` or `/side` keeps the draft; the prompt is the point.
+			own_notice:set { tone = "info", key = "chat.composer.btw_needs_prompt", dismissable = true }
+			return
+		end
 		if zeron then
 			shared.text:set("")
 			ZeronCommands.run(zeron, session_id:peek())
