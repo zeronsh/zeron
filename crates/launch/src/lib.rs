@@ -9,6 +9,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
+#[cfg(target_os = "linux")]
+mod systemd_scope;
+
 /// The app binary's subcommand that runs the background engine, for
 /// installs without a separate engine executable (Windows; development runs
 /// that only built the app).
@@ -98,8 +101,9 @@ pub struct LaunchConfig {
 }
 
 /// Start the background engine for `config`, detached from the app: its
-/// own session/process group, no inherited console or pipes, so the app
-/// exiting (or its terminal closing) leaves it running.
+/// own session/process group, no inherited console or pipes, and on Linux
+/// its own systemd scope where the app runs in a unit, so the app exiting
+/// (or its terminal closing, or its unit stopping) leaves it running.
 pub fn launch(config: &LaunchConfig, app_exe: &Path) -> std::io::Result<Child> {
     let mut command = engine_command(app_exe);
     command
@@ -131,17 +135,21 @@ pub fn spawn_detached(command: &mut Command) -> std::io::Result<Child> {
         .stderr(Stdio::null());
     #[cfg(unix)]
     {
-        use std::os::unix::process::CommandExt as _;
-        // A session of its own: no controlling terminal to hang up on it.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
+        // Out of the app's systemd unit too, where it's in one: the unit's
+        // end would take it down with the app (systemd_scope.rs).
+        #[cfg(target_os = "linux")]
+        if let Some(mut scoped) = systemd_scope::own_scope(command) {
+            scoped
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            if let Ok(child) = new_session(&mut scoped).spawn()
+                && let Some(child) = systemd_scope::handed_over(child)
+            {
+                return Ok(child);
+            }
         }
-        command.spawn()
+        new_session(command).spawn()
     }
     #[cfg(windows)]
     {
@@ -163,6 +171,21 @@ pub fn spawn_detached(command: &mut Command) -> std::io::Result<Child> {
     }
     #[cfg(not(any(unix, windows)))]
     command.spawn()
+}
+
+/// `command`, to start in a session of its own: no controlling terminal to
+/// hang up on it.
+#[cfg(unix)]
+fn new_session(command: &mut Command) -> &mut Command {
+    use std::os::unix::process::CommandExt as _;
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        })
+    }
 }
 
 /// Whether an engine holds `data_dir` (its `engine.lock`, crates/engine's
