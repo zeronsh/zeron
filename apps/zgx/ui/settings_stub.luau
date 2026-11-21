@@ -24,6 +24,8 @@ local M = {}
 
 local calls = ui.state("settings_stub_calls", {} :: { string })
 local refuse = ui.state("settings_stub_refuse", false)
+-- What a refused change answers with.
+local refuse_word = ui.state("settings_stub_refuse_word", "refused")
 local role = ui.state("settings_stub_role", "admin")
 local about_next = ui.state("settings_stub_about_next", "ok")
 local delete_word = ui.state("settings_stub_delete_word", "ok")
@@ -86,11 +88,13 @@ local function settled(value: any, word: string?): any
 	return p
 end
 
--- A change: refused if asked to be, else `value`.
+-- A change: refused if asked to be (with `refuse_word`'s message), else `value`.
 local function change(value: any): any
 	if refuse:peek() then
 		refuse:set(false)
-		return settled(nil, "refused")
+		local word = refuse_word:peek()
+		refuse_word:set("refused")
+		return settled(nil, word)
 	end
 	return settled(value)
 end
@@ -294,8 +298,13 @@ local answers: { [string]: (arg: any) -> any } = {
 			if m == "SetCommitCredit" then
 				engine[get] = { enabled = arg.params.enabled, cloud = false }
 			elseif m == "SetWorktreeSettings" then
+				-- As the engine does: on without a folder is refused.
+				if arg.params.useCustomDirectory and (arg.params.customDirectory == nil or arg.params.customDirectory == "") then
+					return settled(nil, "Choose a worktree folder")
+				end
 				local w = table.clone(engine[get])
 				w.settings = arg.params
+				w.effectiveDirectory = if arg.params.useCustomDirectory then arg.params.customDirectory else w.defaultDirectory
 				engine[get] = w
 			elseif m == "SetTitleSettings" or m == "SetBackgroundSettings" then
 				engine[get] = arg.params

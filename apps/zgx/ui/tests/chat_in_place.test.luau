@@ -518,9 +518,11 @@ test("long messages open folded, never at their whole height first; a click ease
 	-- (The last one shown: the one measured below.)
 	local n = app:count('role:button "Expand message"')
 	app:click(`role:button "Expand message"[{n}]`)
+	-- Sampled a frame at a time, as a glide's: a wait pumps frames as fast
+	-- as the host draws, and the whole ease can pass between two reads.
 	local seen: { number } = {}
 	for _ = 1, 30 do
-		app:wait("#never-shown", { timeout_ms = 16 })
+		app:frames(1)
 		local hs = bubbles(app)
 		table.insert(seen, hs[#hs])
 	end

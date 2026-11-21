@@ -379,8 +379,10 @@ test("a model's name rolls into place: the chip eases once, and nothing moves as
 	local widths: { number } = {}
 	local last_rolling: { [string]: number }? = nil
 	local settled_at: number? = nil
+	-- A frame at a time: a wait pumps frames as fast as the host draws,
+	-- and the whole roll can pass between two reads.
 	for f = 1, 90 do
-		app:wait("#never-shown", { timeout_ms = 16 })
+		app:frames(1)
 		local w, texts = chip(app)
 		table.insert(widths, w or 0)
 		if texts["O"] then
