@@ -1468,27 +1468,47 @@ impl Repos {
         }
         let name =
             name.ok_or_else(|| EngineError::Other("Could not allocate a worktree name".into()))?;
+        // Resolve the base before touching the filesystem, so a bad base
+        // gives a specific message instead of a raw `git: fatal: ...`.
+        let start = self.worktree_start_point(repo_path, branch).await?;
         let path = base.join(&name);
         #[cfg(windows)]
         validate_windows_worktree_path(&path.to_string_lossy())?;
         std::fs::create_dir_all(&base)?;
         let branch_name = format!("zeron/{name}");
-        #[cfg(windows)]
-        self.add_worktree_in_two_steps(repo_path, &path, &branch_name, branch)
-            .await?;
-        #[cfg(not(windows))]
-        self.git(
-            &[
-                "worktree",
-                "add",
-                "-b",
-                &branch_name,
-                &path.to_string_lossy(),
-                branch,
-            ],
-            Some(repo_path),
-        )
-        .await?;
+        match &start {
+            WorktreeStart::Orphan => {
+                // No commit to check out, so nothing for the two-step
+                // Windows checkout to do: git only registers the worktree.
+                #[cfg(windows)]
+                let git_path = windows_git_worktree_path(&path.to_string_lossy());
+                #[cfg(not(windows))]
+                let git_path = path.to_string_lossy();
+                self.git(
+                    &["worktree", "add", "--orphan", "-b", &branch_name, &git_path],
+                    Some(repo_path),
+                )
+                .await?;
+            }
+            WorktreeStart::Commit(start) => {
+                #[cfg(windows)]
+                self.add_worktree_in_two_steps(repo_path, &path, &branch_name, start)
+                    .await?;
+                #[cfg(not(windows))]
+                self.git(
+                    &[
+                        "worktree",
+                        "add",
+                        "-b",
+                        &branch_name,
+                        &path.to_string_lossy(),
+                        start,
+                    ],
+                    Some(repo_path),
+                )
+                .await?;
+            }
+        }
         let checkout = self.checkout_identity(&path).await?;
         Ok(Worktree {
             repo_path: repo_path.to_string_lossy().to_string(),
@@ -1497,6 +1517,108 @@ impl Repos {
             name,
             checkout_id: Some(checkout.id),
         })
+    }
+
+    /// What a new worktree starts from, given the base the person picked.
+    ///
+    /// - A base that names a commit (a branch, tag, SHA, or `HEAD`, detached
+    ///   or not) starts there.
+    /// - A branch that exists only as `origin/<base>` starts from the remote
+    ///   copy.
+    /// - `HEAD`, or the current branch, in a repository with no commits yet
+    ///   starts an empty orphan branch (`git worktree add --orphan`, git 2.42+).
+    /// - Anything else is refused with a message naming the base.
+    async fn worktree_start_point(
+        &self,
+        repo_path: &Path,
+        base: &str,
+    ) -> Result<WorktreeStart, EngineError> {
+        let base = base.trim();
+        if base.is_empty() {
+            return Err(EngineError::Other(
+                "Choose a base branch for the new worktree.".into(),
+            ));
+        }
+        if base.starts_with('-') {
+            return Err(EngineError::Other(format!(
+                "\"{base}\" isn't a valid base for a worktree."
+            )));
+        }
+        if self.resolve_commit(repo_path, base).await?.is_some() {
+            // Keep the name (not the SHA) so git's own messages and hooks
+            // see what the person picked.
+            return Ok(WorktreeStart::Commit(base.to_string()));
+        }
+        let head_unborn = self.resolve_commit(repo_path, "HEAD").await?.is_none();
+        if head_unborn {
+            let current = self
+                .git(&["branch", "--show-current"], Some(repo_path))
+                .await
+                .unwrap_or_default();
+            if base == "HEAD" || (!current.is_empty() && base == current) {
+                let version = self.git(&["--version"], None).await.unwrap_or_default();
+                if !git_supports_worktree_orphan(&version) {
+                    let shown = version.trim_start_matches("git version ").trim();
+                    return Err(EngineError::Other(format!(
+                        "This repository has no commits yet, and a worktree for it needs Git 2.42 or newer (found {}). Make a first commit, update Git, or send without a new worktree.",
+                        if shown.is_empty() {
+                            "an unknown version"
+                        } else {
+                            shown
+                        }
+                    )));
+                }
+                return Ok(WorktreeStart::Orphan);
+            }
+        }
+        if !base.starts_with("refs/") && !base.starts_with("origin/") {
+            let remote = format!("origin/{base}");
+            if self
+                .git_probe(
+                    &[
+                        "show-ref",
+                        "--verify",
+                        "--quiet",
+                        &format!("refs/remotes/{remote}"),
+                    ],
+                    Some(repo_path),
+                )
+                .await?
+                .is_some()
+            {
+                return Ok(WorktreeStart::Commit(remote));
+            }
+        }
+        let repo_name = repo_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "the repository".to_string());
+        Err(EngineError::Other(if head_unborn {
+            format!(
+                "Can't start a worktree from \"{base}\": {repo_name} has no commits yet, and no branch or commit is named \"{base}\". Make a first commit, or send without a new worktree."
+            )
+        } else {
+            format!(
+                "Can't start a worktree from \"{base}\": no branch, tag or commit by that name exists in {repo_name}. It may have been deleted or renamed. Pick another base."
+            )
+        }))
+    }
+
+    /// The commit `rev` names in `repo_path`, or `None` when it names none
+    /// (unknown ref, unborn `HEAD`).
+    async fn resolve_commit(
+        &self,
+        repo_path: &Path,
+        rev: &str,
+    ) -> Result<Option<String>, EngineError> {
+        // Callers refuse revs starting with `-`, so no `--end-of-options`
+        // (git 2.24+) is needed.
+        let spec = format!("{rev}^{{commit}}");
+        self.git_probe(
+            &["rev-parse", "--verify", "--quiet", &spec],
+            Some(repo_path),
+        )
+        .await
     }
 
     /// Git's built-in checkout passes `<destination>/.git` in GIT_DIR, whose
@@ -2455,6 +2577,38 @@ fn canonical_search_root(root: &Path) -> Result<PathBuf, EngineError> {
 /// (port of zeron's `worktreeBranchFromTitle`). Zeron NFKD-normalizes accented
 /// letters first; native keeps it ASCII-only (generated titles are Title Case
 /// English), so non-ASCII characters collapse into the `-` separator.
+/// Where [`Repos::create_worktree`] starts the new branch.
+#[derive(Debug, PartialEq, Eq)]
+enum WorktreeStart {
+    /// A rev git resolves to a commit.
+    Commit(String),
+    /// An empty branch, for a repository with no commits yet.
+    Orphan,
+}
+
+/// `git worktree add --orphan` landed in Git 2.42. Parses `git --version`
+/// output such as `git version 2.42.0` or `git version 2.39.3 (Apple Git-146)`.
+fn git_supports_worktree_orphan(version: &str) -> bool {
+    let Some(number) = version
+        .trim()
+        .strip_prefix("git version ")
+        .and_then(|rest| rest.split_whitespace().next())
+    else {
+        return false;
+    };
+    let mut parts = number.split('.').map(|p| {
+        p.chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse::<u32>()
+            .ok()
+    });
+    match (parts.next().flatten(), parts.next().flatten()) {
+        (Some(major), Some(minor)) => (major, minor) >= (2, 42),
+        _ => false,
+    }
+}
+
 pub fn worktree_branch_from_title(title: &str) -> String {
     let mut slug = String::new();
     for c in title.trim().chars() {
@@ -2749,6 +2903,191 @@ mod tests {
             Repos::with_worktrees_root(&tmp.path().join("data2"), "test", code.join("wt"));
         let worktree = sibling.create_worktree(&repo, "main").await.unwrap();
         assert!(Path::new(&worktree.path).starts_with(code.join("wt").join("comet")));
+    }
+
+    /// A repository at `<tmp>/repo` on `main` (no commits) and a `Repos`
+    /// that puts worktrees under `<tmp>/wt`.
+    async fn unborn_fixture() -> (tempfile::TempDir, Repos, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let repos =
+            Repos::with_worktrees_root(&tmp.path().join("data"), "test", tmp.path().join("wt"));
+        repos
+            .git(&["init", "-b", "main"], Some(&repo))
+            .await
+            .unwrap();
+        (tmp, repos, repo)
+    }
+
+    async fn commit_empty(repos: &Repos, repo: &Path, message: &str) {
+        repos
+            .git(
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    message,
+                ],
+                Some(repo),
+            )
+            .await
+            .unwrap();
+    }
+
+    fn worktree_dirs(tmp: &Path) -> usize {
+        std::fs::read_dir(tmp.join("wt").join("repo"))
+            .map(|d| d.count())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn worktree_orphan_needs_git_2_42() {
+        assert!(git_supports_worktree_orphan("git version 2.42.0"));
+        assert!(git_supports_worktree_orphan("git version 2.56.1\n"));
+        assert!(git_supports_worktree_orphan("git version 3.0.0"));
+        assert!(git_supports_worktree_orphan("git version 2.45.2.windows.1"));
+        assert!(!git_supports_worktree_orphan("git version 2.41.0"));
+        assert!(!git_supports_worktree_orphan(
+            "git version 2.39.3 (Apple Git-146)"
+        ));
+        assert!(!git_supports_worktree_orphan(""));
+        assert!(!git_supports_worktree_orphan("not git"));
+    }
+
+    #[tokio::test]
+    async fn worktree_from_unborn_head_starts_an_empty_branch() {
+        let version = std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .unwrap();
+        if !git_supports_worktree_orphan(&String::from_utf8_lossy(&version.stdout)) {
+            eprintln!("skipping: git is older than 2.42");
+            return;
+        }
+        for base in ["HEAD", "main"] {
+            let (tmp, repos, repo) = unborn_fixture().await;
+            let worktree = repos.create_worktree(&repo, base).await.unwrap();
+            let path = Path::new(&worktree.path);
+            assert!(path.starts_with(tmp.path().join("wt").join("repo")));
+            assert!(path.join(".git").is_file(), "linked worktree for {base}");
+            assert_eq!(repos.current_branch(path).await.unwrap(), worktree.branch);
+            assert_eq!(repos.head_sha(path).await.unwrap(), None);
+            // The primary checkout stays on its own unborn branch.
+            assert_eq!(repos.current_branch(&repo).await.unwrap(), "main");
+
+            // The chat-title rename still works on the unborn branch, and
+            // a commit made in the worktree lands on it.
+            let renamed = repos
+                .rename_worktree_branch(path, &worktree.branch, "Add a readme")
+                .await
+                .unwrap();
+            assert_eq!(renamed, "zeron/add-a-readme");
+            commit_empty(&repos, path, "first").await;
+            assert!(repos.head_sha(path).await.unwrap().is_some());
+            assert!(repos.branch_exists(&repo, "zeron/add-a-readme").await);
+
+            repos.delete_worktree(&repo, path).await.unwrap();
+            assert!(!path.exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn worktree_from_unknown_base_in_unborn_repo_is_explained() {
+        let (tmp, repos, repo) = unborn_fixture().await;
+        let error = repos.create_worktree(&repo, "dev").await.unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("no commits yet"), "{text}");
+        assert!(text.contains("\"dev\""), "{text}");
+        assert!(!text.contains("fatal"), "{text}");
+        assert_eq!(worktree_dirs(tmp.path()), 0);
+    }
+
+    #[tokio::test]
+    async fn worktree_from_missing_or_deleted_base_is_explained() {
+        let (tmp, repos, repo) = unborn_fixture().await;
+        commit_empty(&repos, &repo, "init").await;
+        repos.git(&["branch", "gone"], Some(&repo)).await.unwrap();
+        repos
+            .git(&["branch", "-D", "gone"], Some(&repo))
+            .await
+            .unwrap();
+        for base in ["nope", "gone", "refs/heads/gone", "deadbeef"] {
+            let text = repos
+                .create_worktree(&repo, base)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(text.contains(&format!("\"{base}\"")), "{text}");
+            assert!(text.contains("Pick another base"), "{text}");
+            assert!(!text.contains("fatal"), "{text}");
+        }
+        for base in ["", "  ", "--orphan"] {
+            assert!(repos.create_worktree(&repo, base).await.is_err());
+        }
+        assert_eq!(worktree_dirs(tmp.path()), 0);
+        assert!(
+            repos
+                .branches(&repo)
+                .await
+                .unwrap()
+                .iter()
+                .all(|b| !b.starts_with("zeron/"))
+        );
+    }
+
+    #[tokio::test]
+    async fn worktree_from_detached_head_starts_at_that_commit() {
+        let (_tmp, repos, repo) = unborn_fixture().await;
+        commit_empty(&repos, &repo, "one").await;
+        let first = repos.head_sha(&repo).await.unwrap().unwrap();
+        commit_empty(&repos, &repo, "two").await;
+        repos
+            .git(&["checkout", "--detach", &first], Some(&repo))
+            .await
+            .unwrap();
+        let worktree = repos.create_worktree(&repo, "HEAD").await.unwrap();
+        assert_eq!(
+            repos.head_sha(Path::new(&worktree.path)).await.unwrap(),
+            Some(first)
+        );
+    }
+
+    #[tokio::test]
+    async fn worktree_from_remote_only_branch_uses_the_remote_copy() {
+        let (tmp, repos, upstream) = unborn_fixture().await;
+        commit_empty(&repos, &upstream, "init").await;
+        repos
+            .git(&["checkout", "-b", "feature"], Some(&upstream))
+            .await
+            .unwrap();
+        commit_empty(&repos, &upstream, "feature work").await;
+        let feature = repos.head_sha(&upstream).await.unwrap().unwrap();
+        let clone = tmp.path().join("clone");
+        repos
+            .git(
+                &[
+                    "clone",
+                    "-q",
+                    "-b",
+                    "main",
+                    &upstream.to_string_lossy(),
+                    &clone.to_string_lossy(),
+                ],
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!repos.branch_exists(&clone, "feature").await);
+        let worktree = repos.create_worktree(&clone, "feature").await.unwrap();
+        assert_eq!(
+            repos.head_sha(Path::new(&worktree.path)).await.unwrap(),
+            Some(feature)
+        );
     }
 
     async fn two_step_fixture(hook_exit: u8) -> (tempfile::TempDir, Repos, PathBuf) {
