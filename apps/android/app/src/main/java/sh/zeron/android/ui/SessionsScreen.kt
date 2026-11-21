@@ -206,13 +206,14 @@ fun SessionsScreen(
 
     // "New section…" from a row's Move menu files that row into it. Remembered: every row
     // takes `actions`, so a fresh instance per recomposition re-composes every visible row.
-    val userSections = ws?.front?.sections
+    // Keyed on (id, name) only: the sections carry their rows, which change with every snapshot.
+    val userSections = ws?.front?.sections.orEmpty().map { it.id to it.name }
     val actions = remember(model, onOpen, selected, userSections) {
         RowActions(
             model = model,
             onOpen = onOpen,
             archive = { row -> model.archive(row.id) },
-            sections = userSections.orEmpty().map { it.id to it.name },
+            sections = userSections,
             newSection = { chatId -> newSection = chatId ?: "" },
             selected = selected,
         )
