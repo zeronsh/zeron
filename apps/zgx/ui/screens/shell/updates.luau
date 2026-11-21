@@ -269,11 +269,14 @@ end
 
 -- Running chats on its device: updating its Zeron restarts its engine, which
 -- stops them, and they carry on after. (One waiting on background work counts:
--- the restart ends that work too.)
+-- the restart ends that work too.) `here` counts this device's, by its id:
+-- chats on other devices carry on through this one's restart.
 local function running_on(device: string, here: boolean): number
+	local now = sessions.now:get()
+	local id = if here then now.here else device
 	local n = 0
-	for _, c in sessions.now:get().chats or {} do
-		if (c.device == device or (here and device == "")) and (c.status == "working" or c.status == "input" or c.status == "waiting") then
+	for _, c in now.chats or {} do
+		if id ~= nil and c.device == id and (c.status == "working" or c.status == "input" or c.status == "waiting") then
 			n += 1
 		end
 	end
