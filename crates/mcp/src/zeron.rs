@@ -828,14 +828,33 @@ pub fn session_for(sessions: &[Session], chat: &Chat) -> Option<Session> {
         .map(|s| (*s).clone())
 }
 
+/// Candidates for an ambiguous key, each as `id (device, folder, branch)`:
+/// enough to tell chats of one title apart without another call.
+fn candidates<'a>(chats: impl Iterator<Item = &'a Chat>) -> String {
+    let mut seen = std::collections::HashSet::new();
+    chats
+        .filter(|c| seen.insert(c.id.as_str()))
+        .map(|c| {
+            let folder = c
+                .cwd
+                .as_deref()
+                .and_then(|p| p.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next())
+                .filter(|f| !f.is_empty());
+            let parts: Vec<&str> = [Some(short(&c.device_id)), folder, c.branch.as_deref()]
+                .into_iter()
+                .flatten()
+                .collect();
+            format!("{} ({})", short(&c.id), parts.join(", "))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 pub fn resolve_chat_in(chats: &[Chat], key: &str) -> anyhow::Result<Chat> {
     if let Some(chat) = chats.iter().find(|c| c.id == key) {
         return Ok(chat.clone());
     }
     let by_prefix: Vec<&Chat> = chats.iter().filter(|c| c.id.starts_with(key)).collect();
-    if let [one] = by_prefix.as_slice() {
-        return Ok((*one).clone());
-    }
     let by_title: Vec<&Chat> = chats
         .iter()
         .filter(|c| {
@@ -844,6 +863,17 @@ pub fn resolve_chat_in(chats: &[Chat], key: &str) -> anyhow::Result<Chat> {
                 .is_some_and(|t| t.trim().eq_ignore_ascii_case(key))
         })
         .collect();
+    if let [one] = by_prefix.as_slice() {
+        // (A key that is one chat's id prefix and another's exact title is
+        // either: say so, rather than pick one silently.)
+        if by_title.iter().all(|t| t.id == one.id) {
+            return Ok((*one).clone());
+        }
+        bail!(
+            "{key:?} is both the start of one chat's id and the title of another; use a full id: {}",
+            candidates(by_prefix.iter().chain(by_title.iter()).copied())
+        );
+    }
     if let [one] = by_title.as_slice() {
         return Ok((*one).clone());
     }
@@ -851,22 +881,14 @@ pub fn resolve_chat_in(chats: &[Chat], key: &str) -> anyhow::Result<Chat> {
         bail!(
             "{} chats start with {key:?}; be more specific: {}",
             by_prefix.len(),
-            by_prefix
-                .iter()
-                .map(|c| short(&c.id))
-                .collect::<Vec<_>>()
-                .join(", ")
+            candidates(by_prefix.iter().copied())
         );
     }
     if by_title.len() > 1 {
         bail!(
             "{} chats are titled {key:?}; use an id: {}",
             by_title.len(),
-            by_title
-                .iter()
-                .map(|c| short(&c.id))
-                .collect::<Vec<_>>()
-                .join(", ")
+            candidates(by_title.iter().copied())
         );
     }
     bail!("no chat matches {key:?} (id, id prefix, or exact title); try list_chats")
@@ -1127,6 +1149,34 @@ mod tests {
             .to_string();
         assert!(err.contains("2 chats are titled"), "{err}");
         assert!(resolve_chat_in(&chats, "zzz").is_err());
+    }
+
+    #[test]
+    fn same_title_names_each_candidate_by_where_it_runs() {
+        let mut a = chat("aaaa1111-1", Some("School Management"));
+        a.device_id = "threadripper-id".into();
+        a.cwd = Some("/home/me/school".into());
+        let mut b = chat("bbbb2222-2", Some("School Management"));
+        b.device_id = "pc-id".into();
+        b.cwd = Some("C:\\work\\school".into());
+        b.branch = Some("main".into());
+        let chats = vec![a, b, chat("cccc3333-3", Some("Other"))];
+        let err = resolve_chat_in(&chats, "school management").unwrap_err().to_string();
+        assert!(err.contains("2 chats are titled"), "{err}");
+        assert!(err.contains("aaaa1111 (threadri, school)"), "{err}");
+        assert!(err.contains("bbbb2222 (pc-id, school, main)"), "{err}");
+        // A full id still resolves each.
+        assert_eq!(resolve_chat_in(&chats, "bbbb2222-2").unwrap().id, "bbbb2222-2");
+    }
+
+    #[test]
+    fn a_prefix_that_is_another_chats_title_is_ambiguous() {
+        let chats = vec![chat("abcd1111-1", Some("Docs")), chat("zzzz2222-2", Some("abcd"))];
+        let err = resolve_chat_in(&chats, "abcd").unwrap_err().to_string();
+        assert!(err.contains("both the start of one chat's id and the title of another"), "{err}");
+        // Its own title and id prefix are the same chat: fine.
+        let one = vec![chat("abcd1111-1", Some("abcd"))];
+        assert_eq!(resolve_chat_in(&one, "abcd").unwrap().id, "abcd1111-1");
     }
 
     fn space(id: &str, path: &str, name: Option<&str>) -> Space {
