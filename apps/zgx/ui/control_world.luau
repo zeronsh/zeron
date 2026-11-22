@@ -7,6 +7,8 @@
 --
 --   require("@app/control_world")()   once, before the screen is built
 
+-- (Orchestrators on, as these are its: off is the default everywhere.)
+require("@account/plugins").set({ orchestrators = true })
 local sessions = require("@account/sessions")
 local orchestration = require("@account/orchestration")
 local sample_of = require("@account/orchestration_sample")

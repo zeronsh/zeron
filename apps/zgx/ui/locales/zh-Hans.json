@@ -3407,7 +3407,7 @@
         "file": "文件"
       },
       "drop_to_reference": "Drop to reference",
-      "held_paused": "已保留 · 其卡片已暂停",
+      "held_paused": "其卡片暂停期间已保留",
       "resume": "继续",
       "didnt_resume": "无法继续其卡片"
     },

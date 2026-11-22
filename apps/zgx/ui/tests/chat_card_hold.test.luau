@@ -26,7 +26,7 @@ local function open_held(app: any)
 	app:frames(10)
 end
 
-local LINE = '.composer-held >> ~"Held · its card is paused"'
+local LINE = '.composer-held >> ~"Held while its card is paused"'
 
 test("card hold: a paused card's thread says its queue is held; Resume resumes the card", function()
 	local app = mount("chat_fixture.luau")

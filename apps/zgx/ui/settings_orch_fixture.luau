@@ -6,6 +6,8 @@
 -- the engine would.
 
 ui.theme.strict("warn")
+-- (Orchestrators on, as these are its: off is the default everywhere.)
+require("@account/plugins").set({ orchestrators = true })
 local ds = require("@ds")
 ds.setup()
 local sessions = require("@account/sessions")

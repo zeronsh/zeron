@@ -5,6 +5,8 @@
 -- thread opened is noted in `opened`.
 
 ui.theme.strict("warn")
+-- (Orchestrators on, as these are its: off is the default everywhere.)
+require("@account/plugins").set({ orchestrators = true })
 local ds = require("@ds")
 ds.setup()
 local T = require("@ds/transcript")
@@ -68,6 +70,9 @@ return ui.component(function(): Node
 			h_full = true,
 			T.Transcript {
 				messages = messages,
+				orchestrators = function(): any
+					return require("@account/plugins").module("orchestrators")
+				end,
 				chat_of = function(chat: string): any
 					return if titles[chat] then { title = titles[chat] } else nil
 				end,

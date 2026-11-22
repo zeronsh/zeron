@@ -3372,7 +3372,7 @@
         "file": "File"
       },
       "drop_to_reference": "Drop to reference",
-      "held_paused": "Held · its card is paused",
+      "held_paused": "Held while its card is paused",
       "resume": "Resume",
       "didnt_resume": "Couldn't resume its card"
     },
