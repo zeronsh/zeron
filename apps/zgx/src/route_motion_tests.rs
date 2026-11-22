@@ -883,6 +883,7 @@ struct TextFrame {
     composer: Rect,
     field: Rect,
     scroll_y: f32,
+    line_left_full: f32,
     line_top_full: f32,
     line_top_visible: Option<f32>,
     line_height_full: f32,
@@ -931,6 +932,7 @@ fn inspect_composer_text(app: &mut TestApp) -> TextFrame {
         composer: composer_rect,
         field: field_rect,
         scroll_y,
+        line_left_full: full.x,
         line_top_full: full.y,
         line_top_visible: vis.map(|r| r.y),
         line_height_full: full.height,
@@ -1381,6 +1383,154 @@ fn composer_writing_new_lines_never_clips_caret_at_bottom_or_text_at_top() {
             assert_caret_unclipped(f1, &format!("{mode} wrap word {word} frame 1"));
         }
     }
+}
+
+#[test]
+fn composer_skinny_to_multiline_glides_text_and_caret_smoothly() {
+    // 1. Shift+Enter from skinny (compact) -> multi-line (expanded), then Backspace back to skinny.
+    let mut shell = Shell::new(false);
+    shell.app.click(BUILD);
+    shell.frames(60);
+    shell.app.click(FIELD);
+    shell.frames(2);
+    type_at_caret(&mut shell.app, "Hello");
+    shell.frames(30);
+    let compact = inspect_composer_text(&mut shell.app);
+    assert_no_top_clip(compact, "skinny base");
+    assert_caret_unclipped(compact, "skinny base");
+
+    type_at_caret(&mut shell.app, "\n");
+    let mut prev = inspect_composer_text(&mut shell.app);
+    assert!(
+        (prev.line_left_full - compact.line_left_full).abs() <= 0.5,
+        "frame 0 must start at compact text.left without jumping: prev={prev:?}, compact={compact:?}"
+    );
+    let mut max_dx_text = 0.0_f32;
+    let mut max_dx_caret = 0.0_f32;
+    for step in 1..=30 {
+        shell.frames(1);
+        let f = inspect_composer_text(&mut shell.app);
+        assert_no_top_clip(f, &format!("skinny->multiline Shift+Enter frame {step}"));
+        assert_caret_unclipped(f, &format!("skinny->multiline Shift+Enter frame {step}"));
+        // Line 1 left edge and Line 2 caret (at col 0) must glide together in lockstep.
+        assert!(
+            (f.caret_full.x - f.line_left_full).abs() <= 0.5,
+            "frame {step}: caret drifted horizontally from text ({} vs {}): {f:?}",
+            f.caret_full.x,
+            f.line_left_full
+        );
+        // Monotonic glide left (never jumps back right) with no 29.5px teleport.
+        assert!(
+            f.line_left_full <= prev.line_left_full + 0.5,
+            "frame {step}: text moved backwards right ({} -> {}): {f:?}",
+            prev.line_left_full,
+            f.line_left_full
+        );
+        let dx_t = (f.line_left_full - prev.line_left_full).abs();
+        let dx_c = (f.caret_full.x - prev.caret_full.x).abs();
+        max_dx_text = max_dx_text.max(dx_t);
+        max_dx_caret = max_dx_caret.max(dx_c);
+        assert!(
+            dx_t <= 8.0 && dx_c <= 8.0,
+            "frame {step}: horizontal teleport detected (dx_text={dx_t}, dx_caret={dx_c}): prev={prev:?}, f={f:?}"
+        );
+        prev = f;
+    }
+    assert!(
+        compact.line_left_full - prev.line_left_full > 25.0,
+        "expected full compact->expanded inset travel (~29.5px), got {} -> {}",
+        compact.line_left_full,
+        prev.line_left_full
+    );
+    assert!(
+        max_dx_text > 1.0 && max_dx_caret > 1.0,
+        "expected smooth multi-frame glide, got max_dx_text={max_dx_text}, max_dx_caret={max_dx_caret}"
+    );
+
+    // Backspace back from expanded -> compact: smooth glide right, no frame-0 teleport.
+    let expanded = prev;
+    shell.app.key(Key::Backspace);
+    let mut prev = inspect_composer_text(&mut shell.app);
+    assert!(
+        (prev.line_left_full - expanded.line_left_full).abs() <= 0.5,
+        "contraction frame 0 must start at expanded text.left: prev={prev:?}, expanded={expanded:?}"
+    );
+    for step in 1..=30 {
+        shell.frames(1);
+        let f = inspect_composer_text(&mut shell.app);
+        assert_no_top_clip(f, &format!("multiline->skinny frame {step}"));
+        assert_caret_unclipped(f, &format!("multiline->skinny frame {step}"));
+        assert!(
+            f.line_left_full >= prev.line_left_full - 0.5,
+            "contraction frame {step}: text moved backwards left ({} -> {}): {f:?}",
+            prev.line_left_full,
+            f.line_left_full
+        );
+        let dx_t = (f.line_left_full - prev.line_left_full).abs();
+        let dx_c = (f.caret_full.x - prev.caret_full.x).abs();
+        assert!(
+            dx_t <= 14.0 && dx_c <= 14.0,
+            "contraction frame {step}: horizontal teleport detected (dx_text={dx_t}, dx_caret={dx_c}): prev={prev:?}, f={f:?}"
+        );
+        prev = f;
+    }
+    assert!(
+        (prev.line_left_full - compact.line_left_full).abs() <= 0.5,
+        "expected settled contraction to return to compact.left"
+    );
+
+    // 2. Typing across the skinny compact width boundary: text must stay on 1 line
+    // (never falsely wrap to line 2 and unwrap back to line 1) while gliding smoothly left.
+    let mut shell = Shell::new(false);
+    shell.app.click(BUILD);
+    shell.frames(60);
+    shell.app.click(FIELD);
+    shell.frames(2);
+    type_at_caret(&mut shell.app, "a");
+    shell.frames(15);
+    let compact_h = inspect_composer_text(&mut shell.app).composer.height;
+    let mut steps = 0;
+    let mut expanded_triggered = false;
+    while inspect_composer_text(&mut shell.app).composer.height <= compact_h + 0.5 {
+        assert!(steps < 120, "never crossed compact boundary");
+        type_at_caret(&mut shell.app, "w");
+        steps += 1;
+        let before_tick = inspect_composer_text(&mut shell.app);
+        shell.frames(1);
+        let after_tick = inspect_composer_text(&mut shell.app);
+        if after_tick.composer.height > compact_h + 0.5 {
+            expanded_triggered = true;
+            // Caret must stay on Line 1 across the entire expansion (no wrap-to-2 then unwrap-to-1 jump).
+            assert!(
+                (before_tick.caret_full.y - before_tick.line_top_full).abs() <= 2.0,
+                "wrap trigger frame 0 falsely wrapped caret to line 2: {before_tick:?}"
+            );
+            assert!(
+                (after_tick.caret_full.y - after_tick.line_top_full).abs() <= 2.0,
+                "wrap trigger frame 1 falsely wrapped caret to line 2: {after_tick:?}"
+            );
+            let mut prev = after_tick;
+            for step in 2..=30 {
+                shell.frames(1);
+                let f = inspect_composer_text(&mut shell.app);
+                assert_no_top_clip(f, &format!("auto-wrap skinny->expanded frame {step}"));
+                assert_caret_unclipped(f, &format!("auto-wrap skinny->expanded frame {step}"));
+                assert!(
+                    (f.caret_full.y - f.line_top_full).abs() <= 2.0,
+                    "auto-wrap frame {step}: caret jumped off line 1: {f:?}"
+                );
+                let dx_t = (f.line_left_full - prev.line_left_full).abs();
+                let dx_c = (f.caret_full.x - prev.caret_full.x).abs();
+                assert!(
+                    dx_t <= 8.0 && dx_c <= 8.0,
+                    "auto-wrap frame {step}: horizontal teleport (dx_text={dx_t}, dx_caret={dx_c}): prev={prev:?}, f={f:?}"
+                );
+                prev = f;
+            }
+            break;
+        }
+    }
+    assert!(expanded_triggered, "never triggered compact->expanded via typing");
 }
 
 

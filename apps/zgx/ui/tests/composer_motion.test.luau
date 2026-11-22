@@ -11,7 +11,7 @@ local function geometry(height: number, header: number?, corner: number?)
 	}, false)
 end
 
-test("composer transition: width changes once after a full expanded line fits", function()
+test("composer transition: width changes once while horizontal insets glide smoothly", function()
 	local a, b = geometry(22), geometry(220)
 	local changes, last = 0, a.text.width
 	local previous = Motion.frame(a, b, 0)
@@ -20,10 +20,12 @@ test("composer transition: width changes once after a full expanded line fits", 
 		expect(g.text.width == a.text.width or g.text.width == b.text.width).to_be(true)
 		if g.text.width ~= last then
 			changes += 1
-			-- A discrete width change must not also jump the vertical field.
-			expect(math.abs(g.text.top - previous.text.top) < 1).to_be(true)
-			expect(math.abs(g.text.height - previous.text.height) < 5).to_be(true)
 		end
+		-- Every presented edge (left, right, top, height) moves smoothly without teleports.
+		expect(math.abs(g.text.left - previous.text.left) < 2).to_be(true)
+		expect(math.abs(g.text.right - previous.text.right) < 2).to_be(true)
+		expect(math.abs(g.text.top - previous.text.top) < 1).to_be(true)
+		expect(math.abs(g.text.height - previous.text.height) < 5).to_be(true)
 		last = g.text.width
 		previous = g
 		expect(g.text.height >= 22).to_be(true)
@@ -37,17 +39,28 @@ test("composer transition: width changes once after a full expanded line fits", 
 	expect(Motion.frame(a, b, 1)).to_equal(b)
 end)
 
-test("composer transition: headers and rounder controls remain inside a valid frame", function()
+test("composer transition: headers and rounder controls remain inside a valid frame without overlapping text", function()
 	local a, b = geometry(22), geometry(500, 90, 45)
 	for _, pair in { { a, b }, { b, a } } do
+		local from, to = pair[1], pair[2]
+		local prev = Motion.frame(from, to, 0)
 		for i = 0, 100 do
-			local g = Motion.frame(pair[1], pair[2], i / 100)
+			local g = Motion.frame(from, to, i / 100)
 			expect(g.header_height <= g.text.top + 0.001).to_be(true)
 			expect(g.text.height >= 22).to_be(true)
 			expect(g.text.top + g.text.height <= g.height - 2 + 0.001).to_be(true)
-			if not g.expanded then
+			-- Insets and leading control glide smoothly with no abrupt jump.
+			expect(math.abs(g.text.left - prev.text.left) < 2).to_be(true)
+			expect(math.abs(g.controls.leading.left - prev.controls.leading.left) < 2).to_be(true)
+			-- Visible text never overlaps the leading `+` button in 2D:
+			-- either it sits vertically above `+` or horizontally to its right.
+			local inner_h = g.height - Layout.BORDER * 2
+			local leading_top = inner_h - g.controls.leading.bottom - g.controls.leading.height
+			local check_h = if to.expanded then Motion.clip_height(g, to) else to.text.height
+			if g.text.top + check_h > leading_top + 0.01 then
 				expect(g.controls.leading.left + 28 < g.text.left).to_be(true)
 			end
+			prev = g
 		end
 	end
 end)
@@ -140,4 +153,28 @@ test("composer transition: clip height opens to the pill bottom during compact-w
 	local opened = Motion.frame(compact, two_lines, 0.9)
 	expect(opened.expanded).to_be(true)
 	expect(Motion.clip_height(opened, two_lines)).to_be(opened.text.height)
+end)
+
+test("composer transition: editor width holds destination width during inset glide and defers to layout settled", function()
+	local compact = geometry(22)
+	local two_lines = geometry(44)
+	local six = geometry(132)
+
+	-- Settled or same-mode transitions return nil so the textarea uses "100%".
+	expect(Motion.editor_width(compact, compact, 660)).to_be_nil()
+	expect(Motion.editor_width(two_lines, two_lines, 660)).to_be_nil()
+	expect(Motion.editor_width(Motion.frame(two_lines, six, 0.5), six, 660)).to_be_nil()
+
+	-- Compact -> expanded holds the expanded destination width across the entire glide.
+	for _, p in { 0, 0.2, 0.5, 0.8 } do
+		local g = Motion.frame(compact, two_lines, p)
+		expect(Motion.editor_width(g, two_lines, 660)).to_be(two_lines.text.width)
+		-- Respects live pill width if the window resizes mid-transition.
+		expect(Motion.editor_width(g, two_lines, 500)).to_be(500 - Layout.BORDER * 2 - two_lines.text.left - two_lines.text.right)
+	end
+	expect(Motion.editor_width(Motion.frame(compact, two_lines, 1), two_lines, 660)).to_be_nil()
+
+	-- Expanded -> compact holds the compact destination width across the glide.
+	local shrinking = Motion.frame(two_lines, compact, 0.4)
+	expect(Motion.editor_width(shrinking, compact, 660)).to_be(compact.text.width)
 end)

@@ -149,25 +149,28 @@ motion, frame or binding.
 View bindings share a projection of the complete presented snapshot, so changes
 to width or measurement metadata alone do not wake unchanged controls/insets.
 
-The vertical envelope and controls move together. During expansion, the editor
-keeps compact width until a complete line fits above both control groups, then
-switches once to the expanded width. During contraction, it takes compact width
-immediately. The text top and height continue on the same vertical trajectory;
-width is not continuously interpolated during a mode change.
+The vertical envelope, text insets and controls move together. During
+compact-to-expanded and expanded-to-compact transitions, the clip wrapper's
+horizontal insets glide along a smooth arc around the leading `+` button (`p^4`
+when expanding so the pill rises clear of `+` before sliding left;
+`1 - (1 - p)^2` when contracting so the text clears `+` before the pill closes)
+while `Motion.editor_width` holds the textarea at its destination wrapping
+width so text wraps once without mid-flight re-wrapping or a horizontal
+teleport. Settled (or in-mode), `Motion.editor_width` defers to `"100%"` so
+pane resizes flow purely through layout.
 
 The viewport derives from that frame's surface, top and bottom reservations.
 A separate animated clip surrounds the naturally measured header; the clip's
 height never feeds back into the header measurement. Likewise, the textarea sits
-inside an `overflow = "hidden"` clip sized by `Motion.clip_height` (opening to
-the pill's inner bottom during the compact-width phase where controls sit beside
-the text, and matching `shown.text.height` above the controls once expanded),
-while its own height (`Motion.editor_height`) holds at least the growing
-destination, pending frame-0 edit height (`metrics.pending`), and temporary
-compact-width wraps during compact-to-expanded transitions before settling back
-to `shown.text.height`. Single-line growth while already expanded settles
-immediately on frame 0 (backed by synchronous live-edit metrics when the
-mounted editor has already advanced its native revision) so neither line 1 at
-the top nor the new line's caret at the bottom is clipped. Combined with
+inside an `overflow = "hidden"` clip sized by `Motion.clip_height` (opening up
+to two lines down to the pill's inner bottom while text still sits to the right
+of `+`, then staying strictly above the controls once `text.left` glides across
+`+`'s column), while its own height (`Motion.editor_height`) holds at least the
+growing destination and pending frame-0 edit height (`metrics.pending`) before
+settling back to `shown.text.height`. Single-line growth while already expanded
+settles immediately on frame 0 (backed by synchronous live-edit metrics when
+the mounted editor has already advanced its native revision) so neither line 1
+at the top nor the new line's caret at the bottom is clipped. Combined with
 updating `pill_w` from `pill.width` before editors refresh on resize, caret
 reveal never scrolls and clips the top line off-screen mid-resize. These
 transitions retain the textarea, draft, focus and selection, and do not write

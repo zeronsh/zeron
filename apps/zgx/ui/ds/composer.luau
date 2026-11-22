@@ -1376,6 +1376,17 @@ return ui.component(function(props: Props): Node
 			pill_w:peek()
 		)
 	end)
+	local editor_width = ui.computed(function(): Length
+		local g = frame_geometry:get()
+		local dest = transition.destination:get()
+		-- Only subscribe to `pill_w` while insets are actively gliding across a
+		-- mode change, so settled pane resizes flow purely through `"100%"`.
+		local live = if math.abs(g.text.left - dest.text.left) > 0.01
+			or math.abs(g.text.right - dest.text.right) > 0.01
+			then pill_w:get()
+			else nil
+		return ComposerMotion.editor_width(g, dest, live) or "100%"
+	end)
 	-- Width is applied by layout, not a view binding. Project the presented
 	-- snapshot once so width/measurement metadata alone cannot wake every
 	-- height, inset and control binding in each split composer.
@@ -2024,7 +2035,9 @@ return ui.component(function(props: Props): Node
 				absolute = true,
 				left = 0,
 				top = 0,
-				w_full = true,
+				w = function(): Length
+					return editor_width:get()
+				end,
 				h = function(): number
 					return editor_height:get()
 				end,
