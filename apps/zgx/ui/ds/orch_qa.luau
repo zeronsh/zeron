@@ -39,6 +39,7 @@
 -- The whole of an entry's model and its state is here: the page only
 -- feeds it the dumps and opens threads.
 
+local FoldScroll = require("@self/fold_scroll")
 local IconButton = require("@self/icon_button").IconButton
 local ContextMenu = require("@self/context_menu")
 local Icon = require("@self/icon")
@@ -542,6 +543,9 @@ local function entry(props: Props, row: State<Entry>): Node
 	}
 end
 
+-- How tall the list stands once "n more" opened it, before it scrolls.
+local OPEN_MAX_H = 720
+
 local Section = ui.component(function(props: Props): Node
 	local own_all = ui.use_state(false :: boolean)
 	local all: any = if props.all ~= nil then props.all else own_all
@@ -576,11 +580,21 @@ local Section = ui.component(function(props: Props): Node
 		}),
 		-- (Keyed: an entry is built once and follows its route as it changes,
 		-- so an answer arriving never builds the list again.)
-		ui.each(shown, function(_e: Entry, _i: number, row: State<Entry>): Node
-			return entry(props, row)
-		end, { key = function(x: Entry): string
-			return x.key
-		end, w_full = true, gap = "$zeron.space.hair" }),
+		-- (Opened past `limit`: about ten entries tall, then it scrolls.)
+		FoldScroll {
+			class = "orch-qa-list",
+			open = function(): boolean
+				return all:get()
+			end,
+			max_h = OPEN_MAX_H,
+			list = function(): Node
+				return ui.each(shown, function(_e: Entry, _i: number, row: State<Entry>): Node
+					return entry(props, row)
+				end, { key = function(x: Entry): string
+					return x.key
+				end, w_full = true, gap = "$zeron.space.hair" })
+			end,
+		},
 		ui.show(function(): boolean
 			return #list:get() > limit
 		end, ui.button {

@@ -1045,8 +1045,12 @@ M.board_later = ui.persist("control_board_later", false)
 M.board_paused = ui.persist("control_board_paused", false)
 local timeline = ui.shared("orchestration.timeline", {} :: { [string]: { any } })
 
+-- The Map's own element, to bring it into view.
+local map_ref = ui.ref()
+
 local function map(): Node
 	return ui.column {
+		ref = map_ref,
 		w_full = true,
 		OrchMap().Map {
 			world = world,
@@ -1086,8 +1090,41 @@ local function map(): Node
 	}
 end
 
+-- Every thread on every machine: the Map in its Machines view, shown and
+-- scrolled to (the Machines widget's "n more").
+function M.show_map_machines()
+	local w = M.widgets:peek()
+	local hidden: any = w.hidden or {}
+	if hidden.map then
+		M.toggle("map")
+	end
+	OrchMap().set(M.map_view, { variant = "machines" })
+	-- (Once it's laid out: its top to the view's.)
+	local function bring(tries: number)
+		local el = map_ref:peek()
+		local view = scroll_ref:peek()
+		if el and view and el.y ~= nil and view.y ~= nil then
+			M.place:set(math.max(0, M.place:peek() + (el.y :: number) - (view.y :: number) - 8))
+		elseif tries > 0 then
+			ui.after(50, function()
+				bring(tries - 1)
+			end)
+		end
+	end
+	ui.after(0, function()
+		bring(20)
+	end)
+end
+
+-- How many threads a machine lists on the Overview before "n more".
+M.MACHINE_CAP = 6
+
 local function machines(): Node
 	return Machines {
+		cap = M.MACHINE_CAP,
+		on_more = function(_device: string)
+			M.show_map_machines()
+		end,
 		devices = function(): { any }
 			return OV.devices()
 		end,
