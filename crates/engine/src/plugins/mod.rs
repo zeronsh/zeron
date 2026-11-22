@@ -221,6 +221,11 @@ struct Inner {
     device_id: String,
     device_name: Mutex<String>,
     workspace: Mutex<Option<crate::WorkspaceHost>>,
+    /// The account's plugin switches (the workspace's `pluginSwitches`
+    /// rows), for plugins whose switch is the account's.
+    switches: Mutex<Option<watch::Receiver<std::collections::BTreeMap<String, bool>>>>,
+    /// Whether each plugin watched by id (`Plugins::watch`) is on.
+    on_watches: Mutex<HashMap<String, watch::Sender<bool>>>,
     directory: Mutex<Option<Arc<dyn KeyDirectory>>>,
     /// Told when a directory is set or who is signed in may have changed:
     /// key checks wait for both.
@@ -485,6 +490,24 @@ fn sign_folder(dir: &Path, key: &SigningKey) -> Result<Option<Vec<u8>>, String> 
     Ok(Some(bytes))
 }
 
+/// Whether plugin `id` is on, from the last scan and the account's
+/// switches (`Plugins::is_on`).
+fn on_now(entries: &[Entry], switches: &std::collections::BTreeMap<String, bool>, id: &str) -> bool {
+    // Zeron's own first: a folder of yours under its id is broken anyway.
+    let entry = entries
+        .iter()
+        .find(|e| e.item.id == id && e.item.builtin)
+        .or_else(|| entries.iter().find(|e| e.item.id == id));
+    match entry {
+        // The account's switch as it is now, not as the last scan read it.
+        Some(e) if e.item.builtin && e.item.scope.is_some() && e.item.status != Status::Broken => {
+            switches.get(id).copied().unwrap_or(!e.item.default_off)
+        }
+        Some(e) => e.item.status == Status::On,
+        None => switches.get(id).copied().unwrap_or(false),
+    }
+}
+
 impl Plugins {
     /// The service for the engine whose data dir is `data_dir`. Nothing runs
     /// until [`Self::start`].
@@ -514,6 +537,8 @@ impl Plugins {
                 device_id: device_id.to_owned(),
                 device_name: Mutex::new(crate::local_device_name(device_id)),
                 workspace: Mutex::new(None),
+                switches: Mutex::new(None),
+                on_watches: Mutex::new(HashMap::new()),
                 directory: Mutex::new(None),
                 can_look_up: Arc::new(tokio::sync::Notify::new()),
                 #[cfg(test)]
@@ -613,7 +638,71 @@ impl Plugins {
     }
 
     pub fn set_workspace(&self, workspace: crate::WorkspaceHost) {
+        *lock(&self.inner.switches) = Some(workspace.watch_plugin_switches());
         *lock(&self.inner.workspace) = Some(workspace);
+        self.refresh_on_watches();
+    }
+
+    // ── Is it on? (for the engine's own Rust) ───────────────────────────────
+
+    /// Whether plugin `id` is on here: what Rust outside the plugins
+    /// gates on. A plugin listed here is on when its status is (for one of
+    /// Zeron's own whose switch is the account's, the account's switch, or
+    /// its manifest's default while nobody chose). One whose files this
+    /// engine doesn't have (a headless or Cloud engine, which never hears
+    /// where Zeron's own are) follows the account's switch by id alone, and
+    /// is off with none.
+    pub fn is_on(&self, id: &str) -> bool {
+        let switches = self.account_switches();
+        let entries = lock(&self.inner.entries);
+        on_now(&entries, &switches, id)
+    }
+
+    /// [`Self::is_on`] for `id`, told every time it changes: a toggle in
+    /// Settings → Plugins here, or the account's switch landing from
+    /// another device.
+    pub fn watch(&self, id: &str) -> watch::Receiver<bool> {
+        let rx = {
+            let mut watches = lock(&self.inner.on_watches);
+            match watches.get(id) {
+                Some(tx) => tx.subscribe(),
+                None => {
+                    let (tx, rx) = watch::channel(false);
+                    watches.insert(id.to_owned(), tx);
+                    rx
+                }
+            }
+        };
+        // (Settled after it's registered, so a change meanwhile isn't missed.)
+        self.refresh_on_watches();
+        rx
+    }
+
+    /// The account's plugin switches as the registry holds them now.
+    fn account_switches(&self) -> std::collections::BTreeMap<String, bool> {
+        lock(&self.inner.switches)
+            .as_ref()
+            .map(|rx| rx.borrow().clone())
+            .unwrap_or_default()
+    }
+
+    /// Tell every [`Self::watch`] what it reads now; forget those no one
+    /// watches any more.
+    fn refresh_on_watches(&self) {
+        let watches: Vec<(String, watch::Sender<bool>)> = {
+            let mut watches = lock(&self.inner.on_watches);
+            watches.retain(|_, tx| !tx.is_closed());
+            watches.iter().map(|(id, tx)| (id.clone(), tx.clone())).collect()
+        };
+        if watches.is_empty() {
+            return;
+        }
+        let switches = self.account_switches();
+        let entries = lock(&self.inner.entries);
+        for (id, tx) in watches {
+            let on = on_now(&entries, &switches, &id);
+            tx.send_if_modified(|was| std::mem::replace(was, on) != on);
+        }
     }
 
     pub fn set_links(&self, links: Arc<zeron_rpc::LinkCache>) {
@@ -768,6 +857,20 @@ impl Plugins {
             }
         });
         lock(&self.inner.tasks).extend([worker, setup, renew, new_keys]);
+        // The account's switches, changed here or landing from another
+        // device: watchers told at once, and the list (and services) follow.
+        if let Some(mut switches) = lock(&self.inner.switches).clone() {
+            let weak = Arc::downgrade(&self.inner);
+            let follow = runtime.spawn(async move {
+                while switches.changed().await.is_ok() {
+                    let Some(inner) = weak.upgrade() else { return };
+                    let plugins = Plugins { inner };
+                    plugins.refresh_on_watches();
+                    plugins.kick(Kick::Rescan);
+                }
+            });
+            lock(&self.inner.tasks).push(follow);
+        }
         self.spawn_update_checks();
     }
 
@@ -1211,15 +1314,23 @@ impl Plugins {
         // Zeron's own, from the app's folder of them. A folder of yours by
         // the same name gives way, said so.
         if let Some(dir) = lock(&self.inner.builtin_dir).clone() {
+            let switches = self.account_switches();
             for dir in scan::plugin_dirs(&dir) {
                 let inspected = scan::inspect(&dir, true);
                 let id = inspected.folder.clone();
-                let off = state.decisions.get(&id).is_some_and(|d| d.off);
+                // The account's switch, when its manifest makes it the
+                // account's (this device's decision then counts for nothing);
+                // otherwise this device's.
+                let chosen = if scan::builtin_switch(&inspected).account {
+                    switches.get(&id).copied()
+                } else {
+                    state.decisions.get(&id).map(|d| !d.off)
+                };
                 for theirs in entries.iter_mut().filter(|e| e.item.id == id) {
                     theirs.item.status = Status::Broken;
                     theirs.item.error = Some(manifest::RESERVED_ID_ERROR.to_string());
                 }
-                entries.push(scan::builtin_entry(inspected, off));
+                entries.push(scan::builtin_entry(inspected, chosen));
             }
         }
         for entry in entries.iter_mut() {
@@ -1254,9 +1365,8 @@ impl Plugins {
         (entries, owed, keeps)
     }
 
-    /// Forget own ids and decisions whose folder is gone (yours, or Zeron's
-    /// own for its off switch). Under the scan lock, which installs hold
-    /// while they swap a folder.
+    /// Forget own ids whose folder is gone (decisions stay: `State::prune`).
+    /// Under the scan lock, which installs hold while they swap a folder.
     fn prune_state(&self) {
         let names = |dir: &Path| -> Vec<String> {
             scan::plugin_dirs(dir)
@@ -1273,7 +1383,7 @@ impl Plugins {
             state.prune(&present).then(|| state.clone())
         };
         if let Some(state) = pruned {
-            tracing::info!("plugins: forgot decisions for plugins that are gone");
+            tracing::info!("plugins: forgot own ids of plugins that are gone");
             if let Err(error) = state.save(&self.inner.plugins_dir) {
                 tracing::warn!(%error, "plugins: couldn't save pruned choices");
             }
@@ -1291,6 +1401,7 @@ impl Plugins {
         };
         *lock(&self.inner.entries) = entries;
         self.inner.scanned.store(true, Ordering::SeqCst);
+        self.refresh_on_watches();
         self.publish_list();
         self.publish_tools();
         self.sync_services();
@@ -1785,6 +1896,26 @@ impl Plugins {
                 let entry = self
                     .entry(&p.id)
                     .ok_or_else(|| failed(format!("There's no plugin {}", p.id)))?;
+                // Zeron's own whose switch is the account's: written for
+                // every device (synced), this device's decision untouched.
+                if entry.item.builtin && entry.item.scope.is_some() {
+                    let workspace = lock(&self.inner.workspace).clone();
+                    let Some(workspace) = workspace else {
+                        return Err(failed("Couldn't save it for your account"));
+                    };
+                    // (A Cloud machine writes only the rows it hosts.)
+                    if workspace.is_cloud() {
+                        return Err(failed(format!(
+                            "{} is turned on or off for your whole account, from one of your devices",
+                            entry.item.name
+                        )));
+                    }
+                    workspace
+                        .set_plugin_switch(&p.id, !p.off)
+                        .map_err(|_| failed("Couldn't save it for your account"))?;
+                    self.rescan().await;
+                    return self.item(&p.id);
+                }
                 // Zeron's own: on or off is all there is to decide.
                 if entry.item.builtin {
                     self.update_state(|state| {

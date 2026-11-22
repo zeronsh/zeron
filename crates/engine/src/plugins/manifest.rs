@@ -187,6 +187,45 @@ pub struct McpSpec {
     pub env: BTreeMap<String, String>,
 }
 
+/// How its on/off switch behaves (`"switch": { "default": "off", "scope":
+/// "account" }`). Honoured for Zeron's own plugins alone (shipped inside
+/// the app): anyone else's is on once you allow it, on this device.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct SwitchSpec {
+    /// `"default": "off"`: off until it's turned on (`"on"`, the default:
+    /// on until it's turned off).
+    pub default_off: bool,
+    /// `"scope": "account"`: one switch for every device of the account,
+    /// synced, that engines without the plugin's files follow too
+    /// (`"device"`, the default: each device its own).
+    pub account: bool,
+}
+
+impl SwitchSpec {
+    fn parse(value: Option<&serde_json::Value>) -> Result<Self, String> {
+        let object = match value {
+            None | Some(serde_json::Value::Null) => return Ok(Self::default()),
+            Some(serde_json::Value::Object(object)) => object,
+            Some(_) => return Err("Its \"switch\" must be an object".into()),
+        };
+        let pick = |key: &str, values: [&str; 2]| -> Result<bool, String> {
+            match object.get(key) {
+                None | Some(serde_json::Value::Null) => Ok(false),
+                Some(serde_json::Value::String(value)) if value == values[0] => Ok(false),
+                Some(serde_json::Value::String(value)) if value == values[1] => Ok(true),
+                Some(_) => Err(format!(
+                    "Its \"switch.{key}\" must be \"{}\" or \"{}\"",
+                    values[0], values[1]
+                )),
+            }
+        };
+        Ok(Self {
+            default_off: pick("default", ["on", "off"])?,
+            account: pick("scope", ["device", "account"])?,
+        })
+    }
+}
+
 /// The manifest's `signature` block, as written (not yet checked).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SignatureSpec {
@@ -219,6 +258,8 @@ pub struct Manifest {
     /// with the permission): none named, any public host; named, those
     /// alone, a private one (`localhost:8080`) only so (plugin-guard's `net`).
     pub network_hosts: Vec<String>,
+    /// How its switch behaves (Zeron's own plugins alone).
+    pub switch: SwitchSpec,
     /// `None` when absent; `Some(Err)` when present but malformed.
     pub signature: Option<Result<SignatureSpec, ()>>,
     /// The first thing wrong with it, in plain words.
@@ -412,6 +453,10 @@ impl Manifest {
                 Vec::new()
             }
         };
+        let switch = SwitchSpec::parse(object.get("switch")).unwrap_or_else(|e| {
+            problems.push(e);
+            SwitchSpec::default()
+        });
         let signature = object.get("signature").map(parse_signature);
         let mut manifest = Manifest {
             raw: raw.clone(),
@@ -428,6 +473,7 @@ impl Manifest {
             commands,
             service,
             network_hosts,
+            switch,
             signature,
             problem: None,
         };
@@ -679,5 +725,25 @@ mod tests {
         // `a--b`'s tool `c` and plugin `a`'s tool `b__c` were both `a__b__c`.
         assert!(!valid_tool_name("b__c"));
         assert_ne!(crate::plugins::mcp_name("a--b", "c"), crate::plugins::mcp_name("a", "b_c"));
+    }
+
+    #[test]
+    fn plugins_manifest_switch_says_its_default_and_scope() {
+        let read = |value: serde_json::Value| Manifest::from_value(with("switch", value)).unwrap();
+        assert_eq!(Manifest::from_value(base()).unwrap().switch, SwitchSpec::default());
+        assert_eq!(
+            read(serde_json::json!({ "default": "off", "scope": "account" })).switch,
+            SwitchSpec { default_off: true, account: true }
+        );
+        assert_eq!(read(serde_json::json!({ "default": "on", "scope": "device" })).switch, SwitchSpec::default());
+        assert_eq!(read(serde_json::json!({ "default": "off" })).switch, SwitchSpec { default_off: true, account: false });
+        assert_eq!(read(serde_json::json!({})).problem(), None);
+        for bad in [
+            serde_json::json!("off"),
+            serde_json::json!({ "default": false }),
+            serde_json::json!({ "scope": "everywhere" }),
+        ] {
+            assert!(read(bad.clone()).problem().is_some_and(|p| p.contains("switch")), "{bad}");
+        }
     }
 }
