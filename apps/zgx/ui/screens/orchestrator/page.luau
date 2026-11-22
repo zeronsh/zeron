@@ -1,11 +1,15 @@
 -- An orchestrator's page (`/orchestrator/:id`): its head (its hue, name and
 -- goal; how many of its crew are working; its model; paused; its
--- settings), then its conversation beside its live state. The conversation
+-- settings), then its conversation beside its side panel. The conversation
 -- is its chat, transcript and composer, as a side chat's lane draws one
 -- (screens/chat/lane_tab), where its crew's reports come in as Crew updates
--- cards. The live state is what needs you from it, its board and its crew.
--- Narrower than both need, one shows at a time, a switch in the head
--- choosing.
+-- cards. The side panel (screens/orchestrator/panel) holds its tasks and its
+-- crew. A switch in the head shows the conversation, both, or the panel
+-- alone, at every width; the seam between the two sizes the panel. Width
+-- and choice are kept for each orchestrator (panel_state). A new one, with
+-- nothing for the panel yet, shows its conversation alone and one line on
+-- what to type first; the panel offers itself once there's a task, an ask
+-- or a crew thread.
 --
 --   Page { id = function() return orchestrator_id end }
 
@@ -13,23 +17,19 @@ local ds = require("@ds")
 local locale = require("@ds/locale")
 local hue = require("@ds/orch_hue")
 local data = require("@ds/orch_data")
-local OrchBoard = require("@ds/orch_board")
-local OrchCrew = require("@ds/orch_crew")
-local stage = require("@ds/stage")
 local rows = require("@account/rows")
 local decide = require("@ds/orch_decide")
 local Links = require("@ds/links")
-local Block = require("@ds/orch_block")
-local Counter = require("@ds/orch_counter")
+local seam = require("@ds/seam")
 local orchestration = require("@account/orchestration")
 local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
 local lanes = require("@app/screens/chat/lanes")
 local LaneTab = require("@app/screens/chat/lane_tab")
 local actions = require("@app/screens/orchestrator/actions")
-local Progress = require("@app/screens/control/progress")
 local NeedsYou = require("@app/screens/control/needs")
-local KeptScroll = require("@ds/kept_scroll")
+local Panel = require("@app/screens/orchestrator/panel")
+local panel_state = require("@app/screens/orchestrator/panel_state")
 local Flow = require("@ds/orch_flow")
 local FlowEditor = require("@ds/orch_flow_editor")
 local flows = require("@app/screens/orchestrator/flows")
@@ -38,9 +38,10 @@ local toast = require("@ds/toast")
 
 local M = {}
 
--- Narrow: which half shows, the conversation or the live state (one for
--- the window, kept across a reload).
-local half = ui.state("orch_page_half", "chat")
+-- What the page shows: the conversation ("chat"), both ("split") or the
+-- side panel alone ("live"); the shown orchestrator's, kept for it
+-- (panel_state) once the person chooses.
+M.mode = ui.state("orch_page_mode", "chat")
 
 -- What the page shows: its work (the conversation and live state) or its
 -- flow, to edit (ds/orch_flow_editor).
@@ -61,15 +62,17 @@ local function model_options(): { any }
 	return out
 end
 
--- Where its live state is scrolled: kept as the page is made again (a
+-- Where its Tasks tab is scrolled: kept as the page is made again (a
 -- thread opened from it and back, the orchestrator a moment unknown while
 -- the host publishes) and as the board and crew change under it.
 M.place = ui.state("orch_page_scroll", 0)
 
--- Both side by side from this wide (the page's own width); narrower, one.
-local SPLIT_AT = 880
--- The live state's share of a split page, and its bounds.
-local SIDE_SHARE, SIDE_MIN, SIDE_MAX = 0.44, 380, 620
+-- The narrowest the conversation and the panel go side by side; narrower
+-- than both, Split shows the conversation.
+local CHAT_MIN, PANEL_MIN = 360, 300
+M.CHAT_MIN, M.PANEL_MIN = CHAT_MIN, PANEL_MIN
+-- The panel's share of a split page until it's dragged, and its bounds then.
+local SIDE_SHARE, SIDE_LEAST, SIDE_MOST = 0.4, 360, 560
 -- Under way: the crew counts these as working.
 local WORKING: { [string]: boolean } = { working = true, connecting = true, waiting = true }
 
@@ -90,21 +93,6 @@ M.model_name = model_name
 -- chat or a crew thread waiting on an answer (screens/control/needs).
 local function needs_of(id: string?): { any }
 	return NeedsYou.of(orchestration.now:get(), sessions.now:get(), id)
-end
-
--- A section of the live state, a block of its own: its title and count
--- over what it holds.
-local function Section(title: any, count: (() -> number)?, body: Node, id: string): Node
-	return Block.Block {
-		id = id,
-		title = title,
-		figures = if count
-			then ui.show(function(): boolean
-				return count() > 0
-			end, Counter { value = count, text_size = "$font.size.xs", color = "$text.secondary" })
-			else nil,
-		body,
-	}
 end
 
 local Page = ui.component(function(props: { of: () -> string? }): Node
@@ -174,8 +162,79 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 		return if o then o.hue else nil
 	end
 	local width = ui.use_state(1200)
-	local function split(): boolean
-		return width:get() >= SPLIT_AT
+	local function paused(): boolean
+		local o = orchestrator()
+		return o ~= nil and o.paused == true
+	end
+	local function device_name(device: string): string?
+		for _, d in sessions.now:get().devices or {} do
+			if d.id == device then
+				return d.name
+			end
+		end
+		return nil
+	end
+	-- Whether the panel has anything to show: a task, an ask, a crew thread.
+	local offered_now = ui.computed(function(): boolean
+		local id = props.of()
+		if #crew:get() > 0 or needs:get() > 0 then
+			return true
+		end
+		for _, it in orchestration.now:get().items or {} do
+			if it.orchestrator_id == id then
+				return true
+			end
+		end
+		return false
+	end)
+	local function offered(): boolean
+		return offered_now:get()
+	end
+	-- Its mode as kept, else Split once there's something to show.
+	local function kept_mode(kept: any, has: boolean): string
+		local k = kept and kept.mode
+		if k == "chat" or k == "split" or k == "live" then
+			return k
+		end
+		return if has then "split" else "chat"
+	end
+	ui.effect(function()
+		local m = kept_mode(panel_state.get(props.of()), offered_now:get())
+		if M.mode:peek() ~= m then
+			M.mode:set(m)
+		end
+	end)
+	-- Chosen in the head: kept for this orchestrator.
+	ui.effect(function()
+		local m = M.mode:get()
+		local id = props.of()
+		if id and m ~= kept_mode(panel_state.peek(id), offered_now:peek()) then
+			panel_state.set(id, "mode", m)
+		end
+	end)
+	local function fits(): boolean
+		return width:get() >= CHAT_MIN + PANEL_MIN + 1
+	end
+	-- What shows: nothing for the panel, the conversation; Split too
+	-- narrow for both, the conversation.
+	local function shows(): string
+		if not offered() then
+			return "chat"
+		end
+		local m = M.mode:get()
+		if m == "split" and not fits() then
+			return "chat"
+		end
+		return m
+	end
+	local function panel_most(): number
+		return width:get() - CHAT_MIN - 1
+	end
+	-- The panel's width split: as dragged, else its share; within bounds.
+	local function panel_w(): number
+		local kept = panel_state.get(props.of()).w
+		local want = kept or math.clamp(math.floor(width:get() * SIDE_SHARE), SIDE_LEAST, SIDE_MOST)
+		return math.floor(math.clamp(want, PANEL_MIN, math.max(PANEL_MIN, panel_most())))
 	end
 	-- The conversation's lane, let go as the page goes or moves on.
 	local function slot_of(id: string): string
@@ -209,7 +268,7 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 				hue = hue_now,
 				size = 10,
 				pulse = function(): boolean
-					return working:get() > 0
+					return working:get() > 0 and not paused()
 				end,
 			},
 			ui.column {
@@ -230,10 +289,7 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 						color = "$text.primary",
 						shrink = 1,
 					},
-					ui.show(function(): boolean
-						local o = orchestrator()
-						return o ~= nil and o.paused == true
-					end, ds.Badge { ui.t("orch.page.paused") :: any, size = "sm", icon = "action-pause" }),
+					ui.show(paused, ui.div { id = "orch-paused", shrink = 0, ds.Badge { ui.t("orch.page.paused") :: any, size = "sm", icon = "action-pause", tone = "warning" } }),
 				},
 				ds.FadeText {
 					function(): string
@@ -252,6 +308,9 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 				gap = "$space.1",
 				items = "center",
 				shrink = 0,
+				hidden = function(): boolean
+					return #crew:get() == 0
+				end,
 				ds.Icon { name = "users-group-rounded", size = 14, color = "$text.tertiary" },
 				ui.text {
 					function(): string
@@ -299,43 +358,62 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 					},
 				},
 			},
-			-- Narrow: the conversation or the live state.
+			-- The conversation, both, or the panel alone: at every width,
+			-- once there's something for the panel to show.
 			ui.div {
+				id = "orch-mode",
 				shrink = 0,
 				hidden = function(): boolean
-					return split() or M.view:get() == "flow"
+					return M.view:get() == "flow" or not offered()
 				end,
 				ds.Segmented {
-					value = half,
+					value = M.mode,
+					label = ui.t("orch.page.mode") :: any,
 					options = {
 						{ value = "chat", label = ui.t("orch.page.chat") :: any },
+						{ value = "split", label = ui.t("orch.page.split") :: any },
 						{ value = "live", label = ui.t("orch.page.live") :: any },
 					},
 				},
 			},
-			ds.IconButton {
-				id = "orch-pause",
-				icon = function(): any
-					local o = orchestrator()
-					return if o and o.paused then "action-play" else "action-pause"
-				end,
-				label = function(): string
-					local o = orchestrator()
-					return locale.s(if o and o.paused then "orch.page.resume" else "orch.page.pause")
-				end,
-				size = "sm",
-				tone = "quiet",
-				on_click = function()
+			-- Paused: a word to resume it by; else its pause, a glyph.
+			ui.presence(function(): string
+				return if paused() then "paused" else "running"
+			end, function(kind: string): Node
+				local function toggle()
 					local o = orchestrator()
 					if o then
 						actions.set_paused(o.id, not o.paused)
 					end
-				end,
-			},
+				end
+				if kind == "paused" then
+					return ds.Button {
+						ds.Icon { name = "action-play", size = 14 },
+						ui.t("orch.page.resume") :: any,
+						id = "orch-pause",
+						tone = "secondary",
+						size = "xs",
+						tooltip = locale.s("orch.page.resume_tip"),
+						on_click = toggle,
+					}
+				end
+				return ds.IconButton {
+					id = "orch-pause",
+					icon = "action-pause",
+					label = ui.t("orch.page.pause") :: any,
+					tooltip = locale.s("orch.page.pause_tip"),
+					tooltip_side = "bottom",
+					size = "sm",
+					tone = "quiet",
+					on_click = toggle,
+				}
+			end, { shrink = 0 }),
 			ds.IconButton {
 				id = "orch-settings",
 				icon = "settings",
 				label = ui.t("orch.page.settings") :: any,
+				tooltip = locale.s("orch.page.settings_tip"),
+				tooltip_side = "bottom",
 				size = "sm",
 				tone = "quiet",
 				on_click = function()
@@ -348,7 +426,8 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 		}
 	end
 
-	-- The conversation: its chat in a lane of its own.
+	-- The conversation: its chat in a lane of its own; empty and with
+	-- nothing for the panel yet, one line on what to type first.
 	local function conversation(): Node
 		return ui.presence(function(): string
 			return props.of() or ""
@@ -357,146 +436,105 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 				return ui.div {}
 			end
 			local o = orchestrator()
-			return LaneTab.Tab {
-				tab = { id = slot_of(id), kind = "side_chat", chat = id, title = if o then o.name else "", data = { own = true } },
+			local view = lanes.view(slot_of(id))
+			return ui.column {
+				w_full = true,
+				h_full = true,
+				LaneTab.Tab {
+					tab = { id = slot_of(id), kind = "side_chat", chat = id, title = if o then o.name else "", data = { own = true } },
+				},
+				ui.show(function(): boolean
+					return not offered() and #(view.messages:get() or {}) == 0
+				end, ui.row {
+					id = "orch-first-hint",
+					absolute = true,
+					left = 0,
+					right = 0,
+					top = "40%",
+					justify = "center",
+					pointer_events = "none",
+					px = "$space.6",
+					ui.text {
+						locale.t("orch.page.first_hint"),
+						text_size = "$font.size.md",
+						color = "$text.tertiary",
+						wrap = true,
+						align = "center",
+					},
+				}),
 			}
 		end, { w_full = true, h_full = true })
 	end
 
-	-- The live state: what needs you, its board, its crew.
-	local kept = KeptScroll.use(M.place)
-	local function live(): Node
-		return ui.scroll {
-			id = "orch-live",
-			w_full = true,
-			grow = 1,
-			min_h = 0,
-			fade = { 12, 12 },
-			fade_overflow = true,
-			offset = kept.offset,
-			on_wheel = kept.on_wheel,
-			on_press = kept.on_press,
-			on_key = kept.on_key,
-			ui.column {
-				w_full = true,
-				on_resize = kept.on_resize,
-				gap = "$space.4",
-				px = "$space.4",
-				pt = "$space.2",
-				pb = "$space.6",
-				Section(ui.t("orch.page.needs_you"), function(): number
-					return needs:get()
-				end, NeedsYou.Asks {
-					-- (The Control room's Needs you, only this orchestrator's.)
-					now = function(): any
-						return orchestration.now:get()
-					end,
-					sessions = function(): any
-						return sessions.now:get()
-					end,
-					orchestrator = props.of,
-					name_of = name_of,
-				}, "orch-section-needs"),
-				-- (Needs you with the page; the Board, then the crew, each in a
-				-- frame of its own after: ds/stage.)
-				Section(ui.t("orch.page.board"), nil, stage.Later(1, function(): Node return OrchBoard {
-					id = "orch-page-board",
-					items = function(): { any }
-						return orchestration.now:get().items or {}
-					end,
-					orchestrators = function(): { any }
-						return orchestration.now:get().orchestrators or {}
-					end,
-					filter = props.of,
-					compact = true,
-					-- (Each card's thread and ask read by themselves,
-					-- account/rows: a push wakes the cards it changed.)
-					orchestrator_of = rows.orchestrator,
-					todo_of = function(chat: string): any
-						local c = rows.chat(chat)
-						return c and c.todo
-					end,
-					thread_of = function(chat: string): any
-						return rows.chat(chat)
-					end,
-					ask_of = function(chat: string): any
-						return rows.ask(chat)
-					end,
-					on_move = function(id: string, state: string, order: number)
-						orchestration.move_item(id, state, order)
-					end,
-					-- (Their promises: refused, the board puts the card
-					-- back and says so.)
-					on_pause = orchestration.pause_item,
-					on_resume = orchestration.resume_item,
-					asks = function(): any
-						local now = orchestration.now:get()
-						return now and now.asks
-					end,
-					on_approve = function(id: string)
-						orchestration.approve_item(id)
-					end,
-					on_request_changes = function(id: string, text: string)
-						orchestration.request_changes(id, text)
-					end,
-					on_priority = function(id: string, p: string)
-						orchestration.set_priority(id, p)
-					end,
-					on_open_thread = NeedsYou.open_chat,
-					-- (A card's dump, shown in the Control room's capture.)
-					on_source = function(src: any)
-						orchestration.reveal_dump:set(src.dump_id)
-						route.control()
-					end,
-					on_remove = orchestration.remove_item,
-					on_restore = orchestration.restore_item,
-					on_start = orchestration.start_item,
-					space_name = function(id: string): string?
-						for _, p in sessions.projects:get() or {} do
-							if p.id == id then
-								return p.name
-							end
-						end
-						return nil
-					end,
-					device_name = function(id: string): string?
-						for _, d in sessions.devices:get() or {} do
-							if d.id == id then
-								return d.name
-							end
-						end
-						return nil
-					end,
-					progress_of = Progress.row,
-					on_link = open_link,
-					-- A card waiting on a decision: its options as chips,
-					-- and the whole of it in the overlay (as the Control
-					-- room's: screens/control/needs).
-					on_answer = NeedsYou.on_answer,
-					on_expand_ask = NeedsYou.on_expand,
-				} end), "orch-section-board"),
-				Section(ui.t("orch.page.crew"), function(): number
-					return #crew:get()
-				end, stage.Later(2, function(): Node return OrchCrew {
-					members = crew,
-					hue = hue_now,
-					device_name = function(device: string): string?
-						for _, d in sessions.now:get().devices or {} do
-							if d.id == device then
-								return d.name
-							end
-						end
-						return nil
-					end,
-					on_open = function(chat: string)
-						route.open_session(chat)
-					end,
-					progress = function(chat: string): Node
-						return Progress.strip(chat, { lean = true })
-					end,
-				} end), "orch-section-crew"),
+	-- The seam between the two: a hairline, dragged to size the panel
+	-- (a double click puts it back).
+	local seam_lit = ui.use_state(false)
+	local seam_held = ui.use_state(false)
+	local seam_drag = seam.drag()
+	local function seam_node(): Node
+		local start: any = nil
+		return ui.div {
+			id = "orch-seam",
+			w = 1,
+			h_full = true,
+			shrink = 0,
+			bg = "$border",
+			hidden = function(): boolean
+				return shows() ~= "split"
+			end,
+			ui.div {
+				id = "orch-seam-handle",
+				absolute = true,
+				top = 0,
+				bottom = 0,
+				left = ui.raw(-seam.REACH, "the seam's reach each side of the hairline"),
+				w = ui.raw(2 * seam.REACH + 1, "the seam's reach each side of the hairline"),
+				cursor = "col_resize",
+				pointer_events = "auto",
+				label = ui.t("orch.page.resize") :: any,
+				on_hover = function(inside: boolean)
+					seam_lit:set(inside)
+				end,
+				on_press = function(e: any)
+					if e.clicks == 2 then
+						panel_state.set(props.of(), "w", nil)
+						return
+					end
+					start = { x = e.x, w = panel_w() }
+					seam_held:set(true)
+				end,
+				on_pointer_move = function(e: any)
+					if not start then
+						return
+					end
+					M.resize_to(start.w - (e.x - start.x))
+				end,
+				on_release = function()
+					start = nil
+					seam_held:set(false)
+					seam_drag.release()
+				end,
+				ui.div {
+					absolute = true,
+					top = 0,
+					bottom = 0,
+					left = ui.raw(seam.REACH - 1, "the lit gap at the hairline"),
+					w = 3,
+					rounded = "$radius.full",
+					pointer_events = "none",
+					bg = "$border.strong",
+					opacity = seam.lit(function(): boolean
+						return seam_lit:get() or seam_held:get()
+					end, seam_drag),
+				},
 			},
 		}
+	end
+	-- (A width asked for, kept within its bounds: the drag's, and tests'.)
+	M.resize_to = function(want: number)
+		local lo, hi = PANEL_MIN, panel_most()
+		seam_drag.at(want, lo, hi)
+		panel_state.set(props.of(), "w", math.floor(math.clamp(want, lo, math.max(lo, hi))))
 	end
 
 	local function body(): Node
@@ -508,41 +546,44 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 			ui.column {
 				id = "orch-conversation",
 				grow = 1,
-				min_w = 0,
+				min_w = CHAT_MIN,
 				h_full = true,
 				hidden = function(): boolean
-					return not split() and half:get() ~= "chat"
+					return shows() == "live"
 				end,
 				conversation(),
 			},
-			-- The seam between the two: a hairline.
-			ui.div {
-				w = 1,
-				h_full = true,
-				shrink = 0,
-				bg = "$border",
-				hidden = function(): boolean
-					return not split()
-				end,
-			},
+			seam_node(),
 			ui.column {
 				id = "orch-side",
 				h_full = true,
 				min_w = 0,
 				shrink = 0,
 				grow = function(): number
-					return if split() then 0 else 1
+					return if shows() == "live" then 1 else 0
 				end,
 				w = function(): number | string
-					if not split() then
+					if shows() ~= "split" then
 						return "auto"
 					end
-					return math.clamp(math.floor(width:get() * SIDE_SHARE), SIDE_MIN, SIDE_MAX)
+					return panel_w()
 				end,
 				hidden = function(): boolean
-					return not split() and half:get() ~= "live"
+					return shows() == "chat"
 				end,
-				live(),
+				Panel.Panel {
+					of = props.of,
+					crew = function(): { any }
+						return crew:get()
+					end,
+					needs = function(): number
+						return needs:get()
+					end,
+					name_of = name_of,
+					device_name = device_name,
+					open_link = open_link,
+					place = M.place,
+				},
 			},
 		}
 	end
