@@ -10,13 +10,70 @@
 #                                    run however others fail (--no-fail-fast),
 #                                    the known ones skipped by exact name
 #   scripts/ci/test-zgx.sh ui [zgx]  zgx test ui (the Luau UI tests), with the
-#                                    zgx CLI given or on PATH; fails on any FAIL
-#                                    not listed, and names listed ones that pass
+#                                    zgx CLI given or on PATH, then each of
+#                                    Zeron's own plugins' (plugins-builtin/<id>/
+#                                    tests, `plugin_tests` below); fails on any
+#                                    FAIL not listed, and names listed ones that
+#                                    pass
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 known="$root/scripts/ci/zgx-known-failures.txt"
 
 listed() { sed -n "s/^$1: //p" "$known"; }
+
+# The Luau UI tests of each of Zeron's own plugins that has some
+# (apps/zgx/plugins-builtin/<id>/tests/*.test.luau), run by `zgx test` in a
+# copy of the app made for them: ui/ without its own tests, the plugin's
+# tests in tests/, and the other files of its tests/ (fixtures, worlds)
+# beside app.luau, where `mount()` finds fixtures. The plugin is loaded as
+# the window loads a bundled built-in, trusted with the app modules its
+# manifest names (`app_modules`): its overrides.luau, put in by a zgx.json.
+# A test then reaches the plugin's app-side modules as the app does
+# (`@account/plugins`), with `plugins.on` off until its fixture says.
+plugin_tests() {
+  zgx="$1"
+  for tests in "$root"/apps/zgx/plugins-builtin/*/tests; do
+    ls "$tests"/*.test.luau >/dev/null 2>&1 || continue
+    plugin="$(dirname "$tests")"
+    id="$(basename "$plugin")"
+    stage="$(mktemp -d)"
+    cp -R "$root/apps/zgx/ui/." "$stage/"
+    rm -rf "$stage/tests"
+    mkdir "$stage/tests"
+    cp "$tests"/*.test.luau "$stage/tests/"
+    for file in "$tests"/*.luau; do
+      case "$file" in *.test.luau) continue ;; esac
+      if [ -e "$stage/$(basename "$file")" ]; then
+        echo "FAIL $(basename "$file") is the app's too: name $id's fixture its own ($file)"
+        continue
+      fi
+      cp "$file" "$stage/"
+    done
+    if [ -f "$plugin/overrides.luau" ]; then
+      python3 - "$plugin" "$stage/zgx.json" <<'PY'
+import json, sys
+plugin, out = sys.argv[1], sys.argv[2]
+manifest = json.load(open(f"{plugin}/zeron-plugin.json"))
+modules = manifest.get("app_modules") or []
+json.dump({
+    "expose": {"hooks": {m: "override" for m in modules}},
+    "plugins": {manifest["id"]: {
+        "path": f"{plugin}/overrides.luau",
+        "allow": [f"override-module:{m}" for m in modules],
+    }},
+}, open(out, "w"), indent=2)
+PY
+    fi
+    echo "== plugins-builtin/$id/tests"
+    out="$("$zgx" test "$stage" 2>&1)" || true
+    printf '%s\n' "$out"
+    # None ran (a zgx.json it refused, a crash): a failure of its own.
+    if ! grep -qE '^(ok|FAIL) ' <<<"$out"; then
+      echo "FAIL $id's tests didn't run (plugins-builtin/$id/tests)"
+    fi
+    rm -rf "$stage"
+  done
+}
 
 case "${1:-}" in
   rust)
@@ -39,6 +96,7 @@ case "${1:-}" in
     cd "$root/apps/zgx"
     status=0
     "$zgx" test ui 2>&1 | tee "$log" | grep -vE '^warning: Luau was built with its asserts' || status=$?
+    plugin_tests "$zgx" | tee -a "$log" | grep -vE '^warning: Luau was built with its asserts' || true
     # `FAIL <name> (<file>)`
     failed="$(sed -n 's/^FAIL \(.*\) ([^()]*)$/\1/p' "$log" | sort -u)"
     expected="$(listed luau | sort -u)"
