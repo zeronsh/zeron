@@ -5,6 +5,7 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import sh.zeron.android.core.AppModel
+import sh.zeron.android.core.ExitReasons
 import sh.zeron.android.core.Fonts
 import sh.zeron.android.design.LocalAssets
 
@@ -14,6 +15,8 @@ class ZeronApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // How the last runs ended (an ANR, a crash, memory), into the log before anything else happens.
+        ExitReasons.recordInBackground(this)
         LocalAssets.manager = assets
         Fonts.init(assets)
         model = AppModel(this)
