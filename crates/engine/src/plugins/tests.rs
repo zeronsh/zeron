@@ -1066,6 +1066,32 @@ async fn plugins_zeron_s_own_are_allowed_what_they_ask_turn_off_and_never_go() {
     assert_eq!((on["status"].as_str(), on["allowed"].as_array().map(Vec::len)), (Some("on"), Some(3)));
 }
 
+/// An engine scans as it starts, before any window has said where Zeron's
+/// own plugins are (`SetBuiltinPlugins`), and a headless one never hears it:
+/// a built-in's switch must outlive those scans, not be forgotten as a
+/// plugin that's gone.
+#[tokio::test]
+async fn plugins_a_builtin_s_switch_survives_scans_that_cant_see_it() {
+    let f = fixture();
+    let shipped = f.data.join("app-plugins");
+    std::fs::create_dir_all(&shipped).unwrap();
+    write_plugin(&shipped, "github", serde_json::json!({ "name": "GitHub", "permissions": ["ui.add"] }), None);
+    call(&f.plugins, methods::SET_BUILTIN_PLUGINS, serde_json::json!({ "dir": shipped })).await.unwrap();
+    call(&f.plugins, methods::SET_PLUGIN_OFF, serde_json::json!({ "id": "github", "off": true })).await.unwrap();
+
+    // The engine restarts: a fresh service on the same data scans with no
+    // window yet.
+    let restarted = Plugins::new(&f.data, "dev-1");
+    restarted.rescan().await;
+    assert!(
+        State::load(f.plugins.plugins_dir()).decisions.get("github").is_some_and(|d| d.off),
+        "the off switch is still saved"
+    );
+    // The window attaches: still off.
+    call(&restarted, methods::SET_BUILTIN_PLUGINS, serde_json::json!({ "dir": shipped })).await.unwrap();
+    assert_eq!(item(&restarted, "github").await["status"], "off");
+}
+
 #[tokio::test]
 async fn plugins_zeron_s_own_load_from_the_app_s_folder_with_none_of_yours_beside_it() {
     // (The test above has a folder of yours by the same name, which hid that

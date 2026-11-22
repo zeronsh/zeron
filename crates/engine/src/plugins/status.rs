@@ -69,14 +69,21 @@ impl State {
             .map_err(|_| "Couldn't save your plugin choices".to_string())
     }
 
-    /// Forget own ids and decisions whose plugin is gone (`present`: the
-    /// ids with a folder, yours and Zeron's). A stale own id would make a
-    /// stranger's package of that name yours. Whether anything went.
+    /// Forget own ids whose plugin is gone (`present`: the ids with a
+    /// folder, yours and Zeron's): a stale own id would make a stranger's
+    /// package of that name yours. Whether anything went.
+    ///
+    /// Decisions stay. A scan can't see every plugin a decision is for:
+    /// Zeron's own are seen only once a window says where they are
+    /// (`SetBuiltinPlugins`), which an engine that just started hasn't
+    /// heard yet and a headless one never does, so pruning them forgot a
+    /// built-in's switch at every restart. A decision binds its author's
+    /// key or exact content, so one kept for a gone folder never allows a
+    /// stranger's package under the id; `RemovePlugin` forgets it.
     pub fn prune(&mut self, present: &BTreeSet<String>) -> bool {
-        let (own, decisions) = (self.own.len(), self.decisions.len());
+        let own = self.own.len();
         self.own.retain(|id| present.contains(id));
-        self.decisions.retain(|id, _| present.contains(id));
-        own != self.own.len() || decisions != self.decisions.len()
+        own != self.own.len()
     }
 }
 
@@ -232,7 +239,8 @@ pub fn decide(facts: &Facts<'_>, decision: Option<&Decision>) -> Verdict {
 
     match facts.author {
         // Zeron's own: allowed what it asks as it ships, on unless turned
-        // off (`scan::builtin_entry` settles it; this is its default).
+        // off (`scan::builtin_entry` settles it, with its manifest's
+        // default and the account's switch; this is the plain default).
         Author::Zeron => verdict(
             if decision.is_some_and(|d| d.off) { Status::Off } else { Status::On },
             all(),
@@ -616,7 +624,11 @@ mod tests {
         assert!(state.prune(&present));
         assert!(!state.prune(&present));
         assert_eq!(state.own.iter().collect::<Vec<_>>(), vec!["here"]);
-        assert_eq!(state.decisions.keys().collect::<Vec<_>>(), vec!["here"]);
+        assert_eq!(
+            state.decisions.keys().collect::<Vec<_>>(),
+            vec!["gone", "here"],
+            "decisions stay: a scan may not see a built-in's folder"
+        );
     }
 
     #[test]
