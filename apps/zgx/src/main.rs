@@ -61,12 +61,14 @@ mod orchestration;
 mod orchestration_progress;
 mod scratchpad;
 mod orchestration_timeline;
+mod orchestrators;
 mod plugins;
 mod previews;
 mod projects;
 mod quit_prompt;
 mod relaunch;
 mod session_home;
+mod session_values;
 mod sessions;
 mod settings;
 #[cfg(target_os = "macos")]
@@ -849,15 +851,11 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         cloud::install(cx, &host);
         // The sessions behind the main window (src/sessions.rs).
         sessions::install(cx, &host);
-        // Orchestrators, their crews, board, asks and Brain dump
-        // (src/orchestration.rs).
-        orchestration::install(cx, &host);
-        // What each chat has been doing lately (src/orchestration_timeline.rs).
-        orchestration_timeline::install(cx, &host);
-        // How far each chat's work has got (src/orchestration_progress.rs).
-        orchestration_progress::install(cx, &host);
-        // The Control Room's Scratchpad (src/scratchpad.rs).
-        scratchpad::install(cx, &host);
+        // Orchestrators, their crews, board, asks and Brain dump, what each
+        // chat has been doing lately, how far its work has got, and the
+        // Control Room's Scratchpad: only while the Orchestrators plugin is
+        // on (src/orchestrators.rs).
+        orchestrators::install(cx, &host);
         // What there is to update, on every device (src/updates.rs).
         updates::install(&host);
         // Adding a project, removing one (src/projects.rs).

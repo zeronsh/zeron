@@ -726,6 +726,23 @@ impl Drop for Watch {
     }
 }
 
+/// A connection with no socket, for another module's tests: every frame it
+/// sends, as text, and the end of its bell to keep while it's used.
+#[cfg(all(test, unix))]
+pub(crate) fn test_connection() -> (Rpc, mpsc::Receiver<String>, OwnedFd) {
+    let (heard, bell) = pipe().unwrap();
+    let (tx, rx) = mpsc::channel::<String>();
+    let rpc = Rpc(Rc::new(Inner {
+        tx,
+        bell: Arc::new(bell),
+        frames: Frames(Arc::default()),
+        next_id: Cell::new(1),
+        pending: RefCell::default(),
+        closed: Cell::new(false),
+    }));
+    (rpc, rx, heard)
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

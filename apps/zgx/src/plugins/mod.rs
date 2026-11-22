@@ -57,6 +57,7 @@ pub mod host_bar;
 pub mod locales;
 pub mod network;
 pub mod plugin_menus;
+pub mod switch;
 
 use std::{
     cell::{Cell, RefCell},
@@ -1564,6 +1565,9 @@ impl Bridge {
     fn publish_on(&self) {
         let on = Value::record(self.loaded.borrow().iter().map(|p| (p.name.as_str(), Value::from(true))).collect::<Vec<_>>());
         self.host.shared("plugins.on", Value::Nil).set(on);
+        // (The app's Rust behind those hooks, at the same moment.)
+        let loaded = self.loaded.borrow().clone();
+        switch::set(loaded.iter().map(|p| p.name.as_str()));
     }
 
     fn reload(&self) {

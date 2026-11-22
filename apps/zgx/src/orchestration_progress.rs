@@ -33,22 +33,21 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{Value as Json, json};
 use zeron_proto::orchestration::{Progress, ProgressState};
-use zgx_desktop::WindowContext;
-use zgx_script::{ScriptHost, Shared, Value};
+use zgx_script::{ScriptHost, Value};
 
-use crate::engine::{self, lists};
+use crate::engine::{self, lists, rpc::Rpc};
+use crate::orchestrators::Key;
 
 /// One open window's state.
 struct Window {
     id: u64,
-    shared: Shared,
+    shared: Key,
 }
 
 #[derive(Default)]
 struct Tracker {
     windows: RefCell<Vec<Window>>,
     next_window: Cell<u64>,
-    watching: Cell<bool>,
     rows: RefCell<Rows>,
     /// Whether something the engine sent couldn't be read, said once.
     complained: Cell<bool>,
@@ -59,36 +58,63 @@ thread_local! {
     static TRACKER: Rc<Tracker> = Rc::new(Tracker::default());
 }
 
-pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
+/// `host`'s window, its rows given now while Orchestrators is on
+/// (src/orchestrators.rs opens the stream).
+pub(crate) fn add(host: &ScriptHost) -> u64 {
     let t = TRACKER.with(Rc::clone);
     let window = t.next_window.get();
     t.next_window.set(window + 1);
-    t.windows.borrow_mut().push(Window { id: window, shared: host.shared("orchestration.progress", t.rows.borrow().value()) });
-    let me = Rc::downgrade(&t);
-    cx.on_closed(move || {
-        if let Some(t) = me.upgrade() {
-            t.windows.borrow_mut().retain(|w| w.id != window);
+    let shared = Key::new(host, "orchestration.progress");
+    if crate::orchestrators::on() {
+        shared.set(t.rows.borrow().value());
+    }
+    t.windows.borrow_mut().push(Window { id: window, shared });
+    window
+}
+
+/// `window` closed.
+pub(crate) fn remove(window: u64) {
+    TRACKER.with(|t| t.windows.borrow_mut().retain(|w| w.id != window));
+}
+
+/// Orchestrators on: each window given the rows as they are.
+pub(crate) fn show() {
+    TRACKER.with(|t| t.publish());
+}
+
+/// `WatchProgress` on `rpc` (a connection, Orchestrators on).
+pub(crate) fn open(rpc: &Rpc) {
+    let t = TRACKER.with(Rc::clone);
+    let heard = Rc::downgrade(&t);
+    // (As changes: the whole list once, then the rows that moved; an engine
+    // from before sends the whole list each time.)
+    let watch = lists::listen(rpc, "WatchProgress", move |frame| {
+        if let Some(t) = heard.upgrade() {
+            t.heard(frame.list);
         }
     });
-    if !t.watching.replace(true) {
-        let weak = Rc::downgrade(&t);
-        engine::get().on_connect(move |rpc| {
-            let Some(t) = weak.upgrade() else { return };
-            let heard = Rc::downgrade(&t);
-            // (As changes: the whole list once, then the rows that moved;
-            // an engine from before sends the whole list each time.)
-            let watch = lists::listen(rpc, "WatchProgress", move |frame| {
-                if let Some(t) = heard.upgrade() {
-                    t.heard(frame.list);
-                }
-            });
-            *t.watch.borrow_mut() = Some(watch);
-        });
-    }
+    *t.watch.borrow_mut() = Some(watch);
+}
 
+/// Orchestrators off: the stream closed, its rows let go of, and each
+/// window's nil.
+pub(crate) fn close() {
+    let t = TRACKER.with(Rc::clone);
+    let watch = t.watch.borrow_mut().take();
+    drop(watch);
+    *t.rows.borrow_mut() = Rows::default();
+    let keys: Vec<Key> = t.windows.borrow().iter().map(|w| w.shared.clone()).collect();
+    for key in keys {
+        key.clear();
+    }
+}
+
+/// The window's actions: refused while Orchestrators is off.
+pub(crate) fn actions(host: &ScriptHost) {
     host.async_action("orchestration.progress_check", move |chat| {
         let chat = crate::auth::text(&chat);
         async move {
+            crate::orchestrators::refuse()?;
             crate::plugins::preview::refuse("orchestration.progress_check")?;
             if chat.is_empty() {
                 return Err("invalid".to_string());
@@ -128,7 +154,7 @@ impl Tracker {
     fn publish(&self) {
         let value = self.rows.borrow().value();
         // (Taken out first: setting one may run a script that calls back in.)
-        let targets: Vec<Shared> = self.windows.borrow().iter().map(|w| w.shared.clone()).collect();
+        let targets: Vec<Key> = self.windows.borrow().iter().map(|w| w.shared.clone()).collect();
         for shared in targets {
             shared.set(value.clone());
         }
