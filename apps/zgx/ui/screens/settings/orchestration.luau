@@ -12,10 +12,15 @@ local M = {}
 M.ID = "orchestration"
 M.TITLE = "Orchestration"
 
-search.index(M.ID, ui.t("settings.orchestration.title"), ui.t("settings.orchestration.terms"), {
-	{ key = "auto_archive", title = ui.t("settings.orchestration.auto_archive.label"), section = ui.t("settings.orchestration.crew_section"), terms = ui.t("settings.orchestration.auto_archive.terms") },
-	{ key = "idle_hours", title = ui.t("settings.orchestration.idle_hours.label"), section = ui.t("settings.orchestration.crew_section"), terms = ui.t("settings.orchestration.idle_hours.terms") },
-})
+-- Found by the settings search (indexed as it loads, and again as
+-- Orchestrators comes back on: screens/settings/init).
+function M.index()
+	search.index(M.ID, ui.t("settings.orchestration.title"), ui.t("settings.orchestration.terms"), {
+		{ key = "auto_archive", title = ui.t("settings.orchestration.auto_archive.label"), section = ui.t("settings.orchestration.crew_section"), terms = ui.t("settings.orchestration.auto_archive.terms") },
+		{ key = "idle_hours", title = ui.t("settings.orchestration.idle_hours.label"), section = ui.t("settings.orchestration.crew_section"), terms = ui.t("settings.orchestration.idle_hours.terms") },
+	})
+end
+M.index()
 
 local function on(): boolean
 	return orchestration.auto_archive:get() == true

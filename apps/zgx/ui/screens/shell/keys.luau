@@ -15,6 +15,8 @@
 -- `menu`: the menu bar's menu it's in; `reserved`: a focused terminal
 -- never has it first (Zeron's keep their shortcuts from a page);
 -- `elsewhere`: another screen makes its command (the shell makes the rest).
+-- `plugin`: one of Zeron's built-in plugins' (keys.shown(k): only while it
+-- runs; off, neither its command nor its row in Settings is there).
 
 export type Key = {
 	id: string,
@@ -28,6 +30,8 @@ export type Key = {
 	-- Made by its own screen, not the shell (its title and key kept the
 	-- same there).
 	elsewhere: boolean?,
+	-- A built-in plugin's (its id): only while it's on.
+	plugin: string?,
 }
 
 local M = {}
@@ -49,14 +53,14 @@ M.LIST = {
 	{ id = "panel.new_browser_tab", title = "New Browser Tab", key = "cmd+t", group = "Panels", menu = "File", elsewhere = true },
 	{ id = "panel.focus_address", title = "Open Location", key = "cmd+l", group = "Panels", menu = "View", elsewhere = true },
 	{ id = "panel.reload_page", title = "Reload Page", key = "cmd+shift+r", group = "Panels", menu = "View", elsewhere = true },
-	-- (The Control room's composer, wherever it shows: screens/control/page.
-	-- ⌘K is Search's.)
-	{ id = "control.focus_capture", title = "Focus Capture", key = "cmd+shift+k", group = "Go", menu = "Go", reserved = true },
+	-- (Orchestrators', while it's on: the Control room's composer, wherever
+	-- it shows. ⌘K is Search's.)
+	{ id = "control.focus_capture", title = "Focus Capture", key = "cmd+shift+k", group = "Go", menu = "Go", reserved = true, plugin = "orchestrators" },
 	-- (Its tabs: Overview, Board, Chat.)
-	{ id = "control.tab_board", title = "Control room: Board", key = "cmd+alt+1", group = "Go", menu = "Go", reserved = true },
-	{ id = "control.tab_map", title = "Control room: Map", key = "cmd+alt+2", group = "Go", menu = "Go", reserved = true },
-	{ id = "control.tab_chat", title = "Control room: Chat", key = "cmd+alt+3", group = "Go", menu = "Go", reserved = true },
-	{ id = "control.tab_notes", title = "Control room: Notes", key = "cmd+alt+4", group = "Go", menu = "Go", reserved = true },
+	{ id = "control.tab_board", title = "Control room: Board", key = "cmd+alt+1", group = "Go", menu = "Go", reserved = true, plugin = "orchestrators" },
+	{ id = "control.tab_map", title = "Control room: Map", key = "cmd+alt+2", group = "Go", menu = "Go", reserved = true, plugin = "orchestrators" },
+	{ id = "control.tab_chat", title = "Control room: Chat", key = "cmd+alt+3", group = "Go", menu = "Go", reserved = true, plugin = "orchestrators" },
+	{ id = "control.tab_notes", title = "Control room: Notes", key = "cmd+alt+4", group = "Go", menu = "Go", reserved = true, plugin = "orchestrators" },
 	{ id = "shell.next_session", title = "Next session", key = "ctrl+tab", group = "Go", menu = "Go", reserved = true },
 	{ id = "shell.previous_session", title = "Previous session", key = "ctrl+shift+tab", group = "Go", menu = "Go", reserved = true },
 } :: { Key }
@@ -89,6 +93,16 @@ for _, k in M.LIST do
 end
 function M.get(id: string): Key?
 	return by_id[id]
+end
+
+-- Whether `k` is there now: the app's always, a built-in plugin's while it
+-- runs (`@account/plugins`, tracked; required here, as a test may read the
+-- table with no interface).
+function M.shown(k: Key): boolean
+	if not k.plugin then
+		return true
+	end
+	return (require :: any)("@account/plugins").on(k.plugin)
 end
 
 -- What Settings → Shortcuts has rebound, by id: a combination in place of

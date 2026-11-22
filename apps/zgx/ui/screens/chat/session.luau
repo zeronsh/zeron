@@ -24,6 +24,8 @@ local LinkChips = require("@app/screens/chat/link_chips")
 local LinkMenu = require("@app/screens/chat/link_menu")
 local Find = require("@app/screens/chat/find")
 local boundary = require("@app/screens/shell/boundary")
+-- Which of Zeron's built-in plugins run (Orchestrators' blocks here).
+local plugins = require("@account/plugins")
 
 -- The pictures replies show, read from the open chat's folder on its device.
 local pictures = ReplyImages.for_session(function(): any
@@ -357,6 +359,11 @@ local function Session(id: Id?): Node
 						find = Find.marks(),
 						-- A message asked for (an ask's turn), gone to and lit.
 						focus = focus,
+						-- Orchestrators' blocks, while it's on: what the engine
+						-- said into the chat, crew updates.
+						orchestrators = function(): any
+							return plugins.module("orchestrators")
+						end,
 					},
 					Find.Bar(),
 				},

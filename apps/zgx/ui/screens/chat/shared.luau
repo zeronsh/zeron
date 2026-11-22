@@ -17,7 +17,13 @@ local cloud = require("@account/cloud")
 local locale = require("@ds/locale")
 local toast = require("@ds/toast")
 local ChatLinks = require("@app/screens/chat/chat_links")
-local Ref = require("@ds/orch_ref")
+-- Which of Zeron's built-in plugins run: the Control room's references
+-- are Orchestrators' (its `ref`, ds/orch_ref), only while it's on.
+local plugins = require("@account/plugins")
+local function orch_ref(): any
+	local orch = plugins.module("orchestrators")
+	return if orch then orch.ref else nil
+end
 local route = require("@app/screens/shell/route")
 
 local Draft = require("@ds/draft_text")
@@ -751,6 +757,10 @@ end
 -- composer: ds/orch_ref): a chip named by its token, sent with the dump as
 -- one of its `refs` (never as an attachment). Once each (its kind and id).
 function M.mention_ref(ref: any, key: string?)
+	local Ref = orch_ref()
+	if not Ref then
+		return
+	end
 	local r = Ref.of({ ref = ref })
 	if not r then
 		return
@@ -760,7 +770,8 @@ function M.mention_ref(ref: any, key: string?)
 			return
 		end
 	end
-	M.push_cargo(key, { id = chip_id("ref"), kind = "ref", name = Ref.token(r), ref = table.clone(r) })
+	-- (Its glyph carried with it: the composer's chips draw it.)
+	M.push_cargo(key, { id = chip_id("ref"), kind = "ref", name = Ref.token(r), ref = table.clone(r), icon = Ref.ICON[r.kind or ""] })
 end
 
 -- A chat as it's listed now, for what says who sent a message: its title (its
@@ -822,7 +833,8 @@ end
 -- Control room reference (ds/orch_ref) too. `landed` runs as anything does.
 local function zone_props(map: any, zone: string, key: string?, landed: (() -> ())?, refs: boolean?): { [string]: any }
 	local function ref_in(payload: any): any
-		return if refs then Ref.of(payload) else nil
+		local Ref = if refs then orch_ref() else nil
+		return if Ref then Ref.of(payload) else nil
 	end
 	local function land()
 		map:set({})

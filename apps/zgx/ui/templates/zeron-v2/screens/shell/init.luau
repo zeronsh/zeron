@@ -40,6 +40,8 @@ local MenuAt = require("@ds/menu_at")
 local prefs = require("@app/screens/settings/prefs")
 local fit = require("@app/screens/shell/fit")
 local keys = require("@app/screens/shell/keys")
+-- Which of Zeron's built-in plugins run (Orchestrators' hooks here).
+local plugins = require("@account/plugins")
 local host = require("@app/screens/settings/host")
 -- (The look chosen, applied as it loads.)
 local appearance = require("@app/screens/shell/appearance")
@@ -66,14 +68,37 @@ for _, module in {
 } do
 	boundary.load(module)
 end
--- The Control room's and an orchestrator's pages, loaded once the window
--- has come up and settled, one a frame: loaded on the first click instead,
--- inside the page's build (and the sidebar's view menu's), they cost the
--- open a quarter of a second more.
+-- Zeron's built-in plugins on as the window loads (Orchestrators'): their
+-- app-side modules loaded now, with the shell's, so it's built with them.
+plugins.start()
+
+-- Orchestrators' Control room page (its `control_page`), or nil: off, or
+-- it didn't load.
+local function control_page(): any
+	local orch = plugins.module("orchestrators")
+	if not orch then
+		return nil
+	end
+	local ok, page = pcall(function(): any
+		return orch.control_page
+	end)
+	return if ok then page else nil
+end
+-- The Control room's and an orchestrator's pages, while Orchestrators is
+-- on, loaded once the window has come up and settled, one a frame: loaded
+-- on the first click instead, inside the page's build (and the sidebar's
+-- view menu's), they cost the open a quarter of a second more.
 ui.after(2000, function()
-	boundary.load("@app/screens/control/page")
+	if control_page() == nil then
+		return
+	end
 	ui.after(0, function()
-		boundary.load("@app/screens/orchestrator/page")
+		local orch = plugins.module("orchestrators")
+		if orch then
+			pcall(function(): any
+				return orch.orchestrator_page
+			end)
+		end
 	end)
 end)
 
@@ -308,7 +333,7 @@ return function(): Node
 	-- Search's).
 	runs["control.focus_capture"] = function()
 		if route.current:peek().name == "control" then
-			local control: any = boundary.load("@app/screens/control/page")
+			local control: any = control_page()
 			if control and control.focus_composer then
 				(control.focus_composer :: any)()
 			end
@@ -318,7 +343,7 @@ return function(): Node
 	for _, tab in { "board", "map", "chat", "notes" } do
 		runs[`control.tab_{tab}`] = function()
 			if route.current:peek().name == "control" then
-				local control: any = boundary.load("@app/screens/control/page")
+				local control: any = control_page()
 				if control and control.show_tab then
 					(control.show_tab :: any)(tab)
 				end
@@ -335,8 +360,10 @@ return function(): Node
 	-- Each on its key now (Settings → Shortcuts rebinds it at once). A
 	-- command's key goes to its menu item before any `on_key` hears it, so
 	-- each but ⌘1–9 tells the sidebar's ⌘ hints a key went down itself.
+	-- (A built-in plugin's only while it runs, as this load has it: a toggle
+	-- reloads the window, which declares them again.)
 	for _, k in keys.LIST do
-		local run = runs[k.id]
+		local run = if k.plugin and not plugins.peek(k.plugin) then nil else runs[k.id]
 		if run then
 			local jump = string.match(k.id, "^shell%.session_%d$") ~= nil
 			ui.command {
@@ -495,7 +522,7 @@ return function(): Node
 			-- on the Control room: into its composer, wherever it shows.
 			if e.key == "/" and not (e.editing or e.cmd or e.alt or e.ctrl or e.meta or e["repeat"]) then
 				if route.current:peek().name == "control" then
-					local control: any = boundary.load("@app/screens/control/page")
+					local control: any = control_page()
 					if control and control.focus_composer then
 						return (control.focus_composer :: any)() == true
 					end
@@ -722,9 +749,14 @@ return function(): Node
 			boundary.screen(boundary.named("shell.boundary.screen.new_project"), "@app/screens/shell/add_project", function(AddProject): Node
 				return AddProject()
 			end),
-			-- New orchestrator, and an orchestrator's settings.
-			boundary.screen(boundary.named("shell.boundary.screen.orchestrator"), "@app/screens/orchestrator/dialogs", function(dialogs): Node
-				return dialogs.Dialogs()
+			-- New orchestrator, and an orchestrator's settings (Orchestrators'
+			-- `dialogs`, while it's on).
+			ui.show(function(): boolean
+				return plugins.on("orchestrators")
+			end, function(): Node
+				return boundary.screen(boundary.named("shell.boundary.screen.orchestrator"), "@app/builtin/orchestrators", function(orch): Node
+					return orch.dialogs.Dialogs()
+				end)
 			end),
 		},
 	}

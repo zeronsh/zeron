@@ -55,9 +55,8 @@ local locale = require("@self/locale")
 local SessionRow = require("@self/session_row")
 local People = require("@self/people")
 local EditorMenu = require("@self/editor_menu")
-local OrchHue = require("@self/orch_hue")
 local badge = require("@self/badge")
-local trace = require("@self/orch_perf_trace")
+local trace = require("@self/perf_trace")
 
 export type Session = {
 	id: string,
@@ -153,6 +152,13 @@ export type OrchRow = { id: string, name: string, hue: number?, working: number,
 -- The Control room's row (its count: what needs you) and the Orchestrators
 -- section under the top, each orchestrator a row.
 export type Orchestration = {
+	-- Whether it shows at all (Orchestrators on, as the caller hears it);
+	-- built only once it does. Always, without it.
+	on: (() -> boolean)?,
+	-- An orchestrator's dot (its hue, `size`, `pulse` while its crew
+	-- works): the caller's, as the Orchestrators section and a crew
+	-- thread's mark wear it.
+	Dot: ((props: { hue: any, size: number, pulse: (() -> boolean)? }) -> Node)?,
 	control: { count: () -> number, selected: (() -> boolean)?, on_click: (() -> ())? }?,
 	list: Live<{ OrchRow }>?,
 	selected: ((id: string) -> boolean)?,
@@ -1367,6 +1373,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- A crew thread: its orchestrator's dot after the title (named on
 		-- hover), so who started it shows without a word more.
 		local crew = s.crew
+		local crew_dot = props.orchestration and props.orchestration.Dot
 		title = ui.row {
 			class = "session-title",
 			grow = 1,
@@ -1374,7 +1381,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			items = "center",
 			gap = if crew then "$zeron.space.tight" else nil,
 			title,
-			if crew
+			if crew and crew_dot
 				then ui.div {
 					class = "session-crew",
 					shrink = 0,
@@ -1382,7 +1389,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					role = "img",
 					label = locale.s("ds.sidebar.crew_of", { name = crew.name }),
 					tooltip = locale.s("ds.sidebar.crew_of", { name = crew.name }),
-					OrchHue.Dot { hue = crew.hue, size = 6 },
+					crew_dot { hue = crew.hue, size = 6 },
 				}
 				else nil,
 		}
@@ -2094,6 +2101,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- of all of it; what of it needs you). Folds as a section does. On the
 	-- rail, the Control room's icon and each orchestrator's dot.
 	local function orchestration_rows(o: Orchestration): Node
+		local Dot: (props: any) -> Node = o.Dot or function(_: any): Node
+			return ui.div {}
+		end
 		local list: any = o.list
 		if type(list) == "function" then
 			list = ui.computed(list)
@@ -2175,7 +2185,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				end,
 				class = "orchestrator-row",
 				provide = { orchestrator = now:peek().id },
-				lead = OrchHue.Dot {
+				lead = Dot {
 					hue = function(): number?
 						return cur().hue
 					end,
@@ -2385,7 +2395,14 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				end,
 			})
 			else nil,
-		if props.orchestration then orchestration_rows(props.orchestration) else nil,
+		-- (Built once it shows: off, nothing of it made.)
+		if props.orchestration
+			then (if props.orchestration.on
+				then ui.show(props.orchestration.on, function(): Node
+					return orchestration_rows(props.orchestration :: Orchestration)
+				end)
+				else orchestration_rows(props.orchestration))
+			else nil,
 	}
 
 	-- The middle: pinned, your sections, then the groups, as one virtualized
@@ -4913,6 +4930,14 @@ fn layer(input:LayerInput)->vec4<f32> {
 	if (details :: any).orchestrator_chats then
 		table.insert(SHOW, { key = "orchestrator_chats", label = "ds.sidebar.view.orchestrator_chats", icon = "users-group-rounded" })
 	end
+	-- (What a Show row needs to be listed: the crew threads' needs
+	-- Orchestrators on.)
+	local SHOWN: { [string]: () -> boolean } = {
+		orchestrator_chats = function(): boolean
+			local o = props.orchestration
+			return o == nil or o.on == nil or o.on()
+		end,
+	}
 	-- Opens it. (A press anywhere outside it closes it, this one too, as
 	-- zgx closes any popover: toggling here would open it again.)
 	local view_trigger = IconButton {
@@ -5185,6 +5210,9 @@ fn layer(input:LayerInput)->vec4<f32> {
 			-- groups to fold or empty projects to list.)
 			local ACTIVITY_OWNS: { [string]: boolean } = { keep_active = true, empty_projects = true, archived = true }
 			for _, d in SHOW do
+				if SHOWN[d.key] and not SHOWN[d.key]() then
+					continue
+				end
 				local st = (details :: any)[d.key] :: State<boolean>
 				local owned = act and ACTIVITY_OWNS[d.key] == true
 				table.insert(

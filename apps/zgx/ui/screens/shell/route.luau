@@ -46,9 +46,12 @@
 --                           settings shows: `project` and `session` follow it
 --   route.control()         to the Control room (`control`)
 --   route.orchestrator(id)  to an orchestrator's page (`orchestrator`, its id)
+--                           (these two, and their routes, only while
+--                           Orchestrators is on: off, they're home)
 --   route.find_chat(id)     a chat wherever it's listed: top-level, archived,
---                           or under another (a crew thread opens as a chat
---                           of its own); nil for none
+--                           or, while Orchestrators is on, under another (a
+--                           crew thread opens as a chat of its own); nil
+--                           for none
 --   route.own_page(name)    whether a route is a page of its own, with no chat
 --                           under it (a plugin's page, the Control room, an
 --                           orchestrator's)
@@ -64,6 +67,7 @@
 
 local sessions = require("@account/sessions")
 local look = require("@app/screens/shell/project_look")
+local plugins = require("@account/plugins")
 
 local M = {}
 
@@ -306,6 +310,10 @@ local function chat_of(id: string?): sessions.Chat?
 	-- A chat under another, opened as a chat of its own: an orchestrator's
 	-- crew thread (from the Control room, a crew card, a crew update), a
 	-- side chat. It works where its parent does unless it says otherwise.
+	-- (Orchestrators' alone: off, a chat under another isn't one to open.)
+	if not plugins.on("orchestrators") then
+		return nil
+	end
 	for parent_id, kids in now.children or {} do
 		for _, k in kids do
 			if k.id == id then
@@ -349,9 +357,9 @@ local where = steady(function(): Current
 		return { name = "settings", page = r.params.page }
 	elseif r.name == "plugin" then
 		return { name = "plugin", plugin = r.params.plugin, page = r.params.page }
-	elseif r.name == "control" then
+	elseif r.name == "control" and plugins.on("orchestrators") then
 		return { name = "control" }
-	elseif r.name == "orchestrator" then
+	elseif r.name == "orchestrator" and plugins.on("orchestrators") then
 		return { name = "orchestrator", orchestrator = r.params.id }
 	end
 	local p = chosen:get()
@@ -795,15 +803,21 @@ function M.own_page(name: string?): boolean
 	return name ~= nil and OWN_PAGES[name] == true
 end
 
--- To the Control room.
+-- To the Control room (Orchestrators on).
 function M.control()
+	if not plugins.on("orchestrators") then
+		return
+	end
 	if at().name ~= "control" then
 		go("control")
 	end
 end
 
--- To an orchestrator's page.
+-- To an orchestrator's page (Orchestrators on).
 function M.orchestrator(id: string)
+	if not plugins.on("orchestrators") then
+		return
+	end
 	local r = at()
 	if r.name == "orchestrator" and r.params.id == id then
 		return

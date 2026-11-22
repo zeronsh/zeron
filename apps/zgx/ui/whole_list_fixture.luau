@@ -10,7 +10,7 @@
 --   wl_add / wl_remove one chat comes / goes
 --   wl_rename          one chat's title changes
 --   wl_tab_<tab>       the page on one tab (board, map, chat, notes)
---   wl_read            the run counts (ds/orch_perf_trace) into the state
+--   wl_read            the run counts (ds/orch_perf_trace, ds/perf_trace) into the state
 --                      `wl_counts`; wl_reset sets them to nothing
 
 local root = require("./control_fixture")
@@ -172,10 +172,17 @@ end
 
 local counts = ui.state("wl_counts", {} :: any)
 ui.command { id = "wl_read", title = "Whole list: read the run counts", run = function()
-	counts:set(table.clone(require("@ds/orch_perf_trace").counts))
+	-- (The Control room's, ds/orch_perf_trace, and the app's: the sidebar's
+	-- rows, ds/perf_trace.)
+	local all = table.clone(require("@ds/orch_perf_trace").counts)
+	for k, n in require("@ds/perf_trace").counts do
+		all[k] = (all[k] or 0) + n
+	end
+	counts:set(all)
 end }
 ui.command { id = "wl_reset", title = "Whole list: reset the run counts", run = function()
 	require("@ds/orch_perf_trace").reset()
+	require("@ds/perf_trace").reset()
 end }
 
 return root

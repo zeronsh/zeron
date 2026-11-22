@@ -29,7 +29,6 @@
 -- `Strip { items = cargo, on_remove = …, on_retry = …, on_open = … }`.
 
 local Icon = require("@self/icon")
-local Ref = require("@self/orch_ref")
 local HoverCard = require("@self/hover_card")
 local Mark = require("@self/mark")
 local FileIcon = require("@self/file_icons")
@@ -488,8 +487,9 @@ local function row_chip(item: Item, row: State<Item>, props: Props): Node
 		-- Another chat mentioned: its agent's mark, as the sidebar's row.
 		glyph = if item.mark then Mark { name = item.mark, size = glyph_size - 2, bare = true } else Icon { name = "side-chat", size = glyph_size - 2 }
 	elseif item.kind == "ref" then
-		-- Something in the Control room referenced: its kind's glyph.
-		glyph = Icon { name = Ref.ICON[(item.ref or {}).kind or ""] or "tag", size = glyph_size - 2 }
+		-- Something in the Control room referenced: its kind's glyph, as
+		-- the chip carries it (screens/chat/shared `mention_ref`).
+		glyph = Icon { name = (item :: any).icon or "tag", size = glyph_size - 2 }
 	else
 		glyph = Icon { name = "wrap-text", size = glyph_size - 2 }
 	end
