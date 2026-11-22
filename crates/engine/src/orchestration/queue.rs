@@ -1,15 +1,15 @@
-//! Inbox and Next, and starting a card.
+//! Planned cards, and starting one.
 //!
-//! - **Inbox** holds what was captured and isn't started; **Next** what is
-//!   queued to start after something else. Neither has a thread.
-//! - **Starting** a card (`startItem`, or the person moving it to Now) gives
-//!   it a thread: in its project (else its orchestrator's crew policy, else
-//!   the best project), its title and detail as the first prompt. The card
-//!   goes to Now with the thread on it, and the thread records the card as
-//!   what it was started for.
-//! - An orchestrator whose crew is full (`maxRunning`) keeps its new work in
-//!   Next, saying why; when a slot frees, the engine that hosts the
-//!   orchestrator starts its oldest most urgent Next card.
+//! - A card with no thread waits in Planned: **held** (kept for later, never
+//!   started on its own) or not (it starts when its turn comes).
+//! - **Starting** a card (`startItem`) gives it a thread: in its project
+//!   (else its orchestrator's crew policy, else the best project), its
+//!   title and detail as the first prompt. The thread is on the card, the
+//!   thread records the card as what it was started for, and the card is
+//!   Running once the work is on its way.
+//! - An orchestrator whose crew is full (`maxRunning`) keeps its new work
+//!   planned, saying why; when a slot frees, the engine that hosts the
+//!   orchestrator starts its oldest most urgent waiting card.
 
 use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex, PoisonError};
@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use serde_json::{Value, json};
-use zeron_proto::orchestration::{CommKind, Orchestrator, OrchestratorKind, WorkItem, WorkItemPatch, WorkState};
+use zeron_proto::orchestration::{BoardCard, CommKind, Orchestrator, OrchestratorKind, WorkItem, WorkItemPatch};
 use zeron_proto::{ChildKind, SessionStatus};
 use zeron_rpc::RpcError;
 
@@ -66,18 +66,25 @@ pub(crate) fn first_prompt(card: &WorkItem) -> String {
     }
 }
 
-/// Next cards waiting for a crew slot (they say why they wait), in the
-/// order they start: most urgent, then oldest. A card put in Next by hand
-/// waits for the person.
-pub(crate) fn next_up<'a>(items: &'a [WorkItem], orchestrator: &str) -> Vec<&'a WorkItem> {
+/// Planned cards waiting for a crew slot (they say why they wait), in the
+/// order they start: most urgent, then oldest. A card planned by hand, held
+/// for later, paused or closed waits for the person. `cards`: the board's
+/// rows.
+pub(crate) fn next_up<'a>(items: &'a [WorkItem], cards: &[BoardCard], orchestrator: &str) -> Vec<&'a WorkItem> {
+    let waits = |i: &WorkItem| match cards.iter().find(|c| c.id == i.id) {
+        Some(row) => !row.held && row.closed.is_none(),
+        // (From before places: its old column.)
+        None => i.state == zeron_proto::orchestration::WorkState::Planned,
+    };
     let mut queued: Vec<&WorkItem> = items
         .iter()
         .filter(|i| {
             i.orchestrator_id.as_deref() == Some(orchestrator)
-                && i.state == WorkState::Planned
                 && i.waiting.is_some()
                 && !i.removed
+                && !i.paused()
                 && i.threads.is_empty()
+                && waits(i)
         })
         .collect();
     queued.sort_by(|a, b| {
@@ -152,19 +159,18 @@ impl EngineRpc {
             .item(id)
             .filter(|i| !i.removed)
             .ok_or_else(|| failed(format!("No board item {id}")))?;
-        if matches!(card.state, WorkState::Done | WorkState::Dropped) {
+        let closed = match self.board_card(id) {
+            Some(row) => row.closed.is_some(),
+            None => matches!(card.state, zeron_proto::orchestration::WorkState::Done | zeron_proto::orchestration::WorkState::Dropped),
+        };
+        if closed {
             return Err(failed("That card is done"));
         }
         // Started already: the thread it has.
         if let Some(thread) = card.threads.first().cloned() {
-            if matches!(card.state, WorkState::Inbox | WorkState::Planned) {
-                orch.patch_item(WorkItemPatch {
-                    id: Some(card.id.clone()),
-                    state: Some(WorkState::Active),
-                    waiting: Some(None),
-                    ..Default::default()
-                })
-                .map_err(RpcError::Failed)?;
+            if card.waiting.is_some() {
+                orch.patch_item(WorkItemPatch { id: Some(card.id.clone()), waiting: Some(None), ..Default::default() })
+                    .map_err(RpcError::Failed)?;
             }
             return Ok(json!({ "id": card.id, "threadId": thread }));
         }
@@ -177,13 +183,15 @@ impl EngineRpc {
             && !force
             && let Some(waiting) = self.crew_full(o)
         {
+            // (Waiting for a slot isn't held for later.)
             orch.patch_item(WorkItemPatch {
                 id: Some(card.id.clone()),
-                state: Some(WorkState::Planned),
                 waiting: Some(Some(waiting.clone())),
+                held: Some(false),
                 ..Default::default()
             })
             .map_err(RpcError::Failed)?;
+            self.with_card(&card.id, Utc::now(), |row, _| row.held = false);
             return Ok(json!({ "id": card.id, "queued": true, "waiting": waiting }));
         }
         let prompt = first_prompt(&card);
@@ -228,16 +236,22 @@ impl EngineRpc {
                 },
             );
         }
-        let mut threads = card.threads.clone();
-        threads.push(chat.clone());
-        orch.patch_item(WorkItemPatch {
-            id: Some(card.id.clone()),
-            state: Some(WorkState::Active),
-            threads: Some(threads),
-            waiting: Some(None),
-            ..Default::default()
-        })
-        .map_err(RpcError::Failed)?;
+        // Its thread on it, in one write with what that means: started (no
+        // longer held or waiting), work on its way, and the column an older
+        // reader shows for that (its place follows, worked out by the
+        // caller).
+        let now = Utc::now();
+        self.with_card(&card.id, now, |row, item| {
+            if !item.threads.contains(&chat) {
+                item.threads.push(chat.clone());
+                item.threads_at = Some(now);
+            }
+            item.waiting = None;
+            item.state = zeron_proto::orchestration::WorkState::Active;
+            row.held = false;
+            row.work_at = Some(now);
+        });
+        // Its first prompt.
         deliver(self, &chat, &prompt, owner.as_ref().map(|o| o.id.as_str()), When::Now, None)?;
         orch.comms().say(
             CommKind::Spawn,
@@ -287,11 +301,13 @@ impl EngineRpc {
             return Vec::new();
         };
         let free = (max as usize).saturating_sub(self.crew_running(orchestrator));
-        let items = self.orchestration().state().items;
+        let state = self.orchestration().state();
         let mut started = Vec::new();
-        for card in next_up(&items, orchestrator).into_iter().take(free) {
+        for card in next_up(&state.items, &state.cards, orchestrator).into_iter().take(free) {
             match self.start_item(&card.id, false) {
                 Ok(reply) => {
+                    // (Started by the engine: its card is worked out here.)
+                    self.derive_cards(std::slice::from_ref(&card.id), zeron_proto::orchestration::Mover::Engine, Utc::now());
                     if let Some(thread) = reply["threadId"].as_str() {
                         started.push(thread.to_owned());
                     } else {
@@ -343,7 +359,7 @@ pub(crate) fn start_due(orchestration: &Orchestration, rpc: &EngineRpc) -> Vec<S
         state
             .orchestrators
             .iter()
-            .filter(|o| o.crew.max_running.is_some() && !next_up(&state.items, &o.id).is_empty())
+            .filter(|o| o.crew.max_running.is_some() && !next_up(&state.items, &state.cards, &o.id).is_empty())
             .map(|o| o.id.clone())
             .collect()
     });
@@ -361,7 +377,7 @@ pub(crate) fn start_due(orchestration: &Orchestration, rpc: &EngineRpc) -> Vec<S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeron_proto::orchestration::Priority;
+    use zeron_proto::orchestration::{Priority, WorkState};
 
     fn card(id: &str, priority: Priority, created: i64, state: WorkState) -> WorkItem {
         serde_json::from_value(json!({
@@ -386,8 +402,23 @@ mod tests {
             i.waiting = Some("full".into());
         }
         items.push(card("by-hand", Priority::Urgent, 1, WorkState::Planned));
-        let order: Vec<&str> = next_up(&items, "o").iter().map(|i| i.id.as_str()).collect();
+        // (No rows: an older engine's cards, by their old column.)
+        let order: Vec<&str> = next_up(&items, &[], "o").iter().map(|i| i.id.as_str()).collect();
         assert_eq!(order, vec!["urgent", "early-normal", "late-normal", "early-low"]);
+        // With rows: held for later, or closed, waits for the person.
+        let now = chrono::Utc::now();
+        let mut held = BoardCard::new("urgent", now);
+        held.held = true;
+        let mut closed = BoardCard::new("early-low", now);
+        closed.closed = Some(zeron_proto::orchestration::Closed {
+            at: now,
+            by: zeron_proto::orchestration::Mover::You,
+            how: zeron_proto::orchestration::CloseHow::Marked,
+            note: None,
+        });
+        let rows = vec![held, closed, BoardCard::new("early-normal", now), BoardCard::new("late-normal", now)];
+        let order: Vec<&str> = next_up(&items, &rows, "o").iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(order, vec!["early-normal", "late-normal"]);
     }
 
     #[test]

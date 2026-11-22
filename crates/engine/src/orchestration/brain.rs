@@ -198,8 +198,8 @@ impl EngineRpc {
         // that was in Review as they wrote it.
         for r in refs.iter_mut().filter(|r| r.kind == zeron_proto::orchestration::RefKind::Card) {
             r.context.remove("state");
-            if let Some(card) = self.orchestration().item(&r.id) {
-                r.context.insert("state".into(), if card.state == WorkState::Review { "review" } else { "other" }.into());
+            if self.orchestration().item(&r.id).is_some() {
+                r.context.insert("state".into(), if self.card_in_review(&r.id) { "review" } else { "other" }.into());
             }
         }
         let text = match () {
@@ -333,7 +333,7 @@ impl EngineRpc {
                 match (was_review && !judged, sentence) {
                     (true, Some(sentence)) => orch
                         .item(id)
-                        .filter(|c| c.state == WorkState::Review)
+                        .filter(|c| self.card_in_review(&c.id))
                         .map(|c| (c.id, reads_as_approval(&sentence), sentence)),
                     _ => None,
                 }
@@ -453,7 +453,7 @@ impl EngineRpc {
                 _ if verdict.is_some() => {
                     let (card_id, approve, sentence) = verdict.clone().expect("checked");
                     if approve {
-                        self.approve_item(&card_id, Utc::now())?;
+                        self.accept_item(&card_id, Utc::now())?;
                     } else {
                         self.request_changes(&card_id, &sentence)?;
                     }
@@ -832,7 +832,8 @@ impl EngineRpc {
                         .patch_item(WorkItemPatch {
                             title: Some(super::board_cards::route_card_title(route, &message)),
                             detail: Some(message.clone()),
-                            state: Some(card.unwrap_or(WorkState::Inbox)),
+                            // Held for later unless it's queued real work.
+                            held: Some(card != Some(WorkState::Planned)),
                             priority: Some(super::board_cards::priority_of(&format!("{} {message}", route.excerpt))),
                             source: Some(RouteRef {
                                 dump_id: dump.id.clone(),

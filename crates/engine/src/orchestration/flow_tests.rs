@@ -257,10 +257,12 @@ async fn a_flows_cards_keep_the_boards_rules() {
     for c in state.items.iter().filter(|c| c.flow.is_some() && c.state == WorkState::Blocked) {
         assert!(open_ask_on(&core, &c.id).is_some(), "{} is Blocked with no ask", c.title);
     }
+    // Worked out again, the gate's card stays in Needs you.
     let rpc = core.rpc_service();
-    let changes = rpc.plan_board_checks(chrono::Utc::now(), true);
     let gate = card(&core, &o, "4").id;
-    assert!(changes.iter().all(|c| c.item != gate), "the board check moved the gate's card");
+    let moved = rpc.derive_all(std::slice::from_ref(&gate), chrono::Utc::now());
+    assert!(moved.is_empty(), "the gate's card moved: {moved:?}");
+    assert_eq!(rpc.board_card(&gate).unwrap().place, zeron_proto::orchestration::Place::NeedsYou);
 }
 
 #[tokio::test]
@@ -336,10 +338,15 @@ async fn an_orchestrator_doesnt_move_or_start_its_flows_cards() {
     op(&core, Caller::Local, json!({"op":"startFlow","orchestratorId":o,"task":"T"})).await.unwrap();
     let worker = card(&core, &o, "2");
     report(&core, &worker.threads[0], None, "built").await;
-    // Done by the run: the orchestrator can't put it in Review.
-    let refused = op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":worker.id,"state":"review"}})).await.unwrap_err();
-    assert!(refused.contains("flow's run"), "{refused}");
+    // Done by the run: an orchestrator's `state` moves nothing, and it
+    // can't close a step's card or change its threads.
+    op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":worker.id,"state":"review"}})).await.unwrap();
     assert_eq!(card(&core, &o, "2").state, WorkState::Done);
+    let refused = op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":worker.id,"threads":[]}})).await.unwrap_err();
+    assert!(refused.contains("flow's run"), "{refused}");
+    let gate_card = card(&core, &o, "4");
+    let refused = op(&core, agent(&o), json!({"op":"closeItem","id":gate_card.id,"reason":"skip it"})).await.unwrap_err();
+    assert!(refused.contains("flow's run"), "{refused}");
     // Its outcome it may add to.
     op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":worker.id,"outcome":"Checked the build"}})).await.unwrap();
     // Nor start the gate's card itself.

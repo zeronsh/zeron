@@ -249,11 +249,18 @@ impl EngineRpc {
                 let target = params["chatId"].as_str().unwrap_or_default().to_owned();
                 let text = params["text"].as_str().unwrap_or_default();
                 params["text"] = json!(attributed(&target, text));
+                // Work on its way to a card's thread.
+                if calling.as_ref().is_some_and(|c| c.id != target) {
+                    self.work_sent(&target, chrono::Utc::now());
+                }
                 Ok(params)
             }
             _ => {
                 let target_id = params["chatId"].as_str().unwrap_or_default().to_owned();
                 let target = chats.iter().find(|c| c.id == target_id);
+                // A run or a steer from another chat: work on its way to a
+                // card's thread.
+                let mut sent = false;
                 let command = &mut params["command"];
                 match command["kind"].as_str().unwrap_or_default() {
                     "run" => {
@@ -265,6 +272,7 @@ impl EngineRpc {
                             .and_then(|c| c.ceiling)
                             .unwrap_or((SandboxLevel::DangerFullAccess, AccessMode::FullAccess));
                         run_as_chat_is_set(request, target, ceiling);
+                        sent = true;
                     }
                     // Only Zeron files a report (the `report` op).
                     "crewReport" => {
@@ -273,6 +281,7 @@ impl EngineRpc {
                     "steer" => {
                         let prompt = command["prompt"].as_str().unwrap_or_default();
                         command["prompt"] = json!(attributed(&target_id, prompt));
+                        sent = true;
                     }
                     "respondInput" => {
                         let approves = command["answers"].as_array().into_iter().flatten().any(|answer| {
@@ -292,6 +301,9 @@ impl EngineRpc {
                         }
                     }
                     _ => {}
+                }
+                if sent && calling.as_ref().is_some_and(|c| c.id != target_id) {
+                    self.work_sent(&target_id, chrono::Utc::now());
                 }
                 Ok(params)
             }

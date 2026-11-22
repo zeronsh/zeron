@@ -34,8 +34,10 @@ pub(crate) mod one_shots;
 pub(crate) mod queue;
 pub(crate) mod progress;
 pub mod report;
+pub(crate) mod board;
 pub(crate) mod board_cards;
 pub(crate) mod board_checks;
+pub(crate) mod derive;
 pub(crate) mod placement;
 pub(crate) mod scope;
 pub(crate) mod limits;
@@ -174,8 +176,8 @@ struct Inner {
     /// `createOrchestrator`'s request ids and what each made: a request
     /// sent twice (a double submit, a retry) gets the first one's id back.
     created: Mutex<CreatedBy>,
-    /// Runs the board check a moment after a change (board_checks.rs).
-    board_poke: board_checks::Poke,
+    /// The cards to work out a moment after a change (board.rs).
+    board: board::Board,
     /// This device's session rows as the engine found them on start (what
     /// was at work when it stopped), until the start-up pass takes them.
     before_stop: Mutex<Option<Vec<zeron_proto::Session>>>,
@@ -248,7 +250,7 @@ impl Orchestration {
                 wake_started: std::sync::atomic::AtomicBool::new(false),
                 progress: progress::ProgressBook::default(),
                 created: Mutex::new(CreatedBy::default()),
-                board_poke: board_checks::Poke::default(),
+                board: board::Board::default(),
                 before_stop: Mutex::new(None),
                 resumed: Mutex::new(Vec::new()),
             }),
@@ -286,9 +288,9 @@ impl Orchestration {
         list.iter().map(|(c, _)| c.clone()).collect()
     }
 
-    /// The board check, run a moment from now.
-    pub(crate) fn board_poke(&self) -> board_checks::Poke {
-        self.inner.board_poke.clone()
+    /// The board's touched cards and timers (board.rs).
+    pub(crate) fn board(&self) -> &board::Board {
+        &self.inner.board
     }
 
     /// Everything, read now.
@@ -436,7 +438,7 @@ impl Orchestration {
             watchers::start(self.clone());
             progress::start(self.clone());
             queue::start(self.clone());
-            board_checks::start(self.clone());
+            board::start(self.clone());
             limits::start(self.clone());
             start_stats(self.clone());
         }
@@ -566,11 +568,11 @@ pub(crate) fn apply_item_patch(
     if let Some(detail) = patch.detail {
         item.detail = detail;
     }
-    if let Some(state) = patch.state {
-        if state != item.state || created {
-            item.done_at = (state == WorkState::Done).then_some(now);
-        }
-        item.state = state;
+    // (Its column is worked out, never set: `patch.state` is read by the
+    // op, as what the person did, and ignored from an agent. A new card
+    // shows as planned to a reader from before places until it is.)
+    if created {
+        item.state = if patch.held == Some(true) { WorkState::Inbox } else { WorkState::Planned };
     }
     if let Some(priority) = patch.priority {
         item.priority = priority;
@@ -608,15 +610,41 @@ pub(crate) fn apply_item_patch(
     if let Some(device) = patch.device_id {
         item.device_id = device.filter(|d| !d.trim().is_empty());
     }
-    // A card that leaves Next waits on nothing.
-    match patch.waiting {
-        Some(waiting) => item.waiting = waiting.map(|w| excerpt(&w, 140)).filter(|w| !w.is_empty()),
-        None if item.state != WorkState::Planned => item.waiting = None,
-        None => {}
+    if let Some(waiting) = patch.waiting {
+        item.waiting = waiting.map(|w| excerpt(&w, 140)).filter(|w| !w.is_empty());
     }
     item.updated_at = now;
     let id = item.id.clone();
     doc.upsert_work_item(&item);
+    // What the engine keeps of it: its finish line, held for later or not.
+    // A new card's row is made with it; a card from before places gets its
+    // row when it's first worked out.
+    if created || patch.finish.is_some() || patch.held.is_some() {
+        let mut row = match doc.board_card(&id) {
+            Some(row) => Some(row),
+            None if created => {
+                let mut row = zeron_proto::orchestration::BoardCard::new(&id, now);
+                row.reason = "Planned".into();
+                Some(row)
+            }
+            None => None,
+        };
+        if let Some(row) = row.as_mut() {
+            if let Some(finish) = patch.finish {
+                row.finish = finish;
+            }
+            if let Some(held) = patch.held {
+                row.held = held;
+                row.status = if held {
+                    zeron_proto::orchestration::CardStatus::Held
+                } else {
+                    zeron_proto::orchestration::CardStatus::Next
+                };
+            }
+            row.updated_at = now;
+            doc.upsert_board_card(row);
+        }
+    }
     Ok(id)
 }
 

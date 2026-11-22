@@ -11,8 +11,8 @@
 use chrono::Utc;
 use serde_json::{Value, json};
 use zeron_proto::orchestration::{
-    AnswerVia, Ask, AskOrigin, AskState, CommKind, CrewMember, CrewPolicy, OrchestrateOp, Orchestrator, OrchestratorKind,
-    WorkItemPatch, seed_hue,
+    AnswerVia, Ask, AskOrigin, AskState, CheckWhy, Checking, CommKind, CrewMember, CrewPolicy, Mover, OrchestrateOp,
+    Orchestrator, OrchestratorKind, WorkItemPatch, WorkState, seed_hue,
 };
 use zeron_proto::{ChatConfig, ChildKind, SandboxLevel, SessionStatus, agent_messages};
 use zeron_rpc::{Caller, RpcError};
@@ -265,10 +265,14 @@ impl EngineRpc {
                 });
                 Ok(serde_json::to_value(settings).unwrap_or(Value::Null))
             }
-            OrchestrateOp::ApproveItem { id } => {
-                self.approve_item(&id, now)?;
-                Ok(json!({ "id": id }))
+            OrchestrateOp::ApproveItem { id } => self.accept_item(&id, now),
+            OrchestrateOp::CloseItem { id, reason, dropped } => {
+                let by = if *who == Who::Person { Mover::You } else { Mover::Agent };
+                self.close_item(&id, by, reason, dropped, now)
             }
+            OrchestrateOp::ReopenItem { id } => self.reopen_item(&id, now),
+            OrchestrateOp::HoldItem { id, held } => self.hold_item(&id, held, now),
+            OrchestrateOp::SeenItem { id } => self.seen_item(&id, now),
             OrchestrateOp::RequestChanges { id, text } => {
                 let text = text.trim().to_owned();
                 if text.is_empty() {
@@ -283,6 +287,7 @@ impl EngineRpc {
             }
             OrchestrateOp::AddToBoard { chat_id } => {
                 let id = self.add_to_board(&chat_id)?;
+                self.derive_cards(std::slice::from_ref(&id), Mover::You, now);
                 Ok(json!({ "id": id }))
             }
             OrchestrateOp::ReleaseFromCrew { chat_id } => {
@@ -314,50 +319,33 @@ impl EngineRpc {
                     item.orchestrator_id = Some(Some(id.clone()));
                 }
                 let current = item.id.as_deref().and_then(|id| orch.item(id));
-                // The person's own hold: Blocked is Paused, and a paused card
-                // moved out is resumed.
-                if *who == Who::Person
-                    && let Some(card) = current.as_ref()
-                {
-                    match item.state {
-                        Some(zeron_proto::orchestration::WorkState::Blocked) if card.state != zeron_proto::orchestration::WorkState::Blocked => {
-                            item.state = None;
-                            let id = card.id.clone();
-                            orch.patch_item(item).map_err(RpcError::Failed)?;
-                            return self.pause_item(&id, now);
-                        }
-                        Some(to) if card.paused() && to != zeron_proto::orchestration::WorkState::Blocked => {
-                            item.state = None;
-                            let id = card.id.clone();
-                            orch.patch_item(item).map_err(RpcError::Failed)?;
-                            return self.resume_item(&id, Some(to), now).await;
-                        }
-                        _ => {}
-                    }
-                }
-                // Into Now from Inbox or Next (or made there).
-                let was = current.as_ref().map(|i| i.state);
-                let to_now = item.state == Some(zeron_proto::orchestration::WorkState::Active)
-                    && was.is_none_or(|s| {
-                        matches!(s, zeron_proto::orchestration::WorkState::Inbox | zeron_proto::orchestration::WorkState::Planned)
-                    });
-                let by_hand = item.state.is_some();
+                let created = current.is_none();
+                // Its column is worked out, never set. An agent's `state` is
+                // accepted and ignored; the person's (an older app's drag)
+                // is what they did, below.
+                let wanted = item.state.take().filter(|_| *who == Who::Person);
+                let by = if *who == Who::Person { Mover::You } else { Mover::Agent };
+                let (finish, held) = (item.finish.clone(), item.held);
                 let id = orch.patch_item(item).map_err(RpcError::Failed)?;
-                // Its column set by hand: what its route says no longer moves
-                // it, until that route's state changes (board_cards::sync_card);
-                // the board check's note on it is spent.
-                if by_hand {
-                    self.mark_moved(&id, now);
-                    orch.workspace().write_orchestration(|doc| {
-                        if let Some(mut c) = doc.work_item(&id)
-                            && c.check.is_some()
-                        {
-                            c.check = None;
-                            doc.upsert_work_item(&c);
+                if !created && (finish.is_some() || held.is_some()) {
+                    self.with_card(&id, now, |row, _| {
+                        if let Some(finish) = finish {
+                            row.finish = finish;
+                        }
+                        if let Some(held) = held {
+                            row.held = held;
                         }
                     });
                 }
-                // Its question, raised with the move (Blocked waits on it).
+                // Made inside its orchestrator's turn: that turn is on it
+                // until it ends.
+                if created
+                    && let Who::Agent { chat, role: ChatRole::Orchestrator { .. } } = who
+                    && self.sessions_ref().turn_in_flight(chat)
+                {
+                    self.with_card(&id, now, |row, _| row.checking = Some(Checking { since: now, why: CheckWhy::Created }));
+                }
+                // Its question, raised in the same step.
                 let ask_id = match (ask, who) {
                     (Some(ask), Who::Agent { chat, .. }) => {
                         if ask.question.trim().is_empty() {
@@ -371,22 +359,78 @@ impl EngineRpc {
                     }),
                     (None, _) => None,
                 };
-                orch.board_poke().poke();
-                // The person moving a card with no thread to Now starts it.
-                if to_now
-                    && *who == Who::Person
-                    && orch.item(&id).is_some_and(|i| i.threads.is_empty())
-                {
-                    return self.start_item(&id, true);
+                let reply = |extra: Value| match (&ask_id, extra) {
+                    (Some(ask_id), Value::Object(mut map)) => {
+                        map.insert("askId".into(), json!(ask_id));
+                        Value::Object(map)
+                    }
+                    (_, extra) => extra,
+                };
+                // What the person did with the card.
+                if let Some(to) = wanted {
+                    let paused = current.as_ref().is_some_and(|c| c.paused());
+                    let closed = self.board_card(&id).is_some_and(|c| c.closed.is_some())
+                        || current.as_ref().is_some_and(|c| {
+                            self.board_card(&id).is_none() && matches!(c.state, WorkState::Done | WorkState::Dropped)
+                        });
+                    match to {
+                        WorkState::Done => return self.close_item(&id, Mover::You, None, false, now).map(reply),
+                        WorkState::Dropped => return self.close_item(&id, Mover::You, None, true, now).map(reply),
+                        WorkState::Blocked if !paused && !created => return self.pause_item(&id, now).map(reply),
+                        WorkState::Active => {
+                            if closed {
+                                self.reopen_item(&id, now)?;
+                            }
+                            if paused {
+                                return self.resume_item(&id, true, now).await.map(reply);
+                            }
+                            self.with_card(&id, now, |row, _| row.held = false);
+                            // With no thread, it starts.
+                            if orch.item(&id).is_some_and(|i| i.threads.is_empty()) {
+                                let started = self.start_item(&id, true);
+                                self.derive_cards(std::slice::from_ref(&id), Mover::You, now);
+                                return started.map(reply);
+                            }
+                        }
+                        WorkState::Planned | WorkState::Inbox => {
+                            if closed {
+                                self.reopen_item(&id, now)?;
+                            }
+                            if paused {
+                                self.resume_item(&id, false, now).await?;
+                            }
+                            self.with_card(&id, now, |row, _| row.held = to == WorkState::Inbox);
+                        }
+                        WorkState::Blocked | WorkState::Review | WorkState::Other => {}
+                    }
                 }
-                Ok(match ask_id {
-                    Some(ask_id) => json!({ "id": id, "askId": ask_id }),
-                    None => json!({ "id": id }),
-                })
+                self.derive_cards(std::slice::from_ref(&id), by, now);
+                Ok(reply(json!({ "id": id })))
             }
             OrchestrateOp::PauseItem { id } => self.pause_item(&id, now),
-            OrchestrateOp::ResumeItem { id, state } => self.resume_item(&id, state, now).await,
-            OrchestrateOp::StartItem { id } => self.start_item(&id, *who == Who::Person),
+            // (`state`: where an older app dragged it out of Paused to.)
+            OrchestrateOp::ResumeItem { id, state } => match state {
+                Some(WorkState::Done) => {
+                    self.resume_item(&id, false, now).await?;
+                    self.close_item(&id, Mover::You, None, false, now)
+                }
+                Some(WorkState::Dropped) => {
+                    self.resume_item(&id, false, now).await?;
+                    self.close_item(&id, Mover::You, None, true, now)
+                }
+                Some(WorkState::Inbox) => {
+                    self.resume_item(&id, false, now).await?;
+                    self.hold_item(&id, true, now)
+                }
+                Some(WorkState::Planned) => self.resume_item(&id, false, now).await,
+                _ => self.resume_item(&id, true, now).await,
+            },
+            OrchestrateOp::StartItem { id } => {
+                let by = if *who == Who::Person { Mover::You } else { Mover::Agent };
+                let started = self.start_item(&id, *who == Who::Person);
+                self.derive_cards(std::slice::from_ref(&id), by, now);
+                started
+            }
             OrchestrateOp::StartFlow { orchestrator_id, task } => self.start_flow(&orchestrator_id, &task),
             OrchestrateOp::StopFlow { orchestrator_id } => self.stop_flow(&orchestrator_id),
             OrchestrateOp::Report {
@@ -483,8 +527,8 @@ impl EngineRpc {
                 }
                 orch.workspace()
                     .write_orchestration(|doc| doc.upsert_ask(&ask));
-                // Its thread's card waits on the person.
-                self.sync_cards_of(&ask.from_chat);
+                // Its card needs the person.
+                self.derive_asked(&ask, Mover::Agent, now);
                 // Its banner shows on every device as the row arrives
                 // (orchestration/watchers.rs), this one too.
                 orch.comms().say(CommKind::Ask, chat, YOU, &ask.question);
@@ -503,9 +547,9 @@ impl EngineRpc {
                     // A time already past is "back now".
                     ask.deferred_until = until.filter(|u| *u > now);
                     doc.upsert_ask(&ask);
-                    Ok::<_, RpcError>(ask.from_chat)
+                    Ok::<_, RpcError>(ask)
                 })?;
-                self.sync_cards_of(&asker);
+                self.derive_asked(&asker, Mover::You, now);
                 Ok(json!({ "id": id }))
             }
             OrchestrateOp::DismissAsk { id } => {
@@ -516,9 +560,20 @@ impl EngineRpc {
                         ask.answered_at = Some(now);
                         doc.upsert_ask(&ask);
                     }
-                    Ok::<_, RpcError>(ask.from_chat)
+                    Ok::<_, RpcError>(ask)
                 })?;
-                self.sync_cards_of(&asker);
+                // The engine's own question about a card, dismissed: the
+                // card is left alone (held) until the person lets it go or
+                // work is sent to it.
+                if asker.origin.engine()
+                    && let Some(item) = asker.item_id.as_deref()
+                {
+                    self.with_card(item, now, |row, _| {
+                        row.held = true;
+                        row.stall = None;
+                    });
+                }
+                self.derive_asked(&asker, Mover::You, now);
                 Ok(json!({ "id": id }))
             }
             OrchestrateOp::Dump { text, attachments, transfers, config, refs } => {
@@ -632,6 +687,18 @@ impl EngineRpc {
             Who::Agent { chat, .. } => chat.as_str(),
             _ => YOU,
         };
+        let actor = match who {
+            Who::Agent { .. } => Mover::Agent,
+            _ => Mover::You,
+        };
+        // One of the engine's own questions about a card (Retry / Drop,
+        // Continue / Close / Drop, Looks good): the engine does what the
+        // person picked.
+        if *who == Who::Person && self.answer_engine_ask(&ask, picked.as_deref(), &text, now)? {
+            orch.comms().say(CommKind::Answer, YOU, &ask.from_chat, &answer);
+            self.derive_asked(&ask, actor, now);
+            return Ok(json!({ "id": id }));
+        }
         // "Where should this go?" moves its route to the pick; "hasn't
         // answered" asks again or lets it be. A thread's own question
         // on a route goes back to it, below.
@@ -643,6 +710,7 @@ impl EngineRpc {
         }
         if self.answer_route_ask(&ask, &route_answer).await? {
             orch.comms().say(CommKind::Answer, YOU, &ask.from_chat, &answer);
+            self.derive_asked(&ask, actor, now);
             return Ok(json!({ "id": id }));
         }
         // One line each: an ask's text can't pass for another message.
@@ -661,8 +729,24 @@ impl EngineRpc {
         deliver(self, &ask.from_chat, &text, None, When::Now, Some(said))?;
         orch.comms()
             .say(CommKind::Answer, answerer, &ask.from_chat, &answer);
-        self.sync_cards_of(&ask.from_chat);
+        // Answered to its orchestrator: that turn is on the card.
+        if let Some(item) = ask.item_id.as_deref()
+            && orch.item(item).is_some_and(|c| c.orchestrator_id.as_deref() == Some(ask.from_chat.as_str()))
+        {
+            self.with_card(item, now, |row, _| row.checking = Some(Checking { since: now, why: CheckWhy::Answer }));
+        }
+        self.derive_asked(&ask, actor, now);
         Ok(json!({ "id": id }))
+    }
+
+    /// The cards `ask` is about (the one it names, else its asker's),
+    /// worked out now.
+    pub(crate) fn derive_asked(&self, ask: &Ask, actor: Mover, now: chrono::DateTime<Utc>) {
+        let cards = match ask.item_id.clone() {
+            Some(item) => vec![item],
+            None => self.cards_of_chat(&ask.from_chat),
+        };
+        self.derive_cards(&cards, actor, now);
     }
 
     /// Put `chat_id` in `orchestrator_id`'s crew (moving it from another),
@@ -913,6 +997,14 @@ pub(crate) fn permitted(who: &Who, op: &OrchestrateOp, rpc: &EngineRpc) -> Resul
         OrchestrateOp::ApproveItem { .. } | OrchestrateOp::RequestChanges { .. } => {
             refuse("Only the person approves a card or asks for changes")
         }
+        OrchestrateOp::ReopenItem { .. } | OrchestrateOp::HoldItem { .. } | OrchestrateOp::SeenItem { .. } => {
+            refuse("Only the person reopens, holds or opens a card")
+        }
+        OrchestrateOp::CloseItem { id, .. } => match (role, orch.item(id)) {
+            (ChatRole::Orchestrator { id: mine }, Some(card)) if card.orchestrator_id.as_deref() == Some(mine.as_str()) => Ok(()),
+            (ChatRole::BrainDump { .. }, Some(card)) if card.orchestrator_id.is_none() => Ok(()),
+            _ => refuse("An orchestrator closes only its own cards, with the reason: the person closes the rest"),
+        },
         OrchestrateOp::UpdateOrchestrator {
             id,
             name,
@@ -954,11 +1046,10 @@ pub(crate) fn permitted(who: &Who, op: &OrchestrateOp, rpc: &EngineRpc) -> Resul
         },
         OrchestrateOp::UpsertItem { item, ask } => {
             upsert_permitted(role, item, rpc)?;
+            let _ = ask;
             let current = item.id.as_deref().and_then(|id| orch.item(id));
-            let open_ask = current.as_ref().is_some_and(|c| rpc.card_has_open_ask(&c.id));
             let threads_changed = item.threads.as_ref().is_some_and(|t| current.as_ref().is_none_or(|c| &c.threads != t));
-            super::board_checks::agent_move_allowed(current.as_ref(), item.state, threads_changed, open_ask, ask.is_some())
-                .map_err(failed)
+            super::board_checks::agent_edit_allowed(current.as_ref(), threads_changed).map_err(failed)
         }
         OrchestrateOp::PauseItem { .. } | OrchestrateOp::ResumeItem { .. } => {
             refuse("Only the person pauses or resumes a card")
@@ -1243,7 +1334,9 @@ pub(crate) fn deliver_with(
             .map(|_| Delivered::Queued)
             .map_err(engine_failed)
     };
-    match (status, when) {
+    let kind = injected.as_ref().map(|i| i.kind.clone());
+    let about = injected.as_ref().and_then(|i| i.item_id.clone());
+    let delivered = match (status, when) {
         _ if paused => queued(doc_host),
         (SessionStatus::Working, When::Now) => doc_host
             .queue_command_with_transfers(
@@ -1311,5 +1404,11 @@ pub(crate) fn deliver_with(
                 .map(|_| Delivered::Run)
                 .map_err(engine_failed)
         }
+    }?;
+    // Work is on its way to a card's thread (a retraction isn't work; a
+    // paused card's message waits in its held queue).
+    if !paused && kind.as_deref() != Some(zeron_doc::injected::RETRACTION) {
+        rpc.work_sent_on(chat_id, about.as_deref(), Utc::now());
     }
+    Ok(delivered)
 }

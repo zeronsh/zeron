@@ -1,8 +1,8 @@
 //! Orchestrators, their crews, the board, asks and Brain dumps
 //! (docs/design/orchestrators.md, wire types in `zeron_proto::orchestration`).
 //!
-//! Five synced kinds, one row per entity, keyed by its id (a crew row by its
-//! thread's chat id). Each top-level field of the entity is its own registry
+//! Synced kinds, one row per entity, keyed by its id (a crew row by its
+//! thread's chat id, a board card's by its work item's). Each top-level field of the entity is its own registry
 //! field, so concurrent edits of different fields on two devices both land
 //! (per-field LWW, like chats). A dump's routes are one field each
 //! (`route<id>`), so a route recorded on one device and a reroute made on
@@ -19,7 +19,7 @@
 use serde::de::DeserializeOwned;
 use serde_json::Map;
 use zeron_proto::orchestration::{
-    Ask, AskState, CrewMember, Dump, OrchestrationSettings, OrchestrationState, Orchestrator, Progress, Route,
+    Ask, AskState, BoardCard, CrewMember, Dump, OrchestrationSettings, OrchestrationState, Orchestrator, Progress, Route,
     WorkItem,
 };
 
@@ -39,14 +39,21 @@ pub const SETTINGS_ROW: &str = "settings";
 /// far more often than the rest and has its own watch (`WatchProgress`).
 pub const KIND_PROGRESS: &str = "progress";
 
+/// Each card's place on the board and what the engine keeps about it
+/// (`BoardCard`), keyed by its work item's id. Its own kind, not fields of
+/// the work item: a build from before it writes a work item back without
+/// the fields it doesn't know.
+pub const KIND_BOARD_CARDS: &str = "boardCards";
+
 /// Every orchestration kind (publishers watch their versions together).
-pub const ORCHESTRATION_KINDS: [&str; 6] = [
+pub const ORCHESTRATION_KINDS: [&str; 7] = [
     KIND_ORCHESTRATORS,
     KIND_CREW,
     KIND_WORK_ITEMS,
     KIND_ASKS,
     KIND_DUMPS,
     KIND_SETTINGS,
+    KIND_BOARD_CARDS,
 ];
 
 /// `WatchOrchestration` sends at most this many dumps, newest first.
@@ -112,6 +119,14 @@ impl Entity for WorkItem {
     const KIND: &'static str = KIND_WORK_ITEMS;
     const REQUIRED: &'static [&'static str] =
         &["id", "title", "state", "priority", "createdAt", "updatedAt"];
+    fn row_id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl Entity for BoardCard {
+    const KIND: &'static str = KIND_BOARD_CARDS;
+    const REQUIRED: &'static [&'static str] = &["id", "place", "status", "since", "statusSince", "updatedAt"];
     fn row_id(&self) -> &str {
         &self.id
     }
@@ -436,6 +451,113 @@ impl RegistryDoc {
         all
     }
 
+    // ── board cards ─────────────────────────────────────────────────────────
+
+    pub fn upsert_board_card(&mut self, card: &BoardCard) {
+        self.write_entity(card);
+    }
+
+    /// A card's place and what the engine keeps about it (its item's id).
+    pub fn board_card(&self, id: &str) -> Option<BoardCard> {
+        self.read_entity(id)
+    }
+
+    /// Every card's row, by id.
+    pub fn read_board_cards(&self) -> Vec<BoardCard> {
+        let mut all: Vec<BoardCard> = self.read_entities();
+        all.sort_by(|a, b| a.id.cmp(&b.id));
+        all
+    }
+
+    /// The card rows `pick` takes, by id (only those are copied).
+    pub fn board_cards_where(&self, pick: impl Fn(&BoardCard) -> bool) -> Vec<BoardCard> {
+        self.read_entities_with(|rows: &std::collections::HashMap<String, BoardCard>| {
+            let mut out: Vec<BoardCard> = rows.values().filter(|c| pick(c)).cloned().collect();
+            out.sort_by(|a, b| a.id.cmp(&b.id));
+            out
+        })
+    }
+
+    /// The work items `pick` takes, by id (only those are copied; removed
+    /// ones are passed to `pick` too).
+    pub fn work_items_where(&self, pick: impl Fn(&WorkItem) -> bool) -> Vec<WorkItem> {
+        self.read_entities_with(|rows: &std::collections::HashMap<String, WorkItem>| {
+            let mut out: Vec<WorkItem> = rows.values().filter(|i| pick(i)).cloned().collect();
+            out.sort_by(|a, b| a.id.cmp(&b.id));
+            out
+        })
+    }
+
+    /// The asks `pick` takes, oldest first (only those are copied; every
+    /// ask the registry holds is passed to `pick`, closed long ago or not).
+    pub fn asks_where(&self, pick: impl Fn(&Ask) -> bool) -> Vec<Ask> {
+        self.read_entities_with(|rows: &std::collections::HashMap<String, Ask>| {
+            let mut out: Vec<Ask> = rows.values().filter(|a| pick(a)).cloned().collect();
+            out.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+            out
+        })
+    }
+
+    /// The rows of one board kind whose mark (`of`: what of a row a reader
+    /// cares about, hashed) isn't the one `seen` has, with something to
+    /// tell each by (`tell`); `seen` is brought up to date. The rows are
+    /// read where they are: nothing is copied for a row that didn't change.
+    fn changed_marks<T: Entity, R>(
+        &self,
+        seen: &mut std::collections::HashMap<String, u64>,
+        of: impl Fn(&T) -> u64,
+        tell: impl Fn(&T) -> R,
+    ) -> Vec<R> {
+        self.read_entities_with(|rows: &std::collections::HashMap<String, T>| {
+            let mut changed = Vec::new();
+            for (id, row) in rows {
+                let mark = of(row);
+                match seen.get_mut(id.as_str()) {
+                    Some(was) if *was == mark => {}
+                    Some(was) => {
+                        *was = mark;
+                        changed.push(tell(row));
+                    }
+                    None => {
+                        seen.insert(id.clone(), mark);
+                        changed.push(tell(row));
+                    }
+                }
+            }
+            changed
+        })
+    }
+
+    /// The work items whose mark changed since `seen` ([`Self::changed_marks`]).
+    pub fn changed_work_items<R>(
+        &self,
+        seen: &mut std::collections::HashMap<String, u64>,
+        of: impl Fn(&WorkItem) -> u64,
+        tell: impl Fn(&WorkItem) -> R,
+    ) -> Vec<R> {
+        self.changed_marks(seen, of, tell)
+    }
+
+    /// The card rows whose mark changed since `seen`.
+    pub fn changed_board_cards<R>(
+        &self,
+        seen: &mut std::collections::HashMap<String, u64>,
+        of: impl Fn(&BoardCard) -> u64,
+        tell: impl Fn(&BoardCard) -> R,
+    ) -> Vec<R> {
+        self.changed_marks(seen, of, tell)
+    }
+
+    /// The asks whose mark changed since `seen`.
+    pub fn changed_asks<R>(
+        &self,
+        seen: &mut std::collections::HashMap<String, u64>,
+        of: impl Fn(&Ask) -> u64,
+        tell: impl Fn(&Ask) -> R,
+    ) -> Vec<R> {
+        self.changed_marks(seen, of, tell)
+    }
+
     // ── asks ────────────────────────────────────────────────────────────────
 
     pub fn upsert_ask(&mut self, ask: &Ask) {
@@ -557,14 +679,18 @@ impl RegistryDoc {
     pub fn read_orchestration(&self) -> OrchestrationState {
         let perf_t = std::time::Instant::now();
         let _perf = PerfLog(perf_t);
+        // A card taken off the board is gone for every reader, its place too.
+        let items: Vec<WorkItem> = self.read_work_items().into_iter().filter(|i| !i.removed).collect();
+        let on_board: std::collections::HashSet<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        let cards = self.read_board_cards().into_iter().filter(|c| on_board.contains(c.id.as_str())).collect();
         OrchestrationState {
             orchestrators: self.read_orchestrators(),
             crew: self.read_crew(),
-            // A card taken off the board is gone for every reader.
-            items: self.read_work_items().into_iter().filter(|i| !i.removed).collect(),
+            items,
             asks: self.read_current_asks(Utc::now()),
             dumps: self.read_newest_dumps(MAX_DUMPS_IN_STATE),
             settings: self.orchestration_settings(),
+            cards,
         }
     }
 }

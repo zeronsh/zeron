@@ -3,23 +3,24 @@
 //! (docs in `zeron_proto::orchestration::flow`).
 //!
 //! - **Start**: the flow is checked (what the Flow view checks); each step
-//!   that gets a card gets one, in Up next, waiting on the cards before it;
+//!   that gets a card gets one, planned, waiting on the cards before it;
 //!   the entry's way on starts.
 //! - **A role step** starts as a card does (`startItem`): a crew thread on
 //!   its card, with the step's agent and model, its first prompt the task,
 //!   its instructions and what the steps before it reported. Coming back
 //!   to it (a fail's return) messages the same thread.
 //! - **A step ends** with its thread's `report` `done`: a step with a pass
-//!   and a fail way on gives `result`. Its card goes to Done with the
-//!   report as its outcome, and the run takes the matching way on. A fail
-//!   that goes back counts against its limit; past it, the card waits on
-//!   the person (Blocked with an ask).
-//! - **A gate** is the person's: its card goes to Blocked with an approval
-//!   ask; Approve takes its pass (or only) way on, Send back its fail.
+//!   and a fail way on gives `result`. Its card is closed with the report
+//!   as its outcome, and the run takes the matching way on. A fail that
+//!   goes back counts against its limit; past it, the card waits on the
+//!   person (an ask on it).
+//! - **A gate** is the person's: its card gets an approval ask; Approve
+//!   takes its pass (or only) way on, Send back its fail.
 //! - **The finish** ends the run.
 //!
-//! Every move keeps the board's rules (`board_checks`): a card in Blocked
-//! always has its open ask, a card in Now its thread.
+//! The run records facts (a step's closing, an ask, work sent back to a
+//! thread); where each card is on the board is worked out from them like
+//! any card's (`derive.rs`).
 
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
@@ -27,8 +28,8 @@ use zeron_proto::orchestration::flow::{
     self as model, Condition, FlowResult, FlowRun, FlowStep, NodeKind, RunState,
 };
 use zeron_proto::orchestration::{
-    AskKind, AskOption, CardCheck, CheckKind, CommKind, ItemAsk, OrchestratorKind, Report, ReportState,
-    WorkItem, WorkItemPatch, WorkState, prompt_text::one_line,
+    AskKind, AskOption, CloseHow, Closed, CommKind, ItemAsk, Mover, OrchestratorKind, Report, ReportState, WorkItem,
+    WorkItemPatch, prompt_text::one_line,
 };
 use zeron_rpc::RpcError;
 
@@ -161,7 +162,7 @@ impl EngineRpc {
         };
         let steps = model::order(&flow);
         let total = steps.len() as u32;
-        // A card per step, in Up next, in the run's order.
+        // A card per step, planned, in the run's order.
         orch.workspace().write_orchestration(|doc| {
             for (i, node) in steps.iter().enumerate() {
                 let card = super::apply_item_patch(
@@ -170,7 +171,6 @@ impl EngineRpc {
                         orchestrator_id: Some(Some(id.to_owned())),
                         title: Some(format!("{}: {}", node.name, one_line(task, 80))),
                         detail: Some(step_prompt(&run, node, &[])),
-                        state: Some(WorkState::Planned),
                         ..Default::default()
                     },
                 )
@@ -291,15 +291,32 @@ impl EngineRpc {
                     r.at = Some(node.to_owned());
                 });
                 match (card.threads.first().cloned(), came_from) {
-                    // Back to a step that ran: its thread, told why.
+                    // Back to a step that ran: open again, its thread told why
+                    // (`deliver` tells the card work is on its way).
                     (Some(thread), Some((from, said))) => {
-                        orch.workspace().write_orchestration(|doc| {
-                            if let Some(mut item) = doc.work_item(&card_id) {
-                                moved(&mut item, WorkState::Active, &format!("Back in Now: {from} sent it back"), now);
-                                doc.upsert_work_item(&item);
-                            }
+                        self.with_card(&card_id, now, |row, _| {
+                            row.closed = None;
+                            row.word = None;
+                            row.work_at = Some(now);
                         });
                         deliver(self, &thread, &return_prompt(&run, from, said), Some(orchestrator), When::Now, None)?;
+                        self.derive_cards(std::slice::from_ref(&card_id), Mover::Engine, now);
+                        Ok(())
+                    }
+                    // Forward to a step that ran before (the work it sent
+                    // back has come round again): open again, its thread
+                    // given its prompt with what the steps before it now say.
+                    (Some(thread), None) => {
+                        let detail = step_prompt(&run, &step, &self.earlier(&run));
+                        orch.patch_item(WorkItemPatch { id: Some(card_id.clone()), detail: Some(detail.clone()), ..Default::default() })
+                            .map_err(RpcError::Failed)?;
+                        self.with_card(&card_id, now, |row, _| {
+                            row.closed = None;
+                            row.word = None;
+                            row.work_at = Some(now);
+                        });
+                        deliver(self, &thread, &detail, Some(orchestrator), When::Now, None)?;
+                        self.derive_cards(std::slice::from_ref(&card_id), Mover::Engine, now);
                         Ok(())
                     }
                     _ => {
@@ -320,6 +337,7 @@ impl EngineRpc {
                                 r.threads.insert(node, thread);
                             });
                         }
+                        self.derive_cards(std::slice::from_ref(&card_id), Mover::Engine, now);
                         Ok(())
                     }
                 }
@@ -353,8 +371,7 @@ impl EngineRpc {
         });
     }
 
-    /// `card` to Blocked with an ask raised on it (the board's rule: a
-    /// Blocked card has its open ask).
+    /// An ask raised on `card` (it waits in Needs you for the answer).
     #[allow(clippy::too_many_arguments)]
     fn block_with_ask(
         &self,
@@ -385,12 +402,8 @@ impl EngineRpc {
                 }
             });
         }
-        self.orchestration().workspace().write_orchestration(|doc| {
-            if let Some(mut item) = doc.work_item(&card.id) {
-                moved(&mut item, WorkState::Blocked, note, now);
-                doc.upsert_work_item(&item);
-            }
-        });
+        let _ = note;
+        self.derive_cards(std::slice::from_ref(&card.id), Mover::Engine, now);
         ask
     }
 
@@ -477,14 +490,13 @@ impl EngineRpc {
                 if let Some(key) = &counted {
                     self.set_run(orchestrator, |r| *r.returns.entry(key.clone()).or_default() += 1);
                 }
-                self.orchestration().workspace().write_orchestration(|doc| {
-                    if let Some(mut item) = doc.work_item(&card.id) {
-                        item.outcome = Some(one_line(said, 2000));
-                        let note = if counted.is_some() { "Done: it sent the work back" } else { "Done: its step is over" };
-                        moved(&mut item, WorkState::Done, note, now);
-                        doc.upsert_work_item(&item);
-                    }
+                // Its step is over: closed, its outcome what it said.
+                let note = if counted.is_some() { "It sent the work back" } else { "Its step is over" };
+                self.with_card(&card.id, now, |row, item| {
+                    item.outcome = Some(one_line(said, 2000));
+                    row.closed = Some(Closed { at: now, by: Mover::Engine, how: CloseHow::Report, note: Some(note.to_owned()) });
                 });
+                self.derive_cards(std::slice::from_ref(&card.id), Mover::Engine, now);
                 let back = counted.is_some().then_some((step.step.as_str(), said));
                 self.flow_go(orchestrator, &to, back, now)?;
             }
@@ -556,18 +568,6 @@ impl EngineRpc {
         }
         true
     }
-}
-
-/// `item` moved to `state` by the engine (marked as a move, with `note`).
-fn moved(item: &mut WorkItem, state: WorkState, note: &str, now: DateTime<Utc>) {
-    if item.state != state {
-        item.done_at = (state == WorkState::Done).then_some(now);
-    }
-    item.state = state;
-    item.waiting = None;
-    item.moved_at = Some(now);
-    item.check = Some(CardCheck { kind: CheckKind::Moved, note: note.to_owned(), since: now, nudged_at: None });
-    item.updated_at = now;
 }
 
 #[cfg(test)]

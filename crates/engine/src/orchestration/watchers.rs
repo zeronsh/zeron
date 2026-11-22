@@ -48,11 +48,8 @@ pub(crate) fn start(orchestration: Orchestration) {
             if !settled.is_empty() {
                 tracing::info!(dumps = settled.len(), "brain dump: dumps left routing now need the person");
             }
-            // Cards an open ask made Blocked under the old rule: from their route.
-            let (restated, kept) = rpc.settle_card_states().await;
-            if !restated.is_empty() || !kept.is_empty() {
-                tracing::info!(?restated, ?kept, "board: cards an ask had blocked re-stated; cards moved by hand kept");
-            }
+            // Cards waiting on a decision their thread put in words: its ask.
+            rpc.settle_card_states().await;
         }
     });
     // An agent's message about to run in a Brain dump or an orchestrator

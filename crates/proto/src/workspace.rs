@@ -62,6 +62,13 @@ pub mod capabilities {
     /// synced session row and transcript.
     pub const ORCHESTRATION_ROUTES_V1: &str = "orchestration-routes-v1";
 
+    /// The host works out where the cards of the boards it keeps are
+    /// (`orchestration::BoardCard` rows) and acts for them: its own asks,
+    /// the wake of a stalled card's orchestrator. A board whose natural
+    /// keeper is a host without it is kept by the next in line that has it;
+    /// with none, its cards show by their old column.
+    pub const ORCHESTRATION_PLACES_V1: &str = "orchestration-places-v1";
+
     /// The engine writes `injected` on the commands and queue rows it
     /// delivers itself (a crew ask, an answer…): a host trusts a row's
     /// `injected` only from a device that says so.
@@ -84,6 +91,7 @@ pub mod capabilities {
         ATTACHMENT_STORE_V1,
         ORCHESTRATION_PROGRESS_V1,
         ORCHESTRATION_ROUTES_V1,
+        ORCHESTRATION_PLACES_V1,
         INJECTED_MESSAGES_V1,
         crate::voice::remote::CAPABILITY,
     ];
@@ -208,6 +216,7 @@ mod tests {
                     "attachment-store-v1",
                     "orchestration-progress-v1",
                     "orchestration-routes-v1",
+                    "orchestration-places-v1",
                     "injected-messages-v1",
                     "voice-client-media-v1"
                 ],
