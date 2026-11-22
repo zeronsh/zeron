@@ -892,7 +892,7 @@ async fn a_routed_threads_message_back_to_the_brain_dump_is_its_outcome() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn routed_tasks_land_on_the_board_and_follow_their_route() {
-    use zeron_proto::orchestration::{Priority, RouteRef, RouteState, RouteTarget, WorkState};
+    use zeron_proto::orchestration::{Place, Priority, RouteRef, RouteState, RouteTarget, WorkState};
     let Setup { core, rpc, finish, prompts, .. } = setup().await;
     let dump = call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "dump", "text": DEVICES_TEXT })).await;
     let dump_id = dump["id"].as_str().unwrap().to_owned();
@@ -934,8 +934,9 @@ async fn routed_tasks_land_on_the_board_and_follow_their_route() {
     // Adding the thread to the board again is the same card.
     let again = call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "addToBoard", "chatId": thread })).await;
     assert_eq!(again["id"].as_str(), Some(card.id.as_str()));
-    // An ask from the thread never blocks the card (it says "Waiting on
-    // you" on it, in the board); it stays at work, asked or answered.
+    // An ask from the thread puts its card in Needs you while it is open
+    // (an older reader's Blocked), though the thread works on; dismissed, the
+    // card is Running again.
     let ask = call(
         &rpc,
         Caller::Agent { chat: Some(thread.clone()) },
@@ -944,9 +945,10 @@ async fn routed_tasks_land_on_the_board_and_follow_their_route() {
     )
     .await;
     let state = |id: &str| core.orchestration.item(id).unwrap().state;
-    assert_eq!(state(&card.id), WorkState::Active);
+    let place = |id: &str| core.workspace.read_orchestration_with(|d| d.board_card(id)).unwrap().place;
+    assert_eq!((place(&card.id), state(&card.id)), (Place::NeedsYou, WorkState::Blocked));
     call(&rpc, Caller::Local, methods::ORCHESTRATE, json!({ "op": "dismissAsk", "id": ask["id"] })).await;
-    assert_eq!(state(&card.id), WorkState::Active);
+    assert_eq!((place(&card.id), state(&card.id)), (Place::Running, WorkState::Active));
     // The thread's turn ends with nothing left: the route is done, so is the card.
     wait_for(|| prompts.lock().unwrap().iter().any(|p| p.contains("Make device names unique asap")), "the thread's turn").await;
     let _ = finish.send(());

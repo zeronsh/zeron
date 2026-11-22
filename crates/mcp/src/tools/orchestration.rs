@@ -11,8 +11,8 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 use zeron_proto::orchestration::{
-    AskKind, AskOption, OrchestrationState, OrchestratorKind, ReportState, RouteIntent, RouteTarget, WorkItemPatch,
-    WorkLink, WorkState,
+    AskKind, AskOption, BoardCard, CardStatus, Finish, FinishKind, OrchestrationState, OrchestratorKind, Place,
+    ReportState, RouteIntent, RouteTarget, WorkItem, WorkItemPatch, WorkLink, WorkState,
 };
 use zeron_rpc::methods;
 
@@ -22,6 +22,7 @@ pub(super) const REPORT: &str = "report";
 pub(super) const ASK: &str = "ask";
 pub(super) const BOARD: &str = "board";
 pub(super) const ITEM_UPSERT: &str = "item_upsert";
+pub(super) const ITEM_CLOSE: &str = "item_close";
 pub(super) const CREW_ADD: &str = "crew_add";
 pub(super) const CREW_RELEASE: &str = "crew_release";
 pub(super) const NOTES_SET: &str = "notes_set";
@@ -35,11 +36,12 @@ pub(super) const SCRATCHPAD_READ: &str = "scratchpad_read";
 pub(super) const SCRATCHPAD_WRITE: &str = "scratchpad_write";
 pub(super) const SCRATCHPAD_APPEND: &str = "scratchpad_append";
 
-pub(super) const NAMES: [&str; 16] = [
+pub(super) const NAMES: [&str; 17] = [
     REPORT,
     ASK,
     BOARD,
     ITEM_UPSERT,
+    ITEM_CLOSE,
     CREW_ADD,
     CREW_RELEASE,
     NOTES_SET,
@@ -94,7 +96,7 @@ impl Role {
         match tool {
             ASK | PROGRESS => true,
             REPORT => matches!(self, Role::Crew { .. }),
-            BOARD | ITEM_UPSERT => matches!(self, Role::Orchestrator { .. } | Role::BrainDump { .. }),
+            BOARD | ITEM_UPSERT | ITEM_CLOSE => matches!(self, Role::Orchestrator { .. } | Role::BrainDump { .. }),
             CREW_ADD | CREW_RELEASE | NOTES_SET | ANSWER_ASK => matches!(self, Role::Orchestrator { .. }),
             WORLD | ROUTE | DUMP_DONE | ORCHESTRATOR_CREATE => matches!(self, Role::BrainDump { .. }),
             // The person's Scratchpad: the Brain dump keeps it, an
@@ -146,7 +148,23 @@ fn target_schema(description: &str) -> Value {
     })
 }
 
-const STATES: [&str; 7] = ["inbox", "planned", "active", "blocked", "review", "done", "dropped"];
+const FINISH_LINES: [&str; 4] = ["report", "merged", "pr", "accept"];
+
+fn finish_schema() -> Value {
+    let lines = "report: its thread reports done (the default); merged: its branch is contained in `into`; pr: its PR is merged or closed; accept: the person says it looks good.";
+    json!({
+        "description": format!("What ends the card, its finish line, chosen when the card is made (only the person changes it after): a line, or {{line, branch, into, pr}}. {lines}"),
+        "anyOf": [
+            { "type": "string", "enum": FINISH_LINES },
+            { "type": "object", "properties": {
+                "line": { "type": "string", "enum": FINISH_LINES, "description": lines },
+                "branch": s("merged: the card's branch (default: its thread's)."),
+                "into": s("merged: the branch it lands on (default: the project's checked-out branch)."),
+                "pr": s("pr: the PR's URL (default: the card's PR link).")
+            }, "required": ["line"] }
+        ]
+    })
+}
 
 pub(super) fn catalog() -> Vec<ToolDef> {
     vec![
@@ -214,34 +232,35 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: BOARD,
-            description: "Your board: work items (state, priority, progress, threads, links, outcome), your crew (each thread's status, what it's doing now, todo progress, last report) and the open asks. The Brain dump sees every board.",
+            description: "Your board: its cards (where each is, as Zeron works it out from what happens: place and status; what it's done when; priority, progress, threads, links, outcome, its thread's last report), your crew (each thread's status, what it's doing now, todo progress, last report) and the open asks. The Brain dump sees every board.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "filter": { "type": "string", "description": "open (default: everything not done or dropped), all, or one state: inbox, planned, active, blocked, review, done, dropped." }
+                    "filter": { "type": "string", "description": "open (default: every card not done or dropped), all, or one place: needs_you, snoozed, running, planned, done, dropped." }
                 }
             }),
         },
         ToolDef {
             name: ITEM_UPSERT,
-            description: "Create a board item (no id; title required) or change one (id plus the fields to change). States: inbox (Later: someday, remind me, ideas; never started on its own), planned (Up next: queued real work, or held while a crew is full), active (Now: a thread is working on it), blocked (waiting on the person), review (finished, something for the person to check), done, dropped. Keep states true, and put the answer or result in outcome when there is one: that is what the person reads.\n\nBlocked means it waits on the person, so it needs their question: pass `ask` with the move (it joins Needs you, on this card, and the answer comes back to you), unless the card already has an open ask. Zeron refuses Blocked without one. A card the person paused (Blocked, Paused) is theirs: Zeron refuses any change to its state. Zeron also checks the board itself: a card in Now whose thread finished is flagged and goes to Review if you don't move it, an errored thread's card goes to Blocked with an ask, and its notes show in `board` as `check`.",
+            description: "Create a board card (no id; title required) or change one (id plus the fields to change). Zeron works out where each card is on the board from what happens (its thread working, a report, an ask, its finish line), so there is no state to set. Give a new card its finish line (`finish`). Put the answer or result in `outcome` when there is one: that is what the person reads.\n\n`ask` raises the person's question on this card in the same step: it joins Needs you, and the answer comes back to you. A card the person paused is theirs: Zeron refuses changes to its threads.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "id": s("The item to change. Omit to create."),
                     "title": s("Short title."),
                     "detail": s("Markdown."),
-                    "state": { "type": "string", "enum": STATES },
+                    "finish": finish_schema(),
+                    "later": { "type": "boolean", "description": "true, for a new card only: kept for later, it never starts on its own. false lets a held card go." },
                     "priority": { "type": "string", "enum": ["urgent", "high", "normal", "low"] },
                     "progress": { "type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "0 to 1; null derives it from the threads' todo lists." },
                     "outcome": { "type": ["string", "null"], "description": "The answer or result (markdown); null clears it." },
                     "threads": { "type": "array", "items": { "type": "string" }, "description": "Chat ids working on it." },
                     "links": links_schema(),
-                    "order": { "type": "number", "description": "Sort key in its column, smaller first." },
+                    "order": { "type": "number", "description": "Sort key among its neighbours on the board, smaller first." },
                     "orchestrator": s("Brain dump only: the orchestrator that owns it (id); omit for a loose item."),
                     "ask": {
                         "type": "object",
-                        "description": "With state blocked: the person's question, raised on this card in the same step (as the `ask` tool would). Required for blocked unless the card already has an open ask.",
+                        "description": "The person's question about this card, raised in the same step (as the `ask` tool would, on this card).",
                         "properties": {
                             "question": s("Markdown, self-contained: what the person must decide or do."),
                             "options": {
@@ -263,6 +282,19 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                         "required": ["question"]
                     }
                 }
+            }),
+        },
+        ToolDef {
+            name: ITEM_CLOSE,
+            description: "Close a card of yours, with the reason, when the work turned out unnecessary or is finished in a way its finish line can't see. A card normally closes itself when it crosses its finish line. Zeron refuses while a thread works on it.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": s("The card to close."),
+                    "reason": s("One line: why it's closed."),
+                    "dropped": { "type": "boolean", "default": false, "description": "true takes it off the plan instead of marking it done." }
+                },
+                "required": ["id", "reason"]
             }),
         },
         ToolDef {
@@ -291,7 +323,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: ROUTE,
-            description: "Route one fragment of a dump and deliver it at once. excerpt is the fragment quoted verbatim from the dump; message is what the target is sent, rewritten so it can act without the rest of the dump. Targets: orchestrator or chat (an existing owner of that very work, by id); newThread (no id needed: Zeron starts a thread in `project`, on its device, with message as its first prompt; the default for a task with no owner) or newOrchestrator (no id needed: a lasting, multi-part area of work, in `project`); item (a board card: with an id, that card; with no id, a new card for what should wait, Inbox by default or Next with `card: next`, in `project`; the person starts it from the board); note (kept in your notes); unsure (only with two or more existing owners as candidates, best first: the person is asked where it goes). When the fragment is about one of the dump's references, set reference to its id: Zeron delivers it to that element whatever the target (a reply to an @ask answers it; a comment on an @card goes to the card's thread; @chat to that chat; a follow-up on a @qa to the chat that answered it), so target note is fine there; an @device is where a new thread starts; an @orchestrator or @comm is context.",
+            description: "Route one fragment of a dump and deliver it at once. excerpt is the fragment quoted verbatim from the dump; message is what the target is sent, rewritten so it can act without the rest of the dump. Targets: orchestrator or chat (an existing owner of that very work, by id); newThread (no id needed: Zeron starts a thread in `project`, on its device, with message as its first prompt; the default for a task with no owner) or newOrchestrator (no id needed: a lasting, multi-part area of work, in `project`); item (a board card: with an id, that card; with no id, a new card for what should wait, held for later by default or planned with `card: next`, in `project`; the person starts it from the board); note (kept in your notes); unsure (only with two or more existing owners as candidates, best first: the person is asked where it goes). When the fragment is about one of the dump's references, set reference to its id: Zeron delivers it to that element whatever the target (a reply to an @ask answers it; a comment on an @card goes to the card's thread; @chat to that chat; a follow-up on a @qa to the chat that answered it), so target note is fine there; an @device is where a new thread starts; an @orchestrator or @comm is context.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -305,7 +337,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                     "attachments": { "type": "array", "items": { "type": "string" }, "description": "The dump's files this fragment is about (their paths or names, as the dump lists them). Omit to send all of them with a task or info, and none otherwise." },
                     "project": s("For newThread/newOrchestrator/a new item: the project it is about (id, name or path, from world)."),
                     "device": s("For newThread/newOrchestrator/a new item: the device (id or name); with a project, that project's own."),
-                    "card": { "type": "string", "enum": ["inbox", "next"], "description": "For a new item: inbox (Later: someday, remind me, ideas; never started on its own; the default) or next (Up next: queued real work, after something else)." },
+                    "card": { "type": "string", "enum": ["inbox", "next"], "description": "For a new item: inbox (held for later: someday, remind me, ideas; never starts on its own; the default) or next (planned: queued real work, after something else)." },
                     "progress": { "type": "boolean", "default": false, "description": "For a question about how a thread's work is going (\"how's X going?\"): Zeron answers it from the thread's progress while the thread works, and doesn't deliver it." },
                     "reference": s("The id of the dump's reference (an element the person attached: @card, @chat, @ask…) this fragment is about. Only ids the dump lists.")
                 },
@@ -445,7 +477,12 @@ struct ItemArgs {
     id: Option<String>,
     title: Option<String>,
     detail: Option<String>,
-    state: Option<String>,
+    /// An older prompt's column: accepted and dropped (Zeron places cards).
+    #[serde(default)]
+    #[allow(dead_code)]
+    state: Option<Value>,
+    finish: Option<Value>,
+    later: Option<bool>,
     priority: Option<String>,
     #[serde(default, with = "zeron_proto::orchestration::double_option")]
     progress: Option<Option<f64>>,
@@ -458,7 +495,7 @@ struct ItemArgs {
     ask: Option<ItemAskArgs>,
 }
 
-/// `item_upsert`'s `ask`: the question a move to blocked raises.
+/// `item_upsert`'s `ask`: the person's question, raised on the card.
 #[derive(Deserialize)]
 struct ItemAskArgs {
     question: String,
@@ -468,6 +505,15 @@ struct ItemAskArgs {
     context: Option<String>,
     #[serde(default)]
     urgent: bool,
+}
+
+#[derive(Deserialize)]
+struct CloseArgs {
+    id: String,
+    #[serde(default)]
+    reason: String,
+    #[serde(default)]
+    dropped: bool,
 }
 
 #[derive(Deserialize)]
@@ -514,7 +560,8 @@ struct RouteArgs {
     #[serde(default)]
     reference: Option<String>,
     attachments: Option<Vec<String>>,
-    /// For a new card: `inbox` (Later) or `next` (Up next: after something else).
+    /// For a new card: `inbox` (held for later) or `next` (planned: after
+    /// something else).
     #[serde(default)]
     card: Option<String>,
     /// Resolved before the op (see `orchestration_tool`).
@@ -556,6 +603,40 @@ fn fraction(what: &str, value: f64) -> Result<f32, String> {
         return Err(format!("{what} must be between 0 and 1"));
     }
     Ok(value as f32)
+}
+
+/// `item_upsert`'s `finish`: a line, or `{line, branch, into, pr}`.
+fn finish_of(value: Value) -> Result<Finish, String> {
+    let line_of = |raw: &str| match raw.trim() {
+        "report" => Ok(FinishKind::Report),
+        "merged" => Ok(FinishKind::Merged),
+        "pr" => Ok(FinishKind::Pr),
+        "accept" => Ok(FinishKind::Accept),
+        _ => Err(format!("unknown finish line {raw:?}: report, merged, pr or accept")),
+    };
+    let text = |v: &Value, what: &str| -> Result<Option<String>, String> {
+        match v.get(what) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(t)) => Ok(Some(t.trim().to_owned()).filter(|t| !t.is_empty())),
+            Some(_) => Err(format!("finish.{what} is a string")),
+        }
+    };
+    match &value {
+        Value::String(raw) => Ok(Finish::of(line_of(raw)?)),
+        Value::Object(_) => {
+            let line = match value.get("line") {
+                Some(Value::String(raw)) => line_of(raw)?,
+                _ => return Err("finish.line is report, merged, pr or accept".into()),
+            };
+            Ok(Finish {
+                line,
+                branch: text(&value, "branch")?,
+                into: text(&value, "into")?,
+                pr: text(&value, "pr")?,
+            })
+        }
+        _ => Err("finish is a line (report, merged, pr, accept) or {line, branch, into, pr}".into()),
+    }
 }
 
 /// A tool's arguments as the `Orchestrate` op they become, or what's wrong
@@ -652,16 +733,8 @@ pub(super) fn op_for(tool: &str, args: Value, role: &Role) -> Result<Value, Stri
         }
         ITEM_UPSERT => {
             let a: ItemArgs = parse(args)?;
-            let state = match a.state.as_deref() {
-                Some(raw) => {
-                    let state: WorkState = parse_enum("item state", raw)?;
-                    if state == WorkState::Other {
-                        return Err(format!("unknown item state: {raw:?}"));
-                    }
-                    Some(state)
-                }
-                None => None,
-            };
+            // (`state` is never sent on: Zeron works out each card's place.)
+            let finish = a.finish.filter(|f| !f.is_null()).map(finish_of).transpose()?;
             let priority = a.priority.as_deref().map(|raw| parse_enum("priority", raw)).transpose()?;
             let progress = match a.progress {
                 Some(Some(p)) => Some(Some(fraction("progress", p)?)),
@@ -683,7 +756,6 @@ pub(super) fn op_for(tool: &str, args: Value, role: &Role) -> Result<Value, Stri
                 orchestrator_id,
                 title: a.title,
                 detail: a.detail,
-                state,
                 priority,
                 progress,
                 threads: a.threads,
@@ -691,6 +763,8 @@ pub(super) fn op_for(tool: &str, args: Value, role: &Role) -> Result<Value, Stri
                 outcome: a.outcome,
                 source: None,
                 order: a.order.filter(|o| o.is_finite()),
+                finish,
+                held: a.later,
                 ..Default::default()
             };
             let ask = match a.ask {
@@ -727,12 +801,18 @@ pub(super) fn op_for(tool: &str, args: Value, role: &Role) -> Result<Value, Stri
                 }
                 None => None,
             };
-            // (Blocked with no `ask` is refused by the engine unless the card
-            // already has an open ask: only it sees the asks.)
             match ask {
                 Some(ask) => Ok(json!({ "op": "upsertItem", "item": item, "ask": ask })),
                 None => Ok(json!({ "op": "upsertItem", "item": item })),
             }
+        }
+        ITEM_CLOSE => {
+            let a: CloseArgs = parse(args)?;
+            let reason = nonempty("reason", &a.reason)?;
+            if reason.contains('\n') {
+                return Err("reason is one line".into());
+            }
+            Ok(json!({ "op": "closeItem", "id": nonempty("id", &a.id)?, "reason": reason, "dropped": a.dropped }))
         }
         NOTES_SET => {
             let a: NotesArgs = parse(args)?;
@@ -848,7 +928,7 @@ pub(super) fn crew_refusal(orchestrator: &zeron_proto::orchestration::Orchestrat
     }
 }
 
-/// Why a new crew thread waits in Next instead of starting, or `None`: its
+/// Why a new crew thread waits in Planned instead of starting, or `None`: its
 /// crew already runs `running` threads, its limit.
 pub(super) fn crew_queues(orchestrator: &zeron_proto::orchestration::Orchestrator, running: usize, starts: bool) -> Option<String> {
     match orchestrator.crew.max_running {
@@ -894,7 +974,7 @@ impl Tools {
     /// A new crew thread of `orchestrator` as its crew policy says: where it
     /// may run (the first allowed device when none is named), its default
     /// harness and model, its item (on this board only), and no start past
-    /// `maxRunning`: then `Some(why)`, and the work waits in Next
+    /// `maxRunning`: then `Some(why)`, and the work waits in Planned
     /// ([`Self::queue_crew_card`]). Paused: a clear refusal.
     pub(super) async fn apply_crew_policy(&self, orchestrator: &str, args: &mut super::CreateChatArgs) -> anyhow::Result<Option<String>> {
         let Ok(state) = self.orchestration_state().await else {
@@ -945,9 +1025,10 @@ impl Tools {
         Ok(None)
     }
 
-    /// A crew thread that can't start yet, as a Next card on `orchestrator`'s
-    /// board (its `item`, else a new one with the prompt): it starts on its
-    /// own when a slot frees.
+    /// A crew thread that can't start yet, as a waiting card on
+    /// `orchestrator`'s board (its `item`, else a new one with the prompt,
+    /// Planned by itself: no thread yet): it starts on its own when a slot
+    /// frees.
     pub(super) async fn queue_crew_card(&self, args: &super::CreateChatArgs, waiting: String) -> anyhow::Result<Value> {
         let prompt = args.prompt.as_deref().unwrap_or("").trim().to_owned();
         let (space, device) = if args.project.is_some() || args.device.is_some() {
@@ -968,7 +1049,6 @@ impl Tools {
             title: item.is_none().then_some(title),
             detail: item.is_none().then(|| prompt.clone()),
             id: item,
-            state: Some(WorkState::Planned),
             waiting: Some(Some(waiting.clone())),
             space_id: space,
             device_id: device,
@@ -982,7 +1062,7 @@ impl Tools {
             "queued": true,
             "item": reply["id"],
             "waiting": waiting,
-            "note": format!("Not started: {waiting}. It waits in Next and starts on its own when a thread frees up."),
+            "note": format!("Not started: {waiting}. It waits in Planned and starts on its own when a thread frees up."),
         }))
     }
 
@@ -1068,7 +1148,7 @@ impl Tools {
                 }
                 self.orchestrate(op).await
             }
-            REPORT | ASK | ITEM_UPSERT | NOTES_SET | DUMP_DONE | ANSWER_ASK => {
+            REPORT | ASK | ITEM_UPSERT | ITEM_CLOSE | NOTES_SET | DUMP_DONE | ANSWER_ASK => {
                 let op = op_for(tool, args, &role)?;
                 self.orchestrate(op).await
             }
@@ -1129,36 +1209,7 @@ impl Tools {
             Role::Orchestrator { id } => Some(id.as_str()),
             _ => None,
         };
-        let filter = filter.map(str::trim).filter(|f| !f.is_empty()).unwrap_or("open");
-        let want_state: Option<WorkState> = match filter {
-            "open" | "all" => None,
-            raw => Some(parse_enum::<WorkState>("filter", raw).map_err(anyhow::Error::msg)?),
-        };
-        let items: Vec<Value> = state
-            .items
-            .iter()
-            .filter(|i| mine.is_none_or(|m| i.orchestrator_id.as_deref() == Some(m)))
-            .filter(|i| match (filter, want_state) {
-                ("open", _) => !matches!(i.state, WorkState::Done | WorkState::Dropped),
-                (_, Some(s)) => i.state == s,
-                _ => true,
-            })
-            .map(|i| {
-                json!({
-                    "id": i.id, "orchestratorId": i.orchestrator_id, "title": i.title, "state": i.state,
-                    "priority": i.priority, "progress": i.progress, "threads": i.threads, "links": i.links,
-                    "outcome": i.outcome, "detail": i.detail,
-                    "paused": i.paused().then_some("paused by the person: theirs to resume, leave it"),
-                    "check": i.check.as_ref().map(|c| json!({ "kind": c.kind, "note": c.note, "since": c.since })),
-                    // (A step of its flow's run: the engine moves it as the run goes.)
-                    "flowStep": i.flow.as_ref().map(|f| json!({
-                        "flow": f.flow, "step": f.step, "kind": f.kind, "index": f.index, "of": f.of,
-                        "note": "a step of the flow's run: the engine starts and moves it as each step reports",
-                    })),
-                    "dependsOn": (!i.depends_on.is_empty()).then_some(&i.depends_on),
-                })
-            })
-            .collect();
+        let items = board_items(&state, mine, filter).map_err(anyhow::Error::msg)?;
         let crew: Vec<Value> = state
             .crew
             .iter()
@@ -1210,7 +1261,7 @@ impl Tools {
                         json!({
                             "chat": m.chat_id, "title": chat.and_then(|c| c.title.clone()), "role": m.role,
                             "status": status_of(session.as_ref()).0,
-                            "item": item.map(|i| json!({ "id": i.id, "title": i.title, "state": i.state })),
+                            "item": item.map(|i| card_brief(&state, i)),
                         })
                     })
                     .collect();
@@ -1218,8 +1269,8 @@ impl Tools {
                     .items
                     .iter()
                     .filter(|i| i.orchestrator_id.as_deref() == Some(o.id.as_str()))
-                    .filter(|i| !matches!(i.state, WorkState::Done | WorkState::Dropped))
-                    .map(|i| json!({ "id": i.id, "title": i.title, "state": i.state }))
+                    .filter(|i| is_open(&state, i))
+                    .map(|i| card_brief(&state, i))
                     .collect();
                 json!({ "id": o.id, "name": o.name, "goal": o.goal, "paused": o.paused, "crew": crew, "items": items })
             })
@@ -1250,8 +1301,8 @@ impl Tools {
         let loose: Vec<Value> = state
             .items
             .iter()
-            .filter(|i| i.orchestrator_id.is_none() && !matches!(i.state, WorkState::Done | WorkState::Dropped))
-            .map(|i| json!({ "id": i.id, "title": i.title, "state": i.state }))
+            .filter(|i| i.orchestrator_id.is_none() && is_open(&state, i))
+            .map(|i| card_brief(&state, i))
             .collect();
         Ok(json!({
             "orchestrators": orchestrators,
@@ -1262,6 +1313,107 @@ impl Tools {
             "note": "Crew threads are listed under their orchestrator. A task, priority or cancel for one goes to that orchestrator (name the thread in message); info and questions may go to the thread. A task with no owner is a newThread in the project it's about (projects: most recently active first; prefer one the text names, then one here). Recent chats are context, not owners: route to one only when it is doing that very work.",
         }))
     }
+}
+
+/// Where `item` is on the board: its row (none while its engine hasn't
+/// placed it), its place and its status. Without a row, its old column
+/// mapped (an open ask on it puts a Review card in Needs you).
+fn card_of<'a>(state: &'a OrchestrationState, item: &WorkItem) -> (Option<&'a BoardCard>, Place, CardStatus) {
+    match state.cards.iter().find(|c| c.id == item.id) {
+        Some(row) => (Some(row), row.place, row.status),
+        None => {
+            let asked = state.asks.iter().any(|a| {
+                a.state == zeron_proto::orchestration::AskState::Open && a.item_id.as_deref() == Some(item.id.as_str())
+            });
+            let (place, status) = zeron_proto::orchestration::board::place_of_old(item, asked);
+            (None, place, status)
+        }
+    }
+}
+
+/// Still open: not done or dropped (its row's closing, else its place).
+fn open_of(row: Option<&BoardCard>, place: Place) -> bool {
+    row.map_or(!place.closed(), |r| r.closed.is_none())
+}
+
+fn is_open(state: &OrchestrationState, item: &WorkItem) -> bool {
+    let (row, place, _) = card_of(state, item);
+    open_of(row, place)
+}
+
+/// A card in a few words, as `world` lists it.
+fn card_brief(state: &OrchestrationState, item: &WorkItem) -> Value {
+    let (_, place, _) = card_of(state, item);
+    json!({ "id": item.id, "title": item.title, "place": place.as_str() })
+}
+
+/// `board`'s cards: `mine` only (the Brain dump: all), by `filter` (open,
+/// all, or a place; the old column names still work).
+fn board_items(state: &OrchestrationState, mine: Option<&str>, filter: Option<&str>) -> Result<Vec<Value>, String> {
+    let filter = filter.map(str::trim).filter(|f| !f.is_empty()).unwrap_or("open");
+    let want = match filter {
+        "open" | "all" => None,
+        "needs_you" | "needsYou" | "blocked" | "review" => Some(Place::NeedsYou),
+        "snoozed" => Some(Place::Snoozed),
+        "running" | "active" => Some(Place::Running),
+        "planned" | "inbox" => Some(Place::Planned),
+        "done" => Some(Place::Done),
+        "dropped" => Some(Place::Dropped),
+        other => {
+            return Err(format!(
+                "unknown filter {other:?}: open, all, needs_you, snoozed, running, planned, done or dropped"
+            ));
+        }
+    };
+    Ok(state
+        .items
+        .iter()
+        .filter(|i| mine.is_none_or(|m| i.orchestrator_id.as_deref() == Some(m)))
+        .filter_map(|i| {
+            let (row, place, status) = card_of(state, i);
+            let keep = match want {
+                Some(want) => place == want,
+                None => filter == "all" || open_of(row, place),
+            };
+            keep.then(|| board_item(i, row, place, status))
+        })
+        .collect())
+}
+
+/// One card as `board` lists it.
+fn board_item(i: &WorkItem, row: Option<&BoardCard>, place: Place, status: CardStatus) -> Value {
+    let finish = row.map(|r| r.finish.clone()).unwrap_or_default();
+    let mut card = json!({
+        "id": i.id, "orchestratorId": i.orchestrator_id, "title": i.title,
+        "place": place.as_str(), "status": status.label(), "doneWhen": finish.done_when(),
+        "priority": i.priority, "progress": i.progress, "threads": i.threads, "links": i.links,
+        "outcome": i.outcome, "detail": i.detail,
+        "paused": i.paused().then_some("paused by the person: theirs to resume, leave it"),
+        // (A step of its flow's run: the engine starts it as the run goes.)
+        "flowStep": i.flow.as_ref().map(|f| json!({
+            "flow": f.flow, "step": f.step, "kind": f.kind, "index": f.index, "of": f.of,
+            "note": "a step of the flow's run: the engine starts it as each step before it reports",
+        })),
+        "dependsOn": (!i.depends_on.is_empty()).then_some(&i.depends_on),
+    });
+    if let Some(row) = row {
+        if let Some(note) = row.note.as_deref().filter(|n| !n.trim().is_empty()) {
+            card["statusNote"] = json!(note);
+        }
+        if let Some(until) = row.until {
+            card["until"] = json!(until);
+        }
+        if let Some(c) = &row.closed {
+            card["closed"] = json!({ "how": c.how, "by": c.by, "note": c.note, "at": c.at });
+        }
+        if let Some(w) = &row.word {
+            card["lastReport"] = json!({ "state": w.state, "summary": w.summary, "at": w.at });
+        }
+    }
+    if row.map_or(status == CardStatus::Held, |r| r.held) {
+        card["held"] = json!(true);
+    }
+    card
 }
 
 /// A crew thread its usage limit stopped, as `board` lists it: waiting for
@@ -1390,6 +1542,14 @@ mod tests {
         }
     }
 
+    fn work_item(id: &str, orch: &str, title: &str, state: &str) -> WorkItem {
+        serde_json::from_value(json!({
+            "id": id, "orchestratorId": orch, "title": title, "state": state, "priority": "normal",
+            "createdAt": "2026-11-22T00:00:00Z", "updatedAt": "2026-11-22T00:00:00Z",
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn an_orchestrator_never_waits_on_its_crew() {
         let chat = |parent: Option<&str>, kind: Option<zeron_proto::ChildKind>| zeron_proto::Chat {
@@ -1419,36 +1579,7 @@ mod tests {
         o.crew_rules = "Tests first".into();
         let mut m = member("c1", "o1", false);
         m.item_id = Some("i1".into());
-        let item = zeron_proto::orchestration::WorkItem {
-            id: "i1".into(),
-            orchestrator_id: Some("o1".into()),
-            title: "Auth PR".into(),
-            detail: String::new(),
-            state: WorkState::Active,
-            priority: Default::default(),
-            progress: None,
-            threads: vec![],
-            links: vec![],
-            outcome: None,
-            source: None,
-            order: 0.0,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            done_at: None,
-            removed: Default::default(),
-            removed_at: Default::default(),
-            space_id: None,
-            device_id: None,
-            waiting: None,
-            moved_at: None,
-            moved_route_state: None,
-            approved_at: None,
-            paused_at: None,
-            check: None,
-            threads_at: None,
-            flow: None,
-            depends_on: Vec::new(),
-        };
+        let item = work_item("i1", "o1", "Auth PR", "active");
         let state = OrchestrationState {
             orchestrators: vec![o, orchestrator("b1", OrchestratorKind::BrainDump)],
             crew: vec![m],
@@ -1456,7 +1587,11 @@ mod tests {
             ..Default::default()
         };
         let prompt = |chat: &str| role_prompt(&Role::of(Some(chat), &state), Some(chat), &state);
-        assert!(prompt("o1").unwrap().starts_with("You are an orchestrator in Zeron: Ops. Goal: Ship it."));
+        let orch = prompt("o1").unwrap();
+        assert!(orch.starts_with("You are an orchestrator in Zeron: Ops. Goal: Ship it."), "{orch}");
+        // Zeron places the cards: nothing tells it to move them.
+        assert!(!orch.contains("Keep item states true") && !orch.contains("Board check"), "{orch}");
+        assert!(orch.contains("`finish`") && orch.contains("`item_close`") && orch.contains("[Board]"), "{orch}");
         let crew = prompt("c1").unwrap();
         assert!(crew.starts_with("You are on Ops's crew, working on Auth PR."), "{crew}");
         assert!(crew.contains("Crew rules: Tests first."));
@@ -1562,7 +1697,7 @@ mod tests {
         assert_eq!(offered(&Role::Crew { orchestrator_id: "o".into() }), vec![REPORT, ASK, PROGRESS, SCRATCHPAD_READ]);
         assert_eq!(
             offered(&Role::Orchestrator { id: "o".into() }),
-            vec![ASK, BOARD, ITEM_UPSERT, CREW_ADD, CREW_RELEASE, NOTES_SET, PROGRESS, ANSWER_ASK, SCRATCHPAD_READ]
+            vec![ASK, BOARD, ITEM_UPSERT, ITEM_CLOSE, CREW_ADD, CREW_RELEASE, NOTES_SET, PROGRESS, ANSWER_ASK, SCRATCHPAD_READ]
         );
         assert_eq!(
             offered(&Role::BrainDump { id: "b".into() }),
@@ -1570,6 +1705,7 @@ mod tests {
                 ASK,
                 BOARD,
                 ITEM_UPSERT,
+                ITEM_CLOSE,
                 WORLD,
                 ROUTE,
                 DUMP_DONE,
@@ -1686,35 +1822,33 @@ mod tests {
         assert_eq!(op_for(ANSWER_ASK, json!({ "id": "a", "answer": "go" }), &orch).unwrap()["answer"], "go");
 
         let orch = Role::Orchestrator { id: "o".into() };
-        let created = op_for(ITEM_UPSERT, json!({ "title": "Auth", "state": "active", "outcome": null }), &orch).unwrap();
+        let created = op_for(ITEM_UPSERT, json!({ "title": "Auth", "outcome": null }), &orch).unwrap();
         assert_eq!(created["item"]["orchestratorId"], "o", "an orchestrator's new item is its own");
         assert_eq!(created["item"]["outcome"], Value::Null);
-        assert!(op_for(ITEM_UPSERT, json!({ "state": "active" }), &orch).is_err(), "new needs a title");
-        assert!(op_for(ITEM_UPSERT, json!({ "id": "i", "state": "someday" }), &orch).is_err());
+        assert!(op_for(ITEM_UPSERT, json!({ "detail": "x" }), &orch).is_err(), "new needs a title");
         assert!(op_for(ITEM_UPSERT, json!({ "title": "x", "orchestrator": "other" }), &orch).is_err());
         let patch = op_for(ITEM_UPSERT, json!({ "id": "i", "progress": null }), &orch).unwrap();
         assert_eq!(patch["item"]["progress"], Value::Null);
         assert!(patch["item"].get("orchestratorId").is_none(), "a patch keeps its owner");
-        // Blocked with its question, in one op.
-        let blocked = op_for(
+        // The person's question on the card, in one op.
+        let asked = op_for(
             ITEM_UPSERT,
-            json!({ "id": "i", "state": "blocked", "ask": {
+            json!({ "id": "i", "ask": {
                 "question": " Ship now or with Plan 12? ", "options": ["Fold into Plan 12", { "label": "Do it now", "detail": "needs creds" }],
                 "recommendation": { "option": 0, "why": "prod is rebuilt anyway" } } }),
             &orch,
         )
         .unwrap();
-        assert_eq!(blocked["item"]["state"], "blocked");
-        assert_eq!(blocked["ask"]["question"], "Ship now or with Plan 12?");
-        assert_eq!(blocked["ask"]["options"][1]["detail"], "needs creds");
-        assert_eq!(blocked["ask"]["recommendation"]["label"], "Fold into Plan 12");
+        assert_eq!(asked["ask"]["question"], "Ship now or with Plan 12?");
+        assert_eq!(asked["ask"]["options"][1]["detail"], "needs creds");
+        assert_eq!(asked["ask"]["recommendation"]["label"], "Fold into Plan 12");
         assert!(op_for(ITEM_UPSERT, json!({ "id": "i", "ask": { "question": " " } }), &orch).is_err(), "a question");
         assert!(
             op_for(ITEM_UPSERT, json!({ "id": "i", "ask": { "question": "q", "options": ["a"], "recommendation": { "option": 3 } } }), &orch)
                 .is_err(),
             "its recommendation names an option"
         );
-        assert!(op_for(ITEM_UPSERT, json!({ "id": "i", "state": "done" }), &orch).unwrap().get("ask").is_none());
+        assert!(op_for(ITEM_UPSERT, json!({ "id": "i", "title": "t" }), &orch).unwrap().get("ask").is_none());
 
         let notes = op_for(NOTES_SET, json!({ "text": "plan" }), &orch).unwrap();
         assert_eq!(notes, json!({ "op": "updateOrchestrator", "id": "o", "notes": "plan" }));
@@ -1734,7 +1868,7 @@ mod tests {
             &brain,
         );
         assert!(untitled.unwrap_err().contains("title"), "a task's card needs a short title");
-        // What should wait is a new card: Inbox by default, Next on asking.
+        // What should wait is a new card: held for later by default, planned on asking.
         let later = op_for(
             ROUTE,
             json!({ "dump": "d", "excerpt": "later: docs", "target": { "kind": "item" }, "intent": "task", "message": "Tidy the docs", "title": "Tidy the docs" }),
@@ -1767,6 +1901,156 @@ mod tests {
         let plain = op_for(ROUTE, json!({ "dump": "d", "excerpt": "x", "target": { "kind": "note" }, "intent": "note" }), &brain).unwrap();
         assert!(plain["reference"].is_null());
         assert!(op_for(DUMP_DONE, json!({ "dump": "d", "summary": "" }), &brain).is_err());
+    }
+
+    #[test]
+    fn an_old_prompts_state_is_accepted_and_dropped() {
+        let orch = Role::Orchestrator { id: "o".into() };
+        for state in [json!("active"), json!("blocked"), json!("someday"), json!(3), Value::Null] {
+            let op = op_for(ITEM_UPSERT, json!({ "id": "i", "state": state, "title": "t" }), &orch).unwrap();
+            assert!(op["item"].get("state").is_none(), "{op}");
+            assert_eq!(op["item"]["title"], "t");
+        }
+        let created = op_for(ITEM_UPSERT, json!({ "title": "Auth", "state": "review" }), &orch).unwrap();
+        assert!(created["item"].get("state").is_none(), "{created}");
+    }
+
+    #[test]
+    fn a_finish_line_and_later_ride_the_patch() {
+        use zeron_proto::orchestration::OrchestrateOp;
+        let orch = Role::Orchestrator { id: "o".into() };
+        let patch_of = |op: Value| match serde_json::from_value::<OrchestrateOp>(op.clone()).unwrap() {
+            OrchestrateOp::UpsertItem { item, .. } => item,
+            _ => panic!("{op}"),
+        };
+        let pr = op_for(ITEM_UPSERT, json!({ "title": "Auth", "finish": " pr " }), &orch).unwrap();
+        assert_eq!(pr["item"]["finish"], json!({ "line": "pr" }));
+        assert_eq!(patch_of(pr).finish, Some(Finish::of(FinishKind::Pr)));
+        let merged = op_for(
+            ITEM_UPSERT,
+            json!({ "title": "Auth", "finish": { "line": "merged", "branch": "orch/auth", "into": " main ", "pr": "" } }),
+            &orch,
+        )
+        .unwrap();
+        assert_eq!(merged["item"]["finish"], json!({ "line": "merged", "branch": "orch/auth", "into": "main" }));
+        let finish = patch_of(merged).finish.unwrap();
+        assert_eq!((finish.line, finish.into.as_deref()), (FinishKind::Merged, Some("main")));
+        let unknown = op_for(ITEM_UPSERT, json!({ "title": "x", "finish": "vibes" }), &orch).unwrap_err();
+        assert!(unknown.contains("report, merged, pr or accept"), "{unknown}");
+        assert!(op_for(ITEM_UPSERT, json!({ "title": "x", "finish": { "line": "soon" } }), &orch).is_err());
+        assert!(op_for(ITEM_UPSERT, json!({ "title": "x", "finish": { "into": "main" } }), &orch).is_err(), "a line");
+        assert!(op_for(ITEM_UPSERT, json!({ "title": "x", "finish": 3 }), &orch).is_err());
+
+        let later = op_for(ITEM_UPSERT, json!({ "title": "Docs", "later": true }), &orch).unwrap();
+        assert_eq!(later["item"]["held"], true);
+        assert_eq!(patch_of(later).held, Some(true));
+        let go = op_for(ITEM_UPSERT, json!({ "id": "i", "later": false }), &orch).unwrap();
+        assert_eq!(go["item"]["held"], false);
+        let plain = op_for(ITEM_UPSERT, json!({ "id": "i", "title": "t" }), &orch).unwrap();
+        assert!(plain["item"].get("held").is_none() && plain["item"].get("finish").is_none(), "{plain}");
+    }
+
+    #[test]
+    fn item_close_needs_a_reason() {
+        use zeron_proto::orchestration::OrchestrateOp;
+        let orch = Role::Orchestrator { id: "o".into() };
+        let op = op_for(ITEM_CLOSE, json!({ "id": " i1 ", "reason": " Fixed upstream " }), &orch).unwrap();
+        assert_eq!(op, json!({ "op": "closeItem", "id": "i1", "reason": "Fixed upstream", "dropped": false }));
+        let wire: OrchestrateOp = serde_json::from_value(op).unwrap();
+        assert_eq!(wire, OrchestrateOp::CloseItem { id: "i1".into(), reason: Some("Fixed upstream".into()), dropped: false });
+        let dropped = op_for(ITEM_CLOSE, json!({ "id": "i1", "reason": "Not needed", "dropped": true }), &orch).unwrap();
+        assert!(matches!(serde_json::from_value(dropped).unwrap(), OrchestrateOp::CloseItem { dropped: true, .. }));
+        assert!(op_for(ITEM_CLOSE, json!({ "id": "i1" }), &orch).unwrap_err().contains("reason"));
+        assert!(op_for(ITEM_CLOSE, json!({ "id": "i1", "reason": "  " }), &orch).is_err());
+        assert!(op_for(ITEM_CLOSE, json!({ "id": "i1", "reason": "a\nb" }), &orch).is_err());
+        assert!(op_for(ITEM_CLOSE, json!({ "id": " ", "reason": "r" }), &orch).is_err());
+        assert!(op_for(ITEM_CLOSE, json!({ "reason": "r" }), &orch).is_err());
+    }
+
+    #[test]
+    fn board_shows_each_cards_place_from_its_row_or_its_old_column() {
+        use zeron_proto::orchestration::{CloseHow, Closed, Mover, Word};
+        let now: chrono::DateTime<Utc> = "2026-11-22T00:00:00Z".parse().unwrap();
+        // i1 has a row: Running, waiting on its tests, to land on main.
+        let mut running = BoardCard::new("i1", now);
+        running.place = Place::Running;
+        running.status = CardStatus::Waiting;
+        running.note = Some("cargo test".into());
+        running.finish = Finish { line: FinishKind::Merged, into: Some("main".into()), ..Default::default() };
+        running.word = Some(Word { state: ReportState::Blocked, at: now, from: "c1".into(), summary: "needs a token".into(), report: None });
+        // i3 has a row and is closed, though its old column says active.
+        let mut closed = BoardCard::new("i3", now);
+        closed.place = Place::Done;
+        closed.status = CardStatus::Done;
+        closed.closed = Some(Closed { at: now, by: Mover::Agent, how: CloseHow::Closed, note: Some("fixed upstream".into()) });
+        // i5 has a row: held for later.
+        let mut held = BoardCard::new("i5", now);
+        held.status = CardStatus::Held;
+        held.held = true;
+        let state = OrchestrationState {
+            items: vec![
+                work_item("i1", "o1", "Auth", "blocked"),
+                work_item("i2", "o1", "Docs", "inbox"),
+                work_item("i3", "o1", "Old", "active"),
+                work_item("i4", "o1", "Gone", "dropped"),
+                work_item("i5", "o1", "Later", "planned"),
+                work_item("x1", "o2", "Theirs", "active"),
+            ],
+            cards: vec![running, closed, held],
+            ..Default::default()
+        };
+        let ids = |items: &[Value]| items.iter().map(|i| i["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+
+        let open = board_items(&state, Some("o1"), None).unwrap();
+        assert_eq!(ids(&open), ["i1", "i2", "i5"], "open: not done or dropped, mine only");
+        let auth = &open[0];
+        assert_eq!(auth["place"], "running");
+        assert_eq!(auth["status"], "Waiting on tests");
+        assert_eq!(auth["statusNote"], "cargo test");
+        assert_eq!(auth["doneWhen"], "Merged into main");
+        assert_eq!(auth["lastReport"]["summary"], "needs a token");
+        assert_eq!(auth["lastReport"]["state"], "blocked");
+        assert!(auth.get("state").is_none() && auth.get("check").is_none(), "{auth}");
+        assert!(auth.get("held").is_none() && auth.get("closed").is_none());
+        // No row: its old column, mapped.
+        let docs = &open[1];
+        assert_eq!((docs["place"].as_str(), docs["status"].as_str()), (Some("planned"), Some("Held")));
+        assert_eq!(docs["doneWhen"], "Its thread reports done");
+        assert_eq!(docs["held"], true);
+        assert_eq!(open[2]["held"], true);
+
+        let done = board_items(&state, Some("o1"), Some("done")).unwrap();
+        assert_eq!(ids(&done), ["i3"]);
+        assert_eq!(done[0]["closed"]["how"], "closed");
+        assert_eq!(done[0]["closed"]["note"], "fixed upstream");
+        assert_eq!(done[0]["closed"]["by"], "agent");
+        assert_eq!(ids(&board_items(&state, Some("o1"), Some("dropped")).unwrap()), ["i4"]);
+        assert_eq!(ids(&board_items(&state, Some("o1"), Some("all")).unwrap()).len(), 5);
+        assert_eq!(ids(&board_items(&state, None, Some("running")).unwrap()), ["i1", "x1"], "the Brain dump sees every board");
+        // The old column names still filter, by place.
+        assert_eq!(ids(&board_items(&state, Some("o1"), Some("active")).unwrap()), ["i1"]);
+        assert_eq!(ids(&board_items(&state, Some("o1"), Some("inbox")).unwrap()), ["i2", "i5"]);
+        assert!(board_items(&state, Some("o1"), Some("blocked")).unwrap().is_empty());
+        assert!(board_items(&state, Some("o1"), Some("someday")).is_err());
+
+        // `world`'s view: the place, and open from the row.
+        assert_eq!(card_brief(&state, &state.items[0]), json!({ "id": "i1", "title": "Auth", "place": "running" }));
+        assert!(!is_open(&state, &state.items[2]), "closed by its row, whatever its old column");
+        assert!(is_open(&state, &state.items[1]));
+        assert!(!is_open(&state, &state.items[3]));
+    }
+
+    #[test]
+    fn a_review_card_without_a_row_needs_you_only_with_an_open_ask() {
+        let mut state = OrchestrationState { items: vec![work_item("i1", "o1", "PR", "review")], ..Default::default() };
+        assert_eq!(card_brief(&state, &state.items[0])["place"], "done");
+        state.asks = vec![serde_json::from_value(json!({
+            "id": "a1", "fromChat": "c1", "orchestratorId": "o1", "itemId": "i1", "kind": "approval",
+            "question": "Merge?", "state": "open", "createdAt": "2026-11-22T00:00:00Z",
+        }))
+        .unwrap()];
+        assert_eq!(card_brief(&state, &state.items[0])["place"], "needsYou");
+        assert!(is_open(&state, &state.items[0]));
     }
 
     #[test]

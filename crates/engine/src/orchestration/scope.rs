@@ -64,6 +64,11 @@ fn named(o: &Orchestrator) -> Orchestrator {
     }
 }
 
+/// The board cards of `items` (each card's place goes where its item does).
+fn cards_of(state: &OrchestrationState, items: &[zeron_proto::orchestration::WorkItem]) -> Vec<zeron_proto::orchestration::BoardCard> {
+    state.cards.iter().filter(|c| items.iter().any(|i| i.id == c.id)).cloned().collect()
+}
+
 /// `state` as the agent of `chat` may see it.
 pub(crate) fn scoped(state: &OrchestrationState, chat: Option<&str>) -> OrchestrationState {
     match seen(state, chat) {
@@ -74,14 +79,12 @@ pub(crate) fn scoped(state: &OrchestrationState, chat: Option<&str>) -> Orchestr
         Seen::Orchestrator(id) => {
             let crew: Vec<_> = state.crew.iter().filter(|m| m.orchestrator_id == id).cloned().collect();
             let mine = |chat: &str| chat == id || crew.iter().any(|m| m.chat_id == chat);
+            let items: Vec<_> =
+                state.items.iter().filter(|i| i.orchestrator_id.as_deref().is_none_or(|o| o == id)).cloned().collect();
             OrchestrationState {
                 orchestrators: state.orchestrators.iter().filter(|o| o.id == id).cloned().collect(),
-                items: state
-                    .items
-                    .iter()
-                    .filter(|i| i.orchestrator_id.as_deref().is_none_or(|o| o == id))
-                    .cloned()
-                    .collect(),
+                cards: cards_of(state, &items),
+                items,
                 asks: state
                     .asks
                     .iter()
@@ -93,19 +96,23 @@ pub(crate) fn scoped(state: &OrchestrationState, chat: Option<&str>) -> Orchestr
                 settings: state.settings.clone(),
             }
         }
-        Seen::Crew { orchestrator, item } => OrchestrationState {
-            orchestrators: state
-                .orchestrators
-                .iter()
-                .filter(|o| o.id == orchestrator)
-                .map(|o| Orchestrator { crew_rules: o.crew_rules.clone(), ..named(o) })
-                .collect(),
-            crew: state.crew.iter().filter(|m| Some(m.chat_id.as_str()) == chat).cloned().collect(),
-            items: state.items.iter().filter(|i| Some(i.id.as_str()) == item).cloned().collect(),
-            asks: Vec::new(),
-            dumps: Vec::new(),
-            settings: state.settings.clone(),
-        },
+        Seen::Crew { orchestrator, item } => {
+            let items: Vec<_> = state.items.iter().filter(|i| Some(i.id.as_str()) == item).cloned().collect();
+            OrchestrationState {
+                orchestrators: state
+                    .orchestrators
+                    .iter()
+                    .filter(|o| o.id == orchestrator)
+                    .map(|o| Orchestrator { crew_rules: o.crew_rules.clone(), ..named(o) })
+                    .collect(),
+                crew: state.crew.iter().filter(|m| Some(m.chat_id.as_str()) == chat).cloned().collect(),
+                cards: cards_of(state, &items),
+                items,
+                asks: Vec::new(),
+                dumps: Vec::new(),
+                settings: state.settings.clone(),
+            }
+        }
         Seen::BrainDump(id) => OrchestrationState {
             orchestrators: state
                 .orchestrators
@@ -306,6 +313,7 @@ mod tests {
                 refs: Vec::new(),
             }],
             settings: Default::default(),
+            cards: Vec::new(),
         }
     }
 

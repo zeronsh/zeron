@@ -104,12 +104,18 @@ pub async fn file_report(
                 item.progress = Some(progress);
             }
             super::merge_links(&mut item.links, links);
-            if !item.threads.contains(&chat) {
-                item.threads.push(chat);
+            let joins = !item.threads.contains(&chat);
+            if joins {
+                item.threads.push(chat.clone());
                 item.threads_at = Some(Utc::now());
             }
             item.updated_at = Utc::now();
             doc.upsert_work_item(&item);
+            // On it by its own report: the card's guest, whose word isn't
+            // the card's.
+            if joins {
+                super::board::joined_by_report(doc, item_id, &chat, Utc::now());
+            }
         });
     }
     // A report is a step of the thread's own work (its host is this engine:

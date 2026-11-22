@@ -935,7 +935,10 @@ async fn agents_stay_inside_their_own_orchestrator() {
     )
     .await
     .unwrap();
-    assert!(core.orchestration.item(&mine).unwrap().done_at.is_some());
+    // (Its `state` is accepted and ignored: nobody sets a column.)
+    let after = core.orchestration.item(&mine).unwrap();
+    assert_eq!(after.threads, ["plain", "ours"]);
+    assert!(after.done_at.is_none() && after.state != WorkState::Done);
     // A plain chat keeps no board, and an orchestrator doesn't route.
     assert!(
         op(
@@ -1712,100 +1715,73 @@ async fn a_thread_with_finished_cards_that_asks_waits_on_its_newest_card_and_non
     let asks: Vec<_> = asks_from(&core, map).into_iter().filter(|a| a.origin == AskOrigin::TurnEnd).collect();
     assert_eq!(asks.len(), 1, "{asks:#?}");
     // One card waits on the person: the one the asking turn's work is on.
+    // The thread's own chase (on no card) is that card's too, not every
+    // card's the thread ever had.
+    use zeron_proto::orchestration::{CardStatus, Place};
     assert_eq!(asks[0].item_id.as_deref(), Some(routes[2].1.as_str()));
+    let at = |i: usize| placed(&core, &routes[i].1).place;
+    assert_eq!([at(0), at(1), at(2)], [Place::Done, Place::Running, Place::NeedsYou], "finished stays finished, an outcome so far stays at work, the asking one needs you");
     assert_eq!(
         [card(&core, &routes[0].1), card(&core, &routes[1].1), card(&core, &routes[2].1)],
-        [WorkState::Done, WorkState::Active, WorkState::Active],
-        "finished stays finished, an outcome so far stays at work, none Blocked"
+        [WorkState::Done, WorkState::Active, WorkState::Blocked],
+        "what an older reader sees"
     );
-    // A real failure is still Blocked.
+    let asking = placed(&core, &routes[2].1);
+    assert!(asking.asks.contains(&asks[0].id) && asking.asks.contains(&"chase".to_owned()), "{:?}", asking.asks);
+    assert!(placed(&core, &routes[1].1).asks.is_empty());
+    // Its question answered and its chase dismissed, a real failure asks
+    // the person: Retry or drop.
+    op(&core, Caller::Local, json!({"op":"dismissAsk","id":asks[0].id})).await.unwrap();
+    op(&core, Caller::Local, json!({"op":"dismissAsk","id":"chase"})).await.unwrap();
     super::watchers::record_outcome(&core.orchestration, &rpc, map, &dump, &routes[2].0, "x", "The build broke.".into(), Some(RouteState::Failed)).await;
+    let failed = placed(&core, &routes[2].1);
+    assert_eq!((failed.place, failed.status), (Place::NeedsYou, CardStatus::Failed));
     assert_eq!(card(&core, &routes[2].1), WorkState::Blocked);
     assert_eq!(card(&core, &routes[0].1), WorkState::Done);
     core.sessions.shutdown().await;
 }
 
 #[tokio::test]
-async fn cards_an_ask_once_blocked_are_restated_from_their_routes_once() {
-    let (_temp, core) = core().await;
-    let map = "9ad131f1-map";
-    let (dump, _, routes) = routed_thread(&core, map, &["Fix the Timeline legend", "Every card in Now", "Rebuild the map"]).await;
-    let rpc = core.rpc_service();
-    super::watchers::record_outcome(&core.orchestration, &rpc, map, &dump, &routes[0].0, "x", "Legend fixed.".into(), Some(RouteState::Done)).await;
-    super::watchers::record_outcome(&core.orchestration, &rpc, map, &dump, &routes[2].0, "x", "It broke.".into(), Some(RouteState::Failed)).await;
-    // As the live engine left them: Blocked by an ask, though done or at work.
-    for (_, item) in &routes[..2] {
-        core.orchestration
-            .patch_item(WorkItemPatch { id: Some(item.clone()), state: Some(WorkState::Blocked), ..Default::default() })
-            .unwrap();
-    }
-    let (mut restated, kept) = rpc.settle_card_states().await;
-    restated.sort();
-    assert!(kept.is_empty());
-    let mut want = vec![routes[0].1.clone(), routes[1].1.clone()];
-    want.sort();
-    assert_eq!(restated, want);
-    assert_eq!(
-        [card(&core, &routes[0].1), card(&core, &routes[1].1), card(&core, &routes[2].1)],
-        [WorkState::Done, WorkState::Active, WorkState::Blocked],
-        "the failed one stays Blocked"
-    );
-    assert_eq!(rpc.settle_card_states().await, (vec![], vec![]), "idempotent");
-    core.sessions.shutdown().await;
-}
-
-#[tokio::test]
-async fn a_card_the_person_moves_stays_until_its_work_changes() {
+async fn a_card_the_person_closes_stays_closed_whatever_its_route_does() {
+    use zeron_proto::orchestration::{CardStatus, CloseHow, Mover, Place};
     let (_temp, core) = core().await;
     let map = "9ad131f1-map";
     let (dump, _, routes) = routed_thread(&core, map, &["Fix the Timeline legend", "Rebuild the map"]).await;
     let rpc = core.rpc_service();
     let (legend, rebuild) = (&routes[0], &routes[1]);
-    // A loose card (no orchestrator) whose work failed: Blocked.
+    // A loose card (no orchestrator) whose work failed: the engine asks.
     assert_eq!(core.orchestration.item(&legend.1).unwrap().orchestrator_id, None, "loose");
     super::watchers::record_outcome(&core.orchestration, &rpc, map, &dump, &legend.0, "x", "It broke.".into(), Some(RouteState::Failed)).await;
     assert_eq!(card(&core, &legend.1), WorkState::Blocked);
-    // The person moves it to Done (the board's Move to, or a drag).
+    let row = placed(&core, &legend.1);
+    assert_eq!((row.place, row.status), (Place::NeedsYou, CardStatus::Failed));
+    // The person marks it done (an older board's Move to, or a drag).
     op(&core, Caller::Local, json!({"op":"upsertItem","item":{"id":legend.1,"state":"done"}})).await.unwrap();
     assert_eq!(card(&core, &legend.1), WorkState::Done);
-    let moved = core.orchestration.item(&legend.1).unwrap();
-    assert!(moved.moved_at.is_some() && moved.moved_route_state == Some(RouteState::Failed));
+    let row = placed(&core, &legend.1);
+    assert_eq!(row.closed.as_ref().map(|c| (c.how, c.by)), Some((CloseHow::Marked, Mover::You)));
+    assert_eq!((row.by, row.reason.as_str()), (Mover::You, "You marked it done"));
+    // The engine's question about it closed with it.
+    assert!(core.orchestration.state().asks.iter().filter(|a| a.item_id.as_deref() == Some(legend.1.as_str())).all(|a| a.state != AskState::Open));
     // Re-synced, and the start's pass: it stays Done.
     rpc.sync_route_card(&dump, &legend.0);
     rpc.sync_cards_of(map);
-    assert_eq!(rpc.settle_card_states().await, (vec![], vec![]));
+    rpc.settle_card_states().await;
     assert_eq!(card(&core, &legend.1), WorkState::Done);
 
-    // Another card, at work (an outcome so far), moved to Done; then its
-    // work really fails.
+    // Another card, at work (an outcome so far), marked done; its work
+    // failing later doesn't take it back: the person's word stands.
     super::watchers::record_outcome(&core.orchestration, &rpc, map, &dump, &rebuild.0, "x", "Rebuilding; tests next.".into(), Some(RouteState::Answered)).await;
     assert_eq!(card(&core, &rebuild.1), WorkState::Active);
-    op(&core, Caller::Local, json!({"op":"upsertItem","item":{"id":rebuild.1,"state":"done"}})).await.unwrap();
+    op(&core, Caller::Local, json!({"op":"closeItem","id":rebuild.1})).await.unwrap();
     rpc.sync_cards_of(map);
-    assert_eq!(card(&core, &rebuild.1), WorkState::Done, "kept while nothing new happens");
+    assert_eq!(card(&core, &rebuild.1), WorkState::Done);
     super::watchers::record_outcome(&core.orchestration, &rpc, map, &dump, &rebuild.0, "x", "The rebuild failed.".into(), Some(RouteState::Failed)).await;
-    assert_eq!(card(&core, &rebuild.1), WorkState::Blocked, "a new failure still shows");
-    assert_eq!(core.orchestration.item(&rebuild.1).unwrap().moved_at, None, "the move is spent");
-    core.sessions.shutdown().await;
-}
-
-#[tokio::test]
-async fn a_card_set_by_hand_before_the_mark_existed_is_kept_at_start() {
-    let (_temp, core) = core().await;
-    let map = "9ad131f1-map";
-    let (dump, _, routes) = routed_thread(&core, map, &["Feedback on the Timeline legend"]).await;
-    let rpc = core.rpc_service();
-    super::watchers::record_outcome(&core.orchestration, &rpc, map, &dump, &routes[0].0, "x", "Fixed.".into(), Some(RouteState::Done)).await;
-    // Set by hand on an older engine (no mark): back in Now though its
-    // route is done. (One left in Review is re-judged instead: the Review
-    // test below.)
-    core.orchestration
-        .patch_item(WorkItemPatch { id: Some(routes[0].1.clone()), state: Some(WorkState::Active), ..Default::default() })
-        .unwrap();
-    assert_eq!(rpc.settle_card_states().await, (vec![], vec![routes[0].1.clone()]));
-    rpc.sync_cards_of(map);
-    assert_eq!(card(&core, &routes[0].1), WorkState::Active, "a later sync keeps it");
-    assert_eq!(rpc.settle_card_states().await, (vec![], vec![]), "once");
+    assert_eq!(placed(&core, &rebuild.1).place, Place::Done);
+    // Until they reopen it: then its failure asks.
+    op(&core, Caller::Local, json!({"op":"reopenItem","id":rebuild.1})).await.unwrap();
+    let row = placed(&core, &rebuild.1);
+    assert_eq!((row.place, row.status), (Place::NeedsYou, CardStatus::Failed));
     core.sessions.shutdown().await;
 }
 
@@ -1843,15 +1819,14 @@ async fn idle_crew_threads_are_archived_and_an_unarchive_starts_over() {
     assert_eq!(core.workspace.orchestration_state().settings.crew_idle_hours, 12, "kept through another change");
     op(&core, Caller::Local, json!({"op":"updateSettings","crewIdleHours":6})).await.unwrap();
 
-    // A crew thread on a card in Review (done working, waiting on merge).
-    let item = op(&core, agent(&auth), json!({"op":"upsertItem","item":{"title":"Login redirect","state":"review"}}))
-        .await
-        .unwrap();
+    // A crew thread on a card waiting to be looked at (done working).
+    let item = op(&core, agent(&auth), json!({"op":"upsertItem","item":{"title":"Login redirect"}})).await.unwrap();
     chat(&core, "worker", "Worker", Some((auth.as_str(), "crew"))).await;
     op(&core, Caller::Local, json!({"op":"addToCrew","orchestratorId":auth,"chatId":"worker","role":"fix","itemId":item}))
         .await
         .unwrap();
     assert!(core.orchestration.item(&item).unwrap().threads.contains(&"worker".to_owned()));
+    to_review(&core, &item).await;
 
     let chats = || core.workspace.read_chats().unwrap();
     let st = || core.workspace.orchestration_state();
@@ -1866,7 +1841,7 @@ async fn idle_crew_threads_are_archived_and_an_unarchive_starts_over() {
 
     assert!(core.workspace.chat("worker").unwrap().unwrap().archived, "archived as the person's Archive does");
     let card = core.orchestration.item(&item).unwrap();
-    assert_eq!(card.state, WorkState::Review, "its column kept");
+    assert_eq!(placed(&core, &item).place, zeron_proto::orchestration::Place::NeedsYou, "its place kept");
     assert!(!card.threads.contains(&"worker".to_owned()));
     assert!(card.links.iter().any(|l| l.kind == LinkKind::Chat && l.target == "worker" && l.label == "Worker"));
     assert!(core.orchestration.crew_of("worker").unwrap().archived_seen_at.is_some());
@@ -1924,15 +1899,26 @@ async fn review_holds_only_what_waits_on_the_person() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     assert!(r[..2].iter().all(|(_, item)| card(&core, item) == WorkState::Active), "mid-work: Now");
-    // Finished with an open PR: Review, the PR first.
+    // Finished with an open PR: something for the person to look at (the
+    // engine's own ask: Looks good, or what to change), the PR first.
     outcome(&core, map, &dump, &r[2].0, "I opened the PR against `zeron/zgx`: https://github.com/zeronsh/zeron/pull/1403\n\nNot merged yet.", RouteState::Done).await;
     assert_eq!(card(&core, &r[2].1), WorkState::Review);
+    {
+        use zeron_proto::orchestration::{CardStatus, Place};
+        let row = placed(&core, &r[2].1);
+        assert_eq!((row.place, row.status), (Place::NeedsYou, CardStatus::Review));
+        let ask = core.orchestration.state().asks.into_iter().find(|a| Some(&a.id) == row.asks.first()).unwrap();
+        assert_eq!(ask.origin, AskOrigin::Review);
+        assert_eq!(ask.options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(), ["Looks good"]);
+        assert!(ask.context.as_deref().is_some_and(|c| c.contains("pull/1403")), "{:?}", ask.context);
+    }
     assert!(card_outcome_of(&core, &r[2].1).starts_with("Review: PR https://github.com/zeronsh/zeron/pull/1403\n\n"), "{}", card_outcome_of(&core, &r[2].1));
-    // Finished on a decision for the person: not finished; Now, and the
-    // question is one ask, on this card.
+    // Finished on a decision for the person: not finished; the question is
+    // one ask, on this card, and the card needs them.
     outcome(&core, map, &dump, &r[3].0, "Four variants are built and scored.\n\nWhich do you want: the inline tag, or the coloured edge?", RouteState::Done).await;
-    assert_eq!(card(&core, &r[3].1), WorkState::Active);
-    let asks: Vec<_> = asks_from(&core, map).into_iter().filter(|a| a.state == AskState::Open).collect();
+    assert_eq!(placed(&core, &r[3].1).place, zeron_proto::orchestration::Place::NeedsYou);
+    assert_eq!(card(&core, &r[3].1), WorkState::Blocked, "what an older reader sees");
+    let asks: Vec<_> = asks_from(&core, map).into_iter().filter(|a| a.state == AskState::Open && !a.origin.engine()).collect();
     assert_eq!(asks.len(), 1, "{asks:#?}");
     assert_eq!(asks[0].item_id.as_deref(), Some(r[3].1.as_str()));
     assert_eq!(asks[0].options.len(), 2);
@@ -1951,53 +1937,6 @@ async fn review_holds_only_what_waits_on_the_person() {
     op(&core, Caller::Local, json!({"op":"upsertItem","item":{"id":r[2].1,"state":"done"}})).await.unwrap();
     core.rpc_service().sync_cards_of(map);
     assert_eq!(card(&core, &r[2].1), WorkState::Done);
-    core.sessions.shutdown().await;
-}
-
-#[tokio::test]
-async fn the_start_restates_cards_the_old_rule_left_in_review() {
-    let (_temp, core) = core().await;
-    let map = "9ad131f1-map";
-    let (dump, _, r) = routed_thread(&core, map, &["Map device rename", "Changes panel diff scroll", "Timeline legend", "Topology variants", "Mine to keep"]).await;
-    let rpc = core.rpc_service();
-    // As the old rule left them: an outcome so far (thread state unknown
-    // here), a finished PR, a finished nothing, a finished decision the
-    // Brain dump put in Review by hand, and one the person moved there.
-    outcome(&core, map, &dump, &r[0].0, "Renamed in the heading; now wiring Topology.", RouteState::Answered).await;
-    outcome(&core, map, &dump, &r[1].0, "**PR #1402 is open** and waiting for review/merge: https://github.com/zeronsh/zgx/pull/1402", RouteState::Done).await;
-    outcome(&core, map, &dump, &r[2].0, "Legend fixed; tests pass.", RouteState::Done).await;
-    outcome(&core, map, &dump, &r[3].0, "Variants built.", RouteState::Done).await;
-    outcome(&core, map, &dump, &r[4].0, "Done.", RouteState::Done).await;
-    // (Old routes carried no review: the PR one's is cleared to match.)
-    core.orchestration.workspace().write_orchestration(|doc| {
-        let mut d = doc.dump(&dump).unwrap();
-        for route in &mut d.routes {
-            route.review = None;
-        }
-        doc.upsert_dump(&d);
-    });
-    for (_, item) in &r[..4] {
-        core.orchestration.patch_item(WorkItemPatch { id: Some(item.clone()), state: Some(WorkState::Review), ..Default::default() }).unwrap();
-    }
-    core.orchestration
-        .patch_item(WorkItemPatch { id: Some(r[3].1.clone()), outcome: Some(Some("Waiting on your pick (built on orch/topo-variants). Recommend (a).".into())), ..Default::default() })
-        .unwrap();
-    op(&core, Caller::Local, json!({"op":"upsertItem","item":{"id":r[4].1,"state":"review"}})).await.unwrap();
-
-    let (restated, _) = rpc.settle_card_states().await;
-    assert_eq!(
-        [card(&core, &r[0].1), card(&core, &r[1].1), card(&core, &r[2].1), card(&core, &r[3].1), card(&core, &r[4].1)],
-        [WorkState::Active, WorkState::Review, WorkState::Done, WorkState::Active, WorkState::Review],
-        "working → Now; PR stays Review; a decision → Now with its ask; nothing → Done; moved by hand kept"
-    );
-    assert!(card_outcome_of(&core, &r[1].1).starts_with("Review: PR https://github.com/zeronsh/zgx/pull/1402"));
-    // The card waiting on a decision got the ask it never had, on it.
-    let asks: Vec<_> = asks_from(&core, map).into_iter().filter(|a| a.state == AskState::Open).collect();
-    assert_eq!(asks.len(), 1, "{asks:#?}");
-    assert_eq!(asks[0].item_id.as_deref(), Some(r[3].1.as_str()));
-    assert!(asks[0].question.contains("Waiting on your pick"));
-    assert!(restated.contains(&r[0].1) && restated.contains(&r[2].1));
-    assert_eq!(rpc.settle_card_states().await, (vec![], vec![]), "once");
     core.sessions.shutdown().await;
 }
 
@@ -2021,6 +1960,13 @@ async fn approve_closes_a_review_and_request_changes_sends_it_back_to_work() {
     core.rpc_service().sync_cards_of(map);
     assert_eq!(rpc_settle(&core).await, (vec![], vec![]));
     assert_eq!(card(&core, &r[0].1), WorkState::Done);
+    {
+        use zeron_proto::orchestration::{CloseHow, Mover};
+        let row = placed(&core, &r[0].1);
+        assert_eq!(row.closed.as_ref().map(|c| (c.how, c.by)), Some((CloseHow::Accepted, Mover::You)));
+        assert_eq!(row.reason, "You approved it");
+        assert!(row.asks.is_empty(), "its question closed with it");
+    }
     // Request changes: an empty one is refused; the text goes to the
     // thread, and the card is back in Now.
     assert!(op(&core, Caller::Local, json!({"op":"requestChanges","id":r[1].1,"text":"  "})).await.is_err());
@@ -2154,6 +2100,9 @@ async fn a_comment_on_a_card_reference_reaches_the_cards_thread() {
     let card = op(&core, Caller::Local, upsert("Topology lines", "worker", "active")).await.unwrap();
     let review = op(&core, Caller::Local, upsert("Curved edges", "worker", "review")).await.unwrap();
     let rework = op(&core, Caller::Local, upsert("Dashed rails", "fixer", "review")).await.unwrap();
+    // (A column isn't set: these two really wait for the person to look.)
+    to_review(&core, &review).await;
+    to_review(&core, &rework).await;
     let loose = op(&core, Caller::Local, json!({"op":"upsertItem","item":{"title":"Someday","detail":"Old idea"}}))
         .await
         .unwrap();
@@ -2183,6 +2132,8 @@ async fn a_comment_on_a_card_reference_reaches_the_cards_thread() {
     let r = route_row(&core, &dump, &id);
     assert_eq!((r.target.clone(), r.state), (RouteTarget::Chat { id: "worker".into() }, RouteState::Delivered));
     assert_eq!(r.item_id, None, "the card stays its own route's");
+    // (Work on its way to its thread: Running, once worked out.)
+    core.rpc_service().derive_all(std::slice::from_ref(&card), chrono::Utc::now());
     assert_eq!(core.orchestration.item(&card).unwrap().state, WorkState::Active);
 
     // A Review card the person approves: approveItem, as its button does.
@@ -2210,6 +2161,7 @@ async fn a_comment_on_a_card_reference_reaches_the_cards_thread() {
     // A "looks good" cut out of "doesn't look good" approves nothing: the
     // whole sentence is judged, and sent as the change asked for.
     let again = op(&core, Caller::Local, upsert("Legend", "fixer", "review")).await.unwrap();
+    to_review(&core, &again).await;
     let dump2 = op(&core, Caller::Local, json!({"op":"dump","text":"it doesn't look good yet",
         "refs":[{"kind":"card","id":again,"label":"Legend","context":{"state":"review"}}]})).await.unwrap();
     op(&core, agent(&brain), json!({"op":"route","dumpId":dump2,"excerpt":"look good","target":{"kind":"note"},
@@ -2220,10 +2172,10 @@ async fn a_comment_on_a_card_reference_reaches_the_cards_thread() {
     let late = op(&core, Caller::Local, upsert("Late", "fixer", "active")).await.unwrap();
     let dump3 = op(&core, Caller::Local, json!({"op":"dump","text":"approve",
         "refs":[{"kind":"card","id":late,"label":"Late","context":{"state":"review"}}]})).await.unwrap();
-    op(&core, Caller::Local, json!({"op":"upsertItem","item":{"id":late,"state":"review"}})).await.unwrap();
+    to_review(&core, &late).await;
     op(&core, agent(&brain), json!({"op":"route","dumpId":dump3,"excerpt":"approve","target":{"kind":"note"},
         "intent":"info","message":"approve","reference":late})).await.unwrap();
-    assert_eq!(core.orchestration.item(&late).unwrap().state, WorkState::Review, "not a verdict");
+    assert!(placed(&core, &late).closed.is_none(), "not a verdict");
 
     // A card with no thread or owner keeps the comment.
     let id = op(
@@ -2408,14 +2360,9 @@ async fn the_start_raises_no_ask_the_person_already_answered() {
         let (dump, _, r) = routed_thread(&core, chat, &[title]).await;
         push(&core, chat, "u1", zeron_doc::MessageRole::User, title);
         push(&core, chat, "a1", zeron_doc::MessageRole::Assistant, asked);
-        // As the old rule left it: in Review, its route done with no review.
+        // Its turn ended on a decision: its route still going, the question
+        // an ask.
         outcome(&core, chat, &dump, &r[0].0, asked, RouteState::Done).await;
-        core.orchestration.workspace().write_orchestration(|doc| {
-            let mut d = doc.dump(&dump).unwrap();
-            d.routes[0].state = RouteState::Done;
-            d.routes[0].review = None;
-            doc.upsert_dump(&d);
-        });
         // The first's ask (from its outcome) stays open; the second's is
         // dismissed, as if it was never raised.
         if chat == "other-map" {
@@ -2423,9 +2370,6 @@ async fn the_start_raises_no_ask_the_person_already_answered() {
                 op(&core, Caller::Local, json!({"op":"dismissAsk","id":a.id})).await.unwrap();
             }
         }
-        core.orchestration
-            .patch_item(WorkItemPatch { id: Some(r[0].1.clone()), state: Some(WorkState::Review), ..Default::default() })
-            .unwrap();
         cards.push((chat, r[0].1.clone()));
     }
     let open_first = asks_from(&core, "9ad131f1-map").into_iter().filter(|a| a.state == AskState::Open).count();
@@ -2444,8 +2388,12 @@ async fn the_start_raises_no_ask_the_person_already_answered() {
     let second: Vec<_> = asks_from(&core, "other-map").into_iter().filter(|a| a.state == AskState::Open).collect();
     assert_eq!(second.len(), 1, "{second:#?}");
     assert_eq!(second[0].item_id.as_deref(), Some(cards[1].1.as_str()));
-    // Both wait in Now, not Review.
-    assert_eq!([card(&core, &cards[0].1), card(&core, &cards[1].1)], [WorkState::Active, WorkState::Active]);
+    // The unanswered one needs the person; the answered one doesn't (once
+    // the pass that follows an ask's change has run).
+    use zeron_proto::orchestration::Place;
+    rpc.board_pass_all(chrono::Utc::now());
+    assert_ne!(placed(&core, &cards[0].1).place, Place::NeedsYou);
+    assert_eq!(placed(&core, &cards[1].1).place, Place::NeedsYou);
     core.sessions.shutdown().await;
 }
 
@@ -2664,9 +2612,8 @@ async fn a_card_moved_by_hand_into_now_still_gets_its_decision_ask() {
         for a in asks_from(&core, chat) {
             op(&core, Caller::Local, json!({"op":"dismissAsk","id":a.id})).await.unwrap();
         }
+        // (An older Brain dump's move: accepted, and nothing moves.)
         op(&core, agent(&brain), json!({"op":"upsertItem","item":{"id":r[0].1,"state":"active"}})).await.unwrap();
-        let moved = core.orchestration.item(&r[0].1).unwrap();
-        assert!(moved.moved_at.is_some() && moved.state == WorkState::Active);
         cards.push((chat, r[0].1.clone()));
     }
     // The second: the person answered in its thread since.
@@ -2680,11 +2627,11 @@ async fn a_card_moved_by_hand_into_now_still_gets_its_decision_ask() {
     // Answered: none.
     assert!(open_asks(&core, "r9-answered").is_empty());
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0, "a reply in the thread needs no model");
-    // Their columns, and their marks, as they were.
-    for (_, item) in &cards {
-        let c = core.orchestration.item(item).unwrap();
-        assert!(c.state == WorkState::Active && c.moved_at.is_some());
-    }
+    // The one with its ask needs the person; the answered one doesn't.
+    use zeron_proto::orchestration::Place;
+    core.rpc_service().board_pass_all(chrono::Utc::now());
+    assert_eq!(placed(&core, &cards[0].1).place, Place::NeedsYou);
+    assert_ne!(placed(&core, &cards[1].1).place, Place::NeedsYou);
     // Once: the start's pass again raises nothing more.
     core.rpc_service().settle_card_states().await;
     assert_eq!(open_asks(&core, "r9-open").len(), 1);
@@ -2720,7 +2667,7 @@ async fn a_decision_followed_by_other_work_still_gets_its_ask() {
     assert!(open[0].question.contains("graph-label decision"), "{}", open[0].question);
     // Each relayed message since was judged once: neither answers it.
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
-    assert_eq!(card(&core, &r[0].1), WorkState::Active, "its column as it was");
+    assert_eq!(placed(&core, &r[0].1).place, zeron_proto::orchestration::Place::NeedsYou, "its ask puts it in Needs you");
     core.sessions.shutdown().await;
 }
 
@@ -2851,18 +2798,48 @@ async fn geese(core: &crate::EngineCore) -> (String, String) {
     (o, card)
 }
 
+/// Card `id` waits for the person to look at its result: its thread said
+/// done, its finish line is theirs to accept, and the engine asked.
+async fn to_review(core: &crate::EngineCore, id: &str) {
+    use zeron_proto::orchestration::{CardStatus, Finish, FinishKind, Place, ReportState, Word};
+    let rpc = core.rpc_service();
+    let now = chrono::Utc::now();
+    let thread = core.orchestration.item(id).unwrap().threads.first().cloned().unwrap_or_default();
+    rpc.with_card(id, now, |row, _| {
+        row.finish = Finish::of(FinishKind::Accept);
+        row.work_at = Some(now - chrono::Duration::minutes(10));
+        row.word = Some(Word { state: ReportState::Done, at: now - chrono::Duration::minutes(5), from: thread, summary: "Done".into(), report: None });
+        row.heard_at = Some(now - chrono::Duration::minutes(5));
+    });
+    rpc.derive_all(&[id.to_owned()], now);
+    let row = placed(core, id);
+    assert_eq!((row.place, row.status), (Place::NeedsYou, CardStatus::Review), "{id}");
+}
+
+/// Card `id`'s row: where it is.
+fn placed(core: &crate::EngineCore, id: &str) -> zeron_proto::orchestration::BoardCard {
+    core.rpc_service().board_card(id).unwrap_or_else(|| panic!("card {id} has no row"))
+}
+
 #[tokio::test]
-async fn an_agent_marks_blocked_only_with_the_persons_question() {
+async fn an_agents_state_is_ignored_and_its_ask_puts_the_card_in_needs_you() {
+    use zeron_proto::orchestration::{CardStatus, Place};
     let (_temp, core) = core().await;
     let (o, card) = geese(&core).await;
-    let refused = op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":card,"state":"blocked"}})).await.unwrap_err();
-    assert!(refused.contains("`ask`"), "{refused}");
-    assert_eq!(core.orchestration.item(&card).unwrap().state, WorkState::Active, "not moved");
+    // (Made with `state: active`, a thread that never ran: planned all the same.)
+    assert_eq!(placed(&core, &card).place, Place::Planned);
+    // An older prompt's `state`: accepted, and nothing moves.
+    for state in ["blocked", "done", "review", "active", "someday"] {
+        op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":card,"state":state}})).await.unwrap();
+        assert_eq!(placed(&core, &card).place, Place::Planned, "{state}");
+    }
+    assert_eq!(core.orchestration.item(&card).unwrap().state, WorkState::Planned, "what an older reader sees");
+    // Its question, raised with the card: Needs you.
     let reply = call(
         &core,
         agent(&o),
         methods::ORCHESTRATE,
-        json!({"op":"upsertItem","item":{"id":card,"state":"blocked"},
+        json!({"op":"upsertItem","item":{"id":card},
                "ask":{"question":"Ship Phase 1 today or fold it into Plan 12?","options":[{"label":"Fold into Plan 12"},{"label":"Do it now"}]}}),
     )
     .await
@@ -2872,14 +2849,18 @@ async fn an_agent_marks_blocked_only_with_the_persons_question() {
     assert_eq!(ask.item_id.as_deref(), Some(card.as_str()), "on the card, in Needs you");
     assert_eq!(ask.from_chat, o, "the answer goes to the orchestrator");
     assert_eq!(ask.state, AskState::Open);
-    assert_eq!(core.orchestration.item(&card).unwrap().state, WorkState::Blocked);
-    // Its ask open: Blocked again is fine without another.
-    op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":card,"state":"active"}})).await.unwrap();
-    op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":card,"state":"blocked"}})).await.unwrap();
+    let row = placed(&core, &card);
+    assert_eq!((row.place, row.status), (Place::NeedsYou, CardStatus::Asked));
+    assert_eq!(row.asks, [ask_id]);
+    assert_eq!(row.from, Some(Place::Planned));
+    assert_eq!(row.seq, 1, "its first move");
+    assert!(row.reason.starts_with("Asked you: Ship Phase 1"), "{}", row.reason);
+    assert_eq!(core.orchestration.item(&card).unwrap().state, WorkState::Blocked, "what an older reader sees");
 }
 
 #[tokio::test]
 async fn pausing_stops_the_thread_and_holds_it_for_the_person() {
+    use zeron_proto::orchestration::{CardStatus, Mover, Place};
     let (_temp, core) = core().await;
     let (o, card) = geese(&core).await;
     // Agents can't pause or resume.
@@ -2889,7 +2870,10 @@ async fn pausing_stops_the_thread_and_holds_it_for_the_person() {
     }
     op(&core, Caller::Local, json!({"op":"pauseItem","id":card})).await.unwrap();
     let paused = core.orchestration.item(&card).unwrap();
-    assert!(paused.paused(), "Blocked, in Paused");
+    assert!(paused.paused());
+    assert_eq!(paused.state, WorkState::Blocked, "an older reader's Paused group");
+    let row = placed(&core, &card);
+    assert_eq!((row.place, row.status), (Place::Planned, CardStatus::Paused));
     let stops = core
         .doc_host
         .open("geese-t1")
@@ -2901,22 +2885,16 @@ async fn pausing_stops_the_thread_and_holds_it_for_the_person() {
         .filter(|c| matches!(c.payload, SessionCommandPayload::Interrupt {}))
         .count();
     assert_eq!(stops, 1, "the stop button's command");
-    // The orchestrator can't move it out, nor needs an ask for it.
-    let refused = op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":card,"state":"active"}})).await.unwrap_err();
-    assert!(refused.contains("paused by the person"), "{refused}");
+    // The orchestrator can't take its thread off it.
     let refused = op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":card,"threads":[]}})).await.unwrap_err();
     assert!(refused.contains("paused by the person"), "its thread stays held: {refused}");
-    assert!(super::board_checks::plan_from(
-        &core.orchestration.state(),
-        &core.orchestration.workspace().read_chats().unwrap().into_iter().map(|c| (c.id.clone(), c)).collect(),
-        &Default::default(),
-        &Default::default(),
-        &[],
-        None,
-        chrono::Utc::now(),
-    )
-    .iter()
-    .all(|c| c.item != card), "a paused card is true as it is");
+    // Nor close it.
+    let refused = op(&core, agent(&o), json!({"op":"closeItem","id":card,"reason":"not needed"})).await.unwrap_err();
+    assert!(refused.contains("paused by the person"), "{refused}");
+    // Worked out again, however much later: paused as it is.
+    let rpc = core.rpc_service();
+    rpc.derive_all(std::slice::from_ref(&card), chrono::Utc::now() + chrono::Duration::hours(3));
+    assert_eq!(placed(&core, &card).status, CardStatus::Paused);
     // Its message to the thread waits, held.
     let before = sent(&core, "geese-t1").len();
     let held = call(
@@ -2938,12 +2916,16 @@ async fn pausing_stops_the_thread_and_holds_it_for_the_person() {
     assert_eq!(sent(&core, "geese-t1").len(), before, "not run");
     let queued = core.doc_host.open("geese-t1").unwrap().doc().read_queue().unwrap();
     assert!(queued.iter().any(|q| q.text.contains("carry on")), "queued: {queued:?}");
-    // The person resumes it into Now: the thread carries on.
+    assert_eq!(placed(&core, &card).status, CardStatus::Paused, "a held message isn't work on its way");
+    // The person resumes it: the thread carries on, and it is Running.
     op(&core, Caller::Local, json!({"op":"resumeItem","id":card})).await.unwrap();
     let resumed = core.orchestration.item(&card).unwrap();
     assert_eq!(resumed.state, WorkState::Active);
     assert!(resumed.paused_at.is_none());
     assert!(sent(&core, "geese-t1").iter().any(|p| p.contains("[Resumed]")), "{:?}", sent(&core, "geese-t1"));
+    let row = placed(&core, &card);
+    assert_eq!(row.place, Place::Running);
+    assert_eq!(row.by, Mover::You, "the person's move");
 }
 
 #[tokio::test]
@@ -2959,33 +2941,137 @@ async fn the_persons_move_to_blocked_pauses_and_out_of_it_resumes() {
 }
 
 #[tokio::test]
-async fn an_ask_answered_takes_its_card_out_of_blocked() {
+async fn an_ask_answered_takes_its_card_out_of_needs_you() {
+    use zeron_proto::orchestration::{CardStatus, EventKind, Mover, Place};
     let (_temp, core) = core().await;
     let (o, card) = geese(&core).await;
     let reply = call(
         &core,
         agent(&o),
         methods::ORCHESTRATE,
-        json!({"op":"upsertItem","item":{"id":card,"state":"blocked"},"ask":{"question":"Which way?"}}),
+        json!({"op":"upsertItem","item":{"id":card},"ask":{"question":"Which way?"}}),
     )
     .await
     .unwrap();
     let ask_id = reply["askId"].as_str().unwrap().to_owned();
+    assert_eq!(placed(&core, &card).place, Place::NeedsYou);
     op(&core, Caller::Local, json!({"op":"answerAsk","id":ask_id,"answer":"Fold it in"})).await.unwrap();
+    // The answer went to its orchestrator: that turn is on the card.
+    let row = placed(&core, &card);
+    assert_eq!((row.place, row.status), (Place::Running, CardStatus::Checking));
+    assert_eq!((row.from, row.by), (Some(Place::NeedsYou), Mover::You));
+    assert_eq!(row.reason, "You answered: Fold it in");
+    assert!(row.asks.is_empty());
+    assert_eq!(core.orchestration.item(&card).unwrap().state, WorkState::Active);
+    // Its timeline: each move, saying what was asked and answered (one
+    // line each, not two).
+    let lines: Vec<(EventKind, &str)> = row.events.iter().map(|e| (e.kind, e.text.as_str())).collect();
+    assert_eq!(lines, [(EventKind::Move, "Asked you: Which way?"), (EventKind::Move, "You answered: Fold it in")]);
+    assert_eq!(row.events[1].seq, Some(2));
+    assert_eq!((row.events[1].from, row.events[1].to), (Some(Place::NeedsYou), Some(Place::Running)));
+    // Worked out again: nothing more to do.
     let rpc = core.rpc_service();
-    let plan = rpc.plan_board_checks(chrono::Utc::now(), true);
-    let change = plan.iter().find(|c| c.item == card).expect("set straight");
-    assert_eq!(change.verdict.state, Some(WorkState::Active));
-    rpc.apply_changes(&plan, chrono::Utc::now());
-    let after = core.orchestration.item(&card).unwrap();
-    assert_eq!(after.state, WorkState::Active);
-    assert_eq!(after.check.unwrap().kind, CheckKind::Moved);
-    // Run again: nothing more to do.
-    assert!(rpc.plan_board_checks(chrono::Utc::now(), true).iter().all(|c| c.item != card));
+    assert!(rpc.derive_all(std::slice::from_ref(&card), chrono::Utc::now()).is_empty());
+}
+
+/// A card as an engine from before places left it: its item alone, in
+/// `state`, with no row.
+fn old_card(core: &crate::EngineCore, id: &str, owner: &str, state: WorkState, threads: &[&str]) {
+    let at = chrono::Utc::now() - chrono::Duration::hours(6);
+    let item: zeron_proto::orchestration::WorkItem = serde_json::from_value(json!({
+        "id": id, "orchestratorId": owner, "title": format!("Old {id}"), "state": state, "priority": "normal",
+        "threads": threads, "createdAt": at, "updatedAt": at, "threadsAt": at,
+        "doneAt": if state == WorkState::Done { json!(at) } else { Value::Null },
+    }))
+    .unwrap();
+    core.orchestration.workspace().write_orchestration(|doc| doc.upsert_work_item(&item));
 }
 
 #[tokio::test]
-async fn after_a_restart_every_board_is_set_straight_once() {
+async fn cards_from_before_places_are_mapped_by_the_table_once() {
+    use zeron_proto::orchestration::{CardStatus, CloseHow, MoveCause, Place};
+    let (_temp, core) = core().await;
+    let (o, _card) = geese(&core).await;
+    for (id, state) in [
+        ("later", WorkState::Inbox),
+        ("next", WorkState::Planned),
+        ("review", WorkState::Review),
+        ("done", WorkState::Done),
+        ("dropped", WorkState::Dropped),
+    ] {
+        old_card(&core, id, &o, state, &[]);
+    }
+    old_card(&core, "paused", &o, WorkState::Blocked, &[]);
+    core.orchestration.workspace().write_orchestration(|doc| {
+        let mut c = doc.work_item("paused").unwrap();
+        c.paused_at = Some(chrono::Utc::now());
+        doc.upsert_work_item(&c);
+    });
+    // Still in Now though its own thread reported done two hours ago (the
+    // old check's most frequent flag), and one whose thread reported
+    // nothing.
+    for (id, thread) in [("said-done", "said-done-t"), ("silent", "silent-t")] {
+        chat(&core, thread, "Worker", Some((o.as_str(), "crew"))).await;
+        op(&core, Caller::Local, json!({"op":"addToCrew","orchestratorId":o,"chatId":thread})).await.unwrap();
+        old_card(&core, id, &o, WorkState::Active, &[thread]);
+    }
+    let said_at = chrono::Utc::now() - chrono::Duration::hours(2);
+    core.orchestration.set_last_report(
+        "said-done-t",
+        zeron_proto::orchestration::ReportHead {
+            id: "r1".into(),
+            state: zeron_proto::orchestration::ReportState::Done,
+            summary: "Fixed and tested".into(),
+            at: said_at,
+        },
+    );
+    let rpc = core.rpc_service();
+    assert!(rpc.board_card("later").is_none(), "no row yet");
+    let moved = rpc.board_pass_all(chrono::Utc::now());
+    assert!(moved.is_empty(), "mapped, not moved: {moved:?}");
+    let at = |id: &str| {
+        let row = placed(&core, id);
+        (row.place, row.status)
+    };
+    assert_eq!(at("later"), (Place::Planned, CardStatus::Held), "Later: planned, held");
+    assert_eq!(at("next"), (Place::Planned, CardStatus::Next));
+    assert_eq!(at("paused"), (Place::Planned, CardStatus::Paused));
+    assert_eq!(at("review"), (Place::Done, CardStatus::Done), "Review with no ask and no PR: done");
+    assert_eq!(at("done"), (Place::Done, CardStatus::Done));
+    assert_eq!(at("dropped"), (Place::Dropped, CardStatus::Dropped));
+    // Found done when its thread said so, with nobody woken or asked.
+    let found = placed(&core, "said-done");
+    assert_eq!((found.place, found.since), (Place::Done, said_at), "done at the time of its report");
+    assert_eq!(found.closed.as_ref().map(|c| (c.how, c.note.as_deref())), Some((CloseHow::Report, Some("Fixed and tested"))));
+    assert!(!found.unseen());
+    assert_eq!(core.orchestration.item("said-done").unwrap().state, WorkState::Done);
+    // The silent one: nobody is on it, so the engine checks (its
+    // orchestrator woken, once).
+    let silent = placed(&core, "silent");
+    assert_eq!((silent.place, silent.status), (Place::Running, CardStatus::Checking));
+    assert!(silent.stall.as_ref().is_some_and(|s| s.woken_at.is_some()));
+    assert_eq!(sent(&core, &o).iter().filter(|m| m.starts_with("[Board] Nothing is moving")).count(), 1, "{:?}", sent(&core, &o));
+    assert!(sent(&core, &o).iter().any(|m| m.contains("\"Old silent\" (silent)")), "{:?}", sent(&core, &o));
+    // Mapped, not moved: no move to animate, nothing shown as new, and its
+    // old time kept (Earlier, not today).
+    let done = placed(&core, "done");
+    assert_eq!((done.seq, done.cause), (0, MoveCause::Mapped));
+    assert_eq!(done.closed.as_ref().map(|c| c.how), Some(CloseHow::Mapped));
+    assert!(!done.unseen());
+    assert!(chrono::Utc::now() - done.since > chrono::Duration::hours(5), "{}", done.since);
+    // What an older reader sees is what it saw (Review with nothing to
+    // review reads Done now).
+    for (id, state) in [("later", WorkState::Inbox), ("next", WorkState::Planned), ("paused", WorkState::Blocked), ("done", WorkState::Done)] {
+        assert_eq!(core.orchestration.item(id).unwrap().state, state, "{id}");
+    }
+    assert_eq!(core.orchestration.item("review").unwrap().state, WorkState::Done);
+    // A second pass changes nothing.
+    assert!(rpc.board_pass_all(chrono::Utc::now()).is_empty());
+}
+
+#[tokio::test]
+async fn a_restart_changes_no_cards_place() {
+    use zeron_proto::orchestration::Place;
     let temp = tempfile::tempdir().unwrap();
     let assemble = || {
         crate::EngineCore::assemble_with_profile(
@@ -2996,39 +3082,37 @@ async fn after_a_restart_every_board_is_set_straight_once() {
         )
         .unwrap()
     };
-    let card = {
+    let (asked, planned, done, before) = {
         let core = assemble();
-        let (_o, card) = geese(&core).await;
-        // Blocked under the old rules: no ask.
-        core.orchestration
-            .patch_item(WorkItemPatch { id: Some(card.clone()), state: Some(WorkState::Blocked), ..Default::default() })
-            .unwrap();
+        let (o, asked) = geese(&core).await;
+        op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":asked},"ask":{"question":"Which way?"}})).await.unwrap();
+        let planned = op(&core, agent(&o), json!({"op":"upsertItem","item":{"title":"Later work","later":true}})).await.unwrap();
+        let done = op(&core, agent(&o), json!({"op":"upsertItem","item":{"title":"Done work"}})).await.unwrap();
+        op(&core, Caller::Local, json!({"op":"closeItem","id":done})).await.unwrap();
+        let before: Vec<_> = [&asked, &planned, &done].into_iter().map(|id| placed(&core, id)).collect();
         // Stopped as the app stops it (the registry saved).
         core.shutdown().await;
-        card
+        (asked, planned, done, before)
     };
+    assert_eq!(before.iter().map(|r| r.place).collect::<Vec<_>>(), [Place::NeedsYou, Place::Planned, Place::Done]);
     let core = assemble();
     let rpc = core.rpc_service();
-    let plan = rpc.plan_board_checks(chrono::Utc::now(), true);
-    let items = core.orchestration.state().items;
-    assert!(plan.iter().any(|c| c.item == card), "plan {plan:?}; items {items:?}");
-    assert_eq!(plan.iter().find(|c| c.item == card).unwrap().verdict.raise, Some(super::board_checks::Raise::Blocked));
-    rpc.apply_changes(&plan, chrono::Utc::now());
-    let asks: Vec<Ask> =
-        core.orchestration.state().asks.into_iter().filter(|a| a.item_id.as_deref() == Some(card.as_str())).collect();
-    assert_eq!(asks.len(), 1);
-    assert!(asks[0].question.contains("Phase 1: ship"));
-    assert!(rpc.plan_board_checks(chrono::Utc::now(), true).iter().all(|c| c.item != card), "idempotent");
+    let (_, moved) = rpc.start_up_pass().await;
+    assert!(moved.is_empty(), "{moved:?}");
+    let after: Vec<_> = [&asked, &planned, &done].into_iter().map(|id| placed(&core, id)).collect();
+    assert_eq!(after, before, "the same rows: no move, no new number");
 }
 
-/// The start-up board check over a copy of real data, printed per board:
-/// what it would change, then applied (to the copy), then what a second pass
-/// would change. `BOARD_DRY_RUN_DIR` (a data dir copy), `BOARD_DRY_RUN_ORG`
-/// and `BOARD_DRY_RUN_USER` (its signed-in account). Never point it at a
-/// live data dir.
+/// The board worked out over a copy of real data, printed per board: where
+/// each card lands on the first pass (mapped from its old column, then
+/// worked out), what the engine would do (asks, wakes), then what a second
+/// pass right after and one ten minutes on would change. `BOARD_DRY_RUN_DIR`
+/// (a data dir copy), `BOARD_DRY_RUN_ORG` and `BOARD_DRY_RUN_USER` (its
+/// signed-in account). Never point it at a live data dir.
 #[tokio::test]
 #[ignore]
-async fn board_check_dry_run_on_copied_data() {
+async fn board_dry_run_on_copied_data() {
+    use zeron_proto::orchestration::Place;
     let dir = std::path::PathBuf::from(std::env::var("BOARD_DRY_RUN_DIR").expect("BOARD_DRY_RUN_DIR"));
     let org = std::env::var("BOARD_DRY_RUN_ORG").expect("BOARD_DRY_RUN_ORG");
     let user = std::env::var("BOARD_DRY_RUN_USER").expect("BOARD_DRY_RUN_USER");
@@ -3059,149 +3143,80 @@ async fn board_check_dry_run_on_copied_data() {
             .and_then(|id| state.orchestrators.iter().find(|x| x.id == id))
             .map_or_else(|| "(loose)".to_owned(), |x| format!("{}{}", x.name, if x.archived { " [archived]" } else { "" }))
     };
-    let print = |label: &str, plan: &[super::board_checks::Change]| {
-        println!("== {label}: {} card(s)", plan.len());
-        let mut by: std::collections::BTreeMap<String, Vec<String>> = Default::default();
-        for c in plan {
-            by.entry(name(&c.orchestrator)).or_default().push(c.to_string());
+    let mut old: std::collections::BTreeMap<String, usize> = Default::default();
+    for i in &state.items {
+        *old.entry(format!("{:?}{}", i.state, if i.paused() { " (paused)" } else { "" })).or_default() += 1;
+    }
+    println!("device {here}; {} boards; {} cards; old columns {old:?}; {} with a row", state.orchestrators.len(), state.items.len(), state.cards.len());
+    let tally = |label: &str| {
+        let state = core.orchestration.state();
+        let mut by: std::collections::BTreeMap<String, usize> = Default::default();
+        for c in &state.cards {
+            *by.entry(format!("{} / {}", c.place.label(), c.status.label())).or_default() += 1;
         }
-        for (board, lines) in by {
-            println!("-- {board}");
-            for l in lines {
-                println!("   {l}");
-            }
+        println!("== {label}: {} rows, {} open asks", state.cards.len(), state.asks.iter().filter(|a| a.state == AskState::Open).count());
+        for (place, n) in by {
+            println!("   {n:>4}  {place}");
+        }
+        state
+    };
+    let print = |label: &str, moved: &[super::board::Moved]| {
+        println!("== {label}: {} card(s) moved", moved.len());
+        for m in moved {
+            println!("   {m}");
         }
     };
-    let open: Vec<_> = state.items.iter().filter(|i| !i.removed).collect();
-    println!(
-        "device {here}; {} boards; {} cards on them ({} open)",
-        state.orchestrators.len(),
-        open.len(),
-        open.iter().filter(|i| !matches!(i.state, WorkState::Done | WorkState::Dropped)).count()
-    );
-    // Every card in Now, and what its threads read as.
-    {
-        let chats: std::collections::HashMap<String, zeron_proto::Chat> =
-            core.orchestration.workspace().read_chats().unwrap().into_iter().map(|c| (c.id.clone(), c)).collect();
-        let rows: std::collections::HashMap<String, zeron_proto::Session> = core
-            .orchestration
-            .workspace()
-            .watch_session_rows()
-            .borrow()
-            .iter()
-            .map(|s| (s.chat_id.clone(), s.clone()))
-            .collect();
-        let now_cards: Vec<_> = open.iter().filter(|i| i.state == WorkState::Active).collect();
-        let mut tally: std::collections::BTreeMap<&str, usize> = Default::default();
-        for c in &now_cards {
-            let of: Vec<_> = c.threads.iter().map(|t| super::board_checks::Thread::of(chats.get(t), rows.get(t), None, false, now)).collect();
-            let kind = if of.iter().any(|t| matches!(t, super::board_checks::Thread::Live { .. })) {
-                "a thread at work"
-            } else if of.is_empty() {
-                "no thread"
-            } else if of.iter().any(|t| matches!(t, super::board_checks::Thread::Errored { .. })) {
-                "thread errored"
-            } else if of.iter().any(|t| matches!(t, super::board_checks::Thread::Stopped { .. })) {
-                "thread stopped"
-            } else if of.iter().all(|t| matches!(t, super::board_checks::Thread::Idle)) {
-                "thread never ran"
-            } else {
-                "thread finished"
-            };
-            *tally.entry(kind).or_default() += 1;
-        }
-        println!("== in Now: {} ({tally:?})", now_cards.len());
-        for c in now_cards {
-            let threads: Vec<String> = c
-                .threads
-                .iter()
-                .map(|t| {
-                    let row = rows.get(t);
-                    format!(
-                        "{}={:?}{}",
-                        &t[..t.len().min(8)],
-                        super::board_checks::Thread::of(chats.get(t), row, None, false, now),
-                        row.map(|r| format!(
-                            " (row {:?}, updated {}{}{}{})",
-                            r.status,
-                            r.updated_at.format("%m-%d %H:%M"),
-                            r.waiting.as_ref().map(|w| format!(", waiting since {} on {:?}", w.since.format("%m-%d %H:%M"), w.on.iter().map(|o| zeron_proto::orchestration::prompt_text::one_line(&o.label, 40)).collect::<Vec<_>>())).unwrap_or_default(),
-                            if r.running_subagents > 0 { format!(", {} subagents", r.running_subagents) } else { String::new() },
-                            if r.background_tasks.is_empty() { String::new() } else { format!(", {} bg", r.background_tasks.len()) },
-                        ))
-                        .unwrap_or_default()
-                    )
-                })
-                .collect();
-            let asks = state.asks.iter().filter(|a| a.state == AskState::Open && a.item_id.as_deref() == Some(c.id.as_str())).count();
-            println!(
-                "   {} [{}] routed={} openAsks={} links={} threads=[{}] \"{}\"",
-                &c.id[..8],
-                name(&c.orchestrator_id),
-                c.source.is_some(),
-                asks,
-                c.links.len(),
-                threads.join(", "),
-                zeron_proto::orchestration::prompt_text::one_line(&c.title, 50)
-            );
-        }
+    let asks_before = state.asks.len();
+    let ids: Vec<String> = state.items.iter().map(|i| i.id.clone()).collect();
+    let was: std::collections::HashMap<String, String> = state
+        .items
+        .iter()
+        .map(|i| (i.id.clone(), format!("{:?}{}", i.state, if i.paused() { " (paused)" } else { "" })))
+        .collect();
+    let first = rpc.derive_all(&ids, now);
+    print("first pass (every card this device keeps)", &first);
+    let after = tally("after the first pass");
+    println!("   {} ask(s) raised by the engine", after.asks.len() - asks_before);
+    let woken = after.cards.iter().filter(|c| c.stall.as_ref().is_some_and(|s| s.woken_at.is_some())).count();
+    println!("   {woken} card(s) whose orchestrator is woken for them");
+    // Where each old column's cards went.
+    let mut went: std::collections::BTreeMap<String, usize> = Default::default();
+    for c in &after.cards {
+        *went.entry(format!("{} -> {} / {}", was.get(&c.id).map_or("?", String::as_str), c.place.label(), c.status.label())).or_default() += 1;
     }
-    // Cards to show whole (`BOARD_DRY_RUN_SHOW`: id prefixes, comma-separated).
-    for prefix in std::env::var("BOARD_DRY_RUN_SHOW").unwrap_or_default().split(',').filter(|p| !p.is_empty()) {
-        for c in state.items.iter().filter(|i| i.id.starts_with(prefix)) {
-            println!(
-                "== card {} {:?} removed={} threads={:?} check={:?} moved_at={:?} title={:?}",
-                c.id, c.state, c.removed, c.threads, c.check, c.moved_at, c.title
-            );
-        }
-        for c in state.items.iter().filter(|i| i.id.starts_with(prefix)) {
-            let chats = core.orchestration.workspace().read_chats().unwrap_or_default();
-            let rows = core.orchestration.workspace().read_sessions().unwrap_or_default();
-            let progress = core.orchestration.workspace().read_orchestration_with(|doc| doc.read_progress());
-            for t in &c.threads {
-                let chat = chats.iter().find(|x| &x.id == t);
-                println!(
-                    "   thread {t}: chat archived={:?} device={:?}",
-                    chat.map(|x| x.archived),
-                    chat.map(|x| x.device_id.clone())
-                );
-                if let Some(r) = rows.iter().find(|r| &r.chat_id == t) {
-                    println!(
-                        "     row {:?} updated {} started {:?} waiting={} subagents={} outcome={:?}",
-                        r.status, r.updated_at, r.started_at, r.waiting.is_some(), r.running_subagents, r.last_turn_outcome
-                    );
-                }
-                if let Some(p) = progress.iter().find(|p| &p.chat_id == t) {
-                    println!(
-                        "     progress {:?} updated {} step {:?} tool {:?} device {}",
-                        p.state, p.updated_at, p.last_step_at, p.tool_since, p.device_id
-                    );
-                }
-            }
-        }
-        for m in state.crew.iter().filter(|m| m.item_id.as_deref().is_some_and(|i| i.starts_with(prefix))) {
-            println!("   crew {} item {:?} released={}", m.chat_id, m.item_id, m.released);
-        }
+    for (line, n) in went {
+        println!("   {n:>4}  {line}");
     }
-    let kept = rpc.plan_board_checks(now, false);
-    let all = rpc.plan_board_checks(now, true);
-    print("kept by this device (what its start-up pass does)", &kept);
-    print("every board (all devices' passes together)", &all);
-    rpc.apply_changes(&all, now);
-    let asks = core.orchestration.state().asks.len() - state.asks.len();
-    println!("applied to the copy; {asks} ask(s) raised");
-    print("second pass right after", &rpc.plan_board_checks(now, true));
-    // Ten minutes on with nothing moved (threads as they are now): the
-    // stale flags aged, not the heartbeats.
-    core.orchestration.workspace().write_orchestration(|doc| {
-        for mut item in doc.read_work_items() {
-            if let Some(c) = item.check.as_mut().filter(|c| c.kind == CheckKind::Stale) {
-                c.since -= chrono::Duration::minutes(11);
-                doc.upsert_work_item(&item);
-            }
-        }
-    });
-    print("second pass with the stale flags 11 minutes old (to Review)", &rpc.plan_board_checks(now, true));
+    for a in after.asks.iter().filter(|a| a.origin.engine() && a.state == AskState::Open) {
+        println!("   ask [{:?}] {}", a.origin, zeron_proto::orchestration::prompt_text::one_line(&a.question, 100));
+    }
+    // What isn't closed, card by card.
+    for c in after.cards.iter().filter(|c| !c.place.closed()) {
+        let item = after.items.iter().find(|i| i.id == c.id);
+        println!(
+            "   {} [{}] was {} -> {} / {}{}{} threads={} links={} \"{}\"",
+            &c.id[..c.id.len().min(8)],
+            name(&item.and_then(|i| i.orchestrator_id.clone())),
+            was.get(&c.id).map_or("?", String::as_str),
+            c.place.label(),
+            c.status.label(),
+            c.note.as_ref().map(|n| format!(" ({n})")).unwrap_or_default(),
+            match &c.stall {
+                Some(s) if s.woken_at.is_some() => " [orchestrator woken]",
+                Some(_) => " [nobody to wake]",
+                None => "",
+            },
+            item.map_or(0, |i| i.threads.len()),
+            item.map_or(0, |i| i.links.iter().filter(|l| l.kind == LinkKind::Chat).count()),
+            zeron_proto::orchestration::prompt_text::one_line(item.map_or("", |i| i.title.as_str()), 50),
+        );
+    }
+    print("second pass right after", &rpc.derive_all(&ids, now));
+    print("ten minutes on, nothing else changed", &rpc.derive_all(&ids, now + chrono::Duration::minutes(10)));
+    let end = tally("at the end");
+    let nowhere = end.items.iter().filter(|i| !end.cards.iter().any(|c| c.id == i.id)).count();
+    println!("{nowhere} card(s) with no row (kept by another device)");
+    assert!(end.cards.iter().all(|c| c.place != Place::Other));
 }
 
 
@@ -3266,31 +3281,74 @@ async fn geese_row(core: &crate::EngineCore, status: zeron_proto::SessionStatus,
 
 #[tokio::test]
 async fn an_errored_threads_ask_closes_itself_once_it_works_again() {
+    use zeron_proto::orchestration::{CardStatus, Place};
     let (_temp, core) = core().await;
     let (_o, card) = geese(&core).await;
     let rpc = core.rpc_service();
-    // Its thread errored: Blocked, with the check's ask.
+    let ids = std::slice::from_ref(&card);
+    // Its thread errored. A moment first (a usage limit's mark, a resume,
+    // may be on its way), then the engine asks: Retry / Drop.
     geese_row(&core, zeron_proto::SessionStatus::Errored, Some(zeron_proto::DoneStatus::Errored)).await;
-    rpc.check_boards_on(chrono::Utc::now(), true).await;
+    rpc.derive_all(ids, chrono::Utc::now());
+    assert_eq!(placed(&core, &card).place, Place::Running, "just ended");
+    assert!(core.orchestration.state().asks.iter().all(|a| a.item_id.as_deref() != Some(card.as_str())));
+    rpc.derive_all(ids, chrono::Utc::now() + chrono::Duration::seconds(40));
+    let row = placed(&core, &card);
+    assert_eq!((row.place, row.status), (Place::NeedsYou, CardStatus::Failed));
     assert_eq!(core.orchestration.item(&card).unwrap().state, WorkState::Blocked);
     let raised: Vec<Ask> = core.orchestration.state().asks.into_iter().filter(|a| a.item_id.as_deref() == Some(card.as_str())).collect();
     assert_eq!(raised.len(), 1);
     assert_eq!(raised[0].origin, AskOrigin::BoardCheck);
     assert_eq!(raised[0].state, AskState::Open);
-    // Resumed: working again. Its ask closes itself, and then the card is
-    // back in Now.
+    assert_eq!(raised[0].options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(), ["Retry", "Drop it"]);
+    assert_eq!(row.asks, [raised[0].id.clone()]);
+    // Asked once.
+    rpc.derive_all(ids, chrono::Utc::now() + chrono::Duration::seconds(90));
+    assert_eq!(core.orchestration.state().asks.iter().filter(|a| a.item_id.as_deref() == Some(card.as_str())).count(), 1);
+    // Working again: its ask closes itself, and the card is Running.
     geese_row(&core, zeron_proto::SessionStatus::Working, None).await;
-    rpc.check_boards_on(chrono::Utc::now(), true).await;
+    rpc.derive_all(ids, chrono::Utc::now());
     let ask = core.orchestration.state().asks.into_iter().find(|a| a.id == raised[0].id).unwrap();
     assert_eq!(ask.state, AskState::Answered);
     assert_eq!(ask.answered_via, Some(AnswerVia::Resolved));
     assert_eq!(ask.answer.as_deref(), Some("resolved: its thread is working again"));
-    rpc.check_boards_on(chrono::Utc::now(), true).await;
+    let row = placed(&core, &card);
+    assert_eq!((row.place, row.status), (Place::Running, CardStatus::Working));
     assert_eq!(core.orchestration.item(&card).unwrap().state, WorkState::Active);
 }
 
 #[tokio::test]
+async fn retry_and_drop_are_done_by_the_engine() {
+    use zeron_proto::orchestration::{CardStatus, CloseHow, Mover, Place};
+    for (pick, option) in [("Retry", 0), ("Drop it", 1)] {
+        let (_temp, core) = core().await;
+        let (o, card) = geese(&core).await;
+        let rpc = core.rpc_service();
+        geese_row(&core, zeron_proto::SessionStatus::Errored, Some(zeron_proto::DoneStatus::Errored)).await;
+        rpc.derive_all(std::slice::from_ref(&card), chrono::Utc::now() + chrono::Duration::seconds(40));
+        let ask = core.orchestration.state().asks.into_iter().find(|a| a.item_id.as_deref() == Some(card.as_str())).unwrap();
+        let (thread_before, owner_before) = (sent(&core, "geese-t1").len(), sent(&core, &o).len());
+        op(&core, Caller::Local, json!({"op":"answerAsk","id":ask.id,"option":option})).await.unwrap();
+        assert_eq!(sent(&core, &o).len(), owner_before, "{pick}: its orchestrator isn't woken to relay it");
+        let row = placed(&core, &card);
+        if pick == "Retry" {
+            let said = sent(&core, "geese-t1");
+            assert_eq!(said.len(), thread_before + 1, "{said:?}");
+            assert!(said.last().unwrap().contains("[Retry]"), "{said:?}");
+            assert_eq!((row.place, row.status), (Place::Running, CardStatus::Queued));
+            assert_eq!(row.by, Mover::You);
+        } else {
+            assert_eq!(sent(&core, "geese-t1").len(), thread_before);
+            assert_eq!(row.place, Place::Dropped);
+            assert_eq!(row.closed.as_ref().map(|c| (c.how, c.by)), Some((CloseHow::Dropped, Mover::You)));
+            assert_eq!(core.orchestration.item(&card).unwrap().state, WorkState::Dropped);
+        }
+    }
+}
+
+#[tokio::test]
 async fn after_a_crash_a_chat_picked_back_up_gets_no_error_ask() {
+    use zeron_proto::orchestration::Place;
     let temp = tempfile::tempdir().unwrap();
     let assemble = || {
         crate::EngineCore::assemble_with_profile(
@@ -3306,6 +3364,8 @@ async fn after_a_crash_a_chat_picked_back_up_gets_no_error_ask() {
         let (_o, card) = geese(&core).await;
         // Working when the engine dies: no shutdown, only what was saved.
         geese_row(&core, zeron_proto::SessionStatus::Working, None).await;
+        core.rpc_service().derive_all(std::slice::from_ref(&card), chrono::Utc::now());
+        assert_eq!(placed(&core, &card).place, Place::Running);
         core.orchestration.workspace().flush();
         card
     };
@@ -3313,9 +3373,10 @@ async fn after_a_crash_a_chat_picked_back_up_gets_no_error_ask() {
     // The crash recovery marks its cut-off turn errored.
     geese_row(&core, zeron_proto::SessionStatus::Errored, Some(zeron_proto::DoneStatus::Errored)).await;
     let rpc = core.rpc_service();
-    let (resumed, changed) = rpc.start_up_pass(true).await;
+    let (resumed, moved) = rpc.start_up_pass().await;
     assert_eq!(resumed, ["geese-t1"], "picked back up");
-    assert!(changed.iter().all(|c| c.item != card), "its card left alone: {changed:?}");
+    assert!(moved.iter().all(|c| c.item != card), "its card stays where it was: {moved:?}");
+    assert_eq!(placed(&core, &card).place, Place::Running);
     assert_eq!(core.orchestration.item(&card).unwrap().state, WorkState::Active);
     assert!(
         core.orchestration.state().asks.iter().all(|a| a.item_id.as_deref() != Some(card.as_str())),
@@ -3381,7 +3442,7 @@ async fn a_send_the_stop_cut_off_mid_execute_resumes_its_chat_once() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     let rpc = core.rpc_service();
-    let (resumed, _) = rpc.start_up_pass(true).await;
+    let (resumed, _) = rpc.start_up_pass().await;
     assert_eq!(resumed, ["cut-chat"]);
     // Once: a later pass resumes nothing.
     assert!(rpc.resume_cut_off_sends().is_empty());
@@ -3426,11 +3487,14 @@ async fn an_engine_shutdown_with_crew_mid_turn_never_pauses_their_cards() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     let later = chrono::Utc::now() + chrono::Duration::minutes(5);
-    let plan = rpc.plan_board_checks(later, true);
-    assert!(plan.iter().all(|c| c.verdict.paused != Some(true)), "never paused by the check: {plan:?}");
-    // While the engine shuts down, no check runs at all.
+    rpc.derive_all(std::slice::from_ref(&card), later);
+    assert!(!core.orchestration.item(&card).unwrap().paused(), "a stop never pauses a card");
+    // While the engine shuts down, nothing is worked out at all.
+    let before = placed(&core, &card);
     core.sessions.shutdown().await;
-    assert!(rpc.check_boards_on(later, true).await.is_empty());
+    assert!(rpc.derive_all(std::slice::from_ref(&card), later + chrono::Duration::minutes(30)).is_empty());
+    assert!(rpc.board_pass(true, later + chrono::Duration::minutes(30)).is_empty());
+    assert_eq!(placed(&core, &card), before);
     let after = core.orchestration.item(&card).unwrap();
     assert!(!after.paused(), "{after:?}");
 }
@@ -3439,12 +3503,10 @@ async fn an_engine_shutdown_with_crew_mid_turn_never_pauses_their_cards() {
 async fn a_card_the_engine_paused_is_unpaused_at_start_and_its_held_sends_go() {
     let (_temp, core) = core().await;
     let (o, card) = geese(&core).await;
-    // Paused by the board check itself (as the old rule did).
-    core.orchestration
-        .patch_item(WorkItemPatch { id: Some(card.clone()), state: Some(WorkState::Blocked), ..Default::default() })
-        .unwrap();
+    // Paused by the old board check itself (as its rule once did).
     core.orchestration.workspace().write_orchestration(|doc| {
         let mut c = doc.work_item(&card).unwrap();
+        c.state = WorkState::Blocked;
         c.paused_at = Some(chrono::Utc::now());
         c.check = Some(CardCheck {
             kind: CheckKind::Moved,
@@ -3458,7 +3520,7 @@ async fn a_card_the_engine_paused_is_unpaused_at_start_and_its_held_sends_go() {
     let held = call(&core, agent(&o), methods::QUEUE_MESSAGE, json!({"chatId":"geese-t1","text":"deploy now"})).await.unwrap();
     assert_eq!(held["delivery"], "held");
     // A card the person paused stays paused.
-    let mine = op(&core, agent(&o), json!({"op":"upsertItem","item":{"title":"Mine","state":"active","threads":["geese-t1"]}}))
+    let mine = op(&core, agent(&o), json!({"op":"upsertItem","item":{"title":"Mine","threads":["geese-t1"]}}))
         .await
         .unwrap();
     op(&core, Caller::Local, json!({"op":"pauseItem","id":mine})).await.unwrap();
@@ -3467,8 +3529,7 @@ async fn a_card_the_engine_paused_is_unpaused_at_start_and_its_held_sends_go() {
     assert_eq!(rpc.unpause_engine_pauses(chrono::Utc::now()).await, [card.clone()]);
     let after = core.orchestration.item(&card).unwrap();
     assert!(!after.paused());
-    assert_eq!(after.state, WorkState::Active);
-    assert!(after.check.unwrap().note.contains("the engine had paused it"));
+    assert!(after.check.is_none());
     assert!(core.orchestration.item(&mine).unwrap().paused(), "the person's own pause stands");
     // Run again: nothing more.
     assert!(rpc.unpause_engine_pauses(chrono::Utc::now()).await.is_empty());
@@ -3540,4 +3601,326 @@ async fn a_paused_card_with_no_thread_dropped_on_now_starts_one() {
     let after = core.orchestration.item(&card).unwrap();
     assert!(!after.paused());
     assert!(reply["threadId"].is_string() || reply["queued"] == true, "started (or queued for its crew): {reply}");
+}
+
+/// A board as engines from before places left it, written to
+/// `BOARD_FIXTURE_DIR` (a scratch data dir) for the sandbox app: two paused
+/// orchestrators hosted on that dir's device (nothing in it can start an
+/// agent), their crew threads on a pretend other device, and cards in every
+/// old column, some of them untrue the ways the old check's log shows
+/// (still in Now though its thread reported done, in Review with nothing to
+/// review, Done while its thread works). Shown under the base engine and
+/// under this one, it is the before and after of the board.
+#[tokio::test]
+#[ignore]
+async fn board_fixture() {
+    use zeron_proto::orchestration::{ProgressState, ReportHead, ReportState};
+    let dir = std::path::PathBuf::from(std::env::var("BOARD_FIXTURE_DIR").expect("BOARD_FIXTURE_DIR"));
+    let core = crate::EngineCore::assemble_with_profile(
+        crate::EngineProfile::local(&dir).unwrap(),
+        std::sync::Arc::new(HarnessRegistry::new()),
+        HarnessId::Codex,
+        None,
+    )
+    .unwrap();
+    const CLOUD: &str = "cloud-1";
+    let now = chrono::Utc::now();
+    let ago = |mins: i64| now - chrono::Duration::minutes(mins);
+    let mut owners = Vec::new();
+    for (name, goal) in [("Zeron fixes", "Keep the Zeron dev app healthy"), ("Exnomic VPN", "Ship the mesh")] {
+        let o = op(&core, Caller::Local, json!({"op":"createOrchestrator","name":name,"goal":goal})).await.unwrap();
+        op(&core, Caller::Local, json!({"op":"updateOrchestrator","id":o,"paused":true})).await.unwrap();
+        owners.push(o);
+    }
+    let (fixes, vpn) = (owners[0].clone(), owners[1].clone());
+    // A crew thread on the other device: its session row and progress row
+    // as its host would have written them.
+    let thread = |id: &'static str, title: &'static str, owner: String| {
+        let core = &core;
+        async move {
+            let mut params = json!({"op":"createChat","chatId":id,"deviceId":CLOUD,"parentChatId":owner,"childKind":"crew",
+                "config":{"harness":"codex","sandbox":"workspace-write"}});
+            params["parentChatId"] = json!(owner);
+            call(core, Caller::Local, methods::MUTATE, params).await.unwrap();
+            call(core, Caller::Local, methods::MUTATE, json!({"op":"renameChat","chatId":id,"title":title})).await.unwrap();
+            op(core, Caller::Local, json!({"op":"addToCrew","orchestratorId":owner,"chatId":id})).await.unwrap();
+        }
+    };
+    #[derive(Clone, Copy, PartialEq)]
+    enum T {
+        Working,
+        Finished,
+        Errored,
+        Never,
+    }
+    let stand = |id: &str, t: T, note: &str, ended: i64| {
+        if t == T::Never {
+            return;
+        }
+        let mut row = idle(id);
+        row.device_id = CLOUD.into();
+        row.started_at = Some(ago(ended + 25));
+        row.updated_at = ago(ended);
+        match t {
+            T::Errored => {
+                row.status = zeron_proto::SessionStatus::Errored;
+                row.last_turn_outcome =
+                    Some(zeron_proto::NativeTurnOutcome { status: zeron_proto::DoneStatus::Errored, finished_at: ago(ended) });
+            }
+            T::Finished => {
+                row.last_turn_outcome =
+                    Some(zeron_proto::NativeTurnOutcome { status: zeron_proto::DoneStatus::Completed, finished_at: ago(ended) });
+            }
+            _ => {}
+        }
+        core.orchestration.workspace().record_session(&row);
+        // (At work: a tool running, as its progress row says.)
+        let progress: zeron_proto::orchestration::Progress = serde_json::from_value(json!({
+            "chatId": id, "deviceId": CLOUD,
+            "state": if t == T::Working { ProgressState::Working } else { ProgressState::Idle },
+            "startedAt": ago(ended + 25), "lastStepAt": ago(ended.min(1)), "note": note,
+            "tool": if t == T::Working { json!("cargo test -p zeron-zgx") } else { Value::Null },
+            "toolSince": if t == T::Working { json!(ago(3)) } else { Value::Null },
+            "updatedAt": ago(ended.min(1)),
+        }))
+        .unwrap();
+        core.orchestration.workspace().write_orchestration(|doc| doc.upsert_progress(&progress));
+    };
+    // A card in its old column: the item alone, no row.
+    let mut order = 0.0;
+    let mut card = |id: &str, owner: &str, title: &str, state: WorkState, threads: &[&str], made: i64, done: Option<i64>, outcome: &str| {
+        order += 1.0;
+        let item: zeron_proto::orchestration::WorkItem = serde_json::from_value(json!({
+            "id": id, "orchestratorId": owner, "title": title, "state": state, "priority": "normal", "order": order,
+            "threads": threads, "createdAt": ago(made), "updatedAt": ago(done.unwrap_or(made / 2)),
+            "threadsAt": if threads.is_empty() { Value::Null } else { json!(ago(made)) },
+            "movedAt": ago(made), "doneAt": done.map(ago),
+            "outcome": if outcome.is_empty() { Value::Null } else { json!(outcome) },
+        }))
+        .unwrap();
+        core.orchestration.workspace().write_orchestration(|doc| doc.upsert_work_item(&item));
+    };
+    let said = |chat: &str, state: ReportState, summary: &str, mins: i64| {
+        core.orchestration.set_last_report(chat, ReportHead { id: format!("r-{chat}"), state, summary: summary.into(), at: ago(mins) });
+    };
+
+    // ── Zeron fixes ─────────────────────────────────────────────────────────
+    thread("t-merge", "Merge main 0.3.8", fixes.clone()).await;
+    stand("t-merge", T::Finished, "The merge is committed and its tests match.", 6);
+    card("c-merge", &fixes, "Bring main (0.3.8) into orchestrators", WorkState::Blocked, &["t-merge"], 130, None, "The merge is committed and its tests match both sides. Two things are left that only you can do.");
+    let ask: Ask = serde_json::from_value(json!({
+        "id": "a-merge", "fromChat": "t-merge", "orchestratorId": fixes, "itemId": "c-merge", "kind": "approval",
+        "question": "Unlock 1Password and allow the push to your zgx fork?",
+        "options": [{"label": "Unlocked + push the fork", "detail": "Push zeron/main-merge and the fork"}, {"label": "Unlocked, don't push yet"}, {"label": "Wait"}],
+        "state": "open", "createdAt": ago(6), "context": "The merge is committed; signing failed (1Password locked).",
+    }))
+    .unwrap();
+    core.orchestration.workspace().write_orchestration(|doc| doc.upsert_ask(&ask));
+
+    thread("t-admin", "Admin app redesign", fixes.clone()).await;
+    stand("t-admin", T::Errored, "Building the Windows installer.", 12);
+    card("c-admin", &fixes, "Admin app redesign", WorkState::Active, &["t-admin"], 200, None, "Its thread hit an error while building the Windows installer.");
+
+    thread("t-rows", "Chat list rows", fixes.clone()).await;
+    stand("t-rows", T::Working, "Measuring on 700 chats: one status change went from 1,680 recomputes to 374. Checking the sidebar next.", 0);
+    card("c-rows", &fixes, "Chat list: only changed rows update", WorkState::Active, &["t-rows"], 45, None, "");
+
+    // Parked by its orchestrator though its thread works.
+    thread("t-tool", "Tool output error", fixes.clone()).await;
+    stand("t-tool", T::Working, "The fix is committed. Two test suites are running.", 0);
+    card("c-tool", &fixes, "Tool output error (tool_detail)", WorkState::Planned, &["t-tool"], 30, None, "");
+
+    thread("t-tel-a", "Telemetry server", fixes.clone()).await;
+    thread("t-tel-b", "Telemetry Android", fixes.clone()).await;
+    stand("t-tel-a", T::Finished, "Server side is done.", 50);
+    stand("t-tel-b", T::Working, "Server side is done. Wiring the Android client to it.", 0);
+    card("c-tel", &fixes, "Telemetry v2", WorkState::Active, &["t-tel-a", "t-tel-b"], 125, None, "");
+
+    // Still in Now though its thread reported done three hours ago (the
+    // old check's most frequent flag).
+    thread("t-tokens", "Token usage report", fixes.clone()).await;
+    stand("t-tokens", T::Finished, "Report written.", 185);
+    said("t-tokens", ReportState::Done, "$7,840 in 14 days; 23% is orchestration overhead. The answer is in Q&A.", 185);
+    card("c-tokens", &fixes, "Token usage breakdown", WorkState::Active, &["t-tokens"], 260, None, "$7,840 in 14 days; 23% is orchestration overhead. The answer is in Q&A.");
+
+    // In Review with nothing to review.
+    thread("t-release", "Release 7bb4a19a3", fixes.clone()).await;
+    stand("t-release", T::Finished, "Live check clean, data counts match.", 95);
+    said("t-release", ReportState::Done, "Live check clean, data counts match.", 95);
+    card("c-release", &fixes, "Release 7bb4a19a3", WorkState::Review, &["t-release"], 150, None, "Its thread finished: live check clean, data counts match.");
+
+    // Done while its thread still works on something else.
+    thread("t-board", "Board cards answer asks", fixes.clone()).await;
+    stand("t-board", T::Working, "Following up on the float.", 0);
+    said("t-board", ReportState::Done, "Merged into zeron/orchestrators and live in the dev app.", 31);
+    card("c-board", &fixes, "Board cards on the orchestrator page answer asks", WorkState::Done, &["t-board"], 190, Some(31), "Merged into zeron/orchestrators and live in the dev app.");
+
+    card("c-deploy", &fixes, "Deploy lane: Windows MSI 65621", WorkState::Done, &[], 100, Some(48), "Published as sequence 8.");
+    card("c-sidebar", &fixes, "Keyed sidebar shape", WorkState::Planned, &[], 60, None, "");
+    card("c-morph", &fixes, "Board to list morph", WorkState::Inbox, &[], 400, None, "");
+    card("c-smoke", &fixes, "Windows installer smoke test", WorkState::Planned, &[], 55, None, "");
+    core.orchestration.workspace().write_orchestration(|doc| {
+        let mut c = doc.work_item("c-smoke").unwrap();
+        c.depends_on = vec!["c-sidebar".into()];
+        doc.upsert_work_item(&c);
+    });
+    thread("t-ios", "iOS Live screen", fixes.clone()).await;
+    stand("t-ios", T::Finished, "Stopped.", 300);
+    card("c-ios", &fixes, "iOS: port Android's Live screen", WorkState::Blocked, &["t-ios"], 700, None, "");
+    core.orchestration.workspace().write_orchestration(|doc| {
+        let mut c = doc.work_item("c-ios").unwrap();
+        c.paused_at = Some(ago(300));
+        doc.upsert_work_item(&c);
+    });
+    for (n, title) in ["Sidebar crew rows", "Control room idle CPU", "Atlas texture crash", "Needs you float", "Brain dump model pick", "Progress widget"].iter().enumerate() {
+        let done = 60 * 24 * (n as i64 + 2);
+        card(&format!("c-old-{n}"), &fixes, title, WorkState::Done, &[], done + 600, Some(done), "Merged.");
+    }
+
+    // ── Exnomic VPN ─────────────────────────────────────────────────────────
+    // Its thread finished and reported nothing: nobody is on it.
+    thread("t-relay", "RU-entry relay", vpn.clone()).await;
+    stand("t-relay", T::Finished, "Heartbeat jitter is in.", 40);
+    card("c-relay", &vpn, "RU-entry relay: resist cascade detection", WorkState::Active, &["t-relay"], 500, None, "");
+    thread("t-probes", "Speed probes", vpn.clone()).await;
+    stand("t-probes", T::Working, "Devices measure every route in turn; wiring the table.", 0);
+    card("c-probes", &vpn, "Proactive speed and reachability probes", WorkState::Active, &["t-probes"], 220, None, "");
+    thread("t-never", "Per-app exits", vpn.clone()).await;
+    stand("t-never", T::Never, "", 0);
+    card("c-exits", &vpn, "Per-app exit preferences", WorkState::Planned, &["t-never"], 90, None, "");
+    card("c-invite", &vpn, "Invite-page downloads throttled in Russia", WorkState::Done, &[], 3000, Some(1500), "Mirror added.");
+
+    core.shutdown().await;
+    println!("fixture written to {} (orchestrators {fixes}, {vpn})", dir.display());
+}
+
+#[tokio::test]
+async fn an_agent_chooses_a_finish_line_and_later_only_when_it_makes_the_card() {
+    use zeron_proto::orchestration::{CardStatus, FinishKind, Place};
+    let (_temp, core) = core().await;
+    let (o, _card) = geese(&core).await;
+    // Made with its finish line, kept for later (the tool's `later` is the
+    // op's `held`).
+    let made = op(&core, agent(&o), json!({"op":"upsertItem","item":{"title":"Land the fix","held":true,
+        "finish":{"line":"merged","into":"main"}}}))
+        .await
+        .unwrap();
+    let row = placed(&core, &made);
+    assert_eq!((row.finish.line, row.finish.into.as_deref(), row.held), (FinishKind::Merged, Some("main"), true));
+    assert_eq!((row.place, row.status), (Place::Planned, CardStatus::Held));
+    // After that its finish line is the person's: an agent can't trade a
+    // merge for its own word.
+    let refused = op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":made,"finish":{"line":"report"}}})).await.unwrap_err();
+    assert!(refused.contains("chosen when the card is made"), "{refused}");
+    assert_eq!(placed(&core, &made).finish.line, FinishKind::Merged);
+    // (The same line again changes nothing and is fine, with its other edits.)
+    op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":made,"outcome":"Halfway","finish":{"line":"merged","into":"main"}}}))
+        .await
+        .unwrap();
+    // It may let its held card go, never hold one that's under way.
+    op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":made,"held":false}})).await.unwrap();
+    assert_eq!(placed(&core, &made).status, CardStatus::Next);
+    let refused = op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":made,"held":true}})).await.unwrap_err();
+    assert!(refused.contains("only the person holds a card"), "{refused}");
+    assert!(!placed(&core, &made).held);
+    // The person does both.
+    op(&core, Caller::Local, json!({"op":"upsertItem","item":{"id":made,"finish":{"line":"accept"}}})).await.unwrap();
+    op(&core, Caller::Local, json!({"op":"holdItem","id":made,"held":true})).await.unwrap();
+    let row = placed(&core, &made);
+    assert_eq!((row.finish.line, row.held), (FinishKind::Accept, true));
+}
+
+#[tokio::test]
+async fn only_a_cards_own_thread_says_where_it_stands() {
+    use zeron_proto::orchestration::{EventKind, Report, ReportState};
+    let (_temp, core) = core().await;
+    let (o, card) = geese(&core).await;
+    // Another thread of the same crew, on its own card.
+    chat(&core, "geese-t2", "Phase 2 thread", None).await;
+    op(&core, Caller::Local, json!({"op":"addToCrew","orchestratorId":o,"chatId":"geese-t2"})).await.unwrap();
+    let report = |from: &str, id: &str, at: chrono::DateTime<chrono::Utc>| Report {
+        id: id.into(),
+        orchestrator_id: o.clone(),
+        from_chat: from.into(),
+        item_id: Some(card.clone()),
+        state: ReportState::Done,
+        summary: "All done".into(),
+        detail: String::new(),
+        links: Vec::new(),
+        progress: None,
+        at,
+        result: None,
+    };
+    // It reports done naming the first card (which, as a report on a card
+    // does, puts it on that card as it speaks): on the timeline, but not the
+    // card's word, so nothing closes.
+    let now = chrono::Utc::now();
+    core.orchestration.workspace().write_orchestration(|doc| {
+        let mut c = doc.work_item(&card).unwrap();
+        c.threads.push("geese-t2".into());
+        c.threads_at = Some(now);
+        doc.upsert_work_item(&c);
+    });
+    super::board::on_report(core.orchestration.workspace(), &report("geese-t2", "r-other", now));
+    let row = placed(&core, &card);
+    assert!(row.word.is_none(), "{:?}", row.word);
+    assert!(row.events.iter().any(|e| e.kind == EventKind::Report && e.text == "Reported done: All done"));
+    // It came onto the card by its own report: the card's guest, however
+    // long it has been there when it says done again.
+    assert_eq!(row.guests, ["geese-t2"]);
+    super::board::on_report(core.orchestration.workspace(), &report("geese-t2", "r-again", now + chrono::Duration::seconds(3)));
+    let row = placed(&core, &card);
+    assert!(row.word.is_none() && row.closed.is_none(), "{:?} {:?}", row.word, row.closed);
+    // The card's own thread (put on it before it spoke) says it.
+    super::board::on_report(core.orchestration.workspace(), &report("geese-t1", "r-own", now + chrono::Duration::seconds(5)));
+    let word = placed(&core, &card).word.expect("its word");
+    assert_eq!((word.from.as_str(), word.state), ("geese-t1", ReportState::Done));
+    // Filed twice (a redelivered command): once.
+    super::board::on_report(core.orchestration.workspace(), &report("geese-t1", "r-own", now + chrono::Duration::seconds(5)));
+    assert_eq!(placed(&core, &card).events.iter().filter(|e| e.about.as_deref() == Some("r-own")).count(), 1);
+}
+
+#[tokio::test]
+async fn a_thread_that_reports_itself_onto_a_card_never_speaks_for_it() {
+    use zeron_proto::orchestration::{Report, ReportState};
+    let (_temp, core) = core().await;
+    let (o, card) = geese(&core).await;
+    chat(&core, "geese-t2", "Phase 2 thread", None).await;
+    op(&core, Caller::Local, json!({"op":"addToCrew","orchestratorId":o,"chatId":"geese-t2"})).await.unwrap();
+    let done = |id: &str, at: chrono::DateTime<chrono::Utc>| Report {
+        id: id.into(),
+        orchestrator_id: o.clone(),
+        from_chat: "geese-t2".into(),
+        item_id: Some(card.clone()),
+        state: ReportState::Done,
+        summary: "All done".into(),
+        detail: String::new(),
+        links: Vec::new(),
+        progress: None,
+        at,
+        result: None,
+    };
+    // Its report names another thread's card: filing it puts it on the card,
+    // as the card's guest.
+    op(&core, agent("geese-t2"), json!({"op":"report","state":"message","summary":"Looking at this too","itemId":card})).await.unwrap();
+    assert!(core.orchestration.item(&card).unwrap().threads.iter().any(|t| t == "geese-t2"));
+    assert_eq!(placed(&core, &card).guests, ["geese-t2"]);
+    // Long on the card by now, it says done, and again: never the card's
+    // word, and nothing closes.
+    let now = chrono::Utc::now();
+    for (n, mins) in [10, 20].into_iter().enumerate() {
+        super::board::on_report(core.orchestration.workspace(), &done(&format!("r-{n}"), now + chrono::Duration::minutes(mins)));
+        let row = placed(&core, &card);
+        assert!(row.word.is_none() && row.closed.is_none(), "{:?} {:?}", row.word, row.closed);
+    }
+    // Its orchestrator's edits that keep it on the card change nothing.
+    op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":card,"threads":["geese-t1","geese-t2"],"outcome":"Under way"}})).await.unwrap();
+    assert_eq!(placed(&core, &card).guests, ["geese-t2"]);
+    // Taken off and put back by its orchestrator, it is the card's own.
+    op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":card,"threads":["geese-t1"]}})).await.unwrap();
+    assert!(placed(&core, &card).guests.is_empty());
+    op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":card,"threads":["geese-t1","geese-t2"]}})).await.unwrap();
+    super::board::on_report(core.orchestration.workspace(), &done("r-own", chrono::Utc::now() + chrono::Duration::minutes(30)));
+    let word = placed(&core, &card).word.expect("its word");
+    assert_eq!((word.from.as_str(), word.state), ("geese-t2", ReportState::Done));
 }

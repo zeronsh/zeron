@@ -19,7 +19,7 @@
 
 use chrono::{DateTime, Duration as TimeDelta, Utc};
 use zeron_proto::orchestration::{
-    AskState, CrewMember, LinkKind, OrchestrationState, WorkLink, WorkState,
+    AskState, CardStatus, CrewMember, LinkKind, OrchestrationState, Place, WorkLink, WorkState,
 };
 use zeron_proto::{Chat, ChildKind, Session, SessionStatus};
 
@@ -90,10 +90,19 @@ pub(crate) fn kept(
     if state.asks.iter().any(|a| a.state == AskState::Open && a.from_chat == chat.id) {
         return Some(Kept::OpenAsk);
     }
-    let in_play = |state: WorkState| matches!(state, WorkState::Active | WorkState::Blocked);
+    // A card at work, paused, or waiting on the person's answer (which
+    // comes back to its thread); not one that only waits to be looked at.
+    // By its row; from before places, by its old column.
+    let in_play = |i: &zeron_proto::orchestration::WorkItem| match state.cards.iter().find(|c| c.id == i.id) {
+        Some(row) => {
+            row.place == Place::Running
+                || (matches!(row.place, Place::NeedsYou | Place::Snoozed) && row.status != CardStatus::Review)
+                || i.paused()
+        }
+        None => matches!(i.state, WorkState::Active | WorkState::Blocked),
+    };
     let on_card = state.items.iter().filter(|i| !i.removed).any(|i| {
-        in_play(i.state)
-            && (i.threads.iter().any(|t| *t == chat.id) || member.item_id.as_deref() == Some(i.id.as_str()))
+        in_play(i) && (i.threads.contains(&chat.id) || member.item_id.as_deref() == Some(i.id.as_str()))
     });
     on_card.then_some(Kept::CardInPlay)
 }
@@ -296,6 +305,7 @@ mod tests {
             crew,
             // (A 12-hour window the person chose: what these tests time.)
             settings: OrchestrationSettings { crew_auto_archive: true, crew_idle_hours: 12, crew_idle_hours_set: true },
+            cards: Vec::new(),
             ..Default::default()
         }
     }

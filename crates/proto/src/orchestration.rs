@@ -9,8 +9,14 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub mod board;
 pub mod flow;
 pub mod frames;
+
+pub use board::{
+    BoardCard, CardChip, CardEvent, CardStatus, CheckWhy, Checking, ChipKind, CloseHow, Closed, EventKind, Finish, FinishKind,
+    MoveCause, Mover, Place, Stall, Word,
+};
 
 /// `Option<Option<T>>` that keeps `null` apart from absent: absent = `None`
 /// (unchanged), `null` = `Some(None)` (cleared).
@@ -598,6 +604,10 @@ pub struct WorkItem {
     pub title: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub detail: String,
+    /// The column a build from before places shows it in. Written by the
+    /// engine with every move, mapped from its place
+    /// ([`BoardCard::old_state`]); never read back. Where a card is:
+    /// [`board::place_of`].
     pub state: WorkState,
     pub priority: Priority,
     /// Explicit progress 0–1. When `None`, clients derive it from the
@@ -636,14 +646,12 @@ pub struct WorkItem {
     pub space_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
-    /// Why an Up next card waits, one line ("Auth's crew is full: 2 of 2
+    /// Why a planned card waits, one line ("Auth's crew is full: 2 of 2
     /// working"). Cleared when it starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<String>,
-    /// When its column was set by hand (the person's move, or an `item_upsert`
-    /// with a state): what its route says no longer moves it, until that
-    /// route's state changes from `moved_route_state` (a failure, a reroute,
-    /// work done after).
+    /// From before places: when its column was set by hand. No longer
+    /// written; kept on rows an older engine made.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moved_at: Option<DateTime<Utc>>,
     /// Its route's state when it was moved (none for a card with no route).
@@ -652,19 +660,17 @@ pub struct WorkItem {
     /// When the person approved it from Review (`approveItem`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_at: Option<DateTime<Utc>>,
-    /// Paused by the person (`pauseItem`, or a stop of its thread): the card
-    /// is Blocked, its threads stopped and their queued messages held, until
-    /// the person resumes it (`resumeItem`). Only the person (or its thread
-    /// working again) takes a card out of Paused; agents can't.
+    /// Paused by the person (`pauseItem`): its threads stopped and their
+    /// queued messages held, until the person resumes it (`resumeItem`). It
+    /// waits in Planned, "Paused by you". Only the person (or its thread
+    /// working again) takes the pause off; agents can't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_at: Option<DateTime<Utc>>,
-    /// What the engine's board check found wrong with the card, or what it
-    /// changed on it (see [`CardCheck`]). Cleared once the card is true again.
+    /// From before places: what the old board check found wrong with the
+    /// card. Cleared when the card is first worked out; never set now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<CardCheck>,
-    /// When a thread was last added to it: its thread may not have started
-    /// yet, so the board check gives it [`STALE_GRACE_SECS`] before calling
-    /// its work finished.
+    /// When a thread was last added to it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threads_at: Option<DateTime<Utc>>,
     /// Where it stands in its orchestrator's flow, when a flow's run made it.
@@ -676,9 +682,10 @@ pub struct WorkItem {
 }
 
 impl WorkItem {
-    /// In Blocked's Paused group: Blocked, held by the person.
+    /// Paused by the person (`pausedAt`): its threads stopped, their queues
+    /// held, until they resume it.
     pub fn paused(&self) -> bool {
-        self.state == WorkState::Blocked && self.paused_at.is_some()
+        self.paused_at.is_some()
     }
 }
 
@@ -914,6 +921,12 @@ pub enum AskOrigin {
     /// a Blocked card nobody asked about): it closes itself, answered
     /// "resolved: …" (`answeredVia: resolved`), once that condition clears.
     BoardCheck,
+    /// The engine raised it because nothing was moving on its card
+    /// (Continue / Close / Drop). Closes itself when something does.
+    Stall,
+    /// The engine keeps it while a card's PR is open or its result waits
+    /// to be accepted. Closes itself when that ends.
+    Review,
     #[serde(other)]
     Other,
 }
@@ -921,6 +934,12 @@ pub enum AskOrigin {
 impl AskOrigin {
     pub fn is_tool(&self) -> bool {
         *self == AskOrigin::Tool
+    }
+
+    /// Raised by the engine for a card's condition, and closed by it when
+    /// the condition clears.
+    pub fn engine(&self) -> bool {
+        matches!(self, AskOrigin::BoardCheck | AskOrigin::Stall | AskOrigin::Review)
     }
 }
 
@@ -1686,10 +1705,11 @@ pub mod role_prompts {
         format!(
             "You are an orchestrator in Zeron: {name}. Goal: {goal}. Your rules: {rules}.\n\
 - Split work into board items (`item_upsert`) and run each through crew threads (`create_chat`, kind crew, one item each; stack work that touches the same files).\n\
-- Keep item states true; put results in `outcome`. Not started: `planned` is Up next (real work queued for its turn, or held while your crew is full); `inbox` is Later (someday, remind me, ideas; never started on its own). `active` (Now) only while a thread works on it: when its thread finishes, move its card in the same turn (Review when the person has something to check, else Done).\n\
-- Blocked means waiting on the person: set it with `item_upsert(state: blocked, ask: {{question, options, recommendation}})` in one call, so the question is in Needs you. Never Blocked without a question (Zeron refuses it).\n\
-- A paused card (Blocked, Paused) is the person's decision: never move it or message its thread; it waits until they resume it.\n\
-- A [Board check] lists cards whose column isn't true: move each, or say in its outcome why it stays.\n\
+- Zeron works out where each card is on the board from what happens (its thread working, a report, an ask, its finish line): you never set a column. Give a new card its finish line (`finish`): `report` (its thread reports done; the default), `merged` (its branch lands on `into`), `pr` (its PR is merged or closed) or `accept` (the person says it looks good). Put results in `outcome`. A card for later that shouldn't start on its own: `later: true`.\n\
+- When a card needs the person, `ask` on it (`item_id`), or pass `ask` with `item_upsert`: the question is in Needs you and its answer comes back to you.\n\
+- A card is done when it crosses its finish line. Close one yourself (`item_close`, with the reason) only when the work turned out unnecessary or is finished in a way its line can't see; Zeron refuses while a thread works on it.\n\
+- A paused card is the person's decision: never message its thread; it waits until they resume it.\n\
+- A [Board] message lists cards of yours nothing is moving on: for each, send its thread on, ask the person, or close it with the reason.\n\
 - After starting or messaging crew, end your turn: don't wait on crew threads (`wait_for_turn`, `wait`). Their reports arrive together as 'Crew updates' and wake you; act on them, don't echo them.\n\
 - Check how a crew thread is going with `progress`, never by messaging it: a message interrupts its work.\n\
 - Ask the person only via `ask`, only for real decisions.\n\
@@ -1719,15 +1739,15 @@ pub mod role_prompts {
 - Split the dump into fragments by meaning (one per destination and intent); quote each fragment verbatim as `excerpt`.\n\
 - Route each to the existing orchestrator or thread that owns it. Only an owner of that very work counts; an old thread that merely shares a word doesn't.\n\
 - Bias to action: a task with no owner is a `newThread` in the project it is about (`world` lists projects: the one the text names, else the most recently active), with `project` set; it starts at once with your `message` as its first prompt. A new, lasting, multi-part area of work is a `newOrchestrator` in that project.\n\
-- But don't start what the person says should wait. Something for later (\"later\", \"someday\", \"remind me\", \"next week\", \"when I get a chance\", \"at some point\", a reminder) is a Later card (someday, remind me, ideas; never started on its own): target `item` with no id, `project` set. Something to do after something else (\"after X\", \"once Y is done\", \"then\", low priority) is an Up next card (queued real work): target `item` with no id, `card: next`, `project` set. Either way give it a `title`; the person starts it from the board.\n\
+- But don't start what the person says should wait. Something for later (\"later\", \"someday\", \"remind me\", \"next week\", \"when I get a chance\", \"at some point\", a reminder) is a card held for later (someday, remind me, ideas; never started on its own): target `item` with no id, `project` set. Something to do after something else (\"after X\", \"once Y is done\", \"then\", low priority) is a planned card (queued real work): target `item` with no id, `card: next`, `project` set. Either way give it a `title`; the person starts it from the board.\n\
 - Rewrite `message` so the target can act without the rest of the dump.\n\
 - Give every task a `title`: 3 to 6 words naming the work, as a board card would (\"Delete cards from the Board\", \"Fix slash menu in Codex chats\"); never the message's opening words.\n\
 - Intent `question` is only for a question the person wants answered (\"are X ever used?\", \"when does 2.0 ship?\"): its answer waits for them in the Control room. A question that is part of work they hand over (\"fix X, and can you also check Y?\", \"why does X happen? find the root cause and fix it\", \"could you add Z?\") is a `task`; a rhetorical one (\"so much better, right?\") is `info`.\n\
 - A task, priority or cancel for a crew thread goes to its orchestrator (`world` lists each crew thread under it, with its item): route it to the orchestrator, naming the thread in `message`. Zeron delivers it there whichever you pick. Info and questions may go to the thread itself.\n\
 - A question about how a thread's work is going (\"how's X going?\", \"progress on Y?\") is never the thread's to answer: call `progress` on it, then `route` it as a question to that thread with `progress: true`. Zeron answers it from the thread's progress and doesn't interrupt the thread.\n\
 - Use `unsure` only when two or more existing owners fit, with them as candidates; never because nothing exists. The person is asked where it goes.\n\
-- The Scratchpad is the person's. Write to it (`scratchpad_append`, or `scratchpad_write` with a `heading` to update a section; `scratchpad_read` first) only when they explicitly ask (\"add this to my scratchpad\", \"note this in the scratchpad\"); that part isn't routed. Otherwise route ideas as before (something for later is a Later card).\n\
-- A dump may list references: elements the person dragged in (@card, @chat, @orchestrator, @device, @ask, @qa, @comm), each with an id. A fragment about one is routed with `reference` set to its id, and Zeron delivers it there: a reply to an @ask answers that ask; a comment on an @card goes to the card's thread (on a card in Review, an approval approves it and anything else asks for changes; quote the person's words verbatim as `excerpt`); a message for an @chat goes to that chat; a follow-up on a @qa goes to the chat that answered it. An @device is where a new thread starts; an @orchestrator or @comm is context (target the orchestrator when it owns the work).\n\
+- The Scratchpad is the person's. Write to it (`scratchpad_append`, or `scratchpad_write` with a `heading` to update a section; `scratchpad_read` first) only when they explicitly ask (\"add this to my scratchpad\", \"note this in the scratchpad\"); that part isn't routed. Otherwise route ideas as before (something for later is a card held for later).\n\
+- A dump may list references: elements the person dragged in (@card, @chat, @orchestrator, @device, @ask, @qa, @comm), each with an id. A fragment about one is routed with `reference` set to its id, and Zeron delivers it there: a reply to an @ask answers that ask; a comment on an @card goes to the card's thread (on a card waiting for the person to look at it, an approval approves it and anything else asks for changes; quote the person's words verbatim as `excerpt`); a message for an @chat goes to that chat; a follow-up on a @qa goes to the chat that answered it. An @device is where a new thread starts; an @orchestrator or @comm is context (target the orchestrator when it owns the work).\n\
 - Finish with `dump_done` and a one-line summary.\n\
 - Never do the work yourself.";
 
@@ -2202,6 +2222,11 @@ pub struct OrchestrationState {
     /// The profile's settings (defaults until one is written).
     #[serde(default)]
     pub settings: OrchestrationSettings,
+    /// Each card's place on the board and what the engine keeps about it
+    /// ([`BoardCard`], by its item's id). A card with no row here is shown
+    /// by its old column ([`board::place_of_old`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cards: Vec<BoardCard>,
 }
 
 /// `Orchestrate` RPC params: one op. Ops marked (agent) are also allowed
@@ -2315,10 +2340,13 @@ pub enum OrchestrateOp {
     /// Create (no `id`) or patch an item. Replies `{ id }` (plus `askId`
     /// when `ask` raised one). (agent)
     ///
-    /// Board rules: an agent's move to `blocked` needs an open ask on the
-    /// card, or `ask` here (raised with the move, on the card); an agent
-    /// never changes a paused card's state. The person's move to `blocked`
-    /// pauses the card ([`OrchestrateOp::PauseItem`]).
+    /// A card's place is worked out by the engine ([`BoardCard`]): an
+    /// agent's `state` is accepted and ignored. The person's `state` (an
+    /// older app's drag) is read as what they did: `done` marks it done,
+    /// `dropped` drops it, `blocked` pauses it, `active` resumes or starts
+    /// it, `inbox` holds it for later, `planned` lets it go. An agent never
+    /// changes a paused card's threads. `ask` raises a question on the card
+    /// in the same step.
     #[serde(rename_all = "camelCase")]
     UpsertItem {
         item: WorkItemPatch,
@@ -2482,6 +2510,29 @@ pub enum OrchestrateOp {
         route_id: String,
         target: RouteTarget,
     },
+    /// Close a card: done, for `reason`; with `dropped`, taken off the plan
+    /// instead. The person closes any card at any time (mark done, drop).
+    /// An orchestrator closes its own with a reason (the work turned out
+    /// unnecessary, or is finished in a way its finish line can't see), and
+    /// is refused while a thread works on it. Replies `{ id }`. (agent: an
+    /// orchestrator, its own cards)
+    #[serde(rename_all = "camelCase")]
+    CloseItem {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dropped: bool,
+    },
+    /// The person reopens a closed card: it goes where its facts put it.
+    /// Replies `{ id }`.
+    ReopenItem { id: String },
+    /// The person keeps a card for later (`held`: it never starts on its
+    /// own) or lets it go. Replies `{ id }`.
+    HoldItem { id: String, held: bool },
+    /// The person opened a card: the moves the engine made up to now no
+    /// longer show its dot. Replies `{ id }`.
+    SeenItem { id: String },
 }
 
 /// Fields of a work item to set; `id: None` creates.
@@ -2521,6 +2572,14 @@ pub struct WorkItemPatch {
     /// Why it waits; `Some(None)` clears.
     #[serde(default, skip_serializing_if = "Option::is_none", with = "double_option")]
     pub waiting: Option<Option<String>>,
+    /// Its finish line ([`Finish`]): what ends it. Kept in its
+    /// [`BoardCard`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish: Option<Finish>,
+    /// Kept for later (`true`: it never starts on its own) or let go
+    /// (`false`). Kept in its [`BoardCard`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<bool>,
 }
 
 /// The column a task's wording says it waits in, or `None` (start it now):

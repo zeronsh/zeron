@@ -205,6 +205,11 @@ impl DocHost {
             return Ok((SessionCommandStatus::Rejected, Some("not from this orchestrator's crew".into())));
         };
         let report = &report;
+        // Its card's timeline, its thread's word, and (a report that wakes)
+        // this orchestrator's turn on the card.
+        if let Some(ws) = self.workspace() {
+            crate::orchestration::board::on_report(ws, report);
+        }
         let debounce = self.crew_wake_debounce();
         let spawn = {
             let mut chats = lock(&self.inner.crew_inbox.chats);

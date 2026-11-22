@@ -8,7 +8,7 @@
 //!   the plain stream sends it. First, and again now and then (a reader that
 //!   lost track is set right).
 //! - `{"frame": "delta", "version": n, "items": {…}, …}`: per collection that
-//!   changed (`orchestrators`, `crew`, `items`, `asks`, `dumps`), a
+//!   changed (`orchestrators`, `crew`, `items`, `asks`, `dumps`, `cards`), a
 //!   [`ListDelta`]; and `settings`, whole, when they changed.
 //!
 //! `version` counts the frames of one subscription (the snapshot is 1). A
@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::{Ask, CrewMember, Dump, OrchestrationSettings, OrchestrationState, Orchestrator, WorkItem};
+use super::{Ask, BoardCard, CrewMember, Dump, OrchestrationSettings, OrchestrationState, Orchestrator, WorkItem};
 
 /// A row's key in its collection: its `id`, a crew row's `chatId`.
 pub trait Keyed {
@@ -174,6 +174,10 @@ pub struct OrchestrationDelta {
     pub dumps: Option<ListDelta<Dump>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<OrchestrationSettings>,
+    /// The cards whose place (or what the engine keeps about them) changed:
+    /// one row per card that moved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cards: Option<ListDelta<BoardCard>>,
 }
 
 impl OrchestrationDelta {
@@ -186,6 +190,7 @@ impl OrchestrationDelta {
             asks: diff_list(&old.asks, &new.asks),
             dumps: diff_list(&old.dumps, &new.dumps),
             settings: (old.settings != new.settings).then(|| new.settings.clone()),
+            cards: diff_list(&old.cards, &new.cards),
         };
         (!delta.is_empty()).then_some(delta)
     }
@@ -214,12 +219,17 @@ impl OrchestrationDelta {
         if let Some(s) = &self.settings {
             state.settings = s.clone();
         }
+        if let Some(d) = &self.cards {
+            apply_list(&mut state.cards, d);
+        }
     }
 }
 
 /// One frame of `WatchOrchestration {changes: true}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "frame", rename_all = "camelCase")]
+// (A frame is made, sent and dropped: its size on the stack is nobody's cost.)
+#[allow(clippy::large_enum_variant)]
 pub enum OrchestrationFrame {
     Snapshot { version: u64, state: OrchestrationState },
     Delta {
@@ -232,6 +242,7 @@ pub enum OrchestrationFrame {
 /// A frame as a reader hears it: one of [`OrchestrationFrame`], or the bare
 /// state an engine from before frames sends (a snapshot with no version).
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Heard {
     Snapshot { version: Option<u64>, state: OrchestrationState },
     Delta { version: u64, delta: OrchestrationDelta },
