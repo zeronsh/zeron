@@ -988,10 +988,37 @@ struct View {
     /// A finished subagent's transcript, read whole from its uploaded blob
     /// (a lane's): nothing to watch while it stands.
     snapshot: Cell<bool>,
-    /// A lane that shows no transcript (`session_only`: Capture's composer,
-    /// which needs the chat's row and the send path): its transcript isn't
-    /// watched, and its `messages` stay empty.
-    session_only: Cell<bool>,
+}
+
+thread_local! {
+    /// The lanes that show no transcript (`session_only`: Capture's
+    /// composer, which needs the chat's row and the send path): their
+    /// transcript isn't watched, and their `messages` stay empty. Beside
+    /// [`View`], not in it: an option only Orchestrators' Capture asks for.
+    /// (Each held weakly: a view's place isn't another's while it's here.)
+    static SESSION_ONLY: RefCell<Vec<Weak<View>>> = const { RefCell::new(Vec::new()) };
+}
+
+impl View {
+    /// Whether this is a lane that shows no transcript.
+    fn session_only(&self) -> bool {
+        SESSION_ONLY.with(|lanes| lanes.borrow().iter().any(|lane| std::ptr::eq(lane.as_ptr(), self)))
+    }
+
+    /// Made one (`on`), or no longer; whether that changed it.
+    fn set_session_only(self: &Rc<Self>, on: bool) -> bool {
+        if self.session_only() == on {
+            return false;
+        }
+        SESSION_ONLY.with(|lanes| {
+            let mut lanes = lanes.borrow_mut();
+            lanes.retain(|lane| lane.strong_count() > 0 && !std::ptr::eq(lane.as_ptr(), Rc::as_ptr(self)));
+            if on {
+                lanes.push(Rc::downgrade(self));
+            }
+        });
+        true
+    }
 }
 
 /// A prompt sent and not yet in the transcript: shown under it meanwhile,
@@ -1329,7 +1356,6 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         pending: RefCell::default(),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
-        session_only: Cell::new(false),
     });
     chats.views.borrow_mut().push(Rc::downgrade(&view));
     if chats.views.borrow().len() == 1 {
@@ -1379,7 +1405,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
             // (Its transcript wanted again, or no longer: the chat opened
             // afresh, so its watches are what it now wants.)
             let session_only = args.field("session_only").is_some_and(Value::truthy);
-            if view.session_only.replace(session_only) != session_only {
+            if view.set_session_only(session_only) {
                 view.open_chat(None);
             }
             // A finished subagent: its uploaded transcript first.
@@ -1615,7 +1641,6 @@ fn lane_view(host: &ScriptHost, slot: &str) -> Rc<View> {
         pending: RefCell::default(),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
-        session_only: Cell::new(false),
     });
     chats.views.borrow_mut().push(Rc::downgrade(&view));
     let weak = Rc::downgrade(&view);
@@ -2847,7 +2872,7 @@ impl View {
             let mut open = chats.take_let_go(&id).unwrap_or(Open { id, heard, ..Open::default() });
             // (No transcript is watched: none is coming, and its row is
             // what it shows.)
-            open.heard |= self.session_only.get();
+            open.heard |= self.session_only();
             open
         });
         let has_rows = next.as_ref().is_some_and(|o| o.heard);
@@ -2943,7 +2968,7 @@ impl View {
             params = with_known(params, open);
         }
         // (A lane showing no transcript: its row and queue alone.)
-        let transcript = (!self.session_only.get()).then(|| {
+        let transcript = (!self.session_only()).then(|| {
             rpc.watch("WatchDocMessages", params, move |item| {
                 if let Some(view) = weak.upgrade()
                     && view.generation.get() == generation
@@ -3299,7 +3324,7 @@ impl View {
     }
 
     fn publish_messages(&self) {
-        if self.session_only.get() {
+        if self.session_only() {
             self.messages.set(Value::List(Rc::from([])));
             return;
         }
@@ -3646,7 +3671,7 @@ impl View {
                 p.transfers = transfers;
             }
             self.mark_failed(&id, &message_id, Some(run));
-        } else if self.session_only.get() {
+        } else if self.session_only() {
             // (No transcript comes to say it arrived: delivered is done,
             // unless the outbox holds it, which says when it leaves.)
             let mut pending = self.pending.borrow_mut();
@@ -7855,7 +7880,7 @@ mod tests {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/orch_push_fixture.luau");
         let app = TestApp::new(|runtime| zgx_script::ScriptHost::new(runtime, path));
         let view = super::lane_view(&app.host, "capture-test");
-        view.session_only.set(true);
+        view.set_session_only(true);
         view.open_chat(Some("chat-brain".into()));
         assert!(view.open.borrow().as_ref().is_some_and(|o| o.heard && o.watches.is_empty()));
         view.publish_messages();
@@ -9917,7 +9942,6 @@ mod tests {
                 pending: RefCell::default(),
                 generation: Cell::new(0),
                 snapshot: Cell::new(false),
-                session_only: Cell::new(false),
             })
         };
         let time = |label: &str, view: &Rc<View>, frame: serde_json::Value| {
@@ -9974,7 +9998,6 @@ mod tests {
             pending: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
-            session_only: Cell::new(false),
         });
         for (n, step) in fixture["steps"].as_array().unwrap().iter().enumerate() {
             view.heard_frame(step["frame"].clone());
@@ -10016,7 +10039,6 @@ mod tests {
             pending: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
-            session_only: Cell::new(false),
         });
         let rows = || format!("{:?}", view.messages.signal().with_untracked(Clone::clone));
         // What it holds, as it would tell the engine: ids and the engine's sums.
@@ -10105,7 +10127,6 @@ mod tests {
             pending: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
-            session_only: Cell::new(false),
         });
         let draft = || format!("{:?}", view.draft.signal().with_untracked(Clone::clone));
         let rows = || format!("{:?}", view.messages.signal().with_untracked(Clone::clone));
@@ -10156,7 +10177,6 @@ mod tests {
             pending: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
-            session_only: Cell::new(false),
         });
         let ids = || view.open.borrow().as_ref().unwrap().entries.iter().map(|e| e.id.to_string()).collect::<Vec<_>>();
         let rows = || format!("{:?}", view.messages.signal().with_untracked(Clone::clone));
@@ -10213,7 +10233,6 @@ mod tests {
             pending: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
-            session_only: Cell::new(false),
         });
         view.pending.borrow_mut().insert(
             "c".into(),
