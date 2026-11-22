@@ -231,6 +231,8 @@ struct WorkspaceHostInner {
     progress_tx: watch::Sender<Vec<zeron_proto::orchestration::Progress>>,
     /// The Scratchpad and its history (`crate::orchestration::scratchpad`).
     scratchpad_tx: watch::Sender<zeron_proto::scratchpad::ScratchpadState>,
+    /// The account's plugin switches (`pluginSwitches` rows), by plugin id.
+    plugin_switches_tx: watch::Sender<std::collections::BTreeMap<String, bool>>,
     room: Mutex<Option<Arc<RegistryClient>>>,
     /// [`WorkspaceHost::registry_synced`], published when it changes so
     /// waiters (the chat sync dispatcher's reconciliation) need not poll it.
@@ -301,6 +303,7 @@ struct PublishedVersions {
     orchestration: u64,
     progress: u64,
     scratchpad: u64,
+    plugin_switches: u64,
 }
 
 /// The registry replica a store holds: its whole snapshot plus the row
@@ -527,6 +530,7 @@ impl WorkspaceHost {
         let orchestration_published = AtomicU64::new(doc.orchestration_version());
         let (progress_tx, _) = watch::channel(doc.read_progress());
         let (scratchpad_tx, _) = watch::channel(doc.read_scratchpad());
+        let (plugin_switches_tx, _) = watch::channel(doc.plugin_switches());
         let (changed_tx, changed_rx) = watch::channel(0u64);
         let edge_less = config.edge.is_none();
 
@@ -544,6 +548,7 @@ impl WorkspaceHost {
                 orchestration_published,
                 progress_tx,
                 scratchpad_tx,
+                plugin_switches_tx,
                 room: Mutex::new(None),
                 registry_synced_tx: watch::Sender::new(edge_less),
                 changed_tx,
@@ -1009,6 +1014,33 @@ impl WorkspaceHost {
     /// The Scratchpad and its history, republished on every change.
     pub fn watch_scratchpad(&self) -> watch::Receiver<zeron_proto::scratchpad::ScratchpadState> {
         self.inner.scratchpad_tx.subscribe()
+    }
+
+    /// The account's plugin switches (`pluginSwitches` rows) by plugin id,
+    /// republished when one changes here or lands from another device.
+    pub fn watch_plugin_switches(&self) -> watch::Receiver<std::collections::BTreeMap<String, bool>> {
+        self.inner.plugin_switches_tx.subscribe()
+    }
+
+    /// The account's switch for plugin `id`, as the registry holds it now.
+    pub fn plugin_switch(&self, id: &str) -> Option<bool> {
+        self.read(|doc| doc.plugin_switch(id))
+    }
+
+    /// Set plugin `id`'s switch for the whole account (synced). Published
+    /// to [`Self::watch_plugin_switches`] at once, not at the next publish.
+    pub fn set_plugin_switch(&self, id: &str, on: bool) -> Result<bool, EngineError> {
+        let (written, switches) = self.mutate(|doc| {
+            doc.set_plugin_switch(id, on).map(|written| (written, doc.plugin_switches()))
+        })?;
+        publish_if_changed(&self.inner.plugin_switches_tx, switches);
+        Ok(written)
+    }
+
+    /// Whether this engine runs a Cloud session's machine (whose registry
+    /// writes are limited to the rows it hosts).
+    pub fn is_cloud(&self) -> bool {
+        self.inner.config.platform == zeron_proto::CLOUD_PLATFORM
     }
 
     /// Read orchestration rows under the registry lock.
@@ -1872,6 +1904,7 @@ impl WorkspaceHostInner {
             orchestration: doc.orchestration_version(),
             progress: doc.progress_version(),
             scratchpad: doc.scratchpad_version(),
+            plugin_switches: doc.plugin_switches_version(),
         };
         let last = *published;
         let changed = |pick: fn(&PublishedVersions) -> u64| last.is_none_or(|last| pick(&last) != pick(&now));
@@ -1882,6 +1915,7 @@ impl WorkspaceHostInner {
         let orchestration = changed(|v| v.orchestration).then(|| doc.read_orchestration());
         let progress = changed(|v| v.progress).then(|| doc.read_progress());
         let scratchpad = changed(|v| v.scratchpad).then(|| doc.read_scratchpad());
+        let plugin_switches = changed(|v| v.plugin_switches).then(|| doc.plugin_switches());
         // Pins reconcile against the chats as they read now: just read, or
         // (unchanged) as last published.
         let reconciled = match &chats {
@@ -1965,6 +1999,9 @@ impl WorkspaceHostInner {
         }
         if let Some(scratchpad) = scratchpad {
             publish_if_changed(&self.scratchpad_tx, scratchpad);
+        }
+        if let Some(plugin_switches) = plugin_switches {
+            publish_if_changed(&self.plugin_switches_tx, plugin_switches);
         }
         // A failed read retries every list on the next publish.
         *published = (!failed).then_some(now);

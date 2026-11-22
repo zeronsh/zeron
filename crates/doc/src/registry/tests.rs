@@ -3330,3 +3330,62 @@ fn an_aborted_save_leaves_its_rows_unsaved() {
     doc.abort_save(whole);
     assert!(!doc.begin_save(true).is_delta(), "an aborted whole save forgot the full replace");
 }
+
+// ── plugin switches ─────────────────────────────────────────────────────────
+
+/// An account-wide switch set on one device reads the same on every other,
+/// the newest toggle winning, and survives a restart.
+#[test]
+fn plugin_switches_are_the_account_s_and_the_last_toggle_wins() {
+    let mut laptop = RegistryDoc::new("laptop");
+    let mut devbox = RegistryDoc::new("devbox");
+    let mut server = HashMap::new();
+    let mut seq = 0u64;
+    assert_eq!(devbox.plugin_switch("orchestrators"), None, "no row: the plugin's own default");
+
+    assert!(laptop.set_plugin_switch("orchestrators", true).unwrap());
+    assert!(!laptop.set_plugin_switch("orchestrators", true).unwrap(), "unchanged: nothing written");
+    let before = devbox.plugin_switches_version();
+    server_round(&mut server, &mut seq, &mut [&mut laptop, &mut devbox]);
+    assert_ne!(devbox.plugin_switches_version(), before, "a synced switch moves the kind's version");
+    assert_eq!(devbox.plugin_switch("orchestrators"), Some(true));
+
+    // Toggled on the devbox later: off everywhere.
+    devbox.set_plugin_switch("orchestrators", false).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut laptop, &mut devbox]);
+    assert_eq!(laptop.plugin_switches(), BTreeMap::from([("orchestrators".to_string(), false)]));
+    assert_eq!(laptop.plugin_switches(), devbox.plugin_switches());
+
+    let restored = RegistryDoc::from_bytes(&laptop.to_bytes().unwrap(), "laptop").unwrap();
+    assert_eq!(restored.plugin_switch("orchestrators"), Some(false));
+
+    assert!(laptop.set_plugin_switch("Not An Id", true).is_err());
+    assert!(laptop.set_plugin_switch("", true).is_err());
+}
+
+/// A row a newer build wrote (an `on` this one can't read) is passed over,
+/// never an error; and a build that doesn't know the kind keeps its rows
+/// (by kind and id, like every row), persists them and re-seeds them with
+/// their own clocks, so an older device never loses the account's choice.
+#[test]
+fn plugin_switch_rows_survive_builds_that_cant_read_them() {
+    let row = |id: &str, on: Value| RegistryRow {
+        kind: KIND_PLUGIN_SWITCHES.into(),
+        id: id.into(),
+        seq: 1,
+        deleted: false,
+        del_hlc: None,
+        fields: [("on".to_string(), on)].into(),
+        clocks: [("on".to_string(), hlc_by(5_000, "laptop"))].into(),
+    };
+    let mut doc = RegistryDoc::new("old");
+    doc.apply_rows(1, vec![row("orchestrators", json!(true)), row("later", json!({ "scope": "x" }))]);
+    assert_eq!(doc.plugin_switches(), BTreeMap::from([("orchestrators".to_string(), true)]));
+
+    let restored = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "old").unwrap();
+    assert!(restored.row_counts().contains(&(KIND_PLUGIN_SWITCHES.to_string(), 2)));
+    let kept = restored.overlay_row(KIND_PLUGIN_SWITCHES, "later").expect("kept");
+    let seeded = applied(None, &row_to_seed_op(&kept));
+    assert_eq!(seeded.fields["on"], json!({ "scope": "x" }));
+    assert_eq!(seeded.clocks["on"], hlc_by(5_000, "laptop"), "re-seeded with its own clock");
+}

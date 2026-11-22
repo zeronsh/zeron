@@ -160,6 +160,16 @@ or the folder's own name, is no choice. Older engines ignore the unknown kind an
 each row's own fields. The row outlives its copies: a repository added again gets its
 look back.
 
+## Plugin switches
+
+A plugin whose switch is the account's (one of Zeron's own, its manifest's `"switch": {
+"scope": "account" }`) is on or off for every engine of the account from one
+`pluginSwitches` row, keyed by the plugin's id, with one field, `on`. Settings → Plugins
+writes it (`SetPluginOff`); no row means the manifest's default, which is never written.
+Every engine follows it, headless ones with none of the plugin's files included
+(`Plugins::is_on` / `Plugins::watch`); a Cloud runner is shown the rows and refused writes.
+Older engines keep the rows as they keep any kind and ignore them.
+
 ## Sidebar sections
 
 Signed-in profiles store section metadata in `sidebarSections` rows and session

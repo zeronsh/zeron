@@ -51,6 +51,8 @@ pub use orchestration::{
     MAX_DUMPS_IN_STATE,
     MAX_TEXT_FIELD_BYTES, ORCHESTRATION_KINDS,
 };
+mod plugin_switches;
+pub use plugin_switches::KIND_PLUGIN_SWITCHES;
 mod repository_looks;
 mod scratchpad;
 pub use scratchpad::{KIND_SCRATCHPAD, KIND_SCRATCHPAD_HISTORY, SCRATCHPAD_ROW, ScratchpadEdit};
