@@ -1,0 +1,24 @@
+--!strict
+-- Orchestrators, by Zeron: shipped inside the app (plugins-builtin), off
+-- until you turn it on in Settings → Plugins.
+--
+-- Its screens are the app's own code, so they don't run here in the
+-- plugin's sandbox: as one of Zeron's bundled built-ins it is trusted with
+-- the app modules its manifest names (`app_modules`), and puts its own in
+-- their place. The app reaches them by a stable name, `@app/builtin/
+-- orchestrators` (ui/builtin/orchestrators.luau is the app's, `false`, while
+-- it's off), through `@account/plugins`' `module("orchestrators")`; the
+-- app's own hooks for it are gated by `plugins.on("orchestrators")`.
+--
+--   overrides.luau  the app modules it replaces (`ui.override`)
+--   index.luau      the app-side module: what the app reaches, each part
+--                   required as it's first asked for
+--   app/            the modules it's made of, run as the app's code: they
+--                   require each other by relative paths and the app by
+--                   `@app/…`, `@ds/…` and `@account/…`
+--   tests/          its Luau UI tests, with their fixtures
+--                   (scripts/ci/test-zgx.sh ui runs them)
+--
+-- docs/plugins.md, "Zeron's own plugins".
+
+require("./overrides")

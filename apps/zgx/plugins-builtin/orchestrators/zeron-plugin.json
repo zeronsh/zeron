@@ -1,0 +1,21 @@
+{
+  "id": "orchestrators",
+  "name": "Orchestrators",
+  "version": "1.0.0",
+  "description": "Orchestrator chats that plan work and hand it to crews of agents across your devices, with the Control room to follow and steer them.",
+  "entry": "init.luau",
+  "default": "off",
+  "permissions": [
+    "ui.add",
+    "ui.replace",
+    "pages.add",
+    "navigate",
+    "sessions.read",
+    "devices",
+    "notifications",
+    "compose"
+  ],
+  "app_modules": [
+    "@app/builtin/orchestrators"
+  ]
+}

@@ -152,28 +152,85 @@ impl Item {
     pub fn may(&self, permission: &str) -> bool {
         self.status() == "on" && self.permissions().iter().any(|p| p == permission)
     }
-    /// What it loads as, if it runs: its snapshot's entry and its grants.
+    /// What it loads as, if it runs: its snapshot's entry and its grants
+    /// (one of Zeron's own shipped in this app: from the app's folder, with
+    /// the trust that gives, `plugin_with`).
     pub fn plugin(&self) -> Option<Plugin> {
+        self.plugin_with(&builtin_dir())
+    }
+
+    /// `plugin`, Zeron's own plugins shipped in `builtin` (the app's
+    /// plugins-builtin folder): a bundled built-in (`bundled`) loads from
+    /// its folder there and may replace the app modules it names; any
+    /// other loads from its snapshot with what its permissions give.
+    pub(crate) fn plugin_with(&self, builtin: &Path) -> Option<Plugin> {
         if self.status() != "on" || RESERVED.contains(&self.id()) {
             return None;
         }
-        let snapshot = PathBuf::from(self.json["snapshot"].as_str()?);
         let entry = self.json["entry"].as_str().filter(|e| !e.is_empty()).unwrap_or("init.luau");
         if entry.contains("..") || entry.starts_with('/') {
             return None;
         }
         let ui = &self.json["ui"];
+        let mut grants = grants::capabilities(
+            self.id(),
+            &self.permissions(),
+            &self.list(&ui["change"]),
+            &self.list(&ui["replace"]),
+        );
+        let dir = match self.bundled(builtin) {
+            Some(bundled) => {
+                grants.extend(grants::bundled(&bundled.modules));
+                bundled.dir
+            }
+            None => PathBuf::from(self.json["snapshot"].as_str()?),
+        };
         Some(Plugin {
             name: self.id().into(),
-            entry: snapshot.join(entry),
-            grants: grants::capabilities(
-                self.id(),
-                &self.permissions(),
-                &self.list(&ui["change"]),
-                &self.list(&ui["replace"]),
-            ),
+            entry: dir.join(entry),
+            grants,
         })
     }
+
+    /// One of Zeron's own, shipped inside this app: the engine lists it as
+    /// a built-in by Zeron, from the folder `builtin/<id>` as this window
+    /// finds it on its own disk, whose manifest there names the same id.
+    /// None for any other: a plugin you installed is never this, whatever
+    /// its id or name (its folder is yours, and the engine lists one with a
+    /// built-in's id as broken), nor is a list that says "built-in" of a
+    /// folder elsewhere. What it's trusted with is read from the app's own
+    /// folder, not the list: the app modules its manifest names
+    /// (`app_modules`), which it may replace as the app's own code
+    /// (`grants::bundled`). docs/plugins.md, "Zeron's own plugins".
+    pub fn bundled(&self, builtin: &Path) -> Option<Bundled> {
+        let id = self.id();
+        let plain = !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        if !plain || self.json["builtin"] != Json::Bool(true) || self.json["author"]["kind"] != "zeron" {
+            return None;
+        }
+        let shipped = builtin.join(id).canonicalize().ok()?;
+        let listed = Path::new(self.json["dir"].as_str()?).canonicalize().ok()?;
+        // (Canonical both: a link in the app's folder reaching out of it is
+        // no folder of the app's.)
+        if listed != shipped || !shipped.starts_with(builtin.canonicalize().ok()?) {
+            return None;
+        }
+        let manifest: Json = serde_json::from_slice(&std::fs::read(shipped.join("zeron-plugin.json")).ok()?).ok()?;
+        if manifest["id"].as_str() != Some(id) {
+            return None;
+        }
+        let modules = self.list(&manifest["app_modules"]);
+        Some(Bundled { dir: shipped, modules })
+    }
+}
+
+/// One of Zeron's own plugins as this window ships it (`Item::bundled`):
+/// its folder in the app's plugins-builtin, and the app modules its
+/// manifest there names (`app_modules`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Bundled {
+    pub dir: PathBuf,
+    pub modules: Vec<String>,
 }
 
 #[derive(Default)]
@@ -1483,15 +1540,25 @@ impl Bridge {
         self.publish_page();
         let (sources, list) = self.sources(false);
         self.publish_records(&sources, &list);
-        if *self.loaded.borrow() == want {
-            return;
+        if *self.loaded.borrow() != want {
+            *self.loaded.borrow_mut() = want.clone();
+            self.host.set_plugins(want);
+            // (Before the window's first load: that load takes them.)
+            if !self.first_load.get() {
+                self.reload();
+            }
         }
-        *self.loaded.borrow_mut() = want.clone();
-        self.host.set_plugins(want);
-        // (Before the window's first load: that load takes them.)
-        if !self.first_load.get() {
-            self.reload();
-        }
+        self.publish_on();
+    }
+
+    /// Which plugins run in this window (`plugins.on`, `{ [id] = true }`),
+    /// for the app's own hooks gated on one (`@account/plugins`): on in the
+    /// engine's list, and loaded. Said after the load that brings a
+    /// built-in's app modules in, and as loaded then (a plugin that failed
+    /// and was set aside isn't on).
+    fn publish_on(&self) {
+        let on = Value::record(self.loaded.borrow().iter().map(|p| (p.name.as_str(), Value::from(true))).collect::<Vec<_>>());
+        self.host.shared("plugins.on", Value::Nil).set(on);
     }
 
     fn reload(&self) {
@@ -3807,6 +3874,8 @@ mod hotkeys_tests;
 mod markdown_tests;
 #[cfg(test)]
 mod network_tests;
+#[cfg(test)]
+mod bundled_tests;
 
 #[cfg(test)]
 mod menu_tests {
