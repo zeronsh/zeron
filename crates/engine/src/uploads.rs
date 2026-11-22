@@ -785,7 +785,17 @@ mod tests {
         let store = tempfile::tempdir().unwrap();
         let work = tempfile::tempdir().unwrap();
         let elsewhere = tempfile::tempdir().unwrap();
-        let uploads = Uploads::from_root(store.path());
+        // The store reached through a link (as macOS' `/var` is, or a
+        // Windows short name): what is kept is named by its real path.
+        #[cfg(unix)]
+        let root = {
+            let link = elsewhere.path().join("store-link");
+            std::os::unix::fs::symlink(store.path(), &link).unwrap();
+            link
+        };
+        #[cfg(not(unix))]
+        let root = store.path().to_path_buf();
+        let uploads = Uploads::from_root(&root);
         let png = b"\x89PNG\r\n\x1a\nrest".to_vec();
         std::fs::create_dir_all(work.path().join("shots")).unwrap();
         std::fs::write(work.path().join("shots/tag.png"), &png).unwrap();
@@ -794,14 +804,13 @@ mod tests {
         std::fs::write(elsewhere.path().join("out.png"), &png).unwrap();
         let cwd = Some(work.path());
         let stored = uploads.store_ask_image("shots/tag.png", cwd).unwrap();
-        assert!(Path::new(&stored).starts_with(std::fs::canonicalize(store.path()).unwrap()) || Path::new(&stored).starts_with(store.path()));
+        assert!(Path::new(&stored).starts_with(std::fs::canonicalize(store.path()).unwrap()), "{stored}");
         assert!(stored.ends_with("-tag.png"));
         assert_eq!(std::fs::read(&stored).unwrap(), png);
         // Again: the same file, not a copy.
         assert_eq!(uploads.store_ask_image(work.path().join("shots/tag.png").to_str().unwrap(), cwd).unwrap(), stored);
         // Already stored: where it is.
-        let canon = std::fs::canonicalize(&stored).unwrap().to_string_lossy().to_string();
-        assert_eq!(uploads.store_ask_image(&stored, None).unwrap(), canon);
+        assert_eq!(uploads.store_ask_image(&stored, None).unwrap(), stored);
         // Outside its folder, not a picture, or a picture in name only: refused.
         assert!(uploads.store_ask_image(elsewhere.path().join("out.png").to_str().unwrap(), cwd).is_err());
         assert!(uploads.store_ask_image("../out.png", cwd).is_err());
@@ -1665,7 +1674,11 @@ impl Uploads {
                 Err(e) => return Err(EngineError::Io(e.error)),
             }
         }
-        Ok(destination.to_string_lossy().to_string())
+        // Its canonical path, as one already in the store is named: the same
+        // picture is one string however the store's folder was reached (a
+        // link on the way, `/var` for `/private/var`, a Windows short name
+        // like `RUNNER~1`).
+        Ok(std::fs::canonicalize(&destination)?.to_string_lossy().to_string())
     }
 
     /// Store an image an agent shows with `show_image` as `{id}-image.{ext}`
