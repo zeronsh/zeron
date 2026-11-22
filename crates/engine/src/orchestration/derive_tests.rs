@@ -566,9 +566,24 @@ fn planned_holds_what_is_paused_waiting_held_or_not_started() {
     c.waits_on = vec!["Keyed sidebar shape".into(), "Other".into()];
     let d = c.at(mins(1));
     assert_eq!((d.place, d.status), (Place::Planned, CardStatus::After));
-    assert_eq!(d.note.as_deref(), Some("Keyed sidebar shape (+1)"));
+    assert_eq!(d.note.as_deref(), Some("Keyed sidebar shape and 1 more"));
     c.item.paused_at = Some(mins(0));
     assert_eq!(place(&c, mins(1)), (Place::Planned, CardStatus::Paused));
+}
+
+#[test]
+fn a_paused_card_is_never_closed_by_an_agents_word() {
+    // Its thread said done as the pause stopped it: the card is the
+    // person's until they resume it.
+    let mut c = Case::with(ThreadFact { ended_at: Some(mins(2)), active_at: Some(mins(2)), ..thread(Thread::Stopped { at: mins(2) }) });
+    c.item.paused_at = Some(mins(2));
+    c.row.word = word(ReportState::Done, mins(2));
+    let d = c.at(mins(30));
+    assert_eq!((d.place, d.status), (Place::Planned, CardStatus::Paused));
+    assert!(!d.acts.iter().any(|a| matches!(a, Act::Close { .. })), "{:?}", d.acts);
+    // Resumed, the word it had stands.
+    c.item.paused_at = None;
+    assert_eq!(c.at(mins(31)).place, Place::Done);
 }
 
 #[test]

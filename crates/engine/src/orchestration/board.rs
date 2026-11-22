@@ -1548,7 +1548,16 @@ pub(crate) fn on_report(workspace: &crate::workspace_host::WorkspaceHost, report
         if row.events.iter().any(|e| e.kind == EventKind::Report && e.about.as_deref() == Some(report.id.as_str())) {
             return;
         }
-        if matches!(report.state, ReportState::Done | ReportState::Blocked | ReportState::Failed) {
+        let Some(item) = doc.work_item(id).filter(|i| !i.removed) else { return };
+        // Whose word it is: the card's own thread's. A thread may report on
+        // any card of its orchestrator's board (which puts it on that card),
+        // but only one that was the card's before it spoke says where the
+        // card stands: its own item, or a card it was put on earlier. A flow
+        // step's card is its run's to end, never a report's.
+        let own = doc.crew_member(&report.from_chat).is_some_and(|m| m.item_id.as_deref() == Some(id))
+            || (item.threads.contains(&report.from_chat) && item.threads_at.is_none_or(|at| at < report.at));
+        let speaks = own && item.flow.is_none();
+        if speaks && matches!(report.state, ReportState::Done | ReportState::Blocked | ReportState::Failed) {
             row.word = Some(Word {
                 state: report.state,
                 at: report.at,
@@ -1557,7 +1566,9 @@ pub(crate) fn on_report(workspace: &crate::workspace_host::WorkspaceHost, report
                 report: Some(report.id.clone()),
             });
         }
-        row.heard_at = Some(row.heard_at.map_or(report.at, |h| h.max(report.at)));
+        if own {
+            row.heard_at = Some(row.heard_at.map_or(report.at, |h| h.max(report.at)));
+        }
         if report.state.wakes() && row.closed.is_none() {
             row.checking = Some(Checking { since: report.at, why: CheckWhy::Report });
         }

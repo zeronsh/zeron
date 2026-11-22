@@ -3793,3 +3793,83 @@ async fn board_fixture() {
     core.shutdown().await;
     println!("fixture written to {} (orchestrators {fixes}, {vpn})", dir.display());
 }
+
+#[tokio::test]
+async fn an_agent_chooses_a_finish_line_and_later_only_when_it_makes_the_card() {
+    use zeron_proto::orchestration::{CardStatus, FinishKind, Place};
+    let (_temp, core) = core().await;
+    let (o, _card) = geese(&core).await;
+    // Made with its finish line, kept for later (the tool's `later` is the
+    // op's `held`).
+    let made = op(&core, agent(&o), json!({"op":"upsertItem","item":{"title":"Land the fix","held":true,
+        "finish":{"line":"merged","into":"main"}}}))
+        .await
+        .unwrap();
+    let row = placed(&core, &made);
+    assert_eq!((row.finish.line, row.finish.into.as_deref(), row.held), (FinishKind::Merged, Some("main"), true));
+    assert_eq!((row.place, row.status), (Place::Planned, CardStatus::Held));
+    // After that its finish line is the person's: an agent can't trade a
+    // merge for its own word.
+    let refused = op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":made,"finish":{"line":"report"}}})).await.unwrap_err();
+    assert!(refused.contains("chosen when the card is made"), "{refused}");
+    assert_eq!(placed(&core, &made).finish.line, FinishKind::Merged);
+    // (The same line again changes nothing and is fine, with its other edits.)
+    op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":made,"outcome":"Halfway","finish":{"line":"merged","into":"main"}}}))
+        .await
+        .unwrap();
+    // It may let its held card go, never hold one that's under way.
+    op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":made,"held":false}})).await.unwrap();
+    assert_eq!(placed(&core, &made).status, CardStatus::Next);
+    let refused = op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":made,"held":true}})).await.unwrap_err();
+    assert!(refused.contains("only the person holds a card"), "{refused}");
+    assert!(!placed(&core, &made).held);
+    // The person does both.
+    op(&core, Caller::Local, json!({"op":"upsertItem","item":{"id":made,"finish":{"line":"accept"}}})).await.unwrap();
+    op(&core, Caller::Local, json!({"op":"holdItem","id":made,"held":true})).await.unwrap();
+    let row = placed(&core, &made);
+    assert_eq!((row.finish.line, row.held), (FinishKind::Accept, true));
+}
+
+#[tokio::test]
+async fn only_a_cards_own_thread_says_where_it_stands() {
+    use zeron_proto::orchestration::{EventKind, Report, ReportState};
+    let (_temp, core) = core().await;
+    let (o, card) = geese(&core).await;
+    // Another thread of the same crew, on its own card.
+    chat(&core, "geese-t2", "Phase 2 thread", None).await;
+    op(&core, Caller::Local, json!({"op":"addToCrew","orchestratorId":o,"chatId":"geese-t2"})).await.unwrap();
+    let report = |from: &str, id: &str, at: chrono::DateTime<chrono::Utc>| Report {
+        id: id.into(),
+        orchestrator_id: o.clone(),
+        from_chat: from.into(),
+        item_id: Some(card.clone()),
+        state: ReportState::Done,
+        summary: "All done".into(),
+        detail: String::new(),
+        links: Vec::new(),
+        progress: None,
+        at,
+        result: None,
+    };
+    // It reports done naming the first card (which, as a report on a card
+    // does, puts it on that card as it speaks): on the timeline, but not the
+    // card's word, so nothing closes.
+    let now = chrono::Utc::now();
+    core.orchestration.workspace().write_orchestration(|doc| {
+        let mut c = doc.work_item(&card).unwrap();
+        c.threads.push("geese-t2".into());
+        c.threads_at = Some(now);
+        doc.upsert_work_item(&c);
+    });
+    super::board::on_report(core.orchestration.workspace(), &report("geese-t2", "r-other", now));
+    let row = placed(&core, &card);
+    assert!(row.word.is_none(), "{:?}", row.word);
+    assert!(row.events.iter().any(|e| e.kind == EventKind::Report && e.text == "Reported done: All done"));
+    // The card's own thread (put on it before it spoke) says it.
+    super::board::on_report(core.orchestration.workspace(), &report("geese-t1", "r-own", now + chrono::Duration::seconds(5)));
+    let word = placed(&core, &card).word.expect("its word");
+    assert_eq!((word.from.as_str(), word.state), ("geese-t1", ReportState::Done));
+    // Filed twice (a redelivered command): once.
+    super::board::on_report(core.orchestration.workspace(), &report("geese-t1", "r-own", now + chrono::Duration::seconds(5)));
+    assert_eq!(placed(&core, &card).events.iter().filter(|e| e.about.as_deref() == Some("r-own")).count(), 1);
+}

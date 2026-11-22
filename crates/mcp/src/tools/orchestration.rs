@@ -153,7 +153,7 @@ const FINISH_LINES: [&str; 4] = ["report", "merged", "pr", "accept"];
 fn finish_schema() -> Value {
     let lines = "report: its thread reports done (the default); merged: its branch is contained in `into`; pr: its PR is merged or closed; accept: the person says it looks good.";
     json!({
-        "description": format!("What ends the card, its finish line: a line, or {{line, branch, into, pr}}. {lines}"),
+        "description": format!("What ends the card, its finish line, chosen when the card is made (only the person changes it after): a line, or {{line, branch, into, pr}}. {lines}"),
         "anyOf": [
             { "type": "string", "enum": FINISH_LINES },
             { "type": "object", "properties": {
@@ -250,7 +250,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                     "title": s("Short title."),
                     "detail": s("Markdown."),
                     "finish": finish_schema(),
-                    "later": { "type": "boolean", "description": "true keeps it for later: it never starts on its own. false lets it go." },
+                    "later": { "type": "boolean", "description": "true, for a new card only: kept for later, it never starts on its own. false lets a held card go." },
                     "priority": { "type": "string", "enum": ["urgent", "high", "normal", "low"] },
                     "progress": { "type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "0 to 1; null derives it from the threads' todo lists." },
                     "outcome": { "type": ["string", "null"], "description": "The answer or result (markdown); null clears it." },

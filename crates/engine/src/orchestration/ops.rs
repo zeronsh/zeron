@@ -325,7 +325,31 @@ impl EngineRpc {
                 // is what they did, below.
                 let wanted = item.state.take().filter(|_| *who == Who::Person);
                 let by = if *who == Who::Person { Mover::You } else { Mover::Agent };
-                let (finish, held) = (item.finish.clone(), item.held);
+                // What ends a card, and that it is kept for later, are chosen
+                // when it's made: after that they are the person's. (An agent
+                // that could change a card's finish line could close code
+                // work on its own word; one that could hold a started card
+                // could park it out of the engine's sight. Letting a held
+                // card go only puts it back under the engine's eye: allowed.)
+                let (finish, held) = match (created, who) {
+                    (true, _) => (None, None),
+                    (false, Who::Person) => (item.finish.take(), item.held.take()),
+                    (false, Who::Agent { .. }) => {
+                        let row = self.board_card(item.id.as_deref().unwrap_or_default());
+                        if item.finish.as_ref().is_some_and(|f| row.as_ref().is_none_or(|r| r.finish != *f)) {
+                            return Err(failed(
+                                "A card's finish line is chosen when the card is made: only the person changes it after. To end a card another way, close it with the reason (`item_close`).",
+                            ));
+                        }
+                        if item.held == Some(true) && row.as_ref().is_none_or(|r| !r.held) {
+                            return Err(failed(
+                                "`later: true` is for a new card: only the person holds a card after it's made. If nothing should happen on it now, ask the person or close it with the reason (`item_close`).",
+                            ));
+                        }
+                        item.finish = None;
+                        (None, item.held.take().filter(|held| !held))
+                    }
+                };
                 let id = orch.patch_item(item).map_err(RpcError::Failed)?;
                 if !created && (finish.is_some() || held.is_some()) {
                     self.with_card(&id, now, |row, _| {

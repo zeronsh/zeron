@@ -385,7 +385,8 @@ pub(crate) fn derive(f: &Facts, now: DateTime<Utc>) -> Derived {
         FinishKind::Accept => None,
         FinishKind::Report | FinishKind::Other => {
             let review = f.route.as_ref().is_some_and(|r| r.ends_it && r.review.is_some());
-            (finished && !review && at_rest && open.is_empty())
+            // (A paused card is the person's: no agent's word closes it.)
+            (finished && !review && at_rest && open.is_empty() && !item.paused())
                 .then(|| (CloseHow::Report, card.word.as_ref().filter(|_| said_done).map(|w| w.summary.clone())))
         }
     };
@@ -578,7 +579,10 @@ pub(crate) fn derive(f: &Facts, now: DateTime<Utc>) -> Derived {
         return planned(CardStatus::Paused, Why::Paused, None, acts);
     }
     if let Some(first) = f.waits_on.first() {
-        let note = if f.waits_on.len() > 1 { format!("{} (+{})", one_line(first, 60), f.waits_on.len() - 1) } else { one_line(first, 60) };
+        let note = match f.waits_on.len() - 1 {
+            0 => one_line(first, 60),
+            more => format!("{} and {more} more", one_line(first, 60)),
+        };
         return planned(CardStatus::After, Why::After(first.clone()), Some(note), acts);
     }
     if card.held {
