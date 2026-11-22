@@ -4,3 +4,5 @@ ui/.zgx/
 **/locales/.lock
 # Translation scratch, never shipped.
 /tools/i18n-work/
+# Python bytecode from the i18n tools.
+/tools/**/__pycache__/
