@@ -12,8 +12,12 @@ ui.effect(function()
 		plugins.set(now)
 	end
 end)
+-- What the app has in the plugin's place with it off (ui/builtin): its
+-- parts while their modules are still in ui/, else `false`.
+local standin = require("@app/builtin/orchestrators")
 return ui.column {
 	id = "root",
+	ui.text { id = "standin", if type(standin) == "table" then "parts" else "false" },
 	ui.show(function(): boolean
 		return plugins.on("orchestrators")
 	end, ui.text {
