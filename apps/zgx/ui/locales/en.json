@@ -4022,6 +4022,7 @@
       "review": "Review",
       "show_folder": "Show folder",
       "builtin": "{name} is part of Zeron",
+      "all_devices": "All devices",
       "remove_named": "Remove {name}",
       "update": "Update",
       "updating": "Updating…",

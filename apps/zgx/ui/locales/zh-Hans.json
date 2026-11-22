@@ -4057,6 +4057,7 @@
       "review": "查看",
       "show_folder": "显示文件夹",
       "builtin": "{name}是 Zeron 的一部分",
+      "all_devices": "所有设备",
       "remove_named": "移除 {name}",
       "update": "更新",
       "updating": "正在更新…",

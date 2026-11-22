@@ -328,7 +328,9 @@ local Control = ui.component(function(props: { now: State<any>, on: string? }): 
 						if on:peek() ~= value then
 							return
 						end
-						local p: any = state.set_off(id, not value, on_device)
+						-- (The account's switch is set here, for every device.)
+						local target = if state.account(now:peek()) then nil else on_device
+						local p: any = state.set_off(id, not value, target)
 						if p ~= nil then
 							-- (Not done, as on a device out of reach: back as it is.)
 							p:after(function(_: any) end, function(err: any)
@@ -462,6 +464,9 @@ local function row(p: state.Item, _i: number, now: State<any>): Node
 			ui.show(function(): boolean
 				return words.unverified(now:get())
 			end, ds.Badge { ui.t("plugins.words.unverified"), tone = "warning", class = "plugin-unverified" }),
+			ui.show(function(): boolean
+				return state.account(now:get())
+			end, ds.Badge { ui.t("plugins.page.all_devices"), tone = "neutral", class = "plugin-all-devices" }),
 			ds.Badge {
 				function(): string
 					return now:get().version

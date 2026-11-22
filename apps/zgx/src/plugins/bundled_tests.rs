@@ -42,7 +42,7 @@ return ui.column {
 fn lay_out(dir: &Path) {
     write(dir, "zeron-plugin.json", &json!({
         "id": "demo", "name": "Demo", "version": "1.0.0", "entry": "init.luau",
-        "default": "off", "app_modules": ["@app/builtin/demo"],
+        "switch": { "default": "off", "scope": "account" }, "app_modules": ["@app/builtin/demo"],
     }).to_string());
     write(dir, "init.luau", r#"ui.override { module = "@app/builtin/demo", with = "./index" }"#);
     write(dir, "index.luau", r#"
@@ -216,7 +216,7 @@ fn orchestrators_ships_as_a_bundled_built_in() {
     let dir = app.join("plugins-builtin/orchestrators");
     let manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("zeron-plugin.json")).unwrap()).unwrap();
     assert_eq!(manifest["id"], "orchestrators");
-    assert_eq!(manifest["default"], "off");
+    assert_eq!(manifest["switch"], json!({ "default": "off", "scope": "account" }));
     let modules: Vec<String> = serde_json::from_value(manifest["app_modules"].clone()).unwrap();
     assert!(!modules.is_empty());
     for module in &modules {

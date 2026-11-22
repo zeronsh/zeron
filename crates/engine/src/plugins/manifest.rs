@@ -746,4 +746,23 @@ mod tests {
             assert!(read(bad.clone()).problem().is_some_and(|p| p.contains("switch")), "{bad}");
         }
     }
+
+    /// What the app ships in `plugins-builtin/` reads with no problem, and
+    /// Orchestrators' switch is the account's, off until it's turned on.
+    #[test]
+    fn plugins_manifest_shipped_built_ins_read() {
+        let shipped = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/zgx/plugins-builtin");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&shipped).unwrap() {
+            let path = entry.unwrap().path().join("zeron-plugin.json");
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let manifest = Manifest::parse(&bytes).unwrap();
+            assert_eq!(manifest.problem(), None, "{}", path.display());
+            if manifest.id == "orchestrators" {
+                assert_eq!(manifest.switch, SwitchSpec { default_off: true, account: true });
+            }
+            seen += 1;
+        }
+        assert!(seen > 0);
+    }
 }

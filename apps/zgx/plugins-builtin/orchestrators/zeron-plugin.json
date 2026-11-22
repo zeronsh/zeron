@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Orchestrator chats that plan work and hand it to crews of agents across your devices, with the Control room to follow and steer them.",
   "entry": "init.luau",
-  "default": "off",
+  "switch": { "default": "off", "scope": "account" },
   "permissions": [
     "ui.add",
     "ui.replace",

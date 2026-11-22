@@ -23,7 +23,7 @@ A plugin is a folder: `zeron-plugin.json` (its manifest), `init.luau` (its code)
 - `permissions`: only what you use. The person allows them once, in Zeron. Asking for more later asks them again.
 - `ui.change`: the selectors you replace, each written exactly as in `zeron.place { at = … }`. Needs `"ui.change"`.
 - `ui.replace`: whole screens you replace (`"@app/screens/…"`; never `@app/screens/plugins` or `@app/screens/shell/settings`). Needs `"ui.replace"`. A screen replacement runs as Zeron's own code; prefer `ui.change`.
-- `app_modules`, `default`: for Zeron's own plugins shipped in the app alone (see [Zeron's own plugins](#zerons-own-plugins)). Yours are never given them.
+- `app_modules`: for Zeron's own plugins shipped in the app alone (see [Zeron's own plugins](#zerons-own-plugins)). Yours are never given them.
 - `tools`: tools agents can call, each `{ "name", "description", "input" }`. `name` is `^[a-z][a-z0-9_]{0,40}$` without `__`, and `input` is a JSON Schema. Needs `"tools"`.
 - `settings`: what the person can set for your plugin (see [Settings](#settings)). Needs no permission.
 - `commands`: the programs it runs as you (`["gh", "git"]`), each by its name as it's found on the PATH, never a path. Needs `"commands"`, and the person sees each name when allowing it (see [Programs and a database](#programs-and-a-database)).
@@ -702,7 +702,7 @@ A plugin you wrote that shows as Unverified here (one you copied in unsigned, sa
 
 ## Zeron's own plugins
 
-Zeron ships some of its features as plugins, in the app's `plugins-builtin/` folder beside `ui/`: Git, GitHub, Parallax scenes and Orchestrators. They're listed "by Zeron", allowed what they ask with no sheet, and turned off (never removed) in Settings → Plugins. `"default": "off"` in one's manifest keeps it off until it's turned on (the engine's to honour).
+Zeron ships some of its features as plugins, in the app's `plugins-builtin/` folder beside `ui/`: Git, GitHub, Parallax scenes and Orchestrators. They're listed "by Zeron", allowed what they ask with no sheet, and turned off (never removed) in Settings → Plugins. `"switch": { "default": "off", "scope": "account" }` in one's manifest keeps it off until it's turned on, with one switch for the whole account (see `switch` above).
 
 Most are plugins like yours, built only from what any plugin can use. One that is a large part of the app itself (Orchestrators: its screens, their stores, the Control room) runs instead as the app's own code, as a **bundled built-in**:
 
@@ -725,7 +725,7 @@ Most are plugins like yours, built only from what any plugin can use. One that i
 
   | file | what it is |
   |---|---|
-  | `zeron-plugin.json` | `"default": "off"`, `"app_modules": ["@app/builtin/orchestrators"]`, its permissions |
+  | `zeron-plugin.json` | `"switch": { "default": "off", "scope": "account" }`, `"app_modules": ["@app/builtin/orchestrators"]`, its permissions |
   | `init.luau` | its entry, in its own sandbox: `require("./overrides")` first, then what it adds as a plugin (pages, commands) |
   | `overrides.luau` | its `ui.override` calls alone, needing nothing but `ui` (the Luau tests load it on its own) |
   | `index.luau` | the app-side module: its parts by name, each required as it's first read |

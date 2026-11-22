@@ -128,6 +128,11 @@ impl Item {
     pub fn hash(&self) -> &str {
         self.str("hash")
     }
+    /// One of Zeron's own whose switch is the account's (`"scope":
+    /// "account"`): one switch for every device, set on this engine alone.
+    pub fn account_switch(&self) -> bool {
+        self.str("scope") == "account"
+    }
     fn list(&self, at: &Json) -> Vec<String> {
         at.as_array()
             .into_iter()
@@ -3653,6 +3658,12 @@ fn set_off_action(host: &ScriptHost, me: Weak<Bridge>) {
         async move {
             preview::refuse("plugins.set_off")?;
             let (id, device) = remote::id_and_device(&arg);
+            // (An account's switch is set here, never forwarded: another
+            // device's engine may not have the plugin's files.)
+            let account = me.upgrade().is_some_and(|b| {
+                [None, device.as_deref()].into_iter().any(|on| b.item_on(on, &id).is_some_and(|i| i.account_switch()))
+            });
+            let device = device.filter(|_| !account);
             let off = arg.field("off").is_some_and(Value::truthy);
             eprintln!("zeron-zgx: plugins: {id} turned {} from Settings", if off { "off" } else { "on" });
             call_on(&me, device, "SetPluginOff", json!({ "id": id, "off": off })).await.map(|_| Value::Nil)
@@ -3726,6 +3737,14 @@ mod tests {
         let now = vec![at("focus", "https://a/focus"), at("ping", "https://evil/ping")];
         let gone: Vec<String> = gone(&before, &now).into_iter().map(|(id, _)| id).collect();
         assert_eq!(gone, vec!["clock".to_string(), "ping".to_string()]);
+    }
+
+    /// `"scope": "account"` on an item: its switch is the account's.
+    #[test]
+    fn an_account_scoped_item_has_the_accounts_switch() {
+        assert!(item(json!({ "id": "orchestrators", "scope": "account", "default_off": true })).account_switch());
+        assert!(!item(json!({ "id": "focus" })).account_switch());
+        assert!(!item(json!({ "id": "focus", "scope": "device" })).account_switch());
     }
 
     /// `zeron.compose(text)` adds its words as ever; with options, it says
