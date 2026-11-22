@@ -2848,15 +2848,29 @@ impl Bridge {
     /// checkout on its device, the device is offline) is set aside instead,
     /// until its chat or device changes (`github_wake`).
     fn github_ended(self: &Rc<Self>, plugin: &str, session: &str, key: &str, why: &str) {
-        let ended = {
+        let (ended, parked_until) = {
             let mut all = self.gh.borrow_mut();
             let Some(gh) = all.get_mut(plugin) else { return };
-            gh.watches.ended(session, key, why, Instant::now())
+            let ended = gh.watches.ended(session, key, why, Instant::now());
+            (ended, gh.watches.parked_until(session, key))
         };
         let wait = match ended {
             github::Ended::Stale => return,
             github::Ended::Parked => {
-                return eprintln!("zeron-zgx: plugin {plugin}: {session}'s pull request watch ended ({why}); set aside until its chat or device changes");
+                eprintln!("zeron-zgx: plugin {plugin}: {session}'s pull request watch ended ({why}); set aside until its chat or device changes");
+                // (Its device offline: the list looked at again once its
+                // wait is up, should the list not move by itself then.)
+                if let Some(at) = parked_until {
+                    let me = Rc::downgrade(self);
+                    self.tasks.spawn(async move {
+                        zgx::timer::sleep(at.saturating_duration_since(Instant::now())).await;
+                        if let Some(b) = me.upgrade() {
+                            let list = b.host.shared("sessions", Value::Nil).signal().with_untracked(Value::clone);
+                            b.github_wake(&list);
+                        }
+                    });
+                }
+                return;
             }
             github::Ended::Wait(wait) => wait,
         };
@@ -2921,7 +2935,7 @@ impl Bridge {
                         _ => None,
                     }
                 };
-                for (session, key, _) in gh.watches.wake(params, online) {
+                for (session, key, _) in gh.watches.wake(params, online, Instant::now()) {
                     start.push((plugin.clone(), session, key));
                 }
             }

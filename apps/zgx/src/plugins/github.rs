@@ -108,27 +108,40 @@ pub fn away(why: &str) -> Option<Away> {
 pub struct Parked {
     pub why: Away,
     pub device: String,
-    /// The session list has shown its device offline since: online again,
-    /// it's worth asking.
+    /// Its device was offline since it was set aside: online again, it's
+    /// worth asking. Set aside as offline, it already was (the engine said
+    /// so), whatever the session list showed: the list often calls a device
+    /// offline before its watch gives up on it (a sleeping Mac: the watch
+    /// retries for minutes first), and waiting to see it go offline again
+    /// left the badge missing for good once it woke.
     seen_offline: bool,
+    /// Not asked again before this, however the list moves: while the list
+    /// calls a device online and the engine still can't reach it, each try
+    /// waits longer (the watch's own [`Retry`]), rather than one try per
+    /// change of the list.
+    pub not_before: Option<std::time::Instant>,
 }
 
 impl Parked {
-    pub fn new(why: Away, params: &Json) -> Self {
-        Self { why, device: params["targetDeviceId"].as_str().unwrap_or("").to_string(), seen_offline: false }
+    pub fn new(why: Away, params: &Json, not_before: Option<std::time::Instant>) -> Self {
+        Self {
+            why,
+            device: params["targetDeviceId"].as_str().unwrap_or("").to_string(),
+            seen_offline: why == Away::Offline,
+            not_before,
+        }
     }
 
     /// Its device as the session list has it now (`None`: not listed):
-    /// whether to try again. Only coming back online after being seen
-    /// offline counts, so a device the list calls online while the engine
-    /// can't reach it is asked once, not again and again.
-    pub fn wake(&mut self, online: Option<bool>) -> bool {
+    /// whether to try again at `now`. Only a device that was offline and
+    /// is online now counts, and not before its wait is up.
+    pub fn wake(&mut self, online: Option<bool>, now: std::time::Instant) -> bool {
         match online {
             Some(false) => {
                 self.seen_offline = true;
                 false
             }
-            Some(true) => self.seen_offline,
+            Some(true) => self.seen_offline && self.not_before.is_none_or(|at| now >= at),
             None => false,
         }
     }
@@ -249,7 +262,10 @@ impl<W> Watches<W> {
         };
         w.watch = None;
         if let Some(away) = away(why) {
-            w.parked = Some(Parked::new(away, &w.params));
+            // (Offline: asked again once its device is back, its wait
+            // growing each time the engine still can't reach it.)
+            let not_before = (away == Away::Offline).then(|| now + w.retry.ended());
+            w.parked = Some(Parked::new(away, &w.params, not_before));
             w.again_at = None;
             return Ended::Parked;
         }
@@ -269,10 +285,23 @@ impl<W> Watches<W> {
         self.entries.values().any(|w| w.parked.is_some())
     }
 
-    /// The session list moved: each set-aside watch that's shown, whose
-    /// chat changed (`params`: its watch's params now) or whose device came
-    /// back online (`online`), to start again.
-    pub fn wake(&mut self, params: impl Fn(&str) -> Option<Json>, online: impl Fn(&str) -> Option<bool>) -> Vec<Start> {
+    /// When `session`'s watch of `key`, set aside, may be asked again (its
+    /// device offline when it was): the host looks at the list again then,
+    /// in case the list doesn't move by itself.
+    pub fn parked_until(&self, session: &str, key: &str) -> Option<std::time::Instant> {
+        self.entries.get(session).filter(|w| w.key == key)?.parked.as_ref()?.not_before
+    }
+
+    /// The session list moved (or a set-aside watch's wait is up): each
+    /// set-aside watch that's shown, whose chat changed (`params`: its
+    /// watch's params now) or whose device came back online (`online`), to
+    /// start again.
+    pub fn wake(
+        &mut self,
+        params: impl Fn(&str) -> Option<Json>,
+        online: impl Fn(&str) -> Option<bool>,
+        now: std::time::Instant,
+    ) -> Vec<Start> {
         let mut start = Vec::new();
         for (session, w) in self.entries.iter_mut() {
             if !w.wanted {
@@ -284,7 +313,7 @@ impl<W> Watches<W> {
                     // Its chat moved: a watch of where it is now.
                     *w = Entry::new(watch_key(&now), now);
                 }
-                Some(_) if parked.wake(online(&parked.device)) => w.parked = None,
+                Some(_) if parked.wake(online(&parked.device), now) => w.parked = None,
                 _ => continue,
             }
             start.push((session.clone(), w.key.clone(), w.params.clone()));
@@ -494,22 +523,84 @@ mod tests {
 
     #[test]
     fn a_set_aside_watch_wakes_only_when_its_device_comes_back() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
         let params = json!({ "cwd": "/w", "targetDeviceId": "box" });
-        let mut parked = Parked::new(Away::Offline, &params);
+        let mut parked = Parked::new(Away::Offline, &params, Some(t0 + Duration::from_secs(2)));
         assert_eq!(parked.device, "box");
-        // The list still calls it online (its last beat is recent): no
-        // asking again on every change of the list.
+        // Its wait not up: not asked again, however often the list moves.
         for _ in 0..50 {
-            assert!(!parked.wake(Some(true)));
+            assert!(!parked.wake(Some(true), t0));
         }
-        assert!(!parked.wake(None), "not listed: nothing to go by");
-        assert!(!parked.wake(Some(false)));
-        assert!(!parked.wake(Some(false)));
-        assert!(parked.wake(Some(true)), "back online");
+        assert!(!parked.wake(None, t0 + Duration::from_secs(5)), "not listed: nothing to go by");
+        assert!(!parked.wake(Some(false), t0 + Duration::from_secs(5)), "still offline");
+        assert!(parked.wake(Some(true), t0 + Duration::from_secs(5)), "back online");
         // A chat whose folder isn't on this device: this device is always
         // online, so only a change of its chat wakes it.
-        let mut here = Parked::new(Away::NotHere, &json!({ "cwd": "/gone", "targetDeviceId": "mac" }));
-        assert!((0..50).all(|_| !here.wake(Some(true))));
+        let mut here = Parked::new(Away::NotHere, &json!({ "cwd": "/gone", "targetDeviceId": "mac" }), None);
+        assert!((0..50).all(|i| !here.wake(Some(true), t0 + Duration::from_secs(i))));
+    }
+
+    /// The Nov 22 case: a Linux box asleep 18 minutes. The list called it
+    /// offline after a minute, while its chats' watches were still retrying;
+    /// they were set aside only later, and when it woke the list just went
+    /// back to online. Waiting to see it offline again after being set aside
+    /// kept those chats' badges missing until Zeron was opened again.
+    #[test]
+    fn a_watch_set_aside_after_the_list_already_showed_its_device_offline_comes_back_with_it() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut w: Watches<u32> = Watches::default();
+        let list = shown(&[("a", "/w", "box")]);
+        let (session, key, params) = w.want(&list, t0, 512).remove(0);
+        w.started(&session, &key, 1);
+        // (Nothing set aside yet as the list goes offline: nothing to wake.)
+        assert!(!w.any_parked());
+        let asleep = t0 + Duration::from_secs(8 * 60);
+        assert_eq!(w.ended(&session, &key, "transport: peer box: device is offline (no recent presence)", asleep), Ended::Parked);
+        let p = |_: &str| Some(params.clone());
+        // Asleep, the list unchanged: offline still.
+        assert!(w.wake(p, |_| Some(false), asleep + Duration::from_secs(60)).is_empty());
+        // Awake: the list's first look at it online starts it again.
+        let awake = t0 + Duration::from_secs(18 * 60);
+        assert_eq!(w.wake(p, |_| Some(true), awake).len(), 1, "back with its device");
+        w.started(&session, &key, 2);
+        assert!(w.get(&session).unwrap().watch.is_some());
+    }
+
+    /// The list calls a device online while the engine still can't reach it
+    /// (their presence windows differ): asked again only as each wait is up,
+    /// waiting longer each time, never on every change of the list.
+    #[test]
+    fn a_device_the_list_calls_online_but_the_engine_can_t_reach_is_asked_less_and_less() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let offline = "transport: peer box: device is offline (no recent presence)";
+        let mut w: Watches<u32> = Watches::default();
+        let list = shown(&[("a", "/w", "box")]);
+        let (session, key, params) = w.want(&list, t0, 512).remove(0);
+        let p = |_: &str| Some(params.clone());
+        let mut starts = Vec::new();
+        let mut at = t0;
+        w.started(&session, &key, 0);
+        assert_eq!(w.ended(&session, &key, offline, at), Ended::Parked);
+        // Ten minutes of the list moving every second, the device "online".
+        while at < t0 + Duration::from_secs(600) {
+            at += Duration::from_secs(1);
+            if !w.wake(p, |_| Some(true), at).is_empty() {
+                starts.push(at.duration_since(t0).as_secs());
+                w.started(&session, &key, 0);
+                assert_eq!(w.ended(&session, &key, offline, at), Ended::Parked);
+                assert!(w.parked_until(&session, &key).is_some_and(|until| until > at));
+            }
+        }
+        // 2 s, then 4, 8, 16, 32, 64, 128, 256 s after each.
+        assert_eq!(starts, vec![2, 6, 14, 30, 62, 126, 254, 510]);
+        // Heard at last: its next wait is the shortest again.
+        w.started(&session, &key, 1);
+        assert!(w.heard(&session));
+        assert_eq!(w.ended(&session, &key, offline, at), Ended::Parked);
+        assert_eq!(w.parked_until(&session, &key), Some(at + Retry::FIRST));
     }
 
     fn shown(ids: &[(&str, &str, &str)]) -> Vec<(String, Json)> {
@@ -535,20 +626,20 @@ mod tests {
             let at = t0 + Duration::from_secs(i);
             assert!(w.want(if i % 2 == 0 { &list } else { &[] }, at, 512).is_empty());
             let same = list[0].1.clone();
-            assert!(w.wake(|_| Some(same.clone()), |_| Some(true)).is_empty());
+            assert!(w.wake(|_| Some(same.clone()), |_| Some(true), at).is_empty());
             assert_eq!(w.due(&session, &key), None);
         }
         // Shown, and its chat moved to another branch: a watch of that.
         assert!(w.want(&list, t0, 512).is_empty());
         let moved = watch_params(&json!({ "cwd": "/elsewhere", "branch": "next", "device": "mac" })).unwrap();
-        let start = w.wake(|_| Some(moved.clone()), |_| Some(true));
+        let start = w.wake(|_| Some(moved.clone()), |_| Some(true), t0);
         assert_eq!(start.len(), 1);
         assert_eq!(start[0].1, watch_key(&moved));
     }
 
     #[test]
     fn a_chat_on_an_offline_device_is_asked_about_again_once_it_s_back() {
-        use std::time::Instant;
+        use std::time::{Duration, Instant};
         let t0 = Instant::now();
         let mut w: Watches<u32> = Watches::default();
         let list = shown(&[("a", "/w", "box")]);
@@ -556,9 +647,9 @@ mod tests {
         w.started(&session, &key, 1);
         assert_eq!(w.ended(&session, &key, "transport: peer box: device is offline (no recent presence)", t0), Ended::Parked);
         let p = |_: &str| Some(params.clone());
-        assert!(w.wake(p, |_| Some(true)).is_empty(), "still called online by the list");
-        assert!(w.wake(p, |_| Some(false)).is_empty());
-        assert_eq!(w.wake(p, |_| Some(true)).len(), 1, "back");
+        assert!(w.wake(p, |_| Some(true), t0).is_empty(), "its wait not up yet");
+        assert!(w.wake(p, |_| Some(false), t0 + Duration::from_secs(5)).is_empty(), "offline");
+        assert_eq!(w.wake(p, |_| Some(true), t0 + Duration::from_secs(6)).len(), 1, "back");
         w.started(&session, &key, 2);
         assert!(w.get(&session).unwrap().watch.is_some());
     }
@@ -642,7 +733,7 @@ mod tests {
             // (The list moves; box stays offline.)
             let list = shown_at(tick);
             let params = |id: &str| list.iter().find(|(s, _)| s == id).map(|(_, p)| p.clone());
-            for s in w.wake(params, |d| Some(d == "mac")) {
+            for s in w.wake(params, |d| Some(d == "mac"), t0 + at) {
                 start(&mut w, &mut timers, at, s);
             }
             at += Duration::from_secs(5);
