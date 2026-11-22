@@ -3,7 +3,9 @@
 
 use std::path::Path;
 
+#[cfg(unix)]
 use base64::Engine as _;
+#[cfg(unix)]
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL;
 use zeron_proto::{AgentAuthKind, AgentUsageWindow, HarnessId};
 
@@ -16,11 +18,13 @@ pub(crate) fn accounts(root: &Path) -> AgentAccounts {
     AgentAccounts::new(AgentAccountsConfig::isolated(root))
 }
 
+#[cfg(unix)]
 fn jwt(claims: serde_json::Value) -> String {
     format!("e30.{}.sig", BASE64_URL.encode(serde_json::to_vec(&claims).unwrap()))
 }
 
 /// A Codex `auth.json` for `email` in workspace `workspace` (its account key).
+#[cfg(unix)]
 pub(crate) fn codex_auth(email: &str, workspace: &str, access: &str, refreshed: &str) -> serde_json::Value {
     let id_token = jwt(serde_json::json!({
         "email": email,
@@ -57,6 +61,7 @@ pub(crate) fn claude_slot(accounts: &AgentAccounts, uuid: &str, email: &str, acc
 }
 
 /// A saved Codex login (workspace `workspace` is its account key): its slot id.
+#[cfg(unix)]
 pub(crate) fn codex_slot(accounts: &AgentAccounts, workspace: &str, email: &str, access: &str) -> String {
     let slot = Slot {
         id: slot_id_for(HarnessId::Codex, workspace),
@@ -94,6 +99,7 @@ pub(crate) fn live_claude(root: &Path, uuid: &str, email: &str) {
 }
 
 /// Make `workspace` the machine's Codex login (under the test root).
+#[cfg(unix)]
 pub(crate) fn live_codex(root: &Path, workspace: &str, email: &str) {
     let config = AgentAccountsConfig::isolated(root);
     std::fs::create_dir_all(&config.codex_home).unwrap();
