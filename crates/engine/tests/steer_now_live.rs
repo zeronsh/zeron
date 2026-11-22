@@ -147,6 +147,7 @@ async fn steer_now_interrupts_a_streaming_answer() {
                     auto_approve: true,
                     access: Default::default(),
                     plan: false,
+                    code_mode: false,
                     attachments: vec![],
                     worktree: None,
                     resume: None,

@@ -151,23 +151,38 @@ M.escape_end = escape_end
 -- 2.5f), or nil. A `..` after digits (a range) is not a fraction.
 local function number_end(line: string, i: number): number?
 	local _, e = find(line, "^0[xX][%x_]+", i)
-	if not e then
-		_, e = find(line, "^0[bBoO][%x_]+", i)
-	end
-	if not e then
-		_, e = find(line, "^%d[%d_]*", i)
-		if e then
-			if byte(line, e + 1) == DOT and is_digit(byte(line, e + 2)) then
-				_, e = find(line, "^[%d_]*", e + 2)
-			elseif byte(line, e + 1) == DOT and not is_alpha(byte(line, e + 2)) and byte(line, e + 2) ~= DOT then
-				e += 1
+	if e then
+		local nxt = byte(line, e + 1)
+		if nxt == DOT and byte(line, e + 2) ~= DOT then
+			local _, x = find(line, "^%.[%x_]+[pP][%+%-]?[%d_]+", e + 1)
+			if x then
+				e = x
 			end
-		else
-			_, e = find(line, "^%.%d[%d_]*", i)
+		elseif nxt == 112 or nxt == 80 then
+			local _, x = find(line, "^[pP][%+%-]?[%d_]+", e + 1)
+			if x then
+				e = x
+			end
 		end
-		if e then
-			local _, x = find(line, "^[eE][%+%-]?%d+", (e :: number) + 1)
-			e = x or e
+	else
+		_, e = find(line, "^0[bBoO][%x_]+", i)
+		if not e then
+			_, e = find(line, "^%d[%d_]*", i)
+			if e then
+				if byte(line, e + 1) == DOT and is_digit(byte(line, e + 2)) then
+					_, e = find(line, "^[%d_]*", e + 2)
+				elseif byte(line, e + 1) == DOT and not is_alpha(byte(line, e + 2)) and byte(line, e + 2) ~= DOT then
+					e += 1
+				end
+			else
+				_, e = find(line, "^%.%d[%d_]*", i)
+			end
+			if e then
+				local _, x = find(line, "^[eE][%+%-]?%d[%d_]*", (e :: number) + 1)
+				if x then
+					e = x
+				end
+			end
 		end
 	end
 	if not e then
@@ -177,6 +192,43 @@ local function number_end(line: string, i: number): number?
 	return s or e
 end
 M.number_end = number_end
+
+-- Zig's arbitrary-width integer types: i0..i65535 and u0..u65535 (no leading zero).
+local function is_zig_int(w: string): boolean
+	local len = #w
+	if len < 2 or len > 6 then
+		return false
+	end
+	local c1 = byte(w, 1)
+	if c1 ~= 105 and c1 ~= 117 then
+		return false
+	end
+	local c2 = byte(w, 2)
+	if c2 < 48 or c2 > 57 then
+		return false
+	end
+	if c2 == 48 then
+		return len == 2
+	end
+	for k = 3, len do
+		local d = byte(w, k)
+		if d < 48 or d > 57 then
+			return false
+		end
+	end
+	local n = tonumber(sub(w, 2))
+	return n ~= nil and n <= 65535
+end
+
+-- Keywords after `name ::` that declare a type in Odin.
+local ODIN_TYPE_DECLS: { [string]: boolean } = {
+	struct = true,
+	enum = true,
+	union = true,
+	bit_field = true,
+	bit_set = true,
+	distinct = true,
+}
 
 -- The lexer for C-like languages. `spec` names the language's rules:
 --   line        line comment openers ({ "//" })
@@ -195,8 +247,14 @@ M.number_end = number_end
 --   chars       `'x'` is a character ('a, a Rust lifetime, if `lifetimes`)
 --   macros      `name!` is a macro (Rust)
 --   attributes  `#[...]` is an attribute (Rust)
---   decorators  `@name` is an attribute (Python, Swift, Kotlin, TS, WGSL)
+--   decorators  `@name` is an attribute (Python, Swift, Kotlin, TS, WGSL, Odin)
 --   preprocessor  `#word` starting a line is a directive (C, C#)
+--   directives  `#word` anywhere on a line is a directive (Odin)
+--   odin_attrs  `@(...)` is an attribute (Odin)
+--   odin_decls  `name :: proc` / `struct` / `enum` / `union` / `bit_field` / `bit_set` / `distinct` (Odin)
+--   zig_multiline  `\\...` to end of line is a multiline string (Zig)
+--   zig_builtins   `@builtin` is a macro; `@"..."` is an escaped identifier (Zig)
+--   zig_int_types  `i0`..`i65535` and `u0`..`u65535` are integer types (Zig)
 --   long        Lua's long brackets: `[[...]]` strings, `--[[...]]` comments
 --   rust_raw    Rust's `r#"..."#` (and `b`, `br`, `c` before a quote)
 --   cpp_raw     C++'s `R"x(...)x"`
@@ -223,6 +281,13 @@ function M.code(spec: { [string]: any }): Highlighter
 	local caps = spec.caps_type
 	local key_suffix: string? = spec.key
 	local number_pattern: string? = spec.number
+	local decorators = spec.decorators == true
+	local zig_multiline = spec.zig_multiline == true
+	local zig_builtins = spec.zig_builtins == true
+	local zig_int_types = spec.zig_int_types == true
+	local directives = spec.directives == true
+	local odin_attrs = spec.odin_attrs == true
+	local odin_decls = spec.odin_decls == true
 
 	-- What can start something other than a plain word or symbol, so most
 	-- bytes skip every check below.
@@ -239,6 +304,9 @@ function M.code(spec: { [string]: any }): Highlighter
 		if k.escape == nil then
 			k.escape = true
 		end
+	end
+	if zig_multiline then
+		starts[BACKSLASH] = true
 	end
 
 	-- A kind made a variant by a prefix (`r"..."`, `f'...'`), made once.
@@ -462,6 +530,10 @@ function M.code(spec: { [string]: any }): Highlighter
 				continue
 			end
 			if starts[b] then
+				if zig_multiline and b == BACKSLASH and byte(line, i + 1) == BACKSLASH then
+					push(out, i, n, C.string)
+					return nil, 0, open
+				end
 				local done = false
 				for _, c in line_comments do
 					if b == byte(c) and sub(line, i, i + #c - 1) == c then
@@ -642,6 +714,8 @@ function M.code(spec: { [string]: any }): Highlighter
 					color = C.variable
 				elseif types[key] then
 					color = C.type
+				elseif zig_int_types and is_zig_int(w) then
+					color = C.type
 				elseif spec.macros and after == BANG and byte(line, e + 2) ~= EQ then
 					color = C.macro
 					e += 1
@@ -649,13 +723,23 @@ function M.code(spec: { [string]: any }): Highlighter
 					color = C["function"]
 				elseif is_key(line, e) then
 					color = C.property
-				elseif caps then
-					local c = byte(w)
-					if c >= 65 and c <= 90 then
-						if #w > 1 and not find(w, "%l") then
-							color = C.constant
-						else
+				else
+					if odin_decls and (after == 32 or after == 9 or after == COLON) then
+						local _, _, rhs = find(line, "^%s*::%s*([%a_]+)", e + 1)
+						if rhs == "proc" then
+							color = C["function"]
+						elseif rhs and ODIN_TYPE_DECLS[rhs] then
 							color = C.type
+						end
+					end
+					if not color and caps then
+						local c = byte(w)
+						if c >= 65 and c <= 90 then
+							if #w > 1 and not find(w, "%l") then
+								color = C.constant
+							else
+								color = C.type
+							end
 						end
 					end
 				end
@@ -672,7 +756,7 @@ function M.code(spec: { [string]: any }): Highlighter
 				continue
 			end
 			if b == APOS and spec.chars then
-				local _, e = find(line, "^'\\[^']*'", i)
+				local _, e = find(line, "^'\\.[^']*'", i)
 				if not e then
 					_, e = find(line, "^'[^'\\][\128-\191]*'", i)
 				end
@@ -698,46 +782,130 @@ function M.code(spec: { [string]: any }): Highlighter
 					end
 				end
 			end
-			if b == HASH and spec.attributes and (byte(line, i + 1) == LBRACK or sub(line, i + 1, i + 2) == "![") then
-				-- To its matching bracket.
-				local level, j = 0, i + 1
-				while j <= n do
-					local c = byte(line, j)
-					if c == LBRACK then
-						level += 1
-					elseif c == RBRACK then
-						level -= 1
-						if level == 0 then
-							break
+			if b == HASH then
+				if spec.attributes and (byte(line, i + 1) == LBRACK or sub(line, i + 1, i + 2) == "![") then
+					-- To its matching bracket.
+					local level, j = 0, i + 1
+					while j <= n do
+						local c = byte(line, j)
+						if c == LBRACK then
+							level += 1
+						elseif c == RBRACK then
+							level -= 1
+							if level == 0 then
+								break
+							end
 						end
+						j += 1
 					end
-					j += 1
-				end
-				push(out, i, math.min(j, n), C.attribute)
-				i = j + 1
-				continue
-			end
-			if b == HASH and spec.preprocessor and i == first then
-				local _, e, word = find(line, "^#%s*([%a_]+)", i)
-				if e then
-					push(out, i, e, C.macro)
-					i = e + 1
-					if word == "include" or word == "import" then
-						local _, q = find(line, "^%s*<[^>]*>", i)
-						if q then
-							push(out, i, q, C.string)
-							i = q + 1
-						end
-					end
+					push(out, i, math.min(j, n), C.attribute)
+					i = j + 1
 					continue
 				end
+				if spec.preprocessor and i == first then
+					local _, e, word = find(line, "^#%s*([%a_]+)", i)
+					if e then
+						push(out, i, e, C.macro)
+						i = e + 1
+						if word == "include" or word == "import" then
+							local _, q = find(line, "^%s*<[^>]*>", i)
+							if q then
+								push(out, i, q, C.string)
+								i = q + 1
+							end
+						end
+						continue
+					end
+				end
+				if directives then
+					local _, e = find(line, "^#[%a_][%w_]*", i)
+					if e then
+						push(out, i, e, C.macro)
+						i = e + 1
+						continue
+					end
+				end
 			end
-			if b == AT and spec.decorators then
-				local _, e = find(line, "^@[%a_][%w_%.]*", i)
-				if e then
-					push(out, i, e, C.attribute)
-					i = e + 1
+			if b == AT then
+				if zig_builtins then
+					local nxt = byte(line, i + 1)
+					if nxt == QUOTE then
+						local j = i + 2
+						while j <= n do
+							local c = byte(line, j)
+							if c == BACKSLASH then
+								j += 2
+							elseif c == QUOTE then
+								break
+							else
+								j += 1
+							end
+						end
+						local e = math.min(j, n)
+						local prev = byte(line, i - 1)
+						local member = prev == DOT and byte(line, i - 2) ~= DOT
+						local _, paren = find(line, "^%s*%(", e + 1)
+						local color: string? = nil
+						if member then
+							color = if paren then C["function"] else C.property
+						elseif naming then
+							color = if defs[naming] then C["function"] else C.type
+						elseif paren then
+							color = C["function"]
+						end
+						if color then
+							push(out, i, e, color :: string)
+						end
+						naming = nil
+						value = true
+						i = e + 1
+						continue
+					elseif is_alpha(nxt) then
+						local _, e = find(line, "^@[%a_][%w_]*", i)
+						if e then
+							push(out, i, e, C.macro)
+							naming = nil
+							value = true
+							i = e + 1
+							continue
+						end
+					end
+				elseif odin_attrs and byte(line, i + 1) == LPAREN then
+					local level, j = 0, i + 1
+					while j <= n do
+						local c = byte(line, j)
+						if c == QUOTE then
+							j += 1
+							while j <= n do
+								local sc = byte(line, j)
+								if sc == BACKSLASH then
+									j += 2
+								elseif sc == QUOTE then
+									break
+								else
+									j += 1
+								end
+							end
+						elseif c == LPAREN then
+							level += 1
+						elseif c == RPAREN then
+							level -= 1
+							if level == 0 then
+								break
+							end
+						end
+						j += 1
+					end
+					push(out, i, math.min(j, n), C.attribute)
+					i = j + 1
 					continue
+				elseif decorators then
+					local _, e = find(line, "^@[%a_][%w_%.]*", i)
+					if e then
+						push(out, i, e, C.attribute)
+						i = e + 1
+						continue
+					end
 				end
 			end
 			if b == SLASH and spec.regex and not value then

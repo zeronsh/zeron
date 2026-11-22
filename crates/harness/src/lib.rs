@@ -84,6 +84,10 @@ pub struct TurnControl {
     processes: std::sync::Arc<background::BackgroundWork>,
     /// The agent process's pid (0: none, or not known).
     agent_pid: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// Host-prepared prompt carrying the chat's prior transcript, consumed by
+    /// a driver ONLY when resuming `RunRequest::resume` fails as unrestorable
+    /// and it falls back to a fresh session in-place.
+    recovery_prompt: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl TurnControl {
@@ -95,6 +99,24 @@ impl TurnControl {
     /// Driver: resolves once per [`Self::stop_turn`].
     pub async fn stop_requested(&self) {
         self.stop.notified().await;
+    }
+
+    /// Host: supply the transcript-wrapped prompt a driver should send if
+    /// resuming `RunRequest::resume` fails as unrestorable and it starts fresh.
+    pub fn set_recovery_prompt(&self, prompt: Option<String>) {
+        *self
+            .recovery_prompt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = prompt;
+    }
+
+    /// Driver: consume the host's recovery prompt when falling back from an
+    /// unrestorable resumed session to a fresh one.
+    pub fn take_recovery_prompt(&self) -> Option<String> {
+        self.recovery_prompt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 
     /// Driver: how many background tasks the runtime currently holds.
@@ -372,8 +394,9 @@ pub trait Harness: Send + Sync {
     /// The [`AccessMode`]s this driver honors, least to most trusting. A
     /// request for any other runs with full access (the composer offers
     /// only these), except Auto: it falls back only to a stricter mode
-    /// listed here, and the engine refuses it when there is none
-    /// ([`AccessMode::honored_by`]).
+    /// listed here, and the engine refuses it when there is none. A request
+    /// for Supervised or Auto-accept edits, when Auto is listed and they
+    /// are not, runs in Auto ([`AccessMode::honored_by`]).
     fn access_modes(&self) -> &[AccessMode] {
         &[AccessMode::FullAccess]
     }
@@ -488,6 +511,7 @@ mod background;
 pub use background::{MarkOutcome, MarkRefused, OutputSource};
 pub mod bounded_file;
 mod catalog;
+pub mod catalog_env;
 mod catalog_failure;
 pub(crate) mod code_signature;
 /// Secret redaction, shared with the doc fold (command output tails).
@@ -574,12 +598,47 @@ pub fn apply_run_env(cmd: &mut process::Command, env: &std::collections::BTreeMa
     }
 }
 
+static PREFERRED_NODE_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Put `dir` (a Node install's `bin`) right after an agent's own directory
+/// on every agent child's PATH and on installers' (once per process). A
+/// Cloud machine sets it to its newest Node: the image's default `node` can
+/// be older than npm-distributed agents need (Pi 1.5 needs Node 22's
+/// `module.enableCompileCache`; @cursor/sdk's native bindings need 22.13),
+/// and a script agent runs on whichever `node` its PATH finds first.
+pub fn prefer_node_dir(dir: std::path::PathBuf) {
+    let _ = PREFERRED_NODE_DIR.set(dir);
+}
+
+/// The directory [`prefer_node_dir`] set, if any.
+pub fn preferred_node_dir() -> Option<&'static std::path::Path> {
+    PREFERRED_NODE_DIR.get().map(std::path::PathBuf::as_path)
+}
+
+/// The newest Node on this machine (its version managers' installs and the
+/// PATH's), as its `bin` directory and version.
+pub fn newest_node_dir() -> Option<(std::path::PathBuf, (u64, u64, u64))> {
+    let name = if cfg!(windows) { "node.exe" } else { "node" };
+    executable::node_manager_bins()
+        .into_iter()
+        .map(|dir| dir.join(name))
+        .chain(executable::find_on_paths("node", Vec::new()))
+        .filter_map(|node| {
+            let version = adapter_install::node_version(&node)?;
+            Some((node.parent()?.to_path_buf(), version))
+        })
+        .max_by_key(|(_, version)| *version)
+}
+
 fn compose_path<'a>(
     cmd: &mut std::process::Command,
     executable_dir: impl IntoIterator<Item = &'a std::path::Path>,
 ) {
-    let executable_dir: Vec<std::path::PathBuf> =
+    let mut executable_dir: Vec<std::path::PathBuf> =
         executable_dir.into_iter().map(Into::into).collect();
+    if let Some(node) = preferred_node_dir() {
+        executable_dir.push(node.to_path_buf());
+    }
     let own = std::env::var_os("PATH");
     let user = shell_env::user_path();
     #[cfg(windows)]
@@ -966,6 +1025,19 @@ pub fn supports_titles(id: HarnessId) -> bool {
 /// a chat that ran while they were off.
 pub fn switches_native_subagents(id: HarnessId) -> bool {
     matches!(id, HarnessId::ClaudeCode)
+}
+
+/// Drivers that support an opt-in Code Mode where the agent scripts tool calls
+/// in JavaScript instead of emitting one JSON tool call per turn:
+/// - Codex (`features.code_mode = true` on `thread/start` and `thread/resume`)
+/// - Muse Code (`-c run.code_mode="additive"` on `muse serve`)
+///
+/// Claude Code's experimental Code Mode is excluded because Claude Code
+/// refuses it outside an interactive terminal (`-p` / `stream-json`).
+/// OpenCode 2.x and Hermes enable their code-execution tools by default rather
+/// than behind an opt-in mode switch.
+pub fn supports_code_mode(id: HarnessId) -> bool {
+    matches!(id, HarnessId::Codex | HarnessId::Muse)
 }
 
 #[cfg(test)]

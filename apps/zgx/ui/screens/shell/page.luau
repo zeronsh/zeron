@@ -2057,6 +2057,7 @@ return function(props: Props): Node
 				-- width leaves, followed as the sidebar moves.)
 				return props.width() - (row_ref.width or props.width())
 			end,
+			width = props.width,
 			start = function(): number
 				local past = ds.TitleBar.last_control_end() + 8
 				if sidebar_settled() <= 0 then

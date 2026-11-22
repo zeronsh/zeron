@@ -170,8 +170,9 @@ async fn list_inner(
             result
         }
     });
-    // A forced list is someone asking again (a sign-in, a Retry): it waits for
-    // the agent's answer rather than serving the copy it means to replace.
+    // A kept catalog answers at once while the refresh runs on, unless the
+    // caller asked for this one (`force`: a sign-in just changed what the
+    // agent lists, and the kept one is the last account's).
     let result = if disk.is_some() && !force {
         tokio::time::timeout(Duration::from_millis(100), &mut refresh)
             .await
@@ -340,6 +341,7 @@ mod tests {
         probe.delay.store(true, SeqCst);
         let gate = Arc::new(tokio::sync::RwLock::new(()));
         let lease = Arc::new(gate.clone().read_owned().await);
+        // (Unforced: the kept catalog answers while the probe runs on.)
         list_with_lease(dir.path(), probe, false, Some(lease))
             .await
             .unwrap();
@@ -459,6 +461,20 @@ mod tests {
         assert_eq!(list(dir.path(), probe, false).await.unwrap(), old);
         tokio::time::sleep(Duration::from_millis(250)).await;
         assert_eq!(read(&path, &context), Some(models()));
+    }
+    /// Asked for this one (a sign-in just changed what the agent lists), a
+    /// slow probe is waited for: the kept catalog is the last account's.
+    #[tokio::test]
+    async fn a_forced_list_waits_for_the_probe_over_the_kept_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = Probe::new();
+        let context = probe.model_context().unwrap().unwrap();
+        let path = location(dir.path(), probe.as_ref(), &context);
+        let mut old = models();
+        old[0].id = "old-live".into();
+        save(&path, &context, &old).unwrap();
+        probe.delay.store(true, SeqCst);
+        assert_eq!(list(dir.path(), probe, true).await.unwrap(), models());
     }
     #[tokio::test]
     async fn a_forced_list_waits_for_the_agent_instead_of_its_disk_copy() {

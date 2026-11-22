@@ -396,6 +396,31 @@ test("a prompt's machine coming up is its first setup step, starting or waking, 
 	expect(foot(session({ state = "sleeping" })).text).to_be("Interrupted — its Cloud machine went to sleep")
 end)
 
+test("a send's machine step stays from its start until the machine's own steps come", function()
+	local starting = TurnState.of({ streaming = true, sending = true, live = false, now = NOW, cloud = session({ state = "provisioning" }) } :: any)
+	expect(starting and starting.step).to_be("start")
+	-- Up: nothing more to say of it, so the step it showed stays (not
+	-- "Sending…" before the machine's own steps).
+	local up: any = { streaming = true, sending = true, live = false, now = NOW, cloud = session({ state = "ready" }) }
+	expect(TurnState.of(up)).to_be(nil)
+	expect(TurnState.keep_step(starting, TurnState.of(up), up)).to_be(starting)
+	-- Never one not shown before (a send to a machine already up), nor past
+	-- a failed wake, a reply begun, or a machine gone to sleep.
+	expect(TurnState.keep_step(nil, nil, up)).to_be(nil)
+	expect(TurnState.keep_step(starting, nil, table.clone(up) :: any)).to_be(starting)
+	local failed = table.clone(up)
+	failed.wake_failed = true
+	expect(TurnState.keep_step(starting, nil, failed)).to_be(nil)
+	local replied = table.clone(up)
+	replied.sending = false
+	expect(TurnState.keep_step(starting, nil, replied)).to_be(nil)
+	local asleep: any = { streaming = true, sending = true, live = false, now = NOW, cloud = session({ state = "error" }) }
+	expect(TurnState.keep_step(starting, nil, asleep)).to_be(nil)
+	-- What else is said takes its place.
+	local updating = { text = "Updating its Cloud machine…", spinner = true, step = "wake" }
+	expect(TurnState.keep_step(starting, updating :: any, up)).to_be(updating)
+end)
+
 test("a prompt waiting on a slow wake says so", function()
 	expect(turn({ sending = true, cloud = session({ state = "starting", stage = "slow" }) })).to_be("Waking its Cloud machine is taking longer than usual…")
 	expect(turn({ cloud = session({ state = "starting", stage = "slow" }) })).to_be("Resuming — its Cloud machine is taking longer than usual to wake…")

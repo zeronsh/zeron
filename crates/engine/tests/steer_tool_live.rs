@@ -158,6 +158,7 @@ async fn steering_never_aborts_a_running_tool() {
                     auto_approve: true,
                     access: Default::default(),
                     plan: false,
+                    code_mode: false,
                     attachments: vec![],
                     worktree: None,
                     resume: None,

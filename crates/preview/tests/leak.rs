@@ -177,6 +177,7 @@ async fn remote_preview_churn_does_not_accumulate_tasks_or_memory() {
                 origin: Some("chat:chat".into()),
                 chat_id: Some("chat".into()),
                 signing_in: false,
+                test_run: false,
             },
         )])
         .unwrap();

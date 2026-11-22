@@ -1169,8 +1169,33 @@ local function cursor_pool(model: string): string
 	return "Other"
 end
 
+-- Antigravity's limits are its group of models' ("Gemini Session",
+-- "Claude & GPT Week": zeron_proto's ANTIGRAVITY_USAGE_*): the model's.
+local function antigravity_group(model: string): string
+	local id = string.lower(string.match(model, "^[^/]+/(.+)$") or model)
+	return if string.find(id, "gemini", 1, true) then "Gemini" else "Claude & GPT"
+end
+
+-- The windows `model` draws from, named within its group ("Session"), for
+-- an agent that limits groups of models apart (Antigravity); nil: all of
+-- the account's are.
+local function group_windows(account: any, harness: string, model: string): { any }?
+	if harness ~= "antigravity" then
+		return nil
+	end
+	local group = `{antigravity_group(model)} `
+	local mine = {}
+	for _, w in account.windows do
+		if string.sub(w.label, 1, #group) == group then
+			table.insert(mine, { label = string.sub(w.label, #group + 1), used = w.used })
+		end
+	end
+	return mine
+end
+
 -- What the ring reads: the fuller window; for Cursor, the pool the model
--- draws from, if that's reported. Nil: nothing reported.
+-- draws from, if that's reported; for Antigravity, the model's group's
+-- fuller one. Nil: nothing reported.
 local function account_used(account: any, harness: string, model: string): number?
 	if harness == "cursor" then
 		local id = string.match(model, "^[^/]+/(.+)$") or model
@@ -1182,7 +1207,7 @@ local function account_used(account: any, harness: string, model: string): numbe
 		end
 	end
 	local most: number? = nil
-	for _, w in account.windows do
+	for _, w in group_windows(account, harness, model) or account.windows do
 		most = if most then math.max(most, w.used) else w.used
 	end
 	return most
@@ -1190,13 +1215,34 @@ end
 
 -- An account's windows in words, or why it has none to show: one not in use
 -- says what's wrong with it, as a signed-out one's old figures would mislead.
-local function account_detail(account: any): string
+-- Antigravity's are its model's group's; a group Google sets no limit for
+-- (Gemini on Google AI Ultra) shows the others', each group named once
+-- ("Claude & GPT: Session 40% · Week 10%").
+local function account_detail(account: any, harness: string, model: string): string
 	if account.error and (not account.active or #account.windows == 0) then
 		return account.error
 	end
+	local function said(w: any): string
+		return `{w.label} {math.floor(w.used * 100 + 0.5)}%`
+	end
+	local mine = group_windows(account, harness, model)
 	local parts: { string } = {}
-	for _, w in account.windows do
-		table.insert(parts, `{w.label} {math.floor(w.used * 100 + 0.5)}%`)
+	if mine and #mine == 0 then
+		-- ("<group> <span>": the span is the label's last word.)
+		local group: string? = nil
+		for _, w in account.windows do
+			local named, span = string.match(w.label, "^(.+) (%S+)$")
+			local part = said({ label = span or w.label, used = w.used })
+			if named and named ~= group then
+				group = named
+				part = `{named}: {part}`
+			end
+			table.insert(parts, part)
+		end
+	else
+		for _, w in mine or account.windows do
+			table.insert(parts, said(w))
+		end
 	end
 	return table.concat(parts, " · ")
 end
@@ -1253,7 +1299,7 @@ function M.model_accounts(device: () -> string?): any
 					active = a.active,
 					can_switch = a.can_switch,
 					used = account_used(a, harness, model),
-					detail = account_detail(a),
+					detail = account_detail(a, harness, model),
 				}
 			end
 			return out

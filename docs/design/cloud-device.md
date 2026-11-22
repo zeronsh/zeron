@@ -16,7 +16,10 @@ only once an account has been connected *for Cloud* (Settings → Providers, wit
 the device switcher). Cloud is listed there as one entry, never its session machines; no other
 device list shows it.
 
-- v1 providers on Cloud: **Codex** and **Claude Code** only.
+- Providers on Cloud: every built-in agent — Claude Code, Codex, Cursor, Devin, Grok, Hermes,
+  fx, Pi, OpenCode, Antigravity and Muse Code — each on the vault credentials listed in
+  "Providers" (agents added from the ACP registry stay on the devices that added them). A
+  machine installs an agent's CLI the first time a session runs it.
 - v1 repositories on Cloud: **GitHub repositories** the user installed the Zeron GitHub App on.
   Each session sandbox clones its project's repository from the branch picked in the composer;
   agents get a one-hour GitHub App installation token for `git push` and `gh pr create`, so
@@ -644,23 +647,55 @@ unreadable (that user reconnects), which doubles as the emergency response to a 
 The key source is pluggable (`KekProvider`), so an external key manager can replace the
 secret later without touching records' format.
 
-### Providers (v1)
+### Providers
 
 | Provider id | Material | Refresh |
 | --- | --- | --- |
 | `codex` | ChatGPT OAuth token set from `codex login` (`id_token`, `access_token`, `refresh_token`, `account_id`) | `POST https://auth.openai.com/oauth/token` (`grant_type=refresh_token`, Codex public client id) |
 | `claude` | Claude Code credential blob from a sign-in through Claude's own OAuth flow (`claudeAiOauth`), or a long-lived `claude setup-token` token | `POST https://platform.claude.com/v1/oauth/token` (`grant_type=refresh_token`, Claude Code client id); setup tokens never refresh |
 | `github` | GitHub App user token + refresh token (never granted; see "GitHub") | `POST https://github.com/login/oauth/access_token` with `GITHUB_APP_CLIENT_ID/SECRET` (vault secrets) |
-| `anthropic-key` | User's own Anthropic API key | none (static) |
-| `openai-key` | User's own OpenAI API key | none (static) |
+| `grok` | The xAI OIDC token set `grok login --device-auth` writes to `auth.json` (`{grokAuth: entry, scope: "{issuer}::{client_id}"}`) | `POST {oidc_issuer}/oauth2/token` (form, `grant_type=refresh_token`, the entry's own `oidc_client_id`); the issuer must be an `https` `x.ai` host |
+| `xai-oauth` | Hermes' `providers["xai-oauth"]` record (`{xaiOauth}`: an xAI OAuth token set with Hermes' API scopes) | `POST {token_endpoint}` (default `https://auth.x.ai/oauth2/token`, an `x.ai` host only; Hermes' public client); kept ≥ 2 h (or half its life) from expiry, since Hermes refreshes an hour ahead itself |
+| `nous` | Hermes' `providers.nous` record (`{nousAuth}`) | `POST {portal}/api/oauth/token` (form `grant_type=refresh_token`, `client_id=hermes-cli`; refresh token in the `x-nous-refresh-token` header); portal an `https` `nousresearch.com` host. Single-use refresh tokens: reuse revokes the session |
+| `antigravity` | Antigravity's `acp_token.json` (`{antigravityToken}`: `client_id`, `client_secret`, `refresh_token`, `scopes`, `project_id`; no access token) | `POST https://oauth2.googleapis.com/token`; Google refresh tokens don't rotate; refreshed once < 50 min remain |
+| `muse` | Muse's whole `auth.json` (`{museAuth}`), its `providers.meta` login | none: Muse mints its model keys from the access token, which lasts until `expires_at`; then `needs_reconnect` |
+| `copilot` | `{copilotToken, login}`: the GitHub token of Copilot's editor app (device flow), which agents exchange for Copilot sessions themselves | none (does not expire; revoked on GitHub) |
+| `devin` | `{devinCredentials}`: Devin's `credentials.toml` as a table (`windsurf_api_key` and its server urls), written by Devin's own browser sign-in | none (long-lived) |
+| `cursor-key` | `{key, expiresAt?}`: a Cursor user API key, minted by Cursor's browser sign-in (named, expiring) or pasted | none; an expiring one turns `needs_reconnect` at its expiry |
+| `anthropic-key`, `openai-key`, `openrouter-key`, `gemini-key`, `xai-key`, `deepseek-key`, `ai-gateway-key`, `meta-key` | `{key}`: the user's own API key for that vendor | none (static) |
+
+Every sign-in an agent offers on a computer, it offers on Cloud (`cloud_login_options` =
+`login_options`). Logins and keys are per account, not per agent: one ChatGPT sign-in runs
+Codex, Pi, OpenCode and Hermes on Cloud; one Claude sign-in runs Claude Code and Pi; one Copilot
+sign-in runs Pi and OpenCode; one OpenRouter key serves every agent that reaches OpenRouter.
+Which agent runs on which credential is one table, `zeron_proto::providers::cloud_credentials`:
+
+| Agent | Cloud credentials (preference order within a group) | How the machine hands them over |
+| --- | --- | --- |
+| Claude Code | `claude`, else `anthropic-key` | credential file (empty refresh token), else `ANTHROPIC_API_KEY` |
+| Codex | `codex`, else `openai-key` | managed `CODEX_HOME/auth.json` |
+| Cursor | `cursor-key` | `CURSOR_API_KEY` |
+| Devin | `devin` | `$XDG_DATA_HOME/devin/credentials.toml` (0600) |
+| Grok | `grok`, else `xai-key` | `~/.grok/auth.json` entry (empty refresh token, rewritten ahead of expiry), else `XAI_API_KEY` |
+| Pi | `codex`, `claude`, `copilot`, every vendor key | `auth.json` `openai-codex` / `anthropic` entries (empty refresh token, under Pi's lock); `COPILOT_GITHUB_TOKEN`; vendor env vars |
+| OpenCode | `codex`, `copilot`, vendor keys | the logins through OpenCode's own credential API (`/api/credential`) when its server starts; keys as env vars |
+| Hermes | `codex`, `nous`, `xai-oauth`, vendor keys | `$HERMES_HOME/auth.json` `providers.*` records (empty refresh token, fresh `last_refresh`, under `auth.lock`); keys as env vars |
+| fx | `ai-gateway-key`, `openai-key`, `anthropic-key` | `AI_GATEWAY_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` |
+| Antigravity | `antigravity`, else `gemini-key` | `acp_token.json` (access token, empty refresh token; a runtime is replaced before its token runs out), else `GEMINI_API_KEY`; `settings.json` `auth.type` to match |
+| Muse Code | `muse`, else `meta-key` | its `auth.json` (refresh tokens emptied), else `META_API_KEY` |
+
+Saving a key in Cloud's "API keys" list never signs a login out (a login is shared by several
+agents); within one card's group a machine runs the login first, and activating the key on that
+card is how to prefer it.
 
 **Claude subscriptions.** Anthropic's published Claude Code terms restrict third parties from
 storing or intermediating Claude.ai credentials "unless we've mutually agreed otherwise".
 Zeron holds Claude logins in the vault under its arrangement with Anthropic for running
 Claude Code on users' Cloud devices (confirmed by Wing, 2026-10-01; keep the written
-confirmation on file next to this doc). Scope it to that purpose: Claude grants are delivered
-only to the unmodified Claude Code CLI on the user's own devices, never to another harness or
-SDK, and sign-in always completes through Claude's own OAuth flow. Alternatives that need no
+confirmation on file next to this doc). Claude grants are delivered only to the user's own
+Cloud machines: to the unmodified Claude Code CLI, and — by Wing's decision of 2026-11-18 — to
+Pi's Claude provider, which signs in with the same Claude client; sign-in always completes
+through Claude's own OAuth flow. Alternatives that need no
 vault: the CLI's own `claude auth login` inside the Cloud device, or the user's own Anthropic
 API key (`anthropic-key`).
 
@@ -676,6 +711,21 @@ API key (`anthropic-key`).
   github.com; the *vault* polls GitHub and stores the result, so the token never transits a
   device. Separately, the user installs the App on the accounts / repositories Cloud may reach
   (`githubInstallUrl` in the vault status → `github.com/apps/{slug}/installations/new`).
+- **Grok**: `grok login --device-auth` into a throwaway `GROK_HOME`; its `auth.json` entry is
+  uploaded and the home shredded.
+- **Cursor**: Cursor's own browser sign-in (the SDK's PKCE flow) mints a named user API key into
+  a throwaway store; the key and its expiry are uploaded.
+- **Devin**: Devin's own browser sign-in (ACP `authenticate`) into a throwaway
+  `XDG_DATA_HOME`; its `credentials.toml` is uploaded.
+- **GitHub Copilot** (Pi): GitHub's device flow with Copilot's editor app, run by the laptop's
+  engine; the token is uploaded with its login.
+- **ChatGPT for Pi, OpenCode and Hermes**: the Codex capture above (one `codex` login); Claude
+  for Pi: the Claude capture (one `claude` login); Copilot for OpenCode: the Copilot capture.
+- **Hermes' Nous Portal and xAI**: `hermes auth add <provider>` (device code) into a throwaway
+  `HERMES_HOME`; its `providers.<id>` record is uploaded.
+- **Antigravity**: its ACP `authenticate` into a throwaway `GEMINI_HOME` with file storage
+  forced (`AGY_ACP_FORCE_FILE_STORAGE=1`); `acp_token.json` is uploaded.
+- **Muse**: its own sign-in into a throwaway config root, file-backed; `auth.json` is uploaded.
 - **API keys**: pasted on the laptop, uploaded once.
 
 The vault only refreshes. It owns each refresh token from upload on.
@@ -690,6 +740,13 @@ is in the credential's `authorizedDevices`, the user is not disabled, and the gl
 when within 10 minutes of expiry (Codex: when `last_refresh` is older than 7 days or the JWT has
 <1 h left). The consumer caches a grant until expiry (offline fallback) and never sees a
 refresh token.
+
+An agent that runs on several credentials (Pi) asks for them in one round trip: `POST
+/vault/{orgId}/grants {providers, deviceId, ts, sig}` signs `zeron-vault-grant\n{userId}\n
+{deviceId}\n{providers joined by ","}\n{ts}` (the providers sorted and distinct; `github` is
+never batched, it needs its repository) and answers `{grants, missing: [{provider, error,
+message}]}`. One signature spends one `ts`. A machine whose edge predates the route (404) asks
+one provider at a time.
 
 Failure semantics: a refresh that returns `invalid_grant` marks the account `needs_reconnect`
 and stops issuing grants. An ambiguous failure (timeout/5xx) keeps the current generation and
@@ -818,7 +875,8 @@ refresh contract changes is caught within a day, before users' grants start fail
 - **Runner mode** (`ZERON_RUNNER_ENROLL` or an existing `{data_dir}/runner.json`): `Auth`
   gains a runner token source (enroll once, then signed `/runner/token`); scope is `Synced`
   for the runner's `{orgId, userId}`. Platform comes from `ZERON_DEVICE_PLATFORM` (`cloud`).
-  The runner posts heartbeats and restricts its harness catalog to Codex + Claude Code.
+  The runner posts heartbeats and registers the built-in agents only (`CLOUD_HARNESSES`): no
+  agent from the ACP registry.
 - **Session machines** (`ZERON_CLOUD_*`, persisted to `cloud-session.json`): the device row
   carries `cloud-session`; at boot the engine clones the project into `ZERON_CLOUD_PATH` (with
   the GitHub grant's credential store; retried with backoff) and checks out
@@ -848,12 +906,20 @@ refresh contract changes is caught within a day, before users' grants start fail
   Codex from a vault grant (managed `CODEX_HOME` with the access token, empty refresh token;
   re-granted before expiry), Claude from a vault grant (Claude Code's credential file with the
   access token and an empty refresh token, rewritten before expiry), else the native sandbox
-  login, else `anthropic-key`. GitHub grants (App installation tokens for the session
+  login, else `anthropic-key`. Every other agent runs on what `cloud_credentials` lists for it
+  (see "Providers"): its grants are drawn in one batched call, keys become its environment
+  variables, and its logins go where the agent reads them (Grok's `auth.json` entry, Devin's
+  `credentials.toml`, Pi's `openai-codex` / `anthropic` entries, Hermes' `providers.*` records
+  under its `auth.lock`, Antigravity's `acp_token.json` and `settings.json` auth type, Muse's
+  `auth.json`, OpenCode's `/api/credential` through its harness), always with an empty refresh
+  token and rewritten ahead of expiry. A login the sandbox made itself (a real refresh
+  token) is left alone. The first run of an agent whose CLI the machine lacks installs it (once;
+  a failed install is retried after ten minutes). GitHub grants (App installation tokens for the session
   repository, requested with `repo`) are kept fresh in a git credential store file (`{data_dir}/cloud/git-credentials`, 0600,
   wired as git's `credential.https://github.com.helper`) and `gh`'s `hosts.yml`, so `git`
   keeps working in sessions that outlive the spawn-time `GH_TOKEN`. Secrets ride a
   `#[serde(skip)]` field on `RunRequest`, so they are never persisted in the session doc, the
-  journal or logs. On platform `cloud` only Codex and Claude Code are registered: nothing else
+  journal or logs. On platform `cloud` only the built-in agents are registered: nothing else
   is probed, update-checked or installable (some providers' images install a harness the first
   time its binary is invoked).
 - **Projects' GitHub repositories**: SpacesSync stamps `githubRepo` (the `origin` remote's
@@ -873,8 +939,15 @@ refresh contract changes is caught within a day, before users' grants start fail
   404ing. `ListCloudBranches {repo, defaultBranch?}` lists the branches a session can start from
   (GitHub's, default first; `GET /vault/{org}/github/branches?repo=`). A side chat
   (`parentChatId`) whose parent runs on a session machine is hosted on that same machine. `ListHarnesses` / `ListModels` aimed at any Cloud
-  device are answered by the asking engine (Codex + Claude Code), and anything else aimed at the
-  logical device fails fast — it has no engine.
+  device are answered by the asking engine (every built-in agent; models from the edge's list
+  where it has one, else the asking device's own catalog), and anything else aimed at the
+  logical device fails fast — it has no engine. The edge's list is Claude Code's and Codex's
+  kept by hand, and every other agent's as a Cloud machine last discovered it: after a run
+  prepares its credentials, the machine hands the agent's credential variables to its model
+  discovery (`zeron_harness::catalog_env`, part of the catalog's cache key), discovers, and
+  sends the catalog with the run's credential fingerprint (`POST /runner/models`; once per
+  agent and fingerprint per 10 minutes, at once for a new fingerprint). The account keeps the
+  last one per agent, so pickers list it while every machine sleeps.
 - **Laptop side**: `CloudStatus` / `CloudEnable` / `CloudDelete` / `CloudUsage`,
   `CloudSessions` / `CloudSessionWake` / `CloudSessionSleep` / `CloudSessionDelete`,
   `ListCloudBranches`, `VaultStatus`, `VaultConnectCodex` / `VaultConnectClaude`, `VaultPutApiKey`,
@@ -892,6 +965,7 @@ the bearer's `org_id`.
 
 | Route | Bearer | Body → reply |
 | --- | --- | --- |
+| `GET /cloud/{orgId}/models` | user | → `{models: {harness: Model[]}}`: Claude Code's and Codex's kept by hand, every other agent's as a machine last published it |
 | `GET /cloud/{orgId}` | user | → `CloudStatus` (account), with `machines: [{id, name, vcpu, memoryGB, diskGiB, creditMultiplier}]` and `machine` (the default) |
 | `POST /cloud/{orgId}/enable` | user | `{}` → `CloudStatus` (instant; mints the logical device id) |
 | `DELETE /cloud/{orgId}` | user | → `CloudStatus` (`deleting` → `off`; deletes every session sandbox after capturing usage) |
@@ -908,8 +982,9 @@ the bearer's `org_id`.
 | `POST /runner/token` | none | `{orgId, userId, deviceId, ts, sig}` → `{accessToken, expiresAt}` |
 | `POST /runner/wake-timing` | runner | `{sent?, token?, firstOutput?, version?, updateResult?, …}` (`EngineTiming`, `wake.ts`) → `{ok: true}`: its side of the wake, counted once |
 | `POST /runner/wake-stage` | runner | `{stage: "updating" \| null}` → `{ok: true}`: shown as `CloudSession.stage` |
+| `POST /runner/models` | runner | `{harness, models, credential}` → `{ok: true}`: the agent's catalog as this machine discovered it (≤ 400 models, unparseable ones dropped; never `claude-code`/`codex`'s, which stay hand-kept) |
 | `POST /runner/heartbeat` | runner | `{activeRuns, clients, backgroundRuns?, waitingRuns?, diskUsedBytes?, diskTotalBytes?}` → `{ok: true, diskCapacityGiB?}` (per session device) |
-| `GET /vault/{orgId}` | user | → `VaultStatusView` |
+| `GET /vault/{orgId}` | user | → `VaultStatusView`. Lists only the providers named in `x-zeron-vault-providers` (comma-separated); without the header, the original five (`codex`, `claude`, `github`, `anthropic-key`, `openai-key`). Every route answering a status filters it alike |
 | `PUT /vault/{orgId}/credentials/{provider}` | user | `PutCredentialRequest` → `VaultStatusView` |
 | `PATCH /vault/{orgId}/credentials/{provider}` | user | `{authorizedDevices}` → `VaultStatusView` |
 | `DELETE /vault/{orgId}/credentials/{provider}` | user | → `VaultStatusView` |
@@ -917,6 +992,7 @@ the bearer's `org_id`.
 | `POST /vault/{orgId}/devices/{deviceId}/revoke` | user | → `VaultStatusView` |
 | `POST /vault/{orgId}/disable` | user | `{disabled}` → `VaultStatusView` |
 | `POST /vault/{orgId}/grant` | user or runner | `GrantRequest` → `Grant` |
+| `POST /vault/{orgId}/grants` | user or runner | `GrantManyRequest` `{providers, deviceId, ts, sig}` → `{grants, missing}` |
 | `POST /vault/{orgId}/github/device` | user | `{authorizedDevices}` → `GithubDeviceStart` |
 | `POST /vault/{orgId}/github/device/{flowId}` | user | → `GithubDevicePoll` |
 
@@ -924,7 +1000,8 @@ Types are in `edge/vault/src/api.ts` (TypeScript) and `crates/proto/src/cloud.rs
 Signatures are base64url (no padding) Ed25519 over UTF-8:
 
 - runner token: `zeron-runner-token\n{orgId}\n{userId}\n{deviceId}\n{ts}`
-- vault grant: `zeron-vault-grant\n{userId}\n{deviceId}\n{provider}\n{ts}`
+- vault grant: `zeron-vault-grant\n{userId}\n{deviceId}\n{provider}\n{ts}` (a batch: the sorted
+  providers joined by `,` in place of `{provider}`)
 
 `ZERON_RUNNER_ENROLL` = `{orgId}.{userId}.{deviceId}.{code}` (`code` is 32 random bytes,
 base64url). After enrollment the engine persists `{data_dir}/runner.json`

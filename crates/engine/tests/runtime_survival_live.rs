@@ -111,6 +111,7 @@ fn run(
         auto_approve: true,
         access: Default::default(),
         plan: false,
+        code_mode: false,
         attachments: vec![],
         worktree: None,
         resume: None,

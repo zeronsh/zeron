@@ -18,6 +18,7 @@ fn run_request_attachments_survive_command_round_trip() {
         auto_approve: true,
         access: Default::default(),
         plan: false,
+        code_mode: false,
         attachments: vec!["/tmp/a.png".into()],
         worktree: None,
         resume: None,

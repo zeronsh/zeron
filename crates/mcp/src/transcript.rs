@@ -371,6 +371,7 @@ mod tests {
     #[test]
     fn answered_questions_join_the_tool_ledger() {
         let question = |id: &str, header: &str| zeron_proto::UserInputQuestion {
+            note: None,
             id: id.into(),
             header: header.into(),
             question: format!("{header}?"),

@@ -87,6 +87,9 @@ pub(super) struct Runner {
     /// Supervised approvals waiting on the person, by approval id.
     asking: HashMap<String, AbortHandle>,
     pub turn: TurnControl,
+    /// The Muse it runs, asked who's signed in when a turn ends saying it
+    /// isn't (`account::explain_no_models`).
+    pub exe: Option<std::path::PathBuf>,
     lost_context: Option<String>,
 }
 
@@ -124,6 +127,7 @@ impl Runner {
             approvals: HashMap::new(),
             asking: HashMap::new(),
             turn: TurnControl::default(),
+            exe: None,
             lost_context: None,
         }
     }
@@ -691,7 +695,12 @@ impl Runner {
         self.joined.clear();
         self.interrupting = false;
         self.deliveries.clear();
-        let error = self.error.take();
+        let mut error = self.error.take();
+        if let (Some(said), Some(exe)) = (error.as_deref(), self.exe.as_deref())
+            && super::account::says_signed_out(said)
+        {
+            error = Some(super::account::explain_no_models(exe, &self.request.env, said).await);
+        }
         self.emit(AgentEvent::Done {
             status,
             result: None,
@@ -809,6 +818,7 @@ impl Runner {
         let questions: Vec<UserInputQuestion> = raw
             .iter()
             .map(|q| UserInputQuestion {
+                note: None,
                 id: string(q, "id").into(),
                 header: string(q, "header").into(),
                 question: string(q, "question").into(),
@@ -1006,6 +1016,7 @@ mod tests {
 
     fn question(multi: bool) -> UserInputQuestion {
         UserInputQuestion {
+            note: None,
             id: "q".into(),
             header: "h".into(),
             question: "?".into(),

@@ -259,7 +259,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // may not have brought: bring it in first (src/windows_install.rs).
     #[cfg(all(windows, feature = "beta"))]
     {
-        windows_install::complete_if_needed(&argv);
+        windows_install::complete_if_needed(&argv)?;
         if let Some(dir) = std::env::current_exe().ok().as_deref().and_then(zeron_update::windows::install_directory) {
             zeron_launch::set_full_app_engine(
                 zeron_update::windows::version_files(&dir, about::APP_VERSION).join("engine").join("zeron.exe"),
@@ -269,12 +269,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if cfg!(feature = "beta") || !dev_launch(&argv[1..]) {
         match zeron_cli::run(about::APP_VERSION, zeron_cli::Engines::Helper) {
             zeron_cli::Launch::Done(result) => {
-                // (As a `main` returning it would: the error, exit status 1.)
-                if let Err(error) = result {
-                    eprintln!("Error: {error:?}");
-                    std::process::exit(1);
-                }
-                return Ok(());
+                // (Its error is `main`'s: "Error: …", exit status 1.)
+                return result.map_err(Into::into);
             }
             zeron_cli::Launch::Window { open_url: url, safe_mode } => {
                 open_url = url;
@@ -727,7 +723,7 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     // ds/transcript's trace (`ZERON_ZGX_TRACE_TRANSCRIPT=1`): the hover lane
     // and the rows' heights as they change, a line each on stdout.
     if std::env::var("ZERON_ZGX_TRACE_TRANSCRIPT").is_ok_and(|v| v == "1") {
-        host.shared("debug.trace_transcript", true);
+        host.shared("trace.transcript", true);
     }
     // How much the desktop blurs behind the glass (`window.blur`), for the
     // glass's tint (ds/material).

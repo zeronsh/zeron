@@ -475,6 +475,9 @@ local Body = ui.component(function(args: { props: Props, phase: State<number> })
 				items = "center",
 				ui.button {
 					class = "orch-decision-thread",
+					-- (Its name is the decision's words too: a selection takes it,
+					-- as zgx leaves a button's label out unless it says so.)
+					selectable = true,
 					label = function(): string
 						local a = ask()
 						return locale.s("ds.orch.decide.open_thread_named", { name = props.name_of(a and a.from_chat) or "" })
@@ -1034,6 +1037,9 @@ local AnswerBody = ui.component(function(args: { props: AnswerProps, entry: () -
 					return e ~= nil and e.chat ~= nil
 				end, ui.button {
 					class = "orch-decision-thread orch-qa-dialog-thread",
+					-- (Its name is the decision's words too: a selection takes it,
+					-- as zgx leaves a button's label out unless it says so.)
+					selectable = true,
 					label = function(): string
 						return locale.s("ds.orch.qa.open_in", { name = who() })
 					end,

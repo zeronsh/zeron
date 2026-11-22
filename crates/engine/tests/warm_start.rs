@@ -196,6 +196,7 @@ fn ask(model: &str, cwd: &str) -> RunRequest {
         auto_approve: false,
         access: Default::default(),
         plan: false,
+        code_mode: false,
         resume: None,
         attachments: vec![],
         worktree: None,
@@ -235,7 +236,7 @@ fn rig(prewarms: bool) -> Rig {
 
 fn assemble(data: &std::path::Path, seen: &Arc<Mutex<Seen>>, options: &Options) -> EngineCore {
     let registry = HarnessRegistry::new();
-    for id in [HarnessId::Mock, HarnessId::Pi, HarnessId::ClaudeCode] {
+    for id in [HarnessId::Mock, HarnessId::Pi, HarnessId::ClaudeCode, HarnessId::Codex] {
         registry.register(Arc::new(WarmFixture {
             id,
             seen: seen.clone(),
@@ -867,4 +868,24 @@ async fn a_switch_of_native_subagents_is_never_run_on_the_old_setting() {
     let seen = rig.seen.lock().unwrap();
     assert_eq!(seen.discarded, vec![seen.prewarms[0].0.clone()]);
     assert_eq!(seen.runs[0].0, "", "a runtime of its own");
+}
+
+/// Codex's Code Mode switched on after the warm start: the warm runtime,
+/// launched with it off, is discarded and the run starts with Code Mode on.
+#[tokio::test]
+async fn a_switch_of_code_mode_is_never_run_on_the_old_setting() {
+    let rig = rig(true);
+    let mut ask_codex = ask("gpt-5.4", &rig.cwd());
+    ask_codex.harness = Some(HarnessId::Codex);
+    assert_eq!(rig.warm_with(CHAT, ask_codex.clone(), true).await["outcome"], "started");
+    rig.core
+        .registry
+        .set_code_mode(HarnessId::Codex, true)
+        .unwrap();
+    ask_codex.prompt = "after enabling code mode".into();
+    rig.send_with(CHAT, ask_codex).await;
+    let seen = rig.seen.lock().unwrap();
+    assert_eq!(seen.discarded, vec![seen.prewarms[0].0.clone()]);
+    assert_eq!(seen.runs[0].0, "", "a runtime of its own");
+    assert!(seen.runs[0].1.code_mode, "run receives code_mode=true");
 }

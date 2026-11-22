@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use futures::StreamExt;
-use sha2::{Digest, Sha512};
+use sha2::{Digest, Sha256, Sha512};
 use tokio::io::AsyncWriteExt;
 
 use crate::HarnessError;
@@ -37,13 +37,16 @@ const MAX_ARCHIVE_BYTES: u64 = 768 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 4_096;
 
-/// an archive release whose integrity is proven after extraction (by a
-/// vendor code signature) rather than by a digest pinned in zeron's source.
+/// an archive release whose integrity is proven by a registry sha-256 digest
+/// and/or post-extraction verification (vendor code signature, version probe)
+/// rather than a sha-512 pinned in zeron's source.
 pub struct VerifiedRelease<'a> {
     pub name: &'a str,
     pub version: &'a str,
     pub url: &'a str,
     pub entry: &'a str,
+    /// lowercase hex SHA-256 of the downloaded archive, verified when present.
+    pub sha256: Option<&'a str>,
     /// written as the install marker once verification passes.
     pub marker: &'a str,
 }
@@ -54,6 +57,7 @@ struct Source<'a> {
     url: &'a str,
     entry: &'a str,
     sha512: Option<&'a str>,
+    sha256: Option<&'a str>,
     marker: &'a str,
 }
 
@@ -65,6 +69,7 @@ impl<'a> From<&'a ArchivePin> for Source<'a> {
             url: pin.url,
             entry: pin.entry,
             sha512: Some(pin.sha512),
+            sha256: None,
             marker: pin.sha512,
         }
     }
@@ -78,6 +83,7 @@ impl<'a> From<&'a VerifiedRelease<'a>> for Source<'a> {
             url: release.url,
             entry: release.entry,
             sha512: None,
+            sha256: release.sha256,
             marker: release.marker,
         }
     }
@@ -268,7 +274,8 @@ async fn download(
     let mut body = response.bytes_stream();
     let mut file = tokio::fs::File::create(dest).await?;
     let mut received = 0_u64;
-    let mut digest = Sha512::new();
+    let mut sha512 = source.sha512.map(|_| Sha512::new());
+    let mut sha256 = source.sha256.map(|_| Sha256::new());
     loop {
         let chunk = tokio::time::timeout(STALL_TIMEOUT, body.next())
             .await
@@ -287,7 +294,12 @@ async fn download(
                         MAX_ARCHIVE_BYTES / (1024 * 1024)
                     )));
                 }
-                digest.update(&bytes);
+                if let Some(digest) = sha512.as_mut() {
+                    digest.update(&bytes);
+                }
+                if let Some(digest) = sha256.as_mut() {
+                    digest.update(&bytes);
+                }
                 file.write_all(&bytes).await?;
             }
             Some(Err(e)) => return Err(failed(e.to_string())),
@@ -295,13 +307,21 @@ async fn download(
         }
     }
     file.flush().await?;
-    let actual = format!("{:x}", digest.finalize());
-    if let Some(expected) = source.sha512
-        && actual != expected
-    {
-        return Err(failed(format!(
-            "SHA-512 mismatch (expected {expected}, got {actual})"
-        )));
+    if let (Some(expected), Some(digest)) = (source.sha512, sha512) {
+        let actual = format!("{:x}", digest.finalize());
+        if actual != expected {
+            return Err(failed(format!(
+                "SHA-512 mismatch (expected {expected}, got {actual})"
+            )));
+        }
+    }
+    if let (Some(expected), Some(digest)) = (source.sha256, sha256) {
+        let actual = format!("{:x}", digest.finalize());
+        if actual != expected {
+            return Err(failed(format!(
+                "SHA-256 mismatch (expected {expected}, got {actual})"
+            )));
+        }
     }
     Ok(())
 }
@@ -500,12 +520,41 @@ mod tests {
                     .unwrap();
                 zip.write_all(b"#!/bin/sh\n").unwrap();
                 let bytes = zip.finish().unwrap().into_inner();
+                let digest = format!("{:x}", Sha256::digest(&bytes));
                 let url = serve(bytes).await;
+                let wrong_digest = VerifiedRelease {
+                    name: "verified-acp",
+                    version: "2.0.0",
+                    url: &url,
+                    entry: "server",
+                    sha256: Some(&"0".repeat(64)),
+                    marker: "registry-sha256",
+                };
+                let mismatch = install_verified(&wrong_digest, "Test", |_| async {
+                    panic!("verify must not run when SHA-256 mismatches");
+                })
+                .await
+                .unwrap_err();
+                assert!(
+                    mismatch.to_string().contains("SHA-256 mismatch"),
+                    "{mismatch}"
+                );
+                let root = adapters_root().unwrap();
+                assert!(!root.join("verified-acp").exists());
+                assert!(
+                    std::fs::read_dir(&root)
+                        .unwrap()
+                        .flatten()
+                        .all(|entry| !entry.file_name().to_string_lossy().starts_with(".tmp-")),
+                    "a checksum mismatch leaves no temporary directory behind"
+                );
+
                 let release = VerifiedRelease {
                     name: "verified-acp",
                     version: "2.0.0",
                     url: &url,
                     entry: "server",
+                    sha256: Some(&digest),
                     marker: "vendor-signature",
                 };
 
@@ -516,7 +565,6 @@ mod tests {
                 .await
                 .unwrap_err();
                 assert!(rejected.to_string().contains("not signed"), "{rejected}");
-                let root = adapters_root().unwrap();
                 assert!(!root.join("verified-acp").exists());
                 assert!(
                     std::fs::read_dir(&root)

@@ -104,6 +104,7 @@ fn request(prompt: &str) -> RunRequest {
         auto_approve: true,
         access: Default::default(),
         plan: false,
+        code_mode: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
@@ -2437,6 +2438,56 @@ async fn a_side_chats_only_thread_starts_without_agent_tools() {
                 config.get(key) == Some(&serde_json::Value::Bool(false)),
                 side_chats_only,
                 "{key}: {config}"
+            );
+        }
+    }
+}
+
+/// A Codex run with Code Mode enabled passes `features.code_mode = true` on
+/// `thread/start`; off, the key is omitted so older CLIs stay untouched.
+#[tokio::test]
+async fn code_mode_thread_starts_with_feature_flag() {
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-codex-voice.py");
+    let driver = CodexHarness::new()
+        .with_executable(fixture)
+        .with_graces(Duration::from_millis(10), Duration::from_millis(100));
+    for code_mode in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut req = request("use code mode");
+        req.cwd = dir.path().display().to_string();
+        req.code_mode = code_mode;
+        let (controls, _steer, token) = controls("Yes");
+        let mut stream = driver.run(req, controls).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = stream.next().await {
+                if matches!(event.unwrap(), AgentEvent::Done { .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        token.cancel();
+        drop(stream);
+        let wire = std::fs::read_to_string(dir.path().join("voice-wire.jsonl")).unwrap();
+        let start = wire
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|frame| frame["method"] == "thread/start")
+            .expect("a thread starts");
+        let config = start["params"].get("config");
+        if code_mode {
+            assert_eq!(
+                config.and_then(|c| c.get("features.code_mode")),
+                Some(&serde_json::Value::Bool(true)),
+                "{start}"
+            );
+        } else {
+            assert_eq!(
+                config.and_then(|c| c.get("features.code_mode")),
+                None,
+                "{start}"
             );
         }
     }

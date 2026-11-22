@@ -148,6 +148,9 @@ fn mocked(base: &str) -> ProbeEndpoints {
         openai_auth: base.to_string(),
         openai_port: 0,
         nous_portal: base.to_string(),
+        google_token: format!("{base}/google/token"),
+        google_userinfo: format!("{base}/google/userinfo"),
+        antigravity_api: base.to_string(),
         allow_slot_refresh: true,
         allow_loopback_http: true,
     }
@@ -300,6 +303,19 @@ fn grok_usage_uses_the_grok_build_share_of_the_period() {
     let snapshot = grok_usage_snapshot(&blended).unwrap();
     assert_eq!(snapshot.windows[0].label, "Period");
     assert!(grok_usage_snapshot(&serde_json::json!({ "config": {} })).is_none());
+    // A week with nothing used yet (live reply): protobuf JSON leaves the
+    // zero figures out.
+    let unused = serde_json::json!({ "config": {
+        "currentPeriod": { "type": "USAGE_PERIOD_TYPE_WEEKLY", "start": "2026-11-17T09:46:58Z", "end": "2026-11-24T09:46:58Z" },
+        "onDemandCap": { "val": 0 },
+        "isUnifiedBillingUser": true,
+        "billingPeriodEnd": "2026-11-24T09:46:58Z",
+    }});
+    let snapshot = grok_usage_snapshot(&unused).unwrap();
+    assert_eq!((snapshot.windows[0].label.as_str(), snapshot.windows[0].used_fraction), ("Week", 0.0));
+    assert!(snapshot.windows[0].resets_at.is_some());
+    let unused_build = serde_json::json!({ "config": { "productUsage": [{ "product": "GrokBuild" }], "currentPeriod": {} } });
+    assert_eq!(grok_usage_snapshot(&unused_build).unwrap().windows[0].used_fraction, 0.0);
 }
 
 #[tokio::test]
@@ -497,6 +513,94 @@ async fn a_rejected_saved_grok_token_refreshes_once_against_its_issuer() {
     let refused = accounts.grok_usage(&evil, false).await;
     assert_eq!(refused, Err(ProbeError::UntrustedEndpoint));
     assert_eq!(issuer_hits.load(Ordering::SeqCst), before);
+}
+
+/// Antigravity's usage is its `/usage`: a fresh access token from the
+/// login's refresh token, its tiers from `loadCodeAssist`, then its
+/// project's limits (the token file's `project_id`; else the one
+/// `loadCodeAssist` names). A dead refresh token reads "sign in again".
+#[tokio::test]
+async fn antigravity_usage_is_its_projects_limits_and_its_paid_plan() {
+    let server = MockServer::start(|method, path, body| match (method, path) {
+        ("POST", "/google/token") if body.contains("refresh_token=dead") => (400, r#"{"error":"invalid_grant"}"#.into()),
+        ("POST", "/google/token") => {
+            assert!(body.contains("client_secret=sec") || body.contains("refresh_token=grt-b"), "{body}");
+            (200, r#"{"access_token":"at-fresh","expires_in":3599}"#.into())
+        }
+        ("POST", "/v1internal:loadCodeAssist") => (
+            200,
+            serde_json::json!({
+                "cloudaicompanionProject": "proj-from-assist",
+                "currentTier": { "id": "free-tier", "name": "Antigravity" },
+                "paidTier": { "id": "g1-ultra-tier", "name": "Google AI Ultra" }
+            })
+            .to_string(),
+        ),
+        ("POST", "/v1internal:retrieveUserQuotaSummary") => {
+            let project = serde_json::from_str::<serde_json::Value>(body).unwrap()["project"].clone();
+            let left = if project == "proj-file" { 0.6 } else { 0.1 };
+            (
+                200,
+                serde_json::json!({ "groups": [{
+                    "displayName": "Claude and GPT models",
+                    "buckets": [
+                        { "window": "weekly", "remainingFraction": 1, "resetTime": "2026-11-26T21:17:50Z" },
+                        { "window": "5h", "remainingFraction": left, "resetTime": "2026-11-20T02:17:50Z" }
+                    ]
+                }] })
+                .to_string(),
+            )
+        }
+        _ => (404, String::new()),
+    })
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, _) = accounts_with(tmp.path(), mocked(&server.base));
+    let slot = |key: &str, credentials: serde_json::Value| Slot {
+        id: slot_id_for(HarnessId::Antigravity, key),
+        harness: HarnessId::Antigravity,
+        account_key: key.into(),
+        profile: SlotProfile {
+            email: "ada@gmail.com".into(),
+            display_name: None,
+            organization: None,
+            plan: None,
+            auth_kind: AgentAuthKind::Oauth,
+        },
+        credentials,
+        claude_config: None,
+        saved_at: 1,
+        created_at: None,
+        store_key: None,
+        user_id: None,
+    };
+    let filed = slot(
+        "google:a",
+        serde_json::json!({ "refresh_token": "grt-a", "client_id": "cid", "client_secret": "sec", "project_id": "proj-file" }),
+    );
+    let usage = accounts.antigravity_usage(&filed).await.unwrap();
+    let labels: Vec<&str> = usage.windows.iter().map(|w| w.label.as_str()).collect();
+    assert_eq!(labels, ["Claude & GPT Session", "Claude & GPT Week"]);
+    assert!((usage.windows[0].used_fraction - 0.4).abs() < 1e-6, "{usage:?}");
+    assert_eq!(usage.plan_label.as_deref(), Some("Google AI Ultra"));
+    // The access token it asked with is the refreshed one.
+    assert_eq!(server.hits("POST /v1internal:retrieveUserQuotaSummary"), 1);
+
+    let unfiled = slot("google:b", serde_json::json!({ "refresh_token": "grt-b", "client_id": "cid" }));
+    let usage = accounts.antigravity_usage(&unfiled).await.unwrap();
+    assert!((usage.windows[0].used_fraction - 0.9).abs() < 1e-6, "loadCodeAssist's project: {usage:?}");
+
+    let dead = slot("google:c", serde_json::json!({ "refresh_token": "dead", "client_id": "cid" }));
+    assert_eq!(accounts.antigravity_usage(&dead).await, Err(ProbeError::Unauthorized { status: 400 }));
+    let keychain = slot("google:d", serde_json::Value::Null);
+    assert!(matches!(accounts.antigravity_usage(&keychain).await, Err(ProbeError::NoCredentials { .. })));
+
+    // And the list the app asks for probes it.
+    accounts.write_slot(&filed).unwrap();
+    let listed = rows(&accounts.list(true).await.unwrap(), HarnessId::Antigravity);
+    let row = listed.iter().find(|a| a.email.as_deref() == Some("ada@gmail.com")).expect("listed");
+    assert_eq!(row.usage_windows.len(), 2, "{row:?}");
+    assert_eq!(row.plan_label.as_deref(), Some("Google AI Ultra"));
 }
 
 #[cfg(unix)]
@@ -709,6 +813,365 @@ done
     let devin = rows(&accounts.list(false).await.unwrap(), HarnessId::Devin);
     assert_eq!(devin.len(), 1);
     assert!(devin[0].active);
+}
+
+// ── Sign-ins that install their agent first ─────────────────────────────────
+
+/// An installer override: `installed` until `install` runs, which takes
+/// `takes` (a future it awaits) and then marks it installed.
+fn installer(
+    installed: Arc<std::sync::atomic::AtomicBool>,
+    takes: impl Fn() -> futures::future::BoxFuture<'static, Result<(), String>> + Send + Sync + 'static,
+) -> SignInInstaller {
+    let flag = installed.clone();
+    let takes = Arc::new(takes);
+    SignInInstaller {
+        installed: Arc::new(move |_| flag.load(Ordering::SeqCst)),
+        install: Arc::new(move |_| {
+            let (installed, takes) = (installed.clone(), takes.clone());
+            Box::pin(async move {
+                takes().await?;
+                installed.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+        }),
+    }
+}
+
+/// An agent that isn't installed is installed first — the poll says so —
+/// and its sign-in then runs under the same login id: its page and device
+/// code reach the app, and its outcome is this login's.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_sign_in_installs_its_agent_first_then_relays_the_agents_own_sign_in() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    let cli = script(
+        tmp.path(),
+        "hermes",
+        r#"#!/bin/sh
+printf '  1. Open this URL in your browser:\n     https://auth.openai.com/codex/device\n  2. Enter this code:\n     QRST-5678\n'
+sleep 1
+mkdir -p "$HERMES_HOME"
+printf '{"active_provider":"openai-codex","credential_pool":{"openai-codex":[{"id":"abc123","label":"new@example.com","auth_type":"oauth","priority":0,"source":"device_code","access_token":"x"}]}}' > "$HERMES_HOME/auth.json"
+"#,
+    );
+    accounts.override_cli(HarnessId::Hermes, cli);
+    let installed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    accounts.override_installer(installer(installed.clone(), || {
+        Box::pin(async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Ok(())
+        })
+    }));
+    let start = accounts.start_login(HarnessId::Hermes).await.unwrap();
+    // No page yet: it arrives with a poll, once installed.
+    assert_eq!(start.url, "");
+    let first = accounts.poll_login(&start.login_id).await.unwrap();
+    assert_eq!(first.status, AgentLoginStatus::Pending);
+    assert_eq!(
+        first.message.as_deref(),
+        Some("Installing Hermes on this computer…")
+    );
+    let polls = settle(&accounts, &start.login_id).await;
+    assert_eq!(
+        polls.last().unwrap().status,
+        AgentLoginStatus::Done,
+        "{polls:?}"
+    );
+    assert!(installed.load(Ordering::SeqCst));
+    assert!(
+        polls
+            .iter()
+            .any(|p| p.url.as_deref() == Some("https://auth.openai.com/codex/device"))
+    );
+    assert!(
+        polls
+            .iter()
+            .any(|p| p.message.as_deref() == Some("Enter the code QRST-5678 when asked."))
+    );
+    assert!(config.hermes_home.join("auth.json").exists());
+    // Only this login's bookkeeping was left, and it's gone now.
+    assert!(lock(&accounts.inner.flows).is_empty());
+}
+
+/// An install that fails says why and how to go on.
+#[tokio::test]
+async fn a_sign_in_whose_agent_wont_install_says_why() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, _) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    let installed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    accounts.override_installer(installer(installed, || {
+        Box::pin(async { Err("curl is missing".to_string()) })
+    }));
+    let start = accounts
+        .start_login_with(HarnessId::Hermes, Some("nous"), None)
+        .await
+        .unwrap();
+    let polls = settle(&accounts, &start.login_id).await;
+    let last = polls.last().unwrap();
+    assert_eq!(last.status, AgentLoginStatus::Error);
+    assert_eq!(
+        last.message.as_deref(),
+        Some(
+            "Couldn't install Hermes on this computer (curl is missing) — install it first, \
+             then sign in again."
+        )
+    );
+}
+
+/// Cancelling a sign-in mid-install stops the install (its future is
+/// dropped, and with it the installer's process group); a new start for
+/// the agent supersedes one still installing.
+#[tokio::test]
+async fn cancelling_a_sign_in_mid_install_stops_the_install() {
+    struct Dropped(Arc<std::sync::atomic::AtomicUsize>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, _) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = dropped.clone();
+    accounts.override_installer(installer(
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        move || {
+            let guard = Dropped(counter.clone());
+            Box::pin(async move {
+                let _guard = guard;
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+        },
+    ));
+    let start = accounts.start_login(HarnessId::Grok).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    accounts.cancel_login(&start.login_id);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(dropped.load(Ordering::SeqCst), 1, "the install was dropped");
+    assert!(accounts.poll_login(&start.login_id).await.is_err());
+    // A second start replaces a first still installing.
+    let first = accounts.start_login(HarnessId::Grok).await.unwrap();
+    // (Its install under way.)
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let second = accounts.start_login(HarnessId::Grok).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(dropped.load(Ordering::SeqCst), 2);
+    assert!(accounts.poll_login(&first.login_id).await.is_err());
+    assert_eq!(
+        accounts.poll_login(&second.login_id).await.unwrap().status,
+        AgentLoginStatus::Pending
+    );
+    accounts.cancel_login(&second.login_id);
+}
+
+/// Only sign-ins that run the agent's own CLI wait for it: Claude's, and
+/// the ChatGPT / Copilot / Claude sign-ins of OpenCode and Pi, are the
+/// engine's own.
+#[test]
+fn only_sign_ins_that_run_the_agents_cli_install_it() {
+    for harness in [
+        HarnessId::Codex,
+        HarnessId::Cursor,
+        HarnessId::Grok,
+        HarnessId::Devin,
+        HarnessId::Hermes,
+        HarnessId::Muse,
+        HarnessId::Antigravity,
+    ] {
+        assert!(sign_in_runs_cli(harness), "{harness:?}");
+    }
+    for harness in [HarnessId::ClaudeCode, HarnessId::Opencode, HarnessId::Pi] {
+        assert!(!sign_in_runs_cli(harness), "{harness:?}");
+    }
+}
+
+// ── Antigravity ─────────────────────────────────────────────────────────────
+
+/// A fake Antigravity ACP server: its Google sign-in writes a token file
+/// (refresh token `refresh`) under the `GEMINI_HOME` it's given — a
+/// throwaway one, in file mode — after printing its sign-in page.
+#[cfg(unix)]
+fn fake_agy(dir: &Path, refresh: &str) -> PathBuf {
+    script(
+        dir,
+        &format!("agy-{refresh}"),
+        &format!(
+            r#"#!/bin/sh
+while read -r line; do
+  id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"protocolVersion":1,"agentInfo":{{"name":"antigravity-acp"}},"authMethods":[{{"id":"oauth-personal","name":"Sign in with Google"}},{{"id":"oauth-business","name":"Gemini Enterprise"}}]}}}}\n' "$id" ;;
+    *'"method":"authenticate"'*)
+      case "$line" in *'"methodId":"oauth-personal"'*) ;; *) exit 5 ;; esac
+      case "$GEMINI_HOME" in *".login-"*) ;; *) exit 6 ;; esac
+      [ "$AGY_ACP_FORCE_FILE_STORAGE" = 1 ] || exit 7
+      printf 'Please visit https://accounts.google.com/o/oauth2/auth?client_id=cid\n' >&2
+      sleep 1
+      mkdir -p "$GEMINI_HOME/antigravity-acp"
+      printf '{{"client_id":"cid","client_secret":"cs","refresh_token":"{refresh}","access_token":"at","token_uri":"https://oauth2.googleapis.com/token"}}' > "$GEMINI_HOME/antigravity-acp/acp_token.json"
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id" ;;
+    *'"id":'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id" ;;
+  esac
+done
+"#
+        ),
+    )
+}
+
+/// On this computer, Antigravity's sign-in asks Google every time (a file
+/// login in a home of its own, never the session already here), and each
+/// Google account it saves is a row named by its address: the first one
+/// goes live in Antigravity's token file (its settings set to that
+/// sign-in), a second waits to be switched to, and removing the live one
+/// signs Zeron's Antigravity out of it.
+#[cfg(unix)]
+#[tokio::test]
+async fn antigravity_signs_in_to_a_google_account_each_switchable_by_its_address() {
+    // Each Google login's address, in the `id_token` its refresh answers
+    // with (as Google's does), looked up once per login.
+    let lookups = Arc::new(AtomicUsize::new(0));
+    let seen = lookups.clone();
+    let google = MockServer::start(move |_, path, body| match path {
+        "/google/token" => {
+            seen.fetch_add(1, Ordering::SeqCst);
+            let who = if body.contains("refresh_token=grt-a") { "ada@gmail.com" } else { "bea@gmail.com" };
+            let claims = base64::Engine::encode(
+                &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                serde_json::json!({ "email": who }).to_string(),
+            );
+            let id_token = format!("e30.{claims}.sig");
+            (200, serde_json::json!({ "access_token": "at", "id_token": id_token }).to_string())
+        }
+        _ => (404, String::new()),
+    })
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let endpoints = mocked(&google.base);
+    let (accounts, config) = accounts_with(tmp.path(), endpoints);
+    let gemini = config.antigravity_home.clone().unwrap();
+    // Settings naming no method yet (a first run's), and one of its own.
+    write(
+        &gemini.join("antigravity-acp/settings.json"),
+        r#"{"theme": "dark"}"#,
+    );
+
+    accounts.override_cli(HarnessId::Antigravity, fake_agy(tmp.path(), "grt-a"));
+    let start = accounts.start_login(HarnessId::Antigravity).await.unwrap();
+    let polls = settle(&accounts, &start.login_id).await;
+    assert_eq!(
+        polls.last().unwrap().status,
+        AgentLoginStatus::Done,
+        "{polls:?}"
+    );
+    assert!(
+        polls
+            .iter()
+            .any(|p| p.url.as_deref() == Some("https://accounts.google.com/o/oauth2/auth?client_id=cid"))
+    );
+    // Live: its token file as the server writes it, the settings switched
+    // to the Google sign-in it's for and the rest kept.
+    let live = zeron_harness::acp::antigravity_token_file(&gemini);
+    let token: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&live).unwrap()).unwrap();
+    assert_eq!(token["refresh_token"], "grt-a");
+    assert_eq!(mode(&live), 0o600);
+    assert!(zeron_harness::acp::antigravity_reads_token_file(&gemini));
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(gemini.join("antigravity-acp/settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(settings["auth"]["type"], "oauth-personal");
+    assert_eq!(settings["theme"], "dark");
+    // No throwaway home left behind.
+    assert!(
+        !std::fs::read_dir(config.root_dir())
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with(".login-"))
+    );
+
+    accounts.override_cli(HarnessId::Antigravity, fake_agy(tmp.path(), "grt-b"));
+    let start = accounts.start_login(HarnessId::Antigravity).await.unwrap();
+    assert_eq!(
+        settle(&accounts, &start.login_id).await.last().unwrap().status,
+        AgentLoginStatus::Done
+    );
+    let listed = rows(&accounts.list(false).await.unwrap(), HarnessId::Antigravity);
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    assert!(listed.iter().all(|a| a.switchable));
+    let a = listed.iter().find(|a| a.active).expect("one live");
+    let b = listed.iter().find(|a| !a.active).unwrap();
+    assert_eq!(a.email.as_deref(), Some("ada@gmail.com"));
+    assert_eq!(b.email.as_deref(), Some("bea@gmail.com"));
+    assert_eq!(lookups.load(Ordering::SeqCst), 2);
+    // The second didn't replace the first.
+    let token: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&live).unwrap()).unwrap();
+    assert_eq!(token["refresh_token"], "grt-a");
+
+    // Switching writes the other account's token file.
+    let switched = accounts.activate(HarnessId::Antigravity, &b.id).await.unwrap();
+    let token: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&live).unwrap()).unwrap();
+    assert_eq!(token["refresh_token"], "grt-b");
+    let now = rows(&switched, HarnessId::Antigravity);
+    assert!(now.iter().find(|r| r.id == b.id).unwrap().active);
+    assert!(!now.iter().find(|r| r.id == a.id).unwrap().active);
+
+    // Removing the live one signs Zeron's Antigravity out of it.
+    let left = accounts.forget(HarnessId::Antigravity, &b.id).await.unwrap();
+    assert!(!live.exists());
+    assert!(!zeron_harness::acp::antigravity_reads_token_file(&gemini));
+    let left = rows(&left, HarnessId::Antigravity);
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].id, a.id);
+}
+
+/// Antigravity set to Gemini Enterprise keeps its server's own sign-in, the
+/// method its settings name: a personal Google sign-in never replaces it.
+#[cfg(unix)]
+#[tokio::test]
+async fn antigravity_set_to_another_method_keeps_its_servers_own_sign_in() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    let gemini = config.antigravity_home.clone().unwrap();
+    let settings = gemini.join("antigravity-acp/settings.json");
+    write(&settings, r#"{"auth": {"type": "oauth-business"}}"#);
+    // A server that signs in without saving anything where this home keeps
+    // an Enterprise login.
+    let agent = script(
+        tmp.path(),
+        "agy",
+        r#"#!/bin/sh
+while read -r line; do
+  id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"authMethods":[{"id":"oauth-personal","name":"Google"},{"id":"oauth-business","name":"Gemini Enterprise"}]}}\n' "$id" ;;
+    *'"id":'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id" ;;
+  esac
+done
+"#,
+    );
+    accounts.override_cli(HarnessId::Antigravity, agent);
+    let start = accounts.start_login(HarnessId::Antigravity).await.unwrap();
+    let polls = settle(&accounts, &start.login_id).await;
+    let last = polls.last().unwrap();
+    assert_eq!(last.status, AgentLoginStatus::Error);
+    assert!(
+        last.message
+            .as_deref()
+            .is_some_and(|m| m.contains("no login was saved in")),
+        "{polls:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&settings).unwrap(),
+        r#"{"auth": {"type": "oauth-business"}}"#
+    );
+    assert!(!zeron_harness::acp::antigravity_token_file(&gemini).exists());
 }
 
 // ── OpenCode / Pi ───────────────────────────────────────────────────────────

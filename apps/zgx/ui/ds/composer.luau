@@ -269,6 +269,8 @@ export type Props = {
 	-- The trays behind it (ds/composer_dock's).
 	queue: State<{ dock.Queued }>?,
 	can_steer: (boolean | () -> boolean)?,
+	-- A turn runs (the queue's Send now stops it, for an agent that can't steer).
+	turn_running: (() -> boolean)?,
 	on_queue_send: ((id: string) -> ())?,
 	on_queue_edit: ((id: string) -> ())?,
 	on_queue_remove: ((id: string) -> ())?,
@@ -2688,6 +2690,7 @@ return ui.component(function(props: Props): Node
 		trays, tray_pill = dock.parts {
 			queue = props.queue,
 			can_steer = props.can_steer,
+			turn_running = props.turn_running,
 			on_queue_send = props.on_queue_send,
 			on_queue_edit = props.on_queue_edit,
 			on_queue_remove = props.on_queue_remove,

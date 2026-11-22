@@ -1292,6 +1292,7 @@ pub(crate) fn deliver_with(
                 auto_approve: false,
                 access: config.as_ref().map(|c| c.access).unwrap_or_default(),
                 plan: config.as_ref().is_some_and(|c| c.plan),
+                code_mode: false,
                 resume: None,
                 attachments: attachments.to_vec(),
                 worktree: None,

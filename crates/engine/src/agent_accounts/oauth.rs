@@ -438,6 +438,19 @@ impl AgentAccounts {
         &self,
         harness: HarnessId,
     ) -> Result<AgentLoginStart, EngineError> {
+        self.start_copilot_login_with(harness, None).await
+    }
+
+    /// [`Self::start_copilot_login`]; with `capture` (Pi only: Copilot's
+    /// editor app, whose token Copilot's exchange serves), the GitHub token
+    /// goes there as a `copilot` vault upload (`{provider, material:
+    /// {copilotToken, login}, profile}`) once Copilot accepted it — never
+    /// into a slot or pi's store.
+    pub(super) async fn start_copilot_login_with(
+        &self,
+        harness: HarnessId,
+        capture: Option<CaptureSink>,
+    ) -> Result<AgentLoginStart, EngineError> {
         self.reap_spawned_flows(harness);
         let login = self
             .inner
@@ -484,7 +497,7 @@ impl AgentAccounts {
         let handle = tokio::spawn(async move {
             let outcome = tokio::time::timeout(
                 LOGIN_WAIT,
-                this.finish_copilot_login(harness, &login, &device_code, interval),
+                this.finish_copilot_login(harness, &login, &device_code, interval, capture),
             )
             .await
             .unwrap_or_else(|_| Err(EngineError::Other("The sign-in timed out.".into())));
@@ -515,6 +528,7 @@ impl AgentAccounts {
         login: &str,
         device_code: &str,
         interval: u64,
+        capture: Option<CaptureSink>,
     ) -> Result<(), EngineError> {
         let mut interval = interval.max(1);
         let token = loop {
@@ -563,6 +577,21 @@ impl AgentAccounts {
                 }
             }
         };
+        if let Some(capture) = capture {
+            // Copilot's exchange refuses an account without Copilot: said
+            // now, not on Cloud's first run.
+            self.pi_copilot_entry(&token).await?;
+            let login = self.github_login(&token).await.ok_or_else(|| {
+                EngineError::Other("Could not identify the signed-in GitHub account.".into())
+            })?;
+            return capture(serde_json::json!({
+                "provider": "copilot",
+                "material": { "copilotToken": token, "login": login },
+                "profile": { "displayName": login },
+            }))
+            .await
+            .map_err(EngineError::Other);
+        }
         let entry = match harness {
             HarnessId::Pi => self.pi_copilot_entry(&token).await?,
             _ => serde_json::json!({
@@ -580,6 +609,27 @@ impl AgentAccounts {
             })?;
         let detected = Detected::known(account_key, profile, entry).keyed("github-copilot");
         self.save_new_login(harness, &detected).await
+    }
+
+    /// The GitHub login a github.com token belongs to (`GET /user`).
+    async fn github_login(&self, github_token: &str) -> Option<String> {
+        let api = self.inner.endpoints.github_api.trim_end_matches('/');
+        let user: serde_json::Value = self
+            .inner
+            .http
+            .get(format!("{api}/user"))
+            .header("Authorization", format!("token {github_token}"))
+            .header("Accept", "application/vnd.github+json")
+            .header("User-Agent", "zeron")
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await
+            .ok()
+            .filter(|res| res.status().is_success())?
+            .json()
+            .await
+            .ok()?;
+        str_field(&user, "login")
     }
 
     /// Pi's Copilot entry for a fresh GitHub token, as pi's `/login` writes
