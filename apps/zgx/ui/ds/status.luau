@@ -485,11 +485,15 @@ function M.StatusIcon(props: { kind: Kind | () -> Kind, size: Size? }): Node
 		ui.switch(drawn, {
 			working = ring("$zeron.status.working", size),
 			connecting = ring("$zeron.status.connecting", size),
+			-- (A kind with no entry, nil as a row goes or one a newer
+			-- engine sends, draws no glyph.)
 			glyph = ui.show(function(): boolean
-				return KINDS[kind()].glyph ~= nil
+				local k = KINDS[kind()]
+				return k ~= nil and k.glyph ~= nil
 			end, Icon {
 				name = function(): Icon.Name
-					return KINDS[kind()].glyph or "status-done"
+					local k = KINDS[kind()]
+					return k and k.glyph or "status-done"
 				end,
 				size = size,
 			}),
