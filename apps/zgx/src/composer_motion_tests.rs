@@ -57,7 +57,7 @@ fn composer_transition_rules_cover_width_clip_headers_and_interruption() {
         }
     })
     .unwrap();
-    assert_eq!(report.outcomes.len(), 5);
+    assert_eq!(report.outcomes.len(), 6);
     assert_eq!(report.failed(), 0, "{report:?}");
 }
 

@@ -139,6 +139,34 @@ function M.editor_height(shown: Layout.Geometry, dest: Layout.Geometry, pending:
 	return h
 end
 
+-- Visible clip height for the textarea wrapper. While compact -> expanded is
+-- still in its compact-width phase, the controls sit beside the text rather
+-- than beneath it, so the clip can open down to the pill's inner bottom edge
+-- instead of prematurely reserving bottom control space and clipping line 2
+-- and its caret.
+function M.clip_height(shown: Layout.Geometry, dest: Layout.Geometry): number
+	if not shown.expanded and dest.expanded then
+		local room = math.max(shown.text.height, shown.height - Layout.BORDER * 2 - shown.text.top)
+		return math.min(dest.text.height, room)
+	end
+	return shown.text.height
+end
+
+-- Small single-line growth while already expanded (pressing Shift+Enter or
+-- wrapping to the next line) must open immediately: animating 22px over 220ms
+-- leaves no room between line 1 and the bottom controls without either
+-- clipping the top line or clipping the new line's caret at the bottom.
+local function is_single_line_growth(shown: Layout.Geometry, next: Layout.Geometry): boolean
+	if not shown.expanded or not next.expanded then
+		return false
+	end
+	if shown.header_height ~= next.header_height then
+		return false
+	end
+	local delta = next.text.height - shown.text.height
+	return delta > 0 and delta <= math.max(1, next.line_height) * 1.5 + 0.01
+end
+
 function M.use(target: ReadOnlyState<Layout.Geometry>, snap: State<number>?, settlement: ReadOnlyState<{ revision: number, status: string }>?)
 	local motion = require("@self/motion")
 	local initial = target:peek()
@@ -207,7 +235,7 @@ function M.use(target: ReadOnlyState<Layout.Geometry>, snap: State<number>?, set
 		end
 		local shown = frame:peek()
 		-- Layout already applies width; an otherwise unchanged frame needs no run.
-		if same_shape(shown, next) then
+		if same_shape(shown, next) or is_single_line_growth(shown, next) then
 			settle(next)
 			return
 		end

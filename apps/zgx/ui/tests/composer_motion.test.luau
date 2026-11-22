@@ -117,3 +117,27 @@ test("composer transition: editor height holds room during growth and settles to
 	local opening_cap = Motion.frame(compact, capped, 0.1)
 	expect(Motion.editor_height(opening_cap, capped, { unwrapped_width = 600, wrapped_height = 500, line_height = 22 })).to_be(240)
 end)
+
+test("composer transition: clip height opens to the pill bottom during compact-width expansion", function()
+	local compact = geometry(22)
+	local two_lines = geometry(44)
+	local six = geometry(132)
+
+	-- Settled frames clip to shown.text.height exactly.
+	expect(Motion.clip_height(compact, compact)).to_be(compact.text.height)
+	expect(Motion.clip_height(two_lines, two_lines)).to_be(two_lines.text.height)
+	expect(Motion.clip_height(six, six)).to_be(six.text.height)
+
+	-- Compact -> expanded at p = 0.2 (16ms): controls are still beside the text,
+	-- so clip_height opens past shown.text.height to hold line 2 and its caret.
+	local frame1 = Motion.frame(compact, two_lines, 0.2)
+	expect(frame1.expanded).to_be(false)
+	expect(frame1.text.height < 44).to_be(true)
+	expect(Motion.clip_height(frame1, two_lines) >= 44).to_be(true)
+	expect(Motion.clip_height(frame1, two_lines) <= two_lines.text.height).to_be(true)
+
+	-- Once expanded width takes over, clip_height matches shown.text.height (above controls).
+	local opened = Motion.frame(compact, two_lines, 0.9)
+	expect(opened.expanded).to_be(true)
+	expect(Motion.clip_height(opened, two_lines)).to_be(opened.text.height)
+end)

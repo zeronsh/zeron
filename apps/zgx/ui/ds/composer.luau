@@ -1381,8 +1381,9 @@ return ui.component(function(props: Props): Node
 	-- height, inset and control binding in each split composer.
 	local view_geometry = ui.computed(function(): ViewGeometry
 		local g = frame_geometry:get()
+		local clip_h = ComposerMotion.clip_height(g, transition.destination:get())
 		return { height = g.height, header_height = g.header_height,
-			text = { left = g.text.left, right = g.text.right, top = g.text.top, height = g.text.height },
+			text = { left = g.text.left, right = g.text.right, top = g.text.top, height = clip_h },
 			controls = g.controls, tray_inset = g.tray_inset }
 	end)
 	-- Every binding reads the same frame snapshot; none starts an animation.

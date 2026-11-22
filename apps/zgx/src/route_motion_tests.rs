@@ -876,8 +876,8 @@ fn the_sidebar_s_content_stands_still_and_only_fades_as_it_folds() {
     }
 }
 
-/// Inspect the composer pill, text viewport clip, scroll offset and the topmost
-/// rendered text line inside the editor on the current frame.
+/// Inspect the composer pill, text viewport clip, scroll offset, topmost
+/// rendered text line, and caret bounds/visibility on the current frame.
 #[derive(Clone, Copy, Debug)]
 struct TextFrame {
     composer: Rect,
@@ -887,6 +887,9 @@ struct TextFrame {
     line_top_visible: Option<f32>,
     line_height_full: f32,
     line_height_visible: f32,
+    caret_full: Rect,
+    caret_visible: Option<Rect>,
+    caret_painted_over: bool,
 }
 
 fn inspect_composer_text(app: &mut TestApp) -> TextFrame {
@@ -900,6 +903,11 @@ fn inspect_composer_text(app: &mut TestApp) -> TextFrame {
     let scene = app.ui.scene.borrow();
     let composer_rect = scene.transformed_bounds(composer);
     let field_rect = scene.transformed_bounds(field);
+    let caret_full = scene.transformed_bounds(editor.caret);
+    let caret_visible = scene.visible_bounds(editor.caret);
+    let caret_painted_over = scene
+        .plain_box(editor.caret)
+        .is_some_and(|r| scene.painted_over(editor.caret, r));
     // Find the topmost non-empty painted text node inside the editor.
     let mut stack = vec![editor.node];
     let mut top_line: Option<(Rect, Option<Rect>)> = None;
@@ -927,7 +935,31 @@ fn inspect_composer_text(app: &mut TestApp) -> TextFrame {
         line_top_visible: vis.map(|r| r.y),
         line_height_full: full.height,
         line_height_visible: vis.map_or(0., |r| r.height),
+        caret_full,
+        caret_visible,
+        caret_painted_over,
     }
+}
+
+fn assert_caret_unclipped(frame: TextFrame, context: &str) {
+    let vis = frame
+        .caret_visible
+        .unwrap_or_else(|| panic!("{context}: caret completely clipped out: {frame:?}"));
+    assert!(
+        (vis.y - frame.caret_full.y).abs() <= 0.5,
+        "{context}: caret top clipped by {}px: {frame:?}",
+        vis.y - frame.caret_full.y
+    );
+    assert!(
+        vis.height >= frame.caret_full.height - 0.5,
+        "{context}: caret bottom clipped (visible {} of {}): {frame:?}",
+        vis.height,
+        frame.caret_full.height
+    );
+    assert!(
+        !frame.caret_painted_over,
+        "{context}: caret painted over by another control: {frame:?}"
+    );
 }
 
 fn assert_no_top_clip(frame: TextFrame, context: &str) {
@@ -1285,5 +1317,71 @@ fn composer_mid_animation_interruption_and_headers_never_clip_top_of_text() {
         }
     }
 }
+
+#[test]
+fn composer_writing_new_lines_never_clips_caret_at_bottom_or_text_at_top() {
+    for session in [false, true] {
+        let mode = if session { "docked" } else { "new-chat" };
+        let mut shell = Shell::new(false);
+        if session {
+            shell.app.click(BUILD);
+            shell.frames(60);
+        }
+        shell.app.click(FIELD);
+        shell.frames(2);
+        type_at_caret(&mut shell.app, "Line 1");
+        shell.frames(30);
+        let first = inspect_composer_text(&mut shell.app);
+        assert_no_top_clip(first, &format!("{mode} line 1"));
+        assert_caret_unclipped(first, &format!("{mode} line 1"));
+
+        // Press Shift+Enter (newline) line by line from 1 -> 13 (crossing compact->expanded,
+        // expanded min->3, 3->4..10->11 cap, and past cap 11->13).
+        for line in 2..=13 {
+            type_at_caret(&mut shell.app, "\n");
+            let from_compact = session && line == 2;
+            for step in 0..=25 {
+                if step > 0 {
+                    shell.frames(1);
+                }
+                let f = inspect_composer_text(&mut shell.app);
+                // Lines 1..=10 fit under the 240px viewport cap so line 1 must stay unclipped;
+                // at 11+ lines the viewport is capped and scrolls internally by design.
+                if line <= 10 {
+                    assert_no_top_clip(f, &format!("{mode} newline to {line} frame {step}"));
+                }
+                // Compact (49px) -> Expanded (120px) starts at p=0 on frame 0 before the first
+                // animation tick; by frame 1 (16ms) line 2's caret must already be fully visible.
+                if !from_compact || step >= 1 {
+                    assert_caret_unclipped(f, &format!("{mode} newline to {line} frame {step}"));
+                }
+            }
+            // Type text on the newly created line and verify caret stays completely unclipped.
+            type_at_caret(&mut shell.app, &format!("Line {line}"));
+            let typed = inspect_composer_text(&mut shell.app);
+            assert_caret_unclipped(typed, &format!("{mode} typed on line {line}"));
+        }
+
+        // Also test auto-wrap growth (typing words across the right edge in expanded mode):
+        // top line and bottom caret must both stay unclipped on every single character.
+        let field = shell.app.find(FIELD).unwrap();
+        let editor = shell.app.ui.editor_within(field).unwrap();
+        let len = editor.editor.borrow().text().len();
+        editor.set_selection(0, len);
+        type_at_caret(&mut shell.app, "Line 1\nLine 2\n");
+        shell.frames(30);
+        for word in 0..22 {
+            type_at_caret(&mut shell.app, "meadow ");
+            let f0 = inspect_composer_text(&mut shell.app);
+            assert_no_top_clip(f0, &format!("{mode} wrap word {word} frame 0"));
+            assert_caret_unclipped(f0, &format!("{mode} wrap word {word} frame 0"));
+            shell.frames(1);
+            let f1 = inspect_composer_text(&mut shell.app);
+            assert_no_top_clip(f1, &format!("{mode} wrap word {word} frame 1"));
+            assert_caret_unclipped(f1, &format!("{mode} wrap word {word} frame 1"));
+        }
+    }
+}
+
 
 
