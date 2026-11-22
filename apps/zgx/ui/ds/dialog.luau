@@ -51,6 +51,10 @@ export type DialogProps = {
 	-- A glyph over the title, for a dialog that wants one.
 	icon: Icon.Name?,
 	size: ("sm" | "md" | "lg")?,
+	-- An exact panel width or height (a roomier form), in place of `size`'s
+	-- width and the content's height.
+	width: number?,
+	height: number?,
 	confirm: Action?,
 	cancel: (string | Message | false)?,
 	-- A third way out, set apart at the foot's start ("Skip these updates").
@@ -316,7 +320,8 @@ M.Dialog = ui.component(function(props: DialogProps): Node
 		label = props.title,
 		dismissable = props.dismissable ~= false,
 		hold = props.hold,
-		w = `$zeron.dialog.{props.size or "sm"}`,
+		w = props.width or `$zeron.dialog.{props.size or "sm"}`,
+		h = props.height,
 		panel = function(phase: State<number>): Node
 			return DialogBody { props = props, close = close, phase = phase }
 		end,

@@ -32,6 +32,7 @@ local control = require("@ds/control")
 local locale = require("@ds/locale")
 local ds_session_row = require("@ds/session_row")
 local activity = require("@app/screens/shell/activity")
+local scheduled = require("@app/screens/scheduled/store")
 
 export type Props = {
 	collapsed: State<boolean>,
@@ -1615,6 +1616,13 @@ M.Sidebar = ui.component(function(props: Props): Node
 		end,
 		on_search = function()
 			view.palette:set(true)
+		end,
+		on_scheduled = function()
+			route.scheduled()
+		end,
+		scheduled = scheduled.summary,
+		scheduled_selected = function(): boolean
+			return route.current:get().name == "scheduled"
 		end,
 		on_user = M.account.on_user,
 		user_open = M.account.user_open,

@@ -457,6 +457,7 @@
       "new_chat_in_on": "New chat in {name} on {device}",
       "new_chat": "New chat",
       "search": "Search",
+      "scheduled_tasks": "Scheduled Tasks",
       "pinned": "Pinned",
       "drop_to_pin": "Drop here to pin",
       "drop_sessions": "Drop sessions here",

@@ -99,12 +99,17 @@ return function(props: Props): Node
 	local function on_plugin(): boolean
 		return route.current:get().name == "plugin"
 	end
+	-- Scheduled Tasks: a page of its own, as a plugin's is, with no chat
+	-- under it (the composer and the chat page keep out of its way).
+	local function on_scheduled(): boolean
+		return route.current:get().name == "scheduled"
+	end
 
 	-- What the chat route shows, under the title bar: a new chat, or a
 	-- session (a page swap; another session is the same page, showing it,
 	-- in place).
 	local view = ui.presence(function(): string
-		if route.chat:get().name == "plugin" then
+		if route.chat:get().name == "plugin" or route.chat:get().name == "scheduled" then
 			return "none"
 		end
 		return if in_session() then "session" else "home"
@@ -634,6 +639,28 @@ return function(props: Props): Node
 					local c = route.current:get()
 					return `{c.plugin or ""}/{c.page or ""}`
 				end, plugin_page, { w_full = true, h_full = true }),
+			}
+		)
+	)
+	-- Scheduled Tasks: its page, a route of its own, on the window's
+	-- material as a plugin's is. Kept out of the plugin list on purpose:
+	-- it has no plugin, and its row lives between Search and theirs.
+	table.insert(
+		pane,
+		ui.show(
+			function(): boolean
+				return on_scheduled()
+			end,
+			ui.column {
+				id = "scheduled-page-area",
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = TITLE_H - INSET,
+				bottom = 0,
+				boundary.screen("Scheduled Tasks", "@app/screens/scheduled", function(scheduled): Node
+					return scheduled.Page()
+				end),
 			}
 		)
 	)

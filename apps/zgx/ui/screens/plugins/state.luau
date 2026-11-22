@@ -78,15 +78,28 @@ export type Now = {
 
 M.now = ui.shared("plugins", { state = "loading", list = {} } :: Now)
 
+-- Zeron's own headless services are not plugins you manage: Scheduled
+-- Tasks is a first-class page, and this service is only its engine half.
+local INTERNAL = { scheduled = true }
+local function visible(list: { Item }): { Item }
+	local out = {}
+	for _, item in list do
+		if not INTERNAL[item.id] then
+			table.insert(out, item)
+		end
+	end
+	return out
+end
+
 -- The list as it shows, in the host's order (by name).
 M.list = ui.computed(function(): { Item }
-	return M.now:get().list or {}
+	return visible(M.now:get().list or {})
 end)
 
 M.waiting = ui.computed(function(): number
 	local n = 0
 	for _, p in M.now:get().list or {} do
-		if p.status == "pending" or p.status == "tampered" then
+		if not INTERNAL[p.id] and (p.status == "pending" or p.status == "tampered") then
 			n += 1
 		end
 	end
@@ -108,7 +121,7 @@ end
 -- The list the page shows: the device shown's.
 M.shown = ui.computed(function(): { Item }
 	if M.device() then
-		return M.remote:get().list or {}
+		return visible(M.remote:get().list or {})
 	end
 	return M.list:get()
 end)

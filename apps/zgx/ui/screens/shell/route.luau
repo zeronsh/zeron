@@ -66,6 +66,7 @@ local ROUTES = {
 	home = "/",
 	session = "/session/:id",
 	settings = "/settings/:page",
+	scheduled = "/scheduled",
 	plugin = "/plugin/:plugin/:page",
 }
 -- The router, made by the shell as it's built (`M.make`, from the app's
@@ -87,6 +88,9 @@ local function parse(path: string): Route
 	local page = string.match(path, "^/settings/([^/]+)$")
 	if page then
 		return { name = "settings", params = { page = page }, path = path }
+	end
+	if path == "/scheduled" then
+		return { name = "scheduled", params = {}, path = path }
 	end
 	local plugin, ppage = string.match(path, "^/plugin/([^/]+)/([^/]+)$")
 	if plugin then
@@ -306,6 +310,8 @@ local where = steady(function(): Current
 		return { name = "session", session = r.params.id, project = if c then c.project else nil }
 	elseif r.name == "settings" then
 		return { name = "settings", page = r.params.page }
+	elseif r.name == "scheduled" then
+		return { name = "scheduled" }
 	elseif r.name == "plugin" then
 		return { name = "plugin", plugin = r.params.plugin, page = r.params.page }
 	end
@@ -724,6 +730,12 @@ function M.plugin_page(plugin: string, page: string)
 		return
 	end
 	go("plugin", { plugin = plugin, page = page })
+end
+
+-- Scheduled Tasks: the page of its own, between Search and the plugin
+-- pages in the sidebar.
+function M.scheduled()
+	go("scheduled")
 end
 
 -- Out of settings, back where the chats were: a step back (so forward

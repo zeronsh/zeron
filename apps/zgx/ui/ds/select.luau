@@ -48,6 +48,9 @@ export type Props = {
 	on_change: ((value: any) -> ())?,
 	w: number?,
 	w_full: boolean?,
+	-- How tall its list may grow before it scrolls (a long chat list in a
+	-- roomy dialog takes more of the room).
+	height: number?,
 }
 
 -- How many rows open over the button; more drop below it. And the height
@@ -65,6 +68,7 @@ return ui.component(function(props: Props): Node
 	local value = props.value
 	local open = ui.use_state(false)
 	local hovered = ui.use_state(false)
+	local view = props.height or VIEW
 	-- The row the keys or the pointer are on (its place in the options).
 	local lit = ui.use_state(0)
 	local box = ui.ref()
@@ -324,7 +328,7 @@ return ui.component(function(props: Props): Node
 								rows[i]:focus()
 								-- In the middle of the view, what is round it showing.
 								local step = control.H[size] - 4 + GAP
-								offset:set(math.max(0, (i - 1) * step - (VIEW - step) / 2))
+								offset:set(math.max(0, (i - 1) * step - (view - step) / 2))
 								return
 							end
 						end
@@ -335,7 +339,7 @@ return ui.component(function(props: Props): Node
 			if over or tall then
 				return list
 			end
-			return ui.scroll { w_full = true, max_h = VIEW, offset = offset, fade = { 12, 12 }, fade_overflow = true, list }
+			return ui.scroll { w_full = true, max_h = view, offset = offset, fade = { 12, 12 }, fade_overflow = true, list }
 		end,
 	})
 

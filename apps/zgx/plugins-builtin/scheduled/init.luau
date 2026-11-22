@@ -1,0 +1,6 @@
+-- Scheduled Tasks' window half is Zeron's own page (screens/scheduled):
+-- its row sits between Search and Pull requests, and its work is the
+-- service beside this file, which runs with no window open.
+--
+-- This plugin exists so the engine can run that service on every device
+-- that has the feature; it adds nothing to the window itself.

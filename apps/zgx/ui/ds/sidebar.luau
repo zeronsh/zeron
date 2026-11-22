@@ -207,6 +207,11 @@ export type Props = {
 	-- device's), on that device too (its name, as the sessions have it).
 	on_new: ((project: string?, device: string?) -> ())?,
 	on_search: (() -> ())?,
+	-- Scheduled Tasks: its own row between Search and the plugin pages;
+	-- `scheduled` says how many are active and whether one needs attention.
+	on_scheduled: (() -> ())?,
+	scheduled: (() -> { count: number, attention: boolean })?,
+	scheduled_selected: (() -> boolean)?,
 	-- Plugins' pages ("pages.add"), each a row under Search: `{ plugin, id,
 	-- title, icon? }` as a state of a list, and what choosing one does.
 	pages: State<{ any }>?,
@@ -2096,6 +2101,24 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				return locale.s("ds.sidebar.search")
 			end), hint(ui.shortcut_text("cmd+k"))),
 			on_click = props.on_search,
+		},
+		row {
+			class = "scheduled-task-row",
+			name = function(): string
+				return locale.s("ds.sidebar.scheduled_tasks")
+			end,
+			selected = props.scheduled_selected,
+			lead = Icon { name = "clock-circle", size = 16 },
+			words = line(label(function(): string
+				return locale.s("ds.sidebar.scheduled_tasks")
+			end), hint(function(): string
+				local s = props.scheduled and props.scheduled()
+				if s and s.attention then
+					return "!"
+				end
+				return if s and s.count > 0 then tostring(s.count) else ""
+			end)),
+			on_click = props.on_scheduled,
 		},
 		if props.pages
 			-- (Each page's row follows it: a plugin renaming its page or

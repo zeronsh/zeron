@@ -1305,7 +1305,7 @@ local function Composer(): Node
 	local dictation = Dictation.bind(shared.text, function(): string
 		return `{session_id:get() or ""}|{if editing:get() then editing:get().item else ""}|{route.current:get().name}`
 	end, function(): boolean
-		return asks.question:get() ~= nil or asks.approval:get() ~= nil or route.current:get().name == "settings" or route.current:get().name == "plugin"
+		return asks.question:get() ~= nil or asks.approval:get() ~= nil or route.current:get().name == "settings" or route.current:get().name == "plugin" or route.current:get().name == "scheduled"
 	end, "main")
 
 	local composer_sizes = ui.state("chat_composer_sizes", nil :: ds.ComposerSizes?)
@@ -1762,7 +1762,7 @@ local function Composer(): Node
 		-- Not seen over a plugin's page (the chat's is kept unseen under it),
 		-- nor anything placed round the composer: the page takes the pointer.
 		opacity = function(): number
-			return if route.current:get().name == "plugin" then 0 else 1
+			return if route.current:get().name == "plugin" or route.current:get().name == "scheduled" then 0 else 1
 		end,
 		on_resize = function(size: { w: number, h: number })
 			-- (Hidden, Settings standing in its place, it has no height: not somewhere to
@@ -1840,7 +1840,7 @@ local function Composer(): Node
 				-- (And not over a plugin's page: the chat's page is kept unseen
 				-- under it, and so is this.)
 				ui.show(function(): boolean
-					return not route.needs_project:get() and route.current:get().name ~= "plugin"
+					return not route.needs_project:get() and route.current:get().name ~= "plugin" and route.current:get().name ~= "scheduled"
 				end, composer()),
 			},
 		},

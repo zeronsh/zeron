@@ -1,0 +1,40 @@
+{
+  "id": "scheduled",
+  "name": "Scheduled Tasks",
+  "version": "1.0.1",
+  "description": "Recurring Zeron work, run on time with the chat's context.",
+  "icon": "icon.svg",
+  "entry": "init.luau",
+  "service": "service.luau",
+  "permissions": [
+    "service",
+    "messages.send",
+    "sessions.read",
+    "notifications",
+    "tools",
+    "models.read",
+    "models.set"
+  ],
+  "tools": [
+    {
+      "name": "schedule_task",
+      "description": "Schedule a recurring Zeron task. Only call this after the person has said what the task should do, how often (and which weekdays when it is specific days), and the time of day. If any of those is missing, ask in the chat instead of calling this tool; never invent or default the time or the days. The task reports back in the chat it was scheduled from unless new_chat is true. A model can be chosen with `model`; omit it to use the chat's or the agent's default.",
+      "input": {
+        "type": "object",
+        "properties": {
+          "prompt": { "type": "string", "description": "What the agent should do on each run." },
+          "title": { "type": "string", "description": "A short name for the list (optional; the prompt is used when empty)." },
+          "repeat_kind": { "type": "string", "enum": ["once", "daily", "weekdays", "weekly", "days"], "description": "How often it runs; days means the specific weekdays in `days`." },
+          "days": { "type": "array", "items": { "type": "string", "enum": ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"] }, "description": "The weekdays it runs, when repeat_kind is days (for example [\"monday\", \"thursday\"]). Ask the person which days; never guess." },
+          "time": { "type": "string", "description": "The time of day in 24-hour local time, HH:MM (for example 09:00 or 18:30). Ask the person; never guess." },
+          "model": { "type": "string", "description": "The model to start each run with, as Zeron lists it, for example opencode/opencode-go/deepseek-v4.1-flash or codex/gpt-6-luna (optional). Omit to use the chat's model, or the agent's default for a new chat. A model must belong to the chat's own agent when reporting in an existing chat." },
+          "effort": { "type": "string", "description": "The model's reasoning effort, for example low, medium, high (optional)." },
+          "new_chat": { "type": "boolean", "description": "Open a new chat for every run instead of reporting in this one." },
+          "chat_id": { "type": "string", "description": "Report in this chat id instead of the one the tool was called from (optional)." },
+          "chat_name": { "type": "string", "description": "The chat's display name, when chat_id is given (optional)." }
+        },
+        "required": ["prompt", "repeat_kind", "time"]
+      }
+    }
+  ]
+}
