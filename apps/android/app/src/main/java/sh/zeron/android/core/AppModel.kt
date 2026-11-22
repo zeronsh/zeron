@@ -608,6 +608,7 @@ class AppModel(private val app: Application) {
     fun delete(id: String) = attempt("delete") {
         _client.value?.deleteSession(id)
         drafts.save(id, "")
+        drafts.save(Drafts.sending(id), "")
         refreshWorkspace()
     }
 
@@ -700,6 +701,42 @@ class AppModel(private val app: Application) {
         drafts.save(chatId, if (draft.isEmpty()) text else draft + "\n" + text)
     }
 
+    private val outboxes = HashMap<String, Outbox<List<sh.zeron.android.ui.StagedImage>>>()
+
+    /**
+     * A chat's messages on their way into the core, off the main thread and in
+     * order. Kept by the model, so a send outlives leaving the chat; what's
+     * still on its way is saved beside the draft until the core has it.
+     */
+    fun outbox(chatId: String): Outbox<List<sh.zeron.android.ui.StagedImage>> = outboxes.getOrPut(chatId) {
+        Outbox<List<sh.zeron.android.ui.StagedImage>>(
+            SerialLane(SerialLane.pool),
+            { main.post(it) },
+            persist = { texts -> drafts.save(Drafts.sending(chatId), restoredDraft(texts, "")) },
+        ).also { it.onFailed = unsentFallback(chatId) }
+    }
+
+    /** With no composer open, sends that didn't go go back to the chat's saved draft (their photos can't be kept). */
+    fun unsentFallback(chatId: String): (List<Outbox.Pending<List<sh.zeron.android.ui.StagedImage>>>, Exception) -> Unit = { items, e ->
+        Log.w("Zeron", "send failed with the chat closed", e)
+        drafts.save(chatId, restoredDraft(items.map { it.text }, drafts.load(chatId)))
+    }
+
+    /**
+     * The draft a chat's composer opens with. Text that was still on its way
+     * when the process ended comes back ahead of it: it may have reached the
+     * core just before, but a message the user typed is never lost.
+     */
+    fun openingDraft(chatId: String): String {
+        val draft = drafts.load(chatId)
+        val leftover = drafts.load(Drafts.sending(chatId))
+        if (leftover.isEmpty() || outboxes[chatId]?.isIdle == false) return draft
+        return restoredDraft(listOf(leftover), draft).also {
+            drafts.save(chatId, it)
+            drafts.save(Drafts.sending(chatId), "")
+        }
+    }
+
     /** A Cloud chat created whose first message didn't go out yet (key → chat). */
     private var unsentCloudChat: Pair<String, String>? = null
 
@@ -717,7 +754,10 @@ class AppModel(private val app: Application) {
         val key = "$spaceId|${draft.branch.orEmpty()}|${draft.harness}|${draft.model.orEmpty()}"
         val chatId = unsentCloudChat?.takeIf { it.first == key && client.sessionRow(it.second) != null }?.second
             ?: client.createCloudSession(spaceId, config, draft.branch, null).also { unsentCloudChat = key to it }
-        client.openSession(chatId).send(SendRequest(text, attachments, null, BusyPolicy.QUEUE))
+        // Off the main thread: the send writes the chat's documents and storage.
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            client.openSession(chatId).send(SendRequest(text, attachments, null, BusyPolicy.QUEUE))
+        }
         unsentCloudChat = null
         noteDeliveryActivity()
         refreshWorkspace()

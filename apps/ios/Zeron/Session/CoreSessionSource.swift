@@ -29,6 +29,18 @@ final class CoreSessionSource: SessionSource {
     private var defaultModels: [String: ModelPickerRow] = [:]
     private var defaultModelsLoading: Set<String> = []
     private weak var engine: TranscriptView?
+    /// The core's send, stop and answer calls run here, in order: they write
+    /// the chat's documents and storage and can wait behind a save of a large
+    /// chat, so never on the main thread (a send stuck there froze the app).
+    private let lane = DispatchQueue(label: "sh.zeron.send", qos: .userInitiated)
+    /// Messages on their way into the core, oldest first (main thread). Shown
+    /// in the queue as "Sending…" until the call returns, by which point the
+    /// real row is in the chat's documents.
+    private var outgoing: [(id: Int, text: String, images: [StagedImage])] = []
+    private var nextOutgoing = 0
+    /// Lane only: a send failed, and the ones queued behind it don't go (they'd overtake it).
+    private var failedSend: Int?
+    var onSendFailed: ((String, [StagedImage]) -> Void)?
 
     init(app: AppModel, client: CoreClient, handle: SessionHandle, chatId: String) {
         self.app = app
@@ -59,7 +71,7 @@ final class CoreSessionSource: SessionSource {
 
     var isUnused: Bool {
         let t = handle.transcriptStatus()
-        return t.entryCount == 0 && t.pendingCount == 0 && handle.composer().queue.isEmpty
+        return outgoing.isEmpty && t.entryCount == 0 && t.pendingCount == 0 && handle.composer().queue.isEmpty
     }
 
     func reattach() {
@@ -163,6 +175,9 @@ final class CoreSessionSource: SessionSource {
             }
             return SessionChrome.QueuedItem(id: q.id, text: q.visibleText, thumbnail: nil, gate: gate)
         }
+        next.queue += outgoing.map {
+            SessionChrome.QueuedItem(id: "sending-\($0.id)", text: $0.text.isEmpty ? "Attachment" : $0.text, thumbnail: $0.images.first?.thumbnail, gate: "Sending…")
+        }
         next.error = c.queueError
         next.emptyNotice = switch c.transcriptLoad {
         case .ready: nil
@@ -177,32 +192,67 @@ final class CoreSessionSource: SessionSource {
         }
     }
 
-    /// False when the core refused the message (it stays in the composer).
+    /// Taken at once: the message shows as sending while the core's call runs
+    /// on the lane. If that fails, [onSendFailed] gives its text and images
+    /// back (with any sent after it, which don't go).
     @discardableResult
     func send(text: String, images: [StagedImage], mode: DeliveryMode) -> Bool {
-        do {
-            if mode == .interrupt, chrome.running { try handle.interrupt() }
-            _ = try handle.send(request: SendRequest(text: text, attachments: images.map(\.outgoing), worktree: nil, busy: mode == .steer ? .steer : .queue))
-            app?.forgetFreshSideChat(chatId)
-            app?.noteDeliveryActivity()
-            sendFailure = nil
-            return true
-        } catch {
-            // Kept across refreshes (which rebuild the chrome) until the next send.
-            sendFailure = "Couldn't send: \(error)"
-            refresh()
-            return false
+        let interrupt = mode == .interrupt && chrome.running
+        let request = SendRequest(text: text, attachments: images.map(\.outgoing), worktree: nil, busy: mode == .steer ? .steer : .queue)
+        let id = nextOutgoing
+        nextOutgoing += 1
+        outgoing.append((id: id, text: text, images: images))
+        // Saved as on its way until the core has it: a process that dies mid-send gives it back as the draft.
+        Drafts.saveSending(chatId, outgoing.map(\.text))
+        app?.noteDeliveryActivity()
+        sendFailure = nil
+        refresh()
+        let handle = handle
+        lane.async {
+            if let failed = self.failedSend, id > failed { return }
+            do {
+                if interrupt { try handle.interrupt() }
+                _ = try handle.send(request: request)
+                DispatchQueue.main.async { self.sendLanded(id) }
+            } catch {
+                self.failedSend = id
+                DispatchQueue.main.async { self.sendFailed(id, error) }
+            }
         }
+        return true
+    }
+
+    private func sendLanded(_ id: Int) {
+        outgoing.removeAll { $0.id == id }
+        Drafts.saveSending(chatId, outgoing.map(\.text))
+        app?.forgetFreshSideChat(chatId)
+        refresh()
+    }
+
+    private func sendFailed(_ id: Int, _ error: Error) {
+        // This one and everything queued behind it (the lane skips those).
+        let back = outgoing.filter { $0.id >= id }
+        outgoing.removeAll { $0.id >= id }
+        Drafts.saveSending(chatId, outgoing.map(\.text))
+        // Sends from here on go again.
+        lane.async { self.failedSend = nil }
+        // Kept across refreshes (which rebuild the chrome) until the next send.
+        sendFailure = "Couldn't send: \(error)"
+        refresh()
+        onSendFailed?(back.map(\.text).joined(separator: "\n\n"), back.flatMap(\.images))
     }
 
     private var sendFailure: String?
 
     func stop() {
-        try? handle.interrupt()
+        let handle = handle
+        lane.async { try? handle.interrupt() }
     }
 
     func answer(requestId: String, answers: [(questionId: String, labels: [String])]) {
-        try? handle.respondInput(requestId: requestId, answers: answers.map { UserInputAnswer(questionId: $0.questionId, labels: $0.labels) })
+        let handle = handle
+        let answers = answers.map { UserInputAnswer(questionId: $0.questionId, labels: $0.labels) }
+        lane.async { try? handle.respondInput(requestId: requestId, answers: answers) }
     }
 
     func queueAction(_ id: String, _ action: QueueAction) {
@@ -211,8 +261,8 @@ final class CoreSessionSource: SessionSource {
         // attachment rows stop the turn to send.
         case .sendNow: Task { _ = try? await handle.deliverQueuedNow(id: id) }
         case .remove: Task { _ = try? await handle.removeQueued(id: id) }
-        case .moveUp: _ = try? handle.moveQueuedBy(id: id, delta: -1)
-        case .moveDown: _ = try? handle.moveQueuedBy(id: id, delta: 1)
+        case .moveUp: lane.async { [handle] in _ = try? handle.moveQueuedBy(id: id, delta: -1) }
+        case .moveDown: lane.async { [handle] in _ = try? handle.moveQueuedBy(id: id, delta: 1) }
         case .edit: break // Driven by the view: beginEdit / finishEdit.
         }
     }
@@ -266,7 +316,8 @@ final class CoreSessionSource: SessionSource {
     }
 
     func retryDelivery() {
-        try? handle.retryDelivery()
+        let handle = handle
+        lane.async { try? handle.retryDelivery() }
     }
 
     func chipMenu(_ id: String) -> UIMenu? {

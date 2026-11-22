@@ -89,6 +89,8 @@ protocol SessionSource: AnyObject {
     /// False when the message wasn't taken (it stays in the composer).
     @discardableResult
     func send(text: String, images: [StagedImage], mode: DeliveryMode) -> Bool
+    /// A send that was taken didn't go after all: its text and images, for the composer.
+    var onSendFailed: ((String, [StagedImage]) -> Void)? { get set }
     func stop()
     func answer(requestId: String, answers: [(questionId: String, labels: [String])])
     func queueAction(_ id: String, _ action: QueueAction)
@@ -124,6 +126,7 @@ enum QueueAction {
 final class FixtureSessionSource: SessionSource {
     private(set) var chrome = SessionChrome()
     var onChange: (() -> Void)?
+    var onSendFailed: ((String, [StagedImage]) -> Void)?
     private weak var engine: TranscriptView?
     private var entries: [DebugEntry] = []
     private var timer: Timer?
