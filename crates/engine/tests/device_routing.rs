@@ -163,8 +163,17 @@ impl Harness for InstantHarness {
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[]
     }
+    /// The one model it runs: an agent with no models isn't one MCP offers.
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        Ok(vec![])
+        Ok(vec![Model {
+            default: false,
+            id: "instant-1".into(),
+            label: "Instant 1".into(),
+            provider: None,
+            description: None,
+            reasoning_levels: vec![],
+            options: vec![],
+        }])
     }
     /// (Parks nothing: enough for a warm start's routing.)
     fn prewarms(&self) -> bool {
@@ -2512,13 +2521,14 @@ async fn mcp_standalone_session_executes_on_the_selected_device() {
         .await
         .unwrap();
     let project = projects["projects"][0]["id"].as_str().unwrap();
-    tools
+    let models = tools
         .call(
             "list_models",
             json!({"device":"device-b", "harness":"codex"}),
         )
         .await
         .unwrap();
+    assert_eq!(models["models"][0]["id"], "instant-1", "{models}");
     let created = tools
         .call(
             "create_chat",
