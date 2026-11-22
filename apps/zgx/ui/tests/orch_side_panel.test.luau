@@ -249,7 +249,15 @@ test("side panel: a card opens in the panel, its ask with its answers", function
 	expect(shown(app, "#orch-detail")).to_be(true)
 	expect(app:text("#orch-detail-title")).to_be("Orchestrator screen")
 	expect(app:has('#orch-detail-ask >> role:button "Side by side"')).to_be(true)
-	expect(app:has('#orch-detail-status >> "Blocked"')).to_be(true)
+	-- Its ask open: waiting on you, not its column.
+	expect(app:has('#orch-detail-status >> "Waiting on you"')).to_be(true)
+	expect(app:has('#orch-detail-status >> "Blocked"')).to_be(false)
+	-- A card with nothing open: its column's word.
+	app:click("#orch-detail-back")
+	settle(app)
+	app:click('#orch-page-board >> .orch-card "Control room"')
+	settle(app)
+	expect(app:has('#orch-detail-status >> "Running"')).to_be(true)
 end)
 
 test("side panel: a new orchestrator starts on its conversation; the panel offers itself", function()
@@ -330,4 +338,116 @@ test("side panel: no symbol typed as text, in its head, tabs, crew or a detail",
 	app:click('#orch-crew-list >> role:button "Open Orchestrator screen"')
 	settle(app)
 	no_symbols(app, "#orch-detail")
+end)
+
+-- A thread done with an ask of its still open: waiting on you, since it
+-- asked, in its Crew row and its detail; "Completed" only once nothing is.
+local function thread_status(app: any, chat: string, st: string)
+	local s = table.clone(app:state("sessions") :: any)
+	local kids = table.clone(s.children or {})
+	local mine = {}
+	for _, c in kids["orc-orch"] or {} do
+		if c.id == chat then
+			c = table.clone(c)
+			c.status = st
+		end
+		table.insert(mine, c)
+	end
+	kids["orc-orch"] = mine
+	s.children = kids
+	app:set_state("sessions", s)
+	settle(app)
+end
+
+test("side panel: a finished thread with an open ask reads Waiting on you, not Completed", function()
+	local app = open()
+	thread_status(app, "th-ui-orch", "done")
+	crew_tab(app)
+	local ROW = '#orch-crew-waiting >> role:button "Open Orchestrator screen"'
+	expect(app:has(`{ROW} >> .orch-status-input`)).to_be(true)
+	expect(app:has(`{ROW} >> .orch-status-done`)).to_be(false)
+	-- Its time is since it asked (the sample's ask: 200 s, "3m").
+	expect(app:has(`{ROW} >> "3m"`)).to_be(true)
+	app:click(ROW)
+	settle(app)
+	expect(app:has('#orch-detail-status >> "Waiting on you"')).to_be(true)
+	expect(app:has('#orch-detail-status >> "Completed"')).to_be(false)
+	expect(app:has("#orch-detail-status >> .orch-status-input")).to_be(true)
+	expect(app:has('#orch-detail-status >> "3m"')).to_be(true)
+	-- Answered: nothing open, the thread done.
+	local now = table.clone(app:state("orchestration") :: any)
+	local asks = {}
+	for _, a in now.asks do
+		if a.id == "ak-1" then
+			a = table.clone(a)
+			a.state = "answered"
+		end
+		table.insert(asks, a)
+	end
+	now.asks = asks
+	app:set_state("orchestration", now)
+	settle(app)
+	expect(app:has('#orch-detail-status >> "Completed"')).to_be(true)
+	expect(app:has('#orch-detail-status >> "Waiting on you"')).to_be(false)
+	expect(app:has("#orch-detail-status >> .orch-status-done")).to_be(true)
+	app:click("#orch-detail-back")
+	settle(app)
+	expect(app:has('#orch-crew-idle >> .orch-crew-latest >> "Orchestrator screen"')).to_be(true)
+end)
+
+-- The seam's drag (ds/orch_seam_drag), the page's handler itself, driven
+-- with pointer positions: the width it keeps after each move.
+test("side panel: the seam's drag keeps the width each position asks, within bounds", function()
+	local SeamDrag = require("@ds/orch_seam_drag")
+	local kept: number? = 480
+	local page = 1200
+	local seen: { { number } } = {}
+	local drag = SeamDrag.new {
+		width = function(): number
+			return kept or 0
+		end,
+		page = function(): number
+			return page
+		end,
+		set = function(w: number?)
+			kept = w
+		end,
+		bounds = function(want: number, least: number, most: number)
+			table.insert(seen, { want, least, most })
+		end,
+	}
+	-- Not pressed: a move changes nothing.
+	drag.move(100)
+	expect(kept).to_be(480)
+	drag.press(800)
+	expect(drag.held()).to_be(true)
+	-- Left 100: 100 wider.
+	drag.move(700)
+	expect(kept).to_be(580)
+	-- Far left: as wide as leaves the conversation its least (1200 - 361).
+	drag.move(100)
+	expect(kept).to_be(839)
+	expect(seen[#seen][1]).to_be(1180)
+	expect(seen[#seen][2]).to_be(300)
+	expect(seen[#seen][3]).to_be(839)
+	-- Far right: its least.
+	drag.move(1150)
+	expect(kept).to_be(300)
+	-- Back where it started, from the press (not the last move).
+	drag.move(800)
+	expect(kept).to_be(480)
+	drag.release()
+	expect(drag.held()).to_be(false)
+	drag.move(600)
+	expect(kept).to_be(480)
+	-- A narrower page holds a press's width within it too.
+	page = 700
+	drag.press(500)
+	drag.move(400)
+	expect(kept).to_be(339)
+	drag.release()
+	-- A double press: back to its share (nothing kept).
+	drag.press(500, 2)
+	expect(kept).to_be_nil()
+	expect(drag.held()).to_be(false)
 end)
