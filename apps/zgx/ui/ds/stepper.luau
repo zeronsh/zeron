@@ -4,6 +4,8 @@
 -- an end its button dims. A unit may follow the number ("px", "s").
 --
 -- `NumberStepper { value = state, min = 1, max = 16, step = 1, unit = "agents" }`.
+-- `zero_label` names the bottom of the range when it means something else
+-- than its number ("No limit" for a 0 that is none): shown in its place.
 
 local Icon = require("@self/icon")
 local control = require("@self/control")
@@ -18,6 +20,8 @@ export type Props = {
 	step: number?,
 	decimals: number?,
 	unit: (string | Message)?,
+	-- What the minimum reads as, in its number's place (a 0 that means none).
+	zero_label: (string | () -> string)?,
 	-- (These take messages, `ui.t`, too.)
 	label: (string | Message)?,
 	hint: (string | Message)?,
@@ -38,6 +42,10 @@ return ui.component(function(props: Props): Node
 	local hovered = ui.use_state(false)
 
 	local function fmt(v: number): string
+		local zero = props.zero_label
+		if zero ~= nil and v <= lo then
+			return if type(zero) == "function" then zero() else zero
+		end
 		return string.format(`%.{decimals}f`, v)
 	end
 	local function set(v: number)

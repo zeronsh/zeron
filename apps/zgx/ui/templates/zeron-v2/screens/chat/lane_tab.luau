@@ -1290,7 +1290,9 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 	-- Files, and the files pane's, carried over it, dropped anywhere on it, as
 	-- on the chat page: chips on its own draft (a sidebar chat, mentioned), its
 	-- composer taking the keys.
-	local focus = ui.use_state(0)
+	-- (Or its caller's, `data.focus`: a page that hands it the keys, an
+	-- orchestrator's just made.)
+	local focus = data.focus or ui.use_state(0)
 	local zone, carrying, carrying_session = Shared.own_drop_zone(`lane.{slot}`, chat, function()
 		focus:add(1)
 	end)
