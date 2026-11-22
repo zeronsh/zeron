@@ -1350,6 +1350,15 @@ return ui.component(function(props: Props): Node
 			end
 		end)
 	end)
+	-- Follow the pill's width in the size batch (before editors run
+	-- refresh_if_resized), so width-driven wraps update editor height on Pass 1
+	-- before caret reveal computes scroll.
+	ui.effect(function()
+		local w = pill.width
+		if w ~= nil and math.abs(pill_w:peek() - w) >= 0.5 then
+			pill_w:set(w)
+		end
+	end)
 	local settlement = ui.computed(function()
 		local metrics_now = metrics.result:get()
 		local actual = pill.height
@@ -1359,6 +1368,14 @@ return ui.component(function(props: Props): Node
 	end)
 	local transition = ComposerMotion.use(target_geometry, props.snap, settlement)
 	local frame_geometry = transition.frame
+	local editor_height = ui.computed(function(): number
+		return ComposerMotion.editor_height(
+			frame_geometry:get(),
+			transition.destination:get(),
+			metrics.pending:get(),
+			pill_w:peek()
+		)
+	end)
 	-- Width is applied by layout, not a view binding. Project the presented
 	-- snapshot once so width/measurement metadata alone cannot wake every
 	-- height, inset and control binding in each split composer.
@@ -1986,13 +2003,16 @@ return ui.component(function(props: Props): Node
 			overflow = "hidden",
 			head,
 		},
-		-- The draft.
+		-- The draft: clipped to the presented text envelope while the editor
+		-- holds its stable layout height during growth so caret reveal never
+		-- scrolls the top line off-screen mid-resize.
 		ui.div {
 			absolute = true,
 			left = presented(function(g) return g.text.left end),
 			right = presented(function(g) return g.text.right end),
 			top = presented(function(g) return g.text.top end),
 			h = presented(function(g) return g.text.height end),
+			overflow = "hidden",
 			ui.textarea(EditorMenu.on({
 				ref = field,
 				value = value,
@@ -2000,8 +2020,13 @@ return ui.component(function(props: Props): Node
 				placeholder = placeholder,
 				placeholder_color = "$text.tertiary",
 				read_only = disabled,
+				absolute = true,
+				left = 0,
+				top = 0,
 				w_full = true,
-				h_full = true,
+				h = function(): number
+					return editor_height:get()
+				end,
 				px = 0,
 				py = 0,
 				border = 0,

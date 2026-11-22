@@ -157,8 +157,15 @@ width is not continuously interpolated during a mode change.
 
 The viewport derives from that frame's surface, top and bottom reservations.
 A separate animated clip surrounds the naturally measured header; the clip's
-height never feeds back into the header measurement. These transitions retain
-the textarea, draft, focus and selection, and do not write editor scroll.
+height never feeds back into the header measurement. Likewise, the textarea sits
+inside an `overflow = "hidden"` clip sized to `shown.text.height`, while its own
+height (`Motion.editor_height`) holds at least the growing destination, pending
+frame-0 edit height (`metrics.pending`), and temporary compact-width wraps during
+compact-to-expanded transitions before settling back to `shown.text.height`.
+Combined with updating `pill_w` from `pill.width` before editors refresh on
+resize, caret reveal never scrolls and clips the top line off-screen mid-resize.
+These transitions retain the textarea, draft, focus and selection, and do not
+write editor scroll.
 
 Reduced motion cancels animation and snaps to the destination. A context change
 also snaps, holding that policy until the current metrics are ready and the pill

@@ -192,9 +192,25 @@ function M.use(props: Props)
 			width = want.width,
 		}
 	end)
+	-- Latest requested natural size before deferred publication settles, used
+	-- only to keep the editor's internal viewport tall enough on frame 0 so
+	-- caret reveal never scrolls and clips the top of the draft before the
+	-- composer's geometry transition starts.
+	local pending = ui.computed(function(): Size?
+		local want = request:get()
+		local raw = want.estimate or want.source
+		if raw == nil then
+			return nil
+		end
+		return {
+			unwrapped_width = raw.unwrapped_width,
+			wrapped_height = raw.wrapped_height,
+			line_height = raw.line_height,
+		}
+	end)
 	-- Geometry follows measured dimensions; request/readiness changes have
 	-- their own subscribers and do not invalidate the last complete sample.
-	return { result = result, sample = size :: ReadOnlyState<Size?> }
+	return { result = result, sample = size :: ReadOnlyState<Size?>, pending = pending :: ReadOnlyState<Size?> }
 end
 
 return M

@@ -72,3 +72,48 @@ test("composer transition: changes above the cap do not change the visual destin
 	expect(Motion.same_destination(a, geometry(100))).to_be(false)
 	expect(Motion.same_destination(a, geometry(500, 30))).to_be(false)
 end)
+
+test("composer transition: editor height holds room during growth and settles to the visible clip", function()
+	local compact = geometry(22)
+	local three = geometry(66)
+	local six = geometry(132)
+	local capped = geometry(500)
+
+	-- Settled: matches visible text clip exactly.
+	expect(Motion.editor_height(compact, compact, { unwrapped_width = 40, wrapped_height = 22, line_height = 22 })).to_be(22)
+	expect(Motion.editor_height(three, three, { unwrapped_width = 40, wrapped_height = 66, line_height = 22 })).to_be(66)
+	expect(Motion.editor_height(capped, capped, { unwrapped_width = 40, wrapped_height = 500, line_height = 22 })).to_be(240)
+
+	-- Growing (expanded 3 -> 6): holds destination height from progress 0 until settled.
+	local growing = Motion.frame(three, six, 0.25)
+	expect(Motion.editor_height(growing, six, { unwrapped_width = 40, wrapped_height = 132, line_height = 22 })).to_be(132)
+
+	-- Shrinking (expanded 6 -> 3): tracks shown height down to destination.
+	local shrinking = Motion.frame(six, three, 0.25)
+	expect(Motion.editor_height(shrinking, three, { unwrapped_width = 40, wrapped_height = 66, line_height = 22 })).to_be(shrinking.text.height)
+
+	-- Frame-0 pending before target updates: holds pending height immediately.
+	expect(Motion.editor_height(three, three, { unwrapped_width = 40, wrapped_height = 110, line_height = 22 })).to_be(110)
+
+	-- Compact -> expanded (compact-width phase): accounts for extra wraps at compact width.
+	local opening = Motion.frame(compact, six, 0.1)
+	expect(opening.expanded).to_be(false)
+	expect(Motion.editor_height(opening, six, { unwrapped_width = 600, wrapped_height = 132, line_height = 22 }) > six.text.height).to_be(true)
+	-- Once width expands (p = 0.9), drops back to destination height.
+	local opened = Motion.frame(compact, six, 0.9)
+	expect(opened.expanded).to_be(true)
+	expect(Motion.editor_height(opened, six, { unwrapped_width = 600, wrapped_height = 132, line_height = 22 })).to_be(six.text.height)
+
+	-- Width-only resize while compact + typing across narrower compact room uses live_width.
+	-- Old compact width is 531; live_width = 480 gives compact_w = 351.
+	expect(Motion.editor_height(
+		compact,
+		compact,
+		{ unwrapped_width = 360, wrapped_height = 22, line_height = 22 },
+		480
+	) >= Layout.TEXT_MIN_VIEWPORT).to_be(true)
+
+	-- Capped draft opening from compact caps at TEXT_MAX_VIEWPORT (scrollable by design).
+	local opening_cap = Motion.frame(compact, capped, 0.1)
+	expect(Motion.editor_height(opening_cap, capped, { unwrapped_width = 600, wrapped_height = 500, line_height = 22 })).to_be(240)
+end)

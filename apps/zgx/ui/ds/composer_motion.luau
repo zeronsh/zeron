@@ -89,6 +89,56 @@ function M.same_destination(a: Layout.Geometry, b: Layout.Geometry): boolean
 	return a.width == b.width and a.text.width == b.text.width and same_shape(a, b)
 end
 
+-- Height given to the textarea inside its presented clip (`shown.text.height`).
+-- While growing (or on frame 0 before a pending edit's target publishes), the
+-- textarea holds at least the height needed to lay out the draft without
+-- caret-reveal scrolling the top line off-screen. Settled, it equals
+-- `shown.text.height` so accessibility, hit-testing and scrollbars match the
+-- visible field exactly.
+function M.editor_height(shown: Layout.Geometry, dest: Layout.Geometry, pending: Layout.Sample?, live_width: number?): number
+	local h = math.max(shown.text.height, dest.text.height)
+	local capped = dest.natural_height > dest.height + 0.01
+	local expanded_need = dest.text.height
+	local opening_to_expanded = not shown.expanded and dest.expanded
+	local width = if live_width and live_width > 0 then live_width else dest.width
+	local compact_w = if width > 0
+		then math.max(0, width - Layout.BORDER * 2 - shown.compact_text.left - shown.compact_text.right)
+		else shown.text.width
+
+	if pending then
+		local pending_h = math.min(Layout.TEXT_MAX_VIEWPORT, math.max(pending.wrapped_height, pending.line_height))
+		if pending.wrapped_height > Layout.TEXT_MAX_VIEWPORT + 0.01 then
+			capped = true
+		end
+		if not shown.expanded and not dest.expanded and (
+			(compact_w > 0 and pending.unwrapped_width > compact_w)
+			or pending.wrapped_height > pending.line_height + 0.01
+		) then
+			opening_to_expanded = true
+			expanded_need = math.max(expanded_need, Layout.TEXT_MIN_VIEWPORT, pending_h)
+		else
+			expanded_need = math.max(expanded_need, pending_h)
+		end
+		h = math.max(h, expanded_need)
+	end
+
+	-- While compact -> expanded still holds compact width (waiting for room
+	-- above the controls), an uncapped draft can wrap to more lines at compact
+	-- width than at expanded width. Give the editor enough height to hold those
+	-- temporary wrapped lines at scroll.y = 0; the outer clip masks to
+	-- `shown.text.height`.
+	if opening_to_expanded and not capped and compact_w > 0 then
+		local expanded_w = Layout.measurement(width).width
+		if expanded_w > compact_w then
+			local lh = math.max(1, if pending then pending.line_height else dest.line_height)
+			local compact_fit = math.ceil(expanded_need * (expanded_w / compact_w) / lh) * lh + lh * 2
+			h = math.max(h, compact_fit)
+		end
+	end
+
+	return h
+end
+
 function M.use(target: ReadOnlyState<Layout.Geometry>, snap: State<number>?, settlement: ReadOnlyState<{ revision: number, status: string }>?)
 	local motion = require("@self/motion")
 	local initial = target:peek()
