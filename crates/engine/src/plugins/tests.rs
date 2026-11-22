@@ -1084,7 +1084,7 @@ async fn plugins_a_builtin_s_switch_survives_scans_that_cant_see_it() {
     let restarted = Plugins::new(&f.data, "dev-1");
     restarted.rescan().await;
     assert!(
-        State::load(f.plugins.plugins_dir()).decisions.get("github").is_some_and(|d| d.off),
+        State::load(f.plugins.plugins_dir()).switches.get("github") == Some(&false),
         "the off switch is still saved"
     );
     // The window attaches: still off.
@@ -1183,8 +1183,8 @@ async fn plugins_an_account_switch_is_written_for_the_account_and_watched() {
     assert!(*watched.borrow_and_update());
     let state = State::load(f.plugins.plugins_dir());
     assert!(
-        state.decisions.get("orchestrators").is_some_and(|d| !d.off),
-        "this device's decision is left as it was"
+        state.switches.get("orchestrators") == Some(&true) && !state.decisions.contains_key("orchestrators"),
+        "this device's old choice is left as it was, a switch alone: {state:?}"
     );
 
     // Changed by the account (another device): read at once, before a rescan.
@@ -1224,6 +1224,53 @@ async fn plugins_an_engine_without_the_files_follows_the_account_switch() {
         .await
         .unwrap_err();
     assert!(refused.contains("whole account"), "{refused}");
+}
+
+/// What was allowed for a plugin whose folder went (by hand, not
+/// `RemovePlugin`) is never another plugin's under its id: not one made
+/// here before a rescan, not one copied in after scans that couldn't see
+/// Zeron's own (where only an on/off switch is kept, which allows nothing).
+#[tokio::test]
+async fn plugins_consent_for_a_gone_plugin_is_never_inherited_under_its_id() {
+    let f = fixture();
+    let allow = |id: &'static str| {
+        let plugins = f.plugins.clone();
+        async move {
+            plugins.rescan().await;
+            let hash = item(&plugins, id).await["hash"].as_str().unwrap().to_owned();
+            call(&plugins, methods::DECIDE_PLUGIN, serde_json::json!({ "id": id, "allow": true, "hash": hash }))
+                .await
+                .unwrap()
+        }
+    };
+    // X, someone's (unsigned), allowed `network` and `ui.add`.
+    write_plugin(f.plugins.plugins_dir(), "focus", serde_json::json!({ "permissions": ["ui.add", "network"] }), None);
+    assert_eq!(allow("focus").await["status"], "on");
+    // Its folder goes by hand, and a plugin is made here under its id
+    // before any rescan: it asks for what it wants, nothing inherited.
+    std::fs::remove_dir_all(f.plugins.plugins_dir().join("focus")).unwrap();
+    let made = call(
+        &f.plugins,
+        methods::NEW_PLUGIN,
+        serde_json::json!({ "id": "focus", "name": "Focus", "permissions": ["network"] }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(made["status"], "pending", "{made}");
+    assert_eq!(made["allowed"], serde_json::json!([]), "{made}");
+
+    // Y allowed, gone by hand, scanned (no window: Zeron's own unknown),
+    // then a different plugin copied in as Y: asked again.
+    write_plugin(f.plugins.plugins_dir(), "notes", serde_json::json!({ "permissions": ["ui.add"] }), None);
+    assert_eq!(allow("notes").await["status"], "on");
+    std::fs::remove_dir_all(f.plugins.plugins_dir().join("notes")).unwrap();
+    f.plugins.rescan().await;
+    let state = State::load(f.plugins.plugins_dir());
+    assert!(!state.decisions.contains_key("notes"), "its consent went: {state:?}");
+    write_plugin(f.plugins.plugins_dir(), "notes", serde_json::json!({ "permissions": ["ui.add"], "description": "another" }), None);
+    f.plugins.rescan().await;
+    let other = item(&f.plugins, "notes").await;
+    assert_eq!((other["status"].as_str(), other["allowed"].clone()), (Some("pending"), serde_json::json!([])), "{other}");
 }
 
 #[tokio::test]
@@ -1643,7 +1690,7 @@ async fn plugins_removing_a_folder_that_squats_a_builtin_keeps_the_builtins() {
     call(&f.plugins, methods::REMOVE_PLUGIN, serde_json::json!({ "id": "github" })).await.unwrap();
     assert!(!f.plugins.plugins_dir().join("github").exists(), "your folder went");
     assert!(storage.join("github.json").is_file() && storage.join("github.settings.json").is_file(), "the built-in's storage stays");
-    assert!(State::load(f.plugins.plugins_dir()).decisions.get("github").is_some_and(|d| d.off), "and its off switch");
+    assert_eq!(State::load(f.plugins.plugins_dir()).switches.get("github"), Some(&false), "and its off switch");
     let list = call(&f.plugins, methods::LIST_PLUGINS, serde_json::json!({})).await.unwrap();
     let github: Vec<_> = list["plugins"].as_array().unwrap().iter().filter(|p| p["id"] == "github").collect();
     assert_eq!(github.len(), 1, "{list}");

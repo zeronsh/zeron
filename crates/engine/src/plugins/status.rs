@@ -23,6 +23,12 @@ pub struct State {
     pub own: BTreeSet<String>,
     #[serde(default)]
     pub decisions: BTreeMap<String, Decision>,
+    /// Zeron's own plugins' switches on this device (`true`: on), by id:
+    /// on or off and nothing else, never consent. Kept when a scan can't see
+    /// the plugin (`Self::prune`), and read only for Zeron's own, so it
+    /// allows nothing for anyone else's plugin under the id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub switches: BTreeMap<String, bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -69,21 +75,36 @@ impl State {
             .map_err(|_| "Couldn't save your plugin choices".to_string())
     }
 
-    /// Forget own ids whose plugin is gone (`present`: the ids with a
-    /// folder, yours and Zeron's): a stale own id would make a stranger's
-    /// package of that name yours. Whether anything went.
+    /// Forget own ids and decisions whose plugin is gone (`present`: the
+    /// ids with a folder, yours and, once `builtins` says where they are,
+    /// Zeron's). A stale own id would make a stranger's package of that
+    /// name yours, and a stale decision would hand its consent to whatever
+    /// comes next under the id. Whether anything changed.
     ///
-    /// Decisions stay. A scan can't see every plugin a decision is for:
-    /// Zeron's own are seen only once a window says where they are
-    /// (`SetBuiltinPlugins`), which an engine that just started hasn't
-    /// heard yet and a headless one never does, so pruning them forgot a
-    /// built-in's switch at every restart. A decision binds its author's
-    /// key or exact content, so one kept for a gone folder never allows a
-    /// stranger's package under the id; `RemovePlugin` forgets it.
-    pub fn prune(&mut self, present: &BTreeSet<String>) -> bool {
-        let own = self.own.len();
+    /// The on/off part stays, as a switch (`switches`): Zeron's own are seen
+    /// only once a window says where they are (`SetBuiltinPlugins`), which an
+    /// engine that just started hasn't heard yet and a headless one never
+    /// does, so a gone id may be a built-in's, whose switch must outlive the
+    /// scan. Without `builtins`, every gone decision's switch is kept (it
+    /// allows nothing: only Zeron's own read it); with them, Zeron's own
+    /// decisions become their switches and the rest go whole.
+    pub fn prune(&mut self, present: &BTreeSet<String>, builtins: Option<&BTreeSet<String>>) -> bool {
+        let before = self.clone();
         self.own.retain(|id| present.contains(id));
-        own != self.own.len()
+        let mut gone = Vec::new();
+        for (id, decision) in &self.decisions {
+            let builtin = builtins.is_some_and(|b| b.contains(id));
+            if builtin || !present.contains(id) {
+                gone.push((id.clone(), !decision.off, builtin || builtins.is_none()));
+            }
+        }
+        for (id, on, keep_switch) in gone {
+            self.decisions.remove(&id);
+            if keep_switch {
+                self.switches.entry(id).or_insert(on);
+            }
+        }
+        *self != before
     }
 }
 
@@ -621,14 +642,23 @@ mod tests {
         state.decisions.insert("gone".into(), allowed(&["ui.add"], Some("K"), None));
         state.decisions.insert("here".into(), allowed(&["ui.add"], Some("K"), None));
         let present: BTreeSet<String> = ["here".to_string()].into();
-        assert!(state.prune(&present));
-        assert!(!state.prune(&present));
-        assert_eq!(state.own.iter().collect::<Vec<_>>(), vec!["here"]);
-        assert_eq!(
-            state.decisions.keys().collect::<Vec<_>>(),
-            vec!["gone", "here"],
-            "decisions stay: a scan may not see a built-in's folder"
-        );
+        let mut off = allowed(&["ui.add"], None, Some("h"));
+        off.off = true;
+        state.decisions.insert("builtin".into(), off.clone());
+        let mut headless = state.clone();
+        // Zeron's own unknown (no window yet, or headless): consent goes,
+        // the on/off stays as a switch, which allows nothing.
+        assert!(headless.prune(&present, None));
+        assert!(!headless.prune(&present, None));
+        assert_eq!(headless.own.iter().collect::<Vec<_>>(), vec!["here"]);
+        assert_eq!(headless.decisions.keys().collect::<Vec<_>>(), vec!["here"]);
+        assert_eq!(headless.switches, BTreeMap::from([("builtin".to_string(), false), ("gone".to_string(), true)]));
+        // Known: Zeron's own decision becomes its switch; the rest go whole.
+        let builtins: BTreeSet<String> = ["builtin".to_string()].into();
+        let present: BTreeSet<String> = ["here".to_string(), "builtin".to_string()].into();
+        assert!(state.prune(&present, Some(&builtins)));
+        assert_eq!(state.decisions.keys().collect::<Vec<_>>(), vec!["here"]);
+        assert_eq!(state.switches, BTreeMap::from([("builtin".to_string(), false)]));
     }
 
     #[test]

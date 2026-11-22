@@ -1324,7 +1324,7 @@ impl Plugins {
                 let chosen = if scan::builtin_switch(&inspected).account {
                     switches.get(&id).copied()
                 } else {
-                    state.decisions.get(&id).map(|d| !d.off)
+                    state.switches.get(&id).copied()
                 };
                 for theirs in entries.iter_mut().filter(|e| e.item.id == id) {
                     theirs.item.status = Status::Broken;
@@ -1365,8 +1365,9 @@ impl Plugins {
         (entries, owed, keeps)
     }
 
-    /// Forget own ids whose folder is gone (decisions stay: `State::prune`).
-    /// Under the scan lock, which installs hold while they swap a folder.
+    /// Forget own ids and decisions whose folder is gone, keeping on/off as
+    /// a switch (`State::prune`). Under the scan lock, which installs hold
+    /// while they swap a folder.
     fn prune_state(&self) {
         let names = |dir: &Path| -> Vec<String> {
             scan::plugin_dirs(dir)
@@ -1375,15 +1376,17 @@ impl Plugins {
                 .collect()
         };
         let mut present: std::collections::BTreeSet<String> = names(&self.inner.plugins_dir).into_iter().collect();
-        if let Some(dir) = lock(&self.inner.builtin_dir).clone() {
-            present.extend(names(&dir));
+        let builtins: Option<std::collections::BTreeSet<String>> =
+            lock(&self.inner.builtin_dir).clone().map(|dir| names(&dir).into_iter().collect());
+        if let Some(builtins) = &builtins {
+            present.extend(builtins.iter().cloned());
         }
         let pruned = {
             let mut state = lock(&self.inner.state);
-            state.prune(&present).then(|| state.clone())
+            state.prune(&present, builtins.as_ref()).then(|| state.clone())
         };
         if let Some(state) = pruned {
-            tracing::info!("plugins: forgot own ids of plugins that are gone");
+            tracing::info!("plugins: forgot decisions for plugins that are gone, keeping their switches");
             if let Err(error) = state.save(&self.inner.plugins_dir) {
                 tracing::warn!(%error, "plugins: couldn't save pruned choices");
             }
@@ -1917,11 +1920,10 @@ impl Plugins {
                     return self.item(&p.id);
                 }
                 // Zeron's own: on or off is all there is to decide.
+                // (A switch, never consent: see `State::switches`.)
                 if entry.item.builtin {
                     self.update_state(|state| {
-                        let mut decision = state.decisions.get(&p.id).cloned().unwrap_or_else(|| entry.facts().record(true));
-                        decision.off = p.off;
-                        state.decisions.insert(p.id.clone(), decision);
+                        state.switches.insert(p.id.clone(), !p.off);
                     })?;
                     self.rescan().await;
                     return self.item(&p.id);
@@ -1976,6 +1978,7 @@ impl Plugins {
                 }
                 self.update_state(|state| {
                     state.decisions.remove(&p.id);
+                    state.switches.remove(&p.id);
                     state.own.remove(&p.id);
                 })?;
                 // What it kept (`zeron.store`, its settings, its database)
@@ -2021,7 +2024,12 @@ impl Plugins {
                     );
                     // Own before it's signed: the watcher's re-sign sees it as own.
                     let key = signing::load_or_create_key(&this.inner.data_dir)?;
+                    // New here: nothing allowed for a plugin once under
+                    // this id (its folder gone by hand, not yet rescanned)
+                    // is this one's.
                     this.update_state(|state| {
+                        state.decisions.remove(&id);
+                        state.switches.remove(&id);
                         state.own.insert(id.clone());
                     })
                     .map_err(|e| e.to_string())?;
