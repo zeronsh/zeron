@@ -3865,6 +3865,12 @@ async fn only_a_cards_own_thread_says_where_it_stands() {
     let row = placed(&core, &card);
     assert!(row.word.is_none(), "{:?}", row.word);
     assert!(row.events.iter().any(|e| e.kind == EventKind::Report && e.text == "Reported done: All done"));
+    // It came onto the card by its own report: the card's guest, however
+    // long it has been there when it says done again.
+    assert_eq!(row.guests, ["geese-t2"]);
+    super::board::on_report(core.orchestration.workspace(), &report("geese-t2", "r-again", now + chrono::Duration::seconds(3)));
+    let row = placed(&core, &card);
+    assert!(row.word.is_none() && row.closed.is_none(), "{:?} {:?}", row.word, row.closed);
     // The card's own thread (put on it before it spoke) says it.
     super::board::on_report(core.orchestration.workspace(), &report("geese-t1", "r-own", now + chrono::Duration::seconds(5)));
     let word = placed(&core, &card).word.expect("its word");
@@ -3872,4 +3878,49 @@ async fn only_a_cards_own_thread_says_where_it_stands() {
     // Filed twice (a redelivered command): once.
     super::board::on_report(core.orchestration.workspace(), &report("geese-t1", "r-own", now + chrono::Duration::seconds(5)));
     assert_eq!(placed(&core, &card).events.iter().filter(|e| e.about.as_deref() == Some("r-own")).count(), 1);
+}
+
+#[tokio::test]
+async fn a_thread_that_reports_itself_onto_a_card_never_speaks_for_it() {
+    use zeron_proto::orchestration::{Report, ReportState};
+    let (_temp, core) = core().await;
+    let (o, card) = geese(&core).await;
+    chat(&core, "geese-t2", "Phase 2 thread", None).await;
+    op(&core, Caller::Local, json!({"op":"addToCrew","orchestratorId":o,"chatId":"geese-t2"})).await.unwrap();
+    let done = |id: &str, at: chrono::DateTime<chrono::Utc>| Report {
+        id: id.into(),
+        orchestrator_id: o.clone(),
+        from_chat: "geese-t2".into(),
+        item_id: Some(card.clone()),
+        state: ReportState::Done,
+        summary: "All done".into(),
+        detail: String::new(),
+        links: Vec::new(),
+        progress: None,
+        at,
+        result: None,
+    };
+    // Its report names another thread's card: filing it puts it on the card,
+    // as the card's guest.
+    op(&core, agent("geese-t2"), json!({"op":"report","state":"message","summary":"Looking at this too","itemId":card})).await.unwrap();
+    assert!(core.orchestration.item(&card).unwrap().threads.iter().any(|t| t == "geese-t2"));
+    assert_eq!(placed(&core, &card).guests, ["geese-t2"]);
+    // Long on the card by now, it says done, and again: never the card's
+    // word, and nothing closes.
+    let now = chrono::Utc::now();
+    for (n, mins) in [10, 20].into_iter().enumerate() {
+        super::board::on_report(core.orchestration.workspace(), &done(&format!("r-{n}"), now + chrono::Duration::minutes(mins)));
+        let row = placed(&core, &card);
+        assert!(row.word.is_none() && row.closed.is_none(), "{:?} {:?}", row.word, row.closed);
+    }
+    // Its orchestrator's edits that keep it on the card change nothing.
+    op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":card,"threads":["geese-t1","geese-t2"],"outcome":"Under way"}})).await.unwrap();
+    assert_eq!(placed(&core, &card).guests, ["geese-t2"]);
+    // Taken off and put back by its orchestrator, it is the card's own.
+    op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":card,"threads":["geese-t1"]}})).await.unwrap();
+    assert!(placed(&core, &card).guests.is_empty());
+    op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":card,"threads":["geese-t1","geese-t2"]}})).await.unwrap();
+    super::board::on_report(core.orchestration.workspace(), &done("r-own", chrono::Utc::now() + chrono::Duration::minutes(30)));
+    let word = placed(&core, &card).word.expect("its word");
+    assert_eq!((word.from.as_str(), word.state), ("geese-t2", ReportState::Done));
 }

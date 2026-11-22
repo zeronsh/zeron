@@ -350,7 +350,13 @@ impl EngineRpc {
                         (None, item.held.take().filter(|held| !held))
                     }
                 };
+                let threads_given = item.threads.is_some();
                 let id = orch.patch_item(item).map_err(RpcError::Failed)?;
+                // A thread taken off the card is its guest no longer: put
+                // back by its orchestrator or the person, it is the card's own.
+                if !created && threads_given && self.board_card(&id).is_some_and(|row| !row.guests.is_empty()) {
+                    self.with_card(&id, now, |row, item| row.guests.retain(|g| item.threads.contains(g)));
+                }
                 if !created && (finish.is_some() || held.is_some()) {
                     self.with_card(&id, now, |row, _| {
                         if let Some(finish) = finish {

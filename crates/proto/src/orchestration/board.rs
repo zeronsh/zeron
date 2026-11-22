@@ -508,6 +508,13 @@ pub struct BoardCard {
     pub work_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub word: Option<Word>,
+    /// Its threads that put themselves on it by reporting on it (a thread
+    /// may report on any card of its orchestrator's board). They show on it
+    /// and their work counts as work on it, but what they report never says
+    /// where it stands: that is its own threads', put on it by the person,
+    /// its orchestrator or the engine.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guests: Vec<String>,
     /// When its thread was last heard from other than by its session: a
     /// report of any kind, an outcome of its route. Work sent before that
     /// has reached it.
@@ -550,6 +557,7 @@ impl BoardCard {
             held: false,
             work_at: None,
             word: None,
+            guests: Vec::new(),
             heard_at: None,
             checking: None,
             stall: None,

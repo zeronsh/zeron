@@ -1550,12 +1550,22 @@ pub(crate) fn on_report(workspace: &crate::workspace_host::WorkspaceHost, report
         }
         let Some(item) = doc.work_item(id).filter(|i| !i.removed) else { return };
         // Whose word it is: the card's own thread's. A thread may report on
-        // any card of its orchestrator's board (which puts it on that card),
-        // but only one that was the card's before it spoke says where the
-        // card stands: its own item, or a card it was put on earlier. A flow
-        // step's card is its run's to end, never a report's.
-        let own = doc.crew_member(&report.from_chat).is_some_and(|m| m.item_id.as_deref() == Some(id))
-            || (item.threads.contains(&report.from_chat) && item.threads_at.is_none_or(|at| at < report.at));
+        // any card of its orchestrator's board (which puts it on that card,
+        // as its guest), but only one the person, its orchestrator or the
+        // engine put there says where the card stands: its own item, or a
+        // card it was on before it spoke and never joined by a report. A
+        // flow step's card is its run's to end, never a report's.
+        let from = report.from_chat.as_str();
+        let its_item = doc.crew_member(from).is_some_and(|m| m.item_id.as_deref() == Some(id));
+        let on_it = item.threads.iter().any(|t| t == from);
+        let before = on_it && item.threads_at.is_none_or(|at| at < report.at);
+        // (Where the report was filed says so, in the write that puts the
+        // thread on the card. An engine from before places doesn't: there
+        // the thread came onto the card as it spoke.)
+        if !its_item && on_it && !before && joined_as_it_spoke(&item, report.at) && !row.guests.iter().any(|g| g == from) {
+            row.guests.push(from.to_owned());
+        }
+        let own = its_item || (before && !row.guests.iter().any(|g| g == from));
         let speaks = own && item.flow.is_none();
         if speaks && matches!(report.state, ReportState::Done | ReportState::Blocked | ReportState::Failed) {
             row.word = Some(Word {
@@ -1583,6 +1593,33 @@ pub(crate) fn on_report(workspace: &crate::workspace_host::WorkspaceHost, report
         row.updated_at = report.at;
         doc.upsert_board_card(&row);
     });
+}
+
+/// How long after a report is made its filing puts its thread on the card
+/// it names (the same step, on one clock).
+const JOINED_WITHIN_SECS: i64 = 5;
+
+/// Whether `item`'s threads last changed as a report made at `at` was filed:
+/// the report's own thread joining it.
+fn joined_as_it_spoke(item: &WorkItem, at: DateTime<Utc>) -> bool {
+    item.threads_at.is_some_and(|joined| joined >= at && joined - at <= chrono::Duration::seconds(JOINED_WITHIN_SECS))
+}
+
+/// A report from `chat` has put it on card `id`, in this same write: unless
+/// the card is its own item, it is the card's guest from here on, and what
+/// it reports never says where the card stands ([`on_report`]). (A card
+/// from before places has no row yet: its report is read as it was then,
+/// when its row is made.)
+pub(crate) fn joined_by_report(doc: &mut zeron_doc::RegistryDoc, id: &str, chat: &str, at: DateTime<Utc>) {
+    if doc.crew_member(chat).is_some_and(|m| m.item_id.as_deref() == Some(id)) {
+        return;
+    }
+    let Some(mut row) = doc.board_card(id) else { return };
+    if !row.guests.iter().any(|g| g == chat) {
+        row.guests.push(chat.to_owned());
+        row.updated_at = at;
+        doc.upsert_board_card(&row);
+    }
 }
 
 /// What of a session a card's place reads.
