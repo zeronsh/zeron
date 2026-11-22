@@ -27,6 +27,28 @@ local function open(): any
 	return app
 end
 
+-- Whether a hover card shows (zgx's tooltip panel, drawn: not hidden).
+local function card_shows(app: any): boolean
+	for line in app:tree():gmatch("[^\n]+") do
+		if line:find(' dialog "Tooltip" ', 1, true) and not line:find("hidden", 1, true) then
+			return true
+		end
+	end
+	return false
+end
+
+-- The part's card comes once the pointer has rested on its word 300 ms of
+-- the wall clock, which a slow runner's frames outlast, and it hangs over
+-- the chips: rest past that, then let it go (Escape), so a chip is in
+-- reach on any runner.
+local function rest_and_let_go(app: any)
+	app:wait("#no-such-node", { timeout_ms = 400 })
+	expect(card_shows(app)).to_be(true)
+	app:key("Escape")
+	app:frames(5)
+	expect(card_shows(app)).to_be(false)
+end
+
 local function calls(app: any): string
 	return tostring(app:state("calls") or "")
 end
@@ -270,6 +292,7 @@ test("the pointer on a part lights its chip and brings it into view", function()
 	expect(lx + lw > vx + vw).to_be(true)
 	app:hover('#control-capture >> .orch-part >> "registry "')
 	app:frames(20)
+	rest_and_let_go(app)
 	expect(app:state("orch_receipt_hovered")).to_be("rt-9")
 	lx, _, lw = box(app, LAST)
 	expect(lx >= vx and lx + lw <= vx + vw + 0.5).to_be(true)
