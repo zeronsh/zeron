@@ -458,7 +458,7 @@ impl SessionCore {
             if let Some(live) = client.live() {
                 // A new chat's registry row must survive alongside its outbox:
                 // recovery needs its host and room generation before any UI opens it.
-                live.persist_registry(&client)?;
+                live.ensure_chat_row_durable(&client, &self.chat_id)?;
             }
             let result = f(&self.doc)?;
             if let Some(live) = client.live() {

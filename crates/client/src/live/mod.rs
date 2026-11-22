@@ -18,6 +18,8 @@ pub(crate) mod direct;
 pub(crate) mod escort;
 pub(crate) mod held;
 pub(crate) mod path_gate;
+#[cfg(test)]
+mod phone_bench;
 pub(crate) mod relay;
 pub(crate) mod room;
 pub(crate) mod urls;
@@ -195,6 +197,19 @@ pub(crate) struct RegistryPosture {
     pub last_failure: Option<String>,
 }
 
+/// A chat's host and room generation: what outbox recovery needs from its
+/// registry row before any UI opens it.
+pub(crate) type ChatRoute = (String, Option<u32>);
+
+fn chat_routes(doc: &RegistryDoc) -> HashMap<String, ChatRoute> {
+    // Unreadable rows count as unsaved: their chats' next send saves.
+    doc.read_chats()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|chat| (chat.id, (chat.device_id, chat.room_gen)))
+        .collect()
+}
+
 pub(crate) struct LiveBackend {
     pub(crate) edge: String,
     pub(crate) store: Arc<DocsStore>,
@@ -205,6 +220,9 @@ pub(crate) struct LiveBackend {
     registry_save: Arc<Notify>,
     registry_save_gate: Mutex<()>,
     registry_dirty: Arc<AtomicBool>,
+    /// Each chat's host and room generation as the registry snapshot on disk
+    /// holds them: what restart recovery reads for a chat with outbox rows.
+    durable_chats: Mutex<HashMap<String, ChatRoute>>,
     last_liveness_probe: AtomicI64,
     pub(crate) relay: relay::Relay,
     /// Direct peer connections (terminals), started with the backend.
@@ -216,11 +234,12 @@ pub(crate) struct LiveBackend {
 }
 
 impl LiveBackend {
-    /// Open the docs store and restore the registry replica (instant, local).
+    /// Open the docs store and restore the registry replica (instant, local),
+    /// with the chat routes that replica holds on disk.
     pub(crate) fn open(
         data_dir: &std::path::Path,
         device_id: &str,
-    ) -> Result<(DocsStore, RegistryDoc)> {
+    ) -> Result<(DocsStore, RegistryDoc, HashMap<String, ChatRoute>)> {
         std::fs::create_dir_all(data_dir).map_err(|e| ClientError::Storage(e.to_string()))?;
         let store = DocsStore::open(data_dir).map_err(|e| ClientError::Storage(e.to_string()))?;
         let registry = match store.load_snapshot(REGISTRY_DOC_ID) {
@@ -230,10 +249,15 @@ impl LiveBackend {
             }),
             _ => RegistryDoc::new(device_id.to_owned()),
         };
-        Ok((store, registry))
+        let durable = chat_routes(&registry);
+        Ok((store, registry, durable))
     }
 
-    pub(crate) fn new(inner: &Arc<ClientInner>, store: DocsStore) -> Self {
+    pub(crate) fn new(
+        inner: &Arc<ClientInner>,
+        store: DocsStore,
+        durable_chats: HashMap<String, ChatRoute>,
+    ) -> Self {
         let bearer = Bearer(Arc::downgrade(inner));
         let edge = inner.config.edge_base().to_owned();
         let store = Arc::new(store);
@@ -251,6 +275,7 @@ impl LiveBackend {
             registry_save: Arc::new(Notify::new()),
             registry_save_gate: Mutex::new(()),
             registry_dirty: Arc::new(AtomicBool::new(false)),
+            durable_chats: Mutex::new(durable_chats),
             last_liveness_probe: AtomicI64::new(0),
             cancel: inner.cancel.child_token(),
         }
@@ -411,10 +436,34 @@ impl LiveBackend {
     /// a new chat row persisted before its first command.
     pub(crate) fn persist_registry(&self, inner: &ClientInner) -> Result<()> {
         let _gate = lock(&self.registry_save_gate);
-        let bytes = inner.workspace.mutate(|doc| doc.to_bytes())?;
+        // The routes from the same state as the bytes, under the same lock.
+        let (bytes, routes) = inner
+            .workspace
+            .mutate(|doc| doc.to_bytes().map(|bytes| (bytes, chat_routes(doc))))?;
         self.store
             .save_snapshot(REGISTRY_DOC_ID, &bytes)
-            .map_err(|err| ClientError::Storage(err.to_string()))
+            .map_err(|err| ClientError::Storage(err.to_string()))?;
+        *lock(&self.durable_chats) = routes;
+        Ok(())
+    }
+
+    /// Before a chat's first outbox row: its registry row must be on disk with
+    /// the host and room generation it has now, since restart recovery reads
+    /// them before any UI opens the chat. Saves the registry only when the
+    /// saved copy doesn't have them yet (a new chat, a host move); an ordinary
+    /// send on a known chat writes nothing here. The whole registry is
+    /// megabytes on a busy account, and this runs on the sender's thread.
+    pub(crate) fn ensure_chat_row_durable(&self, inner: &ClientInner, chat_id: &str) -> Result<()> {
+        let current = inner
+            .workspace
+            .mutate(|doc| doc.chat(chat_id))
+            .ok()
+            .flatten()
+            .map(|chat| (chat.device_id, chat.room_gen));
+        if current.is_some() && lock(&self.durable_chats).get(chat_id) == current.as_ref() {
+            return Ok(());
+        }
+        self.persist_registry(inner)
     }
 
     /// Persist the registry now (backgrounding).

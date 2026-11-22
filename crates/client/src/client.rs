@@ -767,8 +767,8 @@ impl Client {
             registry.set_local_only(true);
             (registry, None)
         } else {
-            let (store, registry) = LiveBackend::open(&config.data_dir, &config.device_id)?;
-            (registry, Some(store))
+            let (store, registry, durable) = LiveBackend::open(&config.data_dir, &config.device_id)?;
+            (registry, Some((store, durable)))
         };
         let inner = Arc::new(ClientInner {
             workspace: WorkspaceStore::new(registry),
@@ -811,10 +811,9 @@ impl Client {
             _ => Backend::Live(Box::new({
                 catalog::DiskCatalog::new(&inner.config.data_dir).warm_labels();
                 inner.load_restored_dismissed();
-                LiveBackend::new(
-                    &inner,
-                    store.ok_or_else(|| ClientError::Internal("docs store missing".into()))?,
-                )
+                let (store, durable) =
+                    store.ok_or_else(|| ClientError::Internal("docs store missing".into()))?;
+                LiveBackend::new(&inner, store, durable)
             })),
         };
         let _ = inner.backend.set(backend);
