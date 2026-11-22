@@ -3225,3 +3225,208 @@ fn a_broken_delta_chain_keeps_its_pending_writes() {
     let ids: Vec<String> = loaded.read_chats().unwrap().into_iter().map(|c| c.id).collect();
     assert_eq!(ids, ["after", "kept"], "the pending write after the break was lost");
 }
+
+// ── the room's op size limit ────────────────────────────────────────────────
+
+/// The shape the room refused for good: an agent's background shell whose
+/// command is an 11 KB heredoc, listed again as its description (field
+/// incident: 176 queued rewrites of three such rows, 23 KB each).
+fn heredoc_session(chat: &str, at: i64) -> Session {
+    let heredoc = format!(
+        "cat > tests/settings.rs <<'EOF'\n{}EOF",
+        "// settings test line\n".repeat(530)
+    );
+    let mut row = session(chat, "dev-a", SessionStatus::Idle);
+    row.updated_at = ts(at);
+    row.background_tasks = vec![zeron_proto::BackgroundTask {
+        id: "bgsh".into(),
+        command: heredoc.clone(),
+        description: Some(heredoc),
+        started_at: ts(3_100),
+    }];
+    row
+}
+
+/// What re-sending `batches` costs: their push frames as the client sends
+/// them, every one again on each reconnect while the room refuses them.
+fn push_frame_bytes(batches: &[PendingBatch]) -> usize {
+    batches
+        .iter()
+        .map(|b| {
+            serde_json::to_vec(&json!({ "t": "push", "batch": b.batch, "ops": b.ops }))
+                .unwrap()
+                .len()
+        })
+        .sum()
+}
+
+/// A write an older build could queue: one op whose JSON is `bytes` long.
+fn raw_op_of_len(id: &str, bytes: usize) -> RowOp {
+    let mut op = RowOp {
+        kind: "chats".into(),
+        id: id.into(),
+        op: OpKind::Upsert,
+        set: Some(BTreeMap::from([("note".to_string(), json!(""))])),
+        hlc: hlc(4_000),
+        clocks: None,
+    };
+    let base = serde_json::to_vec(&op).unwrap().len();
+    op.set
+        .as_mut()
+        .unwrap()
+        .insert("note".into(), json!("n".repeat(bytes - base)));
+    assert_eq!(serde_json::to_vec(&op).unwrap().len(), bytes);
+    op
+}
+
+fn single(batch: &str, op: RowOp) -> PendingBatch {
+    PendingBatch {
+        batch: batch.into(),
+        ops: vec![op],
+        in_flight: false,
+    }
+}
+
+fn queued(doc: &RegistryDoc) -> Vec<(String, Vec<String>)> {
+    doc.pending
+        .iter()
+        .map(|b| (b.batch.clone(), b.ops.iter().map(|o| o.id.clone()).collect()))
+        .collect()
+}
+
+#[test]
+fn a_session_with_a_long_background_command_queues_only_ops_that_fit() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.mark_saved();
+    for i in 0..176 {
+        doc.upsert_session(&heredoc_session("chat-1", 4_000 + i * 10_000))
+            .unwrap();
+    }
+    assert!(doc.pending_ops().all(fits_op_budget));
+    // Small again, the keepalive rewrites coalesce: the run's head plus one.
+    assert_eq!(doc.pending_ops_len(), 2);
+    let read = doc.read_sessions().unwrap();
+    let task = &read[0].background_tasks[0];
+    assert!(task.command.len() <= SYNCED_TASK_COMMAND_BYTES);
+    assert!(task.command.starts_with("cat > tests/settings.rs") && task.command.ends_with('…'));
+    assert_eq!(task.description, None, "a description that repeats the command is dropped");
+
+    let reconnect = push_frame_bytes(&doc.pending);
+    let save = doc.delta_bytes().unwrap().unwrap().len();
+    eprintln!(
+        "176 heredoc session rewrites: {} queued ops, {reconnect} bytes re-sent per reconnect, \
+         {save} bytes per registry save",
+        doc.pending_ops_len()
+    );
+    assert!(reconnect < 4 * 1024, "{reconnect}");
+    assert!(save < 8 * 1024, "{save}");
+}
+
+#[test]
+fn a_description_is_kept_when_it_says_something_else() {
+    let mut doc = RegistryDoc::new("dev-a");
+    let mut row = session("chat-1", "dev-a", SessionStatus::Working);
+    row.background_tasks = vec![zeron_proto::BackgroundTask {
+        id: "bgsh".into(),
+        command: "npm run dev".into(),
+        description: Some("Start the dev server".into()),
+        started_at: ts(3_100),
+    }];
+    doc.upsert_session(&row).unwrap();
+    assert_eq!(doc.read_sessions().unwrap(), vec![row]);
+}
+
+#[test]
+fn any_write_over_the_limit_is_split_into_ops_that_fit_and_replicates_whole() {
+    let mut host = RegistryDoc::new("host");
+    let mut viewer = RegistryDoc::new("viewer");
+    // A chat row whose fields together pass the limit, each one well under.
+    let mut chat_row = chat("chat-1", "host");
+    chat_row.title = Some("t".repeat(9_000));
+    chat_row.last_message_preview = Some("p".repeat(9_000));
+    host.upsert_chat(&chat_row).unwrap();
+    assert!(host.pending_ops_len() > 1);
+    assert!(host.pending_ops().all(fits_op_budget));
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    let seen = viewer.read_chats().unwrap();
+    assert_eq!(seen[0].title, chat_row.title);
+    assert_eq!(seen[0].last_message_preview, chat_row.last_message_preview);
+}
+
+#[test]
+fn load_drops_only_the_writes_the_room_can_never_accept() {
+    let mut old = RegistryDoc::new("dev-a");
+    old.pending = vec![
+        single("b-1", raw_op_of_len("good-1", 900)),
+        single("b-2", raw_op_of_len("too-big-1", 23_234)),
+        single("b-3", raw_op_of_len("good-2", 900)),
+        // Exactly at the limit: the room takes it, so it stays.
+        single("b-4", raw_op_of_len("at-limit", MAX_OP_BYTES)),
+        single("b-5", raw_op_of_len("one-past", MAX_OP_BYTES + 1)),
+        PendingBatch {
+            batch: "b-6".into(),
+            ops: vec![raw_op_of_len("good-3", 900), raw_op_of_len("too-big-2", 24_000)],
+            in_flight: false,
+        },
+        single("b-7", raw_op_of_len("good-4", 900)),
+    ];
+    let bytes = old.to_bytes().unwrap();
+    let loaded = RegistryDoc::from_bytes(&bytes, "dev-a").unwrap();
+    let kept = vec![
+        ("b-1".to_string(), vec!["good-1".to_string()]),
+        ("b-3".to_string(), vec!["good-2".to_string()]),
+        ("b-4".to_string(), vec!["at-limit".to_string()]),
+        ("b-6".to_string(), vec!["good-3".to_string()]),
+        ("b-7".to_string(), vec!["good-4".to_string()]),
+    ];
+    assert_eq!(queued(&loaded), kept);
+    // A sweep that finds nothing changes nothing.
+    let again = RegistryDoc::from_bytes(&loaded.to_bytes().unwrap(), "dev-a").unwrap();
+    assert_eq!(queued(&again), kept);
+}
+
+#[test]
+fn a_restart_in_the_middle_of_the_sweep_loses_no_write() {
+    let mut old = RegistryDoc::new("dev-a");
+    old.pending = vec![
+        single("b-1", raw_op_of_len("good-1", 900)),
+        single("b-2", raw_op_of_len("too-big", 23_234)),
+        single("b-3", raw_op_of_len("good-2", 900)),
+    ];
+    let base = old.to_bytes().unwrap();
+
+    // Swept on load, a new write queued and saved as a delta on the old
+    // whole save; then the process stops.
+    let mut first = RegistryDoc::from_bytes(&base, "dev-a").unwrap();
+    first.mark_saved();
+    first.upsert_chat(&chat("chat-new", "dev-a")).unwrap();
+    let delta = first.delta_bytes().unwrap().unwrap();
+    let expected = queued(&first);
+    assert_eq!(
+        expected.iter().map(|(_, ids)| ids.concat()).collect::<Vec<_>>(),
+        ["good-1", "good-2", "chat-new"]
+    );
+
+    // Loaded from the whole save plus that delta: the same queue.
+    let (second, clean) = RegistryDoc::from_saved(&base, &[delta], &[], "dev-a").unwrap();
+    assert!(clean);
+    assert_eq!(queued(&second), expected);
+
+    // Stopped before any save after the sweep: the old save sweeps again
+    // to the same good writes.
+    let (third, _) = RegistryDoc::from_saved(&base, &[], &[], "dev-a").unwrap();
+    assert_eq!(queued(&third), expected[..2].to_vec());
+}
+
+#[test]
+fn a_batch_the_room_refused_for_good_is_dropped_and_the_rest_stay() {
+    let mut doc = RegistryDoc::new("dev-a");
+    doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    doc.upsert_chat(&chat("chat-2", "dev-a")).unwrap();
+    let pushed = doc.take_pushable();
+    assert!(doc.reject_batch(&pushed[0].batch, "chats/chat-1: bad id"));
+    assert!(!doc.reject_batch(&pushed[0].batch, "again"));
+    assert_eq!(queued(&doc), vec![(pushed[1].batch.clone(), vec!["chat-2".to_string()])]);
+}

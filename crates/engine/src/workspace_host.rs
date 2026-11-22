@@ -2315,10 +2315,19 @@ impl zeron_sync::RegistryTransport for WsDerivedRegistryTransport {
                 .send()
                 .await
                 .map_err(|e| zeron_sync::SyncError::WebSocket(describe_http_error(e)))?;
-            if !resp.status().is_success() {
+            let status = resp.status();
+            if matches!(status.as_u16(), 400 | 413) {
+                // The room refused this batch; the body says why.
+                let body = resp.text().await.unwrap_or_default();
+                return Err(zeron_sync::SyncError::Refused(if body.is_empty() {
+                    format!("registry push http {status}")
+                } else {
+                    body
+                }));
+            }
+            if !status.is_success() {
                 return Err(zeron_sync::SyncError::Protocol(format!(
-                    "registry push http {}",
-                    resp.status()
+                    "registry push http {status}"
                 )));
             }
             resp.text()

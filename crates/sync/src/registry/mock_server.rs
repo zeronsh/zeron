@@ -28,6 +28,15 @@ struct Shared {
     presence: HashMap<String, i64>,
     /// Pushes accepted per device (assertion surface for tests).
     pushes: HashMap<String, u64>,
+    /// Bytes of every push frame received, accepted or not.
+    push_bytes: u64,
+    /// Pushes refused for an op over the size limit.
+    refusals: u64,
+    /// Refuse the way the deployed room did before refusals named their
+    /// batch: no `batch`, no `permanent`.
+    legacy_refusals: bool,
+    /// Refuse ops on this row id as the room refuses an invalid id.
+    refused_id: Option<String>,
 }
 
 /// A running mock registry server on a local TCP port.
@@ -116,6 +125,26 @@ impl MockRegistryServer {
 
     pub fn pushes(&self, device: &str) -> u64 {
         lock(&self.state).pushes.get(device).copied().unwrap_or(0)
+    }
+
+    /// Bytes of push frames received so far, accepted or refused.
+    pub fn push_bytes(&self) -> u64 {
+        lock(&self.state).push_bytes
+    }
+
+    /// Pushes refused so far for an op over the size limit.
+    pub fn refusals(&self) -> u64 {
+        lock(&self.state).refusals
+    }
+
+    /// Refuse every op on row `id` (as the room refuses an invalid id).
+    pub fn refuse_id(&self, id: &str) {
+        lock(&self.state).refused_id = Some(id.to_owned());
+    }
+
+    /// Refuse as the room did before refusals named their batch.
+    pub fn set_legacy_refusals(&self, legacy: bool) {
+        lock(&self.state).legacy_refusals = legacy;
     }
 
     /// Simulate an operator wipe (`POST /reset`): clients re-seed on rejoin.
@@ -216,6 +245,42 @@ async fn serve(
                                 .await;
                             continue;
                         };
+                        let refusal = {
+                            let mut state = lock(&state);
+                            state.push_bytes += text.len() as u64;
+                            // The room's size check (`validateOp`): the
+                            // op as JSON.stringify measures it, in UTF-16.
+                            let refused = ops.iter().find_map(|op| {
+                                let too_large = serde_json::to_string(op).is_ok_and(|s| {
+                                    s.chars().map(char::len_utf16).sum::<usize>()
+                                        > zeron_doc::MAX_OP_BYTES
+                                });
+                                if too_large {
+                                    Some((op, "op too large"))
+                                } else if state.refused_id.as_deref() == Some(op.id.as_str()) {
+                                    Some((op, "bad id"))
+                                } else {
+                                    None
+                                }
+                            });
+                            refused.map(|(op, why)| {
+                                let message = format!("{}/{}: {why}", op.kind, op.id);
+                                state.refusals += 1;
+                                if state.legacy_refusals {
+                                    json!({"t":"error","code":"invalid_op","message":message})
+                                } else {
+                                    json!({"t":"error","code":"invalid_op","message":message,
+                                        "batch":batch,"permanent":true})
+                                }
+                                .to_string()
+                            })
+                        };
+                        if let Some(refusal) = refusal {
+                            if sink.send(WsMessage::Text(refusal.into())).await.is_err() {
+                                return;
+                            }
+                            continue;
+                        }
                         let (ack, rows_frame) = {
                             let mut state = lock(&state);
                             let next_seq = state.seq + 1;

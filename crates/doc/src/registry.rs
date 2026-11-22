@@ -45,6 +45,7 @@ pub const SIDEBAR_PINS_STATE_ID: &str = "sidebarPins";
 pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
 /// A repository's name and icon, shared by its copies; see `repository_looks`.
 pub const KIND_REPOSITORY_LOOKS: &str = "repositoryLooks";
+mod op_budget;
 mod repository_looks;
 mod row_cache;
 mod sidebar_pins;
@@ -810,6 +811,7 @@ impl RegistryDoc {
     /// this shrinks snapshots bloated before coalescing existed (178k
     /// batches → one op per touched row). The host persists the result.
     fn coalesce_loaded(&mut self) {
+        self.drop_never_accepted();
         let before = self.pending_ops_len();
         if self.coalesce_unsent() > 0 {
             tracing::info!(
@@ -819,6 +821,61 @@ impl RegistryDoc {
                 "registry: compacted queued writes on load"
             );
         }
+    }
+
+    /// Drop queued ops the room can never accept: over its size limit
+    /// ([`MAX_OP_BYTES`]) by its own measure, so every replay is refused,
+    /// and the batch with them. Older builds queued such ops (a session row
+    /// carrying long background commands); each one stayed queued forever,
+    /// was re-sent on every reconnect and stopped the HTTPS fallback at the
+    /// first. Nothing else is dropped, and the rest keep their order.
+    fn drop_never_accepted(&mut self) {
+        let mut dropped: Vec<RowOp> = Vec::new();
+        for batch in &mut self.pending {
+            batch.ops.retain(|op| match op_budget::never_accepted(op) {
+                Some(bytes) => {
+                    tracing::warn!(
+                        kind = %op.kind,
+                        id = %op.id,
+                        bytes,
+                        limit = MAX_OP_BYTES,
+                        batch = %batch.batch,
+                        "registry: dropping a queued write the room refuses as too large"
+                    );
+                    dropped.push(op.clone());
+                    false
+                }
+                None => true,
+            });
+        }
+        if dropped.is_empty() {
+            return;
+        }
+        self.pending.retain(|b| !b.ops.is_empty());
+        self.touch_ops(&dropped);
+        self.generation += 1;
+    }
+
+    /// The room refused `batch` for good (its error named it as permanent):
+    /// no replay can succeed, so stop queueing it. Returns whether it was
+    /// pending. Its ops are logged, so what was given up is on record.
+    pub fn reject_batch(&mut self, batch: &str, reason: &str) -> bool {
+        let Some(at) = self.pending.iter().position(|b| b.batch == batch) else {
+            return false;
+        };
+        let refused = self.pending.remove(at);
+        for op in &refused.ops {
+            tracing::warn!(
+                kind = %op.kind,
+                id = %op.id,
+                batch,
+                reason,
+                "registry: the room refused a queued write for good; dropped"
+            );
+        }
+        self.touch_ops(&refused.ops);
+        self.generation += 1;
+        true
     }
 
     // ── server frames ───────────────────────────────────────────────────────
@@ -978,7 +1035,7 @@ impl RegistryDoc {
         self.clock.next(Self::now_ms(), &device)
     }
 
-    fn enqueue_ops(&mut self, mut ops: Vec<RowOp>) {
+    fn enqueue_ops(&mut self, ops: Vec<RowOp>) {
         if ops.is_empty() {
             return;
         }
@@ -991,6 +1048,9 @@ impl RegistryDoc {
             }
             return;
         }
+        // An op over the room's size limit is refused with its whole batch,
+        // on every replay, forever. Queue only ops that fit.
+        let mut ops: Vec<RowOp> = ops.into_iter().flat_map(op_budget::fit_op).collect();
         // The registry room rejects any batch over its op cap (500), and a
         // rejected batch is a PERMANENT wedge: error frames carry no batch
         // id, so the client can never retire it — it replays and fails on
@@ -1951,7 +2011,7 @@ impl RegistryDoc {
             ("runningSubagents", json!(session.running_subagents)),
             (
                 "backgroundTasks",
-                serde_json::to_value(&session.background_tasks)?,
+                serde_json::to_value(synced_background_tasks(&session.background_tasks))?,
             ),
             ("waiting", serde_json::to_value(&session.waiting)?),
         ]);
@@ -2191,6 +2251,32 @@ fn replay_row<'a>(
 }
 
 // ── field helpers ───────────────────────────────────────────────────────────
+
+/// How much of a background command a session row carries. The row is a
+/// status line for other devices, not the command's record: an agent's
+/// shell command can hold a whole heredoc (11 KB seen), which alone pushed
+/// the row past the room's op limit.
+pub const SYNCED_TASK_COMMAND_BYTES: usize = 512;
+/// The same for the agent's description of the command.
+pub const SYNCED_TASK_DESCRIPTION_BYTES: usize = 256;
+
+/// `tasks` as a session row syncs them: commands and descriptions cut to
+/// their caps, and a description that only repeats the command dropped.
+fn synced_background_tasks(tasks: &[zeron_proto::BackgroundTask]) -> Vec<zeron_proto::BackgroundTask> {
+    tasks
+        .iter()
+        .map(|task| zeron_proto::BackgroundTask {
+            id: task.id.clone(),
+            command: op_budget::cut_str(&task.command, SYNCED_TASK_COMMAND_BYTES),
+            description: task
+                .description
+                .as_deref()
+                .filter(|d| *d != task.command)
+                .map(|d| op_budget::cut_str(d, SYNCED_TASK_DESCRIPTION_BYTES)),
+            started_at: task.started_at,
+        })
+        .collect()
+}
 
 fn fields<const N: usize>(entries: [(&str, Value); N]) -> BTreeMap<String, Value> {
     entries

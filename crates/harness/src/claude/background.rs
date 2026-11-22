@@ -218,8 +218,13 @@ impl BackgroundShells {
                         .clone()
                         .or_else(|| listed.description.clone())
                         .unwrap_or_else(|| "Background command".to_owned()),
-                    // Only worth a line of its own beside the command.
-                    description: listed.description.clone().filter(|_| command.is_some()),
+                    // Only worth a line of its own beside the command, and
+                    // not when it only repeats it (the runtime lists a
+                    // shell's command as its description when none was given).
+                    description: listed
+                        .description
+                        .clone()
+                        .filter(|d| command.as_ref().is_some_and(|c| c != d)),
                     started_at: listed.since,
                 }
             })
@@ -386,6 +391,24 @@ mod tests {
         );
         let tasks = shells.tasks();
         assert_eq!(tasks[0].command, "Watch the build");
+        assert_eq!(tasks[0].description, None);
+    }
+
+    #[test]
+    fn a_description_that_repeats_the_command_is_not_kept() {
+        // The runtime lists a shell started without a description under its
+        // command; a long heredoc then travelled twice.
+        let command = "cat > notes.txt <<'EOF'\nline\nEOF";
+        let quoted = serde_json::to_string(command).unwrap();
+        let frames = [
+            format!(r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"toolu_h","name":"Bash","input":{{"command":{quoted},"run_in_background":true}}}}]}}}}"#),
+            format!(r#"{{"type":"system","subtype":"task_started","task_id":"bh","tool_use_id":"toolu_h","description":{quoted},"is_backgrounded":true,"task_type":"local_bash"}}"#),
+            format!(r#"{{"type":"system","subtype":"background_tasks_changed","tasks":[{{"task_id":"bh","task_type":"local_bash","description":{quoted}}}]}}"#),
+        ];
+        let mut shells = BackgroundShells::default();
+        feed(&mut shells, &frames.iter().map(String::as_str).collect::<Vec<_>>());
+        let tasks = shells.tasks();
+        assert_eq!(tasks[0].command, command);
         assert_eq!(tasks[0].description, None);
     }
 }

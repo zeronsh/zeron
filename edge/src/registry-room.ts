@@ -105,6 +105,21 @@ interface RejectedOp {
 
 interface WireOp extends Op {}
 
+/** A push the room did not apply. `batch` and `permanent` are set when the
+ * batch's own content was refused, so replaying it can never succeed. */
+interface PushRefusal {
+  ok: false;
+  code: string;
+  message: string;
+  batch?: string;
+  permanent?: true;
+}
+
+/** The fields that let a client retire a batch refused for good (older
+ * clients ignore them and keep logging the refusal). */
+const refusedBatch = (refusal: PushRefusal): { batch?: string; permanent?: true } =>
+  refusal.permanent ? { batch: refusal.batch, permanent: true } : {};
+
 /** What a runner's rows are filtered by (registry-runner.ts). */
 interface RunnerView {
   reach: RunnerReach;
@@ -665,7 +680,7 @@ export class RegistryRoom implements DurableObject {
         return json({ error: "bad_push", message: "malformed body" }, 400);
       }
       const outcome = this.applyPushBatch(device, frame, runner);
-      if (!outcome.ok) return json({ error: outcome.code, message: outcome.message }, 400);
+      if (!outcome.ok) return json({ error: outcome.code, message: outcome.message, ...refusedBatch(outcome) }, 400);
       return json({
         batch: outcome.batch,
         seq: outcome.seq,
@@ -775,7 +790,7 @@ export class RegistryRoom implements DurableObject {
     }
     const outcome = this.applyPushBatch(state.device, frame, state.runner);
     if (!outcome.ok) {
-      send(ws, { t: "error", code: outcome.code, message: outcome.message });
+      send(ws, { t: "error", code: outcome.code, message: outcome.message, ...refusedBatch(outcome) });
       return;
     }
     // Skipped runner ops are reported like invalid ones (error frames the
@@ -801,18 +816,19 @@ export class RegistryRoom implements DurableObject {
     device: string,
     frame: Record<string, unknown>,
     runner?: string
-  ):
-    | { ok: false; code: string; message: string }
-    | { ok: true; batch: string; seq: number; applied: number; rejected: RejectedOp[] } {
+  ): PushRefusal | { ok: true; batch: string; seq: number; applied: number; rejected: RejectedOp[] } {
     const batch = typeof frame.batch === "string" ? frame.batch : "";
     if (batch === "" || !Array.isArray(frame.ops)) {
       this.recordPush(device, false);
       return { ok: false, code: "bad_push", message: "malformed push" };
     }
     const ops = frame.ops as WireOp[];
+    // From here on the refusal is about the batch's own content, so no
+    // replay of it can ever pass: say which batch, and that it is for good,
+    // so the client stops queueing it instead of re-sending it forever.
     if (ops.length === 0 || ops.length > MAX_BATCH_OPS) {
       this.recordPush(device, false);
-      return { ok: false, code: "bad_push", message: `batch of ${ops.length} ops` };
+      return { ok: false, code: "bad_push", message: `batch of ${ops.length} ops`, batch, permanent: true };
     }
     for (const op of ops) {
       const invalid = validateOp(op);
@@ -821,7 +837,7 @@ export class RegistryRoom implements DurableObject {
         // and a client that builds one bad op is a client bug to surface, not
         // to partially apply. Rejections are attributed per device on /stats.
         this.recordPush(device, false);
-        return { ok: false, code: "invalid_op", message: `${op.kind}/${op.id}: ${invalid}` };
+        return { ok: false, code: "invalid_op", message: `${op.kind}/${op.id}: ${invalid}`, batch, permanent: true };
       }
     }
 
