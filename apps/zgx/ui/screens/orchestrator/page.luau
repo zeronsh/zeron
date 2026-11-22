@@ -437,11 +437,25 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 			end
 			local o = orchestrator()
 			local view = lanes.view(slot_of(id))
+			-- Just made here (screens/orchestrator/actions): its composer
+			-- takes the keys, once the dialog has given them back to where
+			-- they were (after its 130 ms leave). (Cleared in the timer:
+			-- cleared here, this effect would run again and take its timer.)
+			local focus = ui.state(`orch_page_focus_{id}`, 0)
+			ui.effect(function()
+				if actions.just_made:get() ~= id then
+					return
+				end
+				ui.after(260, function()
+					focus:add(1)
+					actions.just_made:set(nil)
+				end)
+			end)
 			return ui.column {
 				w_full = true,
 				h_full = true,
 				LaneTab.Tab {
-					tab = { id = slot_of(id), kind = "side_chat", chat = id, title = if o then o.name else "", data = { own = true } },
+					tab = { id = slot_of(id), kind = "side_chat", chat = id, title = if o then o.name else "", data = { own = true, focus = focus } },
 				},
 				ui.show(function(): boolean
 					return not offered() and #(view.messages:get() or {}) == 0

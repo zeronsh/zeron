@@ -14,6 +14,8 @@ local store = require("@app/screens/chat/store")
 local actions = require("@app/screens/orchestrator/actions")
 local flows = require("@app/screens/orchestrator/flows")
 local Flow = require("@ds/orch_flow")
+local OrchChips = require("@ds/orch_chips")
+local data = require("@ds/orch_data")
 
 local M = {}
 
@@ -63,17 +65,110 @@ local function device_options(with_none: boolean): { any }
 	return out
 end
 
+-- Where it works: a project (its device with it), or no project on one of
+-- the computers. Grouped under each device's name, a folder for a project
+-- and a computer for none (no device to say twice in a row's words).
+-- NONE is no project here; `device:<id>`, no project on that device.
+local DEVICE = "device:"
 local function project_options(): { any }
-	local out: { any } = { { value = NONE, label = locale.s("orch.dialog.project_none") } }
-	local devices: { [string]: string } = {}
-	for _, d in sessions.now:get().devices or {} do
-		devices[d.id] = d.name
+	local now = sessions.now:get()
+	local here = now.here
+	local out: { any } = {}
+	local named: { [string]: string } = {}
+	local order: { any } = {}
+	for _, d in now.devices or {} do
+		if not d.cloud then
+			named[d.id] = d.name
+			-- (This computer first.)
+			if d.id == here then
+				table.insert(order, 1, d)
+			else
+				table.insert(order, d)
+			end
+		end
 	end
-	for _, p in sessions.now:get().projects or {} do
-		table.insert(out, { value = p.id, label = p.name, description = devices[p.device] })
+	for _, d in order do
+		table.insert(out, {
+			value = if d.id == here then NONE else DEVICE .. d.id,
+			label = locale.s("orch.dialog.project_none"),
+			icon = "monitor",
+			group = d.name,
+		})
+		for _, p in now.projects or {} do
+			if p.device == d.id then
+				table.insert(out, { value = p.id, label = p.name, icon = "folder", group = d.name })
+			end
+		end
+	end
+	-- (No devices known yet: the one choice there always is.)
+	if #out == 0 then
+		table.insert(out, { value = NONE, label = locale.s("orch.dialog.project_none"), icon = "monitor" })
 	end
 	return out
 end
+
+-- The device a project value puts it on (nil: this one).
+local function device_of(value: string): string?
+	if value == NONE then
+		return sessions.now:peek().here
+	end
+	if string.sub(value, 1, #DEVICE) == DEVICE then
+		return string.sub(value, #DEVICE + 1)
+	end
+	for _, p in sessions.now:peek().projects or {} do
+		if p.id == value then
+			return p.device
+		end
+	end
+	return sessions.now:peek().here
+end
+
+-- A device's name.
+local function device_name(id: string?): string
+	for _, d in sessions.now:get().devices or {} do
+		if d.id == id then
+			return d.name
+		end
+	end
+	return id or ""
+end
+
+-- The crew's choices: the orchestrator's own model, or another.
+local SAME = "same"
+local function crew_model_options(): { any }
+	local out = model_options()
+	out[1] = { value = SAME, label = locale.s("orch.dialog.crew_model_same") }
+	return out
+end
+
+-- A model value's name, as its picker says it.
+local function model_label(v: string): string
+	for _, o in model_options() do
+		if o.value == v then
+			return o.label
+		end
+	end
+	return v
+end
+
+-- The window's height in points (800 where a host gives none: a headless
+-- test), as ds/orch_decision reads it.
+local function window_height(): number
+	local window = (ui :: any).window
+	local state = if type(window) == "table" or type(window) == "userdata" then window.size else nil
+	local ok, v = pcall(function(): any
+		return if state then state:get() else nil
+	end)
+	local h = if ok and type(v) == "table" and type(v.height) == "number" then v.height else 0
+	return if h > 1 then h else 800
+end
+
+-- What the dialog's title, its line, its foot and its insets take: the
+-- fields scroll in the rest of the window.
+local DIALOG_CHROME = 320
+
+-- Crew threads at once, to start with.
+local AT_ONCE = 3
 
 -- A request id for one opening's create: the engine answers the same id
 -- again with the orchestrator the first made.
@@ -83,21 +178,33 @@ local function request_id(): string
 	return string.format("orch-new-%d-%d-%d", os.time(), math.floor(os.clock() * 1e6), requests)
 end
 
--- New orchestrator: a name (all it needs), its goal, the project and
--- device it works in, its model. Created, it opens.
+-- New orchestrator, in the order it's thought of: its name, what it's for,
+-- where it works and its model, where its crew runs and how many at once.
+-- Its rules, its crew's, its crew's own model and the flow it starts from
+-- are folded under "optional". Created, its page opens with its composer
+-- taking the keys.
 --
--- Only Create (its click, or Enter) sends it, once an opening: leaving a
--- field never does (zgx's input commits on blur), and a second Enter or
--- click while, or after, the first is answered asks nothing more. Closed
--- unsent (Cancel, Escape, a click outside), what was typed is there again
--- as it reopens; sent, it starts empty.
+-- Create waits for a name, and says so. Only Create (its click, or Enter)
+-- sends it, once an opening: leaving a field never does (zgx's input
+-- commits on blur), and a second Enter or click while, or after, the first
+-- is answered asks nothing more. Closed unsent (Cancel, Escape, a click
+-- outside), what was typed is there again as it reopens; sent, it starts
+-- empty.
 local function NewDialog(): Node
 	local name = ui.state("orch_new_name", "")
 	local goal = ui.state("orch_new_goal", "")
 	local project = ui.state("orch_new_project", NONE :: string)
-	local device = ui.state("orch_new_device", NONE :: string)
 	local model = ui.state("orch_new_model", NONE :: string)
+	-- Where its crew runs, as chosen (nil: untouched, its own device).
+	local devices = ui.state("orch_new_devices", nil :: { [string]: boolean }?)
+	local limit = ui.state("orch_new_limit", AT_ONCE)
+	local more = ui.state("orch_new_more", false)
+	local rules = ui.state("orch_new_rules", "")
+	local crew_rules = ui.state("orch_new_crew_rules", "")
+	local crew_model = ui.state("orch_new_crew_model", SAME :: string)
 	local busy = ui.state("orch_new_busy", false)
+	-- How tall its fields stand (the dialog scrolls them past the window).
+	local fields_h = ui.state("orch_new_fields_h", 480)
 	-- What its flow starts from (screens/orchestrator/flows' starters), and
 	-- a flow read from a file, when that's the one.
 	local start = ui.state("orch_new_start", flows.BLANK :: string)
@@ -105,32 +212,41 @@ local function NewDialog(): Node
 	local import_error = ui.state("orch_new_import_error", "")
 	-- This opening's request: set as it opens, cleared once it's sent.
 	local request = ui.state("orch_new_request", "")
-	-- Opened: on the project and device it was asked from, the draft kept.
+	-- Opened: on the project or device it was asked from, the draft kept.
 	ui.effect(function()
 		if actions.new_open:get() then
 			local seed = actions.new_seed:peek()
 			ui.batch(function()
 				if seed then
-					project:set(seed.project or NONE)
-					device:set(seed.device or NONE)
+					if seed.project then
+						project:set(seed.project)
+					elseif seed.device and seed.device ~= sessions.now:peek().here then
+						project:set(DEVICE .. seed.device)
+					else
+						project:set(NONE)
+					end
 				end
 				busy:set(false)
 				request:set(request_id())
 			end)
 		end
 	end)
-	-- A project fixes its device.
-	ui.effect(function()
-		local p = project:get()
-		if p == NONE then
-			return
+	local function named(): boolean
+		return trim(name:get()) ~= ""
+	end
+	-- Where it runs: the crew's devices shown chosen. None chosen is its
+	-- own device (the engine's empty list), so that one shows ticked.
+	local function own(): string?
+		return device_of(project:get())
+	end
+	local function shown(): { [string]: boolean }
+		local d = devices:get()
+		if d and next(d) ~= nil then
+			return d
 		end
-		for _, x in sessions.now:peek().projects or {} do
-			if x.id == p and x.device and device:peek() ~= x.device then
-				device:set(x.device)
-			end
-		end
-	end)
+		local mine = own()
+		return if mine then { [mine] = true } else {}
+	end
 	local function go()
 		local n = trim(name:peek())
 		local req = request:peek()
@@ -143,22 +259,55 @@ local function NewDialog(): Node
 			request:set("")
 		end)
 		local harness, m = split_model(model:peek())
-		local chosen = if start:peek() == flows.IMPORTED then imported:peek() else flows.starter(start:peek())
+		local p = project:peek()
+		local space, device = nil, nil
+		if string.sub(p, 1, #DEVICE) == DEVICE then
+			device = string.sub(p, #DEVICE + 1)
+		elseif p ~= NONE then
+			space = p
+		end
+		-- Its crew: where (only when it isn't just its own device), how many
+		-- at once (0: no limit), and its model (the same: none sent).
+		local chosen: { string } = {}
+		local mine = device_of(p)
+		for d, on in devices:peek() or {} do
+			if on then
+				table.insert(chosen, d)
+			end
+		end
+		table.sort(chosen)
+		if #chosen == 1 and chosen[1] == mine then
+			chosen = {}
+		end
+		local crew_harness, crew_m = nil, nil
+		if crew_model:peek() ~= SAME then
+			crew_harness, crew_m = split_model(crew_model:peek())
+		end
+		local n_limit = limit:peek()
+		local chosen_flow = if start:peek() == flows.IMPORTED then imported:peek() else flows.starter(start:peek())
 		actions
 			.create({
 				name = string.sub(n, 1, 80),
 				goal = trim(goal:peek()),
-				project = if project:peek() ~= NONE then project:peek() else nil,
-				device = if device:peek() ~= NONE then device:peek() else nil,
+				project = space,
+				device = device,
 				harness = harness,
 				model = m,
+				rules = trim(rules:peek()),
+				crew_rules = trim(crew_rules:peek()),
+				crew = {
+					devices = chosen,
+					max_running = if n_limit > 0 then n_limit else nil,
+					harness = crew_harness,
+					model = crew_m,
+				},
 				request_id = req,
 			})
 			:after(function(reply: any)
 				-- Its flow, kept for it by its id.
 				local id = if type(reply) == "table" then reply.id elseif type(reply) == "string" then reply else nil
-				if chosen and type(id) == "string" then
-					flows.set(id, chosen)
+				if chosen_flow and type(id) == "string" then
+					flows.set(id, chosen_flow)
 					-- And its plan in its notes, to follow until the engine
 					-- routes it: under any notes it has, never over them.
 					local had: string? = nil
@@ -167,14 +316,19 @@ local function NewDialog(): Node
 							had = o.notes
 						end
 					end
-					actions.update(id, { notes = Flow.with_plan(had, chosen) })
+					actions.update(id, { notes = Flow.with_plan(had, chosen_flow) })
 				end
 				ui.batch(function()
 					name:set("")
 					goal:set("")
 					project:set(NONE)
-					device:set(NONE)
 					model:set(NONE)
+					devices:set(nil)
+					limit:set(AT_ONCE)
+					more:set(false)
+					rules:set("")
+					crew_rules:set("")
+					crew_model:set(SAME)
 					start:set(flows.BLANK)
 					imported:set(nil)
 					import_error:set("")
@@ -189,65 +343,49 @@ local function NewDialog(): Node
 				end)
 			end)
 	end
-	-- As Zeron's own "New …" dialogs (a template, a plugin): a title and a
-	-- line, its name, then what it's for; where it runs and its model as the
-	-- composer's chips do, small, along one row under them.
-	return ds.Dialog {
-		open = actions.new_open,
-		title = ui.t("orch.dialog.new_title") :: any,
-		body = ui.t("orch.dialog.new_body") :: any,
-		size = "md",
-		confirm = {
-			label = ui.t("orch.dialog.create") :: any,
-			on_click = go,
-			keep_open = true,
-			busy = function(): boolean
-				return busy:get()
-			end,
+	local function half(node: Node): Node
+		return ui.column { grow = 1, basis = 0, min_w = 0, node }
+	end
+	-- The optional part, folded: its rules, its crew's, its crew's model,
+	-- and the flow it starts from.
+	local optional = ui.column {
+		id = "orch-new-optional",
+		w_full = true,
+		gap = "$space.4",
+		pt = "$space.2",
+		ds.TextArea {
+			value = rules,
+			label = ui.t("orch.dialog.rules") :: any,
+			placeholder = ui.t("orch.dialog.rules_placeholder"),
+			hint = ui.t("orch.dialog.rules_hint") :: any,
+			rows = 2,
+			max_rows = 6,
+			w_full = true,
 		},
-		ui.column {
-			id = "orch-new-dialog",
+		ds.TextArea {
+			value = crew_rules,
+			label = ui.t("orch.dialog.crew_rules") :: any,
+			placeholder = ui.t("orch.dialog.crew_rules_placeholder"),
+			hint = ui.t("orch.dialog.crew_rules_hint") :: any,
+			rows = 2,
+			max_rows = 6,
+			w_full = true,
+		},
+		ui.row {
 			w_full = true,
 			gap = "$space.3",
-			ds.TextField {
-				value = name,
-				label = ui.t("orch.dialog.name"),
-				placeholder = function(): string
-					return locale.s("orch.dialog.name_placeholder")
-				end,
-				autofocus = true,
-				w_full = true,
-				-- (Enter is the dialog's own: its Create.)
-			},
-			ds.TextArea {
-				value = goal,
-				name = ui.t("orch.dialog.goal") :: any,
-				placeholder = ui.t("orch.dialog.goal_placeholder") :: any,
-				rows = 3,
-				max_rows = 6,
-				w_full = true,
-			},
-			ui.row {
-				w_full = true,
-				gap = "$space.2",
-				ui.column { grow = 1, basis = 0, min_w = 0, ds.Select { value = project, name = ui.t("orch.dialog.project") :: any, options = project_options, size = "sm", w_full = true } },
-				ui.column { grow = 1, basis = 0, min_w = 0, ds.Select { value = device, name = ui.t("orch.dialog.device") :: any, options = function(): { any }
-					return device_options(true)
-				end, size = "sm", w_full = true, disabled = function(): boolean
-					return project:get() ~= NONE
-				end } },
-				ui.column { grow = 1, basis = 0, min_w = 0, ds.Select { value = model, name = ui.t("orch.dialog.model") :: any, options = model_options, size = "sm", w_full = true } },
-			},
-			-- What its flow starts from: nothing, Plan → Build → Review, a
-			-- saved template, or a team's JSON file.
-			ui.row {
+			items = "end",
+			half(ds.Select { value = crew_model, label = ui.t("orch.dialog.crew_model") :: any, options = crew_model_options, w_full = true }),
+			-- What its flow starts from: nothing, Plan, Build, Review, a saved
+			-- template, or a team's JSON file.
+			half(ui.row {
 				id = "orch-new-start",
 				w_full = true,
 				gap = "$space.2",
-				items = "center",
+				items = "end",
 				ui.column { grow = 1, min_w = 0, ds.Select {
 					value = start,
-					name = ui.t("orch.dialog.start_from") :: any,
+					label = ui.t("orch.dialog.start_from") :: any,
 					options = function(): { any }
 						local out = flows.starters()
 						local f = imported:get()
@@ -256,14 +394,12 @@ local function NewDialog(): Node
 						end
 						return out
 					end,
-					size = "sm",
 					w_full = true,
 				} },
 				ds.Button {
 					ui.t("orch.dialog.import_flow") :: any,
 					id = "orch-new-import",
 					tone = "ghost",
-					size = "sm",
 					on_click = function()
 						import_error:set("")
 						flows.import_file(function(f: any, err: string?)
@@ -278,18 +414,181 @@ local function NewDialog(): Node
 						end)
 					end,
 				},
-			},
-			ui.show(function(): boolean
-				return import_error:get() ~= ""
-			end, ds.Text {
-				function(): string
-					local key = import_error:get()
-					return if key ~= "" then locale.s(key) else ""
-				end,
-				style = "caption",
-				tone = "danger",
-				wrap = true,
 			}),
+		},
+		ui.show(function(): boolean
+			return import_error:get() ~= ""
+		end, ds.Text {
+			function(): string
+				local key = import_error:get()
+				return if key ~= "" then locale.s(key) else ""
+			end,
+			style = "caption",
+			tone = "danger",
+			wrap = true,
+		}),
+	}
+	return ds.Dialog {
+		open = actions.new_open,
+		title = ui.t("orch.dialog.new_title") :: any,
+		body = ui.t("orch.dialog.new_body") :: any,
+		size = "lg",
+		confirm = {
+			label = ui.t("orch.dialog.create_open") :: any,
+			on_click = go,
+			keep_open = true,
+			busy = function(): boolean
+				return busy:get()
+			end,
+			-- (Nothing to call it yet: the name's line says so.)
+			disabled = function(): boolean
+				return not named()
+			end,
+		},
+		-- (Taller than the window, with its optional part open: its fields
+		-- scroll, its title and buttons staying put.)
+		-- (A scroll is 240 high unless sized: as tall as its fields, up to
+		-- the room the window leaves.)
+		ui.scroll {
+			w_full = true,
+			h = function(): number
+				return math.min(fields_h:get(), math.max(240, window_height() - DIALOG_CHROME))
+			end,
+			fade = { 12, 12 },
+			fade_overflow = true,
+			ui.column {
+				on_resize = function(size: any)
+					if size.h and size.h > 0 then
+						fields_h:set(size.h)
+					end
+				end,
+				id = "orch-new-dialog",
+				w_full = true,
+				gap = "$space.4",
+				-- Its name, and while there's none, why Create waits. (Its own
+				-- line, gone once it's named: a field's hint keeps its room.)
+				ui.column {
+					w_full = true,
+					gap = "$zeron.space.tight",
+					ds.TextField {
+						value = name,
+						label = ui.t("orch.dialog.name"),
+						placeholder = function(): string
+							return locale.s("orch.dialog.name_placeholder")
+						end,
+						autofocus = true,
+						w_full = true,
+						-- (Enter is the dialog's own: its Create.)
+					},
+					ui.show(function(): boolean
+						return not named()
+					end, ui.div { id = "orch-new-name-needed", ds.Hint { ui.t("orch.dialog.name_needed") :: any } }),
+				},
+				ds.TextArea {
+					value = goal,
+					label = ui.t("orch.dialog.what_for") :: any,
+					placeholder = ui.t("orch.dialog.what_for_placeholder") :: any,
+					hint = ui.t("orch.dialog.what_for_hint") :: any,
+					rows = 2,
+					max_rows = 6,
+					w_full = true,
+				},
+				ui.row {
+					w_full = true,
+					gap = "$space.3",
+					items = "start",
+					half(ds.Select {
+						value = project,
+						label = ui.t("orch.dialog.project") :: any,
+						options = project_options,
+						hint = function(): string
+							return locale.s("orch.dialog.on_device", { device = device_name(own()) })
+						end,
+						w_full = true,
+					}),
+					half(ds.Select {
+						value = model,
+						label = ui.t("orch.dialog.model") :: any,
+						options = model_options,
+						hint = function(): string
+							local c = crew_model:get()
+							return if c == SAME
+								then locale.s("orch.dialog.crew_same")
+								else locale.s("orch.dialog.crew_other", { model = model_label(c) })
+						end,
+						w_full = true,
+					}),
+				},
+				ui.row {
+					w_full = true,
+					gap = "$space.4",
+					items = "end",
+					ui.column {
+						grow = 1,
+						min_w = 0,
+						OrchChips {
+							ids = "orch-new-devices",
+							label = ui.t("orch.dialog.crew_runs_on") :: any,
+							chosen = shown,
+							on_change = function(set: { [string]: boolean })
+								-- (None left is its own again.)
+								devices:set(if next(set) ~= nil then set else nil)
+							end,
+							options = function(): { any }
+								return device_options(false)
+							end,
+						},
+					},
+					ds.NumberStepper {
+						value = limit,
+						min = 0,
+						max = 32,
+						w = 132,
+						label = ui.t("orch.dialog.max_running") :: any,
+						zero_label = function(): string
+							return locale.s("orch.dialog.no_limit")
+						end,
+					},
+				},
+				-- The rest, folded until asked for.
+				ui.column {
+					w_full = true,
+					border_sides = { 1, 0, 0, 0 },
+					border_color = "$border.subtle",
+					pt = "$space.3",
+					ui.button {
+						id = "orch-new-more",
+						role = "button",
+						expanded = function(): boolean
+							return more:get()
+						end,
+						label = ui.t("orch.dialog.more") :: any,
+						w_full = true,
+						h = 28,
+						gap = "$space.2",
+						items = "center",
+						rounded = "$radius.md",
+						bg = "#00000000",
+						cursor = "pointer",
+						color = "$text.secondary",
+						hover = { color = "$text.primary" },
+						on_click = function()
+							more:set(not more:peek())
+						end,
+						ds.Icon {
+							name = function(): any
+								return if more:get() then "alt-arrow-down" else "alt-arrow-right"
+							end,
+							size = 14,
+						},
+						ui.text { ui.t("orch.dialog.more") :: any, grow = 1, text_size = "$font.size.md" },
+						ui.text { ui.t("orch.dialog.optional") :: any, text_size = "$font.size.sm", color = "$text.tertiary" },
+					},
+					ui.show(function(): boolean
+						return more:get()
+					end, optional),
+				},
+			},
 		},
 	}
 end
@@ -324,6 +623,26 @@ end
 -- Its settings: what it is for and its rules, its crew's rules, its notes
 -- (its plan, which it keeps too), where and how its crew runs, and when it
 -- wakes on its own. Saved together; only what changed is sent.
+-- The device an orchestrator runs on (its chat's).
+local function own_device(id: string?): string?
+	if not id then
+		return nil
+	end
+	local c = data.chats(sessions.now:get())[id]
+	return c and c.device or nil
+end
+
+-- A crew's devices as the engine reads them: just its own device is none
+-- chosen (both run it there).
+local function crew_devices(list: { string }, own: string?): { string }
+	local out = table.clone(list)
+	table.sort(out)
+	if #out == 1 and out[1] == own then
+		return {}
+	end
+	return out
+end
+
 local function SettingsSheet(): Node
 	local name = ui.state("orch_set_name", "")
 	local goal = ui.state("orch_set_goal", "")
@@ -406,11 +725,11 @@ local function SettingsSheet(): Node
 				table.insert(chosen, d)
 			end
 		end
-		table.sort(chosen)
+		local mine = own_device(id)
+		chosen = crew_devices(chosen, mine)
 		local harness, m = split_model(model:peek())
 		local crew = o.crew or {}
-		local was_devices = table.clone(crew.devices or {})
-		table.sort(was_devices)
+		local was_devices = crew_devices(crew.devices or {}, mine)
 		local n_limit = limit:peek()
 		local policy = crew.on_limit or {}
 		local switch_account = on_account:peek()
@@ -478,7 +797,7 @@ local function SettingsSheet(): Node
 			w_full = true,
 			gap = "$space.4",
 			ds.TextField { value = name, label = ui.t("orch.dialog.name"), w_full = true },
-			ds.TextArea { value = goal, label = ui.t("orch.dialog.goal") :: any, rows = 2, max_rows = 4, w_full = true },
+			ds.TextArea { value = goal, label = ui.t("orch.dialog.what_for") :: any, rows = 2, max_rows = 4, w_full = true },
 			-- Who reads each, said under it: the rules only the orchestrator
 			-- (its instructions), the crew rules every crew thread (with the
 			-- first message, and again when they change), the notes its plan.
@@ -514,16 +833,26 @@ local function SettingsSheet(): Node
 				w_full = true,
 				gap = "$space.2",
 				ds.Text { ui.t("orch.dialog.devices") :: any, style = "caption", tone = "secondary" },
+				-- (None chosen is its own device, the engine's empty list: that
+				-- one shows ticked, never "runs nowhere".)
 				ui.each(ui.computed(function(): { any }
 					return device_options(false)
 				end), function(d: any): Node
+					local function shown(): { [string]: boolean }
+						local set = devices:get()
+						if next(set) ~= nil then
+							return set
+						end
+						local mine = own_device(actions.settings_of:get())
+						return if mine then { [mine] = true } else {}
+					end
 					return ds.Checkbox {
 						label = d.label,
 						value = function(): boolean
-							return devices:get()[d.value] == true
+							return shown()[d.value] == true
 						end,
 						on_change = function(on: boolean)
-							local now = table.clone(devices:peek())
+							local now = table.clone(shown())
 							now[d.value] = if on then true else nil
 							devices:set(now)
 						end,
@@ -536,7 +865,17 @@ local function SettingsSheet(): Node
 				w_full = true,
 				gap = "$space.3",
 				items = "end",
-				ds.NumberStepper { value = limit, min = 0, max = 32, label = ui.t("orch.dialog.max_running") :: any },
+				ds.NumberStepper {
+					value = limit,
+					min = 0,
+					max = 32,
+					w = 132,
+					label = ui.t("orch.dialog.max_running") :: any,
+					-- (0 is none: the engine's no limit.)
+					zero_label = function(): string
+						return locale.s("orch.dialog.no_limit")
+					end,
+				},
 				ui.column { grow = 1, min_w = 0, ds.Select { value = model, label = ui.t("orch.dialog.crew_model") :: any, options = model_options, w_full = true } },
 			},
 			-- When limited: another account, and past that (only with it on)

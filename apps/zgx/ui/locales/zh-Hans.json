@@ -4475,7 +4475,7 @@
     },
     "dialog": {
       "new_title": "New orchestrator",
-      "new_body": "一个规划工作并带领团队完成的智能体。",
+      "new_body": "它规划工作，派一组线程去完成，并在需要你决定时询问你。",
       "create": "Create",
       "name": "Name",
       "name_placeholder": "Release train",
@@ -4512,9 +4512,22 @@
       "weekdays": "Weekdays only",
       "wake_prompt": "Prompt",
       "start_from": "Start from",
-      "import_flow": "Import JSON…",
+      "import_flow": "导入 JSON",
       "on_limit_account": "受限时改用其他账户继续",
-      "on_limit_harness": "…或改用其他提供方或模型"
+      "on_limit_harness": "没有可用账户时，改用其他提供方或模型",
+      "what_for": "用途",
+      "what_for_placeholder": "每周五发布一个版本：说明、构建、签名、上架。",
+      "what_for_hint": "它据此做规划。之后可以在设置中修改。",
+      "name_needed": "先给它起个名字才能创建。",
+      "crew_runs_on": "团队运行于",
+      "no_limit": "不限",
+      "crew_same": "它的团队使用相同的模型。",
+      "crew_other": "它的团队使用 {model}。",
+      "crew_model_same": "与编排器相同",
+      "more": "规则，以及从保存的流程开始",
+      "optional": "可选",
+      "create_open": "创建并打开",
+      "on_device": "运行于 {device}。"
     },
     "flow": {
       "blank": "Blank",

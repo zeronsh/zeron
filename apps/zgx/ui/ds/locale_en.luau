@@ -772,6 +772,7 @@ return {
 	["ds.provider_card.use_reset"] = "Use a reset",
 	["ds.provider_card.connect"] = "Connect a {name} account",
 	["ds.provider_card.add_account"] = "Add account",
+	["ds.provider_card.how_it_signs_in"] = "How it signs in on Cloud",
 	["ds.provider_card.signing_in_to"] = "Signing in to {name}",
 	["ds.provider_card.signing_in_hint"] = "Waiting for you to finish in the browser. Nothing changes until you switch.",
 	["ds.provider_card.signing_in"] = "Signing in",

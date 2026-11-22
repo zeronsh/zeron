@@ -162,7 +162,7 @@ local function settings(): any
 	return app
 end
 local ACCOUNT = '#orch-settings-on-limit >> role:checkbox "When limited, continue on another account"'
-local HARNESS = '#orch-settings-on-limit >> role:checkbox "…or another harness or model"'
+local HARNESS = '#orch-settings-on-limit >> role:checkbox "And with none left, another harness or model"'
 
 test("usage limit: Settings' checkboxes, off by default, the second only with the first, write crew.onLimit", function()
 	local app = settings()

@@ -4437,7 +4437,7 @@
     },
     "dialog": {
       "new_title": "New orchestrator",
-      "new_body": "An agent that plans the work and runs a crew to finish it.",
+      "new_body": "It plans the work, runs a crew of threads to do it, and asks you when it needs a decision.",
       "create": "Create",
       "name": "Name",
       "name_placeholder": "Release train",
@@ -4474,9 +4474,22 @@
       "weekdays": "Weekdays only",
       "wake_prompt": "Prompt",
       "start_from": "Start from",
-      "import_flow": "Import JSON…",
+      "import_flow": "Import JSON",
       "on_limit_account": "When limited, continue on another account",
-      "on_limit_harness": "…or another harness or model"
+      "on_limit_harness": "And with none left, another harness or model",
+      "what_for": "What it's for",
+      "what_for_placeholder": "Ship a release every Friday: notes, builds, signing, the store.",
+      "what_for_hint": "It plans from this. You can change it later in its settings.",
+      "name_needed": "Give it a name to create it.",
+      "crew_runs_on": "Crew runs on",
+      "no_limit": "No limit",
+      "crew_same": "Its crew uses the same model.",
+      "crew_other": "Its crew uses {model}.",
+      "crew_model_same": "Same as the orchestrator",
+      "more": "Rules, and starting from a saved flow",
+      "optional": "optional",
+      "create_open": "Create and open",
+      "on_device": "Runs on {device}."
     },
     "flow": {
       "blank": "Blank",
