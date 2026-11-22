@@ -505,9 +505,9 @@ local function plate(): () -> string
 	return material.pick("$zeron.settings.note", "$zeron.settings.card")
 end
 
--- Places a test drives the board by (`ds_scratchpad_probe`): a grid of
+-- Places a test drives the board by (`ds_scratchpad_test_marks`): a grid of
 -- small marks, every tenth of its width and height, `#scratchpad-at-<i>-<j>`.
-local probe = ui.state("ds_scratchpad_probe", false)
+local test_marks = ui.state("ds_scratchpad_test_marks", false)
 
 M.Board = ui.component(function(props: BoardProps): Node
 	local ch = props.shapes
@@ -1193,7 +1193,7 @@ M.Board = ui.component(function(props: BoardProps): Node
 		}),
 		-- (Under the words being written: they take their presses.)
 		ui.show(function(): boolean
-			return probe:get()
+			return test_marks:get()
 		end, marks()),
 		-- A text being written, where it goes.
 		ui.show(function(): boolean

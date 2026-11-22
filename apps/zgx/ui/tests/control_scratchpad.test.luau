@@ -180,13 +180,13 @@ test("the drawing draws its shapes, at two sizes", function()
 	expect(app:error()).to_be_nil()
 end)
 
--- The drawing, by hand: the board's marks (`ds_scratchpad_probe`), a tenth
+-- The drawing, by hand: the board's marks (`ds_scratchpad_test_marks`), a tenth
 -- of its width and height apart.
 local function board(): any
 	local app = open(1440, 2400)
 	app:command("fixture.scratchpad_empty")
 	app:frames(5)
-	app:set_state("ds_scratchpad_probe", true)
+	app:set_state("ds_scratchpad_test_marks", true)
 	app:click('#scratchpad-tabs >> role:radio "Draw"')
 	app:frames(20)
 	return app

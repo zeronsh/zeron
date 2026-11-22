@@ -52,6 +52,6 @@ test("map loads tick: every view, the headings alone", function()
 			table.insert(opens, (os.clock() - t1) * 1000)
 		end
 		expect(pct(ticks, 0.5) < 4).to_be(true)
-		print(`VIEWLOADS {v} tick p50={string.format("%.2f", pct(ticks, 0.5))} p95={string.format("%.2f", pct(ticks, 0.95))} max={string.format("%.2f", pct(ticks, 1))} | open worst-frame={string.format("%.1f", pct(opens, 1))} total30={string.format("%.1f", (os.clock() - t0) * 1000)}`)
+		print(`zeron-zgx: VIEWLOADS {v} tick p50={string.format("%.2f", pct(ticks, 0.5))} p95={string.format("%.2f", pct(ticks, 0.95))} max={string.format("%.2f", pct(ticks, 1))} | open worst-frame={string.format("%.1f", pct(opens, 1))} total30={string.format("%.1f", (os.clock() - t0) * 1000)}`)
 	end
 end)

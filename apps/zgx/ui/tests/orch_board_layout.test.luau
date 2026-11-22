@@ -45,10 +45,7 @@ local function check(app: any, board: string, label: string)
 	local rows: { [number]: { any } } = {}
 	for _, c in cols do
 		-- Every one as wide as the first.
-		if math.abs(c.w - w0) >= 1 then
-			print(`{label}: column {c.x},{c.y} {c.w} vs {w0}`)
-		end
-		expect(math.abs(c.w - w0) < 1).to_be(true)
+		expect(if math.abs(c.w - w0) < 1 then "" else `{label}: column {c.x},{c.y} {c.w} vs {w0}`).to_be("")
 		local key = math.floor(c.y + 0.5)
 		rows[key] = rows[key] or {}
 		table.insert(rows[key], c)

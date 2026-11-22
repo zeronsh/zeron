@@ -34,7 +34,6 @@ test("mark done as read: the count is the finished, unread chats on the Map, non
 	for _ in got do
 		n += 1
 	end
-	print(`MARKREAD {n}: {table.concat((app:state("mark_read") or {}).ids or {}, " ")}`)
 	expect(n >= 2).to_be(true)
 	-- (Finished, unread: in; working, asking, Review: never.)
 	expect(got["th-omarchy"]).to_be(true)

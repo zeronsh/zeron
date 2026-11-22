@@ -27,7 +27,7 @@ for _, theme in { "theme_dark", "theme_light" } do
 		local p: any = read(theme)
 		assert(p and p.machines, "no palette read")
 		local machines: { string } = p.machines
-		print(`FORCEPAL {p.theme} {table.concat(machines, " ")}`)
+		print(`zeron-zgx: FORCEPAL {p.theme} {table.concat(machines, " ")}`)
 		assert(#machines >= 8 and #machines <= pal.COUNT, `{#machines} machine colours`)
 		-- (Statuses read from the theme: there are some, and chromatic ones.)
 		local hues: { number } = {}
@@ -50,11 +50,11 @@ for _, theme in { "theme_dark", "theme_light" } do
 		for _, t in names do
 			local v: string = p.status[t]
 			local l: number, c: number, h: number = pal.hue_of(v)
-			print(string.format("FORCEPAL_STATUS %s %s %s %.2f %.3f %.0f", tostring(p.theme), t, v, l, c, h))
+			print(`zeron-zgx: FORCEPAL_STATUS {tostring(p.theme)} {t} {v} {string.format("%.2f %.3f %.0f", l, c, h)}`)
 		end
 		for _, m in machines do
 			local l: number, c: number, h: number = pal.hue_of(m)
-			print(string.format("FORCEPAL_MACHINE %s %s %.2f %.3f %.0f", tostring(p.theme), m, l, c, h))
+			print(`zeron-zgx: FORCEPAL_MACHINE {tostring(p.theme)} {m} {string.format("%.2f %.3f %.0f", l, c, h)}`)
 		end
 		for k, m in machines do
 			local l, c, h = pal.hue_of(m)
@@ -214,7 +214,7 @@ for _, theme in { "theme_dark", "theme_light" } do
 				least = math.min(least, pal.delta(m[i], m[j]))
 			end
 		end
-		print(`FORCEPAL_DE {p.theme} least ΔE among the first six {string.format("%.1f", least)}`)
+		print(`zeron-zgx: FORCEPAL_DE {p.theme} least ΔE among the first six {string.format("%.1f", least)}`)
 		expect(least >= 8).to_be(true)
 	end)
 end
