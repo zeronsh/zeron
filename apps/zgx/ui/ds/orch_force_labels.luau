@@ -16,7 +16,8 @@
 --
 -- input: {
 --   nodes: { { id, kind = "brain" | "orchestrator" | "chat", x, y, r,
---              title, hx?, hy? (its hub), rank? (lower first) } },
+--              title, hx?, hy? (its hub), rank? (lower first), quiet?
+--              (no name: its card names it) } },
 --   links: { { ax, ay, bx, by } },
 --   measure: (text, hub: boolean) -> width,
 --   prev: { [string]: Label }?   the last placement, by id
@@ -334,7 +335,8 @@ function M.start(input: any): any
 	-- Threads, the most pressing first.
 	local order: { number } = {}
 	for i, n in nodes do
-		if n.kind == "chat" then
+		-- (A quiet one: its mark kept clear, its name on its card alone.)
+		if n.kind == "chat" and not n.quiet then
 			table.insert(order, i)
 		end
 	end

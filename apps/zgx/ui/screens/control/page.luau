@@ -1085,6 +1085,8 @@ local function map(): Node
 		MapMenu().Dialogs(),
 	}
 end
+-- (The Map widget alone, for its fixture's pictures at a set width.)
+M.map_widget = map
 
 local function machines(): Node
 	return Machines {

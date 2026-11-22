@@ -61,6 +61,54 @@ function M.hub_angle(k: number): number
 	return math.rad(deg)
 end
 
+M.TURN_BELOW = 1.5
+M.EVEN_SHARE, M.EVEN_MOST = 0.75, 2
+
+-- Each of the middle's hubs out as far as it goes: past its fan's reach
+-- (as stretched, the way back to the middle); as close in as that lets
+-- it when `tight`.
+function M.reach_hubs(s: any)
+	for c = 1, s.n do
+		if s.is_hub[c] then
+			local a = s.slot_a[c]
+			local f = math.sqrt((s.fx * math.cos(a)) ^ 2 + (s.fy * math.sin(a)) ^ 2)
+			local own_f = f
+			if s.tight then
+				s.slot_r[c] = M.hub_reach(s.depth[c] * f, s.hub_wide[c], s.own_reach * own_f, s.k)
+			else
+				s.slot_r[c] = math.max(M.HUB_LEN * s.k, s.depth[c] * f + 110 * s.k)
+			end
+			s.def_r[c] = s.slot_r[c]
+		end
+	end
+	for _, l in s.links do
+		if l.strong and s.is_hub[l.b] then
+			l.len = s.slot_r[l.b]
+		end
+	end
+end
+
+-- How far a hub sits from the middle so its fan (`depth` deep, `wide`
+-- across, facing away) keeps CLEAR_MID from the middle's own reach: the
+-- nearest a crew comes is at the fan's edge, wide / 2 off straight away.
+M.CLEAR_MID = 70
+function M.hub_reach(depth: number, wide: number, own_reach: number, k: number): number
+	local need = own_reach + M.CLEAR_MID * k
+	local edge = math.pi - wide / 2
+	local L = M.HUB_LEN * 0.8 * k
+	while L < 2000 do
+		-- (Nearest of the fan's edge to the middle: along that ray, from the hub.)
+		local t = math.max(0, math.min(depth, L * math.cos(edge)))
+		local px, py = L - t * math.cos(edge), t * math.sin(edge)
+		local d = if math.cos(edge) > 0 then math.sqrt(px * px + py * py) else L
+		if d >= need and L >= M.HUB_SEP_X * 0.6 then
+			return L
+		end
+		L += 6
+	end
+	return L
+end
+
 -- (`fixed`: held where it is, the middle: the Brain.)
 export type Node = { id: string, parent: number?, mass: number?, fixed: boolean? }
 -- (`len`: its rest length; a strong link's is its child's ring.)
@@ -105,6 +153,19 @@ export type Sim = {
 	sx: number,
 	sy: number,
 	k: number,
+	-- The web stretched to its frame (each way, 1 or more): where the frame
+	-- has room one way, the slots spread that way (never closer anywhere).
+	fx: number,
+	fy: number,
+	-- The middle's hubs (not stretched: placed by their fans' reach), each
+	-- one's fan's width; how far the middle's own chats reach; whether hubs
+	-- sit as close in as their fans let them.
+	is_hub: { boolean },
+	hub_wide: { number },
+	own_reach: number,
+	tight: boolean,
+	-- The middle's hubs turned (radians) for the frame's shape.
+	turn: number,
 }
 
 -- A steady number in [0, 1) from a string and a seed.
@@ -120,18 +181,20 @@ M.hash01 = hash01
 
 -- How `count` children sit in rows on a fan: each one's row radius and
 -- angle (across the fan, centred), and the last row's radius.
-local function fan(count: number, scale: number?): ({ number }, { number }, number)
+local function fan(count: number, scale: number?, wide: number?, spacing: number?): ({ number }, { number }, number)
 	local sk = scale or 1
-	local len, rowd, gap = M.FAN_LEN * sk, M.FAN_ROW * sk, M.FAN_GAP * sk
+	local sp = spacing or 1
+	local W = wide or M.FAN_WIDE
+	local len, rowd, gap = M.FAN_LEN * sk * math.sqrt(sp), M.FAN_ROW * sk * sp, M.FAN_GAP * sk * sp
 	local rs, as = table.create(count, 0), table.create(count, 0)
 	local k, row, last = 1, 0, len
 	while k <= count do
 		local r = len + row * rowd
-		local cap = math.max(3, math.floor(r * M.FAN_WIDE / gap))
+		local cap = math.max(3, math.floor(r * W / gap))
 		local here = math.min(cap, count - k + 1)
 		-- (A row holding fewer than it could: its nodes closer together,
 		-- centred, never further apart than its gap.)
-		local span = math.min(M.FAN_WIDE, (here - 1) * gap / r)
+		local span = math.min(W, (here - 1) * gap / r)
 		-- (Every other row shifted half a place: no link runs behind a node
 		-- of the row before.)
 		local shift = if row % 2 == 1 and here > 1 then span / (here - 1) / 2 else 0
@@ -147,10 +210,25 @@ local function fan(count: number, scale: number?): ({ number }, { number }, numb
 end
 M.fan = fan
 
+-- How wide a crew of `count` fans out (radians): FAN_WIDE for a few,
+-- wider as it grows, all the way round but for a clear way back to its
+-- parent (FAN_CLEAR).
+M.FAN_CLEAR = math.rad(70)
+M.FAN_GROW = math.rad(9)
+function M.fan_wide(count: number): number
+	return math.clamp(M.FAN_WIDE + math.max(0, count - 6) * M.FAN_GROW, M.FAN_WIDE, 2 * math.pi - M.FAN_CLEAR)
+end
+-- A crew's spacing, by its size: more room between more of them (a big
+-- crew's names need it), up to SPACE_MOST.
+M.SPACE_MOST = 1.45
+function M.fan_space(count: number): number
+	return math.clamp(1 + math.max(0, count - 8) * 0.025, 1, M.SPACE_MOST)
+end
+
 -- `opts.aspect`: the field's width over its height: round the middle, the
 -- web stretched across a wide field (an ellipse), never wasted room up
 -- and down. `opts.dense`: 1 for the full spacing, less for a crowded web.
-function M.new(nodes: { Node }, links: { Link }, seed: number?, opts: { aspect: number?, dense: number? }?): Sim
+function M.new(nodes: { Node }, links: { Link }, seed: number?, opts: { aspect: number?, dense: number?, wide: boolean?, space: boolean?, tight: boolean?, turn: boolean?, flat: boolean?, even: boolean? }?): Sim
 	local n = #nodes
 	local s: Sim = {
 		n = n,
@@ -183,9 +261,26 @@ function M.new(nodes: { Node }, links: { Link }, seed: number?, opts: { aspect: 
 		sx = 1,
 		sy = 1,
 		k = 1,
+		fx = 1,
+		fy = 1,
+		is_hub = table.create(n, false),
+		hub_wide = table.create(n, 0),
+		own_reach = 0,
+		tight = false,
+		turn = 0,
 	}
 	local aspect = math.clamp((opts and opts.aspect) or 1, 0.6, 3)
 	s.sx, s.sy = math.sqrt(aspect), 1 / math.sqrt(aspect)
+	-- (Flat: no ellipse round the middle; the frame's shape is met by
+	-- stretching the whole web instead, `M.stretch`.)
+	if opts and opts.flat then
+		s.sx, s.sy = 1, 1
+	end
+	-- (A frame near square: the first two hubs along its diagonal, not
+	-- side by side.)
+	if opts and opts.turn and aspect < M.TURN_BELOW then
+		s.turn = -math.atan2(1, aspect)
+	end
 	s.k = math.clamp((opts and opts.dense) or 1, 0.7, 1)
 	for i, nd in nodes do
 		s.ids[i] = nd.id
@@ -227,15 +322,34 @@ function M.new(nodes: { Node }, links: { Link }, seed: number?, opts: { aspect: 
 			table.insert(kids[p], i)
 		end
 	end
-	for p, list in kids do
-		if s.parent[p] == 0 then
-			continue
-		end
-		local rs, as, last = fan(#list, s.k)
+	-- (Even: a small crew given room enough to reach EVEN_SHARE of the
+	-- deepest crew of its middle's, at most EVEN_MOST its spacing.)
+	local function lay_fan(p: number, list: { number }, extra: number)
+		local wide = if opts and opts.wide then M.fan_wide(#list) else nil
+		local space = (if opts and opts.space then M.fan_space(#list) else 1) * extra
+		local rs, as, last = fan(#list, s.k, wide, space)
 		for k, c in list do
 			s.slot_r[c], s.slot_a[c] = rs[k], as[k]
 		end
 		s.depth[p] = last
+	end
+	local deepest = 0
+	for p, list in kids do
+		if s.parent[p] == 0 then
+			continue
+		end
+		lay_fan(p, list, 1)
+		if s.parent[s.parent[p]] == 0 then
+			deepest = math.max(deepest, s.depth[p])
+		end
+	end
+	if opts and opts.even then
+		for p, list in kids do
+			if s.parent[p] ~= 0 and s.parent[s.parent[p]] == 0 and s.depth[p] < deepest * M.EVEN_SHARE then
+				local extra = math.min(M.EVEN_MOST, deepest * M.EVEN_SHARE / math.max(1, s.depth[p]))
+				lay_fan(p, list, extra)
+			end
+		end
 	end
 	for p, list in kids do
 		if s.parent[p] ~= 0 then
@@ -248,10 +362,24 @@ function M.new(nodes: { Node }, links: { Link }, seed: number?, opts: { aspect: 
 		for _, c in list do
 			table.insert(if kids[c] then hubs else own, c)
 		end
+		-- (The middle's own chats' rings' reach.)
+		local own_n = #list - (function(): number
+			local h = 0
+			for _, c in list do
+				if kids[c] then
+					h += 1
+				end
+			end
+			return h
+		end)()
+		s.own_reach = if own_n > 0 then (M.FAN_LEN * 1.15 + math.floor(own_n / 12) * M.FAN_ROW) * s.k else 0
+		s.tight = opts ~= nil and opts.tight == true
 		for k, c in hubs do
-			s.slot_a[c] = M.hub_angle(k)
-			s.slot_r[c] = math.max(M.HUB_LEN * s.k, s.depth[c] + 110 * s.k)
+			s.slot_a[c] = M.hub_angle(k) + s.turn
+			s.hub_wide[c] = if opts and opts.wide then M.fan_wide(#kids[c]) else M.FAN_WIDE
+			s.is_hub[c] = true
 		end
+		M.reach_hubs(s)
 		-- (The middle's own chats: rings round it, as many a ring as fit
 		-- a gap apart, none within HUB_CLEAR of a hub's way out.)
 		local hub_a: { number } = {}
@@ -306,12 +434,13 @@ function M.new(nodes: { Node }, links: { Link }, seed: number?, opts: { aspect: 
 end
 
 -- The direction node `p` faces: away from its parent; the middle, up.
+-- (In the web unstretched: its slots are turned by it, then stretched.)
 local function facing(s: Sim, p: number): number
 	local g = s.parent[p]
 	if g == 0 then
 		return -math.pi / 2
 	end
-	return math.atan2(s.y[p] - s.y[g], s.x[p] - s.x[g])
+	return math.atan2((s.y[p] - s.y[g]) / s.fy, (s.x[p] - s.x[g]) / s.fx)
 end
 
 -- Where node `i`'s slot is now: round the middle, from straight up;
@@ -320,10 +449,13 @@ local function slot(s: Sim, i: number): (number, number)
 	local p = s.parent[i]
 	if s.parent[p] == 0 then
 		local a = s.slot_a[i]
-		return s.x[p] + math.cos(a) * s.slot_r[i] * s.sx, s.y[p] + math.sin(a) * s.slot_r[i] * s.sy
+		-- (A hub: out as far as its fan needs, already; the middle's own
+		-- chats stretched with the web.)
+		local fx, fy = if s.is_hub[i] then 1 else s.fx, if s.is_hub[i] then 1 else s.fy
+		return s.x[p] + math.cos(a) * s.slot_r[i] * s.sx * fx, s.y[p] + math.sin(a) * s.slot_r[i] * s.sy * fy
 	end
 	local a = s.slot_a[i] + facing(s, p)
-	return s.x[p] + math.cos(a) * s.slot_r[i], s.y[p] + math.sin(a) * s.slot_r[i]
+	return s.x[p] + math.cos(a) * s.slot_r[i] * s.fx, s.y[p] + math.sin(a) * s.slot_r[i] * s.fy
 end
 
 -- Node `i` takes where it is now as its slot (dropped there, or kept
@@ -336,12 +468,15 @@ function M.adopt(s: Sim, i: number)
 	local dx, dy = s.x[i] - s.x[p], s.y[i] - s.y[p]
 	if s.parent[p] == 0 then
 		-- (Round the middle: on its ellipse.)
-		local ex, ey = dx / s.sx, dy / s.sy
+		local fx, fy = if s.is_hub[i] then 1 else s.fx, if s.is_hub[i] then 1 else s.fy
+		local ex, ey = dx / (s.sx * fx), dy / (s.sy * fy)
 		s.slot_a[i] = math.atan2(ey, ex)
 		s.slot_r[i] = math.max(1, math.sqrt(ex * ex + ey * ey))
 	else
-		s.slot_a[i] = math.atan2(dy, dx) - facing(s, p)
-		s.slot_r[i] = math.max(1, math.sqrt(dx * dx + dy * dy))
+		-- (Its slot's angle and reach unstretched: stretched, here again.)
+		local ex, ey = dx / s.fx, dy / s.fy
+		s.slot_a[i] = math.atan2(ey, ex) - facing(s, p)
+		s.slot_r[i] = math.max(1, math.sqrt(ex * ex + ey * ey))
 	end
 	for _, l in s.links do
 		if l.strong and l.b == i then
@@ -362,6 +497,36 @@ function M.pin(s: Sim, i: number, on: boolean)
 				l.len = s.def_r[i]
 			end
 		end
+	end
+end
+
+-- The web stretched to fill a frame `w` by `h` (screen points at zoom 1;
+-- `pad` round its marks for their names): from where a fresh web's slots
+-- put everything, each way the factor (1 or more, at most STRETCH_MOST)
+-- that brings it to the frame's size. Never less than 1: a web too big
+-- one way is zoomed out (Fit), not squeezed. Call before `place`.
+M.STRETCH_MOST = 2.2
+function M.stretch(s: Sim, w: number, h: number, pad: number)
+	s.fx, s.fy = 1, 1
+	M.reach_hubs(s)
+	local tw, th = math.max(1, w - 2 * pad), math.max(1, h - 2 * pad)
+	-- (A few rounds: the hubs move out as their fans stretch.)
+	for _ = 1, 3 do
+		M.place(s, nil)
+		local x0, y0, x1, y1 = M.bounds(s)
+		local gx = tw / math.max(1, x1 - x0)
+		local gy = th / math.max(1, y1 - y0)
+		local nx: number = math.clamp(s.fx * gx, 1, M.STRETCH_MOST)
+		local ny: number = math.clamp(s.fy * gy, 1, M.STRETCH_MOST)
+		-- (Never more than half again one way than the other.)
+		local even: number = math.min(nx, ny)
+		nx, ny = math.min(nx, even * 1.5), math.min(ny, even * 1.5)
+		local was: any = s
+		if math.abs(nx - was.fx) < 0.02 and math.abs(ny - was.fy) < 0.02 then
+			break
+		end
+		was.fx, was.fy = nx, ny
+		M.reach_hubs(s)
 	end
 end
 
@@ -477,6 +642,7 @@ end
 function M.step(s: Sim): number
 	local n = s.n
 	local x, y, vx, vy, awake, held, mass = s.x, s.y, s.vx, s.vy, s.awake, s.held, s.mass
+	local sfx, sfy = s.fx, s.fy
 	-- Springs (strong and weak), into the velocities.
 	for _, l in s.links do
 		local a, b = l.a, l.b
@@ -485,7 +651,14 @@ function M.step(s: Sim): number
 		end
 		local ex, ey = x[b] - x[a], y[b] - y[a]
 		local d = math.max(0.01, math.sqrt(ex * ex + ey * ey))
-		local f = (d - (l.len or M.WEAK_LEN)) * (if l.strong then M.STRONG_K else M.WEAK_K)
+		local len = l.len or M.WEAK_LEN
+		-- (A strong link stretched with the web: as long as its slot is,
+		-- this way.)
+		if l.strong and (sfx ~= 1 or sfy ~= 1) and not s.is_hub[b] then
+			local qx, qy = ex / d / sfx, ey / d / sfy
+			len /= math.max(0.01, math.sqrt(qx * qx + qy * qy))
+		end
+		local f = (d - len) * (if l.strong then M.STRONG_K else M.WEAK_K)
 		local ux, uy = ex / d * f, ey / d * f
 		if awake[a] and not held[a] then
 			vx[a] += ux / mass[a]

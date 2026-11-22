@@ -58,8 +58,23 @@ end
 function M.pins_of(): any
 	return if M.pivot:peek() == "machine" then M.pins_m else M.pins
 end
+-- The hubs whose quiet threads the person opened out of their fold, by
+-- hub id (`fold:<hub>` the fold; kept on this device).
+M.open_folds = ui.persist("control_map_force_open_folds", {} :: { [string]: boolean })
+function M.set_open(hub: string, on: boolean)
+	M.open_folds:set_key({ hub }, if on then true else nil)
+end
 -- The nodes pinned by hand (dropped there), by id (kept on this device).
 M.pins = ui.persist("control_map_force_pins", {} :: { [string]: boolean })
+-- The field each pivot's web was laid out for (and by which layout), kept
+-- with its places: { [pivot] = { w, h, v } }.
+M.layouts = ui.persist("control_map_force_layout", {} :: { [string]: any })
+-- The field's height set from outside (tests, offscreen shots), else nil.
+M.field_height = ui.state("control_map_force_field_h", nil :: number?)
+-- (A node's menu, as the mounted Graph has it: for tests.)
+M.menu_of = function(_id: string): { any }?
+	return nil
+end
 -- The node the pointer is on.
 M.hover = ui.state("control_map_force_hover", nil :: string?)
 -- The node held by the pointer (pressed on, not yet let go), or nil: the
@@ -172,7 +187,16 @@ local NAMES_ZOOM = 0.3
 local R_BRAIN, R_HUB, R_CHAT, R_RING = draw.BRAIN_D / 2, draw.HUB_D / 2, draw.R_CHAT, draw.R_RING
 -- The fit's least zoom: past it the web is spaced closer, never drawn
 -- smaller.
-local MIN_FIT = 0.75
+-- (Fit zooms out this far before a name is cut by the field's edge: names
+-- keep their size whatever the zoom.)
+local MIN_FIT = 0.5
+-- (Round the web, for its names, when it's stretched to the field.)
+local STRETCH_PAD = 70
+-- (The layout's version: places kept by an older one are laid out anew,
+-- pins kept. And how much the field may change before the web is laid out
+-- for it again.)
+local LAYOUT_V = 2
+local LAYOUT_SLACK = 0.12
 -- A chat asking for the person; one the sidebar draws its working ring
 -- for (waiting on its own work too); one it draws a glyph for, by it.
 local NEED: { [string]: boolean } = { input = true }
@@ -184,6 +208,8 @@ local BADGE_AT = 10.5
 local T_NAME: any = { size = 11.5, baseline = "top", align = "center" }
 local T_HUB: any = { size = 12.5, weight = 600, baseline = "top", align = "center" }
 local T_NAME_BASE, T_HUB_BASE = T_NAME.size, T_HUB.size
+-- (A fold's count, in its ring.)
+local T_FOLD: any = { size = 11, weight = 600, baseline = "middle", align = "center" }
 local T_NAME_HALO: any = table.clone(T_NAME)
 local T_HUB_HALO: any = table.clone(T_HUB)
 -- A name's halo: its text again in the page's colour, these offsets round
@@ -221,9 +247,19 @@ M.View = ui.component(function(props: {
 	on_open_card: ((item: string) -> ())?,
 	-- Resumes a paused card (the hover card's Resume).
 	on_resume_card: ((item: string) -> ())?,
+	-- The field's height, where the Map's room decides it (a full page);
+	-- else about 0.62 of its width.
+	height: (() -> number)?,
 }): Node
 	local width = ui.use_state(0)
 	local function field_h(): number
+		local forced = M.field_height:get()
+		if type(forced) == "number" and forced > 0 then
+			return forced
+		end
+		if props.height then
+			return math.max(300, props.height())
+		end
 		return math.clamp(math.floor(width:get() * 0.62), 420, 760)
 	end
 	local view = ui.use_state({ x = 0, y = 0, zoom = 1 })
@@ -255,7 +291,7 @@ M.View = ui.component(function(props: {
 	end
 
 	-- (Counts for tests and numbers, published once a frame.)
-	local counts: any = { corner_replaces = 0, pin_clicks = 0, rescales = 0, leaders = 0, name_size = 0, label_halos = 0, names = 0, names_ms = 0, prunes = 0, pruned = 0, pins = 0, status = 0, rings = 0, builds = 0, wakes = 0, steps = 0, draws = 0, overlay = 0, frames = 0, settled = 0, settle_ms = 0, first_ms = 0, nodes = 0, drawn = 0, worst_ms = 0 }
+	local counts: any = { layouts = 0, unfolds = 0, corner_replaces = 0, pin_clicks = 0, rescales = 0, leaders = 0, name_size = 0, label_halos = 0, names = 0, names_ms = 0, prunes = 0, pruned = 0, pins = 0, status = 0, rings = 0, builds = 0, wakes = 0, steps = 0, draws = 0, overlay = 0, frames = 0, settled = 0, settle_ms = 0, first_ms = 0, nodes = 0, drawn = 0, worst_ms = 0 }
 	local dirty = ui.use_state(false)
 	local function count(key: string, by: number?)
 		counts[key] += by or 1
@@ -304,6 +340,20 @@ M.View = ui.component(function(props: {
 	local chats_now: { [string]: any } = {}
 	local function state_of(id: string): string
 		return model.status_of(chats_now[id])
+	end
+	-- (Which threads are named now: names placed again as this changes.)
+	local NAMED: { [string]: boolean } = { working = true, waiting = true, input = true, approval = true, failed = true, limited = true }
+	local named_key = ""
+	-- (Set with the names, below.)
+	local names_dirty_req: () -> () = function() end
+	local function named_now(): string
+		local out = {}
+		for _, n in fmodel.nodes do
+			if n.kind == "chat" and n.folded == nil and NAMED[state_of(n.id)] then
+				table.insert(out, n.id)
+			end
+		end
+		return table.concat(out, ",")
 	end
 
 	-- Fitting the view to the web: its box in the field, at most 1.4x.
@@ -452,10 +502,22 @@ M.View = ui.component(function(props: {
 		end)
 	end)
 	local built_pivot: string? = nil
+	-- (The field the web was laid out for, this pivot's: laid out again,
+	-- fresh, when the field changes by more than LAYOUT_SLACK.)
+	local function same_frame(f: any, w: number, h: number): boolean
+		return type(f) == "table" and f.v == LAYOUT_V and type(f.w) == "number" and type(f.h) == "number"
+			and math.abs(w / math.max(1, f.w) - 1) <= LAYOUT_SLACK and math.abs(h / math.max(1, f.h) - 1) <= LAYOUT_SLACK
+	end
 	local function rebuild(world: any, comms: { any })
 		local pivot = M.pivot:peek()
-		local next_m = fm.build(world, comms, world.clock or os.time(), pivot)
-		if next_m.sig == fmodel.sig then
+		-- (Not before the field is laid out: the web is laid out for it.)
+		if width:peek() < 50 then
+			return
+		end
+		local fw0, fh0 = width:peek(), field_h()
+		local frame_ok = same_frame((M.layouts:peek() or {})[pivot], fw0, fh0)
+		local next_m = fm.build(world, comms, world.clock or os.time(), pivot, { open = M.open_folds:peek() or {} })
+		if next_m.sig == fmodel.sig and frame_ok then
 			-- The same web: what changed taken in place. A state alone (a
 			-- live push): the status layer drawn again, nothing else; a
 			-- name, a fade, a colour, a message in flight: the rest too.
@@ -475,7 +537,7 @@ M.View = ui.component(function(props: {
 				if o.hue ~= n.hue or o.device ~= n.device then
 					colours = true
 				end
-				o.title, o.fade, o.done, o.total, o.hue, o.device, o.provider = n.title, n.fade, n.done, n.total, n.hue, n.device, n.provider
+				o.title, o.fade, o.done, o.total, o.hue, o.device, o.provider, o.folded = n.title, n.fade, n.done, n.total, n.hue, n.device, n.provider, n.folded
 			end
 			fmodel.machines = next_m.machines
 			if colours or marks then
@@ -493,6 +555,10 @@ M.View = ui.component(function(props: {
 				end)
 			end
 			status_tick:set(status_tick:peek() + 1)
+			-- (A thread come to work or gone quiet: named, or not, from now.)
+			if named_now() ~= named_key then
+				names_dirty_req()
+			end
 			return
 		end
 		count("builds")
@@ -505,12 +571,17 @@ M.View = ui.component(function(props: {
 		for i, l in next_m.links do
 			links[i] = { a = l.a, b = l.b, strong = l.strong, hub = l.hub }
 		end
-		-- (Laid out across the field: wide for a wide one; closer for a
-		-- crowded web, its nodes never drawn smaller.)
-		local aspect = math.max(1, width:peek()) / field_h()
+		-- (Laid out for the field: each crew round its hub, wider and roomier
+		-- as it grows; each hub as close in as its crew lets it; the first two
+		-- along the diagonal of a field near square; then the whole web
+		-- stretched to the field's room each way. Closer for a crowded web,
+		-- its nodes never drawn smaller.)
+		local fw, fh = math.max(1, width:peek()), field_h()
 		local dense = math.clamp(1 - (#nodes - 60) / 400, 0.7, 1)
-		local next_s = sim.new(nodes, links, 7, { aspect = aspect, dense = dense })
-		-- (Where they were: this web, else kept from before.)
+		local next_s = sim.new(nodes, links, 7, { aspect = fw / fh, dense = dense, wide = true, space = true, tight = true, turn = true, flat = true, even = true })
+		sim.stretch(next_s, fw, fh - 30, STRETCH_PAD)
+		-- (Where they were: this web, else kept from before; laid out for
+		-- another field (or by an older layout), only what was pinned there.)
 		local from: { [string]: any } = table.clone(M.places_of():peek() or {})
 		-- (The web as it stands, on the same pivot: a pivot's own places
 		-- are never the other's.)
@@ -518,6 +589,16 @@ M.View = ui.component(function(props: {
 			for i = 1, s.n do
 				from[s.ids[i]] = { s.x[i], s.y[i] }
 			end
+		end
+		if not frame_ok then
+			local pins = M.pins_of():peek() or {}
+			for id in table.clone(from) do
+				if not pins[id] then
+					from[id] = nil
+				end
+			end
+			M.layouts:set_key({ pivot }, { w = fw0, h = fh0, v = LAYOUT_V })
+			count("layouts")
 		end
 		-- (A pivot opened: its own view as it was left, else fitted to its
 		-- web once it rests; the other's left as it is.)
@@ -615,6 +696,7 @@ M.View = ui.component(function(props: {
 		chats_now = world.chats or {}
 		width:get()
 		M.pivot:get()
+		M.open_folds:get()
 		rebuild(world, comms)
 	end)
 
@@ -671,6 +753,7 @@ M.View = ui.component(function(props: {
 			dark = dark,
 			fg = kit.ink("text.primary", 0.92),
 			secondary = kit.ink("text.primary", 0.6),
+			fold_ring = kit.ink("text.primary", 0.35),
 			bg = kit.ink("background"),
 			brain = kit.ink("text.primary", if dark then 0.88 else 0.82),
 			-- (A node on no machine known: a plain fill.)
@@ -760,6 +843,10 @@ M.View = ui.component(function(props: {
 	-- point), and whether the zoom has moved off it since.
 	local names_k = 1
 	local names_dirty = false
+	names_dirty_req = function()
+		names_dirty = true
+		tick:set(tick:peek() + 1)
+	end
 	-- The field's own controls in its corners (the legend bottom left, the
 	-- pivot bottom right, Fit top right): their sizes as laid out, and the
 	-- room each takes (field points, a little round it). No name goes
@@ -886,6 +973,7 @@ M.View = ui.component(function(props: {
 		end
 	end
 	local function place_names(c: any)
+		named_key = named_now()
 		local nodes = {}
 		for i, n in fmodel.nodes do
 			local p = n.parent
@@ -899,6 +987,10 @@ M.View = ui.component(function(props: {
 				hx = if p > 0 then s.x[p] else nil,
 				hy = if p > 0 then s.y[p] else nil,
 				rank = if n.kind == "chat" then (NAME_RANK[state_of(n.id)] or 4) else 0,
+				-- (Named while it's at work, waiting or asking; an idle or
+				-- finished one, and a fold, named on its card as the pointer
+				-- rests on it.)
+				quiet = n.kind == "chat" and (n.folded ~= nil or not NAMED[state_of(n.id)]),
 			})
 		end
 		local links = {}
@@ -1160,6 +1252,12 @@ M.View = ui.component(function(props: {
 					c:circle(nx, ny, draw.HUB_GAP_D / 2, p.bg)
 					c:circle(nx, ny, draw.HUB_FILL_D / 2, node_fill[i])
 				end
+			elseif n.folded then
+				-- (A fold: an open ring, how many it holds inside it.)
+				c:circle(nx, ny, R_RING, p.fold_ring)
+				c:circle(nx, ny, R_RING - 1.3, p.bg)
+				T_FOLD.color = p.secondary
+				c:text(n.title, nx, ny, T_FOLD)
 			else
 				-- (Its state's ring, glyph and name are the status layer's:
 				-- a state changing draws that alone.)
@@ -1682,7 +1780,11 @@ M.View = ui.component(function(props: {
 		if not n then
 			return
 		end
-		if n.kind == "chat" then
+		if n.folded then
+			-- (A fold: its threads out, each standing alone.)
+			M.set_open(string.sub(id, #fm.FOLD + 1), true)
+			count("unfolds")
+		elseif n.kind == "chat" then
 			props.on_open_chat(id)
 		elseif n.kind ~= "machine" then
 			props.on_open_orchestrator(id)
@@ -1774,6 +1876,10 @@ M.View = ui.component(function(props: {
 			on_open_card = props.on_open_card,
 			on_resume = props.on_resume_card,
 			on_mark_read = props.mark_read,
+			on_open_fold = function(fid: string)
+				M.set_open(string.sub(fid, #fm.FOLD + 1), true)
+				count("unfolds")
+			end,
 		}
 	end
 	local function hover_box(): (number, number, number)
@@ -1867,6 +1973,9 @@ M.View = ui.component(function(props: {
 				title_v:get()
 				local i = fmodel.index[item.id]
 				local n = i and fmodel.nodes[i]
+				if n and n.folded then
+					return locale.s("ds.orch.map.fold_label", { count = #n.folded })
+				end
 				local t = if n then n.title else ""
 				local st = state_of(item.id)
 				if item.kind == "chat" and st ~= "idle" and status.KINDS[st :: any] then
@@ -1958,11 +2067,13 @@ M.View = ui.component(function(props: {
 				-- reader of one chat (account/rows): a push wakes the glyph of
 				-- the chat it changed, not every glyph on the web.)
 				kind = function(): any
-					if props.chat then
-						return model.status_of(props.chat(item.id))
+					local k = if props.chat then model.status_of(props.chat(item.id)) else nil
+					if not (k and status.KINDS[k :: any]) then
+						status_tick:get()
+						k = state_of(item.id)
 					end
-					status_tick:get()
-					return state_of(item.id)
+					-- (Gone quiet before the layer drops it: a kind it knows.)
+					return if status.KINDS[k :: any] then k else "done"
 				end,
 				size = size,
 			},
@@ -2120,6 +2231,57 @@ M.View = ui.component(function(props: {
 		}
 	end
 
+	-- A node's menu (the space's: BACKGROUND).
+	local node_menu = function(id: string): { any }?
+		if id == BACKGROUND then
+			-- (Every chat on it finished and not yet read: marked read at
+			-- once, gone from it, an Undo for a moment; none at work,
+			-- asking or in Review.)
+			local ids = M.done_unread_ids()
+			local n = #ids
+			return {
+				{ label = locale.s("ds.orch.map.unpin_all"), icon = "pin", on_select = function()
+					M.unpin_all()
+				end },
+				{
+					label = if n > 0 then locale.s("ds.orch.map.mark_done_read", { count = n }) else locale.s("ds.orch.map.mark_done_read_none"),
+					icon = "check-circle",
+					disabled = n == 0 or props.mark_read == nil,
+					on_select = function()
+						if props.mark_read and n > 0 then
+							props.mark_read(ids)
+						end
+					end,
+				},
+			}
+		end
+		local i = fmodel.index[id]
+		-- (A machine's hub has no menu of its own: its pins.)
+		-- (A fold: its own menu, showing what it holds.)
+		if i and fmodel.nodes[i].folded then
+			return { { label = locale.s("ds.orch.map.card.fold_open"), icon = "eye", on_select = function()
+				M.set_open(string.sub(id, #fm.FOLD + 1), true)
+			end } }
+		end
+		local base = if props.menu and not (i and fmodel.nodes[i].kind == "machine") then props.menu(id) else nil
+		if i and fmodel.nodes[i].kind ~= "chat" then
+			local out = table.clone(base or {})
+			table.insert(out, { separator = true })
+			table.insert(out, { label = locale.s("ds.orch.map.unpin_children"), icon = "pin", on_select = function()
+				M.unpin_children(id)
+			end })
+			-- (Its quiet threads opened out of their fold: back into it.)
+			if (M.open_folds:peek() or {})[id] then
+				table.insert(out, { label = locale.s("ds.orch.map.fold_quiet"), icon = "collapse-arrows", on_select = function()
+					M.set_open(id, false)
+				end })
+			end
+			return out
+		end
+		return base
+	end
+	M.menu_of = node_menu
+
 	return ui.column {
 		class = "orch-map-force",
 		w_full = true,
@@ -2133,42 +2295,7 @@ M.View = ui.component(function(props: {
 		kit.MenuField {
 			-- (The node's menu, and for a parent its children's pins; the
 			-- space's: every pin.)
-			menu = function(id: string): { any }?
-				if id == BACKGROUND then
-					-- (Every chat on it finished and not yet read: marked read at
-					-- once, gone from it, an Undo for a moment; none at work,
-					-- asking or in Review.)
-					local ids = M.done_unread_ids()
-					local n = #ids
-					return {
-						{ label = locale.s("ds.orch.map.unpin_all"), icon = "pin", on_select = function()
-							M.unpin_all()
-						end },
-						{
-							label = if n > 0 then locale.s("ds.orch.map.mark_done_read", { count = n }) else locale.s("ds.orch.map.mark_done_read_none"),
-							icon = "check-circle",
-							disabled = n == 0 or props.mark_read == nil,
-							on_select = function()
-								if props.mark_read and n > 0 then
-									props.mark_read(ids)
-								end
-							end,
-						},
-					}
-				end
-				local i = fmodel.index[id]
-				-- (A machine's hub has no menu of its own: its pins.)
-				local base = if props.menu and not (i and fmodel.nodes[i].kind == "machine") then props.menu(id) else nil
-				if i and fmodel.nodes[i].kind ~= "chat" then
-					local out = table.clone(base or {})
-					table.insert(out, { separator = true })
-					table.insert(out, { label = locale.s("ds.orch.map.unpin_children"), icon = "pin", on_select = function()
-						M.unpin_children(id)
-					end })
-					return out
-				end
-				return base
-			end,
+			menu = node_menu,
 			register = props.register,
 			key = "force",
 			hit = function(px: number, py: number): string?

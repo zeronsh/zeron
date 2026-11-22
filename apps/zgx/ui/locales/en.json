@@ -1294,7 +1294,21 @@
         "needs_you": "needs you",
         "brain": "Brain",
         "unpin_children": "Unpin all children",
-        "unpin_all": "Unpin all"
+        "unpin_all": "Unpin all",
+        "fold_quiet": "Fold idle and finished threads",
+        "fold_label": "{count, plural, one {# idle or finished thread} other {# idle or finished threads}}",
+        "card": {
+          "fold_title": "{count, plural, one {# idle or finished thread} other {# idle or finished threads}}",
+          "fold_open": "Show them",
+          "crew_label": "Crew",
+          "board_label": "Board",
+          "n_working": "{n} working",
+          "n_idle": "{n} idle",
+          "n_failed": "{n} failed",
+          "n_now": "{n} now",
+          "n_review": "{n} in review",
+          "n_blocked": "{n} blocked"
+        }
       },
       "machines": {
         "running": "{n} running",

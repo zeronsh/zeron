@@ -547,6 +547,151 @@ ui.command { id = "map_force_big", title = "Map: a big fleet that talks", run = 
 	end
 	orchestration.comms:set(list)
 end }
+-- Fleet shapes for the force Graph's balance (tests/orch_force_balance):
+-- the live Map's shape (two orchestrators, 25 and 12 crew, the Brain dump
+-- with one thread; real-length names, mixed states), a sparse one, one
+-- orchestrator with 40, four uneven, seven; and one with a crew big enough
+-- to fold. `map_shape_add` adds a working thread to the first, and
+-- `map_shape_finish` finishes its first working one.
+local SHAPE_VPN = {
+	"Windows build worker (x16-win, Claude)", "per-app exits", "Per-app exits: 2 fixes + renumber 0068 + tests", "Crew thread 5b9c4d",
+	"dscp marking", "iOS app (K2) (Claude)", "new UDP family", "hy2 HoL fix", "Deploy lane (Opus)", "RU routing: whitelist survival + CDN edge",
+	"tcp-brutal", "admin panel", "Auto-install no-click (Mac/Linux)", "control alloc fix", "whitelist mode", "spoof-channel research",
+	"proactive probes", "Proactive probes: renumber 0067 + migration", "Android updater (Opus)", "macOS install/update proof (Claude)",
+	"Moscow RU node (msk-2)", "Telemetry v2 (Opus 5.5 High)", "Protocols CDN/ShadowTLS (Opus)", "Throughput regression bench", "Exporter image",
+}
+local SHAPE_FIXES = {
+	"Orchestrator creation fixes", "Control Room tabs", "Android crash sending to an orchestrator", "Per-chat Cloud machine size",
+	"Merge main 0.3.8 into orchestrators", "iOS design options: orchestrators + Control Room", "Board redesign: 3 columns, derived states",
+	"Cursor missing from menus", "Orchestrators as a built-in plugin", "Force graph hover intent", "Sidebar perf: whole-list computeds", "Graph polish",
+}
+local SHAPE_MIX = { "idle", "working", "idle", "done", "waiting", "idle", "idle", "working", "done", "idle", "input", "idle", "working", "idle", "done", "idle", "waiting", "idle" }
+local SHAPES: { [string]: any } = {
+	screenshot = { { "VPN Orchestrator", 25, SHAPE_VPN, 0 }, { "Zeron fixes", 12, SHAPE_FIXES, 3 }, own = 1 },
+	sparse = { { "Release", 3, nil, 1 }, { "Docs", 2, nil, 4 }, own = 0 },
+	one40 = { { "Engine", 40, SHAPE_VPN, 2 }, own = 0 },
+	uneven4 = { { "VPN Orchestrator", 30, SHAPE_VPN, 0 }, { "Zeron fixes", 12, SHAPE_FIXES, 3 }, { "Docs", 5, nil, 5 }, { "Release", 2, nil, 7 }, own = 2 },
+	seven = { { "A team", 9, SHAPE_VPN, 1 }, { "B team", 6, SHAPE_FIXES, 2 }, { "C team", 4, nil, 3 }, { "D team", 12, SHAPE_VPN, 4 }, { "E team", 3, nil, 5 }, { "F team", 7, SHAPE_FIXES, 6 }, { "G team", 5, nil, 7 }, own = 1 },
+	-- (A crew with more quiet threads than fold at once: 30 idle, 4 working.)
+	fold = { { "Engine", 34, nil, 0, "fold" }, { "Docs", 4, nil, 2 }, own = 0 },
+}
+local shape_now: any = nil
+local function map_shape(name: string)
+	local spec = SHAPES[name]
+	local t = os.time()
+	local devices = {
+		{ id = "dev-desk", name = "dev-desk", platform = "linux", here = true, online = true },
+		{ id = "dev-mac", name = "macbook", platform = "macos", online = true },
+		{ id = "dev-cloud", name = "Cloud", platform = "cloud", cloud = true, online = true },
+	}
+	local dev_ids = { "dev-desk", "dev-mac", "dev-cloud" }
+	local chats, crew, os_ = {}, {}, {}
+	local k = 0
+	local function chat(id: string, title: string, device: string, status: string): any
+		k += 1
+		local agent = BIG_AGENTS[(k - 1) % #BIG_AGENTS + 1]
+		local c = { id = id, title = title, device = device, status = status, updated = t - k * 5, created = t - 9000, agent = agent[1], model = agent[2] }
+		table.insert(chats, c)
+		return c
+	end
+	local function orch(id: string, name: string, hue: number, device: string, kind: string?): any
+		chat(id, name, device, "working")
+		local o = { id = id, kind = kind or "standard", name = name, goal = "", rules = "", crew_rules = "", notes = "", hue = hue,
+			crew = { devices = {} }, paused = false, archived = false, created = t - 9000, updated = t - 60 }
+		table.insert(os_, o)
+		return o
+	end
+	orch("orc-brain", "Brain dump", 140, "dev-cloud", "brain_dump")
+	for j = 1, spec.own do
+		chat(`own{j}`, if j == 1 then "Corporate Zeron Reins Strategy" else `Brain note {j}`, "dev-cloud", "working")
+		table.insert(crew, { orchestrator_id = "orc-brain", chat_id = `own{j}`, released = false })
+	end
+	for h, hub in spec do
+		if type(h) ~= "number" then
+			continue
+		end
+		local oid = `orc-{h}`
+		orch(oid, hub[1], (h * 67) % 360, dev_ids[(h - 1) % #dev_ids + 1])
+		for i = 1, hub[2] do
+			local title = if hub[3] then hub[3][(i - 1) % #hub[3] + 1] else `{hub[1]} thread {i}`
+			local status = if hub[5] == "fold" then (if i <= 4 then "working" else "idle") else SHAPE_MIX[(i + hub[4] - 1) % #SHAPE_MIX + 1]
+			local cid = `s{h}c{i}`
+			chat(cid, title, dev_ids[(h + i) % #dev_ids + 1], status)
+			table.insert(crew, { orchestrator_id = oid, chat_id = cid, released = false })
+		end
+	end
+	shape_now = { name = name, chats = chats, crew = crew, os = os_, devices = devices }
+	sessions.now:set({
+		state = "ready", here = "dev-desk", devices = devices, projects = {}, chats = chats, archived = {}, children = {},
+		places = { pinned = {}, sections = {} }, places_ready = true,
+	} :: any)
+	orchestration.now:set({ state = "ready", orchestrators = os_, crew = crew, items = {}, asks = {}, dumps = {} })
+	orchestration.comms:set({})
+end
+for name in SHAPES do
+	ui.command { id = `map_shape_{name}`, title = `Map: the {name} fleet shape`, run = function()
+		map_shape(name)
+	end }
+end
+local function shape_push()
+	local sh = shape_now
+	if not sh then
+		return
+	end
+	sessions.now:set({
+		state = "ready", here = "dev-desk", devices = sh.devices, projects = {}, chats = table.clone(sh.chats), archived = {}, children = {},
+		places = { pinned = {}, sections = {} }, places_ready = true,
+	} :: any)
+	orchestration.now:set({ state = "ready", orchestrators = sh.os, crew = table.clone(sh.crew), items = {}, asks = {}, dumps = {} })
+end
+-- A node's menu on the force Graph (`force_menu_for`, its id): its items'
+-- labels into `force_menu`; `map_force_menu_pick` selects the item labelled
+-- `force_menu_pick`.
+local force_menu_for = ui.state("force_menu_for", "")
+local force_menu = ui.state("force_menu", {} :: any)
+local force_menu_pick = ui.state("force_menu_pick", "")
+ui.command { id = "map_force_menu_read", title = "Map: read a force node's menu", run = function()
+	local out = {}
+	for _, it in require("@ds/orch_force").menu_of(force_menu_for:peek()) or {} do
+		if it.label then
+			table.insert(out, it.label)
+		end
+	end
+	force_menu:set(out)
+end }
+ui.command { id = "map_force_menu_pick", title = "Map: pick from a force node's menu", run = function()
+	for _, it in require("@ds/orch_force").menu_of(force_menu_for:peek()) or {} do
+		if it.label == force_menu_pick:peek() and it.on_select then
+			it.on_select()
+		end
+	end
+end }
+ui.command { id = "map_shape_add", title = "Map: a thread added to the first orchestrator", run = function()
+	local sh = shape_now
+	if not sh then
+		return
+	end
+	local id = `added{#sh.chats}`
+	table.insert(sh.chats, { id = id, title = "A new thread", device = "dev-desk", status = "working", updated = os.time(), created = os.time(), agent = "claude", model = "claude-opus-5-5" })
+	table.insert(sh.crew, { orchestrator_id = "orc-1", chat_id = id, released = false })
+	shape_push()
+end }
+ui.command { id = "map_shape_finish", title = "Map: the first orchestrator's first working thread finishes", run = function()
+	local sh = shape_now
+	if not sh then
+		return
+	end
+	for i, c in sh.chats do
+		if c.status == "working" and string.sub(c.id, 1, 3) == "s1c" then
+			local d = table.clone(c)
+			d.status = "done"
+			d.updated = os.time()
+			sh.chats[i] = d
+			break
+		end
+	end
+	shape_push()
+end }
 for _, z in { { "in", 1.25 }, { "out", 0.8 } } do
 	ui.command { id = `map_force_zoom_{z[1]}`, title = `Map: zoom the force graph {z[1]}`, run = function()
 		require("@ds/orch_force").zoom_by(z[2] :: number)
@@ -1002,9 +1147,33 @@ for _, m in { "active", "recent", "all" } do
 	end }
 end
 
+-- (The Map widget alone at a set width, `force_bare_w` points: the force
+-- Graph's balance pictures. The page stays mounted under it for its data,
+-- every widget of it hidden (`map_bare`): one Graph at a time.)
+local bare_w = ui.state("force_bare_w", 0)
+ui.command { id = "map_bare", title = "Only the Map widget, at a set width", run = function()
+	local hidden = {}
+	for _, id in page.WIDGETS do
+		hidden[id] = true
+	end
+	page.widgets:set({ order = table.clone(page.WIDGETS), hidden = hidden :: any })
+end }
 return ui.column {
 	w_full = true,
 	h_full = true,
 	bg = "$background",
+	ui.show(function(): boolean
+		return bare_w:get() > 0
+	end, ui.column {
+		p = 16,
+		shrink = 0,
+		ui.column {
+			id = "force-bare",
+			w = function(): number
+				return bare_w:get()
+			end,
+			page.map_widget(),
+		},
+	}),
 	page.Page(),
 }
