@@ -1,7 +1,8 @@
 -- An orchestrator's page (screens/orchestrator/page) in the sample world
 -- (ui/orchestrator_fixture.luau): its head, its conversation with the
--- crew's reports as one Crew updates card, its live state (what needs you,
--- its board, its crew), split wide and one at a time narrow; and the New
+-- crew's reports as one Crew updates card, its side panel (what needs you
+-- and its board, its crew: tests/orch_side_panel), split wide and one at a
+-- time narrow; and the New
 -- orchestrator dialog and its settings, each asking the one op.
 
 local function settle(app: any)
@@ -34,7 +35,7 @@ test("orchestrator page: its head says what it is and how its crew stands", func
 	expect(app:has('#orch-name >> "Orchestrators"')).to_be(true)
 	expect(app:has('#orch-goal >> "Ship Orchestrators and the Control room in zgx."')).to_be(true)
 	-- Three of its four crew threads work now.
-	expect(app:has('#orch-crew-count >> "3/4"')).to_be(true)
+	expect(app:has('#orch-crew-count >> "3 of 4 working"')).to_be(true)
 	expect(app:has('#orch-model >> "Opus 5.5"')).to_be(true)
 end)
 
@@ -45,30 +46,32 @@ test("orchestrator page: wide, its conversation and live state side by side", fu
 	-- The crew's reports are one card in its conversation, never a bubble.
 	expect(app:has('#orch-conversation >> "Crew updates"')).to_be(true)
 	expect(app:has('#orch-conversation >> "Needs a decision: tabs or split for the orchestrator page"')).to_be(true)
-	-- Its live state: what needs it, its board (its own items only), its crew.
+	-- Its side panel: what needs it, its board (its own items only), its crew.
 	expect(app:has('#orch-section-needs >> "Orchestrator page: conversation and live state side by side, or tabs?"')).to_be(true)
-	expect(app:has('#orch-page-board-now >> "Control room"')).to_be(true)
+	expect(app:wait('#orch-page-board-now >> "Control room"', { timeout_ms = 2000 })).to_be(true)
 	expect(app:has('#orch-page-board >> "Reboot Moscow node"')).to_be(false)
-	expect(app:has('#orch-section-crew >> "Engine: orchestration state"')).to_be(true)
+	expect(app:has('#orch-panel-crew >> "Engine: orchestration state"')).to_be(true)
 end)
 
 test("orchestrator page: narrow, one half at a time, switched in its head", function()
-	local app = open(1000, 800)
+	local app = open(900, 800)
+	-- Split with no room for both: the conversation.
 	expect(shown(app, "#orch-conversation")).to_be(true)
 	expect(shown(app, "#orch-side")).to_be(false)
 	app:click('#orch-head >> role:radio "Live"')
 	settle(app)
 	expect(shown(app, "#orch-side")).to_be(true)
 	expect(shown(app, "#orch-conversation")).to_be(false)
-	-- Widened again, both.
+	-- Split, widened: both.
+	app:click('#orch-head >> role:radio "Split"')
 	app:resize(1600, 900)
 	settle(app)
 	expect(shown(app, "#orch-conversation")).to_be(true)
 	expect(shown(app, "#orch-side")).to_be(true)
 	app:resize(900, 700)
 	settle(app)
-	expect(shown(app, "#orch-side")).to_be(true)
-	expect(shown(app, "#orch-conversation")).to_be(false)
+	expect(shown(app, "#orch-side")).to_be(false)
+	expect(shown(app, "#orch-conversation")).to_be(true)
 end)
 
 test("orchestrator page: an ask's choice answers it", function()

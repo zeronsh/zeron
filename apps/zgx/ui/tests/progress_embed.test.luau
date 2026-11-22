@@ -1,5 +1,6 @@
 -- Progress where a thread is shown (screens/control/progress's strip): a
--- crew row's line on an orchestrator's page (ui/orchestrator_fixture.luau),
+-- crew thread's detail in an orchestrator's side panel
+-- (ui/orchestrator_fixture.luau),
 -- pinned from its menu; never on a board card, which is its title and one
 -- quiet line (ds/orch_card; ui/control_page_fixture.luau); and a crew
 -- thread's line in its session's head (ui/control_fixture.luau, the window).
@@ -8,12 +9,20 @@ test("progress embed: crew rows and board cards on an orchestrator's page", func
 	local app = mount("orchestrator_fixture.luau")
 	app:resize(1440, 1400)
 	app:frames(40)
-	local CREW = "#orch-section-crew"
-	-- Each crew thread with a row: its clocks and menu, lean (the row
-	-- already says its state, steps and activity).
+	local CREW = "#orch-detail-progress"
+	-- A crew thread opened in the panel: its clocks and menu, lean (the
+	-- detail already says its state and activity).
+	app:click("#orch-panel-tabs >> role:tab [2]")
+	app:frames(20)
+	app:click('#orch-crew-list >> role:button "Open Engine: orchestration state"')
+	app:frames(20)
 	expect(app:has(`{CREW} >> #progress-strip-th-engine-state`)).to_be(true)
-	expect(app:count(`{CREW} >> .orch-progress-lean`)).to_be(4)
+	expect(app:count(`{CREW} >> .orch-progress-lean`)).to_be(1)
 	expect(app:has(`{CREW} >> #progress-strip-th-engine-state >> ~"last step 2m ago"`)).to_be(true)
+	app:click("#orch-detail-back")
+	app:frames(10)
+	app:click('#orch-crew-list >> role:button "Open Control room UI"')
+	app:frames(20)
 	expect(app:has(`{CREW} >> #progress-strip-th-ui-control >> .orch-progress-menu`)).to_be(true)
 	-- Its board's cards: their title and one quiet line, no strip.
 	expect(app:has(`#orch-page-board >> #progress-strip-th-engine-flow`)).to_be(false)
@@ -40,7 +49,11 @@ test("progress embed: a crew row's line, pinned to Progress from its menu", func
 	local app = mount("orchestrator_fixture.luau")
 	app:resize(1440, 2400)
 	app:frames(40)
-	local ROW = "#orch-section-crew >> #progress-strip-th-engine-state"
+	app:click("#orch-panel-tabs >> role:tab [2]")
+	app:frames(20)
+	app:click('#orch-crew-list >> role:button "Open Engine: orchestration state"')
+	app:frames(20)
+	local ROW = "#orch-detail-progress >> #progress-strip-th-engine-state"
 	expect(app:has(ROW)).to_be(true)
 	app:click(`{ROW} >> .orch-progress-menu`)
 	app:frames(10)

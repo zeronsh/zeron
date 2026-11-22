@@ -319,5 +319,62 @@ ui.command { id = "orch.archive_ci", title = "CI speed archived", run = function
 	end)
 end }
 
+-- A new orchestrator, nothing yet for its panel, its page open; then its
+-- first task.
+ui.command { id = "orch.fresh", title = "A new orchestrator", run = function()
+	local now = table.clone(orchestration.now:peek())
+	local list = table.clone(now.orchestrators or {})
+	table.insert(list, {
+		id = "orc-fresh", kind = "standard", name = "Release train", goal = "Ship a release every Friday.",
+		hue = 210, crew = { devices = {} }, paused = false, archived = false, created = NOW, updated = NOW,
+	})
+	now.orchestrators = list
+	orchestration.now:set(now)
+	-- (Its conversation empty, as a new one's is.)
+	local c = table.clone(fixture_chats:peek())
+	c["orc-fresh"] = { messages = {}, session = { id = "orc-fresh", state = "ready", title = "Release train", device = "dev-desk", harness = "claude-code", model = "claude-code/opus-5.5" } }
+	fixture_chats:set(c)
+	route.orchestrator("orc-fresh")
+end }
+ui.command { id = "orch.fresh_task", title = "The new one's first task", run = function()
+	local now = table.clone(orchestration.now:peek())
+	local items = table.clone(now.items or {})
+	table.insert(items, { id = "it-fresh", orchestrator_id = "orc-fresh", title = "Release notes", detail = "", state = "planned",
+		priority = "normal", threads = {}, links = {}, order = 0, created = NOW, updated = NOW })
+	now.items = items
+	orchestration.now:set(now)
+end }
+-- Orchestrators' crew grown past every cap: 8 more working, 3 failed, 7
+-- idle (done), each a thread under it.
+ui.command { id = "orch.big_crew", title = "A big crew", run = function()
+	local now = table.clone(orchestration.now:peek())
+	local crew = table.clone(now.crew or {})
+	local s = table.clone(sessions.now:peek()) :: any
+	local kids = table.clone(s.children or {})
+	local mine = table.clone(kids["orc-orch"] or {})
+	local function add(id: string, title: string, st: string, age: number)
+		table.insert(crew, { orchestrator_id = "orc-orch", chat_id = id, role = "ui", joined = ago(age + 60) })
+		table.insert(mine, {
+			id = id, title = title, name = title, parent = "orc-orch", device = "dev-desk", status = st,
+			agent = "claude", model = "claude-opus-5-5", updated = ago(age), created = ago(age + 60),
+			activity = if st == "working" then { kind = "edit", label = `Editing {title}`, since = ago(age) } else nil,
+		})
+	end
+	for i = 1, 8 do
+		add(`th-big-w{i}`, `Busy thread {i}`, "working", 30 * i)
+	end
+	for i = 1, 3 do
+		add(`th-big-f{i}`, `Broken thread {i}`, "failed", 400 + 30 * i)
+	end
+	for i = 1, 7 do
+		add(`th-big-i{i}`, `Quiet thread {i}`, "done", 2000 + 60 * i)
+	end
+	kids["orc-orch"] = mine
+	s.children = kids
+	now.crew = crew
+	sessions.now:set(s)
+	orchestration.now:set(now)
+end }
+
 route.orchestrator("orc-orch")
 return shell

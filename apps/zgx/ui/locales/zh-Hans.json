@@ -1466,6 +1466,12 @@
         "retry": "重试",
         "timeout": "引擎没有回应",
         "recent": "最近的回答"
+      },
+      "crew_list": {
+        "working": "工作中",
+        "waiting": "等你处理",
+        "idle": "空闲",
+        "idle_word": "空闲"
       }
     },
     "limit": {
@@ -4454,11 +4460,18 @@
       "resume": "Resume",
       "settings": "Settings",
       "answer_failed": "Couldn't send the answer",
-      "working_of": "{working}/{total}",
+      "working_of": "{total} 个中 {working} 个在工作",
       "missing": "This orchestrator isn't here",
       "to_control": "Control room",
       "work": "Work",
-      "flow": "Flow"
+      "flow": "Flow",
+      "mode": "显示",
+      "split": "分栏",
+      "pause_tip": "暂停：不派新的任务，不再唤醒",
+      "resume_tip": "继续：团队重新接手新工作",
+      "settings_tip": "设置：目标、规则、机器",
+      "resize": "调整面板宽度",
+      "first_hint": "告诉它先做什么。它会规划工作并启动团队。"
     },
     "dialog": {
       "new_title": "New orchestrator",
@@ -4636,6 +4649,27 @@
       "decision": "决定",
       "resumed_restart": "引擎已重启",
       "resumed_rerun": "后台任务已中断：请重新运行"
+    },
+    "panel": {
+      "label": "任务和团队",
+      "tasks": "任务",
+      "crew": "团队",
+      "needs_you": "需要你",
+      "board": "看板",
+      "back": "返回",
+      "open_thread": "打开线程",
+      "detail": {
+        "waiting": "等你处理",
+        "report": "最近汇报",
+        "progress": "进度"
+      },
+      "state": {
+        "planned": "已计划",
+        "active": "进行中",
+        "review": "待审",
+        "blocked": "受阻",
+        "done": "完成"
+      }
     }
   },
   "control": {

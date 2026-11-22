@@ -132,15 +132,15 @@ test("control scroll: scrolled back up, the top is kept", function()
 	expect(top(app)).to_be(start)
 end)
 
--- An orchestrator's page (screens/orchestrator/page, its live state's
--- scroll): kept as the page is made again while the host's orchestration
--- is a moment unknown.
+-- An orchestrator's page (screens/orchestrator/page, its side panel's
+-- Tasks scroll): kept as the page is made again while the host's
+-- orchestration is a moment unknown.
 test("orchestrator scroll: the live state keeps its place while orchestration is republished", function()
 	local app = mount("orchestrator_fixture.luau")
 	app:resize(1440, 700)
 	app:frames(30)
 	local function at(): number
-		local line = string.match(app:tree("#orch-section-crew"), "[^\n]+") or ""
+		local line = string.match(app:tree("#orch-fold-board"), "[^\n]+") or ""
 		return tonumber(string.match(line, " %-?[%d%.]+,(%-?[%d%.]+) ")) or 0
 	end
 	local start = at()

@@ -1428,6 +1428,12 @@
         "retry": "Retry",
         "timeout": "no reply from the engine",
         "recent": "Recent answers"
+      },
+      "crew_list": {
+        "working": "Working",
+        "waiting": "Waiting on you",
+        "idle": "Idle",
+        "idle_word": "Idle"
       }
     },
     "limit": {
@@ -4416,11 +4422,18 @@
       "resume": "Resume",
       "settings": "Settings",
       "answer_failed": "Couldn't send the answer",
-      "working_of": "{working}/{total}",
+      "working_of": "{working} of {total} working",
       "missing": "This orchestrator isn't here",
       "to_control": "Control room",
       "work": "Work",
-      "flow": "Flow"
+      "flow": "Flow",
+      "mode": "Show",
+      "split": "Split",
+      "pause_tip": "Pause: no new crew work, no wakes",
+      "resume_tip": "Resume: the crew picks up new work again",
+      "settings_tip": "Settings: goal, rules, machines",
+      "resize": "Resize the panel",
+      "first_hint": "Tell it what to work on first. It plans the work and starts its crew."
     },
     "dialog": {
       "new_title": "New orchestrator",
@@ -4598,6 +4611,27 @@
       "decision": "Decision",
       "resumed_restart": "The engine restarted",
       "resumed_rerun": "Its background work stopped: run it again"
+    },
+    "panel": {
+      "label": "Tasks and crew",
+      "tasks": "Tasks",
+      "crew": "Crew",
+      "needs_you": "Needs you",
+      "board": "Board",
+      "back": "Back",
+      "open_thread": "Open thread",
+      "detail": {
+        "waiting": "Waiting on you",
+        "report": "Last report",
+        "progress": "Progress"
+      },
+      "state": {
+        "planned": "Planned",
+        "active": "Running",
+        "review": "In review",
+        "blocked": "Blocked",
+        "done": "Done"
+      }
     }
   },
   "control": {
