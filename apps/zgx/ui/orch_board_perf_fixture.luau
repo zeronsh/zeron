@@ -9,6 +9,8 @@
 --   perf_status_fresh  the same, every row handed back as a new table (the
 --                      whole list written again)
 --   perf_move          a Running card moves to Done, and back the next time
+--   perf_same          nothing changed: the same rows in a new list;
+--                      perf_same_fresh, each row a new table
 --   perf_tick          the clock goes on a minute
 --   perf_read          the run counts (ds/orch_perf_trace) into the state
 --                      `perf_counts`; perf_reset sets them to nothing
@@ -221,6 +223,18 @@ ui.command { id = "perf_move", title = "Perf: a card moves between columns", run
 			patch(cards, TARGET, { place = "running", status = "working", old_state = "active", from = "done", seq = c.seq + 1, closed = false, since = T - 1, status_since = T - 1, updated = T + flips })
 		end
 	end)
+end }
+-- Nothing changed: the same rows again, in a new list (or each a new table).
+ui.command { id = "perf_same", title = "Perf: the same rows again", run = function()
+	local was: { any } = cards:peek()
+	cards:set(table.clone(was))
+end }
+ui.command { id = "perf_same_fresh", title = "Perf: the same rows again, each a new table", run = function()
+	local out: { any } = {}
+	for _, row in cards:peek() do
+		table.insert(out, table.clone(row))
+	end
+	cards:set(out)
 end }
 ui.command { id = "perf_tick", title = "Perf: a minute goes by", run = function()
 	now:set(now:peek() + 60)
