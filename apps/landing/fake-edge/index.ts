@@ -6,11 +6,12 @@
 
 import { SITE_IDS } from "../src/lib/store/names.ts";
 import { makeToken, tokenHash, tokenId, TOKEN_ID } from "./token.ts";
-import { audit, CATEGORIES, DAY, tokens, MANY_IDS, manyMore, NOW, plugins, reports, USERS, type FakePlugin, type FakeUser, type FakeVersion } from "./fixtures.ts";
+import { audit, CATEGORIES, DAY, tokens, MANY_IDS, manyMore, NOW, plugins, reports, startClock, USERS, type FakePlugin, type FakeUser, type FakeVersion } from "./fixtures.ts";
 
 const COOKIE = "__Host-zeron_session";
 
-const state = {
+/** The fake's state, made on its first request (its clock, the fixtures' "now", starts then). */
+const freshState = () => ({
   plugins: plugins(),
   reports: reports(),
   audit: audit(),
@@ -33,7 +34,8 @@ const state = {
   bare: null as string | null,
   /** The store with nothing listed (POST /_fake/empty?on=1): a page's emptiest. */
   empty: false,
-};
+});
+let state = undefined as unknown as ReturnType<typeof freshState>;
 
 // Programs the host rates (crates/plugin-guard/src/commands.rs), enough for the fixtures.
 const CONTAINED = new Set(["cat", "date", "jq", "ls", "uname", "wc", "echo", "grep", "head", "tail"]);
@@ -1025,6 +1027,10 @@ function reportView(r: (typeof state.reports)[number]) {
 
 export default {
   async fetch(request: Request): Promise<Response> {
+    if (!state) {
+      startClock(Date.now());
+      state = freshState();
+    }
     try {
       const response = await route(request);
       return new URL(request.url).pathname.startsWith("/store/v1/admin/") ? rotate(request, response) : response;

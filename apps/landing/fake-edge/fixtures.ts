@@ -8,8 +8,21 @@ import { ICONS, screenshot } from "./art.ts";
 import { makeToken, tokenId } from "./token.ts";
 
 export const DAY = 86_400_000;
-/** The fixtures' "now": fixed, so the tests see the same dates every run. */
-export const NOW = Date.UTC(2026, 10, 17, 18, 0, 0);
+/**
+ * The fixtures' "now": the hour of the fake's first request (startClock), so a run sees the same
+ * dates throughout, and every date is where it was meant to be against the real clock the site
+ * reads (a token "ending in 3 days" hasn't ended; "new this week" is this week), whatever day the
+ * tests run. (Not at load: a Worker's clock reads 0 outside a request.)
+ */
+export let NOW = 0;
+/** How long ago each of USERS joined, in days, in their order. */
+const JOINED = [400, 900, 2, 30, 6, 1];
+
+/** Sets the fixtures' "now" to the hour `at` falls in; before any fixture is made. */
+export function startClock(at: number): void {
+  NOW = Math.floor(at / 3_600_000) * 3_600_000;
+  USERS.forEach((u, i) => (u.created_at = NOW - JOINED[i]! * DAY));
+}
 
 export interface FakeUser {
   id: string;
@@ -20,14 +33,15 @@ export interface FakeUser {
   badges: { id: string; name: string; icon: string | null }[];
 }
 
+// (Each one's created_at: set by startClock, from JOINED.)
 export const USERS: FakeUser[] = [
-  { id: "user_ada", name: "Ada Lovelace", username: "ada", roles: [], created_at: NOW - 400 * DAY, badges: [{ id: "v3-beta", name: "V3 BETA", icon: null }] },
-  { id: "user_grace", name: "Grace Hopper", username: "grace", roles: ["admin"], created_at: NOW - 900 * DAY, badges: [] },
-  { id: "user_lin", name: "Lin", username: null, roles: [], created_at: NOW - 2 * DAY, badges: [] },
-  { id: "user_kai", name: "Kai Moreno", username: "kai", roles: [], created_at: NOW - 30 * DAY, badges: [] },
-  { id: "user_mo", name: "Mo", username: "mo-dev", roles: [], created_at: NOW - 6 * DAY, badges: [] },
+  { id: "user_ada", name: "Ada Lovelace", username: "ada", roles: [], created_at: 0, badges: [{ id: "v3-beta", name: "V3 BETA", icon: null }] },
+  { id: "user_grace", name: "Grace Hopper", username: "grace", roles: ["admin"], created_at: 0, badges: [] },
+  { id: "user_lin", name: "Lin", username: null, roles: [], created_at: 0, badges: [] },
+  { id: "user_kai", name: "Kai Moreno", username: "kai", roles: [], created_at: 0, badges: [] },
+  { id: "user_mo", name: "Mo", username: "mo-dev", roles: [], created_at: 0, badges: [] },
   // An author with a username and nothing sent yet.
-  { id: "user_noor", name: "Noor", username: "noor", roles: [], created_at: NOW - 1 * DAY, badges: [] },
+  { id: "user_noor", name: "Noor", username: "noor", roles: [], created_at: 0, badges: [] },
 ];
 
 // The store's fixed list (contract amendment 4); the names are the fake's.
@@ -120,7 +134,7 @@ interface Spec {
   featured?: boolean;
   age: number;
   /** Older versions first; the last is the newest. Default: one verified 1.0.0. */
-  history?: { version: string; status: Story; ago: number; notes?: string; review?: { reason?: string; message?: string; decided_at?: number }; via?: FakeVersion["via"]; engines?: string; permissions?: string[]; commands?: string[]; network?: string[]; mcp?: { command: string; args?: string[]; env?: Record<string, string> }; service?: string; settings?: Record<string, unknown>[]; files?: Record<string, string>; shots?: string[] }[];
+  history?: { version: string; status: Story; ago: number; notes?: string; review?: { reason?: string; message?: string; /** In days, before the fixtures' "now". */ decided_ago?: number }; via?: FakeVersion["via"]; engines?: string; permissions?: string[]; commands?: string[]; network?: string[]; mcp?: { command: string; args?: string[]; env?: Record<string, string> }; service?: string; settings?: Record<string, unknown>[]; files?: Record<string, string>; shots?: string[] }[];
   readme?: string;
   screenshots?: number;
   /** More files in every version's package. */
@@ -233,15 +247,16 @@ function build(spec: Spec): FakePlugin {
       ? [...ok, { id: "risky", level: "warn" as const, message: "Asks to run programs on the computer as you." }]
       : ok;
     const published = NOW - h.ago * DAY;
+    const decidedAt = h.review?.decided_ago === undefined ? undefined : NOW - h.review.decided_ago * DAY;
     // A verified version was verified half a day after it was published (a yanked one was, before it was yanked).
-    const verifiedAt = h.status === "verified" || h.status === "yanked" ? (h.review?.decided_at ?? published + DAY / 2) : null;
+    const verifiedAt = h.status === "verified" || h.status === "yanked" ? (decidedAt ?? published + DAY / 2) : null;
     const status: VersionStatus = h.status === "yanked" || h.status === "taken_down" || h.status === "removed" ? h.status : "listed";
     const staff = h.status === "taken_down" || h.status === "removed";
     const review: FakeReview =
       verifiedAt !== null
         ? { decided: true, decision: "verified", decided_at: verifiedAt }
         : h.status === "declined"
-          ? { decided: true, decision: "declined", ...h.review }
+          ? { decided: true, decision: "declined", reason: h.review?.reason, message: h.review?.message, ...(decidedAt === undefined ? {} : { decided_at: decidedAt }) }
           : { decided: false, decision: null };
     // (The manifest travels beside the files, never as one: the edge lists it apart.)
     return {
@@ -257,7 +272,7 @@ function build(spec: Spec): FakePlugin {
       deploy_token: h.via === "deploy_token" ? githubActions() : null,
       yanked_by: h.status === "yanked" ? ("author" as const) : null,
       superseded: null,
-      removal: staff ? { at: h.review?.decided_at ?? published + DAY, reason: h.review?.message ?? h.review?.reason ?? null } : null,
+      removal: staff ? { at: decidedAt ?? published + DAY, reason: h.review?.message ?? h.review?.reason ?? null } : null,
       ...(h.status === "taken_down" ? { blocked: true } : {}),
       checks,
       manifest,
@@ -525,9 +540,9 @@ Footnotes are shown as typed.[^1] Questions and ideas are welcome on [the reposi
       { version: "1.0.0", status: "verified", ago: 12, mcp: { command: "node", args: ["server.js"], env: { API_URL: "https://api.averyveryverylongsubdomainname.example.com" } }, service: "service.luau", settings: [{ key: "notes", kind: "folder", label: "Notes folder" }] },
       // (Verified, then stopped by its author: still its newest verified version, what 1.5.0 is weighed against.)
       { version: "1.1.0", status: "yanked", ago: 10, notes: "Moved the panel; stopped offering it after the sidebar changed under it.", mcp: { command: "node", args: ["server.js"], env: { API_URL: "https://api.averyveryverylongsubdomainname.example.com" } }, service: "service.luau", settings: [{ key: "notes", kind: "folder", label: "Notes folder" }] },
-      { version: "1.2.0", status: "taken_down", ago: 8, review: { reason: "unsafe", message: "Taken down: it sent the open chat's text to a host its README doesn't name. Anyone who has it has had it turned off.", decided_at: NOW - 7 * DAY } },
+      { version: "1.2.0", status: "taken_down", ago: 8, review: { reason: "unsafe", message: "Taken down: it sent the open chat's text to a host its README doesn't name. Anyone who has it has had it turned off.", decided_ago: 7 } },
       { version: "1.3.0", status: "removed", ago: 6 },
-      { version: "1.4.0", status: "declined", ago: 4, review: { reason: "asks_too_much", message: "It asks to run python3, git and jq and to reach any site at all, but nothing in the README or the listing says what it runs them for or what it sends where. Name the hosts it needs and drop the wildcard, say in the README what each program is run for, and send it again: a reviewer will look at the new version the same day. Until then this one stays listed, not verified.", decided_at: NOW - 3 * DAY } },
+      { version: "1.4.0", status: "declined", ago: 4, review: { reason: "asks_too_much", message: "It asks to run python3, git and jq and to reach any site at all, but nothing in the README or the listing says what it runs them for or what it sends where. Name the hosts it needs and drop the wildcard, say in the README what each program is run for, and send it again: a reviewer will look at the new version the same day. Until then this one stays listed, not verified.", decided_ago: 3 } },
       // (The worst to weigh: two new asks, a program more, hosts named in place
       // of the wildcard, its MCP server and service changed, a setting that grants.)
       { version: "1.5.0", status: "undecided", ago: 1, notes: "Names the hosts it reaches; says what it runs and why.", permissions: ["ui.add", "network", "commands", "tools", "messages.send", "notifications"], commands: ["python3", "git", "jq", "bash"], network: ["api.averyveryverylongsubdomainname.example.com", "localhost:8080", "uploads.averyveryverylongsubdomainname.example.com"], mcp: { command: "node", args: ["server.js", "--listen", "0.0.0.0:7777"], env: { API_URL: "https://api.averyveryverylongsubdomainname.example.com", UPLOAD_TOKEN: "set-on-first-run" } }, service: "services/sync.luau", settings: [{ key: "notes", kind: "folder", label: "Notes folder" }, { key: "share", kind: "permission", label: "Share notes with agents" }] },
@@ -623,7 +638,7 @@ Footnote[^x"><script>].
       { version: "1.0.0", status: "verified", ago: 70 },
       { version: "1.1.0", status: "yanked", ago: 40, notes: "Broke the sidebar on narrow windows." },
       { version: "1.1.1", status: "verified", ago: 39, notes: "Fixed the sidebar on narrow windows." },
-      { version: "1.2.0", status: "declined", ago: 5, notes: "Shows the cost of each chat.", permissions: ["ui.add", "sessions.read", "network"], network: ["*"], review: { reason: "asks_too_much", message: "It asks to reach any site, but the README doesn't say why. Name the hosts it needs, or say what it sends where.", decided_at: NOW - 4 * DAY } },
+      { version: "1.2.0", status: "declined", ago: 5, notes: "Shows the cost of each chat.", permissions: ["ui.add", "sessions.read", "network"], network: ["*"], review: { reason: "asks_too_much", message: "It asks to reach any site, but the README doesn't say why. Name the hosts it needs, or say what it sends where.", decided_ago: 4 } },
       { version: "1.2.1", status: "undecided", ago: 2, notes: "Shows the cost of each chat, from your agents' own usage.", permissions: ["ui.add", "sessions.read", "usage.read"] },
     ],
   },
@@ -652,7 +667,7 @@ Footnote[^x"><script>].
     categories: ["utilities"],
     owner: "user_kai",
     age: 20,
-    history: [{ version: "0.1.0", status: "declined", ago: 20, review: { reason: "broken", message: "It doesn't start.", decided_at: NOW - 19 * DAY } }],
+    history: [{ version: "0.1.0", status: "declined", ago: 20, review: { reason: "broken", message: "It doesn't start.", decided_ago: 19 } }],
     status: "unlisted",
   },
   {
@@ -758,8 +773,8 @@ for (const [i, [id, name, summary, icon, categories]] of MORE.entries()) {
 // taken down, one whose newest version staff removed.
 SPECS.push(
   { id: "first-light", name: "First light", summary: "Opens your morning chats as you left them.", icon: null, categories: ["productivity"], keywords: ["morning"], permissions: ["ui.add"], owner: "user_ada", installs: 0, age: 2, screenshots: 0, history: [{ version: "0.1.0", status: "undecided", ago: 2 }] },
-  { id: "rough-draft", name: "Rough draft", summary: "Drafts a reply in the composer from the chat so far.", icon: null, categories: ["chat"], keywords: ["draft"], permissions: ["ui.add", "messages.read"], owner: "user_ada", installs: 0, age: 9, screenshots: 0, history: [{ version: "0.1.0", status: "declined", ago: 9, review: { reason: "listing", message: "The README is one line. Say what it drafts from, where the draft appears, and add a picture of it.", decided_at: NOW - 8 * DAY } }] },
-  { id: "clipboard-sync", name: "Clipboard sync", summary: "Keeps the clipboard the same on all your devices.", icon: null, categories: ["utilities"], keywords: ["clipboard"], permissions: ["ui.add", "clipboard", "network"], network: ["sync.clipboard-sync.example.com"], owner: "user_ada", installs: 310, age: 40, screenshots: 0, history: [{ version: "1.0.0", status: "taken_down", ago: 40, review: { reason: "unsafe", message: "It sent every copied password to its sync host in plain text.", decided_at: NOW - 12 * DAY } }] },
+  { id: "rough-draft", name: "Rough draft", summary: "Drafts a reply in the composer from the chat so far.", icon: null, categories: ["chat"], keywords: ["draft"], permissions: ["ui.add", "messages.read"], owner: "user_ada", installs: 0, age: 9, screenshots: 0, history: [{ version: "0.1.0", status: "declined", ago: 9, review: { reason: "listing", message: "The README is one line. Say what it drafts from, where the draft appears, and add a picture of it.", decided_ago: 8 } }] },
+  { id: "clipboard-sync", name: "Clipboard sync", summary: "Keeps the clipboard the same on all your devices.", icon: null, categories: ["utilities"], keywords: ["clipboard"], permissions: ["ui.add", "clipboard", "network"], network: ["sync.clipboard-sync.example.com"], owner: "user_ada", installs: 310, age: 40, screenshots: 0, history: [{ version: "1.0.0", status: "taken_down", ago: 40, review: { reason: "unsafe", message: "It sent every copied password to its sync host in plain text.", decided_ago: 12 } }] },
   { id: "old-sketch", name: "Old sketch", summary: "A first try at a sidebar of pinned chats.", icon: null, categories: ["productivity"], keywords: ["pins"], permissions: ["ui.add"], owner: "user_ada", installs: 0, age: 30, screenshots: 0, history: [{ version: "0.1.0", status: "yanked", ago: 30 }, { version: "0.2.0", status: "removed", ago: 20 }] },
   // Words built to cost the parser the square of their length, each at the store's cap (a 512 KB
   // README, 64 KB notes): the page must still answer at once, showing them as text.
