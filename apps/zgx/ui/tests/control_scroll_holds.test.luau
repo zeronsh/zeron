@@ -137,10 +137,11 @@ end)
 -- orchestration is a moment unknown.
 test("orchestrator scroll: the live state keeps its place while orchestration is republished", function()
 	local app = mount("orchestrator_fixture.luau")
-	app:resize(1440, 700)
+	-- (Short: its Tasks list taller than the panel.)
+	app:resize(1440, 450)
 	app:frames(30)
 	local function at(): number
-		local line = string.match(app:tree("#orch-fold-board"), "[^\n]+") or ""
+		local line = string.match(app:tree("#orch-list-done"), "[^\n]+") or ""
 		return tonumber(string.match(line, " %-?[%d%.]+,(%-?[%d%.]+) ")) or 0
 	end
 	local start = at()

@@ -6,10 +6,9 @@
 -- cards. The side panel (screens/orchestrator/panel) holds its tasks and its
 -- crew. A switch in the head shows the conversation, both, or the panel
 -- alone, at every width; the seam between the two sizes the panel. Width
--- and choice are kept for each orchestrator (panel_state). A new one, with
--- nothing for the panel yet, shows its conversation alone and one line on
--- what to type first; the panel offers itself once there's a task, an ask
--- or a crew thread.
+-- and choice are kept for each orchestrator (panel_state). A new one opens
+-- split like any other: its panel says nothing needs you, the board is
+-- empty and there's no crew yet, and its empty chat says what to type first.
 --
 --   Page { id = function() return orchestrator_id end }
 
@@ -174,32 +173,17 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 		end
 		return nil
 	end
-	-- Whether the panel has anything to show: a task, an ask, a crew thread.
-	local offered_now = ui.computed(function(): boolean
-		local id = props.of()
-		if #crew:get() > 0 or needs:get() > 0 then
-			return true
-		end
-		for _, it in orchestration.now:get().items or {} do
-			if it.orchestrator_id == id then
-				return true
-			end
-		end
-		return false
-	end)
-	local function offered(): boolean
-		return offered_now:get()
-	end
-	-- Its mode as kept, else Split once there's something to show.
-	local function kept_mode(kept: any, has: boolean): string
+	-- Its mode as kept, else Split: the full layout from the start, an
+	-- empty orchestrator's panel saying what's empty.
+	local function kept_mode(kept: any): string
 		local k = kept and kept.mode
 		if k == "chat" or k == "split" or k == "live" then
 			return k
 		end
-		return if has then "split" else "chat"
+		return "split"
 	end
 	ui.effect(function()
-		local m = kept_mode(panel_state.get(props.of()), offered_now:get())
+		local m = kept_mode(panel_state.get(props.of()))
 		if M.mode:peek() ~= m then
 			M.mode:set(m)
 		end
@@ -208,19 +192,15 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 	ui.effect(function()
 		local m = M.mode:get()
 		local id = props.of()
-		if id and m ~= kept_mode(panel_state.peek(id), offered_now:peek()) then
+		if id and m ~= kept_mode(panel_state.peek(id)) then
 			panel_state.set(id, "mode", m)
 		end
 	end)
 	local function fits(): boolean
 		return width:get() >= CHAT_MIN + PANEL_MIN + 1
 	end
-	-- What shows: nothing for the panel, the conversation; Split too
-	-- narrow for both, the conversation.
+	-- What shows: as chosen; Split too narrow for both, the conversation.
 	local function shows(): string
-		if not offered() then
-			return "chat"
-		end
 		local m = M.mode:get()
 		if m == "split" and not fits() then
 			return "chat"
@@ -361,7 +341,7 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 				id = "orch-mode",
 				shrink = 0,
 				hidden = function(): boolean
-					return M.view:get() == "flow" or not offered()
+					return M.view:get() == "flow"
 				end,
 				ds.Segmented {
 					value = M.mode,
@@ -455,7 +435,7 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 					tab = { id = slot_of(id), kind = "side_chat", chat = id, title = if o then o.name else "", data = { own = true, focus = focus } },
 				},
 				ui.show(function(): boolean
-					return not offered() and #(view.messages:get() or {}) == 0
+					return #(view.messages:get() or {}) == 0
 				end, ui.row {
 					id = "orch-first-hint",
 					absolute = true,

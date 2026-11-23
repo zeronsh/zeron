@@ -107,14 +107,15 @@ local Body = ui.component(function(p: { props: Props, orch: string }): Node
 			},
 		},
 	}
-	local tasks = scroller("orch-live", Tasks.Tasks {
+	local tasks_props: Tasks.Props = {
 		of = props.of,
 		name_of = props.name_of,
 		open_link = props.open_link,
 		needs = props.needs,
 		fold = fold,
 		on_open_card = open_detail,
-	}, true)
+	}
+	local tasks = scroller("orch-live", Tasks.Tasks(tasks_props), true)
 	local crew = scroller("orch-crew-scroll", CrewList.CrewList {
 		members = props.crew,
 		asks = function(): { any }
@@ -166,6 +167,8 @@ local Body = ui.component(function(p: { props: Props, orch: string }): Node
 		ui.show(function(): boolean
 			return state.detail:get() ~= nil
 		end, Detail.Detail {
+			-- (A card's detail is the board's: it takes the board's props.)
+			board = Tasks.board_props(tasks_props),
 			of = function(): any
 				return state.detail:get()
 			end,

@@ -1,10 +1,12 @@
--- A board card's or a crew thread's detail, open in an orchestrator's side
--- panel in place of its tabs: a back control, its title and how it stands,
--- the ask it waits on with its answers, its last report, the machine and
--- model it runs on, and "Open thread" (the only way from here to the
+-- What opens in an orchestrator's side panel in place of its tabs. A card:
+-- the board's own detail of it (ds/orch_board_detail's Card, with Back).
+-- A crew thread: a back control, its title and how it stands, the ask it
+-- waits on with its answers, its last report, the machine and model it
+-- runs on, its progress, and "Open thread" (the only way from here to the
 -- thread itself).
 --
 --   Detail { of = function() return { chat = id, item = id? } end,
+--     board = board props (screens/orchestrator/tasks' board_props),
 --     orchestrator = function() return id end, name_of = fn, device_name = fn,
 --     on_back = fn, on_open_thread = fn(chat) }
 
@@ -21,6 +23,7 @@ local sessions = require("@account/sessions")
 local NeedsYou = require("@app/screens/control/needs")
 local data = require("@ds/orch_data")
 local Progress = require("@app/screens/control/progress")
+local BoardDetail = require("@ds/orch_board_detail")
 
 local M = {}
 
@@ -29,6 +32,9 @@ local STATES: { [string]: boolean } = { planned = true, active = true, review = 
 
 export type Props = {
 	of: () -> { chat: string?, item: string? }?,
+	-- The board's props (ds/orch_board_ctx): a card's detail is the
+	-- board's own (ds/orch_board_detail's Card), not this one.
+	board: { [string]: any }?,
 	orchestrator: () -> string?,
 	name_of: (id: string?) -> string?,
 	device_name: (id: string) -> string?,
@@ -60,7 +66,56 @@ local function heading(key: string): Node
 	}
 end
 
+-- A card opened: the board's detail of it, with Back.
+local function card_detail(props: Props): Node
+	local board: { [string]: any } = table.clone(props.board or {})
+	-- (Its `on_close` is two things to the board: Back, with `back`, and a
+	-- card marked done or dropped, by its id. Told apart by that id.)
+	local close_card: any = board.on_close
+	board.on_close = function(id: any, dropped: any): any
+		if type(id) == "string" and type(close_card) == "function" then
+			return (close_card :: (string, any) -> any)(id, dropped)
+		end
+		props.on_back()
+		return nil
+	end
+	board.card = function(): string?
+		local d = props.of()
+		return d and d.item
+	end
+	board.back = true
+	board.flat = true
+	return ui.scroll {
+		id = "orch-detail",
+		w_full = true,
+		grow = 1,
+		min_h = 0,
+		fade = { 12, 12 },
+		fade_overflow = true,
+		ui.column {
+			w_full = true,
+			px = "$space.3",
+			py = "$space.2",
+			BoardDetail.Card(board :: any),
+		},
+	}
+end
+
 function M.Detail(props: Props): Node
+	return ui.presence(function(): string
+		local d = props.of()
+		return if d and d.item and props.board then "card" else "thread"
+	end, function(kind: string): Node
+		if kind == "card" then
+			return card_detail(props)
+		end
+		return M.Thread(props)
+	end, { w_full = true, grow = 1, min_h = 0 })
+end
+
+-- A crew thread opened: how it stands, its ask, its last report, where it
+-- runs, and Open thread.
+function M.Thread(props: Props): Node
 	local function chat_id(): string?
 		local d = props.of()
 		return d and d.chat
@@ -176,7 +231,7 @@ function M.Detail(props: Props): Node
 		gap = "$space.2",
 		items = "center",
 		ds.IconButton {
-			id = "orch-detail-back",
+			id = "orch-thread-back",
 			icon = "arrow-left",
 			label = ui.t("orch.panel.back") :: any,
 			size = "sm",
@@ -185,7 +240,7 @@ function M.Detail(props: Props): Node
 		},
 		ui.text {
 			title,
-			id = "orch-detail-title",
+			id = "orch-thread-title",
 			grow = 1,
 			min_w = 0,
 			truncate = true,
@@ -196,7 +251,7 @@ function M.Detail(props: Props): Node
 	}
 
 	local state = ui.row {
-		id = "orch-detail-status",
+		id = "orch-thread-status",
 		gap = "$space.2",
 		items = "center",
 		ui.div {
@@ -230,7 +285,7 @@ function M.Detail(props: Props): Node
 	local ask = ui.show(function(): boolean
 		return #needs() > 0
 	end, ui.column {
-		id = "orch-detail-ask",
+		id = "orch-thread-ask",
 		w_full = true,
 		gap = "$space.1",
 		heading("orch.panel.detail.waiting"),
@@ -257,7 +312,7 @@ function M.Detail(props: Props): Node
 	local said = ui.show(function(): boolean
 		return report() ~= nil
 	end, ui.column {
-		id = "orch-detail-report",
+		id = "orch-thread-report",
 		w_full = true,
 		gap = "$space.1",
 		heading("orch.panel.detail.report"),
@@ -295,13 +350,13 @@ function M.Detail(props: Props): Node
 	local where = ui.column {
 		w_full = true,
 		gap = "$space.2",
-		field("orch-detail-doing", ds.Icon { name = "chat-round-line", size = 14 }, doing),
-		field("orch-detail-machine", ds.Icon { name = "monitor", size = 14 }, function(): string
+		field("orch-thread-doing", ds.Icon { name = "chat-round-line", size = 14 }, doing),
+		field("orch-thread-machine", ds.Icon { name = "monitor", size = 14 }, function(): string
 			local c = chat()
 			return (c and c.device and props.device_name(c.device)) or ""
 		end),
 		field(
-			"orch-detail-model",
+			"orch-thread-model",
 			ui.presence(function(): string
 				local c = chat()
 				return (c and c.agent) or ""
@@ -349,13 +404,13 @@ function M.Detail(props: Props): Node
 					heading("orch.panel.detail.progress"),
 					ui.div { grow = 1, min_w = 0, Progress.strip(id, { lean = true }) },
 				}
-			end, { w_full = true, id = "orch-detail-progress" }),
+			end, { w_full = true, id = "orch-thread-progress" }),
 			ui.show(function(): boolean
 				return chat_id() ~= nil
 			end, ui.div {
 				ds.Button {
 					ui.t("orch.panel.open_thread") :: any,
-					id = "orch-detail-open",
+					id = "orch-thread-open",
 					self = "start",
 					tone = "secondary",
 					size = "sm",

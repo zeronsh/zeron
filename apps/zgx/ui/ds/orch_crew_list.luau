@@ -449,12 +449,15 @@ function M.CrewList(props: Props): Node
 		ui.show(function(): boolean
 			local g = groups:get()
 			return #g.working + #g.waiting + #g.idle == 0
-		end, ui.text {
-			locale.t("ds.orch.crew.empty"),
+		end, ui.row {
 			class = "orch-crew-empty",
+			w_full = true,
+			h = 28,
 			px = "$space.2",
-			text_size = "$font.size.sm",
-			color = "$text.tertiary",
+			gap = "$space.2",
+			items = "center",
+			ui.div { color = "$text.tertiary", Icon { name = "users-group-rounded", size = 14 } },
+			ui.text { locale.t("ds.orch.crew.empty"), text_size = "$font.size.sm", color = "$text.tertiary" },
 		}),
 		group("working", locale.t("ds.orch.crew_list.working"), nil),
 		group("waiting", locale.t("ds.orch.crew_list.waiting"), nil),

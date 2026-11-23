@@ -9,7 +9,7 @@ test("progress embed: crew rows and board cards on an orchestrator's page", func
 	local app = mount("orchestrator_fixture.luau")
 	app:resize(1440, 1400)
 	app:frames(40)
-	local CREW = "#orch-detail-progress"
+	local CREW = "#orch-thread-progress"
 	-- A crew thread opened in the panel: its clocks and menu, lean (the
 	-- detail already says its state and activity).
 	app:click("#orch-panel-tabs >> role:tab [2]")
@@ -19,7 +19,7 @@ test("progress embed: crew rows and board cards on an orchestrator's page", func
 	expect(app:has(`{CREW} >> #progress-strip-th-engine-state`)).to_be(true)
 	expect(app:count(`{CREW} >> .orch-progress-lean`)).to_be(1)
 	expect(app:has(`{CREW} >> #progress-strip-th-engine-state >> ~"last step 2m ago"`)).to_be(true)
-	app:click("#orch-detail-back")
+	app:click("#orch-thread-back")
 	app:frames(10)
 	app:click('#orch-crew-list >> role:button "Open Control room UI"')
 	app:frames(20)
@@ -53,7 +53,7 @@ test("progress embed: a crew row's line, pinned to Progress from its menu", func
 	app:frames(20)
 	app:click('#orch-crew-list >> role:button "Open Engine: orchestration state"')
 	app:frames(20)
-	local ROW = "#orch-detail-progress >> #progress-strip-th-engine-state"
+	local ROW = "#orch-thread-progress >> #progress-strip-th-engine-state"
 	expect(app:has(ROW)).to_be(true)
 	app:click(`{ROW} >> .orch-progress-menu`)
 	app:frames(10)

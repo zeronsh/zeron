@@ -42,7 +42,9 @@ function M.count(now: any, id: string?): number
 	return n
 end
 
-function M.Tasks(props: Props): Node
+-- The board's props (ds/orch_board_ctx) for this orchestrator's cards: the
+-- Tasks tab's list and a card's detail in the panel take the same.
+function M.board_props(props: Props): { [string]: any }
 	-- A card opened: its detail in the panel (by its lead thread, as the
 	-- panel's detail is asked for).
 	local function open_card(id: string)
@@ -53,6 +55,57 @@ function M.Tasks(props: Props): Node
 			end
 		end
 	end
+	return {
+		id = "orch-page-board",
+		items = function(): { any }
+			return orchestration.now:get().items or {}
+		end,
+		cards = function(): { any }
+			return orchestration.now:get().cards or {}
+		end,
+		asks = function(): any
+			local now = orchestration.now:get()
+			return now and now.asks
+		end,
+		orchestrators = function(): { any }
+			return orchestration.now:get().orchestrators or {}
+		end,
+		filter = props.of,
+		compact = true,
+		fold = props.fold,
+		orchestrator_of = rows.orchestrator,
+		thread_of = function(chat: string): any
+			return rows.chat(chat)
+		end,
+		progress_of = Progress.row,
+		on_open_card = open_card,
+		on_open_thread = function(chat: string)
+			props.on_open_card(chat, nil)
+		end,
+		on_link = props.open_link,
+		on_source = function(src: any)
+			orchestration.reveal_dump:set(src.dump_id)
+			route.control()
+		end,
+		on_answer = NeedsYou.on_answer,
+		on_expand_ask = NeedsYou.on_expand,
+		on_snooze = orchestration.defer,
+		on_close = orchestration.close_item,
+		on_reopen = orchestration.reopen_item,
+		on_hold = orchestration.hold_item,
+		on_pause = orchestration.pause_item,
+		on_resume = orchestration.resume_item,
+		on_start = function(id: string): any
+			return orchestration.start_item(id)
+		end,
+		on_request_changes = orchestration.request_changes,
+		on_remove = orchestration.remove_item,
+		on_restore = orchestration.restore_item,
+		on_seen = orchestration.seen_item,
+	}
+end
+
+function M.Tasks(props: Props): Node
 	return ui.column {
 		id = "orch-tasks",
 		w_full = true,
@@ -61,54 +114,7 @@ function M.Tasks(props: Props): Node
 			return ui.div {
 				w_full = true,
 				px = "$space.1",
-				List.List {
-					id = "orch-page-board",
-					items = function(): { any }
-						return orchestration.now:get().items or {}
-					end,
-					cards = function(): { any }
-						return orchestration.now:get().cards or {}
-					end,
-					asks = function(): any
-						local now = orchestration.now:get()
-						return now and now.asks
-					end,
-					orchestrators = function(): { any }
-						return orchestration.now:get().orchestrators or {}
-					end,
-					filter = props.of,
-					compact = true,
-					fold = props.fold,
-					orchestrator_of = rows.orchestrator,
-					thread_of = function(chat: string): any
-						return rows.chat(chat)
-					end,
-					progress_of = Progress.row,
-					on_open_card = open_card,
-					on_open_thread = function(chat: string)
-						props.on_open_card(chat, nil)
-					end,
-					on_link = props.open_link,
-					on_source = function(src: any)
-						orchestration.reveal_dump:set(src.dump_id)
-						route.control()
-					end,
-					on_answer = NeedsYou.on_answer,
-					on_expand_ask = NeedsYou.on_expand,
-					on_snooze = orchestration.defer,
-					on_close = orchestration.close_item,
-					on_reopen = orchestration.reopen_item,
-					on_hold = orchestration.hold_item,
-					on_pause = orchestration.pause_item,
-					on_resume = orchestration.resume_item,
-					on_start = function(id: string): any
-						return orchestration.start_item(id)
-					end,
-					on_request_changes = orchestration.request_changes,
-					on_remove = orchestration.remove_item,
-					on_restore = orchestration.restore_item,
-					on_seen = orchestration.seen_item,
-				},
+				List.List(M.board_props(props) :: any),
 			}
 		end),
 	}
