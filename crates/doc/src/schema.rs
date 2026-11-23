@@ -1153,6 +1153,69 @@ impl SessionDoc {
         Ok(join_continuation_entries(entries))
     }
 
+    /// The transcript's newest entries, each WHOLE and as [`Self::read_entries`]
+    /// then [`join_continuation_entries`] give it, read from their containers
+    /// without reading the rest of the list: up to `max_entries`, and only
+    /// while the parts read stay within `max_parts` (one turn can have tens of
+    /// thousands; none is read in part). A continuation comes only with its
+    /// root (read on past `max_entries` to find it, a little way); one whose
+    /// root lies further back is left out, as is an entry that can't be read.
+    ///
+    /// Unlike [`Self::read_opening_tail`], nothing here is cut short: a reader
+    /// may take these entries for the transcript's own. What's left out comes
+    /// with the whole read that must follow.
+    pub fn read_newest_entries(
+        &self,
+        max_entries: usize,
+        max_parts: usize,
+    ) -> Result<Vec<SessionMessageEntry>, DocError> {
+        use loro::{Container, ValueOrContainer};
+        let messages = self.doc.get_list("messages");
+        // How far back a continuation's root is looked for.
+        let reach = max_entries.saturating_mul(4).max(max_entries + 16);
+        let mut parts_read = 0usize;
+        let mut entries = Vec::new();
+        let mut roots = std::collections::HashSet::new();
+        let mut missing = std::collections::HashSet::new();
+        for (scanned, index) in (0..messages.len()).rev().enumerate() {
+            if scanned >= reach || (entries.len() >= max_entries && missing.is_empty()) {
+                break;
+            }
+            let value = match messages.get(index) {
+                Some(ValueOrContainer::Container(Container::Map(map))) => {
+                    let parts = match map.get("parts") {
+                        Some(ValueOrContainer::Container(Container::List(parts))) => parts.len(),
+                        _ => 0,
+                    };
+                    if parts_read + parts > max_parts {
+                        break;
+                    }
+                    parts_read += parts;
+                    map.get_deep_value().to_json_value()
+                }
+                Some(ValueOrContainer::Value(value)) => value.to_json_value(),
+                _ => continue,
+            };
+            let Some(entry) = self.parse_entry(value) else { continue };
+            match &entry.continuation_of {
+                Some(root) if !roots.contains(root) => {
+                    missing.insert(root.clone());
+                }
+                Some(_) => {}
+                None => {
+                    missing.remove(&entry.id);
+                    roots.insert(entry.id.clone());
+                }
+            }
+            entries.push(entry);
+        }
+        entries.reverse();
+        // (A continuation without its root here would show as an entry of
+        // its own; the whole read joins it into its root.)
+        entries.retain(|e| e.continuation_of.as_ref().is_none_or(|root| roots.contains(root)));
+        Ok(join_continuation_entries(entries))
+    }
+
     /// Read the commands ledger.
     ///
     /// Same skip-not-fail policy as `read_entries`: any device can append
@@ -2489,6 +2552,7 @@ mod tests {
             issued_at: 1,
             edited_at: None,
             delivery_gate: None,
+            config: None,
         };
         a.push_queued(&row("q1")).unwrap();
         a.set_queued_text("q1", "later, edited", 2).unwrap();
@@ -2769,6 +2833,53 @@ mod tests {
             doc.export_snapshot().unwrap(),
             "preview never mutates storage"
         );
+    }
+
+    /// The newest entries, whole and joined as the whole read joins them:
+    /// a continuation with its root, or not at all; never an entry in part.
+    #[test]
+    fn newest_entries_are_whole_and_joined_as_the_whole_read_joins_them() {
+        let doc = SessionDoc::init("tail").unwrap();
+        let push = |id: &str, parts: usize, continuation_of: Option<&str>| {
+            doc.push_message(&SessionMessageEntry {
+                id: id.into(),
+                role: MessageRole::Assistant,
+                parts: (0..parts)
+                    .map(|part| MessagePart::Text { id: format!("{id}-{part}"), text: "body".into() })
+                    .collect(),
+                created_at: 0,
+                device_id: "device".into(),
+                status: Some(MessageStatus::Complete),
+                continuation_of: continuation_of.map(Into::into),
+                duration_ms: None,
+            })
+            .unwrap();
+        };
+        for i in 0..10 {
+            push(&format!("e{i}"), 2, None);
+        }
+        // A turn in three segments, a prompt between its second and third.
+        push("turn", 3, None);
+        push("turn-1", 3, Some("turn"));
+        push("prompt", 1, None);
+        push("turn-2", 3, Some("turn"));
+        let whole = join_continuation_entries(doc.read_entries().unwrap());
+        let newest = |entries, parts| doc.read_newest_entries(entries, parts).unwrap();
+        // Everything: the whole read's entries.
+        assert_eq!(newest(100, 1_000), whole);
+        // Two entries asked for: read on back to the turn's root, so it
+        // comes joined (the whole read's turn, then the prompt).
+        assert_eq!(newest(2, 1_000), whole[whole.len() - 2..]);
+        // Too few parts to reach its root: the segments are left out.
+        assert_eq!(newest(2, 7).iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["prompt"]);
+        // The newest alone more than the parts allowed: nothing.
+        assert!(newest(1, 2).is_empty());
+        // A segment whose root is gone shows as the whole read shows it.
+        push("orphan", 1, Some("nowhere"));
+        let whole = join_continuation_entries(doc.read_entries().unwrap());
+        assert_eq!(whole.last().unwrap().id, "orphan");
+        assert!(newest(100, 1_000).iter().all(|e| e.id != "orphan"), "left out, for the whole read");
+        assert_eq!(newest(100, 1_000), whole[..whole.len() - 1]);
     }
 
     #[test]

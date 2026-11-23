@@ -1,6 +1,6 @@
 # Zeron
 
-コーディングエージェント（Claude Code、Codex、Cursor、Devin、Grok、Hermes、Pi、Antigravity）をデフォルトではローカルで管理し、必要に応じて複数デバイス間で同期することもできます。
+コーディングエージェント（Claude Code、Codex、Cursor、OpenCode、Devin、Grok、Hermes、Pi、Antigravity、Muse Code、fx）をデフォルトではローカルで管理し、必要に応じて複数デバイス間で同期することもできます。
 
 *[English](README.md) | [简体中文](README.zh-CN.md) | [한국어](README.ko.md) | 日本語 | [Español](README.es.md)*
 
@@ -10,11 +10,11 @@
 
 [GitHub Releases](https://github.com/zeronsh/zeron/releases/latest) から、お使いのプラットフォーム向けの最新版をダウンロードしてください。
 
-- **macOS** — `zeron-<version>-macos-arm64.dmg`
+- **macOS**（Apple Silicon、macOS 13 以降）— `zeron-<version>-macos-arm64.dmg`
 - **Windows** — `zeron-<version>-windows-x86_64-setup.exe`
 - **Linux** — `zeron-<version>-linux-<arch>.tar.gz` を展開し、中の `install.sh` を実行
 
-アカウントもネットワーク接続も不要で、セッションはお使いのデバイスに保存されます。アプリは自動でアップデートされます。
+アカウントもネットワーク接続も不要で、セッションはお使いのデバイスに保存されます。デスクトップアプリは [zgx](https://zgx.zeron.sh)（プラグイン・テンプレート・テーマに対応したネイティブ Rust ＋ ホットリロード対応 Luau UI）で構築されており、自動でアップデートされます。
 
 ## ヘッドレス実行（CLI）
 
@@ -51,6 +51,6 @@ Zeron をスポンサーしてくださっている [The Context Company](https:
 
 ---
 
-開発に参加したい方や仕組みが気になる方は、[Ask DeepWiki](https://deepwiki.com/zeronsh/zeron) または [ARCHITECTURE.md](ARCHITECTURE.md) をご覧ください。
+開発に参加したい方や仕組みが気になる方は、[Ask DeepWiki](https://deepwiki.com/zeronsh/zeron)、[ARCHITECTURE.md](ARCHITECTURE.md)、[CONTRIBUTORS.md](CONTRIBUTORS.md)、[apps/zgx/README.md](apps/zgx/README.md) をご覧ください。
 
 [MIT License](LICENSE) のもとで公開されています。

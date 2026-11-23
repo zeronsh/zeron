@@ -97,6 +97,8 @@ local function inner(icon: () -> Icon.Name, label: Label, size: control.Size, co
 		focus = control.ring,
 		-- (Mouse presses don't take focus from the field.)
 		on_click = on_click,
+		-- (Inside the frame `field.wrap` dims while disabled.)
+		dim = false,
 		justify = "center",
 		Icon { name = icon, size = control.ICON[size] - 2 },
 	}

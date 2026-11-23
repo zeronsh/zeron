@@ -33,6 +33,103 @@ fn catalog_provider(hermes: &str) -> &str {
     }
 }
 
+/// Whether Hermes can run model `id` (`<provider>:<model>`), among the
+/// models it lists (`ids`). `auto:<model>` is the default its config names
+/// with the provider left to auto-detection, which sends that model to the
+/// provider it's signed in to: its stock config names an OpenRouter model
+/// (`anthropic/claude-opus-4.6`), and a ChatGPT login, say, refuses that
+/// ("not supported when using Codex with a ChatGPT account"); Hermes's own
+/// sign-in leaves that default in place too. So it's one Hermes can run
+/// only when a provider it lists serves that model, or it lists none
+/// (nothing to tell by). Every other model is listed by a provider it has.
+pub(super) fn runnable<'a>(id: &str, ids: impl IntoIterator<Item = &'a str>) -> bool {
+    let Some(model) = id.strip_prefix("auto:") else {
+        return true;
+    };
+    let mut concrete = ids
+        .into_iter()
+        .filter_map(|other| other.split_once(':'))
+        .filter(|(provider, _)| *provider != "auto")
+        .peekable();
+    concrete.peek().is_none() || concrete.any(|(_, served)| served == model)
+}
+
+/// The models Hermes can run (`runnable`), the others left out.
+pub(super) fn keep_runnable(models: &mut Vec<Model>) {
+    let ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
+    models.retain(|m| runnable(&m.id, ids.iter().map(String::as_str)));
+}
+
+/// The model Hermes runs when a chat names none, from its `session/new`
+/// reply's models: its current one (its config's default) if it can run that
+/// (`runnable`), else the first of the provider it's set to (`active`, as
+/// its auto-detection would pick it: a Cloud machine's Hermes lists the
+/// Claude login it finds beside its ChatGPT one, Claude's models first),
+/// else the first it can run. The picker marks the same one (`mark_default`).
+pub(super) fn chosen_for_none(session: &serde_json::Value, active: Option<&str>) -> Option<String> {
+    let models = session.get("models")?;
+    let ids: Vec<&str> = models
+        .get("availableModels")?
+        .as_array()?
+        .iter()
+        .filter_map(|m| m.get("modelId").and_then(serde_json::Value::as_str))
+        .collect();
+    if let Some(current) = models.get("currentModelId").and_then(serde_json::Value::as_str)
+        && ids.contains(&current)
+        && runnable(current, ids.iter().copied())
+    {
+        return Some(current.to_owned());
+    }
+    let ok = |id: &&&str| runnable(id, ids.iter().copied());
+    active
+        .and_then(|active| {
+            ids.iter()
+                .filter(ok)
+                .find(|id| id.split_once(':').is_some_and(|(provider, _)| provider == active))
+        })
+        .or_else(|| ids.iter().find(ok))
+        .map(|id| (*id).to_owned())
+}
+
+/// Marks the model a chat that names none runs (`chosen`) as the catalog's
+/// default, so the picker starts a new chat on it.
+pub(super) fn mark_default(models: &mut [Model], chosen: Option<&str>) {
+    for model in models.iter_mut() {
+        model.default = Some(model.id.as_str()) == chosen;
+    }
+}
+
+/// The provider Hermes runs on when its config leaves the choice to
+/// auto-detection: `active_provider` in `$HERMES_HOME/auth.json`, which its
+/// own sign-in sets (and Zeron's, on a Cloud machine). A small file, read
+/// as Hermes's catalog is (`name_models`).
+pub(super) async fn active_provider() -> Option<String> {
+    active_provider_in(&hermes_home()).await
+}
+
+async fn active_provider_in(home: &Path) -> Option<String> {
+    let bytes = tokio::fs::read(home.join("auth.json")).await.ok()?;
+    if bytes.len() > MAX_AUTH_BYTES {
+        return None;
+    }
+    let auth: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    auth.get("active_provider")?
+        .as_str()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_owned)
+}
+
+/// The most of Hermes's `auth.json` read.
+const MAX_AUTH_BYTES: usize = 4 << 20;
+
+fn hermes_home() -> std::path::PathBuf {
+    crate::model_context::root(
+        "HERMES_HOME",
+        crate::executable::home_or_current_dir().join(".hermes"),
+    )
+}
+
 /// Hermes's large-context picker variants (`openai-codex:gpt-6-luna-900k`)
 /// as a Context Window choice on their base model rather than rows of
 /// their own. Hermes adds `-900k` after each Codex model that has one, a
@@ -82,11 +179,7 @@ pub(super) fn fold_context_variants(models: &mut Vec<Model>) {
 /// already split off) after the catalog in Hermes's home, if there is one.
 /// Blocking file work: call off the async runtime.
 pub(super) fn name_models(models: &mut [Model]) {
-    let home = crate::model_context::root(
-        "HERMES_HOME",
-        crate::executable::home_or_current_dir().join(".hermes"),
-    );
-    name_models_from(models, &home.join("models_dev_cache.json"));
+    name_models_from(models, &hermes_home().join("models_dev_cache.json"));
 }
 
 /// The most of Hermes's catalog read (it's a few MB).
@@ -301,6 +394,87 @@ fn named_by_id(model: &Model) -> Option<(&str, &str)> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Hermes's stock default under auto-detection, `auto:anthropic/
+    /// claude-opus-4.6`, listed first beside a ChatGPT login's models (as a
+    /// Cloud machine's Hermes lists them): Codex refuses it, so it isn't
+    /// offered, and a session asked for no model runs Codex's first instead.
+    /// A default a listed provider serves, or one with nothing beside it,
+    /// stays.
+    #[test]
+    fn a_default_no_signed_in_provider_serves_isnt_run() {
+        let listed = ["auto:anthropic/claude-opus-4.6", "openai-codex:gpt-6.2-sol", "openai-codex:gpt-6.2-luna"];
+        assert!(!super::runnable(listed[0], listed));
+        assert!(super::runnable(listed[1], listed));
+        let served = ["auto:anthropic/claude-opus-4.6", "openrouter:anthropic/claude-opus-4.6"];
+        assert!(super::runnable(served[0], served));
+        assert!(super::runnable("auto:anthropic/claude-opus-4.6", ["auto:anthropic/claude-opus-4.6"]));
+
+        let mut models: Vec<zeron_proto::Model> = listed
+            .iter()
+            .map(|id| zeron_proto::Model {
+                id: (*id).into(),
+                label: (*id).into(),
+                description: None,
+                provider: None,
+                reasoning_levels: Vec::new(),
+                options: Vec::new(),
+                default: false,
+            })
+            .collect();
+        super::keep_runnable(&mut models);
+        assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), &listed[1..]);
+
+        let session = |current: &str, ids: &[&str]| {
+            serde_json::json!({ "models": {
+                "currentModelId": current,
+                "availableModels": ids.iter().map(|id| serde_json::json!({ "modelId": id, "name": id })).collect::<Vec<_>>(),
+            }})
+        };
+        let chosen = |current: &str, ids: &[&str], active: Option<&str>| super::chosen_for_none(&session(current, ids), active);
+        assert_eq!(chosen(listed[0], &listed, None).as_deref(), Some("openai-codex:gpt-6.2-sol"));
+        assert_eq!(chosen("openai-codex:gpt-6.2-luna", &listed, None).as_deref(), Some("openai-codex:gpt-6.2-luna"), "one it can run stays");
+        assert_eq!(super::chosen_for_none(&serde_json::json!({}), None), None);
+        // A Cloud machine's Hermes beside a ChatGPT and a Claude login lists
+        // Claude's first; set to Codex, it runs Codex's.
+        let both = [
+            "auto:anthropic/claude-opus-4.6",
+            "anthropic:claude-fable-5-2",
+            "anthropic:claude-opus-5-5",
+            "openai-codex:gpt-6.2-sol",
+        ];
+        assert_eq!(chosen(both[0], &both, Some("openai-codex")).as_deref(), Some("openai-codex:gpt-6.2-sol"));
+        assert_eq!(chosen(both[0], &both, None).as_deref(), Some("anthropic:claude-fable-5-2"));
+        assert_eq!(chosen(both[0], &both, Some("nous")).as_deref(), Some("anthropic:claude-fable-5-2"), "a provider it lists nothing of");
+        // The picker marks the same one.
+        let mut rows: Vec<zeron_proto::Model> = both
+            .iter()
+            .map(|id| zeron_proto::Model {
+                id: (*id).into(),
+                label: (*id).into(),
+                description: None,
+                provider: None,
+                reasoning_levels: Vec::new(),
+                options: Vec::new(),
+                default: false,
+            })
+            .collect();
+        super::keep_runnable(&mut rows);
+        super::mark_default(&mut rows, Some("openai-codex:gpt-6.2-sol"));
+        assert_eq!(rows.iter().filter(|m| m.default).map(|m| m.id.as_str()).collect::<Vec<_>>(), ["openai-codex:gpt-6.2-sol"]);
+    }
+
+    /// Hermes's provider is the `active_provider` its `auth.json` names.
+    #[tokio::test]
+    async fn the_provider_hermes_is_set_to_is_read_from_its_auth_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("auth.json"), r#"{"active_provider":"openai-codex","providers":{}}"#).unwrap();
+        assert_eq!(super::active_provider_in(dir.path()).await.as_deref(), Some("openai-codex"));
+        std::fs::write(dir.path().join("auth.json"), r#"{"providers":{}}"#).unwrap();
+        assert_eq!(super::active_provider_in(dir.path()).await, None);
+        assert_eq!(super::active_provider_in(&dir.path().join("missing")).await, None);
+    }
+
     use super::*;
 
     fn model(id: &str, label: &str, provider: &str) -> Model {

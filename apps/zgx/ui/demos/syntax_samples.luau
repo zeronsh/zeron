@@ -515,6 +515,70 @@ fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4<f32> {
 }
 ]==]
 
+S.zig = [==[
+//! Relays a device's frames to its peers.
+const std = @import("std");
+
+const MAX_FRAME: usize = 16 * 1024;
+
+pub const FrameError = error{ TooLarge, PeerGone };
+
+pub const Header = packed struct(u24) {
+    version: u4,
+    flags: u4,
+    length: u16,
+};
+
+pub fn send(id: u64, frame: []const u8, @"type": u7) FrameError!void {
+    if (frame.len > MAX_FRAME) return error.TooLarge;
+    const scale: f64 = 0x1.fp+3;
+    const banner =
+        \\a multiline string keeps "quotes" and \n literal
+        \\and // is not a comment
+    ;
+    const tag: u8 = '\n';
+    const n: i24 = @intCast(frame.len);
+    std.debug.print("sent {d} bytes ({c}, {d}, {s}, {d})\n", .{ n, tag, id, banner, @as(f64, scale) + @floatFromInt(@"type") });
+}
+]==]
+
+S.odin = [==[
+package relay
+
+import "core:fmt"
+
+/* Block comments /* nest */ in Odin. */
+MAX_FRAME :: 16 * 1024
+
+Header :: struct #packed {
+	version: u8,
+	length:  u16be,
+}
+
+Frame_Kind :: enum u8 {
+	Data,
+	Ping,
+}
+
+Peer_Id :: distinct u64
+
+@(private="file")
+BANNER :: `raw string keeps \n and "quotes"
+over lines`
+
+@(require_results)
+send :: proc(id: Peer_Id, kind: Frame_Kind, frame: []u8, loc := #caller_location) -> bool {
+	if len(frame) > MAX_FRAME {
+		return false
+	}
+	#partial switch kind {
+	case .Data:
+		fmt.printfln("peer %d: %s (%r)\n", id, BANNER, 'x')
+	}
+	return true
+}
+]==]
+
 S.diff = [==[
 diff --git a/crates/ui/src/syntax_cache.rs b/crates/ui/src/syntax_cache.rs
 index 3f1c2a9..8b7afb3 100644

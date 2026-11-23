@@ -11,26 +11,47 @@ architecture token (`x86_64` or `aarch64`) so the updater can find the matching
 executable; published releases currently include x64 only. Background services
 are not supported yet.
 
-`scripts/package-windows.ps1` builds the portable ZIP, the updater payload
-`.exe`, and `zeron-<version>-windows-<arch>-setup.exe` (Inno Setup 6 required:
-`winget install JRSoftware.InnoSetup`). `scripts/test-windows-installer.ps1`
-installs, inspects, and uninstalls the setup silently; it touches the current
-user's registration, so it only runs in CI or with `-Force`.
+`scripts/package-windows.ps1` builds the portable ZIP, the standalone updater
+payload `.exe`, and `zeron-<version>-windows-<arch>-setup.exe` (Inno Setup 6
+required: `winget install JRSoftware.InnoSetup`). Pass `-ZgxVersion <version>`
+and `-ZgxEngine <path-to-engine-zeron.exe>` (as `.github/workflows/zgx-build.yml`
+does) to package the shipping **zgx** app (`apps/zgx` with `--features beta`,
+plus `beta\<version>\{ui,plugins-builtin,engine\zeron.exe}`); omitting them
+packages the standalone `apps/zeron` CLI/engine binary (exercised by Windows
+CI). `scripts/test-windows-installer.ps1` installs, inspects, and uninstalls
+the setup silently; it touches the current user's registration, so it only runs
+in CI or with `-Force`.
 
 ## Build and run
 
 Install stable MSVC Rust, Visual Studio C++ build tools, Windows SDK, CMake,
 and Git for Windows. On ARM64 also install LLVM so `clang` is on PATH —
 `ring` compiles its crypto with Clang on `aarch64-pc-windows-msvc`, and MSVC
-alone is not enough. Then run:
+alone is not enough.
+
+### Desktop app (`apps/zgx`)
+
+Build the engine from the repository root, then run `apps/zgx`:
 
 ```powershell
-cargo run --locked -p zeron
+cargo build -p zeron --bin zeron-engine
+cd apps/zgx
+cargo run --release              # intro / onboarding / main window (staging by default)
+cargo run --release -- gallery   # design-system workbench
 ```
 
-Close the app before rebuilding. For release builds, use
-`cargo build --release --locked -p zeron`. If shader compiler discovery fails,
-set `GPUI_FXC_PATH` to the Windows SDK's `fxc.exe`.
+For a release-style build of the ZGX binary (production identity, no staging
+endpoints): `cargo build --release --locked --features beta` inside `apps/zgx`.
+Close the app before rebuilding.
+
+### Engine / headless CLI (`apps/zeron`)
+
+```powershell
+cargo run --locked -p zeron -- headless
+```
+
+For release engine builds (required by `scripts/package-windows.ps1`), set
+`$env:LUAU_CXXFLAGS = '-DNDEBUG'` and run `cargo build --release --locked -p zeron`.
 
 ## Configuration and agent support
 
@@ -63,48 +84,29 @@ shutdown/drop log failures. Processes started through external services or
 brokers are outside this ownership. Closing a terminal or exiting its shell also
 terminates processes detached inside that job (including `start` children).
 
-## Embedded browser
+## Embedded browser & glass
 
-Browser tabs embed Microsoft Edge WebView2 (the Evergreen runtime ships with
-Windows 10/11) in visual-hosting mode. Each page is a DirectComposition visual
-mounted in the zui overlay plane's native layer: GPUI's base content, then the
-page, then deferred GPUI content (menus, tooltips, prompts) in a second swap
-chain. DWM composites the page directly, without copies or child windows. A
-frame without deferred content detaches the overlay and draws nothing extra.
-
-GPUI receives all pointer input, so anything drawn above the page occludes it
-naturally; presses, moves and wheel events that reach the page element are
-forwarded with `SendMouseInput`. The page owns the keyboard while focused;
-browser and app shortcuts are intercepted with `AcceleratorKeyPressed` and
-dispatched to GPUI. A press on GPUI content, or an interactive overlay opening,
-returns keyboard focus to the window.
-
-All tabs of a window share one InPrivate environment (one browser process).
-Hidden tabs are unmounted and set invisible, so Chromium throttles them. The
-user-data folder (`%TEMP%\zeron-webview2`) holds only runtime caches; when
-another process still holds it (a second Zeron, or one shutting down after a
-quick restart), the window falls back to its own folder, and stale ones are
-swept in the background. Per-frame updates touch WebView2 only when geometry
-or visibility changed.
-
-Frosted window chrome uses native Acrylic and requires Windows **Settings >
-Personalization > Colors > Transparency effects**. Content cards and popovers
-remain opaque because in-app backdrop blur is not supported. The pinned
-[Zui DirectX fix](https://github.com/zeronsh/zui/pull/7) supplies the renderer
-layout and edge-fade corrections.
+Browser tabs in `apps/zgx` use `zgx-desktop`'s `webview2` feature (Microsoft
+Edge WebView2 in a DirectComposition tree owned by the zgx window; ships with
+Windows 11 and Edge on Windows 10, falling back to a placeholder if absent).
+Window translucency respects Windows **Settings > Personalization > Colors >
+Transparency effects**, watched from the registry by
+`apps/zgx/src/transparency.rs`.
 
 When Windows disables **Animation effects**, Zeron's **Reduce motion: System**
-setting skips transitions and gives activity grids a gentle 2.4-second brightness
-pulse. **Reduce motion: On** keeps those indicators still; **Off** restores the
-usual travelling wave. **Pause animations in background** also pauses activity
-grids when the main window loses focus.
+setting skips transitions and softens activity indicators.
 
 ## Verification
 
-[Windows CI](../../.github/workflows/windows.yml) builds the release application
-and tests application startup, agent discovery/protocols, process cleanup,
-ConPTY, locking, UI behavior, and shader layouts. Shared Rust regressions run
-on Linux and macOS. To run the engine and harness checks locally:
+[Windows CI](../../.github/workflows/windows.yml) runs the Windows harness,
+CLI, updater, engine, and voice-media suites, builds the release `zeron`
+binary, verifies portable ZIP and Inno Setup installer packaging
+(`scripts/package-windows.ps1` and `scripts/test-windows-installer.ps1`), and
+checks isolated CLI startup without `HOME`. Shared Rust regressions run on
+Linux and macOS, and Windows ZGX desktop builds run in
+[`.github/workflows/zgx-build.yml`](../../.github/workflows/zgx-build.yml).
+
+To run the engine and harness checks locally:
 
 ```powershell
 cargo test --locked -p zeron-engine -p zeron-harness --lib
@@ -113,19 +115,7 @@ cargo test --locked -p zeron-engine --test codex_catalog --test codex_login_reso
 ```
 
 Fixtures use synthetic agents, so these tests do not establish authenticated
-provider compatibility. GUI probes are optional CI dispatch checks and can
-also run on an interactive Windows desktop after building the release app:
-
-```powershell
-cargo build --release --locked -p zeron-ui --example windows-render-fixture --features windows-render-fixture
-./scripts/test-windows-lifecycle.ps1 -Runs 5
-./scripts/test-windows-rendering.ps1
-```
-
-The lifecycle probe uses isolated data and provider homes. The renderer probe
-captures only its synthetic window. Results go to ignored
-`target/windows-lifecycle-*` and `target/windows-render-*` directories.
-
-Remaining acceptance work includes authenticated provider runs and shutdown,
-broader GPU/DPI coverage, accessibility, cross-device parity,
-concurrent-launch log rotation, and invalid-window teardown diagnostics.
+provider compatibility. Remaining acceptance work includes authenticated
+provider runs and shutdown, broader GPU/DPI coverage, accessibility,
+cross-device parity, concurrent-launch log rotation, and invalid-window
+teardown diagnostics.

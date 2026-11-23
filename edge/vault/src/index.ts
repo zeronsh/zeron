@@ -17,6 +17,8 @@ import type {
   GithubListingView,
   GithubRepoView,
   Grant,
+  GrantManyReply,
+  GrantManyRequest,
   GrantRequest,
   PutCredentialRequest,
   VaultCaller,
@@ -77,6 +79,10 @@ export class VaultApi extends WorkerEntrypoint<Env> implements VaultRpc {
 
   grant(caller: VaultCaller, request: GrantRequest): Promise<VaultResult<Grant>> {
     return this.vault().grant(caller, request);
+  }
+
+  grantMany(caller: VaultCaller, request: GrantManyRequest): Promise<VaultResult<GrantManyReply>> {
+    return this.vault().grantMany(caller, request);
   }
 
   githubDeviceStart(caller: VaultCaller, authorizedDevices: readonly string[]): Promise<VaultResult<GithubDeviceStart>> {

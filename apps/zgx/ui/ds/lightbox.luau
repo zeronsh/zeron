@@ -384,7 +384,7 @@ local StageView = ui.component(function(st: Stage): Node
 	local rested_at, zoomed_at = 0, 0
 	local function hold()
 		local it = item()
-		if not it or st.morphing:peek() then
+		if not it or st.morphing:peek() or st.alpha:peek() < 0.99 then
 			return
 		end
 		local h = standin:peek()
@@ -609,13 +609,45 @@ local StageView = ui.component(function(st: Stage): Node
 		if had and had.w == size.w and had.h == size.h then
 			return
 		end
-		sizes[it.src] = { w = size.w, h = size.h }
 		measured:set(measured:peek() + 1)
 		if ready then
-			on_swap()
+			-- Don't wipe standin or jolt layout mid-open if aspect already matches.
+			local same_shape = had ~= nil
+				and math.abs(had.w / had.h - size.w / size.h) / (size.w / size.h) < 0.005
+			if not (st.morphing:peek() and same_shape) then
+				on_swap()
+			end
 		end
 		on_measured()
 	end
+	-- Keep the thumbnail snapshot alive briefly past the morph-to-rest handoff
+	-- so a large image's final-size async decode never flashes blank when
+	-- `morphing` flips to false.
+	local snap_live = ui.use_state(false)
+	local snap_gen = 0
+	ui.effect(function()
+		local m = st.morphing:get()
+		local s = st.snap:get()
+		if s == "" then
+			snap_gen += 1
+			if snap_live:peek() then
+				snap_live:set(false)
+			end
+		elseif m then
+			snap_gen += 1
+			if not snap_live:peek() then
+				snap_live:set(true)
+			end
+		elseif snap_live:peek() then
+			snap_gen += 1
+			local gen = snap_gen
+			ui.after(180, function()
+				if gen == snap_gen and not st.morphing:peek() then
+					snap_live:set(false)
+				end
+			end)
+		end
+	end)
 	st.register {
 		rect = function(): Rect?
 			return rest_rect()
@@ -669,8 +701,15 @@ local StageView = ui.component(function(st: Stage): Node
 		local k = rest.w / lw * settle
 		local mx, my = rest.x + rest.w / 2, rest.y + rest.h / 2
 		local dw, dh = lw * k, lh * k
+		local sn: Rect = { x = 0, y = 0, w = 1, h = 1 }
+		if st.from.rect then
+			local a = st.from.rect :: Rect
+			local k0 = math.max(a.w / lw, a.h / lh)
+			local sw, sh = a.w / k0 * k, a.h / k0 * k
+			sn = { x = mx - sw / 2, y = my - sh / 2, w = sw, h = sh }
+		end
 		return {
-			sn = { x = 0, y = 0, w = 1, h = 1 },
+			sn = sn,
 			cx = 0,
 			cy = 0,
 			cw = size.width,
@@ -683,6 +722,31 @@ local StageView = ui.component(function(st: Stage): Node
 			k = k,
 			d = { x = mx - dw / 2, y = my - dh / 2, w = dw, h = dh },
 		}
+	end
+	-- Target-size async pre-warm: while opening, morphing, or zooming in,
+	-- request ONE decode at the final target dimensions from frame 0 so
+	-- `ensure_image` never returns IMAGE_PENDING frame-by-frame as `scale`
+	-- grows (the root cause of random open/morph flicker).
+	local function prewarm(): { src: string, w: number, h: number }?
+		tick:get()
+		local it = item()
+		if not it or it.svg or gone() or string.match(it.src, "%.gif$") then
+			return nil
+		end
+		local nat = natural()
+		if not nat then
+			return nil
+		end
+		if st.morphing:get() and not st.leaving:get() then
+			local rest = rest_rect()
+			if rest then
+				return { src = it.src, w = math.max(1, rest.w), h = math.max(1, rest.h) }
+			end
+		end
+		if heading and heading > view.s + 0.001 then
+			return { src = it.src, w = math.max(1, nat.w * heading), h = math.max(1, nat.h * heading) }
+		end
+		return nil
 	end
 	-- How much of its laid-out size a vector picture is drawn at: all of
 	-- it, or less where that would pass SVG_PIXELS at 2x (the rest a scale).
@@ -1162,10 +1226,11 @@ local StageView = ui.component(function(st: Stage): Node
 			opacity = function(): number
 				return math.clamp(st.alpha:get(), 0, 1)
 			end,
-			-- The thumbnail's own pixels, while it grows.
+			-- The thumbnail's own pixels, while it grows (and briefly across
+			-- the morph-to-rest handoff so the final decode never flashes blank).
 			ui.image {
 				src = function(): string
-					return if st.morphing:get() then st.snap:get() else ""
+					return if snap_live:get() then st.snap:get() else ""
 				end,
 				aria_hidden = true,
 				pointer_events = "none",
@@ -1186,6 +1251,38 @@ local StageView = ui.component(function(st: Stage): Node
 					return math.max(1, geo().sn.h)
 				end,
 			},
+			-- Target-size async pre-warm: requests ONE decode at the final
+			-- resting/zoomed dimensions on frame 0 so growing `scale` frames
+			-- never repeatedly hit IMAGE_PENDING and blink out.
+			ui.show(
+				function(): boolean
+					return prewarm() ~= nil
+				end,
+				function(): Node
+					return ui.image {
+						src = function(): string
+							local p = prewarm()
+							return if p then p.src else ""
+						end,
+						decode = "async",
+						aria_hidden = true,
+						pointer_events = "none",
+						fit = "contain",
+						absolute = true,
+						left = 0,
+						top = 0,
+						opacity = 0.001,
+						w = function(): number
+							local p = prewarm()
+							return if p then p.w else 1
+						end,
+						h = function(): number
+							local p = prewarm()
+							return if p then p.h else 1
+						end,
+					}
+				end
+			),
 			-- What the window showed of it as the zoom began (`hold`), under
 			-- it, scaled with the zoom: its part of the window then, kept
 			-- exactly where the picture is now.
@@ -1469,13 +1566,15 @@ local HostBody = ui.component(function(): Node
 		if rect and not reduced() and not resume and not (api and api.gone()) then
 			-- The thumbnail as it showed, before it is lifted out.
 			local el = if key then thumbs[key] else nil
-			local shot = if el and el.mounted then el:snapshot(math.ceil(rect.w * 2)) else nil
-			snap:set(shot or "")
-			LIFTED:set(key)
-			settle:set(1)
-			morphing:set(true)
-			t:set(0)
-			alpha:set(1)
+			local shot = if el and el.mounted then M.snapshot(el, math.ceil(rect.w * 2)) else nil
+			ui.batch(function()
+				snap:set(shot or "")
+				LIFTED:set(key)
+				settle:set(1)
+				morphing:set(true)
+				t:set(0)
+				alpha:set(1)
+			end)
 			animate(t, {
 				value = 1,
 				duration = ms(snappy.open),
@@ -1487,15 +1586,15 @@ local HostBody = ui.component(function(): Node
 			-- (The scrim with the picture's first, fastest part.)
 			animate(lift, { value = 1, duration = ms(snappy.open * 0.8), ease = snappy.ease })
 		else
-			morphing:set(false)
-			animate(alpha, { value = 1, duration = ms(fade_ms()), ease = "out(2)" })
-			if reduced() then
+			-- Keep `settle` at 1 on fade open so `drawn` never creeps upward
+			-- frame-by-frame (which triggers repeated async IMAGE_PENDING blanks).
+			ui.batch(function()
+				morphing:set(false)
 				settle:set(1)
-			else
-				animate(settle, { value = 1, duration = ms(fade_ms()), ease = "out(2)" })
-			end
+				LIFTED:set(key)
+			end)
+			animate(alpha, { value = 1, duration = ms(fade_ms()), ease = "out(2)" })
 			animate(lift, { value = 1, duration = ms(fade_ms()), ease = "out(2)" })
-			LIFTED:set(key)
 		end
 	end
 	-- Out: back into its thumbnail where it shows, else settling and
@@ -1519,15 +1618,20 @@ local HostBody = ui.component(function(): Node
 			if el and el.mounted then
 				el:focus()
 			end
-			shown:set(nil)
-			morphing:set(false)
+			ui.batch(function()
+				shown:set(nil)
+				morphing:set(false)
+				snap:set("")
+			end)
 		end
 		if rect and api and api.ready() and not api.gone() and not reduced() then
 			from.rect, from.radius = rect, radius
-			if not was_morphing then
-				t:set(1)
-			end
-			morphing:set(true)
+			ui.batch(function()
+				if not was_morphing then
+					t:set(1)
+				end
+				morphing:set(true)
+			end)
 			animate(t, {
 				value = 0,
 				duration = ms(snappy.close * math.max(0.4, t:peek())),
@@ -1552,12 +1656,15 @@ local HostBody = ui.component(function(): Node
 			-- Opening: the stage builds, measures, then `arrive`.
 			stop()
 			arrived = false
-			lift:set(0)
-			alpha:set(0)
-			t:set(0)
-			snap:set("")
-			shown:set(want)
-			up:set(true)
+			ui.batch(function()
+				lift:set(0)
+				alpha:set(0)
+				settle:set(1)
+				t:set(0)
+				snap:set("")
+				shown:set(want)
+				up:set(true)
+			end)
 		elseif want and have and leaving:peek() and want.index == have.index then
 			-- Opened again while going: back from where it is.
 			shown:set(want)
@@ -1565,20 +1672,25 @@ local HostBody = ui.component(function(): Node
 		elseif want and have then
 			-- Another of the set: the thumbnail lifted follows it, and it
 			-- fades in where it is.
-			shown:set(want)
-			if want.group then
-				LIFTED:set(key_of(want.group, want.index, want.items))
-			end
-			if have.index ~= want.index then
-				stop()
-				morphing:set(false)
-				settle:set(1)
-				if reduced() then
-					alpha:set(1)
-				else
-					alpha:set(0)
-					animate(alpha, { value = 1, duration = ms(fade_ms()), ease = "out(2)" })
+			ui.batch(function()
+				shown:set(want)
+				if want.group then
+					LIFTED:set(key_of(want.group, want.index, want.items))
 				end
+				if have.index ~= want.index then
+					stop()
+					morphing:set(false)
+					snap:set("")
+					settle:set(1)
+					if reduced() then
+						alpha:set(1)
+					else
+						alpha:set(0)
+					end
+				end
+			end)
+			if have.index ~= want.index and not reduced() then
+				animate(alpha, { value = 1, duration = ms(fade_ms()), ease = "out(2)" })
 			end
 		elseif not want and up:peek() and have then
 			leave()

@@ -445,7 +445,9 @@ impl OpencodeHarness {
         cwd: Option<&str>,
         mcp: Option<&zeron_proto::McpServer>,
     ) -> Result<Server, HarnessError> {
-        self.server_with_env(cwd, mcp, &[], &Default::default(), AccessMode::FullAccess)
+        // (A Cloud machine's credential keys for OpenCode: crate::catalog_env.)
+        let env = crate::catalog_env::get(self.id());
+        self.server_with_env(cwd, mcp, &[], &env, AccessMode::FullAccess)
             .await
     }
 
@@ -460,7 +462,15 @@ impl OpencodeHarness {
         run_env: &std::collections::BTreeMap<String, String>,
         access: AccessMode,
     ) -> Result<Server, HarnessError> {
-        if let Some(base) = &self.base_url {
+        // A Cloud machine's logins for OpenCode ride the run environment but
+        // never reach the server's process: they're installed through its
+        // credential API once it's up (`credentials`).
+        let mut run_env = run_env.clone();
+        let logins = run_env
+            .remove(credentials::CREDENTIALS_ENV)
+            .map(|raw| credentials::parse(&raw))
+            .transpose()?;
+        let mut server = if let Some(base) = &self.base_url {
             if !extra_mcp.is_empty() {
                 tracing::warn!(
                     target: "zeron_harness::opencode",
@@ -468,19 +478,27 @@ impl OpencodeHarness {
                     "attached to an existing opencode server; plugin MCP servers are skipped"
                 );
             }
-            return Ok(Server::attached(base.clone()));
+            Server::attached(base.clone())
+        } else {
+            let exe = self.resolve_executable()?;
+            Server::spawn_with_extras(
+                &exe,
+                cwd,
+                self.startup_timeout,
+                mcp,
+                extra_mcp,
+                &run_env,
+                access,
+            )
+            .await?
+        };
+        if let Some(logins) = logins
+            && let Err(error) = credentials::install(&server, &logins).await
+        {
+            server.shutdown(self.kill_grace).await;
+            return Err(error);
         }
-        let exe = self.resolve_executable()?;
-        Server::spawn_with_extras(
-            &exe,
-            cwd,
-            self.startup_timeout,
-            mcp,
-            extra_mcp,
-            run_env,
-            access,
-        )
-        .await
+        Ok(server)
     }
 
     /// One short-lived server answers both discovery calls. Also primes the
@@ -4749,6 +4767,7 @@ fn map_questions(props: &Value) -> Vec<(String, UserInputQuestion)> {
                     Some((
                         key,
                         UserInputQuestion {
+                            note: None,
                             id: new_message_id(),
                             header: q
                                 .get("header")
@@ -5636,6 +5655,9 @@ impl SseDecoder {
         }
     }
 }
+
+mod credentials;
+pub use credentials::CREDENTIALS_ENV;
 
 #[cfg(test)]
 mod tests;
