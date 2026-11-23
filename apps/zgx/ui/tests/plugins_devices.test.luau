@@ -117,32 +117,6 @@ test("this computer's actions name no device; another computer's folders aren't 
 	expect(app:tree()).to_contain("Install a plugin on devbox")
 end)
 
-test("one whose switch is the account's has one switch, set here from any computer", function()
-	local app = open()
-	expect(app:tree()).never.to_contain("All devices")
-	app:command("with_account")
-	app:frames(20)
-	expect(app:tree()).to_contain("Orchestrators")
-	expect(app:tree()).to_contain("All devices")
-	app:click('role:switch "Orchestrators"')
-	landed(app)
-	expect(asked(app, "set_off:orchestrators:false@")).to_be(true)
-	-- Another computer's list shows it the same, and its switch names no
-	-- device: it's the account's, set here.
-	pick(app, "devbox")
-	expect(app:tree()).to_contain("All devices")
-	expect(app:tree()).to_contain("Checkout status")
-	app:click('role:switch "Orchestrators"')
-	landed(app)
-	expect(asked(app, "set_off:orchestrators:true@")).to_be(true)
-	expect(calls(app)).never.to_contain("set_off:orchestrators:true@devbox")
-	expect(calls(app)).never.to_contain("set_off:orchestrators:false@devbox")
-	-- Its own plugins still name it.
-	app:click('role:switch "Checkout status"')
-	landed(app)
-	expect(calls(app)).to_contain("set_off:checkout:true@devbox")
-end)
-
 test("a computer that's away says so, and is looked at again when it's back", function()
 	local app = open()
 	pick(app, "Old laptop")

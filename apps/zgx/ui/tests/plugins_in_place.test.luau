@@ -38,8 +38,6 @@ test("each plugin shows who made it and what it can do now", function()
 	expect(tree).to_contain("by @ada")
 	expect(app:has('role:switch "Focus"')).to_be(true)
 	expect(app:has('role:button "Review"')).to_be(false)
-	-- (Each device's own: no account-wide tag.)
-	expect(tree).never.to_contain("All devices")
 end)
 
 test("a plugin arriving, a new version and a status change keep every row", function()

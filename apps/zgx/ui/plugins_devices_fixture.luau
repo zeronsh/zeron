@@ -108,15 +108,9 @@ stub.review = function(id: string, device: string?, name: string?)
 end
 stub.set_off = function(id: string, off: boolean, device: string?)
 	note(`set_off:{id}:{tostring(off)}@{device or ""}`)
-	local status = if off then "off" else "on"
-	find(if device then DEVBOX else HERE, id).status = status
-	-- (The account's switch, set here: every device's list follows it.)
-	local theirs = find(DEVBOX, id)
-	if device == nil and theirs and theirs.scope == "account" then
-		theirs.status = status
-	end
-	if device or state.device() then
-		publish_remote(state.device())
+	find(if device then DEVBOX else HERE, id).status = if off then "off" else "on"
+	if device then
+		publish_remote(device)
 	end
 	return nil
 end
@@ -159,22 +153,6 @@ ui.command {
 		now.devices[2] = table.clone(now.devices[2])
 		now.devices[2].online = not now.devices[2].online
 		sessions.now:set(now)
-	end,
-}
-ui.command {
-	id = "with_account",
-	title = "Orchestrators, whose switch is the account's, on every computer",
-	run = function()
-		for _, list in { HERE, DEVBOX } do
-			table.insert(list, plugin("orchestrators", "Orchestrators", "off", {
-				author = { kind = "zeron" },
-				builtin = true,
-				scope = "account",
-				default_off = true,
-			}))
-		end
-		state.now:set({ state = "ready", dirs = state.now:peek().dirs, list = HERE } :: any)
-		publish_remote(state.device())
 	end,
 }
 ui.command {
