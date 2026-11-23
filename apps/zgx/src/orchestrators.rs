@@ -176,6 +176,27 @@ mod tests {
         KEYS.iter().map(|k| (*k, app.host.shared(k, Value::Nil).get() != Value::Nil)).collect()
     }
 
+    /// The board's cards as the scripts read them (`orchestration.cards`):
+    /// their ids, or nil.
+    fn cards(app: &TestApp) -> Option<Vec<String>> {
+        let now = app.host.shared("orchestration", Value::Nil).get();
+        let cards = now.field("cards")?.clone();
+        Some(cards.list().iter().filter_map(|c| match c.field("id") {
+            Some(Value::Str(id)) => Some(id.to_string()),
+            _ => None,
+        }).collect())
+    }
+
+    /// A `WatchOrchestration` snapshot with one card on the board.
+    fn with_a_card() -> Json {
+        let at = "2026-11-22T09:00:00Z";
+        serde_json::json!({
+            "orchestrators": [], "crew": [], "items": [], "asks": [], "dumps": [],
+            "cards": [{ "id": "it-1", "place": "running", "status": "working", "since": at,
+                        "statusSince": at, "seq": 1, "updatedAt": at }],
+        })
+    }
+
     /// Each stream the frames sent so far opened, by id, and whether it was
     /// cancelled since.
     fn streams(sent: &std::sync::mpsc::Receiver<String>, seen: &mut BTreeMap<u64, (String, bool)>) -> Vec<(String, bool)> {
@@ -216,10 +237,14 @@ mod tests {
         let mut seen = BTreeMap::new();
         assert_eq!(streams(&sent, &mut seen), vec![], "off: nothing opened");
         assert!(keys(&app).iter().all(|(_, set)| !set), "off: no value given: {:?}", keys(&app));
+        assert_eq!(cards(&app), None, "off: no cards");
 
         crate::plugins::switch::set(["git", ID]);
         assert_eq!(open_now(&sent, &mut seen), STREAMS, "on: opened at once");
         assert!(keys(&app).iter().all(|(_, set)| *set), "on: every value given: {:?}", keys(&app));
+        // The board's cards, as the stream says them.
+        crate::orchestration::heard_for_tests(with_a_card());
+        assert_eq!(cards(&app), Some(vec!["it-1".to_string()]), "on: the cards");
         // A connection after: opened on it, the old ones closed.
         connected(&rpc);
         assert_eq!(open_now(&sent, &mut seen), STREAMS);
@@ -227,6 +252,7 @@ mod tests {
         crate::plugins::switch::set(["git"]);
         assert_eq!(open_now(&sent, &mut seen), Vec::<String>::new(), "off: every stream closed");
         assert!(keys(&app).iter().all(|(_, set)| !set), "off: every value nil: {:?}", keys(&app));
+        assert_eq!(cards(&app), None, "off: the cards gone with it");
         let opened = seen.len();
         connected(&rpc);
         assert_eq!(open_now(&sent, &mut seen), Vec::<String>::new());
@@ -243,5 +269,69 @@ mod tests {
         assert_eq!(refuse(), Err("off".to_string()));
         crate::plugins::switch::set([ID]);
         assert_eq!(refuse(), Ok(()));
+    }
+
+    /// The board's own actions, as a window has them: off, the person's ops
+    /// on a card (done, dropped, kept, seen) and a delete waiting for its
+    /// Undo answer "off", nothing waits, and the quit sends nothing. On, a
+    /// delete waits (and the quit would send it); turned off meanwhile, it's
+    /// let go of: never sent, at its wait's end or at the quit.
+    #[test]
+    fn the_board_s_ops_and_its_delayed_delete_follow_the_switch() {
+        let script = r#"
+local out = ui.state("out", "")
+local function calls(id: string, action: string, arg: any)
+    ui.command { id = id, title = id, run = function()
+        out:set("")
+        ui.call(action, arg):after(function(v) out:set(`ok {v}`) end, function(e) out:set(`rejected {e}`) end)
+    end }
+end
+calls("close", "orchestration.op", { op = "closeItem", id = "it-1", dropped = true })
+calls("reopen", "orchestration.op", { op = "reopenItem", id = "it-1" })
+calls("hold", "orchestration.op", { op = "holdItem", id = "it-1", held = true })
+calls("seen", "orchestration.op", { op = "seenItem", id = "it-1" })
+calls("remove", "orchestration.remove_later", { id = "it-1", ms = 60000 })
+ui.command { id = "undo", title = "undo", run = function() ui.invoke("orchestration.remove_undo", "it-1") end }
+return ui.column { ui.text { id = "out", function() return out:get() end } }
+"#;
+        let mut app = TestApp::new(move |runtime| {
+            let host = ScriptHost::inline(runtime, "app", script);
+            let window = orchestration::add(&host);
+            orchestration::actions(&host, window);
+            host
+        });
+        // (Followed with no connection: the switch's close reaches the deletes.)
+        follow(|| None);
+        let said = |app: &mut TestApp, command: &str| {
+            assert!(app.host.run_command(command), "{command}");
+            assert!(app.wait_until(|app| !app.text("out").is_empty()), "{command}: no answer: {:?}", app.error());
+            app.text("out")
+        };
+        for op in ["close", "reopen", "hold", "seen", "remove"] {
+            let out = said(&mut app, op);
+            assert!(out.starts_with("rejected") && out.contains("off"), "{op} while off: {out}");
+        }
+        assert!(app.host.run_command("undo"));
+        assert_eq!(orchestration::waiting_deletes(), Vec::<String>::new(), "off: no delete waits");
+        assert_eq!(orchestration::sent_at_quit(), Vec::<String>::new(), "off: the quit sends nothing");
+
+        // On: a delete waits for its Undo, and the quit would send it.
+        crate::plugins::switch::set([ID]);
+        assert!(app.host.run_command("remove"));
+        assert!(
+            app.wait_until(|_| orchestration::waiting_deletes() == ["it-1"]),
+            "on: the delete waits: {:?} {}",
+            app.error(),
+            app.text("out")
+        );
+        assert!(!app.text("out").contains("off"), "on: not refused: {}", app.text("out"));
+        assert_eq!(orchestration::sent_at_quit(), vec!["it-1".to_string()], "on: the quit sends it");
+
+        // Waiting again, and turned off: let go of, the quit sends nothing.
+        assert!(app.host.run_command("remove"));
+        assert!(app.wait_until(|_| orchestration::waiting_deletes() == ["it-1"]));
+        crate::plugins::switch::set([]);
+        assert_eq!(orchestration::waiting_deletes(), Vec::<String>::new(), "off: let go of");
+        assert_eq!(orchestration::sent_at_quit(), Vec::<String>::new(), "off: the quit sends nothing");
     }
 }

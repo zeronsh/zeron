@@ -392,8 +392,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             links::open(url);
         }
     })?;
-    // Cards deleted on the board whose Undo hadn't run out: deleted now
-    // (src/orchestration.rs).
+    // Cards deleted on the board whose Undo hadn't run out: deleted now,
+    // with Orchestrators on; off, nothing is sent (src/orchestration.rs).
     orchestration::after_quit();
     // Quitting with "Keep Zeron running after you quit" off: the engine
     // stops once its work is done, asking first about any still running

@@ -219,10 +219,38 @@ fn remove_op(id: &str) -> Json {
     json!({ "op": "removeItem", "id": id })
 }
 
+/// The deletes the quit sends: those still waiting, with Orchestrators on
+/// (off, none waits: its switch let them go, and no orchestration op is
+/// sent).
+fn removing_at_quit() -> Vec<String> {
+    let ids = removing_now();
+    if crate::orchestrators::on() { ids } else { Vec::new() }
+}
+
+/// The deletes waiting for their Undo, by id (src/orchestrators.rs's tests).
+#[cfg(test)]
+pub(crate) fn waiting_deletes() -> Vec<String> {
+    let mut ids: Vec<String> = REMOVING.with(|r| r.borrow().keys().cloned().collect());
+    ids.sort();
+    ids
+}
+
+/// What the quit would send now, taken (src/orchestrators.rs's tests).
+#[cfg(test)]
+pub(crate) fn sent_at_quit() -> Vec<String> {
+    removing_at_quit()
+}
+
+/// A `WatchOrchestration` frame, as the stream would give it (src/orchestrators.rs's tests).
+#[cfg(test)]
+pub(crate) fn heard_for_tests(item: Json) {
+    ORCHESTRATION.with(Rc::clone).heard_state(item);
+}
+
 /// The app's quit (src/main.rs, once its windows are gone): the deletes
 /// still waiting for their Undo are sent now, as they would have been.
 pub fn after_quit() {
-    let ids = removing_now();
+    let ids = removing_at_quit();
     if ids.is_empty() {
         return;
     }
@@ -306,6 +334,9 @@ pub(crate) fn close() {
     *o.comms.borrow_mut() = Comms::default();
     *o.loads.borrow_mut() = Value::Nil;
     *o.history.borrow_mut() = History::default();
+    // (The deletes waiting for their Undo let go of: none is sent, at its
+    // wait's end or at the quit.)
+    REMOVING.with(|r| r.borrow_mut().clear());
     let keys: Vec<Key> = o.windows.borrow().iter().flat_map(|w| [w.now.clone(), w.loads.clone(), w.comms.clone()]).collect();
     for key in keys {
         key.clear();
@@ -355,6 +386,7 @@ pub(crate) fn actions(host: &ScriptHost, window: u64) {
             _ => 0,
         };
         async move {
+            crate::orchestrators::refuse()?;
             crate::plugins::preview::refuse("orchestration.remove_later")?;
             let id = id.ok_or("a card id")?;
             let wait = Duration::from_millis(ms).min(REMOVE_WAIT_MAX);
@@ -365,7 +397,8 @@ pub(crate) fn actions(host: &ScriptHost, window: u64) {
             // no engine now, the app's quit sends it.)
             engine::get().spawn(async move {
                 zgx::timer::sleep(wait).await;
-                let outcome = if remove_due(&id, turn) {
+                // (Turned off meanwhile: let go of, never sent.)
+                let outcome = if remove_due(&id, turn) && crate::orchestrators::on() {
                     engine::get().call("Orchestrate", remove_op(&id)).await.map(|_| true)
                 } else {
                     Ok(false)
@@ -376,7 +409,7 @@ pub(crate) fn actions(host: &ScriptHost, window: u64) {
         }
     });
     host.action("orchestration.remove_undo", move |id| {
-        if crate::plugins::preview::refuse("orchestration.remove_undo").is_err() {
+        if crate::orchestrators::refuse().is_err() || crate::plugins::preview::refuse("orchestration.remove_undo").is_err() {
             return;
         }
         undo_remove(&crate::auth::text(&id));
