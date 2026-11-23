@@ -35,6 +35,7 @@ const MAX_HEADER_BYTES: usize = 64 * 1024;
 const LOAD_CODE_ASSIST_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) const CCPA_BASE_URL_ENV: &str = "AGY_ACP_CCPA_BASE_URL";
+pub(crate) const CLOUD_CODE_URL_ENV: &str = "CLOUD_CODE_URL";
 const DISABLE_PROXY_ENV: &str = "ZERON_ANTIGRAVITY_THOUGHTS_PROXY";
 
 /// Running loopback CCPA proxy whose lifetime is tied to the spawned Antigravity child.
@@ -154,12 +155,16 @@ fn is_disabled(run_env: &BTreeMap<String, String>) -> bool {
 }
 
 fn configured_upstream(run_env: &BTreeMap<String, String>) -> Option<String> {
-    run_env
-        .get(CCPA_BASE_URL_ENV)
-        .cloned()
-        .or_else(|| std::env::var(CCPA_BASE_URL_ENV).ok())
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
+    [CLOUD_CODE_URL_ENV, CCPA_BASE_URL_ENV]
+        .into_iter()
+        .find_map(|key| {
+            run_env
+                .get(key)
+                .cloned()
+                .or_else(|| std::env::var(key).ok())
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+        })
 }
 
 struct ParsedRequest {

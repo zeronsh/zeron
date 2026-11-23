@@ -575,7 +575,7 @@ local function fixed_row(label: Message, current: () -> Choice): Node
 end
 
 local function submenu(
-	siblings: { State<boolean> },
+	corridor: Menu.Corridor,
 	label: Message,
 	value: State<string?>,
 	choices: { Choice } | () -> { Choice },
@@ -603,16 +603,8 @@ local function submenu(
 		local at: number = if type(fallback) == "function" then fallback() else fallback
 		return listed[at] or listed[1] or { value = "", label = "" }
 	end
-	local own: State<boolean>? = nil
-	local function close_siblings()
-		for _, open in siblings do
-			if open ~= own then
-				open:set(false)
-			end
-		end
-	end
 	return Dropdown {
-		on_open = close_siblings,
+		corridor = corridor,
 		on_choose = on_choose,
 		value = value,
 		items = choices,
@@ -626,32 +618,17 @@ local function submenu(
 		-- row it opens from sits 5 inside it, its inset and border).
 		placement = { side = "right", align = "start", offset = 7 },
 		trigger = function(menu: Dropdown.Menu): Node
-			own = menu.open
-			table.insert(siblings, menu.open)
 			return ui.menu_item(Menu.look {
 				label = label,
 				bg = function()
 					return if menu.open:get() then "$hover" else "#00000000"
 				end,
+				on_mount = menu.on_mount,
 				-- A press opens it, as hovering does; one already open stays
 				-- open (a hover opened it just before), as a system menu's row.
-				on_click = function()
-					close_siblings()
-					if not menu.open:peek() then
-						menu.toggle()
-					end
-				end,
-				on_hover = function(inside: boolean)
-					if menu.on_hover then
-						menu.on_hover(inside)
-					end
-					if inside then
-						close_siblings()
-						if not menu.open:peek() then
-							menu.toggle()
-						end
-					end
-				end,
+				on_click = menu.on_click,
+				on_hover = menu.on_hover,
+				on_pointer_move = menu.on_pointer_move,
 				choice_mark(current),
 				FadeText {
 					function()
@@ -713,6 +690,7 @@ end
 -- reaches instead), each a row opening its choices beside the panel (the
 -- project's with "New project" under them).
 local function work_in(
+	corridor: Menu.Corridor,
 	project: State<string?>?,
 	projects: ({ Project } | State<{ Project }> | () -> { Project })?,
 	on_new_project: (() -> ())?,
@@ -722,7 +700,6 @@ local function work_in(
 	reach: State<string?>?,
 	reach_default: (() -> string?)?
 ): Node
-	local siblings: { State<boolean> } = {}
 	local rows: { Node } = {
 		Menu.Heading { locale.t("ds.composer.work_in") },
 	}
@@ -748,7 +725,7 @@ local function work_in(
 			rows,
 			ui.show(function(): boolean
 				return #choices() > 0
-			end, submenu(siblings, locale.t("ds.composer.device.label"), device, choices, 1, locale.s("ds.composer.device.search")))
+			end, submenu(corridor, locale.t("ds.composer.device.label"), device, choices, 1, locale.s("ds.composer.device.search")))
 		)
 	end
 	if project and projects then
@@ -776,7 +753,7 @@ local function work_in(
 		local p = project
 		table.insert(
 			rows,
-			submenu(siblings, locale.t("ds.composer.project.label"), project, choices, 1, locale.s("ds.composer.project.search"), {
+			submenu(corridor, locale.t("ds.composer.project.label"), project, choices, 1, locale.s("ds.composer.project.search"), {
 				worded({
 					icon = "close",
 					on_click = function()
@@ -813,7 +790,7 @@ local function work_in(
 			rows,
 			ui.show(function(): boolean
 				return (project == nil or project:get() ~= NO_PROJECT) and not plain() and not on_cloud(device, devices)
-			end, submenu(siblings, locale.t("ds.composer.checkout.label"), checkout, CHECKOUTS, 2))
+			end, submenu(corridor, locale.t("ds.composer.checkout.label"), checkout, CHECKOUTS, 2))
 		)
 	end
 	if reach and reach_default then
@@ -823,18 +800,18 @@ local function work_in(
 			rows,
 			ui.show(function(): boolean
 				return on_cloud(device, devices) and reach_default() ~= nil
-			end, submenu(siblings, locale.t("ds.composer.reach.label"), reach, REACHES, function(): number
+			end, submenu(corridor, locale.t("ds.composer.reach.label"), reach, REACHES, function(): number
 				return if reach_default() == "isolated" then 2 else 1
 			end))
 		)
 	end
-	return ui.column { w_full = true, table.unpack(rows) }
+	return ui.column { w_full = true, gap = "$zeron.list.gap", table.unpack(rows) }
 end
 
 -- The same head for an existing chat, which can't move: where it works,
 -- said in rows that open nothing; and on Cloud, what its machine reaches,
 -- which `on_reach` changes (shown at once, the chat's own following).
-local function fixed_work_in(fixed: () -> Fixed?, on_reach: ((reach: string) -> ())?): Node
+local function fixed_work_in(corridor: Menu.Corridor, fixed: () -> Fixed?, on_reach: ((reach: string) -> ())?): Node
 	local function f(): Fixed
 		return fixed() or { worktree = false }
 	end
@@ -872,10 +849,10 @@ local function fixed_work_in(fixed: () -> Fixed?, on_reach: ((reach: string) -> 
 			rows,
 			ui.show(function(): boolean
 				return f().cloud == true and f().reach ~= nil
-			end, submenu({}, locale.t("ds.composer.reach.label"), reach, REACHES, 1, nil, nil, nil, on_reach))
+			end, submenu(corridor, locale.t("ds.composer.reach.label"), reach, REACHES, 1, nil, nil, nil, on_reach))
 		)
 	end
-	return ui.column { w_full = true, table.unpack(rows) }
+	return ui.column { w_full = true, gap = "$zeron.list.gap", table.unpack(rows) }
 end
 
 -- The ring, in a chip-high box of its own, washed under the pointer as the
@@ -2418,10 +2395,12 @@ return ui.component(function(props: Props): Node
 		end
 		if props.branch then
 			local checkout = props.checkout
+			local picker_corridor = if checkout or props.device or props.project then Menu.corridor() else nil
 			-- Built for each chip it heads (a node lives in one place).
 			local function head_node(): Node?
-				return if checkout or props.device or props.project
+				return if picker_corridor
 					then work_in(
+						picker_corridor,
 						props.project,
 						props.projects :: any,
 						props.on_new_project,
@@ -2527,6 +2506,7 @@ return ui.component(function(props: Props): Node
 				empty = props.branches_empty,
 				list_when = in_project,
 				width = 280,
+				corridor = picker_corridor,
 				head = head_node(),
 				trigger = function(menu: Dropdown.Menu): Node
 					return chip(menu, locale.t("ds.composer.branch.label"), {
@@ -2544,7 +2524,8 @@ return ui.component(function(props: Props): Node
 			-- (nothing there to change, as a chat can't move), but for what a
 			-- Cloud chat's machine reaches.
 			local fixed = props.branch_fixed
-			local static: Node? = if fixed
+			local static_corridor = if fixed then Menu.corridor() else nil
+			local static: Node? = if fixed and static_corridor
 				then Dropdown {
 					value = ui.use_state(nil :: string?),
 					label = locale.t("ds.composer.branch.label") :: any,
@@ -2554,7 +2535,8 @@ return ui.component(function(props: Props): Node
 						return false
 					end,
 					width = 280,
-					head = fixed_work_in(fixed, props.on_reach),
+					corridor = static_corridor,
+					head = fixed_work_in(static_corridor, fixed, props.on_reach),
 					trigger = function(menu: Dropdown.Menu): Node
 						return chip(menu, function(): string
 							local f = fixed()

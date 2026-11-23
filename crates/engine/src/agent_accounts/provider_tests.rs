@@ -1172,6 +1172,251 @@ done
     assert!(!zeron_harness::acp::antigravity_token_file(&gemini).exists());
 }
 
+#[cfg(unix)]
+fn fake_unified_antigravity_cli(
+    dir: &Path,
+    subdir: &str,
+    refresh: &str,
+    initial_access: &str,
+    initial_expiry: &str,
+    refreshed_access: &str,
+) -> PathBuf {
+    let bin_dir = dir.join(subdir);
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    script(
+        &bin_dir,
+        "antigravity",
+        &format!(
+            r#"#!/bin/sh
+gemini_dir=""
+is_login=0
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--gemini-dir" ]; then
+    gemini_dir="$arg"
+    prev=""
+    continue
+  fi
+  case "$arg" in
+    --gemini-dir) prev="--gemini-dir" ;;
+    --login) is_login=1 ;;
+  esac
+done
+[ -n "$gemini_dir" ] || gemini_dir="$GEMINI_HOME"
+[ "$AGY_CLI_DISABLE_AUTO_UPDATE" = "1" ] || exit 11
+[ -n "$SSH_CONNECTION" ] || exit 12
+if [ "$is_login" = "1" ]; then
+  printf 'Open this link in a browser to log in with Google:\n\n  https://accounts.google.com/o/oauth2/auth?client_id=cid&redirect_uri=https%%3A%%2F%%2Fantigravity.google%%2Foauth-callback\n\nThen paste the authorization code:\n'
+  read -r pasted
+  [ -n "$pasted" ] || exit 13
+  mkdir -p "$gemini_dir/antigravity-acp"
+  printf '{{"token":{{"access_token":"{initial_access}","token_type":"Bearer","refresh_token":"{refresh}","expiry":"{initial_expiry}"}},"auth_method":"consumer"}}\n' > "$gemini_dir/antigravity-acp/antigravity-oauth-token"
+  exit 0
+fi
+while read -r line; do
+  id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"protocolVersion":1,"agentInfo":{{"name":"antigravity"}}}}}}\n' "$id" ;;
+    *'"method":"session/new"'*)
+      mkdir -p "$gemini_dir/antigravity-acp"
+      printf '{{"token":{{"access_token":"{refreshed_access}","token_type":"Bearer","refresh_token":"{refresh}","expiry":"2099-01-01T00:00:00Z"}},"auth_method":"consumer"}}\n' > "$gemini_dir/antigravity-acp/antigravity-oauth-token"
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"sessionId":"sess-refresh"}}}}\n' "$id" ;;
+    *'"id":'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id" ;;
+  esac
+done
+"#
+        ),
+    )
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn antigravity_unified_cli_paste_login_switches_accounts_and_refreshes_usage() {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server_task = tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut raw = Vec::new();
+                let mut chunk = [0u8; 8192];
+                let head_end = loop {
+                    let n = socket.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        return;
+                    }
+                    raw.extend_from_slice(&chunk[..n]);
+                    if let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break end + 4;
+                    }
+                };
+                let head = String::from_utf8_lossy(&raw[..head_end]);
+                let path = head
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("");
+                let auth = head
+                    .lines()
+                    .find_map(|line| {
+                        let (k, v) = line.split_once(':')?;
+                        k.eq_ignore_ascii_case("authorization")
+                            .then(|| v.trim().to_string())
+                    })
+                    .unwrap_or_default();
+                let (status, reply) = match path {
+                    "/google/userinfo" => match auth.as_str() {
+                        "Bearer ya29.fresh-a" | "Bearer ya29.refreshed-a" => {
+                            (200, serde_json::json!({ "email": "uni-a@gmail.com" }).to_string())
+                        }
+                        "Bearer ya29.fresh-b" => {
+                            (200, serde_json::json!({ "email": "uni-b@gmail.com" }).to_string())
+                        }
+                        _ => (401, String::new()),
+                    },
+                    "/v1internal:loadCodeAssist" => {
+                        if auth != "Bearer ya29.refreshed-a" {
+                            (401, String::new())
+                        } else {
+                            (
+                                200,
+                                serde_json::json!({
+                                    "cloudaicompanionProject": "proj-uni",
+                                    "paidTier": { "id": "g1-pro-tier", "name": "Google AI Pro" }
+                                })
+                                .to_string(),
+                            )
+                        }
+                    }
+                    "/v1internal:retrieveUserQuotaSummary" => (
+                        200,
+                        serde_json::json!({
+                            "groups": [
+                                {
+                                    "displayName": "Gemini models",
+                                    "buckets": [
+                                        {
+                                            "window": "5h",
+                                            "remainingFraction": 0.75,
+                                            "resetTime": "2026-11-24T00:00:00Z"
+                                        }
+                                    ]
+                                }
+                            ]
+                        })
+                        .to_string(),
+                    ),
+                    _ => (404, String::new()),
+                };
+                let response = http_response(
+                    &format!("{status} X"),
+                    &[("Content-Type", "application/json")],
+                    &reply,
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            });
+        }
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), mocked(&base));
+    let gemini = config.antigravity_home.clone().unwrap();
+
+    // 1. Account A starts in PasteCode mode with an already-expired access token
+    //    so we exercise both fresh userinfo lookup (via fallback refresh) and
+    //    CLI-backed usage refresh.
+    let cli_a = fake_unified_antigravity_cli(
+        tmp.path(),
+        "cli-a",
+        "1//uni-rt-a",
+        "ya29.fresh-a",
+        "2020-01-01T00:00:00Z",
+        "ya29.refreshed-a",
+    );
+    accounts.override_cli(HarnessId::Antigravity, cli_a.clone());
+
+    let start_a = accounts.start_login(HarnessId::Antigravity).await.unwrap();
+    assert_eq!(start_a.mode, AgentLoginMode::PasteCode);
+    assert!(
+        start_a.url.starts_with("https://accounts.google.com/o/oauth2/auth?"),
+        "unexpected paste-login url: {}",
+        start_a.url
+    );
+    // Empty paste is rejected without consuming the flow.
+    assert!(accounts.complete_login(&start_a.login_id, "   ").await.is_err());
+
+    let snap_a = accounts
+        .complete_login(&start_a.login_id, "4/0A-code-a")
+        .await
+        .unwrap();
+    let rows_a = rows(&snap_a, HarnessId::Antigravity);
+    assert_eq!(rows_a.len(), 1);
+    assert!(rows_a[0].active);
+    assert_eq!(rows_a[0].email.as_deref(), Some("uni-a@gmail.com"));
+
+    let live_oauth = zeron_harness::acp::antigravity_oauth_token_file(&gemini);
+    assert!(live_oauth.is_file());
+    assert_eq!(mode(&live_oauth), 0o600);
+    assert!(zeron_harness::acp::antigravity_reads_token_file(&gemini));
+
+    // Usage probe sees expired expiry (2020-01-01), calls fake unified CLI to
+    // refresh into `ya29.refreshed-a`, and queries CCPA quota successfully!
+    let with_usage = rows(&accounts.list(true).await.unwrap(), HarnessId::Antigravity);
+    assert_eq!(with_usage.len(), 1);
+    assert_eq!(with_usage[0].plan_label.as_deref(), Some("Google AI Pro"));
+    assert!(
+        with_usage[0].usage_error.is_none(),
+        "unexpected usage error: {:?}",
+        with_usage[0].usage_error
+    );
+
+    // 2. Account B signs in, switches live, then forgets cleanly.
+    let cli_b = fake_unified_antigravity_cli(
+        tmp.path(),
+        "cli-b",
+        "1//uni-rt-b",
+        "ya29.fresh-b",
+        "2099-01-01T00:00:00Z",
+        "ya29.fresh-b",
+    );
+    accounts.override_cli(HarnessId::Antigravity, cli_b);
+    let start_b = accounts.start_login(HarnessId::Antigravity).await.unwrap();
+    assert_eq!(start_b.mode, AgentLoginMode::PasteCode);
+    let snap_b = accounts
+        .complete_login(&start_b.login_id, "https://antigravity.google/oauth-callback?code=b")
+        .await
+        .unwrap();
+    let listed = rows(&snap_b, HarnessId::Antigravity);
+    assert_eq!(listed.len(), 2);
+    let b = listed.iter().find(|r| r.email.as_deref() == Some("uni-b@gmail.com")).unwrap();
+    assert!(!b.active);
+
+    let switched = accounts.activate(HarnessId::Antigravity, &b.id).await.unwrap();
+    assert!(
+        rows(&switched, HarnessId::Antigravity)
+            .iter()
+            .find(|r| r.id == b.id)
+            .unwrap()
+            .active
+    );
+    let live_doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&live_oauth).unwrap()).unwrap();
+    assert_eq!(live_doc["token"]["refresh_token"], "1//uni-rt-b");
+
+    let after_forget = accounts.forget(HarnessId::Antigravity, &b.id).await.unwrap();
+    assert!(!live_oauth.exists());
+    assert_eq!(rows(&after_forget, HarnessId::Antigravity).len(), 1);
+
+    // 3. Abandoned paste-code login cancels cleanly.
+    accounts.override_cli(HarnessId::Antigravity, cli_a);
+    let abandoned = accounts.start_login(HarnessId::Antigravity).await.unwrap();
+    accounts.cancel_login(&abandoned.login_id);
+    assert!(accounts.complete_login(&abandoned.login_id, "late-code").await.is_err());
+    server_task.abort();
+}
+
 // ── OpenCode / Pi ───────────────────────────────────────────────────────────
 
 fn openai_entry(email: &str, account: &str) -> serde_json::Value {
