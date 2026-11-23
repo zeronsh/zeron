@@ -47,6 +47,7 @@ crates/harness/tests/cursor.rs  Cursor catalog: a Max Mode default starts on its
 crates/harness/tests/fixtures/fake-cursor-shim.sh  Cursor catalog: the shim's variants as cursor-agent 1.0.28 sends them, and the 256k start it expects
 apps/zgx/ui/lanes_fixture.luau  Model picker: stubs for the catalog's refresh_catalog and retry_catalog
 apps/zgx/ui/parity_fixture.luau  Model picker: stubs for the catalog's refresh_catalog and retry_catalog
+apps/zgx/ui/chat_fixture.luau  General only: model picker stubs (refresh_catalog, retry_catalog) and the catalog_cursor_* commands, the Cloud machine size a create names, and go_<chat>_at_<message> (a chat opened at a message)
 apps/zgx/ui/shell_fixture.luau  Model picker stubs (refresh_catalog, retry_catalog), and fixture.limited for the usage-limit row mark
 
 # tool_detail: a kept tail shorter than a fold (nil concat fix).

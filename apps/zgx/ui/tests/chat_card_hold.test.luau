@@ -1,5 +1,5 @@
 -- A chat that's a thread of a paused card (screens/chat/card_hold, on
--- ui/chat_fixture.luau): its queue says it's held, with Resume (the card's
+-- ui/card_hold_fixture.luau): its queue says it's held, with Resume (the card's
 -- `resumeItem`, into Now); said with nothing queued too, and gone once the
 -- card is resumed.
 
@@ -29,7 +29,7 @@ end
 local LINE = '.composer-held >> ~"Held while its card is paused"'
 
 test("card hold: a paused card's thread says its queue is held; Resume resumes the card", function()
-	local app = mount("chat_fixture.luau")
+	local app = mount("card_hold_fixture.luau")
 	open(app, "s2")
 	app:command("queue_one")
 	app:frames(10)
@@ -43,14 +43,14 @@ test("card hold: a paused card's thread says its queue is held; Resume resumes t
 	expect(showing(app, 'role:listitem ~"Queued words"')).to_be(true)
 	app:click("#composer-held-action")
 	app:frames(20)
-	expect(app:state("calls")).to_contain("orch:resumeItem:it-held:")
+	expect(app:state("orch_calls")).to_contain("orch:resumeItem:it-held:")
 	-- Resumed: the line goes, the queue stays.
 	expect(showing(app, LINE)).to_be(false)
 	expect(app:has('role:button "Open Held"') or app:has('role:tab "Open Held"')).to_be(false)
 end)
 
 test("card hold: with nothing queued, a paused card's thread still says it's held", function()
-	local app = mount("chat_fixture.luau")
+	local app = mount("card_hold_fixture.luau")
 	open(app, "s2")
 	app:command("card_paused")
 	app:frames(20)
@@ -58,12 +58,12 @@ test("card hold: with nothing queued, a paused card's thread still says it's hel
 	expect(showing(app, LINE)).to_be(true)
 	app:click("#composer-held-action")
 	app:frames(20)
-	expect(app:state("calls")).to_contain("orch:resumeItem:it-held:")
+	expect(app:state("orch_calls")).to_contain("orch:resumeItem:it-held:")
 	expect(showing(app, LINE)).to_be(false)
 end)
 
 test("card hold: another chat's card paused says nothing here", function()
-	local app = mount("chat_fixture.luau")
+	local app = mount("card_hold_fixture.luau")
 	open(app, "s1")
 	app:command("card_paused")
 	app:frames(10)
@@ -75,7 +75,7 @@ test("card hold: another chat's card paused says nothing here", function()
 end)
 
 test("card hold: a Resume refused keeps the line and says it didn't resume", function()
-	local app = mount("chat_fixture.luau")
+	local app = mount("card_hold_fixture.luau")
 	open(app, "s2")
 	app:command("card_paused")
 	app:set_state("orch_refuse", true)
@@ -83,7 +83,7 @@ test("card hold: a Resume refused keeps the line and says it didn't resume", fun
 	open_held(app)
 	app:click("#composer-held-action")
 	app:frames(20)
-	expect(app:state("calls")).to_contain("orch:resumeItem:it-held:")
+	expect(app:state("orch_calls")).to_contain("orch:resumeItem:it-held:")
 	-- (Said in the deck's alerts.)
 	expect(app:has('role:tab "Open Alerts"')).to_be(true)
 	app:click('role:tab "Open Alerts"')

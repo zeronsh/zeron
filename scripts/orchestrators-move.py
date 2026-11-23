@@ -22,7 +22,7 @@ What moves:
             account/{rows,scratchpad}, screens/chat/card_hold
   fixtures  a file at ui/'s top level (a fixture, a world, a stub) that main
             (the base) doesn't have and that requires a moving module or a
-            moving fixture
+            moving fixture, or that only moving tests and fixtures mount
   tests     a ui/tests/*.test.luau main doesn't have that mounts or requires
             a moving fixture or module, or is named as Orchestrators' own
             (control_*, orch_*, orchestrator_*, sidebar_orch*, sidebar_crew*,
@@ -304,6 +304,18 @@ def plan(tree: Tree, base: str):
                 # fixture that stays), which only the plugin's stage loads.
                 elif EXPECTED_TESTS.match(posixpath.basename(v)):
                     tests.add(v)
+        # A fixture of the branch's that only moving tests and fixtures
+        # mount: theirs, though it reaches the plugin by plugins.module.
+        changed = True
+        while changed:
+            changed = False
+            for v in tree.where:
+                if not is_root_file(v) or v in fixtures or v in at_base:
+                    continue
+                users = required_by.get(v, set())
+                if users and users <= (fixtures | tests):
+                    fixtures.add(v)
+                    changed = True
         return fixtures, tests
 
     accepted = set(verify)
