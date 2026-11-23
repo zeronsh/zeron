@@ -114,6 +114,15 @@ end)
 
 local NEEDS = "#control-widget-needs"
 
+-- The opened list scrolled down to the chats-awaiting-input line: it
+-- stands where the newest of them comes in the order (urgent first, then
+-- newest, as the board's column), under the cards and asks that came
+-- after it.
+local function to_inputs(app: any)
+	app:scroll(`{NEEDS} >> .orch-asks-list [1]`, 100000)
+	app:frames(20)
+end
+
 -- The chats awaiting input with no ask of theirs: what the line counts.
 local function bare_inputs(app: any): number
 	local asking = {}
@@ -141,6 +150,7 @@ test("list caps: Needs you folds chats awaiting input into one line, which opens
 	expect(app:has(`{NEEDS} >> .orch-need-inputs >> ~"{n} chats waiting for input"`)).to_be(true)
 	-- (Folded: none of their rows.)
 	expect(app:has(`{NEEDS} >> .orch-need-inputs >> .orch-need`)).to_be(false)
+	to_inputs(app)
 	app:click(`{NEEDS} >> .orch-need-inputs-toggle`)
 	app:frames(30)
 	expect(app:count(`{NEEDS} >> .orch-need-inputs >> .orch-need`)).to_be(n)
@@ -165,16 +175,23 @@ test("list caps: Needs you's n more opens the rest in a list that scrolls past t
 	expect(app:error()).to_be_nil()
 end)
 
-test("list caps: an orchestrator's Needs you caps the same way", function()
+-- An orchestrator's page has no Needs you block of its own any more: its
+-- side panel's Tasks list has a Needs you section, a row a card, built only
+-- near the view and capped at its own "Show n more" (ds/orch_board_list,
+-- tests/orch_board_cheap). What it lists is the board's column for that
+-- orchestrator, the Control room's card rows among them.
+test("list caps: an orchestrator's Needs you is its board column, a row a card", function()
 	local app = open("fleet_dense")
 	app:command("fleet_orch_orc-ui")
 	app:frames(90)
-	local S = "#orch-section-needs"
-	expect(app:count(`{S} >> .orch-need`) <= 6).to_be(true)
-	app:click(`{S} >> .orch-asks-more`)
-	app:frames(40)
-	local _, _, _, list_h = box(app, `{S} >> .orch-asks-list [1]`)
-	expect(list_h < 10 * 140).to_be(true)
+	local model = require("@ds/orch_board_model")
+	local board = model.board(app:state("orchestration"), { filter = "orc-ui" })
+	expect(#board.needs_you > 0).to_be(true)
+	for _, e in board.needs_you do
+		expect(app:has(`#orch-list-needs_you >> #orch-row-{e.id}`)).to_be(true)
+	end
+	expect(app:tree("#orch-list-needs_you", 1)).to_contain(`text "{#board.needs_you}"`)
+	expect(app:error()).to_be_nil()
 end)
 
 test("list caps: a small fleet's Needs you is as it was", function()
@@ -207,6 +224,7 @@ test("list caps: the chats awaiting input, opened, scroll past ten", function()
 	expect(n > 10).to_be(true)
 	app:click(`{NEEDS} >> .orch-asks-more`)
 	app:frames(30)
+	to_inputs(app)
 	app:click(`{NEEDS} >> .orch-need-inputs-toggle`)
 	app:frames(30)
 	local _, _, _, h = box(app, `{NEEDS} >> .orch-need-inputs-list [1]`)
