@@ -232,6 +232,10 @@ fn orchestrators_ships_as_a_bundled_built_in() {
     };
     let bundled = listed.bundled(&app.join("plugins-builtin")).expect("bundled");
     assert_eq!(bundled.modules, modules);
+    // Its row in Settings → Plugins shows an icon, as the other built-ins'
+    // do: Zeron's own crew glyph (ui/assets/icons/ui/users-group-rounded).
+    let svg = super::icon_svg(&json!({ "dir": dir })).expect("Orchestrators' icon");
+    assert!(svg.trim_start().starts_with("<svg"), "{svg}");
 }
 
 /// The entry that ships, loaded as the app loads a bundled built-in: on, it
