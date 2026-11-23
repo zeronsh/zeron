@@ -1,8 +1,9 @@
 -- A decision asked of the person (control_world's `fixture.decision`: two
 -- variants with pictures and scores, a recommendation, context, links), in
--- the Control room: compact on its board card and in Needs you (its
--- question in a line, its options as chips); a card or the thread's name
--- opens the thread at the message that asked; the overlay shows all of it,
+-- the Control room: its question on its board card, its options as chips
+-- in the card's detail and in Needs you; the detail's Open thread or the
+-- thread's name opens the thread at the message that asked; the overlay
+-- shows all of it,
 -- and picking or replying answers it (account/orchestration's `answer`,
 -- the option 1-based) once its Undo has passed. On ui/control_page_fixture.
 
@@ -13,6 +14,14 @@ local function open(): any
 	app:frames(30)
 	app:command("fixture.decision")
 	app:frames(30)
+	-- Where the engine puts its card: Needs you, asked, by that ask.
+	local n = table.clone(app:state("orchestration") :: any)
+	local cards = table.clone(n.cards or {})
+	local now = os.time()
+	table.insert(cards, { id = "it-topo", place = "needs_you", status = "asked", old_state = "active", since = now - 120, status_since = now - 120, asks = { "ak-topo" } })
+	n.cards = cards
+	app:set_state("orchestration", n)
+	app:frames(30)
 	return app
 end
 
@@ -21,6 +30,12 @@ local function calls(app: any): string
 end
 
 local CARD = '#control-board-tab >> .orch-card "Topology lines: pick a variant"'
+-- (A card opened: its detail beside the board, its ask's own buttons.)
+local DETAIL = "#control-board-tab >> #orch-detail-needs"
+local function opened(app: any)
+	app:click(CARD)
+	app:frames(20)
+end
 
 -- To a tab of the Control room's (the Board's cards on its own).
 local function tab(app: any, id: string)
@@ -57,17 +72,20 @@ local function overlay(app: any): any
 	return app
 end
 
-test("a card waiting on a decision shows it compact: the question in a line, its options as chips", function()
+test("a card waiting on a decision shows its question; opened, its options as chips", function()
 	local app = open()
 	tab(app, "board")
-	expect(app:has(`{CARD} >> "Waiting on you"`)).to_be(true)
-	expect(app:has(`{CARD} >> .orch-card-question`)).to_be(true)
+	expect(app:has(`{CARD} >> .orch-card-status >> "Waiting on you"`)).to_be(true)
+	expect(app:has(`{CARD} >> .orch-card-summary >> "{QUESTION}"`)).to_be(true)
+	-- (On the card itself, no chips: they're its detail's.)
+	expect(app:has(`{CARD} >> .orch-choice`)).to_be(false)
+	opened(app)
 	-- The recommended one ringed and starred, named so; the others plain.
-	expect(app:has(`{CARD} >> .orch-choice-recommended`)).to_be(true)
-	expect(app:has(`{CARD} >> role:button "{SOLID}, recommended"`)).to_be(true)
-	expect(app:has(`{CARD} >> role:button "{DASHED}"`)).to_be(true)
-	expect(app:count(`{CARD} >> .orch-choice`)).to_be(3)
-	expect(app:has(`{CARD} >> .orch-choice-expand`)).to_be(true)
+	expect(app:has(`{DETAIL} >> .orch-choice-recommended`)).to_be(true)
+	expect(app:has(`{DETAIL} >> role:button "{SOLID}, recommended"`)).to_be(true)
+	expect(app:has(`{DETAIL} >> role:button "{DASHED}"`)).to_be(true)
+	expect(app:count(`{DETAIL} >> .orch-choice`)).to_be(3)
+	expect(app:has(`{DETAIL} >> .orch-choice-expand`)).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
 
@@ -81,7 +99,8 @@ end)
 test("a card waiting on a decision opens its thread at the message that asked", function()
 	local app = open()
 	tab(app, "board")
-	app:click(`{CARD} >> .orch-card-title`)
+	opened(app)
+	app:click("#control-board-tab >> #orch-detail-ask-thread")
 	app:frames(10)
 	expect(calls(app)).to_contain("open:th-topo:msg-topo-ask")
 end)
@@ -93,18 +112,19 @@ test("an ask's thread name opens the thread at the message that asked", function
 	expect(calls(app)).to_contain("open:th-topo:msg-topo-ask")
 end)
 
-test("a chip on the card answers it, after its Undo", function()
+test("a chip in the card's detail answers it, after its Undo", function()
 	local app = open()
 	tab(app, "board")
-	app:click(`{CARD} >> role:button "{DASHED}"`)
+	opened(app)
+	app:click(`{DETAIL} >> role:button "{DASHED}"`)
 	app:frames(4)
-	expect(app:has(`{CARD} >> .orch-sending >> "{DASHED}"`)).to_be(true)
+	expect(app:has(`{DETAIL} >> .orch-sending >> "{DASHED}"`)).to_be(true)
 	-- (Needs you says so too: one pick, wherever it's shown.)
 	tab(app, "overview")
 	expect(app:has('#control-widget-needs >> .orch-sending')).to_be(true)
 	expect(calls(app)).never.to_contain("answer:")
 	tab(app, "board")
-	expect(app:wait(`{CARD} >> role:button "Undo"`, { gone = true, timeout_ms = 8000 })).to_be(true)
+	expect(app:wait(`{DETAIL} >> role:button "Undo"`, { gone = true, timeout_ms = 8000 })).to_be(true)
 	app:frames(4)
 	expect(calls(app)).to_contain("answer:ak-topo:2:")
 end)

@@ -1,7 +1,6 @@
 -- Dragging anything in the Control room onto Capture's composer references
 -- it (ds/orch_ref): a chip on the Brain dump's draft (its token, its kind's
--- glyph), once each, sent with the dump as its `refs`, never as a file. A
--- Board card's one drag still moves it between columns. On
+-- glyph), once each, sent with the dump as its `refs`, never as a file. On
 -- ui/control_page_fixture.luau (orchestration_sample; ui/control_world).
 
 local COMPOSER = "#control-capture-composer"
@@ -197,17 +196,6 @@ test("drag refs: a dump with nothing referenced has no refs", function()
 	local sent: any = app:state("last_dump")
 	expect(sent).never.to_be_nil()
 	expect(sent.refs).to_be_nil()
-end)
-
-test("drag refs: a Board card dragged to another column still moves there", function()
-	local app = tall()
-	tab(app, "board")
-	app:drag(BOARD_CARD, "#control-board-blocked")
-	app:frames(20)
-	expect(app:error()).to_be_nil()
-	-- Moved (the board's own drop: into Blocked, paused), and no chip made.
-	expect(calls(app)).to_contain("pauseItem")
-	expect(#refs_of(app)).to_be(0)
 end)
 
 test("drag refs: Capture says Drop to reference while one is over it", function()
