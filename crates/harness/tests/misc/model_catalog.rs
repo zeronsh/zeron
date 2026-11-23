@@ -219,3 +219,59 @@ fn each_spec_hashes_its_auth_file_contents() {
         String::from_utf8_lossy(&result.stdout)
     );
 }
+
+/// A Pi that lists `state.models` and refuses `set_model` for those in
+/// `state.refuse`; it exits on `set_model` for those in `state.crash`.
+fn pi_binary(root: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = root.join("pi");
+    std::fs::write(&path, r#"#!/usr/bin/python3
+import json, pathlib, sys
+root = pathlib.Path(__file__).parent
+if '--version' in sys.argv:
+    print('1.2.3')
+    sys.exit(0)
+state = json.loads((root / 'state.json').read_text())
+for line in sys.stdin:
+    request = json.loads(line)
+    if 'id' not in request or 'type' not in request: continue
+    kind, data, ok, error = request['type'], {}, True, None
+    if kind == 'get_available_models':
+        data = {'models':[{'id':m,'provider':'fixture','name':m} for m in state['models']]}
+    if kind == 'get_available_thinking_levels': data = {'levels':['off']}
+    if kind == 'set_model':
+        if request['modelId'] in state.get('crash', []): sys.exit(1)
+        if request['modelId'] in state.get('refuse', []):
+            ok, error = False, 'Model not found: fixture/' + request['modelId']
+    print(json.dumps({'id':request['id'],'type':'response','command':kind,'success':ok,'data':data,'error':error}), flush=True)
+"#).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[tokio::test]
+async fn pi_discovery_skips_a_listed_model_that_set_model_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let binary = pi_binary(dir.path());
+    let state = dir.path().join("state.json");
+    let catalog = |json: &str| {
+        std::fs::write(&state, json).unwrap();
+        // A fresh harness each time: no catalog cached from a previous case.
+        zeron_harness::PiHarness::new().with_executable(&binary)
+    };
+
+    let harness = catalog(r#"{"models":["first","gone","last"],"refuse":["gone"]}"#);
+    let found = harness.model_catalog(true).await.unwrap();
+    assert_eq!(found.source, "live");
+    let ids: Vec<_> = found.models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["fixture/first", "fixture/last"]);
+
+    // Every model refused: Pi's own reason, not an empty catalog.
+    let harness = catalog(r#"{"models":["a","b"],"refuse":["a","b"]}"#);
+    let error = harness.model_catalog(true).await.unwrap_err().to_string();
+    assert!(error.contains("Model not found: fixture/a"), "{error}");
+
+    // Pi dying mid-discovery fails it, never a partial catalog.
+    let harness = catalog(r#"{"models":["first","boom","last"],"crash":["boom"]}"#);
+    assert!(harness.model_catalog(true).await.is_err());
+}

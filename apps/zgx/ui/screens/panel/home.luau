@@ -841,9 +841,15 @@ local function lanes(props: Props, sid: string): Node
 	local function device_data(id: string?): any
 		local d = device_of(id)
 		if d then
+			if d.cloud or d.platform == "cloud" then
+				return { id = "cloud", name = d.name, here = false, cloud = true }
+			end
 			return { id = d.id, name = d.name, here = d.here }
 		end
-		return if id then { id = id, name = locale.s("ds.sidebar.unknown_device") } else nil
+		if id and (id == "cloud" or string.sub(id, 1, 6) == "cloud-") then
+			return { id = "cloud", name = locale.s("settings.projects.cloud"), here = false, cloud = true }
+		end
+		return if id then { id = "none", name = locale.s("ds.sidebar.unknown_device") } else nil
 	end
 	-- A finished lane's state shows until it's seen (screens/panel/
 	-- lanes_seen: its tab in front), then its time, as the sidebar's.
@@ -979,7 +985,7 @@ local function lanes(props: Props, sid: string): Node
 				project = if id == "none" then "none" else id
 			elseif g.kind == "device" then
 				local id = string.match(g.key, "device:([^/]+)$")
-				if id and id ~= "none" then
+				if id and id ~= "none" and id ~= "cloud" then
 					device = id
 				end
 			end

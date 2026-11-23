@@ -71,9 +71,10 @@ fn files_over_the_transcript_dim_the_chat_and_a_drop_attaches_them() {
     app.frames(10);
     assert!(!dimmed(&mut app), "a drop takes the overlay away");
     assert!(
-        has(&mut app, r#"#chat-composer >> ~"notes.md""#),
+        has(&mut app, r#"#chat-composer >> role:button "notes.md""#),
         "the file is a chip on the composer, as a drop on it makes"
     );
+    assert_eq!(draft(&mut app), "notes.md ", "dropped file also inserts an inline chip in the draft");
 }
 
 #[test]
@@ -119,8 +120,8 @@ fn the_files_panes_files_dropped_on_the_transcript_attach_as_chips() {
         assert!(has(app, r#"#chat-drop >> ~"Drop to attach""#), "the same words as for files from outside");
     });
     assert!(!dimmed(&mut app));
-    assert!(has(&mut app, r#"#chat-composer >> ~"lib.rs""#), "the file is a chip on the composer");
-    assert_eq!(draft(&mut app), "", "not a mention in the draft");
+    assert!(has(&mut app, r#"#chat-composer >> role:button ~"lib.rs""#), "the file is a chip on the composer");
+    assert_eq!(draft(&mut app), "lib.rs ", "dropped file also inserts an inline chip in the draft");
 }
 
 #[test]
@@ -150,5 +151,6 @@ fn files_dropped_on_a_new_chats_page_attach_to_its_composer() {
     app.ui.dispatch(InputEvent::FilesDrop { x, y, paths: vec![path].into() });
     app.frames(10);
     assert!(!dimmed(&mut app));
-    assert!(has(&mut app, r#"#chat-composer >> ~"plan.pdf""#));
+    assert!(has(&mut app, r#"#chat-composer >> role:button "plan.pdf""#));
+    assert_eq!(draft(&mut app), "plan.pdf ", "dropped file on new chat also inserts an inline chip");
 }
