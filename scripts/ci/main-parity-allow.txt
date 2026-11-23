@@ -54,12 +54,19 @@ apps/zgx/ui/shell_fixture.luau  Model picker stubs (refresh_catalog, retry_catal
 apps/zgx/ui/tool_detail_fixture.luau  tool_detail: test_tool_short_tail, a kept tail shorter than a fold
 apps/zgx/ui/tests/tool_detail.test.luau  tool_detail: one new case for a kept tail shorter than a fold (additive)
 
-# Not allowed, and failing until they're main's again (orchestrator-
-# motivated struct fields in Chat and session-row literals: `started_by`,
-# the Brain dump's or an orchestrator's; `activity`/`todo`, from
-# proto::orchestration):
-#   crates/client/tests/{cloud_attachments,live,relay}.rs
-#   crates/engine/tests/workspace_sync.rs
-#   crates/sync/tests/{registry_client,registry_edge}.rs
-# `limited` beside them is the general usage limit: once the others go,
-# the last three need a line here for it alone.
+# Chat gained `started_by` (who started it: the Brain dump or an
+# orchestrator; None with Orchestrators off). The one orchestrator-born line
+# left in main's tests: a struct literal must name every field, and moving
+# the field off Chat would change WatchChats. Mechanical, value None. The
+# session rows' `live: Default::default()` is the general usage limit
+# (`limited`, flattened with activity/todo into SessionLive, wire unchanged);
+# `injected` as above.
+crates/client/tests/cloud_attachments.rs  started_by: None on a Chat literal; injected on Run/Steer
+crates/client/tests/live.rs  started_by: None on a Chat literal; injected on Run
+crates/client/tests/relay.rs  started_by: None on a Chat literal
+crates/engine/tests/workspace_sync.rs  started_by: None on a Chat literal; live: Default::default() (usage limit); injected on Run
+crates/sync/tests/registry_client.rs  started_by: None on a Chat literal; live: Default::default() (usage limit)
+crates/sync/tests/registry_edge.rs  started_by: None on a Chat literal; live: Default::default() (usage limit)
+
+# zgx integration tests.
+apps/zgx/tests/reload.rs  The reload test's host answers the model picker's catalog_fresh and catalog_retry (Cursor catalog)
