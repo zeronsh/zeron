@@ -934,8 +934,10 @@ test("force pivot: each pivot keeps its own pan and zoom, through a relaunch", f
 	again:command("map_force_big")
 	again:command("map_force")
 	again:frames(90)
-	expect(v(again).orchestrator.x).to_be(a.x)
-	expect(v(again).machine.x).to_be(b.x)
+	-- (Through a relaunch, as kept: a number read back from storage to
+	-- its fifteenth digit.)
+	expect(math.abs(v(again).orchestrator.x - a.x) < 1e-6).to_be(true)
+	expect(math.abs(v(again).machine.x - b.x) < 1e-6).to_be(true)
 	expect(math.abs((again:state("control_map_force_stats") or {}).zoom - a.zoom) < 1e-6).to_be(true)
 	-- Fit: this pivot's view only.
 	again:click("#orch-force-fit")
