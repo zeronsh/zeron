@@ -17,7 +17,7 @@ export async function catalogAsks(edge: Edge): Promise<void> {
   const stats = data(await edge.stats());
   expect(typeof stats.new_7d).toBe("number");
   expect(stats.new_7d!).toBeLessThanOrEqual(stats.plugins);
-  // (About as many as the newest list has from the last seven days: the fake's clock is its fixtures', a day or two behind.)
+  // (About as many as the newest list has from the last seven days, by the real clock: the fake's is the hour it started in.)
   const newest = data(await edge.catalog({ sort: "new", limit: 50 }));
   const since = (days: number) => newest.items.filter((c) => (c.listed_at ?? 0) >= Date.now() - days * 86_400_000).length;
   if (newest.total <= 50) {
