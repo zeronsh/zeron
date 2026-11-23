@@ -973,6 +973,12 @@ M.View = ui.component(function(props: {
 		-- (Fitted again round the names, as after its own settling: never
 		-- once the view's been moved or a node dragged, nor when they were
 		-- placed again only to clear the field's controls.)
+		-- (Placed once more at the zoom it settled on: fitted round them
+		-- again, nothing placed again after.)
+		if job.after_fit and not moved_view and not dragged_since then
+			fit()
+			recull()
+		end
 		if not moved_view and not dragged_since and not job.for_corners and not job.after_fit then
 			fit()
 			recull()

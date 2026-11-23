@@ -207,7 +207,14 @@ test("force graph: a warm open (places kept) is settled on its first frame", fun
 	expect(s.wakes or 0).to_be(0)
 	expect(s.steps or 0).to_be(0)
 	expect(s.builds > (a.builds or 0)).to_be(true)
-	expect(ms < 50).to_be(true)
+	-- (The Graph's own work that frame: its web built, everything put where
+	-- it was, its shapes made. The frame as a whole is mostly the rest of
+	-- the page taking the new fleet in, and swings with the machine's load:
+	-- held only to a loose bound.)
+	local own = (s.build_ms or 0) + (s.place_ms or 0) + (s.make_ms or 0)
+	print(string.format("FORCEPERF warm open own work %.1fms", own))
+	expect(own < 20).to_be(true)
+	expect(ms < 120).to_be(true)
 	expect(app:count("#control-widget-map >> .orch-force-node") >= 160).to_be(true)
 end)
 

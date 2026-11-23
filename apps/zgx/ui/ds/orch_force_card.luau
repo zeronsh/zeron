@@ -323,16 +323,33 @@ function M.Card(props: Props): Node
 			ui.show(function(): boolean
 				return limit.switched(lim())
 			end, Icon { name = "status-limited", size = 11 }),
-			ui.text {
-				function(): string
-					return limit.text(lim())
-				end,
+			-- (Its words as facts apart: the limit's own text joins them with
+			-- a separator, the card spaces them.)
+			ui.row {
 				class = "orch-force-card-limit-text",
-				text_size = "$font.size.xs",
-				weight = "$font.weight.medium",
-				truncate = true,
-				min_w = 0,
 				grow = 1,
+				min_w = 0,
+				flex_wrap = true,
+				gap = "$space.2",
+				ui.each(ui.computed(function(): { string }
+					local out = {}
+					local text, at = limit.text(lim()), 1
+					while true do
+						local i, j = string.find(text, "·", at, true)
+						local part = string.sub(text, at, if i then i - 1 else #text)
+						local t = string.match(part, "^%s*(.-)%s*$") or ""
+						if t ~= "" then
+							table.insert(out, t)
+						end
+						if not i then
+							break
+						end
+						at = (j :: number) + 1
+					end
+					return out
+				end), function(t: string): Node
+					return ui.text { t, text_size = "$font.size.xs", weight = "$font.weight.medium", truncate = true, min_w = 0 }
+				end),
 			},
 		}),
 		facts(state_line, "orch-force-card-state", "$text.secondary"),
