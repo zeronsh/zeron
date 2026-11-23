@@ -99,6 +99,13 @@ impl VaultClientError {
     pub fn is_needs_reconnect(&self) -> bool {
         self.code.as_deref() == Some("needs_reconnect")
     }
+
+    /// Refused by the device's replay fence (`ts` not newer than its last):
+    /// another signer of this device's (a provider grant) got there first.
+    /// Signing again, later, goes through.
+    pub fn is_stale(&self) -> bool {
+        self.code.as_deref() == Some("stale")
+    }
 }
 
 /// Wire type matching `VaultConnectionsView` in `edge/vault/src/api.ts`.
@@ -544,6 +551,11 @@ pub struct VaultClient {
     http: reqwest::Client,
     grants: Mutex<HashMap<String, CachedGrant>>,
     enroll_lock: tokio::sync::Mutex<()>,
+    /// Held from signing a grant request until its answer: the vault's
+    /// replay fence takes only a `ts` newer than the device's last, so two
+    /// grants in flight at once (a run's servers starting together) must
+    /// reach it in the order they were signed.
+    grant_lock: tokio::sync::Mutex<()>,
 }
 
 impl VaultClient {
@@ -564,6 +576,7 @@ impl VaultClient {
             http,
             grants: Mutex::new(HashMap::new()),
             enroll_lock: tokio::sync::Mutex::new(()),
+            grant_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -761,7 +774,10 @@ impl VaultClient {
 
         self.ensure_enrolled().await?;
         let full_id = mcp_connection_id(short_id);
-        let result = self.send_grant_connection(&full_id, force_refresh).await;
+        let mut result = self.send_grant_connection(&full_id, force_refresh).await;
+        if result.as_ref().is_err_and(VaultClientError::is_stale) {
+            result = self.send_grant_connection(&full_id, force_refresh).await;
+        }
         let grant = match result {
             Ok(grant) => grant,
             Err(err) if err.is_not_enrolled() && self.signer.is_laptop() => {
@@ -795,6 +811,7 @@ impl VaultClient {
         force_refresh: bool,
     ) -> Result<VaultConnectionGrant, VaultClientError> {
         let bearer = self.bearer().await?;
+        let _in_order = self.grant_lock.lock().await;
         let subject = format!("conn:{full_id}");
         let (ts, sig) = self.signer.sign_grant(&self.user_id, &subject)?;
         let body = ConnectionGrantBody {
@@ -832,7 +849,10 @@ impl VaultClient {
         }
 
         self.ensure_enrolled().await?;
-        let result = self.send_grant_connections(&sorted).await;
+        let mut result = self.send_grant_connections(&sorted).await;
+        if result.as_ref().is_err_and(VaultClientError::is_stale) {
+            result = self.send_grant_connections(&sorted).await;
+        }
         let reply = match result {
             Ok(reply) => reply,
             Err(err) if err.is_not_enrolled() && self.signer.is_laptop() => {
@@ -864,6 +884,7 @@ impl VaultClient {
         sorted_full_ids: &[String],
     ) -> Result<VaultConnectionGrantManyReply, VaultClientError> {
         let bearer = self.bearer().await?;
+        let _in_order = self.grant_lock.lock().await;
         let subject = format!("conns:{}", sorted_full_ids.join(","));
         let (ts, sig) = self.signer.sign_grant(&self.user_id, &subject)?;
         let body = ConnectionGrantManyBody {

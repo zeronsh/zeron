@@ -136,10 +136,32 @@ impl ExternalMcpProxy for McpGateway {
             }
 
             if !resp.status().is_success() {
+                // What the upstream said of the credential (never the
+                // credential): its WWW-Authenticate, and the shape of what
+                // was sent.
+                let challenge = resp
+                    .headers()
+                    .get(reqwest::header::WWW_AUTHENTICATE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_owned();
+                let (scheme, token_len) = upstream
+                    .headers
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                    .map(|(_, value)| match value.split_once(' ') {
+                        Some((scheme, token)) => (scheme.to_owned(), token.len()),
+                        None => (String::new(), value.len()),
+                    })
+                    .unwrap_or_default();
                 tracing::warn!(
                     server_id = %req.server_id,
                     method = %req.method,
                     status = resp.status().as_u16(),
+                    challenge = %challenge,
+                    auth_scheme = %scheme,
+                    token_len,
+                    url = %upstream.url,
                     "mcp gateway: upstream answered with an error"
                 );
             }
