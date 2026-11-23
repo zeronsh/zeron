@@ -3,16 +3,17 @@
 -- decision, an approval, a blocker), and chats whose agent stopped to ask
 -- (awaiting input), one row a chat; a card in the board's Needs you is one
 -- row, its first ask, with how many more it has (data.needs). Urgent (or
--- gone stale unanswered) first, then the one waiting longest; a deferred
--- ask stays out of it until its time (data.needs). An ask is compact here:
--- its question in a line and its options as chips (ds/orch_choices), the
--- recommended one ringed; a chip answers at once, with Undo for a moment
--- before it is sent. The question, or the expand at the chips' end, opens
--- the whole of it (ds/orch_decision); the thread's name opens the thread at
--- the message that asked. A chat awaiting input opens. An answer the
--- engine took says so a moment, then slides out, the rows under it closing
--- up (one it turned down stays, saying why: ds/orch_choices); what was
--- answered lately is folded at the foot, in Recent answers.
+-- gone stale unanswered) first, then the newest, as the board's column; a
+-- deferred ask stays out of it until its time (data.needs). An ask is
+-- compact here: its question in a line and its options as chips
+-- (ds/orch_choices), the recommended one ringed; a chip answers at once,
+-- with Undo for a moment before it is sent. The question, or the expand at
+-- the chips' end, opens the whole of it (ds/orch_decision); the thread's
+-- name opens the thread at the message that asked. A chat awaiting input
+-- opens. An answer the engine took says so a moment, then slides out, the
+-- rows under it closing up (one it turned down stays, saying why:
+-- ds/orch_choices); what was answered lately is folded at the foot, in
+-- Recent answers.
 --
 -- Two or more chats awaiting input with no ask to show are one line, "n
 -- chats waiting for input", which opens to their rows. Past `limit` rows,
@@ -470,17 +471,6 @@ return ui.component(function(props: Props): Node
 					end, size = 6 },
 					ui.text { from_name, text_size = "$font.size.xs", color = "$text.tertiary", truncate = true, min_w = 0 },
 				},
-				-- A card asking more than this: how many more, its first shown.
-				ui.show(function(): boolean
-					return more() > 0
-				end, Badge.Badge {
-					function(): string
-						return locale.s("orch.board.more_asks", { n = more() })
-					end,
-					class = "orch-need-more",
-					size = "sm",
-					tabular = true,
-				}),
 				ui.div { grow = 1 },
 				ui.text {
 					function(): string
@@ -561,6 +551,22 @@ return ui.component(function(props: Props): Node
 						ui.rich(runs),
 					}
 				end, { w_full = true }),
+				-- A card asking more than this: how many more, its first shown,
+				-- on a line of its own under the question (the card's title
+				-- whole in the head, however narrow).
+				ui.show(function(): boolean
+					return more() > 0
+				end, ui.row {
+					w_full = true,
+					Badge.Badge {
+						function(): string
+							return locale.s("orch.board.more_asks", { n = more() })
+						end,
+						class = "orch-need-more",
+						size = "sm",
+						tabular = true,
+					},
+				}),
 				-- How to answer: its options as chips, else a line to write.
 				Choices {
 					ask = ask,

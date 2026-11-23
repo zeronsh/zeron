@@ -237,26 +237,28 @@ end)
 
 test("a chat awaiting input opens at its end", function()
 	local app = open()
-	-- (The orchestrator screen card's: under the Moscow reboot and sccache.)
-	app:click('#control-widget-needs >> role:button "Open"[2]')
+	-- (The orchestrator screen card's: under the Moscow reboot (urgent),
+	-- over sccache's (in Needs you longer).)
+	app:click('#control-widget-needs >> role:button "Open"[1]')
 	app:frames(10)
 	expect(calls(app)).to_contain("open:th-ui-orch:")
 	expect(calls(app)).never.to_contain("open:th-ui-orch:m")
 end)
 
-test("a thread's turn-end ask gone stale comes first, urgent", function()
+test("a thread's turn-end ask: newest first, and gone stale, first of all", function()
 	local app = asked()
-	-- Asked after the decision was: under it, while neither is urgent.
-	local before, decision = top(app, `"{PR}"`), top(app, '"Side by side"')
-	expect(before ~= nil and decision ~= nil and decision < before).to_be(true)
+	-- Newest first, as the board's column: asked after the decision's card
+	-- came, over it; under the Moscow reboot, urgent.
+	local before, decision, approve = top(app, `"{PR}"`), top(app, '"Side by side"'), top(app, '"Approve"')
+	expect(before ~= nil and decision ~= nil and before < decision).to_be(true)
+	expect(approve ~= nil and before ~= nil and (approve :: number) < (before :: number)).to_be(true)
 	expect(app:count('#control-widget-needs >> "Urgent"')).to_be(1)
 	app:command("fixture.turn_end_escalate")
 	app:frames(30)
-	-- Urgent now: over the decision, under the Moscow reboot (urgent, and
-	-- waiting longer).
-	local after, decision2, approve = top(app, `"{PR}"`), top(app, '"Side by side"'), top(app, '"Approve"')
-	expect(after ~= nil and decision2 ~= nil and after < decision2).to_be(true)
-	expect(approve ~= nil and after ~= nil and (approve :: number) < (after :: number)).to_be(true)
+	-- Urgent now, and newer than the Moscow reboot: first.
+	local after, decision2, approve2 = top(app, `"{PR}"`), top(app, '"Side by side"'), top(app, '"Approve"')
+	expect(after ~= nil and approve2 ~= nil and (after :: number) < (approve2 :: number)).to_be(true)
+	expect(approve2 ~= nil and decision2 ~= nil and (approve2 :: number) < (decision2 :: number)).to_be(true)
 	expect(app:count('#control-widget-needs >> "Urgent"')).to_be(2)
 end)
 

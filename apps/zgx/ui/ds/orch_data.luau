@@ -26,7 +26,8 @@
 --                                     awaiting input that is no such card's
 --                                     thread (one row a chat: its ask,
 --                                     `input` set, when it has one), urgent
---                                     first, then the longest waiting
+--                                     first, then the newest (the column's
+--                                     order)
 --   data.waiting_for_you(now, sessions_now, qa?, counted?)
 --                                     the one count of what waits on the
 --                                     person: { count, urgent, needs }
@@ -328,6 +329,9 @@ export type Need = {
 	kind: string, -- "card" | "ask" | "input"
 	urgent: boolean,
 	at: number,
+	-- When it came to Needs you: a card's arrival in the column, an ask's
+	-- raising, a chat's last change (the order: newest first).
+	arrived: number,
 	-- The ask it shows (a card's first, not put off), if any.
 	ask: any?,
 	-- An ask (or a card) whose chat awaits input too: the row opens the
@@ -348,8 +352,8 @@ export type Need = {
 -- What needs the person, as the board has it (ds/orch_board_model): one
 -- row a card in Needs you (its first ask, the rest counted on it), one an
 -- open ask not put off that belongs to no such card, one a chat awaiting
--- input that is no such card's thread. Urgent first, then the one waiting
--- longest.
+-- input that is no such card's thread. Urgent first, then the newest, as
+-- the column orders its cards: one card has one place in every list.
 local function needs_now(now: any, sessions_now: any, board: any, at: number): { Need }
 	local chats = M.chats(sessions_now)
 	local out: { Need } = {}
@@ -389,6 +393,7 @@ local function needs_now(now: any, sessions_now: any, board: any, at: number): {
 			kind = "card",
 			urgent = e.urgent,
 			at = if ask then (ask.created or 0) else e.status_since,
+			arrived = e.since,
 			ask = ask,
 			input = input,
 			chat = if from then chats[from] else nil,
@@ -417,6 +422,7 @@ local function needs_now(now: any, sessions_now: any, board: any, at: number): {
 				-- (Gone stale unanswered: urgent too.)
 				urgent = a.urgent == true or a.escalated ~= nil,
 				at = a.created or 0,
+				arrived = a.created or 0,
 				ask = a,
 				input = waiting[a.from_chat] == true,
 				chat = chats[a.from_chat],
@@ -432,6 +438,7 @@ local function needs_now(now: any, sessions_now: any, board: any, at: number): {
 				kind = "input",
 				urgent = false,
 				at = c.updated or 0,
+				arrived = c.updated or 0,
 				chat = c,
 				from = id,
 				hue = M.hue_of(now, chats, id),
@@ -442,9 +449,10 @@ local function needs_now(now: any, sessions_now: any, board: any, at: number): {
 		if a.urgent ~= b.urgent then
 			return a.urgent
 		end
-		if a.at ~= b.at then
-			return a.at < b.at
+		if a.arrived ~= b.arrived then
+			return a.arrived > b.arrived
 		end
+		-- (Two cards come as the column has them: by the card's id.)
 		return a.id < b.id
 	end)
 	return out

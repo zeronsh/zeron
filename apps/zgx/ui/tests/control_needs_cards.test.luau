@@ -185,3 +185,85 @@ test("needs cards: the float on the Board counts the same rows", function()
 	expect(app:tree(FLOAT)).to_contain('"4"')
 	expect(app:error()).to_be_nil()
 end)
+
+-- The top of the first node under `scope` whose line holds `what`.
+local function top(app: any, scope: string, what: string): number?
+	for line in app:tree(scope):gmatch("[^\n]+") do
+		if line:find(what, 1, true) then
+			return tonumber(line:match(" %-?[%d%.]+,(%-?[%d%.]+) "))
+		end
+	end
+	return nil
+end
+
+-- `names` in the order they stand under `scope`, top to bottom.
+local function order(app: any, scope: string, names: { string }): string
+	local placed = {}
+	for _, n in names do
+		local y = top(app, scope, `"{n}"`)
+		expect(y ~= nil).to_be(true)
+		table.insert(placed, { n = n, y = y :: number })
+	end
+	table.sort(placed, function(a: any, b: any): boolean
+		return a.y < b.y
+	end)
+	local out = {}
+	for _, p in placed do
+		table.insert(out, p.n)
+	end
+	return table.concat(out, ", ")
+end
+
+-- Urgent first (the Moscow reboot), then the newest: the orchestrator
+-- screen's card (came 3m ago), CI speed's ask of no card (15m), sccache's
+-- card (in Needs you for a day).
+local ROWS = { "Reboot Moscow node", "Orchestrator screen", "CI speed", "sccache for iOS" }
+local CARDS = { "Reboot Moscow node", "Orchestrator screen", "sccache for iOS" }
+
+test("needs cards: one order in the widget, the float and the column, urgent first then newest", function()
+	local app = open()
+	local want = table.concat(ROWS, ", ")
+	expect(order(app, W, ROWS)).to_be(want)
+	-- The data's own order, and its cards in the board's.
+	local data = require("@ds/orch_data")
+	local model = require("@ds/orch_board_model")
+	local now, sessions = app:state("orchestration"), app:state("sessions")
+	local cards, column = {}, {}
+	for _, n in data.needs(now, sessions) do
+		if n.kind == "card" then
+			table.insert(cards, n.card)
+		end
+	end
+	for _, e in model.board(now).needs_you do
+		table.insert(column, e.id)
+	end
+	expect(table.concat(cards, ",")).to_be(table.concat(column, ","))
+	-- The float, opened past its first row.
+	app:command("fx.board")
+	app:frames(30)
+	app:click(`{FLOAT} >> role:button "3 more"`)
+	app:frames(30)
+	expect(order(app, FLOAT, ROWS)).to_be(want)
+	-- The Board's Needs you column: its cards in the same order.
+	expect(order(app, "#orch-col-needs_you", CARDS)).to_be(table.concat(CARDS, ", "))
+	expect(app:error()).to_be_nil()
+end)
+
+test("needs cards: in the narrow float, the card's title whole and 1 more under its question", function()
+	local app = open()
+	app:command("fx.board")
+	app:frames(30)
+	app:click(`{FLOAT} >> role:button "3 more"`)
+	app:frames(30)
+	-- (Its title as it is, not cut.)
+	expect(app:has(`{FLOAT} >> "Orchestrator screen"`)).to_be(true)
+	local head = top(app, FLOAT, '"Orchestrator screen"') :: number
+	local question = top(app, FLOAT, '"Orchestrator page: conversation') :: number
+	local more = top(app, FLOAT, '"1 more"') :: number
+	local chip = top(app, FLOAT, 'button "Side by side"') :: number
+	expect(head ~= nil and question ~= nil and more ~= nil and chip ~= nil).to_be(true)
+	expect(head < question).to_be(true)
+	expect(question < more).to_be(true)
+	expect(more < chip).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
