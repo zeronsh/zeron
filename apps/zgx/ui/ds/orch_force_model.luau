@@ -109,14 +109,18 @@ function M.build(world: any, comms: { any }?, now: number?, pivot: string?, opts
 	table.sort(open_key)
 	local fold_key = `{fold_at}/{table.concat(open_key, ",")}`
 	-- (A thread's quiet or not is in the fleet's keeping only as its status:
-	-- folds made again whenever any shown thread's quietness changes.)
+	-- folds made again whenever any shown thread's quietness changes; in
+	-- the fleet's own steady order.)
 	local quiet_key = {}
-	for id, c in chats do
-		if M.quiet(c) then
-			table.insert(quiet_key, id)
+	for _, m in fleet.machines do
+		for _, g in m.groups do
+			for _, th in g.threads do
+				if M.quiet(chats[th.id]) then
+					table.insert(quiet_key, th.id)
+				end
+			end
 		end
 	end
-	table.sort(quiet_key)
 	fold_key ..= "/" .. table.concat(quiet_key, ",")
 	if lb and rawequal(lb.fleet, fleet) and rawequal(lb.comms, comms) and lb.pivot == pivot and lb.t == t and lb.fold_key == fold_key then
 		local same = true

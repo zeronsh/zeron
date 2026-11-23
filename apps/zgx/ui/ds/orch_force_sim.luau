@@ -62,7 +62,7 @@ function M.hub_angle(k: number): number
 end
 
 M.TURN_BELOW = 1.5
-M.EVEN_SHARE, M.EVEN_MOST = 0.75, 2
+M.EVEN_SHARE, M.EVEN_MOST = 0.9, 2
 
 -- Each of the middle's hubs out as far as it goes: past its fan's reach
 -- (as stretched, the way back to the middle); as close in as that lets

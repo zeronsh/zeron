@@ -10,6 +10,8 @@ local function open(w: number?, fleet: string?): any
 	local app = mount("orch_map_fixture.luau")
 	app:resize(w or 1440, 2400)
 	app:command("map_only")
+	-- (Every crew shown whole: none folded.)
+	app:set_state("control_map_force_open_folds", { ["orc-eng"] = true, ["orc-vpn"] = true, ["orc-ui"] = true })
 	app:command(fleet or "map_force_big")
 	app:command("map_force")
 	return app
@@ -183,6 +185,7 @@ test("force graph: a warm open (places kept) is settled on its first frame", fun
 		local app = mount("orch_map_fixture.luau")
 		app:resize(1440, 2400)
 		app:command("map_only")
+		app:set_state("control_map_force_open_folds", { ["orc-eng"] = true, ["orc-vpn"] = true, ["orc-ui"] = true })
 		app:command("map_force")
 		return app
 	end
@@ -336,6 +339,9 @@ end)
 test("force graph: hover, card, grip, click, menu", function()
 	local app = open()
 	settle(app, 240)
+	-- (Its names placed and the view fitted round them: still.)
+	app:wait(400)
+	app:frames(30)
 	app:set_state("control_map_force_hover", "vpn19")
 	app:frames(3)
 	app:hover(".orch-force-anchor-box")
@@ -638,8 +644,11 @@ test("force names: every thread named, none on another name, a mark or a line; t
 	local named, chats = check_labels(app, "big")
 	print(`FORCENAMES 164 agents: {named} of {chats} threads named, placed in {string.format("%.1f", stats(app).names_ms or -1)}ms`)
 	-- (A crowd of 160 can't all have room at this scale: those that do,
-	-- the pressing first; the rest on hover.)
-	expect(named >= chats * 0.45).to_be(true)
+	-- the pressing first, then idle and finished ones whole where there's
+	-- room; the rest on hover. Fit zooms out to show the whole web, never a
+	-- name cut by the field's edge, so a crowd has fewer than when names
+	-- ran past it.)
+	expect(named >= chats * 0.35).to_be(true)
 	-- The sample fleet, every chat shown.
 	local small = mount("orch_map_fixture.luau")
 	small:resize(1440, 2400)

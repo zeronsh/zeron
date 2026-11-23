@@ -1165,7 +1165,7 @@ return ui.column {
 	ui.show(function(): boolean
 		return bare_w:get() > 0
 	end, ui.column {
-		p = 16,
+		p = "$space.4",
 		shrink = 0,
 		ui.column {
 			id = "force-bare",

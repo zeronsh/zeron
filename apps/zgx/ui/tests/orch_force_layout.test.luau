@@ -223,31 +223,36 @@ test("force layout: a hub's many quiet threads fold into one; a click opens it, 
 	expect(places(app)["fold:orc-1"] ~= nil).to_be(true)
 end)
 
-test("force layout: idle and finished threads go unnamed (their card names them); a thread at work, waiting or asking named", function()
-	local app = open("screenshot", 1300, 700)
-	local d = read(app)
-	local named = {}
-	for _, la in d.labels do
-		named[la.id] = true
+test("force layout: every thread at work, waiting or asking named; idle and finished ones where there's room; a fold never", function()
+	local active = { working = true, waiting = true, input = true }
+	for _, f in { { 1300, 700 }, { 700, 600 } } do
+		local app = open("screenshot", f[1], f[2])
+		local d = read(app)
+		local named = {}
+		for _, la in d.labels do
+			named[la.id] = true
+		end
+		-- (The fixture's mix: s1c2 works, s1c5 waits, s1c11 asks; s1c1 idle.)
+		for _, id in { "s1c2", "s1c5", "s1c11", "orc-1", "orc-2", "orc-brain" } do
+			expect(`{id} {named[id] == true}`).to_be(`{id} true`)
+		end
+		local spare, spare_named = 0, 0
+		for i = 1, 25 do
+			local id = `s1c{i}`
+			local mix = { "idle", "working", "idle", "done", "waiting", "idle", "idle", "working", "done", "idle", "input", "idle", "working", "idle", "done", "idle", "waiting", "idle" }
+			if not active[mix[(i - 1) % #mix + 1]] then
+				spare += 1
+				if named[id] then
+					spare_named += 1
+				end
+			end
+		end
+		print(`FORCELAYOUT names {f[1]}x{f[2]}: {spare_named} of {spare} idle or finished named`)
+		if f[1] == 700 then
+			-- (Narrow: not all of them have room.)
+			expect(spare_named < spare).to_be(true)
+		else
+			expect(spare_named > 0).to_be(true)
+		end
 	end
-	-- (s1c2 works, s1c1 is idle, s1c4 is done: the fixture's mix.)
-	expect(named.s1c2).to_be(true)
-	expect(named.s1c1).to_be(nil)
-	expect(named.s1c4).to_be(nil)
-	-- The hubs and the Brain always named.
-	expect(named["orc-1"]).to_be(true)
-	expect(named["orc-brain"]).to_be(true)
-	-- One finishing: its name goes.
-	app:command("map_shape_finish")
-	for _ = 1, 120 do
-		app:frames(1)
-	end
-	app:wait(400)
-	app:frames(30)
-	local d2 = read(app)
-	local named2 = {}
-	for _, la in d2.labels do
-		named2[la.id] = true
-	end
-	expect(named2.s1c2).to_be(nil)
 end)

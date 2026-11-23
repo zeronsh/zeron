@@ -59,7 +59,7 @@ local FRAMES = { { 1300, 700 }, { 1500, 900 }, { 700, 600 } }
 local ACTIVE: { [string]: boolean } = { working = true, waiting = true, input = true, approval = true, failed = true }
 
 -- A variant: sim options, and the Graph's own choices.
-type Variant = { name: string, wide: boolean?, space: boolean?, tight: boolean?, fold: number?, quiet: boolean?, min_fit: number?, fill: boolean?, turn: boolean?, flat: boolean?, turn_below: number?, stretch_most: number?, even: boolean? }
+type Variant = { name: string, wide: boolean?, space: boolean?, tight: boolean?, fold: number?, quiet: boolean?, min_fit: number?, fill: boolean?, turn: boolean?, flat: boolean?, turn_below: number?, stretch_most: number?, even: boolean?, even_share: number?, spoke: number? }
 
 -- The web for a shape: nodes (the Brain first), links, and per node its
 -- kind, title, state, radius.
@@ -109,7 +109,8 @@ end
 -- what the frame shows (screen points).
 local function lay(shape: any, v: Variant, w: number, h: number): any
 	local web = build(shape, v)
-	local tb, sm = sim.TURN_BELOW, sim.STRETCH_MOST
+	local tb, sm, es = sim.TURN_BELOW, sim.STRETCH_MOST, sim.EVEN_SHARE
+	sim.EVEN_SHARE = v.even_share or es
 	sim.TURN_BELOW = v.turn_below or tb
 	sim.STRETCH_MOST = v.stretch_most or sm
 	local s = sim.new(web.nodes, web.links, 7, { aspect = w / h, dense = 1, wide = v.wide, space = v.space, tight = v.tight, turn = v.turn, flat = v.flat or v.fill, even = v.even })
@@ -117,7 +118,7 @@ local function lay(shape: any, v: Variant, w: number, h: number): any
 		sim.stretch(s, w, h - 30, 70)
 	end
 	sim.place(s, nil)
-	sim.TURN_BELOW, sim.STRETCH_MOST = tb, sm
+	sim.TURN_BELOW, sim.STRETCH_MOST, sim.EVEN_SHARE = tb, sm, es
 	sim.wake(s, nil)
 	for _ = 1, 4000 do
 		sim.step(s)
@@ -132,9 +133,10 @@ local function lay(shape: any, v: Variant, w: number, h: number): any
 		local ns = {}
 		for i, m in web.meta do
 			local p = s.parent[i]
-			local quiet = m.kind == "fold" or (v.quiet and m.kind == "chat" and not ACTIVE[m.state])
+			local quiet = m.kind == "fold"
+			local spare = v.quiet and m.kind == "chat" and not ACTIVE[m.state]
 			table.insert(ns, { id = m.id, kind = if m.kind == "fold" then "chat" else m.kind, x = s.x[i], y = s.y[i], r = m.r, title = m.title,
-				hx = if p > 0 then s.x[p] else nil, hy = if p > 0 then s.y[p] else nil, rank = if ACTIVE[m.state or ""] then 0 else 3, quiet = quiet })
+				hx = if p > 0 then s.x[p] else nil, hy = if p > 0 then s.y[p] else nil, rank = if ACTIVE[m.state or ""] then 0 else 3, quiet = quiet, spare = spare })
 		end
 		local ls = {}
 		for _, l in web.links do
@@ -254,6 +256,7 @@ local function measure_layout(L: any, v: Variant): any
 		clipped = clipped,
 		unnamed = unnamed,
 		marks = #L.marks,
+		names = #L.names,
 		zoom = L.zoom,
 		steps = L.steps,
 	}
@@ -288,6 +291,14 @@ end
 
 
 local VARIANTS: { Variant } = {
+	{ name = "K3", wide = true, space = true, tight = true, quiet = true, min_fit = 0.5, fill = true, turn = true, even = true, even_share = 0.9 },
+	{ name = "K3+sp06", wide = true, space = true, tight = true, quiet = true, min_fit = 0.5, fill = true, turn = true, even = true, even_share = 0.9, spoke = 0.6 },
+	{ name = "K3+sp08", wide = true, space = true, tight = true, quiet = true, min_fit = 0.5, fill = true, turn = true, even = true, even_share = 0.9, spoke = 0.8 },
+	{ name = "K2", wide = true, space = true, tight = true, quiet = true, min_fit = 0.5, fill = true, turn = true, even = true },
+	{ name = "K2+s18", wide = true, space = true, tight = true, quiet = true, min_fit = 0.5, fill = true, turn = true, even = true, stretch_most = 1.8 },
+	{ name = "K2+e09", wide = true, space = true, tight = true, quiet = true, min_fit = 0.5, fill = true, turn = true, even = true, even_share = 0.9 },
+	{ name = "K2+e10", wide = true, space = true, tight = true, quiet = true, min_fit = 0.5, fill = true, turn = true, even = true, even_share = 1.0 },
+	{ name = "K2+s18+e09", wide = true, space = true, tight = true, quiet = true, min_fit = 0.5, fill = true, turn = true, even = true, stretch_most = 1.8, even_share = 0.9 },
 	{ name = "K+even", wide = true, space = true, tight = true, quiet = true, min_fit = 0.5, fill = true, turn = true, even = true },
 	{ name = "K", wide = true, space = true, tight = true, quiet = true, min_fit = 0.5, fill = true, turn = true },
 	{ name = "K+turn22", wide = true, space = true, tight = true, quiet = true, min_fit = 0.5, fill = true, turn = true, turn_below = 2.2 },
@@ -315,7 +326,7 @@ local VARIANTS: { Variant } = {
 -- (The lab: every variant, shape and frame. Run on purpose:
 -- FORCEBAL_ONLY=<variant names, comma-separated> narrows it.)
 test("force balance lab: every variant, shape and frame measured", function()
-	local only: string? = nil
+	local only: string? = "base,K3"
 	for _, v in VARIANTS do
 		if only and not string.find("," .. only .. ",", "," .. v.name .. ",", 1, true) then
 			continue

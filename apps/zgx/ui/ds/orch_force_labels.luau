@@ -17,7 +17,9 @@
 -- input: {
 --   nodes: { { id, kind = "brain" | "orchestrator" | "chat", x, y, r,
 --              title, hx?, hy? (its hub), rank? (lower first), quiet?
---              (no name: its card names it) } },
+--              (no name: its card names it), spare? (named only where
+--              there's room once every other is placed: cut short at
+--              most once, nearest its hub first) } },
 --   links: { { ax, ay, bx, by } },
 --   measure: (text, hub: boolean) -> width,
 --   prev: { [string]: Label }?   the last placement, by id
@@ -69,6 +71,8 @@ M.LEADER = 8
 M.STEPS = { 0, 10, 24, 44 }
 -- Whether a name keeps off the lines.
 M.LINES = true
+-- (A spare name cut short at most once.)
+local SPARE_CUTS, ALL_CUTS = { 18 }, { 18, 12, 9 }
 -- The grid the marks, names and lines are looked up in.
 local CELL = 48
 
@@ -340,7 +344,23 @@ function M.start(input: any): any
 			table.insert(order, i)
 		end
 	end
+	-- (A spare one after every other, the nearest its hub first.)
+	local function hub_d(i: number): number
+		local n = nodes[i]
+		return if n.hx then (n.x - n.hx) ^ 2 + (n.y - n.hy) ^ 2 else 0
+	end
 	table.sort(order, function(a: number, b: number): boolean
+		local sa, sb = nodes[a].spare == true, nodes[b].spare == true
+		if sa ~= sb then
+			return sb
+		end
+		if sa then
+			local da, db = hub_d(a), hub_d(b)
+			if da ~= db then
+				return da < db
+			end
+			return a < b
+		end
 		local ra, rb = nodes[a].rank or 0, nodes[b].rank or 0
 		if ra ~= rb then
 			return ra < rb
@@ -397,10 +417,13 @@ function M.run(job: any, budget: number?, measure: any?): boolean
 			if #two == 2 or #forms == 0 then
 				table.insert(forms, two)
 			end
-			for _, chars in { 18, 12, 9 } do
-				local s = shortened(title, chars)
-				if s then
-					table.insert(forms, { s })
+			-- (A spare one shortened at most once.)
+			do
+				for _, chars in (if n.spare then SPARE_CUTS else ALL_CUTS) do
+					local s = shortened(title, chars)
+					if s then
+						table.insert(forms, { s })
+					end
 				end
 			end
 			-- (Its sides, away from its hub first.)

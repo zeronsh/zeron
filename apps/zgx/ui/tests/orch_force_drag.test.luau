@@ -52,6 +52,8 @@ local function open_big(): any
 	local app = mount("orch_map_fixture.luau")
 	app:resize(1440, 2400)
 	app:command("map_only")
+	-- (Every crew shown whole: none folded.)
+	app:set_state("control_map_force_open_folds", { ["orc-eng"] = true, ["orc-vpn"] = true, ["orc-ui"] = true })
 	app:command("map_force_big")
 	app:command("map_force")
 	app:frames(90)

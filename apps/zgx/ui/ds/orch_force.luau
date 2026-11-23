@@ -579,7 +579,6 @@ M.View = ui.component(function(props: {
 		local fw, fh = math.max(1, width:peek()), field_h()
 		local dense = math.clamp(1 - (#nodes - 60) / 400, 0.7, 1)
 		local next_s = sim.new(nodes, links, 7, { aspect = fw / fh, dense = dense, wide = true, space = true, tight = true, turn = true, flat = true, even = true })
-		sim.stretch(next_s, fw, fh - 30, STRETCH_PAD)
 		-- (Where they were: this web, else kept from before; laid out for
 		-- another field (or by an older layout), only what was pinned there.)
 		local from: { [string]: any } = table.clone(M.places_of():peek() or {})
@@ -615,6 +614,25 @@ M.View = ui.component(function(props: {
 			end
 		end
 		built_pivot = pivot
+		-- (Stretched to the field: worked out again only where something is
+		-- placed afresh; everything where it was, the last stretch kept.)
+		local kept_frame = (M.layouts:peek() or {})[pivot]
+		local all_kept = frame_ok and type(kept_frame) == "table" and type(kept_frame.fx) == "number"
+		if all_kept then
+			for _, nd in nodes do
+				if not from[nd.id] then
+					all_kept = false
+					break
+				end
+			end
+		end
+		if all_kept then
+			next_s.fx, next_s.fy = kept_frame.fx, kept_frame.fy
+			sim.reach_hubs(next_s)
+		else
+			sim.stretch(next_s, fw, fh - 30, STRETCH_PAD)
+			M.layouts:set_key({ pivot }, { w = fw0, h = fh0, v = LAYOUT_V, fx = next_s.fx, fy = next_s.fy })
+		end
 		local fresh = sim.place(next_s, from)
 		-- (Pinned ones held where they were dropped; a pin of a node not
 		-- shown kept for when it is, till the data says it's gone.)
@@ -988,9 +1006,10 @@ M.View = ui.component(function(props: {
 				hy = if p > 0 then s.y[p] else nil,
 				rank = if n.kind == "chat" then (NAME_RANK[state_of(n.id)] or 4) else 0,
 				-- (Named while it's at work, waiting or asking; an idle or
-				-- finished one, and a fold, named on its card as the pointer
-				-- rests on it.)
-				quiet = n.kind == "chat" and (n.folded ~= nil or not NAMED[state_of(n.id)]),
+				-- finished one where there's room once those are placed (else
+				-- on its card as the pointer rests on it); a fold never.)
+				quiet = n.folded ~= nil,
+				spare = n.kind == "chat" and n.folded == nil and not NAMED[state_of(n.id)],
 			})
 		end
 		local links = {}
