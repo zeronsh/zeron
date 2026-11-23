@@ -76,9 +76,19 @@ test("needs float: nothing waiting, nothing at all", function()
 	local app = open()
 	tab(app, "board")
 	expect(app:has(FLOAT)).to_be(true)
-	-- Every ask answered and no chat awaiting input.
+	-- Every ask answered, no card in the board's Needs you (sccache's
+	-- blocked one picked up again) and no chat awaiting input.
 	local n = table.clone(app:state("orchestration") :: any)
 	n.asks = {}
+	local items = {}
+	for _, it in n.items or {} do
+		local it2 = table.clone(it)
+		if it2.state == "blocked" or it2.state == "review" then
+			it2.state = "active"
+		end
+		table.insert(items, it2)
+	end
+	n.items = items
 	app:set_state("orchestration", n)
 	local s: any = table.clone(app:state("sessions") :: any)
 	local function idle(list: { any }?): { any }
@@ -150,6 +160,6 @@ test("needs float: the Board keeps room at its end, its last cards scrolled clea
 	app:frames(30)
 	local _, fy = box(app, FLOAT)
 	-- (The Done column's foot, its last thing.)
-	local _, cy, _, ch = box(app, "#control-board-done")
+	local _, cy, _, ch = box(app, "#orch-col-done")
 	expect(cy + ch <= fy).to_be(true)
 end)

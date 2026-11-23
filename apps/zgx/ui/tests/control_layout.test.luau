@@ -170,10 +170,11 @@ test("the head counts what the blocks show, no glyphs between", function()
 	expect(head).to_contain(`"{working} working"`)
 	-- Needing you: Needs you's rows and the Q&A's answers not read yet
 	-- (its block's "new" figure), counted once (data.waiting_for_you).
-	expect(app:count("#control-widget-needs >> .orch-need")).to_be(2)
+	-- (Needs you's rows: the board's three Needs-you cards.)
+	expect(app:count("#control-widget-needs >> .orch-need")).to_be(3)
 	local new = tonumber(string.match(app:tree("#control-widget-qa"), '"(%d+) new"')) or 0
 	expect(new > 0).to_be(true)
-	expect(head).to_contain(`"{2 + new} need you"`)
+	expect(head).to_contain(`"{3 + new} need you"`)
 	-- Orchestrators: each of yours not archived (the Brain dump isn't one).
 	expect(head).to_contain('"3 orchestrators"')
 	expect(head).never.to_contain("·")

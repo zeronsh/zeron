@@ -146,7 +146,7 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 	local needs = ui.computed(function(): number
 		local n = 0
 		for _, need in needs_of(props.of()) do
-			if not need.ask or decide.counted(need.ask.id) then
+			if data.counted_need(need, decide.counted) then
 				n += 1
 			end
 		end

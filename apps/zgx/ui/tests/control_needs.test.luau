@@ -1,6 +1,10 @@
--- Needs you (ds/orch_asks) in the Control room: asks and chats awaiting
--- input, urgent first; an ask answered in place goes to the host and its
--- row slides out. On ui/control_page_fixture.luau.
+-- Needs you (ds/orch_asks) in the Control room: a row a card in the
+-- board's Needs you, an ask of no such card, a chat awaiting input that is
+-- no such card's thread, urgent first; an ask answered in place goes to the
+-- host and its row slides out. On ui/control_page_fixture.luau (the
+-- sample's Needs you: the orchestrator screen's card asking ak-1, the
+-- Moscow reboot's asking ak-2, sccache's blocked with nothing asked).
+-- tests/control_needs_cards has a card asking two things.
 
 local function open(): any
 	local app = mount("control_page_fixture.luau")
@@ -22,30 +26,35 @@ local function top(app: any, what: string): number?
 	return nil
 end
 
-test("what needs you lists asks and waiting chats, urgent first, one row a chat", function()
+test("what needs you lists the board's Needs you cards, urgent first, one row a card", function()
 	local app = open()
-	-- The orchestrator screen thread awaits input and has an ask open: one
-	-- row, the ask's, with its options and a way into the chat.
-	expect(app:count("#control-widget-needs >> .orch-need")).to_be(2)
+	-- The orchestrator screen thread awaits input and its card has an ask
+	-- open: one row, the card's, with its ask's options and a way into the
+	-- chat. sccache's card, asking nothing, has its row too.
+	expect(app:count("#control-widget-needs >> .orch-need")).to_be(3)
+	expect(app:has('#control-widget-needs >> role:button "Open “sccache for iOS”"')).to_be(true)
 	local urgent, decision = top(app, '"Approve"'), top(app, '"Side by side"')
 	expect(urgent ~= nil and decision ~= nil and urgent < decision).to_be(true)
 	expect(app:has('#control-widget-needs >> role:button "Open"')).to_be(true)
 	expect(app:has('#control-widget-needs >> "Awaiting input"')).to_be(false)
 end)
 
-test("a waiting chat with no ask of its own has a row to open it", function()
+test("a waiting chat with no ask of its own and no card has a row to open it", function()
 	local data = require("@ds/orch_data")
 	local sample = require("@account/orchestration_sample")
 	local now = table.clone(sample.now)
 	now.asks = {}
+	now.items = {}
 	local needs = data.needs(now, { chats = sample.chats })
 	expect(#needs).to_be(1)
 	expect(needs[1].kind).to_be("input")
-	local with_ask = data.needs(sample.now, { chats = sample.chats })
-	for _, n in with_ask do
-		expect(n.kind).to_be("ask")
+	-- Its card in Needs you: the card's row, opening the chat as well.
+	local with_card = data.needs(sample.now, { chats = sample.chats })
+	for _, n in with_card do
+		expect(n.kind).to_be("card")
 		if n.from == "th-ui-orch" then
 			expect(n.input).to_be(true)
+			expect(n.ask.id).to_be("ak-1")
 		end
 	end
 end)
@@ -76,7 +85,7 @@ test("an option answers its ask after its Undo; once taken it says so, then leav
 	-- Then out of Needs you, and in Recent answers.
 	expect(app:wait('#control-widget-needs >> .orch-need >> "Approve"', { gone = true, timeout_ms = 5000 })).to_be(true)
 	app:frames(10)
-	expect(app:count("#control-widget-needs >> .orch-need")).to_be(1)
+	expect(app:count("#control-widget-needs >> .orch-need")).to_be(2)
 	expect(head(app)).never.to_contain("urgent")
 	app:click('#control-widget-needs >> role:button "Recent answers"')
 	app:frames(6)
@@ -98,11 +107,11 @@ test("Undo takes a pick back: nothing is sent, and the chips and counts come bac
 	app:frames(4)
 	expect(app:has('#control-widget-needs >> role:button "Approve"')).to_be(true)
 	expect(head(app)).to_contain('"1 urgent"')
-	expect(app:count("#control-widget-needs >> .orch-need")).to_be(2)
+	expect(app:count("#control-widget-needs >> .orch-need")).to_be(3)
 	app:frames(30)
 	app:wait('#control-widget-needs >> "never there"', { timeout_ms = 6000 })
 	expect(calls(app)).never.to_contain("answer:")
-	expect(app:count("#control-widget-needs >> .orch-need")).to_be(2)
+	expect(app:count("#control-widget-needs >> .orch-need")).to_be(3)
 end)
 
 test("an answer the engine turns down comes back with why, and Retry sends it again", function()
@@ -115,7 +124,7 @@ test("an answer the engine turns down comes back with why, and Retry sends it ag
 	expect(app:has('#control-widget-needs >> "Answered"')).to_be(false)
 	expect(app:has('#control-widget-needs >> role:button "Approve"')).to_be(true)
 	expect(app:has('#control-widget-needs >> "Couldn\'t send your answer: That ask was already answered or dismissed"')).to_be(true)
-	expect(app:count("#control-widget-needs >> .orch-need")).to_be(2)
+	expect(app:count("#control-widget-needs >> .orch-need")).to_be(3)
 	expect(head(app)).to_contain('"1 urgent"')
 	expect(calls(app)).to_contain("answer:ak-2:1:")
 	-- Retry: sent again at once; taken this time.
@@ -191,7 +200,9 @@ end
 
 test("a thread's question from its turn's end: the question, both options, whose and how long", function()
 	local app = asked()
-	expect(app:count("#control-widget-needs >> .orch-need")).to_be(3)
+	-- (Its card is Running by its old column, so its ask is a row of its
+	-- own: four.)
+	expect(app:count("#control-widget-needs >> .orch-need")).to_be(4)
 	-- (Its code spans drawn as code, their ticks gone.)
 	expect(app:has('#control-widget-needs >> ~"Should I commit and open a PR against zeron/zgx, or merge it"')).to_be(true)
 	expect(app:has('#control-widget-needs >> ~"`zeron/zgx`"')).to_be(false)
@@ -200,8 +211,9 @@ test("a thread's question from its turn's end: the question, both options, whose
 	-- Which thread asked (a way into it, at the question), how long it has waited.
 	expect(app:has('#control-widget-needs >> role:button "Open Codex Slash Commands Missing at its question"')).to_be(true)
 	expect(app:has('#control-widget-needs >> "2m"')).to_be(true)
-	-- (Only the chat awaiting input has an Open of its own.)
-	expect(app:count('#control-widget-needs >> role:button "Open"')).to_be(1)
+	-- (Only the card whose chat awaits input, and sccache's asking nothing,
+	-- have an Open of their own.)
+	expect(app:count('#control-widget-needs >> role:button "Open"')).to_be(2)
 	-- Compact: no reply line where there are options (the overlay has one).
 	expect(app:has('#control-widget-needs >> role:textbox "Reply"')).to_be(false)
 	expect(app:error()).to_be_nil()
@@ -225,7 +237,8 @@ end)
 
 test("a chat awaiting input opens at its end", function()
 	local app = open()
-	app:click('#control-widget-needs >> role:button "Open"')
+	-- (The orchestrator screen card's: under the Moscow reboot and sccache.)
+	app:click('#control-widget-needs >> role:button "Open"[2]')
 	app:frames(10)
 	expect(calls(app)).to_contain("open:th-ui-orch:")
 	expect(calls(app)).never.to_contain("open:th-ui-orch:m")

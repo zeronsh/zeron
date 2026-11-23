@@ -19,16 +19,21 @@
 --                                     holding it)
 --   data.stripes(text, n)             a piece shared by n routes cut into
 --                                     stripes, one route's each by turns
---   data.needs(now, sessions_now)     what needs the person: open asks and
---                                     chats awaiting input (one row a chat:
---                                     its ask, `input` set, when it has
---                                     one), urgent first, then the longest
---                                     waiting
+--   data.needs(now, sessions_now)     what needs the person, as the board
+--                                     has it: a row a Needs-you card (its
+--                                     first ask, `asks` all of them), an
+--                                     open ask of no such card, a chat
+--                                     awaiting input that is no such card's
+--                                     thread (one row a chat: its ask,
+--                                     `input` set, when it has one), urgent
+--                                     first, then the longest waiting
 --   data.waiting_for_you(now, sessions_now, qa?, counted?)
 --                                     the one count of what waits on the
 --                                     person: { count, urgent, needs }
 --                                     (`counted(ask_id)`: false for an ask
 --                                     answered here, ds/orch_decide)
+--   data.counted_need(need, counted)  whether a row counts while asks are
+--                                     answered here (a card's: any of its)
 --   data.open_asks(now)               the open asks by the chat that asked
 --                                     (its latest one)
 --   data.turn_end(ask)                whether a turn's end raised it
@@ -41,6 +46,8 @@
 --                                     today: any not done; a done one,
 --                                     done since local midnight (the
 --                                     board's Done column and its count)
+
+local model = require("@ds/orch_board_model")
 
 local M = {}
 
@@ -59,28 +66,6 @@ local function memo1(f: (any) -> any): (any) -> any
 		if hit == nil then
 			hit = f(a)
 			cache[a] = hit
-		end
-		return hit
-	end
-end
-local function memo2(f: (any, any) -> any): (any, any) -> any
-	local cache: { [any]: any } = setmetatable({}, { __mode = "k" }) :: any
-	local NIL = {}
-	return function(a: any, b: any): any
-		if type(a) ~= "table" and a ~= nil or type(b) ~= "table" and b ~= nil then
-			return f(a, b)
-		end
-		local ka: any = if a == nil then NIL else a
-		local kb: any = if b == nil then NIL else b
-		local inner = cache[ka]
-		if not inner then
-			inner = setmetatable({}, { __mode = "k" })
-			cache[ka] = inner
-		end
-		local hit = inner[kb]
-		if hit == nil then
-			hit = f(a, b)
-			inner[kb] = hit
 		end
 		return hit
 	end
@@ -340,37 +325,92 @@ end
 
 export type Need = {
 	id: string,
-	kind: string, -- "ask" | "input"
+	kind: string, -- "card" | "ask" | "input"
 	urgent: boolean,
 	at: number,
+	-- The ask it shows (a card's first, not put off), if any.
 	ask: any?,
-	-- An ask whose chat awaits input too: the row opens the chat as well.
+	-- An ask (or a card) whose chat awaits input too: the row opens the
+	-- chat as well.
 	input: boolean?,
 	chat: Chat?,
 	from: string?,
 	hue: number?,
+	-- A card's: its id and title, its open asks not put off (the one to
+	-- answer first first; `ask` is the first) and its board status.
+	card: string?,
+	orchestrator: string?,
+	title: string?,
+	asks: { any }?,
+	status: string?,
 }
 
--- What needs the person, newest asks and waiting chats together: urgent
--- first, then the one waiting longest.
-local function needs_now(now: any, sessions_now: any): { Need }
+-- What needs the person, as the board has it (ds/orch_board_model): one
+-- row a card in Needs you (its first ask, the rest counted on it), one an
+-- open ask not put off that belongs to no such card, one a chat awaiting
+-- input that is no such card's thread. Urgent first, then the one waiting
+-- longest.
+local function needs_now(now: any, sessions_now: any, board: any, at: number): { Need }
 	local chats = M.chats(sessions_now)
 	local out: { Need } = {}
-	-- A chat awaiting input with an ask open too is one row: the ask's, with
-	-- a way into the chat (`input`).
 	local waiting: { [string]: boolean } = {}
 	for id, c in chats do
 		if (c.status == "input" or c.status == "approval") and not c.archived then
 			waiting[id] = true
 		end
 	end
+	-- What a Needs-you card already stands for: its asks and its threads.
+	local carded: { [string]: boolean } = {}
+	local covered: { [string]: boolean } = {}
+	for _, e in board.needs_you do
+		local asks: { any } = {}
+		local input = false
+		for _, a in e.asks do
+			carded[a.id] = true
+			if not M.deferred(a, at) then
+				table.insert(asks, a)
+			end
+			if a.from_chat then
+				covered[a.from_chat] = true
+				input = input or waiting[a.from_chat] == true
+			end
+		end
+		local threads = e.item.threads or {}
+		for _, chat in threads do
+			covered[chat] = true
+			input = input or waiting[chat] == true
+		end
+		local ask = asks[1]
+		-- (Its thread: the one that asked, else its lead.)
+		local from = (ask and ask.from_chat) or threads[1]
+		local owner = e.item.orchestrator_id
+		table.insert(out, {
+			id = `card:{e.id}`,
+			kind = "card",
+			urgent = e.urgent,
+			at = if ask then (ask.created or 0) else e.status_since,
+			ask = ask,
+			input = input,
+			chat = if from then chats[from] else nil,
+			from = from,
+			hue = (if owner then M.hue_of(now, chats, owner) else nil) or M.hue_of(now, chats, from),
+			card = e.id,
+			orchestrator = owner,
+			title = e.item.title,
+			asks = asks,
+			status = e.status,
+		})
+	end
+	-- An open ask of no Needs-you card; a chat awaiting input with one open
+	-- too is one row: the ask's, with a way into the chat (`input`).
 	local asking: { [string]: boolean } = {}
-	local at = os.time()
 	for _, a in (now and now.asks) or {} do
 		-- (Deferred: out of the list until its time; the engine clears it
 		-- then and says so again.)
-		if a.state == "open" and not M.deferred(a, at) then
-			asking[a.from_chat] = true
+		if a.state == "open" and not carded[a.id] and not M.deferred(a, at) then
+			if a.from_chat then
+				asking[a.from_chat] = true
+			end
 			table.insert(out, {
 				id = `ask:{a.id}`,
 				kind = "ask",
@@ -386,7 +426,7 @@ local function needs_now(now: any, sessions_now: any): { Need }
 		end
 	end
 	for id, c in chats do
-		if waiting[id] and not asking[id] then
+		if waiting[id] and not asking[id] and not covered[id] then
 			table.insert(out, {
 				id = `chat:{id}`,
 				kind = "input",
@@ -409,7 +449,30 @@ local function needs_now(now: any, sessions_now: any): { Need }
 	end)
 	return out
 end
-M.needs = memo2(needs_now) :: typeof(needs_now)
+
+-- Remembered by the orchestration and sessions given and the board they
+-- make (the board model's own, kept a minute: a put-off ask comes back with
+-- time alone), so the widget, its float and the badge share one list.
+local needs_kept: { [any]: { [any]: { board: any, needs: { Need } } } } = setmetatable({}, { __mode = "k" }) :: any
+local NIL = {}
+function M.needs(now: any, sessions_now: any): { Need }
+	local at = os.time()
+	local board = model.board(now, { at = at })
+	local ka: any = if type(now) == "table" then now else NIL
+	local kb: any = if type(sessions_now) == "table" then sessions_now else NIL
+	local inner = needs_kept[ka]
+	if not inner then
+		inner = setmetatable({}, { __mode = "k" }) :: any
+		needs_kept[ka] = inner
+	end
+	local hit = inner[kb]
+	if hit and hit.board == board then
+		return hit.needs
+	end
+	local made = needs_now(now, sessions_now, board, at)
+	inner[kb] = { board = board, needs = made }
+	return made
+end
 
 -- What waits on the person, counted once for every place that says how
 -- many: the open asks and chats awaiting input (`needs`, as data.needs
@@ -418,12 +481,27 @@ M.needs = memo2(needs_now) :: typeof(needs_now)
 -- Another source of "waiting for you" joins here, nowhere else.
 export type Waiting = { count: number, urgent: number, needs: { Need }, qa_unread: number }
 
+-- Whether a row of data.needs counts while asks are answered here
+-- (`counted(ask_id)`: false for one on its way, ds/orch_decide): a row
+-- with no ask always; a card's while any of its asks does.
+function M.counted_need(n: Need, counted: (ask_id: string) -> boolean): boolean
+	if n.ask == nil then
+		return true
+	end
+	for _, a in n.asks or { n.ask } do
+		if counted(a.id) then
+			return true
+		end
+	end
+	return false
+end
+
 function M.waiting_for_you(now: any, sessions_now: any, qa: { unread: number, waiting: number }?, counted: ((ask_id: string) -> boolean)?): Waiting
 	local needs = M.needs(now, sessions_now)
 	if counted then
 		local kept: { Need } = {}
 		for _, n in needs do
-			if not n.ask or counted(n.ask.id) then
+			if M.counted_need(n, counted) then
 				table.insert(kept, n)
 			end
 		end

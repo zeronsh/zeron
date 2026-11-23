@@ -1,17 +1,18 @@
 -- Needs you: everything waiting on the person, one list across every
 -- orchestrator: the asks they and their crews raised (a question, a
 -- decision, an approval, a blocker), and chats whose agent stopped to ask
--- (awaiting input), one row a chat. Urgent (or gone stale unanswered)
--- first, then the one waiting longest; a deferred ask stays out of it
--- until its time (data.needs). An ask is compact here: its question in a
--- line and its options as chips (ds/orch_choices), the recommended one
--- ringed; a chip answers at once, with Undo for a moment before it is
--- sent. The question, or the expand at the chips' end, opens the whole of
--- it (ds/orch_decision); the thread's name opens the thread at the message
--- that asked. A chat awaiting input opens. An answer the engine took says
--- so a moment, then slides out, the rows under it closing up (one it
--- turned down stays, saying why: ds/orch_choices); what was answered
--- lately is folded at the foot, in Recent answers.
+-- (awaiting input), one row a chat; a card in the board's Needs you is one
+-- row, its first ask, with how many more it has (data.needs). Urgent (or
+-- gone stale unanswered) first, then the one waiting longest; a deferred
+-- ask stays out of it until its time (data.needs). An ask is compact here:
+-- its question in a line and its options as chips (ds/orch_choices), the
+-- recommended one ringed; a chip answers at once, with Undo for a moment
+-- before it is sent. The question, or the expand at the chips' end, opens
+-- the whole of it (ds/orch_decision); the thread's name opens the thread at
+-- the message that asked. A chat awaiting input opens. An answer the
+-- engine took says so a moment, then slides out, the rows under it closing
+-- up (one it turned down stays, saying why: ds/orch_choices); what was
+-- answered lately is folded at the foot, in Recent answers.
 --
 -- Two or more chats awaiting input with no ask to show are one line, "n
 -- chats waiting for input", which opens to their rows. Past `limit` rows,
@@ -134,7 +135,39 @@ local function shown_of(n: any): any
 		input = n.input,
 		from = n.from,
 		hue = n.hue,
+		card = n.card,
+		title = n.title,
+		asks = n.asks,
+		status = n.status,
 	}
+end
+
+-- A card's row as it shows now: the first of its asks not answered here
+-- and taken (the next one comes up as one goes), and how many after it.
+-- The same table while that holds (`chosen`, by the row).
+local chosen: { [any]: { at: number, v: any } } = setmetatable({}, { __mode = "k" }) :: any
+local function card_now(v: any, pending: { [string]: any }): any
+	local asks = v.asks
+	if v.kind ~= "card" or not asks or #asks == 0 then
+		return v
+	end
+	local at = #asks
+	for i, a in asks do
+		local p = pending[a.id]
+		if not p or p.phase ~= "done" then
+			at = i
+			break
+		end
+	end
+	local had = chosen[v]
+	if had and had.at == at then
+		return had.v
+	end
+	local out = table.clone(v)
+	out.ask = asks[at]
+	out.more = #asks - at
+	chosen[v] = { at = at, v = out }
+	return out
 end
 
 -- Each kind of ask as Zeron's status says it: a question or a decision
@@ -147,6 +180,9 @@ local KIND_STATUS: { [string]: status.Kind } = {
 	input = "input",
 }
 
+-- A Needs-you card's statuses that have words of their own (the board's).
+local CARD_STATUS = { asked = true, failed = true, review = true, stalled = true }
+
 return ui.component(function(props: Props): Node
 	-- Rows answered here, kept while they leave: by id, the need as it was.
 	local leaving = ui.use_state({} :: { [string]: any })
@@ -154,6 +190,8 @@ return ui.component(function(props: Props): Node
 	-- row as last seen (one answered here, kept while it says so).
 	local last_order: { string } = {}
 	local seen: { [string]: any } = {}
+	-- A card's asks, to its row's id.
+	local by_ask: { [string]: string } = {}
 	local expanded = ui.use_state(false)
 	local recent_open = ui.use_state(false)
 	local limit = props.limit or 6
@@ -176,6 +214,9 @@ return ui.component(function(props: Props): Node
 		kept = fresh
 		local gone = leaving:get()
 		local pending = decide.pending:get()
+		for i, v in now do
+			now[i] = card_now(v, pending)
+		end
 		local function phase(n: any): string?
 			local p = if n and n.ask then pending[n.ask.id] else nil
 			return if p then p.phase else nil
@@ -183,6 +224,9 @@ return ui.component(function(props: Props): Node
 		local present: { [string]: boolean } = {}
 		local out = {}
 		for _, n in now do
+			for _, a in n.asks or {} do
+				by_ask[a.id] = n.id
+			end
 			-- (Answered here and said: out, unless it's leaving.)
 			if phase(n) ~= "done" or gone[n.id] then
 				present[n.id] = true
@@ -251,6 +295,17 @@ return ui.component(function(props: Props): Node
 			leaving:set_key({ n.id }, nil)
 		end)
 	end
+	-- A card's row whose ask was answered here and taken: another of its
+	-- asks to show next (then it stays, showing that one).
+	local function next_of(n: any, ask_id: string, pending: { [string]: any }): any?
+		for _, a in n.asks or {} do
+			local p = pending[a.id]
+			if a.id ~= ask_id and (not p or p.phase ~= "done") then
+				return a
+			end
+		end
+		return nil
+	end
 	-- An answer the engine took, said for a moment: the row slides out.
 	local left: { [string]: boolean } = {}
 	ui.effect(function()
@@ -259,8 +314,8 @@ return ui.component(function(props: Props): Node
 			local key = `ask:{ask_id}`
 			if p.phase == "done" and not left[key] then
 				left[key] = true
-				local n = seen[key]
-				if n then
+				local n = seen[key] or (by_ask[ask_id] and seen[by_ask[ask_id]])
+				if n and not next_of(n, ask_id, pending) then
 					leave(n)
 				end
 			elseif p.phase ~= "done" then
@@ -300,13 +355,29 @@ return ui.component(function(props: Props): Node
 				props.on_open(n.from, a and a.turn_id or nil)
 			end
 		end
+		-- Whose: a card's title, else the thread's name.
 		local function from_name(): string
 			local n = item:get()
-			return props.name_of(n.from) or ""
+			return n.title or props.name_of(n.from) or ""
 		end
 		local function kind(): string
 			local n = item:get()
+			if n.kind == "card" and not n.ask then
+				return if n.status == "failed" then "blocker" else "input"
+			end
 			return if n.kind == "input" then "input" else ((n.ask and n.ask.kind) or "question")
+		end
+		-- What its head calls it: the ask's kind, or a card with none (its
+		-- thread waiting, nothing moving) as the board says it stands.
+		local function kind_word(): string
+			local n = item:get()
+			if n.kind == "card" and not n.ask and CARD_STATUS[n.status or ""] then
+				return locale.s(`orch.board.status.{n.status}`)
+			end
+			return locale.s(`ds.orch.ask.{kind()}`)
+		end
+		local function more(): number
+			return item:get().more or 0
 		end
 		-- Dragged by its head or its question: a reference to the ask (a chat
 		-- awaiting input, to the chat), for Capture (ds/orch_ref).
@@ -360,9 +431,7 @@ return ui.component(function(props: Props): Node
 				items = "center",
 				status.StatusIcon { kind = state, size = 14 },
 				ui.text {
-					function(): string
-						return locale.s(`ds.orch.ask.{kind()}`)
-					end,
+					kind_word,
 					shrink = 0,
 					text_size = "$font.size.xs",
 					weight = "$font.weight.medium",
@@ -377,6 +446,10 @@ return ui.component(function(props: Props): Node
 				ui.button {
 					class = "orch-need-from",
 					label = function(): string
+						-- (A card asking nothing: its thread, at its end.)
+						if item:get().kind == "card" and not ask() then
+							return locale.s("orch.board.open_thread_named", { title = from_name() })
+						end
 						return locale.s("ds.orch.decide.open_thread_named", { name = from_name() })
 					end,
 					tooltip = locale.s("ds.orch.decide.open_at"),
@@ -397,6 +470,17 @@ return ui.component(function(props: Props): Node
 					end, size = 6 },
 					ui.text { from_name, text_size = "$font.size.xs", color = "$text.tertiary", truncate = true, min_w = 0 },
 				},
+				-- A card asking more than this: how many more, its first shown.
+				ui.show(function(): boolean
+					return more() > 0
+				end, Badge.Badge {
+					function(): string
+						return locale.s("orch.board.more_asks", { n = more() })
+					end,
+					class = "orch-need-more",
+					size = "sm",
+					tabular = true,
+				}),
 				ui.div { grow = 1 },
 				ui.text {
 					function(): string
@@ -427,7 +511,10 @@ return ui.component(function(props: Props): Node
 						if a and not is_leaving() then
 							decide.undo(a.id)
 							props.on_dismiss(a)
-							leave(item:peek())
+							-- (A card with more asks stays: the next one comes up.)
+							if more() == 0 then
+								leave(item:peek())
+							end
 						end
 					end,
 				}),

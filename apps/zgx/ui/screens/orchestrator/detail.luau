@@ -204,7 +204,16 @@ function M.Thread(props: Props): Node
 		local out = {}
 		for _, n in NeedsYou.of(orchestration.now:get(), sessions.now:get(), props.orchestrator()) do
 			local a = n.ask
-			if a then
+			if n.kind == "card" then
+				-- (A card's row: its card, or one of its asks this thread's.)
+				local mine = (it and n.card == it.id) or (id and n.from == id)
+				for _, x in n.asks or {} do
+					mine = mine or (id ~= nil and x.from_chat == id)
+				end
+				if mine then
+					table.insert(out, n)
+				end
+			elseif a then
 				if (id and a.from_chat == id) or (it and a.item_id == it.id) then
 					table.insert(out, n)
 				end

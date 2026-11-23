@@ -38,9 +38,10 @@ function M.open_chat(id: string, message: string?)
 	end
 end
 
--- What waits on the person (data.needs); with `id`, only what orchestrator
--- `id` and its crew raised: its asks, and its own chat or a crew thread
--- waiting on an answer.
+-- What waits on the person (data.needs: a row a card in Needs you, an ask
+-- of no such card, a chat awaiting input); with `id`, only orchestrator
+-- `id`'s: its cards, its asks, and its own chat or a crew thread waiting on
+-- an answer.
 function M.of(now: any, sessions_now: any, id: string?): { any }
 	local all = data.needs(now, sessions_now)
 	if id == nil then
@@ -48,10 +49,15 @@ function M.of(now: any, sessions_now: any, id: string?): { any }
 	end
 	local crew = data.crew_by_chat(now)
 	local out = {}
-	-- (A chat waiting on its own ask is that ask, once: data.needs.)
+	-- (A chat waiting on its own ask is that ask, once, and a card's asks
+	-- and threads are its row: data.needs.)
 	for _, n in all do
 		local ask = n.ask
-		if ask then
+		if n.kind == "card" then
+			if n.orchestrator == id or (n.orchestrator == nil and ask and ask.orchestrator_id == id) then
+				table.insert(out, n)
+			end
+		elseif ask then
 			if ask.orchestrator_id == id then
 				table.insert(out, n)
 			end

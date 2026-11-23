@@ -4513,7 +4513,8 @@
         "pr": "Its pull request is merged or closed",
         "accept": "You say it looks good"
       },
-      "what_happened": "What happened"
+      "what_happened": "What happened",
+      "more_asks": "{n} more"
     },
     "reports": {
       "title": "Crew updates",

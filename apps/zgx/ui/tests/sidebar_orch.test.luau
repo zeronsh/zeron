@@ -39,9 +39,10 @@ end
 
 test("sidebar orch: the Control room counts what needs you", function()
 	local app = open()
-	-- (Asks ak-1 and ak-2 open; the orchestrator screen thread awaiting
-	-- input is ak-1's chat, counted once.)
-	expect(row_of(app, "Control room")).to_contain('text "2"')
+	-- (The board's Needs you: the orchestrator screen's card (ak-1, its
+	-- thread awaiting input counted with it), the Moscow reboot's (ak-2),
+	-- and sccache's, blocked with nothing asked: ds/orch_data `needs`.)
+	expect(row_of(app, "Control room")).to_contain('text "3"')
 	app:click(`{SIDE} >> role:button "Control room"`)
 	app:frames(10)
 	expect(app:state("orch_route")).to_be("control:")
