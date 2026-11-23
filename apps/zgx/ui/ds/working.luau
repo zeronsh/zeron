@@ -45,13 +45,18 @@ local ROTATE = 7
 
 -- Once a second, one clock for every line showing (the script's own): the
 -- clock shows whole seconds, and the word turns on one of them. One timer,
--- so all of them change in the same frame rather than each in its own; it
--- writes nothing while no line shows.
+-- so all of them change in the same frame rather than each in its own. It
+-- runs only while a line shows (the script's effect starts it as the first
+-- comes, and its rerun drops it as the last goes): with none, no script
+-- runs at all.
 local now = ui.state("ds_working_now", ui.now() / 1000)
+local ticking = ui.state("ds_working_ticking", false)
 local showing = 0
-ui.every(1000, function()
-	if showing > 0 then
-		now:set(ui.now() / 1000)
+ui.effect(function()
+	if ticking:get() then
+		ui.every(1000, function()
+			now:set(ui.now() / 1000)
+		end)
 	end
 end)
 
@@ -60,9 +65,13 @@ return ui.component(function(props: Props): Node
 	-- (Shown after none did: the clock as it is now, not as it last was.)
 	if showing == 1 then
 		now:set(ui.now() / 1000)
+		ticking:set(true)
 	end
 	ui.on_cleanup(function()
 		showing -= 1
+		if showing == 0 then
+			ticking:set(false)
+		end
 	end)
 	local seed = props.seed or 0
 	local function since(): number
