@@ -325,10 +325,15 @@ local VARIANTS: { Variant } = {
 
 -- (The lab: every variant, shape and frame. Run on purpose:
 -- FORCEBAL_ONLY=<variant names, comma-separated> narrows it.)
-test("force balance lab: every variant, shape and frame measured", function()
-	local only: string? = "base,K3"
+-- (The variants above: set ONLY to their names, comma-separated, to
+-- measure them all again; LAYOUTS to print each layout for pictures.)
+local ONLY = "base,K3"
+local LAYOUTS = false
+test("force balance: the kept layout (K3) against base, every shape and field: no name over another, none cut, spacing more even", function()
+	local sum: { [string]: number } = {}
+	local n: { [string]: number } = {}
 	for _, v in VARIANTS do
-		if only and not string.find("," .. only .. ",", "," .. v.name .. ",", 1, true) then
+		if not string.find("," .. ONLY .. ",", "," .. v.name .. ",", 1, true) then
 			continue
 		end
 		for _, sname in SHAPE_ORDER do
@@ -337,8 +342,21 @@ test("force balance lab: every variant, shape and frame measured", function()
 				local m = measure_layout(L, v)
 				m.variant, m.shape_name, m.frame = v.name, sname, `{f[1]}x{f[2]}`
 				print("FORCEBAL " .. json(m))
-				print("FORCEBALL " .. json({ variant = v.name, shape = sname, frame = `{f[1]}x{f[2]}`, layout = L }))
+				if LAYOUTS then
+					print("FORCEBALL " .. json({ variant = v.name, shape = sname, frame = `{f[1]}x{f[2]}`, layout = L }))
+				end
+				sum[v.name] = (sum[v.name] or 0) + m.nn_cv
+				n[v.name] = (n[v.name] or 0) + 1
+				if v.name == "K3" then
+					local tag = `{sname} {f[1]}x{f[2]}`
+					expect(`{tag} overlap {m.overlap}`).to_be(`{tag} overlap 0`)
+					expect(`{tag} clipped {m.clipped}`).to_be(`{tag} clipped 0`)
+					expect(m.unnamed <= 2).to_be(true)
+				end
 			end
 		end
 	end
+	local kept, base = sum.K3 / n.K3, sum.base / n.base
+	print(string.format("FORCEBAL_MEAN nn_cv base %.2f kept %.2f", base, kept))
+	expect(kept < base * 0.7).to_be(true)
 end)

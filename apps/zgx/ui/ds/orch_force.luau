@@ -874,6 +874,7 @@ M.View = ui.component(function(props: {
 	local corner_size: { [string]: { w: number, h: number } } = {}
 	local corner_ver = ui.use_state(0)
 	local names_for_corners = false
+	local names_after_fit = false
 	local function corners(): { { number } }
 		local w, h = math.max(1, width:peek()), field_h()
 		local out: { { number } } = {}
@@ -972,9 +973,17 @@ M.View = ui.component(function(props: {
 		-- (Fitted again round the names, as after its own settling: never
 		-- once the view's been moved or a node dragged, nor when they were
 		-- placed again only to clear the field's controls.)
-		if not moved_view and not dragged_since and not job.for_corners then
+		if not moved_view and not dragged_since and not job.for_corners and not job.after_fit then
 			fit()
 			recull()
+			-- (Fitted round them, the zoom moved a little: placed once more at
+			-- its scale, not fitted again.)
+			local k = 1 / math.max(0.05, view:peek().zoom)
+			if math.abs(k - names_k) / names_k > 0.003 then
+				names_dirty = true
+				names_after_fit = true
+				tick:set(tick:peek() + 1)
+			end
 		end
 		table.clear(labs_by_id)
 		local list = {}
@@ -1039,6 +1048,8 @@ M.View = ui.component(function(props: {
 		})
 		names_job.for_corners = names_for_corners
 		names_for_corners = false
+		names_job.after_fit = names_after_fit
+		names_after_fit = false
 		names_ms = 0
 		counts.names_start_ms = (os.clock() - ts) * 1000
 		-- (The fixed ones at once; the threads' a slice a frame, from here.)
