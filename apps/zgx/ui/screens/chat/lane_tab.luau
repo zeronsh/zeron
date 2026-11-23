@@ -209,7 +209,7 @@ end
 -- what's picked (a changed agent, model or access becomes the chat's, as the
 -- chat page's does). A message that didn't go says so on the composer's own
 -- notice line, above it, never over it.
-local function composer(chat: string, view: any, name: string, focus: State<number>, open_model: State<number>, split: boolean?, focused: (() -> boolean)?, own_draft: State<string>?, own_atoms: State<{ ComposerAtoms.AtomEntry }>?): Node
+local function composer(chat: string, view: any, name: string, focus: State<number>, open_model: State<number>, split: boolean?, focused: (() -> boolean)?, own_draft: State<string>?, own_atoms: State<{ ComposerAtoms.AtomEntry }>?, dock_target: State<number>?): Node
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
 	-- reload finds it as it was; a passage quoted from its transcript lands
 	-- in it.)
@@ -696,6 +696,13 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	end, name)
 	return ds.Composer {
 		dictation = dictation,
+		on_sizes = if dock_target
+			then function(sizes: ds.ComposerSizes)
+				if math.abs(dock_target:peek() - sizes.target) > 0.01 then
+					dock_target:set(sizes.target)
+				end
+			end
+			else nil,
 		value = draft,
 		atoms = atoms,
 		snap = if split then snap else nil,
@@ -1117,9 +1124,12 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		return ever
 	end)
 	local dock_h = M.dock_height(slot)
+	local dock_target = ui.state(`chat_lane_dock_target_{slot}`, Dock.REST)
 	-- (A split's pane, focused: the window's composer stands at its foot.)
 	local room = Dock.room(function(): number
 		return if split and focused_now() then Shared.dock_h:get() else dock_h:get()
+	end, function(): number
+		return if split and focused_now() then Shared.dock_target:get() else dock_target:get()
 	end)
 	local function lane_session(): any
 		local s = view.session:get()
@@ -1220,6 +1230,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		offset = offset,
 		keep = anchor,
 		foot = if tab.kind == "subagent" then nil else room.foot,
+		foot_target = if tab.kind == "subagent" then nil else room.foot_target,
 		-- Its "Jump to latest" and the pill of the composer at its foot, a
 		-- centred pair: its own composer's, or, a split's focused pane, the
 		-- window's (screens/chat/shared's `pill_width_of`).
@@ -1349,7 +1360,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 					hidden = function(): boolean
 						return split and focused_now()
 					end,
-					Dock.Dock { height = dock_h, composer = composer(chat, view, `lane.{slot}`, focus, open_model, data.split == true, if split then focused_now else nil, lane_draft, lane_atoms), id = `lane-composer-{slot}` },
+					Dock.Dock { height = dock_h, composer = composer(chat, view, `lane.{slot}`, focus, open_model, data.split == true, if split then focused_now else nil, lane_draft, lane_atoms, dock_target), id = `lane-composer-{slot}` },
 				},
 			}
 			if zone then

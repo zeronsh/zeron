@@ -117,7 +117,7 @@ end
 -- what's picked (a changed agent, model or access becomes the chat's, as the
 -- chat page's does). A message that didn't go says so on the composer's own
 -- notice line, above it, never over it.
-local function composer(chat: string, view: any, name: string, focus: State<number>, open_model: State<number>, own_draft: State<string>?, own_atoms: State<{ ComposerAtoms.AtomEntry }>?): Node
+local function composer(chat: string, view: any, name: string, focus: State<number>, open_model: State<number>, own_draft: State<string>?, own_atoms: State<{ ComposerAtoms.AtomEntry }>?, dock_target: State<number>?): Node
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
 	-- reload finds it as it was; a passage quoted from its transcript lands
 	-- in it.)
@@ -518,6 +518,13 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	end, name)
 	return ds.Composer {
 		dictation = dictation,
+		on_sizes = if dock_target
+			then function(sizes: ds.ComposerSizes)
+				if math.abs(dock_target:peek() - sizes.target) > 0.01 then
+					dock_target:set(sizes.target)
+				end
+			end
+			else nil,
 		value = draft,
 		atoms = atoms,
 		-- (Its transcript's "Jump to latest", while it shows: its trays'
@@ -858,8 +865,11 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 	local offset = ui.state(`chat_lane_offset_{slot}`, T.PAST_END)
 	local anchor = ui.state(`chat_lane_anchor_{slot}`, nil :: any)
 	local dock_h = ui.state(`chat_lane_dock_h_{slot}`, Dock.REST)
+	local dock_target = ui.state(`chat_lane_dock_target_{slot}`, Dock.REST)
 	local room = Dock.room(function(): number
 		return dock_h:get()
+	end, function(): number
+		return dock_target:get()
 	end)
 	local function lane_session(): any
 		local s = view.session:get()
@@ -925,6 +935,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		offset = offset,
 		keep = anchor,
 		foot = if tab.kind == "subagent" then nil else room.foot,
+		foot_target = if tab.kind == "subagent" then nil else room.foot_target,
 		beside = if tab.kind == "subagent"
 			then nil
 			else function(): number?
@@ -1005,7 +1016,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 					pb = Dock.page_pad(),
 					ui.column { w_full = true, grow = 1, min_h = 0, relative = true, transcript, find.Bar() },
 				},
-				Dock.Dock { height = dock_h, composer = composer(chat, view, `lane.{slot}`, focus, open_model, lane_draft, lane_atoms), id = `lane-composer-{slot}` },
+				Dock.Dock { height = dock_h, composer = composer(chat, view, `lane.{slot}`, focus, open_model, lane_draft, lane_atoms, dock_target), id = `lane-composer-{slot}` },
 			}
 			for k, v in zone do
 				body[k] = v

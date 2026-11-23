@@ -155,8 +155,11 @@ local kept = ui.shared("chat.composer.drafts", {} :: { [string]: any })
 local here = ui.shared("chat.composer.here", "")
 -- Bumped, the composer takes the keys.
 M.focus = ui.state("chat_focus", 0)
--- The docked composer's height, as laid out.
+-- The docked composer's height, as laid out, and its destination height
+-- (updated once per resize/transition so list-wide bindings like edge fade
+-- don't invalidate the entire transcript viewport on every animation frame).
 M.dock_h = ui.state("chat_dock_h", 52)
+M.dock_target = ui.state("chat_dock_target", 52)
 -- The chips made so far, for each its own id: kept with the cargo (which
 -- a reload keeps), so a chip made after a reload never takes one's id.
 local made = ui.shared("chat.composer.chips_made", 0)

@@ -1325,6 +1325,9 @@ local function Composer(): Node
 				if math.abs(shared.dock_h:peek() - sizes.presented) > 0.01 then
 					shared.dock_h:set(sizes.presented)
 				end
+				if math.abs(shared.dock_target:peek() - sizes.target) > 0.01 then
+					shared.dock_target:set(sizes.target)
+				end
 			end,
 			-- Its measures, fold and open tray kept across a reload, so it
 			-- is laid out as it was from the first frame.

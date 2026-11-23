@@ -1877,9 +1877,81 @@ return ui.component(function(props: Props): Node
 	-- Files over the pill: its own sense of it, or the caller's.
 	local dropping = props.dropping or ui.use_state(false)
 
-	-- What sits over the draft: the agent's ask, or the cargo strip.
+	-- An image chip opens its picture in the lightbox (unless the caller opens
+	-- chips itself), growing from the chip; ← → go through the chips' pictures.
+	-- The host mounts once stably on the composer root so adding/removing the
+	-- last attachment never tears down or re-registers the lightbox host mid-shrink.
+	local cargo_lightbox = props.cargo ~= nil and not props.on_open_cargo
+	local cargo_strip: Node? = nil
+	if props.cargo then
+		local items = props.cargo :: State<{ cargo.Item }>
+		local group: string? = nil
+		local open_image: ((string) -> ())? = nil
+		if cargo_lightbox then
+			lightboxes += 1
+			local g = `composer{lightboxes}`
+			group = g
+			open_image = function(id: string)
+				local images: { Lightbox.Item } = {}
+				local at = nil
+				for _, c in items:peek() do
+					if (c.kind == "image" or c.kind == "appshot") and c.src and c.src ~= "" then
+						table.insert(images, { src = c.src, name = c.name, path = (c :: any).path, key = c.id })
+						if c.id == id then
+							at = #images
+						end
+					end
+				end
+				if at then
+					Lightbox.open(images, at, g)
+				end
+			end
+		end
+		cargo_strip = ui.show(
+			function(): boolean
+				return not asking()
+			end,
+			cargo.Strip {
+				items = items,
+				on_remove = props.on_remove_cargo,
+				on_retry = props.on_retry_cargo,
+				on_open = props.on_open_cargo or open_image,
+				drag_item = if props.atoms and props.cargo_chip
+					then function(item: cargo.Item): any?
+						local spec = (props.cargo_chip :: (cargo.Item) -> ComposerAtoms.ChipSpec?)(item)
+						if not spec then
+							return nil
+						end
+						return { kind = "cargo_chip", spec = spec }
+					end
+					else nil,
+				drag_preview = if props.atoms and props.cargo_chip
+					then function(payload: any): Node
+						return ComposerAtoms.chip_preview(if type(payload) == "table" and payload.spec then payload.spec.data else nil)
+					end
+					else nil,
+				source = if group
+					then function(item: cargo.Item): { [string]: any }?
+						local radius = ui.theme.get("zeron.composer.chip.radius")
+						return Lightbox.source(group, item.id, if type(radius) == "number" then radius else 0)
+					end
+					else nil,
+			}
+		)
+	end
+
+	-- What sits over the draft: the agent's ask, or the cargo strip. Cargo
+	-- mounts directly (without an outer ui.presence exit layer) so removing the
+	-- last attachment fades the chip once via cargo.Strip's ui.each inside the
+	-- collapsing header clip instead of stacking nested offscreen layers and
+	-- unmounting mid-shrink.
 	local head: Node = ui.column {
-		on_resize = measure(head_h_seen, "h"),
+		on_resize = function(size: Size)
+			local v = if has_cargo() or asking() then size.h else 0
+			if math.abs(head_h_seen:peek() - v) >= 0.5 then
+				head_h_seen:set(v)
+			end
+		end,
 		absolute = true,
 		left = 0,
 		right = 0,
@@ -1892,8 +1964,6 @@ return ui.component(function(props: Props): Node
 				return `question:{q.text}:{q.page or 1}:{if q.multi then 1 else 0}`
 			elseif approval() then
 				return "approval"
-			elseif has_cargo() then
-				return "cargo"
 			end
 			return nil
 		end, function(key: string): Node
@@ -1909,66 +1979,14 @@ return ui.component(function(props: Props): Node
 						return (q.page or 1) <= 1 and not can_answer()
 					end,
 				}
-			elseif kind == "approval" then
-				return ask.Approval { approval = approval() :: ask.Approval }
 			end
-			-- An image chip opens its picture in the lightbox (unless the
-			-- caller opens chips itself), growing from the chip; ← → go
-			-- through the chips' pictures.
-			lightboxes += 1
-			local group = `composer{lightboxes}`
-			local items = props.cargo :: State<{ cargo.Item }>
-			local function open_image(id: string)
-				local images: { Lightbox.Item } = {}
-				local at = nil
-				for _, c in items:peek() do
-					if (c.kind == "image" or c.kind == "appshot") and c.src and c.src ~= "" then
-						table.insert(images, { src = c.src, name = c.name, path = (c :: any).path, key = c.id })
-						if c.id == id then
-							at = #images
-						end
-					end
-				end
-				if at then
-					Lightbox.open(images, at, group)
-				end
-			end
-			return ui.column {
-				w_full = true,
-				cargo.Strip {
-					items = items,
-					on_remove = props.on_remove_cargo,
-					on_retry = props.on_retry_cargo,
-					on_open = props.on_open_cargo or open_image,
-					drag_item = if props.atoms and props.cargo_chip
-						then function(item: cargo.Item): any?
-							local spec = (props.cargo_chip :: (cargo.Item) -> ComposerAtoms.ChipSpec?)(item)
-							if not spec then
-								return nil
-							end
-							return { kind = "cargo_chip", spec = spec }
-						end
-						else nil,
-					drag_preview = if props.atoms and props.cargo_chip
-						then function(payload: any): Node
-							return ComposerAtoms.chip_preview(if type(payload) == "table" and payload.spec then payload.spec.data else nil)
-						end
-						else nil,
-					source = function(item: cargo.Item): { [string]: any }?
-						if props.on_open_cargo then
-							return nil
-						end
-						local radius = ui.theme.get("zeron.composer.chip.radius")
-						return Lightbox.source(group, item.id, if type(radius) == "number" then radius else 0)
-					end,
-				},
-				Lightbox.Host(),
-			}
+			return ask.Approval { approval = approval() :: ask.Approval }
 		end, {
 			w_full = true,
 			enter = { opacity = { 0, 1 }, duration = 200, ease = "outCubic" },
 			exit = { opacity = 0, duration = 120 },
 		}),
+		cargo_strip,
 	}
 
 	local function placeholder(): string
@@ -2879,5 +2897,6 @@ return ui.component(function(props: Props): Node
 		w_full = true,
 		gap = 0,
 		body,
+		if cargo_lightbox then Lightbox.Host() else nil,
 	}
 end)
