@@ -31,6 +31,19 @@ const FORWARDED_CLIENT_HEADERS: [&str; 5] = [
     "last-event-id",
 ];
 
+/// `Authorization: bearer …` (a token endpoint's own `token_type`, kept as
+/// it said it) as `Bearer …`. The scheme is case-insensitive (RFC 9110), but
+/// servers that match `Bearer ` exactly (Linear's) take the lower-case one for
+/// no credential at all and answer 401.
+fn canonical_bearer(value: &str) -> std::borrow::Cow<'_, str> {
+    match value.split_once(' ') {
+        Some((scheme, token)) if scheme.eq_ignore_ascii_case("bearer") && scheme != "Bearer" => {
+            std::borrow::Cow::Owned(format!("Bearer {token}"))
+        }
+        _ => std::borrow::Cow::Borrowed(value),
+    }
+}
+
 fn is_hop_by_hop(name: &str) -> bool {
     matches!(
         name,
@@ -85,7 +98,12 @@ impl McpGateway {
 
         // Injected auth / custom headers always override client headers.
         for (name, value) in &upstream.headers {
-            builder = builder.header(name.as_str(), value.as_str());
+            let value = if name.eq_ignore_ascii_case("authorization") {
+                canonical_bearer(value)
+            } else {
+                std::borrow::Cow::Borrowed(value.as_str())
+            };
+            builder = builder.header(name.as_str(), value.as_ref());
         }
 
         if !body.is_empty() {
@@ -199,5 +217,20 @@ impl ExternalMcpProxy for McpGateway {
                 body,
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonical_bearer;
+
+    #[test]
+    fn bearer_scheme_is_sent_capitalised() {
+        assert_eq!(canonical_bearer("bearer abc.def"), "Bearer abc.def");
+        assert_eq!(canonical_bearer("BEARER abc"), "Bearer abc");
+        assert_eq!(canonical_bearer("Bearer abc"), "Bearer abc");
+        // Another scheme, or no scheme, stays as it is.
+        assert_eq!(canonical_bearer("Basic dXNlcjpwYXNz"), "Basic dXNlcjpwYXNz");
+        assert_eq!(canonical_bearer("token-only"), "token-only");
     }
 }
