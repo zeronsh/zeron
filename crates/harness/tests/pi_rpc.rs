@@ -23,6 +23,7 @@ fn request(cwd: &std::path::Path, prompt: &str) -> RunRequest {
         auto_approve: true,
         access: Default::default(),
         plan: false,
+        code_mode: false,
         resume: None,
         attachments: vec![],
         worktree: None,

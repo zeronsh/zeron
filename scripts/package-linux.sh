@@ -13,7 +13,10 @@
 # set: the zgx interface (apps/zgx, its `beta` feature) as `zeron`, its
 # scripts beside it, and the `zeron-engine` it's given, built from the same
 # commit:
-#   ZGX_VERSION=<workspace version>, or <workspace version>-beta.<n>
+#   ZGX_VERSION=<workspace version>, or <workspace version>-beta.<n>, or
+#     <workspace version>-dev.<n> for a staging edge's Cloud machines: a
+#     stable-channel build they take from its `releases/` (a beta build
+#     moves an install onto the beta channel, `releases/beta/`)
 #   ZGX_ENGINE=<a zeron-engine binary, or a release's linux tarball>
 # The engine must be built with LUAU_CXXFLAGS=-DNDEBUG (checked below), which
 # a stable release from before that isn't.
@@ -29,8 +32,8 @@ ARCH="$(uname -m)"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 ZGX_VERSION="${ZGX_VERSION:-}"
 if [[ -n "$ZGX_VERSION" ]]; then
-  [[ "$ZGX_VERSION" == "$VERSION" || "$ZGX_VERSION" =~ ^"$VERSION"-beta\.[0-9]+$ ]] ||
-    { echo "ZGX_VERSION $ZGX_VERSION isn't the workspace's $VERSION or a beta of it" >&2; exit 1; }
+  [[ "$ZGX_VERSION" == "$VERSION" || "$ZGX_VERSION" =~ ^"$VERSION"-(beta|dev)\.[0-9]+$ ]] ||
+    { echo "ZGX_VERSION $ZGX_VERSION isn't the workspace's $VERSION, a beta of it or a staging build of it" >&2; exit 1; }
   [[ -f "${ZGX_ENGINE:-}" ]] || { echo "ZGX_ENGINE: a zeron-engine binary, or a release's linux tarball" >&2; exit 1; }
   VERSION="$ZGX_VERSION"
 fi

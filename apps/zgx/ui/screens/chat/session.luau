@@ -131,6 +131,8 @@ local function Session(id: Id?): Node
 	local offset = shared.offset
 	local room = Dock.room(function(): number
 		return shared.dock_h:get()
+	end, function(): number
+		return shared.dock_target:get()
 	end)
 	-- Another session opened: where it was left (its place kept as the
 	-- reader left it), else its latest; the one left keeps its place for
@@ -292,6 +294,7 @@ local function Session(id: Id?): Node
 						-- Under the docked composer: the conversation runs
 						-- behind it, its end held clear of it.
 						foot = room.foot,
+						foot_target = room.foot_target,
 						-- (Its pair with the window's composer: shared's
 						-- `pill_width_of`.)
 						beside = function(): number?

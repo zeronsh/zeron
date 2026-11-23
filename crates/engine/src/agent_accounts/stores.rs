@@ -1364,6 +1364,19 @@ impl AgentAccounts {
         &self,
         requester: Option<&str>,
     ) -> Result<AgentLoginStart, EngineError> {
+        self.start_devin_login_with(requester, None, None)
+    }
+
+    /// [`Self::start_devin_login`]; with `capture`, the new `credentials.toml`
+    /// goes there as a `devin` vault upload (`{provider, material:
+    /// {devinCredentials}}`) instead of a slot — the throwaway dirs are
+    /// removed before the upload, and nothing on this device changes.
+    pub(super) fn start_devin_login_with(
+        &self,
+        requester: Option<&str>,
+        capture: Option<CaptureSink>,
+        catalog: Option<crate::sign_in_catalog::CatalogPublisher>,
+    ) -> Result<AgentLoginStart, EngineError> {
         self.reap_spawned_flows(HarnessId::Devin);
         let acp = self
             .acp_harness(HarnessId::Devin)
@@ -1428,24 +1441,44 @@ impl AgentAccounts {
                 .await
                 .map_err(|e| e.to_string());
             watcher.abort();
-            let detected = signed_in.and_then(|()| {
+            let credentials = signed_in.and_then(|()| {
                 let file = data.join("devin").join("credentials.toml");
                 std::fs::read_to_string(&file)
                     .ok()
                     .and_then(|text| parse_devin_toml(&text))
-                    .and_then(parse_devin_credentials)
+                    .filter(|credentials| devin_api_key(credentials).is_some())
                     .ok_or_else(|| {
                         "Devin reported a successful sign-in, but saved no credentials.".to_string()
                     })
             });
-            let outcome = match detected {
-                Ok(detected) => this
-                    .save_new_login(HarnessId::Devin, &detected)
+            // Off the disk before anything else (a captured key lives on
+            // only in this task's memory until the vault has it), unless
+            // the new account's models are discovered there first.
+            let kept = super::SignInHome::keep(
+                HarnessId::Devin,
+                super::ShredOnDrop(task_home.clone()),
+                catalog.filter(|_| capture.is_some()),
+            );
+            let outcome = match (credentials, capture) {
+                (Ok(credentials), Some(capture)) => {
+                    capture(serde_json::json!({
+                        "provider": "devin",
+                        "material": { "devinCredentials": credentials },
+                    }))
                     .await
-                    .map_err(|e| e.to_string()),
-                Err(message) => Err(message),
+                }
+                (Ok(credentials), None) => match parse_devin_credentials(credentials) {
+                    Some(detected) => this
+                        .save_new_login(HarnessId::Devin, &detected)
+                        .await
+                        .map_err(|e| e.to_string()),
+                    None => {
+                        Err("Devin reported a successful sign-in, but saved no credentials.".into())
+                    }
+                },
+                (Err(message), _) => Err(message),
             };
-            let _ = std::fs::remove_dir_all(&task_home);
+            kept.after_upload(&outcome);
             lock(&task_state).outcome = Some(outcome);
         });
         lock(&self.inner.flows).insert(

@@ -64,6 +64,27 @@ test("words: an upload's picture number and a file's name, as the engine keeps t
 	expect(AM.names(pic, "/u/1b2c3d4e-Image_4.png")).to_be(true)
 end)
 
+test("words: friendly_name cleans macOS screenshot dates and pasted_name formats readable deduplicated names", function()
+	expect(AM.is_image_name("shell.png")).to_be(true)
+	expect(AM.is_image_name("PHOTO.JPEG")).to_be(true)
+	expect(AM.is_image_name("notes.md")).to_be(false)
+
+	expect(AM.friendly_name(`Screenshot 2026-11-07 at 1.10.14{NNBSP}PM.png`)).to_be("Screenshot 1.10.14 PM.png")
+	expect(AM.friendly_name(`Screenshot 2026-11-07 at 1.10.14{NNBSP}PM (2).png`)).to_be("Screenshot 1.10.14 PM (2).png")
+	expect(AM.friendly_name("Screen Shot 2026-11-07 at 14.05.09.png")).to_be("Screenshot 14.05.09.png")
+	expect(AM.friendly_name("shell.png")).to_be("shell.png")
+	expect(AM.friendly_name("notes (draft) [v2] \u{1F4DD}.md")).to_be("notes (draft) [v2] \u{1F4DD}.md")
+
+	-- Fixed timestamp so formatting and deduplication are deterministic regardless of timezone.
+	local t0 = 1700000000
+	local first = AM.pasted_name({}, t0)
+	expect(string.match(first, "^Clipboard %d+%.%d%d%.%d%d [AP]M%.png$") ~= nil).to_be(true)
+	local second = AM.pasted_name({ first }, t0)
+	expect(second).to_be(string.gsub(first, "%.png$", " (2).png"))
+	local third = AM.pasted_name({ first, second }, t0)
+	expect(third).to_be(string.gsub(first, "%.png$", " (3).png"))
+end)
+
 local BOX = 'role:textbox "Message"'
 
 local function settle(app: any)
@@ -91,7 +112,7 @@ local function sent(app: any): string
 	return string.match(calls, "send:s2:(.*)$") or ""
 end
 
-test("a picture with a screenshot's name, mentioned, goes as Image N, up as Image N.png, and its chip shows", function()
+test("a picture with a screenshot's name, mentioned, goes with its cleaned screenshot name and its chip shows", function()
 	local app = chat()
 	app:command("attach_odd")
 	settle(app)
@@ -101,12 +122,12 @@ test("a picture with a screenshot's name, mentioned, goes as Image N, up as Imag
 	settle(app)
 	expect(app:wait('~"what is"', { timeout_ms = 2000 })).to_be(true)
 	local calls = app:state("calls")
-	expect(calls).to_contain("send:s2:what is [Image 1](zeron-image:1)")
-	expect(calls).to_contain("attname:Image 1.png")
-	-- The sent message: the chip, its label.
+	expect(calls).to_contain("send:s2:what is [Screenshot 1.10.14 PM.png](zeron-attachment:1)")
+	expect(calls).to_contain("attname:Screenshot 1.10.14 PM.png")
+	-- The sent message: the chip, its cleaned label.
 	local tree = app:tree("#transcript")
-	expect(tree).to_contain("what is Image 1")
-	expect(tree).never.to_contain("zeron-image")
+	expect(tree).to_contain("what is Screenshot 1.10.14 PM.png")
+	expect(tree).never.to_contain("zeron-attachment")
 end)
 
 test("files with odd names go as their escaped links, each by its own number, and show as their chips", function()
@@ -139,16 +160,16 @@ test("two files of one name are two numbers, each its own", function()
 	expect(app:state("calls")).to_contain(AM.link(6, "same.txt"))
 end)
 
-test("one taken off before it goes is its plain label; one typed by hand that names nothing is words", function()
+test("removing an attachment deletes inline chips mentioning it; one typed by hand that names nothing is words", function()
 	local app = chat()
 	app:command("attach_odd")
 	settle(app)
 	mention(app, "Screenshot")
-	app:type(BOX, " and [mine](zeron-attachment:9)")
+	app:type(BOX, "and [mine](zeron-attachment:9)")
 	settle(app)
-	app:hover('role:button "Screenshot 2026-11-07 at 1.10.14' .. NNBSP .. 'PM.png"')
+	app:hover('role:button "Screenshot 1.10.14 PM.png"')
 	app:frames(10)
-	app:click('role:button "Remove Screenshot 2026-11-07 at 1.10.14' .. NNBSP .. 'PM.png"')
+	app:click('role:button "Remove Screenshot 1.10.14 PM.png"')
 	settle(app)
 	app:type(BOX, "")
 	app:key("End")
@@ -156,14 +177,15 @@ test("one taken off before it goes is its plain label; one typed by hand that na
 	settle(app)
 	expect(app:wait('~"and mine"', { timeout_ms = 2000 })).to_be(true)
 	local said = sent(app)
-	-- (Its name alone, as an agent reads one; the made-up one, its words.)
-	expect(said).to_contain("Image 1 ")
-	expect(said).to_contain(" and mine")
+	-- Deleting the attachment removes inline chips mentioning it; a bogus
+	-- link typed by hand is still demoted to its plain words.
+	expect(said).never.to_contain("Screenshot 1.10.14 PM.png")
+	expect(said).to_contain("and mine")
 	expect(said).never.to_contain("zeron-image")
 	expect(said).never.to_contain("zeron-attachment")
 end)
 
-test("an Appshot mentioned goes as its picture's number", function()
+test("an Appshot mentioned goes by its window title with image extension", function()
 	local app = chat()
 	app:set_state("appshots.captured", { n = 1, shot = { id = "a1", app = "Safari", bundle = "com.apple.Safari", title = "Release notes", path = "assets/composer/shell.png", bytes = 1024 } })
 	settle(app)
@@ -173,7 +195,9 @@ test("an Appshot mentioned goes as its picture's number", function()
 	app:key("Enter")
 	settle(app)
 	expect(app:wait('~"look"', { timeout_ms = 2000 })).to_be(true)
-	expect(app:state("calls")).to_contain("send:s2:look [Image 1](zeron-image:1)")
+	local calls = app:state("calls")
+	expect(calls).to_contain("send:s2:look [Release notes.png](zeron-attachment:1)")
+	expect(calls).to_contain("attname:Release notes.png")
 end)
 
 test("after a relaunch, read back with its uploads' names, the message shows its chips", function()

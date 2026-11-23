@@ -43,6 +43,7 @@ local ZeronCommands = require("@app/screens/chat/zeron_commands")
 -- (Loaded with the chat page: captures land on its composer.)
 local Appshots = require("@app/screens/chat/appshots")
 local Carried = require("@app/screens/chat/carried")
+local ComposerAtoms = require("@ds/composer_atoms")
 local Completions = require("@app/screens/chat/completions")
 
 -- Zeron's dock spring (ω ≈ 27).
@@ -235,7 +236,28 @@ local function Composer(): Node
 				end
 			elseif s then
 				-- (Its own pick, unsent, over what the session runs with.)
-				local pick = shared.picks:peek()[id] or {}
+				local all_picks = shared.picks:peek()
+				local raw_pick = all_picks[id]
+				if raw_pick then
+					local any_kept = false
+					for k in DRAFTED do
+						local pv = raw_pick[k]
+						if pv ~= nil then
+							local own = (s :: any)[k]
+							if not equal(own, pv) and not (pv == false and own == nil) then
+								any_kept = true
+								break
+							end
+						end
+					end
+					if not any_kept then
+						local next = table.clone(all_picks)
+						next[id] = nil
+						shared.picks:set(next)
+						raw_pick = nil
+					end
+				end
+				local pick = raw_pick or {}
 				for _, k in FIELDS do
 					local v = (s :: any)[k]
 					if DRAFTED[k] and pick[k] ~= nil then
@@ -859,12 +881,13 @@ local function Composer(): Node
 
 	-- A queued message being edited in the composer: which, and the draft
 	-- it set aside (put back when the edit ends).
-	local editing = ui.state("chat_editing", nil :: { item: string, aside: string, aside_cargo: { any }? }?)
+	local editing = ui.state("chat_editing", nil :: { item: string, aside: string, aside_cargo: { any }?, aside_atoms: { any }? }?)
 	local edits = Asks.queue_edits {
 		id = function(): string?
 			return session_id:peek()
 		end,
 		text = shared.text,
+		atoms = shared.atoms,
 		editing = editing,
 		focus = function()
 			shared.focus:add(1)
@@ -947,11 +970,14 @@ local function Composer(): Node
 		-- token goes; anything carried stays).
 		local zeron = completions.command_of(shared.text:peek())
 		if zeron then
-			shared.text:set("")
+			ui.batch(function()
+				shared.text:set("")
+				shared.atoms:set({})
+			end)
 			ZeronCommands.run(zeron, session_id:peek())
 			return
 		end
-		local typed, carried = shared.take()
+		local typed, carried, raw_draft, raw_atoms = shared.take()
 		local pack = Carried.pack(carried, typed, text)
 		local attachments = pack.attachments
 		-- (Each command or skill picked: its canonical reference.)
@@ -967,11 +993,12 @@ local function Composer(): Node
 			-- arrives as the same row.
 			-- (While a turn runs it's queued instead: it shows in the queue.)
 			-- The chat's unsent pick goes with it (the run takes that agent,
-			-- model and effort, and the session with them); queued, it waits
-			-- for the turn it will run in.
+			-- model and effort, and the session with them); while a turn runs
+			-- the queued message carries the pick so it runs on the chosen
+			-- agent/model when promoted or drained.
 			local pick = shared.picks:peek()[id]
 			local req: { [string]: any } = { session = id, text = text_out, attachments = attachments, appshots = Appshots.of_cargo(carried) }
-			if pick and not running:peek() then
+			if pick then
 				for k, v in pick do
 					req[k] = v
 				end
@@ -981,13 +1008,20 @@ local function Composer(): Node
 							req.harness = m.harness
 						end
 					end
+					if not req.harness then
+						req.harness = string.match(pick.model, "^([^/]+)/")
+					end
 				end
 			end
 			local function deliver(message_id: string?)
+				local queued = message_id == nil
 				req.message_id = message_id
 				store.send(req :: any):after(function()
 					-- Sent with it: the session has it now; no pick left.
-					if req.model or req.effort or req.fast ~= nil or req.options then
+					-- While a turn is running, keep the pick visible in the
+					-- composer until the session adopts it so the picker
+					-- doesn't snap back to the old provider mid-turn.
+					if not queued and (req.model or req.effort or req.fast ~= nil or req.options) then
 						local all = table.clone(shared.picks:peek())
 						-- (By what it holds, not which table: a state's snapshot
 						-- read again needn't be the same table.)
@@ -999,7 +1033,7 @@ local function Composer(): Node
 				end, function(e: any)
 					own_notice:set { tone = "danger", key = "chat.composer.didnt_send", dismissable = true }
 					if shared.text:peek() == "" then
-						shared.text:set(text_out)
+						ComposerAtoms.apply(shared.text, shared.atoms, if #raw_atoms > 0 then raw_draft else text_out, raw_atoms)
 					end
 					-- Its files too, before any added since.
 					shared.restore_cargo_of(id, carried)
@@ -1020,6 +1054,9 @@ local function Composer(): Node
 			-- engine's) can reach the list before the glide is ready, and
 			-- the prompt is there once, whoever adds it first.
 			local mid = store.new_id()
+			local catalog = store.catalog:peek()
+			local from_h = T.session_harness(catalog, store.session:peek())
+			local sw = T.switch_row(catalog, from_h, req.harness, mid)
 			-- (To the transcript at its foot: in a split, the focused pane's,
 			-- which shows its lane's list, the prompt joining it there too.)
 			local lane = foot_lane(id)
@@ -1030,6 +1067,12 @@ local function Composer(): Node
 			T.send(function()
 				for _, list in lists do
 					if list:index_of("id", mid) == nil then
+						if sw and list:len() > 0 then
+							local tail = list:at(list:len())
+							if (not tail or tail.role ~= "switch") and list:index_of("id", sw.id) == nil then
+								list:push(sw)
+							end
+						end
 						list:push {
 							id = mid,
 							role = "user",
@@ -1075,7 +1118,7 @@ local function Composer(): Node
 		local failed = function(why: string?)
 			own_notice:set { tone = "danger", text = why, key = if why then nil else "chat.composer.didnt_start", dismissable = true }
 			if shared.text:peek() == "" then
-				shared.text:set(text_out)
+				ComposerAtoms.apply(shared.text, shared.atoms, if #raw_atoms > 0 then raw_draft else text_out, raw_atoms)
 			end
 		end
 		-- On Cloud, as the shipping app starts one: the chat opens at once
@@ -1282,6 +1325,9 @@ local function Composer(): Node
 				if math.abs(shared.dock_h:peek() - sizes.presented) > 0.01 then
 					shared.dock_h:set(sizes.presented)
 				end
+				if math.abs(shared.dock_target:peek() - sizes.target) > 0.01 then
+					shared.dock_target:set(sizes.target)
+				end
 			end,
 			-- Its measures, fold and open tray kept across a reload, so it
 			-- is laid out as it was from the first frame.
@@ -1298,6 +1344,7 @@ local function Composer(): Node
 			end,
 			on_pill_width = shared.pill_teller("waiting", "window"),
 			value = shared.text,
+			atoms = shared.atoms,
 			placeholder = ui.t("chat.composer.placeholder"),
 			expanded = shown_new,
 			snap = snap,
@@ -1390,6 +1437,7 @@ local function Composer(): Node
 			reach_default = cloud.reach,
 			cargo = shared.cargo,
 			on_remove_cargo = shared.remove_cargo,
+			cargo_chip = Carried.chip_spec,
 			on_attach = function()
 				ui.open_files({ title = ui.t("chat.composer.attach_files"):get(), multiple = true }):after(function(files: any)
 					if files and #files > 0 then
@@ -1400,7 +1448,7 @@ local function Composer(): Node
 			-- (A drop on the pill: the chat's overlay goes with it.)
 			on_files = function(files: { any })
 				shared.dropping:set({})
-				shared.attach_files(files)
+				shared.drop_files(files)
 			end,
 			-- A picture pasted (a screenshot): written out by the host, then
 			-- carried as an image, as one dropped is, named as Zeron names
@@ -1408,7 +1456,7 @@ local function Composer(): Node
 			on_paste_image = function(): boolean
 				store.paste_image():after(function(path: string?)
 					if type(path) == "string" and path ~= "" then
-						shared.attach_files({ { name = "image.png", path = path } })
+						shared.attach_pasted_image(path)
 					end
 				end, function() end)
 				return true
@@ -1428,7 +1476,13 @@ local function Composer(): Node
 			end,
 			on_escape = store.escape,
 			queue = shown_queue,
+			-- (Steer only where its agent takes a word mid-turn: else the row's
+			-- Send now stops the turn, as the host does.)
 			can_steer = function(): boolean
+				local s = open()
+				return running:get() and s ~= nil and s.steers == true
+			end,
+			turn_running = function(): boolean
 				return running:get()
 			end,
 			-- (A held row is the hold's: it goes on its own, or is let go.)

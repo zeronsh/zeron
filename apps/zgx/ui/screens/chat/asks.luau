@@ -17,6 +17,7 @@
 
 local store = require("@app/screens/chat/store")
 local Carried = require("@app/screens/chat/carried")
+local ComposerAtoms = require("@ds/composer_atoms")
 local T = require("@ds/transcript")
 
 local M = {}
@@ -29,7 +30,8 @@ local M = {}
 export type Edits = {
 	id: () -> string?,
 	text: State<string>,
-	editing: State<{ item: string, aside: string, aside_cargo: { any }? }?>,
+	atoms: State<{ any }>?,
+	editing: State<{ item: string, aside: string, aside_cargo: { any }?, aside_atoms: { any }? }?>,
 	focus: () -> (),
 	say: (tone: string, key: string) -> (),
 	cargo: (() -> { any })?,
@@ -62,12 +64,17 @@ function M.queue_edits(e: Edits): { [string]: any }
 		if not now or not id then
 			return
 		end
-		local words = e.text:peek()
+		local raw_words = e.text:peek()
+		local words = if e.atoms then ComposerAtoms.encode(raw_words, ComposerAtoms.live(e.atoms)) else raw_words
 		-- The files it carries now: its chips, as edited.
 		local files = if e.cargo then Carried.pack(e.cargo(), "", "").attachments else nil
 		ui.batch(function()
 			e.editing:set(nil)
-			e.text:set(now.aside)
+			if e.atoms then
+				ComposerAtoms.apply(e.text, e.atoms, now.aside, now.aside_atoms or {})
+			else
+				e.text:set(now.aside)
+			end
 			if e.set_cargo and now.aside_cargo then
 				e.set_cargo(now.aside_cargo)
 			end
@@ -86,8 +93,16 @@ function M.queue_edits(e: Edits): { [string]: any }
 			end
 			store.queue_edit(id, item):after(function(got: any)
 				ui.batch(function()
-					e.editing:set { item = item, aside = e.text:peek(), aside_cargo = if e.cargo then e.cargo() else nil }
+					e.editing:set {
+						item = item,
+						aside = e.text:peek(),
+						aside_cargo = if e.cargo then e.cargo() else nil,
+						aside_atoms = if e.atoms then ComposerAtoms.live(e.atoms) else nil,
+					}
 					e.text:set(if got then got.text else "")
+					if e.atoms then
+						e.atoms:set({})
+					end
 					if e.set_cargo then
 						e.set_cargo(chips_of(if got then got.attachments else nil))
 					end

@@ -21,8 +21,13 @@ fn action(params: &Value) -> Option<Action> {
     }
 }
 
-/// Whether `access` lets the permission in `params` through unasked.
+/// Whether `access` lets the permission in `params` through unasked. Never
+/// in Auto: the agent's reviewer already passed what it approved, so every
+/// request that arrives is one it escalated, whatever its kind.
 pub(super) fn allowed_without_asking(access: AccessMode, params: &Value) -> bool {
+    if access == AccessMode::Auto {
+        return false;
+    }
     action(params).is_none_or(|action| approval::allowed_without_asking(access, action))
 }
 
@@ -46,9 +51,47 @@ pub(super) fn outcome(options: &[Value], allow: bool) -> Value {
     }
 }
 
+/// The stable prefix of the reviewer's note in an approval question:
+/// "<what it asks>. Auto review flagged this: <reason>. Allow it?". The zgx
+/// composer (`approval_parts` in apps/zgx/src/chat.rs) strips this exact
+/// suffix, given the question's `note`, to show the reason apart from the
+/// command; keep the two in step.
+pub(super) const REVIEW_NOTE: &str = " Auto review flagged this: ";
+
+/// Longest reviewer reason kept, in characters.
+const REVIEW_REASON_MAX: usize = 300;
+
+/// The reviewer's reason as one short sentence fragment: newlines folded to
+/// spaces, capped at a character boundary, no closing punctuation.
+fn review_reason(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let capped = match flat.char_indices().nth(REVIEW_REASON_MAX) {
+        Some((at, _)) => format!("{}…", flat[..at].trim_end()),
+        None => flat,
+    };
+    capped.trim_end_matches(['.', '!', '?']).to_owned()
+}
+
 /// What a permission asks the person: the command or the files when the
-/// tool call carries them, else the tool's title.
+/// tool call carries them, else the tool's title. When the agent's reviewer
+/// says why it escalated (`_meta.autoReview.explanation`), the question
+/// carries that reason after [`REVIEW_NOTE`] and as `note`.
 pub(super) fn question(agent: &str, params: &Value) -> UserInputQuestion {
+    let mut question = base_question(agent, params);
+    let reason = review_reason(
+        params["_meta"]["autoReview"]["explanation"]
+            .as_str()
+            .unwrap_or_default(),
+    );
+    if !reason.is_empty() {
+        let asked = question.question.trim_end_matches(" Allow it?");
+        question.question = format!("{asked}{REVIEW_NOTE}{reason}. Allow it?");
+        question.note = Some(reason);
+    }
+    question
+}
+
+fn base_question(agent: &str, params: &Value) -> UserInputQuestion {
     let tool = &params["toolCall"];
     match super::normalize::typed_call(tool) {
         ToolCall::Exec { command } if !command.is_empty() => approval::command(agent, &command),
@@ -104,6 +147,45 @@ mod tests {
         // No kind at all asks like a command would.
         let kindless = permission(json!({ "toolCallId": "t" }));
         assert!(!allowed_without_asking(AutoAcceptEdits, &kindless));
+    }
+
+    #[test]
+    fn auto_asks_about_everything_it_receives() {
+        for kind in ["read", "search", "think", "edit", "execute"] {
+            let params = permission(json!({ "toolCallId": "t", "kind": kind }));
+            assert!(!allowed_without_asking(AccessMode::Auto, &params), "{kind}");
+        }
+    }
+
+    #[test]
+    fn the_reviewers_reason_joins_the_question() {
+        let mut params =
+            permission(json!({ "kind": "execute", "rawInput": { "command": "git push" } }));
+        let plain = question("Grok", &params).question;
+        assert_eq!(plain, "Grok wants to run `git push`. Allow it?");
+        params["_meta"] = json!({ "autoReview": { "outcome": "blocked", "explanation": "Force-push is not allowed to auto-run." } });
+        assert_eq!(
+            question("Grok", &params).question,
+            "Grok wants to run `git push`. Auto review flagged this: Force-push is not allowed to auto-run. Allow it?"
+        );
+        // Newlines fold, the length is capped, closing punctuation is dropped.
+        params["_meta"]["autoReview"]["explanation"] =
+            json!(format!("Line one.\nLine two?!{}", "x".repeat(400)));
+        let asked = question("Grok", &params).question;
+        let reason = asked
+            .split(REVIEW_NOTE)
+            .nth(1)
+            .unwrap()
+            .trim_end_matches(" Allow it?");
+        assert!(reason.starts_with("Line one. Line two?!xxx"), "{reason}");
+        assert!(reason.ends_with("…."), "{reason}");
+        assert_eq!(reason.chars().count(), REVIEW_REASON_MAX + 2);
+        assert_eq!(
+            question("Grok", &params).note.as_deref(),
+            Some(reason.trim_end_matches('.'))
+        );
+        params["_meta"]["autoReview"]["explanation"] = json!("Blocked!");
+        assert!(question("Grok", &params).question.ends_with("flagged this: Blocked. Allow it?"));
     }
 
     #[test]

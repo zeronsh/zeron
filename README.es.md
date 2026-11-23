@@ -1,6 +1,6 @@
 # Zeron
 
-Controla tus agentes de programación (Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, Antigravity) de forma local por defecto, con sincronización opcional entre varios dispositivos.
+Controla tus agentes de programación (Claude Code, Codex, Cursor, OpenCode, Devin, Grok, Hermes, Pi, Antigravity, Muse Code, fx) de forma local por defecto, con sincronización opcional entre varios dispositivos.
 
 *[English](README.md) | [简体中文](README.zh-CN.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | Español*
 
@@ -10,11 +10,11 @@ Controla tus agentes de programación (Claude Code, Codex, Cursor, Devin, Grok, 
 
 Descarga la última versión para tu plataforma desde [GitHub Releases](https://github.com/zeronsh/zeron/releases/latest):
 
-- **macOS** — `zeron-<version>-macos-arm64.dmg`
+- **macOS** (Apple silicon, macOS 13+) — `zeron-<version>-macos-arm64.dmg`
 - **Windows** — `zeron-<version>-windows-x86_64-setup.exe`
 - **Linux** — `zeron-<version>-linux-<arch>.tar.gz` y luego ejecuta el `install.sh` que incluye
 
-No necesitas cuenta ni conexión a internet; las sesiones se quedan en tu dispositivo. La app se actualiza sola.
+No necesitas cuenta ni conexión a internet; las sesiones se quedan en tu dispositivo. La app de escritorio está construida sobre [zgx](https://zgx.zeron.sh) (Rust nativo con interfaz Luau de recarga en caliente, plugins, plantillas y temas) y se actualiza sola.
 
 ## Modo headless (CLI)
 
@@ -51,6 +51,6 @@ Gracias a [The Context Company](https://www.thecontextcompany.com/) por patrocin
 
 ---
 
-¿Quieres contribuir o te interesa saber cómo funciona? [Pregúntale a DeepWiki](https://deepwiki.com/zeronsh/zeron) o consulta [ARCHITECTURE.md](ARCHITECTURE.md).
+¿Quieres contribuir o te interesa saber cómo funciona? [Pregúntale a DeepWiki](https://deepwiki.com/zeronsh/zeron), lee [ARCHITECTURE.md](ARCHITECTURE.md) o consulta [CONTRIBUTORS.md](CONTRIBUTORS.md) y [apps/zgx/README.md](apps/zgx/README.md).
 
 Publicado bajo la [licencia MIT](LICENSE).

@@ -68,6 +68,7 @@ async fn probe_once(harness: Box<dyn Harness>) -> ProbeOutcome {
         auto_approve: true,
         access: Default::default(),
         plan: false,
+        code_mode: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,

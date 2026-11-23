@@ -170,7 +170,7 @@ test("a file picked goes as its mention, a chat as Zeron's chat link", function(
 	settle(app)
 	app:key("Enter")
 	settle(app)
-	expect(app:text(BOX)).to_contain("@Long-chat")
+	expect(app:text(BOX)).to_contain("Long chat")
 	app:key("Enter")
 	settle(app)
 	expect(app:wait('~"and"', { timeout_ms = 2000 })).to_be(true)
@@ -179,7 +179,7 @@ test("a file picked goes as its mention, a chat as Zeron's chat link", function(
 	expect(calls).to_contain("[Long chat](zeron-chat:s1)")
 end)
 
-test("what's attached, picked, goes as its mention (a picture by its number); once it's taken off, its name alone", function()
+test("what's attached, picked, goes as its mention by name; removing it deletes its inline chip", function()
 	local app = chat()
 	app:command("drop_pictures")
 	app:command("attach_passage")
@@ -188,13 +188,12 @@ test("what's attached, picked, goes as its mention (a picture by its number); on
 	settle(app)
 	app:key("Enter")
 	settle(app)
-	-- (A picture: its token its number's, the third thing attached.)
-	expect(app:text(BOX)).to_contain("@Image-3")
+	expect(app:text(BOX)).to_contain("zgx.png")
 	app:key("Enter")
 	settle(app)
 	expect(app:wait('~"look at"', { timeout_ms = 2000 })).to_be(true)
-	expect(app:state("calls")).to_contain("look at [Image 3](zeron-image:3)")
-	-- Taken off before it goes: the name alone.
+	expect(app:state("calls")).to_contain("look at [zgx.png](zeron-attachment:3)")
+	-- Taken off before it goes: inline chip mentioning it is deleted.
 	app:command("drop_pictures")
 	settle(app)
 	app:type(BOX, "then @photo")
@@ -213,9 +212,10 @@ test("what's attached, picked, goes as its mention (a picture by its number); on
 	settle(app)
 	expect(app:wait('~"then"', { timeout_ms = 2000 })).to_be(true)
 	local calls = app:state("calls")
-	-- (Taken off: its name alone, no link to nothing.)
-	expect(calls).to_contain("then photo.heic")
-	expect(calls).never.to_contain("](zeron-attachment:2)")
+	local second = string.match(calls, "send:s2:then.*$") or ""
+	expect(second).to_contain("send:s2:then")
+	expect(second).never.to_contain("photo.heic")
+	expect(second).never.to_contain("](zeron-attachment:2)")
 end)
 
 -- The bubble's words (its paragraph's text).
@@ -246,10 +246,10 @@ test("round trip: an attachment picked in the draft goes as its mention, and the
 	app:key("Enter")
 	settle(app)
 	expect(app:wait('~"Look at"', { timeout_ms = 2000 })).to_be(true)
-	expect(app:state("calls")).to_contain("Look at [Image 3](zeron-image:3)")
+	expect(app:state("calls")).to_contain("Look at [zgx.png](zeron-attachment:3)")
 	local tree = app:tree("#transcript")
-	expect(tree).to_contain("Look at Image 3")
-	expect(tree).never.to_contain("zeron-image")
+	expect(tree).to_contain("Look at zgx.png")
+	expect(tree).never.to_contain("zeron-attachment")
 end)
 
 -- Whether the launcher shows (in the tree and not hidden), and what has the
