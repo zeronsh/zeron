@@ -1,197 +1,266 @@
--- The board's columns (ds/orch_board, ui/orch_board_columns_fixture.luau):
--- Inbox and Blocked stand only while they hold a card, the others taking
--- their room; ten cards a column until all are shown, one choice for every
--- column; Done cleared at once, one Undo putting it all back; and moves
--- (dragged, or the menu's Move to) and the menu as before.
+-- The board's columns and drawers (ds/orch_board, on
+-- ui/orch_board_places_fixture.luau and rows added to it): each column's
+-- and drawer's count, what a folded drawer says, the order within each
+-- place, twelve cards a column and twenty a drawer before "Show n more",
+-- the empty lines, and where a card with no row (or a row an older engine
+-- has overtaken) shows.
 
-local function board(h: number?): any
-	local app = mount("orch_board_columns_fixture.luau")
-	app:resize(1440, h or 900)
-	app:frames(20)
+-- The fixture's "now": today at 8 PM here.
+local base = os.time()
+local here = os.date("*t", base) :: any
+local T = base - (here.hour * 3600 + here.min * 60 + here.sec) + 20 * 3600
+local MIN, HOUR = 60, 3600
+
+local function board(w: number?, h: number?): any
+	local app = mount("orch_board_places_fixture.luau")
+	app:resize(w or 1500, h or 1200)
+	app:frames(30)
 	return app
 end
 
--- The cards' titles in a column, in order.
-local function titles(app: any, col: string): { string }
+-- The cards' ids in a column (not its drawer's) or in a drawer, in order.
+local function column(app: any, place: string): { string }
 	local out: { string } = {}
-	for line in app:tree(`#cols-{col}`):gmatch("[^\n]+") do
-		local t = line:match('^  @%d+ button "([^"]+)"')
-		-- (Not its buttons: Show more or less, Clear all done, Later's head.)
-		if t and not t:match("^Show ") and t ~= "Clear all done" and not t:match("^Later · ") and not t:match("^Paused · ") then
-			table.insert(out, t)
+	for line in app:tree(`#orch-col-{place}`):gmatch("[^\n]+") do
+		local id = line:match("^  @%d+ #orch%-card%-(%S+)")
+		if id then
+			table.insert(out, id)
 		end
 	end
 	return out
 end
-
--- Whether a column stands (in the tree, a hidden one is there, "hidden").
-local function stands(app: any, col: string): boolean
-	local first = app:tree(`#cols-{col}`):match("[^\n]+") or ""
-	return first ~= "" and not first:match(" hidden%s*$")
-end
-
--- Where a column stands, left to right: its x.
-local function x_of(app: any, col: string): number
-	local first = app:tree(`#cols-{col}`):match("[^\n]+") or ""
-	return tonumber(first:match(" (%-?[%d%.]+),%-?[%d%.]+ [%d%.]+x")) or 0
-end
-
--- A node's width as the tree says it.
-local function width(app: any, target: string): number
-	local first = app:tree(target):match("[^\n]+") or ""
-	return tonumber(first:match("([%d%.]+)x[%d%.]+%s*$")) or 0
-end
-
-test("orch board columns: Queued, Now, Review, Done; Blocked between Now and Review only while it holds a card", function()
-	local app = board()
-	expect(stands(app, "blocked")).to_be(false)
-	local order = { "queued", "now", "review", "done" }
-	for i, k in order do
-		expect(stands(app, k)).to_be(true)
-		if i > 1 then
-			expect(x_of(app, k) > x_of(app, order[i - 1])).to_be(true)
+local function drawer(app: any, place: string): { string }
+	local out: { string } = {}
+	for line in app:tree(`#orch-drawer-{place}`):gmatch("[^\n]+") do
+		local id = line:match("#orch%-card%-(%S+)")
+		if id then
+			table.insert(out, id)
 		end
 	end
-	expect(app:has("#cols-inbox")).to_be(false)
-	expect(app:has("#cols-next")).to_be(false)
-	-- The four share the width: each a quarter of it, near enough.
-	local four = width(app, "#cols-now")
-	app:command("fixture.blocked")
-	app:frames(20)
-	expect(app:has('#cols-blocked >> role:button "DNS failover between regions"')).to_be(true)
-	expect(x_of(app, "blocked") > x_of(app, "now")).to_be(true)
-	expect(x_of(app, "blocked") < x_of(app, "review")).to_be(true)
-	local five = width(app, "#cols-now")
-	expect(five < four - 20).to_be(true)
-	-- Moved out of Blocked by its menu: Blocked stands aside again, the
-	-- others wider.
-	app:right_click('#cols-blocked >> role:button "DNS failover between regions"')
-	app:frames(10)
-	app:click('role:menuitem "Move to"')
-	app:frames(10)
-	app:click('role:menuitem "Review"')
-	app:frames(20)
-	expect(app:state("calls")).to_contain("move:it-blk1:review:")
-	expect(stands(app, "blocked")).to_be(false)
-	expect(app:has('#cols-review >> role:button "DNS failover between regions"')).to_be(true)
-	expect(app:error()).to_be_nil()
-end)
+	return out
+end
+local function joined(list: { string }): string
+	return table.concat(list, ",")
+end
 
-test("orch board columns: a card moved into an empty Blocked brings it back", function()
-	local app = board()
-	app:right_click('#cols-queued >> role:button "Phase 2 migration"')
-	app:frames(10)
-	app:click('role:menuitem "Move to"')
-	app:frames(10)
-	app:click('role:menuitem "Pause"')
-	app:frames(20)
-	expect(app:state("calls")).to_contain("pause:it-next1")
-	expect(app:has('#cols-blocked >> role:button "Paused · 1"')).to_be(true)
-	app:set_state("columns_paused", true)
-	app:frames(20)
-	expect(app:has('#cols-blocked >> role:button "Phase 2 migration"')).to_be(true)
-	-- Dragged out again (resumed): gone with it.
-	app:drag('#cols-blocked >> role:button "Phase 2 migration"', "#cols-queued")
-	app:frames(20)
-	expect(app:state("calls")).to_contain("resume:it-next1:planned")
-	expect(app:has('#cols-queued >> role:button "Phase 2 migration"')).to_be(true)
-	expect(stands(app, "blocked")).to_be(false)
-	expect(app:error()).to_be_nil()
-end)
-
-test("orch board columns: ten a column, one Show more for them all, one Show less", function()
-	local app = board(1600)
-	app:command("fixture.many")
-	app:frames(20)
-	expect(#titles(app, "now")).to_be(10)
-	expect(#titles(app, "done")).to_be(10)
-	expect(app:has('#cols-now >> role:button "Show 1 more"')).to_be(true)
-	expect(app:has('#cols-done >> role:button "Show 2 more"')).to_be(true)
-	expect(app:has("#cols-queued >> .orch-column-more")).to_be(false)
-	-- (The column's count says them all.)
-	expect(app:has('#cols-done >> .orch-column-count >> "12"')).to_be(true)
-	-- Shown in Now: Done shows all of its too.
-	app:click('#cols-now >> role:button "Show 1 more"')
-	app:frames(20)
-	expect(app:state("columns_expanded")).to_be(true)
-	expect(#titles(app, "now")).to_be(11)
-	expect(#titles(app, "done")).to_be(12)
-	expect(app:has('#cols-done >> role:button "Show less"')).to_be(true)
-	-- Less in Done: Now's back to ten too.
-	app:click('#cols-done >> role:button "Show less"')
-	app:frames(20)
-	expect(app:state("columns_expanded")).to_be(false)
-	expect(#titles(app, "now")).to_be(10)
-	expect(#titles(app, "done")).to_be(10)
-	expect(app:error()).to_be_nil()
-end)
-
-test("orch board columns: Clear takes every Done card off, one Undo puts them all back", function()
-	local app = board(1600)
-	app:command("fixture.many")
-	app:frames(20)
-	local chats_before = app:state("columns_chats")
-	app:click('#cols-done >> role:button "Clear all done"')
-	app:frames(20)
-	local calls = app:state("calls") :: string
-	for i = 1, 12 do
-		expect(calls).to_contain(`remove:it-done{i}`)
+-- Cards added to the fixture's rows: `{ item, card? }` (no card: no row).
+local function add(app: any, rows: { { item: any, card: any? } })
+	local items = table.clone(app:state("fx_items") :: { any })
+	local cards = table.clone(app:state("fx_cards") :: { any })
+	for _, r in rows do
+		table.insert(items, r.item)
+		if r.card then
+			local c = table.clone(r.card)
+			c.id = r.item.id
+			c.old_state = c.old_state or r.item.state
+			c.asks = c.asks or {}
+			table.insert(cards, c)
+		end
 	end
-	expect(#titles(app, "done")).to_be(0)
-	expect(app:has("#cols-done >> .orch-clear-done")).to_be(false)
-	expect(app:has('"Cleared 12 done cards"')).to_be(true)
-	-- Nothing else asked: no thread opened, no card moved, no chat touched.
-	expect(calls).never.to_contain("open:")
-	expect(calls).never.to_contain(",move:")
-	expect(string.sub(calls, 1, 5)).never.to_be("move:")
-	expect(app:state("columns_chats")).to_equal(chats_before)
-	app:click('role:button "Undo"')
+	app:set_state("fx_items", items)
+	app:set_state("fx_cards", cards)
 	app:frames(20)
-	calls = app:state("calls") :: string
-	for i = 1, 12 do
-		expect(calls).to_contain(`restore:it-done{i}`)
+end
+local function patch(app: any, key: string, id: string, fields: { [string]: any })
+	local rows = table.clone(app:state(key) :: { any })
+	for i, r in rows do
+		if r.id == id then
+			local copy = table.clone(r)
+			for k, v in fields do
+				copy[k] = v
+			end
+			rows[i] = copy
+		end
 	end
-	expect(app:has('#cols-done >> .orch-column-count >> "12"')).to_be(true)
-	expect(app:has('#cols-done >> role:button "Linux titlebar without controls"')).to_be(true)
+	app:set_state(key, rows)
+	app:frames(20)
+end
+
+local function many(n: number, place: string, status: string, state: string, prefix: string): { { item: any, card: any } }
+	local out = {}
+	for i = 1, n do
+		local at = T - (5 * HOUR + i * MIN)
+		table.insert(out, {
+			item = { id = `{prefix}-{i}`, orchestrator_id = "orc-ci", title = `{prefix} {i}`, state = state, priority = "normal", order = 100 + i, threads = {}, created = at, updated = at, links = {} },
+			card = { place = place, status = status, since = at, status_since = at, seq = 1, events = {} },
+		})
+	end
+	return out
+end
+
+local function one(id: string, place: string, status: string, state: string, extra: { [string]: any }?): { item: any, card: any }
+	local card: { [string]: any } = { place = place, status = status, since = T - HOUR, status_since = T - HOUR, seq = 1, events = {} }
+	for k, v in extra or {} do
+		card[k] = v
+	end
+	return {
+		item = { id = id, orchestrator_id = "orc-ci", title = id, state = state, priority = "normal", order = 1, threads = {}, created = T - HOUR, updated = T - HOUR, links = {} },
+		card = card,
+	}
+end
+
+test("board columns: each column's head counts its cards, each drawer's head its own", function()
+	local app = board()
+	expect(app:text("#orch-col-needs_you >> .orch-column-count")).to_be("3")
+	expect(app:text("#orch-col-running >> .orch-column-count")).to_be("5")
+	expect(app:text("#orch-col-done >> .orch-column-count")).to_be("3")
+	expect(#column(app, "needs_you")).to_be(3)
+	expect(#column(app, "running")).to_be(5)
+	expect(#column(app, "done")).to_be(3)
+	-- Folded, a drawer says how many and what's first; none of its cards.
+	expect(app:text("#orch-drawer-snoozed >> .orch-drawer-count")).to_be("1")
+	expect(app:text("#orch-drawer-planned >> .orch-drawer-count")).to_be("4")
+	expect(app:text("#orch-drawer-earlier >> .orch-drawer-count")).to_be("5")
+	expect(app:text("#orch-drawer-snoozed >> .orch-drawer-hint")).to_be("12 pull requests to review")
+	expect(app:has("#orch-drawer-snoozed >> .orch-drawer-back")).to_be(true)
+	expect(app:text("#orch-drawer-planned >> .orch-drawer-hint")).to_be("Next: Keyed sidebar shape")
+	expect(app:has("#orch-drawer-planned >> .orch-drawer-back")).to_be(false)
+	expect(app:text("#orch-drawer-earlier >> .orch-drawer-hint")).to_be("before today")
+	for _, d in { "snoozed", "planned", "earlier" } do
+		expect(#drawer(app, d)).to_be(0)
+	end
+	-- Opened: its cards, its hint gone; the column's count still its own.
+	app:click("#orch-drawer-earlier >> .orch-drawer-head")
+	app:frames(20)
+	expect(#drawer(app, "earlier")).to_be(5)
+	expect(app:has("#orch-drawer-earlier >> .orch-drawer-hint")).to_be(false)
+	expect(app:text("#orch-col-done >> .orch-column-count")).to_be("3")
+	expect(#column(app, "done")).to_be(3)
+	-- Folded again.
+	app:click("#orch-drawer-earlier >> .orch-drawer-head")
+	app:frames(20)
+	expect(#drawer(app, "earlier")).to_be(0)
 	expect(app:error()).to_be_nil()
 end)
 
-test("orch board columns: an empty Done has nothing to clear", function()
+test("board columns: the order within each column and drawer", function()
 	local app = board()
-	app:command("fixture.many")
-	app:frames(10)
-	app:set_state("columns_items", {})
+	app:set_state("board_drawers", { snoozed = true, planned = true, earlier = true })
 	app:frames(20)
-	expect(app:has(".orch-clear-done")).to_be(false)
-end)
-
-test("orch board columns: dragged between columns and the menu, as before", function()
-	local app = board()
-	app:drag('#cols-queued >> role:button "Write the mesh runbook"', "#cols-review")
-	app:frames(20)
-	expect(app:state("calls")).to_contain("move:it-next2:review:")
-	expect(app:has('#cols-review >> role:button "Write the mesh runbook"')).to_be(true)
-	app:right_click('#cols-done >> role:button "Delete cards from the Board"')
-	app:frames(10)
-	for _, name in { "Move to", "Priority", "Delete" } do
-		expect(app:has(`role:menuitem "{name}"`)).to_be(true)
-	end
-	app:click('role:menuitem "Delete"')
-	app:frames(20)
-	expect(app:state("calls")).to_contain("remove:it-done2")
+	-- Needs you: the one that came last first; Running too.
+	expect(joined(column(app, "needs_you"))).to_be("it-merge,it-admin,it-relay")
+	expect(joined(column(app, "running"))).to_be("it-chat,it-release,it-tool,it-telemetry,it-ios")
+	-- Done and Earlier: closed last first.
+	expect(joined(column(app, "done"))).to_be("it-asks,it-token,it-msi")
+	expect(joined(drawer(app, "earlier"))).to_be("it-old-1,it-old-2,it-old-3,it-old-4,it-old-5")
+	-- Planned: what starts next, then what waits on another, paused, held.
+	expect(joined(drawer(app, "planned"))).to_be("it-keyed,it-win,it-exits,it-probes")
+	expect(joined(drawer(app, "snoozed"))).to_be("it-prs")
+	-- An urgent ask goes first in Needs you, however old.
+	patch(app, "fx_asks", "ak-stall", { urgent = true })
+	expect(joined(column(app, "needs_you"))).to_be("it-relay,it-merge,it-admin")
+	-- Snoozed: the one back first.
+	add(app, { one("it-snz", "snoozed", "asked", "blocked", { ["until"] = T + 30 * MIN }) })
+	expect(joined(drawer(app, "snoozed"))).to_be("it-snz,it-prs")
 	expect(app:error()).to_be_nil()
 end)
 
-test("orch board columns: a card dragged within a capped column lands among the ten", function()
-	local app = board(1600)
-	app:command("fixture.many")
+test("board columns: twelve a column, then Show n more", function()
+	local app = board(1500, 2600)
+	add(app, many(15, "running", "working", "active", "run"))
+	expect(app:text("#orch-col-running >> .orch-column-count")).to_be("20")
+	expect(#column(app, "running")).to_be(12)
+	expect(app:text("#orch-col-running >> .orch-show-more")).to_be("Show 8 more")
+	-- (Only the column past its cap says so.)
+	expect(app:has("#orch-col-needs_you >> .orch-show-more")).to_be(false)
+	-- The tab's count says them all too.
+	expect(app:has('#orch-board-tabs >> role:tab "Running" >> "20"')).to_be(true)
+	app:click("#orch-col-running >> .orch-show-more")
 	app:frames(20)
-	app:drag('#cols-now >> role:button "Map island layout"', '#cols-now >> role:button "Board columns cap"')
+	expect(#column(app, "running")).to_be(20)
+	expect(app:has("#orch-col-running >> .orch-show-more")).to_be(false)
+	expect(app:error()).to_be_nil()
+end)
+
+test("board columns: twenty a drawer, then Show n more", function()
+	local app = board(1500, 3000)
+	add(app, many(25, "planned", "next", "planned", "plan"))
+	expect(app:text("#orch-drawer-planned >> .orch-drawer-count")).to_be("29")
+	-- (Folded: nothing to show more of.)
+	expect(app:has("#orch-drawer-planned >> .orch-show-more")).to_be(false)
+	app:click("#orch-drawer-planned >> .orch-drawer-head")
 	app:frames(20)
-	local calls = app:state("calls") :: string
-	local order = tonumber(string.match(calls, "move:it%-now8:active:([%d%.%-]+)"))
-	expect(order ~= nil).to_be(true)
-	-- (Between the second and the third.)
-	expect((order :: number) > 2 and (order :: number) < 3).to_be(true)
+	expect(#drawer(app, "planned")).to_be(20)
+	expect(app:text("#orch-drawer-planned >> .orch-show-more")).to_be("Show 9 more")
+	app:click("#orch-drawer-planned >> .orch-show-more")
+	app:frames(20)
+	expect(#drawer(app, "planned")).to_be(29)
+	expect(app:has("#orch-drawer-planned >> .orch-show-more")).to_be(false)
+	-- (Running's own cards, under its cap, no more.)
+	expect(#column(app, "running")).to_be(5)
+	expect(app:error()).to_be_nil()
+end)
+
+test("board columns: an empty column says so in a line; an empty drawer isn't there", function()
+	local app = board()
+	expect(app:has(".orch-column-empty")).to_be(false)
+	app:set_state("fx_items", {})
+	app:set_state("fx_cards", {})
+	app:frames(20)
+	-- Every column stands, each with its line and a count of nothing.
+	local EMPTY: { [string]: string } = { needs_you = "Nothing needs you", running = "Nothing is running", done = "Nothing finished today" }
+	for place, words in EMPTY do
+		expect(app:has(`#orch-col-{place}`)).to_be(true)
+		expect(app:has(`#orch-col-{place} >> .orch-column-empty >> "{words}"`)).to_be(true)
+		expect(app:text(`#orch-col-{place} >> .orch-column-count`)).to_be("0")
+	end
+	for _, d in { "snoozed", "planned", "earlier" } do
+		expect(app:has(`#orch-drawer-{d}`)).to_be(false)
+	end
+	-- One card snoozed: Needs you's line stays, its drawer under it. One
+	-- running: Running's line goes.
+	add(app, {
+		one("it-snz", "snoozed", "asked", "blocked", { ["until"] = T + 30 * MIN }),
+		one("it-run", "running", "working", "active"),
+	})
+	expect(app:has("#orch-col-needs_you >> .orch-column-empty")).to_be(true)
+	expect(app:has("#orch-drawer-snoozed")).to_be(true)
+	expect(app:has("#orch-col-running >> .orch-column-empty")).to_be(false)
+	expect(joined(column(app, "running"))).to_be("it-run")
+	expect(app:error()).to_be_nil()
+end)
+
+test("board columns: a card with no row shows by its old column", function()
+	local app = board()
+	local function it(id: string, state: string, extra: { [string]: any }?): any
+		local x: { [string]: any } = { id = id, orchestrator_id = "orc-ci", title = id, state = state, priority = "normal", order = 1, threads = {}, created = T - 2 * HOUR, updated = T - HOUR, links = {} }
+		for k, v in extra or {} do
+			x[k] = v
+		end
+		return { item = x }
+	end
+	add(app, {
+		it("old-active", "active", { threads = { "th-chat" } }),
+		it("old-paused", "blocked", { paused_at = T - HOUR }),
+		it("old-review", "review"),
+		it("old-done", "done", { done = T - 30 * MIN }),
+	})
+	-- An ask naming the Review card: the person's to look at.
+	local asks = table.clone(app:state("fx_asks") :: { any })
+	table.insert(asks, { id = "ak-old", item_id = "old-review", kind = "decision", question = "Look at it?", options = {}, state = "open", created = T - 5 * MIN, quiet = false, images = {}, links = {} })
+	app:set_state("fx_asks", asks)
+	app:frames(20)
+	expect(table.find(column(app, "running"), "old-active") ~= nil).to_be(true)
+	expect(app:text("#orch-card-old-active >> .orch-card-status")).to_be("Working")
+	expect(table.find(column(app, "needs_you"), "old-review") ~= nil).to_be(true)
+	expect(app:text("#orch-card-old-review >> .orch-card-status")).to_be("Ready to look at")
+	expect(table.find(column(app, "done"), "old-done") ~= nil).to_be(true)
+	app:click("#orch-drawer-planned >> .orch-drawer-head")
+	app:frames(20)
+	expect(table.find(drawer(app, "planned"), "old-paused") ~= nil).to_be(true)
+	expect(app:text("#orch-card-old-paused >> .orch-card-status")).to_be("Paused by you")
+	expect(app:error()).to_be_nil()
+end)
+
+test("board columns: a row an older engine has overtaken gives way to the item's old column", function()
+	local app = board()
+	expect(table.find(column(app, "running"), "it-chat") ~= nil).to_be(true)
+	-- Closed by a writer that knows no places: its row still says Running.
+	patch(app, "fx_items", "it-chat", { state = "done", done = T - 2 * MIN })
+	expect(table.find(column(app, "running"), "it-chat")).to_be_nil()
+	expect(column(app, "done")[1]).to_be("it-chat")
+	expect(app:text("#orch-col-running >> .orch-column-count")).to_be("4")
+	expect(app:text("#orch-col-done >> .orch-column-count")).to_be("4")
+	expect(app:text("#orch-card-it-chat >> .orch-card-status")).to_be("Done in 48m")
 	expect(app:error()).to_be_nil()
 end)

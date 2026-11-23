@@ -1,8 +1,8 @@
--- The Board's columns use the width they're given (ds/orch_board): side by
--- side where all fit, else balanced rows of equal columns (an empty Blocked
--- holding no place), never narrower than a card fits, every row as wide as
--- the board. On the Control room's Board tab and on an orchestrator's page,
--- at 900, 1200 and 1440 points.
+-- The Board's columns use the width they're given (ds/orch_board): three
+-- side by side, each as wide as the next, where three fit at 240 points
+-- each; else one under another, each as wide as the board's lanes. On the
+-- Control room's Board tab at 900, 1200 and 1440 points. (An orchestrator's
+-- page shows its cards as the list, ds/orch_board_list: no columns.)
 
 local function boxes(app: any, target: string): { { x: number, y: number, w: number, h: number } }
 	local out = {}
@@ -17,52 +17,42 @@ local function boxes(app: any, target: string): { { x: number, y: number, w: num
 	return out
 end
 
--- The board's box, and its standing columns' boxes.
+-- The lanes' box, and the columns' boxes.
 local function layout(app: any, board: string): (any, { any })
-	local b = boxes(app, board)[1]
+	local lanes = boxes(app, `{board} >> #orch-columns`)[1]
 	local cols = {}
-	for i = 1, app:count(`{board} >> .orch-column`) do
-		local c = boxes(app, `{board} >> .orch-column [{i}]`)[1]
-		if c and c.w > 0 and c.h > 0 then
-			table.insert(cols, c)
-		end
+	for _, c in { "needs_you", "running", "done" } do
+		table.insert(cols, boxes(app, `{board} >> #orch-col-{c}`)[1])
 	end
-	return b, cols
+	return lanes, cols
 end
 
 local function check(app: any, board: string, label: string)
-	local b, cols = layout(app, board)
-	expect(#cols >= 3).to_be(true)
+	local lanes, cols = layout(app, board)
+	expect(#cols).to_be(3)
 	local w0 = cols[1].w
-	-- One under another (no room for two): each the board's width.
-	if math.abs(w0 - b.w) < 2 then
-		for _, c in cols do
-			expect(math.abs(c.w - b.w) < 2).to_be(true)
+	if lanes.w < 240 * 3 + 16 then
+		-- One under another: each the lanes' width.
+		for i, c in cols do
+			expect(math.abs(c.w - lanes.w) < 2).to_be(true)
+			expect(math.abs(c.x - lanes.x) < 1).to_be(true)
+			if i > 1 then
+				expect(c.y > cols[i - 1].y).to_be(true)
+			end
 		end
 		return
 	end
-	expect(w0 >= 219).to_be(true)
-	local rows: { [number]: { any } } = {}
-	for _, c in cols do
-		-- Every one as wide as the first.
+	expect(w0 >= 240).to_be(true)
+	for i, c in cols do
 		expect(if math.abs(c.w - w0) < 1 then "" else `{label}: column {c.x},{c.y} {c.w} vs {w0}`).to_be("")
-		local key = math.floor(c.y + 0.5)
-		rows[key] = rows[key] or {}
-		table.insert(rows[key], c)
+		expect(math.abs(c.y - cols[1].y) < 1).to_be(true)
+		if i > 1 then
+			expect(c.x > cols[i - 1].x).to_be(true)
+		end
 	end
-	-- Every row but the last full: the first's columns reach the board's
-	-- right edge; none leaves room past it for another.
-	local ys = {}
-	for y in rows do
-		table.insert(ys, y)
-	end
-	table.sort(ys)
-	local first = rows[ys[1]]
-	local right = 0
-	for _, c in first do
-		right = math.max(right, c.x + c.w)
-	end
-	expect(b.x + b.w - right < 2).to_be(true)
+	-- From the lanes' left edge to their right.
+	expect(math.abs(cols[1].x - lanes.x) < 2).to_be(true)
+	expect(lanes.x + lanes.w - (cols[3].x + cols[3].w) < 2).to_be(true)
 end
 
 for _, w in { 900, 1200, 1440 } do
@@ -74,12 +64,15 @@ for _, w in { 900, 1200, 1440 } do
 		check(app, "#control-board", `control {w}`)
 		expect(app:error()).to_be_nil()
 	end)
-	test(`board layout: an orchestrator's page's Board at {w}`, function()
-		local app = mount("orchestrator_fixture.luau")
-		app:resize(w, 1400)
-		-- (The side panel alone, at every width: the Board in its Tasks.)
-		app:set_state("orch_page_mode", "live")
-		app:frames(150)
-		check(app, "#orch-page-board", `orch {w}`)
-	end)
 end
+
+test("board layout: the Control room's Board narrow, its columns one under another", function()
+	local app = mount("control_page_fixture.luau")
+	app:set_state("control_tab", "board")
+	app:resize(700, 2400)
+	app:frames(150)
+	local lanes = layout(app, "#control-board")
+	expect(lanes.w < 240 * 3 + 16).to_be(true)
+	check(app, "#control-board", "control 700")
+	expect(app:error()).to_be_nil()
+end)

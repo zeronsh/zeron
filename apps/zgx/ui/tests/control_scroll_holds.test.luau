@@ -86,7 +86,7 @@ test("control scroll: a Board card deleted keeps the place", function()
 		end
 		app:right_click(`#control-board-tab >> .orch-card [{pick}]`)
 		app:frames(10)
-		app:click('role:menuitem "Delete"')
+		app:click('role:menuitem "Delete from the board"')
 	end, true)
 end)
 
@@ -158,9 +158,9 @@ test("orchestrator scroll: the live state keeps its place while orchestration is
 	expect(at()).to_be(scrolled)
 end)
 
--- The board's columns past ten (ds/orch_board): Show more and Show less,
--- every column at once, the page where it was.
-test("control scroll: a board's columns shown in full, and back, keep the place", function()
+-- A board's column past its twelve (ds/orch_board): Show n more, the page
+-- where it was.
+test("control scroll: a board's column shown in full keeps the place", function()
 	-- (Short, for the Board's tab to scroll.)
 	local app = open(nil, 500)
 	MARK = "#control-board-figures"
@@ -179,35 +179,21 @@ test("control scroll: a board's columns shown in full, and back, keep the place"
 	app:set_state("orchestration", n)
 	app:frames(30)
 	local start = top(app)
-	expect(app:has("#control-board-done >> .orch-column-more")).to_be(true)
+	local more = "#control-board >> #orch-col-done >> .orch-show-more"
+	expect(app:has(more)).to_be(true)
 	-- (Scrolled down until the button is in the middle of the view.)
-	local line = string.match(app:tree("#control-board-done >> .orch-column-more"), "[^\n]+") or ""
+	local line = string.match(app:tree(more), "[^\n]+") or ""
 	local y = tonumber(string.match(line, " %-?[%d%.]+,(%-?[%d%.]+) ")) or 0
 	app:scroll("#control-board-scroll", math.max(300, y - 250))
 	app:frames(30)
 	pause(app)
 	local scrolled = top(app)
 	expect(scrolled < start - 200).to_be(true)
-	app:click("#control-board-done >> .orch-column-more")
+	local before = app:count("#control-board >> #orch-col-done >> .orch-card")
+	app:click(more)
 	app:frames(30)
-	expect(app:state("control_board_expanded")).to_be(true)
+	expect(app:count("#control-board >> #orch-col-done >> .orch-card") > before).to_be(true)
+	expect(app:has(more)).to_be(false)
 	expect(top(app)).to_be(scrolled)
-	-- (Show less is further down now: the person scrolls to it.)
-	pause(app)
-	app:scroll("#control-board-scroll", 400)
-	app:frames(30)
-	pause(app)
-	scrolled = top(app)
-	app:click("#control-board-done >> .orch-column-more")
-	app:frames(30)
-	expect(app:state("control_board_expanded")).to_be(false)
-	-- Back where it was, or (the page shorter than the place, the board
-	-- its last) at its end: never its top, the button still in view.
-	local after = top(app)
-	expect(after <= scrolled + 400).to_be(true)
-	expect(after < start - 200).to_be(true)
-	local more = string.match(app:tree("#control-board-done >> .orch-column-more"), "[^\n]+") or ""
-	local my = tonumber(string.match(more, " %-?[%d%.]+,(%-?[%d%.]+) ")) or -1
-	expect(my >= 0 and my <= 500).to_be(true)
 	expect(app:error()).to_be(nil)
 end)

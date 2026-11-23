@@ -1,6 +1,5 @@
 -- A flow's run on the orchestrator page (ui/orch_flow_run_fixture.luau):
--- its cards on the board each with the flow and step they are, how far
--- along; the Flow view's Run… (a task asked, then `startFlow`), where the
+-- the Flow view's Run… (a task asked, then `startFlow`), where the
 -- run is and Stop (`stopFlow`); and a flow edited, sent to the engine
 -- (`updateOrchestrator` with its workflow) once the edits rest.
 
@@ -27,23 +26,6 @@ end
 local function has(s: string, part: string): boolean
 	return string.find(s, part, 1, true) ~= nil
 end
-
-test("orch flow board: a run's cards carry their flow and step", function()
-	local app = open()
-	expect(app:has("#orch-page-board")).to_be(true)
-	expect(app:count("#orch-page-board >> .orch-card-flow")).to_be(4)
-	expect(app:has('#orch-page-board >> .orch-card-flow >> "Plan → Build → Review · QA"')).to_be(true)
-	expect(app:has('#orch-page-board >> .orch-card-flow >> "4/4"')).to_be(true)
-	expect(app:has('#orch-page-board >> .orch-card-flow >> "Plan → Build → Review · Planner"')).to_be(true)
-	expect(app:has('#orch-page-board >> .orch-card-flow >> "1/4"')).to_be(true)
-end)
-
-test("orch flow board: a card of no flow has no chip", function()
-	local app = open()
-	expect(app:has('#orch-page-board >> role:button "Live end-to-end test on a dev engine"')).to_be(true)
-	expect(app:has('#orch-page-board >> role:button "Live end-to-end test on a dev engine" >> .orch-card-flow')).to_be(false)
-	expect(app:has('#orch-page-board >> role:button "QA: flow runs on the board" >> .orch-card-flow')).to_be(true)
-end)
 
 test("orch flow board: the Flow view says where the run is, and Stop stops it", function()
 	local app = open()

@@ -1,8 +1,9 @@
 -- A thread its provider's usage limit stopped (its session's `limited`,
 -- ds/usage_limit): waiting for the reset ("Waiting for limit · resets
 -- 14:05", local) or running on another account meanwhile ("On <account> ·
--- <original> resets 14:05"), on the Board's card, Progress's row (its
--- countdown moving with its clock), the Map's node and hover card; and the
+-- <original> resets 14:05"), on Progress's row (its countdown moving with
+-- its clock), the Map's node and hover card; the Board's card as the
+-- engine's row says it (waiting for the limit, till when); and the
 -- orchestrator's settings writing `crew.onLimit`.
 
 local limit = require("@ds/usage_limit")
@@ -32,25 +33,24 @@ end)
 
 -- The Board.
 
-local function board(): any
-	local app = mount("orch_board_columns_fixture.luau")
-	app:resize(1440, 900)
-	app:frames(20)
-	app:command("fixture.limited")
-	app:frames(20)
-	return app
-end
-
-test("usage limit: a Board card says its thread waits for the limit, and till when; one switched, where it runs", function()
-	local app = board()
-	local now = app:tree("#cols-now") :: string
-	expect(has(now, "Sidebar rows drag between sections")).to_be(true)
-	expect(has(now, "Waiting for limit · resets 14:05")).to_be(true)
-	expect(has(now, "On me@home.dev · me@work.dev resets 14:05")).to_be(true)
+-- (ui/orch_board_places_fixture.luau: "iOS Live screen" is Running, its
+-- row's status `limited` until 100 minutes past the fixture's 8 PM.)
+test("usage limit: a Board card says it waits for the usage limit, and till when", function()
+	local app = mount("orch_board_places_fixture.luau")
+	app:resize(1500, 1000)
+	app:frames(30)
+	local card = "#orch-col-running >> #orch-card-it-ios"
+	expect(app:text(`{card} >> .orch-card-status`)).to_be("Waiting for usage limit")
+	-- (9:40 PM, or 21:40, as the person's clock says it.)
+	local tail = app:text(`{card} >> .orch-card-clock`) :: string
+	expect(string.match(tail, "^until %d%d?:40") ~= nil).to_be(true)
 	-- (Its glyph, before its words.)
-	expect(app:has(".orch-card-limited")).to_be(true)
-	-- A card whose thread isn't limited says nothing of it.
-	expect(select(2, string.gsub(now, "resets 14:05", ""))).to_be(2)
+	expect(app:has(`{card} >> .orch-status-glyph`)).to_be(true)
+	-- A card at work otherwise says nothing of it.
+	local running = app:tree("#orch-col-running") :: string
+	expect(select(2, string.gsub(running, "Waiting for usage limit", ""))).to_be(1)
+	expect(select(2, string.gsub(running, "until ", ""))).to_be(1)
+	expect(app:error()).to_be_nil()
 end)
 
 -- Progress.
