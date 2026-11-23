@@ -70,28 +70,29 @@ for _, shape in SHAPES do
 			-- (A hair's tolerance: the halo's.)
 			local e = 1.5
 			local over, out = 0, 0
+			-- (What overlaps or spills, said by the failure itself.)
+			local wrong: { string } = {}
 			for a, la in d.labels do
 				for b, lb in d.labels do
 					if a < b and la.x0 + e < lb.x1 and la.x1 - e > lb.x0 and la.y0 + e < lb.y1 and la.y1 - e > lb.y0 then
 						over += 1
-						print(`FORCELAYOUT_OVER {shape} {w}x{h} {la.id} {lb.id}`)
+						table.insert(wrong, `over {la.id} {lb.id}`)
 					end
 				end
 				if sx(la.x0) < -e or sy(la.y0) < -e or sx(la.x1) > w + e or sy(la.y1) > h + e then
 					out += 1
-					print(`FORCELAYOUT_OUT {shape} {w}x{h} name {la.id}`)
+					table.insert(wrong, `outside: name {la.id}`)
 				end
 			end
 			for _, n in d.nodes do
 				local r = (if n.kind == "brain" then 19 elseif n.kind == "chat" then 13.5 else 21) * z
 				if sx(n.x) - r < -e or sy(n.y) - r < -e or sx(n.x) + r > w + e or sy(n.y) + r > h + e then
 					out += 1
-					print(`FORCELAYOUT_OUT {shape} {w}x{h} mark {n.id}`)
+					table.insert(wrong, `outside: mark {n.id}`)
 				end
 			end
-			print(`FORCELAYOUT {shape} {w}x{h}: {#d.nodes} marks, {#d.labels} names, zoom {string.format("%.2f", z)}, {over} over, {out} outside, {stats(app).layouts or 0} layouts`)
-			expect(over).to_be(0)
-			expect(out).to_be(0)
+			print(`zeron-zgx: FORCELAYOUT {shape} {w}x{h}: {#d.nodes} marks, {#d.labels} names, zoom {string.format("%.2f", z)}, {over} over, {out} outside, {stats(app).layouts or 0} layouts`)
+			expect(`{shape} {w}x{h}: {table.concat(wrong, ", ")}`).to_be(`{shape} {w}x{h}: `)
 		end)
 	end
 end
@@ -109,21 +110,23 @@ test("force layout: a thread added, then one finishing, moves no other; the fiel
 	app:frames(30)
 	local b = places(app)
 	local moved, kept, added = 0, 0, 0
+	local shifted: { string } = {}
 	for id, p in b do
 		local q = a[id]
 		if q then
 			kept += 1
 			if math.abs(p[1] - q[1]) > 0.5 or math.abs(p[2] - q[2]) > 0.5 then
 				moved += 1
-				print(`FORCELAYOUT_MOVED add {id} {q[1]},{q[2]} -> {p[1]},{p[2]}`)
+				table.insert(shifted, `{id} {q[1]},{q[2]} to {p[1]},{p[2]}`)
 			end
 		else
 			added += 1
 		end
 	end
-	print(`FORCELAYOUT add: {kept} kept, {moved} moved, {added} added`)
+	print(`zeron-zgx: FORCELAYOUT add: {kept} kept, {moved} moved, {added} added`)
 	expect(added).to_be(1)
-	expect(moved).to_be(0)
+	-- (What moved, said by the failure itself.)
+	expect(table.concat(shifted, ", ")).to_be("")
 	-- (Laid out for this field once: the add kept its layout.)
 	expect(stats(app).layouts).to_be(layouts)
 	-- One finishing: nothing moves (its name goes; its place stays).
@@ -141,7 +144,7 @@ test("force layout: a thread added, then one finishing, moves no other; the fiel
 			moved2 += 1
 		end
 	end
-	print(`FORCELAYOUT finish: {moved2} moved`)
+	print(`zeron-zgx: FORCELAYOUT finish: {moved2} moved`)
 	expect(moved2).to_be(0)
 end)
 
@@ -247,7 +250,7 @@ test("force layout: every thread at work, waiting or asking named; idle and fini
 				end
 			end
 		end
-		print(`FORCELAYOUT names {f[1]}x{f[2]}: {spare_named} of {spare} idle or finished named`)
+		print(`zeron-zgx: FORCELAYOUT names {f[1]}x{f[2]}: {spare_named} of {spare} idle or finished named`)
 		if f[1] == 700 then
 			-- (Narrow: not all of them have room.)
 			expect(spare_named < spare).to_be(true)

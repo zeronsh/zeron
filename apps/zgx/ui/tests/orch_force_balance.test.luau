@@ -341,9 +341,9 @@ test("force balance: the kept layout (K3) against base, every shape and field: n
 				local L = lay(SHAPES[sname], v, f[1], f[2])
 				local m = measure_layout(L, v)
 				m.variant, m.shape_name, m.frame = v.name, sname, `{f[1]}x{f[2]}`
-				print("FORCEBAL " .. json(m))
+				print(`zeron-zgx: FORCEBAL {json(m)}`)
 				if LAYOUTS then
-					print("FORCEBALL " .. json({ variant = v.name, shape = sname, frame = `{f[1]}x{f[2]}`, layout = L }))
+					print(`zeron-zgx: FORCEBALL {json({ variant = v.name, shape = sname, frame = m.frame, layout = L })}`)
 				end
 				sum[v.name] = (sum[v.name] or 0) + m.nn_cv
 				n[v.name] = (n[v.name] or 0) + 1
@@ -357,6 +357,6 @@ test("force balance: the kept layout (K3) against base, every shape and field: n
 		end
 	end
 	local kept, base = sum.K3 / n.K3, sum.base / n.base
-	print(string.format("FORCEBAL_MEAN nn_cv base %.2f kept %.2f", base, kept))
+	print(`zeron-zgx: FORCEBAL_MEAN nn_cv base {string.format("%.2f", base)} kept {string.format("%.2f", kept)}`)
 	expect(kept < base * 0.7).to_be(true)
 end)

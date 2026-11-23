@@ -212,7 +212,7 @@ test("force graph: a warm open (places kept) is settled on its first frame", fun
 	-- the page taking the new fleet in, and swings with the machine's load:
 	-- held only to a loose bound.)
 	local own = (s.build_ms or 0) + (s.place_ms or 0) + (s.make_ms or 0)
-	print(string.format("FORCEPERF warm open own work %.1fms", own))
+	print(`zeron-zgx: FORCEPERF warm open own work {string.format("%.1f", own)}ms`)
 	expect(own < 20).to_be(true)
 	expect(ms < 120).to_be(true)
 	expect(app:count("#control-widget-map >> .orch-force-node") >= 160).to_be(true)
