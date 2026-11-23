@@ -21,6 +21,7 @@ local route = require("@app/screens/shell/route")
 
 local Draft = require("@ds/draft_text")
 local ComposerAtoms = require("@ds/composer_atoms")
+local AttachmentMentions = require("@ds/attachment_mentions")
 local M = {}
 
 -- The draft, what it carries, the options picked in a question being
@@ -534,7 +535,8 @@ end
 -- the keys. So too `add_to_chat` and `mention_chat`.)
 function M.attach_files(files: { any }, key: string?)
 	for _, f in files do
-		local name = f.name or f.path or "file"
+		local raw = f.name or f.path or "file"
+		local name = AttachmentMentions.friendly_name(raw)
 		local picture = is_image(name)
 		M.push_cargo(key, {
 			id = chip_id("file"),
@@ -547,6 +549,19 @@ function M.attach_files(files: { any }, key: string?)
 	if key == nil then
 		M.focus:add(1)
 	end
+end
+
+-- A picture pasted from the clipboard: gives it a readable timestamped name
+-- (`Clipboard 1.45.12 PM.png`, deduplicated against current cargo) instead of
+-- `image.png`.
+function M.attach_pasted_image(path: string, key: string?)
+	local existing: { string } = {}
+	for _, item in M.peek_cargo(key) do
+		if type(item.name) == "string" then
+			table.insert(existing, item.name)
+		end
+	end
+	M.attach_files({ { name = AttachmentMentions.pasted_name(existing), path = path } }, key)
 end
 
 -- Files of the project (the files pane's, dragged here or its "Add to

@@ -2020,6 +2020,10 @@ return ui.component(function(props: Props): Node
 		end
 		local at = ui.editor.offset_at(el, p.x, p.y)
 		if at ~= nil then
+			local atoms_state = props.atoms
+			if atoms_state then
+				at = ComposerAtoms.snap_byte(value:peek(), atoms_state:peek(), at)
+			end
 			el:focus()
 			el:set_selection_bytes(at, at)
 		end
@@ -2125,7 +2129,7 @@ return ui.component(function(props: Props): Node
 				value = value,
 				atoms = props.atoms,
 				atom_style = if props.atoms
-					then { bg = "$zeron.chip.bg", color = "$text.primary", weight = 500 }
+					then { bg = "$zeron.chip.bg", color = "$text.primary", padding = { 2, 7, 2.4 }, radius = 5 }
 					else nil,
 				on_atom_hover = if props.atoms
 					then function(atom: any)
@@ -2133,7 +2137,10 @@ return ui.component(function(props: Props): Node
 					end
 					else nil,
 				on_atom_press = if props.atoms
-					then function()
+					then function(atom: any)
+						if atom then
+							hovered_atom = atom
+						end
 						return true
 					end
 					else nil,
@@ -2162,6 +2169,8 @@ return ui.component(function(props: Props): Node
 						return ComposerAtoms.chip_preview(if type(payload) == "table" then payload.data else nil)
 					end
 					else nil,
+				drag_preview_anchor = if props.atoms then { 0.5, 0.5 } else nil,
+				drag_preview_offset = if props.atoms then { 0, -4 } else nil,
 				on_drag_end = if props.atoms
 					then function(_payload: any, accepted: boolean?)
 						local sel = drag_restore_sel

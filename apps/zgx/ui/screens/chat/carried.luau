@@ -55,6 +55,30 @@ local function with_chats(words: string, chats: { { name: string, chat: string, 
 	return if string.find(words, "%S") then `{words}\n\n{block}` else block
 end
 
+-- The upload and inline-mention name for a path-backed attachment: preserves
+-- real filenames (including cleaned screenshots and pasted clipboard names),
+-- appends the picture's extension for an Appshot whose name is a window title
+-- so server/desktop/mobile recognize it as an image, and falls back to
+-- `Image N` only if an image somehow has no name.
+function M.mention_name(item: any): string?
+	local name = if type(item.name) == "string" and item.name ~= "" then item.name else nil
+	local picture = item.kind == "image" or item.kind == "appshot"
+	if picture then
+		if name then
+			if item.kind == "appshot" and not AttachmentMentions.is_image_name(name) then
+				local ext = if type(item.path) == "string" then string.match(item.path, "(%.[%w]+)$") else nil
+				return name .. (ext or ".png")
+			end
+			return name
+		end
+		if type(item.mention) == "number" then
+			local ext = if type(item.path) == "string" then string.match(item.path, "(%.[%w]+)$") else nil
+			return AttachmentMentions.image_label(item.mention) .. (ext or "")
+		end
+	end
+	return name
+end
+
 -- `typed`: the words taken from the draft. `text`: what the composer sent, if
 -- that's nothing.
 function M.pack(chips: { any }, typed: string, text: string): Pack
@@ -65,14 +89,7 @@ function M.pack(chips: { any }, typed: string, text: string): Pack
 		elseif item.path then
 			-- (A project's file: on the session's computer already.)
 			-- (An Appshot goes as its picture; what it shows of the app, below.)
-			-- (A picture goes up as `Image N` (its number in the draft), as
-			-- the shipping app stages one: a mention of it names it so.)
-			local picture = item.kind == "image" or item.kind == "appshot"
-			local name = item.name
-			if picture and type(item.mention) == "number" then
-				local ext = string.match(item.path, "(%.[%w]+)$") or ""
-				name = AttachmentMentions.image_label(item.mention) .. ext
-			end
+			local name = M.mention_name(item) or item.name
 			table.insert(p.attachments, { kind = if item.kind == "appshot" then "image" else item.kind, path = item.path, name = name, rel = item.rel, on_host = item.on_host })
 		elseif item.kind == "annotation" and item.quote then
 			table.insert(p.quotes, { text = item.quote, who = item.name, from = item.from })
@@ -154,6 +171,10 @@ function M.mention(item: any): string?
 	elseif item.kind == "annotation" and item.annotation then
 		return Annotation.token(item.annotation)
 	elseif item.path and type(item.mention) == "number" then
+		local named = M.mention_name(item)
+		if named and named ~= "" then
+			return AttachmentMentions.link(item.mention, named)
+		end
 		local picture = item.kind == "image" or item.kind == "appshot"
 		return AttachmentMentions.link(item.mention, if picture then nil else item.name)
 	end
@@ -181,10 +202,7 @@ function M.chip_spec(item: any): ComposerAtoms.ChipSpec?
 		return nil
 	end
 	local what, icon = M.kind(item)
-	local picture = what == "image" or what == "appshot"
-	local label = if picture and type(item.mention) == "number"
-		then AttachmentMentions.image_label(item.mention)
-		else name
+	local label = M.mention_name(item) or name
 	return ComposerAtoms.from_cargo(item, label, link, what, icon)
 end
 

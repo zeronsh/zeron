@@ -16,7 +16,6 @@
 local files = require("@app/screens/files/api")
 local sessions = require("@account/sessions")
 local Carried = require("@app/screens/chat/carried")
-local AttachmentMentions = require("@ds/attachment_mentions")
 local ChatLinks = require("@app/screens/chat/chat_links")
 local locale = require("@ds/locale")
 local route = require("@app/screens/shell/route")
@@ -133,13 +132,12 @@ function M.bind(b: Bind): { [string]: any }
 			local link = Carried.mention(item)
 			if name and link then
 				local what, icon = Carried.kind(item)
-				local picture = what == "image" or what == "appshot"
+				local chip_name = Carried.mention_name(item) or name
 				table.insert(out, {
 					section = "attachments",
-					-- (Its token in the draft: a picture's its number's.)
-					value = if picture and type(item.mention) == "number" then `Image-{item.mention}` else word(name),
+					value = word(name),
 					label = name,
-					chip_label = if picture and type(item.mention) == "number" then AttachmentMentions.image_label(item.mention) else name,
+					chip_label = chip_name,
 					-- (What it is: a picture, a file…)
 					detail = ui.t(`chat.composer.attachment_kind.{what}`):get(),
 					icon = icon,

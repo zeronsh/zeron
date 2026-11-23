@@ -49,6 +49,7 @@ local Math = require("@self/math")
 -- ```mermaid fences drawn as their diagrams (ds/mermaid).
 local Mermaid = require("@self/mermaid")
 local MarkdownFind = require("@self/markdown_find")
+local AttachmentMentions = require("@self/attachment_mentions")
 local locale = require("@self/locale")
 local look = require("@self/look")
 
@@ -875,7 +876,10 @@ local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: C
 		elseif r.a and (string.match(r.a, "^zeron%-image:%d+$") or string.match(r.a, "^zeron%-attachment:%d+$")) then
 			-- What it carries, mentioned by its number (ds/attachment_mentions):
 			-- its chip, a picture's glyph or a file's icon, by its name.
-			attachment_chip(span, r.x, { kind = if string.match(r.a, "^zeron%-image:") then "image" else "file" })
+			local is_image = string.match(r.a, "^zeron%-image:") ~= nil
+				or AttachmentMentions.is_image_name(r.x)
+				or (ctx ~= nil and ctx.attached ~= nil and ctx.attached[r.x] ~= nil and ctx.attached[r.x].kind == "image")
+			attachment_chip(span, r.x, { kind = if is_image then "image" else "file" })
 		elseif r.a and string.match(r.a, "^zeron%-annotation:") then
 			-- A browser pick, mentioned (its token): its chip.
 			attachment_chip(span, r.x, { kind = "file", icon = "cursor" })

@@ -275,6 +275,8 @@ local function image_chip(item: Item, row: State<Item>, props: Props): Node
 			end
 			else nil,
 		drag_preview = props.drag_preview,
+		drag_preview_anchor = if props.drag_preview then { 0.5, 0.5 } else nil,
+		drag_preview_offset = if props.drag_preview then { 0, -4 } else nil,
 		on_hover = function(inside: boolean)
 			hovered:set(inside)
 			over(item, inside)
@@ -586,6 +588,8 @@ local function row_chip(item: Item, row: State<Item>, props: Props): Node
 				end
 				else nil,
 			drag_preview = props.drag_preview,
+			drag_preview_anchor = if props.drag_preview then { 0.5, 0.5 } else nil,
+			drag_preview_offset = if props.drag_preview then { 0, -4 } else nil,
 			slot,
 			ui.column {
 				min_w = 0,

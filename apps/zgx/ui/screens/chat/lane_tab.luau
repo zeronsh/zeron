@@ -731,7 +731,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			else function(): boolean
 				store.paste_image():after(function(path: string?)
 					if type(path) == "string" and path ~= "" then
-						Shared.attach_files({ { name = "image.png", path = path } }, chat)
+						Shared.attach_pasted_image(path, chat)
 						focus:add(1)
 					end
 				end, function() end)

@@ -104,7 +104,12 @@ local function ui_glyph_of(data: ChipData): string
 	return "paperclip"
 end
 
--- Atom style table for `ui.textarea` (`bg`, `color`, `weight`, `icon`).
+-- Atom style table for `ui.textarea`: matches transcript chips in
+-- `ds/markdown.luau` (corner 5, `padding = { 2, 7, 2.4 }`, 17×17 `$zeron.chip.well`
+-- with corner 3 and 2pt pad around the 13px icon, regular body weight).
+local CHIP_PADDING = { 2, 7, 2.4 }
+local CHIP_RADIUS = 5
+
 function M.style_of(data: ChipData): { [string]: any }
 	local is_action = data.kind == "command" or data.kind == "skill"
 	local color = if is_action then "$zeron.composer.token.action" else "$text.primary"
@@ -114,32 +119,58 @@ function M.style_of(data: ChipData): { [string]: any }
 		icon = {
 			src = `assets/icons/files/{icon_set()}/{FileIcon.of(fname, data.dir == true)}.svg`,
 			size = 13,
-			gap = 4,
+			gap = 2,
+			bg = "$zeron.chip.well",
+			radius = 3,
+			pad = 2,
 		}
 	else
 		icon = {
 			src = `assets/icons/ui/{ui_glyph_of(data)}.svg`,
 			size = 13,
-			gap = 4,
+			gap = 2,
+			bg = "$zeron.chip.well",
+			radius = 3,
+			pad = 2,
 			tint = if is_action then "currentColor" else "$zeron.chip.glyph",
 		}
 	end
 	return {
 		bg = "$zeron.chip.bg",
 		color = color,
-		weight = 500,
+		padding = CHIP_PADDING,
+		radius = CHIP_RADIUS,
 		icon = icon,
 	}
 end
 
--- Compact pill preview rendered under the pointer while dragging a chip.
+-- Snap byte offset `byte` out of any atom interior to the atom's nearest edge
+-- so the drop caret never sits inside an atomic chip while dragging.
+function M.snap_byte(text: string, atoms: { AtomEntry }, byte: number): number
+	local n = #text
+	local at = math.clamp(byte, 0, n)
+	if #atoms == 0 then
+		return at
+	end
+	for _, a in atoms do
+		local b_from = M.byte_of_char(text, a.from)
+		local b_to = M.byte_of_char(text, a.to)
+		if at > b_from and at < b_to then
+			return if (at - b_from) <= (b_to - at) then b_from else b_to
+		end
+	end
+	return at
+end
+
+-- Compact pill preview rendered under the pointer while dragging a chip:
+-- mirrors the real inline chip anatomy (22px tall, 17×17 icon well, corner 5).
 function M.chip_preview(data: ChipData?): Node
 	local d: ChipData = data or { kind = "attachment", label = "Item" }
 	local is_action = d.kind == "command" or d.kind == "skill"
 	local ink = if is_action then "$zeron.composer.token.action" else "$text.primary"
 	local lead: Node
 	if d.file_icon or d.kind == "file" then
-		lead = FileIcon { name = d.file_icon or d.label, dir = d.dir == true, size = 14 }
+		lead = FileIcon { name = d.file_icon or d.label, dir = d.dir == true, size = 13 }
 	else
 		lead = Icon {
 			name = ui_glyph_of(d) :: any,
@@ -148,22 +179,33 @@ function M.chip_preview(data: ChipData?): Node
 		}
 	end
 	return ui.row {
-		h = 24,
-		px = "$space.2",
-		gap = "$space.1",
+		h = ui.raw(22, "inline chip drag preview height"),
+		pl = ui.raw(2, "inline chip drag preview left inset"),
+		pr = ui.raw(7, "inline chip drag preview right inset"),
+		gap = ui.raw(2, "inline chip drag preview icon gap"),
 		items = "center",
-		rounded = ui.raw(6, "inline chip drag preview corner"),
-		bg = "$zeron.composer.solid",
+		rounded = ui.raw(5, "inline chip drag preview corner"),
+		bg = "$zeron.chip.bg",
 		border = 1,
 		border_color = "$zeron.composer.edge",
 		shadow = "$zeron.composer.shadow",
+		opacity = 0.94,
 		pointer_events = "none",
-		lead,
+		ui.div {
+			w = ui.raw(17, "inline chip drag preview icon well width"),
+			h = ui.raw(17, "inline chip drag preview icon well height"),
+			shrink = 0,
+			items = "center",
+			justify = "center",
+			rounded = ui.raw(3, "inline chip drag preview icon well corner"),
+			bg = "$zeron.chip.well",
+			lead,
+		},
 		ui.text {
 			d.label,
 			literal = true,
-			text_size = "$font.size.sm",
-			weight = "$font.weight.medium",
+			text_size = "$zeron.composer.text",
+			line_height = "$zeron.composer.line",
 			color = ink,
 		},
 	}
