@@ -48,7 +48,7 @@ Your own plugins are signed as yours, and re-signed and reloaded each time you s
 | `profile.read` | read your id, name, username, avatar |
 | `account.email` | read your email (unless you hide email addresses) |
 | `files.read` | read file paths, and folders: a session's (`cwd`) and a project's (`path`) (without it a file is an id of the plugin's own) |
-| `files.write` | a service writes files (`zeron.write_file`): in its own folder in Documents, or inside a chat's or project's folder |
+| `files.write` | a service writes files (`zeron.write_file`): in its own folder in Documents, or inside a chat's or project's folder, code and settings included. Always asked, even for your own plugins |
 | `panel.tabs` | open tabs of its own in a chat's panel |
 | `pages.add` | add pages of its own to the sidebar |
 | `navigate` | open chats and pages (`zeron.open`) |
@@ -59,7 +59,7 @@ Your own plugins are signed as yours, and re-signed and reloaded each time you s
 | `github`, `github.write` | read (and write) GitHub through Zeron's engine (older calls; prefer `commands` with `gh`) |
 | `network` | the internet: `ui.fetch`, and remote images (`ui.image { src = "https://…" }`). See [Reaching the network](#reaching-the-network) |
 | `clipboard`, `files`, `web`, `windows` | zgx's clipboard, file dialogs, web views, windows |
-| `fonts` | load font files of its own folder (`ui.load_font`) for its windows' text. A loaded font reaches every window's text, Zeron's included, so the person is asked. Its service measures in fonts of its own (`zeron.load_font`) with no permission |
+| `fonts` | load font files of its own folder (`ui.load_font`) for its windows' text. A loaded font reaches every window's text, Zeron's included (its consent sheets too), so it's always asked, even for your own plugins. Its service measures in fonts of its own (`zeron.load_font`) with no permission |
 | `tools` | tools for agents (the manifest's `tools`) |
 | `devices` | send data to itself on your other devices |
 | `native` | run a program of its own (the manifest's `mcp`) |

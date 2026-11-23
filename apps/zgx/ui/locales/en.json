@@ -3572,7 +3572,7 @@
         },
         "fonts": {
           "title": "Add fonts of its own",
-          "detail": "Text in a font it adds, Zeron's included, may draw in its version of that font"
+          "detail": "Its fonts reach every window, Zeron's own included: text in a font it replaces, a permission request's too, may draw in its version of that font."
         },
         "scene3d": {
           "title": "Draw 3D scenes"

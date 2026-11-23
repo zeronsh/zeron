@@ -327,8 +327,9 @@ function M.permission(item: any, permission: string): Line
 		return line(false, "monitor", "plugins.words.permission.windows.title")
 	elseif permission == "fonts" then
 		-- (A family Zeron draws in, given a face of the plugin's, changes
-		-- how Zeron's own text looks: said so.)
-		return line(false, "wrap-text", "plugins.words.permission.fonts.title", "plugins.words.permission.fonts.detail")
+		-- how Zeron's own text looks, a consent sheet's included: always
+		-- asked, said so.)
+		return line(true, "wrap-text", "plugins.words.permission.fonts.title", "plugins.words.permission.fonts.detail")
 	elseif permission == "scene3d" then
 		return line(false, "widget", "plugins.words.permission.scene3d.title")
 	elseif permission == "tools" then

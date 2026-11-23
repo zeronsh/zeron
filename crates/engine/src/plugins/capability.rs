@@ -60,6 +60,10 @@ pub const OUTSIDE_SANDBOX: &[&str] = &[
     // Writing any file in your chats' and projects' folders: code your
     // agents and tools then run.
     "files.write",
+    // Fonts its windows load reach every window, Zeron's own and the
+    // consent window's: a face in a family Zeron draws in changes what
+    // its text, a permission's words included, looks like.
+    "fonts",
 ];
 
 /// The hosts of a plugin with "network" that names none: any public one.
@@ -333,6 +337,15 @@ mod tests {
     #[test]
     fn plugins_capability_files_write_stays_outside_the_sandbox() {
         let m = manifest(json!({ "permissions": ["ui.add", "service", "files.write"], "service": "service.luau" }));
+        assert_eq!(m.problem(), None);
+        assert_eq!(inside_sandbox(&record(&m))["permissions"], json!(["ui.add"]));
+    }
+
+    /// Fonts reach every window's text, the consent window's too: always
+    /// asked, even of your own plugin.
+    #[test]
+    fn plugins_capability_fonts_stays_outside_the_sandbox() {
+        let m = manifest(json!({ "permissions": ["ui.add", "fonts"] }));
         assert_eq!(m.problem(), None);
         assert_eq!(inside_sandbox(&record(&m))["permissions"], json!(["ui.add"]));
     }
