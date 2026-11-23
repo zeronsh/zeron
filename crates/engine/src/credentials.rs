@@ -1060,7 +1060,8 @@ impl CredentialBroker {
                     {
                         let caller_upstream = request
                             .env
-                            .get(antigravity_proxy::CCPA_BASE_URL_ENV)
+                            .get(antigravity_proxy::CLOUD_CODE_URL_ENV)
+                            .or_else(|| request.env.get(antigravity_proxy::CCPA_BASE_URL_ENV))
                             .cloned()
                             .filter(|u| !u.trim().is_empty());
                         if let Some(proxy_url) =
@@ -1068,8 +1069,14 @@ impl CredentialBroker {
                         {
                             request
                                 .env
-                                .insert(antigravity_proxy::CCPA_BASE_URL_ENV.into(), proxy_url);
+                                .insert(antigravity_proxy::CCPA_BASE_URL_ENV.into(), proxy_url.clone());
+                            request
+                                .env
+                                .insert(antigravity_proxy::CLOUD_CODE_URL_ENV.into(), proxy_url);
                         }
+                        request.env.entry("SSH_CONNECTION".into()).or_insert_with(|| {
+                            zeron_harness::acp::ANTIGRAVITY_SSH_FILE_STORAGE_VALUE.into()
+                        });
                     }
                     self.write_agent_file(harness, credential.vault, grant)
                         .await;
@@ -2674,13 +2681,35 @@ fn antigravity_token_file(home: &Path) -> PathBuf {
     home.join("antigravity-acp").join("acp_token.json")
 }
 
-/// Antigravity's own Google login: a token file with a refresh token (the
-/// broker writes its own with an empty one), or a business sign-in.
+fn antigravity_oauth_token_file(home: &Path) -> PathBuf {
+    zeron_harness::acp::antigravity_oauth_token_file(home)
+}
+
+fn has_nested_refresh(doc: &Value) -> bool {
+    doc.get("token")
+        .is_some_and(|token| has_refresh(token, "refresh_token"))
+}
+
+fn is_managed_oauth_token(doc: &Value) -> bool {
+    let Some(token) = doc.get("token").filter(|v| v.is_object()) else {
+        return false;
+    };
+    !has_refresh(token, "refresh_token")
+        && token
+            .get("access_token")
+            .and_then(Value::as_str)
+            .is_some()
+}
+
+/// Antigravity's own Google login: either token file holding a refresh token
+/// (the broker writes its own with an empty/absent one), or a business sign-in.
 fn antigravity_token_exists(home: &Path) -> bool {
     let business = home.join("antigravity-acp").join("acp_business_token.json");
     business.is_file()
         || read_json(&antigravity_token_file(home))
             .is_some_and(|token| has_refresh(&token, "refresh_token"))
+        || read_json(&antigravity_oauth_token_file(home))
+            .is_some_and(|token| has_nested_refresh(&token))
 }
 
 /// Make Antigravity sign in with `GEMINI_API_KEY`.
@@ -2688,7 +2717,7 @@ fn write_antigravity_key_method(home: &Path) -> Result<(), String> {
     write_antigravity_method(home, "gemini-api-key")
 }
 
-/// `acp_token.json` for an `antigravity` grant: the access token and its
+/// Legacy `acp_token.json` for an `antigravity` grant: the access token and its
 /// expiry (naive UTC, as google-auth reads it), the client and project, and
 /// the keys a refresh would need there but EMPTY (google-auth requires them
 /// present; the vault refreshes). When `proxied` is true, writes a far-future
@@ -2719,29 +2748,71 @@ fn antigravity_token_json(grant: &Grant, proxied: bool) -> Value {
     })
 }
 
-/// Antigravity on the vault's Google login: its token file (unless one of
+/// Unified CLI `antigravity-oauth-token` for an `antigravity` grant: access
+/// token + RFC3339 UTC expiry and `"auth_method": "consumer"`, with NO refresh
+/// token (the vault refreshes, and when `proxied` is true the far-future expiry
+/// keeps the CLI from attempting an interactive login mid-turn).
+fn antigravity_oauth_token_json(grant: &Grant, proxied: bool) -> Value {
+    let expiry = if proxied {
+        antigravity_proxy::PROXIED_TOKEN_EXPIRY_RFC3339.to_owned()
+    } else {
+        chrono::DateTime::from_timestamp_millis(grant.expires_at)
+            .unwrap_or_default()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string()
+    };
+    json!({
+        "token": {
+            "access_token": grant.access_token,
+            "token_type": "Bearer",
+            "expiry": expiry,
+        },
+        "auth_method": "consumer",
+    })
+}
+
+/// Antigravity on the vault's Google login: writes both the unified CLI's
+/// `antigravity-oauth-token` and legacy `acp_token.json` (unless one of
 /// Antigravity's own is there) and the personal sign-in method.
 fn write_antigravity_login(home: &Path, grant: &Grant, proxied: bool) -> Result<(), String> {
     if antigravity_token_exists(home) {
         return Ok(());
     }
-    let file = antigravity_token_file(home);
-    let desired = antigravity_token_json(grant, proxied);
-    if read_json(&file).as_ref() != Some(&desired) {
-        if let Some(dir) = file.parent() {
-            private_dir(dir).map_err(|e| e.to_string())?;
+    for (file, desired) in [
+        (
+            antigravity_oauth_token_file(home),
+            antigravity_oauth_token_json(grant, proxied),
+        ),
+        (
+            antigravity_token_file(home),
+            antigravity_token_json(grant, proxied),
+        ),
+    ] {
+        if read_json(&file).as_ref() != Some(&desired) {
+            if let Some(dir) = file.parent() {
+                private_dir(dir).map_err(|e| e.to_string())?;
+            }
+            let bytes = serde_json::to_vec_pretty(&desired).map_err(|e| e.to_string())?;
+            write_private_atomic(&file, &bytes).map_err(|e| e.to_string())?;
         }
-        let bytes = serde_json::to_vec_pretty(&desired).map_err(|e| e.to_string())?;
-        write_private_atomic(&file, &bytes).map_err(|e| e.to_string())?;
     }
     write_antigravity_method(home, "oauth-personal")
 }
 
-/// Drop the broker's token file (never one of Antigravity's own).
+/// Drop the broker's token files (never one of Antigravity's own).
 fn clear_antigravity_login(home: &Path) {
-    let file = antigravity_token_file(home);
-    if read_json(&file).is_some_and(|token| is_managed(&token, "refresh_token")) {
-        let _ = std::fs::remove_file(&file);
+    let mut removed = false;
+    let legacy = antigravity_token_file(home);
+    if read_json(&legacy).is_some_and(|token| is_managed(&token, "refresh_token")) {
+        let _ = std::fs::remove_file(&legacy);
+        removed = true;
+    }
+    let oauth = antigravity_oauth_token_file(home);
+    if read_json(&oauth).is_some_and(|token| is_managed_oauth_token(&token)) {
+        let _ = std::fs::remove_file(&oauth);
+        removed = true;
+    }
+    if removed {
         tracing::info!("credentials: removed the managed Antigravity login");
     }
 }
@@ -4065,23 +4136,58 @@ mod tests {
                 "project_id": "proj-1",
             })
         );
+        let oauth_token = read_json(&antigravity_oauth_token_file(home)).unwrap();
+        assert_eq!(
+            oauth_token,
+            json!({
+                "token": {
+                    "access_token": "ya29.token",
+                    "token_type": "Bearer",
+                    "expiry": "2026-11-18T13:04:05Z",
+                },
+                "auth_method": "consumer",
+            })
+        );
         write_antigravity_login(home, &g, true).unwrap();
         let proxied_token = read_json(&antigravity_token_file(home)).unwrap();
         assert_eq!(proxied_token["expiry"], antigravity_proxy::PROXIED_TOKEN_EXPIRY);
         assert_eq!(proxied_token["token"], "ya29.token");
         assert_eq!(proxied_token["refresh_token"], "");
+        let proxied_oauth = read_json(&antigravity_oauth_token_file(home)).unwrap();
+        assert_eq!(
+            proxied_oauth["token"]["expiry"],
+            antigravity_proxy::PROXIED_TOKEN_EXPIRY_RFC3339
+        );
+        assert_eq!(proxied_oauth["token"]["access_token"], "ya29.token");
+        assert_eq!(proxied_oauth["auth_method"], "consumer");
+        assert!(proxied_oauth["token"].get("refresh_token").is_none());
         let settings = read_json(&home.join("antigravity-acp/settings.json")).unwrap();
         assert_eq!(settings["auth"]["type"], "oauth-personal");
-        // The broker's file isn't Antigravity's own login.
+        // The broker's files aren't Antigravity's own login.
         assert!(!antigravity_token_exists(home));
         clear_antigravity_login(home);
         assert!(!antigravity_token_file(home).exists());
-        // Antigravity's own (a refresh token) stays, and is used.
+        assert!(!antigravity_oauth_token_file(home).exists());
+        // Antigravity's own legacy file (with a refresh token) stays, and is used.
         std::fs::write(antigravity_token_file(home), r#"{"refresh_token":"1//own"}"#).unwrap();
         assert!(antigravity_token_exists(home));
         write_antigravity_login(home, &g, true).unwrap();
         clear_antigravity_login(home);
         assert_eq!(read_json(&antigravity_token_file(home)).unwrap()["refresh_token"], "1//own");
+        // Antigravity's own unified CLI file (with nested refresh_token) also stays.
+        std::fs::remove_file(antigravity_token_file(home)).unwrap();
+        std::fs::write(
+            antigravity_oauth_token_file(home),
+            r#"{"token":{"access_token":"ya29.own","refresh_token":"1//own-cli"},"auth_method":"consumer"}"#,
+        )
+        .unwrap();
+        assert!(antigravity_token_exists(home));
+        write_antigravity_login(home, &g, true).unwrap();
+        clear_antigravity_login(home);
+        assert_eq!(
+            read_json(&antigravity_oauth_token_file(home)).unwrap()["token"]["refresh_token"],
+            "1//own-cli"
+        );
     }
 
     #[test]

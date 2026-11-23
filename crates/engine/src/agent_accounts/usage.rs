@@ -249,36 +249,105 @@ impl AgentAccounts {
         Ok(snapshot)
     }
 
-    /// Antigravity's limits, as its `/usage` reads them: an access token
-    /// from the login's refresh token (Google's don't rotate, so the live
-    /// login's is as safe to use as a saved one's), its tiers and project
-    /// from `loadCodeAssist`, then the project's `retrieveUserQuotaSummary`.
+    /// Antigravity's limits, as its `/usage` reads them:
+    /// - Legacy `acp_token.json` slots (`refresh_token` + `client_id`): refresh
+    ///   via Google's token endpoint as before.
+    /// - Unified CLI `antigravity-oauth-token` slots: reuse the cached (or
+    ///   active disk) `access_token` when fresh, and refresh via an isolated
+    ///   headless `antigravity` probe when expired or rejected with 401
+    ///   (persisting the refreshed token back to the slot).
     pub(super) async fn antigravity_usage(&self, slot: &Slot) -> Result<UsageSnapshot, ProbeError> {
         let missing = ProbeError::NoCredentials {
             why: NoCredentials::Missing,
         };
         let token = &slot.credentials;
-        let refresh_token = str_field(token, "refresh_token").ok_or(missing.clone())?;
-        let client_id = str_field(token, "client_id").ok_or(missing)?;
-        let client_secret = str_field(token, "client_secret").unwrap_or_default();
-        let refreshed = probe_json(
-            "antigravity",
-            "refresh",
-            self.inner.http.post(&self.inner.endpoints.google_token).form(&[
-                ("grant_type", "refresh_token"),
-                ("refresh_token", refresh_token.as_str()),
-                ("client_id", client_id.as_str()),
-                ("client_secret", client_secret.as_str()),
-            ]),
-        )
-        .await
-        .map_err(|error| match error {
-            // invalid_grant: the login is dead — "sign in again".
-            ProbeError::Http { status: 400, .. } => ProbeError::Unauthorized { status: 400 },
-            other => other,
-        })?;
-        let access_token =
-            str_field(&refreshed, "access_token").ok_or_else(|| schema_error("antigravity", &refreshed))?;
+        if let (Some(refresh_token), Some(client_id)) = (
+            str_field(token, "refresh_token"),
+            str_field(token, "client_id"),
+        ) {
+            let client_secret = str_field(token, "client_secret").unwrap_or_default();
+            let refreshed = probe_json(
+                "antigravity",
+                "refresh",
+                self.inner.http.post(&self.inner.endpoints.google_token).form(&[
+                    ("grant_type", "refresh_token"),
+                    ("refresh_token", refresh_token.as_str()),
+                    ("client_id", client_id.as_str()),
+                    ("client_secret", client_secret.as_str()),
+                ]),
+            )
+            .await
+            .map_err(|error| match error {
+                // invalid_grant: the login is dead — "sign in again".
+                ProbeError::Http { status: 400, .. } => ProbeError::Unauthorized { status: 400 },
+                other => other,
+            })?;
+            let access_token = str_field(&refreshed, "access_token")
+                .ok_or_else(|| schema_error("antigravity", &refreshed))?;
+            return self.antigravity_usage_with_token(token, &access_token).await;
+        }
+
+        if !is_unified_antigravity_token(token) {
+            return Err(missing);
+        }
+
+        // If the active live file on disk belongs to this same Google account
+        // and carries a fresher access token (refreshed by a running turn),
+        // prefer it over the slot's snapshot.
+        let mut source = token.clone();
+        if let Some(home) = self.inner.config.antigravity_home.as_deref()
+            && let Some(disk) = read_json(&zeron_harness::acp::antigravity_oauth_token_file(home))
+            && antigravity_refresh_token(&disk) == antigravity_refresh_token(token)
+        {
+            let disk_exp = antigravity_token_expiry(&disk);
+            let slot_exp = antigravity_token_expiry(token);
+            if disk_exp > slot_exp || antigravity_access_token(&source).is_none() {
+                source = disk;
+            }
+        }
+
+        let fresh_enough = antigravity_token_expiry(&source)
+            .is_some_and(|exp| exp > Utc::now() + chrono::TimeDelta::minutes(2));
+        if fresh_enough && let Some(access_token) = antigravity_access_token(&source) {
+            match self.antigravity_usage_with_token(&source, &access_token).await {
+                Ok(snapshot) => return Ok(snapshot),
+                Err(ProbeError::Unauthorized { .. }) => {
+                    // Fall through to refresh once via the unified CLI.
+                }
+                Err(other) => return Err(other),
+            }
+        }
+
+        let Some(acp) = self
+            .acp_harness(HarnessId::Antigravity)
+            .filter(|h| h.uses_unified_antigravity_cli())
+        else {
+            return Err(ProbeError::Unauthorized { status: 401 });
+        };
+        let refreshed_doc = acp
+            .refresh_antigravity_oauth_token(&source)
+            .await
+            .map_err(|err| {
+                tracing::warn!(slot = %slot.id, error = %err, "Antigravity CLI token refresh failed");
+                ProbeError::Unauthorized { status: 401 }
+            })?;
+        let access_token = antigravity_access_token(&refreshed_doc)
+            .ok_or_else(|| schema_error("antigravity", &refreshed_doc))?;
+        let mut updated = slot.clone();
+        updated.credentials = refreshed_doc.clone();
+        updated.saved_at = now_ms();
+        if let Err(err) = self.write_slot(&updated) {
+            tracing::warn!(slot = %slot.id, error = %err, "refreshed Antigravity slot write failed");
+        }
+        self.antigravity_usage_with_token(&refreshed_doc, &access_token)
+            .await
+    }
+
+    async fn antigravity_usage_with_token(
+        &self,
+        token: &serde_json::Value,
+        access_token: &str,
+    ) -> Result<UsageSnapshot, ProbeError> {
         let api = self.inner.endpoints.antigravity_api.trim_end_matches('/');
         let assist = probe_json(
             "antigravity",
@@ -286,7 +355,7 @@ impl AgentAccounts {
             self.inner
                 .http
                 .post(format!("{api}/v1internal:loadCodeAssist"))
-                .bearer_auth(&access_token)
+                .bearer_auth(access_token)
                 .header(reqwest::header::USER_AGENT, ANTIGRAVITY_USER_AGENT)
                 .json(&serde_json::json!({ "metadata": antigravity_client() })),
         )
@@ -300,7 +369,7 @@ impl AgentAccounts {
             self.inner
                 .http
                 .post(format!("{api}/v1internal:retrieveUserQuotaSummary"))
-                .bearer_auth(&access_token)
+                .bearer_auth(access_token)
                 .header(reqwest::header::USER_AGENT, ANTIGRAVITY_USER_AGENT)
                 .json(&serde_json::json!({ "project": project })),
         )

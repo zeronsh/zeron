@@ -498,6 +498,15 @@ enum LoginFlow {
         /// sign-in needing the same port supersedes this one.
         port: Option<u16>,
     },
+    /// Unified Antigravity CLI paste-code login (`antigravity acp --login`),
+    /// waiting for the pasted OAuth code or callback URL via `complete_login`.
+    AntigravityPaste {
+        login: Arc<tokio::sync::Mutex<Option<zeron_harness::acp::AntigravityPasteLogin>>>,
+        home: PathBuf,
+        started_at: Instant,
+        capture: Option<CaptureSink>,
+        catalog: Option<CatalogPublisher>,
+    },
     /// A sign-in whose agent isn't installed on this device yet: installed
     /// first, then its own sign-in started (`inner`, once it has) and
     /// followed under this login id (see
@@ -574,6 +583,7 @@ impl LoginFlow {
             LoginFlow::Claude { started_at, .. }
             | LoginFlow::Spawned { started_at, .. }
             | LoginFlow::Task { started_at, .. }
+            | LoginFlow::AntigravityPaste { started_at, .. }
             | LoginFlow::Installing { started_at, .. } => *started_at,
         }
     }
@@ -1692,7 +1702,8 @@ impl AgentAccounts {
             // again, as before a sign-in through Zeron.
             HarnessId::Antigravity => {
                 let home = self.antigravity_home()?;
-                remove_if_exists(&zeron_harness::acp::antigravity_token_file(home))?
+                remove_if_exists(&zeron_harness::acp::antigravity_oauth_token_file(home))?;
+                remove_if_exists(&zeron_harness::acp::antigravity_token_file(home))?;
             }
             HarnessId::Opencode | HarnessId::Pi => {
                 let key = store_key
@@ -1819,7 +1830,17 @@ impl AgentAccounts {
         // A new start supersedes an install still under way for this agent.
         self.reap_installing_flows(harness);
         if sign_in_runs_cli(harness) && !self.agent_installed(harness) {
-            return Ok(self.start_installing_login(harness, provider, requester));
+            if harness == HarnessId::Antigravity {
+                if let Err(error) = self.install_agent(harness).await {
+                    tracing::warn!(?harness, %error, "installing Antigravity for sign-in failed");
+                    return Err(EngineError::Other(format!(
+                        "Couldn't install Antigravity on this computer ({error}) — install it first, \
+                         then sign in again."
+                    )));
+                }
+            } else {
+                return Ok(self.start_installing_login(harness, provider, requester));
+            }
         }
         self.start_installed_login(harness, provider, requester)
             .await
@@ -1844,7 +1865,7 @@ impl AgentAccounts {
             }
             HarnessId::Codex => self.start_codex_login(requester).await?,
             HarnessId::Cursor => self.start_cursor_login().await?,
-            HarnessId::Antigravity => self.start_antigravity_login(requester)?,
+            HarnessId::Antigravity => self.start_antigravity_login(requester).await?,
             HarnessId::Grok => self.start_grok_login(requester).await?,
             HarnessId::Devin => self.start_devin_login(requester)?,
             // Every agent from the ACP registry: its own sign-in, `provider`
@@ -2173,7 +2194,8 @@ impl AgentAccounts {
                     f,
                     LoginFlow::Spawned { harness: h, .. } | LoginFlow::Task { harness: h, .. }
                         if *h == harness
-                )
+                ) || (harness == HarnessId::Antigravity
+                    && matches!(f, LoginFlow::AntigravityPaste { .. }))
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -2386,7 +2408,7 @@ impl AgentAccounts {
             (HarnessId::Devin, _) => {
                 self.start_devin_login_with(None, Some(capture), catalog)?
             }
-            (HarnessId::Antigravity, _) => self.start_antigravity_capture(capture, catalog)?,
+            (HarnessId::Antigravity, _) => self.start_antigravity_capture(capture, catalog).await?,
             (HarnessId::Muse, _) => self.start_muse_capture(capture, catalog).await?,
             (other, _) => {
                 return Err(EngineError::Other(format!(
@@ -2622,17 +2644,50 @@ impl AgentAccounts {
     /// (`AGY_ACP_FORCE_FILE_STORAGE`), then uploaded as an `antigravity`
     /// login. Google refresh tokens don't rotate, so the account's email is
     /// looked up with a token minted from it first (best effort).
-    fn start_antigravity_capture(
+    async fn start_antigravity_capture(
         &self,
         capture: CaptureSink,
         catalog: Option<CatalogPublisher>,
     ) -> Result<AgentLoginStart, EngineError> {
         self.reap_spawned_flows(HarnessId::Antigravity);
+        if !self.agent_installed(HarnessId::Antigravity) {
+            if let Err(error) = self.install_agent(HarnessId::Antigravity).await {
+                return Err(EngineError::Other(format!(
+                    "Couldn't install Antigravity's sign-in on this computer: {error}"
+                )));
+            }
+        }
         let acp = self
             .acp_harness(HarnessId::Antigravity)
             .ok_or_else(|| EngineError::Other("Antigravity has no sign-in".into()))?;
         let login_id = new_id();
         let home = self.login_home(&login_id)?;
+        if acp.uses_unified_antigravity_cli() {
+            let paste = match acp.start_antigravity_paste_login(&home).await {
+                Ok(paste) => paste,
+                Err(error) => {
+                    let _ = std::fs::remove_dir_all(&home);
+                    return Err(EngineError::Other(error.to_string()));
+                }
+            };
+            let url = paste.url().to_owned();
+            lock(&self.inner.flows).insert(
+                login_id.clone(),
+                LoginFlow::AntigravityPaste {
+                    login: Arc::new(tokio::sync::Mutex::new(Some(paste))),
+                    home,
+                    started_at: Instant::now(),
+                    capture: Some(capture),
+                    catalog,
+                },
+            );
+            return Ok(AgentLoginStart {
+                login_id,
+                url,
+                mode: AgentLoginMode::PasteCode,
+                callback_port: None,
+            });
+        }
         let shred = ShredOnDrop(home.clone());
         #[cfg(unix)]
         let browser = self
@@ -2658,26 +2713,6 @@ impl AgentAccounts {
         let task_state = state.clone();
         let this = self.clone();
         let handle = tokio::spawn(async move {
-            // Its sign-in is its ACP server's: a pinned archive Zeron
-            // installs itself (as Settings' Install does), so connecting it
-            // for Cloud never needs Antigravity set up on this computer.
-            if !zeron_harness::install::installed(HarnessId::Antigravity) {
-                lock(&task_state).message =
-                    Some("Installing Antigravity's sign-in on this computer…".into());
-                let installed = zeron_harness::install::install_harness(
-                    HarnessId::Antigravity,
-                    zeron_harness::CancellationToken::new(),
-                )
-                .await;
-                lock(&task_state).message = None;
-                if let Err(error) = installed {
-                    drop(shred);
-                    lock(&task_state).outcome = Some(Err(format!(
-                        "Couldn't install Antigravity's sign-in on this computer: {error}"
-                    )));
-                    return;
-                }
-            }
             let progress_state = task_state.clone();
             let signed_in = acp
                 .sign_in_with(options, move |progress| {
@@ -2725,49 +2760,12 @@ impl AgentAccounts {
         })
     }
 
-    /// The Google account behind an Antigravity token blob: a token minted
-    /// from its refresh token (Google's don't rotate, so this costs the
-    /// login nothing), then `userinfo`. `None` on any failure — it only
-    /// names the account.
-    async fn google_email(&self, blob: &serde_json::Value) -> Option<String> {
-        let form = [
-            ("grant_type", "refresh_token"),
-            ("refresh_token", blob["refresh_token"].as_str()?),
-            ("client_id", blob["client_id"].as_str()?),
-            ("client_secret", blob["client_secret"].as_str().unwrap_or_default()),
-        ];
-        let endpoints = &self.inner.endpoints;
-        let refreshed = self
-            .inner
-            .http
-            .post(&endpoints.google_token)
-            .form(&form)
-            .timeout(HTTP_TIMEOUT)
-            .send()
-            .await
-            .and_then(reqwest::Response::error_for_status);
-        let token: serde_json::Value = match refreshed {
-            Ok(res) => res.json().await.ok()?,
-            Err(error) => {
-                tracing::warn!(error = %crate::http_error::describe_http_error(error), "Google login: no token to look its account up with");
-                return None;
-            }
-        };
-        // The refresh's `id_token` names the account (its `email` claim);
-        // the profile endpoint only when it doesn't.
-        if let Some(email) = token["id_token"]
-            .as_str()
-            .and_then(jwt_claims)
-            .and_then(|claims| str_field(&claims, "email"))
-            .filter(|email| email.contains('@'))
-        {
-            return Some(email);
-        }
+    async fn google_userinfo_email(&self, access_token: &str) -> Option<String> {
         let info = self
             .inner
             .http
-            .get(&endpoints.google_userinfo)
-            .bearer_auth(token["access_token"].as_str()?)
+            .get(&self.inner.endpoints.google_userinfo)
+            .bearer_auth(access_token)
             .timeout(HTTP_TIMEOUT)
             .send()
             .await
@@ -2780,6 +2778,69 @@ impl AgentAccounts {
             }
         };
         str_field(&info, "email").filter(|email| email.contains('@'))
+    }
+
+    /// The Google account behind an Antigravity token blob: for legacy
+    /// `acp_token.json` mints a token from its refresh token + client_id, then
+    /// reads `id_token` or `userinfo`; for unified CLI `antigravity-oauth-token`
+    /// queries `userinfo` directly with `token.access_token` (refreshing via
+    /// the CLI once if expired). `None` on any failure — it only names the
+    /// account.
+    async fn google_email(&self, blob: &serde_json::Value) -> Option<String> {
+        if let (Some(refresh), Some(client_id)) =
+            (str_field(blob, "refresh_token"), str_field(blob, "client_id"))
+        {
+            let form = [
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh.as_str()),
+                ("client_id", client_id.as_str()),
+                ("client_secret", blob["client_secret"].as_str().unwrap_or_default()),
+            ];
+            let endpoints = &self.inner.endpoints;
+            let refreshed = self
+                .inner
+                .http
+                .post(&endpoints.google_token)
+                .form(&form)
+                .timeout(HTTP_TIMEOUT)
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status);
+            let token: serde_json::Value = match refreshed {
+                Ok(res) => res.json().await.ok()?,
+                Err(error) => {
+                    tracing::warn!(error = %crate::http_error::describe_http_error(error), "Google login: no token to look its account up with");
+                    return None;
+                }
+            };
+            // The refresh's `id_token` names the account (its `email` claim);
+            // the profile endpoint only when it doesn't.
+            if let Some(email) = token["id_token"]
+                .as_str()
+                .and_then(jwt_claims)
+                .and_then(|claims| str_field(&claims, "email"))
+                .filter(|email| email.contains('@'))
+            {
+                return Some(email);
+            }
+            return self
+                .google_userinfo_email(token["access_token"].as_str()?)
+                .await;
+        }
+        if let Some(access_token) = antigravity_access_token(blob)
+            && let Some(email) = self.google_userinfo_email(&access_token).await
+        {
+            return Some(email);
+        }
+        if is_unified_antigravity_token(blob)
+            && let Some(acp) = self.acp_harness(HarnessId::Antigravity)
+            && acp.uses_unified_antigravity_cli()
+            && let Ok(refreshed) = acp.refresh_antigravity_oauth_token(blob).await
+            && let Some(access_token) = antigravity_access_token(&refreshed)
+        {
+            return self.google_userinfo_email(&access_token).await;
+        }
+        None
     }
 
     /// A captured sign-in run by a CLI that writes its credential file under
@@ -2885,7 +2946,7 @@ impl AgentAccounts {
     /// by its Google account, and goes live when no other file login is
     /// (Zeron's runs read it: `zeron_harness::acp::antigravity_reads_token_file`).
     /// Polls carry the browser url once the server prints it.
-    fn start_antigravity_login(
+    async fn start_antigravity_login(
         &self,
         requester: Option<&str>,
     ) -> Result<AgentLoginStart, EngineError> {
@@ -2901,6 +2962,32 @@ impl AgentAccounts {
             .ok_or_else(|| EngineError::Other("Antigravity has no sign-in".into()))?;
         let login_id = new_id();
         let home = self.login_home(&login_id)?;
+        if acp.uses_unified_antigravity_cli() {
+            let paste = match acp.start_antigravity_paste_login(&home).await {
+                Ok(paste) => paste,
+                Err(error) => {
+                    let _ = std::fs::remove_dir_all(&home);
+                    return Err(EngineError::Other(error.to_string()));
+                }
+            };
+            let url = paste.url().to_owned();
+            lock(&self.inner.flows).insert(
+                login_id.clone(),
+                LoginFlow::AntigravityPaste {
+                    login: Arc::new(tokio::sync::Mutex::new(Some(paste))),
+                    home,
+                    started_at: Instant::now(),
+                    capture: None,
+                    catalog: None,
+                },
+            );
+            return Ok(AgentLoginStart {
+                login_id,
+                url,
+                mode: AgentLoginMode::PasteCode,
+                callback_port: None,
+            });
+        }
         #[cfg(unix)]
         let browser = self
             .inner
@@ -3085,22 +3172,84 @@ impl AgentAccounts {
         login_id: &str,
         code: &str,
     ) -> Result<AgentAccountsSnapshot, EngineError> {
-        let (verifier, expected_state, capture) = match lock(&self.inner.flows).get(login_id) {
+        let trimmed = code.trim();
+        let kind = match lock(&self.inner.flows).get(login_id) {
             Some(LoginFlow::Claude {
                 verifier,
                 state,
                 capture,
                 ..
-            }) => (verifier.clone(), state.clone(), capture.clone()),
+            }) => Ok((verifier.clone(), state.clone(), capture.clone())),
+            Some(LoginFlow::AntigravityPaste { .. }) => Err(()),
             _ => {
                 return Err(EngineError::Other(
                     "This sign-in attempt expired — start again.".into(),
                 ));
             }
         };
-        let (auth_code, state) = match code.trim().split_once('#') {
+        if kind.is_err() {
+            if trimmed.is_empty() {
+                return Err(EngineError::Other(
+                    "That code looks empty — paste the authorization code or callback URL.".into(),
+                ));
+            }
+            let Some(LoginFlow::AntigravityPaste {
+                login,
+                home,
+                capture,
+                catalog,
+                ..
+            }) = self.remove_flow(login_id)
+            else {
+                return Err(EngineError::Other(
+                    "This sign-in attempt expired — start again.".into(),
+                ));
+            };
+            let shred = ShredOnDrop(home);
+            let Some(paste) = login.lock().await.take() else {
+                return Err(EngineError::Other(
+                    "This sign-in attempt already completed — start again.".into(),
+                ));
+            };
+            paste
+                .complete(trimmed)
+                .await
+                .map_err(|e| EngineError::Other(e.to_string()))?;
+            let mut upload = antigravity_capture(&shred.0)
+                .map_err(EngineError::Other)?
+                .ok_or_else(|| {
+                    EngineError::Other(
+                        "Antigravity reported a successful sign-in, but saved no Google login."
+                            .into(),
+                    )
+                })?;
+            if let Some(capture) = capture {
+                let kept = SignInHome::keep(HarnessId::Antigravity, shred, catalog);
+                if let Some(email) = self
+                    .google_email(&upload["material"]["antigravityToken"])
+                    .await
+                {
+                    upload["profile"] = serde_json::json!({ "email": email });
+                }
+                let outcome = capture(upload).await;
+                kept.after_upload(&outcome);
+                outcome.map_err(EngineError::Other)?;
+            } else {
+                let token = upload["material"]["antigravityToken"].clone();
+                drop(shred);
+                let email = self.antigravity_email(&token).await;
+                let detected = antigravity_file_login(&token, email).ok_or_else(|| {
+                    EngineError::Other("Antigravity saved a Google login zeron can't read.".into())
+                })?;
+                self.save_new_login(HarnessId::Antigravity, &detected)
+                    .await?;
+            }
+            return self.list(false).await;
+        }
+        let (verifier, expected_state, capture) = kind.unwrap();
+        let (auth_code, state) = match trimmed.split_once('#') {
             Some((c, s)) => (c.to_string(), s.to_string()),
-            None => (code.trim().to_string(), expected_state.clone()),
+            None => (trimmed.to_string(), expected_state.clone()),
         };
         if state != expected_state {
             return Err(EngineError::Other(
@@ -3306,9 +3455,9 @@ impl AgentAccounts {
                         "This sign-in attempt expired — start again.".into(),
                     ));
                 }
-                Some(LoginFlow::Claude { .. }) => {
+                Some(LoginFlow::Claude { .. } | LoginFlow::AntigravityPaste { .. }) => {
                     return Ok(AgentLoginPoll {
-                code: None,
+                        code: None,
                         status: AgentLoginStatus::Pending,
                         message: None,
                         url: None,
@@ -3595,6 +3744,20 @@ impl AgentAccounts {
                     self.cancel_login(&started);
                 }
             }
+            Some(LoginFlow::AntigravityPaste { login, home, .. }) => {
+                tracing::info!(%login_id, "Antigravity paste sign-in cancelled");
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        if let Some(paste) = login.lock().await.take() {
+                            paste.cancel().await;
+                        }
+                        let _ = std::fs::remove_dir_all(&home);
+                    });
+                } else {
+                    drop(login);
+                    let _ = std::fs::remove_dir_all(&home);
+                }
+            }
             _ => {}
         }
     }
@@ -3678,7 +3841,7 @@ impl AgentAccounts {
         {
             return None;
         }
-        let token = read_json(&zeron_harness::acp::antigravity_token_file(home))?;
+        let token = read_antigravity_token_file(home)?;
         let email = self.antigravity_email(&token).await;
         antigravity_file_login(&token, email)
     }
@@ -3687,7 +3850,7 @@ impl AgentAccounts {
     /// token's fingerprint), a failed lookup again after [`IDENTITY_RETRY`]
     /// rather than the login staying a nameless "Google account".
     async fn antigravity_email(&self, token: &serde_json::Value) -> Option<String> {
-        let refresh = str_field(token, "refresh_token")?;
+        let refresh = antigravity_refresh_token(token)?;
         let fingerprint = format!("antigravity:{}", crate::repos::hex(&Sha256::digest(refresh.as_bytes())));
         let cached = lock(&self.inner.identities).get(&fingerprint).cloned();
         match cached {
@@ -3719,16 +3882,26 @@ impl AgentAccounts {
         })
     }
 
-    /// Make `token` Antigravity's live login: its token file, as its server
-    /// writes it, and its settings' method the Google sign-in that file is
-    /// for (everything else in them kept).
+    /// Make `token` Antigravity's live login: writes the unified CLI's
+    /// `antigravity-oauth-token` (converting legacy slots on the fly), keeps
+    /// legacy `acp_token.json` in sync for legacy slots (or removes stale ones
+    /// when activating a unified-only slot), and sets `settings.json` to
+    /// `oauth-personal` (preserving everything else).
     fn write_antigravity_token(&self, token: &serde_json::Value) -> Result<(), EngineError> {
         let home = self.antigravity_home()?;
-        let file = zeron_harness::acp::antigravity_token_file(home);
-        if let Some(dir) = file.parent() {
+        let oauth_file = zeron_harness::acp::antigravity_oauth_token_file(home);
+        let legacy_file = zeron_harness::acp::antigravity_token_file(home);
+        if let Some(dir) = oauth_file.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        write_file_atomic(&file, token.to_string().as_bytes(), true)?;
+        if let Some(oauth_doc) = antigravity_oauth_token_from_slot(token) {
+            write_file_atomic(&oauth_file, oauth_doc.to_string().as_bytes(), true)?;
+        }
+        if str_field(token, "refresh_token").is_some() && str_field(token, "client_id").is_some() {
+            write_file_atomic(&legacy_file, token.to_string().as_bytes(), true)?;
+        } else {
+            remove_if_exists(&legacy_file)?;
+        }
         let settings_file = home.join("antigravity-acp").join("settings.json");
         let mut settings = read_json(&settings_file)
             .filter(serde_json::Value::is_object)
@@ -4760,14 +4933,88 @@ impl AntigravityLogin {
 /// or its file fallback. Key-based methods keep the key in the environment,
 /// so the saved method is all there is. A first run saves no method; its
 /// default is the personal Google sign-in.
+fn antigravity_refresh_token(blob: &serde_json::Value) -> Option<String> {
+    blob.get("token")
+        .and_then(|t| str_field(t, "refresh_token"))
+        .or_else(|| str_field(blob, "refresh_token"))
+}
+
+fn antigravity_access_token(blob: &serde_json::Value) -> Option<String> {
+    blob.get("token")
+        .and_then(|t| str_field(t, "access_token"))
+        .or_else(|| str_field(blob, "token"))
+        .or_else(|| str_field(blob, "access_token"))
+}
+
+fn antigravity_token_expiry(blob: &serde_json::Value) -> Option<DateTime<Utc>> {
+    let raw = blob
+        .get("token")
+        .and_then(|t| str_field(t, "expiry"))
+        .or_else(|| str_field(blob, "expiry"))?;
+    if let Ok(dt) = DateTime::parse_from_rfc3339(&raw) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(&raw, "%Y-%m-%dT%H:%M:%S%.f") {
+        return Some(naive.and_utc());
+    }
+    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(&raw, "%Y-%m-%dT%H:%M:%S") {
+        return Some(naive.and_utc());
+    }
+    None
+}
+
+fn is_unified_antigravity_token(blob: &serde_json::Value) -> bool {
+    blob.get("token")
+        .and_then(|t| str_field(t, "refresh_token"))
+        .is_some()
+}
+
+fn read_antigravity_token_file(home: &Path) -> Option<serde_json::Value> {
+    let oauth_file = zeron_harness::acp::antigravity_oauth_token_file(home);
+    if let Some(blob) = read_json(&oauth_file)
+        && is_unified_antigravity_token(&blob)
+    {
+        return Some(blob);
+    }
+    read_json(&zeron_harness::acp::antigravity_token_file(home))
+}
+
+fn antigravity_oauth_token_from_slot(token: &serde_json::Value) -> Option<serde_json::Value> {
+    if is_unified_antigravity_token(token) {
+        return Some(token.clone());
+    }
+    let refresh = str_field(token, "refresh_token")?;
+    let access = str_field(token, "token")
+        .or_else(|| str_field(token, "access_token"))
+        .unwrap_or_default();
+    let expiry = antigravity_token_expiry(token)
+        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .unwrap_or_else(|| "2020-01-01T00:00:00Z".to_string());
+    Some(serde_json::json!({
+        "token": {
+            "access_token": access,
+            "token_type": "Bearer",
+            "refresh_token": refresh,
+            "expiry": expiry,
+        },
+        "auth_method": "consumer",
+    }))
+}
+
 /// An Antigravity Google token blob as a login: keyed by its refresh token,
 /// which Google never rotates (the blob names no account, and its access
 /// token changes at every refresh), named by `email` when it's known — a
 /// sign-in looks it up; the live file alone can't say, so a slot keeps the
-/// one it was saved with.
+/// one it was saved with. Accepts both the unified CLI's
+/// `antigravity-oauth-token` and legacy `acp_token.json`.
 fn antigravity_file_login(token: &serde_json::Value, email: Option<String>) -> Option<Detected> {
-    let refresh = str_field(token, "refresh_token")?;
-    str_field(token, "client_id")?;
+    let refresh = if is_unified_antigravity_token(token) {
+        antigravity_refresh_token(token)?
+    } else {
+        let r = str_field(token, "refresh_token")?;
+        str_field(token, "client_id")?;
+        r
+    };
     let digest = Sha256::digest(refresh.as_bytes());
     Some(Detected {
         account_key: format!("google:{}", &crate::repos::hex(&digest)[..16]),
@@ -4788,15 +5035,21 @@ fn antigravity_file_login(token: &serde_json::Value, email: Option<String>) -> O
 async fn detect_antigravity_login(home: &Path, keychain: bool) -> Option<AntigravityLogin> {
     let method = zeron_harness::acp::antigravity_saved_auth_method(home)
         .unwrap_or_else(|| "oauth-personal".into());
-    let token = match method.as_str() {
-        "oauth-personal" => Some(("acp_token.json", "antigravity-acp")),
-        "oauth-business" => Some(("acp_business_token.json", "antigravity-acp-business")),
-        _ => None,
+    let has_token = match method.as_str() {
+        "oauth-personal" => {
+            zeron_harness::acp::antigravity_oauth_token_file(home).is_file()
+                || zeron_harness::acp::antigravity_token_file(home).is_file()
+                || (keychain && antigravity_keychain_item("antigravity-acp").await)
+        }
+        "oauth-business" => {
+            home.join("antigravity-acp")
+                .join("acp_business_token.json")
+                .is_file()
+                || (keychain && antigravity_keychain_item("antigravity-acp-business").await)
+        }
+        _ => true,
     };
-    if let Some((file, account)) = token
-        && !home.join("antigravity-acp").join(file).is_file()
-        && !(keychain && antigravity_keychain_item(account).await)
-    {
+    if !has_token {
         return None;
     }
     Some(AntigravityLogin { method })
@@ -5394,7 +5647,7 @@ pub(crate) fn usage_windows_from_reply(
 
 /// Antigravity's limits per group of models, and its paid plan
 /// ([`zeron_proto::plan_usage::antigravity`]).
-pub(super) fn antigravity_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnapshot> {
+fn antigravity_usage_snapshot(body: &serde_json::Value) -> Option<UsageSnapshot> {
     zeron_proto::plan_usage::antigravity(body).map(|(windows, plan_label)| UsageSnapshot {
         windows,
         plan_label,
@@ -5908,7 +6161,15 @@ fn hermes_xai_capture(home: &Path) -> Result<Option<serde_json::Value>, String> 
 /// material: {antigravityToken}}` (the blob names no account; the caller
 /// adds the profile it can look up).
 fn antigravity_capture(home: &Path) -> Result<Option<serde_json::Value>, String> {
-    let Some(blob) = read_json(&home.join("antigravity-acp").join("acp_token.json")) else {
+    if let Some(blob) = read_json(&zeron_harness::acp::antigravity_oauth_token_file(home))
+        && is_unified_antigravity_token(&blob)
+    {
+        return Ok(Some(serde_json::json!({
+            "provider": "antigravity",
+            "material": { "antigravityToken": blob },
+        })));
+    }
+    let Some(blob) = read_json(&zeron_harness::acp::antigravity_token_file(home)) else {
         return Ok(None);
     };
     if str_field(&blob, "refresh_token").is_none() || str_field(&blob, "client_id").is_none() {

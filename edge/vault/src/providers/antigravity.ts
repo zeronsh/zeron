@@ -21,11 +21,13 @@ const CLIENT_RE = /^[A-Za-z0-9._-]{1,200}\.apps\.googleusercontent\.com$/;
 
 export interface AntigravitySecret {
   readonly refreshToken: string;
-  readonly clientId: string;
-  readonly clientSecret: string;
+  /** Present on legacy `acp_token.json` uploads; absent on unified CLI uploads
+   * (which resolve the OAuth client from Worker secrets at refresh time). */
+  readonly clientId?: string;
+  readonly clientSecret?: string;
   readonly scopes: readonly string[];
   readonly projectId?: string;
-  /** Absent until the first refresh (the uploaded file holds none). */
+  /** Absent until the first refresh (or copied from a unified CLI upload). */
   readonly accessToken?: string;
   /** Unix ms; 0 until the first refresh. */
   readonly expiresAt: number;
@@ -34,6 +36,26 @@ export interface AntigravitySecret {
 export const parseAntigravityUpload = (material: unknown): ParseResult<AntigravitySecret> => {
   const token = isObject(material) ? material.antigravityToken : undefined;
   if (!isObject(token)) return { ok: false, message: "antigravity material must be {antigravityToken}" };
+
+  // Unified CLI format (`antigravity-oauth-token`):
+  // `{ token: { access_token?, refresh_token, token_type?, expiry? }, auth_method? }`
+  const nested = isObject(token.token) ? token.token : undefined;
+  if (nested && nonEmptyString(nested.refresh_token)) {
+    const accessToken = nonEmptyString(nested.access_token) ? nested.access_token : undefined;
+    const parsedExpiry = typeof nested.expiry === "string" ? Date.parse(nested.expiry) : Number.NaN;
+    const expiresAt = accessToken && Number.isFinite(parsedExpiry) ? parsedExpiry : 0;
+    return {
+      ok: true,
+      secret: {
+        refreshToken: nested.refresh_token,
+        scopes: [],
+        ...(accessToken ? { accessToken } : {}),
+        expiresAt
+      }
+    };
+  }
+
+  // Legacy ACP server format (`acp_token.json`).
   if (!nonEmptyString(token.refresh_token) || !nonEmptyString(token.client_id) || typeof token.client_secret !== "string") {
     return { ok: false, message: "antigravity token needs refresh_token, client_id and client_secret" };
   }
@@ -57,10 +79,18 @@ export const refreshAntigravity = async (
   secret: AntigravitySecret,
   context: RefreshContext
 ): Promise<RefreshOutcome<AntigravitySecret>> => {
+  const clientId = secret.clientId || context.antigravityClientId;
+  const clientSecret = secret.clientSecret || context.antigravityClientSecret;
+  if (!clientId || !clientSecret) {
+    return { kind: "transient", reason: "antigravity OAuth client is not configured" };
+  }
+  if (!CLIENT_RE.test(clientId)) {
+    return { kind: "transient", reason: "antigravity OAuth client_id is invalid" };
+  }
   const done = await postTokenForm(context.fetch, GOOGLE_TOKEN_URL, {
     grant_type: "refresh_token",
-    client_id: secret.clientId,
-    client_secret: secret.clientSecret,
+    client_id: clientId,
+    client_secret: clientSecret,
     refresh_token: secret.refreshToken
   });
   if (done.kind !== "ok") return done;
@@ -89,7 +119,7 @@ export const antigravityAdapter: ProviderAdapter<AntigravitySecret> = {
     accessToken: secret.accessToken ?? "",
     expiresAt: secret.expiresAt,
     settings: {
-      client_id: secret.clientId,
+      ...(secret.clientId ? { client_id: secret.clientId } : {}),
       scopes: secret.scopes.join(" "),
       ...(secret.projectId ? { project_id: secret.projectId } : {})
     }

@@ -72,12 +72,15 @@ pub(crate) fn context(
         }
         // Its file login (one Zeron signed it in to) and the method its
         // settings choose: a sign-in is another account's catalog. (A
-        // Keychain login has no file to tell by.)
+        // Keychain login has no file to tell by.) Consumer OAuth token files
+        // (`antigravity-oauth-token` / `acp_token.json`) are hashed by stable
+        // account identity below so legacy→unified migration or in-place
+        // access_token refresh during model discovery never invalidates the
+        // in-flight discovery for the same Google account.
         HarnessId::Antigravity => match crate::acp::antigravity_home() {
             Ok(root) => {
                 let acp = root.join("antigravity-acp");
                 vec![
-                    acp.join("acp_token.json"),
                     acp.join("acp_business_token.json"),
                     acp.join("settings.json"),
                 ]
@@ -117,6 +120,11 @@ pub(crate) fn context(
         );
     }
     hash_files(&mut hash, files.iter().chain(extra))?;
+    if id == HarnessId::Antigravity
+        && let Ok(root) = crate::acp::antigravity_home()
+    {
+        hash_antigravity_oauth(&mut hash, &root.join("antigravity-acp"))?;
+    }
     let prefixes: &[&str] = match id {
         HarnessId::Codex => &["CODEX_", "OPENAI_"],
         HarnessId::ClaudeCode => &["CLAUDE_", "ANTHROPIC_", "AWS_"],
@@ -184,6 +192,70 @@ fn hash_files<'a>(
     Ok(())
 }
 
+/// Hash Antigravity's consumer OAuth login by stable account identity
+/// (`refresh_token`) rather than volatile access_token/expiry bytes so
+/// legacy→unified migration and in-place token refreshes during model
+/// discovery never falsely invalidate an in-flight catalog refresh.
+fn hash_antigravity_oauth(hash: &mut Sha256, acp_dir: &Path) -> Result<(), HarnessError> {
+    field(hash, b"antigravity-oauth-identity");
+    let candidates = [
+        acp_dir.join("antigravity-oauth-token"),
+        acp_dir.join("acp_token.json"),
+    ];
+    let mut fallback_raw: Option<Vec<u8>> = None;
+    for path in &candidates {
+        match crate::bounded_file::read(path, MAX_HASHED_FILE) {
+            Ok(bytes) => {
+                if let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    let refresh = doc
+                        .pointer("/token/refresh_token")
+                        .or_else(|| doc.get("refresh_token"))
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty());
+                    if let Some(rt) = refresh {
+                        hash.update([1]);
+                        field(hash, b"rt");
+                        field(hash, rt.as_bytes());
+                        return Ok(());
+                    }
+                    let access = doc
+                        .pointer("/token/access_token")
+                        .or_else(|| doc.get("access_token"))
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty());
+                    if let Some(at) = access {
+                        hash.update([2]);
+                        field(hash, b"at");
+                        field(hash, at.as_bytes());
+                        return Ok(());
+                    }
+                }
+                if fallback_raw.is_none() {
+                    fallback_raw = Some(bytes);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::InvalidInput | std::io::ErrorKind::FileTooLarge
+                ) =>
+            {
+                hash.update([4]);
+                return Ok(());
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    if let Some(raw) = fallback_raw {
+        hash.update([3]);
+        field(hash, &raw);
+    } else {
+        hash.update([0]);
+    }
+    Ok(())
+}
+
 /// The most of one config or credentials file hashed.
 const MAX_HASHED_FILE: u64 = 16 * 1024 * 1024;
 
@@ -217,6 +289,55 @@ mod tests {
         assert!(!first.contains("account"));
         std::fs::remove_file(&file).unwrap();
         assert_eq!(key(), missing);
+    }
+
+    #[test]
+    fn antigravity_oauth_hash_is_stable_across_migration_and_access_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = || {
+            let mut hash = Sha256::new();
+            hash_antigravity_oauth(&mut hash, dir.path()).unwrap();
+            format!("{:x}", hash.finalize())
+        };
+        let signed_out = key();
+
+        // Legacy acp_token.json only.
+        std::fs::write(
+            dir.path().join("acp_token.json"),
+            r#"{"refresh_token":"1//acct-a","access_token":"ya29.old","client_id":"cid"}"#,
+        )
+        .unwrap();
+        let legacy_a = key();
+        assert_ne!(legacy_a, signed_out);
+
+        // Migrated antigravity-oauth-token written alongside legacy file.
+        std::fs::write(
+            dir.path().join("antigravity-oauth-token"),
+            r#"{"token":{"refresh_token":"1//acct-a","access_token":"expired","expiry":"2020-01-01T00:00:00Z"},"auth_method":"consumer"}"#,
+        )
+        .unwrap();
+        assert_eq!(key(), legacy_a, "migration must keep same account hash");
+
+        // In-place access_token refresh by unified CLI keeps the same hash.
+        std::fs::write(
+            dir.path().join("antigravity-oauth-token"),
+            r#"{"token":{"refresh_token":"1//acct-a","access_token":"ya29.fresh","expiry":"2099-01-01T00:00:00Z"},"auth_method":"consumer"}"#,
+        )
+        .unwrap();
+        assert_eq!(key(), legacy_a, "access_token refresh must keep same hash");
+
+        // Switching to another Google account invalidates immediately.
+        std::fs::write(
+            dir.path().join("antigravity-oauth-token"),
+            r#"{"token":{"refresh_token":"1//acct-b","access_token":"ya29.b","expiry":"2099-01-01T00:00:00Z"},"auth_method":"consumer"}"#,
+        )
+        .unwrap();
+        assert_ne!(key(), legacy_a, "different refresh_token must invalidate");
+
+        // Signing out (both files removed) returns to signed_out hash.
+        std::fs::remove_file(dir.path().join("antigravity-oauth-token")).unwrap();
+        std::fs::remove_file(dir.path().join("acp_token.json")).unwrap();
+        assert_eq!(key(), signed_out);
     }
 
     /// A project's `opencode.json` that is a symlink to `/dev/zero` or a
