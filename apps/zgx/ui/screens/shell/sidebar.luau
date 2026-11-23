@@ -12,6 +12,7 @@
 local ds = require("@ds")
 local sessions = require("@account/sessions")
 local project_calls = require("@account/projects")
+local settings_host = require("@app/screens/settings/host")
 -- The project editor (screens/shell/project_editor, its emoji picker and
 -- the emoji's data): loaded as it's first opened, not with the window, and
 -- its dialog placed from then on (`project_editor_used`, kept across a
@@ -839,6 +840,26 @@ local sleep_custom = ui.state("shell_sleep_custom", nil :: string?)
 local sleep_custom_at = ui.state("shell_sleep_custom_at", nil :: number?)
 local sleep_custom_open = ui.state("shell_sleep_custom_open", false)
 local new_title = ui.state("shell_rename_title", "")
+local titles_available = ui.state("shell_titles_available", false)
+-- Asked once sessions arrive and as a session's menu opens, so an agent
+-- that can title put in meanwhile is there to be used by then.
+local titles_asked = false
+local function refresh_titles()
+	local ok, promise = pcall(settings_host.call, "settings.engine", { method = "GetTitleSettings", params = {} })
+	if ok and promise then
+		promise:after(function(answer: any)
+			if type(answer) == "table" then
+				titles_available:set(answer.available == true)
+			end
+		end, function() end)
+	end
+end
+ui.effect(function()
+	if sessions.now:get().state == "ready" and not titles_asked then
+		titles_asked = true
+		ui.after(0, refresh_titles)
+	end
+end)
 
 local function chat(id: string): sessions.Chat?
 	local now = sessions.now:peek()
@@ -1051,6 +1072,7 @@ local function menu(id: string): { any }?
 	end
 	local p = shared.places:peek()
 	local pinned = table.find(p.pinned, id) ~= nil
+	refresh_titles()
 	local into: { any } = { { heading = locale.s("shell.sidebar.menu.sections") } }
 	for _, s in p.sections do
 		local here = table.find(s.sessions, id) ~= nil
@@ -1192,6 +1214,21 @@ local function menu(id: string): { any }?
 				M.rename(id)
 			end,
 		},
+		if titles_available:peek()
+			then {
+				label = locale.s("shell.sidebar.menu.retitle"),
+				icon = "magic-stick",
+				on_select = function()
+					sessions.retitle(id):after(function() end, function(err: any)
+						ds.toast.show {
+							title = locale.s("shell.sidebar.session.couldnt_retitle", { title = c.title }),
+							body = if type(err) == "string" then err else nil,
+							tone = "danger",
+						}
+					end)
+				end,
+			}
+			else false,
 		if side
 			then false
 			else {

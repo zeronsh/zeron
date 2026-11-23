@@ -73,7 +73,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 use tokio::sync::watch;
 
-use zeron_doc::{MessagePart, SessionCommandPayload};
+use zeron_doc::{MessagePart, MessageRole, SessionCommandPayload, SessionMessageEntry};
 use zeron_proto::{
     AgentEvent, ChatConfig, CreateWorktreeOutcome, EngineInfo, HarnessId, HarnessUpdatePolicy,
     ProjectActionDraft, Space, ToolCall, WorkspaceScope,
@@ -98,6 +98,7 @@ use crate::workspace_host::WorkspaceHost;
 
 const FILE_SEARCH_RPC_TIMEOUT: Duration = Duration::from_secs(6);
 const FILE_SEARCH_FEATURED_PATHS: usize = 32;
+const RETITLE_MESSAGE_BUDGET: usize = 20;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -118,6 +119,49 @@ struct ListModelsParams {
 struct SetHarnessEnabledParams {
     harness: HarnessId,
     enabled: bool,
+}
+
+/// Title settings as a client sees them: the stored pick plus whether any
+/// enabled harness could title at all, which drives the retitle menu.
+fn title_settings_view(registry: &HarnessRegistry) -> serde_json::Value {
+    let mut view = serde_json::to_value(registry.title_settings()).unwrap_or_default();
+    view["available"] = registry.titles_available().into();
+    view
+}
+
+/// The retitle request title generation speaks: the user messages in chat
+/// order as the previous/current envelope. Assistant and tool output never
+/// reach the titler — only what the user asked. `None` when nothing in the
+/// doc is user-written.
+fn title_request(entries: &[SessionMessageEntry]) -> Option<serde_json::Value> {
+    let mut messages: Vec<String> = entries
+        .iter()
+        .filter(|entry| entry.role == MessageRole::User)
+        .map(|entry| {
+            entry
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    MessagePart::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter(|text| !text.is_empty())
+        .collect();
+    // The first ask anchors what the chat set out to do; past the budget,
+    // keep it and the most recent asks.
+    if messages.len() > RETITLE_MESSAGE_BUDGET {
+        let tail = messages.split_off(messages.len() + 1 - RETITLE_MESSAGE_BUDGET);
+        messages.truncate(1);
+        messages.extend(tail);
+    }
+    let (current, previous) = messages.split_last()?;
+    Some(serde_json::json!({
+        "previousUserMessages": previous,
+        "currentUserMessage": current,
+    }))
 }
 
 async fn update_harness_enabled(
@@ -3647,7 +3691,7 @@ impl RpcService for EngineRpc {
                 self.registry.installs.cancel(p.harness);
                 RpcReply::value(&serde_json::json!({}))
             }
-            methods::GET_TITLE_SETTINGS => RpcReply::value(&self.registry.title_settings()),
+            methods::GET_TITLE_SETTINGS => RpcReply::value(&title_settings_view(&self.registry)),
             methods::GET_COMMIT_CREDIT => match self.registry.commit_credit() {
                 Some(credit) => RpcReply::value(&credit.status()),
                 None => Err(RpcError::Failed(
@@ -3673,7 +3717,30 @@ impl RpcService for EngineRpc {
                 self.registry
                     .set_title_settings(p)
                     .map_err(RpcError::Failed)?;
-                RpcReply::value(&self.registry.title_settings())
+                RpcReply::value(&title_settings_view(&self.registry))
+            }
+            methods::RETITLE_CHAT => {
+                let p: ChatParams = parse_params(params)?;
+                let titles = self.sessions.titles().ok_or_else(|| {
+                    RpcError::Failed("Title generation isn't running on this engine.".into())
+                })?;
+                let entries = self
+                    .doc_host
+                    .open(&p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?
+                    .doc()
+                    .read_entries()
+                    .unwrap_or_default();
+                let Some(request) = title_request(&entries) else {
+                    return Err(RpcError::Failed(
+                        "This chat has no user messages to title from.".into(),
+                    ));
+                };
+                let title = titles
+                    .retitle(&p.chat_id, &request)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({"title": title}))
             }
             methods::GET_NATIVE_SUBAGENTS => {
                 RpcReply::value(&self.registry.native_subagent_settings())
@@ -6390,6 +6457,68 @@ mod tests {
         assert!(!warm_signed_out(None, HarnessId::ClaudeCode, none));
         // An agent whose logins aren't tracked here.
         assert!(!warm_signed_out(Some(&signed_out), HarnessId::Opencode, none));
+    }
+
+    fn entry(role: zeron_doc::MessageRole, parts: Vec<MessagePart>) -> SessionMessageEntry {
+        SessionMessageEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            role,
+            parts,
+            created_at: 0,
+            device_id: "test".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        }
+    }
+
+    fn text(text: &str) -> MessagePart {
+        MessagePart::Text {
+            id: uuid::Uuid::new_v4().to_string(),
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn title_request_keeps_only_what_the_user_wrote() {
+        let entries = vec![
+            entry(zeron_doc::MessageRole::User, vec![text("first ask")]),
+            entry(zeron_doc::MessageRole::Assistant, vec![text("model answer")]),
+            entry(
+                zeron_doc::MessageRole::User,
+                vec![
+                    text("second ask"),
+                    MessagePart::Image {
+                        id: "i".into(),
+                        path: "/tmp/i.png".into(),
+                        name: "i.png".into(),
+                        mime_type: "image/png".into(),
+                    },
+                ],
+            ),
+        ];
+        assert_eq!(
+            title_request(&entries).unwrap(),
+            serde_json::json!({
+                "previousUserMessages": ["first ask"],
+                "currentUserMessage": "second ask",
+            })
+        );
+        let assistant_only = vec![entry(zeron_doc::MessageRole::Assistant, vec![text("hi")])];
+        assert!(title_request(&assistant_only).is_none());
+    }
+
+    #[test]
+    fn title_request_keeps_the_first_ask_and_the_newest_over_budget() {
+        let entries: Vec<_> = (0..25)
+            .map(|n| entry(zeron_doc::MessageRole::User, vec![text(&format!("ask {n}"))]))
+            .collect();
+        let request = title_request(&entries).unwrap();
+        let previous = request["previousUserMessages"].as_array().unwrap();
+        assert_eq!(previous.len() + 1, RETITLE_MESSAGE_BUDGET);
+        assert_eq!(previous[0], "ask 0");
+        assert_eq!(previous.last().unwrap(), "ask 23");
+        assert_eq!(request["currentUserMessage"], "ask 24");
     }
 
     /// What a viewport does with a keyed list frame: the list it shows after.
