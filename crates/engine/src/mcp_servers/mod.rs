@@ -1471,7 +1471,7 @@ mod tests {
         let mut rx = mgr.watch_snapshot();
         assert_eq!(rx.borrow().storage, McpStorage::Local);
         assert!(!rx.borrow().vault_available);
-        assert_eq!(rx.borrow().presets.len(), 12);
+        assert_eq!(rx.borrow().presets.len(), 10);
 
         // Upsert bearer remote server via RPC
         let reply = mgr

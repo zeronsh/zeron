@@ -2381,7 +2381,7 @@
     },
     "mcp": {
       "title": "MCP",
-      "terms": "mcp servers model context protocol tools connectors integrations oauth vault linear notion github sentry figma",
+      "terms": "mcp servers model context protocol tools connectors integrations oauth vault linear notion sentry stripe vercel",
       "description_synced": "Tools your agents can use in every chat, with any provider. Sign-ins sync to your devices and Cloud with Zeron Vault.",
       "description_local": "Tools your agents can use in every chat, with any provider. Kept on this device; sign in to Zeron to sync them to your other devices.",
       "servers": {
