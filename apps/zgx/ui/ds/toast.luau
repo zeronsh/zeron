@@ -83,9 +83,15 @@ local fronts = ui.state("ds_toasts_fronts", 0)
 -- (src/plugins/host_bar.rs `follow`). 16 where no host says (another
 -- window; a plugin, which can't read it).
 local floor_ok, floor = pcall(ui.shared, "toast_floor", 16)
+-- What a page floats in the same corner (the Control room's Needs you),
+-- in points up from the window's foot to its top: the stack stands over
+-- it. 0 with none.
+M.lift = ui.state("ds_toasts_lift", 0)
 local function foot(): number
 	local at = if floor_ok and floor then floor:get() else nil
-	return if type(at) == "number" then at else 16
+	local host = if type(at) == "number" then at else 16
+	local lift = M.lift:get()
+	return if lift > 0 then math.max(host, lift + 12) else host
 end
 M.foot = foot
 -- What each action runs, by its name: this load's, as `action` declared

@@ -94,8 +94,11 @@ export type Props = {
 	on_resume: ((id: string, state: string?) -> any)?,
 	on_start: ((id: string) -> any)?,
 	on_request_changes: ((id: string, text: string) -> any)?,
-	on_remove: ((id: string) -> any)?,
-	on_restore: ((item: any) -> any)?,
+	-- A card deleted: sent by the host once `wait_ms` (its Undo's while)
+	-- is over, unless `on_undo_remove` came first; the card is off the
+	-- board meanwhile, untouched.
+	on_remove: ((id: string, wait_ms: number) -> ())?,
+	on_undo_remove: ((id: string) -> ())?,
 	on_seen: ((id: string) -> any)?,
 	-- A new task for an orchestrator (nil: whoever takes it), as a dump.
 	on_new_task: ((text: string, orchestrator_id: string?) -> any)?,
@@ -131,6 +134,11 @@ local function read(v: any): any
 	return control.value(v)
 end
 M.read = read
+
+-- Cards the person deleted, while their Undo lasts (ds/orch_board_actions):
+-- off every board, list and detail until the host's delete lands, back as
+-- they were on Undo.
+M.removing = ui.state("orch_board_removing", {} :: { [string]: boolean })
 
 -- A state's `set`, where what was given is one (not a function of state).
 local function setter(given: any): ((state: any, value: any) -> ())?
@@ -295,7 +303,18 @@ function M.make(props: Props): Ctx
 	local function build(): (Board, Board)
 		trace.hit("board.build")
 		local t = at_minute()
-		local rows = { items = read(props.items), cards = read(props.cards), asks = read(props.asks) }
+		local items = read(props.items)
+		local gone = M.removing:get()
+		if next(gone) ~= nil then
+			local kept = {}
+			for _, item in items or {} do
+				if not gone[item.id] then
+					table.insert(kept, item)
+				end
+			end
+			items = kept
+		end
+		local rows = { items = items, cards = read(props.cards), asks = read(props.asks) }
 		local f = filter()
 		local b = model.board(rows, { filter = f, at = t })
 		local a = if f == nil then b else model.board(rows, { at = t })

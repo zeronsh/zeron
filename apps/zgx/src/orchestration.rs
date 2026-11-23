@@ -74,14 +74,21 @@
 //!   orchestration.defer_ask({ id, until? })
 //!                                  put an ask off until `until` (Unix seconds),
 //!                                  nil: back now; `{ id }`, or rejected
+//!   orchestration.remove_later({ id, ms }) (an action) a card the person
+//!                                  deleted: `removeItem` sent after `ms` (its
+//!                                  Undo's while), from here, so a window
+//!                                  closed meanwhile still sends it, and the
+//!                                  app's quit sends what still waits
+//!   orchestration.remove_undo(id)  (an action) that delete undone: nothing sent
 //!   orchestration.loads_wanted(on) (an action) a screen showing loads mounts
 //!                                  (true) or goes (false): they're sampled only
 //!                                  while one wants them
 
 use std::{
     cell::{Cell, RefCell},
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     rc::Rc,
+    time::Duration,
 };
 
 use chrono::{DateTime, Utc};
@@ -143,6 +150,70 @@ struct Orchestration {
 
 thread_local! {
     static ORCHESTRATION: Rc<Orchestration> = Rc::new(Orchestration::default());
+    /// Cards the person deleted, waiting out their Undo: each id with its
+    /// wait's turn (deleted again after an Undo, a new wait).
+    static REMOVING: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
+    static REMOVING_TURN: Cell<u64> = const { Cell::new(0) };
+}
+
+/// The longest a delete waits for its Undo.
+const REMOVE_WAIT_MAX: Duration = Duration::from_secs(60);
+
+/// Card `id`'s delete starts its wait: its turn.
+fn remove_later(id: &str) -> u64 {
+    let turn = REMOVING_TURN.with(|t| {
+        t.set(t.get() + 1);
+        t.get()
+    });
+    REMOVING.with(|r| r.borrow_mut().insert(id.to_owned(), turn));
+    turn
+}
+
+/// Card `id`'s delete undone: whether it was still waiting (nothing sent).
+fn undo_remove(id: &str) -> bool {
+    REMOVING.with(|r| r.borrow_mut().remove(id).is_some())
+}
+
+/// Whether the wait `turn` of card `id`'s delete is over and still wanted
+/// (its Undo not pressed, no newer wait): then it's sent, and no longer waits.
+fn remove_due(id: &str, turn: u64) -> bool {
+    REMOVING.with(|r| {
+        let mut r = r.borrow_mut();
+        if r.get(id) == Some(&turn) {
+            r.remove(id);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+/// The deletes still waiting, taken: the app is quitting.
+fn removing_now() -> Vec<String> {
+    let mut ids: Vec<String> = REMOVING.with(|r| r.borrow_mut().drain().map(|(id, _)| id).collect());
+    ids.sort();
+    ids
+}
+
+fn remove_op(id: &str) -> Json {
+    json!({ "op": "removeItem", "id": id })
+}
+
+/// The app's quit (src/main.rs, once its windows are gone): the deletes
+/// still waiting for their Undo are sent now, as they would have been.
+pub fn after_quit() {
+    let ids = removing_now();
+    if ids.is_empty() {
+        return;
+    }
+    let Some((port, data_dir)) = engine::get().ipc_endpoint() else {
+        return;
+    };
+    for id in ids {
+        if let Err(error) = engine::rpc::call_blocking(port, &data_dir, "Orchestrate", remove_op(&id), Duration::from_secs(5)) {
+            eprintln!("zeron-zgx: orchestration: a card deleted before quitting wasn't ({error})");
+        }
+    }
 }
 
 pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
@@ -212,6 +283,33 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             let reply = engine::get().call("Orchestrate", params).await?;
             Ok(if reply.is_null() { Value::Nil } else { crate::plugins::json_value(&reply) })
         }
+    });
+    host.action("orchestration.remove_later", move |args| {
+        if crate::plugins::preview::refuse("orchestration.remove_later").is_err() {
+            return;
+        }
+        let Some(id) = args.field("id").map(crate::auth::text).filter(|id| !id.is_empty()) else {
+            return;
+        };
+        let ms = match args.field("ms") {
+            Some(Value::Num(ms)) if *ms >= 0.0 => *ms as u64,
+            _ => 0,
+        };
+        let wait = Duration::from_millis(ms).min(REMOVE_WAIT_MAX);
+        let turn = remove_later(&id);
+        // (On the connection's tasks, not the window's: a window closed
+        // meanwhile still sends it. With no engine now, the app's quit does.)
+        engine::get().spawn(async move {
+            zgx::timer::sleep(wait).await;
+            if remove_due(&id, turn)
+                && let Err(error) = engine::get().call("Orchestrate", remove_op(&id)).await
+            {
+                eprintln!("zeron-zgx: orchestration: deleting card {id}: {error}");
+            }
+        });
+    });
+    host.action("orchestration.remove_undo", move |id| {
+        undo_remove(&crate::auth::text(&id));
     });
     let a = o.clone();
     host.action("orchestration.loads_wanted", move |on| {
@@ -1257,6 +1355,39 @@ mod tests {
         assert!(person_op(&json!({ "op": "reopenItem", "id": "it-1" })).is_ok());
         assert!(person_op(&json!({ "op": "holdItem", "id": "it-1", "held": true })).is_ok());
         assert!(person_op(&json!({ "op": "seenItem", "id": "it-1" })).is_ok());
+    }
+
+    /// A delete waits for its Undo: undone, nothing is sent; not undone, it
+    /// is sent once its wait is over, and only that wait's; still waiting
+    /// when the app quits (its window closed, the scripts gone), it is sent
+    /// then.
+    #[test]
+    fn a_delete_waits_for_its_undo_and_the_quit_sends_what_still_waits() {
+        // Undone: never due, and nothing left for the quit.
+        let t = remove_later("it-undone");
+        assert!(undo_remove("it-undone"));
+        assert!(!remove_due("it-undone", t));
+        assert!(!undo_remove("it-undone"), "undone once");
+        // Its wait over: due once.
+        let t = remove_later("it-sent");
+        assert!(remove_due("it-sent", t));
+        assert!(!remove_due("it-sent", t));
+        // Deleted, undone, deleted again: the first wait's end sends nothing.
+        let first = remove_later("it-again");
+        undo_remove("it-again");
+        let second = remove_later("it-again");
+        assert!(!remove_due("it-again", first));
+        // Still waiting as the app quits: sent then, as `removeItem`.
+        let _ = second;
+        remove_later("it-closing");
+        assert_eq!(removing_now(), vec!["it-again".to_string(), "it-closing".to_string()]);
+        assert!(removing_now().is_empty());
+        let op = remove_op("it-closing");
+        assert!(person_op(&op).is_ok());
+        assert!(matches!(
+            serde_json::from_value::<zeron_proto::orchestration::OrchestrateOp>(op).unwrap(),
+            zeron_proto::orchestration::OrchestrateOp::RemoveItem { id } if id == "it-closing"
+        ));
     }
 
     /// Every op the board sends for what the person does to a card, as

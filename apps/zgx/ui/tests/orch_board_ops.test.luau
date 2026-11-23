@@ -47,17 +47,14 @@ test("board ops: each of the person's actions sends the engine's op", function()
 	}, "ops")
 end)
 
-test("board ops: Undo of a delete makes the card again with no state, then does what put it where it was", function()
+test("board ops: a delete is sent after its wait, and not at all once undone", function()
 	local a = app()
-	local made = {
-		op = "upsertItem",
-		item = { orchestratorId = "orc-1", title = "T", detail = "D", priority = "normal", threads = { "th-1" }, links = {}, order = 3 },
-	}
-	same(sent(a, "restore_active"), { made }, "running")
-	same(sent(a, "restore_done"), { made, { op = "closeItem", id = "it-new" } }, "done")
-	same(sent(a, "restore_dropped"), { made, { op = "closeItem", id = "it-new", dropped = true } }, "dropped")
-	same(sent(a, "restore_inbox"), { made, { op = "holdItem", id = "it-new", held = true } }, "held")
-	same(sent(a, "restore_paused"), { made, { op = "pauseItem", id = "it-new" } }, "paused")
+	a:command("remove_later")
+	a:frames(2)
+	-- (Waiting: nothing sent yet.)
+	same(a:state("sent") or {}, {}, "waiting")
+	a:wait('"never shown, only waited past"', { timeout_ms = 200 })
+	same(a:state("sent") or {}, { { op = "removeItem", id = "it-1" } }, "sent")
 end)
 
 test("board ops: New task is a dump naming the chosen orchestrator", function()

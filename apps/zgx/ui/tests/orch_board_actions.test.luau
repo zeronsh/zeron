@@ -54,7 +54,7 @@ local function says_once(app: any, title: string, body: string?, tone: string?, 
 	if body then
 		expect(t.body).to_be(body)
 	end
-	expect(t.tone).to_be(tone or "neutral")
+	expect(t.tone).to_be(tone or "success")
 end
 
 local function menu(app: any, card: string)
@@ -95,18 +95,23 @@ local MENUS: { { card: string, has: { string }, hasnt: { string } } } = {
 	},
 	{
 		card = "it-keyed",
-		has = { "Start now", "Pause", "Keep for later", "Mark done", "Drop" },
-		hasnt = { "Open thread", "Resume", "Reopen", "Let it start", "Snooze" },
+		has = { "Start now", "Keep for later", "Mark done", "Drop" },
+		hasnt = { "Open thread", "Pause", "Resume", "Reopen", "Let it start", "Snooze" },
 	},
 	{
 		card = "it-probes",
 		has = { "Start now", "Let it start", "Mark done" },
-		hasnt = { "Keep for later", "Resume", "Reopen" },
+		hasnt = { "Pause", "Keep for later", "Resume", "Reopen" },
 	},
 	{
 		card = "it-exits",
 		has = { "Open thread", "Resume", "Mark done", "Drop" },
 		hasnt = { "Pause", "Start now", "Reopen", "Keep for later", "Let it start" },
+	},
+	{
+		card = "it-win",
+		has = { "Start now", "Mark done", "Drop" },
+		hasnt = { "Pause", "Resume", "Reopen" },
 	},
 	{
 		card = "it-asks",
@@ -237,20 +242,69 @@ test("board actions: Start now, from the menu and from the detail", function()
 	expect(app:has("#orch-detail-resume")).to_be(true)
 end)
 
-test("board actions: Delete takes it off the board, its Undo puts it back", function()
+-- A card's rows, as words: what an Undo must leave exactly as it was.
+local function rows_of(app: any, id: string): string
+	local out = {}
+	for _, list in { "fx_items", "fx_cards" } do
+		for _, r in app:state(list) or {} do
+			if r.id == id then
+				local keys = {}
+				for k in r do
+					table.insert(keys, k)
+				end
+				table.sort(keys)
+				for _, k in keys do
+					local v = r[k]
+					table.insert(out, `{k}={if type(v) == "table" then `#{#v}` else tostring(v)}`)
+				end
+			end
+		end
+	end
+	return table.concat(out, " ")
+end
+
+local function delete(app: any, card: string)
+	menu(app, card)
+	pick(app, "Delete from the board")
+end
+
+test("board actions: Delete hides the card at once; its Undo brings it back exactly as it was, nothing sent", function()
 	local app = board()
-	says_once(app, "Deleted from the board", "Chat list: only changed rows update", nil, function()
-		menu(app, "it-chat")
-		pick(app, "Delete from the board")
+	local was = rows_of(app, "it-chat")
+	says_once(app, "Deleted from the board", "Chat list: only changed rows update", "neutral", function()
+		delete(app, "it-chat")
 	end)
 	expect(app:has("#orch-card-it-chat")).to_be(false)
+	expect(calls(app)).to_be("remove:it-chat")
 	local before = shown(app)
 	app:click('role:button "Undo"')
 	app:frames(20)
-	expect(calls(app)).to_be("remove:it-chat,restore:it-chat")
+	expect(app:has("#orch-col-running >> #orch-card-it-chat")).to_be(true)
+	-- (Past the wait: nothing was sent, the rows untouched.)
+	app:wait('"never shown, only waited past"', { timeout_ms = 7000 })
+	expect(calls(app)).to_be("remove:it-chat,undo:it-chat")
+	expect(rows_of(app, "it-chat")).to_be(was)
 	expect(app:has("#orch-card-it-chat")).to_be(true)
-	-- (Put back: nothing more is said.)
 	expect(shown(app)).to_be(before)
+end)
+
+test("board actions: Delete not undone is sent once its toast's while is over", function()
+	local app = board()
+	delete(app, "it-chat")
+	expect(calls(app)).to_be("remove:it-chat")
+	app:wait('"never shown, only waited past"', { timeout_ms = 7000 })
+	expect(calls(app)).to_be("remove:it-chat,sent:it-chat")
+	app:wait('"never shown, only waited past"', { timeout_ms = 4500 })
+	expect(app:has("#orch-card-it-chat")).to_be(false)
+end)
+
+test("board actions: Delete still waiting as the window closes is sent then", function()
+	local app = board()
+	delete(app, "it-chat")
+	app:frames(5)
+	app:command("close_window")
+	app:frames(5)
+	expect(calls(app)).to_be("remove:it-chat,sent:it-chat")
 end)
 
 test("board actions: Snooze, each of its four times, and Bring back now", function()
@@ -316,6 +370,7 @@ test("board actions: an answer from a card's detail is sent past its Undo, then 
 	expect(shown(app) - before).to_be(1)
 	expect(last(app).title).to_be("Answered")
 	expect(last(app).body).to_be("Bring main (0.3.8) into orchestrators")
+	expect(last(app).tone).to_be("success")
 	expect(place_of(app, "it-merge")).to_be("running")
 end)
 

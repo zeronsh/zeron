@@ -99,8 +99,8 @@ function M.board_props(props: Props): { [string]: any }
 			return orchestration.start_item(id)
 		end,
 		on_request_changes = orchestration.request_changes,
-		on_remove = orchestration.remove_item,
-		on_restore = orchestration.restore_item,
+		on_remove = orchestration.remove_later,
+		on_undo_remove = orchestration.undo_remove,
 		on_seen = orchestration.seen_item,
 	}
 end

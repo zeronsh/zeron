@@ -20,6 +20,11 @@ local Ctx = require("@self/orch_board_ctx")
 
 local M = {}
 
+-- How long a delete waits for its Undo (its toast's while), and how long
+-- after that its card stays hidden for the engine's rows to leave it out.
+M.UNDO_MS = 6000
+M.LAND_MS = 4000
+
 export type Actions = {
 	reason: (err: any) -> string,
 	can: (what: string) -> boolean,
@@ -101,7 +106,7 @@ function M.make(ctx: Ctx.Ctx): Actions
 			toast.show { title = locale.s(failed_key), body = reason(err), tone = "danger" }
 		end, function()
 			if done_key then
-				toast.show { title = locale.s(done_key), body = title }
+				toast.show { title = locale.s(done_key), body = title, tone = "success" }
 			end
 		end)
 	end
@@ -173,32 +178,41 @@ function M.make(ctx: Ctx.Ctx): Actions
 			said(call(f, e.id, text), e.item.title, "orch.board.said.changes", "orch.board.failed")
 		end
 	end
-	-- Taken off the board (its chat untouched), an Undo beside it a while.
+	-- Taken off the board (its chat untouched): off it at once, and sent by
+	-- the host once its Undo's while is over. Undo puts it back as it was:
+	-- nothing was sent.
 	function act.remove(e: Ctx.Entry)
 		local f = props.on_remove
 		if not f then
 			return
 		end
-		local item = e.item
-		Ctx.after(call(f, e.id), function(err: any)
+		local id, title = e.id, e.item.title
+		local ok, err = pcall(f, id, M.UNDO_MS)
+		if not ok then
 			toast.show { title = locale.s("orch.board.delete_failed"), body = reason(err), tone = "danger" }
-		end, function()
-			local restore = props.on_restore
-			toast.show {
-				title = locale.s("orch.board.deleted"),
-				body = item.title,
-				action = if restore
-					then {
-						label = locale.s("orch.board.undo"),
-						run = function()
-							Ctx.after(call(restore, item), function(err: any)
-								toast.show { title = locale.s("orch.board.undo_failed"), body = reason(err), tone = "danger" }
-							end)
-						end,
-					}
-					else nil,
-			}
+			return
+		end
+		Ctx.removing:set_key({ id }, true)
+		-- (Past its while the host's delete has landed: the engine's rows
+		-- leave it out. Refused there, it comes back.)
+		ui.after(M.UNDO_MS + M.LAND_MS, function()
+			Ctx.removing:set_key({ id }, nil)
 		end)
+		local undo = props.on_undo_remove
+		toast.show {
+			title = locale.s("orch.board.deleted"),
+			body = title,
+			duration = M.UNDO_MS,
+			action = if undo
+				then {
+					label = locale.s("orch.board.undo"),
+					run = function()
+						undo(id)
+						Ctx.removing:set_key({ id }, nil)
+					end,
+				}
+				else nil,
+		}
 	end
 	function act.snooze(ask: any, until_ms: number?)
 		local f = props.on_snooze
@@ -209,7 +223,7 @@ function M.make(ctx: Ctx.Ctx): Actions
 		Ctx.after(call(f, ask.id, until_ms), function(err: any)
 			toast.show { title = locale.s("orch.board.snooze_failed"), body = reason(err), tone = "danger" }
 		end, function()
-			toast.show { title = locale.s(if until_ms then "orch.board.said.snoozed" else "orch.board.said.back"), body = title }
+			toast.show { title = locale.s(if until_ms then "orch.board.said.snoozed" else "orch.board.said.back"), body = title, tone = "success" }
 		end)
 	end
 	-- (Sent past its Undo by ds/orch_decide, which says a refusal on the
@@ -222,7 +236,7 @@ function M.make(ctx: Ctx.Ctx): Actions
 		local sent = f(ask, choice)
 		local title = title_of(ask)
 		Ctx.after(sent, nil, function()
-			toast.show { title = locale.s("orch.board.said.answered"), body = title }
+			toast.show { title = locale.s("orch.board.said.answered"), body = title, tone = "success" }
 		end)
 		return sent
 	end
@@ -238,8 +252,9 @@ function M.make(ctx: Ctx.Ctx): Actions
 		local entries: { any } = {}
 		for _, t in decide.defer_times(ctx.at()) do
 			table.insert(entries, {
+				-- (No glyph each, as the ask overlay's Defer has none: the
+				-- entry it hangs from has the clock.)
 				label = locale.s(`ds.orch.decide.defer_{t.key}`),
-				icon = "clock-circle",
 				on_select = function()
 					act.snooze(ask, t.at)
 				end,
@@ -276,7 +291,9 @@ function M.make(ctx: Ctx.Ctx): Actions
 				act.start(e)
 			end })
 		end
-		if not is_closed and e.status ~= "paused" and props.on_pause then
+		-- (Pause stops what runs or waits on the person: a Planned card has
+		-- Keep for later and Start now instead.)
+		if not is_closed and e.place ~= "planned" and e.status ~= "paused" and props.on_pause then
 			table.insert(entries, { label = locale.s("orch.board.pause"), icon = "action-pause", on_select = function()
 				act.pause(e)
 			end })

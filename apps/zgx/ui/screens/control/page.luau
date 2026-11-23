@@ -954,8 +954,8 @@ local function board(card_build: ((make: () -> Node, i: number) -> Node)?): Node
 				M.show_dump(src.dump_id)
 			end)
 		end,
-		on_remove = orchestration.remove_item,
-		on_restore = orchestration.restore_item,
+		on_remove = orchestration.remove_later,
+		on_undo_remove = orchestration.undo_remove,
 		expanded = M.board_expanded,
 		later_open = M.board_later,
 		on_start = function(id: string): any
@@ -2259,6 +2259,14 @@ local NeedsFloat = ui.component(function(props: { bottom: () -> number }): Node
 	end)
 	ui.on_cleanup(function()
 		M.needs_room:set(0)
+		ds.toast.lift:set(0)
+	end)
+	-- (The toasts in its corner stand over it, not on it.)
+	ui.effect(function()
+		local room = M.needs_room:get()
+		if ds.toast.lift:peek() ~= room then
+			ds.toast.lift:set(room)
+		end
 	end)
 	local function opened(): Node
 	return ui.column(glass.style({

@@ -644,7 +644,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 				Ctx.after(sent, function(err: any)
 					toast.show { title = locale.s("orch.board.new_task_failed"), body = act.reason(err), tone = "danger" }
 				end, function()
-					toast.show { title = locale.s("orch.board.new_task_sent"), body = text }
+					toast.show { title = locale.s("orch.board.new_task_sent"), body = text, tone = "success" }
 				end)
 				return sent
 			end,

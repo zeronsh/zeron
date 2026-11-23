@@ -360,6 +360,11 @@ local function move(id: string, place: string, status: string, reason: string, e
 	patch(cards, id, fields)
 end
 
+-- Every drawer open (for pictures: a state's JSON can't go in a shot's spec).
+ui.command { id = "drawers_open", title = "Open every drawer", run = function()
+	drawers:set({ snoozed = true, planned = true, earlier = true })
+end }
+
 -- Moves the engine makes by itself, with no action of the person's: its
 -- next frame changes the rows, as these do.
 ui.command { id = "engine_done", title = "The engine closes a running card", run = function()
@@ -372,6 +377,21 @@ end }
 ui.command { id = "engine_start", title = "The engine starts a planned card", run = function()
 	patch(items, "it-keyed", { state = "active", threads = { "th-keyed" } })
 	move("it-keyed", "running", "starting", "Thread started", { by = "engine", cause = "started", old_state = "active" })
+end }
+
+-- Deletes waiting for their Undo, as the host keeps them.
+local removing: { [string]: () -> () } = {}
+local function send_remove(id: string)
+	note(`sent:{id}`)
+	patch(items, id, { removed = true })
+end
+-- The window closing (the app quitting) while a delete waits: sent now.
+ui.command { id = "close_window", title = "Close the window", run = function()
+	for id, cancel in removing do
+		cancel()
+		removing[id] = nil
+		send_remove(id)
+	end
 end }
 
 local function board_props(): { [string]: any }
@@ -498,23 +518,25 @@ local function board_props(): { [string]: any }
 			move(id, "running", "queued", "You started it", { old_state = "active" })
 			return nil
 		end,
-		on_remove = function(id: string): any
+		-- (As the host does: the delete sent once its wait is over, unless
+		-- undone; `sent:<id>` noted then. `close_window` sends what waits.)
+		on_remove = function(id: string, wait_ms: number)
 			note(`remove:{id}`)
-			local no = refused()
-			if no then
-				return no
+			if refuse:peek() ~= "" then
+				error(refuse:peek(), 0)
 			end
-			patch(items, id, { removed = true })
-			return nil
+			removing[id] = ui.after(wait_ms, function()
+				removing[id] = nil
+				send_remove(id)
+			end)
 		end,
-		on_restore = function(item: any): any
-			note(`restore:{item.id}`)
-			local no = refused()
-			if no then
-				return no
+		on_undo_remove = function(id: string)
+			note(`undo:{id}`)
+			local cancel = removing[id]
+			removing[id] = nil
+			if cancel then
+				cancel()
 			end
-			patch(items, item.id, { removed = false })
-			return nil
 		end,
 		on_seen = function(id: string): any
 			note(`seen:{id}`)

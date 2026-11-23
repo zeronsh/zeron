@@ -39,16 +39,13 @@ run("actions", function()
 	orchestration.request_changes("it-1", "tighten it")
 end)
 
-local base = { orchestrator_id = "orc-1", title = "T", detail = "D", priority = "normal", threads = { "th-1" }, links = {}, order = 3 }
-for _, state in { "active", "done", "dropped", "inbox", "paused" } do
-	run(`restore_{state}`, function()
-		local item = table.clone(base)
-		item.id = "it-1"
-		item.state = if state == "paused" then "blocked" else state
-		item.paused_at = if state == "paused" then 1700000000 else nil
-		orchestration.restore_item(item)
-	end)
-end
+-- A delete waits for its Undo (here, an app without the host's wait: the
+-- scripts wait, `wait_ms` short): undone, nothing is sent.
+run("remove_later", function()
+	orchestration.remove_later("it-1", 50)
+	orchestration.remove_later("it-2", 50)
+	orchestration.undo_remove("it-2")
+end)
 
 run("new_task", function()
 	orchestration.new_task("Speed up the sidebar", { id = "orc-ci", name = "CI speed" }, "bd-chat")
