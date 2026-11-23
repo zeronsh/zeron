@@ -94,10 +94,14 @@ export type Props = {
 	on_resume: ((id: string, state: string?) -> any)?,
 	on_start: ((id: string) -> any)?,
 	on_request_changes: ((id: string, text: string) -> any)?,
+	-- The project an orchestrator (or a chat) works in, by its chat id:
+	-- said under an orchestrator's name where two share it.
+	project_of: ((chat: string) -> string?)?,
 	-- A card deleted: sent by the host once `wait_ms` (its Undo's while)
 	-- is over, unless `on_undo_remove` came first; the card is off the
 	-- board meanwhile, untouched.
-	on_remove: ((id: string, wait_ms: number) -> ())?,
+	-- Its promise: taken (or undone), or refused with the engine's words.
+	on_remove: ((id: string, wait_ms: number) -> any)?,
 	on_undo_remove: ((id: string) -> ())?,
 	on_seen: ((id: string) -> any)?,
 	-- A new task for an orchestrator (nil: whoever takes it), as a dump.

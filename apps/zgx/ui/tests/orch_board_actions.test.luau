@@ -298,6 +298,26 @@ test("board actions: Delete not undone is sent once its toast's while is over", 
 	expect(app:has("#orch-card-it-chat")).to_be(false)
 end)
 
+test("board actions: Delete the engine refuses brings the card back and says why", function()
+	local app = board()
+	local was = rows_of(app, "it-chat")
+	delete(app, "it-chat")
+	expect(app:has("#orch-card-it-chat")).to_be(false)
+	-- (The engine refuses it once its wait is over.)
+	app:set_state("refuse", "That card is starting already")
+	app:set_state("ds_toasts", {})
+	local before = shown(app)
+	app:wait('"never shown, only waited past"', { timeout_ms = 7000 })
+	expect(calls(app)).to_be("remove:it-chat,refused:it-chat")
+	expect(app:has("#orch-col-running >> #orch-card-it-chat")).to_be(true)
+	expect(rows_of(app, "it-chat")).to_be(was)
+	expect(shown(app) - before).to_be(1)
+	local t = last(app)
+	expect(t.title).to_be("Couldn't delete it")
+	expect(t.body).to_be("That card is starting already")
+	expect(t.tone).to_be("danger")
+end)
+
 test("board actions: Delete still waiting as the window closes is sent then", function()
 	local app = board()
 	delete(app, "it-chat")
@@ -308,7 +328,7 @@ test("board actions: Delete still waiting as the window closes is sent then", fu
 end)
 
 test("board actions: Snooze, each of its four times, and Bring back now", function()
-	for i, label in { "For an hour", "For 4 hours", "Until tomorrow, 9:00", "Until Monday, 9:00" } do
+	for i, label in { "For an hour", "For 4 hours", "Until tomorrow, 9:00 AM", "Until Monday, 9:00 AM" } do
 		local app = board()
 		app:click("#orch-card-it-merge")
 		app:frames(20)
@@ -567,4 +587,53 @@ test("board actions: in a panel's list, the detail's Back leaves the card; Mark 
 	expect(place_of(app, "it-chat")).to_be("done")
 	-- (Closed, its detail stays open on it, now Done.)
 	expect(app:state("list_open")).to_be("it-chat")
+end)
+
+-- The orchestrators' filter: each with its colour dot; a project under the
+-- name only where two share it.
+test("board actions: the filter menu says a project only under two orchestrators of one name", function()
+	local app = board()
+	app:click("#orch-board-filter")
+	app:frames(20)
+	for _, name in { "All orchestrators", "Zeron fixes", "Exnomic VPN", "CI speed" } do
+		expect(`{name} {app:has(`role:menuitem "{name}"`)}`).to_be(`{name} true`)
+	end
+	expect(app:count("role:menu >> .menu-row-detail")).to_be(0)
+	app:key("Escape")
+	app:frames(20)
+	app:command("twin_orchestrators")
+	app:frames(10)
+	local twins = mount("orch_board_places_fixture.luau")
+	twins:resize(1700, 1200)
+	twins:command("twin_orchestrators")
+	twins:frames(20)
+	twins:click("#orch-board-filter")
+	twins:frames(20)
+	expect(twins:count('role:menuitem "Zeron fixes"')).to_be(2)
+	expect(twins:count("role:menu >> .menu-row-detail")).to_be(2)
+	expect(twins:has('role:menu >> .menu-row-detail >> "zeron"')).to_be(true)
+	expect(twins:has('role:menu >> .menu-row-detail >> "zgx"')).to_be(true)
+	-- (Only the twins: one of its own name says nothing more.)
+	expect(twins:has('role:menu >> .menu-row-detail >> "exnomic"')).to_be(false)
+	expect(twins:error()).to_be_nil()
+end)
+
+-- Every time the person reads, one way (ds/locale `when`): the clock today,
+-- the weekday with it within a week, on a 12-hour clock.
+test("board actions: times read one way: a card's clock, Snoozed until, and the snooze menu", function()
+	local app = board()
+	-- (A usage limit ending today at 9:40 PM; a snooze ending tomorrow at 1:37 PM.)
+	expect(app:has('#orch-card-it-ios >> "until 9:40 PM"')).to_be(true)
+	local foot = app:tree("#orch-card-it-prs", 6)
+	expect(string.match(foot, "back %a%a%a 1:37 PM") ~= nil).to_be(true)
+	app:click("#orch-card-it-prs")
+	app:frames(20)
+	expect(string.match(app:tree("#orch-board-detail", 8), "Snoozed until %a%a%a 1:37 PM") ~= nil).to_be(true)
+	app:click("#orch-card-it-merge")
+	app:frames(20)
+	app:click("#orch-detail-snooze")
+	app:frames(10)
+	for _, label in { "For an hour", "For 4 hours", "Until tomorrow, 9:00 AM", "Until Monday, 9:00 AM" } do
+		expect(`{label} {app:has(`role:menuitem "{label}"`)}`).to_be(`{label} true`)
+	end
 end)

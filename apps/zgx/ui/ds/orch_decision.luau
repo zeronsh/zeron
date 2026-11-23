@@ -373,7 +373,7 @@ local Body = ui.component(function(args: { props: Props, phase: State<number> })
 		local out = {}
 		for _, d in decide.defer_times() do
 			table.insert(out, {
-				label = locale.s(`ds.orch.decide.defer_{d.key}`),
+				label = decide.defer_label(d),
 				on_select = function()
 					local a = ask()
 					if a then

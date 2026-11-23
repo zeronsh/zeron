@@ -187,17 +187,28 @@ function M.make(ctx: Ctx.Ctx): Actions
 			return
 		end
 		local id, title = e.id, e.item.title
-		local ok, err = pcall(f, id, M.UNDO_MS)
+		local ok, sent = pcall(f, id, M.UNDO_MS)
 		if not ok then
-			toast.show { title = locale.s("orch.board.delete_failed"), body = reason(err), tone = "danger" }
+			toast.show { title = locale.s("orch.board.delete_failed"), body = reason(sent), tone = "danger" }
 			return
 		end
 		Ctx.removing:set_key({ id }, true)
-		-- (Past its while the host's delete has landed: the engine's rows
-		-- leave it out. Refused there, it comes back.)
-		ui.after(M.UNDO_MS + M.LAND_MS, function()
+		local function back()
 			Ctx.removing:set_key({ id }, nil)
-		end)
+		end
+		if type(sent) == "table" or type(sent) == "userdata" then
+			-- Sent: the engine's rows leave it out a moment later. Refused
+			-- there: back, and why.
+			sent:after(function()
+				ui.after(M.LAND_MS, back)
+			end, function(err: any)
+				back()
+				toast.show { title = locale.s("orch.board.delete_failed"), body = reason(err), tone = "danger" }
+			end)
+		else
+			-- (A host that says nothing of how it went.)
+			ui.after(M.UNDO_MS + M.LAND_MS, back)
+		end
 		local undo = props.on_undo_remove
 		toast.show {
 			title = locale.s("orch.board.deleted"),
@@ -208,7 +219,7 @@ function M.make(ctx: Ctx.Ctx): Actions
 					label = locale.s("orch.board.undo"),
 					run = function()
 						undo(id)
-						Ctx.removing:set_key({ id }, nil)
+						back()
 					end,
 				}
 				else nil,
@@ -254,7 +265,7 @@ function M.make(ctx: Ctx.Ctx): Actions
 			table.insert(entries, {
 				-- (No glyph each, as the ask overlay's Defer has none: the
 				-- entry it hangs from has the clock.)
-				label = locale.s(`ds.orch.decide.defer_{t.key}`),
+				label = decide.defer_label(t),
 				on_select = function()
 					act.snooze(ask, t.at)
 				end,

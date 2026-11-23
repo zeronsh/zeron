@@ -31,7 +31,8 @@
     "date": "{year}年{m}月{day}日",
     "month_day": "{m}月{day}日",
     "date_time": "{date} {time}",
-    "clock_12": "{half, select, am {上午} other {下午}}{h}:{mm}"
+    "clock_12": "{half, select, am {上午} other {下午}}{h}:{mm}",
+    "day_clock": "{day} {time}"
   },
   "ds": {
     "status": {
@@ -1471,8 +1472,8 @@
         "defer": "推迟",
         "defer_hour": "推迟一小时",
         "defer_hours": "推迟 4 小时",
-        "defer_tomorrow": "推迟到明天 9:00",
-        "defer_week": "推迟到周一 9:00",
+        "defer_tomorrow": "推迟到明天 {time}",
+        "defer_week": "推迟到周一 {time}",
         "decide": "决定",
         "sending": "正在发送",
         "failed": "回答未能发送：{reason}",

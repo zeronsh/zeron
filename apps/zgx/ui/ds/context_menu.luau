@@ -38,7 +38,9 @@ local locale = require("@self/locale")
 -- more, as a first choice arms it and a second does it), `disabled` (true,
 -- or why: said under its name), `checked` (a check at its end while true;
 -- `keep_open` leaves the menu open as it toggles) and `submenu` (its own
--- entries, beside it).
+-- entries, beside it), `lead` (a mark in its glyph's place, built as the
+-- menu opens: an orchestrator's colour dot) and `detail` (a line under its
+-- name, with its own glyph: `{ icon, text }`).
 -- (Its words may be messages, `ui.t`: read as text as the menu opens.)
 export type Entry = {
 	label: (string | Message)?,
@@ -51,6 +53,8 @@ export type Entry = {
 	checked: (() -> boolean)?,
 	keep_open: boolean?,
 	submenu: { Entry }?,
+	lead: (() -> Node)?,
+	detail: { icon: Icon.Name?, text: string }?,
 	heading: (string | Message)?,
 	separator: boolean?,
 }
@@ -535,7 +539,10 @@ local function build_panel(props: PanelProps): Node
 		local said = function(): string
 			return if armed:get() == i then e.confirm or "" else e.label or ""
 		end
-		local glyph = if e.icon then Menu.glyph(e.icon, glyph_ink) else nil
+		local glyph = if e.lead
+			then ui.div { w = "$zeron.menu.glyph.box", h = "$zeron.menu.glyph.box", shrink = 0, items = "center", justify = "center", e.lead() }
+			elseif e.icon then Menu.glyph(e.icon, glyph_ink)
+			else nil
 		local name: Node = if e.confirm then RollText { said, text_size = "$font.size.md", color = ink, grow = 1, min_w = 0 } else FadeText {
 			e.label or "",
 			text_size = "$font.size.md",
@@ -550,6 +557,25 @@ local function build_panel(props: PanelProps): Node
 				gap = "$zeron.space.hair",
 				ui.text { e.label or "", text_size = "$font.size.md", line_height = "$font.line.md", color = ink },
 				ui.text { reason, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary", wrap = true },
+			}
+		end
+		local detail = e.detail
+		if detail and not reason then
+			-- What tells it apart, under its name.
+			name = ui.column {
+				grow = 1,
+				min_w = 0,
+				gap = "$zeron.space.hair",
+				ui.text { e.label or "", text_size = "$font.size.md", line_height = "$font.line.md", color = ink, truncate = true },
+				ui.row {
+					class = "menu-row-detail",
+					gap = "$space.1",
+					items = "center",
+					min_w = 0,
+					color = "$text.tertiary",
+					if detail.icon then Icon { name = detail.icon, size = 12 } else nil,
+					ui.text { detail.text, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary", truncate = true, min_w = 0 },
+				},
 			}
 		end
 		local trail: { Node } = {}
@@ -624,7 +650,7 @@ local function build_panel(props: PanelProps): Node
 		}
 		-- The menus' row (its height, padding, corner); with a reason
 		-- under its name, as tall as that needs.
-		Menu.look(look, reason ~= nil)
+		Menu.look(look, reason ~= nil or (detail ~= nil))
 
 		local row: Node
 		if e.submenu and props.still then

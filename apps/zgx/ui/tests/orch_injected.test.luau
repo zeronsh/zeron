@@ -37,6 +37,9 @@ test("injected: one card for an ask, open, deferred or answered", function()
 	expect(app:count(`{CONV} >> .orch-ask-state`)).to_be(7)
 	expect(app:has(`{CONV} >> ~"Answered by orchestrator"`)).to_be(true)
 	expect(app:has(`{CONV} >> ~"Deferred"`)).to_be(true)
+	-- (Until when, as every time is said: a 12-hour clock.)
+	local deferred = string.match(app:tree(CONV, 40), "Deferred until ([^\n\"]+)") or ""
+	expect(string.match(deferred, "%d+:%d%d [AP]M") ~= nil).to_be(true)
 	expect(app:has(`{CONV} >> ~"The panel, so the thread stays beside the report"`)).to_be(true)
 	-- The option picked, lit; the others beside it.
 	expect(app:count(`{CONV} >> .orch-ask-picked`)).to_be(2)

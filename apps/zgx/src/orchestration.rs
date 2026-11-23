@@ -188,6 +188,27 @@ fn remove_due(id: &str, turn: u64) -> bool {
     })
 }
 
+/// How card `id`'s delete went (`true`: sent; `false`: undone), told to
+/// the window that asked; refused, said in the log too. Whether the window
+/// was still there to hear it.
+fn tell_removal(to: tokio::sync::oneshot::Sender<Result<bool, String>>, id: &str, outcome: Result<bool, String>) -> bool {
+    if let Err(error) = &outcome {
+        eprintln!("zeron-zgx: orchestration: deleting card {id}: {error}");
+    }
+    to.send(outcome).is_ok()
+}
+
+/// The window's promise of a delete: `true` once sent, nil when undone (or
+/// left for the quit: no engine to send it to), rejected with the engine's
+/// words when it refused.
+fn removal_reply(heard: Result<Result<bool, String>, tokio::sync::oneshot::error::RecvError>) -> Result<Value, String> {
+    match heard {
+        Ok(Ok(true)) => Ok(Value::Bool(true)),
+        Ok(Ok(false)) | Err(_) => Ok(Value::Nil),
+        Ok(Err(error)) => Err(error),
+    }
+}
+
 /// The deletes still waiting, taken: the app is quitting.
 fn removing_now() -> Vec<String> {
     let mut ids: Vec<String> = REMOVING.with(|r| r.borrow_mut().drain().map(|(id, _)| id).collect());
@@ -284,29 +305,32 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             Ok(if reply.is_null() { Value::Nil } else { crate::plugins::json_value(&reply) })
         }
     });
-    host.action("orchestration.remove_later", move |args| {
-        if crate::plugins::preview::refuse("orchestration.remove_later").is_err() {
-            return;
-        }
-        let Some(id) = args.field("id").map(crate::auth::text).filter(|id| !id.is_empty()) else {
-            return;
-        };
+    host.async_action("orchestration.remove_later", move |args| {
+        let id = args.field("id").map(crate::auth::text).filter(|id| !id.is_empty());
         let ms = match args.field("ms") {
             Some(Value::Num(ms)) if *ms >= 0.0 => *ms as u64,
             _ => 0,
         };
-        let wait = Duration::from_millis(ms).min(REMOVE_WAIT_MAX);
-        let turn = remove_later(&id);
-        // (On the connection's tasks, not the window's: a window closed
-        // meanwhile still sends it. With no engine now, the app's quit does.)
-        engine::get().spawn(async move {
-            zgx::timer::sleep(wait).await;
-            if remove_due(&id, turn)
-                && let Err(error) = engine::get().call("Orchestrate", remove_op(&id)).await
-            {
-                eprintln!("zeron-zgx: orchestration: deleting card {id}: {error}");
-            }
-        });
+        async move {
+            crate::plugins::preview::refuse("orchestration.remove_later")?;
+            let id = id.ok_or("a card id")?;
+            let wait = Duration::from_millis(ms).min(REMOVE_WAIT_MAX);
+            let turn = remove_later(&id);
+            let (told, heard) = tokio::sync::oneshot::channel();
+            // (On the connection's tasks, not the window's: a window closed
+            // meanwhile still sends it, and its refusal is only logged. With
+            // no engine now, the app's quit sends it.)
+            engine::get().spawn(async move {
+                zgx::timer::sleep(wait).await;
+                let outcome = if remove_due(&id, turn) {
+                    engine::get().call("Orchestrate", remove_op(&id)).await.map(|_| true)
+                } else {
+                    Ok(false)
+                };
+                tell_removal(told, &id, outcome);
+            });
+            removal_reply(heard.await)
+        }
     });
     host.action("orchestration.remove_undo", move |id| {
         if crate::plugins::preview::refuse("orchestration.remove_undo").is_err() {
@@ -1391,6 +1415,31 @@ mod tests {
             serde_json::from_value::<zeron_proto::orchestration::OrchestrateOp>(op).unwrap(),
             zeron_proto::orchestration::OrchestrateOp::RemoveItem { id } if id == "it-closing"
         ));
+    }
+
+    /// A delete the engine refuses is told to the window that asked, with
+    /// the engine's words (the board brings the card back and says why);
+    /// with the window gone, only the log hears it.
+    #[test]
+    fn a_refused_delete_reaches_the_window_that_asked() {
+        let (told, mut heard) = tokio::sync::oneshot::channel();
+        assert!(tell_removal(told, "it-1", Err("That card is starting already".into())));
+        let refused = removal_reply(Ok(heard.try_recv().unwrap()));
+        assert!(matches!(&refused, Err(e) if e == "That card is starting already"));
+        // Sent, and undone.
+        let (told, mut heard) = tokio::sync::oneshot::channel();
+        assert!(tell_removal(told, "it-1", Ok(true)));
+        assert!(matches!(removal_reply(Ok(heard.try_recv().unwrap())), Ok(Value::Bool(true))));
+        assert!(matches!(removal_reply(Ok(Ok(false))), Ok(Value::Nil)));
+        // The window gone: nobody to tell, nothing breaks.
+        let (told, heard) = tokio::sync::oneshot::channel::<Result<bool, String>>();
+        drop(heard);
+        assert!(!tell_removal(told, "it-1", Err("refused".into())));
+        // No engine to send it to (its task dropped): left for the quit.
+        let (told, heard) = tokio::sync::oneshot::channel::<Result<bool, String>>();
+        drop(told);
+        let gone = tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(heard);
+        assert!(matches!(removal_reply(gone), Ok(Value::Nil)));
     }
 
     /// Every op the board sends for what the person does to a card, as

@@ -360,6 +360,13 @@ local function move(id: string, place: string, status: string, reason: string, e
 	patch(cards, id, fields)
 end
 
+-- Each orchestrator's project, by its chat id.
+local PROJECTS: { [string]: string } = { ["orc-fixes"] = "zeron", ["orc-vpn"] = "exnomic", ["orc-ci"] = "zeron", ["orc-fixes-2"] = "zgx" }
+-- A second orchestrator named as the first (each says its project then).
+ui.command { id = "twin_orchestrators", title = "Two orchestrators of one name", run = function()
+	orchestrators:push({ id = "orc-fixes-2", kind = "standard", name = "Zeron fixes", hue = 260, archived = false })
+end }
+
 -- Every drawer open (for pictures: a state's JSON can't go in a shot's spec).
 ui.command { id = "drawers_open", title = "Open every drawer", run = function()
 	drawers:set({ snoozed = true, planned = true, earlier = true })
@@ -381,9 +388,49 @@ end }
 
 -- Deletes waiting for their Undo, as the host keeps them.
 local removing: { [string]: () -> () } = {}
+-- Each wait's promise, settled as the host's is: sent, undone, refused.
+local settles: { [string]: (ok: boolean, v: any) -> () } = {}
+local function promise_of(id: string): any
+	local p: any = { done = false }
+	local waiters = {}
+	settles[id] = function(ok: boolean, v: any)
+		settles[id] = nil
+		p.done, p.ok, p.v = true, ok, v
+		for _, w in waiters do
+			local f = if ok then w[1] else w[2]
+			if f then
+				f(v)
+			end
+		end
+	end
+	function p.after(self: any, done: any, failed: any): any
+		if self.done then
+			local f = if self.ok then done else failed
+			if f then
+				f(self.v)
+			end
+		else
+			table.insert(waiters, { done, failed })
+		end
+		return self
+	end
+	return p
+end
 local function send_remove(id: string)
+	local settle = settles[id]
+	-- (`refuse` set while it waited: the engine says no; the card stays.)
+	if refuse:peek() ~= "" then
+		note(`refused:{id}`)
+		if settle then
+			settle(false, { message = refuse:peek() })
+		end
+		return
+	end
 	note(`sent:{id}`)
 	patch(items, id, { removed = true })
+	if settle then
+		settle(true, true)
+	end
 end
 -- The window closing (the app quitting) while a delete waits: sent now.
 ui.command { id = "close_window", title = "Close the window", run = function()
@@ -406,6 +453,9 @@ local function board_props(): { [string]: any }
 		end,
 		thread_of = function(chat: string): any
 			return chats[chat]
+		end,
+		project_of = function(chat: string): string?
+			return PROJECTS[chat]
 		end,
 		progress_of = function(chat: string): any
 			return progress[chat]
@@ -525,10 +575,12 @@ local function board_props(): { [string]: any }
 			if refuse:peek() ~= "" then
 				error(refuse:peek(), 0)
 			end
+			local p = promise_of(id)
 			removing[id] = ui.after(wait_ms, function()
 				removing[id] = nil
 				send_remove(id)
 			end)
+			return p
 		end,
 		on_undo_remove = function(id: string)
 			note(`undo:{id}`)
@@ -536,6 +588,10 @@ local function board_props(): { [string]: any }
 			removing[id] = nil
 			if cancel then
 				cancel()
+			end
+			local settle = settles[id]
+			if settle then
+				settle(true, nil)
 			end
 		end,
 		on_seen = function(id: string): any

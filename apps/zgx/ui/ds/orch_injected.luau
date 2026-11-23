@@ -492,8 +492,7 @@ local function view_of(i: Injected, a: any?): AskView
 end
 
 local function clock(t: number): string
-	local s = os.date("%I:%M %p", math.floor(t)) :: string
-	return (string.gsub(s, "^0", ""))
+	return locale.when(t)
 end
 
 -- Its state's chip.

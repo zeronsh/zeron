@@ -181,11 +181,14 @@ end
 -- tomorrow at nine, next Monday at nine. `at` in milliseconds.
 function M.defer_times(now: number?): { { key: string, at: number } }
 	local t = now or os.time()
+	-- (9:00 here, `days_on` days on. Not through os.time of a table: zgx
+	-- reads one as UTC, which put "9:00" at 9:00 UTC.)
 	local function nine(days_on: number): number
 		local d = os.date("*t", t) :: any
-		d.day += days_on
-		d.hour, d.min, d.sec = 9, 0, 0
-		return os.time(d)
+		local at = t - (d.hour * 3600 + d.min * 60 + d.sec) + days_on * 86400 + 9 * 3600
+		-- (A clock change on the way: back on 9.)
+		local h = (os.date("*t", at) :: any).hour
+		return at + (9 - h) * 3600
 	end
 	local wday = (os.date("*t", t) :: any).wday -- 1 Sunday … 7 Saturday
 	local to_monday = (9 - wday) % 7
@@ -198,6 +201,12 @@ function M.defer_times(now: number?): { { key: string, at: number } }
 		{ key = "tomorrow", at = nine(1) * 1000 },
 		{ key = "week", at = nine(to_monday) * 1000 },
 	}
+end
+
+-- A time to put an ask off until, as its menu says it: "For an hour",
+-- "Until tomorrow, 9:00 AM" (the hour as every time is said: ds/locale).
+function M.defer_label(t: { key: string, at: number }): string
+	return locale.s(`ds.orch.decide.defer_{t.key}`, { time = locale.clock(t.at / 1000) })
 end
 
 -- What a choice says, answered: its option's label and any words.

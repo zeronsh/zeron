@@ -498,33 +498,50 @@ end
 -- over, unless `undo_remove` comes first: the host waits
 -- (`orchestration.remove_later`), so a window closed meanwhile still sends
 -- it, and the app's quit sends what still waits. An app without it waits
--- here.
-local waiting: { [string]: () -> () } = {}
-function M.remove_later(id: string, wait_ms: number)
-	local ok, err = pcall(function()
-		ui.invoke("orchestration.remove_later", { id = id, ms = wait_ms })
+-- here. A promise: `true` once sent, nil when undone (or left for the
+-- quit, with no engine), rejected with the engine's words when it refused.
+local waiting: { [string]: { cancel: () -> (), done: any } } = {}
+function M.remove_later(id: string, wait_ms: number): any
+	local p, raised = attempt(function(): any
+		return M.host("orchestration.remove_later", { id = id, ms = wait_ms })
 	end)
-	if ok then
-		return
+	if p then
+		return p
 	end
-	if not missing(err) then
-		error(err, 0)
+	if not missing(raised) then
+		error(raised, 0)
 	end
-	local cancel = waiting[id]
-	if cancel then
-		cancel()
+	local was = waiting[id]
+	if was then
+		was.cancel()
+		was.done.resolve(nil)
 	end
-	waiting[id] = ui.after(wait_ms, function()
-		waiting[id] = nil
-		M.remove_item(id)
-	end)
+	local out = promise()
+	waiting[id] = {
+		done = out,
+		cancel = ui.after(wait_ms, function()
+			waiting[id] = nil
+			local q, err = attempt(function(): any
+				return M.remove_item(id)
+			end)
+			if not q then
+				out.reject(err)
+				return
+			end
+			q:after(function()
+				out.resolve(true)
+			end, out.reject)
+		end),
+	}
+	return out
 end
 
 function M.undo_remove(id: string)
-	local cancel = waiting[id]
-	if cancel then
+	local was = waiting[id]
+	if was then
 		waiting[id] = nil
-		cancel()
+		was.cancel()
+		was.done.resolve(nil)
 		return
 	end
 	pcall(function()

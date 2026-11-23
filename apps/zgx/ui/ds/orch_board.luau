@@ -439,10 +439,28 @@ local OrchBoard = ui.component(function(props: Props): Node
 					},
 					{ separator = true },
 				}
+				local shown: { any } = {}
+				local named: { [string]: number } = {}
 				for _, o in ctx.orchestrators() do
 					if not o.archived and o.kind ~= "brain_dump" then
+						table.insert(shown, o)
+						named[o.name] = (named[o.name] or 0) + 1
+					end
+				end
+				-- (Two of one name: each says its project under it.)
+				local project_of: ((string) -> string?)? = (props :: any).project_of
+				for _, o in shown do
+					do
+						local project: string? = nil
+						if named[o.name] > 1 and project_of then
+							project = project_of(o.id)
+						end
 						table.insert(entries, {
 							label = o.name,
+							lead = function(): Node
+								return hue.Dot { hue = o.hue, size = 7 }
+							end,
+							detail = if project and project ~= "" then { icon = "folder", text = project } else nil,
 							checked = function(): boolean
 								return ctx.filter() == o.id
 							end,

@@ -31,7 +31,8 @@
     "date": "{m, select, 1 {Jan} 2 {Feb} 3 {Mar} 4 {Apr} 5 {May} 6 {Jun} 7 {Jul} 8 {Aug} 9 {Sep} 10 {Oct} 11 {Nov} 12 {Dec} other {}} {day}, {year}",
     "month_day": "{m, select, 1 {Jan} 2 {Feb} 3 {Mar} 4 {Apr} 5 {May} 6 {Jun} 7 {Jul} 8 {Aug} 9 {Sep} 10 {Oct} 11 {Nov} 12 {Dec} other {}} {day}",
     "date_time": "{date} at {time}",
-    "clock_12": "{h}:{mm} {half, select, am {AM} other {PM}}"
+    "clock_12": "{h}:{mm} {half, select, am {AM} other {PM}}",
+    "day_clock": "{day} {time}"
   },
   "ds": {
     "status": {
@@ -1434,8 +1435,8 @@
         "defer": "Defer",
         "defer_hour": "For an hour",
         "defer_hours": "For 4 hours",
-        "defer_tomorrow": "Until tomorrow, 9:00",
-        "defer_week": "Until Monday, 9:00",
+        "defer_tomorrow": "Until tomorrow, {time}",
+        "defer_week": "Until Monday, {time}",
         "decide": "Decide",
         "sending": "Sending",
         "failed": "Couldn't send your answer: {reason}",

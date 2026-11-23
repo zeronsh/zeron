@@ -278,6 +278,26 @@ function M.clock(at: number): string
 	})
 end
 
+-- When something is, as the person reads it on the board, an ask and a
+-- snooze (one way everywhere): the clock today ("3:45 PM"), the weekday
+-- with it within a week ("Mon 1:37 PM"), the day with it further off
+-- ("Nov 23 9:00 AM": the engine's own times say it so too). `now` in Unix
+-- seconds (os.time()'s when left out).
+function M.when(at: number, now: number?): string
+	local function day(t: number): number
+		local d = os.date("*t", math.floor(t)) :: any
+		d.hour, d.min, d.sec = 12, 0, 0
+		return os.time(d) // 86400
+	end
+	local apart = math.abs(day(at) - day(now or os.time()))
+	if apart == 0 then
+		return M.clock(at)
+	elseif apart < 7 then
+		return M.s("time.day_clock", { day = M.weekday(at), time = M.clock(at) })
+	end
+	return M.s("time.day_clock", { day = M.month_day(at), time = M.clock(at) })
+end
+
 -- Exactly when: "Oct 29, 2026 at 14:05".
 function M.exact(at: number): string
 	local d = os.date("*t", math.floor(at)) :: any

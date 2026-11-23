@@ -109,12 +109,9 @@ local function clipped(s: string): string
 	return string.sub(s, 1, cut - 1) .. "…"
 end
 
--- A time on a card: the clock today, the day with it otherwise.
+-- A time on a card: as every time the person reads (ds/locale `when`).
 function M.time(at: number, now: number): string
-	if model.day_start(at) == model.day_start(now) then
-		return locale.clock(at)
-	end
-	return locale.s("orch.board.day_time", { day = locale.weekday(at), time = locale.clock(at) })
+	return locale.when(at, now)
 end
 
 -- A status' words, as its card says them.
