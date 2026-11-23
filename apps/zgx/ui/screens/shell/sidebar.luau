@@ -1533,7 +1533,7 @@ local orch_rows = ui.computed(function(): { any }
 	if not mod then
 		return NO_ROWS
 	end
-	local now = mod.orchestration.now:get()
+	local now = mod.orchestration.now:get() or {}
 	local chats = mod.data.chats(sessions.now:get())
 	local list: { any } = {}
 	local with_archived = shared.archived_orchestrators:get()

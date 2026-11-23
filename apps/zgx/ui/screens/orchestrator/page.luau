@@ -97,7 +97,7 @@ end
 local Page = ui.component(function(props: { of: () -> string? }): Node
 	local function orchestrator(): any
 		local id = props.of()
-		for _, o in orchestration.now:get().orchestrators or {} do
+		for _, o in (orchestration.now:get() or {}).orchestrators or {} do
 			if o.id == id then
 				return o
 			end
@@ -126,7 +126,7 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 		local id = props.of()
 		local all = chats:get()
 		local out = {}
-		for _, m in orchestration.now:get().crew or {} do
+		for _, m in (orchestration.now:get() or {}).crew or {} do
 			if m.orchestrator_id == id and not m.released then
 				table.insert(out, { member = m, chat = all[m.chat_id] })
 			end
@@ -699,7 +699,7 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 			if orchestrator() then
 				return "found"
 			end
-			return if orchestration.now:get().state == "ready" then "missing" else "loading"
+			return if (orchestration.now:get() or {}).state == "ready" then "missing" else "loading"
 		end, function(kind: string): Node
 			if kind == "loading" then
 				return ui.div {}

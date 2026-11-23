@@ -119,7 +119,7 @@ function M.Thread(props: Props): Node
 		if not id then
 			return nil
 		end
-		for _, it in orchestration.now:get().items or {} do
+		for _, it in (orchestration.now:get() or {}).items or {} do
 			if it.id == id then
 				return it
 			end
@@ -135,7 +135,7 @@ function M.Thread(props: Props): Node
 	end
 	local function member(): any
 		local id = chat_id()
-		for _, m in orchestration.now:get().crew or {} do
+		for _, m in (orchestration.now:get() or {}).crew or {} do
 			if m.chat_id == id then
 				return m
 			end
@@ -153,7 +153,7 @@ function M.Thread(props: Props): Node
 	-- The ask of its that's open (its thread's or its card's), if one is.
 	local function open_ask(): any
 		local id, it = chat_id(), item()
-		for _, a in orchestration.now:get().asks or {} do
+		for _, a in (orchestration.now:get() or {}).asks or {} do
 			if (a.state == nil or a.state == "open") and ((id and a.from_chat == id) or (it and a.item_id == it.id)) then
 				return a
 			end
@@ -347,7 +347,7 @@ function M.Thread(props: Props): Node
 			return ""
 		end
 		local row = { member = m, chat = chat() }
-		return CrewList.doing(row, CrewList.asked_by(orchestration.now:get().asks))
+		return CrewList.doing(row, CrewList.asked_by((orchestration.now:get() or {}).asks))
 	end
 	local where = ui.column {
 		w_full = true,

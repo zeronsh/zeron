@@ -193,7 +193,7 @@ return function()
 			end
 			local label = args.text
 			if not label then
-				for _, a in orchestration.now:peek().asks or {} do
+				for _, a in (orchestration.now:peek() or {}).asks or {} do
 					if a.id == args.id then
 						label = ((a.options or {})[args.option or 0] or {}).label
 					end
@@ -333,7 +333,7 @@ return function()
 			-- would: its thread made, the card in Now.)
 			local id = op.id or op.item.id
 			local card: any = nil
-			for _, it in orchestration.now:peek().items or {} do
+			for _, it in (orchestration.now:peek() or {}).items or {} do
 				if it.id == id then
 					card = it
 				end
@@ -707,7 +707,7 @@ return function()
 		end)
 	end }
 	ui.command { id = "fixture.decision", title = "Fixture: a decision with pictures", run = function()
-		for _, a in orchestration.now:peek().asks or {} do
+		for _, a in (orchestration.now:peek() or {}).asks or {} do
 			if a.id == "ak-topo" then
 				return
 			end
@@ -754,7 +754,7 @@ return function()
 	-- A question whose context carries an email to send, quoted, and a
 	-- command (`fixture.decision_email`): what the person copies out.
 	ui.command { id = "fixture.decision_email", title = "Fixture: a question with an email to send", run = function()
-		for _, a in orchestration.now:peek().asks or {} do
+		for _, a in (orchestration.now:peek() or {}).asks or {} do
 			if a.id == "ak-mail" then
 				return
 			end

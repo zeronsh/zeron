@@ -25,7 +25,7 @@ local M = {}
 -- A chat opened: an orchestrator's on its own page, any other as a session;
 -- at `message` (an entry's id: the message an ask came from) when given.
 function M.open_chat(id: string, message: string?)
-	for _, o in orchestration.now:peek().orchestrators or {} do
+	for _, o in (orchestration.now:peek() or {}).orchestrators or {} do
 		if o.id == id then
 			route.orchestrator(id)
 			return
@@ -163,7 +163,7 @@ function M.Decision(props: DecisionProps): Node
 			if not id then
 				return nil
 			end
-			for _, a in orchestration.now:get().asks or {} do
+			for _, a in (orchestration.now:get() or {}).asks or {} do
 				if a.id == id then
 					return a
 				end

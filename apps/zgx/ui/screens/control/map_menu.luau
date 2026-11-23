@@ -48,7 +48,7 @@ end
 -- A reference to `id` (a chat, an orchestrator) put in Capture's composer
 -- (the Brain dump's, docked or floating), as dragging it there would.
 function M.mention(id: string)
-	local now = orchestration.now:peek()
+	local now = orchestration.now:peek() or {}
 	local brain: string? = nil
 	local ref: any = nil
 	for _, o in now.orchestrators or {} do
@@ -394,7 +394,7 @@ function M.entries(id: string): { any }?
 			},
 		}
 	end
-	for _, o in orchestration.now:peek().orchestrators or {} do
+	for _, o in (orchestration.now:peek() or {}).orchestrators or {} do
 		if o.id == id then
 			return shared(id, o) or chat_entries(id, o)
 		end
@@ -422,7 +422,7 @@ function M.Dialogs(): Node
 			sessions.rename_device(r.id, name):after(function() end, said("control.map_menu.failed"))
 		else
 			local is_orch = false
-			for _, o in orchestration.now:peek().orchestrators or {} do
+			for _, o in (orchestration.now:peek() or {}).orchestrators or {} do
 				if o.id == r.id then
 					is_orch = true
 				end

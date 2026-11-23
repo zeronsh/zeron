@@ -53,7 +53,7 @@ local function session_items(): { Item }
 	-- Orchestrators is on.)
 	local orchestrators: { [string]: boolean } = {}
 	local orch = plugins.module("orchestrators")
-	for _, o in (if orch then orch.orchestration.now:get().orchestrators else nil) or {} do
+	for _, o in (if orch then (orch.orchestration.now:get() or {}).orchestrators else nil) or {} do
 		orchestrators[o.id] = true
 	end
 	local function add(c: sessions.Chat, archived: boolean)
@@ -574,7 +574,7 @@ local function root(): { Item }
 				route.control()
 			end,
 		})
-		for _, o in orch.orchestration.now:get().orchestrators or {} do
+		for _, o in (orch.orchestration.now:get() or {}).orchestrators or {} do
 			if o.kind == "standard" and not o.archived then
 				local id = o.id
 				table.insert(out, {
