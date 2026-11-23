@@ -146,6 +146,7 @@ end
 show(false)
 
 local calls = ui.state("orch_calls", "")
+local creates = ui.state("orch_creates", {} :: { any })
 local function settled(value: any): any
 	return {
 		after = function(_self: any, done: (any) -> (), _failed: ((any) -> ())?)
@@ -191,6 +192,26 @@ local on_limit = ui.state("orch_on_limit", "")
 ;(orchestration :: any).op = function(op: { [string]: any }): any
 	local line = said(op)
 	calls:set(if calls:peek() == "" then line else `{calls:peek()}\n{line}`)
+	if op.op == "createOrchestrator" then
+		-- (Each create whole, for the tests to read its crew and rules.)
+		creates:push(op)
+		-- "Fresh start": a new orchestrator whose chat is empty, as a real
+		-- create's is, to land on.
+		if op.name == "Fresh start" then
+			local now = table.clone(orchestration.now:peek())
+			local list = table.clone(now.orchestrators or {})
+			table.insert(list, { id = "orc-fresh", name = op.name, goal = op.goal or "", hue = 210, crew = { devices = {} }, paused = false, archived = false })
+			now.orchestrators = list
+			orchestration.now:set(now)
+			local s = table.clone(sessions.now:peek())
+			local cs = table.clone(s.chats or {})
+			table.insert(cs, { id = "orc-fresh", title = op.name, device = "dev-desk", updated = NOW, created = NOW, agent = "claude" })
+			s.chats = cs
+			sessions.now:set(s)
+			fixture_chats:set_key({ "orc-fresh" }, { messages = {}, session = { id = "orc-fresh", state = "ready", title = op.name, device = "dev-desk", harness = "claude-code", model = "claude-code/opus-5.5" } })
+			return settled({ id = "orc-fresh" })
+		end
+	end
 	local policy = op.crew and op.crew.onLimit
 	if op.op == "updateOrchestrator" and policy then
 		on_limit:set(`switchAccount={tostring(policy.switchAccount)},switchHarness={tostring(policy.switchHarness)}`)

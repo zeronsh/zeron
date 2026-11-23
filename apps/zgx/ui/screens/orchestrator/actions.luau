@@ -28,6 +28,9 @@ M.settings_open = ui.state("orch_settings_open", false)
 M.settings_of = ui.state("orch_settings_of", nil :: string?)
 -- The New dialog's project and device to start on (a project's own "+").
 M.new_seed = ui.state("orch_new_seed", nil :: { project: string?, device: string? }?)
+-- The orchestrator just made here, until its page has given its composer
+-- the keys (screens/orchestrator/page).
+M.just_made = ui.state("orch_just_made", nil :: string?)
 
 local function failed(key: string): (any) -> ()
 	return function(_err: any)
@@ -91,6 +94,15 @@ function M.promote(chat_id: string)
 	end, failed("orch.actions.promote_failed"))
 end
 
+export type Crew = {
+	-- Where its crew runs (none: the orchestrator's own device).
+	devices: { string }?,
+	-- How many at once (none: no limit).
+	max_running: number?,
+	harness: string?,
+	model: string?,
+}
+
 export type Fields = {
 	name: string,
 	goal: string?,
@@ -98,6 +110,10 @@ export type Fields = {
 	device: string?,
 	harness: string?,
 	model: string?,
+	-- Its rules (what it is told) and its crew's (what every crew thread is).
+	rules: string?,
+	crew_rules: string?,
+	crew: Crew?,
 	-- The opening's request id: the same one twice makes one orchestrator.
 	request_id: string?,
 }
@@ -109,10 +125,26 @@ function M.create(f: Fields): any
 	op.harness = f.harness
 	op.model = f.model
 	op.requestId = f.request_id
+	if f.rules and f.rules ~= "" then
+		op.rules = f.rules
+	end
+	if f.crew_rules and f.crew_rules ~= "" then
+		op.crewRules = f.crew_rules
+	end
+	local c = f.crew
+	if c then
+		op.crew = {
+			devices = if c.devices and #c.devices > 0 then c.devices else nil,
+			maxRunning = c.max_running,
+			harness = if c.model then c.harness else nil,
+			model = c.model,
+		}
+	end
 	local p = orchestration.op(op)
 	p:after(function(reply: any)
 		local id = id_of(reply)
 		if id then
+			M.just_made:set(id)
 			route.orchestrator(id)
 		end
 	end, failed("orch.actions.create_failed"))

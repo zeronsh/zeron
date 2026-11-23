@@ -1559,7 +1559,9 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 	-- Files, and the files pane's, carried over it, dropped anywhere on it, as
 	-- on the chat page: chips on its own draft (a sidebar chat, mentioned), its
 	-- composer taking the keys. (A split's pane is the page's to take: its card.)
-	local focus = ui.use_state(0)
+	-- (Or its caller's, `data.focus`: a page that hands it the keys, an
+	-- orchestrator's just made.)
+	local focus = data.focus or ui.use_state(0)
 	-- Bumped, its model picker opens (⌘/, /model), as the chat page's.
 	local open_model = ui.use_state(0)
 	-- ⌘F's own, over its own transcript.
