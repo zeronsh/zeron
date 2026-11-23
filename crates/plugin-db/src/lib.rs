@@ -144,6 +144,18 @@ const SETTABLE_PRAGMAS: &[&str] = &[
 /// pragmas that bound it, or attach another file.
 fn authorize(context: AuthContext<'_>) -> Authorization {
     match context.action {
+        // A wait on the other process past Zeron's own: SQLite's busy wait
+        // isn't a step the progress handler sees, so it would outlast
+        // [`CALL_TIME`]. Not an error (the plugin's SQL goes on), only kept
+        // at [`BUSY_TIMEOUT`]; a shorter wait is the plugin's to set.
+        AuthAction::Pragma { pragma_name, pragma_value: Some(value) }
+            if pragma_name.eq_ignore_ascii_case("busy_timeout") =>
+        {
+            match value.trim().parse::<i64>() {
+                Ok(ms) if ms <= BUSY_TIMEOUT.as_millis() as i64 => Authorization::Allow,
+                _ => Authorization::Ignore,
+            }
+        }
         AuthAction::Pragma { pragma_name, pragma_value: Some(_) }
             if !SETTABLE_PRAGMAS.contains(&pragma_name.to_ascii_lowercase().as_str()) =>
         {
@@ -348,6 +360,23 @@ mod tests {
         let out = db.with_file_name("copied.sqlite3");
         assert!(call(&db, &json!({ "op": "exec", "sql": format!("VACUUM INTO '{}'", out.display()) })).is_err());
         assert!(!out.exists());
+    }
+
+    /// A wait on the other process can't be set past Zeron's (its busy wait
+    /// would outlast a call's time): asked, it's not an error, and stays.
+    #[test]
+    fn a_plugin_cant_wait_on_the_file_past_zerons_wait() {
+        let db = temp("busy");
+        let read = || call(&db, &json!({ "op": "query", "sql": "PRAGMA busy_timeout" })).unwrap()[0]["timeout"].clone();
+        let zerons = json!(BUSY_TIMEOUT.as_millis() as u64);
+        assert_eq!(read(), zerons);
+        for sql in ["PRAGMA busy_timeout = 600000", "PRAGMA BUSY_TIMEOUT=2147483647", "PRAGMA busy_timeout = 'x'"] {
+            call(&db, &json!({ "op": "exec", "sql": sql })).unwrap_or_else(|e| panic!("{sql}: {e}"));
+            assert_eq!(read(), zerons, "{sql}");
+        }
+        // A shorter wait is the plugin's to set.
+        call(&db, &json!({ "op": "exec", "sql": "PRAGMA busy_timeout = 250" })).unwrap();
+        assert_eq!(read(), json!(250));
     }
 
     /// A runaway statement stops at its time, and the file is usable after.
