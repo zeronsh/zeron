@@ -299,6 +299,23 @@ local said = ui.state("calls", "")
 local function note(what: string)
 	said:set(if said:peek() == "" then what else `{said:peek()},{what}`)
 end
+-- What the engine says to every action while set (a test of refusals): the
+-- action is noted, the rows are left, and its promise is rejected with it.
+local refuse = ui.state("refuse", "")
+local function refused(): any
+	local why = refuse:peek()
+	if why == "" then
+		return nil
+	end
+	return {
+		after = function(self: any, _done: any, failed: ((any) -> ())?): any
+			if failed then
+				failed({ message = why })
+			end
+			return self
+		end,
+	}
+end
 local filter = ui.state("filter", nil :: string?)
 local compact = ui.state("compact", false)
 local only_list = ui.state("only_list", false)
@@ -343,6 +360,20 @@ local function move(id: string, place: string, status: string, reason: string, e
 	patch(cards, id, fields)
 end
 
+-- Moves the engine makes by itself, with no action of the person's: its
+-- next frame changes the rows, as these do.
+ui.command { id = "engine_done", title = "The engine closes a running card", run = function()
+	patch(items, "it-chat", { state = "done", done = T })
+	move("it-chat", "done", "done", "Its thread reported done", {
+		by = "engine", cause = "reported", unseen = true, old_state = "done",
+		closed = { at = T, by = "engine", how = "report" },
+	})
+end }
+ui.command { id = "engine_start", title = "The engine starts a planned card", run = function()
+	patch(items, "it-keyed", { state = "active", threads = { "th-keyed" } })
+	move("it-keyed", "running", "starting", "Thread started", { by = "engine", cause = "started", old_state = "active" })
+end }
+
 local function board_props(): { [string]: any }
 	return {
 		items = items,
@@ -374,6 +405,10 @@ local function board_props(): { [string]: any }
 		end,
 		on_answer = function(ask: any, choice: any): any
 			note(`answer:{ask.id}:{choice.option or ""}:{choice.text or ""}`)
+			local no = refused()
+			if no then
+				return no
+			end
 			patch(asks, ask.id, { state = "answered" })
 			if ask.item_id then
 				move(ask.item_id, "running", "working", "You answered", { asks = {} })
@@ -382,6 +417,10 @@ local function board_props(): { [string]: any }
 		end,
 		on_snooze = function(ask_id: string, until_ms: number?): any
 			note(`snooze:{ask_id}:{if until_ms then "later" else "now"}`)
+			local no = refused()
+			if no then
+				return no
+			end
 			for _, a in asks:peek() do
 				if a.id == ask_id and a.item_id then
 					if until_ms then
@@ -397,6 +436,10 @@ local function board_props(): { [string]: any }
 		end,
 		on_close = function(id: string, dropped: boolean): any
 			note(`close:{id}:{dropped}`)
+			local no = refused()
+			if no then
+				return no
+			end
 			patch(items, id, { state = if dropped then "dropped" else "done", done = T })
 			move(id, if dropped then "dropped" else "done", if dropped then "dropped" else "done", if dropped then "You dropped it" else "You marked it done", {
 				old_state = if dropped then "dropped" else "done",
@@ -407,57 +450,94 @@ local function board_props(): { [string]: any }
 		end,
 		on_reopen = function(id: string): any
 			note(`reopen:{id}`)
+			local no = refused()
+			if no then
+				return no
+			end
 			patch(items, id, { state = "planned" })
 			move(id, "planned", "next", "You reopened it", { old_state = "planned", closed = false })
 			return nil
 		end,
 		on_hold = function(id: string, held: boolean): any
 			note(`hold:{id}:{held}`)
+			local no = refused()
+			if no then
+				return no
+			end
 			patch(items, id, { state = if held then "inbox" else "planned" })
 			move(id, "planned", if held then "held" else "next", if held then "You kept it for later" else "You let it go", { old_state = if held then "inbox" else "planned", held = held })
 			return nil
 		end,
 		on_pause = function(id: string): any
 			note(`pause:{id}`)
+			local no = refused()
+			if no then
+				return no
+			end
 			patch(items, id, { state = "blocked", paused_at = T })
 			move(id, "planned", "paused", "You paused it", { old_state = "blocked" })
 			return nil
 		end,
 		on_resume = function(id: string): any
 			note(`resume:{id}`)
+			local no = refused()
+			if no then
+				return no
+			end
 			patch(items, id, { state = "active", paused_at = false })
 			move(id, "running", "working", "You resumed it", { old_state = "active" })
 			return nil
 		end,
 		on_start = function(id: string): any
 			note(`start:{id}`)
+			local no = refused()
+			if no then
+				return no
+			end
 			patch(items, id, { state = "active", threads = { `th-{id}` } })
 			move(id, "running", "queued", "You started it", { old_state = "active" })
 			return nil
 		end,
 		on_remove = function(id: string): any
 			note(`remove:{id}`)
+			local no = refused()
+			if no then
+				return no
+			end
 			patch(items, id, { removed = true })
 			return nil
 		end,
 		on_restore = function(item: any): any
 			note(`restore:{item.id}`)
+			local no = refused()
+			if no then
+				return no
+			end
 			patch(items, item.id, { removed = false })
 			return nil
 		end,
 		on_seen = function(id: string): any
 			note(`seen:{id}`)
+			local no = refused()
+			if no then
+				return no
+			end
 			patch(cards, id, { unseen = false, seen_at = T })
 			return nil
 		end,
 		on_new_task = function(text: string, orchestrator_id: string?): any
 			note(`new:{orchestrator_id or ""}:{text}`)
+			local no = refused()
+			if no then
+				return no
+			end
 			return nil
 		end,
 	}
 end
 
-return ui.div { w_full = true, h_full = true, ds.toast.Host {}, ui.scroll {
+-- (The toasts over the board, as a window has them.)
+return ui.div { w_full = true, h_full = true, ui.scroll {
 	id = "fixture-root",
 	w_full = true,
 	h_full = true,
@@ -503,4 +583,4 @@ return ui.div { w_full = true, h_full = true, ds.toast.Host {}, ui.scroll {
 			return OrchBoard(props :: any)
 		end),
 	},
-} }
+}, ds.toast.Host {} }

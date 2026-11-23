@@ -39,13 +39,17 @@ export type Actions = {
 	snooze_menu: (ask: any) -> { any },
 }
 
--- Why something was refused, in the engine's words where it gave any.
+-- Why something was refused, in the engine's words where it gave any: a
+-- promise's error (a table, or the host's `UiError`, by its `message`), or
+-- what a call raised, its script position gone.
 local function reason(err: any): string
 	if type(err) == "string" then
-		return err
-	elseif type(err) == "table" then
-		local m = (err :: any).message or (err :: any).error
-		if type(m) == "string" then
+		return (string.gsub(err, "^.-:%d+: ", ""))
+	elseif type(err) == "table" or type(err) == "userdata" then
+		local ok, m = pcall(function(): any
+			return (err :: any).message or (err :: any).error
+		end)
+		if ok and type(m) == "string" then
 			return m
 		end
 	end
@@ -72,8 +76,26 @@ M.lead = lead
 function M.make(ctx: Ctx.Ctx): Actions
 	local props = ctx.props
 
+	-- The host's prop called: its promise, or (a promise of) what it raised
+	-- when the call itself failed (an app without the host action).
+	local function call(f: (...any) -> any, ...: any): any
+		local ok, sent = pcall(f, ...)
+		if ok then
+			return sent
+		end
+		return {
+			after = function(self: any, _done: any, failed: ((any) -> ())?): any
+				if failed then
+					failed(sent)
+				end
+				return self
+			end,
+		}
+	end
+
 	-- `sent` said when it took (`done_key`, the card's title under it) or
-	-- when it was refused (`failed_key`, with why).
+	-- when it was refused (`failed_key`, with why). Said once per action: a
+	-- move the engine makes after it is never said.
 	local function said(sent: any, title: string, done_key: string?, failed_key: string)
 		Ctx.after(sent, function(err: any)
 			toast.show { title = locale.s(failed_key), body = reason(err), tone = "danger" }
@@ -82,6 +104,12 @@ function M.make(ctx: Ctx.Ctx): Actions
 				toast.show { title = locale.s(done_key), body = title }
 			end
 		end)
+	end
+
+	-- The title of the card an ask is on, if it's on one.
+	local function title_of(ask: any): string?
+		local e = ask and ask.item_id and ctx.entry(ask.item_id)
+		return if e then e.item.title else nil
 	end
 
 	local act = {} :: Actions
@@ -106,43 +134,43 @@ function M.make(ctx: Ctx.Ctx): Actions
 	function act.close(e: Ctx.Entry, dropped: boolean)
 		local f = props.on_close
 		if f then
-			said(f(e.id, dropped), e.item.title, if dropped then "orch.board.said.dropped" else "orch.board.said.done", "orch.board.failed")
+			said(call(f, e.id, dropped), e.item.title, if dropped then "orch.board.said.dropped" else "orch.board.said.done", "orch.board.failed")
 		end
 	end
 	function act.reopen(e: Ctx.Entry)
 		local f = props.on_reopen
 		if f then
-			said(f(e.id), e.item.title, "orch.board.said.reopened", "orch.board.failed")
+			said(call(f, e.id), e.item.title, "orch.board.said.reopened", "orch.board.failed")
 		end
 	end
 	function act.hold(e: Ctx.Entry, held: boolean)
 		local f = props.on_hold
 		if f then
-			said(f(e.id, held), e.item.title, if held then "orch.board.said.held" else "orch.board.said.released", "orch.board.failed")
+			said(call(f, e.id, held), e.item.title, if held then "orch.board.said.held" else "orch.board.said.released", "orch.board.failed")
 		end
 	end
 	function act.pause(e: Ctx.Entry)
 		local f = props.on_pause
 		if f then
-			said(f(e.id), e.item.title, "orch.board.said.paused", "orch.board.pause_failed")
+			said(call(f, e.id), e.item.title, "orch.board.said.paused", "orch.board.pause_failed")
 		end
 	end
 	function act.resume(e: Ctx.Entry)
 		local f = props.on_resume
 		if f then
-			said(f(e.id, "active"), e.item.title, "orch.board.said.resumed", "orch.board.resume_failed")
+			said(call(f, e.id, "active"), e.item.title, "orch.board.said.resumed", "orch.board.resume_failed")
 		end
 	end
 	function act.start(e: Ctx.Entry)
 		local f = props.on_start
 		if f then
-			said(f(e.id), e.item.title, "orch.board.said.started", "orch.board.start_failed")
+			said(call(f, e.id), e.item.title, "orch.board.said.started", "orch.board.start_failed")
 		end
 	end
 	function act.request_changes(e: Ctx.Entry, text: string)
 		local f = props.on_request_changes
 		if f and text ~= "" then
-			said(f(e.id, text), e.item.title, "orch.board.said.changes", "orch.board.failed")
+			said(call(f, e.id, text), e.item.title, "orch.board.said.changes", "orch.board.failed")
 		end
 	end
 	-- Taken off the board (its chat untouched), an Undo beside it a while.
@@ -152,7 +180,7 @@ function M.make(ctx: Ctx.Ctx): Actions
 			return
 		end
 		local item = e.item
-		Ctx.after(f(e.id), function(err: any)
+		Ctx.after(call(f, e.id), function(err: any)
 			toast.show { title = locale.s("orch.board.delete_failed"), body = reason(err), tone = "danger" }
 		end, function()
 			local restore = props.on_restore
@@ -163,7 +191,7 @@ function M.make(ctx: Ctx.Ctx): Actions
 					then {
 						label = locale.s("orch.board.undo"),
 						run = function()
-							Ctx.after(restore(item), function(err: any)
+							Ctx.after(call(restore, item), function(err: any)
 								toast.show { title = locale.s("orch.board.undo_failed"), body = reason(err), tone = "danger" }
 							end)
 						end,
@@ -177,19 +205,26 @@ function M.make(ctx: Ctx.Ctx): Actions
 		if not f or not ask then
 			return
 		end
-		Ctx.after(f(ask.id, until_ms), function(err: any)
+		local title = title_of(ask)
+		Ctx.after(call(f, ask.id, until_ms), function(err: any)
 			toast.show { title = locale.s("orch.board.snooze_failed"), body = reason(err), tone = "danger" }
 		end, function()
-			if until_ms then
-				toast.show { title = locale.s("orch.board.said.snoozed") }
-			else
-				toast.show { title = locale.s("orch.board.said.back") }
-			end
+			toast.show { title = locale.s(if until_ms then "orch.board.said.snoozed" else "orch.board.said.back"), body = title }
 		end)
 	end
+	-- (Sent past its Undo by ds/orch_decide, which says a refusal on the
+	-- ask itself, with Retry: only that it took is said here.)
 	function act.answer(ask: any, choice: any): any
 		local f = props.on_answer
-		return if f then f(ask, choice) else nil
+		if not f then
+			return nil
+		end
+		local sent = f(ask, choice)
+		local title = title_of(ask)
+		Ctx.after(sent, nil, function()
+			toast.show { title = locale.s("orch.board.said.answered"), body = title }
+		end)
+		return sent
 	end
 	function act.expand(ask: any)
 		local f = props.on_expand_ask

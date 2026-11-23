@@ -1259,6 +1259,107 @@ mod tests {
         assert!(person_op(&json!({ "op": "seenItem", "id": "it-1" })).is_ok());
     }
 
+    /// Every op the board sends for what the person does to a card, as
+    /// account/orchestration.luau builds it (ui/tests/orch_board_ops.test.luau
+    /// checks the scripts build these same tables): the bridge lets it
+    /// through, and the engine reads it as the op it means, with its fields.
+    #[test]
+    fn every_board_action_is_the_person_s_and_reads_as_the_engine_s_op() {
+        use zeron_proto::orchestration::{OrchestrateOp as Op, RefKind, WorkState};
+        let at = (NOW + 3600) * 1000;
+        let deferred = defer_params(&Value::record([("id", Value::from("ak-1")), ("until", Value::from((at / 1000) as f64))])).unwrap();
+        let answered = answer_params(&Value::record([("id", Value::from("ak-1")), ("option", Value::from(1.0))])).unwrap();
+        let back = defer_params(&Value::record([("id", Value::from("ak-1"))])).unwrap();
+        let cases: Vec<(Json, Box<dyn Fn(&Op) -> bool>)> = vec![
+            (json!({ "op": "closeItem", "id": "it-1" }), Box::new(|op| matches!(op, Op::CloseItem { id, reason: None, dropped: false } if id == "it-1"))),
+            (json!({ "op": "closeItem", "id": "it-1", "dropped": true }), Box::new(|op| matches!(op, Op::CloseItem { dropped: true, .. }))),
+            (json!({ "op": "reopenItem", "id": "it-1" }), Box::new(|op| matches!(op, Op::ReopenItem { id } if id == "it-1"))),
+            (json!({ "op": "holdItem", "id": "it-1", "held": true }), Box::new(|op| matches!(op, Op::HoldItem { held: true, .. }))),
+            (json!({ "op": "holdItem", "id": "it-1", "held": false }), Box::new(|op| matches!(op, Op::HoldItem { held: false, .. }))),
+            (json!({ "op": "seenItem", "id": "it-1" }), Box::new(|op| matches!(op, Op::SeenItem { id } if id == "it-1"))),
+            (json!({ "op": "pauseItem", "id": "it-1" }), Box::new(|op| matches!(op, Op::PauseItem { .. }))),
+            // (Resume into Running: the engine's `active`, its threads told to carry on.)
+            (
+                json!({ "op": "resumeItem", "id": "it-1", "state": "active" }),
+                Box::new(|op| matches!(op, Op::ResumeItem { state: Some(WorkState::Active), .. })),
+            ),
+            (json!({ "op": "startItem", "id": "it-1" }), Box::new(|op| matches!(op, Op::StartItem { id } if id == "it-1"))),
+            (json!({ "op": "removeItem", "id": "it-1" }), Box::new(|op| matches!(op, Op::RemoveItem { .. }))),
+            (
+                json!({ "op": "requestChanges", "id": "it-1", "text": "tighten it" }),
+                Box::new(|op| matches!(op, Op::RequestChanges { text, .. } if text == "tighten it")),
+            ),
+            // (Delete's Undo: the card made again, no `state` on it.)
+            (
+                json!({ "op": "upsertItem", "item": { "orchestratorId": "orc-1", "title": "T", "detail": "D", "priority": "normal",
+                    "threads": ["th-1"], "links": [], "order": 3 } }),
+                Box::new(|op| matches!(op, Op::UpsertItem { item, ask: None } if item.id.is_none() && item.state.is_none() && item.title.as_deref() == Some("T"))),
+            ),
+            // (A Luau table that is empty arrives as a list.)
+            (
+                json!({ "op": "upsertItem", "item": { "title": "T", "detail": "", "threads": [], "links": [] } }),
+                Box::new(|op| matches!(op, Op::UpsertItem { .. })),
+            ),
+            (
+                json!({ "op": "dump", "text": "Speed up the sidebar", "refs": [{ "kind": "orchestrator", "id": "orc-ci", "label": "CI speed" }] }),
+                Box::new(|op| {
+                    matches!(op, Op::Dump { text, refs, .. } if text == "Speed up the sidebar" && refs.len() == 1 && refs[0].kind == RefKind::Orchestrator && refs[0].id == "orc-ci")
+                }),
+            ),
+            (json!({ "op": "dump", "text": "Look at the logs" }), Box::new(|op| matches!(op, Op::Dump { refs, .. } if refs.is_empty()))),
+            (
+                deferred,
+                Box::new(move |op| matches!(op, Op::DeferAsk { id, until: Some(u) } if id == "ak-1" && u.timestamp_millis() == at)),
+            ),
+            (back, Box::new(|op| matches!(op, Op::DeferAsk { until: None, .. }))),
+            (answered, Box::new(|op| matches!(op, Op::AnswerAsk { option: Some(0), .. }))),
+        ];
+        for (params, is) in &cases {
+            assert!(person_op(params).is_ok(), "refused by the bridge: {params}");
+            let op: Op = serde_json::from_value(params.clone()).unwrap_or_else(|e| panic!("{params}: {e}"));
+            assert!(is(&op), "{params} read as {op:?}");
+        }
+    }
+
+    /// The ops an agent sends (through Zeron's tools) never come from the
+    /// window; every other op the engine has is the person's.
+    #[test]
+    fn only_an_agent_s_ops_are_refused_from_the_window() {
+        const AGENT_ONLY: &[&str] = &["report", "ask", "route", "dumpDone"];
+        for op in AGENT_ONLY {
+            assert_eq!(person_op(&json!({ "op": op })), Err("not yours".to_string()), "{op}");
+            assert!(!PERSON_OPS.contains(op), "{op}");
+        }
+        // (Each op the engine reads, by its wire name: the person's or an agent's.)
+        let source = include_str!("../../../crates/proto/src/orchestration.rs");
+        let start = source.find("pub enum OrchestrateOp {").expect("OrchestrateOp");
+        let body = &source[start..];
+        let body = &body[..body.find("\n}\n").expect("its end")];
+        let mut names = Vec::new();
+        for line in body.lines() {
+            let t = line.strip_prefix("    ").unwrap_or_default();
+            if t.starts_with(|c: char| c.is_ascii_uppercase()) {
+                let name: String = t.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+                let mut wire = name.clone();
+                wire[..1].make_ascii_lowercase();
+                names.push(wire);
+            }
+        }
+        assert!(names.len() > 20, "{names:?}");
+        for op in ["closeItem", "reopenItem", "holdItem", "seenItem", "pauseItem", "resumeItem", "startItem", "removeItem"] {
+            assert!(names.iter().any(|n| n == op), "{op} is no op of the engine's");
+        }
+        for name in &names {
+            assert!(
+                PERSON_OPS.contains(&name.as_str()) || AGENT_ONLY.contains(&name.as_str()),
+                "{name}: neither the person's (PERSON_OPS) nor listed as an agent's"
+            );
+        }
+        for op in PERSON_OPS {
+            assert!(names.iter().any(|n| n == op), "{op} in PERSON_OPS is no op of the engine's");
+        }
+    }
+
     /// A card's place as the engine worked it out reaches scripts whole, and
     /// a move of one card makes only that card's row again.
     #[test]

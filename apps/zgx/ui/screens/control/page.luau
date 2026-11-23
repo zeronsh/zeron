@@ -931,11 +931,8 @@ local function board(card_build: ((make: () -> Node, i: number) -> Node)?): Node
 			end
 			return nil
 		end,
-		on_move = function(id: string, state: string, order: number)
-			orchestration.move_item(id, state, order):after(function() end, said("control.board.failed"))
-		end,
-		-- (Put in Blocked: paused; a paused card taken out: resumed there.)
-		-- (Their promises: refused, the board puts the card back and says so.)
+		-- (What the person does to a card: each a promise, said by the
+		-- board when it took or was refused, ds/orch_board_actions.)
 		on_pause = orchestration.pause_item,
 		on_resume = orchestration.resume_item,
 		paused_open = M.board_paused,
@@ -944,15 +941,7 @@ local function board(card_build: ((make: () -> Node, i: number) -> Node)?): Node
 			local now = BD.now()
 			return now and now.asks
 		end,
-		on_approve = function(id: string)
-			orchestration.approve_item(id):after(function() end, said("control.board.failed"))
-		end,
-		on_request_changes = function(id: string, text: string)
-			orchestration.request_changes(id, text):after(function() end, said("control.board.failed"))
-		end,
-		on_priority = function(id: string, p: string)
-			orchestration.set_priority(id, p):after(function() end, said("control.board.failed"))
-		end,
+		on_request_changes = orchestration.request_changes,
 		on_open_thread = M.open_chat,
 		-- (Its dump in Capture's history, on Overview.)
 		on_source = function(src: any)

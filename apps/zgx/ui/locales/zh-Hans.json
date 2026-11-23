@@ -4496,7 +4496,8 @@
         "started": "Started",
         "changes": "Changes sent to its thread",
         "snoozed": "Snoozed",
-        "back": "Brought back"
+        "back": "Brought back",
+        "answered": "Answered"
       },
       "fact": {
         "status": "Status",

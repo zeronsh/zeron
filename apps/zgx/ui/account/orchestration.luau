@@ -482,13 +482,10 @@ function M.add_to_board(chat_id: string): any
 	return M.op({ op = "addToBoard", chatId = chat_id })
 end
 
--- An Inbox or Next card started: its thread made (in its project), the
--- card in Now; at `order` when given (where it was dropped: the person
--- moving a card with no thread to Now starts it). A promise.
-function M.start_item(id: string, order: number?): any
-	if order then
-		return M.op({ op = "upsertItem", item = { id = id, state = "active", order = order } })
-	end
+-- A Planned card started: its thread made (in its project), the card
+-- Running. A promise. (Through `startItem`: the engine works a card's
+-- place out, and `state` on `upsertItem` is going.)
+function M.start_item(id: string): any
 	return M.op({ op = "startItem", id = id })
 end
 
@@ -497,30 +494,75 @@ function M.remove_item(id: string): any
 	return M.op({ op = "removeItem", id = id })
 end
 
+-- What the person did to a card that put it where it was, done again on
+-- the card made in its place (`restore_item`): the op, or nil. (`state` is
+-- the column the engine still writes for older readers, read here, never
+-- set: the engine works the new card's place out from these.)
+local function settle_op(item: any, id: string): { [string]: any }?
+	local state = item.state
+	if state == "done" then
+		return { op = "closeItem", id = id }
+	elseif state == "dropped" then
+		return { op = "closeItem", id = id, dropped = true }
+	elseif state == "inbox" then
+		return { op = "holdItem", id = id, held = true }
+	elseif M.is_paused(item) then
+		return { op = "pauseItem", id = id }
+	end
+	return nil
+end
+M.settle_op = settle_op
+
 -- A card taken off the board, put back as it was: made again from its
--- fields (the engine brings none back), a new card. A promise of `{ id }`.
+-- fields (the engine brings none back), a new card, then closed, held or
+-- paused as it was. A promise of `{ id }`.
 function M.restore_item(item: any): any
 	local src = item.source
 	local links: { any } = {}
 	for _, l in item.links or {} do
 		table.insert(links, { kind = l.kind, label = l.label, target = l.target })
 	end
-	return M.op({
-		op = "upsertItem",
-		item = {
-			orchestratorId = item.orchestrator_id,
-			title = item.title,
-			detail = item.detail or "",
-			state = item.state,
-			priority = item.priority,
-			progress = item.progress,
-			threads = item.threads or {},
-			links = links,
-			outcome = item.outcome,
-			source = if src and src.dump_id then { dumpId = src.dump_id, routeId = src.route_id or "" } else nil,
-			order = item.order,
-		},
-	})
+	local out = promise()
+	local made, raised = attempt(function(): any
+		return M.op({
+			op = "upsertItem",
+			item = {
+				orchestratorId = item.orchestrator_id,
+				title = item.title,
+				detail = item.detail or "",
+				priority = item.priority,
+				progress = item.progress,
+				threads = item.threads or {},
+				links = links,
+				outcome = item.outcome,
+				source = if src and src.dump_id then { dumpId = src.dump_id, routeId = src.route_id or "" } else nil,
+				order = item.order,
+			},
+		})
+	end)
+	if not made then
+		out.reject(raised)
+		return out
+	end
+	made:after(function(reply: any)
+		local id = type(reply) == "table" and reply.id
+		local then_op = if type(id) == "string" then settle_op(item, id) else nil
+		if not then_op then
+			out.resolve(reply)
+			return
+		end
+		local p, err = attempt(function(): any
+			return M.op(then_op)
+		end)
+		if not p then
+			out.reject(err)
+			return
+		end
+		p:after(function()
+			out.resolve(reply)
+		end, out.reject)
+	end, out.reject)
+	return out
 end
 
 -- Whether a chat has a card on the board not done yet.
