@@ -8666,4 +8666,31 @@ pub(crate) mod tests {
         sessions.ipc_port_ready(limit).await;
         assert_eq!(start.elapsed(), Duration::ZERO);
     }
+
+    /// Zeron's MCP server for a chat's run offers orchestration's tools
+    /// (`ZERON_ORCHESTRATION=1` in its env) only while Orchestrators is on:
+    /// off, none; on, there; turned off again, gone from the next launch.
+    #[tokio::test]
+    async fn the_mcp_env_says_orchestration_only_while_the_switch_is_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            Arc::new(RunJournal::open(dir.path().join("journals")).unwrap()),
+            Arc::new(HarnessRegistry::new()),
+        );
+        sessions.set_ipc_port(27699);
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        sessions.set_orchestration(crate::orchestration::OrchestrationSwitch::from_watch(rx));
+        let env = || {
+            let (server, _grant) = sessions.inner.zeron_mcp("chat-1", false, false).expect("a server");
+            server.env.get(zeron_proto::McpServer::ORCHESTRATION_ENV).cloned()
+        };
+        assert_eq!(env(), None, "off: not set");
+        tx.send(true).unwrap();
+        assert_eq!(env().as_deref(), Some("1"), "on: set");
+        tx.send(false).unwrap();
+        assert_eq!(env(), None, "off again: gone from the next launch");
+        tx.send(true).unwrap();
+        assert_eq!(env().as_deref(), Some("1"), "on again: back");
+    }
 }
