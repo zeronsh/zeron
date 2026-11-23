@@ -275,9 +275,19 @@
       "workers_dev": true,
       "routes": [
         { "pattern": "staging.zeron.sh", "custom_domain": true },
+        // Member cards on the staging site, as production's on zeron.sh: the
+        // store's pages link to author cards. They render from the request's
+        // origin and read staging's own directory, CARD_IMAGES bucket,
+        // browser and CARD_READS; /card/* is the same static assets.
+        { "pattern": "site-staging.zeron.sh/@*", "zone_name": "zeron.sh" },
+        { "pattern": "site-staging.zeron.sh/c/*", "zone_name": "zeron.sh" },
+        { "pattern": "site-staging.zeron.sh/card/*", "zone_name": "zeron.sh" },
         // Web sign-in on the staging site (its WEB_ORIGIN). WorkOS redirect URI
         // (staging environment): https://site-staging.zeron.sh/auth/web/callback.
         { "pattern": "site-staging.zeron.sh/auth/web/*", "zone_name": "zeron.sh" }
+        // (Not /install.sh or /releases/*: the installer downloads from
+        // zeron.sh unless told otherwise, so on this host it would install
+        // production's build; staging's releases stay at staging.zeron.sh.)
       ],
       "durable_objects": {
         "bindings": [
