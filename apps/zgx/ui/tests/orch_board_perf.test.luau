@@ -126,6 +126,9 @@ end)
 
 test("board perf: a status change and a move, in the list", function()
 	local app = open("list")
+	-- (Running's tab: its rows at the top, built.)
+	app:set_state("board_tab", "running")
+	app:frames(10)
 	expect(app:has("#orch-row-it-37")).to_be(true)
 	local t, c = pushes(app, "perf_status", N)
 	report("list status", t, c)
@@ -160,4 +163,51 @@ test("board perf: mounting the board, and switching to the list", function()
 	end
 	report("board mount", mounts, {})
 	report("board to-list", lists, per)
+end)
+
+-- The list builds the rows near the view alone (ds/orch_board_list's
+-- slots): switching to it builds what a screen shows, in one frame; a
+-- scroll builds the rows it brings near and lets go of those it leaves.
+local function built_rows(app: any): number
+	return app:count("#orch-list >> .orch-list-row")
+end
+
+test("board perf: the list builds the rows in view, and a scroll the rows it brings", function()
+	local times, rows = {}, 0
+	for _ = 1, 10 do
+		local app = open()
+		app:command("perf_reset")
+		local t0 = os.clock()
+		app:set_state("board_view", "list")
+		app:frames(1)
+		table.insert(times, (os.clock() - t0) * 1000)
+		app:command("perf_read")
+		local c = app:state("perf_counts") or {}
+		rows = c["board.row"] or 0
+		-- At most a 1400-high window's rows (and the margin past it): some
+		-- 40 lines of 30, fewer with asks; never the list's 118.
+		expect(rows > 10).to_be(true)
+		expect(rows <= 60).to_be(true)
+		expect(app:error()).to_be_nil()
+	end
+	report("board to-list (windowed)", times, { ["board.row"] = rows })
+	local app = open("list")
+	local first = built_rows(app)
+	expect(first <= 60).to_be(true)
+	expect(app:has("#orch-row-it-1")).to_be(true)
+	-- Done's rows are far below (it-141, Done's first): not built.
+	expect(app:has("#orch-row-it-141")).to_be(false)
+	-- Scrolled down, they are; the top's are let go.
+	for _ = 1, 8 do
+		app:scroll("#fixture-root", 1000)
+		app:frames(3)
+	end
+	expect(app:has("#orch-row-it-141")).to_be(true)
+	expect(app:has("#orch-row-it-1")).to_be(false)
+	expect(built_rows(app) <= 70).to_be(true)
+	-- And back up: the top's built again, at the height they held.
+	app:scroll("#fixture-root", -20000)
+	app:frames(5)
+	expect(app:has("#orch-row-it-1")).to_be(true)
+	expect(app:error()).to_be_nil()
 end)

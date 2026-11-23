@@ -60,6 +60,35 @@ local CAP = 30
 local NARROW = 440
 local HEAD: { [string]: string } = { needs_you = "asked", running = "working", planned = "next", done = "done" }
 
+-- Only the rows near the view are built (in whatever scrolls the list: a
+-- page, a side panel): each row stands in a slot that hears from zgx
+-- whether it is within MARGIN of the view (`on_visible`, its box grown by
+-- `visible_margin`), as the transcript's runs do (ds/transcript). Away from
+-- it, a slot holds the height its row was last laid out at (or a guess),
+-- so the page keeps its length and nothing in view moves. When the list
+-- first shows, the rows a view's height down are built at once (no frame
+-- of empty slots); rows that come later (a section opened, Show more, a
+-- card arriving) are built, and let go at their first layout if out of
+-- reach.
+local MARGIN = 240
+-- A row's guessed height: its line, and an ask's question and buttons, or
+-- Resume, under it (measured: 30, 94, 62).
+local LINE_H, ASK_H, RESUME_H = 30, 94, 62
+-- The heights rows were laid out at, by card (and the list's density).
+local HEIGHTS: { [string]: number } = {}
+-- How far down a list builds its rows at once, past the window's height.
+local function first_reach(): number
+	local window = (ui :: any).window
+	local ok, size = pcall(function(): any
+		return window.size:peek()
+	end)
+	local h = if ok and type(size) == "table" and type(size.height) == "number" then size.height else 0
+	if h < 200 then
+		h = 1200
+	end
+	return h + MARGIN
+end
+
 type RowProps = { ctx: Ctx.Ctx, act: Actions.Actions, card: string, narrow: () -> boolean }
 
 local Row = ui.component(function(props: RowProps): Node
@@ -318,6 +347,76 @@ M.Sections = ui.component(function(props: SectionsProps): Node
 		return is_narrow:get()
 	end
 
+	-- Rows built as the list first shows (before its first layout, when the
+	-- slots first hear where they are): as many as a view's height (and
+	-- MARGIN) takes, in order.
+	local laid_out = false
+	local reach = first_reach()
+	local function guess(id: string): number
+		local e = ctx.entry(id)
+		if not e then
+			return LINE_H
+		end
+		if e.place == "needs_you" and e.ask then
+			return ASK_H
+		elseif e.status == "paused" and act.can("resume") then
+			return RESUME_H
+		end
+		return LINE_H
+	end
+
+	-- A row's slot: its row while near the view, else its height.
+	-- (Step 3's board-to-list morph pairs a card with its row: only rows
+	-- built, those in view, take part; a held slot has no box to pair.)
+	local function slot(id: string): Node
+		local key = `{id}:{if ctx.compact then "c" else "r"}`
+		-- (A row's builder is untracked: reading its entry here follows nothing.)
+		local h = HEIGHTS[key] or guess(id)
+		local first = true
+		if not laid_out then
+			first = reach > 0
+			reach -= h
+		end
+		local near = ui.use_state(first)
+		local held = ui.use_state(h)
+		return ui.div {
+			class = "orch-list-slot",
+			w_full = true,
+			min_w = 0,
+			visible_margin = MARGIN,
+			on_visible = function(visible: boolean)
+				laid_out = true
+				if near:peek() ~= visible then
+					near:set(visible)
+				end
+			end,
+			on_resize = function(size: { w: number, h: number })
+				if near:peek() and size.h > 0 then
+					HEIGHTS[key] = size.h
+					if math.abs(held:peek() - size.h) >= 0.5 then
+						held:set(size.h)
+					end
+				end
+			end,
+			ui.switch(function(): string
+				return if near:get() then "row" else "held"
+			end, {
+				row = function(): Node
+					return Row { ctx = ctx, act = act, card = id, narrow = narrow }
+				end,
+				held = function(): Node
+					return ui.div {
+						class = "orch-list-held",
+						w_full = true,
+						h = function(): number
+							return held:get()
+						end,
+					}
+				end,
+			}),
+		}
+	end
+
 	local function rows(place: string): Node
 		local ids = ui.computed(function(): { string }
 			trace.hit("board.ids")
@@ -339,7 +438,7 @@ M.Sections = ui.component(function(props: SectionsProps): Node
 			w_full = true,
 			min_w = 0,
 			ui.each(ids, function(id: string): Node
-				return Row { ctx = ctx, act = act, card = id, narrow = narrow }
+				return slot(id)
 			end, {
 				key = function(id: string): string
 					return id

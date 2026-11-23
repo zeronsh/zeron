@@ -47,7 +47,12 @@ end)
 
 test("board cards: in the list, a push that changes one card wakes its row alone", function()
 	local app = open("list")
-	expect(app:count("#orch-list >> .orch-list-row") > 100).to_be(true)
+	-- (Running's tab: its rows at the top, built; ds/orch_board_list builds
+	-- the rows near the view alone.)
+	app:set_state("board_tab", "running")
+	app:frames(10)
+	expect(app:count("#orch-list >> .orch-list-row") > 20).to_be(true)
+	expect(app:has("#orch-row-it-37")).to_be(true)
 	local c = push(app, "perf_status")
 	expect(c["board.row_entry"] or 0).to_be(1)
 	expect(c["board.row"] or 0).to_be(0)
@@ -83,10 +88,16 @@ test("board cards: a card's menu, a paused card's Resume and an ask's buttons ar
 	expect(resumes > 0).to_be(true)
 	expect(resumes < planned).to_be(true)
 	-- In the list: an ask's buttons under the rows that need the person
-	-- alone (Snoozed folded).
+	-- alone (Snoozed folded), and only those built (near the view).
+	app:scroll("#fixture-root", -20000)
 	app:set_state("board_view", "list")
 	app:frames(10)
-	expect(app:count("#orch-list >> .orch-list-ask")).to_be(28)
-	expect(app:count("#orch-list >> .orch-list-row") > 28).to_be(true)
+	local asking = app:count("#orch-list-needs_you >> .orch-list-row")
+	expect(asking > 5).to_be(true)
+	expect(app:count("#orch-list >> .orch-list-ask")).to_be(asking)
+	app:set_state("board_tab", "running")
+	app:frames(10)
+	expect(app:count("#orch-list >> .orch-list-row") > 20).to_be(true)
+	expect(app:count("#orch-list >> .orch-list-ask")).to_be(0)
 	expect(app:error()).to_be_nil()
 end)
