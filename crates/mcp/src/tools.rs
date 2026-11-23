@@ -26,6 +26,9 @@ mod orchestration;
 mod commands;
 mod plugins;
 mod themes;
+#[cfg(test)]
+#[path = "tools/switch_tests.rs"]
+mod switch_tests;
 pub use orchestration::Role;
 pub use plugins::ListedTool;
 pub(crate) use plugins::is_plugin_tool_name;
@@ -872,9 +875,17 @@ impl Tools {
         origin.chat_id.is_some() && origin.waits_on_background
     }
 
+    /// Whether Orchestrators is on where the engine is (the engine says so
+    /// in the server's env): orchestration's tools and role prompts are
+    /// offered only then.
+    pub fn orchestration(&self) -> bool {
+        self.zeron.origin().orchestration
+    }
+
     pub fn list(&self) -> Vec<ToolDef> {
         let in_chat = self.zeron.origin().chat_id.is_some();
         let waits = self.waits_on_background();
+        let orchestration = self.orchestration();
         let role = self.role();
         catalog()
             .into_iter()
@@ -882,8 +893,8 @@ impl Tools {
                 SHOW_VISUAL | SHOW_IMAGE => in_chat,
                 WAIT_ON_BACKGROUND => waits,
                 // `ask` is for a chat's agent; the rest by role.
-                orchestration::ASK | orchestration::PROGRESS => in_chat,
-                name if orchestration::NAMES.contains(&name) => role.offers(name),
+                orchestration::ASK | orchestration::PROGRESS => in_chat && orchestration,
+                name if orchestration::NAMES.contains(&name) => orchestration && role.offers(name),
                 // The Brain dump routes and never acts: no shell of its own
                 // (its CLI's are taken away too), none through here.
                 name if commands::NAMES.contains(&name) => {
@@ -1004,18 +1015,21 @@ impl Tools {
             },
             None => Value::Null,
         };
-        Ok(json!({
+        let mut me = json!({
             "chat": chat,
             "originDeviceId": origin.device_id,
             "localDeviceId": local_device,
             "workspaceScope": engine.get("workspaceScope").cloned().unwrap_or(Value::Null),
-            "orchestrationRole": self.role().label(),
             "note": if origin.chat_id.is_some() {
                 "Messages you send are attributed to this chat; it cannot message itself."
             } else {
                 "Not running inside a chat: messages are sent without attribution."
             },
-        }))
+        });
+        if origin.orchestration {
+            me["orchestrationRole"] = json!(self.role().label());
+        }
+        Ok(me)
     }
 
     async fn list_devices(&self) -> anyhow::Result<Value> {
@@ -1309,7 +1323,7 @@ impl Tools {
             "kind chat cannot have a parent"
         );
         use zeron_proto::orchestration::OrchestratorKind;
-        let kinds = if explicit_parent.is_some() || self.zeron.origin().chat_id.is_some() {
+        let kinds = if self.orchestration() && (explicit_parent.is_some() || self.zeron.origin().chat_id.is_some()) {
             self.orchestrator_kinds().await
         } else {
             HashMap::new()
@@ -3132,6 +3146,12 @@ mod tests {
         }
     }
 
+    /// [`origin`] with Orchestrators on where the engine is: what an
+    /// orchestration test's chat runs with.
+    fn orch_origin(chat: &str) -> Origin {
+        Origin { orchestration: true, ..origin(chat) }
+    }
+
     fn tools_from(world: &Arc<World>, chat: &str) -> Tools {
         tools(world.clone(), origin(chat))
     }
@@ -3210,23 +3230,23 @@ mod tests {
             let last = writes.iter().rev().find(|(_, w)| w["op"] == "createChat").unwrap();
             (last.1["parentChatId"].clone(), last.1["childKind"].clone())
         };
-        tools(world.clone(), origin("chat-alpha-1"))
+        tools(world.clone(), orch_origin("chat-alpha-1"))
             .call("create_chat", json!({}))
             .await
             .unwrap();
         assert_eq!(last_kind(&world), (json!("chat-alpha-1"), json!("crew")));
-        tools(world.clone(), origin("chat-alpha-1"))
+        tools(world.clone(), orch_origin("chat-alpha-1"))
             .call("create_chat", json!({"kind":"subagent"}))
             .await
             .unwrap();
         assert_eq!(last_kind(&world).1, json!("subagent"));
-        tools(world.clone(), origin("chat-crew-9"))
+        tools(world.clone(), orch_origin("chat-crew-9"))
             .call("create_chat", json!({}))
             .await
             .unwrap();
         assert_eq!(last_kind(&world), (json!("chat-crew-9"), json!("subagent")));
         // Crew is only for an orchestrator's own children.
-        let refused = tools(world.clone(), origin("chat-crew-9"))
+        let refused = tools(world.clone(), orch_origin("chat-crew-9"))
             .call("create_chat", json!({"kind":"crew"}))
             .await
             .unwrap_err();
@@ -3241,7 +3261,7 @@ mod tests {
             })],
             ..Default::default()
         });
-        tools(world.clone(), origin("brain-dump-fake"))
+        tools(world.clone(), orch_origin("brain-dump-fake"))
             .call("create_chat", json!({}))
             .await
             .unwrap();
@@ -3275,13 +3295,13 @@ mod tests {
                 .map(|t| t["name"].as_str().unwrap().to_owned())
                 .collect()
         };
-        let lead = tools(world.clone(), origin("chat-alpha-1"));
+        let lead = tools(world.clone(), orch_origin("chat-alpha-1"));
         assert!(!listed(&lead).iter().any(|n| n == orchestration::CREW_ADD), "not read yet");
         let reply = crate::jsonrpc::handle_request(&lead, json!(1), "tools/list", Value::Null).await;
         assert!(names(&reply).iter().any(|n| n == orchestration::CREW_ADD));
         assert!(names(&reply).iter().any(|n| n == commands::RUN_COMMAND));
 
-        let dump = tools(world.clone(), origin("chat-brain-1"));
+        let dump = tools(world.clone(), orch_origin("chat-brain-1"));
         let reply = crate::jsonrpc::handle_request(&dump, json!(1), "tools/list", Value::Null).await;
         let offered = names(&reply);
         assert!(offered.iter().any(|n| n == orchestration::ROUTE));

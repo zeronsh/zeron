@@ -228,12 +228,12 @@ pub(crate) fn start(resumes: Resumes) {
         tokio::time::sleep(AFTER_START).await;
         if let Some(rpc) = resumes.rpc() {
             let resumed = match rpc.active_orchestration() {
-                Some(_) => {
+                Some(orch) if orch.take_start_up() => {
                     let (resumed, moved) = rpc.start_up_pass().await;
                     tracing::info!(?resumed, cards = moved.len(), "board: start-up pass");
                     resumed
                 }
-                None => rpc.restart_resume_pass(),
+                _ => rpc.restart_resume_pass(),
             };
             tracing::info!(?resumed, "start-up resume");
         }

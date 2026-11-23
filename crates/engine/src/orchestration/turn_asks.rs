@@ -864,7 +864,8 @@ pub(crate) fn escalate_with(
 
 /// Look for stale asks every [`ESCALATE_EVERY`].
 pub(crate) fn start(orch: Orchestration) {
-    tokio::spawn(async move {
+    let run = orch.clone();
+    run.spawn(async move {
         let mut tick = tokio::time::interval(ESCALATE_EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {

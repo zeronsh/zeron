@@ -285,13 +285,13 @@ mod tests {
     async fn the_start_sweep_settles_what_an_idle_brain_dump_left_routing() {
         use zeron_proto::HarnessId;
         let temp = tempfile::tempdir().unwrap();
-        let core = crate::EngineCore::assemble_with_profile(
+        let core = crate::orchestration::on(crate::EngineCore::assemble_with_profile(
             crate::EngineProfile::local(temp.path()).unwrap(),
             std::sync::Arc::new(crate::registry::HarnessRegistry::new()),
             HarnessId::Codex,
             None,
         )
-        .unwrap();
+        .unwrap()).await;
         let rpc = core.rpc_service();
         let brain = rpc.ensure_brain_dump().unwrap();
         let mut stale = dump("old thought", vec![]);

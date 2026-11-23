@@ -520,7 +520,13 @@ impl EngineCore {
         }));
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
         plugins.start();
-        let orchestration = orchestration::Orchestration::new(workspace.clone());
+        // One switch for all of orchestration: the Orchestrators plugin
+        // (account-wide, off unless turned on), read by every gate.
+        let orchestrating =
+            orchestration::OrchestrationSwitch::from_watch(plugins.watch(orchestration::switch::PLUGIN_ID));
+        sessions.set_orchestration(orchestrating.clone());
+        doc_host.set_orchestration(orchestrating.clone());
+        let orchestration = orchestration::Orchestration::with_switch(workspace.clone(), orchestrating);
         let resumes = resumes::Resumes::default();
         resumes.set_before_stop(before_stop);
         Ok(Self {
@@ -692,6 +698,18 @@ impl EngineCore {
             service = activity.wrap(service);
         }
         zeron_rpc::HostRelay::spawn(config, service, on_nudge)
+    }
+
+    /// Turn Orchestrators on or off for the account (its plugin switch, as
+    /// Settings → Plugins does) and wait until this engine follows: for
+    /// tests and tools; the app goes through `SetPluginOff`.
+    #[doc(hidden)]
+    pub async fn set_orchestrators(&self, on: bool) {
+        if let Err(error) = self.workspace.set_plugin_switch(orchestration::switch::PLUGIN_ID, on) {
+            tracing::warn!(%error, "orchestrators: the switch wasn't written");
+        }
+        let mut rx = self.orchestration.switch().watch();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), rx.wait_for(|now| *now == on)).await;
     }
 
     pub fn rpc_service(&self) -> Arc<EngineRpc> {

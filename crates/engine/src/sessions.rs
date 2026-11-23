@@ -355,6 +355,10 @@ struct Inner {
     turn_listener: OnceLock<TurnListener>,
     /// Plugins whose native MCP servers local runs get (absent in bare tests).
     plugins: OnceLock<crate::plugins::Plugins>,
+    /// Whether Orchestrators is on (unset: off): a turn's live activity and
+    /// todo on its session row, a crew thread's own subagents, the
+    /// orchestration bit in the Zeron MCP server's env.
+    orchestration: OnceLock<crate::orchestration::OrchestrationSwitch>,
     /// Per chat: the usage limit cleared as its current turn started (its
     /// resume): a limit that turn runs straight back into counts on from it.
     limit_resumed: Mutex<HashMap<String, zeron_proto::usage_limit::SessionLimit>>,
@@ -531,6 +535,7 @@ impl SessionsEngine {
                 scratch_root: OnceLock::new(),
                 turn_listener: OnceLock::new(),
                 plugins: OnceLock::new(),
+                orchestration: OnceLock::new(),
                 limit_resumed: Mutex::new(HashMap::new()),
                 warm: Mutex::new(HashMap::new()),
                 warm_leases: Mutex::new(None),
@@ -639,6 +644,11 @@ impl SessionsEngine {
     /// Wire the plugins service: local runs get its native MCP servers.
     pub fn set_plugins(&self, plugins: crate::plugins::Plugins) {
         let _ = self.inner.plugins.set(plugins);
+    }
+
+    /// Follow the Orchestrators switch (engine assembly; first set wins).
+    pub fn set_orchestration(&self, switch: crate::orchestration::OrchestrationSwitch) {
+        let _ = self.inner.orchestration.set(switch);
     }
 
     /// Wire the doc host (called once at engine assembly; the two services are mutually
@@ -3188,7 +3198,7 @@ impl Inner {
                 entry.last_completed_turn = Some(turn);
             }
             entry.status = status;
-            live::settle(entry, status, now);
+            live::settle(entry, status, now, self.orchestration_on());
             if let Some(outcome) = outcome {
                 entry.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
                     status: outcome,
@@ -3309,14 +3319,21 @@ impl Inner {
     /// thread: an orchestrator's thread delegates to subagents of its own.
     /// Nor while its parent is unknown here (its run outran its row).
     fn side_chats_only(&self, chat_id: &str, harness_id: HarnessId) -> bool {
+        // (A crew thread only while Orchestrators is on; off it's a plain child.)
+        let crew_delegates = self.orchestration_on();
         !self.registry.native_subagents(harness_id)
             && self.workspace().is_none_or(|ws| {
                 !ws.parent_unknown(chat_id)
                     && !ws.chat(chat_id).ok().flatten().is_some_and(|chat| {
                         chat.parent_chat_id.is_some()
-                            && chat.child_kind != Some(zeron_proto::ChildKind::Crew)
+                            && !(crew_delegates && chat.child_kind == Some(zeron_proto::ChildKind::Crew))
                     })
             })
+    }
+
+    /// Whether Orchestrators is on.
+    pub(crate) fn orchestration_on(&self) -> bool {
+        self.orchestration.get().is_some_and(crate::orchestration::OrchestrationSwitch::is_on)
     }
 
     /// Zeron's own MCP server for a run of `chat_id`, stamped with the
@@ -3374,6 +3391,12 @@ impl Inner {
         if zeron_proto::orchestration::is_brain_dump_chat(chat_id) {
             env.insert(zeron_proto::McpServer::ROUTER_ONLY_ENV.to_owned(), "1".to_owned());
         }
+        // Orchestration's tools and role prompts only while it's on (the
+        // engine refuses its RPCs while it's off all the same).
+        let orchestration = self.orchestration_on();
+        if orchestration {
+            env.insert(zeron_proto::McpServer::ORCHESTRATION_ENV.to_owned(), "1".to_owned());
+        }
         let endpoint = lock(&self.mcp_endpoint).clone();
         if let Some(endpoint) = endpoint {
             let origin = zeron_mcp::Origin {
@@ -3381,6 +3404,7 @@ impl Inner {
                 device_id: Some(self.device_id.clone()),
                 side_chats_only,
                 waits_on_background: waits,
+                orchestration,
             };
             match endpoint.grant(origin) {
                 Ok(grant) => {

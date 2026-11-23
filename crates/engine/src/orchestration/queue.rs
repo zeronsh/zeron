@@ -324,13 +324,11 @@ impl EngineRpc {
 /// Watch for crew slots freeing (sessions settling, crews and boards
 /// changing) and start the Next cards of orchestrators hosted here.
 pub(crate) fn start(orchestration: Orchestration) {
-    tokio::spawn(async move {
-        let (mut local, mut rows) = loop {
-            match orchestration.rpc() {
-                Some(rpc) => break (rpc.sessions_ref().watch_sessions(), orchestration.workspace().watch_session_rows()),
-                None => tokio::time::sleep(Duration::from_secs(1)).await,
-            }
-        };
+    let run = orchestration.clone();
+    run.spawn(async move {
+        let Some(rpc) = orchestration.rpc() else { return };
+        let (mut local, mut rows) = (rpc.sessions_ref().watch_sessions(), orchestration.workspace().watch_session_rows());
+        drop(rpc);
         let mut state = orchestration.subscribe();
         loop {
             tokio::select! {

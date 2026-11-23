@@ -407,6 +407,8 @@ async fn core() -> (tempfile::TempDir, crate::EngineCore, Arc<EngineRpc>) {
         None,
     )
     .unwrap();
+    // Orchestrators on: these are its tests.
+    core.set_orchestrators(true).await;
     // Held for the test: what notes read transcripts through.
     let rpc = core.rpc_service();
     (temp, core, rpc)

@@ -105,9 +105,11 @@ impl LiveTracker {
 }
 
 /// The activity a row shows once its status is `status`: none unless the
-/// agent works, thinking when a turn starts with nothing shown yet.
-pub(crate) fn settle(row: &mut Session, status: SessionStatus, now: DateTime<Utc>) {
+/// agent works, thinking when a turn starts with nothing shown yet (only
+/// while Orchestrators is `on`: off, a row is as main writes it).
+pub(crate) fn settle(row: &mut Session, status: SessionStatus, now: DateTime<Utc>, on: bool) {
     match status {
+        SessionStatus::Working if !on => {}
         SessionStatus::Working => {
             if row.activity.is_none() {
                 row.activity = Some(ChatActivity {
@@ -125,6 +127,10 @@ impl Inner {
     /// Publish `chat_id`'s live activity and todo progress, mirrored like
     /// [`Self::set_background_tasks`]: only a change is written.
     pub(super) fn set_live(&self, chat_id: &str, live: LiveUpdate) {
+        // (Orchestration's projection: rows as main writes them while it's off.)
+        if !self.orchestration_on() {
+            return;
+        }
         let session = {
             let mut statuses = lock(&self.statuses);
             let Some(entry) = statuses.get_mut(chat_id) else {
@@ -260,9 +266,9 @@ mod tests {
             todo: None,
             limited: None,
         };
-        settle(&mut row, SessionStatus::Working, Utc::now());
+        settle(&mut row, SessionStatus::Working, Utc::now(), true);
         assert_eq!(row.activity.as_ref().unwrap().kind, ActivityKind::Thinking);
-        settle(&mut row, SessionStatus::Idle, Utc::now());
+        settle(&mut row, SessionStatus::Idle, Utc::now(), true);
         assert_eq!(row.activity, None);
     }
 }

@@ -179,9 +179,10 @@ fn new_projectless_cwd(
 
 /// This device's advertised capabilities: the binary's, plus
 /// `cloud-session` on a Cloud session machine (device lists hide those and
-/// show the account's one Cloud device instead).
+/// show the account's one Cloud device instead). Orchestration's are left
+/// out until it's on here ([`WorkspaceHost::set_orchestration_capabilities`]).
 fn device_capabilities() -> Vec<String> {
-    let mut capabilities = zeron_proto::capabilities::current();
+    let mut capabilities = crate::orchestration::switch::capabilities(zeron_proto::capabilities::current(), false);
     if crate::runner::session().is_some() {
         capabilities.push(zeron_proto::CLOUD_SESSION_CAPABILITY.to_string());
     }
@@ -993,6 +994,12 @@ impl WorkspaceHost {
 
     /// Registry rows per kind and pending ops (introspection: the engine's
     /// `perf` stats line).
+    /// How many times rows of `kind` changed here (tests: nothing written).
+    #[cfg(test)]
+    pub(crate) fn kind_version(&self, kind: &str) -> u64 {
+        self.read(|doc| doc.kind_version(kind))
+    }
+
     pub(crate) fn registry_stats(&self) -> (Vec<(String, usize)>, usize) {
         self.read(|doc| (doc.row_counts(), doc.pending_ops_len()))
     }
@@ -1025,6 +1032,30 @@ impl WorkspaceHost {
     /// The account's switch for plugin `id`, as the registry holds it now.
     pub fn plugin_switch(&self, id: &str) -> Option<bool> {
         self.read(|doc| doc.plugin_switch(id))
+    }
+
+    /// Advertise orchestration's device capabilities on this device's row
+    /// (`on`), or take them off: other devices route orchestration work
+    /// only to a device that advertises them. Written only when it changes.
+    pub fn set_orchestration_capabilities(&self, on: bool) -> Result<bool, EngineError> {
+        let me = self.inner.config.device_id.clone();
+        let wanted = |current: &[String]| {
+            let mut next = crate::orchestration::switch::capabilities(current.to_vec(), false);
+            if on {
+                next.extend(crate::orchestration::switch::CAPABILITIES.iter().map(|c| (*c).to_owned()));
+            }
+            next
+        };
+        let Some(device) = self.read_devices()?.into_iter().find(|d| d.id == me) else { return Ok(false) };
+        if wanted(&device.capabilities) == device.capabilities {
+            return Ok(false);
+        }
+        self.mutate(|doc| -> Result<(), zeron_doc::DocError> {
+            let Some(mut device) = doc.read_devices()?.into_iter().find(|d| d.id == me) else { return Ok(()) };
+            device.capabilities = wanted(&device.capabilities);
+            doc.upsert_device(&device)
+        })?;
+        Ok(true)
     }
 
     /// Set plugin `id`'s switch for the whole account (synced). Published

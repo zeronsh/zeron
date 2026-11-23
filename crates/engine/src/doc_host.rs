@@ -315,6 +315,9 @@ struct DocHostInner {
     /// agent's message to a Brain dump or an orchestrator, from any sender
     /// and any engine version). Absent in bare tests.
     incoming_messages: OnceLock<IncomingMessages>,
+    /// Whether Orchestrators is on (unset: off): crew reports, progress
+    /// checks and messages orchestration takes are its alone.
+    orchestration: OnceLock<crate::orchestration::OrchestrationSwitch>,
     /// Worktree materialization for Run commands (see `set_repos`).
     repos: OnceLock<crate::repos::Repos>,
     project_action_runtime: OnceLock<(ProjectActionsStore, Terminals)>,
@@ -1424,6 +1427,7 @@ impl DocHost {
                 workspace: OnceLock::new(),
                 progress_checks: OnceLock::new(),
                 incoming_messages: OnceLock::new(),
+                orchestration: OnceLock::new(),
                 repos: OnceLock::new(),
                 project_action_runtime: OnceLock::new(),
                 shutdown: CancellationToken::new(),
@@ -1908,9 +1912,19 @@ impl DocHost {
         let _ = self.inner.incoming_messages.set(take);
     }
 
-    /// `prompt`, about to run in `chat_id`, taken by orchestration instead.
+    /// Follow the Orchestrators switch (engine assembly; first set wins).
+    pub(crate) fn set_orchestration(&self, switch: crate::orchestration::OrchestrationSwitch) {
+        let _ = self.inner.orchestration.set(switch);
+    }
+
+    fn orchestration_on(&self) -> bool {
+        self.inner.orchestration.get().is_some_and(crate::orchestration::OrchestrationSwitch::is_on)
+    }
+
+    /// `prompt`, about to run in `chat_id`, taken by orchestration instead
+    /// (never while Orchestrators is off: it runs as sent).
     fn taken_by_orchestration(&self, chat_id: &str, prompt: &str) -> bool {
-        self.inner.incoming_messages.get().is_some_and(|take| take(chat_id, prompt))
+        self.orchestration_on() && self.inner.incoming_messages.get().is_some_and(|take| take(chat_id, prompt))
     }
 
     /// Wire the workspace host (engine assembly) — the source of chat-ownership rows.
@@ -7166,6 +7180,13 @@ impl DocHost {
                     SessionCommandStatus::Applied,
                     Some("answered as new turn".into()),
                 ))
+            }
+            // Orchestration's, ignored while it's off: nothing filed, no one
+            // woken.
+            SessionCommandPayload::CrewReport { .. } | SessionCommandPayload::ProgressCheck {}
+                if !self.orchestration_on() =>
+            {
+                Ok((SessionCommandStatus::Rejected, Some(crate::orchestration::switch::OFF.into())))
             }
             SessionCommandPayload::CrewReport { report } => {
                 self.file_crew_report(sessions, handle, report)

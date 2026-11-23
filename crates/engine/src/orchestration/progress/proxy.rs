@@ -233,7 +233,8 @@ impl Proxies {
 /// change, every [`TICK`] (working ones' transcripts), and when a watcher
 /// comes. Nothing at all while no one watches.
 pub(crate) fn start(orch: Orchestration) {
-    tokio::spawn(async move {
+    let run = orch.clone();
+    run.spawn(async move {
         let mut rows = orch.workspace().watch_session_rows();
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

@@ -246,7 +246,8 @@ pub(crate) fn sweep(orchestration: &Orchestration, rpc: &crate::rpc::EngineRpc) 
 
 /// The sweep, once shortly after a start and then every [`EVERY`].
 pub(crate) fn start(orchestration: Orchestration) {
-    tokio::spawn(async move {
+    let run = orchestration.clone();
+    run.spawn(async move {
         tokio::time::sleep(FIRST_AFTER).await;
         let mut tick = tokio::time::interval(EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

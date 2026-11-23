@@ -9,6 +9,13 @@
 //! [`ops`], the Brain dump's routing in [`brain`], scheduled wakes in
 //! [`wake`], machine load in [`loads`], crew reports in [`report`], how far
 //! each chat's work has got in [`progress`].
+//!
+//! All of it is gated on one switch, the Orchestrators plugin
+//! ([`switch::OrchestrationSwitch`]): its loops run only while it's on (a
+//! run of them, cancelled as a whole when it goes off), its RPCs are refused
+//! while it's off, and nothing else in the engine treats a chat as an
+//! orchestrator's, a crew thread or the Brain dump. Its rows stay as they
+//! are either way.
 
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
@@ -42,16 +49,27 @@ pub(crate) mod placement;
 pub(crate) mod scope;
 pub(crate) mod scratchpad;
 pub(crate) mod stale_dumps;
+pub mod switch;
 pub(crate) mod turn_asks;
 pub(crate) mod watchers;
 pub(crate) mod wake;
 
 #[cfg(test)]
 mod tests;
+
+/// `core` with Orchestrators turned on: what orchestration's tests run on.
+#[cfg(test)]
+pub(crate) async fn on(core: crate::EngineCore) -> crate::EngineCore {
+    core.set_orchestrators(true).await;
+    core
+}
 #[cfg(test)]
 mod flow_tests;
+#[cfg(test)]
+mod switch_tests;
 
 pub use comms::CommBus;
+pub use switch::OrchestrationSwitch;
 
 /// The most often [`Orchestration::subscribe`] publishes (4/s).
 pub const PUBLISH_EVERY: Duration = Duration::from_millis(250);
@@ -165,11 +183,21 @@ pub struct Orchestration {
 struct Inner {
     workspace: WorkspaceHost,
     comms: CommBus,
-    /// The coalesced state (≤ 4/s).
-    state_rx: watch::Receiver<OrchestrationState>,
+    /// The coalesced state (≤ 4/s, while on).
+    state_tx: watch::Sender<OrchestrationState>,
     /// The newest RPC service: what scheduled wakes send through.
     rpc: Mutex<Weak<crate::rpc::EngineRpc>>,
-    wake_started: std::sync::atomic::AtomicBool,
+    /// Whether Orchestrators is on.
+    switch: OrchestrationSwitch,
+    /// The switch is being followed (from the first RPC service on).
+    following: std::sync::atomic::AtomicBool,
+    /// The loops' run while on: cancelled as a whole when it goes off.
+    run: Mutex<Option<tokio_util::sync::CancellationToken>>,
+    /// How many of the run's tasks are alive.
+    tasks: Arc<std::sync::atomic::AtomicUsize>,
+    /// The start-up pass ran (at the engine's start-up resume, or on the
+    /// first turn on after it).
+    started_up: std::sync::atomic::AtomicBool,
     /// Progress of the chats this engine hosts.
     progress: progress::ProgressBook,
     /// `createOrchestrator`'s request ids and what each made: a request
@@ -210,42 +238,143 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl Orchestration {
-    /// Needs a Tokio runtime (it spawns the coalescing task).
+    /// Orchestration that's off and stays off (a bare assembly).
     pub fn new(workspace: WorkspaceHost) -> Self {
-        let mut rows = workspace.watch_orchestration_rows();
-        let (tx, state_rx) = watch::channel(rows.borrow_and_update().clone());
-        tokio::spawn(async move {
-            loop {
-                if rows.changed().await.is_err() {
-                    break;
-                }
-                let next = rows.borrow_and_update().clone();
-                tx.send_if_modified(|current| {
-                    if *current == next {
-                        false
-                    } else {
-                        *current = next;
-                        true
-                    }
-                });
-                if tx.receiver_count() == 0 {
-                    break; // the handle (which holds a receiver) is gone
-                }
-                tokio::time::sleep(PUBLISH_EVERY).await;
-            }
-        });
+        Self::with_switch(workspace, OrchestrationSwitch::default())
+    }
+
+    /// Orchestration following `switch`. Nothing runs until an RPC service
+    /// is attached ([`Self::attach_rpc`]) with the switch on.
+    pub fn with_switch(workspace: WorkspaceHost, switch: OrchestrationSwitch) -> Self {
+        let (state_tx, _) = watch::channel(workspace.orchestration_state());
         Self {
             inner: Arc::new(Inner {
                 workspace,
                 comms: CommBus::new(),
-                state_rx,
+                state_tx,
                 rpc: Mutex::new(Weak::new()),
-                wake_started: std::sync::atomic::AtomicBool::new(false),
+                switch,
+                following: std::sync::atomic::AtomicBool::new(false),
+                run: Mutex::new(None),
+                tasks: Arc::default(),
+                started_up: std::sync::atomic::AtomicBool::new(false),
                 progress: progress::ProgressBook::default(),
                 created: Mutex::new(CreatedBy::default()),
                 board: board::Board::default(),
             }),
         }
+    }
+
+    /// Whether Orchestrators is on.
+    pub fn is_on(&self) -> bool {
+        self.inner.switch.is_on()
+    }
+
+    pub fn switch(&self) -> &OrchestrationSwitch {
+        &self.inner.switch
+    }
+
+    /// How many of orchestration's tasks are running (none while it's off).
+    pub fn running_tasks(&self) -> usize {
+        self.inner.tasks.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Run `task` as one of orchestration's, ended when it goes off. Not
+    /// started at all while it's off (`false`).
+    pub(crate) fn spawn<F>(&self, task: F) -> bool
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let Some(token) = lock(&self.inner.run).clone() else { return false };
+        struct Alive(Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for Alive {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            }
+        }
+        self.inner.tasks.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let alive = Alive(self.inner.tasks.clone());
+        tokio::spawn(async move {
+            let _alive = alive;
+            tokio::select! {
+                _ = token.cancelled() => {}
+                _ = task => {}
+            }
+        });
+        true
+    }
+
+    /// `stream` until Orchestrators goes off (a window watching it then
+    /// sees it end; nothing more is sent). Empty while it's off.
+    pub(crate) fn until_off<T: Send + 'static>(
+        &self,
+        stream: futures::stream::BoxStream<'static, T>,
+    ) -> futures::stream::BoxStream<'static, T> {
+        use futures::StreamExt;
+        let mut on = self.inner.switch.watch();
+        let off = async move {
+            let _ = on.wait_for(|on| !*on).await;
+        };
+        stream.take_until(off).boxed()
+    }
+
+    /// The switch went on: the coalescer and every loop of
+    /// [`Self::attach_rpc`]'s list, as one run.
+    fn start_run(&self) {
+        {
+            let mut run = lock(&self.inner.run);
+            if run.is_some() {
+                return;
+            }
+            *run = Some(tokio_util::sync::CancellationToken::new());
+        }
+        tracing::info!("orchestration: on");
+        self.inner.state_tx.send_replace(self.inner.workspace.orchestration_state());
+        self.spawn(coalesce(self.inner.workspace.watch_orchestration_rows(), self.inner.state_tx.clone()));
+        wake::start(self.clone());
+        watchers::start(self.clone());
+        progress::start(self.clone());
+        queue::start(self.clone());
+        board::start(self.clone());
+        start_stats(self.clone());
+        self.set_capabilities(true);
+    }
+
+    /// The switch went off: the run cancelled (every loop and stream ends;
+    /// nothing is woken and nothing written from here on), the queues held
+    /// for paused cards let go, so their chats go on as plain ones.
+    fn stop_run(&self) {
+        let Some(token) = lock(&self.inner.run).take() else { return };
+        token.cancel();
+        tracing::info!("orchestration: off");
+        self.set_capabilities(false);
+        if let Some(rpc) = self.rpc() {
+            let threads: Vec<String> = self.scan(|state| {
+                state.items.iter().filter(|i| !i.removed && i.paused()).flat_map(|i| i.threads.iter().cloned()).collect()
+            });
+            if !threads.is_empty() {
+                tokio::spawn(async move {
+                    for t in threads {
+                        if let Err(error) = rpc.doc_host_ref().release_queue(&t).await {
+                            tracing::warn!(%error, thread = %t, "orchestration off: held messages weren't released");
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    /// Advertise (or take off) the device capabilities that route
+    /// orchestration work here, on this device's row.
+    fn set_capabilities(&self, on: bool) {
+        if let Err(error) = self.inner.workspace.set_orchestration_capabilities(on) {
+            tracing::warn!(%error, on, "orchestration: device capabilities weren't updated");
+        }
+    }
+
+    /// Whether the start-up pass is still owed (taken once).
+    pub(crate) fn take_start_up(&self) -> bool {
+        !self.inner.started_up.swap(true, std::sync::atomic::Ordering::AcqRel)
     }
 
     pub fn workspace(&self) -> &WorkspaceHost {
@@ -275,7 +404,7 @@ impl Orchestration {
 
     /// Everything, now and on every change, at most [`PUBLISH_EVERY`].
     pub fn subscribe(&self) -> watch::Receiver<OrchestrationState> {
-        self.inner.state_rx.clone()
+        self.inner.state_tx.subscribe()
     }
 
     /// `WatchOrchestration`: the state as it is now (a write just made is
@@ -393,22 +522,36 @@ impl Orchestration {
     }
 
     /// The newest RPC service: what scheduled wakes and other engine-side
-    /// sends go through. Called by `EngineCore::rpc_service`; starts the wake
-    /// timer the first time.
+    /// sends go through. Called by `EngineCore::rpc_service`; from the first
+    /// one on, the switch is followed: on starts orchestration's loops
+    /// (scheduled wakes; the watchers of asks, chases, sweeps, crew
+    /// auto-archive and route answers; progress; the queue; the board and
+    /// its stall wakes; stats), off cancels them.
     pub(crate) fn attach_rpc(&self, rpc: &Arc<crate::rpc::EngineRpc>) {
         *lock(&self.inner.rpc) = Arc::downgrade(rpc);
-        if !self
-            .inner
-            .wake_started
-            .swap(true, std::sync::atomic::Ordering::AcqRel)
-        {
-            wake::start(self.clone());
-            watchers::start(self.clone());
-            progress::start(self.clone());
-            queue::start(self.clone());
-            board::start(self.clone());
-            start_stats(self.clone());
+        if self.inner.following.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return;
         }
+        let mut on = self.inner.switch.watch();
+        let orch = Arc::downgrade(&self.inner);
+        // (Settled now, so an engine starting with it on is running when
+        // this returns.)
+        if *on.borrow_and_update() {
+            self.start_run();
+        } else {
+            self.set_capabilities(false);
+        }
+        tokio::spawn(async move {
+            while on.changed().await.is_ok() {
+                let Some(inner) = orch.upgrade() else { break };
+                let orch = Orchestration { inner };
+                if *on.borrow_and_update() {
+                    orch.start_run();
+                } else {
+                    orch.stop_run();
+                }
+            }
+        });
     }
 
     pub(crate) fn rpc(&self) -> Option<Arc<crate::rpc::EngineRpc>> {
@@ -416,11 +559,32 @@ impl Orchestration {
     }
 }
 
+/// The coalescer: `rows` into `tx`, at most every [`PUBLISH_EVERY`].
+async fn coalesce(mut rows: watch::Receiver<OrchestrationState>, tx: watch::Sender<OrchestrationState>) {
+    rows.mark_unchanged();
+    loop {
+        if rows.changed().await.is_err() {
+            break;
+        }
+        let next = rows.borrow_and_update().clone();
+        tx.send_if_modified(|current| {
+            if *current == next {
+                false
+            } else {
+                *current = next;
+                true
+            }
+        });
+        tokio::time::sleep(PUBLISH_EVERY).await;
+    }
+}
+
 /// Once a minute, when the `perf` target logs at debug: what the engine
 /// holds (registry rows per kind, unsent ops, warm chat docs, tracked
 /// progress, one-shot runs) and its RSS, to tell what grows.
 fn start_stats(orch: Orchestration) {
-    tokio::spawn(async move {
+    let task = orch.clone();
+    task.spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(60));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {

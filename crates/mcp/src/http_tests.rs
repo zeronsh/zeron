@@ -47,6 +47,7 @@ fn origin(chat: &str) -> Origin {
         device_id: Some("d".into()),
         side_chats_only: false,
         waits_on_background: true,
+        orchestration: false,
     }
 }
 

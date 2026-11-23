@@ -1276,7 +1276,8 @@ impl EngineRpc {
     /// (`named`: a comment on a card, changes asked on it, its resume): that
     /// card, when `chat` is on it.
     pub(crate) fn work_sent_on(&self, chat: &str, named: Option<&str>, now: DateTime<Utc>) {
-        let orch = self.orchestration();
+        // (No card is written while Orchestrators is off.)
+        let Some(orch) = self.active_orchestration() else { return };
         let card = orch.workspace().write_orchestration(|doc| {
             let on: Vec<(WorkItem, Option<BoardCard>)> = doc
                 .work_items_where(|i| !i.removed && i.threads.iter().any(|t| t == chat))
@@ -1762,15 +1763,12 @@ pub(crate) fn start(orchestration: Orchestration) {
     // What changed: session rows (here and synced) by chat; cards, asks and
     // routes by their marks.
     let watch = orchestration.clone();
-    tokio::spawn(async move {
+    orchestration.spawn(async move {
         let mut state_rx = watch.subscribe();
         let mut rows_rx = watch.workspace().watch_session_rows();
-        let mut sessions_rx = loop {
-            match watch.rpc() {
-                Some(rpc) => break rpc.sessions_ref().watch_sessions(),
-                None => tokio::time::sleep(std::time::Duration::from_secs(1)).await,
-            }
-        };
+        let Some(rpc) = watch.rpc() else { return };
+        let mut sessions_rx = rpc.sessions_ref().watch_sessions();
+        drop(rpc);
         let (mut seen_rows, mut seen_here): (HashMap<String, Sig>, HashMap<String, Sig>) = Default::default();
         // (What is there at the start is the start-up pass's.)
         let mut marks = Marks::default();
@@ -1806,10 +1804,18 @@ pub(crate) fn start(orchestration: Orchestration) {
             }
         }
     });
-    tokio::spawn(async move {
-        // (The start-up pass is the engine's start-up resume's: `restart_resume.rs`.)
+    let run = orchestration.clone();
+    run.spawn(async move {
+        // The start-up pass is the engine's start-up resume's
+        // (`restart_resume.rs`); turned on after it, it's had here.
         if let Some(rpc) = orchestration.rpc() {
             rpc.resumes().started_up().await;
+        }
+        if orchestration.take_start_up()
+            && let Some(rpc) = orchestration.rpc()
+        {
+            let (resumed, moved) = rpc.start_up_pass_on().await;
+            tracing::info!(?resumed, cards = moved.len(), "board: start-up pass (turned on)");
         }
         let mut tick = tokio::time::interval(EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

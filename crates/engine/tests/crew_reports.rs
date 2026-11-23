@@ -160,6 +160,8 @@ async fn setup() -> Setup {
         .expect("engine core assembles");
     core.sessions.set_no_ipc_port();
     core.doc_host.set_crew_wake_debounce(DEBOUNCE);
+    // Orchestrators on: these are its tests.
+    core.set_orchestrators(true).await;
     let rpc = core.rpc_service();
     for chat in [ORCH, CREW] {
         call(
@@ -342,6 +344,51 @@ async fn nobody_but_zeron_queues_a_crew_report() {
     tokio::time::sleep(DEBOUNCE * 3).await;
     assert!(crew_messages(&core).is_empty());
     assert!(prompts.lock().unwrap().is_empty());
+    let _ = finish.send(());
+    core.shutdown().await;
+}
+
+/// Turned off, a crew report (the op, Zeron's own command, a crew thread's
+/// message) files nothing and wakes no one, and the thread's message goes
+/// as sent; turned on again, a report wakes its orchestrator as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn turned_off_a_crew_report_wakes_no_one_and_on_again_it_does() {
+    let Setup { core, rpc, finish, prompts, .. } = setup().await;
+    core.set_orchestrators(false).await;
+    let refused = try_call(
+        &rpc,
+        Caller::Agent { chat: Some(CREW.into()) },
+        methods::ORCHESTRATE,
+        json!({ "op": "report", "state": "done", "summary": "while off" }),
+    )
+    .await;
+    assert!(refused.as_ref().is_err_and(|e| e.contains("Orchestrators is off")), "{refused:?}");
+    // Zeron's own command, queued here: ignored.
+    let filed = json!({
+        "id": "r-off", "orchestratorId": ORCH, "fromChat": CREW, "state": "done",
+        "summary": "filed while off", "at": chrono::Utc::now(),
+    });
+    call(&rpc, Caller::Local, methods::QUEUE_COMMAND, json!({ "chatId": ORCH, "command": { "kind": "crewReport", "report": filed } }))
+        .await;
+    tokio::time::sleep(DEBOUNCE * 3).await;
+    assert!(crew_messages(&core).is_empty(), "nothing filed");
+    assert!(prompts.lock().unwrap().is_empty(), "no one woken");
+    let ignored = core
+        .doc_host
+        .open(ORCH)
+        .unwrap()
+        .doc()
+        .read_commands()
+        .unwrap()
+        .into_iter()
+        .any(|c| matches!(c.payload, zeron_doc::SessionCommandPayload::CrewReport { .. })
+            && c.status == zeron_doc::SessionCommandStatus::Rejected);
+    assert!(ignored, "the command is rejected, not run");
+
+    core.set_orchestrators(true).await;
+    report(&rpc, "done", "after on").await;
+    wait_for(|| !prompts.lock().unwrap().is_empty(), "the orchestrator woken").await;
+    assert!(crew_messages(&core).iter().flatten().any(|s| s == "after on"), "{:?}", crew_messages(&core));
     let _ = finish.send(());
     core.shutdown().await;
 }

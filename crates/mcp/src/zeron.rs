@@ -50,6 +50,10 @@ pub struct Origin {
     /// ends, so it may say it waits on that work
     /// ([`zeron_proto::McpServer::WAITS_ON_BACKGROUND_ENV`]).
     pub waits_on_background: bool,
+    /// Orchestrators is on where the engine is
+    /// ([`zeron_proto::McpServer::ORCHESTRATION_ENV`]): orchestration's tools
+    /// and role prompts are offered. Off, the server is as it is without it.
+    pub orchestration: bool,
 }
 
 impl Origin {
@@ -68,6 +72,7 @@ impl Origin {
             waits_on_background: read(zeron_proto::McpServer::WAITS_ON_BACKGROUND_ENV)
                 .as_deref()
                 == Some("1"),
+            orchestration: read(zeron_proto::McpServer::ORCHESTRATION_ENV).as_deref() == Some("1"),
         }
     }
 }

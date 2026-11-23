@@ -226,6 +226,17 @@ impl EngineRpc {
         (resumed, moved)
     }
 
+    /// The start-up pass's orchestration part, when Orchestrators is turned
+    /// on after the engine's start-up resume ran: the cards the engine had
+    /// paused itself un-paused, then every card worked out.
+    pub(crate) async fn start_up_pass_on(&self) -> (Vec<String>, Vec<super::board::Moved>) {
+        let unpaused = self.unpause_engine_pauses(Utc::now()).await;
+        if !unpaused.is_empty() {
+            tracing::warn!(cards = ?unpaused, "board: cards the engine had paused (not the person) un-paused");
+        }
+        (Vec::new(), self.board_pass(true, Utc::now()))
+    }
+
     /// Paused cards' threads hosted here keep their queues held (a doc
     /// reopened since lost the hold).
     pub(crate) fn hold_paused_queues(&self) {

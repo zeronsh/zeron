@@ -983,13 +983,11 @@ fn spawn_note(orch: Orchestration, chat_id: String, why: Why) {
 /// Follow this engine's chats: their session rows, the stall clock and
 /// periodic notes.
 pub(crate) fn start(orch: Orchestration) {
-    tokio::spawn(async move {
-        let mut sessions_rx = loop {
-            match orch.rpc() {
-                Some(rpc) => break rpc.sessions_ref().watch_sessions(),
-                None => tokio::time::sleep(std::time::Duration::from_secs(1)).await,
-            }
-        };
+    let run = orch.clone();
+    run.spawn(async move {
+        let Some(rpc) = orch.rpc() else { return };
+        let mut sessions_rx = rpc.sessions_ref().watch_sessions();
+        drop(rpc);
         // A `ProgressCheck` from another device for a chat hosted here.
         if let Some(rpc) = orch.rpc() {
             let checks = orch.clone();

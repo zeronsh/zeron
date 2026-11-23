@@ -1072,6 +1072,8 @@ impl Tools {
         let chat = self.zeron.origin().chat_id.clone();
         let (role, prompt) = match chat {
             None => (Role::Plain, None),
+            // Orchestrators is off: a plain chat, nothing asked of the engine.
+            Some(_) if !self.orchestration() => (Role::Plain, None),
             Some(_) => match self.orchestration_state().await {
                 Ok(state) => {
                     let role = Role::of(chat.as_deref(), &state);

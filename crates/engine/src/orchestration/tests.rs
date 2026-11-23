@@ -23,6 +23,8 @@ async fn core() -> (tempfile::TempDir, crate::EngineCore) {
         None,
     )
     .unwrap();
+    // Orchestrators on: these are its tests.
+    core.set_orchestrators(true).await;
     (temp, core)
 }
 
@@ -3077,16 +3079,16 @@ async fn a_restart_changes_no_cards_place() {
     use zeron_proto::orchestration::Place;
     let temp = tempfile::tempdir().unwrap();
     let assemble = || {
-        crate::EngineCore::assemble_with_profile(
+        crate::orchestration::on(crate::EngineCore::assemble_with_profile(
             crate::EngineProfile::local(temp.path()).unwrap(),
             std::sync::Arc::new(HarnessRegistry::new()),
             HarnessId::Codex,
             None,
         )
-        .unwrap()
+        .unwrap())
     };
     let (asked, planned, done, before) = {
-        let core = assemble();
+        let core = assemble().await;
         let (o, asked) = geese(&core).await;
         op(&core, agent(&o), json!({"op":"upsertItem","item":{"id":asked},"ask":{"question":"Which way?"}})).await.unwrap();
         let planned = op(&core, agent(&o), json!({"op":"upsertItem","item":{"title":"Later work","later":true}})).await.unwrap();
@@ -3098,7 +3100,7 @@ async fn a_restart_changes_no_cards_place() {
         (asked, planned, done, before)
     };
     assert_eq!(before.iter().map(|r| r.place).collect::<Vec<_>>(), [Place::NeedsYou, Place::Planned, Place::Done]);
-    let core = assemble();
+    let core = assemble().await;
     let rpc = core.rpc_service();
     let (_, moved) = rpc.start_up_pass().await;
     assert!(moved.is_empty(), "{moved:?}");
@@ -3119,13 +3121,13 @@ async fn board_dry_run_on_copied_data() {
     let dir = std::path::PathBuf::from(std::env::var("BOARD_DRY_RUN_DIR").expect("BOARD_DRY_RUN_DIR"));
     let org = std::env::var("BOARD_DRY_RUN_ORG").expect("BOARD_DRY_RUN_ORG");
     let user = std::env::var("BOARD_DRY_RUN_USER").expect("BOARD_DRY_RUN_USER");
-    let core = crate::EngineCore::assemble_with_profile(
+    let core = crate::orchestration::on(crate::EngineCore::assemble_with_profile(
         crate::EngineProfile::synced(&dir, &org, &user),
         std::sync::Arc::new(HarnessRegistry::new()),
         HarnessId::Codex,
         None,
     )
-    .unwrap();
+    .unwrap()).await;
     let rpc = core.rpc_service();
     // The copy's own moment: its newest session row (heartbeats are judged
     // against it, not against when this runs).
@@ -3227,16 +3229,16 @@ async fn board_dry_run_on_copied_data() {
 async fn a_crew_thread_at_work_when_the_engine_stopped_is_resumed_once() {
     let temp = tempfile::tempdir().unwrap();
     let assemble = || {
-        crate::EngineCore::assemble_with_profile(
+        crate::orchestration::on(crate::EngineCore::assemble_with_profile(
             crate::EngineProfile::local(temp.path()).unwrap(),
             std::sync::Arc::new(HarnessRegistry::new()),
             HarnessId::Codex,
             None,
         )
-        .unwrap()
+        .unwrap())
     };
     {
-        let core = assemble();
+        let core = assemble().await;
         geese(&core).await;
         // At work on this device when it stops.
         let mut row = idle("geese-t1");
@@ -3246,7 +3248,7 @@ async fn a_crew_thread_at_work_when_the_engine_stopped_is_resumed_once() {
         core.orchestration.workspace().record_session(&row);
         core.shutdown().await;
     }
-    let core = assemble();
+    let core = assemble().await;
     let rpc = core.rpc_service();
     let resumed_text = zeron_proto::orchestration::prompt_text::RESUMED_AFTER_RESTART;
     let before = core.resumes.take_before_stop();
@@ -3364,16 +3366,16 @@ async fn after_a_crash_a_chat_picked_back_up_gets_no_error_ask() {
     use zeron_proto::orchestration::Place;
     let temp = tempfile::tempdir().unwrap();
     let assemble = || {
-        crate::EngineCore::assemble_with_profile(
+        crate::orchestration::on(crate::EngineCore::assemble_with_profile(
             crate::EngineProfile::local(temp.path()).unwrap(),
             std::sync::Arc::new(HarnessRegistry::new()),
             HarnessId::Codex,
             None,
         )
-        .unwrap()
+        .unwrap())
     };
     let card = {
-        let core = assemble();
+        let core = assemble().await;
         let (_o, card) = geese(&core).await;
         // Working when the engine dies: no shutdown, only what was saved.
         geese_row(&core, zeron_proto::SessionStatus::Working, None).await;
@@ -3382,7 +3384,7 @@ async fn after_a_crash_a_chat_picked_back_up_gets_no_error_ask() {
         core.orchestration.workspace().flush();
         card
     };
-    let core = assemble();
+    let core = assemble().await;
     // The crash recovery marks its cut-off turn errored.
     geese_row(&core, zeron_proto::SessionStatus::Errored, Some(zeron_proto::DoneStatus::Errored)).await;
     let rpc = core.rpc_service();
@@ -3409,8 +3411,8 @@ async fn a_send_the_stop_cut_off_mid_execute_resumes_its_chat_once() {
         let store = zeron_sync::DocsStore::open(profile.store_root()).unwrap();
         assert!(store.mark_processed("cmd-cut").unwrap());
     }
-    let core = crate::EngineCore::assemble_with_profile(profile, std::sync::Arc::new(HarnessRegistry::new()), HarnessId::Codex, None)
-        .unwrap();
+    let core = crate::orchestration::on(crate::EngineCore::assemble_with_profile(profile, std::sync::Arc::new(HarnessRegistry::new()), HarnessId::Codex, None)
+        .unwrap()).await;
     let here = core.orchestration.device_id().to_owned();
     call(
         &core,
@@ -3629,13 +3631,13 @@ async fn a_paused_card_with_no_thread_dropped_on_now_starts_one() {
 async fn board_fixture() {
     use zeron_proto::orchestration::{ProgressState, ReportHead, ReportState};
     let dir = std::path::PathBuf::from(std::env::var("BOARD_FIXTURE_DIR").expect("BOARD_FIXTURE_DIR"));
-    let core = crate::EngineCore::assemble_with_profile(
+    let core = crate::orchestration::on(crate::EngineCore::assemble_with_profile(
         crate::EngineProfile::local(&dir).unwrap(),
         std::sync::Arc::new(HarnessRegistry::new()),
         HarnessId::Codex,
         None,
     )
-    .unwrap();
+    .unwrap()).await;
     const CLOUD: &str = "cloud-1";
     let now = chrono::Utc::now();
     let ago = |mins: i64| now - chrono::Duration::minutes(mins);

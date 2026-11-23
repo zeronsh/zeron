@@ -103,10 +103,9 @@ impl EngineRpc {
         let chat = chats.iter().find(|c| c.id == chat_id);
         // (The Brain dump by its row, which only the engine writes; an id
         // that merely looks like one is no Brain dump.)
-        let brain_dump = matches!(
-            self.orchestration().role_of(chat_id),
-            crate::orchestration::ChatRole::BrainDump { .. }
-        );
+        let brain_dump = self
+            .active_orchestration()
+            .is_some_and(|o| matches!(o.role_of(chat_id), crate::orchestration::ChatRole::BrainDump { .. }));
         let ceiling = if zeron_proto::voice::is_orchestrator_chat(chat_id) || brain_dump {
             None
         } else {
@@ -175,6 +174,29 @@ impl EngineRpc {
         }
         match method {
             methods::MUTATE => match params["op"].as_str().unwrap_or_default() {
+                // While Orchestrators is off a new chat is as it is without
+                // it: a crew chat asked for is a plain one, and the rules of
+                // who creates what are the MCP server's.
+                "createChat" if !self.orchestration_on() => {
+                    if params["childKind"].as_str() == Some(zeron_proto::ChildKind::Crew.as_str()) {
+                        params["childKind"] = Value::Null;
+                    }
+                    let Some(config) = params.get_mut("config").filter(|c| c.is_object()) else {
+                        return Err(refused("An agent's new chat names its config (harness, sandbox, access)"));
+                    };
+                    if let Some((max_sandbox, max_access)) = calling.as_ref().and_then(|c| c.ceiling) {
+                        let sandbox = serde_json::from_value(config["sandbox"].clone())
+                            .unwrap_or(SandboxLevel::DangerFullAccess);
+                        let access = serde_json::from_value(config["access"].clone()).unwrap_or_default();
+                        let (sandbox, access, capped) = cap_access((sandbox, access), (max_sandbox, max_access));
+                        if capped {
+                            tracing::info!(chat = ?chat, "agents: a new chat's access capped at its creator's");
+                        }
+                        config["sandbox"] = json!(sandbox);
+                        config["access"] = json!(access);
+                    }
+                    Ok(params)
+                }
                 "createChat" => {
                     // Hidden chats are the engine's to make.
                     let new_id = params["chatId"].as_str().unwrap_or_default();

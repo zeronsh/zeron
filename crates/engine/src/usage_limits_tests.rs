@@ -16,13 +16,16 @@ use crate::run_journal::LimitMark;
 const REMOTE: &str = "dev-remote";
 
 async fn core_at(dir: &std::path::Path) -> crate::EngineCore {
-    crate::EngineCore::assemble_with_profile(
+    let core = crate::EngineCore::assemble_with_profile(
         crate::EngineProfile::local(dir).unwrap(),
         std::sync::Arc::new(HarnessRegistry::new()),
         HarnessId::Codex,
         None,
     )
-    .unwrap()
+    .unwrap();
+    // Orchestrators on: orchestrators and their crews are ranked first.
+    core.set_orchestrators(true).await;
+    core
 }
 
 async fn call(core: &crate::EngineCore, caller: Caller, method: &str, params: Value) -> Value {
