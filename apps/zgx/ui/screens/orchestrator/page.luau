@@ -21,6 +21,7 @@ local rows = require("@account/rows")
 local decide = require("@ds/orch_decide")
 local Links = require("@ds/links")
 local seam = require("@ds/seam")
+local SeamDrag = require("@ds/orch_seam_drag")
 local orchestration = require("@account/orchestration")
 local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
@@ -69,8 +70,7 @@ M.place = ui.state("orch_page_scroll", 0)
 
 -- The narrowest the conversation and the panel go side by side; narrower
 -- than both, Split shows the conversation.
-local CHAT_MIN, PANEL_MIN = 360, 300
-M.CHAT_MIN, M.PANEL_MIN = CHAT_MIN, PANEL_MIN
+local CHAT_MIN, PANEL_MIN = SeamDrag.CHAT_MIN, SeamDrag.PANEL_MIN
 -- The panel's share of a split page until it's dragged, and its bounds then.
 local SIDE_SHARE, SIDE_LEAST, SIDE_MOST = 0.4, 360, 560
 -- Under way: the crew counts these as working.
@@ -227,14 +227,11 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 		end
 		return m
 	end
-	local function panel_most(): number
-		return width:get() - CHAT_MIN - 1
-	end
 	-- The panel's width split: as dragged, else its share; within bounds.
 	local function panel_w(): number
 		local kept = panel_state.get(props.of()).w
 		local want = kept or math.clamp(math.floor(width:get() * SIDE_SHARE), SIDE_LEAST, SIDE_MOST)
-		return math.floor(math.clamp(want, PANEL_MIN, math.max(PANEL_MIN, panel_most())))
+		return SeamDrag.clamp(want, width:get())
 	end
 	-- The conversation's lane, let go as the page goes or moves on.
 	local function slot_of(id: string): string
@@ -471,8 +468,21 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 	local seam_lit = ui.use_state(false)
 	local seam_held = ui.use_state(false)
 	local seam_drag = seam.drag()
+	-- (Its press, moves and release: ds/orch_seam_drag, which holds the
+	-- width within bounds; tests drive it with positions.)
+	local drag = SeamDrag.new {
+		width = function(): number
+			return panel_w()
+		end,
+		page = function(): number
+			return width:peek()
+		end,
+		set = function(w: number?)
+			panel_state.set(props.of(), "w", w)
+		end,
+		bounds = seam_drag.at,
+	}
 	local function seam_node(): Node
-		local start: any = nil
 		return ui.div {
 			id = "orch-seam",
 			w = 1,
@@ -496,21 +506,14 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 					seam_lit:set(inside)
 				end,
 				on_press = function(e: any)
-					if e.clicks == 2 then
-						panel_state.set(props.of(), "w", nil)
-						return
-					end
-					start = { x = e.x, w = panel_w() }
-					seam_held:set(true)
+					drag.press(e.x, e.clicks)
+					seam_held:set(drag.held())
 				end,
 				on_pointer_move = function(e: any)
-					if not start then
-						return
-					end
-					M.resize_to(start.w - (e.x - start.x))
+					drag.move(e.x)
 				end,
 				on_release = function()
-					start = nil
+					drag.release()
 					seam_held:set(false)
 					seam_drag.release()
 				end,
@@ -529,12 +532,6 @@ local Page = ui.component(function(props: { of: () -> string? }): Node
 				},
 			},
 		}
-	end
-	-- (A width asked for, kept within its bounds: the drag's, and tests'.)
-	M.resize_to = function(want: number)
-		local lo, hi = PANEL_MIN, panel_most()
-		seam_drag.at(want, lo, hi)
-		panel_state.set(props.of(), "w", math.floor(math.clamp(want, lo, math.max(lo, hi))))
 	end
 
 	local function body(): Node

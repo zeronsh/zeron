@@ -96,9 +96,14 @@ function M.asked_by(asks: { any }?): { [string]: any }
 	return out
 end
 
--- Since when it has stood as it does: its activity's start while under
--- way, else its last change.
-local function since_of(m: Member, now: number): number
+-- Since when it has stood as it does: since it asked, while an ask of its
+-- is open (`asked`: the open asks by thread); its activity's start while
+-- under way; else its last change.
+local function since_of(m: Member, now: number, asked: { [string]: any }?): number
+	local ask = asked and asked[m.member.chat_id]
+	if ask and type(ask.created) == "number" then
+		return ask.created
+	end
 	local c: { [string]: any } = m.chat or {}
 	local a = c.activity
 	if UNDER_WAY[c.status or ""] and type(a) == "table" and type(a.since) == "number" then
@@ -149,9 +154,9 @@ function M.doing(m: Member, asked: { [string]: any }): string
 	return if info then info.long else locale.s("ds.orch.crew_list.idle_word")
 end
 
-local function sorted(list: { Member }, now: number): { Member }
+local function sorted(list: { Member }, now: number, asked: { [string]: any }): { Member }
 	table.sort(list, function(a: Member, b: Member): boolean
-		local sa, sb = since_of(a, now), since_of(b, now)
+		local sa, sb = since_of(a, now, asked), since_of(b, now, asked)
 		if sa ~= sb then
 			return sa > sb
 		end
@@ -202,7 +207,7 @@ function M.CrewList(props: Props): Node
 			end
 		end
 		for _, list in out do
-			sorted(list, now)
+			sorted(list, now, by)
 		end
 		return out
 	end)
@@ -230,10 +235,11 @@ function M.CrewList(props: Props): Node
 				ui.presence(function(): string
 					return M.kind_of(m(), asked:get())
 				end, function(kind: string): Node
+					-- (Its kind as a class: what tests read.)
 					if kind == "idle" then
-						return ui.div { color = "$text.tertiary", Icon { name = "clock-circle", size = 14 } }
+						return ui.div { class = "orch-status-idle", color = "$text.tertiary", Icon { name = "clock-circle", size = 14 } }
 					end
-					return status.StatusIcon { kind = kind :: any, size = 14 }
+					return ui.div { class = `orch-status-{kind}`, status.StatusIcon { kind = kind :: any, size = 14 } }
 				end),
 			},
 			ui.text {
@@ -248,7 +254,7 @@ function M.CrewList(props: Props): Node
 			},
 			ui.text {
 				function(): string
-					return status.ago(math.max(0, now_s() - since_of(m(), now_s())))
+					return status.ago(math.max(0, now_s() - since_of(m(), now_s(), asked:get())))
 				end,
 				class = "orch-crew-row-time",
 				shrink = 0,
@@ -368,7 +374,7 @@ function M.CrewList(props: Props): Node
 				ui.text {
 					function(): string
 						local top = all:get()[1]
-						return if top then status.ago(math.max(0, now_s() - since_of(top, now_s()))) else ""
+						return if top then status.ago(math.max(0, now_s() - since_of(top, now_s(), asked:get()))) else ""
 					end,
 					shrink = 0,
 					tabular = true,

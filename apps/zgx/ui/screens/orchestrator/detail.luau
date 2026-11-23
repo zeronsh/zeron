@@ -102,10 +102,25 @@ function M.Detail(props: Props): Node
 		local id = chat_id()
 		return Name.crew(chat(), Name.fallback(member(), nil), id)
 	end
-	-- How it stands: a card's column, else its thread's state.
-	-- (A card's state drawn as a thread's would be.)
+	-- The ask of its that's open (its thread's or its card's), if one is.
+	local function open_ask(): any
+		local id, it = chat_id(), item()
+		for _, a in orchestration.now:get().asks or {} do
+			if (a.state == nil or a.state == "open") and ((id and a.from_chat == id) or (it and a.item_id == it.id)) then
+				return a
+			end
+		end
+		return nil
+	end
+	-- How it stands: waiting on you while an ask of its is open; else a
+	-- card's column, else its thread's state. (A card's state drawn as a
+	-- thread's would be.)
 	local ITEM_KIND: { [string]: string } = { planned = "idle", active = "working", review = "approval", blocked = "limited", done = "done" }
 	local function state_kind(): string
+		local a = open_ask()
+		if a then
+			return if a.kind == "approval" then "approval" else "input"
+		end
 		local it = item()
 		if it and ITEM_KIND[it.state or ""] then
 			return ITEM_KIND[it.state]
@@ -120,6 +135,9 @@ function M.Detail(props: Props): Node
 		return "idle"
 	end
 	local function state_word(): string
+		if open_ask() then
+			return locale.s("ds.orch.crew_list.waiting")
+		end
 		local it = item()
 		if it and STATES[it.state or ""] then
 			return locale.s(`orch.panel.state.{it.state}`)
@@ -186,18 +204,21 @@ function M.Detail(props: Props): Node
 			items = "center",
 			justify = "center",
 			ui.presence(state_kind, function(kind: string): Node
+				-- (Its kind as a class: what tests read.)
 				if kind == "idle" then
-					return ui.div { color = "$text.tertiary", ds.Icon { name = "clock-circle", size = 14 } }
+					return ui.div { class = "orch-status-idle", color = "$text.tertiary", ds.Icon { name = "clock-circle", size = 14 } }
 				end
-				return status.StatusIcon { kind = kind :: any, size = 14 }
+				return ui.div { class = `orch-status-{kind}`, status.StatusIcon { kind = kind :: any, size = 14 } }
 			end),
 		},
 		ui.text { state_word, text_size = "$font.size.sm", color = "$text.primary" },
 		ui.text {
 			function(): string
+				-- (Waiting: since it asked.)
+				local a = open_ask()
 				local c = chat()
 				local it = item()
-				local t = (c and c.updated) or (it and it.updated)
+				local t = (a and type(a.created) == "number" and a.created) or (c and c.updated) or (it and it.updated)
 				return if t then status.ago(math.max(0, os.time() - t)) else ""
 			end,
 			text_size = "$font.size.xs",
