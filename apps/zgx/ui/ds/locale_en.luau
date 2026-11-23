@@ -1239,8 +1239,6 @@ return {
 	["ds.orch.map.card.pin"] = "Pin",
 	["ds.orch.map.card.unpin"] = "Unpin",
 	["ds.orch.map.card.mark_read"] = "Mark read",
-	["ds.orch.map.card.crew"] = "Crew: {working} working · {idle} idle · {failed} failed",
-	["ds.orch.map.card.board"] = "Board: {now} now · {review} in review · {blocked} blocked",
 	["ds.orch.map.card.online"] = "Online",
 	["ds.orch.map.card.offline"] = "Offline",
 	["ds.orch.map.card.cpu"] = "CPU {cpu}%",

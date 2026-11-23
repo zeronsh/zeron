@@ -335,7 +335,7 @@ function M.Card(props: Props): Node
 					local out = {}
 					local text, at = limit.text(lim()), 1
 					while true do
-						local i, j = string.find(text, "·", at, true)
+						local i, j = string.find(text, "\u{b7}", at, true)
 						local part = string.sub(text, at, if i then i - 1 else #text)
 						local t = string.match(part, "^%s*(.-)%s*$") or ""
 						if t ~= "" then

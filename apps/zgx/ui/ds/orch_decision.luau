@@ -12,7 +12,7 @@
 -- (Enter decides, Shift+Enter a new line), Decide (the option chosen and
 -- the words), Defer (an hour, four, tomorrow, next week) and the thread.
 -- Deciding goes through ds/orch_decide's pick, so the row and the card
--- say "Sending · Undo" for its moment.
+-- say "Sending, Undo" for its moment.
 --
 -- It stays open until the person closes it (or decides): a frame of the
 -- engine's state without its ask (an engine coming up again, a republish)
@@ -360,7 +360,7 @@ local Body = ui.component(function(args: { props: Props, phase: State<number> })
 							ui.span { locale.t("ds.orch.decide.recommended"), weight = 500, color = "$accent" },
 							(function(): any
 								local w = decide.why(ask())
-								return if w then ui.span { ` · {w}`, literal = true, color = "$text.secondary" } else nil
+								return if w then ui.span { `: {w}`, literal = true, color = "$text.secondary" } else nil
 							end)(),
 						},
 					}
@@ -516,9 +516,9 @@ local Body = ui.component(function(args: { props: Props, phase: State<number> })
 					local a = ask()
 					return a ~= nil and a.orchestrator_id ~= nil and a.orchestrator_id ~= a.from_chat and (props.name_of(a.orchestrator_id) or "") ~= ""
 				end, ui.row {
-					gap = "$space.2",
+					gap = "$space.1",
 					items = "center",
-					ui.text { "·", text_size = "$font.size.sm", color = "$text.tertiary" },
+					ui.div { color = "$text.tertiary", shrink = 0, Icon { name = "bot", size = 12 } },
 					ui.text {
 						function(): string
 							local a = ask()
@@ -528,7 +528,7 @@ local Body = ui.component(function(args: { props: Props, phase: State<number> })
 						color = "$text.tertiary",
 					},
 				}),
-				ui.text { "·", text_size = "$font.size.sm", color = "$text.tertiary" },
+				ui.div { color = "$text.tertiary", shrink = 0, Icon { name = "clock-circle", size = 12 } },
 				ui.text {
 					function(): string
 						local a = ask()
@@ -1063,7 +1063,7 @@ local AnswerBody = ui.component(function(args: { props: AnswerProps, entry: () -
 					},
 					ui.text { who, text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.secondary" },
 				}),
-				ui.text { "·", text_size = "$font.size.sm", color = "$text.tertiary" },
+				ui.div { color = "$text.tertiary", shrink = 0, Icon { name = "clock-circle", size = 12 } },
 				ui.text {
 					function(): string
 						local e = entry()

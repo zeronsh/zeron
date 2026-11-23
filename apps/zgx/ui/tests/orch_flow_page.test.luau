@@ -72,7 +72,7 @@ test("orch flow page: no flow yet, its starters; one chosen, it's there", functi
 	app:command("flow.none")
 	settle(app)
 	expect(app:has("#orch-flow-empty")).to_be(true)
-	app:click('#orch-flow-empty >> role:button "Plan → Build → Review"')
+	app:click('#orch-flow-empty >> role:button "Plan, build, review"')
 	settle(app)
 	expect(app:has("#orch-flow-field")).to_be(true)
 	expect(#saved(app).nodes).to_be(6)
@@ -95,7 +95,7 @@ test("orch flow page: New orchestrator starts from the flow chosen", function()
 	-- (The fixture makes every new one `orc-orch`.)
 	local f = saved(app)
 	expect(f ~= nil).to_be(true)
-	expect(f.name).to_be("Plan → Build → Review")
+	expect(f.name).to_be("Plan, build, review")
 	-- Its plan in its notes, as an update after the create.
 	local calls = app:state("orch_calls") :: string
 	expect(string.find(calls, "createOrchestrator:", 1, true) ~= nil).to_be(true)

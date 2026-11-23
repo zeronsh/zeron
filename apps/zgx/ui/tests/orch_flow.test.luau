@@ -34,7 +34,7 @@ local function team(): any
 	}
 end
 
-test("orch flow: Plan → Build → Review and Blank run as they are", function()
+test("orch flow: Plan, build, review and Blank run as they are", function()
 	expect(#flow.check(flow.initial())).to_be(0)
 	expect(#flow.check(flow.blank())).to_be(0)
 end)

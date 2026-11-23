@@ -78,10 +78,15 @@ test("usage limit: Progress's row waits for the limit in its own state, its coun
 	local reset = app:state("limit_reset") :: number
 	local now = app:state("now") :: number
 	local full = app:tree("#fx-full-th-limit") :: string
-	expect(has(full, "Waiting for limit · resets 14:05")).to_be(true)
+	-- Its facts apart, spaced: no typed separator.
+	expect(app:has('#fx-full-th-limit >> .orch-progress-doing >> "Waiting for limit"')).to_be(true)
+	expect(app:has('#fx-full-th-limit >> .orch-progress-limit-fact >> "resets 14:05"')).to_be(true)
+	expect(string.find(full, "\u{b7}", 1, true)).to_be(nil)
 	expect(has(full, left_words(reset - now))).to_be(true)
 	local strip = app:tree("#fx-strip-th-limit") :: string
-	expect(has(strip, "Waiting for limit · resets 14:05")).to_be(true)
+	expect(app:has('#fx-strip-th-limit >> .orch-progress-doing >> "Waiting for limit"')).to_be(true)
+	expect(app:has('#fx-strip-th-limit >> .orch-progress-limit-fact >> "resets 14:05"')).to_be(true)
+	expect(string.find(strip, "\u{b7}", 1, true)).to_be(nil)
 	expect(has(strip, left_words(reset - now))).to_be(true)
 	-- A minute on (the clock it already has), a minute less.
 	app:command("fixture.later")
@@ -91,9 +96,11 @@ end)
 
 test("usage limit: Progress's row of a thread switched says where it runs meanwhile", function()
 	local app = progress()
-	local full = app:tree("#fx-full-th-switch") :: string
-	expect(has(full, "On me@home.dev · me@work.dev resets 14:05")).to_be(true)
-	expect(has(app:tree("#fx-strip-th-switch") :: string, "On me@home.dev · me@work.dev resets 14:05")).to_be(true)
+	for _, id in { "#fx-full-th-switch", "#fx-strip-th-switch" } do
+		expect(app:has(`{id} >> .orch-progress-doing >> "On me@home.dev"`)).to_be(true)
+		expect(app:has(`{id} >> .orch-progress-limit-fact >> "me@work.dev resets 14:05"`)).to_be(true)
+		expect(string.find(app:tree(id) :: string, "\u{b7}", 1, true)).to_be(nil)
+	end
 end)
 
 -- The Map.

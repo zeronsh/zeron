@@ -9,6 +9,7 @@
 --   limit.of(chat) -> Limit?        its limit, if any
 --   limit.waiting(chat) -> boolean  limited, and not switched
 --   limit.text(l) -> string         the words above
+--   limit.parts(l) -> { string }    those words' facts apart, to space
 --   limit.left(l, now) -> string    "resets in 12m" (none once it's past
 --                                   or unknown), for a clock that already
 --                                   ticks
@@ -86,6 +87,27 @@ function M.text(l: Limit?): string
 		return locale.s("ds.limit.waiting_until", { time = M.clock(reset) })
 	end
 	return locale.s("ds.limit.waiting")
+end
+
+-- Its facts apart ("Waiting for limit", "resets 14:05"), for a row that
+-- spaces them: the locale keeps them apart with a separator that's never
+-- shown typed.
+function M.parts(l: Limit?): { string }
+	local out = {}
+	local text, at = M.text(l), 1
+	while true do
+		local i, j = string.find(text, "\u{b7}", at, true)
+		local part = string.sub(text, at, if i then i - 1 else #text)
+		local t = string.match(part, "^%s*(.-)%s*$") or ""
+		if t ~= "" then
+			table.insert(out, t)
+		end
+		if not i then
+			break
+		end
+		at = (j :: number) + 1
+	end
+	return out
 end
 
 -- How long until it resets, to the minute ("resets in 12m"); "" when the

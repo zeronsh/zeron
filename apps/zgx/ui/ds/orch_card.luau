@@ -10,7 +10,7 @@
 --   Card.Title { text = fn, quiet = fn -> bool }       -- two lines at most
 --   Card.Line { class?, parts... }                     -- the quiet line
 --   Card.Word { text = fn, ink = fn?, strong = bool? } -- a part's words
---   Card.Sep(shown)                                    -- "·" between parts
+--   Card.Sep(shown)                                    -- room between parts
 --   Card.Menu { items = fn, open = state, shown = fn, label = string }
 
 local ContextMenu = require("@self/context_menu")
@@ -85,9 +85,9 @@ function M.Word(props: { text: () -> string, ink: (() -> string)?, strong: boole
 	}
 end
 
--- "·" between two parts, while both show.
+-- Room between two parts, while both show: spacing, no typed dot.
 function M.Sep(shown: () -> boolean): Node
-	return ui.show(shown, ui.text { "·", shrink = 0, text_size = "$font.size.xs", color = "$text.tertiary" })
+	return ui.show(shown, ui.div { class = "orch-card-sep", w = "$space.1", shrink = 0 })
 end
 
 -- Its "…": shown where the pointer rests (`shown`) or while open, the

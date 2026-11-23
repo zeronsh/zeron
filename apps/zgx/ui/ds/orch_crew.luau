@@ -203,7 +203,7 @@ return ui.component(function(props: Props): Node
 			if model ~= "" then
 				table.insert(parts, model)
 			end
-			return table.concat(parts, " · ")
+			return table.concat(parts, ", ")
 		end
 		local function since(): number
 			local a = activity()

@@ -4,7 +4,7 @@
 -- the overlay that shows the whole of it (ds/orch_decision).
 --
 -- A pick is sent after a moment it can be taken back in: it waits here
--- (`pending`) for UNDO_MS, every place showing "Sending · Undo", and only
+-- (`pending`) for UNDO_MS, every place showing "Sending, Undo", and only
 -- then is it sent. Undo drops it. The overlay's Decide goes the same way,
 -- so the row and the card say it too. Only once the engine has taken it
 -- does it say "Answered" (for ANSWERED_MS), and then it leaves Needs you;

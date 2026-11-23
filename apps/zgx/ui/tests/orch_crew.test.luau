@@ -51,7 +51,7 @@ test("orch crew: what each is doing, how far, what it last said", function()
 	expect(app:has(`{CREW} >> ~"Needs a decision: tabs or split"`)).to_be(true)
 	expect(app:has(`{CREW} >> .orch-crew-report-state >> ~"Blocked"`)).to_be(true)
 	-- Its role, machine and model.
-	expect(app:has(`{CREW} >> ~"engine state · desk · opus 5.5"`)).to_be(true)
+	expect(app:has(`{CREW} >> ~"engine state, desk, opus 5.5"`)).to_be(true)
 	-- Waiting on you, it says nothing of an activity.
 	expect(app:count(`{CREW} >> .orch-crew-activity-label`)).to_be(3)
 end)

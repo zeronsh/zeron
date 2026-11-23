@@ -398,7 +398,7 @@ function M.context(id: string): string
 			break
 		end
 	end
-	return table.concat(parts, " · ")
+	return table.concat(parts, ", ")
 end
 
 -- (`live`: whether what shows it is shown; while not, what it reads is

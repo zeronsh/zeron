@@ -51,8 +51,8 @@ test("control progress: what's working now, the latest started first", function(
 	expect(table.find(ids, "th-vpn-moscow")).to_be(nil)
 	expect(table.find(ids, "th-ci-cache")).to_be(nil)
 	-- Where each one is: its orchestrator and machine.
-	expect(app:has(`#progress-full-th-engine-state >> ~"Orchestrators · desk"`)).to_be(true)
-	expect(app:has(`#progress-full-th-vpn-merge >> ~"Exnomic VPN · desk"`)).to_be(true)
+	expect(app:has(`#progress-full-th-engine-state >> ~"Orchestrators, desk"`)).to_be(true)
+	expect(app:has(`#progress-full-th-vpn-merge >> ~"Exnomic VPN, desk"`)).to_be(true)
 end)
 
 test("control progress: pinned threads first, kept, and unpinned", function()
@@ -129,7 +129,7 @@ test("control progress: a host that writes no progress still shows what works", 
 	expect(app:has(`{UNIT} >> .orch-progress-doing >> ~"cargo test -p zeron-engine"`)).to_be(true)
 	-- (Made an hour and a half ago for this task: at it since.)
 	expect(app:text(`{UNIT}-elapsed`)).to_be("1h 30m")
-	expect(app:has(`{UNIT} >> ~"Orchestrators · desk"`)).to_be(true)
+	expect(app:has(`{UNIT} >> ~"Orchestrators, desk"`)).to_be(true)
 	expect(app:has(`{UNIT} >> .orch-progress-cells`)).to_be(false)
 	expect(app:has(`{UNIT} >> .orch-progress-note`)).to_be(false)
 	expect(app:has(`{W} >> ~"6 working"`) or app:has(`{W} >> ~"5 working"`)).to_be(true)

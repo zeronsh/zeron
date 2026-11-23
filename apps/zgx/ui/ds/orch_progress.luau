@@ -2,7 +2,7 @@
 -- the engine keeps for each chat (`orchestration.progress`, docs/design/
 -- orchestrators.md "Progress") drawn as live telemetry. How long it has
 -- been at it, how far through its steps (segmented cells, "3/5"), what it
--- is on now (or the command running, "cargo test · 9m"), how long since its
+-- is on now (or the command running, "cargo test, 9m"), how long since its
 -- last step, the time left when the engine knows it, and a one-line note. Stalled, it says so in the warning's ink, not
 -- an alarm's. "What's up?" asks the host for a fresh note (never the
 -- agent); while it's written, a spinner (still after SPIN_MAX seconds). The clocks are plain words to the
@@ -15,7 +15,7 @@
 --     row = fn -> Row?,            -- orchestration.progress[chat]
 --     chat = fn -> Chat?,          -- its session row (title, agent, activity)
 --     title = fn -> string?,       -- else the chat's
---     context = fn -> string?,     -- "Orchestrators · desk"
+--     context = fn -> string?,     -- "Orchestrators, desk"
 --     now = fn -> number?,         -- Unix seconds (a test's clock); else it
 --                                  -- ticks itself
 --     lean = true,                 -- strip: the clocks and the note alone
@@ -32,9 +32,10 @@
 -- least (ds/orch_hold). A row with `asking` set (its thread asked the
 -- person and waits on the answer) reads "Waiting on you". A thread its
 -- usage limit stopped (its session's `limited`, ds/usage_limit) reads
--- "Waiting for limit · resets 14:05" in the limited state, its time left
--- "resets in 12m" (moving with the clocks, by the minute); one running on
--- another account meanwhile, "On me@home.dev · me@work.dev resets 14:05".
+-- "Waiting for limit" and, spaced apart, "resets 14:05" in the limited
+-- state, its time left "resets in 12m" (moving with the clocks, by the
+-- minute); one running on another account meanwhile, "On me@home.dev" and
+-- "me@work.dev resets 14:05".
 
 local Icon = require("@self/icon")
 local Mark = require("@self/mark")
@@ -220,9 +221,24 @@ M.Progress = ui.component(function(props: Props): Node
 	local function lim(): limit.Limit?
 		return limit.of(chat())
 	end
+	-- Its words' first fact; the rest (when it resets) beside it, spaced.
 	local function limit_words(): string?
 		local l = lim()
-		return if l then limit.text(l) else nil
+		return if l then limit.parts(l)[1] or limit.text(l) else nil
+	end
+	local limit_rest = ui.computed(function(): { string }
+		local out = {}
+		for i, t in limit.parts(lim()) do
+			if i > 1 then
+				table.insert(out, t)
+			end
+		end
+		return out
+	end)
+	local function limit_facts(): Node
+		return ui.each(limit_rest, function(t: string): Node
+			return ui.text { t, class = "orch-progress-limit-fact", literal = true, shrink = 0, text_size = "$font.size.xs", color = "$zeron.status.limited" }
+		end)
 	end
 	-- How it stands, and what it's on, held 300 ms at least.
 	local kind = hold.value(function(): string
@@ -576,11 +592,16 @@ M.Progress = ui.component(function(props: Props): Node
 							return if lim() then "$zeron.status.limited" else "$text.secondary"
 						end,
 					},
+					limit_facts(),
 					ui.show(function(): boolean
 						return tool_text() ~= ""
-					end, small(function(): string
-						return `· {tool_text()}`
-					end, { class = "orch-progress-tool-time" })),
+					end, ui.row {
+						shrink = 0,
+						gap = "$zeron.space.hair",
+						items = "center",
+						ui.div { color = "$text.tertiary", Icon { name = "clock-circle", size = 11 } },
+						small(tool_text, { class = "orch-progress-tool-time" }),
+					}),
 					ui.show(refreshing, ui.div {
 						class = "orch-progress-refreshing",
 						shrink = 0,
@@ -713,7 +734,7 @@ M.Progress = ui.component(function(props: Props): Node
 				ui.show(function(): boolean
 					return not stalled() and left_text() ~= ""
 				end, small(function(): string
-					return if since_text() ~= "" then `{left_text()} ·` else left_text()
+					return left_text()
 				end, { class = "orch-progress-left" })),
 				ui.show(function(): boolean
 					return since_text() ~= ""
@@ -794,11 +815,16 @@ M.Progress = ui.component(function(props: Props): Node
 					return `$zeron.status.{if k == "waiting" then "working" else k}`
 				end,
 			},
+			limit_facts(),
 			ui.show(function(): boolean
 				return tool_text() ~= ""
-			end, small(function(): string
-				return `· {tool_text()}`
-			end, { class = "orch-progress-tool-time" })),
+			end, ui.row {
+				shrink = 0,
+				gap = "$zeron.space.hair",
+				items = "center",
+				ui.div { color = "$text.tertiary", Icon { name = "clock-circle", size = 11 } },
+				small(tool_text, { class = "orch-progress-tool-time" }),
+			}),
 		},
 		-- What's up? and the menu (open, pin), at its end.
 		ui.row {

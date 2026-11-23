@@ -757,7 +757,15 @@ M.Editor = ui.component(function(props: Props): Node
 			id = "orch-flow-connection",
 			w_full = true,
 			gap = "$space.3",
-			Text { `{a and a.name or e.from} → {b and b.name or e.to}`, style = "heading", wrap = true },
+			-- From one step to the next: the arrow an icon, not a glyph.
+			ui.row {
+				w_full = true,
+				gap = "$space.2",
+				items = "center",
+				Text { a and a.name or e.from, style = "heading", wrap = true },
+				ui.div { color = "$text.tertiary", shrink = 0, Icon { name = "arrow-right", size = 16 } },
+				Text { b and b.name or e.to, style = "heading", wrap = true },
+			},
 			Select {
 				value = condition,
 				label = ui.t("orch.flow.when") :: any,

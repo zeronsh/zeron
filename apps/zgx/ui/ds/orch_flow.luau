@@ -147,7 +147,7 @@ end
 function M.initial(): Flow
 	return {
 		version = 2,
-		name = "Plan → Build → Review",
+		name = "Plan, build, review",
 		next_id = 7,
 		nodes = {
 			make("1", "chief", 0, 0),
@@ -283,7 +283,7 @@ function M.plan(f: Flow): string
 		end
 		local who = if n.kind == "gate"
 			then "ask the person"
-			elseif n.model ~= "" then (if n.harness ~= "" then `{n.harness} · {n.model}` else n.model)
+			elseif n.model ~= "" then (if n.harness ~= "" then `{n.harness}, {n.model}` else n.model)
 			elseif n.harness ~= "" then n.harness
 			else "crew model"
 		local line = `{i}. **{n.name}** ({who})`

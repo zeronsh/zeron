@@ -46,16 +46,16 @@ local LIMITED_ROWS: { [string]: any } = {
 		steps = { done = 2, total = 5 }, note = "Picking up where it left off" },
 }
 local CONTEXT: { [string]: string } = {
-	["orc-orch"] = "Orchestrator · desk",
-	["th-engine-state"] = "Orchestrators · desk",
-	["th-engine-flow"] = "Orchestrators · desk",
+	["orc-orch"] = "Orchestrator, desk",
+	["th-engine-state"] = "Orchestrators, desk",
+	["th-engine-flow"] = "Orchestrators, desk",
 	["th-ui-control"] = "Orchestrators · macbook",
 	["th-ui-orch"] = "Orchestrators · macbook",
-	["th-vpn-merge"] = "Exnomic VPN · desk",
-	["th-vpn-moscow"] = "Exnomic VPN · desk",
+	["th-vpn-merge"] = "Exnomic VPN, desk",
+	["th-vpn-moscow"] = "Exnomic VPN, desk",
 	["th-ci-cache"] = "CI speed · Cloud",
-	["th-limit"] = "Zeron fixes · desk",
-	["th-switch"] = "Zeron fixes · desk",
+	["th-limit"] = "Zeron fixes, desk",
+	["th-switch"] = "Zeron fixes, desk",
 }
 -- Full: the widget's first four; strips and chips: all of them.
 local FULL = { "th-engine-state", "th-engine-flow", "th-ui-control", "th-ui-orch" }
