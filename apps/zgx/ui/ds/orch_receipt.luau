@@ -419,13 +419,18 @@ return ui.component(function(props: Props): Node
 			end
 		end
 		for _, tok in tokens_of(segments) do
+			-- (Its words before a line break, and the break: the boxes break
+			-- their line where the paragraph does, a blank line for each
+			-- break past the first.)
+			local words, breaks = string.match(tok.text, "^([^\n]*)(\n[%s]*)$")
+			local shown = words or tok.text
 			local i = if tok.routes then tok.routes[1] else nil
 			local asked = false
 			for _, j in tok.routes or {} do
 				asked = asked or looks[j].asked
 			end
 			local text = ui.text {
-				tok.text,
+				shown,
 				-- (A question's words, for tests to find.)
 				class = if asked then "orch-question-word" else nil,
 				literal = true,
@@ -434,7 +439,9 @@ return ui.component(function(props: Props): Node
 				-- (Laid out, never seen: the paragraph over it draws the words.)
 				color = ui.raw("#00000000", "the hit layer's words, unseen"),
 			}
-			if i then
+			if shown == "" then
+				-- (A break alone: no box.)
+			elseif i then
 				local ref = ui.ref()
 				local rids: { string } = {}
 				for _, j in tok.routes or {} do
@@ -447,6 +454,13 @@ return ui.component(function(props: Props): Node
 			end
 			if string.match(tok.text, "%s$") then
 				close()
+			end
+			if breaks then
+				local _, n = string.gsub(breaks, "\n", "")
+				table.insert(chunks, ui.div { w_full = true, h = 0 })
+				for _ = 2, n do
+					table.insert(chunks, ui.div { w_full = true, h = line_height })
+				end
 			end
 		end
 		close()

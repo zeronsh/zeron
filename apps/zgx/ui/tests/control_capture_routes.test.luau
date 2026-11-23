@@ -133,6 +133,25 @@ test("the pointer on a shared sentence lights both its chips", function()
 	expect(app:state("orch_receipt_hovered")).to_be("")
 end)
 
+test("the words the pointer finds stand where the paragraph draws them, past a blank line too", function()
+	local app = open()
+	-- (The dump's text has a paragraph break: the hit layer breaks there
+	-- as the drawn text does, so its last line is the paragraph's.)
+	local tree = app:tree("#control-capture >> .orch-receipt-text [1]")
+	local first = string.match(tree, "[^\n]+") or ""
+	local y, h = string.match(first, " [%d%.]+,([%d%.]+) [%d%.]+x([%d%.]+)")
+	local bottom = (tonumber(y) or 0) + (tonumber(h) or 0)
+	local last = 0
+	for line in tree:gmatch("[^\n]+") do
+		local ty, th = string.match(line, '^%s+@%d+ text "[^"]*" [%d%.]+,([%d%.]+) [%d%.]+x([%d%.]+)')
+		if ty then
+			last = math.max(last, (tonumber(ty) :: number) + (tonumber(th) :: number))
+		end
+	end
+	expect(tonumber(h) > 60).to_be(true)
+	expect(math.abs(last - bottom) < 1).to_be(true)
+end)
+
 test("parts overlapping in part: both underline the overlap, each its own words, both chips light", function()
 	local app = open()
 	-- The second sentence's pieces, in order: rt-c's own words, the
