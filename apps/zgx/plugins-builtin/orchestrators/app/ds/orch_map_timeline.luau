@@ -1,0 +1,633 @@
+-- The Map's Timeline: one lane a thread, under its machine and project,
+-- over the last 15 minutes or hour. A faint track; where it worked, a bar
+-- whose texture says what at (thinking stippled, testing in cells,
+-- building solid, editing lighter); waiting on you, an open bar in input's
+-- ink; ticks where something happened (a report, an ask, a failure, a
+-- step done); at "now" a head on what still works, and at the end of the lane
+-- what it does now. A click opens the thread.
+--
+--   Timeline {
+--     world, chat, comms,              as ds/orch_map's
+--     timeline = function() return orchestration.timeline:get() end,
+--     window = function() return 15 or 60 end,
+--     on_window = function(minutes) end,
+--     on_open_chat, on_open_orchestrator,
+--   }
+--   (Its rows and what each lane draws: ds/orch_map_spans, pure.)
+
+local Icon = require("@ds/icon")
+local status = require("@ds/status")
+local locale = require("@ds/locale")
+local hue = require("@self/orch_hue")
+local kit = require("@self/orch_map_kit")
+local MachineHead = require("@self/orch_machine_head")
+
+local TOP_H = 34
+local AXIS_H = 34
+local BAR = 4
+
+local M = {}
+
+local spans = require("@self/orch_map_spans")
+type Row = spans.Row
+type Built = spans.Built
+local MACHINE_H, PROJECT_H, LANE_H = spans.MACHINE_H, spans.PROJECT_H, spans.LANE_H
+M.spans_of = spans.spans_of
+M.build = spans.build
+
+-- The states the bar draws open: waiting on you.
+local WAITING: { [string]: boolean } = { input = true, approval = true }
+
+-- How a working span's bar is drawn, by what it did: its texture and ink.
+local TEXTURE: { [string]: string } = {
+	thinking = "stipple",
+	testing = "cells",
+	building = "solid",
+	installing = "solid",
+	merging = "solid",
+	pushing = "solid",
+	editing = "mid",
+	running = "mid",
+	delegating = "mid",
+	reading = "light",
+	reviewing = "light",
+	browsing = "light",
+}
+M.TEXTURE = TEXTURE
+
+local TICK_INK: { [string]: string } = {
+	report = "text.primary",
+	ask = "zeron.status.input",
+	failed = "zeron.status.failed",
+	done = "zeron.status.done",
+}
+
+local function bar(c: any, x0: number, x1: number, mid: number, texture: string)
+	local w = x1 - x0
+	if w <= 0 then
+		return
+	end
+	local top = mid - BAR / 2
+	if texture == "stipple" then
+		local ink = kit.ink("text.primary", 0.5)
+		local x = x0
+		while x < x1 - 0.5 do
+			c:rect(x, top - 0.5, 1.25, 1.25, ink)
+			c:rect(x + 1.5, top + 2.5, 1.25, 1.25, ink)
+			x += 3
+		end
+	elseif texture == "cells" then
+		local ink = kit.ink("text.primary", 0.7)
+		local x = x0
+		while x < x1 - 0.5 do
+			c:rect(x, top - 2, math.min(1.5, x1 - x), BAR + 4, ink, 0.5)
+			x += 3.5
+		end
+	else
+		local alpha = if texture == "solid" then 0.72 elseif texture == "mid" then 0.36 else 0.2
+		c:rect(x0, top, math.max(1.5, w), BAR, kit.ink("text.primary", alpha), math.min(BAR / 2, w / 2))
+	end
+end
+
+-- A tick: a stem, its head the kind's own shape (a report and an ask a
+-- square, done a round head, a failure a cross).
+local function tick(c: any, x: number, mid: number, kind: string)
+	local ink = kit.ink(TICK_INK[kind] or "text.primary", if kind == "report" then 0.6 else 1)
+	c:line(x, mid - 7, x, mid + 6, ink, 1.25)
+	local hy = mid - 9
+	if kind == "done" then
+		c:circle(x, hy, 2.25, ink)
+	elseif kind == "failed" then
+		c:line(x - 2.5, hy - 2.5, x + 2.5, hy + 2.5, ink, 1.5, { cap = "round" })
+		c:line(x - 2.5, hy + 2.5, x + 2.5, hy - 2.5, ink, 1.5, { cap = "round" })
+	else
+		c:rect(x - 1.75, hy - 1.75, 3.5, 3.5, ink, 0.5)
+	end
+end
+
+-- The legend's entries: what a thread was doing (the textures), then what
+-- happened (the ticks): Report, Ask, Failed, Done, always all four.
+local LEGEND = {
+	{ kind = "thinking", texture = "stipple" },
+	{ kind = "editing", texture = "mid" },
+	{ kind = "testing", texture = "cells" },
+	{ kind = "building", texture = "solid" },
+}
+local LEGEND_TICKS = { "report", "ask", "failed", "done" }
+
+M.View = ui.component(function(props: {
+	world: () -> any,
+	chat: (id: string) -> any,
+	comms: () -> { any },
+	timeline: () -> { [string]: { any } },
+	window: () -> number,
+	on_window: (minutes: number) -> (),
+	on_open_chat: (id: string) -> (),
+	on_open_orchestrator: (id: string) -> (),
+	menu: ((id: string) -> { any }?)?,
+	register: ((key: string, open: ((id: string) -> boolean)?) -> ())?,
+}): Node
+	local width = ui.use_state(720)
+	-- (The lanes slide on as time passes: a look every few seconds, a
+	-- point at the hour's scale.)
+	local clock = ui.use_state(os.time())
+	ui.every(5000, function()
+		clock:set(os.time())
+	end)
+	local built = ui.computed(function(): Built
+		return M.build {
+			world = props.world(),
+			chat = props.chat,
+			timeline = props.timeline() or {},
+			comms = props.comms() or {},
+			now = clock:get(),
+			window = props.window(),
+		}
+	end)
+	local rows = ui.computed(function(): { Row }
+		return built:get().rows
+	end)
+	-- Where the chart runs: after the labels, before what each does now.
+	local geom = ui.computed(function(): { label: number, x0: number, x1: number, tail: number, w: number }
+		local w = width:get()
+		local label = math.clamp(math.floor(w * 0.24), 132, 230)
+		local tail = if w >= 760 then math.clamp(math.floor(w * 0.2), 150, 240) elseif w >= 560 then 110 else 0
+		local x0 = label + 12
+		local x1 = w - tail - (if tail > 0 then 16 else 10)
+		return { label = label, x0 = x0, x1 = math.max(x0 + 40, x1), tail = tail, w = w }
+	end)
+	local function x_of(t: number): number
+		local b, g = built:get(), geom:get()
+		return g.x0 + (t - b.t0) / math.max(1, b.t1 - b.t0) * (g.x1 - g.x0)
+	end
+
+	local function draw(c: any, _w: number, _h: number, top: number?, bottom: number?)
+		local b, g = built:get(), geom:get()
+		-- (The band this canvas holds, kit.Tiled: lanes outside it are skipped.)
+		local band_top, band_bottom = top or -math.huge, bottom or math.huge
+		local x0, x1 = g.x0, g.x1
+		local faint = kit.ink("text.primary", 0.05)
+		-- (Down the lanes, under the machines' heads: their lines stay clear.)
+		local under: { { number } } = {}
+		for _, row in b.rows do
+			if row.kind ~= "machine" then
+				local last = under[#under]
+				if last and math.abs(last[2] - row.y) < 0.5 then
+					last[2] = row.y + row.h
+				else
+					table.insert(under, { row.y, row.y + row.h })
+				end
+			end
+		end
+		-- The minutes: a hairline down at each mark, the axis under them.
+		local step = if (b.t1 - b.t0) > 1800 then 300 else 60
+		local major = if step == 300 then 900 else 300
+		local axis_y = b.h + 6
+		c:line(x0, axis_y, x1, axis_y, kit.ink("text.primary", 0.12), 1)
+		local t = b.t1
+		while t >= b.t0 - 0.5 do
+			local x = x_of(t)
+			local ago_s = b.t1 - t
+			local is_major = ago_s % major == 0
+			if is_major and ago_s > 0 then
+				for _, span in under do
+					c:line(x, span[1], x, span[2], faint, 1)
+				end
+			end
+			c:line(x, axis_y, x, axis_y + (if is_major then 5 else 3), kit.ink("text.primary", if is_major then 0.3 else 0.16), 1)
+			if is_major then
+				local label = if ago_s == 0 then locale.s("ds.orch.map.now") else `−{ago_s // 60}m`
+				c:text(label, x, axis_y + 8, { size = 10, color = kit.ink("text.primary", 0.42), align = if ago_s == 0 then "end" else "center", baseline = "top", tabular = true })
+			end
+			t -= step
+		end
+		-- Now: a dotted line down every lane.
+		for _, span in under do
+			c:line(x1, span[1], x1, span[2], kit.ink("text.primary", 0.14), 1, { dash = { 1, 3 } })
+		end
+
+		for _, row in b.rows do
+			if row.kind ~= "lane" or row.y + row.h < band_top - 12 or row.y > band_bottom + 12 then
+				continue
+			end
+			local mid = row.y + row.h / 2
+			local spans = row.spans or {}
+			local start = if #spans > 0 then x_of(spans[1].t0) else x0
+			c:line(start, mid, x1, mid, kit.ink("text.primary", if #spans > 0 then 0.1 else 0.05), 1)
+			for si, s in spans do
+				local a, z = x_of(s.t0), x_of(s.t1)
+				-- (A breath between one span and the next: each change shows.)
+				if spans[si + 1] and z - a > 4 then
+					z -= 2
+				end
+				if s.status == "working" then
+					bar(c, a, z, mid, TEXTURE[s.kind or ""] or "mid")
+				elseif WAITING[s.status] then
+					local ink = kit.ink(`zeron.status.{s.status}`, 0.9)
+					local path = kit.path():rect(a + 0.5, mid - BAR / 2 + 0.5, math.max(1, z - a - 1), BAR - 1, 2.5)
+					c:stroke(path, ink, 1)
+				elseif s.status == "failed" then
+					c:line(a, mid, z, mid, kit.ink("zeron.status.failed", 0.45), 1.5)
+				end
+			end
+			for _, k in row.ticks or {} do
+				tick(c, x_of(k.t), mid, k.kind)
+			end
+			-- The head: what still works, at now.
+			local last = spans[#spans]
+			if last and last.t1 >= b.t1 - 1 then
+				if last.status == "working" then
+					c:circle(x1, mid, 6.5, kit.ink("text.primary", 0.13))
+					c:circle(x1, mid, 3, kit.ink("text.primary", 0.95))
+				elseif WAITING[last.status] then
+					c:circle(x1, mid, 6.5, kit.ink(`zeron.status.{last.status}`, 0.18))
+					c:circle(x1, mid, 3, kit.ink(`zeron.status.{last.status}`, 1))
+				end
+			end
+		end
+	end
+
+	-- A machine: a hairline above it, its head (as every view has it).
+	local function machine_row(row: State<any>): Node
+		return ui.column {
+			class = "orch-tl-machine",
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = function(): number
+				return row:get().y
+			end,
+			h = MACHINE_H,
+			ui.show(function(): boolean
+				return row:get().y > 0
+			end, ui.div { absolute = true, left = 0, right = 0, top = 0, h = 1, bg = "$border" }),
+			ui.column {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = spans.MACHINE_Y,
+				MachineHead.MachineHead {
+					device = function(): any
+						return row:get().device
+					end,
+					here = function(): boolean
+						local d = row:get().device
+						return d ~= nil and (d.here == true or d.id == props.world().here)
+					end,
+					load = function(): any
+						return ((props.world().loads or {}) :: any)[row:get().machine]
+					end,
+				},
+			},
+		}
+	end
+
+	local function project_row(row: State<any>): Node
+		return ui.row {
+			class = "orch-tl-project",
+			absolute = true,
+			left = 0,
+			top = function(): number
+				return row:get().y
+			end,
+			h = PROJECT_H,
+			pl = 22,
+			gap = "$space.1",
+			items = "center",
+			ui.div { color = "$text.tertiary", shrink = 0, Icon { name = "folder", size = 12 } },
+			ui.text {
+				function(): string
+					return row:get().name or ""
+				end,
+				text_size = "$font.size.xs",
+				color = "$text.tertiary",
+			},
+		}
+	end
+
+	local function lane_row(row: State<any>): Node
+		local function t(): any
+			return row:get().thread or {}
+		end
+		local function c(): any
+			return props.chat(row:get().id) or {}
+		end
+		-- (Its state and activity held 300 ms at least.)
+		local st, activity = kit.held(c)
+		local drag = kit.ref_drag(props.world, function(): string
+			return row:peek().id
+		end, function(): string?
+			return (row:peek().thread or {}).title
+		end)
+		return ui.button {
+			class = if (row:peek().thread or {}).kind == "crew" then "orch-tl-lane orch-pill" else "orch-tl-lane",
+			label = function(): string
+				local a = activity()
+				local title = t().title or ""
+				return if a then `{title}, {locale.s(`ds.orch.activity.{a.kind}`)}` else title
+			end,
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = function(): number
+				return row:get().y
+			end,
+			h = LANE_H,
+			rounded = "$radius.sm",
+			bg = "#00000000",
+			-- (Fading out: finished a while ago, ds/orch_map_visibility.)
+			opacity = function(): number
+				return t().opacity or 1
+			end,
+			hover = { bg = "$hover" },
+			on_drag = drag.on_drag,
+			drag_preview = drag.drag_preview,
+			drag_preview_anchor = drag.drag_preview_anchor,
+			drag_preview_offset = drag.drag_preview_offset,
+			on_click = function()
+				local th = row:peek().thread
+				if th and th.kind == "orchestrator" then
+					props.on_open_orchestrator(row:peek().id)
+				else
+					props.on_open_chat(row:peek().id)
+				end
+			end,
+			-- Its name, where the lanes' names are.
+			ui.row {
+				absolute = true,
+				left = 22,
+				top = 0,
+				h = LANE_H,
+				w = function(): number
+					return geom:get().label - 22
+				end,
+				gap = 6,
+				items = "center",
+				ui.div {
+					w = 12,
+					h = 12,
+					shrink = 0,
+					items = "center",
+					justify = "center",
+					class = "orch-state",
+					-- (Its state in words, as the sidebar's dot says it.)
+					label = function(): string
+						local k = st()
+						return if k == "idle" then "" else status.KINDS[k :: any].long
+					end,
+					ui.show(function(): boolean
+						return st() ~= "idle"
+					end, status.StatusIcon { kind = function(): any
+						return st()
+					end, size = 12 }),
+				},
+				-- (Its orchestrator's dot, or the room for one: the titles align.)
+				ui.div {
+					w = 6,
+					h = 6,
+					shrink = 0,
+					ui.show(function(): boolean
+						return t().hue ~= nil
+					end, hue.Dot { hue = function(): number?
+						return t().hue
+					end, size = 6 }),
+				},
+				ui.text {
+					-- (The chat's own name first, as the other views have it.)
+					function(): string
+						local live = c().title
+						return if live and live ~= "" then live else (t().title or "")
+					end,
+					min_w = 0,
+					truncate = true,
+					text_size = "$font.size.xs",
+					weight = function(): string
+						return if t().kind == "orchestrator" then "$font.weight.semibold" else "$font.weight.regular"
+					end,
+					color = function(): string
+						local s = st()
+						return if s == "done" or s == "idle" then "$text.secondary" else "$text.primary"
+					end,
+				},
+			},
+			-- What it does now, at the lane's end.
+			ui.show(function(): boolean
+				return geom:get().tail > 0
+			end, ui.row {
+				absolute = true,
+				top = 0,
+				h = LANE_H,
+				left = function(): number
+					return geom:get().x1 + 14
+				end,
+				right = 4,
+				gap = 6,
+				items = "center",
+				ui.text {
+					function(): string
+						local a = activity()
+						local s = st()
+						if a then
+							return locale.s(`ds.orch.activity.{a.kind}`)
+						elseif s == "input" or s == "approval" or s == "failed" then
+							return status.KINDS[s :: any].long
+						elseif s == "done" then
+							return status.KINDS.done.label
+						end
+						return ""
+					end,
+					shrink = 0,
+					text_size = "$font.size.xs",
+					color = function(): string
+						local s = st()
+						if s == "input" or s == "approval" or s == "failed" or s == "done" then
+							return `$zeron.status.{s}`
+						end
+						return "$text.secondary"
+					end,
+				},
+				-- Done: how long ago, quiet after the word.
+				ui.show(function(): boolean
+					return st() == "done" and c().updated ~= nil
+				end, ui.text {
+					function(): string
+						local u = c().updated
+						return if u then status.ago(kit.since(u)) else ""
+					end,
+					shrink = 0,
+					tabular = true,
+					text_size = "$font.size.xs",
+					color = "$text.tertiary",
+				}),
+				ui.text {
+					function(): string
+						local a = activity()
+						return if a then a.label or "" else ""
+					end,
+					literal = true,
+					grow = 1,
+					min_w = 0,
+					truncate = true,
+					font = "$font.mono",
+					text_size = "$font.size.xs",
+					color = "$text.tertiary",
+				},
+			}),
+		}
+	end
+
+	local function any_row(r: Row, _i: number, row: State<any>): Node
+		if r.kind == "machine" then
+			return machine_row(row)
+		elseif r.kind == "project" then
+			return project_row(row)
+		end
+		return lane_row(row)
+	end
+
+	local function swatch(texture: string?, tick_kind: string?): Node
+		return ui.canvas {
+			w = if texture then 22 else 10,
+			h = 20,
+			shrink = 0,
+			draw = function(c: any, w: number, h: number)
+				if texture then
+					bar(c, 0, w, h / 2, texture)
+				else
+					tick(c, w / 2, h / 2 + 3, tick_kind :: string)
+				end
+			end,
+		}
+	end
+	local function legend_item(word: any, texture: string?, tick_kind: string?): Node
+		return ui.row {
+			gap = 5,
+			items = "center",
+			shrink = 0,
+			swatch(texture, tick_kind),
+			ui.text { word, text_size = "$font.size.xs", color = "$text.tertiary" },
+		}
+	end
+	local legend: any = { gap = "$space.3", items = "center", shrink = 1, min_w = 0, overflow = "hidden" }
+	for _, e in LEGEND do
+		table.insert(legend, legend_item(locale.t(`ds.orch.activity.{e.kind}`), e.texture, nil))
+	end
+	-- (What happened, after a divider: the same four always, each its own
+	-- mark.)
+	local ticks_legend: any = { gap = "$space.3", items = "center", shrink = 0,
+		ui.div { w = 1, h = 14, bg = "$border.subtle", shrink = 0 } }
+	for _, k in LEGEND_TICKS do
+		local item = legend_item(locale.t(`ds.orch.map.tick.{k}`), nil, k)
+		table.insert(ticks_legend, item)
+	end
+
+	local function span_button(mins: number): Node
+		local function on(): boolean
+			return props.window() == mins
+		end
+		return ui.button {
+			class = "orch-tl-window",
+			label = locale.t(`ds.orch.map.window_{mins}`),
+			selected = on,
+			h = 22,
+			px = "$space.2",
+			rounded = "$radius.sm",
+			items = "center",
+			bg = function(): string
+				return if on() then "$selection.item" else "#00000000"
+			end,
+			hover = { bg = "$hover" },
+			on_click = function()
+				props.on_window(mins)
+			end,
+			ui.text {
+				locale.t(`ds.orch.map.span_{mins}`),
+				tabular = true,
+				text_size = "$font.size.xs",
+				weight = "$font.weight.medium",
+				color = function(): string
+					return if on() then "$text.primary" else "$text.tertiary"
+				end,
+			},
+		}
+	end
+
+	return ui.column {
+		class = "orch-map-timeline",
+		w_full = true,
+		gap = "$space.2",
+		on_resize = function(size: { w: number, h: number })
+			if math.abs(size.w - width:peek()) >= 1 then
+				width:set(size.w)
+			end
+		end,
+		ui.row {
+			class = "orch-tl-top",
+			w_full = true,
+			min_h = TOP_H,
+			gap = "$space.4",
+			items = "center",
+			-- (Both groups, wrapping onto a second line when narrow: what
+			-- each mark means is never hidden.)
+			ui.row {
+				grow = 1,
+				min_w = 0,
+				flex_wrap = true,
+				gap = "$space.4",
+				items = "center",
+				ui.row(legend),
+				ui.row(ticks_legend),
+			},
+			ui.row { gap = 2, items = "center", shrink = 0, span_button(15), span_button(60) },
+		},
+		-- A secondary click on a lane (a machine's head): its menu.
+		kit.MenuField {
+			menu = props.menu,
+			register = props.register,
+			key = "timeline",
+			hit = function(_x: number, y: number): string?
+				for _, r in built:peek().rows do
+					if y >= r.y and y < r.y + r.h then
+						if r.kind == "lane" then
+							return r.id
+						elseif r.kind == "machine" then
+							return `dev:{r.machine}`
+						end
+						return nil
+					end
+				end
+				return nil
+			end,
+			center = function(id: string): (number?, number?)
+				for _, r in built:peek().rows do
+					if r.id == id or (r.kind == "machine" and `dev:{r.machine}` == id) then
+						return 40, r.y + r.h / 2
+					end
+				end
+				return nil, nil
+			end,
+			child = ui.column {
+			class = "orch-tl-field",
+			relative = true,
+			w_full = true,
+			h = function(): number
+				return built:get().h + AXIS_H
+			end,
+			ui.each(rows, any_row, { key = function(r: Row): string
+				return r.id
+			end, absolute = true, left = 0, top = 0, right = 0, bottom = 0 }),
+			-- (In bands: one canvas the field's height, hundreds of lanes,
+			-- would pass zgx's raster limit and lose the window its frame.)
+			kit.Tiled {
+				class = "orch-tl-chart",
+				h = function(): number
+					return built:get().h + AXIS_H
+				end,
+				draw = draw,
+			},
+		},
+		},
+	}
+end)
+
+return M

@@ -1,0 +1,11 @@
+{
+	"languageMode": "strict",
+	"aliases": {
+		"app": "../../../ui",
+		"orchestrators": "../app",
+		"ds": "../../../ui/ds",
+		"screens": "../../../ui/screens",
+		"demos": "../../../ui/demos",
+		"account": "../../../ui/account"
+	}
+}

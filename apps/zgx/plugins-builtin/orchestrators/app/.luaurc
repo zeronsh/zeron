@@ -1,0 +1,10 @@
+{
+	"languageMode": "strict",
+	"aliases": {
+		"app": "../../../ui",
+		"ds": "../../../ui/ds",
+		"screens": "../../../ui/screens",
+		"demos": "../../../ui/demos",
+		"account": "../../../ui/account"
+	}
+}
