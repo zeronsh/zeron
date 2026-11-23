@@ -2722,7 +2722,7 @@ async fn a_compound_decision_is_judged_one_choice_at_a_time() {
     assert!(r9.question.contains("graph-label decision"), "{}", r9.question);
     assert_eq!(r9.options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(), ["Accept round 9", "Keep iterating"]);
     assert_eq!(r9.item_id.as_deref(), Some(r[0].1.as_str()), "on the R9 card");
-    assert_eq!(r9.id, super::turn_asks::ask_id(chat, "a1113#1"), "a stable id: chat, message, part");
+    assert_eq!(r9.id, super::turn_asks::ask_id(chat, "a1113.1"), "a stable id: chat, message, part");
     assert!(calls.load(std::sync::atomic::Ordering::SeqCst) >= 2, "each part judged on its own");
     // Again: nothing new.
     core.rpc_service().settle_card_states().await;

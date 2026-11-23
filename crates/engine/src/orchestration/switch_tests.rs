@@ -203,3 +203,67 @@ async fn off_a_working_chats_row_has_no_activity_or_todo() {
     assert!(row.activity.is_some(), "{row:?}");
     rig.core.sessions.shutdown().await;
 }
+
+/// The edge registry's row id rule (`edge/src/registry-core.ts:55`,
+/// `ID_RE = /^[A-Za-z0-9_.:@\/-]{1,256}$/`): a row whose id fails it is
+/// refused there and never syncs. Copied here; keep the two the same.
+fn edge_takes(id: &str) -> bool {
+    (1..=256).contains(&id.len())
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b':' | b'@' | b'/' | b'-'))
+}
+
+#[tokio::test]
+async fn every_orchestration_row_id_the_engine_makes_is_one_the_edge_takes() {
+    let chat = uuid::Uuid::new_v4().to_string();
+    let message = uuid::Uuid::new_v4().to_string();
+    let ids = [
+        super::turn_asks::ask_id(&chat, &message),
+        super::turn_asks::ask_id(&chat, &super::turn_asks::part_turn(&message, 3)),
+        super::board::pr_ask_id(Some(&chat)),
+        super::board::pr_ask_id(None),
+        zeron_proto::orchestration::new_brain_dump_chat_id(),
+        uuid::Uuid::new_v4().simple().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+        zeron_doc::registry::SCRATCHPAD_ROW.to_owned(),
+        "settings".to_owned(),
+        "slot07".to_owned(),
+    ];
+    for id in &ids {
+        assert!(edge_takes(id), "{id}");
+    }
+    // The parts of a compound decision as asks were raised before: refused
+    // by the edge, still read here.
+    assert!(!edge_takes(&super::turn_asks::ask_id(&chat, &format!("{message}#1"))));
+    assert_eq!(super::turn_asks::turn_base(&format!("{message}#1")), message);
+    assert_eq!(super::turn_asks::turn_base(&super::turn_asks::part_turn(&message, 1)), message);
+    assert_eq!(super::turn_asks::turn_base(&message), message);
+
+    // And the rows a working engine writes.
+    let temp = tempfile::tempdir().unwrap();
+    let core = super::on(core(temp.path())).await;
+    let rpc = core.rpc_service();
+    rpc.ensure_brain_dump().unwrap();
+    let made = handle(&core, Caller::Local, methods::ORCHESTRATE, json!({"op":"createOrchestrator","name":"Ops","goal":"g"}))
+        .await
+        .unwrap()
+        .unwrap();
+    let orchestrator = made["id"].as_str().unwrap().to_owned();
+    handle(&core, Caller::Local, methods::ORCHESTRATE, json!({"op":"upsertItem","item":{"title":"Ship","orchestratorId":orchestrator}}))
+        .await
+        .unwrap();
+    let state = core.orchestration.state();
+    let rows: Vec<String> = state
+        .orchestrators
+        .iter()
+        .map(|o| o.id.clone())
+        .chain(state.crew.iter().map(|m| m.chat_id.clone()))
+        .chain(state.items.iter().map(|i| i.id.clone()))
+        .chain(state.asks.iter().map(|a| a.id.clone()))
+        .chain(state.dumps.iter().map(|d| d.id.clone()))
+        .chain(state.cards.iter().map(|c| c.id.clone()))
+        .collect();
+    assert!(rows.len() >= 3, "{rows:?}");
+    for id in &rows {
+        assert!(edge_takes(id), "{id}");
+    }
+}
