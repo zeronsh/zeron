@@ -79,9 +79,9 @@ export type Props = {
 local WIDTH = "$zeron.menu.width"
 -- How long the pointer may take crossing other rows to an open submenu
 -- before the row it rests on takes over (Zeron's grace, renewed while it
--- keeps moving toward it), how far past the submenu's edges its corridor
--- reaches, and how far the pointer must move to count as heading somewhere.
-local GRACE, SLACK, NUDGE = 300, 8, 2
+-- keeps moving toward it), and how far the pointer must move to count as
+-- heading somewhere.
+local GRACE, NUDGE = 300, 2
 -- Typing: how long between letters they still make one name (as zgx's own
 -- menus and AppKit's).
 local TYPEAHEAD = 750
@@ -90,28 +90,6 @@ local TYPEAHEAD = 750
 local ARM_GUARD = 300
 -- A choice blinks before the menu closes, as AppKit's do: off, then on.
 local BLINK = 50
-
--- Whether the pointer at `p`, having last rested on the trigger at `o`, is
--- still heading for the submenu `b` (on the left of it, `left`): inside the
--- triangle from `o` to the submenu's near edge, its ends `SLACK` past the
--- submenu's top and foot (Zeron's `corridor`).
-local function toward(o: { x: number, y: number }, p: { x: number, y: number }, b: Element, left: boolean): boolean
-	local bx, by, bw, bh = b.x, b.y, b.width, b.height
-	if not (bx and by and bw and bh) then
-		return false
-	end
-	local edge = if left then bx + bw else bx
-	local dir = if left then -1 else 1
-	local distance = (edge - o.x) * dir
-	local advance = (p.x - o.x) * dir
-	if distance <= 0 or advance <= 0 or advance > distance + SLACK then
-		return false
-	end
-	local f = math.min(advance / distance, 1)
-	local top = o.y + (by - SLACK - o.y) * f
-	local bottom = o.y + (by + bh + SLACK - o.y) * f
-	return p.y >= top and p.y <= bottom
-end
 
 -- Rules between groups (edge to edge, the groups inset themselves) and a
 -- group's title: the menus' own (`Menu.Rule`, `Menu.Heading`).
@@ -287,7 +265,7 @@ local function build_panel(props: PanelProps): Node
 		if sub_at ~= 0 and p and origin and sub_el then
 			local trig = stops[sub_at].el
 			local left = trig ~= nil and sub_el.x ~= nil and trig.x ~= nil and (sub_el.x :: number) < (trig.x :: number)
-			if toward(origin, p, sub_el, left) then
+			if Menu.toward(origin, p, sub_el, left) then
 				-- Heading for the submenu across this row: wait, renewing the
 				-- wait while the pointer keeps on toward it; stopping, or
 				-- turning back, hands over to this row.
@@ -660,6 +638,9 @@ local function build_panel(props: PanelProps): Node
 				open = open,
 				label = e.label,
 				trigger = trigger,
+				-- Close beside the panel, as a submenu sits: 2 from its edge (the
+				-- row it opens from sits 5 inside it, its inset and border).
+				placement = { side = "right", align = "start", offset = 7 },
 				w = WIDTH,
 				Panel {
 					entries = sub_entries,
