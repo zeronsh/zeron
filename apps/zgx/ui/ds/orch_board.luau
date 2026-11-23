@@ -452,6 +452,11 @@ local OrchBoard = ui.component(function(props: Props): Node
 				rounded_br = 0,
 				bg = lane,
 				clip_inset = { top = 0, right = 0, bottom = LANE_EXTRA, left = 0 },
+				-- (Its clip given as an animated value too, from its first
+				-- frame: the one its eases start from.)
+				on_mount = function(el: any)
+					anime.utils.set(el, { clipBottom = LANE_EXTRA })
+				end,
 			},
 			ui.div {
 				ref = foot,

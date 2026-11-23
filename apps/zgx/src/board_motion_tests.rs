@@ -385,6 +385,21 @@ fn a_card_in_flight_is_over_every_card_at_rest_and_solid_from_its_first_frame() 
     }
 }
 
+/// Where a lane's body paints to, below its column's top: its box cut by
+/// its clip.
+fn lane_bottom(app: &mut TestApp, place: &str) -> (f32, f32) {
+    let body = one(app, &format!("#orch-col-{place} >> .orch-lane-body")).unwrap();
+    let column = one(app, &format!("#orch-col-{place}")).unwrap();
+    let scene = app.ui.scene.borrow();
+    let b = scene.bounds(body);
+    let cut = match scene.clip_inset(body).map(|c| c.bottom) {
+        Some(zgx::layout::Length::Px(v)) => v,
+        _ => 0.,
+    };
+    let c = scene.bounds(column);
+    (b.y + b.height - cut, c.y + c.height)
+}
+
 fn foot_y(app: &mut TestApp, place: &str) -> f32 {
     let foot = one(app, &format!("#orch-col-{place} >> .orch-lane-foot")).unwrap();
     app.ui.scene.borrow().transform(foot).y
@@ -403,6 +418,10 @@ fn lanes_do_not_ease_at_mount_on_a_tab_or_a_filter() {
         if f > 0 {
             for place in ["needs_you", "running", "done"] {
                 assert_eq!(foot_y(&mut app, place), 0., "{place}'s lane eased at mount, frame {f}");
+                // (Its body ends a corner's height above the column's foot,
+                // never below it.)
+                let (painted, foot) = lane_bottom(&mut app, place);
+                assert!(painted <= foot + 0.5, "{place}'s lane paints to {painted}, its column ends at {foot}, frame {f}");
             }
         }
     }
