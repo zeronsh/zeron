@@ -7,7 +7,7 @@
 //! The chat's host writes [`SessionLimit`] on the chat's session row
 //! (`Session::limited`) and keeps it until the chat is resumed; every device
 //! reads it (the board treats a limited thread as at work, the clients show
-//! "Waiting for limit · resets 14:05").
+//! "Waiting for limit" and "resets 14:05", spaced).
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

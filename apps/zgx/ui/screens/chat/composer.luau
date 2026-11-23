@@ -1327,18 +1327,21 @@ local function Composer(): Node
 			end
 		end
 		-- On Cloud: its machine's session (a side chat shares its parent's),
-		-- and the size of its machine ("Cloud · Large").
+		-- and the size of its machine (`size`: "Large", after the size's glyph).
 		local on_cloud = cloud.on_device((s :: any).device)
 		local machine = if on_cloud then cloud.session_for(s.id, (s :: any).device) else nil
 		local restarting = false
+		local size: { string }? = nil
 		if on_cloud then
 			-- (Its size as picked while its machine restarts on it.)
 			local to = cloud.resizing:get()[s.id]
-			on = CloudMachine.on_size("Cloud", CloudMachine.size_name(cloud.machines(), to or (machine and machine.machine)))
+			on = "Cloud"
+			size = CloudMachine.size_words(CloudMachine.size_name(cloud.machines(), to or (machine and machine.machine)))
 			restarting = to ~= nil
 		end
 		return {
 			device = on,
+			size = size,
 			cloud = on_cloud,
 			restarting = restarting,
 			name = name,

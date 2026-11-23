@@ -7,10 +7,10 @@
 //! Over every `ds/orch_*` (the Board, its cards and the Graph with the
 //! rest), `screens/control/` and `screens/orchestrator/`, in ui/ or in the
 //! Orchestrators plugin's app/ (plugins-builtin/orchestrators, which keeps
-//! ui/'s layout), and the `control.`, `orch.` and `ds.orch.` keys of every
-//! locale. (The usage
-//! limit's `ds.limit.` words keep a separator between their facts that no
-//! one sees: `limit.parts` and the Graph's card lay them out apart.)
+//! ui/'s layout), with the usage limit's words (ds/usage_limit), and the
+//! `control.`, `orch.`, `ds.orch.`, `ds.limit.` and `ds.composer.machine.`
+//! keys of every locale (a limit's facts and a Cloud chip's size are words
+//! apart, spaced).
 
 use std::path::{Path, PathBuf};
 
@@ -42,7 +42,7 @@ fn in_scope(rel: &str) -> bool {
     if rel.starts_with("screens/control/") || rel.starts_with("screens/orchestrator/") {
         return true;
     }
-    rel.starts_with("ds/orch_")
+    rel.starts_with("ds/orch_") || rel == "ds/usage_limit.luau"
 }
 
 /// The code of a line, its comment cut.
@@ -54,7 +54,7 @@ fn code(line: &str) -> &str {
 }
 
 fn key_in_scope(key: &str) -> bool {
-    ["control.", "orch.", "ds.orch."].iter().any(|p| key.starts_with(p))
+    ["control.", "orch.", "ds.orch.", "ds.limit.", "ds.composer.machine."].iter().any(|p| key.starts_with(p))
 }
 
 fn walk(prefix: &str, value: &serde_json::Value, file: &str, found: &mut Vec<String>) {

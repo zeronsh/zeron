@@ -681,7 +681,6 @@
       },
       "machine": {
         "label": "Machine",
-        "on": "{device} · {size}",
         "column_vcpu": "vCPU",
         "column_memory": "Memory",
         "column_rate": "Credits",
@@ -1454,9 +1453,11 @@
     },
     "limit": {
       "waiting": "Waiting for limit",
-      "waiting_until": "Waiting for limit · resets {time}",
-      "switched": "On {account} · {original} resets {time}",
-      "switched_unknown": "On {account} · {original} limited",
+      "resets": "resets {time}",
+      "on": "On {account}",
+      "original_resets": "{original} resets {time}",
+      "original_limited": "{original} limited",
+      "and_then": "{first}, {rest}",
       "resets_in": "resets in {t}",
       "original": "its account"
     }
@@ -3455,13 +3456,12 @@
       "outbox_uploading": "Uploading…",
       "outbox_failed": "Didn't send",
       "size_default": "Your default",
-      "on_size": "{where} · {size}",
+      "size_restarting": "restarting",
       "size_gb": "{n} GB",
       "restarting": "Restarting on {size}…",
       "size_note_running": "Size can change once this turn ends.",
       "size_note_awake": "Restarts the machine. Files stay; processes stop.",
-      "size_note_asleep": "Wakes the machine on it. Files stay.",
-      "on_size_restarting": "{where} · {size} · restarting"
+      "size_note_asleep": "Wakes the machine on it. Files stay."
     },
     "turn_state": {
       "interrupted": "Interrupted",

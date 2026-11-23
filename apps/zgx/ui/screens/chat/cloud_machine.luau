@@ -17,7 +17,7 @@
 --   size_choices(machines, default)  a new chat's Machine menu: each size's
 --                                  specs and rate, the account's default tagged
 --   size_for(machines, picked, default)  the size a new chat starts on
---   size_name / on_size            "Large"; "Cloud · Large"
+--   size_name / size_words         "Large"; { "Large", "restarting" }
 --   dismissed / dismiss / settle   dismissal: an alert put away stays away
 --                                  until its level worsens (the restored note:
 --                                  until its machine rebuilds again)
@@ -720,16 +720,18 @@ function M.size_name(machines: { any }, id: string?): string?
 	return nil
 end
 
--- Where a Cloud chat runs, with its size: "Cloud · Large"; while its machine
--- restarts on a size picked, that size and so: "Cloud · Large · restarting".
-function M.on_size(where: string, size: string?, restarting: boolean?): string
+-- What a Cloud chat's chip says of its machine after "Cloud": its size,
+-- { "Large" }; while its machine restarts on a size picked, that size and
+-- so, { "Large", "restarting" }; none while its size isn't known. Each its
+-- own words: the chip spaces them after the size's glyph.
+function M.size_words(size: string?, restarting: boolean?): { string }
 	if size == nil then
-		return where
+		return {}
 	end
 	if restarting then
-		return say("on_size_restarting", `{where} · {size} · restarting`, { where = where, size = size })
+		return { size, say("size_restarting", "restarting") }
 	end
-	return say("on_size", `{where} · {size}`, { where = where, size = size })
+	return { size }
 end
 
 -- ── As the deck takes it ───────────────────────────────────────────────────

@@ -681,7 +681,6 @@
       },
       "machine": {
         "label": "机器",
-        "on": "{device} · {size}",
         "column_vcpu": "vCPU",
         "column_memory": "内存",
         "column_rate": "额度",
@@ -1488,10 +1487,12 @@
       }
     },
     "limit": {
-      "waiting": "等待用量限制重置",
-      "waiting_until": "等待用量限制 · {time} 重置",
-      "switched": "改用 {account} · {original} {time} 重置",
-      "switched_unknown": "改用 {account} · {original} 受限",
+      "waiting": "等待用量限制",
+      "resets": "{time} 重置",
+      "on": "改用 {account}",
+      "original_resets": "{original} {time} 重置",
+      "original_limited": "{original} 受限",
+      "and_then": "{first}，{rest}",
       "resets_in": "{t}后重置",
       "original": "原账户"
     }
@@ -3490,13 +3491,12 @@
       "outbox_uploading": "正在上传…",
       "outbox_failed": "未发送",
       "size_default": "你的默认",
-      "on_size": "{where} · {size}",
+      "size_restarting": "重启中",
       "size_gb": "{n} GB",
       "restarting": "正在以{size}重启…",
       "size_note_running": "本轮结束后才能更改规格。",
       "size_note_awake": "重启机器。文件保留，进程停止。",
-      "size_note_asleep": "以此规格唤醒机器。文件保留。",
-      "on_size_restarting": "{where} · {size} · 重启中"
+      "size_note_asleep": "以此规格唤醒机器。文件保留。"
     },
     "turn_state": {
       "interrupted": "已中断",

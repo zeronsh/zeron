@@ -500,14 +500,15 @@ end)
 
 -- Each session's row as last made: kept while it says the same, so the
 -- row (ds/sidebar follows its session's own table) stays asleep as others
--- change.
+-- change. (`note_parts`, a list made again each time, says what `note`
+-- does: that one's compared.)
 local made_rows: { [string]: { [string]: any } } = {}
 local function kept(row: { [string]: any }): { [string]: any }
 	local was = made_rows[row.id]
 	if was then
 		local same = true
 		for k, v in row do
-			if was[k] ~= v then
+			if k ~= "note_parts" and was[k] ~= v then
 				same = false
 				break
 			end
@@ -648,10 +649,11 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 		local status = ASKED[asked[c.id] or ""] or c.status
 		-- (Stopped by its usage limit, waiting for the reset: limited, its
 		-- glyph saying till when, unless it's asking for you.)
-		local note: string? = nil
+		local note: string?, note_parts: { string }? = nil, nil
 		if limit.waiting(c) and not ASKED[asked[c.id] or ""] then
 			status = "limited"
 			note = limit.text(limit.of(c))
+			note_parts = limit.parts(limit.of(c))
 		end
 		-- (The Activity view's: woken from sleep and not looked at since, the
 		-- alarm, unless it's asking for you or under way. Which shelf it's
@@ -671,6 +673,7 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 			title = c.title,
 			status = status :: any,
 			note = note,
+			note_parts = note_parts,
 			time = if on_shelf == "asleep" and c.sleep_until then activity.wakes_in(c.sleep_until) else c.updated,
 			shelf = on_shelf,
 			rank = rank,

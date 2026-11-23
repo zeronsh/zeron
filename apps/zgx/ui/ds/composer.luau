@@ -112,6 +112,10 @@ export type FixedMachine = {
 -- picked, the chip's glyph a restart's.
 export type Fixed = {
 	device: string?,
+	-- On Cloud, its machine's size after the device ({ "Large" }; restarting
+	-- on it, { "Large", "restarting" }): each its own words, after the
+	-- size's glyph.
+	size: { string }?,
 	name: string?,
 	worktree: boolean,
 	project: string?,
@@ -381,6 +385,8 @@ local PROJECT_MIN, PROJECT_MAX, BRANCH_MAX, BRANCH_FLOOR = 44, 140, 180, 36
 local DEVICE_MAX, DEVICE_KEEP, DEVICE_MIN = 120, 72, 36
 -- What a chevron between two of them takes, with its gap.
 local PLACE_CHEVRON = 14
+-- The size's glyph and the room around it (ui.row gaps, its lead-in).
+local SIZE_GLYPH = 24
 -- The footer's chips: one height, one corner (the menus' row corner),
 -- each lead (a glyph's 12) 6 in all round, and as far from its words.
 local CHIP_H, CHIP_RADIUS = 24, "$radius.lg"
@@ -1039,6 +1045,9 @@ end
 type Place = {
 	-- The device it runs on, by name (nil: none to say).
 	device: (() -> string?)?,
+	-- On Cloud, its machine's size after the device, as words apart (none:
+	-- nothing to say): the cpu glyph, then each, spaced.
+	size: (() -> { string })?,
 	-- The project (nil: none named), and whether it works in one at all.
 	project: () -> Project?,
 	in_project: () -> boolean,
@@ -1065,9 +1074,19 @@ local function place_line(p: Place): { Child }
 	end
 	-- The name's and the branch's own widths, measured unseen: each keeps
 	-- its least of itself, or all of a shorter one (never padded out).
-	local natural, branch_natural, device_natural = ui.ref(), ui.ref(), ui.ref()
+	local natural, branch_natural, device_natural, size_natural = ui.ref(), ui.ref(), ui.ref(), ui.ref()
 	local function device_name(): string
 		return if p.device then p.device() or "" else ""
+	end
+	local function size_words(): { string }
+		return if p.size then p.size() else {}
+	end
+	local function has_size(): boolean
+		return #size_words() > 0
+	end
+	-- (The size's own width: its words, its glyph and the room around them.)
+	local function size_width(): number
+		return if has_size() then (size_natural.width or 0) + SIZE_GLYPH else 0
 	end
 	local function has_device(): boolean
 		return device_name() ~= ""
@@ -1083,7 +1102,7 @@ local function place_line(p: Place): { Child }
 				on_measures(
 					if has_project() or not p.in_project() then name_w else 0,
 					if p.in_project() then branch_w else 0,
-					if has_device() then (device_natural.width or 0) + PLACE_CHEVRON else 0
+					if has_device() then (device_natural.width or 0) + size_width() + PLACE_CHEVRON else 0
 				)
 			end
 		end)
@@ -1124,6 +1143,19 @@ local function place_line(p: Place): { Child }
 			pointer_events = "none",
 			aria_hidden = true,
 		},
+		-- (Measured only, never shown: the size's words together.)
+		ui.text {
+			function(): string
+				return table.concat(size_words(), " ")
+			end,
+			ref = size_natural,
+			absolute = true,
+			left = 0,
+			top = 0,
+			opacity = 0,
+			pointer_events = "none",
+			aria_hidden = true,
+		},
 		ui.presence(lead, function(kind: string): Node
 			-- (Its kind named, for tests: "place-lead-worktree".)
 			return ui.div { class = `place-lead-{kind}`, Icon { name = kind :: Icon.Name, size = 12 } }
@@ -1146,6 +1178,19 @@ local function place_line(p: Place): { Child }
 				shrink = 1,
 				fade = 16,
 			},
+			-- On Cloud, its machine's size: the cpu glyph, then its words,
+			-- spaced.
+			ui.show(has_size, ui.row {
+				id = "composer-place-size",
+				shrink = 0,
+				ml = "$space.1",
+				gap = "$space.1",
+				items = "center",
+				ui.div { shrink = 0, aria_hidden = true, Icon { name = "cpu", size = 12 } },
+				ui.each(ui.computed(size_words), function(t: string): Node
+					return ui.text { t, class = "composer-place-size-word", mb = LIFT, shrink = 0 }
+				end),
+			}),
 			ui.div {
 				shrink = 0,
 				color = "$text.disabled",
@@ -2411,20 +2456,28 @@ return ui.component(function(props: Props): Node
 				local v = props.device:get()
 				for _, d in list_of(props.devices) :: { Device } do
 					if d.value == v then
-						-- On Cloud, with the size it starts on: "Cloud · Large".
-						local size: string? = nil
-						if d.cloud and props.machine and props.machines then
-							local m = props.machine:get()
-							for _, item in list_of(props.machines) :: { Dropdown.Item } do
-								if item.value == m then
-									size = item.label
-								end
-							end
-						end
-						return if size then locale.s("ds.composer.machine.on", { device = d.label, size = size }) else d.label
+						return d.label
 					end
 				end
 				return nil
+			end
+			-- On Cloud, the size it starts on, after the device: { "Large" }.
+			local function chosen_size(): { string }
+				if not props.device or not props.devices or not props.machine or not props.machines then
+					return {}
+				end
+				local v = props.device:get()
+				for _, d in list_of(props.devices) :: { Device } do
+					if d.value == v and d.cloud then
+						local m = props.machine:get()
+						for _, item in list_of(props.machines) :: { Dropdown.Item } do
+							if item.value == m then
+								return { item.label }
+							end
+						end
+					end
+				end
+				return {}
 			end
 			-- The chip: [glyph] device › project › branch, washed under the
 			-- pointer and while its panel is open, as a chip is.
@@ -2462,6 +2515,7 @@ return ui.component(function(props: Props): Node
 				trigger = function(menu: Dropdown.Menu): Node
 					return chip(menu, locale.t("ds.composer.branch.label"), {
 						device = chosen_device,
+						size = chosen_size,
 						project = chosen_project,
 						in_project = in_project,
 						branch = branch_name,
@@ -2483,6 +2537,10 @@ return ui.component(function(props: Props): Node
 					device = function(): string?
 						local f = f_of()
 						return if f then f.device else nil
+					end,
+					size = function(): { string }
+						local f = f_of()
+						return if f and f.size then f.size else {}
 					end,
 					project = function(): Project?
 						local f = f_of()

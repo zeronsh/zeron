@@ -1968,7 +1968,7 @@ pub struct Progress {
     /// The tool call running now, once it has run for
     /// [`PROGRESS_STEP_WRITE_SECS`] (shorter ones never show): its label
     /// (redacted and short, like `ChatActivity::label`) and when it started.
-    /// Clients show "cargo test · 9m" from these.
+    /// Clients show "cargo test" and "9m" from these, spaced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

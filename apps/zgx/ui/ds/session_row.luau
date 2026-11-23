@@ -77,8 +77,10 @@ export type Session = {
 	subagents: number?,
 	pr: { number: number, state: string?, title: string? }?,
 	-- What its state's glyph says where the pointer rests, in place of its
-	-- state's name ("Waiting for limit · resets 14:05").
+	-- state's name: its facts apart ("Waiting for limit", "resets 14:05"),
+	-- spaced, and as one phrase for its label.
 	note: string?,
+	note_parts: { string }?,
 }
 
 function M.line(text: Node, ...: Node?): Node
@@ -172,12 +174,17 @@ function M.mark(cur: () -> Session, strong: () -> boolean): Node
 end
 
 -- A state, small: its glyph alone, in its hue (a state with no glyph, its
--- dot), its name a tooltip (or `note`'s words, while it has some).
-function M.state(kind: status.Kind, note: (() -> string?)?): Node
+-- dot), its name a tooltip (or `note`'s words, while it has some: its
+-- facts apart, `parts`, spaced in the tooltip).
+function M.state(kind: status.Kind, note: (() -> string?)?, parts: (() -> { string }?)?): Node
 	local k = status.KINDS[kind]
 	local function said(): string
 		local n = if note then note() else nil
 		return if n and n ~= "" then n else k.long
+	end
+	local function facts(): { string }
+		local p = if parts then parts() else nil
+		return if p and #p > 0 then p else { said() }
 	end
 	return ui.div {
 		shrink = 0,
@@ -186,7 +193,7 @@ function M.state(kind: status.Kind, note: (() -> string?)?): Node
 		items = "center",
 		justify = "center",
 		color = `$zeron.status.{kind}`,
-		tooltip = if note then Tooltip { said } else k.long,
+		tooltip = if note then Tooltip { said, parts = facts } else k.long,
 		label = if note then said else k.long,
 		if k.glyph then status.StatusIcon { kind = kind, size = 14 } else status.StatusDot { kind = kind, size = 6 },
 	}
@@ -213,7 +220,9 @@ function M.standing(cur: () -> Session): Node
 		end
 		return M.state(kind :: status.Kind, if kind == "limited" then function(): string?
 			return cur().note
-		end else nil)
+		end else nil, function(): { string }?
+			return cur().note_parts
+		end)
 	end)
 end
 
