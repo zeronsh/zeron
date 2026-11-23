@@ -263,7 +263,32 @@ local function ring_time(now: number): number
 	return math.min((now % (RUN * 1000 + REST)) / 1000, RUN)
 end
 local ticked = 0
-local function step_start()
+-- A second's look, the script's own: steppers showing and the clock
+-- stopped, as when what started its timer went, it starts again. It looks
+-- only while something steps: idle, nothing of the script runs (a frame
+-- with nothing moving calls no script). Started from its own effect, so
+-- that a start from a component's run doesn't tie it to that component.
+local watch = ui.state("ds_status_watch", 0)
+local watching = false
+local step_start: () -> ()
+ui.effect(function()
+	if watch:get() == 0 then
+		return
+	end
+	ui.every(1000, function(): boolean?
+		if showing <= 0 then
+			watching = false
+			return false
+		end
+		step_start()
+		return nil
+	end)
+end)
+function step_start()
+	if not watching then
+		watching = true
+		watch:set(watch:peek() + 1)
+	end
 	-- (Its timer is owned as an effect's is: started from one's run, it goes
 	-- when that runs again. Not stepped for three steps: started again.)
 	if stepping and ui.now() - ticked < 3 * STEP then
@@ -294,13 +319,6 @@ local function step_start()
 		return nil
 	end)
 end
--- (A second's look, the script's own: steppers showing and the clock
--- stopped, as when what started its timer went, it starts again.)
-ui.every(1000, function()
-	if showing > 0 then
-		step_start()
-	end
-end)
 -- Steps `el` (under `key`) on the shared clock, `set(el, now)` at each step
 -- (and at once), until `M.unstep(key)`: for a loop off macOS that a script
 -- starts and stops itself. Nothing when motion is reduced.
