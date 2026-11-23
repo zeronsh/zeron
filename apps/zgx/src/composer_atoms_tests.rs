@@ -780,6 +780,173 @@ fn zeron_v2_composer_has_mention_tabs_and_inline_chips() {
         "zeron-v2 send must serialize inline attachment chip, got calls={calls:?}"
     );
 
+    // 4. Drag/drop a file onto zeron-v2's composer: attaches to cargo AND inserts inline chip.
+    let composer = app.bounds("#chat-composer");
+    app.ui.dispatch(InputEvent::FilesDrop {
+        x: composer.x + composer.width * 0.5,
+        y: composer.y + composer.height * 0.5,
+        paths: vec![PathBuf::from("/tmp/zeron-drop/readme.md")].into(),
+    });
+    app.frames(15);
+    {
+        let editor = app.ui.editor_within(field).expect("editor");
+        let atoms = editor.atoms();
+        let text = editor.editor.borrow().text().into_owned();
+        assert_eq!(atoms.len(), 1, "zeron-v2 file drop must insert 1 inline chip, text={text:?}");
+        assert_eq!(&text[atoms[0].range.clone()], "readme.md");
+    }
+
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn dragging_files_to_attach_inserts_inline_chips() {
+    let mut app = mount_fixture("chat_fixture.luau");
+    run_cmd(&app, "go_s6");
+    app.frames(25);
+
+    let field = app.find(FIELD).expect("composer textarea");
+    let cargo_len = |app: &TestApp| -> usize {
+        match read_state(app, "chat.composer.cargo") {
+            Value::List(items) => items.len(),
+            _ => 0,
+        }
+    };
+
+    // 1. Drop an OS file onto the transcript: attaches 1 item and inserts 1 inline chip.
+    let transcript = app.bounds("#transcript");
+    let tx = transcript.x + transcript.width * 0.5;
+    let ty = transcript.y + transcript.height * 0.3;
+    app.ui.dispatch(InputEvent::FilesDrop {
+        x: tx,
+        y: ty,
+        paths: vec![PathBuf::from("/tmp/zeron-drop/Screenshot 2026-04-07 at 1.10.14 PM.png")].into(),
+    });
+    app.frames(15);
+    {
+        let editor = app.ui.editor_within(field).expect("editor");
+        let text = editor.editor.borrow().text().into_owned();
+        let atoms = editor.atoms();
+        assert_eq!(cargo_len(&app), 1, "expected 1 cargo item after transcript drop");
+        assert_eq!(atoms.len(), 1, "expected 1 inline chip after transcript drop, text={text:?}");
+        assert_eq!(&text[atoms[0].range.clone()], "Screenshot 1.10.14 PM.png");
+        assert_eq!(text, "Screenshot 1.10.14 PM.png ");
+    }
+
+    // 2. Drop an OS file directly onto the composer pill: attaches 1 more item and inserts 1 more chip (no double-drop!).
+    let composer = app.bounds("#chat-composer");
+    let cx = composer.x + composer.width * 0.5;
+    let cy = composer.y + composer.height * 0.5;
+    app.ui.dispatch(InputEvent::FilesDrop {
+        x: cx,
+        y: cy,
+        paths: vec![PathBuf::from("/tmp/zeron-drop/notes.md")].into(),
+    });
+    app.frames(15);
+    {
+        let editor = app.ui.editor_within(field).expect("editor");
+        let text = editor.editor.borrow().text().into_owned();
+        let atoms = editor.atoms();
+        assert_eq!(cargo_len(&app), 2, "expected 2 cargo items after composer drop");
+        assert_eq!(atoms.len(), 2, "expected 2 inline chips after composer drop (no duplicate), text={text:?}");
+        assert_eq!(&text[atoms[0].range.clone()], "Screenshot 1.10.14 PM.png");
+        assert_eq!(&text[atoms[1].range.clone()], "notes.md");
+        assert_eq!(text, "Screenshot 1.10.14 PM.png notes.md ");
+    }
+
+    // 3. Backspace deletes the second inline chip while keeping notes.md attached in cargo.
+    send_key(&mut app, Key::Backspace);
+    send_key(&mut app, Key::Backspace);
+    {
+        let editor = app.ui.editor_within(field).expect("editor");
+        let text = editor.editor.borrow().text().into_owned();
+        let atoms = editor.atoms();
+        assert_eq!(cargo_len(&app), 2, "deleting inline chip must keep file attached in cargo");
+        assert_eq!(atoms.len(), 1, "only Screenshot chip should remain, text={text:?}");
+        assert_eq!(&text[atoms[0].range.clone()], "Screenshot 1.10.14 PM.png");
+    }
+
+    // 4. Drag a project file from the Files pane onto the transcript: attaches and inserts chip.
+    let from_node = app.bounds("#fixture-drag-files");
+    let from = (from_node.x + from_node.width * 0.5, from_node.y + from_node.height * 0.5);
+    drag(&mut app, from, (tx, ty));
+    {
+        let editor = app.ui.editor_within(field).expect("editor");
+        let text = editor.editor.borrow().text().into_owned();
+        let atoms = editor.atoms();
+        assert_eq!(cargo_len(&app), 3, "expected 3 cargo items after project file drop");
+        assert_eq!(atoms.len(), 2, "expected 2 inline chips after project file drop, text={text:?}");
+        assert_eq!(&text[atoms[1].range.clone()], "lib.rs");
+    }
+
+    // 5. Removing Screenshot from cargo deletes its auto-inserted inline chip too.
+    app.hover(r#"role:button "Screenshot 1.10.14 PM.png""#);
+    app.frames(10);
+    app.click(r#"role:button "Remove Screenshot 1.10.14 PM.png""#);
+    app.frames(15);
+    {
+        let editor = app.ui.editor_within(field).expect("editor");
+        let text = editor.editor.borrow().text().into_owned();
+        let atoms = editor.atoms();
+        assert_eq!(cargo_len(&app), 2, "Screenshot should be removed from cargo");
+        assert_eq!(atoms.len(), 1, "Screenshot chip should be removed, leaving lib.rs; text={text:?}");
+        assert_eq!(&text[atoms[0].range.clone()], "lib.rs");
+    }
+
+    // 6. Send and verify canonical attachment link serialization for the remaining dropped chip.
+    app.click(FIELD);
+    app.frames(5);
+    send_key(&mut app, Key::Enter);
+    app.frames(20);
+    let calls = match read_state(&app, "calls") {
+        Value::Str(s) => s.to_string(),
+        other => panic!("expected calls string, got {other:?}"),
+    };
+    assert!(
+        calls.contains("send:s6:[lib.rs](zeron-attachment:3)"),
+        "send should serialize auto-inserted dropped file chip, got calls={calls:?}"
+    );
+}
+
+#[test]
+fn side_chat_attach_and_drop_insert_inline_chips() {
+    let ui = ui_dir();
+    let filters = [
+        "the files pane's files dropped on a side chat attach, by their path on its computer",
+        "dropped on its composer, the same as on its transcript",
+        "a side chat's chips are its own: another's composer shows none",
+    ];
+    for filter in filters {
+        let report = zgx_script::test_runner::run(&ui, Some(filter), |outcome| {
+            if let Some(failure) = &outcome.failure {
+                eprintln!("{}: {failure}", outcome.name);
+            }
+        })
+        .expect("side_chat_attach test runs");
+        assert!(!report.outcomes.is_empty(), "no test matched filter {filter:?}");
+        assert_eq!(report.failed(), 0, "{report:?}");
+    }
+
+    // Also verify the dropped file in a side chat becomes an inline atomic chip in the side chat's editor.
+    let mut app = mount_fixture("lanes_fixture.luau");
+    app.click(r#"#session-lanes >> role:button "Open side chat Looking at the tests""#);
+    app.frames(30);
+    let from = app.bounds("#carry-paths");
+    let to = app.bounds(".side-chat-tab");
+    drag(
+        &mut app,
+        (from.x + from.width * 0.5, from.y + from.height * 0.5),
+        (to.x + to.width * 0.5, to.y + to.height * 0.3),
+    );
+    let side_field = app.find(".side-chat-tab >> role:textbox").expect("side chat textbox");
+    {
+        let editor = app.ui.editor_within(side_field).expect("side chat editor");
+        let text = editor.editor.borrow().text().into_owned();
+        let atoms = editor.atoms();
+        assert_eq!(atoms.len(), 1, "side-chat file drop must insert 1 inline chip, text={text:?}");
+        assert_eq!(&text[atoms[0].range.clone()], "lib.rs");
+    }
+}
+
+
 

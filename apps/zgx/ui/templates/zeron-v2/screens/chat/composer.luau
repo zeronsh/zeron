@@ -1425,7 +1425,7 @@ local function Composer(): Node
 			-- (A drop on the pill: the chat's overlay goes with it.)
 			on_files = function(files: { any })
 				shared.dropping:set({})
-				shared.attach_files(files)
+				shared.drop_files(files)
 			end,
 			-- A picture pasted (a screenshot): written out by the host, then
 			-- carried as an image, as one dropped is, named as Zeron names

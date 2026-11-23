@@ -209,7 +209,7 @@ end
 -- what's picked (a changed agent, model or access becomes the chat's, as the
 -- chat page's does). A message that didn't go says so on the composer's own
 -- notice line, above it, never over it.
-local function composer(chat: string, view: any, name: string, focus: State<number>, open_model: State<number>, split: boolean?, focused: (() -> boolean)?): Node
+local function composer(chat: string, view: any, name: string, focus: State<number>, open_model: State<number>, split: boolean?, focused: (() -> boolean)?, own_draft: State<string>?, own_atoms: State<{ ComposerAtoms.AtomEntry }>?): Node
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
 	-- reload finds it as it was; a passage quoted from its transcript lands
 	-- in it.)
@@ -217,8 +217,8 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	-- page's own draft for its chat, as that keeps it while another chat
 	-- is shown (screens/chat/shared's drafts), so focused, the chat page's
 	-- composer goes on with the same words.)
-	local draft = ui.state(if split then `chat_split_draft_{chat}` else `chat_lane_draft_{chat}`, "")
-	local atoms = ui.state(if split then `chat_split_atoms_{chat}` else `chat_lane_atoms_{chat}`, {} :: { ComposerAtoms.AtomEntry })
+	local draft = if not split and own_draft then own_draft else ui.state(if split then `chat_split_draft_{chat}` else `chat_lane_draft_{chat}`, "")
+	local atoms = if not split and own_atoms then own_atoms else ui.state(if split then `chat_split_atoms_{chat}` else `chat_lane_atoms_{chat}`, {} :: { ComposerAtoms.AtomEntry })
 	-- Its draft's chips: one draft's per chat (screens/chat/shared), wherever
 	-- it's kept. (A split's pane shows the chat page's.)
 	local carried = ui.use_state({} :: { any })
@@ -1035,11 +1035,13 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 			finders[slot], pickers[slot] = nil, nil
 		end
 	end)
+	local lane_draft = ui.state(`chat_lane_draft_{chat}`, "")
+	local lane_atoms = ui.state(`chat_lane_atoms_{chat}`, {} :: { ComposerAtoms.AtomEntry })
 	local zone, carrying, carrying_session = nil :: any, nil :: any, nil :: any
 	if tab.kind == "side_chat" and data.split ~= true then
 		zone, carrying, carrying_session = Shared.own_drop_zone(`lane.{slot}`, chat, function()
 			focus:add(1)
-		end)
+		end, { text = lane_draft, atoms = lane_atoms })
 	end
 	-- Watched once there's a chat to watch, while its tab is open: the
 	-- panel lets it go as the tab closes. (A reload asks for the same chat
@@ -1347,7 +1349,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 					hidden = function(): boolean
 						return split and focused_now()
 					end,
-					Dock.Dock { height = dock_h, composer = composer(chat, view, `lane.{slot}`, focus, open_model, data.split == true, if split then focused_now else nil), id = `lane-composer-{slot}` },
+					Dock.Dock { height = dock_h, composer = composer(chat, view, `lane.{slot}`, focus, open_model, data.split == true, if split then focused_now else nil, lane_draft, lane_atoms), id = `lane-composer-{slot}` },
 				},
 			}
 			if zone then

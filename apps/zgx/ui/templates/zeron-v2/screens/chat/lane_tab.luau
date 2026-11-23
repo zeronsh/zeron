@@ -117,12 +117,12 @@ end
 -- what's picked (a changed agent, model or access becomes the chat's, as the
 -- chat page's does). A message that didn't go says so on the composer's own
 -- notice line, above it, never over it.
-local function composer(chat: string, view: any, name: string, focus: State<number>, open_model: State<number>): Node
+local function composer(chat: string, view: any, name: string, focus: State<number>, open_model: State<number>, own_draft: State<string>?, own_atoms: State<{ ComposerAtoms.AtomEntry }>?): Node
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
 	-- reload finds it as it was; a passage quoted from its transcript lands
 	-- in it.)
-	local draft = ui.state(`chat_lane_draft_{chat}`, "")
-	local atoms = ui.state(`chat_lane_atoms_{chat}`, {} :: { ComposerAtoms.AtomEntry })
+	local draft = own_draft or ui.state(`chat_lane_draft_{chat}`, "")
+	local atoms = own_atoms or ui.state(`chat_lane_atoms_{chat}`, {} :: { ComposerAtoms.AtomEntry })
 	-- Its draft's chips: one draft's per chat (screens/chat/shared), wherever
 	-- it's kept.
 	local carried = ui.use_state({} :: { any })
@@ -827,9 +827,11 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 			finders[slot], pickers[slot] = nil, nil
 		end
 	end)
+	local lane_draft = ui.state(`chat_lane_draft_{chat}`, "")
+	local lane_atoms = ui.state(`chat_lane_atoms_{chat}`, {} :: { ComposerAtoms.AtomEntry })
 	local zone, carrying, carrying_session = Shared.own_drop_zone(`lane.{slot}`, chat, function()
 		focus:add(1)
-	end)
+	end, { text = lane_draft, atoms = lane_atoms })
 	-- What the tab is now: a fork under way or failed, or its chat (a new
 	-- side chat's not yet made, until its first message).
 	local kind = ui.computed(function(): string
@@ -1003,7 +1005,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 					pb = Dock.page_pad(),
 					ui.column { w_full = true, grow = 1, min_h = 0, relative = true, transcript, find.Bar() },
 				},
-				Dock.Dock { height = dock_h, composer = composer(chat, view, `lane.{slot}`, focus, open_model), id = `lane-composer-{slot}` },
+				Dock.Dock { height = dock_h, composer = composer(chat, view, `lane.{slot}`, focus, open_model, lane_draft, lane_atoms), id = `lane-composer-{slot}` },
 			}
 			for k, v in zone do
 				body[k] = v

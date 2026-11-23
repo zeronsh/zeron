@@ -22,6 +22,7 @@ local route = require("@app/screens/shell/route")
 local Draft = require("@ds/draft_text")
 local ComposerAtoms = require("@ds/composer_atoms")
 local AttachmentMentions = require("@ds/attachment_mentions")
+local Carried = require("@app/screens/chat/carried")
 local M = {}
 
 -- The draft, what it carries, the options picked in a question being
@@ -529,25 +530,63 @@ function M.restore_cargo_of(key: string, list: { any })
 	set_cargo(key, all)
 end
 
+-- Appends inline atomic chips for `items` (each one carrying a mention link)
+-- onto `target` (defaulting to the window composer's draft and atoms),
+-- preserving clean spacing and leaving the caret right after the last chip.
+function M.insert_cargo_chips(items: { any }, target: { text: State<string>, atoms: State<{ ComposerAtoms.AtomEntry }> }?)
+	if #items == 0 then
+		return
+	end
+	local text_state = if target then target.text else M.text
+	local atoms_state = if target then target.atoms else M.atoms
+	local next_text = text_state:peek()
+	local next_atoms = ComposerAtoms.live(atoms_state)
+	local caret_byte = #next_text
+	local changed = false
+	for _, item in items do
+		local spec = Carried.chip_spec(item)
+		if spec then
+			next_text, next_atoms, caret_byte = ComposerAtoms.splice_insert(next_text, next_atoms, #next_text, #next_text, spec, true)
+			changed = true
+		end
+	end
+	if changed then
+		ComposerAtoms.apply(text_state, atoms_state, next_text, next_atoms, nil, caret_byte)
+	end
+end
+
 -- Files picked or dropped: chips, carried with the message. (`key`, a chat
 -- with a composer of its own: on that chat's draft, and the keys are its
 -- composer's to take. Else on the chat shown's, the window's composer taking
 -- the keys. So too `add_to_chat` and `mention_chat`.)
-function M.attach_files(files: { any }, key: string?)
+function M.attach_files(files: { any }, key: string?): { any }
+	local added: { any } = {}
 	for _, f in files do
 		local raw = f.name or f.path or "file"
 		local name = AttachmentMentions.friendly_name(raw)
 		local picture = is_image(name)
-		M.push_cargo(key, {
+		local item = {
 			id = chip_id("file"),
 			kind = if picture then "image" else "file",
 			name = name,
 			src = if picture then f.path else nil,
 			path = f.path,
-		})
+		}
+		M.push_cargo(key, item)
+		table.insert(added, item)
 	end
 	if key == nil then
 		M.focus:add(1)
+	end
+	return added
+end
+
+-- Files dragged and dropped onto a chat or its composer: attach to cargo
+-- and insert their inline atomic chips into the draft.
+function M.drop_files(files: { any }, key: string?, target: { text: State<string>, atoms: State<{ ComposerAtoms.AtomEntry }> }?)
+	local added = M.attach_files(files, key)
+	if target or key == nil then
+		M.insert_cargo_chips(added, target)
 	end
 end
 
@@ -570,11 +609,11 @@ end
 -- path there, not uploaded again; `paths` are the project's own (relative
 -- to `root`, the project's folder there), and a chip says where in it the
 -- file is. One already carried isn't added twice.
-function M.add_to_chat(paths: { string }, root: string?, key: string?)
-	local have: { [string]: boolean } = {}
+function M.add_to_chat(paths: { string }, root: string?, key: string?): { any }
+	local have: { [string]: any } = {}
 	for _, item in M.peek_cargo(key) do
 		if item.path then
-			have[item.path] = true
+			have[item.path] = item
 		end
 	end
 	-- On this computer (the project whose folder it is lives here): a
@@ -587,28 +626,39 @@ function M.add_to_chat(paths: { string }, root: string?, key: string?)
 			here = true
 		end
 	end
+	local attached: { any } = {}
+	local seen: { [string]: boolean } = {}
 	for _, rel in paths do
 		local at = if root and root ~= "" then `{root}/{rel}` else rel
-		if not have[at] then
-			have[at] = true
-			local name = string.match(rel, "([^/]+)/?$") or rel
-			local picture = here and is_image(name)
-			M.push_cargo(key, {
-				id = chip_id("file"),
-				kind = if picture then "image" else "file",
-				name = name,
-				src = if picture then at else nil,
-				-- (Where in the project, under its name.)
-				meta = string.match(rel, "^(.*)/[^/]+$"),
-				path = at,
-				rel = rel,
-				on_host = true,
-			})
+		if not seen[at] then
+			seen[at] = true
+			local existing = have[at]
+			if existing then
+				table.insert(attached, existing)
+			else
+				local name = string.match(rel, "([^/]+)/?$") or rel
+				local picture = here and is_image(name)
+				local item = {
+					id = chip_id("file"),
+					kind = if picture then "image" else "file",
+					name = name,
+					src = if picture then at else nil,
+					-- (Where in the project, under its name.)
+					meta = string.match(rel, "^(.*)/[^/]+$"),
+					path = at,
+					rel = rel,
+					on_host = true,
+				}
+				have[at] = item
+				M.push_cargo(key, item)
+				table.insert(attached, item)
+			end
 		end
 	end
 	if key == nil then
 		M.focus:add(1)
 	end
+	return attached
 end
 
 -- The composer's model picker, opened from elsewhere (the shell's ⌘/):
@@ -834,9 +884,16 @@ end
 
 -- The props that make a node a drop zone, named `zone` in `map`: files from
 -- outside, and the files pane's, attach as chips on chat `key`'s draft (nil:
--- the chat shown's); a sidebar session is mentioned there. `landed` runs as
--- anything does.
-local function zone_props(map: any, zone: string, key: string?, landed: (() -> ())?): { [string]: any }
+-- the chat shown's) and insert inline chips into `target` (defaulting to the
+-- window composer when `key` is nil); a sidebar session is mentioned there.
+-- `landed` runs as anything does.
+local function zone_props(
+	map: any,
+	zone: string,
+	key: string?,
+	landed: (() -> ())?,
+	target: { text: State<string>, atoms: State<{ ComposerAtoms.AtomEntry }> }?
+): { [string]: any }
 	local function land()
 		map:set({})
 		if landed then
@@ -848,7 +905,7 @@ local function zone_props(map: any, zone: string, key: string?, landed: (() -> (
 			over_in(map, zone, inside)
 		end,
 		on_file_drop = function(files: { any })
-			M.attach_files(files, key)
+			M.drop_files(files, key, target)
 			land()
 		end,
 		drop_when = function(payload: any): boolean
@@ -869,7 +926,10 @@ local function zone_props(map: any, zone: string, key: string?, landed: (() -> (
 		on_drop = function(payload: any)
 			local paths = workspace_paths(payload)
 			if paths then
-				M.add_to_chat(paths, payload.root, key)
+				local items = M.add_to_chat(paths, payload.root, key)
+				if target or key == nil then
+					M.insert_cargo_chips(items, target)
+				end
 			elseif type(payload) == "table" and type(payload.session) == "string" then
 				M.mention_chat(payload.session, key)
 			end
@@ -888,8 +948,13 @@ end
 -- its props, and whether files, and a sidebar session, are over it now, for
 -- its own overlays. `landed` runs as anything lands (its composer takes the
 -- keys).
-function M.own_drop_zone(zone: string, key: string, landed: () -> ()): ({ [string]: any }, () -> boolean, () -> boolean)
-	return zone_props(M.dropping_own, zone, key, landed),
+function M.own_drop_zone(
+	zone: string,
+	key: string,
+	landed: () -> (),
+	target: { text: State<string>, atoms: State<{ ComposerAtoms.AtomEntry }> }?
+): ({ [string]: any }, () -> boolean, () -> boolean)
+	return zone_props(M.dropping_own, zone, key, landed, target),
 		function(): boolean
 			local what = M.dropping_own:get()[zone]
 			return what ~= nil and what ~= "session"
