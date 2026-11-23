@@ -197,9 +197,9 @@ impl EngineRpc {
             let limit_waiting = self
                 .sessions_ref()
                 .session_status(&chat)
-                .and_then(|s| s.limited)
+                .and_then(|s| s.live.limited)
                 .or_else(|| {
-                    self.workspace_host().read_sessions().ok()?.into_iter().find(|s| s.chat_id == chat)?.limited
+                    self.workspace_host().read_sessions().ok()?.into_iter().find(|s| s.chat_id == chat)?.live.limited
                 })
                 .is_some_and(|l| l.waiting());
             if already.contains(&chat) || paused || brain || gone || limit_waiting || self.sessions_ref().turn_in_flight(&chat) {

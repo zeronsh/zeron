@@ -102,9 +102,7 @@ fn session(chat: &str, status: SessionStatus) -> Session {
         running_subagents: 0,
         background_tasks: vec![],
         waiting: None,
-        activity: None,
-        todo: None,
-        limited: None,
+        live: Default::default(),
     }
 }
 
@@ -209,7 +207,7 @@ fn limited(chat: &str, since: DateTime<Utc>) -> Session {
         started_at: None,
         updated_at: since,
         last_turn_outcome: Some(NativeTurnOutcome { status: DoneStatus::Errored, finished_at: since }),
-        limited: Some(zeron_proto::usage_limit::SessionLimit {
+        live: zeron_proto::SessionLive { limited: Some(zeron_proto::usage_limit::SessionLimit {
             provider: "claude".into(),
             account_slot: None,
             account_label: None,
@@ -218,7 +216,7 @@ fn limited(chat: &str, since: DateTime<Utc>) -> Session {
             since,
             attempt: 0,
             switched_to: None,
-        }),
+        }), ..Default::default() },
         ..session(chat, SessionStatus::Errored)
     }
 }

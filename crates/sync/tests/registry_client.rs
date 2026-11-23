@@ -131,9 +131,7 @@ async fn two_clients_converge_and_stream_live_updates() {
             started_at: Some(ts(3_000)),
             updated_at: ts(3_500),
             waiting: None,
-            activity: None,
-            todo: None,
-            limited: None,
+            live: Default::default(),
         })
         .unwrap();
     }
@@ -452,9 +450,7 @@ async fn churn_stays_bounded_no_history_growth() {
                 started_at: Some(ts(i)),
                 updated_at: ts(i + 1),
                 waiting: None,
-                activity: None,
-                todo: None,
-                limited: None,
+                live: Default::default(),
             })
             .unwrap();
         }

@@ -239,7 +239,7 @@ async fn the_account_switch_is_asked_only_where_the_orchestrator_allows_it() {
     assert_eq!(asked, expected);
     // No other account had quota here: each waits for its reset.
     for chat in all {
-        assert!(core.sessions.session_status(chat).unwrap().limited.unwrap().waiting(), "{chat}");
+        assert!(core.sessions.session_status(chat).unwrap().live.limited.unwrap().waiting(), "{chat}");
     }
     core.shutdown().await;
 }
@@ -300,7 +300,7 @@ async fn a_resume_that_runs_straight_back_into_the_limit_waits_again_with_a_back
         None,
     );
     assert!(rpc.limits_pass(&mut book, since).await.is_empty());
-    let l = core.sessions.session_status("relimit").unwrap().limited.unwrap();
+    let l = core.sessions.session_status("relimit").unwrap().live.limited.unwrap();
     assert_eq!((l.attempt, l.until), (1, Some(since + check_backoff(1))));
     assert!(rpc.limits_pass(&mut book, since + TimeDelta::minutes(5)).await.is_empty(), "no spam meanwhile");
     assert_eq!(rpc.limits_pass(&mut book, since + check_backoff(1)).await, ["relimit"]);

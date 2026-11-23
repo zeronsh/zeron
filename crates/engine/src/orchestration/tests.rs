@@ -1338,9 +1338,7 @@ fn idle(chat: &str) -> zeron_proto::Session {
         running_subagents: 0,
         background_tasks: vec![],
         waiting: None,
-        activity: None,
-        todo: None,
-        limited: None,
+        live: Default::default(),
     }
 }
 

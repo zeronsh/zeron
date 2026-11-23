@@ -3174,9 +3174,7 @@ impl Inner {
                     running_subagents: 0,
                     background_tasks: Vec::new(),
                     waiting: None,
-                    activity: None,
-                    todo: None,
-                    limited: None,
+                    live: Default::default(),
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
@@ -6899,9 +6897,7 @@ pub(crate) mod tests {
             last_turn_outcome: None,
             terminal_activity: None,
             waiting: None,
-            activity: None,
-            todo: None,
-            limited: None,
+            live: Default::default(),
         }
     }
 
@@ -8365,7 +8361,7 @@ pub(crate) mod tests {
         rig.feed.send(done(DoneStatus::Errored)).unwrap();
         let s = settled(&rig).await;
         assert_eq!(s.status, SessionStatus::Errored);
-        let limit = s.limited.expect("limited");
+        let limit = s.live.limited.expect("limited");
         assert_eq!((limit.provider.as_str(), limit.window.as_deref(), limit.attempt), ("mock", Some("usage"), 0));
         let wait = limit.until.expect("its reset, from its words") - limit.since;
         assert!((wait - chrono::Duration::minutes(134)).num_seconds().abs() <= 60, "{wait}");
@@ -8386,7 +8382,7 @@ pub(crate) mod tests {
             })
             .unwrap();
         rig.feed.send(done(DoneStatus::Errored)).unwrap();
-        let limit = settled(&rig).await.limited.expect("limited");
+        let limit = settled(&rig).await.live.limited.expect("limited");
         assert_eq!((limit.window.as_deref(), limit.until), (Some("weekly"), Some(resets)));
         rig.core.sessions.shutdown().await;
     }
@@ -8400,7 +8396,7 @@ pub(crate) mod tests {
             })
             .unwrap();
         rig.feed.send(done(DoneStatus::Errored)).unwrap();
-        let limit = settled(&rig).await.limited.expect("limited");
+        let limit = settled(&rig).await.live.limited.expect("limited");
         assert_eq!((limit.window.as_deref(), limit.until), (Some("5-hour"), None));
         rig.core.sessions.shutdown().await;
     }
@@ -8411,7 +8407,7 @@ pub(crate) mod tests {
         rig.feed.send(AgentEvent::Error { message: "Harness exited with status 1".into() }).unwrap();
         rig.feed.send(done(DoneStatus::Errored)).unwrap();
         let s = settled(&rig).await;
-        assert_eq!((s.status, s.limited), (SessionStatus::Errored, None));
+        assert_eq!((s.status, s.live.limited), (SessionStatus::Errored, None));
         rig.core.sessions.shutdown().await;
     }
 
@@ -8426,7 +8422,7 @@ pub(crate) mod tests {
         );
         let inner = &engine.inner;
         let hit = || LimitHit { window: Some("5-hour".into()), until: Some(Utc::now() + chrono::Duration::hours(1)) };
-        let limit = |e: &SessionsEngine| e.session_status("c").and_then(|s| s.limited);
+        let limit = |e: &SessionsEngine| e.session_status("c").and_then(|s| s.live.limited);
         inner.set_status("c", SessionStatus::Working, true);
         inner.set_status_limited("c", HarnessId::Codex, None, Some(DoneStatus::Errored), hit());
         assert_eq!(limit(&engine).map(|l| (l.provider, l.attempt)), Some(("codex".to_owned(), 0)));

@@ -39,9 +39,7 @@ fn session(status: SessionStatus) -> Session {
         running_subagents: 0,
         background_tasks: Vec::new(),
         waiting: None,
-        activity: None,
-        todo: None,
-        limited: None,
+        live: Default::default(),
     }
 }
 
@@ -58,7 +56,11 @@ fn doing(kind: ActivityKind, label: &str) -> Session {
 }
 
 fn doing_since(kind: ActivityKind, label: &str, since: DateTime<Utc>) -> Session {
-    Session { activity: Some(ChatActivity { kind, label: label.into(), since }), ..working() }
+    {
+    let mut row = working();
+    row.activity = Some(ChatActivity { kind, label: label.into(), since });
+    row
+}
 }
 
 fn todo(done: u32, total: u32, current: Option<&str>) -> Option<TodoProgress> {

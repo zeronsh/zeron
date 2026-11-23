@@ -914,14 +914,12 @@ mod tests {
             running_subagents: 0,
             background_tasks: vec![],
             waiting: None,
-            activity: None,
-            todo: None,
-            limited: None,
+            live: Default::default(),
         };
         assert_eq!(task_state(&base), RouteState::Done);
-        let half = Session { todo: Some(TodoProgress { done: 1, total: 2, current: None }), ..base.clone() };
+        let half = Session { live: zeron_proto::SessionLive { todo: Some(TodoProgress { done: 1, total: 2, current: None }), ..base.live.clone() }, ..base.clone() };
         assert_eq!(task_state(&half), RouteState::Answered);
-        let all = Session { todo: Some(TodoProgress { done: 2, total: 2, current: None }), ..base.clone() };
+        let all = Session { live: zeron_proto::SessionLive { todo: Some(TodoProgress { done: 2, total: 2, current: None }), ..base.live.clone() }, ..base.clone() };
         assert_eq!(task_state(&all), RouteState::Done);
         let helping = Session { running_subagents: 1, ..base.clone() };
         assert_eq!(task_state(&helping), RouteState::Answered);
@@ -1049,9 +1047,7 @@ mod tests {
             running_subagents: 0,
             background_tasks: vec![],
             waiting: None,
-            activity: None,
-            todo: None,
-            limited: None,
+            live: Default::default(),
         };
         let working = session(SessionStatus::Working, Some("t0"));
         let done = session(SessionStatus::Idle, Some("t1"));

@@ -262,9 +262,7 @@ mod tests {
             running_subagents: 0,
             background_tasks: Vec::new(),
             waiting: None,
-            activity: None,
-            todo: None,
-            limited: None,
+            live: Default::default(),
         };
         settle(&mut row, SessionStatus::Working, Utc::now(), true);
         assert_eq!(row.activity.as_ref().unwrap().kind, ActivityKind::Thinking);
