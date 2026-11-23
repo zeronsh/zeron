@@ -359,6 +359,9 @@ M.View = ui.component(function(props: {
 	-- Fitting the view to the web: its box in the field, at most 1.4x.
 	-- (The names too, once placed: none cut by the field's edge.)
 	local fit_names: { [number]: labels.Label } = {}
+	-- (A fit's zoom: the names placed again at it, however near the last;
+	-- a wheel's step only past 2%.)
+	local fitted = false
 	local function fit()
 		local bx0, by0, bx1, by1 = sim.bounds(s)
 		local x0: number, y0: number, x1: number, y1: number = bx0, by0, bx1, by1
@@ -372,6 +375,7 @@ M.View = ui.component(function(props: {
 		local pad = if any_name then 24 else 70
 		local z = math.clamp(math.min((w - pad * 2) / math.max(1, x1 - x0), (h - pad * 2 - 30) / math.max(1, y1 - y0)), MIN_FIT, 1.4)
 		view:set({ x = w / 2 - (x0 + x1) / 2 * z, y = (h - 30) / 2 - (y0 + y1) / 2 * z, zoom = z })
+		fitted = true
 		zoom_req:set(zoom_req:peek() + 1)
 		counts.zoom = z
 		count("frames", 0)
@@ -929,7 +933,9 @@ M.View = ui.component(function(props: {
 		end
 		ui.after(ZOOM_SETTLE_MS, function()
 			local k = 1 / math.max(0.05, view:peek().zoom)
-			if math.abs(k - names_k) / names_k > 0.02 then
+			local refit = fitted
+			fitted = false
+			if math.abs(k - names_k) / names_k > (if refit then 0.001 else 0.02) then
 				names_dirty = true
 				count("rescales")
 				tick:set(tick:peek() + 1)
