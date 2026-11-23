@@ -396,7 +396,10 @@ local OrchBoard = ui.component(function(props: Props): Node
 			w_full = true,
 			min_w = 0,
 			gap = "$space.2",
-			items = "start",
+			-- (Stacked, each column takes the board's width.)
+			items = function(): "start" | "stretch"
+				return if stacked:get() then "stretch" else "start"
+			end,
 			direction = function(): "row" | "column"
 				return if stacked:get() then "column" else "row"
 			end,
