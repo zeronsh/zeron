@@ -1,7 +1,7 @@
 -- What one change costs on the Control room with a big fleet
--- (ui/orch_perf_fixture.luau: 100 threads, a Board card a crew thread,
--- Progress all shown): a thread's status, a progress row's step. Prints
--- its numbers (`ORCHPERF …`).
+-- (ui/orch_perf_fixture.luau: 100 threads, a Board card a crew thread):
+-- a thread's status, a progress row's step, on the whole page, the Board
+-- tab and the Map tab. Prints its numbers (`ORCHPERF …`).
 
 local function pct(list: { number }, p: number): number
 	local s = table.clone(list)
@@ -60,17 +60,22 @@ test("perf: one thread's status change, the Board alone", function()
 	expect((c["board.word"] or 0) / 10 <= 2).to_be(true)
 end)
 
-test("perf: one thread's status change, Progress alone", function()
-	local app = open("progress")
-	-- (Every unit shown, not the first few.)
-	app:click("#control-progress-more")
-	app:frames(30)
+test("perf: one thread's progress step, the Board alone", function()
+	-- (Progress's own block is gone from the page; its rows reach the Board's
+	-- cards as their clocks.)
+	local app = open("board")
+	local t, c = changes(app, "perf_progress", 10)
+	report("board step", t, c, 10)
+	-- A step works out no card's line again.
+	expect((c["board.word"] or 0) / 10 <= 2).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
+
+test("perf: one thread's status change, the Map alone", function()
+	local app = open("map")
 	local t, c = changes(app, "perf_status", 10)
-	report("progress status", t, c, 10)
-	-- Only the unit of the thread that changed draws again (some fifty
-	-- units; each read its clocks five times over, before).
-	expect((c["progress.clocks"] or 0) / 10 <= 8).to_be(true)
-	local t2, c2 = changes(app, "perf_progress", 10)
-	report("progress step", t2, c2, 10)
-	expect((c2["progress.clocks"] or 0) / 10 <= 12).to_be(true)
+	report("map status", t, c, 10)
+	-- The hidden Board works out the changed card's line at most.
+	expect((c["board.word"] or 0) / 10 <= 2).to_be(true)
+	expect(app:error()).to_be_nil()
 end)

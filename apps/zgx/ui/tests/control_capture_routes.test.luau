@@ -4,13 +4,17 @@
 -- chips; parts that overlap in part each keep their own words and share
 -- the overlap. On ui/capture_routes_fixture.luau (the dump "dp-shared":
 -- rt-a and rt-b on the first sentence, rt-c and rt-d overlapping in the
--- second).
+-- second). In Capture's history, opened from its bar.
 
 local data = require("@ds/orch_data")
 
 local function open(): any
 	local app = mount("capture_routes_fixture.luau")
-	app:resize(1440, 900)
+	app:resize(1440, 1200)
+	app:frames(30)
+	app:click("#control-history-open")
+	app:frames(30)
+	app:wait("#no-such-node", { timeout_ms = 500 })
 	app:frames(30)
 	return app
 end
@@ -124,7 +128,7 @@ test("the pointer on a shared sentence lights both its chips", function()
 	app:frames(20)
 	expect(app:state("orch_receipt_hovered")).to_be("rt-a,rt-b")
 	-- Off it: neither.
-	app:hover('#control-capture-composer')
+	app:hover('#control-history-close')
 	app:frames(20)
 	expect(app:state("orch_receipt_hovered")).to_be("")
 end)
@@ -148,6 +152,9 @@ test("parts overlapping in part: both underline the overlap, each its own words,
 	app:hover('#control-capture >> .orch-part >> "chat "')
 	app:frames(20)
 	expect(app:state("orch_receipt_hovered")).to_be("rt-c,rt-d")
+	-- (Away first: the word's card hangs over the line above, "zeron"'s.)
+	app:hover("#control-history-close")
+	app:wait("#no-such-node", { timeout_ms = 600 })
 	app:hover('#control-capture >> .orch-part >> "zeron "')
 	app:frames(20)
 	expect(app:state("orch_receipt_hovered")).to_be("rt-d")

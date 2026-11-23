@@ -2,9 +2,9 @@
   "ds/sidebar.luau": "b176882eeab27f24",
   "ds/tokens.luau": "e6cfe367d9e275be",
   "screens/chat/composer.luau": "ff11f1f39e9d843e",
-  "screens/chat/lane_tab.luau": "09858435aff0e939",
+  "screens/chat/lane_tab.luau": "bd7da67782eaba90",
   "screens/panel/init.luau": "a0df0db6e977845f",
-  "screens/shell/init.luau": "335b539ab7f5aab6",
+  "screens/shell/init.luau": "acd0eeacff58ec4c",
   "screens/shell/page.luau": "8095127799fddd48",
   "screens/shell/view.luau": "95dec891b31add1d"
 }

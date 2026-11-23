@@ -1,18 +1,24 @@
 -- Needs you counts cards (ds/orch_data `needs`, built on the board's
 -- Needs you): a row a card in that column (its first ask, how many more on
 -- it), a row an open ask not put off that belongs to no such card, a row a
--- chat awaiting input that is no such card's thread. The widget, its float
--- and the sidebar's badge read that one list. On
+-- chat awaiting input that is no such card's thread. Needs you floating
+-- over the Map (every row opened) and the sidebar's badge read that one
+-- list. On
 -- ui/control_needs_cards_fixture.luau (ui/control_world's sample, plus a
 -- second ask on the Orchestrator screen card, an ask of CI speed's on no
 -- card and one put off until tomorrow).
 
-local W = "#control-widget-needs"
 local FLOAT = "#control-needs-float"
+-- (Its rows: the float, on the Map, every row opened.)
+local W = FLOAT
 
 local function open(): any
 	local app = mount("control_needs_cards_fixture.luau")
 	app:resize(1440, 900)
+	app:frames(30)
+	app:command("fx.map")
+	app:frames(30)
+	app:click(`{FLOAT} >> role:button "3 more"`)
 	app:frames(30)
 	return app
 end
@@ -138,7 +144,7 @@ test("needs cards: the badge's count is the widget's rows, the board's Needs you
 	for _, e in board.needs_you do
 		expect(app:has(`{W} >> .orch-need >> ~"{e.item.title}"`)).to_be(true)
 	end
-	expect(app:tree(`{W} >> .orch-block-head`)).to_contain('"4"')
+	expect(app:tree(FLOAT)).to_contain('"4"')
 	expect(app:error()).to_be_nil()
 end)
 
@@ -177,12 +183,13 @@ test("needs cards: with no ask of no card, the badge is the board's Needs you co
 	expect(data.needs(now, s) == data.needs(now, s)).to_be(true)
 end)
 
-test("needs cards: the float on the Board counts the same rows", function()
+test("needs cards: the float counts the same rows, and isn't on the Board", function()
 	local app = open()
-	app:command("fx.board")
-	app:frames(30)
 	expect(app:has(FLOAT)).to_be(true)
 	expect(app:tree(FLOAT)).to_contain('"4"')
+	app:command("fx.board")
+	app:frames(30)
+	expect(app:has(FLOAT)).to_be(false)
 	expect(app:error()).to_be_nil()
 end)
 
@@ -220,7 +227,7 @@ end
 local ROWS = { "Reboot Moscow node", "Orchestrator screen", "CI speed", "sccache for iOS" }
 local CARDS = { "Reboot Moscow node", "Orchestrator screen", "sccache for iOS" }
 
-test("needs cards: one order in the widget, the float and the column, urgent first then newest", function()
+test("needs cards: one order in the float and the column, urgent first then newest", function()
 	local app = open()
 	local want = table.concat(ROWS, ", ")
 	expect(order(app, W, ROWS)).to_be(want)
@@ -238,23 +245,15 @@ test("needs cards: one order in the widget, the float and the column, urgent fir
 		table.insert(column, e.id)
 	end
 	expect(table.concat(cards, ",")).to_be(table.concat(column, ","))
-	-- The float, opened past its first row.
+	-- The Board's Needs you column: its cards in the same order.
 	app:command("fx.board")
 	app:frames(30)
-	app:click(`{FLOAT} >> role:button "3 more"`)
-	app:frames(30)
-	expect(order(app, FLOAT, ROWS)).to_be(want)
-	-- The Board's Needs you column: its cards in the same order.
 	expect(order(app, "#orch-col-needs_you", CARDS)).to_be(table.concat(CARDS, ", "))
 	expect(app:error()).to_be_nil()
 end)
 
 test("needs cards: in the narrow float, the card's title whole and 1 more under its question", function()
 	local app = open()
-	app:command("fx.board")
-	app:frames(30)
-	app:click(`{FLOAT} >> role:button "3 more"`)
-	app:frames(30)
 	-- (Its title as it is, not cut.)
 	expect(app:has(`{FLOAT} >> "Orchestrator screen"`)).to_be(true)
 	local head = top(app, FLOAT, '"Orchestrator screen"') :: number

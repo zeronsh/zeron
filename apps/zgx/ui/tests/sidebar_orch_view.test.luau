@@ -1,7 +1,7 @@
 -- The sidebar's Orchestrators section, always there to make one, and what
 -- its view menu ("…") offers for orchestration: a new orchestrator, the
--- section shown or put away, archived ones listed; the Control room, its
--- widgets, the Map's view, the Brain dump's model
+-- section shown or put away, archived ones listed; the Control room, the
+-- Map's view (opening it on its Map tab), the Brain dump's model
 -- (ui/orchestrator_fixture.luau: the whole window on the sample).
 
 local SIDE = "#shell-sidebar"
@@ -116,30 +116,33 @@ test("sidebar orch view: Open Control room", function()
 	expect(app:state("orch_route")).to_be("control:")
 end)
 
-test("sidebar orch view: Widgets… shows and hides the Control room's widgets", function()
+test("sidebar orch view: Default map view offers the Map's views, and opens the Control room on its Map tab", function()
 	local app = open()
-	choose(app, "Widgets…")
-	expect(app:has(item(app, "Comms"))).to_be(true)
-	app:click(item(app, "Comms"))
+	-- (No widgets to choose any more: the Control room is tabs.)
+	app:click(MORE)
 	settle(app)
-	local w = app:state("control_widgets") :: any
-	expect(w.hidden.comms).to_be(true)
-end)
-
-test("sidebar orch view: Default map view changes the Map", function()
-	local app = open()
+	app:scroll("#sidebar-view-menu-scroll", 2000)
+	settle(app)
+	expect(app:has(item(app, "Widgets…"))).to_be(false)
+	app:key("Escape")
+	settle(app)
 	choose(app, "Default map view")
-	app:click(item(app, "Timeline"))
-	settle(app)
-	expect((app:state("control_map") :: any).variant).to_be("timeline")
-	choose(app, "Open Control room")
-	settle(app)
-	expect(app:has(".orch-map-timeline")).to_be(true)
-	expect(app:has(".orch-map-topology")).to_be(false)
-	choose(app, "Default map view")
+	expect(app:has(item(app, "Graph"))).to_be(true)
+	expect(app:has(item(app, "Machines"))).to_be(true)
+	expect(app:has(item(app, "Timeline"))).to_be(false)
+	expect(app:has(item(app, "Topology"))).to_be(false)
 	app:click(item(app, "Machines"))
 	settle(app)
-	expect(app:has(".orch-map-machines")).to_be(true)
+	expect((app:state("control_map") :: any).variant).to_be("machines")
+	expect(app:state("orch_route")).to_be("control:")
+	expect(app:state("control_tab")).to_be("map")
+	expect(app:has("#control-tab-map >> .orch-map-machines")).to_be(true)
+	choose(app, "Default map view")
+	app:click(item(app, "Graph"))
+	settle(app)
+	expect((app:state("control_map") :: any).variant).to_be("force")
+	expect(app:has("#control-tab-map >> #orch-force-field")).to_be(true)
+	expect(app:has(".orch-map-machines")).to_be(false)
 end)
 
 test("sidebar orch view: Brain dump model… opens Capture's model picker", function()
@@ -160,6 +163,6 @@ test("sidebar orch view: Brain dump model… from another page opens it as Captu
 	settle(app)
 	settle(app)
 	expect(app:state("orch_route")).to_be("control:")
-	expect(app:has('#control-capture-composer')).to_be(true)
+	expect(app:has('#control-float-composer')).to_be(true)
 	expect(app:has('role:textbox "Search"')).to_be(true)
 end)

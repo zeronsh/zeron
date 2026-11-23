@@ -1,15 +1,16 @@
--- The Control room's Progress widget (screens/control/progress, on
--- ui/control_page_fixture.luau): every thread working now, the latest
+-- The Control room's Progress (screens/control/progress), under Notes, on
+-- ui/control_page_fixture.luau: every thread working now, the latest
 -- started first, and those pinned before them (four, the rest folded);
 -- pins kept on this device;
 -- "What's up?" asks the host once (control_world notes it), then rests;
 -- nothing working, one quiet line.
 
-local W = "#control-widget-progress"
+local W = "#control-notes-progress"
 
 local function open(w: number?, h: number?): any
 	local app = mount("control_page_fixture.luau")
 	app:resize(w or 1440, h or 2400)
+	app:set_state("control_tab", "notes")
 	app:frames(30)
 	return app
 end
@@ -26,9 +27,9 @@ local function listed(app: any): { string }
 	return out
 end
 
-test("control progress: a widget of its own, in the right column", function()
+test("control progress: a block of its own under Notes, beside the Scratchpad", function()
 	local app = open()
-	expect(app:has("#control-right >> #control-widget-progress")).to_be(true)
+	expect(app:has("#control-notes >> #control-notes-progress")).to_be(true)
 	expect(app:has(`{W} >> "Progress"`)).to_be(true)
 	-- Its figures: how many work, how many are stalled.
 	expect(app:has(`{W} >> ~"5 working"`)).to_be(true)
@@ -86,19 +87,19 @@ test("control progress: What's up? asks the host once, then rests", function()
 	local CHECK = "#progress-full-th-engine-state >> .orch-progress-check"
 	app:click(CHECK)
 	app:frames(5)
-	expect(app:state("calls")).to_be("loads_wanted:on,check:th-engine-state")
+	expect(app:state("calls")).to_be("check:th-engine-state")
 	-- Its note on its way: the roller.
 	expect(app:has("#progress-full-th-engine-state >> .orch-progress-refreshing")).to_be(true)
 	app:click(CHECK)
 	app:frames(5)
-	expect(app:state("calls")).to_be("loads_wanted:on,check:th-engine-state")
+	expect(app:state("calls")).to_be("check:th-engine-state")
 	-- The fresh note in (the host's), and 15 s on: it can be asked again.
 	expect(app:wait("#progress-full-th-engine-state >> ~\"Fresh:\"", { timeout_ms = 5000 })).to_be(true)
 	expect(app:has("#progress-full-th-engine-state >> .orch-progress-refreshing")).to_be(false)
 	app:frames(15 * 60 + 5)
 	app:click(CHECK)
 	app:frames(5)
-	expect(app:state("calls")).to_be("loads_wanted:on,check:th-engine-state,check:th-engine-state")
+	expect(app:state("calls")).to_be("check:th-engine-state,check:th-engine-state")
 end)
 
 test("control progress: nothing working, one quiet line", function()
@@ -135,7 +136,7 @@ test("control progress: a host that writes no progress still shows what works", 
 	-- What's up?: asked; nothing to say yet, quietly.
 	app:click(`{UNIT} >> .orch-progress-check`)
 	app:frames(10)
-	expect(app:state("calls")).to_be("loads_wanted:on,check:th-engine-state")
+	expect(app:state("calls")).to_be("check:th-engine-state")
 	expect(app:has(`{UNIT} >> .orch-progress-note >> ~"No details yet"`)).to_be(true)
 	-- Waiting on you, from its session too.
 	expect(app:has(`#progress-full-th-ui-orch >> ~"Awaiting"`)).to_be(true)
@@ -178,7 +179,12 @@ test("control progress: a thread that asked at its turn's end waits on you, unti
 	app:frames(5)
 	expect(app:has(`#progress-full-th-ui-orch >> "Waiting on you"`)).to_be(false)
 	-- Answered (past its Undo): at rest again, off the list.
-	app:click('#control-widget-needs >> role:button "Commit and open a PR against zeron/zgx"')
+	-- (From Needs you floating over Notes, its rest opened.)
+	if app:has('#control-needs-float >> role:button ~"more"') then
+		app:click('#control-needs-float >> role:button ~"more"')
+		app:frames(20)
+	end
+	app:click('#control-needs-float >> role:button "Commit and open a PR against zeron/zgx"')
 	expect(app:wait(UNIT, { gone = true, timeout_ms = 9000 })).to_be(true)
 	expect(app:state("calls")).to_contain("answer:ak-turn:1:")
 end)

@@ -1,5 +1,5 @@
--- The Control room's Scratchpad (ds/orch_scratchpad): its widget among
--- the others, Notes saved as they are typed, edits from elsewhere coming in
+-- The Control room's Scratchpad (ds/orch_scratchpad): a block under Notes,
+-- its notes saved as they are typed, edits from elsewhere coming in
 -- live, history put back, and the drawing (ds/orch_scratchpad_draw). On
 -- ui/control_page_fixture.luau, the host's calls ui/control_world's
 -- (`calls`: `set_text:<text>`, `set_shapes:<n>`, `restore:<id>`).
@@ -7,6 +7,7 @@
 local function open(w: number?, h: number?): any
 	local app = mount("control_page_fixture.luau")
 	app:resize(w or 1440, h or 2400)
+	app:set_state("control_tab", "notes")
 	app:frames(30)
 	return app
 end
@@ -23,25 +24,21 @@ local function count(hay: string, needle: string): number
 	end
 end
 
-local function top(app: any, target: string): number?
-	local line = app:tree(target):match("[^\n]+")
-	return line and tonumber(line:match(" %-?%d+,(%-?%d+) "))
-end
-
 local function status(app: any): string
-	return app:text("#control-widget-scratchpad >> .orch-scratchpad-status")
+	return app:text("#control-notes-scratchpad >> .orch-scratchpad-status")
 end
 
-test("the widget shows the note, saved, and an empty one its placeholder", function()
+test("the block shows the note, saved, and an empty one its placeholder", function()
 	local app = open()
 	expect(app:error()).to_be_nil()
-	expect(app:has("#control-left >> #control-widget-scratchpad")).to_be(true)
+	expect(app:has("#control-notes >> #control-notes-scratchpad")).to_be(true)
 	expect(app:text("#scratchpad-editor")).to_contain("# Sync, the long way round")
 	expect(status(app)).to_be("Saved")
 	-- Read as Markdown.
 	app:click("#scratchpad-preview")
 	app:frames(20)
-	expect(app:has('#control-widget-scratchpad >> .orch-scratchpad-preview >> "Sync, the long way round"')).to_be(true)
+	-- (Its words a moment after: the preview is debounced.)
+	expect(app:wait('#control-notes-scratchpad >> .orch-scratchpad-preview >> "Sync, the long way round"', { timeout_ms = 2000 })).to_be(true)
 	expect(app:has("#scratchpad-editor")).to_be(false)
 	app:click("#scratchpad-preview")
 	app:frames(10)
@@ -51,7 +48,7 @@ test("the widget shows the note, saved, and an empty one its placeholder", funct
 	expect(app:text("#scratchpad-editor")).to_be("")
 	app:click('#scratchpad-tabs >> role:radio "Draw"')
 	app:frames(20)
-	expect(app:has('#control-widget-scratchpad >> "No drawing yet"')).to_be(true)
+	expect(app:has('#control-notes-scratchpad >> "No drawing yet"')).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
 
@@ -78,7 +75,7 @@ test("leaving the editor saves at once", function()
 	local app = open()
 	app:fill("#scratchpad-editor", "Said before leaving")
 	app:frames(2)
-	app:click('#control-widget-scratchpad >> role:button "Widget menu"')
+	app:click("#control-notes-qa")
 	app:frames(3)
 	expect(app:state("calls")).to_contain("set_text:Said before leaving")
 end)
@@ -117,38 +114,12 @@ test("history puts a version back, and Undo the one before this", function()
 	expect(app:text("#scratchpad-editor")).to_contain("# Sync, the long way round")
 end)
 
-test("the widget hides, comes back and moves in the Control room", function()
-	local app = open()
-	app:click('#control-widget-scratchpad >> role:button "Widget menu"')
-	app:frames(10)
-	app:click('"Hide"')
-	app:frames(20)
-	expect(app:has("#control-widget-scratchpad")).to_be(false)
-	expect(app:state("control_widgets").hidden.scratchpad).to_be(true)
-	app:click("#control-widgets-menu")
-	app:frames(10)
-	app:click('"Scratchpad"')
-	app:frames(20)
-	expect(app:has("#control-widget-scratchpad")).to_be(true)
-	app:key("Escape")
-	app:frames(10)
-	-- Up, past the Map.
-	expect((top(app, "#control-widget-scratchpad") :: number) > (top(app, "#control-widget-map") :: number)).to_be(true)
-	app:click('#control-widget-scratchpad >> role:button "Widget menu"')
-	app:frames(10)
-	app:click('"Move up"')
-	app:frames(20)
-	expect((top(app, "#control-widget-scratchpad") :: number) < (top(app, "#control-widget-map") :: number)).to_be(true)
-	local order = app:state("control_widgets").order
-	expect((table.find(order, "scratchpad") :: number) < (table.find(order, "map") :: number)).to_be(true)
-end)
-
 test("expanded to its page: Notes and Draw side by side, tabs when narrow, and back", function()
 	local app = open(1440, 1400)
 	app:click("#scratchpad-expand")
 	app:frames(30)
 	expect(app:has("#scratchpad-page")).to_be(true)
-	expect(app:has("#control-widget-map")).to_be(false)
+	expect(app:has("#control-notes-qa")).to_be(false)
 	expect(app:has("#scratchpad-notes-block >> #scratchpad-editor")).to_be(true)
 	expect(app:has("#scratchpad-draw-block >> .orch-scratchpad-canvas")).to_be(true)
 	-- A word typed there is the widget's too.
@@ -170,11 +141,11 @@ test("the drawing draws its shapes, at two sizes", function()
 	local app = open(1440, 2400)
 	app:click('#scratchpad-tabs >> role:radio "Draw"')
 	app:frames(20)
-	expect(app:has("#control-widget-scratchpad >> .orch-scratchpad-canvas")).to_be(true)
-	expect(app:tree("#control-widget-scratchpad")).to_contain("Drawing, 8 shapes")
+	expect(app:has("#control-notes-scratchpad >> .orch-scratchpad-canvas")).to_be(true)
+	expect(app:tree("#control-notes-scratchpad")).to_contain("Drawing, 8 shapes")
 	app:resize(900, 1800)
 	app:frames(30)
-	expect(app:has("#control-widget-scratchpad >> .orch-scratchpad-canvas")).to_be(true)
+	expect(app:has("#control-notes-scratchpad >> .orch-scratchpad-canvas")).to_be(true)
 	app:resize(1600, 1200)
 	app:frames(30)
 	expect(app:error()).to_be_nil()
@@ -289,7 +260,7 @@ test("a drawing changed elsewhere shows live", function()
 		found = found or s.id == "sh-remote"
 	end
 	expect(found).to_be(true)
-	expect(app:tree("#control-widget-scratchpad")).to_contain("Drawing, 1 shape")
+	expect(app:tree("#control-notes-scratchpad")).to_contain("Drawing, 1 shape")
 end)
 
 test("a text label written on the board", function()

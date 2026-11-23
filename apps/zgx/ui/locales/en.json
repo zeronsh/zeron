@@ -1269,8 +1269,8 @@
           "topology": "Topology",
           "timeline": "Timeline",
           "machines": "Machines",
-          "graph": "Graph",
-          "force": "Graph (force)"
+          "graph": "First graph",
+          "force": "Graph"
         },
         "fit": "Fit to view",
         "reset": "Reset layout",
@@ -2936,9 +2936,10 @@
         "shell_reload_interface": "Reload interface",
         "shell_dictate": "Hold to dictate",
         "control_focus_capture": "Focus Capture",
-        "control_tab_overview": "Control room: Overview",
         "control_tab_board": "Control room: Board",
-        "control_tab_chat": "Control room: Chat"
+        "control_tab_map": "Control room: Map",
+        "control_tab_chat": "Control room: Chat",
+        "control_tab_notes": "Control room: Notes"
       },
       "group": {
         "sessions": "Sessions",
@@ -4739,7 +4740,9 @@
       "earlier": "{n, plural, one {# earlier} other {# earlier}}",
       "history": "Earlier",
       "expand": "Expand",
-      "collapse": "Collapse"
+      "collapse": "Collapse",
+      "history_title": "History",
+      "history_close": "Close history"
     },
     "needs": {
       "failed": "Couldn't send that",
@@ -4807,10 +4810,20 @@
       "label": "Control room tabs",
       "overview": "Overview",
       "board": "Board",
-      "chat": "Chat"
+      "chat": "Chat",
+      "map": "Map",
+      "notes": "Notes"
     },
     "chat": {
       "none": "No Brain dump yet"
+    },
+    "panel": {
+      "menu": "Menu"
+    },
+    "invite": {
+      "title": "Start with an orchestrator",
+      "body": "An orchestrator is an agent that plans the work toward a goal and runs a crew of threads to finish it. Give it a name and what it's for; it asks you when it needs a decision.",
+      "create": "Create an orchestrator"
     }
   },
   "ds.orch.map.pivot": "Hubs",

@@ -7,7 +7,7 @@
 local Name = require("@ds/orch_name")
 local model = require("@ds/orch_map_model")
 
-local MAP = "#control-widget-map"
+local MAP = "#control-map"
 local NAMES = {
 	"Board card declutter", -- its own title, its turn done
 	"End-of-turn question asks", -- its own title, its first turn running

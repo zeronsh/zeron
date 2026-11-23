@@ -14,10 +14,11 @@ local WIDTHS = { 1600, 1200, 900, 700, 520 }
 
 local function open(w: number?, h: number?): any
 	local app = mount("orch_map_fixture.luau")
-	-- (These read the Topology's rows and pills: the Map opens on Graph
-	-- (force) now.)
-	app:set_state("control_map", { variant = "topology", window = 15 })
+	app:command("map_only")
 	app:resize(w or 1440, h or 2400)
+	-- (These read the Topology's rows and pills: the Map opens on Graph
+	-- (force) now, and its tab on a view it lists.)
+	app:set_state("control_map", { variant = "topology", window = 15 })
 	app:frames(30)
 	return app
 end
@@ -160,15 +161,14 @@ test("a machine's head is the same line in every view, never wrapped", function(
 			return out
 		end
 		view(app, "topology")
-		local topo = boxes("#control-widget-map")
+		local topo = boxes("#control-map")
 		-- This device: its dot on the mark's corner.
-		expect(app:has('#control-widget-map >> .orch-machine-head "desk" >> .orch-machine-head-here')).to_be(true)
-		expect(app:has('#control-widget-map >> .orch-machine-head "macbook" >> .orch-machine-head-here')).to_be(false)
+		expect(app:has('#control-map >> .orch-machine-head "desk" >> .orch-machine-head-here')).to_be(true)
+		expect(app:has('#control-map >> .orch-machine-head "macbook" >> .orch-machine-head-here')).to_be(false)
 		view(app, "timeline")
-		local tl = boxes("#control-widget-map")
+		local tl = boxes("#control-map")
 		view(app, "machines")
-		local mc = boxes("#control-widget-map")
-		local block = boxes("#control-widget-machines")
+		local mc = boxes("#control-map")
 		-- One line: its height, its name's a single line.
 		expect(topo[1][4]).to_be(28)
 		expect(topo[3][4] <= 20).to_be(true)
@@ -177,9 +177,9 @@ test("a machine's head is the same line in every view, never wrapped", function(
 			expect(tl[i][1]).to_be(topo[i][1])
 			expect(tl[i][3]).to_be(topo[i][3])
 			expect(tl[i][4]).to_be(topo[i][4])
-			-- In a block (the Map's Machines, the Control room's): its left
-			-- part the same from its own left edge; every part on one line.
-			for _, other: { { number } } in { mc, block } :: { { { number } } } do
+			-- In the Map's Machines: its left part the same from its own left
+			-- edge; every part on one line.
+			for _, other: { { number } } in { mc } :: { { { number } } } do
 				if i <= LEFT then
 					expect(other[i][1] - other[1][1]).to_be(topo[i][1] - topo[1][1])
 				end
@@ -188,12 +188,10 @@ test("a machine's head is the same line in every view, never wrapped", function(
 			end
 		end
 		-- …and its load at the line's end, over the end of its CPU line.
-		for _, other: { { number } } in { mc, block } :: { { { number } } } do
+		for _, other: { { number } } in { mc } :: { { { number } } } do
 			local fig = other[#PARTS]
 			expect(math.abs((fig[1] + fig[3]) - (other[1][1] + other[1][3])) < 0.5).to_be(true)
 		end
-		local lx, _ly, lw = box(app, "#control-widget-machines >> .orch-machine-line[1]")
-		expect(math.abs((lx + lw) - (block[1][1] + block[1][3])) < 0.5).to_be(true)
 	end
 end)
 
@@ -321,58 +319,60 @@ end)
 
 test("topology: each machine a lane, every thread at work a row", function()
 	local app = open()
-	expect(app:count("#control-widget-map >> .orch-lane")).to_be(4)
+	expect(app:count("#control-map >> .orch-lane")).to_be(4)
 	-- Five orchestrators; twelve crew and three threads the Brain dump
 	-- started, under it; one of the person's own at work.
-	expect(app:count("#control-widget-map >> .orch-node")).to_be(5)
-	expect(app:count("#control-widget-map >> .orch-pill")).to_be(15)
-	expect(app:count("#control-widget-map >> .orch-thread")).to_be(1)
+	expect(app:count("#control-map >> .orch-node")).to_be(5)
+	expect(app:count("#control-map >> .orch-pill")).to_be(15)
+	expect(app:count("#control-map >> .orch-thread")).to_be(1)
 end)
 
 test("topology: a crew row on another machine opens its thread", function()
 	local app = open()
-	app:click('#control-widget-map >> .orch-pill "Control room UI, Testing"')
+	app:click('#control-map >> .orch-pill "Control room UI, Testing"')
 	app:frames(10)
 	expect(app:state("shell_route_path")).to_be("/session/th-ui-control")
 end)
 
-test("the view is chosen from the widget's menu and kept", function()
+test("the view is chosen from the Map's menu and kept: the Graph or the Machines", function()
 	local app = open()
-	app:click('#control-widget-map >> role:button "Widget menu"')
-	app:frames(10)
-	app:click('role:menuitemcheckbox "Timeline"')
-	app:frames(20)
-	expect(app:state("control_map").variant).to_be("timeline")
-	expect(app:has("#control-widget-map >> .orch-map-timeline")).to_be(true)
-	expect(app:has("#control-widget-map >> .orch-map-topology")).to_be(false)
-	app:click('#control-widget-map >> role:button "Widget menu"')
-	app:frames(10)
+	local function menu()
+		app:click("#control-map >> .control-panel-menu >> role:button")
+		app:frames(10)
+	end
+	menu()
+	-- (Two views offered, no more.)
+	expect(app:has('role:menuitemcheckbox "Timeline"')).to_be(false)
+	expect(app:has('role:menuitemcheckbox "Topology"')).to_be(false)
 	app:click('role:menuitemcheckbox "Machines"')
 	app:frames(20)
 	expect(app:state("control_map").variant).to_be("machines")
-	expect(app:count("#control-widget-map >> .orch-mc-block")).to_be(4)
-	-- The widget's own entries still follow.
-	app:click('#control-widget-map >> role:button "Widget menu"')
-	app:frames(10)
-	expect(app:has('"Move up"')).to_be(true)
+	expect(app:count("#control-map >> .orch-mc-block")).to_be(4)
+	menu()
+	app:click('role:menuitemcheckbox "Graph"')
+	app:frames(20)
+	expect(app:state("control_map").variant).to_be("force")
+	-- (No widget's own entries: the Map is a tab.)
+	menu()
+	expect(app:has('"Move up"')).to_be(false)
 end)
 
 test("timeline: a lane a thread, under its machine and project", function()
 	local app = open()
 	view(app, "timeline")
-	expect(app:count("#control-widget-map >> .orch-tl-machine")).to_be(4)
-	expect(app:count("#control-widget-map >> .orch-tl-lane")).to_be(21)
-	expect(app:count("#control-widget-map >> .orch-tl-project")).to_be(7)
+	expect(app:count("#control-map >> .orch-tl-machine")).to_be(4)
+	expect(app:count("#control-map >> .orch-tl-lane")).to_be(21)
+	expect(app:count("#control-map >> .orch-tl-project")).to_be(7)
 	-- What it does now, at its end.
-	expect(app:has('#control-widget-map >> "Awaiting Input"')).to_be(true)
-	expect(app:has('#control-widget-map >> "zgx test ui control_"')).to_be(true)
+	expect(app:has('#control-map >> "Awaiting Input"')).to_be(true)
+	expect(app:has('#control-map >> "zgx test ui control_"')).to_be(true)
 end)
 
 test("timeline: the hour or the last 15 minutes, kept", function()
 	local app = open()
 	view(app, "timeline")
 	expect(app:state("control_map").window).to_be(15)
-	app:click('#control-widget-map >> .orch-tl-window "Last hour"')
+	app:click('#control-map >> .orch-tl-window "Last hour"')
 	app:frames(10)
 	expect(app:state("control_map").window).to_be(60)
 	expect(app:state("control_map").variant).to_be("timeline")
@@ -381,10 +381,10 @@ end)
 test("timeline: a lane opens its thread; an orchestrator's, its page", function()
 	local app = open()
 	view(app, "timeline")
-	app:click('#control-widget-map >> .orch-tl-lane "Windows installer, Building"')
+	app:click('#control-map >> .orch-tl-lane "Windows installer, Building"')
 	app:frames(10)
 	expect(app:state("shell_route_path")).to_be("/session/th-reins-win")
-	app:click('#control-widget-map >> .orch-tl-lane "Tally"')
+	app:click('#control-map >> .orch-tl-lane "Tally"')
 	app:frames(10)
 	expect(app:state("shell_route_path")).to_be("/orchestrator/orc-tally")
 end)
@@ -425,7 +425,7 @@ test("machines: a block a machine, in as many columns as fit", function()
 	local function columns(app: any): number
 		local xs: { [string]: boolean } = {}
 		local n = 0
-		for line in app:tree("#control-widget-map"):gmatch("[^\n]+") do
+		for line in app:tree("#control-map"):gmatch("[^\n]+") do
 			if line:find(".orch-mc-block", 1, true) or line:find("orch-mc-block", 1, true) then
 				local x = line:match(" (%-?[%d%.]+),") or ""
 				if not xs[x] then
@@ -438,28 +438,28 @@ test("machines: a block a machine, in as many columns as fit", function()
 	end
 	local app = open(1600, 2400)
 	view(app, "machines")
-	expect(app:count("#control-widget-map >> .orch-mc-block")).to_be(4)
+	expect(app:count("#control-map >> .orch-mc-block")).to_be(4)
 	-- (Tall enough that the Map is in view under Needs you and Progress.)
 	app:resize(700, 3400)
 	app:frames(20)
-	expect(app:count("#control-widget-map >> .orch-mc-block")).to_be(4)
+	expect(app:count("#control-map >> .orch-mc-block")).to_be(4)
 	local _ = columns
 	-- (One column at this width: the Map, at its bound, scrolls to them.)
 	local function into_view(target: string)
-		local _, sy, _, sh = box(app, "#control-widget-map >> .orch-map-scroll")
+		local _, sy, _, sh = box(app, "#control-map >> .orch-map-scroll")
 		local _, y = box(app, target)
 		if y < sy or y > sy + sh - 30 then
-			app:scroll("#control-widget-map >> .orch-map-scroll", y - sy - sh / 2)
+			app:scroll("#control-map >> .orch-map-scroll", y - sy - sh / 2)
 			app:frames(10)
 		end
 	end
 	-- Crew rows open their thread; an orchestrator's row, its page.
-	into_view('#control-widget-map >> .orch-pill "Exporter image, Building"')
-	app:click('#control-widget-map >> .orch-pill "Exporter image, Building"')
+	into_view('#control-map >> .orch-pill "Exporter image, Building"')
+	app:click('#control-map >> .orch-pill "Exporter image, Building"')
 	app:frames(10)
 	expect(app:state("shell_route_path")).to_be("/session/th-vpn-exporter")
-	into_view('#control-widget-map >> .orch-node "Reins release"')
-	app:click('#control-widget-map >> .orch-node "Reins release"')
+	into_view('#control-map >> .orch-node "Reins release"')
+	app:click('#control-map >> .orch-node "Reins release"')
 	app:frames(10)
 	expect(app:state("shell_route_path")).to_be("/orchestrator/orc-reins")
 end)
@@ -471,8 +471,8 @@ test("every view draws and follows a resize", function()
 		for _, w in WIDTHS do
 			app:resize(w, 2400)
 			app:frames(10)
-			expect(app:has(`#control-widget-map >> .orch-map-{v}`)).to_be(true)
-			local _x, _y, mw = box(app, "#control-widget-map")
+			expect(app:has(`#control-map >> .orch-map-{v}`)).to_be(true)
+			local _x, _y, mw = box(app, "#control-map")
 			expect(mw <= w).to_be(true)
 		end
 	end
@@ -480,8 +480,8 @@ end)
 
 test("a thread's activity shows 300 ms at least, then the latest", function()
 	local app = open()
-	local building = '#control-widget-map >> .orch-pill "Engine: orchestration state, Building"'
-	local merging = '#control-widget-map >> .orch-pill "Engine: orchestration state, Merging"'
+	local building = '#control-map >> .orch-pill "Engine: orchestration state, Building"'
+	local merging = '#control-map >> .orch-pill "Engine: orchestration state, Merging"'
 	-- (Testing has shown long enough; then a frame is a 60th of a second.)
 	app:wait("#never-there", { timeout_ms = 400 })
 	app:command("fixture.flicker")
@@ -544,45 +544,36 @@ test("a remote thread's turn ending shows in every view at once, no activity eve
 	local app = open()
 	app:command("fixture.remote_working")
 	app:wait("#never-there", { timeout_ms = 400 })
-	expect(state_in(app, `#control-widget-map >> .orch-pill "{thread}" >> .orch-state`)).to_be("Working")
-	expect(app:has('#control-widget-map >> .orch-node "Brain dump" >> .orch-state')).to_be(true)
-	expect(app:has(`#control-widget-machines >> .orch-machine-job "{thread}"`)).to_be(true)
+	expect(state_in(app, `#control-map >> .orch-pill "{thread}" >> .orch-state`)).to_be("Working")
+	expect(app:has('#control-map >> .orch-node "Brain dump" >> .orch-state')).to_be(true)
 	-- Its turn ends (its rows flickering as they come): idle for good.
 	app:command("fixture.remote_flicker")
 	app:wait("#never-there", { timeout_ms = 700 })
 	for _, v in { "topology", "timeline", "machines" } do
 		view(app, v)
 		local row = if v == "timeline" then `.orch-tl-lane "{thread}"` else `.orch-pill "{thread}"`
-		expect(app:has(`#control-widget-map >> {row}`)).to_be(true)
-		expect(state_in(app, `#control-widget-map >> {row} >> .orch-state`)).to_be("")
+		expect(app:has(`#control-map >> {row}`)).to_be(true)
+		expect(state_in(app, `#control-map >> {row} >> .orch-state`)).to_be("")
 	end
 	view(app, "topology")
-	expect(app:has('#control-widget-map >> .orch-node "Brain dump" >> .orch-state')).to_be(false)
-	-- The Control room's Machines: no longer among what runs.
-	expect(app:has(`#control-widget-machines >> .orch-machine-job "{thread}"`)).to_be(false)
+	expect(app:has('#control-map >> .orch-node "Brain dump" >> .orch-state')).to_be(false)
 end)
 
-test("a chat of no project shows under its machine in every view; comms name every party", function()
+test("a chat of no project shows under its machine in every view", function()
 	local app = open()
 	app:command("fixture.projectless")
 	app:frames(20)
 	for _, v in { "topology", "timeline", "machines" } do
 		view(app, v)
 		local row = if v == "timeline" then '.orch-tl-lane "Hello World Agent"' else '.orch-thread "Hello World Agent"'
-		expect(app:has(`#control-widget-map >> {row}`)).to_be(true)
+		expect(app:has(`#control-map >> {row}`)).to_be(true)
 	end
 	-- Under its machine: in the Topology, in winbox's lane.
 	view(app, "topology")
-	local _, lane_y = box(app, '#control-widget-map >> .orch-machine-head "winbox"')
-	local _, row_y = box(app, '#control-widget-map >> .orch-thread "Hello World Agent"')
-	local _, next_y = box(app, '#control-widget-map >> .orch-machine-head "Cloud"')
+	local _, lane_y = box(app, '#control-map >> .orch-machine-head "winbox"')
+	local _, row_y = box(app, '#control-map >> .orch-thread "Hello World Agent"')
+	local _, next_y = box(app, '#control-map >> .orch-machine-head "Cloud"')
 	expect(row_y > lane_y and row_y < next_y).to_be(true)
-	-- Comms: each party by name, a thread not yet made or unknown by what it is.
-	expect(app:has('#control-widget-comms >> "Hello World Agent"')).to_be(true)
-	expect(app:has('#control-widget-comms >> "New thread"')).to_be(true)
-	for line in app:tree("#control-widget-comms"):gmatch("[^\n]+") do
-		expect(line:find('text ""', 1, true) == nil).to_be(true)
-	end
 end)
 
 local Sim = require("@ds/orch_map_sim")
@@ -617,9 +608,9 @@ test("graph: every node shown in the field, lit with its neighbors under the poi
 	view(app, "graph")
 	app:frames(90)
 	local g = Sim.build(world())
-	expect(app:count("#control-widget-map >> .orch-graph-node")).to_be(#g.nodes)
+	expect(app:count("#control-map >> .orch-graph-node")).to_be(#g.nodes)
 	local fx, fy, fw, fh = box(app, "#orch-graph-field")
-	for line in app:tree("#control-widget-map"):gmatch("[^\n]+") do
+	for line in app:tree("#control-map"):gmatch("[^\n]+") do
 		local x, y, w, h = line:match(" (%-?[%d%.]+),(%-?[%d%.]+) ([%d%.]+)x([%d%.]+)")
 		if line:find("Control room UI", 1, true) and x then
 			local cx = (tonumber(x) :: number) + (tonumber(w) :: number) / 2
@@ -627,15 +618,15 @@ test("graph: every node shown in the field, lit with its neighbors under the poi
 			expect(cx > fx and cx < fx + fw and cy > fy and cy < fy + fh).to_be(true)
 		end
 	end
-	app:hover('#control-widget-map >> .orch-graph-thread ~"Control room UI"')
+	app:hover('#control-map >> .orch-graph-thread ~"Control room UI"')
 	app:frames(5)
 	expect(app:state("control_map_graph_hover")).to_be("th-ui-control")
-	expect(app:has("#control-widget-map >> .orch-graph-card")).to_be(true)
+	expect(app:has("#control-map >> .orch-graph-card")).to_be(true)
 	local near = Sim.neighbors(g, "th-ui-control")
 	expect(near["orc-orch"]).to_be(true)
 	expect(near["dev:dev-mac"]).to_be(true)
 	expect(near["th-engine-state"]).to_be(nil)
-	app:click('#control-widget-map >> .orch-graph-thread ~"Control room UI"')
+	app:click('#control-map >> .orch-graph-thread ~"Control room UI"')
 	app:frames(10)
 	expect(app:state("shell_route_path")).to_be("/session/th-ui-control")
 end)
@@ -644,7 +635,7 @@ test("graph: a node dropped stays where it was dropped", function()
 	local app = open(1440, 2400)
 	view(app, "graph")
 	app:frames(90)
-	app:drag('#control-widget-map >> .orch-graph-thread ~"Exporter image"', '#control-widget-map >> .orch-graph-device "winbox"')
+	app:drag('#control-map >> .orch-graph-thread ~"Exporter image"', '#control-map >> .orch-graph-device "winbox"')
 	app:frames(30)
 	local pins = app:state("control_map_graph_pins")
 	expect(pins["th-vpn-exporter"] ~= nil).to_be(true)
@@ -831,7 +822,7 @@ test("timeline: the legend's events are always Report, Ask, Failed, Done", funct
 	local app = open(1440, 1400)
 	view(app, "timeline")
 	app:frames(10)
-	local tree = app:tree("#control-widget-map >> .orch-tl-top")
+	local tree = app:tree("#control-map >> .orch-tl-top")
 	local at = {}
 	for _, word in { "Report", "Ask", "Failed", "Done" } do
 		local i = string.find(tree, `"{word}"`, 1, true)
@@ -905,10 +896,10 @@ test("a machine renamed shows its new name at once, in every view", function()
 		app:command("map_live")
 		view(app, v)
 		app:frames(if v == "graph" then 60 else 10)
-		expect(string.find(app:tree("#control-widget-map"), "DESKTOP-3NFV6JC", 1, true) ~= nil).to_be(true)
+		expect(string.find(app:tree("#control-map"), "DESKTOP-3NFV6JC", 1, true) ~= nil).to_be(true)
 		app:command("fixture.rename_win")
 		app:frames(5)
-		local tree = app:tree("#control-widget-map")
+		local tree = app:tree("#control-map")
 		expect(string.find(tree, "x16-win", 1, true) ~= nil).to_be(true)
 		expect(string.find(tree, "DESKTOP-3NFV6JC", 1, true)).to_be(nil)
 	end
@@ -921,7 +912,7 @@ test("topology, Lines (the default): an orchestrator's rail runs down to its wor
 	app:frames(10)
 	expect(app:state("control_map_topo_style")).to_be("lines")
 	-- (No row names its origin; rails cross machines.)
-	expect(app:has("#control-widget-map >> .orch-origin")).to_be(false)
+	expect(app:has("#control-map >> .orch-origin")).to_be(false)
 	local function spans(mode: string): (boolean, boolean)
 		local l = Layout.layout(world(), 1200, mode)
 		local across, edges = false, false
@@ -959,24 +950,7 @@ test("topology, Tags: no line across machines; a row there carries an edge and n
 	app:command("map_topo_tags")
 	app:frames(10)
 	expect(app:state("control_map_topo_style")).to_be("tags")
-	expect(app:has('#control-widget-map >> .orch-origin >> ~"Brain dump"')).to_be(true)
-	expect(app:has('#control-widget-map >> .orch-origin >> ~"Zeron fixes"')).to_be(true)
+	expect(app:has('#control-map >> .orch-origin >> ~"Brain dump"')).to_be(true)
+	expect(app:has('#control-map >> .orch-origin >> ~"Zeron fixes"')).to_be(true)
 end)
 
-test("topology: Lines or Tags chosen from the Map's menu, kept", function()
-	local app = open(1440, 1400)
-	app:command("map_cross")
-	view(app, "topology")
-	app:click('#control-widget-map >> role:button "Widget menu"')
-	app:frames(10)
-	app:click('role:menuitemcheckbox "Tags"')
-	app:frames(10)
-	expect(app:state("control_map_topo_style")).to_be("tags")
-	expect(app:has("#control-widget-map >> .orch-origin")).to_be(true)
-	app:click('#control-widget-map >> role:button "Widget menu"')
-	app:frames(10)
-	app:click('role:menuitemcheckbox "Lines"')
-	app:frames(10)
-	expect(app:state("control_map_topo_style")).to_be("lines")
-	expect(app:has("#control-widget-map >> .orch-origin")).to_be(false)
-end)

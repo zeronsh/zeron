@@ -1,10 +1,11 @@
 -- Needs you reached from an orchestrator's page: the Control room's
--- widget (screens/control/needs), every orchestrator's rows, its decision
+-- float (screens/control/needs), every orchestrator's rows, its decision
 -- overlay, its "n more". (The page's own Needs you section and its Board
 -- are gone: its side panel's Tasks list shows its cards, tested in
 -- tests/orch_side_panel.) On ui/orchestrator_fixture.luau.
 
-local CONTROL = "#control-widget-needs"
+-- (The Control room's Needs you, floating over its Map.)
+local CONTROL = "#control-needs-float"
 
 local function settle(app: any, n: number?)
 	app:frames(n or 30)
@@ -16,6 +17,13 @@ local function open(): any
 	settle(app)
 	app:command("orch.control")
 	settle(app)
+	app:set_state("control_tab", "map")
+	settle(app)
+	-- (Every row, not the top one alone.)
+	if app:has(`{CONTROL} >> .orch-asks-more`) then
+		app:click(`{CONTROL} >> .orch-asks-more`)
+		settle(app)
+	end
 	return app
 end
 
@@ -62,20 +70,27 @@ test("orchestrator needs: an ask expands into the decision, and closes again", f
 	expect(app:error()).to_be_nil()
 end)
 
-test("orchestrator needs: past six rows, n more expands the list and Fewer folds it", function()
-	local app = open()
-	-- (Tall enough for every row and Fewer under them.)
+test("orchestrator needs: its top ask floating, n more opens every row and Fewer folds it back", function()
+	local app = mount("orchestrator_fixture.luau")
 	app:resize(1440, 2400)
+	settle(app)
+	app:command("orch.control")
+	settle(app)
+	app:set_state("control_tab", "map")
 	app:command("orch.many_asks")
 	settle(app)
 	-- The sample's three Needs-you cards and the seven asks of a Running
-	-- card's thread (none of them a Needs-you card's): ten.
-	expect(app:count(`{CONTROL} >> .orch-need`)).to_be(6)
-	app:click(`{CONTROL} >> role:button "4 more"`)
+	-- card's thread (none of them a Needs-you card's): ten, the top one
+	-- shown.
+	expect(app:count(`{CONTROL} >> .orch-need`)).to_be(1)
+	app:click(`{CONTROL} >> role:button "9 more"`)
 	settle(app)
 	expect(app:count(`{CONTROL} >> .orch-need`)).to_be(10)
+	-- (Fewer, at its list's foot: the float scrolled to it.)
+	app:scroll(CONTROL, 100000)
+	settle(app, 10)
 	app:click(`{CONTROL} >> role:button "Fewer"`)
 	settle(app)
-	expect(app:count(`{CONTROL} >> .orch-need`)).to_be(6)
+	expect(app:count(`{CONTROL} >> .orch-need`)).to_be(1)
 	expect(app:error()).to_be_nil()
 end)

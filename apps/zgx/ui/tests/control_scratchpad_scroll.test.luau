@@ -1,10 +1,12 @@
--- The Scratchpad in the Control room's page: a wheel over it scrolls the
--- page unless the person is working in it (Notes focused, the board
--- pressed), and the page's kept place (ds/kept_scroll) holds.
+-- The Scratchpad under the Control room's Notes: a wheel over it scrolls
+-- the tab unless the person is working in it (its notes focused, the board
+-- pressed), and the tab's kept place (ds/kept_scroll) holds.
 
 local function open(): any
 	local app = mount("control_page_fixture.luau")
-	app:resize(1440, 900)
+	-- (Narrow and short: Notes one column, far taller than the window.)
+	app:resize(1000, 700)
+	app:set_state("control_tab", "notes")
 	app:frames(30)
 	return app
 end
@@ -18,13 +20,16 @@ end
 -- window's edge is brought into view, and the page moves for that, not
 -- the wheel. How far depends on what's above it: the Map's height.)
 local function to_scratchpad(app: any)
-	app:scroll("#control-scroll", 700)
+	local _, sy = string.match(tostring(app:tree("#control-notes-scratchpad", 0)), " (%-?[%d%.]+),(%-?[%d%.]+) ")
+	app:scroll("#control-notes-scroll", math.max(0, (tonumber(sy) or 0) - 90))
 	app:frames(30)
 	local line = tostring(app:tree("#scratchpad-editor"):match("[^\n]+") or "")
 	local y, h = line:match("%-?[%d%.]+,(%-?[%d%.]+) [%d%.]+x([%d%.]+)")
-	local below = (tonumber(y) or 0) + (tonumber(h) or 0) - 900
+	-- (The tab's own view's foot, not the window's: the head over it.)
+	local _, vy, _, vh = string.match(tostring(app:tree("#control-notes-scroll", 0)), " (%-?[%d%.]+),(%-?[%d%.]+) ([%d%.]+)x([%d%.]+)")
+	local below = (tonumber(y) or 0) + (tonumber(h) or 0) - ((tonumber(vy) or 0) + (tonumber(vh) or 0))
 	if below > 0 then
-		app:scroll("#control-scroll", math.ceil(below) + 8)
+		app:scroll("#control-notes-scroll", math.ceil(below) + 8)
 		app:frames(30)
 	end
 end
@@ -45,7 +50,7 @@ test("scroll: a wheel over the unfocused Scratchpad scrolls the Control room, an
 	local at = place(app)
 	expect(at > 0).to_be(true)
 	-- (As in use: something else on the page pressed first.)
-	app:click("#control-widget-scratchpad >> .orch-scratchpad-status")
+	app:click("#control-notes-scratchpad >> .orch-scratchpad-status")
 	app:frames(10)
 	expect(place(app)).to_be(at)
 	-- Over the notes, a note longer than the field: the page moves.
@@ -59,7 +64,7 @@ test("scroll: a wheel over the unfocused Scratchpad scrolls the Control room, an
 	app:click('#scratchpad-tabs >> role:radio "Draw"')
 	app:frames(20)
 	expect(place(app)).to_be(at)
-	local board = "#control-widget-scratchpad >> .orch-scratchpad-board"
+	local board = "#control-notes-scratchpad >> .orch-scratchpad-board"
 	app:scroll(board, 80)
 	app:frames(30)
 	expect(place(app)).to_be(at + 80)
@@ -84,7 +89,7 @@ test("scroll: working in the Scratchpad keeps the wheel there", function()
 	-- The board pressed: it pans, the page stays.
 	app:click('#scratchpad-tabs >> role:radio "Draw"')
 	app:frames(20)
-	local board = "#control-widget-scratchpad >> .orch-scratchpad-board"
+	local board = "#control-notes-scratchpad >> .orch-scratchpad-board"
 	app:click(board)
 	app:frames(10)
 	app:scroll(board, 80)
@@ -121,7 +126,7 @@ test("scroll: a press into the Scratchpad takes the wheel, Escape or a press out
 	-- Pressed into again, then a press outside it: the page's.
 	app:click("#scratchpad-editor")
 	app:frames(5)
-	app:click("#control-widget-machines")
+	app:click("#control-head")
 	app:frames(5)
 	expect(focused(app, "#scratchpad-editor")).to_be(false)
 	app:scroll("#scratchpad-editor", 60)
@@ -129,12 +134,15 @@ test("scroll: a press into the Scratchpad takes the wheel, Escape or a press out
 	expect(place(app)).to_be(at + 60)
 	at = place(app)
 
-	-- The drawing, the same (the page at its end now: wheeling up). (Each
-	-- wheel the board took is its gesture for a moment after, as a scroll
-	-- view's is: the next one comes after that.)
+	-- The drawing, the same (wheeling up). (Each wheel the board took is
+	-- its gesture for a moment after, as a scroll view's is: the next one
+	-- comes after that.) (Its tabs back in view first, from over Q&A.)
+	app:scroll("#control-notes-qa", -120)
+	app:frames(20)
+	at = place(app)
 	app:click('#scratchpad-tabs >> role:radio "Draw"')
 	app:frames(20)
-	local board = "#control-widget-scratchpad >> .orch-scratchpad-board"
+	local board = "#control-notes-scratchpad >> .orch-scratchpad-board"
 	app:click(board)
 	app:frames(5)
 	app:scroll(board, -60)
@@ -152,8 +160,8 @@ test("scroll: a press into the Scratchpad takes the wheel, Escape or a press out
 	app:scroll(board, -60)
 	app:frames(20)
 	expect(place(app)).to_be(at)
-	app:hover("#control-widget-machines")
-	app:click("#control-widget-machines")
+	app:hover("#control-head")
+	app:click("#control-head")
 	app:wait(1500)
 	app:frames(5)
 	app:scroll(board, -60)

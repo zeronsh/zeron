@@ -1,8 +1,7 @@
--- The Control room's composer floating at the page's foot while Capture is
--- scrolled up out of view (screens/control/page `FloatingCapture`): one
--- composer in two places, its draft the same in both; bare (one line and a
--- knob), opened out on a click, folded by Escape; typing and Enter send a
--- dump from it; ⌘⇧K and `/` give it the keys.
+-- Capture's bar, at the foot of every tab of the Control room
+-- (screens/control/page `FloatingCapture`): bare (one line, a knob and a
+-- History knob), opened out on a click, folded by Escape; typing and Enter
+-- send a dump from it; ⌘⇧K and `/` give it the keys.
 
 local DRAFT = "chat_lane_draft_orc-brain"
 
@@ -19,81 +18,55 @@ local function calls(app: any): string
 	return tostring(app:state("calls") or "")
 end
 
--- Which placement holds the keys: "float", "inline" or "" (the tree's
--- whole dump stops short of the page's depth: each placement's own).
-local function focused(app: any): string
-	for _, at in { { "#control-float [1]", "float" }, { "#control-capture-inline", "inline" } } do
-		if app:has(at[1]) then
-			for line in app:tree(at[1]):gmatch("[^\n]+") do
-				if line:find("textbox", 1, true) and line:find(" focused", 1, true) then
-					return at[2]
-				end
-			end
+-- Whether the bar's field holds the keys.
+local function focused(app: any): boolean
+	for line in app:tree("#control-float [1]"):gmatch("[^\n]+") do
+		if line:find("textbox", 1, true) and line:find(" focused", 1, true) then
+			return true
 		end
 	end
-	return ""
+	return false
 end
 
--- Whether it floats: kept built while the page is, hidden where it doesn't.
-local function floats(app: any): boolean
+-- Whether it shows: kept built while the page is.
+local function shows(app: any): boolean
 	local line = string.match(app:tree("#control-float-layer", 0), "[^\n]+") or ""
 	return not string.find(line, " hidden", 1, true)
 end
 
-local function down(app: any)
-	app:scroll("#control-scroll", 900)
-	app:frames(30)
-end
-
--- (Back up with the wheel over the right column: scrolled down, the
--- page's middle is the Scratchpad's notes, a field that kept a wheel
--- over it once anything has been pressed (`overscroll = "contain"`), the
--- page not moving, as a person's wheel over it wouldn't.)
-local function up(app: any)
-	app:scroll("#control-widget-machines", -2000)
-	app:frames(30)
-end
-
-test("floating composer: Capture scrolled out of view floats it, scrolled back it goes, the draft kept", function()
+test("Capture's bar: on every tab, the draft kept from one to the next", function()
 	local app = open()
-	expect(floats(app)).to_be(false)
-	app:type("#control-capture-composer >> role:textbox", "half a thought")
+	expect(shows(app)).to_be(true)
+	app:type("#control-float >> role:textbox", "half a thought")
 	app:frames(5)
-	down(app)
-	expect(app:state("control_capture_floating")).to_be(true)
-	expect(floats(app)).to_be(true)
+	for _, t in { "map", "chat", "notes", "board" } do
+		app:set_state("control_tab", t)
+		app:frames(30)
+		expect(shows(app)).to_be(true)
+		expect(app:text("#control-float >> role:textbox")).to_be("half a thought")
+	end
 	-- (Bare: one line, no model under it.)
-	expect(app:text("#control-float >> role:textbox")).to_be("half a thought")
 	expect(app:state("control_capture_float_open")).to_be(false)
-	up(app)
-	expect(app:state("control_capture_floating")).to_be(false)
-	-- (Its exit played out.)
-	app:frames(30)
-	expect(floats(app)).to_be(false)
-	expect(app:text("#control-capture-composer >> role:textbox")).to_be("half a thought")
 	expect(app:error()).to_be_nil()
 end)
 
-test("floating composer: typed in while floating, sent with Enter, and the same draft in Capture", function()
+test("Capture's bar: typed in, sent with Enter, a dump", function()
 	local app = open()
-	down(app)
-	app:type("#control-float >> role:textbox", "ship the floating composer")
+	app:type("#control-float >> role:textbox", "ship the bar")
 	app:frames(5)
-	-- One draft: Capture's, out of view, has it too.
-	expect(app:state(DRAFT)).to_be("ship the floating composer")
+	expect(app:state(DRAFT)).to_be("ship the bar")
 	app:key("Enter")
 	app:frames(5)
-	expect(calls(app)).to_contain("dump:ship the floating composer")
+	expect(calls(app)).to_contain("dump:ship the bar")
 	expect(app:text("#control-float >> role:textbox")).to_be("")
 	expect(app:state(DRAFT)).to_be("")
-	-- Still floating, still bare.
-	expect(floats(app)).to_be(true)
+	-- Still there, still bare.
+	expect(shows(app)).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
 
-test("floating composer: the knob opens it out, Escape folds it back, the draft kept", function()
+test("Capture's bar: the knob opens it out, Escape folds it back, the draft kept", function()
 	local app = open()
-	down(app)
 	app:type("#control-float >> role:textbox", "a longer note")
 	app:frames(5)
 	app:click("#control-float-knob")
@@ -102,7 +75,7 @@ test("floating composer: the knob opens it out, Escape folds it back, the draft 
 	-- Opened out: the model under it, the draft the same, the keys in it.
 	expect(app:has('#control-float >> role:button "Model"')).to_be(true)
 	expect(app:text("#control-float >> role:textbox")).to_be("a longer note")
-	expect(focused(app)).to_be("float")
+	expect(focused(app)).to_be(true)
 	app:key("Escape")
 	app:frames(30)
 	expect(app:state("control_capture_float_open")).to_be(false)
@@ -119,9 +92,8 @@ test("floating composer: the knob opens it out, Escape folds it back, the draft 
 	expect(app:error()).to_be_nil()
 end)
 
-test("floating composer: the knob counts what the draft carries", function()
+test("Capture's bar: the knob counts what the draft carries", function()
 	local app = open()
-	down(app)
 	expect(app:has("#control-float >> .control-float-count")).to_be(false)
 	app:command("fixture.carry")
 	app:frames(20)
@@ -133,54 +105,22 @@ test("floating composer: the knob counts what the draft carries", function()
 	expect(app:error()).to_be_nil()
 end)
 
-test("floating composer: typing in it keeps the keys as Capture comes back", function()
-	local app = open()
-	down(app)
-	app:type("#control-float >> role:textbox", "mid sentence")
-	app:frames(5)
-	up(app)
-	app:frames(10)
-	expect(floats(app)).to_be(false)
-	expect(focused(app)).to_be("inline")
-	-- (Where it was: Capture in view.)
-	expect(app:state("control_scroll")).to_be(0)
-	expect(app:state(DRAFT)).to_be("mid sentence")
-	-- And Capture's keys go with it as it floats again.
-	down(app)
-	app:frames(10)
-	expect(floats(app)).to_be(true)
-	expect(focused(app)).to_be("float")
-end)
-
-test("floating composer: ⌘⇧K and / give the composer the keys where it shows", function()
+test("Capture's bar: ⌘⇧K and / give it the keys", function()
 	local app = open("control_fixture.luau")
 	app:frames(30)
-	-- In Capture, in view.
 	app:command("control.focus_capture")
 	app:frames(10)
-	expect(focused(app)).to_be("inline")
-	-- Out of view: the keys go with it into the floating one; Escape gives
-	-- them back to the window, and ⌘⇧K into the floating one again.
-	down(app)
-	expect(floats(app)).to_be(true)
-	expect(focused(app)).to_be("float")
-	app:key("Escape")
-	app:frames(5)
-	expect(focused(app)).to_be("")
-	app:command("control.focus_capture")
-	app:frames(10)
-	expect(app:state("control_capture_floating")).to_be(true)
-	expect(focused(app)).to_be("float")
+	expect(focused(app)).to_be(true)
 	app:type("#control-float >> role:textbox", "k")
 	app:frames(5)
 	expect(app:state(DRAFT)).to_be("k")
-	-- `/` with nothing holding the keys (Escape gave them back).
+	-- Escape gives them back to the window; `/` with nothing holding them.
 	app:key("Escape")
 	app:frames(5)
-	expect(focused(app)).to_be("")
+	expect(focused(app)).to_be(false)
 	app:key("/")
 	app:frames(10)
-	expect(focused(app)).to_be("float")
+	expect(focused(app)).to_be(true)
 	-- (Taken, not typed.)
 	expect(app:state(DRAFT)).to_be("k")
 	-- (No error check: the shell's fixture stands in for no `appearance`

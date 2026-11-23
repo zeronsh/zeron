@@ -5,7 +5,8 @@
 //! plain text, and a drag over an option's words selects them rather than
 //! choosing it. Mounted headless on ui/control_page_fixture.luau with
 //! `fixture.decision_email` (a question whose context quotes an email to
-//! send, and a command), and ui/control_qa_fixture.luau.
+//! send, and a command), opened from Needs you floating over the Map, and
+//! ui/control_qa_fixture.luau (its Q&A under Notes).
 
 use zgx_script::{ScriptHost, testing::TestApp};
 
@@ -33,7 +34,12 @@ fn email() -> TestApp {
     let mut app = fixture("control_page_fixture.luau");
     assert!(app.host.run_command("fixture.decision_email"));
     app.frames(30);
-    app.click(&format!(r#"#control-widget-needs >> role:button ~"{QUESTION}""#));
+    // (From Needs you floating over the Map, its rest opened.)
+    app.host.set_state("control_tab", zgx_script::Value::from("map")).expect("the tab");
+    app.frames(30);
+    app.click("#control-needs-float >> .orch-asks-more");
+    app.frames(20);
+    app.click(&format!(r#"#control-needs-float >> role:button ~"{QUESTION}""#));
     app.frames(40);
     assert!(app.shown(OVERLAY), "the overlay opened");
     app
@@ -157,7 +163,10 @@ fn a_drag_over_an_options_words_selects_them_and_chooses_nothing() {
 #[test]
 fn the_qa_answer_overlay_selects_and_copies_too() {
     let mut app = fixture("control_qa_fixture.luau");
-    app.click(r#"#control-widget-qa >> role:button ~"Are Inbox and Next sections""#);
+    // (The Q&A, under Notes.)
+    app.host.set_state("control_tab", zgx_script::Value::from("notes")).expect("the tab");
+    app.frames(30);
+    app.click(r#"#control-notes-qa >> role:button ~"Are Inbox and Next sections""#);
     app.frames(40);
     assert!(app.shown(".orch-qa-dialog"), "the answer opened");
     word_at(

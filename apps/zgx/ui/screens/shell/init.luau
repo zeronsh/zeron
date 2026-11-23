@@ -337,8 +337,8 @@ return function(): Node
 			end
 		end
 	end
-	-- ⌘⌥1–3 on the Control room: its tabs.
-	for _, tab in { "overview", "board", "chat" } do
+	-- ⌘⌥1–4 on the Control room: its tabs.
+	for _, tab in { "board", "map", "chat", "notes" } do
 		runs[`control.tab_{tab}`] = function()
 			if route.current:peek().name == "control" then
 				local control: any = boundary.load("@app/screens/control/page")

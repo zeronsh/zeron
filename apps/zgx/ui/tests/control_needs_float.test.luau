@@ -1,10 +1,11 @@
--- Needs you floating on Board and Chat (screens/control/page `NeedsFloat`):
--- what waits on the person, answerable without going back to Overview.
--- Compact (its count and the top ask, the rest behind "n more"), the
--- widget's own answers and actions; never on Overview (the widget is
--- there), never while nothing waits, never built while it doesn't show;
--- clear of the floating composer. On ui/control_page_fixture.luau
--- (ui/control_world, whose sample has asks waiting).
+-- Needs you floating on Map, Chat and Notes (screens/control/page
+-- `NeedsFloat`): what waits on the person, answerable from any tab.
+-- Compact (its count and the top ask, the rest behind "n more"), Needs
+-- you's own answers and actions (screens/control/needs); never on the
+-- Board (it has the asks as cards), never while nothing waits, never built
+-- while it doesn't show; clear of Capture's bar. On
+-- ui/control_page_fixture.luau (ui/control_world, whose sample has asks
+-- waiting).
 
 local FLOAT = "#control-needs-float"
 
@@ -31,23 +32,28 @@ local function box(app: any, target: string): (number, number, number, number)
 	return tonumber(x) or 0, tonumber(y) or 0, tonumber(w) or 0, tonumber(h) or 0
 end
 
-test("needs float: on Board and Chat while something waits, never on Overview", function()
+test("needs float: on Map, Chat and Notes while something waits, never on the Board", function()
 	local app = open()
+	-- (The Board, the page's first tab.)
+	expect(app:state("control_tab")).to_be("board")
 	expect(app:has(FLOAT)).to_be(false)
-	tab(app, "board")
+	tab(app, "map")
 	expect(app:has(FLOAT)).to_be(true)
 	tab(app, "chat")
 	expect(app:has(FLOAT)).to_be(true)
-	tab(app, "overview")
+	tab(app, "notes")
+	expect(app:has(FLOAT)).to_be(true)
+	tab(app, "board")
 	app:frames(20)
-	-- (Gone, not hidden: nothing of it built on Overview.)
+	-- (Gone, not hidden: nothing of it built on the Board.)
 	expect(app:has(FLOAT)).to_be(false)
+	expect(app:has("#control-needs-pill")).to_be(false)
 	expect(app:error()).to_be_nil()
 end)
 
 test("needs float: compact, its count and the top ask, the rest behind n more", function()
 	local app = open()
-	tab(app, "board")
+	tab(app, "map")
 	expect(app:count(`{FLOAT} >> .orch-need`)).to_be(1)
 	local more = app:has(`{FLOAT} >> ~"more"`)
 	expect(more).to_be(true)
@@ -56,11 +62,11 @@ test("needs float: compact, its count and the top ask, the rest behind n more", 
 	expect(app:count(`{FLOAT} >> .orch-need`) > 1).to_be(true)
 end)
 
-test("needs float: a chip answers the ask as the widget's does", function()
+test("needs float: a chip answers the ask", function()
 	local app = open()
 	app:command("fixture.decision")
 	app:frames(20)
-	tab(app, "board")
+	tab(app, "map")
 	-- (The top ask's chips: the urgent one first.)
 	local chip = `{FLOAT} >> .orch-choice [1]`
 	expect(app:has(chip)).to_be(true)
@@ -74,7 +80,7 @@ end)
 
 test("needs float: nothing waiting, nothing at all", function()
 	local app = open()
-	tab(app, "board")
+	tab(app, "map")
 	expect(app:has(FLOAT)).to_be(true)
 	-- Every ask answered, no card in the board's Needs you (sccache's
 	-- blocked one picked up again) and no chat awaiting input.
@@ -113,21 +119,24 @@ test("needs float: nothing waiting, nothing at all", function()
 	expect(app:has(FLOAT)).to_be(false)
 end)
 
-test("needs float: clear of the floating composer, wide and narrow", function()
+test("needs float: clear of Capture's bar, wide and narrow, on every tab it shows on", function()
 	for _, w in { 1440, 900 } do
 		local app = open(w)
-		tab(app, "board")
-		app:frames(20)
-		local ax, ay, aw, ah = box(app, FLOAT)
-		local bx, by, bw, bh = box(app, "#control-float")
-		local apart = ax + aw <= bx or bx + bw <= ax or ay + ah <= by or by + bh <= ay
-		expect(apart).to_be(true)
+		for _, t in { "map", "chat", "notes" } do
+			tab(app, t)
+			app:frames(20)
+			local ax, ay, aw, ah = box(app, FLOAT)
+			local bx, by, bw, bh = box(app, "#control-float")
+			expect(aw > 0 and bw > 0).to_be(true)
+			local apart = ax + aw <= bx or bx + bw <= ax or ay + ah <= by or by + bh <= ay
+			expect(apart).to_be(true)
+		end
 	end
 end)
 
 test("needs float: minimised to its count, opened again by a click", function()
 	local app = open()
-	tab(app, "board")
+	tab(app, "map")
 	app:click("#control-needs-min")
 	app:frames(20)
 	expect(app:has(FLOAT)).to_be(false)
@@ -141,7 +150,7 @@ end)
 
 test("needs float: minimised, an ask it hasn't seen opens it again", function()
 	local app = open()
-	tab(app, "board")
+	tab(app, "map")
 	app:click("#control-needs-min")
 	app:frames(20)
 	expect(app:has("#control-needs-pill")).to_be(true)
@@ -151,14 +160,15 @@ test("needs float: minimised, an ask it hasn't seen opens it again", function()
 	expect(app:has("#control-needs-pill")).to_be(false)
 end)
 
-test("needs float: the Board keeps room at its end, its last cards scrolled clear of it", function()
+test("needs float: none over the Board, its last cards scrolled clear of Capture's bar", function()
 	local app = open()
 	app:resize(1440, 500)
 	tab(app, "board")
 	app:frames(30)
 	app:scroll("#control-board-scroll", 5000)
 	app:frames(30)
-	local _, fy = box(app, FLOAT)
+	expect(app:has(FLOAT)).to_be(false)
+	local _, fy = box(app, "#control-float")
 	-- (The Done column's foot, its last thing.)
 	local _, cy, _, ch = box(app, "#orch-col-done")
 	expect(cy + ch <= fy).to_be(true)
@@ -166,7 +176,8 @@ end)
 
 test("needs float: a toast in its corner stands over it, the float where it was", function()
 	local app = open()
-	tab(app, "board")
+	-- (Floating over the Map: not on the Board.)
+	tab(app, "map")
 	expect(app:has(FLOAT)).to_be(true)
 	local _, fy, _, _ = box(app, FLOAT)
 	app:command("say_toast")

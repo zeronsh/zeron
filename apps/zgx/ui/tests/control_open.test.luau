@@ -1,12 +1,11 @@
 -- Opening a crew thread from the Control room: crew threads are listed under
 -- their orchestrator (`sessions.now.children`), and the route finds them
--- there (route.find_chat), so a pill, a comms row or a chip's Open opens
--- the thread as a chat of its own. In the window (ui/control_fixture.luau).
+-- there (route.find_chat), so a pill on the Map or a receipt chip's Open
+-- opens the thread as a chat of its own. In the window
+-- (ui/control_fixture.luau).
 
 local function open(): any
 	local app = mount("control_fixture.luau")
-	-- (These read the Topology's rows: the Map opens on Graph (force) now.)
-	app:set_state("control_map", { variant = "topology", window = 15 })
 	app:resize(1440, 900)
 	app:frames(40)
 	return app
@@ -19,30 +18,23 @@ end
 
 test("a crew pill on the Map opens its thread", function()
 	local app = open()
-	-- (Tall enough that the Map shows under Capture.)
-	app:resize(1440, 1600)
-	app:frames(10)
-	app:click('#control-widget-map >> .orch-pill "Engine: orchestration state, Testing"')
+	-- (The Map tab, in the Topology: still drawn, set once the tab is built.)
+	app:set_state("control_tab", "map")
+	app:frames(30)
+	app:set_state("control_map", { variant = "topology", window = 15 })
+	app:frames(30)
+	app:click('#control-map >> .orch-pill "Engine: orchestration state, Testing"')
 	app:frames(30)
 	expect(at(app)).to_be("/session/th-engine-state")
 	expect(app:has("#control-room")).to_be(false)
 	expect(app:text("#page-title")).to_be("Engine: orchestration state")
 end)
 
-test("a comms row opens the thread it came from, an outcome to you by its name", function()
-	local app = open()
-	app:resize(1440, 3200)
-	app:frames(10)
-	-- A thread's outcome to you: its name on the row, the row its thread.
-	expect(app:has('#control-widget-comms >> role:button "Switched to side by side; the tabs are gone." >> "Orchestrator screen"')).to_be(true)
-	app:click('#control-widget-comms >> role:button "Switched to side by side; the tabs are gone."')
-	app:frames(30)
-	expect(at(app)).to_be("/session/th-ui-orch")
-	expect(app:text("#page-title")).to_be("Orchestrator screen")
-end)
-
 test("a receipt chip's Open goes to its crew thread", function()
 	local app = open()
+	-- (In Capture's history, opened from its bar.)
+	app:click("#control-history-open")
+	app:frames(30)
 	-- (Its chip past the strip's end: the pointer on its part brings it in.)
 	app:hover('#control-capture >> .orch-part >> "registry "')
 	app:frames(10)

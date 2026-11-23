@@ -215,7 +215,7 @@ test("force graph: a warm open (places kept) is settled on its first frame", fun
 	print(`zeron-zgx: FORCEPERF warm open own work {string.format("%.1f", own)}ms`)
 	expect(own < 20).to_be(true)
 	expect(ms < 120).to_be(true)
-	expect(app:count("#control-widget-map >> .orch-force-node") >= 160).to_be(true)
+	expect(app:count("#control-map >> .orch-force-node") >= 160).to_be(true)
 end)
 
 test("force graph: a pan or a zoom moves the drawing as it stands", function()
@@ -304,8 +304,8 @@ test("force graph: filled by machine, a legend names them; no Colour by; a theme
 	local app = open()
 	settle(app, 240)
 	-- (The legend: a machine each, those with a node on the web.)
-	expect(app:count("#control-widget-map >> .orch-force-legend-item") >= 1).to_be(true)
-	app:click('#control-widget-map >> role:button "Widget menu"')
+	expect(app:count("#control-map >> .orch-force-legend-item") >= 1).to_be(true)
+	app:click('#control-map >> .control-panel-menu >> role:button')
 	app:frames(3)
 	expect(app:has('role:menuitemcheckbox "Machine"')).to_be(false)
 	expect(app:has('role:menuitemcheckbox "Orchestrator"')).to_be(false)
@@ -326,11 +326,11 @@ end)
 test("force graph: the Brain, orchestrators and those asking are named; working chats wear the sidebar's ring, those asking its glyph; idle, nothing draws", function()
 	local app = open()
 	settle(app, 240)
-	expect(app:has('#control-widget-map >> .orch-force-brain "Brain"') or app:has('#control-widget-map >> .orch-force-brain')).to_be(true)
+	expect(app:has('#control-map >> .orch-force-brain "Brain"') or app:has('#control-map >> .orch-force-brain')).to_be(true)
 	-- (The sidebar's own StatusIcon over the canvas: a ring a working chat,
 	-- a glyph an asking, approving or failed one.)
-	expect(app:count("#control-widget-map >> .orch-force-ring") >= 1).to_be(true)
-	expect(app:count("#control-widget-map >> .orch-force-glyph") >= 1).to_be(true)
+	expect(app:count("#control-map >> .orch-force-ring") >= 1).to_be(true)
+	expect(app:count("#control-map >> .orch-force-glyph") >= 1).to_be(true)
 	-- (Idle, once the fit's zoom has had its names placed at its scale: the
 	-- canvases stand as they were.)
 	app:wait(400)
@@ -777,7 +777,7 @@ test("force pivot: machines as hubs, every thread off its machine, the legend th
 	end
 	check_labels(app, "machines pivot")
 	-- (The legend: the orchestrators.)
-	expect(app:count("#control-widget-map >> .orch-force-legend-item") >= 3).to_be(true)
+	expect(app:count("#control-map >> .orch-force-legend-item") >= 3).to_be(true)
 	-- Still once laid out.
 	app:wait(1200)
 	app:frames(2)

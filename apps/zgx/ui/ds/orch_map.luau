@@ -43,6 +43,9 @@ export type View = { variant: string, window: number }
 
 export type Props = {
 	world: () -> any,
+	-- The Graph's field height, where a page gives the Map its room (the
+	-- Control room's Map tab); else the Graph's own, from its width.
+	height: (() -> number)?,
 	-- One chat by id, followed by itself (account/rows); else read out of
 	-- the world, every thread following all of it.
 	chat: ((id: string) -> any)?,
@@ -99,7 +102,14 @@ M.DEFAULT = { variant = "force", window = 15 } :: View
 -- more (a Timeline or Topology of hundreds of lanes, the Machines of a big
 -- fleet) scrolls inside it; the Graphs size themselves within it.
 M.MIN_H, M.MAX_H, M.FALLBACK_H = 360, 900, 640
+-- The height a page gives the Map to fill (the Control room's Map tab):
+-- when set, the Map stands that tall, not a share of the window.
+M.fill_h = ui.state("orch_map_fill_h", 0)
 function M.max_h(): number
+	local fill = M.fill_h:get()
+	if fill > 0 then
+		return math.max(M.MIN_H, fill)
+	end
 	local window = (ui :: any).window
 	local state = if type(window) == "table" or type(window) == "userdata" then window.size else nil
 	local ok, v = pcall(function(): any
@@ -157,45 +167,23 @@ function M.set(view: State<View>, change: { variant: string?, window: number? })
 	view:set(valid({ variant = change.variant or v.variant, window = change.window or v.window }))
 end
 
--- The widget menu's entries: the three views, and the Timeline's span.
+-- The views its menu offers: the Graph and the Machines. (The Topology,
+-- the Timeline and the first Graph are kept for what still draws them, not
+-- offered.)
+M.LISTED = { "force", "machines" }
+
+-- The menu's entries: the views, and which chats every view shows.
 function M.menu(view: State<View>): { any }
 	local out: { any } = { { heading = locale.s("ds.orch.map.view") } }
-	for _, id in M.VARIANTS do
+	for _, id in M.LISTED do
 		table.insert(out, {
 			label = locale.s(`ds.orch.map.variant.{id}`),
-			icon = if id == "topology" then "git-branch" elseif id == "timeline" then "list" elseif id == "graph" or id == "force" then "global" else "widget",
+			icon = if id == "force" then "global" else "monitor",
 			checked = function(): boolean
 				return valid(view:get()).variant == id
 			end,
 			on_select = function()
 				M.set(view, { variant = id })
-			end,
-		})
-	end
-	table.insert(out, { separator = true })
-	for _, mins in M.WINDOWS do
-		table.insert(out, {
-			label = locale.s(`ds.orch.map.window_{mins}`),
-			checked = function(): boolean
-				return valid(view:get()).window == mins
-			end,
-			on_select = function()
-				M.set(view, { variant = "timeline", window = mins })
-			end,
-		})
-	end
-	table.insert(out, { separator = true })
-	-- How the Topology shows work on other machines (kept on this device).
-	local TopoStyle = require("@self/orch_map_topo_style")
-	for _, mode in TopoStyle.MODES do
-		table.insert(out, {
-			label = locale.s(`ds.orch.map.topo_{mode}`),
-			checked = function(): boolean
-				return TopoStyle.mode() == mode
-			end,
-			on_select = function()
-				TopoStyle.style:set(mode)
-				M.set(view, { variant = "topology" })
 			end,
 		})
 	end
@@ -215,7 +203,6 @@ function M.menu(view: State<View>): { any }
 			end,
 		})
 	end
-	table.insert(out, { separator = true })
 	return out
 end
 
@@ -354,6 +341,7 @@ M.Map = ui.component(function(props: Props): Node
 					progress = props.progress,
 					on_open_card = props.on_open_card,
 					on_resume_card = props.on_resume_card,
+					height = props.height,
 					register = register,
 				}
 			elseif variant == "machines" then

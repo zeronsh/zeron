@@ -46,13 +46,13 @@ for _, view in VIEWS do
 		app:command(`map_{view}`)
 		app:frames(40)
 		expect(app:error()).to_be(nil)
-		local map = boxes(app, "#control-widget-map")[1]
+		local map = boxes(app, "#control-map")[1]
 		expect(map ~= nil).to_be(true)
 		-- (The bound, three quarters of 900, with the widget's own head and
 		-- padding around it.)
 		expect(map.h <= 675 + 120).to_be(true)
 		for _, class in { ".orch-tl-chart", ".orch-map-lines", ".orch-force-canvas", ".orch-force-overlay", "canvas" } do
-			for _, b in boxes(app, `#control-widget-map >> {class}`) do
+			for _, b in boxes(app, `#control-map >> {class}`) do
 				expect(b.w * b.h * SCALE * SCALE * 4 <= LIMIT).to_be(true)
 			end
 		end
@@ -63,7 +63,7 @@ test("timeline: every lane's band is drawn, and the Map scrolls to its last lane
 	local app = open(1440, 900)
 	app:command("map_timeline")
 	app:frames(40)
-	local tiles = boxes(app, "#control-widget-map >> .orch-tl-chart")
+	local tiles = boxes(app, "#control-map >> .orch-tl-chart")
 	expect(#tiles >= 8).to_be(true)
 	local total = 0
 	for _, b in tiles do
@@ -72,7 +72,7 @@ test("timeline: every lane's band is drawn, and the Map scrolls to its last lane
 	end
 	-- (165 lanes at 26 points: past 4,000 points of field, all covered.)
 	expect(total >= 165 * 26).to_be(true)
-	expect(app:has('#control-widget-map >> .orch-map-scroll')).to_be(true)
+	expect(app:has('#control-map >> .orch-map-scroll')).to_be(true)
 end)
 
 test("the Control room keeps drawing and answering with a huge Map", function()
@@ -87,6 +87,6 @@ test("the Control room keeps drawing and answering with a huge Map", function()
 	-- (Still answering: the menu's view switch lands.)
 	app:command("map_machines")
 	app:frames(10)
-	expect(app:has("#control-widget-map >> .orch-map-scroll")).to_be(true)
+	expect(app:has("#control-map >> .orch-map-scroll")).to_be(true)
 	expect(app:error()).to_be(nil)
 end)

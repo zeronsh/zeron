@@ -5,9 +5,13 @@
 
 local function open(): any
 	local app = mount("control_page_fixture.luau")
-	-- (These read the Topology's rows: the Map opens on Graph (force) now.)
-	app:set_state("control_map", { variant = "topology", window = 15 })
 	app:resize(1440, 900)
+	app:frames(30)
+	-- (On the Map tab, in the Topology: still drawn, set once the tab is
+	-- built, which opens a view it doesn't offer on the Graph.)
+	app:set_state("control_tab", "map")
+	app:frames(30)
+	app:set_state("control_map", { variant = "topology", window = 15 })
 	app:frames(30)
 	return app
 end
@@ -19,36 +23,36 @@ end
 
 test("each machine is a lane; crew sit on the lane they run on", function()
 	local app = open()
-	expect(app:count("#control-widget-map >> .orch-lane")).to_be(3)
-	expect(app:count("#control-widget-map >> .orch-node")).to_be(4)
-	expect(app:count("#control-widget-map >> .orch-pill")).to_be(7)
+	expect(app:count("#control-map >> .orch-lane")).to_be(3)
+	expect(app:count("#control-map >> .orch-node")).to_be(4)
+	expect(app:count("#control-map >> .orch-pill")).to_be(7)
 	-- Orchestrators' station on desk; its Control room thread runs on the macbook, below.
-	local _, station = box(app, '#control-widget-map >> role:button "Orchestrators"')
-	local _, mac_thread = box(app, '#control-widget-map >> .orch-pill "Control room UI, Building"')
+	local _, station = box(app, '#control-map >> role:button "Orchestrators"')
+	local _, mac_thread = box(app, '#control-map >> .orch-pill "Control room UI, Building"')
 	expect(mac_thread > station).to_be(true)
 end)
 
 test("a thread's activity reaches its pill in place", function()
 	local app = open()
-	local before = app:tree('#control-widget-map >> .orch-pill "Engine: reports + MCP tools, Editing"'):match("@(%d+)")
+	local before = app:tree('#control-map >> .orch-pill "Engine: reports + MCP tools, Editing"'):match("@(%d+)")
 	app:command("fixture.activity")
 	-- (Shown once its last state has had its 300 ms.)
-	expect(app:wait('#control-widget-map >> .orch-pill "Engine: reports + MCP tools, Merging"', { timeout_ms = 1500 })).to_be(true)
-	local after = app:tree('#control-widget-map >> .orch-pill "Engine: reports + MCP tools, Merging"'):match("@(%d+)")
+	expect(app:wait('#control-map >> .orch-pill "Engine: reports + MCP tools, Merging"', { timeout_ms = 1500 })).to_be(true)
+	local after = app:tree('#control-map >> .orch-pill "Engine: reports + MCP tools, Merging"'):match("@(%d+)")
 	expect(after).to_be(before)
 end)
 
 test("a report runs a pulse along its line", function()
 	local app = open()
-	expect(app:count("#control-widget-map >> .orch-pulse")).to_be(0)
+	expect(app:count("#control-map >> .orch-pulse")).to_be(0)
 	app:command("fixture.report")
 	app:frames(2)
-	expect(app:count("#control-widget-map >> .orch-pulse")).to_be(1)
+	expect(app:count("#control-map >> .orch-pulse")).to_be(1)
 end)
 
 test("a station opens its orchestrator's page", function()
 	local app = open()
-	app:click('#control-widget-map >> role:button "Exnomic VPN"')
+	app:click('#control-map >> role:button "Exnomic VPN"')
 	app:frames(5)
 	expect(app:state("shell_route_path")).to_be("/orchestrator/orc-vpn")
 end)

@@ -3,11 +3,14 @@
 -- a new dump or ask builds its own row and leaves the others' nodes as
 -- they were; Capture's composer takes in the Brain dump's chat (its
 -- transcript, hundreds of routing turns) only once it's used. On
--- ui/control_page_fixture.luau.
+-- ui/control_page_fixture.luau: Capture's history opened from its bar,
+-- Needs you floating over the Map.
 
 local function open(): any
 	local app = mount("control_page_fixture.luau")
 	app:resize(1440, 900)
+	app:frames(30)
+	app:set_state("control_history_panel", true)
 	app:frames(30)
 	return app
 end
@@ -43,13 +46,11 @@ local function with_dumps(app: any, n: number)
 	app:frames(30)
 end
 
-local NEEDS = "#control-widget-needs"
+local NEEDS = "#control-needs-float"
 
--- The page scrolled to bring the history's "more" into view.
+-- The history scrolled to bring its "more" into view.
 local function to_foot(app: any)
-	local first = app:tree("#control-history-more"):match("[^\n]+") or ""
-	local y = tonumber(first:match(" %-?%d+,(%-?%d+) ")) or 0
-	app:scroll("#control-scroll", y - 400)
+	app:scroll("#control-history-scroll", 4000)
 	app:frames(10)
 end
 
@@ -89,7 +90,7 @@ test("a new dump builds one history row; the rows already there keep their nodes
 		expect(before[i]).never.to_be_nil()
 	end
 	expect(app:count(".control-history-row")).to_be(7)
-	app:type("#control-capture >> role:textbox", "a brand new dump")
+	app:type("#control-float >> role:textbox", "a brand new dump")
 	app:key("Enter")
 	app:frames(30)
 	expect(app:error()).to_be_nil()
@@ -114,7 +115,14 @@ end)
 
 test("a new ask builds its own row; the rows already there keep their nodes", function()
 	local app = open()
-	local count = app:count("#control-widget-needs >> .orch-need")
+	app:set_state("control_history_panel", false)
+	app:set_state("control_tab", "map")
+	app:frames(30)
+	if app:has(`{NEEDS} >> .orch-asks-more`) then
+		app:click(`{NEEDS} >> .orch-asks-more`)
+		app:frames(20)
+	end
+	local count = app:count(`{NEEDS} >> .orch-need`)
 	-- (The board's three Needs-you cards.)
 	expect(count).to_be(3)
 	local approve = node(app, "button", "Approve", NEEDS)
@@ -123,7 +131,7 @@ test("a new ask builds its own row; the rows already there keep their nodes", fu
 	app:command("fixture.turn_end_ask")
 	app:frames(30)
 	expect(app:error()).to_be_nil()
-	expect(app:count("#control-widget-needs >> .orch-need")).to_be(count + 1)
+	expect(app:count(`{NEEDS} >> .orch-need`)).to_be(count + 1)
 	expect(`approve @{node(app, "button", "Approve", NEEDS)}`).to_be(`approve @{approve}`)
 	expect(`side @{node(app, "button", "Side by side", NEEDS)}`).to_be(`side @{side}`)
 	-- The engine's state again, every ask a fresh copy: no row made again.
@@ -139,7 +147,7 @@ test("Capture's composer takes in the Brain dump's chat only once it's used", fu
 	local app = open()
 	-- Shown, not used: nothing watched.
 	expect((app:state("watched") or {})["control-capture"]).to_be_nil()
-	app:hover("#control-capture >> role:textbox")
+	app:hover("#control-float >> role:textbox")
 	app:frames(5)
 	expect((app:state("watched") or {})["control-capture"]).never.to_be_nil()
 	expect(app:error()).to_be_nil()

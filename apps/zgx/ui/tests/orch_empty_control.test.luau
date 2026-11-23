@@ -37,7 +37,7 @@ end
 
 test("empty orchestrator: on the Map, named, its card opening its page", function()
 	local app = open()
-	expect(app:has('#control-widget-map >> .orch-force-orchestrator "Project Tokenheimer"')).to_be(true)
+	expect(app:has('#control-map >> .orch-force-orchestrator "Project Tokenheimer"')).to_be(true)
 	app:set_state("control_map_force_hover", "orc-token")
 	app:frames(3)
 	app:hover(".orch-force-anchor-box")

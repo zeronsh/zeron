@@ -4,7 +4,7 @@
 -- card's own thread awaiting input (no row of its own). For the tests of
 -- Needs you's rows (tests/control_needs_cards) and their pictures.
 --
--- Commands: `fx.board` / `fx.overview` (the tab), `theme_dark`,
+-- Commands: `fx.board` / `fx.map` / `fx.chat` / `fx.notes` (the tab), `theme_dark`,
 -- `theme_light` (ui/control_world's).
 
 ui.theme.strict("warn")
@@ -39,7 +39,7 @@ table.insert(asks, {
 now.asks = asks
 orchestration.now:set(now)
 
-for _, tab in { "board", "overview", "chat" } do
+for _, tab in { "board", "map", "chat", "notes" } do
 	ui.command { id = `fx.{tab}`, title = `Show {tab}`, run = function()
 		page.tab:set(tab)
 	end }

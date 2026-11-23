@@ -142,7 +142,9 @@ export type Footer = { access: boolean?, place: boolean? }
 -- `expanded`: opened out from the start. `on_escape`: Escape's, first.
 -- `on_focus`: told as its field takes the keys and lets them go (either
 -- placement's, so the keys can follow it from one to the other).
-export type Form = { mirror: boolean?, bare: boolean?, expanded: boolean?, on_escape: (() -> boolean)?, on_focus: ((focused: boolean) -> ())? }
+-- `keeps`: a mirror with no first placement (the Control room's Capture,
+-- a bar now): it keeps the chat's picks itself.
+export type Form = { mirror: boolean?, keeps: boolean?, bare: boolean?, expanded: boolean?, on_escape: (() -> boolean)?, on_focus: ((focused: boolean) -> ())? }
 -- (`picker`: bumped, its model picker opens (a page composer's, for
 -- `open_model_when`); its own otherwise. `own`: a lane that shows a chat
 -- of its own (`data.own`: an orchestrator's page), the chat page's words.)
@@ -485,7 +487,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	-- the chat page (screens/chat/composer), never only with the next send.
 	-- (What the chat runs with already, or was seeded from it, isn't a pick.)
 	-- (A mirror only shows them: the first placement makes them the chat's.)
-	if take and not mirror then
+	if take and (not mirror or (form ~= nil and form.keeps == true)) then
 		ui.effect(function()
 			local m, e, f, o = model:get(), effort:get(), fast:get(), options:get()
 			local s = session:get()
@@ -1006,6 +1008,7 @@ M.Composer = ui.component(function(props: {
 	drop: boolean?,
 	id: string?,
 	mirror: boolean?,
+	keeps: boolean?,
 	focus: State<number>?,
 	bare: (() -> boolean)?,
 	on_escape: (() -> boolean)?,
@@ -1211,12 +1214,12 @@ M.Composer = ui.component(function(props: {
 		end
 		local form: Form? = nil
 		if id and how then
-			local f: Form = { mirror = true, bare = how == "bare", expanded = how == "open", on_escape = props.on_escape, on_focus = on_focus }
+			local f: Form = { mirror = true, keeps = props.keeps, bare = how == "bare", expanded = how == "open", on_escape = props.on_escape, on_focus = on_focus }
 			form = f
 		else
 			id = key
 			if mirror or on_focus then
-				local f: Form = { mirror = mirror, on_escape = props.on_escape, on_focus = on_focus }
+				local f: Form = { mirror = mirror, keeps = props.keeps, on_escape = props.on_escape, on_focus = on_focus }
 				form = f
 			end
 		end

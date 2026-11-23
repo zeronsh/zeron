@@ -1696,16 +1696,6 @@ local function view_more(more: any): { Node }
 				end,
 			},
 			Menu.Row {
-				icon = "tuning",
-				label = locale.s("orch.sidebar.view.widgets"),
-				on_click = function()
-					local page = control_page()
-					if page then
-						more.menu(page.widget_entries())
-					end
-				end,
-			},
-			Menu.Row {
 				icon = "git-branch",
 				label = locale.s("orch.sidebar.view.map"),
 				on_click = function()
@@ -1714,7 +1704,7 @@ local function view_more(more: any): { Node }
 						return
 					end
 					local out: { any } = { { heading = locale.s("orch.sidebar.view.map") } }
-					for _, v in OrchMap.VARIANTS do
+					for _, v in OrchMap.LISTED do
 						table.insert(out, {
 							label = locale.s(`ds.orch.map.variant.{v}`),
 							checked = function(): boolean
@@ -1722,6 +1712,8 @@ local function view_more(more: any): { Node }
 							end,
 							on_select = function()
 								OrchMap.set(page.map_view, { variant = v })
+								route.control()
+								page.show_tab("map")
 							end,
 						})
 					end

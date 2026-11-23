@@ -361,7 +361,11 @@ take_rows(M.rows:peek())
 ui.effect(function()
 	take_rows(M.rows:get())
 end)
-local function row_of(id: string): any
+local function row_of(id: string?): any
+	-- (No id, no row: a unit made before its entry's id came.)
+	if id == nil then
+		return nil
+	end
 	row_version(id):get()
 	return row_held[id]
 end

@@ -1,17 +1,19 @@
--- The Scratchpad as the person uses it: keys typed into Notes (not a
--- fill), saved as they go; an engine (or app) without the Scratchpad said
--- plainly, typing still kept and saved once it has it. On
--- ui/control_page_fixture.luau (ui/control_world's stubs: `calls`).
+-- The Scratchpad as the person uses it, on the Control room's Notes tab:
+-- keys typed into its notes (not a fill), saved as they go; an engine (or
+-- app) without the Scratchpad said plainly, typing still kept and saved
+-- once it has it. On ui/control_page_fixture.luau (ui/control_world's
+-- stubs: `calls`).
 
 local function open(): any
 	local app = mount("control_page_fixture.luau")
 	app:resize(1440, 2400)
+	app:set_state("control_tab", "notes")
 	app:frames(30)
 	return app
 end
 
 local function status(app: any): string
-	return app:text("#control-widget-scratchpad >> .orch-scratchpad-status")
+	return app:text("#control-notes-scratchpad >> .orch-scratchpad-status")
 end
 
 local function editor_focused(app: any): boolean

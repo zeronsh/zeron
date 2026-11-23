@@ -3,8 +3,8 @@
 -- glyph), once each, sent with the dump as its `refs`, never as a file. On
 -- ui/control_page_fixture.luau (orchestration_sample; ui/control_world).
 
-local COMPOSER = "#control-capture-composer"
-local FIELD = `{COMPOSER} >> role:textbox`
+-- Capture's bar, at the foot of every tab.
+local FIELD = "#control-float >> role:textbox"
 
 -- The Brain dump's chips (its draft's, shown or kept).
 local function chips(app: any): { any }
@@ -29,12 +29,20 @@ local function calls(app: any): string
 	return tostring(app:state("calls") or "")
 end
 
--- (Tall: every widget on the page at once, nothing scrolled to.)
+-- To a tab of the Control room's.
+local function tab(app: any, id: string)
+	app:set_state("control_tab", id)
+	app:frames(30)
+end
+
+-- On the Map tab, in the Topology (still drawn, no longer offered: set once
+-- the tab is built, which opens a view it doesn't offer on the Graph).
 local function tall(): any
 	local app = mount("control_page_fixture.luau")
-	-- (These read the Topology's rows: the Map opens on Graph (force) now.)
+	app:resize(1440, 1400)
+	app:frames(30)
+	tab(app, "map")
 	app:set_state("control_map", { variant = "topology", window = 15 })
-	app:resize(1440, 4000)
 	app:frames(30)
 	return app
 end
@@ -51,15 +59,8 @@ local function dropped(app: any, source: string): any
 	return refs[1]
 end
 
--- The floating composer's field (Board and Chat have no Capture of their own).
-local FLOAT_FIELD = "#control-float >> role:textbox"
+local FLOAT_FIELD = FIELD
 local BOARD_CARD = '#control-board-tab >> .orch-card "Reboot Moscow node"'
-
--- To a tab of the Control room's.
-local function tab(app: any, id: string)
-	app:set_state("control_tab", id)
-	app:frames(30)
-end
 
 local function expect_ref(chip: any, kind: string, id: string, token: string)
 	expect(chip.ref.kind).to_be(kind)
@@ -67,7 +68,7 @@ local function expect_ref(chip: any, kind: string, id: string, token: string)
 	expect(chip.name).to_be(token)
 end
 
-test("drag refs: a Board card, on the Board tab, dragged into the floating composer is referenced by its id and title", function()
+test("drag refs: a Board card, on the Board tab, dragged into Capture's bar is referenced by its id and title", function()
 	local app = tall()
 	tab(app, "board")
 	expect(app:has(FLOAT_FIELD)).to_be(true)
@@ -80,15 +81,14 @@ test("drag refs: a Board card, on the Board tab, dragged into the floating compo
 	expect_ref(chip, "card", "it-moscow", '@card:"Reboot Moscow node"')
 	expect(chip.ref.context.state).to_be("review")
 	expect(chip.ref.context.orchestrator).to_be("orc-vpn")
-	-- The same draft back on Overview: its chip in Capture's composer,
-	-- removable, as a mentioned chat's.
-	tab(app, "overview")
+	-- The same draft on the Map tab: the bar is the same everywhere.
+	tab(app, "map")
 	expect(#refs_of(app)).to_be(1)
-	expect(app:has(`{COMPOSER} >> role:button ~"Remove @card:"`)).to_be(true)
 end)
 
 test("drag refs: a Progress row is its chat, with its note", function()
 	local app = tall()
+	tab(app, "notes")
 	local chip = dropped(app, "#progress-full-th-vpn-merge")
 	expect_ref(chip, "chat", "th-vpn-merge", '@chat:"Merge phase-1 fixes"')
 	expect(chip.ref.context.note).to_contain("Merge queued")
@@ -116,16 +116,9 @@ test("drag refs: a Map machine, by its name", function()
 	expect(chip.ref.context.os).to_be("macos")
 end)
 
-test("drag refs: a Comms entry, by its first words, who to whom", function()
-	local app = tall()
-	local chip = dropped(app, '#control-widget-comms >> .orch-comm "Checks green, merging #412"')
-	expect_ref(chip, "comm", "cm-13", '@comm:"Checks green, merging #412"')
-	expect(chip.ref.context.from).to_be("th-vpn-merge")
-	expect(chip.ref.context.to).to_be("orc-vpn")
-end)
-
 test("drag refs: a Q&A entry, by its question", function()
 	local app = tall()
+	tab(app, "notes")
 	local chip = dropped(app, '#orch-qa >> .orch-qa-entry "ask the vpn guy whether moscow rebooted fine"')
 	expect(chip.ref.kind).to_be("qa")
 	expect(chip.name).to_be('@qa:"ask the vpn guy whether moscow…"')
@@ -135,7 +128,8 @@ end)
 
 test("drag refs: a Needs-you ask, by its question, its options with it", function()
 	local app = tall()
-	local chip = dropped(app, "#control-widget-needs >> .orch-need-question[1]")
+	-- (From Needs you floating over the Map.)
+	local chip = dropped(app, "#control-needs-float >> .orch-need-question[1]")
 	expect(chip.ref.kind).to_be("ask")
 	expect(chip.name).to_contain("@ask:\"Reboot the Moscow node")
 	expect(chip.ref.context.options).to_be("Approve / Not tonight")
@@ -149,14 +143,16 @@ test("drag refs: the same thing dropped twice is one chip; another is a second",
 	app:drag(BOARD_CARD, FLOAT_FIELD)
 	app:frames(10)
 	expect(#refs_of(app)).to_be(1)
-	tab(app, "overview")
+	tab(app, "map")
 	app:drag('#orch-map-field >> role:button "Exnomic VPN"', FIELD)
 	app:frames(10)
 	expect(#refs_of(app)).to_be(2)
-	-- Taken off with its ×.
-	app:hover(`{COMPOSER} >> ~"@orchestrator:"`)
+	-- Taken off with its ×, the bar opened out.
+	app:click("#control-float-knob")
+	app:frames(20)
+	app:hover('#control-float >> ~"@orchestrator:"')
 	app:frames(5)
-	app:click(`{COMPOSER} >> role:button ~"Remove @orchestrator:"`)
+	app:click('#control-float >> role:button ~"Remove @orchestrator:"')
 	app:frames(10)
 	expect(#refs_of(app)).to_be(1)
 end)
@@ -166,7 +162,7 @@ test("drag refs: sent, they go with the dump as its refs, never as files", funct
 	tab(app, "board")
 	app:drag(BOARD_CARD, FLOAT_FIELD)
 	app:frames(10)
-	tab(app, "overview")
+	tab(app, "map")
 	app:drag('#orch-map-field >> role:button "Moscow node reboot plan"', FIELD)
 	app:frames(10)
 	app:type(FIELD, "same as these")
@@ -200,14 +196,14 @@ end)
 
 test("drag refs: Capture says Drop to reference while one is over it", function()
 	local app = tall()
-	-- At rest: nothing over the composer.
-	expect(app:has("#lane-drop-ref-control-capture")).to_be(false)
+	-- At rest: nothing over the bar.
+	expect(app:has("#lane-drop-ref-control-capture-float")).to_be(false)
 	app:command("fixture.drag_refs")
 	app:frames(10)
-	expect(app:has("#lane-drop-ref-control-capture")).to_be(true)
+	expect(app:has("#lane-drop-ref-control-capture-float")).to_be(true)
 	-- Its words on their own accent pill, over the washed, ringed zone.
-	expect(app:has("#lane-drop-ref-control-capture-label")).to_be(true)
-	expect(app:has('#lane-drop-ref-control-capture-label >> "Drop to reference"')).to_be(true)
+	expect(app:has("#lane-drop-ref-control-capture-float-label")).to_be(true)
+	expect(app:has('#lane-drop-ref-control-capture-float-label >> "Drop to reference"')).to_be(true)
 	-- (The chips there under it.)
 	expect(#refs_of(app)).to_be(3)
 end)
@@ -216,11 +212,11 @@ test("drag refs: the Map's Machines and Timeline views drag their threads too", 
 	local app = tall()
 	app:set_state("control_map", { variant = "machines", window = 15 })
 	app:frames(20)
-	local chip = dropped(app, '#control-widget-map >> .orch-mc-row "Moscow node reboot plan"')
+	local chip = dropped(app, '#control-map >> .orch-mc-row "Moscow node reboot plan"')
 	expect_ref(chip, "chat", "th-vpn-moscow", '@chat:"Moscow node reboot plan"')
 	app:set_state("control_map", { variant = "timeline", window = 15 })
 	app:frames(20)
-	app:drag('#control-widget-map >> .orch-tl-lane "Exnomic VPN"', FIELD)
+	app:drag('#control-map >> .orch-tl-lane "Exnomic VPN"', FIELD)
 	app:frames(10)
 	local refs = refs_of(app)
 	expect(#refs).to_be(2)
@@ -228,19 +224,17 @@ test("drag refs: the Map's Machines and Timeline views drag their threads too", 
 	expect(refs[2].ref.id).to_be("orc-vpn")
 end)
 
-test("drag refs: dropped on the floating composer, the chip is on the same draft", function()
+test("drag refs: dropped on the bar beside the files already on it, the chip is on the same draft", function()
 	local app = mount("control_float_fixture.luau")
-	-- (These read the Topology's rows: the Map opens on Graph (force) now.)
-	app:set_state("control_map", { variant = "topology", window = 15 })
 	app:resize(1440, 900)
 	app:frames(30)
 	app:command("fixture.float")
-	app:frames(60)
-	-- (A little back up: the Map's rows in view, Capture still out of it.)
-	app:scroll("#control-scroll", -200)
 	app:frames(30)
-	expect(app:has("#control-float")).to_be(true)
-	app:drag('#orch-map-field >> role:button "Moscow node reboot plan"', "#control-float >> role:textbox")
+	app:set_state("control_tab", "map")
+	app:frames(30)
+	app:set_state("control_map", { variant = "topology", window = 15 })
+	app:frames(30)
+	app:drag('#orch-map-field >> role:button "Moscow node reboot plan"', FIELD)
 	app:frames(10)
 	-- (No app:error() check: the shell's fixture asks a host action, `appearance`,
 	-- a test host doesn't have, as it mounts.)
@@ -249,10 +243,6 @@ test("drag refs: dropped on the floating composer, the chip is on the same draft
 	expect_ref(refs[1], "chat", "th-vpn-moscow", '@chat:"Moscow node reboot plan"')
 	-- (The files already on it kept, beside it.)
 	expect(#chips(app)).to_be(3)
-	-- And Capture's own shows it too: one draft.
-	app:scroll("#control-scroll", -2000)
-	app:frames(30)
-	expect(app:has(`{COMPOSER} >> role:button ~"Remove @chat:"`)).to_be(true)
 end)
 
 -- The Graph: a node's grip (under the pointer, at its edge) drags a
@@ -265,7 +255,7 @@ local function graph(): any
 end
 
 local function grip_drag(app: any, node: string): any
-	app:hover(`#control-widget-map >> {node}`)
+	app:hover(`#control-map >> {node}`)
 	app:frames(5)
 	expect(app:has("#orch-graph-grip")).to_be(true)
 	return dropped(app, "#orch-graph-grip")
@@ -298,7 +288,7 @@ end)
 
 test("drag refs: a Graph node dragged plainly still moves, no chip made", function()
 	local app = graph()
-	app:drag('#control-widget-map >> .orch-graph-thread ~"Moscow node reboot plan"', '#control-widget-map >> .orch-graph-device ~"Cloud"')
+	app:drag('#control-map >> .orch-graph-thread ~"Moscow node reboot plan"', '#control-map >> .orch-graph-device ~"Cloud"')
 	app:frames(30)
 	expect((app:state("control_map_graph_pins") or {})["th-vpn-moscow"] ~= nil).to_be(true)
 	expect(#refs_of(app)).to_be(0)

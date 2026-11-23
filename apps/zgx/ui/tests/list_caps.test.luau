@@ -2,11 +2,12 @@
 -- with the work is capped, the rest a click away (ui/control_fleet_fixture:
 -- a fleet as big as a person's, or a small one):
 --
---   the Overview's Machines   working threads only, at most six a machine,
---                             "n more" opening the Map's Machines view
---   Needs you                 chats awaiting input with nothing to show are
---                             one line; "n more" opens the rest in a list
---                             that scrolls past about ten rows
+--   Needs you (floating over the Map, Chat and Notes; an orchestrator's
+--   side panel)   chats awaiting input with nothing to show are one line;
+--                 "n more" opens the rest in a list that scrolls past
+--                 about ten rows
+--   Progress (Notes), Q&A   "n more" opens the rest in a list that scrolls
+--
 -- and a small fleet shows what it did before.
 
 local FLEET = "control_fleet_fixture.luau"
@@ -16,6 +17,7 @@ local function open(set: string, w: number?): any
 	app:resize(w or 1600, 1000)
 	app:frames(20)
 	app:command(set)
+	app:set_state("control_tab", "map")
 	app:frames(60)
 	return app
 end
@@ -42,84 +44,18 @@ local function chats(app: any): { [string]: any }
 	return out
 end
 
--- The threads at work on a machine, as Machines counts them.
-local function working_on(app: any, device: string): number
-	local n = 0
-	for _, c in chats(app) do
-		if c.device == device and not c.archived and (c.status == "working" or c.status == "connecting") then
-			n += 1
-		end
-	end
-	return n
-end
-
--- Machines -----------------------------------------------------------------
-
-test("list caps: the Overview's Machines lists six working threads a machine, the rest on n more", function()
-	local app = open("fleet_dense")
-	app:set_state("control_scroll", 99999)
-	app:frames(60)
-	local machines = app:count(".orch-machine")
-	expect(machines >= 4).to_be(true)
-	for i = 1, machines do
-		local m = `.orch-machine [{i}]`
-		local jobs = app:count(`{m} >> .orch-machine-job`)
-		expect(jobs <= 6).to_be(true)
-	end
-	-- This device's: far more than six at work, six shown, the rest counted.
-	local here = working_on(app, "dev-desk")
-	expect(here > 6).to_be(true)
-	expect(app:has(`.orch-machine [1] >> .orch-machine-more >> ~"{here - 6} more"`)).to_be(true)
-	-- No one waiting on the person listed: Needs you has those.
-	expect(app:has(`.orch-machines >> ~"Own thread 9"`)).to_be(false)
-	expect(app:error()).to_be_nil()
-end)
-
-test("list caps: a machine's n more opens the Map's Machines view, in view", function()
-	local app = open("fleet_dense")
-	-- (Its first machine's "n more" brought into view.)
-	local _, top = box(app, "#control-scroll")
-	local _, y = box(app, ".orch-machine [1] >> .orch-machine-more")
-	app:set_state("control_scroll", math.max(0, y - top - 300))
-	app:frames(60)
-	app:click(".orch-machine [1] >> .orch-machine-more")
-	app:frames(60)
-	local view = app:state("control_map") :: any
-	expect(view.variant).to_be("machines")
-	-- (The Map brought up to the view's top.)
-	local _, my = box(app, "#control-widget-map")
-	expect(math.abs(my - top) < 80).to_be(true)
-end)
-
-test("list caps: the dense Overview is a few screens, not ten", function()
-	local app = open("fleet_dense")
-	app:frames(60)
-	local _, _, _, h = box(app, "#control-columns")
-	local _, _, _, machines = box(app, "#control-widget-machines")
-	-- (It was about 9,400 points, Machines most of it.)
-	print(`zeron-zgx: list caps: dense Overview columns {h}, Machines {machines}`)
-	expect(h < 4000).to_be(true)
-	expect(machines < 1800).to_be(true)
-end)
-
-test("list caps: a small fleet's Machines lists every working thread, no n more", function()
-	local app = open("fleet_sparse")
-	app:set_state("control_scroll", 99999)
-	app:frames(60)
-	expect(app:count(".orch-machine-job")).to_be(working_on(app, "dev-desk"))
-	expect(app:has(".orch-machine-more")).to_be(false)
-end)
-
 -- Needs you ----------------------------------------------------------------
 
-local NEEDS = "#control-widget-needs"
+-- (Needs you floating over the Map: its top ask, the rest on "n more".)
+local NEEDS = "#control-needs-float"
 
 -- The opened list scrolled down to the chats-awaiting-input line: it
 -- stands where the newest of them comes in the order (urgent first, then
 -- newest, as the board's column), under the cards and asks that came
 -- after it.
 local function to_inputs(app: any)
-	app:scroll(`{NEEDS} >> .orch-asks-list [1]`, 100000)
+	-- (The float's own scroll: its list stands whole inside it.)
+	app:scroll(NEEDS, 100000)
 	app:frames(20)
 end
 
@@ -158,9 +94,9 @@ end)
 
 test("list caps: Needs you's n more opens the rest in a list that scrolls past ten rows", function()
 	local app = open("fleet_dense")
-	-- (Six rows: the chats awaiting input are one of them.)
+	-- (Its top row alone, folded.)
 	local before = app:count(`{NEEDS} >> .orch-need`) + app:count(`{NEEDS} >> .orch-need-inputs`)
-	expect(before).to_be(6)
+	expect(before).to_be(1)
 	expect(app:has(`{NEEDS} >> .orch-asks-more >> ~"more"`)).to_be(true)
 	local _, _, _, closed = box(app, NEEDS)
 	app:click(`{NEEDS} >> .orch-asks-more`)
@@ -203,16 +139,20 @@ end)
 
 test("list caps: Progress's n more opens the rest in a list that scrolls", function()
 	local app = open("fleet_dense")
+	app:set_state("control_tab", "notes")
 	app:frames(60)
+	-- (Needs you floating, minimised: out of the way of the column's foot.)
+	app:click("#control-needs-min")
+	app:frames(20)
 	expect(app:has("#control-progress-more")).to_be(true)
-	local _, top = box(app, "#control-scroll")
-	local _, y = box(app, "#control-widget-progress")
+	local _, top = box(app, "#control-notes-scroll")
+	local _, y = box(app, "#control-notes-progress")
 	app:set_state("control_scroll", math.max(0, y - top - 20))
 	app:frames(40)
-	local _, _, _, closed = box(app, "#control-widget-progress")
+	local _, _, _, closed = box(app, "#control-notes-progress")
 	app:click("#control-progress-more")
 	app:frames(40)
-	local _, _, _, opened = box(app, "#control-widget-progress")
+	local _, _, _, opened = box(app, "#control-notes-progress")
 	local _, _, _, list_h = box(app, ".control-progress-list [1]")
 	expect(list_h <= 800).to_be(true)
 	expect(opened - closed <= 800).to_be(true)

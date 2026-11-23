@@ -1,11 +1,28 @@
--- The Control room's Capture (screens/control/page, ds/orch_receipt): the
--- newest dump's parts underlined with a chip each, a new dump's parts lit
--- one after another as they're placed, and an unsure part placed from its
--- likely places. On ui/control_page_fixture.luau (orchestration_sample).
+-- The Control room's Capture (screens/control/page, ds/orch_receipt): its
+-- bar at the page's foot (`#control-float`, the chat composer bound to the
+-- Brain dump: its model, files, Shift+Enter, a sidebar chat dragged in as
+-- an @-mention) and its history opened over the page from the bar
+-- (`#control-history`): the newest dump's parts underlined with a chip
+-- each, a new dump's parts lit one after another as they're placed, and an
+-- unsure part placed from its likely places. On
+-- ui/control_page_fixture.luau (orchestration_sample).
 
+-- Capture's composer: the chat composer (screens/chat/lane_tab's), bound to
+-- the Brain dump's chat, in its bar.
+local COMPOSER = "#control-float-composer"
+
+-- Capture's bar opened out (its knob): its chips and model shown.
+local function opened(app: any)
+	app:click("#control-float-knob")
+	app:frames(20)
+end
+
+-- The page, Capture's history opened from its bar (the receipts are there).
 local function open(): any
 	local app = mount("control_page_fixture.luau")
 	app:resize(1440, 900)
+	app:frames(30)
+	app:click("#control-history-open")
 	app:frames(30)
 	return app
 end
@@ -45,11 +62,11 @@ end)
 
 test("a new dump is sent with Enter and its parts light one after another", function()
 	local app = open()
-	app:type("#control-capture >> role:textbox", "fix the flaky sync test and ask vpn about moscow")
+	app:type(`{COMPOSER} >> role:textbox`, "fix the flaky sync test and ask vpn about moscow")
 	app:key("Enter")
 	app:frames(5)
 	expect(calls(app)).to_contain("dump:fix the flaky sync test and ask vpn about moscow")
-	expect(app:text("#control-capture >> role:textbox")).to_be("")
+	expect(app:text(`{COMPOSER} >> role:textbox`)).to_be("")
 	-- Routing: nothing placed yet.
 	expect(app:count("#control-capture >> .orch-chip")).to_be(0)
 	app:command("fixture.route_newest")
@@ -325,10 +342,6 @@ test("a part's hover card is as tall as what it holds, its reply scrolling only 
 	expect(my + mh <= sy).to_be(true)
 end)
 
--- Capture's composer: the chat composer (screens/chat/lane_tab's), bound to
--- the Brain dump's chat.
-local COMPOSER = "#control-capture-composer"
-
 test("capture is the chat composer: the Brain dump's, its model there", function()
 	local app = open()
 	expect(app:has(`{COMPOSER} >> role:textbox`)).to_be(true)
@@ -337,7 +350,9 @@ test("capture is the chat composer: the Brain dump's, its model there", function
 	app:hover(`{COMPOSER} >> role:textbox`)
 	app:frames(5)
 	expect((app:state("watched") or {})["control-capture"]).to_be("orc-brain")
-	-- Its model picker, as a chat's (the Brain dump's own model).
+	-- Its model picker, as a chat's (the Brain dump's own model), the bar
+	-- opened out.
+	opened(app)
 	expect(app:has(`{COMPOSER} >> role:button "Model"`) or app:has(`{COMPOSER} >> ~"Haiku"`)).to_be(true)
 	expect(app:has(`{COMPOSER} >> role:button "Attach"`)).to_be(true)
 	-- No access mode, no place: the Brain dump routes, it works nowhere.
@@ -396,7 +411,10 @@ test("capture takes a chat dragged from the sidebar as an @-mention", function()
 	app:frames(30)
 	app:drag('#sidebar >> role:button "Linux titlebar toggle"', `{COMPOSER} >> role:textbox`)
 	app:frames(10)
-	-- A chip of it on the draft, as a chat's composer has one.
+	-- Carried: the bar, bare, counts it; opened out, a chip of it on the
+	-- draft, as a chat's composer has one.
+	expect(app:text("#control-float-knob >> .control-float-count")).to_be("1")
+	opened(app)
 	expect(app:has(`{COMPOSER} >> role:button "Remove Linux titlebar toggle"`)).to_be(true)
 	-- Sent, it goes with the dump.
 	app:type(`{COMPOSER} >> role:textbox`, "same fix here")
@@ -407,12 +425,14 @@ end)
 
 test("capture's model picker shows the Brain dump's own model", function()
 	local app = open()
+	opened(app)
 	-- Its chat's config (Haiku), never a new chat's default (Opus, first).
 	expect(app:has(`{COMPOSER} >> role:button "Model" >> "Haiku 5.5"`)).to_be(true)
 end)
 
 test("capture: a model picked is the Brain dump's at once, and goes with the dump", function()
 	local app = open()
+	opened(app)
 	-- (Picked in its model picker: the lane's pick, by its chat.)
 	app:set_state("chat_lane_model_orc-brain", "claude-code/claude-opus-5-5")
 	app:frames(10)

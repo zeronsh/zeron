@@ -1,13 +1,13 @@
 -- The Control room (ui/orch_map_fixture.luau) on a big fleet, for what one
 -- change costs: four machines, 100 threads (the VPN orchestrator with 51
--- crew), a Board card for each crew thread, every working one in Progress
--- (all shown) and the Board expanded. For tests/orch_perf.test.luau.
+-- crew), a Board card for each crew thread and the Board expanded. For
+-- tests/orch_perf.test.luau.
 --
 --   perf_big           the fleet (deterministic)
 --   perf_status        one thread's status changes (working <-> done), as the
 --                      engine's push gives it: sessions.now replaced whole
 --   perf_progress      one thread's progress row moves (a step)
---   perf_only <id>     only that widget shown (`perf_only_map`, …)
+--   perf_only <tab>    only that tab shown (`perf_only_board`, `perf_only_map`, …)
 --   perf_read          the run counts (ds/orch_perf_trace) into the state
 --                      `perf_counts`; perf_reset sets them to nothing
 
@@ -118,22 +118,12 @@ ui.command { id = "perf_progress", title = "Perf: one progress step", run = func
 	orchestration.progress:set(p)
 end }
 
-for _, id in page.WIDGETS do
-	ui.command { id = `perf_only_{id}`, title = `Perf: only {id}`, run = function()
-		local hidden = {}
-		for _, other in page.WIDGETS do
-			if other ~= id then
-				hidden[other] = true
-			end
-		end
-		page.widgets:set({ order = table.clone(page.WIDGETS), hidden = hidden :: any })
+-- One tab of the page shown (`perf_only_board`, `perf_only_map`, …).
+for _, id in page.TABS do
+	ui.command { id = `perf_only_{id}`, title = `Perf: only the {id} tab`, run = function()
+		page.show_tab(id)
 	end }
 end
-
--- The Board alone: its own tab.
-ui.command { id = "perf_only_board", title = "Perf: only the Board", run = function()
-	page.tab:set("board")
-end }
 
 local counts = ui.state("perf_counts", {} :: any)
 ui.command { id = "perf_read", title = "Perf: read the run counts", run = function()

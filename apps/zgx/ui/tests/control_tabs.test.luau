@@ -1,13 +1,12 @@
--- The Control room's tabs (screens/control/page): Overview, Board and Chat,
--- the one shown kept on this device (`control_tab`), ⌘⌥1–3. Only the tab
--- shown is built; Capture's full composer is Overview's alone, the floating
--- one is on every tab (Overview's once Capture is scrolled away), one draft
--- in both; Chat reads the Brain dump's transcript through the chat view's
--- own (screens/chat/lane_tab, ds/transcript), watched only while it shows.
+-- The Control room's tabs (screens/control/page): Board, Map, Chat and
+-- Notes, the one shown kept on this device (`control_tab`), ⌘⌥1–4. Only the
+-- tab shown is built at first, the rest in the background; Capture is a bar
+-- at the foot of every tab, one draft; Chat reads the Brain dump's
+-- transcript through the chat view's own (screens/chat/lane_tab,
+-- ds/transcript), watched only while it shows.
 -- On ui/control_page_fixture.luau (ui/control_world), and in the shell.
 
 local DRAFT = "chat_lane_draft_orc-brain"
-local CAPTURE_FIELD = "#control-capture-composer >> role:textbox"
 local FLOAT_FIELD = "#control-float >> role:textbox"
 
 local function open(fixture: string?): any
@@ -59,7 +58,7 @@ local function settled(app: any)
 	expect(app:wait("#control-tab-board", { timeout_ms = 5000 })).to_be(true)
 	for _ = 1, 4000 do
 		local _, waiting = perf(app)
-		if waiting == 0 and built(app, "chat") then
+		if waiting == 0 and built(app, "notes") then
 			break
 		end
 		app:frames(1)
@@ -69,27 +68,41 @@ local function settled(app: any)
 	app:frames(10)
 end
 
-test("control tabs: Overview first; a click on each shows it, kept as control_tab", function()
+test("control tabs: the Board first; a click on each shows it, kept as control_tab", function()
 	local app = open()
-	expect(app:state("control_tab")).to_be("overview")
-	expect(app:has('#control-tabs >> "Overview"')).to_be(true)
-	expect(app:has('#control-tabs >> "Board"')).to_be(true)
-	expect(app:has('#control-tabs >> "Chat"')).to_be(true)
-	click_tab(app, "Board")
 	expect(app:state("control_tab")).to_be("board")
+	for _, label in { "Board", "Map", "Chat", "Notes" } do
+		expect(app:has(`#control-tabs >> "{label}"`)).to_be(true)
+	end
+	expect(app:has('#control-tabs >> "Overview"')).to_be(false)
+	click_tab(app, "Map")
+	expect(app:state("control_tab")).to_be("map")
 	click_tab(app, "Chat")
 	expect(app:state("control_tab")).to_be("chat")
-	click_tab(app, "Overview")
-	expect(app:state("control_tab")).to_be("overview")
+	click_tab(app, "Notes")
+	expect(app:state("control_tab")).to_be("notes")
+	click_tab(app, "Board")
+	expect(app:state("control_tab")).to_be("board")
 	expect(app:error()).to_be_nil()
+end)
+
+test("control tabs: Overview kept from before opens on the Board", function()
+	local shell = open("control_fixture.luau")
+	shell:set_state("control_tab", "overview")
+	shell:command("fixture.leave")
+	shell:frames(30)
+	shell:command("fixture.control")
+	shell:frames(40)
+	expect(shell:state("control_tab")).to_be("board")
+	expect(shown(shell, "board")).to_be(true)
 end)
 
 test("control tabs: the tab kept is the one the page opens on", function()
 	local app = open()
-	app:set_state("control_tab", "board")
+	app:set_state("control_tab", "map")
 	app:frames(30)
-	expect(shown(app, "board")).to_be(true)
-	expect(shown(app, "overview")).to_be(false)
+	expect(shown(app, "map")).to_be(true)
+	expect(shown(app, "board")).to_be(false)
 	-- (The shell's Control room, made again on coming back to it.)
 	local shell = open("control_fixture.luau")
 	shell:set_state("control_tab", "chat")
@@ -105,19 +118,20 @@ end)
 
 test("control tabs: the tab shown builds first; the others in the background once the page settles, hidden", function()
 	local app = open()
-	-- At first: Overview alone.
-	expect(shown(app, "overview")).to_be(true)
-	expect(built(app, "board")).to_be(false)
+	-- At first: the Board alone.
+	expect(shown(app, "board")).to_be(true)
+	expect(built(app, "map")).to_be(false)
 	expect(built(app, "chat")).to_be(false)
+	expect(built(app, "notes")).to_be(false)
 	settled(app)
 	-- Then the others, built and hidden: their content there, not shown.
-	expect(shown(app, "overview")).to_be(true)
-	expect(built(app, "board") and not shown(app, "board")).to_be(true)
-	expect(built(app, "chat") and not shown(app, "chat")).to_be(true)
-	expect(app:has("#control-tab-board >> #control-board >> #orch-col-done")).to_be(true)
+	expect(shown(app, "board")).to_be(true)
+	for _, t in { "map", "chat", "notes" } do
+		expect(built(app, t) and not shown(app, t)).to_be(true)
+	end
+	expect(app:has("#control-tab-map >> #control-map")).to_be(true)
 	expect(app:has("#control-tab-chat >> #lane-control-chat")).to_be(true)
-	-- (The Board is a tab, never a widget.)
-	expect(app:has("#control-widget-board")).to_be(false)
+	expect(app:has("#control-tab-notes >> #control-notes")).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
 
@@ -127,19 +141,21 @@ test("control tabs: switching shows a kept tab, never builds it again", function
 	local ids = {
 		board = node_id(app, "#control-board-tab"),
 		chat = node_id(app, "#lane-control-chat"),
-		overview = node_id(app, "#control-columns"),
+		map = node_id(app, "#control-map"),
+		notes = node_id(app, "#control-notes"),
 		float = node_id(app, "#control-float"),
 	}
-	for _, tab in { "board", "chat", "overview", "chat", "board", "overview" } do
+	for _, tab in { "map", "chat", "notes", "board", "chat", "map", "board" } do
 		app:set_state("control_tab", tab)
 		app:frames(30)
-		for id, t in { overview = "overview", board = "board", chat = "chat" } do
-			expect(shown(app, t)).to_be(id == tab)
+		for _, t in { "board", "map", "chat", "notes" } do
+			expect(shown(app, t)).to_be(t == tab)
 		end
 	end
 	expect(node_id(app, "#control-board-tab")).to_be(ids.board)
 	expect(node_id(app, "#lane-control-chat")).to_be(ids.chat)
-	expect(node_id(app, "#control-columns")).to_be(ids.overview)
+	expect(node_id(app, "#control-map")).to_be(ids.map)
+	expect(node_id(app, "#control-notes")).to_be(ids.notes)
 	expect(node_id(app, "#control-float")).to_be(ids.float)
 	local _, waiting = perf(app)
 	expect(waiting).to_be(0)
@@ -157,7 +173,7 @@ test("control tabs: a hidden tab does no work while what it shows changes; shown
 		app:frames(20)
 	end
 	local counts = perf(app)
-	-- Nothing of Overview's or the Board's read again, built or drawn.
+	-- Nothing of the Map's, Notes' or the Board's read again, built or drawn.
 	for _, name in { "hold.overview", "hold.board", "board.word", "board.status", "progress.row", "progress.clocks", "graph.layout", "graph.draw", "hold.progress" } do
 		expect(counts[name] or 0).to_be(0)
 	end
@@ -170,7 +186,12 @@ test("control tabs: a hidden tab does no work while what it shows changes; shown
 end)
 
 test("control tabs: the background build is one piece a frame, out of layout till it's done", function()
-	local app = open()
+	-- (Opened on the Map: the Board, the tab with the most pieces, built in
+	-- the background.)
+	local app = mount("control_page_fixture.luau")
+	app:set_state("control_tab", "map")
+	app:resize(1440, 900)
+	app:frames(30)
 	expect(app:wait("#control-tab-board", { timeout_ms = 5000 })).to_be(true)
 	local _, last = perf(app)
 	local most = 0
@@ -186,7 +207,7 @@ test("control tabs: the background build is one piece a frame, out of layout til
 			saw_hidden = saw_hidden or string.find(first_line(app, "#control-tab-board >> [1]"), " hidden", 1, true) ~= nil
 		end
 		last = waiting
-		if waiting == 0 and built(app, "chat") then
+		if waiting == 0 and built(app, "notes") then
 			break
 		end
 	end
@@ -198,58 +219,56 @@ end)
 
 test("control tabs: a tab opened before its background build is done builds at once", function()
 	local app = open()
-	expect(app:wait("#control-tab-board", { timeout_ms = 5000 })).to_be(true)
-	app:set_state("control_tab", "board")
+	expect(app:wait("#control-tab-map", { timeout_ms = 5000 })).to_be(true)
+	app:set_state("control_tab", "notes")
 	app:frames(30)
-	expect(shown(app, "board")).to_be(true)
-	-- (Its cards, every column's: Done's shows only what was done since
-	-- midnight, empty in the small hours whatever the sample says.)
-	expect(app:count("#control-board-tab >> .orch-card") > 3).to_be(true)
-	expect(app:count("#control-tab-board >> .stage-idle")).to_be(0)
+	expect(shown(app, "notes")).to_be(true)
+	expect(app:has("#control-tab-notes >> #control-notes-qa")).to_be(true)
+	expect(app:count("#control-tab-notes >> .stage-idle")).to_be(0)
 end)
 
-test("control tabs: ⌘⌥1–3 show Overview, Board and Chat", function()
+test("control tabs: ⌘⌥1–4 show the Board, the Map, Chat and Notes", function()
 	local app = open("control_fixture.luau")
-	app:command("control.tab_board")
-	app:frames(30)
-	expect(app:state("control_tab")).to_be("board")
-	expect(app:has("#control-board-tab")).to_be(true)
-	app:command("control.tab_chat")
-	app:frames(30)
-	expect(app:state("control_tab")).to_be("chat")
-	app:command("control.tab_overview")
-	app:frames(30)
-	expect(app:state("control_tab")).to_be("overview")
-	expect(app:has("#control-capture-composer")).to_be(true)
+	for _, t in { "map", "chat", "notes", "board" } do
+		app:command(`control.tab_{t}`)
+		app:frames(30)
+		expect(app:state("control_tab")).to_be(t)
+		expect(shown(app, t)).to_be(true)
+	end
 end)
 
-test("control tabs: the full composer on Overview only, the floating one on Board and Chat, one draft", function()
+test("control tabs: Capture is a bar at the foot of every tab, one draft", function()
 	local app = open()
-	expect(app:has("#control-capture-composer")).to_be(true)
-	expect(floats(app)).to_be(false)
-	app:type(CAPTURE_FIELD, "half a thought")
+	-- (No composer of its own anywhere else on the page.)
+	expect(app:has("#control-capture-composer")).to_be(false)
+	expect(floats(app)).to_be(true)
+	app:type(FLOAT_FIELD, "half a thought")
 	app:frames(5)
-	for _, tab in { "board", "chat" } do
+	for _, tab in { "map", "chat", "notes", "board" } do
 		app:set_state("control_tab", tab)
 		app:frames(30)
-		-- (Overview's Capture kept, hidden with it.)
-		expect(shown(app, "overview")).to_be(false)
 		expect(floats(app)).to_be(true)
-		-- (Bare: one line and its knob.)
+		-- (Bare: one line and its knobs.)
 		expect(app:state("control_capture_float_open")).to_be(false)
 		expect(app:text(FLOAT_FIELD)).to_be("half a thought")
 	end
-	-- Typed into on Chat, the same draft in Capture back on Overview.
 	app:type(FLOAT_FIELD, " and another")
 	app:frames(5)
 	expect(app:state(DRAFT)).to_be("half a thought and another")
-	app:set_state("control_tab", "overview")
-	app:frames(30)
-	expect(app:text(CAPTURE_FIELD)).to_be("half a thought and another")
-	-- (Capture in view: nothing floats.)
-	app:frames(30)
-	expect(floats(app)).to_be(false)
 	expect(app:error()).to_be_nil()
+end)
+
+test("control tabs: Capture's history opens from its bar, over the page, and closes", function()
+	local app = open()
+	expect(app:has("#control-history")).to_be(false)
+	app:click("#control-history-open")
+	app:frames(30)
+	expect(app:has("#control-history")).to_be(true)
+	-- The newest dump's receipt, then the earlier ones.
+	expect(app:has("#control-history >> #control-capture")).to_be(true)
+	app:click("#control-history-close")
+	app:frames(30)
+	expect(app:has("#control-history")).to_be(false)
 end)
 
 test("control tabs: ⌘⇧K on Board gives the floating composer the keys", function()
@@ -341,17 +360,17 @@ test("control tabs: the tab buttons stand in the same place on every tab", funct
 		return string.match(line, " (%-?[%d%.]+,%-?[%d%.]+) ") or ""
 	end
 	local function all(): string
-		return `{at("Overview")} {at("Board")} {at("Chat")}`
+		return `{at("Board")} {at("Map")} {at("Chat")} {at("Notes")}`
 	end
-	local overview = all()
-	expect(overview ~= "  ").to_be(true)
-	for _, tab in { "board", "chat", "overview", "chat" } do
+	local first = all()
+	expect(first ~= "   ").to_be(true)
+	for _, tab in { "map", "chat", "notes", "board" } do
 		app:set_state("control_tab", tab)
 		app:frames(30)
-		expect(all()).to_be(overview)
+		expect(all()).to_be(first)
 	end
-	-- (The widgets' menu, Overview's alone, to their left.)
-	expect(app:has("#control-widgets-menu")).to_be(true)
+	-- (No widgets' menu: the dashboard is gone.)
+	expect(app:has("#control-widgets-menu")).to_be(false)
 end)
 
 test("control page: the Map's default view, written out for the page to load without the Map, is the Map's own", function()

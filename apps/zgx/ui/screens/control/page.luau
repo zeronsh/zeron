@@ -43,10 +43,8 @@ local rows = require("@account/rows")
 local function MapMenu(): any
 	return require("@app/screens/control/map_menu")
 end
-local Machines = require("@ds/orch_machines")
 local Visibility = require("@ds/orch_map_visibility")
 local Name = require("@ds/orch_name")
-local Comms = require("@ds/orch_comms")
 local function OrchBoard(): any
 	return require("@ds/orch_board")
 end
@@ -90,70 +88,21 @@ local SIDE_W = 420
 -- Between blocks: enough that each reads as its own.
 local GAP = "$space.4"
 
--- The widgets: each one's column when wide.
-M.WIDGETS = { "capture", "needs", "qa", "progress", "map", "scratchpad", "machines", "comms" }
--- (The Board is a tab of its own: its columns want the page.)
-local COLUMN: { [string]: string } = { capture = "left", map = "left", scratchpad = "left", needs = "right", qa = "right", progress = "right", machines = "right", comms = "right" }
-
--- The tabs, and the one shown, kept on this device.
-M.TABS = { "overview", "board", "chat" }
-M.tab = ui.persist("control_tab", "overview")
+-- The tabs, and the one shown, kept on this device: the Board first (what
+-- needs you, what's running, what's done), then the Map at the page's size,
+-- the Brain dump's chat, and Notes (the Q&A and the Scratchpad).
+M.TABS = { "board", "map", "chat", "notes" }
+M.tab = ui.persist("control_tab", "board")
 function M.show_tab(id: string)
 	if table.find(M.TABS, id) and M.tab:peek() ~= id then
 		M.tab:set(id)
 	end
 end
-
--- Shown and in what order, on this device.
-export type Widgets = { order: { string }, hidden: { [string]: boolean } }
-M.widgets = ui.persist("control_widgets", { order = table.clone(M.WIDGETS), hidden = {} } :: Widgets)
-
-local function full_order(w: Widgets): { string }
-	local out, seen = {}, {}
-	for _, id in w.order or {} do
-		if COLUMN[id] and not seen[id] then
-			seen[id] = true
-			table.insert(out, id)
-		end
+-- (One kept from before that's gone since, Overview: the Board.)
+local function valid_tab()
+	if not table.find(M.TABS, M.tab:peek()) then
+		M.tab:set("board")
 	end
-	-- (One this device hasn't placed yet, new since: after the one before
-	-- it in the default order.)
-	for i, id in M.WIDGETS do
-		if not seen[id] then
-			seen[id] = true
-			local after = if i > 1 then table.find(out, M.WIDGETS[i - 1]) else 0
-			table.insert(out, (after or #out) + 1, id)
-		end
-	end
-	return out
-end
-
-function M.toggle(id: string)
-	local w = M.widgets:peek()
-	local hidden = table.clone(w.hidden or {})
-	hidden[id] = if hidden[id] then nil else true
-	M.widgets:set({ order = full_order(w), hidden = hidden })
-end
-
--- A widget one place up (-1) or down (1), past those hidden, and, with the
--- page wide, past those in the other column.
-function M.move(id: string, by: number, wide: boolean)
-	local w = M.widgets:peek()
-	local list = full_order(w)
-	local at = table.find(list, id)
-	if not at then
-		return
-	end
-	local hidden = w.hidden or {}
-	local j = at + by
-	while list[j] and (hidden[list[j]] or (wide and COLUMN[list[j]] ~= COLUMN[id])) do
-		j += by
-	end
-	if not list[j] then
-		return
-	end
-	list[at], list[j] = list[j], list[at]
-	M.widgets:set({ order = list, hidden = table.clone(hidden) })
 end
 
 -- Where a dump's receipt stands, for a board card's source to show it: the
@@ -205,15 +154,26 @@ end
 local function background(tab: string): boolean
 	return M.tab:peek() ~= tab
 end
-local live_overview, live_board = M.live("overview"), M.live("board")
--- (Needs you floating on Board and Chat: live on either.)
+local live_board, live_map = M.live("board"), M.live("map")
+-- (The Map and Notes read the page's world through the same readers: live
+-- on either.)
+local function live_overview(): boolean
+	local t = M.awake:get()
+	return t == "map" or t == "notes"
+end
+-- (Needs you floating: on every tab but the Board, which has it as cards.)
 local function live_float(): boolean
 	local t = M.awake:get()
-	return t == "board" or t == "chat"
+	return t ~= "" and t ~= "board"
 end
--- What Overview and the Board read (`readers`, below): live while their tab
--- shows, held at their last value while it's kept hidden.
-local OV: any, BD: any, NF: any
+-- (Capture is a bar on every tab: its history's readers live on any.)
+local function live_capture(): boolean
+	return M.awake:get() ~= ""
+end
+-- What the Map and Notes, the Board, Needs you floating and Capture's
+-- history read (`readers`, below): live while they show, held at their
+-- last value while hidden.
+local OV: any, BD: any, NF: any, CP: any
 
 -- The chats by id, and the Q&A's entries: computeds the page makes again
 -- each time it is built (`fresh`, from M.Page). The shell requires this
@@ -402,10 +362,10 @@ local function receipt(dump: () -> any, settled: boolean?): Node
 	return Receipt {
 		dump = dump,
 		now = function(): any
-			return OV.now()
+			return CP.now()
 		end,
 		chats = function(): { [string]: any }
-			return OV.chats()
+			return CP.chats()
 		end,
 		on_reroute = function(dump_id: string, route_id: string, target: any)
 			orchestration.reroute(dump_id, route_id, target):after(function() end, said("control.capture.move_failed"))
@@ -437,7 +397,7 @@ local function history_row(_d: any, _i: number, row: State<any>): Node
 		local out = {}
 		local seen: { [string]: boolean } = {}
 		for _, r in row:get().routes or {} do
-			local t = data.target(OV.now(), OV.chats(), r.target, function(k: string): string
+			local t = data.target(CP.now(), CP.chats(), r.target, function(k: string): string
 				return k
 			end)
 			local key = `{t.kind}:{t.id or ""}`
@@ -473,15 +433,19 @@ local function history_row(_d: any, _i: number, row: State<any>): Node
 				return row:get().text or ""
 			end,
 			expanded = open,
-			tooltip = HoverCard.Tip { max_w = 360, p = "$space.2", ui.text {
-				function(): string
-					return row:get().text or ""
-				end,
-				literal = true,
-				wrap = true,
-				text_size = "$font.size.sm",
-				color = "$text.primary",
-			} },
+			tooltip = HoverCard.Tip {
+				max_w = 360,
+				p = "$space.2",
+				ui.text {
+					function(): string
+						return row:get().text or ""
+					end,
+					literal = true,
+					wrap = true,
+					text_size = "$font.size.sm",
+					color = "$text.primary",
+				},
+			},
 			tooltip_delay = 500,
 			w_full = true,
 			h = 32,
@@ -573,89 +537,42 @@ end
 local SLOT = "control-capture"
 local FOOTER: any = { access = false, place = false }
 -- Capture's composer is out of the page's view, above it: it floats.
-M.floating = ui.state("control_capture_floating", false)
+-- Capture's history, opened over the page from its bar.
+M.history_panel = ui.state("control_history_panel", false)
 -- The floating one opened out.
 M.float_open = ui.state("control_capture_float_open", false)
--- (Whether either placement holds the keys, followed as focus moves.)
-local inline_focused = false
+-- (Whether the floating one holds the keys, followed as focus moves.)
 local float_focused = false
 -- The floating one's height as laid out (the Chat tab keeps its foot clear).
 M.float_h = ui.state("control_capture_float_h", 0)
 -- Asked for the keys: bumped, the floating one takes them.
 local float_wanted = ui.state("control_capture_float_wanted", 0)
--- The scroll's own element, to tell above from below.
-local scroll_ref = ui.ref()
 -- The floating one's own element, to let go of the keys before it goes.
 local float_ref = ui.ref()
 -- (Capture's keys, to hand to the floating one as it comes.)
 local float_takes_keys = false
-local function inline_seen(visible: boolean, el: Element)
-	local above = false
-	if not visible then
-		local view = scroll_ref:peek()
-		local top = if view then view.y else nil
-		above = el.y ~= nil and top ~= nil and (el.y :: number) < (top :: number)
-	end
-	if M.floating:peek() == above then
-		return
-	end
-	if above then
-		float_takes_keys = inline_focused
-		M.floating:set(true)
-		return
-	end
-	-- Going: the keys back into Capture's, let go here first (a focused
-	-- node taken away hands the focus on, the view scrolling after it).
-	local had = float_focused
-	if had then
-		local f = float_ref:peek()
-		if f then
-			f:blur()
-		end
-		float_focused = false
-	end
-	ui.batch(function()
-		M.floating:set(false)
-		if M.float_open:peek() then
-			M.float_open:set(false)
-		end
-	end)
-	if had then
-		ui.after(0, function()
-			LaneTab().focus(SLOT)
-		end)
-	end
-end
-
 -- The composer takes the keys where it shows: floating, else in Capture.
 function M.focus_composer(): boolean
-	if M.floating:peek() or M.tab:peek() ~= "overview" then
-		float_wanted:add(1)
-	else
-		LaneTab().focus(SLOT)
-	end
+	float_wanted:add(1)
 	return true
 end
 
+-- Capture's history: the newest dump's receipt (its parts, where each went,
+-- what came back), then the earlier ones folded, a row each. Behind the
+-- bar's History button (`M.history_panel`), over the page.
 local function capture(): Node
-	-- (Gone, hidden or laid out again: nothing of it floats till it says.)
-	ui.on_cleanup(function()
-		if M.floating:peek() then
-			M.floating:set(false)
-		end
-	end)
 	local newest = ui.computed(function(): any
-		return OV.dumps()[1]
+		return CP.dumps()[1]
 	end)
 	-- The earlier ones: how many, and the latest `history_shown` of them,
 	-- the rows the history builds.
 	local older_n = ui.computed(function(): number
-		return math.max(0, #OV.dumps() - 1)
+		return math.max(0, #CP.dumps() - 1)
 	end)
 	local older = ui.computed(function(): { any }
 		local out = {}
 		local n = history_shown:get()
-		for i, d in OV.dumps() do
+		for i, d in CP.dumps() do
 			if i > n + 1 then
 				break
 			end
@@ -665,43 +582,12 @@ local function capture(): Node
 		end
 		return out
 	end)
-	-- (All of it a drop zone for the composer's draft: a sidebar chat
-	-- dropped is an @-mention, files are carried with the dump.)
-	-- (And a card, thread, machine, ask… dragged from the room's widgets: a
-	-- reference, ds/orch_ref.)
+	-- (A drop zone for Capture's draft, as the bar is: a sidebar chat or a
+	-- card dropped here goes on it.)
 	return LaneTab().DropZone { slot = "control-capture", chat = brain_dump, refs = true, ui.column {
 		id = "control-capture",
 		w_full = true,
 		gap = "$space.5",
-		-- The chat composer (a side chat's: ds.Composer, wired), bound to the
-		-- Brain dump's chat: files pasted or dropped, dictation, mentions,
-		-- its model; Enter sends, as everywhere, each send a dump.
-		-- (Watched: scrolled up out of the page's view, it floats at the
-		-- page's foot instead, `floating`. Its focus is followed, so the keys
-		-- go with it from one place to the other.)
-		ui.column {
-			id = "control-capture-inline",
-			w_full = true,
-			on_visible = inline_seen,
-			LaneTab().Composer {
-				id = "control-capture-composer",
-				slot = SLOT,
-				chat = brain_dump,
-				take = M.take,
-				-- (The Brain dump's chat watched only once it's used: its
-				-- transcript, hundreds of routing turns, is never shown here.)
-				lazy = true,
-				-- (And then its row alone: never its transcript.)
-				session_only = true,
-				placeholder = locale.s("control.capture.placeholder"),
-				-- (The Brain dump's model and agent; no access mode, no place:
-				-- it routes, it works nowhere.)
-				footer = FOOTER,
-				on_focus = function(on: boolean)
-					inline_focused = on
-				end,
-			},
-		},
 		-- (Under the composer, a frame after it: the newest's receipt, then
 		-- the history, each a frame of its own, ds/stage.)
 		stage.Later(1, function(): Node
@@ -943,13 +829,9 @@ local function board(card_build: ((make: () -> Node, i: number) -> Node)?): Node
 		end,
 		on_request_changes = orchestration.request_changes,
 		on_open_thread = M.open_chat,
-		-- (Its dump in Capture's history, on Overview.)
+		-- (Its dump in Capture's history, opened over the page.)
 		on_source = function(src: any)
-			if M.tab:peek() == "overview" then
-				M.show_dump(src.dump_id)
-				return
-			end
-			M.show_tab("overview")
+			M.history_panel:set(true)
 			ui.after(0, function()
 				M.show_dump(src.dump_id)
 			end)
@@ -984,16 +866,6 @@ local function board(card_build: ((make: () -> Node, i: number) -> Node)?): Node
 		-- whole of it in the overlay.
 		on_answer = NeedsYou.on_answer,
 		on_expand_ask = NeedsYou.on_expand,
-	}
-end
-
--- Needs you, every orchestrator's (screens/control/needs, as an
--- orchestrator's page has its own).
-local function needs(): Node
-	return NeedsYou.Asks {
-		now = OV.now,
-		sessions = OV.sessions,
-		name_of = OV.name_of,
 	}
 end
 
@@ -1058,12 +930,18 @@ local timeline = ui.shared("orchestration.timeline", {} :: { [string]: { any } }
 -- The Map's own element, to bring it into view.
 local map_ref = ui.ref()
 
-local function map(): Node
+local function map(fill: boolean?): Node
 	return ui.column {
 		ref = map_ref,
 		w_full = true,
 		OrchMap().Map {
 			world = world,
+			-- (On its tab, the Graph the room the tab gives it.)
+			height = if fill
+				then function(): number
+					return OrchMap().fill_h:get()
+				end
+				else nil,
 			-- (Each thread's chat and name by itself, account/rows through
 			-- the Overview's held readers: a push wakes the Map rows of the
 			-- chats it changed, none while the Overview is hidden.)
@@ -1100,73 +978,9 @@ local function map(): Node
 	}
 end
 -- (The Map widget alone, for its fixture's pictures at a set width.)
-M.map_widget = map
-
--- Every thread on every machine: the Map in its Machines view, shown and
--- scrolled to (the Machines widget's "n more").
-function M.show_map_machines()
-	local w = M.widgets:peek()
-	local hidden: any = w.hidden or {}
-	if hidden.map then
-		M.toggle("map")
-	end
-	OrchMap().set(M.map_view, { variant = "machines" })
-	-- (Once it's laid out: its top to the view's.)
-	local function bring(tries: number)
-		local el = map_ref:peek()
-		local view = scroll_ref:peek()
-		if el and view and el.y ~= nil and view.y ~= nil then
-			M.place:set(math.max(0, M.place:peek() + (el.y :: number) - (view.y :: number) - 8))
-		elseif tries > 0 then
-			ui.after(50, function()
-				bring(tries - 1)
-			end)
-		end
-	end
-	ui.after(0, function()
-		bring(20)
-	end)
+M.map_widget = function(): Node
+	return map()
 end
-
--- How many threads a machine lists on the Overview before "n more".
-M.MACHINE_CAP = 6
-
-local function machines(): Node
-	return Machines {
-		cap = M.MACHINE_CAP,
-		on_more = function(_device: string)
-			M.show_map_machines()
-		end,
-		devices = function(): { any }
-			return OV.devices()
-		end,
-		loads = function(): { [string]: any }
-			return OV.loads()
-		end,
-		chats = function(): { [string]: any }
-			return OV.chats()
-		end,
-		here = function(): string?
-			return OV.here()
-		end,
-		hue_of = OV.hue_of,
-		name_of = OV.thread_name,
-		on_open_chat = open_chat,
-	}
-end
-
-local function comms(): Node
-	return Comms {
-		comms = function(): { any }
-			return OV.comms()
-		end,
-		name_of = OV.name_of,
-		hue_of = OV.hue_of,
-		on_open = open_chat,
-	}
-end
-
--- Q&A (ds/orch_qa keeps its entries' model and what was read and put away).
 
 local function qa_computed(): any
 	return ui.computed(function(): { QA.Entry }
@@ -1279,6 +1093,7 @@ local function fresh()
 	OV = readers(live_overview, "overview")
 	BD = readers(live_board, "board")
 	NF = readers(live_float, "needs_float")
+	CP = readers(live_capture, "capture")
 end
 
 local function qa(): Node
@@ -1329,10 +1144,6 @@ end
 local function scratchpad_widget(): Node
 	return Scratch().Widget(scratchpad_props())
 end
-
-local BUILD: { [string]: () -> Node } = { scratchpad = scratchpad_widget, capture = capture, needs = needs, qa = qa, progress = function(): Node
-	return Progress.Widget(live_overview)
-end, map = map, machines = machines, comms = comms }
 
 -- How many of the crew work now.
 local function working_now(): number
@@ -1523,244 +1334,74 @@ local function opens_under(): (((x: number, y: number) -> boolean) -> (), (_v: b
 	end
 end
 
--- Opening the page, the first STAGE_NOW widgets (in its order) build with
--- it and the rest one a frame after (ds/stage), each holding a block's room
--- till then: built all at once, the Map, the Scratchpad, the Board and the
--- rest took 0.4 to 1.4 s in one frame (the window not answering meanwhile).
-local STAGE_NOW = 2
--- (Built before it's opened, Overview hidden: in the background instead,
--- ds/stage's `Idle`, all at once should it be opened first.)
-local function staged(id: string): Node
-	local rank = table.find(full_order(M.widgets:peek()), id) or #M.WIDGETS
-	if background("overview") then
-		return stage.Idle { rank = rank, build = BUILD[id], h = 160, now = live_overview, group = "overview" }
-	end
-	return stage.Later(rank - STAGE_NOW, BUILD[id])
-end
-
--- One widget, a block of its own: its title, its live figures beside it,
--- its menu at its end; it over them.
-local function widget(id: string, wide: boolean): Node
-	local hook, seen, open = opens_under()
-	local function entries(): { any }
-		-- (The Map's own first: which view.)
-		local out = if id == "map" then OrchMap().menu(M.map_view) else {}
-		for _, e in {
-			{ label = locale.s("control.widgets.up"), icon = "arrow-up", on_select = function()
-				M.move(id, -1, wide)
-			end },
-			{ label = locale.s("control.widgets.down"), icon = "arrow-down", on_select = function()
-				M.move(id, 1, wide)
-			end },
-			{ separator = true },
-			{ label = locale.s("control.widgets.hide"), icon = "eye-closed", on_select = function()
-				M.toggle(id)
-			end },
-		} do
-			table.insert(out, e)
-		end
-		return out
-	end
-	return Block.Block {
-		id = `control-widget-{id}`,
-		class = "control-widget",
-		title = locale.t(`control.widget.{id}`),
-		figures = figures_of(id, live_overview),
-		menu = ui.div {
-			class = "control-widget-menu",
-			on_visible = seen,
-			IconButton {
-				icon = "more-horizontal",
-				label = locale.t("control.widgets.menu"),
-				size = "sm",
-				tone = "quiet",
-				on_click = open,
-			},
-		},
-		head = function(row: Node): Node
-			return ContextMenu {
-				items = entries,
-				hook = hook,
-				label = locale.t(`control.widget.{id}`),
-				w_full = true,
-				row,
-			}
-		end,
-		staged(id),
-	}
-end
-
--- The widgets shown, in their order, of one column (nil: all of them).
-local function shown_of(column: string?): any
-	return ui.computed(function(): { { id: string } }
-		local w = M.widgets:get()
-		local hidden = w.hidden or {}
-		local out = {}
-		for _, id in full_order(w) do
-			if not hidden[id] and (column == nil or COLUMN[id] == column) then
-				table.insert(out, { id = id })
-			end
-		end
-		return out
-	end)
-end
-
-local function by_id(w: { id: string }): string
-	return w.id
-end
-
-local function slot(): Node
-	return ui.column {
-		id = "control-plugin-widgets",
-		w_full = true,
-		ui.slot("zeron.orchestration.widgets", { direction = "column", gap = GAP, w_full = true }),
-	}
-end
-
-local function layout(kind: string): Node
-	local wide = kind == "wide"
-	local function list(column: string?): Node
-		return ui.each(shown_of(column), function(w: { id: string }): Node
-			return widget(w.id, wide)
-		end, { key = by_id, w_full = true, gap = GAP })
-	end
-	if wide then
-		return ui.column {
-			id = "control-columns",
-			class = "control-wide",
-			w_full = true,
-			gap = GAP,
-			ui.row {
-				w_full = true,
-				gap = GAP,
-				items = "start",
-				ui.column { id = "control-left", grow = 1, basis = 0, min_w = 0, gap = GAP, list("left") },
-				ui.column { id = "control-right", w = SIDE_W, shrink = 0, gap = GAP, list("right"), slot() },
-			},
-		}
-	end
-	return ui.column {
-		id = "control-columns",
-		class = "control-narrow",
-		w_full = true,
-		gap = GAP,
-		list(nil),
-		slot(),
-	}
-end
-
--- The widgets' menu: each shown or not, and back to how they came (the
--- head's menu, and the sidebar's view menu, "Widgets…").
-function M.widget_entries(): { any }
-	local out: { any } = { { heading = locale.s("control.widgets.title") } }
-	for _, id in M.WIDGETS do
-		table.insert(out, {
-			label = locale.s(`control.widget.{id}`),
-			keep_open = true,
-			checked = function(): boolean
-				return not (M.widgets:get().hidden or {})[id]
-			end,
-			on_select = function()
-				M.toggle(id)
-			end,
-		})
-	end
-	table.insert(out, { separator = true })
-	table.insert(out, { label = locale.s("control.widgets.reset"), icon = "refresh", on_select = function()
-		M.widgets:set({ order = table.clone(M.WIDGETS), hidden = {} })
-	end })
-	return out
-end
-
--- The page's head: its name, what's going on, and the widgets' menu.
+-- The page's head: its name, what's going on, and its tabs.
 local function head(): Node
-	local hook, seen, open = opens_under()
-	return ContextMenu {
-		-- (Overview's widgets: the other tabs have none.)
-		items = function(): { any }
-			return if M.tab:peek() == "overview" then M.widget_entries() else {}
-		end,
-		hook = hook,
-		label = locale.t("control.widgets.title"),
+	return ui.row {
+		id = "control-head",
 		w_full = true,
+		gap = "$space.3",
+		items = "center",
+		ds.Text { locale.t("control.title"), style = "heading" },
+		-- What's going on: the counts, set apart by room, not a glyph; those
+		-- that need you in their own tone when any do.
 		ui.row {
-			id = "control-head",
-			w_full = true,
+			id = "control-summary",
 			gap = "$space.3",
 			items = "center",
-			ds.Text { locale.t("control.title"), style = "heading" },
-			-- What's going on: the counts the blocks show, set apart by room,
-			-- not a glyph; those that need you in their own tone when any do.
-			ui.row {
-				id = "control-summary",
-				gap = "$space.3",
-				items = "center",
-				min_w = 0,
-				-- (On the title's baseline.)
-				y = Block.baseline("$font.size.lg", "$font.size.sm"),
-				ui.text {
-					function(): string
-						return locale.s("control.head.orchestrators", { n = tally.orchestrators() })
-					end,
-					tabular = true,
-					text_size = "$font.size.sm",
-					color = "$text.tertiary",
-				},
-				ui.text {
-					function(): string
-						return locale.s("control.head.working", { n = tally.working() })
-					end,
-					tabular = true,
-					text_size = "$font.size.sm",
-					color = function(): string
-						return if tally.working() > 0 then "$text.secondary" else "$text.tertiary"
-					end,
-				},
-				ui.text {
-					function(): string
-						return locale.s("control.head.needs", { n = tally.waiting() })
-					end,
-					tabular = true,
-					text_size = "$font.size.sm",
-					color = function(): string
-						return if tally.waiting() > 0 then "$zeron.status.input" else "$text.tertiary"
-					end,
-				},
-			},
-			ui.div { grow = 1 },
-			-- The widgets' menu: Overview's alone, to the tabs' left, so the
-			-- tabs stand at the head's end, in the same place on every tab.
-			ui.div {
-				on_visible = seen,
-				hidden = function(): boolean
-					return M.tab:get() ~= "overview"
+			min_w = 0,
+			-- (On the title's baseline.)
+			y = Block.baseline("$font.size.lg", "$font.size.sm"),
+			ui.text {
+				function(): string
+					return locale.s("control.head.orchestrators", { n = tally.orchestrators() })
 				end,
-				IconButton {
-					id = "control-widgets-menu",
-					icon = "tuning",
-					label = locale.t("control.widgets.title"),
-					size = "md",
-					tone = "quiet",
-					on_click = open,
-				},
+				tabular = true,
+				text_size = "$font.size.sm",
+				color = "$text.tertiary",
 			},
-			-- The tabs.
+			ui.text {
+				function(): string
+					return locale.s("control.head.working", { n = tally.working() })
+				end,
+				tabular = true,
+				text_size = "$font.size.sm",
+				color = function(): string
+					return if tally.working() > 0 then "$text.secondary" else "$text.tertiary"
+				end,
+			},
+			ui.text {
+				function(): string
+					return locale.s("control.head.needs", { n = tally.waiting() })
+				end,
+				tabular = true,
+				text_size = "$font.size.sm",
+				color = function(): string
+					return if tally.waiting() > 0 then "$zeron.status.input" else "$text.tertiary"
+				end,
+			},
+		},
+		ui.div { grow = 1 },
+		-- The tabs, at the head's end (none to choose from before the first
+		-- orchestrator).
+		ui.div {
+			hidden = M.inviting,
 			ds.Segmented {
-				id = "control-tabs",
-				value = M.tab,
-				label = locale.t("control.tabs.label"),
-				options = {
-					{ value = "overview", label = locale.t("control.tabs.overview") },
-					{ value = "board", label = locale.t("control.tabs.board") },
-					{ value = "chat", label = locale.t("control.tabs.chat") },
-				},
+			id = "control-tabs",
+			value = M.tab,
+			label = locale.t("control.tabs.label"),
+			options = {
+				{ value = "board", label = locale.t("control.tabs.board") },
+				{ value = "map", label = locale.t("control.tabs.map") },
+				{ value = "chat", label = locale.t("control.tabs.chat") },
+				{ value = "notes", label = locale.t("control.tabs.notes") },
+			},
 			},
 		},
 	}
 end
 
 -- The floating composer's widths: bare (one line), opened out.
-local FLOAT_W, FLOAT_OPEN_W = 520, 680
+local FLOAT_W, FLOAT_OPEN_W = 600, 720
 -- Clear of the page's sides, and of its foot.
 local FLOAT_SIDE, FLOAT_FOOT = 24, 20
 -- Needs you floating (on Board and Chat): its width, and its list's
@@ -1781,6 +1422,8 @@ local FLOAT_KNOB = 51
 -- Capture's).
 -- Kept built while the page is (`shown`: whether it floats now), so going to
 -- a tab where it floats only shows it.
+local Invitation: () -> Node
+local HistoryPanel: any
 local FloatingCapture = ui.component(function(props: { width: () -> number, shown: () -> boolean }): Node
 	local open = M.float_open
 	local focus = ui.use_state(0)
@@ -1839,6 +1482,24 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, show
 	ui.on_cleanup(function()
 		alive = false
 		float_focused = false
+	end)
+	-- Its model picker asked for while bare: opened out, then asked for
+	-- again once the opened-out form is there (the bar is the only
+	-- composer, none other to open it in). (Here, where it outlives the
+	-- bare form the request came to.)
+	local reask = ui.use_state(0)
+	local reasked = reask:peek()
+	ui.effect(function()
+		local n = reask:get()
+		if n == reasked then
+			return
+		end
+		reasked = n
+		ui.after(60, function()
+			if alive and open:peek() then
+				LaneTab().open_model_when(SLOT)
+			end
+		end)
 	end)
 	local function set_open(on: boolean)
 		if open:peek() ~= on then
@@ -1925,6 +1586,40 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, show
 			enter = motion.transition({ opacity = { 0, 1 }, scale = { 0.8, 1 }, duration = 160, ease = "out(3)" }),
 			exit = motion.transition({ opacity = 0, duration = 100 }),
 		}),
+	}
+	-- Its history: a knob as the first, opening it over the page.
+	local history_knob = ui.button {
+		id = "control-history-open",
+		label = locale.t("control.capture.history_title"),
+		expanded = function(): boolean
+			return M.history_panel:get()
+		end,
+		w = ui.raw(FLOAT_KNOB, "the pill's one line, as round"),
+		h = ui.raw(FLOAT_KNOB, "the pill's one line"),
+		shrink = 0,
+		items = "center",
+		justify = "center",
+		rounded = "$radius.full",
+		border = 1,
+		border_color = "$zeron.composer.edge",
+		bg = function(): string
+			return if material.see_through() then "$zeron.composer.tint" else "$zeron.composer.solid"
+		end,
+		backdrop_blur = function(): number
+			return if material.see_through() then 16 else 0
+		end,
+		shadow = function(): string
+			return if material.see_through() then "$zeron.composer.rest" else "$zeron.composer.shadow"
+		end,
+		hover = { border_color = "$border.strong" },
+		color = function(): string
+			return if M.history_panel:get() then "$text.primary" else "$text.secondary"
+		end,
+		focus_on_press = false,
+		on_click = function()
+			M.history_panel:set(not M.history_panel:peek())
+		end,
+		Icon { name = "clock-circle", size = 16 },
 	}
 	return ui.row {
 		w_full = true,
@@ -2014,6 +1709,8 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, show
 							placeholder = locale.s("control.capture.placeholder"),
 							footer = FOOTER,
 							mirror = true,
+							-- (The only placement now: the chat's picks are its own.)
+							keeps = true,
 							focus = focus,
 							bare = function(): boolean
 								return not open:get()
@@ -2027,6 +1724,7 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, show
 							end,
 							on_open_model = function()
 								set_open(true)
+								reask:add(1)
 							end,
 							on_focus = function(on: boolean)
 								float_focused = on
@@ -2040,6 +1738,13 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, show
 					end, ui.div {
 						shrink = 0,
 						knob,
+					}),
+					-- Its history (the dumps sent, where each went), over the page.
+					ui.show(function(): boolean
+						return CP ~= nil and CP.dumps()[1] ~= nil
+					end, ui.div {
+						shrink = 0,
+						history_knob,
 					}),
 				},
 			},
@@ -2088,13 +1793,60 @@ local function scrolled(props: { id: string, place: any, ref: any?, pb: any?, [n
 	}
 end
 
--- Overview: Capture and the widgets (or the Scratchpad opened to its page).
-local Overview = ui.component(function(props: { width: State<number> }): Node
-	-- Loads are sampled only while the widgets show (Machines, the Map's
-	-- lanes): not while the tab is kept hidden.
+-- A block of a tab's (ds/orch_block): its title, its figures beside it, and
+-- a … menu of `entries` at its end when given.
+local function panel(p: { id: string, title: string, figures: Node?, entries: (() -> { any })?, [number]: Node }): Node
+	local menu: Node? = nil
+	local head: ((row: Node) -> Node)? = nil
+	if p.entries then
+		local hook, seen, open = opens_under()
+		menu = ui.div {
+			class = "control-panel-menu",
+			on_visible = seen,
+			IconButton {
+				icon = "more-horizontal",
+				label = locale.t("control.panel.menu"),
+				size = "sm",
+				tone = "quiet",
+				on_click = open,
+			},
+		}
+		head = function(row: Node): Node
+			return ContextMenu {
+				items = p.entries,
+				hook = hook,
+				label = locale.t(p.title),
+				w_full = true,
+				row,
+			}
+		end
+	end
+	return Block.Block {
+		id = p.id,
+		class = "control-panel",
+		title = locale.t(p.title),
+		figures = p.figures,
+		menu = menu,
+		head = head,
+		p[1],
+	}
+end
+
+-- What the Map's head says: how many are at work.
+local function map_figures(): Node?
+	return figure_if_live(function(): string
+		local w = working_now()
+		return if w > 0 then locale.s("control.map.working", { n = w }) else ""
+	end)
+end
+
+-- Map: the Map at the page's size, the Graph or the Machines (its menu).
+-- Its foot kept clear of Capture's bar.
+local MapTab = ui.component(function(): Node
+	-- Loads are sampled only while it shows (the Machines view's lines).
 	local wanted = false
 	ui.effect(function()
-		local on = live_overview()
+		local on = live_map()
 		if on ~= wanted then
 			wanted = on
 			orchestration.loads_wanted(on)
@@ -2104,30 +1856,139 @@ local Overview = ui.component(function(props: { width: State<number> }): Node
 		if wanted then
 			orchestration.loads_wanted(false)
 		end
+		OrchMap().fill_h:set(0)
 	end)
+	-- (A view kept from before that it no longer offers: the Graph.)
+	local v = OrchMap().valid(M.map_view:peek())
+	if not table.find(OrchMap().LISTED, v.variant) then
+		OrchMap().set(M.map_view, { variant = "force" })
+	end
+	-- (The room the Map has: the tab's height, less its insets and the
+	-- block's own head and padding.)
+	local MAP_CHROME = 86
+	-- (Taken once it has held still a moment, in whole points: Capture's
+	-- bar easing open or shut doesn't lay the Graph out at each of its
+	-- frames. The first, at once.)
+	local SETTLE_MS = 150
+	local latest = 0
+	return ui.column {
+		id = "control-map-tab",
+		w_full = true,
+		h_full = true,
+		min_h = 0,
+		items = "center",
+		on_resize = function(size: { w: number, h: number })
+			local fill = OrchMap().fill_h
+			local room = math.floor(math.max(0, size.h - MAP_CHROME - M.float_h:peek() - FLOAT_FOOT - FLOAT_CLEAR))
+			latest = room
+			if fill:peek() <= 0 then
+				fill:set(room)
+				return
+			end
+			ui.after(SETTLE_MS, function()
+				if latest == room and math.abs(room - fill:peek()) >= 1 then
+					fill:set(room)
+				end
+			end)
+		end,
+		px = "$space.6",
+		pt = "$space.2",
+		pb = function(): any
+			return ui.raw(M.float_h:get() + FLOAT_FOOT + FLOAT_CLEAR, "clear of Capture's bar, measured")
+		end,
+		ui.column {
+			w_full = true,
+			max_w = MAX_W,
+			grow = 1,
+			min_h = 0,
+			-- (A big fleet's Graph, fitted down as far as it goes, draws no
+			-- name past the Map's edge.)
+			overflow = "hidden",
+			panel {
+				id = "control-map",
+				title = "control.tabs.map",
+				figures = map_figures(),
+				entries = function(): { any }
+					return OrchMap().menu(M.map_view)
+				end,
+				-- (Once the tab has measured its room: the Graph laid out
+				-- once, for the height it has.)
+				ui.presence(function(): string
+					return if OrchMap().fill_h:get() > 0 then "map" else "pending"
+				end, function(key: string): Node
+					return if key == "map" then map(true) else ui.column { w_full = true }
+				end, { w_full = true }),
+			},
+		},
+	}
+end)
+
+-- Notes: the Q&A (questions put to the threads in dumps, and their
+-- answers), Progress (what each thread at work is at) and the Scratchpad,
+-- side by side where the page is wide; the Scratchpad opened to the page in
+-- place of them.
+local NotesTab = ui.component(function(props: { width: State<number> }): Node
 	return scrolled {
-		id = "control-scroll",
+		id = "control-notes-scroll",
 		place = M.place,
-		ref = scroll_ref,
-		-- (A real swap: the widgets, or the Scratchpad opened to its page.)
+		-- (Its end scrolls clear of Capture's bar, and of Needs you floating
+		-- over its right-hand column.)
+		pb = function(): any
+			local room = math.max(M.float_h:get() + FLOAT_FOOT, M.needs_room:get())
+			return ui.raw(room + FLOAT_CLEAR, "what floats at its foot, measured")
+		end,
 		ui.presence(function(): string
-			return if M.scratchpad_open:get() then "scratchpad" else "widgets"
+			if M.scratchpad_open:get() then
+				return "scratchpad"
+			end
+			-- (Nothing till the page's width is known: built once, at the
+			-- width it is, not narrow first and again wide.)
+			local w = props.width:get()
+			if w <= 0 then
+				return "pending"
+			end
+			return if w >= M.WIDE then "wide" else "narrow"
 		end, function(kind: string): Node
+			if kind == "pending" then
+				return ui.div {}
+			end
 			if kind == "scratchpad" then
 				return ui.column {
 					w_full = true,
 					Scratch().Page(scratchpad_props()),
 				}
 			end
-			return ui.presence(function(): string
-				-- (A real swap: two columns or one, the widgets laid out again.)
-				return if props.width:get() >= M.WIDE then "wide" else "narrow"
-			end, layout, { w_full = true })
+			-- (Each a frame after the tab, ds/stage, as the widgets were.)
+			local scratch = panel { id = "control-notes-scratchpad", title = "control.widget.scratchpad", figures = figures_of("scratchpad", live_overview), stage.Later(1, scratchpad_widget) }
+			local qa_block = panel { id = "control-notes-qa", title = "control.widget.qa", figures = figures_of("qa", live_overview), qa() }
+			-- (Progress, until the Board's Running has it.)
+			local progress_block = panel {
+				id = "control-notes-progress",
+				title = "control.widget.progress",
+				figures = figures_of("progress", live_overview),
+				Progress.Widget(live_overview),
+			}
+			local plugins = ui.column {
+				id = "control-plugin-widgets",
+				w_full = true,
+				ui.slot("zeron.orchestration.widgets", { direction = "column", gap = GAP, w_full = true }),
+			}
+			if kind == "wide" then
+				return ui.row {
+					id = "control-notes",
+					w_full = true,
+					gap = GAP,
+					items = "start",
+					ui.column { grow = 1, basis = 0, min_w = 0, gap = GAP, scratch },
+					ui.column { w = SIDE_W, shrink = 0, gap = GAP, qa_block, progress_block, plugins },
+				}
+			end
+			return ui.column { id = "control-notes", w_full = true, gap = GAP, qa_block, progress_block, scratch, plugins }
 		end, { w_full = true }),
 	}
 end)
 
--- Where the Board tab is scrolled, kept as Overview's is.
+-- Where the Board tab is scrolled, kept as Notes' is.
 M.board_place = ui.state("control_board_scroll", 0)
 
 -- Board: its figures, then the board across the page (a frame after the
@@ -2370,6 +2231,114 @@ local NeedsFloat = ui.component(function(props: { bottom: () -> number }): Node
 	}
 end)
 
+-- An account with no orchestrator of its own yet (the Brain dump aside):
+-- the page is an invitation to make one, not empty tabs.
+function M.inviting(): boolean
+	local now = orchestration.now:get()
+	if not now or now.state ~= "ready" then
+		return false
+	end
+	for _, o in now.orchestrators or {} do
+		if o.kind ~= "brain_dump" and not o.archived then
+			return false
+		end
+	end
+	return true
+end
+
+-- The invitation: what an orchestrator is, and Create.
+Invitation = function(): Node
+	return ui.column {
+		id = "control-invite",
+		w_full = true,
+		grow = 1,
+		min_h = 0,
+		items = "center",
+		justify = "center",
+		px = "$space.6",
+		pb = "$space.8",
+		ui.column {
+			w_full = true,
+			max_w = 480,
+			items = "center",
+			gap = "$space.3",
+			ui.div { color = "$text.tertiary", pb = "$space.1", Icon { name = "bot", size = 32 } },
+			ds.Text { locale.t("control.invite.title"), style = "heading" },
+			ui.text {
+				locale.t("control.invite.body"),
+				class = "control-invite-body",
+				w_full = true,
+				wrap = true,
+				align = "center",
+				text_size = "$font.size.md",
+				line_height = "$font.line.md",
+				color = "$text.secondary",
+			},
+			ui.div { h = "$space.2" },
+			ds.Button {
+				locale.t("control.invite.create") :: any,
+				id = "control-invite-create",
+				tone = "primary",
+				on_click = function()
+					require("@app/screens/orchestrator/actions").new()
+				end,
+			},
+		},
+	}
+end
+
+-- Capture's history, over the page from its bar's History knob: the
+-- newest dump's receipt and the earlier ones (`capture`), scrolled past
+-- HISTORY_MAX_H. (A popover of its own: the receipts' hover cards show in
+-- it, as they don't in a layer of the page's.)
+local HISTORY_MAX_H = 520
+-- Its width: the old Capture's room, so a dump reads as it did there.
+local HISTORY_W = 820
+HistoryPanel = ui.component(function(props: { w: () -> number }): Node
+	local content = ui.use_state(0)
+	return ui.column(glass.style({
+		id = "control-history",
+		w = props.w,
+		rounded = "$radius.xl",
+		p = "$space.3",
+		gap = "$space.2",
+		ui.row {
+			w_full = true,
+			gap = "$space.2",
+			items = "center",
+			ui.div { color = "$text.tertiary", Icon { name = "clock-circle", size = 14 } },
+			ui.text { locale.t("control.capture.history_title"), text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.primary" },
+			ui.div { grow = 1 },
+			IconButton {
+				id = "control-history-close",
+				icon = "close",
+				label = locale.t("control.capture.history_close"),
+				size = "sm",
+				tone = "quiet",
+				on_click = function()
+					M.history_panel:set(false)
+				end,
+			},
+		},
+		ui.scroll {
+			id = "control-history-scroll",
+			w_full = true,
+			h = function(): any
+				return ui.raw(math.min(content:get(), HISTORY_MAX_H), "its rows' height, to its room")
+			end,
+			ui.column {
+				w_full = true,
+				on_resize = function(size: { w: number, h: number })
+					if math.abs(size.h - content:peek()) >= 1 then
+						content:set(size.h)
+					end
+				end,
+				capture(),
+			},
+		},
+	}, "menu") :: any)
+end)
+
 -- The tabs built so far: each stays once built, hidden while another
 -- shows. The rest are built in the background `PREBUILD_AFTER` ms after the
 -- page opens (ds/stage's `Idle`: a few pieces a frame, while the window is
@@ -2412,6 +2381,7 @@ end
 
 M.Page = ui.component(function(): Node
 	fresh()
+	valid_tab()
 	local width = ui.use_state(0)
 	-- The tab shown is built; the others once the page has settled.
 	M.built:set({ [M.tab:peek()] = true })
@@ -2439,17 +2409,17 @@ M.Page = ui.component(function(): Node
 	end)
 	ui.after(M.PREBUILD_AFTER, function()
 		if alive then
-			M.built:set({ overview = true, board = true, chat = true })
+			M.built:set({ board = true, map = true, chat = true, notes = true })
 		end
 	end)
 	-- A dump asked to be shown from another page (a board card's source):
-	-- on Overview, where Capture's history is.
+	-- in Capture's history, opened over the page.
 	ui.effect(function()
 		local id = orchestration.reveal_dump:get()
 		if id then
 			ui.after(0, function()
 				orchestration.reveal_dump:set(nil)
-				M.show_tab("overview")
+				M.history_panel:set(true)
 				ui.after(0, function()
 					M.show_dump(id)
 				end)
@@ -2458,8 +2428,8 @@ M.Page = ui.component(function(): Node
 	end)
 	ui.on_cleanup(function()
 		decide.hide()
-		if M.floating:peek() then
-			M.floating:set(false)
+		if M.history_panel:peek() then
+			M.history_panel:set(false)
 		end
 		if M.float_open:peek() then
 			M.float_open:set(false)
@@ -2479,10 +2449,14 @@ M.Page = ui.component(function(): Node
 	ui.effect(function()
 		M.page_w:set(width:get())
 	end)
-	-- The floating composer: on Board and Chat, and on Overview with
-	-- Capture scrolled away.
+	-- Capture's history panel's width: as the bar opened out, in the page.
+	local function history_w(): number
+		return math.min(HISTORY_W, math.max(0, width:get() - FLOAT_SIDE * 2))
+	end
+	-- Capture's bar: on every tab, but over the invitation of an account
+	-- with no orchestrator yet.
 	local float_shown = ui.computed(function(): boolean
-		return M.tab:get() ~= "overview" or M.floating:get()
+		return not M.inviting()
 	end)
 	return ui.column {
 		id = "control-room",
@@ -2506,26 +2480,59 @@ M.Page = ui.component(function(): Node
 			end,
 			ui.column { w_full = true, max_w = MAX_W, head() },
 		},
-		-- The tabs: each built the first time it's shown (or in the
-		-- background, once the page has settled) and kept, hidden while
-		-- another shows: going back to one is showing it.
+		-- The tabs, and Capture's history under them (opened from its bar,
+		-- over it, the tab giving it room). (Reversed: the history first in
+		-- the tree, as the page's layers would otherwise take the pointer
+		-- from its hover cards, and shown last.)
 		ui.column {
 			w_full = true,
 			grow = 1,
 			min_h = 0,
-			relative = true,
-			kept("overview", function(): Node
-				return Overview { width = width }
-			end),
-			kept("board", function(): Node
-				return BoardTab {}
-			end),
-			kept("chat", function(): Node
-				return ChatTab {}
-			end),
+			direction = "column_reverse",
+			ui.presence(function(): string?
+				return if M.history_panel:get() and float_shown:get() then "history" else nil
+			end, function(): Node
+				return ui.row {
+					w_full = true,
+					justify = "center",
+					HistoryPanel { w = history_w },
+				}
+			end, {
+				w_full = true,
+				shrink = 0,
+				pt = "$space.2",
+				pb = function(): any
+					return ui.raw(M.float_h:get() + FLOAT_FOOT + 8, "over Capture's bar")
+				end,
+				enter = motion.transition({ opacity = { 0, 1 }, duration = 160, ease = "out(3)" }),
+				exit = motion.transition({ opacity = { 1, 0 }, duration = 120 }),
+			}),
+			-- The tabs: each built the first time it's shown (or in the
+			-- background, once the page has settled) and kept, hidden while
+			-- another shows: going back to one is showing it.
+			ui.column {
+				w_full = true,
+				grow = 1,
+				min_h = 0,
+				id = "control-body",
+				relative = true,
+				hidden = M.inviting,
+				kept("board", function(): Node
+					return BoardTab {}
+				end),
+				kept("map", function(): Node
+					return MapTab {}
+				end),
+				kept("chat", function(): Node
+					return ChatTab {}
+				end),
+				kept("notes", function(): Node
+					return NotesTab { width = width }
+				end),
+			},
 		},
-		-- Capture's composer, floating: kept built, shown where it floats
-		-- (faded in; gone at once).
+		-- Capture's bar, at the foot of every tab: kept built, shown while
+		-- the page has tabs (faded in; gone at once).
 		ui.column {
 			id = "control-float-layer",
 			absolute = true,
@@ -2548,9 +2555,13 @@ M.Page = ui.component(function(): Node
 				end,
 			},
 		},
-		-- Needs you, floating, on Board and Chat while something waits.
+		-- An account with no orchestrator yet: what one is, and a way to make
+		-- the first.
+		ui.show(M.inviting, Invitation()),
+		-- Needs you, floating, on every tab but the Board (it has it as
+		-- cards) while something waits.
 		ui.presence(function(): string?
-			if M.tab:get() == "overview" or tally.needs(false) == 0 then
+			if M.tab:get() == "board" or M.inviting() or tally.needs(false) == 0 then
 				return nil
 			end
 			return "needs"

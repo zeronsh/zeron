@@ -9,6 +9,7 @@
 --                      session list pushed again, every other row the same
 --   wl_add / wl_remove one chat comes / goes
 --   wl_rename          one chat's title changes
+--   wl_tab_<tab>       the page on one tab (board, map, chat, notes)
 --   wl_read            the run counts (ds/orch_perf_trace) into the state
 --                      `wl_counts`; wl_reset sets them to nothing
 
@@ -25,9 +26,8 @@ local function big()
 	-- (Motion reduced: the status dots and rings still, so what a push costs
 	-- isn't mixed with their steps.)
 	require("@ds/motion").reduce:set(true)
-	-- (Every widget shown, whatever a run before left kept.)
-	local page = require("@app/screens/control/page")
-	page.widgets:set({ order = table.clone(page.WIDGETS), hidden = {} :: any })
+	-- (The Board shown, whatever a run before left kept.)
+	require("@app/screens/control/page").show_tab("board")
 	local t = T
 	local devices = {
 		{ id = "dev-desk", name = "dev-desk", platform = "linux", here = true, online = true },
@@ -161,18 +161,12 @@ ui.command { id = "wl_remove", title = "Whole list: one chat removed", run = fun
 	end)
 end }
 
--- Only one of the Control room's widgets shown (`wl_only_map`, …), or none
--- (`wl_only_none`): what each one's readers cost a push.
+-- One of the Control room's tabs shown (`wl_tab_board`, `wl_tab_map`, …):
+-- what each one's readers cost a push.
 local page = require("@app/screens/control/page")
-for _, id in { "none", table.unpack(page.WIDGETS) } do
-	ui.command { id = `wl_only_{id}`, title = `Whole list: only {id}`, run = function()
-		local hidden = {}
-		for _, other in page.WIDGETS do
-			if other ~= id then
-				hidden[other] = true
-			end
-		end
-		page.widgets:set({ order = table.clone(page.WIDGETS), hidden = hidden :: any })
+for _, id in page.TABS do
+	ui.command { id = `wl_tab_{id}`, title = `Whole list: the {id} tab`, run = function()
+		page.show_tab(id)
 	end }
 end
 

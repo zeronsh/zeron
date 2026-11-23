@@ -94,9 +94,11 @@ end)
 
 local SIGN = "Code signing"
 
+-- The page on its Map tab.
 local function open(): any
 	local app = mount("orch_map_fixture.luau")
 	app:resize(1440, 2400)
+	app:command("map_only")
 	app:frames(30)
 	return app
 end
@@ -205,7 +207,7 @@ end)
 test("map visibility: the Map's menu has Show chats, the choice kept", function()
 	local first = open()
 	expect(first:state("ds/orch_map_visibility.luau::control_map_show")).to_be("recent")
-	first:click('#control-widget-map >> role:button "Widget menu"')
+	first:click('#control-map >> role:button "Menu"')
 	first:frames(10)
 	expect(first:has('"Show chats"')).to_be(true)
 	expect(first:has('role:menuitemcheckbox "Active + recently finished"')).to_be(true)

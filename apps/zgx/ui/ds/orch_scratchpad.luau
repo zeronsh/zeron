@@ -281,7 +281,14 @@ end
 -- Notes: the Markdown as it's typed, or as it reads.
 local function Notes(props: Props, h: any, grow: number?): Node
 	local fill = plate()
-	local reading = ui.debounced(text.value, 150)
+	local debounced = ui.debounced(text.value, 150)
+	-- What the preview reads: the text as it settles (debounced, so a key
+	-- typed doesn't lay the Markdown out again), or the text itself while
+	-- that has nothing yet (built before the text came).
+	local reading = ui.computed(function(): string
+		local r = debounced:get()
+		return if r ~= "" then r else text.value:get()
+	end)
 	local editing = ui.use_state(false)
 	local editor_el: any = nil
 	local editor = ui.textarea {

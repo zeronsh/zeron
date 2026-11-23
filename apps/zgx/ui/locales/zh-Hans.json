@@ -1269,8 +1269,8 @@
           "topology": "Topology",
           "timeline": "Timeline",
           "machines": "Machines",
-          "graph": "Graph",
-          "force": "Graph (force)"
+          "graph": "First graph",
+          "force": "Graph"
         },
         "fit": "Fit to view",
         "reset": "Reset layout",
@@ -2973,9 +2973,10 @@
         "shell_reload_interface": "重新加载界面",
         "shell_dictate": "按住听写",
         "control_focus_capture": "聚焦捕获",
-        "control_tab_overview": "控制室：概览",
         "control_tab_board": "控制室：看板",
-        "control_tab_chat": "控制室：聊天"
+        "control_tab_map": "控制室：地图",
+        "control_tab_chat": "控制室：聊天",
+        "control_tab_notes": "控制室：笔记"
       },
       "group": {
         "sessions": "会话",
@@ -4776,7 +4777,9 @@
       "earlier": "{n, plural, one {# earlier} other {# earlier}}",
       "history": "更早",
       "expand": "展开",
-      "collapse": "收起"
+      "collapse": "收起",
+      "history_title": "历史",
+      "history_close": "关闭历史"
     },
     "needs": {
       "failed": "Couldn't send that",
@@ -4846,10 +4849,20 @@
       "label": "控制室标签页",
       "overview": "概览",
       "board": "看板",
-      "chat": "聊天"
+      "chat": "聊天",
+      "map": "地图",
+      "notes": "笔记"
     },
     "chat": {
       "none": "还没有 Brain dump"
+    },
+    "panel": {
+      "menu": "菜单"
+    },
+    "invite": {
+      "title": "从一个编排器开始",
+      "body": "编排器是一个朝着目标规划工作、并带领一组线程完成它的智能体。给它起个名字并说明用途；需要决定时它会问你。",
+      "create": "创建编排器"
     }
   }
 }

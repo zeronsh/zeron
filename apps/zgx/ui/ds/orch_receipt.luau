@@ -575,6 +575,9 @@ return ui.component(function(props: Props): Node
 				HoverCard.Anchored {
 					class = "orch-part-hold",
 					w = CARD_W,
+					-- (Over the word: under it, it would cover the chip the
+					-- word has just scrolled into view.)
+					placement = { side = "top", align = "start", offset = 6 },
 					-- (The word's box: the outer one's, which places it.)
 					anchor = ui.div {
 						w = function(): number

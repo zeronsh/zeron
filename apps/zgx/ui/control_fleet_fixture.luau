@@ -7,6 +7,7 @@
 --                  machines
 --   fleet_sparse   the Brain dump and one orchestrator, four threads, one ask
 --   fleet_nocrew   fleet_sparse, its orchestrator's crew released
+--   fleet_empty    a new account: one chat, no orchestrator
 --   fleet_orch_<id> / fleet_control   where the window is
 
 local root = require("./control_fixture")
@@ -236,6 +237,20 @@ ui.command { id = "fleet_sparse", title = "Fleet: sparse", run = function()
 end }
 ui.command { id = "fleet_nocrew", title = "Fleet: an orchestrator with no crew", run = function()
 	sparse(true)
+end }
+
+-- A new account: one machine, one chat, no orchestrator yet.
+ui.command { id = "fleet_empty", title = "Fleet: a new account", run = function()
+	local s: any = clone(sessions.now:peek())
+	s.devices = { s.devices[1] }
+	s.chats = {
+		{ id = "own1", title = "Hello Zeron", device = "dev-desk", status = "done", updated = T - 600, created = T - 700, agent = "claude", model = "claude-opus-5-5" },
+	}
+	s.children, s.archived = {}, {}
+	sessions.now:set(s)
+	orchestration.now:set({ state = "ready", orchestrators = {}, crew = {}, items = {}, asks = {}, dumps = {} } :: any)
+	orchestration.comms:set({})
+	orchestration.progress:set({} :: any)
 end }
 
 ui.command { id = "fleet_control", title = "Fleet: the Control room", run = function()

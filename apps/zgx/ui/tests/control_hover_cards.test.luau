@@ -2,12 +2,15 @@
 -- part's card hangs from its chip (or its answer line, or the word it's
 -- on), never from the pointer, so the pointer reaches it and what's in it;
 -- it stays as the pointer crosses into it, a click on the chip pins it, and
--- Escape or a click outside lets it go. On ui/control_page_fixture.luau
--- (orchestration_sample).
+-- Escape or a click outside lets it go (under its anchor, or over it where
+-- there's no room under it). In Capture's history, opened from
+-- its bar, on ui/control_page_fixture.luau (orchestration_sample).
 
 local function open(): any
 	local app = mount("control_page_fixture.luau")
 	app:resize(1440, 900)
+	app:frames(30)
+	app:set_state("control_history_panel", true)
 	app:frames(30)
 	return app
 end
@@ -77,6 +80,15 @@ local function until_gone(app: any, target: string): boolean
 	end
 	return false
 end
+-- A card that hangs from an anchor whose top is `top` and foot `foot`: 6
+-- points under it, or (no room under it, as at the foot of the history over
+-- Capture's bar) 6 points over it.
+local function hangs(y: number?, h: number?, top: number, foot: number): boolean
+	if not y then
+		return false
+	end
+	return math.abs(y - (foot + 6)) <= 1 or math.abs(y + (h or 0) + 6 - top) <= 1
+end
 local function route_at(app: any): string
 	return tostring(app:state("shell_route_path") or "")
 end
@@ -91,10 +103,10 @@ test("hover card: on a route chip, it hangs under the chip, from its start", fun
 	-- Its words: where it went, how it stands, the way in.
 	expect(app:has(`{IN_HOVER} >> "Exnomic VPN"`)).to_be(true)
 	expect(app:has(`{IN_HOVER} >> .orch-part-open`)).to_be(true)
-	local x, y, w = card_box(app, HOVER)
+	local x, y, w, h = card_box(app, HOVER)
 	expect(w).to_be(480)
 	expect(math.abs((x :: number) - (cx :: number)) <= 1).to_be(true)
-	expect(math.abs((y :: number) - ((cy :: number) + (ch :: number) + 6)) <= 1).to_be(true)
+	expect(hangs(y, h, cy :: number, (cy :: number) + (ch :: number))).to_be(true)
 end)
 
 test("hover card: the pointer crosses into it and it stays, where it was", function()
@@ -138,8 +150,8 @@ test("hover card: a click on the chip pins it; the pointer leaving or on another
 	app:click(CHIP)
 	expect(until_shown(app, PINNED)).to_be(true)
 	expect(app:state("hover_card_pinned") ~= "").to_be(true)
-	local x0, y0 = card_box(app, PINNED)
-	expect(math.abs((y0 :: number) - ((cy :: number) + (ch :: number) + 6)) <= 1).to_be(true)
+	local x0, y0, _, h0 = card_box(app, PINNED)
+	expect(hangs(y0, h0, cy :: number, (cy :: number) + (ch :: number))).to_be(true)
 	-- The pointer away: it stays.
 	app:hover("#control-history-toggle")
 	pause(app, 600)
@@ -197,9 +209,9 @@ test("hover card: on an answer line, it hangs under the line and its Open works"
 	local lx, bottom = (tx :: number) - 14, (oy :: number) - 1 + 24
 	app:hover(LINE)
 	expect(until_shown(app, HOVER)).to_be(true)
-	local x, y = card_box(app, HOVER)
+	local x, y, _, h = card_box(app, HOVER)
 	expect(math.abs((x :: number) - lx) <= 1).to_be(true)
-	expect(math.abs((y :: number) - (bottom + 6)) <= 1).to_be(true)
+	expect(hangs(y, h, bottom - 24, bottom)).to_be(true)
 	app:hover(`{IN_HOVER} >> .orch-part-open`)
 	pause(app, 400)
 	local x1, y1 = card_box(app, HOVER)
@@ -216,7 +228,7 @@ test("hover card: in the text, it hangs from the word the pointer came to, not f
 	-- "rebooted" on the second line; under it, on the third, "registry",
 	-- another part's: the card hangs from the first over the second.
 	local WORD = '#control-capture >> .orch-part >> "rebooted "'
-	local wx, wy, _, wh = box(app, WORD)
+	local wx, wy = box(app, WORD)
 	expect(wx ~= nil).to_be(true)
 	app:hover(WORD)
 	-- (The word's anchor comes under a pointer at rest: the pointer moves
@@ -224,9 +236,11 @@ test("hover card: in the text, it hangs from the word the pointer came to, not f
 	app:hover("#control-history-toggle")
 	app:hover("#control-capture >> .orch-part-anchor")
 	expect(until_shown(app, HOVER)).to_be(true)
-	local x, y = card_box(app, HOVER)
+	local x, y, _, ch = card_box(app, HOVER)
+	-- (Over the word, its start under the word's, 6 points clear: under
+	-- it, the card would cover the chip the word scrolled into view.)
 	expect(math.abs((x :: number) - (wx :: number)) <= 1).to_be(true)
-	expect(math.abs((y :: number) - ((wy :: number) + (wh :: number) + 6)) <= 1).to_be(true)
+	expect(math.abs((y :: number) + (ch :: number) + 6 - (wy :: number)) <= 1).to_be(true)
 	-- On its way to the card, the pointer crosses another part's word: the
 	-- card stays where it hangs, and the pointer reaches it.
 	app:hover('#control-capture >> .orch-part >> "thing "')

@@ -674,6 +674,8 @@ return function()
 		ref_chips()
 		local Shared = require("@app/screens/chat/shared") :: any
 		Shared.dropping_own:set_key({ "lane.control-capture" }, "ref")
+		-- (And over Capture's bar: its zone of its own.)
+		Shared.dropping_own:set_key({ "lane.control-capture.float" }, "ref")
 	end }
 	-- A thread asking the person to pick between two variants, with
 	-- pictures, scores, a recommendation, context and links; its card on

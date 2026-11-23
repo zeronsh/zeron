@@ -1,8 +1,8 @@
 -- The Control room scrolled down stays where the person left it
--- (screens/control/page, ds/kept_scroll): as the world moves under it (a
--- report in Comms, a thread showing in Progress, a Board card deleted),
--- when its content is short for a moment and grows back, and when another
--- page opened from it is left for it again.
+-- (screens/control/page, ds/kept_scroll): Notes and the Board, as the world
+-- moves under them (a crew report, a thread showing in Progress, a Board
+-- card deleted), when Notes' content is short for a moment and grows back,
+-- and when another page opened from it is left for it again.
 
 local function open(fixture: string?, h: number?): any
 	local app = mount(fixture or "control_page_fixture.luau")
@@ -21,9 +21,9 @@ local function pause(app: any)
 	end
 end
 
--- Where the tab's content is drawn (Overview's widgets, the Board's
--- figures): its top, in the window. (The head, the tabs in it, stays.)
-local MARK = "#control-columns"
+-- Where the tab's content is drawn (Notes' blocks, the Board's figures):
+-- its top, in the window. (The head, the tabs in it, stays.)
+local MARK = "#control-notes"
 local function top(app: any): number
 	local line = string.match(app:tree(MARK), "[^\n]+") or ""
 	return tonumber(string.match(line, " %-?[%d%.]+,(%-?[%d%.]+) ")) or 0
@@ -32,15 +32,14 @@ end
 -- Scrolled down `by`, then `change`: the content as far up after as
 -- before. (`board`: on the Board's tab.)
 local function holds(fixture: string, by: number, change: (any) -> (), board: boolean?)
-	-- (The Board's tab is short: a short window, for it to scroll.)
-	local app = open(fixture, if board then 360 else nil)
-	MARK = if board then "#control-board-figures" else "#control-columns"
-	if board then
-		app:set_state("control_tab", "board")
-		app:frames(30)
-	end
+	-- (Short windows, for each tab to scroll; the Board's room for a whole
+	-- card over Capture's bar.)
+	local app = open(fixture, if board then 460 else 420)
+	MARK = if board then "#control-board-figures" else "#control-notes"
+	app:set_state("control_tab", if board then "board" else "notes")
+	app:frames(30)
 	local start = top(app)
-	app:scroll(if board then "#control-board-scroll" else "#control-scroll", by)
+	app:scroll(if board then "#control-board-scroll" else "#control-notes-scroll", by)
 	app:frames(30)
 	pause(app)
 	local scrolled = top(app)
@@ -55,14 +54,14 @@ local function holds(fixture: string, by: number, change: (any) -> (), board: bo
 	end
 end
 
-test("control scroll: a report in Comms keeps the place", function()
-	holds("control_page_fixture.luau", 600, function(app)
+test("control scroll: a crew report keeps the place", function()
+	holds("control_page_fixture.luau", 400, function(app)
 		app:command("fixture.report")
 	end)
 end)
 
 test("control scroll: a thread showing in Progress keeps the place", function()
-	holds("control_page_fixture.luau", 600, function(app)
+	holds("control_page_fixture.luau", 400, function(app)
 		app:command("fixture.progress_proxy")
 		app:frames(5)
 		app:command("fixture.activity")
@@ -90,24 +89,21 @@ test("control scroll: a Board card deleted keeps the place", function()
 	end, true)
 end)
 
--- Every widget but Capture gone for a frame (as when they are built
--- again), then back: the page was too short to hold the place meanwhile.
+-- Notes' blocks gone for a frame (the Scratchpad opened to the page and
+-- folded back), then back: the page was too short to hold the place
+-- meanwhile.
 test("control scroll: content short for a moment, the place comes back", function()
-	holds("control_page_fixture.luau", 900, function(app)
-		local all = app:state("control_widgets")
-		app:set_state("control_widgets", {
-			order = all.order,
-			hidden = { needs = true, progress = true, map = true, machines = true, comms = true },
-		})
+	holds("control_page_fixture.luau", 400, function(app)
+		app:set_state("control_scratchpad_open", true)
 		app:frames(2)
-		app:set_state("control_widgets", all)
+		app:set_state("control_scratchpad_open", false)
 	end)
 end)
 
 -- Another page opened from it (a thread, Settings), and Back: the page
 -- made again opens where it was.
 test("control scroll: back from another page, the place is kept", function()
-	holds("control_fixture.luau", 600, function(app)
+	holds("control_fixture.luau", 400, function(app)
 		app:command("fixture.leave")
 		app:frames(30)
 		expect(app:has("#control-room")).to_be(false)
@@ -117,12 +113,14 @@ end)
 
 -- Scrolled back to the top, it opens at the top.
 test("control scroll: scrolled back up, the top is kept", function()
-	MARK = "#control-columns"
-	local app = open("control_fixture.luau")
-	local start = top(app)
-	app:scroll("#control-scroll", 600)
+	MARK = "#control-notes"
+	local app = open("control_fixture.luau", 420)
+	app:set_state("control_tab", "notes")
 	app:frames(30)
-	app:scroll("#control-scroll", -2000)
+	local start = top(app)
+	app:scroll("#control-notes-scroll", 400)
+	app:frames(30)
+	app:scroll("#control-notes-scroll", -2000)
 	app:frames(30)
 	expect(top(app)).to_be(start)
 	app:command("fixture.leave")

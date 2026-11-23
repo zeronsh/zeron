@@ -65,8 +65,19 @@ local function closes(app: any): boolean
 	return false
 end
 
+-- Needs you floating over the Map, its rest opened ("n more").
+local NEEDS = "#control-needs-float"
+local function needs_open(app: any)
+	tab(app, "map")
+	if app:has(`{NEEDS} >> .orch-asks-more`) then
+		app:click(`{NEEDS} >> .orch-asks-more`)
+		app:frames(20)
+	end
+end
+
 local function overlay(app: any): any
-	app:click(`#control-widget-needs >> role:button "{QUESTION}"`)
+	needs_open(app)
+	app:click(`{NEEDS} >> role:button "{QUESTION}"`)
 	app:frames(30)
 	expect(shows(app, ".orch-decision")).to_be(true)
 	return app
@@ -91,9 +102,10 @@ end)
 
 test("Needs you shows it compact too, chips and all", function()
 	local app = open()
-	expect(app:has(`#control-widget-needs >> role:button "{QUESTION}"`)).to_be(true)
-	expect(app:has(`#control-widget-needs >> role:button "{SOLID}, recommended"`)).to_be(true)
-	expect(app:has(`#control-widget-needs >> role:button "{DASHED}"`)).to_be(true)
+	needs_open(app)
+	expect(app:has(`#control-needs-float >> role:button "{QUESTION}"`)).to_be(true)
+	expect(app:has(`#control-needs-float >> role:button "{SOLID}, recommended"`)).to_be(true)
+	expect(app:has(`#control-needs-float >> role:button "{DASHED}"`)).to_be(true)
 end)
 
 test("a card waiting on a decision opens its thread at the message that asked", function()
@@ -108,7 +120,8 @@ end)
 -- (Its card in Needs you: the row names the card, its thread with it.)
 test("an ask's card named in Needs you opens the thread at the message that asked", function()
 	local app = open()
-	app:click('#control-widget-needs >> role:button "Open Topology lines: pick a variant at its question"')
+	needs_open(app)
+	app:click('#control-needs-float >> role:button "Open Topology lines: pick a variant at its question"')
 	app:frames(10)
 	expect(calls(app)).to_contain("open:th-topo:msg-topo-ask")
 end)
@@ -121,8 +134,8 @@ test("a chip in the card's detail answers it, after its Undo", function()
 	app:frames(4)
 	expect(app:has(`{DETAIL} >> .orch-sending >> "{DASHED}"`)).to_be(true)
 	-- (Needs you says so too: one pick, wherever it's shown.)
-	tab(app, "overview")
-	expect(app:has('#control-widget-needs >> .orch-sending')).to_be(true)
+	needs_open(app)
+	expect(app:has('#control-needs-float >> .orch-sending')).to_be(true)
 	expect(calls(app)).never.to_contain("answer:")
 	tab(app, "board")
 	expect(app:wait(`{DETAIL} >> role:button "Undo"`, { gone = true, timeout_ms = 8000 })).to_be(true)
@@ -171,8 +184,8 @@ test("in the overlay, a number chooses an option and Decide answers with it", fu
 	app:frames(20)
 	-- Closed; on its way in Needs you, sent past its Undo.
 	expect(closes(app)).to_be(true)
-	expect(app:has("#control-widget-needs >> .orch-sending")).to_be(true)
-	expect(app:wait('#control-widget-needs >> role:button "Undo"', { gone = true, timeout_ms = 8000 })).to_be(true)
+	expect(app:has("#control-needs-float >> .orch-sending")).to_be(true)
+	expect(app:wait('#control-needs-float >> role:button "Undo"', { gone = true, timeout_ms = 8000 })).to_be(true)
 	app:frames(4)
 	expect(calls(app)).to_contain("answer:ak-topo:2:")
 end)
@@ -186,7 +199,7 @@ test("in the overlay, a click chooses, and the reply goes with it on Enter", fun
 	app:key("Enter")
 	app:frames(20)
 	expect(closes(app)).to_be(true)
-	expect(app:wait('#control-widget-needs >> role:button "Undo"', { gone = true, timeout_ms = 8000 })).to_be(true)
+	expect(app:wait('#control-needs-float >> role:button "Undo"', { gone = true, timeout_ms = 8000 })).to_be(true)
 	app:frames(4)
 	expect(calls(app)).to_contain("answer:ak-topo:1:ship it today")
 end)
@@ -196,7 +209,7 @@ test("in the overlay, a reply alone answers it", function()
 	app:type('.orch-decision >> role:textbox "Reply"', "Neither: try 3 first")
 	app:key("Enter")
 	app:frames(20)
-	expect(app:wait('#control-widget-needs >> role:button "Undo"', { gone = true, timeout_ms = 8000 })).to_be(true)
+	expect(app:wait('#control-needs-float >> role:button "Undo"', { gone = true, timeout_ms = 8000 })).to_be(true)
 	app:frames(4)
 	expect(calls(app)).to_contain("answer:ak-topo::Neither: try 3 first")
 end)
@@ -220,7 +233,7 @@ test("Defer puts it off: out of Needs you; its card, snoozed, says when it's bac
 	app:frames(30)
 	expect(calls(app)).to_contain("defer:ak-topo:")
 	expect(closes(app)).to_be(true)
-	expect(app:has(`#control-widget-needs >> role:button "{QUESTION}"`)).to_be(false)
+	expect(app:has(`#control-needs-float >> role:button "{QUESTION}"`)).to_be(false)
 	-- The engine's next frame: the card snoozed till the ask is back.
 	local n = table.clone(app:state("orchestration") :: any)
 	local cards = table.clone(n.cards or {})
@@ -253,7 +266,7 @@ test("an older app sends an option and a reply as plain words: its label, a dash
 	app:type('.orch-decision >> role:textbox "Reply"', "ship it today")
 	app:key("Enter")
 	app:frames(20)
-	expect(app:wait('#control-widget-needs >> .orch-answered', { timeout_ms = 8000 })).to_be(true)
+	expect(app:wait('#control-needs-float >> .orch-answered', { timeout_ms = 8000 })).to_be(true)
 	expect(calls(app)).to_contain(`answer-op:ak-topo:{SOLID} — ship it today`)
 	expect(app:error()).to_be_nil()
 end)
@@ -266,17 +279,17 @@ test("a defer turned down is said on the ask, which stays; Retry sends it again"
 	app:click('"For an hour"')
 	app:frames(30)
 	expect(closes(app)).to_be(true)
-	expect(app:has(`#control-widget-needs >> role:button "{QUESTION}"`)).to_be(true)
-	expect(app:has('#control-widget-needs >> "Couldn\'t defer it: That ask was already answered or dismissed"')).to_be(true)
+	expect(app:has(`#control-needs-float >> role:button "{QUESTION}"`)).to_be(true)
+	expect(app:has('#control-needs-float >> "Couldn\'t defer it: That ask was already answered or dismissed"')).to_be(true)
 	app:command("fixture.answers_ok")
-	app:click('#control-widget-needs >> .orch-need >> role:button "Retry"')
+	app:click('#control-needs-float >> .orch-need >> role:button "Retry"')
 	app:frames(30)
 	local n = 0
 	for _ in calls(app):gmatch("defer:ak%-topo:") do
 		n += 1
 	end
 	expect(n).to_be(2)
-	expect(app:has(`#control-widget-needs >> role:button "{QUESTION}"`)).to_be(false)
+	expect(app:has(`#control-needs-float >> role:button "{QUESTION}"`)).to_be(false)
 end)
 
 test("an engine without deferAsk says so: the error is shown, nothing else tried", function()
@@ -287,8 +300,8 @@ test("an engine without deferAsk says so: the error is shown, nothing else tried
 	app:click('"For an hour"')
 	app:frames(30)
 	expect(calls(app)).to_contain("defer-op:ak-topo:")
-	expect(app:has(`#control-widget-needs >> role:button "{QUESTION}"`)).to_be(true)
-	expect(app:has('#control-widget-needs >> ~"Couldn\'t defer it: unknown variant `deferAsk`"')).to_be(true)
+	expect(app:has(`#control-needs-float >> role:button "{QUESTION}"`)).to_be(true)
+	expect(app:has('#control-needs-float >> ~"Couldn\'t defer it: unknown variant `deferAsk`"')).to_be(true)
 end)
 
 test("the overlay stays open across the engine publishing its state again", function()
@@ -320,19 +333,21 @@ test("the overlay stays open after the click that opened it, and through a click
 end)
 
 test("the overlay stays open when a tooltip or hover card was up as it opened", function()
-	for _, from in { `{DETAIL} >> role:button "{DASHED}"`, `#control-widget-needs >> role:button "{DASHED}"`, `{CARD} >> .orch-card-title` } do
+	for _, from in { `{DETAIL} >> role:button "{DASHED}"`, `{NEEDS} >> role:button "{DASHED}"`, `{CARD} >> .orch-card-title` } do
 		local app = open()
 		-- (The tab kept from the last time round: set each time; on the
 		-- Board, the card's detail open.)
 		local board = string.find(from, "control-board-tab", 1, true) ~= nil
-		tab(app, if board then "board" else "overview")
 		if board then
+			tab(app, "board")
 			opened(app)
+		else
+			needs_open(app)
 		end
 		app:hover(from)
 		app:wait('role:dialog "Tooltip"', { timeout_ms = 2000 })
 		app:frames(10)
-		local expand = if string.find(from, "control-widget-needs", 1, true) then `#control-widget-needs >> role:button "{QUESTION}"` else `{DETAIL} >> .orch-choice-expand`
+		local expand = if string.find(from, NEEDS, 1, true) then `{NEEDS} >> role:button "{QUESTION}"` else `{DETAIL} >> .orch-choice-expand`
 		app:click(expand)
 		app:frames(30)
 		expect(shows(app, ".orch-decision")).to_be(true)
@@ -362,7 +377,7 @@ test("the overlay stays open through a moment the engine's state lacks its ask",
 	local app = overlay(open())
 	app:command("fixture.asks_blip")
 	app:frames(5)
-	expect(app:has(`#control-widget-needs >> role:button "{QUESTION}"`)).to_be(false)
+	expect(app:has(`#control-needs-float >> role:button "{QUESTION}"`)).to_be(false)
 	-- (Past its closing's length: still up, its ask as it was.)
 	app:wait('"never there"', { timeout_ms = 500 })
 	app:frames(5)

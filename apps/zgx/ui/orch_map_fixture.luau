@@ -85,23 +85,29 @@ lanes.watch = function(slot: string, id: string?)
 end
 local page = require("@app/screens/control/page")
 local OrchMap = require("@ds/orch_map")
+-- (Past the first Graph's move to the Topology: a test's own choice of
+-- view stands, the Map built after it as it is.)
+OrchMap.left_graph:set(true)
+-- (Set by `map_bare`: the Graph alone, the page's Map tab not shown.)
+local bare_mode = false
 for _, v in OrchMap.VARIANTS do
 	ui.command { id = `map_{v}`, title = `Map: {v}`, run = function()
 		OrchMap.set(page.map_view, { variant = v })
+		if not bare_mode then
+			page.show_tab("map")
+		end
 	end }
 end
 ui.command { id = "map_window_60", title = "Map: the last hour", run = function()
 	OrchMap.set(page.map_view, { window = 60 })
 end }
--- Only the Map shown (shots): the other widgets hidden.
+-- Only the Map shown (shots and tests): the page on its Map tab. (Not at
+-- load, nor kept from a launch before: a mount's window grows to the size
+-- a test gives it, and the Graph is first laid out at that size, as the
+-- Overview's was.)
+page.show_tab("board")
 ui.command { id = "map_only", title = "Only the Map", run = function()
-	local hidden = {}
-	for _, id in page.WIDGETS do
-		if id ~= "map" then
-			hidden[id] = true
-		end
-	end
-	page.widgets:set({ order = table.clone(page.WIDGETS), hidden = hidden :: any })
+	page.show_tab("map")
 end }
 -- The live one's small world: one machine, the Brain dump, and Tally with
 -- its two crew there.
@@ -1149,14 +1155,27 @@ end
 
 -- (The Map widget alone at a set width, `force_bare_w` points: the force
 -- Graph's balance pictures. The page stays mounted under it for its data,
--- every widget of it hidden (`map_bare`): one Graph at a time.)
+-- on its Notes (`map_bare`), which reads the fleet as the Map does, not
+-- its Map tab: one Graph at a time.)
 local bare_w = ui.state("force_bare_w", 0)
-ui.command { id = "map_bare", title = "Only the Map widget, at a set width", run = function()
-	local hidden = {}
-	for _, id in page.WIDGETS do
-		hidden[id] = true
+-- (Nor built in the background meanwhile, as the page builds its tabs
+-- once it's settled: its Graph would be a second, hidden one.)
+local function unbuild_map()
+	local b = page.built:peek()
+	if bare_mode and b.map then
+		local c = table.clone(b)
+		c.map = nil
+		page.built:set(c)
 	end
-	page.widgets:set({ order = table.clone(page.WIDGETS), hidden = hidden :: any })
+end
+ui.effect(function()
+	page.built:get()
+	unbuild_map()
+end)
+ui.command { id = "map_bare", title = "Only the Map widget, at a set width", run = function()
+	bare_mode = true
+	page.show_tab("notes")
+	unbuild_map()
 end }
 return ui.column {
 	w_full = true,

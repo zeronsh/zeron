@@ -7,11 +7,13 @@
 local function open(): any
 	local app = mount("control_qa_fixture.luau")
 	app:resize(1440, 1400)
+	-- (Q&A and Progress, under Notes.)
+	app:set_state("control_tab", "notes")
 	app:frames(30)
 	return app
 end
 
-local QA = "#control-widget-qa"
+local QA = "#control-notes-qa"
 
 local function marks(app: any): any
 	return app:state("control_qa") or {}
@@ -45,8 +47,8 @@ test("Q&A: an entry says where it was answered, when it was asked and answered, 
 	expect(app:has(`{QA} >> .orch-qa-when >> "Answering"`)).to_be(true)
 	expect(app:has(`{QA} >> .orch-qa-when >> "Waiting"`)).to_be(true)
 	-- The head counts what's new and what waits.
-	expect(app:has('#control-widget-qa >> .control-qa-new >> "2 new"')).to_be(true)
-	expect(app:has('#control-widget-qa >> "2 waiting"')).to_be(true)
+	expect(app:has('#control-notes-qa >> .control-qa-new >> "2 new"')).to_be(true)
+	expect(app:has('#control-notes-qa >> "2 waiting"')).to_be(true)
 end)
 
 test("Q&A: unread answers stand out; read ones step back", function()
@@ -113,11 +115,14 @@ test("Q&A: an answer arriving shows in place, unread, nothing rebuilt or moved",
 	expect(app:has(`{QA} >> .orch-qa-preview >> ~"signed this morning"`)).to_be(true)
 	expect(app:count(`{QA} >> .orch-qa-unread`)).to_be(3)
 	expect(app:count(`{QA} >> .orch-qa-entry`)).to_be(5)
-	expect(app:has('#control-widget-qa >> "1 waiting"')).to_be(true)
+	expect(app:has('#control-notes-qa >> "1 waiting"')).to_be(true)
 end)
 
 test("Q&A: a dump's question parts are marked in Capture; its other parts aren't", function()
 	local app = open()
+	-- (In Capture's history, opened from its bar.)
+	app:click("#control-history-open")
+	app:frames(30)
 	-- The sample's newest dump: two questions (the VPN one, the engine state
 	-- one), three other parts.
 	expect(app:count("#control-capture >> .orch-question-word") > 0).to_be(true)
@@ -127,14 +132,11 @@ test("Q&A: a dump's question parts are marked in Capture; its other parts aren't
 	expect(app:has('#control-capture >> .orch-question-word >> ~"tabs"')).to_be(false)
 end)
 
-test("Q&A: what's read and put away is kept (the device's), and the widget can be hidden", function()
+test("Q&A: what's read and put away is kept (the device's), under Notes", function()
 	local app = open()
 	expect(marks(app).read["dp-qa/rq-3"]).to_be(true)
 	expect(marks(app).dismissed["dp-qa2/rq-6"]).to_be(true)
-	-- In its place in the default order: under Needs you.
-	local w = app:state("control_widgets") or {}
-	local order = w.order or {}
-	expect(table.find(order, "qa") == nil or table.find(order, "qa") == (table.find(order, "needs") or 0) + 1).to_be(true)
+	expect(app:has("#control-notes >> #control-notes-qa >> #orch-qa")).to_be(true)
 end)
 
 -- Loaded as the shell loads a screen (required inside a component's
@@ -143,6 +145,8 @@ end)
 local function screen(): any
 	local app = mount("control_qa_screen_fixture.luau")
 	app:resize(1440, 1400)
+	-- (Q&A and Progress, under Notes.)
+	app:set_state("control_tab", "notes")
 	app:frames(30)
 	app:set_state("qa_screen_shown", false)
 	app:frames(10)
@@ -182,11 +186,11 @@ end)
 
 test("Progress: after the Control room is left and come back to, a thread that starts working shows", function()
 	local app = screen()
-	expect(app:has('#control-widget-progress >> ~"Brand new worker"')).to_be(false)
+	expect(app:has('#control-notes-progress >> ~"Brand new worker"')).to_be(false)
 	app:command("fixture.new_worker")
 	app:frames(20)
 	expect(app:error()).to_be_nil()
-	expect(app:has('#control-widget-progress >> ~"Brand new worker"')).to_be(true)
+	expect(app:has('#control-notes-progress >> ~"Brand new worker"')).to_be(true)
 end)
 
 test("Q&A: Answering only while the thread is on a turn begun since the question came; a busy thread not at it yet is Waiting", function()
