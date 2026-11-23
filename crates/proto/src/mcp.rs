@@ -75,6 +75,11 @@ pub struct McpPreset {
     pub icon: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header_name: Option<String>,
+    /// The server's OAuth has no Dynamic Client Registration: signing in
+    /// takes an app's own client ID (and secret) registered with the vendor,
+    /// redirecting to `McpServersSnapshot::client_redirect_uri` (Slack).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub client_required: bool,
 }
 
 /// Redacted view of a configured MCP server (never carries secret values).
@@ -114,7 +119,15 @@ pub struct McpServersSnapshot {
     pub vault_available: bool,
     pub presets: Vec<McpPreset>,
     pub servers: Vec<McpServerView>,
+    /// The fixed loopback redirect a pre-registered OAuth client (one whose
+    /// client ID the person brings) must allow: unlike a dynamically
+    /// registered client's, its port never changes.
+    pub client_redirect_uri: String,
 }
+
+/// The error `StartMcpAuth` answers with when the server's OAuth can't
+/// register a client itself and none was given: the caller asks for one.
+pub const MCP_CLIENT_REQUIRED: &str = "mcp_client_required";
 
 /// Params for `UpsertMcpServer` (local IPC only; carries credentials).
 #[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

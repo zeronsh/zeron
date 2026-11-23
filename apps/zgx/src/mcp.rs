@@ -638,6 +638,18 @@ mod tests {
                     "icon": "linear",
                 },
                 {
+                    "id": "slack",
+                    "name": "Slack",
+                    "description": "Search channels and post messages.",
+                    "category": "Communication",
+                    "url": "https://mcp.slack.com/mcp",
+                    "transport": "http",
+                    "authKind": "oauth",
+                    "docsUrl": "https://docs.slack.dev/ai/slack-mcp-server/",
+                    "icon": "slack",
+                    "clientRequired": true,
+                },
+                {
                     "id": "context7",
                     "name": "Context7",
                     "description": "Up-to-date library documentation.",
@@ -683,6 +695,7 @@ mod tests {
                     "updatedAt": 1700000001,
                 }
             ],
+            "clientRedirectUri": "http://localhost:38417/callback",
         });
         let snapshot_for_host = snapshot.clone();
         let mut app = TestApp::new(move |runtime| {
@@ -713,19 +726,34 @@ mod tests {
         assert_eq!(app.error(), None);
 
         let texts = app.texts();
-        assert!(texts.iter().any(|t| t == "Zeron Vault"), "missing Vault status: {texts:?}");
+        assert!(texts.iter().any(|t| t == "Your servers"), "missing servers section: {texts:?}");
         assert!(texts.iter().any(|t| t == "Linear"), "missing configured server Linear: {texts:?}");
-        assert!(texts.iter().any(|t| t == "Signed in as ada@zeron.sh"), "missing account label: {texts:?}");
+        assert!(texts.iter().any(|t| t == "ada@zeron.sh"), "missing account label: {texts:?}");
         assert!(texts.iter().any(|t| t == "Local Files"), "missing stdio server: {texts:?}");
         assert!(texts.iter().any(|t| t == "Context7"), "missing preset Context7: {texts:?}");
+        // No storage banner: the page's line under its title says it.
+        assert!(!texts.iter().any(|t| t == "Zeron Vault"), "storage banner is back: {texts:?}");
+        // Linear is added, so it's not offered again.
+        assert_eq!(texts.iter().filter(|t| *t == "Linear").count(), 1, "{texts:?}");
 
-        app.click("#settings-page >> role:button \"Add custom\"");
-        app.frames(15);
+        // Slack has no client registration: Connect asks for its app.
+        app.click("#settings-page >> role:button \"Connect\"[1]");
+        app.frames(20);
+        assert_eq!(app.error(), None);
+        let slack_texts = app.texts();
+        assert!(slack_texts.iter().any(|t| t == "Connect Slack"), "missing Slack dialog: {slack_texts:?}");
+        assert!(
+            slack_texts.iter().any(|t| t == "http://localhost:38417/callback"),
+            "missing redirect URL: {slack_texts:?}"
+        );
+        app.keys("Escape");
+        app.frames(20);
+
+        app.click("#settings-page >> role:button \"Custom server\"");
+        app.frames(20);
         assert_eq!(app.error(), None);
         let form_texts = app.texts();
-        assert!(
-            form_texts.iter().any(|t| t == "Add custom MCP server"),
-            "missing custom form: {form_texts:?}"
-        );
+        assert!(form_texts.iter().any(|t| t == "Add server"), "missing custom server dialog: {form_texts:?}");
+        assert!(form_texts.iter().any(|t| t == "Remote URL"), "missing server type choice: {form_texts:?}");
     }
 }

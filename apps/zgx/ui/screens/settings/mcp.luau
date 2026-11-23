@@ -1,12 +1,24 @@
--- Settings → MCP: managed external MCP servers, Zeron Vault vs local storage
--- status, interactive OAuth sign-in, custom remote/stdio server configuration,
--- and the built-in popular MCP server catalog.
+-- Settings → MCP: the MCP servers every agent gets in every chat, on any
+-- provider (the engine's gateway hands them to each harness). Signed in,
+-- their sign-ins are kept by Zeron Vault and follow you to your devices and
+-- Cloud; signed out, they stay on this device. The page says which in its
+-- line under the title; a server kept on this device alone says so on its
+-- row.
+--
+-- Two lists, as Providers has: your servers, a row each as the Plugins
+-- page's (its mark, what it's doing, its settings and its switch), then the
+-- servers to add, a click each, and a custom one last. Everything that asks
+-- something happens in a dialog: signing in (waiting on the browser, the
+-- app a server like Slack wants first, a key), adding a custom server, and
+-- a server's own settings.
 
 local ds = require("@ds")
-local ds_icon = require("@ds/icon")
 local ds_select = require("@ds/select")
+local material = require("@ds/material")
+local progress = require("@ds/progress")
 local toast = require("@ds/toast")
 local mcp = require("@account/mcp")
+local host = require("@app/screens/settings/host")
 local search = require("@app/screens/settings/search")
 local visits = require("@app/screens/settings/visits")
 
@@ -16,17 +28,39 @@ M.ID = "mcp"
 M.TITLE = "MCP"
 
 search.index(M.ID, ui.t("settings.mcp.title"), ui.t("settings.mcp.terms"), {
-	{ key = "storage", title = ui.t("settings.mcp.storage.title"), terms = ui.t("settings.mcp.storage.terms") },
-	{ key = "custom", title = ui.t("settings.mcp.custom.title"), terms = ui.t("settings.mcp.custom.terms") },
-	{ key = "configured", title = ui.t("settings.mcp.configured.title"), terms = ui.t("settings.mcp.configured.terms") },
-	{ key = "presets", title = ui.t("settings.mcp.presets.title"), terms = ui.t("settings.mcp.presets.terms") },
+	{ key = "servers", title = ui.t("settings.mcp.servers.title"), terms = ui.t("settings.mcp.servers.terms") },
+	{ key = "add", title = ui.t("settings.mcp.add.title"), terms = ui.t("settings.mcp.add.terms") },
 })
+
+-- The engine's word for a server whose OAuth can't register a client
+-- itself (zeron_proto::MCP_CLIENT_REQUIRED): an app's own is asked for.
+local CLIENT_REQUIRED = "mcp_client_required"
+-- (What engines before it said instead.)
+local CLIENT_REQUIRED_OLD = "registration_endpoint"
+
+-- The servers with a mark of their own (assets/icons/mcp, Simple Icons'
+-- in each brand's colour); any other gets its initial on a hue.
+local LOGOS: { [string]: boolean } = {
+	slack = true,
+	linear = true,
+	notion = true,
+	github = true,
+	sentry = true,
+	figma = true,
+	atlassian = true,
+	stripe = true,
+	supabase = true,
+	vercel = true,
+	cloudflare = true,
+	posthog = true,
+}
+local HUES = { "violet", "blue", "teal", "amber", "rose", "indigo", "emerald", "orange" }
 
 local function trim(s: string): string
 	return (string.gsub(s, "^%s*(.-)%s*$", "%1"))
 end
 
-local function error_text(err: any): string?
+local function message_of(err: any): string?
 	if type(err) == "string" and err ~= "" then
 		return err
 	end
@@ -36,19 +70,58 @@ local function error_text(err: any): string?
 	return nil
 end
 
-local function show_error(err: any)
-	toast.show {
-		title = ui.t("settings.mcp.toast.failed"),
-		body = error_text(err),
-		tone = "danger",
-	}
+local function wants_client(err: string?): boolean
+	return err ~= nil
+		and (string.find(err, CLIENT_REQUIRED, 1, true) ~= nil or string.find(err, CLIENT_REQUIRED_OLD, 1, true) ~= nil)
 end
 
--- Splits a shell-like argument string into tokens, respecting single/double quotes.
+-- What went wrong, in words for the person (the engine's own, when it's
+-- nothing known, after them).
+local function friendly(err: string?): string
+	if not err or err == "" then
+		return ui.t("settings.mcp.error.generic"):get()
+	end
+	local lower = string.lower(err)
+	if wants_client(err) then
+		return ui.t("settings.mcp.error.client"):get()
+	elseif string.find(lower, "timed out", 1, true) then
+		return ui.t("settings.mcp.error.timed_out"):get()
+	elseif string.find(lower, "could not open browser", 1, true) then
+		return ui.t("settings.mcp.error.browser"):get()
+	elseif string.find(lower, "in use", 1, true) and string.find(lower, "port", 1, true) then
+		return ui.t("settings.mcp.error.port"):get()
+	elseif lower == "offline" or lower == "closed" then
+		return ui.t("settings.mcp.error.offline"):get()
+	end
+	local first = string.match(err, "^[^\n]*") or err
+	if #first > 160 then
+		first = string.sub(first, 1, 157) .. "…"
+	end
+	return ui.t("settings.mcp.error.detail", { detail = first }):get()
+end
+
+local function host_of(url: string?): string
+	if not url then
+		return ""
+	end
+	return string.match(url, "^%a[%w+.-]*://([^/?#]+)") or url
+end
+
+local function format_args(args: { string }?): string
+	if not args or #args == 0 then
+		return ""
+	end
+	local parts: { string } = {}
+	for _, a in args do
+		table.insert(parts, if string.find(a, "%s") then `"{a}"` else a)
+	end
+	return table.concat(parts, " ")
+end
+
+-- Splits a shell-like argument string, keeping what's quoted together.
 local function split_args(raw: string): { string }
 	local out: { string } = {}
-	local i = 1
-	local len = #raw
+	local i, len = 1, #raw
 	while i <= len do
 		while i <= len and string.match(string.sub(raw, i, i), "%s") do
 			i += 1
@@ -69,14 +142,12 @@ local function split_args(raw: string): { string }
 				else
 					table.insert(buf, ch)
 				end
+			elseif ch == '"' or ch == "'" then
+				quote = ch
+			elseif string.match(ch, "%s") then
+				break
 			else
-				if ch == '"' or ch == "'" then
-					quote = ch
-				elseif string.match(ch, "%s") then
-					break
-				else
-					table.insert(buf, ch)
-				end
+				table.insert(buf, ch)
 			end
 			i += 1
 		end
@@ -91,48 +162,24 @@ end
 local function split_scopes(raw: string): { string }
 	local out: { string } = {}
 	for part in string.gmatch(raw, "[^%s,]+") do
-		if part ~= "" then
-			table.insert(out, part)
-		end
+		table.insert(out, part)
 	end
 	return out
 end
 
-local function parse_headers(raw: string): ({ [string]: string }, string?)
+-- `Name: value` (headers) or `NAME=value` (environment) lines; the first
+-- that isn't one comes back second.
+local function parse_lines(raw: string, sep: string): ({ [string]: string }, string?)
 	local out: { [string]: string } = {}
 	for line in string.gmatch(raw .. "\n", "([^\n]*)\n") do
 		local cleaned = trim(line)
 		if cleaned ~= "" then
-			local colon = string.find(cleaned, ":", 1, true)
-			if not colon then
-				return out, cleaned
-			end
-			local name = trim(string.sub(cleaned, 1, colon - 1))
-			local value = trim(string.sub(cleaned, colon + 1))
-			if name == "" then
-				return out, cleaned
-			end
-			out[name] = value
-		end
-	end
-	return out, nil
-end
-
-local function parse_env(raw: string): ({ [string]: string }, string?)
-	local out: { [string]: string } = {}
-	for line in string.gmatch(raw .. "\n", "([^\n]*)\n") do
-		local cleaned = trim(line)
-		if cleaned ~= "" then
-			local eq = string.find(cleaned, "=", 1, true)
-			if not eq then
-				return out, cleaned
-			end
-			local key = trim(string.sub(cleaned, 1, eq - 1))
-			local value = string.sub(cleaned, eq + 1)
+			local at = string.find(cleaned, sep, 1, true)
+			local key = if at then trim(string.sub(cleaned, 1, at - 1)) else ""
 			if key == "" then
 				return out, cleaned
 			end
-			out[key] = value
+			out[key] = if sep == "=" then string.sub(cleaned, (at :: number) + 1) else trim(string.sub(cleaned, (at :: number) + 1))
 		end
 	end
 	return out, nil
@@ -140,1057 +187,527 @@ end
 
 local function valid_http_url(raw: string): boolean
 	local lower = string.lower(raw)
-	local rest: string? = nil
-	if string.sub(lower, 1, 8) == "https://" then
-		rest = string.sub(raw, 9)
-	elseif string.sub(lower, 1, 7) == "http://" then
-		rest = string.sub(raw, 8)
-	end
-	if not rest or rest == "" then
-		return false
-	end
-	return string.find(rest, "%s") == nil
+	local rest = if string.sub(lower, 1, 8) == "https://"
+		then string.sub(raw, 9)
+		elseif string.sub(lower, 1, 7) == "http://" then string.sub(raw, 8)
+		else nil
+	return rest ~= nil and rest ~= "" and string.find(rest, "%s") == nil
 end
 
-local function format_args(args: { string }?): string
-	if not args or #args == 0 then
-		return ""
-	end
-	local parts: { string } = {}
-	for _, a in args do
-		if string.find(a, "%s") then
-			table.insert(parts, `"{a}"`)
-		else
-			table.insert(parts, a)
-		end
-	end
-	return table.concat(parts, " ")
+local function snapshot(): mcp.Snapshot
+	return mcp.now:get()
 end
 
-local function effective_status(server: mcp.Server, flow: mcp.AuthFlow?): string
-	if not server.enabled then
-		return "disabled"
-	end
-	if flow then
-		if flow.phase == "authorizing" then
-			return "authorizing"
-		elseif flow.phase == "error" then
-			return "error"
-		end
-	end
-	return server.status or "needsAuth"
-end
-
-local function status_badge(status: string): Node
-	if status == "connected" then
-		return ds.Badge { ui.t("settings.mcp.status.connected"), tone = "success", dot = true, shape = "pill" }
-	elseif status == "authorizing" then
-		return ds.Badge { ui.t("settings.mcp.status.authorizing"), tone = "info", dot = true, shape = "pill" }
-	elseif status == "reauthRequired" then
-		return ds.Badge { ui.t("settings.mcp.status.reauth_required"), tone = "warning", dot = true, shape = "pill" }
-	elseif status == "error" then
-		return ds.Badge { ui.t("settings.mcp.status.error"), tone = "danger", dot = true, shape = "pill" }
-	elseif status == "disabled" then
-		return ds.Badge { ui.t("settings.mcp.status.disabled"), tone = "neutral", shape = "pill" }
-	end
-	return ds.Badge { ui.t("settings.mcp.status.needs_auth"), tone = "warning", dot = true, shape = "pill" }
-end
-
-local function storage_badge(storage: string): Node
-	if storage == "vault" then
-		return ds.Badge { ui.t("settings.mcp.badge.vault"), tone = "accent", icon = "shield-check", shape = "pill" }
-	end
-	return ds.Badge { ui.t("settings.mcp.badge.local"), tone = "neutral", icon = "laptop", shape = "pill" }
-end
-
-local function server_subtitle(server: mcp.Server): string
-	if server.transport == "stdio" then
-		local cmd = server.command or ""
-		local arg_text = format_args(server.args)
-		if arg_text ~= "" then
-			return `stdio · {cmd} {arg_text}`
-		end
-		return `stdio · {cmd}`
-	end
-	local kind = if server.transport == "sse" then "SSE" else "HTTP"
-	local url = server.url or ""
-	if url ~= "" then
-		return `{kind} · {url}`
-	end
-	return kind
-end
-
-local function find_upserted_server(
-	snapshot: any,
-	before_ids: { [string]: boolean },
-	target_id: string?,
-	preset_id: string?,
-	name: string,
-	url: string?
-): mcp.Server?
-	local servers: { mcp.Server }? = if type(snapshot) == "table" then snapshot.servers else nil
-	if not servers then
-		servers = mcp.now:peek().servers
-	end
-	if not servers then
+local function preset_by_id(id: string?): mcp.Preset?
+	if not id then
 		return nil
 	end
-	if target_id and target_id ~= "" then
-		for _, s in servers do
-			if s.id == target_id then
-				return s
-			end
+	for _, p in snapshot().presets or {} do
+		if p.id == id then
+			return p
 		end
 	end
-	if preset_id and preset_id ~= "" then
-		for _, s in servers do
-			if s.preset == preset_id or s.id == preset_id then
-				return s
-			end
-		end
+	return nil
+end
+
+local function server_by_id(id: string?): mcp.Server?
+	if not id then
+		return nil
 	end
-	for _, s in servers do
-		if not before_ids[s.id] then
+	for _, s in snapshot().servers or {} do
+		if s.id == id then
 			return s
 		end
 	end
-	local best: mcp.Server? = nil
-	for _, s in servers do
-		if s.name == name and (url == nil or s.url == url) then
-			if not best or (s.updatedAt or 0) >= (best.updatedAt or 0) then
-				best = s
-			end
-		end
-	end
-	return best
+	return nil
 end
 
-function M.view(): Node
-	visits.once("mcp", function()
-		mcp.refresh():after(function() end, function() end)
-	end)
-
-	local refreshing = ui.use_state(false)
-	local preset_query = ui.state("settings_mcp_preset_query", "")
-	local preset_busy = ui.use_state({} :: { [string]: boolean })
-
-	-- Custom / Edit server form state.
-	local form_open = ui.use_state(false)
-	local form_saving = ui.use_state(false)
-	local editing_id = ui.use_state(nil :: string?)
-	local editing_preset = ui.use_state(nil :: string?)
-	local editing_has_bearer = ui.use_state(false)
-	local editing_header_keys = ui.use_state({} :: { string })
-	local editing_env_keys = ui.use_state({} :: { string })
-	local form_transport = ui.use_state("http" :: mcp.Transport)
-	local form_name = ui.use_state("")
-	local form_url = ui.use_state("")
-	local form_auth_kind = ui.use_state("oauth" :: mcp.AuthKind)
-	local form_bearer = ui.use_state("")
-	local form_headers = ui.use_state("")
-	local form_oauth_advanced = ui.use_state(false)
-	local form_client_id = ui.use_state("")
-	local form_client_secret = ui.use_state("")
-	local form_scopes = ui.use_state("")
-	local form_local_only = ui.use_state(false)
-	local form_command = ui.use_state("")
-	local form_args = ui.use_state("")
-	local form_env = ui.use_state("")
-	local form_error = ui.use_state(nil :: string?)
-
-	-- Remove confirmation dialog state.
-	local remove_open = ui.use_state(false)
-	local remove_target = ui.use_state(nil :: { id: string, name: string }?)
-	local remove_busy = ui.use_state(false)
-
-	local function reset_form()
-		editing_id:set(nil)
-		editing_preset:set(nil)
-		editing_has_bearer:set(false)
-		editing_header_keys:set({})
-		editing_env_keys:set({})
-		form_transport:set("http")
-		form_name:set("")
-		form_url:set("")
-		form_auth_kind:set("oauth")
-		form_bearer:set("")
-		form_headers:set("")
-		form_oauth_advanced:set(false)
-		form_client_id:set("")
-		form_client_secret:set("")
-		form_scopes:set("")
-		form_local_only:set(false)
-		form_command:set("")
-		form_args:set("")
-		form_env:set("")
-		form_error:set(nil)
+local function server_for_preset(p: mcp.Preset): mcp.Server?
+	for _, s in snapshot().servers or {} do
+		if s.preset == p.id or s.id == p.id then
+			return s
+		end
 	end
+	return nil
+end
 
-	local function open_add_form()
-		if form_open:peek() and editing_id:peek() == nil and editing_preset:peek() == nil then
-			form_open:set(false)
-			return
-		end
-		reset_form()
-		form_open:set(true)
-	end
-
-	local function open_edit_form(server: mcp.Server)
-		reset_form()
-		editing_id:set(server.id)
-		editing_preset:set(server.preset)
-		editing_has_bearer:set(server.authKind == "bearer")
-		editing_header_keys:set(server.headerKeys or {})
-		editing_env_keys:set(server.envKeys or {})
-		form_transport:set(server.transport)
-		form_name:set(server.name or "")
-		form_url:set(server.url or "")
-		form_auth_kind:set(server.authKind or "none")
-		form_local_only:set(server.storage == "local")
-		form_command:set(server.command or "")
-		form_args:set(format_args(server.args))
-		local scopes_text = table.concat(server.scopes or {}, " ")
-		form_scopes:set(scopes_text)
-		form_oauth_advanced:set(scopes_text ~= "")
-		form_open:set(true)
-	end
-
-	local function open_preset_form(preset: mcp.Preset)
-		reset_form()
-		editing_preset:set(preset.id)
-		form_transport:set(preset.transport)
-		form_name:set(preset.name)
-		form_url:set(preset.url)
-		form_auth_kind:set(preset.authKind)
-		if preset.authKind == "headers" and preset.headerName and preset.headerName ~= "" then
-			form_headers:set(`{preset.headerName}: `)
-		end
-		form_open:set(true)
-	end
-
-	local function begin_oauth(server_id: string, server_name: string, opts: { clientId: string?, clientSecret: string?, scopes: { string }? }?)
-		local req: mcp.StartAuthRequest = {
-			id = server_id,
-			clientId = if opts then opts.clientId else nil,
-			clientSecret = if opts then opts.clientSecret else nil,
-			scopes = if opts then opts.scopes else nil,
-		}
-		mcp.start_auth(req):after(function()
-			toast.show {
-				title = ui.t("settings.mcp.toast.auth_started", { name = server_name }),
-				tone = "info",
-			}
-		end, function(err: any)
-			show_error(err)
-		end)
-	end
-
-	local function submit_form(and_sign_in: boolean)
-		if form_saving:peek() then
-			return
-		end
-		form_error:set(nil)
-
-		local name = trim(form_name:peek())
-		if name == "" then
-			form_error:set(ui.t("settings.mcp.form.error_name"):get())
-			return
-		end
-
-		local transport = form_transport:peek()
-		local req: mcp.UpsertRequest
-		local oauth_client_id: string? = nil
-		local oauth_client_secret: string? = nil
-		local oauth_scopes: { string } = {}
-		local target_url: string? = nil
-
-		if transport == "stdio" then
-			local command = trim(form_command:peek())
-			if command == "" then
-				form_error:set(ui.t("settings.mcp.form.error_command"):get())
-				return
-			end
-			local env_map, bad_env = parse_env(form_env:peek())
-			if bad_env then
-				form_error:set(ui.t("settings.mcp.form.error_env_line", { line = bad_env }):get())
-				return
-			end
-			req = {
-				id = editing_id:peek(),
-				name = name,
-				preset = editing_preset:peek(),
-				transport = "stdio",
-				command = command,
-				args = split_args(form_args:peek()),
-				env = env_map,
-				authKind = "none",
-				localOnly = true,
-			}
-		else
-			local url = trim(form_url:peek())
-			if not valid_http_url(url) then
-				form_error:set(ui.t("settings.mcp.form.error_url"):get())
-				return
-			end
-			target_url = url
-
-			local auth_kind = form_auth_kind:peek()
-			local bearer_token: string? = nil
-			local headers_map: { [string]: string } = {}
-
-			if auth_kind == "bearer" then
-				local tok = trim(form_bearer:peek())
-				if tok ~= "" then
-					bearer_token = tok
-				end
-			elseif auth_kind == "headers" then
-				local parsed, bad_header = parse_headers(form_headers:peek())
-				if bad_header then
-					form_error:set(ui.t("settings.mcp.form.error_header_line", { line = bad_header }):get())
-					return
-				end
-				headers_map = parsed
-			elseif auth_kind == "oauth" then
-				local cid = trim(form_client_id:peek())
-				local csec = trim(form_client_secret:peek())
-				oauth_client_id = if cid ~= "" then cid else nil
-				oauth_client_secret = if csec ~= "" then csec else nil
-				oauth_scopes = split_scopes(form_scopes:peek())
-			end
-
-			local vault_available = mcp.now:peek().vaultAvailable
-			req = {
-				id = editing_id:peek(),
-				name = name,
-				preset = editing_preset:peek(),
-				transport = transport,
-				url = url,
-				authKind = auth_kind,
-				bearerToken = bearer_token,
-				headers = headers_map,
-				localOnly = if vault_available then form_local_only:peek() else true,
-				oauthClientId = oauth_client_id,
-				oauthClientSecret = oauth_client_secret,
-				oauthScopes = oauth_scopes,
-			}
-		end
-
-		local before_ids: { [string]: boolean } = {}
-		for _, s in mcp.now:peek().servers or {} do
-			before_ids[s.id] = true
-		end
-		local was_editing = editing_id:peek() ~= nil
-
-		form_saving:set(true)
-		mcp.upsert(req):after(function(reply: any)
-			form_saving:set(false)
-			form_open:set(false)
-			local saved = find_upserted_server(reply, before_ids, req.id, req.preset, name, target_url)
-			if and_sign_in and saved and req.authKind == "oauth" then
-				begin_oauth(saved.id, saved.name, {
-					clientId = oauth_client_id,
-					clientSecret = oauth_client_secret,
-					scopes = if #oauth_scopes > 0 then oauth_scopes else nil,
-				})
-			else
-				toast.show {
-					title = ui.t(if was_editing then "settings.mcp.toast.saved" else "settings.mcp.toast.added", { name = name }),
-					tone = "success",
-				}
-			end
-		end, function(err: any)
-			form_saving:set(false)
-			form_error:set(error_text(err) or ui.t("settings.mcp.toast.failed"):get())
-		end)
-	end
-
-	local function connect_preset(preset: mcp.Preset)
-		if preset.authKind == "bearer" or preset.authKind == "headers" then
-			open_preset_form(preset)
-			return
-		end
-		local busy_map = preset_busy:peek()
-		if busy_map[preset.id] then
-			return
-		end
-		preset_busy:set_key(preset.id, true)
-
-		local before_ids: { [string]: boolean } = {}
-		for _, s in mcp.now:peek().servers or {} do
-			before_ids[s.id] = true
-		end
-
-		local vault_available = mcp.now:peek().vaultAvailable
-		local req: mcp.UpsertRequest = {
-			name = preset.name,
-			preset = preset.id,
-			transport = preset.transport,
-			url = preset.url,
-			authKind = preset.authKind,
-			enabled = true,
-			localOnly = not vault_available,
-		}
-		mcp.upsert(req):after(function(reply: any)
-			preset_busy:set_key(preset.id, nil :: any)
-
-			local created = find_upserted_server(reply, before_ids, nil, preset.id, preset.name, preset.url)
-			if preset.authKind == "oauth" and created then
-				begin_oauth(created.id, created.name, nil)
-			else
-				toast.show {
-					title = ui.t("settings.mcp.toast.added", { name = preset.name }),
-					tone = "success",
-				}
-			end
-		end, function(err: any)
-			preset_busy:set_key(preset.id, nil :: any)
-			show_error(err)
-		end)
-	end
-
-	local function server_for_preset(preset: mcp.Preset): mcp.Server?
-		for _, s in mcp.now:get().servers or {} do
-			if s.preset == preset.id or s.id == preset.id or (s.url ~= nil and s.url == preset.url) then
-				return s
-			end
-		end
-		return nil
-	end
-
-	local servers_list = ui.computed(function(): { mcp.Server }
-		return mcp.now:get().servers or {}
-	end)
-
-	local filtered_presets = ui.computed(function(): { mcp.Preset }
-		local presets = mcp.now:get().presets or {}
-		local q = string.lower(trim(preset_query:get()))
-		if q == "" then
-			return presets
-		end
-		local out: { mcp.Preset } = {}
-		for _, p in presets do
-			local hay = string.lower(`{p.name} {p.category} {p.description} {p.id}`)
-			if string.find(hay, q, 1, true) ~= nil then
-				table.insert(out, p)
-			end
-		end
-		return out
-	end)
-
-	-- 1. Storage status section.
-	local storage_section = search.anchor(
-		"storage",
-		ds.Settings.Section {
-			title = ui.t("settings.mcp.storage.title"),
-			ds.Settings.Group {
-				ui.presence(function(): string
-					return if mcp.now:get().vaultAvailable then "vault" else "local"
-				end, function(mode: string): Node
-					if mode == "vault" then
-						return ds.Settings.Row {
-							icon = "shield-check",
-							label = ui.t("settings.mcp.storage.vault_title"),
-							description = ui.t("settings.mcp.storage.vault_description"),
-							control = ds.Badge { ui.t("settings.mcp.storage.synced_badge"), tone = "success", dot = true, shape = "pill" },
-						}
-					end
-					return ds.Settings.Row {
-						icon = "laptop",
-						label = ui.t("settings.mcp.storage.local_title"),
-						description = ui.t("settings.mcp.storage.local_description"),
-						control = ds.Badge { ui.t("settings.mcp.storage.local_badge"), tone = "neutral", shape = "pill" },
-					}
-				end, { w_full = true }),
-			},
-		}
-	)
-
-	ui.effect(function()
-		if search.lit:get() == "custom" and not form_open:peek() then
-			reset_form()
-			form_open:set(true)
-		end
-	end)
-
-	-- 2. Collapsible Add / Edit Custom MCP Server form.
-	local custom_form_section = ui.show(form_open, function(): Node
-		return search.anchor(
-			"custom",
-			ds.Settings.Section {
-				title = ui.t("settings.mcp.custom.title"),
-				description = ui.t("settings.mcp.form.description"),
-				ds.Settings.Group {
-				ui.column {
-					w_full = true,
-					px = "$space.4",
-					py = "$space.4",
-					gap = "$space.3",
-					ui.text {
-						function(): string
-							return ui.t(if editing_id:get() ~= nil then "settings.mcp.form.edit_title" else "settings.mcp.form.add_title"):get()
-						end,
-						text_size = "$font.size.md",
-						line_height = "$font.line.md",
-						weight = "$font.weight.semibold",
-						color = "$text.primary",
-					},
-					ds.Select {
-						value = form_transport,
-						label = ui.t("settings.mcp.form.transport"),
-						w_full = true,
-						options = function(): { ds_select.Option }
-							return {
-								{ value = "http", label = ui.t("settings.mcp.form.transport_http"):get() },
-								{ value = "sse", label = ui.t("settings.mcp.form.transport_sse"):get() },
-								{ value = "stdio", label = ui.t("settings.mcp.form.transport_stdio"):get() },
-							}
-						end,
-					},
-					ds.TextField {
-						value = form_name,
-						label = ui.t("settings.mcp.form.name"),
-						placeholder = ui.t("settings.mcp.form.name_placeholder"),
-						w_full = true,
-					},
-					-- Remote (HTTP / SSE) fields.
-					ui.show(function(): boolean
-						return form_transport:get() ~= "stdio"
-					end, ui.column {
-						w_full = true,
-						gap = "$space.3",
-						ds.TextField {
-							value = form_url,
-							label = ui.t("settings.mcp.form.url"),
-							placeholder = "https://mcp.example.com/mcp",
-							inputmode = "url",
-							w_full = true,
-						},
-						ds.Select {
-							value = form_auth_kind,
-							label = ui.t("settings.mcp.form.auth_kind"),
-							w_full = true,
-							options = function(): { ds_select.Option }
-								return {
-									{ value = "oauth", label = ui.t("settings.mcp.form.auth_oauth"):get() },
-									{ value = "bearer", label = ui.t("settings.mcp.form.auth_bearer"):get() },
-									{ value = "headers", label = ui.t("settings.mcp.form.auth_headers"):get() },
-									{ value = "none", label = ui.t("settings.mcp.form.auth_none"):get() },
-								}
-							end,
-						},
-						-- Bearer token input.
-						ui.show(function(): boolean
-							return form_auth_kind:get() == "bearer"
-						end, ds.TextField {
-							value = form_bearer,
-							label = ui.t("settings.mcp.form.bearer_token"),
-							placeholder = ui.t("settings.mcp.form.bearer_placeholder"),
-							hint = function(): string
-								if editing_id:get() ~= nil and editing_has_bearer:get() then
-									return ui.t("settings.mcp.form.bearer_keep_hint"):get()
-								end
-								return ""
-							end,
-							password = true,
-							w_full = true,
-						}),
-						-- Custom headers multi-line input.
-						ui.show(function(): boolean
-							return form_auth_kind:get() == "headers"
-						end, ds.TextArea {
-							value = form_headers,
-							label = ui.t("settings.mcp.form.headers"),
-							placeholder = "X-Api-Key: your-key",
-							hint = function(): string
-								local keys = editing_header_keys:get()
-								if editing_id:get() ~= nil and #keys > 0 then
-									return ui.t("settings.mcp.form.headers_keep_hint", { keys = table.concat(keys, ", ") }):get()
-								end
-								return ui.t("settings.mcp.form.headers_hint"):get()
-							end,
-							rows = 3,
-							max_rows = 6,
-							mono = true,
-							w_full = true,
-						}),
-						-- Collapsible Advanced OAuth overrides.
-						ui.show(function(): boolean
-							return form_auth_kind:get() == "oauth"
-						end, ui.column {
-							w_full = true,
-							gap = "$space.2",
-							ds.Button {
-								tone = "ghost",
-								size = "sm",
-								self = "start",
-								on_click = function()
-									form_oauth_advanced:toggle()
-								end,
-								ds.Icon {
-									name = function(): ds_icon.Name
-										return if form_oauth_advanced:get() then "alt-arrow-down" else "alt-arrow-right"
-									end,
-									size = 14,
-								},
-								ui.t("settings.mcp.form.oauth_advanced"),
-							},
-							ui.show(form_oauth_advanced, ui.column {
-								w_full = true,
-								gap = "$space.3",
-								pl = "$space.3",
-								ui.text {
-									ui.t("settings.mcp.form.oauth_advanced_hint"),
-									text_size = "$font.size.sm",
-									line_height = "$font.line.sm",
-									color = "$text.tertiary",
-									wrap = true,
-								},
-								ds.TextField {
-									value = form_client_id,
-									label = ui.t("settings.mcp.form.oauth_client_id"),
-									placeholder = ui.t("settings.mcp.form.oauth_client_id_placeholder"),
-									w_full = true,
-								},
-								ds.TextField {
-									value = form_client_secret,
-									label = ui.t("settings.mcp.form.oauth_client_secret"),
-									placeholder = ui.t("settings.mcp.form.oauth_client_secret_placeholder"),
-									password = true,
-									w_full = true,
-								},
-								ds.TextField {
-									value = form_scopes,
-									label = ui.t("settings.mcp.form.oauth_scopes"),
-									placeholder = ui.t("settings.mcp.form.oauth_scopes_placeholder"),
-									w_full = true,
-								},
-							}),
-						}),
-						-- Vault local-only override when signed in with Vault available.
-						ui.show(function(): boolean
-							return mcp.now:get().vaultAvailable
-						end, ui.row {
-							w_full = true,
-							items = "center",
-							gap = "$space.3",
-							pt = "$space.1",
-							ui.column {
-								grow = 1,
-								min_w = 0,
-								gap = "$zeron.space.hair",
-								ui.text {
-									ui.t("settings.mcp.form.local_only"),
-									text_size = "$font.size.md",
-									line_height = "$font.line.md",
-									weight = "$font.weight.medium",
-									color = "$text.primary",
-									wrap = true,
-								},
-								ui.text {
-									ui.t("settings.mcp.form.local_only_description"),
-									text_size = "$font.size.sm",
-									line_height = "$font.line.sm",
-									color = "$text.tertiary",
-									wrap = true,
-								},
-							},
-							ds.Switch {
-								value = form_local_only,
-								label = ui.t("settings.mcp.form.local_only"),
-							},
-						}),
-					}),
-					-- Local (stdio) fields.
-					ui.show(function(): boolean
-						return form_transport:get() == "stdio"
-					end, ui.column {
-						w_full = true,
-						gap = "$space.3",
-						ds.TextField {
-							value = form_command,
-							label = ui.t("settings.mcp.form.command"),
-							placeholder = "npx",
-							hint = ui.t("settings.mcp.form.command_hint"),
-							w_full = true,
-						},
-						ds.TextField {
-							value = form_args,
-							label = ui.t("settings.mcp.form.args"),
-							placeholder = "-y @modelcontextprotocol/server-filesystem /path",
-							hint = ui.t("settings.mcp.form.args_hint"),
-							w_full = true,
-						},
-						ds.TextArea {
-							value = form_env,
-							label = ui.t("settings.mcp.form.env"),
-							placeholder = "API_KEY=your-secret",
-							hint = function(): string
-								local keys = editing_env_keys:get()
-								if editing_id:get() ~= nil and #keys > 0 then
-									return ui.t("settings.mcp.form.env_keep_hint", { keys = table.concat(keys, ", ") }):get()
-								end
-								return ui.t("settings.mcp.form.env_hint"):get()
-							end,
-							rows = 3,
-							max_rows = 6,
-							mono = true,
-							w_full = true,
-						},
-						ui.row {
-							w_full = true,
-							items = "center",
-							gap = "$space.2",
-							color = "$text.tertiary",
-							ds.Icon { name = "laptop", size = 14 },
-							ui.text {
-								ui.t("settings.mcp.form.stdio_local_note"),
-								grow = 1,
-								min_w = 0,
-								text_size = "$font.size.sm",
-								line_height = "$font.line.sm",
-								color = "$text.tertiary",
-								wrap = true,
-							},
-						},
-					}),
-					-- Inline validation / save error.
-					ui.show(function(): boolean
-						return form_error:get() ~= nil
-					end, ui.text {
-						function(): string
-							return form_error:get() or ""
-						end,
-						text_size = "$font.size.sm",
-						line_height = "$font.line.sm",
-						color = "$zeron.tone.danger.ink",
-						wrap = true,
-					}),
-					-- Form action buttons.
-					ui.row {
-						w_full = true,
-						justify = "end",
-						items = "center",
-						gap = "$space.2",
-						pt = "$space.2",
-						ds.Button {
-							ui.t("common.cancel"),
-							tone = "ghost",
-							size = "sm",
-							disabled = form_saving,
-							on_click = function()
-								form_open:set(false)
-							end,
-						},
-						ds.Button {
-							ui.t("settings.mcp.form.save"),
-							tone = "secondary",
-							size = "sm",
-							busy = form_saving,
-							on_click = function()
-								submit_form(false)
-							end,
-						},
-						ui.show(function(): boolean
-							return editing_id:get() == nil and form_transport:get() ~= "stdio" and form_auth_kind:get() == "oauth"
-						end, ds.Button {
-							ui.t("settings.mcp.form.save_and_sign_in"),
-							tone = "primary",
-							size = "sm",
-							busy = form_saving,
-							on_click = function()
-								submit_form(true)
-							end,
-						}),
-					},
-				},
-			},
-		}
-		)
-	end)
-
-	-- 3. Configured MCP Servers section.
-	local function configured_row(initial: mcp.Server, _: number, server_state: State<mcp.Server>): Node
-		local enabled_state = ui.use_state(initial.enabled)
-		ui.effect(function()
-			local current = server_state:get()
-			if enabled_state:peek() ~= current.enabled then
-				enabled_state:set(current.enabled)
-			end
-		end)
-
-		local function current_flow(): mcp.AuthFlow?
-			return mcp.auth_flows:get()[server_state:get().id]
-		end
-
-		local function current_status(): string
-			return effective_status(server_state:get(), current_flow())
-		end
-
-		local function current_error(): string?
-			local flow = current_flow()
-			if flow and flow.phase == "error" and flow.error and flow.error ~= "" then
-				return flow.error
-			end
-			local s = server_state:get()
-			if s.lastError and s.lastError ~= "" then
-				return s.lastError
-			end
-			return nil
-		end
-
+-- A server's mark: its brand's on the marks' tile, else its initial.
+local function Logo(icon: string?, name: string, size: number): Node
+	if icon and LOGOS[icon] then
 		return ui.column {
-			w_full = true,
-			px = "$space.4",
-			py = "$space.3",
-			gap = "$space.2",
-			-- Top row: server identity + badges + enable switch.
-			ui.row {
-				w_full = true,
-				items = "center",
-				gap = "$space.3",
-				flex_wrap = true,
-				ui.column {
-					grow = 1,
-					min_w = 0,
-					gap = "$zeron.space.hair",
-					ui.row {
-						gap = "$space.2",
-						items = "center",
-						flex_wrap = true,
-						ui.text {
-							function(): string
-								return server_state:get().name
-							end,
-							text_size = "$font.size.md",
-							line_height = "$font.line.md",
-							weight = "$font.weight.medium",
-							color = "$text.primary",
-							wrap = true,
-						},
-						ui.presence(function(): string
-							return server_state:get().storage or "local"
-						end, storage_badge),
-						ui.presence(current_status, status_badge),
-					},
-					ui.text {
-						function(): string
-							return server_subtitle(server_state:get())
-						end,
-						text_size = "$font.size.sm",
-						line_height = "$font.line.sm",
-						color = "$text.tertiary",
-						wrap = true,
-					},
-				},
-				ui.row {
-					shrink = 0,
-					items = "center",
-					gap = "$space.2",
-					-- OAuth primary action: Sign in / Reconnect / Cancel / Disconnect.
-					ui.presence(function(): string
-						local s = server_state:get()
-						if s.authKind ~= "oauth" or not s.enabled then
-							return "none"
-						end
-						local st = current_status()
-						if st == "authorizing" then
-							return "cancel"
-						elseif st == "connected" then
-							return "disconnect"
-						elseif st == "reauthRequired" or st == "error" then
-							return "reconnect"
-						end
-						return "sign_in"
-					end, function(kind: string): Node
-						if kind == "cancel" then
-							return ds.Button {
-								ui.t("settings.mcp.action.cancel"),
-								tone = "secondary",
-								size = "xs",
-								on_click = function()
-									local s = server_state:peek()
-									local flow = mcp.auth_flows:peek()[s.id]
-									mcp.cancel_auth(s.id, if flow then flow.flowId else nil):after(function() end, show_error)
-								end,
-							}
-						elseif kind == "disconnect" then
-							return ds.Button {
-								ui.t("settings.mcp.action.disconnect"),
-								tone = "ghost",
-								size = "xs",
-								on_click = function()
-									local s = server_state:peek()
-									mcp.disconnect_auth(s.id):after(function()
-										toast.show {
-											title = ui.t("settings.mcp.toast.disconnected", { name = s.name }),
-											tone = "neutral",
-										}
-									end, show_error)
-								end,
-							}
-						elseif kind == "reconnect" then
-							return ds.Button {
-								ui.t("settings.mcp.action.reconnect"),
-								tone = "secondary",
-								size = "xs",
-								on_click = function()
-									local s = server_state:peek()
-									begin_oauth(s.id, s.name, nil)
-								end,
-							}
-						elseif kind == "sign_in" then
-							return ds.Button {
-								ui.t("settings.mcp.action.sign_in"),
-								tone = "primary",
-								size = "xs",
-								on_click = function()
-									local s = server_state:peek()
-									begin_oauth(s.id, s.name, nil)
-								end,
-							}
-						end
-						return ui.div {}
-					end),
-					ds.IconButton {
-						icon = "pen",
-						label = ui.t("common.edit"),
-						size = "sm",
-						tone = "quiet",
-						on_click = function()
-							open_edit_form(server_state:peek())
-						end,
-					},
-					ds.IconButton {
-						icon = "trash-bin-minimalistic",
-						label = ui.t("common.remove"),
-						size = "sm",
-						tone = "danger",
-						on_click = function()
-							local s = server_state:peek()
-							remove_target:set({ id = s.id, name = s.name })
-							remove_open:set(true)
-						end,
-					},
-					ds.Switch {
-						value = enabled_state,
-						label = ui.t("settings.mcp.action.enable_label", {
-							name = function(): string
-								return server_state:get().name
-							end,
-						}),
-						on_change = function(on: boolean)
-							local s = server_state:peek()
-							mcp.set_enabled(s.id, on):after(function() end, function(err: any)
-								enabled_state:set(not on)
-								show_error(err)
-							end)
-						end,
-					},
-				},
-			},
-			-- Optional account label.
-			ui.show(function(): boolean
-				local label = server_state:get().accountLabel
-				return label ~= nil and label ~= ""
-			end, function(): Node
-				return ui.text {
-					function(): string
-						local label = server_state:get().accountLabel or ""
-						return ui.t("settings.mcp.account_label", { account = label }):get()
-					end,
-					text_size = "$font.size.sm",
-					line_height = "$font.line.sm",
-					color = "$text.secondary",
-					wrap = true,
-				}
-			end),
-			-- Optional error message.
-			ui.show(function(): boolean
-				return current_error() ~= nil
-			end, function(): Node
-				return ui.text {
-					function(): string
-						return current_error() or ""
-					end,
-					text_size = "$font.size.sm",
-					line_height = "$font.line.sm",
-					color = "$zeron.tone.danger.ink",
-					wrap = true,
-				}
-			end),
+			w = size,
+			h = size,
+			shrink = 0,
+			rounded = ui.raw(size * 0.25, "a mark tile's radius scales with it"),
+			items = "center",
+			justify = "center",
+			bg = "$zeron.mark.bg",
+			border = 1,
+			border_color = "$zeron.mark.border",
+			aria_hidden = true,
+			ui.svg { src = `assets/icons/mcp/{icon}.svg`, w = size * 0.56, h = size * 0.56, shrink = 0 },
 		}
 	end
+	local sum = 0
+	for i = 1, #name do
+		sum += string.byte(name, i)
+	end
+	return ds.Tile { label = name, hue = HUES[sum % #HUES + 1], size = size }
+end
 
-	local configured_section = search.anchor(
-		"configured",
-		ds.Settings.Section {
-			title = ui.t("settings.mcp.configured.title"),
-			description = ui.t("settings.mcp.configured.description"),
-			ui.show(function(): boolean
-				return #servers_list:get() == 0
-			end, ds.Settings.Group {
-				ds.EmptyState {
-					icon = "remote-server",
-					size = "sm",
-					title = ui.t("settings.mcp.configured.empty_title"),
-					body = ui.t("settings.mcp.configured.empty_body"),
-					action = {
-						label = ui.t("settings.mcp.add_custom"),
-						icon = "plus",
-						on_click = open_add_form,
-					},
-				},
-			}),
-			ds.Settings.Each(servers_list, configured_row, {
-				key = function(s: mcp.Server): string
-					return s.id
-				end,
-			}),
-		}
-	)
+local function server_logo(s: mcp.Server, size: number): Node
+	local p = preset_by_id(s.preset)
+	return Logo(if p then p.icon else nil, s.name, size)
+end
 
-	-- 4. Popular MCP Servers catalog section.
-	local function preset_row(_: mcp.Preset, _: number, preset_state: State<mcp.Preset>): Node
+-- ── Signing in ─────────────────────────────────────────────────────────
+-- One dialog for every sign-in, by step: waiting on the browser; the app
+-- the server wants first (its client ID and secret, and the address to
+-- allow); a key for a server that takes one; or what went wrong.
+
+local connect_open = ui.state("settings_mcp_connect_open", false)
+local connect_server = ui.state("settings_mcp_connect_server", nil :: string?)
+local connect_preset = ui.state("settings_mcp_connect_preset", nil :: string?)
+local connect_step = ui.state("settings_mcp_connect_step", "waiting")
+local connect_error = ui.state("settings_mcp_connect_error", "")
+local connect_busy = ui.state("settings_mcp_connect_busy", false)
+local client_id = ui.state("settings_mcp_client_id", "")
+local client_secret = ui.state("settings_mcp_client_secret", "")
+local key_value = ui.state("settings_mcp_key_value", "")
+-- Whether this sign-in has been seen under way: a flow's last outcome
+-- (done, from an earlier one) doesn't end the one just started.
+local armed = false
+
+-- The name the dialog speaks of (a preset's before it's added).
+local function connect_name(): string
+	local s = server_by_id(connect_server:get())
+	if s then
+		return s.name
+	end
+	local p = preset_by_id(connect_preset:get())
+	return if p then p.name else ""
+end
+
+local function connect_icon(): string?
+	local s = server_by_id(connect_server:get())
+	local p = preset_by_id(if s then s.preset else connect_preset:get())
+	return if p then p.icon else nil
+end
+
+local function connect_docs(): string?
+	local s = server_by_id(connect_server:get())
+	local p = preset_by_id(if s then s.preset else connect_preset:get())
+	return if p and p.docsUrl ~= "" then p.docsUrl else nil
+end
+
+local function settle_error(err: any)
+	connect_busy:set(false)
+	local text = message_of(err)
+	if text == "cancelled" then
+		return
+	end
+	if wants_client(text) then
+		connect_error:set("")
+		connect_step:set("client")
+	else
+		connect_error:set(friendly(text))
+		connect_step:set("error")
+	end
+	connect_open:set(true)
+end
+
+local function sign_in(id: string, opts: { clientId: string?, clientSecret: string? }?)
+	connect_server:set(id)
+	connect_error:set("")
+	connect_step:set("waiting")
+	connect_busy:set(false)
+	connect_open:set(true)
+	armed = false
+	mcp.start_auth({
+		id = id,
+		clientId = if opts then opts.clientId else nil,
+		clientSecret = if opts then opts.clientSecret else nil,
+	}):after(function() end, settle_error)
+end
+
+local function upsert_preset(p: mcp.Preset, extra: { [string]: any }?): any
+	local req: { [string]: any } = {
+		name = p.name,
+		preset = p.id,
+		transport = p.transport,
+		url = p.url,
+		authKind = p.authKind,
+		enabled = true,
+		localOnly = not snapshot().vaultAvailable,
+	}
+	for k, v in extra or {} do
+		req[k] = v
+	end
+	return mcp.upsert(req :: any)
+end
+
+-- The server an upsert made or changed, from its reply (else the list).
+local function saved_server(reply: any, id: string?, preset: string?, before: { [string]: boolean }): mcp.Server?
+	local servers: { mcp.Server } = if type(reply) == "table" and reply.servers then reply.servers else (mcp.now:peek().servers or {})
+	for _, s in servers do
+		if (id and s.id == id) or (preset and s.preset == preset) then
+			return s
+		end
+	end
+	for _, s in servers do
+		if not before[s.id] then
+			return s
+		end
+	end
+	return nil
+end
+
+local function ids_now(): { [string]: boolean }
+	local out: { [string]: boolean } = {}
+	for _, s in mcp.now:peek().servers or {} do
+		out[s.id] = true
+	end
+	return out
+end
+
+-- Connect, from the list of servers to add.
+local function connect(p: mcp.Preset)
+	local existing = server_for_preset(p)
+	if existing then
+		if existing.authKind == "oauth" then
+			sign_in(existing.id)
+		end
+		return
+	end
+	connect_server:set(nil)
+	connect_preset:set(p.id)
+	connect_error:set("")
+	connect_busy:set(false)
+	if p.authKind == "bearer" or p.authKind == "headers" then
+		key_value:set("")
+		connect_step:set("key")
+		connect_open:set(true)
+		return
+	elseif p.authKind == "oauth" and (p :: any).clientRequired then
+		client_id:set("")
+		client_secret:set("")
+		connect_step:set("client")
+		connect_open:set(true)
+		return
+	end
+	local before = ids_now()
+	upsert_preset(p):after(function(reply: any)
+		local s = saved_server(reply, nil, p.id, before)
+		if p.authKind == "oauth" and s then
+			sign_in(s.id)
+		else
+			toast.show { title = ui.t("settings.mcp.toast.added", { name = p.name }), tone = "success" }
+		end
+	end, function(err: any)
+		toast.show { title = ui.t("settings.mcp.toast.couldnt_add", { name = p.name }), body = friendly(message_of(err)), tone = "danger" }
+	end)
+end
+
+-- The dialog's way on, by its step.
+local function connect_confirm()
+	local step = connect_step:peek()
+	if connect_busy:peek() then
+		return
+	end
+	if step == "error" then
+		local id = connect_server:peek()
+		local p = preset_by_id(connect_preset:peek())
+		if id then
+			sign_in(id)
+		elseif p then
+			connect(p)
+		end
+		return
+	elseif step == "client" then
+		local cid, csec = trim(client_id:peek()), trim(client_secret:peek())
+		if cid == "" then
+			return
+		end
+		local opts = { clientId = cid, clientSecret = if csec ~= "" then csec else nil }
+		local id = connect_server:peek()
+		if id then
+			sign_in(id, opts)
+			return
+		end
+		local p = preset_by_id(connect_preset:peek())
+		if not p then
+			return
+		end
+		connect_busy:set(true)
+		local before = ids_now()
+		upsert_preset(p, { oauthClientId = opts.clientId, oauthClientSecret = opts.clientSecret }):after(function(reply: any)
+			connect_busy:set(false)
+			local s = saved_server(reply, nil, p.id, before)
+			if s then
+				sign_in(s.id, opts)
+			end
+		end, settle_error)
+		return
+	elseif step == "key" then
+		local p = preset_by_id(connect_preset:peek())
+		local value = trim(key_value:peek())
+		if not p or value == "" then
+			return
+		end
+		connect_busy:set(true)
+		local extra: { [string]: any } = if p.authKind == "headers"
+			then { headers = { [p.headerName or "Authorization"] = value } }
+			else { bearerToken = value }
+		upsert_preset(p, extra):after(function()
+			connect_busy:set(false)
+			connect_open:set(false)
+			toast.show { title = ui.t("settings.mcp.toast.connected", { name = p.name }), tone = "success" }
+		end, settle_error)
+	end
+end
+
+local function cancel_waiting()
+	local id = connect_server:peek()
+	if id and connect_step:peek() == "waiting" then
+		local flow = mcp.auth_flows:peek()[id]
+		if flow and flow.phase == "authorizing" then
+			mcp.cancel_auth(id, flow.flowId):after(function() end, function() end)
+		end
+	end
+end
+
+local function copy_line(text: () -> string): Node
+	local copied = ui.use_state(false)
+	return ui.row {
+		w_full = true,
+		gap = "$space.2",
+		items = "center",
+		pl = "$space.3",
+		pr = "$space.1",
+		py = "$space.1",
+		rounded = "$radius.lg",
+		bg = "$zeron.secondary.bg",
+		ui.text {
+			text,
+			grow = 1,
+			min_w = 0,
+			font = "$font.mono",
+			text_size = "$font.size.sm",
+			line_height = "$font.line.sm",
+			color = "$text.primary",
+			selectable = true,
+		},
+		ds.IconButton {
+			icon = function()
+				return if copied:get() then "check" else "copy"
+			end,
+			label = ui.t("settings.mcp.client.copy"),
+			size = "sm",
+			tone = "quiet",
+			on_click = function()
+				ui.clipboard.write(text())
+				copied:set(true)
+				ui.after(1400, function()
+					copied:set(false)
+				end)
+			end,
+		},
+	}
+end
+
+local function connect_body(step: string): Node
+	if step == "waiting" then
 		return ui.row {
 			w_full = true,
-			px = "$space.4",
-			py = "$space.3",
 			gap = "$space.3",
 			items = "center",
-			flex_wrap = true,
+			px = "$space.4",
+			py = "$space.3",
+			rounded = "$radius.lg",
+			bg = "$zeron.secondary.bg",
+			progress.ProgressRing { size = 16, tone = "neutral", label = ui.t("settings.mcp.connect.waiting_label"):get() },
+			ui.text {
+				ui.t("settings.mcp.connect.waiting_hint"),
+				grow = 1,
+				min_w = 0,
+				text_size = "$font.size.sm",
+				line_height = "$font.line.sm",
+				color = "$text.secondary",
+				wrap = true,
+			},
+		}
+	elseif step == "client" then
+		return ui.column {
+			w_full = true,
+			gap = "$space.3",
+			ui.column {
+				w_full = true,
+				gap = "$space.1",
+				ui.text {
+					ui.t("settings.mcp.client.redirect"),
+					text_size = "$font.size.sm",
+					line_height = "$font.line.sm",
+					weight = "$font.weight.medium",
+					color = "$text.secondary",
+				},
+				copy_line(function(): string
+					local uri = (mcp.now:get() :: any).clientRedirectUri
+					return if type(uri) == "string" and uri ~= "" then uri else "http://localhost:38417/callback"
+				end),
+			},
+			ds.TextField {
+				value = client_id,
+				label = ui.t("settings.mcp.client.id"),
+				placeholder = "1234567890.1234567890",
+				autofocus = true,
+				w_full = true,
+			},
+			ds.TextField {
+				value = client_secret,
+				label = ui.t("settings.mcp.client.secret"),
+				password = true,
+				w_full = true,
+			},
+			ui.show(function(): boolean
+				return connect_docs() ~= nil
+			end, ds.Button {
+				tone = "ghost",
+				size = "sm",
+				self = "start",
+				on_click = function()
+					local url = connect_docs()
+					if url then
+						host.invoke("open_url", url)
+					end
+				end,
+				ds.Icon { name = "arrow-up-right", size = 14 },
+				ui.t("settings.mcp.client.how"),
+			}),
+		}
+	elseif step == "key" then
+		return ds.TextField {
+			value = key_value,
+			label = function(): string
+				local p = preset_by_id(connect_preset:get())
+				return if p and p.headerName and p.headerName ~= "" then p.headerName else ui.t("settings.mcp.key.label"):get()
+			end,
+			password = true,
+			autofocus = true,
+			w_full = true,
+		}
+	end
+	return ds.Callout {
+		tone = "danger",
+		title = function(): string
+			return connect_error:get()
+		end,
+	}
+end
+
+local function connect_dialog(): Node
+	-- Closed while waiting: the flow it was waiting on is cancelled.
+	ui.effect(function()
+		if not connect_open:get() then
+			cancel_waiting()
+		end
+	end)
+	-- The flow's outcome ends the wait: connected, or why not.
+	ui.effect(function()
+		local id = connect_server:get()
+		local flow = if id then mcp.auth_flows:get()[id] else nil
+		if not id or not flow or connect_step:peek() ~= "waiting" or not connect_open:peek() then
+			return
+		end
+		if flow.phase == "authorizing" then
+			armed = true
+		elseif armed and flow.phase == "done" then
+			armed = false
+			local name = connect_name()
+			connect_open:set(false)
+			toast.show { title = ui.t("settings.mcp.toast.connected", { name = name }), tone = "success" }
+		elseif armed and flow.phase == "error" then
+			armed = false
+			settle_error(flow.error)
+		end
+	end)
+	return ds.Dialog {
+		open = connect_open,
+		size = "sm",
+		title = function(): string
+			local name = connect_name()
+			local step = connect_step:get()
+			if step == "waiting" then
+				return ui.t("settings.mcp.connect.waiting_title", { name = name }):get()
+			elseif step == "error" then
+				return ui.t("settings.mcp.connect.error_title", { name = name }):get()
+			end
+			return ui.t("settings.mcp.connect.title", { name = name }):get()
+		end,
+		body = function(): string
+			local name = connect_name()
+			local step = connect_step:get()
+			if step == "waiting" then
+				return ui.t("settings.mcp.connect.waiting_body", { name = name }):get()
+			elseif step == "client" then
+				return ui.t("settings.mcp.client.body", { name = name }):get()
+			elseif step == "key" then
+				return ui.t("settings.mcp.key.body", { name = name }):get()
+			end
+			return ui.t("settings.mcp.connect.error_body"):get()
+		end,
+		confirm = {
+			label = function(): string
+				local step = connect_step:get()
+				if step == "waiting" then
+					return ui.t("settings.mcp.connect.waiting_button"):get()
+				elseif step == "error" then
+					return ui.t("settings.mcp.connect.try_again"):get()
+				elseif step == "key" then
+					return ui.t("settings.mcp.connect.connect"):get()
+				end
+				return ui.t("settings.mcp.connect.continue"):get()
+			end,
+			keep_open = true,
+			busy = function(): boolean
+				return connect_busy:get() or connect_step:get() == "waiting"
+			end,
+			disabled = function(): boolean
+				local step = connect_step:get()
+				if step == "client" then
+					return trim(client_id:get()) == ""
+				elseif step == "key" then
+					return trim(key_value:get()) == ""
+				end
+				return step == "waiting"
+			end,
+			on_click = connect_confirm,
+		},
+		ui.row {
+			w_full = true,
+			gap = "$space.3",
+			items = "center",
+			ui.presence(function(): string
+				return `{connect_icon() or ""}\0{connect_name()}`
+			end, function(key: string): Node
+				local icon, name = string.match(key, "^(.-)%z(.*)$")
+				return Logo(if icon ~= "" then icon else nil, name or "", 32)
+			end),
 			ui.column {
 				grow = 1,
 				min_w = 0,
 				gap = "$zeron.space.hair",
-				ui.row {
-					gap = "$space.2",
-					items = "center",
-					flex_wrap = true,
-					ui.text {
-						function(): string
-							return preset_state:get().name
-						end,
-						text_size = "$font.size.md",
-						line_height = "$font.line.md",
-						weight = "$font.weight.medium",
-						color = "$text.primary",
-					},
-					ui.show(function(): boolean
-						local cat = preset_state:get().category
-						return cat ~= nil and cat ~= ""
-					end, function(): Node
-						return ds.Badge {
-							function(): string
-								return preset_state:get().category or ""
-							end,
-							tone = "neutral",
-							shape = "pill",
-						}
-					end),
+				ui.text {
+					connect_name,
+					text_size = "$font.size.md",
+					line_height = "$font.line.md",
+					weight = "$font.weight.medium",
+					color = "$text.primary",
 				},
 				ui.text {
 					function(): string
-						return preset_state:get().description or ""
+						return if snapshot().vaultAvailable
+							then ui.t("settings.mcp.connect.synced"):get()
+							else ui.t("settings.mcp.connect.local"):get()
 					end,
 					text_size = "$font.size.sm",
 					line_height = "$font.line.sm",
@@ -1198,210 +715,754 @@ function M.view(): Node
 					wrap = true,
 				},
 			},
-			ui.row {
-				shrink = 0,
-				items = "center",
-				gap = "$space.2",
-				ui.presence(function(): string
-					local p = preset_state:get()
-					local existing = server_for_preset(p)
-					if not existing then
-						return if p.authKind == "bearer" or p.authKind == "headers" then "configure" else "connect"
-					end
-					local st = effective_status(existing, mcp.auth_flows:get()[existing.id])
-					if st == "connected" then
-						return "connected"
-					elseif st == "authorizing" then
-						return "authorizing"
-					elseif existing.authKind == "oauth" and existing.enabled and (st == "needsAuth" or st == "reauthRequired" or st == "error") then
-						return "added_needs_auth"
-					end
-					return "added"
-				end, function(state_kind: string): Node
-					if state_kind == "connected" then
-						return ds.Badge { ui.t("settings.mcp.status.connected"), tone = "success", dot = true, shape = "pill" }
-					elseif state_kind == "authorizing" then
-						return ui.row {
-							gap = "$space.2",
-							items = "center",
-							ds.Badge { ui.t("settings.mcp.status.authorizing"), tone = "info", dot = true, shape = "pill" },
-							ds.Button {
-								ui.t("settings.mcp.action.cancel"),
-								tone = "ghost",
-								size = "xs",
-								on_click = function()
-									local existing = server_for_preset(preset_state:peek())
-									if existing then
-										local flow = mcp.auth_flows:peek()[existing.id]
-										mcp.cancel_auth(existing.id, if flow then flow.flowId else nil):after(function() end, show_error)
-									end
-								end,
-							},
-						}
-					elseif state_kind == "added_needs_auth" then
-						return ui.row {
-							gap = "$space.2",
-							items = "center",
-							ds.Badge { ui.t("settings.mcp.presets.added"), tone = "neutral", shape = "pill" },
-							ds.Button {
-								ui.t("settings.mcp.action.sign_in"),
-								tone = "primary",
-								size = "xs",
-								on_click = function()
-									local existing = server_for_preset(preset_state:peek())
-									if existing then
-										begin_oauth(existing.id, existing.name, nil)
-									end
-								end,
-							},
-						}
-					elseif state_kind == "added" then
-						return ds.Badge { ui.t("settings.mcp.presets.added"), tone = "neutral", shape = "pill" }
-					elseif state_kind == "configure" then
-						return ds.Button {
-							ui.t("settings.mcp.presets.configure"),
-							tone = "secondary",
-							size = "sm",
-							on_click = function()
-								open_preset_form(preset_state:peek())
-							end,
-						}
-					end
-					return ds.Button {
-						ui.t("settings.mcp.presets.connect"),
-						tone = "secondary",
-						size = "sm",
-						busy = function(): boolean
-							return preset_busy:get()[preset_state:get().id] == true
-						end,
-						on_click = function()
-							connect_preset(preset_state:peek())
-						end,
-					}
-				end),
-			},
-		}
-	end
+		},
+		ui.presence(function(): string
+			return connect_step:get()
+		end, connect_body, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
+	}
+end
 
-	local presets_section = search.anchor(
-		"presets",
-		ds.Settings.Section {
-			title = ui.t("settings.mcp.presets.title"),
-			description = ui.t("settings.mcp.presets.description"),
-			ds.SearchField {
-				value = preset_query,
-				placeholder = ui.t("settings.mcp.presets.search"),
-				results = function(): number
-					return #filtered_presets:get()
-				end,
-				size = "sm",
+-- ── A server's settings (and a custom one's adding) ───────────────────
+
+local form_open = ui.state("settings_mcp_form_open", false)
+local editing = ui.state("settings_mcp_editing", nil :: string?)
+local form_kind = ui.state("settings_mcp_form_kind", "remote")
+local form_name = ui.state("settings_mcp_form_name", "")
+local form_url = ui.state("settings_mcp_form_url", "")
+local form_auth = ui.state("settings_mcp_form_auth", "oauth")
+local form_bearer = ui.state("settings_mcp_form_bearer", "")
+local form_headers = ui.state("settings_mcp_form_headers", "")
+local form_own_client = ui.state("settings_mcp_form_own_client", false)
+local form_client_id = ui.state("settings_mcp_form_client_id", "")
+local form_client_secret = ui.state("settings_mcp_form_client_secret", "")
+local form_scopes = ui.state("settings_mcp_form_scopes", "")
+local form_sync = ui.state("settings_mcp_form_sync", true)
+local form_command = ui.state("settings_mcp_form_command", "")
+local form_args = ui.state("settings_mcp_form_args", "")
+local form_env = ui.state("settings_mcp_form_env", "")
+local form_error = ui.state("settings_mcp_form_error", "")
+local form_busy = ui.state("settings_mcp_form_busy", false)
+
+local remove_open = ui.state("settings_mcp_remove_open", false)
+local remove_target = ui.state("settings_mcp_remove_target", nil :: { id: string, name: string }?)
+
+local function editing_server(): mcp.Server?
+	return server_by_id(editing:get())
+end
+
+-- A server added from the list: its address and sign-in are its preset's.
+local function editing_preset(): boolean
+	local s = editing_server()
+	return s ~= nil and s.preset ~= nil and s.preset ~= ""
+end
+
+local function open_add()
+	editing:set(nil)
+	form_kind:set("remote")
+	form_name:set("")
+	form_url:set("")
+	form_auth:set("oauth")
+	form_bearer:set("")
+	form_headers:set("")
+	form_own_client:set(false)
+	form_client_id:set("")
+	form_client_secret:set("")
+	form_scopes:set("")
+	form_sync:set(true)
+	form_command:set("")
+	form_args:set("")
+	form_env:set("")
+	form_error:set("")
+	form_busy:set(false)
+	form_open:set(true)
+end
+
+local function open_manage(s: mcp.Server)
+	open_add()
+	editing:set(s.id)
+	form_kind:set(if s.transport == "stdio" then "local" else "remote")
+	form_name:set(s.name or "")
+	form_url:set(s.url or "")
+	form_auth:set(s.authKind or "none")
+	form_sync:set(s.storage ~= "local")
+	form_command:set(s.command or "")
+	form_args:set(format_args(s.args))
+	local scopes = table.concat(s.scopes or {}, " ")
+	form_scopes:set(scopes)
+	form_open:set(true)
+end
+
+local function submit_form()
+	if form_busy:peek() then
+		return
+	end
+	form_error:set("")
+	local current = server_by_id(editing:peek())
+	local name = trim(form_name:peek())
+	if name == "" then
+		form_error:set(ui.t("settings.mcp.form.error_name"):get())
+		return
+	end
+	local vault = snapshot().vaultAvailable
+	local req: { [string]: any }
+	local sign_in_after = false
+	local opts: { clientId: string?, clientSecret: string? }? = nil
+	if current and current.preset and current.preset ~= "" then
+		-- (A listed server: its name and where it's kept, nothing else.)
+		req = {
+			id = current.id,
+			name = name,
+			preset = current.preset,
+			transport = current.transport,
+			url = current.url,
+			authKind = current.authKind,
+			localOnly = if vault then not form_sync:peek() else true,
+		}
+	elseif form_kind:peek() == "local" then
+		local command = trim(form_command:peek())
+		if command == "" then
+			form_error:set(ui.t("settings.mcp.form.error_command"):get())
+			return
+		end
+		local env, bad = parse_lines(form_env:peek(), "=")
+		if bad then
+			form_error:set(ui.t("settings.mcp.form.error_env_line", { line = bad }):get())
+			return
+		end
+		req = {
+			id = editing:peek(),
+			name = name,
+			transport = "stdio",
+			command = command,
+			args = split_args(form_args:peek()),
+			env = env,
+			authKind = "none",
+			localOnly = true,
+		}
+	else
+		local url = trim(form_url:peek())
+		if not valid_http_url(url) then
+			form_error:set(ui.t("settings.mcp.form.error_url"):get())
+			return
+		end
+		local auth = form_auth:peek()
+		req = {
+			id = editing:peek(),
+			name = name,
+			transport = "http",
+			url = url,
+			authKind = auth,
+			headers = {},
+			localOnly = if vault then not form_sync:peek() else true,
+		}
+		if auth == "bearer" then
+			local token = trim(form_bearer:peek())
+			if token ~= "" then
+				req.bearerToken = token
+			elseif not current then
+				form_error:set(ui.t("settings.mcp.form.error_token"):get())
+				return
+			end
+		elseif auth == "headers" then
+			local headers, bad = parse_lines(form_headers:peek(), ":")
+			if bad then
+				form_error:set(ui.t("settings.mcp.form.error_header_line", { line = bad }):get())
+				return
+			end
+			req.headers = headers
+		elseif auth == "oauth" then
+			local cid, csec = trim(form_client_id:peek()), trim(form_client_secret:peek())
+			if cid ~= "" then
+				req.oauthClientId = cid
+				opts = { clientId = cid, clientSecret = if csec ~= "" then csec else nil }
+			end
+			if csec ~= "" then
+				req.oauthClientSecret = csec
+			end
+			req.oauthScopes = split_scopes(form_scopes:peek())
+			sign_in_after = current == nil
+		end
+	end
+	local before = ids_now()
+	form_busy:set(true)
+	mcp.upsert(req :: any):after(function(reply: any)
+		form_busy:set(false)
+		form_open:set(false)
+		local s = saved_server(reply, req.id, nil, before)
+		if sign_in_after and s then
+			sign_in(s.id, opts)
+		else
+			toast.show {
+				title = ui.t(if current then "settings.mcp.toast.saved" else "settings.mcp.toast.added", { name = name }),
+				tone = "success",
+			}
+		end
+	end, function(err: any)
+		form_busy:set(false)
+		form_error:set(friendly(message_of(err)))
+	end)
+end
+
+local function label_text(text: any): Node
+	return ui.text {
+		text,
+		text_size = "$font.size.sm",
+		line_height = "$font.line.sm",
+		color = "$text.tertiary",
+		wrap = true,
+	}
+end
+
+local function form_dialog(): Node
+	local function custom(): boolean
+		return not editing_preset()
+	end
+	local function remote(): boolean
+		return custom() and form_kind:get() == "remote"
+	end
+	local function signed_in(): boolean
+		local s = editing_server()
+		return s ~= nil and s.authKind == "oauth" and s.status == "connected"
+	end
+	-- Kept in the vault or here: a choice while there's a vault, for what
+	-- isn't a command on this computer.
+	local function syncable(): boolean
+		local s = editing_server()
+		local is_local = if s then s.transport == "stdio" else form_kind:get() == "local"
+		return snapshot().vaultAvailable and not is_local
+	end
+	return ds.Dialog {
+		open = form_open,
+		size = "md",
+		hold = function(): boolean
+			return form_busy:get()
+		end,
+		title = function(): string
+			local s = editing_server()
+			return if s then s.name else ui.t("settings.mcp.form.add_title"):get()
+		end,
+		body = function(): string
+			local s = editing_server()
+			if not s then
+				return ui.t("settings.mcp.form.add_body"):get()
+			end
+			if s.transport == "stdio" then
+				return `{s.command or ""} {format_args(s.args)}`
+			end
+			return s.url or ""
+		end,
+		confirm = {
+			label = function(): string
+				return if editing:get() then ui.t("settings.mcp.form.save"):get() else ui.t("settings.mcp.form.add"):get()
+			end,
+			keep_open = true,
+			busy = function(): boolean
+				return form_busy:get()
+			end,
+			on_click = submit_form,
+		},
+		ds.TextField {
+			value = form_name,
+			label = ui.t("settings.mcp.form.name"),
+			placeholder = ui.t("settings.mcp.form.name_placeholder"),
+			w_full = true,
+		},
+		ui.show(function(): boolean
+			return custom() and editing:get() == nil
+		end, ds.Segmented {
+			value = form_kind,
+			fill = true,
+			label = ui.t("settings.mcp.form.kind"),
+			options = {
+				{ value = "remote", label = ui.t("settings.mcp.form.kind_remote") },
+				{ value = "local", label = ui.t("settings.mcp.form.kind_local") },
+			},
+		}),
+		-- A remote server: its address and how it signs in.
+		ui.show(remote, ui.column {
+			w_full = true,
+			gap = "$space.3",
+			ds.TextField {
+				value = form_url,
+				label = ui.t("settings.mcp.form.url"),
+				placeholder = "https://mcp.example.com/mcp",
+				inputmode = "url",
 				w_full = true,
 			},
+			ds.Select {
+				value = form_auth,
+				label = ui.t("settings.mcp.form.auth"),
+				w_full = true,
+				options = function(): { ds_select.Option }
+					return {
+						{ value = "oauth", label = ui.t("settings.mcp.form.auth_oauth"):get() },
+						{ value = "bearer", label = ui.t("settings.mcp.form.auth_bearer"):get() },
+						{ value = "headers", label = ui.t("settings.mcp.form.auth_headers"):get() },
+						{ value = "none", label = ui.t("settings.mcp.form.auth_none"):get() },
+					}
+				end,
+			},
 			ui.show(function(): boolean
-				return #filtered_presets:get() == 0 and trim(preset_query:get()) ~= ""
-			end, ds.Settings.Group {
-				ds.EmptyState {
-					icon = "search",
+				return form_auth:get() == "bearer"
+			end, ds.TextField {
+				value = form_bearer,
+				label = ui.t("settings.mcp.form.token"),
+				hint = function(): string
+					local s = editing_server()
+					return if s and s.authKind == "bearer" then ui.t("settings.mcp.form.token_kept"):get() else ""
+				end,
+				password = true,
+				w_full = true,
+			}),
+			ui.show(function(): boolean
+				return form_auth:get() == "headers"
+			end, ds.TextArea {
+				value = form_headers,
+				label = ui.t("settings.mcp.form.headers"),
+				placeholder = "X-Api-Key: …",
+				hint = function(): string
+					local s = editing_server()
+					local keys = if s then s.headerKeys or {} else {}
+					return if #keys > 0
+						then ui.t("settings.mcp.form.headers_kept", { keys = table.concat(keys, ", ") }):get()
+						else ui.t("settings.mcp.form.headers_hint"):get()
+				end,
+				rows = 2,
+				max_rows = 6,
+				mono = true,
+				w_full = true,
+			}),
+			-- Your own OAuth app, for a server that registers none itself.
+			ui.show(function(): boolean
+				return form_auth:get() == "oauth"
+			end, ui.column {
+				w_full = true,
+				gap = "$space.3",
+				ui.show(function(): boolean
+					return not form_own_client:get()
+				end, ds.Button {
+					tone = "ghost",
 					size = "sm",
-					title = ui.t("settings.mcp.presets.no_match_title", { q = preset_query }),
-					body = ui.t("settings.mcp.presets.no_match_body"),
-					action = {
-						label = ui.t("settings.mcp.presets.clear_search"),
+					self = "start",
+					on_click = function()
+						form_own_client:set(true)
+					end,
+					ui.t("settings.mcp.form.own_client"),
+				}),
+				ui.show(form_own_client, ui.column {
+					w_full = true,
+					gap = "$space.3",
+					label_text(ui.t("settings.mcp.form.own_client_hint")),
+					copy_line(function(): string
+						local uri = (mcp.now:get() :: any).clientRedirectUri
+						return if type(uri) == "string" and uri ~= "" then uri else "http://localhost:38417/callback"
+					end),
+					ds.TextField { value = form_client_id, label = ui.t("settings.mcp.client.id"), w_full = true },
+					ds.TextField { value = form_client_secret, label = ui.t("settings.mcp.client.secret"), password = true, w_full = true },
+					ds.TextField {
+						value = form_scopes,
+						label = ui.t("settings.mcp.form.scopes"),
+						placeholder = ui.t("settings.mcp.form.scopes_placeholder"),
+						w_full = true,
+					},
+				}),
+			}),
+		}),
+		-- A command on this computer: what runs, with what.
+		ui.show(function(): boolean
+			return custom() and form_kind:get() == "local"
+		end, ui.column {
+			w_full = true,
+			gap = "$space.3",
+			ds.TextField {
+				value = form_command,
+				label = ui.t("settings.mcp.form.command"),
+				placeholder = "npx",
+				w_full = true,
+			},
+			ds.TextField {
+				value = form_args,
+				label = ui.t("settings.mcp.form.args"),
+				placeholder = "-y @modelcontextprotocol/server-filesystem ~/Documents",
+				w_full = true,
+			},
+			ds.TextArea {
+				value = form_env,
+				label = ui.t("settings.mcp.form.env"),
+				placeholder = "API_KEY=…",
+				hint = function(): string
+					local s = editing_server()
+					local keys = if s then s.envKeys or {} else {}
+					return if #keys > 0 then ui.t("settings.mcp.form.env_kept", { keys = table.concat(keys, ", ") }):get() else ""
+				end,
+				rows = 2,
+				max_rows = 6,
+				mono = true,
+				w_full = true,
+			},
+			label_text(ui.t("settings.mcp.form.local_note")),
+		}),
+		-- Where it's kept, and (a server of yours) signing out and removing:
+		-- a card of the rows that apply, each bringing the rule over it (a
+		-- Group's rules would stand between rows that aren't there).
+		ui.show(function(): boolean
+			return syncable() or signed_in() or editing:get() ~= nil
+		end, ui.column {
+			w_full = true,
+			rounded = "$radius.xl",
+			bg = material.pick("$zeron.settings.tint", "$zeron.settings.card"),
+			border = 1,
+			border_color = "$zeron.settings.edge",
+			overflow = "hidden",
+			ui.show(syncable, ds.Settings.Row {
+				label = ui.t("settings.mcp.form.sync"),
+				description = ui.t("settings.mcp.form.sync_description"),
+				control = ds.Switch { value = form_sync, label = ui.t("settings.mcp.form.sync") },
+			}),
+			ui.show(signed_in, ui.column {
+				w_full = true,
+				ui.show(syncable, ds.Settings.Rule()),
+				ds.Settings.Row {
+					label = ui.t("settings.mcp.manage.signed_in"),
+					description = function(): string
+						local s = editing_server()
+						return if s and s.accountLabel and s.accountLabel ~= "" then s.accountLabel else host_of(if s then s.url else nil)
+					end,
+					control = ds.Button {
+						ui.t("settings.mcp.manage.sign_out"),
+						tone = "secondary",
+						size = "sm",
 						on_click = function()
-							preset_query:set("")
+							local s = editing_server()
+							if s then
+								mcp.disconnect_auth(s.id):after(function()
+									toast.show { title = ui.t("settings.mcp.toast.signed_out", { name = s.name }), tone = "neutral" }
+								end, function(err: any)
+									form_error:set(friendly(message_of(err)))
+								end)
+							end
 						end,
 					},
 				},
 			}),
-			ds.Settings.Each(filtered_presets, preset_row, {
-				key = function(p: mcp.Preset): string
-					return p.id
-				end,
-				wash = true,
+			ui.show(function(): boolean
+				return editing:get() ~= nil
+			end, ui.column {
+				w_full = true,
+				ui.show(function(): boolean
+					return syncable() or signed_in()
+				end, ds.Settings.Rule()),
+				ds.Settings.Row {
+					label = ui.t("settings.mcp.manage.remove"),
+					description = ui.t("settings.mcp.manage.remove_description"),
+					danger = true,
+					control = ds.Button {
+						ui.t("common.remove"),
+						tone = "danger",
+						size = "sm",
+						on_click = function()
+							local s = editing_server()
+							if s then
+								remove_target:set({ id = s.id, name = s.name })
+								form_open:set(false)
+								remove_open:set(true)
+							end
+						end,
+					},
+				},
 			}),
-		}
-	)
+		}),
+		ui.show(function(): boolean
+			return form_error:get() ~= ""
+		end, ui.text {
+			function(): string
+				return form_error:get()
+			end,
+			text_size = "$font.size.sm",
+			line_height = "$font.line.sm",
+			color = "$zeron.tone.danger.ink",
+			wrap = true,
+		}),
+	}
+end
 
-	-- Remove confirmation dialog.
-	local remove_dialog = ds.Dialog {
+local function remove_dialog(): Node
+	return ds.Dialog {
 		open = remove_open,
 		tone = "danger",
 		title = function(): string
 			local t = remove_target:get()
-			return ui.t("settings.mcp.remove_dialog.title", { name = if t then t.name else "" }):get()
+			return ui.t("settings.mcp.remove.title", { name = if t then t.name else "" }):get()
 		end,
-		body = ui.t("settings.mcp.remove_dialog.body"),
-		hold = function(): boolean
-			return remove_busy:get()
-		end,
+		body = ui.t("settings.mcp.remove.body"),
 		confirm = {
 			label = ui.t("common.remove"),
-			keep_open = true,
-			busy = function(): boolean
-				return remove_busy:get()
-			end,
 			on_click = function()
-				local target = remove_target:peek()
-				if not target or remove_busy:peek() then
+				local t = remove_target:peek()
+				if not t then
 					return
 				end
-				remove_busy:set(true)
-				mcp.delete(target.id):after(function()
-					remove_busy:set(false)
-					remove_open:set(false)
-					if editing_id:peek() == target.id then
-						form_open:set(false)
-					end
-					toast.show {
-						title = ui.t("settings.mcp.toast.removed", { name = target.name }),
-						tone = "neutral",
-					}
+				mcp.delete(t.id):after(function()
+					toast.show { title = ui.t("settings.mcp.toast.removed", { name = t.name }), tone = "neutral" }
 				end, function(err: any)
-					remove_busy:set(false)
-					show_error(err)
+					toast.show { title = ui.t("settings.mcp.toast.couldnt_remove", { name = t.name }), body = friendly(message_of(err)), tone = "danger" }
 				end)
 			end,
 		},
 	}
+end
+
+-- ── The page ───────────────────────────────────────────────────────────
+
+-- What a server is doing, for its row.
+local function state_of(s: mcp.Server): string
+	if not s.enabled then
+		return "off"
+	end
+	local flow = mcp.auth_flows:get()[s.id]
+	if flow and flow.phase == "authorizing" then
+		return "waiting"
+	end
+	local err = if flow and flow.phase == "error" then flow.error else s.lastError
+	if s.authKind == "oauth" and s.status ~= "connected" and wants_client(err) then
+		return "client"
+	end
+	if s.status == "connected" then
+		return "connected"
+	end
+	if flow and flow.phase == "error" then
+		return "error"
+	end
+	if s.authKind == "oauth" and (s.status == "needsAuth" or s.status == "reauthRequired") then
+		return if s.status == "reauthRequired" then "expired" else "signin"
+	end
+	if s.status == "error" then
+		return "error"
+	end
+	return "ready"
+end
+
+local function where_of(s: mcp.Server): string
+	if s.transport == "stdio" then
+		return ui.t("settings.mcp.row.command", { command = s.command or "" }):get()
+	end
+	return host_of(s.url)
+end
+
+local function describe(s: mcp.Server): string
+	local st = state_of(s)
+	local line: string
+	if st == "connected" then
+		line = if s.accountLabel and s.accountLabel ~= "" then s.accountLabel else where_of(s)
+	elseif st == "waiting" then
+		line = ui.t("settings.mcp.row.waiting"):get()
+	elseif st == "signin" then
+		line = ui.t("settings.mcp.row.signin"):get()
+	elseif st == "expired" then
+		line = ui.t("settings.mcp.row.expired"):get()
+	elseif st == "client" then
+		line = ui.t("settings.mcp.row.client"):get()
+	elseif st == "error" then
+		local flow = mcp.auth_flows:get()[s.id]
+		line = friendly(if flow and flow.error then flow.error else s.lastError)
+	elseif st == "off" then
+		line = ui.t("settings.mcp.row.off", { where = where_of(s) }):get()
+	else
+		line = where_of(s)
+	end
+	if s.storage == "local" and snapshot().vaultAvailable then
+		line = ui.t("settings.mcp.row.this_device", { line = line }):get()
+	end
+	return line
+end
+
+local Control = ui.component(function(props: { now: State<mcp.Server> }): Node
+	local now = props.now
+	local on = ui.use_state(now:peek().enabled)
+	ui.effect(function()
+		local want = now:get().enabled
+		if on:peek() ~= want then
+			on:set(want)
+		end
+	end)
+	return ui.row {
+		gap = "$space.2",
+		items = "center",
+		ui.switch(function(): string
+			local st = state_of(now:get())
+			if st == "waiting" then
+				return "waiting"
+			elseif st == "signin" or st == "expired" or st == "client" or (st == "error" and now:get().authKind == "oauth") then
+				return "sign_in"
+			end
+			return "none"
+		end, {
+			waiting = ui.div { px = "$space.2", progress.ProgressRing { size = 14, tone = "neutral", label = ui.t("settings.mcp.row.waiting"):get() } },
+			sign_in = ds.Button {
+				ui.t("settings.mcp.row.sign_in"),
+				tone = "secondary",
+				size = "sm",
+				on_click = function()
+					sign_in(now:peek().id)
+				end,
+			},
+			none = ui.div {},
+		}),
+		ds.IconButton {
+			icon = "settings-minimalistic",
+			label = function(): string
+				return ui.t("settings.mcp.row.settings_of", { name = now:get().name }):get()
+			end,
+			size = "sm",
+			tone = "quiet",
+			on_click = function()
+				open_manage(now:peek())
+			end,
+		},
+		ds.Switch {
+			value = on,
+			label = function(): string
+				return now:get().name
+			end,
+			on_change = function(value: boolean)
+				local s = now:peek()
+				mcp.set_enabled(s.id, value):after(function() end, function(err: any)
+					on:set(not value)
+					toast.show { title = ui.t("settings.mcp.toast.couldnt_switch", { name = s.name }), body = friendly(message_of(err)), tone = "danger" }
+				end)
+			end,
+		},
+	}
+end)
+
+local function server_row(first: mcp.Server, _: number, now: State<mcp.Server>): Node
+	return ds.Settings.Row {
+		label = function(): string
+			return now:get().name
+		end,
+		description = function(): string
+			return describe(now:get())
+		end,
+		lead = ui.presence(function(): string
+			local s = now:get()
+			return `{s.preset or ""}\0{s.name}`
+		end, function(): Node
+			return server_logo(now:peek(), 32)
+		end),
+		badge = ui.show(function(): boolean
+			local st = state_of(now:get())
+			return st == "error" or st == "client"
+		end, ds.Badge { ui.t("settings.mcp.row.needs_attention"), tone = "danger" }),
+		truncate = true,
+		control = Control { now = now },
+	}
+end
+
+local function preset_row(p: mcp.Preset): Node
+	return ds.Settings.Row {
+		label = p.name,
+		description = p.description,
+		lead = Logo(p.icon, p.name, 32),
+		control = ds.Button {
+			ui.t("settings.mcp.add.connect"),
+			tone = "secondary",
+			size = "sm",
+			on_click = function()
+				connect(p)
+			end,
+		},
+	}
+end
+
+function M.view(): Node
+	visits.once("mcp", function()
+		mcp.refresh():after(function() end, function() end)
+	end)
+
+	local servers = ui.computed(function(): { mcp.Server }
+		return snapshot().servers or {}
+	end)
+	-- The servers still to add: those of the list not added yet.
+	local to_add = ui.computed(function(): { mcp.Preset }
+		local out: { mcp.Preset } = {}
+		for _, p in snapshot().presets or {} do
+			if not server_for_preset(p) then
+				table.insert(out, p)
+			end
+		end
+		return out
+	end)
+
+	-- (Found by a search for a custom server: its dialog.)
+	ui.effect(function()
+		if search.lit:get() == "add" and not form_open:peek() and #to_add:peek() == 0 then
+			open_add()
+		end
+	end)
+
+	local yours = search.anchor(
+		"servers",
+		ui.show(function(): boolean
+			return #servers:get() > 0
+		end, ds.Settings.Section {
+			title = ui.t("settings.mcp.servers.title"),
+			ds.Settings.Each(servers, server_row, {
+				key = function(s: mcp.Server): string
+					return s.id
+				end,
+				wash = true,
+			}),
+		})
+	)
+
+	local add = search.anchor(
+		"add",
+		ds.Settings.Section {
+			title = ui.t("settings.mcp.add.title"),
+			ds.Settings.Group {
+				ui.column {
+					w_full = true,
+					ui.each(to_add, function(p: mcp.Preset): Node
+						return ui.column {
+							w_full = true,
+							ui.show(function(): boolean
+								local first = to_add:get()[1]
+								return first ~= nil and first.id ~= p.id
+							end, ds.Settings.Rule()),
+							preset_row(p),
+						}
+					end, {
+						key = function(p: mcp.Preset): string
+							return p.id
+						end,
+						w_full = true,
+					}),
+					ui.show(function(): boolean
+						return #to_add:get() > 0
+					end, ds.Settings.Rule()),
+					ds.Settings.Row {
+						label = ui.t("settings.mcp.add.custom"),
+						description = ui.t("settings.mcp.add.custom_description"),
+						lead = ds.ProviderCard.disc(ds.Icon { name = "plus", size = 16 }),
+						on_click = open_add,
+					},
+				},
+			},
+		}
+	)
 
 	return ds.Settings.Page {
 		title = ui.t("settings.mcp.title"),
-		description = ui.t("settings.mcp.description"),
-		trail = ui.row {
-			gap = "$space.2",
-			items = "center",
-			ds.Button {
-				tone = "ghost",
-				size = "sm",
-				busy = refreshing,
-				on_click = function()
-					if refreshing:peek() then
-						return
-					end
-					refreshing:set(true)
-					mcp.refresh():after(function()
-						refreshing:set(false)
-					end, function(err: any)
-						refreshing:set(false)
-						show_error(err)
-					end)
-				end,
-				ds.Icon { name = "refresh", size = 14 },
-				ui.t("settings.mcp.refresh"),
-			},
-			ds.Button {
-				tone = "secondary",
-				size = "sm",
-				on_click = open_add_form,
-				ds.Icon { name = "plus", size = 14 },
-				ui.t("settings.mcp.add_custom"),
-			},
-		},
-		storage_section,
-		custom_form_section,
-		configured_section,
-		presets_section,
-		remove_dialog,
+		description = function(): string
+			return if snapshot().vaultAvailable
+				then ui.t("settings.mcp.description_synced"):get()
+				else ui.t("settings.mcp.description_local"):get()
+		end,
+		yours,
+		add,
+		connect_dialog(),
+		form_dialog(),
+		remove_dialog(),
 	}
 end
 

@@ -26,6 +26,34 @@ use crate::{new_id, now_ms};
 const AUTH_FLOW_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const FINISHED_FLOW_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_CALLBACK_REQUEST_BYTES: usize = 32 * 1024;
+/// The loopback port a pre-registered OAuth client (one whose client ID the
+/// person brings, as Slack requires) redirects to: fixed, so it can be set
+/// up once in the vendor's app settings.
+const PREREGISTERED_CALLBACK_PORT: u16 = 38417;
+
+/// The redirect URI to allow in a pre-registered OAuth client's settings.
+/// (`localhost`, which vendors accept as a desktop redirect; browsers try
+/// its IPv4 address, where the listener is.)
+pub fn preregistered_redirect_uri() -> String {
+    format!("http://localhost:{PREREGISTERED_CALLBACK_PORT}/callback")
+}
+
+/// Bind the fixed callback port, giving a cancelled flow that held it a
+/// moment to let go.
+async fn bind_preregistered_callback() -> Result<TcpListener, String> {
+    let mut last_err = None;
+    for _ in 0..20 {
+        match TcpListener::bind(("127.0.0.1", PREREGISTERED_CALLBACK_PORT)).await {
+            Ok(listener) => return Ok(listener),
+            Err(e) => last_err = Some(e),
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Err(format!(
+        "port {PREREGISTERED_CALLBACK_PORT} is in use, so the sign-in can't return here: {}",
+        last_err.map(|e| e.to_string()).unwrap_or_default()
+    ))
+}
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -575,25 +603,45 @@ impl OAuthFlowManager {
         on_change: OnFlowChange,
     ) -> Result<StartMcpAuthResponse, String> {
         let discovered = discover_oauth(&http, &opts.server_url).await?;
+        let preregistered = opts.client_id.filter(|s| !s.trim().is_empty());
+        if preregistered.is_none() && discovered.registration_endpoint.is_none() {
+            // No way to register a client: the caller asks the person for
+            // their app's (Slack's OAuth is only ever a registered app's).
+            return Err(zeron_proto::MCP_CLIENT_REQUIRED.to_owned());
+        }
 
-        // Bind a loopback listener for the redirect callback.
-        let listener = TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .map_err(|e| format!("bind OAuth loopback callback listener: {e}"))?;
+        // A server's previous flow ends first: a pre-registered client's
+        // flows share one fixed port.
+        self.cancel_for_server(&opts.server_id);
+
+        // Bind a loopback listener for the redirect callback: any free port
+        // for a client registered just now for it, the fixed one a
+        // pre-registered client's redirect was set up with.
+        let (listener, redirect_uri) = if preregistered.is_some() {
+            (bind_preregistered_callback().await?, preregistered_redirect_uri())
+        } else {
+            let listener = TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .map_err(|e| format!("bind OAuth loopback callback listener: {e}"))?;
+            let port = listener
+                .local_addr()
+                .map_err(|e| format!("read callback listener port: {e}"))?
+                .port();
+            (listener, format!("http://127.0.0.1:{port}/callback"))
+        };
         let callback_port = listener
             .local_addr()
             .map_err(|e| format!("read callback listener port: {e}"))?
             .port();
-        let redirect_uri = format!("http://127.0.0.1:{callback_port}/callback");
 
         // Resolve client_id via explicit override or RFC 7591 DCR.
-        let (client_id, client_secret) = match opts.client_id.filter(|s| !s.trim().is_empty()) {
+        let (client_id, client_secret) = match preregistered {
             Some(cid) => (cid, opts.client_secret.filter(|s| !s.is_empty())),
             None => {
-                let reg_endpoint = discovered.registration_endpoint.as_deref().ok_or_else(|| {
-                    "MCP server does not advertise an OAuth registration_endpoint and no client_id was provided"
-                        .to_owned()
-                })?;
+                let reg_endpoint = discovered
+                    .registration_endpoint
+                    .as_deref()
+                    .ok_or_else(|| zeron_proto::MCP_CLIENT_REQUIRED.to_owned())?;
                 register_dynamic_client(&http, reg_endpoint, &redirect_uri).await?
             }
         };
@@ -629,9 +677,6 @@ impl OAuthFlowManager {
                 pairs.append_pair("resource", resource);
             }
         }
-
-        // Cancel any previous pending flow for this server before registering the new one.
-        self.cancel_for_server(&opts.server_id);
 
         let flow_id = new_id();
         let cancel = CancellationToken::new();

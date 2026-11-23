@@ -401,6 +401,7 @@ impl McpServers {
             vault_available,
             presets: self.presets.clone(),
             servers,
+            client_redirect_uri: oauth::preregistered_redirect_uri(),
         }
     }
 

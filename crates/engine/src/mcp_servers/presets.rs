@@ -14,9 +14,12 @@ pub fn default_presets() -> Vec<McpPreset> {
             url: "https://mcp.slack.com/mcp".into(),
             transport: McpTransport::Http,
             auth_kind: McpAuthKind::OAuth,
-            docs_url: "https://docs.slack.dev".into(),
+            docs_url: "https://docs.slack.dev/ai/slack-mcp-server/".into(),
             icon: "slack".into(),
             header_name: None,
+            // Slack's OAuth has no Dynamic Client Registration: only a Slack
+            // app's own client (Marketplace-published or internal) may sign in.
+            client_required: true,
         },
         McpPreset {
             id: "linear".into(),
@@ -30,6 +33,7 @@ pub fn default_presets() -> Vec<McpPreset> {
             docs_url: "https://linear.app/docs/mcp".into(),
             icon: "linear".into(),
             header_name: None,
+            client_required: false,
         },
         McpPreset {
             id: "notion".into(),
@@ -42,6 +46,7 @@ pub fn default_presets() -> Vec<McpPreset> {
             docs_url: "https://developers.notion.com/docs/mcp".into(),
             icon: "notion".into(),
             header_name: None,
+            client_required: false,
         },
         McpPreset {
             id: "github".into(),
@@ -55,6 +60,7 @@ pub fn default_presets() -> Vec<McpPreset> {
             docs_url: "https://github.com/github/github-mcp-server".into(),
             icon: "github".into(),
             header_name: None,
+            client_required: false,
         },
         McpPreset {
             id: "sentry".into(),
@@ -68,6 +74,7 @@ pub fn default_presets() -> Vec<McpPreset> {
             docs_url: "https://docs.sentry.io/product/sentry-mcp/".into(),
             icon: "sentry".into(),
             header_name: None,
+            client_required: false,
         },
         McpPreset {
             id: "figma".into(),
@@ -80,6 +87,7 @@ pub fn default_presets() -> Vec<McpPreset> {
             docs_url: "https://developers.figma.com/docs/figma-mcp-server/".into(),
             icon: "figma".into(),
             header_name: None,
+            client_required: false,
         },
         McpPreset {
             id: "atlassian".into(),
@@ -93,6 +101,7 @@ pub fn default_presets() -> Vec<McpPreset> {
             docs_url: "https://support.atlassian.com/rovo/docs/setting-up-ides/".into(),
             icon: "atlassian".into(),
             header_name: None,
+            client_required: false,
         },
         McpPreset {
             id: "stripe".into(),
@@ -106,6 +115,7 @@ pub fn default_presets() -> Vec<McpPreset> {
             docs_url: "https://docs.stripe.com/mcp".into(),
             icon: "stripe".into(),
             header_name: None,
+            client_required: false,
         },
         McpPreset {
             id: "supabase".into(),
@@ -119,6 +129,7 @@ pub fn default_presets() -> Vec<McpPreset> {
             docs_url: "https://supabase.com/docs/guides/getting-started/mcp".into(),
             icon: "supabase".into(),
             header_name: None,
+            client_required: false,
         },
         McpPreset {
             id: "vercel".into(),
@@ -132,6 +143,7 @@ pub fn default_presets() -> Vec<McpPreset> {
             docs_url: "https://vercel.com/docs/mcp/vercel-mcp".into(),
             icon: "vercel".into(),
             header_name: None,
+            client_required: false,
         },
         McpPreset {
             id: "cloudflare".into(),
@@ -145,6 +157,7 @@ pub fn default_presets() -> Vec<McpPreset> {
             docs_url: "https://developers.cloudflare.com/agents/model-context-protocol/mcp-servers-for-cloudflare/".into(),
             icon: "cloudflare".into(),
             header_name: None,
+            client_required: false,
         },
         McpPreset {
             id: "posthog".into(),
@@ -158,6 +171,7 @@ pub fn default_presets() -> Vec<McpPreset> {
             docs_url: "https://posthog.com/docs/model-context-protocol".into(),
             icon: "posthog".into(),
             header_name: None,
+            client_required: false,
         },
         McpPreset {
             id: "context7".into(),
@@ -171,6 +185,7 @@ pub fn default_presets() -> Vec<McpPreset> {
             docs_url: "https://context7.com".into(),
             icon: "context7".into(),
             header_name: None,
+            client_required: false,
         },
     ]
 }
@@ -203,5 +218,7 @@ mod tests {
         assert_eq!(context7.auth_kind, McpAuthKind::None);
         let slack = presets.iter().find(|p| p.id == "slack").unwrap();
         assert_eq!(slack.auth_kind, McpAuthKind::OAuth);
+        assert!(slack.client_required);
+        assert_eq!(presets.iter().filter(|p| p.client_required).count(), 1);
     }
 }
