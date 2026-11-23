@@ -37,12 +37,21 @@ How requires are written after the move:
             tests/.luaurc give, naming app/); a moved fixture from a fixture:
             `./…`; the app's fixtures and modules: `@app/…` and the aliases
 
+Outside the Luau: code, tests and CI (apps/zgx/src, apps/zgx/tests,
+apps/zgx/tools, scripts/, .github/) may not name a moving file by its ui/
+path (`ui/ds/orch_board.luau`, `join("ui/orch_push_fixture.luau")`), and a
+Rust file naming a moving fixture alone must mount it through
+`crate::fixture_tests` (src/fixture_tests.rs), which finds a fixture in ui/
+or stages it from its plugin's tests/ as scripts/ci/test-zgx.sh does. Docs
+and comments that do are printed as notes.
+
 It fails, naming each, on anything that would break: a file staying in ui/
 that requires (or names, as a module path or a mounted fixture) a moving
 one; a main test or fixture that depends on orchestrator code; a moved
 module that requires a fixture; a module path a moved file hands to the
-app's code as text (it can't be made relative); a require that doesn't
-resolve after the move.
+app's code as text (it can't be made relative); code outside the Luau
+naming a moving file as above; a require that doesn't resolve after the
+move.
 """
 
 from __future__ import annotations
@@ -356,6 +365,56 @@ def plan(tree: Tree, base: str):
     return modules, fixtures, tests, left, problems, graph, at_base
 
 
+# ------------------------------------------------- outside the Luau
+
+OUTSIDE = ["apps/zgx/src", "apps/zgx/tests", "apps/zgx/tools", "scripts", ".github"]
+SELF = "scripts/orchestrators-move.py"
+FIXTURE_HELPER = "fixture_tests::"
+COMMENT = re.compile(r"^\s*(//|#|--|\*|/\*)")
+
+
+def outside(root: str, moving: set[str]) -> tuple[list[str], list[str]]:
+    """Code, tests and CI outside the Luau that name a moving file by its
+    ui/ path, or (Rust) a moving fixture without the helper that finds it:
+    problems; docs and comments that do: notes."""
+    by_path = {f"ui/{v}": v for v in moving if not v.startswith(OWN + "/")}
+    fixtures = {v for v in moving if is_root_file(v)}
+    paths = re.compile("|".join(re.escape(p) for p in sorted(by_path, key=len, reverse=True)) or "$^")
+    names = re.compile(r"(?<![\w/])(" + "|".join(re.escape(v) for v in sorted(fixtures)) + r")\b"
+                       if fixtures else "$^")
+    problems: list[str] = []
+    notes: list[str] = []
+    listed = run("git", "-C", root, "ls-files", "--cached", "--others", "--exclude-standard",
+                 "--", *OUTSIDE, "apps/zgx/docs").splitlines()
+    for rel in listed:
+        if rel == SELF or not os.path.isfile(os.path.join(root, rel)):
+            continue
+        try:
+            with open(os.path.join(root, rel), encoding="utf-8") as f:
+                text = f.read()
+        except (UnicodeDecodeError, OSError):
+            continue
+        doc = rel.endswith(".md") or rel.startswith("apps/zgx/docs/")
+        helped = FIXTURE_HELPER in text or rel == "apps/zgx/src/fixture_tests.rs"
+        for n, line in enumerate(text.splitlines(), 1):
+            found = [m.group(0) for m in paths.finditer(line)]
+            bare = [] if not rel.endswith(".rs") else [m.group(1) for m in names.finditer(line)]
+            if not found and not bare:
+                continue
+            where = f"{rel}:{n}"
+            if doc or COMMENT.match(line):
+                for name in found:
+                    notes.append(f"{where}: names {name} (moving), in a doc or comment")
+                continue
+            for name in found:
+                problems.append(f"{where}: names {name}, which moves to {dest(by_path[name])}")
+            if not helped:
+                for name in bare:
+                    problems.append(f"{where}: mounts {name}, which moves to {dest(name)}: "
+                                    f"mount it through crate::{FIXTURE_HELPER.rstrip(':')}")
+    return problems, notes
+
+
 # ----------------------------------------------------------- rewriting
 
 
@@ -470,7 +529,23 @@ def rewrite_index(tree: Tree, code: str, moving: set[str], notes: list[str]) -> 
             return m.group(0)
         return m.group(1) + "./app/" + module_name(t) + m.group(3)
 
-    return PART.sub(part, code)
+    code = PART.sub(part, code)
+    # Its header, once every part is app/'s.
+    if all(m.group(2).startswith("./app/") for m in PART.finditer(code)):
+        for before, after in INDEX_HEADER:
+            code = code.replace(before, after)
+    return code
+
+
+INDEX_HEADER = [
+    ("-- (init.luau). The same parts as the app's own stand-in\n"
+     "-- (ui/builtin/orchestrators.luau) while their modules are still in ui/.\n",
+     "-- (init.luau). With the plugin off, the app has its own stand-in\n"
+     "-- (ui/builtin/orchestrators.luau), which is `false`.\n"),
+    ("-- One part a line (`name = \"module\",`): moving the modules into app/\n"
+     "-- rewrites these paths to `./app/…`.\n",
+     "-- One part a line (`name = \"module\",`), each a module in app/.\n"),
+]
 
 
 # The tests/ folder's .luaurc, for `zgx check` alone: luau-lsp resolves the
@@ -548,6 +623,12 @@ def main() -> int:
 
     if problems:
         show("FAIL: general code would reach moved files", problems)
+        return 1
+    elsewhere, notes = outside(root, moving)
+    for n in notes:
+        print(f"note: {n}")
+    if elsewhere:
+        show("FAIL: code, tests or CI outside the Luau name moving files", elsewhere)
         return 1
 
     # Each file's new text, computed before anything moves.
