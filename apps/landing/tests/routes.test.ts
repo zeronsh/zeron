@@ -296,6 +296,24 @@ describe("a plugin's page", () => {
     expect(body).toContain('href="https://github.com/ada/focus-timer" rel="nofollow noopener ugc"');
   });
 
+  test("a 404 the Worker draws (a plugin, a version) carries the site's CSP and security headers, and is never kept; the site's 404 file keeps its own", async () => {
+    for (const path of ["/plugins/no-such-plugin", "/plugins/Bad_Id", "/plugins/focus-timer/versions/9.9.9"]) {
+      const { response, body } = await html(path);
+      expect(response.status, path).toBe(404);
+      expect(body.length, path).toBeGreaterThan(0);
+      expect(response.headers.get("content-security-policy"), path).toMatch(/^default-src 'none'; script-src 'self'; style-src 'self' /);
+      expect(response.headers.get("x-content-type-options"), path).toBe("nosniff");
+      expect(response.headers.get("cache-control"), path).toMatch(/no-store/);
+      inert(body);
+    }
+    // (An address with nothing at all, and someone else's plugin among yours, are the site's 404 page as a file, with the file's headers.)
+    for (const [path, cookie] of [["/no/such/page", undefined], ["/account/plugins/pr-radar", await site.signIn("user_ada")]] as const) {
+      const missing = await html(path, cookie);
+      expect(missing.response.status, path).toBe(404);
+      expect(missing.body, path).toBe(readFileSync(new URL("../dist/client/404.html", import.meta.url), "utf8"));
+    }
+  });
+
   test("unknown, unlisted and malformed ids are one 404, in the shell, saying nothing of why", async () => {
     const pages = await Promise.all(["/plugins/no-such-plugin", "/plugins/clipboard-sync", "/plugins/crypto-ticker", "/plugins/Bad_Id", "/plugins/a%2Fb"].map(async (path) => ({ path, ...(await html(path)) })));
     for (const { path, response, body } of pages) {
