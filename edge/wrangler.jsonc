@@ -304,12 +304,13 @@
         { "name": "STORE_READS", "namespace_id": "1004", "simple": { "limit": 300, "period": 60 } },
         { "name": "STORE_WRITES", "namespace_id": "1006", "simple": { "limit": 30, "period": 60 } }
       ],
-      // PLACEHOLDER database_id, as production's.
+      // Staging's store catalog (created 2026-11-23; migrations applied with
+      // `wrangler d1 migrations apply STORE_DB --remote --env staging`).
       "d1_databases": [
         {
           "binding": "STORE_DB",
           "database_name": "zeron-store-staging",
-          "database_id": "00000000-0000-0000-0000-000000000001",
+          "database_id": "c258a0da-677f-42ed-ac60-4f0bcf6a50dd",
           "migrations_dir": "migrations/store"
         }
       ],
