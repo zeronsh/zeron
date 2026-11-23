@@ -1002,8 +1002,8 @@ local TemplateTape = ui.component(function(): Node
 		ui.overlay {
 			absolute = true,
 			left = 0,
-			top = 0,
-			bottom = 0,
+			top = 2,
+			bottom = 2,
 			w = 8,
 			pointer_events = "none",
 			z = 2,
@@ -1018,8 +1018,8 @@ local TemplateTape = ui.component(function(): Node
 		ui.overlay {
 			absolute = true,
 			right = 0,
-			top = 0,
-			bottom = 0,
+			top = 2,
+			bottom = 2,
 			w = 8,
 			pointer_events = "none",
 			z = 2,
