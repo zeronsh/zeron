@@ -944,6 +944,8 @@ pub struct EngineRpc {
     viewport_focus: crate::desktop_notify::ViewportFocus,
     /// The plugins service (absent in bare test assemblies).
     plugins: Option<crate::plugins::Plugins>,
+    /// Managed external MCP servers (absent in bare test assemblies).
+    mcp_servers: Option<std::sync::Arc<crate::mcp_servers::McpServers>>,
     engine_info: EngineInfo,
 }
 
@@ -1006,6 +1008,7 @@ impl EngineRpc {
             credentials: None,
             viewport_focus: Default::default(),
             plugins: None,
+            mcp_servers: None,
             engine_info,
         }
     }
@@ -1013,6 +1016,15 @@ impl EngineRpc {
     /// Attach the plugins service (the Plugin* methods).
     pub fn with_plugins(mut self, plugins: crate::plugins::Plugins) -> Self {
         self.plugins = Some(plugins);
+        self
+    }
+
+    /// Attach the managed external MCP servers service.
+    pub fn with_mcp_servers(
+        mut self,
+        mcp_servers: std::sync::Arc<crate::mcp_servers::McpServers>,
+    ) -> Self {
+        self.mcp_servers = Some(mcp_servers);
         self
     }
 
@@ -2865,6 +2877,11 @@ fn forwardable(method: &str) -> bool {
             | methods::UPDATE_PLUGIN
             | methods::INSTALL_VERIFIED_PLUGIN
             | methods::PLUGIN_STATUS
+            // Managed MCP servers: read-only views/refresh are forwardable;
+            // mutations and OAuth flows stay local-only (`zeron_rpc::local_only`).
+            | methods::LIST_MCP_SERVERS
+            | methods::WATCH_MCP_SERVERS
+            | methods::REFRESH_MCP_SERVERS
     )
 }
 
@@ -2886,6 +2903,7 @@ fn is_stream_method(method: &str) -> bool {
             | methods::UPDATE_STATUS
             | methods::WATCH_HARNESS_UPDATES
             | methods::WATCH_PLUGINS
+            | methods::WATCH_MCP_SERVERS
     )
 }
 
@@ -3650,6 +3668,12 @@ impl RpcService for EngineRpc {
                 return Err(RpcError::Failed("Plugins aren't available here".into()));
             };
             return Box::pin(async move { plugins.dispatch(method, params).await }).await;
+        }
+        if crate::mcp_servers::handles(method) {
+            let Some(mcp_servers) = self.mcp_servers.clone() else {
+                return Err(RpcError::Failed("MCP servers aren't available here".into()));
+            };
+            return Box::pin(async move { mcp_servers.handle_rpc(method, params).await }).await;
         }
         if crate::acp_registry::handles(method) {
             return Box::pin(crate::acp_registry::dispatch(

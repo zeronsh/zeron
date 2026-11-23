@@ -115,7 +115,7 @@ export type VaultResult<T> =
 
 /** One provider's connection, summarized from its active account (else its
  * most recent one). */
-export interface VaultConnectionView {
+export interface VaultProviderConnectionView {
   readonly provider: VaultProviderId;
   readonly status: "connected" | "needsReconnect";
   readonly authorizedDevices: readonly string[];
@@ -227,7 +227,7 @@ export interface GithubListingView {
 }
 
 export interface VaultStatusView {
-  readonly connections: readonly VaultConnectionView[];
+  readonly connections: readonly VaultProviderConnectionView[];
   readonly devices: readonly VaultDeviceView[];
   readonly available: true;
   /** Where the user installs the GitHub App on accounts / repositories
@@ -410,6 +410,118 @@ export interface GithubDevicePoll {
   readonly error?: string;
 }
 
+// ── Remote MCP / plugin connections (`VaultConnections` DO) ──────────────────
+
+export const CONNECTION_ID_RE = /^(mcp|plugin):[a-z0-9][a-z0-9._-]{0,63}$/;
+
+export type VaultConnectionKind = "mcp" | "plugin";
+export type VaultConnectionTransport = "http" | "sse";
+export type VaultConnectionAuthKind = "none" | "headers" | "oauth";
+export type VaultConnectionStatus = "connected" | "needs_auth" | "reauth_required" | "error";
+
+export type VaultConnectionMaterial =
+  | {
+      readonly kind: "headers";
+      readonly headers: Readonly<Record<string, string>>;
+    }
+  | {
+      readonly kind: "oauth";
+      readonly accessToken: string;
+      readonly refreshToken?: string;
+      readonly tokenType?: string;
+      readonly expiresAt?: number;
+      readonly tokenEndpoint: string;
+      readonly clientId: string;
+      readonly clientSecret?: string;
+      readonly scopes?: readonly string[];
+      readonly resource?: string;
+    };
+
+/** Metadata view of one stored connection. Never exposes tokens or secrets. */
+export interface VaultConnectionView {
+  readonly id: string;
+  readonly kind: VaultConnectionKind;
+  readonly name: string;
+  readonly preset?: string;
+  readonly url: string;
+  readonly transport: VaultConnectionTransport;
+  readonly enabled: boolean;
+  readonly authKind: VaultConnectionAuthKind;
+  readonly status: VaultConnectionStatus;
+  readonly headerKeys: readonly string[];
+  readonly scopes: readonly string[];
+  readonly accountLabel?: string;
+  readonly authorizedDevices: readonly string[];
+  readonly updatedAt: number;
+  readonly expiresAt?: number;
+  readonly lastError?: string;
+}
+
+export interface VaultConnectionsView {
+  readonly disabled: boolean;
+  readonly connections: readonly VaultConnectionView[];
+}
+
+export interface PutConnectionRequest {
+  readonly name: string;
+  readonly preset?: string;
+  readonly url: string;
+  readonly transport?: VaultConnectionTransport;
+  readonly enabled?: boolean;
+  readonly authKind: VaultConnectionAuthKind;
+  readonly material?: VaultConnectionMaterial;
+  readonly authorizedDevices?: readonly string[];
+  readonly scopes?: readonly string[];
+  readonly accountLabel?: string;
+}
+
+export interface UpdateConnectionRequest {
+  readonly name?: string;
+  readonly url?: string;
+  readonly transport?: VaultConnectionTransport;
+  readonly enabled?: boolean;
+  readonly authorizedDevices?: readonly string[];
+  readonly accountLabel?: string | null;
+}
+
+/**
+ * `sig` = base64url Ed25519 signature by the device key over the UTF-8 bytes of
+ * `zeron-vault-grant\n{userId}\n{deviceId}\nconn:{id}\n{ts}`.
+ */
+export interface ConnectionGrantRequest {
+  readonly id: string;
+  readonly deviceId: string;
+  readonly ts: number;
+  readonly sig: string;
+  readonly forceRefresh?: boolean;
+}
+
+/** Short-lived grant for one connection. Never includes refreshToken or clientSecret. */
+export interface ConnectionGrant {
+  readonly id: string;
+  readonly url: string;
+  readonly transport: VaultConnectionTransport;
+  readonly headers: Readonly<Record<string, string>>;
+  readonly expiresAt?: number;
+  readonly generation: number;
+}
+
+/**
+ * Several connection grants in one round trip. `sig` signs the grant message
+ * with `conns:${ids.join(",")}` as its subject.
+ */
+export interface ConnectionGrantManyRequest {
+  readonly ids: readonly string[];
+  readonly deviceId: string;
+  readonly ts: number;
+  readonly sig: string;
+}
+
+export interface ConnectionGrantManyReply {
+  readonly grants: readonly ConnectionGrant[];
+  readonly missing: readonly { readonly id: string; readonly error: VaultErrorCode; readonly message: string }[];
+}
+
 /** The `VaultApi` WorkerEntrypoint's methods, as seen through the binding. */
 export interface VaultRpc {
   status(caller: VaultCaller): Promise<VaultResult<VaultStatusView>>;
@@ -474,4 +586,29 @@ export interface VaultRpc {
   /** Plan usage of one Claude, Codex or Antigravity login, read by the vault (users only;
    * `not_found` for providers without a usage view). */
   accountUsage(caller: VaultCaller, provider: VaultProviderId, slot: string): Promise<VaultResult<VaultUsageView>>;
+  /** List remote MCP / plugin connections (users see all; runners see enabled + authorized). */
+  listConnections(caller: VaultCaller, kind?: VaultConnectionKind): Promise<VaultResult<VaultConnectionsView>>;
+  /** Create or replace a remote MCP / plugin connection (users only). */
+  putConnection(
+    caller: VaultCaller,
+    id: string,
+    request: PutConnectionRequest
+  ): Promise<VaultResult<VaultConnectionView>>;
+  /** Update non-secret metadata on an existing connection (users only). */
+  updateConnection(
+    caller: VaultCaller,
+    id: string,
+    patch: UpdateConnectionRequest
+  ): Promise<VaultResult<VaultConnectionView>>;
+  /** Permanently delete a connection and its sealed credentials (allowed while disabled). */
+  deleteConnection(caller: VaultCaller, id: string): Promise<VaultResult<{ readonly deleted: boolean }>>;
+  /** Clear sealed auth material and mark `needs_auth`, keeping connection config (allowed while disabled). */
+  disconnectConnectionAuth(caller: VaultCaller, id: string): Promise<VaultResult<VaultConnectionView>>;
+  /** Draw a short-lived grant (headers, never refresh tokens or secrets) for one connection. */
+  grantConnection(caller: VaultCaller, request: ConnectionGrantRequest): Promise<VaultResult<ConnectionGrant>>;
+  /** Draw short-lived grants for several connections in one signed request. */
+  grantConnections(
+    caller: VaultCaller,
+    request: ConnectionGrantManyRequest
+  ): Promise<VaultResult<ConnectionGrantManyReply>>;
 }

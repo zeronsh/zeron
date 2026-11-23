@@ -337,12 +337,7 @@ impl SessionsEngine {
                     None => (None, None),
                 };
             request.mcp = mcp.clone();
-            request.extra_mcp = self
-                .inner
-                .plugins
-                .get()
-                .map(crate::plugins::Plugins::native_mcp_servers)
-                .unwrap_or_default();
+            request.extra_mcp = self.inner.extra_mcp_servers(grant.as_ref());
             request.env.insert(
                 zeron_proto::ORIGIN_ENV.into(),
                 zeron_proto::chat_origin(chat_id),

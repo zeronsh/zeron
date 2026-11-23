@@ -840,6 +840,18 @@ pub mod methods {
     /// shown as the engine's own are, under the same Settings, at most a few
     /// a minute for each `source`; clicking it opens `session`.
     pub const POST_NOTIFICATION: &str = "PostNotification";
+
+    // ── Managed MCP servers ──────────────────────────────────────────────────
+    pub const WATCH_MCP_SERVERS: &str = "WatchMcpServers";
+    pub const LIST_MCP_SERVERS: &str = "ListMcpServers";
+    pub const UPSERT_MCP_SERVER: &str = "UpsertMcpServer";
+    pub const SET_MCP_SERVER_ENABLED: &str = "SetMcpServerEnabled";
+    pub const DELETE_MCP_SERVER: &str = "DeleteMcpServer";
+    pub const START_MCP_AUTH: &str = "StartMcpAuth";
+    pub const POLL_MCP_AUTH: &str = "PollMcpAuth";
+    pub const CANCEL_MCP_AUTH: &str = "CancelMcpAuth";
+    pub const DISCONNECT_MCP_AUTH: &str = "DisconnectMcpAuth";
+    pub const REFRESH_MCP_SERVERS: &str = "RefreshMcpServers";
 }
 
 /// Methods answered only over this device's own local IPC, never to a peer
@@ -926,6 +938,15 @@ pub fn local_only(method: &str) -> bool {
             // another device (a Cloud machine among them) and never an agent.
             | methods::CLOUD_SET_REACH
             | methods::CLOUD_SESSION_SET_REACH
+            // Managed MCP server mutations and OAuth flows carry secrets or
+            // drive loopback auth callbacks: never cross the peer relay.
+            | methods::UPSERT_MCP_SERVER
+            | methods::SET_MCP_SERVER_ENABLED
+            | methods::DELETE_MCP_SERVER
+            | methods::START_MCP_AUTH
+            | methods::POLL_MCP_AUTH
+            | methods::CANCEL_MCP_AUTH
+            | methods::DISCONNECT_MCP_AUTH
     )
 }
 
@@ -1275,6 +1296,31 @@ mod tests {
         for method in [methods::CLOUD_SET_REACH, methods::CLOUD_SESSION_SET_REACH] {
             assert!(local_only(method), "{method}");
             assert!(peer_refused(method, &serde_json::Value::Null), "{method}");
+            assert!(!agent_allowed(method), "{method}");
+        }
+    }
+
+    #[test]
+    fn managed_mcp_server_mutations_and_auth_are_local_only_and_never_agent_allowed() {
+        for method in [
+            methods::UPSERT_MCP_SERVER,
+            methods::SET_MCP_SERVER_ENABLED,
+            methods::DELETE_MCP_SERVER,
+            methods::START_MCP_AUTH,
+            methods::POLL_MCP_AUTH,
+            methods::CANCEL_MCP_AUTH,
+            methods::DISCONNECT_MCP_AUTH,
+        ] {
+            assert!(local_only(method), "{method}");
+            assert!(peer_refused(method, &serde_json::Value::Null), "{method}");
+            assert!(!agent_allowed(method), "{method}");
+        }
+        for method in [
+            methods::WATCH_MCP_SERVERS,
+            methods::LIST_MCP_SERVERS,
+            methods::REFRESH_MCP_SERVERS,
+        ] {
+            assert!(!local_only(method), "{method}");
             assert!(!agent_allowed(method), "{method}");
         }
     }
