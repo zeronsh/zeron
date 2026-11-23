@@ -53,3 +53,13 @@ apps/zgx/ui/shell_fixture.luau  Model picker stubs (refresh_catalog, retry_catal
 # tool_detail: a kept tail shorter than a fold (nil concat fix).
 apps/zgx/ui/tool_detail_fixture.luau  tool_detail: test_tool_short_tail, a kept tail shorter than a fold
 apps/zgx/ui/tests/tool_detail.test.luau  tool_detail: one new case for a kept tail shorter than a fold (additive)
+
+# Not allowed, and failing until they're main's again (orchestrator-
+# motivated struct fields in Chat and session-row literals: `started_by`,
+# the Brain dump's or an orchestrator's; `activity`/`todo`, from
+# proto::orchestration):
+#   crates/client/tests/{cloud_attachments,live,relay}.rs
+#   crates/engine/tests/workspace_sync.rs
+#   crates/sync/tests/{registry_client,registry_edge}.rs
+# `limited` beside them is the general usage limit: once the others go,
+# the last three need a line here for it alone.
