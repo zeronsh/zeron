@@ -156,6 +156,7 @@ local TITLE_KEYS: { [string]: { string } } = {
 	shortcuts = { "Shortcuts", "settings.shortcuts.title" },
 	appshots = { "Appshots", "settings.appshots.title" },
 	providers = { "Providers", "settings.providers.title" },
+	mcp = { "MCP", "settings.mcp.title" },
 	devices = { "Devices", "settings.devices.title" },
 	projects = { "Projects", "settings.projects.title" },
 	members = { "Members", "settings.members.title" },

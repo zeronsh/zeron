@@ -182,20 +182,27 @@ fn codex_mcp_overrides(mcp: &zeron_proto::McpServer) -> Vec<(String, Value)> {
     .collect()
 }
 
-/// Dotted `thread/start` config overrides for the plugins' native MCP
-/// servers ([`RunRequest::extra_mcp`]). Unlike Zeron's own server they get no
-/// `default_tools_approval_mode`: their tools are a plugin's, so Codex asks
-/// (or refuses) under the chat's access mode like any user-configured server.
+/// Dotted `thread/start` config overrides for extra MCP servers
+/// ([`RunRequest::extra_mcp`], plugins and managed servers). Unlike Zeron's own
+/// server they get no `default_tools_approval_mode` or custom timeout: their
+/// tools are approved (or refused) under the chat's access mode like any
+/// user-configured server.
 fn codex_extra_mcp_overrides(extras: &[zeron_proto::McpServer]) -> Vec<(String, Value)> {
     extras
         .iter()
         .flat_map(|mcp| {
             let key = |field: &str| format!("mcp_servers.{}.{field}", mcp.name);
-            [
-                (key("command"), mcp.command.clone().into()),
-                (key("args"), json!(mcp.args)),
-                (key("env"), json!(mcp.env)),
-            ]
+            match &mcp.http {
+                Some(http) => vec![
+                    (key("url"), http.url.clone().into()),
+                    (key("http_headers"), json!(http.headers)),
+                ],
+                None => vec![
+                    (key("command"), mcp.command.clone().into()),
+                    (key("args"), json!(mcp.args)),
+                    (key("env"), json!(mcp.env)),
+                ],
+            }
         })
         .collect()
 }
@@ -3717,6 +3724,35 @@ mod mcp_injection_tests {
             "a plugin's tools are never pre-approved"
         );
         assert_eq!(overrides.len(), 3);
+    }
+
+    #[test]
+    fn codex_extra_mcp_overrides_emit_http_url_and_headers_without_auto_approve_or_custom_timeout() {
+        let http_extra = zeron_proto::McpServer {
+            name: "linear".into(),
+            command: "/opt/zeron/zeron".into(),
+            args: vec!["mcp-proxy".into()],
+            env: Default::default(),
+            http: Some(zeron_proto::McpHttp {
+                url: "http://127.0.0.1:43210/mcp/server/linear".into(),
+                headers: [("Authorization".into(), "Bearer run-token".into())].into(),
+            }),
+        };
+        let overrides: serde_json::Map<String, Value> =
+            codex_extra_mcp_overrides(&[http_extra]).into_iter().collect();
+        assert_eq!(
+            overrides["mcp_servers.linear.url"],
+            "http://127.0.0.1:43210/mcp/server/linear"
+        );
+        assert_eq!(
+            overrides["mcp_servers.linear.http_headers"],
+            json!({ "Authorization": "Bearer run-token" })
+        );
+        assert!(!overrides.contains_key("mcp_servers.linear.command"));
+        assert!(!overrides.contains_key("mcp_servers.linear.default_tools_approval_mode"));
+        assert!(!overrides.contains_key("mcp_servers.linear.tool_timeout_sec"));
+        assert!(!overrides.contains_key("mcp_servers.linear.startup_timeout_sec"));
+        assert_eq!(overrides.len(), 2);
     }
 }
 

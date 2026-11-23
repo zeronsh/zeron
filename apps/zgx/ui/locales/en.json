@@ -2378,6 +2378,126 @@
         "description": "Parakeet v3 · {total} MB",
         "remove": "Remove"
       }
+    },
+    "mcp": {
+      "title": "MCP",
+      "terms": "mcp servers model context protocol oauth tools vault remote stdio integrations slack linear notion github",
+      "description": "Connect external MCP servers so your agents can access tools and data across devices.",
+      "refresh": "Refresh",
+      "add_custom": "Add custom",
+      "storage": {
+        "title": "Sync & storage",
+        "terms": "storage vault sync local encrypted cloud sign in credentials",
+        "vault_title": "Zeron Vault",
+        "vault_description": "Stored encrypted in Zeron Vault and shared across your devices and Cloud.",
+        "local_title": "Local only",
+        "local_description": "Stored locally on this device. Sign in to sync MCP auth across all your devices.",
+        "synced_badge": "Synced",
+        "local_badge": "This device"
+      },
+      "configured": {
+        "title": "Your MCP servers",
+        "terms": "configured servers enabled disabled connect disconnect reconnect remove edit oauth",
+        "description": "Servers enabled here are available to your agents.",
+        "empty_title": "No MCP servers yet",
+        "empty_body": "Connect a popular server below or add a custom remote or local server."
+      },
+      "badge": {
+        "vault": "Vault",
+        "local": "Local"
+      },
+      "status": {
+        "connected": "Connected",
+        "needs_auth": "Sign in required",
+        "authorizing": "Authorizing…",
+        "reauth_required": "Reconnect required",
+        "error": "Error",
+        "disabled": "Disabled"
+      },
+      "action": {
+        "sign_in": "Sign in",
+        "reconnect": "Reconnect",
+        "disconnect": "Disconnect",
+        "cancel": "Cancel",
+        "enable_label": "Enable {name}"
+      },
+      "account_label": "Signed in as {account}",
+      "remove_dialog": {
+        "title": "Remove {name}?",
+        "body": "This removes the server configuration and any stored authentication for it."
+      },
+      "custom": {
+        "title": "Custom MCP server",
+        "terms": "custom add edit remote http sse stdio command bearer token headers client id secret scopes local only"
+      },
+      "form": {
+        "add_title": "Add custom MCP server",
+        "edit_title": "Edit MCP server",
+        "description": "Configure a remote HTTP/SSE endpoint or a local stdio command.",
+        "transport": "Transport",
+        "transport_http": "Remote (HTTP)",
+        "transport_sse": "Remote (SSE)",
+        "transport_stdio": "Local command (stdio)",
+        "name": "Name",
+        "name_placeholder": "My MCP Server",
+        "url": "URL",
+        "auth_kind": "Authentication",
+        "auth_oauth": "OAuth (Automatic)",
+        "auth_bearer": "Bearer token",
+        "auth_headers": "Custom headers",
+        "auth_none": "None",
+        "bearer_token": "Bearer token",
+        "bearer_placeholder": "Enter access token",
+        "bearer_keep_hint": "Leave blank to keep the saved token.",
+        "headers": "Custom headers",
+        "headers_hint": "One Header-Name: value pair per line.",
+        "headers_keep_hint": "Saved headers: {keys}. Leave blank to keep them, or enter headers to replace.",
+        "oauth_advanced": "Advanced OAuth settings",
+        "oauth_advanced_hint": "Optional overrides when a server requires a pre-registered OAuth client.",
+        "oauth_client_id": "Client ID",
+        "oauth_client_id_placeholder": "Optional OAuth client ID",
+        "oauth_client_secret": "Client secret",
+        "oauth_client_secret_placeholder": "Optional OAuth client secret",
+        "oauth_scopes": "Scopes",
+        "oauth_scopes_placeholder": "Space- or comma-separated scopes",
+        "local_only": "Keep local only on this device",
+        "local_only_description": "Do not sync this server or its auth to Zeron Vault (useful for private or VPN servers).",
+        "command": "Command",
+        "command_hint": "Executable to launch on this device.",
+        "args": "Arguments",
+        "args_hint": "Space-separated arguments passed to the command.",
+        "env": "Environment variables",
+        "env_hint": "One KEY=VALUE entry per line.",
+        "env_keep_hint": "Saved variables: {keys}. Leave blank to keep them, or enter entries to replace.",
+        "stdio_local_note": "Local stdio servers run only on this device and are not synced to Vault or Cloud.",
+        "save": "Save",
+        "save_and_sign_in": "Save & Sign in",
+        "error_name": "Enter a name for this MCP server.",
+        "error_url": "Enter a valid http:// or https:// URL.",
+        "error_command": "Enter a command to run.",
+        "error_header_line": "Invalid header line: {line}. Use Header-Name: value.",
+        "error_env_line": "Invalid environment line: {line}. Use KEY=VALUE."
+      },
+      "presets": {
+        "title": "Popular MCP servers",
+        "terms": "presets popular catalog slack linear notion github sentry figma atlassian stripe supabase vercel cloudflare posthog context7",
+        "description": "One-click setup for commonly used remote MCP servers.",
+        "search": "Search popular MCP servers…",
+        "connect": "Connect",
+        "configure": "Configure",
+        "added": "Added",
+        "no_match_title": "No servers match \"{q}\"",
+        "no_match_body": "Try another search term or add a custom MCP server above.",
+        "clear_search": "Clear search"
+      },
+      "toast": {
+        "added": "Added {name}",
+        "saved": "Saved {name}",
+        "removed": "Removed {name}",
+        "disconnected": "Disconnected {name}",
+        "auth_started": "Continue sign-in for {name} in your browser.",
+        "failed": "MCP action failed"
+      }
     }
   },
   "common": {

@@ -8953,6 +8953,8 @@ dependencies = [
  "flate2",
  "futures",
  "gethostname",
+ "http-body-util",
+ "hyper",
  "ignore",
  "image",
  "libc",

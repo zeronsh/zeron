@@ -1,0 +1,173 @@
+//! Loopback MCP Gateway implementing [`zeron_mcp::http::ExternalMcpProxy`].
+//!
+//! Forwards authenticated `/mcp/server/{server_id}` requests to the configured
+//! upstream remote MCP server with managed credentials injected by the engine,
+//! streaming responses (including SSE) with zero buffering and performing one
+//! automatic token refresh + retry on upstream `401 Unauthorized`.
+
+use std::convert::Infallible;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+
+use bytes::Bytes;
+use futures::StreamExt;
+use http_body_util::{BodyExt, StreamBody};
+use hyper::body::Frame;
+use hyper::header::{HeaderMap, HeaderName, HeaderValue};
+use hyper::{Method, StatusCode};
+
+use zeron_mcp::http::{ExternalMcpProxy, ExternalProxyRequest, ExternalProxyResponse};
+
+use super::{McpServers, ResolvedUpstream};
+
+/// Safe client headers forwarded to upstream MCP servers.
+const FORWARDED_CLIENT_HEADERS: [&str; 5] = [
+    "content-type",
+    "accept",
+    "mcp-protocol-version",
+    "mcp-session-id",
+    "last-event-id",
+];
+
+fn is_hop_by_hop(name: &str) -> bool {
+    matches!(
+        name,
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+            | "content-length"
+    )
+}
+
+/// Loopback gateway forwarding external MCP traffic with managed credentials.
+pub struct McpGateway {
+    servers: Arc<McpServers>,
+    /// Dedicated HTTP client with no overall request timeout so long-lived SSE
+    /// streams (`GET /mcp/server/{id}` or streaming `POST`) never time out.
+    http: reqwest::Client,
+}
+
+impl McpGateway {
+    pub fn new(servers: Arc<McpServers>) -> Self {
+        let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(30))
+            .user_agent(concat!("zeron/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        Self { servers, http }
+    }
+
+    async fn send_upstream(
+        &self,
+        upstream: &ResolvedUpstream,
+        method: &Method,
+        client_headers: &HeaderMap,
+        body: &Bytes,
+    ) -> Result<reqwest::Response, String> {
+        let reqwest_method = reqwest::Method::from_bytes(method.as_str().as_bytes())
+            .map_err(|e| format!("unsupported HTTP method {method}: {e}"))?;
+        let mut builder = self.http.request(reqwest_method, &upstream.url);
+
+        for name in FORWARDED_CLIENT_HEADERS {
+            if let Some(value) = client_headers.get(name)
+                && let Ok(val_str) = value.to_str()
+            {
+                builder = builder.header(name, val_str);
+            }
+        }
+
+        // Injected auth / custom headers always override client headers.
+        for (name, value) in &upstream.headers {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+
+        if !body.is_empty() {
+            builder = builder.body(body.clone());
+        }
+
+        builder
+            .send()
+            .await
+            .map_err(|e| format!("upstream MCP request failed: {e}"))
+    }
+}
+
+impl ExternalMcpProxy for McpGateway {
+    fn forward(
+        &self,
+        req: ExternalProxyRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<ExternalProxyResponse, String>> + Send>> {
+        let servers = self.servers.clone();
+        let http = self.http.clone();
+        Box::pin(async move {
+            let gateway = McpGateway { servers, http };
+            let upstream = gateway
+                .servers
+                .resolve_upstream(&req.server_id, false)
+                .await?;
+
+            let mut resp = gateway
+                .send_upstream(&upstream, &req.method, &req.headers, &req.body)
+                .await?;
+
+            // If upstream returns 401 for an OAuth server, force a single refresh
+            // and retry once with the fresh token.
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED && upstream.is_oauth {
+                tracing::debug!(
+                    server_id = %req.server_id,
+                    "mcp gateway: upstream returned 401; forcing OAuth refresh and retrying once"
+                );
+                if let Ok(refreshed) = gateway
+                    .servers
+                    .resolve_upstream(&req.server_id, true)
+                    .await
+                {
+                    resp = gateway
+                        .send_upstream(&refreshed, &req.method, &req.headers, &req.body)
+                        .await?;
+                }
+            }
+
+            let status = StatusCode::from_u16(resp.status().as_u16())
+                .unwrap_or(StatusCode::BAD_GATEWAY);
+            let mut headers = HeaderMap::new();
+            for (name, value) in resp.headers() {
+                let lower = name.as_str().to_ascii_lowercase();
+                if is_hop_by_hop(&lower) {
+                    continue;
+                }
+                if let (Ok(h_name), Ok(h_val)) = (
+                    HeaderName::from_bytes(name.as_str().as_bytes()),
+                    HeaderValue::from_bytes(value.as_bytes()),
+                ) {
+                    headers.append(h_name, h_val);
+                }
+            }
+
+            // Stream upstream bytes directly into ExternalProxyResponse with zero buffering.
+            let stream = resp.bytes_stream().filter_map(|chunk| async move {
+                match chunk {
+                    Ok(bytes) => Some(Ok::<Frame<Bytes>, Infallible>(Frame::data(bytes))),
+                    Err(err) => {
+                        tracing::debug!(error = %err, "mcp gateway: upstream stream closed with error");
+                        None
+                    }
+                }
+            });
+            let body = BodyExt::boxed_unsync(StreamBody::new(stream));
+
+            Ok(ExternalProxyResponse {
+                status,
+                headers,
+                body,
+            })
+        })
+    }
+}

@@ -347,6 +347,9 @@ struct Inner {
     turn_listener: OnceLock<TurnListener>,
     /// Plugins whose native MCP servers local runs get (absent in bare tests).
     plugins: OnceLock<crate::plugins::Plugins>,
+    /// Managed external MCP servers (Vault + local) stamped into runs and served
+    /// through the loopback MCP Gateway (absent in bare tests).
+    mcp_servers: OnceLock<Arc<crate::mcp_servers::McpServers>>,
     /// New chats' warm starts, by the id the chat will be created with
     /// ([`warm_start`]).
     warm: Mutex<HashMap<String, warm_start::WarmStart>>,
@@ -519,6 +522,7 @@ impl SessionsEngine {
                 scratch_root: OnceLock::new(),
                 turn_listener: OnceLock::new(),
                 plugins: OnceLock::new(),
+                mcp_servers: OnceLock::new(),
                 warm: Mutex::new(HashMap::new()),
                 warm_leases: Mutex::new(None),
             }),
@@ -596,6 +600,22 @@ impl SessionsEngine {
         &self,
         service: Arc<dyn zeron_rpc::RpcService>,
     ) -> std::io::Result<()> {
+        let external = self
+            .inner
+            .mcp_servers
+            .get()
+            .map(crate::mcp_servers::McpServers::gateway);
+        self.serve_mcp_endpoint_with_external(service, external)
+            .await
+    }
+
+    /// Like [`Self::serve_mcp_endpoint`], with an explicit external MCP proxy
+    /// override.
+    pub async fn serve_mcp_endpoint_with_external(
+        &self,
+        service: Arc<dyn zeron_rpc::RpcService>,
+        external: Option<Arc<dyn zeron_mcp::http::ExternalMcpProxy>>,
+    ) -> std::io::Result<()> {
         let factory: zeron_mcp::http::ToolsFactory = Arc::new(move |origin: &zeron_mcp::Origin| {
             let chat = origin.chat_id.clone().unwrap_or_default();
             Arc::new(zeron_mcp::Tools::new(Arc::new(zeron_mcp::Zeron::with_client(
@@ -603,7 +623,7 @@ impl SessionsEngine {
                 origin.clone(),
             ))))
         });
-        let endpoint = zeron_mcp::http::McpHttpServer::bind(factory).await?;
+        let endpoint = zeron_mcp::http::McpHttpServer::bind_with_external(factory, external).await?;
         *lock(&self.inner.mcp_endpoint) = Some(Arc::new(endpoint));
         Ok(())
     }
@@ -626,6 +646,12 @@ impl SessionsEngine {
     /// Wire the plugins service: local runs get its native MCP servers.
     pub fn set_plugins(&self, plugins: crate::plugins::Plugins) {
         let _ = self.inner.plugins.set(plugins);
+    }
+
+    /// Wire the managed external MCP servers service: runs get enabled remote
+    /// (gateway) and stdio servers stamped into `extra_mcp`.
+    pub fn set_mcp_servers(&self, mcp_servers: Arc<crate::mcp_servers::McpServers>) {
+        let _ = self.inner.mcp_servers.set(mcp_servers);
     }
 
     /// Wire the doc host (called once at engine assembly; the two services are mutually
@@ -3309,6 +3335,37 @@ impl Inner {
         ))
     }
 
+    /// Collect all extra MCP servers stamped onto an agent run: allowed
+    /// plugins' native MCP servers plus managed external MCP servers (remote
+    /// servers routed via the loopback MCP Gateway + local stdio servers).
+    /// Names are deduplicated and `"zeron"` is always reserved.
+    pub(super) fn extra_mcp_servers(
+        &self,
+        grant: Option<&zeron_mcp::http::Grant>,
+    ) -> Vec<zeron_proto::McpServer> {
+        let mut out = self
+            .plugins
+            .get()
+            .map(crate::plugins::Plugins::native_mcp_servers)
+            .unwrap_or_default();
+        let mut seen: std::collections::HashSet<String> = out
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        seen.insert("zeron".to_owned());
+
+        if let Some(mcp_servers) = self.mcp_servers.get() {
+            let endpoint = lock(&self.mcp_endpoint).clone();
+            let token = grant.map(zeron_mcp::http::Grant::token);
+            for server in mcp_servers.extra_mcp_servers(endpoint.as_deref(), token) {
+                if seen.insert(server.name.clone()) {
+                    out.push(server);
+                }
+            }
+        }
+        out
+    }
+
     fn workspace(&self) -> Option<crate::workspace_host::WorkspaceHost> {
         self.doc_host().and_then(|host| host.workspace().cloned())
     }
@@ -4754,13 +4811,9 @@ async fn drive_run(
         request.mcp = Some(server);
         _mcp_grant = grant;
     }
-    // Plugins' native MCP servers come from this host's own allowed plugins,
-    // run from their verified snapshots — never from what a sender put here.
-    request.extra_mcp = inner
-        .plugins
-        .get()
-        .map(crate::plugins::Plugins::native_mcp_servers)
-        .unwrap_or_default();
+    // Plugins' native MCP servers and managed external MCP servers come from
+    // this host's own configuration — never from what a sender put here.
+    request.extra_mcp = inner.extra_mcp_servers(_mcp_grant.as_ref());
     request.code_mode = code_mode;
     // The MCP servers the agent starts from this run's config: the only
     // children it may hold when stopped idle (see the reaper).

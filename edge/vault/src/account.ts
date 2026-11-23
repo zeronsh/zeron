@@ -58,7 +58,7 @@ import type {
   GithubUnavailableView,
   VaultAccountProfile,
   VaultAccountView,
-  VaultConnectionView,
+  VaultProviderConnectionView,
   VaultMaterial,
   VaultProviderId,
   VaultResult,
@@ -475,7 +475,7 @@ export class VaultAccount extends DurableObject<Env> {
 
   /** The provider's connection, summarized from its active account (else
    * its most recent one); null when it holds none. */
-  view(userId: string, provider: VaultProviderId): VaultResult<VaultConnectionView | null> {
+  view(userId: string, provider: VaultProviderId): VaultResult<VaultProviderConnectionView | null> {
     const owner = this.claim(userId, provider);
     if (owner) return owner;
     const rows = this.rows();
