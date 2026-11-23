@@ -61,14 +61,19 @@ local children = {
 local online = true
 -- (`box_project`: the project checked out on the devbox too.)
 local box_project = false
+local extra_devices: { any } = {}
 local function publish()
+	local devs = {
+		{ id = "d", name = "work-laptop", platform = "macos", here = true, online = true },
+		{ id = "box", name = "devbox", platform = "linux", here = false, online = online },
+	}
+	for _, dev in extra_devices do
+		table.insert(devs, dev)
+	end
 	sessions.now:set({
 		state = "ready",
 		here = "d",
-		devices = {
-			{ id = "d", name = "work-laptop", platform = "macos", here = true, online = true },
-			{ id = "box", name = "devbox", platform = "linux", here = false, online = online },
-		},
+		devices = devs,
 		projects = if box_project
 			then {
 				{ id = "p1", name = "comet-native", device = "d", path = "/Users/me/comet-native", git = true },
@@ -250,6 +255,16 @@ end }
 -- A side chat on the devbox (a worktree there): its own device's group.
 ui.command { id = "side_elsewhere", title = "A side chat on the devbox", run = function()
 	table.insert(children, { id = "side-box", parent = "chat-1", title = "Try it on the devbox", device = "box", updated = NOW - 10, created = NOW - 20, agent = "claude" })
+	publish()
+end }
+-- Several side chats on Cloud, each on its own Cloud sandbox device (plus
+-- one whose sandbox device is gone): they group together as one Cloud group.
+ui.command { id = "side_cloud", title = "Side chats on Cloud sandboxes", run = function()
+	table.insert(extra_devices, { id = "cloud-1", name = "Cloud session", platform = "cloud", here = false, online = true, cloud = true })
+	table.insert(extra_devices, { id = "cloud-2", name = "Cloud session", platform = "cloud", here = false, online = false, cloud = true })
+	table.insert(children, { id = "side-c1", parent = "chat-1", title = "Cloud run one", device = "cloud-1", updated = NOW - 5, created = NOW - 15, agent = "claude" })
+	table.insert(children, { id = "side-c2", parent = "chat-1", title = "Cloud run two", device = "cloud-2", updated = NOW - 12, created = NOW - 22, agent = "claude" })
+	table.insert(children, { id = "side-c3", parent = "chat-1", title = "Cloud run archived sandbox", device = "cloud-gone", updated = NOW - 18, created = NOW - 28, agent = "claude" })
 	publish()
 end }
 ui.command { id = "box_project", title = "The project on the devbox too", run = function()

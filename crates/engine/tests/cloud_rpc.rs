@@ -410,6 +410,20 @@ fn cloud_edge(request: &str, body: &str) -> (u16, String) {
                 .into(),
         );
     }
+    // The vault's accounts: one ChatGPT login, nothing else connected.
+    if request.starts_with("GET /vault/") && request.contains("/accounts/") {
+        if request.ends_with("/accounts/codex") {
+            return (
+                200,
+                r#"{"accounts":[{"slot":"a1","status":"connected","active":true,"kind":"oauth","account":"me@example.com","email":"me@example.com","authorizedDevices":["cloud-acct"],"createdAt":1,"updatedAt":1}]}"#
+                    .into(),
+            );
+        }
+        if request.contains("/usage") {
+            return (404, r#"{"error":"not_found","message":"no usage"}"#.into());
+        }
+        return (200, r#"{"accounts":[]}"#.into());
+    }
     if request.starts_with("GET ") && request.contains("/github/repos") {
         return (
             200,
@@ -769,8 +783,8 @@ async fn catalogs_for_cloud_devices_are_answered_here() {
     });
     let client = memory_client(core.rpc_service());
 
-    // Harnesses for any Cloud device: Codex and Claude Code, both usable
-    // there, without dialing anything (no peer links exist here).
+    // Harnesses for any Cloud device: every built-in agent, without dialing
+    // anything (no peer links exist here).
     for target in ["cloud-acct", "cloud-s-chat-1"] {
         let harnesses: Vec<serde_json::Value> = client
             .call_as(
@@ -779,12 +793,11 @@ async fn catalogs_for_cloud_devices_are_answered_here() {
             )
             .await
             .unwrap();
-        let ids: Vec<&str> = harnesses.iter().filter_map(|h| h["id"].as_str()).collect();
-        assert_eq!(ids.len(), 2, "{harnesses:?}");
-        assert!(
-            ids.contains(&"codex") && ids.contains(&"claude-code"),
-            "{ids:?}"
-        );
+        let mut ids: Vec<&str> = harnesses.iter().filter_map(|h| h["id"].as_str()).collect();
+        ids.sort_unstable();
+        let mut cloud: Vec<&str> = zeron_proto::CLOUD_HARNESSES.to_vec();
+        cloud.sort_unstable();
+        assert_eq!(ids, cloud, "{harnesses:?}");
         assert!(harnesses.iter().all(|h| h["installed"] == true));
     }
     let refused = client
@@ -795,9 +808,31 @@ async fn catalogs_for_cloud_devices_are_answered_here() {
         .await
         .unwrap_err();
     assert!(
-        refused.to_string().contains("Codex and Claude Code only"),
+        refused.to_string().contains("doesn't run on Cloud"),
         "{refused}"
     );
+
+    // A Cloud chat's composer asks its session machine for accounts: they
+    // come from the vault, the same for every machine, never by dialing the
+    // machine (which may be asleep).
+    for target in ["cloud-s-chat-1", "cloud"] {
+        let snapshot: serde_json::Value = client
+            .call_as(
+                methods::LIST_AGENT_ACCOUNTS,
+                serde_json::json!({ "targetDeviceId": target }),
+            )
+            .await
+            .unwrap();
+        let codex: Vec<&serde_json::Value> = snapshot["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["harness"] == "codex")
+            .collect();
+        assert_eq!(codex.len(), 1, "{target}: {snapshot}");
+        assert_eq!(codex[0]["id"], "codex:a1");
+        assert_eq!(codex[0]["active"], true);
+    }
 
     // Models for a chat on a session machine (asleep, or gone): Cloud's, as
     // the edge lists them, whatever this computer has installed or signed in.
@@ -986,7 +1021,21 @@ async fn github_logins_are_listed_and_changed_one_at_a_time() {
             let accounts = [login("awork", "work-me", true), login("ahome", "home-me", false)];
             return (200, serde_json::json!({ "accounts": accounts }).to_string());
         }
-        if request.starts_with("GET ") && request.contains("/github/repos") {
+        // The vault's accounts: one ChatGPT login, nothing else connected.
+    if request.starts_with("GET /vault/") && request.contains("/accounts/") {
+        if request.ends_with("/accounts/codex") {
+            return (
+                200,
+                r#"{"accounts":[{"slot":"a1","status":"connected","active":true,"kind":"oauth","account":"me@example.com","email":"me@example.com","authorizedDevices":["cloud-acct"],"createdAt":1,"updatedAt":1}]}"#
+                    .into(),
+            );
+        }
+        if request.contains("/usage") {
+            return (404, r#"{"error":"not_found","message":"no usage"}"#.into());
+        }
+        return (200, r#"{"accounts":[]}"#.into());
+    }
+    if request.starts_with("GET ") && request.contains("/github/repos") {
             let reply = serde_json::json!({
                 "repos": [{
                     "fullName": "work-org/api", "cloneUrl": "https://github.com/work-org/api.git",
@@ -1156,6 +1205,7 @@ async fn a_message_that_waited_days_for_its_machine_goes_once_when_woken() {
             auto_approve: true,
             access: Default::default(),
             plan: false,
+            code_mode: false,
             attachments: Vec::new(),
             worktree: None,
             resume: None,

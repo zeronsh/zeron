@@ -22,9 +22,84 @@ export type Mention = {
 	image: boolean,
 }
 
--- What a picture is called in a draft: `Image N`.
+-- What a picture is called in a draft when it has no name of its own: `Image N`.
 function M.image_label(index: number): string
 	return `Image {index}`
+end
+
+local IMAGE_EXTS: { [string]: boolean } = {
+	png = true,
+	jpg = true,
+	jpeg = true,
+	gif = true,
+	webp = true,
+	svg = true,
+	bmp = true,
+	tif = true,
+	tiff = true,
+	heic = true,
+	heif = true,
+	avif = true,
+}
+
+-- Whether `name` has an image file extension (matches proto `is_image_path`
+-- plus Apple/modern formats).
+function M.is_image_name(name: string): boolean
+	local base = string.match(name, "([^/\\]+)$") or name
+	local ext = string.match(base, "%.([^%.]+)$")
+	return if ext then IMAGE_EXTS[string.lower(ext)] == true else false
+end
+
+-- Human-readable filename for an attached file: normalizes narrow/non-breaking
+-- spaces and trims verbose macOS screenshot dates (`Screenshot 2026-11-07 at
+-- 1.10.14\u{202F}PM.png` -> `Screenshot 1.10.14 PM.png`) while leaving normal
+-- filenames untouched.
+function M.friendly_name(name: string): string
+	local clean = string.gsub(name, "\226\128\175", " ")
+	clean = string.gsub(clean, "\194\160", " ")
+	local after = string.match(clean, "^Screenshot %d%d%d%d%-%d%d%-%d%d at (.+)$")
+		or string.match(clean, "^Screen [Ss]hot %d%d%d%d%-%d%d%-%d%d at (.+)$")
+	if after then
+		local h, m, s, ap, rest = string.match(after, "^(%d+)%.(%d%d)%.(%d%d)%s*([AaPp][Mm])(.*)$")
+		if h and m and s and ap then
+			return `Screenshot {h}.{m}.{s} {string.upper(ap)}{rest}`
+		end
+		local h24, m24, s24, rest24 = string.match(after, "^(%d+)%.(%d%d)%.(%d%d)(.*)$")
+		if h24 and m24 and s24 then
+			return `Screenshot {h24}.{m24}.{s24}{rest24}`
+		end
+	end
+	return clean
+end
+
+-- Readable timestamped name for a pasted clipboard image (`Clipboard 1.45.12 PM.png`),
+-- deduplicated as `(2)`, `(3)`, ... against `existing`.
+function M.pasted_name(existing: { string }?, now: number?): string
+	local t: any = os.date("*t", math.floor(now or os.time()))
+	local hour24: number = if type(t) == "table" and type(t.hour) == "number" then t.hour else 0
+	local min: number = if type(t) == "table" and type(t.min) == "number" then t.min else 0
+	local sec: number = if type(t) == "table" and type(t.sec) == "number" then t.sec else 0
+	local ampm = if hour24 >= 12 then "PM" else "AM"
+	local hour12 = hour24 % 12
+	if hour12 == 0 then
+		hour12 = 12
+	end
+	local stem = string.format("Clipboard %d.%02d.%02d %s", hour12, min, sec, ampm)
+	local taken: { [string]: boolean } = {}
+	if existing then
+		for _, n in existing do
+			taken[n] = true
+		end
+	end
+	local candidate = stem .. ".png"
+	if not taken[candidate] then
+		return candidate
+	end
+	local i = 2
+	while taken[`{stem} ({i}).png`] do
+		i += 1
+	end
+	return `{stem} ({i}).png`
 end
 
 -- A name as a link's label takes it: `\`, `[`, `]` and a backtick escaped.
@@ -34,7 +109,8 @@ function M.escape(label: string): string
 	end))
 end
 
--- The link for attachment `index`: a picture's with no `name`.
+-- The link for attachment `index`: a legacy numbered picture with no `name`,
+-- or `[<escaped name>](zeron-attachment:index)` for named files and images.
 function M.link(index: number, name: string?): string
 	if name == nil then
 		return `[{M.image_label(index)}]({M.IMAGE}{index})`

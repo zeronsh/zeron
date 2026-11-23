@@ -116,12 +116,13 @@ impl PiHarness {
         })
     }
     async fn probe(&self, cwd: &Path, models: bool) -> Result<Value, HarnessError> {
+        // (A Cloud machine's credential keys for Pi: crate::catalog_env.)
         let mut process = self.spawn(
             cwd,
             &["--no-session".into()],
             None,
             &[],
-            &Default::default(),
+            &crate::catalog_env::get(HarnessId::Pi),
         )?;
         let (mut tx, rx) = tokio::sync::oneshot::channel();
         let grace = self.kill_grace;
@@ -241,11 +242,20 @@ impl Process {
         command: Value,
         backlog: &mut Vec<Value>,
     ) -> Result<Value, HarnessError> {
+        self.try_query(command, backlog).await?
+    }
+    /// [`Self::query`], keeping Pi's own refusal (the inner `Err`) apart
+    /// from a broken process or pipe (the outer `Err`).
+    async fn try_query(
+        &mut self,
+        command: Value,
+        backlog: &mut Vec<Value>,
+    ) -> Result<Result<Value, HarnessError>, HarnessError> {
         let id = self.transport.client.request(command)?;
         loop {
             let frame = self.next().await?;
             if frame["type"] == "response" && frame["id"] == id {
-                return response_data(frame);
+                return Ok(response_data(frame));
             }
             if frame["type"] == "extension_ui_request" {
                 self.dialogs.request(self.transport.client.clone(), &frame);

@@ -96,5 +96,9 @@ return ui.column {
 			{ id = "devin", label = "Devin", mark = "devin" },
 		},
 		models = MODELS,
+		-- A model its catalog doesn't list, by the name its chat gave it.
+		model_label = function(): string?
+			return if (ui.state("test_picker_model", nil :: string?):get() or ""):find("/", 1, true) then "Unlisted" else nil
+		end,
 	},
 }

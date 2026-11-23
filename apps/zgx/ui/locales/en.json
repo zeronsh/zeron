@@ -937,6 +937,7 @@
       "use_reset": "Use a reset",
       "connect": "Connect a {name} account",
       "add_account": "Add account",
+      "how_it_signs_in": "How it signs in on Cloud",
       "signing_in_to": "Signing in to {name}",
       "signing_in_hint": "Waiting for you to finish in the browser. Nothing changes until you switch.",
       "signing_in": "Signing in",
@@ -1540,6 +1541,11 @@
         "terms": "subagent delegate side chats tasks spawn",
         "description": "Off, it delegates through side chats."
       },
+      "code_mode": {
+        "label": "Code mode",
+        "terms": "code mode javascript script tool calls programmatic",
+        "description": "Run multi-step tool calls as code in one turn."
+      },
       "update_policy": {
         "label": "Update policy",
         "terms": "automatic upgrade version cli"
@@ -1668,16 +1674,7 @@
       },
       "couldnt_switch": "Couldn't switch accounts",
       "cloud": "Cloud",
-      "cloud_keys": {
-        "title": "API keys",
-        "section_description": "Instead of signing in, Cloud can use an API key. A key saved here becomes the account its agent uses on every Cloud machine, from its next turn.",
-        "anthropic": "Anthropic API key",
-        "openai": "OpenAI API key",
-        "description": "For {agent} on Cloud. Kept in Zeron's vault, never on this computer.",
-        "placeholder": "Paste a key",
-        "save": "Save",
-        "saved": "{agent} on Cloud now uses this key"
-      }
+      "cloud_key_kept": "Kept in Zeron's vault for Cloud, never on this Mac. Every Cloud machine uses it from its next turn, wherever no sign-in is in use."
     },
     "devices": {
       "title": "Devices",

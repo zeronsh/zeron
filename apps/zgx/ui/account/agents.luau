@@ -89,8 +89,13 @@ export type Agent = {
 	accounts: { Account },
 	groups: { Group }?,
 	login_for: string?,
+	-- Whether its card adds an account by signing in (on Cloud, only the
+	-- agents Cloud takes a sign-in for; nil: it does).
+	can_add: boolean?,
+	-- How it signs in on Cloud, where that differs from its own way.
+	cloud_note: string?,
 }
-export type Now = { state: string, list: { Agent }, target: string? }
+export type Now = { state: string, list: { Agent }, target: string?}
 
 M.now = ui.shared("agents", { state = "looking", list = {} } :: Now)
 

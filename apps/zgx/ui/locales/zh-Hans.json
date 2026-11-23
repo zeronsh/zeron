@@ -937,6 +937,7 @@
       "use_reset": "使用一次重置",
       "connect": "连接 {name} 账户",
       "add_account": "添加账户",
+      "how_it_signs_in": "在 Cloud 上如何登录",
       "signing_in_to": "正在登录 {name}",
       "signing_in_hint": "等待你在浏览器中完成操作。切换账户前不会更改任何内容。",
       "signing_in": "正在登录",
@@ -1540,6 +1541,11 @@
         "terms": "子智能体 委派 侧边对话 任务 创建 subagent delegate side chats tasks spawn",
         "description": "关闭时，通过侧边对话委派任务。"
       },
+      "code_mode": {
+        "label": "代码模式",
+        "terms": "代码模式 脚本 工具调用 编程 code mode javascript script tool calls programmatic",
+        "description": "在一轮中以代码方式执行多步工具调用。"
+      },
       "update_policy": {
         "label": "更新策略",
         "terms": "自动 升级 版本 命令行 automatic upgrade version cli"
@@ -1668,16 +1674,7 @@
       },
       "couldnt_switch": "无法切换账户",
       "cloud": "云端",
-      "cloud_keys": {
-        "title": "API 密钥",
-        "section_description": "云端也可以使用 API 密钥，而不必登录。在此保存的密钥会成为该代理在每台云端机器上使用的账户，从下一轮开始生效。",
-        "anthropic": "Anthropic API 密钥",
-        "openai": "OpenAI API 密钥",
-        "description": "用于云端的 {agent}。保存在 Zeron 的密钥库中，不会存放在这台电脑上。",
-        "placeholder": "粘贴密钥",
-        "save": "保存",
-        "saved": "云端的 {agent} 现在使用此密钥"
-      }
+      "cloud_key_kept": "保存在 Zeron 的保管库中供 Cloud 使用，绝不存放在这台 Mac 上。每台 Cloud 机器从下一轮起，在未使用登录的地方使用它。"
     },
     "devices": {
       "title": "设备",

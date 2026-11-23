@@ -1496,6 +1496,7 @@ impl SessionHandle {
                     auto_approve: false,
                     access: config.map(|c| c.access).unwrap_or_default(),
                     plan: config.is_some_and(|c| c.plan),
+                    code_mode: false,
                     resume: None,
                     attachments: refs.clone(),
                     worktree: request.worktree.clone(),

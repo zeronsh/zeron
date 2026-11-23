@@ -156,11 +156,16 @@ function M.use(props: Props)
 		end
 		-- A width-only query already measures settled editor content at that
 		-- exact width. Publish it as one sample now, avoiding a stale/ready
-		-- round-trip for every frame of a page resize. Content, IME, style,
-		-- editor replacement and initial requests still need acknowledgement.
-		if settled and settled.width ~= wanted.width and settled.mount == wanted.mount
-			and settled.edit == wanted.edit and settled.theme == wanted.theme
-			and settled.revision == wanted.source.revision then
+		-- round-trip for every frame of a page resize. Likewise, a live edit
+		-- inside the mounted editor (typing, Shift+Enter, paste, IME) already
+		-- advanced its native metric revision before notifying Luau, so
+		-- `wanted.source` is already the exact frame-0 size. External draft
+		-- writes (where the editor has not yet consumed the new string),
+		-- theme changes, editor replacement and initial requests still defer.
+		if settled and settled.mount == wanted.mount and settled.theme == wanted.theme
+			and ((settled.width ~= wanted.width and settled.edit == wanted.edit
+					and settled.revision == wanted.source.revision)
+				or (settled.width == wanted.width and settled.revision ~= wanted.source.revision)) then
 			publish_exact(wanted, wanted.source)
 			return
 		end
@@ -192,9 +197,25 @@ function M.use(props: Props)
 			width = want.width,
 		}
 	end)
+	-- Latest requested natural size before deferred publication settles, used
+	-- only to keep the editor's internal viewport tall enough on frame 0 so
+	-- caret reveal never scrolls and clips the top of the draft before the
+	-- composer's geometry transition starts.
+	local pending = ui.computed(function(): Size?
+		local want = request:get()
+		local raw = want.estimate or want.source
+		if raw == nil then
+			return nil
+		end
+		return {
+			unwrapped_width = raw.unwrapped_width,
+			wrapped_height = raw.wrapped_height,
+			line_height = raw.line_height,
+		}
+	end)
 	-- Geometry follows measured dimensions; request/readiness changes have
 	-- their own subscribers and do not invalidate the last complete sample.
-	return { result = result, sample = size :: ReadOnlyState<Size?> }
+	return { result = result, sample = size :: ReadOnlyState<Size?>, pending = pending :: ReadOnlyState<Size?> }
 end
 
 return M

@@ -1795,6 +1795,12 @@ pub const CURSOR_USAGE_CURSOR: &str = "Cursor";
 pub const CURSOR_USAGE_GROK: &str = "Grok";
 pub const CURSOR_USAGE_OTHER: &str = "Other";
 
+/// The groups Antigravity's usage windows are labelled by ("Gemini Session",
+/// "Claude & GPT Week"): Google limits each group of models on its own, and
+/// the composer shows the group of the selected model.
+pub const ANTIGRAVITY_USAGE_GEMINI: &str = "Gemini";
+pub const ANTIGRAVITY_USAGE_OTHER: &str = "Claude & GPT";
+
 /// CLI plan rate-limit window (accounts settings meters) — NOT app token accounting.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

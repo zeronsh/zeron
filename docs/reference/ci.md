@@ -10,9 +10,10 @@ Pull requests, `main` and the merge queue all go through one workflow,
 2. **admit** ([`scripts/ci/admit.py`](../../scripts/ci/admit.py)) waits until
    all of those runners are free.
 3. **The suites** all start together. Each is a reusable workflow:
-   `ui-tests.yml` (Linux), `windows.yml`, `macos.yml` (macOS and iOS),
-   `voice-tests.yml`, `android.yml`, `preview-tests.yml`,
-   `linux-installer.yml` and `cursor-compatibility.yml`.
+   `zgx-tests.yml` (macOS and Linux), `ui-tests.yml` (Linux core tests),
+   `windows.yml`, `macos.yml` (macOS and iOS), `voice-tests.yml`,
+   `android.yml`, `preview-tests.yml`, `linux-installer.yml` and
+   `cursor-compatibility.yml`.
 4. **CI result** passes when no suite failed or was cancelled. This is the
    check to require in the ruleset and the merge queue.
 
@@ -20,25 +21,28 @@ Pull requests, `main` and the merge queue all go through one workflow,
 
 | | Pull request (fast tier) | `main`, merge queue, manual run (full tier) |
 |---|---|---|
-| Linux core and UI, Cursor, edge, installer | when their files change | when their files change |
+| ZGX desktop app (`zgx-macos`, `zgx-linux`) | `apps/zgx` or crates it/plugin host builds changed | when their files change |
+| Linux core, Cursor, edge, installer | when their files change | when their files change |
 | iOS core (Linux) | app or mobile core changed | app or mobile core changed |
 | iOS simulator | the app, `crates/mobile` or `crates/client` changed | with iOS core |
 | Windows tests, macOS | only when the change looks platform specific | when their files change |
 | Windows packaging (`app`) | `apps/zeron`, `dist/windows`, packaging scripts, `crates/update` | with Windows tests |
-| macOS browser / preview fixtures | browser, preview or edge code changed | always |
-| Linux browser fixture | nightly or `ci:full` only | nightly or manual run only |
 | Android APK | the Android app or `crates/mobile` changed | when its files change |
 | Voice (audio stack, Windows media runtime) | nightly or `ci:full` only | nightly or manual run only |
-| GPUI frame-source | the pinned GPUI revision moved | the same |
 
 The `iOS core` paths come from the Cargo graph: every crate `zeron-mobile`
-depends on.
+depends on. The `zgx` suite runs `scripts/ci/test-zgx.sh rust` (Rust host unit
+tests), `scripts/ci/test-zgx.sh tests` (integration tests in `apps/zgx/tests/`),
+and `scripts/ci/test-zgx.sh ui` (`zgx test ui` Luau UI tests) on macOS and
+Linux, plus the engine's plugin tests on macOS. Release and beta packaging of
+`apps/zgx` across macOS, Linux, and Windows runs in `zgx-build.yml` (called by
+`release.yml` and `zgx-beta.yml`).
 
 On the fast tier, a change counts as platform specific when it touches:
 
 - the platform's own files: packaging, scripts, `apps/zeron`, `crates/update`,
   and the voice crates or the mobile core for voice and Android;
-- a file under `crates/` whose name says so, such as `browser/macos.rs`;
+- a file under `crates/` whose name says so, such as `coretext.rs`;
 - changed code (not comments) with a platform conditional or platform API:
   `target_os`, `cfg(unix)`, `cfg(windows)`, `objc`, WebKit, `HWND`, ...
 
@@ -50,14 +54,13 @@ everything.
 
 ### Scheduled runs
 
-- **Nightly** (`ci.yml`, schedule): every suite, job and fixture, nothing
-  reused, slow tests included. Voice and the Linux browser fixture run only
-  here, on manual runs and with `ci:full`: in the two weeks measured, the
-  voice jobs left after the move to `core-tests` never failed, and the Linux
-  browser fixture's failures were window-timing flakes and package downloads.
-  The rest of voice (protocol, transport, MCP, voice-media) runs in
-  `core-tests`, `ios-core` and the Windows tests.
-- **Nightly** (`release-profile-tests.yml`): core and UI in the release profile.
+- **Nightly** (`ci.yml`, schedule): every suite and job, nothing reused, slow
+  tests included. Voice runs only here, on manual runs and with `ci:full`: in
+  the two weeks measured, the voice jobs left after the move to `core-tests`
+  never failed. The rest of voice (protocol, transport, MCP, voice-media) runs
+  in `core-tests`, `ios-core` and the Windows tests.
+- **Nightly** (`release-profile-tests.yml`): Linux core suite in the release
+  profile.
 - **Weekly** (`weekly-tests.yml`): the tests no other workflow runs. That is
   every `zeron-engine` integration binary, plus the crates whose own tests have
   no other runner (term, syntax, theme, veil, visual, visual-gpu, zatex,
@@ -109,7 +112,7 @@ tree is the merge with the current `main`. The inputs are:
   - the packages they test and every workspace package those depend on, of any
     dependency kind;
   - every file outside those packages that their Rust sources name with a
-    `../` path, for example `include_str!("../../../ui/src/file-icons.json")`
+    `../` path, for example `include_str!("../../../assets/file-icons/README.md")`
     or `CARGO_MANIFEST_DIR` joined with `../harness/tests/fixtures`. The
     sources are scanned on every run, so new references are picked up without
     a list to maintain. The plan summary lists the files found.
@@ -132,8 +135,8 @@ Which recorded passes count:
 Reuse fails closed:
 
 - If a pull request changes a Rust build file (`crates/`, `apps/zeron`,
-  `Cargo.*`, `.cargo/`) that no selected suite's fingerprint covers, nothing is
-  reused.
+  `apps/zgx`, `Cargo.*`, `.cargo/`) that no selected suite's fingerprint covers,
+  nothing is reused.
 - If a suite's sources build a path from the package directory's parent in
   code (`.parent()`, `.ancestors()`, `join("..")`), the scan can't follow it.
   That suite then counts the whole workspace as its input.
@@ -290,9 +293,10 @@ admission:
 
 The repository has 10 GB of Actions cache. When it is full, GitHub evicts the
 least recently used entries. Only `main` saves caches, so pull requests can't
-push out the caches that `main` seeds. There is one cache per build: Linux
-core, Linux UI, Linux voice, one shared by the Windows jobs, macOS native, iOS
-core and simulator, and Android.
+push out the caches that `main` seeds. There is one cache per build: ZGX
+(macOS and Linux, plus `zgx-cli` and `zgx-ghostty`), Linux core,
+Linux voice, one shared by the Windows jobs, macOS native, iOS core and
+simulator, and Android.
 
 ## Locally
 

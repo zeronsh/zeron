@@ -27,8 +27,8 @@ test("a message sent while a side chat works is queued, not put in its transcrip
 	app:key("Enter")
 	app:frames(10)
 	expect(calls(app)).to_contain("send:side-a:one more thing")
-	-- (Waiting for the turn it runs in: what's picked isn't sent with it.)
-	expect(calls(app)).to_contain("pick:side-a::::")
+	-- Carries what's picked so the queued message runs on that agent/model.
+	expect(calls(app)).to_contain("pick:side-a:codex/gpt-6.1:codex:medium:edits")
 	expect(app:has('.side-chat-tab >> "one more thing"')).to_be(false)
 	expect(app:text(BOX)).to_be("")
 end)
