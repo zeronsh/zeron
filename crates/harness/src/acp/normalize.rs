@@ -181,6 +181,7 @@ pub(super) fn typed_call(update: &Value) -> ToolCall {
     match kind {
         "execute" => ToolCall::Exec {
             command: raw_str("command")
+                .or_else(|| raw_str("CommandLine"))
                 .or_else(|| unwrap_command_title(&title))
                 .or_else(|| arg_from_title(&title))
                 .unwrap_or_default(),
@@ -189,6 +190,7 @@ pub(super) fn typed_call(update: &Value) -> ToolCall {
             path: raw_str("path")
                 .or_else(|| raw_str("file_path"))
                 .or_else(|| raw_str("filePath"))
+                .or_else(|| raw_str("AbsolutePath"))
                 .or_else(|| first_location(update))
                 .or_else(|| arg_from_title(&title))
                 .unwrap_or_default(),
@@ -213,6 +215,8 @@ pub(super) fn typed_call(update: &Value) -> ToolCall {
                 match raw_str("path")
                     .or_else(|| raw_str("file_path"))
                     .or_else(|| raw_str("filePath"))
+                    .or_else(|| raw_str("TargetFile"))
+                    .or_else(|| raw_str("AbsolutePath"))
                     .or_else(|| first_location(update))
                 {
                     Some(path) if kind == "edit" => ToolCall::EditFile {
@@ -232,19 +236,24 @@ pub(super) fn typed_call(update: &Value) -> ToolCall {
             } else {
                 ToolCall::Search {
                     pattern: raw_str("pattern")
+                        .or_else(|| raw_str("Pattern"))
                         .or_else(|| raw_str("globPattern"))
                         .or_else(|| raw_str("query"))
+                        .or_else(|| raw_str("Query"))
                         .or_else(|| arg_from_title(&title))
                         .unwrap_or_default(),
-                    path: raw_str("path"),
+                    path: raw_str("path")
+                        .or_else(|| raw_str("SearchPath"))
+                        .or_else(|| raw_str("SearchDirectory")),
                 }
             }
         }
-        "fetch" => match raw_str("url") {
+        "fetch" => match raw_str("url").or_else(|| raw_str("Url")) {
             Some(url) => ToolCall::WebFetch { url, prompt: None },
             None => ToolCall::WebSearch {
                 query: raw_str("searchTerm")
                     .or_else(|| raw_str("query"))
+                    .or_else(|| raw_str("Query"))
                     .or_else(|| arg_from_title(&title))
                     .unwrap_or_default(),
             },

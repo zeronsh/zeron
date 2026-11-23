@@ -136,6 +136,50 @@ describe("antigravity", () => {
     expect(JSON.stringify(grant)).not.toMatch(/google-rt|GOCSPX/);
     expect(parseAntigravityUpload({ antigravityToken: { ...token, client_id: "someone-else" } }).ok).toBe(false);
   });
+
+  it("accepts unified CLI antigravity-oauth-token uploads and refreshes via Worker OAuth client", async () => {
+    const cliDoc = {
+      token: {
+        access_token: "ya29.initial",
+        token_type: "Bearer",
+        refresh_token: "1//cli-rt",
+        expiry: new Date(NOW + 55 * 60_000).toISOString()
+      },
+      auth_method: "consumer"
+    };
+    const parsed = parseAntigravityUpload({ antigravityToken: cliDoc });
+    if (!parsed.ok) throw new Error(parsed.message);
+    expect(parsed.secret.refreshToken).toBe("1//cli-rt");
+    expect(parsed.secret.accessToken).toBe("ya29.initial");
+    expect(antigravityAdapter.refreshDue(parsed.secret, NOW)).toBe(false);
+    expect(antigravityAdapter.refreshDue(parsed.secret, NOW + 10 * 60_000)).toBe(true);
+
+    // Without configured Worker OAuth client secrets, returns a transient error.
+    const fetchFn = vi.fn<FetchFn>(async () => json(200, { access_token: "ya29.b", expires_in: 3599 }));
+    const unconfigured = await refreshAntigravity(parsed.secret, { fetch: fetchFn, now: NOW });
+    expect(unconfigured.kind).toBe("transient");
+    expect(fetchFn).not.toHaveBeenCalled();
+
+    // With configured Worker OAuth client secrets, refreshes at Google cleanly.
+    const done = await refreshAntigravity(parsed.secret, {
+      fetch: fetchFn,
+      now: NOW,
+      antigravityClientId: "1071006060591-cli.apps.googleusercontent.com",
+      antigravityClientSecret: "GOCSPX-worker"
+    });
+    expect(done.kind).toBe("ok");
+    if (done.kind !== "ok") throw new Error(done.reason);
+    expect(form(fetchFn.mock.calls[0]![1])).toMatchObject({
+      grant_type: "refresh_token",
+      refresh_token: "1//cli-rt",
+      client_id: "1071006060591-cli.apps.googleusercontent.com",
+      client_secret: "GOCSPX-worker"
+    });
+    expect(done.secret.accessToken).toBe("ya29.b");
+    const grant = antigravityAdapter.grant(done.secret, NOW);
+    expect(grant.accessToken).toBe("ya29.b");
+    expect(JSON.stringify(grant)).not.toMatch(/cli-rt|GOCSPX/);
+  });
 });
 
 describe("muse", () => {
