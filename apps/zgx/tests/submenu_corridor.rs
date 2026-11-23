@@ -97,6 +97,19 @@ fn diagonal_pointer_path_keeps_open_submenu_alive_and_keeps_gap() {
     let search_branches = bounds_of(&mut app, "\"Search branches…\"");
     let parent_panel = bounds_of(&mut app, ".dropdown-panel[1]");
 
+    // Verify stacked submenu trigger rows keep $zeron.list.gap (~2px) so
+    // active and hover washes never touch.
+    let device_project_gap = project.y - (device.y + device.height);
+    let project_checkout_gap = checkout.y - (project.y + project.height);
+    assert!(
+        (1.5..=3.0).contains(&device_project_gap),
+        "expected ~2px gap between Device ({device:?}) and Project ({project:?}), got {device_project_gap}"
+    );
+    assert!(
+        (1.5..=3.0).contains(&project_checkout_gap),
+        "expected ~2px gap between Project ({project:?}) and Checkout ({checkout:?}), got {project_checkout_gap}"
+    );
+
     // Enter Device trigger near its middle-left; Device submenu opens.
     let ox = device.x + device.width * 0.4;
     let oy = device.y + device.height * 0.5;

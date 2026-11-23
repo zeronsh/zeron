@@ -1261,7 +1261,7 @@ return ui.component(function(props: Props): Node
 						table.insert(top, gated(rule()))
 					end
 				end
-				local head = if props.head then ui.column { w_full = true, p = "$space.1", props.head } else nil
+				local head = if props.head then ui.column { w_full = true, p = "$space.1", gap = "$zeron.list.gap", props.head } else nil
 				if head and not bottom_up then
 					section(head, true)
 				end
@@ -1570,9 +1570,14 @@ return ui.component(function(props: Props): Node
 					-- (Nothing to list.)
 				elseif props.search == false then
 					local items: { Node } = {
-						ui.each(shown, function(item: Item)
-							return item_row(item, false)
-						end, { key = key_of, w_full = true }),
+						ui.show(
+							function(): boolean
+								return #shown:get() > 0
+							end,
+							ui.each(shown, function(item: Item)
+								return item_row(item, false)
+							end, { key = key_of, w_full = true, gap = "$zeron.list.gap" })
+						),
 					}
 					for _, node in nothing() do
 						table.insert(items, node)
@@ -1751,7 +1756,7 @@ return ui.component(function(props: Props): Node
 				table.insert(rows, row)
 			end
 			if props.extra then
-				local foot = ui.column { w_full = true, rule(), ui.column { w_full = true, p = "$space.1", props.extra } }
+				local foot = ui.column { w_full = true, rule(), ui.column { w_full = true, p = "$space.1", gap = "$zeron.list.gap", props.extra } }
 				table.insert(rows, if props.extra_when then ui.show(props.extra_when, foot) else foot)
 			end
 			local function finish(col: { [any]: any }): Node

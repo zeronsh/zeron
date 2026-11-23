@@ -805,7 +805,7 @@ local function work_in(
 			end))
 		)
 	end
-	return ui.column { w_full = true, table.unpack(rows) }
+	return ui.column { w_full = true, gap = "$zeron.list.gap", table.unpack(rows) }
 end
 
 -- The same head for an existing chat, which can't move: where it works,
@@ -852,7 +852,7 @@ local function fixed_work_in(corridor: Menu.Corridor, fixed: () -> Fixed?, on_re
 			end, submenu(corridor, locale.t("ds.composer.reach.label"), reach, REACHES, 1, nil, nil, nil, on_reach))
 		)
 	end
-	return ui.column { w_full = true, table.unpack(rows) }
+	return ui.column { w_full = true, gap = "$zeron.list.gap", table.unpack(rows) }
 end
 
 -- The ring, in a chip-high box of its own, washed under the pointer as the
