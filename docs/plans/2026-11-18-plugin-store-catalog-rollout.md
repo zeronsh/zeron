@@ -17,9 +17,10 @@ address and the site's origin, for the environment.
 
 ## 1. Before anything reaches main (hard gate)
 
-`edge/wrangler.jsonc` binds `STORE_DB` to **placeholder database ids**:
-`00000000-0000-0000-0000-000000000000` for production and `…0001` for
-staging. A deploy with a placeholder id fails, and once the deploy job
+`edge/wrangler.jsonc` binds production's `STORE_DB` to a **placeholder
+database id**, `00000000-0000-0000-0000-000000000000` (staging's,
+`zeron-store-staging`, is created and set). A deploy with a placeholder id
+fails, and once the deploy job
 applies migrations (step 2), a placeholder on main breaks every edge
 deploy. So, before the store merges to main:
 
