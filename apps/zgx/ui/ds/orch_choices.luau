@@ -1,8 +1,8 @@
 -- A decision, compact: its options as chips, the one recommended ringed in
 -- the accent with a small star, and a way to see all of it (the overlay).
 -- A chip answers (ds/orch_decide's pick): the chips give way to
--- "Sending · <its label>" and Undo while the pick can be taken back, then
--- "Answered · <its label>" once the engine has taken it. Turned down (or
+-- "Sending", its label and Undo while the pick can be taken back, then
+-- "Answered" and its label once the engine has taken it. Turned down (or
 -- unanswered), the chips come back with why, and Retry. With no options,
 -- a line to write the answer in. Needs you's rows and a board card
 -- waiting on a decision both show it.
@@ -182,7 +182,6 @@ return ui.component(function(props: Props): Node
 			gap = "$space.2",
 			items = "center",
 			ui.text { locale.t("ds.orch.decide.sending"), shrink = 0, text_size = TEXT[size], weight = "$font.weight.medium", color = "$text.tertiary" },
-			ui.text { "·", shrink = 0, text_size = TEXT[size], color = "$text.tertiary" },
 			ui.text {
 				label,
 				literal = true,
@@ -223,7 +222,6 @@ return ui.component(function(props: Props): Node
 			items = "center",
 			ui.div { color = "$zeron.status.done", shrink = 0, Icon { name = "check", size = 12 } },
 			ui.text { locale.t("ds.orch.decide.answered"), shrink = 0, text_size = TEXT[size], weight = "$font.weight.medium", color = "$text.secondary" },
-			ui.text { "·", shrink = 0, text_size = TEXT[size], color = "$text.tertiary" },
 			ui.text {
 				label,
 				literal = true,

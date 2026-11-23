@@ -882,10 +882,25 @@ local function board(card_build: ((make: () -> Node, i: number) -> Node)?): Node
 		items = function(): { any }
 			return BD.now().items or {}
 		end,
+		-- (Where the engine says each card stands.)
+		cards = function(): { any }
+			return BD.now().cards or {}
+		end,
 		orchestrators = function(): { any }
 			return BD.now().orchestrators or {}
 		end,
 		show_filter = true,
+		view = M.board_view,
+		drawers = M.board_drawers,
+		on_close = orchestration.close_item,
+		on_reopen = orchestration.reopen_item,
+		on_hold = orchestration.hold_item,
+		on_seen = orchestration.seen_item,
+		on_snooze = orchestration.defer,
+		on_new_task = function(text: string, id: string?): any
+			local o = if id then BD.orchestrator(id) else nil
+			return orchestration.new_task(text, if o then { id = o.id, name = o.name } else nil, brain_dump())
+		end,
 		-- (Each card's thread, ask and owner read by themselves,
 		-- account/rows through the Board's held readers: a push wakes the
 		-- cards whose rows it changed, and none while the Board is hidden.)
@@ -954,7 +969,9 @@ local function board(card_build: ((make: () -> Node, i: number) -> Node)?): Node
 		on_restore = orchestration.restore_item,
 		expanded = M.board_expanded,
 		later_open = M.board_later,
-		on_start = orchestration.start_item,
+		on_start = function(id: string): any
+			return orchestration.start_item(id)
+		end,
 		space_name = function(id: string): string?
 			for _, p in BD.projects() or {} do
 				if p.id == id then
@@ -1039,6 +1056,10 @@ M.map_view = ui.persist("control_map", M.MAP_DEFAULT)
 -- Whether the board's columns show all their cards (past ten): kept, as
 -- the map's view is.
 M.board_expanded = ui.persist("control_board_expanded", false)
+-- The board as columns or as a list, and which of its drawers are open:
+-- kept too.
+M.board_view = ui.persist("control_board_view", "board")
+M.board_drawers = ui.persist("control_board_drawers", {} :: { [string]: boolean })
 -- Whether the board's Queued column shows its Later group: kept as well.
 M.board_later = ui.persist("control_board_later", false)
 -- Whether its Blocked column shows its Paused group: kept too.

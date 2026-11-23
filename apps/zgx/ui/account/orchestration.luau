@@ -445,6 +445,33 @@ function M.request_changes(id: string, text: string): any
 	return M.op({ op = "requestChanges", id = id, text = text })
 end
 
+-- What the person does to a card on the board, where the engine works its
+-- place out: marked done (or dropped), opened again, kept for later (or
+-- let go), and opened (seen: its dot gone). Each a promise.
+function M.close_item(id: string, dropped: boolean?): any
+	return M.op({ op = "closeItem", id = id, dropped = if dropped then true else nil })
+end
+
+function M.reopen_item(id: string): any
+	return M.op({ op = "reopenItem", id = id })
+end
+
+function M.hold_item(id: string, held: boolean): any
+	return M.op({ op = "holdItem", id = id, held = held })
+end
+
+function M.seen_item(id: string): any
+	return M.op({ op = "seenItem", id = id })
+end
+
+-- A new task from the board: a dump (toward the Brain dump's `chat`) that
+-- names the orchestrator it's for, when one was chosen; else routed as any
+-- dump is.
+function M.new_task(text: string, orchestrator: { id: string, name: string? }?, chat: string?): any
+	local refs = if orchestrator then { { kind = "orchestrator", id = orchestrator.id, label = orchestrator.name or "" } } else nil
+	return M.dump(text, nil, chat, nil, refs)
+end
+
 function M.set_priority(id: string, priority: string): any
 	return M.op({ op = "upsertItem", item = { id = id, priority = priority } })
 end

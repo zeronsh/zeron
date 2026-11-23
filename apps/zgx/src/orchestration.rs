@@ -24,6 +24,20 @@
 //!                   source? = { dump_id, route_id }, order, created, updated, done?,
 //!                   space_id?, device_id?, waiting?,
 //!                   flow? = { run, node, kind, flow, step, index, of }, depends_on } },
+//!       cards = { { id (its item's), place = "needs_you" | "snoozed" | "running" | "planned" |
+//!                   "done" | "dropped", status, note?, until?, since, status_since,
+//!                   seq, from?, reason, cause, by = "you" | "engine" | "agent",
+//!                   asks = { ask id }, chip? = { kind, label, target? },
+//!                   finish = { line = "report" | "merged" | "pr" | "accept", branch?, into?, pr? },
+//!                   closed? = { at, by, how, note? }, held, work_at?,
+//!                   word? = { state, at, from, summary, report? }, guests = { chat id },
+//!                   checking? = { since, why }, seen_at?, unseen,
+//!                   events = { { at, kind, text, by?, from?, to?, seq?, about? } } (oldest first),
+//!                   old_state (the item `state` it was written with: a card whose item
+//!                   says another was moved since by an engine from before places, and
+//!                   shows by its item's), updated } }
+//!                   (where each card stands, worked out by the engine: no row for a card
+//!                   whose engine predates places),
 //!       asks = { { id, from_chat, orchestrator_id?, item_id?, kind, question,
 //!                  options = { { label, detail?, images = { path_or_url },
 //!                                scores = { { name, value } } } },
@@ -75,6 +89,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
 use zeron_proto::orchestration::frames::{Followed, Follower, Heard, Keyed, ListDelta, OrchestrationDelta};
 use zeron_proto::orchestration::flow::{FlowEdge, FlowNode, FlowRun, Workflow};
+use zeron_proto::orchestration::board::{BoardCard, CardEvent};
 use zeron_proto::orchestration::{
     Ask, ChatActivity, CommEvent, CrewMember, DeviceLoad, Dump, OrchestrationState, Orchestrator, Route, RouteTarget,
     Score, TodoProgress, WorkItem, WorkLink,
@@ -314,6 +329,12 @@ const PERSON_OPS: &[&str] = &[
     // held; or resumed, into a column, its held messages sent.)
     "pauseItem",
     "resumeItem",
+    // (A card marked done or dropped by the person; one closed, opened
+    // again; one kept for later, or let go; one they opened, seen.)
+    "closeItem",
+    "reopenItem",
+    "holdItem",
+    "seenItem",
     // (The profile's orchestration settings: crew auto-archive, notes…)
     "updateSettings",
     "upsertItem",
@@ -652,6 +673,7 @@ struct RowValues {
     orchestrators: Collection,
     crew: Collection,
     items: Collection,
+    cards: Collection,
     asks: Collection,
     dumps: Collection,
 }
@@ -661,6 +683,7 @@ impl RowValues {
         self.orchestrators.forget(delta.orchestrators.as_ref());
         self.crew.forget(delta.crew.as_ref());
         self.items.forget(delta.items.as_ref());
+        self.cards.forget(delta.cards.as_ref());
         self.asks.forget(delta.asks.as_ref());
         self.dumps.forget(delta.dumps.as_ref());
     }
@@ -672,6 +695,7 @@ impl RowValues {
             ("orchestrators", self.orchestrators.value(&s.orchestrators, orchestrator_value)),
             ("crew", self.crew.value(&s.crew, crew_value)),
             ("items", self.items.value(&s.items, item_value)),
+            ("cards", self.cards.value(&s.cards, card_value)),
             ("asks", self.asks.value(&s.asks, ask_value)),
             ("dumps", self.dumps.value(&s.dumps, dump_value)),
             ("settings", settings_value(s)),
@@ -855,6 +879,83 @@ fn item_value(i: &WorkItem) -> Value {
             ])
         })),
         ("depends_on", strings(&i.depends_on)),
+    ])
+}
+
+/// Where a card stands, as its engine worked it out.
+fn card_value(c: &BoardCard) -> Value {
+    let finish = Value::record([
+        ("line", word(&c.finish.line)),
+        ("branch", opt_str(c.finish.branch.as_deref())),
+        ("into", opt_str(c.finish.into.as_deref())),
+        ("pr", opt_str(c.finish.pr.as_deref())),
+    ]);
+    Value::record([
+        ("id", Value::from(c.id.as_str())),
+        ("place", word(&c.place)),
+        ("status", word(&c.status)),
+        ("note", opt_str(c.note.as_deref())),
+        ("until", opt(c.until.as_ref(), secs)),
+        ("since", secs(&c.since)),
+        ("status_since", secs(&c.status_since)),
+        // (Counts its moves: one that rises is a move to show.)
+        ("seq", Value::from(c.seq as f64)),
+        ("from", opt(c.from.as_ref(), word)),
+        ("reason", Value::from(c.reason.as_str())),
+        ("cause", word(&c.cause)),
+        ("by", word(&c.by)),
+        ("asks", strings(&c.asks)),
+        ("chip", c.chip.as_ref().map_or(Value::Nil, |chip| {
+            Value::record([
+                ("kind", word(&chip.kind)),
+                ("label", Value::from(chip.label.as_str())),
+                ("target", opt_str(chip.target.as_deref())),
+            ])
+        })),
+        ("finish", finish),
+        ("closed", c.closed.as_ref().map_or(Value::Nil, |closed| {
+            Value::record([
+                ("at", secs(&closed.at)),
+                ("by", word(&closed.by)),
+                ("how", word(&closed.how)),
+                ("note", opt_str(closed.note.as_deref())),
+            ])
+        })),
+        ("held", Value::Bool(c.held)),
+        ("work_at", opt(c.work_at.as_ref(), secs)),
+        ("word", c.word.as_ref().map_or(Value::Nil, |w| {
+            Value::record([
+                ("state", word(&w.state)),
+                ("at", secs(&w.at)),
+                ("from", Value::from(w.from.as_str())),
+                ("summary", Value::from(w.summary.as_str())),
+                ("report", opt_str(w.report.as_deref())),
+            ])
+        })),
+        ("guests", strings(&c.guests)),
+        ("checking", c.checking.as_ref().map_or(Value::Nil, |k| {
+            Value::record([("since", secs(&k.since)), ("why", word(&k.why))])
+        })),
+        ("seen_at", opt(c.seen_at.as_ref(), secs)),
+        // (The engine moved it since the person last opened it.)
+        ("unseen", Value::Bool(c.unseen())),
+        ("events", list(&c.events, event_value)),
+        ("old_state", word(&c.old_state())),
+        ("updated", secs(&c.updated_at)),
+    ])
+}
+
+/// A line of a card's "What happened".
+fn event_value(e: &CardEvent) -> Value {
+    Value::record([
+        ("at", secs(&e.at)),
+        ("kind", word(&e.kind)),
+        ("text", Value::from(e.text.as_str())),
+        ("by", opt(e.by.as_ref(), word)),
+        ("from", opt(e.from.as_ref(), word)),
+        ("to", opt(e.to.as_ref(), word)),
+        ("seq", opt(e.seq, |n| Value::from(n as f64))),
+        ("about", opt_str(e.about.as_deref())),
     ])
 }
 
@@ -1150,6 +1251,88 @@ mod tests {
         assert!(person_op(&json!({ "op": "pauseItem", "id": "it-1" })).is_ok());
         assert!(person_op(&json!({ "op": "resumeItem", "id": "it-1", "state": "active" })).is_ok());
         assert!(person_op(&json!({ "op": "updateSettings", "crewAutoArchive": true })).is_ok());
+        // (What the person does to a card on the board: mark it done or
+        // drop it, open it again, keep it for later, open it.)
+        assert!(person_op(&json!({ "op": "closeItem", "id": "it-1", "dropped": true })).is_ok());
+        assert!(person_op(&json!({ "op": "reopenItem", "id": "it-1" })).is_ok());
+        assert!(person_op(&json!({ "op": "holdItem", "id": "it-1", "held": true })).is_ok());
+        assert!(person_op(&json!({ "op": "seenItem", "id": "it-1" })).is_ok());
+    }
+
+    /// A card's place as the engine worked it out reaches scripts whole, and
+    /// a move of one card makes only that card's row again.
+    #[test]
+    fn a_card_s_place_reads_for_the_scripts_and_a_move_touches_only_it() {
+        let mut wire = sample();
+        wire["cards"] = json!([
+            { "id": "it-titlebar", "place": "done", "status": "done", "since": iso(NOW - 26_000),
+              "statusSince": iso(NOW - 26_000), "seq": 3, "from": "running", "reason": "Merged in e99f817",
+              "cause": "merged", "by": "engine",
+              "chip": { "kind": "merged", "label": "merged e99f817" },
+              "finish": { "line": "merged", "branch": "zeron/titlebar", "into": "zeron/orchestrators" },
+              "closed": { "at": iso(NOW - 26_000), "by": "engine", "how": "merged" },
+              "word": { "state": "done", "at": iso(NOW - 27_000), "from": "th-titlebar", "summary": "Toggle lands" },
+              "events": [
+                  { "at": iso(NOW - 29_000), "kind": "move", "text": "Thread started", "by": "agent",
+                    "from": "planned", "to": "running", "seq": 1 },
+                  { "at": iso(NOW - 27_000), "kind": "report", "text": "Reported done: Toggle lands", "about": "rp-9" },
+              ],
+              "updatedAt": iso(NOW - 26_000) },
+            { "id": "it-live", "place": "needsYou", "status": "asked", "since": iso(NOW - 300),
+              "statusSince": iso(NOW - 300), "seq": 1, "asks": ["ak-9"], "note": "Answer in its thread",
+              "until": iso(NOW + 600), "held": true, "seenAt": iso(NOW - 100), "updatedAt": iso(NOW - 300) },
+        ]);
+        let s1 = OrchestrationState::deserialize(&wire).unwrap();
+        let v = state_value(&s1);
+        let done = row(&v, "cards", "id", "it-titlebar");
+        assert_eq!(text(done.field("place")).as_deref(), Some("done"));
+        assert_eq!(text(done.field("from")).as_deref(), Some("running"));
+        assert_eq!(text(done.field("cause")).as_deref(), Some("merged"));
+        assert_eq!(text(done.field("by")).as_deref(), Some("engine"));
+        assert_eq!(num(done.field("seq")), Some(3.0));
+        assert_eq!(text(done.field("old_state")).as_deref(), Some("done"));
+        assert_eq!(text(done.field("chip").unwrap().field("label")).as_deref(), Some("merged e99f817"));
+        let finish = done.field("finish").unwrap();
+        assert_eq!(text(finish.field("line")).as_deref(), Some("merged"));
+        assert_eq!(text(finish.field("into")).as_deref(), Some("zeron/orchestrators"));
+        assert_eq!(text(done.field("closed").unwrap().field("how")).as_deref(), Some("merged"));
+        assert_eq!(text(done.field("word").unwrap().field("summary")).as_deref(), Some("Toggle lands"));
+        // (Moved by the engine and never opened: its dot.)
+        assert_eq!(done.field("unseen"), Some(&Value::Bool(true)));
+        let events = done.field("events").unwrap().list();
+        assert_eq!(events.len(), 2);
+        assert_eq!(text(events[0].field("to")).as_deref(), Some("running"));
+        assert_eq!(text(events[1].field("kind")).as_deref(), Some("report"));
+        let asked = row(&v, "cards", "id", "it-live");
+        assert_eq!(text(asked.field("place")).as_deref(), Some("needs_you"));
+        assert_eq!(text(asked.field("status")).as_deref(), Some("asked"));
+        assert_eq!(text(asked.field("old_state")).as_deref(), Some("blocked"));
+        assert_eq!(num(asked.field("until")), Some((NOW + 600) as f64));
+        assert_eq!(asked.field("held"), Some(&Value::Bool(true)));
+        assert_eq!(text(asked.field("asks").unwrap().list().first()).as_deref(), Some("ak-9"));
+        assert!(nil(asked.field("closed")) && nil(asked.field("chip")));
+
+        // It is answered and its thread carries on: one card's row.
+        let mut s2 = s1.clone();
+        let live = s2.cards.iter_mut().find(|c| c.id == "it-live").unwrap();
+        live.place = zeron_proto::orchestration::board::Place::Running;
+        live.status = zeron_proto::orchestration::board::CardStatus::Working;
+        live.seq = 2;
+        let frames = frames(&[s1, s2.clone()]);
+        assert_eq!(frames.len(), 2);
+        assert!(frames[1].get("items").is_none(), "only the card's row goes");
+        let o = Orchestration::default();
+        o.heard_state(frames[0].clone());
+        let before = o.now_value();
+        o.heard_state(frames[1].clone());
+        let after = o.now_value();
+        assert_eq!(after, state_value(&s2));
+        assert_eq!(text(row(&after, "cards", "id", "it-live").field("place")).as_deref(), Some("running"));
+        assert!(!same(row(&before, "cards", "id", "it-live"), row(&after, "cards", "id", "it-live")));
+        assert!(same(row(&before, "cards", "id", "it-titlebar"), row(&after, "cards", "id", "it-titlebar")));
+        for list in ["orchestrators", "crew", "items", "asks", "dumps"] {
+            assert!(same(before.field(list).unwrap(), after.field(list).unwrap()), "{list} kept whole");
+        }
     }
 
     #[test]
