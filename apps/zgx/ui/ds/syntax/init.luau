@@ -100,6 +100,7 @@ local ALIASES: { [string]: string } = {
 	less = "css",
 	patch = "diff",
 	frag = "wgsl",
+	zon = "zig",
 }
 
 -- Whole file names with a language of their own.
@@ -150,15 +151,18 @@ local NAMES_SHOWN: { [string]: string } = {
 	css = "CSS",
 	sql = "SQL",
 	wgsl = "WGSL",
+	zig = "Zig",
+	odin = "Odin",
 	diff = "Diff",
 }
 
 local COMMENTS: { [string]: Comment } = {}
 do
 	local slashes: Comment = { line = "//", block = { "/*", "*/" } }
-	for _, id in { "rust", "typescript", "tsx", "javascript", "jsx", "go", "swift", "kotlin", "java", "csharp", "c", "cpp", "wgsl" } do
+	for _, id in { "rust", "typescript", "tsx", "javascript", "jsx", "go", "swift", "kotlin", "java", "csharp", "c", "cpp", "wgsl", "odin" } do
 		COMMENTS[id] = slashes
 	end
+	COMMENTS.zig = { line = "//" }
 	local hash: Comment = { line = "#" }
 	for _, id in { "python", "ruby", "shell", "toml", "yaml" } do
 		COMMENTS[id] = hash

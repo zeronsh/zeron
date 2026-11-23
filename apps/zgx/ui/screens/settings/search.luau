@@ -367,7 +367,6 @@ function M.Field(): Node
 			selected = on,
 			cursor = "pointer",
 			w_full = true,
-			min_h = "$zeron.menu.row",
 			px = "$space.2",
 			py = "$space.1",
 			gap = "$space.2",

@@ -272,6 +272,8 @@ end
 -- type, the accent caret, and the frame told of its focus.
 function M.input(props: InputProps, size: control.Size, focused: State<boolean>): InputProps
 	local p = table.clone(props)
+	-- (Inside the frame `wrap` dims while disabled.)
+	p.dim = control.dim(props.disabled)
 	p.bg = "#00000000"
 	p.border = 0
 	p.rounded = 0

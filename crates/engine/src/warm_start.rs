@@ -111,6 +111,9 @@ pub(super) struct Parked {
     /// Whether it launched without its provider's own subagents (the
     /// setting may change before its run: `native_subagents_changed`).
     pub(super) side_chats_only: bool,
+    /// Whether it launched with Code Mode enabled (the setting may change
+    /// before its run: `code_mode_changed`).
+    pub(super) code_mode: bool,
     /// The projectless folder its launch made, removed if it ends unused
     /// and still empty.
     made_folder: Option<std::path::PathBuf>,
@@ -146,6 +149,7 @@ fn same_ask(a: &RunRequest, b: &RunRequest) -> bool {
         && a.sandbox == b.sandbox
         && a.access == b.access
         && a.plan == b.plan
+        && a.code_mode == b.code_mode
         && a.auto_approve == b.auto_approve
 }
 
@@ -192,6 +196,7 @@ impl SessionsEngine {
             return Ok(WarmOutcome::Unsupported);
         }
         request.harness = Some(harness_id);
+        request.code_mode = self.inner.registry.code_mode(harness_id);
         request.prompt.clear();
         request.attachments.clear();
         request.mcp = None;
@@ -363,6 +368,7 @@ impl SessionsEngine {
             if !self.is_current(chat_id, generation) {
                 return Ok(None);
             }
+            let code_mode = request.code_mode;
             harness
                 .prewarm(key, request)
                 .await
@@ -374,6 +380,7 @@ impl SessionsEngine {
                 credential,
                 binary,
                 side_chats_only,
+                code_mode,
                 made_folder: made_folder.clone(),
             }))
         };

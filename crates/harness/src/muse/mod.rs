@@ -98,7 +98,7 @@ impl MuseHarness {
         )
         .ok_or_else(|| {
             HarnessError::NotInstalled(
-                "Muse Code CLI: install it (curl -fsSL https://dev.meta.ai/install.sh | sh) or \
+                "Muse Code CLI: install it (curl -fsSL https://dev.meta.ai/install.sh | bash) or \
                  set MUSE_EXECUTABLE"
                     .into(),
             )
@@ -109,7 +109,9 @@ impl MuseHarness {
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
         let exe = self.resolve_executable()?;
         let cwd = std::env::current_dir()?;
-        let mut host = Host::spawn(&exe, &cwd, Mode::ReadOnly, &Default::default())?;
+        // (A Cloud machine's Meta key: crate::catalog_env.)
+        let env = crate::catalog_env::get(HarnessId::Muse);
+        let mut host = Host::spawn(&exe, &cwd, Mode::ReadOnly, &env)?;
         let grace = self.kill_grace;
         let result = tokio::time::timeout(Duration::from_secs(20), async {
             host.initialize(true).await?;
@@ -127,7 +129,7 @@ impl MuseHarness {
         let models = catalog::models(&result?);
         if models.is_empty() {
             return Err(HarnessError::Protocol(
-                "Muse returned no models; run `muse` and sign in with /login".into(),
+                account::explain_no_models(&exe, &env, account::NO_MODELS).await,
             ));
         }
         Ok(models)
@@ -146,6 +148,7 @@ impl MuseHarness {
             Mode::Session {
                 sandbox: !full_access(&request)
                     && request.sandbox != zeron_proto::SandboxLevel::DangerFullAccess,
+                code_mode: request.code_mode,
             }
         };
         let host = Host::spawn(&exe, Path::new(&request.cwd), mode, &request.env)?;
@@ -165,6 +168,7 @@ impl MuseHarness {
             } = controls;
             runner.input = Some(std::sync::Arc::from(request_input));
             runner.turn = turn;
+            runner.exe = Some(exe);
             let consumer = runner.tx.clone();
             let result = tokio::select! {
                 result = runner.run(&mut steering) => result,
@@ -309,6 +313,7 @@ fn launch_matches(live: &RunRequest, next: &RunRequest) -> bool {
     live.cwd == next.cwd
         && full_access(live) == full_access(next)
         && live.sandbox == next.sandbox
+        && live.code_mode == next.code_mode
         && live.env == next.env
         && live.mcp == next.mcp
         && live.extra_mcp == next.extra_mcp

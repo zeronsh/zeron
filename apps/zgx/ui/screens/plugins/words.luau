@@ -321,6 +321,8 @@ function M.permission(item: any, permission: string): Line
 		return line(false, "global", "plugins.words.permission.web.title")
 	elseif permission == "windows" then
 		return line(false, "monitor", "plugins.words.permission.windows.title")
+	elseif permission == "scene3d" then
+		return line(false, "widget", "plugins.words.permission.scene3d.title")
 	elseif permission == "tools" then
 		-- Each tool by name, with what it tells your agents (their words
 		-- reach every agent's list of tools).

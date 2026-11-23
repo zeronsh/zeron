@@ -7,8 +7,6 @@
 -- `island.glass { … }`: a node's props with the island's glass added.
 -- `island.metrics()`: its numbers (read as it's built).
 
-local material = require("@self/material")
-
 local M = {}
 
 export type Metrics = { radius: number, inset: number, pad: number, control: number, gap: number, group: number, blur: number }
@@ -37,15 +35,14 @@ function M.thickness(): number
 end
 
 -- Its glass, or with glass turned solid (ds/material: the Opaque setting,
--- or the system's transparency off), the menus' solid fill, unblurred.
+-- or the system's transparency off), the menus' solid fill, unblurred: the
+-- window's solid theme says so through these tokens (`material.solid_theme`).
+-- Plain tokens, never functions: an animated node runs its style's
+-- functions again each frame (the title bar's island slides).
 function M.glass(props: { [any]: any }): { [any]: any }
 	props.rounded = "$zeron.island.radius"
-	props.bg = function()
-		return if material.see_through() then "$zeron.island.tint" else "$zeron.menu.solid"
-	end
-	props.backdrop_blur = function()
-		return if material.see_through() then "$zeron.island.blur" else 0
-	end
+	props.bg = "$zeron.island.tint"
+	props.backdrop_blur = "$zeron.island.blur"
 	props.shadow = "$zeron.island.shadow"
 	return props
 end

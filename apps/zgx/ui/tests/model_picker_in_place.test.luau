@@ -234,3 +234,19 @@ test("while its catalog is on its way, the model holds its shape rather than say
 	expect(app:has('#composer-toolbar >> "Choose…"')).to_be(true)
 	app:set_state("chat.catalog", catalog)
 end)
+
+-- A chat's model its agent's catalog doesn't list (renamed, retired, or a
+-- Cloud agent's list not in yet) keeps its agent: the chip names it beside
+-- that agent's mark, and the panel opens on that agent's tab, not the first
+-- agent's (it opened on Claude's, the chip a bare name).
+test("a model its catalog doesn't list keeps its agent's mark and tab", function()
+	local app = mount("picker_fixture.luau")
+	app:set_state("test_picker_model", "devin/swe-9")
+	settle(app)
+	expect(app:tree():find("Unlisted", 1, true) ~= nil).to_be(true)
+	app:click('role:button "Model"')
+	settle(app)
+	expect(app:tree():find("Search Devin models", 1, true) ~= nil).to_be(true)
+	expect(app:tree():find("Search Claude models", 1, true) ~= nil).to_be(false)
+	expect(app:error()).to_be_nil()
+end)

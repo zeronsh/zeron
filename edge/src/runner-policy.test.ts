@@ -70,6 +70,7 @@ describe("runner policy", () => {
   it("allows grants, its own device room, other devices as a client, chats, and row sync", () => {
     for (const [method, path] of [
       ["POST", "/vault/o/grant"],
+      ["POST", "/vault/o/grants"],
       ["GET", "/device/cloud-1/ws?role=host"],
       ["GET", "/device/cloud-1/ws?role=client"],
       ["POST", "/device/cloud-1/nudge"],
