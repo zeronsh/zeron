@@ -1,8 +1,8 @@
 -- A decision asked of the person (control_world's `fixture.decision`: two
 -- variants with pictures and scores, a recommendation, context, links), in
 -- the Control room: its question on its board card, its options as chips
--- in the card's detail and in Needs you; the detail's Open thread or the
--- thread's name opens the thread at the message that asked; the overlay
+-- in the card's detail and in Needs you; the detail's Open thread or its
+-- name in Needs you opens the thread at the message that asked; the overlay
 -- shows all of it,
 -- and picking or replying answers it (account/orchestration's `answer`,
 -- the option 1-based) once its Undo has passed. On ui/control_page_fixture.
@@ -105,9 +105,10 @@ test("a card waiting on a decision opens its thread at the message that asked", 
 	expect(calls(app)).to_contain("open:th-topo:msg-topo-ask")
 end)
 
-test("an ask's thread name opens the thread at the message that asked", function()
+-- (Its card in Needs you: the row names the card, its thread with it.)
+test("an ask's card named in Needs you opens the thread at the message that asked", function()
 	local app = open()
-	app:click('#control-widget-needs >> role:button "Open Topology lines at its question"')
+	app:click('#control-widget-needs >> role:button "Open Topology lines: pick a variant at its question"')
 	app:frames(10)
 	expect(calls(app)).to_contain("open:th-topo:msg-topo-ask")
 end)
@@ -208,7 +209,7 @@ test("Escape closes the overlay, nothing answered", function()
 	expect(calls(app)).never.to_contain("answer:")
 end)
 
-test("Defer puts it off: out of Needs you, its card says Deferred", function()
+test("Defer puts it off: out of Needs you; its card, snoozed, says when it's back", function()
 	local app = overlay(open())
 	app:click('.orch-decision >> role:button "Defer"')
 	app:frames(10)
@@ -220,8 +221,27 @@ test("Defer puts it off: out of Needs you, its card says Deferred", function()
 	expect(calls(app)).to_contain("defer:ak-topo:")
 	expect(closes(app)).to_be(true)
 	expect(app:has(`#control-widget-needs >> role:button "{QUESTION}"`)).to_be(false)
+	-- The engine's next frame: the card snoozed till the ask is back.
+	local n = table.clone(app:state("orchestration") :: any)
+	local cards = table.clone(n.cards or {})
+	for i, c in cards do
+		if c.id == "it-topo" then
+			local copy = table.clone(c)
+			copy.place = "snoozed"
+			copy["until"] = os.time() + 3600
+			cards[i] = copy
+		end
+	end
+	n.cards = cards
+	app:set_state("orchestration", n)
+	app:frames(30)
 	tab(app, "board")
-	expect(app:has(`{CARD} >> "Deferred"`)).to_be(true)
+	local topo = '.orch-card "Topology lines: pick a variant"'
+	expect(app:has(`#control-board-tab >> #orch-col-needs_you >> {topo}`)).to_be(false)
+	app:click("#control-board-tab >> #orch-drawer-snoozed >> .orch-drawer-head")
+	app:frames(20)
+	local back = app:text(`#control-board-tab >> #orch-drawer-snoozed >> {topo} >> .orch-card-clock`) :: string
+	expect(string.sub(back, 1, 5)).to_be("back ")
 	expect(app:has(`{CARD} >> .orch-choice`)).to_be(false)
 end)
 
@@ -287,7 +307,8 @@ end)
 test("the overlay stays open after the click that opened it, and through a click inside", function()
 	local app = open()
 	tab(app, "board")
-	app:click(`{CARD} >> .orch-choice-expand`)
+	opened(app)
+	app:click(`{DETAIL} >> .orch-choice-expand`)
 	app:frames(30)
 	expect(shows(app, ".orch-decision")).to_be(true)
 	app:click(`.orch-decision >> role:button "{DASHED}"`)
@@ -299,14 +320,19 @@ test("the overlay stays open after the click that opened it, and through a click
 end)
 
 test("the overlay stays open when a tooltip or hover card was up as it opened", function()
-	for _, from in { `{CARD} >> role:button "{DASHED}"`, `#control-widget-needs >> role:button "{DASHED}"`, `{CARD} >> .orch-card-title` } do
+	for _, from in { `{DETAIL} >> role:button "{DASHED}"`, `#control-widget-needs >> role:button "{DASHED}"`, `{CARD} >> .orch-card-title` } do
 		local app = open()
-		-- (The tab kept from the last time round: set each time.)
-		tab(app, if string.find(from, "control-board-tab", 1, true) then "board" else "overview")
+		-- (The tab kept from the last time round: set each time; on the
+		-- Board, the card's detail open.)
+		local board = string.find(from, "control-board-tab", 1, true) ~= nil
+		tab(app, if board then "board" else "overview")
+		if board then
+			opened(app)
+		end
 		app:hover(from)
 		app:wait('role:dialog "Tooltip"', { timeout_ms = 2000 })
 		app:frames(10)
-		local expand = if string.find(from, "control-widget-needs", 1, true) then `#control-widget-needs >> role:button "{QUESTION}"` else `{CARD} >> .orch-choice-expand`
+		local expand = if string.find(from, "control-widget-needs", 1, true) then `#control-widget-needs >> role:button "{QUESTION}"` else `{DETAIL} >> .orch-choice-expand`
 		app:click(expand)
 		app:frames(30)
 		expect(shows(app, ".orch-decision")).to_be(true)
