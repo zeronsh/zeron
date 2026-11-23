@@ -272,12 +272,16 @@ async fn a_service_gets_the_memory_its_manifest_asks() {
     assert_eq!(r.ask(&plan, "big", json!({})).await.unwrap(), json!(96));
 }
 
-/// Holds 40 MB during the call and lets it go: garbage once it answers.
+/// Holds 24 MB during the call and lets it go: garbage once it answers.
+/// Each string's `rep` is garbage too, so a call needs 48 MB at most
+/// however the collector is paced: within the 64 MB default, while two
+/// calls' worth (96 MB) isn't, unless the first call's garbage is
+/// collected before the next.
 const CHURN: &str = r#"
 local zeron = require("./zeron")("svc")
 zeron.serve("churn", function()
 	local t = {}
-	for i = 1, 40 do t[i] = string.rep("x", 1048576 - 8) .. i end
+	for i = 1, 24 do t[i] = string.rep("x", 1048576 - 8) .. i end
 	return #t
 end)
 "#;
@@ -288,7 +292,7 @@ async fn a_big_calls_garbage_leaves_room_for_the_next() {
     let plan = r.plan("1.0.0", CHURN, &["service"]);
     for call in 1..=3 {
         let answer = r.ask(&plan, "churn", json!({})).await;
-        assert_eq!(answer, Ok(json!(40)), "call {call}");
+        assert_eq!(answer, Ok(json!(24)), "call {call}");
     }
     assert_eq!(r.starts(), 1, "the same VM served them all");
 }

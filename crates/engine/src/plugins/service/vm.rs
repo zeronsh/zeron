@@ -418,10 +418,12 @@ fn run(
         status.touch();
         if let Err(mlua::Error::MemoryError(_)) = &result {
             state.dead.set(true);
-        } else if !status.busy() && lua.used_memory() > limits.memory / 2 {
+        } else if lua.used_memory() > limits.memory / 2 {
             // Luau collects only as it allocates, and never before failing
             // an allocation: what a big call left would count against the
-            // next. Collected while nothing waits on it.
+            // next. Collected now, even with the next call already waiting
+            // (it waits one collection): skipped, that call would start on
+            // the last one's garbage, run out of memory and stop the service.
             let _ = lua.gc_collect();
         }
         result
