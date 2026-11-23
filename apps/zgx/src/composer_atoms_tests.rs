@@ -707,3 +707,79 @@ fn typing_with_inline_chips_in_a_long_draft_costs_what_a_short_one_does() {
         "inline chips (typing before) added Lua overhead: {long_before_c} vs plain {long_plain_c}"
     );
 }
+
+#[test]
+fn zeron_v2_composer_has_mention_tabs_and_inline_chips() {
+    let root = std::env::temp_dir().join(format!("zgx-composer-v2-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let t = root.join("templates");
+    crate::plugins::live::sync_zeron(&ui_dir(), &t).unwrap();
+    crate::plugins::live::compose(&t, "zeron-v2", &Default::default(), false).unwrap();
+    let live_dir = t.join(crate::plugins::live::LIVE);
+    for entry in std::fs::read_dir(ui_dir()).unwrap().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.ends_with(".luau") && !live_dir.join(&name).exists() {
+            std::fs::copy(entry.path(), live_dir.join(&name)).unwrap();
+        }
+    }
+
+    let mut app = TestApp::new(|runtime| ScriptHost::new(runtime, live_dir.join("chat_fixture.luau")));
+    app.ui.scene.borrow_mut().resize(1200., 800.);
+    app.frames(25);
+    assert!(app.error().is_none(), "zeron-v2 chat_fixture errored: {:?}", app.error());
+
+    // Attach an image so Attachments section has an item alongside Files / Chats.
+    run_cmd(&app, "attach_odd");
+    app.frames(15);
+
+    // 1. Typing `@` opens the launcher WITH section tabs (Files / Attachments).
+    app.type_text(FIELD, "@");
+    app.frames(15);
+    app.ui.prepare_frame();
+    let mut texts = Vec::new();
+    {
+        let scene = app.ui.scene.borrow();
+        let mut stack = vec![scene.root()];
+        while let Some(id) = stack.pop() {
+            if let NodeKind::Text { text, .. } = scene.kind(id) {
+                texts.push(text.as_ref().to_string());
+            }
+            stack.extend_from_slice(scene.children(id));
+        }
+    }
+    assert!(
+        texts.iter().any(|t| t == "All") && texts.iter().any(|t| t == "Files") && texts.iter().any(|t| t == "Attachments"),
+        "zeron-v2 @ launcher must show section tabs (All / Files / Attachments), saw texts={texts:?}"
+    );
+
+    // 2. Filter to the attached screenshot and press Enter: creates an inline chip atom.
+    app.ui.dispatch(InputEvent::Text("Screenshot".into()));
+    app.settle();
+    app.frames(12);
+    send_key(&mut app, Key::Enter);
+    app.frames(12);
+
+    let field = app.find(FIELD).expect("composer textarea");
+    {
+        let editor = app.ui.editor_within(field).expect("editor");
+        let atoms = editor.atoms();
+        assert_eq!(atoms.len(), 1, "zeron-v2 composer must insert 1 inline chip atom");
+        let text = editor.editor.borrow().text().into_owned();
+        assert_eq!(&text[atoms[0].range.clone()], "Screenshot 1.10.14 PM.png");
+    }
+
+    // 3. Send and verify canonical attachment link serialization.
+    send_key(&mut app, Key::Enter);
+    app.frames(20);
+    let calls = match read_state(&app, "calls") {
+        Value::Str(s) => s.to_string(),
+        other => panic!("expected calls string, got {other:?}"),
+    };
+    assert!(
+        calls.contains("send:s1:[Screenshot 1.10.14 PM.png](zeron-attachment:1)"),
+        "zeron-v2 send must serialize inline attachment chip, got calls={calls:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
