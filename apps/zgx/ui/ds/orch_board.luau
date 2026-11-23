@@ -85,12 +85,9 @@ local OrchBoard = ui.component(function(props: Props): Node
 	-- How many of each place show (past its cap).
 	local shown = ui.use_state({} :: { [string]: number })
 
+	-- A place's cards' ids, in order (woken when who is there changes).
 	local function ids_of(place: string): { string }
-		local out: { string } = {}
-		for _, e in model.of(ctx.board(), place) do
-			table.insert(out, e.id)
-		end
-		return out
+		return ctx.ids(place)
 	end
 	local function cap_of(place: string): number
 		return shown:get()[place] or (if model.COLUMN[place] then DRAWER_CAP else CAP)
@@ -136,6 +133,9 @@ local OrchBoard = ui.component(function(props: Props): Node
 			trace.hit("board.ids")
 			local all = ids_of(place)
 			local cap = cap_of(place)
+			if #all <= cap then
+				return all
+			end
 			local out: { string } = {}
 			for i = 1, math.min(cap, #all) do
 				table.insert(out, all[i])
@@ -143,7 +143,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 			return out
 		end)
 		local more = ui.computed(function(): number
-			return math.max(0, #model.of(ctx.board(), place) - cap_of(place))
+			return math.max(0, #ids_of(place) - cap_of(place))
 		end)
 		return ui.column {
 			w_full = true,
@@ -197,16 +197,20 @@ local OrchBoard = ui.component(function(props: Props): Node
 			return drawers:get()[place] == true
 		end
 		local function count(): number
-			return #model.of(ctx.board(), place)
+			return #ids_of(place)
+		end
+		-- (Its first card, read by itself.)
+		local function first(): Ctx.Entry?
+			return ctx.entry(ids_of(place)[1])
 		end
 		local hint = ui.computed(function(): string
-			local list = model.of(ctx.board(), place)
 			if place == "planned" then
-				local first = model.next_up(ctx.board())
-				return if first then locale.s("orch.board.next_named", { title = first.item.title or "" }) else ""
+				local e = first()
+				local next = e and (e.status == "next" or e.status == "queued")
+				return if next then locale.s("orch.board.next_named", { title = (e :: Ctx.Entry).item.title or "" }) else ""
 			elseif place == "snoozed" then
-				local first = list[1]
-				return if first then first.item.title or "" else ""
+				local e = first()
+				return if e then e.item.title or "" else ""
 			end
 			return locale.s("orch.board.before_today")
 		end)
@@ -214,8 +218,8 @@ local OrchBoard = ui.component(function(props: Props): Node
 			if place ~= "snoozed" then
 				return ""
 			end
-			local first = model.of(ctx.board(), place)[1]
-			return if first and first.until_at then Card.time(first.until_at, ctx.at()) else ""
+			local e = first()
+			return if e and e.until_at then Card.time(e.until_at, ctx.clock(0)) else ""
 		end)
 		return ui.show(function(): boolean
 			return count() > 0
@@ -314,7 +318,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 	local function column(place: string): Node
 		local lane = material.pick("$zeron.settings.tint", "$zeron.settings.group")
 		local function count(): number
-			return #model.of(ctx.board(), place)
+			return #ids_of(place)
 		end
 		return ui.column {
 			id = `orch-col-{place}`,
@@ -520,7 +524,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 	local function count_of(key: string): () -> number
 		return function(): number
 			trace.hit("board.counts")
-			return (ctx.board().counts :: any)[key] or 0
+			return (ctx.counts() :: any)[key] or 0
 		end
 	end
 	local head = ui.row {

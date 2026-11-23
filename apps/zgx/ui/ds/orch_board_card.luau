@@ -146,15 +146,16 @@ end
 
 -- What follows the words, quieter: the clock of a status still under way,
 -- when a wait ends, or the engine's note.
+-- (The clock is read only where one shows: a time to the minute, a count
+-- to the second while it shows seconds.)
 function M.tail(ctx: Ctx.Ctx, e: Ctx.Entry): string
 	local s = e.status
-	local at = ctx.at()
 	if e.place == "snoozed" then
-		return if e.until_at then locale.s("orch.board.back_at", { time = M.time(e.until_at, at) }) else ""
+		return if e.until_at then locale.s("orch.board.back_at", { time = M.time(e.until_at, ctx.clock(0)) }) else ""
 	elseif s == "limited" then
-		return if e.until_at then locale.s("orch.board.until", { time = M.time(e.until_at, at) }) else ""
+		return if e.until_at then locale.s("orch.board.until", { time = M.time(e.until_at, ctx.clock(0)) }) else ""
 	elseif e.place == "needs_you" or e.place == "running" or s == "paused" then
-		return Ctx.age(at - e.status_since, locale)
+		return Ctx.age(ctx.clock(e.status_since) - e.status_since, locale)
 	elseif s == "next" then
 		return (e.card and e.card.note) or e.item.waiting or ""
 	end
@@ -512,6 +513,7 @@ M.Card = ui.component(function(props: Props): Node
 		shrink = 0,
 		items = function(): { any }?
 			local x = entry:peek()
+			trace.hit("board.menu")
 			return if x then (props.menu :: any)(x) else nil
 		end,
 		box,

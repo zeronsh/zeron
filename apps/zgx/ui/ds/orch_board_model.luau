@@ -10,7 +10,8 @@
 --
 --   local model = require("@ds/orch_board_model")
 --   model.board(now, { filter = id?, at = seconds? })   -> Board (memoized
---                              on the rows it reads and the day)
+--                              on the rows it reads and the minute; a card
+--                              that says the same keeps its Entry table)
 --   model.entry(now, id)       -> Entry?  one card, whoever's it is
 --   model.place(item, card?, asked) -> place, status
 --   model.PLACES               the columns, in order
@@ -24,8 +25,6 @@
 --               what waits on another card, what's paused, what's held
 --   done        closed today, the last first
 --   earlier     closed before today (dropped ones among them), the last first
-
-local trace = require("@self/orch_perf_trace")
 
 local M = {}
 
@@ -221,6 +220,53 @@ local function asks_of(item: any, card: any?, index: any, at: number): { any }
 	return out
 end
 
+-- Whether two rows say the same (their fields, and the tables in them a few
+-- levels down): a push handing an unchanged row back as a new table (the
+-- whole list written again) changes no card.
+local function same(a: any, b: any, depth: number): boolean
+	if rawequal(a, b) then
+		return true
+	end
+	if type(a) ~= "table" or type(b) ~= "table" or depth <= 0 then
+		return false
+	end
+	for k, v in a do
+		if not same(v, b[k], depth - 1) then
+			return false
+		end
+	end
+	for k in b do
+		if a[k] == nil then
+			return false
+		end
+	end
+	return true
+end
+M.same = same
+
+-- Whether a card's new Entry says what its last one did: then the last one
+-- is kept, the same table, and nothing that reads the card wakes.
+local function same_entry(a: Entry, b: Entry): boolean
+	if
+		a.place ~= b.place
+		or a.status ~= b.status
+		or a.urgent ~= b.urgent
+		or a.since ~= b.since
+		or a.status_since ~= b.status_since
+		or a.closed_at ~= b.closed_at
+		or a.until_at ~= b.until_at
+		or #a.asks ~= #b.asks
+	then
+		return false
+	end
+	for i, ask in a.asks do
+		if not same(ask, b.asks[i], 4) then
+			return false
+		end
+	end
+	return same(a.ask, b.ask, 4) and same(a.item, b.item, 4) and same(a.card, b.card, 5)
+end
+
 local function entry_of(item: any, card_row: any?, index: any, at: number): Entry
 	local card = if current(item, card_row) then card_row else nil
 	local asks = asks_of(item, card, index, at)
@@ -271,8 +317,8 @@ local function latest_first(a: Entry, b: Entry): boolean
 	return a.id < b.id
 end
 
-local function build(now: any, filter: string?, at: number): Board
-	trace.hit("board.build")
+local function build(now: any, filter: string?, at: number, prev: Board?): Board
+	local was = prev and prev.by_id
 	local cards = M.cards_by_id(now and now.cards)
 	local index = asks_index(now and now.asks)
 	local today = day_start(at)
@@ -289,6 +335,10 @@ local function build(now: any, filter: string?, at: number): Board
 	for _, item in (now and now.items) or {} do
 		if not item.removed and (filter == nil or item.orchestrator_id == filter) then
 			local e = entry_of(item, cards[item.id], index, at)
+			local last = was and was[e.id]
+			if last and same_entry(e, last) then
+				e = last
+			end
 			b.by_id[e.id] = e
 			if e.place == "needs_you" then
 				table.insert(b.needs_you, e)
@@ -369,7 +419,15 @@ function M.board(now: any, opts: { filter: string?, at: number? }?): Board
 			return k.board
 		end
 	end
-	local board = build(now, filter, at)
+	-- (The last board of this filter: its cards that say the same are kept.)
+	local prev: Board? = nil
+	for _, k in kept do
+		if k.filter == filter then
+			prev = k.board
+			break
+		end
+	end
+	local board = build(now, filter, at, prev)
 	table.insert(kept, 1, { items = items, cards = cards, asks = asks, filter = filter, day = day, minute = minute, board = board })
 	if #kept > KEPT then
 		table.remove(kept)

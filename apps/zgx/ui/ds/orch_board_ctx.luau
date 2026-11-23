@@ -6,16 +6,35 @@
 -- wires a board once and its list or a detail the same way.
 --
 --   local ctx = Ctx.make(props)     -- inside a component
---   ctx.board()                     the cards by place (ds/orch_board_model)
---   ctx.entry(id)                   one card, wherever it stands
+--   ctx.board()                     the cards by place (ds/orch_board_model);
+--                                   wakes its reader on any change
+--   ctx.entry(id)                   one card, wherever it stands; wakes its
+--                                   reader when that card changes alone
+--   ctx.ids(place)                  a place's cards' ids, in order; wakes its
+--                                   reader when who is there, or their
+--                                   order, changes
+--   ctx.counts()                    the tabs' figures (Board.counts)
 --   ctx.at()                        Unix seconds, ticking while a clock shows
+--   ctx.clock(since)                the same, for a clock counting from
+--                                   `since`: woken each second while it
+--                                   shows seconds, each minute after
 --   ctx.act.<what>(…)               what the person does (each a host's prop)
+--
+-- What one push costs: the board is built again once (ds/orch_board_model
+-- keeps the Entry of each card that says the same), then compared with the
+-- last one, and only what changed is woken: a card's own readers, a
+-- place's list where its cards came or went or moved, the tabs' counts.
+-- (A "presented" board that lags the rows, for the motion of step 3,
+-- belongs between the rows and `ids`: `board()` and `entry` stay the
+-- rows' own.)
 
 local model = require("@self/orch_board_model")
 local control = require("@self/control")
+local trace = require("@self/orch_perf_trace")
 
 export type Entry = model.Entry
 export type Board = model.Board
+export type Counts = { all: number, needs_you: number, running: number, done: number }
 
 -- What a host gives: its rows, and the person's actions as it sends them.
 export type Props = {
@@ -86,8 +105,11 @@ export type Ctx = {
 	-- Whether cards say whose they are.
 	owners: boolean,
 	at: () -> number,
+	clock: (since: number) -> number,
 	board: () -> Board,
 	entry: (id: string?) -> Entry?,
+	ids: (place: string) -> { string },
+	counts: () -> Counts,
 	filter: () -> string?,
 	set_filter: (id: string?) -> (),
 	orchestrators: () -> { any },
@@ -159,6 +181,45 @@ function M.after(sent: any, failed: ((err: any) -> ())?, done: (() -> ())?)
 	end
 end
 
+-- Every place a card can stand in, a board's lists (ds/orch_board_model).
+local PLACES = { "needs_you", "snoozed", "running", "planned", "done", "earlier" }
+
+-- Each card's version, a small state its readers follow (`entry(id)`),
+-- bumped when its Entry changes. States are made as cards are first read
+-- and kept by a board's slot: a board gone hands its slot (and its states)
+-- to the next one made, so boards opened and closed reuse them.
+local versions: { [number]: { [string]: any } } = {}
+local free: { number } = {}
+local slots = 0
+local function take_slot(): number
+	local n = table.remove(free)
+	if n then
+		return n
+	end
+	slots += 1
+	versions[slots] = {}
+	return slots
+end
+local function give_slot(n: number)
+	table.insert(free, n)
+end
+local function version(n: number, id: string): any
+	local held = versions[n]
+	local v = held[id]
+	if not v then
+		v = ui.state(`card:{n}:{id}`, 0)
+		held[id] = v
+	end
+	return v
+end
+local function bump(n: number, id: string)
+	local v = versions[n][id]
+	-- (Never read: nobody to wake.)
+	if v then
+		v:set(v:peek() + 1)
+	end
+end
+
 -- Made inside a component: its clock is the component's.
 function M.make(props: Props): Ctx
 	local compact = props.compact == true
@@ -183,13 +244,20 @@ function M.make(props: Props): Ctx
 
 	-- The time: the host's (a fixture's), else a clock that ticks each
 	-- second while a card's status is under two minutes old (its seconds
-	-- show), and on the minute otherwise.
+	-- show), and on the minute otherwise. Two states, so a clock past its
+	-- seconds (and the board) wakes on the minute alone.
 	local tick = ui.use_state(os.time())
+	local minute = ui.use_state(os.time())
 	local fresh = false
 	if not props.now then
 		ui.every(1000, function(): boolean?
 			local t = os.time()
-			if fresh or t // 60 ~= tick:peek() // 60 then
+			if t // 60 ~= minute:peek() // 60 then
+				ui.batch(function()
+					minute:set(t)
+					tick:set(t)
+				end)
+			elseif fresh then
 				tick:set(t)
 			end
 			return nil
@@ -201,13 +269,33 @@ function M.make(props: Props): Ctx
 		end
 		return tick:get()
 	end
+	local function at_minute(): number
+		if props.now then
+			return props.now()
+		end
+		return minute:get()
+	end
+	local function clock(since: number): number
+		if props.now then
+			return props.now()
+		end
+		if tick:peek() - since < 120 then
+			return tick:get()
+		end
+		return minute:get()
+	end
 
-	local rows = ui.computed(function(): any
-		return { items = read(props.items), cards = read(props.cards), asks = read(props.asks) }
-	end)
-	local board = ui.computed(function(): Board
-		local t = at()
-		local b = model.board(rows:get(), { filter = filter(), at = t })
+	-- The boards: the filter's, and every card's (a detail open on one the
+	-- filter hides). Plain tables, never state: what reads them follows the
+	-- small states below, set only where something changed.
+	local shown: Board, all: Board
+	local function build(): (Board, Board)
+		trace.hit("board.build")
+		local t = at_minute()
+		local rows = { items = read(props.items), cards = read(props.cards), asks = read(props.asks) }
+		local f = filter()
+		local b = model.board(rows, { filter = f, at = t })
+		local a = if f == nil then b else model.board(rows, { at = t })
 		-- (Whether a clock shows its seconds: read by the tick, untracked.)
 		local young = false
 		for _, place in { "needs_you", "running" } do
@@ -218,14 +306,77 @@ function M.make(props: Props): Ctx
 			end
 		end
 		fresh = young
-		return b
-	end)
-	-- Every card, whoever's it is (a detail open on one the filter hides).
-	local all = ui.computed(function(): Board
-		if filter() == nil then
-			return board:get()
+		return b, a
+	end
+	local function ids_of(b: Board, place: string): { string }
+		local out: { string } = {}
+		for _, e in model.of(b, place) do
+			table.insert(out, e.id)
 		end
-		return model.board(rows:get(), { at = at() })
+		return out
+	end
+	local function same_ids(x: { string }, y: { string }): boolean
+		if #x ~= #y then
+			return false
+		end
+		for i, id in x do
+			if y[i] ~= id then
+				return false
+			end
+		end
+		return true
+	end
+
+	shown, all = build()
+	local n = take_slot()
+	ui.on_cleanup(function()
+		give_slot(n)
+	end)
+	-- A place's ids (as they were last set, plain), and the state its
+	-- readers follow.
+	local held_ids: { [string]: { string } } = {}
+	local ids_state: { [string]: any } = {}
+	for _, place in PLACES do
+		held_ids[place] = ids_of(shown, place)
+		ids_state[place] = ui.use_state(held_ids[place])
+	end
+	local counts = ui.use_state(shown.counts :: Counts)
+	local whole = ui.use_state(0)
+
+	-- A push: the boards again, and what changed woken.
+	ui.effect(function()
+		local was_shown, was_all = shown, all
+		local b, a = build()
+		if b == was_shown and a == was_all then
+			return
+		end
+		shown, all = b, a
+		ui.batch(function()
+			if a ~= was_all then
+				for id, e in a.by_id do
+					if was_all.by_id[id] ~= e then
+						bump(n, id)
+					end
+				end
+				for id in was_all.by_id do
+					if a.by_id[id] == nil then
+						bump(n, id)
+					end
+				end
+			end
+			if b ~= was_shown then
+				for _, place in PLACES do
+					local now_ids = ids_of(b, place)
+					if not same_ids(now_ids, held_ids[place]) then
+						held_ids[place] = now_ids
+						ids_state[place]:set(now_ids)
+					end
+				end
+				-- (An equal value wakes nobody.)
+				counts:set(b.counts)
+				whole:set(whole:peek() + 1)
+			end
+		end)
 	end)
 
 	local function orchestrators(): { any }
@@ -256,14 +407,27 @@ function M.make(props: Props): Ctx
 		compact = compact,
 		owners = owners == true,
 		at = at,
+		clock = clock,
 		board = function(): Board
-			return board:get()
+			whole:get()
+			return shown
 		end,
 		entry = function(id: string?): Entry?
 			if not id then
 				return nil
 			end
-			return all:get().by_id[id]
+			version(n, id):get()
+			return all.by_id[id]
+		end,
+		ids = function(place: string): { string }
+			local st = ids_state[place]
+			if not st then
+				return {}
+			end
+			return st:get()
+		end,
+		counts = function(): Counts
+			return counts:get()
 		end,
 		filter = filter,
 		set_filter = set_filter,
@@ -294,7 +458,7 @@ function M.make(props: Props): Ctx
 			selected_state:set(id)
 			-- (Opened: seen, its dot gone.)
 			if id and props.on_seen then
-				local e = all:peek().by_id[id]
+				local e = all.by_id[id]
 				if e and e.card and e.card.unseen then
 					props.on_seen(id)
 				end

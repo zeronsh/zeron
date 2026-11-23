@@ -34,7 +34,6 @@ local Choices = require("@self/orch_choices")
 local Fold = require("@self/orch_fold")
 local hue = require("@self/orch_hue")
 local locale = require("@self/locale")
-local model = require("@self/orch_board_model")
 local Ctx = require("@self/orch_board_ctx")
 local Actions = require("@self/orch_board_actions")
 local Card = require("@self/orch_board_card")
@@ -267,6 +266,7 @@ local Row = ui.component(function(props: RowProps): Node
 		shrink = 0,
 		items = function(): { any }?
 			local x = entry:peek()
+			trace.hit("board.menu")
 			return if x then act.menu(x) else nil
 		end,
 		ui.column { w_full = true, min_w = 0, line, asked, resume },
@@ -303,7 +303,7 @@ M.Sections = ui.component(function(props: SectionsProps): Node
 		end
 	end
 	local function count(place: string): number
-		return #model.of(ctx.board(), place)
+		return #ctx.ids(place)
 	end
 	local function cap_of(place: string): number
 		return shown:get()[place] or CAP
@@ -321,13 +321,14 @@ M.Sections = ui.component(function(props: SectionsProps): Node
 	local function rows(place: string): Node
 		local ids = ui.computed(function(): { string }
 			trace.hit("board.ids")
-			local out: { string } = {}
+			local all = ctx.ids(place)
 			local cap = cap_of(place)
-			for i, entry in model.of(ctx.board(), place) do
-				if i > cap then
-					break
-				end
-				table.insert(out, entry.id)
+			if #all <= cap then
+				return all
+			end
+			local out: { string } = {}
+			for i = 1, cap do
+				table.insert(out, all[i])
 			end
 			return out
 		end)

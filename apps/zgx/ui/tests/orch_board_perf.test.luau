@@ -2,7 +2,10 @@
 -- ui/orch_board_perf_fixture.luau): a status change in its column, a move
 -- between columns, a minute going by; on the board and in its list. Prints
 -- its numbers (`BOARDPERF …`: each push and the frame after it, p50 and
--- max, and the run counts per push, ds/orch_perf_trace's `board.*`).
+-- max, and the run counts per push, ds/orch_perf_trace's `board.*`), and
+-- holds what a push may wake: a status change, its own card alone; a move,
+-- that and the two columns' lists and the tabs' counts; a minute, the
+-- clocks shown. (Times are printed, not held.)
 
 local N = 20
 
@@ -42,6 +45,10 @@ local function pushes(app: any, command: string, n: number): ({ number }, { [str
 	return out, per
 end
 
+local function per_push(c: { [string]: number }, key: string): number
+	return c[key] or 0
+end
+
 local function report(name: string, list: { number }, per: { [string]: number })
 	local parts = {}
 	for k, v in per do
@@ -57,6 +64,17 @@ test("board perf: the fixture shows 200 cards over every place", function()
 	expect(app:count("#orch-col-running >> .orch-card")).to_be(12)
 	expect(app:has("#orch-card-it-37")).to_be(true)
 	expect(app:text("#orch-col-running >> .orch-column-count")).to_be("64")
+	-- A push shows: its status in place, then a move.
+	app:command("perf_status")
+	app:frames(3)
+	expect(app:text("#orch-card-it-37 >> .orch-card-status")).to_be("Waiting on tests")
+	app:command("perf_move")
+	app:frames(3)
+	expect(app:has("#orch-col-done >> #orch-card-it-37")).to_be(true)
+	expect(app:has("#orch-col-running >> #orch-card-it-37")).to_be(false)
+	expect(app:text("#orch-col-running >> .orch-column-count")).to_be("63")
+	expect(app:text("#orch-col-done >> .orch-column-count")).to_be("31")
+	expect(app:error()).to_be_nil()
 end)
 
 test("board perf: a status change in its column", function()
@@ -64,6 +82,12 @@ test("board perf: a status change in its column", function()
 	local t, c = pushes(app, "perf_status", N)
 	report("board status", t, c)
 	expect(app:error()).to_be_nil()
+	-- Its card alone reads its entry again; no column's list, no count.
+	expect(per_push(c, "board.card_entry")).to_be(1)
+	expect(per_push(c, "board.word")).to_be(1)
+	expect(per_push(c, "board.ids")).to_be(0)
+	expect(per_push(c, "board.counts")).to_be(0)
+	expect(per_push(c, "board.card")).to_be(0)
 end)
 
 test("board perf: a status change, every row a new table", function()
@@ -71,6 +95,9 @@ test("board perf: a status change, every row a new table", function()
 	local t, c = pushes(app, "perf_status_fresh", N)
 	report("board status-fresh", t, c)
 	expect(app:error()).to_be_nil()
+	expect(per_push(c, "board.card_entry")).to_be(1)
+	expect(per_push(c, "board.ids")).to_be(0)
+	expect(per_push(c, "board.counts")).to_be(0)
 end)
 
 test("board perf: a move between columns", function()
@@ -78,6 +105,12 @@ test("board perf: a move between columns", function()
 	local t, c = pushes(app, "perf_move", N)
 	report("board move", t, c)
 	expect(app:error()).to_be_nil()
+	-- The two columns' lists and the tabs' counts; the card built where it
+	-- lands, and the one that comes into view under Running's cap.
+	expect(per_push(c, "board.ids") <= 2).to_be(true)
+	expect(per_push(c, "board.counts") <= 4).to_be(true)
+	expect(per_push(c, "board.card") <= 2).to_be(true)
+	expect(per_push(c, "board.card_entry") <= 2).to_be(true)
 end)
 
 test("board perf: a minute goes by", function()
@@ -85,6 +118,10 @@ test("board perf: a minute goes by", function()
 	local t, c = pushes(app, "perf_tick", N)
 	report("board tick", t, c)
 	expect(app:error()).to_be_nil()
+	-- The clocks shown, nothing else.
+	expect(per_push(c, "board.tail") <= app:count("#orch-board >> .orch-card-clock")).to_be(true)
+	expect(per_push(c, "board.card_entry")).to_be(0)
+	expect(per_push(c, "board.ids")).to_be(0)
 end)
 
 test("board perf: a status change and a move, in the list", function()
@@ -92,8 +129,13 @@ test("board perf: a status change and a move, in the list", function()
 	expect(app:has("#orch-row-it-37")).to_be(true)
 	local t, c = pushes(app, "perf_status", N)
 	report("list status", t, c)
+	expect(per_push(c, "board.row_entry")).to_be(1)
+	expect(per_push(c, "board.ids")).to_be(0)
 	local t2, c2 = pushes(app, "perf_move", N)
 	report("list move", t2, c2)
+	expect(per_push(c2, "board.ids") <= 2).to_be(true)
+	expect(per_push(c2, "board.row") <= 2).to_be(true)
+	expect(per_push(c2, "board.row_entry") <= 2).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
 
