@@ -133,6 +133,57 @@ local CASES: { { any } } = {
 	{ "yaml: alias", "yaml", { "  <<: *defaults" }, 1, "*defaults", "label" },
 	{ "diff: inserted", "diff", { "+added", "-gone" }, 1, "added", "inserted" },
 	{ "diff: deleted", "diff", { "+added", "-gone" }, 2, "gone", "deleted" },
+	{ "zig: builtin", "zig", { [[const std = @import("std");]] }, 1, "@import", "macro" },
+	{ "zig: builtin before dot", "zig", { [[const mem = @import("std").mem;]] }, 1, "mem;", "property" },
+	{ "zig: escaped ident", "zig", { [[const @"type" = u24;]] }, 1, '@"type"', "text" },
+	{ "zig: escaped ident no stray string", "zig", { [[const @"type" = u24;]] }, 1, "u24", "type" },
+	{ "zig: escaped ident fn", "zig", { [[pub fn @"return"(x: i7) void {}]] }, 1, '@"return"', "function" },
+	{ "zig: escaped ident call", "zig", { [[const r = @"my func"(1);]] }, 1, '@"my func"', "function" },
+	{ "zig: escaped ident property", "zig", { [[const v = s.@"while";]] }, 1, '@"while"', "property" },
+	{ "zig: escaped ident quote", "zig", { [[const x = @"a\"b"; const y = 1;]] }, 1, "const y", "keyword" },
+	{ "zig: arbitrary int u0", "zig", { "var z: u0 = 0; var a: u24 = 1; var b: i65535 = 2;" }, 1, "u0", "type" },
+	{ "zig: arbitrary int u24", "zig", { "var a: u24 = 1; var b: i65535 = 2;" }, 1, "u24", "type" },
+	{ "zig: arbitrary int i65535", "zig", { "var a: u24 = 1; var b: i65535 = 2;" }, 1, "i65535", "type" },
+	{ "zig: invalid int width not type", "zig", { "var a: u65536 = 1; var b: i01 = 2;" }, 1, "u65536", "text" },
+	{ "zig: leading zero int not type", "zig", { "var a: u65536 = 1; var b: i01 = 2;" }, 1, "i01", "text" },
+	{ "zig: multiline string", "zig", { [[    \\hello "world" \n // not comment]] }, 1, "hello", "string" },
+	{ "zig: multiline no escape", "zig", { [[    \\hello "world" \n // not comment]] }, 1, "\\n", "string" },
+	{ "zig: multiline no comment", "zig", { [[    \\hello "world" \n // not comment]] }, 1, "// not", "string" },
+	{ "zig: no block comments", "zig", { "/* not a comment */ const x = 1;" }, 1, "not", "text" },
+	{ "zig: hex float", "zig", { "const f = 0x1.fp+3;" }, 1, "fp+3", "number" },
+	{ "zig: hex float no frac", "zig", { "const f = 0x1p-4;" }, 1, "p-4", "number" },
+	{ "rust: hex method not hex float", "rust", { "let a = 0x1.abs();" }, 1, "abs", "function" },
+	{ "rust: hex range not hex float", "rust", { "for i in 0x1..0x10 {}" }, 1, "..", "punctuation" },
+	{ "zig: char unicode escape", "zig", { [[const c = '\u{1F600}';]] }, 1, "\\u{1F600}", "escape" },
+	{ "zig: char escaped quote", "zig", { [[const q = '\''; const z = 1;]] }, 1, "const z", "keyword" },
+	{ "zig: keywords and constants", "zig", { "comptime var x: anytype = undefined;" }, 1, "comptime", "keyword" },
+	{ "zig: constant undefined", "zig", { "comptime var x: anytype = undefined;" }, 1, "undefined", "constant" },
+	{ "markdown: zig fence", "markdown", { "```zig", [[const s = @import("std");]], "```" }, 2, "@import", "macro" },
+	{ "odin: nested block comment", "odin", { "/* a /* b */ still", "comment */ x := 1" }, 1, "still", "comment" },
+	{ "odin: nested comment closes", "odin", { "/* a /* b */ still", "comment */ return nil" }, 2, "return", "keyword" },
+	{ "odin: raw string over lines", "odin", { [[s := `one \n "q"]], [[two`]], "return nil" }, 1, "\\n", "string" },
+	{ "odin: raw string line 2", "odin", { [[s := `one \n "q"]], [[two`]], "return nil" }, 2, "two", "string" },
+	{ "odin: raw string closes", "odin", { [[s := `one \n "q"]], [[two`]], "return nil" }, 3, "return", "keyword" },
+	{ "odin: directive mid-line", "odin", { "Vec3 :: struct #packed { x: f32 }" }, 1, "#packed", "macro" },
+	{ "odin: directive start", "odin", { "#partial switch k {" }, 1, "#partial", "macro" },
+	{ "odin: directive load", "odin", { [[data := #load("a.bin")]] }, 1, "#load", "macro" },
+	{ "odin: decorator attr", "odin", { "@private x := 1" }, 1, "@private", "attribute" },
+	{ "odin: paren attr", "odin", { [[@(private="file") foo :: proc() {}]] }, 1, "private", "attribute" },
+	{ "odin: paren attr string parens", "odin", { [[@(deprecated="use foo() instead") bar :: proc() {}]] }, 1, "bar", "function" },
+	{ "odin: proc decl", "odin", { "main :: proc() {" }, 1, "main", "function" },
+	{ "odin: tight proc decl", "odin", { "main::proc() {" }, 1, "main", "function" },
+	{ "odin: capitalized proc decl", "odin", { "Update :: proc(dt: f32) {" }, 1, "Update", "function" },
+	{ "odin: lowercase struct decl", "odin", { "vec3 :: struct { x: f32 }" }, 1, "vec3", "type" },
+	{ "odin: enum decl", "odin", { "kind :: enum u8 { A }" }, 1, "kind", "type" },
+	{ "odin: union decl", "odin", { "val :: union { int, f32 }" }, 1, "val", "type" },
+	{ "odin: bit_field decl", "odin", { "hdr :: bit_field u32 { a: u8 | 8 }" }, 1, "hdr", "type" },
+	{ "odin: distinct decl", "odin", { "handle :: distinct u64" }, 1, "handle", "type" },
+	{ "odin: bit_set decl", "odin", { "flags :: bit_set[Flag]" }, 1, "flags", "type" },
+	{ "odin: caps constant", "odin", { "MAX_PEERS :: 64" }, 1, "MAX_PEERS", "constant" },
+	{ "odin: endian type", "odin", { "len: u16be = 0" }, 1, "u16be", "type" },
+	{ "odin: typeid type", "odin", { "ti: typeid = nil" }, 1, "typeid", "type" },
+	{ "odin: keyword or_return", "odin", { "v := load() or_return" }, 1, "or_return", "keyword" },
+	{ "markdown: odin fence", "markdown", { "```odin", "main :: proc() {}", "```" }, 2, "main", "function" },
 }
 
 -- States: what a line leaves, exactly, so the engine stops re-colouring.
@@ -144,6 +195,10 @@ local STATES: { { any } } = {
 	{ "a heredoc's delimiter", "shell", { "cat <<EOF" }, "HEOF" },
 	{ "markdown carries the fence's state", "markdown", { "```rust", "/* x" }, "F```|rust|c1" },
 	{ "settled after a comment closes", "typescript", { "/* a", "b */" }, 0 },
+	{ "zig multiline leaves 0", "zig", { [[    \\line one]] }, 0 },
+	{ "odin nested comment state", "odin", { "/* a /* b" }, "c2" },
+	{ "odin raw string state", "odin", { "s := `open" }, "s2" },
+	{ "odin raw string settles", "odin", { "s := `open", "closed`" }, 0 },
 }
 
 local M = {}
@@ -174,12 +229,21 @@ function M.run(): Result
 		{ path = "/a/b/Cargo.lock", language = "toml" },
 		{ path = "ui/ds/syntax.luau", language = "luau" },
 		{ path = "notes.MD", language = "markdown" },
+		{ path = "build.zig", language = "zig" },
+		{ path = "build.zig.zon", language = "zig" },
+		{ path = "src/main.odin", language = "odin" },
 		{ path = "README", language = nil },
 	}
 	for _, l in langs do
 		local got = Syntax.language(l.path)
 		check(`language of {l.path}`, got == l.language, `wanted {tostring(l.language)}, got {tostring(got)}`)
 	end
+	local zig_c = Syntax.comment("zig")
+	check("zig has line-only comments", zig_c ~= nil and zig_c.line == "//" and zig_c.block == nil, tostring(zig_c))
+	local odin_c = Syntax.comment("odin")
+	check("odin has line and block comments", odin_c ~= nil and odin_c.line == "//" and odin_c.block ~= nil, tostring(odin_c))
+	check("zig display name", Syntax.name("zig") == "Zig", Syntax.name("zig"))
+	check("odin display name", Syntax.name("odin") == "Odin", Syntax.name("odin"))
 	-- Every sample's spans are well formed: numbers, in order, inside
 	-- the line, never overlapping, each a token.
 	local samples = require("@demos/syntax_samples")

@@ -1,7 +1,7 @@
 -- Settings → Providers offers Cloud as one more choice after the computers,
 -- while Cloud is on: its agents' accounts (the vault's, every Cloud machine
--- uses them), with no switch, no settings and nothing to install, and API
--- keys to save for it. Without Cloud, no such choice. On the shell in
+-- uses them), with no switch, no settings and nothing to install, each card
+-- adding its sign-ins and API keys. Without Cloud, no such choice. On the shell in
 -- ui/shell_fixture.luau, Cloud from ui/cloud_stub.luau.
 
 local PAGE = "#settings-page"
@@ -35,7 +35,7 @@ local function open(with_cloud: boolean): any
 	return app
 end
 
-test("with Cloud on, Providers offers Cloud: its agents' accounts, no switch or settings, and its API keys", function()
+test("with Cloud on, Providers offers Cloud: its agents' accounts, no switch or settings, keys added on each card", function()
 	local app = open(true)
 	app:click(`{PAGE} >> role:button "Device"`)
 	app:frames(10)
@@ -50,14 +50,21 @@ test("with Cloud on, Providers offers Cloud: its agents' accounts, no switch or 
 	expect(app:has(`{PAGE} >> role:switch "Codex on"`)).to_be(false)
 	expect(app:has(`{PAGE} >> role:button "Codex settings"`)).to_be(false)
 	expect(shows(app, PAGE, "Add another agent")).to_be(false)
-	-- Its API keys, saved for Cloud.
-	expect(shows(app, PAGE, "Anthropic API key")).to_be(true)
-	expect(shows(app, PAGE, "OpenAI API key")).to_be(true)
-	app:type(`{PAGE} >> role:textbox "OpenAI API key"`, "sk-test-123")
+	-- Every agent signs in on Cloud as it does on a computer, Muse Code
+	-- included, and takes its API key on its own card: no keys section.
+	expect(shows(app, PAGE, "Add Muse Code account")).to_be(true)
+	expect(shows(app, PAGE, "Add Claude Code account")).to_be(true)
+	expect(shows(app, PAGE, "Anthropic API key")).to_be(false)
+	app:click(`{PAGE} >> "Add API key" [1]`)
+	app:frames(20)
+	expect(app:has('role:dialog "Add API key"')).to_be(true)
+	-- Kept by Cloud's vault, so it takes no name.
+	expect(app:has('role:textbox "Name (optional)"')).to_be(false)
+	app:type('role:dialog "Add API key" >> role:textbox "API key"', "sk-ant-test-123")
 	app:frames(5)
-	app:click(`{PAGE} >> role:button "Save" [2]`)
-	app:frames(10)
-	expect(asked(app, "agents.cloud_key")).to_be(true)
+	app:click('role:dialog "Add API key" >> role:button "Save"')
+	app:frames(20)
+	expect(asked(app, "agents.add_key:claude-code:anthropic")).to_be(true)
 	expect(app:error()).to_be_nil()
 	-- Back to this computer: its agents as they were, with their switches.
 	app:click(`{PAGE} >> role:button "Device"`)
@@ -66,7 +73,6 @@ test("with Cloud on, Providers offers Cloud: its agents' accounts, no switch or 
 	app:frames(30)
 	expect(asked(app, "agents.target:")).to_be(true)
 	expect(app:has(`{PAGE} >> role:switch "Claude Code on"`)).to_be(true)
-	expect(shows(app, PAGE, "Anthropic API key")).to_be(false)
 end)
 
 test("without Cloud, Providers offers no Cloud", function()

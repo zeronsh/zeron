@@ -168,6 +168,7 @@ fn run_request(harness: HarnessId, prompt: &str) -> RunRequest {
         auto_approve: true,
         access: Default::default(),
         plan: false,
+        code_mode: false,
         resume: None,
         attachments: vec![],
         worktree: None,
@@ -415,6 +416,55 @@ async fn a_switch_back_replays_the_message_that_triggered_the_first_switch() {
             .any(|p| matches!(p, MessagePart::Switch { .. }))
     };
     assert!(above("u2") && above("u3"), "{entries:#?}");
+}
+
+/// Regression: if the outgoing provider's last user message has no assistant
+/// reply yet (e.g. interrupted before streaming or errored), switching
+/// providers on the next message must place the seam directly above the new
+/// message, NOT above the earlier unanswered message that ran on the old
+/// provider.
+#[tokio::test]
+async fn switch_seam_stays_below_earlier_unanswered_user_message_from_previous_provider() {
+    let rig = rig(None);
+    rig.sent_turn(CLAUDE, "first question", "u1").await;
+
+    // Simulate an unanswered user prompt that started on Claude (interrupted
+    // before any assistant entry landed), followed by a switch to Codex via
+    // `turn` (message written during dispatch).
+    let doc = rig.core.doc_host.open("main").unwrap();
+    doc.write_user_message("u2_claude", "write a 500 word story", 10)
+        .unwrap();
+    rig.turn(CODEX, "hmm", "u3_codex").await;
+
+    let entries = rig.entries();
+    let u2 = entries.iter().position(|e| e.id == "u2_claude").unwrap();
+    let u3 = entries.iter().position(|e| e.id == "u3_codex").unwrap();
+    let seam = entries
+        .iter()
+        .position(|e| e.parts.iter().any(|p| matches!(p, MessagePart::Switch { .. })))
+        .unwrap();
+    assert!(
+        u2 < seam && seam + 1 == u3,
+        "seam ({seam}) must sit after u2_claude ({u2}) and directly before u3_codex ({u3}): {entries:#?}"
+    );
+
+    // Same invariant when the triggering message was pre-written to the doc
+    // before dispatch (`sent_turn`), with another unanswered prompt ahead of it.
+    doc.write_user_message("u4_codex", "another interrupted prompt", 20)
+        .unwrap();
+    rig.sent_turn(CLAUDE, "back to claude", "u5_claude").await;
+
+    let entries = rig.entries();
+    let u4 = entries.iter().position(|e| e.id == "u4_codex").unwrap();
+    let u5 = entries.iter().position(|e| e.id == "u5_claude").unwrap();
+    let seam2 = entries
+        .iter()
+        .rposition(|e| e.parts.iter().any(|p| matches!(p, MessagePart::Switch { .. })))
+        .unwrap();
+    assert!(
+        u4 < seam2 && seam2 + 1 == u5,
+        "second seam ({seam2}) must sit after u4_codex ({u4}) and directly before u5_claude ({u5}): {entries:#?}"
+    );
 }
 
 #[tokio::test]

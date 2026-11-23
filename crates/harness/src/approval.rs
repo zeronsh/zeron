@@ -31,6 +31,7 @@ pub fn allowed_without_asking(access: AccessMode, action: Action) -> bool {
 /// `question` says what and ends asking ("… Allow it?").
 pub fn question(header: impl Into<String>, question: impl Into<String>) -> UserInputQuestion {
     UserInputQuestion {
+        note: None,
         id: uuid::Uuid::new_v4().to_string(),
         header: header.into(),
         question: question.into(),

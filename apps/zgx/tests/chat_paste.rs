@@ -52,8 +52,9 @@ fn a_pasted_picture_is_carried_as_an_image() {
     paste(&mut app, None);
     assert!(calls(&app).contains("paste_image"), "the host was asked for the picture: {}", calls(&app));
     let tree = app.tree();
-    let images = |tree: &str| tree.matches("image.png").count();
+    let images = |tree: &str| tree.matches("Clipboard ").count();
     assert!(images(&tree) >= 1, "the picture rides on the composer:\n{tree}");
+    assert!(!tree.contains("image.png"), "pasted picture should get a readable name, not image.png:\n{tree}");
     // A second is a second image, not the first again.
     let one = images(&tree);
     paste(&mut app, None);
@@ -70,6 +71,6 @@ fn pasted_text_goes_in_and_an_empty_clipboard_adds_nothing() {
     assert!(app.host.run_command("clipboard_empty"));
     paste(&mut app, None);
     assert!(calls(&app).contains("paste_image"));
-    assert!(!app.tree().contains("image.png"), "no picture, no chip");
+    assert!(!app.tree().contains("Clipboard "), "no picture, no chip");
     assert_eq!(app.error(), None);
 }

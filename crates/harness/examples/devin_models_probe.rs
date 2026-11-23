@@ -50,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
         auto_approve: true,
         access: Default::default(),
         plan: false,
+        code_mode: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
