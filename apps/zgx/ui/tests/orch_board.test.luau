@@ -377,7 +377,8 @@ test("orch board: a paused card has a Resume of its own; it resumes into Running
 	-- Nobody else's: not Planned's others, not Needs you's.
 	expect(app:count(".orch-card-resume")).to_be(1)
 	app:click("#orch-card-it-exits >> .orch-card-resume")
-	app:frames(20)
+	-- (Its move held, then landed: ds/orch_board_motion.)
+	app:frames(75)
 	expect(calls(app)).to_contain("resume:it-exits")
 	-- (Its own press: the card isn't opened.)
 	expect(app:state("board_selected")).to_be_nil()

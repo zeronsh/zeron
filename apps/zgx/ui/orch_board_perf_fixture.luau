@@ -15,6 +15,20 @@
 --   perf_read          the run counts (ds/orch_perf_trace) into the state
 --                      `perf_counts`; perf_reset sets them to nothing
 --
+-- Moves for the motion (tests/orch_board_motion.test.luau, and the strips
+-- of frames for its review), each a push as the engine's next frame makes
+-- it (`seq` one higher, `from` its old place):
+--   motion_one         the engine closes it-37 (Running's first): Done
+--   motion_two         it-38 and it-39 the same, at once
+--   motion_three       it-38 to it-40
+--   motion_four        it-38 to it-41 (three travel, the fourth crossfades)
+--   motion_many        it-38 to it-47 (ten)
+--   motion_answer      the person answers it-1 (Needs you's first): Running
+--   motion_back        it-37 back to Running (a move during another)
+--   motion_seq0        it-42 to Done as an old engine maps it (`seq` 0)
+--   motion_pause       the person pauses it-37: Planned (a folded drawer)
+--   motion_start       the engine starts it-101 (Planned's first): Running
+--
 -- States a test sets: `board_view` ("board" | "list"), `board_drawers`.
 
 ui.theme.strict("warn")
@@ -238,6 +252,78 @@ ui.command { id = "perf_same_fresh", title = "Perf: the same rows again, each a 
 end }
 ui.command { id = "perf_tick", title = "Perf: a minute goes by", run = function()
 	now:set(now:peek() + 60)
+end }
+
+-- A card moved as the engine's next frame moves it.
+local function move(id: string, place: string, by: string, extra: { [string]: any }?)
+	flips += 1
+	local c = row_of(cards, id)
+	local fields: { [string]: any } = {
+		place = place, from = c.place, seq = (c.seq or 0) + 1, by = by, since = T - 1, status_since = T - 1, updated = T + flips,
+	}
+	local item: { [string]: any } = { updated = T + flips }
+	if place == "done" then
+		fields.status, fields.old_state = "done", "done"
+		fields.closed = { at = T - 1, by = by, how = "report" }
+		fields.cause = "reported"
+		fields.unseen = by ~= "you"
+		item.state, item.done = "done", T - 1
+	elseif place == "running" then
+		fields.status, fields.old_state, fields.closed, fields.cause = "working", "active", false, "started"
+		fields.unseen = false
+		item.state, item.done = "active", false
+	elseif place == "planned" then
+		fields.status, fields.old_state, fields.cause = "paused", "blocked", "paused"
+		item.state, item.paused_at = "blocked", T - 1
+	end
+	for k, v in extra or {} do
+		fields[k] = v
+	end
+	patch(items, id, item)
+	patch(cards, id, fields)
+end
+local function moves(ids: { string }, place: string, by: string)
+	ui.batch(function()
+		for _, id in ids do
+			move(id, place, by)
+		end
+	end)
+end
+ui.command { id = "motion_one", title = "Motion: the engine closes a card", run = function()
+	moves({ "it-37" }, "done", "engine")
+end }
+ui.command { id = "motion_two", title = "Motion: two at once", run = function()
+	moves({ "it-38", "it-39" }, "done", "engine")
+end }
+ui.command { id = "motion_three", title = "Motion: three at once", run = function()
+	moves({ "it-38", "it-39", "it-40" }, "done", "engine")
+end }
+ui.command { id = "motion_four", title = "Motion: four at once", run = function()
+	moves({ "it-38", "it-39", "it-40", "it-41" }, "done", "engine")
+end }
+ui.command { id = "motion_many", title = "Motion: ten at once", run = function()
+	moves({ "it-38", "it-39", "it-40", "it-41", "it-42", "it-43", "it-44", "it-45", "it-46", "it-47" }, "done", "engine")
+end }
+ui.command { id = "motion_answer", title = "Motion: the person answers a card", run = function()
+	ui.batch(function()
+		patch(asks, "ak-1", { state = "answered" })
+		move("it-1", "running", "you", { asks = {}, cause = "answered" })
+	end)
+end }
+ui.command { id = "motion_back", title = "Motion: a card moves back", run = function()
+	moves({ "it-37" }, "running", "engine")
+end }
+ui.command { id = "motion_seq0", title = "Motion: a card mapped from its old column", run = function()
+	move("it-42", "done", "engine", { seq = 0, from = false })
+end }
+ui.command { id = "motion_pause", title = "Motion: the person pauses a card", run = function()
+	moves({ "it-37" }, "planned", "you")
+end }
+ui.command { id = "motion_start", title = "Motion: the engine starts a planned card", run = function()
+	ui.batch(function()
+		patch(items, "it-101", { threads = { "th-101" } })
+		move("it-101", "running", "engine")
+	end)
 end }
 
 local counts = ui.state("perf_counts", {} :: any)

@@ -91,6 +91,8 @@ mod split_tests;
 #[cfg(test)]
 mod route_motion_tests;
 #[cfg(test)]
+mod board_motion_tests;
+#[cfg(test)]
 mod composer_metrics_tests;
 #[cfg(test)]
 mod composer_layout_tests;

@@ -381,6 +381,31 @@ ui.command { id = "engine_done", title = "The engine closes a running card", run
 		closed = { at = T, by = "engine", how = "report" },
 	})
 end }
+-- Several at once, as one push (the motion's strips: two travel; five,
+-- three travel and two crossfade).
+local function engine_close(ids: { string })
+	ui.batch(function()
+		for _, id in ids do
+			patch(items, id, { state = "done", done = T })
+			move(id, "done", "done", "Its thread reported done", {
+				by = "engine", cause = "reported", unseen = true, old_state = "done",
+				closed = { at = T, by = "engine", how = "report" },
+			})
+		end
+	end)
+end
+ui.command { id = "engine_two", title = "The engine closes two running cards", run = function()
+	engine_close({ "it-chat", "it-release" })
+end }
+ui.command { id = "engine_five", title = "The engine closes every running card", run = function()
+	engine_close({ "it-chat", "it-release", "it-tool", "it-telemetry", "it-ios" })
+end }
+-- The person pauses a running card, as its menu's Pause does once taken:
+-- it goes to Planned (a folded drawer).
+ui.command { id = "person_pause", title = "The person pauses a running card", run = function()
+	patch(items, "it-tool", { state = "blocked", paused_at = T })
+	move("it-tool", "planned", "paused", "You paused it", { old_state = "blocked" })
+end }
 ui.command { id = "engine_start", title = "The engine starts a planned card", run = function()
 	patch(items, "it-keyed", { state = "active", threads = { "th-keyed" } })
 	move("it-keyed", "running", "starting", "Thread started", { by = "engine", cause = "started", old_state = "active" })

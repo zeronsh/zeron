@@ -13,7 +13,9 @@
 //! A shot is `<fixture>` (ui/<fixture>_fixture.luau, or a name ending
 //! .luau) or `gallery:<page>`, optionally `@<w>x<h>`, `#<target>` (crop to
 //! a node's box) and `!<command>` / `=<state>:<json>` / `^<target>` (a click) /
-//! `/<from>=><to>` (a drag: text selected) / `+<ms>` (a wait)
+//! `/<from>=><to>` (a drag: text selected) / `+<ms>` (a wait) / `%<n>`
+//! (`n` display frames, 1/60 s of the test's time each: an animation
+//! caught at a known moment, the same on every run)
 //! / `:<target>:<text>` (a click, then the text typed) steps, joined by `|`:
 //! `gallery:composer|#gallery-demo@1240x820`. `AUDIT_SCALE` (2) is the
 //! pixels a point; `AUDIT_DARK=1` the dark scheme where the screen has one.
@@ -44,6 +46,8 @@ struct Shot {
 enum Step {
     // Real time passing, frames drawn (`+<ms>`): what comes over the network.
     Wait(u64),
+    // `n` display frames on the test's clock (`%<n>`), no real time.
+    Frames(usize),
     Command(String),
     Click(String),
     // A key pressed (`>Tab`, `>Escape`): keyboard modality, as a person's
@@ -106,6 +110,8 @@ fn parse(spec: &str, dark: bool) -> Shot {
             steps.push(Step::State(state.to_string(), serde_json::from_str(json).expect("a state's JSON")));
         } else if let Some(ms) = part.strip_prefix('+') {
             steps.push(Step::Wait(ms.parse().expect("+<milliseconds>")));
+        } else if let Some(n) = part.strip_prefix('%') {
+            steps.push(Step::Frames(n.parse().expect("%<frames>")));
         } else if let Some(label) = part.strip_prefix('~') {
             name = format!("{name}-{label}");
         }
@@ -176,6 +182,7 @@ fn take(shot: &Shot, out: &Path, scale: f32, dark: bool) -> Result<PathBuf, Stri
                     app.frames(1);
                 }
             }
+            Step::Frames(n) => app.frames(*n),
             Step::Click(target) => {
                 app.target(target).map_err(|e| format!("{}: click {target}: {e}", shot.name))?;
                 app.click(target);

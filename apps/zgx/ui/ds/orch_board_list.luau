@@ -38,6 +38,8 @@ local Ctx = require("@self/orch_board_ctx")
 local Actions = require("@self/orch_board_actions")
 local Card = require("@self/orch_board_card")
 local trace = require("@self/orch_perf_trace")
+local reduce = require("@self/motion")
+local Motion = require("@self/orch_board_motion")
 
 local M = {}
 
@@ -120,6 +122,18 @@ local Row = ui.component(function(props: RowProps): Node
 	local ask = ui.computed(function(): any?
 		local x = e()
 		return if x and x.place == "needs_you" then x.ask else nil
+	end)
+	-- How it comes in (ds/orch_board_motion): from where its card stood, as
+	-- the board turns into the list; from its last row, as it moves.
+	local m = ctx.motion
+	local placed = entry:peek()
+	local built = m.build(id, placed ~= nil and Motion.IN_DRAWER[placed.place] == true)
+	local start = m.start(built)
+	local mounted_el: any = nil
+	ui.on_cleanup(function()
+		if mounted_el then
+			m.detach(id, mounted_el)
+		end
 	end)
 	local line = ui.button {
 		class = "orch-list-row",
@@ -296,7 +310,7 @@ local Row = ui.component(function(props: RowProps): Node
 			},
 		}
 	end)
-	return (ContextMenu {
+	local whole = (ContextMenu {
 		label = locale.t("orch.board.card_actions"),
 		ring = "$radius.md",
 		w_full = true,
@@ -308,6 +322,25 @@ local Row = ui.component(function(props: RowProps): Node
 		end,
 		ui.column { w_full = true, min_w = 0, line, asked, resume },
 	}) :: Node
+	return ui.div {
+		w_full = true,
+		min_w = 0,
+		z = if built.how ~= nil then 1 else nil,
+		ui.div {
+			class = "orch-row-motion",
+			w_full = true,
+			min_w = 0,
+			opacity = start,
+			on_mount = function(el: any)
+				mounted_el = el
+				m.attach(id, el)
+			end,
+			on_resize = function(_size: any, el: any)
+				m.placed(id, el)
+			end,
+			whole,
+		},
+	}
 end)
 
 export type SectionsProps = {
@@ -451,6 +484,7 @@ M.Sections = ui.component(function(props: SectionsProps): Node
 				key = function(id: string): string
 					return id
 				end,
+				animate = reduce.layout({ duration = Motion.TRAVEL, ease = Motion.EASE }),
 				class = "orch-list-rows",
 				direction = "column",
 				w_full = true,
@@ -598,6 +632,7 @@ M.List = ui.component(function(props: Props): Node
 		w_full = true,
 		min_w = 0,
 		M.Sections { ctx = ctx, act = act, tab = props.tab, fold = props.fold },
+		ctx.motion.host(),
 	}
 end)
 
