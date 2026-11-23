@@ -281,14 +281,17 @@ test("board motion: into a folded drawer by its head line, out of one from it", 
 	app:frames(1)
 	expect(phase(app, "it-37")).to_be("hold")
 	app:frames(HOLD + 1)
-	-- To its head: still in Running while it goes, the drawer's count as was.
+	-- Its travel: it has left Running's list (its gap closing on the
+	-- travel's curve, src/board_motion_tests.rs) and the drawer counts it;
+	-- a copy of it, drawn over the column, goes to the drawer's head line.
 	expect(phase(app, "it-37")).to_be("out")
-	expect(in_col(app, "running", "it-37")).to_be(true)
-	expect(drawer_count(app, "planned")).to_be("40")
-	app:frames(TRAVEL + 1)
-	-- Landed: in the drawer (folded: no card), counted there.
 	expect(in_col(app, "running", "it-37")).to_be(false)
+	expect(app:count("#orch-col-running >> .orch-card-ghost")).to_be(1)
+	expect(drawer_count(app, "planned")).to_be("41")
+	app:frames(TRAVEL + 1)
+	-- Landed: in the drawer (folded: no card), its copy gone.
 	expect(app:has("#orch-card-it-37")).to_be(false)
+	expect(app:count(".orch-card-ghost")).to_be(0)
 	expect(drawer_count(app, "planned")).to_be("41")
 	expect(settled(app)).to_be(true)
 	-- Out of it: comes in at Running's top once its hold is over.
@@ -456,7 +459,7 @@ local function worst(app: any, n: number): (number, number)
 end
 
 test("board motion: frames while cards move, and none asked for once they land", function()
-	local cases = { { "one", "motion_one" }, { "three", "motion_three" }, { "four", "motion_four" }, { "many", "motion_many" }, { "answer", "motion_answer" } }
+	local cases = { { "one", "motion_one" }, { "three", "motion_three" }, { "four", "motion_four" }, { "many", "motion_many" }, { "answer", "motion_answer" }, { "drawer", "motion_pause" } }
 	for _, case in cases do
 		local name, command = case[1], case[2]
 		local maxes, means = {}, {}

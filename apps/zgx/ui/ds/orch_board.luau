@@ -417,9 +417,14 @@ local OrchBoard = ui.component(function(props: Props): Node
 			gap = "$space.1",
 			relative = true,
 			on_resize = eased,
+			on_mount = function(el: any)
+				ctx.motion.column(place, el)
+			end,
 			ui.div {
 				ref = body,
 				class = "orch-lane-body",
+				-- (Drawn only: the pointer passes through to what is under it.)
+				pointer_events = "none",
 				absolute = true,
 				top = 0,
 				left = 0,
@@ -434,6 +439,8 @@ local OrchBoard = ui.component(function(props: Props): Node
 			ui.div {
 				ref = foot,
 				class = "orch-lane-foot",
+				-- (Drawn only: the pointer passes through to what is under it.)
+				pointer_events = "none",
 				absolute = true,
 				left = 0,
 				right = 0,
@@ -501,6 +508,46 @@ local OrchBoard = ui.component(function(props: Props): Node
 					},
 				}
 			end, { w_full = true, enter = { opacity = { 0, 1 }, duration = Motion.FADE, ease = "linear" } }),
+			-- Over its cards, under its drawer: the copies of cards going into
+			-- its folded drawer, each from where its card stood in under the
+			-- drawer's head line.
+			ui.div {
+				class = "orch-ghosts",
+				-- (Drawn only: the pointer passes through to what is under it.)
+				pointer_events = "none",
+				absolute = true,
+				top = 0,
+				left = 0,
+				right = 0,
+				-- (Cut at the drawer's head line, the column's foot under it
+				-- (the head's 32 points and the column's inset): the copy
+				-- goes in under the line, never through its words nor below
+				-- the lane.)
+				bottom = ui.raw(36, "a folded drawer's head and the column's inset"),
+				overflow = "hidden",
+				ui.each(
+					ui.computed(function(): { any }
+						return ctx.motion.ghosts(place)
+					end),
+					function(g: any): Node
+						return ui.div {
+							absolute = true,
+							left = g.x,
+							top = g.y,
+							w = g.w,
+							on_mount = function(el: any)
+								ctx.motion.ghost_placed(g, el)
+							end,
+							Card.Card { ctx = ctx, card = g.id, ghost = true },
+						}
+					end,
+					{
+						key = function(g: any): string
+							return g.key
+						end,
+					}
+				),
+			},
 			drawer(model.DRAWER[place]),
 		}
 	end
@@ -822,7 +869,12 @@ local OrchBoard = ui.component(function(props: Props): Node
 			exit = { opacity = 0, duration = if reduced then Motion.FADE else Motion.SWITCH_OUT, ease = "linear" },
 			-- (From a hundredth, not nothing: a list counts what is wholly
 			-- transparent out of view, and would build its rows a frame late.)
-			enter = { opacity = { 0.01, 1 }, duration = if reduced then Motion.FADE else Motion.SWITCH_IN, ease = "linear" },
+			enter = {
+				opacity = { 0.01, 1 },
+				duration = if reduced then Motion.FADE else Motion.SWITCH_IN,
+				delay = if reduced then 0 else Motion.SWITCH_DELAY,
+				ease = "linear",
+			},
 		})
 	end
 

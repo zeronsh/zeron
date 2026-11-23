@@ -332,6 +332,9 @@ export type Props = {
 	-- What stands under its foot (a paused card's Resume).
 	extra: ((entry: () -> Ctx.Entry?) -> Node?)?,
 	menu: ((entry: Ctx.Entry) -> { any }?)?,
+	-- A copy drawn over its column while the card goes into a folded
+	-- drawer (ds/orch_board_motion): no id, no part in the motion.
+	ghost: boolean?,
 }
 
 M.Card = ui.component(function(props: Props): Node
@@ -363,7 +366,7 @@ M.Card = ui.component(function(props: Props): Node
 			return ""
 		end
 		local p = m.phase(id)
-		if p == "hold" or p == "fade_out" or p == "out" then
+		if not props.ghost and (p == "hold" or p == "fade_out" or p == "out") then
 			return said
 		end
 		said = M.summary(ctx, x)
@@ -391,8 +394,8 @@ M.Card = ui.component(function(props: Props): Node
 	local rest = material.pick("$zeron.settings.note", "$zeron.settings.card")
 	local lane = material.pick("$zeron.settings.tint", "$zeron.settings.group")
 	-- How it comes in (ds/orch_board_motion), decided as it's built.
-	local built = m.build(id, props.drawer == true)
-	local start = m.start(built)
+	local built: Motion.Built = if props.ghost then { how = nil :: string? } else m.build(id, props.drawer == true)
+	local start = if props.ghost then nil else m.start(built)
 	local mounted_el: any = nil
 	ui.on_cleanup(function()
 		if mounted_el then
@@ -509,8 +512,8 @@ M.Card = ui.component(function(props: Props): Node
 	-- Dragged: a reference to it (ds/orch_ref; Capture's composer takes one).
 	-- It moves nothing: where a card stands is the engine's.
 	local box = ui.button(Ref.on({
-		class = "orch-card",
-		id = `orch-card-{id}`,
+		class = if props.ghost then "orch-card-ghost" else "orch-card",
+		id = if props.ghost then nil else `orch-card-{id}`,
 		selected = function(): boolean
 			return selected:get()
 		end,
@@ -610,11 +613,16 @@ M.Card = ui.component(function(props: Props): Node
 			min_w = 0,
 			opacity = start,
 			on_mount = function(el: any)
+				if props.ghost then
+					return
+				end
 				mounted_el = el
 				m.attach(id, el)
 			end,
 			on_resize = function(_size: any, el: any)
-				m.placed(id, el)
+				if not props.ghost then
+					m.placed(id, el)
+				end
 			end,
 			-- In flight, an opaque underlay: its lane over the window's opaque ground,
 			-- as it rests, so its tinted fill looks the same and nothing it

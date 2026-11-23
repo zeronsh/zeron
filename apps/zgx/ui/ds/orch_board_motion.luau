@@ -52,6 +52,9 @@
 
 local motion = require("@self/motion")
 
+-- The gap between a list's cards (ds/orch_board's `$space.1`).
+local LIST_GAP = (ui.theme.get("space.1") :: number?) or 4
+
 -- (anime's overloads, for elements and their params alike.)
 local play: (any, any) -> any = anime.animate :: any
 local set: (any, any) -> () = anime.utils.set :: any
@@ -74,6 +77,9 @@ M.SWITCH = 280
 M.SWITCH_IN = 100
 M.SWITCH_OUT = 100
 M.SWITCH_CAP = 24
+-- What arrives starts this long after the leaving view began to fade, so
+-- the two overlap only briefly.
+M.SWITCH_DELAY = 80
 -- A card's detail: in with a slide from the right, out quicker.
 M.DETAIL_IN = 180
 M.DETAIL_OUT = 130
@@ -146,6 +152,12 @@ export type Motion = {
 	-- The board to its list, or back: what shows now is what the arriving
 	-- nodes start from.
 	begin_switch: () -> (),
+	-- A column's element (the board gives it), and the copies of cards
+	-- going into its folded drawer, for the board to draw over it.
+	column: (place: string, el: any) -> (),
+	ghosts: (place: string) -> { any },
+	-- A copy mounted: it goes to its drawer's head line.
+	ghost_placed: (g: any, el: any) -> (),
 	-- The timers' host: a node the board (or the list) mounts once.
 	host: () -> Node,
 	flying: () -> number,
@@ -191,6 +203,10 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 	-- travel's start, a switch's).
 	local from_at: { [string]: { x: number, y: number } } = {}
 	local heads: { [string]: any } = {}
+	-- Each column's element, and the copies of cards going into its folded
+	-- drawer, drawn over it.
+	local columns: { [string]: any } = {}
+	local ghosts = ui.use_state({} :: { any })
 	local folded_of: (place: string) -> boolean = function(_place: string): boolean
 		return false
 	end
@@ -342,20 +358,51 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 				done(id)
 				animate(id, { opacity = { to = 1 }, duration = M.DIM_MS, ease = M.EASE })
 			elseif folded_of(to) and not folded_of(f.from) and elements[id] then
-				-- Into a folded drawer: to its head line, fading at the end.
-				phase(f, "out")
+				-- Into a folded drawer: it leaves its list at once (the gap
+				-- closes on the travel's curve, as any move's does) and a copy
+				-- of it, drawn over its column, goes to the drawer's head
+				-- line, fading at the end.
 				local el, head = elements[id], heads[to]
-				local dy = 0
-				if head then
-					local ok, d = pcall(function(): number
-						return (head :: any).y - (el :: any).y
+				local column = M.COLUMN_OF[to] or to
+				local box = columns[column]
+				local x, y = shown_at(el)
+				local okw, w, h = pcall(function(): (number, number)
+					return (el :: any).width, (el :: any).height
+				end)
+				local okb, bx, by = pcall(function(): (number, number)
+					return (box :: any).x, (box :: any).y
+				end)
+				local okh, hy = pcall(function(): number
+					return (head :: any).y
+				end)
+				if x and y and okw and okb and box and okh and head then
+					phase(f, "out")
+					local list = table.clone(ghosts:peek())
+					table.insert(list, {
+						id = id,
+						column = column,
+						key = `{id}:{f.token}`,
+						x = x - bx,
+						y = y - by,
+						w = w,
+						-- (To where the head stands once the card's slot has
+						-- closed above it: up by the card and its gap.)
+						dy = hy - (h + LIST_GAP) - y,
+					})
+					m.where[id] = nil
+					ui.batch(function()
+						ghosts:set(list)
+						schedule()
 					end)
-					dy = if ok then d else 0
+					republish()
+					return
 				end
-				animate(id, {
-					y = { to = dy, duration = M.TRAVEL, ease = M.EASE },
-					opacity = { to = 0, duration = M.FADE, delay = M.TRAVEL - M.FADE, ease = "linear" },
-				})
+				-- (Nothing to measure it by: it goes as any other.)
+				m.where[id] = nil
+				phase(f, "travel")
+				schedule()
+				republish()
+				return
 			else
 				-- (Where its old node shows, for its new one to start from.)
 				local el = elements[id]
@@ -374,8 +421,16 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 		elseif p == "out" then
 			m.where[id] = nil
 			done(id)
-			schedule()
-			republish()
+			local list: { any } = {}
+			for _, g in ghosts:peek() do
+				if g.id ~= id then
+					table.insert(list, g)
+				end
+			end
+			ui.batch(function()
+				ghosts:set(list)
+				schedule()
+			end)
 			return
 		elseif p == "fade_out" then
 			m.where[id] = nil
@@ -574,7 +629,7 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 	-- A node arriving: from `from_at[id]` to its own place, translated, its
 	-- opacity from `from_opacity` to 1 over `fade_ms`. (At its first layout:
 	-- where it is is known then, before the frame is drawn.)
-	local function slide_in(id: string, el: any, from_opacity: number, fade_ms: number, ms: number)
+	local function slide_in(id: string, el: any, from_opacity: number, fade_ms: number, ms: number, delay: number?)
 		local from = from_at[id]
 		local dx, dy = 0, 0
 		if from then
@@ -590,6 +645,7 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 			x = { to = 0, duration = ms, ease = M.EASE },
 			y = { to = 0, duration = ms, ease = M.EASE },
 			opacity = { to = 1, duration = fade_ms, ease = "linear" },
+			delay = delay or 0,
 		})
 	end
 
@@ -605,7 +661,13 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 			local f = m.flights[id]
 			pending[id] = { how = how, el = el, head = f and heads[f.from] }
 		elseif how == "switch_fade" then
-			play(el, { opacity = { from = 0, to = 1 }, duration = if motion.reduced_now() then M.FADE else M.SWITCH_IN, ease = "linear" })
+			local reduced = motion.reduced_now()
+			play(el, {
+				opacity = { from = 0, to = 1 },
+				duration = if reduced then M.FADE else M.SWITCH_IN,
+				delay = if reduced then 0 else M.SWITCH_DELAY,
+				ease = "linear",
+			})
 		elseif how == "fade" then
 			play(el, { opacity = { from = 0, to = 1 }, duration = M.FADE, ease = "linear" })
 		end
@@ -624,7 +686,7 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 		if p.how == "travel" then
 			slide_in(id, el, M.DIM, M.TRAVEL_IN, M.TRAVEL)
 		elseif p.how == "switch" then
-			slide_in(id, el, 0, M.SWITCH_IN, M.SWITCH)
+			slide_in(id, el, 0, M.SWITCH_IN, M.SWITCH, M.SWITCH_DELAY)
 		else
 			-- From its drawer's head line, in over the first FADE ms.
 			local dy = 0
@@ -665,6 +727,25 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 		end
 		return heads[place]
 	end
+	function m.column(place: string, el: any)
+		columns[place] = el
+	end
+	function m.ghosts(place: string): { any }
+		local out: { any } = {}
+		for _, g in ghosts:get() do
+			if g.column == place then
+				table.insert(out, g)
+			end
+		end
+		return out
+	end
+	function m.ghost_placed(g: any, el: any)
+		play(el, {
+			y = { to = g.dy, duration = M.TRAVEL, ease = M.EASE },
+			opacity = { to = 0, duration = M.FADE, delay = M.TRAVEL - M.FADE, ease = "linear" },
+		})
+	end
+
 	function m.raised(place: string): boolean
 		return landing:get()[place] == true
 	end

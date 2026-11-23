@@ -268,3 +268,62 @@ fn the_switch_to_the_list_slides_rows_from_their_cards_never_scaled() {
     assert_eq!(moved(&scene, row), (0., 0.));
     assert!(opacity(&scene, row) > 0.995);
 }
+
+/// The orchestrator's call on a card going into a folded drawer: its slot
+/// collapses while it travels, as any move's does. The card under it is
+/// held where it stood by a translation that eases to nothing over the
+/// travel, while a copy of the card goes to the drawer's head line.
+#[test]
+fn a_card_into_a_folded_drawer_closes_its_gap_as_it_travels() {
+    let mut app = board("all");
+    run(&app, "motion_pause");
+    frames(&app, 47);
+    for _ in 0..4 {
+        if one(&mut app, "#orch-col-running >> .orch-card-ghost").is_some() {
+            break;
+        }
+        app.frame();
+    }
+    assert!(one(&mut app, "#orch-col-running >> .orch-card-ghost").is_some(), "no copy in flight");
+    assert!(one(&mut app, "#orch-col-running >> #orch-card-it-37").is_none(), "still in its list");
+    // The card that was under it (it-38): from its old place, up to its new.
+    let mut ys = Vec::new();
+    for _ in 0..21 {
+        let below = one(&mut app, "#orch-card-it-38").unwrap();
+        ys.push(moved(&app.ui.scene.borrow(), below).1);
+        app.frame();
+    }
+    eprintln!("zeron-zgx: BOARDMOTION drawer gap: it-38 held by {:?}", ys.iter().map(|y| y.round()).collect::<Vec<_>>());
+    assert!(ys[0] > 10., "the slot was closed at once ({})", ys[0]);
+    assert!(ys.windows(2).all(|w| w[1] <= w[0] + 0.01), "the slot did not close steadily: {ys:?}");
+    assert!(ys[ys.len() / 2] < ys[0] * 0.2, "half way, the slot was still open: {ys:?}");
+    frames(&app, 10);
+    assert!(one(&mut app, ".orch-card-ghost").is_none(), "its copy stayed");
+    let below = one(&mut app, "#orch-card-it-38").unwrap();
+    assert_eq!(moved(&app.ui.scene.borrow(), below), (0., 0.));
+}
+
+/// The orchestrator's call on the switch: the leaving view fades over its
+/// 100 ms, and nothing of the arriving one shows before 80 ms (at 60 ms,
+/// the list's heads still read faintly through the board in the strips).
+#[test]
+fn the_switch_starts_the_rows_after_the_board_has_mostly_faded() {
+    let mut app = mount("orch_board_places_fixture.luau", 1240., 820., "all");
+    app.host.set_state("board_view", Value::from("list")).unwrap();
+    // Frames at 17, 33, 50 ... 150 ms after the switch.
+    for f in 1..=9 {
+        app.frame();
+        let rows = all(&mut app, ".orch-list-row");
+        let cards = all(&mut app, ".orch-card");
+        let scene = app.ui.scene.borrow();
+        let row = rows.iter().map(|n| opacity(&scene, *n)).fold(0f32, f32::max);
+        let card = cards.iter().map(|n| opacity(&scene, *n)).fold(0f32, f32::max);
+        eprintln!("zeron-zgx: BOARDMOTION switch {} ms: board {card:.2} rows {row:.2}", f * 50 / 3);
+        if f * 1000 / 60 < 80 {
+            assert!(row < 0.02, "rows show at {} ms: {row}", f * 1000 / 60);
+        }
+        if f >= 8 {
+            assert!(card < 0.01, "the board still shows at {} ms: {card}", f * 1000 / 60);
+        }
+    }
+}
