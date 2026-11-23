@@ -26,8 +26,8 @@ local locale = require("@self/locale")
 local material = require("@self/material")
 local Clocks = require("@self/orch_progress_clocks")
 local ContextMenu = require("@self/context_menu")
-local model = require("@self/orch_board_model")
 local Ctx = require("@self/orch_board_ctx")
+local Ref = require("@self/orch_ref")
 local trace = require("@self/orch_perf_trace")
 
 local M = {}
@@ -280,6 +280,48 @@ function M.Unseen(props: { shown: () -> boolean }): Node
 	})
 end
 
+-- A card as a reference (ds/orch_ref): its state, its first thread, its
+-- orchestrator, the project it's in (its threads', else its
+-- orchestrator's; left out where it's the orchestrator's own name).
+function M.ref(ctx: Ctx.Ctx, e: Ctx.Entry): any
+	local it = e.item
+	local threads = it.threads or {}
+	local of: any = ctx.props.project_of
+	local function project_of(chat: string?): string?
+		if not chat or not of then
+			return nil
+		end
+		local name = of(chat)
+		return if name and name ~= "" then name else nil
+	end
+	local project: string? = nil
+	for _, chat in threads do
+		project = project_of(chat)
+		if project then
+			break
+		end
+	end
+	if not project then
+		project = project_of(it.orchestrator_id)
+	end
+	local o = ctx.owner(it.orchestrator_id)
+	if o and project and string.lower(project) == string.lower(o.name or "") then
+		project = nil
+	end
+	return Ref.make("card", it.id, it.title, {
+		state = it.state,
+		thread = threads[1],
+		orchestrator = it.orchestrator_id,
+		project = project,
+	})
+end
+
+-- Whose a card is, said: its orchestrator's dot, named.
+function M.owner_name(ctx: Ctx.Ctx, e: Ctx.Entry?): string
+	local o = e and ctx.owner(e.item.orchestrator_id)
+	return if o then o.name or "" else ""
+end
+
 export type Props = {
 	ctx: Ctx.Ctx,
 	-- Its card's id (not `id`: a component's `id` names its element).
@@ -346,6 +388,11 @@ M.Card = ui.component(function(props: Props): Node
 		items = "start",
 		if ctx.owners
 			then ui.div {
+				class = "orch-card-owner",
+				role = "img",
+				label = function(): string
+					return M.owner_name(ctx, e())
+				end,
 				shrink = 0,
 				h = (ui.theme.get("font.line.sm") :: number?) or 16,
 				items = "center",
@@ -439,7 +486,9 @@ M.Card = ui.component(function(props: Props): Node
 		},
 	}
 	local extra = if props.extra then props.extra(e) else nil
-	local box = ui.button {
+	-- Dragged: a reference to it (ds/orch_ref; Capture's composer takes one).
+	-- It moves nothing: where a card stands is the engine's.
+	local box = ui.button(Ref.on({
 		class = "orch-card",
 		id = `orch-card-{id}`,
 		selected = function(): boolean
@@ -499,7 +548,10 @@ M.Card = ui.component(function(props: Props): Node
 			-- (Outside the parts' gaps: empty, it takes no room.)
 			ui.div { hook = "orchestration.item", class = "orch-item-slot", provide = { item = id }, w_full = true },
 		},
-	}
+	}, function(): any
+		local x = entry:peek()
+		return if x then M.ref(ctx, x) else nil
+	end) :: any)
 	if not props.menu then
 		return box
 	end

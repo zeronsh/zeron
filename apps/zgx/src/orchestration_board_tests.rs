@@ -1,7 +1,8 @@
 //! The orchestration board under a hand (ui/orch_board_places_fixture.luau,
-//! ds/orch_board), in raw pointer events. Nothing on it is dragged: the
-//! engine says where each card stands. A card pressed and carried to
-//! another column starts no drag, asks nothing and stays where its row
+//! ds/orch_board), in raw pointer events. Nothing on it is moved by a
+//! drag: the engine says where each card stands. A card pressed and
+//! carried to another column carries only a reference to it (for a
+//! composer to take, ds/orch_ref), asks nothing and stays where its row
 //! puts it; a press let go where it was, or after a wobble, opens its
 //! detail beside the board.
 
@@ -66,8 +67,9 @@ fn gesture(app: &mut TestApp, from: (f32, f32), path: &[(f32, f32)]) -> bool {
     dragged
 }
 
-/// A card carried from Running to Done, slowly and in a flick: no drag, no
-/// call, the card still in Running, nothing opened.
+/// A card carried from Running to Done, slowly and in a flick: a reference
+/// drag and nothing else (no call, the card still in Running, nothing
+/// opened).
 #[test]
 fn orchestration_board_a_card_carried_away_stays_put() {
     let mut app = mount(1500., 1000.);
@@ -81,8 +83,9 @@ fn orchestration_board_a_card_carried_away_stays_put() {
             (start.0 + (end.0 - start.0) * t, start.1 + (end.1 - start.1) * t)
         })
         .collect();
-    assert!(!gesture(&mut app, start, &slow), "nothing on the board drags");
-    assert!(!gesture(&mut app, start, &[end]), "a flick drags nothing either");
+    // (Its one drag is a reference to it: let go on the board, it lands nowhere.)
+    assert!(gesture(&mut app, start, &slow), "a card carried is a reference drag");
+    gesture(&mut app, start, &[end]);
     assert_eq!(state(&app, "calls"), "", "nothing asked of the host");
     assert!(has(&mut app, "#orch-col-running >> #orch-card-it-chat"));
     assert!(!has(&mut app, "#orch-col-done >> #orch-card-it-chat"));

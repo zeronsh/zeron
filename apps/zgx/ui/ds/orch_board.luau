@@ -598,6 +598,11 @@ local OrchBoard = ui.component(function(props: Props): Node
 		end
 	end)
 
+	-- Whether a card's detail shows here.
+	local function detail_shown(): boolean
+		return props.on_open_card == nil and ctx.selected() ~= nil
+	end
+
 	local function main(): Node
 		return ui.switch(function(): string
 			return view:get()
@@ -622,11 +627,23 @@ local OrchBoard = ui.component(function(props: Props): Node
 		ui.row {
 			w_full = true,
 			min_w = 0,
-			gap = "$space.3",
 			items = "start",
-			ui.column { grow = 1, basis = 0, min_w = 0, main() },
+			-- Compact (a narrow page) with a card open: its detail in the
+			-- board's place, Back to the board as it was (kept mounted,
+			-- hidden; where the page is scrolled is the host's to keep, as
+			-- an orchestrator's side panel does).
+			ui.column {
+				grow = 1,
+				basis = 0,
+				min_w = 0,
+				hidden = function(): boolean
+					return compact and detail_shown()
+				end,
+				main(),
+			},
 			-- Its detail, beside the board (a host that shows details
-			-- itself, `on_open_card`, has none here).
+			-- itself, `on_open_card`, has none here). The gap is the
+			-- detail's own: with none open, the columns reach the edge.
 			if props.on_open_card
 				then nil
 				else ui.presence(function(): string?
@@ -637,11 +654,13 @@ local OrchBoard = ui.component(function(props: Props): Node
 						class = "orch-board-detail",
 						w = if compact then nil else DETAIL_W,
 						w_full = compact,
+						ml = if compact then nil else "$space.3",
 						shrink = 0,
 						Detail.Detail {
 							ctx = ctx,
 							act = act,
 							card = id,
+							back = compact,
 							on_back = function()
 								ctx.open(nil)
 							end,

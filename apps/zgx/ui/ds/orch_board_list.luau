@@ -153,13 +153,21 @@ local Row = ui.component(function(props: RowProps): Node
 			size = 13,
 		},
 		if ctx.owners
-			then hue.Dot {
-				hue = function(): number?
-					local x = e()
-					local o = x and ctx.owner(x.item.orchestrator_id)
-					return o and o.hue
+			then ui.div {
+				class = "orch-list-owner",
+				role = "img",
+				label = function(): string
+					return Card.owner_name(ctx, e())
 				end,
-				size = 7,
+				shrink = 0,
+				hue.Dot {
+					hue = function(): number?
+						local x = e()
+						local o = x and ctx.owner(x.item.orchestrator_id)
+						return o and o.hue
+					end,
+					size = 7,
+				},
 			}
 			else nil,
 		ui.text {
