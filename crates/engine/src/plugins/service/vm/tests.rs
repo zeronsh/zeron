@@ -552,7 +552,7 @@ async fn a_family_it_lacks_falls_back_as_in_a_window() {
 #[tokio::test]
 async fn a_service_measures_in_its_plugins_fonts() {
     // Geist's bold italic: not among the app's fonts.
-    const BOLD_ITALIC: &[u8] = include_bytes!("../../../../../ui/assets/fonts/Geist-BoldItalic.ttf");
+    const BOLD_ITALIC: &[u8] = include_bytes!("../../../../../../assets/fonts/Geist-BoldItalic.ttf");
     let dir = folder(&[("service.luau", MEASURING), ("fonts/not-a-font.ttf", "hello")]);
     std::fs::write(dir.path().join("fonts/Geist-BoldItalic.ttf"), BOLD_ITALIC).unwrap();
     let (vm, described, _) = start(dir.path(), Limits::default()).await;
@@ -583,7 +583,7 @@ async fn a_service_measures_in_its_plugins_fonts() {
 #[tokio::test]
 async fn a_service_measures_in_a_font_from_its_bytes() {
     use base64::Engine as _;
-    const BOLD_ITALIC: &[u8] = include_bytes!("../../../../../ui/assets/fonts/Geist-BoldItalic.ttf");
+    const BOLD_ITALIC: &[u8] = include_bytes!("../../../../../../assets/fonts/Geist-BoldItalic.ttf");
     let dir = folder(&[("service.luau", MEASURING)]);
     let (vm, described, _) = start(dir.path(), Limits::default()).await;
     described.unwrap();
