@@ -38,6 +38,7 @@ local model = require("@self/orch_board_model")
 local Ctx = require("@self/orch_board_ctx")
 local Actions = require("@self/orch_board_actions")
 local Card = require("@self/orch_board_card")
+local trace = require("@self/orch_perf_trace")
 
 local M = {}
 
@@ -64,7 +65,9 @@ type RowProps = { ctx: Ctx.Ctx, act: Actions.Actions, card: string, narrow: () -
 
 local Row = ui.component(function(props: RowProps): Node
 	local ctx, act, id = props.ctx, props.act, props.card
+	trace.hit("board.row")
 	local entry = ui.computed(function(): Ctx.Entry?
+		trace.hit("board.row_entry")
 		return ctx.entry(id)
 	end)
 	local function e(): Ctx.Entry?
@@ -317,6 +320,7 @@ M.Sections = ui.component(function(props: SectionsProps): Node
 
 	local function rows(place: string): Node
 		local ids = ui.computed(function(): { string }
+			trace.hit("board.ids")
 			local out: { string } = {}
 			local cap = cap_of(place)
 			for i, entry in model.of(ctx.board(), place) do

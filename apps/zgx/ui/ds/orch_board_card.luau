@@ -28,6 +28,7 @@ local Clocks = require("@self/orch_progress_clocks")
 local ContextMenu = require("@self/context_menu")
 local model = require("@self/orch_board_model")
 local Ctx = require("@self/orch_board_ctx")
+local trace = require("@self/orch_perf_trace")
 
 local M = {}
 
@@ -295,7 +296,9 @@ export type Props = {
 M.Card = ui.component(function(props: Props): Node
 	local ctx = props.ctx
 	local id = props.card
+	trace.hit("board.card")
 	local entry = ui.computed(function(): Ctx.Entry?
+		trace.hit("board.card_entry")
 		return ctx.entry(id)
 	end)
 	local function e(): Ctx.Entry?
@@ -318,10 +321,12 @@ M.Card = ui.component(function(props: Props): Node
 	end)
 	local words = ui.computed(function(): string
 		local x = e()
+		trace.hit("board.word")
 		return if x then M.words(x) else ""
 	end)
 	local tail = ui.computed(function(): string
 		local x = e()
+		trace.hit("board.tail")
 		return if x then M.tail(ctx, x) else ""
 	end)
 	local owner_hue = ui.computed(function(): number?

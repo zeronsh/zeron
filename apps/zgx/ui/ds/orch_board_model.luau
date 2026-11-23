@@ -25,6 +25,8 @@
 --   done        closed today, the last first
 --   earlier     closed before today (dropped ones among them), the last first
 
+local trace = require("@self/orch_perf_trace")
+
 local M = {}
 
 export type Entry = {
@@ -270,6 +272,7 @@ local function latest_first(a: Entry, b: Entry): boolean
 end
 
 local function build(now: any, filter: string?, at: number): Board
+	trace.hit("board.build")
 	local cards = M.cards_by_id(now and now.cards)
 	local index = asks_index(now and now.asks)
 	local today = day_start(at)

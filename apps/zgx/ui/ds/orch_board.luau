@@ -55,6 +55,7 @@ local Detail = require("@self/orch_board_detail")
 local List = require("@self/orch_board_list")
 local NewTask = require("@self/orch_board_new")
 local Actions = require("@self/orch_board_actions")
+local trace = require("@self/orch_perf_trace")
 
 export type Props = Ctx.Props
 
@@ -132,6 +133,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 	-- A place's cards, as many as show, then "Show n more".
 	local function cards(place: string, drawer: boolean): Node
 		local ids = ui.computed(function(): { string }
+			trace.hit("board.ids")
 			local all = ids_of(place)
 			local cap = cap_of(place)
 			local out: { string } = {}
@@ -517,6 +519,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 
 	local function count_of(key: string): () -> number
 		return function(): number
+			trace.hit("board.counts")
 			return (ctx.board().counts :: any)[key] or 0
 		end
 	end
