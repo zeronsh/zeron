@@ -5,8 +5,10 @@
 //! punctuation is fine.
 //!
 //! Over every `ds/orch_*` (the Board, its cards and the Graph with the
-//! rest), `screens/control/` and `screens/orchestrator/`, and the
-//! `control.`, `orch.` and `ds.orch.` keys of every locale. (The usage
+//! rest), `screens/control/` and `screens/orchestrator/`, in ui/ or in the
+//! Orchestrators plugin's app/ (plugins-builtin/orchestrators, which keeps
+//! ui/'s layout), and the `control.`, `orch.` and `ds.orch.` keys of every
+//! locale. (The usage
 //! limit's `ds.limit.` words keep a separator between their facts that no
 //! one sees: `limit.parts` and the Graph's card lay them out apart.)
 
@@ -18,6 +20,11 @@ fn ui_dir() -> PathBuf {
     std::env::var_os("ZERON_ZGX_TEST_UI")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui"))
+}
+
+/// The Orchestrators plugin's app-side modules, laid out as in ui/.
+fn plugin_app_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins-builtin/orchestrators/app")
 }
 
 fn luau_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -68,26 +75,28 @@ fn walk(prefix: &str, value: &serde_json::Value, file: &str, found: &mut Vec<Str
 #[test]
 fn no_dot_typed_between_words_in_the_orchestrators_ui() {
     let ui = ui_dir();
-    let mut files = Vec::new();
-    luau_files(&ui.join("ds"), &mut files);
-    luau_files(&ui.join("screens"), &mut files);
     let mut found = Vec::new();
     let mut scanned = 0;
-    for path in &files {
-        let rel = path.strip_prefix(&ui).unwrap().to_string_lossy().replace('\\', "/");
-        if !in_scope(&rel) {
-            continue;
-        }
-        scanned += 1;
-        let text = std::fs::read_to_string(path).unwrap();
-        for (n, line) in text.lines().enumerate() {
-            if code(line).contains(SYMBOL) {
-                found.push(format!("{rel}:{}: {}", n + 1, line.trim()));
+    for (root, shown) in [(ui.clone(), "ui"), (plugin_app_dir(), "plugins-builtin/orchestrators/app")] {
+        let mut files = Vec::new();
+        luau_files(&root.join("ds"), &mut files);
+        luau_files(&root.join("screens"), &mut files);
+        for path in &files {
+            let rel = path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+            if !in_scope(&rel) {
+                continue;
+            }
+            scanned += 1;
+            let text = std::fs::read_to_string(path).unwrap();
+            for (n, line) in text.lines().enumerate() {
+                if code(line).contains(SYMBOL) {
+                    found.push(format!("{shown}/{rel}:{}: {}", n + 1, line.trim()));
+                }
             }
         }
     }
     // (A scope that found no file would pass on nothing.)
-    assert!(scanned > 20, "only {scanned} files in scope under {}", ui.display());
+    assert!(scanned > 20, "only {scanned} files in scope under {} and {}", ui.display(), plugin_app_dir().display());
     let mut locales = 0;
     for entry in std::fs::read_dir(ui.join("locales")).unwrap().flatten() {
         let path = entry.path();

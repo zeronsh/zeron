@@ -157,6 +157,8 @@ mod updates;
 mod visuals_tests;
 #[cfg(test)]
 mod orchestration_board_tests;
+#[cfg(test)]
+mod fixture_tests;
 
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
 

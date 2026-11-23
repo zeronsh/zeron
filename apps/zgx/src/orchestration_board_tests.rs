@@ -1,4 +1,4 @@
-//! The orchestration board under a hand (ui/orch_board_places_fixture.luau,
+//! The orchestration board under a hand (orch_board_places_fixture.luau,
 //! ds/orch_board), in raw pointer events. Nothing on it is moved by a
 //! drag: the engine says where each card stands. A card pressed and
 //! carried to another column carries only a reference to it (for a
@@ -8,11 +8,10 @@
 
 use zgx::input::{InputEvent, Modifiers, PointerButton};
 use zgx::scene::Rect;
-use zgx_script::{ScriptHost, Value, testing::TestApp};
+use zgx_script::{Value, testing::TestApp};
 
 fn mount(w: f32, h: f32) -> TestApp {
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/orch_board_places_fixture.luau");
-    let app = TestApp::new(|runtime| ScriptHost::new(runtime, path));
+    let app = TestApp::new(|runtime| crate::fixture_tests::host(runtime, "orch_board_places_fixture.luau"));
     app.ui.scene.borrow_mut().resize(w, h);
     app.frames(30);
     app

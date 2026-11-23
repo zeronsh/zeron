@@ -2,14 +2,14 @@
 //! are one paragraph (its parts spans in it), not a box a word, so a
 //! selection across it gives the dump's own text, spaces and all, never
 //! the tabs zgx puts between boxes side by side. Mounted headless on
-//! ui/orch_receipt_fixture.luau (the sample's newest dump).
+//! orch_receipt_fixture.luau (the sample's newest dump; crate::fixture_tests
+//! finds it).
 
-use zgx_script::{ScriptHost, testing::TestApp};
+use zgx_script::testing::TestApp;
 
 #[test]
 fn a_receipt_copies_its_dump_as_written() {
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/orch_receipt_fixture.luau");
-    let mut app = TestApp::new(|runtime| ScriptHost::new(runtime, path));
+    let mut app = TestApp::new(|runtime| crate::fixture_tests::host(runtime, "orch_receipt_fixture.luau"));
     app.ui.scene.borrow_mut().resize(900., 500.);
     app.frames(30);
     assert_eq!(app.error(), None, "the fixture failed");

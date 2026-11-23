@@ -7877,8 +7877,7 @@ mod tests {
     #[test]
     fn a_session_only_lane_is_ready_with_no_transcript() {
         use zgx_script::testing::TestApp;
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/orch_push_fixture.luau");
-        let app = TestApp::new(|runtime| zgx_script::ScriptHost::new(runtime, path));
+        let app = TestApp::new(|runtime| crate::fixture_tests::host(runtime, "orch_push_fixture.luau"));
         let view = super::lane_view(&app.host, "capture-test");
         view.set_session_only(true);
         view.open_chat(Some("chat-brain".into()));

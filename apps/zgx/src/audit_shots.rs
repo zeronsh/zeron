@@ -78,10 +78,13 @@ fn parse(spec: &str, dark: bool) -> Shot {
         steps.push(Step::State("dark".into(), serde_json::json!(dark)));
         steps.push(Step::State("page".into(), serde_json::json!(page)));
         (format!("gallery-{page}"), ui_dir().join("gallery.luau"))
-    } else if head.ends_with(".luau") {
+    } else if head.ends_with(".luau") && (head.contains('/') || ui_dir().join(head).exists()) {
         (head.trim_end_matches(".luau").replace('/', "-"), ui_dir().join(head))
+    } else if head.ends_with(".luau") {
+        // A built-in plugin's fixture, in its stage.
+        (head.trim_end_matches(".luau").to_string(), crate::fixture_tests::path(head))
     } else {
-        (head.to_string(), ui_dir().join(format!("{head}_fixture.luau")))
+        (head.to_string(), crate::fixture_tests::path(&format!("{head}_fixture.luau")))
     };
     let mut name = name;
     for part in parts {
@@ -124,7 +127,7 @@ fn take(shot: &Shot, out: &Path, scale: f32, dark: bool) -> Result<PathBuf, Stri
     let script = shot.script.clone();
     // (A desktop of its own: what a Copy writes goes somewhere, as in a window.)
     let app = TestApp::try_with_desktop(|runtime| {
-        let host = crate::plugins::lend_design_system(ScriptHost::new(runtime, script.clone()), &script);
+        let host = crate::plugins::lend_design_system(crate::fixture_tests::configured(ScriptHost::new(runtime, script.clone()), &script), &script);
         // (What a window host answers and a test host doesn't.)
         host.action("appearance", |_| {});
         host.action("close", |_| {});

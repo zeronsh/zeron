@@ -2215,8 +2215,7 @@ mod tests {
     #[test]
     fn a_pushed_delta_runs_only_the_moved_card_s_selector() {
         use zgx_script::testing::TestApp;
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/orch_push_fixture.luau");
-        let app = TestApp::new(|runtime| ScriptHost::new(runtime, path));
+        let app = TestApp::new(|runtime| crate::fixture_tests::host(runtime, "orch_push_fixture.luau"));
         app.frames(5);
         let shared = app.host.shared("orchestration", loading_value());
         let o = Orchestration::default();
@@ -2376,13 +2375,19 @@ mod tests {
                 }
             }
         }
-        let ui = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
+        // The app's modules, and Orchestrators' own (its app/ keeps ui/'s
+        // layout).
+        let app = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut files = Vec::new();
-        walk(&ui, &mut files);
+        for root in [app.join("ui"), app.join("plugins-builtin/orchestrators/app")] {
+            let mut found = Vec::new();
+            walk(&root, &mut found);
+            files.extend(found.into_iter().map(|path| (root.clone(), path)));
+        }
         let mut sent: Vec<(String, String)> = Vec::new();
-        for path in files {
+        for (root, path) in files {
             let text = std::fs::read_to_string(&path).unwrap();
-            let rel = path.strip_prefix(&ui).unwrap().display().to_string();
+            let rel = path.strip_prefix(&root).unwrap().display().to_string();
             let account = rel.replace('\\', "/") == "account/orchestration.luau";
             if !(text.contains("orchestration.op(") || (account && text.contains("M.op("))) {
                 continue;
