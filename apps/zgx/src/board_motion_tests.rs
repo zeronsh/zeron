@@ -232,7 +232,7 @@ fn a_shrinking_lane_eases_and_nothing_hangs_outside_it() {
 }
 
 /// Decision 43: the switch never scales a box, the leaving view is gone by
-/// 100 ms, and each card in view becomes its row from where it stood.
+/// 100 ms, and each card in view becomes its row (decision 47's drift).
 #[test]
 fn the_switch_to_the_list_slides_rows_from_their_cards_never_scaled() {
     let mut app = mount("orch_board_places_fixture.luau", 1240., 820., "all");
@@ -240,13 +240,9 @@ fn the_switch_to_the_list_slides_rows_from_their_cards_never_scaled() {
     let was = app.ui.scene.borrow().bounds(card);
     app.host.set_state("board_view", Value::from("list")).unwrap();
     app.frame();
-    {
-        // (By its id: it shows nothing yet, which targets pass over.)
-        let row = app.find("orch-row-it-chat").expect("its row");
-        let scene = app.ui.scene.borrow();
-        let b = scene.bounds(row);
-        assert!((b.x - was.x).abs() < 2. && (b.y - was.y).abs() < 2., "its row starts at {b:?}, its card stood at {was:?}");
-    }
+    // (Where it starts: within 24 points of home, toward where its card
+    // stood, `the_switch_drifts_each_arrival_at_most_24_points`.)
+    let _ = was;
     for f in 0..24 {
         let rows = all(&mut app, ".orch-list-row");
         let cards = all(&mut app, ".orch-card");
@@ -326,4 +322,183 @@ fn the_switch_starts_the_rows_after_the_board_has_mostly_faded() {
             assert!(card < 0.01, "the board still shows at {} ms: {card}", f * 1000 / 60);
         }
     }
+}
+
+/// The card button `node` stands in, if any (it, or an ancestor).
+fn card_of(scene: &Scene, node: NodeId, cards: &[NodeId]) -> Option<NodeId> {
+    std::iter::once(node).chain(scene.ancestors(node)).find(|n| cards.contains(n))
+}
+
+/// Decision 46: a travelling card is over every card at rest, from its
+/// first frame to its landing, solid all the while: out of a folded drawer
+/// over its column's cards, and beside cards arriving by a crossfade.
+#[test]
+fn a_card_in_flight_is_over_every_card_at_rest_and_solid_from_its_first_frame() {
+    for (command, moving) in [("engine_start", "it-keyed"), ("engine_five", "it-chat")] {
+        let mut app = mount("orch_board_places_fixture.luau", 1240., 820., "all");
+        run(&app, command);
+        frames(&app, 47);
+        let target = format!("#orch-card-{moving}");
+        let mut travelling = 0;
+        for f in 0..30 {
+            app.frame();
+            if one(&mut app, &format!("{target} >> .orch-card-underlay")).is_none()
+                && all(&mut app, ".orch-card-underlay").iter().all(|_| true)
+            {
+                // (Not yet, or no longer, in flight.)
+            }
+            let Some(card) = one(&mut app, &target) else { continue };
+            let cards = all(&mut app, ".orch-card");
+            let unders = all(&mut app, ".orch-card-underlay");
+            let scene = app.ui.scene.borrow();
+            // In flight: its underlay (in its node) is shown.
+            // (Its underlay: under it, its top left where the card's is.)
+            let cb = scene.bounds(card);
+            let mine = unders.iter().copied().find(|u| {
+                let b = scene.bounds(*u);
+                (b.x - cb.x).abs() < 2. && (b.y - cb.y).abs() < 2.
+            });
+            let Some(under) = mine else { continue };
+            travelling += 1;
+            assert!(opacity(&scene, under) > 0.995, "{command}: its underlay at {} in flight frame {f}", opacity(&scene, under));
+            // (What draws nothing yet takes no hits: from when its content
+            // shows.)
+            if opacity(&scene, card) < 0.5 {
+                continue;
+            }
+            let b = scene.bounds(card);
+            for (px, py) in [(b.x + b.width / 2., b.y + b.height / 2.), (b.x + 20., b.y + 10.), (b.x + b.width - 20., b.y + b.height - 10.)] {
+                let hits = scene.hit_test_all(px, py);
+                let first = hits.iter().find_map(|h| card_of(&scene, *h, &cards));
+                // (It, or another card in flight with it: none at rest.)
+                let in_flight = |c: NodeId| {
+                    let cb = scene.bounds(c);
+                    unders.iter().any(|u| {
+                        let b = scene.bounds(*u);
+                        (b.x - cb.x).abs() < 2. && (b.y - cb.y).abs() < 2.
+                    })
+                };
+                assert!(first.is_some_and(in_flight), "{command}: at {px},{py}, frame {f} of its flight, a card at rest is over it");
+            }
+        }
+        assert!(travelling >= 10, "{command}: {travelling} frames in flight seen");
+    }
+}
+
+fn foot_y(app: &mut TestApp, place: &str) -> f32 {
+    let foot = one(app, &format!("#orch-col-{place} >> .orch-lane-foot")).unwrap();
+    app.ui.scene.borrow().transform(foot).y
+}
+
+/// The orchestrator's sixth point and decision 48: a lane never eases at
+/// mount, on a tab or a filter: everything in a column takes its place at
+/// once.
+#[test]
+fn lanes_do_not_ease_at_mount_on_a_tab_or_a_filter() {
+    let script = ui_dir().join("orch_board_places_fixture.luau");
+    let mut app = TestApp::new(|runtime| crate::plugins::lend_design_system(ScriptHost::new(runtime, script.clone()), &script));
+    app.ui.scene.borrow_mut().resize(1240., 820.);
+    for f in 0..40 {
+        app.frame();
+        if f > 0 {
+            for place in ["needs_you", "running", "done"] {
+                assert_eq!(foot_y(&mut app, place), 0., "{place}'s lane eased at mount, frame {f}");
+            }
+        }
+    }
+    for (state, value) in [("board_tab", Value::from("running")), ("board_tab", Value::from("all")), ("filter", Value::from("orc-vpn")), ("filter", Value::Nil)] {
+        app.host.set_state(state, value).unwrap();
+        for f in 0..20 {
+            app.frame();
+            for place in ["running", "done"] {
+                if one(&mut app, &format!("#orch-col-{place} >> .orch-lane-foot")).is_some() {
+                    assert_eq!(foot_y(&mut app, place), 0., "{place}'s lane eased on {state}, frame {f}");
+                }
+            }
+        }
+    }
+}
+
+/// Decisions 48 and 49: as the detail opens and closes, its content keeps
+/// its width, pinned to its box's right edge, while the box eases; each
+/// column's drawer stays under its last card, moving with it, never
+/// sliding across it nor opening a gap.
+#[test]
+fn the_detail_eases_its_box_and_the_columns_move_as_one() {
+    let mut app = mount("orch_board_places_fixture.luau", 1240., 820., "all");
+    let gap_of = |app: &mut TestApp| -> f32 {
+        let cards = all(app, "#orch-col-running >> .orch-card");
+        let head = one(app, "#orch-col-running >> .orch-drawer-head").unwrap();
+        let scene = app.ui.scene.borrow();
+        let last = cards.iter().map(|c| { let b = scene.bounds(*c); b.y + b.height }).fold(0f32, f32::max);
+        scene.bounds(head).y - last
+    };
+    let rest = gap_of(&mut app);
+    app.host.set_state("board_selected", Value::from("it-chat")).unwrap();
+    let mut widths = Vec::new();
+    for f in 0..16 {
+        app.frame();
+        let g = gap_of(&mut app);
+        assert!((g - rest).abs() < 1., "opening, frame {f}: the drawer stands {g} under the last card ({rest} at rest)");
+        if let (Some(content), Some(space)) = (one(&mut app, "#orch-board-detail"), one(&mut app, ".orch-board-detail-space")) {
+            let scene = app.ui.scene.borrow();
+            let (c, s) = (scene.bounds(content), scene.bounds(space));
+            assert!((c.width - 420.).abs() < 0.5, "frame {f}: its content is {} wide", c.width);
+            assert!(((c.x + c.width) - (s.x + s.width)).abs() < 0.5, "frame {f}: its content isn't pinned right");
+            widths.push(s.width);
+        }
+    }
+    assert!(widths.iter().any(|w| *w > 1. && *w < 431.), "the box never eased: {widths:?}");
+    app.host.set_state("board_selected", Value::Nil).unwrap();
+    for f in 0..16 {
+        app.frame();
+        let g = gap_of(&mut app);
+        assert!((g - rest).abs() < 1., "closing, frame {f}: the drawer stands {g} under the last card ({rest} at rest)");
+    }
+}
+
+/// Decision 47: across the switch, each arriving row or card starts within
+/// 24 points of its home.
+#[test]
+fn the_switch_drifts_each_arrival_at_most_24_points() {
+    for (from, to, target) in [("board", "list", ".orch-list-row"), ("list", "board", ".orch-card")] {
+        let mut app = mount("orch_board_places_fixture.luau", 1240., 820., "all");
+        app.host.set_state("board_view", Value::from(from)).unwrap();
+        frames(&app, 40);
+        app.host.set_state("board_view", Value::from(to)).unwrap();
+        let mut most = 0f32;
+        for _ in 0..24 {
+            app.frame();
+            let nodes = all(&mut app, target);
+            let scene = app.ui.scene.borrow();
+            for n in nodes {
+                let (dx, dy) = moved(&scene, n);
+                most = most.max((dx * dx + dy * dy).sqrt());
+            }
+        }
+        eprintln!("zeron-zgx: BOARDMOTION switch {from}-to-{to}: farthest from home {most:.1} points");
+        assert!(most <= 24.5, "{from} to {to}: an arrival started {most} points from home");
+        assert!(most > 1., "{from} to {to}: nothing drifted");
+    }
+}
+
+/// Decision 50: the empty line's words come in once the last card has gone.
+#[test]
+fn the_empty_lines_words_wait_for_the_last_card() {
+    let mut app = mount("orch_board_places_fixture.luau", 1240., 820., "all");
+    run(&app, "engine_five");
+    let mut seen = Vec::new();
+    for _ in 0..95 {
+        app.frame();
+        let words = one(&mut app, "#orch-col-running >> .orch-column-empty-words");
+        let flying = all(&mut app, ".orch-card-underlay").len();
+        if let Some(w) = words {
+            let o = opacity(&app.ui.scene.borrow(), w);
+            seen.push(o);
+            if flying > 0 {
+                assert!(o < 0.01, "its words show at {o} while a card is still on its way");
+            }
+        }
+    }
+    assert!(seen.last().is_some_and(|o| *o > 0.99), "its words never came: {seen:?}");
 }

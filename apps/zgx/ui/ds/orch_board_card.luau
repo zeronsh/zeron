@@ -356,21 +356,37 @@ M.Card = ui.component(function(props: Props): Node
 		local x = e()
 		return if x then x.item.title or "" else ""
 	end)
-	-- (While it holds before a move, the summary it had: only its status
-	-- line changes until it travels, and it keeps its size.)
+	-- Its face: everything but its status line (glyph, words, clock, dot),
+	-- which follow its row at once. While it holds before a move (whoever
+	-- caused it), the face it had: its summary, its chip, its threads and
+	-- what stands under its foot wait for its travel, and it keeps its
+	-- size. So does a card still asking whose ask was just answered: the
+	-- question stays until the card leaves.
 	local m = ctx.motion
-	local said = ""
-	local summary = ui.computed(function(): string
+	local kept: Ctx.Entry? = nil
+	local face = ui.computed(function(): Ctx.Entry?
 		local x = e()
+		if not props.ghost and kept ~= nil then
+			local p = m.phase(id)
+			if p == "hold" or p == "fade_out" or p == "out" then
+				return kept
+			end
+			if x and x.place == "needs_you" and x.ask == nil and (kept :: Ctx.Entry).ask ~= nil then
+				return kept
+			end
+		end
+		kept = x
+		return x
+	end)
+	local function f(): Ctx.Entry?
+		return face:get()
+	end
+	local summary = ui.computed(function(): string
+		local x = f()
 		if not x or props.drawer then
 			return ""
 		end
-		local p = m.phase(id)
-		if not props.ghost and (p == "hold" or p == "fade_out" or p == "out") then
-			return said
-		end
-		said = M.summary(ctx, x)
-		return said
+		return M.summary(ctx, x)
 	end)
 	local words = ui.computed(function(): string
 		local x = e()
@@ -397,6 +413,7 @@ M.Card = ui.component(function(props: Props): Node
 	local built: Motion.Built = if props.ghost then { how = nil :: string? } else m.build(id, props.drawer == true)
 	local start = if props.ghost then nil else m.start(built)
 	local mounted_el: any = nil
+	local content_ref = ui.ref()
 	ui.on_cleanup(function()
 		if mounted_el then
 			m.detach(id, mounted_el)
@@ -497,18 +514,18 @@ M.Card = ui.component(function(props: Props): Node
 		ui.div { grow = 1, min_w = 0 },
 		M.Threads {
 			count = function(): number
-				local x = e()
+				local x = f()
 				return if x then #(x.item.threads or {}) else 0
 			end,
 		},
 		M.Chip {
 			chip = function(): any
-				local x = e()
+				local x = f()
 				return x and x.card and x.card.chip
 			end,
 		},
 	}
-	local extra = if props.extra then props.extra(e) else nil
+	local extra = if props.extra then props.extra(f) else nil
 	-- Dragged: a reference to it (ds/orch_ref; Capture's composer takes one).
 	-- It moves nothing: where a card stands is the engine's.
 	local box = ui.button(Ref.on({
@@ -605,7 +622,9 @@ M.Card = ui.component(function(props: Props): Node
 		w_full = true,
 		min_w = 0,
 		-- (Coming in by a move: over its new neighbours while it travels.)
-		z = if built.how ~= nil then 1 else nil,
+		-- (In flight: over every card at rest, and over one that arrives by
+		-- a crossfade.)
+		z = if built.how == "travel" or built.how == "drawer" then 2 elseif built.how ~= nil then 1 else nil,
 		ui.div {
 			class = "orch-card-motion",
 			relative = true,
@@ -617,7 +636,7 @@ M.Card = ui.component(function(props: Props): Node
 					return
 				end
 				mounted_el = el
-				m.attach(id, el)
+				m.attach(id, el, content_ref)
 			end,
 			on_resize = function(_size: any, el: any)
 				if not props.ghost then
@@ -651,7 +670,8 @@ M.Card = ui.component(function(props: Props): Node
 					},
 				}
 			end),
-			whole,
+			-- (What brightens as it arrives: its underlay is solid at once.)
+			ui.div { ref = content_ref, w_full = true, min_w = 0, whole },
 		},
 	}
 end)

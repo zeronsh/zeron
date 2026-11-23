@@ -77,6 +77,9 @@ M.SWITCH = 280
 M.SWITCH_IN = 100
 M.SWITCH_OUT = 100
 M.SWITCH_CAP = 24
+-- How far from home an arriving card or row starts, at most: a drift
+-- toward where its counterpart stood, not the whole way.
+M.SWITCH_REACH = 24
 -- What arrives starts this long after the leaving view began to fade, so
 -- the two overlap only briefly.
 M.SWITCH_DELAY = 80
@@ -131,7 +134,9 @@ export type Motion = {
 	start: (b: Built) -> number?,
 	-- Its node mounted (built with `start`'s opacity, so its first frame
 	-- shows nothing of where it doesn't belong): `el` what moves and dims.
-	attach: (id: string, el: any) -> (),
+	-- `content` (a ref): what brightens as a card travels in, its underlay
+	-- solid from the first frame.
+	attach: (id: string, el: any, content: any?) -> (),
 	-- Its node's first layout (its `on_resize`): an arrival that starts
 	-- from where something else stood starts now.
 	placed: (id: string, el: any) -> (),
@@ -146,6 +151,11 @@ export type Motion = {
 	-- Whether a card travels into the column `place` now (it paints over
 	-- the others meanwhile, so the card goes over them). Tracked.
 	raised: (place: string) -> boolean,
+	-- A list's cards changed (ds/orch_board_ctx), and whether one of the
+	-- column `place`'s did just now: then its lane and drawer ease with
+	-- the cards (anything else that resizes a column moves them at once).
+	touch: (place: string) -> (),
+	recent: (place: string) -> boolean,
 	-- Whether a card that left the column `place` is still on its way
 	-- (its empty line waits). Tracked.
 	leaving: (place: string) -> boolean,
@@ -190,8 +200,12 @@ local function shown_at(el: any): (number?, number?)
 	return x, y
 end
 
+local made = 0
+
 function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motion
 	local m = {} :: Motion
+	made += 1
+	local generation = made
 	m.where = {}
 	m.flights = {}
 	-- The last `seq` drawn of each card.
@@ -221,7 +235,11 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 	local function phase_state(id: string): any
 		local st = phases[id]
 		if not st then
-			st = ui.state(`orch_board_phase:{slot}:{id}`, "" :: string) :: any
+			-- (Made as its card is first built, maybe in flight already: it
+			-- starts at the phase it is in. This board's own: a board made
+			-- later in the slot starts its own.)
+			local f = m.flights[id]
+			st = ui.state(`orch_board_phase:{slot}:{generation}:{id}`, (if f then f.phase else "") :: string) :: any
 			phases[id] = st
 		end
 		return st
@@ -629,7 +647,7 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 	-- A node arriving: from `from_at[id]` to its own place, translated, its
 	-- opacity from `from_opacity` to 1 over `fade_ms`. (At its first layout:
 	-- where it is is known then, before the frame is drawn.)
-	local function slide_in(id: string, el: any, from_opacity: number, fade_ms: number, ms: number, delay: number?)
+	local function slide_in(id: string, el: any, from_opacity: number, fade_ms: number, ms: number, delay: number?, reach: number?)
 		local from = from_at[id]
 		local dx, dy = 0, 0
 		if from then
@@ -639,6 +657,11 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 			if ok and type(x) == "number" and type(y) == "number" then
 				dx, dy = from.x - x, from.y - y
 			end
+		end
+		-- (At most `reach` points from home, toward where it came from.)
+		local far = math.sqrt(dx * dx + dy * dy)
+		if reach and far > reach then
+			dx, dy = dx * reach / far, dy * reach / far
 		end
 		set(el, { x = dx, y = dy, opacity = from_opacity })
 		play(el, {
@@ -650,16 +673,16 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 	end
 
 	-- Arrivals waiting for their node's first layout.
-	local pending: { [string]: { how: string, el: any, head: any? } } = {}
+	local pending: { [string]: { how: string, el: any, head: any?, content: any? } } = {}
 
-	function m.attach(id: string, el: any)
+	function m.attach(id: string, el: any, content: any?)
 		elements[id] = el
 		local how = arrivals[id]
 		if how == "travel" or how == "switch" then
-			pending[id] = { how = how, el = el }
+			pending[id] = { how = how, el = el, content = content }
 		elseif how == "drawer" then
 			local f = m.flights[id]
-			pending[id] = { how = how, el = el, head = f and heads[f.from] }
+			pending[id] = { how = how, el = el, head = f and heads[f.from], content = content }
 		elseif how == "switch_fade" then
 			local reduced = motion.reduced_now()
 			play(el, {
@@ -683,10 +706,24 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 			return
 		end
 		pending[id] = nil
+		-- (The ref, else the node itself.)
+		local content = p.content
+		local inner: any = el
+		if content ~= nil then
+			local ok, got = pcall(function(): any
+				return content:get()
+			end)
+			if ok and got ~= nil then
+				inner = got
+			end
+		end
 		if p.how == "travel" then
-			slide_in(id, el, M.DIM, M.TRAVEL_IN, M.TRAVEL)
+			-- Solid at once, over everything at rest; its content brightens.
+			slide_in(id, el, 1, 0, M.TRAVEL)
+			set(inner, { opacity = M.DIM })
+			play(inner, { opacity = { to = 1 }, duration = M.TRAVEL_IN, ease = "linear" })
 		elseif p.how == "switch" then
-			slide_in(id, el, 0, M.SWITCH_IN, M.SWITCH, M.SWITCH_DELAY)
+			slide_in(id, el, 0, M.SWITCH_IN, M.SWITCH, M.SWITCH_DELAY, M.SWITCH_REACH)
 		else
 			-- From its drawer's head line, in over the first FADE ms.
 			local dy = 0
@@ -697,11 +734,10 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 				end)
 				dy = if ok then d else 0
 			end
-			set(el, { y = dy, opacity = 0 })
-			play(el, {
-				y = { to = 0, duration = M.TRAVEL, ease = M.EASE },
-				opacity = { to = 1, duration = M.FADE, ease = "linear" },
-			})
+			set(el, { y = dy, opacity = 1 })
+			set(inner, { opacity = 0 })
+			play(el, { y = { to = 0, duration = M.TRAVEL, ease = M.EASE } })
+			play(inner, { opacity = { to = 1 }, duration = M.FADE, ease = "linear" })
 		end
 	end
 
@@ -744,6 +780,15 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 			y = { to = g.dy, duration = M.TRAVEL, ease = M.EASE },
 			opacity = { to = 0, duration = M.FADE, delay = M.TRAVEL - M.FADE, ease = "linear" },
 		})
+	end
+
+	local touched: { [string]: number } = {}
+	function m.touch(place: string)
+		touched[M.COLUMN_OF[place] or place] = ui.now()
+	end
+	function m.recent(place: string): boolean
+		local at = touched[place]
+		return at ~= nil and ui.now() - at < 120
 	end
 
 	function m.raised(place: string): boolean

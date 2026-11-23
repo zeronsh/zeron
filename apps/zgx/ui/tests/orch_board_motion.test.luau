@@ -428,7 +428,7 @@ test("board motion: cards leaving together leave 60 ms apart, the lowest landing
 	expect(settled(app)).to_be(true)
 end)
 
-test("board motion: a column's empty line waits for its last card to leave, then fades in", function()
+test("board motion: a column's empty line takes its room as the last card leaves; its words wait", function()
 	local app = open("orch_board_places_fixture.luau")
 	expect(app:has("#orch-col-running >> .orch-column-empty")).to_be(false)
 	app:command("engine_five")
@@ -436,13 +436,60 @@ test("board motion: a column's empty line waits for its last card to leave, then
 	-- 77); two crossfade.)
 	app:frames(HOLD + STAGGER2 + 2)
 	expect(app:count("#orch-col-running >> .orch-card")).to_be(0)
-	expect(app:has("#orch-col-running >> .orch-column-empty")).to_be(false)
-	app:frames(TRAVEL - 6)
-	expect(app:has("#orch-col-running >> .orch-column-empty")).to_be(false)
-	app:frames(8)
+	-- Its room, at once: the drawer settles once (its words' fade is
+	-- src/board_motion_tests.rs's).
+	expect(app:has("#orch-col-running >> .orch-column-empty")).to_be(true)
+	expect(motion(app).flying > 0).to_be(true)
+	app:frames(TRAVEL + 4)
 	expect(app:has("#orch-col-running >> .orch-column-empty")).to_be(true)
 	expect(settled(app)).to_be(true)
 	expect(app:error()).to_be_nil()
+end)
+
+test("board motion: through the hold the card's face stays: an answer's question, a pause's Resume", function()
+	-- The person's answer: the question stays its summary until it travels.
+	local app = open("orch_board_places_fixture.luau")
+	local question = summary(app, "it-merge")
+	expect(question).to_contain("Unlock 1Password")
+	app:click("#orch-card-it-merge")
+	app:frames(15)
+	app:click('#orch-detail-needs >> role:button "Unlocked + push the fork"')
+	app:set_state("board_selected", nil)
+	app:frames(20)
+	local status = app:text("#orch-card-it-merge >> .orch-card-status")
+	local beat = false
+	for _ = 1, 300 do
+		app:frames(1)
+		if app:text("#orch-card-it-merge >> .orch-card-status") ~= status then
+			beat = true
+			break
+		end
+	end
+	expect(beat).to_be(true)
+	for f = 1, HOLD - 2 do
+		expect(`{f} {app:count("#orch-card-it-merge >> .orch-card-summary")}`).to_be(`{f} 1`)
+		expect(summary(app, "it-merge")).to_be(question)
+		app:frames(1)
+	end
+	app:frames(TRAVEL + 6)
+	expect(places_col(app, "running", "it-merge")).to_be(true)
+	expect(summary(app, "it-merge") ~= question).to_be(true)
+	-- The person's pause: no Resume, no new chip, until it lands.
+	local p = open("orch_board_places_fixture.luau")
+	p:set_state("board_drawers", { planned = true })
+	p:frames(20)
+	local was = summary(p, "it-tool")
+	p:command("person_pause")
+	p:frames(1)
+	expect(p:text("#orch-card-it-tool >> .orch-card-status")).to_contain("Paused")
+	for _ = 1, HOLD - 2 do
+		expect(p:has("#orch-card-it-tool >> .orch-card-resume")).to_be(false)
+		expect(summary(p, "it-tool")).to_be(was)
+		p:frames(1)
+	end
+	p:frames(TRAVEL + 6)
+	expect(p:has("#orch-drawer-planned >> #orch-card-it-tool >> .orch-card-resume")).to_be(true)
+	expect(p:error()).to_be_nil()
 end)
 
 -- The worst frame (ms) of `n` frames, each timed.
@@ -481,6 +528,29 @@ test("board motion: frames while cards move, and none asked for once they land",
 		table.sort(means)
 		print(`zeron-zgx: BOARDMOTION {name} worst-frame={string.format("%.2f", maxes[#maxes])}ms median-run-worst={string.format("%.2f", maxes[2])}ms mean-frame={string.format("%.2f", means[2])}ms`)
 	end
+end)
+
+test("board motion: the detail opening and closing, frame by frame", function()
+	local opens, closes = {}, {}
+	for _ = 1, 3 do
+		local app = open()
+		local t0 = os.clock()
+		app:click("#orch-card-it-38")
+		local click = (os.clock() - t0) * 1000
+		local most = worst(app, 14)
+		table.insert(opens, math.max(most, click))
+		local t1 = os.clock()
+		app:set_state("board_selected", nil)
+		local close = (os.clock() - t1) * 1000
+		local most2 = worst(app, 14)
+		table.insert(closes, math.max(most2, close))
+		expect(app:has("#orch-board-detail")).to_be(false)
+		expect(app:error()).to_be_nil()
+	end
+	table.sort(opens)
+	table.sort(closes)
+	print(`zeron-zgx: BOARDMOTION detail-open worst-frame={string.format("%.2f", opens[#opens])}ms median-run-worst={string.format("%.2f", opens[2])}ms`)
+	print(`zeron-zgx: BOARDMOTION detail-close worst-frame={string.format("%.2f", closes[#closes])}ms median-run-worst={string.format("%.2f", closes[2])}ms`)
 end)
 
 test("board motion: the switch to the list and back, timed with the morph", function()

@@ -418,6 +418,7 @@ function M.make(props: Props): Ctx
 			if not same_ids(now_ids, held_ids[place]) then
 				held_ids[place] = now_ids
 				ids_state[place]:set(now_ids)
+				motion.touch(place)
 			end
 		end
 	end

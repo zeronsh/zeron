@@ -166,6 +166,10 @@ local OrchBoard = ui.component(function(props: Props): Node
 			w_full = true,
 			min_w = 0,
 			gap = "$space.1",
+			-- (A card travelling in goes over its column's drawer too.)
+			z = function(): number
+				return if ctx.motion.raised(model.COLUMN[place] or place) then 1 else 0
+			end,
 			ui.each(ids, function(id: string): Node
 				return Card.Card { ctx = ctx, card = id, drawer = drawer, menu = menu, extra = resume_row }
 			end, {
@@ -210,6 +214,12 @@ local OrchBoard = ui.component(function(props: Props): Node
 		}
 	end
 
+	-- Each drawer's node, for its column to ease it with its lane.
+	local drawer_refs: { [string]: any } = {}
+	for _, place in { "snoozed", "planned", "earlier" } do
+		drawer_refs[place] = ui.ref()
+	end
+
 	-- The drawer at a column's foot: folded, a line saying how many and
 	-- what's first; open, its cards.
 	local function drawer(place: string): Node
@@ -241,19 +251,15 @@ local OrchBoard = ui.component(function(props: Props): Node
 			local e = first()
 			return if e and e.until_at then Card.time(e.until_at, ctx.clock(0)) else ""
 		end)
-		-- (It slides with the cards above it as their gap closes or a slot
-		-- opens, rather than jumping ahead of them: a node of its own in
-		-- the column, hidden while empty, so its slide is measured against
-		-- the column.)
+		-- (A node of its own in the column, hidden while empty: as cards
+		-- move above it, the column eases it with its lane (`column`).)
 		return ui.div {
+			ref = drawer_refs[place],
 			hidden = function(): boolean
 				return count() == 0
 			end,
 			w_full = true,
 			min_w = 0,
-			layout = if reduce.reduced_now() then nil else "position",
-			layout_duration = Motion.TRAVEL,
-			layout_ease = Motion.EASE,
 			ui.show(function(): boolean
 				return count() > 0
 			end, ui.column {
@@ -384,10 +390,14 @@ local OrchBoard = ui.component(function(props: Props): Node
 		local radius = (ui.theme.get("radius.xl") :: number?) or 12
 		local body, foot = ui.ref(), ui.ref()
 		local last_h: number? = nil
+		-- Only a card move (or a drawer opening and closing, whose space
+		-- eases by itself) moves the lane on a curve: at mount, on a tab
+		-- or filter, a new width (the window, the detail), everything in
+		-- the column takes its place at once, together.
 		local function eased(size: { w: number, h: number })
 			local was = last_h
 			last_h = size.h
-			if was == nil or was <= 0 or size.h <= 0 or reduce.reduced_now() then
+			if was == nil or was <= 0 or size.h <= 0 or reduce.reduced_now() or not ctx.motion.recent(place) then
 				return
 			end
 			-- (How much taller it showed: what the lane eases away.)
@@ -405,6 +415,13 @@ local OrchBoard = ui.component(function(props: Props): Node
 			anime.utils.set(f, { y = from_y })
 			anime.animate(b, { clipBottom = { to = LANE_EXTRA }, duration = Motion.TRAVEL, ease = Motion.EASE })
 			anime.animate(f, { y = { to = 0 }, duration = Motion.TRAVEL, ease = Motion.EASE })
+			-- (Its drawer, the column's last, moves as its foot does.)
+			local dr = drawer_refs[model.DRAWER[place]]
+			local de = dr and dr:get()
+			if de then
+				anime.utils.set(de, { y = d + num_of(anime.utils.get(de, "y"), 0) })
+				anime.animate(de, { y = { to = 0 }, duration = Motion.TRAVEL, ease = Motion.EASE })
+			end
 		end
 		return ui.column {
 			id = `orch-col-{place}`,
@@ -492,8 +509,10 @@ local OrchBoard = ui.component(function(props: Props): Node
 			},
 			cards(place, false),
 			-- (Once the last card has left, not under it: then in.)
-			ui.presence(function(): string?
-				return if count() == 0 and not ctx.motion.leaving(place) then "empty" else nil
+			-- (Its room taken as the last card leaves, so the drawer settles
+			-- once; its words come in once that card has gone.)
+			ui.show(function(): boolean
+				return count() == 0
 			end, function(): Node
 				return ui.row {
 					class = "orch-column-empty",
@@ -503,11 +522,18 @@ local OrchBoard = ui.component(function(props: Props): Node
 					justify = "center",
 					ui.text {
 						locale.t(`orch.board.none.{place}`),
+						class = "orch-column-empty-words",
+						opacity = reduce.tween(
+							ui.computed(function(): number
+								return if ctx.motion.leaving(place) then 0 else 1
+							end),
+							{ duration = Motion.FADE, ease = "linear" }
+						),
 						text_size = "$font.size.sm",
 						color = "$text.tertiary",
 					},
 				}
-			end, { w_full = true, enter = { opacity = { 0, 1 }, duration = Motion.FADE, ease = "linear" } }),
+			end),
 			-- Over its cards, under its drawer: the copies of cards going into
 			-- its folded drawer, each from where its card stood in under the
 			-- drawer's head line.
@@ -812,37 +838,48 @@ local OrchBoard = ui.component(function(props: Props): Node
 				end, one, { w_full = true }),
 			}
 		end
+		-- Its content fades in (180 ms) and out (130 ms), laid out once at
+		-- its full width; beside the board, its box eases its width over
+		-- 180 ms both ways with the content pinned to its right edge and
+		-- cut by it, so the columns widen and narrow with it.
 		local shown = ui.presence(function(): string?
 			return if ctx.selected() ~= nil then "open" else nil
 		end, opened, {
-			enter = reduce.transition({
-				opacity = { 0, 1 },
-				x = { Motion.DETAIL_SLIDE, 0 },
-				duration = Motion.DETAIL_IN,
-				ease = Motion.EASE,
-			}),
+			enter = { opacity = { 0, 1 }, duration = if reduced then Motion.FADE else Motion.DETAIL_IN, ease = "linear" },
 			-- (Compact, the board shows again at once in its place: the
 			-- detail just goes.)
-			exit = if compact
-				then nil
-				else reduce.transition({
-					opacity = 0,
-					x = Motion.DETAIL_SLIDE,
-					duration = Motion.DETAIL_OUT,
-					ease = Motion.EASE,
-				}),
+			exit = if compact then nil else { opacity = 0, duration = if reduced then Motion.FADE else Motion.DETAIL_OUT, ease = "linear" },
 		})
-		if compact or reduced then
+		if compact then
 			return shown
 		end
-		-- (The space it takes eases, so the columns widen and narrow.)
-		return ui.div {
+		local full = DETAIL_W + ((ui.theme.get("space.3") :: number?) or 12)
+		local box = ui.ref()
+		local was_open = ctx.selected() ~= nil
+		ui.effect(function()
+			local open = ctx.selected() ~= nil
+			if open == was_open then
+				return
+			end
+			was_open = open
+			local el = box:get()
+			if el then
+				anime.animate(el, {
+					w = if open then full else 0,
+					duration = if reduce.reduced_now() then 0 else Motion.DETAIL_IN,
+					ease = Motion.EASE,
+				})
+			end
+		end)
+		return ui.row {
+			ref = box,
 			class = "orch-board-detail-space",
 			shrink = 0,
-			layout = "width",
-			layout_duration = Motion.DETAIL_IN,
-			layout_ease = Motion.EASE,
-			layout_clip = true,
+			self = "stretch",
+			w = if was_open then full else 0,
+			justify = "end",
+			items = "start",
+			overflow = "hidden",
 			shown,
 		}
 	end
