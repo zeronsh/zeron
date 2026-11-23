@@ -21,4 +21,7 @@
 --
 -- docs/plugins.md, "Zeron's own plugins".
 
-require("./overrides")
+-- (`@self`: this folder, as zgx runs it and as `zgx check` reads it. zgx
+-- names a plugin's entry by the plugin's id, so `./` starts here too when
+-- it runs; luau-lsp takes an init.luau's `./` from the folder above.)
+require("@self/overrides")

@@ -5,3 +5,6 @@
 -- load these alone into the app they run (scripts/ci/test-zgx.sh).
 
 ui.override { module = "@app/builtin/orchestrators", with = "./index" }
+
+-- (A module returns one value: nothing else here.)
+return nil
