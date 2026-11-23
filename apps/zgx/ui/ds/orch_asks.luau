@@ -13,6 +13,11 @@
 -- turned down stays, saying why: ds/orch_choices); what was answered
 -- lately is folded at the foot, in Recent answers.
 --
+-- Two or more chats awaiting input with no ask to show are one line, "n
+-- chats waiting for input", which opens to their rows. Past `limit` rows,
+-- "n more" opens the rest in a list of its own that scrolls past about
+-- SCROLL_ROWS rows: the widget never grows without end.
+--
 --   Asks {
 --     needs = function() return data.needs(now, sessions_now) end,
 --     recent = function() return decide.recent(now.asks, 5) end,
@@ -36,6 +41,7 @@ local hold = require("@self/orch_hold")
 local Ref = require("@self/orch_ref")
 local decide = require("@self/orch_decide")
 local Choices = require("@self/orch_choices")
+local FoldScroll = require("@self/fold_scroll")
 local Icon = require("@self/icon")
 
 export type Props = {
@@ -51,6 +57,10 @@ export type Props = {
 
 -- How long an answered row takes to leave.
 local LEAVE_MS = 220
+-- The rows "n more" shows before its list scrolls.
+local SCROLL_ROWS = 10
+-- A chat awaiting input's row, about (its head and its padding).
+local INPUT_ROW_H = 52
 
 -- `**bold**` and `` `code` `` in a question, as its runs; the rest plain.
 local function runs_of(text: string): { any }
@@ -196,8 +206,35 @@ return ui.component(function(props: Props): Node
 		last_order = order
 		return out
 	end)
-	local rows = ui.computed(function(): { any }
+	-- Chats awaiting input with nothing to show but that: one line for
+	-- them all (two or more), where the first of them stood.
+	local inputs_open = ui.use_state(false)
+	local function bare_input(n: any): boolean
+		return n.kind == "input" and n.ask == nil
+	end
+	local grouped = ui.computed(function(): { any }
 		local list = all:get()
+		local inputs = {}
+		for _, n in list do
+			if bare_input(n) then
+				table.insert(inputs, n)
+			end
+		end
+		if #inputs < 2 then
+			return list
+		end
+		local out = {}
+		for _, n in list do
+			if not bare_input(n) then
+				table.insert(out, n)
+			elseif n == inputs[1] then
+				table.insert(out, { id = "inputs", kind = "inputs", inputs = inputs })
+			end
+		end
+		return out
+	end)
+	local rows = ui.computed(function(): { any }
+		local list = grouped:get()
 		if expanded:get() or #list <= limit then
 			return list
 		end
@@ -450,6 +487,93 @@ return ui.component(function(props: Props): Node
 		}
 	end
 
+	-- The chats awaiting input, one line: how many, opening to their rows.
+	local function inputs_row(item: State<any>): Node
+		local list = ui.computed(function(): { any }
+			return item:get().inputs or {}
+		end)
+		return ui.column {
+			class = "orch-need-inputs",
+			w_full = true,
+			py = "$space.2",
+			gap = "$space.1",
+			ui.button {
+				class = "orch-need-inputs-toggle",
+				label = function(): string
+					return locale.s("ds.orch.ask.inputs", { n = #list:get() })
+				end,
+				expanded = function(): boolean
+					return inputs_open:get()
+				end,
+				w_full = true,
+				h = 28,
+				px = "$space.2",
+				mx = ui.raw(-8, "its words over the rows' words, its wash out past them"),
+				gap = "$space.2",
+				items = "center",
+				rounded = "$radius.md",
+				bg = "#00000000",
+				hover = { bg = "$hover" },
+				active = { bg = "$pressed" },
+				focus = control.ring,
+				on_click = function()
+					inputs_open:set(not inputs_open:peek())
+				end,
+				status.StatusIcon { kind = "input", size = 14 },
+				ui.text {
+					function(): string
+						return locale.s("ds.orch.ask.inputs", { n = #list:get() })
+					end,
+					grow = 1,
+					min_w = 0,
+					truncate = true,
+					text_size = "$font.size.sm",
+					color = "$text.secondary",
+				},
+				ui.div {
+					color = "$text.tertiary",
+					Icon {
+						name = function(): any
+							return if inputs_open:get() then "alt-arrow-down" else "alt-arrow-right"
+						end,
+						size = 12,
+					},
+				},
+			},
+			-- (Opened: about SCROLL_ROWS of them, then they scroll.)
+			ui.show(function(): boolean
+				return inputs_open:get()
+			end, FoldScroll {
+				class = "orch-need-inputs-list",
+				open = function(): boolean
+					return true
+				end,
+				max_h = SCROLL_ROWS * INPUT_ROW_H,
+				list = function(): Node
+					return ui.each(list, function(n: any, i: number, one: State<any>): Node
+						return row(n, i, one)
+					end, { key = function(n: any): string
+						return n.id
+					end, w_full = true })
+				end,
+			}),
+		}
+	end
+
+	-- Each row's height as laid out, and the list's: what "n more" scrolls in.
+	local heights = ui.use_state({} :: { [string]: number })
+	local function cap_h(): number
+		local h = 0
+		local hs = heights:get()
+		for i, n in rows:get() do
+			if i > SCROLL_ROWS then
+				break
+			end
+			h += hs[n.id] or 0
+		end
+		return math.max(h, 1)
+	end
+
 	local function by_id(n: any): string
 		return n.id
 	end
@@ -583,33 +707,61 @@ return ui.component(function(props: Props): Node
 			status.StatusIcon { kind = "done", size = 14 },
 			ui.text { locale.t("ds.orch.ask.none"), text_size = "$font.size.sm", color = "$text.tertiary" },
 		}),
-		ui.each(rows, function(n: any, i: number, item: State<any>): Node
-			return ui.column {
-				w_full = true,
-				layout = "position",
-				layout_duration = 200,
-				ui.show(function(): boolean
-					local top = rows:get()[1]
-					return top ~= nil and top.id ~= item:get().id
-				end, rule()),
-				row(n, i, item),
-			}
-		end, { key = by_id, w_full = true }),
+		-- (Its own scroll once "n more" has opened it: about SCROLL_ROWS
+		-- rows tall, each row's height as laid out.)
+		FoldScroll {
+			class = "orch-asks-list",
+			open = function(): boolean
+				return expanded:get()
+			end,
+			max_h = cap_h,
+			list = function(): Node
+				return ui.each(rows, function(n: any, i: number, item: State<any>): Node
+					return ui.column {
+						w_full = true,
+						layout = "position",
+						layout_duration = 200,
+						on_resize = function(size: { w: number, h: number })
+							local key = item:peek().id
+							if math.abs((heights:peek()[key] or 0) - size.h) >= 1 then
+								heights:set_key({ key }, size.h)
+							end
+						end,
+						ui.show(function(): boolean
+							local top = rows:get()[1]
+							return top ~= nil and top.id ~= item:get().id
+						end, rule()),
+						if n.kind == "inputs" then inputs_row(item) else row(n, i, item),
+					}
+				end, { key = by_id, w_full = true })
+			end,
+		},
 		ui.show(function(): boolean
-			return #all:get() > limit
+			return #grouped:get() > limit
 		end, ui.button {
+			class = "orch-asks-more",
 			label = function(): string
-				return if expanded:get() then locale.s("ds.orch.less") else locale.s("ds.orch.more", { n = #all:get() - limit })
+				return if expanded:get() then locale.s("ds.orch.less") else locale.s("ds.orch.more", { n = #grouped:get() - limit })
 			end,
 			h = 28,
+			gap = "$space.2",
 			items = "center",
 			bg = "#00000000",
 			on_click = function()
 				expanded:set(not expanded:peek())
 			end,
+			ui.div {
+				color = "$text.tertiary",
+				Icon {
+					name = function(): any
+						return if expanded:get() then "alt-arrow-up" else "alt-arrow-down"
+					end,
+					size = 12,
+				},
+			},
 			ui.text {
 				function(): string
-					return if expanded:get() then locale.s("ds.orch.less") else locale.s("ds.orch.more", { n = #all:get() - limit })
+					return if expanded:get() then locale.s("ds.orch.less") else locale.s("ds.orch.more", { n = #grouped:get() - limit })
 				end,
 				text_size = "$font.size.sm",
 				color = "$text.secondary",

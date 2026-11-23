@@ -1248,7 +1248,8 @@
         "answer": "Answer",
         "open": "Open",
         "none": "Nothing needs you",
-        "reply": "回复"
+        "reply": "回复",
+        "inputs": "{n} 个对话在等你输入"
       },
       "more": "{n} more",
       "less": "Fewer",

@@ -14,7 +14,13 @@
 --     here = function() return this device's id end,
 --     hue_of = function(chat_id) return hue? end,
 --     on_open_chat = function(id) end,
---   }
+--     cap = 6,                                  -- threads a machine lists
+--     on_more = function(device_id) end,        -- its "n more" (the Map's
+--   }                                           -- Machines view)
+--
+-- Only the threads at work are listed (waiting on the person is Needs
+-- you's), at most `cap` a machine; the rest are counted on a "n more" that
+-- opens where every one of them shows (`on_more`). Without `cap`, all.
 
 local Visibility = require("@self/orch_map_visibility")
 local Icon = require("@self/icon")
@@ -37,6 +43,8 @@ export type Props = {
 	-- A thread's name (ds/orch_name's, over the crew and its items); its
 	-- chat's title when left out.
 	name_of: ((chat_id: string) -> string)?,
+	cap: number?,
+	on_more: ((device_id: string) -> ())?,
 }
 
 -- The seconds the line shows.
@@ -44,8 +52,10 @@ local SPAN = 360
 
 -- What a thread starting marks on its machine's line, and in what hue.
 local MARKED: { [string]: string } = { testing = "working", building = "working", installing = "working", merging = "success", pushing = "success" }
--- The states a thread is listed under its machine in.
-local LISTED: { [string]: boolean } = { working = true, connecting = true, waiting = true, input = true, approval = true }
+-- The states a thread is listed under its machine in: at work.
+local LISTED: { [string]: boolean } = { working = true, connecting = true }
+-- The states whose activity marks its machine's line (waiting too).
+local MARKING: { [string]: boolean } = { working = true, connecting = true, waiting = true, input = true, approval = true }
 
 -- Each machine's running chats, worked out once a push for every machine
 -- (each card filtered all the chats itself before): by device, each list
@@ -221,12 +231,24 @@ local function device_row(props: Props, _d: any, _i: number, row: State<any>): N
 		local l = load()
 		return row:get().online ~= false and (l == nil or l.online ~= false)
 	end
-	local running = ui.computed(function(): { any }
+	local all_running = ui.computed(function(): { any }
 		-- (Running chats only, and those the Map's "Show chats" shows: the
 		-- one rule every view of the fleet keeps, ds/orch_map_visibility.)
 		local all = running_by_device(props.chats() or {}, Visibility.mode:get(), Visibility.now())
 		return all[id()] or {}
 	end)
+	-- At most `cap` of them; the rest counted on "n more".
+	local running = ui.computed(function(): { any }
+		local list = all_running:get()
+		local cap = props.cap
+		if not cap or #list <= cap then
+			return list
+		end
+		return table.move(list, 1, cap, 1, {})
+	end)
+	local function more(): number
+		return #all_running:get() - #running:get()
+	end
 	-- Its marks: each loud activity's start, each failure, as they're seen.
 	local events = ui.computed(function(): { Spark.Event }
 		local dev = id()
@@ -235,7 +257,7 @@ local function device_row(props: Props, _d: any, _i: number, row: State<any>): N
 		for _, c in props.chats() or {} do
 			if c.device == dev then
 				local a = c.activity
-				if type(a) == "table" and MARKED[a.kind] and type(a.since) == "number" and LISTED[c.status or ""] then
+				if type(a) == "table" and MARKED[a.kind] and type(a.since) == "number" and MARKING[c.status or ""] then
 					mine[`{c.id}:{a.kind}:{a.since}`] = { at = a.since, tone = MARKED[a.kind] }
 				end
 				if c.status == "failed" and type(c.updated) == "number" then
@@ -364,6 +386,35 @@ local function device_row(props: Props, _d: any, _i: number, row: State<any>): N
 			end, { key = function(c: any): string
 				return c.id
 			end, w_full = true }),
+			ui.show(function(): boolean
+				return more() > 0
+			end, ui.button {
+				class = "orch-machine-more",
+				label = function(): string
+					return locale.s("ds.orch.more", { n = more() })
+				end,
+				h = 28,
+				px = "$space.2",
+				gap = "$space.2",
+				items = "center",
+				self = "start",
+				rounded = "$radius.md",
+				bg = "#00000000",
+				hover = { bg = "$hover" },
+				on_click = function()
+					if props.on_more then
+						props.on_more(id())
+					end
+				end,
+				ui.div { color = "$text.tertiary", Icon { name = "map-arrow-right", size = 12 } },
+				ui.text {
+					function(): string
+						return locale.s("ds.orch.more", { n = more() })
+					end,
+					text_size = "$font.size.sm",
+					color = "$text.secondary",
+				},
+			}),
 		}),
 	}
 end

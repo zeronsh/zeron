@@ -19,6 +19,9 @@
 --   progress.figures()           the widget's live figures
 --   progress.counts()            how many work now, how many stalled
 
+local FoldScroll = require("@ds/fold_scroll")
+-- How tall its list stands once "n more" opened it, before it scrolls.
+local OPEN_MAX_H = 800
 local ds = require("@ds")
 local Unit = require("@ds/orch_progress")
 local Block = require("@ds/orch_block")
@@ -565,7 +568,15 @@ function M.Widget(live: (() -> boolean)?): Node
 			text_size = "$font.size.sm",
 			color = "$text.tertiary",
 		}),
-		ui.each(shown, function(e: { id: string }): Node
+		-- (Opened past the first few: about ten rows tall, then it scrolls.)
+		FoldScroll {
+			class = "control-progress-list",
+			open = function(): boolean
+				return all:get()
+			end,
+			max_h = OPEN_MAX_H,
+			list = function(): Node
+				return ui.each(shown, function(e: { id: string }): Node
 			-- Dragged: a reference to its chat (ds/orch_ref), for Capture.
 			local drag = Ref.source(function(): any
 				local r = row_of(e.id) or {}
@@ -593,7 +604,9 @@ function M.Widget(live: (() -> boolean)?): Node
 			end,
 			w_full = true,
 			gap = "$space.3",
-		}),
+		})
+			end,
+		},
 		-- The rest, folded: how many, or fold them again.
 		ui.show(function(): boolean
 			return all:get() or more() > 0
