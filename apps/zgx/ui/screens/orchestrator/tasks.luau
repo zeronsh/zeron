@@ -18,9 +18,6 @@ local NeedsYou = require("@app/screens/control/needs")
 
 local M = {}
 
--- Needs you's rows before "n more".
-M.NEEDS_CAP = 3
-
 export type Fold = { open: (key: string, default: boolean) -> boolean, set: (key: string, open: boolean) -> () }
 export type Props = {
 	of: () -> string?,
