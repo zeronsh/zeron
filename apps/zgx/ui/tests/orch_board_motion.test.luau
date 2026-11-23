@@ -14,6 +14,8 @@
 -- machine's.
 
 local HOLD, TRAVEL, FADE = 48, 21, 8
+-- (Three leaving together: the last leaves 120 ms after the first.)
+local STAGGER2 = 8
 
 local function open(fixture: string?, w: number?, h: number?): any
 	local app = mount(fixture or "orch_board_perf_fixture.luau")
@@ -95,7 +97,7 @@ test("board motion: at most three in flight; a fourth crossfades", function()
 	expect(in_col(app, "running", "it-38")).to_be(true)
 	app:frames(FADE + 1)
 	expect(phase(app, "it-41")).to_be_nil()
-	app:frames(HOLD + TRAVEL)
+	app:frames(HOLD + TRAVEL + STAGGER2)
 	expect(in_col(app, "done", "it-38")).to_be(true)
 	expect(settled(app)).to_be(true)
 	-- Ten at once: three travel, seven crossfade.
@@ -110,7 +112,7 @@ test("board motion: at most three in flight; a fourth crossfades", function()
 	end
 	expect(motion(app2).flying).to_be(3)
 	expect(fades).to_be(7)
-	app2:frames(HOLD + TRAVEL + 2)
+	app2:frames(HOLD + TRAVEL + STAGGER2 + 2)
 	expect(settled(app2)).to_be(true)
 	expect(app2:error()).to_be_nil()
 end)
@@ -227,9 +229,21 @@ test("board motion: an engine move never toasts; the person's toasts once, at it
 	app:click("#orch-card-it-merge")
 	app:frames(20)
 	app:click('#orch-detail-needs >> role:button "Unlocked + push the fork"')
-	expect(app:wait('role:button "Undo"', { gone = true, timeout_ms = 8000 })).to_be(true)
-	app:frames(2)
-	-- Said with the move's first beat: the card still holds in Needs you.
+	app:set_state("board_selected", nil)
+	-- Frame by frame through its Undo (5 s): the toast comes in the frame
+	-- its status changes (the move's first beat), not before.
+	local status = app:text("#orch-card-it-merge >> .orch-card-status")
+	local beat = nil
+	for f = 1, 320 do
+		app:frames(1)
+		local now = app:text("#orch-card-it-merge >> .orch-card-status")
+		if now ~= status then
+			beat = f
+			break
+		end
+		expect(toasts(app) - before).to_be(0)
+	end
+	expect(beat ~= nil).to_be(true)
 	expect(toasts(app) - before).to_be(1)
 	expect(places_col(app, "needs_you", "it-merge")).to_be(true)
 	app:frames(HOLD + TRAVEL + 4)
@@ -321,37 +335,111 @@ test("board motion: the detail opens, and closes in 130 ms", function()
 	expect(app:error()).to_be_nil()
 end)
 
-test("board motion: the board to its list morphs the rows in view, at most 24", function()
-	-- (Tall: more rows in view than the cap.)
+test("board motion: the board to its list slides the cards in view, at most 24", function()
+	-- (Tall: more cards in view than the cap; the window says so, as a
+	-- window's host does.)
 	local app = open(nil, 1500, 2600)
+	pcall(function()
+		app:set_state("zgx.window.size", { width = 1500, height = 2600 })
+	end)
+	app:frames(2)
 	app:set_state("board_view", "list")
-	app:frames(1)
-	local morphed = motion(app).morphed or {}
-	expect(#morphed).to_be(24)
-	for _, id in morphed do
+	-- (Over the switch's while: rows built as they come into view take part.)
+	app:frames(17)
+	local switched = motion(app).switched or {}
+	expect(#switched).to_be(24)
+	for _, id in switched do
 		-- Each is a row built (rows are built near the view alone).
 		expect(app:has(`#orch-row-{id}`)).to_be(true)
 	end
-	-- (Done's first row is far below: not built, not morphed.)
+	-- (Done's first row is far below: not built, not slid.)
 	expect(app:has("#orch-row-it-141")).to_be(false)
-	expect(table.find(morphed, "it-141")).to_be_nil()
-	app:frames(30)
+	expect(table.find(switched, "it-141")).to_be_nil()
+	-- The board faded where it stood, gone by 100 ms.
+	expect(app:has("#orch-columns")).to_be(false)
+	app:frames(20)
 	-- And back: the cards whose rows showed, at most 24.
 	app:set_state("board_view", "board")
 	app:frames(1)
-	local back = motion(app).morphed or {}
+	local back = motion(app).switched or {}
 	expect(#back > 0).to_be(true)
 	expect(#back <= 24).to_be(true)
 	app:frames(30)
 	expect(settled(app)).to_be(true)
-	-- A window's worth fewer than the cap: each row in view, no more.
+	-- A window's worth fewer than the cap: each one in view, no more.
 	local small = open()
 	small:set_state("board_view", "list")
 	small:frames(1)
-	local few = motion(small).morphed or {}
+	local few = motion(small).switched or {}
 	expect(#few > 0).to_be(true)
 	expect(#few <= 24).to_be(true)
 	expect(small:error()).to_be_nil()
+end)
+
+-- A card's summary as it shows.
+local function summary(app: any, id: string): string
+	return app:text(`#orch-card-{id} >> .orch-card-summary`)
+end
+
+test("board motion: during the hold only its status line changes; the summary comes with the travel", function()
+	local app = open()
+	-- (it-38: its thread's note while it runs, its report once done.)
+	local was = summary(app, "it-38")
+	expect(was).to_contain("Step 2 of the plan")
+	app:command("motion_two")
+	app:frames(1)
+	expect(app:text("#orch-card-it-38 >> .orch-card-status")).to_contain("Done")
+	expect(summary(app, "it-38")).to_be(was)
+	app:frames(HOLD - 2)
+	expect(phase(app, "it-38")).to_be("hold")
+	expect(summary(app, "it-38")).to_be(was)
+	app:frames(TRAVEL + 6)
+	expect(in_col(app, "done", "it-38")).to_be(true)
+	expect(summary(app, "it-38") ~= was).to_be(true)
+	-- A status change in place: its summary crossfades (both show a moment).
+	local places = open("orch_board_places_fixture.luau")
+	expect(places:count("#orch-card-it-merge >> .orch-card-summary")).to_be(1)
+	expect(app:error()).to_be_nil()
+end)
+
+test("board motion: cards leaving together leave 60 ms apart, the lowest landing first", function()
+	local app = open()
+	app:command("motion_three")
+	app:frames(1)
+	local ms = motion(app).hold_ms or {}
+	-- (In Done they stand it-38, it-39, it-40 from the top: it-40 lands lowest.)
+	expect(ms["it-40"]).to_be(800)
+	expect(ms["it-39"]).to_be(860)
+	expect(ms["it-38"]).to_be(920)
+	-- (800 ms: frame 48; 860: 52; 920: 56.)
+	app:frames(48)
+	expect(in_col(app, "done", "it-40")).to_be(true)
+	expect(in_col(app, "running", "it-39")).to_be(true)
+	expect(in_col(app, "running", "it-38")).to_be(true)
+	app:frames(4)
+	expect(in_col(app, "done", "it-39")).to_be(true)
+	expect(in_col(app, "running", "it-38")).to_be(true)
+	app:frames(4)
+	expect(in_col(app, "done", "it-38")).to_be(true)
+	app:frames(TRAVEL + 1)
+	expect(settled(app)).to_be(true)
+end)
+
+test("board motion: a column's empty line waits for its last card to leave, then fades in", function()
+	local app = open("orch_board_places_fixture.luau")
+	expect(app:has("#orch-col-running >> .orch-column-empty")).to_be(false)
+	app:command("engine_five")
+	-- (Three travel, the last leaving at 920 ms and landing at 1270 ms (frame
+	-- 77); two crossfade.)
+	app:frames(HOLD + STAGGER2 + 2)
+	expect(app:count("#orch-col-running >> .orch-card")).to_be(0)
+	expect(app:has("#orch-col-running >> .orch-column-empty")).to_be(false)
+	app:frames(TRAVEL - 6)
+	expect(app:has("#orch-col-running >> .orch-column-empty")).to_be(false)
+	app:frames(8)
+	expect(app:has("#orch-col-running >> .orch-column-empty")).to_be(true)
+	expect(settled(app)).to_be(true)
+	expect(app:error()).to_be_nil()
 end)
 
 -- The worst frame (ms) of `n` frames, each timed.
@@ -377,7 +465,7 @@ test("board motion: frames while cards move, and none asked for once they land",
 			local t0 = os.clock()
 			app:command(command)
 			local push = (os.clock() - t0) * 1000
-			local most, mean = worst(app, HOLD + TRAVEL + 6)
+			local most, mean = worst(app, HOLD + TRAVEL + STAGGER2 + 6)
 			table.insert(maxes, math.max(most, push))
 			table.insert(means, mean)
 			-- Settled: nothing in flight, no timer, and no frame of the board's

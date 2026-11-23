@@ -400,6 +400,12 @@ end }
 ui.command { id = "engine_five", title = "The engine closes every running card", run = function()
 	engine_close({ "it-chat", "it-release", "it-tool", "it-telemetry", "it-ios" })
 end }
+-- The person pauses a running card, as its menu's Pause does once taken:
+-- it goes to Planned (a folded drawer).
+ui.command { id = "person_pause", title = "The person pauses a running card", run = function()
+	patch(items, "it-tool", { state = "blocked", paused_at = T })
+	move("it-tool", "planned", "paused", "You paused it", { old_state = "blocked" })
+end }
 ui.command { id = "engine_start", title = "The engine starts a planned card", run = function()
 	patch(items, "it-keyed", { state = "active", threads = { "th-keyed" } })
 	move("it-keyed", "running", "starting", "Thread started", { by = "engine", cause = "started", old_state = "active" })

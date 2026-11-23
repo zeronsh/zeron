@@ -1,21 +1,24 @@
 --!strict
--- How the board moves (step 3 of the board's design): where each card is
--- *presented*, lagging the rows by a hold, and what plays as it goes. One
--- per board (ds/orch_board_ctx makes it with the board's slot); the
--- columns, the drawers and the list view all read the presented places
--- through `ctx.ids`, so they move together.
+-- How the board moves (step 3 of the board's design, and its review's
+-- decisions 38-44): where each card is *presented*, lagging the rows by a
+-- hold, and what plays as it goes. One per board (ds/orch_board_ctx makes
+-- it with the board's slot); the columns, the drawers and the list view all
+-- read the presented places through `ctx.ids`, so they move together.
 --
 -- A move has three beats:
---   1. At once: the card changes where it stands (its glyph and words
---      crossfade, its clock restarts) and the tabs' counts change (they
---      read the rows, `ctx.counts`).
+--   1. At once: the card's status line changes where it stands (its glyph
+--      and words, its clock, its dot) and the tabs' counts change (they read
+--      the rows, `ctx.counts`). Its summary and its size stay as they were
+--      (`phase(id)` is "hold": ds/orch_board_card keeps the summary it had).
 --   2. Hold, HOLD ms: it stays in its old place, dimming to DIM over DIM_MS.
---   3. Travel, TRAVEL ms (outQuint): it is presented where it stands; the
+--   3. Travel, TRAVEL ms (outQuint): it is presented where it stands. The
 --      old list closes its gap and the new one opens a slot (their `each`
---      slides its rows), and the card goes there in a straight line (its
---      `layout_id`: the node mounting in the new list starts at the box of
---      the one leaving the old), its opacity coming back. The column heads'
---      counts change as it lands (they count the presented lists).
+--      slides its rows); the card's node in the new list, built with its new
+--      summary and size, starts where the old one showed and is translated
+--      home (never scaled), at full opacity within FADE ms and on a solid
+--      fill until it lands. The column heads count it as it goes.
+-- Cards that leave together leave STAGGER ms apart, the one that lands
+-- lowest first.
 --
 -- What is a move: the same card, its row's `seq` higher than the last one
 -- drawn, `from` other than `place`. Anything else that changes a card's
@@ -29,21 +32,29 @@
 -- then travels to wherever it stands; one moved again in its travel goes on
 -- from where it shows.
 --
+-- The board to its list and back (`begin_switch`): the leaving view fades
+-- out in place (SWITCH_OUT); each card or row of the arriving view whose
+-- counterpart showed (at most SWITCH_CAP) starts at the counterpart's top
+-- left, fades in over SWITCH_IN and slides home over SWITCH, translated
+-- only; the rest fade in where they are.
+--
 -- Transforms and opacity only while cards move: the dim and the comings in
--- are `anime` animations of an element's opacity and translation, and the
--- travel and the gap are layout animations zgx runs on the compositor. The
--- hold's and travel's ends are timers (`ui.after`), which sleep between:
--- once every card has landed nothing asks for a frame.
+-- are `anime` animations of an element's opacity and translation; the gap
+-- and the slot are `each`'s, on the compositor. The beats' ends are timers
+-- (`ui.after`), which sleep between: once every card has landed nothing
+-- asks for a frame.
 --
 -- What the tests read (tests/orch_board_motion.test.luau): the named state
 -- `orch_board_motion` (the last board that changed): `flying` (in their
--- hold or travel), `timers`, `phase` ({ [id] = phase }), `morphed` (the
--- rows the last switch to the list paired with a card).
+-- hold or travel), `timers`, `phase` ({ [id] = phase }), `hold_ms`
+-- ({ [id] = its hold, stagger included }), `switched` (the nodes the last
+-- switch slid from their counterparts).
 
 local motion = require("@self/motion")
 
--- (anime's overloads, for elements, refs and their params alike.)
+-- (anime's overloads, for elements and their params alike.)
 local play: (any, any) -> any = anime.animate :: any
+local set: (any, any) -> () = anime.utils.set :: any
 
 local M = {}
 
@@ -54,11 +65,15 @@ M.TRAVEL = 350
 M.EASE = "outQuint"
 M.FADE = 120
 M.CAP = 3
--- The board to its list and back: each card in view becomes its row.
-M.MORPH = 280
-M.MORPH_CAP = 24
-M.MORPH_OUT = 120
-M.MORPH_IN = 160
+M.STAGGER = 60
+-- A travelling card is opaque within FADE ms of its first frame: its fade
+-- begins the frame after it appears, so it takes a frame less.
+M.TRAVEL_IN = 100
+-- The board to its list and back.
+M.SWITCH = 280
+M.SWITCH_IN = 100
+M.SWITCH_OUT = 100
+M.SWITCH_CAP = 24
 -- A card's detail: in with a slide from the right, out quicker.
 M.DETAIL_IN = 180
 M.DETAIL_OUT = 130
@@ -69,10 +84,11 @@ M.DRAWER = 200
 M.COLUMN_OF = { snoozed = "needs_you", planned = "running", earlier = "done", dropped = "done" } :: { [string]: string }
 -- Every list, in the board's order.
 M.ORDER = { "needs_you", "snoozed", "running", "planned", "done", "earlier" }
--- The places that are a column's drawer: their cards never morph.
+-- The places that are a column's drawer: their cards never slide across a
+-- switch.
 M.IN_DRAWER = { snoozed = true, planned = true, earlier = true, dropped = true } :: { [string]: boolean }
 
-M.debug = ui.state("orch_board_motion", { flying = 0, timers = 0, phase = {}, morphed = {} } :: any)
+M.debug = ui.state("orch_board_motion", { flying = 0, timers = 0, phase = {}, hold_ms = {}, switched = {} } :: any)
 
 -- (Phases: "hold", "travel", "out" (to a folded drawer's head), "fade_out",
 -- "fade_in". The first three count against CAP.)
@@ -84,11 +100,13 @@ type Flight = {
 	from: string,
 	index: number,
 	restarted: boolean,
+	-- Its hold, the stagger included.
+	hold_ms: number,
 	-- Bumped with each phase: a timer of an older one does nothing.
 	token: number,
 }
 
-export type Built = { layout_id: string, duration: number, how: string? }
+export type Built = { how: string? }
 
 export type Motion = {
 	-- The presented list of a card held away from its row's, or nil.
@@ -99,36 +117,66 @@ export type Motion = {
 	-- A push: `lists` the rows' (by place), `shown` the presented lists as
 	-- they stand, `by_id` the rows' entries.
 	update: (lists: { [string]: { string } }, shown: { [string]: { string } }, by_id: { [string]: any }) -> (),
-	-- A card's node (its card, or its row) built: its `layout_id` (the
-	-- card's and its row's the same, so one hands its box to the other),
-	-- how long a move handed to it takes, and how it comes in ("travel",
-	-- "fade", "drawer", "morph" or nil). `drawer`: it stands in a drawer.
+	-- A card's node (its card, or its row) built: how it comes in
+	-- ("travel", "fade", "drawer", "switch" or nil). `drawer`: it stands in
+	-- a drawer.
 	build: (id: string, drawer: boolean) -> Built,
-	-- Its node mounted (built with `start`'s opacities, so its first frame
-	-- shows none of it): `el` what moves and dims, `parts.content` what it
-	-- holds (a morph fades it alone), `parts.ghost` a row's card-coloured
-	-- backing (a morph fades it out as the row takes the card's place).
-	attach: (id: string, el: any, parts: { content: any?, ghost: any? }?) -> (),
+	-- The opacity a node built so starts at (nil: its own).
+	start: (b: Built) -> number?,
+	-- Its node mounted (built with `start`'s opacity, so its first frame
+	-- shows nothing of where it doesn't belong): `el` what moves and dims.
+	attach: (id: string, el: any) -> (),
+	-- Its node's first layout (its `on_resize`): an arrival that starts
+	-- from where something else stood starts now.
+	placed: (id: string, el: any) -> (),
 	detach: (id: string, el: any) -> (),
-	mounted: (id: string) -> boolean,
+	-- A card's phase, "" at rest (tracked: its reader wakes when its own
+	-- card's changes).
+	phase: (id: string) -> string,
 	-- The board says which drawers are folded, and gives their heads.
 	folded: (place: string) -> boolean,
 	set_folded: (f: (place: string) -> boolean) -> (),
 	head: (place: string, el: any?) -> any?,
-	-- The board to its list, or back: for MORPH ms, the first MORPH_CAP
-	-- cards' nodes built whose other node showed pair with it.
-	begin_morph: () -> (),
-	-- The opacities a node built as `b` says starts at: its own, its
-	-- content's, its ghost's.
-	start: (b: Built) -> (number?, number?, number?),
+	-- Whether a card travels into the column `place` now (it paints over
+	-- the others meanwhile, so the card goes over them). Tracked.
+	raised: (place: string) -> boolean,
+	-- Whether a card that left the column `place` is still on its way
+	-- (its empty line waits). Tracked.
+	leaving: (place: string) -> boolean,
+	-- The board to its list, or back: what shows now is what the arriving
+	-- nodes start from.
+	begin_switch: () -> (),
 	-- The timers' host: a node the board (or the list) mounts once.
 	host: () -> Node,
-	-- What is in flight, for the tests.
 	flying: () -> number,
-	-- Whether a card travels into `place` now (its column paints over the
-	-- others meanwhile, so the card goes over them). Tracked.
-	raised: (place: string) -> boolean,
 }
+
+-- A number from what anime or an element answers (a number, or a string
+-- with one in it).
+local function num(v: any): number
+	if type(v) == "number" then
+		return v
+	end
+	return tonumber(string.match(tostring(v or ""), "-?[%d%.]+") or "") or 0
+end
+
+-- Where an element shows: its laid-out box's top left and its translation.
+local function shown_at(el: any): (number?, number?)
+	local ok, x, y = pcall(function(): (number, number)
+		return (el :: any).x, (el :: any).y
+	end)
+	if not ok or type(x) ~= "number" or type(y) ~= "number" then
+		return nil, nil
+	end
+	local okt, tx, ty = pcall(function(): (any, any)
+		return anime.utils.get(el, "x"), anime.utils.get(el, "y")
+	end)
+	if okt then
+		x += num(tx)
+		y += num(ty)
+	end
+	return x, y
+end
 
 function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motion
 	local m = {} :: Motion
@@ -136,13 +184,12 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 	m.flights = {}
 	-- The last `seq` drawn of each card.
 	local seq: { [string]: number } = {}
-	-- Bumped when a card is placed again without travelling (a crossfade, at
-	-- once): its next node starts no layout pair with the last.
-	local pair: { [string]: number } = {}
-	-- Each card's mounted element (its card's, or its row's), and what
-	-- animates it.
+	-- Each card's mounted element (its card's, or its row's).
 	local elements: { [string]: any } = {}
 	local arrivals: { [string]: string } = {}
+	-- Where a card's last node showed as the next took its place (a
+	-- travel's start, a switch's).
+	local from_at: { [string]: { x: number, y: number } } = {}
 	local heads: { [string]: any } = {}
 	local folded_of: (place: string) -> boolean = function(_place: string): boolean
 		return false
@@ -150,14 +197,23 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 	-- The timers: one per card in flight, each the row of an `each` that owns
 	-- its `ui.after` (a timer an effect made would end with its next run).
 	local timers = ui.use_state({} :: { any })
-	-- The places a card travels into now.
+	-- The columns a card travels into, and those a card left still on its way.
 	local landing = ui.use_state({} :: { [string]: boolean })
-	local morph_left = 0
-	local morph_on = false
-	local morph_token = 0
-	-- What showed as the switch began (each card's node), and what paired.
-	local morph_from: { [string]: boolean } = {}
-	local morphed: { string } = {}
+	local left = ui.use_state({} :: { [string]: boolean })
+	-- Each card's phase, a small state its card reads.
+	local phases: { [string]: any } = {}
+	local function phase_state(id: string): any
+		local st = phases[id]
+		if not st then
+			st = ui.state(`orch_board_phase:{slot}:{id}`, "" :: string) :: any
+			phases[id] = st
+		end
+		return st
+	end
+	local switch_left = 0
+	local switch_on = false
+	local switch_token = 0
+	local switched: { string } = {}
 
 	local function flying(): number
 		local n = 0
@@ -172,64 +228,81 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 
 	local function publish_debug()
 		local phase: { [string]: string } = {}
+		local hold_ms: { [string]: number } = {}
 		for id, f in m.flights do
 			phase[id] = f.phase
+			hold_ms[id] = f.hold_ms
 		end
-		M.debug:set({ flying = flying(), timers = #timers:peek(), phase = phase, morphed = table.clone(morphed) })
+		M.debug:set({ flying = flying(), timers = #timers:peek(), phase = phase, hold_ms = hold_ms, switched = table.clone(switched) })
 	end
 
+	-- The marks that follow the flights: each card's phase, the columns
+	-- landed in and left, the timers.
 	local function schedule()
 		local out: { any } = {}
+		local into: { [string]: boolean } = {}
+		local from: { [string]: boolean } = {}
+		local row_list = (m :: any).row_list or {}
 		for id, f in m.flights do
 			local ms = if f.phase == "hold"
-				then M.HOLD
+				then f.hold_ms
 				elseif f.phase == "fade_out" or f.phase == "fade_in" then M.FADE
 				else M.TRAVEL
 			table.insert(out, { key = `{id}:{f.token}`, id = id, token = f.token, ms = ms })
-		end
-		if morph_on then
-			table.insert(out, { key = `morph:{morph_token}`, token = morph_token, ms = M.MORPH })
-		end
-		table.sort(out, function(a: any, b: any): boolean
-			return a.key < b.key
-		end)
-		timers:set(out)
-		local into: { [string]: boolean } = {}
-		local row_list = (m :: any).row_list or {}
-		for id, f in m.flights do
-			if f.phase == "travel" or f.phase == "fade_in" then
+			if f.phase == "travel" or f.phase == "fade_in" or f.phase == "out" then
 				local to = row_list[id]
 				if to then
 					into[M.COLUMN_OF[to] or to] = true
 				end
+				from[M.COLUMN_OF[f.from] or f.from] = true
 			end
 		end
-		local was = landing:peek()
-		local same = true
-		for k in into do
-			if not was[k] then
-				same = false
+		if switch_on then
+			table.insert(out, { key = `switch:{switch_token}`, token = switch_token, ms = M.SWITCH })
+		end
+		table.sort(out, function(a: any, b: any): boolean
+			return a.key < b.key
+		end)
+		local function differ(a: { [string]: boolean }, b: { [string]: boolean }): boolean
+			for k in a do
+				if not b[k] then
+					return true
+				end
 			end
-		end
-		for k in was do
-			if not into[k] then
-				same = false
+			for k in b do
+				if not a[k] then
+					return true
+				end
 			end
+			return false
 		end
-		if not same then
-			landing:set(into)
-		end
+		ui.batch(function()
+			timers:set(out)
+			if differ(into, landing:peek()) then
+				landing:set(into)
+			end
+			if differ(from, left:peek()) then
+				left:set(from)
+			end
+			for id, st in phases do
+				local f = m.flights[id]
+				local p = if f then f.phase else ""
+				if st:peek() ~= p then
+					st:set(p)
+				end
+			end
+		end)
 		publish_debug()
 	end
 
 	local function animate(id: string, params: { [string]: any })
 		local el = elements[id]
 		if el then
-			play(el, params :: any)
+			play(el, params)
 		end
 	end
 
-	local function phase(id: string, f: Flight, name: string)
+	local function phase(f: Flight, name: string)
 		f.phase = name
 		f.token += 1
 	end
@@ -237,13 +310,21 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 	local function done(id: string)
 		m.flights[id] = nil
 		arrivals[id] = nil
+		from_at[id] = nil
 	end
 
 	-- A timer's end: the next beat.
 	local function advance(id: string?, token: number)
 		if id == nil then
-			if token == morph_token then
-				morph_on = false
+			-- (The switch's while over: what is built later comes in
+			-- plainly, and where nodes stood is let go.)
+			if token == switch_token then
+				switch_on = false
+				for k in from_at do
+					if not m.flights[k] then
+						from_at[k] = nil
+					end
+				end
 				schedule()
 			end
 			return
@@ -262,7 +343,7 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 				animate(id, { opacity = { to = 1 }, duration = M.DIM_MS, ease = M.EASE })
 			elseif folded_of(to) and not folded_of(f.from) and elements[id] then
 				-- Into a folded drawer: to its head line, fading at the end.
-				phase(id, f, "out")
+				phase(f, "out")
 				local el, head = elements[id], heads[to]
 				local dy = 0
 				if head then
@@ -276,22 +357,33 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 					opacity = { to = 0, duration = M.FADE, delay = M.TRAVEL - M.FADE, ease = "linear" },
 				})
 			else
+				-- (Where its old node shows, for its new one to start from.)
+				local el = elements[id]
+				local x, y = nil, nil
+				if el and not folded_of(f.from) then
+					x, y = shown_at(el)
+				end
+				from_at[id] = if x and y then { x = x, y = y } else nil
 				m.where[id] = nil
-				phase(id, f, "travel")
+				phase(f, "travel")
 				arrivals[id] = if folded_of(f.from) then "drawer" else "travel"
+				schedule()
 				republish()
+				return
 			end
 		elseif p == "out" then
 			m.where[id] = nil
-			pair[id] = (pair[id] or 0) + 1
 			done(id)
+			schedule()
 			republish()
+			return
 		elseif p == "fade_out" then
 			m.where[id] = nil
-			pair[id] = (pair[id] or 0) + 1
-			phase(id, f, "fade_in")
+			phase(f, "fade_in")
 			arrivals[id] = "fade"
+			schedule()
 			republish()
+			return
 		else
 			done(id)
 		end
@@ -331,9 +423,11 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 
 	function m.update(lists: { [string]: { string } }, shown: { [string]: { string } }, by_id: { [string]: any })
 		local row_list: { [string]: string } = {}
+		local row_index: { [string]: number } = {}
 		for place, ids in lists do
-			for _, id in ids do
+			for i, id in ids do
 				row_list[id] = place
+				row_index[id] = i
 			end
 		end
 		(m :: any).row_list = row_list
@@ -355,6 +449,7 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 				table.insert(order, id)
 			end
 		end
+		local holding: { string } = {}
 		for _, id in order do
 			local to = row_list[id]
 			local e = by_id[id]
@@ -376,12 +471,20 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 					-- Moved again while it holds: holds again, once.
 					if moved and not f.restarted then
 						f.restarted = true
+						f.hold_ms = M.HOLD
 						f.token += 1
 						changed = true
 					end
 				elseif f.phase == "travel" or f.phase == "fade_in" then
 					if to ~= at then
 						-- Moved again on its way: on from where it shows.
+						local el = elements[id]
+						local x, y = nil, nil
+						if el then
+							x, y = shown_at(el)
+						end
+						from_at[id] = if x and y then { x = x, y = y } else nil
+						arrivals[id] = if f.phase == "travel" then "travel" else "fade"
 						m.where[id] = nil
 						f.token += 1
 						changed = true
@@ -393,18 +496,39 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 				local move = moved and s > 0 and card ~= nil and card.from ~= nil and card.from ~= card.place
 				if not move then
 					m.where[id] = nil
-					pair[id] = (pair[id] or 0) + 1
 				elseif reduced or flying() >= M.CAP then
 					m.where[id] = at
-					m.flights[id] = { phase = "fade_out", from = at, index = index[id], restarted = false, token = 1 }
+					m.flights[id] = { phase = "fade_out", from = at, index = index[id], restarted = false, hold_ms = 0, token = 1 }
 					animate(id, { opacity = { to = 0 }, duration = M.FADE, ease = "linear" })
 					changed = true
 				else
 					m.where[id] = at
-					m.flights[id] = { phase = "hold", from = at, index = index[id], restarted = false, token = 1 }
+					m.flights[id] = { phase = "hold", from = at, index = index[id], restarted = false, hold_ms = M.HOLD, token = 1 }
 					animate(id, { opacity = { to = M.DIM }, duration = M.DIM_MS, ease = "out(3)" })
+					table.insert(holding, id)
 					changed = true
 				end
+			end
+		end
+		-- Leaving together, they leave STAGGER ms apart: the one that lands
+		-- lowest first (the furthest down its new list, then the rightmost
+		-- column).
+		if #holding > 1 then
+			local column: { [string]: number } = { needs_you = 1, running = 2, done = 3 }
+			table.sort(holding, function(a: string, b: string): boolean
+				local ia, ib = row_index[a] or 0, row_index[b] or 0
+				if ia ~= ib then
+					return ia > ib
+				end
+				local ca = column[M.COLUMN_OF[row_list[a]] or row_list[a]] or 0
+				local cb = column[M.COLUMN_OF[row_list[b]] or row_list[b]] or 0
+				if ca ~= cb then
+					return ca > cb
+				end
+				return a < b
+			end)
+			for i, id in holding do
+				m.flights[id].hold_ms = M.HOLD + (i - 1) * M.STAGGER
 			end
 		end
 		-- Gone from the board: let go.
@@ -412,7 +536,6 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 			if row_list[id] == nil then
 				seq[id] = nil
 				m.where[id] = nil
-				pair[id] = nil
 				if m.flights[id] then
 					done(id)
 					changed = true
@@ -426,87 +549,108 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 
 	function m.build(id: string, drawer: boolean): Built
 		local how = arrivals[id]
-		local duration = M.TRAVEL
-		if morph_on and how == nil then
-			if not drawer and morph_left > 0 and morph_from[id] then
-				morph_left -= 1
-				table.insert(morphed, id)
-				how = "morph"
-				duration = M.MORPH
+		if switch_on and how == nil then
+			if not drawer and switch_left > 0 and from_at[id] then
+				switch_left -= 1
+				table.insert(switched, id)
+				how = "switch"
 				publish_debug()
 			else
-				-- (Past the cap, in a drawer, or no node to come from: no
-				-- pair, a crossfade.)
-				pair[id] = (pair[id] or 0) + 1
-				how = "fade"
+				how = "switch_fade"
 			end
 		end
 		arrivals[id] = how
-		return { layout_id = `orch-card-{slot}-{filter() or ""}-{pair[id] or 0}-{id}`, duration = duration, how = how }
+		return { how = how }
 	end
 
-	function m.attach(id: string, el: any, parts: { content: any?, ghost: any? }?)
+	function m.start(b: Built): number?
+		return if b.how ~= nil then 0 else nil
+	end
+
+	function m.phase(id: string): string
+		return phase_state(id):get()
+	end
+
+	-- A node arriving: from `from_at[id]` to its own place, translated, its
+	-- opacity from `from_opacity` to 1 over `fade_ms`. (At its first layout:
+	-- where it is is known then, before the frame is drawn.)
+	local function slide_in(id: string, el: any, from_opacity: number, fade_ms: number, ms: number)
+		local from = from_at[id]
+		local dx, dy = 0, 0
+		if from then
+			local ok, x, y = pcall(function(): (number, number)
+				return (el :: any).x, (el :: any).y
+			end)
+			if ok and type(x) == "number" and type(y) == "number" then
+				dx, dy = from.x - x, from.y - y
+			end
+		end
+		set(el, { x = dx, y = dy, opacity = from_opacity })
+		play(el, {
+			x = { to = 0, duration = ms, ease = M.EASE },
+			y = { to = 0, duration = ms, ease = M.EASE },
+			opacity = { to = 1, duration = fade_ms, ease = "linear" },
+		})
+	end
+
+	-- Arrivals waiting for their node's first layout.
+	local pending: { [string]: { how: string, el: any, head: any? } } = {}
+
+	function m.attach(id: string, el: any)
 		elements[id] = el
 		local how = arrivals[id]
-		if how == "travel" then
-			play(el, { opacity = { from = M.DIM, to = 1 }, duration = M.TRAVEL, ease = M.EASE })
-		elseif how == "morph" then
-			-- (Its box moves from its other node's; what it holds comes in
-			-- once that one's would have gone.)
-			local content = (parts and parts.content) or el
-			play(content, { opacity = { from = 0, to = 1 }, delay = M.MORPH - M.MORPH_IN, duration = M.MORPH_IN, ease = "linear" })
-			local ghost = parts and parts.ghost
-			if ghost then
-				play(ghost, { opacity = { from = 1, to = 0 }, duration = M.MORPH, ease = M.EASE })
-			end
+		if how == "travel" or how == "switch" then
+			pending[id] = { how = how, el = el }
+		elseif how == "drawer" then
+			local f = m.flights[id]
+			pending[id] = { how = how, el = el, head = f and heads[f.from] }
+		elseif how == "switch_fade" then
+			play(el, { opacity = { from = 0, to = 1 }, duration = if motion.reduced_now() then M.FADE else M.SWITCH_IN, ease = "linear" })
 		elseif how == "fade" then
 			play(el, { opacity = { from = 0, to = 1 }, duration = M.FADE, ease = "linear" })
-		elseif how == "drawer" then
-			-- From its drawer's head line, in over the first FADE ms.
-			local f = m.flights[id]
-			local head = f and heads[f.from]
-			ui.after(0, function()
-				local dy = 0
-				if head then
-					local ok, d = pcall(function(): number
-						return (head :: any).y - (el :: any).y
-					end)
-					dy = if ok then d else 0
-				end
-				play(el, {
-					y = { from = dy, to = 0, duration = M.TRAVEL, ease = M.EASE },
-					opacity = { from = 0, to = 1, duration = M.FADE, ease = "linear" },
-				})
-			end)
 		end
 		-- (Once: a node built again later comes in plainly.)
 		arrivals[id] = nil
 	end
 
-	function m.raised(place: string): boolean
-		return landing:get()[place] == true
-	end
-
-	function m.start(b: Built): (number?, number?, number?)
-		local how = b.how
-		if how == "travel" then
-			return M.DIM, nil, 0
-		elseif how == "fade" or how == "drawer" then
-			return 0, nil, 0
-		elseif how == "morph" then
-			return nil, 0, 1
+	function m.placed(id: string, el: any)
+		-- (The element `on_resize` hands is another handle on the node
+		-- `on_mount` gave: either moves it.)
+		local p = pending[id]
+		if not p then
+			return
 		end
-		return nil, nil, 0
+		pending[id] = nil
+		if p.how == "travel" then
+			slide_in(id, el, M.DIM, M.TRAVEL_IN, M.TRAVEL)
+		elseif p.how == "switch" then
+			slide_in(id, el, 0, M.SWITCH_IN, M.SWITCH)
+		else
+			-- From its drawer's head line, in over the first FADE ms.
+			local dy = 0
+			local head = p.head
+			if head then
+				local ok, d = pcall(function(): number
+					return (head :: any).y - (el :: any).y
+				end)
+				dy = if ok then d else 0
+			end
+			set(el, { y = dy, opacity = 0 })
+			play(el, {
+				y = { to = 0, duration = M.TRAVEL, ease = M.EASE },
+				opacity = { to = 1, duration = M.FADE, ease = "linear" },
+			})
+		end
 	end
 
 	function m.detach(id: string, el: any)
 		if elements[id] == el then
 			elements[id] = nil
 		end
-	end
-
-	function m.mounted(id: string): boolean
-		return elements[id] ~= nil
+		local p = pending[id]
+		if p and p.el == el then
+			pending[id] = nil
+		end
 	end
 
 	function m.folded(place: string): boolean
@@ -521,16 +665,37 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 		end
 		return heads[place]
 	end
+	function m.raised(place: string): boolean
+		return landing:get()[place] == true
+	end
+	function m.leaving(place: string): boolean
+		return left:get()[place] == true
+	end
 
-	function m.begin_morph()
-		morph_left = if motion.reduced_now() then 0 else M.MORPH_CAP
-		morph_on = true
-		morph_token += 1
-		morph_from = {}
-		for id in elements do
-			morph_from[id] = true
+	function m.begin_switch()
+		switch_left = if motion.reduced_now() then 0 else M.SWITCH_CAP
+		switch_on = true
+		switch_token += 1
+		switched = {}
+		-- (Where each card or row shows as the switch begins: in view
+		-- alone, those the window shows.)
+		local win_h = 1e9
+		local ok, size = pcall(function(): any
+			return ((ui :: any).window.size :: any):peek()
+		end)
+		if ok and type(size) == "table" and type(size.height) == "number" and size.height > 0 then
+			win_h = size.height
 		end
-		morphed = {}
+		for id, el in elements do
+			if not m.flights[id] then
+				local x, y = shown_at(el)
+				if x and y and y < win_h then
+					from_at[id] = { x = x, y = y }
+				else
+					from_at[id] = nil
+				end
+			end
+		end
 		schedule()
 	end
 

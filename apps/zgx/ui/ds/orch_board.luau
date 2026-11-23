@@ -70,6 +70,16 @@ local CAP = 12
 local DRAWER_CAP = 20
 -- A column's narrowest: under three of them side by side, they stack.
 local COLUMN_MIN = 240
+-- How far a lane's body reaches under its foot, clipped: as far as a
+-- column can shrink at once.
+local LANE_EXTRA = 4000
+-- A number from what anime answers (a number, or a string with one).
+local function num_of(v: any, default: number): number
+	if type(v) == "number" then
+		return v
+	end
+	return tonumber(string.match(tostring(v or ""), "-?[%d%.]+") or "") or default
+end
 -- The detail's width beside the board.
 local DETAIL_W = 420
 
@@ -367,6 +377,35 @@ local OrchBoard = ui.component(function(props: Props): Node
 		local function count(): number
 			return #ids_of(place)
 		end
+		-- Its lane: a body and a rounded foot drawn under it, so that as the
+		-- column grows or shrinks the lane eases with its cards on the
+		-- compositor (the body's clip and the foot's translation, the cards'
+		-- curve): no card or drawer hangs outside it as it shrinks.
+		local radius = (ui.theme.get("radius.xl") :: number?) or 12
+		local body, foot = ui.ref(), ui.ref()
+		local last_h: number? = nil
+		local function eased(size: { w: number, h: number })
+			local was = last_h
+			last_h = size.h
+			if was == nil or was <= 0 or size.h <= 0 or reduce.reduced_now() then
+				return
+			end
+			-- (How much taller it showed: what the lane eases away.)
+			local d = was - size.h
+			if math.abs(d) < 0.5 then
+				return
+			end
+			local b, f = body:get(), foot:get()
+			if not b or not f then
+				return
+			end
+			local from = num_of(anime.utils.get(b, "clipBottom"), LANE_EXTRA) - d
+			local from_y = d + num_of(anime.utils.get(f, "y"), 0)
+			anime.utils.set(b, { clipBottom = from })
+			anime.utils.set(f, { y = from_y })
+			anime.animate(b, { clipBottom = { to = LANE_EXTRA }, duration = Motion.TRAVEL, ease = Motion.EASE })
+			anime.animate(f, { y = { to = 0 }, duration = Motion.TRAVEL, ease = Motion.EASE })
+		end
 		return ui.column {
 			id = `orch-col-{place}`,
 			class = "orch-column",
@@ -376,8 +415,35 @@ local OrchBoard = ui.component(function(props: Props): Node
 			min_w = 0,
 			p = "$space.1",
 			gap = "$space.1",
-			rounded = "$radius.xl",
-			bg = lane,
+			relative = true,
+			on_resize = eased,
+			ui.div {
+				ref = body,
+				class = "orch-lane-body",
+				absolute = true,
+				top = 0,
+				left = 0,
+				right = 0,
+				bottom = radius - LANE_EXTRA,
+				rounded = "$radius.xl",
+				rounded_bl = 0,
+				rounded_br = 0,
+				bg = lane,
+				clip_inset = { top = 0, right = 0, bottom = LANE_EXTRA, left = 0 },
+			},
+			ui.div {
+				ref = foot,
+				class = "orch-lane-foot",
+				absolute = true,
+				left = 0,
+				right = 0,
+				bottom = 0,
+				h = ui.raw(radius, "a lane's rounded foot: its corner's height"),
+				rounded = "$radius.xl",
+				rounded_tl = 0,
+				rounded_tr = 0,
+				bg = lane,
+			},
 			-- (A card travelling into it goes over the other columns.)
 			z = function(): number
 				return if ctx.motion.raised(place) then 1 else 0
@@ -418,20 +484,23 @@ local OrchBoard = ui.component(function(props: Props): Node
 				},
 			},
 			cards(place, false),
-			ui.show(function(): boolean
-				return count() == 0
-			end, ui.row {
-				class = "orch-column-empty",
-				w_full = true,
-				h = 44,
-				items = "center",
-				justify = "center",
-				ui.text {
-					locale.t(`orch.board.none.{place}`),
-					text_size = "$font.size.sm",
-					color = "$text.tertiary",
-				},
-			}),
+			-- (Once the last card has left, not under it: then in.)
+			ui.presence(function(): string?
+				return if count() == 0 and not ctx.motion.leaving(place) then "empty" else nil
+			end, function(): Node
+				return ui.row {
+					class = "orch-column-empty",
+					w_full = true,
+					h = 44,
+					items = "center",
+					justify = "center",
+					ui.text {
+						locale.t(`orch.board.none.{place}`),
+						text_size = "$font.size.sm",
+						color = "$text.tertiary",
+					},
+				}
+			end, { w_full = true, enter = { opacity = { 0, 1 }, duration = Motion.FADE, ease = "linear" } }),
 			drawer(model.DRAWER[place]),
 		}
 	end
@@ -662,9 +731,10 @@ local OrchBoard = ui.component(function(props: Props): Node
 		return props.on_open_card == nil and ctx.selected() ~= nil
 	end
 
-	-- The board to its list and back: the cards in view morph into their
-	-- rows (ds/orch_board_motion), told as the switch picks its side,
-	-- before either is built.
+	-- The board to its list and back: the leaving view fades where it
+	-- stands, and the cards (or rows) in view slide in from where their
+	-- counterparts stood (ds/orch_board_motion), told as the switch picks its
+	-- side, before either is built.
 	local last_view: string? = nil
 	-- The open card's detail: in with a fade and a slide from the right,
 	-- the columns taking their new width over the same while, and out
@@ -731,20 +801,28 @@ local OrchBoard = ui.component(function(props: Props): Node
 	end
 
 	local function main(): Node
-		return ui.switch(function(): string
+		local reduced = reduce.reduced_now()
+		return ui.presence(function(): string
 			local v = view:get()
 			if last_view ~= nil and v ~= last_view then
-				ctx.motion.begin_morph()
+				ctx.motion.begin_switch()
 			end
 			last_view = v
 			return v
-		end, {
-			board = function(): Node
-				return columns()
-			end,
-			list = function(): Node
+		end, function(v: string): Node
+			if v == "list" then
 				return List.Sections { ctx = ctx, act = act, tab = tab }
-			end,
+			end
+			return columns()
+		end, {
+			w_full = true,
+			min_w = 0,
+			-- (What leaves fades where it stands; what comes, its cards and rows
+			-- aside, fades in where it lands.)
+			exit = { opacity = 0, duration = if reduced then Motion.FADE else Motion.SWITCH_OUT, ease = "linear" },
+			-- (From a hundredth, not nothing: a list counts what is wholly
+			-- transparent out of view, and would build its rows a frame late.)
+			enter = { opacity = { 0.01, 1 }, duration = if reduced then Motion.FADE else Motion.SWITCH_IN, ease = "linear" },
 		})
 	end
 

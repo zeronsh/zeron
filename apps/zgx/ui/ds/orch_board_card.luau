@@ -29,6 +29,7 @@ local ContextMenu = require("@self/context_menu")
 local Ctx = require("@self/orch_board_ctx")
 local Ref = require("@self/orch_ref")
 local trace = require("@self/orch_perf_trace")
+local Motion = require("@self/orch_board_motion")
 
 local M = {}
 
@@ -352,12 +353,21 @@ M.Card = ui.component(function(props: Props): Node
 		local x = e()
 		return if x then x.item.title or "" else ""
 	end)
+	-- (While it holds before a move, the summary it had: only its status
+	-- line changes until it travels, and it keeps its size.)
+	local m = ctx.motion
+	local said = ""
 	local summary = ui.computed(function(): string
 		local x = e()
 		if not x or props.drawer then
 			return ""
 		end
-		return M.summary(ctx, x)
+		local p = m.phase(id)
+		if p == "hold" or p == "fade_out" or p == "out" then
+			return said
+		end
+		said = M.summary(ctx, x)
+		return said
 	end)
 	local words = ui.computed(function(): string
 		local x = e()
@@ -379,11 +389,10 @@ M.Card = ui.component(function(props: Props): Node
 	end)
 	local hovered = ui.use_state(false)
 	local rest = material.pick("$zeron.settings.note", "$zeron.settings.card")
+	local lane = material.pick("$zeron.settings.tint", "$zeron.settings.group")
 	-- How it comes in (ds/orch_board_motion), decided as it's built.
-	local m = ctx.motion
 	local built = m.build(id, props.drawer == true)
-	local start, start_content = m.start(built)
-	local content_ref = ui.ref()
+	local start = m.start(built)
 	local mounted_el: any = nil
 	ui.on_cleanup(function()
 		if mounted_el then
@@ -528,31 +537,37 @@ M.Card = ui.component(function(props: Props): Node
 			ctx.open(id)
 		end,
 		ui.column {
-			ref = content_ref,
 			w_full = true,
 			min_w = 0,
-			opacity = start_content,
 			p = if ctx.compact then "$space.2" else ui.raw(10, "a card's even inset"),
 			ui.column {
 			w_full = true,
 			min_w = 0,
 			gap = if ctx.compact then "$space.1" else "$zeron.space.snug",
 			head,
-			ui.show(function(): boolean
-				return summary:get() ~= ""
-			end, ui.text {
-				function(): string
-					return summary:get()
-				end,
-				class = "orch-card-summary",
+			-- (A new summary crossfades with the last, the card taking its
+			-- new size at once: what's under it slides there.)
+			ui.presence(function(): string?
+				local s = summary:get()
+				return if s ~= "" then s else nil
+			end, function(s: string): Node
+				return ui.text {
+					s,
+					class = "orch-card-summary",
+					w_full = true,
+					min_w = 0,
+					wrap = true,
+					lines = 2,
+					truncate = true,
+					text_size = "$font.size.sm",
+					line_height = "$font.line.sm",
+					color = "$text.secondary",
+				}
+			end, {
 				w_full = true,
 				min_w = 0,
-				wrap = true,
-				lines = 2,
-				truncate = true,
-				text_size = "$font.size.sm",
-				line_height = "$font.line.sm",
-				color = "$text.secondary",
+				enter = { opacity = { 0, 1 }, duration = Motion.FADE, ease = "linear" },
+				exit = { opacity = 0, duration = Motion.FADE, ease = "linear" },
 			}),
 			foot,
 			extra,
@@ -590,16 +605,44 @@ M.Card = ui.component(function(props: Props): Node
 		z = if built.how ~= nil then 1 else nil,
 		ui.div {
 			class = "orch-card-motion",
-			layout_id = built.layout_id,
-			layout_duration = built.duration,
-			layout_ease = "outQuint",
+			relative = true,
 			w_full = true,
 			min_w = 0,
 			opacity = start,
 			on_mount = function(el: any)
 				mounted_el = el
-				m.attach(id, el, { content = content_ref })
+				m.attach(id, el)
 			end,
+			on_resize = function(_size: any, el: any)
+				m.placed(id, el)
+			end,
+			-- In flight, an opaque underlay: its lane over the window's opaque ground,
+			-- as it rests, so its tinted fill looks the same and nothing it
+			-- passes over reads through it.
+			ui.show(function(): boolean
+				local p = m.phase(id)
+				return p == "travel" or p == "out"
+			end, function(): Node
+				return ui.div {
+					class = "orch-card-underlay",
+					absolute = true,
+					top = 0,
+					left = 0,
+					right = 0,
+					bottom = 0,
+					rounded = M.RADIUS,
+					bg = "$zeron.window",
+					ui.div {
+						absolute = true,
+						top = 0,
+						left = 0,
+						right = 0,
+						bottom = 0,
+						rounded = M.RADIUS,
+						bg = lane,
+					},
+				}
+			end),
 			whole,
 		},
 	}
