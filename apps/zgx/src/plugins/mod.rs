@@ -1551,6 +1551,10 @@ impl Bridge {
             self.host.set_plugins(want);
             // (Before the window's first load: that load takes them.)
             if !self.first_load.get() {
+                // Said before the reload too, so what the window declares
+                // once per load (commands, keys, built rows) reads the new
+                // set, not the one being let go.
+                self.publish_on();
                 self.reload();
             }
         }
