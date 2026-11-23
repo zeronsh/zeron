@@ -112,6 +112,9 @@ pub const BLOCKED: &[&str] = &[
     // (An agent's ask answered or put off for the person.)
     "orchestration.answer_ask",
     "orchestration.defer_ask",
+    // (A card's delete, sent once its Undo has passed, and that Undo.)
+    "orchestration.remove_later",
+    "orchestration.remove_undo",
     // (The Scratchpad written: a preview reads it, never changes it.)
     "scratchpad.set_text",
     "scratchpad.set_shapes",

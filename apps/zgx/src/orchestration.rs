@@ -309,6 +309,9 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         });
     });
     host.action("orchestration.remove_undo", move |id| {
+        if crate::plugins::preview::refuse("orchestration.remove_undo").is_err() {
+            return;
+        }
         undo_remove(&crate::auth::text(&id));
     });
     let a = o.clone();
