@@ -87,20 +87,24 @@ end
 -- The Control room's and an orchestrator's pages, while Orchestrators is
 -- on, loaded once the window has come up and settled, one a frame: loaded
 -- on the first click instead, inside the page's build (and the sidebar's
--- view menu's), they cost the open a quarter of a second more.
-ui.after(2000, function()
-	if control_page() == nil then
-		return
-	end
-	ui.after(0, function()
-		local orch = plugins.module("orchestrators")
-		if orch then
-			pcall(function(): any
-				return orch.orchestrator_page
-			end)
+-- view menu's), they cost the open a quarter of a second more. Asked only
+-- when the window loads with it on (turning it on reloads the window), so
+-- with it off no timer runs at all.
+if plugins.peek("orchestrators") then
+	ui.after(2000, function()
+		if control_page() == nil then
+			return
 		end
+		ui.after(0, function()
+			local orch = plugins.module("orchestrators")
+			if orch then
+				pcall(function(): any
+					return orch.orchestrator_page
+				end)
+			end
+		end)
 	end)
-end)
+end
 
 -- The finished session last marked seen (kept across the shell being made
 -- again).
