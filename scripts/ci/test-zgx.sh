@@ -15,8 +15,18 @@
 #                                    tests, `plugin_tests` below); fails on any
 #                                    FAIL not listed, and names listed ones that
 #                                    pass
+#   scripts/ci/test-zgx.sh plugins [zgx]
+#                                    the plugins' Luau UI tests alone, judged
+#                                    the same way
+#
+# For a targeted run, `ui` and `plugins` take (space-separated):
+#   ZGX_TESTS="control_open orch_map"   only these test files (stems of
+#                                       *.test.luau), in ui/ and the plugins
+#   ZGX_PLUGINS="orchestrators"         only these plugins' tests
 set -euo pipefail
-root="$(cd "$(dirname "$0")/../.." && pwd)"
+# Its real path: a plugin's files are where the window finds them only by
+# that (zgx resolves a replacement's folder through links).
+root="$(cd "$(dirname "$0")/../.." && pwd -P)"
 known="$root/scripts/ci/zgx-known-failures.txt"
 
 listed() { sed -n "s/^$1: //p" "$known"; }
@@ -29,18 +39,38 @@ listed() { sed -n "s/^$1: //p" "$known"; }
 # the window loads a bundled built-in, trusted with the app modules its
 # manifest names (`app_modules`): its overrides.luau, put in by a zgx.json.
 # A test then reaches the plugin's app-side modules as the app does
-# (`@account/plugins`), with `plugins.on` off until its fixture says.
+# (`@account/plugins`), with `plugins.on` off until its fixture says. A
+# plugin with an app/ folder (its modules run as the app's code) gets an
+# alias of its id naming it, so its tests and fixtures require those
+# modules as `@<id>/…`, the very files its index.luau loads (its
+# tests/.luaurc says the same to `zgx check`).
 plugin_tests() {
   zgx="$1"
   for tests in "$root"/apps/zgx/plugins-builtin/*/tests; do
     ls "$tests"/*.test.luau >/dev/null 2>&1 || continue
     plugin="$(dirname "$tests")"
     id="$(basename "$plugin")"
+    if [ -n "${ZGX_PLUGINS:-}" ] && ! grep -qw -- "$id" <<<"$ZGX_PLUGINS"; then
+      continue
+    fi
     stage="$(mktemp -d)"
     cp -R "$root/apps/zgx/ui/." "$stage/"
     rm -rf "$stage/tests"
     mkdir "$stage/tests"
-    cp "$tests"/*.test.luau "$stage/tests/"
+    copy_tests "$tests" "$stage/tests"
+    if ! ls "$stage/tests"/*.test.luau >/dev/null 2>&1; then
+      rm -rf "$stage"
+      continue
+    fi
+    if [ -d "$plugin/app" ]; then
+      python3 - "$stage/.luaurc" "$id" "$plugin/app" <<'PY'
+import json, sys
+path, alias, app = sys.argv[1], sys.argv[2], sys.argv[3]
+config = json.load(open(path))
+config.setdefault("aliases", {})[alias] = app
+json.dump(config, open(path, "w"), indent="\t")
+PY
+    fi
     for file in "$tests"/*.luau; do
       case "$file" in *.test.luau) continue ;; esac
       if [ -e "$stage/$(basename "$file")" ]; then
@@ -75,6 +105,66 @@ PY
   done
 }
 
+# The *.test.luau of folder $1 into $2: those ZGX_TESTS names, or all.
+copy_tests() {
+  for file in "$1"/*.test.luau; do
+    [ -e "$file" ] || continue
+    name="$(basename "$file" .test.luau)"
+    if [ -n "${ZGX_TESTS:-}" ] && ! grep -qw -- "$name" <<<"$ZGX_TESTS"; then
+      continue
+    fi
+    cp "$file" "$2/"
+  done
+}
+
+# ui/'s own tests: all of them in place, or ZGX_TESTS's in a copy of ui/.
+app_tests() {
+  zgx="$1"
+  if [ -z "${ZGX_TESTS:-}" ]; then
+    "$zgx" test ui
+    return
+  fi
+  stage="$(mktemp -d)"
+  cp -R "$root/apps/zgx/ui/." "$stage/"
+  rm -rf "$stage/tests"
+  mkdir "$stage/tests"
+  copy_tests "$root/apps/zgx/ui/tests" "$stage/tests"
+  status=0
+  if ls "$stage/tests"/*.test.luau >/dev/null 2>&1; then
+    "$zgx" test "$stage" || status=$?
+  fi
+  rm -rf "$stage"
+  return "$status"
+}
+
+# Judges the log $1 of a run that exited $2 against the known failures.
+judge() {
+  log="$1"
+  status="$2"
+  # `FAIL <name> (<file>)`
+  failed="$(sed -n 's/^FAIL \(.*\) ([^()]*)$/\1/p' "$log" | sort -u)"
+  expected="$(listed luau | sort -u)"
+  new="$(comm -23 <(printf '%s\n' "$failed") <(printf '%s\n' "$expected") | sed '/^$/d')"
+  fixed="$(comm -13 <(printf '%s\n' "$failed") <(printf '%s\n' "$expected") | sed '/^$/d')"
+  ran="$(grep -cE '^(ok|FAIL) ' "$log" || true)"
+  echo "zgx test ui: $ran tests, $(printf '%s' "$failed" | grep -c . || true) failed"
+  # A targeted run doesn't reach every known failure.
+  if [ -n "$fixed" ] && [ -z "${ZGX_TESTS:-}${ZGX_PLUGINS:-}" ]; then
+    echo "::notice::known zgx UI failures that passed (delete them from scripts/ci/zgx-known-failures.txt):"
+    printf '  %s\n' "$fixed"
+  fi
+  if [ -n "$new" ]; then
+    echo "::error::zgx UI tests that failed and aren't known failures:"
+    printf '  %s\n' "$new"
+    exit 1
+  fi
+  # Failed for something other than tests (no tests ran, a crash).
+  if [ "$ran" -eq 0 ] || { [ "$status" -ne 0 ] && [ -z "$failed" ]; }; then
+    echo "::error::zgx test ui exited $status with no test failures to show for it"
+    exit 1
+  fi
+}
+
 case "${1:-}" in
   rust)
     skips=()
@@ -95,32 +185,21 @@ case "${1:-}" in
     log="$(mktemp)"
     cd "$root/apps/zgx"
     status=0
-    "$zgx" test ui 2>&1 | tee "$log" | grep -vE '^warning: Luau was built with its asserts' || status=$?
+    app_tests "$zgx" 2>&1 | tee "$log" | grep -vE '^warning: Luau was built with its asserts' || status=$?
     plugin_tests "$zgx" | tee -a "$log" | grep -vE '^warning: Luau was built with its asserts' || true
-    # `FAIL <name> (<file>)`
-    failed="$(sed -n 's/^FAIL \(.*\) ([^()]*)$/\1/p' "$log" | sort -u)"
-    expected="$(listed luau | sort -u)"
-    new="$(comm -23 <(printf '%s\n' "$failed") <(printf '%s\n' "$expected") | sed '/^$/d')"
-    fixed="$(comm -13 <(printf '%s\n' "$failed") <(printf '%s\n' "$expected") | sed '/^$/d')"
-    ran="$(grep -cE '^(ok|FAIL) ' "$log" || true)"
-    echo "zgx test ui: $ran tests, $(printf '%s' "$failed" | grep -c . || true) failed"
-    if [ -n "$fixed" ]; then
-      echo "::notice::known zgx UI failures that passed (delete them from scripts/ci/zgx-known-failures.txt):"
-      printf '  %s\n' "$fixed"
-    fi
-    if [ -n "$new" ]; then
-      echo "::error::zgx UI tests that failed and aren't known failures:"
-      printf '  %s\n' "$new"
-      exit 1
-    fi
-    # Failed for something other than tests (no tests ran, a crash).
-    if [ "$ran" -eq 0 ] || { [ "$status" -ne 0 ] && [ -z "$failed" ]; }; then
-      echo "::error::zgx test ui exited $status with no test failures to show for it"
-      exit 1
-    fi
+    judge "$log" "$status"
+    rm -f "$log"
+    ;;
+  plugins)
+    zgx="${2:-zgx}"
+    log="$(mktemp)"
+    cd "$root/apps/zgx"
+    plugin_tests "$zgx" | tee "$log" | grep -vE '^warning: Luau was built with its asserts' || true
+    judge "$log" 0
+    rm -f "$log"
     ;;
   *)
-    echo "usage: $0 rust | tests | ui [zgx]" >&2
+    echo "usage: $0 rust | tests | ui [zgx] | plugins [zgx]" >&2
     exit 2
     ;;
 esac
