@@ -185,7 +185,9 @@ case "${1:-}" in
     log="$(mktemp)"
     cd "$root/apps/zgx"
     status=0
-    app_tests "$zgx" 2>&1 | tee "$log" | grep -vE '^warning: Luau was built with its asserts' || status=$?
+    # (The filter's exit kept out: a targeted run whose tests are all the
+    # plugins' prints nothing here.)
+    app_tests "$zgx" 2>&1 | tee "$log" | { grep -vE '^warning: Luau was built with its asserts' || true; } || status=$?
     plugin_tests "$zgx" | tee -a "$log" | grep -vE '^warning: Luau was built with its asserts' || true
     judge "$log" "$status"
     rm -f "$log"
