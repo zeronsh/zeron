@@ -233,3 +233,39 @@ fn orchestrators_ships_as_a_bundled_built_in() {
     let bundled = listed.bundled(&app.join("plugins-builtin")).expect("bundled");
     assert_eq!(bundled.modules, modules);
 }
+
+/// The entry that ships, loaded as the app loads a bundled built-in: on, it
+/// runs with no error and its index stands in for the app's own module.
+/// (An entry that is one `require(…)` alone runs as that call's value, `true`
+/// for a module with nothing to return, and the app refused it.)
+#[test]
+fn orchestrators_shipped_entry_loads_and_puts_its_index_in_place() {
+    let app = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let builtin = app.join("plugins-builtin");
+    let root = dir("shipped");
+    write(&root, "app/app.luau", r#"
+local orchestrators = require("@app/builtin/orchestrators")
+return ui.column {
+    id = "root",
+    ui.text { id = "label", if type(orchestrators) == "table" then orchestrators.proof.label() else "the app's own" },
+}
+"#);
+    write(&root, "app/builtin/orchestrators.luau", "return false");
+    write(&root, "app/account/plugins.luau", "return { on = function(_: string) return true end }");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(builtin.join("orchestrators/zeron-plugin.json")).unwrap()).unwrap();
+    let listed = Item {
+        json: json!({
+            "id": "orchestrators", "name": "Orchestrators", "status": "on", "entry": manifest["entry"],
+            "builtin": true, "author": { "kind": "zeron" }, "dir": builtin.join("orchestrators"),
+            "snapshot": root.join("snapshot/orchestrators"), "permissions": manifest["permissions"],
+            "ui": { "change": [], "replace": [] },
+        }),
+    };
+    let plugin = listed.plugin_with(&builtin).expect("on: it loads");
+    assert!(plugin.entry.ends_with("orchestrators/init.luau"), "{:?}", plugin.entry);
+    let mut a = mount(&root, vec![plugin]);
+    assert_eq!(a.error(), None);
+    assert_eq!(a.text("label"), "Orchestrators");
+    let _ = std::fs::remove_dir_all(&root);
+}

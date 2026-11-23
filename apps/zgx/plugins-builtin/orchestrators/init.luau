@@ -25,3 +25,8 @@
 -- names a plugin's entry by the plugin's id, so `./` starts here too when
 -- it runs; luau-lsp takes an init.luau's `./` from the folder above.)
 require("@self/overrides")
+
+-- (Nothing to return. A source that is one call alone is run as that
+-- call's value, and a required module with no value comes back as `true`:
+-- an entry returning `true` fails to load.)
+return nil
