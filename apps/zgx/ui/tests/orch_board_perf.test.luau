@@ -55,7 +55,7 @@ local function report(name: string, list: { number }, per: { [string]: number })
 		table.insert(parts, `{k}={v}`)
 	end
 	table.sort(parts)
-	print(`BOARDPERF {name} p50={string.format("%.2f", pct(list, 0.5))}ms max={string.format("%.2f", pct(list, 1))}ms per-push: {table.concat(parts, " ")}`)
+	print(`zeron-zgx: BOARDPERF {name} p50={string.format("%.2f", pct(list, 0.5))}ms max={string.format("%.2f", pct(list, 1))}ms per-push: {table.concat(parts, " ")}`)
 end
 
 test("board perf: the fixture shows 200 cards over every place", function()
