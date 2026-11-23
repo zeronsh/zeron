@@ -29,6 +29,7 @@ local LinkMenu = require("@app/screens/chat/link_menu")
 local boundary = require("@app/screens/shell/boundary")
 local Quote = require("@ds/quote")
 local Draft = require("@ds/draft_text")
+local ComposerAtoms = require("@ds/composer_atoms")
 -- (The chat page's places in its chats, which a split's panes share.)
 local Shared = require("@app/screens/chat/shared")
 local Asks = require("@app/screens/chat/asks")
@@ -217,6 +218,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	-- is shown (screens/chat/shared's drafts), so focused, the chat page's
 	-- composer goes on with the same words.)
 	local draft = ui.state(if split then `chat_split_draft_{chat}` else `chat_lane_draft_{chat}`, "")
+	local atoms = ui.state(if split then `chat_split_atoms_{chat}` else `chat_lane_atoms_{chat}`, {} :: { ComposerAtoms.AtomEntry })
 	-- Its draft's chips: one draft's per chat (screens/chat/shared), wherever
 	-- it's kept. (A split's pane shows the chat page's.)
 	local carried = ui.use_state({} :: { any })
@@ -242,6 +244,12 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	-- A chip taken off its draft, wherever the draft is now.
 	local function remove_carried(cid: string)
 		Shared.remove_cargo_of(chat, cid)
+		if not split then
+			local next_text, next_atoms, changed = ComposerAtoms.remove_by_cargo(draft:peek(), ComposerAtoms.live(atoms), cid)
+			if changed then
+				ComposerAtoms.apply(draft, atoms, next_text, next_atoms)
+			end
+		end
 	end
 	-- The options picked in a question its chat asks. (A split's pane: its
 	-- chat's draft's, below. Else kept by the chat, as its draft is.)
@@ -269,9 +277,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 				return
 			end
 			local d = Shared.draft_of(chat)
-			if size ~= known or draft:peek() ~= d.text then
+			if size ~= known or draft:peek() ~= d.text or #ComposerAtoms.live(atoms) ~= #d.atoms then
 				pulled, known = size, size
-				draft:set(d.text)
+				ComposerAtoms.apply(draft, atoms, d.text, d.atoms)
 			end
 			chosen:set(d.chosen)
 		end)
@@ -339,12 +347,13 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	}
 	-- A queued message edited in its composer. (A split's pane: a press
 	-- focuses it, the window's composer doing this.)
-	local editing = ui.state(`chat_lane_editing_{chat}`, nil :: { item: string, aside: string, aside_cargo: { any }? }?)
+	local editing = ui.state(`chat_lane_editing_{chat}`, nil :: { item: string, aside: string, aside_cargo: { any }?, aside_atoms: { any }? }?)
 	local edits = Asks.queue_edits {
 		id = function(): string?
 			return chat
 		end,
 		text = draft,
+		atoms = atoms,
 		editing = editing,
 		focus = function()
 			focus:add(1)
@@ -373,7 +382,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 				if row.id == e.item and not row.editing then
 					ui.batch(function()
 						editing:set(nil)
-						draft:set(e.aside)
+						ComposerAtoms.apply(draft, atoms, e.aside, e.aside_atoms or {})
 						if e.aside_cargo then
 							Shared.set_cargo_of(chat, e.aside_cargo)
 						end
@@ -688,6 +697,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	return ds.Composer {
 		dictation = dictation,
 		value = draft,
+		atoms = atoms,
 		snap = if split then snap else nil,
 		-- (Its transcript's "Jump to latest", while it shows: its trays'
 		-- pill moves aside, the two a centred pair. By the lane's name, its
@@ -699,6 +709,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		cargo = carried,
 		-- (Its chips' × under the pointer, as the chat page's.)
 		on_remove_cargo = remove_carried,
+		cargo_chip = Carried.chip_spec,
 		-- (What's dropped on it is its tab's to take, or a split pane's card,
 		-- under their own overlays.)
 		drop_overlay = false,
@@ -819,13 +830,19 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			-- A draft that is only one of Zeron's own commands runs it.
 			local command = if completions then completions.command_of(draft:peek()) else nil
 			if command then
-				draft:set("")
+				ui.batch(function()
+					draft:set("")
+					atoms:set({})
+				end)
 				run_command(command)
 				return
 			end
-			-- (The passages it mentions, each in full.)
+			-- (Encode inline chips first so atom offsets match the raw draft,
+			-- then expand any quoted passages.)
 			local said_quotes = quotes:peek()
-			local words = string.match(Quote.expand(text, Quote.kept(text, said_quotes)), "^%s*(.-)%s*$") or ""
+			local said_atoms = ComposerAtoms.live(atoms)
+			local encoded = ComposerAtoms.encode(text, said_atoms)
+			local words = string.match(Quote.expand(encoded, Quote.kept(encoded, said_quotes)), "^%s*(.-)%s*$") or ""
 			if words == "" and #carried:peek() == 0 then
 				return
 			end
@@ -837,6 +854,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			end
 			ui.batch(function()
 				draft:set("")
+				atoms:set({})
 				quotes:set({})
 			end)
 			notice:set(nil)
@@ -859,7 +877,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			req.appshots = Appshots.of_cargo(chips)
 			local function failed(err: any)
 				ui.batch(function()
-					draft:set(text)
+					ComposerAtoms.apply(draft, atoms, text, said_atoms)
 					quotes:set(said_quotes)
 				end)
 				Shared.restore_cargo_of(chat, chips)

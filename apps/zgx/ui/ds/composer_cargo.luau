@@ -79,6 +79,10 @@ export type Props = {
 	-- An image chip as the lightbox's thumbnail (ds/lightbox `source`): the
 	-- props that let its picture grow from the chip and go back into it.
 	source: ((item: Item) -> { [string]: any }?)?,
+	-- Dragging a cargo chip into the composer: returns the drag payload for
+	-- `item` (or nil if the item cannot be mentioned inline) and its preview.
+	drag_item: ((item: Item) -> any?)?,
+	drag_preview: ((payload: any) -> Node)?,
 }
 
 -- How many chips show before the rest fold into "+N more", and how many
@@ -265,6 +269,12 @@ local function image_chip(item: Item, row: State<Item>, props: Props): Node
 				(props.on_open :: (string) -> ())(item.id)
 			end
 			else nil,
+		on_drag = if props.drag_item
+			then function()
+				return (props.drag_item :: (Item) -> any?)(row:peek())
+			end
+			else nil,
+		drag_preview = props.drag_preview,
 		on_hover = function(inside: boolean)
 			hovered:set(inside)
 			over(item, inside)
@@ -570,6 +580,12 @@ local function row_chip(item: Item, row: State<Item>, props: Props): Node
 					(props.on_open :: (string) -> ())(item.id)
 				end
 				else nil,
+			on_drag = if props.drag_item
+				then function()
+					return (props.drag_item :: (Item) -> any?)(row:peek())
+				end
+				else nil,
+			drag_preview = props.drag_preview,
 			slot,
 			ui.column {
 				min_w = 0,

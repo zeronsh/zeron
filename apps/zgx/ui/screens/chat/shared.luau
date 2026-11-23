@@ -20,6 +20,7 @@ local ChatLinks = require("@app/screens/chat/chat_links")
 local route = require("@app/screens/shell/route")
 
 local Draft = require("@ds/draft_text")
+local ComposerAtoms = require("@ds/composer_atoms")
 local M = {}
 
 -- The draft, what it carries, the options picked in a question being
@@ -27,6 +28,7 @@ local M = {}
 -- module's own: a template replacing any chat module (this one included)
 -- and every hot reload find them where they were.
 M.text = ui.shared("chat.composer.text", "")
+M.atoms = ui.shared("chat.composer.atoms", {} :: { ComposerAtoms.AtomEntry })
 M.cargo = ui.shared("chat.composer.cargo", {} :: { any })
 M.quotes = ui.shared("chat.composer.quotes", {} :: { [string]: string })
 M.chosen = ui.shared("chat.composer.chosen", {} :: { [string]: boolean })
@@ -175,6 +177,7 @@ do
 	if type(was) == "table" and all[""] == nil and here:peek() == "" and M.text:peek() == "" and #M.cargo:peek() == 0 then
 		ui.batch(function()
 			M.text:set(if type(was.text) == "string" then was.text else "")
+			M.atoms:set(if type(was.atoms) == "table" then ComposerAtoms.restyle(was.atoms) else {})
 			M.cargo:set(if type(was.cargo) == "table" then was.cargo else {})
 			M.quotes:set(if type(was.quotes) == "table" then was.quotes else {})
 			-- (Its chips' ids taken: one made from here never repeats one.)
@@ -200,14 +203,14 @@ local function save_new()
 	saved_at = ui.now()
 	local now: any = nil
 	if here:peek() == "" then
-		local text, cargo, quotes = M.text:peek(), M.cargo:peek(), M.quotes:peek()
+		local text, atoms, cargo, quotes = M.text:peek(), ComposerAtoms.live(M.atoms), M.cargo:peek(), M.quotes:peek()
 		if text ~= "" or #cargo > 0 then
-			now = { text = text, cargo = cargo, quotes = quotes }
+			now = { text = text, atoms = atoms, cargo = cargo, quotes = quotes }
 		end
 	else
 		local put = kept:peek()[""]
 		if put then
-			now = { text = put.text, cargo = put.cargo, quotes = put.quotes }
+			now = { text = put.text, atoms = put.atoms, cargo = put.cargo, quotes = put.quotes }
 		end
 	end
 	if now ~= nil or saved_new:peek() ~= nil then
@@ -218,6 +221,7 @@ ui.effect(function()
 	-- What it's saved from, followed (the draft's edits, not the draft).
 	if here:get() == "" then
 		M.text:len()
+		M.atoms:len()
 		M.cargo:get()
 		M.quotes:get()
 	else
@@ -280,9 +284,9 @@ function M.show(key: string)
 	end
 	ui.batch(function()
 		local all = table.clone(kept:peek())
-		local text, cargo, quotes, chosen = M.text:peek(), M.cargo:peek(), M.quotes:peek(), M.chosen:peek()
+		local text, atoms, cargo, quotes, chosen = M.text:peek(), ComposerAtoms.live(M.atoms), M.cargo:peek(), M.quotes:peek(), M.chosen:peek()
 		if text ~= "" or #cargo > 0 or next(chosen) ~= nil then
-			all[was] = { text = text, cargo = cargo, quotes = quotes, chosen = chosen }
+			all[was] = { text = text, atoms = atoms, cargo = cargo, quotes = quotes, chosen = chosen }
 		else
 			all[was] = nil
 		end
@@ -290,7 +294,12 @@ function M.show(key: string)
 		all[key] = nil
 		kept:set(all)
 		here:set(key)
-		M.text:set(if now then now.text else "")
+		ComposerAtoms.apply(
+			M.text,
+			M.atoms,
+			if now then now.text else "",
+			if now and type(now.atoms) == "table" then now.atoms else {}
+		)
 		M.cargo:set(if now then now.cargo else {})
 		M.quotes:set(if now and now.quotes then now.quotes else {})
 		M.chosen:set(if now and now.chosen then now.chosen else {})
@@ -298,11 +307,18 @@ function M.show(key: string)
 end
 
 -- What was typed and carried, taken for sending (the composer cleared).
-function M.take(): (string, { any })
-	local text = Quote.expand(M.text:peek(), Quote.kept(M.text:peek(), M.quotes:peek()))
+-- Inline atomic chips are encoded into their canonical links before quote
+-- expansion so atom offsets match the raw draft text; `raw` and `atoms` are
+-- also returned so a failed send can restore the chips intact.
+function M.take(): (string, { any }, string, { ComposerAtoms.AtomEntry })
+	local raw = M.text:peek()
+	local atoms = ComposerAtoms.live(M.atoms)
+	local encoded = ComposerAtoms.encode(raw, atoms)
+	local text = Quote.expand(encoded, Quote.kept(encoded, M.quotes:peek()))
 	local cargo = M.cargo:peek()
 	ui.batch(function()
 		M.text:set("")
+		M.atoms:set({})
 		M.cargo:set({})
 		M.quotes:set({})
 	end)
@@ -312,34 +328,35 @@ function M.take(): (string, { any })
 	if here:peek() == "" then
 		save_new()
 	end
-	return text, cargo
+	return text, cargo, raw, atoms
 end
 
 -- The draft shown, lifted out whole to be put back later (a plugin's
 -- `zeron.take_draft`): its words as typed, its chips and the passages
 -- quoted in it, the composer cleared. Nil when there's nothing to lift.
-function M.lift(): { text: string, cargo: { any }, quotes: { [string]: string } }?
-	local text, cargo, quotes = M.text:peek(), M.cargo:peek(), M.quotes:peek()
+function M.lift(): { text: string, atoms: { ComposerAtoms.AtomEntry }, cargo: { any }, quotes: { [string]: string } }?
+	local text, atoms, cargo, quotes = M.text:peek(), ComposerAtoms.live(M.atoms), M.cargo:peek(), M.quotes:peek()
 	if text == "" and #cargo == 0 then
 		return nil
 	end
 	ui.batch(function()
 		M.text:set("")
+		M.atoms:set({})
 		M.cargo:set({})
 		M.quotes:set({})
 	end)
-	return { text = text, cargo = cargo, quotes = quotes }
+	return { text = text, atoms = atoms, cargo = cargo, quotes = quotes }
 end
 
 -- A lifted draft put back on the draft shown (`zeron.put_draft`). Onto an
 -- empty composer it's as it was; onto words already there, its words follow
 -- them after a blank line and its chips follow theirs, its files numbered
 -- after those there.
-function M.lay(d: { text: string, cargo: { any }, quotes: { [string]: string } })
-	local here_text, here_cargo = M.text:peek(), M.cargo:peek()
+function M.lay(d: { text: string, atoms: { ComposerAtoms.AtomEntry }?, cargo: { any }, quotes: { [string]: string } })
+	local here_text, here_atoms, here_cargo = M.text:peek(), ComposerAtoms.live(M.atoms), M.cargo:peek()
 	ui.batch(function()
 		if here_text == "" and #here_cargo == 0 then
-			M.text:set(d.text)
+			ComposerAtoms.apply(M.text, M.atoms, d.text, if type(d.atoms) == "table" then d.atoms else {})
 			M.cargo:set(d.cargo)
 			M.quotes:set(d.quotes)
 			return
@@ -350,7 +367,14 @@ function M.lay(d: { text: string, cargo: { any }, quotes: { [string]: string } }
 		end
 		M.quotes:set(quotes)
 		if d.text ~= "" then
-			M.text:set(if here_text == "" then d.text else `{here_text}\n\n{d.text}`)
+			local prefix_chars = if here_text == "" then 0 else ComposerAtoms.char_len(here_text .. "\n\n")
+			local combined = table.clone(here_atoms)
+			if type(d.atoms) == "table" and #d.atoms > 0 then
+				for _, a in ComposerAtoms.shift(d.atoms, prefix_chars) do
+					table.insert(combined, a)
+				end
+			end
+			ComposerAtoms.apply(M.text, M.atoms, if here_text == "" then d.text else `{here_text}\n\n{d.text}`, combined)
 		end
 		for _, item in d.cargo do
 			local moved = table.clone(item)
@@ -963,6 +987,52 @@ function M.update_comment(id: string, body: string)
 	end
 end
 
+-- Keeps remaining browser annotation chips synced if removing an earlier
+-- annotation renumbered them.
+local function sync_annotation_atoms(
+	cargo: { any },
+	atoms: { ComposerAtoms.AtomEntry },
+	changed: boolean
+): ({ ComposerAtoms.AtomEntry }, boolean)
+	if #atoms == 0 then
+		return atoms, changed
+	end
+	local by_id: { [string]: any } = {}
+	for _, item in cargo do
+		if item.kind == "annotation" and item.annotation and type(item.id) == "string" then
+			by_id[item.id] = item
+		end
+	end
+	if next(by_id) == nil then
+		return atoms, changed
+	end
+	local out: { ComposerAtoms.AtomEntry }? = nil
+	for i, a in atoms do
+		local cid = if a.data then a.data.cargo_id else nil
+		local item = if cid then by_id[cid] else nil
+		if item and a.data then
+			local tok = Annotation.token(item.annotation)
+			if a.data.link ~= tok then
+				local updated: { ComposerAtoms.AtomEntry } = out or table.clone(atoms)
+				out = updated
+				local next_data = table.clone(a.data)
+				next_data.link = tok
+				updated[i] = {
+					id = a.id,
+					from = a.from,
+					to = a.to,
+					data = next_data,
+					style = a.style,
+				}
+			end
+		end
+	end
+	if out then
+		return out, true
+	end
+	return atoms, changed
+end
+
 function M.remove_cargo(id: string)
 	local left = {}
 	for _, item in M.cargo:peek() do
@@ -970,7 +1040,15 @@ function M.remove_cargo(id: string)
 			table.insert(left, item)
 		end
 	end
-	M.cargo:set(M.renumber(left))
+	local next_cargo = M.renumber(left)
+	local next_text, next_atoms, changed = ComposerAtoms.remove_by_cargo(M.text:peek(), ComposerAtoms.live(M.atoms), id)
+	next_atoms, changed = sync_annotation_atoms(next_cargo, next_atoms, changed)
+	ui.batch(function()
+		M.cargo:set(next_cargo)
+		if changed then
+			ComposerAtoms.apply(M.text, M.atoms, next_text, next_atoms)
+		end
+	end)
 end
 
 -- Chat `key`'s draft, wherever it is: out in the composer while it shows
@@ -978,13 +1056,14 @@ end
 -- in a question it's asked. What shows a chat's draft by its id (a split
 -- pane's composer) reads it here, never the chat shown's; `show` moves a
 -- draft between the two in one batch, so it's never read half moved.
-function M.draft_of(key: string): { text: string, cargo: { any }, chosen: { [string]: boolean } }
+function M.draft_of(key: string): { text: string, atoms: { ComposerAtoms.AtomEntry }, cargo: { any }, chosen: { [string]: boolean } }
 	if here:get() == key then
-		return { text = M.text:get(), cargo = M.cargo:get(), chosen = M.chosen:get() }
+		return { text = M.text:get(), atoms = ComposerAtoms.live(M.atoms), cargo = M.cargo:get(), chosen = M.chosen:get() }
 	end
 	local d = kept:get()[key]
 	return {
 		text = if d and type(d.text) == "string" then d.text else "",
+		atoms = if d and type(d.atoms) == "table" then d.atoms else {},
 		cargo = if d and type(d.cargo) == "table" then d.cargo else {},
 		chosen = if d and type(d.chosen) == "table" then d.chosen else {},
 	}
@@ -996,6 +1075,7 @@ end
 function M.track_draft_of(key: string)
 	if here:get() == key then
 		M.text:len()
+		M.atoms:len()
 		M.cargo:get()
 		M.chosen:get()
 	else
@@ -1033,19 +1113,21 @@ function M.peek_text_of(key: string): string
 	return if d and type(d.text) == "string" then d.text else ""
 end
 
--- Chat `key`'s draft changed where it's shown by its id (`field`: "text"
--- or "chosen"): written wherever it is, as `draft_of` reads it.
+-- Chat `key`'s draft changed where it's shown by its id (`field`: "text",
+-- "atoms", or "chosen"): written wherever it is, as `draft_of` reads it.
 function M.set_draft_of(key: string, field: string, value: any)
 	if here:peek() == key then
 		if field == "text" then
 			M.text:set(value)
+		elseif field == "atoms" then
+			M.atoms:set(value)
 		else
 			M.chosen:set(value)
 		end
 		return
 	end
 	local all = table.clone(kept:peek())
-	local d = table.clone(all[key] or { text = "", cargo = {}, quotes = {} })
+	local d = table.clone(all[key] or { text = "", atoms = {}, cargo = {}, quotes = {} })
 	d[field] = value
 	all[key] = d
 	kept:set(all)
@@ -1070,6 +1152,12 @@ function M.remove_cargo_of(key: string, id: string)
 		end
 	end
 	d.cargo = M.renumber(left)
+	local next_text, next_atoms, changed = ComposerAtoms.remove_by_cargo(d.text or "", d.atoms, id)
+	next_atoms, changed = sync_annotation_atoms(d.cargo, next_atoms, changed)
+	if changed then
+		d.text = next_text
+		d.atoms = next_atoms
+	end
 	all[key] = d
 	kept:set(all)
 end

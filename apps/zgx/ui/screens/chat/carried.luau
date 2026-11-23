@@ -10,6 +10,7 @@ local Comments = require("@app/screens/chat/comments")
 local Annotation = require("@ds/annotation")
 local ChatLinks = require("@app/screens/chat/chat_links")
 local AttachmentMentions = require("@ds/attachment_mentions")
+local ComposerAtoms = require("@ds/composer_atoms")
 
 local M = {}
 
@@ -169,6 +170,22 @@ function M.settle(words: string, chips: { any }): string
 		end
 	end
 	return AttachmentMentions.demote_unattached(words, numbers)
+end
+
+-- Inline chip spec for dragging a cargo chip into the composer.
+-- Returns nil for cargo kinds without an inline mention link.
+function M.chip_spec(item: any): ComposerAtoms.ChipSpec?
+	local name = M.label(item)
+	local link = M.mention(item)
+	if not name or not link then
+		return nil
+	end
+	local what, icon = M.kind(item)
+	local picture = what == "image" or what == "appshot"
+	local label = if picture and type(item.mention) == "number"
+		then AttachmentMentions.image_label(item.mention)
+		else name
+	return ComposerAtoms.from_cargo(item, label, link, what, icon)
 end
 
 -- What a sent message shows of what it carries.

@@ -516,19 +516,23 @@ local function opens(a: string): boolean
 	return string.match(a, "^https?://") ~= nil or string.match(a, "^mailto:") ~= nil
 end
 
--- A chip's look, as Zeron's shipping app paints it (composer/chip.rs
--- `paint_chip`): its pill hugs its name, 2 points above and below, corner
--- 5; its icon (14) on a well of its own 2 points round it, corner 4
--- (`zeron.chip.*`), a point in from the pill's start and 2 before the
--- name; 7 points after the name (Zeron's room: a no-break space of Geist
--- is a quarter em, its well and name 6 of them in, 2 after, at 14).
-local CHIP_PADDING = { 1, 7, 2 }
+-- A chip's look: its pill hugs its name with corner 5, and its icon well
+-- (13px icon + 2pt pad = 17pt square, concentric corner 3) sits with equal
+-- 2pt spacing on left, top, bottom, and between the well and the label.
+-- Code-styled chips (`span.text_size` set to inline code size, 13.5pt) get
+-- 3pt vertical padding so the pill height matches prose chips (~21.4pt)
+-- instead of cramping the upper/lower gap around the well.
+local CHIP_PADDING = { 2, 7, 2 }
+local CHIP_PADDING_TIGHT = { 2, 7, 3 }
 local CHIP_RADIUS = ui.raw(5, "Zeron's inline chip corner (chip.rs)")
+local function chip_padding(span: { [any]: any }): { number }
+	return if span.text_size ~= nil then CHIP_PADDING_TIGHT else CHIP_PADDING
+end
 local function chip_icon(icon: { [string]: any }): { [string]: any }
-	icon.size = 14
+	icon.size = 13
 	icon.gap = 2
 	icon.bg = "$zeron.chip.well"
-	icon.radius = 4
+	icon.radius = 3
 	icon.pad = 2
 	return icon
 end
@@ -558,7 +562,7 @@ local function mention_chip(span: { [any]: any }, target: string, name: string)
 	span.hover = {}
 	span.bg = "$zeron.chip.bg"
 	span[1] = name
-	span.padding = CHIP_PADDING
+	span.padding = chip_padding(span)
 	span.radius = CHIP_RADIUS
 	span.icon = if chat
 		then chip_icon { src = "assets/icons/ui/side-chat.svg", tint = "$zeron.chip.glyph" }
@@ -632,7 +636,7 @@ local function attachment_chip(span: { [any]: any }, name: string, item: { kind:
 	span.color = nil
 	span.bg = "$zeron.chip.bg"
 	span[1] = name
-	span.padding = CHIP_PADDING
+	span.padding = chip_padding(span)
 	span.radius = CHIP_RADIUS
 	local glyph = if item.kind == "chat" then "side-chat" elseif item.kind == "image" then "gallery" else item.icon
 	span.icon = if glyph
@@ -655,7 +659,7 @@ local function invocation_chip(span: { [any]: any }, name: string)
 	span.hover = {}
 	span.bg = "$zeron.chip.bg"
 	span[1] = name
-	span.padding = CHIP_PADDING
+	span.padding = chip_padding(span)
 	span.radius = CHIP_RADIUS
 	span.icon = chip_icon { src = `assets/icons/ui/{glyph}.svg`, tint = "$zeron.chip.glyph" }
 end

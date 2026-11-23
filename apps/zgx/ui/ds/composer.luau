@@ -60,6 +60,7 @@ local Draft = require("@self/draft_text")
 local Layout = require("@self/composer_layout")
 local ComposerMotion = require("@self/composer_motion")
 local EditorMenu = require("@self/editor_menu")
+local ComposerAtoms = require("@self/composer_atoms")
 
 type ViewGeometry = {
 	height: number, header_height: number, tray_inset: number,
@@ -225,6 +226,10 @@ export type Props = {
 	on_remove_cargo: ((id: string) -> ())?,
 	on_retry_cargo: ((id: string) -> ())?,
 	on_open_cargo: ((id: string) -> ())?,
+	-- Inline atomic chips in the draft (mentions, commands, skills, dragged
+	-- cargo attachments), and how a cargo chip becomes an inline chip on drag.
+	atoms: State<{ ComposerAtoms.AtomEntry }>?,
+	cargo_chip: ((item: cargo.Item) -> ComposerAtoms.ChipSpec?)?,
 	-- Text pasted in: true takes it (the caller made a chip of it).
 	on_paste_text: ((text: string) -> boolean)?,
 	-- A paste with no text (a picture on the clipboard): the caller's to
@@ -1285,6 +1290,7 @@ return ui.component(function(props: Props): Node
 	local m = mentions.use {
 		field = field,
 		value = value,
+		atoms = props.atoms,
 		sources = props.mentions or {},
 		enabled = props.mention_enabled,
 		empty = props.mention_empty,
@@ -1295,6 +1301,19 @@ return ui.component(function(props: Props): Node
 			return (pill_w:get() or 0) > 0
 		end,
 	}
+	-- File-icon SVGs follow the active theme's light/dark icon set; only runs
+	-- on theme switches and skips drafts without atoms.
+	if props.atoms then
+		local atoms_state = props.atoms
+		ComposerAtoms.bind_editor(atoms_state, field)
+		ui.effect(function()
+			local _ = ui.theme.current:get()
+			local cur = ComposerAtoms.live(atoms_state)
+			if #cur > 0 then
+				atoms_state:set(ComposerAtoms.restyle(cur))
+			end
+		end)
+	end
 	-- Asked to: the keys, the caret at the end.
 	if props.focus then
 		local focus = props.focus
@@ -1921,6 +1940,20 @@ return ui.component(function(props: Props): Node
 					on_remove = props.on_remove_cargo,
 					on_retry = props.on_retry_cargo,
 					on_open = props.on_open_cargo or open_image,
+					drag_item = if props.atoms and props.cargo_chip
+						then function(item: cargo.Item): any?
+							local spec = (props.cargo_chip :: (cargo.Item) -> ComposerAtoms.ChipSpec?)(item)
+							if not spec then
+								return nil
+							end
+							return { kind = "cargo_chip", spec = spec }
+						end
+						else nil,
+					drag_preview = if props.atoms and props.cargo_chip
+						then function(payload: any): Node
+							return ComposerAtoms.chip_preview(if type(payload) == "table" and payload.spec then payload.spec.data else nil)
+						end
+						else nil,
 					source = function(item: cargo.Item): { [string]: any }?
 						if props.on_open_cargo then
 							return nil
@@ -1964,6 +1997,64 @@ return ui.component(function(props: Props): Node
 		end
 	end
 
+	-- Non-reactive drag/hover bookkeeping for inline chips: zero cost while
+	-- typing (no reactive state is read or written on keystrokes).
+	local hovered_atom: any = nil
+	local drag_restore_sel: { number }? = nil
+	local drop_restore_sel: { number }? = nil
+	local function accepts_chip_drop(payload: any): boolean
+		return props.atoms ~= nil
+			and type(payload) == "table"
+			and (payload.kind == "composer_atom" or payload.kind == "cargo_chip")
+	end
+	local function on_chip_drag_over(_payload: any, p: any)
+		local el = field:peek()
+		if not el then
+			return
+		end
+		if drop_restore_sel == nil then
+			local a, b = el:selection_bytes()
+			if a ~= nil and b ~= nil then
+				drop_restore_sel = { a, b }
+			end
+		end
+		local at = ui.editor.offset_at(el, p.x, p.y)
+		if at ~= nil then
+			el:focus()
+			el:set_selection_bytes(at, at)
+		end
+	end
+	local function on_chip_drag_leave()
+		local sel = drop_restore_sel
+		drop_restore_sel = nil
+		local el = field:peek()
+		if sel and el then
+			el:set_selection_bytes(sel[1], sel[2])
+		end
+	end
+	local function on_chip_drop(payload: any, p: any)
+		drop_restore_sel = nil
+		drag_restore_sel = nil
+		local atoms_state = props.atoms
+		if not atoms_state or type(payload) ~= "table" then
+			return
+		end
+		local el = field:peek()
+		local at = if el and p then ui.editor.offset_at(el, p.x, p.y) else nil
+		if at == nil then
+			at = #value:peek()
+		end
+		if payload.kind == "composer_atom" and type(payload.id) == "string" then
+			ComposerAtoms.move_atom(el, value, atoms_state, payload.id, at)
+		elseif payload.kind == "cargo_chip" and type(payload.spec) == "table" then
+			local after = ComposerAtoms.insert_at(el, value, atoms_state, at, at, payload.spec, true)
+			if el then
+				el:focus()
+				el:set_selection_bytes(after, after)
+			end
+		end
+	end
+
 	local surface = ui.div {
 		ref = pill,
 		on_resize = measure(pill_w, "w"),
@@ -1993,6 +2084,10 @@ return ui.component(function(props: Props): Node
 				end
 			end
 			else nil,
+		drop_when = if props.atoms then accepts_chip_drop else nil,
+		on_drag_over = if props.atoms then on_chip_drag_over else nil,
+		on_drag_leave = if props.atoms then on_chip_drag_leave else nil,
+		on_drop = if props.atoms then on_chip_drop else nil,
 		-- A press anywhere but a control goes to the draft (its caret at
 		-- its end). (Under the pill's controls and draft, which take their
 		-- own; `focus_on_press = false`, so zgx doesn't move focus off it
@@ -2028,6 +2123,61 @@ return ui.component(function(props: Props): Node
 			ui.textarea(EditorMenu.on({
 				ref = field,
 				value = value,
+				atoms = props.atoms,
+				atom_style = if props.atoms
+					then { bg = "$zeron.chip.bg", color = "$text.primary", weight = 500 }
+					else nil,
+				on_atom_hover = if props.atoms
+					then function(atom: any)
+						hovered_atom = atom
+					end
+					else nil,
+				on_atom_press = if props.atoms
+					then function()
+						return true
+					end
+					else nil,
+				on_drag = if props.atoms
+					then function()
+						if not hovered_atom then
+							return nil
+						end
+						local el = field:peek()
+						if el then
+							local a, b = el:selection_bytes()
+							if a ~= nil and b ~= nil then
+								drag_restore_sel = { a, b }
+							end
+						end
+						return {
+							kind = "composer_atom",
+							id = hovered_atom.id,
+							data = hovered_atom.data,
+							style = hovered_atom.style,
+						}
+					end
+					else nil,
+				drag_preview = if props.atoms
+					then function(payload: any): Node
+						return ComposerAtoms.chip_preview(if type(payload) == "table" then payload.data else nil)
+					end
+					else nil,
+				on_drag_end = if props.atoms
+					then function(_payload: any, accepted: boolean?)
+						local sel = drag_restore_sel
+						drag_restore_sel = nil
+						if not accepted and sel then
+							local el = field:peek()
+							if el then
+								el:set_selection_bytes(sel[1], sel[2])
+							end
+						end
+					end
+					else nil,
+				drop_when = if props.atoms then accepts_chip_drop else nil,
+				on_drag_over = if props.atoms then on_chip_drag_over else nil,
+				on_drag_leave = if props.atoms then on_chip_drag_leave else nil,
+				on_drop = if props.atoms then on_chip_drop else nil,
 				label = locale.t("ds.composer.message"),
 				placeholder = placeholder,
 				placeholder_color = "$text.tertiary",
