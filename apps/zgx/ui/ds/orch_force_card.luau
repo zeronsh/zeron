@@ -3,18 +3,22 @@
 -- Progress's row of it, the board's items), never a transcript.
 --
 --   A thread: its whole title (two lines at most); its state and how long
---   ("Done 2h ago", "Working 14m · last step 30s ago") with its steps or
---   todo; where it sits (orchestrator · its card and column · role ·
---   model · machine); what it's doing (Progress's note while it works, its
+--   ("Done 2h ago", "Working 14m", "last step 30s ago") with its steps or
+--   todo; where it sits (orchestrator, its card and column, role, model,
+--   machine); what it's doing (Progress's note while it works, its
 --   card's outcome once done); stopped by its usage limit, that ("Waiting
---   for limit · resets 14:05", or "On <account> · <original> resets
---   14:05" running on another meanwhile); what applies of unread, asking, failed, a
+--   for limit", "resets 14:05", or running on another account meanwhile);
+--   what applies of unread, asking, failed, a
 --   pull request, a branch; and Open chat, Open card, Pin, Mark read;
 --   its card paused by the person, Resume (into Now) first.
 --   An orchestrator: its crew working / idle / failed, its board's Now /
 --   Review / Blocked, and Open page.
 --   A machine (the machines pivot): online or not, its CPU, how many
 --   threads work on it.
+--   A fold (a hub's idle and finished threads as one): how many, the first
+--   few of them, and Show them.
+--
+-- Facts on one line stand apart by spacing, never a typed separator.
 --
 --   ForceCard.Card(props) -> Node   (props below)
 
@@ -45,6 +49,8 @@ export type Props = {
 	-- A paused card resumed (into Now).
 	on_resume: ((item: string) -> ())?,
 	on_mark_read: ((ids: { string }) -> ())?,
+	-- A fold opened (its threads out, each alone), by the fold's id.
+	on_open_fold: ((id: string) -> ())?,
 }
 
 local W = 300
@@ -117,9 +123,19 @@ local function paused(it: any): boolean
 	return type(p) == "number" or (type(p) == "string" and p ~= "")
 end
 
--- A row of small words, tertiary, one line.
-local function quiet(text: () -> string, class: string?): Node
-	return ui.text { text, class = class, text_size = "$font.size.xs", color = "$text.tertiary", truncate = true, min_w = 0, w_full = true }
+-- Facts on a line: each its own words, spaced apart (never a typed
+-- separator between them); a line too long for the card wraps.
+local function facts(list: () -> { string }, class: string?, color: string?): Node
+	return ui.row {
+		class = class,
+		w_full = true,
+		min_w = 0,
+		flex_wrap = true,
+		gap = "$space.2",
+		ui.each(ui.computed(list), function(t: string): Node
+			return ui.text { t, text_size = "$font.size.xs", color = color or "$text.tertiary", truncate = true, min_w = 0 }
+		end),
+	}
 end
 
 -- A signal chip: its glyph and words.
@@ -167,7 +183,7 @@ function M.Card(props: Props): Node
 	local function lim(): limit.Limit?
 		return limit.of(c())
 	end
-	local function state_line(): string
+	local function state_line(): { string }
 		local s0 = st()
 		local k = status.KINDS[s0 :: any]
 		local word = if k then k.label else locale.s("ds.orch.map.card.idle")
@@ -175,7 +191,7 @@ function M.Card(props: Props): Node
 		if s0 == "limited" and l then
 			-- (Waiting for the reset: how long till it, where that's known.)
 			local left = limit.left(l, os.time())
-			return if left ~= "" then `{word} · {left}` else word
+			return if left ~= "" then { word, left } else { word }
 		end
 		local p = prog()
 		if LIVE[s0] then
@@ -188,10 +204,10 @@ function M.Card(props: Props): Node
 			if p and type(p.eta_secs) == "number" then
 				table.insert(parts, locale.s("ds.orch.map.card.eta", { eta = took(p.eta_secs) }))
 			end
-			return table.concat(parts, " · ")
+			return parts
 		end
 		local at = c().updated
-		return if at then locale.s("ds.orch.map.card.state_ago", { state = word, ago = ago(at) }) else word
+		return { if at then locale.s("ds.orch.map.card.state_ago", { state = word, ago = ago(at) }) else word }
 	end
 	local function steps(): (number, number)
 		local p = prog()
@@ -201,7 +217,7 @@ function M.Card(props: Props): Node
 		local x = n()
 		return (x and x.done) or 0, (x and x.total) or 0
 	end
-	local function context(): string
+	local function context(): { string }
 		local _, item, orch = crew()
 		local member = crew()
 		local parts = {}
@@ -223,7 +239,13 @@ function M.Card(props: Props): Node
 		if mname ~= "" then
 			table.insert(parts, mname)
 		end
-		return table.concat(parts, " · ")
+		local out = {}
+		for _, t in parts do
+			if t ~= "" then
+				table.insert(out, t)
+			end
+		end
+		return out
 	end
 	local function column(): string
 		local _, item = crew()
@@ -301,19 +323,36 @@ function M.Card(props: Props): Node
 			ui.show(function(): boolean
 				return limit.switched(lim())
 			end, Icon { name = "status-limited", size = 11 }),
-			ui.text {
-				function(): string
-					return limit.text(lim())
-				end,
+			-- (Its words as facts apart: the limit's own text joins them with
+			-- a separator, the card spaces them.)
+			ui.row {
 				class = "orch-force-card-limit-text",
-				text_size = "$font.size.xs",
-				weight = "$font.weight.medium",
-				truncate = true,
-				min_w = 0,
 				grow = 1,
+				min_w = 0,
+				flex_wrap = true,
+				gap = "$space.2",
+				ui.each(ui.computed(function(): { string }
+					local out = {}
+					local text, at = limit.text(lim()), 1
+					while true do
+						local i, j = string.find(text, "·", at, true)
+						local part = string.sub(text, at, if i then i - 1 else #text)
+						local t = string.match(part, "^%s*(.-)%s*$") or ""
+						if t ~= "" then
+							table.insert(out, t)
+						end
+						if not i then
+							break
+						end
+						at = (j :: number) + 1
+					end
+					return out
+				end), function(t: string): Node
+					return ui.text { t, text_size = "$font.size.xs", weight = "$font.weight.medium", truncate = true, min_w = 0 }
+				end),
 			},
 		}),
-		ui.text { state_line, class = "orch-force-card-state", text_size = "$font.size.xs", color = "$text.secondary", truncate = true, min_w = 0, w_full = true },
+		facts(state_line, "orch-force-card-state", "$text.secondary"),
 		ui.show(function(): boolean
 			local _, total = steps()
 			return total > 0
@@ -340,7 +379,7 @@ function M.Card(props: Props): Node
 			gap = "$space.1",
 			items = "center",
 			min_w = 0,
-			quiet(context, "orch-force-card-context"),
+			facts(context, "orch-force-card-context"),
 			ui.show(function(): boolean
 				return column() ~= ""
 			end, ui.text { column, class = "orch-force-card-column", shrink = 0, px = "$space.1", rounded = "$radius.sm", bg = "$zeron.chip.bg", text_size = "$font.size.xs", color = "$text.secondary" }),
@@ -491,27 +530,28 @@ function M.Card(props: Props): Node
 			color = "$text.primary",
 			w_full = true,
 		},
-		ui.text {
-			function(): string
-				local t = tallies()
-				return locale.s("ds.orch.map.card.crew", { working = t.working, idle = t.idle, failed = t.failed })
-			end,
-			class = "orch-force-card-crew",
-			text_size = "$font.size.xs",
-			color = "$text.secondary",
-		},
-		ui.text {
-			function(): string
-				local t = tallies()
-				return locale.s("ds.orch.map.card.board", { now = t.active, review = t.review, blocked = t.blocked })
-			end,
-			class = "orch-force-card-board",
-			text_size = "$font.size.xs",
-			color = "$text.secondary",
-		},
-		quiet(function(): string
+		facts(function(): { string }
+			local t = tallies()
+			return {
+				locale.s("ds.orch.map.card.crew_label"),
+				locale.s("ds.orch.map.card.n_working", { n = t.working }),
+				locale.s("ds.orch.map.card.n_idle", { n = t.idle }),
+				locale.s("ds.orch.map.card.n_failed", { n = t.failed }),
+			}
+		end, "orch-force-card-crew", "$text.secondary"),
+		facts(function(): { string }
+			local t = tallies()
+			return {
+				locale.s("ds.orch.map.card.board_label"),
+				locale.s("ds.orch.map.card.n_now", { n = t.active }),
+				locale.s("ds.orch.map.card.n_review", { n = t.review }),
+				locale.s("ds.orch.map.card.n_blocked", { n = t.blocked }),
+			}
+		end, "orch-force-card-board", "$text.secondary"),
+		facts(function(): { string }
 			local x = n()
-			return props.machine_name(x and x.device)
+			local m = props.machine_name(x and x.device)
+			return if m ~= "" then { m } else {}
 		end),
 		ui.row {
 			class = "orch-force-card-actions",
@@ -563,8 +603,7 @@ function M.Card(props: Props): Node
 			weight = "$font.weight.medium",
 			color = "$text.primary",
 		},
-		ui.text {
-			function(): string
+		facts(function(): { string }
 				local d = device()
 				local parts = { if d == nil or d.online ~= false then locale.s("ds.orch.map.card.online") else locale.s("ds.orch.map.card.offline") }
 				local load = (props.world().loads or {})[(n() or {}).device or ""]
@@ -578,11 +617,91 @@ function M.Card(props: Props): Node
 					end
 				end
 				table.insert(parts, locale.s("ds.orch.map.card.running", { count = working }))
-				return table.concat(parts, " · ")
+				return parts
+			end, "orch-force-card-machine-line", "$text.secondary"),
+	}
+
+	-- A fold: how many, the first few, and Show them.
+	local FOLD_SHOWN = 5
+	local function folded(): { string }
+		local x = n()
+		return (x and x.folded) or {}
+	end
+	local fold = ui.column {
+		class = "orch-force-card-fold",
+		w_full = true,
+		gap = "$space.1",
+		ui.text {
+			function(): string
+				return locale.s("ds.orch.map.card.fold_title", { count = #folded() })
 			end,
-			class = "orch-force-card-machine-line",
-			text_size = "$font.size.xs",
-			color = "$text.secondary",
+			class = "orch-force-card-fold-title",
+			text_size = "$font.size.sm",
+			weight = "$font.weight.medium",
+			color = "$text.primary",
+		},
+		ui.column {
+			w_full = true,
+			gap = "$zeron.space.hair",
+			ui.each(ui.computed(function(): { string }
+				local out = {}
+				for k, cid in folded() do
+					if k > FOLD_SHOWN then
+						break
+					end
+					table.insert(out, cid)
+				end
+				return out
+			end), function(cid: string): Node
+				return ui.row {
+					class = "orch-force-card-fold-row",
+					gap = "$space.2",
+					items = "center",
+					w_full = true,
+					min_w = 0,
+					-- (Its state's glyph; an idle one none, its room kept.)
+					ui.div {
+						w = 12,
+						h = 12,
+						shrink = 0,
+						ui.show(function(): boolean
+							return status.KINDS[props.state_of(cid) :: any] ~= nil
+						end, status.StatusIcon { kind = function(): any
+							-- (Built while hidden too: a kind it knows.)
+							local k = props.state_of(cid)
+							return if status.KINDS[k :: any] then k else "done"
+						end, size = 12 }),
+					},
+					ui.text {
+						function(): string
+							local ch = props.chat(cid)
+							return (ch and ch.title) or ""
+						end,
+						text_size = "$font.size.xs",
+						color = "$text.secondary",
+						truncate = true,
+						min_w = 0,
+						grow = 1,
+					},
+				}
+			end),
+		},
+		ui.row {
+			class = "orch-force-card-actions",
+			gap = "$space.1",
+			pt = "$space.1",
+			Button {
+				id = "orch-force-card-fold-open",
+				tone = "secondary",
+				size = "xs",
+				on_click = function()
+					local x = n()
+					if x and props.on_open_fold then
+						props.on_open_fold(x.id)
+					end
+				end,
+				locale.t("ds.orch.map.card.fold_open"),
+			},
 		},
 	}
 
@@ -593,11 +712,13 @@ function M.Card(props: Props): Node
 		gap = "$space.1",
 		ui.switch(function(): string
 			local k = kind()
-			return if k == "chat" then "thread" elseif k == "machine" then "machine" else "orchestrator"
+			local x = n()
+			return if x and x.folded then "fold" elseif k == "chat" then "thread" elseif k == "machine" then "machine" else "orchestrator"
 		end, {
 			thread = thread,
 			orchestrator = orchestrator,
 			machine = machine,
+			fold = fold,
 		}),
 	}
 end

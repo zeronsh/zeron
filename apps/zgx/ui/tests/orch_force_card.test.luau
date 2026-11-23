@@ -64,8 +64,11 @@ test("force card: an orchestrator's crew and board tallies; Open page", function
 	local app = open()
 	local t = hover(app, "orc-reins")
 	print("CARDORCH " .. string.gsub(string.sub(t, 1, 500), "\n", " | "))
-	expect(has(t, "Crew: 2 working · 1 idle · 0 failed")).to_be(true)
-	expect(has(t, "Board: 2 now · 0 in review · 0 blocked")).to_be(true)
+	-- (Each fact its own words, spaced apart: no typed separator.)
+	for _, w in { "Crew", "2 working", "1 idle", "0 failed", "Board", "2 now", "0 in review", "0 blocked" } do
+		expect(`{w} {has(t, w)}`).to_be(`{w} true`)
+	end
+	expect(string.find(t, "·", 1, true)).to_be(nil)
 	app:click("#orch-force-card-open-page")
 	app:frames(5)
 	expect(string.find(tostring(app:state("shell_route_path")), "orc-reins", 1, true) ~= nil).to_be(true)

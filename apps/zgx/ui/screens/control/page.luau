@@ -1089,6 +1089,8 @@ local function map(): Node
 		MapMenu().Dialogs(),
 	}
 end
+-- (The Map widget alone, for its fixture's pictures at a set width.)
+M.map_widget = map
 
 -- Every thread on every machine: the Map in its Machines view, shown and
 -- scrolled to (the Machines widget's "n more").

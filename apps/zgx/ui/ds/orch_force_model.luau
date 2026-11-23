@@ -35,6 +35,9 @@ M.LIVE_S = 90
 export type Node = {
 	id: string,
 	kind: string, -- "brain" | "orchestrator" | "machine" | "chat"
+	-- (A fold: a "chat" node standing for its hub's quiet threads, idle or
+	-- finished, as one; their ids.)
+	folded: { string }?,
 	-- (Machine pivot: a thread that's an orchestrator's own.)
 	lead_of: boolean?,
 	title: string,
@@ -74,6 +77,15 @@ export type Model = {
 -- an orchestrator's own too, hangs off its machine, coloured by its
 -- orchestrator's hue).
 M.MACHINE = "machine:"
+-- A hub's quiet threads (idle, finished) as one node, `fold:<hub>`, once
+-- it has FOLD_AT of them; the person opens one (`opts.open[hub]`) to see
+-- them all. Its working, waiting and asking threads always stand alone.
+M.FOLD = "fold:"
+M.FOLD_AT = 24
+local QUIET: { [string]: boolean } = { idle = true, done = true }
+function M.quiet(chat: any): boolean
+	return QUIET[model.status_of(chat)] == true
+end
 -- The web last built and what from: the same fleet (model.fleet keeps it
 -- through a push that moved nothing it shows), messages and pivot give it
 -- back, while no node's todo or agent says otherwise.
@@ -81,12 +93,36 @@ local last_build: any = nil
 -- (How many times a web was built, not given back: for tests.)
 M.builds = 0
 
-function M.build(world: any, comms: { any }?, now: number?, pivot: string?): Model
+function M.build(world: any, comms: { any }?, now: number?, pivot: string?, opts: { fold_at: number?, open: { [string]: boolean }? }?): Model
 	local fleet = model.fleet(world)
 	local chats = world.chats or {}
 	local t = now or os.time()
 	local lb = last_build
-	if lb and rawequal(lb.fleet, fleet) and rawequal(lb.comms, comms) and lb.pivot == pivot and lb.t == t then
+	local fold_at = (opts and opts.fold_at) or M.FOLD_AT
+	local open: { [string]: boolean } = (opts and opts.open) or {}
+	local open_key = {}
+	for h, on in open do
+		if on then
+			table.insert(open_key, h)
+		end
+	end
+	table.sort(open_key)
+	local fold_key = `{fold_at}/{table.concat(open_key, ",")}`
+	-- (A thread's quiet or not is in the fleet's keeping only as its status:
+	-- folds made again whenever any shown thread's quietness changes; in
+	-- the fleet's own steady order.)
+	local quiet_key = {}
+	for _, m in fleet.machines do
+		for _, g in m.groups do
+			for _, th in g.threads do
+				if M.quiet(chats[th.id]) then
+					table.insert(quiet_key, th.id)
+				end
+			end
+		end
+	end
+	fold_key ..= "/" .. table.concat(quiet_key, ",")
+	if lb and rawequal(lb.fleet, fleet) and rawequal(lb.comms, comms) and lb.pivot == pivot and lb.t == t and lb.fold_key == fold_key then
 		local same = true
 		for _, n in lb.model.nodes do
 			if n.kind == "chat" or n.kind == "orchestrator" then
@@ -130,6 +166,40 @@ function M.build(world: any, comms: { any }?, now: number?, pivot: string?): Mod
 	end
 	local function tenths(th: any): number
 		return math.clamp(math.floor((th.opacity or 1) * 10 + 0.5), 1, 10)
+	end
+	-- Folds: a hub's quiet threads as one, past FOLD_AT of them (not the
+	-- middle's own, not a hub the person opened). `alias[id]`: a folded
+	-- thread's fold, for what links to it.
+	local alias: { [string]: string } = {}
+	local fold_list: { [string]: { string } } = {}
+	local function plan_folds(list: { any }, parent_of: (th: any) -> string?)
+		local quiet_of: { [string]: { string } } = {}
+		for _, th in list do
+			local hub = parent_of(th)
+			if hub and th.kind ~= "orchestrator" and M.quiet(chats[th.id]) then
+				quiet_of[hub] = quiet_of[hub] or {}
+				table.insert(quiet_of[hub], th.id)
+			end
+		end
+		for hub, ids in quiet_of do
+			if #ids >= fold_at and not open[hub] then
+				fold_list[hub] = ids
+				for _, id in ids do
+					alias[id] = M.FOLD .. hub
+				end
+			end
+		end
+	end
+	local folds_added: { [string]: boolean } = {}
+	-- (A hub's fold, after its threads: added the first time one of its
+	-- folded threads comes up.)
+	local function add_fold(hub: string, parent: number, device: string?, hue: number?)
+		if folds_added[hub] then
+			return
+		end
+		folds_added[hub] = true
+		local ids = fold_list[hub]
+		add({ id = M.FOLD .. hub, kind = "chat", title = tostring(#ids), folded = ids, device = device, hue = hue, parent = parent, own = false, provider = "other", fade = 10, done = 0, total = 0 } :: any)
 	end
 	-- The Brain dump: the middle (one; else no middle, orchestrators free).
 	local brain: string? = nil
@@ -190,9 +260,22 @@ function M.build(world: any, comms: { any }?, now: number?, pivot: string?): Mod
 				hub_of[m.id] = #out.nodes
 			end
 		end
+		local machine_threads = {}
 		for _, list in { leads, rest } do
 			for _, th in list do
-				if th.id ~= brain then
+				if th.id ~= brain and hub_of[th.device or ""] then
+					table.insert(machine_threads, th)
+				end
+			end
+		end
+		plan_folds(machine_threads, function(th: any): string?
+			return if hub_of[th.device or ""] then M.MACHINE .. (th.device :: string) else nil
+		end)
+		for _, list in { leads, rest } do
+			for _, th in list do
+				if th.id ~= brain and alias[th.id] then
+					add_fold(M.MACHINE .. (th.device :: string), hub_of[th.device or ""], th.device, nil)
+				elseif th.id ~= brain then
 					local d, tot = todo(th.id)
 					local lead = if th.kind == "orchestrator" then th.id else th.orchestrator
 					add({
@@ -232,9 +315,17 @@ function M.build(world: any, comms: { any }?, now: number?, pivot: string?): Mod
 			total = 0,
 		})
 	end
+	plan_folds(rest, function(th: any): string?
+		local lead = th.orchestrator
+		return if lead and out.index[lead] and lead ~= brain then lead else nil
+	end)
 	for _, th in rest do
 		local lead = th.orchestrator
 		local p = (lead and out.index[lead]) or (brain and out.index[brain]) or 0
+		if alias[th.id] then
+			add_fold(lead, p, th.device, th.hue)
+			continue
+		end
 		local d, tot = todo(th.id)
 		add({
 			id = th.id,
@@ -302,7 +393,7 @@ function M.build(world: any, comms: { any }?, now: number?, pivot: string?): Mod
 	for _, e in comms or {} do
 		local at = e.at or 0
 		if at >= t - M.TALK_S then
-			local a, b = out.index[e.from or ""], out.index[e.to or ""]
+			local a, b = out.index[alias[e.from or ""] or e.from or ""], out.index[alias[e.to or ""] or e.to or ""]
 			local l = weak(a, b, at)
 			-- (In flight: one arc a pair, its latest, and only on a weak link.)
 			if l and a and b and at >= t - M.LIVE_S then
@@ -320,15 +411,15 @@ function M.build(world: any, comms: { any }?, now: number?, pivot: string?): Mod
 	end
 	for _, ask in (world.now or {}).asks or {} do
 		if ask.state == "open" and ask.from_chat and ask.orchestrator_id then
-			weak(out.index[ask.orchestrator_id], out.index[ask.from_chat])
+			weak(out.index[ask.orchestrator_id], out.index[alias[ask.from_chat] or ask.from_chat])
 		end
 	end
 	local prov = model.provenance(world)
 	for _, r in prov.routed do
-		weak(out.index[r.from], out.index[r.to])
+		weak(out.index[alias[r.from] or r.from], out.index[alias[r.to] or r.to])
 	end
 	out.sig = table.concat(sig, "|")
-	last_build = { fleet = fleet, comms = comms, pivot = pivot, t = t, model = out }
+	last_build = { fleet = fleet, comms = comms, pivot = pivot, t = t, model = out, fold_key = fold_key }
 	return out
 end
 
