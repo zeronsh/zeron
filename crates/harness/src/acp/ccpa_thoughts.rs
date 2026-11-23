@@ -26,7 +26,7 @@ use std::time::Duration;
 use serde_json::{Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
 
 const PROD_CCPA_ENDPOINT: &str = "https://cloudcode-pa.googleapis.com";
@@ -41,11 +41,18 @@ const DISABLE_PROXY_ENV: &str = "ZERON_ANTIGRAVITY_THOUGHTS_PROXY";
 pub(crate) struct ThoughtsProxy {
     base_url: String,
     shutdown: CancellationToken,
+    activity: watch::Receiver<u64>,
 }
 
 impl ThoughtsProxy {
     pub(crate) fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// Subscribe to monotonic CCPA HTTP liveness ticks (incremented on every
+    /// proxied request start and streaming response chunk).
+    pub(crate) fn subscribe_activity(&self) -> watch::Receiver<u64> {
+        self.activity.clone()
     }
 
     /// Start the loopback proxy unless disabled via `ZERON_ANTIGRAVITY_THOUGHTS_PROXY=0`.
@@ -66,6 +73,7 @@ impl ThoughtsProxy {
         let addr: SocketAddr = listener.local_addr()?;
         let base_url = format!("http://{addr}");
         let shutdown = CancellationToken::new();
+        let (activity_tx, activity_rx) = watch::channel(0u64);
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(30))
             .build()
@@ -75,6 +83,7 @@ impl ThoughtsProxy {
             fixed_upstream: fixed_upstream.map(|u| u.trim_end_matches('/').to_owned()),
             resolved_upstream: Mutex::new(None),
             skip_models: Mutex::new(HashSet::new()),
+            activity: activity_tx,
         });
         let cancel = shutdown.clone();
         tokio::spawn(async move {
@@ -105,7 +114,11 @@ impl ThoughtsProxy {
                 }
             }
         });
-        Ok(Self { base_url, shutdown })
+        Ok(Self {
+            base_url,
+            shutdown,
+            activity: activity_rx,
+        })
     }
 }
 
@@ -120,6 +133,13 @@ struct ProxyState {
     fixed_upstream: Option<String>,
     resolved_upstream: Mutex<Option<String>>,
     skip_models: Mutex<HashSet<String>>,
+    activity: watch::Sender<u64>,
+}
+
+impl ProxyState {
+    fn note_activity(&self) {
+        self.activity.send_modify(|n| *n = n.wrapping_add(1));
+    }
 }
 
 fn is_disabled(run_env: &BTreeMap<String, String>) -> bool {
@@ -476,7 +496,9 @@ async fn write_buffered_response(
 async fn stream_chunked_response(
     stream: &mut TcpStream,
     mut resp: reqwest::Response,
+    state: &ProxyState,
 ) -> std::io::Result<()> {
+    state.note_activity();
     let status = resp.status();
     let reason = status.canonical_reason().unwrap_or("OK");
     let mut head = format!("HTTP/1.1 {} {}\r\n", status.as_u16(), reason);
@@ -500,6 +522,7 @@ async fn stream_chunked_response(
         if chunk.is_empty() {
             continue;
         }
+        state.note_activity();
         let size_hdr = format!("{:x}\r\n", chunk.len());
         stream.write_all(size_hdr.as_bytes()).await?;
         stream.write_all(&chunk).await?;
@@ -514,6 +537,7 @@ async fn handle_connection(mut stream: TcpStream, state: Arc<ProxyState>) -> std
     let Some(req) = read_http_request(&mut stream).await? else {
         return Ok(());
     };
+    state.note_activity();
     let upstream_base = resolve_upstream(&state, &req.headers).await;
     let target = if req.target.starts_with('/') {
         req.target.as_str()
@@ -561,7 +585,9 @@ async fn handle_connection(mut stream: TcpStream, state: Arc<ProxyState>) -> std
                 state.skip_models.lock().await.insert(model);
             }
             match send_upstream(&state.client, &req.method, &url, &req.headers, req.body).await {
-                Ok(retry_resp) => return stream_chunked_response(&mut stream, retry_resp).await,
+                Ok(retry_resp) => {
+                    return stream_chunked_response(&mut stream, retry_resp, &state).await;
+                }
                 Err(err) => {
                     let msg = format!("upstream CCPA retry failed: {err}");
                     let _ = write_error_response(&mut stream, 502, "Bad Gateway", &msg).await;
@@ -569,10 +595,11 @@ async fn handle_connection(mut stream: TcpStream, state: Arc<ProxyState>) -> std
                 }
             }
         }
+        state.note_activity();
         return write_buffered_response(&mut stream, status, &headers, &err_body).await;
     }
 
-    stream_chunked_response(&mut stream, resp).await
+    stream_chunked_response(&mut stream, resp, &state).await
 }
 
 #[cfg(test)]

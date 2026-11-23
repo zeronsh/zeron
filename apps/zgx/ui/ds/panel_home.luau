@@ -173,7 +173,7 @@ end
 -- A lane's group, as the sidebar would group it (its view's Organize):
 -- a project's (its tile: hue and initial, or its own picture), a device's
 -- (this Mac's laptop, another's server); nil, one list with no groups.
-export type LaneGroup = { key: string, name: string, kind: "project" | "device", hue: string?, src: string?, emoji: string?, here: boolean? }
+export type LaneGroup = { key: string, name: string, kind: "project" | "device", hue: string?, src: string?, emoji: string?, here: boolean?, cloud: boolean? }
 -- A lane, as it comes: what it is, and where it runs. Its `status` as it
 -- should show (done or failed only while unseen); `at` when it last moved,
 -- `created` when it was made (the view's Sort); its project and device
@@ -189,7 +189,7 @@ export type Lane = {
 	-- What its corner says instead of when it moved (a port's `:3000`).
 	corner: string?,
 	project: { id: string, name: string, hue: string?, src: string?, emoji: string? }?,
-	device: { id: string, name: string, here: boolean? }?,
+	device: { id: string, name: string, here: boolean?, cloud: boolean? }?,
 	branch: string?,
 	-- A second line of its own, whatever the view (a port's address).
 	detail: string?,
@@ -358,6 +358,7 @@ function M.Lanes(props: LanesProps): Node
 			name = if d then d.name else locale.s("ds.sidebar.unknown_device"),
 			kind = "device",
 			here = d ~= nil and d.here == true,
+			cloud = d ~= nil and d.cloud == true,
 		}
 	end
 	-- Its second line, by the sidebar's rule (ds/session_row `detail`).
@@ -755,7 +756,7 @@ function M.Lanes(props: LanesProps): Node
 			local g = first.group :: LaneGroup
 			local on_new = props.on_new
 			local plus: Node? = nil
-			if on_new then
+			if on_new and not g.cloud then
 				local label = if props.new_label then props.new_label(g) else g.name
 				plus = IconButton {
 					id = `{props.list}-new-{gkey}`,
@@ -800,7 +801,7 @@ function M.Lanes(props: LanesProps): Node
 								weight = "$font.weight.semibold",
 							}, badge, g.hue or "gray", g.src, g.emoji, g.project)
 						end
-						return SessionRow.tile(Icon { name = if g.here then "laptop" else "remote-server", size = 12 }, badge)
+						return SessionRow.tile(Icon { name = if g.here then "laptop" elseif g.cloud then "cloud" else "remote-server", size = 12 }, badge)
 					end,
 					count = function(): number
 						return (now:get() :: Item).n or 0

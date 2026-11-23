@@ -39,6 +39,12 @@ search.index(M.ID, ui.t("settings.providers.title"), ui.t("settings.providers.te
 		terms = ui.t("settings.providers.native_subagents.terms"),
 	},
 	{
+		key = "code_mode",
+		title = ui.t("settings.providers.code_mode.label"),
+		section = ui.t("settings.providers.agent_settings"),
+		terms = ui.t("settings.providers.code_mode.terms"),
+	},
+	{
 		key = "update_policy",
 		title = ui.t("settings.providers.update_policy.label"),
 		section = ui.t("settings.providers.agent_settings"),
@@ -182,10 +188,41 @@ local open_settings = ui.state("settings_agent_open", "")
 -- The engine's native subagent settings: those it can switch, and those off.
 local subagents = ui.state("settings_subagents", nil :: { switchable: { string }, off: { string } }?)
 
+local function engine_params(params: { [string]: any }): { [string]: any }
+	local target = now().target
+	if target and target ~= CLOUD then
+		params.targetDeviceId = target
+	end
+	return params
+end
+
 local function load_subagents()
-	host.call("settings.engine", { method = "GetNativeSubagents", params = {} }):after(function(v: any)
+	host.call("settings.engine", { method = "GetNativeSubagents", params = engine_params({}) }):after(function(v: any)
 		subagents:set({ switchable = v.switchable or {}, off = v.off or {} })
 	end, function() end)
+end
+
+-- The engine's Code Mode settings: those that support it, and those turned on.
+local code_modes = ui.state("settings_code_modes", nil :: { supported: { string }, enabled: { string } }?)
+local code_modes_device: string? = nil
+
+local function load_code_modes()
+	local requested = shown_device()
+	if requested ~= code_modes_device then
+		code_modes:set(nil)
+	end
+	host.call("settings.engine", { method = "GetCodeMode", params = engine_params({}) }):after(function(v: any)
+		if shown_device() ~= requested then
+			return
+		end
+		code_modes_device = requested
+		code_modes:set({ supported = v.supported or {}, enabled = v.enabled or {} })
+	end, function()
+		if shown_device() == requested then
+			code_modes_device = nil
+			code_modes:set(nil)
+		end
+	end)
 end
 
 -- The Codex account whose banked resets are being chosen from (by its
@@ -358,6 +395,7 @@ local function card(row: State<agents.Agent>): Node
 		settings = not cloud_card,
 		on_settings = function()
 			load_subagents()
+			load_code_modes()
 			open_settings:set(id)
 		end,
 		on_add = function()
@@ -594,12 +632,15 @@ local function settings_dialog(): Node
 		end
 	end)
 	local native = ui.state("settings_agent_native", true)
+	local code_mode = ui.state("settings_agent_code_mode", false)
 	local policy = ui.state("settings_agent_policy", "notify")
 	ui.effect(function()
 		local a = agent()
 		local s = subagents:get()
+		local c = code_modes:get()
 		if a then
 			native:set(not (s ~= nil and table.find(s.off, a.id) ~= nil))
+			code_mode:set(c ~= nil and table.find(c.enabled, a.id) ~= nil)
 			policy:set((a :: any).update_policy or "notify")
 		end
 	end)
@@ -626,6 +667,10 @@ local function settings_dialog(): Node
 	local function switchable(): boolean
 		local a, s = agent(), subagents:get()
 		return a ~= nil and s ~= nil and table.find(s.switchable, a.id) ~= nil
+	end
+	local function supports_code_mode(): boolean
+		local a, c = agent(), code_modes:get()
+		return a ~= nil and c ~= nil and table.find(c.supported, a.id) ~= nil
 	end
 	-- One added from the ACP registry (or of your own): it can be removed
 	-- from the device, and has an environment there. One of your own isn't
@@ -725,7 +770,7 @@ local function settings_dialog(): Node
 							if not a then
 								return
 							end
-							host.call("settings.engine", { method = "SetNativeSubagents", params = { harness = a.id, enabled = on } }):after(function(v: any)
+							host.call("settings.engine", { method = "SetNativeSubagents", params = engine_params({ harness = a.id, enabled = on }) }):after(function(v: any)
 								if v and v.switchable then
 									subagents:set({ switchable = v.switchable, off = v.off or {} })
 								end
@@ -737,6 +782,28 @@ local function settings_dialog(): Node
 					},
 				},
 			},
+			ui.show(supports_code_mode, ds.Settings.Row {
+				label = ui.t("settings.providers.code_mode.label"),
+				description = ui.t("settings.providers.code_mode.description"),
+				control = ds.Switch {
+					value = code_mode,
+					label = ui.t("settings.providers.code_mode.label"),
+					on_change = function(on: boolean)
+						local a = agent()
+						if not a then
+							return
+						end
+						host.call("settings.engine", { method = "SetCodeMode", params = engine_params({ harness = a.id, enabled = on }) }):after(function(v: any)
+							if v and v.supported then
+								code_modes:set({ supported = v.supported, enabled = v.enabled or {} })
+							end
+						end, function()
+							code_mode:set(not on)
+							toast.show { title = ui.t("settings.engine.couldnt_save"):get(), tone = "danger" }
+						end)
+					end,
+				},
+			}),
 			ds.Settings.Row {
 				label = ui.t("settings.providers.skills_dollar.label"),
 				description = ui.t("settings.providers.skills_dollar.description"),

@@ -1,6 +1,6 @@
 # Zeron
 
-코딩 에이전트(Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, Antigravity)를 기본적으로 로컬에서 관리하고, 필요하면 여러 기기 간 동기화도 사용할 수 있습니다.
+코딩 에이전트(Claude Code, Codex, Cursor, OpenCode, Devin, Grok, Hermes, Pi, Antigravity, Muse Code, fx)를 기본적으로 로컬에서 관리하고, 필요하면 여러 기기 간 동기화도 사용할 수 있습니다.
 
 *[English](README.md) | [简体中文](README.zh-CN.md) | 한국어 | [日本語](README.ja.md) | [Español](README.es.md)*
 
@@ -10,11 +10,11 @@
 
 [GitHub Releases](https://github.com/zeronsh/zeron/releases/latest)에서 플랫폼에 맞는 최신 버전을 내려받으세요.
 
-- **macOS** — `zeron-<version>-macos-arm64.dmg`
+- **macOS** (Apple Silicon, macOS 13+) — `zeron-<version>-macos-arm64.dmg`
 - **Windows** — `zeron-<version>-windows-x86_64-setup.exe`
 - **Linux** — `zeron-<version>-linux-<arch>.tar.gz`의 압축을 풀고 안에 있는 `install.sh` 실행
 
-계정이나 네트워크 연결이 필요 없으며, 세션은 사용 중인 기기에 저장됩니다. 앱은 자동으로 업데이트됩니다.
+계정이나 네트워크 연결이 필요 없으며, 세션은 사용 중인 기기에 저장됩니다. 데스크톱 앱은 [zgx](https://zgx.zeron.sh)(플러그인, 템플릿, 테마를 지원하는 네이티브 Rust + 핫 리로드 Luau UI)로 빌드되었으며 자동으로 업데이트됩니다.
 
 ## 헤드리스 실행 (CLI)
 
@@ -51,6 +51,6 @@ Zeron을 후원해 주신 [The Context Company](https://www.thecontextcompany.co
 
 ---
 
-개발에 참여하고 싶거나 동작 방식이 궁금하다면 [Ask DeepWiki](https://deepwiki.com/zeronsh/zeron) 또는 [ARCHITECTURE.md](ARCHITECTURE.md)를 확인하세요.
+개발에 참여하고 싶거나 동작 방식이 궁금하다면 [Ask DeepWiki](https://deepwiki.com/zeronsh/zeron), [ARCHITECTURE.md](ARCHITECTURE.md), [CONTRIBUTORS.md](CONTRIBUTORS.md), [apps/zgx/README.md](apps/zgx/README.md)를 확인하세요.
 
 [MIT License](LICENSE)로 배포됩니다.

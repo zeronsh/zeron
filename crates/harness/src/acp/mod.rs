@@ -707,12 +707,32 @@ fn antigravity_legacy_archive() -> Option<crate::archive_install::ArchivePin> {
 const ANTIGRAVITY_ARCHIVE_NAME: &str = "antigravity-acp";
 
 /// the acp registry's manifest for google's server, the source of releases
-/// newer than the pin compiled into this build.
+/// installed and updated dynamically across platforms.
 pub const ANTIGRAVITY_REGISTRY_URL: &str = "https://raw.githubusercontent.com/agentclientprotocol/registry/main/antigravity-acp/agent.json";
 
 /// install marker for a release proven by google's code signature, which has
 /// no digest in zeron's source to record instead.
 const ANTIGRAVITY_SIGNED_MARKER: &str = "google-code-signature";
+
+/// install marker prefix for a Google-hosted release verified by the ACP
+/// registry's SHA-256 digest on platforms without OS code-signature verification.
+const ANTIGRAVITY_SHA256_MARKER_PREFIX: &str = "registry-sha256:";
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn is_trusted_sha256_marker(marker: &str) -> bool {
+    !crate::code_signature::SUPPORTED
+        && marker
+            .strip_prefix(ANTIGRAVITY_SHA256_MARKER_PREFIX)
+            .is_some_and(|digest| {
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            })
+}
 
 fn antigravity_entry() -> &'static str {
     if cfg!(windows) {
@@ -741,12 +761,17 @@ fn antigravity_registry_platform() -> Option<&'static str> {
 }
 
 /// completed installs whose marker proves their origin: a digest pinned by
-/// this or an earlier build, or google's verified code signature.
+/// this or an earlier build, google's verified code signature (macOS/Windows),
+/// or the ACP registry's verified SHA-256 digest (Linux).
 fn trusted_antigravity_installs() -> Vec<(semver::Version, PathBuf)> {
-    let pins: Vec<_> = [antigravity_archive(), antigravity_previous_archive(), antigravity_legacy_archive()]
-        .into_iter()
-        .flatten()
-        .collect();
+    let pins: Vec<_> = [
+        antigravity_archive(),
+        antigravity_previous_archive(),
+        antigravity_legacy_archive(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     crate::archive_install::installed_versions(ANTIGRAVITY_ARCHIVE_NAME)
         .into_iter()
         .filter_map(|(version, marker)| {
@@ -754,7 +779,8 @@ fn trusted_antigravity_installs() -> Vec<(semver::Version, PathBuf)> {
             let trusted = pins
                 .iter()
                 .any(|pin| pin.version == version && pin.sha512 == marker)
-                || (crate::code_signature::SUPPORTED && marker == ANTIGRAVITY_SIGNED_MARKER);
+                || (crate::code_signature::SUPPORTED && marker == ANTIGRAVITY_SIGNED_MARKER)
+                || is_trusted_sha256_marker(&marker);
             if !trusted {
                 return None;
             }
@@ -786,13 +812,16 @@ pub struct AntigravityRelease {
     pub version: String,
     /// `None` when the manifest has no usable google-hosted archive here.
     archive_url: Option<String>,
+    /// lowercase hex SHA-256 published by the ACP registry for `archive_url`.
+    sha256: Option<String>,
 }
 
 impl AntigravityRelease {
     /// whether zeron can prove this release's origin before installing it.
     pub fn installable(&self) -> bool {
         antigravity_archive().is_some_and(|pin| pin.version == self.version)
-            || (crate::code_signature::SUPPORTED && self.archive_url.is_some())
+            || (self.archive_url.is_some()
+                && (crate::code_signature::SUPPORTED || self.sha256.is_some()))
     }
 }
 
@@ -802,21 +831,49 @@ pub fn antigravity_release(manifest: &Value) -> Option<AntigravityRelease> {
     }
     let version = manifest.get("version")?.as_str()?;
     semver::Version::parse(version).ok()?;
-    let archive_url = antigravity_registry_platform()
+    let binary = antigravity_registry_platform()
         .and_then(|platform| manifest.get("distribution")?.get("binary")?.get(platform))
         .filter(|binary| {
             binary
                 .get("cmd")
                 .and_then(Value::as_str)
                 .is_some_and(|cmd| cmd.strip_prefix("./").unwrap_or(cmd) == antigravity_entry())
-        })
+        });
+    let archive_url = binary
         .and_then(|binary| binary.get("archive")?.as_str())
         .filter(|url| is_google_release_url(url))
         .map(str::to_owned);
+    let sha256 = archive_url.as_ref().and_then(|_| {
+        binary
+            .and_then(|binary| binary.get("sha256")?.as_str())
+            .map(str::trim)
+            .filter(|digest| is_sha256_hex(digest))
+            .map(str::to_ascii_lowercase)
+    });
     Some(AntigravityRelease {
         version: version.to_owned(),
         archive_url,
+        sha256,
     })
+}
+
+/// fetch the current Antigravity ACP release manifest from the ACP registry.
+pub async fn fetch_antigravity_release(
+    client: &reqwest::Client,
+) -> Result<AntigravityRelease, String> {
+    let response = client
+        .get(ANTIGRAVITY_REGISTRY_URL)
+        .send()
+        .await
+        .map_err(|error| format!("Antigravity ACP release check failed: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("Antigravity ACP release check failed: {error}"))?;
+    let json: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("Antigravity ACP release response was invalid: {error}"))?;
+    antigravity_release(&json)
+        .ok_or_else(|| "Antigravity ACP release response contained no valid version".into())
 }
 
 fn is_google_release_url(url: &str) -> bool {
@@ -837,31 +894,39 @@ pub async fn install_antigravity_release(
     if let Some(pin) = antigravity_archive().filter(|pin| pin.version == release.version) {
         return crate::archive_install::ensure_installed(pin, "Antigravity").await;
     }
-    if !crate::code_signature::SUPPORTED {
-        return Err(HarnessError::Install(format!(
-            "Antigravity {} is not pinned by this build of Zeron; update Zeron to install it",
-            release.version
-        )));
-    }
     let url = release.archive_url.as_deref().ok_or_else(|| {
         HarnessError::Install(format!(
             "the ACP registry lists no Google-hosted Antigravity {} archive for this platform",
             release.version
         ))
     })?;
+    let marker = if crate::code_signature::SUPPORTED {
+        ANTIGRAVITY_SIGNED_MARKER.to_owned()
+    } else {
+        let Some(sha256) = release.sha256.as_deref() else {
+            return Err(HarnessError::Install(format!(
+                "the ACP registry lists no SHA-256 checksum for Antigravity {} on this platform",
+                release.version
+            )));
+        };
+        format!("{ANTIGRAVITY_SHA256_MARKER_PREFIX}{sha256}")
+    };
     let verified = crate::archive_install::VerifiedRelease {
         name: ANTIGRAVITY_ARCHIVE_NAME,
         version: &release.version,
         url,
         entry: antigravity_entry(),
-        marker: ANTIGRAVITY_SIGNED_MARKER,
+        sha256: release.sha256.as_deref(),
+        marker: &marker,
     };
     let expected = release.version.clone();
     crate::archive_install::install_verified(&verified, "Antigravity", |dir| async move {
-        crate::code_signature::verify_google_signed(&dir).await?;
-        // a signature proves google built the server, not that it is the
-        // release the registry named; the install directory, and so launch
-        // order, is keyed by that name.
+        if crate::code_signature::SUPPORTED {
+            crate::code_signature::verify_google_signed(&dir).await?;
+        }
+        // a signature or registry digest proves what was fetched, not that it
+        // is the release the registry named; the install directory, and so
+        // launch order, is keyed by that name.
         confirm_reported_version(&dir.join(antigravity_entry()), &expected).await
     })
     .await
@@ -1047,23 +1112,81 @@ fn comparable_path(path: &str) -> String {
     }
 }
 
-/// Whether the listing device has a pinned, explicitly installable archive.
+#[derive(Debug, PartialEq, Eq)]
+enum AntigravityInstallTarget {
+    Registry(AntigravityRelease),
+    Fallback(crate::archive_install::ArchivePin),
+}
+
+fn select_antigravity_install_target(
+    registry_release: Option<AntigravityRelease>,
+    fallback: Option<crate::archive_install::ArchivePin>,
+) -> Option<AntigravityInstallTarget> {
+    if let Some(release) = registry_release.filter(AntigravityRelease::installable) {
+        let newer_or_equal = fallback.as_ref().is_none_or(|pin| {
+            match (
+                semver::Version::parse(&release.version),
+                semver::Version::parse(pin.version),
+            ) {
+                (Ok(reg), Ok(pinned)) => reg >= pinned,
+                _ => false,
+            }
+        });
+        if newer_or_equal {
+            return Some(AntigravityInstallTarget::Registry(release));
+        }
+    }
+    fallback.map(AntigravityInstallTarget::Fallback)
+}
+
+/// Whether the listing device supports Zeron's managed Antigravity archive install.
 pub fn can_install(harness: HarnessId) -> bool {
-    harness == HarnessId::Antigravity && antigravity_archive().is_some()
+    harness == HarnessId::Antigravity && antigravity_registry_platform().is_some()
 }
 
 /// Only an explicit Settings action may call this installer.
 pub async fn install_harness(harness: HarnessId) -> Result<(), HarnessError> {
-    let pin = (harness == HarnessId::Antigravity)
-        .then(antigravity_archive)
-        .flatten()
-        .ok_or_else(|| {
-            HarnessError::NotInstalled(
-                "Set ANTIGRAVITY_ACP_EXECUTABLE to an installed ACP server".into(),
-            )
-        })?;
-    crate::archive_install::ensure_installed(pin, "Antigravity").await?;
-    Ok(())
+    if harness != HarnessId::Antigravity || antigravity_registry_platform().is_none() {
+        return Err(HarnessError::NotInstalled(
+            "Set ANTIGRAVITY_ACP_EXECUTABLE to an installed ACP server".into(),
+        ));
+    }
+    let registry_release = match reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(20))
+        .build()
+    {
+        Ok(client) => match fetch_antigravity_release(&client).await {
+            Ok(release) => Some(release),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "Antigravity ACP registry lookup failed during install; falling back to bundled release"
+                );
+                None
+            }
+        },
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "could not build HTTP client for Antigravity registry lookup; falling back to bundled release"
+            );
+            None
+        }
+    };
+    match select_antigravity_install_target(registry_release, antigravity_archive()) {
+        Some(AntigravityInstallTarget::Registry(release)) => {
+            install_antigravity_release(&release).await?;
+            Ok(())
+        }
+        Some(AntigravityInstallTarget::Fallback(pin)) => {
+            crate::archive_install::ensure_installed(pin, "Antigravity").await?;
+            Ok(())
+        }
+        None => Err(HarnessError::NotInstalled(
+            "Set ANTIGRAVITY_ACP_EXECUTABLE to an installed ACP server".into(),
+        )),
+    }
 }
 
 /// User-global skill folders the server loads (`resolve_skills_paths`).
@@ -1190,6 +1313,63 @@ pub fn antigravity_saved_auth_method(home: &Path) -> Option<String> {
         .ok()
         .flatten()
         .map(|method| method.canonical)
+}
+
+/// Whether Antigravity's local conversation SQLite DB currently records an
+/// active (`PENDING` = 1 or `RUNNING` = 2) background task step (such as a
+/// `schedule` timer/cron or background command, all of which populate
+/// `task_details` and emit no open ACP `tool_call` frame while sleeping).
+///
+/// Checked only on the rare occasion that Antigravity's prompt-stall deadline
+/// elapses with zero wire or CCPA activity; missing DBs or schema differences
+/// fail closed (`false`) so genuinely wedged runs still settle.
+async fn antigravity_has_active_background_task(
+    run_env: &std::collections::BTreeMap<String, String>,
+    session_id: &str,
+) -> bool {
+    if session_id.is_empty()
+        || session_id.contains('/')
+        || session_id.contains('\\')
+        || session_id.contains("..")
+    {
+        return false;
+    }
+    let home = run_env
+        .get("GEMINI_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| antigravity_home().ok());
+    let Some(home) = home else {
+        return false;
+    };
+    let db_path = home
+        .join("antigravity-acp")
+        .join("conversations")
+        .join(format!("{session_id}.db"));
+    tokio::task::spawn_blocking(move || antigravity_db_has_active_background_task(&db_path))
+        .await
+        .unwrap_or(false)
+}
+
+fn antigravity_db_has_active_background_task(db_path: &Path) -> bool {
+    if !db_path.is_file() {
+        return false;
+    }
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let Ok(conn) = rusqlite::Connection::open_with_flags(db_path, flags) else {
+        return false;
+    };
+    let _ = conn.busy_timeout(Duration::from_millis(200));
+    // CortexStepStatus::PENDING (1) / RUNNING (2) on steps that carry
+    // background `task_details` (timers, crons, background commands).
+    conn.query_row(
+        "SELECT 1 FROM steps WHERE status IN (1, 2) \
+         AND task_details IS NOT NULL AND length(task_details) > 0 LIMIT 1",
+        [],
+        |_| Ok(()),
+    )
+    .is_ok()
 }
 
 fn sign_in_auth_method(
@@ -1809,7 +1989,7 @@ struct WarmAgent {
 /// Per-child resources whose lifetimes match the spawned ACP subprocess.
 struct ChildGuards {
     _scratch: Option<ScratchDir>,
-    _thoughts_proxy: Option<ccpa_thoughts::ThoughtsProxy>,
+    thoughts_proxy: Option<ccpa_thoughts::ThoughtsProxy>,
 }
 
 /// What `spawn_agent` hands a run.
@@ -2879,7 +3059,7 @@ impl AcpHarness {
         }
         let guards = ChildGuards {
             _scratch: scratch,
-            _thoughts_proxy: thoughts_proxy,
+            thoughts_proxy,
         };
         Ok((guards, child, stderr_tail, sign_in_prompted))
     }
@@ -5781,7 +5961,7 @@ async fn select_session_config(
 async fn run_session(session: Session) {
     let Session {
         // Locals drop in reverse binding order: reap the child before cleanup.
-        guards: _guards,
+        guards,
         mut child,
         client,
         mut incoming,
@@ -6080,6 +6260,10 @@ async fn run_session(session: Session) {
     };
     let mut prompt_stall_deadline: Option<tokio::time::Instant> =
         prompt_stall.map(|d| tokio::time::Instant::now() + d);
+    let mut ccpa_activity = guards
+        .thoughts_proxy
+        .as_ref()
+        .map(ccpa_thoughts::ThoughtsProxy::subscribe_activity);
     // The prompt in flight (re-sent by a preempt when the agent drops an
     // unstarted cancelled prompt). When an unrestorable resumed session fell
     // back to a fresh one, send the host's transcript-wrapped recovery prompt.
@@ -7217,10 +7401,33 @@ async fn run_session(session: Session) {
                 }
             },
 
+            // Antigravity CCPA liveness heartbeat: any LLM request start or
+            // streaming SSE chunk through the loopback thoughts proxy (including
+            // subagents, workflows, and post-timer wakeups) proves the server is
+            // actively working even while ACP stdout is quiet.
+            changed = async {
+                match ccpa_activity.as_mut() {
+                    Some(rx) => rx.changed().await,
+                    None => std::future::pending().await,
+                }
+            }, if ccpa_activity.is_some() => {
+                if changed.is_err() {
+                    ccpa_activity = None;
+                } else if harness == HarnessId::Antigravity
+                    && turn.is_some()
+                    && open_tools.is_empty()
+                    && questions.is_empty()
+                {
+                    prompt_stall_deadline =
+                        prompt_stall.map(|d| tokio::time::Instant::now() + d);
+                }
+            },
+
             // Prompt-stall watchdog: a prompt was sent and NOTHING has come
             // back on the wire at all (or for Antigravity, total silence past
-            // the bound with no open tools or user questions). Surface a
-            // visible error instead of indefinite Working.
+            // the bound with no open tools, user questions, CCPA HTTP activity,
+            // or active background tasks). Surface a visible error instead of
+            // indefinite Working.
             _ = tokio::time::sleep_until(
                 prompt_stall_deadline.unwrap_or_else(tokio::time::Instant::now),
             ), if prompt_stall_deadline.is_some()
@@ -7231,6 +7438,18 @@ async fn run_session(session: Session) {
                 && !stopping
                 && !preempt_sent =>
             {
+                if harness == HarnessId::Antigravity
+                    && antigravity_has_active_background_task(&request.env, &session_id).await
+                {
+                    tracing::debug!(
+                        target: "zeron_harness::acp",
+                        %session_id,
+                        "deferring Antigravity prompt-stall watchdog while a background task is active"
+                    );
+                    prompt_stall_deadline =
+                        prompt_stall.map(|d| tokio::time::Instant::now() + d);
+                    continue;
+                }
                 let message = if progress_seq == prompt_seq {
                     format!(
                         "{agent_name} stopped responding mid-turn \
@@ -7780,15 +7999,18 @@ mod tests {
 
         let current_server = install(current.version, current.sha512);
         install("9.0.0", "tampered");
+        install("9.1.0", "registry-sha256:not-a-valid-hex-digest");
         install("not-a-version", ANTIGRAVITY_SIGNED_MARKER);
         assert_eq!(harness.executable_path(), Some(current_server.clone()));
         assert!(!is_managed_antigravity_server(&legacy_server));
 
         let signed_server = install("99.0.0", ANTIGRAVITY_SIGNED_MARKER);
+        let sha256_marker = format!("{ANTIGRAVITY_SHA256_MARKER_PREFIX}{}", "a".repeat(64));
+        let sha256_server = install("98.0.0", &sha256_marker);
         let newest = if crate::code_signature::SUPPORTED {
             signed_server
         } else {
-            current_server.clone()
+            sha256_server
         };
         assert_eq!(harness.executable_path(), Some(newest.clone()));
         assert!(is_managed_antigravity_server(&newest));
@@ -7826,6 +8048,10 @@ mod tests {
             root.join("9.0.0").is_dir(),
             "untrusted installs are left alone"
         );
+        assert!(
+            root.join("9.1.0").is_dir(),
+            "malformed sha256 markers are left alone"
+        );
         assert!(root.join("not-a-version").is_dir());
 
         running.kill().unwrap();
@@ -7860,8 +8086,12 @@ mod tests {
         let release = AntigravityRelease {
             version: "9.9.9".into(),
             archive_url: Some(pin.url.to_owned()),
+            sha256: None,
         };
-        assert!(release.installable());
+        assert_eq!(release.installable(), crate::code_signature::SUPPORTED);
+        if !release.installable() {
+            return;
+        }
         let error = install_antigravity_release(&release).await.unwrap_err();
         assert!(
             error
@@ -7884,19 +8114,45 @@ mod tests {
         let Some(platform) = antigravity_registry_platform() else {
             return;
         };
-        let manifest = |version: &str, archive: &str, cmd: &str| {
+        let manifest = |version: &str, archive: &str, cmd: &str, sha256: Option<&str>| {
+            let mut binary = json!({"archive": archive, "cmd": cmd});
+            if let Some(sha256) = sha256 {
+                binary["sha256"] = json!(sha256);
+            }
             json!({
                 "id": "antigravity-acp",
                 "version": version,
-                "distribution": {"binary": {platform: {"archive": archive, "cmd": cmd}}}
+                "distribution": {"binary": {platform: binary}}
             })
         };
-        let url = "https://dl.google.com/agy-extensions/releases/x/agy-acp-server-1.3.0.zip";
+        let url = "https://dl.google.com/agy-extensions/releases/x/agy-acp-server-1.6.0.zip";
         let cmd = format!("./{}", antigravity_entry());
-        let release = antigravity_release(&manifest("1.3.0", url, &cmd)).unwrap();
-        assert_eq!(release.version, "1.3.0");
-        assert_eq!(release.archive_url.as_deref(), Some(url));
-        assert_eq!(release.installable(), crate::code_signature::SUPPORTED);
+        let release_without_sha =
+            antigravity_release(&manifest("1.6.0", url, &cmd, None)).unwrap();
+        assert_eq!(release_without_sha.version, "1.6.0");
+        assert_eq!(release_without_sha.archive_url.as_deref(), Some(url));
+        assert_eq!(release_without_sha.sha256, None);
+        assert_eq!(
+            release_without_sha.installable(),
+            crate::code_signature::SUPPORTED
+        );
+
+        let upper_digest = "A1B2C3D4".repeat(8);
+        let release_with_sha =
+            antigravity_release(&manifest("1.6.0", url, &cmd, Some(&upper_digest))).unwrap();
+        assert_eq!(
+            release_with_sha.sha256.as_deref(),
+            Some(upper_digest.to_ascii_lowercase().as_str())
+        );
+        assert!(
+            release_with_sha.installable(),
+            "a Google-hosted archive with a valid SHA-256 is installable on every platform"
+        );
+
+        let bad_sha =
+            antigravity_release(&manifest("1.6.0", url, &cmd, Some("not-a-sha256"))).unwrap();
+        assert_eq!(bad_sha.sha256, None);
+        assert_eq!(bad_sha.installable(), crate::code_signature::SUPPORTED);
 
         for rejected in [
             "http://dl.google.com/agy-extensions/releases/x.zip",
@@ -7906,16 +8162,22 @@ mod tests {
             "https://dl.google.com/other/x.zip",
             "https://example.com/agy-extensions/releases/x.zip",
         ] {
-            let release = antigravity_release(&manifest("1.3.0", rejected, &cmd)).unwrap();
+            let release =
+                antigravity_release(&manifest("1.6.0", rejected, &cmd, Some(&upper_digest)))
+                    .unwrap();
             assert_eq!(release.archive_url, None, "{rejected}");
+            assert_eq!(release.sha256, None, "{rejected}");
             assert!(!release.installable(), "{rejected}");
         }
-        let renamed = antigravity_release(&manifest("1.3.0", url, "./other_server")).unwrap();
+        let renamed =
+            antigravity_release(&manifest("1.6.0", url, "./other_server", Some(&upper_digest)))
+                .unwrap();
         assert_eq!(renamed.archive_url, None);
+        assert_eq!(renamed.sha256, None);
 
-        assert!(antigravity_release(&manifest("latest", url, &cmd)).is_none());
-        assert!(antigravity_release(&manifest("../1.3.0", url, &cmd)).is_none());
-        assert!(antigravity_release(&json!({"id": "other", "version": "1.3.0"})).is_none());
+        assert!(antigravity_release(&manifest("latest", url, &cmd, None)).is_none());
+        assert!(antigravity_release(&manifest("../1.6.0", url, &cmd, None)).is_none());
+        assert!(antigravity_release(&json!({"id": "other", "version": "1.6.0"})).is_none());
 
         if let Some(pin) = antigravity_archive() {
             let pinned =
@@ -7926,6 +8188,49 @@ mod tests {
                 "the pinned digest needs no registry archive"
             );
         }
+    }
+
+    #[test]
+    fn antigravity_install_target_prefers_newer_registry_release_and_falls_back_cleanly() {
+        let Some(pin) = antigravity_archive() else {
+            return;
+        };
+        let url = "https://dl.google.com/agy-extensions/releases/x/agy-acp-server-9.9.9.zip";
+        let newer = AntigravityRelease {
+            version: "9.9.9".into(),
+            archive_url: Some(url.into()),
+            sha256: Some("a".repeat(64)),
+        };
+        assert_eq!(
+            select_antigravity_install_target(Some(newer.clone()), Some(pin)),
+            Some(AntigravityInstallTarget::Registry(newer))
+        );
+
+        let older = AntigravityRelease {
+            version: "1.0.0".into(),
+            archive_url: Some(url.into()),
+            sha256: Some("a".repeat(64)),
+        };
+        assert_eq!(
+            select_antigravity_install_target(Some(older), Some(pin)),
+            Some(AntigravityInstallTarget::Fallback(pin))
+        );
+
+        let uninstallable = AntigravityRelease {
+            version: "9.9.9".into(),
+            archive_url: None,
+            sha256: None,
+        };
+        assert_eq!(
+            select_antigravity_install_target(Some(uninstallable), Some(pin)),
+            Some(AntigravityInstallTarget::Fallback(pin))
+        );
+
+        assert_eq!(
+            select_antigravity_install_target(None, Some(pin)),
+            Some(AntigravityInstallTarget::Fallback(pin))
+        );
+        assert_eq!(select_antigravity_install_target(None, None), None);
     }
 
     #[test]

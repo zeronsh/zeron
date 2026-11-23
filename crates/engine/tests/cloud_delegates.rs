@@ -130,7 +130,7 @@ async fn a_cloud_machine_starts_delegates_of_its_own_chat() {
                 None,
                 Some("/home/user/app".into()),
                 Some("main".into()),
-                None,
+                Some(zeron_proto::ChildKind::Subagent),
             )
             .unwrap();
     });
@@ -138,7 +138,8 @@ async fn a_cloud_machine_starts_delegates_of_its_own_chat() {
         .call_as(
             methods::MUTATE,
             serde_json::json!({
-                "op": "createChat", "chatId": "child", "parentChatId": "main", "cloud": true,
+                "op": "createChat", "chatId": "child", "parentChatId": "main",
+                "childKind": "subagent", "cloud": true,
                 "config": { "harness": "codex", "sandbox": "workspace-write" },
             }),
         )
@@ -150,8 +151,9 @@ async fn a_cloud_machine_starts_delegates_of_its_own_chat() {
     let child = core.workspace.chat("child").unwrap().unwrap();
     assert_eq!(child.device_id, "cloud-child");
     assert_eq!(child.parent_chat_id.as_deref(), Some("main"));
+    assert_eq!(child.child_kind, Some(zeron_proto::ChildKind::Subagent));
 
-    // The request named the parent and the agent — never a repository.
+    // The request named the parent, childKind and the agent — never a repository.
     let (request, body) = seen
         .lock()
         .unwrap()
@@ -163,6 +165,7 @@ async fn a_cloud_machine_starts_delegates_of_its_own_chat() {
     let body: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(body["chatId"], "child");
     assert_eq!(body["parentChatId"], "main");
+    assert_eq!(body["childKind"], "subagent");
     assert_eq!(body["config"]["harness"], "codex");
     assert!(
         body.get("repo").is_none() && body.get("spaceId").is_none(),

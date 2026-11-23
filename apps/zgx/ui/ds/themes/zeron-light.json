@@ -15,6 +15,9 @@
 		// GLASS_ALPHA 0.80); `background`, the same scrim as it was, stays
 		// what opaque reads (a button's ink, the dims).
 		"glass.tint": "#f3f3f5cc",
+		// Strong blur hides passing code without a conspicuous pale plate.
+		"zeron.diff.sticky.tint": "#f5f5f759",
+		"zeron.diff.sticky.solid": "#f5f5f7",
 		// zgx's own surfaces (its tooltips): white above the pale menus it shows over, opaque, so a tooltip reads as one.
 		"popover.bg": "#ffffff",
 		"surface": {
