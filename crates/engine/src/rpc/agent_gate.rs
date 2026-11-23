@@ -59,9 +59,10 @@ fn label(chat: Option<&Chat>, id: &str) -> String {
 }
 
 /// A chat that creates no chats: one with a parent that isn't a crew
-/// thread (a crew thread may have subagents of its own).
-fn can_not_delegate(chat: &Chat) -> bool {
-    chat.parent_chat_id.is_some() && chat.child_kind != Some(zeron_proto::ChildKind::Crew)
+/// thread (a crew thread may have subagents of its own, while
+/// Orchestrators is on: `orchestrating`; off, it is a plain child).
+fn can_not_delegate(chat: &Chat, orchestrating: bool) -> bool {
+    chat.parent_chat_id.is_some() && !(orchestrating && chat.child_kind == Some(zeron_proto::ChildKind::Crew))
 }
 
 fn refused(message: impl Into<String>) -> RpcError {
@@ -120,7 +121,7 @@ impl EngineRpc {
             id: chat_id.to_owned(),
             label: label(chat, chat_id),
             ceiling,
-            delegated: chat.is_some_and(can_not_delegate),
+            delegated: chat.is_some_and(|c| can_not_delegate(c, self.orchestration_on())),
         }
     }
 
@@ -174,30 +175,14 @@ impl EngineRpc {
         }
         match method {
             methods::MUTATE => match params["op"].as_str().unwrap_or_default() {
-                // While Orchestrators is off a new chat is as it is without
-                // it: a crew chat asked for is a plain one, and the rules of
-                // who creates what are the MCP server's.
-                "createChat" if !self.orchestration_on() => {
-                    if params["childKind"].as_str() == Some(zeron_proto::ChildKind::Crew.as_str()) {
+                "createChat" => {
+                    // (Every rule below holds whatever Orchestrators is;
+                    // only the crew's are its, and off a crew chat asked for
+                    // is made a plain one.)
+                    let orchestrating = self.orchestration_on();
+                    if !orchestrating && params["childKind"].as_str() == Some(zeron_proto::ChildKind::Crew.as_str()) {
                         params["childKind"] = Value::Null;
                     }
-                    let Some(config) = params.get_mut("config").filter(|c| c.is_object()) else {
-                        return Err(refused("An agent's new chat names its config (harness, sandbox, access)"));
-                    };
-                    if let Some((max_sandbox, max_access)) = calling.as_ref().and_then(|c| c.ceiling) {
-                        let sandbox = serde_json::from_value(config["sandbox"].clone())
-                            .unwrap_or(SandboxLevel::DangerFullAccess);
-                        let access = serde_json::from_value(config["access"].clone()).unwrap_or_default();
-                        let (sandbox, access, capped) = cap_access((sandbox, access), (max_sandbox, max_access));
-                        if capped {
-                            tracing::info!(chat = ?chat, "agents: a new chat's access capped at its creator's");
-                        }
-                        config["sandbox"] = json!(sandbox);
-                        config["access"] = json!(access);
-                    }
-                    Ok(params)
-                }
-                "createChat" => {
                     // Hidden chats are the engine's to make.
                     let new_id = params["chatId"].as_str().unwrap_or_default();
                     if zeron_proto::voice::is_orchestrator_chat(new_id)
@@ -213,7 +198,7 @@ impl EngineRpc {
                         }
                         let parent = params["parentChatId"].as_str().unwrap_or_default().to_owned();
                         if let Some(parent_chat) = chats.iter().find(|c| c.id == parent)
-                            && can_not_delegate(parent_chat)
+                            && can_not_delegate(parent_chat, orchestrating)
                         {
                             return Err(refused(format!(
                                 "{} is itself a delegated chat: only top-level chats and crew threads have children.",
@@ -222,7 +207,8 @@ impl EngineRpc {
                         }
                         // An orchestrator's own children are its crew unless
                         // it says otherwise.
-                        if parent == calling.id
+                        if orchestrating
+                            && parent == calling.id
                             && params.get("childKind").is_none_or(serde_json::Value::is_null)
                             && matches!(
                                 self.orchestration().role_of(&calling.id),
@@ -746,4 +732,41 @@ mod tests {
         assert!(sleep.is_err(), "sleep is the person's to set");
         core.sessions.shutdown().await;
     }
+
+    /// With Orchestrators off (the default) an agent's createChat is held to
+    /// every rule it is held to with it on: reserved ids, and the
+    /// delegation depth, a chat asked for as crew being a plain child.
+    #[tokio::test]
+    async fn off_an_agents_create_chat_keeps_every_rule() {
+        let (_temp, core) = core().await;
+        assert!(!core.orchestration.is_on());
+        chat(&core, "lead", "Lead", "workspace-write", "full-access").await;
+        let rpc = core.rpc_service();
+        let create = |caller: &str, id: &str, parent: Option<&str>, kind: Option<&str>| {
+            let mut params = json!({"op":"createChat", "chatId":id, "deviceId":core.device_id,
+                "config":{"harness":"codex","sandbox":"workspace-write","access":"full-access"}});
+            if let Some(parent) = parent {
+                params["parentChatId"] = json!(parent);
+            }
+            if let Some(kind) = kind {
+                params["childKind"] = json!(kind);
+            }
+            with_caller(agent(caller), rpc.handle(methods::MUTATE, params))
+        };
+        let refused = |r: Result<zeron_rpc::RpcReply, zeron_rpc::RpcError>, says: &str| match r {
+            Err(error) => assert!(error.to_string().contains(says), "{error}"),
+            Ok(_) => panic!("allowed; wanted: {says}"),
+        };
+        let brain = zeron_proto::orchestration::new_brain_dump_chat_id();
+        refused(create("lead", &brain, None, None).await, "reserved");
+        // Asked for as crew: a plain child, which creates no chats of its own.
+        create("lead", "kid", Some("lead"), Some("crew")).await.unwrap();
+        assert_eq!(core.workspace.chat("kid").unwrap().unwrap().child_kind, None);
+        refused(create("kid", "grandkid", Some("kid"), None).await, "delegated chat");
+        refused(create("kid", "sibling", None, None).await, "delegated chat");
+        refused(create("lead", "under-kid", Some("kid"), None).await, "itself a delegated chat");
+        assert!(core.workspace.chat("grandkid").unwrap().is_none());
+        core.sessions.shutdown().await;
+    }
+
 }
