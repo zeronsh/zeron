@@ -707,6 +707,37 @@ test("side chats are grouped as the sidebar's view groups sessions (by project, 
 	expect(app:has('role:button "Open side chat Draft the release notes"')).to_be(true)
 end)
 
+test("side chats on separate Cloud sandboxes group together under one Cloud device group", function()
+	local app = home()
+	app:command("side_cloud")
+	app:frames(10)
+	-- By project, then device (the default sidebar view): one project header,
+	-- one Cloud session header for all three Cloud sandboxes, and one local device.
+	app:set_state("sidebar.view", { organize = { "project", "device" } })
+	app:frames(30)
+	expect(table.concat(groups(app, "#panel-home-side-list"), ",")).to_be("comet-native,Cloud session,work-laptop")
+	expect(app:has('role:button "Open side chat Cloud run one"')).to_be(true)
+	expect(app:has('role:button "Open side chat Cloud run two"')).to_be(true)
+	expect(app:has('role:button "Open side chat Cloud run archived sandbox"')).to_be(true)
+	-- Folding the single Cloud group hides all three Cloud side chats at once.
+	app:click('#panel-home-side-list >> role:button "Cloud session"')
+	app:frames(30)
+	expect(app:has('role:button "Open side chat Cloud run one"')).to_be(false)
+	expect(app:has('role:button "Open side chat Cloud run two"')).to_be(false)
+	expect(app:has('role:button "Open side chat Cloud run archived sandbox"')).to_be(false)
+	expect(app:has('role:button "Open side chat Draft the release notes"')).to_be(true)
+	-- By device alone: still a single Cloud session group, with no "+" button
+	-- (side chats don't start a Cloud machine of their own).
+	app:set_state("sidebar.view", { organize = "device" })
+	app:frames(30)
+	app:hover('#panel-home-side-list >> role:button "Cloud session"')
+	app:frames(10)
+	expect(app:has('#panel-home-side-list-new-device:cloud')).to_be(false)
+	app:hover("#panel-home-device")
+	app:frames(10)
+	expect(table.concat(groups(app, "#panel-home-side-list"), ",")).to_be("Cloud session,work-laptop")
+end)
+
 test("a lane's tab in front from anywhere (a spawn chip, the lanes card) counts as seeing it", function()
 	local app = home()
 	expect(lane_row(app, "Open subagent read the docs")).to_contain("Completed")

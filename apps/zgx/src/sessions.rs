@@ -1657,6 +1657,12 @@ impl Sessions {
     }
 }
 
+/// Whether the person uses Cloud: a device of Cloud's (its logical device,
+/// or a chat's machine) is among theirs.
+pub(crate) fn uses_cloud() -> bool {
+    SESSIONS.with(|s| s.devices.borrow().as_array().into_iter().flatten().any(is_cloud))
+}
+
 /// A device row of Cloud's: the logical Cloud device or a session's machine
 /// (`zeron_proto::is_cloud_device` and the Cloud capabilities).
 pub(crate) fn is_cloud(d: &Json) -> bool {

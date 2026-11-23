@@ -3,8 +3,8 @@
 Settings → Providers → **Install** runs on the selected device, as its user. Merely
 listing or detecting agents never invokes these CLI installers. The table below
 was checked with `curl -fsSL` against the linked vendor documentation on
-2026-09-21. Commands download the vendor's current release, except for the existing
-pinned Antigravity archive.
+2026-09-21. Commands download the vendor's current release (for Antigravity,
+via the ACP registry with the bundled archive pin as an offline fallback).
 
 | Agent / documentation | Unix command (Linux and macOS) | Native Windows command |
 | --- | --- | --- |
@@ -16,9 +16,9 @@ pinned Antigravity archive.
 | [Grok](https://docs.x.ai/developers/release-notes) | `curl -fsSL https://x.ai/cli/install.sh \| bash` | `npm.cmd install -g @xai-official/grok` |
 | [Hermes](https://hermes-agent.nousresearch.com/docs/getting-started/installation) | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash` | `irm https://hermes-agent.nousresearch.com/install.ps1 \| iex` |
 | [Devin](https://cli.devin.ai/) | macOS, when brew resolves: `brew install --cask devin-cli`; otherwise `curl -fsSL https://cli.devin.ai/install.sh \| bash` | `irm https://static.devin.ai/cli/setup.ps1 \| iex` |
-| [Muse Code](https://dev.meta.ai/docs/muse-code/) | `curl -fsSL https://dev.meta.ai/install.sh \| sh` | `irm https://dev.meta.ai/install.ps1 \| iex` |
+| [Muse Code](https://dev.meta.ai/docs/muse-code/) | `curl -fsSL https://dev.meta.ai/install.sh \| bash` | `irm https://dev.meta.ai/install.ps1 \| iex` |
 | [fx](https://fx.sh/docs) | `curl -fsSL https://fx.sh/setup.sh \| bash` | Manual setup (no native Windows installer) |
-| Antigravity | Existing verified 1.1.1 archive in `acp::antigravity_archive`; no shell command | Same archive path on supported architectures |
+| Antigravity | Latest verified Google-hosted release from the ACP registry (falling back to the bundled archive pin in `acp::antigravity_archive`); no shell command | Same registry-backed archive path on supported architectures |
 
 Unix shell commands run through `sh -c`, with PATH augmented from the user's login
 shell and npm toolchain. Native Windows `irm` commands run through

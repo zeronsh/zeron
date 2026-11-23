@@ -191,6 +191,15 @@ return ui.component(function(props: Props): Node
 	local function current(): Model?
 		return by_id:get()[shown_id() or ""]
 	end
+	-- The chosen model's agent, listed or not: a value is `<agent>/<model>`,
+	-- so a model its catalog doesn't list (renamed, retired, or a catalog not
+	-- yet in) still names its agent, whose mark and tab it keeps rather
+	-- than falling to the first agent's.
+	local function chosen_agent(): Harness?
+		local m = current()
+		local id = if m then m.harness else string.match(shown_id() or "", "^([^/]+)/")
+		return if id then agents:get()[id] else nil
+	end
 	-- The level a model starts on.
 	local function own_effort(m: Model): string?
 		if not m.efforts or #m.efforts == 0 then
@@ -279,9 +288,9 @@ return ui.component(function(props: Props): Node
 		if t then
 			return t
 		end
-		local m = current()
-		if m then
-			return m.harness
+		local agent = chosen_agent()
+		if agent then
+			return agent.id
 		end
 		-- No model chosen: the first agent's tab; with none (a catalog
 		-- still coming), the starred one.
@@ -822,6 +831,10 @@ return ui.component(function(props: Props): Node
 			end
 			else nil,
 		say = named,
+		say_mark = function(): Mark.Name?
+			local agent = chosen_agent()
+			return if agent and not agent.icon then agent.mark else nil
+		end,
 		value = shown_model,
 		items = items :: any,
 		tone = props.tone or "chip",

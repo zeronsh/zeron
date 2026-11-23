@@ -48,6 +48,7 @@ async fn managed_install_reaches_session_started() {
         auto_approve: true,
         access: Default::default(),
         plan: false,
+        code_mode: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,

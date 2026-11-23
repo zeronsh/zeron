@@ -95,11 +95,15 @@ echo "zeron cloud: put back zeron-engine for $ver"
  */
 export const ENSURE_REPAIR =
   `{ h="\${ZERON_CLOUD_HOME:-$HOME}"; r="$h/.zeron/repair-engine"; ` +
-  `dd="\${ZERON_CLOUD_UNIT_DIR:-/etc/systemd/system}/${CLOUD_UNIT_NAME}.d"; ` +
+  `dd="\${ZERON_CLOUD_UNIT_DIR:-/etc/systemd/system}/${CLOUD_UNIT_NAME}.d"; c=0; ` +
   `t="$(mktemp)" && printf %s '${btoa(REPAIR_ENGINE_SCRIPT)}' | base64 -d >"$t" && ` +
   `{ cmp -s "$t" "$r" || install -m 0700 "$t" "$r"; } && ` +
   `printf '[Service]\\nExecStartPre=-%s\\n' "$r" >"$t" && ` +
-  `{ cmp -s "$t" "$dd/repair-engine.conf" || { sudo mkdir -p "$dd" && sudo install -m 0644 "$t" "$dd/repair-engine.conf" && sudo systemctl daemon-reload; }; }; ` +
+  `{ cmp -s "$t" "$dd/repair-engine.conf" || { sudo mkdir -p "$dd" && sudo install -m 0644 "$t" "$dd/repair-engine.conf" && c=1; }; } && ` +
+  // A unit written before OOMPolicy=continue was in it gets it as a drop-in.
+  `printf '[Service]\\nOOMPolicy=continue\\n' >"$t" && ` +
+  `{ cmp -s "$t" "$dd/oom-policy.conf" || { sudo mkdir -p "$dd" && sudo install -m 0644 "$t" "$dd/oom-policy.conf" && c=1; }; } && ` +
+  `{ [ "$c" = 0 ] || sudo systemctl daemon-reload; }; ` +
   `rm -f "$t"; } >/dev/null 2>&1 || true`;
 
 export const CLOUD_INSTALL_SCRIPT = `#!/bin/sh
@@ -204,6 +208,10 @@ EnvironmentFile=$data/env
 ExecStart=$app/current/zeron headless
 Restart=always
 RestartSec=1
+# A program an agent runs that the kernel kills for memory dies alone: the
+# engine (and every chat on the machine) carries on. systemd's default stops
+# the whole unit, so one runaway build or test restarted the engine.
+OOMPolicy=continue
 
 [Install]
 WantedBy=multi-user.target

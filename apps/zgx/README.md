@@ -1,14 +1,14 @@
 # Zeron in zgx
 
-Zeron's interface rebuilt on [zgx](https://zgx.zeron.sh), starting with
-onboarding. The interface is Luau (`ui/`): it hot-reloads as it is saved,
-keeping its state, so most work never rebuilds Rust. The Rust host
-(`src/main.rs`) makes windows, registers fonts and answers the scripts'
-actions, and speaks to a Zeron engine (`src/engine/`), which owns the
-account, this Mac's agents and GitHub for Cloud.
+Zeron's desktop app, built on [zgx](https://zgx.zeron.sh). The interface is
+Luau (`ui/`): it hot-reloads as it is saved, keeping its state, so most work
+never rebuilds Rust. The Rust host (`src/main.rs`) makes windows, registers
+fonts, answers the scripts' actions, and speaks to a Zeron engine
+(`src/engine/`), which owns the account, this machine's agents, plugins, and
+GitHub for Cloud.
 
-The composer's current behavior, layout and sizing contracts are documented
-in [Composer](docs/composer.md).
+Subsystem guides: [Composer](docs/composer.md) · [Plugins](docs/plugins.md) ·
+[Templates](docs/templates.md) · [Themes](docs/themes.md) · [i18n](docs/i18n.md).
 
 ## Running it
 
@@ -16,24 +16,27 @@ in [Composer](docs/composer.md).
 uses staging's edge (`https://staging.zeron.sh`) and sign-in client, and
 the engine zgx starts keeps its data in `~/.zeron-staging`: your production
 account, chats and devices aren't there. `ZERON_ZGX_ENV=production` points a
-build at production instead (`src/auth.rs` lists the other overrides).
+build at production instead (`src/auth.rs` lists the other overrides). Release
+packages build with `--features beta`, which targets production only and uses
+the installed `~/.zeron` data dir and port `27654` (see `dist/README.md`).
 
-You need Rust 1.85 or newer (edition 2024). We develop on macOS; Linux
-should work but is untested. The app is this folder: `apps/zgx` in
-zeronsh/zeron, or the root of zeronsh/zeron-zgx, which is a copy of it.
+You need Rust 1.85 or newer (edition 2024). The app builds and ships on macOS
+(Apple silicon, macOS 13+), Linux (x86_64 and aarch64), and Windows (x86_64).
+It lives in `apps/zgx` in `zeronsh/zeron`.
 
 On macOS you also need Zig 0.16 (`brew install zig@0.16`): Ghostty draws the
-panel's terminals there (zgx-desktop's `ghostty` feature), and zgx builds it
+panel's terminals there (`zgx-desktop`'s `ghostty` feature), and zgx builds it
 from source. The first build of it takes about six minutes, once; it's then
 cached in `~/Library/Caches/zgx-ghostty` for every checkout. Without Zig 0.16
 the build stops and says so (`ZIG` points it at another Zig executable).
 
 ```sh
-git clone git@github.com:zeronsh/zeron-zgx.git && cd zeron-zgx
-cargo run --release -- gallery      # the workbench: every component and demo
+cargo build -p zeron --bin zeron-engine   # at the repository root
+cd apps/zgx
+cargo run --release -- gallery            # the workbench: every component and demo
 ```
 
-The first build fetches zgx from GitHub (its `main`, pinned in `Cargo.lock`)
+The first build fetches zgx from GitHub (pinned in `Cargo.toml` / `Cargo.lock`)
 and takes a few minutes. After that, edits to `ui/` hot-reload in the running
 window without rebuilding. Pages worth a look, in the gallery's sidebar:
 
@@ -63,20 +66,22 @@ cargo run --release -- gallery --inspect   # devtools for `zgx inspect` / its MC
 ```
 
 A launch signed in goes straight to setup, and once setup has been finished
-on this Mac (its "Open Zeron"), to the main window; finishing setup opens it
+on this machine (its "Open Zeron"), to the main window; finishing setup opens it
 too. Signed out, or new, it's the intro and setup again.
 
 ### The engine
 
 Sign-in, Your agents and Connect GitHub are the engine's, over its local
 IPC: the engine keeps the session (zgx keeps none of its own), finds the
-agents and runs their sign-ins, and runs GitHub's device flow. zgx uses
+agents and runs their sign-ins, and runs GitHub's device flow. Dev builds use
 the staging engine, port 27871 with its data in `~/.zeron-staging`
 (`scripts/staging-app.sh`'s): one already running is used as it is,
 otherwise zgx starts `target/debug/zeron-engine` from this checkout's root
 (`cargo build -p zeron --bin zeron-engine` there first), detached, against
-zgx's edge and sign-in client. Signing in restarts it once, to sync. Never
-the production engine: port 27654 and `~/.comet-native` are refused.
+zgx's edge and sign-in client. Signing in restarts it once, to sync. Dev builds
+never touch the production engine unless explicitly requested
+(`ZERON_ZGX_ENGINE_PRODUCTION=1`): ports 27654/27655, `~/.zeron`,
+`~/.comet-native`, and `%LOCALAPPDATA%\Zeron` are refused by default.
 
 ```sh
 ZERON_ZGX_ENGINE_PORT=27881 ZERON_ZGX_ENGINE_DATA=/tmp/zgx-engine \
@@ -86,21 +91,20 @@ ZERON_ZGX_ENGINE_HOME=/tmp/zgx-home \
 
 `ZERON_ZGX_ENGINE_HOME` gives the engine zgx starts a home of its own
 (`HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`), so the agents' logins it reads
-and writes are that folder's, not this Mac's. `ZERON_ZGX_ENGINE_BIN` picks
+and writes are that folder's, not this machine's. `ZERON_ZGX_ENGINE_BIN` picks
 another engine; `ZERON_ZGX_ENGINE_SPAWN=0` only uses one that's running.
 `ZERON_ZGX_NO_BROWSER=1` opens no browser for a sign-in (a path instead
 writes the page there, for a test rig). See `src/engine/manager.rs`.
 `ZERON_ZGX_MOCK=1` offers the engine's mock agent in the model picker
-(src/chat.rs), to run a chat without a paid one; `ZERON_MOCK_DELAY_MS`
+(`src/chat.rs`), to run a chat without a paid one; `ZERON_MOCK_DELAY_MS`
 and `ZERON_MOCK_REPEAT` on the engine it starts pace and lengthen its replies.
 
-This is a cargo workspace of its own (in zeronsh/zeron, not a member of the
-root one). zgx
-builds against patched crates (winit, wgpu-hal, accesskit), and a git
-dependency does not carry a patch, so `Cargo.toml` repeats zgx's. Patching
-those in the root workspace would also change gpui's wgpu renderer. It
-tracks zgx's `main` branch: `cargo update -p zgx` moves `Cargo.lock` to the
-latest commit.
+This is a Cargo workspace of its own (not a member of the root workspace). zgx
+builds against patched crates (`winit`, `wgpu-hal`, `accesskit_*`), and a git
+dependency does not carry a patch, so `Cargo.toml` repeats zgx's. Keeping it
+separate isolates those patches from the engine and shared crates in the root
+workspace. `Cargo.toml` pins a zgx commit; bump the rev and run
+`cargo update -p zgx` to move `Cargo.lock`.
 
 ## Layout
 
@@ -111,10 +115,15 @@ ui/
   gallery.luau       every ds component in both themes: work on it here first
   intro.luau         the onboarding intro (zgx's agents_intro): art, outside the ds;
                      its exit decodes setup's first screen into the real window
+  consent.luau       isolated plugin permission consent window
+  template_consent.luau  isolated consent window for keeping/installing templates
+  locales/           ICU MessageFormat catalogs (en.json, zh-Hans.json)
+  templates/         built-in template overlays (zeron-v2/)
   ds/                the design system: the only place values live
-    init.luau        what screens import: Text, Button, Surface, Mark, Steps, setup
+    init.luau        what screens import: Text, Button, Surface, Mark, Steps, setup…
     tokens.luau      app tokens (zeron.*), declared in standard tokens; loads themes
     themes/          zeron-dark.json, zeron-light.json (restyle in place as saved)
+    palettes.luau    applies chosen light/dark themes over any active template
     text.luau        type styles × tones (ui.variants)
     button.luau      primary / secondary / ghost / accent × sm / md / lg
     surface.luau     plain / raised / sunken / overlay; interactive; selected
@@ -122,8 +131,7 @@ ui/
     steps.luau       progress dots
     decode.luau      a screen decoding out of characters (layer shader): transitions
     onboarding_frame.luau  setup's window and its steps (ds.Onboarding: Frame,
-                     Step and its footer pills, Form), the app's and the
-                     gallery's examples' alike
+                     Step and its footer pills, Form)
     card_wall.luau   columns of member cards drifting beside a screen's words
   screens/
     onboarding/      init.luau (the steps in ds.Onboarding.Frame), state.luau,
@@ -131,24 +139,23 @@ ui/
     shell/           the main window: init.luau (the frame), route.luau (where
                      it is: ui.router, the project, session and device open),
                      sidebar.luau (ds.Sidebar on @account/sessions), page.luau
-                     (the routed page, the composer, the files pane),
-                     title_bar.luau, settings.luau (its pages: `settings.add`),
-                     appearance.luau; ui/shell_fixture.luau runs it headless
-files/           the session page's files (Pane { project, session }):
-                     workspace.luau (a folder read as it opens, the file open,
-                     saves, what changes on disk), api.luau (src/files.rs's
-                     calls; ui/files_fixture.luau stubs them)
-    settings/        Settings' pages (init.luau adds them to the shell's list):
-                     General, Appearance, Notifications, Files, Profile (your
-                     account too: `settings/account` lands there), Providers,
-                     Devices, Members, About & updates (the engine's
-                     updater, src/about.rs); wallpaper.luau (a new
-                     chat's own picture, kept by the host); search.luau (⌘F, each page indexes
-                     its rows), store.luau (the account and organization),
-                     prefs.luau (this Mac's preferences, for other screens),
-                     chimes.luau; host.luau's calls, src/settings.rs's
-                     (ui/settings_stub.luau answers them headless)
+                     (the routed page, cards, split chats), split.luau,
+                     title_bar.luau, palette.luau, settings.luau, appearance.luau
+    chat/            home.luau (new chat), session.luau, composer.luau, store.luau,
+                     lanes.luau, dictation.luau, appshots.luau
+    files/           the session page's files (Pane { project, session }):
+                     workspace.luau, api.luau (src/files.rs's calls)
+    panel/           the companion panel: terminal.luau, browser.luau, previews.luau,
+                     home.luau
+    plugins/         Settings → Plugins UI (never overridden by templates)
+    templates/       Settings → Templates UI (never overridden by templates)
+    themes/          Settings → Themes UI
+    settings/        Settings' pages (General, Appearance, Notifications, Files,
+                     Profile, Providers, Devices, Members, Cloud, Billing, Voice,
+                     Appshots, Shortcuts, Archived, About & updates, …)
   assets/            art, icons (paths resolve from ui/)
+plugins-builtin/     built-in plugins shipped with the app (git, github, parallax-scenes)
+plugins-dev/         example plugins and staging rig
 fonts/               Instrument Serif (Geist comes from apps/ios/Zeron/Fonts)
 ```
 
@@ -208,10 +215,9 @@ Screens import only from `@ds` plus zgx's layout primitives
 (`ui.column`, `ui.row`, `ui.presence`…). Anything a second screen would want
 moves into `ds/`, and into the gallery, before it is used.
 
-The settled glass values from the shipping app carry over. There is one
-wash for hover, pressed and selected; selection adds only a ring, never a
-drop shadow. The dark window is a #080808 scrim at 90% over the under-window
-blur. Light is provisional.
+Glass uses one wash for hover, pressed and selected; selection adds only a
+ring, never a drop shadow. The dark window is a #080808 scrim at 90% over the
+under-window blur.
 
 ## Patterns
 
@@ -357,27 +363,23 @@ ZERON_ZGX_PLUGIN_LOG=1 …            # (dev) tool calls and answers
 zeron template list|use <id>|create <id> [--from F]|status <id>|delete <id>
 ```
 
-## Not yet
+## Packaging and updates
 
-- Release bundles: Zeron's own copy that templates inherit from (`.zeron/`) is made from `ui/`'s source, so a bundled build must ship that source too.
-- Templates from others: only templates made on this device (by you or your agents) can be used. A template runs with all of the app's powers, so importing someone else's waits for signing and consent like plugins have.
-- The per-screen templates of Oct 31 (`<data>/templates/screens/…`) were development-only and aren't carried over.
-- The engine's manager in full (the shipping app's `managed.rs`: the
-  installed engine, updates), and Sync's one-time import of a local
-  workspace on signing in.
-- Release bundling of `ui/` (`zgx_script::build::bundle` + `ScriptHost::bundled`).
-- Light theme neutrals against the shipping app.
-- Settings → Profile's photo, title and Delete account work against an
-  edge that has them (`PUT|DELETE /auth/me/photo`, `GET /auth/avatars/{key}`,
-  `PATCH /auth/me {title}`, `DELETE /auth/me {confirm}`): staging does,
-  production not until it's deployed there (until then the page says the
-  change didn't go through).
-- Settings → About & updates updates the engine only where the engine
-  manages its own install (a service install on Linux or a Mac); the Zeron
-  app's own engine is updated from the app. No download progress: the
-  engine's `ApplyUpdate` answers once it's done. "Check for updates" asks
-  the public release feed itself (the engine has no call to check now).
-  zgx isn't packaged, so nothing updates it.
-- Clicking a desktop banner opens the shipping app on its chat: the engine
-  posts the banners, and opens whichever app is registered as Zeron. zgx
-  needs registering as the app first.
+Release builds compile with `--features beta` (which enables production-only
+endpoints, `zeron` app identity, and managed engine lifecycle) and ship `ui/`
+and `plugins-builtin/` beside the binary so templates inherit from Zeron's
+packaged scripts:
+
+- **macOS:** `scripts/package-zgx-macos.sh` builds `Zeron.app` with
+  `Contents/MacOS/zeron`, `Contents/MacOS/Zeron Engine`, and
+  `Contents/Resources/{ui,plugins-builtin}` (requires macOS 13+).
+- **Linux:** `ZGX_VERSION=… ZGX_ENGINE=… scripts/package-linux.sh` packages
+  `zeron`, `zeron-engine`, `ui/`, and `plugins-builtin/`.
+- **Windows:** `scripts/package-windows.ps1 -ReleasesUrl … -ZgxVersion … -ZgxEngine …`
+  packages `zeron.exe` with `beta/<version>/{ui,plugins-builtin,engine/zeron.exe}`.
+
+Packaged builds manage the installed engine (`src/engine/manager.rs`), handle
+`zeron://` links including clicked desktop notification banners
+(`src/links.rs`), and self-update across release channels via `crates/update`
+(`src/about.rs`). See [`dist/README.md`](../../dist/README.md) for full
+packaging commands and release artifacts.

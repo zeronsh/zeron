@@ -57,7 +57,7 @@ fn composer_transition_rules_cover_width_clip_headers_and_interruption() {
         }
     })
     .unwrap();
-    assert_eq!(report.outcomes.len(), 4);
+    assert_eq!(report.outcomes.len(), 7);
     assert_eq!(report.failed(), 0, "{report:?}");
 }
 
@@ -217,3 +217,164 @@ fn composer_width_only_resize_publishes_the_frame_without_animating_and_preserve
     assert_eq!(c.report().field("frame"), c.report().field("destination"));
     assert!(!c.app.clock.wants_frame());
 }
+
+#[test]
+fn removing_last_attachment_to_skinny_avoids_transcript_repaint_storm() {
+    use std::path::PathBuf;
+    use std::rc::Rc;
+    use zgx::input::InputEvent;
+
+    let ui_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui");
+    let build_app = || -> TestApp {
+        let app = TestApp::new(|runtime| ScriptHost::new(runtime, ui_dir.join("chat_fixture.luau")));
+        app.ui.scene.borrow_mut().resize(1240., 820.);
+        app.frames(2);
+        assert!(app.host.run_command("go_s6"));
+        app.frames(30);
+        // Populate a rich multi-message transcript so any accidental per-frame
+        // transcript layout/repaint shows up unmistakably in damage area.
+        let mut rows = Vec::new();
+        for i in 0..8 {
+            let text = format!(
+                "## Section {i}\n\nAssistant reply with **bold**, `inline code`, and a code block:\n\n```rust\nfn handle_frame_{i}(dt: f32) -> f32 {{\n    let eased = 1.0 - (1.0 - dt).powi(3);\n    eased * 100.0\n}}\n```\n\n- Bullet one explaining layout geometry\n- Bullet two explaining scroll anchoring and bottom fade\n"
+            );
+            let user_entry = serde_json::json!({
+                "id": format!("u{i}"),
+                "role": "user",
+                "parts": [{ "id": format!("u{i}p"), "kind": "text", "text": format!("Question {i}: check composer shrink.") }],
+                "createdAt": 1_762_000_000_000_i64 + i as i64 * 1000
+            });
+            let asst_entry = serde_json::json!({
+                "id": format!("a{i}"),
+                "role": "assistant",
+                "status": "complete",
+                "parts": [{ "id": format!("a{i}x"), "kind": "text", "text": text }],
+                "createdAt": 1_762_000_000_500_i64 + i as i64 * 1000
+            });
+            rows.push(crate::chat::built_entry(&user_entry, "doc", None, Some("Opus")).unwrap());
+            rows.push(crate::chat::built_entry(&asst_entry, "doc", None, Some("Opus")).unwrap());
+        }
+        app.host
+            .shared("chat.messages", Value::Nil)
+            .set(Value::List(Rc::from(rows)));
+        app.frames(30);
+        app
+    };
+
+    let drop_path = |app: &mut TestApp, path: PathBuf| {
+        let r = app.bounds("#transcript");
+        app.ui.dispatch(InputEvent::FilesDrop {
+            x: r.x + r.width / 2.,
+            y: r.y + r.height * 0.3,
+            paths: vec![path].into(),
+        });
+        app.frames(30);
+    };
+
+    let click_remove_chip = |app: &mut TestApp| {
+        let chip = app
+            .find(r#"#chat-composer >> role:button "notes.md""#)
+            .or_else(|| app.find(r#"#chat-composer >> role:button ~"zgx""#))
+            .or_else(|| app.find(r#"#chat-composer >> role:button ~"Image""#))
+            .expect("cargo chip button");
+        let r = app.ui.scene.borrow().transformed_bounds(chip);
+        app.ui.dispatch(InputEvent::PointerMove {
+            x: r.x + r.width / 2.,
+            y: r.y + r.height / 2.,
+        });
+        app.frames(10);
+        let _ = app.ui.scene.borrow_mut().flush();
+        app.click(r#"#chat-composer >> role:button ~"Remove""#);
+    };
+
+    let verify_shrink = |label: &str, path: PathBuf| -> TestApp {
+        let mut app = build_app();
+        drop_path(&mut app, path);
+        let expanded_h = app.bounds("#chat-composer").height;
+        assert!(
+            expanded_h > 180.0,
+            "{label}: expected expanded composer with cargo + inline chip, got {expanded_h}"
+        );
+        let _ = app.ui.scene.borrow_mut().flush();
+
+        click_remove_chip(&mut app);
+
+        let mut prev_h = expanded_h;
+        let mut prev_tb_x = app.bounds("role:textbox \"Message\"").x;
+        let mut prev_tb_y = app.bounds("role:textbox \"Message\"").y;
+        let mut anim_damage_total = 0.0f64;
+        let mut max_anim_frame_damage = 0.0f32;
+        let mut max_anim_calls = 0u64;
+
+        for f in 0..16 {
+            let calls_before = app.calls();
+            app.frame();
+            let report = app.ui.scene.borrow_mut().flush();
+            let dcalls = app.calls() - calls_before;
+            let dmg_pt2: f32 = report.damage.iter().map(|r| r.width * r.height).sum();
+            let comp_h = app.bounds("#chat-composer").height;
+            let tb = app.bounds("role:textbox \"Message\"");
+
+            assert!(
+                comp_h <= prev_h + 0.05,
+                "{label} f{f:02}: composer height must shrink monotonically ({prev_h:.2} -> {comp_h:.2})"
+            );
+            assert!(
+                tb.x >= prev_tb_x - 0.05,
+                "{label} f{f:02}: textbox x must shift monotonically right ({prev_tb_x:.2} -> {:.2})",
+                tb.x
+            );
+            assert!(
+                tb.y >= prev_tb_y - 0.05,
+                "{label} f{f:02}: textbox y must shift monotonically down ({prev_tb_y:.2} -> {:.2})",
+                tb.y
+            );
+            prev_h = comp_h;
+            prev_tb_x = tb.x;
+            prev_tb_y = tb.y;
+
+            if f >= 1 {
+                anim_damage_total += dmg_pt2 as f64;
+                max_anim_frame_damage = max_anim_frame_damage.max(dmg_pt2);
+                max_anim_calls = max_anim_calls.max(dcalls);
+            }
+        }
+
+        let settled_h = app.bounds("#chat-composer").height;
+        assert!(
+            (settled_h - 81.0).abs() < 2.0,
+            "{label}: composer should settle to compact skinny height (~81), got {settled_h:.2}"
+        );
+        assert!(
+            max_anim_frame_damage < 250_000.0,
+            "{label}: animation frame repainted too much area ({max_anim_frame_damage:.0} pt2; full transcript repaint regression)"
+        );
+        assert!(
+            anim_damage_total < 1_500_000.0,
+            "{label}: total animation damage across f01..f15 too high ({anim_damage_total:.0} pt2)"
+        );
+        assert!(
+            max_anim_calls <= 50,
+            "{label}: animation frame script calls spiked to {max_anim_calls}"
+        );
+        assert_eq!(app.error(), None, "{label}: unexpected script error");
+        app
+    };
+
+    let _file_app = verify_shrink("file", PathBuf::from("/tmp/zeron-drop/notes.md"));
+
+    let img = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/assets/favicons/zgx.png");
+    let mut img_app = verify_shrink("image", img.clone());
+
+    // Re-attaching an image after 1 -> 0 must still open the Lightbox cleanly
+    // (Lightbox.Host stays mounted on the composer root across 0 <-> 1 cargo).
+    drop_path(&mut img_app, img);
+    img_app.click(r#"#chat-composer >> role:button ~"zgx""#);
+    img_app.frames(6);
+    assert!(
+        img_app.find(r#"role:dialog "Image viewer""#).is_some(),
+        "image lightbox should open cleanly after removing and re-attaching an image"
+    );
+    assert_eq!(img_app.error(), None);
+}
+

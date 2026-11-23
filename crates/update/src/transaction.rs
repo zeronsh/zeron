@@ -150,10 +150,11 @@ impl Layout {
         }
     }
 
-    /// The new version's executable called `name`.
+    /// The new version's executable called `name`. (A beta's directory is
+    /// `beta-<version>`: `crate::managed_dir`, where it's staged.)
     fn new_binary(&self, target: &str, name: &std::ffi::OsStr) -> PathBuf {
         match self {
-            Self::Versioned { app_root } => app_root.join(target).join(name),
+            Self::Versioned { app_root } => app_root.join(crate::managed_dir(target)).join(name),
             Self::MacBundle { incoming, .. } => incoming.join("Contents/MacOS").join(name),
             Self::WindowsFolder { incoming, .. } => incoming.clone(),
         }
@@ -193,8 +194,8 @@ impl Layout {
             Self::Versioned { app_root } => {
                 let current = std::fs::read_link(app_root.join("current")).ok()?;
                 Some(Whoami {
-                    me: version_dir(&exe)?,
-                    current: current.file_name()?.to_str()?.to_owned(),
+                    me: dir_version(&version_dir(&exe)?).to_owned(),
+                    current: dir_version(current.file_name()?.to_str()?).to_owned(),
                 })
             }
             Self::MacBundle { bundle, incoming } => {
@@ -908,6 +909,18 @@ struct Whoami {
 
 fn version_dir(path: &Path) -> Option<String> {
     Some(path.parent()?.file_name()?.to_str()?.to_owned())
+}
+
+/// The version a managed install's directory holds: its name, or a beta's
+/// without the `beta-` its directory is named with (`crate::managed_dir`).
+/// Compared with the record's versions as they are, a beta's never matched:
+/// an update to one found no files and went back, on every Linux install
+/// (a Cloud machine's included) that was on a beta.
+fn dir_version(name: &str) -> &str {
+    match name.strip_prefix("beta-") {
+        Some(version) if crate::Channel::of_version(version) == crate::Channel::Beta => version,
+        _ => name,
+    }
 }
 
 /// What to do about a record, given who's starting.
@@ -1683,6 +1696,45 @@ mod tests {
             finished_at: None,
             interrupted: false,
         }
+    }
+
+    /// A beta is staged and installed as `beta-<version>` (`managed_dir`);
+    /// the record names versions. An update from one beta to the next found
+    /// the new one's files where they are and each side knows itself, as for
+    /// a stable release, whichever way the old one's directory was named (a
+    /// Cloud machine's first install names it as its version).
+    #[cfg(unix)]
+    #[test]
+    fn a_betas_directory_is_its_version() {
+        let root = tempfile::tempdir().unwrap();
+        let app_root = root.path().to_path_buf();
+        for dir in ["0.3.8-beta.1", "beta-0.3.8-beta.4"] {
+            std::fs::create_dir_all(app_root.join(dir)).unwrap();
+            std::fs::write(app_root.join(dir).join("zeron-engine"), "").unwrap();
+        }
+        std::os::unix::fs::symlink(app_root.join("0.3.8-beta.1"), app_root.join("current")).unwrap();
+        let mut update = transaction(Phase::Requested);
+        update.from = "0.3.8-beta.1".into();
+        update.target = "0.3.8-beta.4".into();
+        update.layout = Layout::Versioned { app_root: app_root.clone() };
+        let name = std::ffi::OsStr::new("zeron-engine");
+        assert!(update.layout.new_binary(&update.target, name).is_file(), "the new beta's files are found");
+        let old = app_root.join("0.3.8-beta.1/zeron-engine");
+        let new = app_root.join("beta-0.3.8-beta.4/zeron-engine");
+        assert_eq!(update.layout.whoami_of(&old, &update), Some(who("0.3.8-beta.1", "0.3.8-beta.1")));
+        assert_eq!(step_for(&update, &who("0.3.8-beta.1", "0.3.8-beta.1")), Step::StartTrial);
+        update.phase = Phase::Trial;
+        assert_eq!(update.layout.whoami_of(&new, &update), Some(who("0.3.8-beta.4", "0.3.8-beta.1")));
+        assert_eq!(step_for(&update, &who("0.3.8-beta.4", "0.3.8-beta.1")), Step::RunTrial);
+        // Committed: `current` names the beta's directory.
+        std::fs::remove_file(app_root.join("current")).unwrap();
+        std::os::unix::fs::symlink(app_root.join("beta-0.3.8-beta.4"), app_root.join("current")).unwrap();
+        assert_eq!(update.layout.whoami_of(&new, &update), Some(who("0.3.8-beta.4", "0.3.8-beta.4")));
+        assert_eq!(step_for(&update, &who("0.3.8-beta.4", "0.3.8-beta.4")), Step::SettleCommitted);
+        // A stable release's directory is its version; a name that only
+        // looks like a beta's is left as it is.
+        assert_eq!(dir_version("0.3.9"), "0.3.9");
+        assert_eq!(dir_version("beta-0.3.9"), "beta-0.3.9");
     }
 
     /// `current` only moves at the commit, so who's starting says what happened.

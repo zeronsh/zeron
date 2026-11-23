@@ -40,7 +40,7 @@ export const runnerRefusal = (auth: Verified, method: string, url: URL): string 
     case "vault":
       // Grants are the one vault call a runner makes (for its own device; the
       // vault route re-checks the body's deviceId against the token).
-      if (method === "POST" && parts.length === 3 && parts[2] === "grant") return undefined;
+      if (method === "POST" && parts.length === 3 && (parts[2] === "grant" || parts[2] === "grants")) return undefined;
       return "runner tokens may only request vault grants";
     case "device":
       if (parts[1] === auth.deviceId) return undefined;

@@ -48,13 +48,18 @@ function M.page_pad(): any
 	return ui.raw(M.FOOTER + M.GAP, "the docked composer's footer line and its gap to the foot")
 end
 
-function M.room(height: () -> number): { foot: () -> number }
+function M.room(height: () -> number, target: (() -> number)?): { foot: () -> number, foot_target: (() -> number)? }
 	return {
 		-- (The viewport ends at the footer's line: what floats over it is the
 		-- composer above that.)
 		foot = function(): number
 			return height() - M.FOOTER
 		end,
+		foot_target = if target
+			then function(): number
+				return target() - M.FOOTER
+			end
+			else nil,
 	}
 end
 

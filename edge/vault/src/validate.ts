@@ -3,7 +3,7 @@
  * Worker is trusted to have VERIFIED the caller, not to have validated every
  * field of a client-supplied body, so the vault re-checks types and bounds.
  */
-import { VAULT_PROVIDERS, type GrantRequest, type VaultCaller, type VaultProviderId } from "./api";
+import { VAULT_PROVIDERS, type GrantManyRequest, type GrantRequest, type VaultCaller, type VaultProviderId } from "./api";
 import { ID_RE } from "./env";
 import { isRepoFullName } from "./providers/github-app";
 
@@ -46,6 +46,32 @@ export const isGrantRequest = (value: unknown): value is GrantRequest => {
     request.sig.length <= MAX_SIG_CHARS &&
     (request.repo === undefined || isRepoFullName(request.repo)) &&
     (request.inheritFrom === undefined || isId(request.inheritFrom))
+  );
+};
+
+/** The most providers one batch may name: every provider but `github`. */
+export const MAX_BATCH_PROVIDERS = VAULT_PROVIDERS.length - 1;
+
+/** A batch names providers sorted and distinct (so the signed list has one
+ * spelling), never `github` (its grants need a repository). */
+export const isGrantManyRequest = (value: unknown): value is GrantManyRequest => {
+  if (typeof value !== "object" || value === null) return false;
+  const request = value as Partial<GrantManyRequest>;
+  const providers = request.providers;
+  if (!Array.isArray(providers) || providers.length === 0 || providers.length > MAX_BATCH_PROVIDERS) return false;
+  for (let i = 0; i < providers.length; i++) {
+    const provider: unknown = providers[i];
+    if (!isProvider(provider) || provider === "github") return false;
+    if (i > 0 && !((providers[i - 1] as string) < provider)) return false;
+  }
+  return (
+    isId(request.deviceId) &&
+    typeof request.ts === "number" &&
+    Number.isSafeInteger(request.ts) &&
+    request.ts > 0 &&
+    typeof request.sig === "string" &&
+    request.sig.length > 0 &&
+    request.sig.length <= MAX_SIG_CHARS
   );
 };
 
