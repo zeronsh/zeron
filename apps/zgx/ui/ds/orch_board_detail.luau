@@ -9,16 +9,18 @@
 -- answers, each move with why), the newest last.
 --
 --   Detail.Detail { ctx = ctx, act = act, card = card_id,
---     on_close = fn,          -- its close control (or Back, with `back`)
+--     on_back = fn,           -- its close control (or Back, with `back`):
+--                             -- the detail goes, the card is left as it is
 --     back = true,            -- in a panel: a way back, not a close
 --     flat = true }           -- no surface of its own (the panel's)
 --
 -- By itself, for a host that shows a card's detail in its own place (an
 -- orchestrator's side panel): the board's props (ds/orch_board_ctx), with
--- the card's id and the same three:
+-- the card's id and the same three. (Its `on_close` stays the board's:
+-- Mark done and Drop, `fn(id, dropped)`; `on_back` is its Back.)
 --
 --   Detail.Card { items = fn, cards = fn, asks = fn, …, card = fn -> id?,
---     on_close = fn, back = true, flat = true }
+--     on_back = fn, back = true, flat = true }
 
 local Icon = require("@self/icon")
 local IconButton = require("@self/icon_button").IconButton
@@ -40,7 +42,7 @@ export type Props = {
 	act: Actions.Actions,
 	-- Its card's id (not `id`: a component's `id` names its element).
 	card: string,
-	on_close: (() -> ())?,
+	on_back: (() -> ())?,
 	back: boolean?,
 	flat: boolean?,
 }
@@ -168,14 +170,14 @@ M.Detail = ui.component(function(props: Props): Node
 		min_w = 0,
 		gap = "$space.1",
 		items = "center",
-		if props.back and props.on_close
+		if props.back and props.on_back
 			then IconButton {
 				id = "orch-detail-back",
 				icon = "alt-arrow-left",
 				label = locale.t("orch.board.back"),
 				size = "md",
 				tone = "quiet",
-				on_click = props.on_close,
+				on_click = props.on_back,
 			}
 			else nil,
 		ui.div { grow = 1, basis = 0, min_w = 0, owner_mark },
@@ -199,14 +201,14 @@ M.Detail = ui.component(function(props: Props): Node
 				end,
 			},
 		}) :: Node,
-		if props.on_close and not props.back
+		if props.on_back and not props.back
 			then IconButton {
 				id = "orch-detail-close",
 				icon = "close",
 				label = locale.t("orch.board.close_detail"),
 				size = "md",
 				tone = "quiet",
-				on_click = props.on_close,
+				on_click = props.on_back,
 			}
 			else nil,
 	}
@@ -788,7 +790,7 @@ M.Card = ui.component(function(props: Ctx.Props): Node
 		return Ctx.read(given)
 	end, function(id: string): Node
 		local p: any = props
-		return M.Detail { ctx = ctx, act = act, card = id, on_close = p.on_close, back = p.back == true, flat = p.flat == true }
+		return M.Detail { ctx = ctx, act = act, card = id, on_back = p.on_back, back = p.back == true, flat = p.flat == true }
 	end, { w_full = true })
 end)
 

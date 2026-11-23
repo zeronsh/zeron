@@ -563,7 +563,7 @@ return ui.div { w_full = true, h_full = true, ui.scroll {
 				detail.back = true
 				detail.flat = true
 				detail.on_open_card = nil
-				detail.on_close = function()
+				detail.on_back = function()
 					list_open:set(nil)
 				end
 				-- (A panel's look: its own surface, the list or a card in it.)

@@ -85,6 +85,9 @@ export type Props = {
 	-- taken off the board, put back, and opened (seen). Each may answer a
 	-- promise (`:after(done, failed)`): refused, the board says so.
 	on_close: ((id: string, dropped: boolean) -> any)?,
+	-- A card's detail shown by itself (ds/orch_board_detail's Card): its
+	-- Back (or close) control. Never closes the card.
+	on_back: (() -> ())?,
 	on_reopen: ((id: string) -> any)?,
 	on_hold: ((id: string, held: boolean) -> any)?,
 	on_pause: ((id: string) -> any)?,

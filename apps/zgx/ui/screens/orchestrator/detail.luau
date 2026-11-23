@@ -69,16 +69,9 @@ end
 -- A card opened: the board's detail of it, with Back.
 local function card_detail(props: Props): Node
 	local board: { [string]: any } = table.clone(props.board or {})
-	-- (Its `on_close` is two things to the board: Back, with `back`, and a
-	-- card marked done or dropped, by its id. Told apart by that id.)
-	local close_card: any = board.on_close
-	board.on_close = function(id: any, dropped: any): any
-		if type(id) == "string" and type(close_card) == "function" then
-			return (close_card :: (string, any) -> any)(id, dropped)
-		end
-		props.on_back()
-		return nil
-	end
+	-- (Back leaves the card as it is; the board's `on_close` stays Mark
+	-- done and Drop.)
+	board.on_back = props.on_back
 	board.card = function(): string?
 		local d = props.of()
 		return d and d.item

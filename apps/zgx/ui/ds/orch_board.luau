@@ -624,7 +624,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 							ctx = ctx,
 							act = act,
 							card = id,
-							on_close = function()
+							on_back = function()
 								ctx.open(nil)
 							end,
 						},
