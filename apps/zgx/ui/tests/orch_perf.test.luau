@@ -42,7 +42,7 @@ local function report(name: string, list: { number }, counts: { [string]: number
 		table.insert(parts, `{k}={v / n}`)
 	end
 	table.sort(parts)
-	print(`ORCHPERF {name} p50={string.format("%.1f", pct(list, 0.5))}ms max={string.format("%.1f", pct(list, 1))}ms per-change: {table.concat(parts, " ")}`)
+	print(`zeron-zgx: ORCHPERF {name} p50={string.format("%.1f", pct(list, 0.5))}ms max={string.format("%.1f", pct(list, 1))}ms per-change: {table.concat(parts, " ")}`)
 end
 
 test("perf: one thread's status change, the whole page", function()

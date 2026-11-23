@@ -63,8 +63,6 @@ for _, col in { 200, 220, 260, 320 } do
 		local cards = app:count("#control-board-tab >> .orch-card")
 		expect(cards > 5).to_be(true)
 		expect(app:has('#control-board-review >> .orch-card "Changes panel diff: horizontal scroll with fixed gutter and a title long enough to clamp"')).to_be(true)
-		local col_line = string.match(app:tree("#control-board-review", 0), "[^\n]+") or ""
-		print(`COLUMN {col}: {col_line}`)
 		local outside: { string } = {}
 		for i = 1, cards do
 			local target = `#control-board-tab >> .orch-card [{i}]`
@@ -77,10 +75,8 @@ for _, col in { 200, 220, 260, 320 } do
 				end
 			end
 		end
-		if #outside > 0 then
-			print(table.concat(outside, "\n", 1, math.min(#outside, 8)))
-		end
-		expect(#outside).to_be(0)
+		-- (What spills, said by the failure itself.)
+		expect(table.concat(outside, "\n", 1, math.min(#outside, 8))).to_be("")
 		expect(app:error()).to_be_nil()
 	end)
 end

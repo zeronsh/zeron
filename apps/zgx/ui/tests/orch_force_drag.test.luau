@@ -36,7 +36,7 @@ local function run(world: string?, what: string, label: string): (number, number
 		end
 	end
 	local b = app:state("control_map_force_stats") or {}
-	print(`FORCEDRAG {label}: frame p50={string.format("%.2f", pct(times, 0.5))}ms p95={string.format("%.2f", pct(times, 0.95))}ms max={string.format("%.2f", pct(times, 1))}ms base_draws={(b.draws or 0) - (a.draws or 0)} overlay={(b.overlay or 0) - (a.overlay or 0)} steps={(b.steps or 0) - (a.steps or 0)} settle_after_release={f}f/{string.format("%.1f", (os.clock() - t1) * 1000)}ms`)
+	print(`zeron-zgx: FORCEDRAG {label}: frame p50={string.format("%.2f", pct(times, 0.5))}ms p95={string.format("%.2f", pct(times, 0.95))}ms max={string.format("%.2f", pct(times, 1))}ms base_draws={(b.draws or 0) - (a.draws or 0)} overlay={(b.overlay or 0) - (a.overlay or 0)} steps={(b.steps or 0) - (a.steps or 0)} settle_after_release={f}f/{string.format("%.1f", (os.clock() - t1) * 1000)}ms`)
 	return pct(times, 0.5), pct(times, 0.95)
 end
 
@@ -171,7 +171,7 @@ test("force graph: a live push changing one chat's state repaints its rings alon
 	end
 	local b = app:state("control_map_force_stats")
 	table.sort(times)
-	print(`FORCEPUSH 164 agents, one chat's state a push: frame p50={string.format("%.2f", times[10])}ms max={string.format("%.2f", times[20])}ms base_draws={b.draws - a.draws} status_draws={(b.status or 0) - (a.status or 0)} builds={b.builds - a.builds}`)
+	print(`zeron-zgx: FORCEPUSH 164 agents, one chat's state a push: frame p50={string.format("%.2f", times[10])}ms max={string.format("%.2f", times[20])}ms base_draws={b.draws - a.draws} status_draws={(b.status or 0) - (a.status or 0)} builds={b.builds - a.builds}`)
 	expect(b.builds).to_be(a.builds)
 end)
 

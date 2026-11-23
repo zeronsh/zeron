@@ -94,7 +94,7 @@ test("force sim: it comes to rest, and a still web stays still", function()
 		end
 	end
 	local ms = (os.clock() - t0) * 1000
-	print(`FORCEPERF sim 154 nodes cold: steps={s.steps} ms={string.format("%.1f", ms)}`)
+	print(`zeron-zgx: FORCEPERF sim 154 nodes cold: steps={s.steps} ms={string.format("%.1f", ms)}`)
 	expect(still).to_be(true)
 	-- From where it rested: nothing new, nothing moves.
 	local kept = sim.positions(s)
@@ -136,7 +136,7 @@ test("force graph: a cold open settles a frame at a time, no frame long, then no
 	local app = open()
 	local f, worst = settle(app, 240)
 	local s = stats(app)
-	print(`FORCEPERF cold open 164 agents: frames_to_settled={f} (~{math.floor(f * 16.7)}ms) worst_frame={string.format("%.1f", worst)}ms sim_worst={string.format("%.1f", s.worst_ms or 0)}ms first_draw={string.format("%.1f", s.first_ms or 0)}ms steps={s.steps} nodes={s.nodes}`)
+	print(`zeron-zgx: FORCEPERF cold open 164 agents: frames_to_settled={f} (~{math.floor(f * 16.7)}ms) worst_frame={string.format("%.1f", worst)}ms sim_worst={string.format("%.1f", s.worst_ms or 0)}ms first_draw={string.format("%.1f", s.first_ms or 0)}ms steps={s.steps} nodes={s.nodes}`)
 	expect(s.nodes >= 160).to_be(true)
 	expect((s.settled or 0) >= 1).to_be(true)
 	expect(f <= 60).to_be(true)
@@ -160,7 +160,7 @@ test("force graph: a cold open settles a frame at a time, no frame long, then no
 	local b = stats(app)
 	expect(b.draws).to_be(a.draws)
 	expect(b.steps).to_be(a.steps)
-	print(`FORCEIDLE draws {b.draws - a.draws} overlay {b.overlay - a.overlay} status {(b.status or 0) - (a.status or 0)}`)
+	print(`zeron-zgx: FORCEIDLE draws {b.draws - a.draws} overlay {b.overlay - a.overlay} status {(b.status or 0) - (a.status or 0)}`)
 	expect(b.overlay - a.overlay <= 2 * 21).to_be(true)
 end)
 
@@ -203,7 +203,7 @@ test("force graph: a warm open (places kept) is settled on its first frame", fun
 	local ms = (os.clock() - t0) * 1000
 	app:frames(2)
 	local s = stats(app)
-	print(`FORCEPERF warm open 164 agents: first frame={string.format("%.1f", ms)}ms wakes={s.wakes} steps={s.steps} first_draw={string.format("%.1f", s.first_ms or 0)}ms`)
+	print(`zeron-zgx: FORCEPERF warm open 164 agents: first frame={string.format("%.1f", ms)}ms wakes={s.wakes} steps={s.steps} first_draw={string.format("%.1f", s.first_ms or 0)}ms`)
 	expect(s.wakes or 0).to_be(0)
 	expect(s.steps or 0).to_be(0)
 	expect(s.builds > (a.builds or 0)).to_be(true)
@@ -255,7 +255,7 @@ test("force graph: a new thread wakes only round it, and settles quickly", funct
 	local t0 = os.clock()
 	local f, worst = settle(app, 240)
 	local b = stats(app)
-	print(`FORCEPERF one more thread: frames={f} worst={string.format("%.1f", worst)}ms steps={b.steps - a.steps} total={string.format("%.1f", (os.clock() - t0) * 1000)}ms`)
+	print(`zeron-zgx: FORCEPERF one more thread: frames={f} worst={string.format("%.1f", worst)}ms steps={b.steps - a.steps} total={string.format("%.1f", (os.clock() - t0) * 1000)}ms`)
 	expect(b.builds).to_be(a.builds + 1)
 	expect(f <= 30).to_be(true)
 end)
@@ -601,7 +601,7 @@ local function check_labels(app: any, label: string): (number, number)
 			named += 1
 		end
 	end
-	print(`FORCENAMES {label}: {named} of {chats} threads named`)
+	print(`zeron-zgx: FORCENAMES {label}: {named} of {chats} threads named`)
 	for a, la in labs do
 		for b, lb in labs do
 			if a < b then
@@ -649,7 +649,7 @@ test("force names: every thread named, none on another name, a mark or a line; t
 	settle(app, 240)
 	app:frames(5)
 	local named, chats = check_labels(app, "big")
-	print(`FORCENAMES 164 agents: {named} of {chats} threads named, placed in {string.format("%.1f", stats(app).names_ms or -1)}ms`)
+	print(`zeron-zgx: FORCENAMES 164 agents: {named} of {chats} threads named, placed in {string.format("%.1f", stats(app).names_ms or -1)}ms`)
 	-- (A crowd of 160 can't all have room at this scale: those that do,
 	-- the pressing first, then idle and finished ones whole where there's
 	-- room; the rest on hover. Fit zooms out to show the whole web, never a
@@ -863,7 +863,7 @@ test("force names: the same size on screen at three zooms", function()
 		end
 		check_labels(app, `zoom {k}`)
 	end
-	print(`FORCENAMESIZE on screen {string.format("%.2f %.2f %.2f", sizes[1], sizes[2], sizes[3])}`)
+	print(`zeron-zgx: FORCENAMESIZE on screen {string.format("%.2f %.2f %.2f", sizes[1], sizes[2], sizes[3])}`)
 	for _, v in sizes do
 		expect(math.abs(v - 11.5) < 0.05).to_be(true)
 	end
@@ -890,7 +890,7 @@ test("force names: leaders are short pointers, never longer than a link could be
 			expect(`{la.id} leader {len <= labels_mod.LEADER + 0.5}`).to_be(`{la.id} leader true`)
 		end
 	end
-	print(`FORCELEADERS {n} leaders`)
+	print(`zeron-zgx: FORCELEADERS {n} leaders`)
 	expect(stats(app).leaders >= 0).to_be(true)
 end)
 
@@ -996,7 +996,7 @@ local function names_clear_of_controls(app: any, label: string): number
 			expect(`{label}: {la.id} under a control {hit}`).to_be(`{label}: {la.id} under a control false`)
 		end
 	end
-	print(`FORCECORNERS {label}: {#d.labels} names, {over} under a control, {stats(app).corner_replaces or 0} placed again for them`)
+	print(`zeron-zgx: FORCECORNERS {label}: {#d.labels} names, {over} under a control, {stats(app).corner_replaces or 0} placed again for them`)
 	return #d.labels
 end
 for _, p in { "machine", "orchestrator" } do

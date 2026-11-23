@@ -41,6 +41,9 @@ const LIGHTS: Rect = Rect {
     height: 14.,
 };
 const TOGGLE: &str = "role:button \"Toggle sidebar\"";
+/// Frames (at 60 a second) past the shell's 2 s of start-up, its last
+/// deferred load among them.
+const SETTLED: usize = 130;
 
 fn shell() -> (TestApp, Window) {
     let slot: Rc<RefCell<Option<Window>>> = Rc::default();
@@ -70,6 +73,11 @@ fn shell() -> (TestApp, Window) {
     app.ui.scene.borrow_mut().resize(1200., 800.);
     app.frames(60);
     assert_eq!(app.error(), None, "the shell failed to load");
+    // Its start-up done: the pages it loads once the window has settled
+    // (screens/shell/init, 2 s in) are loaded before anything here is
+    // watched, as a window gone full screen a while after it opened has them.
+    app.frames(SETTLED);
+    assert_eq!(app.error(), None, "the shell's late loads failed");
     let window = slot.borrow_mut().take().expect("the host was made");
     (app, window)
 }
