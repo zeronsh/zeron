@@ -334,7 +334,9 @@ fn card_of(scene: &Scene, node: NodeId, cards: &[NodeId]) -> Option<NodeId> {
 /// over its column's cards, and beside cards arriving by a crossfade.
 #[test]
 fn a_card_in_flight_is_over_every_card_at_rest_and_solid_from_its_first_frame() {
-    for (command, moving) in [("engine_start", "it-keyed"), ("engine_five", "it-chat")] {
+    // (Out of a folded drawer, its copy rises behind the head line instead:
+    // decision 52, `a_card_out_of_a_folded_drawer_rises_from_behind_the_head_line`.)
+    for (command, moving) in [("engine_five", "it-chat"), ("engine_five", "it-release")] {
         let mut app = mount("orch_board_places_fixture.luau", 1240., 820., "all");
         run(&app, command);
         frames(&app, 47);
@@ -520,4 +522,132 @@ fn the_empty_lines_words_wait_for_the_last_card() {
         }
     }
     assert!(seen.last().is_some_and(|o| *o > 0.99), "its words never came: {seen:?}");
+}
+
+/// Where the copies' layer paints to: its box cut by its clip.
+fn painted_bottom(scene: &Scene, node: NodeId) -> f32 {
+    let b = scene.bounds(node);
+    let cut = match scene.clip_inset(node).map(|c| c.bottom) {
+        Some(zgx::layout::Length::Px(v)) => v,
+        _ => 0.,
+    };
+    b.y + b.height - cut
+}
+
+/// The child of `column` that `node` stands in.
+fn in_column(scene: &Scene, node: NodeId, column: NodeId) -> Option<NodeId> {
+    let mut last = node;
+    for a in scene.ancestors(node) {
+        if a == column {
+            return Some(last);
+        }
+        last = a;
+    }
+    None
+}
+
+/// What the copies' checks share: each frame of a drawer move, the copy
+/// (if any) solid, its layer over every card of the column, and cut at the
+/// head line's top as it shows.
+fn copy_frame(app: &mut TestApp, place: &str, f: usize) -> Option<(f32, f32)> {
+    let ghost = one(app, &format!("#orch-col-{place} >> .orch-card-ghost"))?;
+    let layer = one(app, &format!("#orch-col-{place} >> .orch-ghosts")).unwrap();
+    let column = one(app, &format!("#orch-col-{place}")).unwrap();
+    let head = one(app, &format!("#orch-col-{place} >> .orch-drawer-head")).unwrap();
+    let cards = all(app, &format!("#orch-col-{place} >> .orch-card"));
+    let scene = app.ui.scene.borrow();
+    assert!(opacity(&scene, ghost) > 0.995, "frame {f}: the copy at {}", opacity(&scene, ghost));
+    let over = scene.z(in_column(&scene, layer, column).unwrap());
+    for c in cards {
+        let under = scene.z(in_column(&scene, c, column).unwrap());
+        assert!(over > under, "frame {f}: a card at rest ({under}) not under the copies ({over})");
+    }
+    let line = scene.bounds(head).y;
+    let cut = painted_bottom(&scene, layer);
+    assert!((cut - line).abs() < 1., "frame {f}: the copies are cut at {cut}, the head line's top is at {line}");
+    Some((scene.bounds(ghost).y, line))
+}
+
+/// Decision 51: a card going into a folded drawer travels over the cards
+/// closing its gap, solid, and slides down behind the head line's top.
+#[test]
+fn a_card_into_a_folded_drawer_goes_over_its_gap_and_behind_the_head_line() {
+    let mut app = mount("orch_board_places_fixture.luau", 1240., 820., "all");
+    run(&app, "person_pause");
+    frames(&app, 47);
+    let mut seen = Vec::new();
+    for f in 0..26 {
+        app.frame();
+        if let Some(at) = copy_frame(&mut app, "running", f) {
+            seen.push(at);
+        }
+    }
+    assert!(seen.len() >= 18, "the copy showed {} frames", seen.len());
+    // (Down, and at the end behind the line.)
+    assert!(seen.windows(2).all(|w| w[1].0 >= w[0].0 - 0.01), "it went up: {seen:?}");
+    let (top, line) = *seen.last().unwrap();
+    assert!(top >= line - 1., "it ended at {top}, the line at {line}: not behind it");
+    frames(&app, 10);
+    assert!(one(&mut app, ".orch-card-ghost").is_none());
+}
+
+/// Decision 52: a card coming out of a folded drawer rises from behind the
+/// head line's top, at full strength (its copy; the card itself shows once
+/// it has landed), never over the line nor below the lane's foot.
+#[test]
+fn a_card_out_of_a_folded_drawer_rises_from_behind_the_head_line() {
+    let mut app = mount("orch_board_places_fixture.luau", 1240., 820., "all");
+    run(&app, "engine_start");
+    frames(&app, 47);
+    let mut seen = Vec::new();
+    for f in 0..26 {
+        app.frame();
+        if let Some(at) = copy_frame(&mut app, "running", f) {
+            // (The card in its slot shows nothing while its copy rises.)
+            let card = one(&mut app, "#orch-card-it-keyed").unwrap();
+            assert!(opacity(&app.ui.scene.borrow(), card) < 0.01, "frame {f}: the card shows under its copy");
+            seen.push(at);
+        }
+    }
+    assert!(seen.len() >= 18, "the copy showed {} frames", seen.len());
+    let (first, line) = seen[0];
+    assert!(first >= line - 25., "it started at {first}, well above the line at {line}");
+    assert!(seen.windows(2).all(|w| w[1].0 <= w[0].0 + 0.01), "it went down: {seen:?}");
+    frames(&app, 10);
+    assert!(one(&mut app, ".orch-card-ghost").is_none(), "its copy stayed");
+    let card = one(&mut app, "#orch-card-it-keyed").unwrap();
+    assert!(opacity(&app.ui.scene.borrow(), card) > 0.995, "landed, the card doesn't show");
+}
+
+/// Decision 53: the closing detail stays: its content, pinned right in its
+/// narrowing box, fades over 130 ms.
+#[test]
+fn the_closing_detail_fades_its_content_pinned_right() {
+    let mut app = mount("orch_board_places_fixture.luau", 1240., 820., "all");
+    app.host.set_state("board_selected", Value::from("it-chat")).unwrap();
+    frames(&app, 30);
+    app.host.set_state("board_selected", Value::Nil).unwrap();
+    let mut fades = Vec::new();
+    for f in 1..=7 {
+        app.frame();
+        let content = one(&mut app, "#orch-board-detail").unwrap_or_else(|| panic!("gone at frame {f}"));
+        let texts = all(&mut app, "#orch-board-detail >> role:button").len();
+        let space = one(&mut app, ".orch-board-detail-space").unwrap();
+        let scene = app.ui.scene.borrow();
+        let (c, s) = (scene.bounds(content), scene.bounds(space));
+        assert!(texts > 0 && c.height > 100., "frame {f}: an empty detail ({texts} buttons, {} high)", c.height);
+        assert!(((c.x + c.width) - (s.x + s.width)).abs() < 0.5, "frame {f}: not pinned right");
+        fades.push(opacity(&scene, content));
+    }
+    eprintln!("zeron-zgx: BOARDMOTION detail closing opacity {fades:?}");
+    assert!(fades[0] > 0.5, "nearly gone on its first frame: {fades:?}");
+    assert!(fades.windows(2).all(|w| w[1] <= w[0] + 1e-3), "not fading: {fades:?}");
+    // (Faded by 130 ms of its fade; let go once its box has closed.)
+    frames(&app, 3);
+    if let Some(content) = one(&mut app, "#orch-board-detail") {
+        let o = opacity(&app.ui.scene.borrow(), content);
+        assert!(o < 0.01, "still showing ({o}) after its fade");
+    }
+    frames(&app, 8);
+    assert!(one(&mut app, "#orch-board-detail").is_none(), "still there once its box closed");
 }

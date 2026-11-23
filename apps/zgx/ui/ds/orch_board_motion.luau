@@ -69,6 +69,9 @@ M.EASE = "outQuint"
 M.FADE = 120
 M.CAP = 3
 M.STAGGER = 60
+-- A folded drawer's head line and the column's inset under it (ds/orch_board):
+-- where a card going into the drawer, or coming out of it, is cut.
+M.HEAD_LINE = 36
 -- A travelling card is opaque within FADE ms of its first frame: its fade
 -- begins the frame after it appears, so it takes a frame less.
 M.TRAVEL_IN = 100
@@ -459,6 +462,28 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 			return
 		else
 			done(id)
+			-- (Out of a folded drawer: its copy landed where the card stands;
+			-- the card shows, and the copy goes.)
+			local had = false
+			local list: { any } = {}
+			for _, g in ghosts:peek() do
+				if g.id == id then
+					had = true
+				else
+					table.insert(list, g)
+				end
+			end
+			if had then
+				local el = elements[id]
+				if el then
+					set(el, { opacity = 1 })
+				end
+				ui.batch(function()
+					ghosts:set(list)
+					schedule()
+				end)
+				return
+			end
 		end
 		schedule()
 	end
@@ -725,19 +750,34 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 		elseif p.how == "switch" then
 			slide_in(id, el, 0, M.SWITCH_IN, M.SWITCH, M.SWITCH_DELAY, M.SWITCH_REACH)
 		else
-			-- From its drawer's head line, in over the first FADE ms.
-			local dy = 0
-			local head = p.head
-			if head then
-				local ok, d = pcall(function(): number
-					return (head :: any).y - (el :: any).y
-				end)
-				dy = if ok then d else 0
+			-- Out of a folded drawer: a copy of it, drawn over its column,
+			-- rises from behind the drawer's head line to where it stands,
+			-- revealed by the line's cut, at full strength; the card itself
+			-- shows once the copy lands.
+			local to = (m :: any).row_list[id]
+			local column = to and (M.COLUMN_OF[to] or to)
+			local box = column and columns[column]
+			local ok, x, y, w, h, bx, by, bh = pcall(function(): (number, number, number, number, number, number, number)
+				return (el :: any).x, (el :: any).y, (el :: any).width, (el :: any).height, (box :: any).x, (box :: any).y, (box :: any).height
+			end)
+			if ok and box then
+				-- (Its top at the head line's top as it stood before the
+				-- column grew by the card: hidden behind the line.)
+				local start = bh - M.HEAD_LINE - (h + LIST_GAP)
+				local list = table.clone(ghosts:peek())
+				table.insert(list, {
+					id = id,
+					column = column,
+					key = `{id}:rise`,
+					x = x - bx,
+					y = start,
+					w = w,
+					dy = (y - by) - start,
+				})
+				ghosts:set(list)
+			else
+				set(el, { opacity = 1 })
 			end
-			set(el, { y = dy, opacity = 1 })
-			set(inner, { opacity = 0 })
-			play(el, { y = { to = 0, duration = M.TRAVEL, ease = M.EASE } })
-			play(inner, { opacity = { to = 1 }, duration = M.FADE, ease = "linear" })
 		end
 	end
 
@@ -776,10 +816,8 @@ function M.make(slot: number, filter: () -> string?, republish: () -> ()): Motio
 		return out
 	end
 	function m.ghost_placed(g: any, el: any)
-		play(el, {
-			y = { to = g.dy, duration = M.TRAVEL, ease = M.EASE },
-			opacity = { to = 0, duration = M.FADE, delay = M.TRAVEL - M.FADE, ease = "linear" },
-		})
+		-- (Solid all the way: the head line's cut hides it, or reveals it.)
+		play(el, { y = { to = g.dy, duration = M.TRAVEL, ease = M.EASE } })
 	end
 
 	local touched: { [string]: number } = {}

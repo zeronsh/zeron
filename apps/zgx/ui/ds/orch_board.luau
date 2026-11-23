@@ -70,6 +70,11 @@ local CAP = 12
 local DRAWER_CAP = 20
 -- A column's narrowest: under three of them side by side, they stack.
 local COLUMN_MIN = 240
+-- A folded drawer's head line and the column's inset under it: where a
+-- card going into the drawer, or coming out, is cut.
+local HEAD_LINE = Motion.HEAD_LINE
+-- How far the copies' layer reaches under the column, clipped.
+local GHOST_EXTRA = 600
 -- How far a lane's body reaches under its foot, clipped: as far as a
 -- column can shrink at once.
 local LANE_EXTRA = 4000
@@ -388,7 +393,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 		-- compositor (the body's clip and the foot's translation, the cards'
 		-- curve): no card or drawer hangs outside it as it shrinks.
 		local radius = (ui.theme.get("radius.xl") :: number?) or 12
-		local body, foot = ui.ref(), ui.ref()
+		local body, foot, ghost_layer = ui.ref(), ui.ref(), ui.ref()
 		local last_h: number? = nil
 		-- Only a card move (or a drawer opening and closing, whose space
 		-- eases by itself) moves the lane on a curve: at mount, on a tab
@@ -421,6 +426,13 @@ local OrchBoard = ui.component(function(props: Props): Node
 			if de then
 				anime.utils.set(de, { y = d + num_of(anime.utils.get(de, "y"), 0) })
 				anime.animate(de, { y = { to = 0 }, duration = Motion.TRAVEL, ease = Motion.EASE })
+			end
+			-- (The copies' cut, the head line's top, with it.)
+			local g = ghost_layer:get()
+			if g then
+				local base = GHOST_EXTRA + HEAD_LINE
+				anime.utils.set(g, { clipBottom = num_of(anime.utils.get(g, "clipBottom"), base) - d })
+				anime.animate(g, { clipBottom = { to = base }, duration = Motion.TRAVEL, ease = Motion.EASE })
 			end
 		end
 		return ui.column {
@@ -544,18 +556,25 @@ local OrchBoard = ui.component(function(props: Props): Node
 			-- drawer's head line.
 			ui.div {
 				class = "orch-ghosts",
+				ref = ghost_layer,
 				-- (Drawn only: the pointer passes through to what is under it.)
 				pointer_events = "none",
 				absolute = true,
 				top = 0,
 				left = 0,
 				right = 0,
-				-- (Cut at the drawer's head line, the column's foot under it
-				-- (the head's 32 points and the column's inset): the copy
-				-- goes in under the line, never through its words nor below
-				-- the lane.)
-				bottom = ui.raw(36, "a folded drawer's head and the column's inset"),
-				overflow = "hidden",
+				-- Over the column's cards (a copy goes over those closing its
+				-- gap), and cut at the top edge of the drawer's head line (its
+				-- 32 points and the column's inset above the column's foot,
+				-- following the drawer as it eases): a copy slides in behind
+				-- the line, or rises out from behind it, never over its words
+				-- nor below the lane.
+				z = 3,
+				bottom = -GHOST_EXTRA,
+				clip_inset = { top = 0, right = 0, bottom = GHOST_EXTRA + HEAD_LINE, left = 0 },
+				on_mount = function(el: any)
+					anime.utils.set(el, { clipBottom = GHOST_EXTRA + HEAD_LINE })
+				end,
 				ui.each(
 					ui.computed(function(): { any }
 						return ctx.motion.ghosts(place)
@@ -830,6 +849,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 				end,
 			}
 		end
+		local last_open: string? = nil
 		local function opened(): Node
 			return ui.column {
 				id = "orch-board-detail",
@@ -838,22 +858,32 @@ local OrchBoard = ui.component(function(props: Props): Node
 				w_full = compact,
 				ml = if compact then nil else "$space.3",
 				shrink = 0,
+				-- (The card last open while it closes: what fades is its
+				-- detail, not an empty box.)
 				ui.presence(function(): string?
-					return ctx.selected()
+					local id = ctx.selected()
+					if id ~= nil then
+						last_open = id
+					end
+					return last_open
 				end, one, { w_full = true }),
 			}
 		end
 		-- Its content fades in (180 ms) and out (130 ms), laid out once at
 		-- its full width; beside the board, its box eases its width over
 		-- 180 ms both ways with the content pinned to its right edge and
-		-- cut by it, so the columns widen and narrow with it.
+		-- cut by it, so the columns widen and narrow with it. Closing, the
+		-- content stays where it stands (in the box's flow, so still
+		-- pinned right) until the box has closed.
+		local closing = ui.use_state(false)
+		local content = ui.ref()
 		local shown = ui.presence(function(): string?
-			return if ctx.selected() ~= nil then "open" else nil
-		end, opened, {
+			return if ctx.selected() ~= nil or closing:get() then "open" else nil
+		end, function(): Node
+			local node = opened()
+			return ui.div { ref = content, shrink = 0, w_full = compact, node }
+		end, {
 			enter = { opacity = { 0, 1 }, duration = if reduced then Motion.FADE else Motion.DETAIL_IN, ease = "linear" },
-			-- (Compact, the board shows again at once in its place: the
-			-- detail just goes.)
-			exit = if compact then nil else { opacity = 0, duration = if reduced then Motion.FADE else Motion.DETAIL_OUT, ease = "linear" },
 		})
 		if compact then
 			return shown
@@ -867,13 +897,33 @@ local OrchBoard = ui.component(function(props: Props): Node
 				return
 			end
 			was_open = open
+			local now_reduced = reduce.reduced_now()
+			local c = content:get()
+			if open then
+				closing:set(false)
+				if c then
+					anime.animate(c, { opacity = { to = 1 }, duration = if now_reduced then Motion.FADE else Motion.DETAIL_IN, ease = "linear" })
+				end
+			else
+				closing:set(true)
+				if c then
+					anime.animate(c, { opacity = { to = 0 }, duration = if now_reduced then Motion.FADE else Motion.DETAIL_OUT, ease = "linear" })
+				end
+			end
 			local el = box:get()
 			if el then
 				anime.animate(el, {
 					w = if open then full else 0,
-					duration = if reduce.reduced_now() then 0 else Motion.DETAIL_IN,
+					duration = if now_reduced then Motion.FADE else Motion.DETAIL_IN,
 					ease = Motion.EASE,
+					onComplete = function()
+						if not open then
+							closing:set(false)
+						end
+					end,
 				})
+			else
+				closing:set(false)
 			end
 		end)
 		return ui.row {
