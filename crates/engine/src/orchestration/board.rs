@@ -519,7 +519,7 @@ fn move_words(from: Option<Place>, d: &Derived, actor: Mover) -> (String, MoveCa
         Why::Settling => ("Thread finished".into(), MoveCause::Finished, Mover::Engine),
         Why::Snoozed => (
             match d.until {
-                Some(until) => format!("Snoozed until {}", until.format("%b %-d %H:%M UTC")),
+                Some(until) => format!("Snoozed until {}", local_time(until)),
                 None => "Snoozed".into(),
             },
             MoveCause::Snoozed,
@@ -534,6 +534,12 @@ fn move_words(from: Option<Place>, d: &Derived, actor: Mover) -> (String, MoveCa
     // What the person's own op led to is theirs.
     let by = if actor == Mover::Engine { by } else { actor };
     (reason, cause, by)
+}
+
+/// A time the person reads, in their own zone and the app's way of
+/// writing it (`Nov 23 9:00 AM`): never UTC.
+pub(crate) fn local_time(at: DateTime<Utc>) -> String {
+    at.with_timezone(&chrono::Local).format("%b %-d %-I:%M %p").to_string()
 }
 
 /// A card's column from before places, as it was called.
@@ -972,6 +978,9 @@ impl EngineRpc {
             asks.extend(derived.asks.iter().cloned());
             let mut asked: Vec<(String, String)> = Vec::new();
             let mut answered: Vec<(String, String)> = Vec::new();
+            // Closed by the person's answer to the engine's own question
+            // (its Drop it, Close it, Looks good): the move says it, once.
+            let closed_by_you = matches!(derived.why, Why::Closed { by: Mover::You, .. });
             if !seeded {
                 for new in asks.iter().filter(|a| !row.asks.contains(a)) {
                     if let Some(a) = doc.ask(new) {
@@ -980,6 +989,9 @@ impl EngineRpc {
                 }
                 for gone in row.asks.iter().filter(|a| !asks.contains(a)) {
                     let Some(a) = doc.ask(gone) else { continue };
+                    if closed_by_you && a.origin.engine() && a.answered_via == Some(AnswerVia::Person) {
+                        continue;
+                    }
                     let said = one_line(a.answer.as_deref().unwrap_or(""), 90);
                     let text = match (a.state, a.answered_via) {
                         (AskState::Dismissed, _) => "You dismissed its question".to_owned(),
@@ -1014,7 +1026,16 @@ impl EngineRpc {
                 line.to = Some(derived.place);
                 row.note_event(line);
             } else if was != derived.place {
-                let (mut reason, cause, by) = move_words(Some(was), derived, actor);
+                // A paused card the person resumed: theirs, and said so.
+                let resumed = row.status == CardStatus::Paused
+                    && derived.status != CardStatus::Paused
+                    && actor == Mover::You
+                    && !matches!(derived.why, Why::Closed { .. });
+                let (mut reason, cause, by) = if resumed {
+                    ("You resumed it".to_owned(), MoveCause::Resumed, Mover::You)
+                } else {
+                    move_words(Some(was), derived, actor)
+                };
                 // The move says what was asked or answered: no second line.
                 match cause {
                     MoveCause::Asked if !asked.is_empty() => reason = asked.remove(0).0,

@@ -2926,6 +2926,9 @@ async fn pausing_stops_the_thread_and_holds_it_for_the_person() {
     let row = placed(&core, &card);
     assert_eq!(row.place, Place::Running);
     assert_eq!(row.by, Mover::You, "the person's move");
+    // Said as theirs: resumed, not "Thread started".
+    assert_eq!((row.reason.as_str(), row.cause), ("You resumed it", zeron_proto::orchestration::MoveCause::Resumed));
+    assert_eq!(row.events.last().map(|e| e.text.as_str()), Some("You resumed it"));
 }
 
 #[tokio::test]
@@ -3341,6 +3344,16 @@ async fn retry_and_drop_are_done_by_the_engine() {
             assert_eq!(sent(&core, "geese-t1").len(), thread_before);
             assert_eq!(row.place, Place::Dropped);
             assert_eq!(row.closed.as_ref().map(|c| (c.how, c.by)), Some((CloseHow::Dropped, Mover::You)));
+            // Its timeline says it once: dropped, not dropped then answered.
+            let after_ask: Vec<&str> = row
+                .events
+                .iter()
+                .skip_while(|e| !e.text.starts_with("Asked you"))
+                .skip(1)
+                .map(|e| e.text.as_str())
+                .collect();
+            assert_eq!(after_ask, ["You dropped it"], "{:?}", row.events);
+            assert_eq!(row.reason, "You dropped it");
             assert_eq!(core.orchestration.item(&card).unwrap().state, WorkState::Dropped);
         }
     }

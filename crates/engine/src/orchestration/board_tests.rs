@@ -198,6 +198,20 @@ fn a_branch_has_landed_when_its_own_work_is_in_its_target() {
 
 // ── What a move says ────────────────────────────────────────────────────────
 
+/// A snooze's time is the person's own, as the app writes times: never UTC.
+#[test]
+fn a_snooze_says_its_time_in_the_persons_zone() {
+    let until = t0() + TimeDelta::hours(3);
+    let mut d = derived(Place::Snoozed, Why::Snoozed);
+    d.until = Some(until);
+    let (reason, cause, by) = move_words(Some(Place::NeedsYou), &d, Mover::You);
+    assert_eq!((cause, by), (MoveCause::Snoozed, Mover::You));
+    let local = until.with_timezone(&chrono::Local);
+    assert_eq!(reason, format!("Snoozed until {}", local.format("%b %-d %-I:%M %p")));
+    assert!(!reason.contains("UTC"), "{reason}");
+    assert!(reason.ends_with(" AM") || reason.ends_with(" PM"), "{reason}");
+}
+
 fn derived(place: Place, why: Why) -> Derived {
     Derived { place, status: CardStatus::Working, note: None, until: None, asks: vec![], why, acts: vec![], recheck: None }
 }
