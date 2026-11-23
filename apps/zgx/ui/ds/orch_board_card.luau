@@ -379,6 +379,17 @@ M.Card = ui.component(function(props: Props): Node
 	end)
 	local hovered = ui.use_state(false)
 	local rest = material.pick("$zeron.settings.note", "$zeron.settings.card")
+	-- How it comes in (ds/orch_board_motion), decided as it's built.
+	local m = ctx.motion
+	local built = m.build(id, props.drawer == true)
+	local start, start_content = m.start(built)
+	local content_ref = ui.ref()
+	local mounted_el: any = nil
+	ui.on_cleanup(function()
+		if mounted_el then
+			m.detach(id, mounted_el)
+		end
+	end)
 	local quiet = props.drawer == true
 
 	local head = ui.row {
@@ -517,8 +528,10 @@ M.Card = ui.component(function(props: Props): Node
 			ctx.open(id)
 		end,
 		ui.column {
+			ref = content_ref,
 			w_full = true,
 			min_w = 0,
+			opacity = start_content,
 			p = if ctx.compact then "$space.2" else ui.raw(10, "a card's even inset"),
 			ui.column {
 			w_full = true,
@@ -552,21 +565,44 @@ M.Card = ui.component(function(props: Props): Node
 		local x = entry:peek()
 		return if x then M.ref(ctx, x) else nil
 	end) :: any)
-	if not props.menu then
-		return box
+	local whole: Node = box
+	if props.menu then
+		whole = (ContextMenu {
+			label = locale.t("orch.board.card_actions"),
+			ring = M.RADIUS,
+			w_full = true,
+			shrink = 0,
+			items = function(): { any }?
+				local x = entry:peek()
+				trace.hit("board.menu")
+				return if x then (props.menu :: any)(x) else nil
+			end,
+			box,
+		}) :: Node
 	end
-	return (ContextMenu {
-		label = locale.t("orch.board.card_actions"),
-		ring = M.RADIUS,
+	-- How it moves (ds/orch_board_motion): the node that dims and travels,
+	-- inside the row its list slides (so a slide and a hand-over never
+	-- add up on one node).
+	return ui.div {
 		w_full = true,
-		shrink = 0,
-		items = function(): { any }?
-			local x = entry:peek()
-			trace.hit("board.menu")
-			return if x then (props.menu :: any)(x) else nil
-		end,
-		box,
-	}) :: Node
+		min_w = 0,
+		-- (Coming in by a move: over its new neighbours while it travels.)
+		z = if built.how ~= nil then 1 else nil,
+		ui.div {
+			class = "orch-card-motion",
+			layout_id = built.layout_id,
+			layout_duration = built.duration,
+			layout_ease = "outQuint",
+			w_full = true,
+			min_w = 0,
+			opacity = start,
+			on_mount = function(el: any)
+				mounted_el = el
+				m.attach(id, el, { content = content_ref })
+			end,
+			whole,
+		},
+	}
 end)
 
 return M

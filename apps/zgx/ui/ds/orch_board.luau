@@ -56,6 +56,8 @@ local List = require("@self/orch_board_list")
 local NewTask = require("@self/orch_board_new")
 local Actions = require("@self/orch_board_actions")
 local trace = require("@self/orch_perf_trace")
+local reduce = require("@self/motion")
+local Motion = require("@self/orch_board_motion")
 
 export type Props = Ctx.Props
 
@@ -84,6 +86,11 @@ local OrchBoard = ui.component(function(props: Props): Node
 	local new_open = ui.use_state(false)
 	-- How many of each place show (past its cap).
 	local shown = ui.use_state({} :: { [string]: number })
+	-- (A drawer folded on the board: a card goes into it, or comes out of
+	-- it, by its head line.)
+	ctx.motion.set_folded(function(place: string): boolean
+		return view:peek() == "board" and model.COLUMN[place] ~= nil and drawers:peek()[place] ~= true
+	end)
 
 	-- A place's cards' ids, in order (woken when who is there changes).
 	local function ids_of(place: string): { string }
@@ -155,6 +162,9 @@ local OrchBoard = ui.component(function(props: Props): Node
 				key = function(id: string): string
 					return id
 				end,
+				-- (The gap a card leaves closes, the slot it lands in opens,
+				-- and a card that changes its order slides.)
+				animate = reduce.layout({ duration = Motion.TRAVEL, ease = Motion.EASE }),
 				class = "orch-cards",
 				direction = "column",
 				w_full = true,
@@ -221,97 +231,134 @@ local OrchBoard = ui.component(function(props: Props): Node
 			local e = first()
 			return if e and e.until_at then Card.time(e.until_at, ctx.clock(0)) else ""
 		end)
-		return ui.show(function(): boolean
-			return count() > 0
-		end, ui.column {
-			id = `orch-drawer-{place}`,
-			class = "orch-drawer",
+		-- (It slides with the cards above it as their gap closes or a slot
+		-- opens, rather than jumping ahead of them: a node of its own in
+		-- the column, hidden while empty, so its slide is measured against
+		-- the column.)
+		return ui.div {
+			hidden = function(): boolean
+				return count() == 0
+			end,
 			w_full = true,
 			min_w = 0,
-			gap = "$space.1",
-			ui.button {
-				class = "orch-drawer-head",
-				label = locale.t(`orch.board.place.{place}`),
-				expanded = open,
+			layout = if reduce.reduced_now() then nil else "position",
+			layout_duration = Motion.TRAVEL,
+			layout_ease = Motion.EASE,
+			ui.show(function(): boolean
+				return count() > 0
+			end, ui.column {
+				id = `orch-drawer-{place}`,
+				class = "orch-drawer",
 				w_full = true,
-				h = 32,
-				px = "$space.2",
-				gap = "$space.2",
-				items = "center",
-				rounded = "$radius.md",
-				border = 1,
-				border_color = "$border",
-				border_dash = { 3, 3 },
-				bg = "#00000000",
-				hover = { bg = "$hover" },
-				active = { bg = "$pressed" },
-				on_click = function()
-					drawers:set_key(place, not open())
-				end,
-				ui.div {
-					shrink = 0,
-					color = "$text.tertiary",
-					Icon {
-						name = function(): Icon.Name
-							return if open() then "alt-arrow-down" else "alt-arrow-right"
-						end,
-						size = 13,
-					},
-				},
-				ui.text {
-					locale.t(`orch.board.place.{place}`),
-					class = "orch-drawer-title",
-					shrink = 0,
-					text_size = "$font.size.sm",
-					weight = "$font.weight.medium",
-					color = "$text.secondary",
-				},
-				ui.text {
-					function(): string
-						return tostring(count())
+				min_w = 0,
+				ui.button {
+					class = "orch-drawer-head",
+					on_mount = function(el: any)
+						ctx.motion.head(place, el)
 					end,
-					class = "orch-drawer-count",
-					shrink = 0,
-					tabular = true,
-					text_size = "$font.size.sm",
-					color = "$text.tertiary",
-				},
-				ui.div { grow = 1, min_w = 0 },
-				ui.show(function(): boolean
-					return not open() and hint:get() ~= ""
-				end, ui.text {
-					function(): string
-						return hint:get()
-					end,
-					class = "orch-drawer-hint",
-					shrink = 1,
-					min_w = 0,
-					truncate = true,
-					text_size = "$font.size.xs",
-					color = "$text.tertiary",
-				}),
-				ui.show(function(): boolean
-					return not open() and back:get() ~= ""
-				end, ui.row {
-					class = "orch-drawer-back",
-					shrink = 0,
-					gap = "$zeron.space.tight",
+					label = locale.t(`orch.board.place.{place}`),
+					expanded = open,
+					w_full = true,
+					h = 32,
+					px = "$space.2",
+					gap = "$space.2",
 					items = "center",
-					color = "$text.tertiary",
-					Icon { name = "clock-circle", size = 12 },
+					rounded = "$radius.md",
+					border = 1,
+					border_color = "$border",
+					border_dash = { 3, 3 },
+					bg = "#00000000",
+					hover = { bg = "$hover" },
+					active = { bg = "$pressed" },
+					on_click = function()
+						drawers:set_key(place, not open())
+					end,
+					ui.div {
+						shrink = 0,
+						color = "$text.tertiary",
+						Icon {
+							name = function(): Icon.Name
+								return if open() then "alt-arrow-down" else "alt-arrow-right"
+							end,
+							size = 13,
+						},
+					},
+					ui.text {
+						locale.t(`orch.board.place.{place}`),
+						class = "orch-drawer-title",
+						shrink = 0,
+						text_size = "$font.size.sm",
+						weight = "$font.weight.medium",
+						color = "$text.secondary",
+					},
 					ui.text {
 						function(): string
-							return back:get()
+							return tostring(count())
 						end,
+						class = "orch-drawer-count",
+						shrink = 0,
 						tabular = true,
-						text_size = "$font.size.xs",
+						text_size = "$font.size.sm",
+						color = "$text.tertiary",
 					},
-				}),
-			},
-			ui.show(open, function(): Node
-				return cards(place, true)
-			end),
-		})
+					ui.div { grow = 1, min_w = 0 },
+					ui.show(function(): boolean
+						return not open() and hint:get() ~= ""
+					end, ui.text {
+						function(): string
+							return hint:get()
+						end,
+						class = "orch-drawer-hint",
+						shrink = 1,
+						min_w = 0,
+						truncate = true,
+						text_size = "$font.size.xs",
+						color = "$text.tertiary",
+					}),
+					ui.show(function(): boolean
+						return not open() and back:get() ~= ""
+					end, ui.row {
+						class = "orch-drawer-back",
+						shrink = 0,
+						gap = "$zeron.space.tight",
+						items = "center",
+						color = "$text.tertiary",
+						Icon { name = "clock-circle", size = 12 },
+						ui.text {
+							function(): string
+								return back:get()
+							end,
+							tabular = true,
+							text_size = "$font.size.xs",
+						},
+					}),
+				},
+				-- Its cards, the space they take easing as it opens and closes
+				-- (clipped: what goes fades under its edge).
+				ui.div {
+					class = "orch-drawer-body",
+					w_full = true,
+					min_w = 0,
+					layout = if reduce.reduced_now() then nil else "height",
+					layout_duration = Motion.DRAWER,
+					layout_ease = Motion.EASE,
+					layout_clip = true,
+					ui.presence(function(): string?
+						return if open() then "open" else nil
+					end, function(): Node
+						return ui.column {
+							w_full = true,
+							min_w = 0,
+							pt = "$space.1",
+							cards(place, true),
+						}
+					end, {
+						w_full = true,
+						exit = reduce.transition({ opacity = 0, duration = Motion.DRAWER, ease = Motion.EASE }),
+					}),
+				},
+			}),
+		}
 	end
 
 	-- A column: its head (its glyph, name and count), its cards, its drawer.
@@ -331,6 +378,10 @@ local OrchBoard = ui.component(function(props: Props): Node
 			gap = "$space.1",
 			rounded = "$radius.xl",
 			bg = lane,
+			-- (A card travelling into it goes over the other columns.)
+			z = function(): number
+				return if ctx.motion.raised(place) then 1 else 0
+			end,
 			hidden = function(): boolean
 				local t = tab:get()
 				return t ~= "all" and t ~= place
@@ -394,7 +445,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 		local w = lanes.width
 		return w ~= nil and w > 0 and w < COLUMN_MIN * 3 + 16
 	end)
-	local function columns(): Node
+	local function lanes_row(): Node
 		return ui.row {
 			ref = lanes,
 			id = "orch-columns",
@@ -413,6 +464,14 @@ local OrchBoard = ui.component(function(props: Props): Node
 			column("running"),
 			column("done"),
 		}
+	end
+	-- (Built again for each filter: a filter is no move, so nothing slides.)
+	local function columns(): Node
+		return ui.presence(function(): string
+			return ctx.filter() or "*"
+		end, function(): Node
+			return lanes_row()
+		end, { w_full = true, min_w = 0 })
 	end
 
 	-- The orchestrators' filter: a button saying whose cards show, its menu
@@ -603,9 +662,82 @@ local OrchBoard = ui.component(function(props: Props): Node
 		return props.on_open_card == nil and ctx.selected() ~= nil
 	end
 
+	-- The board to its list and back: the cards in view morph into their
+	-- rows (ds/orch_board_motion), told as the switch picks its side,
+	-- before either is built.
+	local last_view: string? = nil
+	-- The open card's detail: in with a fade and a slide from the right,
+	-- the columns taking their new width over the same while, and out
+	-- quicker (ds/orch_board_motion). One card to another swaps in place.
+	local function detail(): Node
+		local reduced = reduce.reduced_now()
+		local function one(id: string): Node
+			return Detail.Detail {
+				ctx = ctx,
+				act = act,
+				card = id,
+				back = compact,
+				on_back = function()
+					ctx.open(nil)
+				end,
+			}
+		end
+		local function opened(): Node
+			return ui.column {
+				id = "orch-board-detail",
+				class = "orch-board-detail",
+				w = if compact then nil else DETAIL_W,
+				w_full = compact,
+				ml = if compact then nil else "$space.3",
+				shrink = 0,
+				ui.presence(function(): string?
+					return ctx.selected()
+				end, one, { w_full = true }),
+			}
+		end
+		local shown = ui.presence(function(): string?
+			return if ctx.selected() ~= nil then "open" else nil
+		end, opened, {
+			enter = reduce.transition({
+				opacity = { 0, 1 },
+				x = { Motion.DETAIL_SLIDE, 0 },
+				duration = Motion.DETAIL_IN,
+				ease = Motion.EASE,
+			}),
+			-- (Compact, the board shows again at once in its place: the
+			-- detail just goes.)
+			exit = if compact
+				then nil
+				else reduce.transition({
+					opacity = 0,
+					x = Motion.DETAIL_SLIDE,
+					duration = Motion.DETAIL_OUT,
+					ease = Motion.EASE,
+				}),
+		})
+		if compact or reduced then
+			return shown
+		end
+		-- (The space it takes eases, so the columns widen and narrow.)
+		return ui.div {
+			class = "orch-board-detail-space",
+			shrink = 0,
+			layout = "width",
+			layout_duration = Motion.DETAIL_IN,
+			layout_ease = Motion.EASE,
+			layout_clip = true,
+			shown,
+		}
+	end
+
 	local function main(): Node
 		return ui.switch(function(): string
-			return view:get()
+			local v = view:get()
+			if last_view ~= nil and v ~= last_view then
+				ctx.motion.begin_morph()
+			end
+			last_view = v
+			return v
 		end, {
 			board = function(): Node
 				return columns()
@@ -644,30 +776,10 @@ local OrchBoard = ui.component(function(props: Props): Node
 			-- Its detail, beside the board (a host that shows details
 			-- itself, `on_open_card`, has none here). The gap is the
 			-- detail's own: with none open, the columns reach the edge.
-			if props.on_open_card
-				then nil
-				else ui.presence(function(): string?
-					return ctx.selected()
-				end, function(id: string): Node
-					return ui.column {
-						id = "orch-board-detail",
-						class = "orch-board-detail",
-						w = if compact then nil else DETAIL_W,
-						w_full = compact,
-						ml = if compact then nil else "$space.3",
-						shrink = 0,
-						Detail.Detail {
-							ctx = ctx,
-							act = act,
-							card = id,
-							back = compact,
-							on_back = function()
-								ctx.open(nil)
-							end,
-						},
-					}
-				end),
+			if props.on_open_card then nil else detail(),
 		},
+		-- (The timers of what moves: ds/orch_board_motion.)
+		ctx.motion.host(),
 		NewTask.Dialog {
 			open = new_open,
 			orchestrators = ctx.orchestrators,

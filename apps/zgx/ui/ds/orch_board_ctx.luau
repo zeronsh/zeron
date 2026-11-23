@@ -10,27 +10,34 @@
 --                                   wakes its reader on any change
 --   ctx.entry(id)                   one card, wherever it stands; wakes its
 --                                   reader when that card changes alone
---   ctx.ids(place)                  a place's cards' ids, in order; wakes its
---                                   reader when who is there, or their
---                                   order, changes
+--   ctx.ids(place)                  a place's cards' ids, in order, as
+--                                   presented (below); wakes its reader
+--                                   when who is there, or their order,
+--                                   changes
 --   ctx.counts()                    the tabs' figures (Board.counts)
 --   ctx.at()                        Unix seconds, ticking while a clock shows
 --   ctx.clock(since)                the same, for a clock counting from
 --                                   `since`: woken each second while it
 --                                   shows seconds, each minute after
 --   ctx.act.<what>(…)               what the person does (each a host's prop)
+--   ctx.motion                      how cards move (ds/orch_board_motion)
 --
 -- What one push costs: the board is built again once (ds/orch_board_model
 -- keeps the Entry of each card that says the same), then compared with the
 -- last one, and only what changed is woken: a card's own readers, a
 -- place's list where its cards came or went or moved, the tabs' counts.
--- (A "presented" board that lags the rows, for the motion of step 3,
--- belongs between the rows and `ids`: `board()` and `entry` stay the
--- rows' own.)
+--
+-- Presented: the places' lists lag the rows by a move's hold
+-- (ds/orch_board_motion). A card that moves stays in its old list while it
+-- holds, then goes to its new one; the columns, the drawers, the list view
+-- and the column heads' counts read these (`ids`). `board()`, `entry` and
+-- `counts` stay the rows' own: a card's status and the tabs' counts change
+-- at once.
 
 local model = require("@self/orch_board_model")
 local control = require("@self/control")
 local trace = require("@self/orch_perf_trace")
+local Motion = require("@self/orch_board_motion")
 
 export type Entry = model.Entry
 export type Board = model.Board
@@ -129,6 +136,7 @@ export type Ctx = {
 	selected: () -> string?,
 	-- A card opened (its detail), or closed (nil).
 	open: (id: string?) -> (),
+	motion: Motion.Motion,
 }
 
 local M = {}
@@ -358,13 +366,74 @@ function M.make(props: Props): Ctx
 	ui.on_cleanup(function()
 		give_slot(n)
 	end)
-	-- A place's ids (as they were last set, plain), and the state its
-	-- readers follow.
+	-- A place's ids as presented (as they were last set, plain), and the
+	-- state its readers follow.
 	local held_ids: { [string]: { string } } = {}
 	local ids_state: { [string]: any } = {}
-	for _, place in PLACES do
-		held_ids[place] = ids_of(shown, place)
-		ids_state[place] = ui.use_state(held_ids[place])
+	local function row_lists(b: Board): { [string]: { string } }
+		local out: { [string]: { string } } = {}
+		for _, place in PLACES do
+			out[place] = ids_of(b, place)
+		end
+		return out
+	end
+	-- The rows' lists with the cards held away from theirs (`motion.where`)
+	-- kept where they showed, at the index they had.
+	local motion: Motion.Motion
+	local function presented(rows: { [string]: { string } }): { [string]: { string } }
+		local where = motion.where
+		if next(where) == nil then
+			return rows
+		end
+		local out: { [string]: { string } } = {}
+		for _, place in PLACES do
+			local want: { string } = {}
+			for _, id in rows[place] do
+				local w = where[id]
+				if w == nil or w == place then
+					table.insert(want, id)
+				end
+			end
+			-- (Held here from elsewhere, in the order they stood.)
+			local held: { any } = {}
+			for id, w in where do
+				local f = motion.flights[id]
+				if w == place and not table.find(want, id) then
+					table.insert(held, { id = id, at = if f then f.index else math.huge })
+				end
+			end
+			table.sort(held, function(a: any, b: any): boolean
+				return a.at < b.at
+			end)
+			for _, h in held do
+				table.insert(want, math.clamp(h.at, 1, #want + 1), h.id)
+			end
+			out[place] = want
+		end
+		return out
+	end
+	local function set_lists(lists: { [string]: { string } })
+		for _, place in PLACES do
+			local now_ids = lists[place]
+			if not same_ids(now_ids, held_ids[place]) then
+				held_ids[place] = now_ids
+				ids_state[place]:set(now_ids)
+			end
+		end
+	end
+	motion = Motion.make(n, filter, function()
+		-- (A beat's end: the lists again, from the rows as they stand.)
+		ui.batch(function()
+			set_lists(presented(row_lists(shown)))
+		end)
+	end)
+	do
+		local rows = row_lists(shown)
+		motion.seed(rows, shown.by_id)
+		for _, place in PLACES do
+			held_ids[place] = rows[place]
+			ids_state[place] = ui.use_state(held_ids[place])
+		end
 	end
 	local counts = ui.use_state(shown.counts :: Counts)
 	local whole = ui.use_state(0)
@@ -391,13 +460,10 @@ function M.make(props: Props): Ctx
 				end
 			end
 			if b ~= was_shown then
-				for _, place in PLACES do
-					local now_ids = ids_of(b, place)
-					if not same_ids(now_ids, held_ids[place]) then
-						held_ids[place] = now_ids
-						ids_state[place]:set(now_ids)
-					end
-				end
+				local rows = row_lists(b)
+				-- (Moves begin: what holds stays where it showed.)
+				motion.update(rows, held_ids, b.by_id)
+				set_lists(presented(rows))
 				-- (An equal value wakes nobody.)
 				counts:set(b.counts)
 				whole:set(whole:peek() + 1)
@@ -476,6 +542,7 @@ function M.make(props: Props): Ctx
 		selected = function(): string?
 			return selected_state:get()
 		end,
+		motion = motion,
 		open = function(id: string?)
 			if id and props.on_open_card then
 				props.on_open_card(id)
