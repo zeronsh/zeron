@@ -133,6 +133,31 @@ return function()
 		orchestration.now:set(copy)
 	end
 
+	-- A device with no Brain dump yet (`fixture.no_brain_dump`): its row
+	-- taken away, kept here for the first dump to bring back.
+	local brain_row: any = nil
+	local function has_brain_dump(n: any): boolean
+		for _, o in n.orchestrators or {} do
+			if o.kind == "brain_dump" then
+				return true
+			end
+		end
+		return false
+	end
+	ui.command { id = "fixture.no_brain_dump", title = "Fixture: no Brain dump yet", run = function()
+		republish(function(n)
+			local kept = {}
+			for _, o in n.orchestrators or {} do
+				if o.kind == "brain_dump" then
+					brain_row = o
+				else
+					table.insert(kept, o)
+				end
+			end
+			n.orchestrators = kept
+		end)
+	end }
+
 	local stub = orchestration :: any
 	local function rejected(message: string): any
 		return {
@@ -276,11 +301,22 @@ return function()
 				note(`dump-ref:{r.kind}:{r.id}`)
 			end
 			ui.state("last_dump", nil :: any):set(op)
+			-- (Sent with no chat: a device with no Brain dump yet.)
+			if not op.chat then
+				note("dump-chat:none")
+			end
 			local id = `dp-new-{#calls:peek()}`
 			republish(function(n)
 				local dumps = table.clone(n.dumps)
 				table.insert(dumps, 1, { id = id, text = op.text, state = "routing", routes = {}, device = "dev-desk", created = os.time() })
 				n.dumps = dumps
+				-- The engine makes the Brain dump with the first dump
+				-- (`fixture.no_brain_dump` took it away).
+				if brain_row and not has_brain_dump(n) then
+					local orchestrators = table.clone(n.orchestrators or {})
+					table.insert(orchestrators, brain_row)
+					n.orchestrators = orchestrators
+				end
 			end)
 			return settled({ id = id })
 		elseif kind == "answerAsk" then
