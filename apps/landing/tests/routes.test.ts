@@ -44,15 +44,29 @@ const verifiedOf = (body: string, version: string) => /data-kind="verified">(?:<
 /** The session's CSRF token, as a page carries it in its forms. */
 const tokenOf = (body: string) => /name="csrf" value="([^"]+)"/.exec(body)?.[1] ?? "";
 
+/** The config the build baked in (dist/server/wrangler.json): production's, or staging's when built with CLOUDFLARE_ENV=staging. */
+const BAKED = JSON.parse(readFileSync(new URL("../dist/server/wrangler.json", import.meta.url), "utf8"));
+const STAGING = process.env.CLOUDFLARE_ENV === "staging";
+
 describe("the deploy config", () => {
-  test("production is the zeron.sh worker reading the production edge", () => {
-    const config = JSON.parse(readFileSync(new URL("../dist/server/wrangler.json", import.meta.url), "utf8"));
-    expect(config.name).toBe("comet-landing");
-    expect(config.routes.map((r: { pattern: string }) => r.pattern)).toEqual(["zeron.sh", "comet.zeron.sh"]);
-    expect(config.services).toEqual([{ binding: "EDGE", service: "comet-native-edge" }]);
+  test("production is the zeron.sh worker reading the production edge; staging, its own worker reading the staging edge", () => {
+    const config = BAKED;
+    if (STAGING) {
+      // (npm run deploy:staging: its own worker, which holds only its own domain and so can never take zeron.sh.)
+      expect(config.name).toBe("zeron-landing-staging");
+      expect(config.routes).toEqual([{ pattern: "site-staging.zeron.sh", custom_domain: true }]);
+      expect(config.services).toEqual([{ binding: "EDGE", service: "zeron-edge-staging" }]);
+      expect(config.vars).toEqual({ SITE_ORIGIN: "https://site-staging.zeron.sh" });
+    } else {
+      expect(config.name).toBe("comet-landing");
+      expect(config.routes.map((r: { pattern: string }) => r.pattern)).toEqual(["zeron.sh", "comet.zeron.sh"]);
+      expect(config.services).toEqual([{ binding: "EDGE", service: "comet-native-edge" }]);
+      expect(config.vars).toEqual({ SITE_ORIGIN: "https://zeron.sh" });
+    }
     expect(config.assets.binding).toBe("ASSETS");
     expect(config.assets.not_found_handling).toBeUndefined();
     expect(config.cache).toEqual({ enabled: true });
+    expect(config.limits).toEqual({ cpu_ms: 3000 });
   });
 });
 
@@ -1475,11 +1489,13 @@ describe("the review of the web store: what it found, held", () => {
   });
 
   test("on the Worker's other names, the store's pages are the site's own origin's; the landing pages stay", async () => {
-    for (const host of ["https://comet.zeron.sh", "https://comet-landing.someone.workers.dev"]) {
+    // (The origin is the build's: zeron.sh, or the staging site's on a staging build.)
+    const origin = BAKED.vars.SITE_ORIGIN as string;
+    for (const host of ["https://comet.zeron.sh", `https://${BAKED.name}.someone.workers.dev`]) {
       for (const path of ["/plugins/all?sort=new", "/account", "/admin/plugins", "/auth/web/login"]) {
         const response = await site.fetch(`${host}${path}`);
         expect(response.status, `${host}${path}`).toBe(path.startsWith("/admin") ? 404 : 301);
-        if (!path.startsWith("/admin")) expect(response.headers.get("location")).toBe(`https://zeron.sh${path}`);
+        if (!path.startsWith("/admin")) expect(response.headers.get("location")).toBe(`${origin}${path}`);
       }
       expect((await site.fetch(`${host}/`)).status).toBe(200);
     }
