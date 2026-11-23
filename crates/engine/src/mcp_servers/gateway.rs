@@ -135,6 +135,14 @@ impl ExternalMcpProxy for McpGateway {
                 }
             }
 
+            if !resp.status().is_success() {
+                tracing::warn!(
+                    server_id = %req.server_id,
+                    method = %req.method,
+                    status = resp.status().as_u16(),
+                    "mcp gateway: upstream answered with an error"
+                );
+            }
             let status = StatusCode::from_u16(resp.status().as_u16())
                 .unwrap_or(StatusCode::BAD_GATEWAY);
             let mut headers = HeaderMap::new();

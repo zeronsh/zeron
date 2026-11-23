@@ -2381,7 +2381,7 @@
     },
     "mcp": {
       "title": "MCP",
-      "terms": "mcp 服务器 模型上下文协议 工具 连接器 集成 oauth 保险库 slack linear notion github sentry figma",
+      "terms": "mcp 服务器 模型上下文协议 工具 连接器 集成 oauth 保险库 linear notion github sentry figma",
       "description_synced": "你的智能体可在每个对话、任何提供方中使用这些工具。登录信息通过 Zeron Vault 同步到你的设备和 Cloud。",
       "description_local": "你的智能体可在每个对话、任何提供方中使用这些工具。仅保存在此设备上；登录 Zeron 即可同步到你的其他设备。",
       "servers": {

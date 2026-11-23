@@ -596,6 +596,16 @@ impl McpServers {
             }
         }
 
+        // What each run gets, and what it can't (no endpoint or grant: a
+        // remote server can't reach its gateway), so a missing tool is
+        // explained in the log.
+        let names: Vec<&str> = out.iter().map(|s| s.name.as_str()).collect();
+        tracing::info!(
+            servers = ?names,
+            gateway = endpoint.is_some(),
+            grant = grant_token.is_some(),
+            "mcp: managed servers for a run"
+        );
         out
     }
 
@@ -1461,7 +1471,7 @@ mod tests {
         let mut rx = mgr.watch_snapshot();
         assert_eq!(rx.borrow().storage, McpStorage::Local);
         assert!(!rx.borrow().vault_available);
-        assert_eq!(rx.borrow().presets.len(), 13);
+        assert_eq!(rx.borrow().presets.len(), 12);
 
         // Upsert bearer remote server via RPC
         let reply = mgr

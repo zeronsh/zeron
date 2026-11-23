@@ -638,15 +638,15 @@ mod tests {
                     "icon": "linear",
                 },
                 {
-                    "id": "slack",
-                    "name": "Slack",
-                    "description": "Search channels and post messages.",
-                    "category": "Communication",
-                    "url": "https://mcp.slack.com/mcp",
+                    "id": "acme",
+                    "name": "Acme",
+                    "description": "A server that registers no clients itself.",
+                    "category": "Testing",
+                    "url": "https://mcp.acme.test/mcp",
                     "transport": "http",
                     "authKind": "oauth",
-                    "docsUrl": "https://docs.slack.dev/ai/slack-mcp-server/",
-                    "icon": "slack",
+                    "docsUrl": "https://acme.test/docs",
+                    "icon": "acme",
                     "clientRequired": true,
                 },
                 {
@@ -736,15 +736,15 @@ mod tests {
         // Linear is added, so it's not offered again.
         assert_eq!(texts.iter().filter(|t| *t == "Linear").count(), 1, "{texts:?}");
 
-        // Slack has no client registration: Connect asks for its app.
+        // A server with no client registration: Connect asks for its app.
         app.click("#settings-page >> role:button \"Connect\"[1]");
         app.frames(20);
         assert_eq!(app.error(), None);
-        let slack_texts = app.texts();
-        assert!(slack_texts.iter().any(|t| t == "Connect Slack"), "missing Slack dialog: {slack_texts:?}");
+        let own_app_texts = app.texts();
+        assert!(own_app_texts.iter().any(|t| t == "Connect Acme"), "missing own-app dialog: {own_app_texts:?}");
         assert!(
-            slack_texts.iter().any(|t| t == "http://localhost:38417/callback"),
-            "missing redirect URL: {slack_texts:?}"
+            own_app_texts.iter().any(|t| t == "http://localhost:38417/callback"),
+            "missing redirect URL: {own_app_texts:?}"
         );
         app.keys("Escape");
         app.frames(20);

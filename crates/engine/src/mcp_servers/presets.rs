@@ -6,22 +6,6 @@ use zeron_proto::{McpAuthKind, McpPreset, McpTransport};
 pub fn default_presets() -> Vec<McpPreset> {
     vec![
         McpPreset {
-            id: "slack".into(),
-            name: "Slack".into(),
-            description: "Search channels, read threads, and post messages in Slack workspaces."
-                .into(),
-            category: "Communication".into(),
-            url: "https://mcp.slack.com/mcp".into(),
-            transport: McpTransport::Http,
-            auth_kind: McpAuthKind::OAuth,
-            docs_url: "https://docs.slack.dev/ai/slack-mcp-server/".into(),
-            icon: "slack".into(),
-            header_name: None,
-            // Slack's OAuth has no Dynamic Client Registration: only a Slack
-            // app's own client (Marketplace-published or internal) may sign in.
-            client_required: true,
-        },
-        McpPreset {
             id: "linear".into(),
             name: "Linear".into(),
             description: "Inspect and manage Linear issues, cycles, projects, and team workflows."
@@ -198,7 +182,7 @@ mod tests {
     #[test]
     fn default_presets_have_unique_ids_and_valid_urls() {
         let presets = default_presets();
-        assert_eq!(presets.len(), 13);
+        assert_eq!(presets.len(), 12);
         let mut ids = HashSet::new();
         for p in &presets {
             assert!(ids.insert(p.id.clone()), "duplicate preset id: {}", p.id);
@@ -216,9 +200,10 @@ mod tests {
         }
         let context7 = presets.iter().find(|p| p.id == "context7").unwrap();
         assert_eq!(context7.auth_kind, McpAuthKind::None);
-        let slack = presets.iter().find(|p| p.id == "slack").unwrap();
-        assert_eq!(slack.auth_kind, McpAuthKind::OAuth);
-        assert!(slack.client_required);
-        assert_eq!(presets.iter().filter(|p| p.client_required).count(), 1);
+        // (Slack's MCP takes only a Marketplace-published or internal Slack
+        // app's own client: not offered here, added as a custom server with
+        // one's own app instead. Every preset signs in without one.)
+        assert!(presets.iter().all(|p| p.id != "slack"));
+        assert!(presets.iter().all(|p| !p.client_required));
     }
 }

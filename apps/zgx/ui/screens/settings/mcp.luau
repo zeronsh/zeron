@@ -41,7 +41,6 @@ local CLIENT_REQUIRED_OLD = "registration_endpoint"
 -- The servers with a mark of their own (assets/icons/mcp, Simple Icons'
 -- in each brand's colour); any other gets its initial on a hue.
 local LOGOS: { [string]: boolean } = {
-	slack = true,
 	linear = true,
 	notion = true,
 	github = true,
