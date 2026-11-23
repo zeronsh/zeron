@@ -104,6 +104,7 @@ fn request(prompt: &str) -> RunRequest {
         auto_approve: true,
         access: Default::default(),
         plan: false,
+        code_mode: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
@@ -240,6 +241,8 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         is_error: true,
         output: None,
         diff: None,
+        preview_paths: Vec::new(),
+        image_payloads: Vec::new(),
         exit_code: Some(1),
     }));
 
@@ -263,6 +266,8 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         is_error: false,
         output: None,
         diff: None,
+        preview_paths: Vec::new(),
+        image_payloads: Vec::new(),
         exit_code: None,
     }));
 
@@ -280,6 +285,8 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         is_error: true,
         output: None,
         diff: None,
+        preview_paths: Vec::new(),
+        image_payloads: Vec::new(),
         exit_code: None,
     }));
 
@@ -295,6 +302,8 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         is_error: false,
         output: None,
         diff: None,
+        preview_paths: Vec::new(),
+        image_payloads: Vec::new(),
         exit_code: None,
     }));
 
@@ -313,6 +322,8 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         is_error: false,
         output: None,
         diff: None,
+        preview_paths: Vec::new(),
+        image_payloads: Vec::new(),
         exit_code: None,
     }));
 
@@ -1499,6 +1510,8 @@ async fn child_thread_routing_tags_and_never_settles_parent() {
             is_error: false,
             output: None,
             diff: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
             exit_code: Some(0),
         }),
     }));
@@ -1915,6 +1928,8 @@ async fn view_image_reads_as_a_file_read() {
                 is_error: false,
                 output: None,
                 diff: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
                 exit_code: None,
             },
         ]
@@ -2316,6 +2331,7 @@ async fn idle_voice_runtime_has_no_initial_turn_and_preserves_mcp() {
         command: "zeron".into(),
         args: vec!["mcp".into()],
         env: Default::default(),
+        http: None,
     });
     let (mut controls, steer, token) = controls("Yes");
     let (voice, bridge, _events) = zeron_harness::codex::realtime::channel();
@@ -2383,6 +2399,7 @@ async fn a_side_chats_only_thread_starts_without_agent_tools() {
             command: "zeron".into(),
             args: vec!["mcp".into()],
             env: Default::default(),
+            http: None,
         };
         if side_chats_only {
             server.env.insert(
@@ -2426,6 +2443,56 @@ async fn a_side_chats_only_thread_starts_without_agent_tools() {
     }
 }
 
+/// A Codex run with Code Mode enabled passes `features.code_mode = true` on
+/// `thread/start`; off, the key is omitted so older CLIs stay untouched.
+#[tokio::test]
+async fn code_mode_thread_starts_with_feature_flag() {
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-codex-voice.py");
+    let driver = CodexHarness::new()
+        .with_executable(fixture)
+        .with_graces(Duration::from_millis(10), Duration::from_millis(100));
+    for code_mode in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut req = request("use code mode");
+        req.cwd = dir.path().display().to_string();
+        req.code_mode = code_mode;
+        let (controls, _steer, token) = controls("Yes");
+        let mut stream = driver.run(req, controls).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = stream.next().await {
+                if matches!(event.unwrap(), AgentEvent::Done { .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        token.cancel();
+        drop(stream);
+        let wire = std::fs::read_to_string(dir.path().join("voice-wire.jsonl")).unwrap();
+        let start = wire
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|frame| frame["method"] == "thread/start")
+            .expect("a thread starts");
+        let config = start["params"].get("config");
+        if code_mode {
+            assert_eq!(
+                config.and_then(|c| c.get("features.code_mode")),
+                Some(&serde_json::Value::Bool(true)),
+                "{start}"
+            );
+        } else {
+            assert_eq!(
+                config.and_then(|c| c.get("features.code_mode")),
+                None,
+                "{start}"
+            );
+        }
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn external_voice_keeps_canonical_events_without_any_local_helper() {
@@ -2449,6 +2516,7 @@ async fn external_voice_keeps_canonical_events_without_any_local_helper() {
         command: "zeron".into(),
         args: vec!["mcp".into()],
         env: Default::default(),
+        http: None,
     });
     let (mut controls, _steer, token) = controls("Yes");
     let (voice, bridge, mut events) = channel();
@@ -2600,4 +2668,109 @@ async fn an_app_server_that_keeps_dying_reports_what_it_printed() {
         "4",
         "one launch + three relaunches"
     );
+}
+
+// ---- warm starts (a new chat's agent launched before its first message) ----
+
+fn launches(log: &std::path::Path) -> Vec<i32> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.strip_prefix("launch ")?.trim().parse().ok())
+        .collect()
+}
+
+fn warm_alive(pid: i32) -> bool {
+    // A zombie (`Z`) has exited; `ps` prints nothing for a reaped pid.
+    std::process::Command::new("/bin/ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .map(|o| {
+            let stat = String::from_utf8_lossy(&o.stdout);
+            !stat.trim().is_empty() && !stat.trim().starts_with('Z')
+        })
+        .unwrap_or(false)
+}
+
+async fn warm_until(what: &str, mut done: impl FnMut() -> bool) {
+    for _ in 0..200 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("never: {what}");
+}
+
+async fn warm_run(harness: &CodexHarness, key: &str, req: RunRequest) -> Vec<AgentEvent> {
+    let (controls, _steer, _token) = controls("Yes");
+    let stream = harness.run_warm(key, req, controls).await.expect("run starts");
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        stream.map(|r| r.expect("stream event")).collect::<Vec<_>>(),
+    )
+    .await
+    .expect("run finished in time")
+}
+
+/// A warm start launches the agent before its message, and the run takes
+/// that very process.
+#[tokio::test]
+async fn a_warm_start_is_taken_by_its_run() {
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let harness = harness();
+    let mut req = request("scenario:happy");
+    req.cwd = "/tmp".into();
+    // (The happy scenario checks every param the turn must carry, and the
+    // warm handshake's notification opt-outs.)
+    req.model_options.insert("serviceTier".into(), serde_json::Value::String("fast".into()));
+    req.env.insert("FAKE_LAUNCH_LOG".into(), log.path().to_string_lossy().into_owned());
+    let mut early = req.clone();
+    early.prompt.clear();
+    harness.prewarm("chat-w#1", early).await.expect("prewarms");
+    warm_until("the warm launch", || launches(log.path()).len() == 1).await;
+    let events = warm_run(&harness, "chat-w#1", req).await;
+    assert!(events.iter().any(|e| matches!(e, AgentEvent::Done { status: DoneStatus::Completed, .. })), "{events:?}");
+    assert_eq!(launches(log.path()).len(), 1, "the warm process ran it");
+}
+
+/// Launched in another folder or environment than its run: ended, and the
+/// run starts its own.
+#[tokio::test]
+async fn a_warm_start_launched_otherwise_is_not_used() {
+    for what in ["folder", "environment"] {
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let harness = harness();
+        let mut req = request("scenario:happy");
+        req.cwd = "/tmp".into();
+        req.env.insert("FAKE_LAUNCH_LOG".into(), log.path().to_string_lossy().into_owned());
+        let mut early = req.clone();
+        early.prompt.clear();
+        match what {
+            "folder" => early.cwd = "/".into(),
+            _ => {
+                early.env.insert("GH_TOKEN".into(), "another".into());
+            }
+        }
+        harness.prewarm("chat-x#1", early).await.expect("prewarms");
+        warm_until("the warm launch", || launches(log.path()).len() == 1).await;
+        warm_run(&harness, "chat-x#1", req).await;
+        let pids = launches(log.path());
+        assert_eq!(pids.len(), 2, "{what}: a fresh launch ran it");
+        warm_until(&format!("{what}: the unused one ends"), || !warm_alive(pids[0])).await;
+    }
+}
+
+/// Discarded, the warm process has ended by the time the discard returns.
+#[tokio::test]
+async fn a_discarded_warm_start_is_ended() {
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let harness = harness();
+    let mut req = request("");
+    req.cwd = "/tmp".into();
+    req.env.insert("FAKE_LAUNCH_LOG".into(), log.path().to_string_lossy().into_owned());
+    harness.prewarm("chat-y#1", req).await.expect("prewarms");
+    warm_until("the warm launch", || launches(log.path()).len() == 1).await;
+    harness.discard_warm("chat-y#1").await;
+    assert!(!warm_alive(launches(log.path())[0]));
 }

@@ -178,6 +178,14 @@
     // snapshot.read. Unset ⇒ every session installs the engine (~30–60 s).
     "WORKOS_CLIENT_ID": "client_01KWD0EAKZKD50YCQJNYSRE4BY",
     "AUTH_MODE": "workos",
+    // Who the chat rooms offer the relay layer to (docs/design/relay-layer.md):
+    // "1" for everyone, a comma-separated list of WorkOS user ids (each room
+    // checks its owner), or "" (or unset) for nobody. Now: everyone. Taking a
+    // user off is safe at any time: each of their hosts, as it next opens a
+    // chat, stores a checkpoint and moves the chat back to stored rows.
+    // Never deploy edge code older than this release while any room may still
+    // hold a relay queue or an unhealed chat (14 days after turning it off).
+    "CHAT_RELAY_LAYER": "1",
     // Sandbox provider for NEW Cloud devices (src/cloud/providers): "boat".
     // Existing sandboxes keep the provider they were created on.
     "SANDBOX_PROVIDER": "boat",
@@ -199,13 +207,16 @@
     // seconds, charged from the UTC day in CLOUD_CREDIT_RATE_FROM on. Usage on
     // earlier days stays at 60 seconds a credit, so balances don't move.
     //
-    // CLOUD_CREDIT_RATE_FROM is a placeholder until the deployer sets it to a
-    // real YYYY-MM-DD; until then every day stays at 60. Pick a whole UTC day
-    // AFTER the day of the deploy, so that no day is charged at both rates.
-    // Once that day has come, leave it alone: moving or removing it re-prices
-    // the days in between.
+    // CLOUD_CREDIT_RATE_FROM is the first UTC day at the new rate, a whole
+    // day after the deploy that set it, so that no day is charged at both
+    // rates. It lives here, not only in the dashboard: an edge deploy from
+    // this file replaces the dashboard's vars (no keep_vars), and the
+    // hand-set 2026-11-13 was overwritten by the auto-deploys of Nov 13-17
+    // (every day since read 60). Wing chose 2026-11-20 on 2026-11-19, so no
+    // day is re-priced. Now that day is set, leave it alone: moving or
+    // removing it re-prices the days in between.
     "CLOUD_CREDIT_SECONDS": "30",
-    "CLOUD_CREDIT_RATE_FROM": "SET-AT-DEPLOY",
+    "CLOUD_CREDIT_RATE_FROM": "2026-11-20",
     // Where session engines reach the edge when no request names it (a wake
     // that re-provisions a session whose first provision failed).
     "CLOUD_EDGE_URL": "https://edge.zeron.sh",

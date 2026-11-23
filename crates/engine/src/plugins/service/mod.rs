@@ -150,7 +150,9 @@ pub trait Hooks: Send + Sync + 'static {
 pub struct Config {
     /// A service with nothing in flight this long stops.
     pub idle: Duration,
-    /// How often the host looks at each service (idle, timers).
+    /// How often the host looks at a busy service (calls or ops in
+    /// flight); an idle one is looked at as it would stop, and timers as
+    /// they are due.
     pub tick: Duration,
     /// How long a service may take to load.
     pub load_timeout: Duration,
@@ -203,6 +205,18 @@ struct Slot {
     /// One start at a time.
     start: tokio::sync::Mutex<()>,
     log: Mutex<VecDeque<String>>,
+    /// Wakes its looker (`supervisor`): a VM started, timers set, or the
+    /// slot gone.
+    wake: Arc<tokio::sync::Notify>,
+    /// Times its looker looked (tests).
+    #[cfg(test)]
+    looks: std::sync::atomic::AtomicUsize,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.wake.notify_one();
+    }
 }
 
 #[derive(Default)]
@@ -286,6 +300,9 @@ impl Services {
                     state: Mutex::new(SlotState::default()),
                     start: tokio::sync::Mutex::new(()),
                     log: Mutex::new(VecDeque::new()),
+                    wake: Arc::new(tokio::sync::Notify::new()),
+                    #[cfg(test)]
+                    looks: Default::default(),
                 })
             })
             .clone()
@@ -595,7 +612,13 @@ impl Services {
             return;
         };
         let mut st = lock(&slot.state);
-        if st.supervisor.as_ref().is_some_and(|task| !task.is_finished()) {
+        if st
+            .supervisor
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+        {
+            // (What it waits for may have changed: a VM started.)
+            slot.wake.notify_one();
             return;
         }
         let (weak_slot, weak_shared) = (Arc::downgrade(slot), Arc::downgrade(&self.inner));
@@ -667,7 +690,13 @@ fn retire(slot: &Arc<Slot>, why: &str) {
     }
 }
 
+/// The slot's looker: stops its VM once idle, fires its timers. It sleeps
+/// until the next of those is due (a busy VM is looked at each tick), and
+/// with no VM and no timers until woken (`Slot::wake`).
 async fn supervisor(slot: Weak<Slot>, shared: Weak<Shared>) {
+    let Some(wake) = slot.upgrade().map(|slot| slot.wake.clone()) else {
+        return;
+    };
     loop {
         let (Some(slot), Some(shared)) = (slot.upgrade(), shared.upgrade()) else {
             return;
@@ -678,16 +707,26 @@ async fn supervisor(slot: Weak<Slot>, shared: Weak<Shared>) {
         }
         let config = services.inner.config.clone();
         let now = Instant::now();
+        #[cfg(test)]
+        slot.looks.fetch_add(1, Ordering::SeqCst);
         let (fire, plan, next) = {
             let mut st = lock(&slot.state);
+            // When the VM is next looked at: a busy one each tick, an idle
+            // one as it would be idle long enough to stop.
+            let mut look_at = None;
             if let Some(running) = &st.running {
                 let status = running.vm.status();
+                let idle_for = status.idle_for();
                 if status.ended() {
                     st.running = None;
-                } else if !status.busy() && status.idle_for() >= config.idle {
+                } else if !status.busy() && idle_for >= config.idle {
                     running.vm.stop();
                     st.running = None;
                     slot.note("stopped (idle)".into());
+                } else if status.busy() {
+                    look_at = Some(now + config.tick);
+                } else {
+                    look_at = Some(now + (config.idle - idle_for));
                 }
             }
             let mut fire = Vec::new();
@@ -697,7 +736,7 @@ async fn supervisor(slot: Weak<Slot>, shared: Weak<Shared>) {
                     timer.due = now + timer.period;
                 }
             }
-            let next = st.timers.iter().map(|t| t.due).min();
+            let next = st.timers.iter().map(|t| t.due).chain(look_at).min();
             (fire, st.plan.clone(), next)
         };
         if let Some(plan) = plan {
@@ -714,10 +753,20 @@ async fn supervisor(slot: Weak<Slot>, shared: Weak<Shared>) {
                 });
             }
         }
-        let wake = next.map_or(config.tick, |at| at.saturating_duration_since(now).min(config.tick));
         drop(slot);
         drop(services);
-        tokio::time::sleep(wake.max(Duration::from_millis(10))).await;
+        match next {
+            Some(at) => {
+                let wait = at
+                    .saturating_duration_since(now)
+                    .max(Duration::from_millis(10));
+                tokio::select! {
+                    () = tokio::time::sleep(wait) => {}
+                    () = wake.notified() => {}
+                }
+            }
+            None => wake.notified().await,
+        }
     }
 }
 

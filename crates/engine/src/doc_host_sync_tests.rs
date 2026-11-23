@@ -1506,3 +1506,430 @@ async fn a_dropped_handle_ends_its_viewers_streams() {
     .expect("a viewer's stream outlived its dropped handle");
     host.shutdown_workers().await;
 }
+
+// ── a relayed chat whose host has left the room ─────────────────────────────
+
+const ROOM_HOST: &str = "host-device";
+
+/// The chat's host as its room sees it: a doc behind its own relay task, no
+/// engine. It joins and leaves the room as a host's socket does.
+struct HostPeer {
+    doc: zeron_doc::SessionDoc,
+    relay: zeron_sync::chat_relay::RelayHandle,
+    /// What its local-update hook has handed out so far.
+    sent: Mutex<loro::VersionVector>,
+}
+
+/// The host's doc as its relay task reads it (what `EngineChatSink` does).
+struct PeerDoc(loro::LoroDoc);
+
+impl zeron_sync::chat_client::ChatDocSink for PeerDoc {
+    fn apply_row(&self, _: &[u8], _: u64) -> zeron_sync::chat_client::RowImportOutcome {
+        zeron_sync::chat_client::RowImportOutcome::Applied
+    }
+    fn apply_checkpoint(&self, _: &[u8], _: u64) -> Result<(), String> {
+        Ok(())
+    }
+    fn contains_frontier(&self, _: &[u8]) -> bool {
+        true
+    }
+    fn advance_cursor(&self, _: u64) {}
+    fn relay_version(&self) -> Option<Vec<u8>> {
+        Some(self.0.oplog_vv().encode())
+    }
+    fn relay_lacks(&self, version: &[u8]) -> bool {
+        loro::VersionVector::decode(version).is_ok_and(|vv| !self.0.oplog_vv().includes_vv(&vv))
+    }
+    fn relay_behind(&self, version: &[u8]) -> bool {
+        loro::VersionVector::decode(version).is_ok_and(|vv| !vv.includes_vv(&self.0.oplog_vv()))
+    }
+    fn relay_export(&self, since: &[u8]) -> Option<Vec<u8>> {
+        let vv = loro::VersionVector::decode(since).ok()?;
+        if vv.includes_vv(&self.0.oplog_vv()) {
+            return Some(Vec::new());
+        }
+        self.0.export(loro::ExportMode::updates(&vv)).ok()
+    }
+    fn relay_import(&self, bytes: &[u8], _: bool) -> zeron_sync::chat_relay::RelayImport {
+        match self.0.import(bytes) {
+            Ok(status) if status.pending.is_some() => zeron_sync::chat_relay::RelayImport::Parked,
+            Ok(_) => zeron_sync::chat_relay::RelayImport::Applied,
+            Err(_) => zeron_sync::chat_relay::RelayImport::Unreadable,
+        }
+    }
+}
+
+impl HostPeer {
+    fn new() -> Arc<Self> {
+        let loro = loro::LoroDoc::new();
+        let relay = zeron_sync::chat_relay::RelayHandle::spawn(
+            ROOM_HOST,
+            Arc::new(PeerDoc(loro.clone())),
+            zeron_sync::chat_relay::RelayPolicy { confirm_queue: true },
+        );
+        Arc::new(Self {
+            doc: zeron_doc::SessionDoc::from_doc(loro),
+            relay,
+            sent: Mutex::new(loro::VersionVector::default()),
+        })
+    }
+
+    /// One entry of the host's run, relayed as the host relays every commit.
+    fn say(&self, id: &str, role: zeron_doc::MessageRole, text: &str) {
+        self.doc
+            .push_message(&zeron_doc::SessionMessageEntry {
+                id: id.into(),
+                role,
+                parts: vec![zeron_doc::MessagePart::Text { id: "text".into(), text: text.into() }],
+                created_at: 1,
+                device_id: ROOM_HOST.into(),
+                status: None,
+                continuation_of: None,
+                duration_ms: None,
+            })
+            .unwrap();
+        let mut sent = lock(&self.sent);
+        let bytes = self.doc.doc().export(loro::ExportMode::updates(&sent)).unwrap();
+        *sent = self.doc.doc().oplog_vv();
+        self.relay.local_update(bytes, true);
+    }
+}
+
+enum RoomPeer {
+    Socket(tokio::sync::mpsc::UnboundedSender<tokio_tungstenite::tungstenite::Message>),
+    Host(zeron_sync::chat_relay::RelayHandle),
+}
+
+#[derive(Default)]
+struct RelayRoomState {
+    peers: HashMap<String, RoomPeer>,
+    /// The host's frames are lost on their way (a link dying under them).
+    lose_host_frames: bool,
+    host_woken_at: Option<std::time::Instant>,
+    wakes: usize,
+}
+
+/// A relay-era chat room as `edge/src/chat-room.ts` runs one with the layer
+/// on: it stores nothing, forwards relay frames between whoever is in it, and
+/// wakes the chat's host when a reader joins or asks the host directly while
+/// it's away (at most once a minute). Plain-HTTP pulls are refused.
+#[derive(Clone)]
+struct RelayRoom {
+    url: String,
+    state: Arc<Mutex<RelayRoomState>>,
+    host: Arc<HostPeer>,
+    host_socket: Arc<Mutex<Option<CancellationToken>>>,
+}
+
+impl RelayRoom {
+    async fn open() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let room = Self {
+            url: format!("http://{}", listener.local_addr().unwrap()),
+            state: Arc::default(),
+            host: HostPeer::new(),
+            host_socket: Arc::default(),
+        };
+        let serving = room.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else { return };
+                tokio::spawn(serving.clone().serve(stream));
+            }
+        });
+        room
+    }
+
+    async fn serve(self, mut stream: tokio::net::TcpStream) {
+        use tokio_tungstenite::tungstenite::Message;
+        let mut buffer = [0; 8192];
+        let headers = loop {
+            let n = stream.peek(&mut buffer).await.unwrap_or(0);
+            if n == 0 {
+                return;
+            }
+            if let Some(end) = buffer[..n].windows(4).position(|v| v == b"\r\n\r\n") {
+                break String::from_utf8_lossy(&buffer[..end]).to_ascii_lowercase();
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        };
+        if !headers.contains("upgrade: websocket") {
+            let _ = stream.read(&mut buffer).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+            return;
+        }
+        let Ok(ws) = tokio_tungstenite::accept_async(stream).await else { return };
+        let (mut sink, mut reader) = ws.split();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
+        tokio::spawn(async move {
+            while let Some(message) = rx.recv().await {
+                if sink.send(message).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let reply = |kind, header: serde_json::Value| Message::from(encode(kind, &header, &[]));
+        let mut device: Option<String> = None;
+        while let Some(Ok(message)) = reader.next().await {
+            if let Message::Text(text) = &message {
+                if text.as_str() == "ping" {
+                    let _ = tx.send(Message::from("pong"));
+                }
+                continue;
+            }
+            let Some(frame) = decode(&message.into_data()) else { continue };
+            match frame.kind {
+                frame_type::HELLO => {
+                    let from = frame.header["device"].as_str().unwrap_or_default().to_owned();
+                    let _ = tx.send(reply(frame_type::STATE, serde_json::json!({
+                        "headSeq": 0, "seqFloor": 0, "checkpointSeq": 0, "checkpointSize": 0,
+                        "rowCount": 0, "rowBytes": 0, "relay": 1, "legacyPeers": 0,
+                    })));
+                    let mut state = lock(&self.state);
+                    state.peers.insert(from.clone(), RoomPeer::Socket(tx.clone()));
+                    // A reader of a relayed chat is here and the host isn't.
+                    if frame.header["gen"].as_u64() == Some(3) {
+                        self.wake_host(&mut state);
+                    }
+                    device = Some(from);
+                }
+                frame_type::ROWS_REQ => {
+                    let _ = tx.send(reply(frame_type::ROWS_DONE, serde_json::json!({ "headSeq": 0 })));
+                }
+                frame_type::PROBE => {
+                    let _ = tx.send(reply(frame_type::PROBE_OK, serde_json::json!({ "headSeq": 0 })));
+                }
+                _ => {
+                    if let Some(from) = &device {
+                        self.route(from, frame);
+                    }
+                }
+            }
+        }
+        if let Some(from) = device {
+            let mut state = lock(&self.state);
+            if matches!(state.peers.get(&from), Some(RoomPeer::Socket(peer)) if peer.same_channel(&tx)) {
+                state.peers.remove(&from);
+            }
+        }
+    }
+
+    fn send(peer: &RoomPeer, kind: u8, header: serde_json::Value, payload: &[u8]) {
+        match peer {
+            RoomPeer::Socket(tx) => {
+                let _ = tx.send(encode(kind, &header, payload).into());
+            }
+            RoomPeer::Host(relay) => relay.room_frame(zeron_sync::chat_frames::WireFrame {
+                kind,
+                header,
+                payload: payload.to_vec(),
+            }),
+        }
+    }
+
+    /// `handleRelayFrame` and `handleQueueReq`, minus quotas and legacy peers.
+    fn route(&self, from: &str, frame: zeron_sync::chat_frames::WireFrame) {
+        let mut state = lock(&self.state);
+        let mut header = frame.header.clone();
+        let to = header.as_object_mut().and_then(|h| h.remove("to"));
+        header["device"] = serde_json::json!(from);
+        match frame.kind {
+            frame_type::RELAY | frame_type::ANNOUNCE => {
+                if from == ROOM_HOST && state.lose_host_frames {
+                    return;
+                }
+                for (device, peer) in &state.peers {
+                    if device != from {
+                        Self::send(peer, frame.kind, header.clone(), &frame.payload);
+                    }
+                }
+            }
+            frame_type::SYNC_REQ | frame_type::SYNC_DATA => {
+                let to = to.as_ref().and_then(|v| v.as_str()).unwrap_or_default();
+                match state.peers.get(to) {
+                    Some(peer) => Self::send(peer, frame.kind, header, &frame.payload),
+                    // A reader asking a host that has already left: bring it back.
+                    None if frame.kind == frame_type::SYNC_REQ && to == ROOM_HOST => {
+                        self.wake_host(&mut state);
+                    }
+                    None => {}
+                }
+            }
+            frame_type::QUEUE_REQ => {
+                if let Some(peer) = state.peers.get(from) {
+                    Self::send(peer, frame_type::QUEUE_DONE, serde_json::json!({ "count": 0 }), &[]);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `wakeIfAbsent`: the device room's nudge brings the host's socket back.
+    fn wake_host(&self, state: &mut RelayRoomState) {
+        if state.peers.contains_key(ROOM_HOST)
+            || state.host_woken_at.is_some_and(|at| at.elapsed() < Duration::from_secs(60))
+        {
+            return;
+        }
+        state.host_woken_at = Some(std::time::Instant::now());
+        state.wakes += 1;
+        let room = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            room.join_host();
+        });
+    }
+
+    fn join_host(&self) {
+        let mut state = lock(&self.state);
+        if state.peers.contains_key(ROOM_HOST) {
+            return;
+        }
+        state.peers.insert(ROOM_HOST.into(), RoomPeer::Host(self.host.relay.clone()));
+        drop(state);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(zeron_sync::chat_relay::PATH_QUEUE);
+        self.host.relay.room_up(tx);
+        let stop = CancellationToken::new();
+        *lock(&self.host_socket) = Some(stop.clone());
+        let room = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = stop.cancelled() => return,
+                    frame = rx.recv() => match frame.as_deref().and_then(decode) {
+                        Some(frame) => room.route(ROOM_HOST, frame),
+                        None => return,
+                    },
+                }
+            }
+        });
+    }
+
+    /// An idle host closes its socket: whatever it sends next goes nowhere.
+    fn leave_host(&self) {
+        if let Some(stop) = lock(&self.host_socket).take() {
+            stop.cancel();
+        }
+        lock(&self.state).peers.remove(ROOM_HOST);
+    }
+}
+
+fn entry_ids(handle: &ChatDocHandle) -> Vec<String> {
+    handle
+        .doc
+        .read_entries()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect()
+}
+
+/// A chat hosted on another device, relayed (generation 3), viewed here. Its
+/// client caught up with the host while the host ran a turn; the end of that
+/// turn never arrived (the room lost the frames and the announce that would
+/// have said so), and the host, finished, left the room. Nothing here tells
+/// the client it's behind. Opening the chat again must bring the host's end
+/// of the turn without this device writing anything (2026-11-19: the turn
+/// read "Interrupted" until a send pulled the rest in with it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reopening_a_stale_relayed_chat_brings_what_its_host_finished_meanwhile() {
+    use zeron_doc::MessageRole::{Assistant, User};
+    let _budget_guard = SYNC_TEST_LOCK.lock().await;
+    let room = RelayRoom::open().await;
+    room.join_host();
+    room.host.say("u1", User, "do the thing");
+    room.host.say("a1", Assistant, "working on it");
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+    let viewer = DocHost::new(
+        store.clone(),
+        DocHostConfig {
+            device_id: "viewer".into(),
+            default_harness: HarnessId::Mock,
+            edge: Some(EdgeConfig::with_static_token(&room.url, "test")),
+        },
+    );
+    let workspace = WorkspaceHost::open(
+        store.clone(),
+        crate::workspace_host::WorkspaceHostConfig {
+            device_id: "viewer".into(),
+            device_name: "viewer".into(),
+            platform: "macos".into(),
+            org_id: "org".into(),
+            user_id: "user".into(),
+            edge: None,
+            local_only: false,
+        },
+    )
+    .unwrap();
+    workspace.upsert_device_row(&zeron_proto::Device {
+        id: ROOM_HOST.into(),
+        name: "linux box".into(),
+        platform: "linux".into(),
+        last_seen_at: Some(chrono::Utc::now()),
+        created_at: None,
+        version: None,
+        cursor_sdk_version: None,
+        capabilities: vec![zeron_proto::relay_gen::CHAT_RELAY_CAPABILITY.into()],
+    });
+    legacy_chat(&workspace, "chat", ROOM_HOST, Some(zeron_proto::relay_gen::RELAY_ROOM_GEN));
+    viewer.set_workspace(workspace);
+
+    let handle = viewer.open("chat").unwrap();
+    let _view = handle.watch_messages();
+    let caught_up = || lock(&handle.chat2).as_ref().is_some_and(|c| c.caught_up());
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while entry_ids(&handle) != ["u1", "a1"] || !caught_up() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the viewer followed the host's turn");
+
+    // The end of the turn is lost on its way, and the host, done, leaves.
+    lock(&room.state).lose_host_frames = true;
+    room.host.say("a2", Assistant, "done: here is the rest");
+    // Its announce of that commit is lost too.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    room.leave_host();
+    lock(&room.state).lose_host_frames = false;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(entry_ids(&handle), ["u1", "a1"], "the viewer is behind");
+    assert!(handle.sync_started.load(Ordering::Acquire), "its client still runs");
+    assert!(caught_up(), "and reads as caught up");
+    assert_eq!(lock(&room.state).wakes, 0, "nobody has asked for the host");
+    // Hours later, as in the report (its join was its last catch-up).
+    lock(&handle.reopen).asked_at = now_ms() - REOPEN_REFRESH_SPACING_MS - 1;
+
+    // The person opens the chat again: the app's transcript watch opens it.
+    let reopened = std::time::Instant::now();
+    let again = viewer.open("chat").unwrap();
+    let _view_again = again.watch_messages();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while entry_ids(&handle) != ["u1", "a1", "a2"] {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("reopening the chat never brought the end of the host's turn");
+    assert!(reopened.elapsed() < Duration::from_secs(5), "took {:?}", reopened.elapsed());
+    assert_eq!(lock(&room.state).wakes, 1, "the viewer's ask woke the host once");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while lock(&handle.reopen).pending.is_some() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the reopen's ask was answered and settled");
+
+    // Opening it again right away asks nobody: one ask per spacing.
+    let asked_at = lock(&handle.reopen).asked_at;
+    viewer.focus_chat("chat").unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(lock(&handle.reopen).asked_at, asked_at);
+    assert!(lock(&handle.reopen).pending.is_none());
+    viewer.shutdown_workers().await;
+}

@@ -14,6 +14,9 @@ local M = {}
 -- nothing ticks otherwise.
 local TICK = ui.state("chat_turn_tick", 0)
 local due: { [number]: boolean } = {}
+-- Each prompt's machine step while it's on its way (`TurnState.keep_step`),
+-- by message.
+local stepped: { [string]: TurnState.State } = {}
 
 local function judge_again_at(at: number)
 	local key = math.ceil(at)
@@ -77,7 +80,7 @@ function M.of(session: () -> any, messages: any?): (m: any, sending: boolean) ->
 				end
 			end
 		end
-		return TurnState.of {
+		local turn: TurnState.Turn = {
 			streaming = true,
 			sending = sending,
 			live = s.running == true,
@@ -90,6 +93,16 @@ function M.of(session: () -> any, messages: any?): (m: any, sending: boolean) ->
 			host_unreachable = unreachable,
 			host = host,
 		}
+		local said = TurnState.of(turn)
+		if type(m.id) == "string" then
+			if sending then
+				said = TurnState.keep_step(stepped[m.id], said, turn)
+				stepped[m.id] = if said and said.step then said else nil
+			else
+				stepped[m.id] = nil
+			end
+		end
+		return said
 	end
 end
 

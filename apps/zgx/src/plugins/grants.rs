@@ -39,6 +39,9 @@ pub const SHARED_READ: &[(&str, Option<&str>)] = &[
     ("zeron.project", Some("zeron.sessions")),
     ("zeron.device", Some("zeron.devices")),
     ("zeron.devices", Some("zeron.devices")),
+    // The draft in the window's composer, for a plugin allowed "draft":
+    // `{ session, text, attachments = { { kind, name } } }`, never a path.
+    ("zeron.draft", Some("zeron.draft")),
     // Whether the window shows and is in front (the SDK's `zeron.window`):
     // work no one would see waits for it.
     ("zgx.window.shown", None),
@@ -77,9 +80,9 @@ pub const ACTIONS: &[(&str, &str)] = &[
 pub const NEVER_REPLACED: &[&str] = &["@app/screens/plugins", "@app/screens/shell/settings"];
 
 /// Each plugin's own actions (`plugin.<id>.<name>`).
-pub const OWN_ACTIONS: &[&str] = &["result", "ack", "send", "menus", "toast", "problem", "open_tab", "add_page", "github_watch", "github_call", "store_set", "setting_status", "open_url", "notify", "cost", "run", "db", "service_call", "agents", "menu_run", "compose_comment", "file", "block"];
+pub const OWN_ACTIONS: &[&str] = &["result", "ack", "send", "menus", "toast", "problem", "open_tab", "add_page", "github_watch", "github_call", "store_set", "setting_status", "open_url", "notify", "cost", "run", "db", "service_call", "agents", "menu_run", "compose_comment", "draft", "draft_of", "file", "block"];
 /// Each plugin's own shared state, to read (`plugin.<id>.<name>`).
-pub const OWN_SHARED: &[&str] = &["calls", "inbox", "records", "github", "store", "settings", "locales", "menu_items", "composed"];
+pub const OWN_SHARED: &[&str] = &["calls", "inbox", "records", "github", "store", "settings", "locales", "menu_items", "composed", "drafts"];
 
 /// The capability naming plugin `id`'s own calls and actions.
 pub fn own(id: &str) -> Capability {
@@ -252,6 +255,9 @@ pub fn capabilities(id: &str, permissions: &[String], change: &[String], replace
             "pages.add" => out.push(Capability::OverrideElement(page_selector(id))),
             "navigate" => out.push(named("zeron.navigate")),
             "compose" => out.push(named("zeron.compose")),
+            // Reading the composer's draft (`zeron.draft`); taking it and
+            // putting it back are its own action's, checked by the host.
+            "draft" => out.push(named("zeron.draft")),
             "devices" => out.push(named("zeron.devices")),
             "network" => out.push(Capability::Fetch),
             "clipboard" => out.push(Capability::Clipboard),
@@ -259,6 +265,7 @@ pub fn capabilities(id: &str, permissions: &[String], change: &[String], replace
             "web" => out.push(Capability::Web),
             "windows" => out.push(Capability::Windows),
             "fonts" => out.push(Capability::Fonts),
+            "scene3d" => out.push(Capability::Scene3d),
             // The engine's: tools reach agents through Zeron's MCP server,
             // a native server runs beside agents.
             "tools" | "native" => {}
@@ -306,6 +313,13 @@ mod tests {
                 Capability::Fetch,
             ]
         );
+    }
+
+    #[test]
+    fn a_plugin_draws_3d_only_with_its_permission() {
+        // zgx asks for the `scene3d` grant before `ui.scene3d` draws.
+        assert!(capabilities("x", &s(&["scene3d"]), &[], &[]).contains(&Capability::Scene3d));
+        assert!(!capabilities("x", &s(&["windows"]), &[], &[]).contains(&Capability::Scene3d));
     }
 
     #[test]
@@ -399,6 +413,15 @@ mod tests {
         assert!(!got.contains(&Capability::OverrideElement("@app/screens/chat".into())));
         assert!(!got.contains(&Capability::OverrideModule("#composer-toolbar".into())));
         assert!(!got.iter().any(|c| matches!(c, Capability::Override(_))));
+    }
+
+    /// "draft" reads the composer's draft; "compose" alone never does.
+    #[test]
+    fn only_draft_reads_the_draft() {
+        let draft = Capability::Named("zeron.draft".into());
+        assert_eq!(capabilities("stash", &s(&["draft"]), &[], &[]), vec![own("stash"), draft.clone()]);
+        assert!(!capabilities("x", &s(&["compose"]), &[], &[]).contains(&draft));
+        assert!(SHARED_READ.contains(&("zeron.draft", Some("zeron.draft"))));
     }
 
     #[test]

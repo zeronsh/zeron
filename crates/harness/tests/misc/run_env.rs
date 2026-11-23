@@ -39,6 +39,7 @@ fn request(cwd: &Path) -> RunRequest {
         auto_approve: true,
         access: Default::default(),
         plan: false,
+        code_mode: false,
         resume: None,
         attachments: Vec::new(),
         worktree: None,

@@ -48,6 +48,7 @@ fn request(prompt: &str) -> RunRequest {
         auto_approve: true,
         access: Default::default(),
         plan: false,
+        code_mode: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
@@ -407,6 +408,111 @@ async fn resumed_first_class_model_is_switched_before_prompt() {
         "{events:?}"
     );
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[test]
+fn grok_runtime_is_not_shared_across_always_approve_and_auto() {
+    let auto = RunRequest {
+        auto_approve: false,
+        access: AccessMode::Auto,
+        ..request("p")
+    };
+    let approved = RunRequest {
+        auto_approve: true,
+        ..auto.clone()
+    };
+    let grok = AcpHarness::grok();
+    assert!(grok.same_runtime(&auto, &auto));
+    assert!(grok.same_runtime(&approved, &approved));
+    assert!(!grok.same_runtime(&auto, &approved));
+    assert!(!grok.same_runtime(&approved, &auto));
+}
+
+#[tokio::test]
+async fn grok_supervised_and_edits_run_in_auto_never_always_approve() {
+    for access in [AccessMode::Supervised, AccessMode::AutoAcceptEdits] {
+        let (controls, _steer, _token) = controls();
+        let mut req = request("scenario:permission-meta");
+        req.access = access;
+        req.auto_approve = false;
+        let events = run_to_end(&harness(), req, controls).await;
+        assert!(
+            events.contains(&AgentEvent::TextDelta {
+                text: "mode=auto client=extension".into()
+            }),
+            "{access:?}: {events:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn grok_resume_only_agent_gets_the_mode_on_session_resume() {
+    for (access, expected) in [
+        (AccessMode::Auto, "mode=auto client=extension"),
+        (AccessMode::FullAccess, "mode=yolo client=none"),
+    ] {
+        let (controls, _steer, _token) = controls();
+        let mut req = request("scenario:permission-meta");
+        req.access = access;
+        req.auto_approve = false;
+        req.resume = Some("s-loaded".into());
+        req.env
+            .insert("FAKE_RESUME_ONLY".into(), "s-loaded".into());
+        let events = run_to_end(&harness(), req, controls).await;
+        assert!(
+            events.contains(&AgentEvent::TextDelta {
+                text: expected.into()
+            }),
+            "{access:?}: {events:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn auto_asks_about_a_reviewer_escalated_read() {
+    for (answer, reply) in [("Yes", "allowed"), ("No", "declined")] {
+        let (controls, asked) = answering_controls(Some(answer));
+        let mut req = request("scenario:auto-read-escalation");
+        req.access = AccessMode::Auto;
+        req.auto_approve = false;
+        let events = run_to_end(&harness(), req, controls).await;
+        let asked = asked.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1, "{answer}: {asked:?} {events:?}");
+        assert!(asked[0].contains("Reads a secrets file"), "{asked:?}");
+        assert!(
+            events.contains(&AgentEvent::TextDelta {
+                text: reply.into()
+            }),
+            "{answer}: {events:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn grok_session_carries_its_permission_mode() {
+    const AUTO: &str = "mode=auto client=extension";
+    const YOLO: &str = "mode=yolo client=none";
+    for (access, auto_approve, resume, expected) in [
+        (AccessMode::Auto, false, None, AUTO),
+        (AccessMode::Auto, false, Some("s-loaded"), AUTO),
+        (AccessMode::FullAccess, false, None, YOLO),
+        (AccessMode::FullAccess, false, Some("s-loaded"), YOLO),
+        // auto_approve is full access whatever the mode asked for.
+        (AccessMode::Auto, true, None, YOLO),
+    ] {
+        let (controls, _steer, _token) = controls();
+        let mut req = request("scenario:permission-meta");
+        req.access = access;
+        req.auto_approve = auto_approve;
+        req.resume = resume.map(Into::into);
+        let events = run_to_end(&harness(), req, controls).await;
+        assert!(
+            events.contains(&AgentEvent::TextDelta {
+                text: expected.into()
+            }),
+            "{access:?} auto_approve {auto_approve} resume {resume:?}: {events:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1180,7 +1286,7 @@ fn antigravity_descriptor_surface_matches_registry_expectations() {
     assert_eq!(antigravity.id(), HarnessId::Antigravity);
     assert_eq!(antigravity.display_name(), "Antigravity");
     assert!(antigravity.supports_steering());
-    assert_eq!(antigravity.steering_mode(), SteeringMode::TurnBoundary);
+    assert_eq!(antigravity.steering_mode(), SteeringMode::StepBoundary);
     assert!(antigravity.reasoning_levels().is_empty());
 }
 
@@ -1283,11 +1389,11 @@ async fn antigravity_models_group_effort_variants_into_one_row() {
 #[test]
 fn only_antigravity_offers_access_modes_beyond_full_access() {
     assert_eq!(AcpHarness::antigravity().access_modes(), AccessMode::ALL);
-    for harness in [
-        AcpHarness::grok(),
-        AcpHarness::devin(),
-        AcpHarness::hermes(),
-    ] {
+    assert_eq!(
+        AcpHarness::grok().access_modes(),
+        [AccessMode::Auto, AccessMode::FullAccess]
+    );
+    for harness in [AcpHarness::devin(), AcpHarness::hermes()] {
         assert_eq!(
             harness.access_modes(),
             [AccessMode::FullAccess],
@@ -1322,8 +1428,8 @@ fn a_new_access_mode_needs_a_new_agent_where_it_is_honored() {
         ..supervised.clone()
     };
     assert!(AcpHarness::antigravity().reconfigures_in_place(&full, &auto_approved));
-    // Grok runs every mode with full access, so nothing changes.
-    assert!(AcpHarness::grok().reconfigures_in_place(&full, &supervised));
+    // Grok runs Supervised in Auto, a different mode from full access.
+    assert!(!AcpHarness::grok().reconfigures_in_place(&full, &supervised));
 }
 
 /// Controls whose input bridge answers every question `answer` (`None`
@@ -2653,6 +2759,7 @@ async fn mcp_injection_all_acp_harnesses_new_resume_and_fallback() {
                     ("ZERON_IPC_PORT".into(), "27699".into()),
                 ]
                 .into(),
+                http: None,
             });
             let (controls, _steer, _token) = controls();
             let mut stream = harness.run(req, controls).await.unwrap();
@@ -2887,3 +2994,643 @@ async fn fx_permissions_follow_zeron_access_mode() {
         );
     }
 }
+
+// ---- warm starts (a new chat's agent launched before its first message) ----
+
+fn launches(log: &std::path::Path) -> Vec<i32> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.strip_prefix("launch ")?.trim().parse().ok())
+        .collect()
+}
+
+fn warm_alive(pid: i32) -> bool {
+    // A zombie (`Z`) has exited; `ps` prints nothing for a reaped pid.
+    std::process::Command::new("/bin/ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .map(|o| {
+            let stat = String::from_utf8_lossy(&o.stdout);
+            !stat.trim().is_empty() && !stat.trim().starts_with('Z')
+        })
+        .unwrap_or(false)
+}
+
+async fn warm_until(what: &str, mut done: impl FnMut() -> bool) {
+    for _ in 0..200 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("never: {what}");
+}
+
+async fn warm_run(harness: &AcpHarness, key: &str, req: RunRequest) -> Vec<AgentEvent> {
+    let (controls, _steer, _token) = controls();
+    let stream = harness.run_warm(key, req, controls).await.expect("run starts");
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        stream.map(|r| r.expect("stream event")).collect::<Vec<_>>(),
+    )
+    .await
+    .expect("run finished in time")
+}
+
+/// A warm start launches the agent before its message, and the run takes
+/// that very process.
+#[tokio::test]
+async fn a_warm_start_is_taken_by_its_run() {
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let harness = harness();
+    let mut req = request("scenario:happy");
+    req.cwd = "/tmp".into();
+    req.env.insert("FAKE_LAUNCH_LOG".into(), log.path().to_string_lossy().into_owned());
+    let mut early = req.clone();
+    early.prompt.clear();
+    harness.prewarm("chat-w#1", early).await.expect("prewarms");
+    warm_until("the warm launch", || launches(log.path()).len() == 1).await;
+    let events = warm_run(&harness, "chat-w#1", req).await;
+    assert!(events.iter().any(|e| matches!(e, AgentEvent::Done { status: DoneStatus::Completed, .. })), "{events:?}");
+    assert_eq!(launches(log.path()).len(), 1, "the warm process ran it");
+}
+
+/// Launched in another folder or environment than its run: ended, and the
+/// run starts its own.
+#[tokio::test]
+async fn a_warm_start_launched_otherwise_is_not_used() {
+    for what in ["folder", "environment"] {
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let harness = harness();
+        let mut req = request("scenario:happy");
+        req.cwd = "/tmp".into();
+        req.env.insert("FAKE_LAUNCH_LOG".into(), log.path().to_string_lossy().into_owned());
+        let mut early = req.clone();
+        early.prompt.clear();
+        match what {
+            "folder" => early.cwd = "/".into(),
+            _ => {
+                early.env.insert("GH_TOKEN".into(), "another".into());
+            }
+        }
+        harness.prewarm("chat-x#1", early).await.expect("prewarms");
+        warm_until("the warm launch", || launches(log.path()).len() == 1).await;
+        warm_run(&harness, "chat-x#1", req).await;
+        let pids = launches(log.path());
+        assert_eq!(pids.len(), 2, "{what}: a fresh launch ran it");
+        warm_until(&format!("{what}: the unused one ends"), || !warm_alive(pids[0])).await;
+    }
+}
+
+/// Discarded, the warm process has ended by the time the discard returns.
+#[tokio::test]
+async fn a_discarded_warm_start_is_ended() {
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let harness = harness();
+    let mut req = request("");
+    req.cwd = "/tmp".into();
+    req.env.insert("FAKE_LAUNCH_LOG".into(), log.path().to_string_lossy().into_owned());
+    harness.prewarm("chat-y#1", req).await.expect("prewarms");
+    warm_until("the warm launch", || launches(log.path()).len() == 1).await;
+    harness.discard_warm("chat-y#1").await;
+    assert!(!warm_alive(launches(log.path())[0]));
+}
+
+/// A capped Auto request must fail before executable resolution or spawn,
+/// even when the selected agent only advertises full access.
+#[tokio::test]
+async fn auto_without_a_safe_fallback_refuses_before_launch() {
+    let (_, capped, _) = zeron_proto::cap_access(
+        (SandboxLevel::WorkspaceWrite, AccessMode::FullAccess),
+        (SandboxLevel::WorkspaceWrite, AccessMode::Auto),
+    );
+    let req = RunRequest {
+        auto_approve: false,
+        access: capped,
+        ..request("must not run")
+    };
+    for agent in [AcpHarness::devin(), AcpHarness::hermes()] {
+        let agent = agent.with_executable(PathBuf::from("/nonexistent/auto-must-not-launch"));
+        assert!(!agent.reconfigures_in_place(&req, &req));
+        let (controls, _sender, _token) = controls();
+        match agent.run(req.clone(), controls).await {
+            Err(HarnessError::Protocol(message)) => {
+                assert!(message.contains("cannot run in Auto"), "{message}");
+                assert!(
+                    message.contains("explicitly select Full access"),
+                    "{message}"
+                );
+            }
+            Err(error) => panic!("access must be checked before launch: {error}"),
+            Ok(_) => panic!("unsupported Auto started a run"),
+        }
+    }
+    // Supported stricter fallbacks remain usable, and explicit full access
+    // retains the legacy auto_approve behavior.
+    let edits = RunRequest {
+        access: AccessMode::AutoAcceptEdits,
+        ..req.clone()
+    };
+    assert!(AcpHarness::antigravity().reconfigures_in_place(&req, &edits));
+    let explicit = RunRequest {
+        auto_approve: true,
+        ..req
+    };
+    let full = RunRequest {
+        auto_approve: false,
+        access: AccessMode::FullAccess,
+        ..explicit.clone()
+    };
+    assert!(AcpHarness::devin().reconfigures_in_place(&full, &explicit));
+}
+
+#[cfg(unix)]
+fn write_executable_script(dir: &tempfile::TempDir, name: &str, script: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.path().join(name);
+    std::fs::write(&path, script).expect("write script");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
+    path
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn antigravity_1_5_two_pass_switches_model_before_xhigh_effort() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = write_executable_script(
+        &dir,
+        "fake-agy-150.py",
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+def opts(model, effort, mode):
+    efforts = [
+        {"value": "low", "name": "Low"},
+        {"value": "medium", "name": "Medium"},
+        {"value": "high", "name": "High"},
+    ]
+    if model in ("gemini-4-neon", "gemini-4-hydrogen"):
+        efforts.append({"value": "xhigh", "name": "Extra High"})
+    return [
+        {
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": model,
+            "options": [
+                {"value": "gemini-3.8-flash", "name": "Gemini 3.8 Flash"},
+                {"value": "gemini-4-neon", "name": "Gemini 4 Neon"},
+            ],
+        },
+        {
+            "id": "thinking_level",
+            "name": "Thinking Level",
+            "category": "thought_level",
+            "type": "select",
+            "currentValue": effort,
+            "options": efforts,
+        },
+        {
+            "id": "mode",
+            "name": "Session Mode",
+            "category": "mode",
+            "type": "select",
+            "currentValue": mode,
+            "options": [
+                {"value": "default", "name": "Default"},
+                {"value": "yolo", "name": "YOLO"},
+            ],
+        },
+    ]
+
+model, effort, mode = "gemini-3.8-flash", "high", "default"
+sets = []
+for raw in sys.stdin:
+    msg = json.loads(raw)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": "agy-150", "configOptions": opts(model, effort, mode)}})
+    elif method == "session/set_config_option":
+        cid = msg["params"]["configId"]
+        val = msg["params"]["value"]
+        sets.append(f"{cid}={val}")
+        if cid == "model":
+            model = val
+        elif cid == "thinking_level":
+            effort = val
+        elif cid == "mode":
+            mode = val
+        send({"jsonrpc": "2.0", "id": mid, "result": {"configOptions": opts(model, effort, mode)}})
+    elif method == "session/prompt":
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "agy-150",
+            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "sets:" + ";".join(sets)}}
+        }})
+        send({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}})
+        break
+"#,
+    );
+    let harness = AcpHarness::antigravity().with_executable(&script);
+    let mut req = request("hi");
+    req.model = Some("gemini-4-neon".into());
+    req.reasoning = Some(ReasoningLevel::XHigh);
+    req.access = AccessMode::FullAccess;
+    let (controls, _steer, _token) = controls();
+    let events = run_to_end(&harness, req, controls).await;
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "sets:model=gemini-4-neon;thinking_level=xhigh;mode=yolo");
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn antigravity_step_boundary_steer_waits_for_tool_suppresses_cancel_chunk_and_continues() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = write_executable_script(
+        &dir,
+        "fake-agy-steer.py",
+        r#"#!/usr/bin/env python3
+import json, sys, threading, time
+
+lock = threading.Lock()
+def send(obj):
+    with lock:
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
+
+cancel_event = threading.Event()
+tool_done = threading.Event()
+cancel_seen_before_tool_done = False
+prompt_count = 0
+
+def handle_prompt(mid, text):
+    global prompt_count
+    prompt_count += 1
+    if prompt_count == 1:
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "agy-steer",
+            "update": {"sessionUpdate": "tool_call", "toolCallId": "tc-1", "title": "Read file", "kind": "read", "status": "in_progress"}
+        }})
+        time.sleep(0.25)
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "agy-steer",
+            "update": {"sessionUpdate": "tool_call_update", "toolCallId": "tc-1", "status": "completed", "rawOutput": "ok"}
+        }})
+        tool_done.set()
+        cancel_event.wait(timeout=5.0)
+        # Real agy_acp_server 1.5.0 emits this synthetic chunk on cancel.
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "agy-steer",
+            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "The request was cancelled by the client."}}
+        }})
+        send({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "cancelled"}})
+    else:
+        marker = "EARLY_CANCEL" if cancel_seen_before_tool_done else "AFTER_TOOL"
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "agy-steer",
+            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": f"{marker}:{text}"}}
+        }})
+        send({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}})
+
+for raw in sys.stdin:
+    msg = json.loads(raw)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": "agy-steer"}})
+    elif method == "session/cancel":
+        if not tool_done.is_set():
+            cancel_seen_before_tool_done = True
+        cancel_event.set()
+    elif method == "session/prompt":
+        prompt_text = msg["params"]["prompt"][0]["text"]
+        threading.Thread(target=handle_prompt, args=(mid, prompt_text), daemon=True).start()
+"#,
+    );
+    let harness = AcpHarness::antigravity().with_executable(&script);
+    let (controls, steer_tx, _token) = controls();
+    let mut stream = harness.run(request("first turn"), controls).await.unwrap();
+    let mut events = Vec::new();
+    let mut steered_sent = false;
+    while let Some(item) = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("turn finished")
+    {
+        let ev = item.expect("stream event");
+        if matches!(ev, AgentEvent::ToolCall { .. }) && !steered_sent {
+            steered_sent = true;
+            steer_tx.send(SteerMessage::text("pivot now")).await.unwrap();
+        }
+        let is_done = matches!(ev, AgentEvent::Done { .. });
+        events.push(ev);
+        if is_done {
+            break;
+        }
+    }
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !text.contains("cancelled by the client"),
+        "synthetic cancel chunk leaked: {text:?}"
+    );
+    assert!(
+        text.contains("AFTER_TOOL:pivot now"),
+        "expected steer after tool completion: {text:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Steered { .. })),
+        "missing Steered event: {events:?}"
+    );
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn antigravity_wedged_preempt_cancel_errors_instead_of_hanging_or_interrupting() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = write_executable_script(
+        &dir,
+        "fake-agy-wedged-cancel.py",
+        r#"#!/usr/bin/env python3
+import json, sys, time
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for raw in sys.stdin:
+    msg = json.loads(raw)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": "agy-wedge"}})
+    elif method == "session/prompt":
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "agy-wedge",
+            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "partial"}}
+        }})
+    elif method == "session/cancel":
+        # Wedge: ignore cancel and never resolve session/prompt.
+        time.sleep(30)
+"#,
+    );
+    let harness = AcpHarness::antigravity()
+        .with_executable(&script)
+        .with_stop_timeout(Duration::from_millis(350))
+        .with_graces(Duration::from_millis(100), Duration::from_millis(200));
+    let (controls, steer_tx, _token) = controls();
+    let mut stream = harness.run(request("first"), controls).await.unwrap();
+    let mut events = Vec::new();
+    let mut sent = false;
+    while let Some(item) = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("wedged preempt settled within stop_timeout")
+    {
+        let ev = item.expect("stream event");
+        if matches!(ev, AgentEvent::TextDelta { .. }) && !sent {
+            sent = true;
+            steer_tx.send(SteerMessage::text("steer me")).await.unwrap();
+        }
+        events.push(ev);
+    }
+    let done = dones(&events);
+    assert_eq!(done.len(), 1, "{events:?}");
+    assert_eq!(
+        done[0].0,
+        DoneStatus::Errored,
+        "wedged steer cancel must error (not interrupt) so the engine can re-dispatch the steer: {events:?}"
+    );
+    assert!(
+        done[0]
+            .1
+            .as_deref()
+            .is_some_and(|e| e.contains("did not cancel the current turn in time")),
+        "{done:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn antigravity_corrupt_resume_recovers_with_prior_history_from_turn_control() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = write_executable_script(
+        &dir,
+        "fake-agy-corrupt.py",
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for raw in sys.stdin:
+    msg = json.loads(raw)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {
+            "protocolVersion": 1,
+            "agentCapabilities": {"loadSession": True, "sessionCapabilities": {"resume": {}}}
+        }})
+    elif method == "session/resume":
+        send({"jsonrpc": "2.0", "id": mid, "error": {
+            "code": -32603,
+            "message": "failed to setup trajectory: file is not a database"
+        }})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": "agy-fresh"}})
+    elif method == "session/prompt":
+        prompt_text = msg["params"]["prompt"][0]["text"]
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "agy-fresh",
+            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ECHO:" + prompt_text}}
+        }})
+        send({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}})
+        break
+"#,
+    );
+    let harness = AcpHarness::antigravity().with_executable(&script);
+    let mut req = request("what was the secret?");
+    req.resume = Some("corrupt-db-session".into());
+    let (controls, _steer, _token) = controls();
+    controls.turn.set_recovery_prompt(Some(
+        "<conversation>[{\"role\":\"user\",\"text\":\"secret is OBSIDIAN-742\"}]</conversation>\n\nwhat was the secret?".into(),
+    ));
+    let events = run_to_end(&harness, req, controls).await;
+    let notice = events.iter().find_map(|e| match e {
+        AgentEvent::Error { message } => Some(message.as_str()),
+        _ => None,
+    });
+    assert!(
+        notice.is_some_and(|m| m.contains("prior conversation history")),
+        "expected history-recovery notice: {events:?}"
+    );
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        text.contains("OBSIDIAN-742") && text.ends_with("what was the secret?"),
+        "expected replayed history in fresh prompt: {text:?}"
+    );
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn antigravity_streams_agent_thought_chunk_as_reasoning_delta() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = write_executable_script(
+        &dir,
+        "fake-agy-thoughts.py",
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for raw in sys.stdin:
+    msg = json.loads(raw)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": "agy-think"}})
+    elif method == "session/prompt":
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "agy-think",
+            "update": {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "Checking factors..."}}
+        }})
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "agy-think",
+            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "42"}}
+        }})
+        send({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}})
+        break
+"#,
+    );
+    let harness = AcpHarness::antigravity().with_executable(&script);
+    let (controls, _steer, _token) = controls();
+    let events = run_to_end(&harness, request("think"), controls).await;
+    assert!(
+        events.contains(&AgentEvent::ReasoningDelta {
+            text: "Checking factors...".into()
+        }),
+        "expected ReasoningDelta: {events:?}"
+    );
+    assert!(
+        events.contains(&AgentEvent::TextDelta { text: "42".into() }),
+        "expected TextDelta: {events:?}"
+    );
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn antigravity_stop_turn_suppresses_synthetic_cancel_chunk() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = write_executable_script(
+        &dir,
+        "fake-agy-stop-turn.py",
+        r#"#!/usr/bin/env python3
+import json, os, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+prompt_mid = None
+for raw in sys.stdin:
+    msg = json.loads(raw)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": "agy-stop"}})
+    elif method == "session/prompt":
+        prompt_mid = mid
+        proxy_url = os.environ.get("AGY_ACP_CCPA_BASE_URL", "")
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "agy-stop",
+            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "WORKING:" + proxy_url}}
+        }})
+    elif method == "session/cancel" and prompt_mid is not None:
+        # Mirror real agy_acp_server 1.5.0: emits synthetic cancel chunk before settling cancelled.
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "agy-stop",
+            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "The request was cancelled by the client."}}
+        }})
+        send({"jsonrpc": "2.0", "id": prompt_mid, "result": {"stopReason": "cancelled"}})
+        prompt_mid = None
+        break
+"#,
+    );
+    let harness = AcpHarness::antigravity().with_executable(&script);
+    let (controls, steer, _token) = controls();
+    let turn = controls.turn.clone();
+    let mut stream = harness.run(request("long task"), controls).await.unwrap();
+    let mut events = Vec::new();
+    let mut stopped = false;
+    while let Some(item) = stream.next().await {
+        let ev = item.unwrap();
+        if !stopped && matches!(&ev, AgentEvent::TextDelta { text } if text.starts_with("WORKING:")) {
+            stopped = true;
+            turn.stop_turn();
+        }
+        let is_done = matches!(ev, AgentEvent::Done { .. });
+        events.push(ev);
+        if is_done {
+            drop(steer);
+            break;
+        }
+    }
+    let texts: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        texts.iter().any(|t| t.starts_with("WORKING:http://127.0.0.1:")),
+        "expected loopback AGY_ACP_CCPA_BASE_URL proxy in child env: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t.contains("cancelled by the client")),
+        "synthetic cancel chunk must be suppressed on stop_turn: {texts:?}"
+    );
+    assert_eq!(dones(&events), vec![(DoneStatus::Interrupted, None)]);
+}
+

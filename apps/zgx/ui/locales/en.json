@@ -590,6 +590,10 @@
         "supervised_hint": "Ask before commands and file changes.",
         "edits": "Auto-accept edits",
         "edits_hint": "Apply edits, ask before other actions.",
+        "auto": "Auto",
+        "auto_hint": "The agent's reviewer approves safe actions; risky ones ask.",
+        "auto_unavailable": "Auto unavailable",
+        "auto_unavailable_hint": "This agent doesn't support Auto. Choose another access mode or agent.",
         "full": "Full access",
         "full_hint": "Run commands and edits without asking."
       },
@@ -606,6 +610,13 @@
         "worktree_hint": "An isolated copy, on a branch of its own."
       },
       "work_in": "Work in",
+      "reach": {
+        "label": "Reaches",
+        "devices": "All devices",
+        "devices_hint": "Works with your other devices: their chats, and commands on them.",
+        "isolated": "Isolated",
+        "isolated_hint": "Only its own machine and the chats it starts."
+      },
       "project": {
         "label": "Project",
         "search": "Search projects…",
@@ -626,6 +637,7 @@
       "dictate": "Dictate",
       "queue_message": "Queue message",
       "send_message": "Send message",
+      "send_auto_unavailable": "Auto isn't available for this agent. Choose another access mode to send.",
       "stop": "Stop",
       "back": "Back",
       "next": "Next",
@@ -718,7 +730,18 @@
       "show_all_lines": "Show all {n} lines",
       "open_subagent": "Open subagent {title}",
       "subagent": "Subagent",
-      "worked_for": "Worked for {secs}s · {summary}"
+      "worked_for": "Worked for {secs}s · {summary}",
+      "review": {
+        "reviewing": "Reviewing…",
+        "approved": "Auto-approved",
+        "denied": "Blocked by auto-review",
+        "timed-out": "Review timed out",
+        "reviewing_hint": "The agent's reviewer is checking this before it runs.",
+        "approved_hint": "The agent's reviewer judged this safe and let it run.",
+        "denied_hint": "The agent's reviewer stopped this. It didn't run.",
+        "timed-out_hint": "The agent's reviewer didn't decide in time, so this didn't run.",
+        "risk": "Risk: {risk}"
+      }
     },
     "transcript": {
       "copy_message": "Copy message",
@@ -871,6 +894,8 @@
       "default": "Default",
       "reasoning": "REASONING",
       "account": "Account",
+      "account_of": "{name} account",
+      "no_account": "None",
       "model": "Model",
       "search_starred": "Search starred models…",
       "search_agent": "Search {agent} models…",
@@ -882,7 +907,8 @@
       "not_found": "No models found",
       "not_found_hint": "Nothing in {where} matches “{q}”",
       "where_starred": "starred models",
-      "where_models": "models"
+      "where_models": "models",
+      "add_key": "Add {name} API key"
     },
     "effort_slider": {
       "reasoning": "Reasoning"
@@ -910,6 +936,7 @@
       "use_reset": "Use a reset",
       "connect": "Connect a {name} account",
       "add_account": "Add account",
+      "how_it_signs_in": "How it signs in on Cloud",
       "signing_in_to": "Signing in to {name}",
       "signing_in_hint": "Waiting for you to finish in the browser. Nothing changes until you switch.",
       "signing_in": "Signing in",
@@ -969,7 +996,23 @@
       "paste_key_hint": "{name} reads it as {var}. It's kept on this device and never shown again.",
       "key_name": "{var}",
       "get_key": "Get a key",
-      "save_key": "Save"
+      "save_key": "Save",
+      "add_named_account": "Add {name} account",
+      "add_api_key": "Add API key",
+      "key_offline": "Zeron's engine isn't answering — try again in a moment.",
+      "key_remote": "API keys are added on the computer that runs {name}.",
+      "key_failed": "The key couldn't be added — try again.",
+      "key_title": "Add API key",
+      "key_provider": "Provider",
+      "key_body": "{agent} uses this key for {name} models.",
+      "key_field": "API key",
+      "key_kept": "Stored on this Mac in {agent}'s settings.",
+      "key_name_label": "Name",
+      "key_name_placeholder": "Work, Personal…",
+      "rename": "Rename",
+      "rename_title": "Rename API key",
+      "rename_hint": "Leave it blank for its default name.",
+      "key_name_optional": "Name (optional)"
     },
     "command_palette": {
       "scope": {
@@ -1131,6 +1174,11 @@
         "description": "Blurred everywhere, for screen sharing. Click one to see it.",
         "terms": "screen sharing recording blur blurred mosaic private censor redact"
       },
+      "keep_chats_local": {
+        "label": "Keep chats on this device",
+        "description": "Stay signed in, but this device's chats, chat list and projects aren't synced to Zeron's servers. Your other devices won't see them, and this one won't see theirs. Zeron restarts its engine to switch.",
+        "terms": "sync synced local only offline private privacy server cloud upload chats transcripts devices"
+      },
       "links_in": {
         "external": "Your default browser.",
         "tab": "A browser tab beside the conversation."
@@ -1163,6 +1211,12 @@
         "terms": "co-author coauthor attribution bot commit message",
         "cloud": "Always on for Cloud",
         "on": "Agents' commits add zeronsh[bot] as a co-author"
+      },
+      "keep_running": {
+        "label": "Keep Zeron running after you quit",
+        "on": "Chats keep working, and other devices can reach them.",
+        "off": "When you quit, Zeron stops once its chats are done.",
+        "terms": "background quit close engine agents running stop memory battery"
       }
     },
     "engine": {
@@ -1486,6 +1540,11 @@
         "terms": "subagent delegate side chats tasks spawn",
         "description": "Off, it delegates through side chats."
       },
+      "code_mode": {
+        "label": "Code mode",
+        "terms": "code mode javascript script tool calls programmatic",
+        "description": "Run multi-step tool calls as code in one turn."
+      },
       "update_policy": {
         "label": "Update policy",
         "terms": "automatic upgrade version cli"
@@ -1611,7 +1670,10 @@
           "label": "{name}'s sign-in"
         },
         "remove_row_description": "Chats that used it stay."
-      }
+      },
+      "couldnt_switch": "Couldn't switch accounts",
+      "cloud": "Cloud",
+      "cloud_key_kept": "Kept in Zeron's vault for Cloud, never on this Mac. Every Cloud machine uses it from its next turn, wherever no sign-in is in use."
     },
     "devices": {
       "title": "Devices",
@@ -1991,6 +2053,12 @@
         "terms": "machine size vcpu memory disk credits rate xlarge large small standard",
         "description": "The size new Cloud chats start on. Bigger machines use credits faster.",
         "failed": "Couldn't change the default machine. Try again in a moment."
+      },
+      "reach": {
+        "title": "New chats reach",
+        "terms": "reach access devices isolated isolate remote commands security",
+        "description": "Whether new Cloud chats work with your other devices — their chats, and commands on them — or stay on their own machine. You can change it for each chat from its composer.",
+        "failed": "Couldn't change what new Cloud chats reach. Try again in a moment."
       }
     },
     "billing": {
@@ -3200,7 +3268,8 @@
         "show": "Show in Finder",
         "dismiss": "Dismiss {name}",
         "saving": "Saving…"
-      }
+      },
+      "dismiss_error": "Dismiss"
     },
     "browser_api": {
       "empty": "Enter a website or localhost address.",
@@ -3323,6 +3392,12 @@
       "old": "This Zeron needs a newer engine",
       "old_tip": "Its engine is older than this version needs. Open About & updates to go back to Stable.",
       "short_old": "Needs a newer engine"
+    },
+    "quit": {
+      "working": "{n, plural, one {# chat is still working.} other {# chats are still working.}}",
+      "detail": "Keep running in the background until they finish, or stop them now?",
+      "keep": "Keep Running",
+      "stop": "Stop Them Now"
     }
   },
   "account": {
@@ -3349,6 +3424,9 @@
         "expired": "You were signed out. Sign in again to carry on.",
         "failed": "Sign-in didn't finish. Try again."
       }
+    },
+    "cloud": {
+      "reach_not_changed": "Couldn't change what this Cloud chat reaches."
     }
   },
   "plugins": {
@@ -3468,7 +3546,11 @@
         },
         "compose": {
           "title": "Put text in the message box",
-          "detail": "You still send it."
+          "detail": "It can add to what you've written or replace it. You still send it."
+        },
+        "draft": {
+          "title": "Read what you type in the message box, and set it aside",
+          "detail": "It sees your words in any chat before you send them, and can take the draft away and put it back later. It never sends it."
         },
         "network": {
           "title": "Connect to the internet",
@@ -3491,6 +3573,9 @@
         "fonts": {
           "title": "Add fonts of its own",
           "detail": "Text in a font it adds, Zeron's included, may draw in its version of that font"
+        },
+        "scene3d": {
+          "title": "Draw 3D scenes"
         },
         "tools": {
           "title": "Give your agents tools"

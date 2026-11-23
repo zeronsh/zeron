@@ -31,6 +31,9 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     "notifications",
     "navigate",
     "compose",
+    // Reading the composer's draft, and taking it and putting it back
+    // (`zeron.draft`, `take_draft`, `put_draft`).
+    "draft",
     "network",
     "clipboard",
     "files",
@@ -39,6 +42,8 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     // Font files of its own for its windows' text (`ui.load_font`), which
     // reach every window's text, Zeron's too.
     "fonts",
+    // Drawing 3D scenes (`ui.scene3d`), the zgx grant `scene3d`.
+    "scene3d",
     "tools",
     "devices",
     "native",

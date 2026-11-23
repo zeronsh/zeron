@@ -60,6 +60,7 @@ mod mermaid;
 mod plugins;
 mod previews;
 mod projects;
+mod quit_prompt;
 mod relaunch;
 mod session_home;
 mod sessions;
@@ -86,6 +87,12 @@ mod split_tests;
 #[cfg(test)]
 mod route_motion_tests;
 #[cfg(test)]
+mod composer_metrics_tests;
+#[cfg(test)]
+mod composer_layout_tests;
+#[cfg(test)]
+mod composer_motion_tests;
+#[cfg(test)]
 mod hit_sweep_tests;
 #[cfg(test)]
 mod hit_tests;
@@ -110,11 +117,15 @@ mod picture_aspect_tests;
 #[cfg(test)]
 mod chip_copy_tests;
 #[cfg(test)]
+mod composer_atoms_tests;
+#[cfg(test)]
 mod drop_tests;
 #[cfg(test)]
 mod picker_settle_tests;
 #[cfg(test)]
 mod fit_tests;
+#[cfg(test)]
+mod access_mode_tests;
 // (Unix only: it reads thread CPU time through libc.)
 #[cfg(all(test, unix))]
 mod slide_bench_tests;
@@ -127,6 +138,8 @@ mod scroll_script_tests;
 mod transcript_scroll_tests;
 #[cfg(test)]
 mod transcript_paint_tests;
+#[cfg(test)]
+mod long_thread_tests;
 #[cfg(test)]
 mod editor_scroll_tests;
 #[cfg(test)]
@@ -238,7 +251,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // may not have brought: bring it in first (src/windows_install.rs).
     #[cfg(all(windows, feature = "beta"))]
     {
-        windows_install::complete_if_needed(&argv);
+        windows_install::complete_if_needed(&argv)?;
         if let Some(dir) = std::env::current_exe().ok().as_deref().and_then(zeron_update::windows::install_directory) {
             zeron_launch::set_full_app_engine(
                 zeron_update::windows::version_files(&dir, about::APP_VERSION).join("engine").join("zeron.exe"),
@@ -248,12 +261,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if cfg!(feature = "beta") || !dev_launch(&argv[1..]) {
         match zeron_cli::run(about::APP_VERSION, zeron_cli::Engines::Helper) {
             zeron_cli::Launch::Done(result) => {
-                // (As a `main` returning it would: the error, exit status 1.)
-                if let Err(error) = result {
-                    eprintln!("Error: {error:?}");
-                    std::process::exit(1);
-                }
-                return Ok(());
+                // (Its error is `main`'s: "Error: …", exit status 1.)
+                return result.map_err(Into::into);
             }
             zeron_cli::Launch::Window { open_url: url, safe_mode } => {
                 open_url = url;
@@ -312,19 +321,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             unsafe { std::env::set_var("ZGX_LAYOUT_WARNINGS", "1") };
         }
     }
-    // Signed in on an earlier run: no intro, setup at once, where sign-in
-    // leads (src/auth.rs). Asking for `intro` still plays it. The first launch
-    // of this interface by someone who finished setup before is the exception:
-    // the intro, then their username and card, once.
-    if matches!(screen, Screen::Intro) && !asked_for_intro && auth::session_exists() {
-        if welcome_due(finished_setup_before(), welcomed()) {
-            WELCOME.store(true, std::sync::atomic::Ordering::Relaxed);
-        } else {
-            screen = Screen::Onboarding;
-            // Setup finished on this Mac before: the main window.
-            if onboarded() {
-                screen = Screen::Main;
-            }
+    // Where a launch opens (`opening`). Asking for `intro` still plays it.
+    if matches!(screen, Screen::Intro) && !asked_for_intro {
+        let session = auth::session_exists();
+        match opening(session, session && finished_setup_before(), welcomed(), onboarded()) {
+            Opening::Intro => {}
+            Opening::Welcome => WELCOME.store(true, std::sync::atomic::Ordering::Relaxed),
+            Opening::Setup => screen = Screen::Onboarding,
+            Opening::Main => screen = Screen::Main,
         }
     }
 
@@ -333,6 +337,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // requires find them compiled. (After the last `set_var` above: it
     // starts a thread.)
     compile_ahead(&screen);
+    // The engine, if none is running, started as the launch begins (on a
+    // thread of its own), not once the first window is up: it's ready about
+    // when the window is.
+    if matches!(screen, Screen::Intro | Screen::Onboarding | Screen::Main) {
+        engine::start_ahead();
+    }
 
     let mut application = Application::new();
     for font in fonts() {
@@ -351,6 +361,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
     }
+    // A clicked banner: Zeron forward on its chat (src/links.rs).
+    links::take_banner_clicks();
     let options = match screen {
         Screen::Intro => intro_window(),
         Screen::Onboarding => onboarding_window(),
@@ -370,6 +382,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             links::open(url);
         }
     })?;
+    // Quitting with "Keep Zeron running after you quit" off: the engine
+    // stops once its work is done, asking first about any still running
+    // (src/quit_prompt.rs). (Not for a relaunch: the app is coming back.)
+    if !relaunch::asked() {
+        quit_prompt::after_quit();
+    }
     // Quitting: an update downloaded and never restarted for installs now,
     // so the next launch is on it (src/about.rs).
     about::install_on_quit();
@@ -547,7 +565,9 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
         let state = zgx_script::app_data_dir(APP_ID).map(|dir| dir.join("script-state").join("app.luau"));
         carried_settings::carry(from.as_deref(), state.as_deref());
     }
-    let host = script_host_at(cx, plugins::prepare_live(), "app.luau");
+    let live = plugins::prepare_live();
+    zgx::profile::mark("templates laid");
+    let host = script_host_at(cx, live, "app.luau");
     host.shared("window", "main");
     // Plugins and your templates (src/plugins): the main window's alone.
     plugins::install(cx, &host);
@@ -589,6 +609,38 @@ fn welcomed() -> bool {
 /// Whether someone signed in had finished setup, here or in the Zeron app.
 fn finished_setup_before() -> bool {
     onboarded_marker().is_some_and(|path| path.is_file()) || finished_in_zeron_app()
+}
+
+/// Where a launch that asked for no screen opens.
+#[derive(Debug, PartialEq, Eq)]
+enum Opening {
+    /// The intro, then setup from its start.
+    Intro,
+    /// The intro, then their username and card only (`welcome_due`).
+    Welcome,
+    /// Setup at once, where sign-in leads (src/auth.rs).
+    Setup,
+    /// The main window.
+    Main,
+}
+
+/// Where a launch opens: signed in on an earlier run, no intro, setup at once
+/// (the first launch of this interface by someone who finished setup before
+/// is the exception: the intro, then their username and card, once), or the
+/// main window once setup was finished on this computer. Setup finished
+/// without an account opens the main window too: it works without one
+/// (screens/shell), and only the session was asked here before, so whoever
+/// went on without signing in saw the intro and setup on every launch.
+fn opening(session: bool, finished_before: bool, welcomed: bool, onboarded: bool) -> Opening {
+    if session && welcome_due(finished_before, welcomed) {
+        Opening::Welcome
+    } else if onboarded {
+        Opening::Main
+    } else if session {
+        Opening::Setup
+    } else {
+        Opening::Intro
+    }
 }
 
 /// Whether someone signed in gets the welcome: they'd finished setup before and
@@ -663,7 +715,7 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     // ds/transcript's trace (`ZERON_ZGX_TRACE_TRANSCRIPT=1`): the hover lane
     // and the rows' heights as they change, a line each on stdout.
     if std::env::var("ZERON_ZGX_TRACE_TRANSCRIPT").is_ok_and(|v| v == "1") {
-        host.shared("debug.trace_transcript", true);
+        host.shared("trace.transcript", true);
     }
     // How much the desktop blurs behind the glass (`window.blur`), for the
     // glass's tint (ds/material).
@@ -1064,6 +1116,12 @@ fn serve_with(
     cx.on_closed(move || {
         reloading.borrow_mut().take();
         if let Some((host, devtools, commands, corner)) = keep.borrow_mut().take() {
+            // The scripts' last word before what they saved is written: a
+            // save still waiting on a timer (the new chat's draft,
+            // ui/screens/chat/shared.luau) goes now, as no timer fires
+            // after this. (Read at once: setting it runs what follows it.)
+            host.shared("app.closing", Value::Bool(false))
+                .set(Value::Bool(true));
             host.save();
             drop(devtools);
             drop(commands);
@@ -1373,5 +1431,19 @@ mod welcome_tests {
         assert!(super::welcome_due(true, false));
         assert!(!super::welcome_due(true, true));
         assert!(!super::welcome_due(false, false));
+    }
+
+    /// Setup finished without an account opens the main window on the next
+    /// launch, as it does signed in; the intro is for whoever hasn't finished it.
+    #[test]
+    fn setup_finished_without_an_account_opens_the_main_window() {
+        use super::{Opening, opening};
+        // (session, finished before, welcomed, onboarded here)
+        assert_eq!(opening(false, false, false, true), Opening::Main);
+        assert_eq!(opening(false, false, false, false), Opening::Intro);
+        assert_eq!(opening(true, false, false, true), Opening::Main);
+        assert_eq!(opening(true, false, false, false), Opening::Setup);
+        assert_eq!(opening(true, true, false, true), Opening::Welcome);
+        assert_eq!(opening(true, true, true, true), Opening::Main);
     }
 }

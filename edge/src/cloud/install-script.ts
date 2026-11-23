@@ -48,6 +48,64 @@ ExecStart=/bin/systemctl start --no-block ${CLOUD_UNIT_NAME}
 WantedBy=multi-user.target
 `;
 
+/**
+ * Puts back the release's `zeron-engine` beside the `zeron` the unit runs, when
+ * it's missing. Since 0.3.0 the release's `zeron` is the zgx app, whose
+ * `zeron headless` hands off to that engine: without it the unit exits at
+ * once, restarts every second and never enrolls. Machines lost it to the
+ * installer, the engine's own updater and the pre-sleep tidy, which all left
+ * it out on Cloud (0.3.5's still do), so the unit runs this before every start
+ * (`ExecStartPre=-`: it never fails a start). Downloads only while it's
+ * missing, the version `current` names, from the edge's own releases.
+ */
+export const REPAIR_ENGINE_SCRIPT = `#!/bin/sh
+# Zeron Cloud: put back a missing zeron-engine (edge/src/cloud/install-script.ts).
+home="\${ZERON_CLOUD_HOME:-$HOME}"
+cur="$home/.zeron/app/current"
+[ -x "$cur/zeron" ] || exit 0
+[ -f "$cur/zeron-engine" ] && exit 0
+dest="$(readlink -f "$cur")" || exit 0
+ver="$(basename "$dest")"
+case "$ver" in
+  "" | *[!A-Za-z0-9._+-]*) exit 0 ;;
+esac
+case "$(uname -m)" in
+  x86_64 | amd64) arch=x86_64 ;;
+  aarch64 | arm64) arch=aarch64 ;;
+  *) exit 0 ;;
+esac
+[ -n "\${ZERON_EDGE_URL:-}" ] || exit 0
+tmp="$(mktemp -d "$home/.zeron/.repair.XXXXXX")" || exit 0
+trap 'rm -rf "$tmp"' EXIT
+curl -fsSL --retry 3 --connect-timeout 15 --speed-limit 1048576 --speed-time 15 \\
+  -o "$tmp/zeron.tar.gz" "$ZERON_EDGE_URL/releases/zeron-$ver-linux-$arch.tar.gz" || exit 0
+tar -xzf "$tmp/zeron.tar.gz" -C "$tmp" "zeron-$ver-linux-$arch/zeron-engine" || exit 0
+chmod 755 "$tmp/zeron-$ver-linux-$arch/zeron-engine"
+mv -f "$tmp/zeron-$ver-linux-$arch/zeron-engine" "$dest/zeron-engine"
+echo "zeron cloud: put back zeron-engine for $ver"
+`;
+
+/**
+ * Writes the repair script (`REPAIR_ENGINE_SCRIPT`) to `~/.zeron/repair-engine`
+ * and a drop-in running it before the engine's unit starts, each only when it
+ * differs, reloading systemd only then. Run by the installer and by every
+ * wake's first command, so machines set up before it get it as they wake.
+ * Best effort: a failure here never stops what follows.
+ * `ZERON_CLOUD_HOME` / `ZERON_CLOUD_UNIT_DIR` exist for the unit tier.
+ */
+export const ENSURE_REPAIR =
+  `{ h="\${ZERON_CLOUD_HOME:-$HOME}"; r="$h/.zeron/repair-engine"; ` +
+  `dd="\${ZERON_CLOUD_UNIT_DIR:-/etc/systemd/system}/${CLOUD_UNIT_NAME}.d"; c=0; ` +
+  `t="$(mktemp)" && printf %s '${btoa(REPAIR_ENGINE_SCRIPT)}' | base64 -d >"$t" && ` +
+  `{ cmp -s "$t" "$r" || install -m 0700 "$t" "$r"; } && ` +
+  `printf '[Service]\\nExecStartPre=-%s\\n' "$r" >"$t" && ` +
+  `{ cmp -s "$t" "$dd/repair-engine.conf" || { sudo mkdir -p "$dd" && sudo install -m 0644 "$t" "$dd/repair-engine.conf" && c=1; }; } && ` +
+  // A unit written before OOMPolicy=continue was in it gets it as a drop-in.
+  `printf '[Service]\\nOOMPolicy=continue\\n' >"$t" && ` +
+  `{ cmp -s "$t" "$dd/oom-policy.conf" || { sudo mkdir -p "$dd" && sudo install -m 0644 "$t" "$dd/oom-policy.conf" && c=1; }; } && ` +
+  `{ [ "$c" = 0 ] || sudo systemctl daemon-reload; }; ` +
+  `rm -f "$t"; } >/dev/null 2>&1 || true`;
+
 export const CLOUD_INSTALL_SCRIPT = `#!/bin/sh
 # Zeron Cloud engine installer (edge/src/cloud/install-script.ts).
 # POSIX sh, idempotent, provider-neutral.
@@ -85,7 +143,9 @@ esac
 
 restart=0
 dest="$app/$ver"
-if [ -x "$dest/zeron" ]; then
+# (Whole, its zeron-engine too: \`zeron headless\` runs it, and installs
+# made before 2026-11-15 left it out.)
+if [ -x "$dest/zeron" ] && [ -f "$dest/zeron-engine" ]; then
   echo "zeron $ver already installed"
 else
   tmp="$(mktemp -d "$data/.download.XXXXXX")"
@@ -99,10 +159,8 @@ else
   tar -xzf "$tmp/zeron.tar.gz" -C "$tmp/unpacked" --strip-components=1
   # Probe before switching: a binary that cannot start must not replace one that can.
   "$tmp/unpacked/zeron" --version >/dev/null
-  # The desktop app's background engine (78 MB): never run here (the unit runs
-  # \`zeron headless\`, which links the engine), and every byte on this disk is
-  # copied back in on every wake. The engine's updater leaves it out too.
-  rm -f "$tmp/unpacked/zeron-engine"
+  # (zeron-engine stays: \`zeron headless\` runs it. Without it the unit
+  # exits at once and the machine never enrolls.)
   rm -rf "$dest"
   mv "$tmp/unpacked" "$dest"
 fi
@@ -150,6 +208,10 @@ EnvironmentFile=$data/env
 ExecStart=$app/current/zeron headless
 Restart=always
 RestartSec=1
+# A program an agent runs that the kernel kills for memory dies alone: the
+# engine (and every chat on the machine) carries on. systemd's default stops
+# the whole unit, so one runaway build or test restarted the engine.
+OOMPolicy=continue
 
 [Install]
 WantedBy=multi-user.target
@@ -172,6 +234,8 @@ else
   rm -f "$boot_new"
 fi
 
+# A zeron-engine an update leaves out is put back before each start.
+${ENSURE_REPAIR}
 sudo systemctl daemon-reload
 sudo systemctl enable ${CLOUD_UNIT_NAME} ${CLOUD_BOOT_UNIT_NAME} >/dev/null
 sudo systemctl start ${CLOUD_BOOT_UNIT_NAME}
@@ -253,6 +317,9 @@ export const RESTART_ENGINE_COMMAND = `sudo systemctl restart ${CLOUD_UNIT_NAME}
  * systemd hasn't read yet gets one reload. `--no-block` answers at once (the
  * engine's first token says it's up). Idempotent: a no-op when it's running. */
 export const START_ENGINE_COMMAND =
+  // (First, the repair of a missing zeron-engine before each start, for
+  // machines set up before it: a no-op once it's there.)
+  `${ENSURE_REPAIR}; ` +
   `sudo systemctl start --no-block ${CLOUD_UNIT_NAME} || ` +
   `{ sudo systemctl daemon-reload; sudo systemctl start --no-block ${CLOUD_UNIT_NAME}; }`;
 

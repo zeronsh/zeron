@@ -1,0 +1,285 @@
+          @6 dialog "Zeron" 0,0 1320x840
+            @7 #host-toasts 1304,824 0x0
+      @1385 #shell 0,0 1320x840
+        @1386 #shell-chats 0,0 1320x840
+                @1476 #shell-sidebar 0,0 277x840
+                        @1481 #sidebar-content 5,42 272x793
+                          @1482 #sidebar-actions 13,50 256x94
+                              @1484 button "New chat" 13,50 256x30
+                                      @1488 img 20,57 16x16
+                                          @1494 text "New chat" 43,56 57x19
+                                      @1495 text "Ctrl+N" 228,57 33x16
+                              @1498 button "Search" 13,82 256x30
+                                      @1502 img 20,89 16x16
+                                          @1508 text "Search" 43,88 42x19
+                                      @1509 text "Ctrl+K" 229,89 32x16
+                                  @1720 button "Pull requests" 13,114 256x30
+                                              @1899 img 20,121 16x16
+                                              @1729 text "Pull requests" 43,120 77x19
+                          @1515 #sidebar 13,160 256x627
+                                  @1732 scroll 13,160 256x627
+                                              @52 button "Projects" 13,160 256x24
+                                                    @21 text "Projects" 21,164 43x16
+                                                  @88 button "web" 13,186 256x30
+                                                                      @2014 img 19,192 18x18
+                                                              @302 text "web" 43,192 26x19
+                                                    @1137 button "Speed up the dashboard's first paint" 13,218 256x30
+                                                                          @1102 img 42,226 14x14
+                                                                        @687 text "Speed up the dashboard's first paint" 64,224 220x19
+                                                              @978 group 237,233 0x0
+                                                                        @697 group "Completed" 245,225 16x16
+                                                                            @700 img 246,226 14x14
+                                                                    @709 img 64,244 11x11 hidden
+                                                                    @1142 text "studio · main" 79,241 63x16 hidden
+                                                    @966 button "Add dark mode to settings" 13,250 256x30
+                                                                          @1105 img 42,258 14x14
+                                                                        @719 text "Add dark mode to settings" 64,256 161x19
+                                                              @141 group 237,265 0x0
+                                                                        @723 group "Completed" 245,257 16x16
+                                                                            @728 img 246,258 14x14
+                                                                    @732 img 64,276 11x11 hidden
+                                                                    @137 text "studio · main" 79,273 63x16 hidden
+                                                  @122 button "api" 13,282 256x30
+                                                                      @746 img 19,288 18x18
+                                                              @109 text "api" 43,288 18x19
+                                                    @955 button "Sweep idle keys without a timer" 13,314 256x30
+                                                                          @1112 img 42,322 14x14
+                                                                        @761 text "Sweep idle keys without a timer" 64,320 193x19
+                                                              @250 group 237,329 0x0
+                                                                        @767 group "Completed" 245,321 16x16
+                                                                            @770 img 246,322 14x14
+                                                                    @773 img 64,340 11x11 hidden
+                                                                    @188 text "studio · main" 79,337 63x16 hidden
+                                                    @206 button "Fix burst at the rate limit boundary" 13,346 256x30
+                                                                          @1116 img 42,354 14x14
+                                                                        @780 text "Fix burst at the rate limit boundary" 64,352 209x19
+                                                              @224 group 230,361 0x0
+                                                                      @782 text "30m" 238,353 23x16
+                                                                    @784 img 64,372 11x11 hidden
+                                                                    @239 text "studio · main" 79,369 63x16 hidden
+                                                    @273 button "Return a real Retry-After" 13,378 256x30
+                                                                          @1123 img 42,386 14x14
+                                                                        @791 text "Return a real Retry-After" 64,384 150x19
+                                                              @290 group 237,393 0x0
+                                                                        @794 group "Completed" 245,385 16x16
+                                                                            @796 img 246,386 14x14
+                                                                    @799 img 64,404 11x11 hidden
+                                                                    @307 text "studio · main" 79,401 63x16 hidden
+                                                  @320 button "uptime" 13,410 256x30
+                                                                      @802 img 19,416 18x18
+                                                              @335 text "uptime" 43,416 43x19
+                                                    @353 button "Page only when two regions agree" 13,442 256x30
+                                                                          @1149 img 42,450 14x14
+                                                                        @813 text "Page only when two regions agree" 64,448 208x19
+                                                              @370 group 237,457 0x0
+                                                                        @817 group "Completed" 245,449 16x16
+                                                                            @819 img 246,450 14x14
+                                                                    @828 img 64,468 11x11 hidden
+                                                                    @384 text "studio · main" 79,465 63x16 hidden
+                                                    @399 button "Why Frankfurt flapped overnight" 13,474 256x30
+                                                                          @1188 img 42,482 14x14
+                                                                        @845 text "Why Frankfurt flapped overnight" 64,480 197x19
+                                                              @423 group 237,489 0x0
+                                                                        @851 group "Completed" 245,481 16x16
+                                                                            @854 img 246,482 14x14
+                                                                    @861 img 64,500 11x11 hidden
+                                                                    @450 text "studio · main" 79,497 63x16 hidden
+                                                  @476 button "docs" 13,506 256x30
+                                                                      @864 img 19,512 18x18
+                                                              @491 text "docs" 43,512 29x19
+                                                    @519 button "Write up the October incident" 13,538 256x30
+                                                                          @1192 img 42,546 14x14
+                                                                        @907 text "Write up the October incident" 64,544 179x19
+                                                              @550 group 237,553 0x0
+                                                                        @923 group "Completed" 245,545 16x16
+                                                                            @936 img 246,546 14x14
+                                                                    @942 img 64,564 11x11 hidden
+                                                                    @611 text "studio · main" 79,561 63x16 hidden
+                                  @1530 button "Local" 13,797 224x30
+                                                    @1902 group "Local" 18,802 20x20
+                                              @1539 text "Local" 43,803 33x19
+                                  @1542 checkbox "Settings" 239,797 30x30 unchecked
+                                    @1543 img 246,804 16x16
+                      @1545 #sidebar-drag 5,0 272x42
+                            @1549 button "Sidebar view options" 94,9 24x24
+                              @1550 img 98,13 16x16
+                    @1553 group "Resize sidebar" 269,42 12x793
+              @1391 #shell-drag 277,0 1043x38
+                @1393 #shell-page-room 281,42 1034x793
+                        @1561 #split-pane-e4d0f441-f736-4272-ad2d-5281c69091e8 281,42 1034x793
+                  @1396 #shell-page 281,42 1034x793
+                    @1397 #shell-page-card 281,42 1034x793
+                                @1903 #chat-session 282,43 1032x791
+                                                    @1181 document 282,43 1032x751
+                                                      @1176 #transcript scroll "Conversation" 282,43 1032x751
+                                                                    @634 #585d2c87-d8c5-4ce6-8c8a-ed827c83a3d9 article "You" 456,59 684x68
+                                                                                          @946 text "Clients can send about twice the limit if they time it aroun…" 609,69 473x48
+                                                                  @661 article "Reply" 456,175 684x398
+                                                                          @1063 button "Thought process · ran 1 command · read 2 files" 456,175 684x26
+                                                                                    @1198 text "Thought process · ran 1 command · read 2 files" 456,180 251x17
+                                                                                        @1209 text "Found it. estimate() weights the previous window by Math.flo…" 456,213 674x72
+                                                                          @1084 button "Ran 1 command · edited 2 files" 456,297 684x26
+                                                                                    @1203 text "Ran 1 command · edited 2 files" 456,302 166x17
+                                                                                        @1214 text "Fixed in src/window.ts: the previous window now counts for t…" 456,335 669x48
+                                                                                      @1217 list 456,399 684x78
+                                                                                        @1218 listitem "test/window.test.ts fills a window in its last 10 ms, then c…" 456,399 684x48
+                                                                                          @1221 group 456,399 24x24
+                                                                                              @1228 text "test/window.test.ts fills a window in its last 10 ms, then c…" 480,399 647x48
+                                                                                        @1229 listitem "5 of 5 tests pass" 456,453 684x24
+                                                                                          @1232 group 456,453 24x24
+                                                                                              @1238 text "5 of 5 tests pass" 480,453 115x24
+                                                                                        @1243 text "This matches the October incident: a client at the limit got…" 456,493 675x48
+                                                                              @1037 text "Nov 17, 9:15 AM" 456,553 84x17
+                                                                                  @1098 button "Copy message" 548,549 24x24
+                                                                                    @1099 img 553,554 14x14
+                                                  @1239 #transcript-rail group 1304,43 10x751 hidden
+                                                    @685 group 1309,47 3x0 hidden
+                      @1404 #chat-composer-dock 282,745 1032x81
+                        @1405 #chat-composer 468,745 660x81
+                                            @1578 tablist 468,745 0x0 hidden
+                                            @1585 button 468,745 0x0 hidden
+                                            @1586 button "Fold what's waiting" 468,745 0x0 hidden
+                                              @1587 img 468,745 0x0 hidden
+                                        @1590 scroll 468,745 0x0 hidden
+                                      @1595 group 468,745 0x0 hidden
+                                        @1604 textbox "Message" ="" 515,759 531x22 focused
+                                            @1608 "Ask anything, @ to mention…" 515,759 531x22
+                                            @1907 button "Attach" 479,756 28x28
+                                              @1908 img 484,761 18x18
+                                            @1753 #dictation-microphone button "Hold to dictate" 1054,756 28x28
+                                              @1754 img 1059,761 18x18
+                                                @1995 button "Send message" 1090,756 28x28 disabled
+                                                  @1996 img 1097,763 14x14
+                                  @1621 #composer-toolbar 468,802 660x24
+                                          @1626 button "Access" 478,802 93x24
+                                                  @1911 img 484,808 12x12
+                                                      @1914 text "Full access" 502,805 63x17
+                                          @1764 group "Branch main" 575,802 150x24
+                                            @931 group 468,802 17x17 hidden
+                                              @1138 text "api" 468,802 17x17 hidden
+                                            @2612 group 468,802 27x17 hidden
+                                              @928 text "main" 468,802 27x17 hidden
+                                            @959 group 468,802 35x17 hidden
+                                              @962 text "studio" 468,802 35x17 hidden
+                                            @953 #composer-place-lead 581,808 12x12
+                                                    @71 img 581,808 12x12
+                                                @1164 #composer-place-device 599,805 35x17
+                                                  @2035 #composer-place-device 599,805 35x17
+                                                        @1342 #composer-place-device "studio" 599,805 35x17
+                                                @1368 group 638,809 10x10
+                                                  @1174 img 638,809 10x10
+                                              @1671 #composer-place-project 654,805 17x17
+                                                @1327 #composer-place-project 654,805 17x17
+                                                      @1133 #composer-place-project "api" 654,805 17x17
+                                                  @1166 group 677,809 10x10
+                                                    @952 img 677,809 10x10
+                                                @1172 #composer-place-branch 691,805 28x17
+                                                  @664 #composer-place-branch 691,805 27x17
+                                                        @1082 #composer-place-branch "main" 691,805 27x17
+                                              @473 button "Model" 1006,802 112x24
+                                                        @65 img 1012,808 12x12
+                                                            @150 text "Opus 5.5" 1030,805 50x17
+                                                          @1318 text "High" 1086,805 26x17
+                          @1641 img 281,42 0x0 hidden
+                      @1643 #session-header 298,43 848x40
+                        @1644 #page-title 298,43 0x0 hidden
+                              @1647 text "Fix burst at the rate limit boundary" 298,43 0x0 hidden
+              @1419 #shell-files 1315,42 0x793 hidden
+                    @1648 #panel 1315,42 0x0 hidden
+                        @1650 #shell-files-content 1315,42 0x0 hidden
+                            @1652 #panel-strip tablist "Panel tabs" 1315,42 0x0 hidden
+                                @1654 scroll 1315,42 0x0 hidden
+                                @1663 #panel-tab-lifted 1315,42 0x0 hidden
+                                  @1792 #panel-empty group "Session home" 1315,42 0x0 hidden
+                                          @1796 #panel-home-block 1315,42 0x548 hidden
+                                            @1797 #panel-home-info 1331,74 0x94 hidden
+                                              @1798 #panel-home-device group "studio" 1331,74 16x30 hidden
+                                                      @1938 img 1340,81 16x16 hidden
+                                                      @1942 #panel-home-project group "api" 1331,106 0x30 hidden
+                                                                  @1980 img 1340,113 16x16 hidden
+                                                    @1950 #panel-home-branch group "main" 1331,138 0x30 hidden
+                                                        @1952 img 1339,144 18x18 hidden
+                                                      @1955 #panel-home-branch-slot 1381,141 0x24 hidden
+                                                                @739 #git-branch-totals button "12 lines added, 1 removed: open the branch's changes" 1381,141 45x24 hidden
+                                                                  @744 text "+12" 1385,145 20x16 hidden
+                                                                  @742 text "−1" 1409,145 13x16 hidden
+                                                  @1959 #panel-home-details 1331,168 0x0 hidden
+                                              @1963 #panel-home-actions 1331,192 0x66 hidden
+                                                  @1965 text "Actions" 1339,198 0x16 hidden
+                                                @1971 #panel-home-add-action button "Add action" 1331,226 0x30 hidden
+                                                    @1973 img 1339,232 18x18 hidden
+                                            @1807 #panel-home-open 1331,282 0x252 hidden
+                                                @1809 text "Open" 1339,288 0x16 hidden
+                                                @1811 #panel-open-browser button "Browser" 1331,312 0x30 hidden
+                                                    @1813 img 1339,318 18x18 hidden
+                                                  @1816 img "B" 1381,317 20x20 hidden
+                                                    @1817 group 1381,317 20x20 hidden
+                                                      @1818 text "B" 1387,319 8x17 hidden
+                                                @1819 #panel-open-files button "File viewer" 1331,344 0x30 hidden
+                                                    @1821 img 1339,350 18x18 hidden
+                                                  @1824 img "F" 1381,349 20x20 hidden
+                                                    @1825 group 1381,349 20x20 hidden
+                                                      @1826 text "F" 1387,351 7x17 hidden
+                                                @1827 #panel-open-terminal button "Terminal" 1331,376 0x30 hidden
+                                                    @1829 img 1339,382 18x18 hidden
+                                                  @1832 img "T" 1381,381 20x20 hidden
+                                                    @1833 group 1381,381 20x20 hidden
+                                                      @1834 text "T" 1388,383 7x17 hidden
+                                                @1835 #panel-open-side-chat button "Side chat" 1331,408 0x30 hidden
+                                                    @1837 img 1339,414 18x18 hidden
+                                                  @1840 img "S" 1381,413 20x20 hidden
+                                                    @1841 group 1381,413 20x20 hidden
+                                                      @1842 text "S" 1387,415 8x17 hidden
+                                                @1843 #panel-open-fork button "Fork chat" 1331,440 0x30 hidden
+                                                    @1845 img 1339,446 18x18 hidden
+                                                  @1848 img "K" 1381,445 20x20 hidden
+                                                    @1849 group 1381,445 20x20 hidden
+                                                      @1850 text "K" 1387,447 8x17 hidden
+                                              @1851 group 1331,472 0x62 hidden
+                                                @1852 #git-empty-rows 1331,472 0x62 hidden
+                                                  @1853 #git-open-changes button "Changes" 1331,472 0x30 hidden
+                                                      @1855 img 1339,478 18x18 hidden
+                                                    @1858 img "C" 1381,477 20x20 hidden
+                                                      @1859 group 1381,477 20x20 hidden
+                                                        @1860 text "C" 1387,479 9x17 hidden
+                                                  @1861 #git-open-history button "History" 1331,504 0x30 hidden
+                                                      @1863 img 1339,510 18x18 hidden
+                                                    @1866 img "H" 1381,509 20x20 hidden
+                                                      @1867 group 1381,509 20x20 hidden
+                                                        @1868 text "H" 1387,511 9x17 hidden
+                                            @1869 #panel-home-lanes 1331,558 0x0 hidden
+              @1422 slider "Resize files" ="0 points wide" 277,0 0x0 hidden
+                @1425 #session-tabs tablist "Open chats" 132,4 1188x34
+                    @1427 #session-tabs-scroll scroll 132,7 953x28
+                                  @53 #session-tab-chosen 132,7 220x28
+                                @1674 #session-tab-e4d0f441-f736-4272-ad2d-5281c69091e8 tab "Fix burst at the rate limit boundary" 132,7 220x28
+                                    @1679 #session-tab-e4d0f441-f736-4272-ad2d-5281c69091e8-tile-1 136,11 20x20
+                                                    @1086 img 136,11 20x20
+                                      @1684 text "Fix burst at the rate limit boundary" 162,13 193x17
+                    @1434 #session-tab-lifted 132,7 0x0 hidden
+                      @1697 #updates-button button "3 updates" 1093,7 81x28
+                            @1987 #updates-mark-3 1127,11 20x20
+                              @1988 img 1127,11 20x20
+                              @1981 #updates-mark-3-glyph 1127,11 20x20
+                                    @1985 img 1132,16 11x11
+                            @1984 #updates-mark-2 1112,11 20x20
+                              @1881 img 1112,11 20x20
+                              @1886 #updates-mark-2-glyph 1112,11 20x20
+                                    @1887 img 1117,16 11x11
+                            @1891 #updates-mark-1 1097,11 20x20
+                              @1893 #updates-mark-1-glyph 1097,11 20x20
+                                    @1882 img 1102,16 11x11
+                              @1896 img 1152,13 16x16
+          @1438 #titlebar 0,0 1320x0
+              @1440 #titlebar-island 6,7 90x28 hidden
+                  @1443 button "Toggle sidebar" 10,9 24x24
+                  @1451 button "Back" 42,9 24x24 disabled
+                    @1452 img 44,11 21x21
+                  @1456 button "Forward" 68,9 24x24
+                    @1457 img 70,11 21x21
+              @1459 #titlebar-actions-island 1178,0 142x40 hidden
+                @1461 #titlebar-actions 1182,9 24x24
+                      @1706 button "Panel" 1182,9 24x24
+            @1714 #shell-palette 0,0 0x0
+            @1716 #shell-add-project 0,0 0x0
+

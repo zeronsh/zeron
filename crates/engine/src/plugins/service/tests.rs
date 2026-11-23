@@ -133,6 +133,31 @@ async fn it_starts_on_the_first_call_and_stops_when_idle() {
     assert_eq!(r.starts(), 2);
 }
 
+/// Stopped and with no timers, a service's looker sleeps until it is
+/// needed again: nothing wakes the engine for it each tick.
+#[tokio::test]
+async fn a_stopped_service_without_timers_is_not_looked_at() {
+    let r = rig(quick());
+    let plan = r.plan("1.0.0", V1, &["service"]);
+    assert_eq!(
+        r.ask(&plan, "version", json!({})).await.unwrap(),
+        json!("v1")
+    );
+    until("idle stop", || !r.running()).await;
+    let looks = || r.services.slot("svc").looks.load(Ordering::SeqCst);
+    let before = looks();
+    // Ten ticks.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(looks(), before, "looked at with nothing to do");
+    // A call starts it again, and it still stops when idle.
+    assert_eq!(
+        r.ask(&plan, "version", json!({})).await.unwrap(),
+        json!("v1")
+    );
+    assert_eq!(r.starts(), 2);
+    until("idle stop again", || !r.running()).await;
+}
+
 #[tokio::test]
 async fn a_call_in_flight_keeps_it_from_stopping() {
     let r = rig(Config {
@@ -353,6 +378,9 @@ async fn a_timer_starts_a_stopped_service() {
         let mut st = lock(&slot.state);
         assert_eq!(st.timers.len(), 1);
         st.timers[0].due = Instant::now();
+        // (Its looker sleeps until the timer it knew was due: told, as
+        // whatever changes its timers tells it.)
+        slot.wake.notify_one();
     }
     until("timer ran", || r.starts() == 2).await;
     until("tick stored", || {

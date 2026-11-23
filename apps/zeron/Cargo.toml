@@ -5,8 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# Shared by both binaries; the UI is referenced only by `zeron`, so the
-# background engine links without it.
+# Shared by both binaries.
 [lib]
 name = "zeron_app"
 path = "src/lib.rs"
@@ -22,11 +21,11 @@ path = "src/bin/zeron-engine.rs"
 [dependencies]
 zeron-engine.workspace = true
 zeron-rpc.workspace = true
-zeron-ui.workspace = true
 zeron-update.workspace = true
 zeron-cli.workspace = true
 zeron-mcp.workspace = true
 zeron-notify.workspace = true
+zeron-sync.workspace = true
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true
@@ -39,6 +38,10 @@ tracing-subscriber.workspace = true
 # same streaming/scroll workloads, so Linux keeps the system allocator.
 [target.'cfg(target_os = "macos")'.dependencies]
 mimalloc.workspace = true
+# mimalloc's options (`mi_option_set`): the heap's VM tag (src/allocator.rs).
+# The same libmimalloc-sys mimalloc links (v2 comes from the workspace's
+# mimalloc feature).
+libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }

@@ -1,7 +1,9 @@
 use super::{Process, normalize::string};
 use crate::HarnessError;
 use serde_json::{Value, json};
-use zeron_proto::{Model, ModelOption, ModelOptionChoice, ReasoningLevel, SlashCommand};
+use zeron_proto::{
+    Model, ModelOption, ModelOptionChoice, ModelProvider, ReasoningLevel, SlashCommand,
+};
 
 pub(super) fn levels(data: &Value) -> Vec<ReasoningLevel> {
     data["levels"]
@@ -17,15 +19,24 @@ pub(super) async fn models(process: &mut Process) -> Result<Vec<Model>, HarnessE
         .query(json!({"type":"get_available_models"}), &mut backlog)
         .await?;
     let mut result = vec![];
+    let mut refused = None;
     for model in data["models"].as_array().into_iter().flatten() {
         let provider = string(model, "provider");
         let id = string(model, "id");
-        process
-            .query(
+        // Pi can list a model it then refuses (an extension that hides it a
+        // moment after startup). Skip that model; a broken process aborts.
+        if let Err(error) = process
+            .try_query(
                 json!({"type":"set_model","provider":provider,"modelId":id}),
                 &mut backlog,
             )
-            .await?;
+            .await?
+        {
+            tracing::warn!(model = %format!("{provider}/{id}"), %error, "Pi refused a listed model; skipping it");
+            refused.get_or_insert(error);
+            backlog.clear();
+            continue;
+        }
         let supported = process
             .query(
                 json!({"type":"get_available_thinking_levels"}),
@@ -36,13 +47,64 @@ pub(super) async fn models(process: &mut Process) -> Result<Vec<Model>, HarnessE
             default: false,
             id: format!("{provider}/{id}"),
             label: model["name"].as_str().unwrap_or(id).into(),
+            provider: (!provider.is_empty()).then(|| ModelProvider {
+                id: provider.into(),
+                name: provider_name(provider),
+            }),
             description: Some(provider.into()),
             reasoning_levels: levels(&supported),
             options: thinking_option(&supported),
         });
         backlog.clear();
     }
-    Ok(result)
+    match refused {
+        Some(error) if result.is_empty() => Err(error),
+        _ => Ok(result),
+    }
+}
+/// A Pi provider's name as people say it. Pi reports only its id
+/// (`openai-codex`); a provider not listed here reads as its id in words
+/// (`foo-bar` → `Foo Bar`).
+pub(crate) fn provider_name(id: &str) -> String {
+    let known = match id {
+        "openai-codex" => "Codex",
+        "opencode" => "OpenCode",
+        "opencode-go" => "OpenCode Go",
+        "anthropic" => "Anthropic",
+        "openai" => "OpenAI",
+        "azure-openai-responses" => "Azure OpenAI",
+        "github-copilot" => "Copilot",
+        "google" => "Google",
+        "google-gemini-cli" => "Gemini CLI",
+        "google-antigravity" => "Antigravity",
+        "google-vertex" => "Vertex AI",
+        "amazon-bedrock" => "Bedrock",
+        "openrouter" => "OpenRouter",
+        "vercel-ai-gateway" => "Vercel AI Gateway",
+        "xai" => "xAI",
+        "groq" => "Groq",
+        "cerebras" => "Cerebras",
+        "mistral" => "Mistral",
+        "minimax" => "MiniMax",
+        "minimax-cn" => "MiniMax China",
+        "huggingface" => "Hugging Face",
+        "zai" => "Z.ai",
+        "kimi-coding" => "Kimi",
+        _ => "",
+    };
+    if !known.is_empty() {
+        return known.into();
+    }
+    id.split(['-', '_'])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            c.next()
+                .map(|f| f.to_uppercase().chain(c).collect::<String>())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 fn thinking_option(data: &Value) -> Vec<ModelOption> {
     if !data["levels"]
@@ -123,4 +185,19 @@ pub(super) fn builtin(text: &str, auto: bool) -> Option<Value> {
         "/steering" | "/follow-up" => json!({"type":"get_state"}),
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_name;
+
+    #[test]
+    fn provider_names_read_as_people_say_them() {
+        assert_eq!(provider_name("openai-codex"), "Codex");
+        assert_eq!(provider_name("opencode"), "OpenCode");
+        assert_eq!(provider_name("github-copilot"), "Copilot");
+        // Unknown: the id in words, never empty.
+        assert_eq!(provider_name("my-local_llm"), "My Local Llm");
+        assert_eq!(provider_name("ollama"), "Ollama");
+    }
 }

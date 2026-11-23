@@ -1,0 +1,38 @@
+[
+ {
+  "id": "zeron-dark",
+  "window": "#0b0b0c",
+  "accent": "#9277b0",
+  "text": "#ededef"
+ },
+ {
+  "id": "tokyo-night",
+  "window": "#1a1b25",
+  "accent": "#7aa2f7",
+  "text": "#c0caf5"
+ },
+ {
+  "id": "catppuccin",
+  "window": "#1e1e2e",
+  "accent": "#cba6f7",
+  "text": "#cdd6f4"
+ },
+ {
+  "id": "dracula",
+  "window": "#282a35",
+  "accent": "#bd93f9",
+  "text": "#f8f8f2"
+ },
+ {
+  "id": "gruvbox",
+  "window": "#282828",
+  "accent": "#8ec07c",
+  "text": "#ebdbb2"
+ },
+ {
+  "id": "github-light",
+  "window": "#f5f5f6",
+  "accent": "#7a55c4",
+  "text": "#1b1b1d"
+ }
+]

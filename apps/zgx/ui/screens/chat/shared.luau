@@ -13,10 +13,16 @@ local Quote = require("@ds/quote")
 local Annotation = require("@ds/annotation")
 local sessions = require("@account/sessions")
 local agents = require("@account/agents")
+local cloud = require("@account/cloud")
 local locale = require("@ds/locale")
 local toast = require("@ds/toast")
 local ChatLinks = require("@app/screens/chat/chat_links")
+local route = require("@app/screens/shell/route")
 
+local Draft = require("@ds/draft_text")
+local ComposerAtoms = require("@ds/composer_atoms")
+local AttachmentMentions = require("@ds/attachment_mentions")
+local Carried = require("@app/screens/chat/carried")
 local M = {}
 
 -- The draft, what it carries, the options picked in a question being
@@ -24,6 +30,7 @@ local M = {}
 -- module's own: a template replacing any chat module (this one included)
 -- and every hot reload find them where they were.
 M.text = ui.shared("chat.composer.text", "")
+M.atoms = ui.shared("chat.composer.atoms", {} :: { ComposerAtoms.AtomEntry })
 M.cargo = ui.shared("chat.composer.cargo", {} :: { any })
 M.quotes = ui.shared("chat.composer.quotes", {} :: { [string]: string })
 M.chosen = ui.shared("chat.composer.chosen", {} :: { [string]: boolean })
@@ -148,8 +155,11 @@ local kept = ui.shared("chat.composer.drafts", {} :: { [string]: any })
 local here = ui.shared("chat.composer.here", "")
 -- Bumped, the composer takes the keys.
 M.focus = ui.state("chat_focus", 0)
--- The docked composer's height, as laid out.
+-- The docked composer's height, as laid out, and its destination height
+-- (updated once per resize/transition so list-wide bindings like edge fade
+-- don't invalidate the entire transcript viewport on every animation frame).
 M.dock_h = ui.state("chat_dock_h", 52)
+M.dock_target = ui.state("chat_dock_target", 52)
 -- The chips made so far, for each its own id: kept with the cargo (which
 -- a reload keeps), so a chip made after a reload never takes one's id.
 local made = ui.shared("chat.composer.chips_made", 0)
@@ -172,6 +182,7 @@ do
 	if type(was) == "table" and all[""] == nil and here:peek() == "" and M.text:peek() == "" and #M.cargo:peek() == 0 then
 		ui.batch(function()
 			M.text:set(if type(was.text) == "string" then was.text else "")
+			M.atoms:set(if type(was.atoms) == "table" then ComposerAtoms.restyle(was.atoms) else {})
 			M.cargo:set(if type(was.cargo) == "table" then was.cargo else {})
 			M.quotes:set(if type(was.quotes) == "table" then was.quotes else {})
 			-- (Its chips' ids taken: one made from here never repeats one.)
@@ -188,21 +199,56 @@ do
 		end)
 	end
 end
-ui.effect(function()
+-- Saved as it changes, at most every SAVE_EVERY ms: each save reads the
+-- whole draft (into the saved state, then its file), and a long one read
+-- at every keystroke cost a copy of it each.
+local SAVE_EVERY = 250
+local saved_at = -math.huge
+local function save_new()
+	saved_at = ui.now()
 	local now: any = nil
-	if here:get() == "" then
-		local text, cargo, quotes = M.text:get(), M.cargo:get(), M.quotes:get()
+	if here:peek() == "" then
+		local text, atoms, cargo, quotes = M.text:peek(), ComposerAtoms.live(M.atoms), M.cargo:peek(), M.quotes:peek()
 		if text ~= "" or #cargo > 0 then
-			now = { text = text, cargo = cargo, quotes = quotes }
+			now = { text = text, atoms = atoms, cargo = cargo, quotes = quotes }
 		end
 	else
-		local put = kept:get()[""]
+		local put = kept:peek()[""]
 		if put then
-			now = { text = put.text, cargo = put.cargo, quotes = put.quotes }
+			now = { text = put.text, atoms = put.atoms, cargo = put.cargo, quotes = put.quotes }
 		end
 	end
 	if now ~= nil or saved_new:peek() ~= nil then
 		saved_new:set(now)
+	end
+end
+ui.effect(function()
+	-- What it's saved from, followed (the draft's edits, not the draft).
+	if here:get() == "" then
+		M.text:len()
+		M.atoms:len()
+		M.cargo:get()
+		M.quotes:get()
+	else
+		kept:len()
+	end
+	-- (A run's timer goes as the next run begins: steady typing saves every
+	-- SAVE_EVERY, and the last keystroke's once it has waited that long.)
+	local wait = SAVE_EVERY - (ui.now() - saved_at)
+	if wait <= 0 then
+		save_new()
+	else
+		ui.after(wait, save_new)
+	end
+end)
+-- The window closing (the app quitting, or the window closed): Zeron's
+-- window sets `app.closing` (src/main.rs) before it writes what the scripts
+-- saved, and a save still waiting its turn goes now. (A timer never fires
+-- once the window has closed, and the last keystrokes were lost with it.)
+local closing = ui.shared("app.closing", false)
+ui.effect(function()
+	if closing:get() == true then
+		save_new()
 	end
 end)
 
@@ -227,6 +273,15 @@ function M.showing(): string
 	return here:peek()
 end
 
+-- The chat the draft in `text` is (a new chat's ""), followed: it changes
+-- with `text` as a move puts one draft away and takes out the next.
+function M.owner(): string
+	return here:get()
+end
+
+-- `showing`, read as it changes.
+M.showing_now = M.owner
+
 function M.show(key: string)
 	local was = here:peek()
 	if was == key then
@@ -234,9 +289,9 @@ function M.show(key: string)
 	end
 	ui.batch(function()
 		local all = table.clone(kept:peek())
-		local text, cargo, quotes, chosen = M.text:peek(), M.cargo:peek(), M.quotes:peek(), M.chosen:peek()
+		local text, atoms, cargo, quotes, chosen = M.text:peek(), ComposerAtoms.live(M.atoms), M.cargo:peek(), M.quotes:peek(), M.chosen:peek()
 		if text ~= "" or #cargo > 0 or next(chosen) ~= nil then
-			all[was] = { text = text, cargo = cargo, quotes = quotes, chosen = chosen }
+			all[was] = { text = text, atoms = atoms, cargo = cargo, quotes = quotes, chosen = chosen }
 		else
 			all[was] = nil
 		end
@@ -244,7 +299,12 @@ function M.show(key: string)
 		all[key] = nil
 		kept:set(all)
 		here:set(key)
-		M.text:set(if now then now.text else "")
+		ComposerAtoms.apply(
+			M.text,
+			M.atoms,
+			if now then now.text else "",
+			if now and type(now.atoms) == "table" then now.atoms else {}
+		)
 		M.cargo:set(if now then now.cargo else {})
 		M.quotes:set(if now and now.quotes then now.quotes else {})
 		M.chosen:set(if now and now.chosen then now.chosen else {})
@@ -252,15 +312,82 @@ function M.show(key: string)
 end
 
 -- What was typed and carried, taken for sending (the composer cleared).
-function M.take(): (string, { any })
-	local text = Quote.expand(M.text:peek(), Quote.kept(M.text:peek(), M.quotes:peek()))
+-- Inline atomic chips are encoded into their canonical links before quote
+-- expansion so atom offsets match the raw draft text; `raw` and `atoms` are
+-- also returned so a failed send can restore the chips intact.
+function M.take(): (string, { any }, string, { ComposerAtoms.AtomEntry })
+	local raw = M.text:peek()
+	local atoms = ComposerAtoms.live(M.atoms)
+	local encoded = ComposerAtoms.encode(raw, atoms)
+	local text = Quote.expand(encoded, Quote.kept(encoded, M.quotes:peek()))
 	local cargo = M.cargo:peek()
 	ui.batch(function()
 		M.text:set("")
+		M.atoms:set({})
 		M.cargo:set({})
 		M.quotes:set({})
 	end)
-	return text, cargo
+	-- A new chat's draft, sent: saved empty at once, not on the throttle's
+	-- next turn, which a quit in between would never reach (the message
+	-- coming back as the draft at the next launch).
+	if here:peek() == "" then
+		save_new()
+	end
+	return text, cargo, raw, atoms
+end
+
+-- The draft shown, lifted out whole to be put back later (a plugin's
+-- `zeron.take_draft`): its words as typed, its chips and the passages
+-- quoted in it, the composer cleared. Nil when there's nothing to lift.
+function M.lift(): { text: string, atoms: { ComposerAtoms.AtomEntry }, cargo: { any }, quotes: { [string]: string } }?
+	local text, atoms, cargo, quotes = M.text:peek(), ComposerAtoms.live(M.atoms), M.cargo:peek(), M.quotes:peek()
+	if text == "" and #cargo == 0 then
+		return nil
+	end
+	ui.batch(function()
+		M.text:set("")
+		M.atoms:set({})
+		M.cargo:set({})
+		M.quotes:set({})
+	end)
+	return { text = text, atoms = atoms, cargo = cargo, quotes = quotes }
+end
+
+-- A lifted draft put back on the draft shown (`zeron.put_draft`). Onto an
+-- empty composer it's as it was; onto words already there, its words follow
+-- them after a blank line and its chips follow theirs, its files numbered
+-- after those there.
+function M.lay(d: { text: string, atoms: { ComposerAtoms.AtomEntry }?, cargo: { any }, quotes: { [string]: string } })
+	local here_text, here_atoms, here_cargo = M.text:peek(), ComposerAtoms.live(M.atoms), M.cargo:peek()
+	ui.batch(function()
+		if here_text == "" and #here_cargo == 0 then
+			ComposerAtoms.apply(M.text, M.atoms, d.text, if type(d.atoms) == "table" then d.atoms else {})
+			M.cargo:set(d.cargo)
+			M.quotes:set(d.quotes)
+			return
+		end
+		local quotes = table.clone(M.quotes:peek())
+		for line, passage in d.quotes do
+			quotes[line] = passage
+		end
+		M.quotes:set(quotes)
+		if d.text ~= "" then
+			local prefix_chars = if here_text == "" then 0 else ComposerAtoms.char_len(here_text .. "\n\n")
+			local combined = table.clone(here_atoms)
+			if type(d.atoms) == "table" and #d.atoms > 0 then
+				for _, a in ComposerAtoms.shift(d.atoms, prefix_chars) do
+					table.insert(combined, a)
+				end
+			end
+			ComposerAtoms.apply(M.text, M.atoms, if here_text == "" then d.text else `{here_text}\n\n{d.text}`, combined)
+		end
+		for _, item in d.cargo do
+			local moved = table.clone(item)
+			moved.mention = nil
+			M.push_cargo(nil, moved)
+		end
+	end)
+	M.focus:add(1)
 end
 
 -- A passage of the transcript, quoted into the draft (its line marks it)
@@ -406,25 +533,77 @@ function M.restore_cargo_of(key: string, list: { any })
 	set_cargo(key, all)
 end
 
+-- Appends inline atomic chips for `items` (each one carrying a mention link)
+-- onto `target` (defaulting to the window composer's draft and atoms),
+-- preserving clean spacing and leaving the caret right after the last chip.
+function M.insert_cargo_chips(items: { any }, target: { text: State<string>, atoms: State<{ ComposerAtoms.AtomEntry }> }?)
+	if #items == 0 then
+		return
+	end
+	local text_state = if target then target.text else M.text
+	local atoms_state = if target then target.atoms else M.atoms
+	local next_text = text_state:peek()
+	local next_atoms = ComposerAtoms.live(atoms_state)
+	local caret_byte = #next_text
+	local changed = false
+	for _, item in items do
+		local spec = Carried.chip_spec(item)
+		if spec then
+			next_text, next_atoms, caret_byte = ComposerAtoms.splice_insert(next_text, next_atoms, #next_text, #next_text, spec, true)
+			changed = true
+		end
+	end
+	if changed then
+		ComposerAtoms.apply(text_state, atoms_state, next_text, next_atoms, nil, caret_byte)
+	end
+end
+
 -- Files picked or dropped: chips, carried with the message. (`key`, a chat
 -- with a composer of its own: on that chat's draft, and the keys are its
 -- composer's to take. Else on the chat shown's, the window's composer taking
 -- the keys. So too `add_to_chat` and `mention_chat`.)
-function M.attach_files(files: { any }, key: string?)
+function M.attach_files(files: { any }, key: string?): { any }
+	local added: { any } = {}
 	for _, f in files do
-		local name = f.name or f.path or "file"
+		local raw = f.name or f.path or "file"
+		local name = AttachmentMentions.friendly_name(raw)
 		local picture = is_image(name)
-		M.push_cargo(key, {
+		local item = {
 			id = chip_id("file"),
 			kind = if picture then "image" else "file",
 			name = name,
 			src = if picture then f.path else nil,
 			path = f.path,
-		})
+		}
+		M.push_cargo(key, item)
+		table.insert(added, item)
 	end
 	if key == nil then
 		M.focus:add(1)
 	end
+	return added
+end
+
+-- Files dragged and dropped onto a chat or its composer: attach to cargo
+-- and insert their inline atomic chips into the draft.
+function M.drop_files(files: { any }, key: string?, target: { text: State<string>, atoms: State<{ ComposerAtoms.AtomEntry }> }?)
+	local added = M.attach_files(files, key)
+	if target or key == nil then
+		M.insert_cargo_chips(added, target)
+	end
+end
+
+-- A picture pasted from the clipboard: gives it a readable timestamped name
+-- (`Clipboard 1.45.12 PM.png`, deduplicated against current cargo) instead of
+-- `image.png`.
+function M.attach_pasted_image(path: string, key: string?)
+	local existing: { string } = {}
+	for _, item in M.peek_cargo(key) do
+		if type(item.name) == "string" then
+			table.insert(existing, item.name)
+		end
+	end
+	M.attach_files({ { name = AttachmentMentions.pasted_name(existing), path = path } }, key)
 end
 
 -- Files of the project (the files pane's, dragged here or its "Add to
@@ -433,11 +612,11 @@ end
 -- path there, not uploaded again; `paths` are the project's own (relative
 -- to `root`, the project's folder there), and a chip says where in it the
 -- file is. One already carried isn't added twice.
-function M.add_to_chat(paths: { string }, root: string?, key: string?)
-	local have: { [string]: boolean } = {}
+function M.add_to_chat(paths: { string }, root: string?, key: string?): { any }
+	local have: { [string]: any } = {}
 	for _, item in M.peek_cargo(key) do
 		if item.path then
-			have[item.path] = true
+			have[item.path] = item
 		end
 	end
 	-- On this computer (the project whose folder it is lives here): a
@@ -450,28 +629,39 @@ function M.add_to_chat(paths: { string }, root: string?, key: string?)
 			here = true
 		end
 	end
+	local attached: { any } = {}
+	local seen: { [string]: boolean } = {}
 	for _, rel in paths do
 		local at = if root and root ~= "" then `{root}/{rel}` else rel
-		if not have[at] then
-			have[at] = true
-			local name = string.match(rel, "([^/]+)/?$") or rel
-			local picture = here and is_image(name)
-			M.push_cargo(key, {
-				id = chip_id("file"),
-				kind = if picture then "image" else "file",
-				name = name,
-				src = if picture then at else nil,
-				-- (Where in the project, under its name.)
-				meta = string.match(rel, "^(.*)/[^/]+$"),
-				path = at,
-				rel = rel,
-				on_host = true,
-			})
+		if not seen[at] then
+			seen[at] = true
+			local existing = have[at]
+			if existing then
+				table.insert(attached, existing)
+			else
+				local name = string.match(rel, "([^/]+)/?$") or rel
+				local picture = here and is_image(name)
+				local item = {
+					id = chip_id("file"),
+					kind = if picture then "image" else "file",
+					name = name,
+					src = if picture then at else nil,
+					-- (Where in the project, under its name.)
+					meta = string.match(rel, "^(.*)/[^/]+$"),
+					path = at,
+					rel = rel,
+					on_host = true,
+				}
+				have[at] = item
+				M.push_cargo(key, item)
+				table.insert(attached, item)
+			end
 		end
 	end
 	if key == nil then
 		M.focus:add(1)
 	end
+	return attached
 end
 
 -- The composer's model picker, opened from elsewhere (the shell's ⌘/):
@@ -697,9 +887,16 @@ end
 
 -- The props that make a node a drop zone, named `zone` in `map`: files from
 -- outside, and the files pane's, attach as chips on chat `key`'s draft (nil:
--- the chat shown's); a sidebar session is mentioned there. `landed` runs as
--- anything does.
-local function zone_props(map: any, zone: string, key: string?, landed: (() -> ())?): { [string]: any }
+-- the chat shown's) and insert inline chips into `target` (defaulting to the
+-- window composer when `key` is nil); a sidebar session is mentioned there.
+-- `landed` runs as anything does.
+local function zone_props(
+	map: any,
+	zone: string,
+	key: string?,
+	landed: (() -> ())?,
+	target: { text: State<string>, atoms: State<{ ComposerAtoms.AtomEntry }> }?
+): { [string]: any }
 	local function land()
 		map:set({})
 		if landed then
@@ -711,7 +908,7 @@ local function zone_props(map: any, zone: string, key: string?, landed: (() -> (
 			over_in(map, zone, inside)
 		end,
 		on_file_drop = function(files: { any })
-			M.attach_files(files, key)
+			M.drop_files(files, key, target)
 			land()
 		end,
 		drop_when = function(payload: any): boolean
@@ -732,7 +929,10 @@ local function zone_props(map: any, zone: string, key: string?, landed: (() -> (
 		on_drop = function(payload: any)
 			local paths = workspace_paths(payload)
 			if paths then
-				M.add_to_chat(paths, payload.root, key)
+				local items = M.add_to_chat(paths, payload.root, key)
+				if target or key == nil then
+					M.insert_cargo_chips(items, target)
+				end
 			elseif type(payload) == "table" and type(payload.session) == "string" then
 				M.mention_chat(payload.session, key)
 			end
@@ -751,8 +951,13 @@ end
 -- its props, and whether files, and a sidebar session, are over it now, for
 -- its own overlays. `landed` runs as anything lands (its composer takes the
 -- keys).
-function M.own_drop_zone(zone: string, key: string, landed: () -> ()): ({ [string]: any }, () -> boolean, () -> boolean)
-	return zone_props(M.dropping_own, zone, key, landed),
+function M.own_drop_zone(
+	zone: string,
+	key: string,
+	landed: () -> (),
+	target: { text: State<string>, atoms: State<{ ComposerAtoms.AtomEntry }> }?
+): ({ [string]: any }, () -> boolean, () -> boolean)
+	return zone_props(M.dropping_own, zone, key, landed, target),
 		function(): boolean
 			local what = M.dropping_own:get()[zone]
 			return what ~= nil and what ~= "session"
@@ -865,6 +1070,52 @@ function M.update_comment(id: string, body: string)
 	end
 end
 
+-- Keeps remaining browser annotation chips synced if removing an earlier
+-- annotation renumbered them.
+local function sync_annotation_atoms(
+	cargo: { any },
+	atoms: { ComposerAtoms.AtomEntry },
+	changed: boolean
+): ({ ComposerAtoms.AtomEntry }, boolean)
+	if #atoms == 0 then
+		return atoms, changed
+	end
+	local by_id: { [string]: any } = {}
+	for _, item in cargo do
+		if item.kind == "annotation" and item.annotation and type(item.id) == "string" then
+			by_id[item.id] = item
+		end
+	end
+	if next(by_id) == nil then
+		return atoms, changed
+	end
+	local out: { ComposerAtoms.AtomEntry }? = nil
+	for i, a in atoms do
+		local cid = if a.data then a.data.cargo_id else nil
+		local item = if cid then by_id[cid] else nil
+		if item and a.data then
+			local tok = Annotation.token(item.annotation)
+			if a.data.link ~= tok then
+				local updated: { ComposerAtoms.AtomEntry } = out or table.clone(atoms)
+				out = updated
+				local next_data = table.clone(a.data)
+				next_data.link = tok
+				updated[i] = {
+					id = a.id,
+					from = a.from,
+					to = a.to,
+					data = next_data,
+					style = a.style,
+				}
+			end
+		end
+	end
+	if out then
+		return out, true
+	end
+	return atoms, changed
+end
+
 function M.remove_cargo(id: string)
 	local left = {}
 	for _, item in M.cargo:peek() do
@@ -872,7 +1123,15 @@ function M.remove_cargo(id: string)
 			table.insert(left, item)
 		end
 	end
-	M.cargo:set(M.renumber(left))
+	local next_cargo = M.renumber(left)
+	local next_text, next_atoms, changed = ComposerAtoms.remove_by_cargo(M.text:peek(), ComposerAtoms.live(M.atoms), id)
+	next_atoms, changed = sync_annotation_atoms(next_cargo, next_atoms, changed)
+	ui.batch(function()
+		M.cargo:set(next_cargo)
+		if changed then
+			ComposerAtoms.apply(M.text, M.atoms, next_text, next_atoms)
+		end
+	end)
 end
 
 -- Chat `key`'s draft, wherever it is: out in the composer while it shows
@@ -880,31 +1139,78 @@ end
 -- in a question it's asked. What shows a chat's draft by its id (a split
 -- pane's composer) reads it here, never the chat shown's; `show` moves a
 -- draft between the two in one batch, so it's never read half moved.
-function M.draft_of(key: string): { text: string, cargo: { any }, chosen: { [string]: boolean } }
+function M.draft_of(key: string): { text: string, atoms: { ComposerAtoms.AtomEntry }, cargo: { any }, chosen: { [string]: boolean } }
 	if here:get() == key then
-		return { text = M.text:get(), cargo = M.cargo:get(), chosen = M.chosen:get() }
+		return { text = M.text:get(), atoms = ComposerAtoms.live(M.atoms), cargo = M.cargo:get(), chosen = M.chosen:get() }
 	end
 	local d = kept:get()[key]
 	return {
 		text = if d and type(d.text) == "string" then d.text else "",
+		atoms = if d and type(d.atoms) == "table" then d.atoms else {},
 		cargo = if d and type(d.cargo) == "table" then d.cargo else {},
 		chosen = if d and type(d.chosen) == "table" then d.chosen else {},
 	}
 end
 
--- Chat `key`'s draft changed where it's shown by its id (`field`: "text"
--- or "chosen"): written wherever it is, as `draft_of` reads it.
+-- Follows chat `key`'s draft as `draft_of` does, wherever it is, without
+-- reading its words (a long draft isn't copied for it): what follows it to
+-- learn that it changed reads it only then (a split pane's mirror of it).
+function M.track_draft_of(key: string)
+	if here:get() == key then
+		M.text:len()
+		M.atoms:len()
+		M.cargo:get()
+		M.chosen:get()
+	else
+		kept:len()
+	end
+end
+
+-- The options picked in chat `key`'s question, as `draft_of` reads them,
+-- without its words.
+function M.chosen_of(key: string): { [string]: boolean }
+	if here:get() == key then
+		return M.chosen:get()
+	end
+	local d = kept:get()[key]
+	return if d and type(d.chosen) == "table" then d.chosen else {}
+end
+
+-- The length of chat `key`'s draft's words, in bytes, as `draft_of`
+-- reads them (out in the composer, its draft not copied for it).
+function M.draft_size_of(key: string): number
+	if here:peek() == key then
+		return Draft.size(M.text)
+	end
+	local d = kept:peek()[key]
+	return if d and type(d.text) == "string" then #d.text else 0
+end
+
+-- Chat `key`'s draft's words as they are, read without following them
+-- (`draft_of` follows them): what a plugin's `zeron.compose` adds to.
+function M.peek_text_of(key: string): string
+	if here:peek() == key then
+		return M.text:peek()
+	end
+	local d = kept:peek()[key]
+	return if d and type(d.text) == "string" then d.text else ""
+end
+
+-- Chat `key`'s draft changed where it's shown by its id (`field`: "text",
+-- "atoms", or "chosen"): written wherever it is, as `draft_of` reads it.
 function M.set_draft_of(key: string, field: string, value: any)
 	if here:peek() == key then
 		if field == "text" then
 			M.text:set(value)
+		elseif field == "atoms" then
+			M.atoms:set(value)
 		else
 			M.chosen:set(value)
 		end
 		return
 	end
 	local all = table.clone(kept:peek())
-	local d = table.clone(all[key] or { text = "", cargo = {}, quotes = {} })
+	local d = table.clone(all[key] or { text = "", atoms = {}, cargo = {}, quotes = {} })
 	d[field] = value
 	all[key] = d
 	kept:set(all)
@@ -929,6 +1235,12 @@ function M.remove_cargo_of(key: string, id: string)
 		end
 	end
 	d.cargo = M.renumber(left)
+	local next_text, next_atoms, changed = ComposerAtoms.remove_by_cargo(d.text or "", d.atoms, id)
+	next_atoms, changed = sync_annotation_atoms(d.cargo, next_atoms, changed)
+	if changed then
+		d.text = next_text
+		d.atoms = next_atoms
+	end
 	all[key] = d
 	kept:set(all)
 end
@@ -969,9 +1281,19 @@ local here_device = ui.computed(function(): string?
 end)
 
 -- The accounts' key for a device: "" for this one, whose engine answers
--- for itself.
+-- for itself; "cloud" for any of Cloud's (a chat's machine, or the
+-- account's Cloud device), whose accounts are the vault's, every Cloud
+-- machine's alike, as Settings → Providers shows them (this engine answers
+-- for "cloud": crates/engine cloud_accounts). A machine can't be asked:
+-- its accounts aren't its own, and asking would wake it.
 local function account_key(device: string?): string
-	return if device == nil or device == here_device:get() then "" else device
+	if device == nil or device == here_device:get() then
+		return ""
+	end
+	if cloud.on_device(device) or device == cloud.device() then
+		return "cloud"
+	end
+	return device
 end
 
 -- Models of Cursor's own pool (Composer, Grok), not the third-party one.
@@ -985,8 +1307,33 @@ local function cursor_pool(model: string): string
 	return "Other"
 end
 
+-- Antigravity's limits are its group of models' ("Gemini Session",
+-- "Claude & GPT Week": zeron_proto's ANTIGRAVITY_USAGE_*): the model's.
+local function antigravity_group(model: string): string
+	local id = string.lower(string.match(model, "^[^/]+/(.+)$") or model)
+	return if string.find(id, "gemini", 1, true) then "Gemini" else "Claude & GPT"
+end
+
+-- The windows `model` draws from, named within its group ("Session"), for
+-- an agent that limits groups of models apart (Antigravity); nil: all of
+-- the account's are.
+local function group_windows(account: any, harness: string, model: string): { any }?
+	if harness ~= "antigravity" then
+		return nil
+	end
+	local group = `{antigravity_group(model)} `
+	local mine = {}
+	for _, w in account.windows do
+		if string.sub(w.label, 1, #group) == group then
+			table.insert(mine, { label = string.sub(w.label, #group + 1), used = w.used })
+		end
+	end
+	return mine
+end
+
 -- What the ring reads: the fuller window; for Cursor, the pool the model
--- draws from, if that's reported. Nil: nothing reported.
+-- draws from, if that's reported; for Antigravity, the model's group's
+-- fuller one. Nil: nothing reported.
 local function account_used(account: any, harness: string, model: string): number?
 	if harness == "cursor" then
 		local id = string.match(model, "^[^/]+/(.+)$") or model
@@ -998,7 +1345,7 @@ local function account_used(account: any, harness: string, model: string): numbe
 		end
 	end
 	local most: number? = nil
-	for _, w in account.windows do
+	for _, w in group_windows(account, harness, model) or account.windows do
 		most = if most then math.max(most, w.used) else w.used
 	end
 	return most
@@ -1006,30 +1353,80 @@ end
 
 -- An account's windows in words, or why it has none to show: one not in use
 -- says what's wrong with it, as a signed-out one's old figures would mislead.
-local function account_detail(account: any): string
+-- Antigravity's are its model's group's; a group Google sets no limit for
+-- (Gemini on Google AI Ultra) shows the others', each group named once
+-- ("Claude & GPT: Session 40% · Week 10%").
+local function account_detail(account: any, harness: string, model: string): string
 	if account.error and (not account.active or #account.windows == 0) then
 		return account.error
 	end
+	local function said(w: any): string
+		return `{w.label} {math.floor(w.used * 100 + 0.5)}%`
+	end
+	local mine = group_windows(account, harness, model)
 	local parts: { string } = {}
-	for _, w in account.windows do
-		table.insert(parts, `{w.label} {math.floor(w.used * 100 + 0.5)}%`)
+	if mine and #mine == 0 then
+		-- ("<group> <span>": the span is the label's last word.)
+		local group: string? = nil
+		for _, w in account.windows do
+			local named, span = string.match(w.label, "^(.+) (%S+)$")
+			local part = said({ label = span or w.label, used = w.used })
+			if named and named ~= group then
+				group = named
+				part = `{named}: {part}`
+			end
+			table.insert(parts, part)
+		end
+	else
+		for _, w in mine or account.windows do
+			table.insert(parts, said(w))
+		end
 	end
 	return table.concat(parts, " · ")
 end
 
+-- Whether `harness` keeps a login per model provider (Pi, OpenCode,
+-- Hermes): Zeron signs in to its providers one by one, or its accounts say
+-- their provider.
+local function per_provider(harness: string, list: { any }?): boolean
+	if agents.logins:get()[harness] ~= nil then
+		return true
+	end
+	for _, a in list or {} do
+		if a.provider ~= nil then
+			return true
+		end
+	end
+	return false
+end
+
 -- The composer's accounts on `device` (ds.ModelPicker's `accounts`,
--- `on_account`, `on_accounts_open`), whichever computer it is: asked for as
--- it's first seen.
+-- `account_group`, `on_account`, `on_accounts_open`), whichever computer it
+-- is: asked for as it's first seen. An agent that keeps a login per model
+-- provider shows only the model's provider's: switching its ChatGPT
+-- account never touches its Claude one.
 function M.model_accounts(device: () -> string?): any
 	ui.effect(function()
 		agents.watch_device(account_key(device()))
 	end)
+	local function listed(harness: string): { any }?
+		local on = agents.on_device:get()[account_key(device())]
+		return on and on[harness]
+	end
 	return {
-		accounts = function(harness: string, model: string): { any }?
-			local on = agents.on_device:get()[account_key(device())]
-			local list = on and on[harness]
-			if not list then
+		accounts = function(harness: string, model: string, provider: string?): { any }?
+			local all = listed(harness)
+			if not all then
 				return nil
+			end
+			local list = all
+			if provider and per_provider(harness, all) then
+				list = {}
+				for _, a in all do
+					if a.provider == provider then
+						table.insert(list, a)
+					end
+				end
 			end
 			local out = table.create(#list)
 			for i, a in list do
@@ -1040,10 +1437,53 @@ function M.model_accounts(device: () -> string?): any
 					active = a.active,
 					can_switch = a.can_switch,
 					used = account_used(a, harness, model),
-					detail = account_detail(a),
+					detail = account_detail(a, harness, model),
 				}
 			end
 			return out
+		end,
+		-- The model's provider, named, and adding one of its accounts: Settings
+		-- → Providers, on the composer's device, its sign-in under way there.
+		account_group = function(harness: string, provider: string?): any
+			if not provider or not per_provider(harness, listed(harness)) then
+				return nil
+			end
+			local offer = (agents.logins:get()[harness] or {})[provider]
+			local name = if offer then offer.name else nil
+			for _, a in listed(harness) or {} do
+				if not name and a.provider == provider then
+					name = a.group
+				end
+			end
+			if not name then
+				return nil
+			end
+			local key = account_key(device())
+			-- Another account: a sign-in, on the composer's device; else an
+			-- API key, typed in Settings — on this Mac alone (a key never
+			-- travels to another device).
+			if offer and offer.login then
+				return {
+					name = name,
+					add = locale.s("ds.provider_card.add_named_account", { name = offer.login }),
+					on_add = function()
+						agents.target(if key == "" then nil else key)
+						route.settings("providers")
+						agents.sign_in_to(harness, provider)
+					end,
+				}
+			elseif offer and offer.key and key == "" then
+				return {
+					name = name,
+					add = locale.s("ds.model_picker.add_key", { name = offer.key }),
+					on_add = function()
+						agents.target(nil)
+						route.settings("providers")
+						agents.key_request:set(`{harness}:{provider}`)
+					end,
+				}
+			end
+			return { name = name }
 		end,
 		on_account = function(harness: string, id: string)
 			agents.switch_on(account_key(device()), harness, id):after(function() end, function()

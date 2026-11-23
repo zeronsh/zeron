@@ -169,7 +169,9 @@ local icon_of = M.icon
 -- choosing one calls `choose` with its id. Built once: its options follow
 -- the devices as they come, go and are renamed, and the choice follows
 -- `shown`.
-function M.picker(shown: () -> string?, choose: (id: string) -> ()): Node
+-- (`extra`: more choices after the computers, each `{ value, label, icon }`:
+-- Providers' Cloud, whose accounts every Cloud machine uses.)
+function M.picker(shown: () -> string?, choose: (id: string) -> (), extra: (() -> { any })?): Node
 	local function computers(): { sessions.Device }
 		return sessions.computers(sessions.devices:get(), true)
 	end
@@ -181,9 +183,12 @@ function M.picker(shown: () -> string?, choose: (id: string) -> ()): Node
 		end
 		return ""
 	end
+	local function extras(): { any }
+		return if extra then extra() else {}
+	end
 	return ui.show(
 		function(): boolean
-			return #computers() > 1
+			return #computers() > 1 or #extras() > 0
 		end,
 		ui.component(function(): Node
 			local chosen = ui.use_state(shown() or here())
@@ -207,6 +212,9 @@ function M.picker(shown: () -> string?, choose: (id: string) -> ()): Node
 							icon = icon_of(d.platform),
 							description = if not d.here and d.online == false then ui.t("settings.devices.offline") else nil,
 						})
+					end
+					for _, e in extras() do
+						table.insert(options, e)
 					end
 					return options
 				end,

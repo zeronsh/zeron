@@ -1,15 +1,27 @@
 # Packaging
 
-## Linux (implemented)
+Releases ship the **zgx** desktop app (`apps/zgx`, built with `--features beta`)
+alongside `zeron-engine` built from the same commit (`.github/workflows/release.yml`
+→ `.github/workflows/zgx-build.yml`). Each platform packages `ui/` and
+`plugins-builtin/` beside the binary so templates inherit from Zeron's scripts.
+The engine must be built with `LUAU_CXXFLAGS=-DNDEBUG` (release scripts refuse
+an engine compiled with Luau asserts).
+
+## Linux
 
 ```sh
-scripts/package-linux.sh            # release build (thin LTO, stripped)
-PROFILE=debug scripts/package-linux.sh   # fast smoke package
+LUAU_CXXFLAGS=-DNDEBUG cargo build --release --locked -p zeron --bin zeron-engine
+ZGX_VERSION="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')" \
+ZGX_ENGINE="$PWD/target/release/zeron-engine" \
+  scripts/package-linux.sh
 ```
 
 Produces `target/package/zeron-<version>-linux-<arch>.tar.gz` containing:
 
-- `zeron` — the binary (headed by default; `zeron headless` runs the engine alone)
+- `zeron` — the ZGX desktop app and CLI dispatcher (`zeron headless` and other
+  engine subcommands hand off to `zeron-engine` beside it)
+- `zeron-engine` — the background engine binary
+- `ui/` and `plugins-builtin/` — Zeron's Luau interface and built-in plugins
 - `zeron.desktop` — XDG desktop entry template (`Exec=zeron` for packagers;
   the installers rewrite `Exec`, `TryExec`, and `Icon` to absolute paths under
   `~/.zeron/app/current`, since `~/.local/bin` is often not on a desktop
@@ -21,64 +33,60 @@ Produces `target/package/zeron-<version>-linux-<arch>.tar.gz` containing:
   `$XDG_DATA_HOME` (default `~/.local/share`). The curl installer does the same
   from the extracted tarball; `scripts/test-linux-desktop-entry.sh` checks both
 
-The release profile in the root `Cargo.toml` sets `lto = "thin"` and
-`strip = "symbols"` for distribution builds.
+Without `ZGX_VERSION` / `ZGX_ENGINE`, `scripts/package-linux.sh` packages the
+standalone `apps/zeron` CLI/engine binaries (`PROFILE=debug` for a fast CI
+smoke package).
 
 ## macOS
 
+Requires a macOS host (Apple silicon, macOS 13+ minimum) and **Zig 0.16**
+(`brew install zig@0.16`, for Ghostty terminals in `apps/zgx`):
+
 ```sh
-scripts/package-macos.sh    # → target/package/zeron-<version>-macos-<arch>.dmg
+LUAU_CXXFLAGS=-DNDEBUG cargo build --release --locked -p zeron --bin zeron-engine
+ZGX_VERSION="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')" \
+ZGX_ENGINE="$PWD/target/release/zeron-engine" \
+  scripts/package-zgx-macos.sh
 ```
 
-Builds the release binary, assembles `Zeron.app` (Info.plist + icns), ad-hoc
-signs it (set `CODESIGN_IDENTITY` for a real Developer ID), and wraps it in a
-dmg. The auto-update tarball retains an internal `Zeron.app` path so older
-installed builds can update into Zeron. CI runs this on tags
-(`.github/workflows/release.yml`). The manual steps it automates, for reference
-(run on a macOS host — gpui needs Metal; no cross-build from Linux):
+Produces, under `target/package-zgx/`:
 
-1. Build the universal (or per-arch) binary:
-   ```sh
-   cargo build --release -p zeron --target aarch64-apple-darwin
-   cargo build --release -p zeron --target x86_64-apple-darwin
-   lipo -create -output zeron \
-     target/aarch64-apple-darwin/release/zeron \
-     target/x86_64-apple-darwin/release/zeron
-   ```
-2. Assemble the bundle:
-   ```sh
-   mkdir -p Zeron.app/Contents/{MacOS,Resources}
-   cp zeron Zeron.app/Contents/MacOS/zeron
-   sed "s/__VERSION__/$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')/" \
-     dist/macos/Info.plist > Zeron.app/Contents/Info.plist
-   ```
-3. Icon: `scripts/macos-app-icon.sh Zeron.app/Contents/Resources` writes
-   `Assets.car` from `dist/macos/Zeron.icon` (light, dark, clear and tinted, on
-   macOS 26 and later; compiling it takes Xcode 26 or later) and `zeron.icns`
-   from `dist/macos/icon-1024.png` (earlier macOS and the dmg). All the app's
-   icons are made from the art in `dist/icon` by `scripts/make-app-icons.py`.
-4. Sign + notarize (required for distribution):
-   ```sh
-   codesign --deep --force --options runtime --sign "Developer ID Application: …" Zeron.app
-   xcrun notarytool submit Zeron.zip --keychain-profile … --wait
-   xcrun stapler staple Zeron.app
-   ```
-5. Ship as a `.dmg` (`hdiutil create -volname Zeron -srcfolder Zeron.app -ov -format UDZO Zeron.dmg`).
+- `Zeron.app` — with `Contents/MacOS/zeron` (the ZGX app),
+  `Contents/MacOS/Zeron Engine` (the engine helper), and
+  `Contents/Resources/{ui,plugins-builtin,zeron.icns,Assets.car,licenses}`
+- `zeron-<version>-macos-<arch>.dmg` — distributable disk image
+- `zeron-<version>-macos-<arch>-app.tar.gz` — auto-updater archive
+
+The script runs `scripts/macos-app-icon.sh` (`Assets.car` from
+`dist/macos/Zeron.icon` on Xcode 26+, plus `zeron.icns` from
+`dist/macos/icon-1024.png`), ad-hoc signs by default, and signs/notarizes when
+`CODESIGN_IDENTITY` and `NOTARY_KEY_PATH` / `NOTARY_KEY_ID` / `NOTARY_ISSUER_ID`
+are set.
 
 ## Windows
 
+Requires Inno Setup 6 (`winget install JRSoftware.InnoSetup`):
+
 ```powershell
-./scripts/package-windows.ps1 -ReleasesUrl https://github.com/zeronsh/zeron/releases/latest/download
+$env:LUAU_CXXFLAGS = '-DNDEBUG'
+cargo build --release --locked -p zeron --bin zeron
+$version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+./scripts/package-windows.ps1 `
+  -ReleasesUrl https://zeron.sh/releases `
+  -ZgxVersion $version `
+  -ZgxEngine "$PWD\target\release\zeron.exe"
 ```
 
 Produces, under `target/package/`:
 
 - `zeron-<version>-windows-<arch>-setup.exe` — the per-user installer built
   from `dist/windows/zeron.iss` with Inno Setup 6
-- `zeron-<version>-windows-<arch>.zip` — the portable package
-- `zeron-<version>-windows-<arch>.exe` — the bare executable the in-app
-  updater downloads
+- `zeron-<version>-windows-<arch>.zip` — the portable package containing
+  `zeron.exe`, `zeron-update.json`, and `beta\<version>\{ui,plugins-builtin,engine\zeron.exe}`
+- `zeron-<version>-windows-<arch>.exe` — the standalone executable for legacy
+  in-place updaters (on first run it fetches the matching zip to populate its
+  version folder; omitted on beta builds)
 
-The installer and the zip both carry `zeron-update.json`, the marker that lets
-the app update itself in place. CI runs `scripts/test-windows-installer.ps1`
-against the setup on every Windows build.
+Omitting `-ZgxVersion` / `-ZgxEngine` packages the standalone `apps/zeron`
+CLI/engine binary (exercised by Windows CI installer/CLI smoke tests via
+`scripts/test-windows-installer.ps1`).

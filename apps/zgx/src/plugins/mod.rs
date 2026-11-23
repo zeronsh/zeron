@@ -219,8 +219,17 @@ struct Gh {
     watches: github::Watches<Watch>,
 }
 
+/// How long Settings → Plugins waits for what asked it to settle: past the
+/// launch (its first publish), then a moment.
+const PAGE_SETTLE_LAUNCH: std::time::Duration = std::time::Duration::from_millis(1500);
+const PAGE_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub struct Bridge {
     host: ScriptHost,
+    /// A publish of Settings → Plugins on its way (`publish_page`), and
+    /// whether one has been made.
+    page_due: Cell<bool>,
+    page_published: Cell<bool>,
     /// Where each plugin's requests may go, as its manifest names them.
     network: network::Network,
     windows: WindowFactory,
@@ -314,6 +323,9 @@ pub struct Bridge {
     /// (`plugins.remote`; never loaded here).
     pub(crate) remote: remote::Remote,
     me: RefCell<Weak<Bridge>>,
+    /// The window's first load is still to come (until `set_view`):
+    /// plugins applied before it load with it, no reload.
+    first_load: Cell<bool>,
 }
 
 /// What plugins may read and ask of the app, each behind its permission,
@@ -363,6 +375,36 @@ pub fn expose_own(host: &ScriptHost, id: &str) {
 /// finished (no organization chosen): then they're asked again once it is
 /// (`auth::set_up`), on the same connection, so plugins load as setup
 /// finishes, with no relaunch. Settings → Plugins says so meanwhile.
+/// How long a launch waits for an engine already running to say which
+/// plugins it allows: an answer is a few milliseconds; past this the
+/// window doesn't wait, and they come with the connection as ever.
+const PRELOAD_WAIT: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// The plugins an engine that's already running allows (`WatchPlugins`'
+/// first word), heard before the window's first load, which then loads
+/// them with it. Otherwise their list came with the connection, after the
+/// first frame, and loading them took a reload of every script in the
+/// window (a fifth of a second on an M5 Max, as the first keys are typed);
+/// the list the connection brings is now the one loaded, and changes
+/// nothing. Only what the engine says is loaded, as ever: with no engine
+/// running (a cold start), or none answering in `PRELOAD_WAIT`, nothing.
+fn preload(b: &Rc<Bridge>) {
+    let Some((port, data_dir)) = engine::get().ipc_endpoint() else { return };
+    // No engine was running at launch (none holds its data dir, or the one
+    // that does is the one this launch started, still coming up): there's
+    // none yet to ask, so none is dialled, as on a cold start before (on
+    // Windows, a port nobody listens on takes the whole wait to say so).
+    if engine::get().started_engine() || !zeron_launch::data_dir_held(&data_dir) {
+        return;
+    }
+    let Some(list) = crate::engine::rpc::ask_now(port, &data_dir, "WatchPlugins", json!({}), PRELOAD_WAIT) else {
+        return;
+    };
+    if list.get("plugins").is_some_and(Json::is_array) {
+        b.heard(&list);
+    }
+}
+
 fn connect(b: &Rc<Bridge>, rpc: &Rpc) {
     // Zeron's own plugins, shipped beside the app's scripts: the engine
     // scans them with yours (each connection: an engine started again
@@ -473,6 +515,88 @@ pub(crate) fn comment(asked: &Value, shown: &str) -> Option<Value> {
     Some(json_value(&out))
 }
 
+/// The longest key a plugin keeps a taken draft under.
+const DRAFT_KEY: usize = 64;
+
+/// A plugin's ask of the composer's draft (`zeron.take_draft`,
+/// `put_draft`, `swap_draft`, `drop_draft`), held to `{ op, key }`: `op`
+/// one of "take", "put", "swap" or "drop", `key` 1 to 64 characters with
+/// no control characters. Anything else is refused.
+pub(crate) fn draft_ask(asked: &Value) -> Option<Value> {
+    let op = asked.field("op").map(text)?;
+    let key = asked.field("key").map(text)?;
+    let valid_key = !key.is_empty() && key.chars().count() <= DRAFT_KEY && !key.chars().any(char::is_control);
+    if !matches!(op.as_str(), "take" | "put" | "swap" | "drop") || !valid_key {
+        return None;
+    }
+    Some(Value::record([("op", Value::from(op.as_str())), ("key", Value::from(key.as_str()))]))
+}
+
+/// What `zeron.compose` asks of the composer: its words alone (added to
+/// the draft shown, as ever), or with `{ text, replace, session }` (the
+/// draft's words replaced, or a chat named other than the one shown).
+pub(crate) fn compose(asked: &Value) -> Value {
+    let Some(words) = asked.field("text") else {
+        return Value::from(text(asked).as_str());
+    };
+    let words = match words {
+        Value::Str(_) | Value::Text(_) => words.clone(),
+        _ => Value::from(""),
+    };
+    let mut fields = vec![
+        ("text", words),
+        ("replace", Value::from(matches!(asked.field("replace"), Some(Value::Bool(true))))),
+    ];
+    if let Some(session) = asked.field("session").map(text).filter(|s| !s.is_empty()) {
+        fields.push(("session", Value::from(session.as_str())));
+    }
+    Value::record(fields)
+}
+
+/// The app's shared states a chat's draft lives in (screens/chat/shared),
+/// each read with the value the app starts it at: read before the app has
+/// made one, it's made as the app would.
+const DRAFT_HERE: &str = "chat.composer.here";
+const DRAFT_TEXT: &str = "chat.composer.text";
+const DRAFT_CARGO: &str = "chat.composer.cargo";
+const DRAFTS_KEPT: &str = "chat.composer.drafts";
+
+/// What a draft carries, as plugins are told it (as `zeron.draft()` says
+/// it, screens/plugins): each chip's kind and name, never a file's path.
+fn draft_attachments(cargo: &Value) -> Value {
+    let said = |item: &Value, field: &str, or: &str| match item.field(field) {
+        Some(v @ Value::Str(_)) => v.clone(),
+        _ => Value::from(or),
+    };
+    vlist(cargo.items().iter().map(|item| Value::record([("kind", said(item, "kind", "file")), ("name", said(item, "name", ""))])).collect())
+}
+
+/// Chat `session`'s draft, for `zeron.draft_of` ("draft"): out in the
+/// composer (`here` its chat, "" a new chat's; `shown` its words, `cargo`
+/// its chips) or kept for it (`kept`, by chat). Its words as typed, what it
+/// carries, and its chat (none for a new chat's). A chat with no draft has
+/// no words and carries nothing.
+pub(crate) fn draft_of(session: &str, here: &Value, shown: &Value, cargo: &Value, kept: &Value) -> Value {
+    let (words, carried) = if session == text(here) {
+        (shown.clone(), cargo.clone())
+    } else {
+        let d = kept.field(session);
+        (
+            d.and_then(|d| d.field("text")).cloned().unwrap_or_default(),
+            d.and_then(|d| d.field("cargo")).cloned().unwrap_or_default(),
+        )
+    };
+    let words = match words {
+        Value::Str(_) | Value::Text(_) => words,
+        _ => Value::from(""),
+    };
+    let mut fields = vec![("text", words), ("attachments", draft_attachments(&carried))];
+    if !session.is_empty() {
+        fields.push(("session", Value::from(session)));
+    }
+    Value::record(fields)
+}
+
 /// Plugins for the main window `cx` shows `host` in.
 pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     expose_surface(host);
@@ -485,6 +609,8 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         network: plugin_network,
         windows: cx.windows.clone(),
         page: host.shared("plugins", page_value("loading", None, &[], &[])),
+        page_due: Cell::new(false),
+        page_published: Cell::new(false),
         menus: host.shared("plugins.menus", vlist(Vec::new())),
         requests: host.shared("plugins.request", vlist(Vec::new())),
         request_list: RefCell::default(),
@@ -533,6 +659,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         reviewed: Cell::new(false),
         remote: remote::Remote::new(host.shared("plugins.remote", remote::Remote::initial())),
         me: RefCell::default(),
+        first_load: Cell::new(true),
     });
     *bridge.me.borrow_mut() = Rc::downgrade(&bridge);
     BRIDGE.with(|b| *b.borrow_mut() = Rc::downgrade(&bridge));
@@ -558,6 +685,10 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             b.later_blame(error.to_string());
         }
     });
+
+    // A launch whose engine already runs (it outlives the app): the plugins
+    // it has allowed, in the window's first load (`preload`).
+    preload(&bridge);
 
     let weak = Rc::downgrade(&bridge);
     engine::get().on_connect(move |rpc| {
@@ -691,27 +822,43 @@ pub fn prepare_live() -> PathBuf {
         preview::set_template_running(id != live::BUILTIN);
         preview::set((!preview::trusted(&root, &id)).then(|| preview::Preview { name: template_name(&root, &id), id: id.clone() }));
     }
-    if let Err(error) = live::sync_zeron(&crate::ui_dir(), &root) {
-        eprintln!("zeron-zgx: Zeron's own interface wasn't copied ({error}); running it from ui/");
-        return fallback;
-    }
     // The built-in themes once installed as templates, retired: one in use
     // gives way to the default template, wearing that theme
     // (retired_themes.rs).
     if let Some(data) = crate::engine::data_dir() {
         retired_themes::retire(&root, &data);
     }
+    let ui = crate::ui_dir();
     let id = live::active(&root);
+    // `.live` as the last launch left it, from the same Zeron and template:
+    // it runs as it is (live::LaunchStamp), nothing read or written.
+    let stamp = live::LaunchStamp::now(&ui, &root, &id);
+    if stamp.still_laid(&ui, &root) {
+        let (_, overlay) = live::plan(&root, &id, &Default::default(), false);
+        LIVE_OVERLAY.with(|o| *o.borrow_mut() = overlay);
+        let laid = live::Laid { ui_stamp: stamp.ui, id, template_stamp: stamp.template, ..Default::default() };
+        LIVE_LAID.with(|l| *l.borrow_mut() = laid);
+        return root.join(live::LIVE).join("app.luau");
+    }
+    if let Err(error) = live::sync_zeron(&ui, &root) {
+        eprintln!("zeron-zgx: Zeron's own interface wasn't copied ({error}); running it from ui/");
+        return fallback;
+    }
+    zgx::profile::mark("Zeron's own interface copied");
     match live::compose(&root, &id, &Default::default(), false) {
         Ok((_, overlay)) => {
             LIVE_OVERLAY.with(|o| *o.borrow_mut() = overlay);
-            let template_stamp = if id == live::BUILTIN { String::new() } else { live::template_stamp(&root.join(&id)) };
-            let laid = live::Laid { ui_stamp: live::ui_stamp(&crate::ui_dir()), id, template_stamp, ..Default::default() };
-            LIVE_LAID.with(|l| *l.borrow_mut() = laid);
             // (Pictures of templates taken from the window, before their
             // previews were drawn from their colours: gone.)
             let _ = std::fs::remove_dir_all(root.join(".previews"));
             let _ = std::fs::remove_dir_all(root.join(live::LIVE).join("previews"));
+            // What the next launch can run as it is: `.live` as this left it.
+            let laid_now = live::LaunchStamp::now(&ui, &root, &id);
+            if let Err(error) = laid_now.write(&root) {
+                eprintln!("zeron-zgx: the launch stamp wasn't kept ({error})");
+            }
+            let laid = live::Laid { ui_stamp: laid_now.ui, id, template_stamp: laid_now.template, ..Default::default() };
+            LIVE_LAID.with(|l| *l.borrow_mut() = laid);
             root.join(live::LIVE).join("app.luau")
         }
         Err(error) => {
@@ -1022,6 +1169,7 @@ fn dev_service(host: &ScriptHost, id: &str) {
 /// elements in it.
 pub fn set_view(handle: zgx::compose::ViewHandle) {
     if let Some(b) = BRIDGE.with(|b| b.borrow().upgrade()) {
+        b.first_load.set(false);
         *b.view.borrow_mut() = Some(handle);
         b.publish_page();
     }
@@ -1358,7 +1506,10 @@ impl Bridge {
         *self.loaded.borrow_mut() = want.clone();
         self.host.set_plugins(want);
         give_memory(&self.host, items.iter().filter(|i| loading.contains(i.id())));
-        self.reload();
+        // (Before the window's first load: that load takes them.)
+        if !self.first_load.get() {
+            self.reload();
+        }
     }
 
     fn reload(&self) {
@@ -1720,7 +1871,32 @@ impl Bridge {
         ]));
     }
 
+    /// Settings → Plugins brought up to date, once what asked has settled:
+    /// asks in a row (a launch makes several: the view known, the engine's
+    /// list, its look) make one, after [`PAGE_SETTLE`] ([`PAGE_SETTLE_LAUNCH`]
+    /// for a launch's first). It walks every element of the window (a tenth
+    /// of a second of a launch's main thread), and nothing a launch shows
+    /// reads it.
     fn publish_page(&self) {
+        if cfg!(test) {
+            return self.publish_page_now();
+        }
+        if self.page_due.replace(true) {
+            return;
+        }
+        let settle = if self.page_published.get() { PAGE_SETTLE } else { PAGE_SETTLE_LAUNCH };
+        let me = Rc::downgrade(&self.me());
+        self.tasks.spawn(async move {
+            zgx::timer::sleep(settle).await;
+            if let Some(b) = me.upgrade() {
+                b.page_due.set(false);
+                b.page_published.set(true);
+                b.publish_page_now();
+            }
+        });
+    }
+
+    fn publish_page_now(&self) {
         // A plugin that failed here shows so, with why, whatever the engine
         // says of it; one placed where the template in use has nothing says
         // where it won't show, and one whose place zgx refused says why.
@@ -2413,6 +2589,49 @@ impl Bridge {
                         Some(asked) => b.request("compose_comment", &plugin, asked),
                         None => eprintln!("zeron-zgx: plugin {plugin}: a comment for a chat not shown, refused"),
                     }
+                }
+            }
+        });
+        // The composer's draft taken (its words, its chips, the passages
+        // quoted in it), put back or let go, under a key of the plugin's,
+        // for a plugin allowed "draft": screens/plugins keeps what's taken
+        // (the plugin never holds its files' paths) and tells it what it
+        // keeps as `plugin.<id>.drafts`.
+        host.action(format!("plugin.{id}.draft"), {
+            let (me, plugin) = (me.clone(), plugin.clone());
+            move |asked| {
+                if let Some(b) = me.upgrade()
+                    && b.item(&plugin).is_some_and(|i| i.may("draft"))
+                {
+                    match draft_ask(&asked) {
+                        Some(asked) => b.request("draft", &plugin, asked),
+                        None => eprintln!("zeron-zgx: plugin {plugin}: a draft ask that isn't take, put, swap or drop with a key, refused"),
+                    }
+                }
+            }
+        });
+        // Another chat's draft, as it is (`zeron.draft_of`, "draft"): read
+        // where the app keeps it, once, never followed.
+        host.async_action(format!("plugin.{id}.draft_of"), {
+            let (me, plugin) = (me.clone(), plugin.clone());
+            move |asked| {
+                let (me, plugin) = (me.clone(), plugin.clone());
+                async move {
+                    let b = me.upgrade().ok_or("This plugin isn't on")?;
+                    let item = b.item(&plugin).ok_or("This plugin isn't on")?;
+                    if !item.may("draft") {
+                        return Err("This plugin wasn't allowed to read what you type in the message box".to_string());
+                    }
+                    let session = text(&asked);
+                    if session.chars().count() > 200 {
+                        return Err("That isn't a chat".to_string());
+                    }
+                    let read = |name: &str, initial: Value| b.host.shared(name, initial).signal().with_untracked(Value::clone);
+                    let here = read(DRAFT_HERE, Value::from(""));
+                    let shown = read(DRAFT_TEXT, Value::from(""));
+                    let cargo = read(DRAFT_CARGO, vlist(Vec::new()));
+                    let kept = read(DRAFTS_KEPT, Value::record(Vec::<(&str, Value)>::new()));
+                    Ok(draft_of(&session, &here, &shown, &cargo, &kept))
                 }
             }
         });
@@ -3322,9 +3541,9 @@ impl Bridge {
         });
         host.action("zeron.compose.insert", {
             let me = me.clone();
-            move |text_| {
+            move |asked| {
                 if let Some(b) = me.upgrade() {
-                    b.request("compose", "", Value::from(text(&text_).as_str()));
+                    b.request("compose", "", compose(&asked));
                 }
             }
         });
@@ -3466,6 +3685,52 @@ mod tests {
         assert_eq!(gone, vec!["clock".to_string(), "ping".to_string()]);
     }
 
+    /// `zeron.compose(text)` adds its words as ever; with options, it says
+    /// whether they replace the draft and which chat's (none: the shown).
+    #[test]
+    fn compose_takes_words_alone_or_with_replace_and_a_chat() {
+        assert_eq!(compose(&Value::from("hello")), Value::from("hello"));
+        let asked = json_value(&json!({ "text": "clearer", "replace": true, "session": "s2" }));
+        let out = compose(&asked);
+        assert_eq!(text(out.field("text").unwrap()), "clearer");
+        assert_eq!(out.field("replace"), Some(&Value::from(true)));
+        assert_eq!(text(out.field("session").unwrap()), "s2");
+        // (Only `true` replaces; a blank chat is the one shown; words that
+        // aren't text are none.)
+        let loose = json_value(&json!({ "text": 5, "replace": "yes", "session": "" }));
+        let out = compose(&loose);
+        assert_eq!(text(out.field("text").unwrap()), "");
+        assert_eq!(out.field("replace"), Some(&Value::from(false)));
+        assert!(out.field("session").is_none());
+    }
+
+    /// `zeron.draft_of`: the chat shown's draft (from the composer), or
+    /// another chat's (kept), with its chat and its chips by kind and name
+    /// alone; a new chat's has no chat; a chat with none, nothing.
+    #[test]
+    fn a_chats_draft_is_read_where_it_is_kept_without_paths() {
+        let kept = json_value(&json!({
+            "s2": { "text": "kept words", "cargo": [{ "kind": "file", "name": "a.rs", "path": "/Users/me/a.rs" }] },
+            "": { "text": "new chat words", "cargo": [] },
+        }));
+        let (here, shown) = (Value::from("s1"), Value::from("typing now"));
+        let cargo = json_value(&json!([{ "kind": "image", "name": "shot.png", "path": "/tmp/shot.png" }]));
+        let out = draft_of("s1", &here, &shown, &cargo, &kept);
+        assert_eq!(value_json(&out), json!({ "text": "typing now", "session": "s1", "attachments": [{ "kind": "image", "name": "shot.png" }] }));
+        let out = draft_of("s2", &here, &shown, &cargo, &kept);
+        assert_eq!(value_json(&out), json!({ "text": "kept words", "session": "s2", "attachments": [{ "kind": "file", "name": "a.rs" }] }));
+        assert!(!out.to_json().contains("/Users/me"), "never a path");
+        // A chat with no draft: nothing written, nothing carried.
+        let out = draft_of("s9", &here, &shown, &cargo, &kept);
+        assert_eq!(value_json(&out), json!({ "text": "", "session": "s9", "attachments": [] }));
+        // A new chat's draft, kept while a chat shows: no chat.
+        let out = draft_of("", &here, &shown, &cargo, &kept);
+        assert_eq!(value_json(&out), json!({ "text": "new chat words", "attachments": [] }));
+        // Before the app has made its states: nothing, not an error.
+        let out = draft_of("s1", &Value::Nil, &Value::Nil, &Value::Nil, &Value::Nil);
+        assert_eq!(text(out.field("text").unwrap()), "");
+    }
+
     /// R21: a plugin's review comment goes on the chat shown alone, with
     /// at most the 40 lines of code that are sent (a 20,000-character
     /// snippet once rode along unseen, onto any chat's draft).
@@ -3484,6 +3749,23 @@ mod tests {
         assert!(comment(&asked, "").is_none(), "no chat shown");
         let wide = json_value(&json!({ "file": "a.rs", "line": 1, "note": "n", "snippet": "é".repeat(3000) }));
         assert!(text(comment(&wide, "s1").unwrap().field("snippet").unwrap()).len() <= COMMENT_BYTES);
+    }
+
+    /// A plugin's ask of the draft is take, put, swap or drop, under a key
+    /// of 1 to 64 characters; nothing else rides along to the app.
+    #[test]
+    fn a_draft_ask_is_take_put_or_drop_with_a_key() {
+        let ask = |v: Json| draft_ask(&json_value(&v));
+        let took = ask(json!({ "op": "take", "key": "stash", "extra": "dropped" })).expect("a take");
+        assert_eq!(value_json(&took), json!({ "op": "take", "key": "stash" }));
+        assert!(ask(json!({ "op": "put", "key": "k".repeat(64) })).is_some());
+        assert!(ask(json!({ "op": "drop", "key": "é" })).is_some());
+        assert!(ask(json!({ "op": "swap", "key": "stash" })).is_some());
+        assert!(ask(json!({ "op": "send", "key": "stash" })).is_none(), "not an op");
+        assert!(ask(json!({ "op": "take", "key": "" })).is_none(), "no key");
+        assert!(ask(json!({ "op": "take" })).is_none(), "no key");
+        assert!(ask(json!({ "op": "take", "key": "k".repeat(65) })).is_none(), "too long");
+        assert!(ask(json!({ "op": "take", "key": "a\nb" })).is_none(), "a control character");
     }
 
     #[test]

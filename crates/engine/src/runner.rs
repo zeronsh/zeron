@@ -203,7 +203,7 @@ async fn prepare_checkout_with(
     record_setup("start", "Started a machine".into());
     let full_name = github_full_name(repo).unwrap_or_else(|| repo.to_string());
     let clone_command = format!(
-        "git clone{} {repo} {}",
+        "git clone --filter=blob:none{} {repo} {}",
         session
             .branch
             .as_deref()
@@ -232,19 +232,22 @@ async fn prepare_checkout_with(
     let mut last = String::new();
     for attempt in 1..=4 {
         let mut clone = tokio::process::Command::new("git");
-        clone.arg("clone");
+        // Blobless: every commit and tree, but only the files the checkout
+        // needs (older ones come when something asks for them). A Cloud
+        // machine reaches GitHub far slower than anything else, and a whole
+        // history (a few hundred MB) took half an hour.
+        clone.args(["clone", "--filter=blob:none", "--progress"]);
         if let Some(branch) = session.branch.as_deref() {
             clone.args(["--branch", branch]);
         }
         clone.arg("--").arg(repo).arg(path);
         clone.env("GIT_TERMINAL_PROMPT", "0").kill_on_drop(true);
-        match clone.output().await {
-            Ok(out) if out.status.success() => {
+        match run_clone(clone, clone_step, &full_name).await {
+            Ok(()) => {
                 last.clear();
                 break;
             }
-            Ok(out) => last = String::from_utf8_lossy(&out.stderr).trim().to_string(),
-            Err(err) => last = err.to_string(),
+            Err(error) => last = error,
         }
         // A half-written clone would make the next attempt fail on the
         // existing directory; it never held anything of the user's.
@@ -331,6 +334,110 @@ async fn pushed_session_branch(path: &Path, branch: &str) -> Option<String> {
     found
         .is_ok_and(|out| out.status.success())
         .then_some(remote)
+}
+
+/// Run `clone` (`git clone --progress`), its step (`index`) saying how far
+/// it has got as git reports it — at most once a second, or as the figure
+/// changes. The error is git's own words, without its progress lines.
+async fn run_clone(
+    mut clone: tokio::process::Command,
+    index: usize,
+    full_name: &str,
+) -> Result<(), String> {
+    use tokio::io::AsyncReadExt;
+    let mut child = clone
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|err| err.to_string())?;
+    let mut stderr = child.stderr.take().ok_or("git's output is unreadable")?;
+    let mut said = String::new();
+    let mut line = Vec::new();
+    let mut shown: Option<(String, std::time::Instant)> = None;
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = stderr.read(&mut chunk).await.unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        // Progress rewrites one line with `\r`; anything else ends in `\n`.
+        for &byte in &chunk[..n] {
+            if byte != b'\r' && byte != b'\n' {
+                line.push(byte);
+                continue;
+            }
+            let text = String::from_utf8_lossy(&line).trim().to_string();
+            line.clear();
+            match clone_progress(&text) {
+                Some(progress) => {
+                    let due = shown.as_ref().is_none_or(|(last, at)| {
+                        *last != progress && at.elapsed() >= Duration::from_secs(1)
+                    });
+                    if due {
+                        progress_step(index, format!("Cloning {full_name} — {progress}"));
+                        shown = Some((progress, std::time::Instant::now()));
+                    }
+                }
+                None if !text.is_empty() && !text.starts_with("remote:") => {
+                    said.push_str(&text);
+                    said.push('\n');
+                }
+                None => {}
+            }
+        }
+    }
+    said.push_str(String::from_utf8_lossy(&line).trim());
+    match child.wait().await {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(match said.trim() {
+            "" => format!("git exited with {status}"),
+            said => said.to_string(),
+        }),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// How far a clone has got, from one of git's progress lines: downloading
+/// (`Receiving objects:  45% (…), 51.00 MiB | 210.00 KiB/s`), then working
+/// out the files (`Resolving deltas`), then writing them (`Updating files`).
+fn clone_progress(line: &str) -> Option<String> {
+    let percent = |rest: &str| {
+        rest.split_whitespace()
+            .find(|word| word.ends_with('%'))
+            .map(str::to_owned)
+    };
+    if let Some(rest) = line.strip_prefix("Receiving objects:") {
+        let percent = percent(rest)?;
+        let size = rest
+            .split(", ")
+            .nth(1)
+            .and_then(|part| part.split(" | ").next())
+            .map(str::trim)
+            .filter(|size| size.ends_with("iB"));
+        return Some(match size {
+            Some(size) => format!("downloading, {percent} ({size})"),
+            None => format!("downloading, {percent}"),
+        });
+    }
+    if let Some(rest) = line.strip_prefix("Resolving deltas:") {
+        return Some(format!("unpacking, {}", percent(rest)?));
+    }
+    if let Some(rest) = line.strip_prefix("Updating files:") {
+        return Some(format!("writing files, {}", percent(rest)?));
+    }
+    None
+}
+
+/// A running step's name, as it goes.
+fn progress_step(index: usize, name: String) {
+    update_setup(|setup| {
+        if let Some(step) = setup.steps.get_mut(index)
+            && step.running
+        {
+            step.name = name;
+        }
+    });
 }
 
 /// One setup step of this boot (live: `running` until it finishes).
@@ -489,9 +596,11 @@ fn setup_parts(
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                preview_paths: Vec::new(),
                 exit_code: None,
                 output_truncated: false,
                 output_lines: None,
+                review: None,
             }
         })
         .collect()
@@ -755,6 +864,36 @@ impl RunnerIdentity {
             repo: repo.map(str::to_owned),
         }
     }
+
+    /// A freshly signed `/vault/{orgId}/grants` body: several providers in
+    /// one round trip. They are signed sorted and distinct, joined by `,`,
+    /// in the place a single grant signs its provider (no provider id holds
+    /// a comma, so the two can't be confused). Never `github`: its grants
+    /// name a repository.
+    pub fn grants_request(&self, providers: &[&str]) -> GrantsRequest {
+        let mut providers: Vec<String> = providers.iter().map(|p| (*p).to_owned()).collect();
+        providers.sort();
+        providers.dedup();
+        let ts = self.next_ts();
+        let message =
+            Self::grant_message(self.user_id(), self.device_id(), &providers.join(","), ts);
+        GrantsRequest {
+            providers,
+            device_id: self.device_id().into(),
+            ts,
+            sig: self.sign(&message),
+        }
+    }
+}
+
+/// Body of `POST /vault/{orgId}/grants`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantsRequest {
+    pub providers: Vec<String>,
+    pub device_id: String,
+    pub ts: i64,
+    pub sig: String,
 }
 
 pub(crate) fn http_client() -> reqwest::Client {
@@ -1361,6 +1500,26 @@ mod tests {
                 .then(|| "c".into())),
             None
         );
+    }
+
+    /// A clone says how far it has got from git's own progress lines;
+    /// anything else isn't progress.
+    #[test]
+    fn a_clone_says_how_far_it_has_got() {
+        assert_eq!(
+            clone_progress("Receiving objects:  45% (2061/4580), 51.00 MiB | 210.00 KiB/s").as_deref(),
+            Some("downloading, 45% (51.00 MiB)")
+        );
+        assert_eq!(
+            clone_progress("Receiving objects: 100% (4580/4580), 74.20 MiB | 1.10 MiB/s, done.").as_deref(),
+            Some("downloading, 100% (74.20 MiB)")
+        );
+        assert_eq!(clone_progress("Receiving objects:   3% (12/400)").as_deref(), Some("downloading, 3%"));
+        assert_eq!(clone_progress("Resolving deltas:  60% (300/500)").as_deref(), Some("unpacking, 60%"));
+        assert_eq!(clone_progress("Updating files:  10% (5/50)").as_deref(), Some("writing files, 10%"));
+        for other in ["Cloning into '/home/user/petalwick'...", "remote: Enumerating objects: 4580, done.", "fatal: repository not found", ""] {
+            assert_eq!(clone_progress(other), None, "{other}");
+        }
     }
 
     #[test]

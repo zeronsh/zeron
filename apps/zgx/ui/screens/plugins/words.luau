@@ -302,6 +302,9 @@ function M.permission(item: any, permission: string): Line
 		return line(false, "map-arrow-right", "plugins.words.permission.navigate.title")
 	elseif permission == "compose" then
 		return line(false, "chat-round-line", "plugins.words.permission.compose.title", "plugins.words.permission.compose.detail")
+	elseif permission == "draft" then
+		-- (What you type, read as you type it: said plainly.)
+		return line(false, "pen", "plugins.words.permission.draft.title", "plugins.words.permission.draft.detail")
 	elseif permission == "network" then
 		-- The places it names (any site, with "*"), those on this device or
 		-- your network said so, and risky then.
@@ -326,6 +329,8 @@ function M.permission(item: any, permission: string): Line
 		-- (A family Zeron draws in, given a face of the plugin's, changes
 		-- how Zeron's own text looks: said so.)
 		return line(false, "wrap-text", "plugins.words.permission.fonts.title", "plugins.words.permission.fonts.detail")
+	elseif permission == "scene3d" then
+		return line(false, "widget", "plugins.words.permission.scene3d.title")
 	elseif permission == "tools" then
 		-- Each tool by name, with what it tells your agents (their words
 		-- reach every agent's list of tools).

@@ -4840,7 +4840,8 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
 // coming and going as a list scrolls. Run by hand:
 // `MEASURE_CHATS=/path[@branch],… MEASURE_SECS=300 cargo test -p zeron-engine --lib
 //  measure_pull_request_watches -- --ignored --nocapture`
-#[cfg(test)]
+// (Unix only: it reads child CPU time with getrusage.)
+#[cfg(all(test, unix))]
 mod measure {
     use super::*;
     use std::collections::HashMap;

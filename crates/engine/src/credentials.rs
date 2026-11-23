@@ -50,12 +50,64 @@
 //!   warm session's `gh` would start failing while `git push` kept working.
 //!   Pushes and pull requests therefore act as the App.
 //!
+//! - **Every other agent** runs on the vault credentials
+//!   [`zeron_proto::providers::cloud_credentials`] lists for it, asked for in
+//!   one signed round trip (`POST /vault/{orgId}/grants`; one provider at a
+//!   time from an edge that predates it). Within one account group the first
+//!   credential granted is used (a sign-in before a key); separate groups
+//!   are all used. Keys go in the run's environment (`CURSOR_API_KEY`,
+//!   `XAI_API_KEY`, `META_API_KEY`, `OPENROUTER_API_KEY`, …). Sign-ins go
+//!   where the agent's own CLI keeps them, never with a refresh token, and
+//!   are rewritten ahead of expiry like Claude's:
+//!   - Grok: an entry of `$GROK_HOME/auth.json` (`~/.grok`) keyed by its
+//!     `{issuer}::{client_id}` scope, `refresh_token` empty, under grok's
+//!     `auth.json.lock` flock. A login of the sandbox's own (a real refresh
+//!     token) is left alone and used instead.
+//!   - Pi's ChatGPT: the `openai-codex` entry of
+//!     `$PI_CODING_AGENT_DIR/auth.json` (`~/.pi/agent`) from the `codex`
+//!     grant Codex runs on (`refresh` empty), under Pi's proper-lockfile
+//!     lock; Pi's other providers' entries are never touched.
+//!   - Devin: `$XDG_DATA_HOME/devin/credentials.toml` (0600). A file the
+//!     broker didn't write (its SHA-256 is kept beside the managed files) is
+//!     the sandbox's own login and stays.
+//!   - Pi's Claude: the `anthropic` entry beside it, from the `claude` grant
+//!     Claude Code runs on.
+//!   - Hermes: its ChatGPT (`codex`), Nous and xAI logins as records of
+//!     `$HERMES_HOME/auth.json` (`providers.<id>`), under Hermes' own
+//!     `auth.lock`, with a fresh `last_refresh` (Hermes adopts a record
+//!     written under its lock only when it's newer than its own); its shared
+//!     Nous store is pointed at an empty one of the machine's. The xAI token
+//!     is replaced while more than 75 minutes remain: Hermes would start its
+//!     own refresh an hour ahead.
+//!   - Antigravity: on its Google login, `acp_token.json` holding the access
+//!     token (refresh fields present but empty) and `auth.type = oauth-personal`,
+//!     plus a loopback CCPA reverse proxy (`AGY_ACP_CCPA_BASE_URL`) that injects
+//!     live vault tokens on every CCPA request (and retries once on 401) while
+//!     writing a far-future `expiry` in `acp_token.json` so `agy_acp_server`'s
+//!     in-memory credentials never expire mid-turn. On the key: `GEMINI_API_KEY`,
+//!     and `auth.type = gemini-api-key` in its `settings.json` (only when absent
+//!     or plain JSON).
+//!   - Muse: its whole `auth.json` document as the vault holds it (refresh
+//!     tokens empty), with `TBH_CREDENTIAL_BACKEND=file`; a file the broker
+//!     didn't write (its SHA-256 is kept) is Muse's own and stays.
+//!   - OpenCode: its sign-ins (ChatGPT, Copilot) go in one run variable,
+//!     [`zeron_harness::opencode::CREDENTIALS_ENV`], which its harness
+//!     installs through OpenCode's credential API on every server it boots
+//!     (2.x keeps logins in its database), and never passes on.
+//!
+//!   A missing CLI is installed the first time a run needs it (once per
+//!   agent; a failure is retried after a while). With no credential at all
+//!   and no login of the sandbox's own, the run fails saying where to sign
+//!   in or add a key.
+//!
 //! Grants are cached per provider until 5 min before expiry; a network failure
 //! falls back to a cached, still-unexpired grant. A 4xx (`not_authorized`,
 //! `not_found`, `needs_reconnect`, revoked, kill switch) means "not connected":
 //! the cache entry and any file it backed are dropped.
 
-use std::collections::HashMap;
+mod antigravity_proxy;
+
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
@@ -65,6 +117,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use zeron_proto::providers::{CloudDelivery, cloud_credentials};
 use zeron_proto::{GithubRepo, HarnessId, RunRequest, VaultProvider};
 
 use crate::http_error::describe_http_error;
@@ -116,6 +169,34 @@ const REFRESH_TICK: Duration = Duration::from_secs(60);
 const GITHUB_PROBE_EVERY: Duration = Duration::from_secs(5 * 60);
 /// Offline fallback only for grants that are still valid this much longer.
 const OFFLINE_MIN_VALIDITY: Duration = Duration::from_secs(30);
+/// Antigravity reads its token once per connection and, past it, starts an
+/// interactive browser sign-in: a run starts on one with at least this much
+/// life (the vault refreshes Google tokens with less left).
+const ANTIGRAVITY_MIN_LIFE: Duration = Duration::from_secs(50 * 60);
+/// Hermes refreshes an xAI token an hour before it expires (when it lives
+/// longer than 45 minutes) and can't — the refresh token is the vault's — so
+/// the machine replaces it while more than this is left.
+const XAI_OAUTH_AHEAD: Duration = Duration::from_secs(75 * 60);
+
+/// The life a cached grant of `provider` must still have for a run to start
+/// on it, else the vault is asked again.
+fn run_min_validity(provider: VaultProvider) -> Duration {
+    match provider {
+        VaultProvider::Antigravity => ANTIGRAVITY_MIN_LIFE,
+        VaultProvider::XaiOauth => XAI_OAUTH_AHEAD,
+        _ => GRANT_SLACK,
+    }
+}
+
+/// How far ahead of expiry the background refresher replaces `provider`'s
+/// file (what the agent itself would otherwise try to refresh, and can't).
+fn refresh_ahead(provider: VaultProvider) -> Duration {
+    match provider {
+        VaultProvider::Antigravity => ANTIGRAVITY_MIN_LIFE,
+        VaultProvider::XaiOauth => XAI_OAUTH_AHEAD,
+        _ => REFRESH_AHEAD,
+    }
+}
 const GITHUB_MAX_PAGES: usize = 10;
 const HOSTS_MARKER: &str =
     "# Managed by Zeron Cloud (GitHub grant) — delete this line to manage gh yourself.";
@@ -151,8 +232,44 @@ pub struct Grant {
     /// Claude: `pro` / `max` / … as Claude Code records it.
     #[serde(default)]
     pub subscription_type: Option<String>,
+    /// Non-secret fields the agent's credential file needs beside the token:
+    /// Grok's entry identity and `scope`, Devin's server urls.
+    #[serde(default)]
+    pub settings: BTreeMap<String, String>,
     #[serde(default)]
     pub generation: i64,
+    /// The vault account it comes from (an older vault names none).
+    #[serde(default)]
+    pub slot: Option<String>,
+}
+
+/// One login's part of a credential fingerprint
+/// ([`CredentialBroker::credential`]): `provider@slot:generation`, the
+/// account it comes from and its version (`provider:generation` from a vault
+/// that names no account).
+fn credential_part(provider: &str, grant: &Grant) -> String {
+    match &grant.slot {
+        Some(slot) => format!("{provider}@{slot}:{}", grant.generation),
+        None => format!("{provider}:{}", grant.generation),
+    }
+}
+
+/// The accounts a credential fingerprint was made with (`provider@slot`,
+/// sorted, joined by `,`), without their versions: whose models a catalog
+/// discovered with it are, the same after a token refresh, another after a
+/// switch of account. `None` for one that names no account: a machine's own
+/// login, none at all, or an older vault's grant.
+pub fn credential_accounts(credential: &str) -> Option<String> {
+    let mut accounts = credential
+        .split(',')
+        .map(|part| {
+            let part = part.strip_suffix(":expiring").unwrap_or(part);
+            let (account, generation) = part.rsplit_once(':')?;
+            (account.contains('@') && generation.parse::<i64>().is_ok()).then_some(account)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    accounts.sort_unstable();
+    (!accounts.is_empty()).then(|| accounts.join(","))
 }
 
 impl std::fmt::Debug for Grant {
@@ -211,6 +328,94 @@ pub struct BrokerConfig {
     /// The session repository as `owner/name`: `github` grants are minted
     /// for its owner's App installation. `None` = no GitHub grant at all.
     pub github_repo: Option<String>,
+    /// Where the other agents keep their logins.
+    pub agents: AgentPaths,
+    /// Credential variables (a [`CloudDelivery::Env`] name) the engine's own
+    /// environment already sets: the agents that read one have a login of
+    /// the machine's own.
+    pub env_logins: BTreeSet<String>,
+    /// Install an agent's missing CLI before its first run (off in tests).
+    pub install_missing: bool,
+}
+
+/// Where each agent beyond Claude Code and Codex keeps its login on this
+/// machine (every path its CLI's own default unless its env var moves it).
+#[derive(Debug, Clone)]
+pub struct AgentPaths {
+    /// `$GROK_HOME` (`~/.grok`): `auth.json`.
+    pub grok_home: PathBuf,
+    /// `$PI_CODING_AGENT_DIR` (`~/.pi/agent`): `auth.json`.
+    pub pi_agent_dir: PathBuf,
+    /// `$XDG_DATA_HOME/devin`: `credentials.toml`.
+    pub devin_dir: PathBuf,
+    /// Antigravity's `GEMINI_HOME`: `antigravity-acp/{settings,acp_token}.json`.
+    pub antigravity_home: Option<PathBuf>,
+    /// `$XDG_DATA_HOME/opencode`.
+    pub opencode_dir: PathBuf,
+    /// `$HERMES_HOME` (`~/.hermes`).
+    pub hermes_home: PathBuf,
+    /// `$XDG_CONFIG_HOME/muse`.
+    pub muse_dir: PathBuf,
+    /// Muse's login: `$MUSE_AUTH_PATH`, else `{muse_dir}/auth.json`.
+    pub muse_auth_file: PathBuf,
+    /// The Cursor SDK's saved login (`~/.cursor/sdk/auth.json`).
+    pub cursor_sdk_auth: PathBuf,
+}
+
+impl AgentPaths {
+    /// Every agent's default under `home`, no environment consulted.
+    pub fn under(home: &Path) -> Self {
+        let data = home.join(".local").join("share");
+        Self {
+            grok_home: home.join(".grok"),
+            pi_agent_dir: home.join(".pi").join("agent"),
+            devin_dir: data.join("devin"),
+            antigravity_home: Some(home.join(".gemini")),
+            opencode_dir: data.join("opencode"),
+            hermes_home: home.join(".hermes"),
+            muse_dir: home.join(".config").join("muse"),
+            muse_auth_file: home.join(".config").join("muse").join("auth.json"),
+            cursor_sdk_auth: home.join(".cursor").join("sdk").join("auth.json"),
+        }
+    }
+
+    /// As the agents resolve them in this process's environment.
+    pub fn detect(home: &Path) -> Self {
+        let env = |name: &str| {
+            std::env::var_os(name)
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        };
+        let data = env("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local").join("share"));
+        let config = env("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config"));
+        let defaults = Self::under(home);
+        Self {
+            grok_home: env("GROK_HOME").unwrap_or(defaults.grok_home),
+            pi_agent_dir: env("PI_CODING_AGENT_DIR").unwrap_or(defaults.pi_agent_dir),
+            devin_dir: data.join("devin"),
+            antigravity_home: zeron_harness::acp::antigravity_home().ok(),
+            opencode_dir: data.join("opencode"),
+            hermes_home: env("HERMES_HOME").unwrap_or(defaults.hermes_home),
+            muse_auth_file: env("MUSE_AUTH_PATH")
+                .unwrap_or_else(|| config.join("muse").join("auth.json")),
+            muse_dir: config.join("muse"),
+            cursor_sdk_auth: defaults.cursor_sdk_auth,
+        }
+    }
+}
+
+/// Every credential variable any agent reads on Cloud.
+fn credential_env_names() -> BTreeSet<&'static str> {
+    HarnessId::ALL
+        .iter()
+        .flat_map(|h| cloud_credentials(*h))
+        .filter_map(|c| match c.delivery {
+            CloudDelivery::Env(names) => Some(names),
+            CloudDelivery::File | CloudDelivery::Api => None,
+        })
+        .flatten()
+        .copied()
+        .collect()
 }
 
 impl BrokerConfig {
@@ -219,6 +424,13 @@ impl BrokerConfig {
         let env = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
         let claude_dir = env("CLAUDE_CONFIG_DIR").map(PathBuf::from);
         Self {
+            agents: AgentPaths::detect(&home),
+            env_logins: credential_env_names()
+                .into_iter()
+                .filter(|name| env(name).is_some())
+                .map(str::to_owned)
+                .collect(),
+            install_missing: true,
             data_dir: data_dir.to_path_buf(),
             claude_config_file: claude_dir
                 .as_ref()
@@ -267,7 +479,28 @@ struct Inner {
     refresher: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Whether this machine's Codex CLI can start ([`CredentialBroker::ensure_codex_starts`]).
     codex_check: tokio::sync::Mutex<CodexCheck>,
+    /// Per agent: whether its CLI is installed ([`CredentialBroker::ensure_installed`]).
+    installs: Mutex<HashMap<HarnessId, Arc<tokio::sync::Mutex<InstallCheck>>>>,
+    /// Per account: when its usage was last reported, and what it said
+    /// ([`CredentialBroker::report_usage`]).
+    usage_reported: Mutex<HashMap<String, (Instant, String)>>,
+    /// Lazy loopback CCPA auth reverse proxy for Antigravity vault runs.
+    antigravity_proxy: Mutex<Option<antigravity_proxy::AntigravityProxy>>,
+    /// Serializes lazy startup of [`Self::antigravity_proxy`].
+    antigravity_proxy_init: tokio::sync::Mutex<()>,
 }
+
+/// An agent's install check: done once it passes; a failed install is
+/// retried after [`INSTALL_RETRY`], and until then runs say why.
+#[derive(Default)]
+enum InstallCheck {
+    #[default]
+    Unchecked,
+    Passed,
+    FailedAt(Instant, String),
+}
+
+const INSTALL_RETRY: Duration = Duration::from_secs(10 * 60);
 
 /// The Codex install check: done once it passes; a failed repair is retried
 /// after [`CODEX_REPAIR_RETRY`] (a network blip mid-install must not leave
@@ -310,6 +543,10 @@ impl CredentialBroker {
                 git_identity: tokio::sync::Mutex::new(None),
                 refresher: Mutex::new(None),
                 codex_check: tokio::sync::Mutex::new(CodexCheck::Unchecked),
+                installs: Mutex::new(HashMap::new()),
+                usage_reported: Mutex::new(HashMap::new()),
+                antigravity_proxy: Mutex::new(None),
+                antigravity_proxy_init: tokio::sync::Mutex::new(()),
             }),
         }
     }
@@ -352,14 +589,95 @@ impl CredentialBroker {
             let _ = self.git_identity(&grant).await;
         }
         for provider in [VaultProvider::Claude, VaultProvider::Codex] {
-            let _ = self.grant_for_run(provider).await;
+            let granted = self.grant_for_run(provider).await;
+            if let (VaultProvider::Codex, GrantOutcome::Granted(grant)) = (provider, granted) {
+                self.report_codex_usage(&grant).await;
+            }
         }
+    }
+
+    /// ChatGPT's usage, read here with this machine's grant (ChatGPT answers
+    /// a machine, never the vault's Cloudflare servers) and reported as its
+    /// account's ([`Self::report_usage`]): a device's Cloud card shows it
+    /// before any ChatGPT run.
+    async fn report_codex_usage(&self, grant: &Grant) {
+        let reply = self
+            .inner
+            .http
+            .get(CODEX_USAGE_URL)
+            .bearer_auth(&grant.access_token)
+            .header("chatgpt-account-id", grant.account_id.as_deref().unwrap_or_default())
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await;
+        let body = match reply {
+            Ok(res) if res.status().is_success() => res.json::<Value>().await.ok(),
+            _ => None,
+        };
+        let Some((windows, plan)) = body
+            .as_ref()
+            .and_then(|body| crate::agent_accounts::usage_windows_from_reply(HarnessId::Codex, body))
+        else {
+            tracing::debug!("ChatGPT usage unreadable here");
+            return;
+        };
+        self.report_usage(&credential_part("codex", grant), windows, plan).await;
     }
 
     pub fn shutdown(&self) {
         if let Some(task) = lock(&self.inner.refresher).take() {
             task.abort();
         }
+        let _ = lock(&self.inner.antigravity_proxy).take();
+    }
+
+    fn has_antigravity_proxy(&self) -> bool {
+        lock(&self.inner.antigravity_proxy).is_some()
+    }
+
+    async fn ensure_antigravity_proxy(&self, fixed_upstream: Option<String>) -> Option<String> {
+        if let Some(proxy) = lock(&self.inner.antigravity_proxy).as_ref() {
+            return Some(proxy.base_url().to_owned());
+        }
+        let _guard = self.inner.antigravity_proxy_init.lock().await;
+        if let Some(proxy) = lock(&self.inner.antigravity_proxy).as_ref() {
+            return Some(proxy.base_url().to_owned());
+        }
+        match antigravity_proxy::AntigravityProxy::start(
+            Arc::downgrade(&self.inner),
+            fixed_upstream,
+        )
+        .await
+        {
+            Ok(proxy) => {
+                let url = proxy.base_url().to_owned();
+                *lock(&self.inner.antigravity_proxy) = Some(proxy);
+                Some(url)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "credentials: failed to start Antigravity CCPA auth proxy; falling back to static token"
+                );
+                None
+            }
+        }
+    }
+
+    /// Fetch a live Antigravity access token for the loopback CCPA proxy.
+    /// Uses [`GRANT_SLACK`] (5m) rather than [`ANTIGRAVITY_MIN_LIFE`] (50m) so
+    /// ongoing requests reuse valid cached tokens and transparently refresh
+    /// ahead of real Google expiry. When `force_refresh` is true (after an
+    /// upstream 401), bypasses the cache once to ask the vault directly.
+    async fn antigravity_proxy_grant(&self, force_refresh: bool) -> GrantOutcome {
+        if !force_refresh {
+            return self
+                .grant_within(VaultProvider::Antigravity, GRANT_SLACK, Some(RUN_REVALIDATE))
+                .await;
+        }
+        let _gate = self.inner.grant_gate.lock().await;
+        let fetched = self.fetch(VaultProvider::Antigravity).await;
+        self.record(VaultProvider::Antigravity, fetched)
     }
 
     // -- grants -------------------------------------------------------------
@@ -373,7 +691,7 @@ impl CredentialBroker {
     /// [`RUN_REVALIDATE`] is checked with the vault first, so the run uses
     /// the provider's active account as it is now.
     async fn grant_for_run(&self, provider: VaultProvider) -> GrantOutcome {
-        self.grant_within(provider, GRANT_SLACK, Some(RUN_REVALIDATE))
+        self.grant_within(provider, run_min_validity(provider), Some(RUN_REVALIDATE))
             .await
     }
 
@@ -390,7 +708,138 @@ impl CredentialBroker {
         if let Some(hit) = self.cached(provider, min_validity, max_age) {
             return hit;
         }
-        match self.fetch(provider).await {
+        let fetched = self.fetch(provider).await;
+        self.record(provider, fetched)
+    }
+
+    /// Grants for a run of an agent that takes several providers: each one
+    /// cached within [`RUN_REVALIDATE`] as it is, the rest in ONE signed
+    /// request (`POST /vault/{orgId}/grants`), else one at a time from an
+    /// edge that predates it. Never `github`.
+    async fn grants_for_run(
+        &self,
+        providers: &[VaultProvider],
+    ) -> HashMap<VaultProvider, GrantOutcome> {
+        let mut out = HashMap::new();
+        let mut wanted: Vec<VaultProvider> = Vec::new();
+        let hit = |p| self.cached(p, run_min_validity(p), Some(RUN_REVALIDATE));
+        for &provider in providers {
+            if provider == VaultProvider::Github || wanted.contains(&provider) {
+                continue;
+            }
+            match hit(provider) {
+                Some(outcome) => {
+                    out.insert(provider, outcome);
+                }
+                None => wanted.push(provider),
+            }
+        }
+        if wanted.len() <= 1 {
+            for provider in wanted {
+                out.insert(provider, self.grant_for_run(provider).await);
+            }
+            return out;
+        }
+        let _gate = self.inner.grant_gate.lock().await;
+        wanted.retain(|&provider| match hit(provider) {
+            Some(outcome) => {
+                out.insert(provider, outcome);
+                false
+            }
+            None => true,
+        });
+        if wanted.is_empty() {
+            return out;
+        }
+        let fetched = match self.fetch_many(&wanted).await {
+            Some(fetched) => fetched,
+            // An edge without the batch route: one at a time (the gate is
+            // held, so the timestamps stay ordered).
+            None => {
+                let mut one_by_one = HashMap::new();
+                for &provider in &wanted {
+                    one_by_one.insert(provider, self.fetch(provider).await);
+                }
+                one_by_one
+            }
+        };
+        for provider in wanted {
+            let outcome = fetched.get(&provider).cloned().unwrap_or_else(|| {
+                GrantOutcome::Unavailable(format!(
+                    "the vault answered without {}",
+                    provider.as_str()
+                ))
+            });
+            out.insert(provider, self.record(provider, outcome));
+        }
+        out
+    }
+
+    /// `POST /vault/{orgId}/grants` for `providers`. `None` when the edge
+    /// doesn't have the route (404): the caller asks one at a time.
+    async fn fetch_many(
+        &self,
+        providers: &[VaultProvider],
+    ) -> Option<HashMap<VaultProvider, GrantOutcome>> {
+        let all = |outcome: GrantOutcome| {
+            Some(
+                providers
+                    .iter()
+                    .map(|p| (*p, outcome.clone()))
+                    .collect::<HashMap<_, _>>(),
+            )
+        };
+        let bearer = match self.inner.tokens.token().await {
+            Ok(token) => token,
+            Err(err) => return all(GrantOutcome::Unavailable(format!("no runner token: {err}"))),
+        };
+        let identity = &self.inner.identity;
+        let url = format!("{}/vault/{}/grants", identity.edge_url(), identity.org_id());
+        let names: Vec<&str> = providers.iter().map(|p| p.as_str()).collect();
+        for attempt in 0..2 {
+            let body = identity.grants_request(&names);
+            let res = match self
+                .inner
+                .http
+                .post(&url)
+                .bearer_auth(&bearer)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(res) => res,
+                Err(err) => return all(GrantOutcome::Unavailable(describe_http_error(err))),
+            };
+            let status = res.status().as_u16();
+            if res.status().is_success() {
+                return match res.json::<GrantsReply>().await {
+                    Ok(reply) => Some(reply.outcomes(providers)),
+                    Err(err) => all(GrantOutcome::Unavailable(format!(
+                        "malformed grants: {}",
+                        describe_http_error(err)
+                    ))),
+                };
+            }
+            if status == 404 {
+                tracing::info!("credentials: the edge has no batch grants; asking one at a time");
+                return None;
+            }
+            let body = EdgeErrorBody::read(res).await;
+            if body.error == "stale" && attempt == 0 {
+                continue;
+            }
+            return all(classify_grant_failure(status, &body));
+        }
+        all(GrantOutcome::Unavailable(
+            "vault grant timestamp refused".into(),
+        ))
+    }
+
+    /// Cache what the vault answered for `provider` (a grant, or that it has
+    /// none), falling back to a still-valid cached grant when it couldn't be
+    /// reached.
+    fn record(&self, provider: VaultProvider, fetched: GrantOutcome) -> GrantOutcome {
+        match fetched {
             GrantOutcome::Granted(grant) => {
                 tracing::info!(
                     provider = provider.as_str(),
@@ -571,9 +1020,148 @@ impl CredentialBroker {
                 None if self.claude_has_login() => {}
                 None => return Err(CLAUDE_NOT_SIGNED_IN.into()),
             },
+            other if !cloud_credentials(other).is_empty() => {
+                self.ensure_installed(other).await?;
+                self.prepare_agent(other, request).await?;
+            }
             _ => {}
         }
         Ok(())
+    }
+
+    /// Hand `harness` the credentials it runs on (see the module docs): per
+    /// account group the first one granted, a key in the environment, a
+    /// sign-in in the agent's own file. `Err` when it has none at all and no
+    /// login of the machine's own.
+    async fn prepare_agent(
+        &self,
+        harness: HarnessId,
+        request: &mut RunRequest,
+    ) -> Result<(), String> {
+        let plan = self.plan(harness).await;
+        let mut handoffs: Vec<Value> = Vec::new();
+        for (credential, grant) in &plan.use_grants {
+            match credential.delivery {
+                CloudDelivery::Env(names) => {
+                    for name in names {
+                        request
+                            .env
+                            .insert((*name).into(), grant.access_token.clone());
+                    }
+                }
+                CloudDelivery::File => {
+                    if credential.vault == VaultProvider::GeminiKey {
+                        request
+                            .env
+                            .insert("GEMINI_API_KEY".into(), grant.access_token.clone());
+                    }
+                    if harness == HarnessId::Antigravity
+                        && credential.vault == VaultProvider::Antigravity
+                    {
+                        let caller_upstream = request
+                            .env
+                            .get(antigravity_proxy::CCPA_BASE_URL_ENV)
+                            .cloned()
+                            .filter(|u| !u.trim().is_empty());
+                        if let Some(proxy_url) =
+                            self.ensure_antigravity_proxy(caller_upstream).await
+                        {
+                            request
+                                .env
+                                .insert(antigravity_proxy::CCPA_BASE_URL_ENV.into(), proxy_url);
+                        }
+                    }
+                    self.write_agent_file(harness, credential.vault, grant)
+                        .await;
+                }
+                CloudDelivery::Api => {
+                    if let Some(value) = opencode_value(credential.vault, grant) {
+                        handoffs.push(json!({
+                            "integrationID": credential.group,
+                            "value": value,
+                        }));
+                    }
+                }
+            }
+        }
+        // Every OpenCode run says what Cloud hands it (none = remove ours):
+        // its harness installs them through OpenCode's credential API.
+        if cloud_credentials(harness)
+            .iter()
+            .any(|c| c.delivery == CloudDelivery::Api)
+        {
+            request.env.insert(
+                zeron_harness::opencode::CREDENTIALS_ENV.into(),
+                Value::Array(handoffs).to_string(),
+            );
+        }
+        match harness {
+            // Hermes merges a shared Nous store over its own: an empty one
+            // of the machine's, so a stale copy never wins over the vault's.
+            HarnessId::Hermes => {
+                let shared = hermes_shared_dir(&self.inner.config.data_dir);
+                if private_dir(&shared).is_ok() {
+                    request.env.insert(
+                        "HERMES_SHARED_AUTH_DIR".into(),
+                        shared.to_string_lossy().into_owned(),
+                    );
+                }
+            }
+            // Muse's login is the file the broker writes, never a keyring.
+            HarnessId::Muse => {
+                request
+                    .env
+                    .insert("TBH_CREDENTIAL_BACKEND".into(), "file".into());
+            }
+            _ => {}
+        }
+        for vault in &plan.cleared_files {
+            self.clear_agent_file(harness, *vault).await;
+        }
+        if plan.use_grants.is_empty() && !plan.unavailable && !self.agent_native_login(harness) {
+            return Err(not_signed_in(harness));
+        }
+        Ok(())
+    }
+
+    /// What a run of `harness` uses now: per group, the first credential
+    /// the vault grants (a group a login of the machine's own fills counts as
+    /// filled); which managed files lost their grant; and whether the vault
+    /// couldn't be reached for any of them.
+    async fn plan(&self, harness: HarnessId) -> AgentPlan {
+        let credentials = cloud_credentials(harness);
+        let providers: Vec<VaultProvider> = credentials.iter().map(|c| c.vault).collect();
+        let outcomes = self.grants_for_run(&providers).await;
+        let mut plan = AgentPlan::default();
+        let mut filled: HashSet<&str> = HashSet::new();
+        for credential in credentials {
+            match outcomes.get(&credential.vault) {
+                Some(GrantOutcome::Granted(grant)) => {
+                    if filled.contains(credential.group) {
+                        continue;
+                    }
+                    if credential.delivery == CloudDelivery::File
+                        && self.native_file_login(harness, credential.vault, grant)
+                    {
+                        // The machine's own login wins; it's not ours to replace.
+                        filled.insert(credential.group);
+                        plan.native = true;
+                        continue;
+                    }
+                    filled.insert(credential.group);
+                    plan.use_grants.push((*credential, grant.clone()));
+                }
+                Some(GrantOutcome::NotConnected(_)) => {
+                    // (An OpenCode login the vault stopped granting is
+                    // removed by its harness: it's no longer handed over.)
+                    if credential.delivery == CloudDelivery::File {
+                        plan.cleared_files.push(credential.vault);
+                    }
+                }
+                Some(GrantOutcome::Unavailable(_)) | None => plan.unavailable = true,
+            }
+        }
+        plan
     }
 
     /// Which credential a run of `harness` would use now, in [`Self::prepare`]'s
@@ -593,9 +1181,44 @@ impl CredentialBroker {
                 VaultProvider::AnthropicKey,
                 self.claude_native_login(),
             ),
+            other if !cloud_credentials(other).is_empty() => {
+                let plan = self.plan(other).await;
+                let mut used: Vec<String> = plan
+                    .use_grants
+                    .iter()
+                    .map(|(c, g)| {
+                        let mut id = credential_part(c.vault.as_str(), g);
+                        // Antigravity reads its token once per connection: a
+                        // session must not outlive it, so one whose token is
+                        // nearing its end reads as another credential and is
+                        // replaced at its next turn.
+                        if c.vault == VaultProvider::Antigravity
+                            && g.remaining_ms() < ANTIGRAVITY_MIN_LIFE.as_millis() as i64
+                        {
+                            id.push_str(":expiring");
+                        }
+                        id
+                    })
+                    .collect();
+                if !used.is_empty() {
+                    used.sort();
+                    return Some(used.join(","));
+                }
+                if plan.unavailable {
+                    return None;
+                }
+                return Some(
+                    if plan.native || self.agent_native_login(other) {
+                        "native"
+                    } else {
+                        "none"
+                    }
+                    .into(),
+                );
+            }
             _ => return None,
         };
-        let generation = |grant: Grant| format!("{}:{}", grant.provider, grant.generation);
+        let generation = |grant: Grant| credential_part(&grant.provider, &grant);
         match self.grant_for_run(login).await {
             GrantOutcome::Granted(grant) => return Some(generation(grant)),
             GrantOutcome::Unavailable(_) => return None,
@@ -1001,8 +1624,18 @@ impl CredentialBroker {
             {
                 GrantOutcome::Granted(grant) => {
                     self.write_claude_credentials(&grant).await;
+                    // Pi's Claude runs on the same login: its entry too,
+                    // when the broker wrote it.
+                    if pi_entry_managed(&self.inner.config.agents.pi_agent_dir, PI_CLAUDE_ENTRY) {
+                        self.write_agent_file(HarnessId::Pi, VaultProvider::Claude, &grant)
+                            .await;
+                    }
                 }
-                GrantOutcome::NotConnected(_) => self.clear_claude_credentials().await,
+                GrantOutcome::NotConnected(_) => {
+                    self.clear_claude_credentials().await;
+                    self.clear_agent_file(HarnessId::Pi, VaultProvider::Claude)
+                        .await;
+                }
                 GrantOutcome::Unavailable(_) => {}
             }
         }
@@ -1020,11 +1653,72 @@ impl CredentialBroker {
                         codex_chatgpt_auth_json(&grant, chrono::Utc::now()),
                     )
                     .await;
+                    // Pi's ChatGPT runs on the same login: keep its entry
+                    // fresh too, when the broker wrote it.
+                    if pi_codex_managed(&self.inner.config.agents.pi_agent_dir) {
+                        self.write_agent_file(HarnessId::Pi, VaultProvider::Codex, &grant)
+                            .await;
+                    }
+                    // And Hermes' ChatGPT, the same way.
+                    if hermes_record_managed(&self.inner.config.agents.hermes_home, VaultProvider::Codex) {
+                        self.write_agent_file(HarnessId::Hermes, VaultProvider::Codex, &grant)
+                            .await;
+                    }
                 }
                 GrantOutcome::NotConnected(_) => {
-                    let _files = self.inner.files.lock().await;
-                    let _ = std::fs::remove_file(home.join("auth.json"));
+                    {
+                        let _files = self.inner.files.lock().await;
+                        let _ = std::fs::remove_file(home.join("auth.json"));
+                    }
+                    self.clear_agent_file(HarnessId::Pi, VaultProvider::Codex)
+                        .await;
+                    self.clear_agent_file(HarnessId::Hermes, VaultProvider::Codex)
+                        .await;
                 }
+                GrantOutcome::Unavailable(_) => {}
+            }
+        }
+        if let Some(grant) = self.cached_grant(VaultProvider::Grok)
+            && grant.remaining_ms() <= REFRESH_AHEAD.as_millis() as i64
+        {
+            match self
+                .grant_within(VaultProvider::Grok, REFRESH_AHEAD, None)
+                .await
+            {
+                GrantOutcome::Granted(grant) => {
+                    if !self.native_file_login(HarnessId::Grok, VaultProvider::Grok, &grant) {
+                        self.write_agent_file(HarnessId::Grok, VaultProvider::Grok, &grant)
+                            .await;
+                    }
+                }
+                GrantOutcome::NotConnected(_) => {
+                    self.clear_agent_file(HarnessId::Grok, VaultProvider::Grok)
+                        .await;
+                }
+                GrantOutcome::Unavailable(_) => {}
+            }
+        }
+        // Logins the agent itself would refresh ahead of expiry, and can't
+        // (no refresh token): replaced before it tries.
+        for (harness, provider) in [
+            (HarnessId::Hermes, VaultProvider::XaiOauth),
+            (HarnessId::Hermes, VaultProvider::Nous),
+            (HarnessId::Antigravity, VaultProvider::Antigravity),
+        ] {
+            let ahead = refresh_ahead(provider);
+            let Some(grant) = self.cached_grant(provider) else {
+                continue;
+            };
+            if grant.remaining_ms() > ahead.as_millis() as i64 {
+                continue;
+            }
+            match self.grant_within(provider, ahead, None).await {
+                GrantOutcome::Granted(grant) => {
+                    if !self.native_file_login(harness, provider, &grant) {
+                        self.write_agent_file(harness, provider, &grant).await;
+                    }
+                }
+                GrantOutcome::NotConnected(_) => self.clear_agent_file(harness, provider).await,
                 GrantOutcome::Unavailable(_) => {}
             }
         }
@@ -1066,6 +1760,1190 @@ impl CredentialBroker {
     }
 }
 
+/// What a run of an agent beyond Claude Code / Codex uses ([`CredentialBroker::plan`]).
+#[derive(Default)]
+struct AgentPlan {
+    /// The credentials handed over, one per account group.
+    use_grants: Vec<(zeron_proto::providers::CloudCredential, Grant)>,
+    /// File credentials the vault no longer grants: their managed files go.
+    cleared_files: Vec<VaultProvider>,
+    /// A group was filled by a login of the machine's own.
+    native: bool,
+    /// The vault couldn't be reached for at least one credential.
+    unavailable: bool,
+}
+
+impl CredentialBroker {
+    /// Install `harness`'s CLI before its first run on this machine, once
+    /// (concurrent runs wait on the same install). Claude Code and Codex come
+    /// with the machine; Cursor runs on an SDK the harness installs itself.
+    async fn ensure_installed(&self, harness: HarnessId) -> Result<(), String> {
+        if !self.inner.config.install_missing
+            || matches!(
+                harness,
+                HarnessId::ClaudeCode | HarnessId::Codex | HarnessId::Cursor | HarnessId::Mock
+            )
+        {
+            return Ok(());
+        }
+        let slot = lock(&self.inner.installs)
+            .entry(harness)
+            .or_default()
+            .clone();
+        let mut check = slot.lock().await;
+        match &*check {
+            InstallCheck::Passed => return Ok(()),
+            InstallCheck::FailedAt(at, why) if at.elapsed() < INSTALL_RETRY => {
+                return Err(why.clone());
+            }
+            _ => {}
+        }
+        let name = zeron_proto::providers::provider_name(harness);
+        if zeron_harness::install::installed(harness) {
+            *check = InstallCheck::Passed;
+            return Ok(());
+        }
+        if !zeron_harness::install::can_install(harness) {
+            let why = format!(
+                "{name} isn't installed on this Cloud machine, and it has no installer here."
+            );
+            *check = InstallCheck::FailedAt(Instant::now(), why.clone());
+            return Err(why);
+        }
+        tracing::info!(
+            harness = harness.as_str(),
+            "credentials: installing a missing agent CLI"
+        );
+        let started = Instant::now();
+        match zeron_harness::install::install_harness(
+            harness,
+            zeron_harness::CancellationToken::new(),
+        )
+        .await
+        {
+            Ok(()) => {
+                tracing::info!(
+                    harness = harness.as_str(),
+                    elapsed_s = started.elapsed().as_secs(),
+                    "credentials: installed the agent CLI"
+                );
+                *check = InstallCheck::Passed;
+                Ok(())
+            }
+            Err(error) => {
+                tracing::warn!(harness = harness.as_str(), %error, "credentials: installing the agent CLI failed");
+                let why = format!("Couldn't install {name} on this Cloud machine: {error}");
+                *check = InstallCheck::FailedAt(Instant::now(), why.clone());
+                Err(why)
+            }
+        }
+    }
+
+    /// Write the file a sign-in of `vault` goes to for `harness`.
+    async fn write_agent_file(&self, harness: HarnessId, vault: VaultProvider, grant: &Grant) {
+        let _files = self.inner.files.lock().await;
+        let agents = self.inner.config.agents.clone();
+        let record = devin_record(&self.inner.config.data_dir);
+        let grant = grant.clone();
+        let muse_record = muse_record(&self.inner.config.data_dir);
+        let antigravity_proxied = self.has_antigravity_proxy();
+        let written = tokio::task::spawn_blocking(move || match (harness, vault) {
+            (HarnessId::Grok, VaultProvider::Grok) => write_grok_entry(&agents.grok_home, &grant),
+            (HarnessId::Pi, VaultProvider::Codex) => write_pi_codex(&agents.pi_agent_dir, &grant),
+            (HarnessId::Pi, VaultProvider::Claude) => write_pi_entry(
+                &agents.pi_agent_dir,
+                PI_CLAUDE_ENTRY,
+                pi_claude_entry(&grant),
+            ),
+            (HarnessId::Hermes, VaultProvider::Codex | VaultProvider::Nous | VaultProvider::XaiOauth) => {
+                write_hermes(&agents.hermes_home, vault, &grant, chrono::Utc::now())
+            }
+            (HarnessId::Antigravity, VaultProvider::Antigravity) => match &agents.antigravity_home {
+                Some(home) => write_antigravity_login(home, &grant, antigravity_proxied),
+                None => Ok(()),
+            },
+            (HarnessId::Muse, VaultProvider::Muse) => {
+                write_muse(&agents.muse_auth_file, &muse_record, &grant)
+            }
+            (HarnessId::Devin, VaultProvider::Devin) => {
+                write_devin(&agents.devin_dir, &record, &grant)
+            }
+            (HarnessId::Antigravity, VaultProvider::GeminiKey) => match &agents.antigravity_home {
+                Some(home) => write_antigravity_key_method(home),
+                None => Ok(()),
+            },
+            _ => Ok(()),
+        })
+        .await
+        .unwrap_or_else(|join| Err(join.to_string()));
+        if let Err(error) = written {
+            tracing::warn!(harness = harness.as_str(), vault = vault.as_str(), %error,
+                "credentials: failed to write the agent's login");
+        }
+    }
+
+    /// The vault no longer grants `vault`: drop what the broker wrote for it.
+    async fn clear_agent_file(&self, harness: HarnessId, vault: VaultProvider) {
+        let _files = self.inner.files.lock().await;
+        let agents = self.inner.config.agents.clone();
+        let record = devin_record(&self.inner.config.data_dir);
+        let muse_record = muse_record(&self.inner.config.data_dir);
+        let _ = tokio::task::spawn_blocking(move || match (harness, vault) {
+            (HarnessId::Grok, VaultProvider::Grok) => clear_grok_managed(&agents.grok_home),
+            (HarnessId::Pi, VaultProvider::Codex) => clear_pi_codex(&agents.pi_agent_dir),
+            (HarnessId::Pi, VaultProvider::Claude) => {
+                clear_pi_entry(&agents.pi_agent_dir, PI_CLAUDE_ENTRY)
+            }
+            (HarnessId::Hermes, VaultProvider::Codex | VaultProvider::Nous | VaultProvider::XaiOauth) => {
+                clear_hermes(&agents.hermes_home, vault)
+            }
+            (HarnessId::Antigravity, VaultProvider::Antigravity) => {
+                if let Some(home) = &agents.antigravity_home {
+                    clear_antigravity_login(home);
+                }
+            }
+            (HarnessId::Muse, VaultProvider::Muse) => clear_muse(&agents.muse_auth_file, &muse_record),
+            (HarnessId::Devin, VaultProvider::Devin) => clear_devin(&agents.devin_dir, &record),
+            _ => {}
+        })
+        .await;
+    }
+
+    /// Whether a login of the machine's own already fills what a `vault`
+    /// grant would write for `harness` (it stays, and is used).
+    fn native_file_login(&self, harness: HarnessId, vault: VaultProvider, grant: &Grant) -> bool {
+        let agents = &self.inner.config.agents;
+        match (harness, vault) {
+            (HarnessId::Grok, VaultProvider::Grok) => {
+                grok_scope(grant).is_some_and(|scope| grok_native(&agents.grok_home, Some(&scope)))
+            }
+            (HarnessId::Pi, VaultProvider::Codex) => pi_codex_native(&agents.pi_agent_dir),
+            (HarnessId::Pi, VaultProvider::Claude) => {
+                pi_entry_native(&agents.pi_agent_dir, PI_CLAUDE_ENTRY)
+            }
+            (HarnessId::Hermes, VaultProvider::Codex | VaultProvider::Nous | VaultProvider::XaiOauth) => {
+                hermes_record_native(&agents.hermes_home, vault)
+            }
+            (HarnessId::Antigravity, VaultProvider::Antigravity) => agents
+                .antigravity_home
+                .as_deref()
+                .is_some_and(antigravity_token_exists),
+            (HarnessId::Muse, VaultProvider::Muse) => muse_native(
+                &agents.muse_auth_file,
+                &muse_record(&self.inner.config.data_dir),
+            ),
+            (HarnessId::Devin, VaultProvider::Devin) => devin_native(
+                &agents.devin_dir,
+                &devin_record(&self.inner.config.data_dir),
+            ),
+            (HarnessId::Antigravity, VaultProvider::GeminiKey) => agents
+                .antigravity_home
+                .as_deref()
+                .is_some_and(antigravity_token_exists),
+            _ => false,
+        }
+    }
+
+    /// Whether `harness` has a login of the machine's own (its CLI's own
+    /// sign-in, or a key in the engine's environment). Conservative: where
+    /// that can't be told, yes (the agent then reports its own error).
+    fn agent_native_login(&self, harness: HarnessId) -> bool {
+        let config = &self.inner.config;
+        let in_env = cloud_credentials(harness).iter().any(|c| match c.delivery {
+            CloudDelivery::Env(names) => names.iter().any(|n| config.env_logins.contains(*n)),
+            CloudDelivery::File | CloudDelivery::Api => false,
+        });
+        if in_env {
+            return true;
+        }
+        let agents = &config.agents;
+        match harness {
+            HarnessId::Cursor => agents.cursor_sdk_auth.is_file(),
+            HarnessId::Devin => devin_native(&agents.devin_dir, &devin_record(&config.data_dir)),
+            HarnessId::Grok => grok_native(&agents.grok_home, None),
+            HarnessId::Pi => pi_native(&agents.pi_agent_dir),
+            HarnessId::Opencode => {
+                agents.opencode_dir.join("auth.json").exists()
+                    || agents.opencode_dir.join("opencode.db").exists()
+            }
+            HarnessId::Hermes => {
+                hermes_native(&agents.hermes_home) || agents.hermes_home.join(".env").exists()
+            }
+            HarnessId::Antigravity => agents
+                .antigravity_home
+                .as_deref()
+                .is_some_and(antigravity_token_exists),
+            HarnessId::Muse => muse_native(&agents.muse_auth_file, &muse_record(&config.data_dir)),
+            _ => true,
+        }
+    }
+}
+
+/// The run's error for `harness` with no credential anywhere: where to
+/// sign in, or which key to add.
+pub fn not_signed_in(harness: HarnessId) -> String {
+    use zeron_proto::providers::{cloud_key_providers, cloud_login_options, provider_name};
+    let name = provider_name(harness);
+    let logins: Vec<&str> = cloud_login_options(harness)
+        .iter()
+        .map(|o| o.label)
+        .collect();
+    let keys: Vec<&str> = cloud_key_providers(harness)
+        .into_iter()
+        .filter_map(VaultProvider::key_vendor)
+        .collect();
+    let article = |word: &str| {
+        if word.starts_with(['A', 'E', 'I', 'O', 'U', 'x']) {
+            "an"
+        } else {
+            "a"
+        }
+    };
+    let key = match keys.as_slice() {
+        [] => None,
+        [one] => Some(format!("add {} {one} API key", article(one))),
+        [a, b] => Some(format!("add {} {a} or {b} API key", article(a))),
+        [a, b, c] => Some(format!("add {} {a}, {b} or {c} API key", article(a))),
+        _ => Some("add an API key for one of its providers".to_string()),
+    };
+    // "A", "A or B", "A, B or C".
+    let either = |words: &[&str]| match words {
+        [] => String::new(),
+        [one] => (*one).to_string(),
+        [rest @ .., last] => format!("{} or {last}", rest.join(", ")),
+    };
+    let action = match (logins.is_empty(), key) {
+        (false, Some(key)) if logins.len() == 1 => format!("Sign in with {} or {key}", logins[0]),
+        (false, Some(key)) => format!("Sign in with {}, or {key},", either(&logins)),
+        (false, None) => format!("Sign in with {}", either(&logins)),
+        (true, Some(key)) => {
+            let mut key = key;
+            key.replace_range(..1, "A");
+            key
+        }
+        (true, None) => "Connect it".to_string(),
+    };
+    format!(
+        "{name} isn't signed in on Cloud. {action} in Settings → Providers → Cloud, then send again."
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Other agents' credential files
+// ---------------------------------------------------------------------------
+
+const STORE_LOCK_WAIT: Duration = Duration::from_secs(5);
+
+/// How an agent guards its JSON credential store: grok's `auth.json.lock`
+/// flock, or proper-lockfile's `auth.json.lock` directory (Pi). The same
+/// conventions the agents' own CLIs take (agent_accounts' stores lock them
+/// alike).
+enum StoreGuard {
+    Flock(#[allow(dead_code)] std::fs::File),
+    Dir(PathBuf),
+}
+
+impl Drop for StoreGuard {
+    fn drop(&mut self) {
+        if let StoreGuard::Dir(path) = self {
+            let _ = std::fs::remove_dir(path);
+        }
+    }
+}
+
+fn lock_file_of(file: &Path) -> PathBuf {
+    let mut name = file.file_name().unwrap_or_default().to_os_string();
+    name.push(".lock");
+    file.with_file_name(name)
+}
+
+fn flock(path: &Path) -> Result<StoreGuard, String> {
+    if let Some(dir) = path.parent() {
+        private_dir(dir).map_err(|e| e.to_string())?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).truncate(false).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path).map_err(|e| e.to_string())?;
+    let deadline = Instant::now() + STORE_LOCK_WAIT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(StoreGuard::Flock(file)),
+            Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(format!("{} is locked by the agent", path.display()));
+            }
+            Err(std::fs::TryLockError::Error(err)) => return Err(err.to_string()),
+        }
+    }
+}
+
+/// proper-lockfile's lock: a directory; one older than its staleness window
+/// is a crashed holder's and is taken over.
+fn dir_lock(path: &Path) -> Result<StoreGuard, String> {
+    if let Some(dir) = path.parent() {
+        private_dir(dir).map_err(|e| e.to_string())?;
+    }
+    let deadline = Instant::now() + STORE_LOCK_WAIT;
+    loop {
+        match std::fs::create_dir(path) {
+            Ok(()) => return Ok(StoreGuard::Dir(path.to_path_buf())),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                let stale = std::fs::metadata(path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|at| at.elapsed().ok())
+                    .is_some_and(|age| age > Duration::from_secs(30));
+                if stale {
+                    let _ = std::fs::remove_dir(path);
+                    continue;
+                }
+                if Instant::now() > deadline {
+                    return Err(format!("{} is locked by the agent", path.display()));
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(err) => return Err(err.to_string()),
+        }
+    }
+}
+
+/// Change a JSON-object credential store under its lock: `change` edits
+/// the map and says whether it changed anything; only then is it written
+/// (0600, atomic). A store that exists but isn't a JSON object is never
+/// touched — it may hold the user's other logins.
+fn update_json_store(
+    file: &Path,
+    guard: impl FnOnce(&Path) -> Result<StoreGuard, String>,
+    change: impl FnOnce(&mut serde_json::Map<String, Value>) -> bool,
+) -> Result<(), String> {
+    update_json_store_at(file, &lock_file_of(file), guard, change)
+}
+
+/// [`update_json_store`] under a lock file the agent names itself (Hermes'
+/// `auth.lock`, beside its `auth.json`).
+fn update_json_store_at(
+    file: &Path,
+    lock: &Path,
+    guard: impl FnOnce(&Path) -> Result<StoreGuard, String>,
+    change: impl FnOnce(&mut serde_json::Map<String, Value>) -> bool,
+) -> Result<(), String> {
+    let _guard = guard(lock)?;
+    let mut map = match read_json_guarded(file) {
+        Ok(Some(Value::Object(map))) => map,
+        Ok(_) => serde_json::Map::new(),
+        Err(()) => {
+            return Err(format!(
+                "{} isn't a JSON object; left alone",
+                file.display()
+            ));
+        }
+    };
+    if !change(&mut map) {
+        return Ok(());
+    }
+    if let Some(dir) = file.parent() {
+        private_dir(dir).map_err(|e| e.to_string())?;
+    }
+    let bytes = serde_json::to_vec_pretty(&Value::Object(map)).map_err(|e| e.to_string())?;
+    write_private_atomic(file, &bytes).map_err(|e| e.to_string())
+}
+
+/// A token field that is there and not empty: a login whose CLI refreshes
+/// it itself (the broker writes its own with an empty one).
+fn has_refresh(entry: &Value, field: &str) -> bool {
+    entry[field].as_str().is_some_and(|t| !t.trim().is_empty())
+}
+
+/// An entry the broker wrote: the refresh field there and EMPTY (a login
+/// with no refresh field at all is some other kind of the agent's own).
+fn is_managed(entry: &Value, field: &str) -> bool {
+    entry[field].as_str() == Some("")
+}
+
+fn rfc3339_ms(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .unwrap_or_default()
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+// -- Grok ---------------------------------------------------------------------
+
+/// The `{issuer}::{client_id}` key a Grok grant's entry lives under.
+fn grok_scope(grant: &Grant) -> Option<String> {
+    if let Some(scope) = grant.settings.get("scope").filter(|s| s.contains("::")) {
+        return Some(scope.clone());
+    }
+    let issuer = grant.settings.get("oidc_issuer")?;
+    let client = grant.settings.get("oidc_client_id")?;
+    Some(format!("{issuer}::{client}"))
+}
+
+/// The `auth.json` entry for a Grok grant: its identity fields, the access
+/// token as `key`, an EMPTY `refresh_token` (the vault is the refresher).
+fn grok_entry(grant: &Grant) -> Value {
+    let mut entry = serde_json::Map::new();
+    for (key, value) in &grant.settings {
+        if !matches!(
+            key.as_str(),
+            "scope" | "key" | "refresh_token" | "expires_at"
+        ) {
+            entry.insert(key.clone(), json!(value));
+        }
+    }
+    entry.insert("key".into(), json!(grant.access_token));
+    entry.insert("refresh_token".into(), json!(""));
+    entry.insert("expires_at".into(), json!(rfc3339_ms(grant.expires_at)));
+    Value::Object(entry)
+}
+
+fn grok_auth_file(grok_home: &Path) -> PathBuf {
+    grok_home.join("auth.json")
+}
+
+/// Whether grok has a login of its own (for `scope`, or any).
+fn grok_native(grok_home: &Path, scope: Option<&str>) -> bool {
+    let Some(Value::Object(map)) = read_json(&grok_auth_file(grok_home)) else {
+        return false;
+    };
+    map.iter()
+        .filter(|(key, _)| scope.is_none_or(|s| s == key.as_str()))
+        .any(|(_, entry)| has_refresh(entry, "refresh_token"))
+}
+
+/// Put the grant's entry in grok's `auth.json`; other issuers' entries stay,
+/// and an earlier managed entry under another scope goes (one Cloud login).
+fn write_grok_entry(grok_home: &Path, grant: &Grant) -> Result<(), String> {
+    let scope = grok_scope(grant).ok_or("the Grok grant names no scope")?;
+    let desired = grok_entry(grant);
+    update_json_store(&grok_auth_file(grok_home), flock, |map| {
+        if map
+            .get(&scope)
+            .is_some_and(|e| !is_managed(e, "refresh_token"))
+        {
+            return false;
+        }
+        let stale: Vec<String> = map
+            .iter()
+            .filter(|(key, e)| **key != scope && is_managed(e, "refresh_token"))
+            .map(|(key, _)| key.clone())
+            .collect();
+        let mut changed = !stale.is_empty();
+        for key in stale {
+            map.remove(&key);
+        }
+        if map.get(&scope) != Some(&desired) {
+            map.insert(scope.clone(), desired);
+            changed = true;
+        }
+        changed
+    })
+}
+
+/// Drop every entry the broker wrote (an empty refresh token).
+fn clear_grok_managed(grok_home: &Path) {
+    let file = grok_auth_file(grok_home);
+    if !file.exists() {
+        return;
+    }
+    let result = update_json_store(&file, flock, |map| {
+        let before = map.len();
+        map.retain(|_, e| !is_managed(e, "refresh_token"));
+        map.len() != before
+    });
+    if let Err(error) = result {
+        tracing::warn!(%error, "credentials: failed to clear the managed Grok login");
+    }
+}
+
+// -- Pi -----------------------------------------------------------------------
+
+const PI_CODEX_ENTRY: &str = "openai-codex";
+
+fn pi_auth_file(pi_dir: &Path) -> PathBuf {
+    pi_dir.join("auth.json")
+}
+
+/// Pi's ChatGPT entry from a `codex` grant: `refresh` EMPTY.
+fn pi_codex_entry(grant: &Grant) -> Value {
+    let account_id = grant.account_id.clone().or_else(|| {
+        jwt_payload(&grant.access_token)?["https://api.openai.com/auth"]["chatgpt_account_id"]
+            .as_str()
+            .map(str::to_owned)
+    });
+    let mut entry = json!({
+        "type": "oauth",
+        "access": grant.access_token,
+        "refresh": "",
+        "expires": grant.expires_at,
+    });
+    if let Some(account_id) = account_id {
+        entry["accountId"] = json!(account_id);
+    }
+    entry
+}
+
+fn pi_codex_native(pi_dir: &Path) -> bool {
+    pi_entry_native(pi_dir, PI_CODEX_ENTRY)
+}
+
+fn pi_codex_managed(pi_dir: &Path) -> bool {
+    pi_entry_managed(pi_dir, PI_CODEX_ENTRY)
+}
+
+/// Pi's Claude entry (`anthropic`): Pi's own Claude Pro/Max login shape,
+/// from the `claude` grant Claude Code runs on, `refresh` EMPTY.
+const PI_CLAUDE_ENTRY: &str = "anthropic";
+
+fn pi_claude_entry(grant: &Grant) -> Value {
+    json!({
+        "type": "oauth",
+        "access": grant.access_token,
+        "refresh": "",
+        "expires": grant.expires_at,
+    })
+}
+
+/// Pi's own login under `name` (a real refresh token).
+fn pi_entry_native(pi_dir: &Path, name: &str) -> bool {
+    read_json(&pi_auth_file(pi_dir)).is_some_and(|v| has_refresh(&v[name], "refresh"))
+}
+
+/// The broker's own entry under `name` (an empty refresh token).
+fn pi_entry_managed(pi_dir: &Path, name: &str) -> bool {
+    read_json(&pi_auth_file(pi_dir)).is_some_and(|v| is_managed(&v[name], "refresh"))
+}
+
+/// Any login of Pi's own: an entry the broker didn't write.
+fn pi_native(pi_dir: &Path) -> bool {
+    let Some(Value::Object(map)) = read_json(&pi_auth_file(pi_dir)) else {
+        return false;
+    };
+    map.values().any(|entry| !is_managed(entry, "refresh"))
+}
+
+fn write_pi_codex(pi_dir: &Path, grant: &Grant) -> Result<(), String> {
+    write_pi_entry(pi_dir, PI_CODEX_ENTRY, pi_codex_entry(grant))
+}
+
+/// Put `desired` under `name` in Pi's `auth.json`, under Pi's lock; Pi's own
+/// login there, and every other entry, stays.
+fn write_pi_entry(pi_dir: &Path, name: &str, desired: Value) -> Result<(), String> {
+    update_json_store(&pi_auth_file(pi_dir), dir_lock, |map| {
+        match map.get(name) {
+            Some(entry) if !is_managed(entry, "refresh") => false,
+            Some(entry) if *entry == desired => false,
+            _ => {
+                map.insert(name.into(), desired);
+                true
+            }
+        }
+    })
+}
+
+fn clear_pi_codex(pi_dir: &Path) {
+    clear_pi_entry(pi_dir, PI_CODEX_ENTRY);
+}
+
+fn clear_pi_entry(pi_dir: &Path, name: &str) {
+    let file = pi_auth_file(pi_dir);
+    if !file.exists() {
+        return;
+    }
+    let result = update_json_store(&file, dir_lock, |map| {
+        let managed = map.get(name).is_some_and(|e| is_managed(e, "refresh"));
+        if managed {
+            map.remove(name);
+        }
+        managed
+    });
+    if let Err(error) = result {
+        tracing::warn!(%error, entry = name, "credentials: failed to clear a managed Pi login");
+    }
+}
+
+// -- Hermes -------------------------------------------------------------------
+
+fn hermes_auth_file(home: &Path) -> PathBuf {
+    home.join("auth.json")
+}
+
+/// `$HERMES_HOME/auth.lock`: the lock every Hermes writer takes.
+fn hermes_lock(home: &Path) -> PathBuf {
+    home.join("auth.lock")
+}
+
+/// `{data_dir}/cloud/hermes-shared`: Hermes' shared Nous store on Cloud,
+/// kept empty (the vault's login is the one).
+fn hermes_shared_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("cloud").join("hermes-shared")
+}
+
+/// Hermes' provider id for a vault login.
+fn hermes_id(vault: VaultProvider) -> Option<&'static str> {
+    match vault {
+        VaultProvider::Codex => Some("openai-codex"),
+        VaultProvider::Nous => Some("nous"),
+        VaultProvider::XaiOauth => Some("xai-oauth"),
+        _ => None,
+    }
+}
+
+/// A provider record's refresh token: Nous keeps it at the top, ChatGPT and
+/// xAI under `tokens`.
+fn hermes_refresh(record: &Value) -> Option<&str> {
+    record["tokens"]["refresh_token"]
+        .as_str()
+        .or_else(|| record["refresh_token"].as_str())
+}
+
+fn hermes_access(record: &Value) -> Option<&str> {
+    record["tokens"]["access_token"]
+        .as_str()
+        .or_else(|| record["access_token"].as_str())
+}
+
+fn hermes_record_of(home: &Path, vault: VaultProvider) -> Option<Value> {
+    let id = hermes_id(vault)?;
+    let auth = read_json(&hermes_auth_file(home))?;
+    let record = auth["providers"][id].clone();
+    record.is_object().then_some(record)
+}
+
+/// Hermes' own login for `vault`'s provider (a real refresh token).
+fn hermes_record_native(home: &Path, vault: VaultProvider) -> bool {
+    hermes_record_of(home, vault)
+        .is_some_and(|r| hermes_refresh(&r).is_some_and(|t| !t.trim().is_empty()))
+}
+
+/// The broker's record for `vault`'s provider (an empty refresh token).
+fn hermes_record_managed(home: &Path, vault: VaultProvider) -> bool {
+    hermes_record_of(home, vault).is_some_and(|r| hermes_refresh(&r) == Some(""))
+}
+
+/// Any login of Hermes' own: a provider record with a refresh token, or a
+/// pool entry that isn't one the broker's records (or keys) became.
+fn hermes_native(home: &Path) -> bool {
+    let Some(auth) = read_json(&hermes_auth_file(home)) else {
+        return false;
+    };
+    let records = auth["providers"]
+        .as_object()
+        .is_some_and(|p| p.values().any(|r| hermes_refresh(r).is_some_and(|t| !t.trim().is_empty())));
+    let pool = auth["credential_pool"].as_object().is_some_and(|pool| {
+        pool.values().flat_map(|rows| rows.as_array().into_iter().flatten()).any(|row| {
+            row["refresh_token"].as_str().is_some_and(|t| !t.trim().is_empty())
+                || (row["auth_type"] == "api_key"
+                    && !row["source"].as_str().is_some_and(|s| s.starts_with("env")))
+        })
+    });
+    records || pool
+}
+
+fn iso_utc(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .unwrap_or_default()
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// Hermes' provider record for a vault grant: the access token, an EMPTY
+/// refresh token, and a fresh `last_refresh` (Hermes adopts a record written
+/// under its lock only when it's newer than the one it holds).
+fn hermes_record(vault: VaultProvider, grant: &Grant, now: chrono::DateTime<chrono::Utc>) -> Option<Value> {
+    let now_iso = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let expires_in = ((grant.expires_at - now.timestamp_millis()) / 1000).max(0);
+    let setting = |key: &str| grant.settings.get(key).filter(|v| !v.is_empty()).cloned();
+    Some(match vault {
+        VaultProvider::Codex => {
+            let mut tokens = json!({
+                "access_token": grant.access_token,
+                "refresh_token": "",
+            });
+            if let Some(id_token) = grant.id_token.as_ref().filter(|t| !t.is_empty()) {
+                tokens["id_token"] = json!(id_token);
+            }
+            if let Some(account) = grant.account_id.as_ref() {
+                tokens["account_id"] = json!(account);
+            }
+            json!({ "tokens": tokens, "last_refresh": now_iso, "auth_mode": "chatgpt" })
+        }
+        VaultProvider::XaiOauth => {
+            let mut tokens = json!({
+                "access_token": grant.access_token,
+                "refresh_token": "",
+                "expires_in": expires_in,
+                "token_type": setting("token_type").unwrap_or_else(|| "Bearer".into()),
+            });
+            if let Some(id_token) = setting("id_token") {
+                tokens["id_token"] = json!(id_token);
+            }
+            let mut record = json!({
+                "tokens": tokens,
+                "last_refresh": now_iso,
+                "auth_mode": "oauth_device_code",
+            });
+            if let Some(endpoint) = setting("token_endpoint") {
+                record["discovery"] = json!({ "token_endpoint": endpoint });
+            }
+            record
+        }
+        VaultProvider::Nous => {
+            let mut record = serde_json::Map::new();
+            for (key, value) in &grant.settings {
+                if !matches!(
+                    key.as_str(),
+                    "access_token" | "refresh_token" | "expires_at" | "expires_in" | "obtained_at"
+                ) {
+                    record.insert(key.clone(), json!(value));
+                }
+            }
+            record.insert("access_token".into(), json!(grant.access_token));
+            record.insert("refresh_token".into(), json!(""));
+            record.insert("expires_at".into(), json!(iso_utc(grant.expires_at)));
+            record.insert("expires_in".into(), json!(expires_in));
+            record.insert("obtained_at".into(), json!(now_iso));
+            record
+                .entry("token_type")
+                .or_insert_with(|| json!("Bearer"));
+            Value::Object(record)
+        }
+        _ => return None,
+    })
+}
+
+/// Put the grant's record in Hermes' `auth.json` under `auth.lock`: Hermes'
+/// own login for the provider, and every other provider and pool entry,
+/// stay. Unchanged when it already holds this access token.
+fn write_hermes(
+    home: &Path,
+    vault: VaultProvider,
+    grant: &Grant,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), String> {
+    let id = hermes_id(vault).ok_or("not a Hermes login")?;
+    let record = hermes_record(vault, grant, now).ok_or("not a Hermes login")?;
+    let now_iso = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    update_json_store_at(&hermes_auth_file(home), &hermes_lock(home), flock, |map| {
+        let mut changed = false;
+        let current = map.get("providers").and_then(|p| p.get(id));
+        let native = current.is_some_and(|r| hermes_refresh(r).is_some_and(|t| !t.trim().is_empty()));
+        let fresh = current.is_some_and(|r| hermes_access(r) == Some(grant.access_token.as_str()));
+        if !native && !fresh {
+            let providers = map
+                .entry("providers")
+                .or_insert_with(|| json!({}));
+            if !providers.is_object() {
+                *providers = json!({});
+            }
+            providers[id] = record;
+            changed = true;
+        }
+        // Hermes runs on its `active_provider` (what `hermes model` and
+        // `hermes auth add` set): without one it reports no provider
+        // connected, whatever logins it holds. One that names nothing
+        // Hermes holds is no choice either.
+        let held = |name: &str| map.get("providers").and_then(|p| p.get(name)).is_some();
+        let chosen = map
+            .get("active_provider")
+            .and_then(Value::as_str)
+            .is_some_and(|name| held(name));
+        if !chosen {
+            map.insert("active_provider".into(), json!(id));
+            changed = true;
+        }
+        if changed {
+            map.entry("version").or_insert_with(|| json!(1));
+            map.insert("updated_at".into(), json!(now_iso));
+        }
+        changed
+    })
+}
+
+/// Drop the broker's record for `vault`'s provider (never Hermes' own).
+fn clear_hermes(home: &Path, vault: VaultProvider) {
+    let Some(id) = hermes_id(vault) else { return };
+    let file = hermes_auth_file(home);
+    if !file.exists() {
+        return;
+    }
+    let result = update_json_store_at(&file, &hermes_lock(home), flock, |map| {
+        let Some(providers) = map.get_mut("providers").and_then(Value::as_object_mut) else {
+            return false;
+        };
+        let managed = providers
+            .get(id)
+            .is_some_and(|r| hermes_refresh(r) == Some(""));
+        if managed {
+            providers.remove(id);
+            if map.get("active_provider").and_then(Value::as_str) == Some(id) {
+                map.remove("active_provider");
+            }
+        }
+        managed
+    });
+    if let Err(error) = result {
+        tracing::warn!(%error, provider = id, "credentials: failed to clear a managed Hermes login");
+    }
+}
+
+// -- Devin --------------------------------------------------------------------
+
+fn devin_file(devin_dir: &Path) -> PathBuf {
+    devin_dir.join("credentials.toml")
+}
+
+/// `{data_dir}/cloud/devin-credentials.sha256`: what the broker last wrote.
+fn devin_record(data_dir: &Path) -> PathBuf {
+    data_dir.join("cloud").join("devin-credentials.sha256")
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    format!("{:x}", sha2::Sha256::digest(bytes))
+}
+
+/// The file is there and isn't what the broker wrote: Devin's own login.
+fn devin_native(devin_dir: &Path, record: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(devin_file(devin_dir)) else {
+        return false;
+    };
+    std::fs::read_to_string(record)
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        != Some(sha256_hex(&bytes).as_str())
+}
+
+/// `credentials.toml` for a Devin grant: the key as `windsurf_api_key` and
+/// the grant's other (non-secret) fields as they were.
+fn devin_toml(grant: &Grant) -> Result<String, String> {
+    let mut table = toml::Table::new();
+    for (key, value) in &grant.settings {
+        if !matches!(key.as_str(), "windsurf_api_key" | "devin_api_key") {
+            table.insert(key.clone(), toml::Value::String(value.clone()));
+        }
+    }
+    table.insert(
+        "windsurf_api_key".into(),
+        toml::Value::String(grant.access_token.clone()),
+    );
+    toml::to_string(&table).map_err(|e| e.to_string())
+}
+
+fn write_devin(devin_dir: &Path, record: &Path, grant: &Grant) -> Result<(), String> {
+    if devin_native(devin_dir, record) {
+        return Ok(());
+    }
+    let text = devin_toml(grant)?;
+    let file = devin_file(devin_dir);
+    if std::fs::read(&file).ok().as_deref() == Some(text.as_bytes()) {
+        return Ok(());
+    }
+    private_dir(devin_dir).map_err(|e| e.to_string())?;
+    if let Some(dir) = record.parent() {
+        private_dir(dir).map_err(|e| e.to_string())?;
+    }
+    // The record first: a crash between the two leaves a file that reads as
+    // ours (the old one is then replaced on the next run), never the reverse.
+    write_private_atomic(record, sha256_hex(text.as_bytes()).as_bytes())
+        .map_err(|e| e.to_string())?;
+    write_private_atomic(&file, text.as_bytes()).map_err(|e| e.to_string())
+}
+
+/// Remove the file only when it's still exactly what the broker wrote.
+fn clear_devin(devin_dir: &Path, record: &Path) {
+    let file = devin_file(devin_dir);
+    if file.exists() && !devin_native(devin_dir, record) {
+        let _ = std::fs::remove_file(&file);
+        tracing::info!("credentials: removed the managed Devin login");
+    }
+    if !file.exists() {
+        let _ = std::fs::remove_file(record);
+    }
+}
+
+// -- Antigravity --------------------------------------------------------------
+
+fn antigravity_token_file(home: &Path) -> PathBuf {
+    home.join("antigravity-acp").join("acp_token.json")
+}
+
+/// Antigravity's own Google login: a token file with a refresh token (the
+/// broker writes its own with an empty one), or a business sign-in.
+fn antigravity_token_exists(home: &Path) -> bool {
+    let business = home.join("antigravity-acp").join("acp_business_token.json");
+    business.is_file()
+        || read_json(&antigravity_token_file(home))
+            .is_some_and(|token| has_refresh(&token, "refresh_token"))
+}
+
+/// Make Antigravity sign in with `GEMINI_API_KEY`.
+fn write_antigravity_key_method(home: &Path) -> Result<(), String> {
+    write_antigravity_method(home, "gemini-api-key")
+}
+
+/// `acp_token.json` for an `antigravity` grant: the access token and its
+/// expiry (naive UTC, as google-auth reads it), the client and project, and
+/// the keys a refresh would need there but EMPTY (google-auth requires them
+/// present; the vault refreshes). When `proxied` is true, writes a far-future
+/// expiry so `agy_acp_server`'s in-memory `Credentials.valid` never trips
+/// mid-turn while the loopback proxy injects fresh vault tokens on every call.
+fn antigravity_token_json(grant: &Grant, proxied: bool) -> Value {
+    let expiry = if proxied {
+        antigravity_proxy::PROXIED_TOKEN_EXPIRY.to_owned()
+    } else {
+        chrono::DateTime::from_timestamp_millis(grant.expires_at)
+            .unwrap_or_default()
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string()
+    };
+    let scopes: Vec<&str> = grant
+        .settings
+        .get("scopes")
+        .map(|s| s.split_whitespace().collect())
+        .unwrap_or_default();
+    json!({
+        "token": grant.access_token,
+        "expiry": expiry,
+        "refresh_token": "",
+        "client_id": grant.settings.get("client_id").cloned().unwrap_or_default(),
+        "client_secret": "",
+        "scopes": scopes,
+        "project_id": grant.settings.get("project_id").cloned().unwrap_or_default(),
+    })
+}
+
+/// Antigravity on the vault's Google login: its token file (unless one of
+/// Antigravity's own is there) and the personal sign-in method.
+fn write_antigravity_login(home: &Path, grant: &Grant, proxied: bool) -> Result<(), String> {
+    if antigravity_token_exists(home) {
+        return Ok(());
+    }
+    let file = antigravity_token_file(home);
+    let desired = antigravity_token_json(grant, proxied);
+    if read_json(&file).as_ref() != Some(&desired) {
+        if let Some(dir) = file.parent() {
+            private_dir(dir).map_err(|e| e.to_string())?;
+        }
+        let bytes = serde_json::to_vec_pretty(&desired).map_err(|e| e.to_string())?;
+        write_private_atomic(&file, &bytes).map_err(|e| e.to_string())?;
+    }
+    write_antigravity_method(home, "oauth-personal")
+}
+
+/// Drop the broker's token file (never one of Antigravity's own).
+fn clear_antigravity_login(home: &Path) {
+    let file = antigravity_token_file(home);
+    if read_json(&file).is_some_and(|token| is_managed(&token, "refresh_token")) {
+        let _ = std::fs::remove_file(&file);
+        tracing::info!("credentials: removed the managed Antigravity login");
+    }
+}
+
+/// `auth.type` in Antigravity's `settings.json`, set when the file is absent
+/// or plain JSON (anything else is the user's, and left alone).
+fn write_antigravity_method(home: &Path, method: &str) -> Result<(), String> {
+    let file = home.join("antigravity-acp").join("settings.json");
+    let mut value = match read_json_guarded(&file) {
+        Ok(Some(value)) => value,
+        Ok(None) => json!({}),
+        Err(()) => return Ok(()),
+    };
+    if value["auth"]["type"] == json!(method) {
+        return Ok(());
+    }
+    if !value["auth"].is_object() {
+        value["auth"] = json!({});
+    }
+    value["auth"]["type"] = json!(method);
+    if let Some(dir) = file.parent() {
+        private_dir(dir).map_err(|e| e.to_string())?;
+    }
+    let bytes = serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())?;
+    write_private_atomic(&file, &bytes).map_err(|e| e.to_string())
+}
+
+// -- Muse ---------------------------------------------------------------------
+
+/// `{data_dir}/cloud/muse-auth.sha256`: what the broker last wrote.
+fn muse_record(data_dir: &Path) -> PathBuf {
+    data_dir.join("cloud").join("muse-auth.sha256")
+}
+
+/// A file at `file` the broker didn't write (`record` holds the SHA-256 of
+/// what it did): the agent's own login.
+fn foreign_file(file: &Path, record: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(file) else {
+        return false;
+    };
+    std::fs::read_to_string(record)
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        != Some(sha256_hex(&bytes).as_str())
+}
+
+fn muse_native(file: &Path, record: &Path) -> bool {
+    foreign_file(file, record)
+}
+
+/// Every `refresh_token` string in `value`, emptied (the vault already did;
+/// the machine never writes one either way).
+fn blank_refresh_tokens(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for (key, field) in map.iter_mut() {
+                if key == "refresh_token" && field.is_string() {
+                    *field = json!("");
+                } else {
+                    blank_refresh_tokens(field);
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(blank_refresh_tokens),
+        _ => {}
+    }
+}
+
+/// Muse's `auth.json` for a `muse` grant: the document the vault holds,
+/// refresh tokens emptied.
+fn muse_document(grant: &Grant) -> Result<String, String> {
+    let raw = grant
+        .settings
+        .get("document")
+        .ok_or("the Muse grant carries no login document")?;
+    let mut document: Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+    if !document.is_object() {
+        return Err("the Muse login document isn't a JSON object".into());
+    }
+    blank_refresh_tokens(&mut document);
+    serde_json::to_string_pretty(&document).map_err(|e| e.to_string())
+}
+
+fn write_muse(file: &Path, record: &Path, grant: &Grant) -> Result<(), String> {
+    if muse_native(file, record) {
+        return Ok(());
+    }
+    let text = muse_document(grant)?;
+    if std::fs::read(file).ok().as_deref() == Some(text.as_bytes()) {
+        return Ok(());
+    }
+    if let Some(dir) = file.parent() {
+        private_dir(dir).map_err(|e| e.to_string())?;
+    }
+    if let Some(dir) = record.parent() {
+        private_dir(dir).map_err(|e| e.to_string())?;
+    }
+    // The record first, as Devin's.
+    write_private_atomic(record, sha256_hex(text.as_bytes()).as_bytes())
+        .map_err(|e| e.to_string())?;
+    write_private_atomic(file, text.as_bytes()).map_err(|e| e.to_string())
+}
+
+fn clear_muse(file: &Path, record: &Path) {
+    if file.exists() && !muse_native(file, record) {
+        let _ = std::fs::remove_file(file);
+        tracing::info!("credentials: removed the managed Muse login");
+    }
+    if !file.exists() {
+        let _ = std::fs::remove_file(record);
+    }
+}
+
+// -- OpenCode -----------------------------------------------------------------
+
+/// OpenCode's `Credential.Value` for a vault login it takes through its
+/// credential API (its harness adds the sign-in method): ChatGPT with an
+/// EMPTY refresh token; Copilot as OpenCode keeps it — the GitHub token
+/// (which doesn't rotate) in both fields, exchanged by OpenCode itself.
+fn opencode_value(vault: VaultProvider, grant: &Grant) -> Option<Value> {
+    match vault {
+        VaultProvider::Codex => {
+            let mut value = json!({
+                "type": "oauth",
+                "refresh": "",
+                "access": grant.access_token,
+                "expires": grant.expires_at,
+            });
+            let account = grant.account_id.clone().or_else(|| {
+                jwt_payload(&grant.access_token)?["https://api.openai.com/auth"]
+                    ["chatgpt_account_id"]
+                    .as_str()
+                    .map(str::to_owned)
+            });
+            if let Some(account) = account {
+                value["metadata"] = json!({ "accountID": account });
+            }
+            Some(value)
+        }
+        VaultProvider::Copilot => Some(json!({
+            "type": "oauth",
+            "refresh": grant.access_token,
+            "access": grant.access_token,
+            "expires": 0,
+        })),
+        _ => None,
+    }
+}
+
+/// `POST /vault/{orgId}/grants` reply.
+#[derive(Deserialize)]
+struct GrantsReply {
+    #[serde(default)]
+    grants: Vec<Grant>,
+    #[serde(default)]
+    missing: Vec<MissingGrant>,
+}
+
+#[derive(Deserialize)]
+struct MissingGrant {
+    provider: String,
+    #[serde(default)]
+    error: String,
+    #[serde(default)]
+    message: String,
+}
+
+impl GrantsReply {
+    /// One outcome per asked provider: its grant, why it has none, or (named
+    /// nowhere in the reply) unavailable.
+    fn outcomes(self, providers: &[VaultProvider]) -> HashMap<VaultProvider, GrantOutcome> {
+        let mut out = HashMap::new();
+        for grant in self.grants {
+            if let Some(provider) = VaultProvider::parse(&grant.provider)
+                .filter(|p| providers.contains(p))
+                .filter(|_| !grant.access_token.is_empty())
+            {
+                out.insert(provider, GrantOutcome::Granted(grant));
+            }
+        }
+        for missing in self.missing {
+            let Some(provider) = VaultProvider::parse(&missing.provider) else {
+                continue;
+            };
+            // The status a single grant would have answered with.
+            let status = match missing.error.as_str() {
+                "upstream" => 502,
+                "unavailable" => 503,
+                _ => 403,
+            };
+            let body = EdgeErrorBody {
+                error: missing.error,
+                message: missing.message,
+            };
+            out.entry(provider)
+                .or_insert_with(|| classify_grant_failure(status, &body));
+        }
+        out
+    }
+}
+
 /// Vault failure → outcome. Only transient failures (502 `upstream`, 503
 /// `unavailable`, 408/429, and the runner bearer itself being refused) keep a
 /// cached grant alive; 403 (`device_unknown`/`device_revoked`/
@@ -1097,6 +2975,80 @@ impl crate::registry::RunEnvironment for CredentialBroker {
     async fn credential(&self, harness: HarnessId, _chat_id: Option<&str>) -> Option<String> {
         CredentialBroker::credential(self, harness).await
     }
+
+    async fn record_usage(
+        &self,
+        _harness: HarnessId,
+        credential: &str,
+        windows: Vec<zeron_proto::AgentUsageWindow>,
+        plan_label: Option<String>,
+    ) {
+        CredentialBroker::report_usage(self, credential, windows, plan_label).await;
+    }
+}
+
+/// ChatGPT's usage view (`/wham/usage`), as Codex reads it.
+const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+
+/// How soon the same account's usage is reported again: the same figures
+/// within a minute, or any at all within ten seconds, aren't.
+const USAGE_REPORT_SAME: Duration = Duration::from_secs(60);
+const USAGE_REPORT_GAP: Duration = Duration::from_secs(10);
+
+impl CredentialBroker {
+    /// A run's subscription usage (`AgentEvent::PlanUsage`), kept on the edge
+    /// as its account's (`POST /runner/usage`): where a device's Cloud card
+    /// reads it when the vault can't ask the provider itself (ChatGPT turns
+    /// Cloudflare's servers away). Only a run on one account's subscription
+    /// (`credential_accounts`); best effort.
+    pub async fn report_usage(
+        &self,
+        credential: &str,
+        windows: Vec<zeron_proto::AgentUsageWindow>,
+        plan_label: Option<String>,
+    ) {
+        let Some(body) = usage_report(credential, &windows, plan_label.as_deref()) else {
+            return;
+        };
+        let account = body["accounts"].as_str().unwrap_or_default().to_owned();
+        let said = body.to_string();
+        {
+            let mut reported = self.inner.usage_reported.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some((at, last)) = reported.get(&account)
+                && (at.elapsed() < USAGE_REPORT_GAP || (*last == said && at.elapsed() < USAGE_REPORT_SAME))
+            {
+                return;
+            }
+            reported.insert(account, (Instant::now(), said));
+        }
+        let Ok(bearer) = self.inner.tokens.token().await else {
+            return;
+        };
+        let url = format!("{}/runner/usage", self.inner.identity.edge_url());
+        match self.inner.http.post(&url).bearer_auth(bearer).json(&body).send().await {
+            Ok(res) if res.status().is_success() || res.status().as_u16() == 404 => {}
+            Ok(res) => tracing::warn!(status = res.status().as_u16(), "usage report refused"),
+            Err(err) => tracing::warn!(error = %describe_http_error(err), "usage report failed"),
+        }
+    }
+}
+
+/// What [`CredentialBroker::report_usage`] sends: `{accounts, windows,
+/// planLabel?}`, for a run on exactly one account's subscription.
+fn usage_report(
+    credential: &str,
+    windows: &[zeron_proto::AgentUsageWindow],
+    plan_label: Option<&str>,
+) -> Option<Value> {
+    let account = credential_accounts(credential).filter(|a| !a.contains(','))?;
+    if windows.is_empty() {
+        return None;
+    }
+    let mut body = serde_json::json!({ "accounts": account, "windows": windows });
+    if let Some(plan) = plan_label.filter(|p| !p.is_empty()) {
+        body["planLabel"] = Value::String(plan.to_owned());
+    }
+    Some(body)
 }
 
 // ---------------------------------------------------------------------------
@@ -1268,6 +3220,18 @@ pub fn discard_managed_credentials(config: &BrokerConfig) {
         let _ = std::fs::remove_file(&hosts);
     }
     clear_managed_claude(config);
+    let agents = &config.agents;
+    clear_grok_managed(&agents.grok_home);
+    clear_pi_codex(&agents.pi_agent_dir);
+    clear_pi_entry(&agents.pi_agent_dir, PI_CLAUDE_ENTRY);
+    clear_devin(&agents.devin_dir, &devin_record(&config.data_dir));
+    for vault in [VaultProvider::Codex, VaultProvider::Nous, VaultProvider::XaiOauth] {
+        clear_hermes(&agents.hermes_home, vault);
+    }
+    if let Some(home) = &agents.antigravity_home {
+        clear_antigravity_login(home);
+    }
+    clear_muse(&agents.muse_auth_file, &muse_record(&config.data_dir));
 }
 
 /// `claudeAiOauth` for a vault grant. `refreshToken` is present and EMPTY:
@@ -1731,7 +3695,43 @@ mod tests {
             account: Some("u@example.com".into()),
             scopes: None,
             subscription_type: None,
+            settings: BTreeMap::new(),
             generation: 3,
+            slot: Some("s1".into()),
+        }
+    }
+
+    /// A run's usage goes as its one account's; a run on several (Pi on a
+    /// ChatGPT and a Claude login) or none says nothing.
+    #[test]
+    fn a_runs_usage_is_its_one_accounts() {
+        let windows = vec![zeron_proto::AgentUsageWindow { label: "5h".into(), used_fraction: 0.25, resets_at: None }];
+        let body = usage_report("codex@c1:7", &windows, Some("ChatGPT Pro")).unwrap();
+        assert_eq!(body["accounts"], "codex@c1");
+        assert_eq!(body["windows"][0]["usedFraction"], 0.25);
+        assert_eq!(body["planLabel"], "ChatGPT Pro");
+        assert!(usage_report("codex@c1:7", &[], None).is_none());
+        assert!(usage_report("claude@a1:2,codex@c1:7", &windows, None).is_none());
+        assert!(usage_report("native", &windows, None).is_none());
+        assert!(usage_report("codex:7", &windows, None).is_none(), "an older vault names no account");
+    }
+
+    /// A fingerprint names each login's account and version; the accounts
+    /// alone say whose catalog it is: the same across a token refresh (or
+    /// Antigravity's nearing expiry), another after a switch of account, and
+    /// none where it names no account.
+    #[test]
+    fn a_fingerprints_accounts_drop_their_versions() {
+        let mut g = grant("at");
+        assert_eq!(credential_part("codex", &g), "codex@s1:3");
+        g.slot = None;
+        assert_eq!(credential_part("codex", &g), "codex:3", "an older vault names no account");
+        assert_eq!(credential_accounts("pi-key@k2:4,codex@s1:7").as_deref(), Some("codex@s1,pi-key@k2"));
+        assert_eq!(credential_accounts("antigravity@a:9:expiring").as_deref(), Some("antigravity@a"));
+        assert_eq!(credential_accounts("codex@s1:8"), credential_accounts("codex@s1:3"));
+        assert_ne!(credential_accounts("codex@s2:3"), credential_accounts("codex@s1:3"));
+        for unnamed in ["codex:3", "codex@s1:3,claude:2", "native", "none", ""] {
+            assert_eq!(credential_accounts(unnamed), None, "{unnamed}");
         }
     }
 
@@ -1833,6 +3833,322 @@ mod tests {
         assert!(unavailable(429, ""));
         assert!(unavailable(401, "stale"));
         assert!(unavailable(401, "unauthorized"));
+    }
+
+    #[test]
+    fn a_batch_reply_says_per_provider_what_a_single_grant_would() {
+        let reply: GrantsReply = serde_json::from_value(json!({
+            "grants": [
+                {"provider": "xai-key", "accessToken": "k", "expiresAt": 1, "generation": 2},
+                {"provider": "openrouter-key", "accessToken": "", "expiresAt": 1},
+                {"provider": "not-asked", "accessToken": "x", "expiresAt": 1}
+            ],
+            "missing": [
+                {"provider": "gemini-key", "error": "upstream", "message": "down"},
+                {"provider": "deepseek-key", "error": "not_authorized"},
+                {"provider": "some-later-provider", "error": "not_found"}
+            ]
+        }))
+        .unwrap();
+        let out = reply.outcomes(&[
+            VaultProvider::XaiKey,
+            VaultProvider::OpenrouterKey,
+            VaultProvider::GeminiKey,
+            VaultProvider::DeepseekKey,
+        ]);
+        assert!(
+            matches!(out.get(&VaultProvider::XaiKey), Some(GrantOutcome::Granted(g)) if g.generation == 2)
+        );
+        assert!(
+            !out.contains_key(&VaultProvider::OpenrouterKey),
+            "an empty grant is no grant"
+        );
+        assert!(matches!(
+            out.get(&VaultProvider::GeminiKey),
+            Some(GrantOutcome::Unavailable(_))
+        ));
+        assert!(matches!(
+            out.get(&VaultProvider::DeepseekKey),
+            Some(GrantOutcome::NotConnected(_))
+        ));
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn agent_files_carry_the_token_never_a_refresh_token() {
+        let mut g = grant("tok");
+        g.settings = BTreeMap::from([
+            ("oidc_issuer".to_string(), "https://auth.x.ai".to_string()),
+            ("oidc_client_id".to_string(), "c1".to_string()),
+            ("refresh_token".to_string(), "must-not-leak".to_string()),
+        ]);
+        assert_eq!(grok_scope(&g).as_deref(), Some("https://auth.x.ai::c1"));
+        let entry = grok_entry(&g);
+        assert_eq!(entry["key"], "tok");
+        assert_eq!(entry["refresh_token"], "");
+        g.settings = BTreeMap::from([
+            (
+                "api_server_url".to_string(),
+                "https://server.codeium.com".to_string(),
+            ),
+            ("devin_api_key".to_string(), "old".to_string()),
+        ]);
+        let toml: toml::Table = devin_toml(&g).unwrap().parse().unwrap();
+        assert_eq!(toml["windsurf_api_key"].as_str(), Some("tok"));
+        assert!(toml.get("devin_api_key").is_none());
+        let pi = pi_codex_entry(&g);
+        assert_eq!(pi["refresh"], "");
+        assert_eq!(pi["accountId"], "acct_1");
+        assert_eq!(pi["expires"], g.expires_at);
+    }
+
+    #[test]
+    fn pis_claude_entry_runs_on_the_claude_login_and_its_own_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut g = grant("claude-access");
+        g.provider = "claude".into();
+        write_pi_entry(dir.path(), PI_CLAUDE_ENTRY, pi_claude_entry(&g)).unwrap();
+        let auth = read_json(&dir.path().join("auth.json")).unwrap();
+        assert_eq!(
+            auth["anthropic"],
+            json!({"type": "oauth", "access": "claude-access", "refresh": "", "expires": g.expires_at})
+        );
+        assert!(pi_entry_managed(dir.path(), PI_CLAUDE_ENTRY));
+        assert!(!pi_native(dir.path()), "only the broker's entry is there");
+        // Pi's own Claude login (a real refresh token) is never replaced.
+        std::fs::write(
+            dir.path().join("auth.json"),
+            r#"{"anthropic":{"type":"oauth","access":"own","refresh":"rt","expires":1}}"#,
+        )
+        .unwrap();
+        assert!(pi_entry_native(dir.path(), PI_CLAUDE_ENTRY));
+        write_pi_entry(dir.path(), PI_CLAUDE_ENTRY, pi_claude_entry(&g)).unwrap();
+        clear_pi_entry(dir.path(), PI_CLAUDE_ENTRY);
+        let auth = read_json(&dir.path().join("auth.json")).unwrap();
+        assert_eq!(auth["anthropic"]["access"], "own");
+        assert!(pi_native(dir.path()));
+        // The lock directory is gone once written.
+        assert!(!dir.path().join("auth.json.lock").exists());
+    }
+
+    #[test]
+    fn hermes_records_carry_no_refresh_token_and_a_fresh_last_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        std::fs::write(
+            home.join("auth.json"),
+            r#"{"version":1,"active_provider":"nous","providers":{"anthropic":{"tokens":{"access_token":"own","refresh_token":"own-rt"}}},"credential_pool":{"openrouter":[{"id":"x","auth_type":"api_key","source":"env:OPENROUTER_API_KEY"}]}}"#,
+        )
+        .unwrap();
+        let now = chrono::Utc::now();
+        // ChatGPT, from the codex grant.
+        write_hermes(home, VaultProvider::Codex, &grant("chatgpt-at"), now).unwrap();
+        // xAI: lifetime, endpoint and id token from the grant's settings.
+        let mut xai = grant("xai-at");
+        xai.settings = BTreeMap::from([
+            ("token_endpoint".to_string(), "https://auth.x.ai/oauth2/token".to_string()),
+            ("id_token".to_string(), "i.d.t".to_string()),
+        ]);
+        write_hermes(home, VaultProvider::XaiOauth, &xai, now).unwrap();
+        // Nous: the record's non-token fields from the settings.
+        let mut nous = grant("nous-at");
+        nous.settings = BTreeMap::from([
+            ("portal_base_url".to_string(), "https://portal.nousresearch.com".to_string()),
+            ("inference_base_url".to_string(), "https://inference-api.nousresearch.com/v1".to_string()),
+            ("client_id".to_string(), "hermes-cli".to_string()),
+            ("scope".to_string(), "inference:invoke".to_string()),
+            ("refresh_token".to_string(), "must-not-leak".to_string()),
+        ]);
+        write_hermes(home, VaultProvider::Nous, &nous, now).unwrap();
+        let auth = read_json(&home.join("auth.json")).unwrap();
+        let providers = &auth["providers"];
+        let iso = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        assert_eq!(providers["openai-codex"]["tokens"]["access_token"], "chatgpt-at");
+        assert_eq!(providers["openai-codex"]["tokens"]["refresh_token"], "");
+        assert_eq!(providers["openai-codex"]["tokens"]["account_id"], "acct_1");
+        assert_eq!(providers["openai-codex"]["last_refresh"], iso);
+        assert_eq!(providers["openai-codex"]["auth_mode"], "chatgpt");
+        assert_eq!(providers["xai-oauth"]["tokens"]["refresh_token"], "");
+        assert_eq!(providers["xai-oauth"]["tokens"]["id_token"], "i.d.t");
+        assert_eq!(
+            providers["xai-oauth"]["discovery"]["token_endpoint"],
+            "https://auth.x.ai/oauth2/token"
+        );
+        assert!(providers["xai-oauth"]["tokens"]["expires_in"].as_i64().unwrap() > 3000);
+        assert_eq!(providers["nous"]["access_token"], "nous-at");
+        assert_eq!(providers["nous"]["refresh_token"], "");
+        assert_eq!(providers["nous"]["client_id"], "hermes-cli");
+        assert_eq!(providers["nous"]["portal_base_url"], "https://portal.nousresearch.com");
+        assert!(!auth.to_string().contains("must-not-leak"));
+        // Everything of Hermes' own stays.
+        assert_eq!(providers["anthropic"]["tokens"]["refresh_token"], "own-rt");
+        // Its active provider named nothing it held: the first login written
+        // is the one Hermes runs on (without one it says none is connected).
+        assert_eq!(auth["active_provider"], "openai-codex");
+        assert_eq!(auth["credential_pool"]["openrouter"][0]["id"], "x");
+        assert_eq!(auth["updated_at"], iso);
+        assert!(hermes_record_managed(home, VaultProvider::Nous));
+        // The same token again: no write (Hermes keeps what it adopted).
+        let before = std::fs::read(home.join("auth.json")).unwrap();
+        write_hermes(home, VaultProvider::Codex, &grant("chatgpt-at"), now + chrono::Duration::minutes(5)).unwrap();
+        assert_eq!(std::fs::read(home.join("auth.json")).unwrap(), before);
+        // A native record (a real refresh token) is never replaced, and
+        // counts as Hermes' own login.
+        assert!(hermes_native(home));
+        clear_hermes(home, VaultProvider::Codex);
+        clear_hermes(home, VaultProvider::XaiOauth);
+        clear_hermes(home, VaultProvider::Nous);
+        let auth = read_json(&home.join("auth.json")).unwrap();
+        assert!(auth["providers"].get("openai-codex").is_none());
+        assert!(auth["providers"].get("nous").is_none());
+        assert!(auth.get("active_provider").is_none(), "it named a login now gone");
+        assert_eq!(auth["providers"]["anthropic"]["tokens"]["access_token"], "own");
+        // Written under Hermes' own lock file.
+        assert!(home.join("auth.lock").exists());
+    }
+
+    #[test]
+    fn a_provider_hermes_was_set_to_stays_its_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("auth.json"),
+            r#"{"active_provider":"anthropic","providers":{"anthropic":{"tokens":{"access_token":"own","refresh_token":"own-rt"}}}}"#,
+        )
+        .unwrap();
+        write_hermes(dir.path(), VaultProvider::Codex, &grant("chatgpt-at"), chrono::Utc::now()).unwrap();
+        let auth = read_json(&dir.path().join("auth.json")).unwrap();
+        assert_eq!(auth["active_provider"], "anthropic");
+        assert_eq!(auth["providers"]["openai-codex"]["tokens"]["access_token"], "chatgpt-at");
+    }
+
+    #[test]
+    fn an_env_key_hermes_pooled_isnt_its_own_login() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("auth.json"),
+            r#"{"credential_pool":{"openrouter":[{"auth_type":"api_key","source":"env:OPENROUTER_API_KEY"}]}}"#,
+        )
+        .unwrap();
+        assert!(!hermes_native(dir.path()));
+        std::fs::write(
+            dir.path().join("auth.json"),
+            r#"{"credential_pool":{"openrouter":[{"auth_type":"api_key","source":"manual"}]}}"#,
+        )
+        .unwrap();
+        assert!(hermes_native(dir.path()));
+    }
+
+    #[test]
+    fn antigravity_runs_on_an_access_token_file_with_empty_refresh_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let mut g = grant("ya29.token");
+        g.expires_at = chrono::DateTime::parse_from_rfc3339("2026-11-18T13:04:05Z")
+            .unwrap()
+            .timestamp_millis();
+        g.settings = BTreeMap::from([
+            ("client_id".to_string(), "1071.apps.googleusercontent.com".to_string()),
+            ("project_id".to_string(), "proj-1".to_string()),
+            ("scopes".to_string(), "https://www.googleapis.com/auth/cloud-platform openid".to_string()),
+        ]);
+        write_antigravity_login(home, &g, false).unwrap();
+        let token = read_json(&antigravity_token_file(home)).unwrap();
+        assert_eq!(
+            token,
+            json!({
+                "token": "ya29.token",
+                "expiry": "2026-11-18T13:04:05",
+                "refresh_token": "",
+                "client_id": "1071.apps.googleusercontent.com",
+                "client_secret": "",
+                "scopes": ["https://www.googleapis.com/auth/cloud-platform", "openid"],
+                "project_id": "proj-1",
+            })
+        );
+        write_antigravity_login(home, &g, true).unwrap();
+        let proxied_token = read_json(&antigravity_token_file(home)).unwrap();
+        assert_eq!(proxied_token["expiry"], antigravity_proxy::PROXIED_TOKEN_EXPIRY);
+        assert_eq!(proxied_token["token"], "ya29.token");
+        assert_eq!(proxied_token["refresh_token"], "");
+        let settings = read_json(&home.join("antigravity-acp/settings.json")).unwrap();
+        assert_eq!(settings["auth"]["type"], "oauth-personal");
+        // The broker's file isn't Antigravity's own login.
+        assert!(!antigravity_token_exists(home));
+        clear_antigravity_login(home);
+        assert!(!antigravity_token_file(home).exists());
+        // Antigravity's own (a refresh token) stays, and is used.
+        std::fs::write(antigravity_token_file(home), r#"{"refresh_token":"1//own"}"#).unwrap();
+        assert!(antigravity_token_exists(home));
+        write_antigravity_login(home, &g, true).unwrap();
+        clear_antigravity_login(home);
+        assert_eq!(read_json(&antigravity_token_file(home)).unwrap()["refresh_token"], "1//own");
+    }
+
+    #[test]
+    fn muse_gets_its_document_without_refresh_tokens_and_keeps_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("config/muse/auth.json");
+        let record = dir.path().join("data/cloud/muse-auth.sha256");
+        let mut g = grant("meta-at");
+        g.settings = BTreeMap::from([(
+            "document".to_string(),
+            json!({"schema_version": 3, "providers": {"meta": {
+                "mechanism": "oauth", "access_token": "meta-at", "refresh_token": "leak", "expires_at": 1_900_000_000
+            }}})
+            .to_string(),
+        )]);
+        write_muse(&file, &record, &g).unwrap();
+        let written = read_json(&file).unwrap();
+        assert_eq!(written["providers"]["meta"]["access_token"], "meta-at");
+        assert_eq!(written["providers"]["meta"]["refresh_token"], "");
+        assert_eq!(written["schema_version"], 3);
+        assert!(!muse_native(&file, &record));
+        clear_muse(&file, &record);
+        assert!(!file.exists() && !record.exists());
+        // A login Muse wrote itself stays.
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, r#"{"providers":{"meta":{"access_token":"own"}}}"#).unwrap();
+        assert!(muse_native(&file, &record));
+        write_muse(&file, &record, &g).unwrap();
+        clear_muse(&file, &record);
+        assert_eq!(read_json(&file).unwrap()["providers"]["meta"]["access_token"], "own");
+        g.settings.insert("document".into(), "[1]".into());
+        assert!(muse_document(&g).is_err());
+    }
+
+    #[test]
+    fn opencode_takes_chatgpt_with_no_refresh_token_and_copilot_as_it_keeps_it() {
+        let chatgpt = opencode_value(VaultProvider::Codex, &grant("at")).unwrap();
+        assert_eq!(chatgpt["type"], "oauth");
+        assert_eq!(chatgpt["refresh"], "");
+        assert_eq!(chatgpt["access"], "at");
+        assert_eq!(chatgpt["metadata"]["accountID"], "acct_1");
+        let copilot = opencode_value(VaultProvider::Copilot, &grant("gho_token")).unwrap();
+        assert_eq!(
+            copilot,
+            json!({"type": "oauth", "refresh": "gho_token", "access": "gho_token", "expires": 0})
+        );
+        assert!(opencode_value(VaultProvider::Grok, &grant("x")).is_none());
+    }
+
+    #[test]
+    fn grants_that_must_outlive_an_agents_own_refresh_are_asked_for_ahead() {
+        assert_eq!(run_min_validity(VaultProvider::Antigravity), ANTIGRAVITY_MIN_LIFE);
+        assert_eq!(run_min_validity(VaultProvider::XaiOauth), XAI_OAUTH_AHEAD);
+        assert_eq!(run_min_validity(VaultProvider::Codex), GRANT_SLACK);
+        assert!(refresh_ahead(VaultProvider::XaiOauth) > Duration::from_secs(3600));
+        assert_eq!(refresh_ahead(VaultProvider::Grok), REFRESH_AHEAD);
+    }
+
+    #[test]
+    fn an_antigravity_settings_file_that_isnt_json_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("antigravity-acp/settings.json");
+        write_antigravity_key_method(dir.path()).unwrap();
+        assert_eq!(read_json(&file).unwrap()["auth"]["type"], "gemini-api-key");
+        std::fs::write(&file, "{ // hjson\n auth: {type: oauth-personal} }").unwrap();
+        write_antigravity_key_method(dir.path()).unwrap();
+        assert!(std::fs::read_to_string(&file).unwrap().contains("hjson"));
     }
 
     #[test]

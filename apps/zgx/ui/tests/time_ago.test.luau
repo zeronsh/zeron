@@ -25,3 +25,34 @@ test("a row's time moves on as the clock does, with nothing else changing", func
 	expect(after:find('text "1h"', 1, true) == nil).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
+
+local DUE = "ds/status.luau::ds_status_clock_due"
+
+test("the clock moves as a corner would read otherwise, and no sooner", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1200, 900)
+	app:frames(30)
+	-- The newest corner reads "1h" ("Write the docs"): it reads "2h" within
+	-- the hour, and nothing changes before (once, every half minute).
+	local due = app:state(DUE)
+	expect(type(due)).to_be("number")
+	expect(due > os.time() + 30).to_be(true)
+	expect(due <= os.time() + 3600 + 30).to_be(true)
+end)
+
+test("corners hours old don't move the clock for most of an hour", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1200, 900)
+	app:frames(30)
+	-- Two hours on: every corner reads hours, the next a whole hour away
+	-- (once, it moved every half minute, to find nothing changed).
+	-- (As the clock's own tick moves it: what was due is done.)
+	local at = os.time() + 2 * 3600
+	app:set_state(DUE, math.huge)
+	app:set_state(CLOCK, at)
+	app:frames(5)
+	expect(corner(app)).to_contain('text "3h"')
+	local due = app:state(DUE)
+	expect(due - at >= 30 * 60).to_be(true)
+	expect(app:error()).to_be_nil()
+end)

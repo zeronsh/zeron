@@ -107,18 +107,26 @@ end
 -- Each agent's completion in the composer (Zeron's Settings → Providers,
 -- settings/completion.rs): "Use $ for skills" (`$` opens the skills; off,
 -- it's ordinary text) and "Separate / commands" (skills kept out of the `/`
--- menu; off, `/` lists them with the commands). Both on unless turned off,
--- kept by agent id.
+-- menu; off, `/` lists them with the commands). Each its agent's default
+-- unless changed, kept by agent id.
 M.skill_completion = ui.persist("settings_skill_completion", {} :: { [string]: { dollar: boolean?, separate: boolean? } })
 
 export type Completion = { dollar: boolean, separate: boolean }
 
+-- "Separate / commands" unless changed: on, but off for Codex, whose skills
+-- aren't among its commands (Claude Code's are), so `/` lists its skills
+-- beside `/compact` and `/review` as Claude Code's lists its own.
+local function separate_default(harness: string?): boolean
+	return harness ~= "codex"
+end
+
 -- An agent's completion settings (`get`: followed as they change).
 function M.completion(harness: string?): Completion
 	local one = if harness then M.skill_completion:get()[harness] else nil
+	local separate = if one and one.separate ~= nil then one.separate else separate_default(harness)
 	return {
 		dollar = not (one and one.dollar == false),
-		separate = not (one and one.separate == false),
+		separate = separate,
 	}
 end
 
@@ -130,7 +138,7 @@ function M.set_completion(harness: string, key: "dollar" | "separate", on: boole
 	if key == "dollar" then
 		one.dollar = if on then nil else false
 	else
-		one.separate = if on then nil else false
+		one.separate = if on == separate_default(harness) then nil else on
 	end
 	all[harness] = if one.dollar == nil and one.separate == nil then nil else one
 	M.skill_completion:set(all)

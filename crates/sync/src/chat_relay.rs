@@ -89,6 +89,8 @@ enum Input {
     Host(Option<String>),
     ReadQueue,
     AskPeers,
+    /// Ask the chat's host for anything this device lacks. The ticket it answers.
+    AskHost(u64),
 }
 
 #[derive(Default)]
@@ -101,6 +103,10 @@ struct Counters {
     /// Queue reads asked for and answered, for catch-up to wait on.
     queue_reads_asked: AtomicU64,
     queue_reads_done: AtomicU64,
+    /// Asks of the host ([`RelayHandle::ask_host`]), and the newest one a round
+    /// with the host has answered.
+    host_asks: AtomicU64,
+    host_answered: AtomicU64,
     /// When a peer's frame last arrived, in ms since this task began.
     last_inbound_ms: AtomicU64,
     /// When the room last came up, on the same clock.
@@ -152,6 +158,7 @@ impl RelayHandle {
             peers: HashMap::new(),
             want: None,
             round: None,
+            host_ask: 0,
             fruitless: 0,
             stalls: 0,
             exporting: HashSet::new(),
@@ -258,6 +265,25 @@ impl RelayHandle {
         let _ = self.tx.send(Input::AskPeers);
     }
 
+    /// Ask the chat's host ([`Self::set_host`]) for whatever this device lacks,
+    /// now, rather than waiting for its next announce. A frame the room lost and
+    /// an announce that went with it leave a device behind with nothing to tell
+    /// it so; a host that has since left the room isn't there to tell it either.
+    /// The room wakes a host that isn't there when it's asked for one (as when a
+    /// reader joins), and the host's join restarts the round. Returns a ticket
+    /// for [`Self::host_answered`].
+    pub fn ask_host(&self) -> u64 {
+        let ticket = self.counters.host_asks.fetch_add(1, Relaxed) + 1;
+        let _ = self.tx.send(Input::AskHost(ticket));
+        ticket
+    }
+
+    /// A round with the host that started after `ticket`'s ask has finished: this
+    /// device then held everything the host had when it answered.
+    pub fn host_answered(&self, ticket: u64) -> bool {
+        self.counters.host_answered.load(Relaxed) >= ticket
+    }
+
     pub fn room_frame(&self, frame: WireFrame) {
         let _ = self.tx.send(Input::RoomFrame(frame));
     }
@@ -294,6 +320,8 @@ struct Round {
     buf: Vec<u8>,
     /// The version it started from, to tell whether the round achieved anything.
     version: Vec<u8>,
+    /// With the host: the newest [`RelayHandle::ask_host`] it answers. 0 otherwise.
+    host_ask: u64,
 }
 
 struct Driver {
@@ -309,6 +337,9 @@ struct Driver {
     peers: HashMap<String, Vec<u8>>,
     want: Option<(String, Instant)>,
     round: Option<Round>,
+    /// The newest ask of the host. Answered once a round with the host started
+    /// after it finishes.
+    host_ask: u64,
     fruitless: u32,
     /// Stalled rounds in a row, against any peer.
     stalls: u32,
@@ -386,6 +417,8 @@ impl Driver {
                 self.queue_req_owed = false;
                 self.send_queue_req();
                 self.announce(true);
+                // An ask of the host that died with the old socket goes again.
+                self.want_host_answer(now);
             }
             Input::RoomFrame(frame) => {
                 self.counters.room_frames_received.fetch_add(1, Relaxed);
@@ -415,6 +448,33 @@ impl Driver {
                 self.fruitless = 0;
                 self.announce(true);
             }
+            Input::AskHost(ticket) => {
+                self.host_ask = self.host_ask.max(ticket);
+                self.fruitless = 0;
+                if self.host.is_none() {
+                    // Nobody named: whoever has more answers the announce.
+                    self.announce(true);
+                }
+                self.want_host_answer(now);
+            }
+        }
+    }
+
+    /// An ask of the host no round has answered yet: ask it now, unless a round
+    /// with it that started after the ask is already under way.
+    fn want_host_answer(&mut self, now: Instant) {
+        let Some(host) = self.host.clone() else {
+            return;
+        };
+        if self.host_ask <= self.counters.host_answered.load(Relaxed) {
+            return;
+        }
+        let covered = self
+            .round
+            .as_ref()
+            .is_some_and(|round| round.peer == host && round.host_ask >= self.host_ask);
+        if !covered {
+            self.want = Some((host, now));
         }
     }
 
@@ -555,12 +615,14 @@ impl Driver {
         };
         self.counters.sync_rounds.fetch_add(1, Relaxed);
         tracing::debug!(peer = %peer, room_open = self.room_open(), "chat relay: sync round");
+        let host_ask = if self.host.as_deref() == Some(peer.as_str()) { self.host_ask } else { 0 };
         self.round = Some(Round {
             peer: peer.clone(),
             last_progress: now,
             xfer: String::new(),
             buf: Vec::new(),
             version: version.clone(),
+            host_ask,
         });
         self.direct(&peer, frame_type::SYNC_REQ, json!({}), &version);
     }
@@ -698,6 +760,11 @@ impl Driver {
         let Some(round) = self.round.take() else {
             return;
         };
+        if round.host_ask > 0 {
+            self.counters.host_answered.fetch_max(round.host_ask, Relaxed);
+        }
+        // A newer ask came in while this round was under way.
+        self.want_host_answer(now);
         let version = self.sink.relay_version().unwrap_or_default();
         self.fruitless = if version == round.version { self.fruitless + 1 } else { 0 };
         if std::mem::take(&mut self.parked_queue) {

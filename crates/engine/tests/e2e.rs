@@ -38,6 +38,7 @@ fn run_request(prompt: &str) -> RunRequest {
         auto_approve: true,
         access: Default::default(),
         plan: false,
+        code_mode: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
@@ -79,6 +80,8 @@ fn mock_script() -> Vec<AgentEvent> {
             is_error: false,
             output: None,
             diff: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
             exit_code: None,
         },
         done(DoneStatus::Completed),
@@ -1336,9 +1339,11 @@ fn spawn_chip(id: &str, status: SubagentStatus) -> MessagePart {
         subagent_ref: Some(format!("{CHAT}--sub--{id}")),
         subagent_status: Some(status),
         subagent_tail: None,
+        preview_paths: Vec::new(),
         exit_code: None,
         output_truncated: false,
         output_lines: None,
+        review: None,
     }
 }
 
@@ -1612,6 +1617,7 @@ impl Harness for EchoAnswerHarness {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
         tokio::spawn(async move {
             let answers = (controls.request_input)(vec![zeron_proto::UserInputQuestion {
+                note: None,
                 id: "q1".into(),
                 header: "Pick".into(),
                 question: "Which one?".into(),
@@ -1750,6 +1756,7 @@ async fn closing_a_dead_runs_question_records_it_without_a_new_turn() {
                 id: "req-dead".into(),
                 request_id: "req-dead".into(),
                 questions: vec![zeron_proto::UserInputQuestion {
+                    note: None,
                     id: "q1".into(),
                     header: "Pick".into(),
                     question: "Which one?".into(),
@@ -1929,6 +1936,7 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
             let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
             tokio::spawn(async move {
                 let answers = (controls.request_input)(vec![zeron_proto::UserInputQuestion {
+                    note: None,
                     id: "q1".into(),
                     header: "Pick".into(),
                     question: "Which one?".into(),
@@ -2122,6 +2130,7 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
                     // (empty answers) and cancels the token — like a real CLI
                     // being torn down, the stream then ends WITHOUT a Done.
                     let _ = (controls.request_input)(vec![zeron_proto::UserInputQuestion {
+                        note: None,
                         id: "q1".into(),
                         header: "Pick".into(),
                         question: "Which one?".into(),
@@ -2271,6 +2280,7 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
             let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
             tokio::spawn(async move {
                 let question = zeron_proto::UserInputQuestion {
+                    note: None,
                     id: "q1".into(),
                     header: "Pick".into(),
                     question: "Which one?".into(),
@@ -2641,6 +2651,7 @@ async fn real_claude_sees_uploaded_image_inline() {
         auto_approve: false,
         access: Default::default(),
         plan: false,
+        code_mode: false,
         attachments: vec![path],
         resume: None,
         worktree: None,
@@ -2879,6 +2890,8 @@ async fn stale_tool_echo_after_steer_boundary_does_not_split_text() {
             is_error: false,
             output: None,
             diff: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
             exit_code: None,
         },
         AgentEvent::TextDelta { text: "two".into() },
@@ -3283,6 +3296,8 @@ async fn generated_image_is_materialized_before_publication_and_survives_reopen(
             is_error: false,
             output: None,
             diff: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
             exit_code: None,
         },
         image.clone(),
@@ -3950,6 +3965,8 @@ async fn a_commands_whole_output_is_read_from_its_hosts_journal() {
                     is_error: false,
                     output: Some(output.clone()),
                     diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                     exit_code: Some(0),
                 },
                 AgentEvent::ToolCall {
@@ -3963,6 +3980,8 @@ async fn a_commands_whole_output_is_read_from_its_hosts_journal() {
                     is_error: false,
                     output: Some("fn main() {}".into()),
                     diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                     exit_code: None,
                 },
                 done(DoneStatus::Completed),

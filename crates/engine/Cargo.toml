@@ -28,13 +28,15 @@ mlua = { version = "0.12", features = ["luau"] }
 # window. zgx-text is that alone, without zgx-gpu's renderer (no wgpu or
 # winit). Pinned, as apps/zgx is, to the zgx that makes it a crate
 # (zeronsh/zgx#2110), so the service and its windows measure alike.
-zgx = { git = "https://github.com/zeronsh/zgx", rev = "e35626b88be755b9672dafa3d844c5a4c5dee8ad", default-features = false }
-zgx-text = { git = "https://github.com/zeronsh/zgx", rev = "e35626b88be755b9672dafa3d844c5a4c5dee8ad" }
+zgx = { git = "https://github.com/zeronsh/zgx", rev = "e9055ac7d829b6d4a81ae0cd900879168e2b7f12", default-features = false }
+zgx-text = { git = "https://github.com/zeronsh/zgx", rev = "e9055ac7d829b6d4a81ae0cd900879168e2b7f12" }
 loro.workspace = true
 tokio.workspace = true
 futures.workspace = true
 zeron-term-link.workspace = true
 async-trait.workspace = true
+# Agents' Zeron MCP tools, served by the engine itself (`zeron_mcp::http`).
+zeron-mcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true
@@ -83,7 +85,6 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
-zeron-mcp.workspace = true
 zeron-harness = { workspace = true, features = ["installer-fixture"] }
 # Paused-clock tests (the 30-minute idle reaper).
 tokio = { workspace = true, features = ["test-util"] }

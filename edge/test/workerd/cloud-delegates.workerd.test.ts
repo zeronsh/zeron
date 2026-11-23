@@ -128,11 +128,13 @@ describe("Cloud delegates", () => {
     expect(deviceId).not.toBe(main.deviceId);
 
     // The edge wrote the child's row: on its new machine, under its parent,
-    // in the parent's project, with the asked-for agent.
+    // in the parent's project, with the asked-for agent (and childKind defaulting
+    // to "subagent" when an older runner omits it).
     const row = find(await rows(user), "chats", child)!;
     expect(row.fields).toMatchObject({
       deviceId,
       parentChatId: main.chatId,
+      childKind: "subagent",
       spaceId: main.spaceId,
       roomGen: 2,
       archived: false,
@@ -141,9 +143,18 @@ describe("Cloud delegates", () => {
     // Again: the same session, not a second machine.
     const again = await startChild(u, runner, child, main.chatId);
     expect(((await again.json()) as { deviceId: string }).deviceId).toBe(deviceId);
+
+    // Explicit childKind ("side") is preserved; unknown values are rejected.
+    expect((await startChild(u, runner, `bad-kind-${rand()}`, main.chatId, { childKind: "bogus" })).status).toBe(400);
+    // Free the one delegate slot so we can start a second child with childKind: "side".
+    expect((await call("DELETE", `/cloud/${u.orgId}/sessions/${child}`, runner)).status).toBe(200);
+    const side = `side-${rand()}`;
+    const startedSide = await startChild(u, runner, side, main.chatId, { childKind: "side" });
+    expect(startedSide.status, await startedSide.clone().text()).toBe(200);
+    expect(find(await rows(user), "chats", side)?.fields.childKind).toBe("side");
   });
 
-  it("sees and reaches its children, never another main chat", async () => {
+  it("sees and reaches its children and every other chat, but hosts only its own room", async () => {
     const { u, main, other, runner } = await world();
     const child = `child-${rand()}`;
     const { deviceId } = (await (await startChild(u, runner, child, main.chatId)).json()) as { deviceId: string };
@@ -151,19 +162,20 @@ describe("Cloud delegates", () => {
     const seen = await rows(runner);
     expect(find(seen, "chats", child)).toBeDefined();
     expect(find(seen, "chats", main.chatId)).toBeDefined();
-    expect(find(seen, "chats", other.chatId)).toBeUndefined();
+    expect(find(seen, "chats", other.chatId)).toBeDefined();
 
-    // Chat rooms: its child's, not the other main chat's.
+    // Chat rooms: its child's, and any other chat's.
     expect((await call("GET", `/chat2/${child}/stats`, runner)).status).toBe(200);
-    expect((await call("GET", `/chat2/${other.chatId}/stats`, runner)).status).toBe(403);
-    // Device rooms: a client link and the nudge to its child's machine only.
-    const link = await call("GET", `/device/${deviceId}/ws?role=client`, runner, undefined, { upgrade: "websocket" });
-    expect(link.status).toBe(101);
-    link.webSocket!.accept();
-    link.webSocket!.close();
+    expect((await call("GET", `/chat2/${other.chatId}/stats`, runner)).status).toBe(200);
+    // Device rooms: a client link to any machine, never the host role.
+    for (const device of [deviceId, other.deviceId]) {
+      const link = await call("GET", `/device/${device}/ws?role=client`, runner, undefined, { upgrade: "websocket" });
+      expect(link.status, device).toBe(101);
+      link.webSocket!.accept();
+      link.webSocket!.close();
+    }
     expect((await call("GET", `/device/${deviceId}/ws?role=host`, runner, undefined, { upgrade: "websocket" })).status).toBe(403);
-    expect((await call("GET", `/device/${other.deviceId}/ws?role=client`, runner, undefined, { upgrade: "websocket" })).status).toBe(403);
-    expect((await call("POST", `/device/${other.deviceId}/nudge`, runner, { chatId: other.chatId })).status).toBe(403);
+    expect((await call("GET", `/device/${other.deviceId}/ws?role=host`, runner, undefined, { upgrade: "websocket" })).status).toBe(403);
   });
 
   it("manages its children's machines, and only theirs", async () => {
@@ -204,17 +216,20 @@ describe("Cloud delegates", () => {
     expect(await grandchild.json()).toMatchObject({ error: "too_deep" });
   });
 
-  it("wakes its sleeping child when it sends to it, and nobody else's", async () => {
-    const { u, main, other, runner } = await world();
+  it("wakes a sleeping Cloud chat when it sends to it, as a person's send would", async () => {
+    const { u, main, runner } = await world();
     const child = await readyChild(u, runner, main.chatId);
     expect((await call("POST", `/cloud/${u.orgId}/sessions/${child.chatId}/sleep`, runner, {})).status).toBe(200);
     await waitForSession(u, child.chatId, "sleeping");
-    // Not a session it started: refused at the door, and nothing wakes.
-    expect((await call("POST", `/device/${other.deviceId}/nudge`, runner, { chatId: other.chatId })).status).toBe(403);
-    // Its own child: the send wakes it, as a user's send would.
     expect((await call("POST", `/device/${child.deviceId}/nudge`, runner, { chatId: child.chatId })).status).toBe(200);
     await waitForSession(u, child.chatId, "starting");
+  });
+
+  it("wakes another of the person's sleeping Cloud chats it sends to, not only its children", async () => {
+    const { u, other, runner } = await world();
     expect((await session(u, other.chatId))?.state).toBe("sleeping");
+    expect((await call("POST", `/device/${other.deviceId}/nudge`, runner, { chatId: other.chatId })).status).toBe(200);
+    await waitForSession(u, other.chatId, "starting");
   });
 
   it("wakes its sleeping parent once it stops working: finished, or waiting on an answer", async () => {
