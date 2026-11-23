@@ -65,6 +65,9 @@ pub mod keep_running;
 pub mod heap;
 pub mod managed;
 pub mod orchestration;
+pub mod resumes;
+mod restart_resume;
+mod usage_limits;
 mod hosted_models;
 mod model_catalogs;
 pub mod model_publish;
@@ -214,6 +217,8 @@ pub struct EngineCore {
     /// Orchestrators, crews, the board, asks and dumps (shared by every
     /// RPC service of this engine).
     pub orchestration: orchestration::Orchestration,
+    /// The engine's own resumes: usage limits' and the start-up one's.
+    pub resumes: resumes::Resumes,
     workspace_scope: WorkspaceScope,
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
@@ -331,7 +336,7 @@ impl EngineCore {
         )?;
         // What was at work here when the engine last stopped: its session
         // rows as stored, before anything here rewrites them (crew threads
-        // left waiting are resumed by the board's start-up pass).
+        // left waiting are resumed by the start-up resume, `restart_resume.rs`).
         let before_stop: Vec<zeron_proto::Session> = workspace
             .read_sessions()
             .unwrap_or_default()
@@ -516,7 +521,8 @@ impl EngineCore {
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
         plugins.start();
         let orchestration = orchestration::Orchestration::new(workspace.clone());
-        orchestration.set_before_stop(before_stop);
+        let resumes = resumes::Resumes::default();
+        resumes.set_before_stop(before_stop);
         Ok(Self {
             sessions,
             doc_host,
@@ -539,6 +545,7 @@ impl EngineCore {
             local_import,
             plugins,
             orchestration,
+            resumes,
             workspace_scope: profile.scope(),
             auth: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
@@ -722,7 +729,8 @@ impl EngineCore {
         if let Some(broker) = self.credentials() {
             rpc = rpc.with_credentials(broker);
         }
-        let rpc = Arc::new(rpc.with_orchestration(self.orchestration.clone()));
+        let rpc = Arc::new(rpc.with_orchestration(self.orchestration.clone()).with_resumes(self.resumes.clone()));
+        self.resumes.attach_rpc(&rpc);
         self.orchestration.attach_rpc(&rpc);
         rpc
     }

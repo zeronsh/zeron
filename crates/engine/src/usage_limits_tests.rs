@@ -318,11 +318,11 @@ async fn a_chat_a_restart_just_resumed_gets_no_second_resume_at_its_reset() {
     let mut book = LimitBook::default();
     let reset = until + TimeDelta::seconds(1);
     // A restart path sent it its "[Resumed]" a moment ago.
-    core.orchestration.note_resumed(&["plain-a".to_owned()], reset);
+    core.resumes.note_resumed(&["plain-a".to_owned()], reset);
     assert!(rpc.limits_pass(&mut book, reset).await.is_empty(), "not a second message");
     assert_eq!(resumes_sent(&core, "plain-a"), 0);
     // Still limited past the grace (that turn never started): its own resume.
-    let later = reset + TimeDelta::seconds(crate::orchestration::board_checks::RESUMED_GRACE_SECS + 1);
+    let later = reset + TimeDelta::seconds(crate::restart_resume::RESUMED_GRACE_SECS + 1);
     assert_eq!(rpc.limits_pass(&mut book, later).await, ["plain-a"]);
     assert_eq!(resumes_sent(&core, "plain-a"), 1);
     core.shutdown().await;

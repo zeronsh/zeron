@@ -964,6 +964,9 @@ pub struct EngineRpc {
     /// Orchestrators, crews, the board, asks and dumps (one per engine:
     /// `with_orchestration`; a bare assembly gets its own).
     orchestration: crate::orchestration::Orchestration,
+    /// The engine's own resumes (usage limits, the start-up one): shared
+    /// with the engine (`with_resumes`); a bare assembly gets its own.
+    resumes: crate::resumes::Resumes,
     engine_info: EngineInfo,
 }
 
@@ -1035,6 +1038,7 @@ impl EngineRpc {
             viewport_focus: Default::default(),
             plugins: None,
             orchestration,
+            resumes: Default::default(),
             engine_info,
         }
     }
@@ -1047,6 +1051,29 @@ impl EngineRpc {
 
     pub(crate) fn orchestration(&self) -> &crate::orchestration::Orchestration {
         &self.orchestration
+    }
+
+    /// Share the engine's resumes (its before-stop rows, who it resumed).
+    pub fn with_resumes(mut self, resumes: crate::resumes::Resumes) -> Self {
+        self.resumes = resumes;
+        self
+    }
+
+    pub(crate) fn resumes(&self) -> &crate::resumes::Resumes {
+        &self.resumes
+    }
+
+    /// Orchestration, for the general features that read what a chat is to
+    /// it (usage limits, the start-up resume): `None` while Orchestrators
+    /// is off, when every chat is a plain one.
+    pub(crate) fn active_orchestration(&self) -> Option<&crate::orchestration::Orchestration> {
+        Some(&self.orchestration)
+    }
+
+    /// The orchestration rows as the general features read them: empty while
+    /// Orchestrators is off.
+    pub(crate) fn orchestration_view(&self) -> zeron_proto::orchestration::OrchestrationState {
+        self.active_orchestration().map(|o| o.state()).unwrap_or_default()
     }
 
     pub(crate) fn workspace_host(&self) -> &WorkspaceHost {

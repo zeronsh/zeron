@@ -3249,11 +3249,11 @@ async fn a_crew_thread_at_work_when_the_engine_stopped_is_resumed_once() {
     let core = assemble();
     let rpc = core.rpc_service();
     let resumed_text = zeron_proto::orchestration::prompt_text::RESUMED_AFTER_RESTART;
-    let before = core.orchestration.take_before_stop();
+    let before = core.resumes.take_before_stop();
     assert!(before.iter().any(|s| s.chat_id == "geese-t1"), "found as it was when it stopped");
     assert_eq!(rpc.resume_after_restart(before), ["geese-t1"]);
     // Taken once: a second pass resumes nothing.
-    assert!(rpc.resume_after_restart(core.orchestration.take_before_stop()).is_empty());
+    assert!(rpc.resume_after_restart(core.resumes.take_before_stop()).is_empty());
     // Sent once: run (or queued behind what its host runs).
     let mut said = sent(&core, "geese-t1");
     said.extend(core.doc_host.open("geese-t1").unwrap().doc().read_queue().unwrap().into_iter().map(|q| q.text));

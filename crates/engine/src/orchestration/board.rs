@@ -58,8 +58,6 @@ const SETTLE: std::time::Duration = std::time::Duration::from_millis(150);
 /// changed without a row changing: a heartbeat going stale, a progress row
 /// growing old).
 const EVERY: std::time::Duration = std::time::Duration::from_secs(60);
-/// How long after a start the first pass runs (synced rows land first).
-const AFTER_START: std::time::Duration = std::time::Duration::from_secs(25);
 /// How long a Merged card's `git` answer is kept.
 const MERGE_CHECK_SECS: i64 = 20;
 
@@ -681,7 +679,7 @@ impl EngineRpc {
             local.insert(s.chat_id.clone());
             sessions.insert(s.chat_id.clone(), s.clone());
         }
-        let resumed = orch.resumed_since(now, TimeDelta::seconds(RESUMED_GRACE_SECS));
+        let resumed = self.resumes().resumed_since(now, TimeDelta::seconds(RESUMED_GRACE_SECS));
         let known_prs = self.known_change_requests();
         // The other devices that work places out.
         let with_places: HashSet<String> = orch
@@ -1757,8 +1755,8 @@ impl Marks {
     }
 }
 
-/// The board's loop: the start-up pass once (the chats a stop left at work
-/// resumed, then every card worked out), then a pass a moment after every
+/// The board's loop: after the start-up pass (the chats a stop left at work
+/// resumed, then every card worked out: `restart_resume.rs`), a pass a moment after every
 /// change, when a card falls due, and every [`EVERY`].
 pub(crate) fn start(orchestration: Orchestration) {
     // What changed: session rows (here and synced) by chat; cards, asks and
@@ -1809,10 +1807,9 @@ pub(crate) fn start(orchestration: Orchestration) {
         }
     });
     tokio::spawn(async move {
-        tokio::time::sleep(AFTER_START).await;
+        // (The start-up pass is the engine's start-up resume's: `restart_resume.rs`.)
         if let Some(rpc) = orchestration.rpc() {
-            let (resumed, moved) = rpc.start_up_pass().await;
-            tracing::info!(?resumed, cards = moved.len(), "board: start-up pass");
+            rpc.resumes().started_up().await;
         }
         let mut tick = tokio::time::interval(EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

@@ -6859,7 +6859,7 @@ async fn drive_run(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn session_at(status: SessionStatus, updated_at: chrono::DateTime<Utc>) -> Session {
@@ -7985,7 +7985,7 @@ mod tests {
         core.sessions.shutdown().await;
     }
 
-    fn done(status: DoneStatus) -> AgentEvent {
+    pub(crate) fn done(status: DoneStatus) -> AgentEvent {
         AgentEvent::Done {
             status,
             result: None,
@@ -8260,18 +8260,18 @@ mod tests {
         }
     }
 
-    struct WakeRig {
-        core: crate::EngineCore,
-        feed: mpsc::UnboundedSender<AgentEvent>,
-        turn: TurnControl,
-        chat: &'static str,
-        _dir: tempfile::TempDir,
+    pub(crate) struct WakeRig {
+        pub(crate) core: crate::EngineCore,
+        pub(crate) feed: mpsc::UnboundedSender<AgentEvent>,
+        pub(crate) turn: TurnControl,
+        pub(crate) chat: &'static str,
+        pub(crate) _dir: tempfile::TempDir,
     }
 
     /// A run on [`WakeHarness`] whose runtime wakes its agent (`wakes`),
     /// started and mid-turn. The grace a wait gets once its work is gone is
     /// short here (`ZERON_WAKE_GRACE_MS`, read per run).
-    async fn wake_rig(chat: &'static str, wakes: bool) -> WakeRig {
+    pub(crate) async fn wake_rig(chat: &'static str, wakes: bool) -> WakeRig {
         // SAFETY: tests only; nothing reads this but the run loop, per run.
         unsafe { std::env::set_var("ZERON_WAKE_GRACE_MS", "300") };
         let (feed, rx) = mpsc::unbounded_channel();
@@ -8301,7 +8301,7 @@ mod tests {
         WakeRig { core, feed, turn, chat, _dir: dir }
     }
 
-    fn waiting_agent(id: &str) -> zeron_proto::WaitingOn {
+    pub(crate) fn waiting_agent(id: &str) -> zeron_proto::WaitingOn {
         zeron_proto::WaitingOn {
             id: id.into(),
             kind: zeron_proto::WaitingKind::Agent,
@@ -8319,12 +8319,12 @@ mod tests {
     }
 
     /// The session as the rig's engine says it once things settle.
-    async fn settled(rig: &WakeRig) -> Session {
+    pub(crate) async fn settled(rig: &WakeRig) -> Session {
         tokio::time::sleep(std::time::Duration::from_millis(120)).await;
         rig.core.sessions.session_status(rig.chat).expect("a session row")
     }
 
-    fn waits_on(session: &Session) -> Vec<String> {
+    pub(crate) fn waits_on(session: &Session) -> Vec<String> {
         session
             .waiting
             .as_ref()
@@ -8469,124 +8469,6 @@ mod tests {
         assert!(s.waiting.is_none());
         assert!(s.last_completed_turn.is_some());
         rig.core.sessions.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn a_chat_waiting_on_its_background_work_when_the_engine_stops_is_resumed_once() {
-        use zeron_rpc::{Caller, RpcService, methods, with_caller};
-        let rig = wake_rig("chat-wait-stop", true).await;
-        // The chat as the workspace lists it (hosted here).
-        let device = rig.core.orchestration.device_id().to_owned();
-        with_caller(
-            Caller::Local,
-            rig.core.rpc_service().handle(
-                methods::MUTATE,
-                serde_json::json!({"op":"createChat","chatId":rig.chat,"deviceId":device,
-                    "config":{"harness":"mock","sandbox":"workspace-write"}}),
-            ),
-        )
-        .await
-        .unwrap();
-        // Its turn completed into a wait on its own build.
-        rig.turn.set_background(1);
-        rig.turn.set_background_agents(vec![waiting_agent("build")]);
-        rig.feed.send(done(DoneStatus::Completed)).unwrap();
-        assert_eq!(waits_on(&settled(&rig).await), ["build"]);
-        // The engine stops: the build and the wait end with it.
-        rig.core.shutdown().await;
-        let dir = rig._dir.path().to_path_buf();
-        drop(rig.core);
-
-        let core = crate::EngineCore::assemble(&dir, Arc::new(HarnessRegistry::new()), HarnessId::Mock, None).unwrap();
-        let rpc = core.rpc_service();
-        let before = core.orchestration.take_before_stop();
-        assert!(
-            before.iter().filter(|s| s.chat_id == "chat-wait-stop").all(|s| s.waiting.is_none()),
-            "its row no longer says it waited: the journal's mark does"
-        );
-        assert_eq!(rpc.resume_after_restart(before), ["chat-wait-stop"]);
-        // Once: the mark is taken.
-        assert!(rpc.resume_after_restart(core.orchestration.take_before_stop()).is_empty());
-        let handle = core.doc_host.open("chat-wait-stop").unwrap();
-        let mut said: Vec<String> = handle
-            .doc()
-            .read_commands()
-            .unwrap()
-            .into_iter()
-            .filter_map(|c| match c.payload {
-                zeron_doc::SessionCommandPayload::Run { request, .. } => Some(request.prompt),
-                _ => None,
-            })
-            .collect();
-        said.extend(handle.doc().read_queue().unwrap().into_iter().map(|q| q.text));
-        let resumed: Vec<&String> = said.iter().filter(|p| p.contains("[Resumed] The engine restarted")).collect();
-        assert_eq!(resumed.len(), 1, "{said:?}");
-        assert!(resumed[0].contains("agent build") && resumed[0].contains("run it again"), "{}", resumed[0]);
-        core.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn a_chat_whose_subagent_runs_when_the_engine_stops_is_resumed_once() {
-        use zeron_rpc::{Caller, RpcService, methods, with_caller};
-        let rig = wake_rig("chat-sub-stop", false).await;
-        let device = rig.core.orchestration.device_id().to_owned();
-        with_caller(
-            Caller::Local,
-            rig.core.rpc_service().handle(
-                methods::MUTATE,
-                serde_json::json!({"op":"createChat","chatId":rig.chat,"deviceId":device,
-                    "config":{"harness":"mock","sandbox":"workspace-write"}}),
-            ),
-        )
-        .await
-        .unwrap();
-        // The parent spawns a subagent, which streams; the parent's turn ends
-        // while it runs on.
-        rig.feed
-            .send(AgentEvent::ToolCall {
-                id: "toolu_sub1".into(),
-                call: zeron_proto::ToolCall::Unknown { name: "Agent".into(), input: None },
-            })
-            .unwrap();
-        rig.feed
-            .send(AgentEvent::Subagent {
-                parent_tool_use_id: "toolu_sub1".into(),
-                event: Box::new(AgentEvent::TextDelta { text: "looking".into() }),
-            })
-            .unwrap();
-        rig.feed.send(done(DoneStatus::Completed)).unwrap();
-        let s = settled(&rig).await;
-        assert_eq!(s.running_subagents, 1, "{s:?}");
-        // The engine stops: the subagent with it.
-        rig.core.shutdown().await;
-        let dir = rig._dir.path().to_path_buf();
-        drop(rig.core);
-
-        let core = crate::EngineCore::assemble(&dir, Arc::new(HarnessRegistry::new()), HarnessId::Mock, None).unwrap();
-        let rpc = core.rpc_service();
-        let before = core.orchestration.take_before_stop();
-        assert!(
-            before.iter().filter(|s| s.chat_id == "chat-sub-stop").all(|s| s.running_subagents == 0),
-            "its row no longer counts the subagent: the journal's mark does"
-        );
-        assert_eq!(rpc.resume_after_restart(before), ["chat-sub-stop"]);
-        assert!(rpc.resume_after_restart(core.orchestration.take_before_stop()).is_empty(), "once");
-        let handle = core.doc_host.open("chat-sub-stop").unwrap();
-        let mut said: Vec<String> = handle
-            .doc()
-            .read_commands()
-            .unwrap()
-            .into_iter()
-            .filter_map(|c| match c.payload {
-                zeron_doc::SessionCommandPayload::Run { request, .. } => Some(request.prompt),
-                _ => None,
-            })
-            .collect();
-        said.extend(handle.doc().read_queue().unwrap().into_iter().map(|q| q.text));
-        let resumed: Vec<&String> = said.iter().filter(|p| p.contains("[Resumed] The engine restarted; your subagents")).collect();
-        assert_eq!(resumed.len(), 1, "{said:?}");
-        assert!(resumed[0].contains("chat-sub-stop--sub--toolu_sub1"), "{}", resumed[0]);
-        core.shutdown().await;
     }
 
     #[tokio::test]
