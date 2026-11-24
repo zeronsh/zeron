@@ -368,6 +368,41 @@ async fn an_agent_cannot_choose_where_a_template_is_exported() {
     assert!(!path.exists());
 }
 
+/// A template installed from the store is the person's to delete (an agent
+/// could put another of its id in its place); one from a file or made here,
+/// as before. Its record says where it came from: one naming no signer (a
+/// deploy token's) too.
+#[tokio::test]
+async fn an_agent_cannot_delete_a_template_from_the_store() {
+    let f = fixture();
+    let templates = f._dir.path().join("templates");
+    std::fs::create_dir_all(templates.join(".zeron")).unwrap();
+    std::fs::write(templates.join(".zeron/zeron-template.json"), r#"{"zeron_version":"0.9.0"}"#).unwrap();
+    let install = |id: &str, kind: Option<&str>| {
+        let folder = templates.join(id);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("zeron-template.json"), json!({ "id": id, "name": id }).to_string()).unwrap();
+        if let Some(kind) = kind {
+            let record = json!({ "key": null, "version": "1.0.0", "source": { "kind": kind, "version": "1.0.0", "installed_at": 0, "store": { "id": id, "publisher": "ada", "hash": "h" } } });
+            std::fs::write(folder.join(".imported.json"), record.to_string()).unwrap();
+        }
+        folder
+    };
+    let from_store = install("midnight", Some("store"));
+    for caller in [Caller::Agent { chat: None }, Caller::Agent { chat: Some("chat-1".into()) }] {
+        let refused = with_caller(caller, call(&f.plugins, methods::DELETE_TEMPLATE, json!({ "id": " midnight " }))).await;
+        assert!(refused.as_ref().is_err_and(|e| e.contains("needs_person")), "{refused:?}");
+    }
+    assert!(from_store.exists());
+    for (id, kind) in [("mine", None), ("shared", Some("file"))] {
+        let folder = install(id, kind);
+        with_caller(Caller::Agent { chat: None }, call(&f.plugins, methods::DELETE_TEMPLATE, json!({ "id": id }))).await.unwrap();
+        assert!(!folder.exists(), "{id}");
+    }
+    call(&f.plugins, methods::DELETE_TEMPLATE, json!({ "id": "midnight" })).await.unwrap();
+    assert!(!from_store.exists(), "the person deletes it");
+}
+
 /// R29 for plugins: an agent's export goes to Zeron's plugin-exports folder,
 /// never a path of its choosing.
 #[tokio::test]

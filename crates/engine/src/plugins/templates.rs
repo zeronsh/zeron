@@ -320,7 +320,7 @@ fn official(id: &str, folder: &Path, manifest: &Manifest) -> bool {
             .strip_prefix(mark)
             .and_then(|rest| rest.strip_prefix('-'))
             .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
-    at_its_id && super::template_packages::imported(folder).is_none()
+    at_its_id && !super::template_packages::has_record(folder)
 }
 
 /// One template, as `ListTemplates` lists it.
@@ -353,7 +353,8 @@ fn entry(
         "id": id,
         "name": manifest.name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| id.to_owned()),
         "description": manifest.description.unwrap_or_default(),
-        "author": manifest.author.unwrap_or_default(),
+        // (A package's manifest doesn't say whose it is: its record does.)
+        "author": manifest.author.filter(|_| !super::template_packages::has_record(folder)).unwrap_or_default(),
         "version": manifest.version.unwrap_or_default(),
         "zeron_version": made_for,
         "builtin": builtin,

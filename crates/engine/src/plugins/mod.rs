@@ -2190,6 +2190,18 @@ impl Plugins {
                 if let Some(by) = &by {
                     tracing::info!(method, id = ?p.id, %by, "templates: asked by an agent or another device");
                 }
+                // One installed from the store is the person's to delete: an
+                // agent could put another of its id in its place.
+                if method == methods::DELETE_TEMPLATE
+                    && !Self::by_person()
+                    && let Some(folder) = p.id.as_deref().and_then(|id| templates::template_dir(&dir, id.trim()))
+                    && template_packages::source(&folder).is_some_and(|s| s.kind == install::STORE)
+                {
+                    return Err(failed(install::failure(
+                        install::reason::NEEDS_PERSON,
+                        "That template was installed from the store: only the person deletes it, in Settings → Templates",
+                    )));
+                }
                 let method = method.to_owned();
                 let reply = tokio::task::spawn_blocking(move || {
                     let id = p.id.as_deref().map(str::trim).filter(|id| !id.is_empty());
