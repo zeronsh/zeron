@@ -39,85 +39,15 @@ pub const BUILTIN: &str = "zeron";
 /// is stamped with, and what a template made from it records.
 pub const ZERON_VERSION: &str = env!("ZERON_VERSION");
 
-/// Paths no template replaces: allowing plugins, your account and signing
-/// in, and the aliases every module resolves by. A template's copies of them
-/// are left out.
-pub const NEVER_TEMPLATED: &[&str] = &["screens/plugins/", "screens/templates/", "account/", ".luaurc"];
-
-/// What of `ui/` isn't the main window's interface: the gallery and its
-/// demos, tests and their fixtures, the intro, the consent windows (each
-/// its own host, always Zeron's own), and the official templates' files
-/// (`official`: each installed as a template of its own).
-fn not_the_app(rel: &str) -> bool {
-    let first = rel.split('/').next().unwrap_or(rel);
-    matches!(first, "demos" | "tests" | ".zgx") || super::official::source_file(rel)
-        || matches!(rel, "gallery.luau" | "intro.luau" | "consent.luau" | "template_consent.luau" | "store_consent.luau")
-        || (!rel.contains('/') && rel.ends_with("_fixture.luau"))
-}
-
-/// Compared as a case-insensitive filesystem (macOS's, Windows') names
-/// files (`zeron_plugin_guard::path::fold`): `Screens/Plugins/page.luau`,
-/// `ſcreens/plugins/page.luau` (U+017F folds to s) and
-/// `screens/plugins./page.luau` are Zeron's plugins page there too.
-pub fn never_templated(rel: &str) -> bool {
-    use zeron_plugin_guard::path::fold;
-    let rel = fold(rel);
-    NEVER_TEMPLATED.iter().any(|p| {
-        let p = fold(p);
-        rel == p || rel.starts_with(&format!("{p}/"))
-    })
-}
-
-/// A template's own files that aren't part of its interface: its manifest
-/// and its listing. None is ever loaded: the engine takes a change to the
-/// listing as no change of code, so such an update asks nothing.
-pub fn template_meta(rel: &str) -> bool {
-    rel == "zeron-template.json" || listing_file(rel)
-}
-
-/// Whether `rel` is one of a template's listing files: the engine's
-/// `listing::template_listing_file`, exactly.
-fn listing_file(rel: &str) -> bool {
-    match rel.strip_prefix("screenshots/") {
-        Some(rest) => rest.rsplit_once('.').is_some_and(|(_, ext)| ["png", "jpg", "jpeg"].contains(&ext.to_ascii_lowercase().as_str())),
-        None => matches!(rel, "README.md" | "CHANGELOG.md" | "preview.png"),
-    }
-}
-
-/// Whether `rel` is under `screenshots/`, as a disk that folds names has it,
-/// and isn't a listing file (the engine's `template_stray_screenshot`): it
-/// counts as the template's code, so a change to it asks, and is never laid
-/// down or run.
-fn stray_screenshot(rel: &str) -> bool {
-    !listing_file(rel) && zeron_plugin_guard::path::fold(rel).strip_prefix("screenshots").is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
-}
-
-/// Whether any part of `rel` could be a Windows short name (`TEMPLA~1`,
-/// `LUAURC~1`): a `~` with a digit after it. Windows opens the file that has
-/// it, so one laid down as `screens/TEMPLA~1/page.luau` is
-/// `screens/templates/page.luau` there. Never laid down, on any system.
-/// (Still counted as the template's code: what was kept is kept.)
-fn short_name(rel: &str) -> bool {
-    rel.as_bytes().windows(2).any(|w| w[0] == b'~' && w[1].is_ascii_digit())
-}
+/// Which of a template's files are what: the engine's and the app's one answer
+/// (zeron-plugin-guard `template`).
+pub use zeron_plugin_guard::template::{meta as template_meta, plain, protected as never_templated};
+use zeron_plugin_guard::template::{composed, of_the_app};
 
 pub fn hash(bytes: &[u8]) -> String {
     let mut h = DefaultHasher::new();
     bytes.hash(&mut h);
     format!("{:016x}", h.finish())
-}
-
-/// Whether `rel` is a plain relative path: normal parts, none a dotfile but
-/// `.luaurc` at the top.
-pub fn plain(rel: &str) -> bool {
-    !rel.is_empty()
-        && Path::new(rel).components().all(|c| match c {
-            Component::Normal(name) => {
-                let name = name.to_string_lossy();
-                !name.starts_with('.') || rel == ".luaurc"
-            }
-            _ => false,
-        })
 }
 
 /// Every regular file under `dir` (no links followed), by its path from `dir`,
@@ -248,7 +178,7 @@ fn in_parallel<T: Sync>(jobs: &[T], work: impl Fn(&T) -> std::io::Result<()> + S
 /// (`official::install`). How many of `.zeron`'s files changed.
 pub fn sync_zeron(ui: &Path, templates: &Path) -> std::io::Result<usize> {
     let dir = templates.join(ZERON);
-    let want = files(ui, |rel| !not_the_app(rel));
+    let want = files(ui, of_the_app);
     // Each file's hash from the bytes the copy read (`ui/` read once).
     let hashes = std::sync::Mutex::new(BTreeMap::new());
     let changed = mirror_reading(&dir, &want, |rel| rel == "zeron-template.json", |rel, bytes| {
@@ -326,8 +256,8 @@ pub fn plan(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_failed:
         // stands in for Zeron's `app.luau` (one file on a case-insensitive
         // filesystem), never both written, whichever sorts last winning.
         let mut spelled: BTreeMap<String, String> = want.keys().map(|rel| (zeron_plugin_guard::path::fold(rel), rel.clone())).collect();
-        for (rel, path) in files(&templates.join(id), |rel| !template_meta(rel)) {
-            if never_templated(&rel) || stray_screenshot(&rel) || short_name(&rel) || failed.contains(&rel) {
+        for (rel, path) in files(&templates.join(id), |_| true) {
+            if !composed(&rel) || failed.contains(&rel) {
                 continue;
             }
             if let Some(zeron_s) = spelled.insert(zeron_plugin_guard::path::fold(&rel), rel.clone())
@@ -512,7 +442,7 @@ pub fn ui_stamp(ui: &Path) -> String {
 
 /// What of `ui/` a sync copies: the app's files, and the official templates'.
 fn synced(rel: &str) -> bool {
-    !not_the_app(rel) || super::official::source_file(rel)
+    of_the_app(rel) || super::official::source_file(rel)
 }
 
 /// What a look found, off the UI thread: `.zeron` brought up to date (only
@@ -946,13 +876,13 @@ mod tests {
         let listing = ["README.md", "CHANGELOG.md", "preview.png", "screenshots/shot.png", "screenshots/shot.JPG", "screenshots/deep/shot.jpeg"];
         let before = digest(&dir);
         for rel in listing {
-            assert!(template_meta(rel) && !stray_screenshot(rel), "{rel}");
+            assert!(template_meta(rel) && !zeron_plugin_guard::template::stray_screenshot(rel), "{rel}");
             write(&dir, rel, "return 1");
         }
         assert_eq!(digest(&dir), before, "no part of what's kept");
         let strays = ["screenshots/app.luau", "screenshots/deep/run.luau", "screenshots/png", "screenshots", "Screenshots/shot.png", "SCREENSHOTS/app.luau", "\u{17f}creenshots/app.luau", "screenshots./app.luau"];
         for rel in strays {
-            assert!(!template_meta(rel) && stray_screenshot(rel), "{rel}");
+            assert!(!template_meta(rel) && zeron_plugin_guard::template::stray_screenshot(rel), "{rel}");
         }
         write(&dir, "screenshots/app.luau", "return 1");
         write(&dir, "screenshots/deep/run.luau", "return 1");
@@ -963,7 +893,7 @@ mod tests {
             assert!(!overlay.from_template.contains(*rel), "{rel}");
         }
         for rel in ["screenshots.luau", "screens/screenshots/app.luau", "changelog.md", "docs/CHANGELOG.md"] {
-            assert!(!template_meta(rel) && !stray_screenshot(rel), "{rel}");
+            assert!(!template_meta(rel) && !zeron_plugin_guard::template::stray_screenshot(rel), "{rel}");
         }
         write(&dir, "screenshots.luau", "return 2");
         compose(&t, "t", &BTreeSet::new(), false).unwrap();
@@ -1005,7 +935,7 @@ mod tests {
         let short = ["screens/TEMPLA~1/page.luau", "SCREEN~2/plugins/page.luau", "LUAURC~1", "account~0/x.luau", "screens/extra~1.luau", "screens/a~12b.luau"];
         for rel in short {
             write(&dir, rel, "-- short");
-            assert!(short_name(rel), "{rel}");
+            assert!(zeron_plugin_guard::template::short_name(rel), "{rel}");
         }
         // Kept with them, as an earlier Zeron did (its digest counts them).
         approve_at(&approvals, "t", &digest(&dir)).unwrap();
@@ -1018,7 +948,7 @@ mod tests {
         write(&dir, short[0], "-- shorT");
         assert!(!trusted_at(&t, "t", &approvals));
         for rel in ["screens/a~b.luau", "screens/a~.luau", "screens/~.luau", "screens/a1~.luau"] {
-            assert!(!short_name(rel), "{rel}");
+            assert!(!zeron_plugin_guard::template::short_name(rel), "{rel}");
         }
     }
 

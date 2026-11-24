@@ -65,7 +65,7 @@ pub fn find(id: &str) -> Option<Official> {
 
 /// Whether `rel` (from `ui/`) is one of the official templates' files.
 pub fn source_file(rel: &str) -> bool {
-    rel.strip_prefix(SOURCE).is_some_and(|r| r.starts_with('/'))
+    zeron_plugin_guard::template::official_source(rel)
 }
 
 fn source(ui: &Path, o: &Official) -> PathBuf {

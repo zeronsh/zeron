@@ -298,23 +298,17 @@ fn counted_before(rel: &str) -> bool {
 /// if that differs. Both of the same bytes, each file read once: a file
 /// changed meanwhile is in both or in neither.
 fn digests(template: &Path) -> (String, Option<String>) {
-    let (mut now, mut before, mut differ) = (Sha256::new(), Sha256::new(), false);
+    use zeron_plugin_guard::template::{Counting, counted};
+    let (mut now, mut before, mut differ) = (Counting::default(), Counting::default(), false);
     for (rel, path) in live::files(template, counted_before) {
         let bytes = std::fs::read(&path).unwrap_or_default();
-        let each = |h: &mut Sha256| {
-            h.update((rel.len() as u64).to_le_bytes());
-            h.update(rel.as_bytes());
-            h.update((bytes.len() as u64).to_le_bytes());
-            h.update(&bytes);
-        };
-        each(&mut before);
-        match live::template_meta(&rel) {
-            true => differ = true,
-            false => each(&mut now),
+        before.add(&rel, &bytes);
+        match counted(&rel) {
+            true => now.add(&rel, &bytes),
+            false => differ = true,
         }
     }
-    let hex = |h: Sha256| h.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>();
-    (hex(now), differ.then(|| hex(before)))
+    (now.finish(), differ.then(|| before.finish()))
 }
 
 /// Where what you kept is recorded: the app's own data folder.

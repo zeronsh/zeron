@@ -109,7 +109,7 @@ fn keep_item(id: &str) -> Option<Json> {
     }
     let t = super::live::installed(&root).into_iter().find(|t| t.id == id)?;
     let dir = root.join(id);
-    let files = super::live::files(&dir, |rel| !super::live::template_meta(rel) && !super::live::never_templated(rel)).len();
+    let files = super::live::files(&dir, zeron_plugin_guard::template::counted).len();
     let author = match &t.imported {
         Some(imported) => imported["author"].clone(),
         None => json!({ "kind": "unknown", "reason": "Made on this device, by you or an agent." }),
