@@ -100,6 +100,36 @@ async fn run_to_end(
     .expect("run finished in time")
 }
 
+/// `/clear` streams nothing of its own: the chat still gets a reply saying
+/// the context was cleared, then the turn ends under the new session.
+#[tokio::test]
+async fn a_clear_command_replies_that_the_context_was_cleared() {
+    let (controls, _steer, _token) = controls("A");
+    let events = run_to_end(&harness(), request("scenario:clear"), controls).await;
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(text.starts_with("Context cleared."), "{events:?}");
+    assert!(events.contains(&AgentEvent::ContextUsage {
+        tokens: Some(0),
+        window: None
+    }));
+    assert_eq!(
+        events.last(),
+        Some(&AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: Some(String::new()),
+            error: None,
+            session_id: Some("sess-cleared".into()),
+        }),
+        "{events:?}"
+    );
+}
+
 #[tokio::test]
 async fn happy_path_normalizes_events_and_tags_subagents() {
     let (controls, _steer, _token) = controls("A");

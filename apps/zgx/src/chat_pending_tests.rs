@@ -166,6 +166,39 @@ fn a_saved_first_prompt_stays_visible_after_the_sending_indicator_expires() {
     assert!(!view.pending.borrow().contains_key("new-chat"));
 }
 
+/// A command the agent runs itself (Claude's `/clear`) ends its turn within
+/// a second and writes no reply: the prompt must not read "Sending…" on,
+/// with nothing left to repaint it once the grace runs out.
+#[test]
+fn a_prompt_whose_turn_ended_without_a_reply_is_not_sending() {
+    let (_app, view, _sending) = pending_chat();
+    view.open_chat(Some("other-chat".into()));
+    view.open_chat(Some("new-chat".into()));
+    let now = now_seconds();
+    view.heard_frame(json!({ "reset": [{
+        "id": "first-message", "role": "user",
+        "createdAt": now * 1000,
+        "parts": [{ "id": "text", "kind": "text", "text": "/clear" }]
+    }] }));
+    assert_eq!(messages(&view)[0]["waiting"], "sending");
+
+    // An earlier turn's end says nothing about this prompt.
+    let iso = crate::sessions::rfc3339;
+    let idle = |finished: i64| {
+        json!({ "chatId": "new-chat", "deviceId": "d", "status": "idle", "updatedAt": iso(now),
+            "lastTurnOutcome": { "status": "completed", "finishedAt": iso(finished) } })
+    };
+    CHATS.with(|chats| chats.sessions.borrow_mut().insert("new-chat".into(), idle(now - 30)));
+    view.publish_messages();
+    assert_eq!(messages(&view)[0]["waiting"], "sending");
+
+    // Its own turn ended, with no reply row: nothing is on its way.
+    CHATS.with(|chats| chats.sessions.borrow_mut().insert("new-chat".into(), idle(now)));
+    view.publish_messages();
+    assert_eq!(messages(&view)[0]["text"], "/clear");
+    assert!(messages(&view)[0]["waiting"].is_null());
+}
+
 fn held_send(id: &str, failure: Option<&str>) -> Json {
     json!({
         "id": format!("send-{id}"),

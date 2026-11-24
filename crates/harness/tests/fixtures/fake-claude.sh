@@ -40,6 +40,21 @@ case "$first" in
   emit '{"type":"result","subtype":"success","result":"echoed","usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-command-echo"}'
   ;;
 
+*scenario:clear*)
+  # `/clear` as CLI 2.1.331 plays it with Zeron's flags: the lifecycle, a
+  # reset, the new conversation's init and the command's replay, then an
+  # empty `local_command` result under the new session id.
+  fid=$(uuid_of "$first")
+  emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$fid\",\"state\":\"queued\"}"
+  emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$fid\",\"state\":\"started\"}"
+  emit '{"type":"conversation_reset","new_conversation_id":"sess-cleared","trigger":"clear","session_id":"sess-old"}'
+  emit '{"type":"system","subtype":"background_tasks_changed","tasks":[],"session_id":"sess-old"}'
+  emit '{"type":"system","subtype":"init","model":"claude-test","cwd":"/tmp","tools":[],"session_id":"sess-cleared"}'
+  emit "{\"type\":\"user\",\"uuid\":\"$fid\",\"isReplay\":true,\"session_id\":\"sess-cleared\",\"message\":{\"role\":\"user\",\"content\":\"<command-name>/clear</command-name>\"}}"
+  emit '{"type":"result","subtype":"success","is_error":false,"result":"","local_command":"clear","usage":{"input_tokens":0,"output_tokens":0},"modelUsage":{},"session_id":"sess-cleared"}'
+  emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$fid\",\"state\":\"completed\"}"
+  ;;
+
 *scenario:title*)
   tools_off=false
   system_set=false
