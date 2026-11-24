@@ -177,3 +177,19 @@ test("composer geometry: a target differs only where a view or the motion reads 
 	expect(Layout.same_target(a, Layout.calculate(input({ expanded = true }), false))).to_be(false)
 	expect(Layout.same_target(a, Layout.calculate(input({ control_corner = 30 }), false))).to_be(false)
 end)
+
+test("composer geometry: compact text box fits taller line heights without clipping", function()
+	local tall = Layout.calculate(input({
+		sample = { unwrapped_width = 80, wrapped_height = 28, line_height = 28 },
+	}), false)
+	expect(tall.mode).to_be("compact")
+	expect(tall.text.height).to_be(28)
+	expect(tall.text.top).to_be(9.5)
+	expect(tall.text.top + tall.text.height <= tall.height - Layout.BORDER * 2).to_be(true)
+	-- Extreme line heights still stay inside the compact pill envelope.
+	local huge = Layout.calculate(input({
+		sample = { unwrapped_width = 80, wrapped_height = 60, line_height = 60 },
+	}), false)
+	expect(huge.text.height).to_be(47)
+	expect(huge.text.top).to_be(0)
+end)

@@ -34,6 +34,7 @@ local LinkMenu = require("@app/screens/chat/link_menu")
 local boundary = require("@app/screens/shell/boundary")
 local Quote = require("@ds/quote")
 local Draft = require("@ds/draft_text")
+local ComposerAtoms = require("@ds/composer_atoms")
 -- (The chat page's places in its chats, which a split's panes share.)
 local Shared = require("@app/screens/chat/shared")
 local Asks = require("@app/screens/chat/asks")
@@ -256,7 +257,7 @@ export type Footer = { access: boolean?, place: boolean? }
 -- `keeps`: a mirror with no first placement (the Control room's Capture,
 -- a bar now): it keeps the chat's picks itself.
 export type Form = { mirror: boolean?, keeps: boolean?, bare: boolean?, expanded: boolean?, on_escape: (() -> boolean)?, on_focus: ((focused: boolean) -> ())? }
-local function composer(chat: string, view: any, name: string, focus: State<number>, open_model: State<number>, split: boolean?, focused: (() -> boolean)?, own: boolean?, take: Take?, placeholder: string?, footer: Footer?, form: Form?): Node
+local function composer(chat: string, view: any, name: string, focus: State<number>, open_model: State<number>, split: boolean?, focused: (() -> boolean)?, own: boolean?, take: Take?, placeholder: string?, footer: Footer?, form: Form?, own_draft: State<string>?, own_atoms: State<{ ComposerAtoms.AtomEntry }>?, dock_target: State<number>?): Node
 	local mirror = form ~= nil and form.mirror == true
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
 	-- reload finds it as it was; a passage quoted from its transcript lands
@@ -265,7 +266,8 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	-- page's own draft for its chat, as that keeps it while another chat
 	-- is shown (screens/chat/shared's drafts), so focused, the chat page's
 	-- composer goes on with the same words.)
-	local draft = ui.state(if split then `chat_split_draft_{chat}` else `chat_lane_draft_{chat}`, "")
+	local draft = if not split and own_draft then own_draft else ui.state(if split then `chat_split_draft_{chat}` else `chat_lane_draft_{chat}`, "")
+	local atoms = if not split and own_atoms then own_atoms else ui.state(if split then `chat_split_atoms_{chat}` else `chat_lane_atoms_{chat}`, {} :: { ComposerAtoms.AtomEntry })
 	-- Its draft's chips: one draft's per chat (screens/chat/shared), wherever
 	-- it's kept. (A split's pane shows the chat page's.)
 	local carried = ui.use_state({} :: { any })
@@ -291,6 +293,12 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	-- A chip taken off its draft, wherever the draft is now.
 	local function remove_carried(cid: string)
 		Shared.remove_cargo_of(chat, cid)
+		if not split then
+			local next_text, next_atoms, changed = ComposerAtoms.remove_by_cargo(draft:peek(), ComposerAtoms.live(atoms), cid)
+			if changed then
+				ComposerAtoms.apply(draft, atoms, next_text, next_atoms)
+			end
+		end
 	end
 	-- The options picked in a question its chat asks. (A split's pane: its
 	-- chat's draft's, below. Else kept by the chat, as its draft is.)
@@ -318,9 +326,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 				return
 			end
 			local d = Shared.draft_of(chat)
-			if size ~= known or draft:peek() ~= d.text then
+			if size ~= known or draft:peek() ~= d.text or #ComposerAtoms.live(atoms) ~= #d.atoms then
 				pulled, known = size, size
-				draft:set(d.text)
+				ComposerAtoms.apply(draft, atoms, d.text, d.atoms)
 			end
 			chosen:set(d.chosen)
 		end)
@@ -394,12 +402,13 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	}
 	-- A queued message edited in its composer. (A split's pane: a press
 	-- focuses it, the window's composer doing this.)
-	local editing = ui.state(`chat_lane_editing_{chat}`, nil :: { item: string, aside: string, aside_cargo: { any }? }?)
+	local editing = ui.state(`chat_lane_editing_{chat}`, nil :: { item: string, aside: string, aside_cargo: { any }?, aside_atoms: { any }? }?)
 	local edits = Asks.queue_edits {
 		id = function(): string?
 			return chat
 		end,
 		text = draft,
+		atoms = atoms,
 		editing = editing,
 		focus = function()
 			focus:add(1)
@@ -428,7 +437,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 				if row.id == e.item and not row.editing then
 					ui.batch(function()
 						editing:set(nil)
-						draft:set(e.aside)
+						ComposerAtoms.apply(draft, atoms, e.aside, e.aside_atoms or {})
 						if e.aside_cargo then
 							Shared.set_cargo_of(chat, e.aside_cargo)
 						end
@@ -810,7 +819,15 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	end, name)
 	local p: { [string]: any } = {
 		dictation = dictation,
+		on_sizes = if dock_target
+			then function(sizes: ds.ComposerSizes)
+				if math.abs(dock_target:peek() - sizes.target) > 0.01 then
+					dock_target:set(sizes.target)
+				end
+			end
+			else nil,
 		value = draft,
+		atoms = atoms,
 		snap = if split then snap else nil,
 		-- (Its transcript's "Jump to latest", while it shows: its trays'
 		-- pill moves aside, the two a centred pair. By the lane's name, its
@@ -822,6 +839,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		cargo = carried,
 		-- (Its chips' × under the pointer, as the chat page's.)
 		on_remove_cargo = remove_carried,
+		cargo_chip = Carried.chip_spec,
 		-- (What's dropped on it is its tab's to take, or a split pane's card,
 		-- under their own overlays.)
 		drop_overlay = false,
@@ -843,7 +861,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			else function(): boolean
 				store.paste_image():after(function(path: string?)
 					if type(path) == "string" and path ~= "" then
-						Shared.attach_files({ { name = "image.png", path = path } }, chat)
+						Shared.attach_pasted_image(path, chat)
 						focus:add(1)
 					end
 				end, function() end)
@@ -957,13 +975,19 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			-- A draft that is only one of Zeron's own commands runs it.
 			local command = if completions then completions.command_of(draft:peek()) else nil
 			if command then
-				draft:set("")
+				ui.batch(function()
+					draft:set("")
+					atoms:set({})
+				end)
 				run_command(command)
 				return
 			end
-			-- (The passages it mentions, each in full.)
+			-- (Encode inline chips first so atom offsets match the raw draft,
+			-- then expand any quoted passages.)
 			local said_quotes = quotes:peek()
-			local words = string.match(Quote.expand(text, Quote.kept(text, said_quotes)), "^%s*(.-)%s*$") or ""
+			local said_atoms = ComposerAtoms.live(atoms)
+			local encoded = ComposerAtoms.encode(text, said_atoms)
+			local words = string.match(Quote.expand(encoded, Quote.kept(encoded, said_quotes)), "^%s*(.-)%s*$") or ""
 			if words == "" and #carried:peek() == 0 then
 				return
 			end
@@ -975,6 +999,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			end
 			ui.batch(function()
 				draft:set("")
+				atoms:set({})
 				quotes:set({})
 			end)
 			notice:set(nil)
@@ -1000,7 +1025,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 				end
 				take(prompt, carry, picks()):after(function() end, function(err: any)
 					ui.batch(function()
-						draft:set(text)
+						ComposerAtoms.apply(draft, atoms, text, said_atoms)
 						quotes:set(said_quotes)
 					end)
 					Shared.restore_cargo_of(chat, chips)
@@ -1017,7 +1042,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			req.appshots = Appshots.of_cargo(chips)
 			local function failed(err: any)
 				ui.batch(function()
-					draft:set(text)
+					ComposerAtoms.apply(draft, atoms, text, said_atoms)
 					quotes:set(said_quotes)
 				end)
 				Shared.restore_cargo_of(chat, chips)
@@ -1528,7 +1553,7 @@ M.DropZone = ui.component(function(props: { slot: string, chat: () -> string?, f
 		end
 		local zone, carrying, carrying_session, carrying_ref = Shared.own_drop_zone(zone_name, id, function()
 			focus:add(1)
-		end, props.refs)
+		end, nil, props.refs)
 		for k, v in zone do
 			node[k] = v
 		end
@@ -1576,11 +1601,13 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 			finders[slot], pickers[slot] = nil, nil
 		end
 	end)
+	local lane_draft = ui.state(`chat_lane_draft_{chat}`, "")
+	local lane_atoms = ui.state(`chat_lane_atoms_{chat}`, {} :: { ComposerAtoms.AtomEntry })
 	local zone, carrying, carrying_session = nil :: any, nil :: any, nil :: any
 	if tab.kind == "side_chat" and data.split ~= true then
 		zone, carrying, carrying_session = Shared.own_drop_zone(`lane.{slot}`, chat, function()
 			focus:add(1)
-		end)
+		end, { text = lane_draft, atoms = lane_atoms })
 	end
 	-- Watched once there's a chat to watch, while its tab is open: the
 	-- panel lets it go as the tab closes. (A reload asks for the same chat
@@ -1665,9 +1692,12 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		return ever
 	end)
 	local dock_h = M.dock_height(slot)
+	local dock_target = ui.state(`chat_lane_dock_target_{slot}`, Dock.REST)
 	-- (A split's pane, focused: the window's composer stands at its foot.)
 	local room = Dock.room(function(): number
 		return if split and focused_now() then Shared.dock_h:get() else dock_h:get()
+	end, function(): number
+		return if split and focused_now() then Shared.dock_target:get() else dock_target:get()
 	end)
 	local function lane_session(): any
 		local s = view.session:get()
@@ -1768,6 +1798,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		offset = offset,
 		keep = anchor,
 		foot = if tab.kind == "read" then data.foot elseif tab.kind == "subagent" then nil else room.foot,
+		foot_target = if reading then nil else room.foot_target,
 		-- Its "Jump to latest" and the pill of the composer at its foot, a
 		-- centred pair: its own composer's, or, a split's focused pane, the
 		-- window's (screens/chat/shared's `pill_width_of`).
@@ -1935,7 +1966,7 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 					hidden = function(): boolean
 						return split and focused_now()
 					end,
-					Dock.Dock { height = dock_h, composer = composer(chat, view, `lane.{slot}`, focus, open_model, data.split == true, if split then focused_now else nil, data.own == true), id = `lane-composer-{slot}` },
+					Dock.Dock { height = dock_h, composer = composer(chat, view, `lane.{slot}`, focus, open_model, data.split == true, if split then focused_now else nil, data.own == true, nil, nil, nil, nil, lane_draft, lane_atoms, dock_target), id = `lane-composer-{slot}` },
 				},
 			}
 			if zone then

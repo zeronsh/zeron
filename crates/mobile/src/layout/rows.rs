@@ -629,7 +629,10 @@ impl RowBuilder {
         let chipped = |path: &str| mentions.iter().any(|mention| mention.names_attachment(path));
         let previews: Vec<(u32, String)> = mentions
             .iter()
-            .filter(|mention| mention.is_image)
+            .filter(|mention| {
+                mention.is_image
+                    || zeron_proto::attachment_mentions::is_image_path(&mention.label)
+            })
             .filter_map(|mention| {
                 let image = parsed.images.iter().find(|image| mention.names_attachment(&image.path))?;
                 Some((mention.index, image.path.clone()))
@@ -726,14 +729,18 @@ fn user_chips(body: &str, previews: &[(u32, String)]) -> Vec<UserChip> {
         icon: if invocation.prefix() == '/' { "command" } else { "wand.and.stars" }.to_owned(),
         open: None,
     }));
-    chips.extend(zeron_proto::attachment_mentions::attachment_mentions(body).into_iter().map(|mention| UserChip {
-        range: mention.range,
-        icon: if mention.is_image { "photo".to_owned() } else { file_icon_asset(&mention.label) },
-        open: previews
-            .iter()
-            .find(|(index, _)| mention.is_image && *index == mention.index)
-            .map(|(_, reference)| image_preview_link(reference)),
-        label: mention.label,
+    chips.extend(zeron_proto::attachment_mentions::attachment_mentions(body).into_iter().map(|mention| {
+        let is_image = mention.is_image
+            || zeron_proto::attachment_mentions::is_image_path(&mention.label);
+        UserChip {
+            range: mention.range,
+            icon: if is_image { "photo".to_owned() } else { file_icon_asset(&mention.label) },
+            open: previews
+                .iter()
+                .find(|(index, _)| is_image && *index == mention.index)
+                .map(|(_, reference)| image_preview_link(reference)),
+            label: mention.label,
+        }
     }));
     chips.sort_by_key(|chip| chip.range.start);
     // Links never nest; drop any overlap rather than paint two chips at once.

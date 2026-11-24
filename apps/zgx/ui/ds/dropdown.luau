@@ -79,9 +79,17 @@ export type Item = {
 	disabled: boolean?,
 }
 -- What a caller's own trigger is given: whether the panel is open, and how
--- to open or close it. A submenu trigger forwards its hover changes so
--- leaving both the row and its panel can close it.
-export type Menu = { open: State<boolean>, toggle: () -> (), on_hover: ((inside: boolean) -> ())? }
+-- to open or close it. A submenu trigger forwards its hover, pointer-move,
+-- mount and press events so the hover corridor can keep it open across gaps
+-- and sibling rows.
+export type Menu = {
+	open: State<boolean>,
+	toggle: () -> (),
+	on_mount: ((el: Element) -> ())?,
+	on_hover: ((inside: boolean) -> ())?,
+	on_pointer_move: ((ev: PointerEvent) -> ())?,
+	on_click: (() -> ())?,
+}
 -- (The panel's own words, an action's, an empty list's, the placeholder,
 -- the search's and the detail, may be messages, `ui.t`. An item's label
 -- stays a string: the search reads it, and its tile its first letter.)
@@ -174,6 +182,8 @@ export type Props = {
 	trigger: ((menu: Menu) -> Node)?,
 	-- A side-opening menu whose parent stays reachable by the pointer.
 	submenu: boolean?,
+	-- Shared hover-intent corridor coordinating a parent panel and its submenus.
+	corridor: Menu.Corridor?,
 	-- How far the trigger folds (a footer short of room): 0, all of it; 1,
 	-- without its detail; 2, its leading icon alone. And while `accent` is
 	-- true, that icon is in the accent (a mode on).
@@ -985,6 +995,9 @@ return ui.component(function(props: Props): Node
 	if props.loading then
 		label_node = ui.show(props.loading, Skeleton.Bar { w = ui.raw(64, "about a model's name"), h = 10 }, label_node)
 	end
+	local corridor = props.corridor
+	local corridor_item: Menu.CorridorItem? = nil
+
 	-- Opening: the search cleared, on the chosen item, in view. (Open
 	-- already, it stays as it is: asked again, by its shortcut or its
 	-- trigger, it was put back folded, the search and tab lost.)
@@ -994,6 +1007,9 @@ return ui.component(function(props: Props): Node
 		end
 		if props.on_open then
 			props.on_open()
+		end
+		if corridor and corridor_item then
+			corridor:opened(corridor_item)
 		end
 		query:set("")
 		local v = value:peek()
@@ -1047,7 +1063,9 @@ return ui.component(function(props: Props): Node
 		end
 	end
 	-- A hover-opened submenu stays open across the gap between its row
-	-- and panel. Leaving both starts a short, cancellable closing grace.
+	-- and panel. When coordinated by a `corridor`, the corridor owns the
+	-- hover-intent cone and closing timers; otherwise leaving both starts
+	-- a short, cancellable closing grace.
 	local over_trigger = false
 	local over_panel = false
 	local cancel_close: (() -> ())? = nil
@@ -1074,11 +1092,35 @@ return ui.component(function(props: Props): Node
 		end
 	end
 	if props.submenu then
-		ui.on_cleanup(stop_close)
+		if corridor then
+			local item = corridor:register(open, show_panel, function()
+				open:set(false)
+			end)
+			corridor_item = item
+			ui.on_cleanup(function()
+				corridor:unregister(item)
+			end)
+			ui.effect(function()
+				if not open:get() then
+					corridor:closed(item)
+				end
+			end)
+		else
+			ui.on_cleanup(stop_close)
+			ui.effect(function()
+				if not open:get() then
+					stop_close()
+					over_panel = false
+				end
+			end)
+		end
+	elseif corridor then
+		ui.on_cleanup(function()
+			corridor:cleanup()
+		end)
 		ui.effect(function()
 			if not open:get() then
-				stop_close()
-				over_panel = false
+				corridor:close_all()
 			end
 		end)
 	end
@@ -1094,9 +1136,33 @@ return ui.component(function(props: Props): Node
 	local trigger = if props.trigger then props.trigger({
 		open = open,
 		toggle = toggle,
+		on_mount = if props.submenu and corridor and corridor_item
+			then function(el: Element)
+				corridor:mount_trigger(corridor_item :: Menu.CorridorItem, el)
+			end
+			else nil,
 		on_hover = if props.submenu
-			then function(inside: boolean)
-				hover(inside, false)
+			then if corridor and corridor_item
+				then function(inside: boolean)
+					local item = corridor_item :: Menu.CorridorItem
+					if inside then
+						corridor:enter_trigger(item)
+					else
+						corridor:leave_trigger(item)
+					end
+				end
+				else function(inside: boolean)
+					hover(inside, false)
+				end
+			else nil,
+		on_pointer_move = if props.submenu and corridor and corridor_item
+			then function(ev: PointerEvent)
+				corridor:move_trigger(corridor_item :: Menu.CorridorItem, { x = ev.x, y = ev.y })
+			end
+			else nil,
+		on_click = if props.submenu and corridor and corridor_item
+			then function()
+				corridor:click_trigger(corridor_item :: Menu.CorridorItem)
 			end
 			else nil,
 	}) else ui.button {
@@ -1207,7 +1273,7 @@ return ui.component(function(props: Props): Node
 						table.insert(top, gated(rule()))
 					end
 				end
-				local head = if props.head then ui.column { w_full = true, p = "$space.1", props.head } else nil
+				local head = if props.head then ui.column { w_full = true, p = "$space.1", gap = "$zeron.list.gap", props.head } else nil
 				if head and not bottom_up then
 					section(head, true)
 				end
@@ -1571,9 +1637,14 @@ return ui.component(function(props: Props): Node
 					-- (Nothing to list.)
 				elseif props.search == false then
 					local items: { Node } = {
-						ui.each(shown, function(item: Item)
-							return item_row(item, false)
-						end, { key = key_of, w_full = true }),
+						ui.show(
+							function(): boolean
+								return #shown:get() > 0
+							end,
+							ui.each(shown, function(item: Item)
+								return item_row(item, false)
+							end, { key = key_of, w_full = true, gap = "$zeron.list.gap" })
+						),
 					}
 					for _, node in nothing() do
 						table.insert(items, node)
@@ -1752,13 +1823,26 @@ return ui.component(function(props: Props): Node
 				table.insert(rows, row)
 			end
 			if props.extra then
-				local foot = ui.column { w_full = true, rule(), ui.column { w_full = true, p = "$space.1", props.extra } }
+				local foot = ui.column { w_full = true, rule(), ui.column { w_full = true, p = "$space.1", gap = "$zeron.list.gap", props.extra } }
 				table.insert(rows, if props.extra_when then ui.show(props.extra_when, foot) else foot)
+			end
+			local function finish(col: { [any]: any }): Node
+				if corridor and not props.submenu then
+					col.on_pointer_move = function(ev: PointerEvent)
+						corridor:move_parent({ x = ev.x, y = ev.y })
+					end
+					col.on_hover = function(inside: boolean)
+						if not inside then
+							corridor:leave_parent()
+						end
+					end
+				end
+				return ui.column(col)
 			end
 			if props.search == false then
 				-- No field to type in: the panel itself takes the keys, focused
 				-- as it opens.
-				return ui.column {
+				return finish {
 					-- The panel's full width, so its rules reach both edges
 					-- (not the width of its widest row).
 					w_full = true,
@@ -1792,7 +1876,7 @@ return ui.component(function(props: Props): Node
 						end)
 					end
 				end)
-				return ui.column {
+				return finish {
 					w_full = true,
 					gap = 0,
 					role = "listbox",
@@ -1816,7 +1900,7 @@ return ui.component(function(props: Props): Node
 			-- it folds it back, rather than reaching the popover, which
 			-- closes.
 			local on_escape = props.on_escape
-			return ui.column {
+			return finish {
 				w_full = true,
 				gap = 0,
 				on_key = if on_escape
@@ -1842,8 +1926,22 @@ return ui.component(function(props: Props): Node
 			end
 			return ui.column {
 				w_full = true,
+				on_mount = if corridor and corridor_item
+					then function(el: Element)
+						corridor:mount_panel(corridor_item :: Menu.CorridorItem, el)
+					end
+					else nil,
 				on_hover = function(inside: boolean)
-					hover(inside, true)
+					if corridor and corridor_item then
+						local item = corridor_item :: Menu.CorridorItem
+						if inside then
+							corridor:enter_panel(item)
+						else
+							corridor:leave_panel(item)
+						end
+					else
+						hover(inside, true)
+					end
 				end,
 				build(),
 			}

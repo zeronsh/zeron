@@ -178,6 +178,10 @@ export type Props = {
 	-- it passes behind (Zeron's band, from the composer's top to the
 	-- window's foot), and the way back to the latest stands over it.
 	foot: (() -> number)?,
+	-- Settled/destination foot height when the docked composer animates: list-
+	-- wide properties (`fade`, `scroll_padding`) follow this once per transition
+	-- instead of invalidating the full transcript viewport on every frame.
+	foot_target: (() -> number)?,
 	-- Whether the view this one is made for rested at its end (a chat
 	-- switched back to: the session page keeps each chat's place); else the
 	-- last transcript's, as a reload's rebuild has it. (With `session`, asked
@@ -1473,6 +1477,9 @@ local function Transcript(props: Props): Node
 	local kept = if props.name then `.{props.name}` else ""
 	local function foot(): number
 		return if props.foot then props.foot() else 0
+	end
+	local function foot_target(): number
+		return if props.foot_target then props.foot_target() else foot()
 	end
 	local offset = props.offset or ui.state(`transcript_offset{kept}`, 0)
 	local list = props.ref or ui.ref()
@@ -2808,7 +2815,7 @@ local function Transcript(props: Props): Node
 			-- The air at the conversation's end, on its last row: on the list
 			-- itself it would clip every row short of the list's foot.
 			pb = function(): number
-				return if last() then ui.raw(TAIL + foot(), "the air at its end, and the room held for what floats over its foot") else 0
+				return if last() then ui.raw(TAIL + foot_target(), "the air at its end, and the room held for what floats over its foot") else 0
 			end,
 			relative = true,
 			min_h = need,
@@ -3018,13 +3025,13 @@ local function Transcript(props: Props): Node
 			-- (Zeron's 24 under the title bar; at the foot, the band the
 			-- composer covers, or 24.)
 			fade = function(): { number }
-				return { 24, math.max(24, foot()) + (props.fade_lead or 0) }
+				return { 24, math.max(24, foot_target()) + (props.fade_lead or 0) }
 			end,
 			-- A row Tab (or ⇧Tab) focuses scrolls clear of both bands: the
 			-- title bar's fade at the top, the composer at the foot (followed
 			-- as it grows).
 			scroll_padding = function(): { top: number, bottom: number }
-				return { top = 24 + 8, bottom = math.max(24, foot()) + 8 }
+				return { top = 24 + 8, bottom = math.max(24, foot_target()) + 8 }
 			end,
 			-- Always (a list's runs past its edges aren't measured, so a
 			-- band "as far as content runs past" stayed shut). At rest

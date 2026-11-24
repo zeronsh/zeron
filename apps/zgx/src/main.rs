@@ -129,6 +129,8 @@ mod receipt_copy_tests;
 #[cfg(test)]
 mod overlay_copy_tests;
 #[cfg(test)]
+mod composer_atoms_tests;
+#[cfg(test)]
 mod drop_tests;
 #[cfg(test)]
 mod picker_settle_tests;

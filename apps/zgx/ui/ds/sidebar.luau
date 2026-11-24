@@ -2446,6 +2446,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				key = function(p: any): string
 					return `{p.plugin}/{p.id}`
 				end,
+				w_full = true,
+				gap = "$zeron.list.gap",
 			})
 			else nil,
 		-- (Built once it shows: off, nothing of it made.)
@@ -5233,7 +5235,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 							return level
 						end,
 						w_full = true,
-						gap = 0,
+						gap = "$zeron.list.gap",
 						-- (Rows taking new places slide there.)
 						animate = motion.layout({ duration = motion.BASE, ease = motion.EASE }),
 					}

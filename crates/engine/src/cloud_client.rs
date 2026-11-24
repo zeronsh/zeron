@@ -426,6 +426,7 @@ impl CloudClient {
         branch: Option<&str>,
         config: Option<&zeron_proto::ChatConfig>,
         machine: Option<&str>,
+        child_kind: Option<zeron_proto::ChildKind>,
     ) -> Result<CloudSession, EngineError> {
         require_id(chat_id, "chatId")?;
         require_id(parent_chat_id, "parentChatId")?;
@@ -440,6 +441,9 @@ impl CloudClient {
         if let Some(config) = config {
             body["config"] = serde_json::to_value(config)
                 .map_err(|e| EngineError::Other(format!("chat config: {e}")))?;
+        }
+        if let Some(child_kind) = child_kind {
+            body["childKind"] = serde_json::Value::String(child_kind.as_str().to_owned());
         }
         self.target()?
             .call::<CloudSession>(

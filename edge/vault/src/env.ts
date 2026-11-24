@@ -27,6 +27,11 @@ export interface Env {
   /** The App's URL slug (`github.com/apps/{slug}`), for the install link. */
   readonly GITHUB_APP_SLUG?: string;
 
+  /** OAuth client credentials used to refresh unified Antigravity CLI uploads
+   * (which omit client_id/client_secret from their token file). */
+  readonly ANTIGRAVITY_OAUTH_CLIENT_ID?: string;
+  readonly ANTIGRAVITY_OAUTH_CLIENT_SECRET?: string;
+
   /** User whose codex + github credentials the daily cron force-refreshes. */
   readonly CANARY_USER_ID?: string;
 }

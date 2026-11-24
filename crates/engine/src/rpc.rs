@@ -1460,6 +1460,7 @@ impl EngineRpc {
         space_id: Option<&str>,
         device_id: Option<&str>,
         parent_chat_id: Option<&str>,
+        child_kind: Option<zeron_proto::ChildKind>,
         branch: Option<&str>,
         cloud: bool,
         reach: Option<zeron_proto::CloudReach>,
@@ -1522,7 +1523,7 @@ impl EngineRpc {
             }
             let started = self
                 .cloud()
-                .create_child_session(chat_id, parent, branch, config, machine)
+                .create_child_session(chat_id, parent, branch, config, machine, child_kind)
                 .await
                 .map_err(|e| RpcError::Failed(format!("Couldn't start a Cloud session: {e}")))?;
             self.await_chat_row(chat_id).await?;
@@ -4970,6 +4971,7 @@ impl RpcService for EngineRpc {
                         space_id.as_deref(),
                         device_id.as_deref(),
                         parent_chat_id.as_deref(),
+                        *child_kind,
                         branch.as_deref().filter(|b| !b.is_empty()),
                         *cloud,
                         cloud_reach.filter(|_| zeron_rpc::caller().is_local()),

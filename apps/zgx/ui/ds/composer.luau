@@ -60,6 +60,7 @@ local Draft = require("@self/draft_text")
 local Layout = require("@self/composer_layout")
 local ComposerMotion = require("@self/composer_motion")
 local EditorMenu = require("@self/editor_menu")
+local ComposerAtoms = require("@self/composer_atoms")
 
 type ViewGeometry = {
 	height: number, header_height: number, tray_inset: number,
@@ -259,6 +260,10 @@ export type Props = {
 	on_remove_cargo: ((id: string) -> ())?,
 	on_retry_cargo: ((id: string) -> ())?,
 	on_open_cargo: ((id: string) -> ())?,
+	-- Inline atomic chips in the draft (mentions, commands, skills, dragged
+	-- cargo attachments), and how a cargo chip becomes an inline chip on drag.
+	atoms: State<{ ComposerAtoms.AtomEntry }>?,
+	cargo_chip: ((item: cargo.Item) -> ComposerAtoms.ChipSpec?)?,
 	-- Text pasted in: true takes it (the caller made a chip of it).
 	on_paste_text: ((text: string) -> boolean)?,
 	-- A paste with no text (a picture on the clipboard): the caller's to
@@ -609,7 +614,7 @@ local function fixed_row(label: Message, current: () -> Choice): Node
 end
 
 local function submenu(
-	siblings: { State<boolean> },
+	corridor: Menu.Corridor,
 	label: Message,
 	value: State<string?>,
 	choices: { Choice } | () -> { Choice },
@@ -641,16 +646,8 @@ local function submenu(
 		local at: number = if type(fallback) == "function" then fallback() else fallback
 		return listed[at] or listed[1] or { value = "", label = "" }
 	end
-	local own: State<boolean>? = nil
-	local function close_siblings()
-		for _, open in siblings do
-			if open ~= own then
-				open:set(false)
-			end
-		end
-	end
 	return Dropdown {
-		on_open = close_siblings,
+		corridor = corridor,
 		on_choose = on_choose,
 		value = value,
 		items = choices,
@@ -666,32 +663,17 @@ local function submenu(
 		-- row it opens from sits 5 inside it, its inset and border).
 		placement = { side = "right", align = "start", offset = 7 },
 		trigger = function(menu: Dropdown.Menu): Node
-			own = menu.open
-			table.insert(siblings, menu.open)
 			return ui.menu_item(Menu.look {
 				label = label,
 				bg = function()
 					return if menu.open:get() then "$hover" else "#00000000"
 				end,
+				on_mount = menu.on_mount,
 				-- A press opens it, as hovering does; one already open stays
 				-- open (a hover opened it just before), as a system menu's row.
-				on_click = function()
-					close_siblings()
-					if not menu.open:peek() then
-						menu.toggle()
-					end
-				end,
-				on_hover = function(inside: boolean)
-					if menu.on_hover then
-						menu.on_hover(inside)
-					end
-					if inside then
-						close_siblings()
-						if not menu.open:peek() then
-							menu.toggle()
-						end
-					end
-				end,
+				on_click = menu.on_click,
+				on_hover = menu.on_hover,
+				on_pointer_move = menu.on_pointer_move,
 				choice_mark(current),
 				FadeText {
 					function()
@@ -824,6 +806,7 @@ end
 -- reaches instead), each a row opening its choices beside the panel (the
 -- project's with "New project" under them).
 local function work_in(
+	corridor: Menu.Corridor,
 	project: State<string?>?,
 	projects: ({ Project } | State<{ Project }> | () -> { Project })?,
 	on_new_project: (() -> ())?,
@@ -835,7 +818,6 @@ local function work_in(
 	reach: State<string?>?,
 	reach_default: (() -> string?)?
 ): Node
-	local siblings: { State<boolean> } = {}
 	local rows: { Node } = {
 		Menu.Heading { locale.t("ds.composer.work_in") },
 	}
@@ -861,7 +843,7 @@ local function work_in(
 			rows,
 			ui.show(function(): boolean
 				return #choices() > 0
-			end, submenu(siblings, locale.t("ds.composer.device.label"), device, choices, 1, locale.s("ds.composer.device.search")))
+			end, submenu(corridor, locale.t("ds.composer.device.label"), device, choices, 1, locale.s("ds.composer.device.search")))
 		)
 	end
 	if project and projects then
@@ -889,7 +871,7 @@ local function work_in(
 		local p = project
 		table.insert(
 			rows,
-			submenu(siblings, locale.t("ds.composer.project.label"), project, choices, 1, locale.s("ds.composer.project.search"), {
+			submenu(corridor, locale.t("ds.composer.project.label"), project, choices, 1, locale.s("ds.composer.project.search"), {
 				worded({
 					icon = "close",
 					on_click = function()
@@ -926,7 +908,7 @@ local function work_in(
 			rows,
 			ui.show(function(): boolean
 				return (project == nil or project:get() ~= NO_PROJECT) and not plain() and not on_cloud(device, devices)
-			end, submenu(siblings, locale.t("ds.composer.checkout.label"), checkout, CHECKOUTS, 2))
+			end, submenu(corridor, locale.t("ds.composer.checkout.label"), checkout, CHECKOUTS, 2))
 		)
 	end
 	if machine and machines then
@@ -936,7 +918,7 @@ local function work_in(
 			rows,
 			ui.show(function(): boolean
 				return on_cloud(device, devices) and #(list_of(machines) :: { Choice }) > 0
-			end, submenu(siblings, locale.t("ds.composer.machine.label"), machine, machines :: any, 1, nil, nil, nil, MACHINE_MORE))
+			end, submenu(corridor, locale.t("ds.composer.machine.label"), machine, machines :: any, 1, nil, nil, nil, MACHINE_MORE))
 		)
 	end
 	if reach and reach_default then
@@ -946,18 +928,18 @@ local function work_in(
 			rows,
 			ui.show(function(): boolean
 				return on_cloud(device, devices) and reach_default() ~= nil
-			end, submenu(siblings, locale.t("ds.composer.reach.label"), reach, REACHES, function(): number
+			end, submenu(corridor, locale.t("ds.composer.reach.label"), reach, REACHES, function(): number
 				return if reach_default() == "isolated" then 2 else 1
 			end))
 		)
 	end
-	return ui.column { w_full = true, table.unpack(rows) }
+	return ui.column { w_full = true, gap = "$zeron.list.gap", table.unpack(rows) }
 end
 
 -- The same head for an existing chat, which can't move: where it works,
 -- said in rows that open nothing; and on Cloud, what its machine reaches,
 -- which `on_reach` changes (shown at once, the chat's own following).
-local function fixed_work_in(fixed: () -> Fixed?, on_reach: ((reach: string) -> ())?): Node
+local function fixed_work_in(corridor: Menu.Corridor, fixed: () -> Fixed?, on_reach: ((reach: string) -> ())?): Node
 	local function f(): Fixed
 		return fixed() or { worktree = false }
 	end
@@ -995,10 +977,10 @@ local function fixed_work_in(fixed: () -> Fixed?, on_reach: ((reach: string) -> 
 			rows,
 			ui.show(function(): boolean
 				return f().cloud == true and f().reach ~= nil
-			end, submenu({}, locale.t("ds.composer.reach.label"), reach, REACHES, 1, nil, nil, nil, nil, on_reach))
+			end, submenu(corridor, locale.t("ds.composer.reach.label"), reach, REACHES, 1, nil, nil, nil, nil, on_reach))
 		)
 	end
-	return ui.column { w_full = true, table.unpack(rows) }
+	return ui.column { w_full = true, gap = "$zeron.list.gap", table.unpack(rows) }
 end
 
 -- The ring, in a chip-high box of its own, washed under the pointer as the
@@ -1452,6 +1434,7 @@ return ui.component(function(props: Props): Node
 	local m = mentions.use {
 		field = field,
 		value = value,
+		atoms = props.atoms,
 		sources = props.mentions or {},
 		enabled = props.mention_enabled,
 		empty = props.mention_empty,
@@ -1462,6 +1445,19 @@ return ui.component(function(props: Props): Node
 			return (pill_w:get() or 0) > 0
 		end,
 	}
+	-- File-icon SVGs follow the active theme's light/dark icon set; only runs
+	-- on theme switches and skips drafts without atoms.
+	if props.atoms then
+		local atoms_state = props.atoms
+		ComposerAtoms.bind_editor(atoms_state, field)
+		ui.effect(function()
+			local _ = ui.theme.current:get()
+			local cur = ComposerAtoms.live(atoms_state)
+			if #cur > 0 then
+				atoms_state:set(ComposerAtoms.restyle(cur))
+			end
+		end)
+	end
 	-- Asked to: the keys, the caret at the end.
 	if props.focus then
 		local focus = props.focus
@@ -1517,6 +1513,15 @@ return ui.component(function(props: Props): Node
 			end
 		end)
 	end)
+	-- Follow the pill's width in the size batch (before editors run
+	-- refresh_if_resized), so width-driven wraps update editor height on Pass 1
+	-- before caret reveal computes scroll.
+	ui.effect(function()
+		local w = pill.width
+		if w ~= nil and math.abs(pill_w:peek() - w) >= 0.5 then
+			pill_w:set(w)
+		end
+	end)
 	local settlement = ui.computed(function()
 		local metrics_now = metrics.result:get()
 		local actual = pill.height
@@ -1526,13 +1531,33 @@ return ui.component(function(props: Props): Node
 	end)
 	local transition = ComposerMotion.use(target_geometry, props.snap, settlement)
 	local frame_geometry = transition.frame
+	local editor_height = ui.computed(function(): number
+		return ComposerMotion.editor_height(
+			frame_geometry:get(),
+			transition.destination:get(),
+			metrics.pending:get(),
+			pill_w:peek()
+		)
+	end)
+	local editor_width = ui.computed(function(): Length
+		local g = frame_geometry:get()
+		local dest = transition.destination:get()
+		-- Only subscribe to `pill_w` while insets are actively gliding across a
+		-- mode change, so settled pane resizes flow purely through `"100%"`.
+		local live = if math.abs(g.text.left - dest.text.left) > 0.01
+			or math.abs(g.text.right - dest.text.right) > 0.01
+			then pill_w:get()
+			else nil
+		return ComposerMotion.editor_width(g, dest, live) or "100%"
+	end)
 	-- Width is applied by layout, not a view binding. Project the presented
 	-- snapshot once so width/measurement metadata alone cannot wake every
 	-- height, inset and control binding in each split composer.
 	local view_geometry = ui.computed(function(): ViewGeometry
 		local g = frame_geometry:get()
+		local clip_h = ComposerMotion.clip_height(g, transition.destination:get())
 		return { height = g.height, header_height = g.header_height,
-			text = { left = g.text.left, right = g.text.right, top = g.text.top, height = g.text.height },
+			text = { left = g.text.left, right = g.text.right, top = g.text.top, height = clip_h },
 			controls = g.controls, tray_inset = g.tray_inset }
 	end)
 	-- Every binding reads the same frame snapshot; none starts an animation.
@@ -1999,9 +2024,81 @@ return ui.component(function(props: Props): Node
 	-- Files over the pill: its own sense of it, or the caller's.
 	local dropping = props.dropping or ui.use_state(false)
 
-	-- What sits over the draft: the agent's ask, or the cargo strip.
+	-- An image chip opens its picture in the lightbox (unless the caller opens
+	-- chips itself), growing from the chip; ← → go through the chips' pictures.
+	-- The host mounts once stably on the composer root so adding/removing the
+	-- last attachment never tears down or re-registers the lightbox host mid-shrink.
+	local cargo_lightbox = props.cargo ~= nil and not props.on_open_cargo
+	local cargo_strip: Node? = nil
+	if props.cargo then
+		local items = props.cargo :: State<{ cargo.Item }>
+		local group: string? = nil
+		local open_image: ((string) -> ())? = nil
+		if cargo_lightbox then
+			lightboxes += 1
+			local g = `composer{lightboxes}`
+			group = g
+			open_image = function(id: string)
+				local images: { Lightbox.Item } = {}
+				local at = nil
+				for _, c in items:peek() do
+					if (c.kind == "image" or c.kind == "appshot") and c.src and c.src ~= "" then
+						table.insert(images, { src = c.src, name = c.name, path = (c :: any).path, key = c.id })
+						if c.id == id then
+							at = #images
+						end
+					end
+				end
+				if at then
+					Lightbox.open(images, at, g)
+				end
+			end
+		end
+		cargo_strip = ui.show(
+			function(): boolean
+				return not asking()
+			end,
+			cargo.Strip {
+				items = items,
+				on_remove = props.on_remove_cargo,
+				on_retry = props.on_retry_cargo,
+				on_open = props.on_open_cargo or open_image,
+				drag_item = if props.atoms and props.cargo_chip
+					then function(item: cargo.Item): any?
+						local spec = (props.cargo_chip :: (cargo.Item) -> ComposerAtoms.ChipSpec?)(item)
+						if not spec then
+							return nil
+						end
+						return { kind = "cargo_chip", spec = spec }
+					end
+					else nil,
+				drag_preview = if props.atoms and props.cargo_chip
+					then function(payload: any): Node
+						return ComposerAtoms.chip_preview(if type(payload) == "table" and payload.spec then payload.spec.data else nil)
+					end
+					else nil,
+				source = if group
+					then function(item: cargo.Item): { [string]: any }?
+						local radius = ui.theme.get("zeron.composer.chip.radius")
+						return Lightbox.source(group, item.id, if type(radius) == "number" then radius else 0)
+					end
+					else nil,
+			}
+		)
+	end
+
+	-- What sits over the draft: the agent's ask, or the cargo strip. Cargo
+	-- mounts directly (without an outer ui.presence exit layer) so removing the
+	-- last attachment fades the chip once via cargo.Strip's ui.each inside the
+	-- collapsing header clip instead of stacking nested offscreen layers and
+	-- unmounting mid-shrink.
 	local head: Node = ui.column {
-		on_resize = measure(head_h_seen, "h"),
+		on_resize = function(size: Size)
+			local v = if has_cargo() or asking() then size.h else 0
+			if math.abs(head_h_seen:peek() - v) >= 0.5 then
+				head_h_seen:set(v)
+			end
+		end,
 		absolute = true,
 		left = 0,
 		right = 0,
@@ -2014,8 +2111,6 @@ return ui.component(function(props: Props): Node
 				return `question:{q.text}:{q.page or 1}:{if q.multi then 1 else 0}`
 			elseif approval() then
 				return "approval"
-			elseif has_cargo() then
-				return "cargo"
 			end
 			return nil
 		end, function(key: string): Node
@@ -2031,52 +2126,14 @@ return ui.component(function(props: Props): Node
 						return (q.page or 1) <= 1 and not can_answer()
 					end,
 				}
-			elseif kind == "approval" then
-				return ask.Approval { approval = approval() :: ask.Approval }
 			end
-			-- An image chip opens its picture in the lightbox (unless the
-			-- caller opens chips itself), growing from the chip; ← → go
-			-- through the chips' pictures.
-			lightboxes += 1
-			local group = `composer{lightboxes}`
-			local items = props.cargo :: State<{ cargo.Item }>
-			local function open_image(id: string)
-				local images: { Lightbox.Item } = {}
-				local at = nil
-				for _, c in items:peek() do
-					if (c.kind == "image" or c.kind == "appshot") and c.src and c.src ~= "" then
-						table.insert(images, { src = c.src, name = c.name, path = (c :: any).path, key = c.id })
-						if c.id == id then
-							at = #images
-						end
-					end
-				end
-				if at then
-					Lightbox.open(images, at, group)
-				end
-			end
-			return ui.column {
-				w_full = true,
-				cargo.Strip {
-					items = items,
-					on_remove = props.on_remove_cargo,
-					on_retry = props.on_retry_cargo,
-					on_open = props.on_open_cargo or open_image,
-					source = function(item: cargo.Item): { [string]: any }?
-						if props.on_open_cargo then
-							return nil
-						end
-						local radius = ui.theme.get("zeron.composer.chip.radius")
-						return Lightbox.source(group, item.id, if type(radius) == "number" then radius else 0)
-					end,
-				},
-				Lightbox.Host(),
-			}
+			return ask.Approval { approval = approval() :: ask.Approval }
 		end, {
 			w_full = true,
 			enter = { opacity = { 0, 1 }, duration = 200, ease = "outCubic" },
 			exit = { opacity = 0, duration = 120 },
 		}),
+		cargo_strip,
 	}
 
 	local function placeholder(): string
@@ -2102,6 +2159,68 @@ return ui.component(function(props: Props): Node
 			el:focus()
 			local n = #value:peek()
 			el:set_selection_bytes(n, n)
+		end
+	end
+
+	-- Non-reactive drag/hover bookkeeping for inline chips: zero cost while
+	-- typing (no reactive state is read or written on keystrokes).
+	local hovered_atom: any = nil
+	local drag_restore_sel: { number }? = nil
+	local drop_restore_sel: { number }? = nil
+	local function accepts_chip_drop(payload: any): boolean
+		return props.atoms ~= nil
+			and type(payload) == "table"
+			and (payload.kind == "composer_atom" or payload.kind == "cargo_chip")
+	end
+	local function on_chip_drag_over(_payload: any, p: any)
+		local el = field:peek()
+		if not el then
+			return
+		end
+		if drop_restore_sel == nil then
+			local a, b = el:selection_bytes()
+			if a ~= nil and b ~= nil then
+				drop_restore_sel = { a, b }
+			end
+		end
+		local at = ui.editor.offset_at(el, p.x, p.y)
+		if at ~= nil then
+			local atoms_state = props.atoms
+			if atoms_state then
+				at = ComposerAtoms.snap_byte(value:peek(), atoms_state:peek(), at)
+			end
+			el:focus()
+			el:set_selection_bytes(at, at)
+		end
+	end
+	local function on_chip_drag_leave()
+		local sel = drop_restore_sel
+		drop_restore_sel = nil
+		local el = field:peek()
+		if sel and el then
+			el:set_selection_bytes(sel[1], sel[2])
+		end
+	end
+	local function on_chip_drop(payload: any, p: any)
+		drop_restore_sel = nil
+		drag_restore_sel = nil
+		local atoms_state = props.atoms
+		if not atoms_state or type(payload) ~= "table" then
+			return
+		end
+		local el = field:peek()
+		local at = if el and p then ui.editor.offset_at(el, p.x, p.y) else nil
+		if at == nil then
+			at = #value:peek()
+		end
+		if payload.kind == "composer_atom" and type(payload.id) == "string" then
+			ComposerAtoms.move_atom(el, value, atoms_state, payload.id, at)
+		elseif payload.kind == "cargo_chip" and type(payload.spec) == "table" then
+			local after = ComposerAtoms.insert_at(el, value, atoms_state, at, at, payload.spec, true)
+			if el then
+				el:focus()
+				el:set_selection_bytes(after, after)
+			end
 		end
 	end
 
@@ -2134,6 +2253,10 @@ return ui.component(function(props: Props): Node
 				end
 			end
 			else nil,
+		drop_when = if props.atoms then accepts_chip_drop else nil,
+		on_drag_over = if props.atoms then on_chip_drag_over else nil,
+		on_drag_leave = if props.atoms then on_chip_drag_leave else nil,
+		on_drop = if props.atoms then on_chip_drop else nil,
 		-- A press anywhere but a control goes to the draft (its caret at
 		-- its end). (Under the pill's controls and draft, which take their
 		-- own; `focus_on_press = false`, so zgx doesn't move focus off it
@@ -2156,22 +2279,92 @@ return ui.component(function(props: Props): Node
 			overflow = "hidden",
 			head,
 		},
-		-- The draft.
+		-- The draft: clipped to the presented text envelope while the editor
+		-- holds its stable layout height during growth so caret reveal never
+		-- scrolls the top line off-screen mid-resize.
 		ui.div {
 			absolute = true,
 			left = presented(function(g) return g.text.left end),
 			right = presented(function(g) return g.text.right end),
 			top = presented(function(g) return g.text.top end),
 			h = presented(function(g) return g.text.height end),
+			overflow = "hidden",
 			ui.textarea(EditorMenu.on({
 				ref = field,
 				value = value,
+				atoms = props.atoms,
+				atom_style = if props.atoms
+					then { bg = "$zeron.chip.bg", color = "$text.primary", padding = { 2, 7, 2.4 }, radius = 5 }
+					else nil,
+				on_atom_hover = if props.atoms
+					then function(atom: any)
+						hovered_atom = atom
+					end
+					else nil,
+				on_atom_press = if props.atoms
+					then function(atom: any)
+						if atom then
+							hovered_atom = atom
+						end
+						return true
+					end
+					else nil,
+				on_drag = if props.atoms
+					then function()
+						if not hovered_atom then
+							return nil
+						end
+						local el = field:peek()
+						if el then
+							local a, b = el:selection_bytes()
+							if a ~= nil and b ~= nil then
+								drag_restore_sel = { a, b }
+							end
+						end
+						return {
+							kind = "composer_atom",
+							id = hovered_atom.id,
+							data = hovered_atom.data,
+							style = hovered_atom.style,
+						}
+					end
+					else nil,
+				drag_preview = if props.atoms
+					then function(payload: any): Node
+						return ComposerAtoms.chip_preview(if type(payload) == "table" then payload.data else nil)
+					end
+					else nil,
+				drag_preview_anchor = if props.atoms then { 0.5, 0.5 } else nil,
+				drag_preview_offset = if props.atoms then { 0, -4 } else nil,
+				on_drag_end = if props.atoms
+					then function(_payload: any, accepted: boolean?)
+						local sel = drag_restore_sel
+						drag_restore_sel = nil
+						if not accepted and sel then
+							local el = field:peek()
+							if el then
+								el:set_selection_bytes(sel[1], sel[2])
+							end
+						end
+					end
+					else nil,
+				drop_when = if props.atoms then accepts_chip_drop else nil,
+				on_drag_over = if props.atoms then on_chip_drag_over else nil,
+				on_drag_leave = if props.atoms then on_chip_drag_leave else nil,
+				on_drop = if props.atoms then on_chip_drop else nil,
 				label = locale.t("ds.composer.message"),
 				placeholder = placeholder,
 				placeholder_color = "$text.tertiary",
 				read_only = disabled,
-				w_full = true,
-				h_full = true,
+				absolute = true,
+				left = 0,
+				top = 0,
+				w = function(): Length
+					return editor_width:get()
+				end,
+				h = function(): number
+					return editor_height:get()
+				end,
 				px = 0,
 				py = 0,
 				border = 0,
@@ -2382,10 +2575,12 @@ return ui.component(function(props: Props): Node
 		end
 		if props.branch then
 			local checkout = props.checkout
+			local picker_corridor = if checkout or props.device or props.project then Menu.corridor() else nil
 			-- Built for each chip it heads (a node lives in one place).
 			local function head_node(): Node?
-				return if checkout or props.device or props.project
+				return if picker_corridor
 					then work_in(
+						picker_corridor,
 						props.project,
 						props.projects :: any,
 						props.on_new_project,
@@ -2511,6 +2706,7 @@ return ui.component(function(props: Props): Node
 				empty = props.branches_empty,
 				list_when = in_project,
 				width = 280,
+				corridor = picker_corridor,
 				head = head_node(),
 				trigger = function(menu: Dropdown.Menu): Node
 					return chip(menu, locale.t("ds.composer.branch.label"), {
@@ -2571,6 +2767,7 @@ return ui.component(function(props: Props): Node
 				}
 			end
 			local function where_menu(f_of: () -> Fixed?): Node
+				local where_corridor = Menu.corridor()
 				return Dropdown {
 					value = ui.use_state(nil :: string?),
 					label = locale.t("ds.composer.branch.label") :: any,
@@ -2580,7 +2777,8 @@ return ui.component(function(props: Props): Node
 						return false
 					end,
 					width = 280,
-					head = fixed_work_in(f_of, props.on_reach),
+					corridor = where_corridor,
+					head = fixed_work_in(where_corridor, f_of, props.on_reach),
 					trigger = function(menu: Dropdown.Menu): Node
 						return chip(menu, function(): string
 							local f = f_of()
@@ -2598,6 +2796,7 @@ return ui.component(function(props: Props): Node
 					return f ~= nil and f.cloud == true and #fm.items() > 0
 				end
 				local note = fm.note
+				local machine_corridor = Menu.corridor()
 				static = ui.show(on_cloud_fixed, Dropdown {
 					value = fm.value,
 					items = fm.items :: any,
@@ -2605,7 +2804,8 @@ return ui.component(function(props: Props): Node
 					label = locale.t("ds.composer.machine.label") :: any,
 					search = false,
 					width = MACHINE_W,
-					head = ui.column { w_full = true, fixed_work_in(fixed_fn, props.on_reach), machine_head() },
+					corridor = machine_corridor,
+					head = ui.column { w_full = true, fixed_work_in(machine_corridor, fixed_fn, props.on_reach), machine_head() },
 					trailing_item = MACHINE_MORE.trailing,
 					extra = if note
 						then ui.row {
@@ -2940,5 +3140,6 @@ return ui.component(function(props: Props): Node
 		w_full = true,
 		gap = 0,
 		body,
+		if cargo_lightbox then Lightbox.Host() else nil,
 	}
 end)

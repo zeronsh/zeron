@@ -143,11 +143,13 @@ describe("Cloud delegates", () => {
     expect(deviceId).not.toBe(main.deviceId);
 
     // The edge wrote the child's row: on its new machine, under its parent,
-    // in the parent's project, with the asked-for agent.
+    // in the parent's project, with the asked-for agent (and childKind defaulting
+    // to "subagent" when an older runner omits it).
     const row = find(await rows(user), "chats", child)!;
     expect(row.fields).toMatchObject({
       deviceId,
       parentChatId: main.chatId,
+      childKind: "subagent",
       spaceId: main.spaceId,
       roomGen: 2,
       archived: false,
@@ -156,6 +158,15 @@ describe("Cloud delegates", () => {
     // Again: the same session, not a second machine.
     const again = await startChild(u, runner, child, main.chatId);
     expect(((await again.json()) as { deviceId: string }).deviceId).toBe(deviceId);
+
+    // Explicit childKind ("side") is preserved; unknown values are rejected.
+    expect((await startChild(u, runner, `bad-kind-${rand()}`, main.chatId, { childKind: "bogus" })).status).toBe(400);
+    // Free the one delegate slot so we can start a second child with childKind: "side".
+    expect((await call("DELETE", `/cloud/${u.orgId}/sessions/${child}`, runner)).status).toBe(200);
+    const side = `side-${rand()}`;
+    const startedSide = await startChild(u, runner, side, main.chatId, { childKind: "side" });
+    expect(startedSide.status, await startedSide.clone().text()).toBe(200);
+    expect(find(await rows(user), "chats", side)?.fields.childKind).toBe("side");
   });
 
   it("sees and reaches its children and every other chat, but hosts only its own room", async () => {

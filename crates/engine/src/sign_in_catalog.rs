@@ -144,6 +144,10 @@ pub fn home_env(harness: HarnessId, home: &Path) -> Vec<(String, OsString)> {
         HarnessId::Antigravity => vec![
             ("GEMINI_HOME".into(), at(home.to_path_buf())),
             ("AGY_ACP_FORCE_FILE_STORAGE".into(), "1".into()),
+            (
+                "SSH_CONNECTION".into(),
+                zeron_harness::acp::ANTIGRAVITY_SSH_FILE_STORAGE_VALUE.into(),
+            ),
         ],
         HarnessId::Grok => vec![("GROK_HOME".into(), at(home.to_path_buf()))],
         HarnessId::Devin => vec![

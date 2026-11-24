@@ -426,4 +426,405 @@ function M.panel(props: { [any]: any }): { [any]: any }
 	return glass.style(props, "menu")
 end
 
+-- Submenu hover-intent corridor (safe polygon):
+-- How long the pointer may cross sibling triggers or parent rows toward an
+-- open submenu before the hovered row takes over (or the submenu closes),
+-- the short grace for crossing the gap when not tracking a corridor, how far
+-- past the submenu's edges the corridor reaches, the apex half-band that
+-- absorbs slight wrist curvature without delaying straight vertical moves,
+-- and the horizontal step that counts as advancing or reversing.
+local CORRIDOR_GRACE = 300
+local CORRIDOR_CLOSE = 150
+local CORRIDOR_SLACK = 12
+local CORRIDOR_APEX = 10
+local CORRIDOR_NUDGE = 2
+
+export type Point = { x: number, y: number }
+
+export type CorridorItem = {
+	open: State<boolean>,
+	show: () -> (),
+	close: () -> (),
+	trigger: Element?,
+	panel: Element?,
+}
+
+export type Corridor = {
+	register: (self: Corridor, open: State<boolean>, show: () -> (), close: () -> ()) -> CorridorItem,
+	unregister: (self: Corridor, item: CorridorItem) -> (),
+	mount_trigger: (self: Corridor, item: CorridorItem, el: Element) -> (),
+	mount_panel: (self: Corridor, item: CorridorItem, el: Element?) -> (),
+	enter_trigger: (self: Corridor, item: CorridorItem) -> (),
+	move_trigger: (self: Corridor, item: CorridorItem, p: Point) -> (),
+	leave_trigger: (self: Corridor, item: CorridorItem) -> (),
+	click_trigger: (self: Corridor, item: CorridorItem) -> (),
+	enter_panel: (self: Corridor, item: CorridorItem) -> (),
+	leave_panel: (self: Corridor, item: CorridorItem) -> (),
+	move_parent: (self: Corridor, p: Point) -> (),
+	leave_parent: (self: Corridor) -> (),
+	opened: (self: Corridor, item: CorridorItem) -> (),
+	closed: (self: Corridor, item: CorridorItem) -> (),
+	close_all: (self: Corridor) -> (),
+	cleanup: (self: Corridor) -> (),
+}
+
+-- Whether the pointer at `p`, having last moved on the open submenu's trigger
+-- at `o`, is still heading for the submenu `b` (`left`: opened to its left):
+-- inside the trapezoid from `[o.y - CORRIDOR_APEX, o.y + CORRIDOR_APEX]` at
+-- `o.x` to `[b.y - CORRIDOR_SLACK, b.y + b.height + CORRIDOR_SLACK]` at `b`'s
+-- near edge. Straight vertical moves (`advance <= 0`) immediately return false.
+function M.toward(o: Point, p: Point, b: Element, left: boolean): boolean
+	local bx, by, bw, bh = b.x, b.y, b.width, b.height
+	if not (bx and by and bw and bh) then
+		return false
+	end
+	local edge = if left then bx + bw else bx
+	local dir = if left then -1 else 1
+	local distance = (edge - o.x) * dir
+	local advance = (p.x - o.x) * dir
+	if distance <= 0 or advance <= 0 or advance > distance + CORRIDOR_SLACK then
+		return false
+	end
+	local f = math.min(advance / distance, 1)
+	local y0 = o.y - CORRIDOR_APEX
+	local y1 = o.y + CORRIDOR_APEX
+	local top = y0 + (by - CORRIDOR_SLACK - y0) * f
+	local bottom = y1 + (by + bh + CORRIDOR_SLACK - y1) * f
+	return p.y >= top and p.y <= bottom
+end
+
+-- Coordinates a parent panel's hover-opened submenus so moving diagonally
+-- from an active trigger toward its open submenu across sibling triggers,
+-- parent rows, or the gap between panels keeps the submenu open, while
+-- straight-down moves, reversals, or pauses hand over promptly.
+function M.corridor(): Corridor
+	local items: { CorridorItem } = {}
+	local active: CorridorItem? = nil
+	local origin: Point? = nil
+	local over_trigger: CorridorItem? = nil
+	local over_panel: CorridorItem? = nil
+	local pending_switch: CorridorItem? = nil
+	local pending_at: Point? = nil
+	local cancel_grace: (() -> ())? = nil
+	local cancel_close: (() -> ())? = nil
+
+	local function stop_grace()
+		if cancel_grace then
+			cancel_grace()
+			cancel_grace = nil
+		end
+		pending_switch = nil
+		pending_at = nil
+	end
+
+	local function stop_close()
+		if cancel_close then
+			cancel_close()
+			cancel_close = nil
+		end
+	end
+
+	local function live_active(): CorridorItem?
+		if active and not active.open:peek() then
+			active = nil
+			origin = nil
+			stop_grace()
+			stop_close()
+		end
+		return active
+	end
+
+	local function is_left(item: CorridorItem): boolean
+		local trig = item.trigger
+		local panel = item.panel
+		return trig ~= nil
+			and panel ~= nil
+			and panel.x ~= nil
+			and trig.x ~= nil
+			and (panel.x :: number) < (trig.x :: number)
+	end
+
+	local function activate(item: CorridorItem)
+		stop_grace()
+		stop_close()
+		for _, other in items do
+			if other ~= item and other.open:peek() then
+				other.close()
+			end
+		end
+		if active ~= item then
+			origin = nil
+		end
+		active = item
+		if not item.open:peek() then
+			item.show()
+		end
+	end
+
+	local function schedule_close()
+		if cancel_close or cancel_grace then
+			return
+		end
+		local cur = live_active()
+		if not cur or over_trigger == cur or over_panel == cur then
+			return
+		end
+		cancel_close = ui.after(CORRIDOR_CLOSE, function()
+			cancel_close = nil
+			local now = live_active()
+			if now and over_trigger ~= now and over_panel ~= now and not cancel_grace then
+				now.close()
+				if active == now then
+					active = nil
+					origin = nil
+				end
+			end
+		end)
+	end
+
+	local function arm_grace(target: CorridorItem?, p: Point)
+		stop_close()
+		if cancel_grace then
+			cancel_grace()
+			cancel_grace = nil
+		end
+		pending_switch = target
+		pending_at = p
+		cancel_grace = ui.after(CORRIDOR_GRACE, function()
+			cancel_grace = nil
+			local waiting = pending_switch
+			pending_switch = nil
+			pending_at = nil
+			if waiting and over_trigger == waiting then
+				activate(waiting)
+				return
+			end
+			local now = live_active()
+			if now and over_trigger ~= now and over_panel ~= now then
+				if over_trigger then
+					activate(over_trigger)
+				else
+					now.close()
+					if active == now then
+						active = nil
+						origin = nil
+					end
+				end
+			end
+		end)
+	end
+
+	local self = {} :: Corridor
+
+	function self:register(open: State<boolean>, show: () -> (), close: () -> ()): CorridorItem
+		local item: CorridorItem = {
+			open = open,
+			show = show,
+			close = close,
+			trigger = nil,
+			panel = nil,
+		}
+		table.insert(items, item)
+		return item
+	end
+
+	function self:unregister(item: CorridorItem)
+		for i, existing in items do
+			if existing == item then
+				table.remove(items, i)
+				break
+			end
+		end
+		if over_trigger == item then
+			over_trigger = nil
+		end
+		if over_panel == item then
+			over_panel = nil
+		end
+		if pending_switch == item then
+			stop_grace()
+		end
+		if active == item then
+			stop_grace()
+			stop_close()
+			active = nil
+			origin = nil
+		end
+	end
+
+	function self:mount_trigger(item: CorridorItem, el: Element)
+		item.trigger = el
+	end
+
+	function self:mount_panel(item: CorridorItem, el: Element?)
+		item.panel = el
+	end
+
+	function self:enter_trigger(item: CorridorItem)
+		over_trigger = item
+		local cur = live_active()
+		if not cur or cur == item then
+			stop_grace()
+			stop_close()
+			activate(item)
+			return
+		end
+		-- Another submenu is open: wait for this trigger's pointer move if we
+		-- have an origin and submenu bounds to test the corridor against.
+		if origin and cur.panel then
+			return
+		end
+		activate(item)
+	end
+
+	function self:move_trigger(item: CorridorItem, p: Point)
+		over_trigger = item
+		local cur = live_active()
+		if not cur then
+			activate(item)
+			origin = p
+			return
+		end
+		if cur == item then
+			origin = p
+			stop_grace()
+			stop_close()
+			return
+		end
+		local panel = cur.panel
+		if origin and panel then
+			local left = is_left(cur)
+			if M.toward(origin, p, panel, left) then
+				local dir = if left then -1 else 1
+				local was = pending_at
+				local forward = if was then (p.x - was.x) * dir else CORRIDOR_NUDGE
+				if pending_switch == item and forward <= -CORRIDOR_NUDGE then
+					activate(item)
+					origin = p
+					return
+				end
+				if pending_switch ~= item or forward >= CORRIDOR_NUDGE or not cancel_grace then
+					arm_grace(item, p)
+				end
+				return
+			end
+		end
+		activate(item)
+		origin = p
+	end
+
+	function self:leave_trigger(item: CorridorItem)
+		if over_trigger == item then
+			over_trigger = nil
+		end
+		schedule_close()
+	end
+
+	function self:click_trigger(item: CorridorItem)
+		activate(item)
+	end
+
+	function self:enter_panel(item: CorridorItem)
+		over_panel = item
+		if live_active() == item then
+			stop_grace()
+			stop_close()
+			-- Once inside the submenu, leaving it later should not reuse the
+			-- trigger's old cone origin.
+			origin = nil
+		end
+	end
+
+	function self:leave_panel(item: CorridorItem)
+		if over_panel == item then
+			over_panel = nil
+		end
+		schedule_close()
+	end
+
+	function self:move_parent(p: Point)
+		if over_trigger then
+			return
+		end
+		local cur = live_active()
+		if not cur or over_panel == cur then
+			return
+		end
+		local panel = cur.panel
+		if origin and panel then
+			local left = is_left(cur)
+			if M.toward(origin, p, panel, left) then
+				local dir = if left then -1 else 1
+				local was = pending_at
+				local forward = if was then (p.x - was.x) * dir else CORRIDOR_NUDGE
+				if was and forward <= -CORRIDOR_NUDGE then
+					stop_grace()
+					schedule_close()
+				elseif not cancel_grace or pending_switch ~= nil or forward >= CORRIDOR_NUDGE then
+					arm_grace(nil, p)
+				end
+				return
+			end
+		end
+		stop_grace()
+		schedule_close()
+	end
+
+	function self:leave_parent()
+		schedule_close()
+	end
+
+	function self:opened(item: CorridorItem)
+		stop_grace()
+		stop_close()
+		for _, other in items do
+			if other ~= item and other.open:peek() then
+				other.close()
+			end
+		end
+		if active ~= item then
+			origin = nil
+		end
+		active = item
+	end
+
+	function self:closed(item: CorridorItem)
+		item.panel = nil
+		if over_panel == item then
+			over_panel = nil
+		end
+		if active == item then
+			stop_grace()
+			stop_close()
+			active = nil
+			origin = nil
+		end
+	end
+
+	function self:close_all()
+		stop_grace()
+		stop_close()
+		for _, item in items do
+			if item.open:peek() then
+				item.close()
+			end
+		end
+		active = nil
+		origin = nil
+		over_trigger = nil
+		over_panel = nil
+	end
+
+	function self:cleanup()
+		stop_grace()
+		stop_close()
+		active = nil
+		origin = nil
+		over_trigger = nil
+		over_panel = nil
+	end
+
+	return self
+end
+
 return M

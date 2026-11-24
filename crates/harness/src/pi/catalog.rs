@@ -19,15 +19,24 @@ pub(super) async fn models(process: &mut Process) -> Result<Vec<Model>, HarnessE
         .query(json!({"type":"get_available_models"}), &mut backlog)
         .await?;
     let mut result = vec![];
+    let mut refused = None;
     for model in data["models"].as_array().into_iter().flatten() {
         let provider = string(model, "provider");
         let id = string(model, "id");
-        process
-            .query(
+        // Pi can list a model it then refuses (an extension that hides it a
+        // moment after startup). Skip that model; a broken process aborts.
+        if let Err(error) = process
+            .try_query(
                 json!({"type":"set_model","provider":provider,"modelId":id}),
                 &mut backlog,
             )
-            .await?;
+            .await?
+        {
+            tracing::warn!(model = %format!("{provider}/{id}"), %error, "Pi refused a listed model; skipping it");
+            refused.get_or_insert(error);
+            backlog.clear();
+            continue;
+        }
         let supported = process
             .query(
                 json!({"type":"get_available_thinking_levels"}),
@@ -48,7 +57,10 @@ pub(super) async fn models(process: &mut Process) -> Result<Vec<Model>, HarnessE
         });
         backlog.clear();
     }
-    Ok(result)
+    match refused {
+        Some(error) if result.is_empty() => Err(error),
+        _ => Ok(result),
+    }
 }
 /// A Pi provider's name as people say it. Pi reports only its id
 /// (`openai-codex`); a provider not listed here reads as its id in words

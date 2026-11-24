@@ -79,6 +79,10 @@ export type Props = {
 	-- An image chip as the lightbox's thumbnail (ds/lightbox `source`): the
 	-- props that let its picture grow from the chip and go back into it.
 	source: ((item: Item) -> { [string]: any }?)?,
+	-- Dragging a cargo chip into the composer: returns the drag payload for
+	-- `item` (or nil if the item cannot be mentioned inline) and its preview.
+	drag_item: ((item: Item) -> any?)?,
+	drag_preview: ((payload: any) -> Node)?,
 }
 
 -- How many chips show before the rest fold into "+N more", and how many
@@ -230,6 +234,7 @@ end
 local function image_chip(item: Item, row: State<Item>, props: Props): Node
 	local hovered = ui.use_state(false)
 	local focused = ui.use_state(false)
+	local removing = false
 	local function lit(): boolean
 		return hovered:get() or focused:get()
 	end
@@ -243,6 +248,13 @@ local function image_chip(item: Item, row: State<Item>, props: Props): Node
 		return row:get().failed ~= nil
 	end
 	local remove = props.on_remove
+	local on_remove = if remove
+		then function(id: string)
+			removing = true
+			over(item, false)
+			remove(id)
+		end
+		else nil
 	local cut = hollow(lit)
 	local lifted = if props.source then props.source(item) else nil
 	return ui.overlay {
@@ -265,7 +277,18 @@ local function image_chip(item: Item, row: State<Item>, props: Props): Node
 				(props.on_open :: (string) -> ())(item.id)
 			end
 			else nil,
+		on_drag = if props.drag_item
+			then function()
+				return (props.drag_item :: (Item) -> any?)(row:peek())
+			end
+			else nil,
+		drag_preview = props.drag_preview,
+		drag_preview_anchor = if props.drag_preview then { 0.5, 0.5 } else nil,
+		drag_preview_offset = if props.drag_preview then { 0, -4 } else nil,
 		on_hover = function(inside: boolean)
+			if removing then
+				return
+			end
 			hovered:set(inside)
 			over(item, inside)
 		end,
@@ -295,8 +318,11 @@ local function image_chip(item: Item, row: State<Item>, props: Props): Node
 			end, "$zeron.composer.chip.scrim_ink", "#ffffff4d"))),
 			ui.show(failed, scrim(ui.div { color = "$zeron.tone.danger.ink", Icon { name = "danger-triangle", size = 16 } })),
 		},
-		if remove
-			then cross(item, lit, remove, function(on: boolean)
+		if on_remove
+			then cross(item, lit, on_remove, function(on: boolean)
+				if removing then
+					return
+				end
 				focused:set(on)
 			end)
 			else nil,
@@ -442,6 +468,7 @@ end
 local function row_chip(item: Item, row: State<Item>, props: Props): Node
 	local hovered = ui.use_state(false)
 	local focused = ui.use_state(false)
+	local removing = false
 	local function lit(): boolean
 		return hovered:get() or focused:get()
 	end
@@ -494,6 +521,13 @@ local function row_chip(item: Item, row: State<Item>, props: Props): Node
 		glyph = Icon { name = "wrap-text", size = glyph_size - 2 }
 	end
 	local remove = props.on_remove
+	local on_remove = if remove
+		then function(id: string)
+			removing = true
+			over(item, false)
+			remove(id)
+		end
+		else nil
 	-- An element picked on a page (the browser panel's): its number and
 	-- page over its note or words, its card under the pointer, no click.
 	local pick = item.kind == "annotation" and item.element ~= nil
@@ -548,6 +582,9 @@ local function row_chip(item: Item, row: State<Item>, props: Props): Node
 			return row:get().name
 		end,
 		on_hover = function(inside: boolean)
+			if removing then
+				return
+			end
 			hovered:set(inside)
 			over(item, inside)
 		end,
@@ -574,6 +611,14 @@ local function row_chip(item: Item, row: State<Item>, props: Props): Node
 					(props.on_open :: (string) -> ())(item.id)
 				end
 				else nil,
+			on_drag = if props.drag_item
+				then function()
+					return (props.drag_item :: (Item) -> any?)(row:peek())
+				end
+				else nil,
+			drag_preview = props.drag_preview,
+			drag_preview_anchor = if props.drag_preview then { 0.5, 0.5 } else nil,
+			drag_preview_offset = if props.drag_preview then { 0, -4 } else nil,
 			slot,
 			ui.column {
 				min_w = 0,
@@ -656,8 +701,11 @@ local function row_chip(item: Item, row: State<Item>, props: Props): Node
 				}
 			),
 		},
-		if remove
-			then cross(item, lit, remove, function(on: boolean)
+		if on_remove
+			then cross(item, lit, on_remove, function(on: boolean)
+				if removing then
+					return
+				end
 				focused:set(on)
 			end, function(): string
 				return row:get().name
@@ -773,7 +821,7 @@ M.Strip = ui.component(function(props: Props): Node
 			gap = "$zeron.composer.chip.gap",
 			animate = { duration = 220, ease = "outCubic" },
 			enter = { opacity = { 0, 1 }, scale = { 0.9, 1 }, duration = 220, ease = "outCubic" },
-			exit = { opacity = 0, scale = 0.9, duration = 140, ease = "outCubic" },
+			exit = { opacity = 0, duration = 120, ease = "outCubic" },
 		}),
 	}
 end)

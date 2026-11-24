@@ -44,6 +44,7 @@ local ZeronCommands = require("@app/screens/chat/zeron_commands")
 -- (Loaded with the chat page: captures land on its composer.)
 local Appshots = require("@app/screens/chat/appshots")
 local Carried = require("@app/screens/chat/carried")
+local ComposerAtoms = require("@ds/composer_atoms")
 local Completions = require("@app/screens/chat/completions")
 
 -- Zeron's dock spring (ω ≈ 27).
@@ -907,12 +908,13 @@ local function Composer(): Node
 
 	-- A queued message being edited in the composer: which, and the draft
 	-- it set aside (put back when the edit ends).
-	local editing = ui.state("chat_editing", nil :: { item: string, aside: string, aside_cargo: { any }? }?)
+	local editing = ui.state("chat_editing", nil :: { item: string, aside: string, aside_cargo: { any }?, aside_atoms: { any }? }?)
 	local edits = Asks.queue_edits {
 		id = function(): string?
 			return session_id:peek()
 		end,
 		text = shared.text,
+		atoms = shared.atoms,
 		editing = editing,
 		focus = function()
 			shared.focus:add(1)
@@ -995,11 +997,14 @@ local function Composer(): Node
 		-- token goes; anything carried stays).
 		local zeron = completions.command_of(shared.text:peek())
 		if zeron then
-			shared.text:set("")
+			ui.batch(function()
+				shared.text:set("")
+				shared.atoms:set({})
+			end)
 			ZeronCommands.run(zeron, session_id:peek())
 			return
 		end
-		local typed, carried = shared.take()
+		local typed, carried, raw_draft, raw_atoms = shared.take()
 		local pack = Carried.pack(carried, typed, text)
 		local attachments = pack.attachments
 		-- (Each command or skill picked: its canonical reference.)
@@ -1055,7 +1060,7 @@ local function Composer(): Node
 				end, function(e: any)
 					own_notice:set { tone = "danger", key = "chat.composer.didnt_send", dismissable = true }
 					if shared.text:peek() == "" then
-						shared.text:set(text_out)
+						ComposerAtoms.apply(shared.text, shared.atoms, if #raw_atoms > 0 then raw_draft else text_out, raw_atoms)
 					end
 					-- Its files too, before any added since.
 					shared.restore_cargo_of(id, carried)
@@ -1140,7 +1145,7 @@ local function Composer(): Node
 		local failed = function(why: string?)
 			own_notice:set { tone = "danger", text = why, key = if why then nil else "chat.composer.didnt_start", dismissable = true }
 			if shared.text:peek() == "" then
-				shared.text:set(text_out)
+				ComposerAtoms.apply(shared.text, shared.atoms, if #raw_atoms > 0 then raw_draft else text_out, raw_atoms)
 			end
 		end
 		-- On Cloud, as the shipping app starts one: the chat opens at once
@@ -1372,6 +1377,9 @@ local function Composer(): Node
 				if math.abs(shared.dock_h:peek() - sizes.presented) > 0.01 then
 					shared.dock_h:set(sizes.presented)
 				end
+				if math.abs(shared.dock_target:peek() - sizes.target) > 0.01 then
+					shared.dock_target:set(sizes.target)
+				end
 			end,
 			-- Its measures, fold and open tray kept across a reload, so it
 			-- is laid out as it was from the first frame.
@@ -1388,6 +1396,7 @@ local function Composer(): Node
 			end,
 			on_pill_width = shared.pill_teller("waiting", "window"),
 			value = shared.text,
+			atoms = shared.atoms,
 			placeholder = ui.t("chat.composer.placeholder"),
 			expanded = shown_new,
 			snap = snap,
@@ -1510,6 +1519,7 @@ local function Composer(): Node
 			reach_default = cloud.reach,
 			cargo = shared.cargo,
 			on_remove_cargo = shared.remove_cargo,
+			cargo_chip = Carried.chip_spec,
 			on_attach = function()
 				ui.open_files({ title = ui.t("chat.composer.attach_files"):get(), multiple = true }):after(function(files: any)
 					if files and #files > 0 then
@@ -1520,7 +1530,7 @@ local function Composer(): Node
 			-- (A drop on the pill: the chat's overlay goes with it.)
 			on_files = function(files: { any })
 				shared.dropping:set({})
-				shared.attach_files(files)
+				shared.drop_files(files)
 			end,
 			-- A picture pasted (a screenshot): written out by the host, then
 			-- carried as an image, as one dropped is, named as Zeron names
@@ -1528,7 +1538,7 @@ local function Composer(): Node
 			on_paste_image = function(): boolean
 				store.paste_image():after(function(path: string?)
 					if type(path) == "string" and path ~= "" then
-						shared.attach_files({ { name = "image.png", path = path } })
+						shared.attach_pasted_image(path)
 					end
 				end, function() end)
 				return true

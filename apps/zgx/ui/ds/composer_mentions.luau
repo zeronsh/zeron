@@ -35,6 +35,7 @@ local Launcher = require("@self/mention_launcher")
 local M = {}
 
 local tokens = require("@self/mention_tokens")
+local ComposerAtoms = require("@self/composer_atoms")
 local Draft = require("@self/draft_text")
 local locale = require("@self/locale")
 
@@ -58,6 +59,9 @@ local ROWS, ROW, WIDTH = 7, 32, 320
 export type Use = {
 	field: any,
 	value: State<string>,
+	-- Inline atomic chips in the draft (ds/composer_atoms). When supplied,
+	-- picking a mention inserts an inline chip instead of plain `@token` text.
+	atoms: State<{ ComposerAtoms.AtomEntry }>?,
 	-- What each trigger lists: a table, or a state of one (a search's
 	-- results, arriving as the query is typed).
 	-- (`any`: a union with the state type is past luau-lsp's type functions.)
@@ -128,6 +132,9 @@ function M.use(opts: Use)
 	local token = ui.computed(function(): Token?
 		local t = Draft.token(opts.value, caret:get())
 		if t and opts.enabled and not opts.enabled(t.trigger) then
+			return nil
+		end
+		if t and opts.atoms and ComposerAtoms.touches_atom(opts.value:peek(), ComposerAtoms.live(opts.atoms), t.from, t.to) then
 			return nil
 		end
 		return t
@@ -324,6 +331,17 @@ function M.use(opts: Use)
 		local from, to, text, tok = M.pick(now, t.to, item, sources())
 		if not from or not to or not text or not tok then
 			return
+		end
+		if opts.atoms then
+			local spec = ComposerAtoms.from_mention(item, t.trigger, tok)
+			if spec then
+				local after = ComposerAtoms.insert_at(el, opts.value, opts.atoms, from, to, spec, true)
+				caret:set(after)
+				if opts.on_choose then
+					opts.on_choose(item, t.trigger, tok)
+				end
+				return
+			end
 		end
 		-- The path the new token stands for, in place of the old one's.
 		local old = string.sub(now, from + 1, to)

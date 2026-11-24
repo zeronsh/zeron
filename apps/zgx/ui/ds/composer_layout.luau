@@ -9,6 +9,8 @@ local CONTROL, TEXT_SIDE, TEXT_OPEN_SIDE = 28, 8, 16
 local INSET_LINE = (ONE_LINE - CONTROL) / 2
 local ACTIONS, ACTIONS_OVER, HYSTERESIS = 42, 3, 32
 M.BORDER = 1
+M.TEXT_MIN_VIEWPORT = TEXT_MIN - TEXT_TOP - TEXT_BOTTOM
+M.TEXT_MAX_VIEWPORT = TEXT_MAX - TEXT_TOP - TEXT_BOTTOM
 
 export type Sample = { unwrapped_width: number, wrapped_height: number, line_height: number }
 export type Input = {
@@ -146,6 +148,8 @@ function M.calculate(p: Input, previous_text_expanded: boolean): Geometry
 	end
 	-- Forced modes and an unknown width don't change text hysteresis.
 	local head = if p.cargo or p.asking then math.max(0, p.header_height) else 0
+	local line_height = if p.sample then math.max(1, p.sample.line_height) else LINE
+	local compact_line = math.clamp(math.max(LINE, line_height), LINE, ONE_LINE)
 	local natural_text = if p.sample then math.max(p.sample.wrapped_height, p.sample.line_height) else LINE
 	local natural_box = natural_text + TEXT_TOP + TEXT_BOTTOM
 	local box = math.clamp(natural_box, TEXT_MIN, TEXT_MAX)
@@ -166,15 +170,15 @@ function M.calculate(p: Input, previous_text_expanded: boolean): Geometry
 		height = height,
 		header_height = head,
 		tray_inset = chrome.tray_inset,
-		line_height = if p.sample then p.sample.line_height else LINE,
+		line_height = line_height,
 		compact_inset = INSET_LINE,
 		compact_text = { left = line_left, right = line_right },
 		text = {
 			left = left,
 			right = right,
 			width = math.max(0, p.width - M.BORDER * 2 - left - right),
-			top = if expanded then (if head > 0 then head + p.header_gap else TEXT_TOP) else (ONE_LINE - LINE) / 2,
-			height = if expanded then box - TEXT_TOP - TEXT_BOTTOM else LINE,
+			top = if expanded then (if head > 0 then head + p.header_gap else TEXT_TOP) else (ONE_LINE - compact_line) / 2,
+			height = if expanded then box - TEXT_TOP - TEXT_BOTTOM else compact_line,
 		},
 		controls = {
 			leading = { left = inset, bottom = inset, height = CONTROL },
