@@ -313,6 +313,15 @@ impl EngineCore {
                 edge: edge.clone(),
             },
         );
+        // A new version on trial may yet be undone, and a Cloud machine looking
+        // for a release would cut off whatever started now: neither starts
+        // work until it's decided (`update_trial`, `wake_update`). Said before
+        // the host is given anything to run: a message waiting on disk drains
+        // as soon as it has its sessions, while the rest is being assembled.
+        let holds_work = zeron_update::transaction::in_trial() || wake_update::armed();
+        if holds_work {
+            doc_host.hold_work();
+        }
         let workspace = WorkspaceHost::open(
             store,
             WorkspaceHostConfig {
@@ -377,14 +386,9 @@ impl EngineCore {
         let mcp_servers = mcp_servers::McpServers::new(&profile, data_dir, &device_id, edge.as_ref());
         sessions.set_mcp_servers(mcp_servers.clone());
         sessions.set_doc_host(doc_host.clone());
-        // A new version on trial may yet be undone, and recovering clears the
-        // journals' marks of what to resume, which a rollback doesn't restore.
-        // It waits for the commit (`update_trial`), with all other new work.
-        // A Cloud machine looking for a release does the same (`wake_update`): an
-        // update would cut off whatever started now.
-        if zeron_update::transaction::in_trial() || wake_update::armed() {
-            doc_host.hold_work();
-        } else {
+        // Recovering clears the journals' marks of what to resume, which a
+        // rollback doesn't restore: it waits with all other new work.
+        if !holds_work {
             match sessions.recover_stale() {
                 Ok(0) => {}
                 Ok(recovered) => tracing::info!(recovered, "stale sessions recovered on boot"),
@@ -1420,6 +1424,7 @@ impl Engine {
     pub async fn run(self) -> anyhow::Result<()> {
         let mut config = self.config;
         tracing::info!(data_dir = %config.data_dir.display(), "engine starting");
+        sessions::expect_ipc_port(true);
 
         std::fs::create_dir_all(&config.data_dir)?;
         update_trial::boot(&config.data_dir)?;
