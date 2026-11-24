@@ -37,10 +37,12 @@
    padding as a card does, its words on the column; hovered, the whole of it fills.) */
 .tbl { margin-top: var(--s24); margin-inline: calc(-1 * var(--s16)); }
 .tbl ul { padding: 0; list-style: none; }
-.trow { display: grid; column-gap: var(--s24); align-items: center; min-height: 56px; padding: var(--s12) var(--s16); border-radius: 12px; font-size: 14px; line-height: 20px; transition: background-color 0.12s var(--ease); }
-.tbl li + li > .trow, li.trow + li.trow, .th + ul > li:first-child > .trow, .th + ul > li.trow:first-child { box-shadow: 0 -1px 0 var(--line); }
-.trow:is(a, li):hover { background: var(--surface); box-shadow: none; }
-.trow:is(a, li):hover + *, li:hover + li > .trow, li.trow:hover + li.trow { box-shadow: none; }
+.trow { position: relative; display: grid; column-gap: var(--s24); align-items: center; min-height: 56px; padding: var(--s12) var(--s16); border-radius: 12px; font-size: 14px; line-height: 20px; transition: background-color 0.12s var(--ease); }
+/* (The rule between two rows is a line of its own, straight across the row's width; the hover's fill has the
+   corners. A hovered row's rule, and the next one's, give way to its fill.) */
+.tbl li + li > .trow::after, li.trow + li.trow::after, .th + ul > li:first-child > .trow::after, .th + ul > li.trow:first-child::after { content: ""; position: absolute; inset: 0 0 auto; height: 1px; background: var(--line); pointer-events: none; }
+.trow:is(a, li):hover { background: var(--surface); }
+.trow:is(a, li):hover::after, li:hover + li > .trow::after, li.trow:hover + li.trow::after { opacity: 0; }
 a.trow:focus-visible { outline-offset: -2px; }
 .trow.th { min-height: 0; padding-top: 0; padding-bottom: var(--s8); font-size: 13px; line-height: 20px; font-weight: 500; color: var(--text-3); }
 .trow > *, .trow .c-name { min-width: 0; }
@@ -99,9 +101,12 @@ a.trow:focus-visible { outline-offset: -2px; }
 /* (Each cell in its place: a token's list of plugins, when opened, is a row of its own under it.) */
 .keys .trow > .c-name { grid-column: 1; grid-row: 1; }
 .keys .trow .c-scope { grid-column: 2; grid-row: 1; }
-.keys .trow > .c-used { grid-column: 3; grid-row: 1; }
-.keys .trow > .c-ends { grid-column: 4; grid-row: 1; }
-.keys .trow > :last-child:not(.c-ends) { grid-column: 5; grid-row: 1; }
+.keys .c-when { display: contents; }
+.keys .trow .c-used { grid-column: 3; grid-row: 1; }
+.keys .trow .c-ends { grid-column: 4; grid-row: 1; }
+/* (Words a phone's line says, the header's on a wide screen.) */
+.keys .ph { display: none; }
+.keys .trow > :last-child:not(.c-when) { grid-column: 5; grid-row: 1; }
 .keys .trow .every::details-content { grid-column: 1 / -1; grid-row: 2; }
 /* (What it can publish, in its own column: the words, up to three small tiles and +n; with many, Show all, which
    opens the whole list as a row of its own under the token.) */
@@ -235,10 +240,11 @@ a.trow:focus-visible { outline-offset: -2px; }
   .sub { margin-top: var(--s32); gap: var(--s24); }
   /* (As wide as the column, as wide as the screen: the cards hang the whole gutter.) */
   .vlist { border-radius: 0; }
-  /* (The head's button under the title, its own width, hanging by its padding.) */
-  .acct .hd-row { flex-direction: column; align-items: flex-start; gap: var(--s16); }
-  .acct .hd-row > .btn { margin-left: calc(-1 * var(--pad)); }
-  .acct .lead { margin-top: var(--s16); }
+  /* (The head: the title, its lead, then the button, its own width, hanging by its padding.) */
+  .acct .hd { display: flex; flex-direction: column; align-items: flex-start; }
+  .acct .hd-row { display: contents; }
+  .acct .hd > .lead { order: 1; }
+  .acct .hd-row > .btn { order: 2; margin-top: var(--s16); margin-left: calc(-1 * var(--pad)); }
   /* A row in two lines: its name and where it stands; then the rest, small, one after another. No columns. */
   .trow.th { display: none; }
   .trow { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s4) var(--s8); padding-block: var(--s12); }
@@ -253,25 +259,29 @@ a.trow:focus-visible { outline-offset: -2px; }
   .mine .c-pub { order: 4; }
   .mine .c-n { order: 5; }
   .mine .trow > svg { display: none; }
-  /* (A token: its name and Revoke; then what it can publish, when it was last used, cut to fit, and when it ends;
-     its list of plugins, opened, under them.) */
-  .keys .trow { display: grid; grid-template-columns: fit-content(55%) minmax(0, 1fr) auto; column-gap: var(--s12); row-gap: var(--s4); }
+  /* (A token in three lines: its name, id and Revoke; what it can publish; "Last used … · Ends …", only a long
+     plugin's name cut. Its list of plugins, opened, under them.) */
+  .keys .trow { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--s12); row-gap: var(--s4); }
   .keys .trow::before { display: none; }
-  .keys .trow > .c-name { grid-column: 1 / 3; grid-row: 1; }
-  /* (The button and the pill reach past their line's height into the row's padding: the two lines sit an item's
-     step apart.) */
-  .keys .trow > .btn.revoke { grid-column: 3; grid-row: 1; margin-block: calc(-1 * var(--s8)); }
-  .keys .trow .c-scope { grid-column: 1; grid-row: 2; min-width: 0; }
-  .keys .trow > .c-used { grid-column: 2; grid-row: 2; }
-  .keys .trow > .c-ends { grid-column: 3; grid-row: 2; justify-self: end; }
-  .keys .trow > .c-ends > .state { margin-left: 0; margin-block: calc(-1 * var(--s4)); }
-  .keys .trow .every::details-content { grid-column: 1 / -1; grid-row: 3; }
-  .keys .trow.was > :last-child:not(.c-ends) { display: none; }
   .keys .trow.th { display: none; }
-  /* (Many plugins: the count whole and Show all; the tiles, which repeat the list, give way.) */
+  .keys .trow > .c-name { grid-column: 1; grid-row: 1; }
+  /* (The button and the pill reach past their line's height into the row's padding: the lines sit an item's step
+     apart.) */
+  .keys .trow > .btn.revoke { grid-column: 2; grid-row: 1; margin-block: calc(-1 * var(--s8)); }
+  .keys .trow .c-scope { grid-column: 1 / -1; grid-row: 2; min-width: 0; justify-self: start; max-width: 100%; }
+  .keys .c-when { display: flex; align-items: center; gap: var(--s8); grid-column: 1 / -1; grid-row: 3; min-width: 0; font-size: 13px; color: var(--text-3); }
+  .keys .trow .c-used { flex: 0 1 auto; min-width: 0; font-size: 13px; color: var(--text-3); }
+  .keys .trow .c-ends { flex: none; font-size: 13px; color: var(--text-3); }
+  .keys .trow .c-ends::before { content: "·"; margin-right: var(--s8); }
+  .keys .trow .c-ends > .state { margin-left: 0; margin-block: calc(-1 * var(--s4)); }
+  .keys .ph { display: inline; }
+  .keys .trow .every::details-content { grid-column: 1 / -1; grid-row: 4; }
+  .keys .trow.was > :last-child:not(.c-when) { display: none; }
+  /* (Many plugins: the count and Show all, a dot between; the tiles, which repeat the list, give way.) */
   .keys .every .tiles { display: none; }
   .keys .every .c-scope .sw { flex: none; }
-  .keys .every .c-scope { font-size: 13px; }
+  .keys .every .show::before { content: "·"; margin-right: var(--s8); color: var(--text-3); font-weight: 400; }
+  .keys .c-scope { font-size: 13px; color: var(--text-2); }
   .every .plist { margin-top: var(--s8); }
   /* (A plugin's: its version, when, how many; a dot between.) */
   :is(.mine .c-pub, .mine .c-n)::before { content: "·"; color: var(--text-3); }

@@ -114,8 +114,11 @@ const published = mine?.ok ? mine.data.plugins.filter((p) => p.versions.length >
                         {ids.length === 1 && tiles}<span class="sw">{scopeWords(k)}</span>
                       </span>
                     )}
-                    <span class="c-used" title={k.last_used_at ? usedLine(k) : `Made ${day(k.created_at, now)}`}><span class:list={{ t3: !k.last_used_at }}>{usedLine(k)}</span></span>
-                    <span class="c-ends">{k.expires_at === null ? store("plugins.store.key.no_end") : soon(k) ? <span class="state no">{endsIn(k)}</span> : date(k.expires_at)}</span>
+                    {/* (When: a phone's third line, "Last used … · Ends …"; wide, two columns.) */}
+                    <span class="c-when">
+                      <span class="c-used" title={k.last_used_at ? usedLine(k) : `Made ${day(k.created_at, now)}`}><span class:list={{ t3: !k.last_used_at }}>{k.last_used_at && <span class="ph">Last used </span>}{usedLine(k)}</span></span>
+                      <span class="c-ends">{k.expires_at === null ? store("plugins.store.key.no_end") : soon(k) ? <span class="state no">{endsIn(k)}</span> : <><span class="ph">Ends </span>{date(k.expires_at)}</>}</span>
+                    </span>
                     <a class="btn ghost sm revoke" href={`/account/tokens/${encodeURIComponent(k.id)}`}>{store("plugins.store.key.revoke")}<span class="sr-only"> {k.name}</span></a>
                   </li>
                 );
@@ -134,8 +137,10 @@ const published = mine?.ok ? mine.data.plugins.filter((p) => p.versions.length >
                   <li class="trow was">
                     <span class="c-name"><span class="nm" title={k.name}>{k.name}</span><span class="id">{k.short}</span></span>
                     <span class="c-scope"><span class="sw">{scopeWords(k)}</span></span>
-                    <span class="c-used" title={`Made ${day(k.created_at, now)}`}>{k.last_used_at ? since(k.last_used_at, now) : store("plugins.store.key.not_used")}</span>
-                    <span class="c-ends"><span class="state quiet">{k.revoked_at ? `Revoked ${day(k.revoked_at, now)}` : `Ended ${day(k.expires_at!, now)}`}</span></span>
+                    <span class="c-when">
+                      <span class="c-used" title={`Made ${day(k.created_at, now)}`}>{k.last_used_at ? <><span class="ph">Last used </span>{since(k.last_used_at, now)}</> : store("plugins.store.key.not_used")}</span>
+                      <span class="c-ends"><span class="state quiet">{k.revoked_at ? `Revoked ${day(k.revoked_at, now)}` : `Ended ${day(k.expires_at!, now)}`}</span></span>
+                    </span>
                     <span></span>
                   </li>
                 ))}

@@ -907,10 +907,11 @@ describe("forms", () => {
     const list = body.slice(body.indexOf('<ul class="plist"'), body.indexOf("</ul>", body.indexOf('<ul class="plist"')));
     expect(list.match(/<li class="pl">/g)).toHaveLength(14);
     // Last used: when, and on which plugin, one line; or not yet (when it was made, on hover).
-    expect(body).toMatch(/<span class="c-used" title="[^"]+ · Focus timer"><span>[^<]+ · Focus timer<\/span><\/span>/);
+    expect(body).toMatch(/<span class="c-used" title="[^"]+ · Focus timer"><span><span class="ph">Last used <\/span>[^<]+ · Focus timer<\/span><\/span>/);
     expect(body).toMatch(/<span class="c-used" title="Made [A-Z][a-z]{2} \d{1,2}(, \d{4})?"><span class="t3">Not used yet<\/span><\/span>/);
     // Ends: a date, doesn't, or within 14 days the warning's pill, in days.
     expect(body).toContain('<span class="c-ends">Doesn&#39;t expire</span>');
+    expect(body).toMatch(/<span class="c-ends"><span class="ph">Ends <\/span>[A-Z][a-z]{2} \d{1,2}, \d{4}<\/span>/);
     expect(body).toMatch(/<span class="state no">Ends in \d+ days?<\/span>/);
     // New token: a link to its page, which the script opens in place as the dialog holding the same form.
     expect(body).toContain('<a class="btn pri" href="/account/tokens/new" data-dialog="new-token">');
