@@ -12,7 +12,7 @@
 /* The hero: centred, the title large, a line, then the search, the page's one (the bar's isn't drawn here). */
 .hero { display: flex; flex-direction: column; align-items: center; text-align: center; }
 .hero h1 { font-size: 56px; line-height: 64px; font-weight: 600; letter-spacing: -0.04em; overflow-wrap: anywhere; max-width: 100%; }
-.hero .lead { margin-top: var(--head); max-width: 560px; font-size: 18px; line-height: 28px; text-wrap: balance; }
+.hero .lead { margin-top: var(--head); max-width: 640px; font-size: 18px; line-height: 28px; text-wrap: balance; }
 .hfind { position: relative; display: flex; align-items: center; width: 100%; max-width: 560px; height: 48px; margin-top: var(--groups); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-1); color: var(--text-3); text-align: left; transition: box-shadow 0.12s var(--ease); }
 .hfind:hover { box-shadow: 0 0 0 1px var(--line-2); }
 .hfind:focus-within { box-shadow: 0 0 0 1px var(--line-2), 0 0 0 4px color-mix(in srgb, var(--focus) 22%, transparent); }

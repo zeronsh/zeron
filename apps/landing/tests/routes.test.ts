@@ -153,7 +153,7 @@ describe("the store's list (/plugins)", () => {
   test("a card: its tile, name, what it does, then who made it and how many have it; one not verified says so in their place; no date", async () => {
     const { body } = await html("/plugins");
     const list = grid(body);
-    expect(list).toMatch(/<a class="pcard h\d+" href="\/plugins\/focus-timer"><span class="tile card[^"]*"[\s\S]*?<div class="pc-name"><span class="name">Focus timer<\/span><svg class="seal s"[\s\S]*?<p class="pc-sum">[^<]+<\/p><div class="pc-meta"><span class="pc-by">@ada<\/span><i aria-hidden="true"><\/i><span class="num">12,840 installs<\/span><\/div>/);
+    expect(list).toMatch(/<a class="pcard h\d+" href="\/plugins\/focus-timer"><span class="tile ms[^"]*"[\s\S]*?<div class="pc-name"><span class="name">Focus timer<\/span><svg class="seal s"[\s\S]*?<p class="pc-sum">[^<]+<\/p><div class="pc-meta"><span class="pc-by">@ada<\/span><i aria-hidden="true"><\/i><span class="num">12,840 installs<\/span><\/div>/);
     expect(list).toMatch(/<span class="pc-by">@ada<\/span><i aria-hidden="true"><\/i><span class="state no">[\d.]+(-[\w.]+)? not verified yet<\/span>/);
     // (What the list is sorted by is the menu's to say, not each card's.)
     for (const sort of ["", "?sort=updated", "?sort=new", "?sort=verified"]) expect(grid((await html(`/plugins${sort}`)).body), sort).not.toMatch(/>(Updated|Published|Verified) [A-Z][a-z]{2} \d/);

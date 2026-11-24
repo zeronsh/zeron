@@ -82,7 +82,7 @@ const lead = state.q
       ? `Plugins whose authors tagged them “${state.keyword}”.`
       : state.verified
         ? "Plugins whose newest version Zeron has verified."
-        : "Panels, commands and tools for your agents, made by people who use Zeron. Anyone can publish. A check marks what Zeron has verified.";
+        : "Panels, commands and tools for your agents, made by people who use Zeron. A check marks what Zeron has verified.";
 const title = state.q ? `“${state.q}” · Plugins · Zeron` : state.category ? `${categoryName(state.category)} plugins · Zeron` : "Plugins · Zeron";
 const description = state.category ? `Plugins for Zeron in ${categoryName(state.category)}, each saying whether Zeron verified it.` : "Panels, commands and tools for your agents, made by people who use Zeron. Each says whether Zeron verified it.";
 // Search results and later pages stay out of search engines; the list and its categories don't.

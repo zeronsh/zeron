@@ -19,7 +19,7 @@ const { plugin: p } = Astro.props;
 ---
 
 <a class:list={["pcard", hueClass(p.id)]} href={pluginUrl(p.id)}>
-  <Tile id={p.id} name={p.name} icon={p.icon} version={p.version} size="card" />
+  <Tile id={p.id} name={p.name} icon={p.icon} version={p.version} size="ms" />
   <div class="pc-body">
     <div class="pc-name"><span class="name">{p.name}</span>{p.verified && <Seal size="s" />}</div>
     <p class="pc-sum">{p.summary}</p>
