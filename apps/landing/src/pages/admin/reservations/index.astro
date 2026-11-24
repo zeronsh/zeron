@@ -45,7 +45,7 @@ const dialogId = (id: string) => `free-${id}`;
 
 <Store title="Reserved ids · Review · Zeron" description="Plugin ids held back from first-come claims." noindex current="review" session={session}>
   <div class="wrap acct">
-    <StaffHead title="Reserved ids" count={result.ok ? reservations.length : null} tabs={staffTabs("reservations", counts)}>
+    <StaffHead title="Reserved ids" count={result.ok ? reservations.length : null} lead="Plugin ids held back from first-come claims, for an account or for nobody." tabs={staffTabs("reservations", counts)}>
       <Flash flash={flash} />
       {
         !result.ok ? (
@@ -60,14 +60,14 @@ const dialogId = (id: string) => `free-${id}`;
             <p>An id reserved here can't be claimed by whoever sends it first.</p>
           </div>
         ) : (
-          <div class="card srows res">
-            <div class="sr h" aria-hidden="true"><span>Id</span><span>For</span><span>Why</span><span>Since</span><span></span></div>
+          <div class="tbl res">
+            <div class="trow th" aria-hidden="true"><span>Id</span><span>For</span><span>Why</span><span>Since</span><span></span></div>
             <ul aria-label="Reserved ids">
               {reservations.map((r) => (
-                <li class="sr">
-                  <code class="id">{r.id}</code>
+                <li class="trow">
+                  <code class="c-id">{r.id}</code>
                   <span class:list={{ t3: !r.to }}><span class="sr-only">For </span>{r.to ? `@${r.to.username}` : "Nobody"}</span>
-                  <span class="why">{r.note ?? ""}</span>
+                  <span class="c-said t2" title={r.note ?? undefined}>{r.note ?? ""}</span>
                   <span class="t2"><time datetime={new Date(r.created_at).toISOString()} title={dateTime(r.created_at)}>{day(r.created_at)}</time></span>
                   <a class="btn ghost sm" href={`${here}/${encodeURIComponent(r.id)}`} data-dialog={dialogId(r.id)}>Free…<span class="sr-only"> {r.id}</span></a>
                 </li>

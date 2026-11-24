@@ -67,7 +67,7 @@ const CLOCK = new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit"
 
 <Store title="Audit log · Review · Zeron" description="What was done to the store's plugins." noindex current="review" session={session}>
   <div class="wrap acct">
-    <StaffHead title="Audit log" count={result.ok ? result.data.total : null} tabs={staffTabs("audit", counts)}>
+    <StaffHead title="Audit log" count={result.ok ? result.data.total : null} lead="What reviewers and authors did to the store's plugins, the newest first." tabs={staffTabs("audit", counts)}>
       {
         pluginFilter && (
           <p class="tools-line">
@@ -90,26 +90,26 @@ const CLOCK = new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit"
           </div>
         ) : (
           <>
-            <div class="card srows log">
-              <div class="sr h" aria-hidden="true"><span>When</span><span>Who</span><span>What</span><span>Detail</span></div>
+            <div class="tbl log">
+              <div class="trow th" aria-hidden="true"><span>When</span><span>Who</span><span>What</span><span>Detail</span><span></span></div>
               <ul aria-label={`The audit log${pluginFilter ? ` for ${pluginFilter}` : ""}, the newest first`}>
-                {entries.map((e) => (
-                  <li class="sr">
-                    <span class="t2"><time datetime={new Date(e.at).toISOString()} title={dateTime(e.at)}>{day(e.at)}, {CLOCK.format(e.at)}</time></span>
-                    <span>{e.actor.username ? `@${e.actor.username}` : <span class="id t3">{e.actor.user_id}</span>}</span>
-                    <span>
-                      {Object.hasOwn(ACTIONS, e.action) ? ACTIONS[e.action] : e.action}{" "}
-                      {e.plugin_id && e.action.startsWith("reservation.") && <a href="/admin/reservations" class="pname"><code class="id">{e.plugin_id}</code></a>}
-                      {e.plugin_id && !e.action.startsWith("reservation.") && (
-                        <a href={e.version ? `/admin/plugins/${encodeURIComponent(e.plugin_id)}/${encodeURIComponent(e.version)}` : `/admin/plugins/${encodeURIComponent(e.plugin_id)}`} class="pname">
-                          <code class="id">{e.plugin_id}</code>
-                          {e.version && <span class="id t2"> {e.version}</span>}
-                        </a>
-                      )}
-                    </span>
-                    <span class="why">{detailText(e.detail)}</span>
-                  </li>
-                ))}
+                {entries.map((e) => {
+                  const href = !e.plugin_id ? null : e.action.startsWith("reservation.") ? "/admin/reservations" : e.version ? `/admin/plugins/${encodeURIComponent(e.plugin_id)}/${encodeURIComponent(e.version)}` : `/admin/plugins/${encodeURIComponent(e.plugin_id)}`;
+                  const detail = detailText(e.detail);
+                  /* (A row about a plugin opens it: its id's link, stretched over the row.) */
+                  return (
+                    <li class="trow">
+                      <span class="t2"><time datetime={new Date(e.at).toISOString()} title={dateTime(e.at)}>{day(e.at)}, {CLOCK.format(e.at)}</time></span>
+                      <span class="c-who">{e.actor.username ? `@${e.actor.username}` : <span class="c-id t3">{e.actor.user_id}</span>}</span>
+                      <span class="c-what">
+                        <span>{Object.hasOwn(ACTIONS, e.action) ? ACTIONS[e.action] : e.action}</span>
+                        {href && <a class="stretch c-id" href={href}>{e.plugin_id}{e.version && <span class="t2"> {e.version}</span>}</a>}
+                      </span>
+                      <span class="c-said t2" title={detail || undefined}>{detail}</span>
+                      {href ? <Icon name="chev" /> : <span></span>}
+                    </li>
+                  );
+                })}
               </ul>
             </div>
             {pager && (pager.previous || pager.next) && (
