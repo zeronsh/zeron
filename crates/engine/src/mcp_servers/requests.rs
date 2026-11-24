@@ -40,6 +40,17 @@ impl McpServers {
         &self,
         params: RequestMcpChangeParams,
     ) -> Result<McpRequestView, String> {
+        // Someone to ask: a Zeron window following this engine's servers.
+        // With none (a Cloud machine, a headless server), a request would
+        // wait for no one, so the agent is told whom to ask instead.
+        if self.snapshot_tx.receiver_count() == 0 {
+            return Err(
+                "No Zeron window is open on this device to ask the person in. Ask them to add or \
+                 change it in Settings → MCP on their computer (it syncs here), or with \
+                 `zeron mcp` in a terminal."
+                    .into(),
+            );
+        }
         let title = self.describe(&params.change)?;
         let reason = params
             .reason
@@ -349,6 +360,11 @@ mod tests {
         (dir, mgr)
     }
 
+    /// A Zeron window following the servers: someone to ask.
+    fn window(mgr: &McpServers) -> tokio::sync::watch::Receiver<zeron_proto::McpServersSnapshot> {
+        mgr.watch_snapshot()
+    }
+
     fn ask(change: McpChange) -> RequestMcpChangeParams {
         RequestMcpChangeParams {
             change,
@@ -375,6 +391,7 @@ mod tests {
     #[tokio::test]
     async fn requests_wait_for_the_person_and_are_done_as_answered() {
         let (_dir, mgr) = manager();
+        let _window = window(&mgr);
         let asked = mgr.request_change(ask(add_preset("context7", None))).await.unwrap();
         assert_eq!(asked.status, McpRequestStatus::Pending);
         assert_eq!(asked.title, "Context7");
@@ -420,6 +437,7 @@ mod tests {
     #[tokio::test]
     async fn requests_that_cant_be_asked_are_refused() {
         let (_dir, mgr) = manager();
+        let _window = window(&mgr);
         let custom = |url: &str, auth: Option<zeron_proto::McpAuthKind>| McpChange::Add {
             preset: None,
             name: Some("Acme".into()),
@@ -474,6 +492,7 @@ mod tests {
     #[tokio::test]
     async fn only_so_many_wait_at_once() {
         let (_dir, mgr) = manager();
+        let _window = window(&mgr);
         for n in 0..MAX_PENDING {
             mgr.request_change(ask(add_preset("linear", Some(&format!("Account {n}")))))
                 .await
@@ -484,5 +503,15 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("wait for the person"), "{err}");
+    }
+
+    /// With no Zeron window here (a Cloud machine, a headless server), a
+    /// request would wait for no one: the agent is told whom to ask.
+    #[tokio::test]
+    async fn with_no_window_to_ask_in_the_agent_is_told_whom_to_ask() {
+        let (_dir, mgr) = manager();
+        let err = mgr.request_change(ask(add_preset("context7", None))).await.unwrap_err();
+        assert!(err.contains("Settings → MCP"), "{err}");
+        assert!(mgr.snapshot().requests.is_empty());
     }
 }
