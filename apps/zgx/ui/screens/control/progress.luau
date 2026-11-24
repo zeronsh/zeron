@@ -38,8 +38,11 @@ local M = {}
 
 -- How long "What's up?" rests after it's used (seconds).
 M.COOLDOWN = 15
--- The widget's units before the rest fold away.
-M.FIRST = 4
+-- The widget's units before the rest fold away: what's working is never
+-- folded below ten (ds/orch_crew_list's WORKING_MIN). It sits in the
+-- page's own scroll, with no room of its own to fill past that; the rest
+-- open on "n more", in a list of OPEN_MAX_H that scrolls.
+M.FIRST = 10
 
 -- The threads pinned to the widget, in the order they were pinned (this
 -- device's).

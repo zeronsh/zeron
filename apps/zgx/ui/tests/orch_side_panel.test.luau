@@ -106,11 +106,15 @@ test("side panel: the crew grouped Working, Waiting on you, Idle; each capped", 
 	app:command("orch.big_crew")
 	settle(app)
 	crew_tab(app)
-	-- 8 of its own working and 3 of the sample's; 5 shown, then "6 more".
-	expect(app:count("#orch-crew-working >> .orch-crew-row")).to_be(5)
-	expect(app:has('#orch-crew-working >> role:button "6 more"')).to_be(true)
-	app:click('#orch-crew-working >> role:button "6 more"')
-	settle(app)
+	-- 8 of its own working and 3 of the sample's: at least ten shown, the
+	-- rest on "n more" only where they don't fit.
+	local shown_n = app:count("#orch-crew-working >> .orch-crew-row")
+	expect(shown_n >= 10).to_be(true)
+	if shown_n < 11 then
+		expect(app:has(`#orch-crew-working >> role:button "{11 - shown_n} more"`)).to_be(true)
+		app:click(`#orch-crew-working >> role:button "{11 - shown_n} more"`)
+		settle(app)
+	end
 	expect(app:count("#orch-crew-working >> .orch-crew-row")).to_be(11)
 	-- Waiting on you: the three failed and the sample's thread with an ask.
 	expect(app:has('#orch-crew-waiting >> "Broken thread 1"')).to_be(true)
@@ -131,6 +135,88 @@ test("side panel: the crew grouped Working, Waiting on you, Idle; each capped", 
 	expect(names).to_be(1)
 	expect(app:has("#orch-crew-list >> .orch-working")).to_be(false)
 	expect(app:has('#orch-crew-list >> "Failed"')).to_be(true)
+	expect(app:error()).to_be_nil()
+end)
+
+-- The Crew tab with `n` working and 42 idle, at a window `h` tall.
+local function crew_of(n: number, h: number): any
+	local app = open(1440, h)
+	app:command(`orch.crew_{n}`)
+	settle(app)
+	crew_tab(app)
+	settle(app)
+	return app
+end
+
+local function working_rows(app: any): number
+	return app:count("#orch-crew-working >> .orch-crew-row")
+end
+
+test("side panel: Working shows every thread while there's room", function()
+	-- Six of 48, the person's: all six, no "n more", Idle folded.
+	local app = crew_of(6, 1300)
+	expect(working_rows(app)).to_be(6)
+	expect(app:has("#orch-crew-working >> .orch-crew-more")).to_be(false)
+	expect(app:count("#orch-crew-idle >> .orch-crew-row")).to_be(0)
+	expect(app:text("#orch-crew-idle >> .orch-fold-count")).to_be("42")
+	-- Twelve, tall enough for them: all twelve.
+	app = crew_of(12, 1300)
+	expect(working_rows(app)).to_be(12)
+	expect(app:has("#orch-crew-working >> .orch-crew-more")).to_be(false)
+	expect(app:error()).to_be_nil()
+end)
+
+test("side panel: Working never folds below ten, and past that only what doesn't fit", function()
+	-- Twelve in a short window: ten, then "2 more".
+	local app = crew_of(12, 600)
+	expect(working_rows(app)).to_be(10)
+	expect(app:has('#orch-crew-working >> role:button "2 more"')).to_be(true)
+	-- Thirty in a tall one: past ten, as many as fit; the rest folded.
+	app = crew_of(30, 1300)
+	local n = working_rows(app)
+	expect(n > 10).to_be(true)
+	expect(n < 30).to_be(true)
+	expect(app:has(`#orch-crew-working >> role:button "{30 - n} more"`)).to_be(true)
+	-- What shows fits the panel: its last row, "n more" and Idle's head in view.
+	local view = box(app, "#orch-crew-scroll")
+	local idle = box(app, "#orch-crew-idle >> .orch-fold-head")
+	expect(idle.y + idle.h <= view.y + view.h).to_be(true)
+	-- One more row would not have fit.
+	local row = box(app, "#orch-crew-working >> .orch-crew-row [1]")
+	expect(idle.y + idle.h + row.h > view.y + view.h - 24).to_be(true)
+	-- Opened, every one; folded again, as before.
+	app:click('#orch-crew-working >> .orch-crew-more')
+	settle(app)
+	expect(working_rows(app)).to_be(30)
+	expect(app:has('#orch-crew-working >> role:button "Fewer"')).to_be(true)
+	app:scroll("#orch-crew-scroll", 5000)
+	settle(app)
+	app:click('#orch-crew-working >> .orch-crew-more')
+	settle(app)
+	expect(working_rows(app)).to_be(n)
+	expect(app:error()).to_be_nil()
+end)
+
+test("side panel: Working's n more is a control: a chevron and words where the rows' are", function()
+	local app = crew_of(30, 900)
+	local more = "#orch-crew-working >> .orch-crew-more"
+	-- A button that says how many, with a chevron icon (never a typed glyph).
+	expect(app:has(`#orch-crew-working >> role:button "{30 - working_rows(app)} more"`)).to_be(true)
+	expect(app:has(`{more} >> role:img`)).to_be(true)
+	expect(app:tree(more):find("Fewer") == nil).to_be(true)
+	-- Its chevron where the rows' status icons stand, its words where their
+	-- names start.
+	local icon = box(app, `{more} >> role:img`)
+	-- (A row's status icon stands centred in 16 points past its padding.)
+	local first = box(app, "#orch-crew-working >> .orch-crew-row [1]")
+	expect(math.abs(icon.x + icon.w / 2 - (first.x + 16)) <= 1).to_be(true)
+	local name = box(app, "#orch-crew-working >> .orch-crew-row-name [1]")
+	expect(math.abs(icon.x + icon.w + 9 - name.x) <= 2).to_be(true)
+	-- As tall as a group's head, and as wide as the rows.
+	local b = box(app, more)
+	local row = box(app, "#orch-crew-working >> .orch-crew-row [1]")
+	expect(b.h).to_be(32)
+	expect(b.w).to_be(row.w)
 	expect(app:error()).to_be_nil()
 end)
 

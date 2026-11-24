@@ -52,7 +52,18 @@ local Body = ui.component(function(p: { props: Props, orch: string }): Node
 		state.detail:set({ chat = chat, item = item })
 	end
 	local kept = KeptScroll.use(props.place)
-	local function scroller(sid: string, child: Node, keep: boolean): Node
+	-- The Crew tab's view and what's in it, measured: the room under its
+	-- list, which Working fills before it folds (ds/orch_crew_list).
+	local crew_view = ui.use_state(0)
+	local crew_content = ui.use_state(0)
+	local function measure(into: State<number>): (size: any, el: any) -> ()
+		return function(size: any, _el: any)
+			if math.abs(size.h - into:peek()) >= 1 then
+				into:set(size.h)
+			end
+		end
+	end
+	local function scroller(sid: string, child: Node, keep: boolean, measured: boolean?): Node
 		return ui.scroll {
 			id = sid,
 			w_full = true,
@@ -66,7 +77,7 @@ local Body = ui.component(function(p: { props: Props, orch: string }): Node
 			on_key = if keep then kept.on_key else nil,
 			ui.column {
 				w_full = true,
-				on_resize = if keep then kept.on_resize else nil,
+				on_resize = if keep then kept.on_resize elseif measured then measure(crew_content) else nil,
 				px = "$space.2",
 				pt = "$space.1",
 				pb = "$space.6",
@@ -131,7 +142,11 @@ local Body = ui.component(function(p: { props: Props, orch: string }): Node
 		on_open = function(chat: string)
 			open_detail(chat, nil)
 		end,
-	}, false)
+		room = function(): number
+			local view = crew_view:get()
+			return if view > 0 then view - crew_content:get() else 0
+		end,
+	}, false, true)
 	return ui.column {
 		w_full = true,
 		h_full = true,
@@ -158,6 +173,7 @@ local Body = ui.component(function(p: { props: Props, orch: string }): Node
 				w_full = true,
 				grow = 1,
 				min_h = 0,
+				on_resize = measure(crew_view),
 				hidden = function(): boolean
 					return tab:get() ~= "crew"
 				end,

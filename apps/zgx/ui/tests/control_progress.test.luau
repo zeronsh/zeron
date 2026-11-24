@@ -1,6 +1,6 @@
 -- The Control room's Progress (screens/control/progress), under Notes, on
 -- ui/control_page_fixture.luau: every thread working now, the latest
--- started first, and those pinned before them (four, the rest folded);
+-- started first, and those pinned before them (ten, the rest folded);
 -- pins kept on this device;
 -- "What's up?" asks the host once (control_world notes it), then rests;
 -- nothing working, one quiet line.
@@ -39,12 +39,8 @@ end)
 
 test("control progress: what's working now, the latest started first", function()
 	local app = open()
-	-- The first four, the rest folded.
-	expect(#listed(app)).to_be(4)
-	expect(app:has('#control-progress-more >> "2 more"')).to_be(true)
-	app:click("#control-progress-more")
-	app:frames(10)
-	expect(app:has('#control-progress-more >> "Fewer"')).to_be(true)
+	-- All six: what's working never folds below ten.
+	expect(app:has("#control-progress-more")).to_be(false)
 	local ids = listed(app)
 	expect(table.concat(ids, ",")).to_be("orc-orch,th-vpn-merge,th-engine-state,th-ui-orch,th-engine-flow,th-ui-control")
 	-- Done and failed aren't working.
@@ -157,7 +153,7 @@ test("control progress: drawn wide and narrow, resized", function()
 		app:resize(size[1], size[2])
 		app:frames(20)
 		expect(app:has(W)).to_be(true)
-		expect(#listed(app)).to_be(4)
+		expect(#listed(app)).to_be(6)
 		expect(app:error()).to_be(nil)
 	end
 end)
