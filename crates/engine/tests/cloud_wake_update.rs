@@ -146,6 +146,33 @@ impl Rig {
     }
 }
 
+/// A message waiting as the engine starts is answered with the tools it's
+/// about to serve, not before them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_waiting_at_a_start_is_answered_with_zerons_tools() {
+    let _serial = SERIAL.lock().await;
+    let rig = Rig::new();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(Agent {
+        release: rig.release.clone(),
+        runs: rig.runs.clone(),
+    }));
+    zeron_engine::sessions::expect_ipc_port(true);
+    let core = EngineCore::assemble(&rig.dir, Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    zeron_engine::sessions::expect_ipc_port(false);
+    create_chat(&core).await;
+    send(&core, "waited", "waited");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(rig.answers(), 0, "not before its tools are served");
+    core.sessions.set_ipc_port(27699);
+    wait_for(|| answered(&core, "waited"), "the waiting message's answer").await;
+    let runs = rig.runs.lock().unwrap().clone();
+    let zeron = runs[0].mcp.as_ref().expect("the run carries Zeron's tools");
+    assert_eq!(zeron.env.get("ZERON_IPC_PORT").map(String::as_str), Some("27699"));
+    core.shutdown().await;
+}
+
 async fn create_chat(core: &EngineCore) {
     let client = zeron_rpc::memory_client(core.rpc_service());
     let _ = client

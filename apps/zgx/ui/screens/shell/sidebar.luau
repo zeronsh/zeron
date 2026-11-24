@@ -331,27 +331,6 @@ local function say(word: string): string
 	return locale.s(`shell.sidebar.filter.state.{word}`)
 end
 
--- The Archived shelf's sessions (the most recently moved first), as the
--- list's rows read them.
-local shelf = ui.computed(function(): { any }
-	local names = devices()
-	local out = {}
-	for _, c in sessions.archived:get() do
-		table.insert(out, {
-			id = c.id,
-			title = c.title,
-			time = c.updated,
-			created = c.created,
-			agent = c.agent,
-			harness = c.harness,
-			agent_icon = c.agent_icon,
-			device = names[c.device] or locale.s("shell.sidebar.unknown_device"),
-			branch = c.branch,
-		})
-	end
-	return out
-end)
-
 -- The project the list is narrowed to (the filter showing, and the
 -- project still there), else nil.
 local function only_project(): string?
@@ -458,6 +437,51 @@ route.narrowed_project(function(): string?
 	return nil
 end)
 
+-- The projects' groups, with no sessions yet: one for each repository,
+-- whichever device its clones are on (it stands where the first of them
+-- does, and reads as the oldest of them), then the chats in none; and each
+-- project's group, by their ids.
+type Groups = { list: { ds.SidebarProject }, of: { [string]: string } }
+local groups = ui.computed(function(): Groups
+	local all = sessions.now:get().projects
+	local out: Groups = { list = {}, of = {} }
+	local seen: { [string]: boolean } = {}
+	for _, p in all do
+		local first = oldest_checkout(p, all)
+		out.of[p.id] = first.id
+		if not seen[first.id] then
+			seen[first.id] = true
+			local l = route.look(first.id) or { hue = route.hue(first.id) }
+			table.insert(out.list, { id = first.id, name = first.name, hue = l.hue, src = l.src, emoji = l.emoji, sessions = {} })
+		end
+	end
+	table.insert(out.list, { id = NO_PROJECT, name = locale.s("shell.sidebar.chats"), icon = "side-chat", sessions = {} })
+	return out
+end)
+
+-- The Archived shelf's sessions (the most recently moved first), as the
+-- list's rows read them.
+local shelf = ui.computed(function(): { any }
+	local names = devices()
+	local of = groups:get().of
+	local out = {}
+	for _, c in sessions.archived:get() do
+		table.insert(out, {
+			id = c.id,
+			title = c.title,
+			time = c.updated,
+			created = c.created,
+			agent = c.agent,
+			harness = c.harness,
+			agent_icon = c.agent_icon,
+			device = names[c.device] or locale.s("shell.sidebar.unknown_device"),
+			branch = c.branch,
+			project = (c.project and of[c.project]) or NO_PROJECT,
+		})
+	end
+	return out
+end)
+
 local projects = ui.computed(function(): { ds.SidebarProject }
 	local now = sessions.now:get()
 	local asked = asks:get()
@@ -466,23 +490,20 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 	local names = devices()
 	local out: { ds.SidebarProject } = {}
 	local by: { [string]: ds.SidebarProject } = {}
-	-- One group for each repository, whichever device its clones are on: it stands
-	-- where the first of them does, and reads as the oldest of them.
-	local of_repository: { [string]: ds.SidebarProject } = {}
-	for _, p in now.projects do
-		local group = if p.repository then of_repository[p.repository] else nil
-		if not group then
-			local first = oldest_checkout(p, now.projects)
-			local l = route.look(first.id) or { hue = route.hue(first.id) }
-			group = { id = first.id, name = first.name, hue = l.hue, src = l.src, emoji = l.emoji, sessions = {} }
-			table.insert(out, group :: any)
-			if p.repository then
-				of_repository[p.repository] = group :: any
-			end
+	local made: { [string]: ds.SidebarProject } = {}
+	local all = groups:get()
+	for _, g in all.list do
+		local group = table.clone(g)
+		group.sessions = {}
+		made[g.id] = group
+		if g.id ~= NO_PROJECT then
+			table.insert(out, group)
 		end
-		by[p.id] = group :: any
 	end
-	local loose: ds.SidebarProject = { id = NO_PROJECT, name = locale.s("shell.sidebar.chats"), icon = "side-chat", sessions = {} }
+	for id, group in all.of do
+		by[id] = made[group]
+	end
+	local loose = made[NO_PROJECT]
 	-- (Which have sessions listed, and which archived ones.)
 	-- (By group: a repository isn't empty while any clone of it has a session.)
 	local just_group = if just then by[just] else nil
@@ -1695,6 +1716,9 @@ M.Sidebar = ui.component(function(props: Props): Node
 		end,
 		on_archive = M.archive,
 		archived = shelf,
+		known = function(): { ds.SidebarProject }
+			return groups:get().list
+		end :: any,
 		activity = activity.on,
 		on_activity_settings = function()
 			route.settings("activity")

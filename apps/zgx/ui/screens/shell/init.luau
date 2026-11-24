@@ -613,9 +613,13 @@ return function(): Node
 					return ui.div {}
 				end
 				local function chat(): any
-					for _, c in sessions.now:get().chats do
-						if c.id == id then
-							return c
+					local now = sessions.now:get()
+					-- (An archived one's too, from its shelf.)
+					for _, list in { now.chats, now.archived or {} } do
+						for _, c in list do
+							if c.id == id then
+								return c
+							end
 						end
 					end
 					return nil

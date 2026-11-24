@@ -296,6 +296,9 @@ struct Inner {
     /// Rung as the port is recorded: what a run revived on boot, while the
     /// engine is still being assembled, waits on ([`SessionsEngine::ipc_port_ready`]).
     ipc_ready: tokio::sync::Notify,
+    /// This engine will serve one ([`expect_ipc_port`]): every run started
+    /// before it does waits for it, not only one revived on boot.
+    ipc_expected: std::sync::atomic::AtomicBool,
     /// Set when this engine will serve no port at all
     /// ([`SessionsEngine::set_no_ipc_port`]): that wait ends at once.
     ipc_none: std::sync::atomic::AtomicBool,
@@ -478,6 +481,18 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Whether engines made from here on serve an IPC port ([`expect_ipc_port`]).
+static IPC_EXPECTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// This process's engine serves an IPC port, once it's assembled
+/// ([`SessionsEngine::set_ipc_port`]): runs started before then wait for it.
+/// Said before assembly, which may start one. Never by an embedder that
+/// serves none (an in-process engine), whose runs go on without.
+#[doc(hidden)]
+pub fn expect_ipc_port(expected: bool) {
+    IPC_EXPECTED.store(expected, std::sync::atomic::Ordering::Release);
+}
+
 #[derive(Clone)]
 pub struct SessionsEngine {
     inner: Arc<Inner>,
@@ -503,6 +518,9 @@ impl SessionsEngine {
                 cancelled_sends: Mutex::new(HashMap::new()),
                 user_stops: Mutex::new(HashMap::new()),
                 ipc_port: std::sync::atomic::AtomicU16::new(0),
+                ipc_expected: std::sync::atomic::AtomicBool::new(
+                    IPC_EXPECTED.load(std::sync::atomic::Ordering::Acquire),
+                ),
                 ipc_ready: tokio::sync::Notify::new(),
                 ipc_none: std::sync::atomic::AtomicBool::new(false),
                 ipc_token_file: Mutex::new(None),
@@ -563,28 +581,7 @@ impl SessionsEngine {
     /// revived run went out with no Zeron tools (its agent read them as gone,
     /// and a parent woken by its children's reports couldn't answer them).
     async fn ipc_port_ready(&self, limit: std::time::Duration) {
-        let deadline = tokio::time::Instant::now() + limit;
-        loop {
-            // (Made before the check: `notify_waiters` reaches a `Notified`
-            // from its making, polled or not.)
-            let rung = self.inner.ipc_ready.notified();
-            // (Acquire: the bearer, recorded before the port, is seen too.)
-            let port = self
-                .inner
-                .ipc_port
-                .load(std::sync::atomic::Ordering::Acquire);
-            if port != 0
-                || self
-                    .inner
-                    .ipc_none
-                    .load(std::sync::atomic::Ordering::Acquire)
-            {
-                return;
-            }
-            if tokio::time::timeout_at(deadline, rung).await.is_err() {
-                return;
-            }
-        }
+        self.inner.ipc_port_ready(limit).await;
     }
 
     /// Record where the served port's bearer lives (`{data_dir}/ipc-token`).
@@ -3260,6 +3257,25 @@ impl Inner {
             })
     }
 
+    /// [`SessionsEngine::ipc_port_ready`].
+    async fn ipc_port_ready(&self, limit: std::time::Duration) {
+        let deadline = tokio::time::Instant::now() + limit;
+        loop {
+            // (Made before the check: `notify_waiters` reaches a `Notified`
+            // from its making, polled or not.)
+            let rung = self.ipc_ready.notified();
+            // (Acquire: the bearer, recorded before the port, is seen too.)
+            if self.ipc_port.load(std::sync::atomic::Ordering::Acquire) != 0
+                || self.ipc_none.load(std::sync::atomic::Ordering::Acquire)
+            {
+                return;
+            }
+            if tokio::time::timeout_at(deadline, rung).await.is_err() {
+                return;
+            }
+        }
+    }
+
     /// Zeron's own MCP server for a run of `chat_id`, stamped with the
     /// originating chat + device so the agent's side chats link back here.
     /// None when the engine serves neither its MCP endpoint nor an IPC port.
@@ -4852,6 +4868,17 @@ async fn drive_run(
     {
         request.mcp = taken.parked.mcp.take();
         _mcp_grant = taken.parked.grant.take();
+    }
+    // A message that waited out a restart (an update's, on a Cloud machine it
+    // woke) starts its run while the engine is still being assembled: the run
+    // waits for the tools it's about to serve. Without them it went out with
+    // no Zeron tools and no MCP servers, and its session kept running so.
+    if request.mcp.is_none() && inner.ipc_expected.load(std::sync::atomic::Ordering::Acquire) {
+        tokio::select! {
+            biased;
+            _ = controls.interrupt.cancelled() => {}
+            () = inner.ipc_port_ready(std::time::Duration::from_secs(10)) => {}
+        }
     }
     if request.mcp.is_none()
         && let Some((server, grant)) =
