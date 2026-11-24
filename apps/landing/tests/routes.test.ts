@@ -1254,6 +1254,15 @@ describe("forms", () => {
     expect(author.body).toContain("Say what &lt;b&gt;it&lt;/b&gt; does.");
   });
 
+  test("the line under Install says one thing for one version: the plugin's page and the version's own draw it alike", async () => {
+    const line = (body: string) => body.slice(body.indexOf('<p class="ver">'), body.indexOf("</p>", body.indexOf('<p class="ver">')) + 4);
+    const plugin = line((await html("/plugins/focus-timer")).body);
+    expect(plugin).toContain('<b class="mono">1.2.0</b>');
+    expect(line((await html("/plugins/focus-timer/versions/1.2.0")).body)).toBe(plugin);
+    // (When it was published: the verified date is the rail's.)
+    expect(plugin).toMatch(/<time datetime="[^"]+"><span class="sr-only">Published <\/span>[^<]+<\/time><\/p>$/);
+  });
+
   test("a version's stepper: the versions either side of it, the older at the left, the newer at the right; one at an end, one side", async () => {
     const step = async (version: string) => {
       const body = (await html(`/plugins/focus-timer/versions/${version}`)).body;

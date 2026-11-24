@@ -85,7 +85,7 @@ const versionHref = (x: string) => `${base}/versions/${encodeURIComponent(x)}`;
               <p class="note quiet">{stoppedWhy(v)}</p>
             </div>
           ) : (
-            <Get id={p.id} name={p.name} version={v.version} newest={newest} verified={v.verified} verifiedAt={v.verified_at} publishedAt={v.published_at} verifiedVersion={v.verified || p.verified_version === v.version ? null : p.verified_version} off={off} />
+            <Get id={p.id} name={p.name} version={v.version} newest={newest} verified={v.verified} publishedAt={v.published_at} verifiedVersion={v.verified || p.verified_version === v.version ? null : p.verified_version} off={off} />
           )}
         </header>
         <div class="cols2 after-head">

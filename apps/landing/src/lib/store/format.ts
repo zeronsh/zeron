@@ -53,6 +53,13 @@ export function since(ms: number, now = Date.now(), hours = false): string {
   return day(ms, now);
 }
 
+/**
+ * When a version was published, as the line under Install says it, on a
+ * plugin's page and on the version's own alike: one fact, from one place. (When
+ * Zeron verified it is the rail's to say.)
+ */
+export const publishedWhen = (ms: number, now = Date.now()): string => since(ms, now, true);
+
 /** The same, inside a sentence ("Published yesterday", "Last used just now"): its own words in lower case. */
 export function sinceInSentence(ms: number, now = Date.now(), hours = false): string {
   return since(ms, now, hours).replace(/^(Today|Yesterday|Just now)$/, (w) => w.toLowerCase());

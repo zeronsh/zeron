@@ -62,7 +62,7 @@ const ABOUT: Record<(typeof REPORT_REASONS)[number], string> = {
   {/* (One centred column, no box round it, as GitHub's report flow: whom it's about, why, what you saw, send.) */}
   <div class="wrap rpt">
     <nav class="crumbs" aria-label="Where this is">
-      <a href="/plugins">All plugins</a><Icon name="chev" /><a href={pluginUrl(id)}>{unbidi(plugin?.name ?? id)}</a><Icon name="chev" /><span aria-current="page">Report</span>
+      <a href="/plugins">Plugins</a><Icon name="chev" /><a href={pluginUrl(id)}>{unbidi(plugin?.name ?? id)}</a><Icon name="chev" /><span aria-current="page">Report</span>
     </nav>
     <Flash flash={sent ? null : flash} />
     {
