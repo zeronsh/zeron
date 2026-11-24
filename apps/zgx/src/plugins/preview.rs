@@ -179,15 +179,17 @@ pub fn another_s(templates: &Path, id: &str) -> bool {
     id != live::BUILTIN && super::official::verified(&templates.join(id)).is_none()
 }
 
-/// Template `id` is about to run. (Told before it's laid over Zeron's own.)
+/// Template `id` is about to run. Told before it's laid over Zeron's own, and
+/// after Zeron's official templates are brought up to this build's
+/// (`live::sync_zeron`): before it, one an update is about to rewrite still
+/// holds the last Zeron's files, which aren't this one's.
 pub fn note_running(templates: &Path, id: &str) {
-    if !ANOTHER_S_RAN.load(Ordering::Relaxed) && another_s(templates, id) {
-        note_another_s();
+    if another_s_ran() || !another_s(templates, id) {
+        return;
     }
-}
-
-/// One that isn't Zeron's runs, or can't be told from one.
-pub fn note_another_s() {
+    #[cfg(test)]
+    TEST_RAN.with(|r| r.set(Some(true)));
+    #[cfg(not(test))]
     ANOTHER_S_RAN.store(true, Ordering::Relaxed);
 }
 

@@ -4220,7 +4220,7 @@
         "id": "Id",
         "version": "Version",
         "why_title": "Why Zeron asks here",
-        "why_body": "A template that isn't Zeron's has run since Zeron started. A template draws Zeron's main window, so Zeron asks you in its own.",
+        "why_body": "A template that isn't Zeron's has run since Zeron started. Templates draw Zeron's main window, so Zeron asks you in a window of its own.",
         "publish": {
           "title": "Publish {name} {version}?",
           "body": "It's in the store at once, under your username, for everyone to install.",

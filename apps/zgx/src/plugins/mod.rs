@@ -826,25 +826,33 @@ pub fn prepare_live() -> PathBuf {
     if let Some(data) = crate::engine::data_dir() {
         retired_themes::retire(&root, &data);
     }
-    let ui = crate::ui_dir();
-    let id = live::active(&root);
-    preview::note_running(&root, &id);
+    lay_at_launch(&crate::ui_dir(), &root).unwrap_or(fallback)
+}
+
+/// `prepare_live`'s laying down: the active template in `root` over `ui`'s own
+/// (as the last launch left it, or composed now), and its app file. None:
+/// Zeron's own runs from `ui/`.
+fn lay_at_launch(ui: &Path, root: &Path) -> Option<PathBuf> {
+    let id = live::active(root);
     // `.live` as the last launch left it, from the same Zeron and template:
     // it runs as it is (live::LaunchStamp), nothing read or written.
-    let stamp = live::LaunchStamp::now(&ui, &root, &id);
-    if stamp.still_laid(&ui, &root) {
-        let (_, overlay) = live::plan(&root, &id, &Default::default(), false);
+    let stamp = live::LaunchStamp::now(ui, root, &id);
+    if stamp.still_laid(ui, root) {
+        preview::note_running(root, &id);
+        let (_, overlay) = live::plan(root, &id, &Default::default(), false);
         LIVE_OVERLAY.with(|o| *o.borrow_mut() = overlay);
         let laid = live::Laid { ui_stamp: stamp.ui, id, template_stamp: stamp.template, ..Default::default() };
         LIVE_LAID.with(|l| *l.borrow_mut() = laid);
-        return root.join(live::LIVE).join("app.luau");
+        return Some(root.join(live::LIVE).join("app.luau"));
     }
-    if let Err(error) = live::sync_zeron(&ui, &root) {
+    if let Err(error) = live::sync_zeron(ui, root) {
         eprintln!("zeron-zgx: Zeron's own interface wasn't copied ({error}); running it from ui/");
-        return fallback;
+        return None;
     }
     zgx::profile::mark("Zeron's own interface copied");
-    match live::compose(&root, &id, &Default::default(), false) {
+    // (Zeron's official templates are this build's by now.)
+    preview::note_running(root, &id);
+    match live::compose(root, &id, &Default::default(), false) {
         Ok((_, overlay)) => {
             LIVE_OVERLAY.with(|o| *o.borrow_mut() = overlay);
             // (Pictures of templates taken from the window, before their
@@ -852,17 +860,17 @@ pub fn prepare_live() -> PathBuf {
             let _ = std::fs::remove_dir_all(root.join(".previews"));
             let _ = std::fs::remove_dir_all(root.join(live::LIVE).join("previews"));
             // What the next launch can run as it is: `.live` as this left it.
-            let laid_now = live::LaunchStamp::now(&ui, &root, &id);
-            if let Err(error) = laid_now.write(&root) {
+            let laid_now = live::LaunchStamp::now(ui, root, &id);
+            if let Err(error) = laid_now.write(root) {
                 eprintln!("zeron-zgx: the launch stamp wasn't kept ({error})");
             }
             let laid = live::Laid { ui_stamp: laid_now.ui, id, template_stamp: laid_now.template, ..Default::default() };
             LIVE_LAID.with(|l| *l.borrow_mut() = laid);
-            root.join(live::LIVE).join("app.luau")
+            Some(root.join(live::LIVE).join("app.luau"))
         }
         Err(error) => {
             eprintln!("zeron-zgx: the template wasn't laid down ({error}); running Zeron's own from ui/");
-            fallback
+            None
         }
     }
 }
@@ -1820,15 +1828,16 @@ impl Bridge {
         let trusted = match cached {
             Some(t) => t,
             None => {
-                let (root, id) = (root.to_path_buf(), id.clone());
+                let (at, id) = (root.to_path_buf(), id.clone());
                 let t = off_thread(move || {
-                    preview::note_running(&root, &id);
-                    preview::trusted(&root, &id)
+                    preview::note_running(&at, &id);
+                    preview::trusted(&at, &id)
                 })
                 .await;
-                // (Unknown: as if someone else's.)
+                // (It couldn't be told there: told here, by its files alone,
+                // so Zeron's own is never taken for someone else's.)
                 let t = t.unwrap_or_else(|| {
-                    preview::note_another_s();
+                    preview::note_running(root, &want.id);
                     false
                 });
                 *self.trust.borrow_mut() = Some((trust_key, t));
@@ -4055,6 +4064,61 @@ mod tests {
 
     fn item(json: Json) -> Item {
         Item { json }
+    }
+
+    /// Someone who has only ever run Zeron's own (no `.active`, `zeron`, one
+    /// that's gone, or an official template) is never taken to have run
+    /// another's, whichever launch: the first, a warm one, or the one after an
+    /// update, whose official template still holds the last Zeron's files as
+    /// it starts. Another's is told at each.
+    #[test]
+    fn only_another_s_template_is_told_at_a_launch() {
+        let ui = crate::ui_dir();
+        let root = std::env::temp_dir().join(format!("zgx-ran-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // Whether another's ran at a launch of `id` (none: no `.active`).
+        let launch = |id: Option<&str>, warm: bool| {
+            match id {
+                Some(id) => drop(live::set_active(&root, id).unwrap()),
+                None => drop(std::fs::remove_file(root.join(live::ACTIVE))),
+            }
+            let active = live::active(&root);
+            assert_eq!(live::LaunchStamp::now(&ui, &root, &active).still_laid(&ui, &root), warm, "{id:?}");
+            preview::another_s_ran_for_test(false);
+            assert!(lay_at_launch(&ui, &root).is_some(), "{id:?}");
+            preview::another_s_ran()
+        };
+        assert!(!launch(None, false), "the first launch");
+        assert!(!launch(None, true), "a warm one");
+        assert!(!launch(Some("zeron"), true));
+        assert!(!launch(Some("gone"), true), "one that isn't there runs Zeron's");
+        let official = "zeron-v2";
+        assert!(!launch(Some(official), false));
+        assert!(!launch(Some(official), true));
+        // After an update: the last Zeron's files, as it wrote them.
+        let dir = root.join(official);
+        std::fs::write(dir.join("screens/shell/last.luau"), "-- the last Zeron's").unwrap();
+        let base = dir.join(".base.json");
+        let mut record: Json = serde_json::from_slice(&std::fs::read(&base).unwrap()).unwrap();
+        record["screens/shell/last.luau"] = json!("0");
+        std::fs::write(&base, record.to_string()).unwrap();
+        assert!(preview::another_s(&root, official), "not this build's yet");
+        assert!(!launch(Some(official), false), "the launch after an update");
+        assert!(!dir.join("screens/shell/last.luau").exists());
+        assert!(!launch(Some(official), true));
+        // Another's, at both; and one that calls itself official.
+        std::fs::create_dir_all(root.join("mine/screens")).unwrap();
+        std::fs::write(root.join("mine/zeron-template.json"), r#"{"id":"mine","name":"Mine","builtin_template":"zeron-v2"}"#).unwrap();
+        std::fs::write(root.join("mine/screens/x.luau"), "-- x").unwrap();
+        assert!(launch(Some("mine"), false));
+        assert!(launch(Some("mine"), true));
+        // And never cleared by what runs after it.
+        lay_at_launch(&ui, &root);
+        live::set_active(&root, "zeron").unwrap();
+        lay_at_launch(&ui, &root);
+        assert!(preview::another_s_ran());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// R26: a plugin removed, or back under its id from somewhere else,
