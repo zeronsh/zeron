@@ -176,6 +176,9 @@ struct Sessions {
     shown_devices: RefCell<Option<Value>>,
     /// Whether a publish is on its way ([`Sessions::publish_soon`]).
     publish_pending: Cell<bool>,
+    /// Whether the scripts have been given the list as heard (`ready`):
+    /// until then each publish goes at once ([`Sessions::publish_soon`]).
+    shown_ready: Cell<bool>,
     /// Publishes so far (for tests).
     #[cfg(test)]
     published: Cell<u32>,
@@ -1185,10 +1188,14 @@ impl Sessions {
     }
 
     /// What the engine sent, given to the scripts [`GATHER`] from now with
-    /// whatever else comes by then. (At once in tests, and before a
-    /// connection's tasks are there.)
+    /// whatever else comes by then. (At once in tests, before a connection's
+    /// tasks are there, and until the scripts have had the list as heard:
+    /// what a launch shows first follows that list, and held a frame, the
+    /// window opened with the title bar's Toggle sidebar focused and its
+    /// tooltip open, a popup of its own presenting for as long as the app
+    /// ran, the idle window's driver thread woken at the display's refresh.)
     fn publish_soon(&self) {
-        if cfg!(test) || !engine::get().can_spawn() {
+        if cfg!(test) || !engine::get().can_spawn() || !self.shown_ready.get() {
             return self.publish();
         }
         if self.publish_pending.replace(true) {
@@ -1210,6 +1217,7 @@ impl Sessions {
         #[cfg(test)]
         self.published.set(self.published.get() + 1);
         let value = self.value();
+        self.shown_ready.set(self.heard.get());
         #[cfg(test)]
         self.last_published.replace(Some(value.clone()));
         for (_, shared) in self.shared.borrow().iter() {
