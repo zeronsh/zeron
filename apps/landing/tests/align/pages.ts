@@ -37,11 +37,12 @@ export const EXCEPTIONS: [string, string][] = [
   [".guide :not(pre) > code", "in the guide a literal is a word in its chip wherever it falls, a table's field and a line's start too"],
   [".step-n", "a step's number hangs in the gutter, left of its title (Tailwind's steps)"],
   [".anchor", "a heading's # hangs in the gutter, left of its words"],
+  [".head .get", "getting a plugin is set at the head's right: its lines end on the page's right edge (align.test.ts, the Get test, holds it)"],
   [".cb-label", "a code block's file name as typed: `.github/…` begins with a dot, its ink mid-cell"],
 ];
 
-/** The columns of the look: the page's, the store's two (its sidebar, its list), a plugin's rail and its Get, Files' two, a dialog's. */
-export const COLUMNS = [".wrap", ".facets", ".listing", ".rail", ".get", ".tree-pane", ".viewer", "dialog.question"];
+/** The columns of the look: the page's, the store's two (its sidebar, its list), a plugin's rail, Files' two, a dialog's. */
+export const COLUMNS = [".wrap", ".facets", ".listing", ".rail", ".tree-pane", ".viewer", "dialog.question"];
 
 export const ALIGN_PAGES: AlignPage[] = [
   // The store: unnarrowed (Featured over the list), in another order, narrowed, nothing found, empty, down.

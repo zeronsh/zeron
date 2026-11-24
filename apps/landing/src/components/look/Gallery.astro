@@ -1,11 +1,14 @@
 ---
-// A plugin's pictures, on its own colour (the prototype's gallery): one at
-// a time, set as a window would be; the rest by scrolling sideways, which a
-// keyboard (the strip takes focus: arrows), a touch and a trackpad all do
-// with no script, each picture snapping into place. The dots say how many
-// and which; with the script they follow the strip and take you to one.
-// Each picture opens on its own. None, and there is no gallery.
-import { hueClass } from "../../lib/store/hue.ts";
+// A plugin's pictures, as Raycast's store sets them: a row of thumbnails
+// that always fills the page's width, each 16:10 with a faint line round it:
+// one alone as wide as the article's column, two halves, three or more thirds. More than three, and the row scrolls
+// sideways (keyboard, touch, trackpad, no script needed); with the script an
+// arrow at its end takes it a screen on. Each thumbnail is a link to its
+// picture; with the script it opens the lightbox below instead (a native
+// <dialog>: the picture large, ‹ › and the arrow keys for the others, its
+// count, Escape or a click beside it to close: scripts/store.ts). None, and
+// there's no row.
+import Icon from "./Icon.astro";
 import { pictureUrl } from "../../lib/store/urls.ts";
 
 interface Props {
@@ -16,23 +19,42 @@ interface Props {
 }
 const { id, name, version, screenshots } = Astro.props;
 const pictures = screenshots.map((s) => pictureUrl(id, version, s)).filter((s): s is string => s !== null);
+const alt = (i: number) => `${name}, picture ${i + 1} of ${pictures.length}`;
 ---
 
 {
   pictures.length > 0 && (
-    <section class:list={["stage gallery", hueClass(id), { one: pictures.length === 1 }]} aria-label={`Pictures of ${name}`} data-gallery>
-      <div class="track" tabindex="0" role="group" aria-label={pictures.length > 1 ? `${pictures.length} pictures: scroll, or use the arrow keys` : "A picture"} data-track>
+    <section class:list={["shots", { one: pictures.length === 1, two: pictures.length === 2 }]} aria-label={`Pictures of ${name}`} data-shots>
+      <div class="shots-row" data-row>
         {pictures.map((src, i) => (
-          <a class="slide" href={src} target="_blank" rel="noopener" data-slide>
-            <img src={src} alt={`${name}, picture ${i + 1} of ${pictures.length}`} loading={i === 0 ? "eager" : "lazy"} decoding="async" />
+          <a class="shot" href={src} target="_blank" rel="noopener" data-shot={i}>
+            <img src={src} alt={alt(i)} loading={i < 3 ? "eager" : "lazy"} decoding="async" />
           </a>
         ))}
       </div>
-      {pictures.length > 1 && (
-        <div class="dots" data-dots>
-          {pictures.map((_, i) => <button type="button" aria-label={`Picture ${i + 1}`} aria-current={i === 0 ? "true" : undefined} data-dot={i} />)}
-        </div>
+      {pictures.length > 3 && (
+        <>
+          <button type="button" class="shots-arrow prev" aria-label="Earlier pictures" data-step="-1" hidden>
+            <Icon name="chev" />
+          </button>
+          <button type="button" class="shots-arrow next" aria-label="More pictures" data-step="1" hidden>
+            <Icon name="chev" />
+          </button>
+        </>
       )}
+      <dialog class="lightbox" aria-label={`Pictures of ${name}`} data-lightbox>
+        <figure>
+          <img alt="" data-lb-picture />
+          {pictures.length > 1 && <figcaption class="num" data-lb-count aria-live="polite"></figcaption>}
+        </figure>
+        {pictures.length > 1 && (
+          <>
+            <button type="button" class="lb-step prev" aria-label="The picture before" data-lb-step="-1"><Icon name="chev" /></button>
+            <button type="button" class="lb-step next" aria-label="The next picture" data-lb-step="1"><Icon name="chev" /></button>
+          </>
+        )}
+        <button type="button" class="lb-close" aria-label="Close" data-lb-close autofocus><Icon name="x" /></button>
+      </dialog>
     </section>
   )
 }

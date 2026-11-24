@@ -3,7 +3,8 @@
 // weighs before installing it. What it asks for (its first few, in the
 // app's words and order, the risky last and in the danger's ink; the rest
 // on its own tab), its details, its keywords, and its links: the author's
-// own (https only, as parsed) and a report.
+// own (https only, as parsed) and a report. Each group under its label, a
+// group's step apart, as the store's sidebar sets them.
 import AppIcon from "./AppIcon.astro";
 import Icon from "./Icon.astro";
 import { catalogHref } from "../../lib/store/catalog.ts";
@@ -71,9 +72,12 @@ const repository = httpsUrl(plugin.repository);
       </section>
     )
   }
-  <ul class="links">
-    {homepage && <li><a href={homepage} rel="nofollow noopener ugc"><Icon name="globe" />{store("plugins.store.fact.homepage")}<span class="o"><Icon name="out" /></span></a></li>}
-    {repository && <li><a href={repository} rel="nofollow noopener ugc"><Icon name="term" />{store("plugins.store.fact.repository")}<span class="o"><Icon name="out" /></span></a></li>}
-    <li><a href={`${pluginUrl(plugin.id)}/report`}><Icon name="flag" />Report this plugin</a></li>
-  </ul>
+  <section aria-labelledby="rail-links">
+    <h2 class="rail-h" id="rail-links">Links</h2>
+    <ul class="links">
+      {homepage && <li><a href={homepage} rel="nofollow noopener ugc"><Icon name="globe" />{store("plugins.store.fact.homepage")}<span class="o"><Icon name="out" /></span></a></li>}
+      {repository && <li><a href={repository} rel="nofollow noopener ugc"><Icon name="term" />{store("plugins.store.fact.repository")}<span class="o"><Icon name="out" /></span></a></li>}
+      <li><a href={`${pluginUrl(plugin.id)}/report`}><Icon name="flag" />Report this plugin</a></li>
+    </ul>
+  </section>
 </aside>

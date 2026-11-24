@@ -283,7 +283,7 @@ describe("a plugin's page", () => {
     expect(body).toContain(">Nothing happened?</button>");
     // On its own hue; its pictures a strip on it, one at a time.
     expect(body).toMatch(/<main id="main" class="h\d+">/);
-    expect(body.match(/<a class="slide"/g)).toHaveLength(2);
+    expect(body.match(/<a class="shot"/g)).toHaveLength(2);
     // The README doesn't say the name again, and nothing in it outweighs the title.
     // (One heading names it; drawn its first letter's side bearing left: lib/store/bearing.ts.)
     expect(body.match(/<h[1-6][^>]*>(<span class="name">)?Focus timer/g)).toEqual(['<h1 class="lsb-5"><span class="name">Focus timer']);
@@ -291,14 +291,15 @@ describe("a plugin's page", () => {
     // Its parts are pages of their own, each a real address; Report is in the rail.
     expect(body).toMatch(/<a href="\/plugins\/focus-timer" aria-current="page">Overview<\/a><a href="\/plugins\/focus-timer\/versions">Versions<span class="num">\d+<\/span><\/a><a href="\/plugins\/focus-timer\/asks">What it asks for<span class="num">\d+<\/span><\/a>/);
     expect(body).toContain('<a href="/plugins/focus-timer/report">');
-    // Every version verified: the seal by the name, no amber note.
-    expect(body).toContain('<span class="state ok">');
+    // Every version verified: the seal by the name, Verified under Install, no amber note.
+    expect(body).toMatch(/<h1 [^>]*><span class="name">Focus timer<\/span><svg class="seal l"/);
+    expect(body).toMatch(/<span class="said ok"><svg class="seal"[^>]*>[\s\S]*?<\/svg>Verified<\/span>/);
     expect(body).not.toContain('<p class="note">');
   });
 
   test("its newest not verified: the amber note, the newest verified to install instead; none verified: said so", async () => {
     const worst = (await html("/plugins/worst-case-listing-at-every-limit-xyz12")).body;
-    expect(worst).toContain('<span class="state no">Not verified yet</span>');
+    expect(worst).toContain('<span class="said no">Not verified yet</span>');
     expect(worst).toMatch(/<p class="note"><b>1\.5\.0 isn&#39;t verified yet\. 1\.0\.0 is\.<\/b>/);
     const none = (await html("/plugins/voice-memos")).body;
     expect(none).toContain('<p class="note"><b>No version of this plugin is verified yet.</b> Zeron asks before it installs it.</p>');
@@ -866,7 +867,7 @@ describe("forms", () => {
     const superseded = await html("/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.4.0");
     expect(superseded.body).toContain("Replaced by 1.5.0 before it was verified. Those who have it keep it working.");
     // (It can't be installed, and says so in place of Install.)
-    expect(superseded.body).toContain('<span class="btn pri lg" aria-disabled="true">Can\'t be installed</span>');
+    expect(superseded.body).toContain('<span class="btn pri" aria-disabled="true">Can\'t be installed</span>');
     expect(superseded.body).not.toContain("data-install");
     // (Never the reviewer's reason: that is its author's to read.)
     expect(superseded.body).not.toContain("Until then this one stays listed");
