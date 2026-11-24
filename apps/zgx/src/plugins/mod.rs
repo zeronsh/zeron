@@ -4229,41 +4229,48 @@ mod tests {
     }
 
     /// One taken down is never laid down at a launch, the first or a warm one
-    /// (whose `.live` still holds it), nor found by a look while it runs.
+    /// (whose `.live` still holds it), nor found by a look while it runs: with
+    /// no engine, from its list alone. The store's own, in a folder of another
+    /// name, and a copy of it, known by what it was copied from.
     #[test]
     fn one_taken_down_is_never_laid_down() {
         let ui = crate::ui_dir();
-        let root = std::env::temp_dir().join(format!("zgx-down-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let dir = root.join("midnight");
-        std::fs::create_dir_all(dir.join("screens")).unwrap();
-        std::fs::write(dir.join("zeron-template.json"), r#"{"id":"midnight","name":"Midnight"}"#).unwrap();
-        std::fs::write(dir.join("screens/midnight.luau"), "-- theirs").unwrap();
-        std::fs::write(dir.join(".imported.json"), r#"{"key":null,"version":"1.2.0","source":{"kind":"store","store":{"id":"midnight"}}}"#).unwrap();
-        live::set_active(&root, "midnight").unwrap();
-        let laid = || root.join(live::LIVE).join("screens/midnight.luau").exists();
-        let list = |blocks: Json| std::fs::write(root.join(blocks::FILE), json!({ "format": "zeron-template-blocks:v1", "blocks": blocks }).to_string()).unwrap();
-        let down = json!([{ "id": "midnight", "version": "1.2.0", "reason": "x", "at": 1 }]);
-        preview::another_s_ran_for_test(false);
-        lay_at_launch(&ui, &root).unwrap();
-        assert!(laid());
-        assert!(live::LaunchStamp::now(&ui, &root, "midnight").still_laid(&ui, &root), "the next launch is a warm one");
-        assert_eq!(live::survey(&ui, &root, None).id, "midnight");
-        // Taken down as it runs: the next look is Zeron's own.
-        list(down.clone());
-        assert_eq!(live::survey(&ui, &root, None).id, live::BUILTIN);
-        // And between launches: a warm one lays nothing of it.
-        lay_at_launch(&ui, &root).unwrap();
-        assert!(!laid(), "nothing of it is left in .live");
-        // Restored, it's as it was; then taken down before a first launch.
-        list(json!([]));
-        lay_at_launch(&ui, &root).unwrap();
-        assert!(laid());
-        list(down);
-        std::fs::remove_file(root.join(live::LAUNCH_STAMP)).unwrap();
-        lay_at_launch(&ui, &root).unwrap();
-        assert!(!laid());
-        let _ = std::fs::remove_dir_all(&root);
+        for (folder, file, says) in [
+            ("midnight-2", ".imported.json", r#"{"key":null,"version":"1.2.0","source":{"kind":"store","store":{"id":"midnight"}}}"#),
+            ("my-copy", ".lineage.json", r#"[{"id":"first","version":"0.1.0","hash":"h"},{"id":"midnight","version":"1.2.0","hash":"h"}]"#),
+        ] {
+            let root = std::env::temp_dir().join(format!("zgx-down-{folder}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let dir = root.join(folder);
+            std::fs::create_dir_all(dir.join("screens")).unwrap();
+            std::fs::write(dir.join("zeron-template.json"), json!({ "id": folder, "name": "Midnight" }).to_string()).unwrap();
+            std::fs::write(dir.join("screens/midnight.luau"), "-- theirs").unwrap();
+            std::fs::write(dir.join(file), says).unwrap();
+            live::set_active(&root, folder).unwrap();
+            let laid = || root.join(live::LIVE).join("screens/midnight.luau").exists();
+            let list = |blocks: Json| std::fs::write(root.join(blocks::FILE), json!({ "format": "zeron-template-blocks:v1", "blocks": blocks }).to_string()).unwrap();
+            let down = json!([{ "id": "midnight", "version": "1.2.0", "reason": "x", "at": 1 }]);
+            preview::another_s_ran_for_test(false);
+            lay_at_launch(&ui, &root).unwrap();
+            assert!(laid(), "{folder}");
+            assert!(live::LaunchStamp::now(&ui, &root, folder).still_laid(&ui, &root), "{folder}: the next launch is a warm one");
+            assert_eq!(live::survey(&ui, &root, None).id, folder);
+            // Taken down as it runs: the next look is Zeron's own.
+            list(down.clone());
+            assert_eq!(live::survey(&ui, &root, None).id, live::BUILTIN, "{folder}");
+            // And while Zeron was closed: the warm launch lays nothing of it.
+            lay_at_launch(&ui, &root).unwrap();
+            assert!(!laid(), "{folder}: nothing of it is left in .live");
+            // Restored, it's as it was; then taken down before a first launch.
+            list(json!([]));
+            lay_at_launch(&ui, &root).unwrap();
+            assert!(laid(), "{folder}");
+            list(down);
+            std::fs::remove_file(root.join(live::LAUNCH_STAMP)).unwrap();
+            lay_at_launch(&ui, &root).unwrap();
+            assert!(!laid(), "{folder}");
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 
     /// R26: a plugin removed, or back under its id from somewhere else,
