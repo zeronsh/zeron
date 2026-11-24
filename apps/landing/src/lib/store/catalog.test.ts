@@ -10,6 +10,10 @@ describe("reading the catalog's address", () => {
     expect(state).toEqual({ q: "", category: null, keyword: null, verified: false, sort: null, cursor: null, page: null });
     expect(effectiveSort(state)).toBe("popular");
     expect(isFront(state)).toBe(true);
+    // (Unnarrowed in any order is still the store's front: Featured shows over it.)
+    expect(isFront(read("sort=verified"))).toBe(true);
+    expect(isFront(read("q=x"))).toBe(false);
+    expect(isFront(read("cursor=c&page=2"))).toBe(false);
   });
 
   test("words are tidied and bounded", () => {
@@ -45,22 +49,22 @@ describe("reading the catalog's address", () => {
 
 describe("the catalog's addresses", () => {
   test("defaults are left out, the rest in a fixed order", () => {
-    expect(catalogHref({})).toBe("/plugins/all");
-    expect(catalogHref({ sort: "popular" })).toBe("/plugins/all");
-    expect(catalogHref({ q: "x", sort: "relevance" })).toBe("/plugins/all?q=x");
-    expect(catalogHref({ cursor: "c", sort: "new", keyword: "k", category: "git", q: "a b" })).toBe("/plugins/all?q=a+b&category=git&keyword=k&sort=new&cursor=c");
+    expect(catalogHref({})).toBe("/plugins");
+    expect(catalogHref({ sort: "popular" })).toBe("/plugins");
+    expect(catalogHref({ q: "x", sort: "relevance" })).toBe("/plugins?q=x");
+    expect(catalogHref({ cursor: "c", sort: "new", keyword: "k", category: "git", q: "a b" })).toBe("/plugins?q=a+b&category=git&keyword=k&sort=new&cursor=c");
   });
 
   test("an address that says more than it means has a plain one", () => {
     const params = new URLSearchParams("sort=popular&utm_source=x");
-    expect(canonicalSearch(params, read("sort=popular&utm_source=x"))).toBe("/plugins/all");
+    expect(canonicalSearch(params, read("sort=popular&utm_source=x"))).toBe("/plugins");
     const clean = new URLSearchParams("q=x&sort=new");
     expect(canonicalSearch(clean, read("q=x&sort=new"))).toBeNull();
   });
 
   test("Previous and Next keep the search and carry the cursor", () => {
     const state = read("q=timer&category=git");
-    expect(pageHref(state, "NEXT")).toBe("/plugins/all?q=timer&category=git&cursor=NEXT&page=2");
+    expect(pageHref(state, "NEXT")).toBe("/plugins?q=timer&category=git&cursor=NEXT&page=2");
     expect(pageHref(state, undefined)).toBeNull();
   });
 });
@@ -72,14 +76,14 @@ describe("which page, for the pager's range", () => {
     expect(read("page=3").page).toBeNull();
     expect(read("cursor=c&page=1").page).toBeNull();
     expect(read("cursor=c&page=x").page).toBeNull();
-    expect(catalogHref({ cursor: "c", page: 3 })).toBe("/plugins/all?cursor=c&page=3");
-    expect(catalogHref({ page: 3 })).toBe("/plugins/all");
+    expect(catalogHref({ cursor: "c", page: 3 })).toBe("/plugins?cursor=c&page=3");
+    expect(catalogHref({ page: 3 })).toBe("/plugins");
   });
   test("Next counts up; Previous counts down, and its first page has no cursor", () => {
-    expect(pageHref(read(""), "N")).toBe("/plugins/all?cursor=N&page=2");
-    expect(pageHref(read("cursor=c&page=2"), "N")).toBe("/plugins/all?cursor=N&page=3");
-    expect(pageHref(read("cursor=c&page=2"), "P", -1)).toBe("/plugins/all");
-    expect(pageHref(read("cursor=c&page=3"), "P", -1)).toBe("/plugins/all?cursor=P&page=2");
+    expect(pageHref(read(""), "N")).toBe("/plugins?cursor=N&page=2");
+    expect(pageHref(read("cursor=c&page=2"), "N")).toBe("/plugins?cursor=N&page=3");
+    expect(pageHref(read("cursor=c&page=2"), "P", -1)).toBe("/plugins");
+    expect(pageHref(read("cursor=c&page=3"), "P", -1)).toBe("/plugins?cursor=P&page=2");
   });
   test("the range: the first page's, a later one's, unknown without a page", () => {
     expect(range(read(""), 24)).toEqual({ from: 1, to: 24 });
@@ -93,7 +97,7 @@ test("only verified: a filter in the address, never a sort, and never the front"
   const { catalogHref, readCatalog, isFront } = await import("./catalog.ts");
   const state = readCatalog(new URLSearchParams("verified=1&sort=new"), null);
   expect(state.verified).toBe(true);
-  expect(catalogHref(state)).toBe("/plugins/all?verified=1&sort=new");
+  expect(catalogHref(state)).toBe("/plugins?verified=1&sort=new");
   expect(isFront(state)).toBe(false);
   expect(readCatalog(new URLSearchParams("verified=yes"), null).verified).toBe(false);
 });

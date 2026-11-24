@@ -18,7 +18,7 @@ import type { WebSession } from "../lib/store/types.ts";
 import { signInUrl } from "../lib/store/urls.ts";
 import "../styles/look/store.css";
 
-type Section = "discover" | "browse" | "publish" | "review";
+type Section = "browse" | "publish" | "review";
 
 interface Props {
   title: string;
@@ -31,10 +31,12 @@ interface Props {
   session?: WebSession | null;
   /** What the bar's search holds (a search's own page). */
   query?: string;
+  /** What else the store is narrowed by, kept by the bar's search (it narrows the store in place). */
+  keep?: Record<string, string>;
   /** The page's own class on <main> (a plugin's hue, say). */
   class?: string;
 }
-const { title, description, noindex = false, canonical, current = null, query = "", class: mainClass } = Astro.props;
+const { title, description, noindex = false, canonical, current = null, query = "", keep = {}, class: mainClass } = Astro.props;
 // A public page asked with a session cookie is drawn for that person (lib/store/http.ts publicPage: never
 // kept): the edge says who (once a request), so the bar is right from the first paint. A cookie that's no
 // one's draws the signed-out bar; an edge that doesn't answer leaves it to the script, as without a cookie.
@@ -48,8 +50,7 @@ const here = `${Astro.url.pathname}${Astro.url.search}`;
 const handle = session ? (session.username ? `@${session.username}` : (session.user.name ?? "You")) : "";
 const face = handle.replace(/^@/, "").charAt(0).toUpperCase() || "?";
 const SECTIONS: { id: Section; label: string; href: string }[] = [
-  { id: "discover", label: "Discover", href: "/plugins" },
-  { id: "browse", label: "Browse", href: "/plugins/all" },
+  { id: "browse", label: "Browse", href: "/plugins" },
   { id: "publish", label: "Publish", href: "/account" },
   { id: "review", label: "Review", href: "/admin/plugins" },
 ];
@@ -80,12 +81,13 @@ const hiddenUntilKnown = (id: Section) => id === "review" && isPublic;
           ))}
         </nav>
         <div class="grow"></div>
-        <form class="find" role="search" action="/plugins/all" method="get" data-tidy>
+        <form class="find" role="search" action="/plugins" method="get" data-tidy>
           <Icon name="search" />
           <input type="search" name="q" value={query || undefined} placeholder="Search plugins" aria-label="Search plugins" autocomplete="off" enterkeyhint="search" data-search />
+          {Object.entries(keep).map(([name, value]) => <input type="hidden" name={name} value={value} />)}
           <kbd class="kbd" aria-hidden="true">/</kbd>
         </form>
-        <a class="find-icon" href="/plugins/all#q" aria-label="Search plugins"><Icon name="search" /></a>
+        <button class="find-icon" type="button" popovertarget="find-menu" aria-label="Search plugins"><Icon name="search" /></button>
         {(isPublic || !session) && <a class="signin" href={signInUrl(here)} data-signin>Sign in</a>}
         {(isPublic || session) && (
           <button class="me" type="button" popovertarget="me-menu" hidden={isPublic} data-me>
@@ -96,6 +98,14 @@ const hiddenUntilKnown = (id: Section) => id === "review" && isPublic;
       </div>
     </header>
 
+    {/* The search, on a phone: the bar's one, opened from its icon. */}
+    <div class="menu find-menu" id="find-menu" popover>
+      <form class="find" role="search" action="/plugins" method="get" data-tidy>
+        <Icon name="search" />
+        <input type="search" name="q" value={query || undefined} placeholder="Search plugins" aria-label="Search plugins" autocomplete="off" enterkeyhint="search" data-search />
+        {Object.entries(keep).map(([name, value]) => <input type="hidden" name={name} value={value} />)}
+      </form>
+    </div>
     {(isPublic || session) && (
       <div class="menu" id="me-menu" popover>
         <p class="who"><b data-handle>{handle}</b>Signed in to Zeron</p>

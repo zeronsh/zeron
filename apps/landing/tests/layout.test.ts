@@ -18,7 +18,7 @@ const files = (dir: string): string[] =>
   });
 
 /** Routes that draw no page: a post's answer (a redirect), or a redirect for good. */
-const NO_PAGE = new Set(["pages/admin/reports/[report].astro", "pages/account/keys/[...rest].astro"]);
+const NO_PAGE = new Set(["pages/admin/reports/[report].astro", "pages/account/keys/[...rest].astro", "pages/plugins/all.astro"]);
 
 describe("the store's pages are the store's look", () => {
   test("the old app window is gone, and nothing names it", () => {

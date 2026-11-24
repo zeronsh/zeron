@@ -116,12 +116,14 @@ describe("the store's front (/plugins)", () => {
 
 });
 
-describe("All plugins (/plugins/all)", () => {
-  /** The plugins a list's page shows, in order. */
-  const listed = (body: string) => [...body.matchAll(/<a class="card res h\d+" href="\/plugins\/([^"]+)"/g)].map((m) => m[1]);
+describe("the store's list (/plugins)", () => {
+  /** The list's own part of a page (Featured, when it's there, sits above it). */
+  const grid = (body: string) => body.slice(body.indexOf('<ul class="results"'));
+  /** The plugins a list's page shows, in order: each the one card. */
+  const listed = (body: string) => [...grid(body).matchAll(/<a class="pcard md h\d+" href="\/plugins\/([^"]+)"/g)].map((m) => m[1]);
 
   test("public, cached for a minute at most, a strict CSP; the columns, a row a plugin", async () => {
-    const { response, body } = await html("/plugins/all");
+    const { response, body } = await html("/plugins");
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("public, max-age=30");
     expect(response.headers.get("cloudflare-cdn-cache-control")).toBe("public, max-age=30, stale-while-revalidate=30");
@@ -130,41 +132,41 @@ describe("All plugins (/plugins/all)", () => {
     inert(body);
     // A card a plugin, each on its own hue; the facets say where you are.
     expect(listed(body)).toHaveLength(24);
-    expect(body).toMatch(/<a href="\/plugins\/all" aria-current="page"><span>All<\/span><span class="num">\d+<\/span><\/a>/);
-    expect(body).toMatch(/<a href="\/plugins\/all" aria-current="true"><i aria-hidden="true"><\/i>Everything<\/a>/);
+    expect(body).toMatch(/<a href="\/plugins" aria-current="page"><span>All<\/span><span class="num">\d+<\/span><\/a>/);
+    expect(body).toMatch(/<a href="\/plugins" aria-current="true"><i aria-hidden="true"><\/i>Everything<\/a>/);
   });
 
   test("Next and Previous are real addresses that carry the cursor, and come back to the same list", async () => {
-    const first = await html("/plugins/all");
+    const first = await html("/plugins");
     const next = /href="([^"]+)" rel="next"/.exec(first.body)?.[1]?.replaceAll("&amp;", "&");
-    expect(next).toMatch(/^\/plugins\/all\?cursor=/);
+    expect(next).toMatch(/^\/plugins\?cursor=/);
     expect(first.body).toMatch(/<span class="btn sec sm" aria-disabled="true">.*?Previous<\/span>/);
     const second = await html(next!);
     expect(second.response.status).toBe(200);
     expect(listed(second.body)).not.toEqual(listed(first.body));
     const previous = /href="([^"]+)" rel="prev"/.exec(second.body)?.[1]?.replaceAll("&amp;", "&");
-    expect(previous).toMatch(/^\/plugins\/all/);
+    expect(previous).toMatch(/^\/plugins/);
     expect(listed((await html(previous!)).body)).toEqual(listed(first.body));
   });
 
   test("a card's foot says what the list is sorted by; one not verified says so instead", async () => {
-    const foot = (body: string) => [...body.matchAll(/<span class="count">(Updated|Published|Verified) ([^<]+)<\/span>/g)].map((m) => [m[1], m[2]]);
-    expect(new Set(foot((await html("/plugins/all?sort=updated")).body).map(([w]) => w))).toEqual(new Set(["Updated"]));
-    expect((await html("/plugins/all")).body).toMatch(/<span class="state no">[\d.]+(-[\w.]+)? not verified yet<\/span>/);
+    const foot = (body: string) => [...grid(body).matchAll(/<div class="pc-foot"><span>(Updated|Published|Verified) ([^<]+)<\/span>/g)].map((m) => [m[1], m[2]]);
+    expect(new Set(foot((await html("/plugins?sort=updated")).body).map(([w]) => w))).toEqual(new Set(["Updated"]));
+    expect((await html("/plugins")).body).toMatch(/<span class="state no">[\d.]+(-[\w.]+)? not verified yet<\/span>/);
     // Newest: the day each was first listed (amendment 39), the newest first.
-    const newest = foot((await html("/plugins/all?sort=new")).body);
+    const newest = foot((await html("/plugins?sort=new")).body);
     expect(new Set(newest.map(([w]) => w))).toEqual(new Set(["Published"]));
     const days = newest.map(([, d]) => Date.parse(`${d}${/\d{4}/.test(d!) ? "" : `, ${new Date().getUTCFullYear()}`}`));
     expect(days.length).toBeGreaterThan(1);
     expect(days).toEqual([...days].sort((a, b) => b - a));
-    // Newly verified (Discover's shelf): by when Zeron verified each, said.
-    const verified = foot((await html("/plugins/all?sort=verified")).body);
+    // Recently verified (the store's own order): by when Zeron verified each, said.
+    const verified = foot((await html("/plugins?sort=verified")).body);
     expect(verified.length).toBeGreaterThan(1);
     expect(verified.every(([w]) => w === "Verified")).toBe(true);
   });
 
   test("the pager: Previous, where you are of how many, Next", async () => {
-    const first = await html("/plugins/all");
+    const first = await html("/plugins");
     const total = Number(/<b class="num">([\d,]+)<\/b> plugins/.exec(first.body)![1]!.replace(",", ""));
     expect(first.body).toContain(`<span class="num">1–24 of ${total}</span>`);
     const next = /href="([^"]+)" rel="next"/.exec(first.body)![1]!.replaceAll("&amp;", "&");
@@ -173,38 +175,38 @@ describe("All plugins (/plugins/all)", () => {
   });
 
   test("the sort is a row of real addresses, the chosen one marked; a search adds Best match", async () => {
-    const { body } = await html("/plugins/all");
-    expect(body).toMatch(/<a href="\/plugins\/all" aria-current="page">Most installed<\/a><a href="\/plugins\/all\?sort=updated">Recently updated<\/a><a href="\/plugins\/all\?sort=new">Newest<\/a>/);
-    const search = await html("/plugins/all?q=timer");
+    const { body } = await html("/plugins");
+    expect(body).toMatch(/<a href="\/plugins" aria-current="page">Most installed<\/a><a href="\/plugins\?sort=updated">Recently updated<\/a><a href="\/plugins\?sort=new">Newest<\/a><a href="\/plugins\?sort=verified">Recently verified<\/a>/);
+    const search = await html("/plugins?q=timer");
     expect(search.body).toMatch(/aria-current="page">Best match<\/a>/);
   });
 
   test("search, category, keyword; the count when the list says it exactly", async () => {
-    const timer = await html("/plugins/all?q=timer");
+    const timer = await html("/plugins?q=timer");
     expect(listed(timer.body)).toContain("focus-timer");
     expect(timer.body).toMatch(/<h1[^>]*>Results for “timer”<\/h1>/);
     // The count, always (amendment 38's total).
     expect(timer.body).toMatch(/<p id="results"><b class="num">\d+<\/b> plugins?<\/p>/);
     // (The field keeps the words.)
     expect(timer.body).toContain('name="q" value="timer"');
-    const empty = await html("/plugins/all?q=zzzzqqq");
+    const empty = await html("/plugins?q=zzzzqqq");
     expect(empty.body).toContain("Nothing matches “zzzzqqq”");
-    expect(empty.body).toContain('href="/plugins/all">Clear search</a>');
+    expect(empty.body).toContain('href="/plugins">Clear search</a>');
     expect(empty.body).toContain('<b class="num">0</b> plugins');
-    const git = await html("/plugins/all?category=git");
+    const git = await html("/plugins?category=git");
     expect(listed(git.body)).toContain("pr-radar");
     expect(listed(git.body)).not.toContain("token-meter");
-    expect(git.body).toContain('<link rel="canonical" href="https://zeron.sh/plugins/all?category=git">');
-    expect(git.body).toMatch(/<a href="\/plugins\/all\?category=git" aria-current="page"><span>Git<\/span><span class="num">\d+<\/span><\/a>/);
+    expect(git.body).toContain('<link rel="canonical" href="https://zeron.sh/plugins?category=git">');
+    expect(git.body).toMatch(/<a href="\/plugins\?category=git" aria-current="page"><span>Git<\/span><span class="num">\d+<\/span><\/a>/);
     // The category's keywords, each a link that narrows it; the chosen one marked, and a link that lets it go.
-    expect(git.body).toMatch(/<a class="tag" href="\/plugins\/all\?category=git&amp;keyword=[a-z]+" title="[a-z]+">/);
-    const kw = await html("/plugins/all?category=git&keyword=github");
-    expect(kw.body).toContain('<a class="tag" href="/plugins/all?category=git" title="github" aria-current="true">github</a>');
-    expect(listed((await html("/plugins/all?keyword=github")).body)).toContain("pr-radar");
+    expect(git.body).toMatch(/<a class="tag" href="\/plugins\?category=git&amp;keyword=[a-z]+" title="[a-z]+">/);
+    const kw = await html("/plugins?category=git&keyword=github");
+    expect(kw.body).toContain('<a class="tag" href="/plugins?category=git" title="github" aria-current="true">github</a>');
+    expect(listed((await html("/plugins?keyword=github")).body)).toContain("pr-radar");
   });
 
-  test("an address that says more than it means is sent to the plain one; /plugins?… is All plugins'", async () => {
-    for (const [asked, plain] of [["/plugins/all?sort=popular&utm_source=x", "/plugins/all"], ["/plugins?q=timer", "/plugins/all?q=timer"], ["/plugins?category=git", "/plugins/all?category=git"]]) {
+  test("an address that says more than it means is sent to the plain one; the old list's, /plugins/all, to the store's, with its query", async () => {
+    for (const [asked, plain] of [["/plugins?sort=popular&utm_source=x", "/plugins"], ["/plugins/all", "/plugins"], ["/plugins/all?q=timer", "/plugins?q=timer"], ["/plugins/all?category=git&sort=new", "/plugins?category=git&sort=new"]]) {
       const response = await site.fetch(asked!);
       expect(response.status, asked).toBe(301);
       expect(response.headers.get("location"), asked).toBe(plain);
@@ -212,9 +214,9 @@ describe("All plugins (/plugins/all)", () => {
   });
 
   test("search results stay out of search engines; the list and its categories don't", async () => {
-    expect((await html("/plugins/all?q=timer")).body).toContain('<meta name="robots" content="noindex, nofollow">');
-    expect((await html("/plugins/all")).body).not.toContain('name="robots"');
-    expect((await html("/plugins/all?category=git")).body).not.toContain('name="robots"');
+    expect((await html("/plugins?q=timer")).body).toContain('<meta name="robots" content="noindex, nofollow">');
+    expect((await html("/plugins")).body).not.toContain('name="robots"');
+    expect((await html("/plugins?category=git")).body).not.toContain('name="robots"');
   });
 });
 
@@ -413,7 +415,7 @@ describe("package files", () => {
 });
 
 describe("public pages: the same for everyone signed out (a shared cache keeps them); drawn for you, and never kept, signed in", () => {
-  const PUBLIC = ["/plugins", "/plugins/all?category=git", "/plugins/all", "/plugins/focus-timer", "/plugins/session-badges", "/plugins/focus-timer/versions", "/plugins/publishing"];
+  const PUBLIC = ["/plugins", "/plugins?category=git", "/plugins?sort=new", "/plugins/focus-timer", "/plugins/session-badges", "/plugins/focus-timer/versions", "/plugins/publishing"];
   /** The bar's own part: who it says you are, and what it offers. */
   const bar = (body: string) => body.slice(body.indexOf('<header class="top"'), body.indexOf("</header>") + 9);
 
@@ -1241,50 +1243,51 @@ describe("forms", () => {
   });
 });
 
-describe("Discover", () => {
-  test("the store in three numbers, from /stats; every category with its line, its count and a few of its plugins", async () => {
-    const { body } = await html("/plugins");
-    expect(body).toMatch(/<dt>Plugins<\/dt><dd class="num">\d+<\/dd>/);
-    expect(body).toMatch(/<dt>Verified<\/dt><dd class="num">\d+ <svg class="seal s"/);
-    expect(body).toMatch(/<dt>New this week<\/dt><dd class="num">\d+<\/dd>/);
-    const index = body.slice(body.indexOf('<ul class="index">'), body.indexOf("</ul>", body.indexOf('<ul class="index">')));
-    expect(index.match(/<a class="idx" href="\/plugins\/all\?category=/g)).toHaveLength(8);
-    expect(index).toContain("<h3>Developer tools</h3><p>Docs, databases, secrets and builds</p>");
-    // (Its top plugins, at most three tiles, each on its own hue.)
-    for (const tiles of index.matchAll(/<div class="tiles" aria-hidden="true">(.*?)<\/div>/gs)) expect(tiles[1]!.match(/class="tile s h\d+"/g)!.length).toBeLessThanOrEqual(3);
+describe("one store page (Discover and Browse were two)", () => {
+  /** The Featured row's part of a page. */
+  const featuredRow = (body: string) => (body.includes('<ul class="feat-row">') ? body.slice(body.indexOf('<ul class="feat-row">'), body.indexOf("</ul>", body.indexOf('<ul class="feat-row">'))) : "");
+
+  test("Featured: up to three, the same card a size up, over the list when nothing narrows it, in any order, on its first page", async () => {
+    const front = featuredRow((await html("/plugins")).body);
+    const cards = front.match(/<a class="pcard lg h\d+" href="\/plugins\/[^"]+"/g) ?? [];
+    expect(cards.length).toBeGreaterThan(0);
+    expect(cards.length).toBeLessThanOrEqual(3);
+    // (The one card: its fields, in their order.)
+    expect(front).toMatch(/<a class="pcard lg[^"]*"[^>]*><span class="tile xl[^"]*"[\s\S]*?<div class="pc-name">[\s\S]*?<div class="pc-by">by [^<]+<\/div><p class="pc-sum">[^<]*<\/p><div class="pc-foot">/);
+    expect(featuredRow((await html("/plugins?sort=new")).body)).not.toBe("");
+    for (const narrowed of ["/plugins?q=timer", "/plugins?category=git", "/plugins?keyword=focus", "/plugins?verified=1"]) expect(featuredRow((await html(narrowed)).body), narrowed).toBe("");
+    const next = /href="([^"]+)" rel="next"/.exec((await html("/plugins")).body)![1]!.replaceAll("&amp;", "&");
+    expect(featuredRow((await html(next)).body)).toBe("");
   });
 
-  test("Featured: each on its own colour, its first picture, or its tile alone, large, when it ships none", async () => {
-    const withPictures = (await html("/plugins")).body;
-    const featured = withPictures.slice(withPictures.indexOf('<h2 id="featured">'), withPictures.indexOf("</section>", withPictures.indexOf('<h2 id="featured">')));
-    expect(featured.match(/<a class="card f-(big|small) h\d+"/g)).toHaveLength(3);
-    expect(featured.match(/<img class="shot"/g)).toHaveLength(3);
-    try {
-      await site.fake("bare", { id: "pr-radar" });
-      // (A minute's cache: another address of the same page, a fresh one.)
-      const { body } = await html("/plugins", await site.signIn("user_kai"));
-      const bare = body.slice(body.indexOf('<h2 id="featured">'), body.indexOf("</section>", body.indexOf('<h2 id="featured">')));
-      expect(bare.match(/<img class="shot"/g)).toHaveLength(2);
-      expect(bare).toMatch(/<span class="alone"><span class="tile xl h\d+"/);
-    } finally {
-      await site.fake("bare");
+  test("Discover's parts are gone: no numbers, no category chips, no lists of its own, no search of its own; the ending once, at the foot", async () => {
+    const { body } = await html("/plugins");
+    for (const gone of ['class="nums"', 'class="cats"', 'class="index"', 'class="fresh"', 'class="bfind"', ">See all<", "Browse by category", "Just published"]) expect(body, gone).not.toContain(gone);
+    expect(body.match(/Made something for Zeron\?/g)).toHaveLength(1);
+    expect(body).toContain('<section class="make" aria-labelledby="make">');
+  });
+
+  test("the bar: Browse · Publish · Review (Discover gone); its search, the one search, narrows the store in place", async () => {
+    const { body } = await html("/plugins?category=git&verified=1");
+    const nav = body.slice(body.indexOf('<nav class="nav"'), body.indexOf("</nav>", body.indexOf('<nav class="nav"')));
+    // (On a public page Review is there for staff alone, hidden until the script knows who's looking.)
+    expect([...nav.matchAll(/<a href="([^"]+)"[^>]*>([^<]+)<\/a>/g)].map((m) => `${m[2]} ${m[1]}`)).toEqual(["Browse /plugins", "Publish /account", "Review /admin/plugins"]);
+    expect(nav).toMatch(/<a href="\/admin\/plugins" hidden data-staff>Review<\/a>/);
+    expect(body).not.toContain(">Discover<");
+    // (The bar's form, and the phone's: to the store, keeping what narrows it.)
+    const forms = [...body.matchAll(/<form class="find" role="search" action="\/plugins" method="get" data-tidy>([\s\S]*?)<\/form>/g)].map((m) => m[1]!);
+    expect(forms).toHaveLength(2);
+    for (const f of forms) {
+      expect(f).toContain('<input type="hidden" name="category" value="git">');
+      expect(f).toContain('<input type="hidden" name="verified" value="1">');
     }
-  });
-
-  test("its lists: See all, each a real link to the list it summarises; Just published only what isn't verified yet", async () => {
-    const { body } = await html("/plugins");
-    expect([...body.matchAll(/<a class="more" href="([^"]+)">See all/g)].map((m) => m[1])).toEqual(["/plugins/all", "/plugins/all?sort=verified", "/plugins/all?sort=new"]);
-    const fresh = body.slice(body.indexOf('<ul class="fresh">'), body.indexOf("</ul>", body.indexOf('<ul class="fresh">')));
-    expect(fresh.match(/<li>/g)!.length).toBeGreaterThan(0);
-    expect(fresh.match(/<li>/g)!.length).toBe(fresh.match(/<span class="state no">Not verified yet<\/span>/g)!.length);
-    expect(fresh).not.toContain('class="seal');
   });
 
   test("an empty store says so; a store that didn't answer says so, and isn't kept", async () => {
     try {
       await site.fake("empty", { on: "1" });
       const { body } = await html("/plugins", await site.signIn("user_mo"));
-      expect(body).toContain("<h2>No plugins yet</h2>");
+      expect(body).toContain("<h2>No plugins in the store yet</h2>");
       expect(body).not.toContain('<h2 id="featured">');
     } finally {
       await site.fake("empty");

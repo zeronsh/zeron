@@ -145,7 +145,7 @@ describe("a reviewer, start to finish", () => {
 describe("no violations axe can find, with the edge's data", () => {
   const PAGES: [string, string | null][] = [
     ["/plugins", null],
-    ["/plugins/all", null],
+    ["/plugins?sort=new", null],
     ["/plugins/focus-timer", null],
     ["/plugins/focus-timer/versions", null],
     ["/plugins/focus-timer/versions/1.0.0", null],

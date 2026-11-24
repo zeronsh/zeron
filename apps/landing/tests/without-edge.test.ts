@@ -34,12 +34,12 @@ for (const edge of ["missing", "broken"] as const) {
         expect(await response.text(), path).toMatch(words);
         expect(response.headers.get("cloudflare-cdn-cache-control") ?? "", path).not.toMatch(/public/);
       }
-      // All plugins says it in the app's words, and offers to try again.
-      const list = await site.fetch("/plugins/all");
+      // The store says it in the app's words, and offers to try again.
+      const list = await site.fetch("/plugins");
       expect(list.status).toBe(503);
       const words = await list.text();
       expect(words).toMatch(/The plugin store didn(&#39;|')t answer/);
-      expect(words).toContain('href="/plugins/all">Try again</a>');
+      expect(words).toContain('href="/plugins">Try again</a>');
       expect(list.headers.get("cloudflare-cdn-cache-control") ?? "").not.toMatch(/public/);
       expect((await site.fetch("/plugins/focus-timer/files/1.2.0/icon.svg")).status).toBe(404);
       expect((await site.fetch("/plugins/sitemap.xml")).status).toBe(503);

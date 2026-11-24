@@ -51,11 +51,11 @@ const PAGES = [
   "/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.4.0",
   "/plugins/focus-timer/versions/1.1.0",
   "/plugins/clipboard-sync",
-  "/plugins/all",
-  "/plugins/all?category=developer-tools",
-  "/plugins/all?q=git",
-  "/plugins/all?keyword=eywordthatisthirtytwocharacters0",
-  "/plugins/all?q=zzzzqqq",
+  "/plugins?sort=new",
+  "/plugins?category=developer-tools",
+  "/plugins?q=git",
+  "/plugins?keyword=eywordthatisthirtytwocharacters0",
+  "/plugins?q=zzzzqqq",
 ];
 
 /** Your own pages, signed in as Ada (every state of a plugin and a token) and as no one. */
@@ -77,7 +77,7 @@ describe("nothing runs off the side", () => {
 });
 
 describe("by keyboard", () => {
-  test.each(["/plugins", "/plugins/focus-timer", "/plugins/worst-case-listing-at-every-limit-xyz12/versions", "/plugins/all?category=developer-tools"])("Tab goes through %s in its reading order, each stop on screen and ringed", async (path) => {
+  test.each(["/plugins", "/plugins/focus-timer", "/plugins/worst-case-listing-at-every-limit-xyz12/versions", "/plugins?category=developer-tools"])("Tab goes through %s in its reading order, each stop on screen and ringed", async (path) => {
     const page = await open(path, 1440);
     try {
       const stops: { tag: string; top: number; left: number; ring: string; label: string }[] = [];
@@ -101,11 +101,11 @@ describe("by keyboard", () => {
       // (The skip link first, then the bar, then the page.)
       expect(stops[0]!.label).toBe("Skip to the page");
       expect(stops[1]!.tag).toBe("a");
-      expect(stops.slice(2, 7).map((s) => s.label)).toEqual(["Discover", "Browse", "Publish", "Search plugins", "Sign in"]);
+      expect(stops.slice(2, 6).map((s) => s.label)).toEqual(["Browse", "Publish", "Search plugins", "Sign in"]);
       // Every stop shows the ring.
       for (const s of stops) expect(s.ring, s.label).toBe("solid");
       // Down the page: a later stop is never above an earlier one's row (a row's stops go left to right).
-      const page_ = stops.slice(8);
+      const page_ = stops.slice(7);
       for (let i = 1; i < page_.length; i++) {
         const [a, b] = [page_[i - 1]!, page_[i]!];
         expect(b.top >= a.top - 4 || b.left > a.left, `${a.label} → ${b.label}`).toBe(true);
@@ -115,11 +115,11 @@ describe("by keyboard", () => {
     }
   });
 
-  test('"/" puts you in Discover\'s own search; Escape leaves it', async () => {
+  test('"/" puts you in the store\'s one search, the bar\'s; Escape leaves it', async () => {
     const page = await open("/plugins", 1440);
     try {
       await page.keyboard.press("/");
-      expect(await page.evaluate(() => document.activeElement?.hasAttribute("data-page-search"))).toBe(true);
+      expect(await page.evaluate(() => document.activeElement?.matches(".top .find input[data-search]"))).toBe(true);
       await page.keyboard.press("Escape");
       expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true);
     } finally {
@@ -133,7 +133,8 @@ describe("by keyboard", () => {
       await page.getByRole("button", { name: "Menu" }).click();
       const menu = page.locator("#nav-menu");
       await expect.poll(() => menu.isVisible()).toBe(true);
-      expect(await menu.getByRole("link").allTextContents()).toEqual(expect.arrayContaining(["Discover", "Browse", "Publish", "Publishing guide", "Sign in"]));
+      expect(await menu.getByRole("link").allTextContents()).toEqual(expect.arrayContaining(["Browse", "Publish", "Publishing guide", "Sign in"]));
+      expect(await menu.getByRole("link").allTextContents()).not.toContain("Discover");
       await page.keyboard.press("Escape");
       await expect.poll(() => menu.isVisible()).toBe(false);
     } finally {

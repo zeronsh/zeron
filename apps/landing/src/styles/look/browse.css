@@ -1,117 +1,130 @@
-/* Browse (the prototype's browse.css), with the states it didn't draw: the phone's order and filters, hover, the current. */
-.crumbs { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding-top: 28px; font-size: 13px; line-height: 20px; color: var(--text-3); }
+/* The store (/plugins): its title block, the sidebar beside the list, Featured over the list unnarrowed, the
+   list as a grid of the one card, and its ending. Spacing by the scale's steps only (store.css :root). */
+.crumbs { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s8); font-size: 13px; line-height: 20px; color: var(--text-3); }
 .crumbs svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .crumbs a { border-radius: 4px; transition: color 0.12s var(--ease); }
 .crumbs a:hover { color: var(--text); }
 
-.bhead { display: flex; align-items: flex-end; justify-content: space-between; gap: 48px; padding-top: 20px; }
+.store-page { padding-top: var(--s48); padding-bottom: var(--sections); }
+.bhead { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--s48); }
 .bhead h1 { font-size: 40px; line-height: 44px; letter-spacing: -0.035em; overflow-wrap: anywhere; }
-.bhead .lead { margin-top: 8px; max-width: 40em; }
+.bhead .lead { margin-top: var(--head); max-width: 40em; }
 
-.browse { display: grid; grid-template-columns: 208px minmax(0, 1fr); gap: 64px; margin-top: 36px; align-items: start; }
+/* The title block, then the sidebar beside the list. */
+.browse { display: grid; grid-template-columns: 208px minmax(0, 1fr); gap: var(--s64); margin-top: var(--title); align-items: start; }
 
-/* The facets: where you are in the catalogue, and how to narrow it. */
-.facets { display: flex; flex-direction: column; gap: 32px; position: sticky; top: 88px; padding-top: 4px; }
-.facet-h { font-size: 13px; line-height: 20px; font-weight: 500; letter-spacing: 0; color: var(--text-3); margin-bottom: 8px; }
-/* (2 px between any two items, so a hovered one never meets the chosen one edge to edge.) */
-.catlist { display: flex; flex-direction: column; gap: 2px; margin: 0 -10px; }
-.catlist a { display: flex; justify-content: space-between; align-items: center; gap: 12px; height: 34px; padding: 0 10px; border-radius: 9px; font-size: 14px; color: var(--text-2); transition: background-color 0.12s var(--ease), color 0.12s var(--ease); }
+/* The sidebar: its groups a group's distance apart, each label its step above what it labels. */
+.facets { display: flex; flex-direction: column; gap: var(--groups); position: sticky; top: 88px; }
+.facet-h { font-size: 13px; line-height: 20px; font-weight: 500; letter-spacing: 0; color: var(--text-3); margin-bottom: var(--label); }
+/* (4 px between any two items, so a hovered one never meets the chosen one edge to edge.) */
+.catlist { --pad: var(--s12); display: flex; flex-direction: column; gap: var(--s4); margin-inline: calc(-1 * var(--pad)); }
+.catlist a { display: flex; justify-content: space-between; align-items: center; gap: var(--s12); height: 32px; padding: 0 var(--pad); border-radius: 9px; font-size: 14px; color: var(--text-2); transition: background-color 0.12s var(--ease), color 0.12s var(--ease); }
 .catlist a:hover { color: var(--text); background: color-mix(in srgb, var(--sunken) 70%, transparent); }
 .catlist a .num { font-size: 13px; color: var(--text-3); }
 .catlist a[aria-current] { background: var(--surface); box-shadow: var(--shadow-1); color: var(--text); font-weight: 550; }
 .catlist a[aria-current] .num { color: var(--text-2); font-weight: 450; }
-.pick { display: flex; flex-direction: column; gap: 10px; font-size: 14px; line-height: 20px; color: var(--text-2); }
-.pick a { display: flex; align-items: center; gap: 10px; border-radius: 4px; transition: color 0.12s var(--ease); }
+.pick { display: flex; flex-direction: column; gap: var(--s12); font-size: 14px; line-height: 20px; color: var(--text-2); }
+.pick a { display: flex; align-items: center; gap: var(--s8); border-radius: 4px; transition: color 0.12s var(--ease); }
 .pick a:hover { color: var(--text); }
 .pick i { width: 16px; height: 16px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--line-2); flex: none; transition: box-shadow 0.12s var(--ease); }
 .pick a:hover i { box-shadow: inset 0 0 0 1.5px var(--text-3); }
 .pick a[aria-current] { color: var(--text); }
 .pick a[aria-current] i { box-shadow: inset 0 0 0 5px var(--text); }
-.pick .seal { margin-left: -4px; }
-.tags { display: flex; flex-wrap: wrap; gap: 6px; margin-left: -9px; padding: 0; list-style: none; }
+.pick .seal { margin-left: calc(-1 * var(--s4)); }
+.tags { display: flex; flex-wrap: wrap; gap: var(--s8); margin-left: calc(-1 * var(--s8)); padding: 0; list-style: none; }
 /* (A chip no wider than the rail, its ellipsis inside it; the whole keyword in its title and address.) */
 .tags li { min-width: 0; max-width: 100%; }
 .tags .tag { display: block; max-width: 100%; line-height: 24px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tags .tag[aria-current] { background: var(--text); color: var(--bg); }
 
-/* The search, in what's chosen. */
-.bfind { --pad: 16px; position: relative; display: flex; align-items: center; height: 48px; margin-inline: calc(-1 * var(--pad)); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow-1); color: var(--text-3); transition: box-shadow 0.12s var(--ease); }
-.bfind:hover { box-shadow: 0 0 0 1px var(--line-2); }
-.bfind:focus-within { box-shadow: 0 0 0 1px var(--line-2), 0 0 0 4px color-mix(in srgb, var(--focus) 22%, transparent); }
-.bfind > svg { position: absolute; left: var(--pad); width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; pointer-events: none; }
-.bfind input[type="search"] { flex: 1; min-width: 0; height: 100%; padding: 0 44px 0 calc(var(--pad) + 28px); border: 0; border-radius: inherit; background: none; font-size: 15px; color: var(--text); }
-.bfind input::placeholder { color: var(--text-3); }
-.bfind input:focus-visible { outline: none; }
-.bfind input::-webkit-search-cancel-button { display: none; }
-.bfind .kbd { position: absolute; right: 12px; }
+/* The list's column: Featured, then the list, a section's distance apart. */
+.listing { display: flex; flex-direction: column; gap: var(--sections); min-width: 0; }
+/* A section's head: its heading and, on the same line, an action; its content a head's step below. */
+.sec-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s16); }
+.sec-head h2 { font-size: 21px; line-height: 28px; }
+.featured .feat-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--items); margin-top: var(--head); margin-inline: calc(-1 * var(--card)); padding: 0; list-style: none; }
 
-.rhead { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 32px; margin-top: 20px; }
+.rhead { display: flex; align-items: center; justify-content: space-between; gap: var(--s16); min-height: 32px; }
 .rhead p { color: var(--text-2); font-size: 14px; }
 .rhead p b { color: var(--text); font-weight: 600; }
-.sort { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; font-size: 14px; }
-.sort span { color: var(--text-3); margin-right: 8px; font-size: 13px; }
-.sort a { height: 32px; display: flex; align-items: center; padding: 0 10px; border-radius: 9px; color: var(--text-2); font-weight: 450; transition: background-color 0.12s var(--ease), color 0.12s var(--ease); }
+.sort { --pad: var(--s12); display: flex; align-items: center; flex-wrap: wrap; gap: var(--s4); margin-right: calc(-1 * var(--pad)); font-size: 14px; }
+.sort span { color: var(--text-3); margin-right: var(--s8); font-size: 13px; }
+.sort a { height: 32px; display: flex; align-items: center; padding: 0 var(--pad); border-radius: 9px; color: var(--text-2); font-weight: 450; transition: background-color 0.12s var(--ease), color 0.12s var(--ease); }
 .sort a:hover { color: var(--text); background: color-mix(in srgb, var(--sunken) 60%, transparent); }
 .sort a[aria-current] { color: var(--text); background: var(--sunken); font-weight: 550; }
 
-/* The results: two a row, each a card. */
-.results { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; margin-top: 16px; margin-inline: -18px; padding: 0; list-style: none; }
-.results li { display: flex; }
-.res { flex: 1; display: flex; gap: 16px; padding: 18px 18px 16px; border-radius: 16px; min-width: 0; }
-.res .txt { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.res .nm { display: flex; align-items: center; gap: 6px; font-size: 16px; line-height: 22px; font-weight: 600; letter-spacing: -0.012em; min-width: 0; }
-.res .nm .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.res .by { color: var(--text-3); font-size: 13px; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.res p { flex: 1; margin-top: 8px; color: var(--text-2); font-size: 14px; line-height: 21px; min-height: 42px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
-.res .ft { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 14px; min-height: 24px; }
-.res .ft .state { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.count { color: var(--text-3); font-size: 13px; line-height: 20px; white-space: nowrap; }
+/* The list: two a row, each the one card, an item's distance apart (so each reads as one). */
+.results { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--items); margin-top: var(--head); margin-inline: calc(-1 * var(--card)); padding: 0; list-style: none; }
+.results li, .feat-row li { display: flex; min-width: 0; }
 
+/* The one card (components/look/PluginCard.astro): one plugin, so one border; inside it, an item's steps. */
+.pcard { flex: 1; display: flex; gap: var(--s16); min-width: 0; padding: var(--s24); border-radius: 16px; background: var(--surface); box-shadow: var(--shadow-1), 0 0 0 1px var(--line); transition: box-shadow 0.12s var(--ease); }
+.pcard:hover { box-shadow: var(--shadow-2), 0 0 0 1px var(--line-2); }
+.pcard:focus-visible { outline-offset: var(--s4); }
+.pc-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.pc-name { display: flex; align-items: center; gap: var(--s8); font-size: 16px; line-height: 22px; font-weight: 600; letter-spacing: -0.012em; min-width: 0; color: var(--text); }
+.pc-name .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pc-by { margin-top: var(--s4); color: var(--text-3); font-size: 13px; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pc-sum { flex: 1; margin-top: var(--s8); color: var(--text-2); font-size: 14px; line-height: 21px; min-height: 42px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.pc-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--s12); margin-top: var(--s16); min-height: 24px; color: var(--text-3); font-size: 13px; line-height: 20px; white-space: nowrap; }
+.pc-foot .state { min-width: 0; overflow: hidden; text-overflow: ellipsis; margin-left: calc(-1 * var(--pad)); }
+/* Featured: the same card a size up, its tile above its words. */
+.pcard.lg { flex-direction: column; gap: var(--s16); }
+.pcard.lg .pc-name { font-size: 18px; line-height: 24px; }
+.pcard.lg .pc-sum { -webkit-line-clamp: 3; min-height: 63px; }
+
+/* The ending: who it's for, the command, the guide; no box round it, a section's distance below the list. */
+.make { display: flex; align-items: center; justify-content: space-between; gap: var(--s32); margin-top: var(--sections); padding-top: var(--s32); box-shadow: 0 -1px 0 var(--line); }
+.make h2 { font-size: 19px; line-height: 26px; }
+.make p { margin-top: var(--s8); max-width: 34em; color: var(--text-2); font-size: 14px; line-height: 21px; }
+.make-acts { display: flex; align-items: center; gap: var(--s12); flex: none; }
 
 /* The phone's order and filters: two disclosures, each opening a small panel under it (no script). */
 .fbar { display: none; }
 .drop { position: relative; }
-.drop summary { display: flex; align-items: center; gap: 6px; height: 32px; padding: 0 10px 0 12px; border-radius: 9px; font-size: 13px; font-weight: 500; color: var(--text); background: var(--surface); box-shadow: var(--shadow-1); list-style: none; cursor: pointer; white-space: nowrap; transition: box-shadow 0.12s var(--ease); }
+.drop summary { --pad: var(--s12); display: flex; align-items: center; gap: var(--s8); height: 32px; padding: 0 var(--s8) 0 var(--pad); border-radius: 9px; font-size: 13px; font-weight: 500; color: var(--text); background: var(--surface); box-shadow: var(--shadow-1); list-style: none; cursor: pointer; white-space: nowrap; transition: box-shadow 0.12s var(--ease); }
 .drop summary::-webkit-details-marker { display: none; }
 .drop summary:hover { box-shadow: var(--shadow-2); }
 .drop summary svg { width: 13px; height: 13px; fill: none; stroke: var(--text-3); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; transform: rotate(90deg); transition: transform 0.12s var(--ease); }
 .drop[open] summary svg { transform: rotate(-90deg); }
-.drop summary .n { display: grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; font-size: 11px; line-height: 1; font-weight: 600; background: var(--text); color: var(--bg); }
-.drop .pop { position: absolute; right: 0; top: calc(100% + 6px); z-index: 5; display: flex; flex-direction: column; gap: 2px; min-width: 200px; padding: 6px; border-radius: 14px; background: var(--surface); box-shadow: var(--shadow-2); }
-.drop .pop > a { display: flex; align-items: center; height: 36px; padding: 0 10px; border-radius: 9px; font-size: 14px; color: var(--text-2); }
+.drop summary .n { display: grid; place-items: center; min-width: 18px; height: 18px; padding: 0 var(--s4); border-radius: 9px; font-size: 11px; line-height: 1; font-weight: 600; background: var(--text); color: var(--bg); }
+.drop .pop { position: absolute; right: 0; top: calc(100% + var(--s8)); z-index: 5; display: flex; flex-direction: column; gap: var(--s4); min-width: 200px; padding: var(--s8); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow-2); }
+.drop .pop > a { display: flex; align-items: center; height: 36px; padding: 0 var(--s12); border-radius: 9px; font-size: 14px; color: var(--text-2); }
 .drop .pop > a:hover { background: var(--sunken); color: var(--text); }
 .drop .pop > a[aria-current] { color: var(--text); font-weight: 550; }
-.drop .pop.wide { width: min(320px, calc(100vw - 40px)); padding: 14px 16px 16px; gap: 0; }
-.drop .pop.wide .facet-h { margin: 0 0 8px; }
-.drop .pop.wide .pick + .facet-h { margin-top: 18px; }
+.drop .pop.wide { width: min(320px, calc(100vw - 40px)); padding: var(--s16); gap: 0; }
+.drop .pop.wide .facet-h { margin: 0 0 var(--label); }
+.drop .pop.wide .pick + .facet-h { margin-top: var(--groups); }
 
 @media (max-width: 1024px) {
-  .browse { grid-template-columns: 188px minmax(0, 1fr); gap: 40px; }
+  .browse { grid-template-columns: 188px minmax(0, 1fr); gap: var(--s48); }
   .results { grid-template-columns: minmax(0, 1fr); }
+  .featured .feat-row { grid-template-columns: minmax(0, 1fr); }
+  .pcard.lg { flex-direction: row; }
 }
 @media (max-width: 860px) {
-  .browse { grid-template-columns: minmax(0, 1fr); gap: 16px; margin-top: 20px; }
-  .facets { position: static; padding: 0; gap: 0; }
+  .browse { grid-template-columns: minmax(0, 1fr); gap: var(--s32); }
+  .facets { position: static; gap: 0; }
   .facets .wide-facet, .facets .facet-h { display: none; }
-  .catlist { flex-direction: row; gap: 8px; overflow-x: auto; margin: 0 calc(-1 * var(--gutter)); padding: 2px var(--gutter) 2px calc(var(--gutter) - 12px); scrollbar-width: none; }
-  .catlist a { flex: none; gap: 7px; height: 32px; padding: 0 12px; border-radius: 16px; font-size: 13px; font-weight: 500; box-shadow: inset 0 0 0 1px var(--line-2); }
+  .catlist { flex-direction: row; gap: var(--s8); overflow-x: auto; margin: 0 calc(-1 * var(--gutter)); padding: var(--s4) var(--gutter) var(--s4) calc(var(--gutter) - var(--pad)); scrollbar-width: none; }
+  .catlist a { flex: none; gap: var(--s8); height: 32px; border-radius: 16px; font-size: 13px; font-weight: 500; box-shadow: inset 0 0 0 1px var(--line-2); }
   .catlist a[aria-current] { background: var(--text); color: var(--bg); box-shadow: none; font-weight: 500; }
   .catlist a[aria-current] .num { color: color-mix(in srgb, var(--bg) 62%, var(--text)); }
   .sort { display: none; }
-  .fbar { display: flex; gap: 8px; margin-left: -12px; }
+  .fbar { display: flex; gap: var(--s8); margin-left: calc(-1 * var(--s12)); }
+  .make { flex-direction: column; align-items: flex-start; }
+  /* (The command and the guide are boxes of 16 a side: stacked on a phone, each hangs by it.) */
+  .make-acts { flex-wrap: wrap; margin-left: calc(-1 * var(--s16)); }
 }
 @media (max-width: 720px) {
-  .crumbs { padding-top: 20px; }
-  .bhead { padding-top: 14px; }
-  .bhead h1 { font-size: 30px; line-height: 34px; }
-  .bhead .lead { margin-top: 6px; }
-  .bfind { height: 46px; }
-  .bfind .kbd { display: none; }
-  .rhead { margin-top: 14px; }
-  .results { gap: 10px; margin-top: 12px; }
-  /* (As wide as the column, as wide as the screen.) */
-  .results { margin-inline: calc(-1 * var(--gutter)); }
-  .res { gap: 14px; padding: 16px var(--gutter) 14px; border-radius: 0; }
-  .res .tile.l { width: 44px; height: 44px; font-size: 19px; }
-  .res p { min-height: 0; }
+  .store-page { padding-top: var(--s32); padding-bottom: var(--s48); }
+  .bhead h1 { font-size: 32px; line-height: 36px; }
+  /* (On a phone the store's sections are 32 apart; its chips head the list.) */
+  .listing { gap: var(--s32); }
+  /* (As wide as the column, as wide as the screen: each card the screen's width, an item's distance apart.) */
+  .results, .featured .feat-row { margin-inline: calc(-1 * var(--gutter)); }
+  .pcard { padding: var(--s24) var(--gutter); border-radius: 0; }
+  .pcard .tile.l { width: 44px; height: 44px; font-size: 19px; }
+  .pc-sum { min-height: 0; }
+  .pcard.lg .pc-sum { min-height: 0; }
 }
