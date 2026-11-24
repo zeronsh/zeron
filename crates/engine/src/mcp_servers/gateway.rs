@@ -130,7 +130,9 @@ impl McpGateway {
         builder
             .send()
             .await
-            .map_err(|e| format!("upstream MCP request failed: {e}"))
+            // (Without its URL, which a key may be in: this is logged and
+            // answered to the agent.)
+            .map_err(|e| format!("upstream MCP request failed: {}", e.without_url()))
     }
 }
 

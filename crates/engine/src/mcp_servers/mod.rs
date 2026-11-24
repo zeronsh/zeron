@@ -879,6 +879,17 @@ impl McpServers {
                     return Err("MCP server URL must use http:// or https://".into());
                 }
 
+                // Moved to another origin: a sign-in under way was to the old
+                // one, as was the app (client) the person gave for it.
+                let was = self
+                    .get_vault_cached(&id)
+                    .map(|c| c.url)
+                    .or_else(|| self.local_store.get(&id).and_then(|s| s.url));
+                if was.is_some_and(|was| gateway::url_origin(&was) != gateway::url_origin(&raw_url)) {
+                    self.oauth_flows.cancel_for_server(&id);
+                    lock(&self.oauth_overrides).remove(&id);
+                }
+
                 // Decide storage: Vault when available, not marked local_only,
                 // and URL is HTTPS (Vault rejects non-HTTPS URLs).
                 let vault = if !req.local_only && scheme == "https" {

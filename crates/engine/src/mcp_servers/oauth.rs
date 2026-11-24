@@ -345,8 +345,8 @@ fn bound_resource(
             let resource = Url::parse(stated).map_err(|e| format!("invalid resource '{stated}': {e}"))?;
             if !names_server(&resource, server) {
                 return Err(format!(
-                    "this server's sign-in is for another one ({}): it would get that one's access",
-                    origin_of(&resource).unwrap_or_else(|_| stated.to_owned())
+                    "this server's sign-in is for another address ({stated}). If that is this \
+                     server's, add it by that address instead"
                 ));
             }
             Ok(Some(stated.to_owned()))

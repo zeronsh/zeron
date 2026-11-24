@@ -440,6 +440,27 @@ impl LocalStore {
         Ok(Some(view))
     }
 
+    /// Keep what a refresh of `previous` answered, unless that's no longer
+    /// what the server signs in with.
+    fn replace_oauth_tokens(&self, id: &str, previous: &str, refreshed: LocalOAuthState) -> Result<bool, String> {
+        let mut servers = lock(&self.servers);
+        let Some(server) = servers.iter_mut().find(|s| s.id == id) else {
+            return Ok(false);
+        };
+        if server.oauth.as_ref().is_none_or(|now| now.access_token != previous) {
+            return Ok(false);
+        }
+        if !refreshed.scopes.is_empty() {
+            server.oauth_scopes = refreshed.scopes.clone();
+        }
+        server.oauth = Some(refreshed);
+        server.reauth_required = false;
+        server.last_error = None;
+        server.updated_at = now_ms();
+        self.persist_locked(&servers)?;
+        Ok(true)
+    }
+
     pub fn disconnect_auth(&self, id: &str) -> Result<Option<McpServerView>, String> {
         let mut servers = lock(&self.servers);
         let Some(server) = servers.iter_mut().find(|s| s.id == id) else {
@@ -614,7 +635,11 @@ impl LocalStore {
                         err.message
                     })?;
 
-                self.set_oauth_tokens(id, refreshed.clone(), None)?;
+                // Signed out, signed in again or moved while it was asked for:
+                // what's there now stands.
+                if !self.replace_oauth_tokens(id, &current_oauth.access_token, refreshed.clone())? {
+                    return Err(format!("MCP server '{id}' changed while its sign-in was renewed"));
+                }
                 let mut headers = current.headers.clone();
                 headers.insert("Authorization".into(), format_oauth_header(&refreshed));
                 Ok(ResolvedLocalUpstream {
@@ -793,6 +818,38 @@ mod tests {
             store_path_for(&local_profile, dir.path()),
             store_path_for(&synced_profile, dir.path())
         );
+    }
+
+    /// A refresh answered after its server signed out changes nothing.
+    #[test]
+    fn a_refresh_never_undoes_a_sign_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalStore::open(dir.path().join("servers.json"));
+        let tokens = |access: &str| LocalOAuthState {
+            access_token: access.into(),
+            refresh_token: Some("refresh".into()),
+            token_type: None,
+            expires_at: None,
+            token_endpoint: "https://auth.example/token".into(),
+            client_id: "client".into(),
+            client_secret: None,
+            scopes: Vec::new(),
+            resource: None,
+        };
+        store
+            .upsert(LocalMcpServer {
+                id: "s".into(),
+                name: "S".into(),
+                auth_kind: McpAuthKind::OAuth,
+                oauth: Some(tokens("old")),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(store.replace_oauth_tokens("s", "old", tokens("new")).unwrap());
+        assert!(!store.replace_oauth_tokens("s", "old", tokens("stale")).unwrap());
+        store.disconnect_auth("s").unwrap();
+        assert!(!store.replace_oauth_tokens("s", "new", tokens("late")).unwrap());
+        assert!(store.get("s").unwrap().oauth.is_none());
     }
 
     /// One file once served every account: the first to sign in has it, and
