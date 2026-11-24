@@ -66,6 +66,7 @@ fun SettingsScreen(
     val appearance by model.appearance.collectAsState()
     val groupByProject by model.groupByProject.collectAsState()
     var confirmSignOut by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    val server by model.server.collectAsState()
     val workspace by model.workspace.collectAsState()
     val devices = workspace?.devices.orEmpty()
     val list = androidx.compose.foundation.lazy.rememberLazyListState()
@@ -102,6 +103,20 @@ fun SettingsScreen(
                         Text(model.accountName, style = MaterialTheme.typography.titleLargeEmphasized, color = MaterialTheme.colorScheme.onPrimaryContainer)
                         Text(model.accountDetail, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f))
                     }
+                }
+            }
+        }
+        // The account's server, under its card (a demo has neither).
+        if (!model.isDemo) {
+            item {
+                Column(Modifier.padding(horizontal = 16.dp)) {
+                    CloudRow(
+                        0, 1, "Server",
+                        if (model.serverFromLaunch) server.host else server.label,
+                        leading = { IconTile(ZIcons.Server) },
+                        // (The app's one server sheet: a link can refill it, never stack another.)
+                        onClick = model::openServerSheet,
+                    )
                 }
             }
         }

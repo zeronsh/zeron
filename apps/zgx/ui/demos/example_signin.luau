@@ -18,6 +18,14 @@ local signin = require("@screens/onboarding/signin")
 
 local shown = ui.state("ex_si_state", "ready")
 local direction = ui.state("ex_si_direction", "one")
+-- The server the pill over the title names: none for Zeron's (its dialog is
+-- screens/server's; here the pill only comes and goes, the gallery's account
+-- left where it is).
+local on_server = ui.state("ex_si_server", "zeron")
+local SERVERS = {
+	{ value = "zeron", label = "Zeron's" },
+	{ value = "acme", label = "Self-hosted" },
+}
 
 -- A card's own height (member_card's), and the gap between cards in a
 -- column (space.3, in points for the sums).
@@ -92,7 +100,7 @@ end
 return {
 	id = "ex_signin",
 	title = "Sign in",
-	about = "Setup's first screen for someone signed out, as the app draws it: two words, three lines on what an account gives, and the way to one or on without. Beside the words, the members who already have one: one large card at a time, drifting up the window's right edge, held under the pointer and dimmed to the room's light until the pointer finds it. Two other walls to compare: two columns beside the words, or a wall behind them. Then the sign-in waiting on the browser, and one that didn't finish.",
+	about = "Setup's first screen for someone signed out, as the app draws it: two words, three lines on what an account gives, and the way to one or on without. Beside the words, the members who already have one: one large card at a time, drifting up the window's right edge, held under the pointer and dimmed to the room's light until the pointer finds it. Two other walls to compare: two columns beside the words, or a wall behind them. Over the title, once the account will live on a server of its own (a self-hosted one, docs/self-hosting.md), a pill naming it, the way to another; Zeron's goes unsaid (the Server choice beside the state trades the two). Then the sign-in waiting on the browser, and one that didn't finish.",
 	demo = function()
 		return kit.stage {
 			states = STATES,
@@ -103,6 +111,8 @@ return {
 				items = "center",
 				ds.Text { "Direction", style = "caption", tone = "tertiary" },
 				ds.Segmented { value = direction, options = DIRECTIONS, label = "Direction" },
+				ds.Text { "Server", style = "caption", tone = "tertiary" },
+				ds.Segmented { value = on_server, options = SERVERS, label = "Server" },
 			},
 			w = WIN_W,
 			h = WIN_H,
@@ -112,6 +122,12 @@ return {
 				walls = { one = signin.wall, columns = columns_direction, wall = wall_direction },
 				on_create = function()
 					shown:set(if shown:peek() == "ready" then "waiting" else "ready")
+				end,
+				server = function(): signin.Server?
+					return if on_server:get() == "acme" then { name = "Acme", host = "zeron.acme.com" } else nil
+				end,
+				on_server = function()
+					on_server:set("zeron")
 				end,
 			},
 		}

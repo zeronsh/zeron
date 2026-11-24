@@ -7262,6 +7262,7 @@ dependencies = [
  "pulldown-cmark 0.12.2",
  "serde",
  "serde_json",
+ "url",
  "uuid",
 ]
 

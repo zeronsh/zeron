@@ -43,14 +43,11 @@ local Radio = ui.component(function(props: { option: Option, value: State<any>, 
 		on_hover = function(inside: boolean)
 			hovered:set(inside)
 		end,
+		-- (A click, Space, and an arrow onto it: the group's arrows activate
+		-- the radio they move to, zgx's own. Focus alone chooses nothing: a
+		-- dialog opening on its first control leaves the choice as it was.)
 		on_click = function()
 			props.on_choose(option.value)
-		end,
-		on_focus = function()
-			-- Arrowing onto an option chooses it, as a native group does.
-			if not chosen() then
-				props.on_choose(option.value)
-			end
 		end,
 		ui.div {
 			pt = ui.raw(1, "centres the 16 dot on an 18 line"),

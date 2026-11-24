@@ -7,10 +7,15 @@
 //!   zeron://open/chat/<id>?workspace=<locator>
 //!                                   a chat's link, opened only in the
 //!                                   workspace it came from
+//!   zeron://server?address=<address>
+//!                                   a self-hosted server's invite: its
+//!                                   dialog, on the address (never a switch
+//!                                   without a click)
 //!
 //! What to open goes to the scripts as shared `app.link`,
-//! `{ seq, chat?, settings? }` (`seq` moving with each), which the shell's
-//! route follows (ui/screens/shell/route.luau). The beta registers for them
+//! `{ seq, chat?, settings?, server? }` (`seq` moving with each), which the
+//! shell's route follows (ui/screens/shell/route.luau), and setup's for an
+//! invite (ui/screens/onboarding/init.luau). The beta registers for them
 //! (`sh.zeron.app`'s `zeron` scheme, src/main.rs); a launch with a link
 //! (`zeron <url>`) opens it too.
 
@@ -23,11 +28,16 @@ use zgx_script::{ScriptHost, Shared, Value};
 pub enum Target {
     Chat(String),
     Settings(&'static str),
+    /// An invite's address.
+    Server(String),
 }
 
 /// What `url` asks for: the target and, for a conversation link, the
 /// workspace it belongs to. None for anything else.
 pub fn parse(url: &str) -> Option<(Target, Option<String>)> {
+    if let Ok(address) = zeron_notify::links::parse_server_invite(url) {
+        return Some((Target::Server(address), None));
+    }
     if let Some(target) = zeron_notify::link_target(url) {
         return Some(if target == zeron_notify::AGENT_UPDATES_TARGET {
             (Target::Settings("providers"), None)
@@ -43,12 +53,18 @@ thread_local! {
     static WINDOWS: RefCell<Vec<Shared>> = const { RefCell::new(Vec::new()) };
     static SEQ: Cell<u64> = const { Cell::new(0) };
     static LAST: RefCell<Value> = RefCell::new(Value::record([("seq", Value::from(0.0))]));
+    /// An invite that came with no window to take it (a launch by the
+    /// link, the intro still playing): the next window's, once.
+    static PENDING: RefCell<Option<Value>> = const { RefCell::new(None) };
 }
 
-/// A window's `app.link`.
+/// A window's `app.link`: an invite that waited for one, else the last
+/// link (a chat opened from setup is the main window's too).
 pub fn install(host: &ScriptHost) {
-    let last = LAST.with(|l| l.borrow().clone());
-    WINDOWS.with(|w| w.borrow_mut().push(host.shared("app.link", last)));
+    let first = PENDING
+        .with(|p| p.borrow_mut().take())
+        .unwrap_or_else(|| LAST.with(|l| l.borrow().clone()));
+    WINDOWS.with(|w| w.borrow_mut().push(host.shared("app.link", first)));
 }
 
 /// Open `url`: a banner's target at once; a chat's link once the engine says
@@ -112,12 +128,21 @@ fn tell(target: Target) {
         s.get()
     });
     let mut fields = vec![("seq", Value::from(seq as f64))];
+    // (An invite is the windows' open now, or the next one's: never handed
+    // to a later one as the last link, which would ask again.)
+    let invite = matches!(target, Target::Server(_));
     match target {
         Target::Chat(id) => fields.push(("chat", Value::from(id.as_str()))),
         Target::Settings(page) => fields.push(("settings", Value::from(page))),
+        Target::Server(address) => fields.push(("server", Value::from(address.as_str()))),
     }
     let value = Value::record(fields);
-    LAST.with(|l| *l.borrow_mut() = value.clone());
+    if !invite {
+        LAST.with(|l| *l.borrow_mut() = value.clone());
+    } else if WINDOWS.with(|w| w.borrow().is_empty()) {
+        PENDING.with(|p| *p.borrow_mut() = Some(value));
+        return;
+    }
     WINDOWS.with(|w| {
         for shared in w.borrow().iter() {
             shared.set(value.clone());
@@ -129,15 +154,18 @@ fn tell(target: Target) {
 mod tests {
     use super::*;
 
+    fn text(value: &Value, key: &str) -> Option<String> {
+        match value.field(key) {
+            Some(Value::Str(s)) => Some(s.to_string()),
+            Some(Value::Text(s)) => Some(s.to_string()),
+            _ => None,
+        }
+    }
+
     fn last() -> (Option<String>, Option<String>) {
         LAST.with(|l| {
             let l = l.borrow();
-            let text = |k: &str| match l.field(k) {
-                Some(Value::Str(s)) => Some(s.to_string()),
-                Some(Value::Text(s)) => Some(s.to_string()),
-                _ => None,
-            };
-            (text("chat"), text("settings"))
+            (text(&l, "chat"), text(&l, "settings"))
         })
     }
 
@@ -162,5 +190,24 @@ mod tests {
         assert_eq!(parse(&link), Some((Target::Chat("c 1".into()), Some("abc".into()))));
         assert_eq!(parse("https://example.com"), None);
         assert_eq!(parse("zeron://open/chat/id"), None);
+    }
+
+    #[test]
+    fn an_invite_names_its_server() {
+        let link = zeron_notify::links::server_invite_link("https://zeron.acme.com");
+        assert_eq!(parse(&link), Some((Target::Server("https://zeron.acme.com".into()), None)));
+        assert_eq!(parse("zeron://server?address="), None);
+    }
+
+    /// Clicked before any window can take it (a launch by the link), an
+    /// invite waits for the first; it never stands as the last link, which
+    /// every later window is handed (setup's, then the main one's).
+    #[test]
+    fn an_invite_waits_for_a_window_and_is_never_handed_on() {
+        clicked("chat-7");
+        open(&zeron_notify::links::server_invite_link("zeron.acme.com"));
+        assert_eq!(last(), (Some("chat-7".into()), None));
+        let waiting = PENDING.with(|p| p.borrow_mut().take()).expect("kept for the next window");
+        assert_eq!(text(&waiting, "server").as_deref(), Some("zeron.acme.com"));
     }
 }

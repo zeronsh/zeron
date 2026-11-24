@@ -21,6 +21,8 @@ object ZIcons {
     val TabSettings = R.drawable.zi_tab_settings
     val Back = R.drawable.zi_arrow_left
     val More = R.drawable.zi_more_horizontal
+    /** The overflow of a screen with no other chrome (the welcome): Android's own ⋮. */
+    val MoreVertical = R.drawable.zi_more_vertical
     val Close = R.drawable.zi_close
     val Plus = R.drawable.zi_plus
     val Attach = R.drawable.zi_paperclip
@@ -96,6 +98,7 @@ object ZIcons {
     val GitHub = R.drawable.zi_github
     val Zeron = R.drawable.zi_zeron
     val Menu = R.drawable.zi_menu
+    val Guide = R.drawable.zi_book_minimalistic
 }
 
 @Composable

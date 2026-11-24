@@ -56,36 +56,23 @@ class CredentialStore(context: Context) {
         return legacy
     }
 
-    fun stored(): Credentials? {
-        val json = storedJson()?.let { runCatching { JSONObject(it) }.getOrNull() } ?: return null
-        return when (json.optString("kind")) {
-            "workos" -> Credentials.WorkOs(
-                json.getString("userId"),
-                json.getString("orgId"),
-                AuthTokens(json.getString("access"), json.getString("refresh")),
-            )
-            "dev" -> Credentials.Dev(json.getString("userId"), json.getString("orgId"))
-            else -> null
-        }
+    /** Credentials and the server they were signed in to (null: Zeron's own). */
+    data class Account(val credentials: Credentials, val server: StoredServer?)
+
+    fun account(): Account? = storedJson()?.let(CredentialJson::decode)
+
+    fun stored(): Credentials? = account()?.credentials
+
+    fun store(credentials: Credentials, server: StoredServer?) {
+        val json = CredentialJson.encode(credentials, server) ?: return
+        prefs.edit().putString("sealed", seal(json)).remove("credentials").apply()
     }
 
-    fun store(credentials: Credentials) {
-        val json = when (credentials) {
-            is Credentials.WorkOs -> JSONObject()
-                .put("kind", "workos")
-                .put("userId", credentials.userId)
-                .put("orgId", credentials.orgId)
-                .put("access", credentials.tokens.accessToken)
-                .put("refresh", credentials.tokens.refreshToken)
-            is Credentials.Dev -> JSONObject().put("kind", "dev").put("userId", credentials.userId).put("orgId", credentials.orgId)
-            is Credentials.Demo -> return
-        }
-        prefs.edit().putString("sealed", seal(json.toString())).remove("credentials").apply()
-    }
-
+    /** Refreshed tokens, kept with the server they came from. */
     fun updateTokens(tokens: AuthTokens) {
-        val current = stored() as? Credentials.WorkOs ?: return
-        store(Credentials.WorkOs(current.userId, current.orgId, tokens))
+        val account = account() ?: return
+        val current = account.credentials as? Credentials.WorkOs ?: return
+        store(Credentials.WorkOs(current.userId, current.orgId, tokens), account.server)
     }
 
     fun clear() {
@@ -103,5 +90,47 @@ class CredentialStore(context: Context) {
     private companion object {
         const val KEY_ALIAS = "zeron-credentials"
         const val TRANSFORMATION = "AES/GCM/NoPadding"
+    }
+}
+
+/**
+ * The sealed credentials JSON: `{kind, userId, orgId, access, refresh}`, plus
+ * `edge`/`workosClientId`/`serverName` for an account on a server other than
+ * Zeron's. Without them it is Zeron's own, as every install before them.
+ */
+internal object CredentialJson {
+    fun encode(credentials: Credentials, server: StoredServer?): String? {
+        val json = when (credentials) {
+            is Credentials.WorkOs -> JSONObject()
+                .put("kind", "workos")
+                .put("userId", credentials.userId)
+                .put("orgId", credentials.orgId)
+                .put("access", credentials.tokens.accessToken)
+                .put("refresh", credentials.tokens.refreshToken)
+            is Credentials.Dev -> JSONObject().put("kind", "dev").put("userId", credentials.userId).put("orgId", credentials.orgId)
+            is Credentials.Demo -> return null
+        }
+        server?.let {
+            json.put("edge", it.url).put("workosClientId", it.workosClientId)
+            it.name?.let { name -> json.put("serverName", name) }
+        }
+        return json.toString()
+    }
+
+    fun decode(text: String): CredentialStore.Account? {
+        val json = runCatching { JSONObject(text) }.getOrNull() ?: return null
+        val credentials = when (json.optString("kind")) {
+            "workos" -> Credentials.WorkOs(
+                json.getString("userId"),
+                json.getString("orgId"),
+                AuthTokens(json.getString("access"), json.getString("refresh")),
+            )
+            "dev" -> Credentials.Dev(json.getString("userId"), json.getString("orgId"))
+            else -> return null
+        }
+        val edge = json.stringOrNull("edge")
+        val client = json.stringOrNull("workosClientId")
+        val server = if (edge != null && client != null) StoredServer(edge, client, json.stringOrNull("serverName")) else null
+        return CredentialStore.Account(credentials, server)
     }
 }

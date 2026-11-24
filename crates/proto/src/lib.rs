@@ -24,6 +24,7 @@ pub mod redact;
 pub mod relay_gen;
 pub mod providers;
 pub mod run_errors;
+pub mod server;
 pub mod sidebar_pins;
 pub mod view;
 pub mod voice;

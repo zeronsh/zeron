@@ -17,6 +17,16 @@
 -- one, and nothing starts as the window takes over. Then the card catches
 -- the light once.
 --
+-- Zeron's server goes unsaid: the welcome is the same for everyone who
+-- never chose another, and choosing one is File → Connect to Server…, a
+-- server's own invite, or Settings → Account (screens/server,
+-- docs/self-hosting.md). Once another is chosen it's who the screen is
+-- for: over the title, a pill names it (the server's icon, its name, its
+-- address), the way back to choosing. It hangs out of the flow, as the
+-- status line under the lines does, so neither moves the words, and the
+-- intro's copy of the screen (which has no account, so no pill) matches
+-- the window's to the point.
+--
 -- The gallery's Sign in example draws this screen, with its other walls to
 -- compare and the states sign-in can be in (waiting on the browser, failed).
 
@@ -116,6 +126,11 @@ export type Wall = {
 	intrudes: number,
 }
 
+-- The server named over the title: what it's called; its address, when
+-- that isn't its name already; `fixed`, a launch's environment named it
+-- (the pill only says so: no way to another from here).
+export type Server = { name: string, host: string?, fixed: boolean? }
+
 export type Props = {
 	-- What the state says: "ready", "waiting" (on the browser) or "failed".
 	status: State<string>?,
@@ -131,6 +146,13 @@ export type Props = {
 	on_skip: (() -> ())?,
 	-- Why the last sign-in didn't finish, as a line (failed only).
 	says: (() -> string?)?,
+	-- The server the account will live on, when it isn't Zeron's (nil for
+	-- Zeron's: no pill). Tracked.
+	server: (() -> Server?)?,
+	-- Choosing another (the server's dialog), the pill's click.
+	on_server: (() -> ())?,
+	-- Drawn with the screen, out of its flow (the server's dialog).
+	overlay: Node?,
 }
 
 -- The one-card wall, as the app shows it.
@@ -193,11 +215,74 @@ function M.screen(props: Props?): Node
 	-- One left edge for everything on the page: the title's ink, each
 	-- line's and the footer label's start on the same column. No optical
 	-- offsets: the user's rule.
-	-- The status line hangs under the lines, out of the flow: the block the
-	-- room centres is the title and the lines, and the line comes and goes
-	-- without moving them.
+	-- The status line hangs under the lines and the server's pill over the
+	-- title, out of the flow: the block the room centres is the title and
+	-- the lines, and both come and go without moving them.
 	local gap = ui.theme.get("space.5") :: number
 	local line_h = ui.theme.get("font.line.md") :: number
+	-- The pill: a small pill button's height, a gap over the title's box,
+	-- its wash hanging out past the words' edge by its pad so the icon's
+	-- ink starts on it (as the footer's ghost pills hang theirs).
+	local PILL_H = 28
+	local pill_gap = ui.theme.get("space.4") :: number
+	local pill_pad = ui.theme.get("zeron.space.snug") :: number
+	-- Which server the pill names, as a key ("" for none): its name, its
+	-- address and whether it's fixed, a line each, so a change of any brings
+	-- a new pill in.
+	local function server_key(): string
+		local s = if p.server then p.server() else nil
+		if not s then
+			return ""
+		end
+		return `{s.name}\n{s.host or ""}\n{if s.fixed then "fixed" else ""}`
+	end
+	local function pill(key: string): Node
+		if key == "" then
+			return ui.div {}
+		end
+		local name, host, fixed = string.match(key, "^(.-)\n(.-)\n(.*)$")
+		local named = ui.t(if host ~= "" then "account.server.identity_host" else "account.server.identity", { server = name, host = host }):get()
+		local kids: { any } = {
+			ds.Icon { name = "global", size = 14, color = "$text.secondary" },
+			ui.text { name, literal = true, truncate = true, shrink = 1, min_w = 0, weight = "$font.weight.medium", color = "$text.primary" },
+		}
+		if host ~= "" then
+			table.insert(kids, ui.text { host, literal = true, truncate = true, shrink = 2, min_w = 0, color = "$text.tertiary" })
+		end
+		if fixed ~= "" or not p.on_server then
+			return ui.row {
+				id = "server-pill",
+				label = named,
+				h = PILL_H,
+				px = "$zeron.space.snug",
+				gap = "$space.2",
+				items = "center",
+				rounded = "$radius.full",
+				bg = "$zeron.secondary.bg",
+				text_size = "$font.size.sm",
+				max_w = MEASURE,
+				table.unpack(kids),
+			}
+		end
+		local props: { [any]: any } = {
+			id = "server-pill",
+			label = named,
+			tone = "secondary",
+			size = "sm",
+			shape = "pill",
+			max_w = MEASURE,
+			-- (The sign-in on its way is this server's: it stays named,
+			-- not changed, until that's over.)
+			disabled = function(): boolean
+				return status:get() == "waiting"
+			end,
+			on_click = p.on_server,
+		}
+		for i, k in kids do
+			props[i] = k
+		end
+		return ds.Button(props :: any)
+	end
 	local words = ui.column {
 		id = "copy",
 		relative = true,
@@ -206,12 +291,27 @@ function M.screen(props: Props?): Node
 		max_w = MEASURE,
 		ml = "$space.4",
 		gap = "$space.5",
+		ui.div {
+			absolute = true,
+			left = -pill_pad,
+			top = -(PILL_H + pill_gap),
+			h = PILL_H,
+			-- (The one thing here the pointer is for: the words round it let
+			-- it through to the wall.)
+			pointer_events = "auto",
+			ui.presence(server_key, pill, {
+				enter = { opacity = { 0, 1 }, y = { 4, 0 }, duration = 240, ease = "outExpo" },
+				exit = { opacity = 0, duration = 120 },
+				mode = "wait",
+			}),
+		},
 		ds.Text { TITLE, style = "display", heading = 1, wrap = true },
 		ui.column { w_full = true, gap = "$space.2", table.unpack(lines) },
 		ui.text {
 			said,
 			absolute = true,
 			left = 0,
+			right = 0,
 			bottom = -(gap + line_h),
 			h = line_h,
 			text_size = "$font.size.md",
@@ -298,6 +398,7 @@ function M.screen(props: Props?): Node
 				words,
 			},
 		},
+		p.overlay,
 	}
 end
 

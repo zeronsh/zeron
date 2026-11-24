@@ -139,6 +139,10 @@ return function(): Node
 	runs["shell.settings"] = function()
 		route.settings()
 	end
+	-- Connect to Server…: Settings → Account, its server's dialog open.
+	runs["shell.connect_server"] = function()
+		route.connect_server()
+	end
 	-- Check for Updates…: Settings' About & updates, checking now.
 	runs["shell.check_updates"] = function()
 		route.settings("about")

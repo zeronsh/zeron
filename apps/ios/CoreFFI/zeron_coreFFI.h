@@ -1736,12 +1736,34 @@ RustBuffer uniffi_zeron_mobile_fn_func_relative_time_label(int64_t at_ms, int64_
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_WORKOS_AUTHORIZE_URL
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_WORKOS_AUTHORIZE_URL
-RustBuffer uniffi_zeron_mobile_fn_func_workos_authorize_url(RustBuffer state, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_zeron_mobile_fn_func_workos_authorize_url(RustBuffer workos_client_id, RustBuffer state, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_AGENT_LOGIN_RULES
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_AGENT_LOGIN_RULES
 RustBuffer uniffi_zeron_mobile_fn_func_agent_login_rules(RustBuffer harness, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_SERVER_DISCOVER
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_SERVER_DISCOVER
+uint64_t uniffi_zeron_mobile_fn_func_server_discover(RustBuffer address
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_SERVER_INFO
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_SERVER_INFO
+RustBuffer uniffi_zeron_mobile_fn_func_server_info(RustBuffer url, RustBuffer workos_client_id, RustBuffer name, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_SERVER_OFFICIAL
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_SERVER_OFFICIAL
+RustBuffer uniffi_zeron_mobile_fn_func_server_official(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_SERVER_SELF_HOSTING_GUIDE
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_SERVER_SELF_HOSTING_GUIDE
+RustBuffer uniffi_zeron_mobile_fn_func_server_self_hosting_guide(RustCallStatus *_Nonnull out_status
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_FUNC_FILE_MENTION_LINK
@@ -2164,6 +2186,30 @@ uint16_t uniffi_zeron_mobile_checksum_func_workos_authorize_url(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_AGENT_LOGIN_RULES
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_AGENT_LOGIN_RULES
 uint16_t uniffi_zeron_mobile_checksum_func_agent_login_rules(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_SERVER_DISCOVER
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_SERVER_DISCOVER
+uint16_t uniffi_zeron_mobile_checksum_func_server_discover(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_SERVER_INFO
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_SERVER_INFO
+uint16_t uniffi_zeron_mobile_checksum_func_server_info(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_SERVER_OFFICIAL
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_SERVER_OFFICIAL
+uint16_t uniffi_zeron_mobile_checksum_func_server_official(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_SERVER_SELF_HOSTING_GUIDE
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_FUNC_SERVER_SELF_HOSTING_GUIDE
+uint16_t uniffi_zeron_mobile_checksum_func_server_self_hosting_guide(void
     
 );
 #endif

@@ -13,3 +13,4 @@
 "CoreError.Storage.message" = "reason"
 "CoreError.NotImplemented.message" = "reason"
 "CoreError.Internal.message" = "reason"
+"ServerLookupError.Failed.message" = "reason"

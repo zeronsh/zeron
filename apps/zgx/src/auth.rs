@@ -21,12 +21,16 @@
 //!     (`ui.call("account.claim_username", "mara")`).
 //!
 //! The engine's edge, sign-in client and loopback port come from here (the
-//! engine this app starts is given them, src/engine/manager.rs).
+//! engine this app starts is given them, src/engine/manager.rs), or from the
+//! server chosen on this computer: a self-hosted one (docs/self-hosting.md),
+//! found by its address (src/server.rs) and kept in the engine's data dir
+//! (zeron_proto::server::saved), so every engine there signs in to it. Its
+//! loopback port is 27641, as production's.
 //!
-//! Zeron.app's beta (the `beta` feature) is production's only: edge.zeron.sh,
-//! its client and port 27641 (the only loopback production's WorkOS client
-//! accepts, shared with Zeron.app). It has no staging built in, and the
-//! variables below do nothing in it.
+//! Zeron.app's beta (the `beta` feature) is production's unless a server is
+//! chosen: edge.zeron.sh, its client and port 27641 (the only loopback
+//! production's WorkOS client accepts, shared with Zeron.app). It has no
+//! staging built in, and the variables below do nothing in it.
 //!
 //! Development builds are staging's by default, production one variable
 //! away:
@@ -36,17 +40,34 @@
 //!   ZERON_ZGX_CALLBACK_PORT=<n>    the loopback port that client redirects to
 //!   ZERON_ZGX_PRIVATE_SIGNIN=1     sign in in a private Chrome window (no
 //!                                  browser session picks the account)
+//! (Any of the edge, client or port set, no server can be chosen in the app;
+//! ZERON_ZGX_ENV alone only picks the build's own.)
 //!
 //! What scripts see, `account`:
 //!   { state = "restoring" | "signed_out" | "waiting" | "signed_in",
 //!     user = { id, email, first_name }?, failure = why the last sign-in
-//!     didn't finish?, env = "staging" | "production" | "custom" }
+//!     didn't finish?, env = "staging" | "production" | "custom" | "self_hosted",
+//!     server = { kind = "zeron" | "self_hosted" | "environment", name?,
+//!                host, url, zeron_host, guide } }
+//! (`name` is what its operator calls a server; `zeron_host` is the build's
+//! own server's host; `guide`, docs/self-hosting.md.)
 //! and call, each rejecting with an outcome word as its `message`:
 //!   account.sign_in(kind)        the user; cancelled, timed_out
 //!                                ("create" opens on a new account, asked
 //!                                afresh; "existing" on signing in)
 //!   account.cancel (an action)   gives up the sign-in waiting on the browser
 //!   account.sign_out             nil
+//!   account.find_server(address) the server there: { url, workos_client_id,
+//!                                name?, host, zeron = it's the build's
+//!                                own, current = signed in to now };
+//!                                or why not: { error = a
+//!                                zeron_proto::server::ServerError code,
+//!                                host, message = it said in English,
+//!                                missing?, status? }
+//!   account.use_server(server)   signs in to `server` (a found one; nil:
+//!                                the build's own) from now on, signed out
+//!                                here first; the account. set_by_environment,
+//!                                invalid, offline
 //!   account.username             your username, or nil
 //!   account.check_username(name) { available, reason = invalid | reserved | taken }
 //!   account.claim_username(name) your card; taken, reserved, invalid,
@@ -76,6 +97,7 @@ use std::{
 };
 
 use serde_json::{Value as Json, json};
+use zeron_proto::server::{SELF_HOSTING_GUIDE, Server, ServerError, host_of, normalize_address};
 use zgx_desktop::WindowContext;
 use zgx_script::{ScriptHost, Shared, Value};
 
@@ -118,13 +140,47 @@ struct Env {
 
 /// Where the account lives: the edge, the sign-in client and the loopback
 /// port it redirects to. The engine is started with them.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Endpoint {
+    /// `production` or `staging` (the build's own), `custom` (the
+    /// environment's) or `self_hosted` (a server chosen on this computer).
     pub name: &'static str,
     pub edge: String,
     pub client: String,
     pub port: u16,
+    /// What a chosen server's operator calls it.
+    pub server_name: Option<String>,
 }
 
+impl Endpoint {
+    /// A server chosen on this computer (zeron_proto::server::saved), signed
+    /// in to in place of the build's own.
+    pub fn chosen(server: Server) -> Self {
+        Self {
+            name: "self_hosted",
+            edge: server.url,
+            client: server.workos_client_id,
+            port: zeron_proto::server::CALLBACK_PORT,
+            server_name: server.name,
+        }
+    }
+
+    /// Whether this is `server`: its edge and its sign-in client. One that
+    /// kept its address under another WorkOS client is another server.
+    pub fn serves(&self, server: &Server) -> bool {
+        self.edge == server.url && self.client == server.workos_client_id
+    }
+
+    /// Named by the environment (a development build's variables): no server
+    /// is chosen in its place.
+    pub fn set_by_environment(&self) -> bool {
+        self.name == "custom"
+    }
+}
+
+/// The build's own endpoint (or a development build's environment's): where
+/// the account lives unless a server is chosen on this computer
+/// ([`engine::Engine::account`] says which), and where updates come from.
 pub fn endpoint() -> Endpoint {
     endpoint_with(|key| std::env::var(key).ok().filter(|v: &String| !v.trim().is_empty()))
 }
@@ -153,6 +209,7 @@ fn endpoint_with(var: impl Fn(&str) -> Option<String>) -> Endpoint {
         edge: edge.unwrap_or_else(|| base.edge.into()).trim_end_matches('/').into(),
         client: client.unwrap_or_else(|| base.client.into()),
         port: port.unwrap_or(base.port),
+        server_name: None,
     }
 }
 
@@ -163,6 +220,7 @@ pub fn production() -> Endpoint {
         edge: PRODUCTION.edge.into(),
         client: PRODUCTION.client.into(),
         port: PRODUCTION.port,
+        server_name: None,
     }
 }
 
@@ -228,7 +286,6 @@ struct Access {
 }
 
 struct Auth {
-    endpoint: Endpoint,
     accounts: RefCell<Vec<Shared>>,
     session: RefCell<Session>,
     /// A sign-in waiting on the browser.
@@ -337,8 +394,27 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     host.async_action("account.sign_out", move |_| {
         let a = a.clone();
         async move { crate::plugins::preview::refuse("account.sign_out")?;
-            a.sign_out().await;
+            // (Shown signed out either way; the engine's error is logged.)
+            let _ = a.sign_out().await;
             Ok(Value::Nil)
+        }
+    });
+    host.async_action("account.find_server", move |address| async move {
+        crate::plugins::preview::refuse("account.find_server")?;
+        let address = text(&address);
+        let found = off_thread(move || crate::server::look_up(&address)).await.ok_or("failed")?;
+        Ok(found_value(found))
+    });
+    let a = auth.clone();
+    host.async_action("account.use_server", move |server| {
+        let a = a.clone();
+        async move {
+            crate::plugins::preview::refuse("account.use_server")?;
+            let server = match &server {
+                Value::Nil => None,
+                server => Some(server_from(server).ok_or("invalid")?),
+            };
+            a.use_server(server).await.map_err(String::from)
         }
     });
     host.async_action("account.keeps_chats_local", move |_| async move {
@@ -438,11 +514,23 @@ pub(crate) fn encode_path(value: &str) -> String {
     encode(value)
 }
 
+/// The account as the intro's copy of sign-in shows it: no one signed in,
+/// on the server setup's window will sign in on, so the copy and the window
+/// name the same one as they hand over.
+pub fn signed_out_value() -> Value {
+    let engine = engine::get();
+    let account = engine.account();
+    Value::record([
+        ("state", Value::from("signed_out")),
+        ("env", Value::from(account.name)),
+        ("server", server_value(&account, engine.own_server())),
+    ])
+}
+
 /// Whether the engine keeps a session, without reading it: a launch signed
 /// in skips the intro.
 pub fn session_exists() -> bool {
-    let account = endpoint();
-    engine::manager::Config::from_env(&account.edge, &account.client, account.port)
+    engine::manager::Config::from_env(&endpoint())
         .is_ok_and(|config| config.data_dir.join("session.json").is_file())
 }
 
@@ -453,13 +541,12 @@ fn gives_up_on_session(session_kept: bool) -> bool {
 
 impl Auth {
     fn new() -> Self {
-        let endpoint = endpoint();
+        let account = engine::get().account();
         eprintln!(
             "zeron-zgx: account: {} ({}, callback port {}), kept by the engine",
-            endpoint.name, endpoint.edge, endpoint.port
+            account.name, account.edge, account.port
         );
         Self {
-            endpoint,
             accounts: RefCell::default(),
             session: RefCell::new(Session::Unknown),
             waiting: Cell::new(false),
@@ -475,6 +562,8 @@ impl Auth {
     }
 
     fn value(&self) -> Value {
+        let engine = engine::get();
+        let account = engine.account();
         let session = self.session.borrow();
         let state = match &*session {
             Session::SignedIn { .. } => "signed_in",
@@ -494,7 +583,8 @@ impl Auth {
             ("state", Value::from(state)),
             ("user", user),
             ("failure", self.failure.get().map_or(Value::Nil, Value::from)),
-            ("env", Value::from(self.endpoint.name)),
+            ("env", Value::from(account.name)),
+            ("server", server_value(&account, engine.own_server())),
             // The organization the session works in (Settings' own).
             (
                 "organization_id",
@@ -666,13 +756,15 @@ impl Auth {
     }
 
     /// Signed out: the engine's session ended (the engine forgets it), as
-    /// asked here.
-    async fn sign_out(&self) {
+    /// asked here. Shown signed out whatever the engine said; its error, if
+    /// it didn't forget the session.
+    async fn sign_out(&self) -> Result<(), String> {
         self.next_generation();
         self.waiting.set(false);
         self.signed_out_here.set(true);
         self.access.borrow_mut().take();
-        if let Err(error) = engine::get().call("SignOut", json!({})).await {
+        let ended = engine::get().call("SignOut", json!({})).await.map(drop);
+        if let Err(error) = &ended {
             eprintln!("zeron-zgx: account: the engine didn't sign out: {error}");
         }
         *self.session.borrow_mut() = Session::SignedOut;
@@ -680,6 +772,54 @@ impl Auth {
         engine::get().session(false);
         self.publish();
         eprintln!("zeron-zgx: account: signed out");
+        ended
+    }
+
+    /// Signs in to `server` from now on (none: the build's own). A session
+    /// is one server's: signed out first, and nothing changes unless the
+    /// engine forgot it.
+    async fn use_server(&self, server: Option<Server>) -> Result<Value, Outcome> {
+        let engine = engine::get();
+        if engine.own_server().set_by_environment() {
+            return Err("set_by_environment");
+        }
+        let account = engine.account();
+        let unchanged = match &server {
+            Some(server) => account.serves(server),
+            None => account == *engine.own_server(),
+        };
+        if unchanged {
+            return Ok(self.value());
+        }
+        // Whether it can switch at all, before signing out: one that can't
+        // leaves the session as it is.
+        engine.may_use_server().map_err(|error| {
+            eprintln!("zeron-zgx: account: the server can't change now: {error}");
+            engine::outcome(&error)
+        })?;
+        let kept = match &*self.session.borrow() {
+            Session::SignedIn { .. } => true,
+            Session::SignedOut => false,
+            // Not heard yet: one may be kept.
+            Session::Unknown => session_exists(),
+        };
+        if (kept || self.waiting.get())
+            && let Err(error) = self.sign_out().await
+        {
+            // (Already signed out is as good as signing out.)
+            match engine::outcome(&error) {
+                "signed_out" => {}
+                outcome => return Err(outcome),
+            }
+        }
+        engine.use_server(server).map_err(|error| {
+            eprintln!("zeron-zgx: account: the server didn't change: {error}");
+            engine::outcome(&error)
+        })?;
+        self.access.borrow_mut().take();
+        self.failure.set(None);
+        self.publish();
+        Ok(self.value())
     }
 
     /// The engine's bearer, kept until it nears its end.
@@ -711,7 +851,7 @@ impl Auth {
         path: String,
         body: Option<Json>,
     ) -> Result<(u16, Json), Outcome> {
-        let url = format!("{}{path}", self.endpoint.edge);
+        let url = format!("{}{path}", engine::get().account().edge);
         for attempt in 0..2 {
             let bearer = self.bearer().await?;
             let (url, body) = (url.clone(), body.clone());
@@ -739,7 +879,7 @@ impl Auth {
         bytes: Vec<u8>,
         content_type: &'static str,
     ) -> Result<(u16, Json), Outcome> {
-        let url = format!("{}{path}", self.endpoint.edge);
+        let url = format!("{}{path}", engine::get().account().edge);
         let bytes = std::sync::Arc::new(bytes);
         for attempt in 0..2 {
             let bearer = self.bearer().await?;
@@ -929,7 +1069,7 @@ impl Auth {
 
     /// Anyone's card: public, no account needed.
     async fn card(&self, name: String) -> Result<Value, Outcome> {
-        let url = format!("{}/cards/{}", self.endpoint.edge, encode(&name));
+        let url = format!("{}/cards/{}", engine::get().account().edge, encode(&name));
         match off_thread(move || request("GET", &url, None, None))
             .await
             .unwrap_or(Http::Offline)
@@ -1054,6 +1194,81 @@ fn done_ids(body: &Json) -> Value {
         .map(|done| done.keys().map(|id| Value::from(id.as_str())).collect())
         .unwrap_or_default();
     Value::List(ids.into())
+}
+
+/// `account.server`: where the account lives, for the sign-in screen's and
+/// Settings' "Server". `kind` is `zeron` (the build's own), `self_hosted`
+/// (chosen here) or `environment` (named by a development build's
+/// variables: nothing can be chosen); `name` is what its operator calls it.
+fn server_value(account: &Endpoint, own: &Endpoint) -> Value {
+    let kind = if account.set_by_environment() {
+        "environment"
+    } else if account.name == "self_hosted" {
+        "self_hosted"
+    } else {
+        "zeron"
+    };
+    Value::record([
+        ("kind", Value::from(kind)),
+        ("name", account.server_name.as_deref().map_or(Value::Nil, Value::from)),
+        ("host", Value::from(host_of(&account.edge).as_str())),
+        ("url", Value::from(account.edge.as_str())),
+        // The build's own, as "Zeron" is offered beside a chosen one.
+        ("zeron_host", Value::from(host_of(&own.edge).as_str())),
+        ("guide", Value::from(SELF_HOSTING_GUIDE)),
+    ])
+}
+
+/// What `account.find_server` answers: the server (`zeron` when it's the
+/// build's own, `current` when it's where the account lives now), or why
+/// it can't be used (`error`, a stable code to word it by, with what the
+/// words name: `missing`, `status`; `message`, in English, for a code the
+/// script doesn't know).
+fn found_value(found: Result<Server, crate::server::NotFound>) -> Value {
+    match found {
+        Ok(server) => {
+            let engine = engine::get();
+            let host = host_of(&server.url);
+            Value::record([
+                ("zeron", Value::from(server.url == engine.own_server().edge)),
+                ("current", Value::from(engine.account().serves(&server))),
+                ("host", Value::from(host.as_str())),
+                ("url", Value::from(server.url.as_str())),
+                ("workos_client_id", Value::from(server.workos_client_id.as_str())),
+                ("name", server.name.as_deref().map_or(Value::Nil, Value::from)),
+            ])
+        }
+        Err(not_found) => {
+            let (missing, status) = match &not_found.error {
+                ServerError::NotConfigured { missing } if !missing.is_empty() => {
+                    (Value::from(missing.join(", ").as_str()), Value::Nil)
+                }
+                ServerError::Unavailable { status } => (Value::Nil, Value::from(f64::from(*status))),
+                _ => (Value::Nil, Value::Nil),
+            };
+            Value::record([
+                ("error", Value::from(not_found.error.code())),
+                ("host", Value::from(not_found.host.as_str())),
+                ("message", Value::from(not_found.error.message(&not_found.host).as_str())),
+                ("missing", missing),
+                ("status", status),
+            ])
+        }
+    }
+}
+
+/// A server `account.find_server` found, handed back to
+/// `account.use_server`: held to the same rules again, since a script
+/// carried it.
+fn server_from(value: &Value) -> Option<Server> {
+    let url = normalize_address(&text(value.field("url")?)).ok()?;
+    let workos_client_id = text(value.field("workos_client_id")?).trim().to_owned();
+    let name = value.field("name").map(text).map(|name| name.trim().to_owned());
+    (!workos_client_id.is_empty()).then(|| Server {
+        url,
+        workos_client_id,
+        name: name.filter(|name| !name.is_empty()),
+    })
 }
 
 pub fn text(value: &Value) -> String {

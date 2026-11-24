@@ -26,6 +26,9 @@ export interface Env {
   WORKOS_CLIENT_ID: string;
   /** "workos" (verify AuthKit JWTs) or "dev" (bearer == userId, never prod). */
   AUTH_MODE: string;
+  /** What apps call this server once someone points them at it (discovery.ts,
+   * `/.well-known/zeron`). Unset ⇒ apps show its address. */
+  SERVER_NAME?: string;
   /** "1": ChatRoom also stores its head on every push. Set this and wait out
    * one bookkeeping flush (5 min) before rolling back past the release that
    * derives the head from the rows: older code reads the stored copy, and a

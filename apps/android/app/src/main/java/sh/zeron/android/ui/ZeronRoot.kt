@@ -81,6 +81,12 @@ fun ZeronRoot(model: AppModel) {
                 AnimatedContent(client != null, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "root") { signedIn ->
                     if (signedIn) MainNav(model) else SignInScreen(model)
                 }
+                // The one server sheet, above whichever screen asked (or a link opened it on):
+                // signed in (the demo too), choosing means signing out first.
+                val serverSheet by model.serverSheet.collectAsState()
+                serverSheet?.let { request ->
+                    ServerSheet(model, if (client != null) ServerSheetMode.Switch else ServerSheetMode.SignIn, request) { model.closeServerSheet() }
+                }
                 // Mic prompt, keep-awake and the off-stage "call ended" snackbar.
                 sh.zeron.android.voice.VoiceHost(model.voice)
             }
