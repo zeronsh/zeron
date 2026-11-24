@@ -283,6 +283,86 @@ fn origin_of(url: &Url) -> Result<String, String> {
     }
 }
 
+/// The site a host belongs to, roughly: its last two labels. Enough for the
+/// services' own (`mcp.linear.app`, `api.vercel.com`), which is all it's
+/// compared against.
+fn site_of(url: &Url) -> Option<String> {
+    let host = url.host_str()?.trim_end_matches('.').to_ascii_lowercase();
+    let labels: Vec<&str> = host.split('.').collect();
+    Some(labels[labels.len().saturating_sub(2)..].join("."))
+}
+
+/// Whether `resource` (what a server's metadata says its tokens are for)
+/// names the server itself: its origin, and its path or one above it.
+fn names_server(resource: &Url, server: &Url) -> bool {
+    if resource.origin() != server.origin() {
+        return false;
+    }
+    let (above, path) = (resource.path().trim_end_matches('/'), server.path().trim_end_matches('/'));
+    path == above || path.strip_prefix(above).is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// The resource (RFC 8707) a sign-in to `server` is for, or why it may not
+/// go on. A server says itself where its sign-in is, so one that isn't what
+/// it seems could name another service's: the person would sign in to that
+/// service's real page, and the token would go to the server. So:
+///
+/// - metadata must be about the server itself (RFC 9728 §3.3);
+/// - a token is asked for the server, by name, wherever the sign-in isn't
+///   wholly the server's own (a service honouring it refuses a stranger's);
+/// - a built-in service's sign-in is for that service's servers alone.
+fn bound_resource(
+    server: &Url,
+    stated: Option<&str>,
+    has_metadata: bool,
+    endpoints: &[&str],
+) -> Result<Option<String>, String> {
+    let mut own = true;
+    let server_site = site_of(server);
+    let services: Vec<(String, String)> = super::presets::default_presets()
+        .iter()
+        .filter_map(|p| Some((site_of(&Url::parse(&p.url).ok()?)?, p.name.clone())))
+        .collect();
+    for endpoint in endpoints {
+        let url = Url::parse(endpoint).map_err(|e| format!("invalid sign-in address '{endpoint}': {e}"))?;
+        let loopback = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
+        if url.scheme() != "https" && !(loopback && server.scheme() == "http") {
+            return Err("this server's sign-in isn't on https".into());
+        }
+        own &= url.origin() == server.origin();
+        let site = site_of(&url);
+        if site != server_site
+            && let Some((_, service)) = services.iter().find(|(s, _)| Some(s) == site.as_ref())
+        {
+            return Err(format!(
+                "this server asks you to sign in to {service}, but it isn't {service}'s: it would \
+                 get your {service} account. Add {service} itself in Settings → MCP instead."
+            ));
+        }
+    }
+    match stated.filter(|r| !r.is_empty()) {
+        Some(stated) => {
+            let resource = Url::parse(stated).map_err(|e| format!("invalid resource '{stated}': {e}"))?;
+            if !names_server(&resource, server) {
+                return Err(format!(
+                    "this server's sign-in is for another address ({stated}). If that is this \
+                     server's, add it by that address instead"
+                ));
+            }
+            Ok(Some(stated.to_owned()))
+        }
+        None if has_metadata || !own => {
+            let mut resource = server.clone();
+            resource.set_query(None);
+            resource.set_fragment(None);
+            Ok(Some(resource.to_string()))
+        }
+        // Every endpoint the server's own, and nothing said of a resource
+        // (an older server): its own token, for itself.
+        None => Ok(None),
+    }
+}
+
 /// Discover OAuth 2.1 metadata for `server_url` using RFC 9728 Protected
 /// Resource Metadata + RFC 8414 Authorization Server Metadata (with OpenID
 /// Connect discovery fallback).
@@ -449,7 +529,17 @@ pub async fn discover_oauth(
         auth_meta.scopes_supported
     };
 
-    let resource = prm.and_then(|p| p.resource).filter(|r| !r.is_empty());
+    let mut endpoints = vec![
+        auth_meta.authorization_endpoint.as_str(),
+        auth_meta.token_endpoint.as_str(),
+    ];
+    endpoints.extend(auth_meta.registration_endpoint.as_deref());
+    let resource = bound_resource(
+        &parsed_url,
+        prm.as_ref().and_then(|p| p.resource.as_deref()),
+        prm.is_some(),
+        &endpoints,
+    )?;
 
     Ok(DiscoveredOAuth {
         authorization_endpoint: auth_meta.authorization_endpoint,
@@ -797,6 +887,20 @@ async fn run_callback_exchange(
             .map(|(k, v)| (k.into_owned(), v.into_owned()))
             .collect();
 
+        // (The state first: any page may send a browser here, and only the
+        // sign-in this listens for may end it.)
+        let got_state = params.get("state").map(String::as_str).unwrap_or("");
+        if got_state != expected_state {
+            let _ = write_html_response(
+                &mut stream,
+                400,
+                "Invalid State",
+                "OAuth state mismatch. Please retry from Zeron.",
+            )
+            .await;
+            continue;
+        }
+
         if let Some(err) = params.get("error") {
             let desc = params
                 .get("error_description")
@@ -811,18 +915,6 @@ async fn run_callback_exchange(
             )
             .await;
             return Err(format!("OAuth provider denied authorization: {desc}"));
-        }
-
-        let got_state = params.get("state").map(String::as_str).unwrap_or("");
-        if got_state != expected_state {
-            let _ = write_html_response(
-                &mut stream,
-                400,
-                "Invalid State",
-                "OAuth state mismatch. Please retry from Zeron.",
-            )
-            .await;
-            continue;
         }
 
         let Some(code) = params.get("code").filter(|c| !c.is_empty()) else {
@@ -1053,6 +1145,58 @@ mod tests {
         assert_eq!(challenge, "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
     }
 
+    /// A server may not have the person sign in to another service, nor get
+    /// a token meant for another server.
+    #[test]
+    fn a_sign_in_is_bound_to_the_server_it_is_for() {
+        let bound = |server: &str, stated: Option<&str>, meta: bool, endpoints: &[&str]| {
+            bound_resource(&Url::parse(server).unwrap(), stated, meta, endpoints)
+        };
+        let evil = "https://evil.example/mcp";
+        // Another service's resource, or its sign-in under the server's name
+        // (or with no metadata of its own at all).
+        assert!(bound(evil, Some("https://mcp.acme.example/mcp"), true, &["https://auth.acme.example/a"]).is_err());
+        for (stated, meta) in [(Some(evil), true), (None, true), (None, false)] {
+            let refused = bound(evil, stated, meta, &["https://mcp.linear.app/authorize", "https://mcp.linear.app/token"]);
+            assert!(refused.unwrap_err().contains("Linear"), "{stated:?}");
+            assert!(bound(evil, stated, meta, &["https://evil.example/a", "https://api.vercel.com/t"]).is_err());
+        }
+        // Look-alikes of the server's own.
+        for other in ["https://evil.example.org/mcp", "https://evil.example/mcpx", "http://evil.example/mcp", "https://evil.example:8443/mcp", "https://evil.example/mcp/deeper"] {
+            assert!(bound(evil, Some(other), true, &["https://evil.example/a"]).is_err(), "{other}");
+        }
+        // A sign-in elsewhere names the server, whatever it left out.
+        assert_eq!(bound("https://tools.acme.example/mcp?key=1", None, false, &["https://login.acme.example/a"]).unwrap().as_deref(), Some("https://tools.acme.example/mcp"));
+        assert_eq!(bound("https://tools.acme.example/mcp", None, true, &["https://tools.acme.example/a"]).unwrap().as_deref(), Some("https://tools.acme.example/mcp"));
+        // Its own path or one above it, as stated.
+        for stated in ["https://tools.acme.example", "https://tools.acme.example/", "https://tools.acme.example/mcp/"] {
+            assert_eq!(bound("https://tools.acme.example/mcp", Some(stated), true, &["https://login.acme.example/a"]).unwrap().as_deref(), Some(stated));
+        }
+        // Not on https.
+        assert!(bound("https://tools.acme.example/mcp", None, true, &["http://tools.acme.example/a"]).is_err());
+    }
+
+    /// The built-in services, as each publishes its sign-in (2026-11-24):
+    /// every one of them still may.
+    #[test]
+    fn the_built_in_services_sign_in_as_they_publish() {
+        for (server, stated, endpoints, resource) in [
+            ("https://mcp.linear.app/mcp", Some("https://mcp.linear.app/mcp"), &["https://mcp.linear.app/authorize"][..], Some("https://mcp.linear.app/mcp")),
+            ("https://mcp.notion.com/mcp", Some("https://mcp.notion.com/mcp"), &["https://mcp.notion.com/token"], Some("https://mcp.notion.com/mcp")),
+            ("https://mcp.sentry.dev/mcp", Some("https://mcp.sentry.dev/mcp"), &["https://mcp.sentry.dev/oauth/token"], Some("https://mcp.sentry.dev/mcp")),
+            ("https://mcp.atlassian.com/v1/mcp", None, &["https://mcp.atlassian.com/v1/authorize"], None),
+            ("https://mcp.stripe.com", Some("https://mcp.stripe.com"), &["https://access.stripe.com/mcp/oauth2/token"], Some("https://mcp.stripe.com")),
+            ("https://mcp.supabase.com/mcp", Some("https://mcp.supabase.com/mcp"), &["https://api.supabase.com/v1/oauth/token"], Some("https://mcp.supabase.com/mcp")),
+            ("https://mcp.vercel.com", Some("https://mcp.vercel.com/"), &["https://vercel.com/oauth/authorize", "https://api.vercel.com/login/oauth/token"], Some("https://mcp.vercel.com/")),
+            ("https://mcp.cloudflare.com/mcp", Some("https://mcp.cloudflare.com/mcp"), &["https://mcp.cloudflare.com/token"], Some("https://mcp.cloudflare.com/mcp")),
+            ("https://mcp.posthog.com/mcp", Some("https://mcp.posthog.com/mcp"), &["https://oauth.posthog.com/oauth/token"], Some("https://mcp.posthog.com/mcp")),
+            ("https://mcp.context7.com/mcp", Some("https://mcp.context7.com/mcp"), &["https://clerk.context7.com/oauth/token"], Some("https://mcp.context7.com/mcp")),
+        ] {
+            let got = bound_resource(&Url::parse(server).unwrap(), stated, stated.is_some(), endpoints).unwrap();
+            assert_eq!(got.as_deref(), resource, "{server}");
+        }
+    }
+
     /// End-to-end test of RFC 9728 + RFC 8414 discovery, RFC 7591 DCR,
     /// PKCE S256 verification, and callback token exchange against a local
     /// mock OAuth + MCP server.
@@ -1260,6 +1404,19 @@ mod tests {
         assert_eq!(tokens.scopes, vec!["mcp:read", "mcp:write"]);
 
         server_task.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "reads the built-in services' public metadata"]
+    async fn live_built_in_services_are_discovered() {
+        let http = reqwest::Client::new();
+        for p in super::super::presets::default_presets() {
+            if p.auth_kind != zeron_proto::McpAuthKind::OAuth { continue; }
+            match discover_oauth(&http, &p.url).await {
+                Ok(d) => eprintln!("ok {} resource={:?}", p.id, d.resource),
+                Err(e) => panic!("{}: {e}", p.id),
+            }
+        }
     }
 
     fn url_form_pairs(body: &str) -> Vec<(String, String)> {

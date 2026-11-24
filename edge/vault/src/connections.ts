@@ -44,8 +44,13 @@ import { isId } from "./validate";
 export const MAX_CONNECTIONS = 100;
 export const OAUTH_REFRESH_LEAD_MS = 5 * 60_000;
 export const CONNECTION_REFRESH_BACKOFF_MS = 60_000;
+/** The longest a token endpoint may take, and the most it may say: every
+ * grant of its connection waits on it. */
+const TOKEN_TIMEOUT_MS = 10_000;
+const MAX_TOKEN_RESPONSE_BYTES = 64 * 1024;
 
 const MAX_NAME_LENGTH = 128;
+const OAUTH_ERROR_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 const MAX_PRESET_LENGTH = 64;
 const MAX_LABEL_LENGTH = 200;
 const MAX_AUTHORIZED_DEVICES = 32;
@@ -316,6 +321,24 @@ const toView = (row: ConnectionRow): VaultConnectionView => ({
   ...(row.last_error ? { lastError: row.last_error } : {})
 });
 
+/** A response's text, refused past `limit` bytes. */
+const textUpTo = async (response: Response, limit: number): Promise<string> => {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  for (let size = 0; ; ) {
+    const { done, value } = await reader.read();
+    if (done) return text + decoder.decode();
+    size += value.byteLength;
+    if (size > limit) {
+      await reader.cancel();
+      throw new Error("response too large");
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+};
+
 export class VaultConnections extends DurableObject<Env> {
   private readonly sql: SqlStorage;
   /** Single-flight OAuth refresh gate keyed by connection id. */
@@ -583,6 +606,26 @@ export class VaultConnections extends DurableObject<Env> {
     }
 
     const now = Date.now();
+    // What it signs in with is for the origin it was given for: moved to
+    // another, it's asked for again, never sent there. (A new generation, so
+    // a refresh under way is dropped too.)
+    if (
+      existing.auth_kind !== "none" &&
+      existing.envelope !== null &&
+      new URL(urlHref).origin !== new URL(existing.url).origin
+    ) {
+      const generation = this.lastGeneration() + 1;
+      this.sql.exec(
+        `UPDATE connections
+         SET generation = ?, status = 'needs_auth', envelope = NULL, header_keys = '[]',
+             expires_at = NULL, last_refresh_at = NULL, last_attempt_at = NULL,
+             last_error = NULL, failures = 0
+         WHERE id = ?`,
+        generation,
+        id
+      );
+      this.setMeta("last_generation", String(generation));
+    }
     this.sql.exec(
       `UPDATE connections
        SET name = ?, url = ?, transport = ?, enabled = ?, authorized_devices = ?, account_label = ?, updated_at = ?
@@ -813,6 +856,7 @@ export class VaultConnections extends DurableObject<Env> {
       const response = await fetch(tokenUrl.href, {
         method: "POST",
         redirect: "manual",
+        signal: AbortSignal.timeout(TOKEN_TIMEOUT_MS),
         headers: {
           "content-type": "application/x-www-form-urlencoded",
           accept: "application/json"
@@ -825,9 +869,11 @@ export class VaultConnections extends DurableObject<Env> {
       } else {
         let body: Record<string, unknown> | undefined;
         try {
-          const parsed: unknown = await response.json();
+          const parsed: unknown = JSON.parse(await textUpTo(response, MAX_TOKEN_RESPONSE_BYTES));
           if (isPlainObject(parsed)) body = parsed;
-        } catch {
+        } catch (error) {
+          // (Its time ran out mid-answer: not an answer at all.)
+          if (error instanceof DOMException) throw error;
           body = undefined;
         }
 
@@ -878,8 +924,9 @@ export class VaultConnections extends DurableObject<Env> {
           }
         } else {
           const oauthError = typeof body?.error === "string" ? body.error : undefined;
-          const oauthDesc = typeof body?.error_description === "string" ? body.error_description : undefined;
-          const reason = (oauthDesc ? `${oauthError ?? `HTTP ${response.status}`}: ${oauthDesc}` : oauthError ?? `HTTP ${response.status}`).slice(0, 200);
+          // (Its code alone, as RFC 6749 spells one: its description is the
+          // endpoint's free text, and this is logged and shown.)
+          const reason = oauthError !== undefined && OAUTH_ERROR_RE.test(oauthError) ? oauthError : `HTTP ${response.status}`;
           const isReauth =
             response.status === 401 ||
             (response.status === 400 &&

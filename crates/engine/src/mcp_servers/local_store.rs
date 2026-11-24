@@ -5,8 +5,9 @@
 //! - [`WorkspaceScope::Local`] (signed out): `{profile.store_root}/mcp-servers.json`
 //!   so the local profile stays completely isolated from synced accounts.
 //! - [`WorkspaceScope::Synced`] / [`WorkspaceScope::Development`]:
-//!   `{data_dir}/mcp-local-servers.json` (stores `Stdio` servers and any remote
-//!   servers explicitly marked `local_only: true`).
+//!   `{profile.store_root}/mcp-local-servers.json` (stores `Stdio` servers and
+//!   any remote servers explicitly marked `local_only: true`): the account's
+//!   own, so signing in as someone else never runs agents with its tokens.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -34,7 +35,17 @@ pub fn store_path_for(profile: &EngineProfile, data_dir: &Path) -> PathBuf {
     match profile.scope() {
         WorkspaceScope::Local => profile.store_root().join("mcp-servers.json"),
         WorkspaceScope::Synced | WorkspaceScope::Development => {
-            data_dir.join("mcp-local-servers.json")
+            let path = profile.store_root().join("mcp-local-servers.json");
+            // (Builds before 0.3.19 kept one file for every account: the
+            // first to sign in here since has it, and no other.)
+            let shared = data_dir.join("mcp-local-servers.json");
+            if !path.exists() && shared.exists() {
+                let _ = std::fs::create_dir_all(profile.store_root());
+                if let Err(error) = std::fs::rename(&shared, &path) {
+                    tracing::warn!(%error, "mcp: the device's servers weren't moved to this account");
+                }
+            }
+            path
         }
     }
 }
@@ -429,6 +440,27 @@ impl LocalStore {
         Ok(Some(view))
     }
 
+    /// Keep what a refresh of `previous` answered, unless that's no longer
+    /// what the server signs in with.
+    fn replace_oauth_tokens(&self, id: &str, previous: &str, refreshed: LocalOAuthState) -> Result<bool, String> {
+        let mut servers = lock(&self.servers);
+        let Some(server) = servers.iter_mut().find(|s| s.id == id) else {
+            return Ok(false);
+        };
+        if server.oauth.as_ref().is_none_or(|now| now.access_token != previous) {
+            return Ok(false);
+        }
+        if !refreshed.scopes.is_empty() {
+            server.oauth_scopes = refreshed.scopes.clone();
+        }
+        server.oauth = Some(refreshed);
+        server.reauth_required = false;
+        server.last_error = None;
+        server.updated_at = now_ms();
+        self.persist_locked(&servers)?;
+        Ok(true)
+    }
+
     pub fn disconnect_auth(&self, id: &str) -> Result<Option<McpServerView>, String> {
         let mut servers = lock(&self.servers);
         let Some(server) = servers.iter_mut().find(|s| s.id == id) else {
@@ -603,7 +635,11 @@ impl LocalStore {
                         err.message
                     })?;
 
-                self.set_oauth_tokens(id, refreshed.clone(), None)?;
+                // Signed out, signed in again or moved while it was asked for:
+                // what's there now stands.
+                if !self.replace_oauth_tokens(id, &current_oauth.access_token, refreshed.clone())? {
+                    return Err(format!("MCP server '{id}' changed while its sign-in was renewed"));
+                }
                 let mut headers = current.headers.clone();
                 headers.insert("Authorization".into(), format_oauth_header(&refreshed));
                 Ok(ResolvedLocalUpstream {
@@ -772,16 +808,63 @@ mod tests {
         );
         assert_eq!(
             store_path_for(&synced_profile, dir.path()),
-            dir.path().join("mcp-local-servers.json")
+            synced_profile.store_root().join("mcp-local-servers.json")
         );
         assert_eq!(
             store_path_for(&dev_profile, dir.path()),
-            dir.path().join("mcp-local-servers.json")
+            dev_profile.store_root().join("mcp-local-servers.json")
         );
         assert_ne!(
             store_path_for(&local_profile, dir.path()),
             store_path_for(&synced_profile, dir.path())
         );
+    }
+
+    /// A refresh answered after its server signed out changes nothing.
+    #[test]
+    fn a_refresh_never_undoes_a_sign_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalStore::open(dir.path().join("servers.json"));
+        let tokens = |access: &str| LocalOAuthState {
+            access_token: access.into(),
+            refresh_token: Some("refresh".into()),
+            token_type: None,
+            expires_at: None,
+            token_endpoint: "https://auth.example/token".into(),
+            client_id: "client".into(),
+            client_secret: None,
+            scopes: Vec::new(),
+            resource: None,
+        };
+        store
+            .upsert(LocalMcpServer {
+                id: "s".into(),
+                name: "S".into(),
+                auth_kind: McpAuthKind::OAuth,
+                oauth: Some(tokens("old")),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(store.replace_oauth_tokens("s", "old", tokens("new")).unwrap());
+        assert!(!store.replace_oauth_tokens("s", "old", tokens("stale")).unwrap());
+        store.disconnect_auth("s").unwrap();
+        assert!(!store.replace_oauth_tokens("s", "new", tokens("late")).unwrap());
+        assert!(store.get("s").unwrap().oauth.is_none());
+    }
+
+    /// One file once served every account: the first to sign in has it, and
+    /// nobody after.
+    #[test]
+    fn a_shared_store_becomes_the_first_accounts_own() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("mcp-local-servers.json"), "first").unwrap();
+        let first = EngineProfile::synced(dir.path(), "org-1", "user-1");
+        let second = EngineProfile::synced(dir.path(), "org-1", "user-2");
+        let path = store_path_for(&first, dir.path());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+        assert!(!dir.path().join("mcp-local-servers.json").exists());
+        assert!(!store_path_for(&second, dir.path()).exists());
+        assert_eq!(store_path_for(&first, dir.path()), path);
     }
 
     #[test]

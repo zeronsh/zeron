@@ -44,6 +44,13 @@ fn canonical_bearer(value: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// A URL's origin alone, with nothing of its path or query (where some
+/// services put a key).
+pub(super) fn url_origin(url: &str) -> Option<String> {
+    let origin = reqwest::Url::parse(url).ok()?.origin();
+    origin.is_tuple().then(|| origin.ascii_serialization())
+}
+
 fn is_hop_by_hop(name: &str) -> bool {
     matches!(
         name,
@@ -70,6 +77,16 @@ pub struct McpGateway {
 impl McpGateway {
     pub fn new(servers: Arc<McpServers>) -> Self {
         let http = reqwest::Client::builder()
+            // A server's credentials go to that server: a redirect off its
+            // origin isn't followed with them (reqwest keeps custom headers,
+            // an `X-Api-Key`, on one).
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                let same = attempt
+                    .previous()
+                    .first()
+                    .is_some_and(|first| first.origin() == attempt.url().origin());
+                if same && attempt.previous().len() <= 5 { attempt.follow() } else { attempt.stop() }
+            }))
             .connect_timeout(Duration::from_secs(30))
             .user_agent(concat!("zeron/", env!("CARGO_PKG_VERSION")))
             .build()
@@ -113,7 +130,9 @@ impl McpGateway {
         builder
             .send()
             .await
-            .map_err(|e| format!("upstream MCP request failed: {e}"))
+            // (Without its URL, which a key may be in: this is logged and
+            // answered to the agent.)
+            .map_err(|e| format!("upstream MCP request failed: {}", e.without_url()))
     }
 }
 
@@ -179,7 +198,8 @@ impl ExternalMcpProxy for McpGateway {
                     challenge = %challenge,
                     auth_scheme = %scheme,
                     token_len,
-                    url = %upstream.url,
+                    // (Its origin: a key may be in the rest of it.)
+                    origin = %url_origin(&upstream.url).unwrap_or_default(),
                     "mcp gateway: upstream answered with an error"
                 );
             }
