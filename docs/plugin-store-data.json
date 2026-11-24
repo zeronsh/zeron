@@ -840,26 +840,24 @@
           "words": [
             "plantilla",
             "plantillas",
-            "interfaz",
-            "diseño"
+            "interfaz"
           ]
         },
         "fr": {
           "substring": false,
           "words": [
-            "modèle",
-            "modèles",
             "gabarit",
+            "gabarits",
             "interface",
-            "habillage"
+            "habillage",
+            "habillages"
           ]
         },
         "it": {
           "substring": false,
           "words": [
-            "modello",
-            "modelli",
-            "interfaccia"
+            "interfaccia",
+            "interfacce"
           ]
         },
         "ja": {
@@ -867,7 +865,8 @@
           "words": [
             "テンプレート",
             "レイアウト",
-            "スキン"
+            "インターフェース",
+            "インターフェイス"
           ]
         },
         "ko": {
@@ -875,14 +874,13 @@
           "words": [
             "템플릿",
             "레이아웃",
-            "스킨"
+            "스킨",
+            "인터페이스"
           ]
         },
         "pt": {
           "substring": false,
           "words": [
-            "modelo",
-            "modelos",
             "interface",
             "layout"
           ]
@@ -901,7 +899,11 @@
             "模板",
             "界面",
             "布局",
-            "皮肤"
+            "皮肤",
+            "佈局",
+            "介面",
+            "範本",
+            "皮膚"
           ]
         }
       }
@@ -2254,6 +2256,6 @@
     "icon",
     "categories"
   ],
-  "templates_about": "A template (contract 'Templates in the store') is a .zeron-template package (template_format), signed in template_payload_prefix's domain, or unsigned from the store under a record naming no signer, as a plugin is. Its content hash (a record's hash) is the plugin's, over its manifest without the signature and every file the package carries. template_protected: what no template replaces, each one a file or, ending '/', a folder; a path is compared after plugin-guard's fold (path.rs `fold`: '\\' as '/', each character's uppercase then its lowercase, empty and '.' parts dropped, each part without its trailing dots and spaces), as the entry is, and is protected when it is one or is under one. A device leaves those files out when it installs; the store refuses a package carrying one (protected_file, field files, its path). template_listing_files: carried and installed, never part of its interface (one ending '/' is a folder). template_manifest_fields.required must be there; allowed may be, by the plugin's rules for each; a member of template_refused_members may not (bad_listing, that field); any other is kept. template_readme_stub: a README.md holding it is the one Zeron wrote (missing_readme). preview.png must be a PNG of at most limits.max_preview_bytes (bad_listing, field preview; missing_listing when there's none); screenshots are under screenshots/. A template's engines_zeron is '>=' + its zeron_version. The template_listing and template_packages cases hold both sides to it.",
+  "templates_about": "A template (contract 'Templates in the store') is a .zeron-template package (template_format), signed in template_payload_prefix's domain, or unsigned from the store under a record naming no signer, as a plugin is. Its content hash (a record's hash) is the plugin's, over its manifest without the signature and every file the package carries. template_protected: what no template replaces, each one a file or, ending '/', a folder; a path is compared after plugin-guard's fold (path.rs `fold`: '\\' as '/', each character's uppercase then its lowercase, empty and '.' parts dropped, each part without its trailing dots and spaces), as the entry is, and is protected when it is one or is under one. A device leaves those files out when it installs; the store refuses a package carrying one (protected_file, field files, its path). template_listing_files: carried and installed, never part of its interface; of screenshots/, the files whose extension (ASCII case aside) is one of limits.screenshot_types, and any other file under it (its path folded as for template_protected) is refused (bad_listing, field files, its path), left out by a device and never composed. template_manifest_fields.required must be there; allowed may be, by the plugin's rules for each; a member of template_refused_members may not (bad_listing, that field, in that list's order); nor may any other but signature (bad_listing, field manifest, word the member, in code point order). template_readme_stub: a README.md holding it is the one Zeron wrote (missing_readme). preview.png must be a still PNG (no acTL chunk, read chunk by chunk from the signature while a whole chunk header remains) of at most limits.max_preview_bytes (bad_listing, field preview; missing_listing when there's none); screenshots are under screenshots/. A template's engines_zeron is '>=' + its zeron_version. The template_listing and template_packages cases hold both sides to it.",
   "unseen": "A name or description may hold no character drawn as nothing (bad_listing): a control or format character (General_Category Cc, Cf), any other Default_Ignorable_Code_Point (the Hangul fillers among them), any Variation_Selector but U+FE0F, and U+FE0F only directly after a character with the Emoji property. Keywords are ASCII. The listing cases named 'unseen:' hold both sides to it."
 }

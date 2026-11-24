@@ -52,6 +52,8 @@ pub const UPDATES: &str = ".updates";
 /// The app's mark of one of Zeron's built-in themes (apps/zgx
 /// theme_templates `MARK`): never written from a package.
 const BUILTIN_THEME: &str = "builtin_theme";
+/// And of one of its official templates (apps/zgx `official::MARK`).
+const BUILTIN_TEMPLATE: &str = "builtin_template";
 
 /// What no template replaces: the app always loads Zeron's own (the app's
 /// `NEVER_TEMPLATED`, apps/zgx/src/plugins/live.rs).
@@ -136,6 +138,17 @@ impl Package {
             Some(key) => author_of(key),
             None => Author::unknown("Not signed"),
         }
+    }
+
+    /// Whether a template from the store is for this Zeron, by its signed
+    /// `zeron_version` (the Zeron it was made from): that or later, the
+    /// `engines.zeron` the store gives it. `Err` is the `incompatible`
+    /// failure saying why not; one that doesn't say is for none.
+    pub fn compatible(&self) -> Result<(), String> {
+        let range = listing::Listing::of_template(&self.manifest)
+            .engines_zeron
+            .ok_or_else(|| install::failure(install::reason::INCOMPATIBLE, "It doesn't say which Zeron it was made from"))?;
+        super::version::accepts(Some(&range), &super::version::zeron()).map_err(|e| install::failure(install::reason::INCOMPATIBLE, e))
     }
 
     /// What the consent window and the tools show of it.
@@ -334,7 +347,7 @@ fn parse_package(raw: Vec<u8>, signed: bool) -> Result<Package, String> {
     // what isn't an app file (a manifest of its own) too.
     let mut ignored = Vec::new();
     decoded.retain(|rel, _| {
-        let keep = !protected(rel) && rel != MANIFEST;
+        let keep = !protected(rel) && rel != MANIFEST && !listing::template_stray_screenshot(rel);
         if !keep {
             ignored.push(rel.clone());
         }
@@ -432,6 +445,7 @@ fn write_folder(dir: &Path, id: &str, package: &Package, author: &Author, source
         let mut manifest = package.manifest.clone();
         if let Some(m) = manifest.as_object_mut() {
             m.remove(BUILTIN_THEME);
+            m.remove(BUILTIN_TEMPLATE);
         }
         std::fs::write(tmp.join(MANIFEST), signing::pretty(&manifest))
             .map_err(|e| format!("Couldn't write {MANIFEST}: {e}"))?;
@@ -991,6 +1005,48 @@ mod tests {
 
     fn package_json(path: &Path) -> Value {
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    /// Every path any released Zeron protected stays protected: the store
+    /// refuses the union of them (contract: `template_protected` only
+    /// grows). Add to this list with each release that adds one; never drop.
+    #[test]
+    fn plugins_template_packages_protected_only_grows() {
+        for released in ["screens/plugins/", "screens/templates/", "account/", ".luaurc"] {
+            assert!(PROTECTED.contains(&released), "{released} was protected in a release: it stays so");
+        }
+    }
+
+    /// A template is for the Zeron it was made from and later.
+    #[test]
+    fn plugins_template_packages_compatible_from_their_zeron_version() {
+        let with = |made_from: Value| {
+            let manifest = json!({ "id": "midnight", "name": "Midnight", "description": "", "version": "1.0.0", "zeron_version": made_from });
+            let files = BTreeMap::from([("app.luau".to_owned(), b"x".to_vec())]);
+            parse(pack(&manifest, &files, Some(&key())).unwrap()).unwrap().compatible()
+        };
+        let now = super::super::version::zeron();
+        assert!(with(json!(now.to_string())).is_ok() && with(json!("0.0.1")).is_ok());
+        for later in [json!("9999.0.0"), json!(""), json!("0.3"), Value::Null] {
+            assert_eq!(install::reason_of(&with(later.clone()).unwrap_err()), Some("incompatible"), "{later}");
+        }
+    }
+
+    /// Nothing but pictures is ever installed under `screenshots/`, and the
+    /// app's own marks never are.
+    #[test]
+    fn plugins_template_packages_install_no_code_as_screenshots_nor_the_app_s_marks() {
+        let manifest = json!({ "id": "midnight", "name": "Midnight", "description": "", "version": "1.0.0", "zeron_version": "0.3.16", "builtin_theme": "x", "builtin_template": "zeron-v2" });
+        let files: BTreeMap<String, Vec<u8>> = ["app.luau", "screenshots/a.PNG", "screenshots/x.luau", "Screenshots/y.luau"].map(|rel| (rel.to_owned(), b"x".to_vec())).into();
+        let mine = key();
+        let package = parse(pack(&manifest, &files, Some(&mine)).unwrap()).unwrap();
+        assert_eq!(package.files.keys().collect::<Vec<_>>(), ["app.luau", "screenshots/a.PNG"]);
+        assert_eq!(package.ignored, ["Screenshots/y.luau", "screenshots/x.luau"]);
+        let d = dir("no-code").join("templates");
+        std::fs::create_dir_all(&d).unwrap();
+        let id = install(&d, &package, &Author::You, None).unwrap();
+        let written: Value = serde_json::from_slice(&std::fs::read(d.join(&id).join(MANIFEST)).unwrap()).unwrap();
+        assert!(written.get(BUILTIN_THEME).is_none() && written.get(BUILTIN_TEMPLATE).is_none(), "{written}");
     }
 
     /// An export carries the store's files and fields (never the README

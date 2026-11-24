@@ -986,7 +986,8 @@ pub const MAX_PREVIEW_BYTES: usize = 4 * 1024 * 1024;
 /// Where a template's screenshots are, in it.
 pub const TEMPLATE_SCREENSHOTS: &str = "screenshots";
 /// A template's listing files: carried and installed, never part of its
-/// interface (never loaded, never a change of its code). A folder ends `/`.
+/// interface (never loaded, never a change of its code). `screenshots/`:
+/// the PNG and JPEG files under it ([`template_listing_file`]).
 pub const TEMPLATE_LISTING_FILES: &[&str] = &[README, CHANGELOG, super::templates::PREVIEW, "screenshots/"];
 /// What a template's manifest must have, and may have, for the store.
 pub const TEMPLATE_REQUIRED: &[&str] = &["id", "name", "description", "version", "zeron_version"];
@@ -1000,12 +1001,35 @@ pub const TEMPLATE_REFUSED_MEMBERS: &[&str] =
 /// (`guides::template_readme`): a README holding it is that one, unchanged.
 pub const TEMPLATE_README_STUB: &str = "This README isn't part of the interface.";
 
-/// Whether `rel` is one of a template's listing files.
+/// Whether `rel` is one of a template's listing files, by its path alone:
+/// its README, changelog and preview, and a PNG or JPEG under
+/// `screenshots/`. The one predicate that decides what's composed, what's
+/// its own code and what a change of its code is.
 pub fn template_listing_file(rel: &str) -> bool {
-    TEMPLATE_LISTING_FILES.iter().any(|f| match f.strip_suffix('/') {
-        Some(folder) => rel.strip_prefix(folder).is_some_and(|rest| rest.starts_with('/')),
-        None => rel == *f,
-    })
+    match rel.strip_prefix(TEMPLATE_SCREENSHOTS).and_then(|rest| rest.strip_prefix('/')) {
+        Some(rest) => rest.rsplit_once('.').is_some_and(|(_, ext)| SCREENSHOT_TYPES.contains(&ext.to_ascii_lowercase().as_str())),
+        None => [README, CHANGELOG, super::templates::PREVIEW].contains(&rel),
+    }
+}
+
+/// Whether `rel` is under `screenshots/` (as a disk folding names has it)
+/// and isn't one of a template's listing files: refused in the store, never
+/// installed from a package, never composed.
+pub fn template_stray_screenshot(rel: &str) -> bool {
+    !template_listing_file(rel) && zeron_plugin_guard::path::fold(rel).strip_prefix(TEMPLATE_SCREENSHOTS).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// Whether PNG `bytes` are animated (an `acTL` chunk): a cover is a still.
+fn animated_png(bytes: &[u8]) -> bool {
+    let mut at = PNG_SIGNATURE.len();
+    while let Some(head) = bytes.get(at..at + 8) {
+        if &head[4..] == b"acTL" {
+            return true;
+        }
+        let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+        at = at.saturating_add(12).saturating_add(len);
+    }
+    false
 }
 
 /// What stands in the way of publishing template `manifest` (its signed
@@ -1023,6 +1047,8 @@ pub fn check_template(manifest: &Value, files: &BTreeMap<String, Vec<u8>>) -> (V
         problems.push(Problem::new(BAD_PACKAGE, Some("manifest"), "Its manifest isn't an object"));
         return (problems, warnings);
     };
+    // An allow list: those it's never told apart by name first, then any
+    // other, in code point order.
     for member in TEMPLATE_REFUSED_MEMBERS {
         if raw.contains_key(*member) {
             problems.push(Problem::new(
@@ -1031,6 +1057,17 @@ pub fn check_template(manifest: &Value, files: &BTreeMap<String, Vec<u8>>) -> (V
                 format!("A template has no \"{member}\": it asks for nothing, and runs as Zeron itself"),
             ));
         }
+    }
+    let mut others: Vec<&str> = raw
+        .keys()
+        .map(String::as_str)
+        .filter(|key| *key != "signature" && ![TEMPLATE_REQUIRED, TEMPLATE_OPTIONAL, TEMPLATE_REFUSED_MEMBERS].iter().any(|list| list.contains(key)))
+        .collect();
+    others.sort_unstable();
+    for member in others {
+        let mut problem = Problem::new(BAD_LISTING, Some("manifest"), format!("\"{}\" isn't something a template's manifest says in the store: leave it out", problem_word(member)));
+        problem.word = Some(problem_word(member)).filter(|w| !w.is_empty());
+        problems.push(problem);
     }
     let text = |key: &str| raw.get(key).and_then(Value::as_str).map(str::trim);
     let id = text("id").unwrap_or("");
@@ -1072,11 +1109,11 @@ pub fn check_template(manifest: &Value, files: &BTreeMap<String, Vec<u8>>) -> (V
             Some("preview"),
             "It needs a preview.png: its card's cover in the store",
         )),
-        Some(bytes) if bytes.len() > MAX_PREVIEW_BYTES || !bytes.starts_with(PNG_SIGNATURE) => problems.push(Problem::at(
+        Some(bytes) if bytes.len() > MAX_PREVIEW_BYTES || !bytes.starts_with(PNG_SIGNATURE) || animated_png(bytes) => problems.push(Problem::at(
             BAD_LISTING,
             Some("preview"),
             preview,
-            format!("Its preview.png must be a PNG picture, at most {} MB", MAX_PREVIEW_BYTES / 1024 / 1024),
+            format!("Its preview.png must be a still PNG picture, at most {} MB", MAX_PREVIEW_BYTES / 1024 / 1024),
         )),
         Some(_) => {}
     }
@@ -1100,6 +1137,8 @@ pub fn check_template(manifest: &Value, files: &BTreeMap<String, Vec<u8>>) -> (V
                 rel,
                 format!("{rel:?} is one of Zeron's own files no template replaces (the plugins and templates pages, your account, .luaurc): leave it out"),
             ));
+        } else if template_stray_screenshot(rel) {
+            problems.push(Problem::at(BAD_LISTING, Some("files"), rel, format!("{rel:?} isn't a PNG or JPEG: {TEMPLATE_SCREENSHOTS}/ holds its pictures alone")));
         }
     }
     check_clashes(files, &[super::templates::MANIFEST, super::template_packages::IMPORTED], &mut problems);

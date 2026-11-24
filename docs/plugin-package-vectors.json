@@ -36836,6 +36836,143 @@
         "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
         "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
         "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACGFjVEwAAAACAAAAAAAAAAA=",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "an animated preview",
+      "problems": [
+        {
+          "field": "preview",
+          "path": "preview.png",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screenshots/x.luau": "cmV0dXJuIHt9"
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "code under screenshots/",
+      "problems": [
+        {
+          "field": "files",
+          "path": "screenshots/x.luau",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "Screenshots/x.luau": "cmV0dXJuIHt9",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "code under Screenshots/, as a folding disk has it",
+      "problems": [
+        {
+          "field": "files",
+          "path": "Screenshots/x.luau",
+          "rule": "bad_listing"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/Two.JPG": "/9j/4EpGSUY=",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "a picture under screenshots/ it doesn't list",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
         "lib/x.luac": "G0x1YQ==",
         "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
         "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
@@ -37595,6 +37732,181 @@
           "screenshots/chat.png"
         ]
       },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"x-future\":1,\"zeron_version\":\"0.3.16\"}",
+      "name": "a member its manifest may not have",
+      "problems": [
+        {
+          "field": "manifest",
+          "path": null,
+          "rule": "bad_listing",
+          "word": "x-future"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"author\":\"Zeron\",\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "an author isn't one of its members",
+      "problems": [
+        {
+          "field": "manifest",
+          "path": null,
+          "rule": "bad_listing",
+          "word": "author"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"signature\":{\"key\":\"k\",\"sig\":\"s\"},\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "its signature is no member of the list",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"深色的官方介面\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "the mark: 官方介面",
+      "problems": [
+        {
+          "cause": "mark_word",
+          "field": "description",
+          "path": null,
+          "rule": "bad_listing",
+          "word": "官方"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
+      "manifest": "{\"description\":\"ダークな公式インターフェース\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
+      "name": "the mark: 公式インターフェース",
+      "problems": [
+        {
+          "cause": "mark_word",
+          "field": "description",
+          "path": null,
+          "rule": "bad_listing",
+          "word": "公式"
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "files_b64": {
+        "CHANGELOG.md": "IyBDaGFuZ2VzCgojIyAxLjIuMAoKLSBUaGUgc2lkZWJhciBtb3ZlcyByaWdodC4K",
+        "README.md": "IyBNaWRuaWdodAoKQSBkYXJrIGludGVyZmFjZS4=",
+        "app.luau": "cmV0dXJuIHJlcXVpcmUoJy4vc2NyZWVucy9zaGVsbC9wYWdlJyk=",
+        "ds/tokens.luau": "cmV0dXJuIHsgYmcgPSAnIzAwMCcgfQ==",
+        "preview.png": "iVBORw0KGgoAAAANSUhEUg==",
+        "screens/shell/sidebar.luau": "cmV0dXJuIHt9",
+        "screenshots/chat.png": "iVBORw0KGgoAAAANSUhEUg=="
+      },
+      "listing": {
+        "categories": [],
+        "engines_zeron": ">=0.3.16",
+        "homepage": "https://example.com/midnight",
+        "keywords": [
+          "dark",
+          "sidebar"
+        ],
+        "license": "MIT",
+        "repository": "https://github.com/example/midnight",
+        "screenshots": [
+          "screenshots/chat.png"
+        ]
+      },
       "manifest": "{\"description\":\"A dark interface with the sidebar on the right.\",\"homepage\":\"https://example.com/midnight\",\"id\":\"midnight\",\"keywords\":[\"dark\",\"sidebar\"],\"license\":\"MIT\",\"name\":\"Midnight Verified\",\"repository\":\"https://github.com/example/midnight\",\"screenshots\":[\"screenshots/chat.png\"],\"version\":\"1.2.0\",\"zeron_version\":\"0.3.16\"}",
       "name": "the mark: a verified name",
       "problems": [
@@ -38186,6 +38498,35 @@
           "screenshots/chat.png"
         ],
         "sha256": "c5b741c07014e793deed97b6099a5596d80c8f79e95ac6b7a8be8a11b35ad044",
+        "version": "1.2.0"
+      },
+      "store_result": {
+        "error": "store_mismatch",
+        "ok": false
+      }
+    },
+    {
+      "name": "carries code under screenshots/",
+      "package_b64": "eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiJJeUJEYUdGdVoyVnpDZ29qSXlBeExqSXVNQW9LTFNCVWFHVWdjMmxrWldKaGNpQnRiM1psY3lCeWFXZG9kQzRLIiwiUkVBRE1FLm1kIjoiSXlCTmFXUnVhV2RvZEFvS1FTQmtZWEpySUdsdWRHVnlabUZqWlM0PSIsImFwcC5sdWF1IjoiY21WMGRYSnVJSEpsY1hWcGNtVW9KeTR2YzJOeVpXVnVjeTl6YUdWc2JDOXdZV2RsSnlrPSIsImRzL3Rva2Vucy5sdWF1IjoiY21WMGRYSnVJSHNnWW1jZ1BTQW5JekF3TUNjZ2ZRPT0iLCJwcmV2aWV3LnBuZyI6ImlWQk9SdzBLR2dvQUFBQU5TVWhFVWc9PSIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiY21WMGRYSnVJSHQ5Iiwic2NyZWVuc2hvdHMvY2hhdC5wbmciOiJpVkJPUncwS0dnb0FBQUFOU1VoRVVnPT0iLCJzY3JlZW5zaG90cy94Lmx1YXUiOiJMUzBnZUE9PSJ9LCJmb3JtYXQiOiJ6ZXJvbi10ZW1wbGF0ZTp2MSIsIm1hbmlmZXN0Ijp7ImRlc2NyaXB0aW9uIjoiQSBkYXJrIGludGVyZmFjZSB3aXRoIHRoZSBzaWRlYmFyIG9uIHRoZSByaWdodC4iLCJob21lcGFnZSI6Imh0dHBzOi8vZXhhbXBsZS5jb20vbWlkbmlnaHQiLCJpZCI6Im1pZG5pZ2h0Iiwia2V5d29yZHMiOlsiZGFyayIsInNpZGViYXIiXSwibGljZW5zZSI6Ik1JVCIsIm5hbWUiOiJNaWRuaWdodCIsInJlcG9zaXRvcnkiOiJodHRwczovL2dpdGh1Yi5jb20vZXhhbXBsZS9taWRuaWdodCIsInNjcmVlbnNob3RzIjpbInNjcmVlbnNob3RzL2NoYXQucG5nIl0sInNpZ25hdHVyZSI6eyJmaWxlcyI6eyJDSEFOR0VMT0cubWQiOiIxNDBkNTEzY2NkMmYxNzBiNTFkYWM0ZmIwNTRlNjk2Y2QzYTY2ZjRkNGU0YTkwZDI4YTRiOTI1ZjNiMzFiNWMwIiwiUkVBRE1FLm1kIjoiY2Y0NGJiNWY2MDhhN2I1ZjMxZjQyNWFhYzE0ZWViNTYwMmVjYzEzOTNlYjU1NmNmMTgzN2VmNmU5MjZhNWJmMCIsImFwcC5sdWF1IjoiNzlmMzE0NTZmMDRiMDUwYWYzOWNmZWQ2MWVlMTdjYmMwYWJmN2ZhNTMxNzU3NTFkNWMzNTliMmIwNzVkZWU1OSIsImRzL3Rva2Vucy5sdWF1IjoiNGNiODAzMjI3MzA3NzU1MGFhYmFhZjQxNzM2YjY0ZTU2ZGE5OTUxOGQ1Njc0ZjJjOWY5OGQ2ZjZhN2E2ZGJmYyIsInByZXZpZXcucG5nIjoiMDJhM2UyOThmMTUzM2Y2MjU1OGM1OGU0YzcwZWRjYWI5YWY1YTUwZDYyZDkyNWZkNTM5MDk0MjAyMGZiMGZiOCIsInNjcmVlbnMvc2hlbGwvc2lkZWJhci5sdWF1IjoiN2RmOGYwY2Q5ZTFjZDBiMjA0YTc2MDc4MzY3MWMwY2NjYTRhMzI1OGRjN2M1MWY1OWU5ZTIyOTVjNmMyNTMxNSIsInNjcmVlbnNob3RzL2NoYXQucG5nIjoiMDJhM2UyOThmMTUzM2Y2MjU1OGM1OGU0YzcwZWRjYWI5YWY1YTUwZDYyZDkyNWZkNTM5MDk0MjAyMGZiMGZiOCIsInNjcmVlbnNob3RzL3gubHVhdSI6ImNkZmJiNzUwMjMzYzE2Njg4NWFmMjc1ZjZlYTc3NzZmYTE1NTk3Yzk0MjU4YmJmODdhNzc3M2JlOGYzOWEwYzEifSwia2V5IjoiaW9qajNYUUo4Wlg5VXRzdFBMcGRjc3BuQ2I4ZGxCSWI4M1NJQWJRUGIxdyIsInNpZyI6IjJhUGVVUnpSSWhaamg0aWVKTVB6Q1l6N3VranF3NGJteXpiMXZBc3pZMDF3RHpkeWI1NzFfMm45dF93U3BRTnRjVDlZVG1MbTBURU5Xb1drdUpweUFnIn0sInZlcnNpb24iOiIxLjIuMCIsInplcm9uX3ZlcnNpb24iOiIwLjMuMTYifX0=",
+      "result": {
+        "files": 7,
+        "hash": "d0afba826b0f5ba9205021facbdcdd28ada59b06cdda9e8a6c2efc2f0101bc8d",
+        "id": "midnight",
+        "ignored": [
+          "screenshots/x.luau"
+        ],
+        "key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+        "ok": true,
+        "paths": [
+          "CHANGELOG.md",
+          "README.md",
+          "app.luau",
+          "ds/tokens.luau",
+          "preview.png",
+          "screens/shell/sidebar.luau",
+          "screenshots/chat.png"
+        ],
+        "sha256": "0b84b08e71b592d2e7154855bd782f7fcba21021f0a86c98a8c9c6aa44cf5027",
         "version": "1.2.0"
       },
       "store_result": {

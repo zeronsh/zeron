@@ -238,15 +238,15 @@ pub const PLUGIN_WORDS: &[(&str, bool, &[&str])] = &[
 /// A plugin's is read with [`PLUGIN_WORDS`] alone.
 pub const TEMPLATE_WORDS: &[(&str, bool, &[&str])] = &[
     ("en", false, &["template", "templates", "layout", "layouts", "interface", "interfaces", "skin", "skins"]),
-    ("es", false, &["plantilla", "plantillas", "interfaz", "dise\u{f1}o"]),
-    ("fr", false, &["mod\u{e8}le", "mod\u{e8}les", "gabarit", "interface", "habillage"]),
+    ("es", false, &["plantilla", "plantillas", "interfaz"]),
+    ("fr", false, &["gabarit", "gabarits", "interface", "habillage", "habillages"]),
     ("de", false, &["vorlage", "vorlagen", "oberfl\u{e4}che", "layout"]),
-    ("it", false, &["modello", "modelli", "interfaccia"]),
-    ("pt", false, &["modelo", "modelos", "interface", "layout"]),
+    ("it", false, &["interfaccia", "interfacce"]),
+    ("pt", false, &["interface", "layout"]),
     ("ru", false, &["\u{448}\u{430}\u{431}\u{43b}\u{43e}\u{43d}*", "\u{438}\u{43d}\u{442}\u{435}\u{440}\u{444}\u{435}\u{439}\u{441}*", "\u{43c}\u{430}\u{43a}\u{435}\u{442}*"]),
-    ("zh", true, &["\u{6a21}\u{677f}", "\u{754c}\u{9762}", "\u{5e03}\u{5c40}", "\u{76ae}\u{80a4}"]),
-    ("ja", true, &["\u{30c6}\u{30f3}\u{30d7}\u{30ec}\u{30fc}\u{30c8}", "\u{30ec}\u{30a4}\u{30a2}\u{30a6}\u{30c8}", "\u{30b9}\u{30ad}\u{30f3}"]),
-    ("ko", true, &["\u{d15c}\u{d50c}\u{b9bf}", "\u{b808}\u{c774}\u{c544}\u{c6c3}", "\u{c2a4}\u{d0a8}"]),
+    ("zh", true, &["\u{6a21}\u{677f}", "\u{754c}\u{9762}", "\u{5e03}\u{5c40}", "\u{76ae}\u{80a4}", "\u{4f48}\u{5c40}", "\u{4ecb}\u{9762}", "\u{7bc4}\u{672c}", "\u{76ae}\u{819a}"]),
+    ("ja", true, &["\u{30c6}\u{30f3}\u{30d7}\u{30ec}\u{30fc}\u{30c8}", "\u{30ec}\u{30a4}\u{30a2}\u{30a6}\u{30c8}", "\u{30a4}\u{30f3}\u{30bf}\u{30fc}\u{30d5}\u{30a7}\u{30fc}\u{30b9}", "\u{30a4}\u{30f3}\u{30bf}\u{30fc}\u{30d5}\u{30a7}\u{30a4}\u{30b9}"]),
+    ("ko", true, &["\u{d15c}\u{d50c}\u{b9bf}", "\u{b808}\u{c774}\u{c544}\u{c6c3}", "\u{c2a4}\u{d0a8}", "\u{c778}\u{d130}\u{d398}\u{c774}\u{c2a4}"]),
 ];
 
 /// What a listing is of: a template's is read with [`TEMPLATE_WORDS`] as

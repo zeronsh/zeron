@@ -1406,6 +1406,7 @@ fn template_package_cases() -> Value {
         ("your account", "account/sessions.luau"),
         ("its .luaurc", ".luaurc"),
         ("its own manifest as a file", "zeron-template.json"),
+        ("code under screenshots/", "screenshots/x.luau"),
     ] {
         cases.push((format!("carries {name}"), template_packed(Some(&key), &manifest, &with(&[(rel, b"-- x")]))));
     }
@@ -1550,6 +1551,10 @@ fn template_listing_cases() -> Value {
         ("a protected file: .luaurc".into(), base.clone(), with_files(&|f| { f.insert(".luaurc".into(), b"{}".to_vec()); })),
         ("a file Zeron won't write".into(), base.clone(), with_files(&|f| { f.insert(".git/config".into(), b"x".to_vec()); })),
         ("its manifest's name as a file".into(), base.clone(), with_files(&|f| { f.insert("Zeron-Template.json".into(), b"{}".to_vec()); })),
+        ("an animated preview".into(), base.clone(), with_files(&|f| { f.insert("preview.png".into(), b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0\x1f\x15\xc4\x89\0\0\0\x08acTL\0\0\0\x02\0\0\0\0\0\0\0\0".to_vec()); })),
+        ("code under screenshots/".into(), base.clone(), with_files(&|f| { f.insert("screenshots/x.luau".into(), b"return {}".to_vec()); })),
+        ("code under Screenshots/, as a folding disk has it".into(), base.clone(), with_files(&|f| { f.insert("Screenshots/x.luau".into(), b"return {}".to_vec()); })),
+        ("a picture under screenshots/ it doesn't list".into(), base.clone(), with_files(&|f| { f.insert("screenshots/Two.JPG".into(), b"\xff\xd8\xff\xe0JFIF".to_vec()); })),
         ("a compiled file is worth a look".into(), base.clone(), with_files(&|f| { f.insert("lib/x.luac".into(), b"\x1bLua".to_vec()); })),
     ];
     let changes: &[(&str, &str, Value)] = &[
@@ -1573,6 +1578,11 @@ fn template_listing_cases() -> Value {
         ("refused: commands", "commands", json!(["git"])),
         ("refused: builtin_template", "builtin_template", json!("zeron-v2")),
         ("refused: builtin_theme", "builtin_theme", json!("midnight")),
+        ("a member its manifest may not have", "x-future", json!(1)),
+        ("an author isn't one of its members", "author", json!("Zeron")),
+        ("its signature is no member of the list", "signature", json!({ "key": "k", "sig": "s" })),
+        ("the mark: 官方介面", "description", json!("\u{6df1}\u{8272}\u{7684}\u{5b98}\u{65b9}\u{4ecb}\u{9762}")),
+        ("the mark: 公式インターフェース", "description", json!("ダークな公式インターフェース")),
         ("the mark: a verified name", "name", json!("Midnight Verified")),
         ("the mark: official, first", "description", json!("Official dark interface for Zeron.")),
         ("the mark: beside a word for a template (a plugin's would pass)", "description", json!("A clean, verified layout.")),
@@ -1795,7 +1805,7 @@ fn template_data() -> Value {
         "template_manifest_fields": { "required": listing::TEMPLATE_REQUIRED, "allowed": listing::TEMPLATE_OPTIONAL },
         "template_refused_members": listing::TEMPLATE_REFUSED_MEMBERS,
         "template_readme_stub": listing::TEMPLATE_README_STUB,
-        "templates_about": "A template (contract 'Templates in the store') is a .zeron-template package (template_format), signed in template_payload_prefix's domain, or unsigned from the store under a record naming no signer, as a plugin is. Its content hash (a record's hash) is the plugin's, over its manifest without the signature and every file the package carries. template_protected: what no template replaces, each one a file or, ending '/', a folder; a path is compared after plugin-guard's fold (path.rs `fold`: '\\' as '/', each character's uppercase then its lowercase, empty and '.' parts dropped, each part without its trailing dots and spaces), as the entry is, and is protected when it is one or is under one. A device leaves those files out when it installs; the store refuses a package carrying one (protected_file, field files, its path). template_listing_files: carried and installed, never part of its interface (one ending '/' is a folder). template_manifest_fields.required must be there; allowed may be, by the plugin's rules for each; a member of template_refused_members may not (bad_listing, that field); any other is kept. template_readme_stub: a README.md holding it is the one Zeron wrote (missing_readme). preview.png must be a PNG of at most limits.max_preview_bytes (bad_listing, field preview; missing_listing when there's none); screenshots are under screenshots/. A template's engines_zeron is '>=' + its zeron_version. The template_listing and template_packages cases hold both sides to it.",
+        "templates_about": "A template (contract 'Templates in the store') is a .zeron-template package (template_format), signed in template_payload_prefix's domain, or unsigned from the store under a record naming no signer, as a plugin is. Its content hash (a record's hash) is the plugin's, over its manifest without the signature and every file the package carries. template_protected: what no template replaces, each one a file or, ending '/', a folder; a path is compared after plugin-guard's fold (path.rs `fold`: '\\' as '/', each character's uppercase then its lowercase, empty and '.' parts dropped, each part without its trailing dots and spaces), as the entry is, and is protected when it is one or is under one. A device leaves those files out when it installs; the store refuses a package carrying one (protected_file, field files, its path). template_listing_files: carried and installed, never part of its interface; of screenshots/, the files whose extension (ASCII case aside) is one of limits.screenshot_types, and any other file under it (its path folded as for template_protected) is refused (bad_listing, field files, its path), left out by a device and never composed. template_manifest_fields.required must be there; allowed may be, by the plugin's rules for each; a member of template_refused_members may not (bad_listing, that field, in that list's order); nor may any other but signature (bad_listing, field manifest, word the member, in code point order). template_readme_stub: a README.md holding it is the one Zeron wrote (missing_readme). preview.png must be a still PNG (no acTL chunk, read chunk by chunk from the signature while a whole chunk header remains) of at most limits.max_preview_bytes (bad_listing, field preview; missing_listing when there's none); screenshots are under screenshots/. A template's engines_zeron is '>=' + its zeron_version. The template_listing and template_packages cases hold both sides to it.",
     })
 }
 
