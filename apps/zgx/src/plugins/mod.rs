@@ -54,6 +54,7 @@ pub mod tokens;
 pub mod looks;
 pub mod template_consent;
 pub mod act_consent;
+pub mod blocks;
 pub mod preview;
 pub mod host_bar;
 pub mod locales;
@@ -780,7 +781,20 @@ fn live_overlay() -> live::Overlay {
     LIVE_OVERLAY.with(|o| o.borrow().clone())
 }
 
+fn held_back(id: &str, why: &blocks::Why) {
+    HELD_BACK.with(|h| *h.borrow_mut() = (*why == blocks::Why::Unchecked).then(|| id.to_string()));
+}
+
+/// The template a launch refused, and why, told once.
+pub fn take_stopped_at_launch() -> Option<(String, blocks::Why)> {
+    STOPPED_AT_LAUNCH.with(|s| s.borrow_mut().take())
+}
+
 thread_local! {
+    static STOPPED_AT_LAUNCH: RefCell<Option<(String, blocks::Why)>> = const { RefCell::new(None) };
+    /// The template in use that can't be checked for now (its id): back by
+    /// itself once it can, which no notice calls a switch.
+    static HELD_BACK: RefCell<Option<String>> = const { RefCell::new(None) };
     /// What `prepare_live` laid down, for the bridge to start from.
     static LIVE_OVERLAY: RefCell<live::Overlay> = RefCell::default();
     /// And what it laid it down from, so the window's first look composes
@@ -813,6 +827,12 @@ pub fn prepare_live() -> PathBuf {
     preview::read_at_launch();
     if ZERON_TEMPLATE.swap(false, std::sync::atomic::Ordering::Relaxed) {
         preview::enter_safe();
+    }
+    // One Zeron took down never starts (blocks.rs), told once there's a window.
+    if let Some((id, why)) = blocks::stop(&root, preview::approvals_path().as_deref()) {
+        let name = template_name(&root, &id);
+        held_back(&id, &why);
+        STOPPED_AT_LAUNCH.with(|s| *s.borrow_mut() = Some((name, why)));
     }
     {
         let id = live::active(&root);
@@ -1804,6 +1824,21 @@ impl Bridge {
             return;
         }
         let id = survey.id.clone();
+        // What runs was taken down, or can't be checked: Zeron's own from this
+        // look on (the survey already says so), told by the host.
+        let running = self.laid.borrow().id.clone();
+        if running != live::BUILTIN && id == live::BUILTIN {
+            let at = root.to_path_buf();
+            let stopped = off_thread(move || blocks::stop(&at, preview::approvals_path().as_deref())).await.flatten();
+            if let Some((_, why)) = stopped.filter(|(stopped, _)| *stopped == running) {
+                self.chose.set(true);
+                held_back(&running, &why);
+                host_bar::notice(host_bar::Notice::stopped(&template_name(root, &running), &why));
+            }
+        }
+        if id != live::BUILTIN && HELD_BACK.with(|h| h.borrow_mut().take()).is_some_and(|held| held == id) {
+            self.chose.set(true);
+        }
         let whole_failed = id != live::BUILTIN && self.broken.borrow_mut().holds(&id, &survey.template_stamp);
         let failed: BTreeSet<String> = {
             let mut failures = self.failed_files.borrow_mut();
@@ -1932,7 +1967,10 @@ impl Bridge {
                 .keys()
                 .filter_map(|rel| self.failed_files.borrow().why(&format!("{}:{rel}", t.id)).map(|why| (rel.clone(), why.to_string())))
                 .collect();
-            let (state, error) = if let Some(why) = &broken {
+            let blocked = blocks::blocked(&root, &t.id);
+            let (state, error) = if blocked.is_some() {
+                ("blocked", None)
+            } else if let Some(why) = &broken {
                 ("broken", Some(why.clone()))
             } else if let Some((rel, why)) = errors.iter().next() {
                 ("errors", Some(format!("{rel}: {why}")))
@@ -1961,6 +1999,9 @@ impl Bridge {
             ];
             if let Some(error) = error {
                 fields.push(("error", Value::from(error.as_str())));
+            }
+            if let Some(why) = &blocked {
+                fields.push(("blocked", json_value(&blocks::row(why))));
             }
             // The colours its preview is drawn in (looks.rs): none for one
             // that changes none of Zeron's.
@@ -3735,6 +3776,9 @@ impl Bridge {
                 async move {
                     // (A preview can't switch templates: preview.rs.)
                     preview::refuse("templates.use")?;
+                    if let Some(root) = templates_root() {
+                        blocks::refuse(&root, &text(&id))?;
+                    }
                     template_call("UseTemplate", json!({ "id": text(&id) })).await?;
                     // Chosen here, on Zeron's own Templates page (never a
                     // template's: screens/templates is never templated):
@@ -3776,6 +3820,7 @@ impl Bridge {
                     let b = me.upgrade().ok_or("closed")?;
                     let root = b.templates_dir().ok_or("Templates aren't available right now")?;
                     let from = text(&id);
+                    blocks::refuse(&root, &from)?;
                     let (new_id, name) = live::copy_name(&root, &from);
                     template_call("CreateTemplate", json!({ "id": new_id, "name": name, "from": from })).await?;
                     b.look();
@@ -3810,6 +3855,9 @@ impl Bridge {
         host.async_action("templates.export", |arg| async move {
             preview::refuse("templates.export")?;
             let id = arg.field("id").map(text).unwrap_or_default();
+            if let Some(root) = templates_root() {
+                blocks::refuse(&root, &id)?;
+            }
             let mut path = arg.field("path").map(text).unwrap_or_default();
             // (A save dialog's name, its extension taken off.)
             if !path.is_empty() && !path.ends_with(".zeron-template") {
@@ -4118,6 +4166,44 @@ mod tests {
         live::set_active(&root, "zeron").unwrap();
         lay_at_launch(&ui, &root);
         assert!(preview::another_s_ran());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// One taken down is never laid down at a launch, the first or a warm one
+    /// (whose `.live` still holds it), nor found by a look while it runs.
+    #[test]
+    fn one_taken_down_is_never_laid_down() {
+        let ui = crate::ui_dir();
+        let root = std::env::temp_dir().join(format!("zgx-down-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("midnight");
+        std::fs::create_dir_all(dir.join("screens")).unwrap();
+        std::fs::write(dir.join("zeron-template.json"), r#"{"id":"midnight","name":"Midnight"}"#).unwrap();
+        std::fs::write(dir.join("screens/midnight.luau"), "-- theirs").unwrap();
+        std::fs::write(dir.join(".imported.json"), r#"{"key":null,"version":"1.2.0","source":{"kind":"store","store":{"id":"midnight"}}}"#).unwrap();
+        live::set_active(&root, "midnight").unwrap();
+        let laid = || root.join(live::LIVE).join("screens/midnight.luau").exists();
+        let list = |blocks: Json| std::fs::write(root.join(blocks::FILE), json!({ "format": "zeron-template-blocks:v1", "blocks": blocks }).to_string()).unwrap();
+        let down = json!([{ "id": "midnight", "version": "1.2.0", "reason": "x", "at": 1 }]);
+        preview::another_s_ran_for_test(false);
+        lay_at_launch(&ui, &root).unwrap();
+        assert!(laid());
+        assert!(live::LaunchStamp::now(&ui, &root, "midnight").still_laid(&ui, &root), "the next launch is a warm one");
+        assert_eq!(live::survey(&ui, &root, None).id, "midnight");
+        // Taken down as it runs: the next look is Zeron's own.
+        list(down.clone());
+        assert_eq!(live::survey(&ui, &root, None).id, live::BUILTIN);
+        // And between launches: a warm one lays nothing of it.
+        lay_at_launch(&ui, &root).unwrap();
+        assert!(!laid(), "nothing of it is left in .live");
+        // Restored, it's as it was; then taken down before a first launch.
+        list(json!([]));
+        lay_at_launch(&ui, &root).unwrap();
+        assert!(laid());
+        list(down);
+        std::fs::remove_file(root.join(live::LAUNCH_STAMP)).unwrap();
+        lay_at_launch(&ui, &root).unwrap();
+        assert!(!laid());
         let _ = std::fs::remove_dir_all(&root);
     }
 

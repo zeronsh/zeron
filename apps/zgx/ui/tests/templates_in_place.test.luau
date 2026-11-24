@@ -301,3 +301,27 @@ test("a newer version found says so and updates in place; a refused one says why
 	expect(app:has('#template-ledger >> ~"wasn\'t installed"')).to_be(true)
 	expect(app:has('#template-ledger >> role:button "Update"')).to_be(false)
 end)
+
+-- One Zeron took down, or can't check for now, says which on its line and
+-- can't be used; restored, its row is as it was, the same node throughout.
+test("one taken down says why and can't be used, and is as it was once it's restored", function()
+	local app = open()
+	local node = row(app, "night")
+	local before = app:tree("#template-night")
+	expect(before).never.to_contain("disabled")
+	for how, says in {
+		taken_down = "Zeron took this version down, so it can't be used",
+		taken_down_plain = "Zeron took this version down. It can't be used.",
+		unchecked = "Off for now: Zeron couldn't check whether it was taken",
+	} do
+		app:command(`templates.{how}`)
+		app:frames(20)
+		local tree = app:tree("#template-night")
+		expect(tree).to_contain(says)
+		expect(tree).to_contain("disabled")
+		expect(row(app, "night")).to_be(node)
+	end
+	app:command("templates.restored")
+	app:frames(20)
+	expect(app:tree("#template-night")).to_be(before)
+end)

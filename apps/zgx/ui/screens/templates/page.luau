@@ -76,7 +76,15 @@ end
 
 -- What a template's row says under its name.
 local function about(t: state.Template): string
-	if t.status == "broken" then
+	if t.status == "blocked" then
+		local b: any = t.blocked or {}
+		if b.unchecked then
+			return ui.t("templates.page.about.unchecked"):get()
+		end
+		return if type(b.reason) == "string" and b.reason ~= ""
+			then ui.t("templates.page.about.taken_down_reason", { reason = string.sub(b.reason, 1, 300) }):get()
+			else ui.t("templates.page.about.taken_down"):get()
+	elseif t.status == "broken" then
 		return ui.t("templates.page.about.broken", { error = t.error or "" }):get()
 	elseif t.status == "errors" then
 		return ui.t("templates.page.about.errors", { error = t.error or "" }):get()
@@ -437,6 +445,10 @@ local function controls(t: state.Template, now: State<any>): Node
 				size = "sm",
 				min_w = slot_w,
 				on_resize = grow,
+				-- (One taken down, or that can't be checked: its line says so.)
+				disabled = function(): boolean
+					return now:get().status == "blocked"
+				end,
 				on_click = function()
 					settle(state.use(id), ui.t("templates.page.couldnt_use", { name = now:peek().name }))
 				end,

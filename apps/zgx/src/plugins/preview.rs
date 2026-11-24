@@ -479,6 +479,10 @@ fn write_safe(on: bool) -> std::io::Result<()> {
 /// Into safe mode: Zeron's own from now on (and across launches), and the
 /// terminals templates started closed.
 pub fn enter_safe() {
+    #[cfg(test)]
+    if TEST_SAFE.with(std::cell::Cell::get).is_some() {
+        return enter_safe_for_test(true);
+    }
     SAFE.store(true, Ordering::Relaxed);
     if let Err(error) = write_safe(true) {
         eprintln!("zeron-zgx: safe mode isn't remembered: {error}");

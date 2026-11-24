@@ -232,6 +232,9 @@ fn host(
                 super::templates_root()
                     .ok_or_else(|| "Templates aren't available right now".to_string())
                     .and_then(|root| {
+                        if super::blocks::blocked(&root, &id).is_some() {
+                            return Err("Zeron took this template down, or can't check it now.".into());
+                        }
                         if super::preview::digest(&root.join(&id)) != hash {
                             return Err("This template changed while you looked at it. Look at it again.".into());
                         }

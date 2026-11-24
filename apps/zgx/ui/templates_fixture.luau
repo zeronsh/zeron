@@ -203,6 +203,28 @@ ui.command {
 		publish()
 	end,
 }
+for _, how in { "taken_down", "taken_down_plain", "unchecked" } do
+	ui.command {
+		id = `templates.{how}`,
+		title = `Night: {how}`,
+		run = function()
+			local t = find("night")
+			t.status = "blocked"
+			t.blocked = if how == "unchecked" then { unchecked = true } elseif how == "taken_down" then { reason = "It reads {keys}." } else {}
+			publish()
+		end,
+	}
+end
+ui.command {
+	id = "templates.restored",
+	title = "Night: restored",
+	run = function()
+		local t = find("night")
+		t.status = "ok"
+		t.blocked = nil
+		publish()
+	end,
+}
 ui.command {
 	id = "broke",
 	title = "Airy's root stops running",

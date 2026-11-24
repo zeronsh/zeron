@@ -44,8 +44,10 @@ export type Template = {
 	active: boolean,
 	-- "ok" | "broken" (it can't run: Zeron's own shows) | "errors" (some of
 	-- its files fall back) | "out_of_date" (made for another Zeron: Zeron
-	-- has updated since)
+	-- has updated since) | "blocked" (Zeron took it down, `blocked.reason`, or
+	-- can't check whether it did, `blocked.unchecked`: it can't be used)
 	status: string,
+	blocked: { reason: string?, unchecked: boolean? }?,
 	error: string?,
 	-- Installed from someone's package: who signed it (`author.kind` "you",
 	-- "verified" with `username`, or "unknown" with `reason`).

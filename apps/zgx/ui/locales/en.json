@@ -3862,7 +3862,9 @@
       "bad_csrf": "The store refused a request it couldn't trust. Try again.",
       "not_owner": "Some of those plugins aren't yours in the store.",
       "invalid_scope": "Choose at least one of your plugins for it.",
-      "not_verified": "Zeron hasn't verified this version, so it isn't updated with the others."
+      "not_verified": "Zeron hasn't verified this version, so it isn't updated with the others.",
+      "template_taken_down": "Zeron took this template down, so it can't be used.",
+      "template_unchecked": "Zeron couldn't check whether this template was taken down. Try again in a moment."
     },
     "store": {
       "browse": "Browse",
@@ -4259,7 +4261,10 @@
         "errors": "Some parts show the default interface: {error}",
         "out_of_date": "Made for Zeron {version}. Zeron has updated since.",
         "out_of_date_unversioned": "Made for an earlier Zeron. Zeron has updated since.",
-        "no_description": "No description."
+        "no_description": "No description.",
+        "taken_down": "Zeron took this version down. It can't be used.",
+        "taken_down_reason": "Zeron took this version down, so it can't be used: {reason}",
+        "unchecked": "Off for now: Zeron couldn't check whether it was taken down. It comes back once Zeron has checked."
       },
       "package_filter": "Zeron template",
       "export_title": "Export Template",

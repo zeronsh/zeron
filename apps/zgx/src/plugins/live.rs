@@ -275,12 +275,14 @@ pub fn sync_zeron(ui: &Path, templates: &Path) -> std::io::Result<usize> {
 
 /// The active template's id, from `.active` (Zeron's own if none, or if it's
 /// gone or isn't a plain id), and Zeron's own whatever it says in safe mode
-/// (`preview::safe`): no template re-selects itself from there.
+/// (`preview::safe`): no template re-selects itself from there. And Zeron's
+/// own for one Zeron took down, or can't check (`blocks`).
 pub fn active(templates: &Path) -> String {
     if super::preview::safe() {
         return BUILTIN.to_string();
     }
-    chosen(templates)
+    let id = chosen(templates);
+    if super::blocks::blocked(templates, &id).is_some() { BUILTIN.to_string() } else { id }
 }
 
 /// What `.active` names, safe mode or not (the Templates page shows it).
@@ -626,7 +628,7 @@ pub struct Installed {
     /// says so, never a save while developing. Which files changed is
     /// `template_status`'s (`.base.json` against `.zeron/.hashes.json`).
     pub out_of_date: bool,
-    /// Installed from someone's signed package: `.imported.json`'s
+    /// Installed from someone's package: `.imported.json`'s
     /// `{key, author}` (the engine's `template_packages`).
     pub imported: Option<serde_json::Value>,
     /// One of Zeron's official templates, exactly as this build wrote it
@@ -670,7 +672,9 @@ pub fn installed(templates: &Path) -> Vec<Installed> {
             out_of_date,
             imported: (id != BUILTIN)
                 .then(|| read_json(&dir.join(".imported.json")))
-                .filter(|v| v["key"].is_string()),
+                // (Known by its record, never by its key: one published with
+                // a deploy token has none.)
+                .filter(|v| v.is_object()),
             official: (id != BUILTIN).then(|| super::official::verified(dir)).flatten(),
         })
     };

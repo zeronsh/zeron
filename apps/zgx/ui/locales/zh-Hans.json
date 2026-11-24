@@ -3862,7 +3862,9 @@
       "bad_csrf": "商店拒绝了一个无法信任的请求。请再试一次。",
       "not_owner": "其中有些插件在商店里不属于你。",
       "invalid_scope": "请至少为它选择一个你的插件。",
-      "not_verified": "Zeron 尚未验证这个版本，所以不会随其他插件一起更新。"
+      "not_verified": "Zeron 尚未验证这个版本，所以不会随其他插件一起更新。",
+      "template_taken_down": "Zeron 已将此模板下架，无法使用。",
+      "template_unchecked": "Zeron 无法确认此模板是否已被下架。请稍后再试。"
     },
     "store": {
       "browse": "浏览",
@@ -4259,7 +4261,10 @@
         "errors": "部分内容显示默认界面：{error}",
         "out_of_date": "为 Zeron {version} 制作。此后 Zeron 已更新。",
         "out_of_date_unversioned": "为较早版本的 Zeron 制作。此后 Zeron 已更新。",
-        "no_description": "无描述。"
+        "no_description": "无描述。",
+        "taken_down": "Zeron 已将此版本下架，无法使用。",
+        "taken_down_reason": "Zeron 已将此版本下架，无法使用：{reason}",
+        "unchecked": "暂时停用：Zeron 无法确认它是否已被下架。确认后会自动恢复。"
       },
       "package_filter": "Zeron 模板",
       "export_title": "导出模板",
