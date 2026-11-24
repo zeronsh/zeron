@@ -178,6 +178,7 @@ pub const CLOUD_HARNESS_IDS: &[HarnessId] = &[
     HarnessId::Opencode,
     HarnessId::Antigravity,
     HarnessId::Muse,
+    HarnessId::Kimi,
 ];
 
 /// How long a run waits for an expected [`RunEnvironment`]: far longer than the
@@ -1137,6 +1138,26 @@ fn full_registry() -> HarnessRegistry {
         },
         Box::new(|| zeron_harness::AcpHarness::grok().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::grok()) as Arc<dyn Harness>)),
+    );
+    // Kimi Code over ACP (`kimi acp`), same lazy pattern: the static
+    // descriptor mirrors AcpHarness::kimi() exactly. No steering extension
+    // (turn boundaries) and no effort ladder exposed over ACP.
+    registry.register_lazy(
+        HarnessDescriptor {
+            icon: None,
+            id: HarnessId::Kimi,
+            name: "Kimi Code".into(),
+            supports_steering: true,
+            steering_mode: SteeringMode::TurnBoundary,
+            reasoning_levels: Vec::new(),
+            installed: true,
+            can_install: false,
+            enabled: None,
+            access_modes: vec![AccessMode::Auto, AccessMode::FullAccess],
+            supports_plan: false,
+        },
+        Box::new(|| zeron_harness::AcpHarness::kimi().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::kimi()) as Arc<dyn Harness>)),
     );
     // Hermes Agent over ACP (`hermes acp`), same lazy pattern: the static
     // descriptor mirrors AcpHarness::hermes() exactly. No steering extension

@@ -601,6 +601,7 @@ fn agent_name(harness: &HarnessId) -> &str {
         HarnessId::Opencode => "OpenCode",
         HarnessId::Antigravity => "Antigravity",
         HarnessId::Muse => "Muse Code",
+        HarnessId::Kimi => "Kimi Code",
         HarnessId::Mock => "Mock",
         HarnessId::Registry(agent) => agent.registry_id(),
     }

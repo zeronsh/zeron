@@ -18,6 +18,7 @@ export type Name =
 	| "pi"
 	| "hermes"
 	| "muse"
+	| "kimi"
 	-- Model providers (an agent's accounts per provider, their API keys):
 	-- one set, one ink each.
 	| "provider-anthropic"
@@ -38,6 +39,7 @@ local FILES: { [Name]: string } = {
 	pi = "pi-mark",
 	hermes = "hermes-mark",
 	muse = "muse-mark",
+	kimi = "kimi-mark",
 	["provider-anthropic"] = "provider-anthropic",
 	["provider-openai"] = "provider-openai",
 	["provider-openrouter"] = "provider-openrouter",
@@ -54,6 +56,7 @@ local MONO: { [Name]: boolean } = {
 	cursor = true,
 	devin = true,
 	hermes = true,
+	kimi = true,
 	["provider-anthropic"] = true,
 	["provider-openai"] = true,
 	["provider-openrouter"] = true,

@@ -8,7 +8,7 @@ use crate::HarnessId;
 /// command — named in the empty-state copy, zeron settings.agents.tsx
 /// `PROVIDERS`). Every agent with a login of its own is here; what each one
 /// supports is documented engine-side (`agent_accounts` module docs).
-pub const PROVIDERS: [(HarnessId, &str, &str); 10] = [
+pub const PROVIDERS: [(HarnessId, &str, &str); 11] = [
     (HarnessId::ClaudeCode, "Claude Code", "claude"),
     (HarnessId::Codex, "Codex", "codex"),
     (HarnessId::Cursor, "Cursor", "cursor-agent"),
@@ -19,6 +19,7 @@ pub const PROVIDERS: [(HarnessId, &str, &str); 10] = [
     (HarnessId::Pi, "Pi", "pi"),
     (HarnessId::Hermes, "Hermes", "hermes auth add"),
     (HarnessId::Muse, "Muse Code", "muse login"),
+    (HarnessId::Kimi, "Kimi Code", "kimi login"),
 ];
 
 /// Whether `harness` has an Accounts section (and sign-in flow). Pure.
@@ -210,7 +211,7 @@ pub fn account_group_label(harness: HarnessId, provider: &str) -> String {
         "groq" => "Groq",
         "deepseek" => "DeepSeek",
         "mistral" => "Mistral",
-        "kimi-coding" => "Kimi",
+        "kimi-coding" | "moonshot" => "Kimi",
         "qwen-oauth" => "Qwen",
         "minimax-oauth" => "MiniMax",
         "meta" => "Meta",
@@ -352,6 +353,10 @@ pub fn cloud_credentials(harness: HarnessId) -> &'static [CloudCredential] {
         cloud(V::Muse, "meta", File),
         cloud(V::MetaKey, "meta", Env(&["META_API_KEY"])),
     ];
+    const KIMI: &[CloudCredential] = &[
+        cloud(V::Kimi, "moonshot", File),
+        cloud(V::MoonshotKey, "moonshot", Env(&["MOONSHOT_API_KEY", "KIMI_API_KEY"])),
+    ];
     const ANTIGRAVITY: &[CloudCredential] = &[
         cloud(V::Antigravity, "gemini", File),
         cloud(V::GeminiKey, "gemini", File),
@@ -410,6 +415,7 @@ pub fn cloud_credentials(harness: HarnessId) -> &'static [CloudCredential] {
         HarnessId::Devin => DEVIN,
         HarnessId::Grok => GROK,
         HarnessId::Muse => MUSE,
+        HarnessId::Kimi => KIMI,
         HarnessId::Antigravity => ANTIGRAVITY,
         HarnessId::Fx => FX,
         HarnessId::Pi => PI,
@@ -461,6 +467,7 @@ pub fn cloud_login_vault(
         (HarnessId::Cursor, _) => V::CursorKey,
         (HarnessId::Devin, _) => V::Devin,
         (HarnessId::Grok, _) => V::Grok,
+        (HarnessId::Kimi, _) => V::Kimi,
         (HarnessId::Antigravity, _) => V::Antigravity,
         (HarnessId::Muse, _) => V::Muse,
         _ => return None,

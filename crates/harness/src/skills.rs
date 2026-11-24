@@ -116,6 +116,7 @@ fn project_dirs(harness: HarnessId) -> &'static [&'static str] {
         ],
         HarnessId::Opencode => &[".claude/skills", ".agents/skills", ".opencode/skills"],
         HarnessId::Grok => &[".agents/skills", ".claude/skills", ".grok/skills"],
+        HarnessId::Kimi => &[".agents/skills", ".kimi/skills"],
         HarnessId::Hermes => &[".agents/skills"],
         HarnessId::Fx => &[".agents/skills", ".claude/skills", ".fx/skills"],
         HarnessId::Pi => &[".agents/skills", ".pi/skills"],

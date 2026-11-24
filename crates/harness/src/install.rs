@@ -92,6 +92,7 @@ fn methods(id: HarnessId, platform: Platform) -> Vec<Method> {
             Shell("curl -fsSL https://pi.dev/install.sh | sh", "sh"),
             Npm("@earendil-works/pi-coding-agent", true),
         ],
+        Kimi => vec![Npm("@moonshot-ai/kimi-code", false)],
         Grok if windows => vec![Npm("@xai-official/grok", false)],
         Grok => vec![
             Shell("curl -fsSL https://x.ai/cli/install.sh | bash", "bash"),
@@ -170,6 +171,7 @@ pub fn manual_command(id: HarnessId) -> Option<&'static str> {
         Hermes => "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
         Devin => "curl -fsSL https://cli.devin.ai/install.sh | bash",
         Muse => "curl -fsSL https://dev.meta.ai/install.sh | bash",
+        Kimi => "npm install -g @moonshot-ai/kimi-code",
         Fx => "curl -fsSL https://fx.sh/setup.sh | bash",
         Antigravity | Mock | Registry(_) => return None,
     })
@@ -188,6 +190,7 @@ fn cli_and_dir(id: HarnessId) -> (&'static str, &'static str) {
         Devin => ("devin", "~/.local/bin"),
         Antigravity => ("agy_acp_server", "~/.zeron/adapters"),
         Muse => ("muse", "~/.local/bin"),
+        Kimi => ("kimi", "the npm global bin"),
         Mock => ("mock", "PATH"),
         Fx => ("fx", "~/.local/bin"),
         Registry(agent) => (agent.registry_id(), "~/.zeron/agents"),
@@ -207,6 +210,7 @@ pub fn installed(id: HarnessId) -> bool {
         Devin => crate::AcpHarness::devin().installed(),
         Antigravity => crate::AcpHarness::antigravity().installed(),
         Muse => crate::MuseHarness::new().installed(),
+        Kimi => crate::AcpHarness::kimi().installed(),
         Mock => false,
         Fx => crate::AcpHarness::fx().installed(),
         Registry(agent) => crate::acp_registry::installed(agent),
