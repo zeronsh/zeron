@@ -386,6 +386,9 @@ test("capture: Shift+Enter breaks the line, Enter sends it as a dump", function(
 	local app = open()
 	app:type(`{COMPOSER} >> role:textbox`, "first line")
 	app:key("shift+Enter")
+	-- (Frames for the break to reach the draft: the composer takes an edit
+	-- in the field a frame or two on, as main's chat composer does.)
+	app:frames(2)
 	app:type(`{COMPOSER} >> role:textbox`, "second")
 	app:frames(3)
 	expect(calls(app)).never.to_contain("dump:")

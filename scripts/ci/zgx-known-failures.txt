@@ -13,3 +13,12 @@
 # the first tick, Engine::run); main passes only because its working ring
 # keeps the loop awake. Waits on the zgx fix (its own board card).
 rust: split_tests::a_divider_bounces_at_a_pane_s_least_and_double_clicked_evens_the_panes
+
+# The same zgx bug (its first tick after idle has dt=0, Engine::run), met by
+# main's composer tests: off macOS the status rings step on a 10 Hz timer
+# (ds/status, the idle-CPU fix) and the loop sleeps between steps, so the
+# first frame of a Shift+Enter's compact-to-expanded glide doesn't move and
+# its caret is still clipped at the compact height. Main's looping ring keeps
+# the loop awake. Waits on the same zgx fix.
+rust: route_motion_tests::composer_skinny_to_multiline_glides_text_and_caret_smoothly
+rust: route_motion_tests::composer_writing_new_lines_never_clips_caret_at_bottom_or_text_at_top
