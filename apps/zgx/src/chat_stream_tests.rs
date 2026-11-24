@@ -15,6 +15,7 @@ fn open_chat() -> (TestApp, Rc<View>) {
         messages: app.host.shared("test.messages", Value::Nil),
         draft: app.host.shared("test.draft", Value::Nil),
         rpc: RefCell::default(),
+        prefetch: false,
         open: RefCell::default(),
         pending: RefCell::default(),
         subagents: app.host.shared("test.subagents", Value::Nil),
