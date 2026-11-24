@@ -68,12 +68,18 @@ pub fn never_templated(rel: &str) -> bool {
     })
 }
 
-/// A template's own files that aren't part of its interface: its manifest
-/// and its listing (the engine's `listing::TEMPLATE_LISTING_FILES`, spelled
-/// exactly as there). None is ever loaded: the engine takes a change to the
-/// listing as no change of code, so such an update asks nothing.
+/// A template's own files that aren't part of its interface: its manifest,
+/// its listing (the engine's `listing::template_listing_file`: those three
+/// and the pictures under `screenshots/`), and anything else under
+/// `screenshots/`, as a disk that folds names has it (the engine's
+/// `template_stray_screenshot`). None is ever loaded: the engine takes a
+/// change to the listing as no change of code, so such an update asks
+/// nothing, and what isn't a picture there has no business being read.
 pub fn template_meta(rel: &str) -> bool {
-    matches!(rel, "zeron-template.json" | "preview.png" | "README.md" | "CHANGELOG.md") || rel.starts_with("screenshots/")
+    matches!(rel, "zeron-template.json" | "preview.png" | "README.md" | "CHANGELOG.md") || {
+        let rel = zeron_plugin_guard::path::fold(rel);
+        rel.strip_prefix("screenshots").is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    }
 }
 
 pub fn hash(bytes: &[u8]) -> String {
@@ -912,6 +918,8 @@ mod tests {
     fn a_template_s_listing_is_never_loaded() {
         let t = setup("listing");
         let listing = ["README.md", "CHANGELOG.md", "preview.png", "screenshots/shot.png", "screenshots/app.luau", "screenshots/deep/run.luau"];
+        // (On a disk that folds names, one folder by another spelling.)
+        let spelled = ["Screenshots/shot.png", "SCREENSHOTS/app.luau", "\u{17f}creenshots/app.luau", "screenshots./app.luau"];
         let digest = super::super::preview::digest(&t.join("t"));
         for rel in listing {
             write(&t.join("t"), rel, "return 1");
@@ -923,7 +931,10 @@ mod tests {
             assert!(!t.join(LIVE).join(rel).exists(), "{rel}");
             assert!(!overlay.from_template.contains(rel), "{rel}");
         }
-        for rel in ["Screenshots/app.luau", "screenshots.luau", "screens/screenshots/app.luau", "changelog.md", "docs/CHANGELOG.md"] {
+        for rel in spelled {
+            assert!(template_meta(rel), "{rel}");
+        }
+        for rel in ["screenshots.luau", "screens/screenshots/app.luau", "changelog.md", "docs/CHANGELOG.md"] {
             assert!(!template_meta(rel), "{rel}");
         }
         write(&t.join("t"), "screenshots.luau", "return 2");
