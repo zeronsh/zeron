@@ -1133,7 +1133,7 @@ describe("forms", () => {
     const after = (await html("/plugins/voice-memos", await site.signIn("user_kai"))).body;
     expect(after).not.toContain("No version of this plugin is verified yet.");
     expect(after).toContain(">Verified<");
-    expect((await html("/admin/audit", grace)).body).toMatch(/Verified\s*<a href="\/admin\/plugins\/voice-memos\/0\.1\.0"/);
+    expect((await html("/admin/audit", grace)).body).toMatch(/<span>Verified<\/span><a class="stretch c-id" href="\/admin\/plugins\/voice-memos\/0\.1\.0"/);
   });
 
   test("an admin whose session ended keeps what they typed through signing in again", async () => {
@@ -1238,7 +1238,7 @@ describe("forms", () => {
     expect(after.body).toContain("The site's own page words can't be reserved: no plugin can have them.");
     expect(flashOf(await post("/admin/reservations/kai-tools", grace, { csrf }))).toBe("__Host-zeron_flash=reservation_released");
     expect((await html("/admin/reservations", grace)).body).not.toContain("kai-tools");
-    expect((await html("/admin/audit", grace)).body).toMatch(/Freed\s*<a href="\/admin\/reservations"/);
+    expect((await html("/admin/audit", grace)).body).toMatch(/<span>Freed<\/span><a class="stretch c-id" href="\/admin\/reservations"/);
   });
 
   test("not verifying needs a reason and words for the author; the version stays listed", async () => {
@@ -1359,7 +1359,7 @@ describe("the staff's side: the queue, a submission, the decision", () => {
   /** The rows of a table, each its cells' text. */
 
   /** The queue's rows (each a version), as the look draws them. */
-  const queueRows = (body: string) => body.slice(body.indexOf('<div class="card q">'), body.indexOf("</main>")).split('<div class="qr">').slice(1);
+  const queueRows = (body: string) => body.slice(body.indexOf('<div class="tbl q">'), body.indexOf("</main>")).split('<a class="trow" href=').slice(1);
 
   test("the queue: reported first, then the longest waiting, its count on its tab; each row what it asks for against its newest verified version", async () => {
     const grace = await site.signIn("user_grace");
@@ -1377,21 +1377,21 @@ describe("the staff's side: the queue, a submission, the decision", () => {
     }
     // An update that asks for more: each new ask marked "+", a far-reaching one in the danger's ink.
     const worst = rows.find((r) => r.includes("/admin/plugins/worst-case-listing-at-every-limit-xyz12/"))!;
-    expect(worst).toContain("<span>Asks for more than 1.1.0</span>");
-    expect(worst).toMatch(/<li class="add risky">[^<]+<span class="sr-only"> \(new\)<\/span><\/li>/);
-    expect(worst).toMatch(/<li class="add">[^<]+<span class="sr-only"> \(new\)<\/span><\/li>/);
+    expect(worst).toContain('<span class="said">Asks for more than 1.1.0</span>');
+    expect(worst).toMatch(/<span role="listitem" class="ask1 add risky"><span aria-hidden="true">\+ <\/span>[^<]+<span class="sr-only"> \(new\)<\/span><\/span>/);
+    expect(worst).toMatch(/<span role="listitem" class="ask1 add"><span aria-hidden="true">\+ <\/span>[^<]+<span class="sr-only"> \(new\)<\/span><\/span>/);
     // Nothing new, but a host swapped inside an ask it had.
     const xss = rows.find((r) => r.includes("/admin/plugins/xss-probe/"))!;
-    expect(xss).toContain("<span>What it asks for changed inside since 1.0.0</span>");
+    expect(xss).toContain('<span class="said">What it asks for changed inside since 1.0.0</span>');
     // A first version: everything it asks for, none of it marked new against nothing.
     const first = rows.find((r) => r.includes("/admin/plugins/first-light/"))!;
-    expect(first).toContain("<span>Nothing verified yet</span>");
-    expect(first).toMatch(/<ul aria-label="What it asks for"><li>[^<]+<\/li>/);
+    expect(first).toContain('<span class="said">Nothing verified yet</span>');
+    expect(first).toMatch(/aria-label="What it asks for"><span role="listitem" class="ask1">[^<]+<\/span>/);
     expect(first).not.toContain('class="add');
     // Each says how many have the plugin, beside who sent it.
-    for (const r of rows) expect(r).toMatch(/<div class="by">by [^<]+ · [\d,]+ installs?/);
-    // Every row opens its version, its link naming the version too.
-    for (const r of rows) expect(r).toMatch(/<a href="\/admin\/plugins\/[a-z0-9-]+\/[^"]+">.*?<span class="sr-only"> [^<]+<\/span><\/a>/);
+    for (const r of rows) expect(r).toMatch(/<span class="c-sub">(@[^< ]+|an account with no username) · [\d,]+ installs?/);
+    // Every row is the link to its version, which it names: its name, then the version.
+    for (const r of rows) expect(r).toMatch(/^"\/admin\/plugins\/[a-z0-9-]+\/[^"]+">[\s\S]*?<span class="nm" title="[^"]*">[^<]*<\/span><b class="vno mono">[^<]+<\/b>/);
     // (A name's controls that turn text around are dropped: "Probe \u202Eevil" reads as written, never around its version.)
     expect(body).not.toContain("\u202E");
     // The staff pages sit beside the lists as tabs: Reports with how many are open.
@@ -1438,9 +1438,10 @@ describe("the staff's side: the queue, a submission, the decision", () => {
     // Then what it binds past its asks (amendment 41), risky, its MCP server and service whole, before and after.
     expect(titles.slice(4, 7)).toEqual(["Its MCP server changed", "Its service changed", "A setting that grants access changed"]);
     expect(rows.slice(4, 7).every((r) => r.startsWith(" risky new"))).toBe(true);
-    expect(rows[4]).toMatch(/<dt>Before<\/dt><dd><code>node server\.js<\/code><code>API_URL=https:\/\/api\.[^<]+<\/code><\/dd>/);
-    expect(rows[4]).toContain("<code>node server.js --listen 0.0.0.0:7777</code>");
-    expect(rows[5]).toContain("<dd><code>services/sync.luau</code></dd>");
+    // (Before and after, each a block of code with its name in its head, a line a part.)
+    expect(rows[4]).toMatch(/<figcaption class="cb-head"><span class="cb-label">Before<\/span><\/figcaption><pre tabindex="0"><code>node server\.js\nAPI_URL=https:\/\/api\.[^<]+<\/code><\/pre>/);
+    expect(rows[4]).toMatch(/<span class="cb-label">After<\/span><\/figcaption><pre tabindex="0"><code>node server\.js --listen 0\.0\.0\.0:7777\n/);
+    expect(rows[5]).toMatch(/<span class="cb-label">After<\/span><\/figcaption><pre tabindex="0"><code>services\/sync\.luau<\/code><\/pre>/);
     // Then what is as before, quieter.
     expect(rows.slice(7).every((r) => / same"/.test(r.slice(0, 20)) && r.includes('<span class="same">Same as 1.1.0</span>'))).toBe(true);
   });

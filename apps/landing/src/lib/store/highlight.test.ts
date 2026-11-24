@@ -46,3 +46,17 @@ describe("the highlighter, given a file built to break it", () => {
     expect(highlighted("<script>alert(1)</script>", null).html).toBe("&lt;script&gt;alert(1)&lt;/script&gt;");
   });
 });
+
+describe("htmlLines", () => {
+  test("a file's highlighted lines, each whole: a span the break cuts closes and opens again; a last break ends it", async () => {
+    const { htmlLines, highlight } = await import("./highlight.ts");
+    expect(htmlLines('a<span class="x">b\nc</span>d\n')).toEqual(['a<span class="x">b</span>', '<span class="x">c</span>d']);
+    expect(htmlLines("one\n\nthree")).toEqual(["one", "", "three"]);
+    expect(htmlLines("")).toEqual([""]);
+    // (A real file: a comment over three lines, each line its own, every span balanced.)
+    const lines = htmlLines(highlight("/* one\n   two\n   three */\nconst x = `a\nb`;\n", "javascript"));
+    expect(lines).toHaveLength(5);
+    for (const l of lines) expect((l.match(/<span/g) ?? []).length).toBe((l.match(/<\/span>/g) ?? []).length);
+    expect(lines.map((l) => l.replace(/<[^>]+>/g, ""))).toEqual(["/* one", "   two", "   three */", "const x = `a", "b`;"]);
+  });
+});

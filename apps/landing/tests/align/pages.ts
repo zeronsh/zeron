@@ -28,7 +28,7 @@ const newToken = async (page: Page) => {
  * longest starts where the shorter end), and a diff's hunk heads sit in its table, a code view of its own.
  */
 export const EXCEPTIONS: [string, string][] = [
-  ["pre.numbers, td.n", "line numbers, right-aligned in a code view's gutter"],
+  ["pre.numbers, td.n, .code > .n", "line numbers, right-aligned in a code view's gutter"],
   ["tr.hunk", "a diff's hunk head, in the code view's own table"],
   ["li li", "a list inside a list item steps in under it, as its level"],
   [".stage", "a screenshot set into its card's coloured stage: a picture, placed by the stage"],
