@@ -60,6 +60,21 @@ pub fn short_name(rel: &str) -> bool {
     rel.as_bytes().windows(2).any(|w| w[0] == b'~' && w[1].is_ascii_digit())
 }
 
+/// Whether `rel` holds a character drawn as nothing (Default_Ignorable, or a
+/// control). Some filesystems (HFS+) leave them out of a name they look up, so
+/// `screens/tem\u{200c}plates/page.luau` is `screens/templates/page.luau` there.
+/// Never loaded, on any system.
+pub fn unseen(rel: &str) -> bool {
+    rel.chars().any(|c| {
+        c.is_control()
+            || matches!(c,
+                '\u{ad}' | '\u{34f}' | '\u{61c}' | '\u{115f}'..='\u{1160}' | '\u{17b4}'..='\u{17b5}' | '\u{180b}'..='\u{180f}'
+                | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{3164}' | '\u{fe00}'..='\u{fe0f}'
+                | '\u{feff}' | '\u{ffa0}' | '\u{fff0}'..='\u{fff8}' | '\u{1bca0}'..='\u{1bca3}' | '\u{1d173}'..='\u{1d17a}'
+                | '\u{e0000}'..='\u{e0fff}')
+    })
+}
+
 /// Whether `rel` isn't part of its interface: its manifest, or its listing.
 pub fn meta(rel: &str) -> bool {
     rel == MANIFEST || listing_file(rel)
@@ -67,7 +82,7 @@ pub fn meta(rel: &str) -> bool {
 
 /// Whether `rel` is laid over Zeron's own when it's used.
 pub fn composed(rel: &str) -> bool {
-    counted(rel) && !stray_screenshot(rel) && !short_name(rel)
+    counted(rel) && !stray_screenshot(rel) && !short_name(rel) && !unseen(rel)
 }
 
 /// Whether `rel` counts as its code: what a keep covers, and a change to
@@ -171,6 +186,12 @@ mod tests {
             ("screens/TEMPLA~1/page.luau", false, false, false, true, false, true),
             ("LUAURC~1", false, false, false, true, false, true),
             ("screens/a~b.luau", false, false, false, false, true, true),
+            ("screens/tem\u{200c}plates/page.luau", false, false, false, false, false, true),
+            (".luau\u{feff}rc", false, false, false, false, false, true),
+            ("account\u{e0041}/x.luau", false, false, false, false, false, true),
+            ("screens/a\u{7f}.luau", false, false, false, false, false, true),
+            ("screens/设置.luau", false, false, false, false, true, true),
+            ("screens/café.luau", false, false, false, false, true, true),
         ] {
             assert_eq!(
                 (listing_file(rel), stray_screenshot(rel), protected(rel), short_name(rel), composed(rel), counted(rel)),
