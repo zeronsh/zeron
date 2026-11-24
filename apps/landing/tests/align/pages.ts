@@ -40,6 +40,7 @@ export const EXCEPTIONS: [string, string][] = [
   [".head .get", "getting a plugin is set at the head's right: its lines end on the page's right edge (align.test.ts, the Get test, holds it)"],
   [".hero", "the store's hero is centred, its title, line and search on the page's middle, not its edge (Raycast's, Vercel's)"],
   [".make", "the store's ending is one centred block"],
+  [".empty", "the empty block is centred in its area"],
   [".cb-label", "a code block's file name as typed: `.github/…` begins with a dot, its ink mid-cell"],
 ];
 
@@ -52,6 +53,7 @@ export const ALIGN_PAGES: AlignPage[] = [
   { name: "store-verified", path: "/plugins?sort=verified" },
   { name: "store-category", path: "/plugins?category=productivity&keyword=focus" },
   { name: "store-none", path: "/plugins?q=nothing-matches-this" },
+  { name: "store-none-narrowed", path: "/plugins?category=git&keyword=focus&verified=1&q=nothing" },
   { name: "store-empty", path: "/plugins", fake: [["empty", { on: "1" }]] },
   { name: "store-down", path: "/plugins", fake: [["down", { on: "1" }]] },
   // A plugin: every part; none of its optional parts; its versions, its asks, one version.
@@ -71,6 +73,9 @@ export const ALIGN_PAGES: AlignPage[] = [
   { name: "yours-signed-out", path: "/account" },
   { name: "tokens", path: "/account/tokens", user: "user_ada" },
   { name: "tokens-none", path: "/account/tokens", user: "user_noor" },
+  { name: "tokens-none-author", path: "/account/tokens", user: "user_kai" },
+  { name: "tokens-signed-out", path: "/account/tokens" },
+  { name: "new-token-no-plugins", path: "/account/tokens/new", user: "user_noor" },
   { name: "revoke", path: "/account/tokens/tok_0OZtGptZyNgbeUuc", user: "user_ada" },
   { name: "new-token", path: "/account/tokens/new?again=1&name=Nightly&ends=365&scope=chosen&plugins=focus-timer%2Cweather", user: "user_ada" },
   { name: "new-token-dialog", path: "/account/tokens", user: "user_ada", act: newToken },
@@ -84,6 +89,8 @@ export const ALIGN_PAGES: AlignPage[] = [
   // Review.
   { name: "queue", path: "/admin/plugins", user: "user_grace" },
   { name: "queue-empty", path: "/admin/plugins", user: "user_grace", fake: [["queue", { as: "empty" }]] },
+  ...(["verified", "declined", "taken_down"] as const).map((state) => ({ name: `queue-empty-${state}`, path: `/admin/plugins?state=${state}`, user: "user_grace", fake: [["queue", { as: "empty" }]] as [string, Record<string, string>][] })),
+  ...(["reports", "reservations", "audit"] as const).map((list) => ({ name: `staff-${list}-empty`, path: `/admin/${list}`, user: "user_grace", fake: [["queue", { as: "empty" }]] as [string, Record<string, string>][] })),
   { name: "review", path: "/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", user: "user_grace" },
   { name: "review-first", path: "/admin/plugins/first-light/0.1.0", user: "user_grace" },
   { name: "review-files", path: "/admin/plugins/xss-probe/1.1.0?view=files", user: "user_grace" },

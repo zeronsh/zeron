@@ -11,6 +11,7 @@
 // changes line by line are views of their own. Admins only; anyone else
 // gets the site's 404.
 import AppIcon from "../../../../components/look/AppIcon.astro";
+import Failed from "../../../../components/look/Failed.astro";
 import Icon from "../../../../components/look/Icon.astro";
 import Seal from "../../../../components/look/Seal.astro";
 import Tile from "../../../../components/look/Tile.astro";
@@ -216,11 +217,7 @@ const versions = record.ok ? record.data.versions : null;
     <Flash flash={flash} />
     {
       !s ? (
-        <div class="empty" role="status">
-          <h1>This version can't be loaded right now</h1>
-          <p>Try again in a moment.</p>
-          <a class="btn sec" href={Astro.url.pathname + Astro.url.search}>Try again</a>
-        </div>
+        <Failed title="This version can't be loaded right now" line="Try again in a moment." level={1} />
       ) : (
         <>
           {/* (As a plugin's page heads it: its tile; the name, the version a mono pill and where it stands right after it,
@@ -244,8 +241,8 @@ const versions = record.ok ? record.data.versions : null;
             <div class="rv-main">
               <nav class="tabs" aria-label="What to read">
                 <a href={viewHref("overview")} aria-current={view === "overview" ? "page" : undefined}>Overview</a>
-                <a href={viewHref("files")} aria-current={view === "files" ? "page" : undefined}>Files<span class="num">{count(files.length)}</span></a>
-                {s.base && <a href={viewHref("changes")} aria-current={view === "changes" ? "page" : undefined}>Changes<span class="num">{count(changes.length)}</span></a>}
+                <a href={viewHref("files")} aria-current={view === "files" ? "page" : undefined}>Files{files.length > 0 && <span class="num">{count(files.length)}</span>}</a>
+                {s.base && <a href={viewHref("changes")} aria-current={view === "changes" ? "page" : undefined}>Changes{changes.length > 0 && <span class="num">{count(changes.length)}</span>}</a>}
               </nav>
 
               {view !== "overview" && drawing.length > 0 && (

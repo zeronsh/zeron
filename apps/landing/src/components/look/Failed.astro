@@ -1,0 +1,17 @@
+---
+// The store didn't answer: the empty block, in the store's own words (or a
+// page's, for what it couldn't load), and Try again, here.
+import Empty from "./Empty.astro";
+import { store } from "../../lib/store/words.ts";
+
+interface Props {
+  title?: string;
+  line?: string;
+  /** Where Try again goes: this page, unless said. */
+  href?: string;
+  level?: 1 | 2;
+}
+const { title = store("plugins.store.failed_title"), line = store("plugins.store.failed_body"), href = `${Astro.url.pathname}${Astro.url.search}`, level = 2 } = Astro.props;
+---
+
+<Empty icon="cloud" title={title} line={line} action={{ label: store("plugins.store.try_again"), href }} level={level} failed />

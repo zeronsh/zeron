@@ -49,7 +49,6 @@ export const STORE_WORDS = {
   "plugins.store.confirm.unyank.body": "It can be installed again.",
   // Deploy tokens.
   "plugins.store.keys": "Deploy tokens",
-  "plugins.store.keys_none": "No tokens yet.",
   "plugins.store.keys_failed": "Couldn't see your tokens",
   "plugins.store.key.new": "New token…",
   "plugins.store.key.new_title": "New deploy token",
@@ -76,7 +75,6 @@ export const STORE_WORDS = {
   "plugins.store.key.expiry_label": "Ends",
   "plugins.store.key.expiry.never": "Never",
   "plugins.store.your_versions": "Versions you've sent",
-  "plugins.store.no_versions": "Nothing sent yet.",
   "plugins.store.key.revoke": "Revoke",
   "plugins.store.key.revoke_title": "Revoke {name}?",
   "plugins.store.key.revoke_body": "Anything publishing with it stops working at once. Versions it already sent stay as they are.",
@@ -107,10 +105,7 @@ export const STORE_WORDS = {
   "plugins.store.sort.popular": "Most installed",
   "plugins.store.sort.updated": "Recently updated",
   "plugins.store.sort.new": "Newest",
-  // A list with nothing in it, or none at all.
-  "plugins.store.nothing_matches": "Nothing matches “{query}”",
-  "plugins.store.nothing_here": "No plugins here",
-  "plugins.store.try_another": "Try other words, or fewer filters.",
+  // A search to clear, or a store with nothing in it.
   "plugins.store.clear": "Clear search",
   "plugins.store.empty_title": "No plugins in the store yet",
   "plugins.store.empty_body": "Plugins people publish appear here.",

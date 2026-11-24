@@ -8,8 +8,12 @@
 // revoked and ended. A long name is cut on its line, whole on hover. New
 // token opens its form in a dialog (with no script, its page); the token is
 // shown once, by the page that makes it, and never here: a lost one is
-// revoked and made again. Signed out, it says so and offers sign-in, here.
+// revoked and made again. None: the guide's steps from CI; with no plugin to
+// send, one line. Signed out, it says so and offers sign-in, here.
 import AccountHead from "../../../components/look/AccountHead.astro";
+import CiSteps from "../../../components/look/CiSteps.astro";
+import Empty from "../../../components/look/Empty.astro";
+import Failed from "../../../components/look/Failed.astro";
 import Flash from "../../../components/look/Flash.astro";
 import Icon from "../../../components/look/Icon.astro";
 import SignInPlease from "../../../components/look/SignInPlease.astro";
@@ -20,7 +24,7 @@ import "../../../styles/look/account.css";
 import { takeFlash } from "../../../lib/store/flash.ts";
 import { count, date, day, since, sinceInSentence } from "../../../lib/store/format.ts";
 import { privatePage } from "../../../lib/store/http.ts";
-import { NO_FIELDS } from "../../../lib/store/tokens.ts";
+import { NO_FIELDS, NO_TOKENS } from "../../../lib/store/tokens.ts";
 import type { DeployToken, MyPlugin } from "../../../lib/store/types.ts";
 import { store } from "../../../lib/store/words.ts";
 
@@ -52,7 +56,8 @@ const endsIn = (k: DeployToken) => {
 const scopeWords = (k: DeployToken) => ("all" in k.scope ? store("plugins.store.key.scope.all") : k.scope.plugins.length === 1 ? plugin(k.scope.plugins[0]!).name : `${count(k.scope.plugins.length)} plugins`);
 /** When it was last used, and on which plugin: one line. Inside a sentence ("Last used yesterday"), its words in lower case. */
 const usedLine = (k: DeployToken, inSentence = false) => (k.last_used_at ? [(inSentence ? sinceInSentence : since)(k.last_used_at, now, true), k.last_used_plugin ? plugin(k.last_used_plugin).name : null].filter(Boolean).join(" · ") : store("plugins.store.key.not_used"));
-const published = mine?.ok ? mine.data.plugins.filter((p) => p.versions.length > 0).length : 0;
+/** An account with no plugin has none a token could publish (a token sends a plugin's later versions): nothing to make. Not known, it may. */
+const canMake = !mine?.ok || mine.data.plugins.some((p) => p.versions.length > 0);
 ---
 
 <Store title="Deploy tokens · Zeron" description="Your account's deploy tokens." noindex current="publish" session={session}>
@@ -63,29 +68,25 @@ const published = mine?.ok ? mine.data.plugins.filter((p) => p.versions.length >
       current="tokens"
       plugins={mine?.ok ? mine.data.plugins.length : null}
       tokens={tokens ? live.length : null}
-      action={session ? { label: "New token", icon: "plus", href: "/account/tokens/new", dialog: "new-token" } : null}
+      action={session && (canMake || live.length > 0) ? { label: "New token", icon: "plus", href: "/account/tokens/new", dialog: "new-token" } : null}
     >
       <Flash flash={flash} />
       {
         who.state === "down" ? (
-          <div class="empty" role="status">
-            <h2>{store("plugins.store.failed_title")}</h2>
-            <p>{store("plugins.store.failed_body")}</p>
-            <a class="btn sec" href={Astro.url.pathname}>{store("plugins.store.try_again")}</a>
-          </div>
+          <Failed />
         ) : !session ? (
           <SignInPlease what="your deploy tokens" />
         ) : tokens === null ? (
-          <div class="empty" role="status">
-            <h2>{store("plugins.store.keys_failed")}</h2>
-            <p>{store("plugins.store.failed_body")}</p>
-            <a class="btn sec" href="/account/tokens">{store("plugins.store.try_again")}</a>
-          </div>
+          <Failed title={store("plugins.store.keys_failed")} href="/account/tokens" />
         ) : live.length === 0 ? (
-          <div class="empty">
-            <h2>{store("plugins.store.keys_none")}</h2>
-            <p>{published > 0 ? "New token makes one: name it, choose what it can publish, and put it in your CI's secrets." : "Publish a plugin's first version from your computer; a token can send the ones after it."}</p>
-          </div>
+          canMake ? (
+            <section class="howto" aria-labelledby="ci">
+              <h2 id="ci">Publish from CI</h2>
+              <CiSteps />
+            </section>
+          ) : (
+            <Empty icon="key" title={NO_TOKENS.title} line={NO_TOKENS.line} />
+          )
         ) : (
           <div class="tbl keys">
             <div class="trow th" aria-hidden="true"><span>Token</span><span>{store("plugins.store.key.scope.label")}</span><span>Last used</span><span>{store("plugins.store.key.expiry_label")}</span><span></span></div>
@@ -150,16 +151,18 @@ const published = mine?.ok ? mine.data.plugins.filter((p) => p.versions.length >
         )
       }
 
-      <section class="how" aria-label="How deploy tokens work">
-        <div><h3><b>1</b>Make it here</h3><p>New token makes one after you sign in again. Zeron shows it once, as it's made, and never again: a lost token is revoked and made anew.</p></div>
-        <div><h3><b>2</b>Give it to your CI</h3><p>Store it as <code>ZERON_DEPLOY_TOKEN</code> in your CI's secrets; the publish action reads it from there.</p></div>
-        <div><h3><b>3</b>It can do one thing</h3><p>Publish new versions of the plugins in its scope. It can't claim a new id, publish a plugin's first version, or read your account.</p></div>
-      </section>
+      {live.length > 0 && (
+        <section class="how" aria-label="How deploy tokens work">
+          <div><h3><b>1</b>Make it here</h3><p>New token makes one after you sign in again. Zeron shows it once, as it's made, and never again: a lost token is revoked and made anew.</p></div>
+          <div><h3><b>2</b>Give it to your CI</h3><p>Store it as <code>ZERON_DEPLOY_TOKEN</code> in your CI's secrets; the publish action reads it from there.</p></div>
+          <div><h3><b>3</b>It can do one thing</h3><p>Publish new versions of the plugins in its scope. It can't claim a new id, publish a plugin's first version, or read your account.</p></div>
+        </section>
+      )}
     </AccountHead>
   </div>
 
   {
-    session && (
+    session && (canMake || live.length > 0) && (
       <dialog class="question" id="new-token" aria-labelledby="new-token-title" closedby="any">
         <h2 id="new-token-title">{store("plugins.store.key.new_title")}</h2>
         <TokenForm id="new-token" csrf={session.csrf} fields={NO_FIELDS} plugins={[...yours.values()]} fresh={session.fresh_sign_in === true} dialog back="/account/tokens" />

@@ -2,6 +2,8 @@
 // Everything done to the store's plugins, by reviewers and by their
 // authors, newest first, as a table; or one plugin's, from its page.
 // Admins only.
+import Empty from "../../components/look/Empty.astro";
+import Failed from "../../components/look/Failed.astro";
 import Icon from "../../components/look/Icon.astro";
 import StaffHead from "../../components/look/StaffHead.astro";
 import Store from "../../layouts/Store.astro";
@@ -78,16 +80,9 @@ const CLOCK = new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit"
       }
       {
         !result.ok ? (
-          <div class="empty" role="status">
-            <h2>The log can't be loaded right now</h2>
-            <p>Try again in a moment.</p>
-            <a class="btn sec" href={Astro.url.pathname + Astro.url.search}>Try again</a>
-          </div>
+          <Failed title="The log can't be loaded right now" line="Try again in a moment." />
         ) : entries.length === 0 ? (
-          <div class="empty">
-            <h2>Nothing yet</h2>
-            <p>What reviewers and authors do to a plugin is written here as it's done.</p>
-          </div>
+          <Empty icon="clock" title="Nothing yet" line="What reviewers and authors do to a plugin is written here as it's done." />
         ) : (
           <>
             <div class="tbl log">

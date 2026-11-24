@@ -24,7 +24,7 @@ const freshState = () => ({
   /** `rotated`: a staff session already replaced on its first privileged use. */
   /** `fresh_until`: the step-up ticket a sign-in earned (spent by making a deploy token), good until then. */
   sessions: new Map<string, { user: string; csrf: string; rotated?: boolean; fresh_until?: number | null }>(),
-  /** The queue as a screenshot asks for it (POST /_fake/queue, astro dev's /_dev/queue): empty, or this long. Null: as it is. */
+  /** The queue as a screenshot asks for it (POST /_fake/queue, astro dev's /_dev/queue): empty, with every staff list, or this long. Null: as it is. */
   queueAs: null as null | "empty" | number,
   /** A version answered with another's record (POST /_fake/loose?on=1): a page must say only what the record names. */
   loose: false,
@@ -446,7 +446,7 @@ function queue(url: URL): Response {
     const rows = [release, pre && (!release || pre.published_at > release.published_at) ? pre : undefined].filter((v): v is FakeVersion => v !== undefined);
     return rows.map((v) => row(p, v, earlierOf(p, v)));
   });
-  if (view === "undecided" && state.queueAs === "empty") items.length = 0;
+  if (state.queueAs === "empty") items.length = 0;
   if (view === "undecided" && typeof state.queueAs === "number") items.push(...filler(state.queueAs - items.length));
   // Plugins with open reports first; then oldest waiting first. (Taken down: the newest take-down first.)
   const downAt = (item: { plugin: { id: string }; version: string }) => state.plugins.find((p) => p.id === item.plugin.id)?.versions.find((v) => v.version === item.version)?.removal?.at ?? 0;
@@ -992,14 +992,14 @@ async function route(request: Request): Promise<Response> {
     }
     if (b === "reports") {
       const status = url.searchParams.get("status") ?? "open";
-      return json(paged(state.reports.filter((r) => status === "all" || r.status === status).map(reportView), url, "reports"));
+      return json(paged(state.reports.filter((r) => state.queueAs !== "empty" && (status === "all" || r.status === status)).map(reportView), url, "reports"));
     }
     if (b === "reservations" && c === undefined) {
-      return json({ reservations: [...state.reservations].sort((x, y) => x.id.localeCompare(y.id)).map((r) => ({ id: r.id, to: r.user ? { username: userOf(r.user).username } : null, note: r.note, created_at: r.created_at })) });
+      return json({ reservations: [...(state.queueAs === "empty" ? [] : state.reservations)].sort((x, y) => x.id.localeCompare(y.id)).map((r) => ({ id: r.id, to: r.user ? { username: userOf(r.user).username } : null, note: r.note, created_at: r.created_at })) });
     }
     if (b === "audit") {
       const plugin = url.searchParams.get("plugin");
-      return json(paged(state.audit.filter((x) => !plugin || x.plugin_id === plugin).map((x) => ({ ...x, actor: { id: author(x.actor).id, username: userOf(x.actor).username, user_id: x.actor } })), url, "entries"));
+      return json(paged(state.audit.filter((x) => state.queueAs !== "empty" && (!plugin || x.plugin_id === plugin)).map((x) => ({ ...x, actor: { id: author(x.actor).id, username: userOf(x.actor).username, user_id: x.actor } })), url, "entries"));
     }
   }
   return notFound();

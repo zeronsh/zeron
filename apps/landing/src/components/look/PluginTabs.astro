@@ -24,6 +24,6 @@ const tabs = [
 
 <nav class="tabs" aria-label={`${plugin.name}: its pages`}>
   {tabs.map((t) => (
-    <a href={t.href} aria-current={t.id === current ? "page" : undefined}>{t.label}{t.n !== null && <span class="num">{count(t.n)}</span>}</a>
+    <a href={t.href} aria-current={t.id === current ? "page" : undefined}>{t.label}{t.n ? <span class="num">{count(t.n)}</span> : null}</a>
   ))}
 </nav>

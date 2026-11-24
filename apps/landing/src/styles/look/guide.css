@@ -1,6 +1,6 @@
 /* The Publishing guide (pages/plugins/publishing.astro): the article in the store's text column, the "On this
    page" rail at the container's right, steps whose numbers hang in the gutter, code blocks with a head, tables.
-   Spacing by the scale's steps only (store.css :root). What sticks or is scrolled to sits a group's step from the
+   (The steps' own rules: steps.css.) Spacing by the scale's steps only (store.css :root). What sticks or is scrolled to sits a group's step from the
    window's top (the bar scrolls away). */
 .guide-page { padding-top: var(--s48); padding-bottom: var(--sections); }
 .guide-grid { display: grid; grid-template-columns: minmax(0, 720px) minmax(0, 1fr) 232px; align-items: start; }
@@ -33,15 +33,6 @@
 
 /* A literal name: a small chip, its fill faint, so a sentence reads through it. */
 .guide :not(pre) > code { font: 500 0.875em/1 var(--mono); padding: 0 var(--s4); border-radius: 4px; background: color-mix(in srgb, var(--text) 7%, transparent); color: var(--text); overflow-wrap: anywhere; }
-
-/* Steps, as Tailwind numbers them: the number a small square in the gutter, the title on the text's edge. */
-.steps { margin: var(--groups) 0 0; padding: 0; list-style: none; counter-reset: none; }
-.step { position: relative; }
-.step + .step { margin-top: var(--groups); }
-.guide .steps + * { margin-top: var(--groups); }
-.step-n { position: absolute; left: calc(-1 * (28px + var(--s16))); top: 0; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; font: 600 12px/1 var(--mono); color: var(--text-2); background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); }
-.guide .step-title { margin: 0; font-size: 16px; line-height: 28px; font-weight: 600; letter-spacing: -0.005em; }
-.guide .step-title + p { margin-top: var(--s4); }
 
 /* A table: one line round it, as a code block's; its words on the column (it hangs by its cells' padding). */
 .table-wrap { --pad: var(--s16); margin: var(--s16) calc(-1 * var(--pad)) 0; overflow-x: auto; border-radius: 12px; box-shadow: inset 0 0 0 1px var(--line); }
@@ -112,12 +103,11 @@
   .guide-page { padding-top: var(--s32); padding-bottom: var(--s48); }
   .guide-head h1 { font-size: 32px; line-height: 36px; }
   .guide h2 { margin-top: var(--s48); }
-  /* (No gutter to hang in: a step's number starts its title's line; a heading's own address is its tap.) */
-  .step-n { position: static; float: left; margin-right: var(--s12); }
+  /* (No gutter to hang in: a heading's own address is its tap.) */
   .anchor { display: none; }
   /* (As wide as the column, as wide as the screen.) */
-  .codeblock, .table-wrap { margin-inline: calc(-1 * var(--gutter)); border-radius: 0; box-shadow: inset 0 1px 0 var(--line), inset 0 -1px 0 var(--line); }
-  .codeblock { --pad: var(--gutter); }
+  .guide :is(.codeblock, .table-wrap) { margin-inline: calc(-1 * var(--gutter)); border-radius: 0; box-shadow: inset 0 1px 0 var(--line), inset 0 -1px 0 var(--line); }
+  .guide .codeblock { --pad: var(--gutter); }
   .table-wrap { --pad: var(--gutter); }
   /* (A table's rows stack: the field, then what it needs, under it. Its heads are still read out, not shown; a
      column's own head starts its cell.) */

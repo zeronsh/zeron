@@ -293,7 +293,7 @@ describe("the catalog, from the edge's real listing", () => {
     expect(verified.body).not.toContain('href="/plugins/theme-sync"');
     // The count is the edge's total (amendment 38): exact, the public list's.
     expect((await new Browser().get("/plugins?sort=new")).body).toMatch(/<p id="results"><b class="num">\d+<\/b> plugins?<\/p>/);
-    expect((await new Browser().get("/plugins?q=zzzzqqq")).body).toContain('<b class="num">0</b> plugins');
+    expect((await new Browser().get("/plugins?q=zzzzqqq")).body).toContain("<h2>Nothing matches</h2>");
     const git = await new Browser().get("/plugins?category=git");
     expect(git.body).toContain('href="/plugins/pr-review"');
     expect(git.body).not.toContain('href="/plugins/focus-timer"');
