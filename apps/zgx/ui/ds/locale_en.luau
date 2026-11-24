@@ -587,6 +587,8 @@ return {
 	["ds.transcript.switched"] = "Switched from {from} to {to}",
 	["ds.transcript.message_from"] = "Message from",
 	["ds.transcript.not_delivered"] = "Not delivered — send again",
+	["ds.transcript.too_large"] = "A file is over 24 MB",
+	["ds.transcript.discard"] = "Discard",
 	["ds.transcript.reply"] = "Reply",
 	["ds.transcript.you"] = "You",
 	["ds.transcript.agent"] = "Agent",

@@ -130,7 +130,7 @@ fn a_send_that_fails_while_away_keeps_its_prompt_and_retry() {
     let (_app, view, _sending) = pending_chat();
     view.open_chat(Some("other-chat".into()));
     let run = json!({ "kind": "run", "messageId": "first-message", "request": { "prompt": "Find the startup bug" } });
-    view.mark_failed("new-chat", "first-message", Some(run.clone()));
+    view.mark_failed("new-chat", "first-message", Some(run.clone()), None);
     assert_eq!(messages(&view), json!([]));
 
     view.open_chat(Some("new-chat".into()));
@@ -149,6 +149,59 @@ fn a_send_that_fails_while_away_keeps_its_prompt_and_retry() {
             .is_pending()
     );
     assert_eq!(messages(&view)[0]["waiting"], "sending");
+}
+
+#[test]
+fn a_send_that_failed_before_its_run_is_sent_again_whole_not_dropped() {
+    // A new chat's first message that never got as far as a run (its file's
+    // upload failed, the link to its device was down): "send again" used to
+    // drop its row, and a new chat's composer had already let the words go.
+    let (_app, view, _sending) = pending_chat();
+    view.mark_failed("new-chat", "first-message", None, Some("too_large"));
+    let failed = messages(&view);
+    assert_eq!(failed[0]["waiting"], "failed");
+    assert_eq!(failed[0]["failure"], "too_large", "the row can say why");
+
+    let mut retry = Box::pin(view.retry(Value::record([
+        ("id", Value::from("new-chat")),
+        ("message", Value::from("first-message")),
+    ])));
+    // (Sent again from its request: it waits on the engine, as the first did.)
+    assert!(
+        retry
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    let again = messages(&view);
+    assert_eq!(again.as_array().unwrap().len(), 1, "still its one row, under its own id");
+    assert_eq!(again[0]["id"], "first-message");
+    assert_eq!(again[0]["text"], "Find the startup bug");
+    assert_eq!(again[0]["waiting"], "sending");
+    assert!(again[0]["failure"].is_null());
+}
+
+#[test]
+fn discard_lets_a_failed_prompt_go_but_never_one_on_its_way() {
+    let (_app, view, _sending) = pending_chat();
+    let discard = || {
+        let mut d = Box::pin(view.discard(Value::record([
+            ("id", Value::from("new-chat")),
+            ("message", Value::from("first-message")),
+        ])));
+        match d.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+            std::task::Poll::Ready(out) => out,
+            std::task::Poll::Pending => panic!("a prompt not in the outbox goes at once"),
+        }
+    };
+    // Still sending: it may yet land, so it stays.
+    assert_eq!(discard(), Err("missing"));
+    assert_eq!(messages(&view)[0]["waiting"], "sending");
+
+    view.mark_failed("new-chat", "first-message", None, None);
+    assert_eq!(discard(), Ok(()));
+    assert_eq!(messages(&view), json!([]));
+    assert!(!view.pending.borrow().contains_key("new-chat"));
 }
 
 #[test]
@@ -207,6 +260,7 @@ fn a_failed_send_in_the_outbox_reads_failed_and_comes_back() {
         let prompt = &pending["other-chat"][0];
         assert!(prompt.held, "the engine retries it, not a command from here");
         assert!(prompt.retry.is_none());
+        assert_eq!(prompt.item.as_deref(), Some("send-m1"), "Discard takes it out of the outbox by this");
     }
     view.follow_held(&[held_send("m1", None)]);
     assert_eq!(messages(&view)[0]["waiting"], "sending");

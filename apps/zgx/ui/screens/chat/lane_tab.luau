@@ -1253,6 +1253,9 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		on_retry = function(message: string)
 			store.retry(chat, message)
 		end,
+		on_discard = function(message: string)
+			store.discard(chat, message)
+		end,
 		-- (A split's pane: the keys stay with this chat, in the window's composer.)
 		on_jump = if split
 			then function()

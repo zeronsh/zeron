@@ -958,6 +958,9 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 		on_retry = function(message: string)
 			store.retry(chat, message)
 		end,
+		on_discard = function(message: string)
+			store.discard(chat, message)
+		end,
 		pictures = pictures,
 		sent_pictures = sent_pictures,
 		on_open_subagent = function(sub: any)

@@ -417,6 +417,17 @@ end
 stub.retry = function(id: string, message: string)
 	note(`retry:{id}:{message}`)
 end
+-- A prompt not delivered, let go (noted): gone from the list, as the host's.
+stub.discard = function(id: string, message: string)
+	note(`discard:{id}:{message}`)
+	local kept = {}
+	for _, m in store.messages:peek() do
+		if m.id ~= message then
+			table.insert(kept, m)
+		end
+	end
+	store.messages:set(kept)
+end
 -- This device's outbox, as the engine takes a send out of it (#1256's
 -- RemoveHeldSend): gone from the chat's waiting list, or not there. An
 -- engine from before it refuses.
@@ -499,6 +510,13 @@ ui.command {
 	title = "A send wasn't delivered",
 	run = function()
 		store.messages:push { id = "lost1", role = "user", text = "Lost on the way", waiting = "failed" }
+	end,
+}
+ui.command {
+	id = "undelivered_too_large",
+	title = "A send wasn't delivered: its file is over 24 MB",
+	run = function()
+		store.messages:push { id = "big1", role = "user", text = "Transcribe this recording", waiting = "failed", failure = "too_large" }
 	end,
 }
 stub.interrupt = function(id: string)

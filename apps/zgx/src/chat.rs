@@ -882,6 +882,14 @@ struct Pending {
     row: bool,
     /// The files the engine delivers for it, for a run sent again.
     transfers: Vec<Json>,
+    /// The send as it was asked for (`chat.send`'s request): one that failed
+    /// before its run was made (a file's upload, a link down) is sent again
+    /// whole from it, rather than dropped.
+    request: Option<Value>,
+    /// Why it wasn't delivered, when that's known (an outcome: "too_large").
+    failure: Option<Outcome>,
+    /// Its id in the engine's outbox while it's held there, to take it out.
+    item: Option<String>,
 }
 
 impl Pending {
@@ -897,6 +905,8 @@ impl Pending {
             ("text", Value::from(words.as_str())),
             ("attachments", carried_value(&self.paths, &quotes, &picks, &comments, &chats)),
             ("waiting", Value::from(self.waiting)),
+            // (Why it wasn't delivered, when that's known.)
+            ("failure", self.failure.map_or(Value::Nil, Value::from)),
             // Still in the engine's outbox, its files uploading: nothing has
             // gone to its chat yet (a Cloud machine isn't woken for it).
             ("held", Value::Bool(self.held)),
@@ -1307,6 +1317,10 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
             held: false,
             row: false,
             transfers: Vec::new(),
+            // (Its send, once the chat is made, puts its own row in its place.)
+            request: None,
+            failure: None,
+            item: None,
         });
     });
     let c = chats.clone();
@@ -1411,6 +1425,12 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     host.async_action("chat.retry", move |args| {
         let v = pick(&args);
         async move { crate::plugins::preview::refuse("chat.retry")?; v.retry(args).await.map(|_| Value::Nil).map_err(String::from) }
+    });
+    // A prompt that wasn't delivered, let go unsent: `{ id, message }`.
+    let pick = which.clone();
+    host.async_action("chat.discard", move |args| {
+        let v = pick(&args);
+        async move { crate::plugins::preview::refuse("chat.discard")?; v.discard(args).await.map(|_| Value::Nil).map_err(String::from) }
     });
     // A send in this device's outbox (still uploading, or stopped) taken out
     // for good: `{ id, item, message? }` → whether it was there to take
@@ -3053,6 +3073,10 @@ impl View {
             held: false,
             row: false,
             transfers: Vec::new(),
+            // (Under the id it shows as, so sent again it's this row again.)
+            request: Some(with_fields(req.clone(), [("message_id", Value::from(message_id.as_str()))])),
+            failure: None,
+            item: None,
         });
         drop(pending);
         if !fresh && !chats.running(&id) {
@@ -3144,8 +3168,8 @@ impl View {
                     paths.push(at)
                 }
                 Err(why) => {
-                    // Failed before it could go: the prompt says so.
-                    self.mark_failed(&id, &message_id, None);
+                    // Failed before it could go: the prompt says so, and why.
+                    self.mark_failed(&id, &message_id, None, Some(why));
                     return Err(why);
                 }
             }
@@ -3207,7 +3231,8 @@ impl View {
         // parent's.)
         if fresh && config["harness"].is_null() {
             eprintln!("zeron-zgx: chat: {id}: no agent to send with (the chat isn't known here yet)");
-            self.mark_failed(&id, &message_id, None);
+            // (Sent again once it is: its request is kept.)
+            self.mark_failed(&id, &message_id, None, None);
             return Err("missing");
         }
         // A chat just made: its config goes out now, and its first message
@@ -3252,7 +3277,7 @@ impl View {
                         // (It runs what its row says, then.)
                         chats.starting.borrow_mut().remove(&id);
                         chats.publish_views();
-                        self.mark_failed(&id, &message_id, None);
+                        self.mark_failed(&id, &message_id, None, Some(engine::outcome(&e)));
                         return Err(engine::outcome(&e));
                     }
                 }
@@ -3266,7 +3291,7 @@ impl View {
             {
                 p.transfers = transfers;
             }
-            self.mark_failed(&id, &message_id, Some(run));
+            self.mark_failed(&id, &message_id, Some(run), sent.err());
         } else if !fresh && runs_otherwise(&chat["config"], &config) {
             // Sent with another agent, model or effort than the chat had (the
             // composer's pick, kept as a draft until now): the chat takes
@@ -3318,6 +3343,7 @@ impl View {
                 };
                 let waiting = if send["failure"].is_string() { "failed" } else { "sending" };
                 let row = send["queueRow"].as_bool() == Some(true);
+                let item = send["id"].as_str().map(str::to_owned);
                 let prompts = pending.entry(chat.to_owned()).or_default();
                 match prompts.iter_mut().find(|p| p.id == message) {
                     Some(p) => {
@@ -3326,6 +3352,7 @@ impl View {
                         p.row = row;
                         p.waiting = waiting;
                         p.retry = None;
+                        p.item = item;
                     }
                     None => {
                         let (words, paths) =
@@ -3340,6 +3367,10 @@ impl View {
                             held: true,
                             row,
                             transfers: Vec::new(),
+                            // (The engine has it, and sends it again.)
+                            request: None,
+                            failure: None,
+                            item,
                         });
                         changed = true;
                     }
@@ -3352,13 +3383,15 @@ impl View {
     }
 
     /// A pending prompt that didn't go: failed, with the command that sends
-    /// it again (none: it never got that far, and is sent again whole).
-    fn mark_failed(&self, id: &str, message_id: &str, retry: Option<Json>) {
+    /// it again (none: it never got that far, and is sent again whole), and
+    /// why, when that's known.
+    fn mark_failed(&self, id: &str, message_id: &str, retry: Option<Json>, failure: Option<Outcome>) {
         if let Some(pending) = self.pending.borrow_mut().get_mut(id)
             && let Some(p) = pending.iter_mut().find(|p| p.id == message_id)
         {
             p.waiting = "failed";
             p.retry = retry;
+            p.failure = failure;
         }
         self.publish_messages();
     }
@@ -3399,12 +3432,13 @@ impl View {
         if self.open_id().as_deref() != Some(&id) {
             return Err("missing");
         }
-        let (run, transfers, held) = {
+        let (run, transfers, held, request) = {
             let mut pending = self.pending.borrow_mut();
             let prompts = pending.get_mut(&id).ok_or("missing")?;
             let p = prompts.iter_mut().find(|p| p.id == message_id).ok_or("missing")?;
             p.waiting = "sending";
-            (p.retry.clone(), p.transfers.clone(), p.held)
+            p.failure = None;
+            (p.retry.clone(), p.transfers.clone(), p.held, p.request.clone())
         };
         self.publish_messages();
         // In the engine's outbox: the engine has what it takes to send it.
@@ -3416,18 +3450,54 @@ impl View {
                 .map_err(|e| engine::outcome(&e));
         }
         let Some(run) = run else {
-            // It never got as far as a run (an upload failed): the composer
-            // has the words; the row goes.
+            // It never got as far as a run (an upload failed, the link to its
+            // device was down, the chat wasn't known here yet): sent again
+            // whole, as it was asked for, its row staying meanwhile. (Before,
+            // the row went and the words with it: a new chat's composer had
+            // already let them go.)
+            if let Some(request) = request {
+                return self.send(request).await;
+            }
+            // (Nothing kept to send it from: the composer has the words.)
             self.forget_pending(&id, &message_id);
             self.publish_messages();
             return Err("failed");
         };
         let sent = command_with(&id, run.clone(), &transfers).await;
         if sent.is_err() {
-            self.mark_failed(&id, &message_id, Some(run));
+            self.mark_failed(&id, &message_id, Some(run), sent.err());
         }
         self.publish_messages();
         sent
+    }
+
+    /// A prompt that wasn't delivered, let go: its row goes and it's never
+    /// sent. One still in the engine's outbox is taken out of it first
+    /// (`RemoveHeldSend`); one the engine can't take out stays.
+    async fn discard(self: &Rc<Self>, args: Value) -> Result<(), Outcome> {
+        let id = args.field("id").map(text).unwrap_or_default();
+        let message_id = args.field("message").map(text).unwrap_or_default();
+        let item = {
+            let pending = self.pending.borrow();
+            let p = pending
+                .get(&id)
+                .and_then(|prompts| prompts.iter().find(|p| p.id == message_id))
+                .ok_or("missing")?;
+            // (Only one that failed: one on its way may still land.)
+            if p.waiting != "failed" {
+                return Err("missing");
+            }
+            if p.held { p.item.clone() } else { None }
+        };
+        if let Some(item) = item {
+            engine::get()
+                .call("RemoveHeldSend", json!({ "chatId": id, "id": item }))
+                .await
+                .map_err(|e| held_removal_failure(&e))?;
+        }
+        self.forget_pending(&id, &message_id);
+        self.publish_messages();
+        Ok(())
     }
 
     async fn respond(self: &Rc<Self>, args: Value) -> Result<(), Outcome> {
@@ -9371,6 +9441,9 @@ mod tests {
                 held: false,
                 row: false,
                 transfers: Vec::new(),
+                request: None,
+                failure: None,
+                item: None,
             }],
         );
         let ids = || -> Vec<String> {
