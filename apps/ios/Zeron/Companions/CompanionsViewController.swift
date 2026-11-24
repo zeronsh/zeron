@@ -6,10 +6,11 @@ import UIKit
 /// session; beside it on iPad and the unfolded iPhone Duo, the inspector.
 final class CompanionsViewController: UIViewController, UICollectionViewDelegate {
     enum Section: Int, CaseIterable {
-        case agents, sideChats, terminals
+        case changes, agents, sideChats, terminals
 
         var title: String {
             switch self {
+            case .changes: "Changes"
             case .agents: "Agents"
             case .sideChats: "Side chats"
             case .terminals: "Terminals"
@@ -22,6 +23,7 @@ final class CompanionsViewController: UIViewController, UICollectionViewDelegate
     }
 
     private enum Item: Hashable {
+        case changes
         case header(Section)
         case agent(String)
         case sideChat(String)
@@ -49,6 +51,9 @@ final class CompanionsViewController: UIViewController, UICollectionViewDelegate
     private var tokens: [AnyObject] = []
     private var ticker: Timer?
     private var forking = false
+    private var changes: CheckoutChanges?
+    private var changesError: String?
+    private var changesTask: Task<Void, Never>?
     private let inSheet: Bool
 
     init(app: AppModel, chatId: String, inSheet: Bool) {
@@ -64,7 +69,7 @@ final class CompanionsViewController: UIViewController, UICollectionViewDelegate
         super.viewDidLoad()
         view.backgroundColor = inSheet ? .clear : Palette.background
         navigationItem.title = app.row(chatId)?.title ?? "Session"
-        navigationItem.subtitle = "Agents, side chats & terminals"
+        navigationItem.subtitle = "Changes, agents, side chats & terminals"
         navigationItem.largeTitleDisplayMode = .never
         if inSheet {
             navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .close, primaryAction: UIAction { [weak self] _ in
@@ -84,6 +89,32 @@ final class CompanionsViewController: UIViewController, UICollectionViewDelegate
         collectionView.accessibilityIdentifier = "companions"
         view.addSubview(collectionView)
 
+        let changes = UICollectionView.CellRegistration<UICollectionViewListCell, Int> { [weak self] cell, _, _ in
+            guard let self else { return }
+            var c = UIListContentConfiguration.subtitleCell()
+            c.text = "Changes"
+            c.textProperties.font = Fonts.ui(.sansMedium, TypeScale.size(16))
+            c.textProperties.color = Palette.text
+            c.image = UIImage(systemName: "chevron.left.forwardslash.chevron.right")
+            c.imageProperties.tintColor = Palette.accent
+            c.imageToTextPadding = 16
+            if let diff = self.changes {
+                let totals = NSMutableAttributedString(attributedString: changeTotals(files: diff.files.count, additions: diff.additions, deletions: diff.deletions))
+                if self.changesError != nil {
+                    totals.append(NSAttributedString(string: " · Unavailable", attributes: [.foregroundColor: Palette.warning]))
+                }
+                c.secondaryAttributedText = totals
+            } else {
+                c.secondaryText = self.changesError == nil ? "Loading changes…" : "Couldn't load changes · Tap to retry"
+            }
+            c.secondaryTextProperties.font = Fonts.ui(.mono, TypeScale.size(12))
+            c.secondaryTextProperties.color = Palette.secondary
+            c.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 14, leading: 20, bottom: 14, trailing: 20)
+            cell.contentConfiguration = c
+            cell.backgroundConfiguration = .clear()
+            cell.accessories = [.disclosureIndicator()]
+            cell.accessibilityIdentifier = "companion-changes"
+        }
         let header = UICollectionView.CellRegistration<CompanionHeaderCell, Section> { [weak self] cell, _, section in
             cell.configure(title: section.title, button: self?.headerButton(section))
         }
@@ -106,6 +137,7 @@ final class CompanionsViewController: UIViewController, UICollectionViewDelegate
         let empty = UICollectionView.CellRegistration<UICollectionViewListCell, Section> { cell, _, section in
             var c = UIListContentConfiguration.cell()
             c.text = switch section {
+            case .changes: "View this session’s changes"
             case .agents: "No subagents yet"
             case .sideChats: "Ask something on the side without derailing the main thread."
             case .terminals: "A shell on this session's computer, in its folder."
@@ -120,6 +152,7 @@ final class CompanionsViewController: UIViewController, UICollectionViewDelegate
         }
         dataSource = UICollectionViewDiffableDataSource(collectionView: collectionView) { cv, path, item in
             switch item {
+            case .changes: cv.dequeueConfiguredReusableCell(using: changes, for: path, item: 0)
             case let .header(s): cv.dequeueConfiguredReusableCell(using: header, for: path, item: s)
             case let .agent(id): cv.dequeueConfiguredReusableCell(using: agent, for: path, item: id)
             case let .sideChat(id): cv.dequeueConfiguredReusableCell(using: side, for: path, item: id)
@@ -150,6 +183,13 @@ final class CompanionsViewController: UIViewController, UICollectionViewDelegate
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        changesTask?.cancel()
+        changesTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.refreshChanges()
+                try? await Task.sleep(for: .seconds(5))
+            }
+        }
         // A terminal may be a tap away: pair with the session's computer now.
         app.client?.warmDirect(chatId: chatId)
         // Running agents' elapsed time ticks on screen only.
@@ -166,6 +206,8 @@ final class CompanionsViewController: UIViewController, UICollectionViewDelegate
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         ticker?.invalidate()
+        changesTask?.cancel()
+        changesTask = nil
     }
 
     private func tick() {
@@ -177,7 +219,7 @@ final class CompanionsViewController: UIViewController, UICollectionViewDelegate
     }
 
     private func headerButton(_ section: Section) -> UIButton? {
-        guard section != .agents else { return nil }
+        guard section != .agents && section != .changes else { return nil }
         let button = UIButton(configuration: {
             var c = UIButton.Configuration.glass()
             c.image = UIImage(systemName: "plus", withConfiguration: UIImage.SymbolConfiguration(pointSize: 12, weight: .bold))
@@ -202,6 +244,20 @@ final class CompanionsViewController: UIViewController, UICollectionViewDelegate
     }
 
     // MARK: Data
+
+    private func refreshChanges() async {
+        guard let client = app.client else { return }
+        do {
+            let diff = try await client.checkoutChanges(chatId: chatId, knownChecksum: changes?.checksum)
+            guard !Task.isCancelled else { return }
+            if let diff { changes = diff }
+            changesError = nil
+        } catch {
+            guard !Task.isCancelled else { return }
+            changesError = ChangesViewController.errorText(error)
+        }
+        reconfigure(.changes)
+    }
 
     private var reloadScheduled = false
 
@@ -236,6 +292,8 @@ final class CompanionsViewController: UIViewController, UICollectionViewDelegate
         changed += tabs.map { .terminal(ObjectIdentifier($0)) }
 
         var s = NSDiffableDataSourceSnapshot<Section, Item>()
+        s.appendSections([.changes])
+        s.appendItems([.changes], toSection: .changes)
         if !ordered.isEmpty {
             s.appendSections([.agents])
             s.appendItems([.header(.agents)] + ordered.map { .agent($0.id) }, toSection: .agents)
@@ -255,7 +313,7 @@ final class CompanionsViewController: UIViewController, UICollectionViewDelegate
 
     private func updateSheetTitle(agentRows: [SubagentRow]) {
         let running = agentRows.filter { $0.state == .running }.count
-        navigationItem.subtitle = running > 0 ? "\(running) agent\(running == 1 ? "" : "s") working" : "Agents, side chats & terminals"
+        navigationItem.subtitle = running > 0 ? "\(running) agent\(running == 1 ? "" : "s") working" : "Changes, agents, side chats & terminals"
     }
 
     // MARK: Selection
@@ -273,6 +331,8 @@ final class CompanionsViewController: UIViewController, UICollectionViewDelegate
         guard let item = dataSource.itemIdentifier(for: indexPath) else { return }
         UISelectionFeedbackGenerator().selectionChanged()
         switch item {
+        case .changes:
+            open?(ChangesViewController(app: app, chatId: chatId, initial: changes))
         case let .agent(id):
             guard let row = agents[id], let doc = row.docId else { return }
             open?(SubagentViewController(app: app, parentId: chatId, docId: doc, title: row.title, running: row.state == .running))

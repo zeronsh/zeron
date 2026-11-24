@@ -9,7 +9,7 @@
 //! frame's prepared rows (pure arithmetic, no measurement).
 
 pub mod display;
-mod markdown;
+pub(crate) mod markdown;
 mod file_icons;
 mod rows;
 pub(crate) mod style;
