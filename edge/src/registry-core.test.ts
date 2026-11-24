@@ -46,6 +46,18 @@ describe("sidebar pin validation", () => {
   });
 });
 
+describe("cloud agent choice validation", () => {
+  it("holds only its three choices, each a boolean or cleared", () => {
+    const op = (set: NonNullable<Op["set"]>) => upsert({ kind: "cloudAgents", set });
+    expect(validateOp(op({ zeronMcpOnly: true, codeMode: false, nativeSubagents: true }))).toBeNull();
+    expect(validateOp(op({ codeMode: null }))).toBeNull();
+    const invalid: NonNullable<Op["set"]>[] = [{ zeronMcpOnly: "yes" }, { codeMode: 1 }, { somethingElse: true }];
+    for (const set of invalid) {
+      expect(validateOp(op(set))).not.toBeNull();
+    }
+  });
+});
+
 describe("hlc", () => {
   it("orders by (ms, counter, device) lexicographically", () => {
     expect(hlc(2) > hlc(1)).toBe(true);

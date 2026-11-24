@@ -89,6 +89,10 @@ pub mod methods {
     /// (`{supported, enabled}`; set with `{harness, enabled}`).
     pub const GET_CODE_MODE: &str = "GetCodeMode";
     pub const SET_CODE_MODE: &str = "SetCodeMode";
+    /// Settings → Providers: which agents run with only Zeron's MCP servers
+    /// (their own hidden), and the choice per agent.
+    pub const GET_ZERON_MCP_ONLY: &str = "GetZeronMcpOnly";
+    pub const SET_ZERON_MCP_ONLY: &str = "SetZeronMcpOnly";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";
@@ -225,10 +229,17 @@ pub mod methods {
     /// calls refresh; the refresh token never leaves the engine. Local IPC
     /// only ([`crate::local_only`]): the device-room relay refuses it.
     pub const ACCESS_TOKEN: &str = "AccessToken";
-    /// `{}` → `{url}`: a fresh interactive sign-in (as `SignIn`) whose
+    /// `{for?}` → `{url}`: a fresh interactive sign-in (as `SignIn`) whose
     /// exchange leaves the engine a one-time step-up ticket, kept in memory
-    /// and never handed out. Needed before `DeleteAccount`.
+    /// and never handed out. Needed before `DeleteAccount` (no `for`).
+    /// `for: "deploy_token"`: the ticket is `CreateDeployToken`'s alone,
+    /// used once, and no other ticket makes a deploy token.
     pub const STEP_UP: &str = "StepUp";
+    /// `{for}` → `{ok: true}`: call off a [`STEP_UP`] begun for that action
+    /// (the person stopped waiting): a sign-in for it that lands later
+    /// earns no ticket, and a ticket it already earned is dropped. Local
+    /// only, never an agent's.
+    pub const CANCEL_STEP_UP: &str = "CancelStepUp";
     /// `{confirm}` (the account's email) → `{ok: true}`, or `{ok: false,
     /// error, message, organization?}`: the engine deletes the account at
     /// the edge with its step-up ticket. `error` is `step_up_required` (run
@@ -531,7 +542,11 @@ pub mod methods {
     pub const LIST_CLOUD_BRANCHES: &str = "ListCloudBranches";
 
     // ── Plugins (the plugins contract; local IPC only but PluginDeliver) ──
-    /// `{}` → `{dirs: {plugins, templates}, plugins: PluginItem[]}`, by name.
+    /// `{}` → `{dirs: {plugins, templates}, plugins: PluginItem[],
+    /// key_notices, store_notices, store_updates}`, by name
+    /// (`store_notices`: see [`ACK_STORE_NOTICES`]; `store_updates`:
+    /// `{device: "newest"|"verified", plugins: {id: …}}`, as
+    /// [`SET_PLUGIN_UPDATES`] set them).
     pub const LIST_PLUGINS: &str = "ListPlugins";
     /// `{}` → stream of `ListPlugins`' reply: the current list at once, then
     /// each change.
@@ -558,7 +573,10 @@ pub mod methods {
     /// `{id}` → `PluginItem`, or `{path}` → `VerifyPlugin`'s reply; both
     /// with `files` (how many files the signature covers).
     pub const SIGN_PLUGIN: &str = "SignPlugin";
-    /// `{path}` → `{author, status, hash, error?}`.
+    /// `{path}` → `{author, status, hash, error?}`. `status`: `ok` (signed,
+    /// its files match), `store` (installed from the store unsigned, a
+    /// deploy token's version, exactly what its record says: its author the
+    /// publisher), `unsigned`, `tampered` or `broken`.
     pub const VERIFY_PLUGIN: &str = "VerifyPlugin";
     /// `{}` → `{device: {id, name}, tools: [..]}`.
     pub const LIST_PLUGIN_TOOLS: &str = "ListPluginTools";
@@ -716,6 +734,12 @@ pub mod methods {
     /// (checked first when none was found yet). Refused when someone else
     /// signed it or it was changed; new permissions wait for you again.
     pub const UPDATE_PLUGIN: &str = "UpdatePlugin";
+    /// `{id, hash}` → `InstallPlugin`'s reply: a consent sheet's "install
+    /// the verified version instead", for plugin `id` as shown (`hash`). The
+    /// version is the engine's own (the item's `update.verified_alternative`
+    /// or `source.verified_alternative`), its record fetched now, refused
+    /// `not_verified` unless it says verified. The person's, never an agent's.
+    pub const INSTALL_VERIFIED_PLUGIN: &str = "InstallVerifiedPlugin";
     /// `{id, to?}` → `{path, bytes}`: a plugin as a `.zeron-plugin` package
     /// (an own plugin is re-signed first), into the folder or file `to`
     /// (absolute), else `<data dir>/plugin-exports`. Only this device's own
@@ -726,21 +750,34 @@ pub mod methods {
     // A plugin from the store installs with `InstallPlugin {store, version?}`
     // and updates with `CheckPluginUpdates` / `UpdatePlugin` as any other.
 
-    /// `{q?, category?, keyword?, featured?, sort?, cursor?, limit?}` →
+    /// `{q?, category?, keyword?, featured?, verified?, author?, sort?,
+    /// cursor?, limit?}` →
     /// `{items: [PluginCard + installed?: {version, status, store}],
     /// next_cursor?, total}`. `featured: true` lists only the plugins staff
     /// feature, in the store's order; false or absent lists every one.
+    /// `verified: true` only plugins whose newest version is verified;
+    /// `author` one publisher's (a username). Each card says `verified` and
+    /// `verified_version` (amendment 45).
     /// `total` is how many plugins the search matches across all its pages
     /// (the same on each page; 0 for none), as the store counts them.
     pub const STORE_SEARCH: &str = "StoreSearch";
-    /// `{id, versions?, for_zeron?}` → the store's `PluginDetail` (with every
-    /// version the caller may see when `versions`), `installed?: {version,
-    /// hash, status, store, update?, blocked?}` and `compatible`
-    /// (`incompatible?`: why not), judged for Zeron `for_zeron` (another
-    /// device's version), else this one.
+    /// `{id, for_zeron?}` → the store's `PluginDetail` (its first page of
+    /// versions, `versions_next_cursor?`; `verified`, `verified_version`),
+    /// `installed?: {version, hash, status, store, verified?, update?,
+    /// blocked?}` and `compatible` (`incompatible?`: why not), judged for
+    /// Zeron `for_zeron` (another device's version), else this one.
     pub const STORE_PLUGIN: &str = "StorePlugin";
-    /// `{}` → `{categories: [{id, name}]}`.
+    /// `{id, cursor?, limit?}` → `{versions: [Version], total,
+    /// next_cursor?, prev_cursor?}`: a page of a plugin's listed and yanked
+    /// versions, newest first, each `verified` or not.
+    pub const STORE_VERSIONS: &str = "StoreVersions";
+    /// `{id, version}` → that `Version` as the store records it.
+    pub const STORE_VERSION: &str = "StoreVersion";
+    /// `{}` → `{categories: [{id, name, count?}]}` (offline: the fixed list).
     pub const STORE_CATEGORIES: &str = "StoreCategories";
+    /// `{}` → `{plugins, verified}`: how many plugins the store lists, and
+    /// how many of them have a newest version that's verified.
+    pub const STORE_STATS: &str = "StoreStats";
     /// `{id, version, path}` → `{file, type, bytes}`: one file of a store
     /// version (a README's picture, a screenshot, the icon), fetched once
     /// into this device's cache; `file` is its path here.
@@ -748,10 +785,25 @@ pub mod methods {
     /// `{id, on}` → the plugin's item: whether this device takes the
     /// store plugin's pre-releases.
     pub const SET_PLUGIN_PRERELEASES: &str = "SetPluginPrereleases";
+    /// `{id?, prefer: "newest" | "verified" | null}` → `{prefer, device}`:
+    /// which store update this device stages, for plugin `id` (null: as the
+    /// device does) or for every plugin (`id` left out; null: the default,
+    /// `newest`). `newest`: the newest version, marked when it isn't
+    /// verified, the newest verified beside it; `verified`: the newest
+    /// verified. Taking an unverified version always asks.
+    pub const SET_PLUGIN_UPDATES: &str = "SetPluginUpdates";
+    /// `{ids}` → `{}`: the app has shown these of the plugin list's
+    /// `store_notices` (each `{id, plugin, version, name?, via: "device" |
+    /// "deploy_token", token_name?, at, words}`: a publish of one of the
+    /// account's plugins this device didn't make), so the engine lets them
+    /// go. Each is raised once per version, and kept until it's shown.
+    pub const ACK_STORE_NOTICES: &str = "AckStoreNotices";
     /// `{id}` → `{id, name, version, description, hash, ok, problems,
     /// warnings, listing, notes, package: {files, bytes}, ticket?}`: one of
     /// your own plugins checked against the store's rules, each problem
-    /// `{rule, field?, path?, words}`. `ticket` (only to this device's app or
+    /// `{rule, field?, path?, line?, words}` (`line`: of `path`, 1 the first,
+    /// when it's one line's, as the `raw_html`, `footnote` and `math`
+    /// warnings are). `ticket` (only to this device's app or
     /// CLI, only when `ok`) is what [`PUBLISH_PLUGIN`] needs, good once, for
     /// it as checked (`hash`).
     pub const PREPARE_PLUGIN_PUBLISH: &str = "PreparePluginPublish";
@@ -761,20 +813,27 @@ pub mod methods {
     /// your session. The person's act alone: never an agent's.
     pub const PUBLISH_PLUGIN: &str = "PublishPlugin";
     /// `{}` → the store's `/me/plugins`: your plugins there, every version
-    /// with its review state and reason.
+    /// `verified` or not, with its `review` (a decline's reason and words are
+    /// yours alone).
     pub const STORE_MY_PLUGINS: &str = "StoreMyPlugins";
-    /// `{id, version, action: "withdraw" | "yank" | "unyank"}` → the
-    /// store's answer.
+    /// `{id, version, action: "yank" | "unyank"}` → `{ok: true, …}` or
+    /// `{ok: false, error, message}`.
     pub const STORE_VERSION_ACTION: &str = "StoreVersionAction";
-    /// `{id}` → `{keys: [...]}`: a plugin's deploy keys (never a secret).
-    pub const LIST_DEPLOY_KEYS: &str = "ListDeployKeys";
-    /// `{id, name, expires?}` → `{ok: true, key, secret}` (the secret,
-    /// `zpk_…`, shown this once and kept nowhere), or `{ok: false, error,
-    /// message}`: `step_up_required` (run [`STEP_UP`], then again), or the
-    /// store's word.
-    pub const CREATE_DEPLOY_KEY: &str = "CreateDeployKey";
-    /// `{id, key}` → `{revoked: key}`.
-    pub const REVOKE_DEPLOY_KEY: &str = "RevokeDeployKey";
+    /// `{}` → `{tokens: [{id, short, name, scope, created_at,
+    /// last_used_at, expires_at, revoked_at}]}`: the account's deploy
+    /// tokens, as the store lists them (never a secret).
+    pub const LIST_DEPLOY_TOKENS: &str = "ListDeployTokens";
+    /// `{name, scope: {all: true} | {plugins: [id…]}, expires?}` →
+    /// `{ok: true, token: {id, short, name, scope, expires_at,
+    /// created_at}, secret}` (the secret, `zdt_…`, shown this once and kept
+    /// nowhere), or `{ok: false, error, message}`: `step_up_required` (run
+    /// [`STEP_UP`] `{for: "deploy_token"}`, then again: each token takes a
+    /// step-up of its own), `not_owner` with `ids` (plugins not yours in the
+    /// store), `not_published`, `invalid_scope`, or the store's word. The
+    /// scope is fixed: another scope is another token.
+    pub const CREATE_DEPLOY_TOKEN: &str = "CreateDeployToken";
+    /// `{id}` → `{revoked: id}`.
+    pub const REVOKE_DEPLOY_TOKEN: &str = "RevokeDeployToken";
     /// `{id, reason, text?}` → `{ok: true, …}` or `{ok: false, error,
     /// message}`: a listed plugin reported to the store's reviewers, by the
     /// signed-in person. `reason` is `malware`, `misleading`, `broken`,
@@ -785,6 +844,23 @@ pub mod methods {
     /// shown as the engine's own are, under the same Settings, at most a few
     /// a minute for each `source`; clicking it opens `session`.
     pub const POST_NOTIFICATION: &str = "PostNotification";
+
+    // ── Managed MCP servers ──────────────────────────────────────────────────
+    pub const WATCH_MCP_SERVERS: &str = "WatchMcpServers";
+    pub const LIST_MCP_SERVERS: &str = "ListMcpServers";
+    pub const UPSERT_MCP_SERVER: &str = "UpsertMcpServer";
+    pub const SET_MCP_SERVER_ENABLED: &str = "SetMcpServerEnabled";
+    pub const DELETE_MCP_SERVER: &str = "DeleteMcpServer";
+    pub const START_MCP_AUTH: &str = "StartMcpAuth";
+    /// An agent asks for a change to the MCP servers; it waits for the
+    /// person (`ResolveMcpRequest`, this device's app alone).
+    pub const REQUEST_MCP_CHANGE: &str = "RequestMcpChange";
+    pub const GET_MCP_REQUEST: &str = "GetMcpRequest";
+    pub const RESOLVE_MCP_REQUEST: &str = "ResolveMcpRequest";
+    pub const POLL_MCP_AUTH: &str = "PollMcpAuth";
+    pub const CANCEL_MCP_AUTH: &str = "CancelMcpAuth";
+    pub const DISCONNECT_MCP_AUTH: &str = "DisconnectMcpAuth";
+    pub const REFRESH_MCP_SERVERS: &str = "RefreshMcpServers";
 }
 
 /// Methods answered only over this device's own local IPC, never to a peer
@@ -795,6 +871,7 @@ pub fn local_only(method: &str) -> bool {
         method,
         methods::ACCESS_TOKEN
             | methods::STEP_UP
+            | methods::CANCEL_STEP_UP
             // This device's background engine: whether it outlives its app.
             | methods::GET_BACKGROUND_SETTINGS
             | methods::SET_BACKGROUND_SETTINGS
@@ -846,26 +923,43 @@ pub fn local_only(method: &str) -> bool {
             | methods::POST_NOTIFICATION
             | methods::EXPORT_PLUGIN
             // The store: browsing and publishing are this device's app's and
-            // CLI's (your session, this device's key); deploy keys too.
+            // CLI's (your session, this device's key); deploy tokens too.
             // Installing from it (`InstallPlugin {store}`), its updates and
             // a plugin's pre-releases (`SetPluginPrereleases`) are managed
             // across your devices as any plugin is.
             | methods::STORE_SEARCH
             | methods::STORE_PLUGIN
+            | methods::STORE_VERSIONS
+            | methods::STORE_VERSION
             | methods::STORE_CATEGORIES
+            | methods::STORE_STATS
             | methods::STORE_FILE
             | methods::PREPARE_PLUGIN_PUBLISH
             | methods::PUBLISH_PLUGIN
             | methods::STORE_MY_PLUGINS
             | methods::STORE_VERSION_ACTION
-            | methods::LIST_DEPLOY_KEYS
-            | methods::CREATE_DEPLOY_KEY
-            | methods::REVOKE_DEPLOY_KEY
+            | methods::LIST_DEPLOY_TOKENS
+            | methods::CREATE_DEPLOY_TOKEN
+            | methods::REVOKE_DEPLOY_TOKEN
             | methods::STORE_REPORT
+            | methods::ACK_STORE_NOTICES
             // What a Cloud chat reaches: this device's app sets it, never
             // another device (a Cloud machine among them) and never an agent.
             | methods::CLOUD_SET_REACH
             | methods::CLOUD_SESSION_SET_REACH
+            // Managed MCP server mutations and OAuth flows carry secrets or
+            // drive loopback auth callbacks: never cross the peer relay.
+            | methods::UPSERT_MCP_SERVER
+            | methods::SET_MCP_SERVER_ENABLED
+            | methods::DELETE_MCP_SERVER
+            | methods::START_MCP_AUTH
+            | methods::POLL_MCP_AUTH
+            | methods::CANCEL_MCP_AUTH
+            | methods::DISCONNECT_MCP_AUTH
+            // What an agent asks for is this device's to answer, here.
+            | methods::REQUEST_MCP_CHANGE
+            | methods::GET_MCP_REQUEST
+            | methods::RESOLVE_MCP_REQUEST
     )
 }
 
@@ -888,6 +982,32 @@ pub fn peer_refused(method: &str, params: &serde_json::Value) -> bool {
         methods::INSTALL_PLUGIN => params.get("path").is_some_and(|path| !path.is_null()),
         _ => false,
     }
+}
+
+/// On a forwarded call that changes a device's plugins: `true` only when
+/// the device that sent it was asked by its own app (the person). Its
+/// engine sets it on every forward of [`person_only_from_peer`]'s methods,
+/// over whatever the caller sent, so an agent's token can't claim it.
+pub const BY_PERSON: &str = "byPerson";
+
+/// What changes a device's plugins (installs, updates, reinstalls,
+/// removes, turns on or off, reviews, allows or declines, sets pre-releases
+/// or which updates it takes): another device's call is taken only with
+/// [`BY_PERSON`], else it's the person's to do.
+pub fn person_only_from_peer(method: &str) -> bool {
+    matches!(
+        method,
+        methods::INSTALL_PLUGIN
+            | methods::UPDATE_PLUGIN
+            | methods::INSTALL_VERIFIED_PLUGIN
+            | methods::REMOVE_PLUGIN
+            | methods::SET_PLUGIN_OFF
+            | methods::SET_PLUGIN_PRERELEASES
+            | methods::SET_PLUGIN_UPDATES
+            | methods::REVIEW_PLUGIN
+            | methods::DECIDE_PLUGIN
+            | methods::STAGE_PLUGIN_PACKAGE
+    )
 }
 
 /// Methods only this device's own app may send on to another device: what
@@ -944,7 +1064,9 @@ pub fn agent_allowed(method: &str) -> bool {
             | methods::READ_COMMAND_OUTPUT
             | methods::STOP_COMMAND
             | methods::LIST_BACKGROUND_COMMANDS
-            // Plugins: authoring, installing (lands waiting for the person),
+            // Plugins: authoring, installing (lands waiting for the person;
+            // over one installed from the store it's refused, `needs_person`:
+            // an update is the person's, `UpdatePlugin`),
             // checking for updates, exporting (to Zeron's plugin-exports
             // folder only: the engine refuses an agent's `to`), and their
             // tools.
@@ -964,7 +1086,10 @@ pub fn agent_allowed(method: &str) -> bool {
             // is `InstallPlugin {store}` (lands waiting for the person).
             | methods::STORE_SEARCH
             | methods::STORE_PLUGIN
+            | methods::STORE_VERSIONS
+            | methods::STORE_VERSION
             | methods::STORE_CATEGORIES
+            | methods::STORE_STATS
             | methods::PREPARE_PLUGIN_PUBLISH
             // Templates: authoring and switching (the app shows an
             // unapproved one as a preview until the person keeps it), and
@@ -977,6 +1102,12 @@ pub fn agent_allowed(method: &str) -> bool {
             | methods::DELETE_TEMPLATE
             | methods::EXPORT_TEMPLATE
             | methods::IMPORT_TEMPLATE
+            // MCP servers: reading them (no secret is in the list), and
+            // asking for a change, which waits for the person (only this
+            // device's app answers it: `ResolveMcpRequest` isn't here).
+            | methods::LIST_MCP_SERVERS
+            | methods::REQUEST_MCP_CHANGE
+            | methods::GET_MCP_REQUEST
             // Themes: data only (no consent: a theme can't run anything),
             // read, made, changed, deleted (yours only) and worn. Not the
             // window's watch.
@@ -1189,6 +1320,38 @@ mod tests {
     }
 
     #[test]
+    fn managed_mcp_server_mutations_and_auth_are_local_only_and_never_agent_allowed() {
+        for method in [
+            methods::UPSERT_MCP_SERVER,
+            methods::SET_MCP_SERVER_ENABLED,
+            methods::DELETE_MCP_SERVER,
+            methods::START_MCP_AUTH,
+            methods::POLL_MCP_AUTH,
+            methods::CANCEL_MCP_AUTH,
+            methods::DISCONNECT_MCP_AUTH,
+        ] {
+            assert!(local_only(method), "{method}");
+            assert!(peer_refused(method, &serde_json::Value::Null), "{method}");
+            assert!(!agent_allowed(method), "{method}");
+        }
+        for method in [methods::WATCH_MCP_SERVERS, methods::REFRESH_MCP_SERVERS] {
+            assert!(!local_only(method), "{method}");
+            assert!(!agent_allowed(method), "{method}");
+        }
+        // An agent reads the (secret-free) list, and asks; the person answers,
+        // in this device's app alone.
+        assert!(!local_only(methods::LIST_MCP_SERVERS));
+        assert!(agent_allowed(methods::LIST_MCP_SERVERS));
+        for method in [methods::REQUEST_MCP_CHANGE, methods::GET_MCP_REQUEST] {
+            assert!(local_only(method), "{method}");
+            assert!(agent_allowed(method), "{method}");
+        }
+        assert!(local_only(methods::RESOLVE_MCP_REQUEST));
+        assert!(peer_refused(methods::RESOLVE_MCP_REQUEST, &serde_json::Value::Null));
+        assert!(!agent_allowed(methods::RESOLVE_MCP_REQUEST));
+    }
+
+    #[test]
     fn plugin_methods_are_local_only_but_managing_delivering_and_serving() {
         for method in [
             methods::NEW_PLUGIN,
@@ -1226,20 +1389,32 @@ mod tests {
         }
         // The store: your other devices install from it, update and take
         // pre-releases here (Settings → Plugins' device switcher); reading
-        // the catalog, publishing, versions, reports and deploy keys are
+        // the catalog, publishing, versions, reports and deploy tokens are
         // this device's own, and never an agent's but to read and check.
-        for method in [methods::INSTALL_PLUGIN, methods::CHECK_PLUGIN_UPDATES, methods::UPDATE_PLUGIN, methods::SET_PLUGIN_OFF, methods::SET_PLUGIN_PRERELEASES] {
+        for method in [methods::INSTALL_PLUGIN, methods::CHECK_PLUGIN_UPDATES, methods::UPDATE_PLUGIN, methods::INSTALL_VERIFIED_PLUGIN, methods::SET_PLUGIN_OFF, methods::SET_PLUGIN_PRERELEASES, methods::SET_PLUGIN_UPDATES] {
             assert!(!local_only(method), "{method}");
         }
         assert!(!peer_refused(methods::INSTALL_PLUGIN, &serde_json::json!({ "store": "focus" })));
+        // Each change to a device's plugins another device sends is taken
+        // there only as the person's (`BY_PERSON`); reading them isn't.
         for method in [
-            methods::STORE_SEARCH, methods::STORE_PLUGIN, methods::STORE_CATEGORIES, methods::STORE_FILE, methods::PREPARE_PLUGIN_PUBLISH,
+            methods::INSTALL_PLUGIN, methods::UPDATE_PLUGIN, methods::INSTALL_VERIFIED_PLUGIN, methods::REMOVE_PLUGIN, methods::SET_PLUGIN_OFF,
+            methods::SET_PLUGIN_PRERELEASES, methods::SET_PLUGIN_UPDATES, methods::REVIEW_PLUGIN, methods::DECIDE_PLUGIN, methods::STAGE_PLUGIN_PACKAGE,
+        ] {
+            assert!(person_only_from_peer(method), "{method}");
+        }
+        for method in [methods::LIST_PLUGINS, methods::WATCH_PLUGINS, methods::CHECK_PLUGIN_UPDATES, methods::PLUGIN_STATUS] {
+            assert!(!person_only_from_peer(method), "{method}");
+        }
+        for method in [
+            methods::STORE_SEARCH, methods::STORE_PLUGIN, methods::STORE_VERSIONS, methods::STORE_VERSION, methods::STORE_CATEGORIES,
+            methods::STORE_STATS, methods::STORE_FILE, methods::PREPARE_PLUGIN_PUBLISH,
             methods::PUBLISH_PLUGIN, methods::STORE_MY_PLUGINS, methods::STORE_VERSION_ACTION, methods::STORE_REPORT,
-            methods::LIST_DEPLOY_KEYS, methods::CREATE_DEPLOY_KEY, methods::REVOKE_DEPLOY_KEY,
+            methods::LIST_DEPLOY_TOKENS, methods::CREATE_DEPLOY_TOKEN, methods::REVOKE_DEPLOY_TOKEN, methods::ACK_STORE_NOTICES,
         ] {
             assert!(local_only(method), "{method}");
         }
-        for method in [methods::PUBLISH_PLUGIN, methods::STORE_VERSION_ACTION, methods::STORE_REPORT, methods::CREATE_DEPLOY_KEY, methods::REVOKE_DEPLOY_KEY, methods::LIST_DEPLOY_KEYS, methods::SET_PLUGIN_PRERELEASES] {
+        for method in [methods::PUBLISH_PLUGIN, methods::STORE_VERSION_ACTION, methods::STORE_REPORT, methods::CREATE_DEPLOY_TOKEN, methods::REVOKE_DEPLOY_TOKEN, methods::LIST_DEPLOY_TOKENS, methods::SET_PLUGIN_PRERELEASES, methods::SET_PLUGIN_UPDATES, methods::ACK_STORE_NOTICES, methods::INSTALL_VERIFIED_PLUGIN, methods::UPDATE_PLUGIN] {
             assert!(!agent_allowed(method), "{method}");
         }
         assert!(!local_only(methods::PLUGIN_DELIVER));
@@ -1601,6 +1776,7 @@ mod tests {
             methods::APPLY_UPDATE,
             methods::ACCESS_TOKEN,
             methods::STEP_UP,
+            methods::CANCEL_STEP_UP,
             methods::DELETE_ACCOUNT,
             methods::SIGN_IN,
             methods::COMPLETE_SIGN_IN,

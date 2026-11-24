@@ -1,0 +1,304 @@
+/* Your pages: Your plugins and Deploy tokens (the prototype's yours.css and keys.css), with their states. */
+.crumbs { display: flex; align-items: center; gap: var(--s8); padding-top: var(--s32); font-size: 13px; line-height: 20px; color: var(--text-3); }
+.crumbs svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.crumbs a:hover { color: var(--text); }
+
+.wrap.acct { padding-top: var(--s64); }
+.acct .crumbs { padding-top: 0; margin-top: calc(-1 * var(--s32)); margin-bottom: var(--s24); }
+/* (Each crumb on one line; the last, a plugin's name, cut: the head below says it whole.) */
+.acct .crumbs a, .rpt .crumbs a { flex: none; }
+:is(.acct, .rpt) .crumbs > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* (A crumb between the first and the last, a plugin's name, is cut too when the line is short.) */
+:is(.acct, .rpt) .crumbs a:not(:first-child) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The head: the title and the page's one action on one row (the button level with the title), the lead under. */
+.acct .hd-row { display: flex; align-items: center; justify-content: space-between; gap: var(--s24); }
+.acct .hd-row h1 { min-width: 0; }
+.acct .hd-row > .btn { flex: none; }
+.acct h1 { font-size: 40px; line-height: 44px; letter-spacing: -0.035em; }
+.acct .lead { margin-top: var(--s8); max-width: 37em; }
+.sub { display: flex; gap: var(--s32); margin-top: var(--s32); box-shadow: inset 0 -1px 0 var(--line); }
+.sub a { position: relative; padding: 0 0 var(--s12); font-size: 15px; line-height: 22px; font-weight: 500; color: var(--text-3); display: flex; gap: var(--s8); align-items: baseline; border-radius: 4px 4px 0 0; transition: color 0.12s var(--ease); }
+.sub a:hover { color: var(--text); }
+.sub a span { font-size: 13px; font-weight: 450; }
+.sub a[aria-current] { color: var(--text); }
+.sub a[aria-current]::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; border-radius: 1px; background: var(--text); }
+.sub a:focus-visible { outline-offset: -2px; }
+
+/* ---- Your plugins and Deploy tokens: a table of rows, one line each ---- */
+/* (No box round it: the header in the label's style, then the rows, a faint rule between. A row hangs by its
+   padding as a card does, its words on the column; hovered, the whole of it fills.) */
+.tbl { margin-top: var(--s24); margin-inline: calc(-1 * var(--s16)); }
+.tbl ul { padding: 0; list-style: none; }
+.trow { position: relative; display: grid; column-gap: var(--s24); align-items: center; min-height: 56px; padding: var(--s12) var(--s16); border-radius: 12px; font-size: 14px; line-height: 20px; transition: background-color 0.12s var(--ease); }
+/* (The rule between two rows is a line of its own, straight across the row's width; the hover's fill has the
+   corners. A hovered row's rule, and the next one's, give way to its fill.) */
+.tbl li + li > .trow::after, li.trow + li.trow::after, .th + ul > li:first-child > .trow::after, .th + ul > li.trow:first-child::after { content: ""; position: absolute; inset: 0 0 auto; height: 1px; background: var(--line); pointer-events: none; }
+.trow:is(a, li):hover { background: var(--surface); }
+.trow:is(a, li):hover::after, li:hover + li > .trow::after, li.trow:hover + li.trow::after { opacity: 0; }
+a.trow:focus-visible { outline-offset: -2px; }
+.trow.th { min-height: 0; padding-top: 0; padding-bottom: var(--s8); font-size: 13px; line-height: 20px; font-weight: 500; color: var(--text-3); }
+.trow > *, .trow .c-name { min-width: 0; }
+.trow .r { text-align: right; }
+/* (A name on one line, cut with an ellipsis; whole in its title.) */
+.c-name { display: flex; align-items: center; gap: var(--s12); }
+.c-name .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 550; letter-spacing: -0.005em; color: var(--text); }
+.c-name .id { flex: none; font: 450 12.5px/20px var(--mono); color: var(--text-3); }
+/* A second line, only for what's unusual: under the row, from the second column. */
+/* (No wider than a line reads.) */
+.c-note { grid-column: 2 / -1; max-width: 720px; margin-top: var(--s4); font-size: 13px; line-height: 20px; color: var(--text-2); overflow-wrap: anywhere; }
+
+/* Your plugins: the plugin, its newest version and its pill, when it was published, installs, a chevron. */
+.mine .trow { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1.25fr) minmax(0, 0.9fr) 88px 16px; }
+.c-ver { display: flex; align-items: center; min-width: 0; white-space: nowrap; }
+.c-ver b { font: 550 13.5px/20px var(--mono); letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; }
+.c-pub { display: flex; align-items: center; gap: var(--s8); color: var(--text-2); white-space: nowrap; }
+.c-pub .via { display: inline-flex; align-items: center; gap: var(--s4); font-size: 13px; color: var(--text-3); }
+.c-pub .via svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.c-n { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-2); }
+.mine .trow > svg { width: 16px; height: 16px; fill: none; stroke: var(--text-3); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform 0.12s var(--ease), stroke 0.12s var(--ease); }
+.mine a.trow:hover > svg { transform: translateX(2px); stroke: var(--text); }
+.trow.off .tile { filter: grayscale(1); opacity: 0.7; }
+.trow.off .nm, .trow.off .c-n { color: var(--text-2); }
+
+
+/* ---- One of your plugins: its versions, each where it stands, what that means, and what you can do ---- */
+/* Its head, as a plugin's page heads it: the tile (80), the name, its id and where it stands on the line under it,
+   and its one action at the right, level with the tile's middle. (The staff's plugin page heads it the same.) */
+.ohead { --tile: 80px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; column-gap: var(--s24); align-items: start; }
+.ohead .txt { min-width: 0; display: flex; flex-direction: column; justify-content: center; min-height: var(--tile); }
+.ohead h1 { font-size: 32px; line-height: 40px; letter-spacing: -0.03em; overflow-wrap: anywhere; }
+.ohead .by { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s4) var(--s8); margin-top: var(--s4); font-size: 14px; line-height: 20px; color: var(--text-3); }
+.ohead .by .mono { font: 450 13px/20px var(--mono); overflow-wrap: anywhere; }
+.ohead .by i { width: 3px; height: 3px; border-radius: 50%; background: currentColor; opacity: 0.6; }
+.ohead .by a { color: var(--text-2); font-weight: 500; border-radius: 4px; }
+.ohead .by a:hover { color: var(--text); }
+.head-act { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: var(--s8); min-height: var(--tile); }
+/* Its versions: your own pages' table (.tbl): the version and its pills, when it was published, its action. */
+/* (Its action column one width on every row, an empty one too: the columns line up down the table.) */
+.vers .trow { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) 168px; }
+.vers .c-ver { gap: var(--s8); flex-wrap: wrap; row-gap: var(--s4); white-space: normal; }
+.vers .c-act { justify-self: end; }
+.vers .c-act .btn { margin-right: calc(-1 * var(--pad)); }
+.vers .c-note { grid-column: 1 / -1; }
+.vers .trow.off .c-ver b { color: var(--text-2); }
+.acct > .flash { margin-top: var(--s24); }
+.mvers { margin-top: var(--s48); }
+.mvers > h2 { display: flex; align-items: baseline; gap: var(--s8); font-size: 19px; line-height: 26px; }
+.mvers > h2 .num { font-size: 14px; font-weight: 450; color: var(--text-3); }
+.mkeys { margin-top: var(--s24); font-size: 14px; line-height: 20px; color: var(--text-3); }
+.mkeys a { color: var(--text-2); font-weight: 500; border-radius: 4px; }
+.mkeys a:hover { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
+
+/* ---- Deploy tokens: the token, what it can publish, last used, when it ends, Revoke ---- */
+.keys .trow { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 0.8fr) 72px; }
+.keys .c-name { gap: var(--s8); }
+/* (Each cell in its place: a token's list of plugins, when opened, is a row of its own under it.) */
+.keys .trow > .c-name { grid-column: 1; grid-row: 1; }
+.keys .trow .c-scope { grid-column: 2; grid-row: 1; }
+.keys .c-when { display: contents; }
+.keys .trow .c-used { grid-column: 3; grid-row: 1; }
+.keys .trow .c-ends { grid-column: 4; grid-row: 1; }
+/* (Words a phone's line says, the header's on a wide screen.) */
+.keys .ph { display: none; }
+.keys .wd { display: inline; }
+.keys .trow > :last-child:not(.c-when) { grid-column: 5; grid-row: 1; }
+.keys .trow .every::details-content { grid-column: 1 / -1; grid-row: 2; }
+/* (What it can publish, in its own column: the words, up to three small tiles and +n; with many, Show all, which
+   opens the whole list as a row of its own under the token.) */
+.c-scope { display: flex; align-items: center; gap: var(--s8); min-width: 0; white-space: nowrap; }
+.c-scope .sw { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.c-scope .tiles { display: flex; flex: none; align-items: center; gap: var(--s4); }
+.c-scope .tile.xs { width: 20px; height: 20px; font-size: 9px; }
+.c-scope .more { font-size: 12px; color: var(--text-3); }
+.c-scope .show { font-size: 13px; color: var(--text-2); font-weight: 500; }
+.every { display: contents; }
+.every > summary { list-style: none; cursor: pointer; border-radius: 4px; }
+.every > summary::-webkit-details-marker { display: none; }
+.every > summary:hover .show { color: var(--text); }
+.every > summary > svg { width: 12px; height: 12px; flex: none; fill: none; stroke: var(--text-3); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; transform: rotate(90deg); transition: transform 0.12s var(--ease); }
+.every[open] > summary > svg { transform: rotate(-90deg); }
+.plist { display: flex; flex-wrap: wrap; gap: var(--s8); margin-top: var(--s12); padding: 0; list-style: none; }
+.pl { display: inline-flex; align-items: center; gap: var(--s8); min-height: 28px; max-width: 100%; padding: var(--s4) var(--s12) var(--s4) var(--s4); border-radius: 8px; background: var(--sunken); font-size: 13px; line-height: 18px; font-weight: 500; overflow-wrap: anywhere; }
+.c-used { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+.c-ends { color: var(--text-2); white-space: nowrap; }
+.c-ends > .state { margin-left: calc(-1 * var(--pad)); }
+/* (Revoke: a quiet button in the danger's ink, at the row's right, hanging by its padding.) */
+.keys .btn.revoke { justify-self: end; margin-right: calc(-1 * var(--pad)); color: var(--danger); }
+.keys .btn.revoke:hover { color: var(--danger); background: var(--danger-wash); }
+.trow.was, .trow.was .nm { color: var(--text-2); }
+.gone { margin-top: var(--s24); }
+.gone summary { display: inline-flex; align-items: center; gap: var(--s8); font-size: 14px; line-height: 20px; color: var(--text-2); font-weight: 500; list-style: none; cursor: pointer; border-radius: 4px; }
+.gone summary::-webkit-details-marker { display: none; }
+.gone summary:hover { color: var(--text); }
+.gone summary svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transform: rotate(90deg); transition: transform 0.12s var(--ease); }
+.gone[open] summary svg { transform: rotate(-90deg); }
+.gone .keys { margin-top: var(--s12); }
+
+/* New deploy token: its form, in Deploy tokens' dialog or as a page of its own (components/look/TokenForm.astro).
+   Each field a box that holds text, so it hangs by its padding, its words on the form's column. */
+.tokform { display: grid; gap: var(--s24); margin-top: var(--title); }
+.tokform .tf { min-width: 0; margin: 0; padding: 0; border: 0; }
+.tokform .field-label { display: block; margin-bottom: var(--s8); padding: 0; font-size: 13px; line-height: 20px; font-weight: 500; color: var(--text-2); }
+.tokform .field { position: relative; }
+.tokform :is(.input, select) { --pad: var(--s16); display: block; width: calc(100% + 2 * var(--pad)); margin-inline: calc(-1 * var(--pad)); height: 40px; padding: 0 var(--pad); border: 0; border-radius: 10px; background: var(--bg); color: var(--text); font-size: 14px; line-height: 20px; box-shadow: inset 0 0 0 1px var(--line-2); }
+.tokform select { appearance: none; padding-right: var(--s32); }
+.tokform .input::placeholder { color: var(--text-3); }
+.tokform :is(.input, select):focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.tokform .input[aria-invalid] { box-shadow: inset 0 0 0 1px var(--danger); }
+.tokform .field .chevron { position: absolute; right: 0; top: 50%; translate: 0 -50%; color: var(--text-3); pointer-events: none; }
+/* (Its scope: the report page's cards to choose, .rcard; the chosen plugins' list under them.) */
+.tokform .scopes .rcard + .rcard { margin-top: var(--s8); }
+/* (Chosen plugins: each to tick, the list in its own well; with all of yours, nothing to choose.) */
+.tokform .picks { --pad: var(--s16); display: grid; gap: var(--s4); max-height: 248px; overflow: auto; margin: var(--s8) calc(-1 * var(--pad)) 0; padding: var(--s8) var(--pad); border-radius: 12px; background: var(--sunken); list-style: none; }
+.tokform .scopes:has(input[value="all"]:checked) .picks { display: none; }
+.tokform .pick-pl { display: flex; align-items: center; gap: var(--s12); min-height: 36px; font-size: 14px; line-height: 20px; overflow-wrap: anywhere; cursor: pointer; }
+.tokform .pick-pl input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--text); }
+.tokform .pick-pl > span:last-child { min-width: 0; padding-block: var(--s8); }
+.tokform .said { margin-top: var(--s8); font-size: 13px; line-height: 18px; color: var(--danger); }
+.tokform > .said { margin-top: 0; }
+.tokform .note { font-size: 13.5px; line-height: 20px; color: var(--text-2); }
+.tokform .answers { display: flex; justify-content: flex-end; gap: var(--s12); margin-top: var(--s4); }
+
+/* The token, shown once: its words, the token to copy, what it is, and done. */
+/* (The token in the guide's block of code, wrapped whole, every character of it on screen; the warning under it.) */
+.reveal .secret { margin-top: var(--s24); }
+.reveal .secret pre { white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; }
+.reveal .warnline { margin-top: var(--s12); background: var(--warn-wash); color: var(--warn); }
+.reveal .made { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--s8) var(--s24); margin-top: var(--s24); font-size: 14px; line-height: 20px; }
+.reveal .made > div { display: contents; }
+.reveal .made dt { color: var(--text-3); }
+.reveal .made dd { margin: 0; overflow-wrap: anywhere; }
+.reveal .made .id { margin-left: var(--s8); font: 450 12.5px/20px var(--mono); color: var(--text-3); }
+
+/* How it works, in three. */
+.how { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--s32); margin-top: var(--s64); padding-top: var(--s32); box-shadow: 0 -1px 0 var(--line); }
+.how h3 { display: flex; align-items: center; gap: var(--s12); }
+.how h3 b { display: grid; place-items: center; flex: none; width: 22px; height: 22px; border-radius: 50%; font: 600 12px/1 var(--mono); color: var(--text-2); box-shadow: inset 0 0 0 1px var(--line-2); }
+.how p { margin-top: var(--s8); color: var(--text-2); font-size: 14px; line-height: 21px; }
+.how code { font: 500 12.5px/1 var(--mono); padding: var(--s4) var(--s4); border-radius: 5px; background: var(--sunken); color: var(--text); }
+
+/* A question before something that can't be taken back. */
+/* (In the page's quiet column, .wrap.rpt, as the report page's form: no box round it.) */
+.askcard { margin-top: var(--s24); overflow: visible; }
+.askcard h1 { font-size: 24px; line-height: 30px; letter-spacing: -0.02em; overflow-wrap: anywhere; }
+.askcard p { margin-top: var(--s8); color: var(--text-2); }
+.askcard .answers { display: flex; justify-content: flex-end; gap: var(--s12); margin-top: var(--s24); }
+/* Report a plugin: one centred column, no box round it; whom it's about, why (each reason a card to choose),
+   what you saw, send. */
+.wrap.rpt { max-width: calc(560px + 2 * var(--gutter)); padding-top: var(--s48); padding-bottom: var(--sections); }
+.rpt .crumbs { padding-top: 0; }
+.wrap.rpt:has(> .empty:last-child) { padding-bottom: 0; }
+.rpt-form, .rpt-done { margin-top: var(--s24); }
+.rpt-who { display: flex; align-items: center; gap: var(--s12); }
+.rpt-who > div { min-width: 0; }
+.rpt-who h1, .rpt-done h1 { font-size: 24px; line-height: 32px; letter-spacing: -0.02em; overflow-wrap: anywhere; }
+.rpt-who p { font-size: 14px; line-height: 20px; color: var(--text-3); }
+.rpt-why { min-width: 0; margin: var(--s32) 0 0; padding: 0; border: 0; }
+.rpt-why legend { padding: 0; }
+.rcard + .rcard { margin-top: var(--s8); }
+/* (A reason: a full-width row with a faint line round it; its words, its radio at the right. Chosen, a ring in the
+   text's colour and the surface's fill. It hangs by its padding, its words on the column.) */
+.rcard { display: flex; align-items: center; gap: var(--s16); margin-inline: calc(-1 * var(--s16)); padding: var(--s16); border-radius: 12px; box-shadow: inset 0 0 0 1px var(--line); cursor: pointer; transition: box-shadow 0.12s var(--ease), background-color 0.12s var(--ease); }
+.rcard:hover { box-shadow: inset 0 0 0 1px var(--line-2); }
+.rcard:has(input:checked) { background: var(--surface); box-shadow: inset 0 0 0 1.5px var(--text); }
+.rcard:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
+.rcard:has(input:disabled) { cursor: default; opacity: 0.55; }
+.rcard:has(input:disabled):hover { box-shadow: inset 0 0 0 1px var(--line); }
+.rc-words { flex: 1; min-width: 0; }
+.rc-words b { display: block; font-size: 15px; line-height: 22px; font-weight: 550; }
+.rc-words small { display: block; font-size: 13px; line-height: 20px; color: var(--text-3); }
+.rcard input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--text); }
+.rcard input:focus-visible { outline: none; }
+.rpt-more { margin-top: var(--s32); }
+.rpt-form .field textarea { padding-block: var(--s12); }
+.rpt-form .answers { display: flex; justify-content: flex-end; gap: var(--s12); margin-top: var(--s32); }
+/* (Sent: a check, the thanks, and the way back.) */
+.rpt-ok { display: grid; place-items: center; width: 40px; height: 40px; margin-bottom: var(--s16); border-radius: 50%; color: var(--verified); background: var(--verified-wash); }
+.rpt-ok svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.rpt-done p { margin-top: var(--s8); color: var(--text-2); }
+.back-link { display: inline-flex; align-items: center; gap: var(--s8); margin-top: var(--s24); font-size: 14px; line-height: 20px; font-weight: 500; color: var(--text-2); border-radius: 4px; }
+.back-link:hover { color: var(--text); }
+.back-link svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+
+@media (max-width: 1024px) {
+  .mine .trow { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.3fr) minmax(0, 0.9fr) 72px 16px; column-gap: var(--s16); }
+  .keys .trow { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 0.9fr) 72px; column-gap: var(--s16); }
+}
+@media (max-width: 860px) {
+  .how { grid-template-columns: minmax(0, 1fr); gap: var(--s24); }
+}
+@media (max-width: 720px) {
+  .wrap.acct { padding-top: var(--s32); }
+  .acct .crumbs { margin-top: calc(-1 * var(--s12)); }
+  .acct h1 { font-size: 32px; line-height: 36px; }
+  .sub { margin-top: var(--s32); gap: var(--s24); }
+  /* (As wide as the column, as wide as the screen: the cards hang the whole gutter.) */
+  /* (A plugin's head on a phone: its tile at the title's first line, its action under its words.) */
+  .ohead { --tile: 56px; grid-template-columns: 56px minmax(0, 1fr); column-gap: var(--s16); }
+  .ohead > .tile.xl { width: 56px; height: 56px; font-size: 24px; }
+  .ohead .txt { justify-content: flex-start; min-height: 0; }
+  .ohead h1 { font-size: 26px; line-height: 32px; margin-top: var(--s12); }
+  .head-act { grid-column: 1 / -1; justify-content: flex-start; min-height: 0; margin-top: var(--s16); margin-left: calc(-1 * var(--pad)); }
+  .vers .trow { display: grid; grid-template-columns: minmax(0, 1fr) auto; row-gap: var(--s4); }
+  .vers .trow::before { display: none; }
+  .vers .trow.th { display: none; }
+  .vers .c-ver { grid-column: 1; grid-row: 1; }
+  .vers .c-act { grid-column: 2; grid-row: 1; }
+  .vers .c-pub { grid-column: 1 / -1; grid-row: 2; font-size: 13px; color: var(--text-3); }
+  .vers .c-note { grid-row: 3; }
+  /* (The head: the title, its lead, then the button, its own width, hanging by its padding.) */
+  .acct .hd { display: flex; flex-direction: column; align-items: flex-start; }
+  .acct .hd-row { display: contents; }
+  .acct .hd > .lead { order: 1; }
+  .acct .hd-row > .btn { order: 2; margin-top: var(--s16); margin-left: calc(-1 * var(--pad)); }
+  /* A row in two lines: its name and where it stands; then the rest, small, one after another. No columns. */
+  .trow.th { display: none; }
+  .trow { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s4) var(--s8); padding-block: var(--s12); }
+  .trow::before { content: ""; order: 2; flex-basis: 100%; height: 0; }
+  .trow .c-name { order: 0; flex: 1 1 0; }
+  .trow > :is(.c-pub, .c-n, .c-used, .c-ends), .trow > span.c-scope, .mine .c-ver b { font-size: 13px; color: var(--text-3); }
+  .trow > :is(.c-pub, .c-n, .c-ends) { flex: none; }
+  .trow > .c-note { order: 9; flex-basis: 100%; margin-top: 0; }
+  .mine .c-ver { display: contents; }
+  .mine .c-ver .state { order: 1; margin-left: 0; }
+  .mine .c-ver b { order: 3; font-size: 13px; color: var(--text-3); }
+  .mine .c-pub { order: 4; }
+  .mine .c-n { order: 5; }
+  .mine .trow > svg { display: none; }
+  /* (A token in three lines: its name, id and Revoke; what it can publish; "Last used … · Ends …", only a long
+     plugin's name cut. Its list of plugins, opened, under them.) */
+  .keys .trow { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--s12); row-gap: var(--s4); }
+  .keys .trow::before { display: none; }
+  .keys .trow.th { display: none; }
+  .keys .trow > .c-name { grid-column: 1; grid-row: 1; }
+  /* (The button and the pill reach past their line's height into the row's padding: the lines sit an item's step
+     apart.) */
+  .keys .trow > .btn.revoke { grid-column: 2; grid-row: 1; margin-block: calc(-1 * var(--s8)); }
+  .keys .trow .c-scope { grid-column: 1 / -1; grid-row: 2; min-width: 0; justify-self: start; max-width: 100%; }
+  .keys .c-when { display: flex; align-items: center; gap: var(--s8); grid-column: 1 / -1; grid-row: 3; min-width: 0; font-size: 13px; color: var(--text-3); }
+  .keys .trow .c-used { flex: 0 1 auto; min-width: 0; font-size: 13px; color: var(--text-3); }
+  .keys .trow .c-ends { flex: none; font-size: 13px; color: var(--text-3); }
+  .keys .trow .c-ends::before { content: "·"; margin-right: var(--s8); }
+  .keys .trow .c-ends > .state { margin-left: 0; margin-block: calc(-1 * var(--s4)); }
+  .keys .ph { display: inline; }
+  .keys .wd { display: none; }
+  .keys .trow .every::details-content { grid-column: 1 / -1; grid-row: 4; }
+  .keys .trow.was > :last-child:not(.c-when) { display: none; }
+  /* (Many plugins: the count and Show all, a dot between; the tiles, which repeat the list, give way.) */
+  .keys .every .tiles { display: none; }
+  .keys .every .c-scope .sw { flex: none; }
+  .keys .every .show::before { content: "·"; margin-right: var(--s8); color: var(--text-3); font-weight: 400; }
+  .keys .c-scope { font-size: 13px; color: var(--text-2); }
+  .every .plist { margin-top: var(--s8); }
+  /* (A plugin's: its version, when, how many; a dot between.) */
+  :is(.mine .c-pub, .mine .c-n)::before { content: "·"; color: var(--text-3); }
+  .mine .c-n::before { margin-right: var(--s8); }
+  .c-n .unit { position: static; width: auto; height: auto; margin: 0; overflow: visible; clip: auto; white-space: normal; }
+
+  .askcard .answers { flex-direction: column-reverse; }
+  .askcard .answers .btn { width: 100%; }
+  .wrap.rpt { padding-top: var(--s32); }
+  .reveal .codeblock { --pad: var(--gutter); margin-inline: calc(-1 * var(--gutter)); border-radius: 0; box-shadow: inset 0 1px 0 var(--line), inset 0 -1px 0 var(--line); }
+  .rcard { margin-inline: calc(-1 * var(--gutter)); padding-inline: var(--gutter); border-radius: 0; }
+}

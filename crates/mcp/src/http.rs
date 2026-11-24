@@ -95,6 +95,33 @@ type Body = UnsyncBoxBody<Bytes, Infallible>;
 /// `origin`, over a connection to the engine scoped to `origin`'s chat.
 pub type ToolsFactory = Arc<dyn Fn(&Origin) -> Arc<Tools> + Send + Sync>;
 
+/// An authenticated loopback request targeting an external managed MCP server
+/// (`/mcp/server/{server_id}`).
+pub struct ExternalProxyRequest {
+    pub server_id: String,
+    pub method: hyper::Method,
+    pub headers: hyper::HeaderMap,
+    pub body: bytes::Bytes,
+}
+
+/// Response returned by an [`ExternalMcpProxy`] (JSON or streamed SSE).
+pub struct ExternalProxyResponse {
+    pub status: hyper::StatusCode,
+    pub headers: hyper::HeaderMap,
+    pub body: UnsyncBoxBody<bytes::Bytes, std::convert::Infallible>,
+}
+
+/// Forwards authenticated `/mcp/server/{server_id}` requests to upstream MCP
+/// servers with managed credentials injected by the engine.
+pub trait ExternalMcpProxy: Send + Sync {
+    fn forward(
+        &self,
+        req: ExternalProxyRequest,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<ExternalProxyResponse, String>> + Send>,
+    >;
+}
+
 /// One run's access: who it speaks for, its tools (made at its first
 /// call), its calls in flight (so a 2025 client's
 /// `notifications/cancelled` can stop one) and its `subscriptions/listen`
@@ -112,6 +139,7 @@ struct GrantState {
 struct Inner {
     port: u16,
     factory: ToolsFactory,
+    external: Option<Arc<dyn ExternalMcpProxy>>,
     grants: Mutex<Vec<Arc<GrantState>>>,
 }
 
@@ -166,16 +194,35 @@ impl Drop for McpHttpServer {
 impl McpHttpServer {
     /// Bind `127.0.0.1` on a free port and serve until dropped.
     pub async fn bind(factory: ToolsFactory) -> std::io::Result<Self> {
-        Self::bind_with(factory, MAX_CONNECTIONS).await
+        Self::bind_with_external(factory, None).await
+    }
+
+    /// Bind `127.0.0.1` on a free port, optionally forwarding
+    /// `/mcp/server/{id}` requests through `external`.
+    pub async fn bind_with_external(
+        factory: ToolsFactory,
+        external: Option<Arc<dyn ExternalMcpProxy>>,
+    ) -> std::io::Result<Self> {
+        Self::bind_inner(factory, external, MAX_CONNECTIONS).await
     }
 
     /// [`Self::bind`], serving at most `max_connections` at once.
+    #[cfg(test)]
     async fn bind_with(factory: ToolsFactory, max_connections: usize) -> std::io::Result<Self> {
+        Self::bind_inner(factory, None, max_connections).await
+    }
+
+    async fn bind_inner(
+        factory: ToolsFactory,
+        external: Option<Arc<dyn ExternalMcpProxy>>,
+        max_connections: usize,
+    ) -> std::io::Result<Self> {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
         let port = listener.local_addr()?.port();
         let inner = Arc::new(Inner {
             port,
             factory,
+            external,
             grants: Mutex::new(Vec::new()),
         });
         let weak = Arc::downgrade(&inner);
@@ -212,6 +259,11 @@ impl McpHttpServer {
     /// `http://127.0.0.1:{port}/mcp`.
     pub fn url(&self) -> String {
         format!("http://127.0.0.1:{}/mcp", self.inner.port)
+    }
+
+    /// `http://127.0.0.1:{port}/mcp/server/{server_id}`.
+    pub fn server_url(&self, server_id: &str) -> String {
+        format!("http://127.0.0.1:{}/mcp/server/{}", self.inner.port, server_id)
     }
 
     /// A fresh token for one run speaking as `origin`.
@@ -468,6 +520,109 @@ fn tools_for(inner: &Inner, grant: &GrantState) -> Arc<Tools> {
         .clone()
 }
 
+fn external_server_id(path: &str) -> Option<&str> {
+    let id = path.strip_prefix("/mcp/server/")?;
+    if id.is_empty()
+        || id == "."
+        || id == ".."
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    {
+        return None;
+    }
+    Some(id)
+}
+
+fn is_hop_by_hop_response_header(name: &hyper::header::HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+            | "content-length"
+    )
+}
+
+async fn handle_external(
+    inner: &Inner,
+    server_id: String,
+    mut headers: HeaderMap,
+    request: Request<hyper::body::Incoming>,
+) -> Response<Body> {
+    let method = request.method().clone();
+    if !matches!(method, Method::POST | Method::GET | Method::DELETE) {
+        let mut response = empty(StatusCode::METHOD_NOT_ALLOWED);
+        response
+            .headers_mut()
+            .insert("allow", HeaderValue::from_static("GET, POST, DELETE"));
+        return response;
+    }
+    let Some(proxy) = inner.external.as_ref() else {
+        return empty(StatusCode::NOT_FOUND);
+    };
+    let body = if method == Method::POST {
+        match http_body_util::Limited::new(request.into_body(), MAX_BODY)
+            .collect()
+            .await
+        {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => return refusal(StatusCode::PAYLOAD_TOO_LARGE, "request too large"),
+        }
+    } else {
+        Bytes::new()
+    };
+    // Never forward the loopback run grant token to an upstream MCP server.
+    headers.remove(hyper::header::AUTHORIZATION);
+    let server_id_for_log = server_id.clone();
+    match proxy
+        .forward(ExternalProxyRequest {
+            server_id,
+            method,
+            headers,
+            body,
+        })
+        .await
+    {
+        Ok(ext) => {
+            let mut response = Response::new(ext.body);
+            *response.status_mut() = ext.status;
+            let mut last_name: Option<hyper::header::HeaderName> = None;
+            for (name, value) in ext.headers {
+                let name = match name {
+                    Some(n) => {
+                        last_name = Some(n.clone());
+                        n
+                    }
+                    None => match last_name.clone() {
+                        Some(n) => n,
+                        None => continue,
+                    },
+                };
+                if is_hop_by_hop_response_header(&name) {
+                    continue;
+                }
+                response.headers_mut().append(name, value);
+            }
+            response
+        }
+        Err(err) => {
+            // (The agent's MCP client drops a server that fails quietly: said
+            // here, or nothing anywhere says why its tools are missing.)
+            tracing::warn!(server = %server_id_for_log, error = %err, "mcp gateway: forward failed");
+            json_response(
+                StatusCode::BAD_GATEWAY,
+                &error_response(Value::Null, -32603, &err),
+            )
+        }
+    }
+}
+
 async fn handle(inner: Arc<Inner>, request: Request<hyper::body::Incoming>) -> Response<Body> {
     let headers = request.headers().clone();
     // Any browser page carries `Origin`; nothing that should reach this does.
@@ -476,6 +631,17 @@ async fn handle(inner: Arc<Inner>, request: Request<hyper::body::Incoming>) -> R
     }
     if !host_allowed(&headers, inner.port) {
         return refusal(StatusCode::FORBIDDEN, "host not allowed");
+    }
+    if let Some(server_id) = external_server_id(request.uri().path()).map(str::to_owned) {
+        if find_grant(&inner, &headers).is_none() {
+            tracing::warn!(server = %server_id, "mcp gateway: refused a request without a run's token");
+            let mut response = refusal(StatusCode::UNAUTHORIZED, "missing or wrong token");
+            response
+                .headers_mut()
+                .insert("www-authenticate", HeaderValue::from_static("Bearer"));
+            return response;
+        }
+        return handle_external(&inner, server_id, headers, request).await;
     }
     if request.uri().path() != "/mcp" {
         return empty(StatusCode::NOT_FOUND);

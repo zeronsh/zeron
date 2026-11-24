@@ -34,6 +34,9 @@
     // The card pages' script, style, fonts and art (public/card, built by
     // scripts/card-assets.mjs from apps/card-web; static assets below).
     { "pattern": "zeron.sh/card/*", "zone_name": "zeron.sh" },
+    // Web sign-in (src/web-auth-routes.ts): its cookies belong to zeron.sh,
+    // so it's served there. WorkOS redirect URI: https://zeron.sh/auth/web/callback.
+    { "pattern": "zeron.sh/auth/web/*", "zone_name": "zeron.sh" },
     // Legacy comet hostnames — keep until 0.1.x clients are gone.
     { "pattern": "edge.comet.zeron.sh", "custom_domain": true },
     { "pattern": "comet.zeron.sh/install.sh", "zone_name": "zeron.sh" },
@@ -109,7 +112,25 @@
   "triggers": { "crons": ["17 * * * *"] },
   // Public card reads per client IP a minute, per Cloudflare location
   // (src/card-gate.ts). Namespace ids are account-wide: staging has its own.
-  "ratelimits": [{ "name": "CARD_READS", "namespace_id": "1001", "simple": { "limit": 60, "period": 60 } }],
+  "ratelimits": [
+    { "name": "CARD_READS", "namespace_id": "1001", "simple": { "limit": 60, "period": 60 } },
+    // The plugin store (src/store/): public reads per client IP, writes per
+    // account (publish, installs, reports, author actions).
+    { "name": "STORE_READS", "namespace_id": "1003", "simple": { "limit": 300, "period": 60 } },
+    { "name": "STORE_WRITES", "namespace_id": "1005", "simple": { "limit": 30, "period": 60 } }
+  ],
+  // The plugin store's catalog (src/store/db.ts). Migrations in
+  // migrations/store are applied with `wrangler d1 migrations apply STORE_DB
+  // --remote` before the worker deploys. PLACEHOLDER database_id: the real one
+  // is set when the database is created at rollout (a deploy with this id fails).
+  "d1_databases": [
+    {
+      "binding": "STORE_DB",
+      "database_name": "zeron-store",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations/store"
+    }
+  ],
   "r2_buckets": [
     {
       "binding": "BLOBS",
@@ -125,6 +146,12 @@
       // public card they show.
       "binding": "CARD_IMAGES",
       "bucket_name": "comet-native-card-images"
+    },
+    {
+      // Plugin packages and each version's files, content-addressed and
+      // immutable (src/store/db.ts `packageKey`, `filesKey`).
+      "binding": "PLUGIN_STORE",
+      "bucket_name": "zeron-plugins"
     }
   ],
   "vars": {
@@ -178,6 +205,11 @@
     // snapshot.read. Unset ⇒ every session installs the engine (~30–60 s).
     "WORKOS_CLIENT_ID": "client_01KWD0EAKZKD50YCQJNYSRE4BY",
     "AUTH_MODE": "workos",
+    // The web site, where web sign-in lives (src/web-auth-routes.ts). Its
+    // sign-in uses PKCE beside the client secret; should WorkOS ever refuse
+    // that pair, "WEB_SIGNIN_PKCE": "off" falls back to the state cookie
+    // alone (see usesPkce there) until it's resolved.
+    "WEB_ORIGIN": "https://zeron.sh",
     // Who the chat rooms offer the relay layer to (docs/design/relay-layer.md):
     // "1" for everyone, a comma-separated list of WorkOS user ids (each room
     // checks its owner), or "" (or unset) for nobody. Now: everyone. Taking a
@@ -241,7 +273,22 @@
       // on the zeron.sh zone (its record wins over the zone's *.zeron.sh
       // wildcard for this one name).
       "workers_dev": true,
-      "routes": [{ "pattern": "staging.zeron.sh", "custom_domain": true }],
+      "routes": [
+        { "pattern": "staging.zeron.sh", "custom_domain": true },
+        // Member cards on the staging site, as production's on zeron.sh: the
+        // store's pages link to author cards. They render from the request's
+        // origin and read staging's own directory, CARD_IMAGES bucket,
+        // browser and CARD_READS; /card/* is the same static assets.
+        { "pattern": "site-staging.zeron.sh/@*", "zone_name": "zeron.sh" },
+        { "pattern": "site-staging.zeron.sh/c/*", "zone_name": "zeron.sh" },
+        { "pattern": "site-staging.zeron.sh/card/*", "zone_name": "zeron.sh" },
+        // Web sign-in on the staging site (its WEB_ORIGIN). WorkOS redirect URI
+        // (staging environment): https://site-staging.zeron.sh/auth/web/callback.
+        { "pattern": "site-staging.zeron.sh/auth/web/*", "zone_name": "zeron.sh" }
+        // (Not /install.sh or /releases/*: the installer downloads from
+        // zeron.sh unless told otherwise, so on this host it would install
+        // production's build; staging's releases stay at staging.zeron.sh.)
+      ],
       "durable_objects": {
         "bindings": [
           { "name": "SESSION_ROOMS", "class_name": "SessionRoom" },
@@ -262,16 +309,32 @@
       ],
       "services": [{ "binding": "VAULT", "service": "zeron-vault-staging", "entrypoint": "VaultApi" }],
       "triggers": { "crons": ["17 * * * *"] },
-      "ratelimits": [{ "name": "CARD_READS", "namespace_id": "1002", "simple": { "limit": 60, "period": 60 } }],
+      "ratelimits": [
+        { "name": "CARD_READS", "namespace_id": "1002", "simple": { "limit": 60, "period": 60 } },
+        { "name": "STORE_READS", "namespace_id": "1004", "simple": { "limit": 300, "period": 60 } },
+        { "name": "STORE_WRITES", "namespace_id": "1006", "simple": { "limit": 30, "period": 60 } }
+      ],
+      // Staging's store catalog (created 2026-11-23; migrations applied with
+      // `wrangler d1 migrations apply STORE_DB --remote --env staging`).
+      "d1_databases": [
+        {
+          "binding": "STORE_DB",
+          "database_name": "zeron-store-staging",
+          "database_id": "c258a0da-677f-42ed-ac60-4f0bcf6a50dd",
+          "migrations_dir": "migrations/store"
+        }
+      ],
       "r2_buckets": [
         { "binding": "BLOBS", "bucket_name": "zeron-staging-blobs" },
         { "binding": "RELEASES", "bucket_name": "zeron-staging-releases" },
-        { "binding": "CARD_IMAGES", "bucket_name": "zeron-staging-card-images" }
+        { "binding": "CARD_IMAGES", "bucket_name": "zeron-staging-card-images" },
+        { "binding": "PLUGIN_STORE", "bucket_name": "zeron-staging-plugins" }
       ],
       "browser": { "binding": "BROWSER" },
       "vars": {
         "WORKOS_CLIENT_ID": "client_01KWD0E9SYPV2WE4QN9TP9DP0W",
         "AUTH_MODE": "workos",
+        "WEB_ORIGIN": "https://site-staging.zeron.sh",
         // The hosted model list at /models/v1.json (src/model-list.ts).
         // Production sets none yet: engines there use their built-in lists.
         "MODEL_LIST": "staging",
@@ -299,5 +362,11 @@
   },
   "observability": {
     "enabled": true
-  }
+  },
+  // CPU per request, for the whole worker and its Durable Objects: pinned at
+  // the paid plan's default, deliberately not lower. The session rooms'
+  // cold replays run near it (session-room.ts), so less would cut them; the
+  // plugin store needs far less (its worst body, 20 MiB of hostile JSON, is
+  // well under 2 s: docs/plugin-store-limits.md).
+  "limits": { "cpu_ms": 30000 }
 }

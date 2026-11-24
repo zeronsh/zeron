@@ -1,0 +1,220 @@
+---
+// One plugin, for its reviewers, as its owner's page sets it: a plugin
+// page's head (its tile, name, id and where it stands, its owner, how many
+// have it; Its page and what can be done to it at the right: feature, move,
+// suspend or restore); every version in every state as your own pages'
+// table, each row to its review, a listed one's Take down at its end, a
+// second line only for what was said; its reports, a table too; its history
+// in the audit log.
+import TakeDown from "../../../../components/kit/TakeDown.astro";
+import Failed from "../../../../components/look/Failed.astro";
+import Flash from "../../../../components/look/Flash.astro";
+import Icon from "../../../../components/look/Icon.astro";
+import Seal from "../../../../components/look/Seal.astro";
+import Tile from "../../../../components/look/Tile.astro";
+import Words from "../../../../components/look/Words.astro";
+import Store from "../../../../layouts/Store.astro";
+import "../../../../styles/look/account.css";
+import "../../../../styles/look/staff.css";
+import { lsb } from "../../../../lib/store/bearing.ts";
+import { pluginAsk, reasonLabel, versionAsk } from "../../../../lib/store/admin.ts";
+import { takeFlash } from "../../../../lib/store/flash.ts";
+import { age, count, dateTime, day, unbidi } from "../../../../lib/store/format.ts";
+import { privatePage } from "../../../../lib/store/http.ts";
+import { isPluginId } from "../../../../lib/store/names.ts";
+import { adminSession } from "../../../../lib/store/session.ts";
+import { everListed, listingState, PILL_TONE, reasonWords, verificationState, versionState } from "../../../../lib/store/states.ts";
+import { memberUrl, pluginUrl } from "../../../../lib/store/urls.ts";
+
+export const prerender = false;
+
+const { id } = Astro.params;
+if (!isPluginId(id)) return new Response(null, { status: 404 });
+const session = await adminSession(Astro);
+if (!session) return new Response(null, { status: 404 });
+const result = await Astro.locals.edge.adminPlugin(id);
+if (!result.ok && result.error === "not_found") return new Response(null, { status: 404 });
+privatePage(Astro);
+const flash = takeFlash(Astro.cookies);
+const a = result.ok ? result.data : null;
+const here = `/admin/plugins/${encodeURIComponent(id)}`;
+const act = (action: string) => `${here}/actions/${action}`;
+const removable = (status: string) => status === "listed" || status === "yanked";
+const vid = (v: string) => `take-down-${v.replace(/[^\w-]/g, "_")}`;
+const name = a ? unbidi(a.plugin.name) : id;
+const listing = a ? listingState(a.status, everListed(a.versions)) : null;
+const suspend = pluginAsk("suspend", name);
+const transfer = pluginAsk("transfer", name);
+const REPORT = { open: { label: "Open" }, actioned: { label: "Acted on" }, dismissed: { label: "Dismissed" } } as const;
+---
+
+<Store title={`${name} · Review · Zeron`} description="A plugin, for its reviewers." noindex current="review" session={session}>
+  <div class="wrap acct staff-plugin">
+    <nav class="crumbs" aria-label="Where this is"><a href="/admin/plugins">Review</a><Icon name="chev" /><span aria-current="page">{name}</span></nav>
+    <Flash flash={flash} />
+    {
+      !a ? (
+        <Failed title="This plugin can't be loaded right now" line="Try again in a moment." href={here} />
+      ) : (
+        <>
+          <header class="ohead">
+            <Tile id={a.plugin.id} name={name} icon={a.plugin.icon} version={a.plugin.version} size="xl" />
+            <div class="txt">
+              <h1 class={lsb(name)}><Words text={name} /></h1>
+              <p class="by">
+                <span class="mono">{a.plugin.id}</span>
+                {listing && a.status !== "listed" && <span class:list={["state", PILL_TONE[listing.tone]]}>{listing.label}</span>}
+                {a.plugin.featured && <span class="state quiet">Featured</span>}
+                <i aria-hidden="true"></i>
+                <span>by {a.owner.username ? <a href={memberUrl(a.owner.username)}>@{a.owner.username}</a> : "an account with no username"}{a.owner.created_at ? ` (${age(a.owner.created_at).toLowerCase()})` : ""}</span>
+                <i aria-hidden="true"></i>
+                <span class="num">{count(a.plugin.installs)} {a.plugin.installs === 1 ? "install" : "installs"}</span>
+              </p>
+            </div>
+            <div class="head-act staff-acts">
+              <form method="post" action={act(a.plugin.featured ? "unfeature" : "feature")}>
+                <input type="hidden" name="csrf" value={session.csrf} />
+                <button class="btn sec sm" type="submit">{a.plugin.featured ? "Stop featuring" : "Feature"}</button>
+              </form>
+              <a class="btn sec sm" href={act("transfer")} data-dialog="transfer">Move…</a>
+              {a.status === "suspended" ? (
+                <form method="post" action={act("restore")}>
+                  <input type="hidden" name="csrf" value={session.csrf} />
+                  <button class="btn sec sm" type="submit">Restore</button>
+                </form>
+              ) : (
+                <a class="btn sec sm" href={act("suspend")} data-dialog="suspend">Suspend…</a>
+              )}
+              {a.status === "listed" && <a class="btn sec sm" href={pluginUrl(a.plugin.id)}>Its page<Icon name="out" /></a>}
+            </div>
+          </header>
+
+          {a.status === "suspended" && a.plugin.suspend_reason && <p class="flash bad"><b>Suspended.</b> {a.plugin.suspend_reason}</p>}
+
+          <section class="mvers" aria-labelledby="versions-heading">
+            <h2 id="versions-heading">Versions{a.versions.length > 0 && <span class="num">{count(a.versions.length)}</span>}</h2>
+            <div class="tbl vers">
+              <div class="trow th" aria-hidden="true"><span>Version</span><span>Published</span><span></span></div>
+              <ul aria-label="Its versions, the newest first">
+                {a.versions.map((v) => {
+                  const st = versionState(v);
+                  const ver = verificationState(v);
+                  const decided = v.review?.decided_at;
+                  // (What was said: why it was taken down or removed, the reviewer's words; with their reason and when.)
+                  const words = v.removal?.reason ? `“${v.removal.reason}”` : v.review?.message ? `“${v.review.message}”` : null;
+                  const when = [v.review?.reason && reasonLabel(v.review.reason), decided && `${v.status === "taken_down" ? "taken down" : v.status === "removed" ? "removed" : "decided"} ${day(decided)}`].filter(Boolean).join(" · ");
+                  // (A second line only when someone said something: when they did, its reason and its date beside it.)
+                  const note = words ? [words, when].filter(Boolean).join(" · ") : "";
+                  return (
+                    /* (The row opens its review: the version's link, stretched over the row; Take down is its own.) */
+                    <li class:list={["trow", { two: Boolean(note) }]}>
+                      <span class="c-ver">
+                        <a class="mono stretch" href={`${here}/${encodeURIComponent(v.version)}`}>{v.version}</a>
+                        {/* (Whether Zeron verified it first, as on its author's page; where it stands only when that isn't simply listed.) */}
+                        <span class:list={["state", PILL_TONE[ver.tone]]}>{v.verified && <Seal quiet />}{ver.label}</span>
+                        {v.status !== "listed" && <span class:list={["state", PILL_TONE[st.tone]]}>{st.label}</span>}
+                        {v.blocked && <span class="state bad" title="Turned off on the devices that had it">Off</span>}
+                      </span>
+                      <span class="c-pub"><span class="sr-only">Published </span><time datetime={new Date(v.published_at).toISOString()} title={dateTime(v.published_at)}>{day(v.published_at)}</time></span>
+                      <span class="c-act">
+                        {removable(v.status) && <a class="btn ghost sm" href={`${here}/${encodeURIComponent(v.version)}/take_down`} data-dialog={vid(v.version)}>Take down…<span class="sr-only"> {v.version}</span></a>}
+                        {v.status === "taken_down" && <a class="btn ghost sm" href={`${here}/${encodeURIComponent(v.version)}/restore`}>Restore…<span class="sr-only"> {v.version}</span></a>}
+                      </span>
+                      {note && <span class="c-note">{note}</span>}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          </section>
+
+          <section class="mvers" aria-labelledby="reports-heading">
+            <div class="sec-row">
+              <h2 id="reports-heading">Reports{a.reports.length > 0 && <span class="num">{count(a.reports.length)}</span>}</h2>
+              <a class="more" href={`/admin/audit?plugin=${encodeURIComponent(a.plugin.id)}`}>Its history<Icon name="chev" /></a>
+            </div>
+            {a.reports.length === 0 ? (
+              <p class="none">No one has reported it.</p>
+            ) : (
+              <div class="tbl preps">
+                <div class="trow th" aria-hidden="true"><span>State</span><span>Reason</span><span>What they said</span><span>Sent</span><span></span></div>
+                <ul aria-label="Its reports, the newest first">
+                  {a.reports.map((r) => (
+                    <li class="trow">
+                      <span>{r.status === "open" ? <span class="state no">Open</span> : <span class="t2">{REPORT[r.status].label}</span>}</span>
+                      <span class="c-reason">{r.reason === "malware" ? <span class="state bad">{reasonWords(r.reason)}</span> : <span class="t2">{reasonWords(r.reason)}</span>}</span>
+                      <span class="c-said">
+                        <span class="c-line">{r.text ? <span class="said" title={r.text}>{r.text}</span> : <span class="t3">No words given.</span>}</span>
+                        <span class="c-sub">from {r.reporter?.username ? `@${r.reporter.username}` : "someone"}{r.version ? ` · about ${r.version}` : ""}</span>
+                      </span>
+                      <span class="t2"><time datetime={new Date(r.created_at).toISOString()} title={dateTime(r.created_at)}>{day(r.created_at)}</time></span>
+                      {r.status === "open" ? <a class="btn ghost sm" href={`/admin/reports#close-${r.id}`}>Close it…</a> : <span></span>}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </section>
+        </>
+      )
+    }
+  </div>
+  {
+    a && (
+      <>
+        <dialog class="question sm" id="suspend" aria-labelledby="suspend-title" closedby="any">
+          <form method="post" action={act("suspend")}>
+            <input type="hidden" name="csrf" value={session.csrf} />
+            <h2 id="suspend-title">{suspend.title}</h2>
+            {suspend.words.map((w) => <p>{w}</p>)}
+            <div class="body">
+              <div>
+                <label class="field-label" for="suspend-reason">Why</label>
+                <div class="field area"><textarea id="suspend-reason" name="reason" required maxlength="2000" rows="3" /></div>
+                <p class="field-hint">Its author reads this.</p>
+              </div>
+            </div>
+            <div class="answers">
+              <button class="btn sec" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
+              <button class="btn danger" type="submit">{suspend.confirm}</button>
+            </div>
+          </form>
+        </dialog>
+        <dialog class="question sm" id="transfer" aria-labelledby="transfer-title" closedby="any">
+          <form method="post" action={act("transfer")}>
+            <input type="hidden" name="csrf" value={session.csrf} />
+            <h2 id="transfer-title">{transfer.title}</h2>
+            {transfer.words.map((w) => <p>{w}</p>)}
+            <div class="body">
+              <div>
+                <label class="field-label" for="transfer-to">New owner's username</label>
+                <div class="field"><input id="transfer-to" name="to_username" required maxlength="21" placeholder="@username" autocomplete="off" /></div>
+              </div>
+            </div>
+            <div class="answers">
+              <button class="btn sec" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
+              <button class="btn danger" type="submit">{transfer.confirm}</button>
+            </div>
+          </form>
+        </dialog>
+        {a.versions.filter((v) => removable(v.status)).map((v) => {
+          const remove = versionAsk("take_down", name, v.version);
+          return (
+            <dialog class="question" id={vid(v.version)} aria-labelledby={`${vid(v.version)}-title`} closedby="any">
+              <form method="post" action={`${here}/${encodeURIComponent(v.version)}/take_down`}>
+                <input type="hidden" name="csrf" value={session.csrf} />
+                <h2 id={`${vid(v.version)}-title`}>{remove.title}</h2>
+                {remove.words.map((w) => <p>{w}</p>)}
+                <TakeDown id={vid(v.version)} harmful />
+                <div class="answers">
+                  <button class="btn sec" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
+                  <button class="btn danger" type="submit">{remove.confirm}</button>
+                </div>
+              </form>
+            </dialog>
+          );
+        })}
+      </>
+    )
+  }
+</Store>

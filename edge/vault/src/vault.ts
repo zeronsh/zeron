@@ -18,6 +18,10 @@
  */
 import {
   VAULT_PROVIDERS,
+  type ConnectionGrant,
+  type ConnectionGrantManyReply,
+  type ConnectionGrantManyRequest,
+  type ConnectionGrantRequest,
   type EnrollDeviceRequest,
   type GithubDevicePoll,
   type GithubDeviceStart,
@@ -27,22 +31,39 @@ import {
   type GrantManyReply,
   type GrantManyRequest,
   type GrantRequest,
+  type PutConnectionRequest,
   type PutCredentialRequest,
+  type UpdateConnectionRequest,
+  type VaultAccountView,
   type VaultCaller,
+  type VaultConnectionKind,
+  type VaultConnectionsView,
   type VaultConnectionView,
+  type VaultProviderConnectionView,
   type VaultProviderId,
   type VaultResult,
   type VaultRpc,
   type VaultStatusView,
-  type VaultAccountView,
   type VaultUsageView
 } from "./api";
 import type { AuditEntry } from "./devices";
 import type { Env } from "./env";
-import { accountStub, devicesStub } from "./names";
+import { accountStub, connectionsStub, devicesStub } from "./names";
 import { installUrl, isRepoFullName } from "./providers/github-app";
 import { fail, ok, type VaultFailure } from "./result";
-import { isCaller, isFlowId, isGrantManyRequest, isGrantRequest, isId, isProvider, parseDeviceList } from "./validate";
+import {
+  isCaller,
+  isConnectionGrantManyRequest,
+  isConnectionGrantRequest,
+  isConnectionId,
+  isConnectionKind,
+  isFlowId,
+  isGrantManyRequest,
+  isGrantRequest,
+  isId,
+  isProvider,
+  parseDeviceList
+} from "./validate";
 
 export class Vault implements VaultRpc {
   constructor(private readonly env: Env) {}
@@ -363,6 +384,180 @@ export class Vault implements VaultRpc {
     });
   }
 
+  /** List remote MCP / plugin connections. Users see all connections alongside
+   * the per-user kill switch flag; runners see only enabled connections
+   * authorized for their own device (or "*" or parent) while not disabled/revoked. */
+  listConnections(caller: VaultCaller, kind?: VaultConnectionKind): Promise<VaultResult<VaultConnectionsView>> {
+    return this.run(caller, { runner: true }, async (userId) => {
+      if (kind !== undefined && !isConnectionKind(kind)) {
+        return fail("bad_request", "kind must be 'mcp' or 'plugin'");
+      }
+      const snapshot = await devicesStub(this.env, userId).snapshot(userId);
+      if (!snapshot.ok) return snapshot;
+
+      if (caller.kind === "runner") {
+        if (snapshot.value.disabled) {
+          return fail("disabled", "the vault is disabled for this user", 403);
+        }
+        const device = snapshot.value.devices.find((d) => d.deviceId === caller.deviceId);
+        if (!device) return fail("device_unknown", "device is not enrolled");
+        if (device.revokedAt !== undefined) return fail("device_revoked", "device was revoked");
+        if (device.parentId) {
+          const parent = snapshot.value.devices.find((d) => d.deviceId === device.parentId);
+          if (parent && parent.revokedAt !== undefined) {
+            return fail("device_revoked", "parent device was revoked");
+          }
+        }
+        const listed = await connectionsStub(this.env, userId).list(userId, {
+          ...(kind !== undefined ? { kind } : {}),
+          deviceId: device.deviceId,
+          ...(device.parentId !== undefined ? { parentId: device.parentId } : {}),
+          enabledOnly: true
+        });
+        if (!listed.ok) return listed;
+        return ok({ disabled: false, connections: listed.value });
+      }
+
+      const listed = await connectionsStub(this.env, userId).list(userId, {
+        ...(kind !== undefined ? { kind } : {})
+      });
+      if (!listed.ok) return listed;
+      return ok({ disabled: snapshot.value.disabled, connections: listed.value });
+    });
+  }
+
+  putConnection(
+    caller: VaultCaller,
+    id: string,
+    request: PutConnectionRequest
+  ): Promise<VaultResult<VaultConnectionView>> {
+    return this.run(caller, {}, async (userId) => {
+      if (!isConnectionId(id)) return fail("bad_request", "malformed connection id");
+      if (typeof request !== "object" || request === null) return fail("bad_request", "request must be an object");
+      const disabled = await this.userDisabled(userId);
+      if (disabled) return disabled;
+      const result = await connectionsStub(this.env, userId).put(userId, id, request);
+      if (!result.ok) return result;
+      await this.audit(userId, {
+        event: "conn_put",
+        orgId: caller.orgId,
+        detail: `${id} auth=${result.value.authKind} status=${result.value.status}`
+      });
+      return result;
+    });
+  }
+
+  updateConnection(
+    caller: VaultCaller,
+    id: string,
+    patch: UpdateConnectionRequest
+  ): Promise<VaultResult<VaultConnectionView>> {
+    return this.run(caller, {}, async (userId) => {
+      if (!isConnectionId(id)) return fail("bad_request", "malformed connection id");
+      if (typeof patch !== "object" || patch === null) return fail("bad_request", "patch must be an object");
+      const disabled = await this.userDisabled(userId);
+      if (disabled) return disabled;
+      const result = await connectionsStub(this.env, userId).update(userId, id, patch);
+      if (!result.ok) return result;
+      await this.audit(userId, { event: "conn_update", orgId: caller.orgId, detail: id });
+      return result;
+    });
+  }
+
+  /** Delete a connection. Only removes access, so it stays available behind
+   * the per-user kill switch (matching `disconnect`). */
+  deleteConnection(caller: VaultCaller, id: string): Promise<VaultResult<{ readonly deleted: boolean }>> {
+    return this.run(caller, {}, async (userId) => {
+      if (!isConnectionId(id)) return fail("bad_request", "malformed connection id");
+      const result = await connectionsStub(this.env, userId).delete(userId, id);
+      if (!result.ok) return result;
+      if (result.value.deleted) await this.audit(userId, { event: "conn_delete", orgId: caller.orgId, detail: id });
+      return result;
+    });
+  }
+
+  /** Clear sealed auth material while keeping connection config. Only removes
+   * access, so it stays available behind the per-user kill switch. */
+  disconnectConnectionAuth(caller: VaultCaller, id: string): Promise<VaultResult<VaultConnectionView>> {
+    return this.run(caller, {}, async (userId) => {
+      if (!isConnectionId(id)) return fail("bad_request", "malformed connection id");
+      const result = await connectionsStub(this.env, userId).disconnectAuth(userId, id);
+      if (!result.ok) return result;
+      await this.audit(userId, { event: "conn_disconnect", orgId: caller.orgId, detail: id });
+      return result;
+    });
+  }
+
+  grantConnection(caller: VaultCaller, request: ConnectionGrantRequest): Promise<VaultResult<ConnectionGrant>> {
+    return this.run(caller, { runner: true }, async (userId) => {
+      if (!isConnectionGrantRequest(request)) {
+        return fail("bad_request", "expected {id, deviceId, ts, sig, forceRefresh?}");
+      }
+      if (caller.kind === "runner" && caller.deviceId !== request.deviceId) {
+        return fail("forbidden", "runners may only request grants for their own device");
+      }
+      const verified = await devicesStub(this.env, userId).verifyGrant(userId, caller.orgId, {
+        subject: `conn:${request.id}`,
+        deviceId: request.deviceId,
+        ts: request.ts,
+        sig: request.sig
+      });
+      if (!verified.ok) return verified;
+      const grant = await connectionsStub(this.env, userId).grant(
+        userId,
+        request.id,
+        request.deviceId,
+        verified.value.parentId,
+        request.forceRefresh
+      );
+      await this.audit(userId, {
+        event: grant.ok ? "conn_grant" : "conn_grant_denied",
+        orgId: caller.orgId,
+        deviceId: request.deviceId,
+        detail: grant.ok ? `${request.id} generation ${grant.value.generation}` : `${request.id} ${grant.error}`
+      });
+      return grant;
+    });
+  }
+
+  grantConnections(
+    caller: VaultCaller,
+    request: ConnectionGrantManyRequest
+  ): Promise<VaultResult<ConnectionGrantManyReply>> {
+    return this.run(caller, { runner: true }, async (userId) => {
+      if (!isConnectionGrantManyRequest(request)) {
+        return fail("bad_request", "expected {ids (distinct connection ids), deviceId, ts, sig}");
+      }
+      if (caller.kind === "runner" && caller.deviceId !== request.deviceId) {
+        return fail("forbidden", "runners may only request grants for their own device");
+      }
+      const verified = await devicesStub(this.env, userId).verifyGrant(userId, caller.orgId, {
+        subject: `conns:${request.ids.join(",")}`,
+        deviceId: request.deviceId,
+        ts: request.ts,
+        sig: request.sig
+      });
+      if (!verified.ok) return verified;
+      const reply = await connectionsStub(this.env, userId).grantMany(
+        userId,
+        request.ids,
+        request.deviceId,
+        verified.value.parentId
+      );
+      if (!reply.ok) return reply;
+      await this.audit(userId, {
+        event: reply.value.grants.length > 0 ? "conn_grant" : "conn_grant_denied",
+        orgId: caller.orgId,
+        deviceId: request.deviceId,
+        detail: [
+          ...reply.value.grants.map((grant) => `${grant.id}@${grant.generation}`),
+          ...reply.value.missing.map((miss) => `${miss.id}:${miss.error}`)
+        ].join(" ")
+      });
+      return reply;
+    });
+  }
+
   // ── internals ────────────────────────────────────────────────────────────
 
   /** Steps 1–2 of the check order, plus a last-resort catch so a bug answers
@@ -399,7 +594,7 @@ export class Vault implements VaultRpc {
       ...VAULT_PROVIDERS.map((provider) => accountStub(this.env, userId, provider).view(userId, provider))
     ]);
     if (!snapshot.ok) return snapshot;
-    const connections: VaultConnectionView[] = [];
+    const connections: VaultProviderConnectionView[] = [];
     for (const view of views) {
       if (!view.ok) return view;
       if (view.value) connections.push(view.value);

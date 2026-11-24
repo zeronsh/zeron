@@ -1,0 +1,11 @@
+{
+  // A stand-in for the edge worker's store and web sign-in, for `npm run
+  // dev` and the tests: the whole contract the site reads
+  // (docs/plans/2026-11-17-plugin-store.md), over fixtures held in memory.
+  // It takes the real worker's name, so the site's EDGE binding finds it.
+  // Never deployed.
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "comet-native-edge",
+  "main": "./index.ts",
+  "compatibility_date": "2026-07-01"
+}

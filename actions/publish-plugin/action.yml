@@ -1,16 +1,17 @@
 name: Publish a Zeron plugin
-description: Check a Zeron plugin against the store's rules and submit it for review, signed with a deploy key.
+description: Check a Zeron plugin against the store's rules and publish it (live at once, verified once Zeron has read it) with a deploy token.
 author: Zeron
 branding:
   icon: upload-cloud
   color: gray-dark
 
 inputs:
-  key:
+  token:
     description: >-
-      The plugin's deploy key secret (zpk_…), from your repository's secrets.
-      Make one with `zeron plugin key create <id> --name "GitHub Actions"`.
-      Without it, the plugin is only checked (`zeron plugin check`).
+      A deploy token (zdt_…), from your repository's secrets. Make one with
+      `zeron plugin token create --name "GitHub Actions" --plugins <id>`, in
+      Zeron, or on the store's site. Without it, the plugin is only checked
+      (`zeron plugin check`).
     required: false
     default: ""
   path:
@@ -18,13 +19,23 @@ inputs:
     required: false
     default: "."
   dry-run:
-    description: Check, sign and pack the plugin, but don't submit it.
+    description: "`true`: check and pack the plugin, but don't publish it. `true` or `false` only: anything else fails the step."
     required: false
     default: "false"
   zeron-version:
-    description: The Zeron release whose command line runs (`latest`, or a version like 0.4.0).
+    description: >-
+      The Zeron release whose command line runs: `latest` (follows each new
+      release), or a version like 0.4.0 (refused if its manifest names
+      another).
     required: false
     default: latest
+  sha256:
+    description: >-
+      Optional: the sha256 of that release's Linux command line tarball for
+      this runner. Given with a pinned zeron-version, the step runs exactly
+      that command line or fails.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -34,8 +45,9 @@ runs:
       # Inputs reach the script as environment variables, never pasted into
       # it: a path or version can't become a command.
       env:
-        ZERON_DEPLOY_KEY: ${{ inputs.key }}
+        ZERON_DEPLOY_TOKEN: ${{ inputs.token }}
         ZERON_PLUGIN_PATH: ${{ inputs.path }}
         ZERON_DRY_RUN: ${{ inputs.dry-run }}
         ZERON_VERSION: ${{ inputs.zeron-version }}
+        ZERON_SHA256: ${{ inputs.sha256 }}
       run: '"$GITHUB_ACTION_PATH/publish.sh"'

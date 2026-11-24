@@ -1,0 +1,124 @@
+---
+// A plugin's Versions (the prototype's versions page): every version it
+// has published, newest first, a page at a time, each with whether Zeron
+// verified it, its notes, and Install for that very version (the link that
+// names it); one that takes no new installs says why. Public, kept by
+// shared caches as the plugin's page is.
+import Failed from "../../../../components/look/Failed.astro";
+import Icon from "../../../../components/look/Icon.astro";
+import NotHere from "../../../../components/look/NotHere.astro";
+import PluginHead from "../../../../components/look/PluginHead.astro";
+import PluginTabs from "../../../../components/look/PluginTabs.astro";
+import Rail from "../../../../components/look/Rail.astro";
+import Seal from "../../../../components/look/Seal.astro";
+import Store from "../../../../layouts/Store.astro";
+import "../../../../styles/look/plugin.css";
+import { day, sinceInSentence } from "../../../../lib/store/format.ts";
+import { pluginTag, publicPage } from "../../../../lib/store/http.ts";
+import { hueClass } from "../../../../lib/store/hue.ts";
+import { isPrerelease } from "../../../../lib/store/names.ts";
+import { pagerOf, placeOf } from "../../../../lib/store/paging.ts";
+import { loadPlugin } from "../../../../lib/store/plugin-page.ts";
+import { drawn, keepable, type Drawn } from "../../../../lib/store/rendered.ts";
+import type { VersionInfo } from "../../../../lib/store/types.ts";
+import { appUrl, fileUrl, linkable, pluginUrl } from "../../../../lib/store/urls.ts";
+import { statusWords, store } from "../../../../lib/store/words.ts";
+
+export const prerender = false;
+
+/** Versions a page: each with its notes, drawn once and kept. */
+const PER_PAGE = 10;
+const asked = Astro.params.id ?? "";
+const place = placeOf(Astro.url);
+const page = await loadPlugin(Astro.locals.edge, asked, { cursor: place.cursor ?? undefined, limit: PER_PAGE });
+// A cursor from elsewhere (or an old one): its first page.
+if (page.state === "ok" && !page.versions && place.cursor) return Astro.redirect(`${pluginUrl(asked)}/versions`, 303);
+
+const notes = new Map<string, string>();
+if (page.state === "ok" && page.versions) {
+  const { plugin } = page;
+  const cf = (Astro.locals as { cfContext?: { waitUntil(p: Promise<unknown>): void } }).cfContext;
+  const shown: Drawn[] = [];
+  for (const v of page.versions.versions) {
+    if (!v.notes) continue;
+    const out = await drawn(Astro.url.origin, plugin.id, v.version, "notes", v.notes, { file: (p) => fileUrl(plugin.id, v.version, p), demote: true }, { keep: true, waitUntil: cf ? (p) => cf.waitUntil(p) : undefined });
+    shown.push(out);
+    notes.set(v.version, out.html);
+  }
+  if (keepable(shown)) publicPage(Astro, [pluginTag(plugin.id)]);
+  else Astro.response.headers.set("cache-control", "no-store");
+} else if (page.state === "ok") Astro.response.status = 503;
+else Astro.response.status = page.state === "missing" ? 404 : 503;
+
+const now = Date.now();
+const versionUrl = (v: string) => `${pluginUrl(asked)}/versions/${encodeURIComponent(v)}`;
+/** Where a version stands, in a pill: verified (the seal), not yet, or no new installs. */
+const pill = (v: VersionInfo) => (v.yanked ? { tone: "quiet", label: statusWords("yanked") } : v.verified ? { tone: "ok", label: store("plugins.store.verified") } : { tone: "no", label: store("plugins.store.review.waiting") });
+/** The line beside it: when Zeron verified it and when it was published, or why it takes no new installs. */
+const said = (v: VersionInfo) => {
+  const published = `published ${day(v.published_at, now)}`;
+  if (v.yanked && v.yanked_by === "superseded") {
+    const by = v.superseded_by ?? v.superseded?.by;
+    return `${by ? store("plugins.store.superseded", { version: by }) : "Replaced by a newer version before it was verified"} · ${published}`;
+  }
+  if (v.yanked) return `${v.yanked_by === "author" ? "Its author stopped new installs" : "No new installs"} · ${published}`;
+  if (v.verified && v.verified_at !== null) return `Verified ${day(v.verified_at, now)} · ${published}`;
+  return `Published ${sinceInSentence(v.published_at, now, true)}`;
+};
+const pager = page.state === "ok" && page.versions ? pagerOf(`${pluginUrl(asked)}/versions`, {}, place, page.versions, page.versions.versions.length) : null;
+---
+
+{
+  page.state === "ok" ? (
+    <Store title={`Versions · ${page.plugin.name} · Plugins · Zeron`} description={`Every version of ${page.plugin.name}, a plugin for Zeron, and which Zeron verified.`} noindex={Boolean(place.cursor)} canonical={`${pluginUrl(page.plugin.id)}/versions`} current="browse" class={hueClass(page.plugin.id)}>
+      <div class="wrap">
+        <PluginHead plugin={page.plugin} category={page.category} versions={[...(page.versions?.versions ?? []), ...page.plugin.versions]} latestZeron={page.latestZeron} />
+        <div class="cols2 after-head">
+          <div>
+            <PluginTabs plugin={page.plugin} current="versions" versions={page.versions?.total ?? null} />
+            <p class="vintro">Every version stays on this page. A check marks the ones Zeron verified, and each of those can still be installed. One nobody verified before a newer one came is kept for the record only.</p>
+            {page.versions ? (
+              <ol class="vlist">
+                {page.versions.versions.map((v) => {
+                  const newest = v.version === page.plugin.version;
+                  const p = pill(v);
+                  return (
+                    <li class:list={["v", { old: !newest }]}>
+                      <div class="vno">
+                        <a href={versionUrl(v.version)}>{v.version}</a>
+                        {newest && <span class="new">Latest</span>}
+                        {isPrerelease(v.version) && <span class="new">Pre-release</span>}
+                      </div>
+                      <div class="vbody">
+                        <div class="st pills">
+                          <span class:list={["state", p.tone]}>{p.tone === "ok" && <Seal quiet />}{p.label}</span>
+                          <span>{said(v)}</span>
+                        </div>
+                        {notes.get(v.version) ? <div class="notes prose" set:html={notes.get(v.version)} /> : <p class="notes t3">No notes for this version.</p>}
+                      </div>
+                      <div class="act">
+                        {v.yanked ? <span class="off">Can't be installed</span> : <a class="btn ghost sm" href={appUrl(page.plugin.id, newest ? undefined : v.version)}>{newest || linkable(v.version) ? store("plugins.store.install_version", { version: v.version }) : <>Open in Zeron<span class="sr-only"> for {v.version}</span></>}</a>}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ol>
+            ) : (
+              <Failed href={`${pluginUrl(page.plugin.id)}/versions`} />
+            )}
+            {pager && (pager.previous || pager.next) && (
+              <nav class="pager" aria-label="Pages of versions">
+                {pager.previous ? <a class="btn sec sm" href={pager.previous} rel="prev"><Icon name="left" />Newer</a> : <span class="btn sec sm" aria-disabled="true"><Icon name="left" />Newer</span>}
+                <span class="num">{pager.where}</span>
+                {pager.next ? <a class="btn sec sm" href={pager.next} rel="next">Earlier<Icon name="arrow" /></a> : <span class="btn sec sm" aria-disabled="true">Earlier<Icon name="arrow" /></span>}
+              </nav>
+            )}
+          </div>
+          <Rail plugin={page.plugin} />
+        </div>
+      </div>
+    </Store>
+  ) : (
+    <NotHere state={page.state} retry={`${pluginUrl(asked)}/versions`} />
+  )
+}

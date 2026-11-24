@@ -29,6 +29,41 @@ use super::{Plugins, failed, lock, now_secs};
 /// The first check after the engine starts, then how often.
 pub(super) const FIRST_CHECK: Duration = Duration::from_secs(90);
 const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+/// How often the store's take-down feed is read (a take-down reaches a
+/// device within this and the feed's 60 s of cache).
+const TAKEDOWN_EVERY: Duration = Duration::from_secs(15 * 60);
+
+/// [`TAKEDOWN_EVERY`] (and the wait before the first read): or, in a debug
+/// build only, `ZERON_TAKEDOWN_EVERY_SECS` (a local end-to-end run, which
+/// can't wait 15 minutes). A release build reads no such setting.
+pub(super) fn takedown_every() -> (Duration, Duration) {
+    takedown_every_from(local_every())
+}
+
+/// `ZERON_TAKEDOWN_EVERY_SECS`, in a debug build only, when it shortens.
+pub(super) fn local_every() -> Option<Duration> {
+    let setting = cfg!(debug_assertions).then(|| std::env::var("ZERON_TAKEDOWN_EVERY_SECS").ok()).flatten();
+    shorter(setting.as_deref())
+}
+
+/// A setting of `secs`, taken only when it shortens: 1 s up to the built-in
+/// interval. Zero, junk, or anything longer is ignored, so nothing makes a
+/// device read the feed (or look over its account's publishes) less often.
+fn shorter(secs: Option<&str>) -> Option<Duration> {
+    secs.and_then(|s| s.trim().parse::<u64>().ok()).filter(|s| (1..=TAKEDOWN_EVERY.as_secs()).contains(s)).map(Duration::from_secs)
+}
+
+/// The first read's wait and the interval, for a setting: the first read
+/// never waits longer than it would anyway.
+fn takedown_every_from(every: Option<Duration>) -> (Duration, Duration) {
+    every.map_or((FIRST_CHECK, TAKEDOWN_EVERY), |every| (every.min(FIRST_CHECK), every))
+}
+
+#[derive(Deserialize)]
+struct VerifiedInsteadParams {
+    id: String,
+    hash: String,
+}
 
 #[derive(Deserialize)]
 struct InstallParams {
@@ -73,6 +108,10 @@ struct CheckParams {
 #[derive(Deserialize)]
 struct UpdateParams {
     id: String,
+    /// One of many ("update all"): a store update Zeron hasn't verified is
+    /// refused (`not_verified`), never taken this way.
+    #[serde(default)]
+    verified_only: bool,
 }
 
 #[derive(Deserialize)]
@@ -89,6 +128,7 @@ pub fn handles(method: &str) -> bool {
             | methods::STAGE_PLUGIN_PACKAGE
             | methods::CHECK_PLUGIN_UPDATES
             | methods::UPDATE_PLUGIN
+            | methods::INSTALL_VERIFIED_PLUGIN
             | methods::EXPORT_PLUGIN
     )
 }
@@ -187,7 +227,11 @@ impl Plugins {
             }
             methods::UPDATE_PLUGIN => {
                 let p: UpdateParams = parse_params(params)?;
-                self.update(&p.id).await
+                self.update(&p.id, p.verified_only).await
+            }
+            methods::INSTALL_VERIFIED_PLUGIN => {
+                let p: VerifiedInsteadParams = parse_params(params)?;
+                self.install_verified_alternative(p.id.trim(), &p.hash).await
             }
             methods::EXPORT_PLUGIN => {
                 let p: ExportParams = parse_params(params)?;
@@ -247,6 +291,22 @@ impl Plugins {
         Ok(dir)
     }
 
+    /// Whether the call being served is the person's: this device's app, or
+    /// another of their devices as the edge verified the link. An agent's
+    /// (or an unverified dial's) isn't.
+    pub(in crate::plugins) fn by_person() -> bool {
+        super::reviews::Origin::of(&zeron_rpc::caller()).is_some()
+    }
+
+    /// The refusal when an agent would replace installed store plugin
+    /// `name`'s code: an update is the person's click.
+    pub(in crate::plugins) fn needs_person(name: &str) -> RpcError {
+        failed(install::failure(
+            install::reason::NEEDS_PERSON,
+            format!("{name} is installed already: only the person updates it, in Zeron's window (check_plugin_updates tells them there's an update)"),
+        ))
+    }
+
     /// Install a verified package, keep the decisions right, and say what
     /// changed.
     pub(in crate::plugins) async fn install_package(&self, package: Package, source: Source) -> Result<RpcReply, RpcError> {
@@ -262,13 +322,16 @@ impl Plugins {
         install::compatible(&package.manifest).map_err(failed)?;
         // What a decision about it is bound to: its owner in the store, or
         // the key that signed it.
-        let binding = source.store().map_or_else(|| package.key.clone(), |s| s.binding());
+        // (Only the store's can be unsigned: anything else was refused.)
+        let signer = package.key.clone().unwrap_or_default();
+        let binding = source.store().map_or_else(|| signer.clone(), |s| s.binding());
         let mut old_binding = None;
         // Signed by another key than the installed one: only its author's
         // own (a new machine), which asks you again; or, from the store,
         // whoever owns its id there (store to store, the store's record
         // decides; into the store from elsewhere, the same username).
         let mut rotated_from = None;
+        let person = Self::by_person();
         if let Some(entry) = self.entry(&id) {
             if entry.item.builtin {
                 return Err(failed(super::manifest::RESERVED_ID_ERROR));
@@ -278,15 +341,33 @@ impl Plugins {
                     "You're making a plugin called {id} on this device. Remove or rename it first to install this one."
                 )));
             }
+            // From the store over one installed, or anything over one from
+            // the store (a file or a link would also take it out of the
+            // store's take-downs): new code under what the person allowed,
+            // so theirs to do (as `UpdatePlugin` is).
+            if (source.store().is_some() || entry.store.is_some()) && !person {
+                return Err(Self::needs_person(&entry.item.name));
+            }
             old_binding = entry.binding().map(str::to_owned);
-            if let Some(key) = entry.key().filter(|k| *k != package.key) {
+            // From the store over a store version: which one, and whether
+            // it was verified (the consent window says so).
+            if let (Some(before), Some(store)) = (&entry.store, source.store.as_mut().filter(|_| source.kind == install::STORE)) {
+                store.replaced = Some(install::ReplacedVersion { version: entry.item.version.clone(), verified: before.verified });
+                // Unsigned (a deploy token's): the key the version before
+                // was signed with carries on, so a later signed version
+                // signed by another still says its key changed.
+                if store.key.is_none() {
+                    store.last_key = entry.key().map(str::to_owned).or_else(|| before.last_key.clone());
+                }
+            }
+            if let Some(key) = entry.key().filter(|k| Some(*k) != package.key.as_deref()) {
                 let takes_over = match (&entry.store, source.store()) {
                     (Some(_), Some(_)) => true,
                     (None, Some(store)) => matches!(
                         &entry.item.author,
                         Author::Verified { username: Some(name), .. } if name.trim().eq_ignore_ascii_case(store.publisher.trim())
                     ),
-                    _ => self.same_account(key, &package.key, &id).await,
+                    _ => self.same_account(key, &signer, &id).await,
                 };
                 if takes_over {
                     rotated_from = Some(key.to_owned());
@@ -298,9 +379,13 @@ impl Plugins {
         let local = zeron_rpc::caller().is_local();
         let author = match source.store() {
             Some(store) => super::scan::store_author(store),
-            None => self.resolve_now(&package.key, Some(&id)).await,
+            None => self.resolve_now(&signer, Some(&id)).await,
         };
         let from_store = source.store().is_some();
+        // A store version Zeron hasn't verified (by the record fetched for
+        // this install): taking it always asks you, even when it asks for
+        // nothing new (amendment 45).
+        let unverified = source.store().is_some_and(|s| !s.verified);
         let version = package.manifest.version.clone();
         let plugins_dir = self.inner.plugins_dir.clone();
         let staged = package.clone();
@@ -332,7 +417,7 @@ impl Plugins {
                         id.clone(),
                         Decision {
                             allowed: true,
-                            author_key: Some(package.key.clone()),
+                            author_key: package.key.clone(),
                             permissions,
                             content_hash: None,
                             off: false,
@@ -369,13 +454,23 @@ impl Plugins {
                 }
             }
         })?;
+        if replaced.is_some() && unverified {
+            self.update_state(|state| {
+                if let Some(d) = state.decisions.get_mut(&id)
+                    && d.allowed
+                {
+                    d.reask = true;
+                }
+            })?;
+        }
         self.update_state(|state| {
             // A block was for the version it replaced.
             if state.blocked.get(&id).is_some_and(|b| b.version != version) {
                 state.blocked.remove(&id);
             }
-            // Installing a pre-release from the store takes its later ones.
-            if from_store && super::version::Version::parse(&version).is_ok_and(|v| v.is_prerelease()) {
+            // Installing a pre-release from the store takes its later ones
+            // (the person's choice: an agent's install never opts them in).
+            if from_store && person && super::version::Version::parse(&version).is_ok_and(|v| v.is_prerelease()) {
                 state.prerelease.insert(id.clone());
             }
         })?;
@@ -463,7 +558,7 @@ impl Plugins {
                     &installed,
                     &fetched,
                     source,
-                    fetched.key != c.key && self.same_account(&c.key, &fetched.key, &c.id).await,
+                    fetched.key.as_deref() != Some(c.key.as_str()) && self.same_account(&c.key, fetched.key.as_deref().unwrap_or_default(), &c.id).await,
                 ) {
                     Some(found) => {
                         let keep = found.refused.is_none().then_some(&fetched);
@@ -523,12 +618,21 @@ impl Plugins {
         json!({ "updates": updates, "errors": errors })
     }
 
-    async fn update(&self, id: &str) -> Result<RpcReply, RpcError> {
+    async fn update(&self, id: &str, verified_only: bool) -> Result<RpcReply, RpcError> {
         self.rescan().await;
         let entry = self.entry(id).ok_or_else(|| failed(format!("There's no plugin {id}")))?;
         if entry.item.builtin {
             return Err(failed("Built-in plugins update when Zeron does"));
         }
+        // An update is the person's (or their other device's): never an
+        // agent's, whatever let the call through.
+        if !Self::by_person() {
+            return Err(Self::needs_person(&entry.item.name));
+        }
+        // A plugin this device takes verified updates of takes nothing its
+        // record doesn't say is verified, now: not when the store can't be
+        // asked either.
+        let verified_only = verified_only || (entry.store.is_some() && lock(&self.inner.state).updates_for(id) == super::status::UpdatePreference::Verified);
         let mut found = install::found(&self.inner.plugins_dir, id, &entry.item.hash);
         if found.is_none() {
             let checked = self.check_updates(Some(id)).await;
@@ -544,14 +648,28 @@ impl Plugins {
             return Err(failed(refused));
         }
         let path = install::found_package_path(&self.inner.plugins_dir, id);
-        let package = blocking(move || package::read(&path, &install::WORDS).and_then(install::parse)).await?;
+        // Unsigned only as the store's, when its record named no signer (a
+        // deploy token's version); from anywhere else, signed.
+        let signed = found.source.as_ref().and_then(|s| s.store()).is_none_or(|s| s.key.is_some());
+        let package = blocking(move || package::read(&path, &install::WORDS).and_then(|raw| install::parse_from_store(raw, signed))).await?;
         if package.hash != found.hash {
             return Err(failed("The update changed since it was found; check again"));
         }
-        let source = found
+        let mut source = found
             .source
             .or_else(|| Source::load(Path::new(&entry.item.dir)))
             .ok_or_else(|| failed("Where it came from isn't known"))?;
+        // From the store: whether it's verified is the store's record's,
+        // asked now, never what the check remembered (unknown: not).
+        if let Some(store) = source.store.as_mut().filter(|_| source.kind == install::STORE) {
+            store.verified = self.verified_now(id, &found.version, &package.hash, package.key.as_deref()).await.map_err(failed)?;
+            if verified_only && !store.verified {
+                return Err(failed(install::failure(
+                    install::reason::NOT_VERIFIED,
+                    format!("{} {} isn't verified by Zeron: an update that isn't is taken on its own, from its sheet", entry.item.name, found.version),
+                )));
+            }
+        }
         self.install_package(package, source).await
     }
 
@@ -562,6 +680,13 @@ impl Plugins {
     async fn reinstall(&self, id: &str) -> Result<RpcReply, RpcError> {
         self.rescan().await;
         let entry = self.entry(id).ok_or_else(|| failed(format!("There's no plugin {id}")))?;
+        // It starts over what the person allowed: theirs to do.
+        if !Self::by_person() {
+            return Err(failed(install::failure(
+                install::reason::NEEDS_PERSON,
+                format!("Installing {} again is the person's, in Zeron's window", entry.item.name),
+            )));
+        }
         if entry.item.builtin {
             return Err(failed("Built-in plugins update when Zeron does"));
         }
@@ -640,6 +765,20 @@ impl Plugins {
             }
         });
         lock(&self.inner.tasks).push(task);
+        let weak = std::sync::Arc::downgrade(&self.inner);
+        let (first, every) = takedown_every();
+        let feed = runtime.spawn(async move {
+            tokio::time::sleep(first).await;
+            loop {
+                let Some(inner) = weak.upgrade() else { return };
+                let plugins = Plugins { inner };
+                plugins.check_takedowns().await;
+                plugins.check_publishes().await;
+                drop(plugins);
+                tokio::time::sleep(every).await;
+            }
+        });
+        lock(&self.inner.tasks).push(feed);
     }
 }
 
@@ -654,3 +793,26 @@ pub(super) fn annotate(plugins_dir: &Path, item: &mut super::scan::PluginItem) {
     item.update = install::found(plugins_dir, &item.id, &item.hash).map(|f| f.shown());
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_take_down_interval_setting_only_ever_shortens() {
+        let built_in = (FIRST_CHECK, TAKEDOWN_EVERY);
+        assert_eq!(takedown_every_from(shorter(None)), built_in);
+        // Zero, junk, or longer than built in: ignored.
+        for ignored in ["0", "", "soon", "-5", "1.5", "901", "3600", "18446744073709551616"] {
+            assert_eq!(shorter(Some(ignored)), None, "{ignored:?}");
+        }
+        // Shorter: taken, and the first read never waits longer than built in.
+        assert_eq!(takedown_every_from(shorter(Some("1"))), (Duration::from_secs(1), Duration::from_secs(1)));
+        assert_eq!(takedown_every_from(shorter(Some(" 600 "))), (FIRST_CHECK, Duration::from_secs(600)));
+        assert_eq!(takedown_every_from(shorter(Some("900"))), (FIRST_CHECK, TAKEDOWN_EVERY));
+        // An account with no plugins: looked at hourly unless a setting
+        // shortens it (never by the feed's interval alone).
+        assert_eq!(super::super::store::publishes_idle(None), Duration::from_secs(60 * 60));
+        assert_eq!(super::super::store::publishes_idle(Some(Duration::from_secs(1))), Duration::from_secs(1));
+    }
+}

@@ -144,12 +144,23 @@ jobs:
         if: steps.changed.outputs.changed == 'true'
         working-directory: edge
         run: npm run card-assets
+      # The plugin store's D1 schema (edge/migrations/store), before the
+      # worker that reads it: a failed migration stops the deploy. Applied
+      # migrations are recorded in the database, so this is a no-op when
+      # nothing is new.
+      - name: store migrations
+        if: steps.changed.outputs.changed == 'true' && env.CLOUDFLARE_API_TOKEN != ''
+        working-directory: edge
+        run: npx wrangler d1 migrations apply STORE_DB --remote
       - name: deploy
         if: steps.changed.outputs.changed == 'true' && env.CLOUDFLARE_API_TOKEN != ''
         working-directory: edge
         run: npx wrangler deploy
 
-  # Static landing page (zeron.sh) — assets-only worker, no build step.
+  # zeron.sh (apps/landing): the landing page and the plugin store's pages,
+  # an Astro site on a Worker. `npm run deploy` installs, type checks,
+  # builds, runs the tests (Chromium for the browser ones) and only then
+  # deploys; without a token the same gate runs and nothing is deployed.
   landing:
     runs-on: ubuntu-latest
     environment: cloudflare
@@ -177,14 +188,20 @@ jobs:
         if: steps.changed.outputs.changed == 'true'
         with:
           node-version: 22
-      - name: test
+          cache: npm
+          cache-dependency-path: apps/landing/package-lock.json
+      - name: Chromium, for the browser tests
         if: steps.changed.outputs.changed == 'true'
         working-directory: apps/landing
-        run: node --test *.test.mjs
-      - name: deploy
+        run: npm ci && npx playwright install --with-deps chromium
+      - name: check, test and deploy
         if: steps.changed.outputs.changed == 'true' && env.CLOUDFLARE_API_TOKEN != ''
         working-directory: apps/landing
-        run: npx wrangler@4 deploy
+        run: npm run deploy
+      - name: check and test (no token, nothing deployed)
+        if: steps.changed.outputs.changed == 'true' && env.CLOUDFLARE_API_TOKEN == ''
+        working-directory: apps/landing
+        run: npm ci && npm run check && npm test
 
   # www.zeron.sh → zeron.sh 301 (see apps/www-redirect/wrangler.jsonc).
   www-redirect:

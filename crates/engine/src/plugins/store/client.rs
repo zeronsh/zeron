@@ -1,6 +1,6 @@
 //! The store's HTTP routes at the edge (`/store/v1/…`, the plan's
 //! contract), as a device calls them: anonymously, with the signed-in
-//! session's bearer, or signed with a deploy key (CI).
+//! session's bearer, or a deploy token's (CI).
 //!
 //! Replies the device acts on (a plugin's record, its package, the batched
 //! update check) are read into types here, each field the contract names
@@ -18,8 +18,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::deploy_key::DeployKey;
+use super::deploy_token::DeployToken;
 use crate::plugins::install::{self, failure};
+use crate::plugins::listing;
 use crate::plugins::package::MAX_PACKAGE_BYTES;
 
 const TIMEOUT: Duration = Duration::from_secs(60);
@@ -36,7 +37,7 @@ pub mod reason {
     pub const STORE_ERROR: &str = "store_error";
     /// What the store sent isn't what its record says (hash, version, key,
     /// publisher): never installed.
-    pub const STORE_MISMATCH: &str = "store_mismatch";
+    pub const STORE_MISMATCH: &str = crate::plugins::install::reason::STORE_MISMATCH;
 }
 
 /// How a request proves who sends it.
@@ -47,8 +48,8 @@ pub enum Caller {
     /// The signed-in session's bearer, when there is one (none: as
     /// anonymous).
     Session(Arc<dyn zeron_rpc::TokenSource>),
-    /// A deploy key's signed request (CI).
-    DeployKey(Arc<DeployKey>),
+    /// A deploy token, as a bearer (CI).
+    DeployToken(Arc<DeployToken>),
 }
 
 /// The edge's store routes.
@@ -71,6 +72,42 @@ fn segment(text: &str) -> String {
     out
 }
 
+/// Whether every segment of `path` (no query) is one the URL keeps as
+/// written: never empty, `.` or `..` (spelled out or percent-encoded),
+/// which a URL resolves away and so would send the request elsewhere.
+fn plain_segments(path: &str) -> bool {
+    path.split('?').next().unwrap_or(path).split('/').skip(1).all(|segment| {
+        let lower = segment.to_ascii_lowercase().replace("%2e", ".");
+        !segment.is_empty() && lower != "." && lower != ".."
+    })
+}
+
+/// `url` as the edge the store CLI may sign requests for: `https://`, or
+/// `http://` on this machine (loopback), with no path, query, fragment or
+/// user. Its base, without a trailing slash.
+pub fn edge_base(url: &str) -> Result<String, String> {
+    let bad = |why: &str| format!("ZERON_EDGE_URL {why}");
+    let parsed = url::Url::parse(url.trim()).map_err(|_| bad("isn't a URL"))?;
+    let loopback = match parsed.host() {
+        Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => return Err(bad("has no host")),
+    };
+    match parsed.scheme() {
+        "https" => {}
+        "http" if loopback => {}
+        _ => return Err(bad("is https (http only on this machine)")),
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(bad("can't carry a user or password"));
+    }
+    if parsed.path() != "/" || parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(bad("is the edge's address alone, with no path (like https://zeron.sh)"));
+    }
+    Ok(parsed.as_str().trim_end_matches('/').to_owned())
+}
+
 /// A `/`-separated path (a file in a package), each part a segment.
 fn segments(path: &str) -> String {
     path.split('/').map(segment).collect::<Vec<_>>().join("/")
@@ -89,6 +126,12 @@ pub struct Search {
     /// every listed plugin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub featured: Option<bool>,
+    /// Only plugins whose newest version is verified (`verified=1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified: Option<bool>,
+    /// One publisher's plugins, by username.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -105,6 +148,8 @@ impl Search {
             ("category", self.category.as_deref()),
             ("keyword", self.keyword.as_deref()),
             ("featured", (self.featured == Some(true)).then_some("true")),
+            ("verified", (self.verified == Some(true)).then_some("1")),
+            ("author", self.author.as_deref()),
             ("sort", self.sort.as_deref()),
             ("cursor", self.cursor.as_deref()),
             ("limit", limit.as_deref()),
@@ -157,17 +202,31 @@ pub struct Detail {
     pub author: Publisher,
     #[serde(default, deserialize_with = "nullable")]
     pub package: PackageRecord,
+    /// Its `version` is verified.
+    #[serde(default, deserialize_with = "nullable")]
+    pub verified: bool,
+    /// The newest verified listed version, if any (installed through the
+    /// one-version route).
+    #[serde(default, deserialize_with = "nullable")]
+    pub verified_version: Option<String>,
 }
 
-/// One version, as `GET /store/v1/plugins/:id/versions` lists it.
+/// One version, as `GET /store/v1/plugins/:id/versions` lists it and
+/// `…/versions/:version` answers it.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct VersionRecord {
     #[serde(default, deserialize_with = "nullable")]
     pub version: String,
+    /// `listed` or `yanked` (what the public sees).
     #[serde(default, deserialize_with = "nullable")]
     pub status: String,
     #[serde(default, deserialize_with = "nullable")]
     pub yanked: bool,
+    /// A reviewer verified it. Required: a version that doesn't say isn't
+    /// read.
+    pub verified: bool,
+    #[serde(default, deserialize_with = "nullable")]
+    pub verified_at: Option<i64>,
     #[serde(default, deserialize_with = "nullable")]
     pub hash: String,
     #[serde(default, deserialize_with = "nullable")]
@@ -220,10 +279,43 @@ pub struct Offer {
     pub added: Vec<String>,
     #[serde(default, deserialize_with = "nullable")]
     pub removed: Vec<String>,
-    /// The caller's own version, still in review (offered to its author's
-    /// devices alone).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub in_review: bool,
+    #[serde(default, deserialize_with = "nullable")]
+    pub prerelease: bool,
+    /// A reviewer verified it. Required: an offer that doesn't say is
+    /// unreadable.
+    pub verified: bool,
+    #[serde(default, deserialize_with = "nullable")]
+    pub verified_at: Option<i64>,
+    /// When this offer isn't verified: the newest verified version newer
+    /// than the one installed, if there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_update: Option<Box<Offer>>,
+}
+
+/// The take-down feed (`GET /store/v1/takedowns?after=<seq>`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Takedowns {
+    #[serde(default, deserialize_with = "nullable")]
+    pub events: Vec<TakedownEvent>,
+    /// The last `seq` there is: where to continue from after a reset.
+    #[serde(default, deserialize_with = "nullable")]
+    pub head: u64,
+    /// The device's place is gone (or it had none): run the full update
+    /// check, then continue from `head`.
+    #[serde(default, deserialize_with = "nullable")]
+    pub reset: bool,
+}
+
+/// A version taken down or restored, in the order the store did it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct TakedownEvent {
+    pub seq: u64,
+    /// `take_down` or `restore`.
+    pub kind: String,
+    pub id: String,
+    pub version: String,
+    #[serde(default, deserialize_with = "nullable")]
+    pub reason: String,
 }
 
 /// A version taken down and blocked: devices turn it off.
@@ -291,6 +383,9 @@ impl StoreClient {
             http: reqwest::Client::builder()
                 .timeout(TIMEOUT)
                 .user_agent(concat!("Zeron/", env!("CARGO_PKG_VERSION")))
+                // Nothing in the store's contract redirects: a misroute
+                // fails here, loudly, rather than being followed elsewhere.
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
         }
@@ -300,10 +395,34 @@ impl StoreClient {
         &self.base
     }
 
+    /// Plugin `id`'s page on the store's website: the site beside this edge
+    /// (`edge.zeron.sh` → `zeron.sh`), at `/plugins/<id>`.
+    pub fn page_url(&self, id: &str) -> String {
+        let site = url::Url::parse(&self.base)
+            .ok()
+            .map(|mut url| {
+                if let Some(host) = url.host_str().and_then(|h| h.strip_prefix("edge.")).map(str::to_owned) {
+                    let _ = url.set_host(Some(&host));
+                }
+                url.as_str().trim_end_matches('/').to_owned()
+            })
+            .unwrap_or_else(|| self.base.clone());
+        format!("{site}/plugins/{}", segment(id))
+    }
+
     /// `method path` (path from `/store/v1`, query included) with `body`,
     /// as `caller`, its reply read up to `limit` bytes: `(status, bytes)` for
     /// a 2xx, else the failure.
     async fn send(&self, method: reqwest::Method, path: &str, body: Option<(Vec<u8>, &str)>, caller: &Caller, limit: u64) -> Result<Vec<u8>, String> {
+        self.exchange(method, path, body, caller, limit).await.map_err(|(failure, _)| failure)
+    }
+
+    /// As [`Self::send`], a refusal with its listing fields ([`refused_fields`]).
+    async fn exchange(&self, method: reqwest::Method, path: &str, body: Option<(Vec<u8>, &str)>, caller: &Caller, limit: u64) -> Result<Vec<u8>, (String, Value)> {
+        let plain = |failure: String| (failure, Value::Null);
+        if !plain_segments(path) {
+            return Err(plain(failure(reason::NOT_IN_STORE, "That isn't a name the store has")));
+        }
         let url = format!("{}{path}", self.base);
         let mut request = self.http.request(method.clone(), &url);
         match caller {
@@ -313,38 +432,36 @@ impl StoreClient {
                     request = request.bearer_auth(token);
                 }
             }
-            Caller::DeployKey(key) => {
-                // The path signed is the URL's path alone.
-                let bare = path.split('?').next().unwrap_or(path);
-                let empty = Vec::new();
-                let signed = body.as_ref().map_or(&empty, |(bytes, _)| bytes);
-                let ts = chrono::Utc::now().timestamp_millis();
-                request = request
-                    .header("Authorization", key.authorization(method.as_str(), bare, signed, ts))
-                    .header(super::deploy_key::CONTENT_SHA256_HEADER, crate::plugins::signing::sha256_hex(signed));
+            Caller::DeployToken(token) => {
+                // (Marked sensitive: never in a log or a debug print.)
+                let Ok(mut value) = reqwest::header::HeaderValue::from_str(&token.authorization()) else {
+                    return Err(plain(failure(super::deploy_token::reason::INVALID_TOKEN, super::deploy_token::DAMAGED)));
+                };
+                value.set_sensitive(true);
+                request = request.header(reqwest::header::AUTHORIZATION, value);
             }
         }
         if let Some((bytes, content_type)) = body {
             request = request.header("Content-Type", content_type).body(bytes);
         }
         let unreachable = |_| failure(reason::STORE_UNREACHABLE, "The store can't be reached right now");
-        let mut response = request.send().await.map_err(unreachable)?;
+        let mut response = request.send().await.map_err(unreachable).map_err(plain)?;
         let status = response.status().as_u16();
         let cap = if (200..300).contains(&status) { limit } else { MAX_JSON_BYTES };
         if response.content_length().is_some_and(|n| n > cap) {
-            return Err(failure(install::reason::TOO_BIG, "The store's answer is too big"));
+            return Err(plain(failure(install::reason::TOO_BIG, "The store's answer is too big")));
         }
         let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(unreachable)? {
+        while let Some(chunk) = response.chunk().await.map_err(unreachable).map_err(plain)? {
             bytes.extend_from_slice(&chunk);
             if bytes.len() as u64 > cap {
-                return Err(failure(install::reason::TOO_BIG, "The store's answer is too big"));
+                return Err(plain(failure(install::reason::TOO_BIG, "The store's answer is too big")));
             }
         }
         if (200..300).contains(&status) {
             return Ok(bytes);
         }
-        Err(refusal(status, &bytes))
+        Err((refusal(status, &bytes), refused_fields(&bytes)))
     }
 
     async fn json(&self, method: reqwest::Method, path: &str, body: Option<Value>, caller: &Caller) -> Result<Value, String> {
@@ -377,16 +494,59 @@ impl StoreClient {
         Ok((value, detail))
     }
 
-    pub async fn versions(&self, id: &str, caller: &Caller) -> Result<(Value, Vec<VersionRecord>), String> {
-        let value = self.json(reqwest::Method::GET, &format!("/store/v1/plugins/{}/versions", segment(id)), None, caller).await?;
-        let versions = Self::typed(value.get("versions").cloned().unwrap_or(Value::Array(Vec::new())))?;
-        Ok((value, versions))
+    /// One page of `id`'s listed and yanked versions, newest first:
+    /// `{versions, total, next_cursor?, prev_cursor?}`, as the store wrote it.
+    pub async fn versions(&self, id: &str, cursor: Option<&str>, limit: Option<u32>, caller: &Caller) -> Result<Value, String> {
+        let mut query = Vec::new();
+        if let Some(cursor) = cursor.map(str::trim).filter(|c| !c.is_empty()) {
+            query.push(format!("cursor={}", segment(cursor)));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={}", limit.clamp(1, 50)));
+        }
+        let query = if query.is_empty() { String::new() } else { format!("?{}", query.join("&")) };
+        self.json(reqwest::Method::GET, &format!("/store/v1/plugins/{}/versions{query}", segment(id)), None, caller).await
+    }
+
+    /// Version `version` of `id`, as the store records it (listed or
+    /// yanked): what a device installs a named version by.
+    /// A record that can't be read (one without `verified`, say: readers
+    /// require it) is `store_mismatch`: nothing is installed by it.
+    pub async fn version(&self, id: &str, version: &str, caller: &Caller) -> Result<(Value, VersionRecord), String> {
+        let path = format!("/store/v1/plugins/{}/versions/{}", segment(id), segment(version));
+        let value = self.json(reqwest::Method::GET, &path, None, caller).await?;
+        let record = serde_json::from_value(value.clone())
+            .map_err(|_| failure(reason::STORE_MISMATCH, format!("The store's record of {id} {version} can't be read (it doesn't say all a record says), so it wasn't installed")))?;
+        Ok((value, record))
+    }
+
+    /// The take-down feed after `after` (none: from the start, which the
+    /// store answers with a reset).
+    pub async fn takedowns(&self, after: Option<u64>) -> Result<Takedowns, String> {
+        let path = after.map_or_else(|| "/store/v1/takedowns".to_owned(), |seq| format!("/store/v1/takedowns?after={seq}"));
+        Self::typed(self.json(reqwest::Method::GET, &path, None, &Caller::Anonymous).await?)
+    }
+
+    /// The store's totals, `{plugins, verified}`.
+    pub async fn stats(&self) -> Result<Value, String> {
+        self.json(reqwest::Method::GET, "/store/v1/stats", None, &Caller::Anonymous).await
     }
 
     /// Version `version`'s package file, up to the largest a package may be.
-    pub async fn package(&self, id: &str, version: &str, caller: &Caller) -> Result<Vec<u8>, String> {
+    /// Read no further than `bytes`, the size the store's record says (a
+    /// package can be): anything longer isn't it.
+    pub async fn package(&self, id: &str, version: &str, caller: &Caller, bytes: u64) -> Result<Vec<u8>, String> {
+        if bytes == 0 || bytes > MAX_PACKAGE_BYTES {
+            return Err(failure(reason::STORE_MISMATCH, "The store's record doesn't give a size a package can be, so nothing was fetched"));
+        }
         let path = format!("/store/v1/plugins/{}/versions/{}/package", segment(id), segment(version));
-        self.send(reqwest::Method::GET, &path, None, caller, MAX_PACKAGE_BYTES).await
+        self.send(reqwest::Method::GET, &path, None, caller, bytes).await.map_err(|error| {
+            if install::reason_of(&error) == Some(install::reason::TOO_BIG) {
+                failure(reason::STORE_MISMATCH, "What the store sent is bigger than its record says, so it wasn't installed")
+            } else {
+                error
+            }
+        })
     }
 
     /// One file of version `version`'s package, at most `limit` bytes.
@@ -403,34 +563,49 @@ impl StoreClient {
 
     // ── Publisher ───────────────────────────────────────────────────────
 
-    /// Submit `package` (a `.zeron-plugin`) as a new version of `id`.
-    pub async fn publish(&self, id: &str, package: Vec<u8>, caller: &Caller) -> Result<Value, String> {
+    /// Submit `package` (a `.zeron-plugin`) as a new version of `id`. A
+    /// refusal comes with its listing fields ([`refused_fields`]).
+    pub async fn publish(&self, id: &str, package: Vec<u8>, caller: &Caller) -> Result<Value, (String, Value)> {
         let path = format!("/store/v1/plugins/{}/versions", segment(id));
-        let bytes = self.send(reqwest::Method::POST, &path, Some((package, "application/json")), caller, MAX_JSON_BYTES).await?;
-        object(&bytes)
+        let bytes = self.exchange(reqwest::Method::POST, &path, Some((package, "application/json")), caller, MAX_JSON_BYTES).await?;
+        object(&bytes).map_err(|failure| (failure, Value::Null))
     }
 
     pub async fn my_plugins(&self, caller: &Caller) -> Result<Value, String> {
         self.json(reqwest::Method::GET, "/store/v1/me/plugins", None, caller).await
     }
 
-    /// `withdraw`, `yank` or `unyank` version `version` of `id`.
+    /// `yank` or `unyank` version `version` of `id`.
     pub async fn version_action(&self, id: &str, version: &str, action: &str, caller: &Caller) -> Result<Value, String> {
         let path = format!("/store/v1/plugins/{}/versions/{}/{}", segment(id), segment(version), segment(action));
         self.json(reqwest::Method::POST, &path, None, caller).await
     }
 
-    pub async fn keys(&self, id: &str, caller: &Caller) -> Result<Value, String> {
-        self.json(reqwest::Method::GET, &format!("/store/v1/plugins/{}/keys", segment(id)), None, caller).await
+    /// The account's deploy tokens (never their secrets).
+    pub async fn tokens(&self, caller: &Caller) -> Result<Value, String> {
+        self.json(reqwest::Method::GET, "/store/v1/me/tokens", None, caller).await
     }
 
-    pub async fn add_key(&self, id: &str, body: Value, caller: &Caller) -> Result<Value, String> {
-        self.json(reqwest::Method::POST, &format!("/store/v1/plugins/{}/keys", segment(id)), Some(body), caller).await
+    /// Make a deploy token: its record as the list shows it, and the token,
+    /// this once. The answer's bytes, and the token's text in what was read
+    /// of them, are wiped once read.
+    pub async fn create_token(&self, body: Value, caller: &Caller) -> Result<(Value, DeployToken), String> {
+        let body = (serde_json::to_vec(&body).unwrap_or_default(), "application/json");
+        let bytes = zeroize::Zeroizing::new(self.send(reqwest::Method::POST, "/store/v1/me/tokens", Some(body), caller, MAX_JSON_BYTES).await?);
+        let mut made = object(&bytes)?;
+        let unreadable = || failure(reason::STORE_ERROR, "The store's answer had no token in it that could be read: revoke it from the list and make another");
+        let token = match made.get_mut("token").map(Value::take) {
+            Some(Value::String(text)) => DeployToken::parse(&zeroize::Zeroizing::new(text)).map_err(|_| unreadable())?,
+            _ => return Err(unreadable()),
+        };
+        if let Some(fields) = made.as_object_mut() {
+            fields.remove("token");
+        }
+        Ok((made, token))
     }
 
-    pub async fn revoke_key(&self, id: &str, key: &str, caller: &Caller) -> Result<Value, String> {
-        let path = format!("/store/v1/plugins/{}/keys/{}", segment(id), segment(key));
-        self.json(reqwest::Method::DELETE, &path, None, caller).await
+    pub async fn revoke_token(&self, id: &str, caller: &Caller) -> Result<Value, String> {
+        self.json(reqwest::Method::DELETE, &format!("/store/v1/me/tokens/{}", segment(id)), None, caller).await
     }
 
     /// Report a listed plugin (`reason`: malware, misleading, broken,
@@ -457,21 +632,43 @@ fn object(bytes: &[u8]) -> Result<Value, String> {
     }
 }
 
+/// A refusal's listing fields, those the edge gave and as a device would
+/// give them: `field` (a manifest key), `cause` (one of
+/// [`listing::cause::ALL`]) and `word` ([`listing::problem_word`]); an
+/// object, empty when it gave none.
+pub fn refused_fields(body: &[u8]) -> Value {
+    let value: Value = serde_json::from_slice(body).unwrap_or_default();
+    let mut fields = serde_json::Map::new();
+    if let Some(field) = value["field"].as_str().filter(|f| !f.is_empty() && f.len() <= 32 && f.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')) {
+        fields.insert("field".into(), serde_json::json!(field));
+    }
+    if let Some(cause) = value["cause"].as_str().filter(|c| listing::cause::ALL.contains(c)) {
+        fields.insert("cause".into(), serde_json::json!(cause));
+    }
+    if let Some(word) = value["word"].as_str().map(listing::problem_word).filter(|w| !w.is_empty()) {
+        fields.insert("word".into(), serde_json::json!(word));
+    }
+    Value::Object(fields)
+}
+
 /// A non-2xx answer as a failure: the edge's own word when it gave one.
 fn refusal(status: u16, body: &[u8]) -> String {
     let value: Value = serde_json::from_slice(body).unwrap_or_default();
     let word = value["error"].as_str().filter(|w| !w.is_empty() && w.len() <= 64 && w.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'));
-    let message: String = value["message"].as_str().unwrap_or("").chars().filter(|c| !c.is_control()).take(500).collect();
+    let message: String = value["message"].as_str().unwrap_or("").chars().filter(|c| !listing::unseen_char(*c)).take(500).collect();
     match (word, status) {
         // The body changed on its way (a proxy, a broken connection): sending
         // it again is the fix.
         // (The edge's word for a plugin or version it doesn't show this caller.)
         (Some("not_found"), 404) => failure(reason::NOT_IN_STORE, if message.is_empty() { "The store has no such plugin".to_owned() } else { message }),
-        (Some("body_mismatch"), _) => failure("body_mismatch", "What reached the store isn't what was signed (it changed on the way): send it again"),
         (Some(word), _) => failure(word, if message.is_empty() { format!("The store refused it ({status})") } else { message }),
         (None, 404) => failure(reason::NOT_IN_STORE, "The store has no such plugin"),
         (None, 429) => failure(install::reason::RATE_LIMITED, "The store is turning away requests from here for now; try again later"),
         (None, 500..) => failure(reason::STORE_UNREACHABLE, format!("The store couldn't answer just now ({status})")),
+        // (No body to say more: who's asking wasn't accepted, or may not.)
+        (None, 401) => failure("unauthenticated", "The store didn't accept who's asking (401)"),
+        (None, 403) => failure("forbidden", "The store refused it (403)"),
+        (None, 300..=399) => failure(reason::STORE_ERROR, format!("The store sent it elsewhere ({status}), which it never does: nothing was fetched")),
         (None, _) => failure(reason::STORE_ERROR, format!("The store refused it ({status})")),
     }
 }
@@ -494,6 +691,40 @@ mod tests {
     }
 
     #[test]
+    fn the_edge_the_cli_signs_for_is_its_address_alone() {
+        assert_eq!(edge_base("https://zeron.sh").as_deref(), Ok("https://zeron.sh"));
+        assert_eq!(edge_base("https://zeron.sh/").as_deref(), Ok("https://zeron.sh"));
+        assert_eq!(edge_base("http://127.0.0.1:8787").as_deref(), Ok("http://127.0.0.1:8787"));
+        assert_eq!(edge_base("http://localhost:8787/").as_deref(), Ok("http://localhost:8787"));
+        assert_eq!(edge_base("http://[::1]:8787").as_deref(), Ok("http://[::1]:8787"));
+        for refused in [
+            "http://zeron.sh", "http://10.0.0.2:8787", "ftp://zeron.sh", "https://zeron.sh/api", "https://zeron.sh/?x=1",
+            "https://zeron.sh/#x", "https://user:pw@zeron.sh", "zeron.sh", "",
+        ] {
+            assert!(edge_base(refused).is_err(), "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_path_a_url_would_resolve_away_is_never_sent() {
+        assert!(plain_segments("/store/v1/plugins/focus/keys/abc"));
+        assert!(plain_segments("/store/v1/plugins?q=..%2e"), "(a query is the query's)");
+        for path in ["/store/v1/plugins/focus/keys/..", "/store/v1/plugins/focus/keys/.", "/store/v1/plugins/focus/keys/",
+                     "/store/v1/plugins/focus/keys/%2E%2e", "/store/v1/plugins/focus/keys/.%2E", "/store/v1/plugins//keys/x"] {
+            assert!(!plain_segments(path), "{path}");
+        }
+        assert_eq!(segment(".."), "..", "(segment escapes; send() refuses what still resolves)");
+    }
+
+    #[tokio::test]
+    async fn revoking_dot_dot_sends_nothing() {
+        // (A closed port: had it been sent, the word would be store_unreachable.)
+        let client = StoreClient::new("http://127.0.0.1:9");
+        let error = client.revoke_token("..", &Caller::Anonymous).await.unwrap_err();
+        assert_eq!(install::reason_of(&error), Some(reason::NOT_IN_STORE), "{error}");
+    }
+
+    #[test]
     fn refusals_carry_the_edge_s_word() {
         let said = |status, body: &str| refusal(status, body.as_bytes());
         assert_eq!(said(409, r#"{"error":"id_taken","message":"Someone has that id."}"#), "id_taken: Someone has that id.");
@@ -507,6 +738,21 @@ mod tests {
         // A word the edge didn't really give (not a plain word) isn't taken as one.
         assert_eq!(install::reason_of(&said(400, r#"{"error":"Bad: thing"}"#)), Some(reason::STORE_ERROR));
         assert!(!said(400, "{\"error\":\"x\",\"message\":\"a\\u0007b\"}").contains('\u{7}'));
+        // No body to say more: who's asking wasn't accepted (not "try again").
+        assert_eq!(install::reason_of(&said(401, "")), Some("unauthenticated"));
+        assert_eq!(install::reason_of(&said(403, "<html>")), Some("forbidden"));
+        assert_eq!(install::reason_of(&said(302, "")), Some(reason::STORE_ERROR));
+    }
+
+    #[test]
+    fn a_refusal_s_listing_fields_are_taken_clean() {
+        let fields = |body: &str| refused_fields(body.as_bytes());
+        let body = r#"{"error":"bad_listing","message":"Its name says \"verified\"","field":"name","cause":"mark_word","word":"Ver\u202eified"}"#;
+        assert_eq!(fields(body), serde_json::json!({ "field": "name", "cause": "mark_word", "word": "Verified" }));
+        // Only causes of the closed list, fields that are plain words, words of at most 64 characters.
+        let odd = format!(r#"{{"field":"Name: x","cause":"made_up","word":"{}"}}"#, "w".repeat(100));
+        assert_eq!(fields(&odd), serde_json::json!({ "word": "w".repeat(64) }));
+        assert_eq!(fields("<html>"), serde_json::json!({}));
     }
 
     /// The store adds fields as it grows (amendments 39–41: `listed_at`,
@@ -524,13 +770,20 @@ mod tests {
         }))
         .unwrap();
         assert_eq!((detail.id.as_str(), detail.author.username.as_deref(), detail.package.bytes), ("focus", Some("ada"), 9));
-        let versions: Vec<VersionRecord> = StoreClient::typed(json!([{ "version": "1.2.0", "status": "approved", "hash": "h", "listed_at": 1, "asks_changed": true }])).unwrap();
-        assert_eq!(versions[0].status, "approved");
+        let versions: Vec<VersionRecord> = StoreClient::typed(json!([{ "version": "1.2.0", "status": "listed", "hash": "h", "verified": true, "via": "device", "listed_at": 1, "asks_changed": true }])).unwrap();
+        assert_eq!((versions[0].status.as_str(), versions[0].verified), ("listed", true));
         let updates = Updates::read(&json!({
-            "updates": [{ "id": "focus", "version": "1.3.0", "hash": "h", "listed_at": 1, "icon": "icon.svg" }],
+            "updates": [{ "id": "focus", "version": "1.3.0", "hash": "h", "verified": false, "listed_at": 1, "icon": "icon.svg",
+                          "verified_update": { "id": "focus", "version": "1.2.5", "hash": "g", "verified": true, "later": 1 } }],
             "blocked": [{ "id": "old", "version": "1.0.0", "reason": "r", "blocked_at": 1 }],
             "total": 2,
         }));
         assert_eq!((updates.updates.len(), updates.blocked.len(), updates.unreadable.len()), (1, 1, 0));
+        assert_eq!(updates.updates[0].verified_update.as_ref().map(|v| (v.version.as_str(), v.verified)), Some(("1.2.5", true)));
+        // `verified` is required: a version or an offer that doesn't say is
+        // never read as either.
+        assert!(StoreClient::typed::<VersionRecord>(json!({ "version": "1.2.0", "status": "listed", "hash": "h" })).is_err());
+        let silent = Updates::read(&json!({ "updates": [{ "id": "focus", "version": "1.3.0", "hash": "h" }] }));
+        assert_eq!((silent.updates.len(), silent.unreadable.clone()), (0, vec![Some("focus".to_owned())]));
     }
 }

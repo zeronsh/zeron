@@ -143,6 +143,20 @@ jobs:
     with:
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).edge || '' }}
 
+  site:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.suites).site
+    uses: ./.github/workflows/site-tests.yml
+    with:
+      pass-key: ${{ fromJSON(needs.plan.outputs.keys).site || '' }}
+
+  store-e2e:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.suites).store-e2e
+    uses: ./.github/workflows/plugin-store-e2e.yml
+    with:
+      pass-key: ${{ fromJSON(needs.plan.outputs.keys).store-e2e || '' }}
+
   installer:
     needs: [plan, admit]
     if: fromJSON(needs.plan.outputs.suites).installer
@@ -209,7 +223,7 @@ jobs:
 
   result:
     name: CI result
-    needs: [plan, admit, linux-core, cursor, edge, installer, voice, windows, macos, ios, android, zgx]
+    needs: [plan, admit, linux-core, cursor, edge, site, store-e2e, installer, voice, windows, macos, ios, android, zgx]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

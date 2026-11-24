@@ -1,25 +1,81 @@
 {
-  // Landing page: an Astro site built to static assets, no worker script.
-  // `wrangler deploy` builds it first (`build` below): a clean install, the
-  // type check, the build into ./dist and the tests, so a deploy from CI
+  // zeron.sh: an Astro site on a Worker. Every page that can be is
+  // prerendered and served as a static asset (./dist/client); the routes
+  // that need a server (the plugin store, its account and admin pages) are
+  // rendered by the Worker, which reads the store and the sign-in session
+  // from the edge worker through the EDGE service binding. The site never
+  // holds a WorkOS secret.
+  // Deploy with `npm run deploy`: a clean install, the type check, the build
+  // into ./dist and the tests, then `wrangler deploy`, so a deploy from CI
   // (.github/workflows/deploy.yml, on a push to main that touches this
-  // folder) or from this directory uploads only a build that passed.
-  // The install surface (/install.sh, /releases/*) is served by the edge
-  // worker via path routes on the same hostname; path routes beat this
-  // custom domain, so this worker only ever sees page traffic. (The worker
-  // keeps its historical "comet-landing" name; renaming a worker means a new
-  // worker. comet.zeron.sh stays attached for old links.)
-  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  // folder) or from this directory uploads only a build that passed. The
+  // build writes the deployable config (dist/server/wrangler.json) and
+  // points wrangler at it, so wrangler itself never builds.
+  // The install surface (/install.sh, /releases/*), member cards (/@*) and
+  // web sign-in (/auth/web/*) are served by the edge worker via path routes
+  // on the same hostname; path routes beat this custom domain, so this
+  // worker only ever sees the site's own traffic. (The worker keeps its
+  // historical "comet-landing" name; renaming a worker means a new worker.
+  // comet.zeron.sh stays attached for old links.)
+  "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "comet-landing",
+  // The front door (src/worker.ts): it routes each request past the cache or
+  // through it, by whether it carries a session cookie, to the site (Site).
+  "main": "./src/worker.ts",
   "compatibility_date": "2026-07-01",
+  // Node's APIs where a dependency reaches for them (as the edge worker has).
+  "compatibility_flags": ["nodejs_compat"],
   "routes": [
     { "pattern": "zeron.sh", "custom_domain": true },
     { "pattern": "comet.zeron.sh", "custom_domain": true }
   ],
   "workers_dev": true,
-  "build": { "command": "npm ci && npm run check && npm test" },
   "assets": {
     "directory": "./dist",
-    "not_found_handling": "404-page"
+    // (An address that is no file goes to the Worker, which answers with
+    // the 404 page when it has no route for it either.)
+    "binding": "ASSETS"
+  },
+  // The store's data and the sign-in session.
+  "services": [{ "binding": "EDGE", "service": "comet-native-edge" }],
+  // The site's own origin: the store's paths asked for on another name of
+  // this Worker (comet.zeron.sh, its workers.dev address) are sent here.
+  "vars": { "SITE_ORIGIN": "https://zeron.sh" },
+  // The Worker cache in front of the Worker: public store pages say how
+  // long they may be kept (Astro's route cache); everything else is no-store.
+  "cache": { "enabled": true },
+  // ...but only for the site itself, never the front door: it must run for
+  // every request, to send a signed-in one past the cache.
+  "exports": {
+    "default": { "type": "worker", "cache": { "enabled": false } },
+    "Site": { "type": "worker", "cache": { "enabled": true } }
+  },
+  // CPU per request, a backstop: a fault anywhere in the page's own code is
+  // cut short by the platform rather than running to the default 30 s. Set
+  // from what a page can cost (src/lib/store/markdown.ts): the honest worst,
+  // a README of code at its 512 KB cap and eight notes at their 64 KB, is
+  // about 0.45 s; the worst the renderer's bounds allow (every document's
+  // highlighting spent on the slowest grammar, the rest the slowest
+  // markup) about 1.6 s. 3 s is about 7 times the first and 2 times the
+  // second, so a page within the bounds is always drawn.
+  "limits": { "cpu_ms": 3000 },
+  "env": {
+    // The site's staging copy, at https://site-staging.zeron.sh: the same
+    // site on its own worker (zeron-landing-staging), which holds only that
+    // domain and so can never take zeron.sh, reading the staging edge.
+    // Built with CLOUDFLARE_ENV=staging (`npm run deploy:staging`); the
+    // build bakes the choice into dist/server/wrangler.json.
+    "staging": {
+      "name": "zeron-landing-staging",
+      "routes": [{ "pattern": "site-staging.zeron.sh", "custom_domain": true }],
+      "services": [{ "binding": "EDGE", "service": "zeron-edge-staging" }],
+      "vars": { "SITE_ORIGIN": "https://site-staging.zeron.sh" },
+      "cache": { "enabled": true },
+      "exports": {
+        "default": { "type": "worker", "cache": { "enabled": false } },
+        "Site": { "type": "worker", "cache": { "enabled": true } }
+      },
+      "limits": { "cpu_ms": 3000 }
+    }
   }
 }

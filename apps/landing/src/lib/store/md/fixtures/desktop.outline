@@ -1,0 +1,296 @@
+=== focus-timer.md
+h1 "Focus timer"
+p "A 25 minute timer in a chat's header. Start it, and it counts down."
+p ""
+  picture "The timer in a chat's header" <- shots/header.png
+p ""
+  picture "A picture from the web" <- https://example.com/tracker.png
+p "Read the guide for more."
+  link "the guide" -> https://example.com/guide
+p "See Your chats, your key, Allow and a picture."
+  link "Your chats" -> zeron-chat:abc
+  link "your key" -> zeron-file:/Users/you/.ssh/id_ed25519
+  link "Allow" -> zeron-invoke:allow
+  link "a picture" -> zeron-image:1
+quote
+  p "See Your chats, your key, Allow and a picture."
+p "<script>zeron.decide(true)</script>"
+h2 "What it does"
+list bulleted
+  item task=none
+    p "Counts down from 25 minutes."
+  item task=none
+    p "Says when it's done."
+h1 "Questions"
+h3 "Does it ring?"
+p "Once, softly."
+=== screenshot-tray.md
+h1 "Screenshot tray"
+p ""
+  picture "shot 1" <- shots/s1.png
+p ""
+  picture "shot 2" <- shots/s2.png
+p ""
+  picture "shot 3" <- shots/s3.png
+p ""
+  picture "shot 4" <- shots/s4.png
+p ""
+  picture "shot 5" <- shots/s5.png
+p ""
+  picture "shot 6" <- shots/s6.png
+p ""
+  picture "shot 7" <- shots/s7.png
+p ""
+  picture "shot 8" <- shots/s8.png
+p ""
+  picture "shot 9" <- shots/s9.png
+p ""
+  picture "shot 10" <- shots/s10.png
+p ""
+  picture "shot 11" <- shots/s11.png
+p ""
+  picture "shot 12" <- shots/s12.png
+p ""
+  picture "shot 13" <- shots/s13.png
+p ""
+  picture "shot 14" <- shots/s14.png
+p ""
+  picture "shot 15" <- shots/s15.png
+p ""
+  picture "shot 16" <- shots/s16.png
+p ""
+  picture "shot 17" <- shots/s17.png
+p ""
+  picture "shot 18" <- shots/s18.png
+p ""
+  picture "shot 19" <- shots/s19.png
+p ""
+  picture "shot 20" <- shots/s20.png
+p ""
+  picture "shot 21" <- shots/s21.png
+p ""
+  picture "shot 22" <- shots/s22.png
+p ""
+  picture "shot 23" <- shots/s23.png
+p ""
+  picture "shot 24" <- shots/s24.png
+p ""
+  picture "shot 25" <- shots/s25.png
+p ""
+  picture "shot 26" <- shots/s26.png
+p ""
+  picture "shot 27" <- shots/s27.png
+p ""
+  picture "shot 28" <- shots/s28.png
+p ""
+  picture "shot 29" <- shots/s29.png
+p ""
+  picture "shot 30" <- shots/s30.png
+p ""
+  picture "shot 31" <- shots/s31.png
+p ""
+  picture "shot 32" <- shots/s32.png
+p ""
+  picture "shot 33" <- shots/s33.png
+p ""
+  picture "shot 34" <- shots/s34.png
+p ""
+  picture "shot 35" <- shots/s35.png
+p ""
+  picture "shot 36" <- shots/s36.png
+p ""
+  picture "shot 37" <- shots/s37.png
+p ""
+  picture "shot 38" <- shots/s38.png
+p ""
+  picture "shot 39" <- shots/s39.png
+p ""
+  picture "shot 40" <- shots/s40.png
+=== short.md
+h1 "Haiku {commit}"
+p "A haiku for each commit message, from the diff."
+p "It keeps out of your way."
+=== notes.md
+list bulleted
+  item task=none
+    p "Pauses when you leave the chat."
+  item task=none
+    p "Says when it's done."
+=== extremes.md
+h1 "Extremes"
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+h2 "Part 1"
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+h2 "Part 2"
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+p "A paragraph of the longest README the store takes, its words wrapping across the page as any prose does."
+h2 "Part 3"
+=== subset.md
+p ""
+  picture "build" <- https://ci.example.com/badge.svg in https://ci.example.com/runs
+  picture "license" <- https://img.example.com/mit.svg in LICENSE
+h1 "Cost meter"
+p "Shows what each chat costs, as it goes, in the sidebar. No setup, no account; it reads your agents' own usage. A hard break, and a code span with ` in it."
+h2 "Install"
+list ordered from 1
+  item task=none
+    p "Open Settings › Plugins."
+  item task=none
+    p "Find Cost meter."
+  item task=none
+    p "Install it:"
+    code[sh] "zeron plugin install cost-meter"
+h2 "Settings"
+table ["Setting", "What it does", "Default"] align ["left", "center", "right"]
+  row ["limit", "The monthly limit, in dollars.", "50"]
+  row ["warn", "When to warn you | a share of the limit.", "0.8"]
+  row ["currency", "", "USD"]
+h2 "To do"
+list bulleted
+  item task=done
+    p "Per-chat totals"
+  item task=open
+    p "Per-project totals"
+    list bulleted
+      item task=none
+        p "grouped by week"
+      item task=none
+        p "grouped by month"
+  item task=open
+    p "Exports"
+quote
+  p "Note It never sends your usage anywhere."
+  quote
+    p "Quoted twice."
+p "Loose list:"
+list bulleted
+  item task=none
+    p "one"
+  item task=none
+    p "two"
+    p "indented code inside nothing"
+rule
+p "See the guide, Settings, and the changelog or a heading. Mail help@example.com or open https://example.com/issues."
+  link "the guide" -> https://example.com/guide
+  link "Settings" -> https://example.com/settings
+  link "the changelog" -> CHANGELOG.md#changes
+  link "a heading" -> #install
+  link "help@example.com" -> help@example.com
+  link "https://example.com/issues" -> https://example.com/issues
+p "A picture of its own:"
+  picture "The meter" <- shots/meter.png
+p "<details><summary>Raw HTML</summary> is its characters &amp; entities &copy; are what they say.</details>"
+p "Escapes: *not emphasis*, [not a link], 1. not a list."

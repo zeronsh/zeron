@@ -308,6 +308,13 @@ pub fn parse(raw: Vec<u8>) -> Result<Package, String> {
         }
         keep
     });
+    // Of what's written, two paths that are one file on a disk folding
+    // names (or a file where another needs a folder of that name; its
+    // manifest and `.imported.json` among them): refused before anything is
+    // written, on every disk alike, as a plugin's are.
+    if let Some(clash) = super::listing::clashes(decoded.keys().map(String::as_str), &[MANIFEST, IMPORTED]).first() {
+        return Err(format!("This template can't be installed: {}.", clash.words()));
+    }
     Ok(Package {
         manifest,
         key,
@@ -1022,6 +1029,39 @@ mod tests {
         for rel in ignored {
             assert!(!t.join(&rel).exists(), "{rel}");
         }
+    }
+
+    #[test]
+    fn plugins_template_packages_paths_that_fold_alike_are_refused_before_anything_is_written() {
+        let alice = key();
+        let parsed = |paths: &[&str]| {
+            let files: BTreeMap<String, Vec<u8>> = paths.iter().map(|rel| ((*rel).to_owned(), b"-- x".to_vec())).collect();
+            let hashes: FileHashes = files.iter().map(|(r, b)| (r.clone(), signing::sha256_hex(b))).collect();
+            let manifest = alice.sign_manifest_for(TEMPLATE_PAYLOAD_PREFIX, &json!({ "id": "dusk", "name": "Dusk" }), &hashes);
+            let package = json!({
+                "format": FORMAT,
+                "manifest": manifest,
+                "files": files.iter().map(|(r, b)| (r.clone(), json!(B64.encode(b)))).collect::<serde_json::Map<_, _>>(),
+            });
+            parse(serde_json::to_vec(&package).unwrap())
+        };
+        for (paths, names) in [
+            (&["app.luau", "screens/Home.luau", "screens/home.luau"][..], &["screens/Home.luau", "screens/home.luau"][..]),
+            (&["app.luau", "caf\u{e9}.luau", "cafe\u{301}.luau"], &["caf\u{e9}.luau", "cafe\u{301}.luau"]),
+            (&["app.luau", "ds", "DS/tokens.luau"], &["ds", "DS/tokens.luau"]),
+            (&["app.luau", "Zeron-Template.json"], &["Zeron-Template.json", MANIFEST]),
+            (&["app.luau", "zeron-template.j\u{17f}on"], &["zeron-template.j\u{17f}on", MANIFEST]),
+        ] {
+            let error = parsed(paths).map(|_| ()).unwrap_err();
+            assert!(error.starts_with("This template can't be installed:"), "{paths:?}: {error}");
+            for name in names {
+                assert!(error.contains(&format!("{name:?}")), "{paths:?}: {error}");
+            }
+        }
+        // (Its manifest's exact name, a protected file and names that only
+        // look alike are as before: set aside, or anyone's.)
+        let fine = parsed(&["app.luau", "screens/home.luau", "screens/home2.luau", "zeron-template.json", "account/x.luau"]).unwrap();
+        assert_eq!(fine.files.keys().collect::<Vec<_>>(), ["app.luau", "screens/home.luau", "screens/home2.luau"]);
     }
 
     #[test]

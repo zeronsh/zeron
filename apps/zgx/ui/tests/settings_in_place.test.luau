@@ -569,6 +569,24 @@ test("updating the engine says so, then that it runs the new version; the app's 
 	expect(shows(app, PAGE, "The engine couldn't reach the release feed")).to_be(true)
 end)
 
+test("an agent's settings dialog leaves as it was: its rows still its agent's while it fades", function()
+	local app = open("Providers")
+	app:click(`{PAGE} >> role:button "Claude Code settings"`)
+	app:frames(30)
+	local dialog = 'role:dialog "Agent settings"'
+	local said = "Hide Claude Code's own MCP servers"
+	expect(shows(app, dialog, said)).to_be(true)
+	app:click('role:button "Done"')
+	-- (Mid-fade: the same words, nothing in it drawn again.)
+	app:frames(2)
+	expect((app:tree(dialog):match("^[^\n]*"))).never.to_contain("hidden")
+	expect(shows(app, dialog, said)).to_be(true)
+	-- (Past its fade, as time goes: put away.)
+	app:wait('"never shown, only waited past"', { timeout_ms = 400 })
+	app:frames(4)
+	expect((app:tree(dialog):match("^[^\n]*"))).to_contain("hidden")
+end)
+
 test("an agent's settings turn its $ skills and / commands on and off, kept for the composer by agent", function()
 	local app = open("Providers")
 	app:click(`{PAGE} >> role:button "Claude Code settings"`)

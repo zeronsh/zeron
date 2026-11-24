@@ -1,7 +1,7 @@
 import { generateKeyPairSync } from "node:crypto";
 import { kCurrentWorker } from "miniflare";
 import { defineConfig } from "vitest/config";
-import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
+import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-pool-workers";
 import { createBoatFake } from "./test/workerd/boat-fake.ts";
 import { createStripeFake } from "./test/workerd/stripe-fake.ts";
 import { createWorkOsFake } from "./test/workerd/workos-fake.ts";
@@ -25,6 +25,10 @@ import { createWorkOsFake } from "./test/workerd/workos-fake.ts";
 // throwaway ES256 pair so runner JWTs are real.
 const runnerKeys = generateKeyPairSync("ec", { namedCurve: "P-256" });
 
+// The store's D1 schema, applied by test/workerd/store-setup.ts before each
+// test file (edge/migrations/store, as the deploy job applies them).
+const storeMigrations = await readD1Migrations("./migrations/store");
+
 /** Boat, Stripe and WorkOS fakes behind Miniflare's one outbound service. */
 const outbound = () => {
   const boat = createBoatFake();
@@ -43,8 +47,13 @@ export default defineConfig({
       miniflare: {
         compatibilityDate: "2026-07-01",
         compatibilityFlags: ["nodejs_compat"],
-        r2Buckets: ["BLOBS", "RELEASES", "CARD_IMAGES"],
-        ratelimits: { CARD_READS: { namespace_id: "1", simple: { limit: 60, period: 60 } } },
+        r2Buckets: ["BLOBS", "RELEASES", "CARD_IMAGES", "PLUGIN_STORE"],
+        d1Databases: ["STORE_DB"],
+        ratelimits: {
+          CARD_READS: { namespace_id: "1", simple: { limit: 60, period: 60 } },
+          STORE_READS: { namespace_id: "2", simple: { limit: 10000, period: 60 } },
+          STORE_WRITES: { namespace_id: "3", simple: { limit: 10000, period: 60 } }
+        },
         durableObjects: {
           DEVICE_ROOMS: { className: "DeviceRoom", useSQLite: true },
           TEST_LOG: { className: "TestLogRoom", useSQLite: true },
@@ -62,10 +71,14 @@ export default defineConfig({
           CLOUD_DELETE: { name: "test-cloud-delete", className: "DeleteWorkflow" }
         },
         serviceBindings: {
-          VAULT: { name: kCurrentWorker, entrypoint: "VaultStub" }
+          VAULT: { name: kCurrentWorker, entrypoint: "VaultStub" },
+          // The web site's server (fixture.ts SiteStub) and the edge it
+          // reaches over its service binding, as the site does in production.
+          SITE: { name: kCurrentWorker, entrypoint: "SiteStub" },
+          EDGE: kCurrentWorker
         },
-        r2Buckets: ["BLOBS", "RELEASES", "CARD_IMAGES"],
         bindings: {
+          STORE_MIGRATIONS: storeMigrations,
           AUTH_MODE: "dev",
           WORKOS_CLIENT_ID: "test-only",
           BOAT_API_KEY: "test-boat-key",
@@ -84,6 +97,9 @@ export default defineConfig({
           STRIPE_API_URL: "https://stripe.test",
           CLOUD_MAX_AWAKE: "2",
           ADMIN_TOKEN: "test-admin-token",
+          // Web sign-in (web-auth-routes.ts) answers on this origin only.
+          WEB_ORIGIN: "https://site.test",
+          WORKOS_API_KEY: "sk_test",
           WORKOS_WEBHOOK_SECRET: "workos_whsec_test",
           RUNNER_JWT_PRIVATE_KEY: JSON.stringify(runnerKeys.privateKey.export({ format: "jwk" })),
           RUNNER_JWT_PUBLIC_KEY: JSON.stringify(runnerKeys.publicKey.export({ format: "jwk" }))
@@ -99,6 +115,7 @@ export default defineConfig({
   },
   test: {
     include: ["test/workerd/**/*.test.ts"],
+    setupFiles: ["./test/workerd/store-setup.ts"],
     // Cloud lifecycle tests drive real Workflows end to end.
     testTimeout: 30_000
   }

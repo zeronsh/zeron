@@ -70,7 +70,7 @@ class PlanTests(unittest.TestCase):
 
     def test_lockfile_runs_every_rust_suite(self):
         suites = plan.plan(files("Cargo.lock"), "fast")
-        self.assertEqual(selected(suites), {"core", "cursor", "windows", "macos", "ios", "android", "zgx"})
+        self.assertEqual(selected(suites), {"core", "cursor", "store-e2e", "windows", "macos", "ios", "android", "zgx"})
 
     def test_mobile_core_selects_ios_and_android(self):
         suites = plan.plan(files("crates/sync/src/lib.rs", patch="+let x = 1;"), "fast")
@@ -105,11 +105,26 @@ class PlanTests(unittest.TestCase):
         # Without the workspace's closure: the static list.
         self.assertIn("zgx", selected(plan.plan(files("crates/visual/src/lib.rs"), "fast")))
 
+    def test_site(self):
+        self.assertEqual(selected(plan.plan(files("apps/landing/src/pages/plugins/index.astro"), "fast")), {"site"})
+        self.assertEqual(selected(plan.plan(files("apps/zgx/ui/locales/en.json"), "fast")), {"site", "zgx"})
+        self.assertIn("site", selected(plan.plan(files("scripts/plugin-store-e2e/edge.mjs"), "fast")))
+
     def test_edge_and_installer(self):
-        self.assertEqual(selected(plan.plan(files("edge/src/coordinator.ts"), "fast")), {"edge"})
-        self.assertEqual(selected(plan.plan(files("edge/src/install.sh"), "fast")), {"edge", "installer"})
+        # (The site's second tier runs it in front of the edge.)
+        self.assertEqual(selected(plan.plan(files("edge/src/coordinator.ts"), "fast")), {"edge", "site", "store-e2e"})
+        self.assertEqual(selected(plan.plan(files("edge/src/install.sh"), "fast")), {"edge", "installer", "site"})
         # The macOS suite no longer runs the edge's preview server (that was the old app's fixture).
         self.assertFalse(plan.plan(files("edge/package-lock.json"), "full")["macos"])
+
+    def test_the_store_end_to_end_runs_for_either_side(self):
+        for path in ["edge/src/store/publish.ts", "crates/engine/src/plugins/store/device.rs", "apps/zeron/src/store_cli.rs",
+                     "scripts/plugin-store-e2e/edge.mjs", "docs/plugin-store-data.json",
+                     "actions/publish-plugin/publish.sh"]:
+            self.assertTrue(plan.plan(files(path), "fast")["store-e2e"], path)
+        self.assertFalse(plan.plan(files("crates/engine/src/sessions.rs"), "fast")["store-e2e"])
+        self.assertFalse(plan.plan(files("README.md"), "full")["store-e2e"])
+        self.assertFalse(plan.plan(files("edge/src/install.sh"), "full")["store-e2e"])
 
     def test_version_bumps_select_nothing(self):
         bump = [{"filename": "Cargo.toml", "patch": '@@ -37 +37 @@\n-version = "0.2.126"\n+version = "0.2.127"'},
@@ -154,15 +169,15 @@ class PlanTests(unittest.TestCase):
     def test_reservation(self):
         suites = plan.plan(files("Cargo.lock"), "full", nightly=True)
         counts = plan.reservation(plan.jobs_to_run(suites), "pull_request", "refs/pull/1/merge")
-        # result + core + cursor + voice + ios-core + apk + zgx-linux; voice runtime + windows x2;
-        # native + ios-tests + zgx-macos
-        self.assertEqual(counts, {"linux": 7, "windows": 3, "macos": 3})
+        # result + core + cursor + store-e2e + voice + ios-core + apk + zgx-linux; voice runtime +
+        # windows x2; native + ios-tests + zgx-macos
+        self.assertEqual(counts, {"linux": 8, "windows": 3, "macos": 3})
         main = plan.reservation(plan.jobs_to_run(suites), "push", "refs/heads/main")
-        self.assertEqual(main["linux"], 8)  # + android publish
-        self.assertEqual(plan.format_reservation(counts), "linux=7 windows=3 macos=3")
+        self.assertEqual(main["linux"], 9)  # + android publish
+        self.assertEqual(plan.format_reservation(counts), "linux=8 windows=3 macos=3")
         daytime = plan.reservation(plan.jobs_to_run(plan.plan(files("Cargo.lock"), "full")), "push",
                                    "refs/heads/main")
-        self.assertEqual(daytime, {"linux": 7, "windows": 2, "macos": 3})  # no voice
+        self.assertEqual(daytime, {"linux": 8, "windows": 2, "macos": 3})  # no voice
         self.assertEqual(plan.reservation(plan.jobs_to_run({s: False for s in plan.SUITE_JOBS}), "push",
                                           "refs/heads/main"),
                          {"linux": 1, "windows": 0, "macos": 0})
@@ -176,6 +191,8 @@ class WorkflowConsistencyTests(unittest.TestCase):
         "core": ("ui-tests.yml", ["core-tests"]),
         "cursor": ("cursor-compatibility.yml", ["cursor-compatibility"]),
         "edge": ("preview-tests.yml", ["edge"]),
+        "site": ("site-tests.yml", ["site"]),
+        "store-e2e": ("plugin-store-e2e.yml", ["store-e2e"]),
         "installer": ("linux-installer.yml", ["desktop-entry"]),
         "voice": ("voice-tests.yml", ["offline-linux", "windows-runtime"]),
         "windows": ("windows.yml", ["tests", "app"]),

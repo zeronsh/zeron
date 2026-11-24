@@ -6,12 +6,12 @@
 //! may search and read the store, install from it (it lands waiting for the
 //! person, as any install does) and check one of the person's plugins
 //! against its rules; submitting a plugin, acting on its versions and its
-//! deploy keys are the person's, in Zeron's window or the CLI. Submitting
+//! deploy tokens are the person's, in Zeron's window or the CLI. Submitting
 //! also needs the ticket `PreparePluginPublish` gives this device's app or
 //! CLI for the plugin as checked (`reviews::Kind::Publish`), so what's sent
 //! is what the person saw checked.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -20,11 +20,12 @@ use serde_json::{Value, json};
 use zeron_rpc::{RpcError, RpcReply, methods, parse_params};
 
 use super::client::{self, Caller, Installed as Asked, Offer, PackageRecord, Search, StoreClient, UpdatesAsk};
-use super::deploy_key::DeployKey;
+use super::deploy_token::Scope;
+use super::notices;
 use super::publish;
 use crate::plugins::install::{self, Found, STORE, Source, failure};
 use crate::plugins::listing::{self, CATEGORIES};
-use crate::plugins::status::Blocked;
+use crate::plugins::status::{Blocked, UpdatePreference};
 use crate::plugins::version::{self, Version};
 use crate::plugins::{Plugins, capability, failed, lock, manifest, now_secs, package, reviews, signing};
 
@@ -35,6 +36,21 @@ const CACHED_VERSIONS: usize = 3;
 /// The most every store file cached here comes to: past it, the oldest
 /// versions' go.
 const MAX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
+/// The most pages of the take-down feed one check reads.
+const TAKEDOWN_PAGES: usize = 20;
+/// How long an account with no plugins waits between looks: an hour, or a
+/// local run's shorter setting (`ZERON_TAKEDOWN_EVERY_SECS`), never longer.
+pub(in crate::plugins) fn publishes_idle(local: Option<std::time::Duration>) -> std::time::Duration {
+    local.map_or(PUBLISHES_IDLE, |every| every.min(PUBLISHES_IDLE))
+}
+
+/// At most this many pages of versions (50 each) are looked through for a
+/// verified version to offer instead.
+const ALTERNATIVE_PAGES: usize = 4;
+/// How often an account with no plugins has its publishes looked over (one
+/// with plugins: at each take-down check; and a publish from here looks at
+/// the next).
+const PUBLISHES_IDLE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 /// The most plugins one update check asks about (the edge's limit).
 pub const MAX_UPDATE_PLUGINS: usize = 200;
 /// What a report may say it's about (contract amendment 13).
@@ -48,17 +64,22 @@ pub fn handles(method: &str) -> bool {
         method,
         methods::STORE_SEARCH
             | methods::STORE_PLUGIN
+            | methods::STORE_VERSIONS
+            | methods::STORE_VERSION
             | methods::STORE_CATEGORIES
+            | methods::STORE_STATS
             | methods::STORE_FILE
             | methods::SET_PLUGIN_PRERELEASES
+            | methods::SET_PLUGIN_UPDATES
             | methods::PREPARE_PLUGIN_PUBLISH
             | methods::PUBLISH_PLUGIN
             | methods::STORE_MY_PLUGINS
             | methods::STORE_VERSION_ACTION
-            | methods::LIST_DEPLOY_KEYS
-            | methods::CREATE_DEPLOY_KEY
-            | methods::REVOKE_DEPLOY_KEY
+            | methods::LIST_DEPLOY_TOKENS
+            | methods::CREATE_DEPLOY_TOKEN
+            | methods::REVOKE_DEPLOY_TOKEN
             | methods::STORE_REPORT
+            | methods::ACK_STORE_NOTICES
     )
 }
 
@@ -77,12 +98,34 @@ struct IdParams {
 #[derive(Deserialize)]
 struct PluginParams {
     id: String,
-    /// Every version the caller may see, not only the latest few.
-    #[serde(default)]
-    versions: bool,
     /// Judged for this version of Zeron (another device's), not this one's.
     #[serde(default)]
     for_zeron: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct VersionsParams {
+    id: String,
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct VersionParams {
+    id: String,
+    version: String,
+}
+
+#[derive(Deserialize)]
+struct UpdatesParams {
+    /// One plugin's (none: the device's).
+    #[serde(default)]
+    id: Option<String>,
+    /// `newest`, `verified`, or null (as the device does / the default).
+    #[serde(default)]
+    prefer: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -122,18 +165,41 @@ struct VersionActionParams {
 }
 
 #[derive(Deserialize)]
-struct CreateKeyParams {
-    id: String,
+struct CreateTokenParams {
     name: String,
+    /// `{all: true}` or `{plugins: [id…]}` (amendment 44).
+    scope: ScopeParams,
     /// Epoch ms.
     #[serde(default)]
     expires: Option<i64>,
 }
 
 #[derive(Deserialize)]
-struct RevokeKeyParams {
+struct ScopeParams {
+    #[serde(default)]
+    all: bool,
+    #[serde(default)]
+    plugins: Option<Vec<String>>,
+}
+
+impl ScopeParams {
+    fn scope(&self) -> Result<Scope, String> {
+        match (self.all, &self.plugins) {
+            (true, None) => Ok(Scope::All),
+            (false, Some(ids)) => Scope::plugins(ids),
+            _ => Err("A token's scope is all of your plugins ({all: true}) or the ones it names ({plugins: [...]})".into()),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct AckNoticesParams {
+    ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct RevokeTokenParams {
     id: String,
-    key: String,
 }
 
 /// A store plugin installed here, as the update check asks about it.
@@ -147,6 +213,13 @@ struct Candidate {
     permissions: Vec<String>,
     allowed: Value,
     prerelease: bool,
+    /// The key that signed the version installed; an unsigned one's (a
+    /// deploy token's), the newest signed version's before it.
+    key: Option<String>,
+    /// The version installed was verified (its record's, at install).
+    verified: bool,
+    /// Which update this device stages for it.
+    prefer: UpdatePreference,
 }
 
 /// `{ok: false, error, message}` from a failure's `"<word>: <words>"`.
@@ -156,10 +229,52 @@ fn not_ok(error: &str) -> Value {
     json!({ "ok": false, "error": word, "message": message })
 }
 
+/// [`not_ok`] with a listing problem's fields (`field`, `cause`, `word`),
+/// those that are there: for an app that says it in its own words.
+fn refused(error: &str, fields: &Value) -> Value {
+    let mut value = not_ok(error);
+    for key in ["field", "cause", "word"] {
+        if let Some(text) = fields[key].as_str() {
+            value[key] = json!(text);
+        }
+    }
+    value
+}
+
 /// Characters that change how the text around them reads (direction
 /// overrides, invisible joiners): never kept from the store's words.
 fn invisible(c: char) -> bool {
     matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}' | '\u{061C}')
+}
+
+/// A store card or plugin page as this device passes it on: its one-line
+/// words (name, summary, description, license, the author's username,
+/// categories, keywords) without control or format characters, and its
+/// versions' notes without any but line breaks. The edge refuses them in a
+/// listing; a hostile or broken answer still can't draw them in a dialog.
+fn clean_card(card: &mut Value) {
+    let one_line = |text: &str| text.chars().filter(|c| !listing::unseen_char(*c)).collect::<String>();
+    let Some(object) = card.as_object_mut() else { return };
+    for key in ["name", "summary", "description", "license"] {
+        if let Some(Value::String(text)) = object.get_mut(key) {
+            *text = one_line(text);
+        }
+    }
+    if let Some(Value::String(name)) = object.get_mut("author").and_then(|a| a.get_mut("username")) {
+        *name = one_line(name);
+    }
+    for key in ["categories", "keywords"] {
+        for item in object.get_mut(key).and_then(Value::as_array_mut).into_iter().flatten() {
+            if let Value::String(text) = item {
+                *text = one_line(text);
+            }
+        }
+    }
+    for version in object.get_mut("versions").and_then(Value::as_array_mut).into_iter().flatten() {
+        if let Some(Value::String(text)) = version.get_mut("notes") {
+            *text = text.chars().filter(|c| *c == '\n' || !listing::unseen_char(*c)).collect();
+        }
+    }
 }
 
 /// Words from the store, made safe to keep and show: one line, no control
@@ -251,6 +366,7 @@ impl Plugins {
                 self.rescan().await;
                 if let Some(items) = reply.get_mut("items").and_then(Value::as_array_mut) {
                     for item in items {
+                        clean_card(item);
                         if let Some(installed) = item["id"].as_str().and_then(|id| self.installed_here(id)) {
                             item["installed"] = installed;
                         }
@@ -263,10 +379,7 @@ impl Plugins {
                 manifest::check_id(&p.id).map_err(failed)?;
                 let (client, caller) = self.store_reader()?;
                 let (mut reply, _) = client.plugin(&p.id, &caller).await.map_err(failed)?;
-                if p.versions {
-                    let (versions, _) = client.versions(&p.id, &caller).await.map_err(failed)?;
-                    reply["versions"] = versions.get("versions").cloned().unwrap_or(json!([]));
-                }
+                clean_card(&mut reply);
                 let zeron = match p.for_zeron.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
                     Some(v) => Version::parse(v).map_err(failed)?,
                     None => version::zeron(),
@@ -284,6 +397,55 @@ impl Plugins {
                     reply["installed"] = installed;
                 }
                 RpcReply::value(&reply)
+            }
+            methods::STORE_VERSIONS => {
+                let p: VersionsParams = parse_params(params)?;
+                manifest::check_id(&p.id).map_err(failed)?;
+                let (client, caller) = self.store_reader()?;
+                let mut reply = client.versions(&p.id, p.cursor.as_deref(), p.limit, &caller).await.map_err(failed)?;
+                clean_card(&mut reply);
+                RpcReply::value(&reply)
+            }
+            methods::STORE_VERSION => {
+                let p: VersionParams = parse_params(params)?;
+                manifest::check_id(&p.id).map_err(failed)?;
+                let (client, caller) = self.store_reader()?;
+                let (mut reply, _) = client.version(&p.id, p.version.trim(), &caller).await.map_err(failed)?;
+                if let Some(text) = reply.get_mut("notes").and_then(|n| n.as_str().map(str::to_owned)) {
+                    reply["notes"] = json!(notes(&text, listing::MAX_NOTES_BYTES));
+                }
+                RpcReply::value(&reply)
+            }
+            methods::STORE_STATS => {
+                let (client, _) = self.store_reader()?;
+                RpcReply::value(&client.stats().await.map_err(failed)?)
+            }
+            methods::SET_PLUGIN_UPDATES => {
+                let p: UpdatesParams = parse_params(params)?;
+                let prefer = match p.prefer.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
+                    None => None,
+                    Some(word) => Some(UpdatePreference::parse(word).ok_or_else(|| failed("Updates are newest or verified"))?),
+                };
+                if let Some(id) = &p.id {
+                    self.rescan().await;
+                    let entry = self.entry(id).ok_or_else(|| failed(format!("There's no plugin {id}")))?;
+                    if entry.store.is_none() {
+                        return Err(failed("Only a plugin installed from the store has store updates to choose"));
+                    }
+                }
+                self.update_state(|state| match (&p.id, prefer) {
+                    (Some(id), Some(prefer)) => {
+                        state.store_updates_for.insert(id.clone(), prefer);
+                    }
+                    (Some(id), None) => {
+                        state.store_updates_for.remove(id);
+                    }
+                    (None, prefer) => state.store_updates = prefer,
+                })?;
+                let state = lock(&self.inner.state).clone();
+                let device = state.store_updates.unwrap_or(crate::plugins::status::DEFAULT_UPDATES);
+                let effective = p.id.as_deref().map_or(device, |id| state.updates_for(id));
+                RpcReply::value(&json!({ "prefer": effective.word(), "device": device.word() }))
             }
             methods::STORE_CATEGORIES => {
                 // Offline, the fixed list this Zeron knows.
@@ -359,14 +521,19 @@ impl Plugins {
             }
             methods::STORE_MY_PLUGINS => {
                 let (client, caller) = self.store_as_person().await.map_err(failed)?;
-                RpcReply::value(&client.my_plugins(&caller).await.map_err(failed)?)
+                let mut reply = client.my_plugins(&caller).await.map_err(failed)?;
+                for plugin in reply.get_mut("plugins").and_then(Value::as_array_mut).into_iter().flatten() {
+                    clean_card(plugin);
+                }
+                RpcReply::value(&reply)
             }
             methods::STORE_VERSION_ACTION => {
                 let p: VersionActionParams = parse_params(params)?;
                 manifest::check_id(&p.id).map_err(failed)?;
                 Version::parse(&p.version).map_err(failed)?;
-                if !matches!(p.action.as_str(), "withdraw" | "yank" | "unyank") {
-                    return Err(failed("The action is withdraw, yank or unyank"));
+                // (What an author does to a version: amendment 45.)
+                if !matches!(p.action.as_str(), "yank" | "unyank") {
+                    return Err(failed("The action is yank or unyank"));
                 }
                 let (client, caller) = self.store_as_person().await.map_err(failed)?;
                 let reply = client.version_action(&p.id, &p.version, &p.action, &caller).await;
@@ -378,15 +545,13 @@ impl Plugins {
                     Err(error) => not_ok(&error),
                 })
             }
-            methods::LIST_DEPLOY_KEYS => {
-                let p: IdParams = parse_params(params)?;
-                manifest::check_id(&p.id).map_err(failed)?;
+            methods::LIST_DEPLOY_TOKENS => {
                 let (client, caller) = self.store_as_person().await.map_err(failed)?;
-                RpcReply::value(&client.keys(&p.id, &caller).await.map_err(failed)?)
+                RpcReply::value(&client.tokens(&caller).await.map_err(failed)?)
             }
-            methods::CREATE_DEPLOY_KEY => {
-                let p: CreateKeyParams = parse_params(params)?;
-                RpcReply::value(&self.create_deploy_key(p).await)
+            methods::CREATE_DEPLOY_TOKEN => {
+                let p: CreateTokenParams = parse_params(params)?;
+                RpcReply::value(&self.create_deploy_token(p).await)
             }
             methods::STORE_REPORT => {
                 let p: ReportParams = parse_params(params)?;
@@ -404,12 +569,21 @@ impl Plugins {
                     Err(error) => not_ok(&error),
                 })
             }
-            methods::REVOKE_DEPLOY_KEY => {
-                let p: RevokeKeyParams = parse_params(params)?;
-                manifest::check_id(&p.id).map_err(failed)?;
+            methods::ACK_STORE_NOTICES => {
+                let p: AckNoticesParams = parse_params(params)?;
+                self.update_state(|state| state.publish_notices.retain(|n| !p.ids.contains(&n.id)))?;
+                self.publish_list();
+                RpcReply::value(&json!({}))
+            }
+            methods::REVOKE_DEPLOY_TOKEN => {
+                let p: RevokeTokenParams = parse_params(params)?;
+                let id = p.id.trim();
+                if id.is_empty() || id.len() > 64 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+                    return Err(failed("That isn't a deploy token's id: give it as `zeron plugin token list` shows it"));
+                }
                 let (client, caller) = self.store_as_person().await.map_err(failed)?;
-                client.revoke_key(&p.id, p.key.trim(), &caller).await.map_err(failed)?;
-                RpcReply::value(&json!({ "revoked": p.key.trim() }))
+                client.revoke_token(id, &caller).await.map_err(failed)?;
+                RpcReply::value(&json!({ "revoked": id }))
             }
             _ => Err(RpcError::UnknownMethod(method.to_owned())),
         }
@@ -424,6 +598,10 @@ impl Plugins {
             "status": entry.item.status,
             "store": entry.store.is_some(),
         });
+        if let Some(store) = &entry.store {
+            installed["verified"] = json!(store.verified);
+            installed["updates"] = json!(lock(&self.inner.state).updates_for(id).word());
+        }
         if let Some(update) = &entry.item.update {
             installed["update"] = update.clone();
         }
@@ -439,7 +617,7 @@ impl Plugins {
         let entry = self.entry(id).ok_or_else(|| failed(format!("There's no plugin {id}")))?;
         if !entry.item.own || entry.item.builtin {
             return Err(failed(
-                "Only a plugin you're making on this device can be published from here (a folder anywhere publishes with `zeron plugin publish <folder>` and a deploy key)",
+                "Only a plugin you're making on this device can be published from here (a folder anywhere publishes with `zeron plugin publish <folder>` and a deploy token)",
             ));
         }
         Ok(PathBuf::from(&entry.item.dir))
@@ -461,76 +639,96 @@ impl Plugins {
         self.register_key().await;
         let this = self.clone();
         let (id_owned, hash) = (id.to_owned(), hash.to_owned());
-        let packed = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        let packed = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, (String, Value)> {
             // Re-signed as it is now, then read as it'll be sent.
             this.auto_resign(&id_owned);
-            let prepared = publish::read(&dir)?;
+            let prepared = publish::read(&dir).map_err(|e| (e, Value::Null))?;
             if prepared.hash != hash {
-                return Err(failure("changed", "It changed since it was checked: check it again"));
+                return Err((failure("changed", "It changed since it was checked: check it again"), Value::Null));
             }
             if !prepared.ok() {
-                return Err(failure(prepared.problems[0].rule, publish::lines(&prepared.problems).join("; ")));
+                let first = &prepared.problems[0];
+                let fields = json!({ "field": first.field, "cause": first.cause, "word": first.word });
+                return Err((failure(first.rule, publish::lines(&prepared.problems).join("; ")), fields));
             }
-            let key = signing::load_or_create_key(&this.inner.data_dir)?;
-            prepared.pack(&key)
+            let key = signing::load_or_create_key(&this.inner.data_dir).map_err(|e| (e, Value::Null))?;
+            prepared.pack(&key).map_err(|e| (e, Value::Null))
         })
         .await;
         let raw = match packed {
             Ok(Ok(raw)) => raw,
-            Ok(Err(error)) => return not_ok(&error),
+            Ok(Err((error, fields))) => return refused(&error, &fields),
             Err(_) => return not_ok("Couldn't pack it"),
         };
         match client.publish(id, raw, &caller).await {
             Ok(mut reply) => {
                 reply["ok"] = json!(true);
+                // The account has a plugin now: its publishes are looked over
+                // at the next check, not an idle hour on.
+                *lock(&self.inner.publishes_checked) = None;
+                // (Live at once: its page on the store's website.)
+                reply["url"] = json!(client.page_url(id));
                 reply
             }
-            Err(error) => not_ok(&error),
+            Err((error, fields)) => refused(&error, &fields),
         }
     }
 
-    /// A deploy key for `id`, made here and registered at the edge with a
-    /// fresh sign-in's ticket and its proof: its secret, shown this once.
-    async fn create_deploy_key(&self, p: CreateKeyParams) -> Value {
-        if let Err(error) = manifest::check_id(&p.id) {
-            return not_ok(&failure("invalid", error));
-        }
+    /// A deploy token for the account (contract a315eef5a), its scope fixed
+    /// now, made by the edge with a step-up begun for it: its secret, in
+    /// the answer this once, never kept or logged here.
+    async fn create_deploy_token(&self, p: CreateTokenParams) -> Value {
+        let scope = match p.scope.scope() {
+            Ok(scope) => scope,
+            Err(error) => return not_ok(&failure("invalid_scope", error)),
+        };
         let name = plain(&p.name, 64);
         if name.is_empty() {
-            return not_ok(&failure("invalid", "Give the key a name (where it's used, like \"GitHub Actions\")"));
+            return not_ok(&failure("invalid", "Give the token a name (where it's used, like \"GitHub Actions\")"));
         }
         let (client, caller) = match self.store_as_person().await {
             Ok(store) => store,
             Err(error) => return not_ok(&error),
         };
-        // A deploy key is for a plugin you have in the store already (its
-        // first version comes from your machine; amendment 17).
-        match client.my_plugins(&caller).await {
-            Ok(mine) if mine["plugins"].as_array().into_iter().flatten().any(|plugin| plugin["id"] == p.id.as_str()) => {}
-            Ok(_) => return not_published(&p.id),
+        // A token publishes plugins you have in the store already (a first
+        // version comes from a signed-in device): said here, by id, before
+        // the step-up.
+        let mine = match client.my_plugins(&caller).await {
+            Ok(mine) => mine,
             Err(error) => return not_ok(&error),
+        };
+        let owned: Vec<&str> = mine["plugins"].as_array().into_iter().flatten().filter_map(|plugin| plugin["id"].as_str()).collect();
+        if owned.is_empty() {
+            return not_ok(&failure(
+                "not_published",
+                "You have no plugin in the store yet: publish one from this device (`zeron plugin publish <id>`), then make a deploy token",
+            ));
         }
-        let step_up = lock(&self.inner.step_up).clone().and_then(|f| f());
+        if let Scope::Plugins(ids) = &scope {
+            let missing: Vec<&str> = ids.iter().map(String::as_str).filter(|id| !owned.contains(id)).collect();
+            if !missing.is_empty() {
+                return not_owner(&missing);
+            }
+        }
+        // A step-up begun for this (`StepUp {for: "deploy_token"}`), used up
+        // here: a sign-in's ticket, or one already spent, isn't one.
+        let step_up = lock(&self.inner.deploy_token_step_up).clone().and_then(|f| f());
         let Some(step_up) = step_up else {
-            return not_ok(&failure("step_up_required", "Making a deploy key needs a fresh sign-in"));
+            return not_ok(&failure("step_up_required", "Making a deploy token needs a fresh sign-in for it"));
         };
-        let key = match DeployKey::generate() {
-            Ok(key) => key,
-            Err(error) => return not_ok(&error),
-        };
-        let mut body = json!({ "key": key.public(), "name": name, "proof": key.proof(&p.id), "stepUp": step_up });
+        let mut body = json!({ "name": name, "scope": scope.to_value(), "stepUp": step_up });
         if let Some(expires) = p.expires {
             body["expires"] = json!(expires);
         }
-        match client.add_key(&p.id, body, &caller).await {
-            Ok(registered) => {
-                tracing::info!(plugin = %p.id, key = %key.public(), "store: a deploy key was made");
-                json!({ "ok": true, "key": registered, "secret": key.secret() })
-            }
-            // (The edge's word for an id this account doesn't own.)
-            Err(error) if install::reason_of(&error) == Some("not_found") => not_published(&p.id),
-            Err(error) => not_ok(&error),
-        }
+        // The token, read as a token is (else nothing usable came back), and
+        // its record as the list shows it; the copies read are wiped, and
+        // the one copy left goes to the app, which shows it once.
+        let (token, secret) = match client.create_token(body, &caller).await {
+            Ok(made) => made,
+            Err(error) => return not_ok(&error),
+        };
+        tracing::info!(short = %secret.short(), "store: a deploy token was made");
+        json!({ "ok": true, "token": token, "secret": secret.as_str() })
     }
 
     /// One file of a store version, from this device's cache or fetched
@@ -578,13 +776,81 @@ impl Plugins {
     /// `version`. Verified as a file is, then checked against the store's
     /// record, then installed as any package (the same consent window).
     pub(in crate::plugins) async fn install_from_store(&self, id: &str, version: Option<&str>, reinstalling: bool) -> Result<RpcReply, RpcError> {
+        self.install_store_version(id, version, reinstalling, false).await
+    }
+
+    /// The verified version a sheet offers instead of the unverified one it
+    /// asks about (`InstallVerifiedPlugin {id, hash}`): the version from
+    /// this engine's own state for that item as shown (`hash`), an update's
+    /// alternative or a first install's, never a caller's word; its record
+    /// fetched now, and refused (`not_verified`) unless it says verified.
+    pub(in crate::plugins) async fn install_verified_alternative(&self, id: &str, hash: &str) -> Result<RpcReply, RpcError> {
+        self.rescan().await;
+        let entry = self.entry(id).ok_or_else(|| failed(format!("There's no plugin {id}")))?;
+        if !Self::by_person() {
+            return Err(Self::needs_person(&entry.item.name));
+        }
+        if !entry.item.hash.eq_ignore_ascii_case(hash.trim()) {
+            return Err(failed("It changed since it was shown: look again"));
+        }
+        let from_update = install::found(&self.inner.plugins_dir, id, &entry.item.hash).and_then(|f| f.verified_alternative).map(|a| a.version);
+        let from_install = entry.store.as_ref().filter(|s| !s.verified).and_then(|s| s.verified_alternative.as_ref()).map(|a| a.version.clone());
+        let Some(version) = from_update.or(from_install) else {
+            return Err(failed(failure(install::reason::NOT_VERIFIED, format!("{} has no verified version to install instead", entry.item.name))));
+        };
+        self.install_store_version(id, Some(&version), false, true).await
+    }
+
+    /// [`Self::install_from_store`]; `verified_only`: refused unless the
+    /// version's record, fetched now, says verified.
+    async fn install_store_version(&self, id: &str, version: Option<&str>, reinstalling: bool, verified_only: bool) -> Result<RpcReply, RpcError> {
         let id = id.trim();
-        let (package, source) = self.fetch_from_store(id, version, reinstalling).await?;
+        manifest::check_id(id).map_err(failed)?;
+        let person = Self::by_person();
+        // (Before fetching anything: `install_package` refuses it too.)
+        if !reinstalling && !person {
+            self.rescan().await;
+            if let Some(entry) = self.entry(id).filter(|e| !e.item.builtin && !e.item.own) {
+                return Err(Self::needs_person(&entry.item.name));
+            }
+        }
+        let (client, caller) = self.store_reader()?;
+        let detail = store_detail(&client, &caller, id).await?;
+        let named = version.map(str::trim).filter(|v| !v.is_empty());
+        // What's installed: the version named; else, for a person, the
+        // newest listed; for an agent, the newest verified (agents install
+        // only what Zeron has verified).
+        let wanted = match (named, person || reinstalling) {
+            (Some(named), _) => named.to_owned(),
+            (None, true) => detail.version.clone(),
+            (None, false) => detail.verified_version.clone().ok_or_else(|| agent_unverified(id, &detail.version))?,
+        };
+        if wanted.is_empty() {
+            return Err(failed(failure(client::reason::NOT_IN_STORE, format!("The store lists no version of {id}"))));
+        }
+        let (package, mut source) = self.fetch_version(&client, &caller, id, &wanted, reinstalling, &detail.author).await?;
+        let verified = source.store().is_some_and(|s| s.verified);
+        // The mark is the record's, fetched just now: an agent's install of
+        // a version it doesn't carry is the person's to make.
+        if !person && !reinstalling && !verified {
+            return Err(agent_unverified(id, &wanted));
+        }
+        if verified_only && !verified {
+            return Err(failed(failure(install::reason::NOT_VERIFIED, format!("The store's record of {id} {wanted} doesn't say it's verified, so it wasn't installed"))));
+        }
+        if verified_only && let Some(store) = source.store.as_mut() {
+            store.instead_of_unverified = true;
+        }
+        // Not verified: the verified version its sheet can offer instead.
+        if !verified
+            && let Some(store) = source.store.as_mut()
+        {
+            store.verified_alternative = self.verified_alternative(&client, &caller, id, &wanted, &package.manifest.permissions, &detail.author).await;
+        }
         let reply = self.install_package(package, source).await?;
         // Counted once per account (the edge's to say): a new install here.
         if let RpcReply::Value(value) = &reply
             && value["update"] == false
-            && let Ok((client, caller)) = self.store_reader()
             && let Ok(runtime) = tokio::runtime::Handle::try_current()
         {
             let id = id.to_owned();
@@ -597,101 +863,120 @@ impl Plugins {
         Ok(reply)
     }
 
-    /// `id`'s latest version in the store for this caller (or `version`),
-    /// fetched, verified and checked against the store's record: the
-    /// package and its source. `installed`: it's the version installed here
-    /// (a reinstall), which may be yanked since.
+    /// `id`'s `version` in the store (none: its newest listed), fetched,
+    /// verified and checked against the store's record: the package and
+    /// its source. `installed`: it's the version installed here (a
+    /// reinstall), which may be yanked since.
     pub(in crate::plugins) async fn fetch_from_store(&self, id: &str, version: Option<&str>, installed: bool) -> Result<(install::Package, Source), RpcError> {
         manifest::check_id(id).map_err(failed)?;
         let (client, caller) = self.store_reader()?;
-        let wanted = version.map(str::trim).filter(|v| !v.is_empty());
-        let not_listed = |error: &str| install::reason_of(error) == Some(client::reason::NOT_IN_STORE);
-        // What the store lists, to everyone.
-        let listed = match client.plugin(id, &caller).await {
-            Ok((_, detail)) => match wanted {
-                None => (!detail.version.is_empty()).then(|| (detail.version.clone(), detail.package.clone(), detail.author.clone())),
-                Some(wanted) => {
-                    let (_, versions) = client.versions(id, &caller).await.map_err(failed)?;
-                    let found = versions.into_iter().find(|v| v.version == wanted);
-                    match found {
-                        Some(found) => {
-                            let usable = matches!(found.status.as_str(), "approved" | "pending") || (installed && found.status == "yanked");
-                            if (found.yanked && !installed) || !usable {
-                                return Err(failed(failure(client::reason::NOT_IN_STORE, format!("Version {wanted} of {id} can't be installed any more"))));
-                            }
-                            let record = PackageRecord { hash: found.hash, sha256: found.sha256, bytes: found.bytes, key: found.key };
-                            Some((found.version, record, detail.author.clone()))
-                        }
-                        None => None,
-                    }
-                }
-            },
-            Err(error) if not_listed(&error) => None,
-            Err(error) => return Err(failed(error)),
-        };
-        let (version, record, publisher) = match listed {
-            Some(listed) => listed,
-            // Not listed to everyone (yet): your own, in review, as your
-            // plugins in the store say it, for your devices alone.
-            None => self.own_record(&client, id, wanted, installed).await.map_err(failed)?,
-        };
-        let raw = client.package(id, &version, &caller).await.map_err(failed)?;
-        let (id_owned, version_owned) = (id.to_owned(), version.clone());
-        let (package, store) = tokio::task::spawn_blocking(move || super::verify(raw, &id_owned, &version_owned, &record, &publisher))
+        let detail = store_detail(&client, &caller, id).await?;
+        let wanted = version.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(&detail.version).to_owned();
+        if wanted.is_empty() {
+            return Err(failed(failure(client::reason::NOT_IN_STORE, format!("The store lists no version of {id}"))));
+        }
+        self.fetch_version(&client, &caller, id, &wanted, installed, &detail.author).await
+    }
+
+    /// Version `version` of `id`, by its own record (`…/versions/:version`,
+    /// fetched now: what it is, and whether it's verified), its package
+    /// fetched and checked against that record.
+    async fn fetch_version(
+        &self,
+        client: &StoreClient,
+        caller: &Caller,
+        id: &str,
+        version: &str,
+        installed: bool,
+        publisher: &client::Publisher,
+    ) -> Result<(install::Package, Source), RpcError> {
+        let (_, found) = client.version(id, version, caller).await.map_err(failed)?;
+        // Listed; a yanked one only to reinstall what's here.
+        if !(found.status == "listed" && !found.yanked || installed && found.status == "yanked") {
+            return Err(failed(failure(client::reason::NOT_IN_STORE, format!("Version {version} of {id} can't be installed any more"))));
+        }
+        let record = PackageRecord { hash: found.hash, sha256: found.sha256, bytes: found.bytes, key: found.key };
+        let raw = client.package(id, version, caller, record.bytes).await.map_err(failed)?;
+        let (id_owned, version_owned, publisher, verified) = (id.to_owned(), version.to_owned(), publisher.clone(), found.verified);
+        let (package, mut store) = tokio::task::spawn_blocking(move || super::verify(raw, &id_owned, &version_owned, &record, &publisher, verified))
             .await
             .map_err(|_| failed("Couldn't read it"))?
             .map_err(failed)?;
+        store.verified_at = found.verified.then_some(found.verified_at).flatten();
         let source = Source { kind: STORE.into(), url: None, path: None, git_ref: None, commit: None, version: String::new(), installed_at: 0, store: Some(store) };
         Ok((package, source))
     }
 
-    /// Plugin `id`'s version `wanted` (none: its latest) among your own
-    /// plugins in the store (`/me/plugins`): its version, its record, and
-    /// you as its publisher. `not_in_store` when it isn't yours, or there's
-    /// no such version to install.
-    async fn own_record(&self, client: &StoreClient, id: &str, wanted: Option<&str>, installed: bool) -> Result<(String, PackageRecord, client::Publisher), String> {
-        let missing = || failure(client::reason::NOT_IN_STORE, format!("The store has no {id}{} for you", wanted.map(|w| format!(" {w}")).unwrap_or_default()));
-        let Ok((_, caller)) = self.store_as_person().await else {
-            return Err(missing());
-        };
-        let mine = client.my_plugins(&caller).await?;
-        let Some(plugin) = mine["plugins"].as_array().into_iter().flatten().find(|p| p["id"] == id) else {
-            return Err(missing());
-        };
-        let versions: Vec<client::VersionRecord> = plugin["versions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|v| serde_json::from_value(v.clone()).ok())
-            .collect();
-        let usable = |v: &client::VersionRecord| matches!(v.status.as_str(), "approved" | "pending") || (installed && v.status == "yanked");
-        let chosen = match wanted {
-            Some(wanted) => versions.into_iter().find(|v| v.version == wanted && usable(v)),
-            None => versions
-                .into_iter()
-                .filter(|v| usable(v) && !v.yanked)
-                .filter_map(|v| Version::parse(&v.version).ok().map(|at| (at, v)))
-                .max_by(|a, b| a.0.cmp(&b.0))
-                .map(|(_, v)| v),
-        };
-        let found = chosen.ok_or_else(missing)?;
-        let publisher: client::Publisher = serde_json::from_value(plugin["author"].clone()).unwrap_or_default();
-        let record = PackageRecord { hash: found.hash, sha256: found.sha256, bytes: found.bytes, key: found.key };
-        Ok((found.version, record, publisher))
+    /// The newest verified version of `id` this Zeron can run, other than
+    /// `asked` (whose asks are `asks`), for a sheet's "instead": its record
+    /// says verified, it's listed, and its package (fetched and checked as
+    /// any install's) asks `added` and `removed` against `asked`. None when
+    /// there's none, or the store can't say.
+    async fn verified_alternative(&self, client: &StoreClient, caller: &Caller, id: &str, asked: &str, asks: &[String], publisher: &client::Publisher) -> Option<install::Alternative> {
+        let zeron = version::zeron();
+        let mut cursor: Option<String> = None;
+        for _ in 0..ALTERNATIVE_PAGES {
+            let page = client.versions(id, cursor.as_deref(), Some(50), caller).await.ok()?;
+            let found = page["versions"].as_array().into_iter().flatten().find(|v| {
+                v["verified"] == true
+                    && v["status"] == "listed"
+                    && v["yanked"] != true
+                    && v["version"].as_str().is_some_and(|x| !same_version(x, asked))
+                    && version::accepts(v["engines"]["zeron"].as_str(), &zeron).is_ok()
+            });
+            if let Some(found) = found {
+                let version = found["version"].as_str()?.to_owned();
+                let (package, source) = self.fetch_version(client, caller, id, &version, false, publisher).await.ok()?;
+                // (Its own record, fetched with the package, says so too.)
+                source.store().filter(|s| s.verified)?;
+                let change = install::grant_change(asks, &package.manifest.permissions);
+                return Some(install::Alternative {
+                    version: plain(&version, 64),
+                    added: change.added,
+                    removed: change.removed,
+                    notes: notes(found["notes"].as_str().unwrap_or_default(), listing::MAX_NOTES_BYTES),
+                    verified_at: found["verified_at"].as_i64(),
+                });
+            }
+            cursor = Some(page["next_cursor"].as_str()?.to_owned());
+        }
+        None
+    }
+
+    /// Whether the store's record says version `version` of `id` (content
+    /// `hash`) is verified, asked now (an update about to be taken): `false`
+    /// when the store can't be reached, so taking it asks you. A record that
+    /// can't be read, names other content or another signer than `signer`
+    /// (the package's own: none, unsigned), is gone, or isn't installable
+    /// (yanked, superseded, not listed) refuses the update: it never fails
+    /// open.
+    pub(in crate::plugins) async fn verified_now(&self, id: &str, version: &str, hash: &str, signer: Option<&str>) -> Result<bool, String> {
+        let Ok((client, caller)) = self.store_reader() else { return Ok(false) };
+        match client.version(id, version, &caller).await {
+            Ok((_, record)) if record.status != "listed" || record.yanked => {
+                Err(failure(client::reason::NOT_IN_STORE, format!("Version {version} of {id} can't be installed any more")))
+            }
+            Ok((_, record)) if record.hash.eq_ignore_ascii_case(hash) && record.key.as_deref() == signer => Ok(record.verified),
+            Ok(_) => Err(failure(client::reason::STORE_MISMATCH, format!("The store's record of {id} {version} names other content or another signer than the update found, so it wasn't taken"))),
+            Err(error) if install::reason_of(&error) == Some(client::reason::STORE_UNREACHABLE) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     /// The batched check for every plugin installed from the store (or
     /// `only`): updates kept as any source's are (`install::Found`), blocked
-    /// versions turned off. `(updates, errors)`, as `check_updates` says them.
-    pub(in crate::plugins) async fn check_store_updates(&self, only: Option<&str>) -> (Vec<Value>, Vec<Value>) {
-        let decisions = lock(&self.inner.state).decisions.clone();
-        let prerelease = lock(&self.inner.state).prerelease.clone();
-        let candidates: Vec<Candidate> = lock(&self.inner.entries)
+    /// versions turned off, a block the store no longer names lifted.
+    /// `(updates, errors)`, as `check_updates` says them.
+    /// Every plugin installed from the store (or `only`), as a check asks
+    /// about it.
+    fn store_candidates(&self, only: Option<&str>) -> Vec<Candidate> {
+        let state = lock(&self.inner.state).clone();
+        lock(&self.inner.entries)
             .iter()
             .filter(|e| !e.item.builtin && !e.item.own && only.is_none_or(|id| id == e.item.id))
             .filter_map(|e| {
                 let store = e.store.as_ref()?;
-                let allowed = decisions.get(&e.item.id).filter(|d| d.allowed).map_or_else(|| e.record.clone(), |d| d.allowed_record());
+                let allowed = state.decisions.get(&e.item.id).filter(|d| d.allowed).map_or_else(|| e.record.clone(), |d| d.allowed_record());
                 Some(Candidate {
                     id: e.item.id.clone(),
                     name: e.item.name.clone(),
@@ -700,10 +985,134 @@ impl Plugins {
                     publisher_id: store.publisher_id.clone(),
                     permissions: e.item.permissions.clone(),
                     allowed,
-                    prerelease: prerelease.contains(&e.item.id),
+                    prerelease: state.prerelease.contains(&e.item.id),
+                    key: e.key().map(str::to_owned).or_else(|| store.last_key.clone()),
+                    verified: store.verified,
+                    prefer: state.updates_for(&e.item.id),
                 })
             })
-            .collect();
+            .collect()
+    }
+
+    /// The take-down feed after the last event applied here: each take-down
+    /// of a version installed here turns it off, each restore lifts that,
+    /// and either ends its mark (a restored version is unverified until
+    /// verified again); a take-down of an update kept here drops it. With
+    /// no place in the feed (a new device, one gone longer than the feed
+    /// keeps, or a place past the feed's head), the full update check says
+    /// what's blocked now and which marks have ended, and the feed carries
+    /// on from its head. Only events after the place and at most the head
+    /// count. Nothing about what's installed is sent.
+    pub async fn check_takedowns(&self) {
+        self.rescan().await;
+        if self.store_candidates(None).is_empty() {
+            return;
+        }
+        let Ok((client, caller)) = self.store_reader() else { return };
+        let mut after = lock(&self.inner.state).takedowns_after;
+        // (At most a few pages a check; the next one carries on.)
+        for _ in 0..TAKEDOWN_PAGES {
+            let feed = match client.takedowns(after).await {
+                Ok(feed) => feed,
+                Err(error) => {
+                    tracing::debug!(%error, "store: the take-down feed couldn't be read");
+                    return;
+                }
+            };
+            if feed.reset || after.is_none_or(|a| a > feed.head) {
+                let (_, errors) = self.check_store_updates(None).await;
+                if errors.is_empty() {
+                    self.end_marks(&client, &caller).await;
+                    let _ = self.update_state(|state| state.takedowns_after = Some(feed.head));
+                }
+                return;
+            }
+            let events: Vec<_> = feed.events.iter().filter(|e| after.is_none_or(|a| e.seq > a) && e.seq <= feed.head).collect();
+            let Some(last) = events.iter().map(|e| e.seq).max() else { return };
+            let candidates = self.store_candidates(None);
+            let mut down: BTreeMap<&str, (&Candidate, String)> = BTreeMap::new();
+            let mut restored: Vec<&Candidate> = Vec::new();
+            for event in events {
+                // An update kept here that's taken down isn't taken.
+                if event.kind == "take_down"
+                    && let Some(c) = candidates.iter().find(|c| c.id == event.id)
+                    && install::found(&self.inner.plugins_dir, &c.id, &c.hash).is_some_and(|f| same_version(&f.version, &event.version))
+                {
+                    install::forget_found(&self.inner.plugins_dir, &c.id);
+                }
+                let Some(c) = candidates.iter().find(|c| c.id == event.id && same_version(&event.version, &c.version)) else { continue };
+                // Taken down or restored, in whatever order: no mark.
+                self.unmark(c);
+                match event.kind.as_str() {
+                    "take_down" => {
+                        restored.retain(|r| r.id != c.id);
+                        down.insert(c.id.as_str(), (c, plain(&event.reason, 500)));
+                    }
+                    "restore" => {
+                        down.remove(c.id.as_str());
+                        restored.push(c);
+                    }
+                    _ => {}
+                }
+            }
+            self.unblock(&restored);
+            if !down.is_empty() {
+                self.block(down.into_values().collect()).await;
+            }
+            after = Some(last);
+            let _ = self.update_state(|state| state.takedowns_after = Some(last));
+            if last >= feed.head {
+                return;
+            }
+        }
+    }
+
+    /// Look over the account's publishes (`/me/plugins`) for any this
+    /// device didn't make, and keep a notice of each for the app, with a
+    /// desktop banner: once per version. Signed out, nothing. An account
+    /// with no plugins is asked again only every few hours.
+    pub async fn check_publishes(&self) {
+        let Ok((client, caller)) = self.store_as_person().await else { return };
+        let idle_for = publishes_idle(super::super::lifecycle::local_every());
+        let idle = lock(&self.inner.publishes_checked).is_some_and(|(at, had)| !had && at.elapsed() < idle_for);
+        if idle {
+            return;
+        }
+        let mine = match client.my_plugins(&caller).await {
+            Ok(mine) => mine,
+            Err(error) => {
+                tracing::debug!(%error, "store: the account's publishes couldn't be read");
+                return;
+            }
+        };
+        let had = mine["plugins"].as_array().is_some_and(|plugins| !plugins.is_empty());
+        *lock(&self.inner.publishes_checked) = Some((std::time::Instant::now(), had));
+        let account = own_publisher_id(&mine).unwrap_or_default();
+        let own_key = signing::load_key(&self.inner.data_dir).map(|key| key.public()).unwrap_or_default();
+        let before = lock(&self.inner.state).publishes.clone().filter(|seen| seen.account == account);
+        let (mut seen, new) = notices::look(before.as_ref(), &mine, &own_key, |text| plain(text, 120));
+        seen.account = account;
+        if before.as_ref() == Some(&seen) && new.is_empty() {
+            return;
+        }
+        let banners: Vec<String> = new.iter().map(notices::PublishNotice::words).collect();
+        let _ = self.update_state(|state| {
+            state.publishes = Some(seen);
+            notices::add(&mut state.publish_notices, new);
+        });
+        if banners.is_empty() {
+            return;
+        }
+        self.publish_list();
+        if let Some(notify) = lock(&self.inner.notifier).clone() {
+            for words in banners {
+                notify("zeron", "Plugin published", &words, None);
+            }
+        }
+    }
+
+    pub(in crate::plugins) async fn check_store_updates(&self, only: Option<&str>) -> (Vec<Value>, Vec<Value>) {
+        let candidates = self.store_candidates(only);
         if candidates.is_empty() {
             return (Vec::new(), Vec::new());
         }
@@ -716,6 +1125,11 @@ impl Plugins {
         let mut errors = Vec::new();
         let mut offers: BTreeMap<String, Offer> = BTreeMap::new();
         let mut blocks = Vec::new();
+        // The plugins the store answered about (offline batches aren't).
+        let mut answered: Vec<&Candidate> = Vec::new();
+        // Those with an entry it sent that couldn't be read: whatever block
+        // they have stays (it fails closed).
+        let mut unread: BTreeSet<&str> = BTreeSet::new();
         // At most the edge's limit per request.
         for batch in candidates.chunks(MAX_UPDATE_PLUGINS) {
             let ask = UpdatesAsk {
@@ -733,9 +1147,15 @@ impl Plugins {
                     continue;
                 }
             };
-            for unreadable in reply.unreadable.iter().flatten() {
-                if let Some(c) = by_id.get(unreadable.as_str()) {
-                    errors.push(said(c, &failure(client::reason::STORE_ERROR, "The store's answer about it couldn't be read")));
+            answered.extend(batch.iter());
+            for unreadable in &reply.unreadable {
+                match unreadable.as_deref().and_then(|id| by_id.get(id)) {
+                    Some(c) => {
+                        unread.insert(c.id.as_str());
+                        errors.push(said(c, &failure(client::reason::STORE_ERROR, "The store's answer about it couldn't be read")));
+                    }
+                    // (Whose, it doesn't say: none of this batch's blocks lifts.)
+                    None => unread.extend(batch.iter().map(|c| c.id.as_str())),
                 }
             }
             blocks.extend(reply.blocked);
@@ -747,12 +1167,21 @@ impl Plugins {
                 }
             }
         }
+        // One block per plugin, for the version installed (the first the
+        // store says: a hostile answer repeating one costs nothing more).
+        let mut blocked: BTreeMap<&str, (&Candidate, String)> = BTreeMap::new();
         for block in &blocks {
             if let Some(c) = by_id.get(block.id.as_str())
                 && same_version(&block.version, &c.version)
             {
-                self.block(c, &plain(&block.reason, 500)).await;
+                blocked.entry(c.id.as_str()).or_insert_with(|| (*c, plain(&block.reason, 500)));
             }
+        }
+        // A block here the store no longer names (restored): lifted.
+        let lifted: Vec<&Candidate> = answered.into_iter().filter(|c| !blocked.contains_key(c.id.as_str()) && !unread.contains(c.id.as_str())).collect();
+        self.unblock(&lifted);
+        if !blocked.is_empty() {
+            self.block(blocked.into_values().collect()).await;
         }
         let plugins_dir = self.inner.plugins_dir.clone();
         let mut updates = Vec::new();
@@ -761,7 +1190,25 @@ impl Plugins {
                 install::forget_found(&plugins_dir, &c.id);
                 continue;
             };
-            match self.store_found(&client, &caller, c, &offer).await {
+            // Which to stage: the newest (marked when it isn't verified, the
+            // newest verified beside it), or, by this device's choice, the
+            // newest verified.
+            let (staged, beside) = match c.prefer {
+                UpdatePreference::Newest => (Some(&offer), offer.verified_update.as_deref()),
+                UpdatePreference::Verified if offer.verified => (Some(&offer), None),
+                UpdatePreference::Verified => (offer.verified_update.as_deref(), None),
+            };
+            let Some(staged) = staged else {
+                // Only unverified updates, and this device stages verified
+                // ones: said, not kept.
+                install::forget_found(&plugins_dir, &c.id);
+                updates.push(json!({
+                    "id": c.id, "name": c.name, "version": offer.version, "verified": false, "held": true,
+                    "installed_verified": c.verified,
+                }));
+                continue;
+            };
+            match self.store_found(&client, &caller, c, staged, beside).await {
                 Ok(found) => {
                     let mut shown = found.shown();
                     shown["id"] = json!(c.id);
@@ -771,32 +1218,71 @@ impl Plugins {
                 Err(error) => errors.push(said(c, &error)),
             }
         }
+        self.catch_up_verified(&client, &caller, &candidates).await;
         (updates, errors)
     }
 
+    /// Each version installed here unverified whose own record, read now,
+    /// says verified and names the same content: its install record says so
+    /// from now on (`verified`, `verified_at`), and the list shows it. Only
+    /// ever that way: a record that can't be read, names other content, or
+    /// says not verified changes nothing (a take-down is the feed's).
+    async fn catch_up_verified(&self, client: &StoreClient, caller: &Caller, candidates: &[Candidate]) {
+        let mut caught = false;
+        for c in candidates.iter().filter(|c| !c.verified) {
+            let Ok((_, record)) = client.version(&c.id, &c.version, caller).await else { continue };
+            if !record.verified || !record.hash.eq_ignore_ascii_case(&c.hash) {
+                continue;
+            }
+            let Some(entry) = self.entry(&c.id).filter(|e| e.item.hash.eq_ignore_ascii_case(&c.hash)) else { continue };
+            let dir = Path::new(&entry.item.dir);
+            if let Some(mut source) = Source::load(dir)
+                && let Some(store) = source.store.as_mut().filter(|s| !s.verified && s.hash.eq_ignore_ascii_case(&c.hash))
+            {
+                store.verified = true;
+                store.verified_at = record.verified_at;
+                store.verified_alternative = None;
+                if source.save(dir).is_ok() {
+                    tracing::info!(plugin = %c.id, version = %c.version, "store: the version installed is verified now");
+                    caught = true;
+                }
+            }
+        }
+        if caught {
+            self.kick(super::super::Kick::Rescan);
+        }
+    }
+
     /// `offer` for `c`, fetched and verified (or the copy already kept, when
-    /// it's the same version), compared with what's installed, and kept.
-    async fn store_found(&self, client: &StoreClient, caller: &Caller, c: &Candidate, offer: &Offer) -> Result<Found, String> {
+    /// it's the same version), compared with what's installed, and kept;
+    /// `beside`, the newest verified version when `offer` isn't, named with
+    /// it.
+    async fn store_found(&self, client: &StoreClient, caller: &Caller, c: &Candidate, offer: &Offer, beside: Option<&Offer>) -> Result<Found, String> {
         let plugins_dir = self.inner.plugins_dir.clone();
         let record = PackageRecord { hash: offer.hash.clone(), sha256: offer.sha256.clone(), bytes: offer.bytes, key: offer.key.clone() };
         let kept_path = install::found_package_path(&plugins_dir, &c.id);
         let kept = install::found(&plugins_dir, &c.id, &c.hash)
             .filter(|f| f.refused.is_none() && f.hash == offer.hash && f.version == offer.version && kept_path.is_file());
         let (id, version, publisher) = (c.id.clone(), offer.version.clone(), offer.publisher());
+        // (`verified` here is the offer's, for the update's sheet; taking
+        // it asks the store's record again: `Plugins::update`.)
         let (package, store) = if kept.is_some() {
-            // Verified when it was found; read back as any kept update is.
-            let package = tokio::task::spawn_blocking(move || package::read(&kept_path, &install::WORDS).and_then(install::parse))
+            // Verified when it was found; read back as any kept update is
+            // (unsigned only when its offer names no signer).
+            let signed = offer.key.is_some();
+            let package = tokio::task::spawn_blocking(move || package::read(&kept_path, &install::WORDS).and_then(|raw| install::parse_from_store(raw, signed)))
                 .await
                 .map_err(|_| "Couldn't read it".to_string())??;
             let (publisher, publisher_id) = super::vouched(&publisher)?;
-            if package.hash != offer.hash || offer.key.as_deref().is_some_and(|k| k != package.key) {
+            if package.hash != offer.hash || offer.key.as_deref().is_some_and(|k| Some(k) != package.key.as_deref()) {
                 return Err(failure(client::reason::STORE_MISMATCH, "The update kept isn't the store's"));
             }
-            let store = install::StoreSource { id: c.id.clone(), publisher, publisher_id, hash: package.hash.clone(), key: Some(package.key.clone()) };
+            let store = install::StoreSource { id: c.id.clone(), publisher, publisher_id, hash: package.hash.clone(), key: package.key.clone(), last_key: None, verified: offer.verified, verified_at: None, verified_alternative: None, instead_of_unverified: false, replaced: None };
             (package, store)
         } else {
-            let raw = client.package(&c.id, &offer.version, caller).await?;
-            tokio::task::spawn_blocking(move || super::verify(raw, &id, &version, &record, &publisher))
+            let raw = client.package(&c.id, &offer.version, caller, record.bytes).await?;
+            let verified = offer.verified;
+            tokio::task::spawn_blocking(move || super::verify(raw, &id, &version, &record, &publisher, verified))
                 .await
                 .map_err(|_| "Couldn't read it".to_string())??
         };
@@ -819,10 +1305,22 @@ impl Plugins {
             refused,
             source: Some(Source { kind: STORE.into(), url: None, path: None, git_ref: None, commit: None, version: String::new(), installed_at: 0, store: Some(store) }),
             digest_diff: diff.grew().then(|| diff.to_value()),
-            new_key: false,
+            // (The store's record decides whose it is: shown, so the update
+            // can say its signing key changed.)
+            // (Unsigned, a deploy token's: no key to have changed.)
+            new_key: c.key.as_deref().zip(package.key.as_deref()).is_some_and(|(was, now)| was != now),
             new_owner,
-            in_review: offer.in_review,
             notes: notes(&offer.notes, listing::MAX_NOTES_BYTES),
+            store_verified: Some(offer.verified),
+            store_verified_at: offer.verified.then_some(offer.verified_at).flatten(),
+            installed_verified: Some(c.verified),
+            verified_alternative: beside.filter(|b| b.verified).map(|b| install::Alternative {
+                version: plain(&b.version, 64),
+                added: b.added.iter().map(|p| plain(p, 64)).collect(),
+                removed: b.removed.iter().map(|p| plain(p, 64)).collect(),
+                notes: notes(&b.notes, listing::MAX_NOTES_BYTES),
+                verified_at: b.verified_at,
+            }),
         };
         let keep = found.refused.is_none().then_some(&package);
         install::keep_found(&plugins_dir, &c.id, &found, keep)?;
@@ -831,13 +1329,91 @@ impl Plugins {
 
     /// `c`'s installed version is blocked by the store: turned off, the
     /// reason kept, and you're told. Not again once you turned it back on.
-    async fn block(&self, c: &Candidate, reason: &str) {
+    /// Turn off each blocked version (with the store's reason), after one
+    /// rescan for all of them.
+    async fn block(&self, blocked: Vec<(&Candidate, String)>) {
+        self.rescan().await;
+        for (c, reason) in blocked {
+            self.block_one(c, &reason);
+        }
+    }
+
+    /// The store no longer blocks these installed versions (restored): the
+    /// block goes, and so does the mark (a restored version is unverified),
+    /// so one turned off by the block asks you again.
+    fn unblock(&self, lifted: &[&Candidate]) {
+        for c in lifted {
+            let mut lifted_here = false;
+            let saved = self.update_state(|state| {
+                if !state.blocked.get(&c.id).is_some_and(|b| same_version(&b.version, &c.version)) {
+                    return;
+                }
+                let overridden = state.blocked.remove(&c.id).is_some_and(|b| b.overridden);
+                lifted_here = true;
+                if let Some(d) = state.decisions.get_mut(&c.id)
+                    && !overridden
+                    && d.allowed
+                {
+                    d.off = false;
+                    d.reask = true;
+                }
+            });
+            if saved.is_err() || !lifted_here {
+                continue;
+            }
+            if let Some(entry) = self.entry(&c.id) {
+                let dir = Path::new(&entry.item.dir);
+                if let Some(mut source) = Source::load(dir)
+                    && let Some(store) = source.store.as_mut()
+                {
+                    store.verified = false;
+                    store.verified_at = None;
+                    let _ = source.save(dir);
+                }
+            }
+            tracing::info!(plugin = %c.id, version = %c.version, "store: a take-down was lifted");
+            self.kick(super::super::Kick::Rescan);
+        }
+    }
+
+    /// `c`'s installed version is no longer verified here: its install
+    /// record says so (`verified`, `verified_at`), and the list shows it.
+    fn unmark(&self, c: &Candidate) {
+        let Some(entry) = self.entry(&c.id).filter(|e| e.item.version == c.version && e.item.hash.eq_ignore_ascii_case(&c.hash)) else { return };
+        let dir = Path::new(&entry.item.dir);
+        if let Some(mut source) = Source::load(dir)
+            && let Some(store) = source.store.as_mut().filter(|s| s.verified)
+        {
+            store.verified = false;
+            store.verified_at = None;
+            if source.save(dir).is_ok() {
+                tracing::info!(plugin = %c.id, version = %c.version, "store: the version installed is no longer verified");
+                self.kick(super::super::Kick::Rescan);
+            }
+        }
+    }
+
+    /// After the feed starts over (its events missed): each version
+    /// installed here marked verified whose own record, read now, says it
+    /// isn't (taken down and restored meanwhile) loses its mark.
+    async fn end_marks(&self, client: &StoreClient, caller: &Caller) {
+        for c in self.store_candidates(None).iter().filter(|c| c.verified) {
+            if let Ok((_, record)) = client.version(&c.id, &c.version, caller).await
+                && !record.verified
+            {
+                self.unmark(c);
+            }
+        }
+    }
+
+    fn block_one(&self, c: &Candidate, reason: &str) {
         // Still the version the store blocked (not one installed while the
         // check was out).
-        self.rescan().await;
         if self.entry(&c.id).is_none_or(|e| e.item.version != c.version || e.item.hash != c.hash) {
             return;
         }
+        // A blocked version shows no mark (turned back on, it still has none).
+        self.unmark(c);
         let mut newly = false;
         let saved = self.update_state(|state| {
             if state.blocked.get(&c.id).is_some_and(|b| same_version(&b.version, &c.version)) {
@@ -871,13 +1447,42 @@ impl Plugins {
     }
 }
 
-/// `{ok: false, error: "not_published"}`: a deploy key is for a plugin you
-/// have in the store already.
-fn not_published(id: &str) -> Value {
-    not_ok(&failure(
-        "not_published",
-        format!("{id} isn't in the store as yours yet: publish its first version from this machine (`zeron plugin publish {id}`), then make a deploy key for it"),
+/// The store's page for `id`: its newest listed version, its newest
+/// verified one, who owns it.
+async fn store_detail(client: &StoreClient, caller: &Caller, id: &str) -> Result<client::Detail, RpcError> {
+    client.plugin(id, caller).await.map(|(_, detail)| detail).map_err(failed)
+}
+
+/// An agent's install of a version Zeron hasn't verified: the person's to
+/// make, from the plugin's page.
+fn agent_unverified(id: &str, version: &str) -> RpcError {
+    failed(failure(
+        install::reason::NEEDS_PERSON,
+        format!(
+            "{id}{} isn't verified by Zeron: an agent installs only versions Zeron has verified; the person installs the rest from its page",
+            if version.is_empty() { String::new() } else { format!(" {version}") }
+        ),
     ))
+}
+
+/// `{ok: false, error: "not_owner", ids}`: a token's scope names plugins
+/// that aren't the account's in the store.
+fn not_owner(ids: &[&str]) -> Value {
+    let mut value = not_ok(&failure(
+        "not_owner",
+        format!("{} isn't yours in the store: a token publishes plugins you already have there (a first version comes from a signed-in device)", ids.join(", ")),
+    ));
+    value["ids"] = json!(ids);
+    value
+}
+
+/// The account's publisher id, as `/me/plugins` gives it at its top,
+/// plugins or none.
+fn own_publisher_id(mine: &Value) -> Option<String> {
+    mine["publisher_id"]
+        .as_str()
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_owned)
 }
 
 /// The bytes under `dir`.
@@ -937,6 +1542,10 @@ mod tests {
         assert_eq!(plain(&"x".repeat(900), 500).len(), 500);
         assert_eq!(not_ok("id_taken: Someone has it"), json!({ "ok": false, "error": "id_taken", "message": "Someone has it" }));
         assert_eq!(not_ok("plain words"), json!({ "ok": false, "error": "failed", "message": "plain words" }));
+        // A listing problem's fields beside its sentence, those there are.
+        let fields = json!({ "field": "name", "cause": "mark_word", "word": "Verified", "other": "x" });
+        assert_eq!(refused("bad_listing: Its name says \"verified\"", &fields), json!({ "ok": false, "error": "bad_listing", "message": "Its name says \"verified\"", "field": "name", "cause": "mark_word", "word": "Verified" }));
+        assert_eq!(refused("too_large: big", &json!({ "field": null })), not_ok("too_large: big"));
         assert_eq!(media_type("shots/A.PNG"), "image/png");
     }
 }

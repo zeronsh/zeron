@@ -1,0 +1,69 @@
+---
+// One file's changes since the newest verified version: a unified diff, each
+// line with its numbers before and after, added and removed in their colours.
+import { highlighted, type HighlightBudget } from "../../lib/store/highlight.ts";
+import type { DiffRow } from "../../lib/store/review.ts";
+
+interface Props {
+  rows: DiffRow[];
+  language: string | null;
+  /** What the page may highlight, in bytes, shared by every file's changes (highlight.ts). */
+  budget?: HighlightBudget;
+}
+const { rows, language, budget } = Astro.props;
+const SIGN = { added: "+", removed: "-", context: " ", hunk: "" } as const;
+// (Each line highlighted on its own; one the highlighter can't take is plain, and the reviewer told.)
+const lines = rows.map((row) => (row.kind === "hunk" ? null : highlighted(row.text, language, budget)));
+const plain = lines.some((l) => l?.plain);
+---
+
+{plain && <p class="notice bad" role="note"><b>Some lines couldn't be highlighted.</b> They nest deeper than real code does, so they're shown as plain text. They're worth a look.</p>}
+
+<div class="diff" role="region" aria-label="Changes" tabindex="0">
+  <table>
+    <colgroup><col class="cn" /><col class="cn" /><col /></colgroup>
+    <tbody>
+      {
+        rows.map((row, i) =>
+          row.kind === "hunk" ? (
+            <tr class="hunk">
+              <td colspan="3">{row.text}</td>
+            </tr>
+          ) : (
+            <tr class={row.kind}>
+              <td class="n" aria-label={row.old ? `line ${row.old} before` : undefined}>{row.old ?? ""}</td>
+              <td class="n" aria-label={row.new ? `line ${row.new} after` : undefined}>{row.new ?? ""}</td>
+              <td class="line">
+                <span class="sign">
+                  {SIGN[row.kind]}
+                  {row.kind !== "context" && <span class="sr-only">{row.kind}: </span>}
+                </span>
+                <code class="hljs" set:html={lines[i]!.html} />
+              </td>
+            </tr>
+          ),
+        )
+      }
+    </tbody>
+  </table>
+</div>
+
+<style>
+  /* (A long line wraps in its own row, beside its numbers: nothing a reviewer reads is ever past the edge.) */
+  .diff { font-family: var(--mono); font-size: 12.5px; line-height: 20px; background: var(--field-bg); border-radius: 12px; box-shadow: inset 0 0 0 1px var(--border); }
+  table { width: 100%; table-layout: fixed; border-collapse: collapse; }
+  td { padding: 0; vertical-align: top; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .cn { width: 56px; }
+  .n { padding: 0 10px; text-align: right; color: var(--text-3); user-select: none; overflow-wrap: normal; }
+  .n + .n { border-right: 1px solid var(--line); }
+  /* (A wrapped line goes on under its code, past its sign.) */
+  .line { padding: 0 14px 0 22px; text-indent: -22px; }
+  .sign { display: inline-block; width: 22px; text-indent: 0; text-align: center; color: var(--text-3); user-select: none; }
+  .line code { font-size: inherit; }
+  .added { background: var(--diff-added-wash); }
+  .added .sign { color: var(--diff-added); }
+  .removed { background: var(--diff-removed-wash); }
+  .removed .sign { color: var(--diff-removed); }
+  .hunk td { padding: 4px 14px; color: var(--tone-accent); background: var(--tone-accent-wash); }
+  tr:first-child.hunk td { padding-top: 6px; }
+</style>

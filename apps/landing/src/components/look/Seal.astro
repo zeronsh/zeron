@@ -1,0 +1,13 @@
+---
+// The Verified seal: the one green thing on the store's pages (the
+// contract's "Who does what, in words": Zeron verifies). Said as "Verified"
+// to a screen reader, unless the words beside it already say so.
+interface Props {
+  size?: "s" | "l";
+  /** The words beside it say "Verified" already: the seal is only seen. */
+  quiet?: boolean;
+}
+const { size, quiet = false } = Astro.props;
+---
+
+<svg class:list={["seal", size]} viewBox="0 0 24 24" focusable="false" {...(quiet ? { "aria-hidden": "true" } : { role: "img", "aria-label": "Verified" })}><path d="M3.85 8.62a4 4 0 0 1 4.78-4.77 4 4 0 0 1 6.74 0 4 4 0 0 1 4.78 4.78 4 4 0 0 1 0 6.74 4 4 0 0 1-4.77 4.78 4 4 0 0 1-6.75 0 4 4 0 0 1-4.78-4.77 4 4 0 0 1 0-6.76Z"></path><path d="m8.8 12.2 2.2 2.2 4.3-4.6"></path></svg>

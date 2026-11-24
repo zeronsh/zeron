@@ -1,0 +1,78 @@
+---
+// A plugin's page, its Overview (the prototype's plugin page): its head
+// (who made it, what it does, getting it), its pictures on its own colour,
+// its README set to be read, and the rail of what a person weighs before
+// installing. The same for everyone, so kept by the Worker cache for at
+// most a minute.
+import Gallery from "../../components/look/Gallery.astro";
+import NotHere from "../../components/look/NotHere.astro";
+import PluginHead from "../../components/look/PluginHead.astro";
+import PluginTabs from "../../components/look/PluginTabs.astro";
+import Rail from "../../components/look/Rail.astro";
+import Store from "../../layouts/Store.astro";
+import "../../styles/look/plugin.css";
+import { pluginTag, publicPage } from "../../lib/store/http.ts";
+import { hueClass } from "../../lib/store/hue.ts";
+import { loadPlugin } from "../../lib/store/plugin-page.ts";
+import { drawn, keepable } from "../../lib/store/rendered.ts";
+import { fileUrl, memberUrl, pluginUrl } from "../../lib/store/urls.ts";
+
+export const prerender = false;
+
+const asked = Astro.params.id ?? "";
+// One address per plugin: a query can't make the page (or its README) be made again, or split its cache.
+if (Astro.url.search) return Astro.redirect(pluginUrl(asked), 301);
+
+const page = await loadPlugin(Astro.locals.edge, asked);
+let readme = "";
+if (page.state === "ok") {
+  const { plugin } = page;
+  // Drawn once and kept by its text (rendered.ts), the try finished whether or not the visitor stays.
+  // (A first heading that only says its name again isn't drawn: the page says it.)
+  const cf = (Astro.locals as { cfContext?: { waitUntil(p: Promise<unknown>): void } }).cfContext;
+  const out = await drawn(Astro.url.origin, plugin.id, plugin.version, "readme", plugin.readme, { file: (p) => fileUrl(plugin.id, plugin.version, p), demote: true, title: plugin.name }, { keep: true, waitUntil: cf ? (p) => cf.waitUntil(p) : undefined });
+  readme = out.html;
+  // Kept by shared caches only when what it shows is what it will show (a held or failed drawing isn't).
+  if (keepable([out])) publicPage(Astro, [pluginTag(plugin.id)]);
+  else Astro.response.headers.set("cache-control", "no-store");
+} else Astro.response.status = page.state === "missing" ? 404 : 503;
+
+// The page as a search engine reads it (a data block; nothing runs).
+const structured =
+  page.state === "ok"
+    ? JSON.stringify({
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        name: page.plugin.name,
+        description: page.plugin.summary,
+        applicationCategory: "Plugin",
+        operatingSystem: "macOS, Windows, Linux",
+        softwareVersion: page.plugin.version,
+        dateModified: new Date(page.plugin.updated_at).toISOString(),
+        ...(page.plugin.author.username ? { author: { "@type": "Person", name: `@${page.plugin.author.username}`, url: new URL(memberUrl(page.plugin.author.username), Astro.site).href } } : {}),
+        url: new URL(pluginUrl(page.plugin.id), Astro.site).href,
+        offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+      }).replace(/</g, "\\u003c")
+    : null;
+---
+
+{
+  page.state === "ok" ? (
+    <Store title={`${page.plugin.name}, a plugin for Zeron`} description={page.plugin.summary} canonical={pluginUrl(page.plugin.id)} current="browse" class={hueClass(page.plugin.id)}>
+      {structured && <script slot="head" type="application/ld+json" set:html={structured} />}
+      <div class="wrap">
+        <PluginHead plugin={page.plugin} category={page.category} versions={page.versions?.versions ?? page.plugin.versions} latestZeron={page.latestZeron} />
+        <Gallery id={page.plugin.id} name={page.plugin.name} version={page.plugin.version} screenshots={page.plugin.screenshots} />
+        <div class="cols2">
+          <div>
+            <PluginTabs plugin={page.plugin} current="overview" versions={page.versions?.total ?? null} />
+            {readme.trim() ? <article class="prose" set:html={readme} /> : <p class="prose">{page.plugin.summary}</p>}
+          </div>
+          <Rail plugin={page.plugin} />
+        </div>
+      </div>
+    </Store>
+  ) : (
+    <NotHere state={page.state} retry={pluginUrl(asked)} />
+  )
+}

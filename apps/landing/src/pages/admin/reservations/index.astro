@@ -1,0 +1,104 @@
+---
+// Ids held back from first-come claims (plan, amendment 19): each for one
+// account, or for nobody, as a table; reserve one under it, or free one
+// from its row. Admins only.
+import Empty from "../../../components/look/Empty.astro";
+import Failed from "../../../components/look/Failed.astro";
+import Flash from "../../../components/look/Flash.astro";
+import Question from "../../../components/look/Question.astro";
+import StaffHead from "../../../components/look/StaffHead.astro";
+import Store from "../../../layouts/Store.astro";
+import "../../../styles/look/account.css";
+import "../../../styles/look/staff.css";
+import { freeAsk } from "../../../lib/store/admin.ts";
+import { takeFlash } from "../../../lib/store/flash.ts";
+import { dateTime, day } from "../../../lib/store/format.ts";
+import { done, field, flashFor, formOf, tokenMatches } from "../../../lib/store/forms.ts";
+import { privatePage } from "../../../lib/store/http.ts";
+import { isPluginId, isUsername, SITE_IDS } from "../../../lib/store/names.ts";
+import { resumed } from "../../../lib/store/resume.ts";
+import { adminSession } from "../../../lib/store/session.ts";
+import { staffCounts, staffTabs } from "../../../lib/store/staff.ts";
+
+export const prerender = false;
+
+const here = "/admin/reservations";
+// (The middleware's admin gate let only an admin this far.)
+const session = await adminSession(Astro);
+if (!session) return new Response(null, { status: 404 });
+
+if (Astro.request.method === "POST") {
+  const form = await formOf(Astro.request);
+  if (!form || !tokenMatches(form, session)) return done(Astro, "expired", here);
+  const id = field(form, "id", 40).toLowerCase();
+  const to = field(form, "to_username", 21).replace(/^@/, "").toLowerCase();
+  if (!isPluginId(id) || (to && !isUsername(to))) return done(Astro, "bad_input", here);
+  const result = await Astro.locals.edge.admin("reservations", { id, to_username: to || null, note: field(form, "note", 500) || null }, session.csrf);
+  return done(Astro, flashFor(result, "reserved"), here);
+}
+if (Astro.request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
+
+privatePage(Astro);
+const flash = takeFlash(Astro.cookies);
+const [result, counts] = await Promise.all([Astro.locals.edge.reservations(), staffCounts(Astro.locals.edge)]);
+const reservations = result.ok ? result.data.reservations : [];
+const dialogId = (id: string) => `free-${id}`;
+---
+
+<Store title="Reserved ids · Review · Zeron" description="Plugin ids held back from first-come claims." noindex current="review" session={session}>
+  <div class="wrap acct">
+    <StaffHead title="Review" lead="Plugin ids held back from first-come claims, for an account or for nobody." tabs={staffTabs("reservations", { ...counts, reservations: result.ok ? reservations.length : null })}>
+      <Flash flash={flash} />
+      {
+        !result.ok ? (
+          <Failed title="Reserved ids can't be loaded right now" line="Try again in a moment." href={here} />
+        ) : reservations.length === 0 ? (
+          <Empty icon="key" title="No ids are reserved" line="An id reserved here can't be claimed by whoever sends it first." />
+        ) : (
+          <div class="tbl res">
+            <div class="trow th" aria-hidden="true"><span>Id</span><span>For</span><span>Why</span><span>Since</span><span></span></div>
+            <ul aria-label="Reserved ids">
+              {reservations.map((r) => (
+                <li class="trow">
+                  <code class="c-id">{r.id}</code>
+                  <span class:list={{ t3: !r.to }}><span class="sr-only">For </span>{r.to ? `@${r.to.username}` : "Nobody"}</span>
+                  <span class="c-said t2" title={r.note ?? undefined}>{r.note ?? ""}</span>
+                  <span class="t2"><time datetime={new Date(r.created_at).toISOString()} title={dateTime(r.created_at)}>{day(r.created_at)}</time></span>
+                  <a class="btn ghost sm" href={`${here}/${encodeURIComponent(r.id)}`} data-dialog={dialogId(r.id)}>Free…<span class="sr-only"> {r.id}</span></a>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )
+      }
+
+      <section class="reserve" aria-labelledby="reserve-heading">
+        <h2 id="reserve-heading">Reserve an id</h2>
+        <p class="lead2">Held for the account named, or for nobody. An id in use moves by a transfer instead.</p>
+        <form method="post" action={here} class="askcard reserve-form">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <div class="body">
+            <div>
+              <label class="field-label" for="reserve-id">Plugin id</label>
+              <div class="field"><input id="reserve-id" name="id" required maxlength="40" placeholder="an-id" autocomplete="off" value={resumed(Astro.url, "id", 40) || undefined} /></div>
+              <p class="field-hint">2 to 40 lowercase letters, digits and dashes.</p>
+            </div>
+            <div>
+              <label class="field-label" for="reserve-for">For</label>
+              <div class="field"><input id="reserve-for" name="to_username" maxlength="21" placeholder="@username" autocomplete="off" value={resumed(Astro.url, "to_username", 21) || undefined} /></div>
+              <p class="field-hint">Empty: held for nobody.</p>
+            </div>
+            <div>
+              <label class="field-label" for="reserve-note">Why</label>
+              <div class="field"><input id="reserve-note" name="note" maxlength="500" autocomplete="off" value={resumed(Astro.url, "note", 500) || undefined} /></div>
+              <p class="field-hint">For the other reviewers.</p>
+            </div>
+            <p class="site-ids">The site's own page words can't be reserved: no plugin can have them. <span class="words">{SITE_IDS.join(", ")}</span></p>
+          </div>
+          <div class="answers"><button class="btn pri" type="submit">Reserve</button></div>
+        </form>
+      </section>
+    </StaffHead>
+  </div>
+  {reservations.map((r) => <Question id={dialogId(r.id)} ask={freeAsk(r.id)} action={`${here}/${encodeURIComponent(r.id)}`} csrf={session.csrf} />)}
+</Store>

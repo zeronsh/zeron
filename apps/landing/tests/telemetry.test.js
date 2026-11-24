@@ -7,7 +7,7 @@ import { runInNewContext } from "node:vm";
 // The tracker is served as written (public/telemetry.js), so what is tested
 // here is byte for byte what a visitor runs. The page is the built one.
 const source = readFileSync(new URL("../public/telemetry.js", import.meta.url), "utf8");
-const html = readFileSync(new URL("../dist/index.html", import.meta.url), "utf8");
+const html = readFileSync(new URL("../dist/client/index.html", import.meta.url), "utf8");
 const placements = { "nav-download": "nav", "hero-download": "hero", "closing-download": "closing" };
 
 function load({ url = "https://zeron.sh/", referrer = "", navigator = {}, transport, clock = Date } = {}) {

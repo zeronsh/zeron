@@ -91,8 +91,19 @@ export const validateOp = (op: Op): string | null => {
       return "invalid sidebar pin field";
     }
   }
+  if (op.kind === "cloudAgents") {
+    // (crates/doc/src/registry/cloud_agents.rs: an agent's choices on Cloud,
+    // each a boolean; `null` clears one.)
+    for (const [key, value] of Object.entries(op.set ?? {})) {
+      if (CLOUD_AGENT_FIELDS.has(key) && (typeof value === "boolean" || value === null)) continue;
+      return "invalid cloud agent field";
+    }
+  }
   return null;
 };
+
+/** The choices a `cloudAgents` row holds for its agent on Cloud. */
+const CLOUD_AGENT_FIELDS = new Set(["nativeSubagents", "codeMode", "zeronMcpOnly"]);
 
 export interface ApplyResult {
   /** Undefined only for an `update` op on a missing row (nothing to store). */

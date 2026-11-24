@@ -88,6 +88,20 @@ pub mod reason {
     pub const NO_SOURCE: &str = "no_source";
     /// Its `engines.zeron` leaves this Zeron out (or can't be read).
     pub const INCOMPATIBLE: &str = "incompatible";
+    /// Two of its paths are one file (or a file and a folder) on a disk that
+    /// folds names (macOS's, Windows'), or one is the manifest's name or
+    /// `.source.json` there: refused before anything is written, on every
+    /// disk alike.
+    pub const PATHS_COLLIDE: &str = "paths_collide";
+    /// Replacing an installed store plugin's code is the person's to do
+    /// (an update they click), never an agent's.
+    pub const NEEDS_PERSON: &str = "needs_person";
+    /// What the store sent isn't what its record says (hash, version, key,
+    /// publisher): never installed (`store::client::reason` names it too).
+    pub const STORE_MISMATCH: &str = "store_mismatch";
+    /// An update asked for as one of many (`verified_only`) isn't
+    /// verified: taken on its own, with its own question.
+    pub const NOT_VERIFIED: &str = "not_verified";
     // The store's words (`store::client::reason`): `store_unreachable`,
     // `not_in_store`, `store_error`, `store_mismatch`; and the edge's own.
 }
@@ -157,13 +171,49 @@ pub struct StoreSource {
     /// The key that signed it, as the store's record names it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// An unsigned version's (a deploy token's): the key the newest signed
+    /// version installed here before it was signed with, so a key change
+    /// across it still shows on the next signed update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_key: Option<String>,
+    /// The version installed was verified (amendment 45), as the record it
+    /// was installed from said, fetched at install time: never a card, a
+    /// remembered offer, the manifest or a caller's word. A record here
+    /// without it reads as not verified: it never fails open.
+    #[serde(default)]
+    pub verified: bool,
+    /// When the store verified it (ms), as its record said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<i64>,
+    /// Installed not verified: the newest verified version this Zeron can
+    /// run, other than it, as the store said at install (for its consent
+    /// sheet's "instead"; installing it asks its own record again).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_alternative: Option<Alternative>,
+    /// (Not kept.) The person chose this verified version instead of the
+    /// unverified one installed: it may be older than that one.
+    #[serde(skip)]
+    pub instead_of_unverified: bool,
+    /// The store version this one replaced here, and whether it was
+    /// verified (its install record's word): what a consent window says of
+    /// "the version you have".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced: Option<ReplacedVersion>,
+}
+
+/// The version a store install replaced (`StoreSource::replaced`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReplacedVersion {
+    pub version: String,
+    #[serde(default)]
+    pub verified: bool,
 }
 
 impl StoreSource {
     /// What a decision about a store plugin is bound to: who owns it in
     /// the store (their stable id, never the username), not the key it was
-    /// signed with (an author's deploy key and device keys sign the same
-    /// plugin). A new owner asks again.
+    /// signed with (an author's devices sign the same plugin, and a deploy
+    /// token's version isn't signed). A new owner asks again.
     pub fn binding(&self) -> String {
         format!("store:{}", self.publisher_id)
     }
@@ -174,6 +224,13 @@ impl Source {
         std::fs::read(dir.join(SOURCE_FILE))
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    }
+
+    /// Written back to the plugin folder `dir` (a dot file: never part of
+    /// what's signed).
+    pub fn save(&self, dir: &Path) -> Result<(), String> {
+        let bytes = serde_json::to_vec_pretty(self).map_err(|_| "Couldn't say where it came from".to_string())?;
+        std::fs::write(dir.join(SOURCE_FILE), bytes).map_err(|_| "Couldn't say where it came from".to_string())
     }
 
     /// What the app is shown: never a local path.
@@ -188,6 +245,16 @@ impl Source {
         if let Some(store) = &self.store {
             value["id"] = json!(store.id);
             value["publisher"] = json!(store.publisher);
+            value["verified"] = json!(store.verified);
+            if store.verified && let Some(at) = store.verified_at {
+                value["verified_at"] = json!(at);
+            }
+            if !store.verified {
+                value["verified_alternative"] = json!(store.verified_alternative);
+            }
+            if let Some(replaced) = &store.replaced {
+                value["replaced"] = json!(replaced);
+            }
         }
         value
     }
@@ -205,7 +272,10 @@ pub const STORE: &str = "store";
 #[derive(Debug, Clone)]
 pub struct Package {
     pub manifest: Manifest,
-    pub key: String,
+    /// Who signed it. None only for a version the store took unsigned (a
+    /// deploy token's, `via: "deploy_token"`): trusted as the store's, by
+    /// its record's hash ([`parse_from_store`]).
+    pub key: Option<String>,
     pub files: BTreeMap<String, Vec<u8>>,
     /// The plugin's content hash, as a scan of it installed will say.
     pub hash: String,
@@ -229,10 +299,42 @@ fn keep_path(rel: &str) -> bool {
     package::plain_path(rel) && rel != MANIFEST_FILE
 }
 
+/// The first two of `files`' paths that would be one file, or a file where
+/// the other needs a folder, on a disk that folds names as macOS's and
+/// Windows' do (`listing::clashes`, the store's own rule), the manifest's
+/// name and `.source.json` taken already: in words naming both.
+fn colliding(files: &BTreeMap<String, Vec<u8>>) -> Option<String> {
+    super::listing::clashes(files.keys().map(String::as_str), &[MANIFEST_FILE, SOURCE_FILE])
+        .first()
+        .map(super::listing::Clash::words)
+}
+
 /// The plugin package `raw`, verified (signature over every file, a
 /// manifest Zeron can run, an id it can be installed under).
 pub fn parse(raw: Vec<u8>) -> Result<Package, String> {
-    let verified = package::parse(raw, FORMAT, signing::PAYLOAD_PREFIX, keep_path, &WORDS)?;
+    parse_package(raw, true)
+}
+
+/// [`parse`] for a package the store serves: `signed` is whether its
+/// record names a signer. A version published with a deploy token is
+/// unsigned, its record naming none: taken by its contents, which the
+/// record's hash then vouches for. Under a record naming no signer, a
+/// signed package is refused: unsigned is taken there, and nothing else.
+pub fn parse_from_store(raw: Vec<u8>, signed: bool) -> Result<Package, String> {
+    let package = parse_package(raw, signed)?;
+    if !signed && package.key.is_some() {
+        return Err(failure(reason::STORE_MISMATCH, "It's signed, but the store's record names no signer, so it wasn't installed"));
+    }
+    Ok(package)
+}
+
+fn parse_package(raw: Vec<u8>, signed: bool) -> Result<Package, String> {
+    let verified = package::parse(raw, FORMAT, signing::PAYLOAD_PREFIX, keep_path, &WORDS, signed)?;
+    // What the store refuses at publish (amendment 31), refused here too,
+    // before anything is written; the scan after writing stays the backstop.
+    if let Some(words) = colliding(&verified.files) {
+        return Err(failure(reason::PATHS_COLLIDE, format!("{words}, so it can't be installed")));
+    }
     let manifest = Manifest::from_value(verified.manifest.clone())?;
     if let Some(problem) = manifest.problem() {
         return Err(problem.to_owned());
@@ -243,7 +345,7 @@ pub fn parse(raw: Vec<u8>) -> Result<Package, String> {
     }
     // What `scan::inspect` checks of a folder: the signature as a plugin's.
     let hashes = package::hashes(&verified.files);
-    if signing::check(&manifest, &hashes) != SigCheck::Valid(verified.key.clone()) {
+    if signing::check(&manifest, &hashes) != expected_sig(verified.key.as_deref()) {
         return Err(WORDS.bad_signature.into());
     }
     let hash = signing::content_hash(&manifest, &hashes);
@@ -338,29 +440,42 @@ pub fn not_newer(candidate: &str, installed: &str) -> String {
     failure(reason::NOT_NEWER, format!("Version {candidate} isn't later than the {installed} installed, so it won't replace it"))
 }
 
+/// What a folder of a package signed by `key` (none: unsigned) checks as.
+fn expected_sig(key: Option<&str>) -> SigCheck {
+    key.map_or(SigCheck::Unsigned, |key| SigCheck::Valid(key.to_owned()))
+}
+
 /// What was installed over, when it was an update.
 #[derive(Debug, Clone)]
 pub struct Replaced {
-    /// The key the replaced one was signed by.
-    pub key: String,
+    /// The key the replaced one was signed by; none for an unsigned one the
+    /// store vouched for.
+    pub key: Option<String>,
     pub version: String,
     pub permissions: Vec<String>,
     pub hash: String,
 }
 
 /// The installed plugin `id`'s key, version, permissions and hash, if it's
-/// signed and its files are what was signed.
-fn installed(dir: &Path) -> Result<(String, Replaced), String> {
+/// signed and its files are what was signed, or it's unsigned and exactly
+/// what the store vouched for (a deploy token's version). Second: whether
+/// it's the store's (installed from it, and still what it vouched for).
+fn installed(dir: &Path) -> Result<(Option<String>, Replaced, bool), String> {
     let inspected = scan::inspect(dir, true);
     let manifest = inspected.manifest.as_ref();
-    let SigCheck::Valid(key) = inspected.sig.clone() else {
-        return Err(failure(
-            reason::INSTALLED_UNSIGNED,
-            format!(
-                "{} is installed already, and it isn't signed. Remove it first to install this one.",
-                manifest.map_or(inspected.folder.as_str(), |m| m.name.as_str())
-            ),
-        ));
+    let from_store = scan::store_record(&inspected).is_some();
+    let key = match inspected.sig.clone() {
+        SigCheck::Valid(key) => Some(key),
+        SigCheck::Unsigned if from_store => None,
+        _ => {
+            return Err(failure(
+                reason::INSTALLED_UNSIGNED,
+                format!(
+                    "{} is installed already, and it isn't signed. Remove it first to install this one.",
+                    manifest.map_or(inspected.folder.as_str(), |m| m.name.as_str())
+                ),
+            ));
+        }
     };
     Ok((
         key.clone(),
@@ -370,19 +485,22 @@ fn installed(dir: &Path) -> Result<(String, Replaced), String> {
             permissions: manifest.map(|m| m.permissions.clone()).unwrap_or_default(),
             hash: inspected.hash,
         },
+        from_store,
     ))
 }
 
 /// Install `package` under `plugins_dir`, from `source`. Over an installed
 /// plugin only when the same key signed both, or the installed one's key is
 /// `rotated_from` (checked by the caller to be the same account's as the
-/// package's); never over anything else. Returns what it replaced.
+/// package's), or both are the store's (its record decides whose it is,
+/// signed or not); never over anything else. Returns what it replaced.
 pub fn install(plugins_dir: &Path, package: &Package, source: &Source, rotated_from: Option<&str>) -> Result<Option<Replaced>, String> {
     let id = package.id().to_owned();
     let dir = plugins_dir.join(&id);
     let replaced = if std::fs::symlink_metadata(&dir).is_ok() {
-        let (key, replaced) = installed(&dir)?;
-        if key != package.key && rotated_from != Some(key.as_str()) {
+        let (key, replaced, from_store) = installed(&dir)?;
+        let store_to_store = from_store && source.store().is_some();
+        if key != package.key && rotated_from.is_none_or(|r| key.as_deref() != Some(r)) && !store_to_store {
             return Err(failure(
                 reason::OTHER_SIGNER,
                 format!("A plugin called {id} is installed already, signed by someone else. Remove it first to install this one."),
@@ -392,7 +510,11 @@ pub fn install(plugins_dir: &Path, package: &Package, source: &Source, rotated_f
         // are refused: an old version's holes stay closed.
         // (From the store, by precedence: a build of the same version isn't later.)
         let later = if source.store().is_some() { newer_by_precedence } else { newer };
-        if replaced.hash != package.hash && !later(&package.manifest.version, &replaced.version) {
+        // But the verified version the person chose instead of an
+        // unverified one installed from the store (its sheet's "instead").
+        let instead = source.store().is_some_and(|s| s.instead_of_unverified && s.verified)
+            && Source::load(&dir).is_some_and(|installed| installed.store().is_some_and(|s| !s.verified));
+        if replaced.hash != package.hash && !instead && !later(&package.manifest.version, &replaced.version) {
             return Err(not_newer(&package.manifest.version, &replaced.version));
         }
         Some(replaced)
@@ -405,7 +527,7 @@ pub fn install(plugins_dir: &Path, package: &Package, source: &Source, rotated_f
     let result = stage(&staged, package, source).and_then(|()| {
         // What's about to be installed is what was verified.
         let check = scan::inspect(&staged, false);
-        if check.sig != SigCheck::Valid(package.key.clone()) || check.hash != package.hash {
+        if check.sig != expected_sig(package.key.as_deref()) || check.hash != package.hash {
             return Err("It changed while it was being installed".to_string());
         }
         if replaced.is_some() {
@@ -909,21 +1031,51 @@ pub struct Found {
     /// grows anything: installing it waits for you.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digest_diff: Option<Value>,
-    /// Signed by another of its author's keys (a new machine): installing it
-    /// asks you again.
+    /// Signed by another key than the version installed: from elsewhere,
+    /// another of its author's (a new machine), and installing it asks you
+    /// again; from the store, where its owner's record decides, it's said
+    /// so the update can show its signing key changed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub new_key: bool,
     /// From the store: its id has another owner now, so installing it asks
     /// you again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub new_owner: bool,
-    /// From the store: your own version, still in review (offered to your
-    /// devices alone).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub in_review: bool,
     /// From the store: what's new in it (its CHANGELOG.md section).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
+    /// From the store: this update is verified, as the store said when it
+    /// was found (for its sheet; taking it asks the store's record again).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_verified: Option<bool>,
+    /// When the store verified it (ms), as it said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_verified_at: Option<i64>,
+    /// From the store: the version installed was verified (the sheet says
+    /// "the version you have was verified; this one is not").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_verified: Option<bool>,
+    /// From the store, when this update isn't verified: the newest verified
+    /// version newer than the one installed, offered beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_alternative: Option<Alternative>,
+}
+
+/// The newest verified version, offered beside an unverified update: what
+/// its sheet says of it (installed by `InstallPlugin {store, version}`,
+/// whose own record then says whether it's verified).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Alternative {
+    pub version: String,
+    /// The permissions it adds and drops against the version installed.
+    #[serde(default)]
+    pub added: Vec<String>,
+    #[serde(default)]
+    pub removed: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notes: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<i64>,
 }
 
 impl Found {
@@ -942,8 +1094,17 @@ impl Found {
         if self.new_owner {
             value["new_owner"] = json!(true);
         }
-        if self.in_review {
-            value["in_review"] = json!(true);
+        if let Some(verified) = self.store_verified {
+            value["verified"] = json!(verified);
+        }
+        if let Some(at) = self.store_verified_at {
+            value["verified_at"] = json!(at);
+        }
+        if let Some(verified) = self.installed_verified {
+            value["installed_verified"] = json!(verified);
+        }
+        if let Some(alternative) = &self.verified_alternative {
+            value["verified_alternative"] = json!(alternative);
         }
         if !self.notes.is_empty() {
             value["notes"] = json!(self.notes);
@@ -1017,7 +1178,7 @@ pub fn compare(installed: &Installed<'_>, fetched: &Package, source: Source, sam
     let change = grant_change(permissions, &fetched.manifest.permissions);
     let refused = if fetched.id() != id {
         Some(failure(reason::DIFFERENT_PLUGIN, format!("The new version is a different plugin ({})", fetched.id())))
-    } else if fetched.key != key && !same_account {
+    } else if fetched.key.as_deref() != Some(key) && !same_account {
         Some(failure(reason::NEW_SIGNER, "The new version is signed by someone else, so it won't be installed"))
     } else if !newer(&fetched.manifest.version, version) {
         Some(not_newer(&fetched.manifest.version, version))
@@ -1034,10 +1195,13 @@ pub fn compare(installed: &Installed<'_>, fetched: &Package, source: Source, sam
         refused,
         source: Some(source),
         digest_diff: diff.grew().then(|| diff.to_value()),
-        new_key: fetched.key != key,
+        new_key: fetched.key.as_deref() != Some(key),
         new_owner: false,
-        in_review: false,
         notes: String::new(),
+        store_verified: None,
+        store_verified_at: None,
+        installed_verified: None,
+        verified_alternative: None,
     })
 }
 
@@ -1063,7 +1227,7 @@ pub(crate) mod tests {
         let (key, _) = SigningKey::generate().unwrap();
         let raw = signed_package(&key, "focus", "1.0.0", &["ui.add"], "return 1");
         let package = parse(raw.clone()).unwrap();
-        assert_eq!((package.id(), package.key.as_str()), ("focus", key.public().as_str()));
+        assert_eq!((package.id(), package.key.as_deref()), ("focus", Some(key.public().as_str())));
         let source = Source { kind: "file".into(), url: None, path: Some("/x.zeron-plugin".into()), git_ref: None, commit: None, version: "1.0.0".into(), installed_at: 1, store: None };
         assert!(install(dir.path(), &package, &source, None).unwrap().is_none());
         let installed = scan::inspect(&dir.path().join("focus"), true);
@@ -1203,13 +1367,81 @@ pub(crate) mod tests {
         assert_eq!(reason_of(&forbidden), Some(reason::DOWNLOAD_FAILED), "{forbidden}");
     }
 
-    /// Two paths that are one file on a disk that ignores case (macOS's,
-    /// Windows'): sideloading doesn't refuse such a package (the store's
-    /// rules do: `listing::fold_path`), so what installing it ends as is
-    /// pinned here. On a disk that keeps case, both files, as signed. On
-    /// one that ignores it, the second write lands on the first, the folder
-    /// no longer matches what was signed, and it's refused before it takes
-    /// its place: nothing is installed and nothing is left half-way.
+    /// Unsigned is only ever the store's, by a record naming no key (a deploy
+    /// token's version): the same bytes from a link are refused as they
+    /// always were, and a signed package from one installs as ever.
+    #[tokio::test]
+    async fn an_unsigned_package_from_a_link_is_refused_as_ever() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        async fn serving(body: Vec<u8>) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let at = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                while let Ok((mut socket, _)) = listener.accept().await {
+                    let mut buf = [0u8; 2048];
+                    let _ = socket.read(&mut buf).await;
+                    let head = format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len());
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let _ = socket.write_all(&body).await;
+                }
+            });
+            format!("http://{at}/focus.zeron-plugin")
+        }
+        let files: BTreeMap<String, Vec<u8>> = [("init.luau".to_string(), b"return 1".to_vec())].into();
+        let manifest = json!({ "id": "focus", "name": "F", "version": "1.0.0", "entry": "init.luau" });
+        let unsigned = package::pack(FORMAT, &manifest, &files).unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let refused = fetch(&Origin::Link(serving(unsigned.clone()).await), scratch.path()).await.unwrap_err();
+        assert_eq!(reason_of(&refused), Some(reason::UNSIGNED), "{refused}");
+        assert!(parse_from_store(unsigned, false).is_ok_and(|p| p.key.is_none()), "the store's, by a record naming no key");
+        let (key, _) = SigningKey::generate().unwrap();
+        let signed = package::pack(FORMAT, &key.sign_manifest(&manifest, &package::hashes(&files)), &files).unwrap();
+        let (package, source) = fetch(&Origin::Link(serving(signed).await), scratch.path()).await.unwrap();
+        assert_eq!((package.key, source.kind.as_str()), (Some(key.public()), "link"));
+    }
+
+    /// A package whose paths fold alike, its signature good: refused as it's
+    /// read, naming the two paths, the same on every disk.
+    #[test]
+    fn paths_that_fold_alike_are_refused_before_anything_is_written() {
+        let (key, _) = SigningKey::generate().unwrap();
+        let with = |extra: &[&str]| {
+            let mut files = BTreeMap::new();
+            files.insert("init.luau".to_string(), b"return 1".to_vec());
+            for rel in extra {
+                files.insert((*rel).to_string(), b"x".to_vec());
+            }
+            let manifest = key.sign_manifest(&json!({ "id": "focus", "name": "F", "version": "1.0.0", "entry": "init.luau" }), &package::hashes(&files));
+            parse(package::pack(FORMAT, &manifest, &files).unwrap())
+        };
+        let refused = |extra: &[&str], names: &[&str]| {
+            let error = with(extra).unwrap_err();
+            assert_eq!(reason_of(&error), Some(reason::PATHS_COLLIDE), "{extra:?}: {error}");
+            for name in names {
+                assert!(error.contains(&format!("{name:?}")), "{extra:?}: {error} names {name}");
+            }
+        };
+        // Case, and Unicode's two spellings of one name (NFC and NFD).
+        refused(&["ui/Badge.luau", "ui/badge.luau"], &["ui/Badge.luau", "ui/badge.luau"]);
+        refused(&["caf\u{e9}.luau", "cafe\u{301}.luau"], &["caf\u{e9}.luau", "cafe\u{301}.luau"]);
+        // A file and a folder that fold alike, in either order.
+        refused(&["ui", "UI/x.luau"], &["ui", "UI/x.luau"]);
+        refused(&["Ui", "ui/x.luau"], &["Ui", "ui/x.luau"]);
+        // The manifest's own name, folded (a long s folds to s), and as a folder.
+        refused(&["Zeron-Plugin.json"], &["Zeron-Plugin.json", "zeron-plugin.json"]);
+        refused(&["zeron-plugin.j\u{17f}on"], &["zeron-plugin.j\u{17f}on", "zeron-plugin.json"]);
+        refused(&["ZERON-PLUGIN.JSON/x.luau"], &["zeron-plugin.json", "ZERON-PLUGIN.JSON/x.luau"]);
+        // (Trailing dots and spaces, which Windows drops, are no file Zeron writes at all.)
+        assert_eq!(reason_of(&with(&["a.luau", "a.luau."]).unwrap_err()), Some(reason::BAD_FILE));
+        // Names that only look alike are anyone's.
+        with(&["ui/badge.luau", "ui/badge2.luau", "uix/a.luau", "zeron-plugin.json.md"]).unwrap();
+    }
+
+    /// The backstop under that refusal: a package whose paths collide that
+    /// got past it (built here without `parse`). On a disk that ignores
+    /// case, the second write lands on the first, the folder no longer
+    /// matches what was signed, and it's refused before it takes its place:
+    /// nothing is installed and nothing is left half-way.
     #[test]
     fn a_package_whose_paths_collide_on_a_case_blind_disk_never_half_installs() {
         let dir = tempfile::tempdir().unwrap();
@@ -1222,7 +1454,10 @@ pub(crate) mod tests {
         files.insert("ui/Badge.luau".to_string(), b"return 'upper'".to_vec());
         files.insert("ui/badge.luau".to_string(), b"return 'lower'".to_vec());
         let manifest = key.sign_manifest(&json!({ "id": "focus", "name": "F", "version": "1.0.0", "entry": "init.luau" }), &package::hashes(&files));
-        let package = parse(package::pack(FORMAT, &manifest, &files).unwrap()).unwrap();
+        assert_eq!(reason_of(&parse(package::pack(FORMAT, &manifest, &files).unwrap()).unwrap_err()), Some(reason::PATHS_COLLIDE));
+        let manifest = Manifest::from_value(manifest).unwrap();
+        let hash = signing::content_hash(&manifest, &package::hashes(&files));
+        let package = Package { manifest, key: Some(key.public()), files, hash };
         let source = Source { kind: "file".into(), url: None, path: None, git_ref: None, commit: None, version: String::new(), installed_at: 0, store: None };
         let installed = install(dir.path(), &package, &source, None);
         if ignores_case {
@@ -1233,6 +1468,179 @@ pub(crate) mod tests {
             assert_eq!(scan::inspect(&dir.path().join("focus"), true).sig, SigCheck::Valid(key.public()));
         }
         assert_eq!(std::fs::read_dir(dir.path().join(INCOMING_DIR)).unwrap().count(), 0, "nothing left half-way");
+    }
+
+    /// A hostile package on the disk Zeron's people run: macOS's APFS, which
+    /// ignores case and Unicode normalization when it compares names. Each
+    /// package is real and signed. Where its paths name one file twice
+    /// (folded as the store folds them), it's refused as it's read, with a
+    /// word naming the two (`paths_collide`), before anything is written;
+    /// and, built past that check, the scan after writing still refuses it,
+    /// nothing left in the plugins folder and nothing staged. Where they
+    /// don't, what's installed is exactly what was signed. (Only on macOS:
+    /// the disk's own folding is asked first; elsewhere it tells these names
+    /// apart.)
+    #[cfg(target_os = "macos")]
+    mod on_a_folding_disk {
+        use super::*;
+
+        /// Whether this disk opens `b` as `a`, once `a` exists.
+        fn folds(a: &str, b: &str) -> bool {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(a), b"x").unwrap();
+            dir.path().join(b).exists()
+        }
+
+        /// `files` and an entry, signed: the package as it travels, and its
+        /// parts.
+        fn signed(files: &[(&str, &[u8])]) -> (Vec<u8>, serde_json::Value, SigningKey, BTreeMap<String, Vec<u8>>) {
+            let (key, _) = SigningKey::generate().unwrap();
+            let mut all = BTreeMap::new();
+            all.insert("init.luau".to_string(), b"return 1".to_vec());
+            for (rel, bytes) in files {
+                all.insert(rel.to_string(), bytes.to_vec());
+            }
+            let manifest = key.sign_manifest(&json!({ "id": "focus", "name": "F", "version": "1.0.0", "entry": "init.luau" }), &package::hashes(&all));
+            (package::pack(FORMAT, &manifest, &all).unwrap(), manifest, key, all)
+        }
+
+        /// (A file's, sideloaded: no store looked at it first.)
+        fn source() -> Source {
+            serde_json::from_value(json!({ "kind": "file", "version": "", "installed_at": 0 })).unwrap()
+        }
+
+        /// Refused as it's read: `paths_collide`, naming each of `named`.
+        fn refused_as_read(files: &[(&str, &[u8])], named: &[&str]) {
+            let error = parse(signed(files).0).map(|_| ()).unwrap_err();
+            assert_eq!(reason_of(&error), Some(reason::PATHS_COLLIDE), "{error}");
+            for rel in named {
+                assert!(error.contains(&format!("{rel:?}")), "{error} names {rel:?}");
+            }
+        }
+
+        /// The same package built past that check (as a store that didn't
+        /// check would hand it over), installed into an empty plugins folder.
+        fn installed_past_the_read(files: &[(&str, &[u8])]) -> (Result<Option<Replaced>, String>, tempfile::TempDir) {
+            let dir = tempfile::tempdir().unwrap();
+            let (_, manifest, key, all) = signed(files);
+            let manifest = Manifest::from_value(manifest).unwrap();
+            let hash = signing::content_hash(&manifest, &package::hashes(&all));
+            let package = Package { manifest, key: key.public(), files: all, hash };
+            (install(dir.path(), &package, &source(), None), dir)
+        }
+
+        /// `files` read and installed as Zeron takes any package.
+        fn installed(files: &[(&str, &[u8])]) -> (Result<Option<Replaced>, String>, tempfile::TempDir, Package) {
+            let dir = tempfile::tempdir().unwrap();
+            let package = parse(signed(files).0).expect("a signed package Zeron takes");
+            (install(dir.path(), &package, &source(), None), dir, package)
+        }
+
+        /// Refused, with a word, and nothing left: no plugin, nothing staged.
+        fn fails_closed(result: Result<Option<Replaced>, String>, dir: &Path, word: &str) {
+            assert_eq!(result.map(|_| ()).unwrap_err(), word);
+            let left: Vec<String> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+            assert_eq!(left, [INCOMING_DIR], "nothing in the plugins folder but its (empty) staging room");
+            assert_eq!(std::fs::read_dir(dir.join(INCOMING_DIR)).unwrap().count(), 0, "nothing staged behind");
+        }
+
+        /// Installed, and on disk exactly what was signed, Zeron's own files
+        /// (its manifest, where it came from) Zeron's.
+        fn installs_as_signed(result: Result<Option<Replaced>, String>, dir: &Path, package: &Package) {
+            result.unwrap();
+            let folder = dir.join("focus");
+            let check = scan::inspect(&folder, true);
+            assert_eq!((check.sig, check.hash.clone()), (SigCheck::Valid(package.key.clone()), package.hash.clone()));
+            let source: Source = serde_json::from_slice(&std::fs::read(folder.join(SOURCE_FILE)).unwrap()).unwrap();
+            assert_eq!(source.kind, "file");
+            for (rel, bytes) in &package.files {
+                assert_eq!(&std::fs::read(folder.join(rel)).unwrap(), bytes, "{rel} on disk is what was signed");
+            }
+        }
+
+        const CHANGED: &str = "It changed while it was being installed";
+        const UNWRITABLE: &str = "Couldn't write its files";
+
+        #[test]
+        fn two_files_differing_only_in_case_are_refused() {
+            assert!(folds("a.luau", "A.luau"), "this disk ignores case");
+            let files: &[(&str, &[u8])] = &[("a.luau", b"return 'lower'"), ("A.luau", b"return 'upper'")];
+            refused_as_read(files, &["a.luau", "A.luau"]);
+            let (result, dir) = installed_past_the_read(files);
+            fails_closed(result, dir.path(), CHANGED);
+        }
+
+        #[test]
+        fn two_names_equal_once_normalized_are_refused() {
+            let (composed, decomposed) = ("caf\u{e9}.luau", "cafe\u{301}.luau");
+            assert!(folds(composed, decomposed), "this disk ignores Unicode normalization");
+            let files: &[(&str, &[u8])] = &[(composed, b"return 'composed'"), (decomposed, b"return 'decomposed'")];
+            refused_as_read(files, &[composed, decomposed]);
+            let (result, dir) = installed_past_the_read(files);
+            fails_closed(result, dir.path(), CHANGED);
+        }
+
+        #[test]
+        fn a_file_and_a_folder_that_fold_alike_are_refused() {
+            // Either order the package lists them in (`Lib/…` before `lib`,
+            // `Lib` before `lib/…`).
+            let lib_first: &[(&str, &[u8])] = &[("lib", b"a file"), ("Lib/x.luau", b"return 1")];
+            let folder_first: &[(&str, &[u8])] = &[("Lib", b"a file"), ("lib/x.luau", b"return 1")];
+            for files in [lib_first, folder_first] {
+                let named: Vec<&str> = files.iter().map(|(rel, _)| *rel).collect();
+                refused_as_read(files, &named);
+                let (result, dir) = installed_past_the_read(files);
+                fails_closed(result, dir.path(), UNWRITABLE);
+            }
+        }
+
+        #[test]
+        fn a_file_that_folds_onto_the_manifest_is_refused() {
+            // By case, and by Unicode's case folding alone (the long s, `ſ`,
+            // is `s` to this disk).
+            for rel in ["Zeron-Plugin.json", "zeron-plugin.j\u{17f}on"] {
+                assert!(folds("zeron-plugin.json", rel), "{rel:?} opens the manifest on this disk");
+                let files: &[(&str, &[u8])] = &[(rel, br#"{ "id": "focus", "permissions": ["commands"] }"#)];
+                refused_as_read(files, &[rel, "zeron-plugin.json"]);
+                let (result, dir) = installed_past_the_read(files);
+                fails_closed(result, dir.path(), CHANGED);
+            }
+        }
+
+        #[test]
+        fn a_name_that_would_be_a_dot_name_is_refused_or_is_its_own_file() {
+            // Refused as it's read: a dot name is never a package's
+            // (`plain_path`), nor one ending in a dot or a space, which APFS
+            // keeps but Windows drops.
+            for rel in [".source.json", ".Source.json", ".\u{17f}ource.json", "x.luau.", "x.luau ", "lib./x.luau"] {
+                let error = parse(signed(&[(rel, b"{}")]).0).map(|_| ()).unwrap_err();
+                assert_eq!(reason_of(&error), Some("bad_file"), "{rel:?}: {error}");
+            }
+            // A fullwidth dot (leading, or trailing), a one-dot leader, a
+            // zero-width space before the dot: APFS keeps each apart, so
+            // each is a file of its own, installed as signed, Zeron's own
+            // `.source.json` beside it.
+            for (rel, apart_from) in [
+                ("\u{ff0e}source.json", ".source.json"),
+                ("\u{2024}source.json", ".source.json"),
+                ("\u{200b}.source.json", ".source.json"),
+                ("x.luau\u{ff0e}", "x.luau"),
+            ] {
+                assert!(!folds(apart_from, rel), "{rel:?} is its own name on this disk");
+                let (result, dir, package) = installed(&[(rel, br#"{ "kind": "store" }"#), (apart_from.trim_start_matches('.'), b"--")]);
+                installs_as_signed(result, dir.path(), &package);
+            }
+        }
+
+        #[test]
+        fn what_is_installed_is_always_what_was_signed() {
+            // Every collision above, at once: refused as read, and past it.
+            let files: &[(&str, &[u8])] = &[("a.luau", b"1"), ("A.luau", b"2"), ("caf\u{e9}.luau", b"3"), ("cafe\u{301}.luau", b"4"), ("Zeron-Plugin.json", b"{}")];
+            let error = parse(signed(files).0).map(|_| ()).unwrap_err();
+            assert_eq!(reason_of(&error), Some(reason::PATHS_COLLIDE), "{error}");
+            let (result, dir) = installed_past_the_read(files);
+            fails_closed(result, dir.path(), CHANGED);
+        }
     }
 
     /// R23: an update was any package with another hash under the same key,

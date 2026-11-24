@@ -788,9 +788,17 @@ zeron.settings_page { build = function() return widgets("settings") end }
                 rig.app.keys("shift+f10");
                 rig.frames(40);
             } else if hover {
+                // Rested on until it shows: a tooltip waits its delay in real
+                // time (300 ms on a Mac, 500 on Linux), which a loaded machine
+                // stretches; then as long again for it to settle.
                 rig.app.hover(open);
-                rig.frames(120);
-                std::thread::sleep(std::time::Duration::from_millis(900));
+                let since = std::time::Instant::now();
+                while rig.app.find(shows).and_then(|n| rig.app.ui.scene.borrow().visible_bounds(n)).is_none() {
+                    assert!(since.elapsed() < std::time::Duration::from_secs(5), "{shows} never showed in 5 s of resting on {open}");
+                    rig.frames(10);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(400));
                 rig.frames(60);
             } else {
                 rig.app.click(open);

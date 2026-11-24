@@ -4,11 +4,13 @@
  * affected operation answer `unavailable`, never crash the isolate.
  */
 import type { VaultAccount } from "./account";
+import type { VaultConnections } from "./connections";
 import type { VaultDevices } from "./devices";
 
 export interface Env {
   readonly VAULT_DEVICES: DurableObjectNamespace<VaultDevices>;
   readonly VAULT_ACCOUNTS: DurableObjectNamespace<VaultAccount>;
+  readonly VAULT_CONNECTIONS: DurableObjectNamespace<VaultConnections>;
 
   /** Global kill switch: `"1"` refuses every call with 503. */
   readonly VAULT_DISABLED?: string;

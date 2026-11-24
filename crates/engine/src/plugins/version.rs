@@ -33,8 +33,10 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-/// The longest version string accepted.
-pub const MAX_LEN: usize = 128;
+/// The longest version string accepted: what the store, its site's links
+/// and the app's version link all hold to (the contract's merged-build
+/// review, changing amendment 3's 128).
+pub const MAX_LEN: usize = 32;
 /// The longest range string accepted.
 pub const MAX_RANGE_LEN: usize = 256;
 /// The largest number in a version: JavaScript's largest exact integer.

@@ -43,6 +43,7 @@ portable-pty.workspace = true
 base64 = "0.22"
 # Cloud runner identity: Ed25519 device key (already in the tree via rustls).
 ring = "0.17"
+zeroize = "1.9"
 toml = "0.8"
 libc.workspace = true
 gethostname.workspace = true
@@ -51,6 +52,9 @@ sha2.workspace = true
 reqwest.workspace = true
 # A large chat2 checkpoint sent in parts, sliced from one buffer.
 bytes = "1"
+# External MCP loopback gateway (`ExternalMcpProxy` response streaming).
+hyper = { version = "1", features = ["http1"] }
+http-body-util = "0.1"
 # The rules plugins are held to (paths, programs, network), shared with apps/zgx.
 zeron-plugin-guard.workspace = true
 ignore.workspace = true
@@ -60,6 +64,7 @@ ignore.workspace = true
 # shows. Already in the tree (reqwest's url, its idna's normalizer).
 url = "2"
 icu_normalizer = "2"
+icu_properties = "2"
 unicode-properties = { version = "0.1", default-features = false, features = ["general-category"] }
 fff-search.workspace = true
 
@@ -72,6 +77,8 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 # Already in the tree (zed-scap, through the app); only its system and disk
 # parts here, no threads pool.
 sysinfo = { version = "0.31.4", default-features = false, features = ["system", "disk"] }
+# A deploy token's checksum (zlib's CRC-32); already in the tree via flate2.
+crc32fast = "1.5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # The battery's IOKit power-source dictionary (device_stats.rs); already in the tree.

@@ -39,6 +39,8 @@ local recipe = ui.variants {
 			[false] = {},
 		},
 		selected = { [true] = {}, [false] = {} },
+		-- Open while others are what's selected (flat, below).
+		current = { [true] = {}, [false] = {} },
 		-- How a selection stands: raised (lit, lifted, ringed) for cards and
 		-- options, flat (the wash alone) for rows in a sidebar or list.
 		depth = { raised = {}, flat = {} },
@@ -63,8 +65,10 @@ local recipe = ui.variants {
 			hover = { bg = "$zeron.selected.flat.bg" },
 			active = { bg = "$zeron.selected.flat.bg" },
 		},
+		-- Open, not selected: the hover wash, held.
+		{ current = true, selected = false, depth = "flat", bg = "$hover" },
 	},
-	defaults = { kind = "plain", interactive = false, selected = false, depth = "raised" },
+	defaults = { kind = "plain", interactive = false, selected = false, current = false, depth = "raised" },
 }
 
 export type Kind = "plain" | "raised" | "sunken" | "overlay"
@@ -74,6 +78,7 @@ export type Props = Merge<ContainerProps, {
 	depth: Depth?,
 	interactive: boolean?,
 	selected: (boolean | State<boolean> | () -> boolean)?,
+	current: (boolean | State<boolean> | () -> boolean)?,
 	[number]: Child,
 }>
 
@@ -84,7 +89,8 @@ return function(props: Props): Node
 		depth = props.depth,
 		interactive = props.interactive or props.on_click ~= nil,
 		selected = props.selected :: any,
+		current = props.current :: any,
 	}
-	p.kind, p.depth, p.interactive, p.selected = nil, nil, nil, nil
+	p.kind, p.depth, p.interactive, p.selected, p.current = nil, nil, nil, nil, nil
 	return ui.column(p)
 end

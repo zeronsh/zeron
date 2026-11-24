@@ -15,6 +15,7 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import type { Env } from "./env";
 import { claimsRunnerIssuer, parseDevRunnerBearer, verifyRunnerJwt } from "./runner-token";
+import { looksLikeDeployToken } from "./store/identity/deploy-token";
 
 export interface Verified {
   readonly userId: string;
@@ -50,6 +51,9 @@ export const bearerFromRequest = (request: Request): string | undefined => {
 
 export const verifyToken = async (env: Env, token: string): Promise<Verified | undefined> => {
   if (!token) return undefined;
+  // A deploy token (store/identity/deploy-token.ts) is never a session, in
+  // any mode: dev mode would otherwise take it as a user id.
+  if (looksLikeDeployToken(token)) return undefined;
   // Runner JWTs are checked first and exclusively against our own key: a
   // token claiming our issuer never falls through to the WorkOS path (or to
   // dev mode's "the bearer is the user id").

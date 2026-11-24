@@ -1,0 +1,99 @@
+---
+// Getting it: Install in Zeron, the one primary button, its own width (it
+// opens Zeron at this plugin; it never installs by itself); under it, at its
+// right, one line: the version it offers, whether Zeron verified it (in
+// its state's ink, the check with Verified, as the store's pills), and when
+// it was published (format.ts publishedWhen: one fact, said alike on every page); and, when that version
+// isn't verified, the amber note: the newest verified one, to install
+// instead (the app's sentences, the contract's link that names a version).
+// "Nothing happened?" opens how to get Zeron, and opens by itself when the
+// page sees the link went nowhere (scripts/store.ts).
+import { compatibility, day, publishedWhen } from "../../lib/store/format.ts";
+import { appUrl, linkable } from "../../lib/store/urls.ts";
+import { store } from "../../lib/store/words.ts";
+import Seal from "./Seal.astro";
+import ZeronMark from "./ZeronMark.astro";
+
+interface Props {
+  id: string;
+  name: string;
+  /** The version the button installs. */
+  version: string;
+  /** It's the plugin's newest: the plain link (the app's page decides); else a link that names it. */
+  newest: boolean;
+  verified: boolean;
+  publishedAt: number;
+  /** The plugin's newest verified version (not this one), and when Zeron verified it, if known. */
+  verifiedVersion: string | null;
+  verifiedVersionAt?: number | null;
+  /** No Zeron released can install it: the button stays, off, and says why. */
+  off?: { needs: string | undefined; latest: string } | null;
+}
+const { id, name, version, newest, verified, publishedAt, verifiedVersion, verifiedVersionAt, off } = Astro.props;
+// (A version the link can't name isn't named on the button either: Zeron's page chooses.)
+const named = !newest && linkable(version) ? version : undefined;
+const label = newest ? "Install in Zeron" : named ? store("plugins.store.install_version", { version: named }) : "Open in Zeron";
+const href = appUrl(id, named);
+const now = Date.now();
+---
+
+<div class="get" data-get>
+  <div class="get-btn">
+    {
+      off ? (
+        <span class="btn pri" aria-disabled="true">{label}</span>
+      ) : (
+        <a class="btn pri" href={href} data-install>
+          <ZeronMark pitch={4} />
+          {label}
+        </a>
+      )
+    }
+  </div>
+  <p class="ver">
+    <b class="mono">{version}</b><i aria-hidden="true"></i>
+    {verified ? <span class="said ok"><Seal quiet />{store("plugins.store.verified")}</span> : <span class="said no">{store("plugins.store.review.waiting")}</span>}<i aria-hidden="true"></i>
+    <time datetime={new Date(publishedAt).toISOString()}><span class="sr-only">Published </span>{publishedWhen(publishedAt, now)}</time>
+  </p>
+  {
+    off ? (
+      <p class="note warn">
+        <b>{store("plugins.store.needs_other_zeron")}</b> It needs {compatibility(off.needs)}; the latest Zeron is {off.latest}.
+      </p>
+    ) : (
+      !verified && (
+        <p class="note">
+          {verifiedVersion ? (
+            <>
+              <b>{store("plugins.store.not_verified_line", { version, verified: verifiedVersion })}</b>{" "}
+              {linkable(verifiedVersion) && (
+                <>
+                  <a href={appUrl(id, verifiedVersion)}>{store("plugins.store.install_instead", { version: verifiedVersion })}</a>
+                  {verifiedVersionAt ? `, verified ${day(verifiedVersionAt, now)}.` : "."}
+                </>
+              )}
+            </>
+          ) : (
+            <>
+              <b>{store("plugins.store.none_verified")}</b> Zeron asks before it installs it.
+            </>
+          )}
+        </p>
+      )
+    )
+  }
+  {
+    !off && (
+      <div class="alt">
+        Opens Zeron. <button type="button" popovertarget={`get-help-${id}`} data-get-help>Nothing happened?</button>
+      </div>
+    )
+  }
+  <div class="menu get-help" id={`get-help-${id}`} popover>
+    <p><b>{label} opens Zeron at {name}, ready to install.</b> If nothing opened:</p>
+    <ol>
+      <li><a href="/#downloads">Download Zeron</a> for your computer, open it, and press {label} again.</li>
+      <li>Or, in Zeron, open Settings, then Plugins, then Browse, and search for {name}.</li>
+    </ol>
+  </div>
+</div>

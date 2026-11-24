@@ -1,0 +1,1903 @@
+{
+"honest": [
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Unofficial client for GitHub",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Checks your files for broken links",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Authentication helper for SSH keys",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Formula editor for LaTeX",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Verify download signatures before you run them",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Shows GitHub's verified badge on commits",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Highlights verified commits in the log",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Opens the official Rust documentation",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Officially unsupported, use at your own risk",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Wraps the official Stripe SDK",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Built on the official Notion API",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Connects to the official Slack app",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Syncs with the official VS Code extension",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Works alongside the official GitHub client",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Lets the GitHub app show verified commits",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Now verified against Node 22",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Verified against Node 22 and 24",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "This release is verified on macOS 15",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Has been verified with Python 3.13",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Adds a button to Zeron's built-in terminal",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Works with Zeron's built-in git",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Marks emails from verified senders",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Lists verified domains in your DNS",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Not an official Linear integration",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "A linter that checks commit messages",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Formats code the way the official style guide says",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "pass",
+"text": "Keeps your verified GPG keys in one place",
+"note": ""
+},
+{
+"lang": "en",
+"field": "name",
+"expect": "pass",
+"text": "Unofficial GitHub",
+"note": ""
+},
+{
+"lang": "en",
+"field": "name",
+"expect": "pass",
+"text": "Verify Links",
+"note": ""
+},
+{
+"lang": "en",
+"field": "name",
+"expect": "pass",
+"text": "Formula Editor",
+"note": ""
+},
+{
+"lang": "en",
+"field": "name",
+"expect": "pass",
+"text": "Auth Helper",
+"note": ""
+},
+{
+"lang": "es",
+"field": "description",
+"expect": "pass",
+"text": "Cliente no oficial de GitHub",
+"note": ""
+},
+{
+"lang": "es",
+"field": "description",
+"expect": "pass",
+"text": "Verifica la sintaxis de tus archivos",
+"note": ""
+},
+{
+"lang": "es",
+"field": "description",
+"expect": "pass",
+"text": "Comprueba enlaces rotos",
+"note": ""
+},
+{
+"lang": "es",
+"field": "description",
+"expect": "pass",
+"text": "Editor de fórmulas matemáticas",
+"note": ""
+},
+{
+"lang": "es",
+"field": "description",
+"expect": "pass",
+"text": "Autenticación con OAuth",
+"note": ""
+},
+{
+"lang": "es",
+"field": "description",
+"expect": "pass",
+"text": "Abre la documentación oficial de Rust",
+"note": ""
+},
+{
+"lang": "es",
+"field": "description",
+"expect": "pass",
+"text": "Muestra los commits verificados",
+"note": ""
+},
+{
+"lang": "es",
+"field": "description",
+"expect": "pass",
+"text": "Envuelve el SDK oficial de Stripe",
+"note": ""
+},
+{
+"lang": "es",
+"field": "description",
+"expect": "pass",
+"text": "Se conecta con la app oficial de Slack",
+"note": ""
+},
+{
+"lang": "es",
+"field": "description",
+"expect": "pass",
+"text": "Verificado con Node 22",
+"note": ""
+},
+{
+"lang": "es",
+"field": "description",
+"expect": "pass",
+"text": "Marca los remitentes verificados",
+"note": ""
+},
+{
+"lang": "es",
+"field": "description",
+"expect": "pass",
+"text": "Formatea el código según la guía oficial",
+"note": ""
+},
+{
+"lang": "es",
+"field": "description",
+"expect": "pass",
+"text": "Un linter que revisa los mensajes de commit",
+"note": ""
+},
+{
+"lang": "es",
+"field": "description",
+"expect": "pass",
+"text": "Gestiona tus claves GPG verificadas",
+"note": ""
+},
+{
+"lang": "es",
+"field": "description",
+"expect": "pass",
+"text": "No es una integración oficial de Linear",
+"note": ""
+},
+{
+"lang": "fr",
+"field": "description",
+"expect": "pass",
+"text": "Vérifie la syntaxe de vos fichiers",
+"note": ""
+},
+{
+"lang": "fr",
+"field": "description",
+"expect": "pass",
+"text": "Vérifie les liens morts",
+"note": ""
+},
+{
+"lang": "fr",
+"field": "description",
+"expect": "pass",
+"text": "Vérifie l'orthographe",
+"note": ""
+},
+{
+"lang": "fr",
+"field": "description",
+"expect": "pass",
+"text": "Éditeur de formules",
+"note": ""
+},
+{
+"lang": "fr",
+"field": "description",
+"expect": "pass",
+"text": "Authentification à deux facteurs",
+"note": ""
+},
+{
+"lang": "fr",
+"field": "description",
+"expect": "pass",
+"text": "Client non officiel pour Mastodon",
+"note": ""
+},
+{
+"lang": "fr",
+"field": "description",
+"expect": "pass",
+"text": "Ouvre la documentation officielle de Rust",
+"note": ""
+},
+{
+"lang": "fr",
+"field": "description",
+"expect": "pass",
+"text": "Affiche les commits vérifiés",
+"note": ""
+},
+{
+"lang": "fr",
+"field": "description",
+"expect": "pass",
+"text": "Utilise le SDK officiel de Stripe",
+"note": ""
+},
+{
+"lang": "fr",
+"field": "description",
+"expect": "pass",
+"text": "Se connecte à l'app officielle de Slack",
+"note": ""
+},
+{
+"lang": "fr",
+"field": "description",
+"expect": "pass",
+"text": "Vérifié avec Node 22",
+"note": ""
+},
+{
+"lang": "fr",
+"field": "description",
+"expect": "pass",
+"text": "Signale les expéditeurs vérifiés",
+"note": ""
+},
+{
+"lang": "fr",
+"field": "description",
+"expect": "pass",
+"text": "Formate le code selon le guide officiel",
+"note": ""
+},
+{
+"lang": "fr",
+"field": "description",
+"expect": "pass",
+"text": "Un linter qui vérifie les messages de commit",
+"note": ""
+},
+{
+"lang": "fr",
+"field": "description",
+"expect": "pass",
+"text": "Ce n'est pas une intégration officielle de Linear",
+"note": ""
+},
+{
+"lang": "de",
+"field": "description",
+"expect": "pass",
+"text": "Prüft die Syntax deiner Dateien",
+"note": ""
+},
+{
+"lang": "de",
+"field": "description",
+"expect": "pass",
+"text": "Geprüfte Links auf einen Blick",
+"note": ""
+},
+{
+"lang": "de",
+"field": "description",
+"expect": "pass",
+"text": "Verifiziert die Signaturen von Downloads",
+"note": ""
+},
+{
+"lang": "de",
+"field": "description",
+"expect": "pass",
+"text": "Inoffizieller Client für GitHub",
+"note": ""
+},
+{
+"lang": "de",
+"field": "description",
+"expect": "pass",
+"text": "Formeleditor für LaTeX",
+"note": ""
+},
+{
+"lang": "de",
+"field": "description",
+"expect": "pass",
+"text": "Authentifizierung mit OAuth",
+"note": ""
+},
+{
+"lang": "de",
+"field": "description",
+"expect": "pass",
+"text": "Öffnet die offizielle Rust-Dokumentation",
+"note": ""
+},
+{
+"lang": "de",
+"field": "description",
+"expect": "pass",
+"text": "Zeigt verifizierte Commits",
+"note": ""
+},
+{
+"lang": "de",
+"field": "description",
+"expect": "pass",
+"text": "Nutzt das offizielle Stripe-SDK",
+"note": ""
+},
+{
+"lang": "de",
+"field": "description",
+"expect": "pass",
+"text": "Verbindet sich mit der offiziellen Slack-App",
+"note": ""
+},
+{
+"lang": "de",
+"field": "description",
+"expect": "pass",
+"text": "Mit Node 22 geprüft",
+"note": ""
+},
+{
+"lang": "de",
+"field": "description",
+"expect": "pass",
+"text": "Markiert verifizierte Absender",
+"note": ""
+},
+{
+"lang": "de",
+"field": "description",
+"expect": "pass",
+"text": "Formatiert Code nach dem offiziellen Styleguide",
+"note": ""
+},
+{
+"lang": "de",
+"field": "description",
+"expect": "pass",
+"text": "Ein Linter, der Commit-Nachrichten prüft",
+"note": ""
+},
+{
+"lang": "de",
+"field": "description",
+"expect": "pass",
+"text": "Keine offizielle Linear-Integration",
+"note": ""
+},
+{
+"lang": "it",
+"field": "description",
+"expect": "pass",
+"text": "Verifica la sintassi dei file",
+"note": ""
+},
+{
+"lang": "it",
+"field": "description",
+"expect": "pass",
+"text": "Editor di formule",
+"note": ""
+},
+{
+"lang": "it",
+"field": "description",
+"expect": "pass",
+"text": "Autenticazione con OAuth",
+"note": ""
+},
+{
+"lang": "it",
+"field": "description",
+"expect": "pass",
+"text": "Client non ufficiale per GitHub",
+"note": ""
+},
+{
+"lang": "it",
+"field": "description",
+"expect": "pass",
+"text": "Apre la documentazione ufficiale di Rust",
+"note": ""
+},
+{
+"lang": "it",
+"field": "description",
+"expect": "pass",
+"text": "Mostra i commit verificati",
+"note": ""
+},
+{
+"lang": "it",
+"field": "description",
+"expect": "pass",
+"text": "Usa l'SDK ufficiale di Stripe",
+"note": ""
+},
+{
+"lang": "it",
+"field": "description",
+"expect": "pass",
+"text": "Si collega all'app ufficiale di Slack",
+"note": ""
+},
+{
+"lang": "it",
+"field": "description",
+"expect": "pass",
+"text": "Verificato con Node 22",
+"note": ""
+},
+{
+"lang": "it",
+"field": "description",
+"expect": "pass",
+"text": "Segnala i mittenti verificati",
+"note": ""
+},
+{
+"lang": "it",
+"field": "description",
+"expect": "pass",
+"text": "Formatta il codice secondo la guida ufficiale",
+"note": ""
+},
+{
+"lang": "it",
+"field": "description",
+"expect": "pass",
+"text": "Un linter che controlla i messaggi di commit",
+"note": ""
+},
+{
+"lang": "it",
+"field": "description",
+"expect": "pass",
+"text": "Non è un'integrazione ufficiale di Linear",
+"note": ""
+},
+{
+"lang": "it",
+"field": "description",
+"expect": "pass",
+"text": "Controlla i link interrotti",
+"note": ""
+},
+{
+"lang": "it",
+"field": "description",
+"expect": "pass",
+"text": "Gestisce le chiavi GPG verificate",
+"note": ""
+},
+{
+"lang": "pt",
+"field": "description",
+"expect": "pass",
+"text": "Verifica a sintaxe dos arquivos",
+"note": ""
+},
+{
+"lang": "pt",
+"field": "description",
+"expect": "pass",
+"text": "Editor de fórmulas",
+"note": ""
+},
+{
+"lang": "pt",
+"field": "description",
+"expect": "pass",
+"text": "Autenticação com OAuth",
+"note": ""
+},
+{
+"lang": "pt",
+"field": "description",
+"expect": "pass",
+"text": "Cliente não oficial do GitHub",
+"note": ""
+},
+{
+"lang": "pt",
+"field": "description",
+"expect": "pass",
+"text": "Abre a documentação oficial do Rust",
+"note": ""
+},
+{
+"lang": "pt",
+"field": "description",
+"expect": "pass",
+"text": "Mostra os commits verificados",
+"note": ""
+},
+{
+"lang": "pt",
+"field": "description",
+"expect": "pass",
+"text": "Usa o SDK oficial da Stripe",
+"note": ""
+},
+{
+"lang": "pt",
+"field": "description",
+"expect": "pass",
+"text": "Conecta-se ao app oficial do Slack",
+"note": ""
+},
+{
+"lang": "pt",
+"field": "description",
+"expect": "pass",
+"text": "Verificado com Node 22",
+"note": ""
+},
+{
+"lang": "pt",
+"field": "description",
+"expect": "pass",
+"text": "Marca remetentes verificados",
+"note": ""
+},
+{
+"lang": "pt",
+"field": "description",
+"expect": "pass",
+"text": "Formata o código conforme o guia oficial",
+"note": ""
+},
+{
+"lang": "pt",
+"field": "description",
+"expect": "pass",
+"text": "Um linter que confere mensagens de commit",
+"note": ""
+},
+{
+"lang": "pt",
+"field": "description",
+"expect": "pass",
+"text": "Não é uma integração oficial do Linear",
+"note": ""
+},
+{
+"lang": "pt",
+"field": "description",
+"expect": "pass",
+"text": "Confere links quebrados",
+"note": ""
+},
+{
+"lang": "pt",
+"field": "description",
+"expect": "pass",
+"text": "Gerencia suas chaves GPG verificadas",
+"note": ""
+},
+{
+"lang": "ru",
+"field": "description",
+"expect": "pass",
+"text": "Проверяет синтаксис файлов",
+"note": ""
+},
+{
+"lang": "ru",
+"field": "description",
+"expect": "pass",
+"text": "Проверено на Linux и macOS",
+"note": ""
+},
+{
+"lang": "ru",
+"field": "description",
+"expect": "pass",
+"text": "Проверенные ссылки в один клик",
+"note": ""
+},
+{
+"lang": "ru",
+"field": "description",
+"expect": "pass",
+"text": "Неофициальный клиент для GitHub",
+"note": ""
+},
+{
+"lang": "ru",
+"field": "description",
+"expect": "pass",
+"text": "Редактор формул",
+"note": ""
+},
+{
+"lang": "ru",
+"field": "description",
+"expect": "pass",
+"text": "Аутентификация через OAuth",
+"note": ""
+},
+{
+"lang": "ru",
+"field": "description",
+"expect": "pass",
+"text": "Открывает официальную документацию Rust",
+"note": ""
+},
+{
+"lang": "ru",
+"field": "description",
+"expect": "pass",
+"text": "Показывает проверенные коммиты",
+"note": ""
+},
+{
+"lang": "ru",
+"field": "description",
+"expect": "pass",
+"text": "Использует официальный SDK Stripe",
+"note": ""
+},
+{
+"lang": "ru",
+"field": "description",
+"expect": "pass",
+"text": "Подключается к официальному приложению Slack",
+"note": ""
+},
+{
+"lang": "ru",
+"field": "description",
+"expect": "pass",
+"text": "Проверено с Node 22",
+"note": ""
+},
+{
+"lang": "ru",
+"field": "description",
+"expect": "pass",
+"text": "Отмечает проверенных отправителей",
+"note": ""
+},
+{
+"lang": "ru",
+"field": "description",
+"expect": "pass",
+"text": "Форматирует код по официальному руководству",
+"note": ""
+},
+{
+"lang": "ru",
+"field": "description",
+"expect": "pass",
+"text": "Линтер, который проверяет сообщения коммитов",
+"note": ""
+},
+{
+"lang": "ru",
+"field": "description",
+"expect": "pass",
+"text": "Не официальная интеграция Linear",
+"note": ""
+},
+{
+"lang": "zh",
+"field": "description",
+"expect": "pass",
+"text": "数学公式编辑器",
+"note": ""
+},
+{
+"lang": "zh",
+"field": "description",
+"expect": "pass",
+"text": "公式编辑器",
+"note": ""
+},
+{
+"lang": "zh",
+"field": "description",
+"expect": "pass",
+"text": "身份认证",
+"note": ""
+},
+{
+"lang": "zh",
+"field": "description",
+"expect": "pass",
+"text": "双因素认证插件",
+"note": ""
+},
+{
+"lang": "zh",
+"field": "description",
+"expect": "pass",
+"text": "验证下载签名",
+"note": ""
+},
+{
+"lang": "zh",
+"field": "description",
+"expect": "pass",
+"text": "非官方 GitHub 客户端",
+"note": ""
+},
+{
+"lang": "zh",
+"field": "description",
+"expect": "pass",
+"text": "打开 Rust 官方文档",
+"note": ""
+},
+{
+"lang": "zh",
+"field": "description",
+"expect": "pass",
+"text": "显示已验证的提交",
+"note": ""
+},
+{
+"lang": "zh",
+"field": "description",
+"expect": "pass",
+"text": "封装官方 Stripe SDK",
+"note": ""
+},
+{
+"lang": "zh",
+"field": "description",
+"expect": "pass",
+"text": "连接官方 Slack 应用",
+"note": ""
+},
+{
+"lang": "zh",
+"field": "description",
+"expect": "pass",
+"text": "已在 Node 22 上验证",
+"note": ""
+},
+{
+"lang": "zh",
+"field": "description",
+"expect": "pass",
+"text": "标记已验证的发件人",
+"note": ""
+},
+{
+"lang": "zh",
+"field": "description",
+"expect": "pass",
+"text": "按官方风格指南格式化代码",
+"note": ""
+},
+{
+"lang": "zh",
+"field": "description",
+"expect": "pass",
+"text": "检查提交信息的 Linter",
+"note": ""
+},
+{
+"lang": "zh",
+"field": "description",
+"expect": "pass",
+"text": "不是 Linear 的官方集成",
+"note": ""
+},
+{
+"lang": "ja",
+"field": "description",
+"expect": "pass",
+"text": "数式エディタ",
+"note": ""
+},
+{
+"lang": "ja",
+"field": "description",
+"expect": "pass",
+"text": "認証トークンの管理",
+"note": ""
+},
+{
+"lang": "ja",
+"field": "description",
+"expect": "pass",
+"text": "二要素認証",
+"note": ""
+},
+{
+"lang": "ja",
+"field": "description",
+"expect": "pass",
+"text": "非公式 GitHub クライアント",
+"note": ""
+},
+{
+"lang": "ja",
+"field": "description",
+"expect": "pass",
+"text": "Rust の公式ドキュメントを開く",
+"note": ""
+},
+{
+"lang": "ja",
+"field": "description",
+"expect": "pass",
+"text": "検証済みのコミットを表示",
+"note": ""
+},
+{
+"lang": "ja",
+"field": "description",
+"expect": "pass",
+"text": "公式 Stripe SDK のラッパー",
+"note": ""
+},
+{
+"lang": "ja",
+"field": "description",
+"expect": "pass",
+"text": "公式 Slack アプリと連携",
+"note": ""
+},
+{
+"lang": "ja",
+"field": "description",
+"expect": "pass",
+"text": "Node 22 で検証済み",
+"note": ""
+},
+{
+"lang": "ja",
+"field": "description",
+"expect": "pass",
+"text": "検証済みの送信者を表示",
+"note": ""
+},
+{
+"lang": "ja",
+"field": "description",
+"expect": "pass",
+"text": "公式スタイルガイドに沿って整形",
+"note": ""
+},
+{
+"lang": "ja",
+"field": "description",
+"expect": "pass",
+"text": "コミットメッセージをチェックするリンター",
+"note": ""
+},
+{
+"lang": "ja",
+"field": "description",
+"expect": "pass",
+"text": "Linear の公式連携ではありません",
+"note": ""
+},
+{
+"lang": "ja",
+"field": "description",
+"expect": "pass",
+"text": "リンク切れをチェック",
+"note": ""
+},
+{
+"lang": "ja",
+"field": "description",
+"expect": "pass",
+"text": "GPG 鍵の認証を管理",
+"note": ""
+},
+{
+"lang": "ko",
+"field": "description",
+"expect": "pass",
+"text": "수학 공식",
+"note": ""
+},
+{
+"lang": "ko",
+"field": "description",
+"expect": "pass",
+"text": "공식 편집기",
+"note": ""
+},
+{
+"lang": "ko",
+"field": "description",
+"expect": "pass",
+"text": "인증 토큰",
+"note": ""
+},
+{
+"lang": "ko",
+"field": "description",
+"expect": "pass",
+"text": "2단계 인증",
+"note": ""
+},
+{
+"lang": "ko",
+"field": "description",
+"expect": "pass",
+"text": "비공식 GitHub 클라이언트",
+"note": ""
+},
+{
+"lang": "ko",
+"field": "description",
+"expect": "pass",
+"text": "Rust 공식 문서 열기",
+"note": ""
+},
+{
+"lang": "ko",
+"field": "description",
+"expect": "pass",
+"text": "검증된 커밋 표시",
+"note": ""
+},
+{
+"lang": "ko",
+"field": "description",
+"expect": "pass",
+"text": "공식 Stripe SDK 래퍼",
+"note": ""
+},
+{
+"lang": "ko",
+"field": "description",
+"expect": "pass",
+"text": "공식 Slack 앱과 연동",
+"note": ""
+},
+{
+"lang": "ko",
+"field": "description",
+"expect": "pass",
+"text": "Node 22에서 검증됨",
+"note": ""
+},
+{
+"lang": "ko",
+"field": "description",
+"expect": "pass",
+"text": "인증된 발신자 표시",
+"note": ""
+},
+{
+"lang": "ko",
+"field": "description",
+"expect": "pass",
+"text": "공식 스타일 가이드에 맞춰 코드 정리",
+"note": ""
+},
+{
+"lang": "ko",
+"field": "description",
+"expect": "pass",
+"text": "커밋 메시지를 검사하는 린터",
+"note": ""
+},
+{
+"lang": "ko",
+"field": "description",
+"expect": "pass",
+"text": "Linear 공식 통합이 아닙니다",
+"note": ""
+},
+{
+"lang": "ko",
+"field": "description",
+"expect": "pass",
+"text": "공인인증서 관리",
+"note": ""
+}
+],
+"dodges": [
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "Official Git tools",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "Verified.",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "This plugin is verified.",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "The verified Git client",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "Our official Git integration",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "Git integration, now verified",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "Git integration that is fully verified",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "Safe, fast and verified.",
+"note": "shape: last word after 'and'"
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "Trusted and verified by our team.",
+"note": "shape: after 'and'"
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "It's verified.",
+"note": "shape: contraction"
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "We're official.",
+"note": "shape: contraction"
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "100% verified",
+"note": "shape: no plugin word"
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "Completely verified and safe.",
+"note": "shape: 'completely' not in list"
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "Totally official Git helpers.",
+"note": "shape: 'totally'"
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "The verified Markdown previewer",
+"note": "shape: 'previewer' not a plugin word"
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "An official Prettier formatter",
+"note": "shape: 'formatter'"
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "Your verified Slack bridge",
+"note": "shape: 'bridge'"
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "The verified way to use Git",
+"note": "shape: no noun"
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "🔒 Verified and safe",
+"note": "emoji before first word"
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "(Official) Git tools",
+"note": "parenthesis"
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "Git tools — official.",
+"note": "dash"
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "Git client, verified",
+"note": "comma"
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "Verified by the store",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "Store-verified Git tools",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "V3rified Git client",
+"note": "digits"
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "Officіal Git extension",
+"note": "lookalike"
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "Verified",
+"note": ""
+},
+{
+"lang": "en",
+"field": "description",
+"expect": "refuse",
+"text": "Official",
+"note": ""
+},
+{
+"lang": "en",
+"field": "name",
+"expect": "refuse",
+"text": "Verified Git",
+"note": ""
+},
+{
+"lang": "en",
+"field": "name",
+"expect": "refuse",
+"text": "Official Git Tools",
+"note": ""
+},
+{
+"lang": "en",
+"field": "name",
+"expect": "refuse",
+"text": "Git (verified)",
+"note": ""
+},
+{
+"lang": "es",
+"field": "description",
+"expect": "refuse",
+"text": "Extensión oficial de Git",
+"note": ""
+},
+{
+"lang": "es",
+"field": "description",
+"expect": "refuse",
+"text": "Cliente verificado de GitHub",
+"note": ""
+},
+{
+"lang": "es",
+"field": "description",
+"expect": "refuse",
+"text": "Este plugin está verificado.",
+"note": ""
+},
+{
+"lang": "es",
+"field": "description",
+"expect": "refuse",
+"text": "Verificado.",
+"note": ""
+},
+{
+"lang": "es",
+"field": "description",
+"expect": "refuse",
+"text": "Oficial y seguro",
+"note": ""
+},
+{
+"lang": "es",
+"field": "description",
+"expect": "refuse",
+"text": "Rápido, seguro y verificado.",
+"note": "shape: after 'y'"
+},
+{
+"lang": "es",
+"field": "description",
+"expect": "refuse",
+"text": "Es oficial.",
+"note": ""
+},
+{
+"lang": "es",
+"field": "description",
+"expect": "refuse",
+"text": "0ficial y seguro",
+"note": "digit"
+},
+{
+"lang": "es",
+"field": "description",
+"expect": "refuse",
+"text": "Totalmente verificado",
+"note": ""
+},
+{
+"lang": "fr",
+"field": "description",
+"expect": "refuse",
+"text": "Extension officielle pour Git",
+"note": ""
+},
+{
+"lang": "fr",
+"field": "description",
+"expect": "refuse",
+"text": "Client vérifié pour GitHub",
+"note": ""
+},
+{
+"lang": "fr",
+"field": "description",
+"expect": "refuse",
+"text": "Ce plugin est vérifié.",
+"note": ""
+},
+{
+"lang": "fr",
+"field": "description",
+"expect": "refuse",
+"text": "Vérifié.",
+"note": ""
+},
+{
+"lang": "fr",
+"field": "description",
+"expect": "refuse",
+"text": "Officiel et sûr",
+"note": ""
+},
+{
+"lang": "fr",
+"field": "description",
+"expect": "refuse",
+"text": "Rapide, sûr et vérifié.",
+"note": "shape: after 'et'"
+},
+{
+"lang": "fr",
+"field": "description",
+"expect": "refuse",
+"text": "C'est officiel.",
+"note": "shape: contraction"
+},
+{
+"lang": "fr",
+"field": "description",
+"expect": "refuse",
+"text": "Plugin verifie",
+"note": "no accent"
+},
+{
+"lang": "fr",
+"field": "description",
+"expect": "refuse",
+"text": "Entièrement vérifié",
+"note": ""
+},
+{
+"lang": "de",
+"field": "description",
+"expect": "refuse",
+"text": "Offizielle Git-Erweiterung",
+"note": ""
+},
+{
+"lang": "de",
+"field": "description",
+"expect": "refuse",
+"text": "Verifizierter GitHub-Client",
+"note": ""
+},
+{
+"lang": "de",
+"field": "description",
+"expect": "refuse",
+"text": "Dieses Plugin ist verifiziert.",
+"note": ""
+},
+{
+"lang": "de",
+"field": "description",
+"expect": "refuse",
+"text": "Verifiziert.",
+"note": ""
+},
+{
+"lang": "de",
+"field": "description",
+"expect": "refuse",
+"text": "Offiziell und sicher",
+"note": ""
+},
+{
+"lang": "de",
+"field": "description",
+"expect": "refuse",
+"text": "Schnell, sicher und verifiziert.",
+"note": "shape: after 'und'"
+},
+{
+"lang": "de",
+"field": "description",
+"expect": "refuse",
+"text": "Ist offiziell.",
+"note": ""
+},
+{
+"lang": "de",
+"field": "description",
+"expect": "refuse",
+"text": "0ffiziell und sicher",
+"note": "digit"
+},
+{
+"lang": "de",
+"field": "description",
+"expect": "refuse",
+"text": "Vollständig verifiziert",
+"note": ""
+},
+{
+"lang": "it",
+"field": "description",
+"expect": "refuse",
+"text": "Estensione ufficiale per Git",
+"note": ""
+},
+{
+"lang": "it",
+"field": "description",
+"expect": "refuse",
+"text": "Client verificato per GitHub",
+"note": ""
+},
+{
+"lang": "it",
+"field": "description",
+"expect": "refuse",
+"text": "Questo plugin è verificato.",
+"note": ""
+},
+{
+"lang": "it",
+"field": "description",
+"expect": "refuse",
+"text": "Verificato.",
+"note": ""
+},
+{
+"lang": "it",
+"field": "description",
+"expect": "refuse",
+"text": "Ufficiale e sicuro",
+"note": ""
+},
+{
+"lang": "it",
+"field": "description",
+"expect": "refuse",
+"text": "Veloce, sicuro e verificato.",
+"note": "shape: after 'e'"
+},
+{
+"lang": "it",
+"field": "description",
+"expect": "refuse",
+"text": "È ufficiale.",
+"note": ""
+},
+{
+"lang": "it",
+"field": "description",
+"expect": "refuse",
+"text": "Completamente verificato",
+"note": ""
+},
+{
+"lang": "pt",
+"field": "description",
+"expect": "refuse",
+"text": "Extensão oficial para Git",
+"note": ""
+},
+{
+"lang": "pt",
+"field": "description",
+"expect": "refuse",
+"text": "Cliente verificado do GitHub",
+"note": ""
+},
+{
+"lang": "pt",
+"field": "description",
+"expect": "refuse",
+"text": "Este plugin é verificado.",
+"note": ""
+},
+{
+"lang": "pt",
+"field": "description",
+"expect": "refuse",
+"text": "Verificado.",
+"note": ""
+},
+{
+"lang": "pt",
+"field": "description",
+"expect": "refuse",
+"text": "Oficial e seguro",
+"note": ""
+},
+{
+"lang": "pt",
+"field": "description",
+"expect": "refuse",
+"text": "Rápido, seguro e verificado.",
+"note": "shape: after 'e'"
+},
+{
+"lang": "pt",
+"field": "description",
+"expect": "refuse",
+"text": "É oficial.",
+"note": ""
+},
+{
+"lang": "pt",
+"field": "description",
+"expect": "refuse",
+"text": "Totalmente verificado",
+"note": ""
+},
+{
+"lang": "ru",
+"field": "description",
+"expect": "refuse",
+"text": "Официальное расширение для Git",
+"note": ""
+},
+{
+"lang": "ru",
+"field": "description",
+"expect": "refuse",
+"text": "Официальный клиент GitHub",
+"note": ""
+},
+{
+"lang": "ru",
+"field": "description",
+"expect": "refuse",
+"text": "Этот плагин проверен.",
+"note": "short form"
+},
+{
+"lang": "ru",
+"field": "description",
+"expect": "refuse",
+"text": "Проверено.",
+"note": ""
+},
+{
+"lang": "ru",
+"field": "description",
+"expect": "refuse",
+"text": "Официально и безопасно",
+"note": "adverb"
+},
+{
+"lang": "ru",
+"field": "description",
+"expect": "refuse",
+"text": "Быстрый, надёжный и официальный.",
+"note": "shape: after 'и'"
+},
+{
+"lang": "ru",
+"field": "description",
+"expect": "refuse",
+"text": "Официальной версии плагин",
+"note": "case form"
+},
+{
+"lang": "ru",
+"field": "description",
+"expect": "refuse",
+"text": "Полностью проверенный плагин",
+"note": ""
+},
+{
+"lang": "zh",
+"field": "description",
+"expect": "refuse",
+"text": "官方 Git 插件",
+"note": ""
+},
+{
+"lang": "zh",
+"field": "description",
+"expect": "refuse",
+"text": "已验证的 Git 客户端",
+"note": ""
+},
+{
+"lang": "zh",
+"field": "description",
+"expect": "refuse",
+"text": "本插件已验证。",
+"note": ""
+},
+{
+"lang": "zh",
+"field": "description",
+"expect": "refuse",
+"text": "官方。",
+"note": ""
+},
+{
+"lang": "zh",
+"field": "description",
+"expect": "refuse",
+"text": "官方出品，安全可靠",
+"note": ""
+},
+{
+"lang": "zh",
+"field": "description",
+"expect": "refuse",
+"text": "快速、安全、已认证。",
+"note": "after list"
+},
+{
+"lang": "zh",
+"field": "description",
+"expect": "refuse",
+"text": "已认证插件",
+"note": ""
+},
+{
+"lang": "zh",
+"field": "description",
+"expect": "refuse",
+"text": "官方认证 Git 工具",
+"note": ""
+},
+{
+"lang": "ja",
+"field": "description",
+"expect": "refuse",
+"text": "公式 Git 拡張",
+"note": ""
+},
+{
+"lang": "ja",
+"field": "description",
+"expect": "refuse",
+"text": "公式Git",
+"note": ""
+},
+{
+"lang": "ja",
+"field": "description",
+"expect": "refuse",
+"text": "公式プラグインです。",
+"note": ""
+},
+{
+"lang": "ja",
+"field": "description",
+"expect": "refuse",
+"text": "このプラグインは公式です。",
+"note": ""
+},
+{
+"lang": "ja",
+"field": "description",
+"expect": "refuse",
+"text": "認証済みプラグイン",
+"note": ""
+},
+{
+"lang": "ja",
+"field": "description",
+"expect": "refuse",
+"text": "公認プラグイン",
+"note": ""
+},
+{
+"lang": "ja",
+"field": "description",
+"expect": "refuse",
+"text": "安全・高速・公式。",
+"note": "list"
+},
+{
+"lang": "ja",
+"field": "description",
+"expect": "refuse",
+"text": "オフィシャル Git ツール",
+"note": ""
+},
+{
+"lang": "ko",
+"field": "description",
+"expect": "refuse",
+"text": "공식 Git 플러그인",
+"note": ""
+},
+{
+"lang": "ko",
+"field": "description",
+"expect": "refuse",
+"text": "공식 플러그인",
+"note": ""
+},
+{
+"lang": "ko",
+"field": "description",
+"expect": "refuse",
+"text": "공식 Git 확장",
+"note": ""
+},
+{
+"lang": "ko",
+"field": "description",
+"expect": "refuse",
+"text": "이 플러그인은 공식입니다.",
+"note": ""
+},
+{
+"lang": "ko",
+"field": "description",
+"expect": "refuse",
+"text": "인증됨",
+"note": ""
+},
+{
+"lang": "ko",
+"field": "description",
+"expect": "refuse",
+"text": "검증된 Git 클라이언트",
+"note": ""
+},
+{
+"lang": "ko",
+"field": "description",
+"expect": "refuse",
+"text": "빠르고 안전한 공식 도구",
+"note": ""
+}
+]
+}

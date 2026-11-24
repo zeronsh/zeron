@@ -1,0 +1,51 @@
+---
+// A plugin's page when there is no plugin to show, in the pages' own
+// language (the head, one plain sentence, one action): an id no plugin is
+// listed under, for whatever reason (unknown, taken down or removed: the
+// public is told none of why), or a version of it that isn't in the store;
+// or the store not answering (never kept).
+import Store from "../../layouts/Store.astro";
+import "../../styles/look/plugin.css";
+import { store } from "../../lib/store/words.ts";
+import Icon from "./Icon.astro";
+import { lsb } from "../../lib/store/bearing.ts";
+
+interface Props {
+  state: "missing" | "down";
+  /** What wasn't found: a plugin, or one of its versions. */
+  what?: "plugin" | "version";
+  /** Where Try again goes. */
+  retry: string;
+  /** Its plugin's page, for a version that isn't there. */
+  back?: { href: string; name: string };
+}
+const { state, what = "plugin", retry, back } = Astro.props;
+const title = state === "down" ? store("plugins.store.failed_title") : what === "version" ? "This version isn't in the store" : "No plugin is listed here";
+---
+
+<Store title={`${title} · Plugins · Zeron`} description={title} noindex current="browse">
+  <div class="wrap">
+    <nav class="crumbs" aria-label="Where this is"><a href="/plugins">Plugins</a>{back && <><Icon name="chev" /><a href={back.href}>{back.name}</a></>}</nav>
+    <section class="gone" role={state === "down" ? "status" : undefined}>
+      <h1 class={lsb(title)}>{title}</h1>
+      {
+        state === "down" ? (
+          <>
+            <p class="lead">{store("plugins.store.failed_body")}</p>
+            <a class="btn sec" href={retry}>{store("plugins.store.try_again")}</a>
+          </>
+        ) : what === "version" ? (
+          <>
+            <p class="lead">It may have a different number, or it was taken out of the store. Those who have it keep it as it is.</p>
+            {back && <a class="btn sec" href={`${back.href}/versions`}>Every version of {back.name}<Icon name="arrow" /></a>}
+          </>
+        ) : (
+          <>
+            <p class="lead">It may have a different id, or it isn't in the store now.</p>
+            <a class="btn sec" href="/plugins">Browse plugins<Icon name="arrow" /></a>
+          </>
+        )
+      }
+    </section>
+  </div>
+</Store>

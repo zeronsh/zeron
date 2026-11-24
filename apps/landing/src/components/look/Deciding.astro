@@ -1,0 +1,35 @@
+---
+// On a page that decides something about a plugin (a question without the
+// script, or a link followed from elsewhere): what is being decided, so
+// nobody decides it blind, and a way to read it first. When the browser
+// says the visit came from another site, it says so plainly. Inside a
+// question's card (AskCard).
+import Icon from "./Icon.astro";
+import Tile from "./Tile.astro";
+import { unbidi } from "../../lib/store/format.ts";
+
+interface Props {
+  id: string;
+  name: string;
+  icon: string | null;
+  version: string | null;
+  /** Its facts, one line: who sent it, new or an update, what the checks found. */
+  facts: string[];
+  /** Where to read it all first. */
+  read: string;
+  /** The visit came from another site (Sec-Fetch-Site). */
+  fromElsewhere: boolean;
+}
+const { id, icon, version, facts, read, fromElsewhere } = Astro.props;
+const name = unbidi(Astro.props.name);
+---
+
+{fromElsewhere && <p class="flash bad elsewhere" role="status">You followed a link from somewhere else to this question. Read what you're deciding before you answer.</p>}
+<div class="deciding">
+  <Tile id={id} name={name} icon={icon} version={version} size="s" />
+  <div class="words">
+    <p class="name">{name}{version && <> <span class="ver">{version}</span></>}</p>
+    <p class="facts">{facts.join(" · ")}</p>
+    <a class="more" href={read}>Read it first<Icon name="chev" /></a>
+  </div>
+</div>

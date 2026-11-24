@@ -1,20 +1,25 @@
-//! The plugin store, device side: deploy keys, the store's HTTP client,
+//! The plugin store, device side: deploy tokens, the store's HTTP client,
 //! publishing, and installing and updating plugins from the store.
 //!
 //! A plugin from the store is a package like any other (`install::parse`
 //! verifies its signature over every file) that must also be exactly what
 //! the store's record says: its file's sha256, its content hash, its id and
-//! version, and the key that signed it when the record names one. Who made
-//! it is who owns its id in the store (the record's publisher), so its
-//! decision is bound to that owner (`StoreSource::binding`): an update
-//! signed by another of the owner's keys (a deploy key, a new machine)
-//! keeps what you allowed, and a new owner asks again. File, link,
-//! release and git installs keep their own rules.
+//! version, and the key that signed it when the record names one. A
+//! version published with a deploy token is unsigned and its record names
+//! no key: taken by its contents, which the record's hash vouches for, now
+//! and on every scan (`install::parse_from_store`, `scan::store_record`).
+//! Who made it is who owns its id in the store (the record's publisher),
+//! so its decision is bound to that owner (`StoreSource::binding`): an
+//! update signed by another of the owner's keys (a new machine), or none
+//! (a deploy token's), keeps what you allowed, and a new owner asks again.
+//! File, link, release and git installs keep their own rules: signed.
 
 pub mod client;
-pub mod deploy_key;
+pub mod deploy_token;
 mod device;
+pub mod notices;
 pub mod publish;
+pub mod text_notes;
 
 use super::install::{self, Package, StoreSource, failure};
 use super::signing;
@@ -22,6 +27,8 @@ use client::{PackageRecord, Publisher, reason};
 
 pub use device::{MAX_UPDATE_PLUGINS, REPORT_REASONS, handles};
 pub(in crate::plugins) use device::StoreHandle;
+#[cfg(test)]
+pub(in crate::plugins) use device::publishes_idle;
 
 /// Whether `name` reads as a username: 1 to 40 letters, digits, `_` and `-`.
 pub fn username(name: &str) -> bool {
@@ -47,20 +54,24 @@ pub fn vouched(publisher: &Publisher) -> Result<(String, String), String> {
 
 /// The package `raw`, verified and checked against the store's record of
 /// `id` at `version` (`record`), published by `publisher`: the package and
-/// the store's record to keep beside it.
-pub fn verify(raw: Vec<u8>, id: &str, version: &str, record: &PackageRecord, publisher: &Publisher) -> Result<(Package, StoreSource), String> {
+/// the store's record to keep beside it. Signed by the key the record
+/// names; a record that names none (a deploy token's version) takes it
+/// unsigned, its contents vouched for by the record's hash alone.
+/// `verified`: the version's record says Zeron verified it (fetched with
+/// `record`, at install time).
+pub fn verify(raw: Vec<u8>, id: &str, version: &str, record: &PackageRecord, publisher: &Publisher, verified: bool) -> Result<(Package, StoreSource), String> {
     let mismatch = |what: &str| failure(reason::STORE_MISMATCH, format!("What the store sent isn't what its record says ({what}), so it wasn't installed"));
     let (publisher, publisher_id) = vouched(publisher)?;
-    if record.sha256.is_empty() || record.hash.is_empty() {
+    if record.sha256.is_empty() || record.hash.is_empty() || record.bytes == 0 {
         return Err(mismatch("its record is incomplete"));
     }
     if signing::sha256_hex(&raw) != record.sha256.to_ascii_lowercase() {
         return Err(mismatch("the file"));
     }
-    if record.bytes != 0 && record.bytes != raw.len() as u64 {
+    if record.bytes != raw.len() as u64 {
         return Err(mismatch("its size"));
     }
-    let package = install::parse(raw)?;
+    let package = install::parse_from_store(raw, record.key.is_some())?;
     if package.id() != id {
         return Err(mismatch("its id"));
     }
@@ -70,10 +81,10 @@ pub fn verify(raw: Vec<u8>, id: &str, version: &str, record: &PackageRecord, pub
     if package.hash != record.hash.to_ascii_lowercase() {
         return Err(mismatch("its contents"));
     }
-    if record.key.as_deref().is_some_and(|key| key != package.key) {
+    if record.key.as_deref().is_some_and(|key| Some(key) != package.key.as_deref()) {
         return Err(mismatch("who signed it"));
     }
-    let store = StoreSource { id: id.to_owned(), publisher, publisher_id, hash: package.hash.clone(), key: Some(package.key.clone()) };
+    let store = StoreSource { id: id.to_owned(), publisher, publisher_id, hash: package.hash.clone(), key: package.key.clone(), last_key: None, verified, verified_at: None, verified_alternative: None, instead_of_unverified: false, replaced: None };
     Ok((package, store))
 }
 
@@ -90,7 +101,7 @@ mod tests {
     }
 
     fn record(raw: &[u8], package: &Package) -> PackageRecord {
-        PackageRecord { hash: package.hash.clone(), sha256: signing::sha256_hex(raw), bytes: raw.len() as u64, key: Some(package.key.clone()) }
+        PackageRecord { hash: package.hash.clone(), sha256: signing::sha256_hex(raw), bytes: raw.len() as u64, key: package.key.clone() }
     }
 
     #[test]
@@ -99,14 +110,14 @@ mod tests {
         let raw = signed_package(&key, "focus", "1.2.0", &["ui.add"], "return 1");
         let package = install::parse(raw.clone()).unwrap();
         let good = record(&raw, &package);
-        let (verified, store) = verify(raw.clone(), "focus", "1.2.0", &good, &ada()).unwrap();
+        let (verified, store) = verify(raw.clone(), "focus", "1.2.0", &good, &ada(), true).unwrap();
         assert_eq!(verified.hash, package.hash);
-        assert_eq!(store, StoreSource { id: "focus".into(), publisher: "ada".into(), publisher_id: ADA.into(), hash: package.hash.clone(), key: Some(key.public()) });
+        assert_eq!(store, StoreSource { id: "focus".into(), publisher: "ada".into(), publisher_id: ADA.into(), hash: package.hash.clone(), key: Some(key.public()), last_key: None, verified: true, verified_at: None, verified_alternative: None, instead_of_unverified: false, replaced: None });
         assert_eq!(store.binding(), format!("store:{ADA}"), "bound to the owner's id, never the username");
 
         let refused = |raw: Vec<u8>, id: &str, version: &str, record: &PackageRecord, publisher: Option<&str>| {
             let publisher = Publisher { id: Some(ADA.into()), username: publisher.map(str::to_owned), verified: true };
-            let error = verify(raw, id, version, record, &publisher).unwrap_err();
+            let error = verify(raw, id, version, record, &publisher, true).unwrap_err();
             install::reason_of(&error).map(str::to_owned).unwrap_or(error)
         };
         // Another plugin, version, file, content or key than the record's.
@@ -114,6 +125,7 @@ mod tests {
         assert_eq!(refused(raw.clone(), "focus", "1.3.0", &good, Some("ada")), "store_mismatch");
         assert_eq!(refused(raw.clone(), "focus", "1.2.0", &PackageRecord { sha256: "00".repeat(32), ..good.clone() }, Some("ada")), "store_mismatch");
         assert_eq!(refused(raw.clone(), "focus", "1.2.0", &PackageRecord { bytes: 3, ..good.clone() }, Some("ada")), "store_mismatch");
+        assert_eq!(refused(raw.clone(), "focus", "1.2.0", &PackageRecord { bytes: 0, ..good.clone() }, Some("ada")), "store_mismatch", "a record without its size");
         let (eve, _) = SigningKey::generate().unwrap();
         assert_eq!(refused(raw.clone(), "focus", "1.2.0", &PackageRecord { key: Some(eve.public()), ..good.clone() }, Some("ada")), "store_mismatch");
         // A record that names no publisher, or no hashes.
@@ -133,13 +145,17 @@ mod tests {
         let tampered = serde_json::to_vec(&value).unwrap();
         let tampered_record = PackageRecord { sha256: signing::sha256_hex(&tampered), bytes: tampered.len() as u64, ..good.clone() };
         assert_eq!(refused(tampered, "focus", "1.2.0", &tampered_record, Some("ada")), "tampered");
-        // The record's key is optional; its hashes compare in any case.
-        let loose = PackageRecord { key: None, sha256: good.sha256.to_uppercase(), ..good.clone() };
-        assert!(verify(raw.clone(), "focus", "1.2.0", &loose, &ada()).is_ok());
+        // Its hashes compare in any case.
+        let loud = PackageRecord { sha256: good.sha256.to_uppercase(), ..good.clone() };
+        assert!(verify(raw.clone(), "focus", "1.2.0", &loud, &ada(), true).is_ok());
+        // A record naming no signer takes unsigned, and nothing else (a
+        // deploy token's version): this one, signed, is refused.
+        let unsigned_only = PackageRecord { key: None, ..good.clone() };
+        assert_eq!(refused(raw.clone(), "focus", "1.2.0", &unsigned_only, Some("ada")), "store_mismatch");
         // A record without the owner's id, or one that isn't one.
         for id in [None, Some("ada"), Some("pub_XYZ"), Some("pub_0123456789abcdef0123456789ABCDEF")] {
             let publisher = Publisher { id: id.map(str::to_owned), username: Some("ada".into()), verified: true };
-            assert_eq!(install::reason_of(&verify(raw.clone(), "focus", "1.2.0", &good, &publisher).unwrap_err()), Some("store_mismatch"), "{id:?}");
+            assert_eq!(install::reason_of(&verify(raw.clone(), "focus", "1.2.0", &good, &publisher, true).unwrap_err()), Some("store_mismatch"), "{id:?}");
         }
     }
 }

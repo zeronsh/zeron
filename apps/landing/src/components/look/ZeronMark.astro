@@ -1,0 +1,18 @@
+---
+// Zeron's mark: twelve cells of a 5 × 3 grid, in the text's colour (inline
+// SVG, currentColor, no filter). Drawn on whole pixels: each cell `pitch - 1`
+// pixels square with a pixel between, the drawing exactly as many pixels
+// as it shows, so every cell lands on whole pixels at 1x and at 2x.
+interface Props {
+  /** Pixels from one cell's edge to the next's: 4 in a button (19 × 11), 5 in the top bar (24 × 14). */
+  pitch?: 4 | 5 | 6;
+  class?: string;
+}
+const { pitch = 5, class: className } = Astro.props;
+const cells = [[0, 0], [1, 0], [2, 0], [4, 0], [0, 1], [1, 1], [3, 1], [4, 1], [0, 2], [2, 2], [3, 2], [4, 2]];
+const cell = pitch - 1;
+const width = 5 * pitch - 1;
+const height = 3 * pitch - 1;
+---
+
+<svg class:list={["mark", className]} width={width} height={height} viewBox={`0 0 ${width} ${height}`} aria-hidden="true" focusable="false">{cells.map(([x, y]) => <rect x={x! * pitch} y={y! * pitch} width={cell} height={cell} rx={Math.round(cell * 0.3 * 10) / 10} />)}</svg>

@@ -1,0 +1,33 @@
+---
+// The head of the staff pages, as your own pages' (AccountHead): the title,
+// a line on what the list holds, and one row of tabs, the queue's lists and
+// the staff pages beside them, each with how many it holds where that's
+// known and any. On a phone the tabs scroll sideways, under one another's edge.
+import { lsb } from "../../lib/store/bearing.ts";
+
+interface Tab {
+  label: string;
+  href: string;
+  /** How many it holds, when known. */
+  n?: number | null;
+  current?: boolean;
+}
+interface Props {
+  /** "Review", on every one of its tabs (the tab says which, and how many it holds). */
+  title: string;
+  lead?: string;
+  tabs: Tab[];
+}
+const { title, lead, tabs } = Astro.props;
+---
+
+<div class="hd">
+  <div class="hd-row">
+    <h1 class={lsb(title)}>{title}</h1>
+  </div>
+  {lead && <p class="lead">{lead}</p>}
+</div>
+<nav class="sub staff-tabs" aria-label="Review">
+  {tabs.map((t) => <a href={t.href} aria-current={t.current ? "page" : undefined}>{t.label}{t.n ? <span class="num">{t.n}</span> : null}</a>)}
+</nav>
+<slot />

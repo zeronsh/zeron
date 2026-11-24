@@ -1,0 +1,114 @@
+---
+// New deploy token (contract a315eef5a). A visit is the form as a page of
+// its own: Deploy tokens' dialog without a script, and where signing in
+// again comes back to, the form filled in as it was. A post makes the token
+// with this session's fresh sign-in (the edge spends it): without one, it
+// goes to sign in again and back here first. What the edge answers holds
+// the token, and this page, the answer to that post, shows it once: never
+// in an address or a form field, never kept (no-store, and with the script
+// gone from the page the moment it's left: scripts/store.ts). A token lost
+// is revoked and made again; no page shows one twice.
+import Empty from "../../../components/look/Empty.astro";
+import Failed from "../../../components/look/Failed.astro";
+import Icon from "../../../components/look/Icon.astro";
+import SignInPlease from "../../../components/look/SignInPlease.astro";
+import TokenForm from "../../../components/look/TokenForm.astro";
+import Words from "../../../components/look/Words.astro";
+import Store from "../../../layouts/Store.astro";
+import "../../../styles/look/account.css";
+import { date } from "../../../lib/store/format.ts";
+import { done, formOf, tokenMatches } from "../../../lib/store/forms.ts";
+import { privatePage } from "../../../lib/store/http.ts";
+import { addressFields, isRefusal, NO_TOKENS, postedFields, refusalOf, signInAgain, tokenRequest, type Refusal, type TokenFields } from "../../../lib/store/tokens.ts";
+import type { NewToken } from "../../../lib/store/types.ts";
+import { lsb } from "../../../lib/store/bearing.ts";
+import { store } from "../../../lib/store/words.ts";
+
+export const prerender = false;
+
+const edge = Astro.locals.edge;
+const back = "/account/tokens";
+if (Astro.request.method !== "GET" && Astro.request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
+const who = await edge.who();
+const session = who.state === "in" ? who.session : null;
+
+let fields: TokenFields = addressFields(Astro.url);
+let refusal: Refusal | null = null;
+let made: NewToken | null = null;
+const mine = session ? await edge.myPlugins() : null;
+const yours = new Map((mine?.ok ? mine.data.plugins : []).map((p) => [p.id, p]));
+/** No plugin of yours to send, and nothing asked: there's nothing to make one for. */
+const none = Astro.request.method === "GET" && mine?.ok === true && !mine.data.plugins.some((p) => p.versions.length > 0);
+const nameOf = (id: string) => yours.get(id)?.name ?? id;
+
+if (Astro.request.method === "POST") {
+  const form = await formOf(Astro.request);
+  if (form) fields = postedFields(form);
+  // (Signed out since the form was drawn: sign in, and back to it as it was.)
+  if (!session) return form && who.state === "out" ? Astro.redirect(signInAgain(fields), 303) : done(Astro, "expired", back);
+  if (!form || !tokenMatches(form, session)) return done(Astro, "expired", back);
+  const asked = tokenRequest(fields, Date.now());
+  if (isRefusal(asked)) refusal = asked;
+  // (No fresh sign-in on this session: that first, and back here to finish.)
+  else if (session.fresh_sign_in === false) return Astro.redirect(signInAgain(fields), 303);
+  else {
+    const result = await edge.createToken(asked, session.csrf);
+    if (result.ok) made = result.data;
+    else {
+      const why = refusalOf(result, nameOf);
+      if (why === "step_up" || why === "signed_out") return Astro.redirect(signInAgain(fields), 303);
+      refusal = why;
+      Astro.response.status = result.status >= 400 && result.status < 500 ? result.status : 502;
+    }
+  }
+  if (refusal && Astro.response.status === 200) Astro.response.status = 400;
+}
+privatePage(Astro);
+if (made) Astro.response.headers.set("referrer-policy", "no-referrer");
+if (who.state === "down") Astro.response.status = 503;
+const again = Astro.request.method === "GET" && Astro.url.searchParams.get("again") === "1";
+const scopeWords = (t: NewToken) =>
+  "all" in t.scope ? store("plugins.store.key.scope.all") : t.scope.plugins.length <= 3 ? t.scope.plugins.map(nameOf).join(", ") : `${t.scope.plugins.length} plugins`;
+const title = made ? store("plugins.store.key.secret_title") : store("plugins.store.key.new_title");
+---
+
+<Store title={`${title} · Zeron`} description="Make a deploy token." noindex current="publish" session={session}>
+  <div class="wrap rpt">
+    <nav class="crumbs" aria-label="Where this is"><a href="/account">Your plugins</a><Icon name="chev" /><a href={back}>Deploy tokens</a></nav>
+    {
+      who.state === "down" ? (
+        <Failed />
+      ) : !session ? (
+        <SignInPlease what="your deploy tokens" />
+      ) : made ? (
+        <section class="askcard reveal" aria-labelledby="made-title" data-secret>
+          <h1 id="made-title" class={lsb(title)}>{title}</h1>
+          {/* (The token in the guide's block of code, its copy button in the block's head; the warning under it.) */}
+          <figure class="codeblock secret">
+            <figcaption class="cb-head">
+              <span class="cb-label">Deploy token</span>
+              <button type="button" class="cb-copy" data-copy-of="the-token" aria-label="Copy the token"><Icon name="copy" /></button>
+            </figcaption>
+            <pre tabindex="0"><code id="the-token" translate="no">{made.token}</code></pre>
+          </figure>
+          <p class="warnline">{store("plugins.store.key.secret_body")}</p>
+          <dl class="made">
+            <div><dt>{store("plugins.store.key.name")}</dt><dd><Words text={made.name} /> <span class="id">{made.short}</span></dd></div>
+            <div><dt>{store("plugins.store.key.scope.label")}</dt><dd><Words text={scopeWords(made)} /></dd></div>
+            <div><dt>{store("plugins.store.key.expiry_label")}</dt><dd>{made.expires_at === null ? store("plugins.store.key.no_end") : date(made.expires_at)}</dd></div>
+          </dl>
+          <div class="answers">
+            <a class="btn pri" href={back} data-secret-done>{store("plugins.store.key.done")}</a>
+          </div>
+        </section>
+      ) : none ? (
+        <Empty icon="key" title={NO_TOKENS.title} line={NO_TOKENS.line} level={1} />
+      ) : (
+        <section class="askcard newtoken" aria-labelledby="new-title">
+          <h1 id="new-title" class={lsb(title)}>{title}</h1>
+          <TokenForm id="page-token" csrf={session.csrf} fields={fields} plugins={[...yours.values()]} fresh={session.fresh_sign_in === true} again={again} refusal={refusal} back={back} />
+        </section>
+      )
+    }
+  </div>
+</Store>

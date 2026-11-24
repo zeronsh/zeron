@@ -188,7 +188,8 @@ impl SigningKey {
             .map(|pair| Self { pair })
     }
 
-    /// The key whose 32-byte ed25519 seed is `seed` (a deploy key's).
+    /// The key whose 32-byte ed25519 seed is `seed` (a fixed one: tests,
+    /// vectors, measuring a signature's size).
     pub fn from_seed(seed: &[u8]) -> Option<Self> {
         Ed25519KeyPair::from_seed_unchecked(seed).ok().map(|pair| Self { pair })
     }

@@ -39,7 +39,8 @@ pub struct Words {
 #[derive(Debug, Clone)]
 pub struct Verified {
     pub manifest: Value,
-    pub key: String,
+    /// Who signed it; none for one taken unsigned (`signed: false`).
+    pub key: Option<String>,
     pub files: BTreeMap<String, Vec<u8>>,
     pub raw: Vec<u8>,
     pub hash: String,
@@ -68,8 +69,10 @@ pub fn read(path: &Path, words: &Words) -> Result<Vec<u8>, String> {
 }
 
 /// The package `raw`, of `format`, signed in `prefix`'s domain, its paths
-/// each kept by `keep_path`: verified, or why not.
-pub fn parse(raw: Vec<u8>, format: &str, prefix: &str, keep_path: impl Fn(&str) -> bool, words: &Words) -> Result<Verified, String> {
+/// each kept by `keep_path`: verified, or why not. `signed`: it must be
+/// signed; else one with no signature is taken by its contents alone (a
+/// signature it does have must still check out).
+pub fn parse(raw: Vec<u8>, format: &str, prefix: &str, keep_path: impl Fn(&str) -> bool, words: &Words, signed: bool) -> Result<Verified, String> {
     if raw.len() as u64 > MAX_PACKAGE_BYTES {
         return Err(words.too_big.into());
     }
@@ -103,7 +106,8 @@ pub fn parse(raw: Vec<u8>, format: &str, prefix: &str, keep_path: impl Fn(&str) 
     }
     let hashes = hashes(&decoded);
     let key = match signing::check_raw(prefix, &manifest, &hashes) {
-        SigCheck::Valid(key) => key,
+        SigCheck::Valid(key) => Some(key),
+        SigCheck::Unsigned if !signed => None,
         SigCheck::Unsigned => return Err(words.unsigned.into()),
         SigCheck::FilesDiffer => return Err(words.tampered.into()),
         SigCheck::BadSignature => return Err(words.bad_signature.into()),
@@ -150,19 +154,26 @@ mod tests {
     #[test]
     fn a_package_verifies_over_every_file_before_anything_is_kept() {
         let (raw, key) = signed();
-        let v = parse(raw.clone(), "zeron-plugin:v1", PAYLOAD_PREFIX, plain_path, &WORDS).unwrap();
-        assert_eq!((v.key, v.files.len(), v.hash), (key, 1, signing::sha256_hex(&raw)));
+        let v = parse(raw.clone(), "zeron-plugin:v1", PAYLOAD_PREFIX, plain_path, &WORDS, true).unwrap();
+        assert_eq!((v.key, v.files.len(), v.hash), (Some(key), 1, signing::sha256_hex(&raw)));
         // Another kind's format, a file changed, a path outside, unsigned.
-        assert_eq!(parse(raw.clone(), "zeron-template:v1", PAYLOAD_PREFIX, plain_path, &WORDS).unwrap_err(), "not a package");
+        assert_eq!(parse(raw.clone(), "zeron-template:v1", PAYLOAD_PREFIX, plain_path, &WORDS, true).unwrap_err(), "not a package");
         let mut value: Value = serde_json::from_slice(&raw).unwrap();
         value["files"]["init.luau"] = json!(B64.encode(b"return 2"));
-        assert_eq!(parse(serde_json::to_vec(&value).unwrap(), "zeron-plugin:v1", PAYLOAD_PREFIX, plain_path, &WORDS).unwrap_err(), "tampered");
+        assert_eq!(parse(serde_json::to_vec(&value).unwrap(), "zeron-plugin:v1", PAYLOAD_PREFIX, plain_path, &WORDS, true).unwrap_err(), "tampered");
         let mut value: Value = serde_json::from_slice(&raw).unwrap();
         value["files"]["../evil"] = json!(B64.encode(b"x"));
-        assert!(parse(serde_json::to_vec(&value).unwrap(), "zeron-plugin:v1", PAYLOAD_PREFIX, plain_path, &WORDS).unwrap_err().starts_with("won't write"));
+        assert!(parse(serde_json::to_vec(&value).unwrap(), "zeron-plugin:v1", PAYLOAD_PREFIX, plain_path, &WORDS, true).unwrap_err().starts_with("won't write"));
         let mut value: Value = serde_json::from_slice(&raw).unwrap();
         value["manifest"].as_object_mut().unwrap().remove("signature");
-        assert_eq!(parse(serde_json::to_vec(&value).unwrap(), "zeron-plugin:v1", PAYLOAD_PREFIX, plain_path, &WORDS).unwrap_err(), "unsigned");
+        let unsigned = serde_json::to_vec(&value).unwrap();
+        assert_eq!(parse(unsigned.clone(), "zeron-plugin:v1", PAYLOAD_PREFIX, plain_path, &WORDS, true).unwrap_err(), "unsigned");
+        // Unless it may be: the store's, its record naming no signer.
+        assert_eq!(parse(unsigned, "zeron-plugin:v1", PAYLOAD_PREFIX, plain_path, &WORDS, false).unwrap().key, None);
+        // A signature it has must still check out.
+        let mut value: Value = serde_json::from_slice(&raw).unwrap();
+        value["files"]["init.luau"] = json!(B64.encode(b"return 2"));
+        assert_eq!(parse(serde_json::to_vec(&value).unwrap(), "zeron-plugin:v1", PAYLOAD_PREFIX, plain_path, &WORDS, false).unwrap_err(), "tampered");
     }
 
     /// R9: a signed package naming a drive-relative path (`D:x.cmd`, or
@@ -178,7 +189,7 @@ mod tests {
             files.insert(bad.to_string(), b"evil".to_vec());
             let manifest = key.sign_manifest(&json!({ "id": "p", "name": "P" }), &hashes(&files));
             let raw = pack("zeron-plugin:v1", &manifest, &files).unwrap();
-            let refused = parse(raw, "zeron-plugin:v1", PAYLOAD_PREFIX, plain_path, &WORDS);
+            let refused = parse(raw, "zeron-plugin:v1", PAYLOAD_PREFIX, plain_path, &WORDS, true);
             assert!(refused.is_err_and(|e| e.starts_with("won't write")), "{bad}");
         }
     }

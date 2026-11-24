@@ -1,0 +1,6 @@
+---
+// The old list's address (Browse): the store is one page now, at /plugins.
+// Its query, every filter, order and page, goes with it, for good.
+export const prerender = false;
+return Astro.redirect(`/plugins${Astro.url.search}`, 301);
+---

@@ -1,0 +1,241 @@
+---
+// The store: one page for every listed plugin (Discover and Browse were
+// two; /plugins/all sends here with its query), as Raycast's store and
+// Vercel's templates set theirs. A centred hero: its title, a line, and the
+// search (the page's own: the bar's isn't drawn here), which narrows this
+// page in place. Unnarrowed, on its first page, Featured: three picks,
+// picture first (components/look/FeaturedTile.astro). Then all of them:
+// beside the list, how to narrow it (the categories with how many each
+// holds, Everything or Verified only, the category's keywords); the list's
+// count and its order (a menu), each plugin the one card
+// (components/look/PluginCard.astro), a page at a time by the edge's cursor.
+// Every filter, order and page is a link (the whole state is the address),
+// so it works without a script and can be shared. On a phone the categories
+// stay a row of chips, and the filters fold into a disclosure (no script).
+//
+// Public and the same for everyone signed out, so the Worker cache keeps
+// each address for half a minute and serves it stale for another.
+import Empty from "../../components/look/Empty.astro";
+import Failed from "../../components/look/Failed.astro";
+import Icon from "../../components/look/Icon.astro";
+import FeaturedTile from "../../components/look/FeaturedTile.astro";
+import PluginCardView from "../../components/look/PluginCard.astro";
+import Seal from "../../components/look/Seal.astro";
+import Store from "../../layouts/Store.astro";
+import "../../styles/look/browse.css";
+import { canonicalSearch, catalogHref, effectiveSort, isFront, PAGE_SIZE, pageHref, range, readCatalog, SORT_LABELS, type CatalogState } from "../../lib/store/catalog.ts";
+import { count } from "../../lib/store/format.ts";
+import { CATALOG_TAG, publicPage } from "../../lib/store/http.ts";
+import { CATEGORIES } from "../../lib/store/nav.ts";
+import type { Category, Sort } from "../../lib/store/types.ts";
+import { categoryLine, EMPTY_BODY, store } from "../../lib/store/words.ts";
+import { lsb } from "../../lib/store/bearing.ts";
+
+export const prerender = false;
+
+const edge = Astro.locals.edge;
+const categoriesResult = await edge.categories();
+const categories = categoriesResult.ok ? categoriesResult.data.categories : [];
+const state = readCatalog(Astro.url.searchParams, categoriesResult.ok ? categories : null);
+
+// An address that says more than it means is sent to the one that says it plainly.
+const canonical = canonicalSearch(Astro.url.searchParams, state);
+if (canonical && categoriesResult.ok) return Astro.redirect(canonical, 301);
+
+const sort = effectiveSort(state);
+const front = isFront(state);
+const [page, stats, keywordsResult, featured] = await Promise.all([
+  edge.catalog({ q: state.q || undefined, category: state.category ?? undefined, keyword: state.keyword ?? undefined, verified: state.verified || undefined, sort, cursor: state.cursor ?? undefined, limit: PAGE_SIZE }),
+  edge.stats(),
+  edge.keywords({ category: state.category ?? undefined, limit: 12 }),
+  // (Asked at the edge's own page size, no `limit`: the first page is the one the edge purges on a change.)
+  front ? edge.catalog({ featured: true, sort: "popular" }) : null,
+]);
+
+// A cursor from another search, or an old one: this search's first page.
+if (!page.ok && page.error === "bad_cursor") return Astro.redirect(catalogHref({ ...state, cursor: null }), 303);
+if (page.ok) publicPage(Astro, [CATALOG_TAG]);
+else Astro.response.status = page.error === "bad_request" ? 400 : 503;
+
+// Categories by the app's names (the fixed list), each with the edge's count; else the site's list alone.
+const shelf = (categoriesResult.ok ? categories : CATEGORIES.map((c): Category => ({ id: c.id, name: c.label }))).map((c) => ({ ...c, name: CATEGORIES.find((x) => x.id === c.id)?.label ?? c.name }));
+const categoryName = (id: string) => shelf.find((c) => c.id === id)?.name ?? id;
+const items = page.ok ? page.data.items : [];
+const next = page.ok ? pageHref(state, page.data.next_cursor) : null;
+const previous = page.ok ? (page.data.prev_cursor ? pageHref(state, page.data.prev_cursor, -1) : state.cursor ? catalogHref({ ...state, cursor: null, page: null }) : null) : null;
+// How many the query matches (amendment 38's total: this page's own), and which of them this page is.
+const total = page.ok ? page.data.total : undefined;
+const shown = page.ok ? range(state, items.length) : null;
+// The category's keywords, most used first; the one chosen kept in the list even when it isn't among them.
+const keywords = keywordsResult.ok ? keywordsResult.data.keywords.map((k) => k.keyword) : [];
+if (state.keyword && !keywords.includes(state.keyword)) keywords.unshift(state.keyword);
+
+// The orders, in the app's words (Recently verified, the store's own): Best match only for a search.
+const sorts: Sort[] = (["relevance", "popular", "updated", "new", "verified"] as const).filter((s) => s !== "relevance" || state.q);
+const sortLabel = (s: Sort) => (s === "verified" ? SORT_LABELS.verified : store(`plugins.store.sort.${s}`));
+const at = (change: Partial<CatalogState>) => catalogHref({ ...state, ...change, cursor: null, page: null });
+
+const heading = state.q ? `Results for “${state.q}”` : state.category ? categoryName(state.category) : state.keyword ? `Tagged “${state.keyword}”` : state.verified ? "Verified plugins" : "Plugins";
+const lead = state.q
+  ? `Plugins whose name, summary, keywords or author match${state.category ? `, in ${categoryName(state.category)}` : ""}.`
+  : state.category
+    ? (categoryLine(state.category) ?? `Plugins for Zeron in ${categoryName(state.category)}.`)
+    : state.keyword
+      ? `Plugins whose authors tagged them “${state.keyword}”.`
+      : state.verified
+        ? "Plugins whose newest version Zeron has verified."
+        : "Panels, commands and tools for your agents, made by people who use Zeron. A check marks what Zeron has verified.";
+const title = state.q ? `“${state.q}” · Plugins · Zeron` : state.category ? `${categoryName(state.category)} plugins · Zeron` : "Plugins · Zeron";
+const description = state.category ? `Plugins for Zeron in ${categoryName(state.category)}, each saying whether Zeron verified it.` : "Panels, commands and tools for your agents, made by people who use Zeron. Each says whether Zeron verified it.";
+// Search results and later pages stay out of search engines; the list and its categories don't.
+const noindex = Boolean(state.q || state.cursor || state.keyword || state.verified);
+const here = `${Astro.url.pathname}${Astro.url.search}`;
+/** Nothing is published at all (however the list is narrowed): no sidebar, no search, only the page's ending. */
+const unpublished = page.ok && items.length === 0 && (stats.ok ? stats.data.plugins === 0 : front);
+/** What was asked for, when nothing matches it. */
+const searched = `${state.q ? "No" : "There's no"}${state.verified ? " verified" : ""} plugin${state.category ? ` in ${categoryName(state.category)}` : ""}${state.keyword ? ` tagged “${state.keyword}”` : ""}${state.q ? ` matches “${state.q}”` : " yet"}.`;
+/** How many filters past the category are on (the phone's Filters says so). */
+const filtering = Number(state.verified) + Number(Boolean(state.keyword));
+/** Featured: up to three, unnarrowed and on the first page alone. */
+const features = page.ok && featured?.ok ? featured.data.items.slice(0, 3) : [];
+/** This page's number, when known, and how many there are; the pager links the first, the one before and the one after (the edge pages by cursor: only those have an address). */
+const pageNo = state.page ?? (state.cursor ? null : 1);
+const pages = total !== undefined ? Math.max(1, Math.ceil(total / PAGE_SIZE)) : null;
+const first = pageNo !== null && pageNo > 2 ? catalogHref({ ...state, cursor: null, page: null }) : null;
+/** The search keeps what else the page is narrowed by (it narrows the store in place). */
+const keep: Record<string, string> = { ...(state.category ? { category: state.category } : {}), ...(state.keyword ? { keyword: state.keyword } : {}), ...(state.verified ? { verified: "1" } : {}) };
+
+---
+
+<Store title={title} description={description} noindex={noindex} canonical={catalogHref({ category: state.category })} current="browse" query={state.q} keep={keep} ownSearch>
+  <div class="wrap store-page">
+    <header class="hero">
+      <h1 class={lsb(heading)}>{heading}</h1>
+      <p class="lead">{lead}</p>
+      {!unpublished && <form class="hfind" role="search" action="/plugins" method="get" data-tidy>
+        <Icon name="search" />
+        <input type="search" name="q" value={state.q || undefined} placeholder="Search plugins" aria-label="Search plugins" autocomplete="off" enterkeyhint="search" data-search />
+        {Object.entries(keep).map(([name, value]) => <input type="hidden" name={name} value={value} />)}
+        <kbd class="kbd" aria-hidden="true">/</kbd>
+      </form>}
+    </header>
+
+    {features.length > 0 && (
+      <section class="featured" aria-labelledby="featured">
+        <div class="sec-head"><h2 id="featured">Featured</h2><span class="sec-aside">Our picks</span></div>
+        <ul class="feat-row">
+          {features.map((p) => <li><FeaturedTile plugin={p} eager /></li>)}
+        </ul>
+      </section>
+    )}
+
+    {
+      !page.ok ? (
+        <Failed href={here} />
+      ) : unpublished ? (
+        <Empty icon="grid" title={store("plugins.store.empty_title")} line={EMPTY_BODY} />
+      ) : (
+        <div class="browse">
+          <aside class="facets" aria-label="Narrow the list">
+            <div>
+              <h2 class="facet-h">Category</h2>
+              <nav class="catlist" aria-label="Categories">
+                <a href={at({ category: null })} aria-current={!state.category ? "page" : undefined}><span>All</span>{stats.ok && stats.data.plugins > 0 && <span class="num">{count(stats.data.plugins)}</span>}</a>
+                {shelf.map((c) => (
+                  <a href={at({ category: c.id })} aria-current={state.category === c.id ? "page" : undefined}><span>{c.name}</span>{c.count ? <span class="num">{count(c.count)}</span> : null}</a>
+                ))}
+              </nav>
+            </div>
+            <div class="wide-facet">
+              <h2 class="facet-h">Show</h2>
+              <div class="pick">
+                <a href={at({ verified: false })} aria-current={!state.verified ? "true" : undefined}><i aria-hidden="true"></i>Everything</a>
+                <a href={at({ verified: true })} aria-current={state.verified ? "true" : undefined}><i aria-hidden="true"></i>{store("plugins.store.verified_only")}<Seal size="s" quiet /></a>
+              </div>
+            </div>
+            {keywords.length > 0 && (
+              <div class="wide-facet">
+                <h2 class="facet-h">Keywords</h2>
+                <ul class="tags">
+                  {keywords.map((k) => <li><a class="tag" href={at({ keyword: state.keyword === k ? null : k })} title={k} aria-current={state.keyword === k ? "true" : undefined}>{k}</a></li>)}
+                </ul>
+              </div>
+            )}
+          </aside>
+
+          <section class="listing" aria-labelledby="results">
+            <div class:list={["rhead", { bare: items.length === 0 }]}>
+              <p id="results" class:list={{ "sr-only": items.length === 0 }}>{total ? <><b class="num">{count(total)}</b> {total === 1 ? "plugin" : "plugins"}</> : "Plugins"}</p>
+              <div class="fbar">
+                {/* The phone's filters, a disclosure (the sidebar's, folded). */}
+                <details class="drop narrow-only">
+                  <summary>Filters{filtering > 0 && <span class="n num">{filtering}</span>}<Icon name="chev" /></summary>
+                  <div class="pop wide">
+                    <p class="facet-h">Show</p>
+                    <div class="pick">
+                      <a href={at({ verified: false })} aria-current={!state.verified ? "true" : undefined}><i aria-hidden="true"></i>Everything</a>
+                      <a href={at({ verified: true })} aria-current={state.verified ? "true" : undefined}><i aria-hidden="true"></i>{store("plugins.store.verified_only")}<Seal size="s" quiet /></a>
+                    </div>
+                    {keywords.length > 0 && (
+                      <>
+                        <p class="facet-h">Keywords</p>
+                        <ul class="tags">
+                          {keywords.map((k) => <li><a class="tag" href={at({ keyword: state.keyword === k ? null : k })} title={k} aria-current={state.keyword === k ? "true" : undefined}>{k}</a></li>)}
+                        </ul>
+                      </>
+                    )}
+                  </div>
+                </details>
+                {/* The order, a menu of links (no script); nothing to order, no menu. */}
+                {items.length > 0 && (
+                  <details class="drop sort">
+                    <summary><span class="t3">Sort:</span> {sortLabel(sort)}<span class="sr-only">, change the order</span><Icon name="chev" /></summary>
+                    <nav class="pop" aria-label={store("plugins.store.order_label")}>
+                      {sorts.map((s) => <a href={at({ sort: s })} aria-current={s === sort ? "page" : undefined}>{sortLabel(s)}</a>)}
+                    </nav>
+                  </details>
+                )}
+              </div>
+            </div>
+
+            {
+              items.length === 0 ? (
+                <Empty icon="search" title="Nothing matches" line={searched} action={state.q ? { label: store("plugins.store.clear"), href: catalogHref({ category: state.category, keyword: state.keyword, verified: state.verified }) } : { label: "Show everything", href: "/plugins" }} />
+              ) : (
+                <>
+                  <ul class="results" aria-labelledby="results">
+                    {items.map((p) => <li><PluginCardView plugin={p} /></li>)}
+                  </ul>
+                  {(previous || next) && (
+                    <nav class="pager numbered" aria-label="Pages">
+                      <div class="pages">
+                        {previous ? <a class="pg step" href={previous} rel="prev" aria-label="The page before"><Icon name="chev" /></a> : <span class="pg step" aria-hidden="true"><Icon name="chev" /></span>}
+                        {first && <a class="pg num" href={first} aria-label="Page 1">1</a>}
+                        {pageNo !== null && pageNo > 3 && <span class="pg gap" aria-hidden="true">…</span>}
+                        {previous && pageNo !== null && <a class="pg num" href={previous} aria-label={`Page ${pageNo - 1}`}>{pageNo - 1}</a>}
+                        {pageNo !== null && <span class="pg num" aria-current="page" aria-label={`Page ${pageNo}`}>{pageNo}</span>}
+                        {next && pageNo !== null && <a class="pg num" href={next} aria-label={`Page ${pageNo + 1}`}>{pageNo + 1}</a>}
+                        {next && pageNo !== null && pages !== null && pageNo + 1 < pages && <span class="pg gap" aria-hidden="true">…</span>}
+                        {next ? <a class="pg step" href={next} rel="next" aria-label="The next page"><Icon name="chev" /></a> : <span class="pg step" aria-hidden="true"><Icon name="chev" /></span>}
+                      </div>
+                      <p class="num">{shown ? `${count(shown.from)}–${count(shown.to)}` : ""}{shown && total !== undefined ? " of " : ""}{total !== undefined ? count(total) : ""}</p>
+                    </nav>
+                  )}
+                </>
+              )
+            }
+          </section>
+        </div>
+      )
+    }
+
+    <section class="make" aria-labelledby="make">
+      <h2 id="make">Made something for Zeron?</h2>
+      <p>Publish it from Zeron's Settings, or from the folder it lives in. It is live at once, and marked verified when Zeron has read it.</p>
+      <div class="make-acts">
+        <a class="btn pri" href="/plugins/publishing">Publishing guide</a>
+        <span class="cmd"><code><em aria-hidden="true">$</em> zeron plugin publish</code><button type="button" data-copy="zeron plugin publish" aria-label="Copy the command"><Icon name="copy" /></button></span>
+      </div>
+    </section>
+  </div>
+</Store>

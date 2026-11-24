@@ -56,6 +56,8 @@ SUITE_JOBS: dict[str, list[tuple[str, str]]] = {
     "core": [("core-tests", "linux")],  # ui-tests.yml
     "cursor": [("cursor-compatibility", "linux")],  # cursor-compatibility.yml
     "edge": [("edge", "linux")],  # preview-tests.yml
+    "site": [("site", "linux")],  # site-tests.yml
+    "store-e2e": [("store-e2e", "linux")],  # plugin-store-e2e.yml
     "installer": [("desktop-entry", "linux")],  # linux-installer.yml
     "voice": [("offline-linux", "linux"), ("windows-runtime", "windows")],  # voice-tests.yml
     "windows": [("tests", "windows"), ("app", "windows")],  # windows.yml
@@ -108,12 +110,27 @@ ZGX_CORE = [
     "crates/proto/**", "crates/update/**", "crates/visual/**", "crates/visual-gpu/**",
 ]
 
+# (The worker's code is its .ts files: edge/src/install.sh is served by it but tested by "installer".)
+STORE_E2E_PATHS = ["edge/src/*.ts", "edge/migrations/store/**", "edge/package.json", "edge/package-lock.json",
+                   "edge/wrangler.jsonc", "crates/engine/src/plugins/**", "crates/engine/src/auth.rs",
+                   "crates/engine/tests/plugin_store_e2e.rs", "crates/plugin-guard/**", "crates/rpc/**",
+                   "crates/cli/**", "apps/zeron/src/**", "docs/plugin-store-data.json",
+                   "scripts/plugin-store-e2e/**", "actions/publish-plugin/**",
+                   ".github/workflows/plugin-store-e2e.yml"]
+
 BROAD: dict[str, list[str]] = {
     "core": CARGO + ["crates/**", "apps/zeron/**", "scripts/ci/**", ".github/actions/linux-ci/**",
                      ".github/workflows/ui-tests.yml"],
     "cursor": CARGO + ["crates/harness/**", "crates/doc/**", "crates/engine/**",
                        "scripts/*cursor-sdk*", ".github/workflows/cursor-*.yml"],
     "edge": ["edge/**", ".github/workflows/preview-tests.yml"],
+    # zeron.sh; the app's words for what a plugin asks (its tests hold the web to them); and
+    # the edge, which its second tier runs it in front of (scripts/plugin-store-e2e/edge.mjs).
+    "site": ["apps/landing/**", "apps/zgx/ui/locales/en.json", "edge/**", "scripts/plugin-store-e2e/edge.mjs",
+             ".github/workflows/site-tests.yml"],
+    # The plugin store end to end: the edge and the engine side of it (plugins,
+    # sign-in, the CLI), the shared data file and the harness.
+    "store-e2e": CARGO + STORE_E2E_PATHS,
     "installer": ["edge/src/install.sh", "scripts/package-linux.sh", "scripts/test-linux-desktop-entry.sh",
                   "scripts/ci/apt-install.sh", "dist/zeron.desktop", "dist/zeron.png",
                   ".github/workflows/linux-installer.yml"],

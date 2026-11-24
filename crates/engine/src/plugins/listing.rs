@@ -114,6 +114,34 @@ pub mod rule {
     pub const NO_NOTES: &str = "no_notes";
 }
 
+/// Why a name, description or keyword is `bad_listing`, for an app that
+/// says it in its own words (the device's check and the edge's answer
+/// alike): a closed list.
+pub mod cause {
+    /// Longer than its limit (a name, a description).
+    pub const TOO_LONG: &str = "too_long";
+    /// A description of more than one line.
+    pub const NOT_ONE_LINE: &str = "not_one_line";
+    /// A character drawn as nothing; `word` is its code point (`U+200B`).
+    pub const UNSEEN_CHAR: &str = "unseen_char";
+    /// The store's mark in words, any language or spelling; `word` is
+    /// where, as written (a keyword: the keyword).
+    pub const MARK_WORD: &str = "mark_word";
+    /// A check mark (`word`, as written).
+    pub const MARK_GLYPH: &str = "mark_glyph";
+    /// A keyword (`word`) not of lowercase letters, digits, dashes and
+    /// single spaces, or too long.
+    pub const KEYWORD_SHAPE: &str = "keyword_shape";
+    /// More keywords than the store takes.
+    pub const TOO_MANY: &str = "too_many";
+    /// A keyword (`word`) given twice.
+    pub const REPEATED: &str = "repeated";
+    pub const ALL: &[&str] = &[TOO_LONG, NOT_ONE_LINE, UNSEEN_CHAR, MARK_WORD, MARK_GLYPH, KEYWORD_SHAPE, TOO_MANY, REPEATED];
+}
+
+/// A [`Problem::word`] is at most this many characters.
+pub const MAX_PROBLEM_WORD_CHARS: usize = 64;
+
 /// One thing in the way of publishing (or, as a warning, worth knowing).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Problem {
@@ -122,7 +150,24 @@ pub struct Problem {
     pub field: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// The line of `path` it's about (1 the first), when it's one line's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    /// Why, for a name, description or keyword (one of [`cause::ALL`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause: Option<&'static str>,
+    /// The text it's about, as written ([`problem_word`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub word: Option<String>,
     pub words: String,
+}
+
+/// `text` as a [`Problem::word`]: without control or format characters
+/// nor any other drawn as nothing (Default_Ignorable_Code_Point), at most
+/// [`MAX_PROBLEM_WORD_CHARS`] characters.
+pub fn problem_word(text: &str) -> String {
+    use icu_properties::props::{BinaryProperty, DefaultIgnorableCodePoint};
+    text.chars().filter(|c| !unseen_char(*c) && !DefaultIgnorableCodePoint::for_char(*c)).take(MAX_PROBLEM_WORD_CHARS).collect()
 }
 
 impl Problem {
@@ -131,8 +176,31 @@ impl Problem {
             rule,
             field,
             path: None,
+            line: None,
+            cause: None,
+            word: None,
             words: words.into(),
         }
+    }
+
+    /// With its cause and the text it's about.
+    fn because(mut self, cause: &'static str, word: Option<&str>) -> Self {
+        self.cause = Some(cause);
+        self.word = word.map(problem_word).filter(|w| !w.is_empty());
+        self
+    }
+
+    /// A name's or description's mark claim (`claim`, in `text`).
+    fn mark(self, text: &str, claim: &str) -> Self {
+        let glyph = claim.chars().count() == 1 && claim.chars().all(|c| MARK_GLYPHS.contains(&c));
+        let written = super::mark::as_written(text, claim);
+        self.because(if glyph { cause::MARK_GLYPH } else { cause::MARK_WORD }, Some(written.as_deref().unwrap_or(claim)))
+    }
+
+    /// An unseen character in `text`.
+    fn unseen_in(self, text: &str) -> Self {
+        let code = super::mark::first_unseen(text).map(|c| format!("U+{:04X}", c as u32));
+        self.because(cause::UNSEEN_CHAR, code.as_deref())
     }
 
     fn at(
@@ -145,6 +213,9 @@ impl Problem {
             rule,
             field,
             path: Some(path.to_owned()),
+            line: None,
+            cause: None,
+            word: None,
             words: words.into(),
         }
     }
@@ -248,12 +319,107 @@ pub fn store_link(url: &str) -> Option<String> {
     plain.then(|| parsed.to_string())
 }
 
-/// Whether `text` has a control or format character (Unicode Cc or Cf:
-/// direction overrides, invisible joiners), which what a listing shows may
-/// not (amendment 31).
+/// What a listing's name, description or keywords may not say: the
+/// store's mark (`mark.rs`).
+pub use super::mark::{MARK_GLYPHS, MARK_WORDS, keyword_claim, mark_claim, mark_text};
+
+/// Whether `text` has a character drawn as nothing, which what a listing
+/// shows may not (amendment 31): a control or format character, any other
+/// default-ignorable one, a variation selector but an emoji's own
+/// (`mark::unseen`).
 fn unseen(text: &str) -> bool {
+    super::mark::unseen(text)
+}
+
+/// Whether `c` is a control or format character (Unicode Cc or Cf): a
+/// newline, an escape sequence's ESC, a direction override, an invisible
+/// joiner.
+pub fn unseen_char(c: char) -> bool {
     use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
-    text.chars().any(|c| matches!(c.general_category(), GeneralCategory::Control | GeneralCategory::Format))
+    matches!(c.general_category(), GeneralCategory::Control | GeneralCategory::Format)
+}
+
+/// `text` for a terminal or a CI log, as one line: each control or format
+/// character written out (`\u{1b}`), so words from a plugin or the store
+/// can't start a line of their own, colour one, or reorder it.
+pub fn escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if unseen_char(c) {
+            out.extend(c.escape_unicode());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Two of a package's paths that a disk folding names (macOS's, Windows')
+/// makes meet ([`clashes`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Clash<'a> {
+    /// One file there: `path`, met after `other`.
+    SameFile { path: &'a str, other: &'a str },
+    /// `file` is a file where `inside` needs a folder of that name; `path`
+    /// is whichever of them was met second.
+    Folder { file: &'a str, inside: &'a str, path: &'a str },
+}
+
+impl Clash<'_> {
+    /// The path met second: the one that clashes with what came before.
+    pub fn path(&self) -> &str {
+        match self {
+            Clash::SameFile { path, .. } | Clash::Folder { path, .. } => path,
+        }
+    }
+
+    /// In words naming both paths.
+    pub fn words(&self) -> String {
+        match self {
+            Clash::SameFile { path, other } => format!("{path:?} and {other:?} are one file on macOS and Windows"),
+            Clash::Folder { file, inside, .. } => format!("{file:?} is a file where {inside:?} needs a folder of that name on macOS and Windows"),
+        }
+    }
+}
+
+/// Every clash among `paths`, in their order, as a disk that folds names
+/// makes them ([`fold_path`]): two that are one file, or a file where
+/// another needs a folder of that name. `taken` (a manifest's name, a file
+/// the installer writes beside it) are there first, as files.
+pub fn clashes<'a>(paths: impl IntoIterator<Item = &'a str>, taken: &[&'a str]) -> Vec<Clash<'a>> {
+    // Each folded file: the path it was. Each folded folder: a path inside it.
+    let mut files: BTreeMap<String, &'a str> = taken.iter().map(|rel| (fold_path(rel), *rel)).collect();
+    let mut folders: BTreeMap<String, &'a str> = BTreeMap::new();
+    let mut found = Vec::new();
+    for rel in paths {
+        let folded = fold_path(rel);
+        if let Some(other) = files.get(&folded) {
+            found.push(Clash::SameFile { path: rel, other });
+            continue;
+        }
+        if let Some(inside) = folders.get(&folded) {
+            found.push(Clash::Folder { file: rel, inside, path: rel });
+            continue;
+        }
+        let parts: Vec<&str> = folded.split('/').collect();
+        let mut clashed = false;
+        for end in 1..parts.len() {
+            let folder = parts[..end].join("/");
+            if let Some(file) = files.get(&folder) {
+                found.push(Clash::Folder { file, inside: rel, path: rel });
+                clashed = true;
+                break;
+            }
+        }
+        if clashed {
+            continue;
+        }
+        for end in 1..parts.len() {
+            folders.entry(parts[..end].join("/")).or_insert(rel);
+        }
+        files.insert(folded, rel);
+    }
+    found
 }
 
 /// A path as macOS and Windows compare it: Unicode NFC, then
@@ -385,13 +551,19 @@ pub fn check(
             BAD_LISTING,
             Some("name"),
             format!("Its name is longer than {MAX_NAME_LEN} characters"),
-        ));
+        ).because(cause::TOO_LONG, None));
     } else if unseen(&manifest.name) {
         problems.push(Problem::new(
             BAD_LISTING,
             Some("name"),
             "Its name has a control or invisible formatting character",
-        ));
+        ).unseen_in(&manifest.name));
+    } else if let Some(claim) = mark_claim(&manifest.name, true) {
+        problems.push(Problem::new(
+            BAD_LISTING,
+            Some("name"),
+            format!("Its name says \"{claim}\": only the store marks a plugin verified or official. Name it for what it does, without that word"),
+        ).mark(&manifest.name, &claim));
     }
     if !manifest.entry.is_empty() && !files.contains_key(&manifest.entry) {
         problems.push(Problem::new(
@@ -432,17 +604,24 @@ pub fn check(
             "It needs a \"description\": one line saying what it does",
         ));
     } else if description.chars().count() > MAX_DESCRIPTION_LEN || description.contains('\n') {
+        let why = if description.chars().count() > MAX_DESCRIPTION_LEN { cause::TOO_LONG } else { cause::NOT_ONE_LINE };
         problems.push(Problem::new(
             BAD_LISTING,
             Some("description"),
             format!("Its description is one line of at most {MAX_DESCRIPTION_LEN} characters"),
-        ));
+        ).because(why, None));
     } else if unseen(description) {
         problems.push(Problem::new(
             BAD_LISTING,
             Some("description"),
             "Its description has a control or invisible formatting character",
-        ));
+        ).unseen_in(description));
+    } else if let Some(claim) = mark_claim(description, false) {
+        problems.push(Problem::new(
+            BAD_LISTING,
+            Some("description"),
+            format!("Its description says \"{claim}\" of the plugin itself: only the store marks a plugin verified or official. Say what it does instead, or say whose thing it is (\"works with the official Slack app\")"),
+        ).mark(description, &claim));
     }
     match raw.get("icon") {
         None | Some(Value::Null) => problems.push(Problem::new(
@@ -525,11 +704,13 @@ pub fn check(
             let words: Vec<Option<&str>> = items.iter().map(Value::as_str).collect();
             let unique: BTreeSet<_> = words.iter().collect();
             if items.len() > MAX_KEYWORDS || unique.len() != words.len() {
-                problems.push(Problem::new(
+                let twice = words.iter().enumerate().find_map(|(at, w)| words[..at].contains(w).then_some(*w)).flatten();
+                let problem = Problem::new(
                     BAD_LISTING,
                     Some("keywords"),
                     format!("It has at most {MAX_KEYWORDS} keywords, each once"),
-                ));
+                );
+                problems.push(if items.len() > MAX_KEYWORDS { problem.because(cause::TOO_MANY, None) } else { problem.because(cause::REPEATED, twice) });
             } else if let Some(bad) = words.iter().find(|w| w.is_none_or(|w| !keyword(w))) {
                 problems.push(Problem::new(
                     BAD_LISTING,
@@ -538,7 +719,13 @@ pub fn check(
                         "Keyword \"{}\" must be lowercase letters, digits, dashes and single spaces, at most {MAX_KEYWORD_LEN} characters",
                         bad.unwrap_or("?")
                     ),
-                ));
+                ).because(cause::KEYWORD_SHAPE, *bad));
+            } else if let Some((keyword, claim)) = words.iter().flatten().find_map(|w| keyword_claim(w).map(|claim| (w, claim))) {
+                problems.push(Problem::new(
+                    BAD_LISTING,
+                    Some("keywords"),
+                    format!("Keyword \"{keyword}\" says \"{claim}\": only the store marks a plugin verified or official. Drop it, or use a word for what the plugin does"),
+                ).because(cause::MARK_WORD, Some(keyword)));
             }
         }
         Some(_) => problems.push(Problem::new(
@@ -636,22 +823,10 @@ pub fn check(
         problems.push(Problem::new(TOO_LARGE, Some("manifest"), "Its manifest is over 256 KB"));
     }
     // Two paths that are one file on a Mac or a Windows machine (the
-    // manifest's own name among them), in code point order.
-    let mut folded: BTreeMap<String, &str> = BTreeMap::new();
-    folded.insert(fold_path(super::manifest::MANIFEST_FILE), super::manifest::MANIFEST_FILE);
-    for rel in files.keys() {
-        let key = fold_path(rel);
-        match folded.get(&key) {
-            Some(other) => problems.push(Problem::at(
-                BAD_LISTING,
-                Some("files"),
-                rel,
-                format!("\"{rel}\" and \"{other}\" are the same file on macOS and Windows"),
-            )),
-            None => {
-                folded.insert(key, rel);
-            }
-        }
+    // manifest's own name among them), or a file where another needs a
+    // folder of that name (amendment 42), in code point order.
+    for clash in clashes(files.keys().map(String::as_str), &[super::manifest::MANIFEST_FILE]) {
+        problems.push(Problem::at(BAD_LISTING, Some("files"), clash.path(), clash.words()));
     }
 
     // How big.
@@ -746,6 +921,35 @@ pub(crate) mod tests {
         let listing = Listing::of(&manifest);
         assert_eq!(listing.categories, vec!["productivity"]);
         assert_eq!(listing.engines_zeron.as_deref(), Some(">=0.3.0"));
+    }
+
+    #[test]
+    fn a_name_description_or_keyword_refused_says_why_and_where() {
+        use serde_json::json;
+        let (base, files) = listed();
+        let first = |key: &str, value: Value| {
+            let mut m = base.clone();
+            m[key] = value;
+            let (problems, _) = check(&Manifest::from_value(m).unwrap(), &files);
+            let p = problems.into_iter().next().unwrap();
+            (p.rule, p.field, p.cause, p.word)
+        };
+        let bad = |field, cause, word: Option<&str>| (rule::BAD_LISTING, Some(field), Some(cause), word.map(str::to_owned));
+        assert_eq!(first("name", json!("Verified Focus")), bad("name", cause::MARK_WORD, Some("Verified")));
+        assert_eq!(first("name", json!("Focus \u{2705}")), bad("name", cause::MARK_GLYPH, Some("\u{2705}")));
+        assert_eq!(first("name", json!("n".repeat(65))), bad("name", cause::TOO_LONG, None));
+        assert_eq!(first("name", json!("Focus\u{200b}Board")), bad("name", cause::UNSEEN_CHAR, Some("U+200B")));
+        assert_eq!(first("description", json!("a\nb")), bad("description", cause::NOT_ONE_LINE, None));
+        assert_eq!(first("description", json!("Official Git tools.")), bad("description", cause::MARK_WORD, Some("Official")));
+        assert_eq!(first("keywords", json!(["a", "b", "a"])), bad("keywords", cause::REPEATED, Some("a")));
+        assert_eq!(first("keywords", json!(["a", "b", "c", "d", "e", "f", "g", "h", "i"])), bad("keywords", cause::TOO_MANY, None));
+        assert_eq!(first("keywords", json!(["Focus"])), bad("keywords", cause::KEYWORD_SHAPE, Some("Focus")));
+        assert_eq!(first("keywords", json!(["timer\u{fe0f}"])), bad("keywords", cause::KEYWORD_SHAPE, Some("timer")));
+        assert_eq!(first("keywords", json!(["veri-fied"])), bad("keywords", cause::MARK_WORD, Some("veri-fied")));
+        // Other fields' problems have no cause.
+        assert_eq!(first("license", json!("")).2, None);
+        // The word is bounded.
+        assert_eq!(problem_word(&format!("a\u{202e}{}", "x".repeat(100))), format!("a{}", "x".repeat(63)));
     }
 
     #[test]
@@ -932,6 +1136,33 @@ pub(crate) mod tests {
         let mut manifest_too = files.clone();
         manifest_too.insert("ZERON-PLUGIN.JSON".into(), b"{}".to_vec());
         assert_eq!(rules(&base, &manifest_too), bad("files"));
+        // A file where another needs a folder of that name (amendment 42),
+        // either order, the manifest's name too; the path met second named.
+        for (a, b, at) in [("ui", "UI/x.luau", "ui"), ("Ui", "ui/x.luau", "ui/x.luau"), ("ZERON-PLUGIN.JSON/x.luau", "init2.luau", "ZERON-PLUGIN.JSON/x.luau")] {
+            let mut two = files.clone();
+            two.insert(a.into(), b"1".to_vec());
+            two.insert(b.into(), b"2".to_vec());
+            let problems = check(&Manifest::from_value(base.clone()).unwrap(), &two).0;
+            assert_eq!(problems.iter().map(|p| (p.rule, p.field, p.path.as_deref())).collect::<Vec<_>>(), [("bad_listing", Some("files"), Some(at))], "{a} {b}");
+            assert!(problems[0].words.contains("needs a folder of that name"), "{}", problems[0].words);
+        }
+        // A path that clashes records nothing: later paths are held only to
+        // what came before them without a problem (in code point order).
+        for (paths, clashing) in [
+            (["UI/a", "Ui", "ui/b"], &["Ui"][..]),
+            (["cafe\u{301}/a", "caf\u{e9}", "caf\u{e9}/b"], &["caf\u{e9}"]),
+            (["A", "A/B", "a/b/c"], &["A/B", "a/b/c"]),
+            (["A", "a", "a/x"], &["a", "a/x"]),
+        ] {
+            let found: Vec<String> = clashes(paths, &[]).iter().map(|c| c.path().to_owned()).collect();
+            assert_eq!(found, clashing, "{paths:?}");
+        }
+        // Names that only look alike are anyone's.
+        let mut alike = files.clone();
+        for rel in ["ui/a.luau", "ui2", "uix/b.luau"] {
+            alike.insert(rel.into(), b"1".to_vec());
+        }
+        assert_eq!(rules(&base, &alike), vec![]);
         // Sizes.
         let mut big = base.clone();
         big["x-notes"] = serde_json::json!("x".repeat(MAX_MANIFEST_BYTES));
@@ -997,5 +1228,33 @@ pub(crate) mod tests {
         );
         assert!(zeron_range(&serde_json::json!({ "engines": { "zeron": 4 } })).is_err());
         assert!(zeron_range(&serde_json::json!({ "engines": [] })).is_err());
+    }
+
+    #[test]
+    fn a_name_or_description_claiming_the_store_s_mark_is_refused() {
+        for (text, claim) in [
+            ("Verified Focus", Some("verified")),
+            ("The OFFICIAL git plugin", Some("official")),
+            ("verified_tools", Some("verified")),
+            ("Focus \u{2713}", Some("\u{2713}")),
+            ("Focus \u{2705} board", Some("\u{2705}")),
+            ("\u{1d42f}\u{1d41e}\u{1d42b}\u{1d422}\u{1d41f}\u{1d422}\u{1d41e}\u{1d41d} Focus", Some("verified")),
+            ("\u{ff36}\u{ff25}\u{ff32}\u{ff29}\u{ff26}\u{ff29}\u{ff25}\u{ff24}", Some("verified")),
+            ("An unofficial client", None),
+            ("Unverified links, flagged", None),
+            ("Officially fun", None),
+            ("V\u{e9}rified", Some("verified")),
+            ("VER\u{130}F\u{130}ED", Some("verified")),
+            ("Focus Board", None),
+        ] {
+            assert_eq!(mark_claim(text, false).as_deref(), claim, "{text}");
+        }
+        let (mut m, files) = listed();
+        m["name"] = serde_json::json!("Focus \u{2714}");
+        m["description"] = serde_json::json!("The official plugin.");
+        let (problems, _) = check(&Manifest::from_value(m).unwrap(), &files);
+        let said: Vec<(&str, Option<&str>)> = problems.iter().map(|p| (p.rule, p.field)).collect();
+        assert_eq!(said, [(rule::BAD_LISTING, Some("name")), (rule::BAD_LISTING, Some("description"))]);
+        assert!(problems[1].words.contains("\"official\""), "{}", problems[1].words);
     }
 }

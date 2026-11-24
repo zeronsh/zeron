@@ -79,7 +79,15 @@ enum Command {
     /// Serve the Zeron MCP (Model Context Protocol) server on stdin/stdout,
     /// proxying to the running engine's IPC. Agents use it to create, read,
     /// and message chats. Logs go to stderr; stdout is the protocol.
-    Mcp,
+    ///
+    /// With a subcommand, manage the other MCP servers Zeron gives agents
+    /// (Linear, Notion, your own…) through the running Zeron, as Settings →
+    /// MCP does.
+    Mcp {
+        // (None: serve the Zeron MCP server on stdio, as agents run it.)
+        #[command(subcommand)]
+        command: Option<McpCommand>,
+    },
     /// Make, sign, check and list plugins (through the running Zeron).
     Plugin {
         #[command(subcommand)]
@@ -170,66 +178,74 @@ pub enum PluginCommand {
         /// The plugin's folder, or the id of one in Zeron's plugins folder.
         target: String,
     },
-    /// Submit a plugin to the store for review. In CI, set ZERON_DEPLOY_KEY
-    /// to a deploy key's secret (never pass it as an argument): the folder is
-    /// checked, signed with that key and sent, with no Zeron running and no
-    /// sign-in. Without it, your own plugin goes through the running Zeron,
-    /// signed with this device's key and sent with your session. Exits 0 when
-    /// submitted, 1 when it doesn't meet the store's rules, 2 for a usage or
-    /// set-up problem, 3 when the store refuses the key or the account, 4
-    /// when the store can't be reached (try again).
+    /// Publish a plugin to the store: it's live at once, for anyone to
+    /// install, and marked verified once a reviewer has read it. In CI, set
+    /// ZERON_DEPLOY_TOKEN to a deploy token (never pass it as an argument):
+    /// the folder is checked, packed and sent with the token, with no Zeron
+    /// running and no sign-in (the store records it as the token's, and
+    /// installs it as yours). Without it, your own plugin goes through the
+    /// running Zeron, signed with this device's key and sent with your
+    /// session. Exits 0 when published, 1 when it doesn't meet the store's
+    /// rules, 2 for a usage or set-up problem, 3 when the store refuses the
+    /// token or the account, 4 when the store can't be reached (try again).
     Publish {
-        /// The plugin's folder (with ZERON_DEPLOY_KEY), or the id of your
+        /// The plugin's folder (with ZERON_DEPLOY_TOKEN), or the id of your
         /// plugin in Zeron's plugins folder.
         target: String,
-        /// Check, sign and pack it, but don't send it.
+        /// Check and pack it, but don't send it.
         #[arg(long)]
         dry_run: bool,
     },
-    /// Your plugins in the store: each version's review state and the
-    /// reviewer's reason. With ZERON_DEPLOY_KEY, the plugin that key is for
-    /// (and no Zeron needs to be running).
+    /// Your plugins in the store: each version, whether Zeron has verified
+    /// it, and a reviewer's reason when it declined to. Through the running
+    /// Zeron, with your session: never a deploy token's.
     Status {
         /// Only this plugin.
         id: Option<String>,
     },
-    /// Deploy keys: what a CI job publishes with, one plugin's each. Made,
-    /// listed and revoked through the running Zeron, with your session (never
-    /// with a deploy key); a plugin's first version comes from your machine.
-    Key {
+    /// Deploy tokens: what a CI job publishes with. Each is your account's,
+    /// for the plugins you name or all of yours, fixed when it's made. Made,
+    /// listed and revoked through the running Zeron, with your session
+    /// (never with a deploy token); a plugin's first version comes from your
+    /// machine.
+    Token {
         #[command(subcommand)]
-        command: KeyCommand,
+        command: TokenCommand,
     },
     /// Stop new installs of a version (installed copies keep working).
-    /// Through the running Zeron, with your session: never a deploy key's.
+    /// Through the running Zeron, with your session: never a deploy token's.
     Yank { id: String, version: String },
     /// Undo `yank`.
     Unyank { id: String, version: String },
-    /// Take back a version still in review.
-    Withdraw { id: String, version: String },
 }
 
 #[derive(Subcommand)]
-pub enum KeyCommand {
-    /// Make a deploy key for a plugin: its secret is shown this once (Zeron
-    /// keeps no copy). Making one needs a fresh sign-in, which this asks for.
+pub enum TokenCommand {
+    /// Make a deploy token: it's shown this once (neither Zeron nor the
+    /// store keeps it). Name the plugins it publishes (`--plugins a,b`), or
+    /// `--all` of yours, those you first publish later included; that can't
+    /// change afterwards. Making one needs a fresh sign-in, which this asks
+    /// for.
     Create {
-        /// The plugin's id.
-        id: String,
         /// What it's for, like "GitHub Actions".
         #[arg(long)]
         name: String,
+        /// The plugins it publishes, by id (yours in the store already).
+        #[arg(long, value_delimiter = ',', value_name = "IDS", required_unless_present = "all", conflicts_with = "all")]
+        plugins: Vec<String>,
+        /// Every plugin of yours, those you first publish later included.
+        #[arg(long)]
+        all: bool,
         /// Stop it working after this many days.
         #[arg(long, value_name = "DAYS")]
         expires_in_days: Option<u32>,
     },
-    /// List a plugin's deploy keys (never their secrets).
-    List { id: String },
-    /// Revoke a deploy key: it publishes nothing from now on.
+    /// List your deploy tokens and what each publishes (never the tokens).
+    List,
+    /// Revoke a deploy token: it publishes nothing from now on.
     Revoke {
+        /// The token's id, as `zeron plugin token list` shows it.
         id: String,
-        /// The key, as `zeron plugin key list` shows it.
-        key: String,
     },
 }
 
@@ -266,6 +282,149 @@ pub enum TemplateCommand {
     Delete { id: String },
 }
 
+/// `zeron mcp …`: the MCP servers Zeron gives agents. A server is named by
+/// its id, the name agents see it by (`linear_work`), or its service and
+/// account (`linear/Work`).
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum McpCommand {
+    /// List the servers, by service: each account, the name agents see it
+    /// by, whether it's signed in and where it's kept. Then the ones there
+    /// are to add.
+    List {
+        /// Print the running Zeron's whole list (servers and the ones to
+        /// add) as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a server: one of Zeron's by its id (`zeron mcp list` names them),
+    /// a remote one by its address (`--url`), or one this device runs
+    /// (`--command`). One that signs in in the browser starts its sign-in.
+    Add(McpAdd),
+    /// Sign in to a server in the browser (Ctrl-C cancels).
+    SignIn {
+        server: String,
+        #[command(flatten)]
+        client: McpClientArgs,
+    },
+    /// Sign out of a server, keeping it (sign in again with `sign-in`).
+    SignOut { server: String },
+    /// Name a server's account ("Work"), telling it apart from the service's
+    /// other accounts, here and to agents. An empty name clears it.
+    Rename { server: String, account: String },
+    /// Turn a server on: agents get it again.
+    On { server: String },
+    /// Turn a server off: agents don't get it until it's on again.
+    Off { server: String },
+    /// Remove a server and its sign-in.
+    Remove {
+        server: String,
+        /// Don't ask first.
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
+/// `zeron mcp add`'s arguments: exactly one of a preset's id, `--url` or
+/// `--command`.
+#[derive(clap::Args, Debug, PartialEq, Eq)]
+#[command(group(clap::ArgGroup::new("server").required(true).args(["preset", "url", "command"])))]
+pub struct McpAdd {
+    /// One of Zeron's servers, by id (`linear`, `notion`, …).
+    #[arg(value_name = "ID")]
+    pub preset: Option<String>,
+    /// A remote server's address: https://…, or http:// on this computer.
+    #[arg(long, value_parser = remote_url)]
+    pub url: Option<String>,
+    /// A server this device runs, speaking MCP on its stdin/stdout; its
+    /// arguments follow `--`.
+    #[arg(long, value_name = "CMD", value_parser = non_empty, conflicts_with_all = ["auth", "token_env", "client_id"])]
+    pub command: Option<String>,
+    /// Its name (`--url` and `--command` servers'; a preset has its own).
+    #[arg(long, value_parser = non_empty, required_unless_present = "preset", conflicts_with = "preset")]
+    pub name: Option<String>,
+    /// The account's name ("Work"): what tells two accounts of one service
+    /// apart. Needed to add a second account of a service.
+    #[arg(long, value_name = "NAME")]
+    pub account: Option<String>,
+    /// How a `--url` server signs in (default: oauth, or bearer with
+    /// `--token-env`).
+    #[arg(long, value_enum, conflicts_with = "preset")]
+    pub auth: Option<McpAuth>,
+    /// The environment variable holding its token, for one that signs in
+    /// with a bearer token (never on the command line, where other
+    /// processes and your shell's history would see it).
+    #[arg(long, value_name = "VAR")]
+    pub token_env: Option<String>,
+    /// An environment variable of this shell's to hand a `--command` server,
+    /// with its value now (repeat for more).
+    #[arg(long = "env", value_name = "VAR", conflicts_with_all = ["preset", "url"])]
+    pub env: Vec<String>,
+    #[command(flatten)]
+    pub client: McpClientArgs,
+    /// The `--command` server's arguments.
+    #[arg(last = true, value_name = "ARGS", conflicts_with_all = ["preset", "url"])]
+    pub args: Vec<String>,
+}
+
+/// Your own OAuth app, for a server that can't register Zeron's itself
+/// (it answers `mcp_client_required`).
+#[derive(clap::Args, Debug, PartialEq, Eq, Default)]
+pub struct McpClientArgs {
+    /// Your OAuth app's client ID, for a server that signs in only with an
+    /// app of your own.
+    #[arg(long, value_name = "ID", value_parser = non_empty)]
+    pub client_id: Option<String>,
+    /// The environment variable holding that app's client secret.
+    #[arg(long, value_name = "VAR", requires = "client_id")]
+    pub client_secret_env: Option<String>,
+}
+
+/// How a custom remote MCP server signs in.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpAuth {
+    /// In the browser (OAuth).
+    Oauth,
+    /// With a token (`--token-env`).
+    Bearer,
+    /// Not at all.
+    None,
+}
+
+/// A remote MCP server's address: `https://…`, or plain `http://` only to
+/// this computer (anywhere else its sign-in would cross the network in the
+/// clear).
+fn remote_url(text: &str) -> Result<String, String> {
+    let url = text.trim();
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("an address has no spaces".into());
+    }
+    let host_rest = if let Some(rest) = url.strip_prefix("https://") {
+        rest
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        let loopback = ["127.0.0.1", "localhost", "[::1]"].iter().any(|host| {
+            rest.strip_prefix(host)
+                .is_some_and(|after| after.is_empty() || after.starts_with([':', '/', '?']))
+        });
+        if !loopback {
+            return Err("use https:// (plain http:// only to this computer)".into());
+        }
+        rest
+    } else {
+        return Err("give an https:// address".into());
+    };
+    if host_rest.is_empty() || host_rest.starts_with(['/', '?', ':']) {
+        return Err("the address has no host".into());
+    }
+    Ok(url.to_owned())
+}
+
+fn non_empty(text: &str) -> Result<String, String> {
+    match text.trim() {
+        "" => Err("it can't be empty".into()),
+        text => Ok(text.to_owned()),
+    }
+}
+
 /// A subcommand that runs the engine's own code in this process: what the
 /// engine helper (or a binary linking the engine) does with it.
 pub enum EngineCommand {
@@ -276,7 +435,10 @@ pub enum EngineCommand {
     Status,
     Sync,
     Quiesce,
+    /// `zeron mcp`: the Zeron MCP server on stdio.
     Mcp,
+    /// `zeron mcp <subcommand>`: the MCP servers Zeron gives agents.
+    McpServers(McpCommand),
     Plugin(PluginCommand),
     Template(TemplateCommand),
     DiscoverModels(String),
@@ -368,7 +530,7 @@ pub fn run(version: &'static str, engines: Engines) -> Launch {
             mode,
             matches!(
                 &cli.command,
-                Some(Command::Mcp | Command::Plugin { .. } | Command::Template { .. } | Command::DiscoverModels { .. })
+                Some(Command::Mcp { .. } | Command::Plugin { .. } | Command::Template { .. } | Command::DiscoverModels { .. })
             ),
         );
     }
@@ -389,7 +551,8 @@ pub fn run(version: &'static str, engines: Engines) -> Launch {
         Some(Command::Status) => engine(EngineCommand::Status),
         Some(Command::Sync) => engine(EngineCommand::Sync),
         Some(Command::Quiesce) => engine(EngineCommand::Quiesce),
-        Some(Command::Mcp) => engine(EngineCommand::Mcp),
+        Some(Command::Mcp { command: None }) => engine(EngineCommand::Mcp),
+        Some(Command::Mcp { command: Some(command) }) => engine(EngineCommand::McpServers(command)),
         Some(Command::DiscoverModels { harness }) => engine(EngineCommand::DiscoverModels(harness)),
         Some(Command::Plugin { command }) => engine(EngineCommand::Plugin(command)),
         Some(Command::Template { command }) => engine(EngineCommand::Template(command)),
@@ -427,7 +590,7 @@ impl Command {
             | Self::Status
             | Self::Sync
             | Self::Quiesce
-            | Self::Mcp
+            | Self::Mcp { .. }
             | Self::Plugin { .. }
             | Self::Template { .. }
             | Self::DiscoverModels { .. } => true,
@@ -517,17 +680,20 @@ mod tests {
             &["sync"],
             &["quiesce"],
             &["mcp"],
+            &["mcp", "list"],
+            &["mcp", "add"],
+            &["mcp", "sign-in"],
+            &["mcp", "remove"],
             &["plugin", "new"],
             &["plugin", "export"],
             &["plugin", "check"],
             &["plugin", "publish"],
             &["plugin", "status"],
-            &["plugin", "key", "create"],
-            &["plugin", "key", "list"],
-            &["plugin", "key", "revoke"],
+            &["plugin", "token", "create"],
+            &["plugin", "token", "list"],
+            &["plugin", "token", "revoke"],
             &["plugin", "yank"],
             &["plugin", "unyank"],
-            &["plugin", "withdraw"],
             &["template", "use"],
             &["daemon", "install"],
             &["update"],
@@ -599,6 +765,117 @@ mod tests {
                 .is_err()
         );
         assert!(command("0.0.0").try_get_matches_from(["zeron", "plugin", "export"]).is_err());
+    }
+
+    fn mcp(args: &[&str]) -> Result<Option<McpCommand>, clap::Error> {
+        let argv = ["zeron", "mcp"].into_iter().chain(args.iter().copied());
+        match Cli::from_arg_matches(&command("0.0.0").try_get_matches_from(argv)?)?.command {
+            Some(Command::Mcp { command }) => Ok(command),
+            _ => panic!("not mcp"),
+        }
+    }
+
+    /// Plain `zeron mcp` is still the stdio server agents' configs run; a
+    /// subcommand manages the servers.
+    #[test]
+    fn plain_mcp_still_serves_stdio() {
+        assert_eq!(mcp(&[]).unwrap(), None);
+        assert!(mcp(&["--no-such-flag"]).is_err());
+        assert!(mcp(&["serve"]).is_err());
+        assert_eq!(mcp(&["list"]).unwrap(), Some(McpCommand::List { json: false }));
+        assert_eq!(mcp(&["list", "--json"]).unwrap(), Some(McpCommand::List { json: true }));
+        assert_eq!(
+            mcp(&["sign-in", "linear/Work"]).unwrap(),
+            Some(McpCommand::SignIn { server: "linear/Work".into(), client: McpClientArgs::default() })
+        );
+        assert_eq!(mcp(&["sign-out", "linear"]).unwrap(), Some(McpCommand::SignOut { server: "linear".into() }));
+        assert_eq!(
+            mcp(&["rename", "linear", ""]).unwrap(),
+            Some(McpCommand::Rename { server: "linear".into(), account: String::new() })
+        );
+        assert_eq!(mcp(&["on", "linear"]).unwrap(), Some(McpCommand::On { server: "linear".into() }));
+        assert_eq!(mcp(&["off", "linear"]).unwrap(), Some(McpCommand::Off { server: "linear".into() }));
+        assert_eq!(
+            mcp(&["remove", "linear", "-y"]).unwrap(),
+            Some(McpCommand::Remove { server: "linear".into(), yes: true })
+        );
+        assert!(mcp(&["remove"]).is_err());
+        // The stdio server and the management commands both run the engine's
+        // code (the helper's, for an interface without it).
+        let parse = |args: &[&str]| {
+            let argv = ["zeron", "mcp"].into_iter().chain(args.iter().copied());
+            Cli::from_arg_matches(&command("0.0.0").try_get_matches_from(argv).unwrap()).unwrap().command.unwrap()
+        };
+        assert!(parse(&[]).runs_engine());
+        assert!(parse(&["list"]).runs_engine());
+    }
+
+    #[test]
+    fn mcp_add_takes_one_kind_of_server() {
+        let add = |args: &[&str]| match mcp(&[&["add"][..], args].concat()) {
+            Ok(Some(McpCommand::Add(add))) => Ok(add),
+            Ok(other) => panic!("not add: {other:?}"),
+            Err(error) => Err(error),
+        };
+        let preset = add(&["linear", "--account", "Work"]).unwrap();
+        assert_eq!(preset.preset.as_deref(), Some("linear"));
+        assert_eq!(preset.account.as_deref(), Some("Work"));
+        assert_eq!((preset.url, preset.command, preset.name), (None, None, None));
+
+        let remote = add(&["--url", "https://mcp.example.com/mcp", "--name", "Example", "--token-env", "EXAMPLE_TOKEN"]).unwrap();
+        assert_eq!(remote.url.as_deref(), Some("https://mcp.example.com/mcp"));
+        assert_eq!(remote.name.as_deref(), Some("Example"));
+        assert_eq!(remote.token_env.as_deref(), Some("EXAMPLE_TOKEN"));
+        assert_eq!(add(&["--url", "https://x.dev", "--name", "X", "--auth", "none"]).unwrap().auth, Some(McpAuth::None));
+        assert!(add(&["--url", "http://localhost:3000/mcp", "--name", "Dev"]).is_ok());
+        assert!(add(&["--url", "http://127.0.0.1", "--name", "Dev"]).is_ok());
+
+        let local = add(&["--command", "npx", "--name", "Files", "--env", "ROOT", "--", "-y", "@acme/files", "--root"]).unwrap();
+        assert_eq!(local.command.as_deref(), Some("npx"));
+        assert_eq!(local.args, ["-y", "@acme/files", "--root"]);
+        assert_eq!(local.env, ["ROOT"]);
+
+        for bad in [
+            &[][..],
+            // Two kinds at once.
+            &["linear", "--url", "https://x.dev"],
+            &["--url", "https://x.dev", "--command", "npx", "--name", "X"],
+            // A custom server needs a name; a preset has its own.
+            &["--url", "https://x.dev"],
+            &["--command", "npx"],
+            &["linear", "--name", "Mine"],
+            &["--url", "https://x.dev", "--name", " "],
+            // Plain http only to this computer; something with a host.
+            &["--url", "http://mcp.example.com", "--name", "X"],
+            &["--url", "http://localhost.evil.com", "--name", "X"],
+            &["--url", "ftp://x.dev", "--name", "X"],
+            &["--url", "https://", "--name", "X"],
+            &["--url", "https://x.dev/a b", "--name", "X"],
+            // What belongs to one kind isn't taken with another.
+            &["linear", "--auth", "none"],
+            &["--command", "npx", "--name", "X", "--token-env", "T"],
+            &["--command", "npx", "--name", "X", "--client-id", "abc"],
+            &["linear", "--env", "ROOT"],
+            &["linear", "--", "-y"],
+            &["--url", "https://x.dev", "--name", "X", "--client-secret-env", "S"],
+        ] {
+            assert!(add(bad).is_err(), "zeron mcp add {bad:?} parsed");
+        }
+    }
+
+    #[test]
+    fn mcp_sign_in_takes_your_own_app() {
+        let Some(McpCommand::SignIn { server, client }) =
+            mcp(&["sign-in", "slack", "--client-id", "123.456", "--client-secret-env", "SLACK_SECRET"]).unwrap()
+        else {
+            panic!("not sign-in");
+        };
+        assert_eq!(server, "slack");
+        assert_eq!(client.client_id.as_deref(), Some("123.456"));
+        assert_eq!(client.client_secret_env.as_deref(), Some("SLACK_SECRET"));
+        // A secret only with its app's ID; never the secret itself.
+        assert!(mcp(&["sign-in", "slack", "--client-secret-env", "S"]).is_err());
+        assert!(mcp(&["sign-in", "slack", "--client-secret", "s3cret"]).is_err());
     }
 
     #[test]

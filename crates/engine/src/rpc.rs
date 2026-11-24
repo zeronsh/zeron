@@ -944,6 +944,8 @@ pub struct EngineRpc {
     viewport_focus: crate::desktop_notify::ViewportFocus,
     /// The plugins service (absent in bare test assemblies).
     plugins: Option<crate::plugins::Plugins>,
+    /// Managed external MCP servers (absent in bare test assemblies).
+    mcp_servers: Option<std::sync::Arc<crate::mcp_servers::McpServers>>,
     engine_info: EngineInfo,
 }
 
@@ -1006,6 +1008,7 @@ impl EngineRpc {
             credentials: None,
             viewport_focus: Default::default(),
             plugins: None,
+            mcp_servers: None,
             engine_info,
         }
     }
@@ -1013,6 +1016,15 @@ impl EngineRpc {
     /// Attach the plugins service (the Plugin* methods).
     pub fn with_plugins(mut self, plugins: crate::plugins::Plugins) -> Self {
         self.plugins = Some(plugins);
+        self
+    }
+
+    /// Attach the managed external MCP servers service.
+    pub fn with_mcp_servers(
+        mut self,
+        mcp_servers: std::sync::Arc<crate::mcp_servers::McpServers>,
+    ) -> Self {
+        self.mcp_servers = Some(mcp_servers);
         self
     }
 
@@ -1258,10 +1270,82 @@ impl EngineRpc {
                 self.handle(method, local(&["chatId", "spaceId", "path"]))
                     .await,
             ),
+            // How the person runs each agent on Cloud: the account's, held by
+            // its registry for every Cloud machine (never one machine's, made
+            // for one chat), so answered here for Cloud and any of its
+            // machines. (A Cloud machine itself only reads them.)
+            methods::GET_NATIVE_SUBAGENTS
+            | methods::SET_NATIVE_SUBAGENTS
+            | methods::GET_CODE_MODE
+            | methods::SET_CODE_MODE
+            | methods::GET_ZERON_MCP_ONLY
+            | methods::SET_ZERON_MCP_ONLY
+                if !crate::runner::is_cloud_platform() =>
+            {
+                Some(self.cloud_agent_settings(method, local(&[])))
+            }
             _ if account => Some(Err(RpcError::Failed(
                 crate::cloud_client::ACCOUNT_DEVICE_HAS_NO_ENGINE.into(),
             ))),
             _ => None,
+        }
+    }
+
+    /// Settings → Providers' agent settings for Cloud, read and made on the
+    /// account's registry rows (`cloudAgents`): the same answers this
+    /// device's own give, over the agents Cloud runs.
+    fn cloud_agent_settings(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        use crate::registry::{CLOUD_HARNESS_IDS, CodeModeSettings, NativeSubagentSettings, ZeronMcpOnlySettings};
+        use zeron_doc::CloudAgentChoice;
+        let ws = &self.workspace;
+        let can = |supports: fn(HarnessId) -> bool| -> Vec<HarnessId> {
+            CLOUD_HARNESS_IDS.iter().copied().filter(|id| supports(*id)).collect()
+        };
+        let chosen = |of: &[HarnessId], choice: CloudAgentChoice, on: bool| -> Vec<HarnessId> {
+            of.iter().copied().filter(|id| ws.cloud_agent_choices(*id).get(choice) == Some(on)).collect()
+        };
+        let choice = match method {
+            methods::GET_NATIVE_SUBAGENTS | methods::SET_NATIVE_SUBAGENTS => CloudAgentChoice::NativeSubagents,
+            methods::GET_CODE_MODE | methods::SET_CODE_MODE => CloudAgentChoice::CodeMode,
+            _ => CloudAgentChoice::ZeronMcpOnly,
+        };
+        let supports: fn(HarnessId) -> bool = match choice {
+            CloudAgentChoice::NativeSubagents => zeron_harness::switches_native_subagents,
+            CloudAgentChoice::CodeMode => zeron_harness::supports_code_mode,
+            CloudAgentChoice::ZeronMcpOnly => zeron_harness::supports_zeron_mcp_only,
+        };
+        let agents = can(supports);
+        if matches!(method, methods::SET_NATIVE_SUBAGENTS | methods::SET_CODE_MODE | methods::SET_ZERON_MCP_ONLY) {
+            // This device's own app or CLI alone: the room takes these rows
+            // from no Cloud machine, so one mustn't have them written by
+            // asking a computer it can reach.
+            if !zeron_rpc::caller().is_local() {
+                return Err(RpcError::Failed(format!(
+                    "{method}: how agents run on Cloud is changed in Zeron's own window"
+                )));
+            }
+            let p: SetHarnessEnabledParams = parse_params(params)?;
+            if !agents.contains(&p.harness) {
+                return Err(RpcError::Failed(format!(
+                    "{} can't change that on Cloud",
+                    zeron_proto::providers::provider_name(p.harness)
+                )));
+            }
+            ws.set_cloud_agent_choice(p.harness, choice, p.enabled);
+        }
+        match choice {
+            CloudAgentChoice::NativeSubagents => RpcReply::value(&NativeSubagentSettings {
+                off: chosen(&agents, choice, false),
+                switchable: agents,
+            }),
+            CloudAgentChoice::CodeMode => RpcReply::value(&CodeModeSettings {
+                enabled: chosen(&agents, choice, true),
+                supported: agents,
+            }),
+            CloudAgentChoice::ZeronMcpOnly => RpcReply::value(&ZeronMcpOnlySettings {
+                on: chosen(&agents, choice, true),
+                supported: agents,
+            }),
         }
     }
 
@@ -2621,6 +2705,15 @@ fn include_registry(params: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
+/// The refusal of a change to another device's plugins that wasn't the
+/// person's (`zeron_rpc::person_only_from_peer`).
+fn plugins_need_person() -> RpcError {
+    RpcError::Failed(crate::plugins::install::failure(
+        crate::plugins::install::reason::NEEDS_PERSON,
+        "Changing plugins on another device is the person's, from Zeron's window (Settings → Plugins)",
+    ))
+}
+
 fn forward_deadline(method: &str) -> std::time::Duration {
     if method == methods::PREPARE_VOICE_V2 {
         return Duration::from_secs(65);
@@ -2718,6 +2811,8 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_NATIVE_SUBAGENTS
             | methods::GET_CODE_MODE
             | methods::SET_CODE_MODE
+            | methods::GET_ZERON_MCP_ONLY
+            | methods::SET_ZERON_MCP_ONLY
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
@@ -2854,7 +2949,13 @@ fn forwardable(method: &str) -> bool {
             | methods::STAGE_PLUGIN_PACKAGE
             | methods::CHECK_PLUGIN_UPDATES
             | methods::UPDATE_PLUGIN
+            | methods::INSTALL_VERIFIED_PLUGIN
             | methods::PLUGIN_STATUS
+            // Managed MCP servers: read-only views/refresh are forwardable;
+            // mutations and OAuth flows stay local-only (`zeron_rpc::local_only`).
+            | methods::LIST_MCP_SERVERS
+            | methods::WATCH_MCP_SERVERS
+            | methods::REFRESH_MCP_SERVERS
     )
 }
 
@@ -2876,6 +2977,7 @@ fn is_stream_method(method: &str) -> bool {
             | methods::UPDATE_STATUS
             | methods::WATCH_HARNESS_UPDATES
             | methods::WATCH_PLUGINS
+            | methods::WATCH_MCP_SERVERS
     )
 }
 
@@ -3300,6 +3402,7 @@ impl AuthRpc {
                 | methods::SIGN_OUT
                 | methods::ACCESS_TOKEN
                 | methods::STEP_UP
+                | methods::CANCEL_STEP_UP
                 | methods::DELETE_ACCOUNT
                 | methods::LIST_ORGS
                 | methods::CREATE_ORG
@@ -3341,12 +3444,36 @@ impl RpcService for AuthRpc {
             // refused before here): a fresh interactive sign-in whose ticket
             // stays in the engine, then the deletion it allows (R16).
             methods::STEP_UP => {
+                #[derive(Deserialize)]
+                struct P {
+                    #[serde(default, rename = "for")]
+                    action: Option<String>,
+                }
+                let p: P = parse_params(params)?;
+                let action = match p.action.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+                    None => None,
+                    Some(word) => Some(crate::StepUpFor::parse(word).ok_or_else(|| {
+                        RpcError::Failed(format!("A step-up is for deploy_token, or for nothing in particular (not \"{word}\")"))
+                    })?),
+                };
                 let url = self
                     .auth
-                    .start_step_up()
+                    .start_step_up(action)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "url": url }))
+            }
+            methods::CANCEL_STEP_UP => {
+                #[derive(Deserialize)]
+                struct P {
+                    #[serde(rename = "for")]
+                    action: String,
+                }
+                let p: P = parse_params(params)?;
+                let action = crate::StepUpFor::parse(p.action.trim())
+                    .ok_or_else(|| RpcError::Failed(format!("A step-up is called off for deploy_token (not \"{}\")", p.action.trim())))?;
+                self.auth.cancel_step_up(action);
+                RpcReply::value(&serde_json::json!({ "ok": true }))
             }
             methods::DELETE_ACCOUNT => {
                 #[derive(Deserialize)]
@@ -3461,7 +3588,16 @@ impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         // An agent's chats: capped at its own access, runs as the chat is
         // set, attributed by Zeron (rpc/agent_gate.rs). Before forwarding.
-        let params = self.agent_gate(method, params)?;
+        let mut params = self.agent_gate(method, params)?;
+        // Another device changing this one's plugins: only for the person
+        // there (its engine says so, `zeron_rpc::BY_PERSON`), never for an
+        // agent on it.
+        if zeron_rpc::person_only_from_peer(method)
+            && matches!(zeron_rpc::caller(), zeron_rpc::Caller::Peer { .. })
+            && params.get(zeron_rpc::BY_PERSON) != Some(&serde_json::Value::Bool(true))
+        {
+            return Err(plugins_need_person());
+        }
         // Machine stats: answered here, or asked of another of the
         // account's devices with its own deadline and error words.
         if method == methods::DEVICE_STATS {
@@ -3474,6 +3610,16 @@ impl RpcService for EngineRpc {
             && target != self.doc_host.device_id()
         {
             let target = target.to_string();
+            // Changing that device's plugins is the person's: only this
+            // device's own app asks it, never an agent here (refused before
+            // anything is sent), and the device there is told the person
+            // asked, over anything the caller put in it.
+            if zeron_rpc::person_only_from_peer(method) {
+                if !zeron_rpc::caller().is_local() {
+                    return Err(plugins_need_person());
+                }
+                params[zeron_rpc::BY_PERSON] = serde_json::Value::Bool(true);
+            }
             // A file on this device can't be read there: another device
             // installs from a link.
             if method == methods::INSTALL_PLUGIN && params.get("path").is_some_and(|p| !p.is_null()) {
@@ -3597,6 +3743,12 @@ impl RpcService for EngineRpc {
             };
             return Box::pin(async move { plugins.dispatch(method, params).await }).await;
         }
+        if crate::mcp_servers::handles(method) {
+            let Some(mcp_servers) = self.mcp_servers.clone() else {
+                return Err(RpcError::Failed("MCP servers aren't available here".into()));
+            };
+            return Box::pin(async move { mcp_servers.handle_rpc(method, params).await }).await;
+        }
         if crate::acp_registry::handles(method) {
             return Box::pin(crate::acp_registry::dispatch(
                 &self.registry,
@@ -3686,6 +3838,14 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&self.registry.native_subagent_settings())
             }
             methods::GET_CODE_MODE => RpcReply::value(&self.registry.code_mode_settings()),
+            methods::GET_ZERON_MCP_ONLY => RpcReply::value(&self.registry.zeron_mcp_only_settings()),
+            methods::SET_ZERON_MCP_ONLY => {
+                let p: SetHarnessEnabledParams = parse_params(params)?;
+                self.registry
+                    .set_zeron_mcp_only(p.harness, p.enabled)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&self.registry.zeron_mcp_only_settings())
+            }
             methods::SET_CODE_MODE => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;
                 self.registry

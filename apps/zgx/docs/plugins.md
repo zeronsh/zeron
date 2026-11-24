@@ -654,7 +654,7 @@ Your page sits under Zeron's rows, so any difference shows. Zeron's settings pag
 | the page | Zeron's column, which your sections fill | 640 wide at most (`zeron.settings.measure`), centred; sections 32 apart (`$space.6`) |
 | `Settings.Section { title, description?, trail?, … }` | related settings under a small title | the title in the label style, `$text.tertiary`; its `description` under it, a hint's quiet line; 8 from them to the card (`$space.2`); `trail` at the title's end (an action). `title` and `description` may be functions, following what they read (an item's name as it's renamed) |
 | `Settings.Group { … }` | a card of rows | corner 12 (`$radius.xl`), a 1-point edge (`$zeron.settings.edge`), `$zeron.settings.card`; a hairline between rows, edge to edge (`$zeron.settings.rule`) |
-| `Settings.Row { label, description?, control?, … }` | one setting: its name, a line under it, its control at its end | 52 tall at least (`zeron.settings.row`); 16 in across (`$space.4`) and 12 down (`$space.3`); the name 13 on 18 (`$font.size.md`), medium, `$text.primary`; the line 12 on 16 (`$font.size.sm`), `$text.tertiary`; the control 16 from the words, 240 wide at most (`zeron.settings.control`); the words keep 180 before the control goes under them. `stacked` puts the control under the words (a text area); `on_click` makes the row lead somewhere (a chevron at its end); `badge` sits after the name; `truncate` keeps each line to one |
+| `Settings.Row { label, description?, control?, … }` | one setting: its name, a line under it, its control at its end | its content's height: 42 for a name alone, 60 with a line under it; 16 in across (`$space.4`) and 12 down (`$space.3`); the name 13 on 18 (`$font.size.md`), medium, `$text.primary`; the line 12 on 16 (`$font.size.sm`), `$text.tertiary`; the control 16 from the words, 240 wide at most (`zeron.settings.control`); the words keep 180 before the control goes under them. `stacked` puts the control under the words (a text area); `on_click` makes the row lead somewhere (a chevron at its end); `badge` sits after the name; `truncate` keeps each line to one |
 | `Settings.Each(list, row, { key })` | a card whose rows come and go | each row its item's (by `key`): one added or changed leaves the others as they are; with none, no card |
 
 A section's title and the words of any note you set over or under a card start 17 in from the card's outer edge, on the rows' words (`px = Settings.inset()`), so the words line up down one edge and the cards hang past it.
@@ -856,8 +856,8 @@ zeron.toast(zeron.s("timer.done"))
 
 A plugin travels as its folder, signed. The person installs it from the store (Settings → Plugins → Browse) or with Settings → Plugins → Install…; an agent uses these tools:
 
-- **`search_plugins { query?, category?, keyword?, sort? }`** searches the store, and **`get_store_plugin { id }`** reads a plugin's page there: its README, what it asks for, its versions and whether it works with this Zeron (`compatible`). Say what it asks for before you suggest it.
-- **`install_plugin { store = id }`** installs it from the store (`version` for one other than the latest). Zeron checks it's exactly what the store reviewed (its files, its version, who signed it) before anything is written (`store_mismatch` when it isn't).
+- **`search_plugins { query?, category?, keyword?, author?, verified?, sort? }`** searches the store, and **`get_store_plugin { id }`** reads a plugin's page there: its README, what it asks for, its versions (each `verified` or not), `verified_version` (the newest Zeron has verified) and whether it works with this Zeron (`compatible`). Say what it asks for, and whether it's verified, before you suggest it.
+- **`install_plugin { store = id }`** installs it from the store. An agent installs only versions Zeron has verified: without a `version`, the newest verified one; a `version` it names must be verified too, else it's the person's to install from the plugin's page (`needs_person`). A plugin installed from the store is the person's to replace, from the store, a file or a link, and to install again; and an agent changes plugins only on its own device (`needs_person` either way). Zeron checks it's exactly what the store's record says (its files, its version, who signed it) before anything is written (`store_mismatch` when it isn't).
 - **`install_plugin { path }`** installs a `.zeron-plugin` file. **`install_plugin { url, ref?, folder? }`** installs from a link:
   - a link to a `.zeron-plugin` file;
   - a GitHub release (`…/releases/latest`, `…/releases/tag/<tag>`), from its `.zeron-plugin` asset;
@@ -869,7 +869,7 @@ Zeron checks the signature over every file before anything is written, so an uns
 When installing or updating fails, the error reads `"<reason>: <words>"`, for example `rate_limited: GitHub is turning away requests…`. The reason is a stable word (`git_missing`, `repo_unreadable`, `rate_limited`, `release_not_found`, `no_package`, `download_failed`, `tampered`, `other_signer`, `not_newer`, `incompatible`, `store_unreachable`, `not_in_store`, `store_mismatch`, …); Zeron's window says each one in the person's language. `rate_limited` means GitHub answered 403 or 429: wait, or sign in with `gh auth login` (Zeron looks up releases as you when `gh` is signed in, or `GITHUB_TOKEN`/`GH_TOKEN` is set). `git_missing` means installing from a repository needs git on that device; a release or a `.zeron-plugin` file doesn't.
 - **Signed with this device's key, installed from Zeron's window:** what it does inside its sandbox is allowed at once. Anything outside it (`commands`, `native`, `service`, `devices`, `ui.replace`, `accounts.switch`, `models.set`, `messages.send`) waits for the person. Installed by an agent, it waits.
 - **Signed by anyone else:** it waits until the person allows it in Zeron. The reply says `waiting`; you can't allow it for them.
-- **From the store:** who made it is who owns its id in the store, so an update signed by another of their keys (a deploy key, a new machine) keeps what the person allowed. An update from a new owner waits for the person again. The store checks for updates for every plugin installed from it at once. A version the store took down as harmful is turned off at the next check, with the reason shown; the person can turn it back on.
+- **From the store:** who made it is who owns its id in the store, so an update signed by another of their keys (a new machine), or published unsigned with one of their deploy tokens, keeps what the person allowed. A version published with a deploy token isn't signed: Zeron installs it as its publisher's because the store's record vouches for its exact contents, and an edit on disk ends that. An update from a new owner waits for the person again. The store checks for updates for every plugin installed from it at once. A version the store took down as harmful is turned off at the next check, with the reason shown; the person can turn it back on.
 - **An update:** it must be signed by the same key as the installed version, or by another live key of the same account (the author on a new machine; an old key revoked still counts as theirs). One signed by a new key installs but waits for the person to allow it again. One that asks for a new permission still installs, but waits for the person to allow just that.
 - **Removing a plugin** (Settings) takes away its folder, what it stored, its pages and its placements.
 
@@ -891,7 +891,7 @@ Zeron says who made a plugin from its signature, never from its manifest. Each d
 | by Zeron | one of Zeron's own, shipped in the app |
 | by you, Made by you | signed with this device's key |
 | Made on one of your devices | signed with your account's key from another of your devices. It's still asked, like anyone's |
-| by @username, Made by @username | signed with a key registered to the account that holds that username, and not revoked; or installed from the store, where @username owns it, exactly as the store reviewed it |
+| by @username, Made by @username | signed with a key registered to the account that holds that username, and not revoked; or installed from the store, where @username owns it, exactly as the store's record says it (verified or not, as its record says) |
 | Unverified, Unknown author | Zeron can't confirm who made it: it's unsigned, its key was never registered or was revoked, its author has no username yet, or Zeron couldn't check (offline, signed out). The sheet says which, and where it came from |
 | Changed since you allowed it | its files changed after you allowed it, in a way its author's signature doesn't vouch for (edited on disk, or an unverified plugin replaced). It doesn't run, and it can't be allowed as it is: its sheet offers Remove, or Reinstall (fetched again from where it came from, then asked again) |
 
@@ -901,15 +901,17 @@ A plugin you wrote that shows as Unverified here (one you copied in unsigned, sa
 
 ## Publishing to the store
 
-The store lists plugins people made, on zeron.sh/plugins and in Settings → Plugins → Browse. Every version is reviewed by Zeron before anyone else sees it, updates included. You can use your own pending version on all your devices straight away (they're offered it as an update, marked "In review").
+The store lists plugins people made, on zeron.sh/plugins and in Settings → Plugins → Browse. A version is live as soon as it's published: anyone can install it, and devices with the plugin are offered it as an update at once. Zeron reads versions after they're published and marks the ones it has read **verified**; a reviewer can also decline to verify one (you see why in `zeron plugin status`; others only see that it isn't verified). Every verified version can be installed, and so can the newest. A version that isn't verified stops taking new installs once a newer one is published: it's yanked as superseded, for good unless Zeron verifies it later, so nothing unread sits installable behind a newer version. Copies already installed keep working.
+
+On a device, a version that isn't verified says so: on its page, on the consent sheet and on the update sheet, which also offers the newest verified version when there is one. Installing or updating to an unverified version always asks the person, even when it asks for nothing new. By default a device offers the newest version; it can be set to take the newest verified one instead, for every plugin or one (Settings → Plugins). An "update all" never takes an unverified update: each is its own question. An agent never installs an unverified version. If Zeron takes a version down as harmful, devices that have it turn it off within about 15 minutes.
 
 ### What the store needs
 
-- **`README.md`** in the plugin's folder, at most 512 KB: its page. CommonMark and GitHub's tables, task lists and strikethrough. Raw HTML is dropped. Pictures are files in the plugin, by a relative path (`![Board](shots/board.png)`); a picture from elsewhere shows as a link, because what's shown is what was reviewed. Links open in the browser.
+- **`README.md`** in the plugin's folder, at most 512 KB: its page. CommonMark and GitHub's tables, task lists and strikethrough. Raw HTML (`<p align="center">`, `<details>`, `<img>`, `<br>`) and footnotes (`[^1]`) aren't drawn: both stores show them as the characters typed, and the publish check says where (`raw_html`, `footnote`, in README.md or CHANGELOG.md). Use Markdown for pictures and headings. Display math (a `$$` block, or a fence marked `math`) is drawn in Zeron but shown as typed on the store's website, and the check says so too (`math`). Pictures are files in the plugin, by a relative path (`![Board](shots/board.png)`); a picture from elsewhere shows as a link, because what's shown is what was reviewed. Links open in the browser.
 - **`description`**: one line, at most 300 characters. It's the plugin's summary on its card. The `name` is at most 64.
 - **`icon`**: an SVG file in the plugin, at most 32 KB.
 - **`categories`**: one or two of `agents`, `appearance`, `chat`, `developer-tools`, `git`, `integrations`, `productivity`, `utilities`.
-- **`version`**: strict semver: `MAJOR.MINOR.PATCH`, optionally `-prerelease` and `+build` (`1.2.0`, `2.0.0-beta.1`). No `v`, no leading zeros.
+- **`version`**: strict semver: `MAJOR.MINOR.PATCH`, optionally `-prerelease` and `+build` (`1.2.0`, `2.0.0-beta.1`), at most 32 characters. No `v`, no leading zeros.
 - **`id`**: not one of Zeron's own plugins' (`git`, `github`, `parallax-scenes`), not starting with `zeron`, and not a name that looks like a brand's. The first account to publish an id owns it.
 - A username on your Zeron account, so the store can say "by @username".
 
@@ -942,43 +944,44 @@ What the store shows is what's there:
 
 ### Checking it
 
-**`check_plugin { id }`** (MCP), or **`zeron plugin check <folder or id>`** on the command line, lists every problem before anything is sent. Each problem has a stable `rule`: `missing_readme`, `missing_listing` (with the `field` that's missing), `bad_listing` (with the `field` that's wrong), `not_semver`, `id_reserved`, `bad_package` (the manifest is one Zeron won't run) and `too_large`. Fix them and check again. `zeron plugin check` needs no Zeron running, so a pull request's CI can run it.
+**`check_plugin { id }`** (MCP), or **`zeron plugin check <folder or id>`** on the command line, lists every problem before anything is sent. Each problem has a stable `rule`: `missing_readme`, `missing_listing` (with the `field` that's missing), `bad_listing` (with the `field` that's wrong; a name may not claim Zeron's mark: the words "verified" or "official" in any spelling that reads as them (look-alike letters, letters spaced apart) or in the store's other languages ("oficial", "officiel", "官方"…; never an ordinary word, so "vérifie la syntaxe" and "数学公式" are fine), or a check mark; a description may use those words about other things ("opens the official Rust docs"), only not of the plugin itself ("Official Git tools", "a verified plugin", "is verified"), and no check mark; neither may hold a character drawn as nothing, but an emoji's own variation selector), `not_semver`, `id_reserved`, `bad_package` (the manifest is one Zeron won't run) and `too_large`. A keyword may not say the mark either (`bad_listing`). A `bad_listing` on the name, description or keywords also has a `cause`: `too_long`, `not_one_line`, `unseen_char`, `mark_word`, `mark_glyph`, `keyword_shape`, `too_many` or `repeated`, and, where there is one, the `word` it's about as you wrote it (the word that reads as the mark, the keyword, or the unseen character as `U+200B`). The store's refusal of a publish carries the same. Fix them and check again. `zeron plugin check` needs no Zeron running, so a pull request's CI can run it.
 
 ### Versions
 
-- Each version is submitted once and keeps its content for good, approved or not. To change a rejected version, submit a new one.
-- A version must be later than the last one you submitted.
+- Each version is published once and keeps its content for good. To change one, publish a new version.
+- A version must be later than every version the plugin has had, in any state (yanked or taken down, pre-releases included).
 - A pre-release (`2.0.0-beta.1`) is offered only to people who chose to take that plugin's pre-releases.
-- **Yank** a version (`zeron plugin yank <id> <version>`) to stop new installs of it; copies already installed keep working. `zeron plugin unyank` undoes it. **Withdraw** a version still in review with `zeron plugin withdraw <id> <version>`.
-- `zeron plugin status [id]` shows each of your versions' review state, and the reviewer's reason for a rejected one.
+- **Yank** a version (`zeron plugin yank <id> <version>`) to stop new installs of it; copies already installed keep working. `zeron plugin unyank` undoes it, except for a version a newer one superseded.
+- `zeron plugin status [id]` shows each of your versions, whether it's verified, and the reviewer's reason when they declined to verify it.
 
 ### Submitting
 
-Publishing is the person's act, in Zeron (Settings → Plugins → Yours → Publish…) or on the command line. An agent can check a plugin, but it can't submit one.
+Publishing is the person's act, in Zeron (Settings → Plugins → Yours → Publish…) or on the command line. An agent can check a plugin: no tool publishes one, and Zeron never gives an agent the check's ticket that does. (An agent with a shell could still run `zeron plugin publish` as you, so tell it not to unless you mean it.)
 
-- **From your machine:** `zeron plugin publish <id>`, with Zeron running and signed in. Your plugin is signed with this device's key and sent with your session. `--dry-run` checks it without sending it.
-- **From CI:** use a **deploy key**. It's a key made on your device for one plugin you already have in the store (its first version comes from your machine), registered to your account; making one asks you to sign in again. Its secret (`zpk_…`) is shown once, and Zeron keeps no copy. A deploy key submits new versions of its plugin and reads their review state (`zeron plugin status`), nothing else: yank, unyank, withdraw and keys are yours, from your machine. So if one leaks, the most it can do is add a version that waits for review. Put it in your CI's secrets as `ZERON_DEPLOY_KEY`, then run `zeron plugin publish <folder>`. No Zeron needs to be running and nobody needs to be signed in: the package is signed with the deploy key, and so is the request that sends it.
+- **From your machine:** `zeron plugin publish <id>`, with Zeron running and signed in. Your plugin is signed with this device's key and sent with your session; it's live at once, and the command prints its page. `--dry-run` checks it without sending it.
+- **From CI:** use a **deploy token**. It's your account's, for the plugins you name or for all of yours (those you first publish later included), fixed when it's made: another set of plugins is another token. A token publishes only plugins you already have in the store (a plugin's first version comes from your machine) and never claims a new id. Making one asks you to sign in again, in Zeron or on the store's site. The token (`zdt_…`) is shown once: neither Zeron nor the store keeps it, so copy it then. Lost, it can't be shown again: revoke it and make another. A deploy token publishes new versions of its plugins, nothing else: their state (`zeron plugin status`), yank, unyank and tokens are yours, from your machine. A version it publishes is live for everyone at once, so treat a token like a password: if one leaks, whoever has it can publish versions of its plugins that people can install (unverified, until Zeron reads them). Revoke a leaked token at once, and yank what it sent. Every version published from anywhere but the device you're on (another of your devices, or a deploy token, by its name) shows on your devices as a notice, once. Put the token in your CI's secrets as `ZERON_DEPLOY_TOKEN`, then run `zeron plugin publish <folder>`. No Zeron needs to be running and nobody needs to be signed in. What a token publishes isn't signed by your key: the store records it as the token's, and devices install it as yours, by the store's record of its exact contents.
 
   ```sh
-  zeron plugin key create focus-timer --name "GitHub Actions"   # once, on your machine
-  zeron plugin key list focus-timer
-  zeron plugin key revoke focus-timer <key>
+  zeron plugin token create --name "GitHub Actions" --plugins focus-timer,focus-board   # once, on your machine
+  zeron plugin token create --name "All my plugins" --all
+  zeron plugin token list
+  zeron plugin token revoke <id>
   ```
 
-  `zeron plugin publish` reads the secret from the environment only, never from an argument. It exits 0 when the plugin is submitted, 1 when it doesn't meet the store's rules, 2 for a set-up problem (no plugin there, a damaged secret, the runner's clock out by more than five minutes), 3 when the store refuses the key or the account, and 4 when the store can't be reached (try again). A revoked or expired key publishes nothing; versions it published before stay in the store. A plugin has a limited number of live keys (`too_many_keys`: revoke one first), and an account makes only so many a day (`rate_limited`).
+  `zeron plugin publish` reads the token from the environment only, never from an argument, and never prints it. It exits 0 when the plugin is published, 1 when it doesn't meet the store's rules, 2 for a set-up problem (no plugin there, something that isn't a token, or a mistyped one: its last characters are a checksum), 3 when the store refuses the token or the account, and 4 when the store can't be reached (try again). A revoked or expired token publishes nothing; versions it published before stay in the store. An account has at most 20 live tokens (`too_many_tokens`: revoke one first) and makes at most 10 a day (`rate_limited`).
 
 ### The GitHub Action
 
-`zeronsh/zeron/actions/publish-plugin` installs Zeron's Linux command line and publishes the plugin with your deploy key. Add the secret to the repository (Settings → Secrets and variables → Actions, as `ZERON_DEPLOY_KEY`), then add these steps to a workflow running on `ubuntu-latest`:
+`zeronsh/zeron/actions/publish-plugin` installs Zeron's Linux command line and publishes the plugin with your deploy token. Add the token to the repository (Settings → Secrets and variables → Actions, as `ZERON_DEPLOY_TOKEN`), then add these steps to a workflow running on `ubuntu-latest`:
 
 ```yaml
 - uses: actions/checkout@v4
 - uses: zeronsh/zeron/actions/publish-plugin@v0.4.0
   with:
-    key: ${{ secrets.ZERON_DEPLOY_KEY }}
+    token: ${{ secrets.ZERON_DEPLOY_TOKEN }}
 ```
 
-Pin it to a Zeron release tag or a commit SHA, never a branch: the step holds your key. It runs on Linux runners (`ubuntu-*`, x86_64 or arm64). `path` names the plugin's folder when it isn't the repository's top, and `dry-run: true` checks it without submitting. Without `key` (a pull request from a fork gets no secrets), it only checks. Run it when you push a version's tag, after bumping `version` and adding its `CHANGELOG.md` section.
+Pin it to a Zeron release tag or a commit SHA, never a branch: the step holds your token. It runs on Linux runners (`ubuntu-*`, x86_64 or arm64). `path` names the plugin's folder when it isn't the repository's top, and `dry-run: true` checks it without submitting. Without `token` (a pull request from a fork gets no secrets), it only checks. Run it when you push a version's tag, after bumping `version` and adding its `CHANGELOG.md` section.
 
 ### Reason words
 
@@ -988,6 +991,8 @@ Every refusal from the store, or from Zeron about the store, reads `"<word>: <wo
 |---|---|
 | `not_a_package`, `unsigned`, `tampered`, `bad_signature`, `too_big`, `bad_file` | the package itself is refused, as from a file |
 | `incompatible` | its `engines.zeron` leaves this Zeron out |
+| `paths_collide` | two of its paths are one file on macOS and Windows (case, Unicode spelling, trailing dots), a file sits where another needs a folder of that name, or a path is the manifest's name there: refused as it's read, on every disk |
+| `needs_person` | an agent tried to install over a plugin installed from the store: updating it (and taking its pre-releases) is the person's, in Zeron's window |
 | `other_signer`, `not_newer`, `different_plugin`, `up_to_date`, `no_source` | installing or updating, as from any source |
 | `store_unreachable` | the store didn't answer (offline, or busy): what's installed keeps running |
 | `not_in_store` | no such plugin or version, or not to you |
@@ -997,14 +1002,18 @@ Every refusal from the store, or from Zeron about the store, reads `"<word>: <wo
 | `signed_out` | it needs you signed in |
 | `review` | publishing needs the check Zeron's window or the CLI made, for the plugin as it was checked |
 | `changed` | the plugin changed since it was checked: check it again |
-| `not_published` | a deploy key is for a plugin you already have in the store |
-| `step_up_required` | making a deploy key needs a fresh sign-in |
-| `bad_package`, `id_reserved`, `not_semver`, `missing_readme`, `missing_listing`, `bad_listing`, `too_large` | the store's rules (`check_plugin`); `binary_file` and `no_notes` are warnings |
+| `not_owner`, `invalid_scope` | a deploy token's scope names plugins that aren't yours in the store (`ids` says which), or isn't a scope |
+| `not_published` | a deploy token is for plugins you already have in the store: publish one from your machine first |
+| `not_verified` | an "update all" (`verified_only`) left an unverified update for its own question |
+| `step_up_required` | making a deploy token needs a fresh sign-in begun for it (`StepUp {for: "deploy_token"}`): each token its own, and no other sign-in's |
+| `bad_package`, `id_reserved`, `not_semver`, `missing_readme`, `missing_listing`, `bad_listing`, `too_large` | the store's rules (`check_plugin`); `binary_file`, `no_notes`, `raw_html`, `footnote` and `math` are warnings |
 | `needs_username`, `id_taken`, `version_exists`, `suspended` | the store refused the submission |
-| `key_not_allowed`, `key_revoked`, `key_expired`, `invalid_signature`, `unauthenticated` | the store refused the deploy key |
-| `stale_request` | the clock is more than five minutes out |
-| `replayed_request`, `body_mismatch` | the request was already made, or changed on its way: send it again |
-| `too_many_keys`, `key_taken`, `invalid_name`, `invalid_expiry`, `invalid_proof` | making a deploy key |
+| `not_a_token`, `damaged` | `ZERON_DEPLOY_TOKEN` isn't a deploy token, or is mistyped (its checksum doesn't match): nothing was sent |
+| `invalid_token` | the deploy token is wrong, revoked or expired |
+| `token_not_allowed` | this deploy token may not publish this plugin: not in its scope, not yours, or the plugin's first version (that's published from your computer) |
+| `session_required` | a deploy token only publishes: anything else needs you signed in |
+| `unauthenticated`, `forbidden` | the store turned away who's asking (a 401 or 403 that said no more): for a signed-in person, sign in again |
+| `too_many_tokens`, `invalid_name`, `invalid_expiry` | making a deploy token |
 
 ## Trust model
 

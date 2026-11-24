@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 import { ANDROID_APK, APP_STORE, DESKTOP_BUILDS, FALLBACK_VERSION, RELEASES_URL } from "../src/data/releases.ts";
 
-const page = (name: string) => readFileSync(new URL(`../dist/${name}`, import.meta.url), "utf8");
+const page = (name: string) => readFileSync(new URL(`../dist/client/${name}`, import.meta.url), "utf8");
 const home = page("index.html");
 
 describe("the landing page, built", () => {
