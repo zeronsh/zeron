@@ -13,10 +13,15 @@
 //! (`.lineage.json`: the store versions it was copied from, copies of copies
 //! too). What it holds now doesn't matter: an edit lifts nothing.
 //!
+//! One that couldn't be written is held to while this engine runs, and said
+//! of its row; the app's own record beside what you allowed, kept once a row
+//! said so, covers a launch before it's written.
+//!
 //! An entry is kept while something here is it, and 30 days besides: so long
 //! a file or a link with that package (its content `hash`) isn't imported.
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
@@ -61,6 +66,22 @@ pub struct Identity {
     pub hash: String,
 }
 
+/// The longest version the store is asked about.
+const MAX_VERSION: usize = 128;
+
+impl Identity {
+    /// Whether the store can be asked about it: a store id, a version, and a
+    /// content hash. Anything else isn't what a store template is (a
+    /// `.lineage.json` is a file anyone may write), and is never sent: the
+    /// store refuses the whole request for one.
+    fn valid(&self) -> bool {
+        templates::valid_id(&self.id)
+            && (1..=MAX_VERSION).contains(&self.version.len())
+            && self.hash.len() == 64
+            && self.hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }
+}
+
 /// Couldn't be read: whoever asks fails closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Unreadable;
@@ -86,8 +107,37 @@ impl Block {
     }
 }
 
+/// Whether the file isn't there at all. Written at the first full check that
+/// is kept (`[]` when nothing is down), so from then on it being gone means
+/// it was taken away: the list starts over, never from the next event alone.
+pub fn missing(dir: &Path) -> bool {
+    std::fs::symlink_metadata(dir.join(FILE)).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// Take-downs that couldn't be written (a full disk, a folder made
+/// read-only), by templates folder: held to while this engine runs, and
+/// written with the next that can be. The feed's place waits for them.
+fn unwritten() -> MutexGuard<'static, BTreeMap<PathBuf, Vec<Block>>> {
+    static UNWRITTEN: Mutex<BTreeMap<PathBuf, Vec<Block>>> = Mutex::new(BTreeMap::new());
+    UNWRITTEN.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// `blocks`, and those that couldn't be written of `dir`'s.
+fn with_unwritten(dir: &Path, mut blocks: Vec<Block>) -> Vec<Block> {
+    for block in unwritten().get(dir).into_iter().flatten() {
+        if !blocks.iter().any(|b| b.id == block.id && same_version(&b.version, &block.version)) {
+            blocks.push(block.clone());
+        }
+    }
+    blocks
+}
+
 /// What's blocked here; none when there's never been a take-down.
 pub fn read(dir: &Path) -> Result<Vec<Block>, Unreadable> {
+    read_file(dir).map(|blocks| with_unwritten(dir, blocks))
+}
+
+fn read_file(dir: &Path) -> Result<Vec<Block>, Unreadable> {
     let path = dir.join(FILE);
     if std::fs::symlink_metadata(&path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
         return Ok(Vec::new());
@@ -99,7 +149,9 @@ pub fn read(dir: &Path) -> Result<Vec<Block>, Unreadable> {
 
 fn write(dir: &Path, blocks: Vec<Block>) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(&json!({ "format": FORMAT, "blocks": blocks })).map_err(|e| e.to_string())?;
-    write_atomic(dir, FILE, &bytes)
+    write_atomic(dir, FILE, &bytes)?;
+    unwritten().remove(dir);
+    Ok(())
 }
 
 /// A dot file of a template's folder as JSON: `Ok(None)` when it isn't there.
@@ -118,6 +170,9 @@ pub fn identities(folder: &Path) -> Result<Vec<Identity>, Unreadable> {
     let mut out: Vec<Identity> = dot_file(folder, LINEAGE)?.unwrap_or_default();
     if let Some(record) = dot_file::<serde_json::Value>(folder, super::template_packages::IMPORTED)? {
         out.extend(identities_of(&record)?);
+    }
+    if !out.iter().all(Identity::valid) {
+        return Err(Unreadable);
     }
     out.sort();
     out.dedup();
@@ -181,6 +236,11 @@ pub fn refuse(dir: &Path, folder: &Path, what: &str) -> Result<(), String> {
 /// Refuses a package (its content hash, and the store's id and version when
 /// it's from there) that was taken down.
 pub fn refuse_package(dir: &Path, content_hash: &str, identity: Option<&Identity>) -> Result<(), String> {
+    // With nothing here for it to block, one that can't be read is started
+    // again: else nothing would ever be imported.
+    if read(dir).is_err() && installed(dir).is_empty() {
+        let _ = settle(dir, &[], Vec::new(), 0);
+    }
     let blocks = read(dir).map_err(|_| super::install::failure(TAKEN_DOWN, "Zeron can't read which templates have been taken down from the store, so it isn't installing any"))?;
     let hit = blocks.iter().find(|b| b.hash.as_deref().is_some_and(|h| h.eq_ignore_ascii_case(content_hash)) || identity.is_some_and(|i| b.is(i)));
     match hit {
@@ -206,6 +266,20 @@ pub fn installed(dir: &Path) -> Vec<(String, Result<Vec<Identity>, Unreadable>)>
         .collect()
 }
 
+/// `all` as the requests that ask about them: an id once in each (a template
+/// and a copy of an earlier version of it are two versions of one id), at
+/// most `most` in one.
+pub fn requests(all: &[Identity], most: usize) -> Vec<Vec<Identity>> {
+    let mut rounds: Vec<Vec<Identity>> = Vec::new();
+    for identity in all {
+        match rounds.iter_mut().find(|r| r.len() < most && !r.iter().any(|i| i.id == identity.id)) {
+            Some(round) => round.push(identity.clone()),
+            None => rounds.push(vec![identity.clone()]),
+        }
+    }
+    rounds
+}
+
 /// Every store version anything here is, once each.
 pub fn all_identities(dir: &Path) -> Vec<Identity> {
     let mut all: Vec<Identity> = installed(dir).into_iter().filter_map(|(_, found)| found.ok()).flatten().collect();
@@ -223,11 +297,27 @@ pub enum Change {
 }
 
 /// `changes` made in order, entries past keeping dropped: `Err` when it
-/// couldn't be read or written (nothing is changed then).
+/// couldn't be read or written. What was taken down is then held to all the
+/// same while this engine runs; what was restored stays blocked.
 pub fn apply(dir: &Path, changes: Vec<Change>, now: i64) -> Result<(), String> {
     let _held = changing();
-    let before = read(dir).map_err(|_| "What's been taken down can't be read".to_string())?;
-    let mut blocks = before.clone();
+    let downs: Vec<Block> = changes.iter().filter_map(|c| if let Change::TakenDown(block) = c { Some(block.clone()) } else { None }).collect();
+    apply_held(dir, changes, now).inspect_err(|_| hold_to(dir, downs))
+}
+
+/// `blocks` held to while this engine runs: they couldn't be written.
+fn hold_to(dir: &Path, blocks: Vec<Block>) {
+    let mut unwritten = unwritten();
+    let kept = unwritten.entry(dir.to_owned()).or_default();
+    for block in blocks {
+        kept.retain(|b| !(b.id == block.id && same_version(&b.version, &block.version)));
+        kept.push(block);
+    }
+}
+
+fn apply_held(dir: &Path, changes: Vec<Change>, now: i64) -> Result<(), String> {
+    let before = read_file(dir).map_err(|_| "What's been taken down can't be read".to_string())?;
+    let mut blocks = with_unwritten(dir, before.clone());
     for change in changes {
         match change {
             Change::TakenDown(block) => {
@@ -244,11 +334,12 @@ pub fn apply(dir: &Path, changes: Vec<Change>, now: i64) -> Result<(), String> {
 /// What the full check said: `asked` (everything it was asked about and
 /// answered), of which `blocks` are down. Those asked about are exactly as it
 /// says; any other entry stays until it's past keeping. Whatever couldn't be
-/// read before is replaced.
+/// read before is replaced. (Nothing of the feed's is applied between the
+/// question and this: `Plugins::template_checks`.)
 pub fn settle(dir: &Path, asked: &[Identity], blocks: Vec<Block>, now: i64) -> Result<(), String> {
     let _held = changing();
-    let before = read(dir);
-    let mut all: Vec<Block> = before.clone().unwrap_or_default();
+    let before = read_file(dir);
+    let mut all: Vec<Block> = with_unwritten(dir, before.clone().unwrap_or_default());
     // (One already known keeps when it was learned of, and its hash.)
     let blocks = blocks.into_iter().map(|b| match all.iter().find(|k| k.id == b.id && same_version(&k.version, &b.version)) {
         Some(known) => Block { at: known.at, hash: b.hash.or_else(|| known.hash.clone()), ..b },
@@ -256,9 +347,9 @@ pub fn settle(dir: &Path, asked: &[Identity], blocks: Vec<Block>, now: i64) -> R
     });
     let blocks: Vec<Block> = blocks.collect();
     all.retain(|b| !asked.iter().any(|i| b.is(i)));
-    all.extend(blocks);
+    all.extend(blocks.iter().cloned());
     let kept = kept(dir, all, now);
-    if before == Ok(kept.clone()) { Ok(()) } else { write(dir, kept) }
+    if before == Ok(kept.clone()) && !missing(dir) { Ok(()) } else { write(dir, kept).inspect_err(|_| hold_to(dir, blocks)) }
 }
 
 /// `blocks` without those past keeping: 30 days old, and nothing here is one.
@@ -365,6 +456,67 @@ mod tests {
         std::fs::write(dir.join(FILE), "nope").unwrap();
         settle(dir, &all_identities(dir), Vec::new(), NOW).unwrap();
         assert_eq!((read(dir), blocked(dir, &store)), (Ok(Vec::new()), None));
+    }
+
+    /// The store refuses a request that names an id twice, or anything that
+    /// isn't a template's: never sent so.
+    #[test]
+    fn what_is_asked_is_what_the_store_takes() {
+        let identity = |id: &str, version: &str| Identity { id: id.into(), version: version.into(), hash: "ab".repeat(32) };
+        let all = [identity("aa", "1.0.0"), identity("aa", "1.1.0"), identity("aa", "1.2.0"), identity("bb", "1.0.0"), identity("cc", "1.0.0")];
+        let asks: Vec<Vec<String>> = requests(&all, 2).iter().map(|r| r.iter().map(|i| format!("{}@{}", i.id, i.version)).collect()).collect();
+        assert_eq!(asks, [vec!["aa@1.0.0", "bb@1.0.0"], vec!["aa@1.1.0", "cc@1.0.0"], vec!["aa@1.2.0"]]);
+        assert!(requests(&[], 2).is_empty());
+        let tmp = tempfile::tempdir().unwrap();
+        let t = template(tmp.path(), "copy", None);
+        for bad in [identity("Not An Id", "1.0.0"), identity("aa", ""), identity("aa", &"1".repeat(129)), Identity { hash: "h".into(), ..identity("aa", "1.0.0") }, Identity { hash: "AB".repeat(32), ..identity("aa", "1.0.0") }] {
+            std::fs::write(t.join(LINEAGE), serde_json::to_vec(&[identity("aa", "1.0.0"), bad.clone()]).unwrap()).unwrap();
+            assert_eq!(identities(&t), Err(Unreadable), "{bad:?}");
+            assert!(all_identities(tmp.path()).is_empty(), "{bad:?}");
+        }
+    }
+
+    /// What can't be read is started again where there's nothing it could
+    /// block.
+    #[test]
+    fn what_cannot_be_read_is_started_again_where_nothing_is_here() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        template(dir, "aa", Some(record("aa", "1.0.0")));
+        std::fs::write(dir.join(FILE), "nope").unwrap();
+        assert!(refuse_package(dir, "00", None).is_err(), "a store template is here");
+        std::fs::remove_dir_all(dir.join("aa")).unwrap();
+        template(dir, "mine", None);
+        assert!(refuse_package(dir, "00", None).is_ok());
+        assert_eq!(read(dir), Ok(Vec::new()));
+    }
+
+    /// A take-down that couldn't be written holds all the same, and is
+    /// written with the next that can be; a restore that couldn't, lifts
+    /// nothing.
+    #[cfg(unix)]
+    #[test]
+    fn what_cannot_be_written_is_held_to() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let t = template(dir, "aa", Some(record("aa", "1.0.0")));
+        let mode = |mode| std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
+        mode(0o555);
+        assert!(apply(dir, vec![Change::TakenDown(block("aa", "1.0.0", NOW))], NOW).is_err());
+        assert!(!dir.join(FILE).exists() && blocked(dir, &t).is_some());
+        mode(0o755);
+        apply(dir, vec![Change::TakenDown(block("bb", "1.0.0", NOW))], NOW).unwrap();
+        assert_eq!(read_file(dir).unwrap().len(), 2, "both are written");
+        // So does the full check's.
+        mode(0o555);
+        assert!(settle(dir, &[], vec![block("cc", "1.0.0", NOW)], NOW).is_err());
+        assert!(read(dir).unwrap().iter().any(|b| b.id == "cc"));
+        assert!(apply(dir, vec![Change::Restored("aa".into(), "1.0.0".into())], NOW).is_err());
+        assert!(blocked(dir, &t).is_some());
+        mode(0o755);
+        apply(dir, vec![Change::Restored("aa".into(), "1.0.0".into())], NOW).unwrap();
+        assert!(blocked(dir, &t).is_none());
     }
 
     /// An entry stays while something here is it, and 30 days besides.

@@ -298,6 +298,11 @@ struct Inner {
     /// When the account's publishes were last looked over
     /// (`store::notices`), and whether it had any plugins then.
     publishes_checked: Mutex<Option<(Instant, bool)>>,
+    /// Held from asking the store about the templates here until its answer
+    /// is kept (those requests' own timeouts bound it), and while the feed's
+    /// are kept: so no answer undoes a take-down learned of after the
+    /// question. Only the feed waits on it; nothing a person does.
+    template_checks: tokio::sync::Mutex<()>,
     /// When this device's own key was last looked up on a peer's word
     /// (`CheckPluginKey`): at most every few seconds.
     own_key_checked: Mutex<Option<Instant>>,
@@ -569,6 +574,7 @@ impl Plugins {
                 new_keys: Mutex::new(Vec::new()),
                 key_notices: Mutex::new(Vec::new()),
                 publishes_checked: Mutex::new(None),
+                template_checks: tokio::sync::Mutex::new(()),
                 own_key_checked: Mutex::new(None),
                 store: Mutex::new(None),
             }),

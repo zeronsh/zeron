@@ -100,6 +100,11 @@ pub struct State {
     /// Templates' versions taken down, as the full check says them: `(id,
     /// version)`.
     pub templates_down: Vec<(String, String)>,
+    /// Answers no update check that carries templates (a plugin never stops
+    /// because of one).
+    pub refuse_template_asks: bool,
+    /// Holds an update check's answer back (made before it waits).
+    pub slow_updates: Option<std::time::Duration>,
     /// A store from before templates: their routes aren't there.
     pub without_templates: bool,
     /// Templates submitted: `(id, package)`.
@@ -272,6 +277,10 @@ impl FakeStore {
                         return;
                     }
                     let (status, content_type, reply) = store.answer(&method, &path, &headers, &body);
+                    let slow = store.state.lock().unwrap().slow_updates.filter(|_| path == "/store/v1/updates");
+                    if let Some(slow) = slow {
+                        tokio::time::sleep(slow).await;
+                    }
                     let head = if content_type == "redirect" {
                         let location = String::from_utf8_lossy(&reply);
                         format!("HTTP/1.1 {status} X\r\nlocation: {location}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
@@ -604,6 +613,22 @@ impl FakeStore {
             ("POST", ["store", "v1", "updates"]) => {
                 let ask: Value = serde_json::from_slice(body).unwrap_or_default();
                 let mut state = self.state.lock().unwrap();
+                // As the edge (updates.ts `parseList`): one bad item, or an
+                // id twice in its list, refuses the whole request.
+                let hex = |h: &str| h.len() == 64 && h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+                let many = ["plugins", "templates"].iter().map(|l| ask[*l].as_array().map_or(0, Vec::len)).sum::<usize>() > zeron_engine::plugins::store::MAX_UPDATE_ITEMS;
+                if many || state.refuse_template_asks && ask["templates"].as_array().is_some_and(|t| !t.is_empty()) {
+                    return json_reply(400, json!({ "error": "bad_request", "message": "Not a list this store takes." }));
+                }
+                for list in ["plugins", "templates"] {
+                    let mut seen = std::collections::BTreeSet::new();
+                    for item in ask[list].as_array().into_iter().flatten() {
+                        let (id, version, hash) = (item["id"].as_str().unwrap_or(""), item["version"].as_str().unwrap_or(""), item["hash"].as_str().unwrap_or(""));
+                        if !zeron_engine::plugins::templates::valid_id(id) || version.len() > 128 || !hex(hash) || !seen.insert(id.to_owned()) {
+                            return json_reply(400, json!({ "error": "bad_request", "message": "Each item is { id, version, hash }, each id once in its list." }));
+                        }
+                    }
+                }
                 state.asks.push(ask.clone());
                 let zeron = Version::parse(ask["zeron"].as_str().unwrap_or("")).ok();
                 let mut updates = Vec::new();

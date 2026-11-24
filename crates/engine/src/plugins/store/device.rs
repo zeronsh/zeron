@@ -1037,6 +1037,10 @@ impl Plugins {
         }
         let Ok((client, caller)) = self.store_reader() else { return };
         let mut after = lock(&self.inner.state).takedowns_after;
+        // The list of templates' taken away since: it starts over, whole.
+        if has_templates && after.is_some() && template_blocks::missing(&templates_dir) {
+            after = None;
+        }
         // (At most a few pages a check; the next one carries on.)
         for _ in 0..TAKEDOWN_PAGES {
             let feed = match client.takedowns(after).await {
@@ -1074,13 +1078,16 @@ impl Plugins {
                     _ => None,
                 })
                 .collect();
-            if let Err(error) = self.apply_template_changes(&templates_dir, changes).await {
-                tracing::warn!(%error, "store: a template's take-down couldn't be kept");
-                if template_blocks::read(&templates_dir).is_err() {
-                    let _ = self.update_state(|state| state.takedowns_after = None);
+            let templates_kept = match self.apply_template_changes(&templates_dir, changes).await {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(%error, "store: a template's take-down couldn't be kept");
+                    if template_blocks::read(&templates_dir).is_err() {
+                        let _ = self.update_state(|state| state.takedowns_after = None);
+                    }
+                    false
                 }
-                return;
-            }
+            };
             // (A template's is never a plugin's here.)
             let events = events.into_iter().filter(|e| e.item_kind == Some(client::Kind::Plugin));
             let candidates = self.store_candidates(None);
@@ -1112,6 +1119,11 @@ impl Plugins {
             self.unblock(&restored);
             if !down.is_empty() {
                 self.block(down.into_values().collect()).await;
+            }
+            // (A template's that couldn't be kept is asked for again; the
+            // plugins' were applied, and applying one again changes nothing.)
+            if !templates_kept {
+                return;
             }
             after = Some(last);
             let _ = self.update_state(|state| state.takedowns_after = Some(last));
@@ -1172,6 +1184,7 @@ impl Plugins {
             return Ok(());
         }
         let dir = dir.to_owned();
+        let _held = self.inner.template_checks.lock().await;
         self.changing_blocks(move || template_blocks::apply(&dir, changes, now_secs())).await
     }
 
@@ -1232,15 +1245,19 @@ impl Plugins {
                 return check;
             }
         };
-        // At most the edge's limit per request, over both kinds together.
-        let mut asks: Vec<(&[Candidate], &[template_blocks::Identity])> = Vec::new();
-        let mut rest = &templates[..];
-        for plugins in candidates.chunks(MAX_UPDATE_ITEMS) {
-            let (with, later) = rest.split_at(rest.len().min(MAX_UPDATE_ITEMS - plugins.len()));
-            asks.push((plugins, with));
-            rest = later;
+        // At most the edge's limit per request, over both kinds together, and
+        // a template's id once in each. The first of the templates' go with
+        // the last of the plugins'; the rest after, so none of them can take
+        // a plugin's answer with it.
+        let mut asks: Vec<(&[Candidate], Vec<template_blocks::Identity>)> = candidates.chunks(MAX_UPDATE_ITEMS).map(|c| (c, Vec::new())).collect();
+        let room = asks.last().map_or(MAX_UPDATE_ITEMS, |(c, _)| MAX_UPDATE_ITEMS - c.len());
+        let mut template_asks = template_blocks::requests(&templates, MAX_UPDATE_ITEMS).into_iter().peekable();
+        if let (Some(last), Some(first)) = (asks.last_mut(), template_asks.peek())
+            && first.len() <= room
+        {
+            last.1 = template_asks.next().unwrap_or_default();
         }
-        asks.extend(rest.chunks(MAX_UPDATE_ITEMS).map(|templates| (&[][..], templates)));
+        asks.extend(template_asks.map(|templates| (&[][..], templates)));
         let mut settled: Vec<template_blocks::Identity> = Vec::new();
         let mut template_downs: Vec<template_blocks::Block> = Vec::new();
         let by_id: HashMap<&str, &Candidate> = candidates.iter().map(|c| (c.id.as_str(), c)).collect();
@@ -1252,8 +1269,23 @@ impl Plugins {
         // Those with an entry it sent that couldn't be read: whatever block
         // they have stays (it fails closed).
         let mut unread: BTreeSet<&str> = BTreeSet::new();
-        for (batch, asked_templates) in asks {
-            let ask = UpdatesAsk {
+        // Held from the first request that carries templates until what they
+        // answered is kept: the requests' own time, nothing else's. Never
+        // waited on: another check asking about them now, this one asks
+        // about the plugins alone (a person's, opening Settings, waits on
+        // nobody's).
+        let mut held = None;
+        for (batch, mut asked_templates) in asks {
+            if !asked_templates.is_empty() && held.is_none() {
+                held = self.inner.template_checks.try_lock().ok();
+            }
+            if held.is_none() && !asked_templates.is_empty() {
+                asked_templates.clear();
+                if batch.is_empty() {
+                    continue;
+                }
+            }
+            let mut ask = UpdatesAsk {
                 zeron: version::zeron().to_string(),
                 plugins: batch
                     .iter()
@@ -1261,10 +1293,26 @@ impl Plugins {
                     .collect(),
                 templates: asked_templates.iter().map(|t| Asked { id: t.id.clone(), version: t.version.clone(), hash: t.hash.clone(), prerelease: false }).collect(),
             };
-            let reply = match client.updates(&ask, &caller).await {
+            let mut reply = client.updates(&ask, &caller).await;
+            // Refused with the templates in it: the plugins are asked about
+            // alone, so nothing about a template keeps them from an answer.
+            if let Err(error) = &reply
+                && !batch.is_empty()
+                && !asked_templates.is_empty()
+                && install::reason_of(error) != Some(client::reason::STORE_UNREACHABLE)
+            {
+                tracing::warn!(%error, "store: the templates were refused in an update check");
+                ask.templates.clear();
+                asked_templates.clear();
+                reply = client.updates(&ask, &caller).await;
+            }
+            let reply = match reply {
                 Ok(reply) => reply,
                 // Offline: what's installed keeps running; the next check asks again.
                 Err(error) => {
+                    if batch.is_empty() {
+                        tracing::warn!(%error, templates = asked_templates.len(), "store: the templates couldn't be checked");
+                    }
                     errors.extend(batch.iter().map(|c| said(c, &error)));
                     continue;
                 }
@@ -1277,7 +1325,7 @@ impl Plugins {
             let unknown = |id: &str| reply.blocked.iter().any(|b| b.item_kind.is_none() && b.id == id);
             let readable = |t: &&template_blocks::Identity| !anyone && !unknown(&t.id) && !reply.unreadable.iter().any(|id| id.as_deref() == Some(t.id.as_str()));
             settled.extend(asked_templates.iter().filter(readable).cloned());
-            for t in asked_templates {
+            for t in &asked_templates {
                 if let Some(block) = reply.blocked.iter().find(|b| b.item_kind == Some(client::Kind::Template) && b.id == t.id && same_version(&b.version, &t.version)) {
                     template_downs.push(template_blocks::Block { id: t.id.clone(), version: t.version.clone(), hash: Some(t.hash.clone()), reason: plain(&block.reason, 500), at: now_secs() });
                 }
@@ -1309,14 +1357,22 @@ impl Plugins {
                 }
             }
         }
-        if !templates.is_empty() {
+        if held.is_some() {
             let all = settled.len() == templates.len();
             let dir = templates_dir.clone();
             match self.changing_blocks(move || template_blocks::settle(&dir, &settled, template_downs, now_secs())).await {
-                Ok(()) => check.templates_settled = all,
+                Ok(()) => {
+                    check.templates_settled = all;
+                    if !all {
+                        tracing::warn!(asked = templates.len(), "store: not every template here was answered about");
+                    }
+                }
                 Err(error) => tracing::warn!(%error, "store: what's blocked of templates couldn't be kept"),
             }
+        } else if !templates.is_empty() {
+            tracing::debug!("store: the templates are being checked already");
         }
+        drop(held);
         // One block per plugin, for the version installed (the first the
         // store says: a hostile answer repeating one costs nothing more).
         let mut blocked: BTreeMap<&str, (&Candidate, String)> = BTreeMap::new();
