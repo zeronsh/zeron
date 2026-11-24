@@ -1,0 +1,38 @@
+---
+// Publishing from CI in three numbered steps: the guide's, and Deploy
+// tokens when there are none (the same words).
+import CodeBlock from "./CodeBlock.astro";
+import "../../styles/look/steps.css";
+
+const TOKENS = `zeron plugin token create --name "GitHub Actions" --plugins focus-timer,focus-board
+zeron plugin token create --name "All my plugins" --all
+zeron plugin token create --name "Release CI" --plugins focus-timer --expires-in-days 90
+zeron plugin token list
+zeron plugin token revoke <id>`;
+const WORKFLOW = `- uses: actions/checkout@v4
+- uses: zeronsh/zeron/actions/publish-plugin@v0.4.0
+  with:
+    token: \${{ secrets.ZERON_DEPLOY_TOKEN }}`;
+---
+
+<ol class="steps">
+  <li class="step">
+    <span class="step-n" aria-hidden="true">01</span>
+    <h3 class="step-title">Make a token</h3>
+    <p>On <a href="/account/tokens">Deploy tokens</a>, in Zeron (Settings, Plugins, Deploy tokens), or from a terminal with Zeron running and signed in:</p>
+    <CodeBlock label="Terminal" code={TOKENS} id="cb-tokens" />
+  </li>
+  <li class="step">
+    <span class="step-n" aria-hidden="true">02</span>
+    <h3 class="step-title">Add it to your CI's secrets</h3>
+    <p>Put the token in your CI's secrets as <code>ZERON_DEPLOY_TOKEN</code>, then publish with it. It's read from the environment only, never from an argument, and needs no Zeron running and nobody signed in:</p>
+    <CodeBlock label="Terminal" code="ZERON_DEPLOY_TOKEN=zdt_… zeron plugin publish <folder>" id="cb-env" />
+  </li>
+  <li class="step">
+    <span class="step-n" aria-hidden="true">03</span>
+    <h3 class="step-title">Publish</h3>
+    <p>On GitHub, the publish action installs Zeron's command line and sends the plugin with your token:</p>
+    <CodeBlock label=".github/workflows/publish.yml" code={WORKFLOW} id="cb-workflow" />
+    <p>Pin it to a Zeron release tag or a commit, never a branch: the step holds your token. Without a token (a pull request from a fork gets no secrets) it only checks.</p>
+  </li>
+</ol>

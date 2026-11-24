@@ -1,0 +1,29 @@
+---
+// A page's own word when there is nothing to show, or the store didn't
+// answer: one block, the same everywhere. An icon on a quiet tile, what it
+// is, a line on it, at most one thing to do; centred in its area, 96 above
+// and below (styles/look/store.css, .empty).
+import Icon from "./Icon.astro";
+import type { IconName } from "./icons.ts";
+
+interface Props {
+  icon: IconName;
+  title: string;
+  line?: string;
+  action?: { label: string; href: string; primary?: boolean };
+  /** The page's only heading: an h1. */
+  level?: 1 | 2;
+  /** Said as it appears: the store didn't answer. */
+  failed?: boolean;
+  class?: string;
+}
+const { icon, title, line, action, level = 2, failed = false, class: own } = Astro.props;
+const Heading = `h${level}` as "h1" | "h2";
+---
+
+<section class:list={["empty", own]} role={failed ? "status" : undefined}>
+  <span class="empty-i"><Icon name={icon} /></span>
+  <Heading>{title}</Heading>
+  {line && <p>{line}</p>}
+  {action && <a class:list={["btn", action.primary ? "pri" : "sec"]} href={action.href}>{action.label}</a>}
+</section>

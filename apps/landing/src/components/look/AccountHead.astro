@@ -1,7 +1,7 @@
 ---
 // The head of your own pages: the title, with the page's one action on its
 // row at the right (level with the title, not the lead); a line on what it
-// is; then the two pages, each with how many it holds when that's known.
+// is; then the two pages, each with how many it holds when that's known and any.
 import Icon from "./Icon.astro";
 import type { IconName } from "./icons.ts";
 import { lsb } from "../../lib/store/bearing.ts";
@@ -34,7 +34,7 @@ const { title, lead, current, plugins = null, tokens = null, action = null } = A
   <p class="lead">{lead}</p>
 </div>
 <nav class="sub" aria-label="Your pages">
-  <a href="/account" aria-current={current === "plugins" ? "page" : undefined}>Your plugins{plugins !== null && <span class="num">{plugins}</span>}</a>
-  <a href="/account/tokens" aria-current={current === "tokens" ? "page" : undefined}>Deploy tokens{tokens !== null && <span class="num">{tokens}</span>}</a>
+  <a href="/account" aria-current={current === "plugins" ? "page" : undefined}>Your plugins{plugins ? <span class="num">{plugins}</span> : null}</a>
+  <a href="/account/tokens" aria-current={current === "tokens" ? "page" : undefined}>Deploy tokens{tokens ? <span class="num">{tokens}</span> : null}</a>
 </nav>
 <slot />

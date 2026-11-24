@@ -26,6 +26,8 @@
 /* Below the hero, a section's step to what's next: Featured, or the list. */
 .hero + * { margin-top: var(--sections); }
 .featured + .browse { margin-top: var(--sections); }
+/* (Nothing published, or no answer: the empty block's own step above it and below.) */
+.hero + .empty, .empty + .make { margin-top: 0; }
 /* The sidebar beside the list. */
 .browse { display: grid; grid-template-columns: 208px minmax(0, 1fr); gap: var(--s64); align-items: start; }
 
@@ -83,6 +85,8 @@
 /* The list's column: its count and order, then the grid. */
 .listing { min-width: 0; }
 .rhead { display: flex; align-items: center; justify-content: space-between; gap: var(--s16); min-height: 32px; }
+/* (Nothing in the list: no count and no order; the phone's filters stay.) */
+.rhead.bare { display: none; }
 .rhead p { color: var(--text-2); font-size: 14px; }
 .rhead p b { color: var(--text); font-weight: 600; }
 
@@ -161,6 +165,7 @@ span.pg.step { color: var(--text-3); opacity: 0.5; }
   .catlist a[aria-current] { background: var(--text); color: var(--bg); box-shadow: none; font-weight: 500; }
   .catlist a[aria-current] .num { color: color-mix(in srgb, var(--bg) 62%, var(--text)); }
   .narrow-only { display: block; }
+  .rhead.bare { display: flex; justify-content: flex-end; }
 }
 @media (max-width: 720px) {
   .store-page { padding-top: var(--s32); padding-bottom: var(--s64); }

@@ -10,6 +10,8 @@
 // its address.
 // The staff pages sit beside them as tabs. Admins only; to anyone else this
 // address is the site's 404, signed in or not.
+import Empty from "../../../components/look/Empty.astro";
+import Failed from "../../../components/look/Failed.astro";
 import Flash from "../../../components/look/Flash.astro";
 import Icon from "../../../components/look/Icon.astro";
 import StaffHead from "../../../components/look/StaffHead.astro";
@@ -17,6 +19,7 @@ import Tile from "../../../components/look/Tile.astro";
 import Store from "../../../layouts/Store.astro";
 import "../../../styles/look/account.css";
 import "../../../styles/look/staff.css";
+import type { IconName } from "../../../components/look/icons.ts";
 import { takeFlash } from "../../../lib/store/flash.ts";
 import { count, dateTime, day, unbidi, waitedFor } from "../../../lib/store/format.ts";
 import { privatePage } from "../../../lib/store/http.ts";
@@ -40,6 +43,14 @@ const LISTS: Record<QueueState, { label: string; lead: string }> = {
   declined: { label: "Not verified", lead: "Versions a reviewer read and didn't verify, still listed without the check; the author has the note." },
   all: { label: "All", lead: "Every listed version, the oldest first." },
   taken_down: { label: "Taken down", lead: "Versions taken down as harmful, off on the devices that had them; restoring one lists it again, unread." },
+};
+/** Each list with nothing in it. */
+const EMPTY: Record<QueueState, { icon: IconName; title: string; line: string }> = {
+  undecided: { icon: "clock", title: "Nothing waiting", line: "New versions show here as they're published." },
+  verified: { icon: "check", title: "Nothing verified yet", line: "Versions Zeron verified show here." },
+  declined: { icon: "file", title: "Nothing here yet", line: "Versions a reviewer didn't verify show here." },
+  all: { icon: "grid", title: "Nothing here yet", line: "Every listed version shows here." },
+  taken_down: { icon: "x", title: "Nothing taken down", line: "A version taken down as harmful shows here until it's restored." },
 };
 const asked = Astro.url.searchParams.get("state");
 const status: QueueState = asked && Object.hasOwn(LISTS, asked) ? (asked as QueueState) : "undecided";
@@ -76,16 +87,9 @@ const submissionHref = (item: QueueItem) => `/admin/plugins/${encodeURIComponent
       <Flash flash={flash} />
       {
         !result.ok ? (
-          <div class="empty" role="status">
-            <h2>The queue can't be loaded right now</h2>
-            <p>Try again in a moment.</p>
-            <a class="btn sec" href={listHref(status)}>Try again</a>
-          </div>
+          <Failed title="The queue can't be loaded right now" line="Try again in a moment." href={listHref(status)} />
         ) : items.length === 0 ? (
-          <div class="empty">
-            <h2>{waiting ? "Nothing waiting" : status === "taken_down" ? "Nothing taken down" : "Nothing here yet"}</h2>
-            <p>{waiting ? "New versions show here as they're published, the longest waiting first." : status === "all" ? "Every listed version shows here." : status === "taken_down" ? "A version taken down as harmful shows here until it's restored." : `Versions ${status === "verified" ? "Zeron verified" : "a reviewer didn't verify"} show here.`}</p>
-          </div>
+          <Empty icon={EMPTY[status].icon} title={EMPTY[status].title} line={EMPTY[status].line} />
         ) : (
           <>
             <div class="tbl q">

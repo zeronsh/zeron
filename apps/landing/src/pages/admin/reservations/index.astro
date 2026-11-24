@@ -2,6 +2,8 @@
 // Ids held back from first-come claims (plan, amendment 19): each for one
 // account, or for nobody, as a table; reserve one under it, or free one
 // from its row. Admins only.
+import Empty from "../../../components/look/Empty.astro";
+import Failed from "../../../components/look/Failed.astro";
 import Flash from "../../../components/look/Flash.astro";
 import Question from "../../../components/look/Question.astro";
 import StaffHead from "../../../components/look/StaffHead.astro";
@@ -49,16 +51,9 @@ const dialogId = (id: string) => `free-${id}`;
       <Flash flash={flash} />
       {
         !result.ok ? (
-          <div class="empty" role="status">
-            <h2>Reserved ids can't be loaded right now</h2>
-            <p>Try again in a moment.</p>
-            <a class="btn sec" href={here}>Try again</a>
-          </div>
+          <Failed title="Reserved ids can't be loaded right now" line="Try again in a moment." href={here} />
         ) : reservations.length === 0 ? (
-          <div class="empty">
-            <h2>No ids are reserved</h2>
-            <p>An id reserved here can't be claimed by whoever sends it first.</p>
-          </div>
+          <Empty icon="key" title="No ids are reserved" line="An id reserved here can't be claimed by whoever sends it first." />
         ) : (
           <div class="tbl res">
             <div class="trow th" aria-hidden="true"><span>Id</span><span>For</span><span>Why</span><span>Since</span><span></span></div>

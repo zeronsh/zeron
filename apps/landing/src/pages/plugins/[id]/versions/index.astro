@@ -4,6 +4,7 @@
 // verified it, its notes, and Install for that very version (the link that
 // names it); one that takes no new installs says why. Public, kept by
 // shared caches as the plugin's page is.
+import Failed from "../../../../components/look/Failed.astro";
 import Icon from "../../../../components/look/Icon.astro";
 import NotHere from "../../../../components/look/NotHere.astro";
 import PluginHead from "../../../../components/look/PluginHead.astro";
@@ -103,11 +104,7 @@ const pager = page.state === "ok" && page.versions ? pagerOf(`${pluginUrl(asked)
                 })}
               </ol>
             ) : (
-              <div class="empty" role="status">
-                <h2>{store("plugins.store.failed_title")}</h2>
-                <p>{store("plugins.store.failed_body")}</p>
-                <a class="btn sec" href={`${pluginUrl(page.plugin.id)}/versions`}>{store("plugins.store.try_again")}</a>
-              </div>
+              <Failed href={`${pluginUrl(page.plugin.id)}/versions`} />
             )}
             {pager && (pager.previous || pager.next) && (
               <nav class="pager" aria-label="Pages of versions">

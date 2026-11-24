@@ -8,6 +8,8 @@
 // in an address or a form field, never kept (no-store, and with the script
 // gone from the page the moment it's left: scripts/store.ts). A token lost
 // is revoked and made again; no page shows one twice.
+import Empty from "../../../components/look/Empty.astro";
+import Failed from "../../../components/look/Failed.astro";
 import Icon from "../../../components/look/Icon.astro";
 import SignInPlease from "../../../components/look/SignInPlease.astro";
 import TokenForm from "../../../components/look/TokenForm.astro";
@@ -17,7 +19,7 @@ import "../../../styles/look/account.css";
 import { date } from "../../../lib/store/format.ts";
 import { done, formOf, tokenMatches } from "../../../lib/store/forms.ts";
 import { privatePage } from "../../../lib/store/http.ts";
-import { addressFields, isRefusal, postedFields, refusalOf, signInAgain, tokenRequest, type Refusal, type TokenFields } from "../../../lib/store/tokens.ts";
+import { addressFields, isRefusal, NO_TOKENS, postedFields, refusalOf, signInAgain, tokenRequest, type Refusal, type TokenFields } from "../../../lib/store/tokens.ts";
 import type { NewToken } from "../../../lib/store/types.ts";
 import { lsb } from "../../../lib/store/bearing.ts";
 import { store } from "../../../lib/store/words.ts";
@@ -35,6 +37,8 @@ let refusal: Refusal | null = null;
 let made: NewToken | null = null;
 const mine = session ? await edge.myPlugins() : null;
 const yours = new Map((mine?.ok ? mine.data.plugins : []).map((p) => [p.id, p]));
+/** No plugin of yours to send, and nothing asked: there's nothing to make one for. */
+const none = Astro.request.method === "GET" && mine?.ok === true && !mine.data.plugins.some((p) => p.versions.length > 0);
 const nameOf = (id: string) => yours.get(id)?.name ?? id;
 
 if (Astro.request.method === "POST") {
@@ -73,7 +77,7 @@ const title = made ? store("plugins.store.key.secret_title") : store("plugins.st
     <nav class="crumbs" aria-label="Where this is"><a href="/account">Your plugins</a><Icon name="chev" /><a href={back}>Deploy tokens</a></nav>
     {
       who.state === "down" ? (
-        <div class="empty" role="status"><h2>{store("plugins.store.failed_title")}</h2><p>{store("plugins.store.failed_body")}</p><a class="btn sec" href={Astro.url.pathname}>{store("plugins.store.try_again")}</a></div>
+        <Failed />
       ) : !session ? (
         <SignInPlease what="your deploy tokens" />
       ) : made ? (
@@ -97,6 +101,8 @@ const title = made ? store("plugins.store.key.secret_title") : store("plugins.st
             <a class="btn pri" href={back} data-secret-done>{store("plugins.store.key.done")}</a>
           </div>
         </section>
+      ) : none ? (
+        <Empty icon="key" title={NO_TOKENS.title} line={NO_TOKENS.line} level={1} />
       ) : (
         <section class="askcard newtoken" aria-labelledby="new-title">
           <h1 id="new-title" class={lsb(title)}>{title}</h1>

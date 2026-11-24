@@ -302,6 +302,9 @@ a.tag:hover { color: var(--text); background: color-mix(in srgb, var(--sunken) 7
 .flash.ok { background: var(--verified-wash); color: var(--verified); }
 .flash.bad { background: var(--danger-wash); color: var(--danger); }
 .flash.info { background: var(--warn-wash); color: var(--warn); }
+/* What to mind, beside what it's about. (A callout is as wide as its column's boxes: it hangs both sides by its
+   padding, its words on the column's two edges. tests/align.test.ts holds every callout to it.) */
+.warnline { margin-top: var(--s16); margin-inline: calc(-1 * var(--s16)); padding: var(--s12) var(--s16); border-radius: 12px; background: var(--danger-wash); color: var(--danger); font-size: 14px; line-height: 20px; }
 
 /* ---- surfaces ---- */
 .card { background: var(--surface); border-radius: 18px; box-shadow: var(--shadow-1); overflow: hidden; }
@@ -323,7 +326,6 @@ a.card:focus-visible { outline-offset: 3px; }
 .item .meta { flex: none; text-align: right; color: var(--text-3); font-size: 13px; line-height: 20px; }
 .rank { width: 20px; flex: none; font: 500 13px/20px var(--mono); color: var(--text-3); }
 
-/* ---- a page's own word when there is nothing, or the store didn't answer ---- */
 /* Someone's words, quoted: a reviewer's note, why staff stopped a version. */
 .said-was { margin: 0 calc(-1 * var(--s16)); padding: var(--s12) var(--s16); border-radius: 12px; background: var(--sunken); font-size: 14px; line-height: 21px; overflow-wrap: anywhere; }
 .said-was footer { margin-top: var(--s4); font-size: 13px; line-height: 20px; color: var(--text-3); }
@@ -362,10 +364,15 @@ dialog.question:target:not([open]) { display: block; position: fixed; inset: 0; 
 }
 /* A list's pages: Previous, where you are, Next (Browse, Versions, the queue). */
 .pager { display: flex; align-items: center; justify-content: space-between; gap: var(--s12); margin-top: var(--s32); padding-top: var(--s24); box-shadow: 0 -1px 0 var(--line); font-size: 13px; color: var(--text-3); }
-.empty { padding: var(--s32) 0 var(--s8); }
-.empty h2 { font-size: 19px; line-height: 26px; }
-.empty p { margin-top: var(--s4); color: var(--text-2); max-width: 36em; }
-.empty .btn { margin-top: var(--s16); }
+/* A page's own word when there's nothing, or the store didn't answer (components/look/Empty.astro): centred in its
+   area, a section and a half above and below; where it ends the page, the foot takes that as its own step. */
+.empty { display: flex; flex-direction: column; align-items: center; padding-block: calc(var(--s64) + var(--s32)); text-align: center; }
+.empty-i { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 10px; background: var(--sunken); color: var(--text-2); }
+.empty-i svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+main .empty :is(h1, h2) { margin-top: var(--s16); font-size: 18px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em; }
+.empty p { max-width: 440px; margin-top: var(--s4); color: var(--text-2); text-wrap: balance; overflow-wrap: anywhere; }
+.empty .btn { margin-top: var(--s24); }
+main:has(> .wrap > .empty:last-child) + .foot { margin-top: 0; }
 /* (A box that begins a line on the column hangs out by its padding: its words on the column. In a row of words
    and pills that may wrap, every pill hangs and the row's gap grows by as much: the pill a line begins with
    hangs, the rest keep their gap.) */
@@ -374,7 +381,7 @@ dialog.question:target:not([open]) { display: block; position: fixed; inset: 0; 
 /* (A list's pages: Previous hangs at the column's start, Next at its end.) */
 .pager > :first-child { margin-left: calc(-1 * var(--pad)); }
 .pager > :last-child { margin-right: calc(-1 * var(--pad)); }
-.empty > .btn, .empty > .cmd, .please > .btn, .hang { margin-left: calc(-1 * var(--pad)); }
+.hang { margin-left: calc(-1 * var(--pad)); }
 
 .foot { margin-top: var(--s64); padding: var(--s32) 0 var(--s48); box-shadow: 0 -1px 0 var(--line); color: var(--text-3); font-size: 13px; line-height: 20px; }
 .foot .wrap { display: flex; flex-wrap: wrap; gap: var(--s8) var(--s24); }
@@ -397,7 +404,7 @@ dialog.question:target:not([open]) { display: block; position: fixed; inset: 0; 
 @media (max-width: 720px) {
   :root { --gutter: var(--s24); --card: var(--gutter); }
   /* (As wide as the column, as wide as the screen.) */
-  .flash { margin-inline: calc(-1 * var(--gutter)); padding-inline: var(--gutter); border-radius: 0; }
+  .flash, .warnline, .said-was { margin-inline: calc(-1 * var(--gutter)); padding-inline: var(--gutter); border-radius: 0; }
   .top .wrap { height: 56px; gap: var(--s8); }
   .nav, .signin, .find { display: none; }
   .find-icon { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 10px; color: var(--text); }

@@ -195,9 +195,9 @@ describe("the store's list (/plugins)", () => {
     // (The field keeps the words.)
     expect(timer.body).toContain('name="q" value="timer"');
     const empty = await html("/plugins?q=zzzzqqq");
-    expect(empty.body).toContain("Nothing matches “zzzzqqq”");
+    expect(empty.body).toContain("<h2>Nothing matches</h2><p>No plugin matches “zzzzqqq”.</p>");
     expect(empty.body).toContain('href="/plugins">Clear search</a>');
-    expect(empty.body).toContain('<b class="num">0</b> plugins');
+    expect(empty.body).not.toContain('<b class="num">0</b>');
     const git = await html("/plugins?category=git");
     expect(listed(git.body)).toContain("pr-radar");
     expect(listed(git.body)).not.toContain("token-meter");
@@ -846,9 +846,26 @@ describe("forms", () => {
 
   test("an author with nothing sent is told how to send the first", async () => {
     const { body } = await html("/account", await site.signIn("user_noor"));
-    expect(body).toContain("<h2>Nothing published yet</h2>");
-    expect(body).toContain('data-copy="zeron plugin publish"');
-    expect(body).toContain('<a href="/account" aria-current="page">Your plugins<span class="num">0</span></a>');
+    // (The guide's own steps, once, and nothing else under the tabs.)
+    expect(body).toMatch(/<h2 id="first">Publish your first plugin<\/h2>/);
+    const guide = (await html("/plugins/publishing")).body;
+    const steps = /<ol class="steps">[\s\S]*?<\/ol>/.exec(guide)![0];
+    expect(body).toContain(steps);
+    expect(body.match(/<ol class="steps">/g)).toHaveLength(1);
+    expect(body).not.toContain('class="how"');
+    expect(body).toContain('<a href="/account" aria-current="page">Your plugins</a>');
+  });
+
+  test("Deploy tokens with none: the guide's steps from CI; with no plugin, one line and no New token", async () => {
+    const steps = [...(await html("/plugins/publishing")).body.matchAll(/<ol class="steps">[\s\S]*?<\/ol>/g)][1]![0];
+    const author = (await html("/account/tokens", await site.signIn("user_kai"))).body;
+    expect(author).toContain(steps);
+    expect(author).toContain('data-dialog="new-token"');
+    const { body } = await html("/account/tokens", await site.signIn("user_noor"));
+    expect(body).toContain("Publish a plugin first, then a token can send its next versions.");
+    expect(body).not.toContain(steps);
+    expect(body).not.toContain("New token");
+    expect((await html("/account/tokens/new", await site.signIn("user_noor"))).body).not.toContain('class="tokform"');
   });
 
   test("one plugin: where each version stands and whether it's verified; a version's one action in its column", async () => {
@@ -1382,7 +1399,8 @@ describe("one store page (Discover and Browse were two)", () => {
     try {
       await site.fake("empty", { on: "1" });
       const { body } = await html("/plugins", await site.signIn("user_mo"));
-      expect(body).toContain("<h2>No plugins in the store yet</h2>");
+      expect(body).toContain("<h2>No plugins in the store yet</h2><p>Plugins people publish appear here.</p></section>");
+      expect(body).not.toMatch(/class="(facets|hfind|rhead)/);
       expect(body).not.toContain('<h2 id="featured">');
     } finally {
       await site.fake("empty");
@@ -1456,7 +1474,7 @@ describe("the staff's side: the queue, a submission, the decision", () => {
       await site.queueAs("empty");
       const empty = await html("/admin/plugins", grace);
       expect(empty.body).toContain("Nothing waiting");
-      expect(empty.body).toMatch(/aria-current="page">Waiting<span class="num">0<\/span>/);
+      expect(empty.body).toMatch(/aria-current="page">Waiting<\/a>/);
       await site.queueAs(40);
       const forty = await html("/admin/plugins", grace);
       expect(queueRows(forty.body)).toHaveLength(40);

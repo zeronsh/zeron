@@ -6,10 +6,13 @@
 // said by nothing); how many have it. A second line only for what's
 // unusual: the newest verified when the newest isn't, the reviewer's note,
 // why it was taken down. One person's page: never cached, never indexed.
+// None yet: the guide's steps to the first, and nothing else.
 // Signed out, it says so and offers sign-in, here.
 import AccountHead from "../../components/look/AccountHead.astro";
+import Failed from "../../components/look/Failed.astro";
 import Flash from "../../components/look/Flash.astro";
 import Icon from "../../components/look/Icon.astro";
+import PublishSteps from "../../components/look/PublishSteps.astro";
 import Seal from "../../components/look/Seal.astro";
 import SignInPlease from "../../components/look/SignInPlease.astro";
 import Tile from "../../components/look/Tile.astro";
@@ -72,11 +75,7 @@ const gone = (p: MyPlugin) => p.listing === "suspended" || ["taken_down", "remov
       <Flash flash={flash} />
       {
         who.state === "down" ? (
-          <div class="empty" role="status">
-            <h2>{store("plugins.store.failed_title")}</h2>
-            <p>{store("plugins.store.failed_body")}</p>
-            <a class="btn sec" href={Astro.url.pathname}>{store("plugins.store.try_again")}</a>
-          </div>
+          <Failed />
         ) : !session ? (
           <SignInPlease what="the plugins you publish" />
         ) : (
@@ -85,17 +84,12 @@ const gone = (p: MyPlugin) => p.listing === "suspended" || ["taken_down", "remov
               <p class="flash info">Claim a username first: Zeron asks for one right after you sign in, and your plugins read “by @username”. Then you can publish.</p>
             )}
             {!result?.ok ? (
-              <div class="empty" role="status">
-                <h2>{store("plugins.store.failed_title")}</h2>
-                <p>{store("plugins.store.failed_body")}</p>
-                <a class="btn sec" href="/account">{store("plugins.store.try_again")}</a>
-              </div>
+              <Failed href="/account" />
             ) : plugins.length === 0 ? (
-              <div class="empty">
-                <h2>Nothing published yet</h2>
-                <p>Publish a plugin from its folder, or from Zeron's Settings, under Plugins. It's live in the store the moment you send it.</p>
-                <span class="cmd"><code><em aria-hidden="true">$</em> zeron plugin publish</code><button type="button" data-copy="zeron plugin publish" aria-label="Copy the command"><Icon name="copy" /></button></span>
-              </div>
+              <section class="howto" aria-labelledby="first">
+                <h2 id="first">Publish your first plugin</h2>
+                <PublishSteps />
+              </section>
             ) : (
               <div class="tbl mine">
                 <div class="trow th" aria-hidden="true"><span>Plugin</span><span>Newest version</span><span>Published</span><span class="r">Installs</span><span></span></div>
@@ -132,11 +126,13 @@ const gone = (p: MyPlugin) => p.listing === "suspended" || ["taken_down", "remov
         )
       }
 
-      <section class="how" aria-label="How publishing works">
-        <div><h3><b>1</b>Send it from its folder</h3><p>Run <code>zeron plugin publish</code> in the plugin's folder, or use Publish in Zeron's Settings, under Plugins. The first version claims its id.</p></div>
-        <div><h3><b>2</b>It is live at once</h3><p>People can install the new version straight away. It says “Not verified yet”, and Zeron asks them before it installs.</p></div>
-        <div><h3><b>3</b>Zeron verifies it</h3><p>When a reviewer at Zeron has read the version, it gets the check. If they find a problem, you get their note saying what to change.</p></div>
-      </section>
+      {plugins.length > 0 && (
+        <section class="how" aria-label="How publishing works">
+          <div><h3><b>1</b>Send it from its folder</h3><p>Run <code>zeron plugin publish</code> in the plugin's folder, or use Publish in Zeron's Settings, under Plugins. The first version claims its id.</p></div>
+          <div><h3><b>2</b>It is live at once</h3><p>People can install the new version straight away. It says “Not verified yet”, and Zeron asks them before it installs.</p></div>
+          <div><h3><b>3</b>Zeron verifies it</h3><p>When a reviewer at Zeron has read the version, it gets the check. If they find a problem, you get their note saying what to change.</p></div>
+        </section>
+      )}
     </AccountHead>
   </div>
 </Store>

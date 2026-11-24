@@ -7,8 +7,10 @@
 // second line only for what was said; its reports, a table too; its history
 // in the audit log.
 import TakeDown from "../../../../components/kit/TakeDown.astro";
+import Failed from "../../../../components/look/Failed.astro";
 import Flash from "../../../../components/look/Flash.astro";
 import Icon from "../../../../components/look/Icon.astro";
+import Seal from "../../../../components/look/Seal.astro";
 import Tile from "../../../../components/look/Tile.astro";
 import Words from "../../../../components/look/Words.astro";
 import Store from "../../../../layouts/Store.astro";
@@ -52,11 +54,7 @@ const REPORT = { open: { label: "Open" }, actioned: { label: "Acted on" }, dismi
     <Flash flash={flash} />
     {
       !a ? (
-        <div class="empty" role="status">
-          <h2>This plugin can't be loaded right now</h2>
-          <p>Try again in a moment.</p>
-          <a class="btn sec" href={here}>Try again</a>
-        </div>
+        <Failed title="This plugin can't be loaded right now" line="Try again in a moment." href={here} />
       ) : (
         <>
           <header class="ohead">
@@ -94,7 +92,7 @@ const REPORT = { open: { label: "Open" }, actioned: { label: "Acted on" }, dismi
           {a.status === "suspended" && a.plugin.suspend_reason && <p class="flash bad"><b>Suspended.</b> {a.plugin.suspend_reason}</p>}
 
           <section class="mvers" aria-labelledby="versions-heading">
-            <h2 id="versions-heading">Versions<span class="num">{count(a.versions.length)}</span></h2>
+            <h2 id="versions-heading">Versions{a.versions.length > 0 && <span class="num">{count(a.versions.length)}</span>}</h2>
             <div class="tbl vers">
               <div class="trow th" aria-hidden="true"><span>Version</span><span>Published</span><span></span></div>
               <ul aria-label="Its versions, the newest first">
@@ -112,8 +110,9 @@ const REPORT = { open: { label: "Open" }, actioned: { label: "Acted on" }, dismi
                     <li class:list={["trow", { two: Boolean(note) }]}>
                       <span class="c-ver">
                         <a class="mono stretch" href={`${here}/${encodeURIComponent(v.version)}`}>{v.version}</a>
-                        <span class:list={["state", PILL_TONE[st.tone]]}>{st.label}</span>
-                        <span class:list={["state", PILL_TONE[ver.tone]]}>{ver.label}</span>
+                        {/* (Whether Zeron verified it first, as on its author's page; where it stands only when that isn't simply listed.) */}
+                        <span class:list={["state", PILL_TONE[ver.tone]]}>{v.verified && <Seal quiet />}{ver.label}</span>
+                        {v.status !== "listed" && <span class:list={["state", PILL_TONE[st.tone]]}>{st.label}</span>}
                         {v.blocked && <span class="state bad" title="Turned off on the devices that had it">Off</span>}
                       </span>
                       <span class="c-pub"><span class="sr-only">Published </span><time datetime={new Date(v.published_at).toISOString()} title={dateTime(v.published_at)}>{day(v.published_at)}</time></span>
@@ -131,7 +130,7 @@ const REPORT = { open: { label: "Open" }, actioned: { label: "Acted on" }, dismi
 
           <section class="mvers" aria-labelledby="reports-heading">
             <div class="sec-row">
-              <h2 id="reports-heading">Reports<span class="num">{count(a.reports.length)}</span></h2>
+              <h2 id="reports-heading">Reports{a.reports.length > 0 && <span class="num">{count(a.reports.length)}</span>}</h2>
               <a class="more" href={`/admin/audit?plugin=${encodeURIComponent(a.plugin.id)}`}>Its history<Icon name="chev" /></a>
             </div>
             {a.reports.length === 0 ? (

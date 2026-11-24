@@ -1,7 +1,8 @@
 ---
-// A page of your own, signed out: its own plain invitation to sign in,
-// never a redirect (a redirect that comes back to a page that redirects is
-// a loop when sign-in fails). The sign-in comes back here.
+// A page of your own, signed out: its own plain invitation to sign in (the
+// empty block), never a redirect (a redirect that comes back to a page that
+// redirects is a loop when sign-in fails). The sign-in comes back here.
+import Empty from "./Empty.astro";
 import { signInUrl } from "../../lib/store/urls.ts";
 
 interface Props {
@@ -12,8 +13,4 @@ const { what } = Astro.props;
 const here = `${Astro.url.pathname}${Astro.url.search}`;
 ---
 
-<section class="please">
-  <h2>Sign in to see {what}</h2>
-  <p>Use the account you publish with. It's the same one you use in Zeron.</p>
-  <a class="btn pri" href={signInUrl(here)}>Sign in</a>
-</section>
+<Empty icon="user" title={`Sign in to see ${what}`} line="Use the account you publish with. It's the same one you use in Zeron." action={{ label: "Sign in", href: signInUrl(here), primary: true }} class="please" />
