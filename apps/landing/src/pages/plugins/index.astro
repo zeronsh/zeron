@@ -1,5 +1,6 @@
 ---
-// The store: one page for every listed plugin (Discover and Browse were
+// The store: one page for every listed plugin, and for every template (the
+// same file at /templates, given the kind: astro.config.mjs) (Discover and Browse were
 // two; /plugins/all sends here with its query), as Raycast's store and
 // Vercel's templates set theirs. A centred hero: its title, a line, and the
 // search (the page's own: the bar's isn't drawn here), which narrows this
@@ -25,6 +26,7 @@ import Store from "../../layouts/Store.astro";
 import "../../styles/look/browse.css";
 import { canonicalSearch, catalogHref, effectiveSort, isFront, PAGE_SIZE, pageHref, range, readCatalog, SORT_LABELS, type CatalogState } from "../../lib/store/catalog.ts";
 import { count } from "../../lib/store/format.ts";
+import { KIND_PATH, KIND_WORDS, kindOf, RUNS_AS } from "../../lib/store/kind.ts";
 import { CATALOG_TAG, publicPage } from "../../lib/store/http.ts";
 import { CATEGORIES } from "../../lib/store/nav.ts";
 import type { Category, Sort } from "../../lib/store/types.ts";
@@ -34,22 +36,25 @@ import { lsb } from "../../lib/store/bearing.ts";
 export const prerender = false;
 
 const edge = Astro.locals.edge;
-const categoriesResult = await edge.categories();
-const categories = categoriesResult.ok ? categoriesResult.data.categories : [];
-const state = readCatalog(Astro.url.searchParams, categoriesResult.ok ? categories : null);
+const kind = kindOf(Astro.url);
+const words = KIND_WORDS[kind];
+// (A template has no categories: its sidebar is Show and Keywords.)
+const categoriesResult = kind === "plugin" ? await edge.categories() : null;
+const categories = categoriesResult?.ok ? categoriesResult.data.categories : [];
+const state = readCatalog(Astro.url.searchParams, categoriesResult && !categoriesResult.ok ? null : categories, kind);
 
 // An address that says more than it means is sent to the one that says it plainly.
 const canonical = canonicalSearch(Astro.url.searchParams, state);
-if (canonical && categoriesResult.ok) return Astro.redirect(canonical, 301);
+if (canonical && (!categoriesResult || categoriesResult.ok)) return Astro.redirect(canonical, 301);
 
 const sort = effectiveSort(state);
 const front = isFront(state);
 const [page, stats, keywordsResult, featured] = await Promise.all([
-  edge.catalog({ q: state.q || undefined, category: state.category ?? undefined, keyword: state.keyword ?? undefined, verified: state.verified || undefined, sort, cursor: state.cursor ?? undefined, limit: PAGE_SIZE }),
-  edge.stats(),
-  edge.keywords({ category: state.category ?? undefined, limit: 12 }),
+  edge.catalog({ kind, q: state.q || undefined, category: state.category ?? undefined, keyword: state.keyword ?? undefined, verified: state.verified || undefined, sort, cursor: state.cursor ?? undefined, limit: PAGE_SIZE }),
+  edge.stats(kind),
+  edge.keywords({ kind, category: state.category ?? undefined, limit: 12 }),
   // (Asked at the edge's own page size, no `limit`: the first page is the one the edge purges on a change.)
-  front ? edge.catalog({ featured: true, sort: "popular" }) : null,
+  front ? edge.catalog({ kind, featured: true, sort: "popular" }) : null,
 ]);
 
 // A cursor from another search, or an old one: this search's first page.
@@ -58,7 +63,7 @@ if (page.ok) publicPage(Astro, [CATALOG_TAG]);
 else Astro.response.status = page.error === "bad_request" ? 400 : 503;
 
 // Categories by the app's names (the fixed list), each with the edge's count; else the site's list alone.
-const shelf = (categoriesResult.ok ? categories : CATEGORIES.map((c): Category => ({ id: c.id, name: c.label }))).map((c) => ({ ...c, name: CATEGORIES.find((x) => x.id === c.id)?.label ?? c.name }));
+const shelf = (categoriesResult?.ok ? categories : CATEGORIES.map((c): Category => ({ id: c.id, name: c.label }))).map((c) => ({ ...c, name: CATEGORIES.find((x) => x.id === c.id)?.label ?? c.name }));
 const categoryName = (id: string) => shelf.find((c) => c.id === id)?.name ?? id;
 const items = page.ok ? page.data.items : [];
 const next = page.ok ? pageHref(state, page.data.next_cursor) : null;
@@ -75,29 +80,37 @@ const sorts: Sort[] = (["relevance", "popular", "updated", "new", "verified"] as
 const sortLabel = (s: Sort) => (s === "verified" ? SORT_LABELS.verified : store(`plugins.store.sort.${s}`));
 const at = (change: Partial<CatalogState>) => catalogHref({ ...state, ...change, cursor: null, page: null });
 
-const heading = state.q ? `Results for “${state.q}”` : state.category ? categoryName(state.category) : state.keyword ? `Tagged “${state.keyword}”` : state.verified ? "Verified plugins" : "Plugins";
+/** What the list holds, on its page unnarrowed. */
+const ABOUT = {
+  plugin: "Panels, commands and tools for your agents, made by people who use Zeron.",
+  template: "Whole interfaces for Zeron, made by people who use it.",
+} as const;
+const heading = state.q ? `Results for “${state.q}”` : state.category ? categoryName(state.category) : state.keyword ? `Tagged “${state.keyword}”` : state.verified ? `Verified ${words.many}` : words.Many;
 const lead = state.q
-  ? `Plugins whose name, summary, keywords or author match${state.category ? `, in ${categoryName(state.category)}` : ""}.`
+  ? `${words.Many} whose name, summary, keywords or author match${state.category ? `, in ${categoryName(state.category)}` : ""}.`
   : state.category
     ? (categoryLine(state.category) ?? `Plugins for Zeron in ${categoryName(state.category)}.`)
     : state.keyword
-      ? `Plugins whose authors tagged them “${state.keyword}”.`
+      ? `${words.Many} whose authors tagged them “${state.keyword}”.`
       : state.verified
-        ? "Plugins whose newest version Zeron has verified."
-        : "Panels, commands and tools for your agents, made by people who use Zeron. A check marks what Zeron has verified.";
-const title = state.q ? `“${state.q}” · Plugins · Zeron` : state.category ? `${categoryName(state.category)} plugins · Zeron` : "Plugins · Zeron";
-const description = state.category ? `Plugins for Zeron in ${categoryName(state.category)}, each saying whether Zeron verified it.` : "Panels, commands and tools for your agents, made by people who use Zeron. Each says whether Zeron verified it.";
+        ? `${words.Many} whose newest version Zeron has verified.`
+        : `${ABOUT[kind]} A check marks what Zeron has verified.`;
+const title = state.q ? `“${state.q}” · ${words.Many} · Zeron` : state.category ? `${categoryName(state.category)} plugins · Zeron` : `${words.Many} · Zeron`;
+const description = state.category ? `Plugins for Zeron in ${categoryName(state.category)}, each saying whether Zeron verified it.` : `${ABOUT[kind]} Each says whether Zeron verified it.`;
 // Search results and later pages stay out of search engines; the list and its categories don't.
 const noindex = Boolean(state.q || state.cursor || state.keyword || state.verified);
 const here = `${Astro.url.pathname}${Astro.url.search}`;
 /** Nothing is published at all (however the list is narrowed): no sidebar, no search, only the page's ending. */
 const unpublished = page.ok && items.length === 0 && (stats.ok ? stats.data.plugins === 0 : front);
 /** What was asked for, when nothing matches it. */
-const searched = `${state.q ? "No" : "There's no"}${state.verified ? " verified" : ""} plugin${state.category ? ` in ${categoryName(state.category)}` : ""}${state.keyword ? ` tagged “${state.keyword}”` : ""}${state.q ? ` matches “${state.q}”` : " yet"}.`;
+const searched = `${state.q ? "No" : "There's no"}${state.verified ? " verified" : ""} ${words.one}${state.category ? ` in ${categoryName(state.category)}` : ""}${state.keyword ? ` tagged “${state.keyword}”` : ""}${state.q ? ` matches “${state.q}”` : " yet"}.`;
 /** How many filters past the category are on (the phone's Filters says so). */
 const filtering = Number(state.verified) + Number(Boolean(state.keyword));
 /** Featured: up to three, unnarrowed and on the first page alone. */
-const features = page.ok && featured?.ok ? featured.data.items.slice(0, 3) : [];
+// (A template is its picture: Featured would show the grid's own first ones twice, so it's drawn only over a list longer
+// than a page, and what it shows is left out of that page.)
+const features = page.ok && featured?.ok && (kind === "plugin" || (total ?? 0) > PAGE_SIZE) ? featured.data.items.slice(0, 3) : [];
+const grid = kind === "template" ? items.filter((p) => !features.some((f) => f.id === p.id)) : items;
 /** This page's number, when known, and how many there are; the pager links the first, the one before and the one after (the edge pages by cursor: only those have an address). */
 const pageNo = state.page ?? (state.cursor ? null : 1);
 const pages = total !== undefined ? Math.max(1, Math.ceil(total / PAGE_SIZE)) : null;
@@ -107,14 +120,15 @@ const keep: Record<string, string> = { ...(state.category ? { category: state.ca
 
 ---
 
-<Store title={title} description={description} noindex={noindex} canonical={catalogHref({ category: state.category })} current="browse" query={state.q} keep={keep} ownSearch>
+<Store title={title} description={description} noindex={noindex} canonical={catalogHref({ kind, category: state.category })} current={kind} query={state.q} keep={keep} ownSearch>
   <div class="wrap store-page">
     <header class="hero">
       <h1 class={lsb(heading)}>{heading}</h1>
       <p class="lead">{lead}</p>
-      {!unpublished && <form class="hfind" role="search" action="/plugins" method="get" data-tidy>
+      {kind === "template" && <p class="fact">{RUNS_AS.list}</p>}
+      {!unpublished && <form class="hfind" role="search" action={KIND_PATH[kind]} method="get" data-tidy>
         <Icon name="search" />
-        <input type="search" name="q" value={state.q || undefined} placeholder="Search plugins" aria-label="Search plugins" autocomplete="off" enterkeyhint="search" data-search />
+        <input type="search" name="q" value={state.q || undefined} placeholder={`Search ${words.many}`} aria-label={`Search ${words.many}`} autocomplete="off" enterkeyhint="search" data-search />
         {Object.entries(keep).map(([name, value]) => <input type="hidden" name={name} value={value} />)}
         <kbd class="kbd" aria-hidden="true">/</kbd>
       </form>}
@@ -133,10 +147,10 @@ const keep: Record<string, string> = { ...(state.category ? { category: state.ca
       !page.ok ? (
         <Failed href={here} />
       ) : unpublished ? (
-        <Empty icon="grid" title={store("plugins.store.empty_title")} line={EMPTY_BODY} />
+        <Empty icon="grid" title={kind === "plugin" ? store("plugins.store.empty_title") : "No templates in the store yet"} line={kind === "plugin" ? EMPTY_BODY : "Templates people publish appear here."} />
       ) : (
-        <div class="browse">
-          <aside class="facets" aria-label="Narrow the list">
+        <div class:list={["browse", { full: kind === "template" }]}>
+          {kind === "plugin" && <aside class="facets" aria-label="Narrow the list">
             <div>
               <h2 class="facet-h">Category</h2>
               <nav class="catlist" aria-label="Categories">
@@ -161,11 +175,24 @@ const keep: Record<string, string> = { ...(state.category ? { category: state.ca
                 </ul>
               </div>
             )}
-          </aside>
+          </aside>}
 
           <section class="listing" aria-labelledby="results">
             <div class:list={["rhead", { bare: items.length === 0 }]}>
-              <p id="results" class:list={{ "sr-only": items.length === 0 }}>{total ? <><b class="num">{count(total)}</b> {total === 1 ? "plugin" : "plugins"}</> : "Plugins"}</p>
+              <p id="results" class:list={{ "sr-only": items.length === 0 }}>{total ? <><b class="num">{count(total)}</b> {total === 1 ? words.one : words.many}</> : words.Many}</p>
+              {kind === "template" && (
+                <div class="tnarrow">
+                  <nav class="tpick" aria-label="Show">
+                    <a class="chip" href={at({ verified: false })} aria-current={!state.verified ? "true" : undefined}>All</a>
+                    <a class="chip" href={at({ verified: true })} aria-current={state.verified ? "true" : undefined}>{store("plugins.store.verified")}</a>
+                  </nav>
+                  {keywords.length > 0 && (
+                    <ul class="tkeys" aria-label="Keywords">
+                      {[...keywords].sort((a, b) => Number(b === state.keyword) - Number(a === state.keyword)).map((k) => <li><a class="chip" href={at({ keyword: state.keyword === k ? null : k })} title={k} aria-current={state.keyword === k ? "true" : undefined}>{k}</a></li>)}
+                    </ul>
+                  )}
+                </div>
+              )}
               <div class="fbar">
                 {/* The phone's filters, a disclosure (the sidebar's, folded). */}
                 <details class="drop narrow-only">
@@ -200,11 +227,12 @@ const keep: Record<string, string> = { ...(state.category ? { category: state.ca
 
             {
               items.length === 0 ? (
-                <Empty icon="search" title="Nothing matches" line={searched} action={state.q ? { label: store("plugins.store.clear"), href: catalogHref({ category: state.category, keyword: state.keyword, verified: state.verified }) } : { label: "Show everything", href: "/plugins" }} />
+                <Empty icon="search" title="Nothing matches" line={searched} action={state.q ? { label: store("plugins.store.clear"), href: catalogHref({ kind, category: state.category, keyword: state.keyword, verified: state.verified }) } : { label: "Show everything", href: KIND_PATH[kind] }} />
               ) : (
                 <>
-                  <ul class="results" aria-labelledby="results">
-                    {items.map((p) => <li><PluginCardView plugin={p} /></li>)}
+                  {/* (A template is its picture: the store's tile, image first; a plugin, the one card.) */}
+                  <ul class={kind === "template" ? "tresults" : "results"} aria-labelledby="results">
+                    {grid.map((p, i) => <li>{kind === "template" ? <FeaturedTile plugin={p} eager={i < 3} /> : <PluginCardView plugin={p} />}</li>)}
                   </ul>
                   {(previous || next) && (
                     <nav class="pager numbered" aria-label="Pages">
@@ -234,7 +262,7 @@ const keep: Record<string, string> = { ...(state.category ? { category: state.ca
       <p>Publish it from Zeron's Settings, or from the folder it lives in. It is live at once, and marked verified when Zeron has read it.</p>
       <div class="make-acts">
         <a class="btn pri" href="/plugins/publishing">Publishing guide</a>
-        <span class="cmd"><code><em aria-hidden="true">$</em> zeron plugin publish</code><button type="button" data-copy="zeron plugin publish" aria-label="Copy the command"><Icon name="copy" /></button></span>
+        <span class="cmd"><code><em aria-hidden="true">$</em> zeron {words.one} publish</code><button type="button" data-copy={`zeron ${words.one} publish`} aria-label="Copy the command"><Icon name="copy" /></button></span>
       </div>
     </section>
   </div>

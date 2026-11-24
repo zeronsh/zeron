@@ -197,6 +197,110 @@ describe("what's empty, and what to mind", () => {
   }, 60_000);
 });
 
+describe("a name cut short", () => {
+  test("its check is right after its …, on a template's card and a plugin's", async () => {
+    for (const path of ["/templates?sort=new", "/plugins"])
+      for (const width of [1728, 1440, 390]) {
+        const page = await open({ path }, width, "dark");
+        try {
+          await page.waitForTimeout(100);
+          const gaps = await page.evaluate(() =>
+            [...document.querySelectorAll<HTMLElement>(":is(.ft-name, .pc-name) > .name:has(+ .seal)")].filter((el) => el.scrollWidth > el.clientWidth).map((el) => {
+              // (Where the "…" ends: its last whole letter that fits with it.)
+              const pen = document.createElement("canvas").getContext("2d")!, s = getComputedStyle(el), box = el.getBoundingClientRect(), range = document.createRange();
+              pen.font = `${s.fontStyle} ${s.fontWeight} ${s.fontSize} ${s.fontFamily}`;
+              const dots = pen.measureText("…").width;
+              range.setStart(el.firstChild!, 0);
+              let end = 0;
+              for (let n = 1; n <= el.firstChild!.textContent!.length; n++) {
+                range.setEnd(el.firstChild!, n);
+                const w = range.getBoundingClientRect().width;
+                if (w + dots > box.width + 0.5) break;
+                end = w + dots;
+              }
+              return el.nextElementSibling!.getBoundingClientRect().left - (box.left + end);
+            }),
+          );
+          // (The worst template is verified; on a wide screen no verified plugin of the fixtures is cut.)
+          if (path.startsWith("/templates")) expect(gaps.length, `${path} at ${width}`).toBeGreaterThan(0);
+          for (const g of gaps) expect(g, `${path} at ${width}`).toBeLessThanOrEqual(11);
+        } finally {
+          await page.context().close();
+        }
+      }
+  }, 60_000);
+});
+
+describe("a template's pictures", () => {
+  test("the row's arrow is level with its own row's middle, the preview above it or not", async () => {
+    for (const path of ["/templates/template-at-every-limit-there-is-xyz1234", "/plugins/worst-case-listing-at-every-limit-xyz12"]) {
+      const page = await open({ path }, 1440, "dark");
+      try {
+        const off = await page.evaluate(() => {
+          const arrow = document.querySelector<HTMLElement>(".shots-arrow.next:not([hidden])")?.getBoundingClientRect(), row = document.querySelector(".shots-row")!.getBoundingClientRect();
+          return arrow ? Math.abs(arrow.top + arrow.height / 2 - (row.top + row.height / 2)) : null;
+        });
+        expect(off, path).not.toBeNull();
+        expect(off!, path).toBeLessThanOrEqual(1);
+      } finally {
+        await page.context().close();
+      }
+    }
+  }, 60_000);
+
+  test("the preview is the article column's full width at 16:10, the thumbs thirds under it, then the tabs; the rail starts level with it, what it runs as first; on a phone it's under the version's line too", async () => {
+    for (const path of ["/templates/control-room", "/templates/dockside", "/templates/early-hours", "/templates/template-at-every-limit-there-is-xyz1234"])
+      for (const width of [1728, 390]) {
+        const page = await open({ path }, width, "dark", width === 1728 ? 1117 : 844);
+        try {
+          const got = await page.evaluate(() => {
+            const box = (q: string) => document.querySelector(q)?.getBoundingClientRect() ?? null;
+            const line = document.querySelector<HTMLElement>(".get .runs-as")!;
+            return { lead: box(".lead-shot")!, tabs: box(".tabs")!, rail: box(".rail")!, thumb: box(".shots-row .shot"), row: box(".shots-row"), runs: box(".rail .runs")!, line: line.checkVisibility() ? line.getBoundingClientRect().bottom : null };
+          });
+          const where = `${path} at ${width}`;
+          expect(Math.abs(got.lead.width / got.lead.height - 1.6), where).toBeLessThan(0.02);
+          expect(got.row === null || Math.round(got.row.top - got.lead.bottom) === 16, where).toBe(true);
+          expect(got.tabs.top, where).toBeGreaterThan(got.row?.bottom ?? got.lead.bottom);
+          if (width === 1728) {
+            expect([Math.round(got.lead.left - got.tabs.left), Math.round(got.lead.right - got.tabs.right)], where).toEqual([0, 0]);
+            expect(Math.round(got.lead.top - got.rail.top), where).toBe(0);
+            if (got.thumb) expect(Math.abs(got.thumb.width - (got.lead.width - 32) / 3), where).toBeLessThanOrEqual(1);
+            expect(got.line, `${where}: one place`).toBeNull();
+            expect(got.runs.bottom, where).toBeLessThan(1117);
+          } else {
+            expect(got.line, where).not.toBeNull();
+            expect(got.line!, where).toBeLessThan(844);
+          }
+        } finally {
+          await page.context().close();
+        }
+      }
+  }, 90_000);
+
+  test("the check beside a page's title is centred on the capitals", async () => {
+    for (const path of ["/templates/control-room", "/plugins/focus-timer"])
+      for (const width of [1728, 390]) {
+        const page = await open({ path }, width, "dark");
+        try {
+          const off = await page.evaluate(() => {
+            const h1 = document.querySelector(".head h1")!, seal = h1.querySelector(".seal")!.getBoundingClientRect(), s = getComputedStyle(h1), pen = document.createElement("canvas").getContext("2d")!;
+            pen.font = `${s.fontStyle} ${s.fontWeight} ${s.fontSize} ${s.fontFamily}`;
+            // (The baseline: where an inline box of no height, aligned to it, sits.)
+            const mark = document.createElement("span");
+            mark.style.cssText = "display:inline-block;width:0;height:0;vertical-align:baseline";
+            h1.prepend(mark);
+            const base = mark.getBoundingClientRect().bottom;
+            return seal.top + seal.height / 2 - (base - pen.measureText("H").actualBoundingBoxAscent / 2);
+          });
+          expect(Math.abs(off), `${path} at ${width}`).toBeLessThanOrEqual(0.75);
+        } finally {
+          await page.context().close();
+        }
+      }
+  }, 60_000);
+});
+
 describe("the columns the rule names", () => {
   test("a plugin's Get ends on the page's right edge, the rail's; its button its own width, level with the tile's middle", async () => {
     for (const path of ["/plugins/focus-timer", "/plugins/first-light", "/plugins/worst-case-listing-at-every-limit-xyz12", "/plugins/focus-timer/versions/1.2.0"])

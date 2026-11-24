@@ -301,3 +301,41 @@ for (const part of document.querySelectorAll<HTMLElement>("[data-decline]")) {
   message.addEventListener("input", show);
   show();
 }
+
+// ── A name cut short, with the check after it ──────────────────────────
+// A name too long for its card ends in "…" wherever its last whole letter
+// does, up to a letter short of its box, and the check stands after the
+// box. Here the box ends where the "…" does, so the check is right after it
+// (without the script, it's at most a letter's width away).
+const names = [...document.querySelectorAll<HTMLElement>(":is(.ft-name, .pc-name) > .name:has(+ .seal)")];
+if (names.length > 0) {
+  const pen = document.createElement("canvas").getContext("2d");
+  const fit = (el: HTMLElement) => {
+    el.style.maxWidth = "";
+    const text = el.firstChild;
+    if (!(text instanceof Text) || !pen || el.scrollWidth <= el.clientWidth) return;
+    const s = getComputedStyle(el);
+    pen.font = `${s.fontStyle} ${s.fontWeight} ${s.fontSize} ${s.fontFamily}`;
+    const room = el.getBoundingClientRect().width - pen.measureText("…").width - (parseFloat(s.letterSpacing) || 0);
+    const range = document.createRange();
+    range.setStart(text, 0);
+    let most = 0;
+    for (let n = 1; n <= text.length; n++) {
+      range.setEnd(text, n);
+      const w = range.getBoundingClientRect().width;
+      if (w > room) break;
+      most = w;
+    }
+    // (A hair more than it needs, so the same letters fit.)
+    el.style.maxWidth = `${Math.ceil((most + el.getBoundingClientRect().width - room) * 2) / 2 + 0.5}px`;
+  };
+  const all = () => names.forEach(fit);
+  void document.fonts.ready.then(all);
+  let width = innerWidth;
+  addEventListener("resize", () => {
+    if (innerWidth !== width) {
+      width = innerWidth;
+      all();
+    }
+  });
+}

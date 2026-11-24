@@ -98,6 +98,8 @@ export const ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"
 export const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
 
 export interface PackageOptions {
+  /** A template's package (its own files, manifest and signing domain); left out, a plugin's. */
+  kind?: "template";
   manifest?: Record<string, unknown>;
   files?: Record<string, string | Uint8Array | undefined>;
   /** As a deploy token sends one: no signature at all (the token vouches for its publisher). */
@@ -132,14 +134,24 @@ export class Publisher {
     return new Publisher(edge, userId, username, bearer, key, privateKey);
   }
 
-  /** A signed `.zeron-plugin`, as the engine packs one (the edge's own canonical JSON). */
+  /** A signed `.zeron-plugin` (or `.zeron-template`), as the engine packs one (the edge's own canonical JSON). */
   async package(id: string, version: string, o: PackageOptions = {}): Promise<Uint8Array<ArrayBuffer>> {
     const { canonicalJson, parseJsonText } = (await import(pathToFileURL(join(EDGE, "src/store/json.ts")).href)) as {
       canonicalJson(v: unknown): string;
       parseJsonText(t: string): unknown;
     };
-    const prefix = (JSON.parse(readFileSync(join(ROOT, "docs/plugin-store-data.json"), "utf8")) as { payload_prefix: string }).payload_prefix;
-    const files: Record<string, string | Uint8Array | undefined> = {
+    const data = JSON.parse(readFileSync(join(ROOT, "docs/plugin-store-data.json"), "utf8")) as { payload_prefix: string; template_payload_prefix?: string };
+    const template = o.kind === "template";
+    const prefix = template ? data.template_payload_prefix! : data.payload_prefix;
+    const format = template ? "zeron-template:v1" : "zeron-plugin:v1";
+    const files: Record<string, string | Uint8Array | undefined> = template ? {
+      "app.luau": `return "${id} ${version}"`,
+      "README.md": `# ${id}\n\nA look for Zeron.\n`,
+      "CHANGELOG.md": `# Changes\n\n## ${version}\n\n- What changed in ${version}.\n`,
+      "preview.png": PNG,
+      "screenshots/one.png": PNG,
+      ...o.files,
+    } : {
       "init.luau": `return "${id} ${version}"`,
       "README.md": `# ${id}\n\nIt does a thing.\n\n![A screen](shots/one.png)\n`,
       "CHANGELOG.md": `# Changes\n\n## ${version}\n\n- What changed in ${version}.\n`,
@@ -149,7 +161,7 @@ export class Publisher {
     };
     const bytes = new Map<string, Buffer>();
     for (const [path, data] of Object.entries(files)) if (data !== undefined) bytes.set(path, Buffer.from(data));
-    const fields: Record<string, unknown> = {
+    const fields: Record<string, unknown> = template ? { id, name: id.replace(/-/g, " "), version, description: `The ${id} template.`, zeron_version: "0.3.0", keywords: ["calm"], screenshots: ["screenshots/one.png"], ...o.manifest } : {
       id,
       name: id.replace(/-/g, " "),
       version,
@@ -167,7 +179,7 @@ export class Publisher {
     const hashes = new Map([...bytes.keys()].sort().map((p) => [p, createHash("sha256").update(bytes.get(p)!).digest("hex")]));
     if (o.unsigned) {
       return new TextEncoder().encode(
-        JSON.stringify({ format: "zeron-plugin:v1", manifest: JSON.parse(canonicalJson(manifest)), files: Object.fromEntries([...bytes].map(([p, d]) => [p, d.toString("base64")])) }),
+        JSON.stringify({ format, manifest: JSON.parse(canonicalJson(manifest)), files: Object.fromEntries([...bytes].map(([p, d]) => [p, d.toString("base64")])) }),
       );
     }
     const toSign = new Map(manifest);
@@ -176,7 +188,7 @@ export class Publisher {
     const signed = JSON.parse(canonicalJson(manifest)) as Record<string, unknown>;
     signed.signature = { key: this.key, files: Object.fromEntries(hashes), sig };
     return new TextEncoder().encode(
-      JSON.stringify({ format: "zeron-plugin:v1", manifest: signed, files: Object.fromEntries([...bytes].map(([p, d]) => [p, d.toString("base64")])) }),
+      JSON.stringify({ format, manifest: signed, files: Object.fromEntries([...bytes].map(([p, d]) => [p, d.toString("base64")])) }),
     );
   }
 
@@ -187,7 +199,7 @@ export class Publisher {
 
   /** Publish a version (listed at once, not verified: amendment 45). */
   async publish(id: string, version: string, o: PackageOptions = {}): Promise<void> {
-    const response = await fetch(`${this.edge}/store/v1/plugins/${id}/versions`, { method: "POST", headers: { authorization: `Bearer ${this.bearer}` }, body: await this.package(id, version, o) });
+    const response = await fetch(`${this.edge}/store/v1/${o.kind ?? "plugin"}s/${id}/versions`, { method: "POST", headers: { authorization: `Bearer ${this.bearer}` }, body: await this.package(id, version, o) });
     if (response.status !== 201) throw new Error(`publishing ${id} ${version}: ${response.status} ${await response.text()}`);
   }
 }

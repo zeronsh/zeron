@@ -103,7 +103,7 @@ describe("by keyboard", () => {
       expect(stops[1]!.tag).toBe("a");
       // (The store's search is its hero's, the page's first stop: the bar has none there.)
       const store = path === "/plugins" || path.startsWith("/plugins?");
-      expect(stops.slice(2, 6).map((s) => s.label)).toEqual(store ? ["Browse", "Publish", "Sign in", "Search plugins"] : ["Browse", "Publish", "Search plugins", "Sign in"]);
+      expect(stops.slice(2, 6).map((s) => s.label)).toEqual(store ? ["Plugins", "Templates", "Publish", "Sign in"] : ["Plugins", "Templates", "Publish", "Search plugins"]);
       // Every stop shows the ring.
       for (const s of stops) expect(s.ring, s.label).toBe("solid");
       // Down the page: a later stop is never above an earlier one's row (a row's stops go left to right).
@@ -135,7 +135,7 @@ describe("by keyboard", () => {
       await page.getByRole("button", { name: "Menu" }).click();
       const menu = page.locator("#nav-menu");
       await expect.poll(() => menu.isVisible()).toBe(true);
-      expect(await menu.getByRole("link").allTextContents()).toEqual(expect.arrayContaining(["Browse", "Publish", "Publishing guide", "Sign in"]));
+      expect(await menu.getByRole("link").allTextContents()).toEqual(expect.arrayContaining(["Plugins", "Templates", "Publish", "Publishing guide", "Sign in"]));
       expect(await menu.getByRole("link").allTextContents()).not.toContain("Discover");
       await page.keyboard.press("Escape");
       await expect.poll(() => menu.isVisible()).toBe(false);

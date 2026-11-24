@@ -7,6 +7,8 @@
 // optional where an older edge may not send them yet. Times are ms since the
 // epoch.
 
+import type { Kind } from "./kind.ts";
+
 /** A failure's stable word. Anything else the edge says reads as `unknown`. */
 export type ErrorWord =
   | "site_id"
@@ -77,6 +79,8 @@ export interface Author {
 
 export interface PluginCard {
   id: string;
+  /** What it is (an edge before templates leaves it out: a plugin; lib/store/kind.ts kindOfItem). A template's `icon` is null, its `cover` always "preview.png", its `categories` []. */
+  kind?: Kind;
   name: string;
   summary: string;
   /** The icon's path in the package (an SVG), or null (amendment 35). */
@@ -211,7 +215,8 @@ export interface PluginDetail extends PluginCard {
   readme: string;
   /** Pictures' paths in the package (amendment 35). */
   screenshots: string[];
-  permissions: Permissions;
+  /** (A template asks for nothing and has none of these: it runs as Zeron itself.) */
+  permissions?: Permissions;
   engines: { zeron?: string } | null;
   homepage: string | null;
   repository: string | null;

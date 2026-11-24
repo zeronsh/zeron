@@ -138,7 +138,6 @@ pre, pre *, code, .mono, .fn { font-variant-ligatures: none !important; }
 .brand { display: flex; align-items: center; gap: var(--s12); font-weight: 600; font-size: 15px; letter-spacing: -0.01em; border-radius: 6px; }
 /* (Its own size, on whole pixels: components/look/ZeronMark.astro.) */
 .brand .mark { flex: none; fill: currentColor; }
-.brand .sep { color: var(--text-3); font-weight: 400; }
 .nav { display: flex; gap: var(--s4); margin-left: var(--s4); }
 .nav a { padding: var(--s8) var(--s12); border-radius: 8px; font-size: 14px; line-height: 20px; color: var(--text-2); font-weight: 450; transition: color 0.12s var(--ease), background-color 0.12s var(--ease); }
 .nav a:hover { color: var(--text); background: color-mix(in srgb, var(--sunken) 60%, transparent); }

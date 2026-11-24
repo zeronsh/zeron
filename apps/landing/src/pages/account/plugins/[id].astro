@@ -97,7 +97,7 @@ const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions
               <h1 class={lsb(name)}><Words text={name} /></h1>
               <p class="by">
                 <span class="mono">{plugin.id}</span>
-                {listing && <><i aria-hidden="true"></i><span class:list={["state", TONE[listing.tone]]}>{listing.label}</span></>}
+                {listing && plugin.listing !== "listed" && <><i aria-hidden="true"></i><span class:list={["state", TONE[listing.tone]]}>{listing.label}</span></>}
               </p>
             </div>
             {plugin.listing === "listed" && <div class="head-act"><a class="btn sec" href={pluginUrl(plugin.id)}>See it in the store<Icon name="out" /></a></div>}

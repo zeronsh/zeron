@@ -99,6 +99,7 @@ const REPORT = { open: { label: "Open" }, actioned: { label: "Acted on" }, dismi
                 {a.versions.map((v) => {
                   const st = versionState(v);
                   const ver = verificationState(v);
+                  const gone = v.status === "taken_down" || v.status === "removed";
                   const decided = v.review?.decided_at;
                   // (What was said: why it was taken down or removed, the reviewer's words; with their reason and when.)
                   const words = v.removal?.reason ? `“${v.removal.reason}”` : v.review?.message ? `“${v.review.message}”` : null;
@@ -110,10 +111,15 @@ const REPORT = { open: { label: "Open" }, actioned: { label: "Acted on" }, dismi
                     <li class:list={["trow", { two: Boolean(note) }]}>
                       <span class="c-ver">
                         <a class="mono stretch" href={`${here}/${encodeURIComponent(v.version)}`}>{v.version}</a>
-                        {/* (Whether Zeron verified it first, as on its author's page; where it stands only when that isn't simply listed.) */}
-                        <span class:list={["state", PILL_TONE[ver.tone]]}>{v.verified && <Seal quiet />}{ver.label}</span>
-                        {v.status !== "listed" && <span class:list={["state", PILL_TONE[st.tone]]}>{st.label}</span>}
-                        {v.blocked && <span class="state bad" title="Turned off on the devices that had it">Off</span>}
+                        {/* (One state: taken down or removed, else whether Zeron verified it; stopped, in words beside it.) */}
+                        {gone ? (
+                          <span class:list={["state", PILL_TONE[st.tone]]}>{st.label}</span>
+                        ) : (
+                          <>
+                            <span class:list={["state", PILL_TONE[ver.tone]]}>{v.verified && <Seal quiet />}{ver.label}</span>
+                            {v.status !== "listed" && <span class="t3 small">{st.label}</span>}
+                          </>
+                        )}
                       </span>
                       <span class="c-pub"><span class="sr-only">Published </span><time datetime={new Date(v.published_at).toISOString()} title={dateTime(v.published_at)}>{day(v.published_at)}</time></span>
                       <span class="c-act">

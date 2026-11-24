@@ -29,6 +29,7 @@ import type {
   VersionsPage,
   WebSession,
 } from "./types.ts";
+import type { Kind } from "./kind.ts";
 import { ADMIN_PAGE } from "./paging.ts";
 
 export type Result<T> = { ok: true; data: T } | { ok: false; status: number; error: ErrorWord; message?: string; ids?: string[] };
@@ -47,6 +48,8 @@ export interface EdgeBinding {
 }
 
 export interface CatalogQuery {
+  /** Plugins (the default) or templates. */
+  kind?: Kind;
   q?: string;
   category?: string;
   keyword?: string;
@@ -101,29 +104,29 @@ export class Edge {
     if (query.verified) params.set("verified", "1");
     if (query.author) params.set("author", query.author);
     const search = params.size ? `?${params}` : "";
-    return this.#json(`/store/v1/plugins${search}`);
+    return this.#json(`${root(query.kind)}${search}`);
   }
 
-  plugin(id: string): Promise<Result<PluginDetail>> {
-    return this.#json(`/store/v1/plugins/${segment(id)}`);
+  plugin(id: string, kind?: Kind): Promise<Result<PluginDetail>> {
+    return this.#json(`${root(kind)}/${segment(id)}`);
   }
 
   /** A page of a plugin's versions, listed and yanked, newest first (amendment 45: every one can be seen and installed). */
-  versions(id: string, cursor?: string, limit?: number): Promise<Result<VersionsPage>> {
+  versions(id: string, cursor?: string, limit?: number, kind?: Kind): Promise<Result<VersionsPage>> {
     const params = new URLSearchParams();
     if (cursor) params.set("cursor", cursor);
     if (limit) params.set("limit", String(limit));
-    return this.#json(`/store/v1/plugins/${segment(id)}/versions${params.size ? `?${params}` : ""}`);
+    return this.#json(`${root(kind)}/${segment(id)}/versions${params.size ? `?${params}` : ""}`);
   }
 
   /** One version of a plugin, listed or yanked. */
-  version(id: string, version: string): Promise<Result<VersionInfo>> {
-    return this.#json(`/store/v1/plugins/${segment(id)}/versions/${segment(version)}`);
+  version(id: string, version: string, kind?: Kind): Promise<Result<VersionInfo>> {
+    return this.#json(`${root(kind)}/${segment(id)}/versions/${segment(version)}`);
   }
 
-  /** The store's totals: plugins listed, and how many of them are verified. */
-  stats(): Promise<Result<Stats>> {
-    return this.#json(`/store/v1/stats`);
+  /** The store's totals for a kind: how many are listed, and how many of them are verified. */
+  stats(kind?: Kind): Promise<Result<Stats>> {
+    return this.#json(`/store/v1/stats${kind === "template" ? "?kind=template" : ""}`);
   }
 
   /** The latest Zeron released (the edge's /releases/latest.txt), or null when it can't be had. */
@@ -144,8 +147,9 @@ export class Edge {
   }
 
   /** The keywords listed plugins carry (in a category, if one is named), most used first. */
-  keywords(query: { category?: string; limit?: number } = {}): Promise<Result<{ keywords: KeywordCount[] }>> {
+  keywords(query: { category?: string; limit?: number; kind?: Kind } = {}): Promise<Result<{ keywords: KeywordCount[] }>> {
     const params = new URLSearchParams();
+    if (query.kind === "template") params.set("kind", query.kind);
     if (query.category) params.set("category", query.category);
     if (query.limit) params.set("limit", String(query.limit));
     return this.#json(`/store/v1/keywords${params.size ? `?${params}` : ""}`);
@@ -156,10 +160,10 @@ export class Edge {
    * what of it goes to the browser). `signedIn` sends the visitor's cookie:
    * a version taken down or removed is its owner's and staff's only.
    */
-  async file(id: string, version: string, path: string, signedIn: boolean): Promise<Response> {
+  async file(id: string, version: string, path: string, signedIn: boolean, kind?: Kind): Promise<Response> {
     let url: string;
     try {
-      url = `/store/v1/plugins/${segment(id)}/files/${segment(version)}/${path.split("/").map(segment).join("/")}`;
+      url = `${root(kind)}/${segment(id)}/files/${segment(version)}/${path.split("/").map(segment).join("/")}`;
     } catch {
       // (A path no package can hold is a file that isn't there.)
       return new Response(null, { status: 404 });
@@ -214,8 +218,8 @@ export class Edge {
     return this.#json(`/store/v1/me/tokens/${segment(id)}`, { method: "DELETE", csrf });
   }
 
-  report(id: string, body: { reason: string; text: string }, csrf: string): Promise<Result<unknown>> {
-    return this.#json(`/store/v1/plugins/${segment(id)}/reports`, { method: "POST", csrf, body });
+  report(id: string, body: { reason: string; text: string }, csrf: string, kind?: Kind): Promise<Result<unknown>> {
+    return this.#json(`${root(kind)}/${segment(id)}/reports`, { method: "POST", csrf, body });
   }
 
   // ── Admin ─────────────────────────────────────────────────────────────
@@ -308,6 +312,9 @@ export class Edge {
     return failure(response.status, payload);
   }
 }
+
+/** A kind's public prefix: the same routes under each, an id of the other kind not found there. */
+const root = (kind: Kind = "plugin") => (kind === "template" ? "/store/v1/templates" : "/store/v1/plugins");
 
 function failure(status: number, payload: unknown): { ok: false; status: number; error: ErrorWord; message?: string; ids?: string[] } {
   const body = (payload ?? {}) as Partial<EdgeError>;

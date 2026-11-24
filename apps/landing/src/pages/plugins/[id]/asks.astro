@@ -20,18 +20,18 @@ export const prerender = false;
 
 const asked = Astro.params.id ?? "";
 if (Astro.url.search) return Astro.redirect(`${pluginUrl(asked)}/asks`, 301);
-const page = await loadPlugin(Astro.locals.edge, asked, { limit: 5 });
+const page = await loadPlugin(Astro.locals.edge, "plugin", asked, { limit: 5 });
 if (page.state === "ok") publicPage(Astro, [pluginTag(page.plugin.id)]);
 else Astro.response.status = page.state === "missing" ? 404 : 503;
-const asks = page.state === "ok" ? lines(page.plugin.permissions) : [];
-const where = page.state === "ok" ? details(page.plugin.permissions) : [];
+const asks = page.state === "ok" ? lines(page.plugin.permissions!) : [];
+const where = page.state === "ok" ? details(page.plugin.permissions!) : [];
 const risky = asks.filter((l) => l.risky).length;
 const author = page.state === "ok" ? page.plugin.author.username : null;
 ---
 
 {
   page.state === "ok" ? (
-    <Store title={`What ${page.plugin.name} asks for · Plugins · Zeron`} description={`What ${page.plugin.name}, a plugin for Zeron, asks to do, in Zeron's own words.`} canonical={`${pluginUrl(page.plugin.id)}/asks`} current="browse" class={hueClass(page.plugin.id)}>
+    <Store title={`What ${page.plugin.name} asks for · Plugins · Zeron`} description={`What ${page.plugin.name}, a plugin for Zeron, asks to do, in Zeron's own words.`} canonical={`${pluginUrl(page.plugin.id)}/asks`} current="plugin" class={hueClass(page.plugin.id)}>
       <div class="wrap">
         <PluginHead plugin={page.plugin} category={page.category} versions={page.versions?.versions ?? page.plugin.versions} latestZeron={page.latestZeron} />
         <div class="cols2 after-head">
@@ -76,6 +76,6 @@ const author = page.state === "ok" ? page.plugin.author.username : null;
       </div>
     </Store>
   ) : (
-    <NotHere state={page.state} retry={`${pluginUrl(asked)}/asks`} />
+    <NotHere kind="plugin" state={page.state} retry={`${pluginUrl(asked)}/asks`} />
   )
 }

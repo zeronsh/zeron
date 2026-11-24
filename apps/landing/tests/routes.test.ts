@@ -89,7 +89,11 @@ describe("the site's own pages", () => {
 
   test("robots and the sitemaps", async () => {
     expect((await html("/robots.txt")).body).toContain("Sitemap: https://zeron.sh/sitemap.xml");
-    expect((await html("/sitemap.xml")).body).toContain("<loc>https://zeron.sh/plugins/sitemap.xml</loc>");
+    const index = (await html("/sitemap.xml")).body;
+    for (const kind of ["plugins", "templates"]) expect(index).toContain(`<loc>https://zeron.sh/${kind}/sitemap.xml</loc>`);
+    const templates = (await html("/templates/sitemap.xml")).body;
+    expect(templates).toContain("<loc>https://zeron.sh/templates/control-room</loc>");
+    expect(templates).not.toContain("/plugins");
     const plugins = await html("/plugins/sitemap.xml");
     expect(plugins.response.headers.get("content-type")).toContain("application/xml");
     expect(plugins.body).toContain("<loc>https://zeron.sh/plugins/focus-timer</loc>");
@@ -297,7 +301,7 @@ describe("a plugin's page", () => {
     expect(body).toMatch(/<a href="\/plugins\/focus-timer" aria-current="page">Overview<\/a><a href="\/plugins\/focus-timer\/versions">Versions<span class="num">\d+<\/span><\/a><a href="\/plugins\/focus-timer\/asks">What it asks for<span class="num">\d+<\/span><\/a>/);
     expect(body).toContain('<a href="/plugins/focus-timer/report">');
     // Every version verified: the seal by the name, Verified under Install, no amber note.
-    expect(body).toMatch(/<h1 [^>]*><span class="name">Focus timer<\/span><svg class="seal l"/);
+    expect(body).toMatch(/<h1 [^>]*><span class="name">Focus timer<\/span>(&nbsp;|\u00a0)<svg class="seal l"/);
     expect(body).toMatch(/<span class="said ok"><svg class="seal"[^>]*>[\s\S]*?<\/svg>Verified<\/span>/);
     expect(body).not.toContain('<p class="note">');
   });
@@ -1349,6 +1353,106 @@ describe("forms", () => {
   });
 });
 
+describe("templates: a plugin's pages, given the kind", () => {
+  test("the list: image first, each its preview, not verified yet in words; what they run as once, above; how to narrow it a row, no sidebar; Featured only over a longer list, never twice", async () => {
+    const { response, body } = await html("/templates");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("public, max-age=30");
+    expect(hasInlineScript(body)).toBe(false);
+    inert(body);
+    expect(body).toContain("<p class=\"lead\">Whole interfaces for Zeron, made by people who use it. A check marks what Zeron has verified.</p>");
+    const list = body.slice(body.indexOf('<ul class="tresults"'), body.indexOf("</ul>", body.indexOf('<ul class="tresults"')));
+    const cards = list.split('<a class="ftile').slice(1);
+    expect(cards.length).toBe(11);
+    for (const c of cards) {
+      expect(c).toMatch(/ href="\/templates\/[a-z0-9-]+"><span class="ft-cover"><img src="\/templates\/[a-z0-9-]+\/files\/[^/]+\/preview\.png" alt=""/);
+      expect(c).not.toContain('class="tile');
+      expect(c).not.toContain("Runs as Zeron");
+    }
+    expect(cards.find((c) => c.includes("/templates/dockside"))).toMatch(/<span class="state no">Not verified yet<\/span>/);
+    expect(cards.find((c) => c.includes("/templates/control-room"))).toMatch(/<svg class="seal s"[\s\S]*<span class="num">4,210 installs<\/span>/);
+    expect(body.match(/Runs as Zeron|runs as Zeron/g)).toHaveLength(1);
+    expect(body).toContain('<p class="fact">A template runs as Zeron itself: it can do anything Zeron can.</p>');
+    expect(body).not.toContain('class="facets"');
+    expect(body).not.toContain('id="featured"');
+    expect(body).toMatch(/<a class="chip" href="\/templates\?keyword=calm"/);
+    // (A category means nothing here, whatever the address says.)
+    expect((await html("/templates?category=git")).response.headers.get("location")).toBe("/templates");
+    expect((await html("/templates?q=zzzz")).body).toContain("<p>No template matches “zzzz”.</p>");
+    // (A list longer than a page: Featured over it, its three left out of the first page's grid, all of them once in all.)
+    try {
+      await site.fake("templates", { on: "1" });
+      const { body: long } = await html("/templates", await site.signIn("user_mo"));
+      const at = (part: string) => [...part.matchAll(/<a class="ftile h\d+" href="\/templates\/([^"]+)"/g)].map((m) => m[1]!);
+      const cut = long.indexOf('<ul class="tresults"');
+      expect(at(long.slice(0, cut))).toEqual(["control-room", "paper-desk", "phosphor"]);
+      expect(at(long.slice(cut))).toHaveLength(21);
+      expect(new Set(at(long)).size).toBe(24);
+    } finally {
+      await site.fake("templates");
+    }
+  });
+
+  test("a template never shows where a plugin is asked for, nor the reverse: lists, search, one page, its versions, its files", async () => {
+    const plugins = (await html("/plugins?q=control+room")).body;
+    expect(plugins).not.toContain("control-room");
+    expect((await html("/templates?q=timer")).body).not.toContain("focus-timer");
+    for (const path of ["/plugins/control-room", "/plugins/control-room/versions", "/plugins/control-room/versions/1.2.0", "/plugins/control-room/files/1.2.0/preview.png", "/templates/focus-timer", "/templates/focus-timer/versions", "/templates/focus-timer/versions/1.2.0", "/templates/focus-timer/files/1.2.0/icon.svg", "/templates/control-room/asks"])
+      expect((await site.fetch(path)).status, path).toBe(404);
+    expect((await html("/templates/focus-timer")).body).toContain("No template is listed here");
+  });
+
+  test("its page: no tile, its preview large and first, then its pictures; what it runs as; Overview and Versions; Install opens it in Zeron", async () => {
+    const { response, body } = await html("/templates/control-room");
+    expect(response.status).toBe(200);
+    inert(body);
+    expect(body).toContain("<title>Control room, a template for Zeron</title>");
+    const head = body.slice(body.indexOf('<header class="head bare"'), body.indexOf("</header>", body.indexOf('<header class="head bare"')));
+    expect(head).not.toContain('class="tile');
+    expect(head).toContain('href="zeron://open/template/control-room" data-install');
+    // (Beside Install: after the version's line, before "Opens Zeron".)
+    expect(head).toMatch(/<p class="ver">[\s\S]*?<\/p>\s*<p class="runs-as">Runs as Zeron itself<\/p>[\s\S]*Opens Zeron\./);
+    const shots = [...body.matchAll(/<a class="shot([^"]*)" href="([^"]+)"[^>]*data-shot="(\d)"/g)].map((m) => `${m[3]}${m[1]} ${m[2]}`);
+    expect(shots).toEqual(["0 lead-shot /templates/control-room/files/1.2.0/preview.png", ...[1, 2, 3].map((i) => `${i} /templates/control-room/files/1.2.0/screenshots/${i}.png`)]);
+    expect(body).toMatch(/<h2 class="rail-h" id="rail-runs">Runs as Zeron itself<\/h2><p>It can do anything Zeron can\.<\/p>/);
+    expect(body).toMatch(/<nav class="tabs"[^>]*><a href="\/templates\/control-room" aria-current="page">Overview<\/a><a href="\/templates\/control-room\/versions">Versions<span class="num">3<\/span><\/a><\/nav>/);
+    expect(body).not.toContain("What it asks for");
+    expect(body).toContain('<a href="/templates/control-room/report">');
+    const preview = await site.fetch("/templates/control-room/files/1.2.0/preview.png");
+    expect([preview.status, preview.headers.get("content-type")]).toEqual([200, "image/png"]);
+    expect([...new Uint8Array(await preview.arrayBuffer()).subarray(0, 4)]).toEqual([0x89, 0x50, 0x4e, 0x47]);
+    // One not verified: in words at its head, beside its preview, with the verified one to install instead.
+    const dock = (await html("/templates/dockside")).body;
+    expect(dock).toContain('<span class="said no">Not verified yet</span>');
+    expect(dock).toContain('href="zeron://open/template/dockside?version=0.9.0"');
+    expect((await html("/templates/early-hours")).body).toContain("<b>No version of this template is verified yet.</b>");
+  });
+
+  test("its versions, one version and its report are the same pages, under its own prefix", async () => {
+    const versions = (await html("/templates/control-room/versions")).body;
+    expect(versions).toContain('<a href="/templates/control-room/versions/1.1.0">1.1.0</a>');
+    expect(versions).toContain('href="zeron://open/template/control-room?version=1.1.0"');
+    const one = (await html("/templates/control-room/versions/1.1.0")).body;
+    expect(one).toContain("Runs as Zeron itself");
+    expect(one).toContain('<a href="/templates">Templates</a>');
+    const kai = await site.signIn("user_kai");
+    const report = await html("/templates/control-room/report", kai);
+    expect(report.body).toContain('action="/templates/control-room/report"');
+    const sent = await post("/templates/control-room/report", kai, { csrf: tokenOf(report.body), reason: "other", text: "A test." });
+    expect([sent.status, sent.headers.get("location")]).toEqual([303, "/templates/control-room/report"]);
+    expect((await site.fetch("/templates/focus-timer/report", { headers: { cookie: kai } })).status).toBe(404);
+  });
+
+  test("the bar's search searches the kind you're on; on a page of neither, plugins", async () => {
+    for (const [path, at] of [["/templates/control-room", "/templates"], ["/plugins/focus-timer", "/plugins"], ["/plugins/publishing", "/plugins"], ["/account", "/plugins"]] as const) {
+      const { body } = await html(path);
+      expect(body, path).toContain(`<form class="find" role="search" action="${at}"`);
+      expect(body, path).toContain(`placeholder="Search ${at.slice(1)}"`);
+    }
+    expect((await html("/templates")).body).toMatch(/<a href="\/templates" aria-current="page">Templates<\/a>/);
+  });
+});
+
 describe("one store page (Discover and Browse were two)", () => {
   /** The Featured row's part of a page. */
   const featuredRow = (body: string) => (body.includes('<ul class="feat-row">') ? body.slice(body.indexOf('<ul class="feat-row">'), body.indexOf("</ul>", body.indexOf('<ul class="feat-row">'))) : "");
@@ -1376,11 +1480,11 @@ describe("one store page (Discover and Browse were two)", () => {
     expect(body).toMatch(/<div class="make-acts"><a class="btn pri" href="\/plugins\/publishing">Publishing guide<\/a><span class="cmd">/);
   });
 
-  test("the bar: Browse · Publish · Review (Discover gone); the store's search is its hero's, the bar's elsewhere; each narrows the store in place", async () => {
+  test("the bar: Plugins · Templates · Publish · Review (Discover and Browse gone); the store's search is its hero's, the bar's elsewhere; each narrows the store in place", async () => {
     const { body } = await html("/plugins?category=git&verified=1");
     const nav = body.slice(body.indexOf('<nav class="nav"'), body.indexOf("</nav>", body.indexOf('<nav class="nav"')));
     // (On a public page Review is there for staff alone, hidden until the script knows who's looking.)
-    expect([...nav.matchAll(/<a href="([^"]+)"[^>]*>([^<]+)<\/a>/g)].map((m) => `${m[2]} ${m[1]}`)).toEqual(["Browse /plugins", "Publish /account", "Review /admin/plugins"]);
+    expect([...nav.matchAll(/<a href="([^"]+)"[^>]*>([^<]+)<\/a>/g)].map((m) => `${m[2]} ${m[1]}`)).toEqual(["Plugins /plugins", "Templates /templates", "Publish /account", "Review /admin/plugins"]);
     expect(nav).toMatch(/<a href="\/admin\/plugins" hidden data-staff>Review<\/a>/);
     expect(body).not.toContain(">Discover<");
     // (The hero's form, the bar's and the phone's: to the store, keeping what narrows it.)

@@ -125,8 +125,13 @@ describe("a reviewer, start to finish", () => {
       const dialog = page.getByRole("dialog", { name: "Verify focus timer 1.0.0?" });
       await expect.poll(() => dialog.isVisible()).toBe(true);
       expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Verify");
+      // (The post comes back to the page it was asked on: its own answer, then that page again.)
+      const posted = page.waitForResponse((r) => r.request().method() === "POST" && r.url().endsWith("/admin/plugins/focus-timer/1.0.0/verify"));
+      const back = page.waitForResponse((r) => r.request().method() === "GET" && r.url() === `${edge.origin}/admin/plugins/focus-timer/1.0.0`);
       await page.keyboard.press("Enter");
-      await page.waitForURL(`${edge.origin}/admin/plugins/focus-timer/1.0.0`);
+      expect((await posted).status()).toBe(303);
+      await back;
+      await page.waitForLoadState();
       await expect.poll(() => page.getByText(VERIFIED).isVisible()).toBe(true);
 
       // (Sign out is in your menu, under your name in the bar.)

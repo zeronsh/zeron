@@ -658,6 +658,43 @@ describe("every page, with what the real edge holds", () => {
   });
 });
 
+describe("templates, as the edge holds them", () => {
+  // (An edge before templates has no such prefix: nothing here to hold it to.)
+  test("published, they're the site's under /templates alone: the list, its page with its preview, versions, one version, files; a plugin's id isn't there, nor the reverse", async ({ skip }) => {
+    if ((await fetch(`${edge.url}/store/v1/templates`)).status !== 200) return skip("this edge has no templates");
+    // (An author of its own: an account claims at most five new ids a week.)
+    const tess = await Publisher.signIn(edge.url, "user_tess", "tessdesk");
+    await tess.publish("calm-desk", "1.0.0", { kind: "template" });
+    const visitor = new Browser();
+    const list = (await visitor.get("/templates")).body;
+    expect(list).toMatch(/<a class="ftile h\d+" href="\/templates\/calm-desk"><span class="ft-cover"><img src="\/templates\/calm-desk\/files\/1\.0\.0\/preview\.png"/);
+    expect(list).toMatch(/<a class="chip" href="\/templates\?keyword=calm"/);
+    expect(list).toContain('<span class="state no">Not verified yet</span>');
+    expect((await visitor.get("/plugins?sort=new")).body).not.toContain("calm-desk");
+    const page = (await visitor.get("/templates/calm-desk")).body;
+    inert(page);
+    expect(page).toContain('href="zeron://open/template/calm-desk" data-install');
+    expect(page).toContain('<h2 class="rail-h" id="rail-runs">Runs as Zeron itself</h2>');
+    expect(page).toContain("<b>No version of this template is verified yet.</b>");
+    expect(page).toContain("Zeron 0.3.0 or later");
+    expect(page).not.toContain("What it asks for");
+    for (const path of ["/templates/calm-desk/versions", "/templates/calm-desk/versions/1.0.0", "/templates?q=calm", "/templates?keyword=calm", "/templates?sort=new"]) {
+      const { response, body } = await visitor.get(path);
+      expect(response.status, path).toBe(200);
+      expect(body.toLowerCase(), path).toContain("calm desk");
+    }
+    for (const file of ["preview.png", "screenshots/one.png"]) {
+      const { response } = await visitor.get(`/templates/calm-desk/files/1.0.0/${file}`);
+      expect([response.status, response.headers.get("content-type")], file).toEqual([200, "image/png"]);
+    }
+    for (const path of ["/plugins/calm-desk", "/plugins/calm-desk/files/1.0.0/preview.png", "/templates/focus-timer", "/templates/focus-timer/versions/1.0.0"]) expect((await visitor.get(path)).response.status, path).toBe(404);
+    expect((await visitor.get("/templates/sitemap.xml")).body).toContain("<loc>https://zeron.sh/templates/calm-desk</loc>");
+    // (Reported under its own prefix, as the edge takes it.)
+    const form = await adaOnWeb.get("/templates/calm-desk/report");
+    expect(form.response.status).toBe(200);
+  });
+});
+
 describe("signing out", () => {
   test("without the session's token, it's refused in the store's word, and the session lives", async () => {
     const browser = await signInOnTheWeb("user_ada");

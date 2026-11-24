@@ -99,6 +99,8 @@ export interface FakeVersion {
 }
 
 export interface FakePlugin {
+  /** What it is; left out, a plugin. */
+  kind?: "template";
   id: string;
   owner: string;
   status: "listed" | "unlisted" | "suspended" | "removed";
