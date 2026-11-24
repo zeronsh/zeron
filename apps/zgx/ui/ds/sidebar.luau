@@ -267,6 +267,15 @@ export type Props = {
 	-- A session's context menu (a secondary click on its row): its entries
 	-- (ds/context_menu's), nil for none.
 	menu: ((id: string) -> { ContextMenu.Entry }?)?,
+	-- Sessions picked out together, by id: a ⇧-click picks every one the list
+	-- shows from the session open (or where the picking began) through the
+	-- one clicked, and opens nothing. A plain click opens its session and
+	-- lets them all go. Only sessions the list shows are ever in it (one
+	-- folded away, filtered out or archived leaves it).
+	marked: State<{ [string]: boolean }>?,
+	-- The context menu of several of them, opened on any one: by their ids,
+	-- in the list's order.
+	menu_many: ((ids: { string }) -> { ContextMenu.Entry }?)?,
 	-- A project group's menu, on its header (Rename…, Remove…), by its id.
 	project_menu: ((id: string) -> { ContextMenu.Entry }?)?,
 }
@@ -459,6 +468,39 @@ return ui.component(function(props: Props): Node
 		end)
 	end
 	local selected = props.selected
+	-- The sessions picked out together (⇧-clicked), where the caller keeps
+	-- them.
+	local marked = props.marked
+	local function is_marked(id: string): boolean
+		return marked ~= nil and marked:get()[id] == true
+	end
+	local function any_marked(): boolean
+		return marked ~= nil and next(marked:get()) ~= nil
+	end
+	local function unmark_all()
+		if marked and next(marked:peek()) ~= nil then
+			marked:set({})
+		end
+	end
+	-- What can be picked, in the order the list shows it; and where the
+	-- picking began, the end every ⇧-click keeps.
+	local pickable: { string } = {}
+	local anchor: string? = nil
+	local function mark_through(id: string)
+		local to = table.find(pickable, id)
+		if not marked or not to then
+			return
+		end
+		local from = if next(marked:peek()) ~= nil then anchor else selected:peek()
+		-- (Not in the list, a new chat's or one folded away: from here.)
+		local at = (if from then table.find(pickable, from) else nil) or to
+		anchor = pickable[at]
+		local through: { [string]: boolean } = {}
+		for i = math.min(at, to), math.max(at, to) do
+			through[pickable[i]] = true
+		end
+		marked:set(through)
+	end
 	-- (Reduce motion: there at once; ds/motion.)
 	local function eased(f: () -> number, how: any): any
 		return motion.tween(ui.computed(f), how)
@@ -866,8 +908,10 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- button): its wash stops short of it.
 		less: number?,
 		selected: (() -> boolean)?,
+		-- Open, but not what's selected (others are picked out): the quiet wash.
+		current: (() -> boolean)?,
 		hovered: State<boolean>?,
-		on_click: (() -> ())?,
+		on_click: ((e: ClickEvent) -> ())?,
 		-- (What plugins place by, and what's under them: ids, never records.)
 		class: string?,
 		provide: { [string]: any }?,
@@ -997,6 +1041,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				selected = function(): boolean
 					return is_selected ~= nil and is_selected()
 				end,
+				current = r.current,
 
 				on_click = r.on_click,
 				on_hover = function(inside: boolean)
@@ -1251,8 +1296,18 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		end, function(): boolean
 			return details.branch:get() and cur().branch ~= nil
 		end, second_line, fades)
+		-- Whether it's open, and whether it can be picked out with others (in
+		-- the list itself, off the shelf) and is.
+		-- (Every chat of the split showing is open too.)
+		local function is_open(): boolean
+			return selected:get() == s.id or in_split(s.id)
+		end
+		local markable = marked ~= nil and not in_flyout and not shelved
+		local function picked(): boolean
+			return markable and is_marked(s.id)
+		end
 		local function strong(): boolean
-			return active(s) or selected:get() == s.id or in_split(s.id)
+			return active(s) or is_open() or picked()
 		end
 		-- Its project's icon beside its title, where its group isn't its
 		-- project.
@@ -1365,7 +1420,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					card_hide(true)
 					-- (Once the click is over, as Zeron's starts on the second
 					-- click: nothing of the press left to take focus back.)
-					if e.clicks == 2 and props.on_rename then
+					-- (⇧ held, it's picked out, however many clicks.)
+					if e.clicks == 2 and not e.shift and props.on_rename then
 						ui.after(0, function()
 							session_renaming:set(s.id)
 						end)
@@ -1424,11 +1480,20 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				-- Pulled up under the title: the line's own inset is the row's.
 				ui.div { mt = ui.raw(-8, "up a row's inset, under the title"), second },
 			},
-			-- (Every chat of the split showing is selected too.)
+			-- (Some picked out: they're what's selected, the one open quieter.)
 			selected = function(): boolean
-				return selected:get() == s.id or in_split(s.id)
+				if markable and any_marked() then
+					return picked()
+				end
+				return is_open()
 			end,
-			on_click = function()
+			current = if markable then is_open else nil,
+			on_click = function(e: ClickEvent)
+				if markable and e.shift then
+					mark_through(s.id)
+					return
+				end
+				unmark_all()
 				selected:set(s.id)
 				if on_pick then
 					on_pick()
@@ -1437,13 +1502,31 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		}
 		-- Its menu, on a secondary click (the app's entries).
 		if props.menu then
-			local menu = props.menu
+			local menu, menu_many = props.menu, props.menu_many
 			body = ContextMenu {
 				label = locale.t("ds.sidebar.session_actions"),
 				ring = "$radius.md",
 				w_full = true,
 				shrink = 0,
 				items = function()
+					-- (On one of several picked out, theirs. On any other, its
+					-- own, and they're let go: what it acts on is what's lit.)
+					if markable and marked and menu_many then
+						local all = marked:peek()
+						if all[s.id] then
+							local ids: { string } = {}
+							for _, id in pickable do
+								if all[id] then
+									table.insert(ids, id)
+								end
+							end
+							if #ids > 1 then
+								return menu_many(ids)
+							end
+						else
+							unmark_all()
+						end
+					end
 					return menu(s.id)
 				end,
 				body,
@@ -3716,6 +3799,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			end
 			local ids: { string } = {}
 			local shown: { string } = {}
+			local picks: { string } = {}
 			for _, it in s.items do
 				-- (One leaving is gone already, for the keys.)
 				if it.kind == "session" and not it.leaving then
@@ -3727,6 +3811,10 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					end
 					if open then
 						table.insert(shown, id)
+						-- (The Archived shelf's aren't picked.)
+						if it.list ~= "archived" then
+							table.insert(picks, id)
+						end
 					end
 				end
 			end
@@ -3744,8 +3832,23 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				end
 			end
 			put(order, ids)
+			pickable = picks
 			if props.order then
 				put(props.order, shown)
+			end
+			-- (Those picked out and no longer shown are let go.)
+			local picked = if marked then marked:peek() else {}
+			if marked and next(picked) ~= nil then
+				local kept: { [string]: boolean } = {}
+				for _, id in picks do
+					kept[id] = picked[id]
+				end
+				for id in picked do
+					if not kept[id] then
+						marked:set(kept)
+						break
+					end
+				end
 			end
 			-- (Their jumps: the first nine shown, as ⌘1–9 go.)
 			local jumps: { [string]: number } = {}
