@@ -156,7 +156,8 @@ describe("the columns the rule names", () => {
     // (Each group, its items: the gaps within each one.)
     const groups: [string, string][] = [
       ["/plugins", ".catlist|:scope > a"],
-      ["/plugins", ".sort|:scope > a"],
+      // (The order is a menu now: its choices fill inside its panel, a step apart, the drop's own; the pages, a row.)
+      ["/plugins", ".pages|:scope > .pg:not(.gap)"],
       ["/plugins", ".nav|:scope > a"],
       ["/plugins", ".results|:scope > li"],
       ["/plugins", ".feat-row|:scope > li"],

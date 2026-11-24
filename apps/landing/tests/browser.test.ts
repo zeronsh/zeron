@@ -401,6 +401,47 @@ describe("who you are, in the bar of a public page", () => {
   });
 });
 
+describe("a plugin's tile, in every hue", () => {
+  test("its glyph reads on its fill: at least 3:1, dark and light", async () => {
+    for (const scheme of ["dark", "light"] as const) {
+      const { page, context } = await open("/plugins", { scheme });
+      try {
+        const low = await page.evaluate(() => {
+          // (Each colour as the screen draws it: through a canvas, whatever syntax the style computes to.)
+          const pen = document.createElement("canvas").getContext("2d", { willReadFrequently: true })!;
+          const rgb = (colour: string) => {
+            pen.clearRect(0, 0, 1, 1);
+            pen.fillStyle = "#000";
+            pen.fillStyle = colour;
+            pen.fillRect(0, 0, 1, 1);
+            return [...pen.getImageData(0, 0, 1, 1).data.slice(0, 3)];
+          };
+          const lum = (c: number[]) => {
+            const [r, g, b] = c.map((v) => (v / 255 <= 0.04045 ? v / 255 / 12.92 : ((v / 255 + 0.055) / 1.055) ** 2.4));
+            return 0.2126 * r! + 0.7152 * g! + 0.0722 * b!;
+          };
+          const out: string[] = [];
+          for (let h = 0; h < 24; h++) {
+            const tile = document.createElement("span");
+            tile.className = `tile h${h}`;
+            tile.textContent = "A";
+            document.body.append(tile);
+            const s = getComputedStyle(tile);
+            const [a, b] = [lum(rgb(s.color)), lum(rgb(s.backgroundColor))];
+            const ratio = (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+            if (ratio < 3) out.push(`h${h}: ${ratio.toFixed(2)}`);
+            tile.remove();
+          }
+          return out;
+        });
+        expect(low, scheme).toEqual([]);
+      } finally {
+        await context.close();
+      }
+    }
+  });
+});
+
 describe("by keyboard", () => {
   test("a destructive action asks in a dialog that starts on Cancel and closes on Escape, back where it was", async () => {
     const { page, context } = await open("/account/plugins/session-badges", { as: "user_ada" });
@@ -519,6 +560,7 @@ describe("by keyboard", () => {
   test("the store: each order, filter and page is a link, the list's whole state its address", async () => {
     const { page, context } = await open("/plugins");
     try {
+      await page.locator(".sort summary").click();
       await page.locator(".sort").getByRole("link", { name: "Newest" }).click();
       await page.waitForURL(/\/plugins\?sort=new$/);
       await page.locator(".facets").getByRole("link", { name: /^Git/ }).click();
@@ -541,7 +583,7 @@ describe("by keyboard", () => {
       await page.keyboard.press("Escape");
       await expect.poll(() => filters.evaluate((d) => (d as HTMLDetailsElement).open)).toBe(false);
       // (Opening one closes the other.)
-      const order = page.locator("details.drop").first();
+      const order = page.locator("details.drop.sort");
       await order.locator("summary").click();
       await filters.locator("summary").click();
       await expect.poll(() => order.evaluate((d) => (d as HTMLDetailsElement).open)).toBe(false);
@@ -550,11 +592,49 @@ describe("by keyboard", () => {
     }
   });
 
-  test("the search, the bar's: / puts you in it, Escape empties it, Enter searches within the category", async () => {
+  test("the order, on a wide screen: a menu that opens without a script, its choices real addresses", async () => {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, javaScriptEnabled: false });
+    try {
+      const page = await context.newPage();
+      await page.goto(new URL("/plugins", site.url).href, { waitUntil: "networkidle" });
+      const order = page.locator("details.drop.sort");
+      expect(await order.locator("summary").textContent()).toBe("Sort: Most installed, change the order");
+      await order.locator("summary").click();
+      await page.getByRole("link", { name: "Newest" }).click();
+      await page.waitForURL(/\/plugins\?sort=new$/);
+      expect(await page.locator("details.drop.sort summary").textContent()).toBe("Sort: Newest, change the order");
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("the search: on the store its own, the hero's (the bar has none there); elsewhere the bar's", async () => {
+    const { page, context } = await open("/plugins/focus-timer");
+    try {
+      expect(await page.locator(".top .find").isVisible()).toBe(true);
+      await page.keyboard.press("/");
+      await expect.poll(() => page.locator(".top").getByRole("searchbox").evaluate((el) => el === document.activeElement)).toBe(true);
+      await page.goto(new URL("/plugins", site.url).href, { waitUntil: "networkidle" });
+      expect(await page.locator(".top .find").isVisible()).toBe(false);
+      expect(await page.locator(".hero").getByRole("searchbox", { name: "Search plugins" }).isVisible()).toBe(true);
+    } finally {
+      await context.close();
+    }
+    // (On a phone, the bar's icon isn't there either: the hero's field is.)
+    const phone = await open("/plugins", { width: 390 });
+    try {
+      expect(await phone.page.getByRole("button", { name: "Search plugins" }).isVisible()).toBe(false);
+      expect(await phone.page.locator(".hero").getByRole("searchbox").isVisible()).toBe(true);
+    } finally {
+      await phone.context.close();
+    }
+  });
+
+  test("the search, the store's: / puts you in it, Escape empties it, Enter searches within the category", async () => {
     const { page, context } = await open("/plugins?category=git");
     try {
       await page.keyboard.press("/");
-      const field = page.locator(".top").getByRole("searchbox", { name: "Search plugins" });
+      const field = page.locator(".hero").getByRole("searchbox", { name: "Search plugins" });
       await expect.poll(() => field.evaluate((el) => el === document.activeElement)).toBe(true);
       await page.keyboard.type("timer");
       await page.keyboard.press("Escape");

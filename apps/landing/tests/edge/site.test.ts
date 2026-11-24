@@ -577,11 +577,28 @@ describe("the audit log", () => {
   });
 });
 
-describe("Newest, from the edge's cards", () => {
-  test("says the day each was first listed (amendment 39)", async () => {
+describe("the store, from the edge's cards", () => {
+  test("Newest is the edge's order, said by the menu", async () => {
     const { body } = await new Browser().get("/plugins?sort=new");
-    // (A verified card's foot says the day it was first listed; one not verified says that instead.)
-    expect(body.slice(body.indexOf('<ul class="results"'))).toMatch(/<div class="pc-foot"><span>Published [A-Z][a-z]{2} \d{1,2}(, \d{4})?<\/span>/);
+    expect(body).toMatch(/<summary><span class="t3">Sort:<\/span> Newest</);
+    expect(body.slice(body.indexOf('<ul class="results"'))).toMatch(/<a class="pcard h\d+" href="\/plugins\/[^"]+">/);
+  });
+
+  test("Featured shows a pick's cover, the first picture of the card's version, from the plugin's own files", async () => {
+    // (Picked by staff for the test; read signed in, so drawn now, not kept from before.)
+    const csrf = await grace.token("/admin/plugins/focus-timer");
+    expect((await grace.post("/admin/plugins/focus-timer/actions/feature", { csrf })).status).toBe(303);
+    try {
+      const { body } = await grace.get("/plugins");
+      const row = body.slice(body.indexOf('<ul class="feat-row">'), body.indexOf("</ul>", body.indexOf('<ul class="feat-row">')));
+      const cover = /<a class="ftile h\d+" href="\/plugins\/focus-timer"><span class="ft-cover"><img src="(\/plugins\/focus-timer\/files\/[^/"]+\/shots\/one\.png)"/.exec(row)?.[1];
+      expect(cover, row.slice(0, 400)).toBeTruthy();
+      const picture = await new Browser().get(cover!);
+      expect(picture.response.status).toBe(200);
+      expect(picture.response.headers.get("content-type")).toBe("image/png");
+    } finally {
+      await grace.post("/admin/plugins/focus-timer/actions/unfeature", { csrf });
+    }
   });
 });
 

@@ -1,9 +1,10 @@
 ---
-// A plugin, as the public sees it in a list (the one card: the store's grid
-// and its Featured row): its tile, its name with the check when its newest
-// version is verified, its author, what it does, and a foot (what the list is
-// ordered by, or that its newest version isn't verified yet, and its
-// installs). Always these, in this order. Featured is the same card a size up.
+// A plugin, as the public sees it in the store's list (the one card): its
+// tile, its name with the check when its newest version is verified, what it
+// does in at most two lines, and one quiet line: its author and how many have
+// it, or, when its newest version isn't verified yet, that in its place.
+// Always these, in this order. Nothing round it at rest; hovered or focused,
+// the whole card fills at the surface's tone.
 import Seal from "./Seal.astro";
 import Tile from "./Tile.astro";
 import { count } from "../../lib/store/format.ts";
@@ -13,22 +14,19 @@ import { pluginUrl } from "../../lib/store/urls.ts";
 
 interface Props {
   plugin: PluginCard;
-  /** The foot's first line for a verified plugin: what the list is ordered by ("Updated Nov 3"). */
-  when: string;
-  size?: "md" | "lg";
 }
-const { plugin: p, when, size = "md" } = Astro.props;
+const { plugin: p } = Astro.props;
 ---
 
-<a class:list={["pcard", size, hueClass(p.id)]} href={pluginUrl(p.id)}>
-  <Tile id={p.id} name={p.name} icon={p.icon} version={p.version} size={size === "lg" ? "xl" : "l"} />
+<a class:list={["pcard", hueClass(p.id)]} href={pluginUrl(p.id)}>
+  <Tile id={p.id} name={p.name} icon={p.icon} version={p.version} size="card" />
   <div class="pc-body">
     <div class="pc-name"><span class="name">{p.name}</span>{p.verified && <Seal size="s" />}</div>
-    <div class="pc-by">by {p.author.username ? `@${p.author.username}` : "a former account"}</div>
     <p class="pc-sum">{p.summary}</p>
-    <div class="pc-foot">
-      {p.verified ? <span>{when}</span> : <span class="state no">{p.version} not verified yet</span>}
-      <span class="num">{count(p.installs)} {p.installs === 1 ? "install" : "installs"}</span>
+    <div class="pc-meta">
+      <span class="pc-by">{p.author.username ? `@${p.author.username}` : "a former account"}</span>
+      <i aria-hidden="true"></i>
+      {p.verified ? <span class="num">{count(p.installs)} {p.installs === 1 ? "install" : "installs"}</span> : <span class="state no">{p.version} not verified yet</span>}
     </div>
   </div>
 </a>

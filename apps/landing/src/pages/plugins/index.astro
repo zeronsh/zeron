@@ -1,28 +1,31 @@
 ---
 // The store: one page for every listed plugin (Discover and Browse were
-// two; /plugins/all sends here with its query). Its title and a line; beside
-// the list, how to narrow it (the categories with how many each holds,
-// Everything or Verified only, the category's keywords); the list, its count
-// and its order, a page at a time by the edge's cursor, each plugin the one
-// card (components/look/PluginCard.astro). Unnarrowed, on its first page,
-// Featured sits above the list: the same card, a size up. The bar's search
-// is the one search, and narrows this page in place. Every filter, order and
-// page is a link (the whole state is the address), so it works without a
-// script and can be shared. On a phone the categories stay a row of chips,
-// and the order and the filters fold into two disclosures (no script).
+// two; /plugins/all sends here with its query), as Raycast's store and
+// Vercel's templates set theirs. A centred hero: its title, a line, and the
+// search (the page's own: the bar's isn't drawn here), which narrows this
+// page in place. Unnarrowed, on its first page, Featured: three picks,
+// picture first (components/look/FeaturedTile.astro). Then all of them:
+// beside the list, how to narrow it (the categories with how many each
+// holds, Everything or Verified only, the category's keywords); the list's
+// count and its order (a menu), each plugin the one card
+// (components/look/PluginCard.astro), a page at a time by the edge's cursor.
+// Every filter, order and page is a link (the whole state is the address),
+// so it works without a script and can be shared. On a phone the categories
+// stay a row of chips, and the filters fold into a disclosure (no script).
 //
 // Public and the same for everyone signed out, so the Worker cache keeps
 // each address for half a minute and serves it stale for another.
 import Icon from "../../components/look/Icon.astro";
+import FeaturedTile from "../../components/look/FeaturedTile.astro";
 import PluginCardView from "../../components/look/PluginCard.astro";
 import Seal from "../../components/look/Seal.astro";
 import Store from "../../layouts/Store.astro";
 import "../../styles/look/browse.css";
 import { canonicalSearch, catalogHref, effectiveSort, isFront, PAGE_SIZE, pageHref, range, readCatalog, SORT_LABELS, type CatalogState } from "../../lib/store/catalog.ts";
-import { count, day } from "../../lib/store/format.ts";
+import { count } from "../../lib/store/format.ts";
 import { CATALOG_TAG, publicPage } from "../../lib/store/http.ts";
 import { CATEGORIES } from "../../lib/store/nav.ts";
-import type { Category, PluginCard, Sort } from "../../lib/store/types.ts";
+import type { Category, Sort } from "../../lib/store/types.ts";
 import { categoryLine, EMPTY_BODY, store } from "../../lib/store/words.ts";
 import { lsb } from "../../lib/store/bearing.ts";
 
@@ -87,24 +90,38 @@ const noindex = Boolean(state.q || state.cursor || state.keyword || state.verifi
 const here = `${Astro.url.pathname}${Astro.url.search}`;
 /** How many filters past the category are on (the phone's Filters says so). */
 const filtering = Number(state.verified) + Number(Boolean(state.keyword));
-/** A card's foot: what the list is sorted by, said (installs; when updated, first published or verified). */
-const when = (p: PluginCard) =>
-  sort === "new" && p.listed_at !== null ? `Published ${day(p.listed_at)}` : sort === "verified" && p.verified_at ? `Verified ${day(p.verified_at)}` : `Updated ${day(p.updated_at)}`;
 /** Featured: up to three, unnarrowed and on the first page alone. */
 const features = page.ok && featured?.ok ? featured.data.items.slice(0, 3) : [];
-/** The bar's search keeps what else the page is narrowed by (it narrows the store in place). */
+/** This page's number, when known, and how many there are; the pager links the first, the one before and the one after (the edge pages by cursor: only those have an address). */
+const pageNo = state.page ?? (state.cursor ? null : 1);
+const pages = total !== undefined ? Math.max(1, Math.ceil(total / PAGE_SIZE)) : null;
+const first = pageNo !== null && pageNo > 2 ? catalogHref({ ...state, cursor: null, page: null }) : null;
+/** The search keeps what else the page is narrowed by (it narrows the store in place). */
 const keep: Record<string, string> = { ...(state.category ? { category: state.category } : {}), ...(state.keyword ? { keyword: state.keyword } : {}), ...(state.verified ? { verified: "1" } : {}) };
 
 ---
 
-<Store title={title} description={description} noindex={noindex} canonical={catalogHref({ category: state.category })} current="browse" query={state.q} keep={keep}>
+<Store title={title} description={description} noindex={noindex} canonical={catalogHref({ category: state.category })} current="browse" query={state.q} keep={keep} ownSearch>
   <div class="wrap store-page">
-    <header class="bhead">
-      <div>
-        <h1 class={lsb(heading)}>{heading}</h1>
-        <p class="lead">{lead}</p>
-      </div>
+    <header class="hero">
+      <h1 class={lsb(heading)}>{heading}</h1>
+      <p class="lead">{lead}</p>
+      <form class="hfind" role="search" action="/plugins" method="get" data-tidy>
+        <Icon name="search" />
+        <input type="search" name="q" value={state.q || undefined} placeholder="Search plugins" aria-label="Search plugins" autocomplete="off" enterkeyhint="search" data-search />
+        {Object.entries(keep).map(([name, value]) => <input type="hidden" name={name} value={value} />)}
+        <kbd class="kbd" aria-hidden="true">/</kbd>
+      </form>
     </header>
+
+    {features.length > 0 && (
+      <section class="featured" aria-labelledby="featured">
+        <div class="sec-head"><h2 id="featured">Featured</h2><span class="sec-aside">Our picks</span></div>
+        <ul class="feat-row">
+          {features.map((p) => <li><FeaturedTile plugin={p} eager /></li>)}
+        </ul>
+      </section>
+    )}
 
     <div class="browse">
       <aside class="facets" aria-label="Narrow the list">
@@ -134,27 +151,12 @@ const keep: Record<string, string> = { ...(state.category ? { category: state.ca
         )}
       </aside>
 
-      <div class="listing">
-        {features.length > 0 && (
-          <section class="featured" aria-labelledby="featured">
-            <div class="sec-head"><h2 id="featured">Featured</h2></div>
-            <ul class="feat-row">
-              {features.map((p) => <li><PluginCardView plugin={p} when={`Updated ${day(p.updated_at)}`} size="lg" /></li>)}
-            </ul>
-          </section>
-        )}
-      <section aria-labelledby="results">
+      <section class="listing" aria-labelledby="results">
         <div class="rhead">
           <p id="results">{total !== undefined ? <><b class="num">{count(total)}</b> {total === 1 ? "plugin" : "plugins"}</> : "Plugins"}</p>
-          {/* The phone's: the order and the filters, each a disclosure. */}
           <div class="fbar">
-            {items.length > 0 && (<details class="drop">
-              <summary>{sortLabel(sort)}<span class="sr-only">: change the order</span><Icon name="chev" /></summary>
-              <div class="pop">
-                {sorts.map((s) => <a href={at({ sort: s })} aria-current={s === sort ? "page" : undefined}>{sortLabel(s)}</a>)}
-              </div>
-            </details>)}
-            <details class="drop">
+            {/* The phone's filters, a disclosure (the sidebar's, folded). */}
+            <details class="drop narrow-only">
               <summary>Filters{filtering > 0 && <span class="n num">{filtering}</span>}<Icon name="chev" /></summary>
               <div class="pop wide">
                 <p class="facet-h">Show</p>
@@ -172,14 +174,16 @@ const keep: Record<string, string> = { ...(state.category ? { category: state.ca
                 )}
               </div>
             </details>
+            {/* The order, a menu of links (no script); nothing to order, no menu. */}
+            {items.length > 0 && (
+              <details class="drop sort">
+                <summary><span class="t3">Sort:</span> {sortLabel(sort)}<span class="sr-only">, change the order</span><Icon name="chev" /></summary>
+                <nav class="pop" aria-label={store("plugins.store.order_label")}>
+                  {sorts.map((s) => <a href={at({ sort: s })} aria-current={s === sort ? "page" : undefined}>{sortLabel(s)}</a>)}
+                </nav>
+              </details>
+            )}
           </div>
-          {/* (Nothing to order, no order: the count line keeps its place, so the heading doesn't move.) */}
-          {items.length > 0 && (
-            <nav class="sort" aria-label={store("plugins.store.order_label")}>
-              <span aria-hidden="true">Sort</span>
-              {sorts.map((s) => <a href={at({ sort: s })} aria-current={s === sort ? "page" : undefined}>{sortLabel(s)}</a>)}
-            </nav>
-          )}
         </div>
 
         {
@@ -220,30 +224,35 @@ const keep: Record<string, string> = { ...(state.category ? { category: state.ca
           ) : (
             <>
               <ul class="results" aria-labelledby="results">
-                {items.map((p) => <li><PluginCardView plugin={p} when={when(p)} /></li>)}
+                {items.map((p) => <li><PluginCardView plugin={p} /></li>)}
               </ul>
               {(previous || next) && (
-                <nav class="pager" aria-label="Pages">
-                  {previous ? <a class="btn sec sm" href={previous} rel="prev"><Icon name="left" />Previous</a> : <span class="btn sec sm" aria-disabled="true"><Icon name="left" />Previous</span>}
-                  <span class="num">{shown ? `${count(shown.from)}–${count(shown.to)}` : ""}{shown && total !== undefined ? " of " : ""}{total !== undefined ? count(total) : ""}</span>
-                  {next ? <a class="btn sec sm" href={next} rel="next">Next<Icon name="arrow" /></a> : <span class="btn sec sm" aria-disabled="true">Next<Icon name="arrow" /></span>}
+                <nav class="pager numbered" aria-label="Pages">
+                  <div class="pages">
+                    {previous ? <a class="pg step" href={previous} rel="prev" aria-label="The page before"><Icon name="chev" /></a> : <span class="pg step" aria-hidden="true"><Icon name="chev" /></span>}
+                    {first && <a class="pg num" href={first} aria-label="Page 1">1</a>}
+                    {pageNo !== null && pageNo > 3 && <span class="pg gap" aria-hidden="true">…</span>}
+                    {previous && pageNo !== null && <a class="pg num" href={previous} aria-label={`Page ${pageNo - 1}`}>{pageNo - 1}</a>}
+                    {pageNo !== null && <span class="pg num" aria-current="page" aria-label={`Page ${pageNo}`}>{pageNo}</span>}
+                    {next && pageNo !== null && <a class="pg num" href={next} aria-label={`Page ${pageNo + 1}`}>{pageNo + 1}</a>}
+                    {next && pageNo !== null && pages !== null && pageNo + 1 < pages && <span class="pg gap" aria-hidden="true">…</span>}
+                    {next ? <a class="pg step" href={next} rel="next" aria-label="The next page"><Icon name="chev" /></a> : <span class="pg step" aria-hidden="true"><Icon name="chev" /></span>}
+                  </div>
+                  <p class="num">{shown ? `${count(shown.from)}–${count(shown.to)}` : ""}{shown && total !== undefined ? " of " : ""}{total !== undefined ? count(total) : ""}</p>
                 </nav>
               )}
             </>
           )
         }
       </section>
-      </div>
     </div>
 
     <section class="make" aria-labelledby="make">
-      <div class="txt">
-        <h2 id="make">Made something for Zeron?</h2>
-        <p>Publish it from Zeron's Settings, or from the folder it lives in. It is live at once, and marked verified when Zeron has read it.</p>
-      </div>
+      <h2 id="make">Made something for Zeron?</h2>
+      <p>Publish it from Zeron's Settings, or from the folder it lives in. It is live at once, and marked verified when Zeron has read it.</p>
       <div class="make-acts">
+        <a class="btn pri" href="/plugins/publishing">Publishing guide</a>
         <span class="cmd"><code><em aria-hidden="true">$</em> zeron plugin publish</code><button type="button" data-copy="zeron plugin publish" aria-label="Copy the command"><Icon name="copy" /></button></span>
-        <a class="btn sec" href="/plugins/publishing">Publishing guide<Icon name="arrow" /></a>
       </div>
     </section>
   </div>
