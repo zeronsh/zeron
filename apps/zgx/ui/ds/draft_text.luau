@@ -17,8 +17,13 @@
 --                                (ds/mention_tokens), or nil
 --   draft_text.end_token(s)      the one at its end
 --   draft_text.holds(s, text)    whether `text` is anywhere in it
+--   draft_text.line_at(s, at)    the line a byte is in: where it starts,
+--                                its text's start (a list's marker)
+--   draft_text.fenced(s, at)     whether a byte is inside a fenced block
 
-local tokens = require("@self/mention_tokens")
+-- (By the `@ds` alias, not `@self`: the test runner resolves the one and
+-- not the other.)
+local tokens = require("@ds/mention_tokens")
 
 local M = {}
 
@@ -94,6 +99,69 @@ function M.token(s: any, caret: number): tokens.Token?
 		end
 	end
 	return tokens.token(s:get(), caret)
+end
+
+-- How much of a line `line_at` reads: enough for any list's marker.
+local HEAD_OF_LINE = 256
+
+-- The line byte `at` (from 0) is in: where it starts (bytes from 0) and
+-- its first `HEAD_OF_LINE` bytes. Nil when its start is past `NEAR` back
+-- (a line that long has no list marker near the caret).
+function M.line_at(s: any, at: number): (number?, string?)
+	local lo = math.max(1, at - NEAR + 1)
+	local before = M.sub(s, lo, at)
+	local nl = string.match(before, "^.*\n()")
+	local start: number
+	if nl then
+		start = lo + nl - 2
+	elseif lo == 1 then
+		start = 0
+	else
+		return nil, nil
+	end
+	local head = M.sub(s, start + 1, start + HEAD_OF_LINE)
+	local stop = string.find(head, "\n", 1, true)
+	return start, if stop then string.sub(head, 1, stop - 1) else head
+end
+
+-- Whether byte `at` (from 0) is inside a fenced block: an odd number of
+-- the lines before it start with ``` or ~~~ (after blanks), found where the
+-- draft is held, each fence's line start read alone.
+function M.fenced(s: any, at: number): boolean
+	if not native(s) then
+		local text: string = s:get()
+		local count = 0
+		for _, fence in { "```", "~~~" } do
+			local from = 1
+			while true do
+				local i = string.find(text, fence, from, true)
+				if i == nil or i > at then
+					break
+				end
+				local lead = string.sub(text, math.max(1, i - 64), i - 1)
+				if string.match(lead, "\n[ \t]*$") or (i <= 65 and string.match(lead, "^[ \t]*$")) then
+					count += 1
+				end
+				from = i + #fence
+			end
+		end
+		return count % 2 == 1
+	end
+	local count = 0
+	for _, fence in { "```", "~~~" } do
+		local found = s:find(fence, { limit = 4096 })
+		for _, hit in found do
+			local i = hit[1]
+			if i > at then
+				break
+			end
+			local lead = M.sub(s, math.max(1, i - 64), i - 1)
+			if string.match(lead, "\n[ \t]*$") or (i <= 65 and string.match(lead, "^[ \t]*$")) then
+				count += 1
+			end
+		end
+	end
+	return count % 2 == 1
 end
 
 function M.end_token(s: any): tokens.Token?

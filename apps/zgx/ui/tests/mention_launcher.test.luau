@@ -108,7 +108,11 @@ test("Tab and Shift+Tab go through the scopes, each listing its own kind; the ar
 	app:key("ArrowDown")
 	app:key("Enter")
 	settle(app)
-	expect(app:text(BOX)).to_contain("@photo.heic")
+	-- (A chip, by its name.)
+	expect(app:text(BOX)).to_contain("photo.heic")
+	local atoms = app:state("chat.composer.atoms")
+	expect(#atoms).to_be(1)
+	expect(atoms[1].data.label).to_be("photo.heic")
 end)
 
 test("an `@` before what's written, the caret back past it, lists the other chats too; a draft with none lists them once one is typed", function()
@@ -306,7 +310,11 @@ test("a click on the launcher's blank room keeps it; a click on a row inserts it
 	end
 	app:click('role:option "Long chat"')
 	settle(app)
-	expect(app:text(BOX)).to_contain("@Long-chat")
+	-- (A chip of the chat, by its title.)
+	expect(app:text(BOX)).to_contain("Long chat")
+	local atoms = app:state("chat.composer.atoms")
+	expect(#atoms).to_be(1)
+	expect(atoms[1].data.kind).to_be("chat")
 	expect(field_has_keys(app)).to_be(true)
 end)
 

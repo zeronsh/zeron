@@ -255,12 +255,34 @@ function M.setup()
 				-- (Its corner and its number cap's are made below, concentric
 				-- with the pill's.)
 				option = { h = 36, key = 20, ring = "{accent}" },
-				-- Something mentioned in the draft, in type alone (zgx's text
-				-- has no inline chips): its trigger greyed as a markdown marker
-				-- is, a file's name in the text's own ink and a command's or a
-				-- skill's in the accent, both a weight up. And the track that
-				-- unrolls from the microphone while dictating.
+				-- Something mentioned in the draft by typing it (one picked
+				-- from the list is a chip, ds/composer_atoms), in type alone:
+				-- its trigger greyed as a markdown marker is, a file's name in
+				-- the text's own ink and a command's or a skill's in the
+				-- accent, both a weight up. And the track that unrolls from the
+				-- microphone while dictating.
 				token = { trigger = "{text.tertiary}", file = "{text.primary}", action = "{accent}", weight = 500 },
+				-- Markdown as it is typed (ds/markdown_edit), its markers kept
+				-- and greyed. Headings in three steps over the draft's 14 on 22
+				-- (the transcript's steps, a size under: the draft is a note,
+				-- not the page), deeper ones bold body text. Code in Geist Mono
+				-- at the transcript's 13, the draft's pitch kept; a block's text
+				-- set in from its wash (`zeron.code.wash`, edge to edge) by
+				-- `inset`. A quote: a rail of the transcript's (its width and
+				-- ink), its words set in past it, in the quote's ink. A rule:
+				-- a hairline across. A list hangs from its marker: a level of
+				-- nesting sets it in by `indent`, its marker takes `marker` at
+				-- least, `gap` after it, and its wrapped lines align under its
+				-- text.
+				markdown = {
+					h1 = { size = 20, line = 28 },
+					h2 = { size = 17, line = 24 },
+					h3 = { size = 15, line = 22 },
+					code = { size = 13, inset = 12 },
+					quote = { rail_w = 2, inset = 14, rail = "{zeron.prose.quote_rail}", ink = "{text.secondary}" },
+					rule = { h = 1, ink = "{border.strong}" },
+					list = { indent = 18, marker = 14, gap = 6 },
+				},
 				voice = { h = 28, ink = "{accent}", bg = "{zeron.secondary.bg}" },
 			},
 			-- A line glyph's stroke, in points at 16 (the sidebar icon's). The
