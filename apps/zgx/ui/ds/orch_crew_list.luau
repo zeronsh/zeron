@@ -5,7 +5,9 @@
 -- after its own icon), in three groups: Working, Waiting on you (an ask
 -- open, input or approval wanted, failed) and Idle. Each group folds (Idle
 -- folded unless opened, its head saying how many and the latest of them)
--- and shows a few rows, then "n more". A row opens the thread's detail.
+-- and shows a few rows, then "n more". Working shows at least ten and,
+-- past that, as many as the panel has room for (`room`, ds/orch_crew_fit);
+-- only what doesn't fit folds. A row opens the thread's detail.
 --
 --   CrewList {
 --     members = function() return { { member = CrewRow, chat = ChatRow? } } end,
@@ -15,7 +17,8 @@
 --     open = function(group) return true end,   -- "working" | "waiting" | "idle"
 --     on_toggle = function(group, open) end,
 --     on_open = function(chat_id) end,
---   }
+--     room = function() return 120 end,         -- height left free under the
+--   }                                           -- list in its scroll (or < 0)
 
 local Icon = require("@self/icon")
 local Mark = require("@self/mark")
@@ -24,6 +27,7 @@ local locale = require("@self/locale")
 local Name = require("@ds/orch_name")
 local Fold = require("@ds/orch_fold")
 local data = require("@self/orch_data")
+local Fit = require("@self/orch_crew_fit")
 
 export type Member = { member: { [string]: any }, chat: { [string]: any }? }
 export type Props = {
@@ -34,13 +38,13 @@ export type Props = {
 	open: (group: string) -> boolean,
 	on_toggle: (group: string, open: boolean) -> (),
 	on_open: (chat_id: string) -> (),
+	room: (() -> number)?,
 }
 
 local M = {}
 
--- Rows a group shows before "n more".
+-- Rows Waiting on you and Idle show before "n more".
 M.CAP = 5
-
 local UNDER_WAY: { [string]: boolean } = { working = true, connecting = true, waiting = true }
 local WANTS: { [string]: boolean } = { input = true, approval = true, plan = true, failed = true, limited = true }
 
@@ -212,7 +216,8 @@ function M.CrewList(props: Props): Node
 		return out
 	end)
 
-	local function row(first: Member, _i: number, cur: State<Member>): Node
+	-- (`sized`: told the row's height as it's laid out.)
+	local function row(first: Member, _i: number, cur: State<Member>, sized: ((h: number) -> ())?): Node
 		local id = first.member.chat_id
 		local function m(): Member
 			return cur:get()
@@ -331,6 +336,11 @@ function M.CrewList(props: Props): Node
 			bg = "#00000000",
 			hover = { bg = "$hover" },
 			active = { bg = "$pressed" },
+			on_resize = if sized
+				then function(size: any, _el: any)
+					sized(size.h)
+				end
+				else nil,
 			on_click = function()
 				props.on_open(id)
 			end,
@@ -339,18 +349,98 @@ function M.CrewList(props: Props): Node
 		}
 	end
 
+	-- "n more" (or "Fewer", opened): a row of its own, the chevron where
+	-- the rows' status icons stand and the words where their names do.
+	local function more_button(more: State<boolean>, hidden_n: () -> number): Node
+		local function words(): string
+			return if more:get() then locale.s("ds.orch.less") else locale.s("ds.orch.more", { n = hidden_n() })
+		end
+		return ui.button {
+			class = "orch-crew-more",
+			w_full = true,
+			h = 32,
+			px = "$space.2",
+			gap = "$space.2",
+			items = "center",
+			rounded = "$radius.md",
+			bg = "#00000000",
+			hover = { bg = "$hover" },
+			active = { bg = "$pressed" },
+			expanded = function(): boolean
+				return more:get()
+			end,
+			label = words,
+			on_click = function()
+				more:set(not more:peek())
+			end,
+			ui.div {
+				w = 16,
+				shrink = 0,
+				items = "center",
+				justify = "center",
+				color = "$text.secondary",
+				Icon {
+					name = function(): Icon.Name
+						return if more:get() then "alt-arrow-up" else "alt-arrow-down"
+					end,
+					size = 14,
+				},
+			},
+			ui.text {
+				words,
+				class = "orch-crew-more-words",
+				min_w = 0,
+				truncate = true,
+				text_size = "$font.size.sm",
+				color = "$text.primary",
+			},
+		}
+	end
+
 	local function group(key: string, title: any, icon: Node?): Node
 		local all = ui.computed(function(): { Member }
 			return groups:get()[key] or {}
 		end)
 		local more = ui.use_state(false)
+		-- Working's cap follows the room it has; the others' stays CAP.
+		local fit = ui.use_state(Fit.MIN)
+		local row_h = ui.use_state(0)
+		local function cap(): number
+			return if key == "working" then fit:get() else M.CAP
+		end
 		local shown = ui.computed(function(): { Member }
 			local list = all:get()
-			if more:get() or #list <= M.CAP then
+			local c = cap()
+			if more:get() or #list <= c then
 				return list
 			end
-			return table.move(list, 1, M.CAP, 1, {})
+			return table.move(list, 1, c, 1, {})
 		end)
+		-- (A working row's height, as laid out: how many more fit. The rows
+		-- are alike, two lines each.)
+		local sized = if key == "working"
+			then function(h: number)
+				if math.abs(h - row_h:peek()) >= 0.5 then
+					row_h:set(h)
+				end
+			end
+			else nil
+		local function hidden_n(): number
+			return #all:get() - #shown:get()
+		end
+		if key == "working" and props.room then
+			local room = props.room
+			ui.effect(function()
+				local r, h, n = room(), row_h:get(), #all:get()
+				if more:get() or not props.open(key) then
+					return
+				end
+				local next = Fit.next(fit:peek(), n, r, h)
+				if next ~= fit:peek() then
+					fit:set(next)
+				end
+			end)
+		end
 		-- Folded Idle's head: the latest of it, and when.
 		local aside = if key == "idle"
 			then ui.row {
@@ -404,39 +494,17 @@ function M.CrewList(props: Props): Node
 				end,
 				ui.column {
 					w_full = true,
-					ui.each(shown, row, {
+					ui.each(shown, function(m: Member, i: number, cur: State<Member>): Node
+						return row(m, i, cur, sized)
+					end, {
 						key = function(m: Member): string
 							return m.member.chat_id
 						end,
 						w_full = true,
 					}),
 					ui.show(function(): boolean
-						return #all:get() > M.CAP
-					end, ui.button {
-						class = "orch-crew-more",
-						self = "start",
-						ml = ui.raw(32, "under the names"),
-						mt = "$space.1",
-						px = "$space.2",
-						h = 24,
-						rounded = "$radius.md",
-						items = "center",
-						bg = "#00000000",
-						hover = { bg = "$hover" },
-						label = function(): string
-							return if more:get() then locale.s("ds.orch.less") else locale.s("ds.orch.more", { n = #all:get() - M.CAP })
-						end,
-						on_click = function()
-							more:set(not more:peek())
-						end,
-						ui.text {
-							function(): string
-								return if more:get() then locale.s("ds.orch.less") else locale.s("ds.orch.more", { n = #all:get() - M.CAP })
-							end,
-							text_size = "$font.size.xs",
-							color = "$text.secondary",
-						},
-					}),
+						return #all:get() > cap()
+					end, more_button(more, hidden_n)),
 				},
 			},
 		}

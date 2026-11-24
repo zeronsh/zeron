@@ -423,5 +423,47 @@ ui.command { id = "orch.big_crew", title = "A big crew", run = function()
 	orchestration.now:set(now)
 end }
 
+-- A crew of `n` working threads and 42 idle (as one person's was), only
+-- these: the Crew tab's Working filling its room (orch.crew_6, _12, _30).
+local function crew_of(n: number)
+	local now = table.clone(orchestration.now:peek())
+	local crew = {}
+	for _, m in now.crew or {} do
+		if m.orchestrator_id ~= "orc-orch" then
+			table.insert(crew, m)
+		end
+	end
+	local s = table.clone(sessions.now:peek()) :: any
+	local kids = table.clone(s.children or {})
+	local mine = {}
+	local TOOLS = { "edit", "test", "build", "read" }
+	local function add(id: string, title: string, st: string, age: number, k: number)
+		table.insert(crew, { orchestrator_id = "orc-orch", chat_id = id, role = "ui", joined = ago(age + 60) })
+		table.insert(mine, {
+			id = id, title = title, name = title, parent = "orc-orch", device = "dev-desk", status = st,
+			agent = if k % 4 == 0 then "openai" else "claude", model = if k % 4 == 0 then "gpt-5.5" else "claude-opus-5-5",
+			updated = ago(age), created = ago(age + 60),
+			activity = if st == "working" then { kind = TOOLS[k % #TOOLS + 1], label = `Step {k} of {title}`, since = ago(age) } else nil,
+		})
+	end
+	for i = 1, n do
+		add(`th-crew-w{i}`, `Working thread {i}`, "working", 20 * i, i)
+	end
+	for i = 1, 42 do
+		add(`th-crew-i{i}`, `Idle thread {i}`, "done", 3000 + 60 * i, i)
+	end
+	kids["orc-orch"] = mine
+	s.children = kids
+	now.crew = crew
+	now.asks = {}
+	sessions.now:set(s)
+	orchestration.now:set(now)
+end
+for _, n in { 6, 12, 30 } do
+	ui.command { id = `orch.crew_{n}`, title = `A crew, {n} working`, run = function()
+		crew_of(n)
+	end }
+end
+
 route.orchestrator("orc-orch")
 return shell
