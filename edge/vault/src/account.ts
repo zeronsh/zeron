@@ -1506,7 +1506,9 @@ export class VaultAccount extends DurableObject<Env> {
       fetch: this.fetchFn,
       now: Date.now(),
       githubClientId: this.env.GITHUB_APP_CLIENT_ID,
-      githubClientSecret: this.env.GITHUB_APP_CLIENT_SECRET
+      githubClientSecret: this.env.GITHUB_APP_CLIENT_SECRET,
+      antigravityClientId: this.env.ANTIGRAVITY_OAUTH_CLIENT_ID,
+      antigravityClientSecret: this.env.ANTIGRAVITY_OAUTH_CLIENT_SECRET
     });
     let generation = row.generation;
     const done = await this.ctx.blockConcurrencyWhile(async (): Promise<RefreshDone> => {

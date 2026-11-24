@@ -57,6 +57,7 @@ const NONINTERACTIVE_ENV: &[(&str, &str)] = &[
     ("GCM_INTERACTIVE", "never"),
     ("NONINTERACTIVE", "1"),
     ("npm_config_yes", "true"),
+    ("AGY_CLI_DISABLE_AUTO_UPDATE", "1"),
 ];
 /// Between full checks, how often each CLI's binary is looked at (stat only)
 /// for an update made outside zeron — its own auto-updater or the user.
@@ -4466,6 +4467,10 @@ mod tests {
         assert_eq!(
             installed_version(HarnessId::Antigravity, output),
             Some("1.2.1".into())
+        );
+        assert_eq!(
+            installed_version(HarnessId::Antigravity, "1.5.15\n"),
+            Some("1.5.15".into())
         );
         assert_eq!(
             installed_version(HarnessId::Antigravity, "agy_acp_server 1.2.3"),
