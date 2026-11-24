@@ -2,6 +2,8 @@
 // What people reported about listed plugins, as a table: the open ones,
 // each closed (dismissed, or acted on, with a note) from its row's one
 // action; those closed, a segment each. Admins only.
+import Empty from "../../../components/look/Empty.astro";
+import Failed from "../../../components/look/Failed.astro";
 import Flash from "../../../components/look/Flash.astro";
 import Icon from "../../../components/look/Icon.astro";
 import StaffHead from "../../../components/look/StaffHead.astro";
@@ -56,16 +58,9 @@ const pluginName = (r: Report) => unbidi(r.plugin.name ?? r.plugin.id);
       <Flash flash={flash} />
       {
         !result.ok ? (
-          <div class="empty" role="status">
-            <h2>Reports can't be loaded right now</h2>
-            <p>Try again in a moment.</p>
-            <a class="btn sec" href={stateHref(status)}>Try again</a>
-          </div>
+          <Failed title="Reports can't be loaded right now" line="Try again in a moment." href={stateHref(status)} />
         ) : reports.length === 0 ? (
-          <div class="empty">
-            <h2>{open ? "No open reports" : "Nothing here yet"}</h2>
-            <p>{open ? "What people report about a plugin shows here, the newest first." : `Reports ${status === "actioned" ? "acted on" : "dismissed"} show here, with what was done.`}</p>
-          </div>
+          <Empty icon="flag" title={open ? "No open reports" : "Nothing here yet"} line={open ? "What people report about a plugin shows here, the newest first." : `Reports ${status === "actioned" ? "acted on" : "dismissed"} show here, with what was done.`} />
         ) : (
           <>
             <div class="tbl reps">

@@ -3,6 +3,7 @@
 // A post does it; a visit (a link followed without a script) asks first,
 // as a page of its own. Signed out, it says so and offers sign-in.
 import AskCard from "../../../../../../components/look/AskCard.astro";
+import Failed from "../../../../../../components/look/Failed.astro";
 import Icon from "../../../../../../components/look/Icon.astro";
 import SignInPlease from "../../../../../../components/look/SignInPlease.astro";
 import Store from "../../../../../../layouts/Store.astro";
@@ -13,7 +14,6 @@ import { unbidi } from "../../../../../../lib/store/format.ts";
 import { privatePage, purge } from "../../../../../../lib/store/http.ts";
 import { isPluginId, isVersion, versionParam } from "../../../../../../lib/store/names.ts";
 import { requireSession } from "../../../../../../lib/store/session.ts";
-import { store } from "../../../../../../lib/store/words.ts";
 
 export const prerender = false;
 
@@ -52,7 +52,7 @@ const ask = AUTHOR_ACTIONS[action].ask(name, version);
     <nav class="crumbs" aria-label="Where this is"><a href="/account">Your plugins</a><Icon name="chev" /><a href={back}>{name}</a></nav>
     {
       who.state === "down" ? (
-        <div class="empty" role="status"><h1>{store("plugins.store.failed_title")}</h1><p>{store("plugins.store.failed_body")}</p><a class="btn sec" href={Astro.url.pathname}>{store("plugins.store.try_again")}</a></div>
+        <Failed level={1} />
       ) : session ? (
         <AskCard ask={ask} action={Astro.url.pathname} csrf={session.csrf} back={back} />
       ) : (

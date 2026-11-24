@@ -11,8 +11,10 @@
 // (amendments 44 and 45; deploy tokens, contract a315eef5a); the reasons are
 // the reviewers' own list (lib/store/admin.ts). The same for everyone, kept
 // by shared caches as the store's other public pages are.
+import CiSteps from "../../components/look/CiSteps.astro";
 import CodeBlock from "../../components/look/CodeBlock.astro";
 import Icon from "../../components/look/Icon.astro";
+import PublishSteps from "../../components/look/PublishSteps.astro";
 import Seal from "../../components/look/Seal.astro";
 import Store from "../../layouts/Store.astro";
 import "../../styles/look/guide.css";
@@ -43,15 +45,6 @@ const OPTIONAL = `{
   "screenshots": ["shots/board.png", "shots/settings.png"],
   "engines": { "zeron": ">=0.4.0" }
 }`;
-const TOKENS = `zeron plugin token create --name "GitHub Actions" --plugins focus-timer,focus-board
-zeron plugin token create --name "All my plugins" --all
-zeron plugin token create --name "Release CI" --plugins focus-timer --expires-in-days 90
-zeron plugin token list
-zeron plugin token revoke <id>`;
-const WORKFLOW = `- uses: actions/checkout@v4
-- uses: zeronsh/zeron/actions/publish-plugin@v0.4.0
-  with:
-    token: \${{ secrets.ZERON_DEPLOY_TOKEN }}`;
 ---
 
 <Store title="Publishing guide · Plugins · Zeron" description="How to put a plugin in Zeron's store: what it needs, how to send it, and how Zeron verifies it." canonical="/plugins/publishing" current="publish">
@@ -78,25 +71,7 @@ const WORKFLOW = `- uses: actions/checkout@v4
 
         <section aria-labelledby="quick-start">
           <h2 id="quick-start">{label("quick-start")}<a class="anchor" href="#quick-start" aria-label={`Link to ${label("quick-start")}`}>#</a></h2>
-          <ol class="steps">
-            <li class="step">
-              <span class="step-n" aria-hidden="true">01</span>
-              <h3 class="step-title">Check it</h3>
-              <p>It lists everything the store would refuse, before anything is sent. It needs no Zeron running, so a pull request's CI can run it too.</p>
-              <CodeBlock label="Terminal" code="zeron plugin check <folder>" id="cb-check" />
-            </li>
-            <li class="step">
-              <span class="step-n" aria-hidden="true">02</span>
-              <h3 class="step-title">Publish it</h3>
-              <p>In Zeron: Settings › Plugins › Yours › Publish…, or from a terminal with Zeron running and signed in. Add <code>--dry-run</code> to check it without sending it.</p>
-              <CodeBlock label="Terminal" code="zeron plugin publish <id>" id="cb-publish" />
-            </li>
-            <li class="step">
-              <span class="step-n" aria-hidden="true">03</span>
-              <h3 class="step-title">Get verified</h3>
-              <p>A reviewer reads it. Until then it's listed, saying it isn't verified yet; once they have, Zeron gives it its check mark.</p>
-            </li>
-          </ol>
+          <PublishSteps />
         </section>
 
         <section aria-labelledby="needs">
@@ -213,27 +188,7 @@ const WORKFLOW = `- uses: actions/checkout@v4
         <section aria-labelledby="ci">
           <h2 id="ci">{label("ci")}<a class="anchor" href="#ci" aria-label={`Link to ${label("ci")}`}>#</a></h2>
           <p>A <strong>deploy token</strong> lets a CI job, such as a GitHub Action, send new versions without your session. A token is your account's, with a scope you choose when you make it and can't change: the plugins it names, or all of yours, those you publish later included. A plugin's first version always comes from your machine; a token sends the ones after it.</p>
-          <ol class="steps">
-            <li class="step">
-              <span class="step-n" aria-hidden="true">01</span>
-              <h3 class="step-title">Make a token</h3>
-              <p>On <a href="/account/tokens">Deploy tokens</a>, in Zeron (Settings, Plugins, Deploy tokens), or from a terminal with Zeron running and signed in:</p>
-              <CodeBlock label="Terminal" code={TOKENS} id="cb-tokens" />
-            </li>
-            <li class="step">
-              <span class="step-n" aria-hidden="true">02</span>
-              <h3 class="step-title">Add it to your CI's secrets</h3>
-              <p>Put the token in your CI's secrets as <code>ZERON_DEPLOY_TOKEN</code>, then publish with it. It's read from the environment only, never from an argument, and needs no Zeron running and nobody signed in:</p>
-              <CodeBlock label="Terminal" code="ZERON_DEPLOY_TOKEN=zdt_… zeron plugin publish <folder>" id="cb-env" />
-            </li>
-            <li class="step">
-              <span class="step-n" aria-hidden="true">03</span>
-              <h3 class="step-title">Publish</h3>
-              <p>On GitHub, the publish action installs Zeron's command line and sends the plugin with your token:</p>
-              <CodeBlock label=".github/workflows/publish.yml" code={WORKFLOW} id="cb-workflow" />
-              <p>Pin it to a Zeron release tag or a commit, never a branch: the step holds your token. Without a token (a pull request from a fork gets no secrets) it only checks.</p>
-            </li>
-          </ol>
+          <CiSteps />
           <ul>
             <li>Making one asks you to sign in again first, wherever you make it. <code>--name</code> says what it's for. Its scope is <code>--plugins a,b</code> (plugins you already have in the store, up to 50) or <code>--all</code> (every plugin of yours, those you first publish later included, never one transferred to you), fixed once made: another set of plugins is another token. <code>--expires-in-days</code> stops it working after that many days.</li>
             <li>The token (<code>zdt_…</code>) is shown once, as it's made. Neither Zeron nor the store keeps it, so one that's lost can't be shown again: revoke it and make another.</li>

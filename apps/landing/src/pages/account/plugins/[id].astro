@@ -11,6 +11,8 @@
 // Yours only: anyone else's id is the 404 page. Signed out, it says so and
 // offers sign-in.
 import AccountHead from "../../../components/look/AccountHead.astro";
+import Empty from "../../../components/look/Empty.astro";
+import Failed from "../../../components/look/Failed.astro";
 import Flash from "../../../components/look/Flash.astro";
 import Icon from "../../../components/look/Icon.astro";
 import Question from "../../../components/look/Question.astro";
@@ -80,21 +82,13 @@ const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions
     <Flash flash={flash} />
     {
       who.state === "down" ? (
-        <div class="empty" role="status">
-          <h1>{store("plugins.store.failed_title")}</h1>
-          <p>{store("plugins.store.failed_body")}</p>
-          <a class="btn sec" href={here}>{store("plugins.store.try_again")}</a>
-        </div>
+        <Failed href={here} level={1} />
       ) : !session ? (
         <AccountHead title="Your plugins" lead="What you have published, and where each version stands." current="plugins" plugins={null} tokens={null}>
           <SignInPlease what="the plugins you publish" />
         </AccountHead>
       ) : !plugin ? (
-        <div class="empty" role="status">
-          <h1>This plugin can't be loaded right now</h1>
-          <p>Try again in a moment.</p>
-          <a class="btn sec" href={here}>Try again</a>
-        </div>
+        <Failed title="This plugin can't be loaded right now" line="Try again in a moment." href={here} level={1} />
       ) : (
         <>
           <header class="ohead">
@@ -112,12 +106,9 @@ const listing = plugin ? listingState(plugin.listing, everListed(plugin.versions
           {idle && <p class="flash info">No version of it can be installed: each was taken down or removed. Its id stays yours for 90 days after your last version; after that, anyone can take it.</p>}
 
           <section class="mvers" aria-labelledby="versions-h">
-            <h2 id="versions-h">Versions<span class="num">{plugin.versions.length}</span></h2>
+            <h2 id="versions-h">Versions{plugin.versions.length > 0 && <span class="num">{plugin.versions.length}</span>}</h2>
             {plugin.versions.length === 0 ? (
-              <div class="empty">
-                <h2>{store("plugins.store.no_versions")}</h2>
-                <p>Versions you publish show here, each saying whether Zeron verified it.</p>
-              </div>
+              <Empty icon="file" title="Nothing published yet" line="Versions you publish show here, each saying whether Zeron verified it." />
             ) : (
               <div class="tbl vers">
                 <div class="trow th" aria-hidden="true"><span>Version</span><span>Published</span><span></span></div>

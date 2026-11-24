@@ -15,6 +15,8 @@
 //
 // Public and the same for everyone signed out, so the Worker cache keeps
 // each address for half a minute and serves it stale for another.
+import Empty from "../../components/look/Empty.astro";
+import Failed from "../../components/look/Failed.astro";
 import Icon from "../../components/look/Icon.astro";
 import FeaturedTile from "../../components/look/FeaturedTile.astro";
 import PluginCardView from "../../components/look/PluginCard.astro";
@@ -88,6 +90,10 @@ const description = state.category ? `Plugins for Zeron in ${categoryName(state.
 // Search results and later pages stay out of search engines; the list and its categories don't.
 const noindex = Boolean(state.q || state.cursor || state.keyword || state.verified);
 const here = `${Astro.url.pathname}${Astro.url.search}`;
+/** Nothing is published at all (however the list is narrowed): no sidebar, no search, only the page's ending. */
+const unpublished = page.ok && items.length === 0 && (stats.ok ? stats.data.plugins === 0 : front);
+/** What was asked for, when nothing matches it. */
+const searched = `${state.q ? "No" : "There's no"}${state.verified ? " verified" : ""} plugin${state.category ? ` in ${categoryName(state.category)}` : ""}${state.keyword ? ` tagged “${state.keyword}”` : ""}${state.q ? ` matches “${state.q}”` : " yet"}.`;
 /** How many filters past the category are on (the phone's Filters says so). */
 const filtering = Number(state.verified) + Number(Boolean(state.keyword));
 /** Featured: up to three, unnarrowed and on the first page alone. */
@@ -106,12 +112,12 @@ const keep: Record<string, string> = { ...(state.category ? { category: state.ca
     <header class="hero">
       <h1 class={lsb(heading)}>{heading}</h1>
       <p class="lead">{lead}</p>
-      <form class="hfind" role="search" action="/plugins" method="get" data-tidy>
+      {!unpublished && <form class="hfind" role="search" action="/plugins" method="get" data-tidy>
         <Icon name="search" />
         <input type="search" name="q" value={state.q || undefined} placeholder="Search plugins" aria-label="Search plugins" autocomplete="off" enterkeyhint="search" data-search />
         {Object.entries(keep).map(([name, value]) => <input type="hidden" name={name} value={value} />)}
         <kbd class="kbd" aria-hidden="true">/</kbd>
-      </form>
+      </form>}
     </header>
 
     {features.length > 0 && (
@@ -123,129 +129,105 @@ const keep: Record<string, string> = { ...(state.category ? { category: state.ca
       </section>
     )}
 
-    <div class="browse">
-      <aside class="facets" aria-label="Narrow the list">
-        <div>
-          <h2 class="facet-h">Category</h2>
-          <nav class="catlist" aria-label="Categories">
-            <a href={at({ category: null })} aria-current={!state.category ? "page" : undefined}><span>All</span>{stats.ok && <span class="num">{count(stats.data.plugins)}</span>}</a>
-            {shelf.map((c) => (
-              <a href={at({ category: c.id })} aria-current={state.category === c.id ? "page" : undefined}><span>{c.name}</span>{c.count !== undefined && <span class="num">{count(c.count)}</span>}</a>
-            ))}
-          </nav>
-        </div>
-        <div class="wide-facet">
-          <h2 class="facet-h">Show</h2>
-          <div class="pick">
-            <a href={at({ verified: false })} aria-current={!state.verified ? "true" : undefined}><i aria-hidden="true"></i>Everything</a>
-            <a href={at({ verified: true })} aria-current={state.verified ? "true" : undefined}><i aria-hidden="true"></i>{store("plugins.store.verified_only")}<Seal size="s" quiet /></a>
-          </div>
-        </div>
-        {keywords.length > 0 && (
-          <div class="wide-facet">
-            <h2 class="facet-h">Keywords</h2>
-            <ul class="tags">
-              {keywords.map((k) => <li><a class="tag" href={at({ keyword: state.keyword === k ? null : k })} title={k} aria-current={state.keyword === k ? "true" : undefined}>{k}</a></li>)}
-            </ul>
-          </div>
-        )}
-      </aside>
+    {
+      !page.ok ? (
+        <Failed href={here} />
+      ) : unpublished ? (
+        <Empty icon="grid" title={store("plugins.store.empty_title")} line={EMPTY_BODY} />
+      ) : (
+        <div class="browse">
+          <aside class="facets" aria-label="Narrow the list">
+            <div>
+              <h2 class="facet-h">Category</h2>
+              <nav class="catlist" aria-label="Categories">
+                <a href={at({ category: null })} aria-current={!state.category ? "page" : undefined}><span>All</span>{stats.ok && stats.data.plugins > 0 && <span class="num">{count(stats.data.plugins)}</span>}</a>
+                {shelf.map((c) => (
+                  <a href={at({ category: c.id })} aria-current={state.category === c.id ? "page" : undefined}><span>{c.name}</span>{c.count ? <span class="num">{count(c.count)}</span> : null}</a>
+                ))}
+              </nav>
+            </div>
+            <div class="wide-facet">
+              <h2 class="facet-h">Show</h2>
+              <div class="pick">
+                <a href={at({ verified: false })} aria-current={!state.verified ? "true" : undefined}><i aria-hidden="true"></i>Everything</a>
+                <a href={at({ verified: true })} aria-current={state.verified ? "true" : undefined}><i aria-hidden="true"></i>{store("plugins.store.verified_only")}<Seal size="s" quiet /></a>
+              </div>
+            </div>
+            {keywords.length > 0 && (
+              <div class="wide-facet">
+                <h2 class="facet-h">Keywords</h2>
+                <ul class="tags">
+                  {keywords.map((k) => <li><a class="tag" href={at({ keyword: state.keyword === k ? null : k })} title={k} aria-current={state.keyword === k ? "true" : undefined}>{k}</a></li>)}
+                </ul>
+              </div>
+            )}
+          </aside>
 
-      <section class="listing" aria-labelledby="results">
-        <div class="rhead">
-          <p id="results">{total !== undefined ? <><b class="num">{count(total)}</b> {total === 1 ? "plugin" : "plugins"}</> : "Plugins"}</p>
-          <div class="fbar">
-            {/* The phone's filters, a disclosure (the sidebar's, folded). */}
-            <details class="drop narrow-only">
-              <summary>Filters{filtering > 0 && <span class="n num">{filtering}</span>}<Icon name="chev" /></summary>
-              <div class="pop wide">
-                <p class="facet-h">Show</p>
-                <div class="pick">
-                  <a href={at({ verified: false })} aria-current={!state.verified ? "true" : undefined}><i aria-hidden="true"></i>Everything</a>
-                  <a href={at({ verified: true })} aria-current={state.verified ? "true" : undefined}><i aria-hidden="true"></i>{store("plugins.store.verified_only")}<Seal size="s" quiet /></a>
-                </div>
-                {keywords.length > 0 && (
-                  <>
-                    <p class="facet-h">Keywords</p>
-                    <ul class="tags">
-                      {keywords.map((k) => <li><a class="tag" href={at({ keyword: state.keyword === k ? null : k })} title={k} aria-current={state.keyword === k ? "true" : undefined}>{k}</a></li>)}
-                    </ul>
-                  </>
+          <section class="listing" aria-labelledby="results">
+            <div class:list={["rhead", { bare: items.length === 0 }]}>
+              <p id="results" class:list={{ "sr-only": items.length === 0 }}>{total ? <><b class="num">{count(total)}</b> {total === 1 ? "plugin" : "plugins"}</> : "Plugins"}</p>
+              <div class="fbar">
+                {/* The phone's filters, a disclosure (the sidebar's, folded). */}
+                <details class="drop narrow-only">
+                  <summary>Filters{filtering > 0 && <span class="n num">{filtering}</span>}<Icon name="chev" /></summary>
+                  <div class="pop wide">
+                    <p class="facet-h">Show</p>
+                    <div class="pick">
+                      <a href={at({ verified: false })} aria-current={!state.verified ? "true" : undefined}><i aria-hidden="true"></i>Everything</a>
+                      <a href={at({ verified: true })} aria-current={state.verified ? "true" : undefined}><i aria-hidden="true"></i>{store("plugins.store.verified_only")}<Seal size="s" quiet /></a>
+                    </div>
+                    {keywords.length > 0 && (
+                      <>
+                        <p class="facet-h">Keywords</p>
+                        <ul class="tags">
+                          {keywords.map((k) => <li><a class="tag" href={at({ keyword: state.keyword === k ? null : k })} title={k} aria-current={state.keyword === k ? "true" : undefined}>{k}</a></li>)}
+                        </ul>
+                      </>
+                    )}
+                  </div>
+                </details>
+                {/* The order, a menu of links (no script); nothing to order, no menu. */}
+                {items.length > 0 && (
+                  <details class="drop sort">
+                    <summary><span class="t3">Sort:</span> {sortLabel(sort)}<span class="sr-only">, change the order</span><Icon name="chev" /></summary>
+                    <nav class="pop" aria-label={store("plugins.store.order_label")}>
+                      {sorts.map((s) => <a href={at({ sort: s })} aria-current={s === sort ? "page" : undefined}>{sortLabel(s)}</a>)}
+                    </nav>
+                  </details>
                 )}
               </div>
-            </details>
-            {/* The order, a menu of links (no script); nothing to order, no menu. */}
-            {items.length > 0 && (
-              <details class="drop sort">
-                <summary><span class="t3">Sort:</span> {sortLabel(sort)}<span class="sr-only">, change the order</span><Icon name="chev" /></summary>
-                <nav class="pop" aria-label={store("plugins.store.order_label")}>
-                  {sorts.map((s) => <a href={at({ sort: s })} aria-current={s === sort ? "page" : undefined}>{sortLabel(s)}</a>)}
-                </nav>
-              </details>
-            )}
-          </div>
-        </div>
-
-        {
-          !page.ok ? (
-            <div class="empty" role="status">
-              <h2>{store("plugins.store.failed_title")}</h2>
-              <p>{store("plugins.store.failed_body")}</p>
-              <a class="btn sec" href={here}>{store("plugins.store.try_again")}</a>
             </div>
-          ) : items.length === 0 ? (
-            <div class="empty">
-              {state.q ? (
-                <>
-                  <h2>{store("plugins.store.nothing_matches", { query: state.q })}</h2>
-                  <p>{store("plugins.store.try_another")}</p>
-                  <a class="btn sec" href={catalogHref({ category: state.category, keyword: state.keyword })}>{store("plugins.store.clear")}</a>
-                </>
-              ) : state.verified ? (
-                <>
-                  <h2>{store("plugins.store.nothing_here")}</h2>
-                  <p>No plugin here has a verified newest version yet.</p>
-                  <a class="btn sec" href={at({ verified: false })}>Show them all</a>
-                </>
-              ) : state.category || state.keyword ? (
-                <>
-                  <h2>{store("plugins.store.nothing_here")}</h2>
-                  <p>{EMPTY_BODY}</p>
-                  <a class="btn sec" href={catalogHref({})}>All plugins</a>
-                </>
+
+            {
+              items.length === 0 ? (
+                <Empty icon="search" title="Nothing matches" line={searched} action={state.q ? { label: store("plugins.store.clear"), href: catalogHref({ category: state.category, keyword: state.keyword, verified: state.verified }) } : { label: "Show everything", href: "/plugins" }} />
               ) : (
                 <>
-                  <h2>{store("plugins.store.empty_title")}</h2>
-                  <p>{EMPTY_BODY}</p>
-                  <a class="btn sec" href="/plugins/publishing">Publishing guide<Icon name="arrow" /></a>
+                  <ul class="results" aria-labelledby="results">
+                    {items.map((p) => <li><PluginCardView plugin={p} /></li>)}
+                  </ul>
+                  {(previous || next) && (
+                    <nav class="pager numbered" aria-label="Pages">
+                      <div class="pages">
+                        {previous ? <a class="pg step" href={previous} rel="prev" aria-label="The page before"><Icon name="chev" /></a> : <span class="pg step" aria-hidden="true"><Icon name="chev" /></span>}
+                        {first && <a class="pg num" href={first} aria-label="Page 1">1</a>}
+                        {pageNo !== null && pageNo > 3 && <span class="pg gap" aria-hidden="true">…</span>}
+                        {previous && pageNo !== null && <a class="pg num" href={previous} aria-label={`Page ${pageNo - 1}`}>{pageNo - 1}</a>}
+                        {pageNo !== null && <span class="pg num" aria-current="page" aria-label={`Page ${pageNo}`}>{pageNo}</span>}
+                        {next && pageNo !== null && <a class="pg num" href={next} aria-label={`Page ${pageNo + 1}`}>{pageNo + 1}</a>}
+                        {next && pageNo !== null && pages !== null && pageNo + 1 < pages && <span class="pg gap" aria-hidden="true">…</span>}
+                        {next ? <a class="pg step" href={next} rel="next" aria-label="The next page"><Icon name="chev" /></a> : <span class="pg step" aria-hidden="true"><Icon name="chev" /></span>}
+                      </div>
+                      <p class="num">{shown ? `${count(shown.from)}–${count(shown.to)}` : ""}{shown && total !== undefined ? " of " : ""}{total !== undefined ? count(total) : ""}</p>
+                    </nav>
+                  )}
                 </>
-              )}
-            </div>
-          ) : (
-            <>
-              <ul class="results" aria-labelledby="results">
-                {items.map((p) => <li><PluginCardView plugin={p} /></li>)}
-              </ul>
-              {(previous || next) && (
-                <nav class="pager numbered" aria-label="Pages">
-                  <div class="pages">
-                    {previous ? <a class="pg step" href={previous} rel="prev" aria-label="The page before"><Icon name="chev" /></a> : <span class="pg step" aria-hidden="true"><Icon name="chev" /></span>}
-                    {first && <a class="pg num" href={first} aria-label="Page 1">1</a>}
-                    {pageNo !== null && pageNo > 3 && <span class="pg gap" aria-hidden="true">…</span>}
-                    {previous && pageNo !== null && <a class="pg num" href={previous} aria-label={`Page ${pageNo - 1}`}>{pageNo - 1}</a>}
-                    {pageNo !== null && <span class="pg num" aria-current="page" aria-label={`Page ${pageNo}`}>{pageNo}</span>}
-                    {next && pageNo !== null && <a class="pg num" href={next} aria-label={`Page ${pageNo + 1}`}>{pageNo + 1}</a>}
-                    {next && pageNo !== null && pages !== null && pageNo + 1 < pages && <span class="pg gap" aria-hidden="true">…</span>}
-                    {next ? <a class="pg step" href={next} rel="next" aria-label="The next page"><Icon name="chev" /></a> : <span class="pg step" aria-hidden="true"><Icon name="chev" /></span>}
-                  </div>
-                  <p class="num">{shown ? `${count(shown.from)}–${count(shown.to)}` : ""}{shown && total !== undefined ? " of " : ""}{total !== undefined ? count(total) : ""}</p>
-                </nav>
-              )}
-            </>
-          )
-        }
-      </section>
-    </div>
+              )
+            }
+          </section>
+        </div>
+      )
+    }
 
     <section class="make" aria-labelledby="make">
       <h2 id="make">Made something for Zeron?</h2>

@@ -103,6 +103,7 @@
 
 /* Reserve an id: under the list, a form of its own, as the report page's: no box round it, at most 560. */
 .reserve { margin-top: var(--s64); }
+.empty + .reserve { margin-top: 0; }
 .reserve h2 { font-size: 19px; line-height: 26px; }
 .reserve .lead2 { margin-top: var(--s4); font-size: 14px; line-height: 21px; color: var(--text-2); }
 .reserve .askcard { max-width: 560px; margin: var(--s16) 0 0; padding: 0; overflow: visible; background: none; box-shadow: none; border-radius: 0; }

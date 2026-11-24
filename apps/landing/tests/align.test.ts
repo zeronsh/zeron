@@ -100,6 +100,103 @@ describe("every icon is drawn at an icon's size", () => {
     }, 60_000);
 });
 
+describe("what's empty, and what to mind", () => {
+  /** Every page of the look, at a desktop's width and a phone's. */
+  const everywhere = (what: string, run: (page: Page, where: string) => Promise<void>) => {
+    for (const p of ALIGN_PAGES)
+      test(`${what}: ${p.name}`, async () => {
+        for (const [w, params] of p.fake ?? []) await site.fake(w, params);
+        try {
+          for (const width of [1440, 390]) {
+            const page = await open(p, width, "dark");
+            try {
+              await run(page, `${p.name} at ${width}`);
+            } finally {
+              await page.context().close();
+            }
+          }
+        } finally {
+          for (const [w, params] of RESET) if (p.fake?.some(([x]) => x === w)) await site.fake(w, params);
+        }
+      }, 60_000);
+  };
+
+  everywhere("a callout spans its column's box width, its words on the column's two edges", async (page, where) => {
+    const off = await page.evaluate(() =>
+      [...document.querySelectorAll<HTMLElement>(".flash, .warnline, .said-was")]
+        .filter((el) => el.checkVisibility())
+        .map((el) => {
+          const s = getComputedStyle(el), parent = el.parentElement!, ps = getComputedStyle(parent), [b, pb] = [el.getBoundingClientRect(), parent.getBoundingClientRect()];
+          const left = b.left + parseFloat(s.paddingLeft) - (pb.left + parseFloat(ps.paddingLeft)), right = pb.right - parseFloat(ps.paddingRight) - (b.right - parseFloat(s.paddingRight));
+          return { what: `${el.className}: ${el.textContent!.trim().slice(0, 30)}`, left: Math.round(left), right: Math.round(right) };
+        })
+        .filter((c) => Math.abs(c.left) > 1 || Math.abs(c.right) > 1),
+    );
+    expect(off, where).toEqual([]);
+  });
+
+  everywhere("no count of 0 in a tab, a sidebar or a heading", async (page, where) => {
+    const zeros = await page.evaluate(() => [...document.querySelectorAll(":is(.sub, .tabs, .staff-tabs, .facets, .rhead, h1, h2, h3) .num")].filter((el) => el.textContent!.trim() === "0").map((el) => el.parentElement!.textContent!.trim()));
+    expect(zeros, where).toEqual([]);
+  });
+
+  everywhere("an empty block is centred in its area, 96 above and below; one action at most", async (page, where) => {
+    const blocks = await page.evaluate(() =>
+      [...document.querySelectorAll<HTMLElement>(".empty")].map((el) => {
+        const b = el.getBoundingClientRect(), icon = el.querySelector(".empty-i")!.getBoundingClientRect(), p = el.parentElement!.getBoundingClientRect(), ps = getComputedStyle(el.parentElement!);
+        const last = el.lastElementChild!.getBoundingClientRect(), line = el.querySelector("p")?.getBoundingClientRect().width ?? 0;
+        const before = el.previousElementSibling?.getBoundingClientRect(), next = el.nextElementSibling?.getBoundingClientRect(), wrap = el.closest(".wrap")!;
+        return {
+          middle: Math.round(icon.left + icon.width / 2 - (p.left + parseFloat(ps.paddingLeft) + p.right - parseFloat(ps.paddingRight)) / 2),
+          above: Math.round(icon.top - b.top), below: Math.round(b.bottom - last.bottom),
+          // (Nothing adds to its step: what's before it ends where it starts; ending the page, so does the page, and the foot keeps no step of its own.)
+          gap: before && before.height > 1 && before.bottom <= b.top + 1 ? Math.round(b.top - before.bottom) : 0, after: next && next.height > 1 ? Math.round(next.top - b.bottom) : 0,
+          foot: el.parentElement === wrap && el === wrap.lastElementChild ? Math.round(wrap.getBoundingClientRect().bottom - b.bottom) + parseFloat(getComputedStyle(document.querySelector(".foot")!).marginTop) : 0,
+          tile: [icon.width, icon.height], line, actions: el.querySelectorAll("a, button").length,
+        };
+      }),
+    );
+    // (The pages with nothing to show do show it.)
+    if (/empty|down|signed-out|no-plugins|^store-none|^tokens-none$/.test(where.split(" at ")[0]!)) expect(blocks.length, where).toBe(1);
+    for (const b of blocks) {
+      expect({ above: b.above, below: b.below, tile: b.tile, gap: b.gap, after: b.after, foot: b.foot }, where).toEqual({ above: 96, below: 96, tile: [40, 40], gap: 0, after: 0, foot: 0 });
+      expect(Math.abs(b.middle), where).toBeLessThanOrEqual(1);
+      expect(b.line, where).toBeLessThanOrEqual(440);
+      expect(b.actions, where).toBeLessThanOrEqual(1);
+    }
+  });
+
+  test("New token: 32 from its title to its first field, on its page and in its dialog", async () => {
+    for (const path of ["/account/tokens/new", "/account/tokens"])
+      for (const width of [1440, 390]) {
+        const page = await open({ path, user: "user_ada" }, width, "dark");
+        try {
+          if (path.endsWith("tokens")) await page.getByRole("link", { name: "New token" }).click();
+          const gap = await page.evaluate(() => {
+            const form = [...document.querySelectorAll<HTMLElement>(".tokform")].find((f) => f.checkVisibility())!;
+            return form.querySelector(".field-label")!.getBoundingClientRect().top - form.parentElement!.querySelector("h1, h2")!.getBoundingClientRect().bottom;
+          });
+          expect(Math.round(gap), `${path} at ${width}`).toBe(32);
+        } finally {
+          await page.context().close();
+        }
+      }
+  }, 60_000);
+
+  test("a row's second line is at most 720 wide", async () => {
+    for (const p of [{ path: "/account/plugins/worst-case-listing-at-every-limit-xyz12", user: "user_ada" }, { path: "/admin/plugins/worst-case-listing-at-every-limit-xyz12", user: "user_grace" }, { path: "/account", user: "user_ada" }]) {
+      const page = await open(p, 1728, "dark");
+      try {
+        const widths = await page.evaluate(() => [...document.querySelectorAll(".c-note")].map((el) => el.getBoundingClientRect().width));
+        expect(widths.length, p.path).toBeGreaterThan(0);
+        for (const w of widths) expect(w, p.path).toBeLessThanOrEqual(720);
+      } finally {
+        await page.context().close();
+      }
+    }
+  }, 60_000);
+});
+
 describe("the columns the rule names", () => {
   test("a plugin's Get ends on the page's right edge, the rail's; its button its own width, level with the tile's middle", async () => {
     for (const path of ["/plugins/focus-timer", "/plugins/first-light", "/plugins/worst-case-listing-at-every-limit-xyz12", "/plugins/focus-timer/versions/1.2.0"])

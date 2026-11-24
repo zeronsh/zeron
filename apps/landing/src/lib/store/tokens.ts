@@ -111,3 +111,6 @@ export function refusalOf(result: Extract<Result<unknown>, { ok: false }>, name:
       return { field: null, message: "The plugin store didn't make the token. Try again in a moment." };
   }
 }
+
+/** An account with no plugin yet: there's nothing a token could publish. */
+export const NO_TOKENS = { title: "No deploy tokens yet", line: "Publish a plugin first, then a token can send its next versions." } as const;

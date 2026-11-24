@@ -230,7 +230,6 @@
 .v.old .vno a { color: var(--text-2); }
 
 /* ---- What it asks for, all of it ---- */
-.warnline { margin-top: var(--s16); margin-left: calc(-1 * var(--s16)); padding: var(--s12) var(--s16); border-radius: 12px; background: var(--danger-wash); color: var(--danger); font-size: 14px; line-height: 20px; max-width: 44em; }
 /* (Rows, no box round them, a straight rule between, as Review's are; each hangs by its padding.) */
 .asklist { margin-top: var(--s16); margin-inline: calc(-1 * var(--s16)); padding: 0; list-style: none; }
 .asklist-none { margin-top: var(--s16); color: var(--text-2); }
@@ -295,7 +294,7 @@
   .cols2, .cols2.after-head { margin-top: var(--sections); }
   .tabs { gap: var(--s24); margin: 0 calc(-1 * var(--gutter)); padding: 0 var(--gutter); }
   /* (As wide as the column, as wide as the screen.) */
-  .prose pre, .warnline { margin-inline: calc(-1 * var(--gutter)); padding-inline: var(--gutter); border-radius: 0; max-width: none; }
+  .prose pre { margin-inline: calc(-1 * var(--gutter)); padding-inline: var(--gutter); border-radius: 0; max-width: none; }
   .get { --get-hang: var(--s16); }
   .asklist { margin-inline: calc(-1 * var(--gutter)); }
   .asklist .ar { padding-inline: var(--gutter); }

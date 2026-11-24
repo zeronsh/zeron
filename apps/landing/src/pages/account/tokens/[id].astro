@@ -3,6 +3,7 @@
 // is the account's, with its scope). A post does it; a visit asks first, as
 // a page of its own (it works with no script). Signed out, the page says so.
 import AskCard from "../../../components/look/AskCard.astro";
+import Failed from "../../../components/look/Failed.astro";
 import Icon from "../../../components/look/Icon.astro";
 import SignInPlease from "../../../components/look/SignInPlease.astro";
 import Store from "../../../layouts/Store.astro";
@@ -42,7 +43,7 @@ const ask = found ? revokeAsk(found.name) : null;
     <nav class="crumbs" aria-label="Where this is"><a href="/account">Your plugins</a><Icon name="chev" /><a href={back}>Deploy tokens</a></nav>
     {
       who.state === "down" ? (
-        <div class="empty" role="status"><h2>The plugin store didn't answer</h2><p>Try again in a moment.</p><a class="btn sec" href={Astro.url.pathname}>Try again</a></div>
+        <Failed />
       ) : session && ask ? (
         <AskCard ask={ask} action={Astro.url.pathname} csrf={session.csrf} back={back} />
       ) : (
