@@ -3575,6 +3575,35 @@ async fn a_paused_card_dropped_on_now_unpauses_and_its_thread_carries_on() {
 }
 
 #[tokio::test]
+async fn a_closed_card_dropped_on_running_reopens_and_starts_in_one_move() {
+    // The board's drop of a Done card on Running: `resumeItem` (active) on a
+    // closed card. Open again, its thread told to carry on, and one move
+    // from Done to Running said as the person's, both at once.
+    let (_temp, core) = core().await;
+    let (_o, card) = geese(&core).await;
+    op(&core, Caller::Local, json!({"op":"closeItem","id":card})).await.unwrap();
+    assert_eq!(placed(&core, &card).place, Place::Done);
+    let seq = placed(&core, &card).seq;
+    let before = sent(&core, "geese-t1").len();
+    op(&core, Caller::Local, json!({"op":"resumeItem","id":card,"state":"active"})).await.unwrap();
+    let said = sent(&core, "geese-t1");
+    assert_eq!(said.len(), before + 1, "its thread runs: {said:?}");
+    assert!(said.last().unwrap().contains("[Reopened] The person reopened"), "{said:?}");
+    let row = placed(&core, &card);
+    assert!(row.closed.is_none(), "open again");
+    assert_eq!(row.place, Place::Running);
+    assert_eq!(row.from, Some(Place::Done), "straight from Done");
+    assert_eq!(row.seq, seq + 1, "one move, not two");
+    assert_eq!(row.by, Mover::You, "the person's move");
+    assert_eq!((row.reason.as_str(), row.cause), ("You reopened and started it", MoveCause::Reopened));
+    assert_eq!(row.events.last().map(|e| e.text.as_str()), Some("You reopened and started it"));
+    // Asking for changes still reads as before: the mark was this drop's alone.
+    op(&core, Caller::Local, json!({"op":"closeItem","id":card})).await.unwrap();
+    op(&core, Caller::Local, json!({"op":"requestChanges","id":card,"text":"one more pass"})).await.unwrap();
+    assert_ne!(placed(&core, &card).reason, "You reopened and started it");
+}
+
+#[tokio::test]
 async fn a_paused_card_taken_to_up_next_lets_its_held_queue_go() {
     let (_temp, core) = core().await;
     let here = core.orchestration.device_id().to_owned();

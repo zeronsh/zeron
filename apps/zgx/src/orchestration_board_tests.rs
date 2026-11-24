@@ -1,10 +1,11 @@
 //! The orchestration board under a hand (orch_board_places_fixture.luau,
-//! ds/orch_board), in raw pointer events. Nothing on it is moved by a
-//! drag: the engine says where each card stands. A card pressed and
-//! carried to another column carries only a reference to it (for a
-//! composer to take, ds/orch_ref), asks nothing and stays where its row
-//! puts it; a press let go where it was, or after a wobble, opens its
-//! detail beside the board.
+//! ds/orch_board), in raw pointer events. A drag never sets a column: the
+//! engine says where each card stands. A card carried carries a reference
+//! to it (for a composer to take, ds/orch_ref); let go on another column
+//! it does what its menu does there (ds/orch_board_drop), and the card
+//! goes where the engine then puts it; let go on its own column, or off
+//! the board, it asks nothing. A press let go where it was, or after a
+//! wobble, opens its detail beside the board.
 
 use zgx::input::{InputEvent, Modifiers, PointerButton};
 use zgx::scene::Rect;
@@ -66,31 +67,58 @@ fn gesture(app: &mut TestApp, from: (f32, f32), path: &[(f32, f32)]) -> bool {
     dragged
 }
 
-/// A card carried from Running to Done, slowly and in a flick: a reference
-/// drag and nothing else (no call, the card still in Running, nothing
-/// opened).
-#[test]
-fn orchestration_board_a_card_carried_away_stays_put() {
-    let mut app = mount(1500., 1000.);
-    let from = rect(&mut app, "#orch-col-running >> #orch-card-it-chat");
-    let to = rect(&mut app, "#orch-col-done");
+/// Pressed on `card`'s left and carried to `end`: slowly (30 moves) or in
+/// a flick (one). Whether a drag was under way.
+fn carry(app: &mut TestApp, card: &str, end: (f32, f32), slow: bool) -> bool {
+    let from = rect(app, card);
     let start = (from.x + 30., from.y + from.height / 2.);
-    let end = (to.x + to.width / 2., to.y + to.height - 8.);
-    let slow: Vec<(f32, f32)> = (1..=30)
-        .map(|i| {
-            let t = i as f32 / 30.;
-            (start.0 + (end.0 - start.0) * t, start.1 + (end.1 - start.1) * t)
-        })
-        .collect();
-    // (Its one drag is a reference to it: let go on the board, it lands nowhere.)
-    assert!(gesture(&mut app, start, &slow), "a card carried is a reference drag");
-    gesture(&mut app, start, &[end]);
-    assert_eq!(state(&app, "calls"), "", "nothing asked of the host");
-    assert!(has(&mut app, "#orch-col-running >> #orch-card-it-chat"));
-    assert!(!has(&mut app, "#orch-col-done >> #orch-card-it-chat"));
-    assert!(!has(&mut app, "#orch-board-detail"), "let go elsewhere, it isn't a click");
-    // (Every card at rest and shown.)
-    assert!(app.opacity("#orch-card-it-chat") > 0.99);
+    let path: Vec<(f32, f32)> = if slow {
+        (1..=30)
+            .map(|i| {
+                let t = i as f32 / 30.;
+                (start.0 + (end.0 - start.0) * t, start.1 + (end.1 - start.1) * t)
+            })
+            .collect()
+    } else {
+        vec![end]
+    };
+    gesture(app, start, &path)
+}
+
+/// A card carried from Running to Done, slowly and in a flick: marked done
+/// (its menu's Mark done, once each), and in Done once the engine's frame
+/// says so; nothing opened, and every card shown again once let go.
+#[test]
+fn orchestration_board_a_card_carried_to_done_is_marked_done() {
+    for slow in [true, false] {
+        let mut app = mount(1500., 1000.);
+        let to = rect(&mut app, "#orch-col-done");
+        let end = (to.x + to.width / 2., to.y + to.height - 8.);
+        assert!(carry(&mut app, "#orch-col-running >> #orch-card-it-chat", end, slow), "a card carried is a drag");
+        assert_eq!(state(&app, "calls"), "close:it-chat:false", "slow: {slow}");
+        app.frames(80);
+        assert!(has(&mut app, "#orch-col-done >> #orch-card-it-chat"), "slow: {slow}");
+        assert!(!has(&mut app, "#orch-board-detail"), "let go elsewhere, it isn't a click");
+        assert!(app.opacity("#orch-card-it-tool") > 0.99);
+        assert!(app.error().is_none(), "{:?}", app.error());
+    }
+}
+
+/// A card let go on its own column, or off every column (the tabs over
+/// them), asks nothing: it stays in Running, shown again, nothing opened.
+#[test]
+fn orchestration_board_a_card_let_go_on_its_own_column_or_off_the_board_stays_put() {
+    let mut app = mount(1500., 1000.);
+    let own = rect(&mut app, "#orch-card-it-ios");
+    let tabs = rect(&mut app, "#orch-board-tabs");
+    for end in [(own.x + own.width / 2., own.y + own.height / 2.), (tabs.x + tabs.width + 40., tabs.y + tabs.height / 2.)] {
+        assert!(carry(&mut app, "#orch-col-running >> #orch-card-it-chat", end, true));
+        assert_eq!(state(&app, "calls"), "", "nothing asked of the host");
+        assert!(has(&mut app, "#orch-col-running >> #orch-card-it-chat"));
+        assert!(!has(&mut app, "#orch-board-detail"), "let go elsewhere, it isn't a click");
+        // (Carried no more: shown at rest.)
+        assert!(app.opacity("#orch-card-it-chat") > 0.99);
+    }
     assert!(app.error().is_none(), "{:?}", app.error());
 }
 

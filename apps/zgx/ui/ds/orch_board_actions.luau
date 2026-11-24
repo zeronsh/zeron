@@ -6,7 +6,8 @@
 -- the danger's tone, with why, when it was refused.
 --
 --   local act = Actions.make(ctx)
---   act.close(entry, dropped), act.reopen(entry), act.hold(entry, held),
+--   act.close(entry, dropped), act.reopen(entry), act.reopen_start(entry),
+--   act.hold(entry, held),
 --   act.pause(entry), act.resume(entry), act.start(entry), act.remove(entry),
 --   act.request_changes(entry, text), act.snooze(ask, until_ms?),
 --   act.answer(ask, choice), act.expand(ask), act.open_thread(entry, chat?)
@@ -31,6 +32,7 @@ export type Actions = {
 	open_thread: (e: Ctx.Entry, chat: string?) -> (),
 	close: (e: Ctx.Entry, dropped: boolean) -> (),
 	reopen: (e: Ctx.Entry) -> (),
+	reopen_start: (e: Ctx.Entry) -> (),
 	hold: (e: Ctx.Entry, held: boolean) -> (),
 	pause: (e: Ctx.Entry) -> (),
 	resume: (e: Ctx.Entry) -> (),
@@ -146,6 +148,15 @@ function M.make(ctx: Ctx.Ctx): Actions
 		local f = props.on_reopen
 		if f then
 			said(call(f, e.id), e.item.title, "orch.board.said.reopened", "orch.board.failed")
+		end
+	end
+	-- A closed card reopened and started (dropped on Running): the engine's
+	-- Resume of a closed card opens it and tells its threads to carry on
+	-- (none: started afresh), in one move. Said once, as both.
+	function act.reopen_start(e: Ctx.Entry)
+		local f = props.on_resume
+		if f then
+			said(call(f, e.id, "active"), e.item.title, "orch.board.said.reopened_started", "orch.board.failed")
 		end
 	end
 	function act.hold(e: Ctx.Entry, held: boolean)

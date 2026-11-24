@@ -4458,7 +4458,8 @@
         "changes": "Changes sent to its thread",
         "snoozed": "Snoozed",
         "back": "Brought back",
-        "answered": "Answered"
+        "answered": "Answered",
+        "reopened_started": "已重新打开并开始"
       },
       "fact": {
         "status": "Status",
@@ -4475,7 +4476,13 @@
         "accept": "You say it looks good"
       },
       "what_happened": "What happened",
-      "more_asks": "{n} more"
+      "more_asks": "{n} more",
+      "reopen_start": "重新打开并开始",
+      "refused": {
+        "question": "只有提问会放到这里",
+        "answer": "请先回答",
+        "parked": "已被其编排器搁置"
+      }
     },
     "reports": {
       "title": "Crew updates",

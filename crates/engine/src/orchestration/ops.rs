@@ -453,6 +453,8 @@ impl EngineRpc {
                     self.hold_item(&id, true, now)
                 }
                 Some(WorkState::Planned) => self.resume_item(&id, false, now).await,
+                // (A closed card: reopened and started, the board's drop on Running.)
+                _ if self.board_card(&id).is_some_and(|row| row.closed.is_some()) => self.reopen_start(&id, now).await,
                 _ => self.resume_item(&id, true, now).await,
             },
             OrchestrateOp::StartItem { id } => {

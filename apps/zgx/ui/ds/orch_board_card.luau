@@ -323,6 +323,19 @@ function M.owner_name(ctx: Ctx.Ctx, e: Ctx.Entry?): string
 	return if o then o.name or "" else ""
 end
 
+-- A card on a board that takes drops (ds/orch_board_drop): its drag told
+-- to the board, and faded where it stands while it's carried.
+local function carried(ctx: Ctx.Ctx, id: string, ghost: boolean, node: { [any]: any }): { [any]: any }
+	local drop = (ctx :: any).drop
+	if ghost or not drop then
+		return node
+	end
+	node.opacity = function(): number
+		return if drop.carried() == id then 0.4 else 1
+	end
+	return drop.source(node, id)
+end
+
 export type Props = {
 	ctx: Ctx.Ctx,
 	-- Its card's id (not `id`: a component's `id` names its element).
@@ -527,8 +540,9 @@ M.Card = ui.component(function(props: Props): Node
 	}
 	local extra = if props.extra then props.extra(f) else nil
 	-- Dragged: a reference to it (ds/orch_ref; Capture's composer takes one).
-	-- It moves nothing: where a card stands is the engine's.
-	local box = ui.button(Ref.on({
+	-- Dropped on the board, its menu's action (ds/orch_board_drop): where a
+	-- card stands is still the engine's.
+	local box = ui.button(carried(ctx, id, props.ghost == true, Ref.on({
 		class = if props.ghost then "orch-card-ghost" else "orch-card",
 		id = if props.ghost then nil else `orch-card-{id}`,
 		selected = function(): boolean
@@ -599,7 +613,7 @@ M.Card = ui.component(function(props: Props): Node
 	}, function(): any
 		local x = entry:peek()
 		return if x then M.ref(ctx, x) else nil
-	end) :: any)
+	end)) :: any)
 	local whole: Node = box
 	if props.menu then
 		whole = (ContextMenu {

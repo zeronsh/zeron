@@ -71,6 +71,9 @@ pub(crate) struct Board {
     rechecks: Mutex<HashMap<String, DateTime<Utc>>>,
     /// Each Merged card's last `git` answer.
     merges: Mutex<MergeChecks>,
+    /// Cards the person just reopened and started (a closed card dropped on
+    /// Running): their next move says so, as one line.
+    reopened: Mutex<HashSet<String>>,
 }
 
 /// card → when `git` was last asked about its branch, and what it said.
@@ -110,6 +113,17 @@ impl Board {
 
     fn next_due(&self) -> Option<DateTime<Utc>> {
         lock(&self.rechecks).values().min().copied()
+    }
+
+    /// Card `id` was reopened and started by the person: its next move out
+    /// of a closed place is said as that.
+    pub(crate) fn reopened(&self, id: &str) {
+        lock(&self.reopened).insert(id.to_owned());
+    }
+
+    /// Whether card `id` was just reopened and started, the mark taken.
+    fn take_reopened(&self, id: &str) -> bool {
+        lock(&self.reopened).remove(id)
     }
 
     fn set_due(&self, id: &str, at: Option<DateTime<Utc>>) {
@@ -1029,8 +1043,14 @@ impl EngineRpc {
                     && derived.status != CardStatus::Paused
                     && actor == Mover::You
                     && !matches!(derived.why, Why::Closed { .. });
+                // A closed card the person reopened and started: theirs, both said.
+                let restarted = matches!(was, Place::Done | Place::Dropped)
+                    && !matches!(derived.why, Why::Closed { .. })
+                    && self.orchestration().board().take_reopened(&id);
                 let (mut reason, cause, by) = if resumed {
                     ("You resumed it".to_owned(), MoveCause::Resumed, Mover::You)
+                } else if restarted {
+                    ("You reopened and started it".to_owned(), MoveCause::Reopened, Mover::You)
                 } else {
                     move_words(Some(was), derived, actor)
                 };
