@@ -31,9 +31,27 @@ const readStock = (raw: unknown, zeronVersion: string): ReadonlyMap<string, stri
   return files.length > 0 && files.every(([, hash]) => typeof hash === "string" && SHA256_RE.test(hash)) ? new Map(files as [string, string][]) : undefined;
 };
 
+/** Releases' files as this isolate last read them: a release's are written
+ * once, so they're kept a while; one not known isn't kept at all, so a file
+ * is read as soon as it's there. The oldest goes first. */
+const CACHE_MS = 10 * 60_000;
+const CACHE_MAX = 8;
+const cache = new Map<string, { readonly stock: Stock; readonly until: number }>();
+
 /** The files of Zeron `zeronVersion`, or undefined when they aren't known. */
-export const stockOf = async (bucket: R2Bucket, zeronVersion: string): Promise<Stock | undefined> => {
+export const stockOf = async (bucket: R2Bucket, zeronVersion: string, now = Date.now()): Promise<Stock | undefined> => {
   if (zeronVersion.length > MAX_VERSION_LEN || !parseVersion(zeronVersion)) return undefined;
+  const kept = cache.get(zeronVersion);
+  if (kept && now < kept.until) return kept.stock;
+  cache.delete(zeronVersion);
+  const stock = await readStockOf(bucket, zeronVersion);
+  if (!stock) return undefined;
+  if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value!);
+  cache.set(zeronVersion, { stock, until: now + CACHE_MS });
+  return stock;
+};
+
+const readStockOf = async (bucket: R2Bucket, zeronVersion: string): Promise<Stock | undefined> => {
   let files: ReadonlyMap<string, string> | undefined;
   try {
     const object = await bucket.get(stockKey(zeronVersion));

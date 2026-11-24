@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import { crc32 } from "../../src/image-check";
 import { handlePublish } from "../../src/store/publish";
 import { UNUSED_ID_DAYS, releaseRows, releaseUnusedIds } from "../../src/store/release";
+import { stockOf } from "../../src/store/stock";
 import { MAX_UPDATE_ITEMS } from "../../src/store/updates";
 import { PNG, adminCall, author, call, deployToken, listed, listedTemplate, makePackage, makeTemplate, newSigner, publish, publishTemplate, publishedTemplate, randomLetters, tokenPublish, tokenPublishTemplate, uniqueId } from "./store-helpers";
 
@@ -508,6 +509,37 @@ describe("templates: staff", () => {
     expect(next.files.every((f) => f.zeron === null)).toBe(true);
     // (The verified one is still a first look: nothing else of it is verified.)
     expect((await view(temp)).zeron_base).toEqual({ version: zeron, known: true });
+  });
+
+  it("reads a release's files once in a while, and again as soon as they're there", async () => {
+    const zeron = `0.3.0-${randomLetters(8)}`;
+    let reads = 0;
+    const bucket = new Proxy(env.PLUGIN_STORE, {
+      get: (target, prop) => {
+        if (prop === "get") reads++;
+        return Reflect.get(target, prop, target).bind(target);
+      }
+    }) as R2Bucket;
+    const put = (hash: string) => env.PLUGIN_STORE.put(`stock/${zeron}.json`, JSON.stringify({ version: zeron, files: { "app.luau": hash.repeat(64) } }));
+    const mark = async (now: number) => (await stockOf(bucket, zeron, now))?.("app.luau", "a".repeat(64));
+    // Not there: asked each time.
+    expect([await mark(0), await mark(0), reads]).toEqual([undefined, undefined, 2]);
+    await put("a");
+    expect([await mark(0), await mark(1), reads]).toEqual(["same", "same", 3]);
+    // Past its while: read again.
+    await put("b");
+    expect([await mark(599_999), await mark(600_000), reads]).toEqual(["same", "changed", 4]);
+    // Not a version, never a key.
+    expect(await stockOf(bucket, "../0.3.0")).toBeUndefined();
+    expect(reads).toBe(4);
+    // Eight at most: the oldest goes.
+    for (let i = 0; i < 8; i++) {
+      const other = `0.3.${i}-${randomLetters(8)}`;
+      await env.PLUGIN_STORE.put(`stock/${other}.json`, JSON.stringify({ version: other, files: { x: "0".repeat(64) } }));
+      expect(await stockOf(bucket, other, 600_000)).toBeDefined();
+    }
+    reads = 0;
+    expect([await mark(600_001), reads]).toEqual(["changed", 1]);
   });
 
   it("holds the schema to the two kinds, one namespace, and the kind of a take-down", async () => {
