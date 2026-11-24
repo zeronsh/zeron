@@ -255,7 +255,10 @@
 }
 @media (max-width: 720px) {
   .crumbs { padding-top: var(--s24); }
-  .head { display: grid; grid-template-columns: 56px minmax(0, 1fr); column-gap: var(--s16); row-gap: 0; padding-top: var(--s16); align-items: center; }
+  /* (The tile at the title's first line, not the middle of a title that wraps: its first 32 px line centred on the
+     56 px tile, the lines after it going on below.) */
+  .head { display: grid; grid-template-columns: 56px minmax(0, 1fr); column-gap: var(--s16); row-gap: 0; padding-top: var(--s16); align-items: start; }
+  .head h1 { margin-top: var(--s12); }
   .head > .tile.xl { width: 56px; height: 56px; font-size: 24px; }
   .head .txt { display: contents; }
   .head h1 { font-size: 26px; line-height: 32px; letter-spacing: -0.03em; }
@@ -264,7 +267,7 @@
   .head .by { grid-column: 1 / -1; font-size: 13px; margin-top: var(--s8); }
   .head > .get { grid-column: 1 / -1; max-width: none; margin-top: var(--s24); }
   /* (One version's head: its tile beside its title; the byline, and where it stands, the width under them.) */
-  .head.one { grid-template-columns: 56px minmax(0, 1fr); align-items: center; }
+  .head.one { grid-template-columns: 56px minmax(0, 1fr); align-items: start; }
   .head.one .by { grid-column: 1 / -1; margin-top: var(--s12); }
   .head.one > .state { grid-column: 1 / -1; justify-self: start; margin-top: var(--s12); margin-left: calc(-1 * var(--pad)); }
   .head.one h1 { font-size: 26px; line-height: 32px; }

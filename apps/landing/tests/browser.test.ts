@@ -401,6 +401,36 @@ describe("who you are, in the bar of a public page", () => {
   });
 });
 
+describe("Review: nothing a reviewer reads is cut or hidden past an edge", () => {
+  test("every code block, ask value, file name and diff line wraps; the worst case's whole API_URL shows", async () => {
+    const base = "/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0";
+    for (const view of ["", "?view=files", "?view=changes"])
+      for (const width of [1728, 390]) {
+        const { page, context } = await open(`${base}${view}`, { as: "user_grace", width });
+        try {
+          const hidden = await page.evaluate(() =>
+            [...document.querySelectorAll("main :is(pre, code, .code, .diff, .codeblock, td.line, .fn, .literal li, .items li, .moved li, .tree-pane .name)")]
+              .filter((el) => (el as HTMLElement).offsetParent && el.scrollWidth > el.clientWidth + 1)
+              .map((el) => `${el.tagName.toLowerCase()}.${el.className}: ${(el.textContent ?? "").trim().slice(0, 40)} (${el.scrollWidth} in ${el.clientWidth})`),
+          );
+          expect(hidden, `${view || "overview"} at ${width}`).toEqual([]);
+          if (!view) {
+            // (The MCP server's environment, before and after: its long address whole, on screen.)
+            const url = "API_URL=https://api.averyveryverylongsubdomainname.example.com";
+            const shown = await page.evaluate((url) => {
+              const blocks = [...document.querySelectorAll(".before-after pre")].filter((el) => el.textContent!.includes(url));
+              return blocks.map((el) => { const r = el.getBoundingClientRect(); return el.scrollWidth <= el.clientWidth + 1 && r.left >= 0 && r.right <= window.innerWidth; });
+            }, url);
+            expect(shown.length, `${width}: the address is in a block`).toBeGreaterThan(0);
+            expect(shown.every(Boolean), `${width}: whole, on screen`).toBe(true);
+          }
+        } finally {
+          await context.close();
+        }
+      }
+  }, 120_000);
+});
+
 describe("a plugin's tile, in every hue", () => {
   test("its glyph reads on its fill: at least 3:1, dark and light", async () => {
     for (const scheme of ["dark", "light"] as const) {

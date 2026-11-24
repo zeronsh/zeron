@@ -14,7 +14,6 @@ import Flash from "../../../components/look/Flash.astro";
 import Icon from "../../../components/look/Icon.astro";
 import StaffHead from "../../../components/look/StaffHead.astro";
 import Tile from "../../../components/look/Tile.astro";
-import Words from "../../../components/look/Words.astro";
 import Store from "../../../layouts/Store.astro";
 import "../../../styles/look/account.css";
 import "../../../styles/look/staff.css";
@@ -36,11 +35,11 @@ privatePage(Astro);
 const flash = takeFlash(Astro.cookies);
 
 const LISTS: Record<QueueState, { label: string; lead: string }> = {
-  undecided: { label: "Waiting", lead: "Versions people can already install that nobody at Zeron has read. Reported ones come first, then the longest waiting." },
+  undecided: { label: "Waiting", lead: "Listed versions nobody at Zeron has read yet. Reported ones come first, then the longest waiting." },
   verified: { label: "Verified", lead: "Versions a reviewer read and Zeron verified, the oldest first." },
-  declined: { label: "Not verified", lead: "Versions a reviewer read and didn't verify. Each stays listed, without the check; its author has the reviewer's note." },
+  declined: { label: "Not verified", lead: "Versions a reviewer read and didn't verify, still listed without the check; the author has the note." },
   all: { label: "All", lead: "Every listed version, the oldest first." },
-  taken_down: { label: "Taken down", lead: "Versions taken down as harmful and not restored, the latest first. Each is off on the devices that had it; restoring one lists it again, unread." },
+  taken_down: { label: "Taken down", lead: "Versions taken down as harmful, off on the devices that had them; restoring one lists it again, unread." },
 };
 const asked = Astro.url.searchParams.get("state");
 const status: QueueState = asked && Object.hasOwn(LISTS, asked) ? (asked as QueueState) : "undecided";
@@ -89,46 +88,51 @@ const submissionHref = (item: QueueItem) => `/admin/plugins/${encodeURIComponent
           </div>
         ) : (
           <>
-            <div class="card q">
-              <div class="qr h" aria-hidden="true"><span>Version</span><span>Since its newest verified</span><span>{waiting ? "Waiting" : "Published"}</span><span></span></div>
+            <div class="tbl q">
+              <div class="trow th" aria-hidden="true"><span>Version</span><span>Since its newest verified</span><span class="r">{waiting ? "Waiting" : "Published"}</span><span></span></div>
               <ul aria-label={`${LISTS[status].label}, ${waiting ? "reported first, then the longest waiting" : "the oldest first"}`}>
                 {items.map((item) => {
                   const c = change(item);
                   const who = item.publisher?.username ? `@${item.publisher.username}` : "an account with no username";
                   const unread = item.earlier_undecided;
+                  const name = unbidi(item.plugin.name);
+                  const asks = c.asks.slice(0, 2);
                   return (
                     <li>
-                      <div class="qr">
-                        <div class="who">
-                          <Tile id={item.plugin.id} name={item.plugin.name} icon={item.icon} version={item.version} />
-                          <div>
-                            <div class="nm"><a href={submissionHref(item)}><Words text={unbidi(item.plugin.name)} /><span class="sr-only"> {item.version}</span></a> <b aria-hidden="true">{item.version}</b></div>
-                            <div class="by">by {who}{item.installs !== undefined && ` · ${item.installs === 1 ? "1 install" : `${count(item.installs)} installs`}`}{item.prerelease && " · pre-release"}</div>
-                          </div>
-                        </div>
-                        <div class="chg">
-                          <div class="lead1 pills">
-                            {item.reports > 0 && <span class="state bad">{item.reports === 1 ? "1 report" : `${count(item.reports)} reports`}</span>}
+                      <a class="trow" href={submissionHref(item)}>
+                        <span class="c-name">
+                          <Tile id={item.plugin.id} name={item.plugin.name} icon={item.icon} version={item.version} size="s" />
+                          <span class="c-two">
+                            <span class="c-line">
+                              <span class="nm" title={name}>{name}</span>
+                              <b class="vno mono">{item.version}</b>
+                              {item.reports > 0 && <span class="state bad">{item.reports === 1 ? "1 report" : `${count(item.reports)} reports`}</span>}
+                            </span>
+                            <span class="c-sub">{[who, item.installs !== undefined && (item.installs === 1 ? "1 install" : `${count(item.installs)} installs`), item.prerelease && "pre-release"].filter(Boolean).join(" · ")}</span>
+                          </span>
+                        </span>
+                        <span class="c-chg">
+                          <span class="c-line">
                             {item.checks.fail > 0 && <span class="state bad">{item.checks.fail === 1 ? "A check failed" : `${count(item.checks.fail)} checks failed`}</span>}
-                            <span>{c.line}</span>
-                          </div>
+                            <span class="said">{c.line}</span>
+                          </span>
                           {c.asks.length > 0 && (
-                            <ul aria-label={c.marked ? `New since ${item.base}` : "What it asks for"}>
-                              {c.asks.map((a) => (
-                                <li class:list={{ add: c.marked, risky: RISKY_ASKS.has(a) }}>
-                                  {ask(a)}
-                                  {c.marked && <span class="sr-only"> (new)</span>}
-                                </li>
+                            <span class="c-sub asks" role="list" aria-label={c.marked ? `New since ${item.base}` : "What it asks for"}>
+                              {asks.map((a) => (
+                                <span role="listitem" class:list={["ask1", { add: c.marked, risky: RISKY_ASKS.has(a) }]}>
+                                  {c.marked && <span aria-hidden="true">+ </span>}{ask(a)}{c.marked && <span class="sr-only"> (new)</span>}
+                                </span>
                               ))}
-                            </ul>
+                              {c.asks.length > 2 && <span role="listitem" class="more1">+{count(c.asks.length - 2)} more</span>}
+                            </span>
                           )}
-                        </div>
-                        <div class="wait">
-                          <div><time datetime={new Date(item.submitted_at).toISOString()} title={dateTime(item.submitted_at)}>{waiting ? waitedFor(item.submitted_at, now) : day(item.submitted_at, now)}</time></div>
-                          {unread > 0 && <small>{unread === 1 ? "1 earlier version unread" : `${count(unread)} earlier versions unread`}</small>}
-                        </div>
-                        <span class="btn sec sm read" aria-hidden="true">Read<Icon name="arrow" /></span>
-                      </div>
+                        </span>
+                        <span class="c-wait">
+                          <span class="c-line"><time datetime={new Date(item.submitted_at).toISOString()} title={dateTime(item.submitted_at)}>{waiting ? waitedFor(item.submitted_at, now) : day(item.submitted_at, now)}</time></span>
+                          {unread > 0 && <span class="c-sub">{unread === 1 ? "1 earlier version unread" : `${count(unread)} earlier versions unread`}</span>}
+                        </span>
+                        <Icon name="chev" />
+                      </a>
                     </li>
                   );
                 })}

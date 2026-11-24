@@ -61,7 +61,8 @@ const WORD: Record<Change, string> = { added: "added", modified: "changed", remo
   summary :global(.twist) { color: var(--text-3); transition: rotate 0.15s; }
   .file { padding-left: 26px; }
   .file[aria-current="page"] { color: var(--text); background: var(--selected); }
-  .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* (A name a reviewer reads whole: a long one wraps.) */
+  .name { min-width: 0; overflow-wrap: anywhere; }
   .mark { margin-left: auto; font-family: var(--mono); font-size: 11px; font-weight: 600; }
   .added .mark { color: var(--diff-added); }
   .modified .mark { color: var(--tone-warning); }

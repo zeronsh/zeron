@@ -196,6 +196,19 @@ h3 { font-size: 15px; line-height: 22px; font-weight: 600; letter-spacing: -0.00
 /* A word too long for any column breaks inside itself, evenly where its line is balanced (Words.astro). */
 .lw { word-break: break-all; }
 
+/* A block of code (components/look/CodeBlock.astro; the guide's, Review's before and after): a head (what it is, Copy), then the code; one line round it
+   (a shadow, so it takes no room and the words sit on the column), its body a step off the page; it hangs outside
+   the text column by its padding. */
+.codeblock { --pad: var(--s16); margin: var(--s16) calc(-1 * var(--pad)) 0; border-radius: 12px; box-shadow: inset 0 0 0 1px var(--line); overflow: hidden; background: var(--surface); }
+.cb-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s12); height: 40px; padding: 0 var(--s4) 0 var(--pad); border-bottom: 1px solid var(--line); }
+.cb-label { font: 500 13px/20px var(--mono); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cb-copy { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; color: var(--text-3); transition: color 0.12s var(--ease), background-color 0.12s var(--ease); }
+.cb-copy:hover { color: var(--text); background: var(--sunken); }
+.cb-copy.is-done { color: var(--verified); }
+.cb-copy svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.codeblock pre { margin: 0; padding: var(--s16) var(--pad); overflow-x: auto; font: 450 13.5px/24px var(--mono); color: var(--text); white-space: pre; }
+.codeblock pre:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+
 /* ---- a plugin's tile and stage ---- */
 .tile {
   flex: none; display: grid; place-items: center; width: 44px; height: 44px; border-radius: 27%; overflow: hidden;

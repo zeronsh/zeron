@@ -22,8 +22,8 @@ afterAll(async () => {
   await site?.dispose();
 });
 
-async function open(p: Pick<AlignPage, "path" | "user" | "act">, width: number, scheme: "light" | "dark"): Promise<Page> {
-  const context = await browser.newContext({ viewport: { width, height: 900 }, colorScheme: scheme, reducedMotion: "reduce" });
+async function open(p: Pick<AlignPage, "path" | "user" | "act">, width: number, scheme: "light" | "dark", height = 900): Promise<Page> {
+  const context = await browser.newContext({ viewport: { width, height }, colorScheme: scheme, reducedMotion: "reduce" });
   const page = await context.newPage();
   if (p.user) await page.goto(new URL(`/auth/web/callback?as=${p.user}&return_to=/plugins`, site.url).href);
   await page.goto(new URL(p.path, site.url).href, { waitUntil: "networkidle" });
@@ -135,6 +135,57 @@ describe("the columns the rule names", () => {
       }
   }, 120_000);
 
+  test("the staff's tables: no pill in a row sits outside its cell, nor past the row", async () => {
+    const pages = ["/admin/plugins", "/admin/plugins?state=declined", "/admin/plugins?state=taken_down", "/admin/reports", "/admin/reports?status=actioned", "/admin/reservations", "/admin/audit", "/account", "/account/tokens"];
+    for (const path of pages)
+      for (const width of [1440, 1024, 390]) {
+        const page = await open({ path, user: path.startsWith("/admin") ? "user_grace" : "user_ada" }, width, "dark");
+        try {
+          const out = await page.evaluate(() => {
+            const misses: string[] = [];
+            let pills = 0;
+            for (const row of document.querySelectorAll(".tbl .trow:not(.th)")) {
+              const box = row.getBoundingClientRect();
+              for (const pill of row.querySelectorAll(".state")) {
+                if (!(pill as HTMLElement).offsetParent) continue;
+                pills++;
+                // (Its cell: the row's own child that holds it.)
+                let cell = pill as Element;
+                while (cell.parentElement && cell.parentElement !== row && getComputedStyle(cell.parentElement).display !== "contents") cell = cell.parentElement;
+                const [p, c] = [pill.getBoundingClientRect(), cell.getBoundingClientRect()];
+                const name = `${(row.textContent ?? "").trim().slice(0, 30)} — ${(pill.textContent ?? "").trim()}`;
+                // (A pill that starts its cell's line hangs left by its own padding, its words on the column: the store's way.
+                // Past that, or past its cell's right edge into the next, it's out.)
+                const hang = parseFloat(getComputedStyle(pill).paddingLeft) || 0;
+                if (p.left < c.left - hang - 1 || p.right > c.right + 1) misses.push(`${name}: outside its cell (${Math.round(p.left)}–${Math.round(p.right)} in ${Math.round(c.left)}–${Math.round(c.right)})`);
+                if (p.left < box.left || p.right > box.right) misses.push(`${name}: past the row`);
+              }
+            }
+            return { misses, pills };
+          });
+          expect(out.misses, `${path} at ${width}`).toEqual([]);
+        } finally {
+          await page.context().close();
+        }
+      }
+  }, 240_000);
+
+  test("Review: the decision stays in view as the page scrolls, under the bar, at 1728 by 1117", async () => {
+    const page = await open({ path: "/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", user: "user_grace" }, 1728, "dark", 1117);
+    try {
+      const height = await page.evaluate(() => document.documentElement.scrollHeight);
+      expect(height).toBeGreaterThan(2 * 1117);
+      for (let y = 0; y < height; y += 400) {
+        await page.evaluate((y) => window.scrollTo(0, y), y);
+        const box = await page.locator("#decide").evaluate((el) => { const r = el.getBoundingClientRect(); return [r.top, r.bottom]; });
+        expect(box[0]!, `at ${y}: its top, under the bar`).toBeGreaterThanOrEqual(60);
+        expect(box[1]!, `at ${y}: its bottom, on screen`).toBeLessThanOrEqual(1117);
+      }
+    } finally {
+      await page.context().close();
+    }
+  }, 60_000);
+
   test("no two items of a group that fill (hover, chosen, focus) touch: 2 px between any two", async () => {
     // (Each group, its items: the gaps within each one.)
     const groups: [string, string][] = [
@@ -146,7 +197,7 @@ describe("the columns the rule names", () => {
       ["/plugins", ".feat-row|:scope > li"],
       ["/plugins", ".tags|:scope > li"],
       ["/plugins/focus-timer", ".tabs|:scope > a"],
-      ["/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", ".vmini|:scope > li"],
+      // (Review's versions are a table now, as your own pages' are: rows a rule apart, only the hovered one filled.)
       ["/admin/plugins/worst-case-listing-at-every-limit-xyz12/1.5.0", ".flist|:scope > li"],
     ];
     for (const [path, selector] of groups) {

@@ -223,12 +223,14 @@ const versions = record.ok ? record.data.versions : null;
         </div>
       ) : (
         <>
-          <header class="head one rv-head">
-            <Tile id={s.plugin.id} name={name} icon={s.version.icon ?? s.plugin.icon} version={version} size="l" />
+          {/* (As a plugin's page heads it: its tile; the name, the version a mono pill and where it stands right after it,
+               on its line; who, when and from where, how many have it, under them.) */}
+          <header class="head rv-head">
+            <Tile id={s.plugin.id} name={name} icon={s.version.icon ?? s.plugin.icon} version={version} size="xl" />
             <div class="txt">
-              <h1 class={lsb(name)}><span class="name"><Words text={name} /></span> <b class="vnum mono">{version}</b></h1>
+              <h1 class={lsb(name)}><span class="name"><Words text={name} /></span> <b class="vnum mono">{version}</b>{standing && <> <span class:list={["state", standing.tone]}>{standing.seal && <Seal quiet />}{standing.label}</span></>}</h1>
               <p class="by">
-                <span>by {author ? <a href={memberUrl(author)}><b>@{author}</b></a> : "an account with no username"}</span>
+                <span>{author ? <a href={memberUrl(author)}><span class="sr-only">by </span>@{author}</a> : "by an account with no username"}</span>
                 <i aria-hidden="true"></i>
                 <span>Published <time datetime={new Date(s.version.published_at).toISOString()} title={dateTime(s.version.published_at)}>{sinceInSentence(s.version.published_at, now, true)}</time>{via}</span>
                 <i aria-hidden="true"></i>
@@ -236,7 +238,6 @@ const versions = record.ok ? record.data.versions : null;
                 {s.version.prerelease && <><i aria-hidden="true"></i><span>Pre-release</span></>}
               </p>
             </div>
-            {standing && <span class:list={["state", standing.tone]}>{standing.seal && <Seal quiet />}{standing.label}</span>}
           </header>
 
           <div class="cols2 rv-cols">
@@ -269,10 +270,15 @@ const versions = record.ok ? record.data.versions : null;
                               <div class="t">{l.title}{l.risky && <span class="sr-only"> (gives it a lot of reach)</span>}</div>
                               {l.detail && <small>{l.detail}</small>}
                               {l.was || l.now ? (
-                                <dl class="before-after">
-                                  <div><dt>Before</dt><dd>{l.was?.map((x) => <code>{x}</code>)}</dd></div>
-                                  <div><dt>After</dt><dd>{l.now?.map((x) => <code>{x}</code>)}</dd></div>
-                                </dl>
+                                /* (Before and after side by side, each a block of code with its name in its head.) */
+                                <div class="before-after">
+                                  {([["Before", l.was], ["After", l.now]] as const).map(([label, lines]) => (
+                                    <figure class="codeblock">
+                                      <figcaption class="cb-head"><span class="cb-label">{label}</span></figcaption>
+                                      {lines && lines.length > 0 ? <pre tabindex="0"><code>{lines.join("\n")}</code></pre> : <p class="cb-none">None</p>}
+                                    </figure>
+                                  ))}
+                                </div>
                               ) : l.change === "changed" && (l.added || l.altered || l.removed) ? (
                                 <ul class="moved">
                                   {l.added?.map((x) => <li class="add"><code>{x}</code><span class="sr-only"> (new)</span></li>)}
@@ -472,7 +478,6 @@ const versions = record.ok ? record.data.versions : null;
                   {s.publisher.plugins && <><dt>Plugins</dt><dd>{count(s.publisher.plugins.total)}{s.publisher.plugins.total > 0 && `, ${s.publisher.plugins.verified === s.publisher.plugins.total ? (s.publisher.plugins.total === 1 ? "verified" : "all verified") : `${count(s.publisher.plugins.verified)} with a verified version`}`}</dd></>}
                 </dl>
               </section>
-              <div class="rule"></div>
               <section aria-labelledby="reports-h">
                 <h2 class="rail-h" id="reports-h">Reports on this plugin</h2>
                 {openReports === null ? (
@@ -493,7 +498,6 @@ const versions = record.ok ? record.data.versions : null;
                   </ul>
                 )}
               </section>
-              <div class="rule"></div>
               <section aria-labelledby="versions-h">
                 <h2 class="rail-h" id="versions-h">Its versions</h2>
                 {versions === null ? (
@@ -524,16 +528,6 @@ const versions = record.ok ? record.data.versions : null;
       )
     }
   </div>
-
-  {
-    s && (pending || removable) && (
-      <div class="decide-bar">
-        {removable && <a class="btn sec" href={`${here}/take_down`} data-dialog="take-down">Take down…</a>}
-        {declinable && <a class="btn sec" href={`${here}/decline`} data-dialog="reject">Don't verify…</a>}
-        {verifiable && <a class="btn pri" href={`${here}/verify`} data-dialog="approve">Verify…</a>}
-      </div>
-    )
-  }
 
   {
     s && verifiable && (
