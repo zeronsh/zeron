@@ -267,6 +267,7 @@ impl LocalMcpServer {
             storage: McpStorage::Local,
             status,
             account_label: self.account_label.clone(),
+            agent_name: String::new(),
             last_error: self.last_error.clone(),
             scopes,
             updated_at: self.updated_at,

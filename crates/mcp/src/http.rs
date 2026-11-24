@@ -579,6 +579,7 @@ async fn handle_external(
     };
     // Never forward the loopback run grant token to an upstream MCP server.
     headers.remove(hyper::header::AUTHORIZATION);
+    let server_id_for_log = server_id.clone();
     match proxy
         .forward(ExternalProxyRequest {
             server_id,
@@ -610,10 +611,15 @@ async fn handle_external(
             }
             response
         }
-        Err(err) => json_response(
-            StatusCode::BAD_GATEWAY,
-            &error_response(Value::Null, -32603, &err),
-        ),
+        Err(err) => {
+            // (The agent's MCP client drops a server that fails quietly: said
+            // here, or nothing anywhere says why its tools are missing.)
+            tracing::warn!(server = %server_id_for_log, error = %err, "mcp gateway: forward failed");
+            json_response(
+                StatusCode::BAD_GATEWAY,
+                &error_response(Value::Null, -32603, &err),
+            )
+        }
     }
 }
 
@@ -628,6 +634,7 @@ async fn handle(inner: Arc<Inner>, request: Request<hyper::body::Incoming>) -> R
     }
     if let Some(server_id) = external_server_id(request.uri().path()).map(str::to_owned) {
         if find_grant(&inner, &headers).is_none() {
+            tracing::warn!(server = %server_id, "mcp gateway: refused a request without a run's token");
             let mut response = refusal(StatusCode::UNAUTHORIZED, "missing or wrong token");
             response
                 .headers_mut()

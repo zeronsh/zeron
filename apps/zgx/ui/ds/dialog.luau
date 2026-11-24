@@ -72,6 +72,23 @@ export type DialogProps = {
 -- How the panel arrives and leaves (Zeron's dialog-in, its 180; leaving, a
 -- little quicker than it came).
 local IN = { duration = 200, ease = "out(3)" }
+-- How far a field's focus ring reaches past it: room kept round a dialog's
+-- scrolling content so the ring shows whole.
+local RING = 3
+-- The room kept between a dialog and the window's top and foot, and the
+-- least its scrolling content shows however short the window.
+local MARGIN, MIN_ROOM = 24, 96
+
+-- The window's height in points, followed (a large one where a host gives
+-- none: a headless test lays a dialog out whole).
+local function window_height(): number
+	local window = (ui :: any).window
+	local size = if type(window) == "table" or type(window) == "userdata" then window.size else nil
+	local ok, v = pcall(function(): any
+		return if size ~= nil then size:get() else nil
+	end)
+	return if ok and type(v) == "table" and type(v.height) == "number" and v.height > 0 then v.height else 10000
+end
 local OUT = { duration = 130, ease = "in(2)" }
 
 -- The stage: the modal, kept up while the panel leaves. `phase` runs from 0
@@ -191,8 +208,33 @@ local DialogBody = ui.component(function(args: { props: DialogProps, close: () -
 		table.insert(children, props.build())
 	end
 	local has_field = #children > 0 or props.confirm_text ~= nil
+	-- Its words, its buttons and what's between them, measured as they lay
+	-- out: what's between them as tall as it is, up to the room the window
+	-- leaves, scrolling past that.
+	local head_h = ui.use_state(64)
+	local foot_h = ui.use_state(36)
+	local content_h = ui.use_state(0)
+	local function measured(state: State<number>): (size: { w: number, h: number }) -> ()
+		return function(size: { w: number, h: number })
+			if math.abs(state:peek() - size.h) > 0.5 then
+				state:set(size.h)
+			end
+		end
+	end
+	local function room(): number
+		local pad = (ui.theme.get("space.5") :: number?) or 20
+		return math.max(MIN_ROOM, window_height() - 2 * MARGIN - 4 * pad - head_h:get() - foot_h:get())
+	end
+	local function content_height(): number?
+		local h = content_h:get()
+		-- (Unmeasured yet: as tall as it is.)
+		return if h > 0 then math.min(h, room()) else nil
+	end
 	return ui.column(panel {
 		w_full = true,
+		-- (Its words and its buttons keep their height; what's between them
+		-- gives way and scrolls in a window too short for all of it.)
+		min_h = 0,
 		p = "$space.5",
 		gap = "$space.5",
 		opacity = function()
@@ -212,7 +254,9 @@ local DialogBody = ui.component(function(args: { props: DialogProps, close: () -
 			return false
 		end,
 		ui.column {
+			on_resize = measured(head_h),
 			gap = "$zeron.space.tight",
+			shrink = 0,
 			if props.icon
 				then ui.div { pb = "$zeron.space.tight", color = "$text.secondary", Icon { name = props.icon, size = 20 } }
 				else nil,
@@ -221,7 +265,28 @@ local DialogBody = ui.component(function(args: { props: DialogProps, close: () -
 				then ui.text { props.body, text_size = "$font.size.md", line_height = 20, color = "$text.secondary", wrap = true }
 				else nil,
 		},
-		if #children > 0 then ui.column { gap = "$space.3", table.unpack(children) } else nil,
+		-- What it asks, scrolling when the window is too short for it all.
+		-- (Inset by a focus ring's reach inside the scroll, and drawn back out
+		-- by as much, so a field's ring isn't clipped and the fields stay
+		-- where they were.)
+		if #children > 0
+			then ui.scroll {
+				w_full = true,
+				-- (As tall as what's in it, up to what the window leaves once
+				-- its words, its buttons and its margins are placed.)
+				h = content_height,
+				m = ui.raw(-RING, "a focus ring's reach, given back"),
+				fade = { 12, 12 },
+				fade_overflow = true,
+				ui.column {
+					w_full = true,
+					p = ui.raw(RING, "a focus ring's reach"),
+					gap = "$space.3",
+					on_resize = measured(content_h),
+					table.unpack(children),
+				},
+			}
+			else nil,
 		if props.confirm_text
 			then ui.column {
 				gap = "$space.2",
@@ -252,9 +317,11 @@ local DialogBody = ui.component(function(args: { props: DialogProps, close: () -
 			}
 			else nil,
 		ui.row {
+			on_resize = measured(foot_h),
 			gap = "$space.2",
 			justify = "end",
 			items = "center",
+			shrink = 0,
 			if props.aside
 				then ui.div {
 					grow = 1,

@@ -638,15 +638,15 @@ mod tests {
                     "icon": "linear",
                 },
                 {
-                    "id": "slack",
-                    "name": "Slack",
-                    "description": "Search channels and post messages.",
-                    "category": "Communication",
-                    "url": "https://mcp.slack.com/mcp",
+                    "id": "acme",
+                    "name": "Acme",
+                    "description": "A server that registers no clients itself.",
+                    "category": "Testing",
+                    "url": "https://mcp.acme.test/mcp",
                     "transport": "http",
                     "authKind": "oauth",
-                    "docsUrl": "https://docs.slack.dev/ai/slack-mcp-server/",
-                    "icon": "slack",
+                    "docsUrl": "https://acme.test/docs",
+                    "icon": "acme",
                     "clientRequired": true,
                 },
                 {
@@ -675,9 +675,28 @@ mod tests {
                     "enabled": true,
                     "storage": "vault",
                     "status": "connected",
-                    "accountLabel": "ada@zeron.sh",
+                    "accountLabel": "Work",
+                    "agentName": "linear_work",
                     "scopes": ["read", "write"],
                     "updatedAt": 1700000000,
+                },
+                {
+                    "id": "linear-2",
+                    "name": "Linear",
+                    "preset": "linear",
+                    "transport": "http",
+                    "url": "https://mcp.linear.app/mcp",
+                    "args": [],
+                    "envKeys": [],
+                    "authKind": "oauth",
+                    "headerKeys": [],
+                    "enabled": true,
+                    "storage": "vault",
+                    "status": "needsAuth",
+                    "accountLabel": "Personal",
+                    "agentName": "linear_personal",
+                    "scopes": [],
+                    "updatedAt": 1700000002,
                 },
                 {
                     "id": "local-fs",
@@ -728,23 +747,60 @@ mod tests {
         let texts = app.texts();
         assert!(texts.iter().any(|t| t == "Your servers"), "missing servers section: {texts:?}");
         assert!(texts.iter().any(|t| t == "Linear"), "missing configured server Linear: {texts:?}");
-        assert!(texts.iter().any(|t| t == "ada@zeron.sh"), "missing account label: {texts:?}");
+        // Two accounts of Linear, each with its name beside the service's.
+        assert!(texts.iter().any(|t| t == "Work"), "missing account Work: {texts:?}");
+        assert!(texts.iter().any(|t| t == "Personal"), "missing account Personal: {texts:?}");
         assert!(texts.iter().any(|t| t == "Local Files"), "missing stdio server: {texts:?}");
         assert!(texts.iter().any(|t| t == "Context7"), "missing preset Context7: {texts:?}");
         // No storage banner: the page's line under its title says it.
         assert!(!texts.iter().any(|t| t == "Zeron Vault"), "storage banner is back: {texts:?}");
-        // Linear is added, so it's not offered again.
+        // Linear is added (one card, two accounts), so it's not offered again.
         assert_eq!(texts.iter().filter(|t| *t == "Linear").count(), 1, "{texts:?}");
+        assert!(texts.iter().any(|t| t == "mcp.linear.app · 2 accounts"), "{texts:?}");
 
-        // Slack has no client registration: Connect asks for its app.
+        // Each account its own row in Linear's card, with what agents call it.
+        assert!(texts.iter().any(|t| t == "linear_work"), "missing agent name: {texts:?}");
+        assert!(texts.iter().any(|t| t == "linear_personal"), "missing agent name: {texts:?}");
+        assert!(texts.iter().any(|t| t == "Add account"), "missing Add account: {texts:?}");
+
+        // An account's ⋯: renaming it, in a dialog of its own.
+        app.click("#settings-page >> role:button \"Linear · Work actions\"");
+        app.frames(20);
+        assert_eq!(app.error(), None);
+        app.click("role:button \"Rename…\"");
+        app.frames(20);
+        assert_eq!(app.error(), None);
+        let rename_texts = app.texts();
+        assert!(rename_texts.iter().any(|t| t == "Rename account"), "missing rename dialog: {rename_texts:?}");
+        assert!(
+            rename_texts.iter().any(|t| t == "Your agents will see it as linear_work."),
+            "missing agent name preview: {rename_texts:?}"
+        );
+        app.keys("Escape");
+        app.frames(20);
+
+        // Add account: a name (optional), then the browser.
+        app.click("#settings-page >> role:button \"Add account\"");
+        app.frames(20);
+        assert_eq!(app.error(), None);
+        let account_texts = app.texts();
+        assert!(
+            account_texts.iter().any(|t| t == "Add another Linear account"),
+            "missing add-account step: {account_texts:?}"
+        );
+        assert!(account_texts.iter().any(|t| t == "Account name"), "missing account name field: {account_texts:?}");
+        app.keys("Escape");
+        app.frames(20);
+
+        // A server with no client registration: Connect asks for its app.
         app.click("#settings-page >> role:button \"Connect\"[1]");
         app.frames(20);
         assert_eq!(app.error(), None);
-        let slack_texts = app.texts();
-        assert!(slack_texts.iter().any(|t| t == "Connect Slack"), "missing Slack dialog: {slack_texts:?}");
+        let own_app_texts = app.texts();
+        assert!(own_app_texts.iter().any(|t| t == "Connect Acme"), "missing own-app dialog: {own_app_texts:?}");
         assert!(
-            slack_texts.iter().any(|t| t == "http://localhost:38417/callback"),
-            "missing redirect URL: {slack_texts:?}"
+            own_app_texts.iter().any(|t| t == "http://localhost:38417/callback"),
+            "missing redirect URL: {own_app_texts:?}"
         );
         app.keys("Escape");
         app.frames(20);

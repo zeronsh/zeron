@@ -102,8 +102,16 @@ pub struct McpServerView {
     pub enabled: bool,
     pub storage: McpStorage,
     pub status: McpServerStatus,
+    /// The account's name, as the person gave it ("Work"): what tells two
+    /// accounts of one service apart, here and to agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_label: Option<String>,
+    /// The name agents see it by (their tools' `mcp__{agent_name}__…`): the
+    /// service's own (`linear`) while it has one account, the service and the
+    /// account's name (`linear_work`) once it has more. The same on every
+    /// device; empty for none known yet.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub agent_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
     pub scopes: Vec<String>,
@@ -157,6 +165,9 @@ pub struct UpsertMcpServerRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_client_secret: Option<String>,
     pub oauth_scopes: Vec<String>,
+    /// The account's name: absent keeps the one it has, empty clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_label: Option<String>,
 }
 
 /// Hand-written so `{:?}` never logs bearer tokens, custom headers, env values,
@@ -181,6 +192,7 @@ impl std::fmt::Debug for UpsertMcpServerRequest {
             .field("enabled", &self.enabled)
             .field("local_only", &self.local_only)
             .field("oauth_client_id", &self.oauth_client_id)
+            .field("account_label", &self.account_label)
             .field(
                 "oauth_client_secret",
                 &self.oauth_client_secret.as_ref().map(|_| "<redacted>"),

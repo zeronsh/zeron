@@ -337,6 +337,7 @@ impl SessionsEngine {
                     None => (None, None),
                 };
             request.mcp = mcp.clone();
+            self.inner.refresh_mcp_servers_for_run().await;
             request.extra_mcp = self.inner.extra_mcp_servers(grant.as_ref());
             request.env.insert(
                 zeron_proto::ORIGIN_ENV.into(),

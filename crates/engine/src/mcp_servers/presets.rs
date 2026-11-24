@@ -3,24 +3,14 @@
 use zeron_proto::{McpAuthKind, McpPreset, McpTransport};
 
 /// Predefined catalog of popular official remote MCP servers.
+///
+/// Every one signs in with no app of the person's own: its OAuth server
+/// registers Zeron's client itself (RFC 7591), each checked on 2026-11-23 by
+/// registering a client as `oauth::register_dynamic_client` does. Servers
+/// that need an app of your own (Slack, GitHub, Figma) are added as custom
+/// servers with one.
 pub fn default_presets() -> Vec<McpPreset> {
     vec![
-        McpPreset {
-            id: "slack".into(),
-            name: "Slack".into(),
-            description: "Search channels, read threads, and post messages in Slack workspaces."
-                .into(),
-            category: "Communication".into(),
-            url: "https://mcp.slack.com/mcp".into(),
-            transport: McpTransport::Http,
-            auth_kind: McpAuthKind::OAuth,
-            docs_url: "https://docs.slack.dev/ai/slack-mcp-server/".into(),
-            icon: "slack".into(),
-            header_name: None,
-            // Slack's OAuth has no Dynamic Client Registration: only a Slack
-            // app's own client (Marketplace-published or internal) may sign in.
-            client_required: true,
-        },
         McpPreset {
             id: "linear".into(),
             name: "Linear".into(),
@@ -49,20 +39,6 @@ pub fn default_presets() -> Vec<McpPreset> {
             client_required: false,
         },
         McpPreset {
-            id: "github".into(),
-            name: "GitHub".into(),
-            description:
-                "Interact with GitHub repositories, pull requests, issues, and actions.".into(),
-            category: "Developer Tools".into(),
-            url: "https://api.githubcopilot.com/mcp/".into(),
-            transport: McpTransport::Http,
-            auth_kind: McpAuthKind::OAuth,
-            docs_url: "https://github.com/github/github-mcp-server".into(),
-            icon: "github".into(),
-            header_name: None,
-            client_required: false,
-        },
-        McpPreset {
             id: "sentry".into(),
             name: "Sentry".into(),
             description: "Investigate Sentry issues, stack traces, releases, and performance data."
@@ -73,19 +49,6 @@ pub fn default_presets() -> Vec<McpPreset> {
             auth_kind: McpAuthKind::OAuth,
             docs_url: "https://docs.sentry.io/product/sentry-mcp/".into(),
             icon: "sentry".into(),
-            header_name: None,
-            client_required: false,
-        },
-        McpPreset {
-            id: "figma".into(),
-            name: "Figma".into(),
-            description: "Read Figma frames, design tokens, components, and layout specs.".into(),
-            category: "Design".into(),
-            url: "https://mcp.figma.com/mcp".into(),
-            transport: McpTransport::Http,
-            auth_kind: McpAuthKind::OAuth,
-            docs_url: "https://developers.figma.com/docs/figma-mcp-server/".into(),
-            icon: "figma".into(),
             header_name: None,
             client_required: false,
         },
@@ -198,7 +161,7 @@ mod tests {
     #[test]
     fn default_presets_have_unique_ids_and_valid_urls() {
         let presets = default_presets();
-        assert_eq!(presets.len(), 13);
+        assert_eq!(presets.len(), 10);
         let mut ids = HashSet::new();
         for p in &presets {
             assert!(ids.insert(p.id.clone()), "duplicate preset id: {}", p.id);
@@ -216,9 +179,14 @@ mod tests {
         }
         let context7 = presets.iter().find(|p| p.id == "context7").unwrap();
         assert_eq!(context7.auth_kind, McpAuthKind::None);
-        let slack = presets.iter().find(|p| p.id == "slack").unwrap();
-        assert_eq!(slack.auth_kind, McpAuthKind::OAuth);
-        assert!(slack.client_required);
-        assert_eq!(presets.iter().filter(|p| p.client_required).count(), 1);
+        // (Slack's MCP takes only a Marketplace-published or internal Slack
+        // app's own client: not offered here, added as a custom server with
+        // one's own app instead. Every preset signs in without one.)
+        // Nor GitHub's (its OAuth has no client registration) or Figma's
+        // (registration refused to all but its approved clients).
+        for gone in ["slack", "github", "figma"] {
+            assert!(presets.iter().all(|p| p.id != gone), "{gone} needs its own app");
+        }
+        assert!(presets.iter().all(|p| !p.client_required));
     }
 }

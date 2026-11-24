@@ -46,7 +46,10 @@ export type Server = {
 	enabled: boolean,
 	storage: Storage,
 	status: ServerStatus,
+	-- The account's name, as the person gave it ("Work").
 	accountLabel: string?,
+	-- The name agents see it by: `linear`, or `linear_work` beside another account.
+	agentName: string?,
 	lastError: string?,
 	scopes: { string },
 	updatedAt: number,
@@ -83,6 +86,8 @@ export type UpsertRequest = {
 	oauthClientId: string?,
 	oauthClientSecret: string?,
 	oauthScopes: { string }?,
+	-- The account's name: nil keeps it, "" clears it.
+	accountLabel: string?,
 }
 
 export type StartAuthRequest = {
