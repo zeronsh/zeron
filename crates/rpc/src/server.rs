@@ -241,10 +241,13 @@ pub(crate) struct AgentGuard {
 
 /// Methods that act on the calling chat, named by `chatId`: for a pinned
 /// agent ([`agent_service`]), only its own.
-const CALLING_CHAT_METHODS: [&str; 3] = [
+const CALLING_CHAT_METHODS: [&str; 6] = [
     crate::methods::PUBLISH_VISUAL,
     crate::methods::PUBLISH_IMAGE,
     crate::methods::AWAIT_BACKGROUND,
+    crate::methods::REGISTER_DELEGATED_TASK,
+    crate::methods::UPDATE_DELEGATED_TASK,
+    crate::methods::LIST_DELEGATED_TASKS,
 ];
 
 /// The service as one run's agent reaches it: only [`crate::agent_allowed`]

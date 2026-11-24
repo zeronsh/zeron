@@ -352,6 +352,31 @@ struct StopWaitingParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct RegisterDelegatedParams {
+    chat_id: String,
+    child_chat_id: String,
+    message_id: String,
+    mode: Option<zeron_proto::DelegationMode>,
+    completion_wake: Option<zeron_proto::CompletionWake>,
+    title: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateDelegatedParams {
+    chat_id: String,
+    task_id: String,
+    action: String,
+    status: Option<zeron_proto::DelegatedStatus>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AsyncDelegationParams {
+    enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RunProjectActionParams {
     space_id: String,
     chat_id: String,
@@ -2798,6 +2823,8 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_TITLE_SETTINGS
             | methods::GET_COMMIT_CREDIT
             | methods::SET_COMMIT_CREDIT
+            | methods::GET_ASYNC_DELEGATION
+            | methods::SET_ASYNC_DELEGATION
             | methods::GET_NATIVE_SUBAGENTS
             | methods::SET_NATIVE_SUBAGENTS
             | methods::GET_CODE_MODE
@@ -2866,6 +2893,7 @@ fn forwardable(method: &str) -> bool {
             | methods::STOP_BACKGROUND_TASK
             | methods::READ_BACKGROUND_TASK_OUTPUT
             | methods::STOP_WAITING
+            | methods::LIST_DELEGATED_TASKS
             // Checkout diffs are produced on the device holding the checkout.
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::WATCH_WORKSPACE_GIT_STATUS
@@ -4407,6 +4435,75 @@ impl RpcService for EngineRpc {
                             .into(),
                     )),
                 }
+            }
+            methods::REGISTER_DELEGATED_TASK => {
+                let p: RegisterDelegatedParams = parse_params(params)?;
+                let child = self
+                    .workspace
+                    .chat(&p.child_chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?
+                    .filter(|child| child.parent_chat_id.as_deref() == Some(p.chat_id.as_str()))
+                    .ok_or_else(|| RpcError::Failed("That chat isn't a child of this one".into()))?;
+                let sessions = self.workspace.merged_sessions(&self.sessions.watch_sessions());
+                let title = [p.title.as_deref(), child.title.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .map(zeron_proto::view::single_line)
+                    .find(|t| !t.trim().is_empty())
+                    .unwrap_or_else(|| "Subagent".into());
+                let task = self
+                    .sessions
+                    .delegations()
+                    .register(crate::delegation::NewTask {
+                        parent_turn_id: crate::delegation::current_turn(&self.doc_host, &p.chat_id),
+                        parent_chat_id: p.chat_id,
+                        target_device_id: child.device_id.clone(),
+                        message_id: p.message_id,
+                        harness: child
+                            .config
+                            .as_ref()
+                            .map_or_else(|| self.doc_host.harness_for(&child.id), |c| c.harness),
+                        model: child.config.as_ref().and_then(|c| c.model.clone()),
+                        title: title.chars().take(120).collect(),
+                        mode: p.mode.unwrap_or_default(),
+                        completion_wake: p.completion_wake.unwrap_or_default(),
+                        baseline: crate::delegation::baseline_of(&sessions, &child),
+                        child_chat_id: child.id,
+                    })
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&task)
+            }
+            methods::UPDATE_DELEGATED_TASK => {
+                let p: UpdateDelegatedParams = parse_params(params)?;
+                let tasks = self.sessions.delegations();
+                let ok = match p.action.as_str() {
+                    "cancel" => match tasks.cancel(&p.chat_id, &p.task_id) {
+                        Some(task) => {
+                            if task.is_open() {
+                                crate::delegation::interrupt(&self.doc_host, &task.child_chat_id);
+                            }
+                            true
+                        }
+                        None => false,
+                    },
+                    "acknowledge" => tasks.acknowledge(&p.chat_id, &p.task_id, p.status),
+                    "async" => tasks.make_async(&p.chat_id, &p.task_id),
+                    "discard" => tasks.discard(&p.chat_id, &p.task_id),
+                    other => return Err(RpcError::BadParams(format!("unknown action {other:?}"))),
+                };
+                RpcReply::value(&serde_json::json!({ "ok": ok }))
+            }
+            methods::LIST_DELEGATED_TASKS => {
+                let p: StopWaitingParams = parse_params(params)?;
+                let sessions = self.workspace.merged_sessions(&self.sessions.watch_sessions());
+                RpcReply::value(&self.sessions.delegations().views(&p.chat_id, &sessions))
+            }
+            methods::GET_ASYNC_DELEGATION => RpcReply::value(&self.sessions.async_delegation().status()),
+            methods::SET_ASYNC_DELEGATION => {
+                let p: AsyncDelegationParams = parse_params(params)?;
+                let setting = self.sessions.async_delegation();
+                setting.set(p.enabled);
+                RpcReply::value(&setting.status())
             }
             methods::STOP_WAITING => {
                 let p: StopWaitingParams = parse_params(params)?;

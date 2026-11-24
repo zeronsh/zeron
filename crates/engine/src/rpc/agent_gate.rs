@@ -82,7 +82,14 @@ impl EngineRpc {
             return Ok(params);
         };
         // What an agent waits on is its own chat's to say, whatever it sends.
-        if method == methods::AWAIT_BACKGROUND {
+        // So is what it delegated.
+        if matches!(
+            method,
+            methods::AWAIT_BACKGROUND
+                | methods::REGISTER_DELEGATED_TASK
+                | methods::UPDATE_DELEGATED_TASK
+                | methods::LIST_DELEGATED_TASKS
+        ) {
             let Some(chat) = chat else {
                 return Err(refused("Only an agent running in a Zeron chat waits on its work"));
             };

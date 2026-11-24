@@ -46,6 +46,7 @@ fn origin(chat: &str) -> Origin {
         chat_id: Some(chat.into()),
         device_id: Some("d".into()),
         side_chats_only: false,
+        delegation: Default::default(),
         waits_on_background: true,
     }
 }

@@ -458,6 +458,7 @@ mod gate_tests {
             running_subagents: running,
             background_tasks: Vec::new(),
             waiting: None,
+            blocked_on_wait: false,
         }
     }
 
@@ -476,11 +477,7 @@ mod gate_tests {
         s.status = SessionStatus::Idle;
         s.waiting = Some(crate::SessionWaiting {
             since: updated_at,
-            on: vec![crate::WaitingOn {
-                id: "bn1".into(),
-                kind: crate::WaitingKind::Process,
-                label: "cargo test".into(),
-            }],
+            on: vec![crate::WaitingOn::runtime("bn1", crate::WaitingKind::Process, "cargo test")],
         });
         s
     }

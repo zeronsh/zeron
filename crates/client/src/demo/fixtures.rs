@@ -495,12 +495,9 @@ pub(crate) fn seed(
                 updated_at: Utc::now(),
                 waiting: demo.waiting_on.map(|command| SessionWaiting {
                     since: ms(last),
-                    on: vec![WaitingOn {
-                        id: format!("bg-{}", demo.id),
-                        kind: WaitingKind::Process,
-                        label: command.into(),
-                    }],
+                    on: vec![WaitingOn::runtime(format!("bg-{}", demo.id), WaitingKind::Process, command)],
                 }),
+                blocked_on_wait: false,
             })?;
         }
         if let Some((until_in, slept_ago)) = demo.sleep {

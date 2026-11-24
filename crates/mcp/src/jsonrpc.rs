@@ -55,6 +55,18 @@ const WAITS_ON_BACKGROUND: &str = "\n\n\
 Before ending a turn while background work you'll come back to is still running (tests, a \
 build), call `wait_on_background` with its task id; never for a dev server or a watcher.";
 
+/// How [`INSTRUCTIONS`] says to work in parallel; what takes its place where
+/// the host runs delegated work in the background ([`crate::Delegation`]).
+const PARALLEL: &str = "For parallel work, start every chat before waiting on any: `create_chats` or `send_messages` \
+(or `wait: false`, then `wait_for_turn`).";
+const DELEGATES: &str = "Work you delegate runs in the background: put a whole task in `create_chat`'s (or, for several \
+at once, `create_chats`') `prompt`, carry on, and when there is nothing else to do, end your turn. Your chat reads as \
+waiting and Zeron wakes you with the results in one message; don't wait for them or poll. Work with your own child \
+chats. Start a standalone chat, or act on a chat that isn't your child (`peer: true`), only when the person asks or \
+there is no other way.";
+const DELEGATE: &str = "Another chat delegated this work to you: your final reply goes back to it as your result, by \
+itself, so make that reply complete, and don't message the other chat to report. Ask a question only if you can't go on.";
+
 /// Appended to [`INSTRUCTIONS`] when the host launched the agent without its
 /// own subagent tools ([`zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV`]).
 const SIDE_CHATS_ONLY: &str = "\n\n\
@@ -64,13 +76,23 @@ subagent, delegate through Zeron chats instead, with `create_chats` (or `create_
 /// What `initialize` tells the agent: with when to say it waits where it's
 /// offered `wait_on_background`, and the side-chat rule when its host turned
 /// the agent's own subagents off.
-pub(crate) fn instructions(waits: bool, side_chats_only: bool) -> std::borrow::Cow<'static, str> {
-    if !waits && !side_chats_only {
+pub(crate) fn instructions(
+    waits: bool,
+    side_chats_only: bool,
+    delegation: crate::Delegation,
+) -> std::borrow::Cow<'static, str> {
+    let parallel = match delegation {
+        crate::Delegation::Off => PARALLEL,
+        crate::Delegation::Parent => DELEGATES,
+        crate::Delegation::Child => DELEGATE,
+    };
+    if !waits && !side_chats_only && delegation == crate::Delegation::Off {
         return INSTRUCTIONS.into();
     }
     let waits = if waits { WAITS_ON_BACKGROUND } else { "" };
     let side_chats = if side_chats_only { SIDE_CHATS_ONLY } else { "" };
-    format!("{INSTRUCTIONS}{waits}{side_chats}").into()
+    let base = INSTRUCTIONS.replace(PARALLEL, parallel);
+    format!("{base}{waits}{side_chats}").into()
 }
 
 /// How often a call still running reports progress. Clients abort a call
@@ -274,7 +296,7 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
                         "name": "zeron",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
-                    "instructions": instructions(tools.waits_on_background(), tools.side_chats_only()),
+                    "instructions": instructions(tools.waits_on_background(), tools.side_chats_only(), tools.delegation()),
                 }),
             )
         }
@@ -481,10 +503,19 @@ mod tests {
 
     #[test]
     fn side_chats_only_instructions_add_the_delegation_rule() {
-        assert_eq!(instructions(false, false), INSTRUCTIONS);
-        let side_chats = instructions(false, true);
+        assert_eq!(instructions(false, false, crate::Delegation::Off), INSTRUCTIONS);
+        let side_chats = instructions(false, true, crate::Delegation::Off);
         assert!(side_chats.starts_with(INSTRUCTIONS));
         assert!(side_chats.ends_with("with `create_chats` (or `create_chat`)."));
+    }
+
+    #[test]
+    fn background_delegation_replaces_waiting_with_ending_the_turn() {
+        let parent = instructions(false, false, crate::Delegation::Parent);
+        assert!(!parent.contains(PARALLEL) && parent.contains(DELEGATES));
+        assert!(parent.contains("show_image"), "the rest stands");
+        let child = instructions(true, false, crate::Delegation::Child);
+        assert!(child.contains(DELEGATE) && child.ends_with(WAITS_ON_BACKGROUND));
     }
 
     #[test]
@@ -526,10 +557,10 @@ mod tests {
     #[test]
     fn only_an_agent_offered_wait_on_background_is_told_when_to_use_it() {
         assert!(!INSTRUCTIONS.contains("wait_on_background"));
-        let waits = instructions(true, false);
+        let waits = instructions(true, false, crate::Delegation::Off);
         assert!(waits.starts_with(INSTRUCTIONS));
         assert!(waits.contains("call `wait_on_background`"));
-        let both = instructions(true, true);
+        let both = instructions(true, true, crate::Delegation::Off);
         assert!(both.contains("call `wait_on_background`"));
         assert!(both.ends_with("with `create_chats` (or `create_chat`)."));
     }

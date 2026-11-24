@@ -909,6 +909,15 @@ impl WorkspaceHost {
         self.inner.sidebar_preferences_tx.borrow().clone()
     }
 
+    /// [`Self::merged_sessions_watch`], as it stands.
+    pub fn merged_sessions(&self, local: &watch::Receiver<Vec<Session>>) -> Vec<Session> {
+        merge_sessions(
+            &self.inner.config.device_id,
+            &self.inner.sessions_tx.borrow(),
+            &local.borrow(),
+        )
+    }
+
     /// WatchSessions source: remote devices' rows from the registry merged with
     /// this engine's live status watch (the local view is fresher for our own runs).
     pub fn merged_sessions_watch(
@@ -2549,6 +2558,7 @@ mod tests {
             started_at: None,
             updated_at: Utc::now(),
             waiting: None,
+            blocked_on_wait: false,
         };
         for i in 0..300 {
             let id = format!("chat-{i:03}");
@@ -2882,6 +2892,7 @@ mod tests {
             running_subagents: 0,
             background_tasks: Vec::new(),
             waiting: None,
+            blocked_on_wait: false,
         }
     }
 

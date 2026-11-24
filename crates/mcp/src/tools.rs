@@ -20,9 +20,10 @@ use zeron_proto::{
 };
 
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
-use crate::zeron::{HarnessInfo, TranscriptFollow, TurnOutcome, Zeron, session_for, short};
+use crate::zeron::{Delegation, HarnessInfo, TranscriptFollow, TurnOutcome, Zeron, session_for, short};
 
 mod commands;
+mod delegation;
 mod mcp_servers;
 mod plugins;
 mod themes;
@@ -133,7 +134,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "list_chats",
-            description: "Chats with project, device, harness/model, sidebar status, and last activity. Status is working, awaitingInput (needs input), completed (unseen result), errored, or idle. statusStale marks expired live reports; terminalActivity explains OSC 7501 reports. sessionStatus is native execution state. Newest activity first.",
+            description: "Chats with project, device, harness/model, sidebar status, and last activity. Status is working, waiting (its turn ended into waiting on work that wakes it: waitingOn says what), awaitingInput (needs input), completed (unseen result), errored, or idle. statusStale marks expired live reports; terminalActivity explains OSC 7501 reports. sessionStatus is native execution state. Newest activity first.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -702,6 +703,9 @@ struct CreateChatArgs {
     prompt: Option<String>,
     #[serde(default)]
     wait: bool,
+    mode: Option<delegation::Mode>,
+    #[serde(default)]
+    wake: delegation::Wake,
     timeout_secs: Option<u64>,
 }
 
@@ -723,6 +727,12 @@ struct SendArgs {
     mode: Option<String>,
     #[serde(default)]
     wait: bool,
+    #[serde(default)]
+    wake: delegation::Wake,
+    /// The person asked for it, or it can't be done otherwise
+    /// ([`Tools::ensure_within_reach`]).
+    #[serde(default)]
+    peer: bool,
     timeout_secs: Option<u64>,
 }
 
@@ -733,9 +743,18 @@ struct WaitArgs {
 }
 
 #[derive(Deserialize)]
+struct ActArgs {
+    chat: String,
+    #[serde(default)]
+    peer: bool,
+}
+
+#[derive(Deserialize)]
 struct ArchiveArgs {
     chat: String,
     archived: Option<bool>,
+    #[serde(default)]
+    peer: bool,
 }
 
 #[derive(Deserialize)]
@@ -744,6 +763,8 @@ struct RespondArgs {
     request_id: Option<String>,
     #[serde(default)]
     answers: Vec<AnswerArg>,
+    #[serde(default)]
+    peer: bool,
 }
 
 #[derive(Deserialize)]
@@ -823,6 +844,7 @@ fn summarize_chat(chat: &Chat, spaces: &[Space], sessions: &[Session]) -> Value 
         "statusStale": session.as_ref().is_some_and(|s| zeron_proto::view::session_stale(s, now)),
         "lastTurnOutcome": session.as_ref().and_then(|s| s.last_turn_outcome),
         "terminalActivity": session.as_ref().and_then(|s| s.terminal_activity.as_ref()),
+        "waitingOn": zeron_proto::view::waiting(session.as_ref(), now).map(|w| &w.on),
         "statusAgeSecs": status_age,
         "lastMessageAt": chat.last_message_at,
         "lastMessagePreview": chat.last_message_preview,
@@ -848,6 +870,16 @@ impl Tools {
         self.zeron.origin().side_chats_only
     }
 
+    /// How this server's agent works with others: only a chat's has anyone
+    /// to be woken as.
+    pub fn delegation(&self) -> Delegation {
+        let origin = self.zeron.origin();
+        match origin.chat_id {
+            Some(_) => origin.delegation,
+            None => Delegation::Off,
+        }
+    }
+
     /// Whether this server's agent is offered `wait_on_background`: a
     /// chat's, on a runtime that wakes it as background work ends.
     pub fn waits_on_background(&self) -> bool {
@@ -858,7 +890,9 @@ impl Tools {
     pub fn list(&self) -> Vec<ToolDef> {
         let in_chat = self.zeron.origin().chat_id.is_some();
         let waits = self.waits_on_background();
-        catalog()
+        let mut tools = catalog();
+        delegation::adapt(&mut tools, self.delegation());
+        tools
             .into_iter()
             .filter(|tool| match tool.name {
                 SHOW_VISUAL | SHOW_IMAGE => in_chat,
@@ -875,6 +909,8 @@ impl Tools {
     /// `Ok` is the tool's structured result; `Err` is a message the model
     /// should read (surfaced as `isError`, never as a protocol error).
     pub async fn call(&self, name: &str, args: Value) -> Result<Value, String> {
+        // (Boxed: one frame held every tool's future, and the largest of them
+        // set how deep a debug build's 2 MB test thread went.)
         let result = match name {
             "whoami" => self.whoami().await,
             "list_devices" => self.list_devices().await,
@@ -882,17 +918,19 @@ impl Tools {
             "list_projects" => self.list_projects(parse(args)?).await,
             "list_harnesses" => self.list_harnesses(parse(args)?).await,
             "list_models" => self.list_models(parse(args)?).await,
-            "list_chats" => self.list_chats(parse(args)?).await,
-            "get_chat" => self.get_chat(parse(args)?).await,
-            "create_chat" => self.create_chat(parse(args)?).await,
-            "create_chats" => self.batch(parse(args)?, true).await,
-            "send_messages" => self.batch(parse(args)?, false).await,
+            "list_chats" => Box::pin(self.list_chats(parse(args)?)).await,
+            "get_chat" => Box::pin(self.get_chat(parse(args)?)).await,
+            "create_chat" => Box::pin(self.create_chat(parse(args)?)).await,
+            "create_chats" => Box::pin(self.batch(parse(args)?, true)).await,
+            "send_messages" => Box::pin(self.batch(parse(args)?, false)).await,
             "read_chat" => self.read_chat(parse(args)?).await,
-            "send_message" => self.send_message(parse(args)?).await,
-            "wait_for_turn" => self.wait_for_turn(parse(args)?).await,
+            "send_message" => Box::pin(self.send_message(parse(args)?)).await,
+            "wait_for_turn" => Box::pin(self.wait_for_turn(parse(args)?)).await,
             "interrupt_chat" => self.interrupt_chat(parse(args)?).await,
             "respond_to_input" => self.respond_to_input(parse(args)?).await,
             "archive_chat" => self.archive_chat(parse(args)?).await,
+            delegation::TASK_STATUS if self.has(name) => self.task_status(parse(args)?).await,
+            delegation::CANCEL_TASK if self.has(name) => self.cancel_task(parse(args)?).await,
             SHOW_VISUAL => self.show_visual(parse(args)?).await,
             SHOW_IMAGE => self.show_image(parse(args)?).await,
             WAIT_ON_BACKGROUND => self.wait_on_background(parse(args)?).await,
@@ -942,12 +980,12 @@ impl Tools {
             |(index, args)| async move {
                 let result = if create {
                     match serde_json::from_value(args) {
-                        Ok(args) => self.create_chat(args).await,
+                        Ok(args) => Box::pin(self.create_chat(args)).await,
                         Err(error) => Err(error.into()),
                     }
                 } else {
                     match serde_json::from_value(args) {
-                        Ok(args) => self.send_message(args).await,
+                        Ok(args) => Box::pin(self.send_message(args)).await,
                         Err(error) => Err(error.into()),
                     }
                 };
@@ -1273,9 +1311,17 @@ impl Tools {
             Some(raw) => parse_enum("sandbox", raw).map_err(anyhow::Error::msg)?,
             None => SandboxLevel::WorkspaceWrite,
         };
+        // Unasked, it inherits: the broadest of the agent's own modes that is
+        // no wider than this chat's.
+        let modes = harnesses
+            .iter()
+            .find(|h| h.id == harness)
+            .filter(|_| !args.cloud)
+            .map(|info| info.access_modes.as_slice())
+            .unwrap_or_default();
         let asked_access: AccessMode = match args.access.as_deref() {
             Some(raw) => parse_enum("access", raw).map_err(anyhow::Error::msg)?,
-            None => ceiling,
+            None => delegation::inherited_access(ceiling, modes),
         };
         // Never more than this chat's own: lowered, and the reply says so.
         let (sandbox, access, capped) =
@@ -1448,10 +1494,20 @@ impl Tools {
                 room_gen: None,
                 sleep: None,
             };
-            let delivered = self
-                .deliver(&chat, space.as_ref(), &harnesses, None, prompt, "run")
+            let wait = args.wait || args.mode == Some(delegation::Mode::Wait);
+            let message_id = uuid::Uuid::new_v4().to_string();
+            // Recorded before it's sent: a turn that ends at once is seen.
+            let task = self
+                .delegate(&chat, &message_id, wait, args.wake, args.title.as_deref())
                 .await?;
+            let delivered = self
+                .deliver(&chat, space.as_ref(), &harnesses, None, prompt, "run", message_id)
+                .await;
+            let delivered = self.sent_or_discard(task.as_ref(), delivered).await?;
             result["sent"] = delivered.receipt;
+            if let Some(task) = &task {
+                task.describe(&mut result, wait);
+            }
             let pending = Arc::new(PendingTurn {
                 baseline: None,
                 start: TurnStart {
@@ -1462,10 +1518,14 @@ impl Tools {
                 .lock()
                 .await
                 .insert(chat.id.clone(), pending.clone());
-            if args.wait {
-                result["turn"] = self
+            if wait {
+                let turn = self
                     .await_pending_turn(&chat, pending, wait_duration(args.timeout_secs))
-                    .await?;
+                    .await;
+                if let Some(task) = &task {
+                    self.after_wait(task, turn.as_ref().ok(), &mut result).await;
+                }
+                result["turn"] = turn?;
             }
         }
         Ok(result)
@@ -1531,16 +1591,40 @@ impl Tools {
             .as_deref()
             .and_then(|id| spaces.iter().find(|s| s.id == id));
         let baseline = session_for(&sessions, &chat);
-        let mode = args.mode.as_deref().unwrap_or("auto");
+        self.ensure_within_reach(&chat, args.peer).await?;
+        // (`async` and `wait` say how to wait, as create_chat's mode does.)
+        let (mode, wait) = match args.mode.as_deref().unwrap_or("auto") {
+            "async" => ("auto", false),
+            "wait" => ("auto", true),
+            mode => (mode, args.wait),
+        };
         let body = self.attribute(&chat, text).await;
         let mut result = json!({
             "chatId": chat.id,
             "title": chat.title,
         });
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let child = self.is_delegate(&chat);
+        // A held message takes its row's id, so it's recorded once it has one.
+        let mut task = if child && mode != "queue" {
+            self.delegate(&chat, &message_id, wait, args.wake, chat.title.as_deref())
+                .await?
+        } else {
+            None
+        };
         let delivered = self
-            .deliver(&chat, space, &harnesses, baseline.as_ref(), body, mode)
-            .await?;
+            .deliver(&chat, space, &harnesses, baseline.as_ref(), body, mode, message_id)
+            .await;
+        let delivered = self.sent_or_discard(task.as_ref(), delivered).await?;
+        if child && task.is_none() {
+            task = self
+                .delegate(&chat, &delivered.message_id, wait, args.wake, chat.title.as_deref())
+                .await?;
+        }
         result["sent"] = delivered.receipt;
+        if let Some(task) = &task {
+            task.describe(&mut result, wait);
+        }
         let pending = Arc::new(PendingTurn {
             baseline,
             start: TurnStart {
@@ -1551,19 +1635,22 @@ impl Tools {
             .lock()
             .await
             .insert(chat.id.clone(), pending.clone());
-        if args.wait {
+        if wait {
             // The message is on its way: not being able to watch the turn
             // must not read as not having sent it.
-            result["turn"] = self
+            let turn = self
                 .await_pending_turn(&chat, pending, wait_duration(args.timeout_secs))
-                .await
-                .unwrap_or_else(|error| {
-                    json!({
-                        "outcome": "unknown",
-                        "followError": format!("{error:#}"),
-                        "replies": [],
-                    })
-                });
+                .await;
+            if let Some(task) = &task {
+                self.after_wait(task, turn.as_ref().ok(), &mut result).await;
+            }
+            result["turn"] = turn.unwrap_or_else(|error| {
+                json!({
+                    "outcome": "unknown",
+                    "followError": format!("{error:#}"),
+                    "replies": [],
+                })
+            });
         }
         Ok(result)
     }
@@ -1587,12 +1674,17 @@ impl Tools {
                 .await?
             }
         };
+        self.acknowledge_turn(&chat, &turn).await;
         Ok(json!({ "chatId": chat.id, "title": chat.title, "turn": turn }))
     }
 
     async fn archive_chat(&self, args: ArchiveArgs) -> anyhow::Result<Value> {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
+        self.ensure_within_reach(&chat, args.peer).await?;
         let archived = args.archived.unwrap_or(true);
+        if archived {
+            self.acknowledge_turn(&chat, &json!({ "outcome": "interrupted" })).await;
+        }
         self.zeron
             .mutate(json!({ "op": "setChatArchived", "chatId": chat.id, "archived": archived }))
             .await?;
@@ -1685,17 +1777,21 @@ impl Tools {
         }))
     }
 
-    async fn interrupt_chat(&self, args: ChatArgs) -> anyhow::Result<Value> {
+    async fn interrupt_chat(&self, args: ActArgs) -> anyhow::Result<Value> {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
+        self.ensure_within_reach(&chat, args.peer).await?;
         let command_id = self
             .zeron
             .queue_command(&chat.id, &SessionCommandPayload::Interrupt {})
             .await?;
+        // (Its own doing: nothing to tell it of.)
+        self.acknowledge_turn(&chat, &json!({ "outcome": "interrupted" })).await;
         Ok(json!({ "chatId": chat.id, "commandId": command_id }))
     }
 
     async fn respond_to_input(&self, args: RespondArgs) -> anyhow::Result<Value> {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
+        self.ensure_within_reach(&chat, args.peer).await?;
         let request_id = match args.request_id {
             Some(id) => id,
             None => self
@@ -1759,7 +1855,9 @@ impl Tools {
         zeron_proto::agent_messages::agent_message(&label, origin_id, text)
     }
 
-    /// Pick and perform the delivery the composer would.
+    /// Pick and perform the delivery the composer would. The message is
+    /// `new_message_id` (a held one takes its row's id instead).
+    #[allow(clippy::too_many_arguments)]
     async fn deliver(
         &self,
         chat: &Chat,
@@ -1768,6 +1866,7 @@ impl Tools {
         session: Option<&Session>,
         text: String,
         mode: &str,
+        new_message_id: String,
     ) -> anyhow::Result<Delivered> {
         let harness = chat
             .config
@@ -1790,7 +1889,6 @@ impl Tools {
             "run" | "steer" | "queue" => mode,
             other => anyhow::bail!("unknown mode {other:?}; expected auto, run, steer, or queue"),
         };
-        let new_message_id = uuid::Uuid::new_v4().to_string();
         let (id, message_id) = match chosen {
             "run" => {
                 let config = chat.config.clone();
@@ -2148,6 +2246,28 @@ mod tests {
                     RpcReply::Value(self.accounts.clone().unwrap())
                 }
                 methods::WATCH_SESSIONS => stream(json!([])),
+                methods::REGISTER_DELEGATED_TASK => {
+                    self.writes.lock().unwrap().push((method.into(), params.clone()));
+                    RpcReply::Value(json!({
+                        "taskId": format!("task-{}", params["childChatId"].as_str().unwrap()),
+                        "parentChatId": params["chatId"], "parentTurnId": "turn",
+                        "childChatId": params["childChatId"], "targetDeviceId": "dev-local",
+                        "messageId": params["messageId"], "harness": "claude-code", "title": "T",
+                        "mode": params["mode"], "status": "queued",
+                        "createdAt": "2026-09-01T00:00:00Z", "updatedAt": "2026-09-01T00:00:00Z",
+                    }))
+                }
+                methods::UPDATE_DELEGATED_TASK => {
+                    self.writes.lock().unwrap().push((method.into(), params.clone()));
+                    RpcReply::Value(json!({ "ok": params["taskId"] != "nope" }))
+                }
+                methods::LIST_DELEGATED_TASKS => RpcReply::Value(json!([{
+                    "taskId": "t1", "parentChatId": "chat-alpha-1", "parentTurnId": "turn",
+                    "childChatId": "chat-beta-2", "targetDeviceId": "dev-remote", "messageId": "m",
+                    "harness": "codex", "title": "Beta", "mode": "async", "status": "running",
+                    "createdAt": "2026-09-01T00:00:00Z", "updatedAt": "2026-09-01T00:00:00Z",
+                    "cohort": "open", "unreachable": true,
+                }])),
                 methods::LIST_HARNESSES if remote => RpcReply::Value(json!([
                     {"id":"codex", "name":"Remote Codex", "installed":true},
                     {"id":"cursor", "name":"Disabled Cursor", "installed":true, "enabled":false}
@@ -2574,6 +2694,7 @@ mod tests {
             running_subagents: 0,
             background_tasks: Vec::new(),
             waiting: None,
+            blocked_on_wait: false,
         };
         // No mid-turn capability is required for a live mailbox delivery.
         let sent = tools
@@ -2584,6 +2705,7 @@ mod tests {
                 Some(&session),
                 "follow up".into(),
                 "auto",
+                "m1".into(),
             )
             .await
             .unwrap();
@@ -2669,6 +2791,143 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("no chat matches"), "{err}");
+    }
+
+    fn parent_tools(world: &Arc<World>, chat: &str) -> Tools {
+        tools(
+            world.clone(),
+            Origin {
+                chat_id: Some(chat.into()),
+                device_id: Some("dev-local".into()),
+                delegation: Delegation::Parent,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn methods_written(world: &World) -> Vec<String> {
+        world.writes.lock().unwrap().iter().map(|(m, _)| m.clone()).collect()
+    }
+
+    #[tokio::test]
+    async fn a_delegated_chat_returns_at_once_and_is_recorded_before_its_prompt_goes() {
+        let world = Arc::new(World::default());
+        let tools = parent_tools(&world, "chat-alpha-1");
+        let made = tools
+            .call("create_chat", json!({ "prompt": "do it", "title": "Parser", "wake": "all" }))
+            .await
+            .unwrap();
+        let child = made["chatId"].as_str().unwrap();
+        assert_eq!(made["taskId"], format!("task-{child}"));
+        assert_eq!(made["status"], "running");
+        assert!(made.get("turn").is_none());
+        let writes = world.writes.lock().unwrap().clone();
+        let at = |method: &str| writes.iter().position(|(m, _)| m == method).unwrap();
+        assert!(at(methods::REGISTER_DELEGATED_TASK) < at(methods::QUEUE_COMMAND));
+        let (_, registered) = &writes[at(methods::REGISTER_DELEGATED_TASK)];
+        let (_, sent) = &writes[at(methods::QUEUE_COMMAND)];
+        assert_eq!(registered["chatId"], "chat-alpha-1");
+        assert_eq!(registered["mode"], "async");
+        assert_eq!(registered["completionWake"], "settledOnly");
+        assert_eq!(registered["messageId"], sent["command"]["messageId"]);
+    }
+
+    #[tokio::test]
+    async fn only_a_subagent_with_a_prompt_is_a_task_and_only_where_its_on() {
+        let world = Arc::new(World::default());
+        let tools = parent_tools(&world, "chat-alpha-1");
+        for args in [
+            json!({ "title": "no prompt" }),
+            json!({ "kind": "side", "prompt": "chat with them" }),
+            json!({ "kind": "chat", "prompt": "on its own" }),
+        ] {
+            let made = tools.call("create_chat", args).await.unwrap();
+            assert!(made.get("taskId").is_none(), "{made}");
+        }
+        let off = self::tools(
+            world.clone(),
+            Origin { chat_id: Some("chat-alpha-1".into()), ..Default::default() },
+        );
+        let made = off.call("create_chat", json!({ "prompt": "as before" })).await.unwrap();
+        assert!(made.get("taskId").is_none());
+        assert!(!methods_written(&world).contains(&methods::REGISTER_DELEGATED_TASK.to_owned()));
+        assert!(!off.has("task_status") && !off.has("cancel_task"));
+        let schema = |tools: &Tools| {
+            tools.list().into_iter().find(|t| t.name == "create_chat").unwrap().input_schema["properties"].clone()
+        };
+        assert!(schema(&off).get("mode").is_none() && schema(&off).get("wait").is_some());
+        assert!(schema(&tools).get("mode").is_some() && schema(&tools).get("wait").is_none());
+    }
+
+    #[tokio::test]
+    async fn an_agent_works_with_its_own_children_unless_it_says_why_not() {
+        let world = Arc::new(World {
+            beta_parent: Some("chat-alpha-1".into()),
+            extra_chats: vec![json!({
+                "id": "chat-other-9", "deviceId": "dev-remote", "title": "Other", "archived": false,
+                "spaceId": "space-remote", "createdAt": "2026-09-01T00:00:00Z",
+                "config": { "harness": "codex", "model": null, "reasoning": null, "sandbox": "workspace-write" },
+            })],
+            ..Default::default()
+        });
+        let parent = parent_tools(&world, "chat-alpha-1");
+        for (tool, args) in [
+            ("send_message", json!({ "chat": "Other", "text": "hi" })),
+            ("interrupt_chat", json!({ "chat": "Other" })),
+            ("archive_chat", json!({ "chat": "Other" })),
+        ] {
+            let refused = parent.call(tool, args.clone()).await.unwrap_err();
+            assert!(refused.contains("isn't your child"), "{tool}: {refused}");
+            let mut peer = args;
+            peer["peer"] = json!(true);
+            parent.call(tool, peer).await.unwrap_or_else(|e| panic!("{tool}: {e}"));
+        }
+        assert!(
+            !methods_written(&world).contains(&methods::REGISTER_DELEGATED_TASK.to_owned()),
+            "another chat's turn wakes nobody here"
+        );
+        // Reading is open to all; its own child needs no flag, nor does a
+        // child's own parent.
+        parent.call("get_chat", json!({ "chat": "Other" })).await.unwrap();
+        parent.call("send_message", json!({ "chat": "Beta", "text": "more" })).await.unwrap();
+        let child = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-beta-2".into()),
+                delegation: Delegation::Child,
+                ..Default::default()
+            },
+        );
+        child.call("send_message", json!({ "chat": "Alpha", "text": "stuck" })).await.unwrap();
+        child.call("send_message", json!({ "chat": "Other", "text": "hi" })).await.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn a_wait_that_gives_up_goes_on_in_the_background() {
+        let world = Arc::new(World::default());
+        let tools = parent_tools(&world, "chat-alpha-1");
+        let made = tools
+            .call("create_chat", json!({ "prompt": "slow", "mode": "wait", "timeout_secs": 1 }))
+            .await
+            .unwrap();
+        assert_eq!(made["turn"]["outcome"], "timedOut");
+        assert!(made["note"].as_str().unwrap().contains("woken"));
+        let writes = world.writes.lock().unwrap().clone();
+        let updated = writes.iter().find(|(m, _)| m == methods::UPDATE_DELEGATED_TASK).unwrap();
+        assert_eq!(updated.1["action"], "async");
+    }
+
+    #[tokio::test]
+    async fn tasks_are_listed_and_cancelled_by_id() {
+        let world = Arc::new(World::default());
+        let tools = parent_tools(&world, "chat-alpha-1");
+        let listed = tools.call("task_status", json!({})).await.unwrap();
+        assert_eq!(listed["tasks"][0]["taskId"], "t1");
+        assert_eq!(listed["tasks"][0]["unreachable"], true);
+        tools.call("task_status", json!({ "task": "nope" })).await.unwrap_err();
+        let cancelled = tools.call("cancel_task", json!({ "task": "t1" })).await.unwrap();
+        assert_eq!(cancelled["status"], "cancelled");
+        tools.call("cancel_task", json!({ "task": "nope" })).await.unwrap_err();
     }
 
     #[tokio::test]

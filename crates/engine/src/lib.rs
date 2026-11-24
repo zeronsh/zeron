@@ -46,6 +46,8 @@ pub mod cloud_client;
 pub mod cloud_disk;
 pub mod commands;
 pub mod commit_credit;
+pub mod delegation;
+pub mod orchestration;
 pub mod credentials;
 pub mod deferred;
 pub mod desktop_notify;
@@ -298,6 +300,8 @@ impl EngineCore {
         // This device's harness enablement (Settings → Providers) rides the
         // engine data dir — per-device, like the CLI installs it gates.
         registry.load_prefs(data_dir);
+        // (Before the store: a first run has none.)
+        let async_delegation = Arc::new(orchestration::AsyncDelegation::open(data_dir));
         let store = Arc::new(DocsStore::open(profile.store_root())?);
         if store.recovery().is_some() {
             runner::note_store_recovered(chrono::Utc::now().timestamp_millis());
@@ -305,6 +309,8 @@ impl EngineCore {
         let store_for_import = store.clone();
         let journal = Arc::new(RunJournal::open(profile.store_root().join("journals"))?);
         let sessions = SessionsEngine::new(device_id.clone(), journal, registry.clone());
+        sessions.set_async_delegation(async_delegation.clone());
+        sessions.set_delegations(delegation::Delegations::open(profile.store_root()));
         let doc_host = DocHost::new(
             store.clone(),
             DocHostConfig {
@@ -336,6 +342,7 @@ impl EngineCore {
             },
         )?;
         doc_host.set_workspace(workspace.clone());
+        async_delegation.set_workspace(workspace.clone());
         // A Cloud machine is made for one chat: it runs each agent as the
         // person chose for Cloud, which the account's registry holds.
         if runner::is_cloud_platform() {
@@ -414,6 +421,13 @@ impl EngineCore {
         );
         let terminals = Terminals::new();
         sessions.track_terminal_activity(terminals.clone(), workspace.clone());
+        delegation::Supervisor {
+            tasks: sessions.delegations(),
+            sessions: sessions.clone(),
+            doc_host: doc_host.clone(),
+            workspace: workspace.clone(),
+        }
+        .spawn();
         let commands = commands::Commands::default();
         // An agent's background commands end with its chat.
         commands.follow_chats(workspace.watch_chats());

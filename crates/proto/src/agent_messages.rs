@@ -36,7 +36,7 @@ fn clean_label(label: &str) -> String {
 /// `text` with any routing header in it marked as quoted: it can't open a
 /// message as another chat's, nor read as one to the agent receiving it.
 pub fn quote_headers(text: &str) -> String {
-    text.replace(PREFIX, QUOTED)
+    crate::delegation::quote_wakes(text).replace(PREFIX, QUOTED)
 }
 
 const QUOTED: &str = "[Quoted message from Zeron chat ";
