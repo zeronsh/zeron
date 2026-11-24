@@ -11,9 +11,8 @@
 -- the Brain dump's chat, in its bar.
 local COMPOSER = "#control-float-composer"
 
--- Capture's bar opened out (its knob): its chips and model shown.
+-- Capture's bar: its chips and model shown as it is (no step to open it out).
 local function opened(app: any)
-	app:click("#control-float-knob")
 	app:frames(20)
 end
 
@@ -434,9 +433,7 @@ test("capture takes a chat dragged from the sidebar as an @-mention", function()
 	app:frames(30)
 	app:drag('#sidebar >> role:button "Linux titlebar toggle"', `{COMPOSER} >> role:textbox`)
 	app:frames(10)
-	-- Carried: the bar, bare, counts it; opened out, a chip of it on the
-	-- draft, as a chat's composer has one.
-	expect(app:text("#control-float-knob >> .control-float-count")).to_be("1")
+	-- Carried: a chip of it on the draft, as a chat's composer has one.
 	opened(app)
 	expect(app:has(`{COMPOSER} >> role:button "Remove Linux titlebar toggle"`)).to_be(true)
 	-- Sent, it goes with the dump.

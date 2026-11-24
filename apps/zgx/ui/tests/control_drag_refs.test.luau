@@ -147,9 +147,7 @@ test("drag refs: the same thing dropped twice is one chip; another is a second",
 	app:drag('#orch-map-field >> role:button "Exnomic VPN"', FIELD)
 	app:frames(10)
 	expect(#refs_of(app)).to_be(2)
-	-- Taken off with its ×, the bar opened out.
-	app:click("#control-float-knob")
-	app:frames(20)
+	-- Taken off with its ×, on the chip over the draft.
 	app:hover('#control-float >> ~"@orchestrator:"')
 	app:frames(5)
 	app:click('#control-float >> role:button ~"Remove @orchestrator:"')

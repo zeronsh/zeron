@@ -248,8 +248,6 @@ test("control tabs: Capture is a bar at the foot of every tab, one draft", funct
 		app:set_state("control_tab", tab)
 		app:frames(30)
 		expect(floats(app)).to_be(true)
-		-- (Bare: one line and its knobs.)
-		expect(app:state("control_capture_float_open")).to_be(false)
 		expect(app:text(FLOAT_FIELD)).to_be("half a thought")
 	end
 	app:type(FLOAT_FIELD, " and another")

@@ -255,8 +255,9 @@ export type Footer = { access: boolean?, place: boolean? }
 -- `on_focus`: told as its field takes the keys and lets them go (either
 -- placement's, so the keys can follow it from one to the other).
 -- `keeps`: a mirror with no first placement (the Control room's Capture,
--- a bar now): it keeps the chat's picks itself.
-export type Form = { mirror: boolean?, keeps: boolean?, bare: boolean?, expanded: boolean?, on_escape: (() -> boolean)?, on_focus: ((focused: boolean) -> ())? }
+-- a bar now): it keeps the chat's picks itself. `over_art`: its footer on
+-- the pill's glass (ds.Composer's), where it floats over a page.
+export type Form = { mirror: boolean?, keeps: boolean?, bare: boolean?, expanded: boolean?, on_escape: (() -> boolean)?, on_focus: ((focused: boolean) -> ())?, over_art: (() -> boolean)? }
 local function composer(chat: string, view: any, name: string, focus: State<number>, open_model: State<number>, split: boolean?, focused: (() -> boolean)?, own: boolean?, take: Take?, placeholder: string?, footer: Footer?, form: Form?, own_draft: State<string>?, own_atoms: State<{ ComposerAtoms.AtomEntry }>?, dock_target: State<number>?): Node
 	local mirror = form ~= nil and form.mirror == true
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
@@ -1157,6 +1158,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	if form and form.on_focus then
 		p.on_field_focus = form.on_focus
 	end
+	if form and form.over_art then
+		p.over_art = form.over_art
+	end
 	return ds.Composer(p :: any)
 end
 
@@ -1278,6 +1282,7 @@ M.Composer = ui.component(function(props: {
 	on_escape: (() -> boolean)?,
 	on_open_model: (() -> ())?,
 	on_focus: ((focused: boolean) -> ())?,
+	over_art: (() -> boolean)?,
 	lazy: boolean?,
 	-- Its chat's row and send path alone, no transcript watched (Capture's:
 	-- it never shows one). Every placement of a slot passes the same.
@@ -1498,12 +1503,12 @@ M.Composer = ui.component(function(props: {
 		end
 		local form: Form? = nil
 		if id and how then
-			local f: Form = { mirror = true, keeps = props.keeps, bare = how == "bare", expanded = how == "open", on_escape = props.on_escape, on_focus = on_focus }
+			local f: Form = { mirror = true, keeps = props.keeps, bare = how == "bare", expanded = how == "open", on_escape = props.on_escape, on_focus = on_focus, over_art = props.over_art }
 			form = f
 		else
 			id = key
 			if mirror or on_focus then
-				local f: Form = { mirror = mirror, keeps = props.keeps, on_escape = props.on_escape, on_focus = on_focus }
+				local f: Form = { mirror = mirror, keeps = props.keeps, on_escape = props.on_escape, on_focus = on_focus, over_art = props.over_art }
 				form = f
 			end
 		end
