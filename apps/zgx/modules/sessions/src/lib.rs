@@ -2,10 +2,16 @@
 //! interface's thread: what scripts call, and the jobs the connection's
 //! thread posts. On the connection's thread: the engine's socket, read and
 //! parsed there, and each list diffed there against the last by chat id, so
-//! the interface's thread makes values only for the rows that changed and
-//! writes them by key (`Shared::upsert`, `Shared::remove`).
+//! the interface's thread makes values only for the rows that changed or
+//! moved and writes them by key (`Shared::upsert_at`, `Shared::remove`).
+//! The diff reads each row's bytes where the frame has them (a hash each,
+//! and its id), keeps only the last list's ids and hashes, and parses only
+//! the rows it posts; the rows that keep their order are a longest
+//! increasing run of their old places, the rest each placed before the row
+//! that follows it.
 
-use serde_json::{Value as Json, json};
+use serde::Deserialize;
+use serde_json::{Value as Json, json, value::RawValue};
 use std::{
     cell::RefCell,
     collections::HashMap,
@@ -50,46 +56,113 @@ struct Costs {
 /// What changed in the list since the last, found on the connection's
 /// thread: what the interface's thread writes.
 enum Patch {
-    /// The whole list: the first, or one whose order changed.
+    /// The whole list: the first.
     Whole(Vec<Json>),
-    /// Rows by `id`: these written (new or changed), these removed.
-    Rows { changed: Vec<Json>, gone: Vec<String> },
+    /// Rows by `id`: these written where they go (new, changed or moved),
+    /// these removed.
+    Rows { rows: Vec<(Json, Placed)>, gone: Vec<String> },
+}
+
+/// Where a posted row goes: `zgx_module::Place`, owned to cross threads.
+enum Placed {
+    Stay,
+    Before(String),
+    End,
+}
+
+/// A frame from the engine, its parts borrowed from the text.
+#[derive(Deserialize)]
+struct Frame<'a> {
+    id: Option<u64>,
+    #[serde(borrow)]
+    item: Option<&'a RawValue>,
+    err: Option<Json>,
+}
+/// A row's id, borrowed where it can be.
+#[derive(Deserialize)]
+struct Keyed<'a> {
+    #[serde(borrow)]
+    id: std::borrow::Cow<'a, str>,
+}
+
+/// The places in `seq` of one of its longest increasing runs (patience
+/// sorting: n log n).
+fn longest_increasing(seq: &[usize]) -> Vec<usize> {
+    // `tails[k]`: where in `seq` the smallest last of a run k+1 long is.
+    let mut tails: Vec<usize> = Vec::new();
+    let mut before: Vec<Option<usize>> = vec![None; seq.len()];
+    for (i, &x) in seq.iter().enumerate() {
+        let k = tails.partition_point(|&t| seq[t] < x);
+        before[i] = k.checked_sub(1).map(|k| tails[k]);
+        if k == tails.len() {
+            tails.push(i);
+        } else {
+            tails[k] = i;
+        }
+    }
+    let mut run = Vec::with_capacity(tails.len());
+    let mut at = tails.last().copied();
+    while let Some(i) = at {
+        run.push(i);
+        at = before[i];
+    }
+    run.reverse();
+    run
 }
 
 /// The last list, as the connection's thread diffs against it: its ids in
-/// order, and each row by id.
+/// order, and a hash of each row's bytes by id (no row is kept).
 #[derive(Default)]
 struct Last {
     order: Vec<String>,
-    rows: HashMap<String, Json>,
+    hashes: HashMap<String, u64>,
 }
 impl Last {
-    /// What changed in `list` since this, which becomes `list`.
-    fn diff(&mut self, list: Vec<Json>, first: bool) -> Patch {
-        let id_of = |row: &Json| row.get("id").and_then(Json::as_str).unwrap_or("").to_owned();
-        let order: Vec<String> = list.iter().map(id_of).collect();
-        let now: std::collections::HashSet<&str> = order.iter().map(String::as_str).collect();
-        let gone: Vec<String> = self.order.iter().filter(|id| !now.contains(id.as_str())).cloned().collect();
-        // In the same order, with new rows after the rest (where an upsert
-        // puts them)? Else the whole list, in its order.
-        let kept = self.order.iter().filter(|id| now.contains(id.as_str()));
-        let added = order.iter().filter(|id| !self.rows.contains_key(*id));
-        let same_order = !first && kept.chain(added).eq(order.iter());
-        let mut changed = Vec::new();
-        let mut rows = HashMap::with_capacity(list.len());
-        let whole = !same_order;
-        let mut all = Vec::new();
-        for (id, row) in order.iter().zip(list) {
-            if whole {
-                all.push(row.clone());
-            } else if self.rows.get(id) != Some(&row) {
-                changed.push(row.clone());
-            }
-            rows.insert(id.clone(), row);
+    /// What changed in `list` (its rows as the frame has them) since this,
+    /// which becomes `list`. Only the rows posted are parsed.
+    fn diff(&mut self, list: &[&RawValue], first: bool) -> Result<Patch, serde_json::Error> {
+        use std::hash::{Hash, Hasher};
+        let mut order = Vec::with_capacity(list.len());
+        let mut hashes = HashMap::with_capacity(list.len());
+        for row in list {
+            let id = serde_json::from_str::<Keyed>(row.get())?.id.into_owned();
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            row.get().hash(&mut hasher);
+            hashes.insert(id.clone(), hasher.finish());
+            order.push(id);
         }
+        let patch = if first {
+            Patch::Whole(list.iter().map(|row| serde_json::from_str(row.get())).collect::<Result<_, _>>()?)
+        } else {
+            let gone: Vec<String> = self.order.iter().filter(|id| !hashes.contains_key(*id)).cloned().collect();
+            // The rows that keep their order: a longest increasing run of
+            // their old places. The rest of the old ones move; new ones are
+            // put. Each is placed before the row after it (or at the end).
+            let was: HashMap<&str, usize> = self.order.iter().enumerate().map(|(i, id)| (id.as_str(), i)).collect();
+            let old: Vec<(usize, usize)> = order.iter().enumerate().filter_map(|(i, id)| was.get(id.as_str()).map(|&w| (i, w))).collect();
+            let places: Vec<usize> = old.iter().map(|&(_, w)| w).collect();
+            let mut stays = vec![false; order.len()];
+            for k in longest_increasing(&places) {
+                stays[old[k].0] = true;
+            }
+            let mut rows = Vec::new();
+            for (i, id) in order.iter().enumerate() {
+                let changed = self.hashes.get(id) != hashes.get(id);
+                if stays[i] && !changed {
+                    continue;
+                }
+                let placed = if stays[i] {
+                    Placed::Stay
+                } else {
+                    order.get(i + 1).map_or(Placed::End, |next| Placed::Before(next.clone()))
+                };
+                rows.push((serde_json::from_str(list[i].get())?, placed));
+            }
+            Patch::Rows { rows, gone }
+        };
         self.order = order;
-        self.rows = rows;
-        if whole { Patch::Whole(all) } else { Patch::Rows { changed, gone } }
+        self.hashes = hashes;
+        Ok(patch)
     }
 }
 
@@ -178,14 +251,15 @@ fn connected(ui: zgx_module::Ui, port: u16, data_dir: PathBuf, commands: mpsc::R
         let started = Instant::now();
         let tungstenite::Message::Text(text) = message else { continue };
         for line in text.lines() {
-            let Ok(mut frame) = serde_json::from_str::<Json>(line) else { continue };
-            let id = frame.get("id").and_then(Json::as_u64);
+            let Ok(frame) = serde_json::from_str::<Frame>(line) else { continue };
+            let id = frame.id;
             if id == Some(1) {
-                let Some(Json::Array(list)) = frame.get_mut("item").map(Json::take) else { continue };
+                let Some(item) = frame.item else { continue };
+                let Ok(list) = serde_json::from_str::<Vec<&RawValue>>(item.get()) else { continue };
                 costs.lists.fetch_add(1, Ordering::Relaxed);
-                let patch = last.diff(list, std::mem::take(&mut first));
-                if let Patch::Rows { changed, gone } = &patch
-                    && changed.is_empty()
+                let Ok(patch) = last.diff(&list, std::mem::take(&mut first)) else { continue };
+                if let Patch::Rows { rows, gone } = &patch
+                    && rows.is_empty()
                     && gone.is_empty()
                 {
                     // (Nothing of the list changed: nothing to post.)
@@ -201,8 +275,18 @@ fn connected(ui: zgx_module::Ui, port: u16, data_dir: PathBuf, commands: mpsc::R
                     if let Some(chats) = host.shared("sessions.chats", Value::NIL) {
                         let written = match &patch {
                             Patch::Whole(list) => chats.set(Value::list(list.iter().map(value_of))).map(drop),
-                            Patch::Rows { changed, gone } => chats
-                                .upsert("id", changed.iter().map(value_of))
+                            Patch::Rows { rows, gone } => chats
+                                .upsert_at(
+                                    "id",
+                                    rows.iter().map(|(row, placed)| {
+                                        let place = match placed {
+                                            Placed::Stay => zgx_module::Place::Stay,
+                                            Placed::Before(key) => zgx_module::Place::Before(key),
+                                            Placed::End => zgx_module::Place::End,
+                                        };
+                                        (value_of(row), place)
+                                    }),
+                                )
                                 .and_then(|()| chats.remove("id", gone.iter().map(String::as_str)).map(drop)),
                         };
                         if let Err(why) = written
@@ -212,14 +296,14 @@ fn connected(ui: zgx_module::Ui, port: u16, data_dir: PathBuf, commands: mpsc::R
                         }
                         match patch {
                             Patch::Whole(list) => costs.whole.fetch_add(list.len() as u64, Ordering::Relaxed),
-                            Patch::Rows { changed, .. } => costs.rows.fetch_add(changed.len() as u64, Ordering::Relaxed),
+                            Patch::Rows { rows, .. } => costs.rows.fetch_add(rows.len() as u64, Ordering::Relaxed),
                         };
                     }
                     costs.frames.fetch_add(1, Ordering::Relaxed);
                     costs.on_ui.fetch_add(begun.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 });
             } else if let Some(promise) = id.and_then(|id| pending.remove(&id)) {
-                let answer = frame.get("err").and_then(Json::as_str).map(str::to_owned);
+                let answer = frame.err.as_ref().and_then(Json::as_str).map(str::to_owned);
                 promise.resolve_with(move |_| match answer {
                     None => Ok(Value::from(true)),
                     Some(why) => Err(why.into()),

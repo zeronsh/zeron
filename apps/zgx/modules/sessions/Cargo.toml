@@ -20,8 +20,9 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-zgx-module = { git = "https://github.com/zeronsh/zgx", rev = "888f59b1e61bca802aae32a2aa6267db5e7b9243" }
-serde_json = "1"
+zgx-module = { git = "https://github.com/zeronsh/zgx", rev = "ba25c67ef6c0330d81da38a82e3d2f434ed6ae76" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 
 [profile.release]
