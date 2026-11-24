@@ -49,7 +49,9 @@ M.PIVOTS = { "orchestrator", "machine" }
 M.pivot = ui.persist("control_map_force_pivot", "orchestrator")
 -- Each pivot's own view (pan and zoom), as the person left it: kept; a
 -- pivot never shown yet, or fitted, has none (it fits its web).
-M.views = ui.persist("control_map_force_views", {} :: { [string]: { x: number, y: number, zoom: number } })
+-- (With the field's size it was made for, `w` and `h`: put back only at that
+-- size; at another it may show none of the web, and the web is fitted.)
+M.views = ui.persist("control_map_force_views", {} :: { [string]: { x: number, y: number, zoom: number, w: number?, h: number? } })
 M.places_m = ui.persist("control_map_force_places_machine", {} :: { [string]: { number } })
 M.pins_m = ui.persist("control_map_force_pins_machine", {} :: { [string]: boolean })
 function M.places_of(): any
@@ -69,6 +71,9 @@ M.pins = ui.persist("control_map_force_pins", {} :: { [string]: boolean })
 -- The field each pivot's web was laid out for (and by which layout), kept
 -- with its places: { [pivot] = { w, h, v } }.
 M.layouts = ui.persist("control_map_force_layout", {} :: { [string]: any })
+-- The least the field stands where its height is given (a page's room):
+-- room for the web and its names at the fit's least zoom.
+M.MIN_FIELD_H = 240
 -- The field's height set from outside (tests, offscreen shots), else nil.
 M.field_height = ui.state("control_map_force_field_h", nil :: number?)
 -- (A node's menu, as the mounted Graph has it: for tests.)
@@ -77,6 +82,10 @@ M.menu_of = function(_id: string): { any }?
 end
 -- The node the pointer is on.
 M.hover = ui.state("control_map_force_hover", nil :: string?)
+-- The node lit, it and its lines in white: the one the pointer is on (or
+-- dragging), gone the moment it's off it. (The card and the pin hang off
+-- `hover`, which keeps a moment's grace for the pointer to reach them.)
+M.lit = ui.state("control_map_force_lit", nil :: string?)
 -- The node held by the pointer (pressed on, not yet let go), or nil: the
 -- drawing's mode is this alone, never whether anything moves.
 M.held = ui.state("control_map_force_held", nil :: string?)
@@ -178,6 +187,13 @@ local NAME_SLICE = 0.003
 -- How long the node lit (and its card) stays once the pointer has left it,
 -- its card and its pin (ms): time to cross to the card.
 local CLOSE_MS = 250
+-- Unpin all: the balanced layout worked out at once (at most this long,
+-- seconds), then eased to on screen in this long (ms).
+local RELAYOUT_SOLVE_S = 0.08
+local RELAYOUT_MS = 450
+-- (How far round the node and its card the pointer may stray on its way
+-- across: past it, the card goes at once.)
+local WAY_MARGIN = 16
 -- How long a zoom rests before the names are placed again at its scale (ms).
 local ZOOM_SETTLE_MS = 250
 -- A machine's hub on the machines pivot: Material's Clover (four leaves),
@@ -258,15 +274,21 @@ M.View = ui.component(function(props: {
 	height: (() -> number)?,
 }): Node
 	local width = ui.use_state(0)
+	-- (The field's height as last worked out: read where nothing should
+	-- follow it.)
+	local field_h_seen = 0
 	local function field_h(): number
+		local h
 		local forced = M.field_height:get()
 		if type(forced) == "number" and forced > 0 then
-			return forced
+			h = forced
+		elseif props.height then
+			h = math.max(M.MIN_FIELD_H, props.height())
+		else
+			h = math.clamp(math.floor(width:get() * 0.62), 420, 760)
 		end
-		if props.height then
-			return math.max(300, props.height())
-		end
-		return math.clamp(math.floor(width:get() * 0.62), 420, 760)
+		field_h_seen = h
+		return h
 	end
 	local view = ui.use_state({ x = 0, y = 0, zoom = 1 })
 	-- (Bumped by each zoom: the names' rescale waits for it to settle.)
@@ -297,7 +319,7 @@ M.View = ui.component(function(props: {
 	end
 
 	-- (Counts for tests and numbers, published once a frame.)
-	local counts: any = { layouts = 0, unfolds = 0, corner_replaces = 0, pin_clicks = 0, rescales = 0, leaders = 0, name_size = 0, label_halos = 0, names = 0, names_ms = 0, prunes = 0, pruned = 0, pins = 0, status = 0, rings = 0, builds = 0, wakes = 0, steps = 0, draws = 0, overlay = 0, frames = 0, settled = 0, settle_ms = 0, first_ms = 0, nodes = 0, drawn = 0, worst_ms = 0 }
+	local counts: any = { relayouts = 0, relayout_ms = 0, layouts = 0, resize_fits = 0, unfolds = 0, corner_replaces = 0, pin_clicks = 0, rescales = 0, leaders = 0, name_size = 0, label_halos = 0, names = 0, names_ms = 0, prunes = 0, pruned = 0, pins = 0, status = 0, rings = 0, builds = 0, wakes = 0, steps = 0, draws = 0, overlay = 0, frames = 0, settled = 0, settle_ms = 0, first_ms = 0, nodes = 0, drawn = 0, worst_ms = 0 }
 	local dirty = ui.use_state(false)
 	local function count(key: string, by: number?)
 		counts[key] += by or 1
@@ -380,8 +402,11 @@ M.View = ui.component(function(props: {
 		local w, h = math.max(1, width:peek()), field_h()
 		local pad = if any_name then 24 else 70
 		local z = math.clamp(math.min((w - pad * 2) / math.max(1, x1 - x0), (h - pad * 2 - 30) / math.max(1, y1 - y0)), MIN_FIT, 1.4)
-		view:set({ x = w / 2 - (x0 + x1) / 2 * z, y = (h - 30) / 2 - (y0 + y1) / 2 * z, zoom = z })
+		local vx, vy = w / 2 - (x0 + x1) / 2 * z, (h - 30) / 2 - (y0 + y1) / 2 * z
+		view:set({ x = vx, y = vy, zoom = z })
 		fitted = true
+		-- (Where the fitted web stands in the field, for tests: x0, y0, x1, y1.)
+		counts.fit_box = { vx + x0 * z, vy + y0 * z, vx + x1 * z, vy + y1 * z, w, h }
 		zoom_req:set(zoom_req:peek() + 1)
 		counts.zoom = z
 		count("frames", 0)
@@ -431,8 +456,9 @@ M.View = ui.component(function(props: {
 		end
 		local frames = 0
 		ui.every(16, function(): boolean?
-			-- (Settled already, by a let go: nothing left.)
-			if not on_screen_now() or settled:peek() then
+			-- (Settled already, by a let go: nothing left. Unpin all easing
+			-- its own way: nothing to step.)
+			if not on_screen_now() or settled:peek() or easing then
 				return false
 			end
 			local f0 = os.clock()
@@ -511,6 +537,17 @@ M.View = ui.component(function(props: {
 			end
 		end)
 	end)
+	-- A pivot's kept view, if it was made for the field as it is now.
+	local function kept_view(pivot: string): any
+		local kept = (M.views:peek() or {})[pivot]
+		if type(kept) ~= "table" or type(kept.zoom) ~= "number" or type(kept.w) ~= "number" or type(kept.h) ~= "number" then
+			return nil
+		end
+		if math.abs(kept.w - width:peek()) > 1 or math.abs(kept.h - field_h()) > 1 then
+			return nil
+		end
+		return kept
+	end
 	local built_pivot: string? = nil
 	-- (The field the web was laid out for, this pivot's: laid out again,
 	-- fresh, when the field changes by more than LAYOUT_SLACK.)
@@ -518,6 +555,11 @@ M.View = ui.component(function(props: {
 		return type(f) == "table" and f.v == LAYOUT_V and type(f.w) == "number" and type(f.h) == "number"
 			and math.abs(w / math.max(1, f.w) - 1) <= LAYOUT_SLACK and math.abs(h / math.max(1, f.h) - 1) <= LAYOUT_SLACK
 	end
+	-- (Asked by Unpin all: the web laid out afresh, as on a cold start,
+	-- nothing kept of where it was.)
+	local fresh_req = false
+	-- (Unpin all's easing under way: the settling stands aside.)
+	local easing = false
 	local function rebuild(world: any, comms: { any })
 		local pivot = M.pivot:peek()
 		-- (Not before the field is laid out: the web is laid out for it.)
@@ -525,7 +567,7 @@ M.View = ui.component(function(props: {
 			return
 		end
 		local fw0, fh0 = width:peek(), field_h()
-		local frame_ok = same_frame((M.layouts:peek() or {})[pivot], fw0, fh0)
+		local frame_ok = not fresh_req and same_frame((M.layouts:peek() or {})[pivot], fw0, fh0)
 		local next_m = fm.build(world, comms, world.clock or os.time(), pivot, { open = M.open_folds:peek() or {} })
 		if next_m.sig == fmodel.sig and frame_ok then
 			-- The same web: what changed taken in place. A state alone (a
@@ -594,7 +636,7 @@ M.View = ui.component(function(props: {
 		local from: { [string]: any } = table.clone(M.places_of():peek() or {})
 		-- (The web as it stands, on the same pivot: a pivot's own places
 		-- are never the other's.)
-		if pivot == built_pivot then
+		if pivot == built_pivot and not fresh_req then
 			for i = 1, s.n do
 				from[s.ids[i]] = { s.x[i], s.y[i] }
 			end
@@ -609,11 +651,12 @@ M.View = ui.component(function(props: {
 			M.layouts:set_key({ pivot }, { w = fw0, h = fh0, v = LAYOUT_V })
 			count("layouts")
 		end
-		-- (A pivot opened: its own view as it was left, else fitted to its
-		-- web once it rests; the other's left as it is.)
+		-- (A pivot opened: its own view as it was left, at the field's size
+		-- it was left at; else fitted to its web once it rests; the other's
+		-- left as it is.)
 		if pivot ~= built_pivot then
-			local kept = (M.views:peek() or {})[pivot]
-			if kept and type(kept.zoom) == "number" then
+			local kept = kept_view(pivot)
+			if kept then
 				view:set({ x = kept.x, y = kept.y, zoom = kept.zoom })
 				zoom_req:set(zoom_req:peek() + 1)
 				view_reset:set(view_reset:peek() + 1)
@@ -1372,7 +1415,12 @@ M.View = ui.component(function(props: {
 			count("overlay", 0)
 		end
 		table.clear(lit_style)
-		local over = M.hover:get()
+		local over = M.lit:get()
+		-- (What's drawn lit, for tests: its id, "" for none.)
+		if counts.lit ~= (over or "") then
+			counts.lit = over or ""
+			count("overlay", 0)
+		end
 		local i = over and fmodel.index[over]
 		if i then
 			local n = fmodel.nodes[i]
@@ -1503,7 +1551,7 @@ M.View = ui.component(function(props: {
 		recull()
 		-- (The person's own view: kept for this pivot alone.)
 		if moved_view then
-			M.views:set_key({ M.pivot:peek() }, { x = x, y = y, zoom = zoom })
+			M.views:set_key({ M.pivot:peek() }, { x = x, y = y, zoom = zoom, w = width:peek(), h = field_h_seen })
 		end
 	end
 	local function zoom_at(px: number, py: number, k: number)
@@ -1639,9 +1687,202 @@ M.View = ui.component(function(props: {
 		end
 		return Visibility.done_unread(ids, world.chats or {}, ctx)
 	end
+	-- Unpin all: back to the balanced layout, as a fresh web is laid out
+	-- (what the places kept from drags pulled it from), worked out at once,
+	-- then eased to on screen in RELAYOUT_MS: every hub clear of the others
+	-- and every node in the field each frame of it, the names placed again
+	-- once it's there. (Unpinning alone, everything was still pulled to the
+	-- places it was dropped at, and drifted for seconds.)
 	M.unpin_all = function()
-		unpin(function(_i: number): boolean
-			return true
+		local pivot = M.pivot:peek()
+		local pins = M.pins_of():peek() or {}
+		local any = false
+		for _ in pins do
+			any = true
+			break
+		end
+		for i = 1, s.n do
+			if s.pinned[i] then
+				any = true
+				sim.pin(s, i, false)
+			end
+		end
+		if not any then
+			return
+		end
+		-- (Where each is on screen now; and where each hub stands from the
+		-- Brain, in the web.)
+		local v0 = view:peek()
+		local from: { [string]: { number } } = {}
+		local hub_from: { [string]: { number } } = {}
+		local bx0, by0 = 0, 0
+		for i = 1, s.n do
+			if s.fixed[i] then
+				bx0, by0 = s.x[i], s.y[i]
+			end
+		end
+		for i = 1, s.n do
+			from[s.ids[i]] = { s.x[i] * v0.zoom + v0.x, s.y[i] * v0.zoom + v0.y }
+			local kind = fmodel.nodes[i].kind
+			if kind == "orchestrator" or kind == "machine" then
+				hub_from[s.ids[i]] = { s.x[i] - bx0, s.y[i] - by0 }
+			end
+		end
+		M.pins_of():set({} :: any)
+		-- (Nothing kept of this web's places, its field's layout, or its view.)
+		local places = table.clone(M.places_of():peek() or {})
+		for i = 1, s.n do
+			places[s.ids[i]] = nil
+		end
+		M.places_of():set(places :: any)
+		M.layouts:set_key({ pivot }, nil)
+		M.views:set_key({ pivot }, nil)
+		moved_view, dragged_since = false, false
+		fresh_req = true
+		rebuild(props.world(), props.comms() or {})
+		fresh_req = false
+		-- The balanced layout, worked out here (a few dozen milliseconds at
+		-- most), and the view fitted to it (round the marks: the names are
+		-- placed again once it rests).
+		sim.run(s, RELAYOUT_SOLVE_S, os.clock)
+		sim.sleep(s)
+		-- (Turned to match: of the layout and its mirror images about the
+		-- Brain, as balanced each, the one that keeps each hub the side it
+		-- was, so no crew sweeps across the web on its way.)
+		local cx, cy = 0, 0
+		for i = 1, s.n do
+			if s.fixed[i] then
+				cx, cy = s.x[i], s.y[i]
+			end
+		end
+		-- (Each hub weighed by its crew: the biggest crews move least.)
+		local crew: { number } = table.create(s.n, 0)
+		for i = 1, s.n do
+			local p = s.parent[i]
+			if p > 0 then
+				crew[p] += 1
+			end
+		end
+		local best_mx, best_my, best_cost = 1, 1, math.huge
+		for _, m in { { 1, 1 }, { -1, 1 }, { 1, -1 }, { -1, -1 } } do
+			local cost = 0
+			for i = 1, s.n do
+				local f = hub_from[s.ids[i]]
+				if f then
+					local nx, ny = (s.x[i] - cx) * m[1], (s.y[i] - cy) * m[2]
+					local fl = math.max(1e-6, math.sqrt(f[1] ^ 2 + f[2] ^ 2))
+					local nl = math.max(1e-6, math.sqrt(nx ^ 2 + ny ^ 2))
+					cost += (1 + crew[i]) * ((f[1] / fl - nx / nl) ^ 2 + (f[2] / fl - ny / nl) ^ 2)
+				end
+			end
+			if cost < best_cost - 1e-9 then
+				best_mx, best_my, best_cost = m[1], m[2], cost
+			end
+		end
+		if best_mx ~= 1 or best_my ~= 1 then
+			for i = 1, s.n do
+				s.x[i] = cx + (s.x[i] - cx) * best_mx
+				s.y[i] = cy + (s.y[i] - cy) * best_my
+			end
+			-- (Each slot mirrored with it: what rests there stays.)
+			for i = 1, s.n do
+				if not s.fixed[i] then
+					sim.adopt(s, i)
+				end
+			end
+		end
+		table.clear(fit_names)
+		fit()
+		local v1 = view:peek()
+		local n = s.n
+		local x1, y1 = table.create(n, 0), table.create(n, 0)
+		local ax, ay, bx, by = table.create(n, 0), table.create(n, 0), table.create(n, 0), table.create(n, 0)
+		local hubs: { number } = {}
+		for i = 1, n do
+			x1[i], y1[i] = s.x[i], s.y[i]
+			bx[i], by[i] = s.x[i] * v1.zoom + v1.x, s.y[i] * v1.zoom + v1.y
+			local f = from[s.ids[i]]
+			ax[i], ay[i] = if f then f[1] else bx[i], if f then f[2] else by[i]
+			local kind = fmodel.nodes[i].kind
+			if kind == "brain" or kind == "orchestrator" or kind == "machine" then
+				table.insert(hubs, i)
+			end
+		end
+		-- Eased on screen, in the fitted view: each frame a step of the way
+		-- from where it was to where it goes, hubs pushed clear of each
+		-- other, everything kept in the field. (Drawn as moving: the names
+		-- wait for it to rest.)
+		easing = true
+		for i = 1, n do
+			s.awake[i] = true
+		end
+		settled:set(false)
+		tick:set(tick:peek() + 1)
+		count("relayouts")
+		local t0 = ui.now()
+		local function radius(i: number): number
+			local kind = fmodel.nodes[i].kind
+			return (if kind == "brain" then R_BRAIN else R_HUB) * v1.zoom
+		end
+		local function frame(t: number)
+			local e = 1 - (1 - t) ^ 3
+			local w, h = math.max(1, width:peek()), field_h()
+			local sx, sy = table.create(n, 0), table.create(n, 0)
+			for i = 1, n do
+				sx[i], sy[i] = ax[i] + (bx[i] - ax[i]) * e, ay[i] + (by[i] - ay[i]) * e
+			end
+			if t < 1 then
+				for _ = 1, 3 do
+					for a = 1, #hubs do
+						local i = hubs[a]
+						for b = a + 1, #hubs do
+							local j = hubs[b]
+							local need = radius(i) + radius(j) + 6
+							local dx, dy = sx[j] - sx[i], sy[j] - sy[i]
+							local d = math.sqrt(dx * dx + dy * dy)
+							if d < need then
+								if d < 0.01 then
+									dx, dy, d = 1, 0, 1
+								end
+								local push = (need - d) / 2
+								sx[i] -= dx / d * push
+								sy[i] -= dy / d * push
+								sx[j] += dx / d * push
+								sy[j] += dy / d * push
+							end
+						end
+					end
+				end
+				for i = 1, n do
+					local m = (if fmodel.nodes[i].kind == "chat" then R_RING * v1.zoom else radius(i)) + 2
+					sx[i] = math.clamp(sx[i], m, math.max(m, w - m))
+					sy[i] = math.clamp(sy[i], m, math.max(m, h - m))
+				end
+			end
+			for i = 1, n do
+				if t >= 1 then
+					s.x[i], s.y[i] = x1[i], y1[i]
+				else
+					s.x[i], s.y[i] = (sx[i] - v1.x) / v1.zoom, (sy[i] - v1.y) / v1.zoom
+				end
+			end
+			ptick:set(ptick:peek() + 1)
+		end
+		frame(0)
+		ui.every(16, function(): boolean?
+			if not easing then
+				return false
+			end
+			local t = math.clamp((ui.now() - t0) / RELAYOUT_MS, 0, 1)
+			frame(t)
+			if t >= 1 then
+				easing = false
+				sim.sleep(s)
+				counts.relayout_ms = ui.now() - t0
+				done_settling()
+				return false
+			end
+			return nil
 		end)
 		-- (And what's kept of nodes not on it now.)
 		M.pins_of():set({} :: any)
@@ -1669,6 +1910,48 @@ M.View = ui.component(function(props: {
 		end
 	end
 	M.recentre = recentre
+
+	-- Fitted again whenever the field's size changes (the window, the room
+	-- a page gives it, Capture's bar opening out over its foot), however
+	-- little and whatever view was moved to: a view made for another size
+	-- may show none of the web. (Once it has held still a moment; a web laid
+	-- out anew for the size is fitted as it settles, and again here.)
+	local sized_w, sized_h = 0, 0
+	local RESIZE_FIT_MS = 120
+	ui.effect(function()
+		local w, h = width:get(), field_h()
+		if w < 50 or h < 1 then
+			return
+		end
+		if sized_w == 0 then
+			sized_w, sized_h = w, h
+			return
+		end
+		if math.abs(w - sized_w) < 1 and math.abs(h - sized_h) < 1 then
+			return
+		end
+		sized_w, sized_h = w, h
+		ui.after(RESIZE_FIT_MS, function()
+			if sized_w ~= w or sized_h ~= h or s.n == 0 then
+				return
+			end
+			-- (The view kept for this size, as it was left: put back; else
+			-- fitted.)
+			local kept = kept_view(M.pivot:peek())
+			if kept then
+				view:set({ x = kept.x, y = kept.y, zoom = kept.zoom })
+				zoom_req:set(zoom_req:peek() + 1)
+				view_reset:set(view_reset:peek() + 1)
+				counts.zoom = kept.zoom
+				moved_view = true
+			else
+				count("resize_fits")
+				moved_view = false
+				fit()
+			end
+			recull()
+		end)
+	end)
 	M.drag_by = function(id: string, dx: number, dy: number)
 		local i = fmodel.index[id]
 		if i then
@@ -1691,6 +1974,10 @@ M.View = ui.component(function(props: {
 	local press: any = nil
 	local grip_hot = ui.use_state(false)
 	local in_field = false
+	-- (The pointer on the field, or on the lit node's anchor over it: out
+	-- of the Map only when on neither, a frame on. The anchor moving off
+	-- a still pointer, to another node, is no leaving.)
+	local field_hot, anchor_hot = false, false
 	-- A moved view (or the controls resized), settled: a name now under one
 	-- of the field's controls has the names placed again, clear of them
 	-- (once a view; the rest keep their places).
@@ -1722,6 +2009,17 @@ M.View = ui.component(function(props: {
 	-- across the gap; this holds the node it hangs off.
 	local card_hot = false
 	local close_token = 0
+	-- (The field's and the card's elements, as laid out: where the card
+	-- stands in the field, for the way to it. The pointer's last place in
+	-- the field.)
+	local field_el: any = nil
+	local card_el: any = nil
+	local last_x, last_y = -1e9, -1e9
+	local function lit_to(id: string?)
+		if M.lit:peek() ~= id then
+			M.lit:set(id)
+		end
+	end
 	-- Where a lit, pinned node's pin is (screen): its middle and reach.
 	local function pin_at(id: string?): (number?, number?, number?)
 		local i = id and fmodel.index[id]
@@ -1750,6 +2048,57 @@ M.View = ui.component(function(props: {
 			end
 		end)
 	end
+	-- (A new node to hang the card off: a close asked for the last one is
+	-- called off.)
+	ui.effect(function()
+		M.hover:get()
+		close_token += 1
+	end)
+	-- Gone now: the pointer clearly elsewhere (not on its way to the card).
+	local function close_now()
+		close_token += 1
+		if not card_hot and not press and not grip_hot:peek() and M.hover:peek() ~= nil then
+			M.hover:set(nil)
+		end
+	end
+	-- Whether a place in the field is on the way from the lit node to its
+	-- card: in the box round both, a little past it. (No card shown yet:
+	-- nothing to reach.)
+	local function on_the_way(px: number, py: number): boolean
+		local id = M.hover:peek()
+		local i = id and fmodel.index[id]
+		local ce, fe = card_el, field_el
+		if not i or not ce or not fe or not ce.width or ce.width <= 0 or not fe.x then
+			return false
+		end
+		local cx0, cy0 = ce.x - fe.x, ce.y - fe.y
+		local cx1, cy1 = cx0 + ce.width, cy0 + ce.height
+		local v = view:peek()
+		local nx, ny = s.x[i] * v.zoom + v.x, s.y[i] * v.zoom + v.y
+		local n = fmodel.nodes[i]
+		local r = (if n.kind == "brain" then R_BRAIN elseif n.kind == "chat" then R_RING else R_HUB) * v.zoom
+		-- (A card that isn't this node's, left from another: none to reach.)
+		local near = cx0 <= nx + r + 1 and cx1 >= nx - r - 1
+			and (math.abs(cy0 - (ny + r)) <= 40 or math.abs((ny - r) - cy1) <= 40)
+		if not near then
+			return false
+		end
+		local m = WAY_MARGIN
+		local x0, y0 = math.min(cx0, nx - r) - m, math.min(cy0, ny - r) - m
+		local x1, y1 = math.max(cx1, nx + r) + m, math.max(cy1, ny + r) + m
+		return px >= x0 and px <= x1 and py >= y0 and py <= y1
+	end
+	-- Off the node: the card's grace on the way to it, else gone now.
+	local function off_node(px: number, py: number)
+		-- (Its last place still on the node, or the pointer's place not known:
+		-- not clearly elsewhere yet.)
+		local unknown = px < -1e8
+		if unknown or on_the_way(px, py) or hit(px, py) == M.hover:peek() then
+			close_later()
+		else
+			close_now()
+		end
+	end
 	-- Pressed on a node: held from now (the drawing's dragging mode) till
 	-- let go or cancelled, moved or not.
 	local function on_press(px: number, py: number)
@@ -1770,6 +2119,12 @@ M.View = ui.component(function(props: {
 		press = { id = id, x = px, y = py, moved = false, view = view:peek() }
 		local i = id and fmodel.index[id]
 		if i then
+			-- (Lit while it's held, its card and pin with it.)
+			keep()
+			lit_to(id)
+			if M.hover:peek() ~= id then
+				M.hover:set(id)
+			end
 			drag(id :: string, s.x[i], s.y[i])
 		end
 	end
@@ -1798,25 +2153,24 @@ M.View = ui.component(function(props: {
 			end
 			return
 		end
+		last_x, last_y = px, py
 		-- (On the lit node's pin: it, not whatever's under the pin.)
 		if M.hover:peek() ~= nil and on_pin(M.hover:peek(), px, py) then
 			keep()
+			lit_to(M.hover:peek())
 			return
 		end
 		local id = hit(px, py)
+		lit_to(id)
 		if id then
 			keep()
 			if id ~= M.hover:peek() then
 				M.hover:set(id)
 			end
 		elseif M.hover:peek() ~= nil then
-			-- (Off it: on its pin, kept; else it goes after a moment, unless
-			-- the pointer reaches its card.)
-			if on_pin(M.hover:peek(), px, py) then
-				keep()
-			else
-				close_later()
-			end
+			-- (Off it: on the way to its card, it stays a moment; anywhere
+			-- else, it goes now.)
+			off_node(px, py)
 		end
 	end
 	ui.effect(function()
@@ -1850,6 +2204,12 @@ M.View = ui.component(function(props: {
 		if i then
 			let_go(i, p.moved)
 		end
+		-- (Let go: lit is what's under the pointer now.)
+		local under = hit(px, py)
+		lit_to(under)
+		if not under and M.hover:peek() ~= nil and not on_pin(M.hover:peek(), px, py) then
+			off_node(px, py)
+		end
 		if not p.moved then
 			local id = hit(px, py)
 			if id then
@@ -1857,10 +2217,23 @@ M.View = ui.component(function(props: {
 			end
 		end
 	end
+	-- Out of the Map: nothing lit; the card a moment's grace only where
+	-- the pointer left on the way to it.
 	local function leave_later()
 		if not in_field and not press then
-			close_later()
+			lit_to(nil)
+			off_node(last_x, last_y)
 		end
+	end
+	local function hot_changed()
+		in_field = field_hot or anchor_hot
+		if in_field then
+			return
+		end
+		ui.after(0, function()
+			in_field = field_hot or anchor_hot
+			leave_later()
+		end)
 	end
 	local function screen_of(id: string): (number, number, number)
 		local i = fmodel.index[id]
@@ -1872,6 +2245,19 @@ M.View = ui.component(function(props: {
 		local r = if n.kind == "brain" then R_BRAIN elseif n.kind == "chat" then R_RING else R_HUB
 		return s.x[i] * v.zoom + v.x, s.y[i] * v.zoom + v.y, r * v.zoom
 	end
+
+	-- The pointer on the field, by hand (tests: a press, a move, a let go,
+	-- leaving the Map, at field points), and where a node stands on screen.
+	M.pointer = {
+		press = on_press,
+		move = on_move,
+		release = on_release,
+		leave = function()
+			field_hot, anchor_hot, in_field = false, false, false
+			leave_later()
+		end,
+		at = screen_of,
+	}
 
 	-- The card of what the pointer rests on (ds/hover_card's anchored).
 	-- The card of what the pointer rests on (ds/orch_force_card), made as
@@ -1943,50 +2329,55 @@ M.View = ui.component(function(props: {
 		return screen_of(id)
 	end
 	local anchor_at = { x = 0, y = 0 }
-	local anchor = HoverCard.Anchored {
-		class = "orch-force-anchor",
-		w = 300,
-		delay = 350,
-		placement = { side = "bottom", align = "start", offset = 6 },
-		-- (The pointer on the card: the node it's of stays lit.)
-		on_card_hover = function(inside: boolean)
-			card_hot = inside
-			if inside then
-				keep()
-			else
-				close_later()
-			end
-		end,
-		anchor = ui.div {
-			class = "orch-force-anchor-box",
-			w = function(): number
-				local _, _, r = hover_box()
-				return math.max(1, r * 2)
-			end,
-			h = function(): number
-				local _, _, r = hover_box()
-				return math.max(1, r * 2)
-			end,
-			on_press = function(e: any)
-				on_press(anchor_at.x + e.local_x, anchor_at.y + e.local_y)
-			end,
-			on_pointer_move = function(e: any)
-				on_move(anchor_at.x + e.local_x, anchor_at.y + e.local_y)
-			end,
-			on_release = function(e: any)
-				on_release(anchor_at.x + e.local_x, anchor_at.y + e.local_y)
-			end,
-			on_hover = function(inside: boolean)
-				in_field = inside
-				if not inside and not press then
-					leave_later()
+	-- (Made anew for each node hovered: a card closed by its own action
+	-- (Open card) never stays closed for the next.)
+	local function make_anchor(): Node
+		return HoverCard.Anchored {
+			class = "orch-force-anchor",
+			w = 300,
+			delay = 350,
+			placement = { side = "bottom", align = "start", offset = 6 },
+			-- (The pointer on the card: the node it's of stays lit.)
+			on_card_hover = function(inside: boolean)
+				card_hot = inside
+				if inside then
+					keep()
+				else
+					close_later()
 				end
 			end,
-		},
-		card = function(_c: any): Node
-			return card()
-		end,
-	}
+			on_card_box = function(el: any)
+				card_el = el
+			end,
+			anchor = ui.div {
+				class = "orch-force-anchor-box",
+				w = function(): number
+					local _, _, r = hover_box()
+					return math.max(1, r * 2)
+				end,
+				h = function(): number
+					local _, _, r = hover_box()
+					return math.max(1, r * 2)
+				end,
+				on_press = function(e: any)
+					on_press(anchor_at.x + e.local_x, anchor_at.y + e.local_y)
+				end,
+				on_pointer_move = function(e: any)
+					on_move(anchor_at.x + e.local_x, anchor_at.y + e.local_y)
+				end,
+				on_release = function(e: any)
+					on_release(anchor_at.x + e.local_x, anchor_at.y + e.local_y)
+				end,
+				on_hover = function(inside: boolean)
+					anchor_hot = inside
+					hot_changed()
+				end,
+			},
+			card = function(_c: any): Node
+				return card()
+			end,
+		}
+	end
 
 	-- Markers (assistive technology, tests): each node's place once
 	-- settled, in a layer the pan moves whole; none off screen.
@@ -2401,10 +2792,11 @@ M.View = ui.component(function(props: {
 					on_release(e.local_x, e.local_y)
 				end,
 				on_hover = function(inside: boolean)
-					in_field = inside
-					if not inside and not press then
-						leave_later()
-					end
+					field_hot = inside
+					hot_changed()
+				end,
+				on_resize = function(_size: any, el: any)
+					field_el = el
 				end,
 				on_wheel = function(e: any): boolean
 					if e.ctrl or e.cmd then
@@ -2465,13 +2857,19 @@ M.View = ui.component(function(props: {
 					return x ~= nil and (pin_at(x)) ~= nil
 				end, ui.div {
 					absolute = true,
+					-- (Following its node each frame it moves: dragged, or
+					-- settling round it.)
 					left = function(): number
 						view:get()
+						ptick:get()
+						geo:get()
 						local x = pin_at(M.hover:get())
 						return (x or -1000) - 11
 					end,
 					top = function(): number
 						view:get()
+						ptick:get()
+						geo:get()
 						local _, y = pin_at(M.hover:get())
 						return (y or -1000) - 11
 					end,
@@ -2513,9 +2911,11 @@ M.View = ui.component(function(props: {
 						anchor_at.y = y - r
 						return y - r
 					end,
-					ui.show(function(): boolean
-						return M.hover:get() ~= nil
-					end, anchor),
+					ui.presence(function(): string?
+						return M.hover:get()
+					end, function(_id: string): Node
+						return make_anchor()
+					end),
 				},
 				-- The machines, at the bottom left.
 				ui.div {

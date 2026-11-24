@@ -12,6 +12,9 @@ local function open(w: number?, h: number?): any
 	app:resize(w or 1440, h or 2400)
 	app:set_state("control_tab", "notes")
 	app:frames(30)
+	-- (The page opens on the Map, its loads sampled while it showed: what
+	-- the Notes ask of the host from here.)
+	app:set_state("calls", "")
 	return app
 end
 

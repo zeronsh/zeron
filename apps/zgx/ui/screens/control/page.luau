@@ -88,20 +88,22 @@ local SIDE_W = 420
 -- Between blocks: enough that each reads as its own.
 local GAP = "$space.4"
 
--- The tabs, and the one shown, kept on this device: the Board first (what
--- needs you, what's running, what's done), then the Map at the page's size,
--- the Brain dump's chat, and Notes (the Q&A and the Scratchpad).
-M.TABS = { "board", "map", "chat", "notes" }
-M.tab = ui.persist("control_tab", "board")
+-- The tabs, and the one shown, kept on this device: the Map first, at the
+-- page's size, then the Board (what needs you, what's running, what's
+-- done), Notes (the Q&A and the Scratchpad) and the Brain dump's chat. A
+-- tab kept from before opens; else the Map.
+M.TABS = { "map", "board", "notes", "chat" }
+M.DEFAULT_TAB = "map"
+M.tab = ui.persist("control_tab", M.DEFAULT_TAB)
 function M.show_tab(id: string)
 	if table.find(M.TABS, id) and M.tab:peek() ~= id then
 		M.tab:set(id)
 	end
 end
--- (One kept from before that's gone since, Overview: the Board.)
+-- (One kept from before that's gone since, Overview: the Map.)
 local function valid_tab()
 	if not table.find(M.TABS, M.tab:peek()) then
-		M.tab:set("board")
+		M.tab:set(M.DEFAULT_TAB)
 	end
 end
 
@@ -1474,10 +1476,10 @@ local function head(): Node
 			value = M.tab,
 			label = locale.t("control.tabs.label"),
 			options = {
-				{ value = "board", label = locale.t("control.tabs.board") },
 				{ value = "map", label = locale.t("control.tabs.map") },
-				{ value = "chat", label = locale.t("control.tabs.chat") },
+				{ value = "board", label = locale.t("control.tabs.board") },
 				{ value = "notes", label = locale.t("control.tabs.notes") },
+				{ value = "chat", label = locale.t("control.tabs.chat") },
 			},
 			},
 		},
@@ -1789,67 +1791,70 @@ local MapTab = ui.component(function(): Node
 	if not table.find(OrchMap().LISTED, v.variant) then
 		OrchMap().set(M.map_view, { variant = "force" })
 	end
-	-- (The room the Map has: the tab's height, less its insets and the
-	-- block's own head and padding.)
-	local MAP_CHROME = 86
+	-- (The room the Map has: what its frame below is laid out to, down to
+	-- Capture's bar's top at rest (grown, the bar lies over the Map, which
+	-- never lays itself out again for it), less the block's own head and
+	-- padding; never less than the Graph's least.)
+	local PANEL_CHROME = 70
+	local MIN_FIELD = OrchMap().MIN_FIELD_H
 	-- (Taken once it has held still a moment, in whole points: Capture's
 	-- bar easing open or shut doesn't lay the Graph out at each of its
 	-- frames. The first, at once.)
 	local SETTLE_MS = 150
 	local latest = 0
-	-- (The tab's height as last laid out.)
-	local tab_h = 0
-	local function fit()
-		if tab_h <= 0 then
-			return
-		end
-		local fill = OrchMap().fill_h
-		local room = math.floor(math.max(0, tab_h - MAP_CHROME - M.float_rest_h:peek() - FLOAT_FOOT - FLOAT_CLEAR))
-		latest = room
-		if fill:peek() <= 0 then
-			fill:set(room)
-			return
-		end
-		ui.after(SETTLE_MS, function()
-			if latest == room and math.abs(room - fill:peek()) >= 1 then
-				fill:set(room)
-			end
-		end)
-	end
-	-- (Capture's bar at rest known, or its rest changed: its form, not its
-	-- draft. Its lines and chips don't come here: grown, it lies over the
-	-- Map.)
-	local rest_seen = M.float_rest_h:peek()
-	ui.effect(function()
-		local r = M.float_rest_h:get()
-		if r ~= rest_seen then
-			rest_seen = r
-			fit()
-		end
-	end)
 	return ui.column {
 		id = "control-map-tab",
 		w_full = true,
 		h_full = true,
 		min_h = 0,
 		items = "center",
-		on_resize = function(size: { w: number, h: number })
-			tab_h = size.h
-			fit()
-		end,
 		px = "$space.6",
 		pt = "$space.2",
+		-- (Its foot clear of Capture's bar at rest, and of Needs you
+		-- floating at the page's right where it reaches over the Map: the hub
+		-- switch and names in that corner never under it.)
 		pb = function(): any
-			return ui.raw(M.float_rest_h:get() + FLOAT_FOOT + FLOAT_CLEAR, "clear of Capture's bar at rest, measured")
+			local room = M.float_rest_h:get() + FLOAT_FOOT
+			local needs = M.needs_room:get()
+			if needs > room then
+				local w = M.page_w:get()
+				local map_right = w / 2 + math.min(math.max(0, w - 48), MAX_W) / 2
+				if map_right > w - FLOAT_SIDE - NEEDS_W then
+					room = needs
+				end
+			end
+			return ui.raw(room + FLOAT_CLEAR, "clear of Capture's bar at rest, and Needs you, measured")
 		end,
 		ui.column {
+			id = "control-map-frame",
 			w_full = true,
 			max_w = MAX_W,
 			grow = 1,
-			min_h = 0,
+			basis = 0,
+			min_h = MIN_FIELD + PANEL_CHROME,
 			-- (A big fleet's Graph, fitted down as far as it goes, draws no
 			-- name past the Map's edge.)
 			overflow = "hidden",
+			-- (Its own size, not the tab's: what its foot keeps clear of
+			-- comes off it.)
+			on_resize = function(size: { w: number, h: number })
+				-- (Hidden with its tab: no room to take.)
+				if size.h < 2 then
+					return
+				end
+				local fill = OrchMap().fill_h
+				local room = math.floor(math.max(MIN_FIELD, size.h - PANEL_CHROME))
+				latest = room
+				if fill:peek() <= 0 then
+					fill:set(room)
+					return
+				end
+				ui.after(SETTLE_MS, function()
+					if latest == room and math.abs(room - fill:peek()) >= 1 then
+						fill:set(room)
+					end
+				end)
+			end,
 			panel {
 				id = "control-map",
 				title = "control.tabs.map",

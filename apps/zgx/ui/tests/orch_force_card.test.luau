@@ -98,6 +98,10 @@ test("force card: Open chat, Open card, Pin and Unpin", function()
 	expect(app:state("control_tab")).to_be("board")
 	expect(app:state("control_board_reveal")).to_be("it-win")
 	app:set_state("control_tab", "map")
+	-- (Settled first: Needs you floats in again, the Map's room changes
+	-- with it and the Graph is fitted to it once more.)
+	app:frames(10)
+	app:wait(400)
 	app:frames(10)
 	hover(app, "th-reins-win")
 	app:click("#orch-force-card-open")
@@ -105,15 +109,22 @@ test("force card: Open chat, Open card, Pin and Unpin", function()
 	expect(app:state("shell_route_path")).to_be("/session/th-reins-win")
 end)
 
--- Hover intent: the card (and the node it hangs off) stays while the
--- pointer crosses from the node to it and while it's on it; off all of
--- them, it goes after a moment. Both pivots.
+-- Hover intent: the card stays while the pointer crosses from the node to
+-- it and while it's on it; off all of them, it goes after a moment, and at
+-- once where the pointer is clearly elsewhere (tests/orch_force_hover).
+-- Both pivots.
+-- (The pointer on the field by hand, at a node's middle moved by dx, dy.)
+local function pointer_at(app: any, id: string, dx: number, dy: number)
+	app:set_state("force_ptr", { op = "move", id = id, dx = dx, dy = dy })
+	app:command("map_force_pointer")
+end
 for _, pv in { "orchestrator", "machine" } do
 	test(`force card ({pv}): node, gap, card: the card stays; off everything it goes after a moment`, function()
 		local app = open(pv)
 		hover(app, "th-reins-win")
-		-- The gap (an empty place on the field): still there a moment on.
-		app:hover(".orch-force-legend")
+		-- The gap (the field between the node and its card, below it): still
+		-- there a moment on.
+		pointer_at(app, "th-reins-win", 0, 22)
 		app:frames(3)
 		expect(app:state("control_map_force_hover")).to_be("th-reins-win")
 		-- On the card: kept, however long.
