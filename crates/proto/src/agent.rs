@@ -624,6 +624,16 @@ pub struct RunRequest {
     /// serde-defaulted for wire compat.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub code_mode: bool,
+    /// Load only the MCP servers this request carries (`mcp`, `extra_mcp`):
+    /// the agent's own (its user config's servers, its account's
+    /// connectors such as ChatGPT apps or claude.ai's) stay off for the
+    /// run, so they don't double Zeron's managed servers and their tool
+    /// tokens. Stamped by the host from Settings → Providers like
+    /// `code_mode`; honored by drivers that support it
+    /// (`zeron_harness::supports_zeron_mcp_only`). Additive +
+    /// serde-defaulted for wire compat.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub zeron_mcp_only: bool,
     /// Harness-native session id to resume, if any.
     pub resume: Option<String>,
     /// Absolute paths of image attachments already staged on the run device
@@ -684,6 +694,7 @@ impl std::fmt::Debug for RunRequest {
             access,
             plan,
             code_mode,
+            zeron_mcp_only,
             resume,
             attachments,
             worktree,
@@ -703,6 +714,7 @@ impl std::fmt::Debug for RunRequest {
             .field("access", access)
             .field("plan", plan)
             .field("code_mode", code_mode)
+            .field("zeron_mcp_only", zeron_mcp_only)
             .field("resume", resume)
             .field("attachments", attachments)
             .field("worktree", worktree)

@@ -12,7 +12,21 @@ for line in sys.stdin:
         continue
     result = {}
     if method == 'config/read':
-        result = {'config': {}}
+        # The user's config as a test lays it out (`config-read.json`), else none.
+        seeded = pathlib.Path('config-read.json')
+        result = json.loads(seeded.read_text()) if seeded.exists() else {'config': {}}
+    elif method == 'plugin/installed':
+        # The plugins a test installs (`plugins-installed.json`), else none.
+        seeded = pathlib.Path('plugins-installed.json')
+        result = json.loads(seeded.read_text()) if seeded.exists() else {'marketplaces': []}
+    elif method == 'plugin/read':
+        # One plugin's detail (`plugin-<name>.json`); `"silent": true` never
+        # answers, as a remote catalog that doesn't.
+        seeded = pathlib.Path(f"plugin-{frame['params']['pluginName']}.json")
+        detail = json.loads(seeded.read_text()) if seeded.exists() else {'mcpServers': []}
+        if detail.get('silent'):
+            continue
+        result = {'plugin': detail}
     elif method in ('thread/start', 'thread/resume'):
         result = {'thread': {'id': 'idle-thread', 'turns': []}}
     elif method == 'turn/start':

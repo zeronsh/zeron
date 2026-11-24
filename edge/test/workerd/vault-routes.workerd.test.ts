@@ -160,4 +160,59 @@ describe("/vault routes → VAULT service binding", () => {
     // A non-error status on a failed result is a contract bug: bad gateway.
     expect((await call("GET", "/vault/org1", userBearer(newUser("vault-weird")))).status).toBe(502);
   });
+
+  it("maps /vault/{orgId}/connections routes to VaultConnections RPCs and validates shapes", async () => {
+    const u = newUser();
+    const bearer = userBearer(u);
+    const caller = { userId: u.userId, orgId: "org1", kind: "user" };
+
+    expect(await (await call("GET", "/vault/org1/connections", bearer)).json()).toEqual({ disabled: false, connections: [] });
+    expect((await lastCall("listConnections")).args).toEqual([caller, undefined]);
+
+    expect((await call("GET", "/vault/org1/connections?kind=mcp", bearer)).status).toBe(200);
+    expect((await lastCall("listConnections")).args).toEqual([caller, "mcp"]);
+    expect((await call("GET", "/vault/org1/connections?kind=bogus", bearer)).status).toBe(400);
+
+    const putBody = {
+      name: "Linear",
+      url: "https://mcp.linear.app/sse",
+      transport: "sse",
+      authKind: "headers",
+      authorizedDevices: ["*"],
+      material: { kind: "headers", headers: { Authorization: "Bearer tok" } }
+    };
+    const putRes = await call("PUT", "/vault/org1/connections/mcp:linear", bearer, putBody);
+    expect(putRes.status).toBe(200);
+    expect(await putRes.json()).toMatchObject({ id: "mcp:linear", kind: "mcp", name: "Linear" });
+    expect((await lastCall("putConnection")).args).toEqual([caller, "mcp:linear", putBody]);
+
+    // Percent-encoded connection id works too
+    expect((await call("PATCH", "/vault/org1/connections/mcp%3Alinear", bearer, { enabled: false, accountLabel: null })).status).toBe(200);
+    expect((await lastCall("updateConnection")).args).toEqual([caller, "mcp:linear", { enabled: false, accountLabel: null }]);
+
+    expect((await call("POST", "/vault/org1/connections/mcp:linear/disconnect", bearer)).status).toBe(200);
+    expect((await lastCall("disconnectConnectionAuth")).args).toEqual([caller, "mcp:linear"]);
+
+    expect(await (await call("DELETE", "/vault/org1/connections/mcp:linear", bearer)).json()).toEqual({ deleted: true });
+    expect((await lastCall("deleteConnection")).args).toEqual([caller, "mcp:linear"]);
+
+    const grantBody = { id: "mcp:linear", deviceId: "laptop-1", ts: 1_800_000_000_000, sig: "c2ln", forceRefresh: true };
+    expect(await (await call("POST", "/vault/org1/connections/grant", bearer, grantBody)).json()).toMatchObject({
+      id: "mcp:linear",
+      headers: { Authorization: "Bearer conn-tok" }
+    });
+    expect((await lastCall("grantConnection")).args).toEqual([caller, grantBody]);
+
+    const batchBody = { ids: ["mcp:linear", "plugin:slack"], deviceId: "laptop-1", ts: 1_800_000_000_001, sig: "c2ln" };
+    expect(await (await call("POST", "/vault/org1/connections/grants", bearer, batchBody)).json()).toMatchObject({
+      grants: [expect.objectContaining({ id: "mcp:linear" }), expect.objectContaining({ id: "plugin:slack" })],
+      missing: []
+    });
+    expect((await lastCall("grantConnections")).args).toEqual([caller, batchBody]);
+
+    // Bad shapes rejected with 400
+    expect((await call("PUT", "/vault/org1/connections/bogus:id", bearer, putBody)).status).toBe(400);
+    expect((await call("POST", "/vault/org1/connections/grant", bearer, { ...grantBody, id: "nope" })).status).toBe(400);
+    expect((await call("POST", "/vault/org1/connections/grants", bearer, { ...batchBody, ids: [] })).status).toBe(400);
+  });
 });

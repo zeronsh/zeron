@@ -1577,6 +1577,7 @@
         "off_note": "New versions aren't looked for."
       },
       "dialog_body": "On {device}. Changes apply as you make them.",
+      "dialog_body_cloud": "For every Cloud chat, on whichever machine runs it. Changes apply as you make them.",
       "done": "Done",
       "updates": "Updates",
       "description": "The coding agents on a device, and the accounts they sign in with.",
@@ -1673,7 +1674,13 @@
       },
       "couldnt_switch": "Couldn't switch accounts",
       "cloud": "Cloud",
-      "cloud_key_kept": "Kept in Zeron's vault for Cloud, never on this Mac. Every Cloud machine uses it from its next turn, wherever no sign-in is in use."
+      "cloud_key_kept": "Kept in Zeron's vault for Cloud, never on this Mac. Every Cloud machine uses it from its next turn, wherever no sign-in is in use.",
+      "zeron_mcp_only": {
+        "label": "Only Zeron's MCP servers",
+        "description": "Hide {name}'s own MCP servers and connectors, so it uses the ones in Settings → MCP without duplicates or extra tokens.",
+        "unavailable": "{name} can't hide its own MCP servers, so it keeps them beside Zeron's.",
+        "terms": "mcp servers connectors built-in duplicates tokens chatgpt apps claude.ai own hide"
+      }
     },
     "devices": {
       "title": "Devices",
@@ -2377,6 +2384,182 @@
         "label": "Speech model",
         "description": "Parakeet v3 · {total} MB",
         "remove": "Remove"
+      }
+    },
+    "mcp": {
+      "title": "MCP",
+      "terms": "mcp servers model context protocol tools connectors integrations oauth vault linear notion sentry stripe vercel",
+      "description_synced": "Tools your agents can use in every chat, with any provider. Sign-ins sync to your devices and Cloud with Zeron Vault.",
+      "description_local": "Tools your agents can use in every chat, with any provider. Kept on this device; sign in to Zeron to sync them to your other devices.",
+      "servers": {
+        "title": "Your servers",
+        "terms": "connected servers accounts sign in sign out enable disable work personal"
+      },
+      "add": {
+        "title": "Add a server",
+        "terms": "add connect custom server url command popular",
+        "connect": "Connect",
+        "custom": "Custom server",
+        "custom_description": "Any MCP server, by its URL or a command on this computer."
+      },
+      "row": {
+        "waiting": "Waiting for sign-in…",
+        "signin": "Not signed in",
+        "expired": "Signed out. Sign in again to use it.",
+        "client": "Needs an OAuth app to sign in",
+        "this_device": "{line} · This device only",
+        "command": "Runs {command}",
+        "sign_in": "Sign in",
+        "needs_attention": "Needs attention",
+        "connected": "Connected",
+        "off_short": "Off",
+        "unnamed": "Unnamed account",
+        "your_account": "Your account",
+        "agent_name_tip": "The name your agents use for this account",
+        "account_actions": "{name} actions",
+        "server_actions": "{name} actions",
+        "where_accounts": "{where} · {n} accounts",
+        "add_account": "Add account"
+      },
+      "connect": {
+        "title": "Connect {name}",
+        "waiting_title": "Sign in to {name}",
+        "waiting_body": "Finish signing in to {name} in your browser. This closes once you're connected.",
+        "waiting_hint": "Waiting for your browser…",
+        "waiting_label": "Waiting for sign-in",
+        "waiting_button": "Waiting…",
+        "error_title": "Couldn't connect {name}",
+        "error_body": "Nothing was saved from this sign-in.",
+        "try_again": "Try again",
+        "continue": "Continue in browser",
+        "connect": "Connect",
+        "synced": "Syncs to your devices with Zeron Vault",
+        "local": "Kept on this device"
+      },
+      "client": {
+        "body": "{name} only lets apps registered with it sign in. Create an app in your {name} workspace, allow this redirect URL, then paste the app's client ID and secret.",
+        "redirect": "Redirect URL",
+        "copy": "Copy",
+        "id": "Client ID",
+        "secret": "Client secret",
+        "how": "How to create the app"
+      },
+      "key": {
+        "body": "Paste the API key {name} gave you. It's kept encrypted and never shown again.",
+        "label": "API key"
+      },
+      "error": {
+        "generic": "Something went wrong signing in.",
+        "client": "This server needs your own OAuth app to sign in.",
+        "timed_out": "Sign-in timed out. Try again when you're ready.",
+        "browser": "Couldn't open your browser.",
+        "port": "Another sign-in is still using the redirect port. Finish or cancel it, then try again.",
+        "offline": "Couldn't reach Zeron. Check your connection and try again.",
+        "detail": "Couldn't connect: {detail}"
+      },
+      "form": {
+        "add_title": "Custom server",
+        "add_body": "Connect any MCP server by its URL, or run one on this computer.",
+        "name": "Name",
+        "name_placeholder": "My server",
+        "kind": "Server type",
+        "kind_remote": "Remote URL",
+        "kind_local": "Local command",
+        "url": "URL",
+        "auth": "Sign-in",
+        "auth_oauth": "OAuth (sign in in the browser)",
+        "auth_bearer": "API key or token",
+        "auth_headers": "Custom headers",
+        "auth_none": "None",
+        "token": "API key or token",
+        "token_kept": "Leave empty to keep the one saved.",
+        "headers": "Headers",
+        "headers_hint": "One per line, as Name: value.",
+        "headers_kept": "Saved: {keys}. Headers you enter replace them.",
+        "own_client": "Use your own OAuth app",
+        "own_client_hint": "For a server that doesn't register apps itself. Allow this redirect URL in your app's settings.",
+        "scopes": "Scopes",
+        "scopes_placeholder": "Server's defaults",
+        "command": "Command",
+        "args": "Arguments",
+        "env": "Environment",
+        "env_kept": "Saved: {keys}. Variables you enter replace them.",
+        "local_note": "Local commands run on this computer only and aren't synced.",
+        "sync": "Sync to your devices",
+        "sync_description": "Keep this server and its sign-in in Zeron Vault, for your other devices and Cloud.",
+        "save": "Save",
+        "add": "Add server",
+        "error_name": "Give the server a name.",
+        "error_url": "Enter a URL starting with https://.",
+        "error_command": "Enter the command to run.",
+        "error_token": "Paste the API key or token.",
+        "error_header_line": "\"{line}\" isn't a header. Write it as Name: value.",
+        "error_env_line": "\"{line}\" isn't a variable. Write it as NAME=value."
+      },
+      "remove": {
+        "title": "Remove {name}?",
+        "body": "Its sign-in is deleted from Zeron Vault and this device. You can connect it again any time.",
+        "body_all": "Removes all {n} accounts and their sign-ins from Zeron Vault and this device. You can connect them again any time."
+      },
+      "toast": {
+        "added": "{name} added",
+        "saved": "{name} saved",
+        "connected": "{name} connected",
+        "removed": "{name} removed",
+        "signed_out": "Signed out of {name}",
+        "couldnt_add": "Couldn't add {name}",
+        "couldnt_remove": "Couldn't remove {name}",
+        "couldnt_switch": "Couldn't change {name}"
+      },
+      "account": {
+        "full_name": "{name} · {account}",
+        "title": "Add another {name} account",
+        "body": "Sign in with another account in your browser. Your agents can use all of them, each by its own name.",
+        "new_key": "API key or token for the new account",
+        "switch_hint": "Sign in with your other account. If your browser signs you straight back in as the first one, switch accounts on {name}'s page.",
+        "error_taken": "You already have a {name} account called “{account}”.",
+        "add": "Add account",
+        "name": "Account name",
+        "name_placeholder": "Personal, Work…",
+        "name_optional": "Optional. You can rename it any time.",
+        "agents_see_one": "Your agents will see it as {agent}."
+      },
+      "menu": {
+        "rename": "Rename…",
+        "sign_in_again": "Sign in again",
+        "sign_out": "Sign out",
+        "remove_account": "Remove account",
+        "edit": "Edit server…",
+        "remove_server": "Remove {name}"
+      },
+      "rename": {
+        "title": "Rename account",
+        "body": "Name this {name} account so you and your agents can tell it apart.",
+        "save": "Save",
+        "unnamed_hint": "Left empty, your agents tell it apart by a number."
+      },
+      "requests": {
+        "title": "Waiting for you",
+        "description": "Agents asked to change your MCP servers. Nothing changes until you allow it.",
+        "terms": "requests agent asked approve allow decline waiting",
+        "add": "Add {name}",
+        "remove": "Remove {name}",
+        "enable": "Turn on {name}",
+        "disable": "Turn off {name}",
+        "from_chat": "{agent} asked in “{chat}”",
+        "an_agent": "An agent",
+        "from_agent": "An agent asked",
+        "because": "{who}: “{reason}”",
+        "runs": "Runs {command} on this computer",
+        "decline": "Decline",
+        "allow": "Allow",
+        "done": "{name} done",
+        "couldnt": "Couldn't do {name}",
+        "notice_body": "Nothing changes until you allow it.",
+        "notice_add": "An agent asks to add {name}",
+        "notice_remove": "An agent asks to remove {name}",
+        "notice_enable": "An agent asks to turn on {name}",
+        "notice_disable": "An agent asks to turn off {name}"
       }
     }
   },

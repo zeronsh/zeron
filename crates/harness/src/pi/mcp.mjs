@@ -70,7 +70,7 @@ export default function (pi) {
       const {tools} = await rpc("tools/list", {});
       for (const tool of tools) {
         pi.registerTool({
-          name: `${config.name}_${tool.name}`, label: `Zeron: ${tool.name}`,
+          name: `${config.name}_${tool.name}`, label: `${config.name === "zeron" ? "Zeron" : config.name}: ${tool.name}`,
           description: tool.description, parameters: tool.inputSchema,
           async execute(_id, args, signal) {
             const result = await rpc("tools/call", {name: tool.name, arguments: args}, signal);

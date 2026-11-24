@@ -121,6 +121,7 @@ fn run_payload(message_id: &str, repo_path: &str, space_id: Option<&str>) -> Ses
             access: Default::default(),
             plan: false,
             code_mode: false,
+            zeron_mcp_only: false,
             attachments: Vec::new(),
             resume: None,
             worktree: Some(WorktreeSpec {

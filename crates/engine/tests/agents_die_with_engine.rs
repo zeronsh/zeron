@@ -101,6 +101,7 @@ fn request(mode: &str, work: &Path) -> RunRequest {
         access: Default::default(),
         plan: false,
         code_mode: false,
+        zeron_mcp_only: false,
         resume: None,
         attachments: Vec::new(),
         worktree: None,

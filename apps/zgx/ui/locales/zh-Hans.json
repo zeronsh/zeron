@@ -1577,6 +1577,7 @@
         "off_note": "不检查新版本。"
       },
       "dialog_body": "位于 {device}。更改立即生效。",
+      "dialog_body_cloud": "适用于所有云端对话，无论由哪台机器运行。更改立即生效。",
       "done": "完成",
       "updates": "更新",
       "description": "设备上的编码智能体及其登录账户。",
@@ -1673,7 +1674,13 @@
       },
       "couldnt_switch": "无法切换账户",
       "cloud": "云端",
-      "cloud_key_kept": "保存在 Zeron 的保管库中供 Cloud 使用，绝不存放在这台 Mac 上。每台 Cloud 机器从下一轮起，在未使用登录的地方使用它。"
+      "cloud_key_kept": "保存在 Zeron 的保管库中供 Cloud 使用，绝不存放在这台 Mac 上。每台 Cloud 机器从下一轮起，在未使用登录的地方使用它。",
+      "zeron_mcp_only": {
+        "label": "仅使用 Zeron 的 MCP 服务器",
+        "description": "隐藏 {name} 自带的 MCP 服务器和连接器，让它只使用「设置 → MCP」中的服务器，避免重复和多余的 token。",
+        "unavailable": "{name} 无法隐藏自带的 MCP 服务器，会与 Zeron 的一起使用。",
+        "terms": "mcp 服务器 连接器 内置 重复 token chatgpt 应用 claude.ai 自带 隐藏"
+      }
     },
     "devices": {
       "title": "设备",
@@ -2377,6 +2384,182 @@
         "label": "语音模型",
         "description": "Parakeet v3 · {total} MB",
         "remove": "移除"
+      }
+    },
+    "mcp": {
+      "title": "MCP",
+      "terms": "mcp 服务器 模型上下文协议 工具 连接器 集成 oauth 保险库 linear notion sentry stripe vercel",
+      "description_synced": "你的智能体可在每个对话、任何提供方中使用这些工具。登录信息通过 Zeron Vault 同步到你的设备和 Cloud。",
+      "description_local": "你的智能体可在每个对话、任何提供方中使用这些工具。仅保存在此设备上；登录 Zeron 即可同步到你的其他设备。",
+      "servers": {
+        "title": "你的服务器",
+        "terms": "已连接 服务器 账号 登录 退出 启用 停用 工作 个人"
+      },
+      "add": {
+        "title": "添加服务器",
+        "terms": "添加 连接 自定义 服务器 网址 命令 常用",
+        "connect": "连接",
+        "custom": "自定义服务器",
+        "custom_description": "任意 MCP 服务器，通过网址或此电脑上的命令。"
+      },
+      "row": {
+        "waiting": "正在等待登录…",
+        "signin": "未登录",
+        "expired": "已退出登录。请重新登录后使用。",
+        "client": "需要 OAuth 应用才能登录",
+        "this_device": "{line} · 仅限此设备",
+        "command": "运行 {command}",
+        "sign_in": "登录",
+        "needs_attention": "需要处理",
+        "connected": "已连接",
+        "off_short": "已关闭",
+        "unnamed": "未命名账号",
+        "your_account": "你的账号",
+        "agent_name_tip": "你的智能体对此账号使用的名称",
+        "account_actions": "{name} 操作",
+        "server_actions": "{name} 操作",
+        "where_accounts": "{where} · {n} 个账号",
+        "add_account": "添加账号"
+      },
+      "connect": {
+        "title": "连接 {name}",
+        "waiting_title": "登录 {name}",
+        "waiting_body": "请在浏览器中完成 {name} 的登录。连接成功后此窗口会自动关闭。",
+        "waiting_hint": "正在等待浏览器…",
+        "waiting_label": "正在等待登录",
+        "waiting_button": "等待中…",
+        "error_title": "无法连接 {name}",
+        "error_body": "此次登录未保存任何内容。",
+        "try_again": "重试",
+        "continue": "在浏览器中继续",
+        "connect": "连接",
+        "synced": "通过 Zeron Vault 同步到你的设备",
+        "local": "保存在此设备上"
+      },
+      "client": {
+        "body": "{name} 只允许已注册的应用登录。请在你的 {name} 工作区中创建一个应用，允许此重定向网址，然后粘贴该应用的客户端 ID 和密钥。",
+        "redirect": "重定向网址",
+        "copy": "复制",
+        "id": "客户端 ID",
+        "secret": "客户端密钥",
+        "how": "如何创建应用"
+      },
+      "key": {
+        "body": "粘贴 {name} 提供的 API 密钥。它会被加密保存，且不会再次显示。",
+        "label": "API 密钥"
+      },
+      "error": {
+        "generic": "登录时出现问题。",
+        "client": "此服务器需要你自己的 OAuth 应用才能登录。",
+        "timed_out": "登录超时。准备好后请重试。",
+        "browser": "无法打开浏览器。",
+        "port": "另一个登录仍在使用重定向端口。请完成或取消后重试。",
+        "offline": "无法连接到 Zeron。请检查网络后重试。",
+        "detail": "无法连接：{detail}"
+      },
+      "form": {
+        "add_title": "自定义服务器",
+        "add_body": "通过网址连接任意 MCP 服务器，或在此电脑上运行一个。",
+        "name": "名称",
+        "name_placeholder": "我的服务器",
+        "kind": "服务器类型",
+        "kind_remote": "远程网址",
+        "kind_local": "本地命令",
+        "url": "网址",
+        "auth": "登录方式",
+        "auth_oauth": "OAuth（在浏览器中登录）",
+        "auth_bearer": "API 密钥或令牌",
+        "auth_headers": "自定义请求头",
+        "auth_none": "无",
+        "token": "API 密钥或令牌",
+        "token_kept": "留空则保留已保存的值。",
+        "headers": "请求头",
+        "headers_hint": "每行一个，格式为 名称: 值。",
+        "headers_kept": "已保存：{keys}。输入的请求头将替换它们。",
+        "own_client": "使用你自己的 OAuth 应用",
+        "own_client_hint": "适用于不能自行注册应用的服务器。请在应用设置中允许此重定向网址。",
+        "scopes": "权限范围",
+        "scopes_placeholder": "服务器默认值",
+        "command": "命令",
+        "args": "参数",
+        "env": "环境变量",
+        "env_kept": "已保存：{keys}。输入的变量将替换它们。",
+        "local_note": "本地命令仅在此电脑上运行，不会同步。",
+        "sync": "同步到你的设备",
+        "sync_description": "将此服务器及其登录信息保存在 Zeron Vault 中，供你的其他设备和 Cloud 使用。",
+        "save": "保存",
+        "add": "添加服务器",
+        "error_name": "请为服务器命名。",
+        "error_url": "请输入以 https:// 开头的网址。",
+        "error_command": "请输入要运行的命令。",
+        "error_token": "请粘贴 API 密钥或令牌。",
+        "error_header_line": "“{line}”不是请求头。请写成 名称: 值。",
+        "error_env_line": "“{line}”不是变量。请写成 NAME=值。"
+      },
+      "remove": {
+        "title": "移除 {name}？",
+        "body": "它的登录信息将从 Zeron Vault 和此设备中删除。你可以随时重新连接。",
+        "body_all": "将从 Zeron Vault 和此设备中移除全部 {n} 个账号及其登录信息。你可以随时重新连接。"
+      },
+      "toast": {
+        "added": "已添加 {name}",
+        "saved": "已保存 {name}",
+        "connected": "已连接 {name}",
+        "removed": "已移除 {name}",
+        "signed_out": "已退出 {name}",
+        "couldnt_add": "无法添加 {name}",
+        "couldnt_remove": "无法移除 {name}",
+        "couldnt_switch": "无法更改 {name}"
+      },
+      "account": {
+        "full_name": "{name} · {account}",
+        "title": "添加另一个 {name} 账号",
+        "body": "在浏览器中用另一个账号登录。你的智能体可以使用所有账号，每个账号都有自己的名称。",
+        "new_key": "新账号的 API 密钥或令牌",
+        "switch_hint": "请用另一个账号登录。如果浏览器直接以第一个账号登录，请在 {name} 的页面上切换账号。",
+        "error_taken": "你已有一个名为“{account}”的 {name} 账号。",
+        "add": "添加账号",
+        "name": "账号名称",
+        "name_placeholder": "个人、工作…",
+        "name_optional": "可选。你可以随时重命名。",
+        "agents_see_one": "你的智能体将以 {agent} 看到它。"
+      },
+      "menu": {
+        "rename": "重命名…",
+        "sign_in_again": "重新登录",
+        "sign_out": "退出登录",
+        "remove_account": "移除账号",
+        "edit": "编辑服务器…",
+        "remove_server": "移除 {name}"
+      },
+      "rename": {
+        "title": "重命名账号",
+        "body": "为此 {name} 账号命名，方便你和智能体区分。",
+        "save": "保存",
+        "unnamed_hint": "留空时，你的智能体会用编号区分它。"
+      },
+      "requests": {
+        "title": "等待你处理",
+        "description": "智能体请求更改你的 MCP 服务器。在你允许之前不会有任何更改。",
+        "terms": "请求 智能体 允许 拒绝 等待",
+        "add": "添加 {name}",
+        "remove": "移除 {name}",
+        "enable": "开启 {name}",
+        "disable": "关闭 {name}",
+        "from_chat": "{agent} 在“{chat}”中请求",
+        "an_agent": "一个智能体",
+        "from_agent": "一个智能体请求",
+        "because": "{who}：“{reason}”",
+        "runs": "在此电脑上运行 {command}",
+        "decline": "拒绝",
+        "allow": "允许",
+        "done": "已完成：{name}",
+        "couldnt": "无法完成：{name}",
+        "notice_body": "在你允许之前不会有任何更改。",
+        "notice_add": "一个智能体请求添加 {name}",
+        "notice_remove": "一个智能体请求移除 {name}",
+        "notice_enable": "一个智能体请求开启 {name}",
+        "notice_disable": "一个智能体请求关闭 {name}"
       }
     }
   },
