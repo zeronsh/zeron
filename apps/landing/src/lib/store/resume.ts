@@ -8,13 +8,13 @@
 import type { AstroGlobal } from "astro";
 import { field, formOf } from "./forms.ts";
 import type { WebSession } from "./types.ts";
+import { hasSessionCookie } from "./session-cookie.ts";
 import { signInUrl } from "./urls.ts";
 
 /** The longest address the edge brings back after signing in. */
 const MOST = 2048;
 
-/** The cookie the edge keeps a web session in (edge/src/web-cookies.ts). */
-const SESSION_COOKIE = "__Host-zeron_session";
+
 
 /** The page at `path` with `fields` of `form` in its query, short enough to come back. */
 export function resumeAddress(path: string, form: FormData | null, fields: readonly string[]): string {
@@ -48,7 +48,7 @@ export function signInAndResume(astro: Pick<AstroGlobal, "redirect">, path: stri
 }
 
 /** Whether the request carries a session cookie: signed in once, maybe no longer. */
-export const hadSession = (request: Request) => new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=`).test(request.headers.get("cookie") ?? "");
+export const hadSession = hasSessionCookie;
 
 /** A value the page was given back after signing in again, bounded. */
 export const resumed = (url: URL, name: string, max = 2000) => (url.searchParams.get(name) ?? "").slice(0, max);

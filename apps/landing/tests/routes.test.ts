@@ -412,17 +412,55 @@ describe("package files", () => {
   });
 });
 
-describe("public pages are the same for everyone (so a shared cache can keep them)", () => {
-  test("signed in or not, admin or not, the bytes are the same", async () => {
-    const people = [undefined, await site.signIn("user_ada"), await site.signIn("user_grace")];
-    for (const path of ["/plugins", "/plugins?category=git", "/plugins/focus-timer", "/plugins/session-badges", "/plugins/sitemap.xml"]) {
+describe("public pages: the same for everyone signed out (a shared cache keeps them); drawn for you, and never kept, signed in", () => {
+  const PUBLIC = ["/plugins", "/plugins/all?category=git", "/plugins/all", "/plugins/focus-timer", "/plugins/session-badges", "/plugins/focus-timer/versions", "/plugins/publishing"];
+  /** The bar's own part: who it says you are, and what it offers. */
+  const bar = (body: string) => body.slice(body.indexOf('<header class="top"'), body.indexOf("</header>") + 9);
+
+  test("signed out, a page is the same for everyone, sets no cookie, and a shared cache may keep it; the bar waits for the script", async () => {
+    for (const path of PUBLIC) {
       // (Drawn once first: a README still being drawn for the first visitor is shown as its text to one who comes meanwhile.)
       await html(path);
-      const bodies = await Promise.all(people.map(async (cookie) => (await html(path, cookie)).body));
+      // (No cookie, or ones that aren't a session's: one page.)
+      const asked = await Promise.all([undefined, "__Host-zeron_flash=report_sent", "theme=dark"].map((cookie) => site.fetch(path, cookie ? { headers: { cookie } } : {})));
+      const bodies = await Promise.all(asked.map((r) => r.text()));
       expect(new Set(bodies).size, path).toBe(1);
-      const csp = await Promise.all(people.map(async (cookie) => (await site.fetch(path, cookie ? { headers: { cookie } } : {})).headers.get("set-cookie")));
-      expect(csp.every((c) => c === null), `${path} sets no cookie`).toBe(true);
+      for (const r of asked) {
+        expect(r.headers.get("cache-control"), path).toMatch(/^public, max-age=\d+$/);
+        expect(r.headers.get("cloudflare-cdn-cache-control") ?? "", path).toMatch(/public/);
+      }
+      expect(bar(bodies[0]!), path).toContain('hidden data-me');
+      expect(bar(bodies[0]!), path).not.toMatch(/@ada|@grace/);
     }
+    expect((await site.fetch("/plugins")).headers.get("set-cookie")).toBeNull();
+  });
+
+  test("signed in, the page comes with you in the bar (Review for staff), and is yours alone: private, never kept", async () => {
+    for (const [user, handle, staff] of [["user_ada", "@ada", false], ["user_grace", "@grace", true]] as const) {
+      const cookie = await site.signIn(user);
+      for (const path of PUBLIC) {
+        const response = await site.fetch(path, { headers: { cookie } });
+        const body = await response.text();
+        expect(response.status, path).toBe(200);
+        expect(response.headers.get("cache-control"), `${path} as ${handle}`).toBe("private, no-store");
+        expect(response.headers.get("cloudflare-cdn-cache-control") ?? "", path).not.toMatch(/public/);
+        // (Drawn: the name in the bar, no Sign in, the menu's Sign out with the session's token; Review only for staff.)
+        const top = bar(body);
+        expect(top, `${path} as ${handle}`).toContain(`>${handle}<`);
+        expect(top, path).not.toContain("hidden data-me");
+        expect(top, path).not.toContain(">Sign in<");
+        expect(body, path).toMatch(/<form method="post" action="\/auth\/web\/logout" data-signout>\s*<input type="hidden" name="csrf" value="[^"]+"/);
+        expect(top.includes('href="/admin/plugins"'), `${path}: Review for ${handle}`).toBe(staff);
+      }
+    }
+  });
+
+  test("a session cookie that's no one's: the signed-out bar, drawn, and still never kept", async () => {
+    const response = await site.fetch("/plugins", { headers: { cookie: "__Host-zeron_session=nobody-has-this" } });
+    const body = await response.text();
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(bar(body)).toContain(">Sign in<");
+    expect(bar(body)).not.toContain("data-me");
   });
 });
 

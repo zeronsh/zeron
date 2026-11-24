@@ -19,7 +19,9 @@
   // comet.zeron.sh stays attached for old links.)
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "comet-landing",
-  "main": "@astrojs/cloudflare/entrypoints/server",
+  // The front door (src/worker.ts): it routes each request past the cache or
+  // through it, by whether it carries a session cookie, to the site (Site).
+  "main": "./src/worker.ts",
   "compatibility_date": "2026-07-01",
   // Node's APIs where a dependency reaches for them (as the edge worker has).
   "compatibility_flags": ["nodejs_compat"],
@@ -42,6 +44,12 @@
   // The Worker cache in front of the Worker: public store pages say how
   // long they may be kept (Astro's route cache); everything else is no-store.
   "cache": { "enabled": true },
+  // ...but only for the site itself, never the front door: it must run for
+  // every request, to send a signed-in one past the cache.
+  "exports": {
+    "default": { "type": "worker", "cache": { "enabled": false } },
+    "Site": { "type": "worker", "cache": { "enabled": true } }
+  },
   // CPU per request, a backstop: a fault anywhere in the page's own code is
   // cut short by the platform rather than running to the default 30 s. Set
   // from what a page can cost (src/lib/store/markdown.ts): the honest worst,
@@ -63,6 +71,10 @@
       "services": [{ "binding": "EDGE", "service": "zeron-edge-staging" }],
       "vars": { "SITE_ORIGIN": "https://site-staging.zeron.sh" },
       "cache": { "enabled": true },
+      "exports": {
+        "default": { "type": "worker", "cache": { "enabled": false } },
+        "Site": { "type": "worker", "cache": { "enabled": true } }
+      },
       "limits": { "cpu_ms": 3000 }
     }
   }

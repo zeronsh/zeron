@@ -4,6 +4,7 @@
 // what lets the pages that show them be cached); the signed-in calls carry
 // the visitor's cookie, and writes their Origin and the session's CSRF token,
 // which the edge checks.
+import { hasSessionCookie } from "./session-cookie.ts";
 import type {
   AdminPlugin,
   AuditPage,
@@ -71,6 +72,8 @@ export class Edge {
   readonly #cookie: string | null;
   #who: Promise<{ state: "in"; session: WebSession } | { state: "out" } | { state: "down" }> | undefined;
   readonly #from: string | null;
+  /** The request carries a session cookie: whose, if anyone's, only the edge can say (who). */
+  readonly hasSession: boolean;
 
   /**
    * `request` is the visitor's: its origin is the host the edge is asked on
@@ -81,6 +84,7 @@ export class Edge {
     this.#origin = new URL(request.url).origin;
     this.#cookie = request.headers.get("cookie");
     this.#from = request.headers.get("origin");
+    this.hasSession = hasSessionCookie(request);
   }
 
   // ── Public ────────────────────────────────────────────────────────────
@@ -176,10 +180,11 @@ export class Edge {
    * Who the visitor is: signed in (the session), signed out (no cookie, or
    * one the edge says is no one's), or not known, the edge not answering. A
    * page of your own says each differently: an edge that's down is never
-   * "signed out". (Read once a request: the admin gate and the page ask the same thing.)
+   * "signed out". (Read once a request: the admin gate, the page and its bar
+   * ask the same thing. Without a session cookie, no one: the edge isn't asked.)
    */
   who(): Promise<{ state: "in"; session: WebSession } | { state: "out" } | { state: "down" }> {
-    this.#who ??= this.#cookie
+    this.#who ??= this.hasSession
       ? this.#json<WebSession>("/auth/web/session", { signedIn: true }).then((result) =>
           result.ok ? { state: "in" as const, session: result.data } : result.status === 401 || result.status === 403 || result.error === "signed_out" ? { state: "out" as const } : { state: "down" as const },
         )

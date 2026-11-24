@@ -17,6 +17,12 @@ interface Env {
 
 declare module "cloudflare:workers" {
   export const env: Env;
+  /** A named entrypoint of this Worker (src/worker.ts Site): its bindings and its request's context. */
+  export abstract class WorkerEntrypoint<E = Env> {
+    protected readonly env: E;
+    protected readonly ctx: unknown;
+    fetch?(request: Request): Promise<Response>;
+  }
 }
 
 declare namespace App {

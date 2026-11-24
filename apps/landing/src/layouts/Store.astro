@@ -6,8 +6,9 @@
 //
 // A public page is the same for everyone (kept by shared caches), so who
 // you are and Review are filled in by scripts/store.ts once the page is in;
-// `session` given (an account or staff page, never kept), they are drawn
-// here. On a phone the bar keeps the brand, the search and a menu.
+// asked with a session cookie, or `session` given (an account or staff page),
+// it is that person's page, never kept, and they are drawn here. On a phone
+// the bar keeps the brand, the search and a menu.
 import Head from "../components/site/Head.astro";
 import Icon from "../components/look/Icon.astro";
 import Icons from "../components/look/Icons.astro";
@@ -33,7 +34,13 @@ interface Props {
   /** The page's own class on <main> (a plugin's hue, say). */
   class?: string;
 }
-const { title, description, noindex = false, canonical, current = null, session, query = "", class: mainClass } = Astro.props;
+const { title, description, noindex = false, canonical, current = null, query = "", class: mainClass } = Astro.props;
+// A public page asked with a session cookie is drawn for that person (lib/store/http.ts publicPage: never
+// kept): the edge says who (once a request), so the bar is right from the first paint. A cookie that's no
+// one's draws the signed-out bar; an edge that doesn't answer leaves it to the script, as without a cookie.
+const given = Astro.props.session;
+const who = given === undefined && Astro.locals.edge.hasSession ? await Astro.locals.edge.who() : null;
+const session: WebSession | null | undefined = given !== undefined || who === null ? given : who.state === "in" ? who.session : who.state === "out" ? null : undefined;
 const isPublic = session === undefined;
 const staff = session?.roles.includes("admin") ?? false;
 const here = `${Astro.url.pathname}${Astro.url.search}`;
