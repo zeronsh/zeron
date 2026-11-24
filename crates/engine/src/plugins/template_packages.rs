@@ -31,15 +31,13 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as B64;
 use serde_json::{Value, json};
 
 use super::files::{MAX_BYTES, MAX_FILES};
 use super::install::{self, Found, Origin, Source};
 use super::listing;
 use super::package::{self, MAX_PACKAGE_BYTES};
-use super::signing::{self, FileHashes, SigningKey, TEMPLATE_PAYLOAD_PREFIX};
+use super::signing::{self, SigningKey, TEMPLATE_PAYLOAD_PREFIX};
 use super::status::Author;
 use super::templates::{self, MANIFEST, PREVIEW, ZERON, inside, valid_id};
 
@@ -55,20 +53,9 @@ const BUILTIN_THEME: &str = "builtin_theme";
 /// And of one of its official templates (apps/zgx `official::MARK`).
 const BUILTIN_TEMPLATE: &str = "builtin_template";
 
-/// What no template replaces: the app always loads Zeron's own (the app's
-/// `NEVER_TEMPLATED`, apps/zgx/src/plugins/live.rs).
-pub const PROTECTED: [&str; 4] = ["screens/plugins/", "screens/templates/", "account/", ".luaurc"];
-
-/// Whether `rel` is (or, on a case-insensitive filesystem, opens) one of
-/// [`PROTECTED`]: compared folded (R30), so `Screens/Plugins/…`,
-/// `ſcreens/plugins/…` or `account./x` is protected too.
-pub fn protected(rel: &str) -> bool {
-    let rel = zeron_plugin_guard::path::fold(rel);
-    PROTECTED.iter().any(|p| {
-        let p = zeron_plugin_guard::path::fold(p);
-        rel == p || rel.starts_with(&format!("{p}/"))
-    })
-}
+/// What no template replaces: the app always loads Zeron's own. One answer
+/// with the app's.
+pub use zeron_plugin_guard::template::{NEVER_TEMPLATED as PROTECTED, protected};
 
 const UNSIGNED: &str = "This template isn't signed, so Zeron can't tell who made it or whether it was changed. Ask its author to export it again from Zeron.";
 const TAMPERED: &str = "This template was changed after it was signed, so Zeron won't install it. Ask its author for a fresh copy.";
@@ -1047,6 +1034,10 @@ fn replace(dir: &Path, id: &str, folder: &Path, package: &Package, author: &Auth
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    use super::super::signing::FileHashes;
     use super::*;
 
     fn dir(name: &str) -> PathBuf {

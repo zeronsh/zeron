@@ -67,7 +67,7 @@ pub fn count_values(value: &Value) -> usize {
 /// A version's notes (its CHANGELOG.md section).
 pub const MAX_NOTES_BYTES: usize = 64 * 1024;
 /// Screenshots are PNG or JPEG pictures.
-pub const SCREENSHOT_TYPES: &[&str] = &["png", "jpg", "jpeg"];
+pub use zeron_plugin_guard::template::SCREENSHOT_TYPES;
 
 /// The store's categories: a fixed list (the edge serves the same one at
 /// `/store/v1/categories`), `(id, name)`.
@@ -983,8 +983,6 @@ fn worth_knowing(files: &BTreeMap<String, Vec<u8>>, version: &str, problems: &mu
 
 /// A template's preview, its card's cover: a PNG at most this big.
 pub const MAX_PREVIEW_BYTES: usize = 4 * 1024 * 1024;
-/// Where a template's screenshots are, in it.
-pub const TEMPLATE_SCREENSHOTS: &str = "screenshots";
 /// A template's listing files: carried and installed, never part of its
 /// interface (never loaded, never a change of its code). `screenshots/`:
 /// the PNG and JPEG files under it ([`template_listing_file`]).
@@ -1001,23 +999,11 @@ pub const TEMPLATE_REFUSED_MEMBERS: &[&str] =
 /// (`guides::template_readme`): a README holding it is that one, unchanged.
 pub const TEMPLATE_README_STUB: &str = "This README isn't part of the interface.";
 
-/// Whether `rel` is one of a template's listing files, by its path alone:
-/// its README, changelog and preview, and a PNG or JPEG under
-/// `screenshots/`. The one predicate that decides what's composed, what's
-/// its own code and what a change of its code is.
-pub fn template_listing_file(rel: &str) -> bool {
-    match rel.strip_prefix(TEMPLATE_SCREENSHOTS).and_then(|rest| rest.strip_prefix('/')) {
-        Some(rest) => rest.rsplit_once('.').is_some_and(|(_, ext)| SCREENSHOT_TYPES.contains(&ext.to_ascii_lowercase().as_str())),
-        None => [README, CHANGELOG, super::templates::PREVIEW].contains(&rel),
-    }
-}
-
-/// Whether `rel` is under `screenshots/` (as a disk folding names has it)
-/// and isn't one of a template's listing files: refused in the store, never
-/// installed from a package, never composed.
-pub fn template_stray_screenshot(rel: &str) -> bool {
-    !template_listing_file(rel) && zeron_plugin_guard::path::fold(rel).strip_prefix(TEMPLATE_SCREENSHOTS).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
-}
+/// Which of a template's files are its listing (carried and installed, never
+/// composed, no change of its code), which under `screenshots/` aren't
+/// (refused in the store, never installed from a package, never composed),
+/// and where its pictures are. One answer with the app's.
+pub use zeron_plugin_guard::template::{SCREENSHOTS as TEMPLATE_SCREENSHOTS, listing_file as template_listing_file, stray_screenshot as template_stray_screenshot};
 
 /// Whether PNG `bytes` are animated (an `acTL` chunk): a cover is a still.
 fn animated_png(bytes: &[u8]) -> bool {
