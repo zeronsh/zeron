@@ -37,6 +37,7 @@ use serde_json::{Value, json};
 
 use super::files::{MAX_BYTES, MAX_FILES};
 use super::install::{self, Found, Origin, Source};
+use super::listing;
 use super::package::{self, MAX_PACKAGE_BYTES};
 use super::signing::{self, FileHashes, SigningKey, TEMPLATE_PAYLOAD_PREFIX};
 use super::status::Author;
@@ -175,18 +176,35 @@ pub fn export(dir: &Path, id: &str, out: &Path, key: &SigningKey) -> Result<Valu
         return Err("There's something at that path that isn't a file.".into());
     }
 
+    let (manifest, files) = contents(&folder, id)?;
+    let bytes = pack(&manifest, &files, Some(key))?;
+    let file = out.file_name().and_then(|n| n.to_str()).ok_or("Say where to save it.")?;
+    templates::write_atomic(parent, file, &bytes)?;
+    Ok(json!({
+        "id": id,
+        "path": out.display().to_string(),
+        "files": files.len(),
+        "key": key.public(),
+    }))
+}
+
+/// What template folder `folder` is packed as, as `id`: its manifest
+/// (unsigned) and every file its package carries. Its interface (the files
+/// no template replaces left out), and its listing files: its preview, its
+/// `README.md` (never the one Zeron wrote, which names a folder of its
+/// author's), its `CHANGELOG.md` and its `screenshots/`.
+pub fn contents(folder: &Path, id: &str) -> Result<(Value, BTreeMap<String, Vec<u8>>), String> {
     let mut files = BTreeMap::new();
     let mut total = 0u64;
-    let mut rels = templates::own_files(&folder);
-    if templates::is_regular_file(&folder.join(PREVIEW)) {
-        rels.push(PREVIEW.into());
-    }
+    let mut rels = templates::own_files(folder);
+    rels.retain(|rel| !protected(rel));
+    rels.extend(templates::listing_files(folder));
     for rel in rels {
-        if protected(&rel) {
+        let path = inside(folder, &rel).ok_or_else(|| format!("{rel} isn't an app file"))?;
+        let bytes = templates::read_regular(&path).ok_or_else(|| format!("Couldn't read {rel}"))?;
+        if rel == listing::README && std::str::from_utf8(&bytes).is_ok_and(|t| t.contains(listing::TEMPLATE_README_STUB)) {
             continue;
         }
-        let path = inside(&folder, &rel).ok_or_else(|| format!("{rel} isn't an app file"))?;
-        let bytes = templates::read_regular(&path).ok_or_else(|| format!("Couldn't read {rel}"))?;
         total += bytes.len() as u64;
         files.insert(rel, bytes);
     }
@@ -196,40 +214,36 @@ pub fn export(dir: &Path, id: &str, out: &Path, key: &SigningKey) -> Result<Valu
             MAX_BYTES / 1024 / 1024
         ));
     }
-    let hashes: FileHashes = files
-        .iter()
-        .map(|(rel, bytes)| (rel.clone(), signing::sha256_hex(bytes)))
-        .collect();
-
     // Its description, fresh: never a signature or an author it carried
-    // (who made it is whoever's key signs it).
+    // (who made it is whoever's key signs it, or the store's publisher).
     let own: Value = templates::read_regular(&folder.join(MANIFEST))
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
     let field = |k: &str| own[k].as_str().unwrap_or("").trim().to_owned();
     let name = if field("name").is_empty() { id.to_owned() } else { field("name") };
-    let manifest = json!({
+    let mut manifest = json!({
         "id": id,
         "name": name,
         "description": field("description"),
         "version": field("version"),
         "zeron_version": field("zeron_version"),
     });
-    let signed = key.sign_manifest_for(TEMPLATE_PAYLOAD_PREFIX, &manifest, &hashes);
-    let package = json!({
-        "format": FORMAT,
-        "manifest": signed,
-        "files": files.iter().map(|(rel, bytes)| (rel.clone(), json!(B64.encode(bytes)))).collect::<serde_json::Map<_, _>>(),
-    });
-    let bytes = serde_json::to_vec(&package).map_err(|e| format!("Couldn't write it: {e}"))?;
-    let file = out.file_name().and_then(|n| n.to_str()).ok_or("Say where to save it.")?;
-    templates::write_atomic(parent, file, &bytes)?;
-    Ok(json!({
-        "id": id,
-        "path": out.display().to_string(),
-        "files": files.len(),
-        "key": key.public(),
-    }))
+    for key in listing::TEMPLATE_OPTIONAL {
+        if let Some(value) = own.get(*key).filter(|v| !v.is_null()) {
+            manifest[*key] = value.clone();
+        }
+    }
+    Ok((manifest, files))
+}
+
+/// `manifest` and `files` as a package's bytes: signed by `key` in the
+/// template domain, or unsigned (a deploy token's).
+pub fn pack(manifest: &Value, files: &BTreeMap<String, Vec<u8>>, key: Option<&SigningKey>) -> Result<Vec<u8>, String> {
+    let signed = match key {
+        Some(key) => key.sign_manifest_for(TEMPLATE_PAYLOAD_PREFIX, manifest, &package::hashes(files)),
+        None => manifest.clone(),
+    };
+    package::pack(FORMAT, &signed, files)
 }
 
 /// Where Zeron saves an export when it isn't told where:
@@ -330,7 +344,7 @@ fn parse_package(raw: Vec<u8>, signed: bool) -> Result<Package, String> {
     // names (or a file where another needs a folder of that name; its
     // manifest and `.imported.json` among them): refused before anything is
     // written, on every disk alike, as a plugin's are.
-    if let Some(clash) = super::listing::clashes(decoded.keys().map(String::as_str), &[MANIFEST, IMPORTED]).first() {
+    if let Some(clash) = listing::clashes(decoded.keys().map(String::as_str), &[MANIFEST, IMPORTED]).first() {
         return Err(format!("{CLASH}: {}.", clash.words()));
     }
     Ok(Package {
@@ -854,7 +868,7 @@ pub fn update(dir: &Path, id: &str, author_of: impl Fn(&str) -> Author) -> Resul
     }
     let mut source: Option<Source> = found.source.clone().or_else(|| serde_json::from_value(imported["source"].clone()).ok());
     // A new version whose code differs from what's installed (anything but
-    // its preview picture) is a new template to allow: it waits for you in
+    // its listing files) is a new template to allow: it waits for you in
     // Zeron's own consent window, as someone else's does, and replaces this
     // one only once you allow it there (`decide`).
     if changes_code(&folder, &package) {
@@ -893,7 +907,8 @@ pub fn update(dir: &Path, id: &str, author_of: impl Fn(&str) -> Author) -> Resul
 }
 
 /// Whether installing `package` over `folder` changes any of its code: a
-/// file of its own added, removed or changed, but its preview picture.
+/// file of its own added, removed or changed, but its listing files (its
+/// preview picture, README, changelog and screenshots).
 fn changes_code(folder: &Path, package: &Package) -> bool {
     let mut now: BTreeMap<String, String> = BTreeMap::new();
     for rel in templates::own_files(folder) {
@@ -903,7 +918,7 @@ fn changes_code(folder: &Path, package: &Package) -> bool {
     let next: BTreeMap<String, String> = package
         .files
         .iter()
-        .filter(|(rel, _)| rel.as_str() != PREVIEW)
+        .filter(|(rel, _)| !listing::template_listing_file(rel))
         .map(|(rel, bytes)| (rel.clone(), signing::sha256_hex(bytes)))
         .collect();
     now != next
@@ -978,6 +993,46 @@ mod tests {
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
     }
 
+    /// An export carries the store's files and fields (never the README
+    /// Zeron wrote, which names a folder of its author's); they're installed
+    /// beside the interface, are no part of it, and changing them alone
+    /// isn't a change of its code.
+    #[test]
+    fn plugins_template_packages_carry_the_listing_beside_the_interface() {
+        let d = with_template("listing");
+        let t = d.join("midnight");
+        write(&t.join("CHANGELOG.md"), "## 1.0.0\n- First.");
+        write(&t.join("screenshots/chat.png"), "png");
+        write(
+            &t.join(MANIFEST),
+            r#"{"id":"midnight","name":"Midnight","description":"Dark.","author":"you","version":"1.0.0","zeron_version":"0.9.0","keywords":["dark"],"screenshots":["screenshots/chat.png"],"license":"MIT","builtin_template":"zeron-v2","icon":"x.svg"}"#,
+        );
+        let (manifest, files) = contents(&t, "midnight").unwrap();
+        for rel in ["README.md", "CHANGELOG.md", "screenshots/chat.png", PREVIEW, "app.luau"] {
+            assert!(files.contains_key(rel), "{rel}");
+        }
+        assert_eq!((&manifest["keywords"][0], &manifest["license"]), (&json!("dark"), &json!("MIT")));
+        assert!(manifest.get("builtin_template").is_none() && manifest.get("icon").is_none() && manifest.get("author").is_none());
+        assert!(!templates::own_files(&t).iter().any(|rel| listing::template_listing_file(rel)));
+        write(&t.join("README.md"), &super::super::guides::template_readme("Midnight", Path::new("/home/me/.zeron/docs/templates.md")));
+        assert!(!contents(&t, "midnight").unwrap().1.contains_key("README.md"));
+
+        let alice = key();
+        let package = |files: &BTreeMap<String, Vec<u8>>| parse(pack(&manifest, files, Some(&alice)).unwrap()).unwrap();
+        // (As installed: without what no template replaces.)
+        for rel in ["screens/plugins", "account"] {
+            std::fs::remove_dir_all(t.join(rel)).unwrap();
+        }
+        std::fs::remove_file(t.join(".luaurc")).unwrap();
+        let mut same_code = files.clone();
+        same_code.insert("CHANGELOG.md".into(), b"## 1.1.0\n- More.".to_vec());
+        same_code.insert("screenshots/two.png".into(), b"png".to_vec());
+        assert!(!changes_code(&t, &package(&same_code)), "only its listing changed");
+        let mut code = files.clone();
+        code.insert("app.luau".into(), b"-- other".to_vec());
+        assert!(changes_code(&t, &package(&code)));
+    }
+
     /// A package the store serves under a record naming no signer (a deploy
     /// token's): taken unsigned, by its contents; a signed one there is
     /// refused, and unsigned is refused anywhere else. Its content hash
@@ -1018,14 +1073,14 @@ mod tests {
         let out = d.parent().unwrap().join("midnight.zeron-template");
         let alice = key();
         let made = export(&d, "midnight", &out, &alice).unwrap();
-        assert_eq!(made["files"], 4);
+        assert_eq!(made["files"], 5);
         assert_eq!(made["key"], alice.public());
-        // What it carries: the app files and its preview; never the
-        // protected ones, its README, its base or an author.
+        // What it carries: the app files, its preview and its README; never
+        // the protected ones, its base or an author.
         let package = package_json(&out);
         let mut names: Vec<&String> = package["files"].as_object().unwrap().keys().collect();
         names.sort();
-        assert_eq!(names, ["app.luau", "ds/tokens.luau", PREVIEW, "screens/shell/sidebar.luau"]);
+        assert_eq!(names, ["README.md", "app.luau", "ds/tokens.luau", PREVIEW, "screens/shell/sidebar.luau"]);
         assert!(package["manifest"].get("author").is_none());
         assert_eq!(package["manifest"]["name"], "Midnight");
 

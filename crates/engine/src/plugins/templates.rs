@@ -227,9 +227,19 @@ fn zeron_files(zeron: &Path) -> Vec<String> {
     app_files(zeron, &[MANIFEST, HASHES, CATALOG])
 }
 
-/// A template's own app files.
+/// A template's own app files: none of its listing files
+/// (`listing::TEMPLATE_LISTING_FILES`), which are never part of its app.
 pub(super) fn own_files(template: &Path) -> Vec<String> {
-    app_files(template, &[MANIFEST, BASE, PREVIEW, super::guides::README])
+    let mut files = app_files(template, &[MANIFEST, BASE]);
+    files.retain(|rel| !super::listing::template_listing_file(rel));
+    files
+}
+
+/// A template's listing files that are there.
+pub(super) fn listing_files(template: &Path) -> Vec<String> {
+    let mut files = app_files(template, &[MANIFEST, BASE]);
+    files.retain(|rel| super::listing::template_listing_file(rel));
+    files
 }
 
 /// The active template's id, as `.active` says: `zeron` when it's absent,
