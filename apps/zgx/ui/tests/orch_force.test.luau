@@ -731,13 +731,16 @@ test("force graph: a pair with a message in flight is one line, its arc, plain a
 	-- Lit from one end: the same arc, restyled.
 	local pair = e.arcs[1]
 	local one = string.split(pair, "|")[1]
+	-- (The pointer on it: lit, and its card's anchor.)
 	app:set_state("control_map_force_hover", one)
+	app:set_state("control_map_force_lit", one)
 	app:frames(3)
 	app:command("map_force_edges")
 	app:frames(1)
 	e = app:state("force_edges")
 	expect(`{pair} lit {e.lit[pair]}`).to_be(`{pair} lit curve`)
 	app:set_state("control_map_force_hover", nil)
+	app:set_state("control_map_force_lit", nil)
 	app:frames(3)
 end)
 

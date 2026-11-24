@@ -1,4 +1,4 @@
--- The Control room as Board, Map, Chat and Notes (screens/control/page),
+-- The Control room as Map, Board, Notes and Chat (screens/control/page),
 -- on ui/control_fleet_fixture.luau (a fleet as big as a person's, or a
 -- small one): the Map at the page's size with two views, Needs you floating
 -- on every tab but the Board, Q&A and the Scratchpad under Notes, no
@@ -33,10 +33,10 @@ local function apart(app: any, a: string, b: string): boolean
 	return ax + aw <= bx or bx + bw <= ax or ay + ah <= by or by + bh <= ay
 end
 
-test("control room tabs: the page opens on the Board; no widget dashboard anywhere", function()
+test("control room tabs: the page opens on the Map; no widget dashboard anywhere", function()
 	local app = open("fleet_dense")
-	expect(app:state("control_tab")).to_be("board")
-	for _, t in { "board", "map", "chat", "notes" } do
+	expect(app:state("control_tab")).to_be("map")
+	for _, t in { "map", "board", "notes", "chat" } do
 		tab(app, t)
 		expect(app:has("#control-columns")).to_be(false)
 		expect(app:has(".control-widget")).to_be(false)
@@ -98,8 +98,11 @@ test("control room tabs: the Map's menu offers the Graph and the Machines, nothi
 end)
 
 test("control room tabs: a view kept from before that the Map no longer offers opens on the Graph", function()
+	-- (Kept on this device, then the page opened again.)
+	local kept = mount(FLEET)
+	kept:set_state("control_map", { variant = "topology", window = 15 })
+	kept:frames(5)
 	local app = mount(FLEET)
-	app:set_state("control_map", { variant = "topology", window = 15 })
 	app:resize(1600, 1000)
 	app:frames(20)
 	app:command("fleet_dense")
@@ -110,6 +113,8 @@ end)
 
 test("control room tabs: Needs you floats on the Map, Chat and Notes, not on the Board", function()
 	local app = open("fleet_dense")
+	tab(app, "board")
+	app:frames(20)
 	expect(app:has("#control-needs-float")).to_be(false)
 	for _, t in { "map", "chat", "notes" } do
 		tab(app, t)
@@ -187,4 +192,117 @@ test("control room tabs: the Brain dump alone still invites; a first orchestrato
 	app:set_state("orchestration", n)
 	app:frames(40)
 	expect(app:has("#control-invite")).to_be(true)
+end)
+
+-- The Map's own room (screens/control/page's MapTab): down to Capture's
+-- bar, bare or opened out, the Graph fitted to it.
+local function force_stats(app: any): any
+	return app:state("control_map_force_stats") or {}
+end
+local function settle_map(app: any)
+	for _ = 1, 600 do
+		if (force_stats(app).settled or 0) >= 1 then
+			break
+		end
+		app:frames(1)
+	end
+	app:frames(30)
+end
+-- The fitted web inside the field, and over a good share of it.
+local function web_fills(app: any): (boolean, number)
+	local b = force_stats(app).fit_box
+	if type(b) ~= "table" then
+		return false, 0
+	end
+	local x0, y0, x1, y1, w, h = b[1], b[2], b[3], b[4], b[5], b[6]
+	local inside = x0 >= -1 and y0 >= -1 and x1 <= w + 1 and y1 <= h + 1
+	return inside, math.max((x1 - x0) / w, (y1 - y0) / h)
+end
+
+test("control room tabs: the Map reaches Capture's bar at rest at the screenshots' sizes; the bar grown lies over it", function()
+	for _, size in { { 2530, 1378 }, { 2046, 1308 } } do
+		local app = mount("orchestrator_fixture.luau")
+		app:resize(size[1], size[2])
+		app:frames(20)
+		app:command("orch.control")
+		app:frames(40)
+		expect(app:state("control_tab")).to_be("map")
+		app:frames(90)
+		settle_map(app)
+		local mx, my, mw, mh = box(app, "#control-map")
+		local _, fy, _, fh = box(app, "#orch-force-field")
+		local _, cy = box(app, "#control-float")
+		-- (Clear of the bar at rest, by its clearance and no more; or of
+		-- Needs you floating, where it reaches over the Map.)
+		local limit = cy
+		if app:has("#control-needs-float") then
+			local nx, ny = box(app, "#control-needs-float")
+			if nx < mx + mw then
+				limit = math.min(limit, ny)
+			end
+		end
+		local gap = limit - (my + mh)
+		expect(gap >= 0 and gap <= 24).to_be(true)
+		-- (The field fills the block: its head and padding the rest.)
+		expect(fy >= my and fy + fh <= my + mh and mh - fh <= 80).to_be(true)
+		local inside, share = web_fills(app)
+		expect(inside).to_be(true)
+		expect(share > 0.6).to_be(true)
+		-- Grown by its lines: over the Map, the Map's height the same.
+		local rest = app:state("control_capture_float_h")
+		app:type("#control-float >> role:textbox", "one\ntwo\nthree\nfour\nfive\nsix")
+		app:frames(90)
+		settle_map(app)
+		expect(app:state("control_capture_float_h") > rest + 40).to_be(true)
+		local _, _, _, mh2 = box(app, "#control-map")
+		expect(math.abs(mh2 - mh) <= 1).to_be(true)
+		inside = web_fills(app)
+		expect(inside).to_be(true)
+		expect(app:error()).to_be_nil()
+	end
+end)
+
+test("control room tabs: in a short window the Graph keeps its least height, its web fitted in it", function()
+	local app = mount("orchestrator_fixture.luau")
+	app:resize(2046, 560)
+	app:frames(20)
+	app:command("orch.control")
+	app:frames(40)
+	app:frames(90)
+	settle_map(app)
+	local _, fy, _, fh = box(app, "#orch-force-field")
+	expect(fh >= 240).to_be(true)
+	-- (Nothing clips it short: the block stands whole.)
+	local _, my, _, mh = box(app, "#control-map")
+	expect(fy + fh <= my + mh).to_be(true)
+	local inside, share = web_fills(app)
+	expect(inside).to_be(true)
+	expect(share > 0.6).to_be(true)
+end)
+
+test("control room tabs: the Graph is fitted again as the window's size changes, a view kept from before set aside", function()
+	local app = mount("orchestrator_fixture.luau")
+	-- (A view kept from a bigger window, far off this one's field.)
+	app:set_state("control_map_force_views", { orchestrator = { x = 4000, y = 4000, zoom = 1.4 } })
+	app:resize(2530, 1378)
+	app:frames(20)
+	app:command("orch.control")
+	app:frames(40)
+	settle_map(app)
+	local inside = web_fills(app)
+	expect(inside).to_be(true)
+	local fits = force_stats(app).resize_fits or 0
+	for _, size in { { 2046, 1308 }, { 1500, 800 }, { 2530, 1378 } } do
+		app:resize(size[1], size[2])
+		app:frames(90)
+		settle_map(app)
+		local _, _, fw, fh = box(app, "#orch-force-field")
+		local b = force_stats(app).fit_box
+		-- (Fitted to the field as it is now.)
+		expect(math.abs(b[5] - fw) <= 1 and math.abs(b[6] - fh) <= 1).to_be(true)
+		local ok, share = web_fills(app)
+		expect(ok).to_be(true)
+		expect(share > 0.6).to_be(true)
+	end
+	expect((force_stats(app).resize_fits or 0) > fits).to_be(true)
 end)

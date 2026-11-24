@@ -763,6 +763,89 @@ end
 ui.command { id = "map_force_drag_hub_hold", title = "Map: press on the force graph's hub", run = function()
 	require("@ds/orch_force").drag_by("orc-eng", 0, 0)
 end }
+-- The pointer on the force graph by hand, at field points: `force_ptr` is
+-- { op = "press" | "move" | "release" | "leave", x, y } or { op = ..., id,
+-- dx, dy } (at that node's middle, moved by dx, dy); `force_at` gets a
+-- node's screen place { x, y, r } (`force_at_id`).
+local force_ptr = ui.state("force_ptr", {} :: any)
+local force_at = ui.state("force_at", {} :: any)
+local force_at_id = ui.state("force_at_id", "")
+ui.command { id = "map_force_pointer", title = "Map: the pointer on the force graph", run = function()
+	local f = require("@ds/orch_force")
+	local p = force_ptr:peek() or {}
+	local x, y = p.x, p.y
+	if p.id then
+		local nx, ny = f.pointer.at(p.id)
+		x, y = nx + (p.dx or 0), ny + (p.dy or 0)
+	end
+	if p.op == "leave" then
+		f.pointer.leave()
+	else
+		(f.pointer :: any)[p.op](x, y)
+	end
+end }
+ui.command { id = "map_force_at", title = "Map: where a node of the force graph is", run = function()
+	local x, y, r = require("@ds/orch_force").pointer.at(force_at_id:peek())
+	force_at:set({ x = x, y = y, r = r })
+end }
+-- One node dropped onto another (`force_drag_onto` = { id, onto, dx, dy }:
+-- by that much off its middle), pinned there as a drag's drop is.
+local force_drag_onto = ui.state("force_drag_onto", {} :: any)
+ui.command { id = "map_force_drag_onto", title = "Map: drop a node onto another", run = function()
+	local f = require("@ds/orch_force")
+	local d = force_drag_onto:peek() or {}
+	local cur = f.current
+	local a, b = cur.model.index[d.id], cur.model.index[d.onto]
+	if not a or not b then
+		return
+	end
+	f.drag_by(d.id, cur.sim.x[b] - cur.sim.x[a] + (d.dx or 0), cur.sim.y[b] - cur.sim.y[a] + (d.dy or 0))
+	f.drag_end(d.id)
+end }
+-- The person's mess, for Unpin all's pictures: the UI hub dropped onto the
+-- VPN hub, four of the UI crew dragged off past the web's left; then the
+-- pivot away and back, the web laid out again from the places kept (each
+-- its slot, as after a relaunch).
+ui.command { id = "map_force_scramble", title = "Map: drop hubs together, crew to the edge", run = function()
+	local f = require("@ds/orch_force")
+	local cur = f.current
+	local x, y = cur.sim.x, cur.sim.y
+	local ix = cur.model.index
+	local a, b = ix["orc-ui"], ix["orc-vpn"]
+	if a and b then
+		f.drag_by("orc-ui", x[b] - x[a] + 6, y[b] - y[a] + 4)
+		f.drag_end("orc-ui")
+	end
+	local x0 = math.huge
+	for i = 1, cur.sim.n do
+		x0 = math.min(x0, x[i])
+	end
+	local k = 0
+	for i = 1, cur.sim.n do
+		if k < 4 and a and cur.sim.parent[i] == a then
+			k += 1
+			local id = cur.sim.ids[i]
+			f.drag_by(id, x0 - 120 - x[i], (k - 2) * 50)
+			f.drag_end(id)
+		end
+	end
+end }
+-- Every node on screen now, into `force_screen`: { w, h, settled,
+-- nodes = { { id, kind, x, y, r } } } (tests read it, frame by frame).
+local force_screen = ui.state("force_screen", {} :: any)
+ui.command { id = "map_force_screen", title = "Map: read the force graph on screen", run = function()
+	local f = require("@ds/orch_force")
+	local cur = f.current
+	local out = { nodes = {} }
+	if cur then
+		for i = 1, cur.sim.n do
+			local id = cur.sim.ids[i]
+			local x, y, r = f.pointer.at(id)
+			table.insert(out.nodes, { id = id, kind = cur.model.nodes[i].kind, x = x, y = y, r = r })
+		end
+	end
+	force_screen:set(out)
+end }
 -- Every node's place now, into `force_places` (tests read it).
 local force_places = ui.state("force_places", {} :: any)
 ui.command { id = "map_force_read", title = "Map: read the force graph's places", run = function()

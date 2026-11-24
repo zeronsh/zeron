@@ -1,5 +1,6 @@
--- The Control room's tabs (screens/control/page): Board, Map, Chat and
--- Notes, the one shown kept on this device (`control_tab`), ⌘⌥1–4. Only the
+-- The Control room's tabs (screens/control/page): Map, Board, Notes and
+-- Chat, the Map by default, the one shown kept on this device
+-- (`control_tab`), ⌘⌥1–4. Only the
 -- tab shown is built at first, the rest in the background; Capture is a bar
 -- at the foot of every tab, one draft; Chat reads the Brain dump's
 -- transcript through the chat view's own (screens/chat/lane_tab,
@@ -68,33 +69,39 @@ local function settled(app: any)
 	app:frames(10)
 end
 
-test("control tabs: the Board first; a click on each shows it, kept as control_tab", function()
+test("control tabs: the Map first and by default; a click on each shows it, kept as control_tab", function()
 	local app = open()
-	expect(app:state("control_tab")).to_be("board")
-	for _, label in { "Board", "Map", "Chat", "Notes" } do
+	expect(app:state("control_tab")).to_be("map")
+	-- (In this order, left to right.)
+	local xs = {}
+	for i, label in { "Map", "Board", "Notes", "Chat" } do
 		expect(app:has(`#control-tabs >> "{label}"`)).to_be(true)
+		xs[i] = tonumber(string.match(first_line(app, `#control-tabs >> "{label}"`), " (%-?[%d%.]+),")) or 0
+	end
+	for i = 2, #xs do
+		expect(xs[i] > xs[i - 1]).to_be(true)
 	end
 	expect(app:has('#control-tabs >> "Overview"')).to_be(false)
-	click_tab(app, "Map")
-	expect(app:state("control_tab")).to_be("map")
+	click_tab(app, "Board")
+	expect(app:state("control_tab")).to_be("board")
 	click_tab(app, "Chat")
 	expect(app:state("control_tab")).to_be("chat")
 	click_tab(app, "Notes")
 	expect(app:state("control_tab")).to_be("notes")
-	click_tab(app, "Board")
-	expect(app:state("control_tab")).to_be("board")
+	click_tab(app, "Map")
+	expect(app:state("control_tab")).to_be("map")
 	expect(app:error()).to_be_nil()
 end)
 
-test("control tabs: Overview kept from before opens on the Board", function()
+test("control tabs: Overview kept from before opens on the Map", function()
 	local shell = open("control_fixture.luau")
 	shell:set_state("control_tab", "overview")
 	shell:command("fixture.leave")
 	shell:frames(30)
 	shell:command("fixture.control")
 	shell:frames(40)
-	expect(shell:state("control_tab")).to_be("board")
-	expect(shown(shell, "board")).to_be(true)
+	expect(shell:state("control_tab")).to_be("map")
+	expect(shown(shell, "map")).to_be(true)
 end)
 
 test("control tabs: the tab kept is the one the page opens on", function()
@@ -118,15 +125,16 @@ end)
 
 test("control tabs: the tab shown builds first; the others in the background once the page settles, hidden", function()
 	local app = open()
-	-- At first: the Board alone.
-	expect(shown(app, "board")).to_be(true)
-	expect(built(app, "map")).to_be(false)
+	-- At first: the Map alone.
+	expect(shown(app, "map")).to_be(true)
+	expect(built(app, "board")).to_be(false)
 	expect(built(app, "chat")).to_be(false)
 	expect(built(app, "notes")).to_be(false)
 	settled(app)
 	-- Then the others, built and hidden: their content there, not shown.
-	expect(shown(app, "board")).to_be(true)
-	for _, t in { "map", "chat", "notes" } do
+	expect(shown(app, "map")).to_be(true)
+	expect(app:has("#control-tab-board >> #control-board-tab")).to_be(true)
+	for _, t in { "board", "chat", "notes" } do
 		expect(built(app, t) and not shown(app, t)).to_be(true)
 	end
 	expect(app:has("#control-tab-map >> #control-map")).to_be(true)
@@ -175,7 +183,7 @@ test("control tabs: a hidden tab does no work while what it shows changes; shown
 	local counts = perf(app)
 	-- Nothing of the Map's, Notes' or the Board's read again, built or drawn.
 	for _, name in { "hold.overview", "hold.board", "board.word", "board.status", "progress.row", "progress.clocks", "graph.layout", "graph.draw", "hold.progress" } do
-		expect(counts[name] or 0).to_be(0)
+		expect(`{name} {counts[name] or 0}`).to_be(`{name} 0`)
 	end
 	-- Shown: it reads what changed.
 	app:set_state("control_tab", "board")
@@ -227,9 +235,9 @@ test("control tabs: a tab opened before its background build is done builds at o
 	expect(app:count("#control-tab-notes >> .stage-idle")).to_be(0)
 end)
 
-test("control tabs: ⌘⌥1–4 show the Board, the Map, Chat and Notes", function()
+test("control tabs: ⌘⌥1–4 show the Map, the Board, Notes and Chat", function()
 	local app = open("control_fixture.luau")
-	for _, t in { "map", "chat", "notes", "board" } do
+	for _, t in { "board", "notes", "chat", "map" } do
 		app:command(`control.tab_{t}`)
 		app:frames(30)
 		expect(app:state("control_tab")).to_be(t)

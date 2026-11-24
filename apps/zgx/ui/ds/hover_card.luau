@@ -96,6 +96,9 @@ export type AnchoredProps = {
 	w_full: boolean?,
 	-- The pointer coming onto the card, or leaving it.
 	on_card_hover: ((inside: boolean) -> ())?,
+	-- The card's element as it's laid out on hover (its box, in the
+	-- window's points: `x`, `y`, `width`, `height`).
+	on_card_box: ((el: any) -> ())?,
 }
 
 -- The card pinned now, by its anchor's key ("" for none); tests read it as
@@ -152,6 +155,11 @@ M.Anchored = ui.component(function(props: AnchoredProps): Node
 	local hover = ui.column {
 		class = "hover-card-hover",
 		on_hover = props.on_card_hover,
+		on_resize = if props.on_card_box
+			then function(_size: any, el: any)
+				(props.on_card_box :: any)(el)
+			end
+			else nil,
 		ui.show(function(): boolean
 			return pinned_now:get() == "" and not dismissed:get()
 		end, props.card({ bare = false, close = close })),

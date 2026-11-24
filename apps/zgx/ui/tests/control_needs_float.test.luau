@@ -34,8 +34,11 @@ end
 
 test("needs float: on Map, Chat and Notes while something waits, never on the Board", function()
 	local app = open()
-	-- (The Board, the page's first tab.)
-	expect(app:state("control_tab")).to_be("board")
+	-- (The Map, the page's first tab.)
+	expect(app:state("control_tab")).to_be("map")
+	expect(app:has(FLOAT)).to_be(true)
+	tab(app, "board")
+	app:frames(20)
 	expect(app:has(FLOAT)).to_be(false)
 	tab(app, "map")
 	expect(app:has(FLOAT)).to_be(true)

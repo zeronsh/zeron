@@ -106,13 +106,17 @@ M.DEFAULT = { variant = "force", window = 15 } :: View
 -- more (a Timeline or Topology of hundreds of lanes, the Machines of a big
 -- fleet) scrolls inside it; the Graphs size themselves within it.
 M.MIN_H, M.MAX_H, M.FALLBACK_H = 360, 900, 640
+-- The least the Graph's field stands where a page gives it its room: in a
+-- shorter one it stands this tall all the same, its foot under what floats
+-- there, never squeezed to nothing.
+M.MIN_FIELD_H = Force.MIN_FIELD_H
 -- The height a page gives the Map to fill (the Control room's Map tab):
 -- when set, the Map stands that tall, not a share of the window.
 M.fill_h = ui.state("orch_map_fill_h", 0)
 function M.max_h(): number
 	local fill = M.fill_h:get()
 	if fill > 0 then
-		return math.max(M.MIN_H, fill)
+		return math.max(M.MIN_FIELD_H, fill)
 	end
 	local window = (ui :: any).window
 	local state = if type(window) == "table" or type(window) == "userdata" then window.size else nil
