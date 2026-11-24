@@ -14,6 +14,25 @@ export type Kind = {
 	state: any,
 	-- The settings of one that's on, if its kind has any.
 	settings: any?,
+	-- Its own sentences, by the plugins' (none: those).
+	words: { [string]: string }?,
+	-- Shown as pictures in a grid, its cover first; and said over its list.
+	cards: boolean?,
+	fact: string?,
+	-- Whether the store sorts it into categories.
+	categories: boolean?,
 }
 
-return {}
+-- A sentence as this kind says it: `ui.t`'s key, the plugins' or its own.
+export type Say = (key: string, args: { [string]: any }?) -> Message
+
+local M = {}
+
+function M.say(kind: Kind): Say
+	local words = kind.words or {}
+	return function(key: string, args: { [string]: any }?): Message
+		return ui.t(words[key] or key, args)
+	end
+end
+
+return M

@@ -479,7 +479,16 @@ export type FeatureProps = {
 	lead: Node?,
 	badge: Node?,
 	on_click: () -> (),
+	-- Its picture, over its words, the card's width (`M.COVER`: 16:10, as a
+	-- screenshot's).
+	cover: Node?,
 }
+M.COVER = 1.6
+
+-- (A Feature's picture, or its place: edge to edge, the card clips it.)
+local function cover_box(node: Node): Node
+	return ui.div { class = "settings-feature-cover", w_full = true, aspect = M.COVER, overflow = "hidden", bg = "$hover", node }
+end
 
 -- (The card round a Feature and its skeleton.)
 local function feature_card(props: { [any]: any }): Node
@@ -502,54 +511,58 @@ function M.Feature(props: FeatureProps): Node
 			focusable = true,
 			cursor = "pointer",
 			w_full = true,
-			p = "$space.4",
-			gap = "$space.3",
 			rounded = ui.raw(control.nest("$radius.xl", 1), "the card's corner less its edge"),
 			hover = { bg = "$hover" },
 			active = { bg = "$pressed" },
 			focus = { outline = "$zeron.focus.width", outline_color = "$zeron.focus.ring", outline_offset = -2 },
 			on_click = props.on_click,
-			ui.row {
+			if props.cover then cover_box(props.cover) else nil,
+			ui.column {
 				w_full = true,
+				p = "$space.4",
 				gap = "$space.3",
-				items = "center",
-				props.lead,
-				ui.column {
-					grow = 1,
-					min_w = 0,
-					gap = "$zeron.space.hair",
-					FadeText {
-						props.label,
+				ui.row {
+					w_full = true,
+					gap = "$space.3",
+					items = "center",
+					props.lead,
+					ui.column {
+						grow = 1,
 						min_w = 0,
-						text_size = "$font.size.md",
-						line_height = "$font.line.md",
-						weight = "$font.weight.medium",
-						color = "$text.primary",
-					},
-					-- (Who made it, and its badge after: the name's line its
-					-- own at every card width. The small badge is the line's
-					-- height, so the card's stays one.)
-					ui.row {
-						gap = "$space.2",
-						items = "center",
-						min_w = 0,
-						FadeText { props.byline or "", shrink = 1, min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" },
-						if props.badge then ui.div { shrink = 0, props.badge } else nil,
+						gap = "$zeron.space.hair",
+						FadeText {
+							props.label,
+							min_w = 0,
+							text_size = "$font.size.md",
+							line_height = "$font.line.md",
+							weight = "$font.weight.medium",
+							color = "$text.primary",
+						},
+						-- (Who made it, and its badge after: the name's line its
+						-- own at every card width. The small badge is the line's
+						-- height, so the card's stays one.)
+						ui.row {
+							gap = "$space.2",
+							items = "center",
+							min_w = 0,
+							FadeText { props.byline or "", shrink = 1, min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" },
+							if props.badge then ui.div { shrink = 0, props.badge } else nil,
+						},
 					},
 				},
-			},
-			-- (Two lines held whatever it says: one height for every card.)
-			ui.text {
-				props.description or "",
-				w_full = true,
-				h = ui.raw(2 * line_sm, "two lines of the small type"),
-				wrap = true,
-				lines = 2,
-				-- (Cut at its second line's end, said so: "…".)
-				truncate = true,
-				text_size = "$font.size.sm",
-				line_height = "$font.line.sm",
-				color = "$text.secondary",
+				-- (Two lines held whatever it says: one height for every card.)
+				ui.text {
+					props.description or "",
+					w_full = true,
+					h = ui.raw(2 * line_sm, "two lines of the small type"),
+					wrap = true,
+					lines = 2,
+					-- (Cut at its second line's end, said so: "…".)
+					truncate = true,
+					text_size = "$font.size.sm",
+					line_height = "$font.line.sm",
+					color = "$text.secondary",
+				},
 			},
 		},
 	}
@@ -559,7 +572,7 @@ end
 -- made it and two lines held in the skeleton's wash, in the very boxes the
 -- card has, so it is the card's height and nothing under it moves when the
 -- card comes. `still`: at rest, not breathing (it has waited long enough).
-function M.FeatureSkeleton(props: { still: boolean?, lead: number? }?): Node
+function M.FeatureSkeleton(props: { still: boolean?, lead: number?, cover: boolean? }?): Node
 	local still = props and props.still
 	local lead = (props and props.lead) or 32
 	local line_sm = (ui.theme.get("font.line.sm") :: number?) or 16
@@ -569,6 +582,7 @@ function M.FeatureSkeleton(props: { still: boolean?, lead: number? }?): Node
 	return feature_card {
 		class = "settings-feature-skeleton",
 		aria_hidden = true,
+		if props and props.cover then cover_box(skeleton.Bar { w = "100%", h = "100%", still = still }) else nil,
 		ui.column {
 			w_full = true,
 			p = "$space.4",
@@ -595,6 +609,37 @@ function M.FeatureSkeleton(props: { still: boolean?, lead: number? }?): Node
 		},
 	}
 end
+
+-- Cards in a grid, as many across as keep `min_w` in the column as it's laid
+-- out (never fewer than one), sharing it end to end, the rest on the next
+-- rows. `build(w)` makes them, each `w()` wide. (A `Feature` each, all of one
+-- height: two lines held whatever it says.)
+export type CardsProps = { id: string?, min_w: number?, build: (w: () -> number) -> any }
+function M.cards_width(column: number, min_w: number, gap: number): number
+	if column <= 0 then
+		return 0
+	end
+	local across = math.max(1, math.floor((column + gap) / (min_w + gap)))
+	-- (Rounded down to a hundredth, so a row of them is never over the column.)
+	return math.floor((column - (across - 1) * gap) / across * 100) / 100
+end
+M.Cards = ui.component(function(props: CardsProps): Node
+	local gap = (ui.theme.get("space.3") :: number?) or 12
+	local column = ui.use_state((ui.theme.get("zeron.settings.measure") :: number?) or 640)
+	local function w(): number
+		return M.cards_width(column:get(), props.min_w or M.FEATURE_MIN, gap)
+	end
+	return ui.div {
+		id = props.id,
+		w_full = true,
+		on_resize = function(size: { w: number, h: number })
+			if math.abs(size.w - column:peek()) >= 0.5 then
+				column:set(size.w)
+			end
+		end,
+		props.build(w),
+	}
+end)
 
 
 -- A row's inline link (a sentence's own Publish…, a plugin's Update): its
@@ -1657,7 +1702,7 @@ export type CatalogCardProps = {
 	-- At the search's end, on its line: what narrows it besides its words
 	-- (an active keyword's token).
 	search_trail: Node?,
-	body: Node,
+	body: Node?,
 }
 
 function M.CatalogCard(props: CatalogCardProps): Node
@@ -1694,7 +1739,8 @@ function M.CatalogCard(props: CatalogCardProps): Node
 		border_color = "$zeron.settings.edge",
 		overflow = "hidden",
 		search,
-		M.Rule(),
+		-- (Nothing under it: a search of what stands under the card.)
+		if props.body then M.Rule() else nil,
 		props.body,
 	}
 end

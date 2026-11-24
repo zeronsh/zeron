@@ -10,6 +10,7 @@ local kind: kinds.Kind = {
 	nav = require("@app/screens/plugins/nav"),
 	state = require("@app/screens/plugins/state"),
 	settings = require("@app/screens/plugins/settings"),
+	categories = true,
 }
 
 return kind

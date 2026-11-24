@@ -32,12 +32,15 @@ local ds = require("@ds")
 local Menu = require("@ds/menu")
 local control = require("@ds/control")
 local state = require("@app/screens/templates/state")
+local nav = require("@app/screens/templates/nav")
+local browse = require("@app/screens/templates/browse")
 local words = require("@app/screens/plugins/words")
 local ThemeSwatch = require("@ds/theme_swatch")
 
 local M = {}
 
-local tab = ui.state("templates_tab", "installed")
+-- (Kept where a link reaches it too: screens/templates/nav.)
+local tab = nav.tab
 local query = ui.state("templates_query", "")
 local deleting = ui.state("templates_deleting", nil :: string?)
 local deleting_open = ui.state("templates_deleting_open", false)
@@ -612,7 +615,14 @@ function M.View(): Node
 			options = {
 				{ value = "installed", label = ui.t("templates.page.installed"), count = count("installed") },
 				{ value = "yours", label = ui.t("templates.page.yours"), count = count("yours") },
+				{ value = "browse", label = ui.t("plugins.store.browse") },
 			},
+		},
+		-- The store's, searched on its own terms (screens/templates/browse).
+		views = {
+			browse = function(): Node
+				return browse.View {}
+			end,
 		},
 		-- (No New for now: templates of yours arrive by an agent or as a
 		-- copy of Zeron's. Install brings in someone else's, as Plugins'.)

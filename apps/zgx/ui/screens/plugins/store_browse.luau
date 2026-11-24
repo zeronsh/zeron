@@ -27,6 +27,7 @@ local C = {}
 
 function C.make(kind: kinds.Kind)
 	local store, nav, state = kind.store, kind.nav, kind.state
+	local say = kinds.say(kind)
 	local M = {}
 
 	-- What's asked: the words searched, a category, a keyword, a publisher
@@ -162,7 +163,7 @@ function C.make(kind: kinds.Kind)
 	local categories = ui.state(kind.keys .. "_categories", {} :: { { id: string, name: string, count: number? } })
 	local asked_categories = false
 	local function load_categories()
-		if asked_categories then
+		if asked_categories or not kind.categories then
 			return
 		end
 		asked_categories = true
@@ -217,7 +218,8 @@ function C.make(kind: kinds.Kind)
 		for _, p in state.shown:get() do
 			local source: any = p.source
 			if type(source) == "table" and source.kind == "store" then
-				out[p.id] = p
+				-- (By the store's id: a template's folder may be named apart.)
+				out[source.id or p.id] = p
 			end
 		end
 		return out
@@ -363,6 +365,33 @@ function C.make(kind: kinds.Kind)
 		}
 	end
 
+	-- Its picture, by the store's path for it: its wash while it comes, and
+	-- where it has none.
+	function M.cover(card: () -> client.Card): Node
+		return ui.presence(function(): string
+			local c = card()
+			local path = (c :: any).cover
+			local src = if type(path) == "string" and path ~= "" then store.picture_src(c.id, c.version, path) else false
+			return if type(src) == "string" then src else ""
+		end, function(src: string): Node
+			if src == "" then
+				return ui.div { w_full = true, h_full = true }
+			end
+			return ui.image { src = src, w_full = true, h_full = true, fit = "cover", aria_hidden = true }
+		end, { w_full = true, h_full = true })
+	end
+
+	-- Whether it's here: "Installed", or that a newer version waits.
+	local function here_badge(card: () -> client.Card): Node
+		return ui.switch(function(): string
+			return M.standing(card())
+		end, {
+			[""] = ui.div {},
+			installed = ds.Badge { ui.t("plugins.store.installed"), tone = "neutral", size = "sm" },
+			update = ds.Badge { ui.t("plugins.store.update"), tone = "accent", size = "sm" },
+		})
+	end
+
 	-- Its badges beside its name on its page: the store's mark first, then
 	-- its account's, each its name, quiet (wrapping with who made it).
 	function M.badges(card: () -> client.Card): Node
@@ -404,6 +433,9 @@ function C.make(kind: kinds.Kind)
 			end,
 		}
 	end
+
+	-- The least a card of a picture is across.
+	local CARD_MIN = 240
 
 	-- A row's height: a truncated row with a byline over its line.
 	local function row_h(_c: client.Card): number
@@ -541,7 +573,8 @@ function C.make(kind: kinds.Kind)
 	-- The controls' width side by side, from what they are (never from where
 	-- they're placed, which follows from it).
 	local function controls_w(): number
-		return check_w:get() + 2 * SELECT_W + 2 * gap()
+		local selects = if kind.categories then 2 else 1
+		return check_w:get() + selects * SELECT_W + selects * gap()
 	end
 	local function head_on_one_line(): boolean
 		local w, c = list_w:get(), check_w:get()
@@ -574,7 +607,7 @@ function C.make(kind: kinds.Kind)
 				ds.Checkbox { value = verified_only, label = ui.t("plugins.store.verified_only") },
 			},
 			-- (The two Selects one unit: they never part on a wrap.)
-			ui.row { shrink = 0, gap = "$space.2", items = "center", category_control(), order_control() },
+			ui.row { shrink = 0, gap = "$space.2", items = "center", if kind.categories then category_control() else nil, order_control() },
 		}
 	end
 
@@ -591,11 +624,48 @@ function C.make(kind: kinds.Kind)
 		return ui.column { w_full = true, py = "$space.6", px = "$space.4", node }
 	end
 
+	-- A card of one, its picture first: opens its page.
+	-- (Featured, narrower: who made it alone, as a plugin's says.)
+	local function card_of(now: State<client.Card>, featured: boolean?): Node
+		local function card(): client.Card
+			return now:get()
+		end
+		return ds.Settings.Feature {
+			label = function(): string
+				return card().name
+			end,
+			byline = function(): string
+				return if featured then M.author(card()) else M.byline(card())
+			end,
+			description = function(): string
+				return card().summary or ""
+			end,
+			badge = ui.row { gap = "$space.1", items = "center", M.verified_mark(card), here_badge(card) },
+			cover = M.cover(card),
+			on_click = function()
+				nav.open_listing(now:peek().id)
+			end,
+		}
+	end
+
 	-- What the card holds under its bar, by kind.
 	local function inside(key: string): Node
 		if key == "loading" then
 			return ds.SkeletonWaiting {
 				build = function(still: boolean): Node
+					if kind.cards then
+						return ds.Settings.Cards {
+							id = if still then "store-loading-still" else "store-loading",
+							min_w = CARD_MIN,
+							build = function(w: () -> number): Node
+								local cards: { Node } = {}
+								for _ = 1, 4 do
+									table.insert(cards, ui.div { w = w, shrink = 0, ds.Settings.FeatureSkeleton { still = still, cover = true } })
+								end
+								return ui.row { w_full = true, flex_wrap = true, gap = "$space.3", table.unpack(cards) }
+							end,
+						}
+					end
 					return ui.column {
 						id = if still then "store-loading-still" else "store-loading",
 						w_full = true,
@@ -612,15 +682,15 @@ function C.make(kind: kinds.Kind)
 		elseif key == "offline" then
 			return said(ds.EmptyState {
 				icon = "wifi-off",
-				title = ui.t("plugins.store.offline_title"),
-				body = ui.t("plugins.store.offline_body"),
+				title = say("plugins.store.offline_title"),
+				body = say("plugins.store.offline_body"),
 				size = "sm",
 				action = { label = ui.t("plugins.store.try_again"), on_click = listing.reload },
 			})
 		elseif key == "failed" then
 			return said(ds.EmptyState {
 				icon = "danger-triangle",
-				title = ui.t("plugins.store.failed_title"),
+				title = say("plugins.store.failed_title"),
 				body = function(): string
 					return words.failure(failed:get() or "")
 				end,
@@ -634,7 +704,7 @@ function C.make(kind: kinds.Kind)
 					local q = trimmed(query:get())
 					return if q ~= ""
 						then ui.t("plugins.store.nothing_matches", { query = q }):get()
-						else ui.t("plugins.store.nothing_here"):get()
+						else say("plugins.store.nothing_here"):get()
 				end,
 				body = ui.t("plugins.store.try_another"),
 				size = "sm",
@@ -643,8 +713,8 @@ function C.make(kind: kinds.Kind)
 		elseif key == "none" then
 			return said(ds.EmptyState {
 				icon = "widget",
-				title = ui.t("plugins.store.empty_title"),
-				body = ui.t("plugins.store.empty_body"),
+				title = say("plugins.store.empty_title"),
+				body = say("plugins.store.empty_body"),
 				size = "sm",
 			})
 		end
@@ -652,15 +722,33 @@ function C.make(kind: kinds.Kind)
 		return ui.column {
 			id = "store-rows",
 			w_full = true,
-			ds.Settings.ListRows(listing.items, row, {
-				key = function(c: client.Card): string
-					return c.id
-				end,
-				height = row_h,
-				text = function(c: client.Card): string
-					return c.name
-				end,
-			}),
+			if kind.cards
+				then ds.Settings.Cards {
+					id = "store-cards",
+					min_w = CARD_MIN,
+					build = function(w: () -> number): Node
+						return ui.each(listing.items, function(_first: client.Card, _i: number, now: State<client.Card>): Node
+							return ui.div { w = w, shrink = 0, card_of(now) }
+						end, {
+							key = function(c: client.Card): string
+								return c.id
+							end,
+							direction = "row",
+							flex_wrap = true,
+							w_full = true,
+							gap = "$space.3",
+						})
+					end,
+				}
+				else ds.Settings.ListRows(listing.items, row, {
+					key = function(c: client.Card): string
+						return c.id
+					end,
+					height = row_h,
+					text = function(c: client.Card): string
+						return c.name
+					end,
+				}),
 			ui.show(function(): boolean
 				return listing.loading:get() and listing.status:get() == "ready"
 			end, ui.column {
@@ -688,7 +776,7 @@ function C.make(kind: kinds.Kind)
 					py = "$space.3",
 					gap = "$space.3",
 					items = "center",
-					ui.text { ui.t("plugins.store.more_failed"), grow = 1, min_w = 0, wrap = true, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" },
+					ui.text { say("plugins.store.more_failed"), grow = 1, min_w = 0, wrap = true, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" },
 					ds.Button { ui.t("plugins.store.try_again"), tone = "secondary", size = "sm", on_click = listing.more },
 				},
 			}),
@@ -732,6 +820,9 @@ function C.make(kind: kinds.Kind)
 
 	-- One featured plugin, a card of its own that opens it.
 	local function feature(first: client.Card, _i: number, now: State<client.Card>): Node
+		if kind.cards then
+			return card_of(now, true)
+		end
 		return ds.Settings.Feature {
 			label = function(): string
 				return now:get().name
@@ -753,6 +844,62 @@ function C.make(kind: kinds.Kind)
 				nav.open_listing(now:peek().id)
 			end,
 		}
+	end
+
+	-- Under the list's head: what's said of all of it, the search, and (cards,
+	-- which stand on the page) the search's own card apart from them.
+	local function list_body(): { Node }
+		local out: { Node } = {}
+		if kind.fact then
+			table.insert(out, ui.text {
+				id = "store-fact",
+				ui.t(kind.fact),
+				w_full = true,
+				px = ds.Settings.inset(),
+				wrap = true,
+				text_size = "$font.size.sm",
+				line_height = "$font.line.sm",
+				color = "$text.secondary",
+			})
+		end
+		table.insert(out, ds.Settings.CatalogCard {
+			id = "store-card",
+			search = { value = query, placeholder = say("plugins.store.search") },
+			-- What a plugin's page narrowed it to (its keyword, its
+			-- publisher): a token each, removable.
+			search_trail = ui.show(function(): boolean
+				return keyword:get() ~= "" or author:get() ~= ""
+			end, ui.row {
+				gap = "$space.1",
+				items = "center",
+				ui.show(function(): boolean
+					return keyword:get() ~= ""
+				end, ds.Tag {
+					function(): string
+						return keyword:get()
+					end :: any,
+					on_remove = function()
+						keyword:set("")
+					end,
+				}),
+				ui.show(function(): boolean
+					return author:get() ~= ""
+				end, ds.Tag {
+					function(): string
+						return `@{author:get()}`
+					end :: any,
+					on_remove = function()
+						author:set("")
+					end,
+				}),
+			}),
+			body = if kind.cards then nil else ui.presence(body_key, inside, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
+		})
+		if kind.cards then
+			-- (The grid's own gap under the search.)
+			table.insert(out, ui.column { w_full = true, pt = "$space.1", ui.presence(body_key, inside, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }) })
+		end
+		return out
 	end
 
 	-- The tab: the featured over the card, the card's search, bar and rows.
@@ -801,7 +948,7 @@ function C.make(kind: kinds.Kind)
 									build = function(w: () -> number): Node
 										local cards: { Node } = {}
 										for _ = 1, 3 do
-											table.insert(cards, ui.div { w = w, shrink = 0, ds.Settings.FeatureSkeleton { still = still } })
+											table.insert(cards, ui.div { w = w, shrink = 0, ds.Settings.FeatureSkeleton { still = still, cover = kind.cards } })
 										end
 										return cards :: any
 									end,
@@ -839,7 +986,7 @@ function C.make(kind: kinds.Kind)
 			end, ds.Settings.Section {
 				title = function(): string
 					local n = total:get()
-					return if n and n > 0 then ui.t("plugins.store.count", { n = n }):get() else ui.t("plugins.store.list_title"):get()
+					return if n and n > 0 then say("plugins.store.count", { n = n }):get() else say("plugins.store.list_title"):get()
 				end,
 				-- (What narrows and orders it, at the title's end; in a narrow
 				-- pane, on a line of its own under the title.)
@@ -847,39 +994,7 @@ function C.make(kind: kinds.Kind)
 				ui.show(function(): boolean
 					return not head_on_one_line()
 				end, ui.row { w_full = true, px = ds.Settings.inset(), head_controls(true) }),
-				ds.Settings.CatalogCard {
-					id = "store-card",
-					search = { value = query, placeholder = ui.t("plugins.store.search") },
-					-- What a plugin's page narrowed it to (its keyword, its
-					-- publisher): a token each, removable.
-					search_trail = ui.show(function(): boolean
-						return keyword:get() ~= "" or author:get() ~= ""
-					end, ui.row {
-						gap = "$space.1",
-						items = "center",
-						ui.show(function(): boolean
-							return keyword:get() ~= ""
-						end, ds.Tag {
-							function(): string
-								return keyword:get()
-							end :: any,
-							on_remove = function()
-								keyword:set("")
-							end,
-						}),
-						ui.show(function(): boolean
-							return author:get() ~= ""
-						end, ds.Tag {
-							function(): string
-								return `@{author:get()}`
-							end :: any,
-							on_remove = function()
-								author:set("")
-							end,
-						}),
-					}),
-					body = ui.presence(body_key, inside, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
-				},
+				table.unpack(list_body()),
 			} },
 		}
 	end)

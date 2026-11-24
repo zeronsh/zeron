@@ -4343,6 +4343,21 @@
       "install": "安装",
       "unverified_body": "Zeron 无法确认它的作者。只有在你信任它的来源时才安装。",
       "unverified_body_from": "Zeron 无法确认它的作者。只有在你信任它的来源时才安装：{where}。"
+    },
+    "store": {
+      "search": "搜索模板",
+      "none_verified": "这个模板还没有经过验证的版本。",
+      "offline_title": "无法连接模板商店",
+      "offline_body": "你的模板照常工作。联网后再试。",
+      "failed_title": "模板商店没有回应",
+      "failed_body": "你的模板照常工作。稍后再试一次。",
+      "more_failed": "更多模板没有加载出来。",
+      "nothing_here": "这里没有模板",
+      "empty_title": "商店里还没有模板",
+      "empty_body": "大家发布的模板会出现在这里。",
+      "count": "{n, plural, other {# 个模板}}",
+      "list_title": "模板",
+      "runs_as_zeron_list": "模板以 Zeron 自身的身份运行：它可以做 Zeron 能做的一切。"
     }
   },
   "themes": {

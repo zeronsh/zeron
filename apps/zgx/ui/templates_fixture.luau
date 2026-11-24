@@ -9,6 +9,7 @@ local ds = require("@ds")
 ds.setup()
 local state = require("@app/screens/templates/state")
 local page = require("@app/screens/templates/page")
+require("./template_store_stub")
 -- The command palette too, whose Templates rows use them (shell/palette).
 -- (No window chrome to restyle in a test host, as shell_fixture says.)
 local actions = require("@app/screens/onboarding/actions");
@@ -216,6 +217,17 @@ for _, how in { "taken_down", "taken_down_plain", "unchecked" } do
 	}
 end
 ui.command {
+	id = "templates.from_store",
+	title = "Midnight arrives from the store, in a folder of another name",
+	run = function()
+		table.insert(model, {
+			id = "midnight-2", name = "Midnight", version = "1.2.0", builtin = false, active = false, status = "ok",
+			imported = { key = nil, author = { kind = "verified", username = "ada" }, source = { kind = "store", id = "midnight", publisher = "ada", verified = true } },
+		} :: any)
+		publish()
+	end,
+}
+ui.command {
 	id = "templates.restored",
 	title = "Night: restored",
 	run = function()
@@ -323,6 +335,7 @@ return ui.div {
 	w_full = true,
 	h_full = true,
 	ui.scroll {
+		id = "fixture-scroll",
 		w_full = true,
 		h_full = true,
 		ui.column {

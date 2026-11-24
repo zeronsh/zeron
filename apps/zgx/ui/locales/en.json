@@ -4343,6 +4343,21 @@
       "install": "Install",
       "unverified_body": "Zeron can't confirm who made this. Install it only if you trust where it came from.",
       "unverified_body_from": "Zeron can't confirm who made this. Install it only if you trust where it came from: {where}."
+    },
+    "store": {
+      "search": "Search templates",
+      "none_verified": "No version of this template is verified yet.",
+      "offline_title": "Can't reach the template store",
+      "offline_body": "Your templates still work. Try again when you're online.",
+      "failed_title": "The template store didn't answer",
+      "failed_body": "Your templates still work. Try again in a moment.",
+      "more_failed": "More templates didn't load.",
+      "nothing_here": "No templates here",
+      "empty_title": "No templates in the store yet",
+      "empty_body": "Templates people publish appear here.",
+      "count": "{n, plural, one {# template} other {# templates}}",
+      "list_title": "Templates",
+      "runs_as_zeron_list": "A template runs as Zeron itself: it can do anything Zeron can."
     }
   },
   "themes": {
