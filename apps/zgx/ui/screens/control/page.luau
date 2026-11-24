@@ -545,6 +545,10 @@ M.float_open = ui.state("control_capture_float_open", false)
 local float_focused = false
 -- The floating one's height as laid out (the Chat tab keeps its foot clear).
 M.float_h = ui.state("control_capture_float_h", 0)
+-- Its height at rest, the least it has been laid out at: what a tab that
+-- fills the page (the Map) keeps clear of. Grown (lines, chips, opened
+-- out) it lies over the page, which never lays itself out again for it.
+M.float_rest_h = ui.state("control_capture_float_rest_h", 0)
 -- Asked for the keys: bumped, the floating one takes them.
 local float_wanted = ui.state("control_capture_float_wanted", 0)
 -- The floating one's own element, to let go of the keys before it goes.
@@ -1413,6 +1417,8 @@ local FLOAT_TOAST_GAP = 12
 -- The companion's size: the pill's own one line (ds.Composer's ONE_LINE
 -- plus its hairlines).
 local FLOAT_KNOB = 51
+-- (Less than this, it's still being laid out: not its height at rest.)
+local FLOAT_REST_MIN = 24
 
 -- Capture's composer floating at the page's foot (Capture scrolled up out
 -- of view): bare, one line and beside it a knob (what it carries, counted;
@@ -1639,6 +1645,11 @@ local FloatingCapture = ui.component(function(props: { width: () -> number, show
 			on_resize = function(size: { w: number, h: number }, el: Element)
 				if math.abs(size.h - M.float_h:peek()) >= 1 then
 					M.float_h:set(size.h)
+				end
+				-- (Not while it's still coming: no height yet.)
+				local rest = M.float_rest_h:peek()
+				if size.h >= FLOAT_REST_MIN and (rest <= 0 or size.h < rest - 0.5) then
+					M.float_rest_h:set(size.h)
 				end
 				local x, bw = el.x, el.width
 				if x and bw then
@@ -1871,6 +1882,36 @@ local MapTab = ui.component(function(): Node
 	-- frames. The first, at once.)
 	local SETTLE_MS = 150
 	local latest = 0
+	-- (The tab's height as last laid out.)
+	local tab_h = 0
+	local function fit()
+		if tab_h <= 0 then
+			return
+		end
+		local fill = OrchMap().fill_h
+		local room = math.floor(math.max(0, tab_h - MAP_CHROME - M.float_rest_h:peek() - FLOAT_FOOT - FLOAT_CLEAR))
+		latest = room
+		if fill:peek() <= 0 then
+			fill:set(room)
+			return
+		end
+		ui.after(SETTLE_MS, function()
+			if latest == room and math.abs(room - fill:peek()) >= 1 then
+				fill:set(room)
+			end
+		end)
+	end
+	-- (Capture's bar at rest known, or its rest changed: its form, not its
+	-- draft. Its lines and chips don't come here: grown, it lies over the
+	-- Map.)
+	local rest_seen = M.float_rest_h:peek()
+	ui.effect(function()
+		local r = M.float_rest_h:get()
+		if r ~= rest_seen then
+			rest_seen = r
+			fit()
+		end
+	end)
 	return ui.column {
 		id = "control-map-tab",
 		w_full = true,
@@ -1878,23 +1919,13 @@ local MapTab = ui.component(function(): Node
 		min_h = 0,
 		items = "center",
 		on_resize = function(size: { w: number, h: number })
-			local fill = OrchMap().fill_h
-			local room = math.floor(math.max(0, size.h - MAP_CHROME - M.float_h:peek() - FLOAT_FOOT - FLOAT_CLEAR))
-			latest = room
-			if fill:peek() <= 0 then
-				fill:set(room)
-				return
-			end
-			ui.after(SETTLE_MS, function()
-				if latest == room and math.abs(room - fill:peek()) >= 1 then
-					fill:set(room)
-				end
-			end)
+			tab_h = size.h
+			fit()
 		end,
 		px = "$space.6",
 		pt = "$space.2",
 		pb = function(): any
-			return ui.raw(M.float_h:get() + FLOAT_FOOT + FLOAT_CLEAR, "clear of Capture's bar, measured")
+			return ui.raw(M.float_rest_h:get() + FLOAT_FOOT + FLOAT_CLEAR, "clear of Capture's bar at rest, measured")
 		end,
 		ui.column {
 			w_full = true,
@@ -2299,6 +2330,8 @@ HistoryPanel = ui.component(function(props: { w: () -> number }): Node
 	return ui.column(glass.style({
 		id = "control-history",
 		w = props.w,
+		-- (Over the page, on a layer that lets the pointer through.)
+		pointer_events = "auto",
 		rounded = "$radius.xl",
 		p = "$space.3",
 		gap = "$space.2",
@@ -2480,33 +2513,12 @@ M.Page = ui.component(function(): Node
 			end,
 			ui.column { w_full = true, max_w = MAX_W, head() },
 		},
-		-- The tabs, and Capture's history under them (opened from its bar,
-		-- over it, the tab giving it room). (Reversed: the history first in
-		-- the tree, as the page's layers would otherwise take the pointer
-		-- from its hover cards, and shown last.)
+		-- The tabs. (Capture's history, opened from its bar, lies over them,
+		-- below.)
 		ui.column {
 			w_full = true,
 			grow = 1,
 			min_h = 0,
-			direction = "column_reverse",
-			ui.presence(function(): string?
-				return if M.history_panel:get() and float_shown:get() then "history" else nil
-			end, function(): Node
-				return ui.row {
-					w_full = true,
-					justify = "center",
-					HistoryPanel { w = history_w },
-				}
-			end, {
-				w_full = true,
-				shrink = 0,
-				pt = "$space.2",
-				pb = function(): any
-					return ui.raw(M.float_h:get() + FLOAT_FOOT + 8, "over Capture's bar")
-				end,
-				enter = motion.transition({ opacity = { 0, 1 }, duration = 160, ease = "out(3)" }),
-				exit = motion.transition({ opacity = { 1, 0 }, duration = 120 }),
-			}),
 			-- The tabs: each built the first time it's shown (or in the
 			-- background, once the page has settled) and kept, hidden while
 			-- another shows: going back to one is showing it.
@@ -2531,6 +2543,27 @@ M.Page = ui.component(function(): Node
 				end),
 			},
 		},
+		-- Capture's history (opened from its bar), over the page just above
+		-- the bar: the page under it is never laid out again for it.
+		ui.presence(function(): string?
+			return if M.history_panel:get() and float_shown:get() then "history" else nil
+		end, function(): Node
+			return ui.row {
+				w_full = true,
+				justify = "center",
+				HistoryPanel { w = history_w },
+			}
+		end, {
+			absolute = true,
+			left = 0,
+			right = 0,
+			bottom = function(): number
+				return M.float_h:get() + FLOAT_FOOT + 8
+			end,
+			pointer_events = "none",
+			enter = motion.transition({ opacity = { 0, 1 }, duration = 160, ease = "out(3)" }),
+			exit = motion.transition({ opacity = { 1, 0 }, duration = 120 }),
+		}),
 		-- Capture's bar, at the foot of every tab: kept built, shown while
 		-- the page has tabs (faded in; gone at once).
 		ui.column {
