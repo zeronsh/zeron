@@ -221,7 +221,6 @@ fn composer_width_only_resize_publishes_the_frame_without_animating_and_preserve
 #[test]
 fn removing_last_attachment_to_skinny_avoids_transcript_repaint_storm() {
     use std::path::PathBuf;
-    use std::rc::Rc;
     use zgx::input::InputEvent;
 
     let ui_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui");
@@ -256,7 +255,7 @@ fn removing_last_attachment_to_skinny_avoids_transcript_repaint_storm() {
         }
         app.host
             .shared("chat.messages", Value::Nil)
-            .set(Value::List(Rc::from(rows)));
+            .set(Value::List(rows.into()));
         app.frames(30);
         app
     };

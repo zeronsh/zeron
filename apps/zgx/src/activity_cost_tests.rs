@@ -24,8 +24,8 @@
 //! states into <dir>/frames.txt (raw RGBA kept beside it), to compare two
 //! builds frame for frame.
 
+use zgx_script::Slice;
 use std::path::PathBuf;
-use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value as Json, json};
@@ -541,7 +541,7 @@ impl Bench {
         let mut list = self.before.clone();
         list.push(row);
         list.extend(self.after.iter().cloned());
-        self.messages.set(Value::List(Rc::from(list)));
+        self.messages.set(Value::List(zgx_script::Slice::from(list)));
         self.draft.set(draft);
         host
     }
@@ -558,7 +558,7 @@ impl Bench {
         let mut list = self.before.clone();
         list.push(row);
         list.extend(self.after.iter().cloned());
-        self.messages.set(Value::List(Rc::from(list)));
+        self.messages.set(Value::List(zgx_script::Slice::from(list)));
         self.draft.set(draft);
         host
     }
@@ -1311,7 +1311,7 @@ fn a_long_group_builds_what_shows_of_it() {
 #[test]
 fn a_reply_built_again_keeps_its_calls_as_they_were() {
     let ptr = |v: &Value| match v {
-        Value::Map(m) => Rc::as_ptr(m) as *const u8,
+        Value::Map(m) => Slice::as_ptr(m) as *const u8,
         _ => std::ptr::null(),
     };
     let tools = |row: &Value| row.field("tools").expect("its tools").list().to_vec();

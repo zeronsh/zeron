@@ -1943,8 +1943,8 @@ impl Bridge {
             .collect();
         let mut page = page_value(self.state.get(), self.dirs.borrow().as_ref(), &items, &[]);
         if let Value::Map(fields) = &page {
-            let mut fields: Vec<(std::rc::Rc<str>, Value)> = fields.to_vec();
-            fields.push(("replaced".into(), vlist(self.replaced())));
+            let mut fields: Vec<zgx_script::Field> = fields.to_vec();
+            fields.push(zgx_script::Field("replaced".into(), vlist(self.replaced())));
             page = Value::record(fields);
         }
         self.page.set(page);
