@@ -924,18 +924,18 @@ mod tests {
         }
     }
 
-    /// A path Windows could open as another file by its short name is never
-    /// laid down, on any system. A template kept with one runs without it and
+    /// A path a disk could open as another file (Windows by its short name,
+    /// HFS+ by leaving out what isn't seen) is never laid down, on any system. A template kept with one runs without it and
     /// isn't asked about again; one byte of that file different asks, as ever.
     #[test]
     fn a_windows_short_name_is_never_laid_down() {
         use super::super::preview::{approve_at, digest, trusted_at};
         let t = setup("short");
         let (dir, approvals) = (t.join("t"), t.join("approvals.json"));
-        let short = ["screens/TEMPLA~1/page.luau", "SCREEN~2/plugins/page.luau", "LUAURC~1", "account~0/x.luau", "screens/extra~1.luau", "screens/a~12b.luau"];
+        let short = ["screens/TEMPLA~1/page.luau", "SCREEN~2/plugins/page.luau", "LUAURC~1", "account~0/x.luau", "screens/extra~1.luau", "screens/a~12b.luau", "screens/tem\u{200c}plates/page.luau"];
         for rel in short {
             write(&dir, rel, "-- short");
-            assert!(zeron_plugin_guard::template::short_name(rel), "{rel}");
+            assert!(zeron_plugin_guard::template::short_name(rel) || zeron_plugin_guard::template::unseen(rel), "{rel}");
         }
         // Kept with them, as an earlier Zeron did (its digest counts them).
         approve_at(&approvals, "t", &digest(&dir)).unwrap();
