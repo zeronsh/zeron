@@ -201,6 +201,7 @@ impl VaultConnectionView {
             storage: McpStorage::Vault,
             status,
             account_label: self.account_label.clone(),
+            agent_name: String::new(),
             last_error: self.last_error.clone(),
             scopes: self.scopes.clone(),
             updated_at: self.updated_at,

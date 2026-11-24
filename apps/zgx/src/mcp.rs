@@ -675,9 +675,28 @@ mod tests {
                     "enabled": true,
                     "storage": "vault",
                     "status": "connected",
-                    "accountLabel": "ada@zeron.sh",
+                    "accountLabel": "Work",
+                    "agentName": "linear_work",
                     "scopes": ["read", "write"],
                     "updatedAt": 1700000000,
+                },
+                {
+                    "id": "linear-2",
+                    "name": "Linear",
+                    "preset": "linear",
+                    "transport": "http",
+                    "url": "https://mcp.linear.app/mcp",
+                    "args": [],
+                    "envKeys": [],
+                    "authKind": "oauth",
+                    "headerKeys": [],
+                    "enabled": true,
+                    "storage": "vault",
+                    "status": "needsAuth",
+                    "accountLabel": "Personal",
+                    "agentName": "linear_personal",
+                    "scopes": [],
+                    "updatedAt": 1700000002,
                 },
                 {
                     "id": "local-fs",
@@ -728,13 +747,40 @@ mod tests {
         let texts = app.texts();
         assert!(texts.iter().any(|t| t == "Your servers"), "missing servers section: {texts:?}");
         assert!(texts.iter().any(|t| t == "Linear"), "missing configured server Linear: {texts:?}");
-        assert!(texts.iter().any(|t| t == "ada@zeron.sh"), "missing account label: {texts:?}");
+        // Two accounts of Linear, each with its name beside the service's.
+        assert!(texts.iter().any(|t| t == "Work"), "missing account Work: {texts:?}");
+        assert!(texts.iter().any(|t| t == "Personal"), "missing account Personal: {texts:?}");
         assert!(texts.iter().any(|t| t == "Local Files"), "missing stdio server: {texts:?}");
         assert!(texts.iter().any(|t| t == "Context7"), "missing preset Context7: {texts:?}");
         // No storage banner: the page's line under its title says it.
         assert!(!texts.iter().any(|t| t == "Zeron Vault"), "storage banner is back: {texts:?}");
-        // Linear is added, so it's not offered again.
-        assert_eq!(texts.iter().filter(|t| *t == "Linear").count(), 1, "{texts:?}");
+        // Linear is added (twice), so it's not offered again.
+        assert_eq!(texts.iter().filter(|t| *t == "Linear").count(), 2, "{texts:?}");
+
+        // An account's settings: its name, what agents see it as, and adding another.
+        app.click("#settings-page >> role:button \"Linear · Work settings\"");
+        app.frames(20);
+        assert_eq!(app.error(), None);
+        let manage_texts = app.texts();
+        assert!(manage_texts.iter().any(|t| t == "Account name"), "missing account name field: {manage_texts:?}");
+        assert!(
+            manage_texts.iter().any(|t| t == "Your agents see this server as linear_work."),
+            "missing agent name: {manage_texts:?}"
+        );
+        assert!(manage_texts.iter().any(|t| t == "Add another account"), "missing add account: {manage_texts:?}");
+        app.click("role:button \"Add account\"");
+        app.frames(20);
+        assert_eq!(app.error(), None);
+        let account_texts = app.texts();
+        assert!(
+            account_texts.iter().any(|t| t == "Add another Linear account"),
+            "missing add-account step: {account_texts:?}"
+        );
+        assert!(account_texts.iter().any(|t| t == "New account"), "missing new account field: {account_texts:?}");
+        // Both accounts named already: only the new one's name is asked.
+        assert!(!account_texts.iter().any(|t| t == "Your current account"), "{account_texts:?}");
+        app.keys("Escape");
+        app.frames(20);
 
         // A server with no client registration: Connect asks for its app.
         app.click("#settings-page >> role:button \"Connect\"[1]");

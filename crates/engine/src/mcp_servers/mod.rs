@@ -50,6 +50,11 @@ use self::vault_client::{
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const RESERVED_SERVER_ID: &str = "zeron";
 const MAX_SERVER_ID_LEN: usize = 64;
+/// The longest account name (it rides into agents' tool names, slugged).
+const MAX_ACCOUNT_LABEL_LEN: usize = 40;
+/// The longest name agents see a server by: their tool names are
+/// `mcp__{name}__{tool}` and some cap those at 64.
+const MAX_AGENT_NAME_LEN: usize = 32;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -424,12 +429,18 @@ impl McpServers {
             }
         }
 
+        // A service's accounts together, by their names.
         servers.sort_by(|a, b| {
             a.name
                 .to_ascii_lowercase()
                 .cmp(&b.name.to_ascii_lowercase())
+                .then_with(|| {
+                    let label = |v: &McpServerView| v.account_label.clone().unwrap_or_default().to_lowercase();
+                    label(a).cmp(&label(b))
+                })
                 .then_with(|| a.id.cmp(&b.id))
         });
+        assign_agent_names(&mut servers);
 
         McpServersSnapshot {
             storage: if vault_available {
@@ -572,6 +583,20 @@ impl McpServers {
         let proxy_cmd = crate::managed::mcp_executable()
             .and_then(|p| p.to_str().map(str::to_owned))
             .unwrap_or_default();
+        // Each by the name agents know it by (`linear_work`), reached by its id.
+        let agent_names: HashMap<String, String> = self
+            .build_snapshot()
+            .servers
+            .into_iter()
+            .map(|v| (v.id, v.agent_name))
+            .collect();
+        let agent_name = |id: &str| -> String {
+            agent_names
+                .get(id)
+                .filter(|n| !n.is_empty())
+                .cloned()
+                .unwrap_or_else(|| id.to_owned())
+        };
 
         // 1. Vault-backed remote servers (always HTTP/SSE).
         let vault_views: Vec<McpServerView> = {
@@ -595,7 +620,7 @@ impl McpServers {
                 continue;
             }
             if let (Some(ep), Some(token)) = (endpoint, grant_token) {
-                out.push(build_gateway_mcp_server(&view.id, ep, token, &proxy_cmd));
+                out.push(build_gateway_mcp_server(&agent_name(&view.id), &view.id, ep, token, &proxy_cmd));
             }
         }
 
@@ -614,7 +639,7 @@ impl McpServers {
                         continue;
                     }
                     out.push(McpServer {
-                        name: server.id,
+                        name: agent_name(&server.id),
                         command,
                         args: server.args,
                         env: server.env,
@@ -629,7 +654,7 @@ impl McpServers {
                         continue;
                     }
                     if let (Some(ep), Some(token)) = (endpoint, grant_token) {
-                        out.push(build_gateway_mcp_server(&server.id, ep, token, &proxy_cmd));
+                        out.push(build_gateway_mcp_server(&agent_name(&server.id), &server.id, ep, token, &proxy_cmd));
                     }
                 }
             }
@@ -748,6 +773,7 @@ impl McpServers {
         }
 
         let id = self.resolve_server_id(&req, &name)?;
+        let label = requested_account_label(&req)?;
 
         match req.transport {
             McpTransport::Stdio => {
@@ -786,7 +812,10 @@ impl McpServers {
                     oauth_client_secret: None,
                     oauth_scopes: Vec::new(),
                     enabled,
-                    account_label: None,
+                    account_label: match label {
+                        Some(set) => set,
+                        None => self.local_store.get(&id).and_then(|e| e.account_label),
+                    },
                     last_error: None,
                     reauth_required: false,
                     updated_at: 0,
@@ -847,6 +876,7 @@ impl McpServers {
         url: &str,
         req: UpsertMcpServerRequest,
     ) -> Result<(), String> {
+        let label = requested_account_label(&req)?;
         let transport_str = match req.transport {
             McpTransport::Sse => "sse",
             _ => "http",
@@ -891,7 +921,7 @@ impl McpServers {
                 transport: Some(transport_str.to_owned()),
                 enabled: req.enabled,
                 authorized_devices: None,
-                account_label: None,
+                account_label: label,
             };
             let updated = vault
                 .update_connection(id, &patch)
@@ -929,7 +959,10 @@ impl McpServers {
             material: new_material,
             authorized_devices,
             scopes,
-            account_label: existing.and_then(|e| e.account_label),
+            account_label: match label {
+                Some(set) => set,
+                None => existing.and_then(|e| e.account_label),
+            },
         };
         let created = vault
             .put_connection(id, &put_req)
@@ -946,6 +979,7 @@ impl McpServers {
         url: &str,
         req: UpsertMcpServerRequest,
     ) -> Result<(), String> {
+        let label = requested_account_label(&req)?;
         let existing = self.local_store.get(id);
         let same_auth = existing
             .as_ref()
@@ -1036,10 +1070,10 @@ impl McpServers {
             oauth_client_secret,
             oauth_scopes,
             enabled,
-            account_label: if same_auth {
-                existing.as_ref().and_then(|e| e.account_label.clone())
-            } else {
-                None
+            // (The person's name for the account: kept whatever its sign-in.)
+            account_label: match label {
+                Some(set) => set,
+                None => existing.as_ref().and_then(|e| e.account_label.clone()),
             },
             last_error: if same_auth {
                 existing.as_ref().and_then(|e| e.last_error.clone())
@@ -1349,6 +1383,7 @@ fn is_remote_ready(view: &McpServerView) -> bool {
 }
 
 fn build_gateway_mcp_server(
+    agent_name: &str,
     server_id: &str,
     endpoint: &zeron_mcp::http::McpHttpServer,
     grant_token: &str,
@@ -1372,7 +1407,7 @@ fn build_gateway_mcp_server(
     };
 
     McpServer {
-        name: server_id.to_owned(),
+        name: agent_name.to_owned(),
         command: proxy_cmd.to_owned(),
         args,
         env,
@@ -1434,6 +1469,100 @@ fn validate_server_id(id: &str) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// `input` as a part of an agent-facing server name: lower-case ASCII
+/// letters and digits, `_` between words, at most `max` long.
+fn agent_slug(input: &str, max: usize) -> String {
+    let mut out = String::new();
+    for ch in input.chars() {
+        let lower = ch.to_ascii_lowercase();
+        if lower.is_ascii_lowercase() || lower.is_ascii_digit() {
+            out.push(lower);
+        } else if !out.is_empty() && !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+    out.truncate(max);
+    while out.ends_with('_') {
+        out.pop();
+    }
+    out
+}
+
+/// Each server's `agent_name`, the name agents see it by, from the list as
+/// sorted (a service's accounts together). A service is a preset's, else a
+/// name's: two custom servers of one name are two accounts of it. One
+/// account goes by the service's name (`linear`); several by it and each's
+/// account name (`linear_work`), or its place among them when it has none
+/// (`linear_2`). Never `zeron` (Zeron's own server), never two alike.
+fn assign_agent_names(servers: &mut [McpServerView]) {
+    const SERVICE_MAX: usize = 20;
+    let service = |v: &McpServerView| {
+        let seed = v
+            .preset
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .unwrap_or(&v.name);
+        let slug = agent_slug(seed, SERVICE_MAX);
+        match slug.as_str() {
+            "" => "mcp".to_owned(),
+            RESERVED_SERVER_ID => format!("{RESERVED_SERVER_ID}_mcp"),
+            _ => slug,
+        }
+    };
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    for (i, view) in servers.iter().enumerate() {
+        let key = service(view);
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, members)) => members.push(i),
+            None => groups.push((key, vec![i])),
+        }
+    }
+    let mut taken: HashSet<String> = HashSet::from([RESERVED_SERVER_ID.to_owned()]);
+    for (key, members) in groups {
+        let several = members.len() > 1;
+        for (place, &i) in members.iter().enumerate() {
+            let wanted = if several {
+                let label = servers[i]
+                    .account_label
+                    .as_deref()
+                    .map(|l| agent_slug(l, MAX_AGENT_NAME_LEN - key.len() - 1))
+                    .unwrap_or_default();
+                let label = if label.is_empty() { (place + 1).to_string() } else { label };
+                format!("{key}_{label}")
+            } else {
+                key.clone()
+            };
+            let mut name = wanted.clone();
+            let mut n = 2;
+            while taken.contains(&name) {
+                let suffix = format!("_{n}");
+                let keep = wanted.len().min(MAX_AGENT_NAME_LEN - suffix.len());
+                name = format!("{}{suffix}", &wanted[..keep]);
+                n += 1;
+            }
+            taken.insert(name.clone());
+            servers[i].agent_name = name;
+        }
+    }
+}
+
+/// The account name a request asks for: `None` to keep the one there is,
+/// `Some(None)` to clear it, `Some(Some(name))` to set it.
+fn requested_account_label(req: &UpsertMcpServerRequest) -> Result<Option<Option<String>>, String> {
+    let Some(raw) = req.account_label.as_deref() else {
+        return Ok(None);
+    };
+    let label = raw.trim();
+    if label.chars().count() > MAX_ACCOUNT_LABEL_LEN {
+        return Err(format!("account name must be at most {MAX_ACCOUNT_LABEL_LEN} characters"));
+    }
+    if label.chars().any(char::is_control) {
+        return Err("account name must be one line of text".into());
+    }
+    Ok(Some((!label.is_empty()).then(|| label.to_owned())))
 }
 
 fn slugify_id(input: &str) -> String {
@@ -1681,7 +1810,8 @@ mod tests {
         );
         assert_eq!(remote.args, vec![crate::sessions::MCP_PROXY_SUBCOMMAND.to_owned()]);
 
-        let stdio = extra.iter().find(|s| s.name == "local-tool").unwrap();
+        // (By its name, as agents see it: "Local Tool".)
+        let stdio = extra.iter().find(|s| s.name == "local_tool").unwrap();
         assert!(stdio.http.is_none());
         assert_eq!(stdio.command, "/usr/bin/my-mcp");
         assert_eq!(stdio.args, vec!["--stdio".to_owned()]);
@@ -2154,6 +2284,135 @@ mod tests {
         assert!(dir.path().join("vault-device-key").exists());
 
         server_task.abort();
+    }
+
+    fn view(id: &str, name: &str, preset: Option<&str>, label: Option<&str>) -> McpServerView {
+        McpServerView {
+            id: id.into(),
+            name: name.into(),
+            preset: preset.map(Into::into),
+            account_label: label.map(Into::into),
+            ..Default::default()
+        }
+    }
+
+    fn named(servers: &mut [McpServerView]) -> Vec<(String, String)> {
+        assign_agent_names(servers);
+        servers.iter().map(|v| (v.id.clone(), v.agent_name.clone())).collect()
+    }
+
+    #[test]
+    fn one_account_goes_by_its_services_name() {
+        let mut servers = [
+            view("linear-2", "Linear", Some("linear"), Some("Work")),
+            view("my-api", "My API!", None, None),
+        ];
+        assert_eq!(
+            named(&mut servers),
+            [("linear-2".into(), "linear".into()), ("my-api".into(), "my_api".into())]
+        );
+    }
+
+    #[test]
+    fn several_accounts_go_by_their_names_or_places() {
+        let mut servers = [
+            view("linear", "Linear", Some("linear"), Some("Personal")),
+            view("linear-2", "Linear", Some("linear"), Some("Acme Corp (EU)")),
+            view("notion", "Notion", Some("notion"), None),
+            view("notion-2", "Notion", Some("notion"), None),
+        ];
+        assert_eq!(
+            named(&mut servers),
+            [
+                ("linear".into(), "linear_personal".into()),
+                ("linear-2".into(), "linear_acme_corp_eu".into()),
+                ("notion".into(), "notion_1".into()),
+                ("notion-2".into(), "notion_2".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_names_are_never_zeron_alike_or_long() {
+        let mut servers = [
+            view("zeron-1", "Zeron", None, None),
+            view("a", "Sentry", Some("sentry"), Some("Work")),
+            view("b", "Sentry", Some("sentry"), Some("work")),
+            view("c", "Sentry", Some("sentry"), Some("an account name far longer than any tool name allows")),
+        ];
+        let names = named(&mut servers);
+        assert_eq!(names[0].1, "zeron_mcp");
+        assert_eq!(names[1].1, "sentry_work");
+        assert_eq!(names[2].1, "sentry_work_2");
+        assert!(names[3].1.starts_with("sentry_an_account"));
+        assert!(names.iter().all(|(_, n)| n.len() <= MAX_AGENT_NAME_LEN && !n.is_empty()));
+    }
+
+    /// An account's name is the person's: kept through updates that don't
+    /// name it and through a change of sign-in, cleared only when asked, and
+    /// what agents tell two accounts apart by.
+    #[tokio::test]
+    async fn account_names_are_kept_and_tell_accounts_apart() {
+        let (_dir, mgr) = local_manager();
+        let linear = |id: Option<&str>, label: Option<&str>| UpsertMcpServerRequest {
+            id: id.map(Into::into),
+            name: "Linear".into(),
+            preset: Some("linear".into()),
+            transport: McpTransport::Http,
+            url: Some("https://mcp.linear.app/mcp".into()),
+            auth_kind: McpAuthKind::None,
+            account_label: label.map(Into::into),
+            ..Default::default()
+        };
+        let label_of = |mgr: &McpServers, id: &str| {
+            mgr.snapshot().servers.into_iter().find(|s| s.id == id).and_then(|s| s.account_label)
+        };
+        let agent_of = |mgr: &McpServers, id: &str| {
+            mgr.snapshot().servers.into_iter().find(|s| s.id == id).map(|s| s.agent_name).unwrap()
+        };
+
+        // The first account: its service's name.
+        mgr.upsert_server(linear(None, None)).await.unwrap();
+        assert_eq!(agent_of(&mgr, "linear"), "linear");
+
+        // Another, named, and the first named too: each by its own.
+        mgr.upsert_server(linear(Some("linear"), Some(" Work "))).await.unwrap();
+        mgr.upsert_server(linear(None, Some("Personal"))).await.unwrap();
+        assert_eq!(label_of(&mgr, "linear").as_deref(), Some("Work"));
+        assert_eq!(agent_of(&mgr, "linear"), "linear_work");
+        assert_eq!(agent_of(&mgr, "linear-2"), "linear_personal");
+
+        // An update that doesn't name it keeps the name, even with a new sign-in.
+        let mut keyed = linear(Some("linear"), None);
+        keyed.auth_kind = McpAuthKind::Bearer;
+        keyed.bearer_token = Some("tok".into());
+        mgr.upsert_server(keyed).await.unwrap();
+        assert_eq!(label_of(&mgr, "linear").as_deref(), Some("Work"));
+
+        // Cleared when asked; refused when it can't be a name.
+        let mut cleared = linear(Some("linear-2"), Some(""));
+        cleared.enabled = Some(true);
+        mgr.upsert_server(cleared).await.unwrap();
+        assert_eq!(label_of(&mgr, "linear-2"), None);
+        assert!(mgr.upsert_server(linear(Some("linear-2"), Some("two\nlines"))).await.is_err());
+        assert!(mgr.upsert_server(linear(Some("linear-2"), Some(&"x".repeat(41)))).await.is_err());
+
+        // A run gets each account by the name agents know it by, reached by its id.
+        let factory: ToolsFactory = Arc::new(|origin| {
+            let client = zeron_rpc::memory_client(Arc::new(NoopRpc));
+            Arc::new(zeron_mcp::Tools::new(Arc::new(
+                zeron_mcp::Zeron::with_client(client, origin.clone()),
+            )))
+        });
+        let ep = McpHttpServer::bind_with_external(factory, Some(mgr.gateway())).await.unwrap();
+        let grant = ep.grant(zeron_mcp::Origin::default()).unwrap();
+        mgr.upsert_server(linear(Some("linear-2"), Some("Personal"))).await.unwrap();
+        let extra = mgr.extra_mcp_servers(Some(&ep), Some(grant.token()));
+        let route = |name: &str| {
+            extra.iter().find(|s| s.name == name).and_then(|s| s.http.as_ref()).map(|h| h.url.clone())
+        };
+        // (The keyed one has no key stored in this local test: only Personal is ready.)
+        assert_eq!(route("linear_personal"), Some(ep.server_url("linear-2")));
     }
 
     /// A run lists the vault's servers again once its list is stale, and only

@@ -2386,7 +2386,7 @@
       "description_local": "你的智能体可在每个对话、任何提供方中使用这些工具。仅保存在此设备上；登录 Zeron 即可同步到你的其他设备。",
       "servers": {
         "title": "你的服务器",
-        "terms": "已连接 服务器 登录 退出 启用 停用"
+        "terms": "已连接 服务器 账号 登录 退出 启用 停用 工作 个人"
       },
       "add": {
         "title": "添加服务器",
@@ -2480,13 +2480,19 @@
         "error_command": "请输入要运行的命令。",
         "error_token": "请粘贴 API 密钥或令牌。",
         "error_header_line": "“{line}”不是请求头。请写成 名称: 值。",
-        "error_env_line": "“{line}”不是变量。请写成 NAME=值。"
+        "error_env_line": "“{line}”不是变量。请写成 NAME=值。",
+        "account": "账号名称",
+        "account_placeholder": "工作、个人…",
+        "account_hint": "你的智能体会以 {agent} 看到此服务器。",
+        "account_hint_none": "用于区分同一服务的其他账号。"
       },
       "manage": {
         "signed_in": "已登录",
         "sign_out": "退出登录",
         "remove": "移除服务器",
-        "remove_description": "你的智能体将在所有设备上不再看到它的工具。"
+        "remove_description": "你的智能体将在所有设备上不再看到它的工具。",
+        "add_account": "添加另一个账号",
+        "add_account_description": "连接第二个 {name} 账号，例如工作和个人。你的智能体可以同时使用。"
       },
       "remove": {
         "title": "移除 {name}？",
@@ -2501,6 +2507,21 @@
         "couldnt_add": "无法添加 {name}",
         "couldnt_remove": "无法移除 {name}",
         "couldnt_switch": "无法更改 {name}"
+      },
+      "account": {
+        "full_name": "{name} · {account}",
+        "title": "添加另一个 {name} 账号",
+        "body": "每个账号都是独立的服务器，你的智能体可以同时使用它们。为它们命名，方便你和智能体区分。",
+        "current": "当前账号",
+        "current_placeholder": "工作",
+        "new": "新账号",
+        "new_placeholder": "个人",
+        "new_key": "新账号的 API 密钥或令牌",
+        "agents_see": "你的智能体将看到 {names}。",
+        "switch_hint": "请用另一个账号登录。如果浏览器直接以第一个账号登录，请在 {name} 的页面上切换账号。",
+        "error_same": "请为两个账号取不同的名称。",
+        "error_taken": "你已有一个名为“{account}”的 {name} 账号。",
+        "add": "添加账号"
       }
     }
   },

@@ -2386,7 +2386,7 @@
       "description_local": "Tools your agents can use in every chat, with any provider. Kept on this device; sign in to Zeron to sync them to your other devices.",
       "servers": {
         "title": "Your servers",
-        "terms": "connected servers sign in sign out enable disable"
+        "terms": "connected servers accounts sign in sign out enable disable work personal"
       },
       "add": {
         "title": "Add a server",
@@ -2480,13 +2480,19 @@
         "error_command": "Enter the command to run.",
         "error_token": "Paste the API key or token.",
         "error_header_line": "\"{line}\" isn't a header. Write it as Name: value.",
-        "error_env_line": "\"{line}\" isn't a variable. Write it as NAME=value."
+        "error_env_line": "\"{line}\" isn't a variable. Write it as NAME=value.",
+        "account": "Account name",
+        "account_placeholder": "Work, Personal…",
+        "account_hint": "Your agents see this server as {agent}.",
+        "account_hint_none": "Tells this account apart from others for the same service."
       },
       "manage": {
         "signed_in": "Signed in",
         "sign_out": "Sign out",
         "remove": "Remove server",
-        "remove_description": "Your agents stop seeing its tools, on every device."
+        "remove_description": "Your agents stop seeing its tools, on every device.",
+        "add_account": "Add another account",
+        "add_account_description": "Connect a second {name} account, like work and personal. Your agents can use both."
       },
       "remove": {
         "title": "Remove {name}?",
@@ -2501,6 +2507,21 @@
         "couldnt_add": "Couldn't add {name}",
         "couldnt_remove": "Couldn't remove {name}",
         "couldnt_switch": "Couldn't change {name}"
+      },
+      "account": {
+        "full_name": "{name} · {account}",
+        "title": "Add another {name} account",
+        "body": "Each account is its own server, so your agents can use both. Name them so you, and your agents, can tell them apart.",
+        "current": "Your current account",
+        "current_placeholder": "Work",
+        "new": "New account",
+        "new_placeholder": "Personal",
+        "new_key": "API key or token for the new account",
+        "agents_see": "Your agents will see {names}.",
+        "switch_hint": "Sign in with your other account. If your browser signs you straight back in as the first one, switch accounts on {name}'s page.",
+        "error_same": "Give the two accounts different names.",
+        "error_taken": "You already have a {name} account called “{account}”.",
+        "add": "Add account"
       }
     }
   },
