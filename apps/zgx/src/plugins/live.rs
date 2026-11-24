@@ -92,6 +92,15 @@ fn stray_screenshot(rel: &str) -> bool {
     !listing_file(rel) && zeron_plugin_guard::path::fold(rel).strip_prefix("screenshots").is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
+/// Whether any part of `rel` could be a Windows short name (`TEMPLA~1`,
+/// `LUAURC~1`): a `~` with a digit after it. Windows opens the file that has
+/// it, so one laid down as `screens/TEMPLA~1/page.luau` is
+/// `screens/templates/page.luau` there. Never laid down, on any system.
+/// (Still counted as the template's code: what was kept is kept.)
+fn short_name(rel: &str) -> bool {
+    rel.as_bytes().windows(2).any(|w| w[0] == b'~' && w[1].is_ascii_digit())
+}
+
 pub fn hash(bytes: &[u8]) -> String {
     let mut h = DefaultHasher::new();
     bytes.hash(&mut h);
@@ -316,7 +325,7 @@ pub fn plan(templates: &Path, id: &str, failed: &BTreeSet<String>, whole_failed:
         // filesystem), never both written, whichever sorts last winning.
         let mut spelled: BTreeMap<String, String> = want.keys().map(|rel| (zeron_plugin_guard::path::fold(rel), rel.clone())).collect();
         for (rel, path) in files(&templates.join(id), |rel| !template_meta(rel)) {
-            if never_templated(&rel) || stray_screenshot(&rel) || failed.contains(&rel) {
+            if never_templated(&rel) || stray_screenshot(&rel) || short_name(&rel) || failed.contains(&rel) {
                 continue;
             }
             if let Some(zeron_s) = spelled.insert(zeron_plugin_guard::path::fold(&rel), rel.clone())
@@ -955,6 +964,34 @@ mod tests {
         write(&dir, "screenshots.luau", "return 2");
         compose(&t, "t", &BTreeSet::new(), false).unwrap();
         assert!(t.join(LIVE).join("screenshots.luau").is_file());
+    }
+
+    /// A path Windows could open as another file by its short name is never
+    /// laid down, on any system. A template kept with one runs without it and
+    /// isn't asked about again; one byte of that file different asks, as ever.
+    #[test]
+    fn a_windows_short_name_is_never_laid_down() {
+        use super::super::preview::{approve_at, digest, trusted_at};
+        let t = setup("short");
+        let (dir, approvals) = (t.join("t"), t.join("approvals.json"));
+        let short = ["screens/TEMPLA~1/page.luau", "SCREEN~2/plugins/page.luau", "LUAURC~1", "account~0/x.luau", "screens/extra~1.luau", "screens/a~12b.luau"];
+        for rel in short {
+            write(&dir, rel, "-- short");
+            assert!(short_name(rel), "{rel}");
+        }
+        // Kept with them, as an earlier Zeron did (its digest counts them).
+        approve_at(&approvals, "t", &digest(&dir)).unwrap();
+        let (_, overlay) = compose(&t, "t", &BTreeSet::new(), false).unwrap();
+        for rel in short {
+            assert!(!t.join(LIVE).join(rel).exists() && !overlay.from_template.contains(rel), "{rel}");
+        }
+        assert_eq!(read(&t.join(LIVE), "screens/extra.luau"), "-- t only", "the rest runs");
+        assert!(trusted_at(&t, "t", &approvals), "not asked again");
+        write(&dir, short[0], "-- shorT");
+        assert!(!trusted_at(&t, "t", &approvals));
+        for rel in ["screens/a~b.luau", "screens/a~.luau", "screens/~.luau", "screens/a1~.luau"] {
+            assert!(!short_name(rel), "{rel}");
+        }
     }
 
     /// R30: a protected path spelled as a case-insensitive filesystem reads
