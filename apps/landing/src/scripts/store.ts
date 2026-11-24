@@ -124,19 +124,68 @@ if (toc && "IntersectionObserver" in window) {
 }
 
 // ── A plugin's pictures ────────────────────────────────────────────────
-// The strip scrolls by itself (keyboard, touch, trackpad); the dots follow
-// it, and take you to a picture.
-for (const gallery of document.querySelectorAll<HTMLElement>("[data-gallery]")) {
-  const track = gallery.querySelector<HTMLElement>("[data-track]");
-  const slides = [...gallery.querySelectorAll<HTMLElement>("[data-slide]")];
-  const dots = [...gallery.querySelectorAll<HTMLButtonElement>("[data-dot]")];
-  if (!track || dots.length === 0) continue;
-  const show = (i: number) => dots.forEach((dot, j) => (j === i ? dot.setAttribute("aria-current", "true") : dot.removeAttribute("aria-current")));
-  dots.forEach((dot, i) => dot.addEventListener("click", () => track.scrollTo({ left: slides[i]!.offsetLeft - slides[0]!.offsetLeft, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" })));
-  const seen = new IntersectionObserver((entries) => {
-    for (const entry of entries) if (entry.isIntersecting && entry.intersectionRatio > 0.6) show(slides.indexOf(entry.target as HTMLElement));
-  }, { root: track, threshold: [0.6] });
-  for (const slide of slides) seen.observe(slide);
+// The row scrolls by itself (keyboard, touch, trackpad); its arrows take it
+// a screen on or back, each shown only while there's more that way. A
+// thumbnail is a link to its picture; here it opens the lightbox instead:
+// the picture large, ‹ › and the arrow keys for the others, Escape or a
+// click beside the picture to close, and focus back on the thumbnail.
+for (const shots of document.querySelectorAll<HTMLElement>("[data-shots]")) {
+  const row = shots.querySelector<HTMLElement>("[data-row]");
+  const thumbs = [...shots.querySelectorAll<HTMLAnchorElement>("[data-shot]")];
+  const box = shots.querySelector<HTMLDialogElement>("[data-lightbox]");
+  if (!row || thumbs.length === 0) continue;
+  const still = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  const arrows = [...shots.querySelectorAll<HTMLButtonElement>(".shots-arrow")];
+  if (arrows.length > 0) {
+    const ends = () => {
+      const max = row.scrollWidth - row.clientWidth - 1;
+      for (const arrow of arrows) arrow.hidden = arrow.dataset.step === "1" ? row.scrollLeft >= max : row.scrollLeft <= 1;
+    };
+    for (const arrow of arrows)
+      arrow.addEventListener("click", () => row.scrollBy({ left: Number(arrow.dataset.step) * row.clientWidth, behavior: still() ? "auto" : "smooth" }));
+    row.addEventListener("scroll", ends, { passive: true });
+    new ResizeObserver(ends).observe(row);
+    ends();
+  }
+
+  const picture = box?.querySelector<HTMLImageElement>("[data-lb-picture]");
+  if (!box || !picture || typeof box.showModal !== "function") continue;
+  const counter = box.querySelector<HTMLElement>("[data-lb-count]");
+  let at = 0;
+  let from: HTMLAnchorElement | null = null;
+  const show = (i: number) => {
+    at = (i + thumbs.length) % thumbs.length;
+    const thumb = thumbs[at]!;
+    picture.src = thumb.getAttribute("href") ?? "";
+    picture.alt = thumb.querySelector("img")?.alt ?? "";
+    if (counter) counter.textContent = `${at + 1} / ${thumbs.length}`;
+  };
+  thumbs.forEach((thumb, i) =>
+    thumb.addEventListener("click", (event) => {
+      // (A click meant elsewhere, a new tab or window, is the link's.)
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+      event.preventDefault();
+      from = thumb;
+      show(i);
+      box.showModal();
+    }),
+  );
+  for (const step of box.querySelectorAll<HTMLButtonElement>("[data-lb-step]")) step.addEventListener("click", () => show(at + Number(step.dataset.lbStep)));
+  box.querySelector("[data-lb-close]")?.addEventListener("click", () => box.close());
+  // (Beside the picture is the dialog itself, the dimmed page around it.)
+  box.addEventListener("click", (event) => event.target === box && box.close());
+  box.addEventListener("keydown", (event) => {
+    if (thumbs.length < 2 || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
+    event.preventDefault();
+    show(at + (event.key === "ArrowRight" ? 1 : -1));
+  });
+  box.addEventListener("close", () => {
+    // (Back where you were: the thumbnail of the picture last seen, in view.)
+    const back = thumbs[at] ?? from;
+    back?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "auto" });
+    back?.focus();
+  });
 }
 
 // ── Install in Zeron ───────────────────────────────────────────────────

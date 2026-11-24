@@ -535,6 +535,8 @@ Footnotes are shown as typed.[^1] Questions and ideas are welcome on [the reposi
     installs: 7000,
     featured: true,
     age: 12,
+    // (As many pictures as the store takes: the row scrolls, its arrows show.)
+    screenshots: 8,
     // A version in every state, a reviewer's reason as long as they write them.
     history: [
       { version: "1.0.0", status: "verified", ago: 12, mcp: { command: "node", args: ["server.js"], env: { API_URL: "https://api.averyveryverylongsubdomainname.example.com" } }, service: "service.luau", settings: [{ key: "notes", kind: "folder", label: "Notes folder" }] },
