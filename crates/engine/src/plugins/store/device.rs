@@ -1030,6 +1030,8 @@ impl Plugins {
             }
             let events: Vec<_> = feed.events.iter().filter(|e| after.is_none_or(|a| e.seq > a) && e.seq <= feed.head).collect();
             let Some(last) = events.iter().map(|e| e.seq).max() else { return };
+            // (A template's is never a plugin's here.)
+            let events = events.into_iter().filter(|e| e.item_kind == Some(client::Kind::Plugin));
             let candidates = self.store_candidates(None);
             let mut down: BTreeMap<&str, (&Candidate, String)> = BTreeMap::new();
             let mut restored: Vec<&Candidate> = Vec::new();
@@ -1139,6 +1141,7 @@ impl Plugins {
                     .iter()
                     .map(|c| Asked { id: c.id.clone(), version: c.version.clone(), hash: c.hash.clone(), prerelease: c.prerelease })
                     .collect(),
+                templates: Vec::new(),
             };
             let reply = match client.updates(&ask, &caller).await {
                 Ok(reply) => reply,
@@ -1172,7 +1175,8 @@ impl Plugins {
         // store says: a hostile answer repeating one costs nothing more).
         let mut blocked: BTreeMap<&str, (&Candidate, String)> = BTreeMap::new();
         for block in &blocks {
-            if let Some(c) = by_id.get(block.id.as_str())
+            if block.item_kind == Some(client::Kind::Plugin)
+                && let Some(c) = by_id.get(block.id.as_str())
                 && same_version(&block.version, &c.version)
             {
                 blocked.entry(c.id.as_str()).or_insert_with(|| (*c, plain(&block.reason, 500)));

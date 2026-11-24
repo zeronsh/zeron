@@ -584,6 +584,34 @@ async fn take_downs_reach_the_device_by_the_feed_and_a_restore_asks_again() {
     assert_eq!(store.state.lock().unwrap().asks.len(), asks + 1);
 }
 
+/// A template's take-down is never a plugin's, whatever its id and version;
+/// the device's place in the feed moves past it all the same.
+#[tokio::test]
+async fn a_template_s_take_down_never_touches_a_plugin() {
+    let store = FakeStore::start().await;
+    let (key, _) = SigningKey::generate().unwrap();
+    store.add("ada", &package_of(&key, "focus", "1.0.0", &["ui.add"], "return 1", json!({})), "verified", "");
+    let d = device(&store, Some("bob"));
+    d.call(methods::INSTALL_PLUGIN, json!({ "store": "focus" })).await.unwrap();
+    assert_eq!(d.allow("focus").await["status"], "on");
+    d.plugins.check_takedowns().await;
+    {
+        let mut state = store.state.lock().unwrap();
+        state.events.push((1, "take_down".into(), "focus".into(), "1.0.0".into(), "A template's.".into()));
+        state.template_events.insert(1);
+    }
+    d.plugins.check_takedowns().await;
+    let item = d.item("focus").await;
+    assert_eq!((item["status"].as_str(), item.get("blocked"), item["source"]["verified"].as_bool()), (Some("on"), None, Some(true)), "{item}");
+    // The next event is the plugin's own, asked for after the template's.
+    store.block("focus", "1.0.0", "Its own.");
+    d.plugins.check_takedowns().await;
+    let item = d.item("focus").await;
+    assert_eq!((item["status"].as_str(), item["blocked"]["reason"].as_str()), (Some("off"), Some("Its own.")), "{item}");
+    let asked = store.state.lock().unwrap().requests.iter().filter(|(_, p, _)| p == "/store/v1/takedowns?after=1").count();
+    assert_eq!(asked, 1, "its place moved past the template's event");
+}
+
 #[tokio::test]
 async fn a_featured_search_lists_only_the_featured_ones_in_the_store_s_order() {
     let store = FakeStore::start().await;

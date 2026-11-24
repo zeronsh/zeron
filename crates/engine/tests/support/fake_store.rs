@@ -109,6 +109,9 @@ pub struct State {
     pub card_extra: Value,
     /// The take-down feed: `(seq, kind, id, version, reason)`, in order.
     pub events: Vec<(u64, String, String, String, String)>,
+    /// Those events that are templates' (`item_kind: "template"`), by seq;
+    /// the rest are plugins'.
+    pub template_events: std::collections::BTreeSet<u64>,
     /// Events at or below this `seq` are forgotten (older than the feed
     /// keeps): asking after one answers a reset.
     pub feed_floor: u64,
@@ -547,7 +550,10 @@ impl FakeStore {
                             .iter()
                             .filter(|e| e.0 > after)
                             .take(500)
-                            .map(|(seq, kind, id, version, reason)| json!({ "seq": seq, "kind": kind, "id": id, "version": version, "reason": reason }))
+                            .map(|(seq, kind, id, version, reason)| {
+                                let item_kind = if state.template_events.contains(seq) { "template" } else { "plugin" };
+                                json!({ "seq": seq, "kind": kind, "item_kind": item_kind, "id": id, "version": version, "reason": reason })
+                            })
                             .collect();
                         json_reply(200, json!({ "events": events, "head": head }))
                     }
