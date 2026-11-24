@@ -68,10 +68,12 @@ pub fn never_templated(rel: &str) -> bool {
     })
 }
 
-/// A template's own files that aren't part of its interface (its README
-/// links the authoring guide).
+/// A template's own files that aren't part of its interface: its manifest
+/// and its listing (the engine's `listing::TEMPLATE_LISTING_FILES`, spelled
+/// exactly as there). None is ever loaded: the engine takes a change to the
+/// listing as no change of code, so such an update asks nothing.
 pub fn template_meta(rel: &str) -> bool {
-    matches!(rel, "zeron-template.json" | "preview.png" | "README.md")
+    matches!(rel, "zeron-template.json" | "preview.png" | "README.md" | "CHANGELOG.md") || rel.starts_with("screenshots/")
 }
 
 pub fn hash(bytes: &[u8]) -> String {
@@ -901,6 +903,33 @@ mod tests {
             overlay.from_template,
             BTreeSet::from(["screens/extra.luau".to_string(), "screens/shell/sidebar.luau".to_string()])
         );
+    }
+
+    /// The engine installs a change to a template's listing without asking,
+    /// so nothing of it is ever laid down, kept by digest or counted; in any
+    /// other spelling a file is the template's code, there as here.
+    #[test]
+    fn a_template_s_listing_is_never_loaded() {
+        let t = setup("listing");
+        let listing = ["README.md", "CHANGELOG.md", "preview.png", "screenshots/shot.png", "screenshots/app.luau", "screenshots/deep/run.luau"];
+        let digest = super::super::preview::digest(&t.join("t"));
+        for rel in listing {
+            write(&t.join("t"), rel, "return 1");
+        }
+        assert_eq!(super::super::preview::digest(&t.join("t")), digest, "no part of what's kept");
+        let (_, overlay) = compose(&t, "t", &BTreeSet::new(), false).unwrap();
+        for rel in listing {
+            assert!(template_meta(rel), "{rel}");
+            assert!(!t.join(LIVE).join(rel).exists(), "{rel}");
+            assert!(!overlay.from_template.contains(rel), "{rel}");
+        }
+        for rel in ["Screenshots/app.luau", "screenshots.luau", "screens/screenshots/app.luau", "changelog.md", "docs/CHANGELOG.md"] {
+            assert!(!template_meta(rel), "{rel}");
+        }
+        write(&t.join("t"), "screenshots.luau", "return 2");
+        assert_ne!(super::super::preview::digest(&t.join("t")), digest, "code");
+        compose(&t, "t", &BTreeSet::new(), false).unwrap();
+        assert!(t.join(LIVE).join("screenshots.luau").is_file());
     }
 
     /// R30: a protected path spelled as a case-insensitive filesystem reads
