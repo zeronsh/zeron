@@ -766,7 +766,8 @@ for (const [i, [id, name, summary, icon, categories]] of MORE.entries()) {
     age: 10 + i * 3,
     screenshots: i % 4 === 0 ? 0 : 1,
     // (Weather needs a Zeron not out yet: Install is off on its page.)
-    history: [{ version: `1.${i % 5}.0`, status: "verified", ago: 10 + i * 3, ...(id === "weather" ? { engines: ">=0.9.0" } : {}) }],
+    // (Cloud costs' newest came from CI, by a deploy token: Your plugins says so.)
+    history: [{ version: `1.${i % 5}.0`, status: "verified", ago: 10 + i * 3, ...(id === "weather" ? { engines: ">=0.9.0" } : {}), ...(id === "cloud-costs" ? { via: "deploy_token" as const } : {}) }],
   });
 }
 

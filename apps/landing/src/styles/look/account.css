@@ -10,9 +10,12 @@
 .acct .crumbs > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* (A crumb between the first and the last, a plugin's name, is cut too when the line is short.) */
 .acct .crumbs a:not(:first-child) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.acct .hd { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--s48); }
+/* The head: the title and the page's one action on one row (the button level with the title), the lead under. */
+.acct .hd-row { display: flex; align-items: center; justify-content: space-between; gap: var(--s24); }
+.acct .hd-row h1 { min-width: 0; }
+.acct .hd-row > .btn { flex: none; }
 .acct h1 { font-size: 40px; line-height: 44px; letter-spacing: -0.035em; }
-.acct .lead { margin-top: var(--s12); max-width: 37em; }
+.acct .lead { margin-top: var(--s8); max-width: 37em; }
 .sub { display: flex; gap: var(--s32); margin-top: var(--s32); box-shadow: inset 0 -1px 0 var(--line); }
 .sub a { position: relative; padding: 0 0 var(--s12); font-size: 15px; line-height: 22px; font-weight: 500; color: var(--text-3); display: flex; gap: var(--s8); align-items: baseline; border-radius: 4px 4px 0 0; transition: color 0.12s var(--ease); }
 .sub a:hover { color: var(--text); }
@@ -29,33 +32,40 @@
 .acct .empty { padding-top: var(--s32); }
 .acct .empty .cmd { margin-top: var(--s16); }
 
-/* ---- Your plugins: each one, its newest version, and where that version stands ---- */
-.mine { margin-top: var(--s32); margin-inline: calc(-1 * var(--card)); }
-.mine ul, .keys ul { padding: 0; list-style: none; }
-.row { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1.45fr) minmax(0, 0.95fr) 80px 16px; gap: var(--s32); align-items: start; padding: var(--s24) var(--card); transition: background-color 0.12s var(--ease); }
-a.row:hover { background: color-mix(in srgb, var(--sunken) 55%, transparent); }
-a.row:hover > svg { transform: translateX(2px); stroke: var(--text); }
-a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
-.mine li + li .row, .row.h + ul .row { box-shadow: 0 -1px 0 var(--line); }
-.row.h { padding-top: var(--s16); padding-bottom: var(--s12); font-size: 13px; line-height: 20px; color: var(--text-3); }
-.row .r { text-align: right; }
-.who { display: flex; align-items: center; gap: var(--s16); min-width: 0; }
-.who > div { min-width: 0; }
-.who .nm { font-weight: 550; letter-spacing: -0.005em; line-height: 22px; text-wrap: balance; }
-.who .id { font: 450 12.5px/18px var(--mono); color: var(--text-3); margin-top: var(--s4); overflow-wrap: anywhere; }
-.ver { font-size: 14px; line-height: 20px; padding-top: var(--s4); min-width: 0; }
-.ver .top1 { display: flex; align-items: center; flex-wrap: wrap; row-gap: var(--s4); min-height: 24px; }
-.ver b { font: 600 14px/20px var(--mono); letter-spacing: -0.01em; overflow-wrap: anywhere; }
-.ver small { display: flex; align-items: center; gap: var(--s8); margin-top: var(--s8); font-size: 13px; line-height: 18px; color: var(--text-3); }
-.ver small .seal { vertical-align: 0; }
-.ver small.why { display: block; color: var(--text-2); overflow-wrap: anywhere; }
-.pub { font-size: 14px; line-height: 20px; padding-top: var(--s4); min-width: 0; }
-.pub small { display: flex; align-items: center; gap: var(--s8); margin-top: var(--s4); font-size: 13px; line-height: 18px; color: var(--text-3); min-width: 0; }
-.pub small svg { width: 14px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.row .n { text-align: right; font-size: 14px; line-height: 20px; padding-top: var(--s4); }
-.row > svg { width: 16px; height: 16px; margin-top: var(--s4); fill: none; stroke: var(--text-3); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform 0.12s var(--ease), stroke 0.12s var(--ease); }
-.row.off .tile { filter: grayscale(1); opacity: 0.7; }
-.row.off .nm, .row.off .n { color: var(--text-2); }
+/* ---- Your plugins and Deploy tokens: a table of rows, one line each ---- */
+/* (No box round it: the header in the label's style, then the rows, a faint rule between. A row hangs by its
+   padding as a card does, its words on the column; hovered, the whole of it fills.) */
+.tbl { margin-top: var(--s24); margin-inline: calc(-1 * var(--s16)); }
+.tbl ul { padding: 0; list-style: none; }
+.trow { position: relative; display: grid; column-gap: var(--s24); align-items: center; min-height: 56px; padding: var(--s12) var(--s16); border-radius: 12px; font-size: 14px; line-height: 20px; transition: background-color 0.12s var(--ease); }
+/* (The rule between two rows is a line of its own, straight across the row's width; the hover's fill has the
+   corners. A hovered row's rule, and the next one's, give way to its fill.) */
+.tbl li + li > .trow::after, li.trow + li.trow::after, .th + ul > li:first-child > .trow::after, .th + ul > li.trow:first-child::after { content: ""; position: absolute; inset: 0 0 auto; height: 1px; background: var(--line); pointer-events: none; }
+.trow:is(a, li):hover { background: var(--surface); }
+.trow:is(a, li):hover::after, li:hover + li > .trow::after, li.trow:hover + li.trow::after { opacity: 0; }
+a.trow:focus-visible { outline-offset: -2px; }
+.trow.th { min-height: 0; padding-top: 0; padding-bottom: var(--s8); font-size: 13px; line-height: 20px; font-weight: 500; color: var(--text-3); }
+.trow > *, .trow .c-name { min-width: 0; }
+.trow .r { text-align: right; }
+/* (A name on one line, cut with an ellipsis; whole in its title.) */
+.c-name { display: flex; align-items: center; gap: var(--s12); }
+.c-name .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 550; letter-spacing: -0.005em; color: var(--text); }
+.c-name .id { flex: none; font: 450 12.5px/20px var(--mono); color: var(--text-3); }
+/* A second line, only for what's unusual: under the row, from the second column. */
+.c-note { grid-column: 2 / -1; margin-top: var(--s4); font-size: 13px; line-height: 20px; color: var(--text-2); overflow-wrap: anywhere; }
+
+/* Your plugins: the plugin, its newest version and its pill, when it was published, installs, a chevron. */
+.mine .trow { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1.25fr) minmax(0, 0.9fr) 88px 16px; }
+.c-ver { display: flex; align-items: center; min-width: 0; white-space: nowrap; }
+.c-ver b { font: 550 13.5px/20px var(--mono); letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; }
+.c-pub { display: flex; align-items: center; gap: var(--s8); color: var(--text-2); white-space: nowrap; }
+.c-pub .via { display: inline-flex; align-items: center; gap: var(--s4); font-size: 13px; color: var(--text-3); }
+.c-pub .via svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.c-n { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-2); }
+.mine .trow > svg { width: 16px; height: 16px; fill: none; stroke: var(--text-3); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform 0.12s var(--ease), stroke 0.12s var(--ease); }
+.mine a.trow:hover > svg { transform: translateX(2px); stroke: var(--text); }
+.trow.off .tile { filter: grayscale(1); opacity: 0.7; }
+.trow.off .nm, .trow.off .c-n { color: var(--text-2); }
 
 /* ---- One of your plugins: its versions, each where it stands, what that means, and what you can do ---- */
 .mhead { display: flex; align-items: center; gap: var(--s16); }
@@ -85,52 +95,43 @@ a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
 .mkeys a { color: var(--text-2); font-weight: 500; border-radius: 4px; }
 .mkeys a:hover { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
 
-/* ---- Deploy tokens ---- */
-.keys { margin-top: var(--s32); }
-/* "Can publish" is two tracks: one slot for the tiles, always room for three and the count (so every row's
-   words, and the header's, start on one column, whatever the key holds), and the words' own. Its parts are
-   the row's grid items: a key for many puts its count and "Show all" in the words' track, one under the
-   other, and the whole list opens under the row. Every cell's first line sits on the tiles' line: the
-   tiles at the top, each cell's words 6px down, a 20px line centred on a 32px tile. */
-.card.keys { margin-inline: calc(-1 * var(--card)); }
-.key { --gap: var(--s32); --slot: calc(4 * 32px + 3 * 4px); display: grid; grid-template-columns: minmax(0, 1.15fr) calc(var(--slot) + 12px - var(--gap)) minmax(0, 0.75fr) minmax(0, 1fr) 132px 72px; column-gap: var(--gap); align-items: start; padding: var(--s24) var(--card); }
-.key.h > .sc { grid-column: 3; }
-.keys li + li.key, .key.h + ul .key { box-shadow: 0 -1px 0 var(--line); }
-.key.h { padding-top: var(--s16); padding-bottom: var(--s12); font-size: 13px; line-height: 20px; color: var(--text-3); }
-.key:not(.h) > :is(.kname, .used, .ends), .scope > .w, .scope .count { padding-top: var(--s8); }
-.key .kname { min-width: 0; }
-.key .nm { font-weight: 550; letter-spacing: -0.005em; overflow-wrap: anywhere; text-wrap: balance; }
-.key .id { margin-top: var(--s4); font: 450 12.5px/18px var(--mono); color: var(--text-3); }
-.scope, .scope.many .w, .scope.many .every { display: contents; }
-/* (The slot is fixed; its tiles end at its right edge, one gap before the words, however many there are.) */
-.scope > .tiles, .scope > .all { grid-column: 2; justify-self: end; margin-right: calc(var(--s12) - var(--gap)); }
-.scope > .w { grid-column: 3; min-width: 0; }
-/* The tiles side by side, never over one another; past three, the count, a tile of its own. */
-.scope .tiles { display: flex; gap: var(--s4); }
-.scope .tiles .more { width: 32px; height: 32px; padding: 0; border-radius: 27%; background: var(--sunken); color: var(--text-2); font: 600 11px/1 var(--sans); letter-spacing: -0.01em; font-variant-numeric: tabular-nums; box-shadow: inset 0 0 0 1px var(--line); }
-.scope .w { font-size: 14px; line-height: 20px; }
-.scope .w .names { overflow-wrap: anywhere; text-wrap: balance; }
-.scope .w small { display: block; font-size: 13px; color: var(--text-3); }
-.all { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 27%; background: var(--sunken); color: var(--text-2); }
-.all svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.key:has(.many) > :is(.kname, .used, .ends, .btn), .scope.many .tiles { grid-row: 1 / 3; }
-.scope.many .count { grid-column: 3; grid-row: 1; }
-.scope.many summary { grid-column: 3; grid-row: 2; justify-self: start; }
-.scope.many .every::details-content { grid-column: 2 / -1; grid-row: 3; }
-.every summary { display: inline-flex; align-items: center; gap: var(--s4); font-size: 13px; line-height: 20px; color: var(--text-2); font-weight: 500; list-style: none; cursor: pointer; border-radius: 4px; }
-.every summary::-webkit-details-marker { display: none; }
-.every summary:hover { color: var(--text); }
-.every summary svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; transform: rotate(90deg); transition: transform 0.12s var(--ease); }
-.every[open] summary svg { transform: rotate(-90deg); }
-.plist { display: flex; flex-wrap: wrap; gap: var(--s8); margin-top: var(--s12); margin-left: calc(-1 * var(--s16)); padding: var(--s12); border-radius: 14px; background: var(--sunken); list-style: none; }
-.pl { display: inline-flex; align-items: center; gap: var(--s8); min-height: 32px; max-width: 100%; padding: var(--s4) var(--s12) var(--s4) var(--s4); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-1); font-size: 13px; line-height: 18px; font-weight: 500; overflow-wrap: anywhere; text-wrap: balance; }
-.used { font-size: 14px; line-height: 20px; min-width: 0; }
-.used small { display: block; font-size: 13px; color: var(--text-3); overflow-wrap: anywhere; text-wrap: balance; }
-.ends { font-size: 14px; line-height: 20px; color: var(--text-2); }
-.ends > .state { margin-left: calc(-1 * var(--pad)); }
-.key .btn { justify-self: end; margin-right: calc(-1 * var(--pad)); }
-.key.was { color: var(--text-2); }
-.key.was .nm { color: var(--text-2); }
+/* ---- Deploy tokens: the token, what it can publish, last used, when it ends, Revoke ---- */
+.keys .trow { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 0.8fr) 72px; }
+.keys .c-name { gap: var(--s8); }
+/* (Each cell in its place: a token's list of plugins, when opened, is a row of its own under it.) */
+.keys .trow > .c-name { grid-column: 1; grid-row: 1; }
+.keys .trow .c-scope { grid-column: 2; grid-row: 1; }
+.keys .c-when { display: contents; }
+.keys .trow .c-used { grid-column: 3; grid-row: 1; }
+.keys .trow .c-ends { grid-column: 4; grid-row: 1; }
+/* (Words a phone's line says, the header's on a wide screen.) */
+.keys .ph { display: none; }
+.keys .wd { display: inline; }
+.keys .trow > :last-child:not(.c-when) { grid-column: 5; grid-row: 1; }
+.keys .trow .every::details-content { grid-column: 1 / -1; grid-row: 2; }
+/* (What it can publish, in its own column: the words, up to three small tiles and +n; with many, Show all, which
+   opens the whole list as a row of its own under the token.) */
+.c-scope { display: flex; align-items: center; gap: var(--s8); min-width: 0; white-space: nowrap; }
+.c-scope .sw { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.c-scope .tiles { display: flex; flex: none; align-items: center; gap: var(--s4); }
+.c-scope .tile.xs { width: 20px; height: 20px; font-size: 9px; }
+.c-scope .more { font-size: 12px; color: var(--text-3); }
+.c-scope .show { font-size: 13px; color: var(--text-2); font-weight: 500; }
+.every { display: contents; }
+.every > summary { list-style: none; cursor: pointer; border-radius: 4px; }
+.every > summary::-webkit-details-marker { display: none; }
+.every > summary:hover .show { color: var(--text); }
+.every > summary > svg { width: 12px; height: 12px; flex: none; fill: none; stroke: var(--text-3); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; transform: rotate(90deg); transition: transform 0.12s var(--ease); }
+.every[open] > summary > svg { transform: rotate(-90deg); }
+.plist { display: flex; flex-wrap: wrap; gap: var(--s8); margin-top: var(--s12); padding: 0; list-style: none; }
+.pl { display: inline-flex; align-items: center; gap: var(--s8); min-height: 28px; max-width: 100%; padding: var(--s4) var(--s12) var(--s4) var(--s4); border-radius: 8px; background: var(--sunken); font-size: 13px; line-height: 18px; font-weight: 500; overflow-wrap: anywhere; }
+.c-used { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+.c-ends { color: var(--text-2); white-space: nowrap; }
+.c-ends > .state { margin-left: calc(-1 * var(--pad)); }
+/* (Revoke: a quiet button in the danger's ink, at the row's right, hanging by its padding.) */
+.keys .btn.revoke { justify-self: end; margin-right: calc(-1 * var(--pad)); color: var(--danger); }
+.keys .btn.revoke:hover { color: var(--danger); background: var(--danger-wash); }
+.trow.was, .trow.was .nm { color: var(--text-2); }
 .gone { margin-top: var(--s24); }
 .gone summary { display: inline-flex; align-items: center; gap: var(--s8); font-size: 14px; line-height: 20px; color: var(--text-2); font-weight: 500; list-style: none; cursor: pointer; border-radius: 4px; }
 .gone summary::-webkit-details-marker { display: none; }
@@ -216,9 +217,8 @@ a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
 
 @media (max-width: 1024px) {
   .vr { grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.5fr) minmax(0, 0.8fr) auto; gap: var(--s24); }
-  .row { grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) minmax(0, 0.9fr) 16px; gap: var(--s24); }
-  .row .n, .row.h .r { display: none; }
-  .key { --gap: var(--s24); grid-template-columns: minmax(0, 1fr) calc(var(--slot) + 12px - var(--gap)) minmax(0, 0.6fr) minmax(0, 0.9fr) 112px 72px; }
+  .mine .trow { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.3fr) minmax(0, 0.9fr) 72px 16px; column-gap: var(--s16); }
+  .keys .trow { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 0.9fr) 72px; column-gap: var(--s16); }
 }
 @media (max-width: 860px) {
   .vr.h { display: none; }
@@ -232,29 +232,6 @@ a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
   .mhead { flex-wrap: wrap; row-gap: var(--s16); }
   .mhead .txt { flex-basis: calc(100% - 74px); }
   .mhead > .btn { margin-left: var(--s64); }
-  .acct .hd { flex-direction: column; align-items: flex-start; gap: var(--s24); }
-  .acct .hd > .btn { margin-left: calc(-1 * var(--pad)); }
-  .row.h, .key.h { display: none; }
-  .row { grid-template-columns: minmax(0, 1fr) auto; gap: var(--s12) var(--s16); padding: var(--s16) var(--card); }
-  .row .who { grid-column: 1; }
-  .row > svg { grid-column: 2; grid-row: 1; align-self: center; }
-  .row .ver, .row .pub { grid-column: 1 / -1; }
-  .row .pub { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s4) var(--s12); padding: 0; }
-  .row .pub small { margin: 0; }
-  .key { grid-template-columns: minmax(0, 1fr) auto; gap: var(--s12) var(--s16); padding: var(--s16) var(--card); }
-  .key .kname { grid-column: 1; grid-row: 1; padding-top: 0; }
-  .key .btn { grid-column: 2; grid-row: 1; }
-  .key .used, .key .ends { grid-column: 1 / -1; grid-row: auto; margin: 0; padding-top: 0; }
-  .key:has(.many) > :is(.used, .ends) { grid-row: auto; }
-  /* (Stacked, on the name's column: the tiles, then the words under them, then a token for many's list.) */
-  .key .scope, .key .scope.many { display: grid; grid-template-columns: minmax(0, 1fr); row-gap: var(--s8); grid-column: 1 / -1; }
-  .scope > .tiles, .scope > .all, .scope.many .tiles { grid-column: 1; grid-row: 1; justify-self: start; margin-right: 0; }
-  .scope > .w, .scope.many .count { grid-column: 1; grid-row: 2; padding-top: 0; }
-  .scope.many summary { grid-column: 1; grid-row: 3; margin-top: calc(-1 * var(--s8)); }
-  .scope.many .every::details-content { grid-column: 1; grid-row: 4; }
-  /* (Inside one token's row, its parts an item's step apart: the grid's 8, the list no further.) */
-  .scope.many .plist { margin-top: 0; }
-  .key .used { display: flex; flex-wrap: wrap; gap: var(--s4) var(--s12); align-items: baseline; }
   .how { grid-template-columns: minmax(0, 1fr); gap: var(--s24); }
 }
 @media (max-width: 720px) {
@@ -263,7 +240,55 @@ a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
   .acct h1 { font-size: 32px; line-height: 36px; }
   .sub { margin-top: var(--s32); gap: var(--s24); }
   /* (As wide as the column, as wide as the screen: the cards hang the whole gutter.) */
-  .mine, .vlist, .card.keys { border-radius: 0; }
+  .vlist { border-radius: 0; }
+  /* (The head: the title, its lead, then the button, its own width, hanging by its padding.) */
+  .acct .hd { display: flex; flex-direction: column; align-items: flex-start; }
+  .acct .hd-row { display: contents; }
+  .acct .hd > .lead { order: 1; }
+  .acct .hd-row > .btn { order: 2; margin-top: var(--s16); margin-left: calc(-1 * var(--pad)); }
+  /* A row in two lines: its name and where it stands; then the rest, small, one after another. No columns. */
+  .trow.th { display: none; }
+  .trow { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s4) var(--s8); padding-block: var(--s12); }
+  .trow::before { content: ""; order: 2; flex-basis: 100%; height: 0; }
+  .trow .c-name { order: 0; flex: 1 1 0; }
+  .trow > :is(.c-pub, .c-n, .c-used, .c-ends), .trow > span.c-scope, .mine .c-ver b { font-size: 13px; color: var(--text-3); }
+  .trow > :is(.c-pub, .c-n, .c-ends) { flex: none; }
+  .trow > .c-note { order: 9; flex-basis: 100%; margin-top: 0; }
+  .mine .c-ver { display: contents; }
+  .mine .c-ver .state { order: 1; margin-left: 0; }
+  .mine .c-ver b { order: 3; font-size: 13px; color: var(--text-3); }
+  .mine .c-pub { order: 4; }
+  .mine .c-n { order: 5; }
+  .mine .trow > svg { display: none; }
+  /* (A token in three lines: its name, id and Revoke; what it can publish; "Last used … · Ends …", only a long
+     plugin's name cut. Its list of plugins, opened, under them.) */
+  .keys .trow { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--s12); row-gap: var(--s4); }
+  .keys .trow::before { display: none; }
+  .keys .trow.th { display: none; }
+  .keys .trow > .c-name { grid-column: 1; grid-row: 1; }
+  /* (The button and the pill reach past their line's height into the row's padding: the lines sit an item's step
+     apart.) */
+  .keys .trow > .btn.revoke { grid-column: 2; grid-row: 1; margin-block: calc(-1 * var(--s8)); }
+  .keys .trow .c-scope { grid-column: 1 / -1; grid-row: 2; min-width: 0; justify-self: start; max-width: 100%; }
+  .keys .c-when { display: flex; align-items: center; gap: var(--s8); grid-column: 1 / -1; grid-row: 3; min-width: 0; font-size: 13px; color: var(--text-3); }
+  .keys .trow .c-used { flex: 0 1 auto; min-width: 0; font-size: 13px; color: var(--text-3); }
+  .keys .trow .c-ends { flex: none; font-size: 13px; color: var(--text-3); }
+  .keys .trow .c-ends::before { content: "·"; margin-right: var(--s8); }
+  .keys .trow .c-ends > .state { margin-left: 0; margin-block: calc(-1 * var(--s4)); }
+  .keys .ph { display: inline; }
+  .keys .wd { display: none; }
+  .keys .trow .every::details-content { grid-column: 1 / -1; grid-row: 4; }
+  .keys .trow.was > :last-child:not(.c-when) { display: none; }
+  /* (Many plugins: the count and Show all, a dot between; the tiles, which repeat the list, give way.) */
+  .keys .every .tiles { display: none; }
+  .keys .every .c-scope .sw { flex: none; }
+  .keys .every .show::before { content: "·"; margin-right: var(--s8); color: var(--text-3); font-weight: 400; }
+  .keys .c-scope { font-size: 13px; color: var(--text-2); }
+  .every .plist { margin-top: var(--s8); }
+  /* (A plugin's: its version, when, how many; a dot between.) */
+  :is(.mine .c-pub, .mine .c-n)::before { content: "·"; color: var(--text-3); }
+  .mine .c-n::before { margin-right: var(--s8); }
+  .c-n .unit { position: static; width: auto; height: auto; margin: 0; overflow: visible; clip: auto; white-space: normal; }
   .please, .askcard { margin-inline: calc(-1 * var(--gutter)); padding: var(--s24) var(--gutter); border-radius: 0; max-width: none; }
   .askcard .answers { flex-direction: column-reverse; }
   .askcard .answers .btn { width: 100%; }

@@ -78,78 +78,61 @@ describe("the columns the rule names", () => {
       }
   }, 120_000);
 
-  test("Deploy tokens: every row's words start on one column, its header's, and its tiles end one gap before it, whatever the token holds", async () => {
-    for (const width of [1440, 1024]) {
+  test("Deploy tokens: what a token can publish stays in its column: every tile and its +n inside it, the column the header's, nothing over the next", async () => {
+    for (const width of [1440, 1024, 390]) {
       const page = await open({ path: "/account/tokens", user: "user_ada" }, width, "dark");
       try {
-        const starts = await page.evaluate(() => {
-          const first = (el: Element | null) => {
-            if (!el) return null;
-            const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
-            for (let n = walker.nextNode(); n; n = walker.nextNode()) {
-              if (!n.textContent!.trim()) continue;
-              const r = document.createRange();
-              r.setStart(n, n.textContent!.search(/\S/));
-              r.setEnd(n, n.textContent!.search(/\S/) + 1);
-              return r.getClientRects()[0]?.left ?? null;
-            }
-            return null;
-          };
-          const header = document.querySelector(".key.h > .sc");
-          const live = [...document.querySelectorAll("ul > li.key:not(.was)")];
-          const rows = live.map((row) => first(row.querySelector(".scope > .w, .scope .count")));
-          // (Each row's tiles, or the grid of all of yours: where they end, however many.)
-          const ends = live.map((row) => row.querySelector(".scope .tiles, .scope > .all")!.getBoundingClientRect().right);
-          return { header: header && (header as HTMLElement).offsetParent ? first(header) : null, rows, ends };
+        const got = await page.evaluate(() => {
+          const header = document.querySelector<HTMLElement>(".keys .trow.th > :nth-child(2)");
+          const column = header && header.offsetParent ? header.getBoundingClientRect() : null;
+          return [...document.querySelectorAll(".keys ul > li.trow:not(.was)")].map((row) => {
+            const cell = row.querySelector(".c-scope")!.getBoundingClientRect();
+            const next = row.querySelector(".c-used")!.getBoundingClientRect();
+            const marks = [...row.querySelectorAll(".c-scope :is(.tile, .more)")].filter((el) => (el as HTMLElement).offsetParent).map((el) => el.getBoundingClientRect());
+            return { cell: [cell.left, cell.right], next: next.left, top: next.top, cellTop: cell.top, marks: marks.map((m) => [m.left, m.right]), column: column ? [column.left, column.right] : null };
+          });
         });
-        const column = starts.header ?? starts.rows[0]!;
-        expect(starts.rows.length).toBeGreaterThan(5);
-        for (const [i, x] of starts.rows.entries()) expect(Math.abs(x! - column), `${width}: row ${i + 1}'s words`).toBeLessThanOrEqual(1);
-        // The tiles end one gap before the words, one tile or four, or the grid of all of yours.
-        const counts = new Set<number>();
-        for (const [i, end] of starts.ends.entries()) {
-          expect(Math.abs(column - end - 12), `${width}: row ${i + 1}'s tiles end 12 before its words`).toBeLessThanOrEqual(1);
-          counts.add(Math.round(end));
+        expect(got.length).toBeGreaterThan(5);
+        for (const [i, r] of got.entries()) {
+          for (const [left, right] of r.marks) {
+            expect(left, `${width}: row ${i + 1}: a tile left of its column`).toBeGreaterThanOrEqual(r.cell[0]! - 1);
+            expect(right, `${width}: row ${i + 1}: a tile past its column`).toBeLessThanOrEqual(r.cell[1]! + 1);
+            // (On a row's line with the next cell, never reaching it.)
+            if (Math.abs(r.top - r.cellTop) < 8) expect(right, `${width}: row ${i + 1}: a tile over Last used`).toBeLessThan(r.next);
+          }
+          // (Wide, the cell is the header's column: its left edge the header's.)
+          if (r.column) expect(Math.abs(r.cell[0]! - r.column[0]!), `${width}: row ${i + 1}'s column`).toBeLessThanOrEqual(1);
         }
-        expect(counts.size, `${width}: one place where every row's tiles end`).toBe(1);
+        // (Some rows do show tiles: the test isn't empty.)
+        expect(got.some((r) => r.marks.length > 0)).toBe(true);
       } finally {
         await page.context().close();
       }
     }
   }, 120_000);
 
-  test("Deploy tokens on a phone: each row's tiles start on its name's column, its words on their own line under them, on the same column", async () => {
-    for (const width of [390, 768]) {
-      const page = await open({ path: "/account/tokens", user: "user_ada" }, width, "dark");
-      try {
-        const rows = await page.evaluate(() => {
-          const first = (el: Element | null) => {
-            const walker = document.createTreeWalker(el!, NodeFilter.SHOW_TEXT);
-            for (let n = walker.nextNode(); n; n = walker.nextNode()) {
-              if (!n.textContent!.trim()) continue;
-              const r = document.createRange();
-              r.setStart(n, n.textContent!.search(/\S/));
-              r.setEnd(n, n.textContent!.search(/\S/) + 1);
-              return r.getClientRects()[0]!;
-            }
-            return null;
-          };
-          return [...document.querySelectorAll("ul > li.key:not(.was)")].map((row) => {
-            const tiles = row.querySelector(".scope .tiles, .scope > .all")!.getBoundingClientRect();
-            const words = first(row.querySelector(".scope > .w, .scope .count"))!;
-            return { name: first(row.querySelector(".kname .nm"))!.left, tiles: [tiles.left, tiles.bottom], words: [words.left, words.top] };
+  test("a row of Your plugins or Deploy tokens: hovered, the whole of it fills, edge to edge of the table, its corners round", async () => {
+    for (const [path, row] of [["/account", ".mine ul > li:first-child > a.trow"], ["/account/tokens", ".keys ul > li.trow:first-child"]] as const)
+      for (const width of [1440, 390]) {
+        const page = await open({ path, user: "user_ada" }, width, "light");
+        try {
+          await page.locator(row).first().hover();
+          await page.waitForTimeout(200);
+          const got = await page.locator(row).first().evaluate((el) => {
+            const table = el.closest(".tbl")!.getBoundingClientRect();
+            const box = el.getBoundingClientRect();
+            const s = getComputedStyle(el);
+            return { fill: s.backgroundColor, radius: s.borderTopLeftRadius, box: [box.left, box.right], table: [table.left, table.right], page: getComputedStyle(document.body).backgroundColor };
           });
-        });
-        expect(rows.length).toBeGreaterThan(5);
-        for (const [i, r] of rows.entries()) {
-          expect(Math.abs(r.tiles[0]! - r.name), `${width}: row ${i + 1}'s tiles on its name's column`).toBeLessThanOrEqual(1);
-          expect(Math.abs(r.words[0]! - r.name), `${width}: row ${i + 1}'s words on its name's column`).toBeLessThanOrEqual(1);
-          expect(r.words[1]!, `${width}: row ${i + 1}'s words on their own line, under the tiles`).toBeGreaterThanOrEqual(r.tiles[1]!);
+          expect(got.fill, `${path} at ${width}: filled`).not.toBe("rgba(0, 0, 0, 0)");
+          expect(got.fill, `${path} at ${width}: a tone of its own`).not.toBe(got.page);
+          expect(got.radius).toBe("12px");
+          expect(Math.abs(got.box[0]! - got.table[0]!), `${path} at ${width}: from the table's left`).toBeLessThanOrEqual(1);
+          expect(Math.abs(got.box[1]! - got.table[1]!), `${path} at ${width}: to its right`).toBeLessThanOrEqual(1);
+        } finally {
+          await page.context().close();
         }
-      } finally {
-        await page.context().close();
       }
-    }
   }, 120_000);
 
   test("no two items of a group that fill (hover, chosen, focus) touch: 2 px between any two", async () => {
