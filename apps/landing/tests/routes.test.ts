@@ -293,7 +293,7 @@ describe("a plugin's page", () => {
     expect(body).toContain('<a href="/plugins/focus-timer/report">');
     // Every version verified: the seal by the name, Verified under Install, no amber note.
     expect(body).toMatch(/<h1 [^>]*><span class="name">Focus timer<\/span><svg class="seal l"/);
-    expect(body).toContain('<span class="said ok">Verified</span>');
+    expect(body).toMatch(/<span class="said ok"><svg class="seal"[^>]*>[\s\S]*?<\/svg>Verified<\/span>/);
     expect(body).not.toContain('<p class="note">');
   });
 

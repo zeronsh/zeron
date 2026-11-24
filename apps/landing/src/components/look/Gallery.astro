@@ -1,7 +1,7 @@
 ---
-// A plugin's pictures, as Raycast's store sets them: a row of thumbnails,
-// three across the page's width (one alone spans two of the three), each
-// 16:10 with a faint line round it. More than three, and the row scrolls
+// A plugin's pictures, as Raycast's store sets them: a row of thumbnails
+// that always fills the page's width, each 16:10 with a faint line round it:
+// one alone as wide as the article's column, two halves, three or more thirds. More than three, and the row scrolls
 // sideways (keyboard, touch, trackpad, no script needed); with the script an
 // arrow at its end takes it a screen on. Each thumbnail is a link to its
 // picture; with the script it opens the lightbox below instead (a native
@@ -24,7 +24,7 @@ const alt = (i: number) => `${name}, picture ${i + 1} of ${pictures.length}`;
 
 {
   pictures.length > 0 && (
-    <section class:list={["shots", { one: pictures.length === 1 }]} aria-label={`Pictures of ${name}`} data-shots>
+    <section class:list={["shots", { one: pictures.length === 1, two: pictures.length === 2 }]} aria-label={`Pictures of ${name}`} data-shots>
       <div class="shots-row" data-row>
         {pictures.map((src, i) => (
           <a class="shot" href={src} target="_blank" rel="noopener" data-shot={i}>

@@ -1,8 +1,8 @@
 ---
 // Getting it: Install in Zeron, the one primary button, its own width (it
 // opens Zeron at this plugin; it never installs by itself); under it, at its
-// right, one quiet line: the version it offers, whether Zeron verified it,
-// and when; and, when that version
+// right, one line: the version it offers, whether Zeron verified it (in
+// its state's ink, the check with Verified, as the store's pills), and when; and, when that version
 // isn't verified, the amber note: the newest verified one, to install
 // instead (the app's sentences, the contract's link that names a version).
 // "Nothing happened?" opens how to get Zeron, and opens by itself when the
@@ -10,6 +10,7 @@
 import { compatibility, day, since } from "../../lib/store/format.ts";
 import { appUrl, linkable } from "../../lib/store/urls.ts";
 import { store } from "../../lib/store/words.ts";
+import Seal from "./Seal.astro";
 import ZeronMark from "./ZeronMark.astro";
 
 interface Props {
@@ -52,7 +53,7 @@ const now = Date.now();
   </div>
   <p class="ver">
     <b class="mono">{version}</b><i aria-hidden="true"></i>
-    {verified ? <span class="said ok">{store("plugins.store.verified")}</span> : <span class="said no">{store("plugins.store.review.waiting")}</span>}<i aria-hidden="true"></i>
+    {verified ? <span class="said ok"><Seal quiet />{store("plugins.store.verified")}</span> : <span class="said no">{store("plugins.store.review.waiting")}</span>}<i aria-hidden="true"></i>
     {verified && verifiedAt !== null ? <time datetime={new Date(verifiedAt).toISOString()}>{day(verifiedAt, now)}</time> : <time datetime={new Date(publishedAt).toISOString()}>{since(publishedAt, now, true)}</time>}
   </p>
   {

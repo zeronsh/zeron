@@ -38,6 +38,11 @@
 .get .ver { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: var(--s4) var(--s8); font-size: 13px; line-height: 20px; color: var(--text-3); }
 .get .ver b { font-weight: 500; color: var(--text-2); }
 .get .ver i { width: 3px; height: 3px; border-radius: 50%; background: currentColor; opacity: 0.6; }
+/* (Its state in its pill's ink: Verified green with the check, not yet amber.) */
+.get .ver .said { display: inline-flex; align-items: center; gap: var(--s4); font-weight: 500; }
+.get .ver .said.ok { color: var(--verified); }
+.get .ver .said.no { color: var(--warn); }
+.get .ver .said .seal { width: 14px; height: 14px; }
 .get .alt { font-size: 13px; line-height: 20px; color: var(--text-3); }
 .get .alt button { color: var(--text-2); box-shadow: 0 1px 0 var(--line-2); border-radius: 2px; font-size: inherit; line-height: inherit; transition: color 0.12s var(--ease); }
 .get .alt button:hover { color: var(--text); }
@@ -58,7 +63,9 @@
 .shots { position: relative; margin-top: var(--s32); }
 .shots-row { display: grid; grid-auto-flow: column; grid-auto-columns: calc((100% - 2 * var(--s16)) / 3); gap: var(--s16); overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; overscroll-behavior-x: contain; }
 .shots-row::-webkit-scrollbar { display: none; }
-.shots.one .shots-row { grid-auto-columns: calc((100% - 2 * var(--s16)) * 2 / 3 + var(--s16)); }
+/* (One alone, the article's column's width; two, halves.) */
+.shots.one .shots-row { grid-auto-columns: calc(100% - var(--rail) - var(--rail-gap)); }
+.shots.two .shots-row { grid-auto-columns: calc((100% - var(--s16)) / 2); }
 .shot { position: relative; display: block; aspect-ratio: 16 / 10; border-radius: 12px; overflow: hidden; scroll-snap-align: start; }
 .shot::after { content: ""; position: absolute; inset: 0; border-radius: inherit; box-shadow: inset 0 0 0 1px var(--line); pointer-events: none; transition: box-shadow 0.12s var(--ease); }
 .shot:hover::after { box-shadow: inset 0 0 0 1px var(--line-2); }
@@ -265,6 +272,7 @@
   /* (The row as wide as the screen, a picture and the next one's edge in view; a finger scrolls it.) */
   .shots-row { grid-auto-columns: 84%; gap: var(--s12); margin-inline: calc(-1 * var(--gutter)); padding-inline: var(--gutter); scroll-padding-inline: var(--gutter); }
   .shots.one .shots-row { grid-auto-columns: 100%; }
+  .shots.two .shots-row { grid-auto-columns: 84%; }
   .shots-arrow { display: none; }
   .lightbox img { max-width: calc(100vw - 2 * var(--gutter)); max-height: calc(100dvh - 2 * var(--s64) - var(--s32)); }
   .lb-step { top: auto; bottom: var(--s12); translate: none; }
