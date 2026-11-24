@@ -50,3 +50,21 @@ test("another file keeps the header, its shared folders in place", function()
 	expect(node(app, "#stack", "text", "Added")).to_be_nil()
 	expect(app:has('#path >> "zeron/src/ds/parts/card.luau"')).to_be(true)
 end)
+
+-- The ⋯ button only while its menu would hold a row: a markdown file's
+-- preview at width has none (its actions all sit out in the header), so
+-- no ⋯; its source, or a code file, has rows, so the ⋯ is back.
+test("the ⋯ button is there only while its menu would hold a row", function()
+	local app = mount("viewer_fixture.luau")
+	app:resize(700, 400)
+	settle(app)
+	expect(node(app, "#line", "button", "More")).never.to_be_nil()
+
+	open(app, "docs/readme.md", nil)
+	expect(node(app, "#line", "button", "More")).to_be_nil()
+
+	-- Its source edits: Go to Line, Wrap, folds — the ⋯ is back.
+	app:click('#line >> role:radio "Source"')
+	settle(app)
+	expect(node(app, "#line", "button", "More")).never.to_be_nil()
+end)
