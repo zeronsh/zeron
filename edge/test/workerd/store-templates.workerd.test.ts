@@ -462,7 +462,7 @@ describe("templates: staff", () => {
     expect((await json<{ templates: { id: string }[] }>(await get("/me/templates", b.userId))).templates.map((t) => t.id)).toContain(temp);
   });
 
-  it("marks each file of a template against Zeron's own at the version it was made from", async () => {
+  it("marks each file of a template's first review against Zeron's own at the version it was made from", async () => {
     const a = await author();
     const plug = uniqueId("p");
     const temp = uniqueId("t");
@@ -474,7 +474,7 @@ describe("templates: staff", () => {
       manifest: { zeron_version: zeron },
       files: { "ds/same.luau": "return 1", "ds/changed.luau": "return 2", "DS/Spelt.luau": "return 3", "ds/added.luau": "return 4" }
     });
-    const view = async (id: string) => json<{ files: { path: string; sha256: string; zeron: string | null }[]; zeron_base: unknown; publisher: unknown }>(await adminCall("GET", `/store/v1/admin/versions/${id}/1.0.0`));
+    const view = async (id: string, version = "1.0.0") => json<{ base?: { version: string }; files: { path: string; sha256: string; zeron: string | null }[]; zeron_base: unknown; publisher: unknown }>(await adminCall("GET", `/store/v1/admin/versions/${id}/${version}`));
     const marks = async () => Object.fromEntries((await view(temp)).files.map((f) => [f.path, f.zeron]));
     // Not known: nothing is marked, and it says so.
     const unknown = await view(temp);
@@ -500,6 +500,14 @@ describe("templates: staff", () => {
     expect(own.zeron_base).toBeNull();
     expect(own.files.every((f) => f.zeron === null)).toBe(true);
     expect(own.publisher).toMatchObject({ plugins: { total: 1, verified: 1 }, templates: { total: 2, verified: 1 } });
+    // Nor has a template with a verified version to read it against.
+    expect((await adminCall("POST", `/store/v1/admin/versions/${temp}/1.0.0/verify`)).status).toBe(200);
+    await publishedTemplate(a, temp, "1.1.0", { manifest: { zeron_version: zeron } });
+    const next = await view(temp, "1.1.0");
+    expect([next.base?.version, next.zeron_base]).toEqual(["1.0.0", null]);
+    expect(next.files.every((f) => f.zeron === null)).toBe(true);
+    // (The verified one is still a first look: nothing else of it is verified.)
+    expect((await view(temp)).zeron_base).toEqual({ version: zeron, known: true });
   });
 
   it("holds the schema to the two kinds, one namespace, and the kind of a take-down", async () => {

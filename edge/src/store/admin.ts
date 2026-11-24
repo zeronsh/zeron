@@ -276,8 +276,9 @@ const versionView = async (env: Env, db: D1Database, bucket: R2Bucket, id: strin
       .bind(id, q.version)
       .all<{ path: string; bytes: number; sha256: string; kind: string }>()
       .then((r) => r.results.map((f) => ({ path: f.path, bytes: f.bytes, sha256: f.sha256, kind: f.kind, binary: f.kind === "binary" })));
-  // The Zeron a template was made from (its listing's engines, `>=` it).
-  const madeFrom = plugin.kind === "template" ? (v.engines_zeron ?? "").replace(/^>=/, "") : null;
+  // The Zeron a template was made from (its listing's engines, `>=` it),
+  // where there's no version of its own to read it against.
+  const madeFrom = plugin.kind === "template" && !base ? (v.engines_zeron ?? "").replace(/^>=/, "") : null;
   const counts = (kind: Kind, verified: boolean): string =>
     `(SELECT COUNT(*) FROM plugins p WHERE p.owner_id = ?1 AND ${listedOf(kind)}${verified ? " AND p.verified_version IS NOT NULL" : ""})`;
   const [ownFiles, baseFiles, decisions, recent, authors, standing, stock] = await Promise.all([
@@ -336,7 +337,7 @@ const versionView = async (env: Env, db: D1Database, bucket: R2Bucket, id: strin
     manifest: parseStoredJson(v.manifest, null),
     ...(base ? { base: { version: base.version, manifest: parseStoredJson(base.manifest, null) } } : {}),
     // Each against Zeron's own at the version a template says it was made
-    // from (a plugin's, or where that isn't known: null).
+    // from (null for a plugin's, with a base, or where that isn't known).
     files: ownFiles.map((f) => ({ ...f, zeron: stock?.(f.path, f.sha256) ?? null })),
     zeron_base: madeFrom === null ? null : { version: madeFrom, known: stock !== undefined },
     base_files: baseFiles,

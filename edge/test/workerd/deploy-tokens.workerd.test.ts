@@ -112,6 +112,7 @@ describe("deploy tokens: making one", () => {
     // An `all` token that never expires; each a new secret.
     const all = await made(userId, { all: true });
     expect(all.scope).toEqual({ all: true, all_kinds: ["plugin"] });
+    expect((await tokensOf(userId)).find((t) => t.id === all.id)!.scope).toEqual({ all: true, all_kinds: ["plugin"] });
     expect(all.expires_at).toBeNull();
     expect(all.token).not.toBe(token.token);
     expect((await tokensOf(userId)).map((t) => t.id)).toEqual([token.id, all.id]);
