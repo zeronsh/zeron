@@ -322,9 +322,15 @@ fn asker(allow: bool) -> (Asker, Rc<RefCell<Vec<Json>>>) {
     (asker, items)
 }
 
+/// What the engine was asked to do.
+fn acts(asked: &[(String, Json, Option<String>)]) -> Vec<&str> {
+    asked.iter().map(|a| a.0.as_str()).filter(|method| *method != "StoreMyPlugins").collect()
+}
+
 /// Once a template that isn't Zeron's has run, publishing, taking new
 /// installs again and a new token are asked in Zeron's own window, saying
-/// what the engine said of it; not allowed, the engine is asked nothing.
+/// what the engine said of it; not allowed, the engine is asked for nothing
+/// (but what's yours there, which the window says it by).
 /// Before, and for anything else, nothing is asked.
 #[test]
 fn acting_as_you_is_asked_in_zeron_s_window_once_another_s_template_ran() {
@@ -348,16 +354,25 @@ fn acting_as_you_is_asked_in_zeron_s_window_once_another_s_template_ran() {
     for (call, method, item) in [
         (publish, "PublishPlugin", json!({ "act": "publish", "kind": "plugin", "id": "focus-timer", "name": "Focus timer", "version": "1.3.0" })),
         (unyank, "StoreVersionAction", json!({ "act": "unyank", "kind": "plugin", "id": "focus-timer", "name": "focus-timer", "version": "1.2.0" })),
-        (token, "CreateDeployToken", json!({ "act": "token", "name": "CI", "scope": { "plugins": ["focus-timer"] }, "expires": 5 })),
+        (token, "CreateDeployToken", json!({ "act": "token", "name": "CI", "scope": { "plugins": ["focus-timer"] }, "expires": 5, "templates": null })),
     ] {
         let (no, items) = asker(false);
         let (out, asked) = run_asking(call, made.clone(), no);
-        assert_eq!((out.as_str(), asked.len()), ("err:cancelled", 0), "{call}");
+        assert_eq!((out.as_str(), acts(&asked).len()), ("err:cancelled", 0), "{call}");
         assert_eq!(*items.borrow(), vec![item], "{call}");
         let (yes, _) = asker(true);
         let (_, asked) = run_asking(call, made.clone(), yes);
-        assert_eq!(asked.iter().map(|a| a.0.as_str()).collect::<Vec<_>>(), [method], "{call}");
+        assert_eq!(acts(&asked), [method], "{call}");
     }
+    // What's yours there says its name, and which of a token's are templates
+    // (of those it names alone); never the page.
+    let mine = json!({ "ok": true, "plugins": [{ "id": "focus-timer", "name": "Focus timer" }], "templates": [{ "id": "midnight" }, { "id": "dusk" }], "token": { "id": "t" }, "secret": "zdt_secret" });
+    let (no, items) = asker(false);
+    run_asking(&unyank.replace("focus-timer\",", "focus-timer\", name = \"Anything\","), mine.clone(), no);
+    assert_eq!(items.borrow()[0]["name"], "Focus timer");
+    let (no, items) = asker(false);
+    run_asking(&token.replace("{ \"focus-timer\" }", "{ \"focus-timer\", \"midnight\" }"), mine, no);
+    assert_eq!(items.borrow()[0]["templates"], json!(["midnight"]));
     // The token itself never reaches the window that asked for it.
     let (yes, _) = asker(true);
     let (out, _) = run_asking(token, made.clone(), yes);
