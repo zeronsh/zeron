@@ -4384,7 +4384,8 @@
       "couldnt_updates": "无法更改 {name} 的更新设置",
       "runs_as_zeron": "以 Zeron 自身的身份运行",
       "runs_as_zeron_body": "它可以做 Zeron 能做的一切。",
-      "update_replaces_edits": "你在这台设备上修改过这个模板。更新会替换你的修改。"
+      "update_replaces_edits": "你在这台设备上修改过这个模板。更新会替换你的修改。",
+      "changed_here": "在这台设备上修改过"
     }
   },
   "themes": {

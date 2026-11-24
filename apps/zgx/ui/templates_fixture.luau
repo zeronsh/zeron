@@ -232,6 +232,14 @@ ui.command {
 	end,
 }
 ui.command {
+	id = "templates.edited",
+	title = "Midnight, from the store, is changed here",
+	run = function()
+		(find("midnight-2") :: any).edited = true
+		publish()
+	end,
+}
+ui.command {
 	id = "templates.store_blocked",
 	title = "Midnight, from the store, is taken down",
 	run = function()

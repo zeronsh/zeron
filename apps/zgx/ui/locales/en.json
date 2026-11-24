@@ -4384,7 +4384,8 @@
       "couldnt_updates": "Couldn't change {name}'s updates",
       "runs_as_zeron": "Runs as Zeron itself",
       "runs_as_zeron_body": "It can do anything Zeron can.",
-      "update_replaces_edits": "You changed this template on this device. Updating replaces your changes."
+      "update_replaces_edits": "You changed this template on this device. Updating replaces your changes.",
+      "changed_here": "Changed on this device"
     }
   },
   "themes": {

@@ -33,6 +33,7 @@ local Menu = require("@ds/menu")
 local control = require("@ds/control")
 local state = require("@app/screens/templates/state")
 local nav = require("@app/screens/templates/nav")
+local visits = require("@app/screens/settings/visits")
 local browse = require("@app/screens/templates/browse")
 local listing = require("@app/screens/templates/listing")
 local words = require("@app/screens/plugins/words")
@@ -76,6 +77,22 @@ local function author(t: state.Template): string
 			else words.from(t.imported and t.imported.source) or ui.t("templates.page.author.unknown"):get()
 	end
 	return ui.t("templates.page.author.named", { name = tostring(t.author) }):get()
+end
+
+-- Whether it's the store's, and the engine's word on it there: "verified"
+-- (while its files are the version's it verified), "edited" (changed here: no
+-- mark), or "" (neither, or not told yet).
+local function of_store(t: any): boolean
+	local source = t.imported and t.imported.source
+	return type(source) == "table" and source.kind == "store"
+end
+local function mark(t: any): string
+	if not of_store(t) then
+		return ""
+	elseif t.edited == true then
+		return "edited"
+	end
+	return if t.imported.source.verified == true then "verified" else ""
 end
 
 -- What a template's row says under its name.
@@ -427,6 +444,14 @@ local function controls(t: state.Template, now: State<any>): Node
 		ui.show(function(): boolean
 			return unverified(now:get())
 		end, ds.Badge { ui.t("plugins.words.unverified"), tone = "warning", class = "template-unverified" }),
+		-- The store's mark, while its files are the ones it verified; or that
+		-- it was changed here.
+		ui.show(function(): boolean
+			return mark(now:get()) == "verified"
+		end, ds.Badge { ui.t("plugins.store.verified"), tone = "success", class = "template-mark" }),
+		ui.show(function(): boolean
+			return mark(now:get()) == "edited"
+		end, ds.Badge { ui.t("templates.store.changed_here"), tone = "neutral", class = "template-mark" }),
 		-- Its version, centred on the row.
 		ui.show(function(): boolean
 			local v = now:get().version
@@ -483,7 +508,8 @@ local function row(t: state.Template, _i: number, now: State<any>): Node
 				if unverified(t) and words.from(t.imported and t.imported.source) == nil then
 					return ""
 				end
-				return author(t)
+				-- (The store's: what it is, with whose it is.)
+				return if of_store(t) then `{author(t)} · {ui.t("templates.store.runs_as_zeron"):get()}` else author(t)
 			end,
 			lead = preview(t),
 			badge = ui.show(function(): boolean
@@ -669,15 +695,20 @@ local function catalog(): Node
 end
 
 function M.View(): Node
-	-- As it opens: each one from a package checked where it came from.
-	if os.time() - checked_at:peek() > 600 then
-		checked_at:set(os.time())
-		local p: any = state.check_updates()
-		if p ~= nil then
-			p:after(function(_: any) end, function(_: any) end)
+	-- As it opens: each one from a package checked where it came from. (From
+	-- an effect, as Plugins': a check that can't be asked leaves the page.)
+	ui.effect(function()
+		if os.time() - checked_at:peek() > 600 then
+			checked_at:set(os.time())
+			local p: any = state.check_updates()
+			if p ~= nil then
+				p:after(function(_: any) end, function(_: any) end)
+			end
 		end
-	end
-	nav.arrive()
+	end)
+	-- Once a visit: the tabs, unless a link opened a template's page as
+	-- Settings came up.
+	visits.once("templates", nav.arrive)
 	return ui.column {
 		w_full = true,
 		items = "center",

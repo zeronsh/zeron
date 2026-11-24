@@ -19,11 +19,14 @@
 //!                                   other query keys are ignored. It never
 //!                                   installs: the person does, from the
 //!                                   page
+//!   zeron://open/template/<id>[?version=<v>]
+//!                                   a template of the store, the same way:
+//!                                   its page in Settings → Templates
 //!
 //! What to open goes to the scripts as shared `app.link`,
-//! `{ seq, chat?, settings?, tab?, plugin?, version? }` (`tab`: Settings →
+//! `{ seq, chat?, settings?, tab?, plugin?, template?, version? }` (`tab`: Settings →
 //! Plugins' tab, for the host's own buttons, never from a link; `version`,
-//! a plugin link's) (`seq` moving with each), which the
+//! a plugin's or template's link's) (`seq` moving with each), which the
 //! shell's route follows (ui/screens/shell/route.luau). The beta registers
 //! for them (`sh.zeron.app`'s `zeron` scheme: dist/macos/Info.plist,
 //! dist/zeron.desktop, dist/windows/zeron.iss, the whole scheme, so a new
@@ -43,12 +46,15 @@ pub enum Target {
     Settings(&'static str),
     /// A store plugin's page, by its id, with the version a link chose.
     Plugin(String, Option<String>),
+    /// A store template's, the same.
+    Template(String, Option<String>),
     /// A tab of Settings → Plugins ("yours": what a notice's button opens).
     PluginsTab(&'static str),
 }
 
-/// What a plugin link starts with.
+/// What a plugin's link starts with, and a template's.
 const PLUGIN_LINK: &str = "zeron://open/plugin/";
+const TEMPLATE_LINK: &str = "zeron://open/template/";
 
 /// A store id, as a plugin's id is (crates/engine plugins/manifest.rs
 /// `check_id`): `^[a-z0-9][a-z0-9-]{1,39}$`.
@@ -59,13 +65,12 @@ fn store_id(id: &str) -> bool {
         && bytes[1..].iter().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-'))
 }
 
-/// The store id a plugin link names, `zeron://open/plugin/<id>` (a
-/// trailing `/` allowed), and the version its query chooses (`?version=`,
+/// The store id a link of the store names, `<kind><id>` (`PLUGIN_LINK`,
+/// `TEMPLATE_LINK`; a trailing `/` allowed), and the version its query chooses (`?version=`,
 /// as a version reads anywhere, else none; other keys ignored). Anything
-/// more in its path (a fragment, another part, an escape) is no plugin
-/// link.
-fn plugin_link(url: &str) -> Option<(String, Option<String>)> {
-    let rest = url.strip_prefix(PLUGIN_LINK)?;
+/// more in its path (a fragment, another part, an escape) is no such link.
+fn store_link(url: &str, kind: &str) -> Option<(String, Option<String>)> {
+    let rest = url.strip_prefix(kind)?;
     let (path, query) = match rest.split_once('?') {
         Some((path, query)) => (path, Some(query)),
         None => (rest, None),
@@ -86,11 +91,11 @@ fn plugin_link(url: &str) -> Option<(String, Option<String>)> {
 /// What `url` asks for: the target and, for a conversation link, the
 /// workspace it belongs to. None for anything else.
 pub fn parse(url: &str) -> Option<(Target, Option<String>)> {
-    if let Some((id, version)) = plugin_link(url) {
-        return Some((Target::Plugin(id, version), None));
-    }
     if url.starts_with(PLUGIN_LINK) {
-        return None;
+        return store_link(url, PLUGIN_LINK).map(|(id, version)| (Target::Plugin(id, version), None));
+    }
+    if url.starts_with(TEMPLATE_LINK) {
+        return store_link(url, TEMPLATE_LINK).map(|(id, version)| (Target::Template(id, version), None));
     }
     if let Some(target) = zeron_notify::link_target(url) {
         return Some(if target == zeron_notify::AGENT_UPDATES_TARGET {
@@ -142,7 +147,7 @@ pub fn open(url: &str) {
     let Some(workspace) = workspace else {
         // (A plugin's page, asked from a web page: Zeron comes forward on
         // it, as for a banner. LaunchServices may already have.)
-        if matches!(target, Target::Plugin(..)) {
+        if matches!(target, Target::Plugin(..) | Target::Template(..)) {
             activate();
         }
         tell(target);
@@ -204,15 +209,17 @@ fn tell(target: Target) {
         s.get()
     });
     let mut fields = vec![("seq", Value::from(seq as f64))];
+    let store = |fields: &mut Vec<(&'static str, Value)>, key: &'static str, id: &str, version: Option<String>| {
+        fields.push((key, Value::from(id)));
+        if let Some(version) = version {
+            fields.push(("version", Value::from(version.as_str())));
+        }
+    };
     match target {
         Target::Chat(id) => fields.push(("chat", Value::from(id.as_str()))),
         Target::Settings(page) => fields.push(("settings", Value::from(page))),
-        Target::Plugin(id, version) => {
-            fields.push(("plugin", Value::from(id.as_str())));
-            if let Some(version) = version {
-                fields.push(("version", Value::from(version.as_str())));
-            }
-        }
+        Target::Plugin(id, version) => store(&mut fields, "plugin", &id, version),
+        Target::Template(id, version) => store(&mut fields, "template", &id, version),
         Target::PluginsTab(tab) => {
             fields.push(("settings", Value::from("plugins")));
             fields.push(("tab", Value::from(tab)));
@@ -342,6 +349,25 @@ mod tests {
         assert_eq!((field("plugin").as_deref(), field("version").as_deref()), (Some("focus"), Some("1.2.0")));
         tell(Target::Plugin("focus".into(), None));
         assert_eq!(field("version"), None);
+    }
+
+    /// A template's link is a plugin's in every way but whose page it opens,
+    /// and neither opens the other's.
+    #[test]
+    fn a_template_link_names_a_store_id_alone() {
+        assert_eq!(parse("zeron://open/template/midnight"), Some((Target::Template("midnight".into(), None), None)));
+        assert_eq!(parse("zeron://open/template/midnight/?version=1.2.0&x=1"), Some((Target::Template("midnight".into(), Some("1.2.0".into())), None)));
+        assert_eq!(parse("zeron://open/template/midnight?version=../../etc"), Some((Target::Template("midnight".into(), None), None)));
+        for bad in ["", "a", "Midnight", "-x", "mid_night", "mid%2Fnight", "midnight/../../etc", "midnight/use", "midnight#install", "midnight?version=1.2.0#x", "https://evil.example/x.zeron-template", "file:///tmp/x", "/midnight"] {
+            assert_eq!(parse(&format!("{TEMPLATE_LINK}{bad}")), None, "{bad}");
+        }
+        for url in ["zeron://open/templates/midnight", "ZERON://open/template/midnight", "zeron://open/template"] {
+            assert_eq!(parse(url), None, "{url}");
+        }
+        tell(Target::Template("midnight".into(), Some("1.2.0".into())));
+        assert_eq!((field("template").as_deref(), field("version").as_deref(), field("plugin")), (Some("midnight"), Some("1.2.0"), None));
+        tell(Target::Plugin("focus".into(), None));
+        assert_eq!((field("template"), field("version")), (None, None));
     }
 
     /// Told to the scripts as `plugin`, and kept for a main window that
