@@ -48,11 +48,7 @@ local function row(key: string, props: any): Node
 	return search.anchor(key, ds.Settings.Row(props))
 end
 
--- A row that comes and goes in a card: its own hairline over it (a card's
--- rules are between rows that are there, never under the last).
-local function later(on: () -> boolean, node: Node): Node
-	return ui.show(on, ui.column { w_full = true, ds.Settings.Rule(), node })
-end
+local later = ds.Settings.Later
 
 -- The fonts installed on this computer (src/fonts.rs: `{ { family, mono }
 -- }`, by name), asked for once a font picker opens; nil until they come.

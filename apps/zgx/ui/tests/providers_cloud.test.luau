@@ -88,6 +88,30 @@ test("with Cloud on, Providers offers Cloud: its agents' accounts, no switch or 
 	expect(app:has(`{PAGE} >> role:switch "Claude Code on"`)).to_be(true)
 end)
 
+test("an agent's settings are ruled between the rows that show, never under the last, here and on Cloud", function()
+	local app = open(true)
+	local dialog = 'role:dialog "Agent settings"'
+	-- (Each row of these has one switch, or the updates' select.)
+	local function ruled(agent: string, rows: number)
+		app:click(`{PAGE} >> role:button "{agent} settings"`)
+		app:frames(30)
+		expect(app:count(`{dialog} >> .settings-rule`)).to_be(rows - 1)
+		app:click(`{dialog} >> role:button "Done"`)
+		app:wait('"never shown, only waited past"', { timeout_ms = 400 })
+		app:frames(4)
+	end
+	-- Claude Code: subagents, Zeron's servers alone, $, / and updates; no
+	-- Code Mode, no environment, nothing to remove. On Cloud, no updates.
+	ruled("Claude Code", 5)
+	app:click(`{PAGE} >> role:button "Device"`)
+	app:frames(10)
+	app:click('role:menuitem "Cloud"')
+	app:frames(30)
+	ruled("Claude Code", 4)
+	-- Codex runs in Code Mode: one row more.
+	ruled("Codex", 5)
+end)
+
 test("without Cloud, Providers offers no Cloud", function()
 	local app = open(false)
 	app:click(`{PAGE} >> role:button "Device"`)

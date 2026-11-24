@@ -805,59 +805,62 @@ local function settings_dialog(): Node
 		cancel = false,
 		confirm = { label = ui.t("settings.providers.done") :: any },
 		ds.Settings.Group {
-			ui.div {
+			ui.column {
 				w_full = true,
-				opacity = function()
-					return if switchable() then 1 else "$zeron.disabled"
-				end,
-				disabled = function()
-					return not switchable()
-				end,
-				ds.Settings.Row {
-					label = ui.t("settings.providers.native_subagents.label"),
-					description = ui.t("settings.providers.native_subagents.description"),
-					control = ds.Switch {
-						value = native,
+				ui.div {
+					w_full = true,
+					opacity = function()
+						return if switchable() then 1 else "$zeron.disabled"
+					end,
+					disabled = function()
+						return not switchable()
+					end,
+					ds.Settings.Row {
 						label = ui.t("settings.providers.native_subagents.label"),
+						description = ui.t("settings.providers.native_subagents.description"),
+						control = ds.Switch {
+							value = native,
+							label = ui.t("settings.providers.native_subagents.label"),
+							on_change = function(on: boolean)
+								local a = agent()
+								if not a then
+									return
+								end
+								host.call("settings.engine", { method = "SetNativeSubagents", params = engine_params({ harness = a.id, enabled = on }) }):after(function(v: any)
+									if v and v.switchable then
+										subagents:set({ switchable = v.switchable, off = v.off or {} })
+									end
+								end, function()
+									native:set(not on)
+									toast.show { title = ui.t("settings.engine.couldnt_save"):get(), tone = "danger" }
+								end)
+							end,
+						},
+					},
+				},
+				ds.Settings.Later(supports_code_mode, ds.Settings.Row {
+					label = ui.t("settings.providers.code_mode.label"),
+					description = ui.t("settings.providers.code_mode.description"),
+					control = ds.Switch {
+						value = code_mode,
+						label = ui.t("settings.providers.code_mode.label"),
 						on_change = function(on: boolean)
 							local a = agent()
 							if not a then
 								return
 							end
-							host.call("settings.engine", { method = "SetNativeSubagents", params = engine_params({ harness = a.id, enabled = on }) }):after(function(v: any)
-								if v and v.switchable then
-									subagents:set({ switchable = v.switchable, off = v.off or {} })
+							host.call("settings.engine", { method = "SetCodeMode", params = engine_params({ harness = a.id, enabled = on }) }):after(function(v: any)
+								if v and v.supported then
+									code_modes:set({ supported = v.supported, enabled = v.enabled or {} })
 								end
 							end, function()
-								native:set(not on)
+								code_mode:set(not on)
 								toast.show { title = ui.t("settings.engine.couldnt_save"):get(), tone = "danger" }
 							end)
 						end,
 					},
-				},
+				}),
 			},
-			ui.show(supports_code_mode, ds.Settings.Row {
-				label = ui.t("settings.providers.code_mode.label"),
-				description = ui.t("settings.providers.code_mode.description"),
-				control = ds.Switch {
-					value = code_mode,
-					label = ui.t("settings.providers.code_mode.label"),
-					on_change = function(on: boolean)
-						local a = agent()
-						if not a then
-							return
-						end
-						host.call("settings.engine", { method = "SetCodeMode", params = engine_params({ harness = a.id, enabled = on }) }):after(function(v: any)
-							if v and v.supported then
-								code_modes:set({ supported = v.supported, enabled = v.enabled or {} })
-							end
-						end, function()
-							code_mode:set(not on)
-							toast.show { title = ui.t("settings.engine.couldnt_save"):get(), tone = "danger" }
-						end)
-					end,
-				},
-			}),
 			-- (Every agent shows it: one that can't hide its own says so.)
 			ui.div {
 				w_full = true,
@@ -901,69 +904,73 @@ local function settings_dialog(): Node
 				description = ui.t("settings.providers.skills_dollar.description"),
 				control = ds.Switch { value = dollar, label = ui.t("settings.providers.skills_dollar.label"), on_change = completion("dollar") },
 			},
-			ds.Settings.Row {
-				label = ui.t("settings.providers.skills_separate.label"),
-				description = ui.t("settings.providers.skills_separate.description"),
-				control = ds.Switch { value = separate, label = ui.t("settings.providers.skills_separate.label"), on_change = completion("separate") },
+			-- (The rows under it come and go, each bringing its hairline.)
+			ui.column {
+				w_full = true,
+				ds.Settings.Row {
+					label = ui.t("settings.providers.skills_separate.label"),
+					description = ui.t("settings.providers.skills_separate.description"),
+					control = ds.Switch { value = separate, label = ui.t("settings.providers.skills_separate.label"), on_change = completion("separate") },
+				},
+				-- (Not on Cloud, whose agents Zeron keeps current.)
+				ds.Settings.Later(function()
+					return not own() and not on_cloud()
+				end, ds.Settings.Row {
+					label = ui.t("settings.providers.updates"),
+					description = function()
+						local note = POLICY_NOTE[policy:get()]
+						return if note then ui.t(note):get() else ""
+					end,
+					control = ds.Select {
+						value = policy,
+						name = ui.t("settings.providers.update_policy.label"),
+						size = "sm",
+						w = 148,
+						options = POLICIES,
+						on_change = function(v: string)
+							local a = agent()
+							if a then
+								host.call("agents.set_update_policy", { id = a.id, policy = v }):after(function() end, function()
+									toast.show { title = ui.t("settings.engine.couldnt_save"):get(), tone = "danger" }
+								end)
+							end
+						end,
+					},
+				}),
+				ds.Settings.Later(from_registry, ds.Settings.Row {
+					label = ui.t("settings.providers.add.env.label"),
+					description = function(): string
+						return ui.t("settings.providers.add.env.description", { device = device_name() }):get()
+					end,
+					stacked = true,
+					control = ds.TextArea {
+						value = env,
+						name = ui.t("settings.providers.add.env.label"),
+						placeholder = "OPENAI_API_KEY=sk-…",
+						mono = true,
+						rows = 2,
+						max_rows = 6,
+						w_full = true,
+						error = function(): string?
+							local e = env_error:get()
+							return if e == "" then nil else e
+						end,
+					},
+				}),
+				ds.Settings.Later(from_registry, ds.Settings.Row {
+					label = function(): string
+						return ui.t("settings.providers.add.remove_row", { device = device_name() }):get()
+					end,
+					description = ui.t("settings.providers.add.remove_row_description"),
+					danger = true,
+					control = ds.Button {
+						ui.t("settings.providers.add.remove"),
+						tone = "danger",
+						size = "sm",
+						on_click = remove,
+					},
+				}),
 			},
-			-- (Not on Cloud, whose agents Zeron keeps current.)
-			ui.show(function()
-				return not own() and not on_cloud()
-			end, ds.Settings.Row {
-				label = ui.t("settings.providers.updates"),
-				description = function()
-					local note = POLICY_NOTE[policy:get()]
-					return if note then ui.t(note):get() else ""
-				end,
-				control = ds.Select {
-					value = policy,
-					name = ui.t("settings.providers.update_policy.label"),
-					size = "sm",
-					w = 148,
-					options = POLICIES,
-					on_change = function(v: string)
-						local a = agent()
-						if a then
-							host.call("agents.set_update_policy", { id = a.id, policy = v }):after(function() end, function()
-								toast.show { title = ui.t("settings.engine.couldnt_save"):get(), tone = "danger" }
-							end)
-						end
-					end,
-				},
-			}),
-			ui.show(from_registry, ds.Settings.Row {
-				label = ui.t("settings.providers.add.env.label"),
-				description = function(): string
-					return ui.t("settings.providers.add.env.description", { device = device_name() }):get()
-				end,
-				stacked = true,
-				control = ds.TextArea {
-					value = env,
-					name = ui.t("settings.providers.add.env.label"),
-					placeholder = "OPENAI_API_KEY=sk-…",
-					mono = true,
-					rows = 2,
-					max_rows = 6,
-					w_full = true,
-					error = function(): string?
-						local e = env_error:get()
-						return if e == "" then nil else e
-					end,
-				},
-			}),
-			ui.show(from_registry, ds.Settings.Row {
-				label = function(): string
-					return ui.t("settings.providers.add.remove_row", { device = device_name() }):get()
-				end,
-				description = ui.t("settings.providers.add.remove_row_description"),
-				danger = true,
-				control = ds.Button {
-					ui.t("settings.providers.add.remove"),
-					tone = "danger",
-					size = "sm",
-					on_click = remove,
-				},
-			}),
 		},
 	}
 end
