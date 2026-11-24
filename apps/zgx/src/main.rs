@@ -139,6 +139,8 @@ mod scroll_script_tests;
 #[cfg(test)]
 mod transcript_scroll_tests;
 #[cfg(test)]
+mod consent_paint_tests;
+#[cfg(test)]
 mod transcript_paint_tests;
 #[cfg(test)]
 mod long_thread_tests;

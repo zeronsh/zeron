@@ -91,20 +91,36 @@ local function scope_of(it: any): Node
 			table.insert(if known and table.find(it.templates, id) then templates else plugins, id)
 		end
 	end
-	local nodes: { Node } = {}
+	-- How many, first; where both, each kind under its own heading.
+	local both = #plugins > 0 and #templates > 0
+	local nodes: { Node } = {
+		line(
+			if not known
+				then ui.t("plugins.store.act.chosen", { n = #plugins })
+				elseif both
+				then function(): string
+					return ui.t("plugins.store.count", { n = #plugins }):get() .. ui.t("plugins.words.list_sep"):get() .. ui.t("templates.store.count", { n = #templates }):get()
+				end
+				elseif #templates > 0 then ui.t("templates.store.count", { n = #templates })
+				else ui.t("plugins.store.count", { n = #plugins })
+		),
+	}
 	local function group(heading: Message, ids: { string })
 		if #ids == 0 then
 			return
 		end
 		local lines: { Node } = {}
+		if both then
+			table.insert(lines, line(heading, true))
+		end
 		for _, id in ids do
 			table.insert(lines, id_line(id))
 		end
-		table.insert(nodes, ui.column { w_full = true, gap = "$space.1", line(heading), ui.column { w_full = true, gap = "$zeron.space.hair", table.unpack(lines) } })
+		table.insert(nodes, ui.column { w_full = true, gap = "$zeron.space.hair", table.unpack(lines) })
 	end
-	group(if known then ui.t("plugins.store.count", { n = #plugins }) else ui.t("plugins.store.act.chosen", { n = #plugins }), plugins)
-	group(ui.t("templates.store.count", { n = #templates }), templates)
-	return ui.column { grow = 1, basis = 0, min_w = 0, gap = "$space.3", table.unpack(nodes) }
+	group(ui.t("plugins.page.title"), plugins)
+	group(ui.t("templates.page.title"), templates)
+	return ui.column { grow = 1, basis = 0, min_w = 0, gap = if both then "$space.2" else "$space.1", table.unpack(nodes) }
 end
 
 -- A fact: what it is on its value's first line. (Its room: "Can publish", and
@@ -253,8 +269,8 @@ local Asking = ui.component(function(_props: {}): Node
 					w_full = true,
 					shrink = 0,
 					gap = "$zeron.space.hair",
-					ui.text { ui.t("plugins.store.act.why_title"), w_full = true, wrap = true, text_size = "$font.size.sm", line_height = "$font.line.sm", weight = "$font.weight.medium", color = "$text.primary" },
-					ui.text { ui.t("plugins.store.act.why_body"), w_full = true, wrap = true, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.secondary" },
+					ui.text { ui.t("plugins.store.act.why_title"), w_full = true, wrap = true, text_size = "$font.size.md", line_height = 20, weight = "$font.weight.medium", color = "$text.primary" },
+					ui.text { ui.t("plugins.store.act.why_body"), w_full = true, wrap = true, text_size = "$font.size.md", line_height = 20, color = "$text.secondary" },
 				},
 			},
 		},
