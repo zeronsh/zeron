@@ -43,7 +43,7 @@ impl McpServers {
         // Someone to ask: a Zeron window following this engine's servers.
         // With none (a Cloud machine, a headless server), a request would
         // wait for no one, so the agent is told whom to ask instead.
-        if self.snapshot_tx.receiver_count() == 0 {
+        if self.windows.load(std::sync::atomic::Ordering::Acquire) == 0 {
             return Err(
                 "No Zeron window is open on this device to ask the person in. Ask them to add or \
                  change it in Settings → MCP on their computer (it syncs here), or with \
@@ -114,11 +114,22 @@ impl McpServers {
                 .iter()
                 .find(|r| r.id == id)
                 .ok_or_else(|| format!("no MCP request '{id}'"))?;
-            if request.status != McpRequestStatus::Pending {
+            // Answered, or an answer (a second click, another window) under
+            // way: never done twice.
+            if request.status != McpRequestStatus::Pending || !lock(&self.answering).insert(id.to_owned()) {
                 return Err("that request was already answered".into());
             }
             request.change.clone()
         };
+        // (Given up with the answer, should its asker go away before it's
+        // done: the request then waits as it did.)
+        struct Answering<'a>(&'a McpServers, &'a str);
+        impl Drop for Answering<'_> {
+            fn drop(&mut self) {
+                lock(&self.0.answering).remove(self.1);
+            }
+        }
+        let _answering = Answering(self, id);
         let outcome = if approve {
             Some(self.apply(&change).await)
         } else {
@@ -192,6 +203,9 @@ impl McpServers {
                 args,
                 account_label,
             } => {
+                if let Some(name) = name.as_deref().filter(|n| !n.trim().is_empty()) {
+                    server_name(Some(name))?;
+                }
                 let label = requested_account_label(&UpsertMcpServerRequest {
                     account_label: account_label.clone(),
                     ..Default::default()
@@ -361,8 +375,8 @@ mod tests {
     }
 
     /// A Zeron window following the servers: someone to ask.
-    fn window(mgr: &McpServers) -> tokio::sync::watch::Receiver<zeron_proto::McpServersSnapshot> {
-        mgr.watch_snapshot()
+    fn window(mgr: &McpServers) -> futures::stream::BoxStream<'static, serde_json::Value> {
+        mgr.watch_stream(zeron_rpc::Caller::Local)
     }
 
     fn ask(change: McpChange) -> RequestMcpChangeParams {
@@ -383,6 +397,66 @@ mod tests {
             args: Vec::new(),
             account_label: account.map(Into::into),
         }
+    }
+
+    /// Two windows' answers at once: done by one.
+    #[tokio::test]
+    async fn a_request_is_done_once_however_many_answer() {
+        let (_dir, mgr) = manager();
+        let _window = window(&mgr);
+        let asked = mgr.request_change(ask(add_preset("context7", None))).await.unwrap();
+        let (a, b) = tokio::join!(mgr.resolve_request(&asked.id, true), mgr.resolve_request(&asked.id, true));
+        assert_eq!([a.is_ok(), b.is_ok()].iter().filter(|ok| **ok).count(), 1);
+        assert_eq!(mgr.snapshot().servers.len(), 1);
+        // One given up before it's done leaves it waiting.
+        let asked = mgr.request_change(ask(add_preset("linear", None))).await.unwrap();
+        drop(mgr.resolve_request(&asked.id, true));
+        assert!(mgr.resolve_request(&asked.id, false).await.is_ok());
+    }
+
+    /// Only this device's window can answer, so only one is someone to ask;
+    /// and what another device or an agent reads holds no key.
+    #[tokio::test]
+    async fn another_device_is_no_one_to_ask_and_reads_no_key() {
+        use futures::StreamExt;
+        use zeron_proto::{McpAuthKind, McpTransport, UpsertMcpServerRequest};
+        let (_dir, mgr) = manager();
+        mgr.upsert_server(UpsertMcpServerRequest {
+            name: "Keyed".into(),
+            transport: McpTransport::Http,
+            url: Some("https://tools.example/s/path-key/mcp?key=query-key".into()),
+            auth_kind: McpAuthKind::None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        mgr.upsert_server(UpsertMcpServerRequest {
+            name: "Command".into(),
+            transport: McpTransport::Stdio,
+            command: Some("npx".into()),
+            args: vec!["--token=arg-key".into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let peer = zeron_rpc::Caller::Peer { device: None };
+        let mut theirs = mgr.watch_stream(peer.clone());
+        theirs.next().await.unwrap();
+        assert!(mgr.request_change(ask(add_preset("linear", None))).await.is_err(), "a peer isn't a window");
+        let ours = window(&mgr);
+        mgr.request_change(ask(add_preset("linear", None))).await.unwrap();
+        for caller in [peer, zeron_rpc::Caller::Agent { chat: None }] {
+            let seen = crate::mcp_servers::shown_to(&caller, mgr.snapshot());
+            let text = serde_json::to_string(&seen).unwrap();
+            assert!(!text.contains("-key"), "{caller:?}: {text}");
+            assert!(text.contains("https://tools.example"), "{text}");
+            // (The agent that asked reads how it's answered.)
+            assert_eq!(seen.requests.is_empty(), matches!(caller, zeron_rpc::Caller::Peer { .. }));
+        }
+        let streamed = theirs.next().await.unwrap().to_string();
+        assert!(!streamed.contains("-key") && !streamed.contains("\"requests\""), "{streamed}");
+        drop(ours);
+        assert!(mgr.request_change(ask(add_preset("notion", None))).await.is_err(), "its window closed");
     }
 
     /// An agent's request waits, changing nothing, until the person answers;

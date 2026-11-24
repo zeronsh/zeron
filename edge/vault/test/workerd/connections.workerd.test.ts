@@ -637,7 +637,36 @@ describe("VaultConnections OAuth single-flight refresh & SSRF defense", () => {
     const listed = value(await vault().listConnections(caller));
     const conn = listed.connections.find((c) => c.id === "mcp:reauth");
     expect(conn?.status).toBe("reauth_required");
-    expect(conn?.lastError).toContain("invalid_grant");
+    // Its code alone: the endpoint's free text is neither shown nor logged.
+    expect(conn?.lastError).toBe("invalid_grant");
+  });
+
+  it("drops what a connection signs in with when it moves to another origin, and only then", async () => {
+    const { userId, caller, device } = await setup();
+    for (const [id, material] of [
+      ["mcp:moves-key", { kind: "headers", headers: { "X-Api-Key": "key-for-a" } }],
+      [
+        "mcp:moves-oauth",
+        { kind: "oauth", accessToken: "at-for-a", expiresAt: Date.now() + 3_600_000, tokenEndpoint: TOKEN_URL, clientId: "cid-1" }
+      ]
+    ] as const) {
+      value(
+        await vault().putConnection(caller, id, { name: "Moves", url: "https://a.example.com/mcp", authKind: material.kind, material })
+      );
+      const before = value(await vault().grantConnection(caller, await signedConnGrant(device, userId, id)));
+      // Elsewhere on the same origin: as it was.
+      expect(value(await vault().updateConnection(caller, id, { url: "https://a.example.com/v2/mcp" })).status).toBe("connected");
+      expect(value(await vault().grantConnection(caller, await signedConnGrant(device, userId, id))).headers).toEqual(before.headers);
+      // Another host, port or name: nothing goes there.
+      const moved = value(await vault().updateConnection(caller, id, { url: "https://b.example.net/mcp" }));
+      expect(moved.status).toBe("needs_auth");
+      const stored = await storedConnection(userId, id);
+      expect(stored?.envelope).toBeNull();
+      expect(stored?.generation).toBeGreaterThan(before.generation);
+      const refused = await vault().grantConnection(caller, await signedConnGrant(device, userId, id));
+      expect(refused.ok).toBe(false);
+      expect(JSON.stringify(refused)).not.toContain("for-a");
+    }
   });
 
   it("refuses SSRF URLs on putConnection, updateConnection, and 3xx redirects during refresh", async () => {

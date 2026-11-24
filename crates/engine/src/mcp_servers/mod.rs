@@ -143,6 +143,10 @@ pub struct McpServers {
     run_refresh: tokio::sync::Mutex<()>,
     /// Changes agents asked for, waiting for the person here (`requests`).
     requests: Mutex<Vec<zeron_proto::McpRequestView>>,
+    /// Those being answered now (`requests`).
+    answering: Mutex<std::collections::HashSet<String>>,
+    /// This device's windows following the servers: who a request can ask.
+    windows: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl McpServers {
@@ -208,6 +212,8 @@ impl McpServers {
             vault_listed_at: Mutex::new(None),
             run_refresh: tokio::sync::Mutex::new(()),
             requests: Mutex::new(Vec::new()),
+            answering: Mutex::default(),
+            windows: Arc::default(),
         });
 
         manager.publish_snapshot();
@@ -248,6 +254,8 @@ impl McpServers {
             vault_listed_at: Mutex::new(None),
             run_refresh: tokio::sync::Mutex::new(()),
             requests: Mutex::new(Vec::new()),
+            answering: Mutex::default(),
+            windows: Arc::default(),
         });
         manager.publish_snapshot();
         manager
@@ -689,14 +697,15 @@ impl McpServers {
         params: Value,
     ) -> Result<RpcReply, RpcError> {
         match method {
-            methods::WATCH_MCP_SERVERS => Ok(RpcReply::Stream(self.watch_stream())),
+            methods::WATCH_MCP_SERVERS => Ok(RpcReply::Stream(self.watch_stream(zeron_rpc::caller()))),
             methods::LIST_MCP_SERVERS => {
-                let snap = self.snapshot();
-                to_unary(&snap)
+                let caller = zeron_rpc::caller();
+                to_unary(&shown_to(&caller, self.snapshot()))
             }
             methods::REFRESH_MCP_SERVERS => {
+                let caller = zeron_rpc::caller();
                 let snap = self.refresh().await;
-                to_unary(&snap)
+                to_unary(&shown_to(&caller, snap))
             }
             methods::UPSERT_MCP_SERVER => {
                 let req: UpsertMcpServerRequest = parse_params(params)?;
@@ -776,17 +785,22 @@ impl McpServers {
         }
     }
 
-    fn watch_stream(&self) -> BoxStream<'static, Value> {
+    /// The snapshot, followed by `caller`; this device's own window counted
+    /// while it does (it's whom a request asks).
+    fn watch_stream(&self, caller: zeron_rpc::Caller) -> BoxStream<'static, Value> {
         let rx = self.snapshot_tx.subscribe();
-        Box::pin(futures::stream::unfold((rx, true), |(mut rx, first)| async move {
-            if first {
-                let val = serde_json::to_value(rx.borrow_and_update().clone()).ok()?;
-                return Some((val, (rx, false)));
-            }
-            rx.changed().await.ok()?;
-            let val = serde_json::to_value(rx.borrow_and_update().clone()).ok()?;
-            Some((val, (rx, false)))
-        }))
+        let window = caller.is_local().then(|| Window::open(&self.windows));
+        Box::pin(futures::stream::unfold(
+            (rx, true, caller, window),
+            |(mut rx, first, caller, window)| async move {
+                if !first {
+                    rx.changed().await.ok()?;
+                }
+                let snapshot = rx.borrow_and_update().clone();
+                let val = serde_json::to_value(shown_to(&caller, snapshot)).ok()?;
+                Some((val, (rx, false, caller, window)))
+            },
+        ))
     }
 
     /// Create or update an MCP server in Vault or Local storage.
@@ -1008,9 +1022,16 @@ impl McpServers {
     ) -> Result<(), String> {
         let label = requested_account_label(&req)?;
         let existing = self.local_store.get(id);
-        let same_auth = existing
-            .as_ref()
-            .is_some_and(|e| e.auth_kind == req.auth_kind);
+        // (What it was given is for where it was: moved to another origin,
+        // it's asked for again.)
+        let same_place = existing.as_ref().is_some_and(|e| {
+            let origin = e.url.as_deref().and_then(gateway::url_origin);
+            origin.is_some() && origin == gateway::url_origin(url)
+        });
+        let same_auth = same_place
+            && existing
+                .as_ref()
+                .is_some_and(|e| e.auth_kind == req.auth_kind);
         let enabled = req
             .enabled
             .unwrap_or_else(|| existing.as_ref().map_or(true, |e| e.enabled));
@@ -1053,14 +1074,14 @@ impl McpServers {
         let oauth_client_id = if req.auth_kind == McpAuthKind::OAuth {
             req.oauth_client_id
                 .filter(|s| !s.trim().is_empty())
-                .or_else(|| existing.as_ref().and_then(|e| e.oauth_client_id.clone()))
+                .or_else(|| existing.as_ref().filter(|_| same_place).and_then(|e| e.oauth_client_id.clone()))
         } else {
             None
         };
         let oauth_client_secret = if req.auth_kind == McpAuthKind::OAuth {
             req.oauth_client_secret
                 .filter(|s| !s.is_empty())
-                .or_else(|| existing.as_ref().and_then(|e| e.oauth_client_secret.clone()))
+                .or_else(|| existing.as_ref().filter(|_| same_place).and_then(|e| e.oauth_client_secret.clone()))
         } else {
             None
         };
@@ -1391,6 +1412,40 @@ impl McpServers {
             Ok(())
         }
     }
+}
+
+/// A window of this device's following the servers, while it does.
+struct Window(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Window {
+    fn open(windows: &Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        windows.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Self(windows.clone())
+    }
+}
+
+impl Drop for Window {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// The snapshot as `caller` may have it. This device's own app sees it
+/// whole. An agent or another device sees where a server is, never a key
+/// its address or its command's arguments may hold; and another device none
+/// of what agents asked for here, which only a window here answers.
+fn shown_to(caller: &zeron_rpc::Caller, mut snapshot: McpServersSnapshot) -> McpServersSnapshot {
+    if caller.is_local() {
+        return snapshot;
+    }
+    for server in &mut snapshot.servers {
+        server.url = server.url.as_deref().and_then(gateway::url_origin);
+        server.args.clear();
+    }
+    if matches!(caller, zeron_rpc::Caller::Peer { .. }) {
+        snapshot.requests.clear();
+    }
+    snapshot
 }
 
 fn build_http_client() -> reqwest::Client {
@@ -1882,6 +1937,76 @@ mod tests {
             buf.extend_from_slice(&chunk[..n]);
         }
         Some((path, headers))
+    }
+
+    /// A server's credentials go to its own origin: not on a redirect off
+    /// it, nor to where it's moved.
+    #[tokio::test]
+    async fn credentials_stay_with_the_server_they_were_given_for() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let serve = |location: Option<String>| {
+            let seen = seen.clone();
+            async move {
+                let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+                let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+                let at = base.clone();
+                let task = tokio::spawn(async move {
+                    while let Ok((mut stream, _)) = listener.accept().await {
+                        let Some((path, headers)) = read_mock_http_request(&mut stream).await else { continue };
+                        seen.lock().unwrap().push(format!("{at}{path} {}", headers.get("x-api-key").cloned().unwrap_or_default()));
+                        let head = match (&location, path.as_str()) {
+                            (Some(to), "/away") => format!("307 Temporary Redirect\r\nLocation: {to}"),
+                            (_, "/mcp") => format!("307 Temporary Redirect\r\nLocation: {at}/mcp/"),
+                            _ => "200 OK".to_owned(),
+                        };
+                        let _ = stream.write_all(format!("HTTP/1.1 {head}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await;
+                        let _ = stream.shutdown().await;
+                    }
+                });
+                (base, task)
+            }
+        };
+        let (other, other_task) = serve(None).await;
+        let (base, task) = serve(Some(format!("{other}/stolen"))).await;
+        let (_dir, mgr) = local_manager();
+        let upsert = |url: String, headers: BTreeMap<String, String>| UpsertMcpServerRequest {
+            id: Some("keyed".into()),
+            name: "Keyed".into(),
+            transport: McpTransport::Http,
+            url: Some(url),
+            auth_kind: McpAuthKind::Headers,
+            headers,
+            local_only: true,
+            ..Default::default()
+        };
+        let key = BTreeMap::from([("X-Api-Key".to_owned(), "the-key".to_owned())]);
+        mgr.upsert_server(upsert(format!("{base}/away"), key)).await.unwrap();
+        let send = || async {
+            mgr.gateway()
+                .forward(zeron_mcp::http::ExternalProxyRequest {
+                    server_id: "keyed".into(),
+                    method: hyper::Method::POST,
+                    headers: Default::default(),
+                    body: Default::default(),
+                })
+                .await
+                .unwrap()
+                .status
+                .as_u16()
+        };
+        assert_eq!(send().await, 307, "the redirect off it is answered, not followed");
+        // One on its own origin is, with its key.
+        mgr.upsert_server(upsert(format!("{base}/mcp"), BTreeMap::new())).await.unwrap();
+        assert_eq!(send().await, 200);
+        assert_eq!(*seen.lock().unwrap(), [format!("{base}/away the-key"), format!("{base}/mcp the-key"), format!("{base}/mcp/ the-key")]);
+        // Moved: the key isn't sent there, its name and state are kept.
+        mgr.set_server_enabled("keyed", false).await.unwrap();
+        mgr.upsert_server(upsert(format!("{other}/moved"), BTreeMap::new())).await.unwrap();
+        let stored = mgr.local_store.get("keyed").unwrap();
+        assert!(stored.headers.is_empty());
+        assert!(!stored.enabled && stored.name == "Keyed");
+        task.abort();
+        other_task.abort();
     }
 
     #[tokio::test]
