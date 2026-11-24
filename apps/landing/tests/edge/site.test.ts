@@ -403,8 +403,10 @@ describe("an author's pages", () => {
 
     // The list names it by its short id, with what it may publish by the plugins' own names (the packages'), and never shows it.
     const list = await web.get("/account/tokens");
-    expect(list.body).toContain(`<div class="id">${short}</div>`);
-    expect(list.body).toContain('<div class="names">focus\u00a0timer and theme\u00a0sync</div><small>2 plugins</small>');
+    expect(list.body).toContain(`<span class="id">${short}</span>`);
+    expect(list.body).toContain('<span class="sw">2 plugins</span>');
+    const names = list.body.slice(list.body.indexOf('<ul class="plist"'), list.body.indexOf("</ul>", list.body.indexOf('<ul class="plist"')));
+    expect([...names.matchAll(/<li class="pl">[\s\S]*?<span>([^<]+)<\/span><\/li>/g)].map((m) => m[1]).sort()).toEqual(["focus timer", "theme sync"]);
     expect(list.body).not.toContain("zdt_");
     const id = /href="\/account\/tokens\/(tok_[0-9A-Za-z]{16})"/.exec(list.body)![1]!;
 
@@ -418,7 +420,7 @@ describe("an author's pages", () => {
     expect(published.status, await published.clone().text()).toBe(201);
     const mine = await web.get("/account/plugins/theme-sync");
     expect(mine.body).toMatch(/0\.2\.0[\s\S]*<small><svg[^>]*>[\s\S]*?<\/svg>GitHub Actions<\/small>/);
-    expect((await web.get("/account/tokens")).body).toMatch(/<time datetime="[^"]+">[^<]+<\/time><\/div><small>on\u00a0theme sync<\/small>/);
+    expect((await web.get("/account/tokens")).body).toMatch(/<span class="c-used" title="[^"]+ \u00b7 theme sync"><span><span class="ph">Last used [^<]+ \u00b7 theme sync<\/span><span class="wd">[^<]+ \u00b7 theme sync<\/span><\/span>/);
 
     // Revoked from the site, it publishes nothing.
     const ask = await web.get(`/account/tokens/${id}`);

@@ -1,17 +1,18 @@
 ---
-// Your plugins (the prototype's yours page): each plugin you publish, its
-// newest version and where it stands (verified, not yet, the reviewer's
-// note when Zeron didn't verify it, taken down or removed and why), when it
-// was published and from where (one of your devices, or a deploy token by its
-// name), and how many have it. One person's page: never cached, never
-// indexed. Signed out, it says so and offers sign-in, here.
+// Your plugins, as Vercel's dashboard lists projects: a row a plugin, one
+// line, the whole row its link. Its tile and name; its newest version and
+// where that stands (a pill); when it was published (and "via token" when a
+// deploy token sent it, its name on hover: one of your devices is the usual,
+// said by nothing); how many have it. A second line only for what's
+// unusual: the newest verified when the newest isn't, the reviewer's note,
+// why it was taken down. One person's page: never cached, never indexed.
+// Signed out, it says so and offers sign-in, here.
 import AccountHead from "../../components/look/AccountHead.astro";
 import Flash from "../../components/look/Flash.astro";
 import Icon from "../../components/look/Icon.astro";
 import Seal from "../../components/look/Seal.astro";
 import SignInPlease from "../../components/look/SignInPlease.astro";
 import Tile from "../../components/look/Tile.astro";
-import Words from "../../components/look/Words.astro";
 import Store from "../../layouts/Store.astro";
 import "../../styles/look/account.css";
 import { count, day, since } from "../../lib/store/format.ts";
@@ -35,26 +36,25 @@ const plugins = result?.ok ? result.data.plugins : [];
 const now = Date.now();
 const liveTokens = tokensResult?.ok ? tokensResult.data.tokens.filter((k) => !k.revoked_at && !(k.expires_at !== null && k.expires_at < now)).length : null;
 
-/** Where a plugin's newest version stands: its pill, and the lines under it. */
-function standing(p: MyPlugin) {
+/** Where a plugin's newest version stands: its pill, and what's unusual about it, said on a line under the row. */
+function standing(p: MyPlugin): { tone: string; label: string; notes: string[] } {
   const v = p.versions[0];
   const verifiedOne = p.verified_version ? p.versions.find((x) => x.version === p.verified_version) : undefined;
-  const newestVerified = verifiedOne
-    ? `${store("plugins.store.summary.newest_verified", { version: verifiedOne.version })}${verifiedOne.verified_at ? `, since ${day(verifiedOne.verified_at, now)}` : ""}`
-    : null;
-  const none = `${store("plugins.store.summary.none_verified").replace(/^./, (c) => c.toUpperCase())}: agents can't install it until one is.`;
-  if (!v) return { tone: "quiet", label: "Nothing published", why: null, line: null, seal: false };
-  if (p.listing === "suspended") return { tone: "bad", label: "Suspended", why: "Zeron took it out of the store. Those who have it keep it.", line: null, seal: false };
+  // (Said only when the newest isn't the verified one.)
+  const newestVerified = verifiedOne && verifiedOne !== v ? store("plugins.store.summary.newest_verified", { version: verifiedOne.version }) : null;
+  const notes = (...xs: (string | null | undefined)[]) => xs.filter((x): x is string => Boolean(x));
+  if (!v) return { tone: "quiet", label: "Nothing published", notes: [] };
+  if (p.listing === "suspended") return { tone: "bad", label: "Suspended", notes: ["Zeron took it out of the store. Those who have it keep it."] };
   if (v.status === "taken_down" || v.status === "removed") {
     const reason = v.removal?.reason ?? v.review?.message ?? null;
-    const off = v.status === "taken_down" && v.removal ? ` Off since ${day(v.removal.at, now)}.` : "";
-    return { tone: "bad", label: statusWords(v.status), why: reason ? `“${reason}”${off}` : off.trim() || null, line: newestVerified, seal: Boolean(verifiedOne) };
+    const off = v.status === "taken_down" && v.removal ? `Off since ${day(v.removal.at, now)}.` : null;
+    return { tone: "bad", label: statusWords(v.status), notes: notes(reason ? `“${reason}”` : null, off, newestVerified) };
   }
-  if (v.yanked) return { tone: "quiet", label: statusWords("yanked"), why: null, line: newestVerified, seal: Boolean(verifiedOne) };
-  if (v.verified) return { tone: "ok", label: store("plugins.store.verified"), why: null, line: v.verified_at ? store("plugins.store.verified_on", { date: day(v.verified_at, now) }) : null, seal: false };
+  if (v.yanked) return { tone: "quiet", label: statusWords("yanked"), notes: notes(newestVerified) };
+  if (v.verified) return { tone: "ok", label: store("plugins.store.verified"), notes: [] };
   if (v.review?.decision === "declined")
-    return { tone: "bad", label: store("plugins.store.review.declined"), why: v.review.message ? store("plugins.store.review.declined_said", { words: v.review.message }) : null, line: newestVerified ?? none, seal: Boolean(verifiedOne) };
-  return { tone: "no", label: store("plugins.store.review.waiting"), why: null, line: newestVerified ?? none, seal: Boolean(verifiedOne) };
+    return { tone: "bad", label: store("plugins.store.review.declined"), notes: notes(v.review.message ? store("plugins.store.review.declined_said", { words: v.review.message }) : null, newestVerified) };
+  return { tone: "no", label: store("plugins.store.review.waiting"), notes: notes(newestVerified) };
 }
 const gone = (p: MyPlugin) => p.listing === "suspended" || ["taken_down", "removed"].includes(p.versions[0]?.status ?? "");
 ---
@@ -63,7 +63,7 @@ const gone = (p: MyPlugin) => p.listing === "suspended" || ["taken_down", "remov
   <div class="wrap acct">
     <AccountHead
       title="Your plugins"
-      lead="What you have published, and where each version stands. A new version is live the moment you send it; the check arrives when Zeron has verified it."
+      lead="What you've published, and where each version stands."
       current="plugins"
       plugins={result?.ok ? plugins.length : null}
       tokens={liveTokens}
@@ -97,34 +97,30 @@ const gone = (p: MyPlugin) => p.listing === "suspended" || ["taken_down", "remov
                 <span class="cmd"><code><em aria-hidden="true">$</em> zeron plugin publish</code><button type="button" data-copy="zeron plugin publish" aria-label="Copy the command"><Icon name="copy" /></button></span>
               </div>
             ) : (
-              <div class="card mine">
-                <div class="row h" aria-hidden="true"><span>Plugin</span><span>Newest version</span><span>Published</span><span class="r">Installs</span><span></span></div>
+              <div class="tbl mine">
+                <div class="trow th" aria-hidden="true"><span>Plugin</span><span>Newest version</span><span>Published</span><span class="r">Installs</span><span></span></div>
                 <ul aria-label="Your plugins">
                   {plugins.map((p) => {
                     const s = standing(p);
                     const v = p.versions[0];
                     return (
                       <li>
-                        <a class:list={["row", hueClass(p.id), { off: gone(p) }]} href={`/account/plugins/${encodeURIComponent(p.id)}`}>
-                          <div class="who">
-                            <Tile id={p.id} name={p.name} icon={p.icon} version={v?.version ?? null} />
-                            <div><div class="nm name"><Words text={p.name} /></div><div class="id">{p.id}</div></div>
-                          </div>
-                          <div class="ver">
-                            <div class="top1 pills">
-                              {v && <b>{v.version}</b>}
-                              <span class:list={["state", s.tone]}>{s.tone === "ok" && <Seal quiet />}{s.label}</span>
-                            </div>
-                            {s.why && <small class="why">{s.why}</small>}
-                            {s.line && <small>{s.seal && <Seal size="s" quiet />}{s.line}</small>}
-                          </div>
-                          <div class="pub">
-                            {v && <div><span class="sr-only">Published </span><time datetime={new Date(v.published_at).toISOString()}>{since(v.published_at, now, true)}</time></div>}
-                            {v?.via === "deploy_token" && <small><Icon name="key" />{v.deploy_token?.name ?? "A deploy token"}</small>}
-                            {v?.via === "device" && <small><Icon name="laptop" />One of your devices</small>}
-                          </div>
-                          <div class="n num">{count(p.installs)}<span class="sr-only"> installs</span></div>
+                        <a class:list={["trow", hueClass(p.id), { off: gone(p), two: s.notes.length > 0 }]} href={`/account/plugins/${encodeURIComponent(p.id)}`}>
+                          <span class="c-name">
+                            <Tile id={p.id} name={p.name} icon={p.icon} version={v?.version ?? null} size="s" />
+                            <span class="nm" title={p.name}>{p.name}</span>
+                          </span>
+                          <span class="c-ver pills">
+                            {v && <b class="mono">{v.version}</b>}
+                            <span class:list={["state", s.tone]}>{s.tone === "ok" && <Seal quiet />}{s.label}</span>
+                          </span>
+                          <span class="c-pub">
+                            {v && <><span class="sr-only">Published </span><time datetime={new Date(v.published_at).toISOString()}>{since(v.published_at, now, true)}</time></>}
+                            {v?.via === "deploy_token" && <span class="via" title={v.deploy_token?.name ? `Sent by the deploy token “${v.deploy_token.name}”` : "Sent by a deploy token"}><Icon name="key" />via token<span class="sr-only">: {v.deploy_token?.name ?? "a deploy token"}</span></span>}
+                          </span>
+                          <span class="c-n num">{count(p.installs)}<span class="sr-only unit"> {p.installs === 1 ? "install" : "installs"}</span></span>
                           <Icon name="chev" />
+                          {s.notes.length > 0 && <span class="c-note">{s.notes.join(" · ")}</span>}
                         </a>
                       </li>
                     );

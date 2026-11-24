@@ -1,26 +1,24 @@
 ---
-// Your deploy tokens (contract a315eef5a; the prototype's keys page, its
-// row for many plugins redrawn): each live token by name and short id,
-// with what it can publish (up to three plugins named; past that a count,
-// three tiles and "+n", and the whole list opened in place under it, a
-// details: no script), when it was last used and for which plugin, when it
-// ends (soon, in the warning's colour), and Revoke; then the revoked and
-// ended. New token opens its form in a dialog (with no script, its page);
-// the token is shown once, by the page that makes it, and never here: a
-// lost one is revoked and made again. Signed out, it says so and offers
-// sign-in, here. A name with no spaces in it breaks into even halves
-// (Words), and "on" stays with the plugin it names.
+// Your deploy tokens (contract a315eef5a), as GitHub lists personal access
+// tokens: a row a token, one line. Its name and short id; what it can
+// publish (one plugin by name and tile, all of yours, or how many with up to
+// three tiles and "+n", the whole list a disclosure that opens as a row
+// under the token: no script); when it was last used and for which plugin;
+// when it ends (soon, in the warning's colour); and Revoke. Then the
+// revoked and ended. A long name is cut on its line, whole on hover. New
+// token opens its form in a dialog (with no script, its page); the token is
+// shown once, by the page that makes it, and never here: a lost one is
+// revoked and made again. Signed out, it says so and offers sign-in, here.
 import AccountHead from "../../../components/look/AccountHead.astro";
 import Flash from "../../../components/look/Flash.astro";
 import Icon from "../../../components/look/Icon.astro";
 import SignInPlease from "../../../components/look/SignInPlease.astro";
 import Tile from "../../../components/look/Tile.astro";
 import TokenForm from "../../../components/look/TokenForm.astro";
-import Words from "../../../components/look/Words.astro";
 import Store from "../../../layouts/Store.astro";
 import "../../../styles/look/account.css";
 import { takeFlash } from "../../../lib/store/flash.ts";
-import { count, date, day, since } from "../../../lib/store/format.ts";
+import { count, date, day, since, sinceInSentence } from "../../../lib/store/format.ts";
 import { privatePage } from "../../../lib/store/http.ts";
 import { NO_FIELDS } from "../../../lib/store/tokens.ts";
 import type { DeployToken, MyPlugin } from "../../../lib/store/types.ts";
@@ -50,11 +48,10 @@ const endsIn = (k: DeployToken) => {
   const days = Math.max(0, Math.ceil((k.expires_at! - now) / 86_400_000));
   return days === 0 ? store("plugins.store.key.ends_today") : days === 1 ? store("plugins.store.key.ends_tomorrow") : store("plugins.store.key.ends_in", { n: days });
 };
-/** A short name kept whole on its line, so names break between one another, never inside one ("Quick / links"). */
-const whole = (name: string) => (name.length <= 24 ? name.replace(/ /g, "\u00a0") : name);
-/** Up to three plugins are named; past three, counted. */
-const named = (ids: string[]) =>
-  ids.length === 2 ? store("plugins.store.key.scope.two", { a: whole(plugin(ids[0]!).name), b: whole(plugin(ids[1]!).name) }) : ids.map((id) => whole(plugin(id).name)).join(", ");
+/** What a token can publish, in words: all of yours, its one plugin by name, or how many. */
+const scopeWords = (k: DeployToken) => ("all" in k.scope ? store("plugins.store.key.scope.all") : k.scope.plugins.length === 1 ? plugin(k.scope.plugins[0]!).name : `${count(k.scope.plugins.length)} plugins`);
+/** When it was last used, and on which plugin: one line. Inside a sentence ("Last used yesterday"), its words in lower case. */
+const usedLine = (k: DeployToken, inSentence = false) => (k.last_used_at ? [(inSentence ? sinceInSentence : since)(k.last_used_at, now, true), k.last_used_plugin ? plugin(k.last_used_plugin).name : null].filter(Boolean).join(" · ") : store("plugins.store.key.not_used"));
 const published = mine?.ok ? mine.data.plugins.filter((p) => p.versions.length > 0).length : 0;
 ---
 
@@ -62,7 +59,7 @@ const published = mine?.ok ? mine.data.plugins.filter((p) => p.versions.length >
   <div class="wrap acct">
     <AccountHead
       title="Deploy tokens"
-      lead="A token lets a CI job publish new versions without your sign-in. It belongs to your account and publishes only the plugins you choose."
+      lead="Tokens let CI publish new versions of your plugins without your sign-in."
       current="tokens"
       plugins={mine?.ok ? mine.data.plugins.length : null}
       tokens={tokens ? live.length : null}
@@ -90,63 +87,39 @@ const published = mine?.ok ? mine.data.plugins.filter((p) => p.versions.length >
             <p>{published > 0 ? "New token makes one: name it, choose what it can publish, and put it in your CI's secrets." : "Publish a plugin's first version from your computer; a token can send the ones after it."}</p>
           </div>
         ) : (
-          <div class="card keys">
-            <div class="key h" aria-hidden="true"><span>Token</span><span class="sc">{store("plugins.store.key.scope.label")}</span><span>Last used</span><span>{store("plugins.store.key.expiry_label")}</span><span></span></div>
+          <div class="tbl keys">
+            <div class="trow th" aria-hidden="true"><span>Token</span><span>{store("plugins.store.key.scope.label")}</span><span>Last used</span><span>{store("plugins.store.key.expiry_label")}</span><span></span></div>
             <ul aria-label="Your live deploy tokens">
               {live.map((k) => {
                 const ids = "all" in k.scope ? [] : k.scope.plugins;
+                const tiles = (
+                  <span class="tiles" aria-hidden="true">
+                    {ids.slice(0, 3).map((id) => { const p = plugin(id); return <Tile id={p.id} name={p.name} icon={p.icon} version={p.version} size="xs" />; })}
+                    {ids.length > 3 && <span class="more num">+{ids.length - 3}</span>}
+                  </span>
+                );
                 return (
-                  <li class="key">
-                    <div class="kname"><div class="nm"><Words text={k.name} /></div><div class="id">{k.short}</div></div>
-                    <div class:list={["scope", { many: ids.length > 3 }]}>
-                      {"all" in k.scope ? (
-                        <>
-                          <span class="all" aria-hidden="true"><Icon name="grid" /></span>
-                          <div class="w"><div>{store("plugins.store.key.scope.all")}</div><small>{count(yours.size)} today, and any you publish later</small></div>
-                        </>
-                      ) : (
-                        <>
-                          <div class="tiles" aria-hidden="true">
-                            {ids.slice(0, 3).map((id) => { const p = plugin(id); return <Tile id={p.id} name={p.name} icon={p.icon} version={p.version} size="s" />; })}
-                            {ids.length > 3 && <span class="tile s more">+{ids.length - 3}</span>}
-                          </div>
-                          <div class="w">
-                            {ids.length <= 3 ? (
-                              <>
-                                <div class="names"><Words text={named(ids)} /></div>
-                                <small>{ids.length === 1 ? "1 plugin" : `${ids.length} plugins`}</small>
-                              </>
-                            ) : (
-                              <>
-                                <div class="count">{ids.length} plugins</div>
-                                {/* Under the count, the whole list on request; it opens under the row, from its scope to its end (a details: no script). */}
-                                <details class="every">
-                                  <summary>Show all {ids.length}<span class="sr-only"> plugins {k.name} can publish</span><Icon name="chev" /></summary>
-                                  <ul class="plist" aria-label={`What ${k.name} can publish`}>
-                                    {ids.map((id) => { const p = plugin(id); return <li class="pl"><Tile id={p.id} name={p.name} icon={p.icon} version={p.version} size="xs" /><span><Words text={p.name} /></span></li>; })}
-                                  </ul>
-                                </details>
-                              </>
-                            )}
-                          </div>
-                        </>
-                      )}
-                    </div>
-                    <div class="used">
-                      {k.last_used_at ? (
-                        <>
-                          <div><time datetime={new Date(k.last_used_at).toISOString()}>{since(k.last_used_at, now, true)}</time></div>
-                          {k.last_used_plugin && <small>on{"\u00a0"}<Words text={plugin(k.last_used_plugin).name} /></small>}
-                        </>
-                      ) : (
-                        <>
-                          <div class="t3">{store("plugins.store.key.not_used")}</div>
-                          <small>Made {day(k.created_at, now)}</small>
-                        </>
-                      )}
-                    </div>
-                    <div class="ends">{k.expires_at === null ? store("plugins.store.key.no_end") : soon(k) ? <span class="state no">{endsIn(k)}</span> : date(k.expires_at)}</div>
-                    <a class="btn ghost sm" href={`/account/tokens/${encodeURIComponent(k.id)}`}>{store("plugins.store.key.revoke")}<span class="sr-only"> {k.name}</span></a>
+                  <li class="trow">
+                    <span class="c-name"><span class="nm" title={k.name}>{k.name}</span><span class="id">{k.short}</span></span>
+                    {ids.length > 1 ? (
+                      /* (Its plugins on request: the summary in its column, the list a row of its own under the token.) */
+                      <details class="every">
+                        <summary class="c-scope"><span class="sw">{scopeWords(k)}</span>{tiles}<span class="show">Show all<span class="sr-only"> plugins {k.name} can publish</span></span><Icon name="chev" /></summary>
+                        <ul class="plist" aria-label={`What ${k.name} can publish`}>
+                          {ids.map((id) => { const p = plugin(id); return <li class="pl"><Tile id={p.id} name={p.name} icon={p.icon} version={p.version} size="xs" /><span>{p.name}</span></li>; })}
+                        </ul>
+                      </details>
+                    ) : (
+                      <span class="c-scope" title={"all" in k.scope ? `${count(yours.size)} today, and any you publish later` : undefined}>
+                        {ids.length === 1 && tiles}<span class="sw">{scopeWords(k)}</span>
+                      </span>
+                    )}
+                    {/* (When: a phone's third line, "Last used … · Ends …"; wide, two columns.) */}
+                    <span class="c-when">
+                      <span class="c-used" title={k.last_used_at ? usedLine(k) : `Made ${day(k.created_at, now)}`}><span class:list={{ t3: !k.last_used_at }}>{k.last_used_at ? <><span class="ph">Last used {usedLine(k, true)}</span><span class="wd">{usedLine(k)}</span></> : usedLine(k)}</span></span>
+                      <span class="c-ends">{k.expires_at === null ? store("plugins.store.key.no_end") : soon(k) ? <span class="state no">{endsIn(k)}</span> : <><span class="ph">Ends </span>{date(k.expires_at)}</>}</span>
+                    </span>
+                    <a class="btn ghost sm revoke" href={`/account/tokens/${encodeURIComponent(k.id)}`}>{store("plugins.store.key.revoke")}<span class="sr-only"> {k.name}</span></a>
                   </li>
                 );
               })}
@@ -158,14 +131,16 @@ const published = mine?.ok ? mine.data.plugins.filter((p) => p.versions.length >
         gone.length > 0 && (
           <details class="gone">
             <summary>Revoked and ended tokens · {gone.length}<Icon name="chev" /></summary>
-            <div class="card keys">
+            <div class="tbl keys">
               <ul aria-label="Revoked and ended tokens">
                 {gone.map((k) => (
-                  <li class="key was">
-                    <div class="kname"><div class="nm"><Words text={k.name} /></div><div class="id">{k.short}</div></div>
-                    <div class="scope"><div class="w"><div class="names"><Words text={"all" in k.scope ? store("plugins.store.key.scope.all") : k.scope.plugins.length <= 3 ? named(k.scope.plugins) : `${k.scope.plugins.length} plugins`} /></div></div></div>
-                    <div class="used"><div>{k.last_used_at ? since(k.last_used_at, now) : store("plugins.store.key.not_used")}</div><small>Made {day(k.created_at, now)}</small></div>
-                    <div class="ends"><span class="state quiet">{k.revoked_at ? `Revoked ${day(k.revoked_at, now)}` : `Ended ${day(k.expires_at!, now)}`}</span></div>
+                  <li class="trow was">
+                    <span class="c-name"><span class="nm" title={k.name}>{k.name}</span><span class="id">{k.short}</span></span>
+                    <span class="c-scope"><span class="sw">{scopeWords(k)}</span></span>
+                    <span class="c-when">
+                      <span class="c-used" title={`Made ${day(k.created_at, now)}`}>{k.last_used_at ? <><span class="ph">Last used {sinceInSentence(k.last_used_at, now)}</span><span class="wd">{since(k.last_used_at, now)}</span></> : store("plugins.store.key.not_used")}</span>
+                      <span class="c-ends"><span class="state quiet">{k.revoked_at ? `Revoked ${day(k.revoked_at, now)}` : `Ended ${day(k.expires_at!, now)}`}</span></span>
+                    </span>
                     <span></span>
                   </li>
                 ))}
