@@ -1393,6 +1393,7 @@ mod tests {
                 HarnessId::Cursor,
                 HarnessId::Devin,
                 HarnessId::Grok,
+                HarnessId::Kimi,
                 HarnessId::Hermes,
                 HarnessId::Fx,
                 HarnessId::Pi,
