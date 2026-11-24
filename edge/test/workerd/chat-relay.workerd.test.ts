@@ -782,6 +782,71 @@ describe("a stored row can't be left depending on ops no checkpoint holds", () =
     viewer.socket.close();
   });
 
+  /** A version vector as Loro encodes it: count, then each peer and its zigzagged counter. */
+  const version = (...entries: [number, number][]) =>
+    btoa(String.fromCharCode(entries.length, ...entries.flatMap(([peer, counter]) => [peer, counter * 2])));
+  const healClaim = (name: string, claimed: string) =>
+    room(name).fetch(`https://chat/heal?chatId=${name}`, {
+      method: "POST",
+      headers: { [AUTH_USER_HEADER]: user, "x-chat2-version": claimed }
+    });
+
+  it("a heal the stored checkpoint already covers needs no upload", async () => {
+    const name = crypto.randomUUID();
+    await enableRelay(name);
+    const viewer = await relayedThenQueued(name);
+    // The host's last checkpoint holds everything it relayed (peer 5 up to 20).
+    await (await checkpoint(name, "", version([5, 20]))).arrayBuffer();
+    const old = await connect(name, "old", { host: "laptop" });
+    await old.settled();
+    expect(await queueCount(name)).toBe(1);
+    const closed = new Promise<number>(resolve => old.socket.addEventListener("close", e => resolve(e.code)));
+    const claim = await healClaim(name, version([5, 12]));
+    expect(claim.status).toBe(200);
+    // As a full heal does: the queue stored, old sockets told to rejoin.
+    expect(await rowCount(name)).toBe(1);
+    expect(await queueCount(name)).toBe(0);
+    expect(await closed).toBe(1012);
+    viewer.socket.close();
+  });
+
+  it("a heal claim the stored checkpoint doesn't cover changes nothing", async () => {
+    const name = crypto.randomUUID();
+    await enableRelay(name);
+    const viewer = await relayedThenQueued(name);
+    await (await checkpoint(name, "", version([5, 20]))).arrayBuffer();
+    const old = await connect(name, "old", { host: "laptop" });
+    await old.settled();
+    for (const claimed of [version([5, 21]), version([5, 20], [6, 1])]) {
+      const claim = await healClaim(name, claimed);
+      expect(claim.status).toBe(409);
+      expect(await claim.json()).toEqual({ error: "not_covered" });
+    }
+    expect(await rowCount(name)).toBe(0);
+    expect(await queueCount(name)).toBe(1);
+    const stats = await (await room(name).fetch("https://chat/stats", { headers: { [AUTH_USER_HEADER]: user } })).json();
+    expect(stats).toMatchObject({ relayDirty: true });
+    viewer.socket.close();
+    old.socket.close();
+  });
+
+  it("a heal claim with no checkpoint stored, or no version, is refused", async () => {
+    const name = crypto.randomUUID();
+    await enableRelay(name);
+    const viewer = await relayedThenQueued(name);
+    expect((await healClaim(name, version([5, 1]))).status).toBe(409);
+    expect((await healClaim(name, "")).status).toBe(400);
+    expect((await healClaim(name, "AQ==")).status).toBe(400);
+    expect((await healClaim(name, version())).status).toBe(400);
+    const other = await room(name).fetch(`https://chat/heal?chatId=${name}`, {
+      method: "POST",
+      headers: { [AUTH_USER_HEADER]: "someone-else", "x-chat2-version": version([5, 1]) }
+    });
+    expect(other.status).toBe(403);
+    expect(await queueCount(name)).toBe(1);
+    viewer.socket.close();
+  });
+
   it("a checkpoint that isn't a heal doesn't release it", async () => {
     const name = crypto.randomUUID();
     await enableRelay(name);
