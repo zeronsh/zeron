@@ -12,7 +12,7 @@ interface Props {
   /** Its icon: the edge's address for it, or its path in the package and the version it's from. */
   icon: string | null | undefined;
   version: string | null;
-  size?: "xs" | "s" | "m" | "l" | "xl" | "xxl";
+  size?: "xs" | "s" | "ms" | "m" | "l" | "xl" | "xxl";
   class?: string;
 }
 const { id, name, icon, version, size = "m", class: className } = Astro.props;

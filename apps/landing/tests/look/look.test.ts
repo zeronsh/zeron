@@ -101,7 +101,9 @@ describe("by keyboard", () => {
       // (The skip link first, then the bar, then the page.)
       expect(stops[0]!.label).toBe("Skip to the page");
       expect(stops[1]!.tag).toBe("a");
-      expect(stops.slice(2, 6).map((s) => s.label)).toEqual(["Browse", "Publish", "Search plugins", "Sign in"]);
+      // (The store's search is its hero's, the page's first stop: the bar has none there.)
+      const store = path === "/plugins" || path.startsWith("/plugins?");
+      expect(stops.slice(2, 6).map((s) => s.label)).toEqual(store ? ["Browse", "Publish", "Sign in", "Search plugins"] : ["Browse", "Publish", "Search plugins", "Sign in"]);
       // Every stop shows the ring.
       for (const s of stops) expect(s.ring, s.label).toBe("solid");
       // Down the page: a later stop is never above an earlier one's row (a row's stops go left to right).
@@ -115,11 +117,11 @@ describe("by keyboard", () => {
     }
   });
 
-  test('"/" puts you in the store\'s one search, the bar\'s; Escape leaves it', async () => {
+  test('"/" puts you in the store\'s one search, its hero\'s; Escape leaves it', async () => {
     const page = await open("/plugins", 1440);
     try {
       await page.keyboard.press("/");
-      expect(await page.evaluate(() => document.activeElement?.matches(".top .find input[data-search]"))).toBe(true);
+      expect(await page.evaluate(() => document.activeElement?.matches(".hero .hfind input[data-search]"))).toBe(true);
       await page.keyboard.press("Escape");
       expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true);
     } finally {
