@@ -25,6 +25,15 @@
 --               what waits on another card, what's paused, what's held
 --   done        closed today, the last first
 --   earlier     closed before today (dropped ones among them), the last first
+--   shared      the open asks, not put off, that stand on Needs-you cards but
+--               are no one card's (`shared`, below): each said once, apart
+--               from the cards
+--
+-- A shared ask: one that names no card and either stands on more than one
+-- card's row or is the engine's review ask for an orchestrator's open PRs
+-- (one for all of them, which each such card carries so that putting it
+-- off puts them off). A card's own ask (`own`) is its first open one not
+-- put off that isn't shared: what its row and its summary say it waits on.
 
 local M = {}
 
@@ -40,6 +49,8 @@ export type Entry = {
 	asks: { any },
 	-- The one to answer now (not put off), if any.
 	ask: any?,
+	-- The one to answer now that is its own (not shared), if any.
+	own: any?,
 	urgent: boolean,
 	-- When it came to this place; when its status last changed (its timer).
 	since: number,
@@ -57,6 +68,8 @@ export type Board = {
 	planned: { Entry },
 	done: { Entry },
 	earlier: { Entry },
+	-- The shared asks of Needs you's cards, the oldest first.
+	shared: { any },
 	by_id: { [string]: Entry },
 	-- The tabs' figures: what's on the board today.
 	counts: { all: number, needs_you: number, running: number, done: number },
@@ -183,6 +196,28 @@ local asks_index = memo1(function(asks: any): { by_id: { [string]: any }, by_ite
 end)
 M.asks_index = asks_index
 
+-- How many cards' rows carry each ask.
+local carried = memo1(function(cards: any): { [string]: number }
+	local out: { [string]: number } = {}
+	for _, c in cards or {} do
+		for _, id in c.asks or {} do
+			out[id] = (out[id] or 0) + 1
+		end
+	end
+	return out
+end)
+
+-- Whether an ask is no one card's (see the head).
+local function shared(ask: any, counts: { [string]: number }): boolean
+	if ask.item_id ~= nil then
+		return false
+	end
+	return ask.origin == "review" or (counts[ask.id] or 0) > 1
+end
+M.shared = function(now: any, ask: any): boolean
+	return shared(ask, carried(now and now.cards))
+end
+
 -- A card's open asks: its row's (the engine's order), else those that name
 -- it or that one of its threads raised on no card.
 local function asks_of(item: any, card: any?, index: any, at: number): { any }
@@ -264,17 +299,21 @@ local function same_entry(a: Entry, b: Entry): boolean
 			return false
 		end
 	end
-	return same(a.ask, b.ask, 4) and same(a.item, b.item, 4) and same(a.card, b.card, 5)
+	return same(a.ask, b.ask, 4) and same(a.own, b.own, 4) and same(a.item, b.item, 4) and same(a.card, b.card, 5)
 end
 
-local function entry_of(item: any, card_row: any?, index: any, at: number): Entry
+local function entry_of(item: any, card_row: any?, index: any, counts: { [string]: number }, at: number): Entry
 	local card = if current(item, card_row) then card_row else nil
 	local asks = asks_of(item, card, index, at)
 	local ask: any? = nil
+	local own: any? = nil
 	local urgent = false
 	for _, a in asks do
 		if not deferred(a, at) then
 			ask = ask or a
+			if not own and not shared(a, counts) then
+				own = a
+			end
 			urgent = urgent or a.urgent == true or a.escalated ~= nil
 		end
 	end
@@ -302,6 +341,7 @@ local function entry_of(item: any, card_row: any?, index: any, at: number): Entr
 		status = status,
 		asks = asks,
 		ask = ask,
+		own = own,
 		urgent = urgent,
 		since = since,
 		status_since = (card and card.status_since) or since,
@@ -321,6 +361,7 @@ local function build(now: any, filter: string?, at: number, prev: Board?): Board
 	local was = prev and prev.by_id
 	local cards = M.cards_by_id(now and now.cards)
 	local index = asks_index(now and now.asks)
+	local counts = carried(now and now.cards)
 	local today = day_start(at)
 	local b: Board = {
 		needs_you = {},
@@ -329,12 +370,13 @@ local function build(now: any, filter: string?, at: number, prev: Board?): Board
 		planned = {},
 		done = {},
 		earlier = {},
+		shared = {},
 		by_id = {},
 		counts = { all = 0, needs_you = 0, running = 0, done = 0 },
 	}
 	for _, item in (now and now.items) or {} do
 		if not item.removed and (filter == nil or item.orchestrator_id == filter) then
-			local e = entry_of(item, cards[item.id], index, at)
+			local e = entry_of(item, cards[item.id], index, counts, at)
 			local last = was and was[e.id]
 			if last and same_entry(e, last) then
 				e = last
@@ -360,6 +402,22 @@ local function build(now: any, filter: string?, at: number, prev: Board?): Board
 			return x.urgent
 		end
 		return latest_first(x, y)
+	end)
+	-- Needs you's shared asks, each once.
+	local seen: { [string]: boolean } = {}
+	for _, e in b.needs_you do
+		for _, a in e.asks do
+			if not seen[a.id] and not deferred(a, at) and shared(a, counts) then
+				seen[a.id] = true
+				table.insert(b.shared, a)
+			end
+		end
+	end
+	table.sort(b.shared, function(x: any, y: any): boolean
+		if (x.created or 0) ~= (y.created or 0) then
+			return (x.created or 0) < (y.created or 0)
+		end
+		return x.id < y.id
 	end)
 	table.sort(b.snoozed, function(x: Entry, y: Entry): boolean
 		local ux, uy = x.until_at or math.huge, y.until_at or math.huge
