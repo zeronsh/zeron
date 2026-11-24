@@ -127,8 +127,11 @@ export type Alert = {
 	cells: { string }?,
 	trail: string?,
 	quiet: boolean?,
+	-- What it would run, under its line, as code.
+	code: string?,
 	-- Its answers, side by side under its words (each an alert: its `action`
-	-- the label, its `id` what comes to `on_alert_action`).
+	-- the label, its `id` what comes to `on_alert_action`), the first the
+	-- one meant.
 	buttons: { Alert }?,
 }
 export type Props = {
@@ -1460,12 +1463,36 @@ local function alert_row(a: Alert, row: State<Alert>, props: Props, height: numb
 	local more = ui.computed(function(): { Alert }
 		return row:get().more or {}
 	end)
+	local function code(): Node
+		return ui.show(function(): boolean
+			return row:get().code ~= nil
+		end, ui.div {
+			w_full = true,
+			pl = function(): any
+				return if has_glyph() then ui.raw(34, "under the row's words: its inset, the glyph and the gap") else "$space.2"
+			end,
+			pr = "$space.2",
+			pb = "$space.1",
+			ui.text {
+				function(): string
+					return row:get().code or ""
+				end,
+				literal = true,
+				wrap = true,
+				font = "$font.mono",
+				text_size = "$font.size.sm",
+				line_height = "$font.line.sm",
+				color = "$text.primary",
+			},
+		})
+	end
 	return ui.column {
 		w_full = true,
 		ui.row(parts),
 		words(function(): string?
 			return row:get().body
 		end),
+		code(),
 		ui.each(more, function(x: Alert, _i: number, now: State<Alert>): Node
 			return alert_row(x, now, props, height, width, row:peek().grid or { name = 0, columns = {} })
 		end, {
@@ -1480,18 +1507,19 @@ local function alert_row(a: Alert, row: State<Alert>, props: Props, height: numb
 		ui.show(function(): boolean
 			return row:get().buttons ~= nil and props.on_alert_action ~= nil
 		end, ui.row {
-			pl = ui.raw(26, "under the row's words"),
+			pl = function(): any
+				return if has_glyph() then ui.raw(34, "under the row's words: its inset, the glyph and the gap") else "$space.2"
+			end,
 			pr = "$space.2",
+			pt = "$space.1",
 			pb = "$space.2",
-			gap = "$space.1",
-			wrap = true,
 			ui.each(ui.computed(function(): { Alert }
 				return row:get().buttons or {}
-			end), function(x: Alert): Node
+			end), function(x: Alert, i: number): Node
 				return Button {
 					x.action or "",
 					size = "sm",
-					tone = "ghost",
+					tone = if i == 1 then "primary" else "ghost",
 					h = 24,
 					px = "$space.2",
 					text_size = "$font.size.xs",
@@ -1504,7 +1532,7 @@ local function alert_row(a: Alert, row: State<Alert>, props: Props, height: numb
 					return x.id
 				end,
 				row = true,
-				gap = "$space.1",
+				gap = "$space.2",
 			}),
 		}),
 	}

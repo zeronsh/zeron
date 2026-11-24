@@ -912,6 +912,14 @@ ui.command {
 		publish()
 	end,
 }
+ui.command {
+	id = "activity_view",
+	title = "The sidebar shows Activity",
+	run = function()
+		local act = require("@app/screens/shell/activity")
+		act.on:set(true)
+	end,
+}
 -- Write the docs delegated, ended its turn and waits: two subagents, one on
 -- another device.
 ui.command {

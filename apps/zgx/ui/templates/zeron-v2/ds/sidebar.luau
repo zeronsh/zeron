@@ -1284,7 +1284,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		local second = SessionRow.second_line(function(): string
 			return detail(cur(), by_here:get())
 		end, function(): boolean
-			return details.branch:get() and cur().branch ~= nil
+			return details.branch:get() and cur().branch ~= nil and cur().note == nil
 		end, second_line, fades)
 		-- Whether it's open, and whether it can be picked out with others (in
 		-- the list itself, off the shelf) and is.

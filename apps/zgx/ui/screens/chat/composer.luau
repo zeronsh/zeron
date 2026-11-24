@@ -617,7 +617,7 @@ local function Composer(): Node
 		local shown = store.session:get()
 		local id = session_id:get()
 		if shown and id and shown.id == id then
-			out = lanes.tasks(id, shown.device)
+			out = lanes.tasks(id)
 		end
 		local first_ended = #out + 1
 		for i, t in out do

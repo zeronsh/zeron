@@ -3504,14 +3504,13 @@ impl Inner {
         {
             return zeron_mcp::Delegation::Off;
         }
-        let child = self
-            .workspace()
-            .and_then(|ws| ws.chat(chat_id).ok().flatten())
-            .is_some_and(|chat| chat.child_kind == Some(zeron_proto::ChildKind::Subagent));
-        if child {
-            zeron_mcp::Delegation::Child
-        } else {
-            zeron_mcp::Delegation::Parent
+        match self.workspace().and_then(|ws| ws.chat(chat_id).ok().flatten()) {
+            Some(chat) if chat.child_kind == Some(zeron_proto::ChildKind::Subagent) => {
+                zeron_mcp::Delegation::Child
+            }
+            // A side chat is the person's conversation, and delegates to no one.
+            Some(chat) if chat.parent_chat_id.is_some() => zeron_mcp::Delegation::Off,
+            _ => zeron_mcp::Delegation::Parent,
         }
     }
 

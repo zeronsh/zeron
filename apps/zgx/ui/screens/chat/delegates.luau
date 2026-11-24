@@ -69,11 +69,12 @@ function M.bind(props: Props): { alerts: State<{ any }>, on_alert: (id: string) 
 						tone = "warning",
 						title = locale.s(if ask.command then "chat.delegates.asks" else "chat.delegates.asks_approval", { title = c.title }),
 						detail = table.concat(said, " · "),
-						body = ask.command or ask.detail,
+						code = ask.command,
+						body = if ask.command then nil else ask.detail,
 						dismissable = false,
 						buttons = {
-							choice(DENY, "chat.delegates.deny"),
 							choice(ALLOW, "chat.delegates.allow"),
+							choice(DENY, "chat.delegates.deny"),
 							choice(OPEN, "chat.delegates.open"),
 						},
 					})

@@ -138,8 +138,8 @@ local CHILD = "chat:"
 -- (`session`), its child chats a Zeron chat started (`child_kind`, a
 -- subagent's or a side chat's, made through Zeron's tools) are among them,
 -- listed as a subagent is; those the person started aren't. A child chat's
--- says what it runs on and, when that's another device than the chat's own
--- (`device`), where; what it asks the person (`asks`, as `chat.asks` says
+-- says what it runs on and, when that's another device than the chat's own,
+-- where; what it asks the person (`asks`, as `chat.asks` says
 -- it); and can be stopped.
 local asks = ui.shared("chat.asks", {} :: { [string]: string })
 local function device_name(id: string): string?
@@ -150,7 +150,15 @@ local function device_name(id: string): string?
 	end
 	return nil
 end
-function M.tasks(session: string?, device: string?): { any }
+local function home_of(id: string?): string?
+	for _, c in sessions.now:get().chats do
+		if c.id == id then
+			return c.device
+		end
+	end
+	return nil
+end
+function M.tasks(session: string?): { any }
 	local active, finished = {}, {}
 	for _, s in subagents:get() do
 		local task = { id = s.ref, kind = "agent", name = s.title }
@@ -170,7 +178,7 @@ function M.tasks(session: string?, device: string?): { any }
 	end)
 	for _, c in children do
 		if c.child_kind ~= nil then
-			local where = if c.device ~= device then device_name(c.device) else nil
+			local where = if c.device ~= home_of(session) then device_name(c.device) else nil
 			local said: { string } = {}
 			for _, word in { c.harness_name or "", where or "" } do
 				if word ~= "" then

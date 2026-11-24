@@ -836,7 +836,16 @@ impl Supervisor {
         self.doc_host.spawn_worker(async move {
             let sent = this.doc_host.deliver_wake(&parent, &message_id, &text).await;
             let sent = match sent {
-                Ok(sent) => sent,
+                Ok(true) => true,
+                // (A turn began meanwhile, or nothing may start just now: its
+                // end, or the next look, tries again.)
+                Ok(false) => {
+                    let mut backoff = lock(&this.tasks.inner.backoff);
+                    let tries = backoff.get(&parent).map_or(0, |(tries, _)| *tries);
+                    let next = tokio::time::Instant::now() + this.tasks.timing().tick;
+                    backoff.insert(parent.clone(), (tries, next));
+                    false
+                }
                 Err(error) => {
                     tracing::warn!(chat = %parent, %error, "delegated results weren't delivered");
                     let mut backoff = lock(&this.tasks.inner.backoff);
