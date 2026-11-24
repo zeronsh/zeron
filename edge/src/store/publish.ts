@@ -173,15 +173,14 @@ export const handlePublish = async (request: Request, env: Env, db: D1Database, 
 const wrongKind = (row: PluginRow, publisher: Publisher, id: string): Response =>
   row.owner_id === publisher.userId ? fail(409, "wrong_kind", `"${id}" is a ${row.kind}.`) : fail(403, "id_taken", `"${id}" belongs to another account.`);
 
-/** What a package is to be listed as: verified, its listing read, its
- * problems (the first problem's order is the engine's), and what it asks
- * for. */
+/** A verified package, and what it is to be listed as, worked out only once
+ * its publisher may publish it: its problems (in the engine's order), what
+ * it asks for, its listing. */
 interface Read {
   readonly pkg: VerifiedContents;
   readonly manifest: JsonObject | null;
-  readonly problems: readonly Problem[];
-  readonly warnings: readonly Problem[];
-  readonly consent: ConsentItem;
+  readonly check: () => { readonly problems: readonly Problem[]; readonly warnings: readonly Problem[] };
+  readonly consent: () => ConsentItem;
   /** Only once there are no problems. */
   readonly listing: () => Listing | Problem;
 }
@@ -189,21 +188,29 @@ interface Read {
 const readPlugin = async (body: Uint8Array, id: string, signed: boolean): Promise<Read | Response> => {
   const pkg = await verifyPackage(body, STORE_MAX_PACKAGE_BYTES, signed);
   if (pkg.manifest.id !== id) return idMismatch(pkg.manifest.id, id);
-  const { problems, warnings } = checkListing(pkg.manifest, pkg.files, isText);
-  return { pkg, manifest: pkg.manifest.raw, problems, warnings, consent: consentItem(pkg.manifest), listing: () => listingOf(pkg.manifest, pkg.files) };
+  return {
+    pkg,
+    manifest: pkg.manifest.raw,
+    check: () => checkListing(pkg.manifest, pkg.files, isText),
+    consent: () => consentItem(pkg.manifest),
+    listing: () => listingOf(pkg.manifest, pkg.files)
+  };
 };
 
 const readTemplate = async (body: Uint8Array, id: string, signed: boolean): Promise<Read | Response> => {
   const pkg = await verifyTemplate(body, STORE_MAX_PACKAGE_BYTES, signed);
   if (pkg.id !== id) return idMismatch(pkg.id, id);
-  const { problems, warnings } = checkTemplate(pkg.manifest, pkg.files, isText);
-  // The device's preview check (a PNG, of a size) passed: then that it's a
-  // picture the store serves, so a published cover is never a 404.
-  if (!problems.some((p) => p.field === "preview")) {
-    const bad = previewProblem(pkg.files);
-    if (bad) problems.push(bad);
-  }
-  return { pkg, manifest: null, problems, warnings, consent: NO_CONSENT, listing: () => listingOfTemplate(pkg.manifest, pkg.files) };
+  const check = () => {
+    const { problems, warnings } = checkTemplate(pkg.manifest, pkg.files, isText);
+    // The device's preview check (a PNG, of a size) passed: then that it's a
+    // picture the store serves, so a published cover is never a 404.
+    if (!problems.some((p) => p.field === "preview")) {
+      const bad = previewProblem(pkg.files);
+      if (bad) problems.push(bad);
+    }
+    return { problems, warnings };
+  };
+  return { pkg, manifest: null, check, consent: () => NO_CONSENT, listing: () => listingOfTemplate(pkg.manifest, pkg.files) };
 };
 
 const idMismatch = (found: string, id: string): Response => fail(400, "bad_package", `The package is "${found}", not "${id}".`, { reason: "id_mismatch" });
@@ -250,7 +257,7 @@ const publishAs = async (publisher: Publisher, request: Request, env: Env, db: D
 
   // The engine's listing rules (what `zeron plugin check` says on the
   // device), then the store's own size limits.
-  const { problems, warnings, consent } = read;
+  const { problems, warnings } = read.check();
   if (problems.length > 0) return listingRefusal(problems[0]!, problems);
   const listing = read.listing();
   if ("rule" in listing) return listingRefusal(listing, [listing]);
@@ -286,6 +293,7 @@ const publishAs = async (publisher: Publisher, request: Request, env: Env, db: D
     .bind(id)
     .first<{ version: string }>();
   const kinds = new Map<string, FileKind>([...pkg.files].map(([path, bytes]) => [path, fileKind(path, bytes)]));
+  const consent = read.consent();
   const checks = runChecks({
     kind,
     pkg,

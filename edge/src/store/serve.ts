@@ -74,7 +74,8 @@ const privileged = async (request: Request, env: Env, owner: string): Promise<bo
 
 /** What decides who may read a version's package. */
 interface PackageState {
-  readonly kind: Kind;
+  /** (None in a state cached before there were kinds: a plugin's.) */
+  readonly kind?: Kind;
   readonly public: boolean;
   readonly owner: string;
   readonly version: string;
@@ -97,7 +98,7 @@ export const servePackage = async (request: Request, env: Env, db: D1Database, b
     return row ? { kind: row.kind, public: row.public === 1, owner: row.owner_id, version: row.version, sha256: row.package_sha256 } : undefined;
   });
   // (The state is the item's, whichever prefix asked; only its own answers.)
-  if (!state || state.kind !== kind) return notFound();
+  if (!state || (state.kind ?? "plugin") !== kind) return notFound();
   const isPublic = state.public;
   if (!isPublic && !(await privileged(request, env, state.owner))) return notFound();
   const read = async () => {
@@ -116,7 +117,8 @@ export const servePackage = async (request: Request, env: Env, db: D1Database, b
 
 /** What decides who may read one packaged file, and where its bytes are. */
 interface FileState {
-  readonly itemKind: Kind;
+  /** (None in a state cached before there were kinds: a plugin's.) */
+  readonly itemKind?: Kind;
   readonly public: boolean;
   readonly owner: string;
   readonly version: string;
@@ -170,7 +172,7 @@ export const serveFile = async (
       icon: row.icon === path
     };
   });
-  if (!state || state.itemKind !== kind) return notFound();
+  if (!state || (state.itemKind ?? "plugin") !== kind) return notFound();
   const pictureKind = state.kind === "png" || state.kind === "jpeg" || (state.kind === "svg" && state.icon);
   const readRaw = async (): Promise<Uint8Array | undefined> => {
     if (state.bytes === 0) return new Uint8Array(0);

@@ -8,6 +8,8 @@ import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { crc32 } from "../../src/image-check";
 import { handlePublish } from "../../src/store/publish";
+import { openCache } from "../../src/store/cache";
+import { fileStateKey, packageStateKey } from "../../src/store/serve";
 import { UNUSED_ID_DAYS, releaseRows, releaseUnusedIds } from "../../src/store/release";
 import { stockOf } from "../../src/store/stock";
 import { MAX_UPDATE_ITEMS } from "../../src/store/updates";
@@ -120,6 +122,28 @@ describe("templates: publishing and browsing one", () => {
     // /me: each has its own.
     expect((await json<{ plugins: { id: string }[] }>(await get("/me/plugins", a.userId))).plugins.map((p) => p.id)).toEqual([plug]);
     expect((await json<{ templates: { id: string }[] }>(await get("/me/templates", a.userId))).templates.map((p) => p.id).sort()).toEqual([another, temp].sort());
+  });
+});
+
+describe("templates: what's cached from before them", () => {
+  it("serves a plugin's package and pictures whose cached state has no kind, under its own prefix only", async () => {
+    const a = await author();
+    const id = uniqueId("p");
+    await listed(a, id, "1.0.0", { files: { "shot.png": PNG } });
+    const paths = [`/versions/1.0.0/package`, `/files/1.0.0/shot.png`];
+    const cache = await openCache();
+    // As the release before wrote them: the same states, without a kind.
+    for (const path of paths) expect((await get(`/plugins/${id}${path}`)).status, path).toBe(200);
+    for (const [key, member] of [[packageStateKey(id, "1.0.0"), "kind"], [fileStateKey(id, "1.0.0", "shot.png"), "itemKind"]] as const) {
+      const state = (await (await cache.match(key))!.json()) as Record<string, unknown>;
+      expect(state[member]).toBe("plugin");
+      delete state[member];
+      await cache.put(key, Response.json(state, { headers: { "cache-control": "public, max-age=60" } }));
+    }
+    for (const path of paths) {
+      expect((await get(`/plugins/${id}${path}`)).status, path).toBe(200);
+      expect((await get(`/templates/${id}${path}`)).status, path).toBe(404);
+    }
   });
 });
 
