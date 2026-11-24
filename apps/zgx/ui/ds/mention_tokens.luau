@@ -200,13 +200,24 @@ function M.short(items: { Item }, item: Item): string
 	return item.value
 end
 
--- The draft's highlight: markdown as it is typed, and each token
--- mentioned in its type. A span's state is the markdown's (a fenced block).
-function M.highlight(line: string, state: number): ({ { any } }, number)
-	local spans, next = markdown.highlight(line, state)
-	if state ~= 0 then
-		return spans, next
+-- The draft's highlight: markdown as it is typed (`base`, a
+-- ds/markdown_edit highlight; its own by default), and each token typed in
+-- its type (one picked from the list is a chip, ds/composer_atoms, drawn
+-- by the textarea over this). A span's state is the markdown's (a fenced
+-- block).
+function M.highlighter(base: ((line: string, state: any) -> ({ { any } }, any))?): (line: string, state: any) -> ({ { any } }, any)
+	local md = base or markdown.highlight
+	return function(line: string, state: any): ({ { any } }, any)
+		local spans, next = md(line, state)
+		if markdown.inside(state) then
+			return spans, next
+		end
+		return M.tokens(line, spans), next
 	end
+end
+
+-- `spans` with each token typed in `line` styled in type alone.
+function M.tokens(line: string, spans: { { any } }): { { any } }
 	local at = 1
 	while true do
 		local s, e = string.find(line, "[@/$]" .. WORD .. "+", at)
@@ -238,7 +249,9 @@ function M.highlight(line: string, state: number): ({ { any } }, number)
 		end
 		at = e + 1
 	end
-	return spans, next
+	return spans
 end
+
+M.highlight = M.highlighter()
 
 return M

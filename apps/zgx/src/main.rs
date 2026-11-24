@@ -1174,7 +1174,7 @@ fn serve_commands(cx: &mut WindowContext, host: &ScriptHost, role: menu_bar::Rol
     // their shortcuts are zgx's key bindings still. (A sheet's bar is the
     // window's under it: nothing of its own to list.)
     let listing = (role == menu_bar::Role::Bar).then(|| {
-        let listed = host.shared("app.menu_commands", Value::List(Rc::from([])));
+        let listed = host.shared("app.menu_commands", Value::List(zgx_script::Slice::from([])));
         let (commands, reserved, from, preview) = (host.commands(), host.reserved_keys(), host.clone(), preview.clone());
         cx.ui.runtime.effect(move || {
             let commands = commands.get();

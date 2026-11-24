@@ -305,7 +305,7 @@ fn with_menus() -> (TestApp, Rc<RefCell<Vec<String>>>) {
     assert_eq!(app.error(), None, "the shell failed");
     let all = app.host.commands().get();
     let listed = crate::palette_commands(&crate::menu_bar::Bar::of(&all, &[], &[], None).menus, &all);
-    app.host.shared("app.menu_commands", Value::List(Rc::from([]))).set(listed);
+    app.host.shared("app.menu_commands", Value::List(zgx_script::Slice::from([]))).set(listed);
     app.frames(10);
     (app, ran)
 }

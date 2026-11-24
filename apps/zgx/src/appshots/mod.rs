@@ -23,6 +23,7 @@
 //!                      opens System Settings at the permission
 //!   appshots.capture   captures now (the shortcut's press)
 
+use zgx_script::Field;
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc};
 
 use zgx_desktop::{TaskSpawner, WindowContext};
@@ -395,7 +396,7 @@ pub fn tag_attachments(list: Value, shots: &[Shown]) -> Value {
             if let Some(bundle) = &shot.bundle {
                 meta.push(("bundle", Value::from(bundle.as_str())));
             }
-            let mut out: Vec<(&str, Value)> = fields.iter().map(|(k, v)| (k.as_ref(), v.clone())).collect();
+            let mut out: Vec<(&str, Value)> = fields.iter().map(|Field(k, v)| (k.as_ref(), v.clone())).collect();
             out.push(("appshot", Value::record(meta)));
             Value::record(out)
         })

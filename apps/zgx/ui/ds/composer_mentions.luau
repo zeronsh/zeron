@@ -10,20 +10,23 @@
 -- list was put away; the caret leaving the token, or a trigger typed, ends
 -- that. Hidden is never put away: the window going to the back, Settings
 -- over the page, the field losing the keys. A row chosen lands in the draft
--- as its token and a space: a file by its name alone (as Zeron's chips name
--- it), the shortest end of its path that tells it from another of that
--- name; the path it stands for is kept beside the draft (`refs`).
+-- as a chip (an atom of the textarea's, ds/composer_atoms) and a space: a
+-- file by its name alone (as Zeron's chips name it), the shortest end of
+-- its path that tells it from another of that name, the path itself in
+-- the chip's `data` (what's sent: ds/composer_atoms `encode`). A chip is
+-- one unit: the caret steps over it, Backspace takes it whole, undo puts it
+-- back whole, and a copy pasted into another draft is the same chip.
+-- (Without `atoms`, a row lands as its token in words.)
 --
--- A token in the draft is styled in type alone (zgx's text has no inline
--- chips, and a wash made a selection of every mention): its trigger greyed
+-- A token typed and not chosen is styled in type alone: its trigger greyed
 -- as a markdown marker is, a file's name in the text's ink a weight up, a
 -- command's or a skill's in the accent. Quiet at rest, plainly a
 -- reference, calm in a long sentence.
 --
---   local m = mentions.use { field = field, value = draft, sources = { ["@"] = files, ["/"] = commands, ["$"] = skills } }
+--   local m = mentions.use { field = field, value = draft, atoms = chips, sources = { ["@"] = files, ["/"] = commands, ["$"] = skills } }
 --   ui.popover(m.popover(anchor))    -- the pill as the anchor
 --   on_key = function(e) if m.keys(e) then return true end … end
---   on_caret = m.on_caret, highlight = mentions.highlight
+--   on_caret = m.on_caret, highlight = mentions.highlighter(markdown.make(look).highlight)
 
 local Icon = require("@self/icon")
 local FileIcon = require("@self/file_icons")
@@ -51,6 +54,7 @@ M.pick = tokens.pick
 M.filter = tokens.filter
 M.short = tokens.short
 M.highlight = tokens.highlight
+M.highlighter = tokens.highlighter
 
 -- How many rows show before the list scrolls, a row's height, the panel's
 -- width.
@@ -299,28 +303,6 @@ function M.use(opts: Use)
 			dismiss(key, nil)
 		end
 	end)
-	-- What each token in the draft stands for (a file's name, its path).
-	-- A token that leaves the draft (replaced, deleted, edited) takes its
-	-- path with it.
-	local refs = ui.use_state({} :: { [string]: string })
-	ui.effect(function()
-		-- (Each looked for where the draft is held, not copied out of it.)
-		Draft.track(opts.value)
-		local kept = refs:peek()
-		local stale: { string } = {}
-		for tok in kept do
-			if #opts.value:find(tok, { limit = 1 }) == 0 then
-				table.insert(stale, tok)
-			end
-		end
-		if #stale > 0 then
-			local next = table.clone(kept)
-			for _, tok in stale do
-				next[tok] = nil
-			end
-			refs:set(next)
-		end
-	end)
 	local function choose(item: Item)
 		local t = token:peek()
 		local el = opts.field:peek()
@@ -343,14 +325,6 @@ function M.use(opts: Use)
 				return
 			end
 		end
-		-- The path the new token stands for, in place of the old one's.
-		local old = string.sub(now, from + 1, to)
-		local next = table.clone(refs:peek())
-		next[old] = nil
-		if item.file and item.value ~= string.sub(tok, 2) then
-			next[tok] = item.value
-		end
-		refs:set(next)
 		el:set_selection_bytes(from, to)
 		el:replace_selection(text)
 		-- The caret is past what was put in (the field says so on its next
@@ -604,7 +578,6 @@ function M.use(opts: Use)
 		descendant = descendant,
 		choose = choose,
 		popover = popover,
-		refs = refs,
 	}
 end
 

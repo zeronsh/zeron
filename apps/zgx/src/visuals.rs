@@ -1298,8 +1298,8 @@ async fn frame(v: Rc<Visuals>, host: ScriptHost, arg: Value) -> Result<Value, St
     let time = n("t").unwrap_or(0.);
     let key = surface_key(&id, &path);
     let (reply, mut answer) = zgx::task::latest();
-    let mut labels = Value::List(Rc::from([]));
-    let mut hints = Value::List(Rc::from([]));
+    let mut labels = Value::List(zgx_script::Slice::from([]));
+    let mut hints = Value::List(zgx_script::Slice::from([]));
     let job = v
         .with(&id, |e| -> Result<Job, String> {
             let node = e.node_at(&path).cloned().ok_or("that part of the visual is gone")?;

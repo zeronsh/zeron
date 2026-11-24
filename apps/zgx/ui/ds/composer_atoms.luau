@@ -32,6 +32,8 @@ export type ChipSpec = {
 	label: string,
 	data: ChipData,
 	style: { [string]: any },
+	-- What assistive technology reads for it (a file's path).
+	name: string?,
 }
 
 export type AtomEntry = {
@@ -40,6 +42,7 @@ export type AtomEntry = {
 	to: number,
 	data: ChipData?,
 	style: { [string]: any }?,
+	name: string?,
 }
 
 local seq = 0
@@ -279,6 +282,9 @@ function M.from_mention(item: any, trigger: string, token: string): ChipSpec?
 		label = data.label,
 		data = data,
 		style = M.style_of(data),
+		-- (Read aloud by its whole name: a file by its path, as the chip
+		-- shows the shortest end of it.)
+		name = if data.kind == "file" and type(item.value) == "string" and item.value ~= "" then item.value else nil,
 	}
 end
 
@@ -336,6 +342,7 @@ local function clone_atom(a: AtomEntry, from: number, to: number): AtomEntry
 		to = to,
 		data = a.data,
 		style = a.style,
+		name = a.name,
 	}
 end
 
@@ -413,6 +420,7 @@ function M.splice_insert(
 		to = chip_c1,
 		data = spec.data,
 		style = spec.style,
+		name = spec.name,
 	})
 	sort_atoms(next_atoms)
 	return next_text, next_atoms, b0 + #inserted, inserted
@@ -575,6 +583,7 @@ function M.splice_move(
 		to = chip_c1,
 		data = src.data,
 		style = src.style,
+		name = src.name,
 	})
 	sort_atoms(next_atoms)
 	return next_text, next_atoms, dst + #inserted, true
@@ -780,6 +789,7 @@ function M.restyle(atoms: { AtomEntry }?): { AtomEntry }
 			to = a.to,
 			data = a.data,
 			style = if a.data then M.style_of(a.data) else a.style,
+			name = a.name,
 		})
 	end
 	return out

@@ -65,6 +65,7 @@
 //!   sessions.collapse({ id, collapsed }) (an action)
 //!                                  a section of yours folded, on every device
 
+use zgx_script::Slice;
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
@@ -1462,7 +1463,7 @@ impl Sessions {
             let Some(c) = entry(id, &mut index) else { continue };
             let (side_chats, working) = layout.parent_at.get(id).map_or((0, 0), |&i| (layout.kids[i].ids.len(), layout.kids[i].working));
             let value = top_row(&mut rows, c, id, known, live(id), at, side_chats, working);
-            if !matches!((&list[pos], &value), (Value::Map(a), Value::Map(b)) if Rc::ptr_eq(a, b)) {
+            if !matches!((&list[pos], &value), (Value::Map(a), Value::Map(b)) if Slice::ptr_eq(a, b)) {
                 list[pos] = value;
                 *changed = true;
             }
@@ -2520,7 +2521,7 @@ mod tests {
     fn a_chat_s_row_is_built_again_only_as_it_changes() {
         let s = with_children("2099-01-01T00:00:00Z");
         let same = |a: &zgx_script::Value, b: &zgx_script::Value| match (a, b) {
-            (zgx_script::Value::Map(a), zgx_script::Value::Map(b)) => std::rc::Rc::ptr_eq(a, b),
+            (zgx_script::Value::Map(a), zgx_script::Value::Map(b)) => zgx_script::Slice::ptr_eq(a, b),
             _ => false,
         };
         let first = s.value();

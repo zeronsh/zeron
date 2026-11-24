@@ -396,8 +396,12 @@ pub fn named(error: &str, templates: &Path) -> Vec<String> {
     if let Ok(real) = std::fs::canonicalize(&live) {
         spellings.push(spelt(&real));
     }
-    let body = match error.find(": runtime error: ") {
-        Some(at) => &error[at + ": runtime error: ".len()..],
+    // (zgx may lead with the function that raised it, on a line of its
+    // own: "app.luau: in the text function of ui.text (defined at
+    // screens/card.luau:3):\nruntime error: screens/card.luau:3: …". Where
+    // it failed is after "runtime error: " either way.)
+    let body = match error.find("runtime error: ") {
+        Some(at) => &error[at + "runtime error: ".len()..],
         None => error,
     };
     let is_path = |c: char| c.is_ascii_alphanumeric() || matches!(c, '/' | '\\' | '.' | '_' | '-' | '@');
@@ -774,6 +778,11 @@ mod tests {
         write(&live, "app.luau", "return 1");
         let names = |error: &str| named(error, &templates);
         assert_eq!(names("app.luau: runtime error: screens/card.luau:3: broke"), vec!["screens/card.luau"]);
+        assert_eq!(
+            names("app.luau: in the text function of ui.text (defined at screens/card.luau:3):\nruntime error: screens/card.luau:3: broke later"),
+            vec!["screens/card.luau"],
+            "the function that raised it said first, on a line of its own"
+        );
         assert_eq!(
             names("app.luau: runtime error: screens\\card.luau:3: broke later\nstack traceback:\n\t[C]: in function 'error'\n\tscreens\\card.luau:3: in function <screens\\card.luau:3>"),
             vec!["screens/card.luau"],
