@@ -18,7 +18,7 @@ import TokenForm from "../../../components/look/TokenForm.astro";
 import Store from "../../../layouts/Store.astro";
 import "../../../styles/look/account.css";
 import { takeFlash } from "../../../lib/store/flash.ts";
-import { count, date, day, since } from "../../../lib/store/format.ts";
+import { count, date, day, since, sinceInSentence } from "../../../lib/store/format.ts";
 import { privatePage } from "../../../lib/store/http.ts";
 import { NO_FIELDS } from "../../../lib/store/tokens.ts";
 import type { DeployToken, MyPlugin } from "../../../lib/store/types.ts";
@@ -50,8 +50,8 @@ const endsIn = (k: DeployToken) => {
 };
 /** What a token can publish, in words: all of yours, its one plugin by name, or how many. */
 const scopeWords = (k: DeployToken) => ("all" in k.scope ? store("plugins.store.key.scope.all") : k.scope.plugins.length === 1 ? plugin(k.scope.plugins[0]!).name : `${count(k.scope.plugins.length)} plugins`);
-/** When it was last used, and on which plugin: one line. */
-const usedLine = (k: DeployToken) => (k.last_used_at ? [since(k.last_used_at, now, true), k.last_used_plugin ? plugin(k.last_used_plugin).name : null].filter(Boolean).join(" · ") : store("plugins.store.key.not_used"));
+/** When it was last used, and on which plugin: one line. Inside a sentence ("Last used yesterday"), its words in lower case. */
+const usedLine = (k: DeployToken, inSentence = false) => (k.last_used_at ? [(inSentence ? sinceInSentence : since)(k.last_used_at, now, true), k.last_used_plugin ? plugin(k.last_used_plugin).name : null].filter(Boolean).join(" · ") : store("plugins.store.key.not_used"));
 const published = mine?.ok ? mine.data.plugins.filter((p) => p.versions.length > 0).length : 0;
 ---
 
@@ -116,7 +116,7 @@ const published = mine?.ok ? mine.data.plugins.filter((p) => p.versions.length >
                     )}
                     {/* (When: a phone's third line, "Last used … · Ends …"; wide, two columns.) */}
                     <span class="c-when">
-                      <span class="c-used" title={k.last_used_at ? usedLine(k) : `Made ${day(k.created_at, now)}`}><span class:list={{ t3: !k.last_used_at }}>{k.last_used_at && <span class="ph">Last used </span>}{usedLine(k)}</span></span>
+                      <span class="c-used" title={k.last_used_at ? usedLine(k) : `Made ${day(k.created_at, now)}`}><span class:list={{ t3: !k.last_used_at }}>{k.last_used_at ? <><span class="ph">Last used {usedLine(k, true)}</span><span class="wd">{usedLine(k)}</span></> : usedLine(k)}</span></span>
                       <span class="c-ends">{k.expires_at === null ? store("plugins.store.key.no_end") : soon(k) ? <span class="state no">{endsIn(k)}</span> : <><span class="ph">Ends </span>{date(k.expires_at)}</>}</span>
                     </span>
                     <a class="btn ghost sm revoke" href={`/account/tokens/${encodeURIComponent(k.id)}`}>{store("plugins.store.key.revoke")}<span class="sr-only"> {k.name}</span></a>
@@ -138,7 +138,7 @@ const published = mine?.ok ? mine.data.plugins.filter((p) => p.versions.length >
                     <span class="c-name"><span class="nm" title={k.name}>{k.name}</span><span class="id">{k.short}</span></span>
                     <span class="c-scope"><span class="sw">{scopeWords(k)}</span></span>
                     <span class="c-when">
-                      <span class="c-used" title={`Made ${day(k.created_at, now)}`}>{k.last_used_at ? <><span class="ph">Last used </span>{since(k.last_used_at, now)}</> : store("plugins.store.key.not_used")}</span>
+                      <span class="c-used" title={`Made ${day(k.created_at, now)}`}>{k.last_used_at ? <><span class="ph">Last used {sinceInSentence(k.last_used_at, now)}</span><span class="wd">{since(k.last_used_at, now)}</span></> : store("plugins.store.key.not_used")}</span>
                       <span class="c-ends"><span class="state quiet">{k.revoked_at ? `Revoked ${day(k.revoked_at, now)}` : `Ended ${day(k.expires_at!, now)}`}</span></span>
                     </span>
                     <span></span>

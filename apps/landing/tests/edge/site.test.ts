@@ -420,7 +420,7 @@ describe("an author's pages", () => {
     expect(published.status, await published.clone().text()).toBe(201);
     const mine = await web.get("/account/plugins/theme-sync");
     expect(mine.body).toMatch(/0\.2\.0[\s\S]*<small><svg[^>]*>[\s\S]*?<\/svg>GitHub Actions<\/small>/);
-    expect((await web.get("/account/tokens")).body).toMatch(/<span class="c-used" title="[^"]+ \u00b7 theme sync"><span><span class="ph">Last used <\/span>[^<]+ \u00b7 theme sync<\/span><\/span>/);
+    expect((await web.get("/account/tokens")).body).toMatch(/<span class="c-used" title="[^"]+ \u00b7 theme sync"><span><span class="ph">Last used [^<]+ \u00b7 theme sync<\/span><span class="wd">[^<]+ \u00b7 theme sync<\/span><\/span>/);
 
     // Revoked from the site, it publishes nothing.
     const ask = await web.get(`/account/tokens/${id}`);

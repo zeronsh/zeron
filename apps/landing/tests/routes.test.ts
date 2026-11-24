@@ -907,7 +907,8 @@ describe("forms", () => {
     const list = body.slice(body.indexOf('<ul class="plist"'), body.indexOf("</ul>", body.indexOf('<ul class="plist"')));
     expect(list.match(/<li class="pl">/g)).toHaveLength(14);
     // Last used: when, and on which plugin, one line; or not yet (when it was made, on hover).
-    expect(body).toMatch(/<span class="c-used" title="[^"]+ · Focus timer"><span><span class="ph">Last used <\/span>[^<]+ · Focus timer<\/span><\/span>/);
+    // (Wide, the header says "Last used"; a phone's line says it, the date's words in lower case in its sentence.)
+    expect(body).toMatch(/<span class="c-used" title="[^"]+ · Focus timer"><span><span class="ph">Last used [^<A-Z]+ · Focus timer<\/span><span class="wd">[^<]+ · Focus timer<\/span><\/span><\/span>/);
     expect(body).toMatch(/<span class="c-used" title="Made [A-Z][a-z]{2} \d{1,2}(, \d{4})?"><span class="t3">Not used yet<\/span><\/span>/);
     // Ends: a date, doesn't, or within 14 days the warning's pill, in days.
     expect(body).toContain('<span class="c-ends">Doesn&#39;t expire</span>');

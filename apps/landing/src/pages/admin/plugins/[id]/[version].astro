@@ -26,7 +26,7 @@ import "../../../../styles/look/plugin.css";
 import "../../../../styles/look/staff.css";
 import { reasonLabel, toWeigh, versionAsk } from "../../../../lib/store/admin.ts";
 import { takeFlash } from "../../../../lib/store/flash.ts";
-import { bytes, count, date, dateTime, day, since, unbidi, waitedFor } from "../../../../lib/store/format.ts";
+import { bytes, count, date, dateTime, day, sinceInSentence, unbidi, waitedFor } from "../../../../lib/store/format.ts";
 import { hueClass } from "../../../../lib/store/hue.ts";
 import { privatePage } from "../../../../lib/store/http.ts";
 import { drawingChecks } from "../../../../lib/store/drawing.ts";
@@ -230,7 +230,7 @@ const versions = record.ok ? record.data.versions : null;
               <p class="by">
                 <span>by {author ? <a href={memberUrl(author)}><b>@{author}</b></a> : "an account with no username"}</span>
                 <i aria-hidden="true"></i>
-                <span>Published <time datetime={new Date(s.version.published_at).toISOString()} title={dateTime(s.version.published_at)}>{since(s.version.published_at, now, true).replace(/^(Yesterday|Just now)/, (w) => w.toLowerCase())}</time>{via}</span>
+                <span>Published <time datetime={new Date(s.version.published_at).toISOString()} title={dateTime(s.version.published_at)}>{sinceInSentence(s.version.published_at, now, true)}</time>{via}</span>
                 <i aria-hidden="true"></i>
                 <span class="num">{s.plugin.installs === 1 ? "1 install" : `${count(s.plugin.installs)} installs`}</span>
                 {s.version.prerelease && <><i aria-hidden="true"></i><span>Pre-release</span></>}

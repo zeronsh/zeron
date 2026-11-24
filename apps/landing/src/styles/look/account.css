@@ -106,6 +106,7 @@ a.trow:focus-visible { outline-offset: -2px; }
 .keys .trow .c-ends { grid-column: 4; grid-row: 1; }
 /* (Words a phone's line says, the header's on a wide screen.) */
 .keys .ph { display: none; }
+.keys .wd { display: inline; }
 .keys .trow > :last-child:not(.c-when) { grid-column: 5; grid-row: 1; }
 .keys .trow .every::details-content { grid-column: 1 / -1; grid-row: 2; }
 /* (What it can publish, in its own column: the words, up to three small tiles and +n; with many, Show all, which
@@ -275,6 +276,7 @@ a.trow:focus-visible { outline-offset: -2px; }
   .keys .trow .c-ends::before { content: "·"; margin-right: var(--s8); }
   .keys .trow .c-ends > .state { margin-left: 0; margin-block: calc(-1 * var(--s4)); }
   .keys .ph { display: inline; }
+  .keys .wd { display: none; }
   .keys .trow .every::details-content { grid-column: 1 / -1; grid-row: 4; }
   .keys .trow.was > :last-child:not(.c-when) { display: none; }
   /* (Many plugins: the count and Show all, a dot between; the tiles, which repeat the list, give way.) */

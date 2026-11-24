@@ -12,7 +12,7 @@ import Rail from "../../../../components/look/Rail.astro";
 import Seal from "../../../../components/look/Seal.astro";
 import Store from "../../../../layouts/Store.astro";
 import "../../../../styles/look/plugin.css";
-import { day, since } from "../../../../lib/store/format.ts";
+import { day, sinceInSentence } from "../../../../lib/store/format.ts";
 import { pluginTag, publicPage } from "../../../../lib/store/http.ts";
 import { hueClass } from "../../../../lib/store/hue.ts";
 import { isPrerelease } from "../../../../lib/store/names.ts";
@@ -62,7 +62,7 @@ const said = (v: VersionInfo) => {
   }
   if (v.yanked) return `${v.yanked_by === "author" ? "Its author stopped new installs" : "No new installs"} · ${published}`;
   if (v.verified && v.verified_at !== null) return `Verified ${day(v.verified_at, now)} · ${published}`;
-  return `Published ${since(v.published_at, now, true)}`;
+  return `Published ${sinceInSentence(v.published_at, now, true)}`;
 };
 const pager = page.state === "ok" && page.versions ? pagerOf(`${pluginUrl(asked)}/versions`, {}, place, page.versions, page.versions.versions.length) : null;
 ---

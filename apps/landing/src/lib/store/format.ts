@@ -53,6 +53,11 @@ export function since(ms: number, now = Date.now(), hours = false): string {
   return day(ms, now);
 }
 
+/** The same, inside a sentence ("Published yesterday", "Last used just now"): its own words in lower case. */
+export function sinceInSentence(ms: number, now = Date.now(), hours = false): string {
+  return since(ms, now, hours).replace(/^(Today|Yesterday|Just now)$/, (w) => w.toLowerCase());
+}
+
 /** How long since, said as a length ("5 hours", "3 days"): how long something has waited. */
 export function waitedFor(ms: number, now = Date.now()): string {
   const seconds = Math.max(0, (now - ms) / 1000);
