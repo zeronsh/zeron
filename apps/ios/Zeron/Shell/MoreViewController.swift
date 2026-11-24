@@ -18,6 +18,8 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         var destructive = false
         /// Out of reach for now (dimmed, its switch off-limits).
         var disabled = false
+        /// Drawn in the symbol's place: the icon itself.
+        var appIcon: AppIcon?
 
         enum Accessory: Hashable {
             case disclosure
@@ -59,6 +61,14 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             c.secondaryTextProperties.color = Palette.secondary
             c.image = UIImage(systemName: row.symbol)
             c.imageProperties.tintColor = row.destructive ? Palette.danger : row.tint
+            if let preview = row.appIcon?.preview {
+                // Rounded as the Home Screen rounds it; the hairline keeps the
+                // light icon's edge on a light row.
+                c.image = preview
+                c.imageProperties.cornerRadius = 9
+                c.imageProperties.strokeColor = Palette.hairline
+                c.imageProperties.strokeWidth = 1
+            }
             cell.contentConfiguration = c
             var bg = UIBackgroundConfiguration.listGroupedCell()
             bg.backgroundColor = Palette.elevated
@@ -226,6 +236,12 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             Row(id: "appearance:1", title: "Light", symbol: "sun.max", accessory: .check(style == 1)),
             Row(id: "appearance:2", title: "Dark", symbol: "moon", accessory: .check(style == 2)),
         ])
+        // Only where iOS lets this app change its icon.
+        if UIApplication.shared.supportsAlternateIcons {
+            s.appendSections(["App Icon"])
+            let current = AppIcon.current
+            s.appendItems(AppIcon.allCases.map { Row(id: "appIcon:\($0.rawValue)", title: $0.title, symbol: "app", accessory: .check($0 == current), appIcon: $0) })
+        }
         s.appendSections(["Wallpaper"])
         var wall = [Row(id: "wallpaper:choose", title: WallpaperStore.isSet ? "Change Wallpaper…" : "Choose Wallpaper…", subtitle: WallpaperStore.isSet ? WallpaperStore.name : "Shown behind new chats and the sessions list", symbol: "photo")]
         if WallpaperStore.isSet {
@@ -271,6 +287,19 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
             UserDefaults.standard.set(style, forKey: "appearance")
             view.window?.overrideUserInterfaceStyle = UIUserInterfaceStyle(rawValue: style) ?? .unspecified
             reload()
+        case let id where id.hasPrefix("appIcon:"):
+            guard let icon = AppIcon(rawValue: String(id.dropFirst(8))), icon != .current else { return }
+            // iOS confirms a change with an alert of its own; only a failure needs one here.
+            Task { @MainActor in
+                do {
+                    try await UIApplication.shared.setAlternateIconName(icon.alternateIconName)
+                } catch {
+                    let alert = UIAlertController(title: "Couldn't change the app icon", message: error.localizedDescription, preferredStyle: .alert)
+                    alert.addAction(UIAlertAction(title: "OK", style: .default))
+                    self.present(alert, animated: true)
+                }
+                self.reload()
+            }
         case "wallpaper:choose":
             WallpaperPicker.present(from: self)
         case "wallpaper:effect":

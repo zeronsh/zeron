@@ -35,7 +35,8 @@ Zeron/
   Core/        Generated UniFFI bindings; Fonts (the exact bytes Rust measures,
                registered with CoreText) + CoreText fallback measurer
   Design/      Palette (Zeron color roles → light/dark), Glass helpers,
-               cell-grid status glyph, harness brand marks
+               cell-grid status glyph, harness brand marks, the Home Screen
+               icons Settings offers (AppIcon: Light, the primary, and Dark)
   Transcript/  TranscriptListView (virtualized scroll host over LayoutFrame),
                RowView/RowModel (CoreText painter for Rust display lists,
                streaming veil), FrameRelay
