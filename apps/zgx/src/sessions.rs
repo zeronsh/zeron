@@ -788,7 +788,30 @@ fn delete_action(host: &ScriptHost, a: Rc<Sessions>) {
     });
 }
 
+/// The chat list as a native module (modules/sessions), loaded only where a
+/// launch names its library (`ZERON_ZGX_SESSIONS_MODULE`): a proof of zgx's
+/// module stage 2 beside the app's own list, which the sidebar reads. It
+/// keeps `sessions.chats` from an engine connection of its own, the
+/// engine's this app reaches.
+fn sessions_module(host: &ScriptHost) {
+    let Some(path) = std::env::var_os("ZERON_ZGX_SESSIONS_MODULE") else { return };
+    // SAFETY: The app's own module, at a path the person running this build
+    // named.
+    if let Err(error) = unsafe { host.load_module(&path) } {
+        eprintln!("zeron-zgx: the sessions module didn't load ({error})");
+        return;
+    }
+    let (Some((port, data_dir)), Some(connect)) = (engine::get().ipc_endpoint(), host.registered_function("sessions.connect")) else {
+        return;
+    };
+    let arg = Value::record([("port", Value::from(f64::from(port))), ("data_dir", Value::from(data_dir.to_string_lossy().as_ref()))]);
+    if let Err(error) = connect(arg) {
+        eprintln!("zeron-zgx: the sessions module didn't connect ({error})");
+    }
+}
+
 pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
+    sessions_module(host);
     let s = SESSIONS.with(Rc::clone);
     let window = s.next_window.get();
     s.next_window.set(window + 1);

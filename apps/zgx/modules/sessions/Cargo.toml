@@ -1,0 +1,29 @@
+# The chat list as a native module, a proof of zgx's module stage 2: its own
+# engine connection on a thread of its own, posting each list to the
+# interface's thread into the shared state `sessions.chats`, and one async
+# action answered over that connection. Loaded only where a launch names it
+# (`ZERON_ZGX_SESSIONS_MODULE`): the sidebar reads the app's own list.
+#
+# A workspace of its own: its build is this crate, zgx's module interface
+# and its socket, nothing of the app or of zgx.
+
+[workspace]
+
+[package]
+name = "zeron-sessions"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+zgx-module = { git = "https://github.com/zeronsh/zgx", rev = "317278b0856ab911c671294f984214b272ea0e66" }
+serde_json = "1"
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
