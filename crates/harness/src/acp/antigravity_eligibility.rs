@@ -58,12 +58,28 @@ pub(crate) fn message(ineligible: &Ineligible) -> String {
 }
 
 /// the access token antigravity runs on, when it keeps it as a file in
-/// `home` (a cloud machine's, a sign-in zeron made): `antigravity-acp/
-/// acp_token.json`'s `token`.
+/// `home` (a cloud machine's, a sign-in zeron made): checks the unified CLI's
+/// `antigravity-oauth-token` (`token.access_token`) first, then falls back to
+/// legacy `acp_token.json`'s `token`.
 fn token_in(home: &Path) -> Option<String> {
-    let bytes = std::fs::read(home.join("antigravity-acp").join("acp_token.json")).ok()?;
+    let dir = home.join("antigravity-acp");
+    if let Ok(bytes) = std::fs::read(dir.join("antigravity-oauth-token"))
+        && let Ok(doc) = serde_json::from_slice::<Value>(&bytes)
+        && let Some(token) = doc
+            .get("token")
+            .and_then(|t| t.get("access_token"))
+            .and_then(Value::as_str)
+            .filter(|t| !t.is_empty())
+    {
+        return Some(token.to_owned());
+    }
+    let bytes = std::fs::read(dir.join("acp_token.json")).ok()?;
     let token = serde_json::from_slice::<Value>(&bytes).ok()?;
-    token.get("token")?.as_str().filter(|t| !t.is_empty()).map(str::to_owned)
+    token
+        .get("token")?
+        .as_str()
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned)
 }
 
 async fn ask(token: &str) -> Option<Ineligible> {
@@ -169,7 +185,17 @@ mod tests {
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(token_in(empty.path()), None);
         std::fs::create_dir_all(empty.path().join("antigravity-acp")).unwrap();
-        std::fs::write(empty.path().join("antigravity-acp/acp_token.json"), r#"{"token":"ya29.x","refresh_token":""}"#).unwrap();
-        assert_eq!(token_in(empty.path()).as_deref(), Some("ya29.x"));
+        std::fs::write(
+            empty.path().join("antigravity-acp/acp_token.json"),
+            r#"{"token":"ya29.legacy","refresh_token":""}"#,
+        )
+        .unwrap();
+        assert_eq!(token_in(empty.path()).as_deref(), Some("ya29.legacy"));
+        std::fs::write(
+            empty.path().join("antigravity-acp/antigravity-oauth-token"),
+            r#"{"token":{"access_token":"ya29.unified","token_type":"Bearer"},"auth_method":"consumer"}"#,
+        )
+        .unwrap();
+        assert_eq!(token_in(empty.path()).as_deref(), Some("ya29.unified"));
     }
 }

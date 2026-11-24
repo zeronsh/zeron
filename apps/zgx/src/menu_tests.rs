@@ -17,15 +17,16 @@ fn corner(app: &TestApp, id: NodeId) -> Option<(f32, f32)> {
 }
 
 /// A menu's geometry: its panel's corner and edge, the room between its
-/// edge and what it holds on each side (left, top, right, bottom), and its
-/// rounded rows: each one's corner and the corner concentric with the
-/// panel at its inset.
+/// edge and what it holds on each side (left, top, right, bottom), its
+/// rounded rows (each one's corner and the corner concentric with the
+/// panel at its inset), and the vertical gaps between adjacent stacked rows.
 #[derive(Debug)]
 pub struct Geometry {
     pub radius: f32,
     pub border: f32,
     pub inset: [f32; 4],
     pub rows: Vec<(f32, f32)>,
+    pub gaps: Vec<f32>,
 }
 
 impl Geometry {
@@ -41,6 +42,13 @@ impl Geometry {
                 out.push(format!(
                     "{what}: a row's corner is {corner}, not {concentric} (the panel's {} less its edge {} and inset)",
                     self.radius, self.border
+                ));
+            }
+        }
+        for &gap in &self.gaps {
+            if gap < 1.5 {
+                out.push(format!(
+                    "{what}: adjacent rows touch (gap {gap:.1}, need at least 2 from $zeron.list.gap)"
                 ));
             }
         }
@@ -105,12 +113,60 @@ pub fn measure(app: &mut TestApp, item: &str) -> Geometry {
     ];
     // Its rows: what follows the panel's edge, as wide as what it holds (a
     // control standing inside a row, a switch's pill, keeps its own corner).
-    let rows = candidates
+    let full_rows: Vec<(Rect, f32)> = candidates
         .into_iter()
         .filter(|(b, _)| b.width >= right - left - 0.5)
-        .map(|(b, r)| (r, (radius - border - (b.x - p.x - border)).max(0.)))
         .collect();
-    Geometry { radius, border, inset, rows }
+    let rows = full_rows
+        .iter()
+        .map(|(b, r)| (*r, (radius - border - (b.x - p.x - border)).max(0.)))
+        .collect();
+    // Interactive rows inside the panel (including unhovered rows whose rest
+    // background is transparent): any menuitem, option, checkbox, radio, or
+    // full-width button descending from `panel`.
+    let mut boxes: Vec<Rect> = full_rows.into_iter().map(|(b, _)| b).collect();
+    for sel in ["role:menuitem", "role:option", "role:checkbox", "role:radio", "role:button"] {
+        let q = zgx_script::driver::parse(sel).expect("role selector");
+        for id in zgx_script::driver::find_all(&app.ui, &app.handle, &q).unwrap_or_default() {
+            let mut cur = scene.parent(id);
+            let mut in_panel = false;
+            while let Some(pid) = cur {
+                if pid == panel {
+                    in_panel = true;
+                    break;
+                }
+                cur = scene.parent(pid);
+            }
+            if !in_panel || !scene.layout_visible(id) {
+                continue;
+            }
+            let b = scene.bounds(id);
+            if b.width >= right - left - 0.5 && b.height > 0.5 {
+                boxes.push(b);
+            }
+        }
+    }
+    // Vertical gaps between distinct stacked rows (deduplicating nested
+    // full-width layers painted inside the same row).
+    boxes.sort_by(|a, b| {
+        a.y.partial_cmp(&b.y)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.height.partial_cmp(&a.height).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    let mut stacked: Vec<Rect> = Vec::new();
+    for b in boxes {
+        if let Some(prev) = stacked.last() {
+            if b.y >= prev.y - 0.5 && b.y + b.height <= prev.y + prev.height + 0.5 {
+                continue;
+            }
+        }
+        stacked.push(b);
+    }
+    let gaps = stacked
+        .windows(2)
+        .map(|pair| pair[1].y - (pair[0].y + pair[0].height))
+        .collect();
+    Geometry { radius, border, inset, rows, gaps }
 }
 
 /// Until `target` shows (a folder read, a file opened: a host's answers
@@ -135,6 +191,30 @@ fn shell() -> TestApp {
     let app = TestApp::new(|runtime| ScriptHost::new(runtime, path));
     app.ui.scene.borrow_mut().resize(1200., 800.);
     app.frames(30);
+    app
+}
+
+fn composer_place() -> TestApp {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/composer_place_fixture.luau");
+    let mut app = TestApp::new(|runtime| ScriptHost::new(runtime, path));
+    app.ui.scene.borrow_mut().resize(1000., 600.);
+    app.frames(10);
+    app.host
+        .set_state(
+            "test_place_devices",
+            zgx_script::Value::from_json(
+                r#"[{"value":"work-laptop","label":"work-laptop","you":true},{"value":"home-laptop","label":"home-laptop"}]"#,
+            )
+            .expect("valid devices json"),
+        )
+        .expect("set test_place_devices");
+    app.host
+        .set_state(
+            "test_place_device",
+            zgx_script::Value::from_json(r#""work-laptop""#).expect("valid device json"),
+        )
+        .expect("set test_place_device");
+    app.frames(20);
     app
 }
 
@@ -187,6 +267,52 @@ fn every_menu_is_concentric_and_evenly_inset() {
     check(&mut app, "the sidebar's view options", |app| app.click("role:button \"Sidebar view options\""), "role:checkbox \"By project\"", &mut faults);
     check(&mut app, "the composer's access picker", |app| app.click("role:button \"Access\""), "role:option", &mut faults);
     check(&mut app, "the composer's model picker", |app| app.click("role:button \"Model\""), "role:option", &mut faults);
+
+    let mut app = composer_place();
+    check(
+        &mut app,
+        "the composer's Checkout submenu",
+        |app| {
+            app.click("role:button \"Branch\"");
+            app.frames(20);
+            app.click("role:menuitem \"Checkout\"");
+        },
+        "role:listbox \"Checkout\" >> role:option",
+        &mut faults,
+    );
+    app.key(zgx::input::Key::Escape);
+    app.frames(20);
+    // Searchable dropdowns whose top is the centered 36px search field or
+    // whose bottom is a virtualized `ui.list` (3px py + 1px row wrapper py)
+    // still obey concentric row corners and `$zeron.list.gap` between rows.
+    for (what, open_sub, item) in [
+        ("the composer's Work in picker", None, "role:menuitem \"Device\""),
+        ("the composer's Device submenu", Some("role:menuitem \"Device\""), "\"Search devices…\""),
+    ] {
+        app.click("role:button \"Branch\"");
+        app.frames(20);
+        if let Some(sub) = open_sub {
+            app.click(sub);
+            app.frames(20);
+        }
+        let g = measure(&mut app, item);
+        for (corner, concentric) in &g.rows {
+            if (corner - concentric).abs() > 0.5 {
+                faults.push(format!("{what}: a row's corner is {corner}, not {concentric}"));
+            }
+        }
+        for &gap in &g.gaps {
+            if gap < 1.5 {
+                faults.push(format!("{what}: adjacent rows touch (gap {gap:.1}, need at least 2 from $zeron.list.gap)"));
+            }
+        }
+        app.key(zgx::input::Key::Escape);
+        app.frames(20);
+        if open_sub.is_some() {
+            app.key(zgx::input::Key::Escape);
+            app.frames(20);
+        }
+    }
 
     assert!(faults.is_empty(), "{}", faults.join("\n"));
 }
