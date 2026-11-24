@@ -4538,7 +4538,10 @@
       "from_store_detail": "Published by @{username}.",
       "from_file": "From a file, not from the store",
       "from_link": "From a link, not from the store",
-      "store_changed": "What the store says of it changed just now. Look again."
+      "store_changed": "What the store says of it changed. Look again.",
+      "now_unverified": "Zeron's mark was taken off it just now. Look again.",
+      "now_verified": "Zeron verified it just now. Look again.",
+      "now_publisher": "Its publisher changed just now. Look again."
     },
     "store": {
       "search": "Search templates",

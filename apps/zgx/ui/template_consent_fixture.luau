@@ -51,13 +51,13 @@ local PACKAGES: { [string]: any } = {
 	changed = {
 		pending = "midnight-3", id = "midnight", name = "Midnight", version = "1.3.0", zeron_version = "0.3.18", files = 12, ignored = {}, hash = "store-hash-3",
 		from = { kind = "store" }, author = { kind = "verified", username = "grace" }, store = { id = "midnight", publisher = "grace", verified = false, verified_alternative = { version = "1.2.0" } },
-		update_of = "midnight", replaces_edits = true, new_owner = true, store_changed = true, also_installed = { { id = "midnight", from = "file" } },
+		update_of = "midnight", replaces_edits = true, new_owner = true, store_changed = { unverified = true, publisher = true }, also_installed = { { id = "midnight", from = "file" } },
 	},
 	-- (The longest name the host lets through.)
 	long = {
 		pending = "long-1", id = "midnight", name = string.rep("W", 64), version = "1.3.0", zeron_version = "0.3.18", files = 12, ignored = {}, hash = "long-1",
 		from = { kind = "store" }, author = { kind = "verified", username = string.rep("w", 39) }, store = { id = "midnight", publisher = string.rep("w", 39), verified = false, verified_alternative = { version = "1.2.0" } },
-		update_of = "midnight", replaces_edits = true, new_owner = true, store_changed = true,
+		update_of = "midnight", replaces_edits = true, new_owner = true, store_changed = { unverified = true, publisher = true },
 	},
 	plain_update = {
 		pending = "midnight-4", id = "midnight", name = "Midnight", version = "1.3.0", zeron_version = "0.3.18", files = 12, ignored = {}, hash = "store-hash-4",
@@ -67,7 +67,11 @@ local PACKAGES: { [string]: any } = {
 	-- (`store`, as the store came to say of it: the same package.)
 	store_said = {
 		pending = "midnight-1", id = "midnight", name = "Midnight", version = "1.2.0", zeron_version = "0.3.18", key = "AbCdEfGhIjKlMnOpQrStUv", files = 12, ignored = {}, hash = "store-hash-1",
-		from = { kind = "store" }, author = { kind = "verified", username = "grace" }, store = { id = "midnight", publisher = "grace", verified = false }, store_changed = true,
+		from = { kind = "store" }, author = { kind = "verified", username = "grace" }, store = { id = "midnight", publisher = "grace", verified = false }, store_changed = { unverified = true, publisher = true },
+	},
+	store_verified = {
+		pending = "midnight-1", id = "midnight", name = "Midnight", version = "1.2.0", zeron_version = "0.3.18", key = "AbCdEfGhIjKlMnOpQrStUv", files = 12, ignored = {}, hash = "store-hash-1",
+		from = { kind = "store" }, author = { kind = "verified", username = "ada" }, store = { id = "midnight", publisher = "ada", verified = true }, store_changed = { verified = true },
 	},
 	link = {
 		pending = "linked-1", id = "linked", name = "Linked", version = "1.0.0", key = "AbCdEfGhIjKlMnOpQrStUv", files = 3, ignored = {}, hash = "link-hash",
@@ -113,7 +117,7 @@ ui.actions {
 
 ui.command { id = "ledger", title = "Show Ledger", run = function() show("ledger") end }
 ui.command { id = "mystery", title = "Show Mystery", run = function() show("mystery") end }
-for _, id in { "store", "token", "link", "long", "changed", "plain_update", "store_said" } do
+for _, id in { "store", "token", "link", "long", "changed", "plain_update", "store_said", "store_verified" } do
 	ui.command { id = id, title = id, run = function() show(id) end }
 end
 for _, name in { "en", "zh-Hans" } do

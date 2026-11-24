@@ -4538,7 +4538,10 @@
       "from_store_detail": "由 @{username} 发布。",
       "from_file": "来自文件，而非商店",
       "from_link": "来自链接，而非商店",
-      "store_changed": "商店对它的说明刚刚有变化。请再看一遍。"
+      "store_changed": "商店对它的说明有变化。请再看一遍。",
+      "now_unverified": "Zeron 刚刚撤下了它的验证标记。请再看一遍。",
+      "now_verified": "Zeron 刚刚验证了它。请再看一遍。",
+      "now_publisher": "它的发布者刚刚变更。请再看一遍。"
     },
     "store": {
       "search": "搜索模板",

@@ -91,6 +91,24 @@ fn shown(item: &Json) -> Json {
     out
 }
 
+/// `item` as the store says of it now (`changed`, `ReviewTemplate`'s), and
+/// which of it changed since it was shown.
+fn restate(item: &mut Json, changed: &Json) {
+    let was = item["store"].clone();
+    for key in ["verified", "verified_at", "publisher", "publisher_id"] {
+        item["store"][key] = changed[key].clone();
+    }
+    if let Some(username) = changed["publisher"].as_str() {
+        item["author"] = json!({ "kind": "verified", "username": username });
+    }
+    let publisher = ["publisher", "publisher_id"].iter().any(|key| !was[*key].is_null() && was[*key] != changed[*key]);
+    item["store_changed"] = json!({
+        "verified": was["verified"] != true && changed["verified"] == true,
+        "unverified": was["verified"] == true && changed["verified"] != true,
+        "publisher": publisher,
+    });
+}
+
 fn record(item: Option<&Json>, busy: bool, error: Option<&str>) -> Value {
     saw(item);
     let item = item.map(shown);
@@ -342,13 +360,7 @@ fn host(
                     Ok(reply) if reply["changed"].is_object() => {
                         let mut item = last.borrow().clone();
                         if let Some(item) = item.as_mut().filter(|item| item["store"].is_object()) {
-                            for key in ["verified", "verified_at", "publisher", "publisher_id"] {
-                                item["store"][key] = reply["changed"][key].clone();
-                            }
-                            if let Some(username) = reply["changed"]["publisher"].as_str() {
-                                item["author"] = json!({ "kind": "verified", "username": username });
-                            }
-                            item["store_changed"] = json!(true);
+                            restate(item, &reply["changed"]);
                         }
                         SEEN.with(|s| s.borrow_mut().take());
                         out.set(record(item.as_ref(), false, None));
@@ -440,6 +452,25 @@ fn said(error: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the store came to say of it is shown, and which of it changed.
+    #[test]
+    fn what_the_store_came_to_say_is_shown_and_said() {
+        let item = json!({ "pending": "midnight-1", "hash": "h", "store": { "id": "midnight", "verified": true, "verified_at": 5, "publisher": "ada", "publisher_id": "u_1" }, "author": { "kind": "verified", "username": "ada" } });
+        let mut now = item.clone();
+        restate(&mut now, &json!({ "verified": false, "publisher": "grace", "publisher_id": "u_2" }));
+        assert_eq!(now["store"], json!({ "id": "midnight", "verified": false, "verified_at": null, "publisher": "grace", "publisher_id": "u_2" }));
+        assert_eq!(now["author"]["username"], "grace");
+        assert_eq!(now["store_changed"], json!({ "verified": false, "unverified": true, "publisher": true }));
+        // The same name over another account is another publisher.
+        let mut now = item.clone();
+        restate(&mut now, &json!({ "verified": true, "publisher": "ada", "publisher_id": "u_9" }));
+        assert_eq!(now["store_changed"], json!({ "verified": false, "unverified": false, "publisher": true }));
+        let mut now = item;
+        now["store"]["verified"] = json!(false);
+        restate(&mut now, &json!({ "verified": true, "verified_at": 9, "publisher": "ada", "publisher_id": "u_1" }));
+        assert_eq!(now["store_changed"], json!({ "verified": true, "unverified": false, "publisher": false }));
+    }
 
     /// What a package says of itself can't read as Zeron's own words.
     #[test]

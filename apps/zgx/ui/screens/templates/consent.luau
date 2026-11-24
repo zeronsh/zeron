@@ -138,10 +138,18 @@ local function body(key: string): Node
 	local function change(id: string, words_of: Message)
 		table.insert(changes, ui.div { id = id, w_full = true, fact("danger-triangle", words_of, nil, "$zeron.tone.warning.ink") })
 	end
-	if it.store_changed == true and not keep then
-		change("template-consent-changed", ui.t("templates.consent.store_changed"))
+	local changed: any = if not keep and type(it.store_changed) == "table" then it.store_changed else nil
+	if changed then
+		change(
+			"template-consent-changed",
+			if changed.unverified == true
+				then ui.t("templates.consent.now_unverified")
+				elseif changed.verified == true then ui.t("templates.consent.now_verified")
+				elseif changed.publisher == true then ui.t("templates.consent.now_publisher")
+				else ui.t("templates.consent.store_changed")
+		)
 	end
-	if it.new_owner == true and not keep then
+	if (it.new_owner == true or (changed and changed.publisher == true)) and not keep then
 		change("template-consent-owner", ui.t("templates.consent.new_owner", { username = if store and type(store.publisher) == "string" then store.publisher else "" }))
 	end
 	if it.replaces_edits == true and not keep then
@@ -352,7 +360,7 @@ end
 -- What the store says of it (a word of it changed is a sheet to read again).
 local function said_by_store(it: any): string
 	local store = store_of(it)
-	return if store then `{it.store_changed == true}:{store.verified == true}:{store.publisher or ""}` else ""
+	return if store then `{it.store_changed ~= nil}:{store.verified == true}:{store.publisher or ""}` else ""
 end
 
 -- Which sheet shows: one package's, as what, and by whom.
