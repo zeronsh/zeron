@@ -136,7 +136,7 @@ describe("deploy tokens: making one", () => {
       [{}, undefined],
       [{ all: false }, undefined],
       [{ all: true, plugins: [pluginId] }, undefined],
-      ...[[], ["template"], ["plugin", "plugin"], ["plugin", "widget"], "plugin", null].map((all_kinds): [unknown, undefined] => [{ all: true, all_kinds }, undefined]),
+      ...[[], ["template"], ["template", "plugin"], ["plugin", "plugin"], ["plugin", "widget"], "plugin", null].map((all_kinds): [unknown, undefined] => [{ all: true, all_kinds }, undefined]),
       [{ plugins: [pluginId], all_kinds: ["plugin"] }, undefined],
       [[pluginId], undefined],
       [{ plugins: [] }, undefined],

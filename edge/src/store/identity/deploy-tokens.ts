@@ -36,7 +36,6 @@
 import type { Env } from "../../env";
 import { adminAuthorized } from "../../cloud/billing";
 import { jsonError, readJsonBody } from "../../http";
-import { KINDS, type Kind } from "../kind";
 import { stepUpHash, stepUpRequired } from "../../step-up";
 import {
   MAX_DEPLOY_TOKEN_PLUGINS,
@@ -47,7 +46,7 @@ import {
 } from "../../user-directory";
 import { cookieSession, bearerUser, forbidden, headerBearer, sessionRequired, unauthenticated } from "./callers";
 import { readBody } from "./body";
-import { DEPLOY_TOKEN_ID_RE, deployTokenHash, looksLikeDeployToken, newDeployToken, newDeployTokenId, parseDeployToken, readScopeIds } from "./deploy-token";
+import { DEPLOY_TOKEN_ID_RE, deployTokenHash, looksLikeDeployToken, newDeployToken, newDeployTokenId, parseDeployToken, readAllKinds, readScopeIds } from "./deploy-token";
 import { PLUGIN_ID_RE } from "./signing";
 
 /** Who owns a store plugin id, since when, and when it was first claimed;
@@ -83,13 +82,6 @@ export const dropFromDeployTokens = async (env: Env, userId: string, pluginId: s
   return directory.dropFromDeployTokens(userId, pluginId);
 };
 
-/** An `all` token's kinds: `["plugin"]`, or `["plugin", "template"]`. */
-const readAllKinds = (raw: unknown): readonly Kind[] | undefined => {
-  if (!Array.isArray(raw)) return undefined;
-  const kinds = KINDS.filter((k) => raw.includes(k));
-  return kinds.includes("plugin") && raw.length === kinds.length ? kinds : undefined;
-};
-
 /** A request's `scope`, sorted: or the refusal, naming the ids at fault. */
 const readScope = (raw: unknown): DeployTokenScope | Response => {
   const invalid = (message: string, ids?: readonly unknown[]) =>
@@ -103,7 +95,7 @@ const readScope = (raw: unknown): DeployTokenScope | Response => {
   if (scope.all === true && keys.every((k) => k === "all" || k === "all_kinds")) {
     // Every item of the account's, of these kinds: a plugin's alone unless it
     // names both (one made before kinds were named is).
-    const kinds = scope.all_kinds === undefined ? (["plugin"] as const) : readAllKinds(scope.all_kinds);
+    const kinds = readAllKinds(scope.all_kinds);
     if (!kinds) return invalid('all_kinds is ["plugin"] or ["plugin", "template"].');
     return { all: true, all_kinds: kinds };
   }

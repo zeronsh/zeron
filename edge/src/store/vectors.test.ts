@@ -22,7 +22,7 @@ import { idProblem, readManifest } from "./manifest";
 import { MAX_MANIFEST_JSON, MAX_MANIFEST_VALUES, PackageRefusal, checkSignature, contentHash, signaturePayload, verifyPackage, verifyTemplate } from "./package";
 import { MAX_PUBLISH_BODY_BYTES } from "./identity/body";
 import { plainPath } from "./paths";
-import { crc32, deployTokenHash, parseDeployToken, readScopeIds, tokenChecksum, tokenFromBody } from "./identity/deploy-token";
+import { crc32, deployTokenHash, parseDeployToken, readAllKinds, readScopeIds, tokenChecksum, tokenFromBody } from "./identity/deploy-token";
 import { comparePrecedence, parseRange, parseVersion, satisfies } from "./semver";
 import { STORE_DATA } from "./data";
 
@@ -188,6 +188,15 @@ describe("engine vectors (docs/plugin-package-vectors.json)", () => {
       const read = readScopeIds(c.ids);
       if (c.ok) expect(read, JSON.stringify(c.ids)).toEqual(c.scope);
       else expect(read, JSON.stringify(c.ids)).toHaveProperty("error");
+    }
+    expect(v.deploy_token.all_scopes.some((c: any) => c.ok) && v.deploy_token.all_scopes.some((c: any) => !c.ok)).toBe(true);
+    for (const c of v.deploy_token.all_scopes) {
+      const kinds = readAllKinds(c.all_kinds ?? undefined);
+      expect(kinds === undefined ? undefined : { all: true, all_kinds: kinds }, JSON.stringify(c.all_kinds)).toEqual(c.scope);
+      expect(kinds !== undefined, JSON.stringify(c.all_kinds)).toBe(c.ok);
+      // (What a scope holds is judged by these kinds: store-templates and
+      // deploy-tokens, in the workerd tier.)
+      for (const [kind, held] of Object.entries(c.covers ?? {})) expect(kinds!.includes(kind as "plugin" | "template"), `${JSON.stringify(c.all_kinds)} ${kind}`).toBe(held);
     }
   });
 

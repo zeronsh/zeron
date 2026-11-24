@@ -352,7 +352,7 @@ describe("templates: deploy tokens", () => {
   it("holds an `all` token to the kinds it names, those claimed later included", async () => {
     const a = await author();
     const { token: plugins } = await deployToken(a.userId, { all: true });
-    const { token: both } = await deployToken(a.userId, { all: true, all_kinds: ["template", "plugin"] });
+    const { token: both } = await deployToken(a.userId, { all: true, all_kinds: ["plugin", "template"] });
     const plug = uniqueId("p");
     const temp = uniqueId("t");
     await listed(a, plug, "1.0.0");

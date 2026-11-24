@@ -138,6 +138,15 @@
     ]
   },
   "deploy_token": {
+    "all_kinds": [
+      [
+        "plugin"
+      ],
+      [
+        "plugin",
+        "template"
+      ]
+    ],
     "alphabet": "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
     "body_len": 43,
     "check_len": 6,

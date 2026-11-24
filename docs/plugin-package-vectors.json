@@ -1664,7 +1664,88 @@
     }
   ],
   "deploy_token": {
-    "about": "A deploy token is prefix, body, checksum. body: the 32 random bytes as one big-endian unsigned integer in base62 (alphabet in value order), most significant digit first, left-padded with '0' to body_len. checksum: CRC-32 (zlib's, ISO-HDLC: reflected polynomial 0xEDB88320, initial 0xFFFFFFFF, final xor 0xFFFFFFFF) of the ASCII of prefix + body, in base62 the same way, left-padded to check_len. short: the first short_len characters of body. sha256: the SHA-256 (hex) of the whole token's ASCII, all the store keeps. Reading one (reads): surrounding whitespace ignored; anything but prefix and base62 characters is not_a_token; the wrong length or a checksum that doesn't match is damaged. It's published with as `Authorization: Bearer <token>`.",
+    "about": "A deploy token is prefix, body, checksum. body: the 32 random bytes as one big-endian unsigned integer in base62 (alphabet in value order), most significant digit first, left-padded with '0' to body_len. checksum: CRC-32 (zlib's, ISO-HDLC: reflected polynomial 0xEDB88320, initial 0xFFFFFFFF, final xor 0xFFFFFFFF) of the ASCII of prefix + body, in base62 the same way, left-padded to check_len. short: the first short_len characters of body. sha256: the SHA-256 (hex) of the whole token's ASCII, all the store keeps. Reading one (reads): surrounding whitespace ignored; anything but prefix and base62 characters is not_a_token; the wrong length or a checksum that doesn't match is damaged. It's published with as `Authorization: Bearer <token>`. Scopes: scopes are the ids named, of either kind (a plugin's and a template's alike), sorted by code unit after trimming, each once. all_scopes are {all: true, all_kinds?}: all_kinds null (absent) is [\"plugin\"]; as the store answers it, all_kinds is always there.",
+    "all_scopes": [
+      {
+        "all_kinds": null,
+        "covers": {
+          "plugin": true,
+          "template": false
+        },
+        "ok": true,
+        "scope": {
+          "all": true,
+          "all_kinds": [
+            "plugin"
+          ]
+        }
+      },
+      {
+        "all_kinds": [
+          "plugin"
+        ],
+        "covers": {
+          "plugin": true,
+          "template": false
+        },
+        "ok": true,
+        "scope": {
+          "all": true,
+          "all_kinds": [
+            "plugin"
+          ]
+        }
+      },
+      {
+        "all_kinds": [
+          "plugin",
+          "template"
+        ],
+        "covers": {
+          "plugin": true,
+          "template": true
+        },
+        "ok": true,
+        "scope": {
+          "all": true,
+          "all_kinds": [
+            "plugin",
+            "template"
+          ]
+        }
+      },
+      {
+        "all_kinds": [
+          "template"
+        ],
+        "ok": false
+      },
+      {
+        "all_kinds": [
+          "template",
+          "plugin"
+        ],
+        "ok": false
+      },
+      {
+        "all_kinds": [
+          "plugin",
+          "plugin"
+        ],
+        "ok": false
+      },
+      {
+        "all_kinds": [
+          "plugin",
+          "theme"
+        ],
+        "ok": false
+      },
+      {
+        "all_kinds": [],
+        "ok": false
+      }
+    ],
     "alphabet": "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
     "body_len": 43,
     "check_len": 6,

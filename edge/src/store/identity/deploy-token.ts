@@ -22,6 +22,7 @@
  */
 import { constantTimeEqual } from "../../cloud/crypto";
 import { STORE_DATA } from "../data";
+import type { Kind } from "../kind";
 import { PLUGIN_ID_RE } from "./signing";
 
 const FORMAT = STORE_DATA.deploy_token;
@@ -109,4 +110,14 @@ export const readScopeIds = (ids: readonly unknown[]): { readonly plugins: strin
   const repeated = trimmed.filter((id, i) => trimmed.indexOf(id) !== i);
   if (repeated.length) return { error: "repeated", ids: [...new Set(repeated)] };
   return { plugins: (trimmed as string[]).slice().sort() };
+};
+
+/** An `all` token's kinds, read as the device reads them: absent, a
+ * plugin's; or exactly one of the lists the data file names
+ * (`deploy_token.all_kinds`), in its order. */
+export const readAllKinds = (raw: unknown): readonly Kind[] | undefined => {
+  if (raw === undefined) return ["plugin"];
+  if (!Array.isArray(raw)) return undefined;
+  const named = (FORMAT.all_kinds as readonly (readonly Kind[])[]).find((kinds) => kinds.length === raw.length && kinds.every((k, i) => k === raw[i]));
+  return named && [...named];
 };
