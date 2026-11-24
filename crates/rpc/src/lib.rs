@@ -808,6 +808,19 @@ pub mod methods {
     /// checked, signed with this device's key and sent to the store with
     /// your session. The person's act alone: never an agent's.
     pub const PUBLISH_PLUGIN: &str = "PublishPlugin";
+    /// (Named for the app; not answered yet.) `{id}` → as
+    /// [`PREPARE_PLUGIN_PUBLISH`], of one of your own templates.
+    pub const PREPARE_TEMPLATE_PUBLISH: &str = "PrepareTemplatePublish";
+    /// (Named for the app; not answered yet.) `{id, hash, ticket}` → as
+    /// [`PUBLISH_PLUGIN`], of a template as [`PREPARE_TEMPLATE_PUBLISH`]
+    /// checked it. The person's act alone: never an agent's.
+    pub const PUBLISH_TEMPLATE: &str = "PublishTemplate";
+    /// (Named for the app; not answered yet.) `{pending, hash}` → as
+    /// `ImportTemplate`'s reply: the verified version of a waiting store
+    /// template, instead of the unverified one; the version is the engine's
+    /// own waiting item's, refused `not_verified` unless its record, read
+    /// then, says verified. The person's act alone: never an agent's.
+    pub const INSTALL_VERIFIED_TEMPLATE: &str = "InstallVerifiedTemplate";
     /// `{}` → the store's `/me/plugins`: your plugins there, every version
     /// `verified` or not, with its `review` (a decline's reason and words are
     /// yours alone).
@@ -888,6 +901,9 @@ pub fn local_only(method: &str) -> bool {
             | methods::DECIDE_TEMPLATE
             | methods::CHECK_TEMPLATE_UPDATES
             | methods::UPDATE_TEMPLATE
+            | methods::PREPARE_TEMPLATE_PUBLISH
+            | methods::PUBLISH_TEMPLATE
+            | methods::INSTALL_VERIFIED_TEMPLATE
             | methods::DESCRIBE_APP
             | methods::DESCRIBE_ELEMENTS
             // Themes: this device's library and choice, never another's.
@@ -1304,6 +1320,9 @@ mod tests {
             methods::DECIDE_TEMPLATE,
             methods::CHECK_TEMPLATE_UPDATES,
             methods::UPDATE_TEMPLATE,
+            methods::PREPARE_TEMPLATE_PUBLISH,
+            methods::PUBLISH_TEMPLATE,
+            methods::INSTALL_VERIFIED_TEMPLATE,
             methods::DESCRIBE_APP,
             methods::LIST_THEMES,
             methods::GET_THEME,
@@ -1701,6 +1720,8 @@ mod tests {
             methods::REVIEW_TEMPLATE,
             methods::UPDATE_PLUGIN,
             methods::UPDATE_TEMPLATE,
+            methods::PUBLISH_TEMPLATE,
+            methods::INSTALL_VERIFIED_TEMPLATE,
             methods::APPLY_UPDATE,
             methods::ACCESS_TOKEN,
             methods::STEP_UP,
