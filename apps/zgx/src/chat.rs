@@ -145,6 +145,10 @@ struct Chats {
     /// Optimistic provider-switch seams recorded on send until the engine's
     /// real `switch:<ts>` system entry arrives right before `before_message_id`.
     pending_switches: RefCell<HashMap<String, Vec<PendingSwitch>>>,
+    /// The view that fetches a finished chat's tail ahead of opening it
+    /// (`chat.prefetch`, issue #1438): one at a time, what it warms passing
+    /// to `let_go` (or the open view) when it moves on or its chat opens.
+    prefetch: RefCell<Option<Rc<View>>>,
 }
 
 /// A transcript's entry. A settled one, built into its row and older than
@@ -862,6 +866,9 @@ struct View {
     /// A finished subagent's transcript, read whole from its uploaded blob
     /// (a lane's): nothing to watch while it stands.
     snapshot: Cell<bool>,
+    /// A prefetch view (`chat.prefetch`): reads a chat ahead of opening it,
+    /// so opening it marks nothing seen and follows nothing held.
+    prefetch: bool,
 }
 
 /// A prompt sent and not yet in the transcript: shown under it meanwhile,
@@ -1199,6 +1206,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         pending: RefCell::default(),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
+        prefetch: false,
     });
     chats.views.borrow_mut().push(Rc::downgrade(&view));
     if chats.views.borrow().len() == 1 {
@@ -1244,11 +1252,69 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
                 return;
             }
             let id = args.field("id").map(text).filter(|s| !s.is_empty());
-            let view = lanes.borrow_mut().entry(slot.clone()).or_insert_with(|| lane_view(&host, &slot)).clone();
+            let view = lanes
+                .borrow_mut()
+                .entry(slot.clone())
+                .or_insert_with(|| lane_view(&host, &slot, false))
+                .clone();
             // A finished subagent: its uploaded transcript first.
             match (id, args.field("frozen").is_some_and(Value::truthy)) {
                 (Some(id), true) => view.open_frozen(id, args.field("chat").map(text).filter(|s| !s.is_empty())),
                 (id, _) => view.open_chat(id),
+            }
+        });
+    }
+    // `chat.prefetch { id }`: warm a finished chat's tail ahead of opening
+    // it (issue #1438, the "done" chime meaning "go read it now"). One view
+    // warms one chat: the next call, or the chat opening, sends what it
+    // held to `let_go`, which that open then takes (its `since` frame asks
+    // the engine for what changed, not the tail again). Settles true once
+    // the tail's in hand, false when it can't be had by then — the caller
+    // rings either way.
+    {
+        let host = host.clone();
+        let inner = host.clone();
+        host.async_action("chat.prefetch", move |args| {
+            let id = args.field("id").map(text).unwrap_or_default();
+            let chats = CHATS.with(Rc::clone);
+            let host = inner.clone();
+            async move {
+                if id.is_empty() {
+                    return Ok(Value::Bool(false));
+                }
+                let view = {
+                    let mut slot = chats.prefetch.borrow_mut();
+                    match slot.as_ref() {
+                        Some(view) => view.clone(),
+                        None => {
+                            let view = lane_view(&host, "prefetch", true);
+                            *slot = Some(view.clone());
+                            view
+                        }
+                    }
+                };
+                let warm = |view: &View, id: &str| {
+                    view.open
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|o| o.id == id && o.heard)
+                };
+                if !warm(&view, &id) {
+                    if view.open_id().as_deref() != Some(id.as_str()) {
+                        view.open_chat(Some(id.clone()));
+                    }
+                    for _ in 0..100 {
+                        if view.open.borrow().as_ref().is_none_or(|o| o.id != id) {
+                            // Moved to another chat: this call is over.
+                            return Ok(Value::Bool(false));
+                        }
+                        if warm(&view, &id) {
+                            return Ok(Value::Bool(true));
+                        }
+                        zgx::timer::sleep(std::time::Duration::from_millis(40)).await;
+                    }
+                }
+                Ok(Value::Bool(warm(&view, &id)))
             }
         });
     }
@@ -1453,7 +1519,7 @@ fn snapshot_frame(reply: &Json) -> Option<Json> {
 
 /// A lane's view: its own states, heard as the window's open chat is (the
 /// catalog, sessions and every connection reach it too).
-fn lane_view(host: &ScriptHost, slot: &str) -> Rc<View> {
+fn lane_view(host: &ScriptHost, slot: &str, prefetch: bool) -> Rc<View> {
     let chats = CHATS.with(Rc::clone);
     let view = Rc::new(View {
         session: host.shared(&format!("chat.lane.{slot}.session"), Value::Nil),
@@ -1465,6 +1531,7 @@ fn lane_view(host: &ScriptHost, slot: &str) -> Rc<View> {
         pending: RefCell::default(),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
+        prefetch,
     });
     chats.views.borrow_mut().push(Rc::downgrade(&view));
     let weak = Rc::downgrade(&view);
@@ -2434,6 +2501,15 @@ impl View {
         let chats = CHATS.with(Rc::clone);
         let was_snapshot = self.snapshot.replace(false);
         self.generation.set(self.generation.get() + 1);
+        // A prefetch holds this chat (`chat.prefetch`): it lets go into
+        // `let_go`, which `take_let_go` then hands this open — the tail it
+        // fetched is what shows, and the engine's `since` frame tops it up.
+        if let Some(id) = &id
+            && let Some(prefetch) = chats.prefetch.borrow().as_ref()
+            && prefetch.open_id().as_deref() == Some(id.as_str())
+        {
+            prefetch.open_chat(None);
+        }
         let next = id.map(|id| {
             // A chat being made has nothing more to come yet: its rows (its
             // first message) are all there is.
@@ -2453,14 +2529,19 @@ impl View {
         }
         self.draft.set(draft_value("", ""));
         self.subscribe();
-        let held = chats.held.borrow().clone();
-        self.follow_held(&held);
+        if !self.prefetch {
+            let held = chats.held.borrow().clone();
+            self.follow_held(&held);
+        }
         self.publish_messages();
         self.publish_session();
         // Its finished state seen, as the shipping app marks it: only while
         // there's something to see (opening a chat looked at already writes
         // nothing, so it doesn't send every window the chat list again).
-        if let Some(id) = self.open_id().filter(|id| chats.marks_seen(id)) {
+        // (A prefetch view opens it to warm the tail: nothing seen for that.)
+        if !self.prefetch
+            && let Some(id) = self.open_id().filter(|id| chats.marks_seen(id))
+        {
             engine::get().spawn(async move {
                 let _ = engine::get().call("Mutate", json!({ "op": "markChatSeen", "chatId": id })).await;
             });
@@ -9073,6 +9154,7 @@ mod tests {
                 pending: RefCell::default(),
                 generation: Cell::new(0),
                 snapshot: Cell::new(false),
+                prefetch: false,
             })
         };
         let time = |label: &str, view: &Rc<View>, frame: serde_json::Value| {
@@ -9129,6 +9211,7 @@ mod tests {
             pending: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
+            prefetch: false,
         });
         for (n, step) in fixture["steps"].as_array().unwrap().iter().enumerate() {
             view.heard_frame(step["frame"].clone());
@@ -9170,6 +9253,7 @@ mod tests {
             pending: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
+            prefetch: false,
         });
         let rows = || format!("{:?}", view.messages.signal().with_untracked(Clone::clone));
         // What it holds, as it would tell the engine: ids and the engine's sums.
@@ -9258,6 +9342,7 @@ mod tests {
             pending: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
+            prefetch: false,
         });
         let draft = || format!("{:?}", view.draft.signal().with_untracked(Clone::clone));
         let rows = || format!("{:?}", view.messages.signal().with_untracked(Clone::clone));
@@ -9308,6 +9393,7 @@ mod tests {
             pending: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
+            prefetch: false,
         });
         let ids = || view.open.borrow().as_ref().unwrap().entries.iter().map(|e| e.id.to_string()).collect::<Vec<_>>();
         let rows = || format!("{:?}", view.messages.signal().with_untracked(Clone::clone));
@@ -9364,6 +9450,7 @@ mod tests {
             pending: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
+            prefetch: false,
         });
         view.pending.borrow_mut().insert(
             "c".into(),

@@ -31,13 +31,25 @@ type Seen = { status: string, turn: string? }
 -- Each chat as last seen, by id: its status ("" for idle) and finished turn.
 local seen = ui.state("settings_chimes_seen_turns", {} :: { [string]: Seen })
 
--- Finishes waiting to stand, by chat: the turn, and when it rings
--- (`ui.now()`, ms).
-local settling = ui.state("settings_chimes_settling", {} :: { [string]: { turn: string, at: number } })
+type Wait = { turn: string, at: number, by: number }
+
+-- Finishes waiting to stand, by chat: the turn, when it settles (`at`),
+-- the latest it rings (`by`, prefetched or not) — issue #1438: the chime
+-- means "go read it now", so it follows the tail's prefetch, bounded.
+local settling = ui.state("settings_chimes_settling", {} :: { [string]: Wait })
+
+-- The chats whose tail's prefetch has landed (its own state: a prefetch
+-- that settles while the settle is still being written can't be lost,
+-- and the timer below wakes on it).
+local prefetched = ui.state("settings_chimes_prefetched", {} :: { [string]: boolean })
 
 -- How long a finish waits to stand before it rings (the engine's banners'
 -- `DONE_SETTLE`).
 local SETTLE = 2000
+
+-- And the most it waits on the tail's prefetch past that: a slow or
+-- offline engine still rings rather than swallowing the finish.
+local PREFETCH_WAIT = 4000
 
 -- What a status turning on plays. ("done" isn't one: see above.)
 local SOUND: { [string]: string } = {
@@ -89,8 +101,17 @@ ui.effect(function()
 				ring = louder(ring, SOUND[status])
 			end
 			if c.turn ~= nil and c.turn ~= was.turn and c.turn_fresh ~= false and not busy(status) then
-				waits[c.id] = { turn = c.turn, at = ui.now() + SETTLE }
+				waits[c.id] = { turn = c.turn, at = ui.now() + SETTLE, by = ui.now() + SETTLE + PREFETCH_WAIT }
 				moved = true
+				local id = c.id
+				prefetched:set_key({ id }, nil)
+				-- The chat's tail ahead of time (a no-op where it's already
+				-- open): when it's in hand, or can't be, the finish may ring.
+				host.call("chat.prefetch", { id = id }):after(function()
+					prefetched:set_key({ id }, true)
+				end, function()
+					prefetched:set_key({ id }, true)
+				end)
 			end
 		end
 	end
@@ -115,11 +136,16 @@ local function stand(upto: number)
 	local waits = settling:peek()
 	local left = {}
 	local ring: string? = nil
+	local warm = prefetched:peek()
 	for id, w in waits do
 		if w.at <= upto then
-			local now = seen:peek()[id]
-			if now and now.turn == w.turn and not busy(now.status) then
-				ring = louder(ring, "done")
+			if warm[id] or w.by <= upto then
+				local now = seen:peek()[id]
+				if now and now.turn == w.turn and not busy(now.status) then
+					ring = louder(ring, "done")
+				end
+			else
+				left[id] = w
 			end
 		else
 			left[id] = w
@@ -129,14 +155,23 @@ local function stand(upto: number)
 	play(ring)
 end
 ui.effect(function()
-	local soonest: number? = nil
-	for _, w in settling:get() do
-		soonest = if soonest then math.min(soonest, w.at) else w.at
+	local now = ui.now()
+	local warm = prefetched:get()
+	local dues: { [number]: boolean } = {}
+	for id, w in settling:get() do
+		-- Its looks: the settle time, and — while the tail isn't in hand —
+		-- the prefetch's bound, so a tail that never lands still rings
+		-- there. Once it is, the settle time alone decides (the effect runs
+		-- again as it lands).
+		dues[w.at] = true
+		if not warm[id] then
+			dues[w.by] = true
+		end
 	end
 	-- (A timer made in an effect belongs to its run: a new finish, or one
-	-- taken, sets it again.)
-	if soonest then
-		local upto: number = soonest
+	-- taken, sets them again.)
+	for due in dues do
+		local upto: number = due
 		ui.after(math.max(0, upto - ui.now()), function()
 			stand(upto)
 		end)

@@ -47,6 +47,20 @@ local function waiting(): any
 	end
 	return p
 end
+-- `chat.prefetch` held pending, as a slow engine's tail fetch (issue #1438):
+-- held while `settings_stub_prefetch_hold` stands, settled by
+-- `settings_stub.prefetch_done`.
+local prefetch_hold = ui.state("settings_stub_prefetch_hold", false)
+local prefetch_waiting: { (any) -> () } = {}
+local function prefetch_promise(): any
+	local p = {}
+	function p.after(_self: any, ok: ((any) -> ())?, _bad: ((any) -> ())?)
+		if ok then
+			table.insert(prefetch_waiting, ok)
+		end
+	end
+	return p
+end
 local function signed_in_again(word: string?)
 	local w = signing_in
 	signing_in = nil
@@ -282,6 +296,12 @@ local answers: { [string]: (arg: any) -> any } = {
 	end,
 	["account.rename_org"] = function()
 		return change(nil)
+	end,
+	["chat.prefetch"] = function(_arg: any)
+		if prefetch_hold:peek() then
+			return prefetch_promise()
+		end
+		return settled(true)
 	end,
 	["settings.engine"] = function(arg: any)
 		local m = arg.method
@@ -690,5 +710,24 @@ ui.command {
 require("./cloud_stub")
 -- The ACP registry's agents (Settings → Providers → Add an agent).
 require("./registry_stub")
+
+ui.command {
+	id = "settings_stub.prefetch_hold",
+	run = function()
+		prefetch_hold:set(true)
+	end,
+}
+
+ui.command {
+	id = "settings_stub.prefetch_done",
+	run = function()
+		prefetch_hold:set(false)
+		local waiting = prefetch_waiting
+		prefetch_waiting = {}
+		for _, ok in waiting do
+			ok(true)
+		end
+	end,
+}
 
 return M
