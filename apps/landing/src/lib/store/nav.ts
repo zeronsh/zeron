@@ -1,7 +1,4 @@
-// The app's list down the side of every store, account and admin page: what
-// is in it, in the app's words, each with the app's icon. (layouts/App.astro
-// draws it; the staff's group is filled in on public pages by
-// scripts/app.ts, which reads the session after the page has loaded.)
+// The store's categories, in the app's words, each with the app's icon.
 import type { GlyphName } from "../../components/ui/Glyph.astro";
 import { store } from "./words.ts";
 
@@ -23,22 +20,3 @@ export const CATEGORIES: readonly NavItem[] = [
   { id: "productivity", label: store("plugins.store.category.productivity"), href: "/plugins/all?category=productivity", icon: "checklist" },
   { id: "utilities", label: store("plugins.store.category.utilities"), href: "/plugins/all?category=utilities", icon: "tuning" },
 ];
-
-export const BROWSE: readonly NavItem[] = [
-  { id: "discover", label: "Discover", href: "/plugins", icon: "star" },
-  { id: "all", label: "All plugins", href: "/plugins/all", icon: "widget" },
-];
-
-export const PUBLISH: readonly NavItem[] = [
-  { id: "mine", label: "Your plugins", href: "/account", icon: "folder-with-files" },
-  { id: "tokens", label: "Deploy tokens", href: "/account/tokens", icon: "lock-keyhole-unlocked" },
-  { id: "guide", label: "Publishing guide", href: "/plugins/publishing", icon: "document" },
-];
-
-export const REVIEW: readonly NavItem[] = [
-  { id: "queue", label: "Queue", href: "/admin/plugins", icon: "inbox" },
-  { id: "reports", label: "Reports", href: "/admin/reports", icon: "flag" },
-  { id: "reserved", label: "Reserved ids", href: "/admin/reservations", icon: "tag" },
-  { id: "audit", label: "Audit log", href: "/admin/audit", icon: "clock-circle" },
-];
-

@@ -1,8 +1,10 @@
 ---
 // Free a reserved id. A post does it; a visit asks first.
-import Confirm from "../../../components/kit/Confirm.astro";
-import Glyph from "../../../components/ui/Glyph.astro";
-import App from "../../../layouts/App.astro";
+import AskCard from "../../../components/look/AskCard.astro";
+import Icon from "../../../components/look/Icon.astro";
+import Store from "../../../layouts/Store.astro";
+import "../../../styles/look/account.css";
+import "../../../styles/look/staff.css";
 import { freeAsk } from "../../../lib/store/admin.ts";
 import { done, flashFor, formOf, tokenMatches } from "../../../lib/store/forms.ts";
 import { privatePage } from "../../../lib/store/http.ts";
@@ -29,9 +31,9 @@ if (Astro.request.method !== "GET") return new Response(null, { status: 405, hea
 privatePage(Astro);
 ---
 
-<App title={`${ask.title} · Zeron`} description={ask.title} noindex current="reserved" session={session}>
-  <nav slot="title" class="crumbs" aria-label="Where this is">
-    <a href={back}>Reserved ids</a><Glyph name="alt-arrow-right" size={12} /><span aria-current="page">{id}</span>
-  </nav>
-  <Confirm ask={ask} action={Astro.url.pathname} csrf={session.csrf} back={back} />
-</App>
+<Store title={`${ask.title} · Zeron`} description={ask.title} noindex current="review" session={session}>
+  <div class="wrap acct">
+    <nav class="crumbs" aria-label="Where this is"><a href={back}>Reserved ids</a><Icon name="chev" /><span aria-current="page">{id}</span></nav>
+    <AskCard ask={ask} action={Astro.url.pathname} csrf={session.csrf} back={back} />
+  </div>
+</Store>

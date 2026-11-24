@@ -8,6 +8,8 @@
 /* (Each crumb on one line; the last, a plugin's name, cut: the head below says it whole.) */
 .acct .crumbs a { flex: none; }
 .acct .crumbs > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* (A crumb between the first and the last, a plugin's name, is cut too when the line is short.) */
+.acct .crumbs a:not(:first-child) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acct .hd { display: flex; align-items: flex-end; justify-content: space-between; gap: 48px; }
 .acct h1 { font-size: 40px; line-height: 44px; letter-spacing: -0.035em; }
 .acct .lead { margin-top: 12px; max-width: 37em; }
@@ -187,11 +189,30 @@ a.row:focus-visible { outline-offset: -2px; border-radius: 4px; }
 .how p { margin-top: 8px; color: var(--text-2); font-size: 14px; line-height: 21px; }
 .how code { font: 500 12.5px/1 var(--mono); padding: 2px 5px; border-radius: 5px; background: var(--sunken); color: var(--text); }
 
+/* The Publishing guide: a page of prose in the store's measure, its parts listed under its lead. */
+.guide-page .guide { max-width: 680px; padding-top: 0; margin-top: 20px; }
+.guide .guide-lead { font-size: 18px; line-height: 29px; color: var(--text-2); }
+.guide .guide-parts { margin-top: 24px; margin-inline: -18px; padding: 14px 18px; border-radius: 14px; background: var(--sunken); }
+/* (Its numbers hang in the well's padding, its words on the column.) */
+.guide .guide-parts ol { margin: 0; padding-left: 0; font-size: 15px; line-height: 24px; }
+.guide .guide-parts li + li { margin-top: 2px; }
+.guide .guide-parts a { box-shadow: none; }
+.guide .guide-parts a:hover { box-shadow: 0 1px 0 var(--text-3); }
+/* (A part opened from the list lands clear of the bar.) */
+.guide h2[id] { scroll-margin-top: 84px; }
+.guide .guide-next { margin-top: 40px; }
+.guide .guide-next .btn { margin-left: calc(-1 * var(--pad)); box-shadow: none; }
+
 /* A question before something that can't be taken back. */
 .askcard { max-width: 520px; margin-top: 8px; margin-left: -28px; padding: 28px; overflow: visible; }
 .askcard h1 { font-size: 24px; line-height: 30px; letter-spacing: -0.02em; overflow-wrap: anywhere; }
 .askcard p { margin-top: 8px; color: var(--text-2); }
 .askcard .answers { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+/* A report: whom it's about, then why. */
+.askcard.report { max-width: 560px; }
+.report-who { display: flex; align-items: flex-start; gap: 14px; }
+.report-who > div { min-width: 0; }
+.report-who p { margin-top: 2px; font-size: 14px; color: var(--text-3); }
 
 @media (max-width: 1024px) {
   .vr { grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.5fr) minmax(0, 0.8fr) auto; gap: 24px; }

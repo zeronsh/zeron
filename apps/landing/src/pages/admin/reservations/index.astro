@@ -2,17 +2,21 @@
 // Ids held back from first-come claims (plan, amendment 19): each for one
 // account, or for nobody, as a table; reserve one under it, or free one
 // from its row. Admins only.
-import Toast from "../../../components/kit/Toast.astro";
-import Glyph from "../../../components/ui/Glyph.astro";
-import App from "../../../layouts/App.astro";
+import Flash from "../../../components/look/Flash.astro";
+import Question from "../../../components/look/Question.astro";
+import StaffHead from "../../../components/look/StaffHead.astro";
+import Store from "../../../layouts/Store.astro";
+import "../../../styles/look/account.css";
+import "../../../styles/look/staff.css";
 import { freeAsk } from "../../../lib/store/admin.ts";
 import { takeFlash } from "../../../lib/store/flash.ts";
-import { count, dateTime, day } from "../../../lib/store/format.ts";
+import { dateTime, day } from "../../../lib/store/format.ts";
 import { done, field, flashFor, formOf, tokenMatches } from "../../../lib/store/forms.ts";
 import { privatePage } from "../../../lib/store/http.ts";
 import { isPluginId, isUsername, SITE_IDS } from "../../../lib/store/names.ts";
 import { resumed } from "../../../lib/store/resume.ts";
 import { adminSession } from "../../../lib/store/session.ts";
+import { staffCounts, staffTabs } from "../../../lib/store/staff.ts";
 
 export const prerender = false;
 
@@ -33,100 +37,73 @@ if (Astro.request.method === "POST") {
 if (Astro.request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
 
 privatePage(Astro);
-const toast = takeFlash(Astro.cookies);
-const result = await Astro.locals.edge.reservations();
+const flash = takeFlash(Astro.cookies);
+const [result, counts] = await Promise.all([Astro.locals.edge.reservations(), staffCounts(Astro.locals.edge)]);
 const reservations = result.ok ? result.data.reservations : [];
 const dialogId = (id: string) => `free-${id}`;
 ---
 
-<App title="Reserved ids · Review · Zeron" description="Plugin ids held back from first-come claims." noindex current="reserved" session={session}>
-  <h1 slot="title" class="t-title">Reserved ids{result.ok && <span class="title-count"> · {count(reservations.length)}</span>}</h1>
-
-  <div class="mine-body">
-    {
-      !result.ok ? (
-        <div class="panel">
+<Store title="Reserved ids · Review · Zeron" description="Plugin ids held back from first-come claims." noindex current="review" session={session}>
+  <div class="wrap acct">
+    <StaffHead title="Reserved ids" count={result.ok ? reservations.length : null} tabs={staffTabs("reservations", counts)}>
+      <Flash flash={flash} />
+      {
+        !result.ok ? (
           <div class="empty" role="status">
-            <span class="tile"><Glyph name="wifi-off" size={20} /></span>
-            <div class="words"><h2>Reserved ids can't be loaded right now</h2><p>Try again in a moment.</p></div>
-            <div class="actions"><a class="btn secondary sm" href={here}>Try again</a></div>
+            <h2>Reserved ids can't be loaded right now</h2>
+            <p>Try again in a moment.</p>
+            <a class="btn sec" href={here}>Try again</a>
           </div>
-        </div>
-      ) : reservations.length === 0 ? (
-        <div class="panel">
+        ) : reservations.length === 0 ? (
           <div class="empty">
-            <span class="tile"><Glyph name="tag" size={20} /></span>
-            <div class="words"><h2>No ids are reserved</h2><p>An id reserved here can't be claimed by whoever sends it first.</p></div>
+            <h2>No ids are reserved</h2>
+            <p>An id reserved here can't be claimed by whoever sends it first.</p>
           </div>
-        </div>
-      ) : (
-        <div class="panel">
-          <table class="table wrapping reserved-table">
-            <caption class="sr-only">Reserved ids</caption>
-            <colgroup><col class="id-col" /><col class="for" /><col /><col class="when" /><col class="action" /></colgroup>
-            <thead><tr><th scope="col">Id</th><th scope="col">For</th><th scope="col">Why</th><th scope="col">Since</th><th scope="col"><span class="sr-only">What can be done</span></th></tr></thead>
-            <tbody>
+        ) : (
+          <div class="card srows res">
+            <div class="sr h" aria-hidden="true"><span>Id</span><span>For</span><span>Why</span><span>Since</span><span></span></div>
+            <ul aria-label="Reserved ids">
               {reservations.map((r) => (
-                <tr>
-                  <td><span class="line"><code class="id">{r.id}</code></span></td>
-                  <td><span class="line">{r.to ? `@${r.to.username}` : <span class="t-3">Nobody</span>}</span></td>
-                  <td class="words">{r.note ?? ""}</td>
-                  <td><span class="line t-2"><time datetime={new Date(r.created_at).toISOString()} title={dateTime(r.created_at)}>{day(r.created_at)}</time></span></td>
-                  <td class="end"><span class="line end"><a class="btn ghost sm" href={`${here}/${encodeURIComponent(r.id)}`} data-dialog={dialogId(r.id)}>Free…</a></span></td>
-                </tr>
+                <li class="sr">
+                  <code class="id">{r.id}</code>
+                  <span class:list={{ t3: !r.to }}><span class="sr-only">For </span>{r.to ? `@${r.to.username}` : "Nobody"}</span>
+                  <span class="why">{r.note ?? ""}</span>
+                  <span class="t2"><time datetime={new Date(r.created_at).toISOString()} title={dateTime(r.created_at)}>{day(r.created_at)}</time></span>
+                  <a class="btn ghost sm" href={`${here}/${encodeURIComponent(r.id)}`} data-dialog={dialogId(r.id)}>Free…<span class="sr-only"> {r.id}</span></a>
+                </li>
               ))}
-            </tbody>
-          </table>
-        </div>
-      )
-    }
+            </ul>
+          </div>
+        )
+      }
 
-    <section class="section" aria-labelledby="reserve-heading">
-      <div class="section-head">
-        <div class="words">
-          <h2 id="reserve-heading">Reserve an id</h2>
-          <p>Held for the account named, or for nobody. An id in use moves by a transfer instead.</p>
-        </div>
-      </div>
-      <form method="post" action={here} class="panel reserve-form">
-        <input type="hidden" name="csrf" value={session.csrf} />
-        <div>
-          <label class="field-label" for="reserve-id">Plugin id</label>
-          <div class="field"><input id="reserve-id" name="id" required maxlength="40" placeholder="an-id" autocomplete="off" value={resumed(Astro.url, "id", 40) || undefined} /></div>
-          <p class="field-hint">2 to 40 lowercase letters, digits and dashes.</p>
-        </div>
-        <div>
-          <label class="field-label" for="reserve-for">For</label>
-          <div class="field"><input id="reserve-for" name="to_username" maxlength="21" placeholder="@username" autocomplete="off" value={resumed(Astro.url, "to_username", 21) || undefined} /></div>
-          <p class="field-hint">Empty: held for nobody.</p>
-        </div>
-        <div>
-          <label class="field-label" for="reserve-note">Why</label>
-          <div class="field"><input id="reserve-note" name="note" maxlength="500" autocomplete="off" value={resumed(Astro.url, "note", 500) || undefined} /></div>
-          <p class="field-hint">For the other reviewers.</p>
-        </div>
-        <p class="site-ids">The site's own page words can't be reserved: no plugin can have them. <span class="words">{SITE_IDS.join(", ")}</span></p>
-        <div class="answers"><button class="btn primary sm" type="submit">Reserve</button></div>
-      </form>
-    </section>
-
-    {
-      reservations.map((r) => {
-        const ask = freeAsk(r.id);
-        return (
-          <dialog class="dialog sm" id={dialogId(r.id)} aria-labelledby={`${dialogId(r.id)}-title`} closedby="any">
-            <form method="post" action={`${here}/${encodeURIComponent(r.id)}`}>
-              <input type="hidden" name="csrf" value={session.csrf} />
-              <div class="head"><h2 id={`${dialogId(r.id)}-title`}>{ask.title}</h2>{ask.words.map((w) => <p>{w}</p>)}</div>
-              <div class="answers">
-                <button class="btn secondary" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
-                <button class="btn danger" type="submit">{ask.confirm}</button>
-              </div>
-            </form>
-          </dialog>
-        );
-      })
-    }
+      <section class="reserve" aria-labelledby="reserve-heading">
+        <h2 id="reserve-heading">Reserve an id</h2>
+        <p class="lead2">Held for the account named, or for nobody. An id in use moves by a transfer instead.</p>
+        <form method="post" action={here} class="card askcard reserve-form">
+          <input type="hidden" name="csrf" value={session.csrf} />
+          <div class="body">
+            <div>
+              <label class="field-label" for="reserve-id">Plugin id</label>
+              <div class="field"><input id="reserve-id" name="id" required maxlength="40" placeholder="an-id" autocomplete="off" value={resumed(Astro.url, "id", 40) || undefined} /></div>
+              <p class="field-hint">2 to 40 lowercase letters, digits and dashes.</p>
+            </div>
+            <div>
+              <label class="field-label" for="reserve-for">For</label>
+              <div class="field"><input id="reserve-for" name="to_username" maxlength="21" placeholder="@username" autocomplete="off" value={resumed(Astro.url, "to_username", 21) || undefined} /></div>
+              <p class="field-hint">Empty: held for nobody.</p>
+            </div>
+            <div>
+              <label class="field-label" for="reserve-note">Why</label>
+              <div class="field"><input id="reserve-note" name="note" maxlength="500" autocomplete="off" value={resumed(Astro.url, "note", 500) || undefined} /></div>
+              <p class="field-hint">For the other reviewers.</p>
+            </div>
+            <p class="site-ids">The site's own page words can't be reserved: no plugin can have them. <span class="words">{SITE_IDS.join(", ")}</span></p>
+          </div>
+          <div class="answers"><button class="btn pri" type="submit">Reserve</button></div>
+        </form>
+      </section>
+    </StaffHead>
   </div>
-  <Toast toast={toast} />
-</App>
+  {reservations.map((r) => <Question id={dialogId(r.id)} ask={freeAsk(r.id)} action={`${here}/${encodeURIComponent(r.id)}`} csrf={session.csrf} />)}
+</Store>
