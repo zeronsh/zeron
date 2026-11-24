@@ -152,7 +152,7 @@ use intro_handoff::Handoff;
 use zgx::{compose::component, platform::PlatformService, reactive::Signal, scene::Rect, widgets::Ui};
 use zgx_desktop::{
     Application, FontData, Glass, GlassMaterial, Titlebar, WindowBounds, WindowContext,
-    WindowHandle, WindowLevel, WindowOptions,
+    WindowHandle, WindowOptions,
 };
 use zgx_script::{ScriptHost, Shared, Value};
 
@@ -1271,17 +1271,20 @@ fn run_menu_command(host: &ScriptHost, id: &str) {
     host.run_command(id);
 }
 
-fn intro_window() -> WindowOptions {
-    WindowOptions {
-        title: "Zeron".into(),
-        transparent: true,
-        decorations: false,
-        resizable: false,
-        covers_display: true,
-        level: WindowLevel::AlwaysOnTop,
-        shadow: false,
-        ..Default::default()
+/// The window `name` of `ui/zgx.json`'s `named_windows`, as zgx-run would
+/// open it: Zeron's windows are said there, not built here (the consent
+/// windows, plugins' own, still build on `zeron_window`).
+fn window_of(name: &str) -> WindowOptions {
+    let script = ui_dir().join("app.luau");
+    match zgx_run::window_options(&script, Some(name)) {
+        Ok((options, _)) => options,
+        Err(why) => panic!("zeron-zgx: ui/zgx.json: {why}"),
     }
+}
+
+/// The intro: over the whole display, see-through, on top.
+fn intro_window() -> WindowOptions {
+    window_of("intro")
 }
 
 /// The glass under Zeron's window: the under-window blur alone, untinted
@@ -1319,19 +1322,12 @@ fn zeron_window(width: f64, height: f64) -> WindowOptions {
 /// on the glass as every window is; its frame (ds.Onboarding.Frame) covers
 /// it with its own colour when the app is opaque.
 fn onboarding_window() -> WindowOptions {
-    WindowOptions {
-        resizable: false,
-        ..zeron_window(ONBOARDING_SIZE.0, ONBOARDING_SIZE.1)
-    }
+    window_of("onboarding")
 }
 
 /// The main window: resizable, its frame kept across launches.
 fn main_window() -> WindowOptions {
-    placed(WindowOptions {
-        min_size: Some((760., 500.)),
-        frame_autosave: Some("zeron-zgx-main".into()),
-        ..zeron_window(1240., 820.)
-    })
+    placed(window_of("main"))
 }
 
 /// A window put where `ZERON_ZGX_FRAME` says (`x,y,w,h,scale`: its corner
@@ -1356,11 +1352,7 @@ fn placed(mut options: WindowOptions) -> WindowOptions {
 }
 
 fn gallery_window() -> WindowOptions {
-    WindowOptions {
-        min_size: Some((900., 560.)),
-        frame_autosave: Some("zeron-zgx-gallery".into()),
-        ..zeron_window(1240., 820.)
-    }
+    window_of("gallery")
 }
 
 /// The scripts: this folder's `ui/`, or `ZERON_ZGX_UI` (scripts/smoke.sh's
@@ -1485,6 +1477,58 @@ fn fonts() -> impl Iterator<Item = Result<FontData, Box<dyn std::error::Error>>>
     ]
     .into_iter()
     .map(|bytes| FontData::new(Arc::<[u8]>::from(bytes)).map_err(Into::into))
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+    /// Zeron's windows as `ui/zgx.json` says them are the windows it built
+    /// in Rust before, field by field (what `WindowOptions` prints), on the
+    /// platform this runs on: the same options, so the same native calls.
+    #[test]
+    fn zgx_json_says_the_windows_zeron_built() {
+        let built = [
+            (
+                "intro",
+                WindowOptions {
+                    title: "Zeron".into(),
+                    transparent: true,
+                    decorations: false,
+                    resizable: false,
+                    covers_display: true,
+                    level: zgx_desktop::WindowLevel::AlwaysOnTop,
+                    shadow: false,
+                    ..Default::default()
+                },
+            ),
+            (
+                "onboarding",
+                WindowOptions {
+                    resizable: false,
+                    ..zeron_window(ONBOARDING_SIZE.0, ONBOARDING_SIZE.1)
+                },
+            ),
+            (
+                "main",
+                WindowOptions {
+                    min_size: Some((760., 500.)),
+                    frame_autosave: Some("zeron-zgx-main".into()),
+                    ..zeron_window(1240., 820.)
+                },
+            ),
+            (
+                "gallery",
+                WindowOptions {
+                    min_size: Some((900., 560.)),
+                    frame_autosave: Some("zeron-zgx-gallery".into()),
+                    ..zeron_window(1240., 820.)
+                },
+            ),
+        ];
+        for (name, built) in built {
+            assert_eq!(format!("{:?}", window_of(name)), format!("{built:?}"), "{name}");
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1,0 +1,49 @@
+{
+  "title": "Zeron",
+  "named_windows": {
+    "intro": {
+      "width": 960,
+      "height": 720,
+      "transparent": true,
+      "decorations": false,
+      "resizable": false,
+      "covers_display": true,
+      "level": "always_on_top",
+      "shadow": false
+    },
+    "onboarding": {
+      "width": 680,
+      "height": 500,
+      "resizable": false,
+      "titlebar": "inset",
+      "caption_height": 38,
+      "glass": { "material": "under_window_background", "plain": true },
+      "decorations": false,
+      "macos": { "decorations": true }
+    },
+    "main": {
+      "width": 1240,
+      "height": 820,
+      "min_width": 760,
+      "min_height": 500,
+      "frame_autosave": "zeron-zgx-main",
+      "titlebar": "inset",
+      "caption_height": 38,
+      "glass": { "material": "under_window_background", "plain": true },
+      "decorations": false,
+      "macos": { "decorations": true }
+    },
+    "gallery": {
+      "width": 1240,
+      "height": 820,
+      "min_width": 900,
+      "min_height": 560,
+      "frame_autosave": "zeron-zgx-gallery",
+      "titlebar": "inset",
+      "caption_height": 38,
+      "glass": { "material": "under_window_background", "plain": true },
+      "decorations": false,
+      "macos": { "decorations": true }
+    }
+  }
+}
