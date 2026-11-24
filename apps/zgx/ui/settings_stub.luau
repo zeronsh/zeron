@@ -294,8 +294,15 @@ local answers: { [string]: (arg: any) -> any } = {
 			if m == "SetCommitCredit" then
 				engine[get] = { enabled = arg.params.enabled, cloud = false }
 			elseif m == "SetWorktreeSettings" then
+				-- As the engine does: a custom location needs its folder.
+				if arg.params.useCustomDirectory and (arg.params.customDirectory == nil or arg.params.customDirectory == "") then
+					return settled(nil, "Choose a worktree folder")
+				end
 				local w = table.clone(engine[get])
 				w.settings = arg.params
+				if arg.params.customDirectory then
+					w.effectiveDirectory = arg.params.customDirectory
+				end
 				engine[get] = w
 			elseif m == "SetTitleSettings" or m == "SetBackgroundSettings" then
 				engine[get] = arg.params
