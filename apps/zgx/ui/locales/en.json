@@ -4323,7 +4323,8 @@
           "templates": "Templates",
           "all_both_now": "All your plugins and templates: {n} today, and any you publish later"
         },
-        "not_used_made": "Not used yet · made {date}"
+        "not_used_made": "Not used yet · made {date}",
+        "one": "Deploy token"
       },
       "unblock_title": "Turn {name} back on?",
       "unblock_body": "Zeron took this version down from the store. It runs again here, as you allowed it.",
@@ -4536,7 +4537,8 @@
       "from_store": "From the store",
       "from_store_detail": "Published by @{username}.",
       "from_file": "From a file, not from the store",
-      "from_link": "From a link, not from the store"
+      "from_link": "From a link, not from the store",
+      "store_changed": "What the store says of it changed just now. Look again."
     },
     "store": {
       "search": "Search templates",
@@ -4571,7 +4573,8 @@
       "runs_as_zeron": "Runs as Zeron itself",
       "runs_as_zeron_body": "It can do anything Zeron can.",
       "update_replaces_edits": "You changed this template on this device. Updating replaces your changes.",
-      "changed_here": "Changed on this device"
+      "changed_here": "Changed on this device",
+      "runs_as_zeron_said": "Runs as Zeron itself. It can do anything Zeron can."
     }
   },
   "themes": {

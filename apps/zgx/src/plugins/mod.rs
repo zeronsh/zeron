@@ -302,6 +302,9 @@ pub struct Bridge {
     /// Which updates the store's plugins take on this device (the
     /// engine's `store_updates`: `{ device, plugins = { id = … } }`).
     store_updates: Shared,
+    /// The same, of the store's templates (`ListTemplates`: store_rows.rs
+    /// `choices`).
+    template_updates: Shared,
     settings_own: RefCell<HashMap<String, Shared>>,
     /// The main window's dialogs (a folder setting's).
     dialogs: zgx_desktop::FileDialogs,
@@ -653,6 +656,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         settings: RefCell::new(settings::Book::new(settings::storage_dir())),
         settings_list: host.shared("plugins.settings", vlist(Vec::new())),
         store_updates: host.shared("plugins.store_updates", Value::Nil),
+        template_updates: host.shared("templates.store_updates", Value::Nil),
         settings_own: RefCell::default(),
         dialogs: cx.dialogs.clone(),
         costs: RefCell::default(),
@@ -2039,8 +2043,10 @@ impl Bridge {
                 if let Some(found) = found {
                     fields.push(("update", json_value(&found)));
                 }
-                if of_store && row.is_some_and(|row| row["edited"] == true) {
-                    fields.push(("edited", Value::Bool(true)));
+                for mark in ["edited", "prerelease"] {
+                    if of_store && row.is_some_and(|row| row[mark] == true) {
+                        fields.push((mark, Value::Bool(true)));
+                    }
                 }
                 fields.push(("imported", json_value(&imported)));
             }
@@ -2089,6 +2095,7 @@ impl Bridge {
                     b.look();
                 }
                 if *b.templates_said.borrow() != said {
+                    b.template_updates.set(json_value(&store_rows::choices(&said)));
                     *b.templates_said.borrow_mut() = said;
                     b.publish_templates();
                 }
@@ -3937,8 +3944,9 @@ impl Bridge {
                         (None, Some(url), None) => json!({ "url": url }),
                         (None, None, Some(store)) => {
                             let mut params = json!({ "store": store });
-                            if let Some(version) = given("version").filter(|v| catalog::version_ok(v)) {
-                                params["version"] = json!(version);
+                            // (One that isn't a version: none of it, never another.)
+                            if let Some(version) = given("version") {
+                                params["version"] = json!(Some(version).filter(|v| catalog::version_ok(v)).ok_or("not_found")?);
                             }
                             params
                         }

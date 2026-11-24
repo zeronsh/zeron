@@ -53,16 +53,40 @@ test("what a template is stands once over the list, and a card says who made it 
 	local app = open()
 	expect(app:count("#store-fact")).to_be(1)
 	expect(app:tree("#store-fact")).to_contain("A template runs as Zeron itself")
+	-- (Under the tabs, over what's featured.)
+	expect(box(app:tree("#store-fact")).y < box(app:tree("#store-featured")).y).to_be(true)
 	local tree = app:tree("#store-cards")
-	expect(tree).to_contain("Midnight")
 	expect(tree).to_contain("@ada")
 	expect(tree).to_contain("Verified")
+	expect(tree).to_contain("Not verified yet")
 	expect(tree).to_contain("{count} [b](https://x)")
 	expect(app:tree("#store-list")).to_contain("34 templates")
 	-- None of a plugin's: no categories, no plugins' words.
 	expect(app:has("#store-category")).to_be(false)
 	expect(app:tree()).to_contain("Search templates")
 	expect(app:tree()).never.to_contain("plugin")
+end)
+
+test("what's featured stands over a list of more than a page, and is nowhere in it", function()
+	local app = open()
+	local featured = app:tree("#store-featured")
+	for _, name in { "Midnight", "Ledger", "Airy" } do
+		expect(featured).to_contain(`"{name}"`)
+		expect(app:tree("#store-cards")).never.to_contain(`"{name}"`)
+	end
+	-- Searched, they're found in the list like any.
+	app:type('role:textbox "Search templates"', "midnight")
+	app:wait("#never-there", { timeout_ms = 700 })
+	app:frames(10)
+	expect(app:has("#store-featured")).to_be(false)
+	expect(app:tree("#store-cards")).to_contain("Midnight")
+	-- A store of one page: no shelf, all of it in the list.
+	app = open("template_stub.few")
+	app:wait("#store-cards", { timeout_ms = 3000 })
+	app:frames(20)
+	expect(app:has("#store-featured")).to_be(false)
+	expect(app:tree("#store-cards")).to_contain("Midnight")
+	expect(#cards(app)).to_be(8)
 end)
 
 test("the cards are one size, in rows across the column, at every width", function()
@@ -86,10 +110,10 @@ end)
 
 test("one installed from the store says so, whatever its folder's name", function()
 	local app = open()
-	expect(app:tree("#store-cards")).never.to_contain("Installed")
+	expect(app:tree("#store-featured")).never.to_contain("Installed")
 	app:command("templates.from_store")
 	app:frames(20)
-	expect(app:tree("#store-cards")).to_contain("Installed")
+	expect(app:tree("#store-featured")).to_contain("Installed")
 end)
 
 test("a search and Verified only ask again, and more come as the end shows", function()
@@ -98,7 +122,7 @@ test("a search and Verified only ask again, and more come as the end shows", fun
 	app:wait("#never-there", { timeout_ms = 400 })
 	app:frames(10)
 	expect(calls(app)).to_contain("cursor=30")
-	expect(#cards(app)).to_be(34)
+	expect(#cards(app)).to_be(31)
 	app = open()
 	app:click('#store-verified-only >> role:checkbox "Verified only"')
 	app:wait("#never-there", { timeout_ms = 400 })
@@ -137,7 +161,7 @@ end
 
 test("a card opens its template's page, and Back is the tabs again", function()
 	local app = open()
-	app:click('#store-cards >> role:button "Midnight"')
+	app:click('#store-featured >> role:button "Midnight"')
 	app:wait("#store-header", { timeout_ms = 3000 })
 	app:wait("#never-there", { timeout_ms = 300 })
 	expect(calls(app)).to_contain("detail:midnight")
@@ -148,8 +172,7 @@ end)
 test("a template's page says what it is beside Install, and asks for nothing", function()
 	local app = page("midnight")
 	local tree = app:tree()
-	expect(app:tree("#store-runs-as")).to_contain("Runs as Zeron itself")
-	expect(app:tree("#store-runs-as")).to_contain("It can do anything Zeron can.")
+	expect(app:tree("#store-runs-as")).to_contain("Runs as Zeron itself. It can do anything Zeron can.")
 	expect(tree).to_contain("Midnight")
 	expect(tree).to_contain("Verified")
 	expect(app:has("#store-asks")).to_be(false)
@@ -158,6 +181,59 @@ test("a template's page says what it is beside Install, and asks for nothing", f
 	expect(tree).to_contain("1.1.0")
 	expect(tree).to_contain("Report this template")
 	expect(string.lower(tree)).never.to_contain("plugin")
+end)
+
+test("its preview comes first, the content's width, and the rest under it three across, two in a narrow pane", function()
+	for w, across in { [1000] = 3, [420] = 2 } do
+		local app = page("midnight")
+		app:resize(w, 900)
+		app:frames(20)
+		expect(app:has("#store-tile")).to_be(false)
+		local shots = box(app:tree("#store-shots"))
+		local lead = box(app:tree('#store-shots >> role:button "Open preview.png"'))
+		expect(math.abs(lead.w - shots.w) < 1).to_be(true)
+		expect(math.abs(lead.w / lead.h - 1.6) < 0.02).to_be(true)
+		local thumbs = {}
+		for line in app:tree("#store-thumbs"):gmatch("[^\n]+") do
+			if line:match("^%s*@%d+ button ") then
+				table.insert(thumbs, box(line))
+			end
+		end
+		expect(#thumbs).to_be(4)
+		local first_row = 0
+		for _, t in thumbs do
+			expect(t.y > lead.y + lead.h).to_be(true)
+			if math.abs(t.y - thumbs[1].y) < 1 then
+				first_row += 1
+			end
+		end
+		expect(first_row).to_be(across)
+	end
+end)
+
+test("a version's Install is on its first line", function()
+	local app = page("midnight")
+	local versions = app:tree('role:group "Versions"')
+	local number, install = versions:match('text "1%.1%.0" ([^\n]+)'), nil
+	for line in versions:gmatch("[^\n]+") do
+		if line:match('button "Install"') then
+			install = line
+		end
+	end
+	expect(math.abs(box(number).y - box(install).y) <= 2).to_be(true)
+end)
+
+test("which updates it takes and its pre-releases are its own choice, as the engine says", function()
+	local app = page("midnight", "templates.from_store")
+	app:command("templates.store_choices")
+	app:frames(20)
+	expect(app:tree("#store-updates")).to_contain("Verified versions only")
+	app:scroll("#fixture-scroll", 700)
+	app:frames(10)
+	app:click('role:switch "Try pre-releases"')
+	app:wait("#never-there", { timeout_ms = 200 })
+	expect(calls(app)).to_contain("prereleases:midnight:false")
+	expect(app:state("calls")).to_contain("check")
 end)
 
 test("one whose newest version isn't verified says so and offers the one that is", function()

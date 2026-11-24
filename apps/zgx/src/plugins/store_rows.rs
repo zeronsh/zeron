@@ -44,6 +44,21 @@ pub fn row<'a>(said: &'a Json, id: &str, imported: &Json) -> Option<&'a Json> {
     said["templates"].as_array()?.iter().find(|row| row["id"] == id && row["imported"]["hash"] == hash)
 }
 
+/// Which updates the store's templates take on this device, as the plugins'
+/// are (`plugins.store_updates`): the device's choice, and each one's own by
+/// its id in the store. Null before the engine says.
+pub fn choices(said: &Json) -> Json {
+    let taken = |v: &Json| v.as_str().filter(|v| matches!(*v, "newest" | "verified")).map(str::to_owned);
+    let Some(device) = taken(&said["prefs"]["device"]) else { return Json::Null };
+    let own: serde_json::Map<String, Json> = said["templates"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| Some((row["imported"]["source"]["id"].as_str()?.to_owned(), json!(taken(&row["prefer"])?))))
+        .collect();
+    json!({ "device": device, "plugins": own })
+}
+
 /// What the engine says of package `name` waiting, beyond what's on the disk.
 pub fn waiting(said: &Json, pending: &mut Json) {
     let name = pending["pending"].clone();
@@ -79,6 +94,17 @@ mod tests {
         assert!(row(&said, "midnight-2", &json!({})).is_none());
         assert!(row(&said, "gone", &imported).is_none());
         assert!(row(&Json::Null, "midnight-2", &imported).is_none());
+    }
+
+    #[test]
+    fn its_updates_are_the_device_s_choice_or_its_own() {
+        assert_eq!(choices(&json!({ "templates": [] })), Json::Null);
+        let said = json!({ "prefs": { "device": "newest" }, "templates": [
+            { "id": "midnight-2", "prefer": "verified", "imported": { "source": { "kind": "store", "id": "midnight" } } },
+            { "id": "dusk", "prefer": "all", "imported": { "source": { "kind": "store", "id": "dusk" } } },
+            { "id": "mine" },
+        ] });
+        assert_eq!(choices(&said), json!({ "device": "newest", "plugins": { "midnight": "verified" } }));
     }
 
     #[test]

@@ -912,7 +912,8 @@ function C.make(kind: kinds.Kind, browse: any)
 						body = why_not,
 					},
 					other = ds.Callout {
-						tone = "warning",
+						-- (In a plugin's way; a template installs beside it.)
+						tone = if template then "info" else "warning",
 						title = say("plugins.store.other_title"),
 						body = say("plugins.store.other_body"),
 						action = {
@@ -1014,21 +1015,15 @@ function C.make(kind: kinds.Kind, browse: any)
 
 		-- What installing one is (a template): said here, beside Install.
 		local function runs_as(): Node
-			return ui.row {
+			return ui.text {
 				id = "store-runs-as",
+				ui.t("templates.store.runs_as_zeron_said"),
 				w_full = true,
 				px = ds.Settings.inset(),
-				gap = "$space.2",
-				items = "center",
-				flex_wrap = true,
-				ds.Badge { ui.t("templates.store.runs_as_zeron"), tone = "warning", size = "sm", icon = "danger-triangle" },
-				ui.text {
-					ui.t("templates.store.runs_as_zeron_body"),
-					wrap = true,
-					text_size = "$font.size.sm",
-					line_height = "$font.line.sm",
-					color = "$text.secondary",
-				},
+				wrap = true,
+				text_size = "$font.size.sm",
+				line_height = "$font.line.sm",
+				color = "$text.secondary",
 			}
 		end
 
@@ -1079,7 +1074,8 @@ function C.make(kind: kinds.Kind, browse: any)
 						head_w:set(size.w)
 					end
 				end,
-				ui.div {
+				-- (A template's picture is its face: no tile.)
+				if kind.cards then nil else ui.div {
 					id = "store-tile",
 					shrink = 0,
 					browse.Tile {
@@ -1291,6 +1287,12 @@ function C.make(kind: kinds.Kind, browse: any)
 				updates:set(now)
 			end
 		end)
+		-- (A choice kept: what a template's list says of it, asked again.)
+		local function chosen_kept(_: any)
+			if template then
+				state.check_updates()
+			end
+		end
 		local function update_options(): { any }
 			local out: { any } = {}
 			local prefs = local_prefs()
@@ -1329,7 +1331,7 @@ function C.make(kind: kinds.Kind, browse: any)
 						options = update_options,
 						on_change = function(v: any)
 							local was = chosen_updates()
-							store.set_updates(id, if v == "device" then nil else v, here.device()):after(function(_: any) end, function(err: any)
+							store.set_updates(id, if v == "device" then nil else v, here.device()):after(chosen_kept, function(err: any)
 								updates:set(was)
 								here.failed(say("plugins.store.couldnt_updates", { name = d().name or id }))(err)
 							end)
@@ -1337,20 +1339,20 @@ function C.make(kind: kinds.Kind, browse: any)
 					},
 				},
 			},
-			(if template then nil else ds.Settings.Row {
+			ds.Settings.Row {
 					label = ui.t("plugins.store.prereleases"),
-					description = ui.t("plugins.store.prereleases_body"),
+					description = say("plugins.store.prereleases_body"),
 					control = ds.Switch {
 						value = pre_on,
 						label = ui.t("plugins.store.prereleases"),
 						on_change = function(v: boolean)
-							store.prereleases(id, v, here.device()):after(function(_: any) end, function(err: any)
+							store.prereleases(id, v, here.device()):after(chosen_kept, function(err: any)
 								pre_on:set(not v)
-								here.failed(ui.t("plugins.store.couldnt_prereleases", { name = d().name or id }))(err)
+								here.failed(say("plugins.store.couldnt_prereleases", { name = d().name or id }))(err)
 							end)
 						end,
 					},
-				}) :: any,
+				},
 		})
 
 		-- The facts: who, which version, how many, where from, what it needs.
@@ -1576,6 +1578,40 @@ function C.make(kind: kinds.Kind, browse: any)
 					}
 				end, { w_full = true, h_full = true })
 			end
+			-- A template's: its preview first, the content's width, and the rest
+			-- under it three across (two in a narrow pane).
+			if kind.cards then
+				local rest: { string } = table.clone(list)
+				local lead = table.remove(rest, 1) :: string
+				return ui.column {
+					id = "store-shots",
+					w_full = true,
+					gap = "$space.3",
+					ui.show(function(): boolean
+						return store.picture_src(id, version, lead) ~= false
+					end, ui.div { class = "store-shot", w_full = true, aspect = 1.6, picture_in(lead) }),
+					if #rest == 0
+						then nil
+						else ds.Settings.Cards {
+							id = "store-thumbs",
+							min_w = 160,
+							least = 2,
+							most = 3,
+							build = function(w: () -> number): Node
+								-- (Its height in points: an aspect's isn't one a wrapped
+								-- row's picture fills.)
+								local function h(): number
+									return math.floor(w() / 1.6)
+								end
+								local thumbs: { Node } = {}
+								for _, path in rest do
+									table.insert(thumbs, ui.div { class = "store-shot", w = w, h = h, shrink = 0, picture_in(path) })
+								end
+								return ui.row { w_full = true, flex_wrap = true, items = "start", gap = "$space.3", table.unpack(thumbs) }
+							end,
+						},
+				}
+			end
 			-- (The shelf's rule, as Browse's featured: one fills the column, two
 			-- share it, three or more show two whole and the third begun.)
 			local one = #list == 1
@@ -1724,10 +1760,10 @@ function C.make(kind: kinds.Kind, browse: any)
 					end
 					return if #parts > 0 then table.concat(parts, " · ") else nil
 				end,
-				-- At its line's end: Install on every row that can be installed,
-				-- verified or not (the newest's too, beside the head's button);
-				-- "Installed" there on the one this device has.
-				detail_action = ui.switch(function(): string
+				-- At its first line's end: Install on every row that can be
+				-- installed, verified or not (the newest's too, beside the head's
+				-- button); "Installed" there on the one this device has.
+				name_action = ui.switch(function(): string
 					return version_action(now:get())
 				end, {
 					none = ui.div {},
@@ -1753,9 +1789,6 @@ function C.make(kind: kinds.Kind, browse: any)
 						color = "$text.secondary",
 					},
 				}),
-				detail_action_shows = function(): boolean
-					return version_action(now:get()) ~= "none"
-				end,
 				stacked = true,
 				control = ui.show(function(): boolean
 					return notes() ~= ""
@@ -2150,7 +2183,7 @@ function C.make(kind: kinds.Kind, browse: any)
 								px = ds.Settings.inset(),
 								gap = "$space.4",
 								items = "start",
-								ds.Skeleton { w = 48, h = 48, rounded = "$radius.md", still = still },
+								if kind.cards then nil else ds.Skeleton { w = 48, h = 48, rounded = "$radius.md", still = still },
 								ui.column { grow = 1, gap = "$space.2", ds.Skeleton { w = 180, h = 20, still = still }, ds.Skeleton { w = 120, still = still }, ds.Skeleton { w = 160, still = still } },
 								ds.Skeleton { w = 64, h = 28, rounded = "$radius.lg", still = still },
 							},

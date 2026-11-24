@@ -220,13 +220,43 @@ for _, how in { "taken_down", "taken_down_plain", "unchecked" } do
 		end,
 	}
 end
+-- A store template's record as the page has it: what the engine keeps of it
+-- (`.imported.json`) with its row's word on it (src/plugins/store_rows.rs).
+local function from_store(id: string, version: string): any
+	return {
+		key = "AbCdEfGhIjKlMnOpQrStUv",
+		at = 1795132800,
+		hash = `{id}-{version}`,
+		version = version,
+		ignored = {},
+		author = { kind = "verified", username = "ada" },
+		source = { kind = "store", id = id, publisher = "ada", verified = true, verified_at = 1795032800000 },
+	}
+end
+ui.command {
+	id = "templates.store_update",
+	title = "A newer Midnight, not verified yet, is found in the store",
+	run = function()
+		(find("midnight-2") :: any).update = { version = "1.3.0", added = {}, removed = {}, verified = false, installed_verified = true, verified_alternative = nil, notes = "Warmer light." }
+		publish()
+	end,
+}
+ui.command {
+	id = "templates.store_choices",
+	title = "The engine says which updates the store's templates take",
+	run = function()
+		(find("midnight-2") :: any).prerelease = true
+		ui.shared("templates.store_updates", nil :: any):set({ device = "newest", plugins = { midnight = "verified" } })
+		publish()
+	end,
+}
 ui.command {
 	id = "templates.from_store",
 	title = "Midnight arrives from the store, in a folder of another name",
 	run = function()
 		table.insert(model, {
 			id = "midnight-2", name = "Midnight", version = "1.2.0", builtin = false, active = false, status = "ok",
-			imported = { key = nil, author = { kind = "verified", username = "ada" }, source = { kind = "store", id = "midnight", publisher = "ada", verified = true } },
+			imported = from_store("midnight", "1.2.0"),
 		} :: any)
 		publish()
 	end,
@@ -244,8 +274,8 @@ ui.command {
 	title = "Midnight, from the store, is taken down",
 	run = function()
 		table.insert(model, {
-			id = "midnight-2", name = "Midnight", version = "1.2.0", builtin = false, active = false, status = "blocked", blocked = { reason = "It reads your keys." },
-			imported = { key = nil, author = { kind = "verified", username = "ada" }, source = { kind = "store", id = "midnight", publisher = "ada", verified = true } },
+			id = "midnight-2", name = "Midnight", version = "1.2.0", builtin = false, active = false, status = "blocked", blocked = { id = "midnight", version = "1.2.0", reason = "It reads your keys." },
+			imported = from_store("midnight", "1.2.0"),
 		} :: any)
 		publish()
 	end,

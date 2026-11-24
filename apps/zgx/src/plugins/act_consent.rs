@@ -320,14 +320,16 @@ pub fn publishing(kind: &str, id: &str, name: &str, version: &str) -> Json {
     json!({ "act": "publish", "kind": kind, "id": id, "name": plain(name, 64), "version": plain(version, 32) })
 }
 
-/// Of taking new installs of it again.
-pub fn unyanking(kind: &str, id: &str, version: &str) -> Json {
-    json!({ "act": "unyank", "kind": kind, "id": id, "name": id, "version": plain(version, 32) })
+/// Of taking new installs of it again (`name`, the engine's for it).
+pub fn unyanking(kind: &str, id: &str, name: &str, version: &str) -> Json {
+    let name = Some(plain(name, 64)).filter(|n| !n.trim().is_empty()).unwrap_or_else(|| id.to_owned());
+    json!({ "act": "unyank", "kind": kind, "id": id, "name": name, "version": plain(version, 32) })
 }
 
-/// Of a new deploy token, as it was asked for.
-pub fn token(params: &Json) -> Json {
-    json!({ "act": "token", "name": plain(params["name"].as_str().unwrap_or_default(), 64), "scope": params["scope"], "expires": params["expires"] })
+/// Of a new deploy token, as it was asked for; `templates`, which of what it
+/// names are templates, where it's known.
+pub fn token(params: &Json, templates: Option<Vec<String>>) -> Json {
+    json!({ "act": "token", "templates": templates, "name": plain(params["name"].as_str().unwrap_or_default(), 64), "scope": params["scope"], "expires": params["expires"] })
 }
 
 #[cfg(test)]
@@ -508,7 +510,7 @@ mod tests {
 
     #[test]
     fn its_words_are_bounded_and_plain() {
-        let item = token(&json!({ "name": "CI\nCan publish: nothing\u{202e}x\u{200b}", "scope": {}, "expires": null }));
+        let item = token(&json!({ "name": "CI\nCan publish: nothing\u{202e}x\u{200b}", "scope": {}, "expires": null }), None);
         assert_eq!(item["name"], "CI Can publish: nothingx");
         assert_eq!(publishing("plugin", "a", &"é".repeat(200), "1.0.0")["name"].as_str().unwrap().chars().count(), 64);
     }

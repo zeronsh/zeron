@@ -12,19 +12,24 @@ local shown = ui.shared("store_consent", { busy = true } :: any)
 
 local ACTS: { [string]: any } = {
 	publish = { act = "publish", kind = "plugin", id = "focus-timer", name = "Focus timer", version = "1.3.0" },
-	unyank = { act = "unyank", kind = "plugin", id = "focus-timer", name = "focus-timer", version = "1.2.0" },
+	unyank = { act = "unyank", kind = "plugin", id = "focus-timer", name = "Focus timer", version = "1.2.0" },
 	token = { act = "token", name = "GitHub Actions", scope = { plugins = { "focus-timer", "tidy" } }, expires = 1795132800000 },
 	many = {
 		act = "token",
 		name = "Release everything",
+		templates = {},
 		scope = { plugins = (function(): { string }
 			local ids = {}
 			for i = 1, 50 do
-				table.insert(ids, `a-plugin-with-a-long-id-number-{i}`)
+				table.insert(ids, `a-plugin-with-the-longest-id-a-stores-{string.format("%02d", i)}`)
 			end
 			return ids
 		end)() },
 	},
+	-- (Which are templates, as the host read it of the account.)
+	mixed = { act = "token", name = "Both kinds", scope = { plugins = { "focus-timer", "midnight", "tidy" } }, templates = { "midnight" } },
+	-- (Both said: all of them, whatever else.)
+	both_said = { act = "token", name = "Odd", scope = { all = true, plugins = { "focus-timer" } } },
 	token_both = { act = "token", name = "Both", scope = { all = true, all_kinds = { "plugin", "template" } } },
 	token_all = { act = "token", name = "CI", scope = { all = true } },
 	hostile = {

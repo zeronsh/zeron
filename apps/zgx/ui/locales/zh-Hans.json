@@ -4323,7 +4323,8 @@
           "templates": "模板",
           "all_both_now": "你的所有插件和模板：目前 {n} 个，以及以后发布的"
         },
-        "not_used_made": "尚未使用 · 创建于 {date}"
+        "not_used_made": "尚未使用 · 创建于 {date}",
+        "one": "部署令牌"
       },
       "unblock_title": "重新打开{name}？",
       "unblock_body": "Zeron 已将这个版本从商店下架。它会按你之前的允许在这里再次运行。",
@@ -4536,7 +4537,8 @@
       "from_store": "来自商店",
       "from_store_detail": "由 @{username} 发布。",
       "from_file": "来自文件，而非商店",
-      "from_link": "来自链接，而非商店"
+      "from_link": "来自链接，而非商店",
+      "store_changed": "商店对它的说明刚刚有变化。请再看一遍。"
     },
     "store": {
       "search": "搜索模板",
@@ -4571,7 +4573,8 @@
       "runs_as_zeron": "以 Zeron 自身的身份运行",
       "runs_as_zeron_body": "它可以做 Zeron 能做的一切。",
       "update_replaces_edits": "你在这台设备上修改过这个模板。更新会替换你的修改。",
-      "changed_here": "在这台设备上修改过"
+      "changed_here": "在这台设备上修改过",
+      "runs_as_zeron_said": "以 Zeron 自身的身份运行。它可以做 Zeron 能做的一切。"
     }
   },
   "themes": {

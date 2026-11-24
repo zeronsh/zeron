@@ -345,7 +345,8 @@ fn install_kind(host: &ScriptHost, engine: &Engine, asker: &Asker, kind: Kind) {
             // (Stopping installs takes nothing from anyone; taking them
             // again puts a version back in front of everyone.)
             if action == "unyank" && preview::another_s_ran() {
-                let item = act_consent::unyanking(kind.id, &id, &version);
+                let name = mine(&e, kind).await.and_then(|all| all.into_iter().find(|(own, _)| *own == id)).map_or_else(|| id.clone(), |(_, name)| name);
+                let item = act_consent::unyanking(kind.id, &id, &name, &version);
                 let reply = a(act(item, move || async move { e("StoreVersionAction", params, None).await })).await?;
                 answered(&reply)?;
                 return Ok(json_value(&reply));
@@ -444,7 +445,13 @@ fn install_account(host: &ScriptHost, engine: Engine, asker: Asker) {
                 params["expires"] = json!(*at as i64);
             }
             if preview::another_s_ran() {
-                let item = act_consent::token(&params);
+                // (Which of them are templates: read of the account, never said
+                // by the page.)
+                let templates = match params["scope"]["plugins"].as_array() {
+                    Some(ids) => mine(&e, TEMPLATES).await.map(|all| ids.iter().filter_map(Json::as_str).filter(|id| all.iter().any(|(own, _)| own == id)).map(str::to_owned).collect()),
+                    None => None,
+                };
+                let item = act_consent::token(&params, templates);
                 let stop = {
                     let e = e.clone();
                     move || {
@@ -514,6 +521,22 @@ fn install_account(host: &ScriptHost, engine: Engine, asker: Asker) {
 /// `run` as an act asked in its window, with nothing to stop half-way.
 fn act<F: Future<Output = Result<Json, String>> + 'static>(item: Json, run: impl FnOnce() -> F + 'static) -> Act {
     Act { item, run: Box::new(move || Box::pin(run())), stop: Box::new(|| {}), undo: None }
+}
+
+/// The account's own of `kind` in the store: each one's id and name, as the
+/// engine says. None if it doesn't.
+async fn mine(e: &Engine, kind: Kind) -> Option<Vec<(String, String)>> {
+    let reply = e("StoreMyPlugins", kind.with(json!({})), None).await.ok()?;
+    let all = reply[if kind.id == TEMPLATES.id { "templates" } else { "plugins" }].as_array()?;
+    Some(
+        all.iter()
+            .filter_map(|p| {
+                let id = p["id"].as_str().and_then(store_id)?;
+                let name = p["name"].as_str().filter(|n| !n.trim().is_empty()).unwrap_or(&id).to_owned();
+                Some((id, name))
+            })
+            .collect(),
+    )
 }
 
 /// The token `made` records, revoked: nobody saw it, or will.

@@ -4,12 +4,37 @@
 --   template_stub.hold / release   answers wait until released
 --   template_stub.offline          every call fails as offline
 --   template_stub.empty            the store has none
+--   template_stub.few              the store has eight, a page
 
 local store: any = require("@app/screens/templates/store")
 
 local calls = ui.state("template_stub_calls", {} :: { string })
-local holding, offline, empty = false, false, false
+local holding, offline, empty, few = false, false, false, false
 local held: { () -> () } = {}
+
+-- Answers a beat later, from one clock of this script's (store_stub's): a
+-- timer made where it's asked goes with what asked, drawn again meanwhile.
+local due: { () -> () } = {}
+local ticking = false
+local function tick()
+	local now = due
+	due = {}
+	for _, f in now do
+		f()
+	end
+	if #due > 0 then
+		ui.after(16, tick)
+	else
+		ticking = false
+	end
+end
+local function soon(f: () -> ())
+	table.insert(due, f)
+	if not ticking then
+		ticking = true
+		ui.after(16, tick)
+	end
+end
 
 local function answer(what: string, work: () -> any): any
 	calls:push(what)
@@ -32,7 +57,7 @@ local function answer(what: string, work: () -> any): any
 	if holding then
 		table.insert(held, settle)
 	else
-		ui.after(16, settle)
+		soon(settle)
 	end
 	function p.after(_self: any, ok: ((any) -> ())?, bad: ((any) -> ())?)
 		local function tell()
@@ -93,7 +118,7 @@ end
 store.search = function(q: any): any
 	return answer(`search:q={q.q or ""},sort={q.sort or ""},cursor={q.cursor or ""}{if q.featured then ",featured" else ""}{if q.verified then ",verified" else ""}`, function(): any
 		local found: { any } = {}
-		for _, c in (if empty then {} else catalog) :: { any } do
+		for _, c in (if empty then {} elseif few then table.move(catalog, 1, 8, 1, {}) else catalog) :: { any } do
 			if (not q.featured or c.featured) and (not q.verified or c.verified) and (q.q == nil or q.q == "" or string.find(string.lower(c.name), string.lower(q.q), 1, true)) then
 				table.insert(found, c)
 			end
@@ -134,7 +159,7 @@ store.detail = function(id: string, _for: string?): any
 	return answer(`detail:{id}`, function(): any
 		local d = table.clone(entry(id))
 		d.readme = `# {d.name}\n\nA whole interface, in one colour.`
-		d.screenshots = { "screenshots/one.png" }
+		d.screenshots = { "screenshots/one.png", "screenshots/two.png", "screenshots/three.png", "screenshots/four.png" }
 		d.versions = versions_of(id)
 		d.verified_version = if d.verified then "1.2.0" else "1.1.0"
 		d.compatible = id ~= "airy"
@@ -163,6 +188,11 @@ store.report = function(id: string, reason: string, _text: string): any
 		return {}
 	end)
 end
+store.prereleases = function(id: string, on: boolean): any
+	return answer(`prereleases:{id}:{on}`, function(): any
+		return {}
+	end)
+end
 store.set_updates = function(id: string?, prefer: string?): any
 	return answer(`updates:{id or ""}:{prefer or ""}`, function(): any
 		return {}
@@ -187,6 +217,9 @@ for name, run in
 		end,
 		empty = function()
 			empty = true
+		end,
+		few = function()
+			few = true
 		end,
 	} :: { [string]: () -> () }
 do

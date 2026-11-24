@@ -39,7 +39,7 @@ local consent = ui.shared("template_consent", { busy = true } :: any)
 -- Allow is armed a moment after a sheet shows (the host holds one sooner:
 -- src/plugins/template_consent.rs), so a click or an Enter meant for the main
 -- window, as this one comes up under it, allows nothing.
-M.ARM_MS = 800
+M.ARM_MS = require("@screens/plugins/arm").MS
 local armed = ui.state("template_consent_armed", false)
 
 local function item(): any
@@ -134,6 +134,19 @@ local function body(key: string): Node
 			ui.invoke("templates.decide", { pending = it.pending, allow = allow, hash = it.hash })
 		end
 	end
+	local changes: { Node } = {}
+	local function change(id: string, words_of: Message)
+		table.insert(changes, ui.div { id = id, w_full = true, fact("danger-triangle", words_of, nil, "$zeron.tone.warning.ink") })
+	end
+	if it.store_changed == true and not keep then
+		change("template-consent-changed", ui.t("templates.consent.store_changed"))
+	end
+	if it.new_owner == true and not keep then
+		change("template-consent-owner", ui.t("templates.consent.new_owner", { username = if store and type(store.publisher) == "string" then store.publisher else "" }))
+	end
+	if it.replaces_edits == true and not keep then
+		change("template-consent-edits", ui.t("templates.store.update_replaces_edits"))
+	end
 	return ui.column {
 		w_full = true,
 		h_full = true,
@@ -174,9 +187,12 @@ local function body(key: string): Node
 							color = "$text.primary",
 							wrap = true,
 						},
+						-- (Each whole: no name long enough to push the store's word on
+						-- it out of the window.)
 						ui.row {
 							gap = "$space.2",
 							items = "center",
+							flex_wrap = true,
 							signer(it),
 							-- (The store's word on this version, as of now.)
 							if store and store.verified == true
@@ -187,6 +203,10 @@ local function body(key: string): Node
 						},
 					},
 				},
+				-- What changed as this showed, whose it is now, and what of yours
+				-- goes: the first facts, under the head, so no name is long
+				-- enough to push them out of view.
+				if #changes > 0 then ui.column { id = "template-consent-changes", w_full = true, gap = "$space.3", table.unpack(changes) } else nil,
 				if keep
 					then ds.Callout {
 						tone = "danger",
@@ -202,8 +222,9 @@ local function body(key: string): Node
 						}),
 						body = ui.t("templates.consent.trust_body"),
 					},
-				-- Not verified: and the version that is, to take instead.
-				if store and store.verified ~= true and not keep
+				-- Not verified: and the version that is, to take instead. (An
+				-- update with none to take says it in its badge alone.)
+				if store and store.verified ~= true and not keep and (alternative or not update)
 					then ui.div {
 						id = "template-consent-unverified",
 						w_full = true,
@@ -223,12 +244,6 @@ local function body(key: string): Node
 						},
 					}
 					else nil,
-				if it.new_owner == true and not keep
-					then ds.Callout { tone = "warning", title = ui.t("templates.consent.new_owner", { username = if store and type(store.publisher) == "string" then store.publisher else "" }) }
-					else nil,
-				if it.replaces_edits == true and not keep
-					then ui.div { id = "template-consent-edits", w_full = true, ds.Callout { tone = "warning", title = ui.t("templates.store.update_replaces_edits") } }
-					else nil,
 				if unknown and not keep and not store
 					then ds.Callout {
 						tone = "warning",
@@ -247,9 +262,6 @@ local function body(key: string): Node
 					id = "template-consent-facts",
 					w_full = true,
 					gap = "$space.3",
-					if store and not keep
-						then fact("danger-triangle", ui.t("templates.store.runs_as_zeron"), ui.t("templates.store.runs_as_zeron_body"), "$zeron.tone.warning.ink")
-						else nil,
 					if keep
 						then fact("file-code", ui.t("templates.consent.keep_files", { n = files }), ui.t("templates.consent.keep_files_detail"))
 						elseif type(it.key) == "string" and it.key ~= "" then fact(
@@ -260,7 +272,8 @@ local function body(key: string): Node
 						)
 						-- (No signature: a deploy token published it, and it's exactly
 						-- what the store's record says, or the engine refused it.)
-						else fact("shield-check", ui.t("templates.consent.store_record"), ui.t("templates.consent.store_record_detail")),
+						elseif store then fact("shield-check", ui.t("templates.consent.store_record"), ui.t("templates.consent.store_record_detail"))
+						else nil,
 					-- Where it came from.
 					if keep
 						then nil
@@ -336,6 +349,12 @@ local function body(key: string): Node
 	}
 end
 
+-- What the store says of it (a word of it changed is a sheet to read again).
+local function said_by_store(it: any): string
+	local store = store_of(it)
+	return if store then `{it.store_changed == true}:{store.verified == true}:{store.publisher or ""}` else ""
+end
+
 -- Which sheet shows: one package's, as what, and by whom.
 local function shown_key(): string
 	local s = consent:get()
@@ -344,13 +363,13 @@ local function shown_key(): string
 		return if s.busy then "loading" else "none"
 	end
 	local a = it.author or {}
-	return `{it.keep or it.pending}@{it.hash}:{a.kind or ""}:{a.username or ""}:{a.reason or ""}`
+	return `{it.keep or it.pending}@{it.hash}:{a.kind or ""}:{a.username or ""}:{a.reason or ""}:{said_by_store(it)}`
 end
 
 -- (A sheet's who, looked up as it shows, is the same sheet: armed as it was.)
 local function sheet_key(): string
 	local it = consent:get().item
-	return if it then `{it.keep or it.pending}@{it.hash}` else ""
+	return if it then `{it.keep or it.pending}@{it.hash}:{said_by_store(it)}` else ""
 end
 
 function M.View(): Node

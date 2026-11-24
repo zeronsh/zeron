@@ -18,7 +18,7 @@ local M = {}
 -- Yes is armed a moment after the window shows, and again each time it comes
 -- forward (the host holds one sooner: src/plugins/act_consent.rs `ARMED`), so
 -- a click or an Enter meant for the main window never answers it.
-M.ARM_MS = 800
+M.ARM_MS = require("@screens/plugins/arm").MS
 
 local shown = ui.shared("store_consent", { busy = true } :: any)
 
@@ -42,102 +42,137 @@ local function title(it: any): string | Message
 	return ui.t("plugins.store.act.token.title")
 end
 
--- What a token can publish, every word of it: which of them, each id on its
--- line's own terms, and for all of both kinds what a template can do.
-local function scope_lines(scope: any): { () -> string }
-	if type(scope) ~= "table" or scope.all == true then
-		local both = type(scope) == "table" and type(scope.all_kinds) == "table" and table.find(scope.all_kinds, "template") ~= nil
-		if not both then
-			return {
-				function(): string
-					return ui.t("plugins.store.key.scope.all"):get()
-				end,
-			}
-		end
-		return {
-			function(): string
-				return ui.t("plugins.store.key.scope.all_both"):get()
-			end,
-			function(): string
-				return ui.t("plugins.store.key.scope.all_both_hint"):get()
-			end,
-		}
-	end
-	return {
-		function(): string
-			local ids: { string } = {}
-			for _, id in (if type(scope.plugins) == "table" then scope.plugins else {}) :: { any } do
-				table.insert(ids, plain(id))
-			end
-			return table.concat(ids, ui.t("plugins.words.list_sep"):get())
-		end,
+-- A fact's words, whole: on as many lines as they take, a word longer than
+-- one broken (what's decided here is never cut).
+local function line(words_of: (() -> string) | Message, quiet: boolean?): Node
+	return ui.text {
+		words_of :: any,
+		w_full = true,
+		wrap = true,
+		text_size = if quiet then "$font.size.sm" else "$font.size.md",
+		line_height = if quiet then "$font.line.sm" else "$font.line.md",
+		color = if quiet then "$text.secondary" else "$text.primary",
 	}
 end
 
--- (How many, first, where there's more than one.)
-local function chosen_lines(scope: any): { () -> string }
-	local lines = scope_lines(scope)
-	local n = if type(scope) == "table" and type(scope.plugins) == "table" then #scope.plugins else 0
-	if type(scope) == "table" and scope.all ~= true and n > 1 then
-		table.insert(lines, 1, function(): string
-			return ui.t("plugins.store.act.chosen", { n = n }):get()
-		end)
-	end
-	return lines
+-- One id a line, whole: the code face at a size the longest id there is (40)
+-- fits a line in, so none is broken at its hyphens. (It may still wrap: a
+-- line that can't is drawn without its end.)
+local function id_line(id: string): Node
+	return ui.text {
+		id,
+		class = "store-consent-one-id",
+		literal = true,
+		w_full = true,
+		wrap = true,
+		font = "$font.mono",
+		text_size = "$font.size.xs",
+		line_height = "$font.line.sm",
+		color = "$text.primary",
+	}
 end
 
--- A fact's words, whole: on as many lines as they take, a word longer than
--- one broken (what's decided here is never cut).
-local function whole(lines: { () -> string }): Node
-	local texts: { Node } = {}
-	for i, words_of in lines do
-		table.insert(texts, ui.text {
-			words_of,
-			w_full = true,
-			wrap = true,
-			text_size = if i == 1 then "$font.size.md" else "$font.size.sm",
-			line_height = if i == 1 then "$font.line.md" else "$font.line.sm",
-			color = if i == 1 then "$text.primary" else "$text.secondary",
-		})
+-- What a token can publish, every word of it: all of a kind (and for both
+-- what a template can do), or which, by how many and then each on its line,
+-- templates under their own heading.
+local function scope_of(it: any): Node
+	local scope = if type(it.scope) == "table" then it.scope else {}
+	if scope.all == true or type(scope.plugins) ~= "table" then
+		local both = type(scope.all_kinds) == "table" and table.find(scope.all_kinds, "template") ~= nil
+		return if both
+			then ui.column { grow = 1, basis = 0, min_w = 0, gap = "$zeron.space.hair", line(ui.t("plugins.store.key.scope.all_both")), line(ui.t("plugins.store.key.scope.all_both_hint"), true) }
+			else ui.column { grow = 1, basis = 0, min_w = 0, line(ui.t("plugins.store.key.scope.all")) }
 	end
-	return ui.column { grow = 1, basis = 0, min_w = 0, gap = "$zeron.space.hair", table.unpack(texts) }
+	-- (Which are templates, as the host read it of the account: nil, unknown.)
+	local known = type(it.templates) == "table"
+	local plugins: { string }, templates: { string } = {}, {}
+	for _, id in scope.plugins :: { any } do
+		if type(id) == "string" then
+			table.insert(if known and table.find(it.templates, id) then templates else plugins, id)
+		end
+	end
+	local nodes: { Node } = {}
+	local function group(heading: Message, ids: { string })
+		if #ids == 0 then
+			return
+		end
+		local lines: { Node } = {}
+		for _, id in ids do
+			table.insert(lines, id_line(id))
+		end
+		table.insert(nodes, ui.column { w_full = true, gap = "$space.1", line(heading), ui.column { w_full = true, gap = "$zeron.space.hair", table.unpack(lines) } })
+	end
+	group(if known then ui.t("plugins.store.count", { n = #plugins }) else ui.t("plugins.store.act.chosen", { n = #plugins }), plugins)
+	group(ui.t("templates.store.count", { n = #templates }), templates)
+	return ui.column { grow = 1, basis = 0, min_w = 0, gap = "$space.3", table.unpack(nodes) }
+end
+
+-- A fact: what it is on its value's first line. (Its room: "Can publish", and
+-- the longest id there is beside it.)
+local KEY_W = 80
+local function row(key: Message, value: Node): Node
+	return ui.row {
+		w_full = true,
+		gap = "$space.3",
+		items = "start",
+		ui.text { key, w = KEY_W, shrink = 0, text_size = "$font.size.md", line_height = "$font.line.md", color = "$text.tertiary", wrap = true },
+		value,
+	}
 end
 
 local function facts(it: any): Node
-	local items: { any } = {}
-	local function add(key: string, lines: { () -> string })
-		table.insert(items, { key = ui.t(key), value = whole(lines) })
-	end
-	local function one(said: () -> string): { () -> string }
-		return { said }
+	local rows: { Node } = {}
+	local function one(words_of: (() -> string)): Node
+		return ui.column { grow = 1, basis = 0, min_w = 0, line(words_of) }
 	end
 	if it.act == "token" then
-		add("plugins.store.key.name", one(function(): string
+		table.insert(rows, row(ui.t("plugins.store.key.name"), one(function(): string
 			return plain(it.name)
-		end))
-		add("plugins.store.key.scope.label", chosen_lines(it.scope))
-		add("plugins.store.key.expiry_label", one(function(): string
+		end)))
+		table.insert(rows, row(ui.t("plugins.store.key.scope.label"), scope_of(it)))
+		table.insert(rows, row(ui.t("plugins.store.key.expiry_label"), one(function(): string
 			return if type(it.expires) == "number" then locale.date(it.expires / 1000) else ui.t("plugins.store.key.expiry.never"):get()
-		end))
+		end)))
 	else
-		add("plugins.store.act.id", one(function(): string
+		-- (Its name and version are the title's.)
+		table.insert(rows, row(ui.t("plugins.store.act.id"), one(function(): string
 			return plain(it.id)
-		end))
-		add("plugins.store.act.version", one(function(): string
-			return plain(it.version)
-		end))
+		end)))
 	end
 	return ui.div {
 		w_full = true,
 		shrink = 0,
 		ds.Settings.Group {
-			ui.column { id = "store-consent-facts", w_full = true, px = "$space.4", py = "$space.3", ds.KeyValue { items = items, key_width = 96 } },
+			ui.column { id = "store-consent-facts", w_full = true, px = "$space.4", py = "$space.3", gap = "$space.3", table.unpack(rows) },
 		},
 	}
 end
 
 local function answer(allow: boolean)
 	ui.invoke("store.decide", { allow = allow })
+end
+
+-- The flow's status line: its room kept in every one of a token's steps, so
+-- nothing moves as it comes and goes.
+local function status(waiting: (() -> boolean)?): Node
+	return ui.row {
+		id = "store-consent-status",
+		w_full = true,
+		min_h = ui.theme.get("font.line.sm") :: number?,
+		items = "center",
+		if waiting
+			then ui.show(waiting, ui.text {
+				id = "store-consent-signing-in",
+				ui.t("plugins.store.key.signing_in"),
+				grow = 1,
+				min_w = 0,
+				wrap = true,
+				text_size = "$font.size.sm",
+				line_height = "$font.line.sm",
+				color = "$text.tertiary",
+			})
+			else nil,
+	}
 end
 
 local Asking = ui.component(function(_props: {}): Node
@@ -187,7 +222,10 @@ local Asking = ui.component(function(_props: {}): Node
 					w_full = true,
 					gap = "$space.3",
 					items = "center",
-					ds.Tile { label = plain(it.name), hue = words.hue(plain(it.id or it.name)), size = 40 },
+					-- (A token is no plugin: the key, on the neutral tile.)
+					if act == "token"
+						then ds.Tile { size = 40, inside = ds.Icon { name = "key-minimalistic", size = 18 } }
+						else ds.Tile { label = plain(it.name), hue = words.hue(plain(it.id or it.name)), size = 40 },
 					ui.text {
 						title(it),
 						heading = 1,
@@ -209,20 +247,18 @@ local Asking = ui.component(function(_props: {}): Node
 					color = "$text.secondary",
 				},
 				facts(it),
-				ui.div { id = "store-consent-why", w_full = true, shrink = 0, ds.Callout { tone = "info", title = ui.t("plugins.store.act.why_title"), body = ui.t("plugins.store.act.why_body") } },
+				-- Why it's asked here: said, quietly, after what's asked.
+				ui.column {
+					id = "store-consent-why",
+					w_full = true,
+					shrink = 0,
+					gap = "$zeron.space.hair",
+					ui.text { ui.t("plugins.store.act.why_title"), w_full = true, wrap = true, text_size = "$font.size.sm", line_height = "$font.line.sm", weight = "$font.weight.medium", color = "$text.primary" },
+					ui.text { ui.t("plugins.store.act.why_body"), w_full = true, wrap = true, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.secondary" },
+				},
 			},
 		},
-		ui.show(function(): boolean
-			return busy() and act == "token"
-		end, ui.text {
-			id = "store-consent-signing-in",
-			ui.t("plugins.store.key.signing_in"),
-			w_full = true,
-			wrap = true,
-			text_size = "$font.size.sm",
-			line_height = "$font.line.sm",
-			color = "$text.tertiary",
-		}),
+		if act == "token" then status(busy) else nil,
 		ui.row {
 			w_full = true,
 			gap = "$space.2",
@@ -235,7 +271,10 @@ local Asking = ui.component(function(_props: {}): Node
 				on_click = function()
 					answer(false)
 				end,
-				ui.t("plugins.store.act.not_now"),
+				-- (While it waits on the sign-in: what it does then.)
+				function(): string
+					return if busy() and act == "token" then ui.t("plugins.store.key.stop_waiting"):get() else ui.t("plugins.store.act.not_now"):get()
+				end,
 			},
 			ds.Button {
 				id = "store-consent-allow",
@@ -293,6 +332,7 @@ local function made(): Node
 			copied = copied,
 		},
 		ui.div { grow = 1 },
+		status(nil),
 		ui.row {
 			w_full = true,
 			items = "center",

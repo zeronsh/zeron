@@ -48,6 +48,8 @@ function C.make(kind: kinds.Kind)
 	-- How many plugins what's asked matches, as the store counts them (its
 	-- lists' `total`), from the first page's answer: kept until the next
 	-- answers, as the rows are; none from a store that doesn't say.
+	-- Whether the first page has more after it.
+	local paged = ui.state(kind.keys .. "_paged", false)
 	local total = ui.state(kind.keys .. "_total", nil :: number?)
 	local settled = ui.debounced(query, 250)
 
@@ -132,6 +134,9 @@ function C.make(kind: kinds.Kind)
 			end
 		end
 		local next = if type(page) == "table" and type(page.next_cursor) == "string" and page.next_cursor ~= "" then page.next_cursor else nil
+		if cursor == nil and paged:peek() ~= (next ~= nil) then
+			paged:set(next ~= nil)
+		end
 		return { items = items, next = next }
 	end)
 
@@ -156,6 +161,31 @@ function C.make(kind: kinds.Kind)
 			end
 		end
 		return { items = out, next = nil }
+	end)
+
+	-- Whether the featured stand over the list: with nothing narrowing it,
+	-- and (cards, where they'd be the list's own first again) only over a
+	-- list of more than a page.
+	local function features(): boolean
+		return not narrowed() and #featured_pages.items:get() > 0 and (not kind.cards or paged:get())
+	end
+	-- The list as it's drawn (cards): without what's featured over it.
+	local drawn = ui.computed(function(): { client.Card }
+		local all = listing.items:get()
+		if not kind.cards or not features() then
+			return all
+		end
+		local over: { [string]: boolean } = {}
+		for _, c in featured_pages.items:get() do
+			over[c.id] = true
+		end
+		local out: { client.Card } = {}
+		for _, c in all do
+			if not over[c.id] then
+				table.insert(out, c)
+			end
+		end
+		return out
 	end)
 
 	-- The categories the store has, asked once a run, each with how many
@@ -277,10 +307,22 @@ function C.make(kind: kinds.Kind)
 	-- The store's mark beside its name: "Verified" when the store has verified
 	-- the version the card offers (what the store's answer says, for this
 	-- visit: the catalog's, never a sheet's decision). Nil when it hasn't.
+	-- (A template's says it isn't, in words: its author draws the picture over
+	-- it, and may draw a mark.)
 	function M.verified_mark(card: () -> client.Card): Node
-		return ui.show(function(): boolean
+		local verified = ui.show(function(): boolean
 			return card().verified == true
 		end, ds.Badge { ui.t("plugins.store.verified"), class = "store-verified", tone = "success", size = "sm" })
+		if not kind.cards then
+			return verified
+		end
+		return ui.row {
+			items = "center",
+			verified,
+			ui.show(function(): boolean
+				return card().verified ~= true
+			end, ds.Badge { ui.t("plugins.store.review.waiting"), class = "store-not-verified", tone = "warning", size = "sm" }),
+		}
 	end
 
 	-- A version's state as the store keeps it (listed, yanked, taken down,
@@ -727,7 +769,7 @@ function C.make(kind: kinds.Kind)
 					id = "store-cards",
 					min_w = CARD_MIN,
 					build = function(w: () -> number): Node
-						return ui.each(listing.items, function(_first: client.Card, _i: number, now: State<client.Card>): Node
+						return ui.each(drawn, function(_first: client.Card, _i: number, now: State<client.Card>): Node
 							return ui.div { w = w, shrink = 0, card_of(now) }
 						end, {
 							key = function(c: client.Card): string
@@ -805,6 +847,11 @@ function C.make(kind: kinds.Kind)
 	local function body_key(): string
 		local items = #listing.items:get()
 		local s = listing.status:get()
+		-- (Cards wait for what's featured over them too, so nothing moves as
+		-- it comes.)
+		if kind.cards and not narrowed() and featured_pages.status:get() == "loading" then
+			return "loading"
+		end
 		if items > 0 and not (s == "failed" and failed:get() ~= nil) then
 			return "list"
 		end
@@ -846,22 +893,10 @@ function C.make(kind: kinds.Kind)
 		}
 	end
 
-	-- Under the list's head: what's said of all of it, the search, and (cards,
+	-- Under the list's head: the search, and (cards,
 	-- which stand on the page) the search's own card apart from them.
 	local function list_body(): { Node }
 		local out: { Node } = {}
-		if kind.fact then
-			table.insert(out, ui.text {
-				id = "store-fact",
-				ui.t(kind.fact),
-				w_full = true,
-				px = ds.Settings.inset(),
-				wrap = true,
-				text_size = "$font.size.sm",
-				line_height = "$font.line.sm",
-				color = "$text.secondary",
-			})
-		end
 		table.insert(out, ds.Settings.CatalogCard {
 			id = "store-card",
 			search = { value = query, placeholder = say("plugins.store.search") },
@@ -916,8 +951,10 @@ function C.make(kind: kinds.Kind)
 		local function featured_key(): string
 			if narrowed() then
 				return "none"
-			elseif #featured_pages.items:get() > 0 then
+			elseif features() then
 				return "cards"
+			elseif kind.cards then
+				return "none"
 			elseif featured_pages.status:get() == "loading" or not wanted:get() then
 				return "loading"
 			end
@@ -927,6 +964,19 @@ function C.make(kind: kinds.Kind)
 			w_full = true,
 			-- (Sections apart as a Settings page's are.)
 			gap = "$space.6",
+			-- (What's said of all of it, once, under the tabs.)
+			if kind.fact
+				then ui.text {
+					id = "store-fact",
+					ui.t(kind.fact),
+					w_full = true,
+					px = ds.Settings.inset(),
+					wrap = true,
+					text_size = "$font.size.sm",
+					line_height = "$font.line.sm",
+					color = "$text.tertiary",
+				}
+				else nil,
 			ui.show(function(): boolean
 				return featured_key() ~= "none"
 			end, ui.presence(featured_key, function(key: string): Node

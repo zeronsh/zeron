@@ -147,7 +147,7 @@ function M.Callout(props: Props): Node
 			if has_body
 				then text
 				else ui.row { gap = "$space.3", items = "center", text, table.unpack(acts) },
-			if has_body and #acts > 0 then ui.row { gap = "$space.2", items = "center", ml = ui.raw(-6, "lines a button's label up with the text over it"), table.unpack(acts) } else nil,
+			if has_body and #acts > 0 then ui.row { gap = "$space.2", items = "center", ml = ui.raw(-((ui.theme.get("zeron.space.snug") :: number?) or 10), "lines a small button's label up with the text over it: out by its own padding"), table.unpack(acts) } else nil,
 		},
 		if dismiss
 			then ui.div {

@@ -599,7 +599,8 @@ function M.FeatureSkeleton(props: { still: boolean?, lead: number?, cover: boole
 				w_full = true,
 				gap = "$space.3",
 				items = "center",
-				skeleton.Bar { w = lead, h = lead, rounded = "$radius.md", still = still },
+				-- (A picture's card has no tile.)
+				if props and props.cover then nil else skeleton.Bar { w = lead, h = lead, rounded = "$radius.md", still = still },
 				ui.column {
 					grow = 1,
 					min_w = 0,
@@ -622,12 +623,16 @@ end
 -- out (never fewer than one), sharing it end to end, the rest on the next
 -- rows. `build(w)` makes them, each `w()` wide. (A `Feature` each, all of one
 -- height: two lines held whatever it says.)
-export type CardsProps = { id: string?, min_w: number?, build: (w: () -> number) -> any }
-function M.cards_width(column: number, min_w: number, gap: number): number
+-- (`least`, `most`: never fewer or more across than these.)
+export type CardsProps = { id: string?, min_w: number?, least: number?, most: number?, build: (w: () -> number) -> any }
+function M.cards_width(column: number, min_w: number, gap: number, least: number?, most: number?): number
 	if column <= 0 then
 		return 0
 	end
-	local across = math.max(1, math.floor((column + gap) / (min_w + gap)))
+	local across = math.max(least or 1, math.floor((column + gap) / (min_w + gap)))
+	if most then
+		across = math.min(across, most)
+	end
 	-- (Rounded down to a hundredth, so a row of them is never over the column.)
 	return math.floor((column - (across - 1) * gap) / across * 100) / 100
 end
@@ -635,7 +640,7 @@ M.Cards = ui.component(function(props: CardsProps): Node
 	local gap = (ui.theme.get("space.3") :: number?) or 12
 	local column = ui.use_state((ui.theme.get("zeron.settings.measure") :: number?) or 640)
 	local function w(): number
-		return M.cards_width(column:get(), props.min_w or M.FEATURE_MIN, gap)
+		return M.cards_width(column:get(), props.min_w or M.FEATURE_MIN, gap, props.least, props.most)
 	end
 	return ui.div {
 		id = props.id,
@@ -772,6 +777,9 @@ export type RowProps = {
 	value: (string | Message | () -> string)?,
 	-- A value, state or function, followed (a role that can't change it).
 	disabled: Props_disabled,
+	-- At the name's line's end: a small action of its own (a version's
+	-- Install).
+	name_action: Node?,
 	-- The name in the danger's ink (Sign out, Delete account).
 	danger: boolean?,
 	-- The name in the secondary ink and the regular weight: a note among
@@ -1013,6 +1021,8 @@ local function row_body(props: RowProps, gw: GiveWayRun?): Node
 				min_w = 0,
 				name,
 				props.badge,
+				if props.name_action then ui.div { grow = 1 } else nil,
+				if props.name_action then ui.div { shrink = 0, props.name_action } else nil,
 			},
 		if props.byline then byline_line(props) else nil,
 		if props.description and props.private_description

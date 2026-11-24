@@ -20,6 +20,7 @@ local shown = ui.computed(function(): { any }
 			update = t.update,
 			blocked = t.blocked,
 			edited = (t :: any).edited,
+			prerelease = (t :: any).prerelease,
 		})
 	end
 	return out

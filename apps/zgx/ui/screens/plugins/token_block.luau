@@ -43,8 +43,7 @@ M.Block = ui.component(function(props: { secret: () -> string?, copy: (token: st
 				gap = "$space.1",
 				selectable = false,
 				ui.text {
-					"token",
-					literal = true,
+					ui.t("plugins.store.key.one"),
 					text_size = "$font.size.xs",
 					color = "$text.tertiary",
 					grow = 1,

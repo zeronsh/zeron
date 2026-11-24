@@ -60,7 +60,7 @@ end)
 
 test("Not now answers no", function()
 	local app = open("unyank")
-	expect(app:tree("#store-consent")).to_contain("Allow new installs of focus-timer 1.2.0?")
+	expect(app:tree("#store-consent")).to_contain("Allow new installs of Focus timer 1.2.0?")
 	app:click("#store-consent-decline")
 	app:frames(4)
 	expect(app:state("calls")).to_be("decide:false")
@@ -86,6 +86,7 @@ end)
 test("while it's being made it can be stopped and not asked again", function()
 	local app = open("busy")
 	expect(app:has("#store-consent-signing-in")).to_be(true)
+	expect(app:tree("#store-consent-decline")).to_contain("Stop waiting")
 	armed(app)
 	app:click("#store-consent-allow")
 	app:frames(4)
@@ -95,10 +96,64 @@ test("while it's being made it can be stopped and not asked again", function()
 	expect(app:state("calls")).to_be("decide:false")
 end)
 
+-- Its status line keeps its room in every step, so nothing moves.
+test("nothing in a token's window moves as it's asked, made and shown", function()
+	local app = open("token")
+	local status = box(app, "#store-consent-status")
+	local allow = box(app, "#store-consent-allow")
+	expect(status.h).to_be(16)
+	expect(app:has("#store-consent-signing-in")).to_be(false)
+	app:command("busy")
+	app:frames(20)
+	expect(box(app, "#store-consent-status").y).to_be(status.y)
+	expect(box(app, "#store-consent-allow").y).to_be(allow.y)
+	expect(box(app, "#store-consent-signing-in").h).to_be(16)
+	app:command("made")
+	app:frames(40)
+	expect(box(app, "#store-consent-status").y).to_be(status.y)
+	expect(box(app, "#store-consent-done").y).to_be(allow.y)
+end)
+
+test("a token's ids are under their own headings, and all of them is said where it's all", function()
+	local app = open("mixed")
+	local facts = app:tree("#store-consent-facts")
+	expect(facts).to_contain("2 plugins")
+	expect(facts).to_contain("1 template")
+	expect((facts:find("tidy", 1, true) :: number) < (facts:find("midnight", 1, true) :: number)).to_be(true)
+	app:command("both_said")
+	app:frames(20)
+	expect(app:tree("#store-consent-facts")).to_contain("All your plugins")
+	-- Which are templates isn't known: how many, no kind said.
+	app:command("token")
+	app:frames(20)
+	expect(app:tree("#store-consent-facts")).to_contain("2 chosen")
+end)
+
+-- Each label is on its value's first line, and what's plain to read is said
+-- once: a publish's card is its id.
+test("a fact's label is on its value's first line, and a publish says its id alone", function()
+	local app = open("many")
+	local rows: { [string]: number } = {}
+	for line in app:tree("#store-consent-facts"):gmatch("[^\n]+") do
+		local said, y = line:match('text "([^"]*)" %-?[%d.]+,(%-?[%d.]+)')
+		if said then
+			rows[said] = tonumber(y) :: number
+		end
+	end
+	expect(rows["Can publish"]).to_be(rows["50 plugins"])
+	app:command("publish")
+	app:frames(20)
+	expect(app:tree("#store-consent-facts")).to_contain("focus-timer")
+	expect(app:tree("#store-consent-facts")).never.to_contain("1.3.0")
+	expect(app:tree("#store-consent-facts")).never.to_contain("Focus timer")
+	expect(app:count("role:status")).to_be(0)
+end)
+
 test("the token is shown in this window, once made, with its Copy", function()
 	local app = open("made")
 	expect(app:has("#store-consent-token")).to_be(true)
 	expect(app:has("#key-secret")).to_be(true)
+	expect(app:tree("#key-secret")).to_contain("Deploy token")
 	expect(app:has("#store-consent-allow")).to_be(false)
 	app:click("#key-secret-copy")
 	app:frames(8)
@@ -140,9 +195,12 @@ test("every fact is whole, and the answer stays in view", function()
 				end
 			end
 			if show == "many" then
-				-- Fifty ids, on as many lines as they take.
+				-- Fifty ids, each on its own line, whole: never broken.
+				expect(app:count(".store-consent-one-id")).to_be(50)
+				local _, whole = app:tree("#store-consent-facts"):gsub('a%-plugin%-with%-the%-longest%-id%-a%-stores%-%d%d" [%d.,-]+ [%d.]+x16', "")
+				expect(whole).to_be(50)
 				expect(facts.h > 400).to_be(true)
-				expect(app:tree("#store-consent-facts")).to_contain(if where == "en" then "50 chosen" else "已选 50 个")
+				expect(app:tree("#store-consent-facts")).to_contain(if where == "en" then "50 plugins" else "50 个插件")
 			end
 			local last = app:tree("#store-consent-facts")
 			if show == "token" or show == "token_all" then

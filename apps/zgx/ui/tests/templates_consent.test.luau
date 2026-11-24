@@ -103,7 +103,9 @@ test("one from the store says whose it is, that it's verified, and that it runs 
 	expect(tree).to_contain("Install Midnight?")
 	expect(tree).to_contain("Made by @ada")
 	expect(app:tree(".template-consent-verified")).to_contain("Verified")
-	expect(tree).to_contain("Runs as Zeron itself")
+	-- (What it can do is the red callout's, said once.)
+	expect(tree).to_contain("A template runs as part of Zeron")
+	expect(tree).never.to_contain("Runs as Zeron itself")
 	expect(tree).to_contain("From the store")
 	expect(tree).to_contain("Its signature checks out")
 	expect(tree).never.to_contain("Unknown author")
@@ -129,6 +131,53 @@ test("one a deploy token published never says a signature checks out, and offers
 	app:click('#template-consent-unverified >> role:button "Install 1.2.0 instead"')
 	app:frames(4)
 	expect(app:state("calls")).to_be("install_verified")
+end)
+
+test("an update has two boxes, and what changed of it and goes is read without scrolling", function()
+	local app = open()
+	app:command("changed")
+	app:frames(20)
+	expect(app:count("role:alert")).to_be(2)
+	local function box(line: string): { y: number, h: number }
+		local _, y, _, h = line:match("(%-?[%d.]+),(%-?[%d.]+) ([%d.]+)x([%d.]+)")
+		return { y = tonumber(y) or 0, h = tonumber(h) or 0 }
+	end
+	for _, show in { "changed", "long", "locale_zh-Hans" } do
+		app:command(show)
+		app:frames(20)
+		local pane = box(app:tree("#template-consent-scroll"))
+		local x, w = app:tree(".template-consent-verified"):match("(%-?[%d.]+),%-?[%d.]+ ([%d.]+)x")
+		expect((tonumber(x) :: number) + (tonumber(w) :: number) <= 428).to_be(true)
+		for _, id in { "#template-consent-changed", "#template-consent-owner", "#template-consent-edits" } do
+			local b = box(app:tree(id))
+			expect(b.y >= pane.y and b.y + b.h <= pane.y + pane.h - 12).to_be(true)
+		end
+	end
+	app:command("locale_en")
+	-- None verified to take instead: its badge says it, and one box.
+	app:command("plain_update")
+	app:frames(20)
+	expect(app:count("role:alert")).to_be(1)
+	expect(app:tree(".template-consent-verified")).to_contain("Not verified yet")
+end)
+
+test("what the store says of it changed as it showed: said, and Allow armed again", function()
+	local app = open()
+	app:command("store")
+	app:frames(20)
+	armed(app)
+	app:command("store_said")
+	app:frames(20)
+	expect(app:tree("#template-consent-changed")).to_contain("What the store says of it changed")
+	expect(app:tree(".template-consent-verified")).to_contain("Not verified yet")
+	expect(app:tree("#template-consent")).to_contain("@grace")
+	app:click("#template-consent-allow")
+	app:frames(4)
+	expect(app:state("calls")).to_be("")
+	armed(app)
+	app:click("#template-consent-allow")
+	app:frames(4)
+	expect(app:state("calls")).to_contain("true:store-hash-1")
 end)
 
 test("one from a file or a link says it isn't from the store", function()
