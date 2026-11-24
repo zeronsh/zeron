@@ -2512,6 +2512,22 @@ async fn zeron_mcp_only_hides_apps_and_configured_servers() {
             r#"{"config": {"mcp_servers": {"github": {"url": "https://x"}, "linear": {"command": "npx"}}}}"#,
         )
         .unwrap();
+        // Codex's plugins: one bringing a server, one only skills, one
+        // turned off, and a remote one whose catalog never answers.
+        std::fs::write(
+            dir.path().join("plugins-installed.json"),
+            r#"{"marketplaces": [
+                {"name": "bundled", "path": "/m/bundled.json", "plugins": [
+                    {"id": "computer@bundled", "name": "computer", "installed": true, "enabled": true},
+                    {"id": "docs@bundled", "name": "docs", "installed": true, "enabled": true},
+                    {"id": "off@bundled", "name": "off", "installed": true, "enabled": false}]},
+                {"name": "remote", "path": null, "plugins": [
+                    {"id": "slow@remote", "name": "slow", "installed": true, "enabled": true}]}]}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("plugin-computer.json"), r#"{"mcpServers": ["cua_repl"]}"#).unwrap();
+        std::fs::write(dir.path().join("plugin-off.json"), r#"{"mcpServers": ["off_server"]}"#).unwrap();
+        std::fs::write(dir.path().join("plugin-slow.json"), r#"{"silent": true}"#).unwrap();
         let mut req = request("only zeron's");
         req.cwd = dir.path().display().to_string();
         req.zeron_mcp_only = only;
@@ -2554,9 +2570,26 @@ async fn zeron_mcp_only_hides_apps_and_configured_servers() {
                 .find(|frame| frame["method"] == "config/read")
                 .expect("the config is read");
             assert_eq!(read["params"]["cwd"], dir.path().display().to_string());
+            // A plugin's servers alone, overlaid on the user's `plugins`
+            // table; the remote catalog that never answered held nothing up.
+            assert_eq!(
+                config["plugins"],
+                serde_json::json!({"computer@bundled": {"mcp_servers": {"cua_repl": {"enabled": false}}}}),
+                "{start}"
+            );
+            let reads: Vec<_> = frames
+                .iter()
+                .filter(|frame| frame["method"] == "plugin/read")
+                .map(|frame| frame["params"].clone())
+                .collect();
+            assert!(reads.contains(&serde_json::json!({"pluginName": "computer", "marketplacePath": "/m/bundled.json"})));
+            assert!(reads.contains(&serde_json::json!({"pluginName": "slow", "remoteMarketplaceName": "remote"})));
+            assert!(!reads.iter().any(|read| read["pluginName"] == "off"), "{reads:?}");
         } else {
             assert!(config.get("features.apps").is_none(), "{start}");
             assert!(config.get("mcp_servers.github.enabled").is_none(), "{start}");
+            assert!(config.get("plugins").is_none(), "{start}");
+            assert!(!frames.iter().any(|frame| frame["method"] == "plugin/installed"));
         }
     }
 }

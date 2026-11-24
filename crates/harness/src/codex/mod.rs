@@ -207,6 +207,71 @@ fn codex_extra_mcp_overrides(extras: &[zeron_proto::McpServer]) -> Vec<(String, 
         .collect()
 }
 
+/// How long a run waits for Codex to say which MCP servers its plugins
+/// bring. A local marketplace answers in milliseconds; a remote one asks
+/// ChatGPT's catalog, so a slow network costs a run start no more than this.
+const PLUGIN_READ_BUDGET: Duration = Duration::from_millis(1500);
+
+/// The MCP servers Codex's enabled plugins bring (a plugin's `.mcp.json`,
+/// which `config/read` doesn't list), as the `plugins` config overlay that
+/// switches each off: `{"<plugin id>": {"mcp_servers": {"<name>":
+/// {"enabled": false}}}}`. Only those servers: a plugin's skills and the
+/// rest stay. Overlaid on the user's own `plugins` table, never in place of
+/// it. All are asked at once within [`PLUGIN_READ_BUDGET`]; a plugin that
+/// doesn't answer in time keeps its servers. `None` when there are none to
+/// switch off, or Codex has no plugins (or predates these methods).
+async fn plugin_mcp_servers_off(client: &RpcClient, cwd: &str) -> Option<Value> {
+    let deadline = tokio::time::Instant::now() + PLUGIN_READ_BUDGET;
+    let installed = tokio::time::timeout_at(
+        deadline,
+        client.request("plugin/installed", json!({"cwds": [cwd]})),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let mut reads: futures::stream::FuturesUnordered<_> = installed["marketplaces"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|marketplace| {
+            let source = match marketplace["path"].as_str() {
+                Some(path) => ("marketplacePath", path),
+                None => ("remoteMarketplaceName", marketplace["name"].as_str().unwrap_or_default()),
+            };
+            marketplace["plugins"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|plugin| plugin["installed"] == true && plugin["enabled"] == true)
+                .filter_map(move |plugin| {
+                    let id = plugin["id"].as_str()?.to_owned();
+                    let params = serde_json::Map::from_iter([
+                        ("pluginName".to_owned(), plugin["name"].as_str()?.into()),
+                        (source.0.to_owned(), source.1.into()),
+                    ]);
+                    let read = client.request_now("plugin/read", Value::Object(params));
+                    Some(async move { (id, read.await) })
+                })
+        })
+        .collect();
+    let mut off = serde_json::Map::new();
+    while let Ok(Some((id, read))) = tokio::time::timeout_at(deadline, reads.next()).await {
+        let servers: serde_json::Map<String, Value> = read
+            .ok()
+            .as_ref()
+            .and_then(|read| read["plugin"]["mcpServers"].as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(|name| (name.to_owned(), json!({"enabled": false})))
+            .collect();
+        if !servers.is_empty() {
+            off.insert(id, json!({ "mcp_servers": servers }));
+        }
+    }
+    (!off.is_empty()).then_some(Value::Object(off))
+}
+
 /// The longest a Zeron MCP tool may take: its longest wait (an hour) plus
 /// margin for the reply.
 const ZERON_TOOL_TIMEOUT_SECS: u64 = 3600 + 120;
@@ -1811,6 +1876,15 @@ async fn run_session(session: Session) {
                 for name in servers.keys().filter(|name| !zerons.contains(name.as_str())) {
                     overrides.insert(format!("mcp_servers.{name}.enabled"), false.into());
                 }
+            }
+            // And those Codex's plugins bring (its computer use, its app tools).
+            if let Some(plugins) = plugin_mcp_servers_off(&client, &request.cwd).await {
+                start_params
+                    .entry("config")
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                    .expect("thread/start config overrides are an object")
+                    .insert("plugins".into(), plugins);
             }
         }
         let mut restore_notice = None;
