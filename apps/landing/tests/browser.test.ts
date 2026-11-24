@@ -16,7 +16,7 @@ afterAll(async () => {
   await site?.dispose();
 });
 
-/** The person's setting: the shell follows it (styles/app.css), so each is checked. */
+/** The person's setting: the look follows it (styles/look/store.css), so each is checked. */
 type Scheme = "dark" | "light";
 
 async function open(path: string, options: { as?: string; width?: number; scheme?: Scheme } = {}): Promise<{ page: Page; context: BrowserContext }> {

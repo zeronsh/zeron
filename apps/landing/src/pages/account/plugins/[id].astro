@@ -22,7 +22,7 @@ import { day, unbidi } from "../../../lib/store/format.ts";
 import { hueClass } from "../../../lib/store/hue.ts";
 import { privatePage } from "../../../lib/store/http.ts";
 import { isPluginId } from "../../../lib/store/names.ts";
-import { everListed, listingState, verificationState, versionState, type Tone } from "../../../lib/store/states.ts";
+import { everListed, listingState, PILL_TONE, verificationState, versionState } from "../../../lib/store/states.ts";
 import type { VersionInfo } from "../../../lib/store/types.ts";
 import { pluginUrl } from "../../../lib/store/urls.ts";
 import { statusWords, store } from "../../../lib/store/words.ts";
@@ -51,7 +51,7 @@ const now = Date.now();
 const actionOf = (v: VersionInfo): AuthorAction | null => (v.status === "listed" ? "yank" : v.status === "yanked" && v.yanked_by !== "superseded" ? "unyank" : null);
 const dialogId = (action: string, version: string) => `${action}-${version.replace(/[^\w-]/g, "_")}`;
 /** A state's tone, as the look's pills say it. */
-const TONE: Record<Tone, string> = { success: "ok", danger: "bad", warning: "bad", info: "no", accent: "quiet", neutral: "quiet" };
+const TONE = PILL_TONE;
 /** Whether Zeron verified it, for a version people can have: verified, not verified (a reviewer read it), or not yet. */
 function verifiedPill(v: VersionInfo): { tone: string; label: string; seal?: boolean } {
   if (v.verified) return { tone: "ok", label: store("plugins.store.verified"), seal: true };

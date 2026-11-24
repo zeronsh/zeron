@@ -4,17 +4,21 @@
 // in every state, verified or not, each to its review, a listed one's Take
 // down in the action column; its reports; its history in the audit log.
 import TakeDown from "../../../../components/kit/TakeDown.astro";
-import Toast from "../../../../components/kit/Toast.astro";
-import PluginTile from "../../../../components/store/PluginTile.astro";
-import Glyph from "../../../../components/ui/Glyph.astro";
-import App from "../../../../layouts/App.astro";
+import Flash from "../../../../components/look/Flash.astro";
+import Icon from "../../../../components/look/Icon.astro";
+import Tile from "../../../../components/look/Tile.astro";
+import Words from "../../../../components/look/Words.astro";
+import Store from "../../../../layouts/Store.astro";
+import "../../../../styles/look/account.css";
+import "../../../../styles/look/staff.css";
+import { lsb } from "../../../../lib/store/bearing.ts";
 import { pluginAsk, reasonLabel, versionAsk } from "../../../../lib/store/admin.ts";
 import { takeFlash } from "../../../../lib/store/flash.ts";
 import { age, count, dateTime, day, unbidi } from "../../../../lib/store/format.ts";
 import { privatePage } from "../../../../lib/store/http.ts";
 import { isPluginId } from "../../../../lib/store/names.ts";
 import { adminSession } from "../../../../lib/store/session.ts";
-import { everListed, listingState, reasonWords, toneClass, verificationState, versionState } from "../../../../lib/store/states.ts";
+import { everListed, listingState, PILL_TONE, reasonWords, verificationState, versionState } from "../../../../lib/store/states.ts";
 import { memberUrl, pluginUrl } from "../../../../lib/store/urls.ts";
 
 export const prerender = false;
@@ -26,7 +30,7 @@ if (!session) return new Response(null, { status: 404 });
 const result = await Astro.locals.edge.adminPlugin(id);
 if (!result.ok && result.error === "not_found") return new Response(null, { status: 404 });
 privatePage(Astro);
-const toast = takeFlash(Astro.cookies);
+const flash = takeFlash(Astro.cookies);
 const a = result.ok ? result.data : null;
 const here = `/admin/plugins/${encodeURIComponent(id)}`;
 const act = (action: string) => `${here}/actions/${action}`;
@@ -36,130 +40,128 @@ const name = a ? unbidi(a.plugin.name) : id;
 const listing = a ? listingState(a.status, everListed(a.versions)) : null;
 const suspend = pluginAsk("suspend", name);
 const transfer = pluginAsk("transfer", name);
-const REPORT = { open: { label: "Open", tone: "warn" }, actioned: { label: "Acted on", tone: "" }, dismissed: { label: "Dismissed", tone: "" } } as const;
+const REPORT = { open: { label: "Open" }, actioned: { label: "Acted on" }, dismissed: { label: "Dismissed" } } as const;
 ---
 
-<App title={`${name} · Review · Zeron`} description="A plugin, for its reviewers." noindex current="queue" session={session}>
-  <nav slot="title" class="crumbs" aria-label="Where this is">
-    <a href="/admin/plugins">Queue</a><Glyph name="alt-arrow-right" size={12} /><span aria-current="page">{name}</span>
-  </nav>
-  {
-    a && (
-      <div slot="tools" class="tools-row">
-        <form method="post" action={act(a.plugin.featured ? "unfeature" : "feature")}>
-          <input type="hidden" name="csrf" value={session.csrf} />
-          <button class="btn secondary sm" type="submit"><Glyph name="star" size={14} />{a.plugin.featured ? "Stop featuring" : "Feature"}</button>
-        </form>
-        <a class="btn secondary sm" href={act("transfer")} data-dialog="transfer">Move…</a>
-        {a.status === "suspended" ? (
-          <form method="post" action={act("restore")}>
-            <input type="hidden" name="csrf" value={session.csrf} />
-            <button class="btn secondary sm" type="submit">Restore</button>
-          </form>
-        ) : (
-          <a class="btn secondary sm" href={act("suspend")} data-dialog="suspend">Suspend…</a>
-        )}
-      </div>
-    )
-  }
-
-  {
-    !a ? (
-      <div class="panel">
+<Store title={`${name} · Review · Zeron`} description="A plugin, for its reviewers." noindex current="review" session={session}>
+  <div class="wrap acct staff-plugin">
+    <nav class="crumbs" aria-label="Where this is"><a href="/admin/plugins">Review</a><Icon name="chev" /><span aria-current="page">{name}</span></nav>
+    <Flash flash={flash} />
+    {
+      !a ? (
         <div class="empty" role="status">
-          <span class="tile"><Glyph name="wifi-off" size={20} /></span>
-          <div class="words"><h2>This plugin can't be loaded right now</h2><p>Try again in a moment.</p></div>
-          <div class="actions"><a class="btn secondary sm" href={here}>Try again</a></div>
+          <h2>This plugin can't be loaded right now</h2>
+          <p>Try again in a moment.</p>
+          <a class="btn sec" href={here}>Try again</a>
         </div>
-      </div>
-    ) : (
-      <div class="mine-body">
-        <header class="mine-head">
-          <PluginTile id={a.plugin.id} name={name} icon={a.plugin.icon} version={a.plugin.version} size={56} class="plugin-tile" />
-          <div class="who">
-            <h1 class="t-title">{name}</h1>
-            <p class="meta t-text t-2">
-              <span class="t-mono t-3">{a.plugin.id}</span>
-              {listing && a.status !== "listed" && <span class:list={["badge sm", toneClass(listing.tone)]}>{listing.label}</span>}
-              {a.plugin.featured && <span class="badge sm accent">Featured</span>}
-              <span>by {a.owner.username ? <a href={memberUrl(a.owner.username)}>@{a.owner.username}</a> : "an account with no username"}{a.owner.created_at ? ` (${age(a.owner.created_at).toLowerCase()})` : ""}</span>
-              <span class="t-3" aria-hidden="true">·</span>
-              <span class="num">{count(a.plugin.installs)} {a.plugin.installs === 1 ? "install" : "installs"}</span>
-            </p>
+      ) : (
+        <>
+          <header class="mhead">
+            <Tile id={a.plugin.id} name={name} icon={a.plugin.icon} version={a.plugin.version} size="l" />
+            <div class="txt">
+              <h1 class={lsb(name)}><Words text={name} /></h1>
+              <p class="by">
+                <span class="mono">{a.plugin.id}</span>
+                {listing && a.status !== "listed" && <span class:list={["state", PILL_TONE[listing.tone]]}>{listing.label}</span>}
+                {a.plugin.featured && <span class="state quiet">Featured</span>}
+                <i aria-hidden="true"></i>
+                <span>by {a.owner.username ? <a href={memberUrl(a.owner.username)}>@{a.owner.username}</a> : "an account with no username"}{a.owner.created_at ? ` (${age(a.owner.created_at).toLowerCase()})` : ""}</span>
+                <i aria-hidden="true"></i>
+                <span class="num">{count(a.plugin.installs)} {a.plugin.installs === 1 ? "install" : "installs"}</span>
+              </p>
+            </div>
+            {a.status === "listed" && <a class="btn sec" href={pluginUrl(a.plugin.id)}>Its page<Icon name="out" /></a>}
+          </header>
+          <div class="staff-acts">
+            <form method="post" action={act(a.plugin.featured ? "unfeature" : "feature")}>
+              <input type="hidden" name="csrf" value={session.csrf} />
+              <button class="btn sec sm" type="submit">{a.plugin.featured ? "Stop featuring" : "Feature"}</button>
+            </form>
+            <a class="btn sec sm" href={act("transfer")} data-dialog="transfer">Move…</a>
+            {a.status === "suspended" ? (
+              <form method="post" action={act("restore")}>
+                <input type="hidden" name="csrf" value={session.csrf} />
+                <button class="btn sec sm" type="submit">Restore</button>
+              </form>
+            ) : (
+              <a class="btn sec sm" href={act("suspend")} data-dialog="suspend">Suspend…</a>
+            )}
           </div>
-          {a.status === "listed" && <a class="see" href={pluginUrl(a.plugin.id)}>Its page<Glyph name="arrow-up-right" size={12} /></a>}
-        </header>
 
-        {a.status === "suspended" && a.plugin.suspend_reason && (
-          <p class="notice warn"><Glyph name="danger-triangle" size={16} /><span><b>Suspended.</b> {a.plugin.suspend_reason}</span></p>
-        )}
+          {a.status === "suspended" && a.plugin.suspend_reason && <p class="flash bad"><b>Suspended.</b> {a.plugin.suspend_reason}</p>}
 
-        <section class="section" aria-labelledby="versions-heading">
-          <div class="section-head"><div class="words"><h2 id="versions-heading">Versions <span class="title-count">· {count(a.versions.length)}</span></h2></div></div>
-          <div class="panel">
-            <table class="table wrapping staff-versions">
-              <caption class="sr-only">Its versions, the newest first</caption>
-              <colgroup><col class="version" /><col class="state" /><col /><col class="when" /><col class="action" /></colgroup>
-              <thead><tr><th scope="col">Version</th><th scope="col">State</th><th scope="col">What was said</th><th scope="col">Published</th><th scope="col"><span class="sr-only">What can be done</span></th></tr></thead>
-              <tbody>
+          <section class="mvers" aria-labelledby="versions-heading">
+            <h2 id="versions-heading">Versions<span class="num">{count(a.versions.length)}</span></h2>
+            <div class="card vlist">
+              <div class="vr h" aria-hidden="true"><span>Version</span><span>What was said</span><span>Published</span><span></span></div>
+              <ul aria-label="Its versions, the newest first">
                 {a.versions.map((v) => {
                   const st = versionState(v);
                   const ver = verificationState(v);
                   const decided = v.review?.decided_at;
                   return (
-                    <tr>
-                      <td><span class="line version"><a href={`${here}/${encodeURIComponent(v.version)}`}>{v.version}</a></span></td>
-                      <td><span class="line"><span class:list={["badge sm", toneClass(st.tone)]}>{st.label}</span><span class:list={["badge sm", toneClass(ver.tone)]}>{ver.label}</span>{v.blocked && <span class="badge sm bad" title="Turned off on the devices that had it">Off</span>}</span></td>
-                      <td class="words">
-                        {v.removal?.reason ? <span class="said">“{v.removal.reason}”</span> : v.review?.message ? <span class="said">“{v.review.message}”</span> : <span>{v.review && !v.review.decided && v.status === "listed" ? "Listed, waiting for a reviewer." : st.about}</span>}
-                        {(v.review?.reason || decided) && <span class="who">{[v.review?.reason && reasonLabel(v.review.reason), decided && `${v.status === "taken_down" ? "taken down" : v.status === "removed" ? "removed" : "decided"} ${day(decided)}`].filter(Boolean).join(" · ")}</span>}
-                      </td>
-                      <td><span class="line t-2"><time datetime={new Date(v.published_at).toISOString()} title={dateTime(v.published_at)}>{day(v.published_at)}</time></span></td>
-                      <td class="end"><span class="line end">{removable(v.status) && <a class="btn ghost sm" href={`${here}/${encodeURIComponent(v.version)}/take_down`} data-dialog={vid(v.version)}>Take down…</a>}{v.status === "taken_down" && <a class="btn ghost sm" href={`${here}/${encodeURIComponent(v.version)}/restore`}>Restore…</a>}</span></td>
-                    </tr>
+                    <li class="vr">
+                      <div class="vn pills">
+                        <a class="mono vlink" href={`${here}/${encodeURIComponent(v.version)}`}>{v.version}</a>
+                        <span class:list={["state", PILL_TONE[st.tone]]}>{st.label}</span>
+                        <span class:list={["state", PILL_TONE[ver.tone]]}>{ver.label}</span>
+                        {v.blocked && <span class="state bad" title="Turned off on the devices that had it">Off</span>}
+                      </div>
+                      <div class="means">
+                        <p>{v.removal?.reason ? `“${v.removal.reason}”` : v.review?.message ? `“${v.review.message}”` : v.review && !v.review.decided && v.status === "listed" ? "Listed, waiting for a reviewer." : st.about}</p>
+                        {(v.review?.reason || decided) && <small>{[v.review?.reason && reasonLabel(v.review.reason), decided && `${v.status === "taken_down" ? "taken down" : v.status === "removed" ? "removed" : "decided"} ${day(decided)}`].filter(Boolean).join(" · ")}</small>}
+                      </div>
+                      <div class="pub"><time datetime={new Date(v.published_at).toISOString()} title={dateTime(v.published_at)}>{day(v.published_at)}</time></div>
+                      <div class="act">
+                        {removable(v.status) && <a class="btn ghost sm" href={`${here}/${encodeURIComponent(v.version)}/take_down`} data-dialog={vid(v.version)}>Take down…<span class="sr-only"> {v.version}</span></a>}
+                        {v.status === "taken_down" && <a class="btn ghost sm" href={`${here}/${encodeURIComponent(v.version)}/restore`}>Restore…<span class="sr-only"> {v.version}</span></a>}
+                      </div>
+                    </li>
                   );
                 })}
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        <section class="section" aria-labelledby="reports-heading">
-          <div class="section-head">
-            <div class="words"><h2 id="reports-heading">Reports <span class="title-count">· {count(a.reports.length)}</span></h2></div>
-            <a class="btn ghost sm" href={`/admin/audit?plugin=${encodeURIComponent(a.plugin.id)}`}>Its history<Glyph name="alt-arrow-right" size={12} /></a>
-          </div>
-          {a.reports.length === 0 ? (
-            <p class="t-text t-3">No one has reported it.</p>
-          ) : (
-            <div class="panel">
-              <table class="table wrapping reports-table">
-                <caption class="sr-only">Its reports, the newest first</caption>
-                <colgroup><col class="when" /><col class="reason" /><col /><col class="when" /><col class="action" /></colgroup>
-                <thead><tr><th scope="col">State</th><th scope="col">Reason</th><th scope="col">What they said</th><th scope="col">Sent</th><th scope="col"><span class="sr-only">What can be done</span></th></tr></thead>
-                <tbody>
-                  {a.reports.map((r) => (
-                    <tr>
-                      <td><span class="line">{r.status === "open" ? <span class="badge sm warn">Open</span> : <span class="t-2">{REPORT[r.status].label}</span>}</span></td>
-                      <td><span class:list={["line", { "t-2": r.reason !== "malware" }]}>{r.reason === "malware" ? <span class="badge sm bad">{reasonWords(r.reason)}</span> : reasonWords(r.reason)}</span></td>
-                      <td class="words">
-                        {r.text ? <span class="said">{r.text}</span> : <span class="t-3">No words given.</span>}
-                        <span class="who">from {r.reporter?.username ? `@${r.reporter.username}` : "someone"}{r.version ? ` · about ${r.version}` : ""}</span>
-                      </td>
-                      <td><span class="line t-2"><time datetime={new Date(r.created_at).toISOString()} title={dateTime(r.created_at)}>{day(r.created_at)}</time></span></td>
-                      <td class="end"><span class="line end">{r.status === "open" && <a class="btn ghost sm" href={`/admin/reports#close-${r.id}`}>Close it…</a>}</span></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              </ul>
             </div>
-          )}
-        </section>
+          </section>
 
-        <dialog class="dialog sm" id="suspend" aria-labelledby="suspend-title" closedby="any">
+          <section class="mvers" aria-labelledby="reports-heading">
+            <div class="sec-row">
+              <h2 id="reports-heading">Reports<span class="num">{count(a.reports.length)}</span></h2>
+              <a class="more" href={`/admin/audit?plugin=${encodeURIComponent(a.plugin.id)}`}>Its history<Icon name="chev" /></a>
+            </div>
+            {a.reports.length === 0 ? (
+              <p class="none">No one has reported it.</p>
+            ) : (
+              <div class="card srows rep">
+                <div class="sr h" aria-hidden="true"><span>State</span><span>Reason</span><span>What they said</span><span>Sent</span><span></span></div>
+                <ul aria-label="Its reports, the newest first">
+                  {a.reports.map((r) => (
+                    <li class="sr">
+                      <span>{r.status === "open" ? <span class="state no">Open</span> : <span class="t2">{REPORT[r.status].label}</span>}</span>
+                      <span>{r.reason === "malware" ? <span class="state bad">{reasonWords(r.reason)}</span> : <span class="t2">{reasonWords(r.reason)}</span>}</span>
+                      <span>
+                        {r.text ? <span class="said">{r.text}</span> : <span class="t3">No words given.</span>}
+                        <small>from {r.reporter?.username ? `@${r.reporter.username}` : "someone"}{r.version ? ` · about ${r.version}` : ""}</small>
+                      </span>
+                      <span class="t2"><time datetime={new Date(r.created_at).toISOString()} title={dateTime(r.created_at)}>{day(r.created_at)}</time></span>
+                      {r.status === "open" ? <a class="btn ghost sm" href={`/admin/reports#close-${r.id}`}>Close it…</a> : <span></span>}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </section>
+        </>
+      )
+    }
+  </div>
+  {
+    a && (
+      <>
+        <dialog class="question sm" id="suspend" aria-labelledby="suspend-title" closedby="any">
           <form method="post" action={act("suspend")}>
             <input type="hidden" name="csrf" value={session.csrf} />
-            <div class="head"><h2 id="suspend-title">{suspend.title}</h2>{suspend.words.map((w) => <p>{w}</p>)}</div>
+            <h2 id="suspend-title">{suspend.title}</h2>
+            {suspend.words.map((w) => <p>{w}</p>)}
             <div class="body">
               <div>
                 <label class="field-label" for="suspend-reason">Why</label>
@@ -168,15 +170,16 @@ const REPORT = { open: { label: "Open", tone: "warn" }, actioned: { label: "Acte
               </div>
             </div>
             <div class="answers">
-              <button class="btn secondary" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
+              <button class="btn sec" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
               <button class="btn danger" type="submit">{suspend.confirm}</button>
             </div>
           </form>
         </dialog>
-        <dialog class="dialog sm" id="transfer" aria-labelledby="transfer-title" closedby="any">
+        <dialog class="question sm" id="transfer" aria-labelledby="transfer-title" closedby="any">
           <form method="post" action={act("transfer")}>
             <input type="hidden" name="csrf" value={session.csrf} />
-            <div class="head"><h2 id="transfer-title">{transfer.title}</h2>{transfer.words.map((w) => <p>{w}</p>)}</div>
+            <h2 id="transfer-title">{transfer.title}</h2>
+            {transfer.words.map((w) => <p>{w}</p>)}
             <div class="body">
               <div>
                 <label class="field-label" for="transfer-to">New owner's username</label>
@@ -184,7 +187,7 @@ const REPORT = { open: { label: "Open", tone: "warn" }, actioned: { label: "Acte
               </div>
             </div>
             <div class="answers">
-              <button class="btn secondary" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
+              <button class="btn sec" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
               <button class="btn danger" type="submit">{transfer.confirm}</button>
             </div>
           </form>
@@ -192,21 +195,21 @@ const REPORT = { open: { label: "Open", tone: "warn" }, actioned: { label: "Acte
         {a.versions.filter((v) => removable(v.status)).map((v) => {
           const remove = versionAsk("take_down", name, v.version);
           return (
-            <dialog class="dialog" id={vid(v.version)} aria-labelledby={`${vid(v.version)}-title`} closedby="any">
+            <dialog class="question" id={vid(v.version)} aria-labelledby={`${vid(v.version)}-title`} closedby="any">
               <form method="post" action={`${here}/${encodeURIComponent(v.version)}/take_down`}>
                 <input type="hidden" name="csrf" value={session.csrf} />
-                <div class="head"><h2 id={`${vid(v.version)}-title`}>{remove.title}</h2>{remove.words.map((w) => <p>{w}</p>)}</div>
+                <h2 id={`${vid(v.version)}-title`}>{remove.title}</h2>
+                {remove.words.map((w) => <p>{w}</p>)}
                 <TakeDown id={vid(v.version)} harmful />
                 <div class="answers">
-                  <button class="btn secondary" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
+                  <button class="btn sec" type="submit" formmethod="dialog" formnovalidate autofocus>Cancel</button>
                   <button class="btn danger" type="submit">{remove.confirm}</button>
                 </div>
               </form>
             </dialog>
           );
         })}
-      </div>
+      </>
     )
   }
-  <Toast toast={toast} />
-</App>
+</Store>

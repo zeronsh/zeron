@@ -14,9 +14,9 @@ const command = process.argv.slice(2).find((arg) => !arg.startsWith("-"));
 const fakeEdge = command === "dev";
 
 /**
- * Pages for making the store, never built for zeron.sh: the design sheet
- * (every token and control in every state) and the empty shell, under
- * /_dev in `astro dev` alone.
+ * Routes for making the store, never built for zeron.sh: the fake's
+ * switches (the queue as a picture needs it, the edge, the fake itself),
+ * under /_dev in `astro dev` alone.
  * @type {import("astro").AstroIntegration}
  */
 const devPages = {
@@ -24,8 +24,6 @@ const devPages = {
   hooks: {
     "astro:config:setup": ({ command, injectRoute }) => {
       if (command !== "dev") return;
-      injectRoute({ pattern: "/_dev/sheet", entrypoint: "./src/dev/sheet.astro", prerender: false });
-      injectRoute({ pattern: "/_dev/shell", entrypoint: "./src/dev/shell.astro", prerender: false });
       injectRoute({ pattern: "/_dev/queue", entrypoint: "./src/dev/queue.ts", prerender: false });
       injectRoute({ pattern: "/_dev/edge", entrypoint: "./src/dev/edge.ts", prerender: false });
       injectRoute({ pattern: "/_dev/fake", entrypoint: "./src/dev/fake.ts", prerender: false });

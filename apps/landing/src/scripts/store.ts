@@ -174,6 +174,18 @@ document.addEventListener("click", (event) => {
   event.preventDefault();
   dialog.showModal();
 });
+// A question named in the address (Close it… on a plugin's report, a link
+// from its page), or one the page came back to (data-open: what was typed
+// before signing in again): opened as its opener would, the address let go
+// of it, so closing it closes it. (Without the script, :target shows it.)
+{
+  const named = location.hash.length > 1 ? document.getElementById(decodeURIComponent(location.hash.slice(1))) : null;
+  const question = named instanceof HTMLDialogElement ? named : document.querySelector<HTMLDialogElement>("dialog.question[data-open]");
+  if (question?.matches("dialog.question") && typeof question.showModal === "function") {
+    if (question === named) history.replaceState(history.state, "", location.pathname + location.search);
+    question.showModal();
+  }
+}
 // (A click on the dim closes it, where `closedby` isn't known yet.)
 for (const dialog of document.querySelectorAll<HTMLDialogElement>("dialog.question")) {
   if (typeof (dialog as { closedBy?: unknown }).closedBy === "string") continue;

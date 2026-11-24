@@ -427,6 +427,16 @@ describe("public pages are the same for everyone (so a shared cache can keep the
 });
 
 describe("signed-in pages", () => {
+  test("every staff page's crumbs start at Review, the store's word for the queue's page", async () => {
+    const grace = await site.signIn("user_grace");
+    for (const path of ["/admin/plugins/focus-timer", "/admin/plugins/focus-timer/1.2.0", "/admin/plugins/focus-timer/actions/suspend", "/admin/plugins/session-badges/1.2.1/decline"]) {
+      const { body } = await html(path, grace);
+      const crumbs = /<nav class="crumbs" aria-label="Where this is">([\s\S]*?)<\/nav>/.exec(body)?.[1] ?? "";
+      expect(crumbs, path).toMatch(/^\s*<a href="\/admin\/plugins">Review<\/a>/);
+      expect(crumbs, path).not.toContain("Queue");
+    }
+  });
+
   test("signed out, Your plugins, one of them, its questions and Deploy tokens say so and offer sign-in, here; never a redirect", async () => {
     for (const path of ["/account", "/account/tokens", "/account/tokens/new", "/account/plugins/focus-timer", "/account/plugins/focus-timer/versions/1.2.0/yank"]) {
       const { response, body } = await html(path);

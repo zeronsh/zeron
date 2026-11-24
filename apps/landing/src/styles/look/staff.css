@@ -3,6 +3,7 @@
 /* The tabs: the queue's lists and the staff pages beside them; on a phone, sideways. */
 .staff-tabs { overflow-x: auto; scrollbar-width: none; }
 .staff-tabs a { flex: none; }
+.acct h1 .title-count { color: var(--text-3); font-weight: inherit; }
 
 /* ---- The queue: what arrived, what it asks for against its newest verified version, how long it has waited ---- */
 .q { margin-top: 28px; margin-inline: calc(-1 * var(--card)); }
@@ -40,6 +41,14 @@
   .qr .read, .qr.h > :last-child { display: none; }
 }
 @media (max-width: 720px) {
+  .sr.h { display: none; }
+  .srows { border-radius: 0; }
+  /* (One column of lines, the row's button beside its first: as much weight as each list's own columns.) */
+  .srows ul > .sr { grid-template-columns: minmax(0, 1fr) auto; row-gap: 4px; column-gap: 16px; }
+  .sr > * { grid-column: 1 / -1; }
+  .sr > :first-child { grid-column: 1; }
+  .sr > .btn { grid-column: 2; grid-row: 1; }
+  .sr:not(.h) > :not(.btn, :first-child) { padding-top: 0; }
   .qr.h { display: none; }
   .qr { grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 18px var(--card); }
   .q { border-radius: 0; }
@@ -47,6 +56,62 @@
   .wait { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding-left: 58px; color: var(--text-2); }
   .wait small { margin: 0; }
 }
+
+/* ---- The staff's lists (Reports, Reserved ids, the Log): a card of rows, its head the columns' names ---- */
+.srows { margin-top: 28px; margin-inline: calc(-1 * var(--card)); }
+.srows ul { padding: 0; list-style: none; }
+.sr { display: grid; column-gap: 32px; align-items: start; padding: 16px var(--card); font-size: 14px; line-height: 22px; }
+.srows li + li.sr, .sr.h + ul .sr { box-shadow: 0 -1px 0 var(--line); }
+.sr.h { padding-top: 14px; padding-bottom: 12px; font-size: 13px; line-height: 20px; color: var(--text-3); }
+.sr > * { min-width: 0; overflow-wrap: anywhere; }
+/* (A row's words share a middle with its button, 32 high: 5 down to a 22-high line.) */
+.sr:not(.h) > :not(.btn) { padding-top: 5px; }
+.sr > .btn { justify-self: end; margin-right: calc(-1 * var(--pad)); }
+.sr .id { font: 500 13px/22px var(--mono); letter-spacing: -0.01em; }
+.sr small { display: block; font-size: 13px; line-height: 20px; color: var(--text-3); }
+.sr .why { color: var(--text-2); }
+.res .sr { grid-template-columns: minmax(0, 1fr) minmax(0, 0.8fr) minmax(0, 1.6fr) 96px 64px; }
+/* Reserve an id: under the list, a form of its own. */
+.reserve { margin-top: 56px; }
+.reserve h2 { font-size: 19px; line-height: 26px; }
+.reserve .lead2 { margin-top: 4px; font-size: 14px; line-height: 21px; color: var(--text-2); }
+.reserve .askcard { margin-top: 16px; max-width: 560px; }
+.reserve .body { margin-top: 0; }
+.site-ids { font-size: 13px; line-height: 20px; color: var(--text-3); }
+.site-ids .words { color: var(--text-2); }
+
+/* One plugin, for its reviewers (the author's plugin page's look): its head, what can be done to it, its versions, its reports. */
+.staff-plugin .mhead .by a { color: var(--text-2); font-weight: 500; }
+.staff-plugin .mhead .by a:hover { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
+.staff-acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; margin-left: -12px; }
+.staff-acts form { display: contents; }
+.staff-plugin .vr .vlink { font: 600 14px/22px var(--mono); color: var(--text); border-radius: 4px; }
+.staff-plugin .vr .vlink:hover { text-decoration: underline; text-underline-offset: 3px; }
+.staff-plugin .vr .means { gap: 2px; }
+.staff-plugin .vr .means p { font-size: 14px; line-height: 22px; overflow-wrap: anywhere; }
+.staff-plugin .vr .means small { display: block; margin-top: 2px; font-size: 13px; line-height: 20px; color: var(--text-3); }
+.staff-plugin .vr .pub { font-size: 14px; line-height: 22px; color: var(--text-2); }
+.staff-plugin .vr .act .btn { margin-right: calc(-1 * var(--pad)); }
+.sec-row { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+.sec-row h2 { display: flex; align-items: baseline; gap: 8px; font-size: 19px; line-height: 26px; }
+.sec-row h2 .num { font-size: 14px; font-weight: 450; color: var(--text-3); }
+.sec-row .more, .tools-line .more { display: inline-flex; align-items: center; gap: 2px; font-size: 14px; line-height: 20px; font-weight: 500; color: var(--text-2); border-radius: 4px; }
+.sec-row .more:hover, .tools-line .more:hover { color: var(--text); }
+.sec-row .more svg, .tools-line .more svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.staff-plugin .none { margin-top: 10px; font-size: 14px; color: var(--text-3); }
+.rep .sr { grid-template-columns: 96px minmax(0, 0.8fr) minmax(0, 2fr) 80px 84px; }
+.sr .said { display: block; color: var(--text); }
+
+/* Reports: its states, chips under the head; each report a row. */
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; margin-left: -12px; }
+.reps .sr { grid-template-columns: minmax(0, 1fr) minmax(0, 0.8fr) minmax(0, 2fr) 80px 84px; }
+.sr .pname { font-weight: 550; color: var(--text); border-radius: 4px; }
+.sr .pname:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+/* The log: when, who, what, and what else it recorded; a plugin's own when it's asked for. */
+.log .sr { grid-template-columns: 136px minmax(0, 0.7fr) minmax(0, 1.4fr) minmax(0, 1.4fr); }
+.tools-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; margin-top: 20px; font-size: 14px; line-height: 20px; color: var(--text-2); }
+.tools-line code { font: 500 13px/20px var(--mono); }
 
 /* ---- A version under review ---- */
 /* (The file tree, a file and its changes, and the decision's fields keep their own styles, written to the
@@ -180,25 +245,30 @@ em.mi { font-style: normal; color: var(--danger); }
 .rv-rail .more:hover { color: var(--text); }
 .decide-bar { display: none; }
 
-/* A question before a decision: a dialog, its fields, the author's view of what they'll read. */
-.question .weigh-line { margin-top: 14px; padding: 10px 12px; border-radius: 10px; font-size: 13.5px; line-height: 20px; }
-.question .weigh-line.warn { color: var(--warn); background: var(--warn-wash); }
-.question .weigh-line.bad { color: var(--danger); background: var(--danger-wash); }
-.question .body { display: grid; gap: 16px; margin-top: 18px; }
-.question .field-label { display: block; margin-bottom: 6px; font-size: 13px; line-height: 20px; font-weight: 500; color: var(--text-2); }
-.question .field { position: relative; }
-.question .field select, .question .field textarea { display: block; width: 100%; padding: 9px 12px; border: 0; border-radius: 10px; background: var(--bg); color: var(--text); font: inherit; font-size: 14px; line-height: 20px; box-shadow: inset 0 0 0 1px var(--line-2); }
-.question .field select { appearance: none; padding-right: 36px; height: 40px; }
-.question .field textarea { resize: vertical; min-height: 96px; }
-.question .field select:focus-visible, .question .field textarea:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
-.question .field .chevron { position: absolute; right: 12px; top: 50%; translate: 0 -50%; color: var(--text-3); pointer-events: none; }
-.question .field-hint { margin-top: 6px; font-size: 12.5px; line-height: 18px; color: var(--text-3); }
-.question .preview { padding: 12px 14px; border-radius: 12px; background: var(--sunken); }
-.question .preview .line { display: flex; align-items: center; gap: 8px; font: 600 13px/20px var(--mono); }
-.question .preview .badge { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: 11px; font: 550 12px/1 var(--sans); color: var(--warn); background: var(--warn-wash); }
-.question .preview .said { margin-top: 6px; font-size: 14px; line-height: 21px; overflow-wrap: anywhere; }
-.question .preview .said.is-empty { color: var(--text-3); }
-.question .preview .who { margin-top: 4px; font-size: 12.5px; line-height: 18px; color: var(--text-3); }
+/* A question before a decision: a dialog, or the same question as a page (AskCard); its fields, the author's
+   view of what they'll read. Each field a box that holds text, so it hangs by its padding. */
+:is(.question, .askcard) .weigh-line { margin-top: 14px; margin-inline: -12px; padding: 10px 12px; border-radius: 10px; font-size: 13.5px; line-height: 20px; }
+:is(.question, .askcard) .weigh-line.warn { color: var(--warn); background: var(--warn-wash); }
+:is(.question, .askcard) .weigh-line.bad { color: var(--danger); background: var(--danger-wash); }
+:is(.question, .askcard) .preview { margin-inline: -14px; padding: 12px 14px; border-radius: 12px; background: var(--sunken); }
+:is(.question, .askcard) .preview .line { display: flex; align-items: center; gap: 8px; font: 600 13px/20px var(--mono); }
+:is(.question, .askcard) .preview .badge { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: 11px; font: 550 12px/1 var(--sans); color: var(--warn); background: var(--warn-wash); }
+:is(.question, .askcard) .preview .said { margin-top: 6px; font-size: 14px; line-height: 21px; overflow-wrap: anywhere; }
+:is(.question, .askcard) .preview .said.is-empty { color: var(--text-3); }
+:is(.question, .askcard) .preview .who { margin-top: 4px; font-size: 12.5px; line-height: 18px; color: var(--text-3); }
+
+.askcard .cut { margin-top: 0; }
+.askcard .weigh-line { margin-top: 0; }
+/* What is being decided, on the question's page (components/look/Deciding.astro). */
+.deciding { display: flex; align-items: flex-start; gap: 12px; }
+.deciding .words { min-width: 0; }
+.deciding .name { margin: 0; font-weight: 550; line-height: 22px; color: var(--text); overflow-wrap: anywhere; }
+.deciding .ver { font: 550 13px/22px var(--mono); color: var(--text-2); }
+.askcard .deciding .facts { margin-top: 2px; font-size: 13px; line-height: 20px; color: var(--text-3); overflow-wrap: anywhere; }
+.deciding .more { display: inline-flex; align-items: center; gap: 2px; margin-top: 4px; font-size: 13px; line-height: 20px; font-weight: 500; color: var(--text-2); border-radius: 4px; }
+.deciding .more:hover { color: var(--text); }
+.deciding .more svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.askcard > .flash.elsewhere { margin-top: 16px; }
 
 @media (max-width: 1024px) {
   .files-view { grid-template-columns: minmax(0, 1fr); }

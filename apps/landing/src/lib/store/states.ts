@@ -5,7 +5,7 @@
 import type { Listing, PluginStatus, Review, VersionInfo } from "./types.ts";
 import { statusWords, store } from "./words.ts";
 
-/** A badge's tone: its ink on its wash (app.css .badge, by toneClass). */
+/** A state's tone: its ink on its wash (the store's pills, by PILL_TONE). */
 export type Tone = "neutral" | "accent" | "info" | "success" | "warning" | "danger";
 
 export interface State {
@@ -95,5 +95,5 @@ export const reasonWords = (reason: string) => {
   return words.charAt(0).toUpperCase() + words.slice(1);
 };
 
-/** A tone as the app's stylesheet names its badge (styles/app.css). */
-export const toneClass = (tone: Tone): string => ({ neutral: "", accent: "accent", info: "info", success: "ok", warning: "warn", danger: "bad" })[tone];
+/** A state's pill in the store's look (styles/look/store.css .state): its tone's class. */
+export const PILL_TONE: Record<Tone, string> = { success: "ok", danger: "bad", warning: "bad", info: "no", accent: "quiet", neutral: "quiet" };

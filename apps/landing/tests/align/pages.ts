@@ -33,6 +33,7 @@ export const EXCEPTIONS: [string, string][] = [
   ["li li", "a list inside a list item steps in under it, as its level"],
   [".stage", "a screenshot set into its card's coloured stage: a picture, placed by the stage"],
   ["p code, li > code:not(:first-child)", "code inside a sentence that wraps to a line's start keeps its chip's 5 px"],
+  ["pre > code", "a code block's lines start where the code puts them: its indentation is the code's"],
 ];
 
 /** The columns of the look: the page's, Browse's two, a plugin's rail and its Get, Files' two, a dialog's. */
@@ -80,6 +81,21 @@ export const ALIGN_PAGES: AlignPage[] = [
   { name: "review-first", path: "/admin/plugins/first-light/0.1.0", user: "user_grace" },
   { name: "review-files", path: "/admin/plugins/xss-probe/1.1.0?view=files", user: "user_grace" },
   { name: "review-changes", path: "/admin/plugins/xss-probe/1.1.0?view=changes", user: "user_grace" },
+  // The pages that were on the old app window: the guide, a report, the staff's lists and questions.
+  { name: "guide", path: "/plugins/publishing" },
+  { name: "report", path: "/plugins/focus-timer/report", user: "user_kai" },
+  { name: "staff-reports", path: "/admin/reports", user: "user_grace" },
+  { name: "staff-reports-closed", path: "/admin/reports?status=actioned", user: "user_grace" },
+  { name: "staff-reservations", path: "/admin/reservations", user: "user_grace" },
+  { name: "staff-reservation", path: "/admin/reservations/zeron-tools", user: "user_grace" },
+  { name: "staff-log", path: "/admin/audit", user: "user_grace" },
+  { name: "staff-log-plugin", path: "/admin/audit?plugin=focus-timer", user: "user_grace" },
+  { name: "staff-plugin", path: "/admin/plugins/focus-timer", user: "user_grace" },
+  { name: "staff-plugin-suspended", path: "/admin/plugins/crypto-ticker", user: "user_grace" },
+  { name: "staff-suspend", path: "/admin/plugins/focus-timer/actions/suspend", user: "user_grace" },
+  { name: "staff-transfer", path: "/admin/plugins/focus-timer/actions/transfer", user: "user_grace" },
+  { name: "staff-decline", path: "/admin/plugins/session-badges/1.2.1/decline", user: "user_grace" },
+  { name: "staff-verify", path: "/admin/plugins/session-badges/1.2.1/verify", user: "user_grace" },
 ];
 
 export const RESET: [string, Record<string, string>][] = [["empty", {}], ["down", {}], ["bare", {}], ["queue", {}], ["tokens", {}]];
