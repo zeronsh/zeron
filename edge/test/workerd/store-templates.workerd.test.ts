@@ -462,6 +462,46 @@ describe("templates: staff", () => {
     expect((await json<{ templates: { id: string }[] }>(await get("/me/templates", b.userId))).templates.map((t) => t.id)).toContain(temp);
   });
 
+  it("marks each file of a template against Zeron's own at the version it was made from", async () => {
+    const a = await author();
+    const plug = uniqueId("p");
+    const temp = uniqueId("t");
+    await listedTemplate(a, uniqueId("t"), "1.0.0");
+    await listed(a, plug, "1.0.0");
+    // Its own Zeron's version, of this test's alone.
+    const zeron = `0.3.0-${randomLetters(8)}`;
+    await publishedTemplate(a, temp, "1.0.0", {
+      manifest: { zeron_version: zeron },
+      files: { "ds/same.luau": "return 1", "ds/changed.luau": "return 2", "DS/Spelt.luau": "return 3", "ds/added.luau": "return 4" }
+    });
+    const view = async (id: string) => json<{ files: { path: string; sha256: string; zeron: string | null }[]; zeron_base: unknown; publisher: unknown }>(await adminCall("GET", `/store/v1/admin/versions/${id}/1.0.0`));
+    const marks = async () => Object.fromEntries((await view(temp)).files.map((f) => [f.path, f.zeron]));
+    // Not known: nothing is marked, and it says so.
+    const unknown = await view(temp);
+    expect(unknown.zeron_base).toEqual({ version: zeron, known: false });
+    expect(unknown.files.length).toBeGreaterThan(4);
+    expect(unknown.files.every((f) => f.zeron === null)).toBe(true);
+    const sha = (path: string) => unknown.files.find((f) => f.path === path)!.sha256;
+    const put = (doc: unknown, key = zeron) => env.PLUGIN_STORE.put(`stock/${key}.json`, typeof doc === "string" ? doc : JSON.stringify(doc));
+    const files = { "ds/same.luau": sha("ds/same.luau"), "ds/changed.luau": "0".repeat(64), "ds/spelt.luau": sha("DS/Spelt.luau"), "ds/left-out.luau": "1".repeat(64) };
+    // Another version's, or not as the generator writes it: not known.
+    await put({ version: zeron, files }, "0.3.0");
+    expect((await view(temp)).zeron_base).toEqual({ version: zeron, known: false });
+    for (const bad of ["{", "null", { version: "0.3.0", files }, { version: zeron }, { version: zeron, files: {} }, { version: zeron, files: [] }, { version: zeron, files: { x: "y" } }]) {
+      await put(bad);
+      expect((await view(temp)).zeron_base, JSON.stringify(bad)).toEqual({ version: zeron, known: false });
+    }
+    await put({ version: zeron, files });
+    expect((await view(temp)).zeron_base).toEqual({ version: zeron, known: true });
+    expect(await marks()).toMatchObject({ "ds/same.luau": "same", "ds/changed.luau": "changed", "DS/Spelt.luau": "changed", "ds/added.luau": "new", "preview.png": "new" });
+    expect(Object.values(await marks())).not.toContain(null);
+    // A plugin has none; its author's block counts each kind.
+    const own = await view(plug);
+    expect(own.zeron_base).toBeNull();
+    expect(own.files.every((f) => f.zeron === null)).toBe(true);
+    expect(own.publisher).toMatchObject({ plugins: { total: 1, verified: 1 }, templates: { total: 2, verified: 1 } });
+  });
+
   it("holds the schema to the two kinds, one namespace, and the kind of a take-down", async () => {
     const insert = (id: string, kind: string) =>
       env.STORE_DB.prepare("INSERT INTO plugins (id, kind, owner_id, owner_since, skeleton, created_at) VALUES (?, ?, 'user_x', 1, ?, 1)").bind(id, kind, `__schema:${id}`).run();

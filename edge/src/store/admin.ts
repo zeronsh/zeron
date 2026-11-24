@@ -45,6 +45,7 @@ import { purgeCatalog, purgeTakedowns } from "./purge";
 import { isUnused, releaseId } from "./release";
 import { SITE_IDS } from "./listing";
 import { decodeSegment } from "./serve";
+import { stockOf } from "./stock";
 import { foldUsername } from "../username";
 
 const MAX_BODY = 8 * 1024;
@@ -262,7 +263,7 @@ const partsSql = (alias: string): string => `json_extract(${alias}.manifest, ${A
 const baseSql = (alias: string): string =>
   `SELECT rowid FROM versions WHERE plugin_id = ${alias}.plugin_id AND version != ${alias}.version AND verification = 'verified' ORDER BY ${VERSION_ORDER} LIMIT 1`;
 
-const versionView = async (env: Env, db: D1Database, id: string, versionText: string): Promise<Response> => {
+const versionView = async (env: Env, db: D1Database, bucket: R2Bucket, id: string, versionText: string): Promise<Response> => {
   const [plugin, v] = await Promise.all([pluginRow(db, id), versionRow(db, id, versionText)]);
   if (!plugin || !v) return notFound();
   const base = await db
@@ -275,7 +276,11 @@ const versionView = async (env: Env, db: D1Database, id: string, versionText: st
       .bind(id, q.version)
       .all<{ path: string; bytes: number; sha256: string; kind: string }>()
       .then((r) => r.results.map((f) => ({ path: f.path, bytes: f.bytes, sha256: f.sha256, kind: f.kind, binary: f.kind === "binary" })));
-  const [ownFiles, baseFiles, decisions, recent, authors, standing] = await Promise.all([
+  // The Zeron a template was made from (its listing's engines, `>=` it).
+  const madeFrom = plugin.kind === "template" ? (v.engines_zeron ?? "").replace(/^>=/, "") : null;
+  const counts = (kind: Kind, verified: boolean): string =>
+    `(SELECT COUNT(*) FROM plugins p WHERE p.owner_id = ?1 AND ${listedOf(kind)}${verified ? " AND p.verified_version IS NOT NULL" : ""})`;
+  const [ownFiles, baseFiles, decisions, recent, authors, standing, stock] = await Promise.all([
     files(v),
     base ? files(base) : Promise.resolve([]),
     db
@@ -291,15 +296,16 @@ const versionView = async (env: Env, db: D1Database, id: string, versionText: st
       .all<{ plugin_id: string; version: string; status: string; verification: string; published_at: number }>(),
     authorsOf(env, [v.publisher_id, plugin.owner_id]),
     // When the account first listed a version (publishing lists it), and
-    // its listed plugins, how many with a verified version.
+    // its listed plugins and templates, how many with a verified version.
     db
       .prepare(
         `SELECT (SELECT MIN(published_at) FROM versions WHERE publisher_id = ?1) AS first_published_at,
-                (SELECT COUNT(*) FROM plugins p WHERE p.owner_id = ?1 AND (${KINDS.map((k) => `(${listedOf(k)})`).join(" OR ")})) AS total,
-                (SELECT COUNT(*) FROM plugins p WHERE p.owner_id = ?1 AND (${KINDS.map((k) => `(${listedOf(k)})`).join(" OR ")}) AND p.verified_version IS NOT NULL) AS verified`
+                ${counts("plugin", false)} AS plugins, ${counts("plugin", true)} AS plugins_verified,
+                ${counts("template", false)} AS templates, ${counts("template", true)} AS templates_verified`
       )
       .bind(v.publisher_id)
-      .first<{ first_published_at: number | null; total: number; verified: number }>()
+      .first<{ first_published_at: number | null; plugins: number; plugins_verified: number; templates: number; templates_verified: number }>(),
+    madeFrom === null ? undefined : stockOf(bucket, madeFrom)
   ]);
   const publisher = authors[v.publisher_id]!;
   const owner = authors[plugin.owner_id]!;
@@ -324,11 +330,15 @@ const versionView = async (env: Env, db: D1Database, id: string, versionText: st
       decisions: { verified: decisions?.verified ?? 0, declined: decisions?.declined ?? 0 },
       recent: recent.results.map((r) => ({ ...r, verified: r.verification === "verified" })),
       first_published_at: standing?.first_published_at ?? null,
-      plugins: { total: standing?.total ?? 0, verified: standing?.verified ?? 0 }
+      plugins: { total: standing?.plugins ?? 0, verified: standing?.plugins_verified ?? 0 },
+      templates: { total: standing?.templates ?? 0, verified: standing?.templates_verified ?? 0 }
     },
     manifest: parseStoredJson(v.manifest, null),
     ...(base ? { base: { version: base.version, manifest: parseStoredJson(base.manifest, null) } } : {}),
-    files: ownFiles,
+    // Each against Zeron's own at the version a template says it was made
+    // from (a plugin's, or where that isn't known: null).
+    files: ownFiles.map((f) => ({ ...f, zeron: stock?.(f.path, f.sha256) ?? null })),
+    zeron_base: madeFrom === null ? null : { version: madeFrom, known: stock !== undefined },
     base_files: baseFiles,
     checks: parseStoredJson(v.checks, []),
     // (A template asks for nothing.)
@@ -858,7 +868,7 @@ export const handleAdmin = async (request: Request, env: Env, db: D1Database, bu
   if (section === "versions" && a && b) {
     const versionText = decodeSegment(b);
     if (!versionText || !ID_RE.test(a)) return notFound();
-    if (parts.length === 4 && get) return versionView(env, db, a, versionText);
+    if (parts.length === 4 && get) return versionView(env, db, bucket, a, versionText);
     if (parts.length === 5 && post && (c === "verify" || c === "decline")) return versionAction(db, admin.userId, undefined, a, versionText, c, body);
   }
   const kind = kindOfSegment(section);
