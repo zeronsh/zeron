@@ -38,6 +38,8 @@ export const EXCEPTIONS: [string, string][] = [
   [".step-n", "a step's number hangs in the gutter, left of its title (Tailwind's steps)"],
   [".anchor", "a heading's # hangs in the gutter, left of its words"],
   [".head .get", "getting a plugin is set at the head's right: its lines end on the page's right edge (align.test.ts, the Get test, holds it)"],
+  [".hero", "the store's hero is centred, its title, line and search on the page's middle, not its edge (Raycast's, Vercel's)"],
+  [".make", "the store's ending is one centred block"],
   [".cb-label", "a code block's file name as typed: `.github/…` begins with a dot, its ink mid-cell"],
 ];
 

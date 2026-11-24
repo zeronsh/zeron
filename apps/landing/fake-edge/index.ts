@@ -106,6 +106,9 @@ function card(p: FakePlugin, version: FakeVersion | undefined = latest(p)) {
     name: String(m.name),
     summary: String(m.description),
     icon: listedVersion && typeof m.icon === "string" ? m.icon : null,
+    // (Its first picture's path in the package, of the version it shows; null when that has none: the edge's
+    // card, as asked of it.)
+    cover: listedVersion && state.bare !== p.id ? (((listedVersion.manifest.screenshots as string[] | undefined) ?? [])[0] ?? null) : null,
     author: author(p.owner),
     categories: (m.categories as string[]) ?? [],
     keywords: (m.keywords as string[]) ?? [],

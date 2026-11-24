@@ -1,17 +1,33 @@
-/* The store (/plugins): its title block, the sidebar beside the list, Featured over the list unnarrowed, the
-   list as a grid of the one card, and its ending. Spacing by the scale's steps only (store.css :root). */
+/* The store (/plugins): its centred hero (the title, a line, the search), Featured unnarrowed, then the sidebar
+   beside the list (its count and order, a grid of the one card, the pages), and its ending, centred. Spacing by
+   the scale's steps only (store.css :root). */
 .crumbs { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s8); font-size: 13px; line-height: 20px; color: var(--text-3); }
 .crumbs svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .crumbs a { border-radius: 4px; transition: color 0.12s var(--ease); }
 .crumbs a:hover { color: var(--text); }
 
-.store-page { padding-top: var(--s48); padding-bottom: var(--sections); }
-.bhead { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--s48); }
-.bhead h1 { font-size: 40px; line-height: 44px; letter-spacing: -0.035em; overflow-wrap: anywhere; }
-.bhead .lead { margin-top: var(--head); max-width: 40em; }
+/* (The ending sits a section and a half above the footer.) */
+.store-page { padding-top: var(--s64); padding-bottom: calc(var(--s64) + var(--s32)); }
 
-/* The title block, then the sidebar beside the list. */
-.browse { display: grid; grid-template-columns: 208px minmax(0, 1fr); gap: var(--s64); margin-top: var(--title); align-items: start; }
+/* The hero: centred, the title large, a line, then the search, the page's one (the bar's isn't drawn here). */
+.hero { display: flex; flex-direction: column; align-items: center; text-align: center; }
+.hero h1 { font-size: 56px; line-height: 64px; font-weight: 600; letter-spacing: -0.04em; overflow-wrap: anywhere; max-width: 100%; }
+.hero .lead { margin-top: var(--head); max-width: 640px; font-size: 18px; line-height: 28px; text-wrap: balance; }
+.hfind { position: relative; display: flex; align-items: center; width: 100%; max-width: 560px; height: 48px; margin-top: var(--groups); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-1); color: var(--text-3); text-align: left; transition: box-shadow 0.12s var(--ease); }
+.hfind:hover { box-shadow: 0 0 0 1px var(--line-2); }
+.hfind:focus-within { box-shadow: 0 0 0 1px var(--line-2), 0 0 0 4px color-mix(in srgb, var(--focus) 22%, transparent); }
+.hfind > svg { position: absolute; left: var(--s16); width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; pointer-events: none; }
+.hfind input { flex: 1; min-width: 0; height: 100%; padding: 0 var(--s48) 0 var(--s48); border: 0; background: none; font-size: 16px; color: var(--text); }
+.hfind input::placeholder { color: var(--text-3); }
+.hfind input:focus-visible { outline: none; }
+.hfind input::-webkit-search-cancel-button { display: none; }
+.hfind .kbd { position: absolute; right: var(--s16); }
+
+/* Below the hero, a section's step to what's next: Featured, or the list. */
+.hero + * { margin-top: var(--sections); }
+.featured + .browse { margin-top: var(--sections); }
+/* The sidebar beside the list. */
+.browse { display: grid; grid-template-columns: 208px minmax(0, 1fr); gap: var(--s64); align-items: start; }
 
 /* The sidebar: its groups a group's distance apart, each label its step above what it labels. */
 .facets { display: flex; flex-direction: column; gap: var(--groups); position: sticky; top: 88px; }
@@ -37,50 +53,78 @@
 .tags .tag { display: block; max-width: 100%; line-height: 24px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tags .tag[aria-current] { background: var(--text); color: var(--bg); }
 
-/* The list's column: Featured, then the list, a section's distance apart. */
-.listing { display: flex; flex-direction: column; gap: var(--sections); min-width: 0; }
-/* A section's head: its heading and, on the same line, an action; its content a head's step below. */
-.sec-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s16); }
-.sec-head h2 { font-size: 21px; line-height: 28px; }
-.featured .feat-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--items); margin-top: var(--head); margin-inline: calc(-1 * var(--card)); padding: 0; list-style: none; }
+/* A section's head: its heading and, beside it, a quiet word; its content a head's step below. */
+.featured .sec-head { justify-content: flex-start; gap: var(--s12); margin-bottom: 0; }
+.featured .sec-head h2 { font-size: 21px; line-height: 28px; }
+.sec-aside { font-size: 14px; line-height: 20px; color: var(--text-3); }
 
+/* Featured: three picks, picture first. */
+.feat-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s24); margin-top: var(--head); padding: 0; list-style: none; }
+.feat-row li { display: flex; min-width: 0; }
+.ftile { flex: 1; display: flex; flex-direction: column; gap: var(--s16); min-width: 0; border-radius: 12px; }
+.ftile:focus-visible { outline-offset: var(--s4); }
+.ft-cover { position: relative; display: grid; place-items: center; aspect-ratio: 16 / 10; border-radius: 12px; overflow: hidden; background: var(--sunken); }
+.ft-cover::after { content: ""; position: absolute; inset: 0; border-radius: inherit; box-shadow: inset 0 0 0 1px var(--line); pointer-events: none; transition: box-shadow 0.12s var(--ease); }
+.ftile:hover .ft-cover::after { box-shadow: inset 0 0 0 1px var(--line-2); }
+.ft-cover img { width: 100%; height: 100%; object-fit: cover; object-position: top left; transition: scale 0.24s var(--ease); }
+.ftile:hover .ft-cover img { scale: 1.015; }
+/* (No picture: its tile, centred on its hue as a soft light.) */
+.ft-cover.bare { background:
+    radial-gradient(70% 90% at 50% 40%, oklch(var(--stage-l1) calc(var(--stage-c) * 1.6) var(--h)), transparent 75%),
+    linear-gradient(160deg, oklch(var(--stage-l1) var(--stage-c) var(--h)), oklch(var(--stage-l2) var(--stage-c) calc(var(--h) - 14))); }
+.ft-body { display: flex; gap: var(--s12); min-width: 0; }
+.ft-txt { display: flex; flex-direction: column; min-width: 0; }
+.ft-name { display: flex; align-items: center; gap: var(--s8); min-width: 0; font-size: 15px; line-height: 20px; font-weight: 600; color: var(--text); }
+.ft-name .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ft-sum { margin-top: var(--s4); font-size: 14px; line-height: 20px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ft-meta { display: flex; align-items: center; gap: var(--s8); margin-top: var(--s4); font-size: 13px; line-height: 20px; color: var(--text-3); white-space: nowrap; }
+.ft-meta i, .pc-meta i { width: 3px; height: 3px; flex: none; border-radius: 50%; background: currentColor; opacity: 0.6; }
+
+/* The list's column: its count and order, then the grid. */
+.listing { min-width: 0; }
 .rhead { display: flex; align-items: center; justify-content: space-between; gap: var(--s16); min-height: 32px; }
 .rhead p { color: var(--text-2); font-size: 14px; }
 .rhead p b { color: var(--text); font-weight: 600; }
-.sort { --pad: var(--s12); display: flex; align-items: center; flex-wrap: wrap; gap: var(--s4); margin-right: calc(-1 * var(--pad)); font-size: 14px; }
-.sort span { color: var(--text-3); margin-right: var(--s8); font-size: 13px; }
-.sort a { height: 32px; display: flex; align-items: center; padding: 0 var(--pad); border-radius: 9px; color: var(--text-2); font-weight: 450; transition: background-color 0.12s var(--ease), color 0.12s var(--ease); }
-.sort a:hover { color: var(--text); background: color-mix(in srgb, var(--sunken) 60%, transparent); }
-.sort a[aria-current] { color: var(--text); background: var(--sunken); font-weight: 550; }
 
-/* The list: two a row, each the one card, an item's distance apart (so each reads as one). */
-.results { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--items); margin-top: var(--head); margin-inline: calc(-1 * var(--card)); padding: 0; list-style: none; }
-.results li, .feat-row li { display: flex; min-width: 0; }
+/* The list: three a row on a wide screen, two, then one; each the one card, which hangs by its padding. */
+.results { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s8); margin-top: var(--head); margin-inline: calc(-1 * var(--s16)); padding: 0; list-style: none; }
+.results li { display: flex; min-width: 0; }
 
-/* The one card (components/look/PluginCard.astro): one plugin, so one border; inside it, an item's steps. */
-.pcard { flex: 1; display: flex; gap: var(--s16); min-width: 0; padding: var(--s24); border-radius: 16px; background: var(--surface); box-shadow: var(--shadow-1), 0 0 0 1px var(--line); transition: box-shadow 0.12s var(--ease); }
-.pcard:hover { box-shadow: var(--shadow-2), 0 0 0 1px var(--line-2); }
-.pcard:focus-visible { outline-offset: var(--s4); }
+/* The one card (components/look/PluginCard.astro): nothing round it at rest; hovered or focused, the whole of
+   it fills at the surface's tone. Its words on the list's column (it hangs by its padding). */
+.pcard { flex: 1; display: flex; gap: var(--s16); min-width: 0; padding: var(--s16); border-radius: 12px; transition: background-color 0.12s var(--ease); }
+.pcard:hover, .pcard:focus-visible { background: var(--surface); }
+.pcard:focus-visible { outline-offset: 0; }
 .pc-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.pc-name { display: flex; align-items: center; gap: var(--s8); font-size: 16px; line-height: 22px; font-weight: 600; letter-spacing: -0.012em; min-width: 0; color: var(--text); }
+.pc-name { display: flex; align-items: center; gap: var(--s8); font-size: 15px; line-height: 20px; font-weight: 600; letter-spacing: -0.01em; min-width: 0; color: var(--text); }
 .pc-name .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pc-by { margin-top: var(--s4); color: var(--text-3); font-size: 13px; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pc-sum { flex: 1; margin-top: var(--s8); color: var(--text-2); font-size: 14px; line-height: 21px; min-height: 42px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
-.pc-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--s12); margin-top: var(--s16); min-height: 24px; color: var(--text-3); font-size: 13px; line-height: 20px; white-space: nowrap; }
-.pc-foot .state { min-width: 0; overflow: hidden; text-overflow: ellipsis; margin-left: calc(-1 * var(--pad)); }
-/* Featured: the same card a size up, its tile above its words. */
-.pcard.lg { flex-direction: column; gap: var(--s16); }
-.pcard.lg .pc-name { font-size: 18px; line-height: 24px; }
-.pcard.lg .pc-sum { -webkit-line-clamp: 3; min-height: 63px; }
+.pc-sum { margin-top: var(--s4); color: var(--text-2); font-size: 14px; line-height: 20px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.pc-meta { display: flex; align-items: center; gap: var(--s8); min-width: 0; margin-top: var(--s8); color: var(--text-3); font-size: 13px; line-height: 20px; white-space: nowrap; }
+.pc-by { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.pc-meta .state { flex: none; height: 20px; }
 
-/* The ending: who it's for, the command, the guide; no box round it, a section's distance below the list. */
-.make { display: flex; align-items: center; justify-content: space-between; gap: var(--s32); margin-top: var(--sections); padding-top: var(--s32); box-shadow: 0 -1px 0 var(--line); }
-.make h2 { font-size: 19px; line-height: 26px; }
-.make p { margin-top: var(--s8); max-width: 34em; color: var(--text-2); font-size: 14px; line-height: 21px; }
-.make-acts { display: flex; align-items: center; gap: var(--s12); flex: none; }
+/* The pages: the numbers centred, the count under them. */
+.pager.numbered { flex-direction: column; justify-content: flex-start; gap: var(--s8); margin-top: var(--groups); padding-top: 0; box-shadow: none; }
+.pager.numbered > * { margin-inline: 0; }
+.pages { display: flex; align-items: center; gap: var(--s4); }
+.pg { display: grid; place-items: center; min-width: 32px; height: 32px; padding: 0 var(--s8); border-radius: 8px; font-size: 14px; color: var(--text-2); transition: background-color 0.12s var(--ease), color 0.12s var(--ease); }
+a.pg:hover { background: var(--sunken); color: var(--text); }
+.pg[aria-current] { background: var(--surface); box-shadow: var(--shadow-1); color: var(--text); font-weight: 550; }
+.pg.gap { min-width: 0; padding: 0; color: var(--text-3); }
+.pg.step svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.pg.step:first-child svg { rotate: 180deg; }
+span.pg.step { color: var(--text-3); opacity: 0.5; }
+.pager.numbered p { font-size: 13px; line-height: 20px; color: var(--text-3); }
 
-/* The phone's order and filters: two disclosures, each opening a small panel under it (no script). */
-.fbar { display: none; }
+/* The ending: one centred block; the guide, then the command. */
+.make { display: flex; flex-direction: column; align-items: center; text-align: center; margin-top: var(--sections); }
+.make h2 { font-size: 21px; line-height: 28px; }
+.make p { margin-top: var(--s8); max-width: 34em; color: var(--text-2); font-size: 15px; line-height: 24px; }
+.make-acts { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: var(--s12); margin-top: var(--s24); }
+
+/* The order (every width) and the phone's filters: disclosures, each opening a small panel under it (no script). */
+.fbar { display: flex; align-items: center; gap: var(--s8); }
+.narrow-only { display: none; }
 .drop { position: relative; }
 .drop summary { --pad: var(--s12); display: flex; align-items: center; gap: var(--s8); height: 32px; padding: 0 var(--s8) 0 var(--pad); border-radius: 9px; font-size: 13px; font-weight: 500; color: var(--text); background: var(--surface); box-shadow: var(--shadow-1); list-style: none; cursor: pointer; white-space: nowrap; transition: box-shadow 0.12s var(--ease); }
 .drop summary::-webkit-details-marker { display: none; }
@@ -96,11 +140,17 @@
 .drop .pop.wide .facet-h { margin: 0 0 var(--label); }
 .drop .pop.wide .pick + .facet-h { margin-top: var(--groups); }
 
+/* (The order's menu: the label quiet, what it is in the text's ink; its panel under it, at its right.) */
+.sort summary { font-weight: 500; }
+.sort summary .t3 { font-weight: 450; }
+
+@media (max-width: 1279px) {
+  .results { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 @media (max-width: 1024px) {
   .browse { grid-template-columns: 188px minmax(0, 1fr); gap: var(--s48); }
-  .results { grid-template-columns: minmax(0, 1fr); }
-  .featured .feat-row { grid-template-columns: minmax(0, 1fr); }
-  .pcard.lg { flex-direction: row; }
+  .feat-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .feat-row li:nth-child(3) { display: none; }
 }
 @media (max-width: 860px) {
   .browse { grid-template-columns: minmax(0, 1fr); gap: var(--s32); }
@@ -110,21 +160,17 @@
   .catlist a { flex: none; gap: var(--s8); height: 32px; border-radius: 16px; font-size: 13px; font-weight: 500; box-shadow: inset 0 0 0 1px var(--line-2); }
   .catlist a[aria-current] { background: var(--text); color: var(--bg); box-shadow: none; font-weight: 500; }
   .catlist a[aria-current] .num { color: color-mix(in srgb, var(--bg) 62%, var(--text)); }
-  .sort { display: none; }
-  .fbar { display: flex; gap: var(--s8); margin-left: calc(-1 * var(--s12)); }
-  .make { flex-direction: column; align-items: flex-start; }
-  /* (The command and the guide are boxes of 16 a side: stacked on a phone, each hangs by it.) */
-  .make-acts { flex-wrap: wrap; margin-left: calc(-1 * var(--s16)); }
+  .narrow-only { display: block; }
 }
 @media (max-width: 720px) {
-  .store-page { padding-top: var(--s32); padding-bottom: var(--s48); }
-  .bhead h1 { font-size: 32px; line-height: 36px; }
-  /* (On a phone the store's sections are 32 apart; its chips head the list.) */
-  .listing { gap: var(--s32); }
-  /* (As wide as the column, as wide as the screen: each card the screen's width, an item's distance apart.) */
-  .results, .featured .feat-row { margin-inline: calc(-1 * var(--gutter)); }
-  .pcard { padding: var(--s24) var(--gutter); border-radius: 0; }
-  .pcard .tile.l { width: 44px; height: 44px; font-size: 19px; }
-  .pc-sum { min-height: 0; }
-  .pcard.lg .pc-sum { min-height: 0; }
+  .store-page { padding-top: var(--s32); padding-bottom: var(--s64); }
+  .hero h1 { font-size: 36px; line-height: 44px; }
+  .hero .lead { font-size: 16px; line-height: 24px; }
+  .hfind { margin-top: var(--s24); }
+  .hero + *, .featured + .browse { margin-top: var(--s48); }
+  /* (One a row; the picks a sideways row, the next one's edge in view.) */
+  .results { grid-template-columns: minmax(0, 1fr); }
+  .feat-row { grid-auto-flow: column; grid-template-columns: none; grid-auto-columns: 84%; gap: var(--s16); overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; margin-inline: calc(-1 * var(--gutter)); padding-inline: var(--gutter); scroll-padding-inline: var(--gutter); }
+  .feat-row li { scroll-snap-align: start; }
+  .feat-row li:nth-child(3) { display: flex; }
 }

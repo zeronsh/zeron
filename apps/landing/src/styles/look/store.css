@@ -154,6 +154,8 @@ pre, pre *, code, .mono, .fn { font-variant-ligatures: none !important; }
 .find .kbd { position: absolute; right: 10px; }
 .kbd { flex: none; font: 500 11px/20px var(--mono); padding: 0 var(--s8); min-width: 20px; text-align: center; border-radius: 6px; color: var(--text-3); box-shadow: inset 0 0 0 1px var(--line-2); }
 .find-icon { display: none; }
+/* (A page with its own search, the store's: the bar's isn't drawn, so there's one.) */
+.own-search .top .find { display: none; }
 .signin { font-size: 14px; font-weight: 500; color: var(--text-2); border-radius: 6px; transition: color 0.12s var(--ease); }
 .signin:hover { color: var(--text); }
 .me { display: flex; align-items: center; gap: var(--s8); height: 36px; padding: 0 var(--s12) 0 var(--s4); margin-right: calc(-1 * var(--s12)); border-radius: 18px; font-size: 14px; font-weight: 500; transition: background-color 0.12s var(--ease); }
@@ -202,7 +204,15 @@ h3 { font-size: 15px; line-height: 22px; font-weight: 600; letter-spacing: -0.00
   font-size: 19px; line-height: 1; font-weight: 600; letter-spacing: -0.01em; user-select: none;
 }
 .tile svg { width: 100%; height: 100%; }
-.tile.s { width: 32px; height: 32px; font-size: 14px; } .tile.xs { width: 22px; height: 22px; font-size: 10px; } .tile.l { width: 56px; height: 56px; font-size: 24px; } .tile.xl { width: 80px; height: 80px; font-size: 34px; }
+/* (In the dark, the tile is its hue mixed a little into the surface, a line of it round the tile, the glyph its
+   light step: a colour that reads as the plugin's, not as mud. In the light it stays its pale wash.) */
+@media (prefers-color-scheme: dark) {
+  .tile {
+    background: color-mix(in oklab, oklch(0.7 0.14 var(--h)) 14%, var(--surface));
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, oklch(0.7 0.14 var(--h)) 24%, var(--surface));
+  }
+}
+.tile.s { width: 32px; height: 32px; font-size: 14px; } .tile.ms { width: 40px; height: 40px; font-size: 17px; } .tile.xs { width: 22px; height: 22px; font-size: 10px; } .tile.l { width: 56px; height: 56px; font-size: 24px; } .tile.xl { width: 80px; height: 80px; font-size: 34px; }
 .tile.xxl { width: 112px; height: 112px; font-size: 48px; box-shadow: inset 0 0 0 1px color-mix(in oklch, currentColor 14%, transparent), 0 18px 40px -18px color-mix(in oklch, oklch(var(--ink-l) var(--ink-c) var(--h)) 45%, transparent); }
 .stage {
   position: relative; overflow: hidden;
@@ -376,6 +386,7 @@ dialog.question:target:not([open]) { display: block; position: fixed; inset: 0; 
   .top .wrap { height: 56px; gap: var(--s8); }
   .nav, .signin, .find { display: none; }
   .find-icon { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 10px; color: var(--text); }
+  .own-search .find-icon { display: none; }
   .find-icon svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; }
   .menubtn { display: grid; place-items: center; width: 40px; height: 40px; margin-right: calc(-1 * var(--s12)); border-radius: 10px; }
   .menubtn svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }

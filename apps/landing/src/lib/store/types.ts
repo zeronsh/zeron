@@ -81,6 +81,12 @@ export interface PluginCard {
   summary: string;
   /** The icon's path in the package (an SVG), or null (amendment 35). */
   icon: string | null;
+  /**
+   * Its first picture's path in the package, of `version`, or null when that
+   * has none (asked of the edge for the store's Featured; an edge before it
+   * leaves it out: no cover, the tile on its hue).
+   */
+  cover?: string | null;
   author: Author;
   categories: string[];
   keywords: string[];

@@ -120,7 +120,7 @@ describe("the store's list (/plugins)", () => {
   /** The list's own part of a page (Featured, when it's there, sits above it). */
   const grid = (body: string) => body.slice(body.indexOf('<ul class="results"'));
   /** The plugins a list's page shows, in order: each the one card. */
-  const listed = (body: string) => [...grid(body).matchAll(/<a class="pcard md h\d+" href="\/plugins\/([^"]+)"/g)].map((m) => m[1]);
+  const listed = (body: string) => [...grid(body).matchAll(/<a class="pcard h\d+" href="\/plugins\/([^"]+)"/g)].map((m) => m[1]);
 
   test("public, cached for a minute at most, a strict CSP; the columns, a row a plugin", async () => {
     const { response, body } = await html("/plugins");
@@ -140,7 +140,8 @@ describe("the store's list (/plugins)", () => {
     const first = await html("/plugins");
     const next = /href="([^"]+)" rel="next"/.exec(first.body)?.[1]?.replaceAll("&amp;", "&");
     expect(next).toMatch(/^\/plugins\?cursor=/);
-    expect(first.body).toMatch(/<span class="btn sec sm" aria-disabled="true">.*?Previous<\/span>/);
+    // (The first page has no page before it: its arrow is drawn, and goes nowhere.)
+    expect(first.body).not.toContain('rel="prev"');
     const second = await html(next!);
     expect(second.response.status).toBe(200);
     expect(listed(second.body)).not.toEqual(listed(first.body));
@@ -149,33 +150,37 @@ describe("the store's list (/plugins)", () => {
     expect(listed((await html(previous!)).body)).toEqual(listed(first.body));
   });
 
-  test("a card's foot says what the list is sorted by; one not verified says so instead", async () => {
-    const foot = (body: string) => [...grid(body).matchAll(/<div class="pc-foot"><span>(Updated|Published|Verified) ([^<]+)<\/span>/g)].map((m) => [m[1], m[2]]);
-    expect(new Set(foot((await html("/plugins?sort=updated")).body).map(([w]) => w))).toEqual(new Set(["Updated"]));
-    expect((await html("/plugins")).body).toMatch(/<span class="state no">[\d.]+(-[\w.]+)? not verified yet<\/span>/);
-    // Newest: the day each was first listed (amendment 39), the newest first.
-    const newest = foot((await html("/plugins?sort=new")).body);
-    expect(new Set(newest.map(([w]) => w))).toEqual(new Set(["Published"]));
-    const days = newest.map(([, d]) => Date.parse(`${d}${/\d{4}/.test(d!) ? "" : `, ${new Date().getUTCFullYear()}`}`));
-    expect(days.length).toBeGreaterThan(1);
-    expect(days).toEqual([...days].sort((a, b) => b - a));
-    // Recently verified (the store's own order): by when Zeron verified each, said.
-    const verified = foot((await html("/plugins?sort=verified")).body);
-    expect(verified.length).toBeGreaterThan(1);
-    expect(verified.every(([w]) => w === "Verified")).toBe(true);
+  test("a card: its tile, name, what it does, then who made it and how many have it; one not verified says so in their place; no date", async () => {
+    const { body } = await html("/plugins");
+    const list = grid(body);
+    expect(list).toMatch(/<a class="pcard h\d+" href="\/plugins\/focus-timer"><span class="tile ms[^"]*"[\s\S]*?<div class="pc-name"><span class="name">Focus timer<\/span><svg class="seal s"[\s\S]*?<p class="pc-sum">[^<]+<\/p><div class="pc-meta"><span class="pc-by">@ada<\/span><i aria-hidden="true"><\/i><span class="num">12,840 installs<\/span><\/div>/);
+    expect(list).toMatch(/<span class="pc-by">@ada<\/span><i aria-hidden="true"><\/i><span class="state no">[\d.]+(-[\w.]+)? not verified yet<\/span>/);
+    // (What the list is sorted by is the menu's to say, not each card's.)
+    for (const sort of ["", "?sort=updated", "?sort=new", "?sort=verified"]) expect(grid((await html(`/plugins${sort}`)).body), sort).not.toMatch(/>(Updated|Published|Verified) [A-Z][a-z]{2} \d/);
+    // Each order is the edge's: Newest and Recently verified differ from Most installed.
+    const popular = listed(body);
+    expect(listed((await html("/plugins?sort=new")).body)).not.toEqual(popular);
+    expect(listed((await html("/plugins?sort=verified")).body)).not.toEqual(popular);
   });
 
-  test("the pager: Previous, where you are of how many, Next", async () => {
+  test("the pager: the pages by number, centred, the one you're on marked; where you are of how many under them", async () => {
     const first = await html("/plugins");
     const total = Number(/<b class="num">([\d,]+)<\/b> plugins/.exec(first.body)![1]!.replace(",", ""));
-    expect(first.body).toContain(`<span class="num">1–24 of ${total}</span>`);
+    expect(first.body).toContain(`<p class="num">1–24 of ${total}</p>`);
+    expect(first.body).toContain('<span class="pg num" aria-current="page" aria-label="Page 1">1</span>');
     const next = /href="([^"]+)" rel="next"/.exec(first.body)![1]!.replaceAll("&amp;", "&");
     expect(next).toMatch(/&page=2$/);
-    expect((await html(next)).body).toMatch(new RegExp(`<span class="num">25–\\d+ of ${total}</span>`));
+    // (Page 2 by its number too: the same address as the arrow.)
+    expect(first.body).toContain(`<a class="pg num" href="${next.replaceAll("&", "&amp;")}" aria-label="Page 2">2</a>`);
+    const second = (await html(next)).body;
+    expect(second).toMatch(new RegExp(`<p class="num">25–\\d+ of ${total}</p>`));
+    expect(second).toContain('<a class="pg num" href="/plugins" aria-label="Page 1">1</a>');
+    expect(second).toContain('<span class="pg num" aria-current="page" aria-label="Page 2">2</span>');
   });
 
-  test("the sort is a row of real addresses, the chosen one marked; a search adds Best match", async () => {
+  test("the sort is a menu of real addresses (Sort: and the chosen one), the chosen one marked; a search adds Best match", async () => {
     const { body } = await html("/plugins");
+    expect(body).toMatch(/<details class="drop sort"><summary><span class="t3">Sort:<\/span> Most installed<span class="sr-only">, change the order<\/span>/);
     expect(body).toMatch(/<a href="\/plugins" aria-current="page">Most installed<\/a><a href="\/plugins\?sort=updated">Recently updated<\/a><a href="\/plugins\?sort=new">Newest<\/a><a href="\/plugins\?sort=verified">Recently verified<\/a>/);
     const search = await html("/plugins?q=timer");
     expect(search.body).toMatch(/aria-current="page">Best match<\/a>/);
@@ -1288,40 +1293,46 @@ describe("one store page (Discover and Browse were two)", () => {
   /** The Featured row's part of a page. */
   const featuredRow = (body: string) => (body.includes('<ul class="feat-row">') ? body.slice(body.indexOf('<ul class="feat-row">'), body.indexOf("</ul>", body.indexOf('<ul class="feat-row">'))) : "");
 
-  test("Featured: up to three, the same card a size up, over the list when nothing narrows it, in any order, on its first page", async () => {
+  test("Featured: up to three, picture first, over the list when nothing narrows it, in any order, on its first page", async () => {
     const front = featuredRow((await html("/plugins")).body);
-    const cards = front.match(/<a class="pcard lg h\d+" href="\/plugins\/[^"]+"/g) ?? [];
-    expect(cards.length).toBeGreaterThan(0);
-    expect(cards.length).toBeLessThanOrEqual(3);
-    // (The one card: its fields, in their order.)
-    expect(front).toMatch(/<a class="pcard lg[^"]*"[^>]*><span class="tile xl[^"]*"[\s\S]*?<div class="pc-name">[\s\S]*?<div class="pc-by">by [^<]+<\/div><p class="pc-sum">[^<]*<\/p><div class="pc-foot">/);
+    const tiles = front.match(/<a class="ftile h\d+" href="\/plugins\/[^"]+"/g) ?? [];
+    expect(tiles.length).toBeGreaterThan(0);
+    expect(tiles.length).toBeLessThanOrEqual(3);
+    // (Its picture, the card's cover, from the plugin's own files; under it the tile, name, what it does, who and how many.)
+    expect(front).toMatch(/<a class="ftile h\d+" href="\/plugins\/focus-timer"><span class="ft-cover"><img src="\/plugins\/focus-timer\/files\/1\.2\.0\/shots\/screen-1\.svg" alt=""[^>]*><\/span><span class="ft-body"><span class="tile s[^"]*"[\s\S]*?<span class="ft-name"><span class="name">Focus timer<\/span>[\s\S]*?<span class="ft-sum">[^<]+<\/span><span class="ft-meta">@ada<i aria-hidden="true"><\/i><span class="num">12,840 installs<\/span><\/span>/);
+    expect((await html("/plugins")).body).toContain('<div class="sec-head"><h2 id="featured">Featured</h2><span class="sec-aside">Our picks</span></div>');
     expect(featuredRow((await html("/plugins?sort=new")).body)).not.toBe("");
     for (const narrowed of ["/plugins?q=timer", "/plugins?category=git", "/plugins?keyword=focus", "/plugins?verified=1"]) expect(featuredRow((await html(narrowed)).body), narrowed).toBe("");
     const next = /href="([^"]+)" rel="next"/.exec((await html("/plugins")).body)![1]!.replaceAll("&amp;", "&");
     expect(featuredRow((await html(next)).body)).toBe("");
   });
 
-  test("Discover's parts are gone: no numbers, no category chips, no lists of its own, no search of its own; the ending once, at the foot", async () => {
+  test("Discover's parts are gone: no numbers, no category chips, no lists of its own; the ending once, at the foot", async () => {
     const { body } = await html("/plugins");
     for (const gone of ['class="nums"', 'class="cats"', 'class="index"', 'class="fresh"', 'class="bfind"', ">See all<", "Browse by category", "Just published"]) expect(body, gone).not.toContain(gone);
     expect(body.match(/Made something for Zeron\?/g)).toHaveLength(1);
     expect(body).toContain('<section class="make" aria-labelledby="make">');
+    // (The ending: the guide the one primary button, the command beside it.)
+    expect(body).toMatch(/<div class="make-acts"><a class="btn pri" href="\/plugins\/publishing">Publishing guide<\/a><span class="cmd">/);
   });
 
-  test("the bar: Browse · Publish · Review (Discover gone); its search, the one search, narrows the store in place", async () => {
+  test("the bar: Browse · Publish · Review (Discover gone); the store's search is its hero's, the bar's elsewhere; each narrows the store in place", async () => {
     const { body } = await html("/plugins?category=git&verified=1");
     const nav = body.slice(body.indexOf('<nav class="nav"'), body.indexOf("</nav>", body.indexOf('<nav class="nav"')));
     // (On a public page Review is there for staff alone, hidden until the script knows who's looking.)
     expect([...nav.matchAll(/<a href="([^"]+)"[^>]*>([^<]+)<\/a>/g)].map((m) => `${m[2]} ${m[1]}`)).toEqual(["Browse /plugins", "Publish /account", "Review /admin/plugins"]);
     expect(nav).toMatch(/<a href="\/admin\/plugins" hidden data-staff>Review<\/a>/);
     expect(body).not.toContain(">Discover<");
-    // (The bar's form, and the phone's: to the store, keeping what narrows it.)
-    const forms = [...body.matchAll(/<form class="find" role="search" action="\/plugins" method="get" data-tidy>([\s\S]*?)<\/form>/g)].map((m) => m[1]!);
-    expect(forms).toHaveLength(2);
+    // (The hero's form, the bar's and the phone's: to the store, keeping what narrows it.)
+    const forms = [...body.matchAll(/<form class="h?find" role="search" action="\/plugins" method="get" data-tidy>([\s\S]*?)<\/form>/g)].map((m) => m[1]!);
+    expect(forms).toHaveLength(3);
     for (const f of forms) {
       expect(f).toContain('<input type="hidden" name="category" value="git">');
       expect(f).toContain('<input type="hidden" name="verified" value="1">');
     }
+    // (On the store, the hero's is the one: the bar's isn't drawn. Elsewhere the bar's is.)
+    expect(body).toContain('<html lang="en" class="store own-search">');
+    expect((await html("/plugins/focus-timer")).body).toContain('<html lang="en" class="store">');
   });
 
   test("an empty store says so; a store that didn't answer says so, and isn't kept", async () => {

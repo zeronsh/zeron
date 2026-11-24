@@ -35,8 +35,10 @@ interface Props {
   keep?: Record<string, string>;
   /** The page's own class on <main> (a plugin's hue, say). */
   class?: string;
+  /** The page has its own search, the one (the store's): the bar's, and on a phone its icon, aren't drawn. */
+  ownSearch?: boolean;
 }
-const { title, description, noindex = false, canonical, current = null, query = "", keep = {}, class: mainClass } = Astro.props;
+const { title, description, noindex = false, canonical, current = null, query = "", keep = {}, class: mainClass, ownSearch = false } = Astro.props;
 // A public page asked with a session cookie is drawn for that person (lib/store/http.ts publicPage: never
 // kept): the edge says who (once a request), so the bar is right from the first paint. A cookie that's no
 // one's draws the signed-out bar; an edge that doesn't answer leaves it to the script, as without a cookie.
@@ -59,7 +61,7 @@ const hiddenUntilKnown = (id: Section) => id === "review" && isPublic;
 ---
 
 <!doctype html>
-<html lang="en" class="store">
+<html lang="en" class:list={["store", { "own-search": ownSearch }]}>
   <head>
     <Head title={title} description={description} noindex={noindex} canonical={canonical} />
     <meta name="color-scheme" content="light dark" />
