@@ -6,11 +6,17 @@ export const FRESH = 30;
 export const STALE = 30;
 
 /**
- * A page that is the same for everyone (it reads no cookie): the Worker
- * cache keeps it, and so may the browser, for as long as the store allows
- * data to be old (a minute, all told).
+ * A page that is the same for everyone: the Worker cache keeps it, and so
+ * may the browser, for as long as the store allows data to be old (a minute,
+ * all told). Asked with a session cookie, it is drawn for that person (the
+ * bar says who they are: layouts/Store.astro), so it is theirs alone: never
+ * kept, by anyone. (Such a request never reaches the cache: src/worker.ts.)
  */
-export function publicPage(astro: Pick<AstroGlobal, "cache" | "response">, tags: string[] = []): void {
+export function publicPage(astro: Pick<AstroGlobal, "cache" | "response" | "locals">, tags: string[] = []): void {
+  if (astro.locals.edge.hasSession) {
+    astro.response.headers.set("cache-control", "private, no-store");
+    return;
+  }
   astro.cache.set({ maxAge: FRESH, swr: STALE, tags });
   astro.response.headers.set("cache-control", `public, max-age=${FRESH}`);
 }
