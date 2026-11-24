@@ -18,6 +18,7 @@
 --   store_stub.no_notes    the engine has no notes on your plugin's folder
 --   store_stub.html_and_footnote  your plugin's README has HTML and math, its CHANGELOG a footnote (advice)
 --   store_stub.hostile_readme  Focus timer's README: 512 KiB of setext headings (before its page opens)
+--   store_stub.not_now     the next publish or unyank is answered Not now
 --   store_stub.token_ended  a token that ended yesterday, still listed
 --   store_stub.tokens_full  a new token is refused: the account has 20 live
 --   store_stub.tokens_today a new token is refused: 10 made today
@@ -46,6 +47,15 @@ local claims = false
 -- The store refuses the next publish for its description's mark glyph
 -- (`store_stub.refuse_listing`), as the edge says it.
 local refuse_listing = false
+-- The next publish, or the next unyank, is answered Not now in Zeron's own
+-- window (`store_stub.not_now`).
+local not_now = false
+local function asked_first()
+	if not_now then
+		not_now = false
+		error({ message = "cancelled" }, 0)
+	end
+end
 -- Lists without `total`, as a store from before it counted them.
 local no_total = false
 
@@ -715,6 +725,7 @@ stub.publish = function(id: string, hash: string, ticket: string): any
 	note(`publish:{id}:{hash}:{ticket}`)
 	return answer(function(): any
 		refused_as_you()
+		asked_first()
 		if refuse_listing then
 			refuse_listing = false
 			return { ok = false, error = "bad_listing", field = "description", cause = "mark_glyph", word = "✅" }
@@ -742,6 +753,7 @@ end
 stub.version_action = function(id: string, version: string, action: string): any
 	note(`version:{id}:{version}:{action}`)
 	return answer(function(): any
+		asked_first()
 		for _, v in mine[id].versions do
 			if v.version == version then
 				-- (Its author's own yank and unyank: never a superseded one's.)
@@ -970,6 +982,13 @@ ui.command {
 	title = "Store: the next publish is refused for its description's mark",
 	run = function()
 		refuse_listing = true
+	end,
+}
+ui.command {
+	id = "store_stub.not_now",
+	title = "Store: the next publish or unyank is answered Not now",
+	run = function()
+		not_now = true
 	end,
 }
 ui.command {

@@ -353,6 +353,11 @@ function C.make(kind: kinds.Kind, browse: any)
 			end, function(err: any)
 				sending:set(false)
 				local m = if type(err) == "table" then err.message else err
+				-- (Not now, in the window that asks: src/plugins/act_consent.rs.
+				-- Nothing was sent, and it can be sent as it is.)
+				if m == "cancelled" then
+					return
+				end
 				sent_error:set(M.failure(m))
 				if type(m) == "string" and string.match(m, "^changed") then
 					check()
@@ -531,6 +536,9 @@ function C.make(kind: kinds.Kind, browse: any)
 			end, function(err: any)
 				acting:set(nil)
 				local m = if type(err) == "table" then err.message else err
+				if m == "cancelled" then
+					return
+				end
 				ds.toast.show { title = ui.t("plugins.store.action_failed"), body = M.failure(m), tone = "warning" }
 			end)
 		end

@@ -30,7 +30,9 @@
 //!   plugins.store.mine                StoreMyPlugins
 //!   plugins.store.version_action { id, version, action }  StoreVersionAction
 //!   plugins.store.prepare(id)         PreparePluginPublish
-//!   plugins.store.publish { id, hash, ticket }  PublishPlugin
+//!   plugins.store.publish { id, hash, ticket }  PublishPlugin (`ticket`: the
+//!                                     prepare's, which is a handle: the
+//!                                     engine's own stays in the host)
 //!   plugins.store.tokens()            ListDeployTokens: the account's
 //!                                     deploy tokens (never a token itself)
 //!   plugins.store.create_token { name, scope, expires? }  CreateDeployToken
@@ -281,8 +283,7 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine, asker: Asker) {
             crate::plugins::preview::refuse("plugins.store.prepare")?;
             let id = store_id(&text(&id)).ok_or("not_in_store")?;
             let reply = e("PreparePluginPublish", json!({ "id": id }), None).await?;
-            remember_prepared(&reply);
-            Ok(json_value(&reply))
+            Ok(json_value(&keep_prepared(reply)))
         }
     });
     let (e, a) = (engine.clone(), asker.clone());
@@ -292,16 +293,19 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine, asker: Asker) {
             crate::plugins::preview::refuse("plugins.store.publish")?;
             let id = arg.field("id").map(text).and_then(|i| store_id(&i)).ok_or("not_in_store")?;
             let hash = arg.field("hash").map(text).unwrap_or_default();
-            let ticket = arg.field("ticket").map(text).unwrap_or_default();
-            let params = json!({ "id": id, "hash": hash, "ticket": ticket });
+            // (What's sent, and what's asked, is what the engine said it
+            // checked, kept here: never what the page says of it.)
+            let was = arg.field("ticket").map(text).and_then(|handle| prepared(&id, &hash, &handle)).ok_or("changed")?;
+            let params = json!({ "id": id, "hash": hash, "ticket": was.ticket });
+            let send = move || async move {
+                // (Good once, whatever comes of it.)
+                forget_prepared(&was.handle);
+                e("PublishPlugin", params, None).await
+            };
             let reply = if preview::another_s_ran() {
-                // (What's asked is what the engine said it checked for this
-                // ticket, never what the page says of it.)
-                let was = prepared(&id, &hash, &ticket).ok_or("changed")?;
-                let item = act_consent::publishing("plugin", &id, &was.name, &was.version);
-                a(act(item, move || async move { e("PublishPlugin", params, None).await })).await?
+                a(act(act_consent::publishing("plugin", &id, &was.name, &was.version), send)).await?
             } else {
-                e("PublishPlugin", params, None).await?
+                send().await?
             };
             // (A listing refused for a cause it names: the page says which,
             // in its own words, so the refusal comes as the answer.)
@@ -351,14 +355,24 @@ pub(super) fn install_with(host: &ScriptHost, engine: Engine, asker: Asker) {
                         });
                     }
                 };
-                let mut reply = a(Act { item, run: Box::new(move || Box::pin(async move { create_token(&e, params).await })), stop: Box::new(stop) }).await?;
+                let mut reply = a(Act { item, run: Box::new(move || Box::pin(async move { create_token(&e, params, &|| true).await })), stop: Box::new(stop) }).await?;
                 // (The window that made it shows it; this one never has it.)
                 if let Some(record) = reply.as_object_mut() {
                     record.remove("secret");
                 }
                 return Ok(json_value(&reply));
             }
-            create_token(&e, params).await.map(|reply| json_value(&reply))
+            // (The app's own flow. Should another's template start while it
+            // waits on the sign-in, it stops there: this window no longer
+            // shows a token.)
+            let ours = || !preview::another_s_ran();
+            let mut reply = create_token(&e, params, &ours).await?;
+            if !ours()
+                && let Some(record) = reply.as_object_mut()
+            {
+                record.remove("secret");
+            }
+            Ok(json_value(&reply))
         }
     });
     let e = engine.clone();
@@ -410,9 +424,11 @@ fn act<F: Future<Output = Result<Json, String>> + 'static>(item: Json, run: impl
 }
 
 /// What the engine checked and gave a ticket for: what publishing with it
-/// sends.
+/// sends. The ticket stays here: the page has `handle` in its place, which
+/// means nothing to the engine.
 #[derive(Clone)]
 struct Prepared {
+    handle: String,
     id: String,
     hash: String,
     ticket: String,
@@ -423,24 +439,41 @@ struct Prepared {
 thread_local! {
     /// The last few, newest last.
     static PREPARED: RefCell<Vec<Prepared>> = const { RefCell::new(Vec::new()) };
+    static NEXT_PREPARED: Cell<u64> = const { Cell::new(0) };
 }
 
 const PREPARED_MOST: usize = 16;
 
-fn remember_prepared(reply: &Json) {
+/// `reply` as the page has it: its ticket kept here, a handle in its place
+/// (none if what it's for isn't all said).
+fn keep_prepared(mut reply: Json) -> Json {
+    let Some(ticket) = reply.as_object_mut().and_then(|o| o.remove("ticket")) else { return reply };
     let field = |k: &str| reply[k].as_str().filter(|s| !s.is_empty()).map(str::to_owned);
-    let (Some(id), Some(hash), Some(ticket), Some(version)) = (field("id"), field("hash"), field("ticket"), field("version")) else { return };
+    let (Some(ticket), Some(id), Some(hash), Some(version)) = (ticket.as_str().filter(|t| !t.is_empty()), field("id"), field("hash"), field("version")) else {
+        return reply;
+    };
     let name = reply["name"].as_str().filter(|s| !s.trim().is_empty()).map_or_else(|| id.clone(), |s| s.chars().take(64).collect());
+    let n = NEXT_PREPARED.with(|n| {
+        n.set(n.get() + 1);
+        n.get()
+    });
+    let handle = format!("prepared-{n}");
+    reply["ticket"] = json!(handle);
     PREPARED.with(|p| {
         let mut p = p.borrow_mut();
-        p.push(Prepared { id, hash, ticket, name, version });
+        p.push(Prepared { handle, id, hash, ticket: ticket.to_owned(), name, version });
         let over = p.len().saturating_sub(PREPARED_MOST);
         p.drain(..over);
     });
+    reply
 }
 
-fn prepared(id: &str, hash: &str, ticket: &str) -> Option<Prepared> {
-    PREPARED.with(|p| p.borrow().iter().rev().find(|p| p.id == id && p.hash == hash && p.ticket == ticket).cloned())
+fn prepared(id: &str, hash: &str, handle: &str) -> Option<Prepared> {
+    PREPARED.with(|p| p.borrow().iter().find(|p| p.handle == handle && p.id == id && p.hash == hash).cloned())
+}
+
+fn forget_prepared(handle: &str) {
+    PREPARED.with(|p| p.borrow_mut().retain(|p| p.handle != handle));
 }
 
 /// What a report may say is wrong (the plan's amendment 13).
@@ -591,8 +624,9 @@ fn token_scope(scope: Option<&Value>) -> Option<Json> {
 /// (StepUp `for: "deploy_token"`; every token asks, and each sign-in makes
 /// one token), asked again each second until it lands, is cancelled, or ten
 /// minutes pass. Asked once first, so what makes no token at all (not
-/// published yet, not yours) is said before the browser opens.
-async fn create_token(e: &Engine, params: Json) -> Result<Json, String> {
+/// published yet, not yours) is said before the browser opens. `go_on` is
+/// looked at before each ask after the first: `false` gives it up.
+async fn create_token(e: &Engine, params: Json, go_on: &dyn Fn() -> bool) -> Result<Json, String> {
     let reply = e("CreateDeployToken", params.clone(), None).await?;
     if reply["ok"].as_bool() != Some(false) || reply["error"].as_str() != Some("step_up_required") {
         answered(&reply)?;
@@ -612,6 +646,11 @@ async fn create_token(e: &Engine, params: Json) -> Result<Json, String> {
     loop {
         zgx::timer::sleep(STEP_UP_EVERY).await;
         if STEP_UP.with(Cell::get) != live {
+            return Err("cancelled".into());
+        }
+        if !go_on() {
+            STEP_UP.with(|n| n.set(n.get() + 1));
+            let _ = e("CancelStepUp", json!({ "for": "deploy_token" }), None).await;
             return Err("cancelled".into());
         }
         let reply = e("CreateDeployToken", params.clone(), None).await?;

@@ -523,6 +523,29 @@ test("a publish the store refuses for a listing's cause says which and why", fun
 	expect(app:tree()).to_contain("Its description has “✅”, which reads as the store's mark.")
 end)
 
+-- Once a template that isn't Zeron's has run, Zeron asks in its own window
+-- first: Not now there is no failure, and it can be sent as it is.
+test("Not now, asked before a publish, says nothing went wrong, and Submit still sends", function()
+	local app = publishing()
+	app:command("store_stub.fixed")
+	app:click('role:button "Check again"')
+	settle(app)
+	expect(app:tree()).to_contain("signed as yours")
+	app:command("store_stub.not_now")
+	app:click("#publish-submit")
+	settle(app)
+	expect(app:tree("#publish-submit")).never.to_contain("disabled")
+	-- (The line by Submit still says what it sends: an error takes its place.)
+	expect(app:tree()).to_contain("signed as yours")
+	app:click("#publish-submit")
+	settle(app)
+	local sent = 0
+	for _ in string.gmatch(calls(app), "publish:pomodoro%-clock:") do
+		sent += 1
+	end
+	expect(sent).to_be(2)
+end)
+
 test("HTML and math in its README and a footnote in its CHANGELOG are advice under the checks, in Zeron's words, and Submit still sends", function()
 	local app = publishing()
 	app:command("store_stub.fixed")
