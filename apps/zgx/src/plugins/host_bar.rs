@@ -149,6 +149,17 @@ impl Notice {
         Notice { title, body, tone: Tone::Neutral, action, stays: true }
     }
 
+    /// A menu's Paste refused while the clipboard holds a token Zeron copied
+    /// (`preview::guard`): the keys still paste.
+    pub fn paste_with_keys() -> Self {
+        let keys = if cfg!(target_os = "macos") { "⌘V" } else { "Ctrl+V" };
+        let title = match CHINESE.with(std::cell::Cell::get) {
+            true => format!("请用 {keys} 粘贴。Zeron 不让模板读取你复制的令牌。"),
+            false => format!("Use {keys} to paste. Zeron keeps a token you copied away from templates."),
+        };
+        Notice { title, body: String::new(), tone: Tone::Neutral, action: None, stays: false }
+    }
+
     /// Template `name`, in use, can't be: Zeron took it down, or can't tell
     /// for now whether it did. The default interface shows instead.
     pub fn stopped(name: &str, why: &super::blocks::Why) -> Self {
@@ -159,10 +170,10 @@ impl Notice {
             Why::Unchecked => None,
         });
         let (title, body) = match (why, reason, chinese) {
-            (Why::TakenDown { .. }, Some(reason), false) => (format!("{name} was taken down"), format!("{reason} Zeron is using the default interface.")),
-            (Why::TakenDown { .. }, None, false) => (format!("{name} was taken down"), "Zeron is using the default interface.".to_owned()),
-            (Why::TakenDown { .. }, Some(reason), true) => (format!("{name} 已被下架"), format!("{reason} Zeron 正在使用默认界面。")),
-            (Why::TakenDown { .. }, None, true) => (format!("{name} 已被下架"), "Zeron 正在使用默认界面。".to_owned()),
+            (Why::TakenDown { .. }, Some(reason), false) => (format!("{name} was taken down"), format!("{reason} Zeron switched back to its own interface.")),
+            (Why::TakenDown { .. }, None, false) => (format!("{name} was taken down"), "Zeron switched back to its own interface.".to_owned()),
+            (Why::TakenDown { .. }, Some(reason), true) => (format!("{name} 已被下架"), format!("{reason} Zeron 已切换回自己的界面。")),
+            (Why::TakenDown { .. }, None, true) => (format!("{name} 已被下架"), "Zeron 已切换回自己的界面。".to_owned()),
             (Why::Unchecked, _, false) => (format!("{name} is off for now"), "Zeron couldn't check whether it was taken down. It comes back once Zeron has checked.".to_owned()),
             (Why::Unchecked, _, true) => (format!("{name} 暂时停用"), "Zeron 无法确认它是否已被下架。确认后会自动恢复。".to_owned()),
         };

@@ -1976,6 +1976,7 @@ impl Bridge {
                 .filter_map(|rel| self.failed_files.borrow().why(&format!("{}:{rel}", t.id)).map(|why| (rel.clone(), why.to_string())))
                 .collect();
             let blocked = blocks::blocked(&root, &t.id);
+            from_store |= root.join(&t.id).join(".lineage.json").exists();
             // (Taken down, in use or not: what was allowed of it is forgotten.)
             if let (Some(blocks::Why::TakenDown { .. }), Some(approvals)) = (&blocked, preview::approvals_path()) {
                 preview::forget_at(&approvals, &t.id);
@@ -2080,11 +2081,17 @@ impl Bridge {
             let Some(b) = me.upgrade() else { return };
             // (Not answered: what it last said stays; asked at the next look.
             // The page it makes isn't asked about again: once a look.)
-            if let Ok(said) = said
-                && *b.templates_said.borrow() != said
-            {
-                *b.templates_said.borrow_mut() = said;
-                b.publish_templates();
+            if let Ok(said) = said {
+                // (One the engine says is taken down, at once: blocks.rs.)
+                if let Some(root) = b.templates_dir()
+                    && blocks::take_rows(&root, &said)
+                {
+                    b.look();
+                }
+                if *b.templates_said.borrow() != said {
+                    *b.templates_said.borrow_mut() = said;
+                    b.publish_templates();
+                }
             }
             b.asking_templates.set(false);
         });
@@ -4251,6 +4258,10 @@ mod tests {
             let list = |blocks: Json| std::fs::write(root.join(blocks::FILE), json!({ "format": "zeron-template-blocks:v1", "blocks": blocks }).to_string()).unwrap();
             let down = json!([{ "id": "midnight", "version": "1.2.0", "reason": "x", "at": 1 }]);
             preview::another_s_ran_for_test(false);
+            // (No list at all: the store's are off until there is one.)
+            lay_at_launch(&ui, &root).unwrap();
+            assert!(!laid(), "{folder}");
+            list(json!([]));
             lay_at_launch(&ui, &root).unwrap();
             assert!(laid(), "{folder}");
             assert!(live::LaunchStamp::now(&ui, &root, folder).still_laid(&ui, &root), "{folder}: the next launch is a warm one");

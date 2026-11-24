@@ -114,7 +114,9 @@ pub fn install(host: &ScriptHost, ui: WeakUi, platform: Platform) {
             let (Some(ui), Some(editor)) = (ui.upgrade(), ready()) else { return };
             // (A script may ask for this paste: not a secret, where a template
             // that isn't Zeron's may have, as `preview::guard` holds reads.)
+            // Never silently: the keys still paste, and the host says so.
             if crate::plugins::preview::another_s_ran() && crate::secrets::held() {
+                crate::plugins::host_bar::notice(crate::plugins::host_bar::Notice::paste_with_keys());
                 return;
             }
             let text = platform

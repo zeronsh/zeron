@@ -13,10 +13,15 @@
 //! version) and what it was copied from (`.lineage.json`, through copies of
 //! copies). A file's or a link's isn't followed by any take-down.
 //!
+//! The engine's word on a row (`ListTemplates`, `blocked`) is a block at once,
+//! kept beside the copy (`blocked-rows.json`): the only cover while it can't
+//! write its file. One is let go of only when a later answer has that row
+//! without it and the file reads and doesn't name it.
+//!
 //! What can't be read is refused, so far as it came from the store: with no
-//! list to be had, every template with a store record or a lineage; with
-//! one, a template whose own record can't be read. It comes back by itself
-//! once Zeron can check. (A template you kept runs as Zeron and can undo all
+//! list to be had (it's gone, or can't be read), every template with a store
+//! record or a lineage; with one, a template whose own record can't be read.
+//! It comes back by itself once Zeron can check. (A template you kept runs as Zeron and can undo all
 //! of this: it guards the honest case.)
 
 use std::path::{Path, PathBuf};
@@ -125,9 +130,17 @@ pub fn copy_for_test(path: Option<PathBuf>) {
     TEST_COPY.with(|c| *c.borrow_mut() = path);
 }
 
-/// What's known to be taken down: the engine's list (kept as it's read), else
-/// the last one read. None: there's one and neither can be read.
-fn known(templates: &Path, copy: Option<&Path>) -> Option<Vec<Block>> {
+/// What's known to be taken down.
+enum Known {
+    /// The engine's list (kept as it's read), else the last one read.
+    Says(Vec<Block>),
+    /// There's one, and neither can be read.
+    Unreadable,
+    /// There's none: not written yet, or gone.
+    Missing,
+}
+
+fn known(templates: &Path, copy: Option<&Path>) -> Known {
     let theirs = list(&templates.join(FILE));
     if let Read::Says((written, blocks)) = theirs {
         if let Some(copy) = copy
@@ -135,14 +148,81 @@ fn known(templates: &Path, copy: Option<&Path>) -> Option<Vec<Block>> {
         {
             eprintln!("zeron-zgx: templates: the taken-down list wasn't kept: {error}");
         }
-        return Some(blocks);
+        return Known::Says(blocks);
     }
     match copy.map_or(Read::Missing, list) {
-        Read::Says((_, blocks)) => Some(blocks),
-        // (Neither has ever been: nothing has been taken down here.)
-        Read::Missing if matches!(theirs, Read::Missing) => Some(Vec::new()),
-        _ => None,
+        Read::Says((_, blocks)) => Known::Says(blocks),
+        Read::Missing if matches!(theirs, Read::Missing) => Known::Missing,
+        _ => Known::Unreadable,
     }
+}
+
+/// Where what the engine said of rows is kept.
+fn rows_path(copy: &Path) -> PathBuf {
+    copy.with_file_name("blocked-rows.json")
+}
+
+/// What the engine said of rows, each with the folder it said it of. (One
+/// that can't be read is as if there were none: the list is what's read
+/// before it.)
+fn said_of_rows(copy: Option<&Path>) -> Vec<(String, Block)> {
+    let Some(Read::Says((_, entries))) = copy.map(|copy| rows(&rows_path(copy))) else { return Vec::new() };
+    entries
+}
+
+fn rows(path: &Path) -> Read<(Json, Vec<(String, Block)>)> {
+    let v = match read(path) {
+        Read::Missing => return Read::Missing,
+        Read::Bad => return Read::Bad,
+        Read::Says(v) => v,
+    };
+    let Some(all) = v.as_array() else { return Read::Bad };
+    let entries = all
+        .iter()
+        .filter_map(|b| Some((words(&b["folder"])?, Block { id: words(&b["id"])?, version: words(&b["version"])?, reason: words(&b["reason"]) })))
+        .collect();
+    Read::Says((v, entries))
+}
+
+/// What the engine answered of the templates (`ListTemplates`): each row it
+/// says is taken down is, from now on, and one it no longer says is let go of
+/// if the list reads and doesn't name it. Whether anything changed.
+pub fn take_rows(templates: &Path, said: &Json) -> bool {
+    let Some(copy) = copy_path() else { return false };
+    let Some(answered) = said["templates"].as_array() else { return false };
+    let listed = match list(&templates.join(FILE)) {
+        Read::Says((_, blocks)) => Some(blocks),
+        _ => None,
+    };
+    let was = said_of_rows(Some(&copy));
+    let mut now: Vec<(String, Block)> = Vec::new();
+    for (folder, block) in &was {
+        let row = answered.iter().find(|row| row["id"] == folder.as_str());
+        let clear = row.is_some_and(|row| !row["blocked"].is_object())
+            && listed.as_ref().is_some_and(|l| !l.iter().any(|b| b.id == block.id && same_version(&b.version, &block.version)));
+        if !clear {
+            now.push((folder.clone(), block.clone()));
+        }
+    }
+    for row in answered {
+        let blocked = &row["blocked"];
+        // (Unchecked is of now, not of what it is: nothing to keep.)
+        let (Some(folder), Some(id), Some(version)) = (words(&row["id"]), words(&blocked["id"]), words(&blocked["version"])) else { continue };
+        let block = Block { id, version, reason: words(&blocked["reason"]) };
+        now.retain(|(f, b)| !(*f == folder && b.id == block.id && same_version(&b.version, &block.version)));
+        now.push((folder, block));
+    }
+    now.sort_by(|a, b| (&a.0, &a.1.id, &a.1.version).cmp(&(&b.0, &b.1.id, &b.1.version)));
+    let mut before = was;
+    before.sort_by(|a, b| (&a.0, &a.1.id, &a.1.version).cmp(&(&b.0, &b.1.id, &b.1.version)));
+    if now == before {
+        return false;
+    }
+    let written = Json::Array(now.iter().map(|(folder, b)| json!({ "folder": folder, "id": b.id, "version": b.version, "reason": b.reason })).collect());
+    if let Err(error) = live::put(&rows_path(&copy), &serde_json::to_vec_pretty(&written).unwrap_or_default()) {
+        eprintln!("zeron-zgx: templates: what was taken down wasn't kept: {error}");
+    }
+    true
 }
 
 /// The store versions a folder is or came from. `None`: it can't be told.
@@ -186,17 +266,35 @@ pub fn blocked(templates: &Path, id: &str) -> Option<Why> {
         return None;
     }
     let dir = templates.join(id);
-    let known = known(templates, copy_path().as_deref());
+    let copy = copy_path();
     let came_from = came_from(&dir);
-    match (known, came_from) {
-        (Some(blocks), _) if blocks.is_empty() => None,
-        (Some(_), None) => Some(Why::Unchecked),
-        (Some(blocks), Some(from)) => blocks
-            .into_iter()
+    let named = |blocks: &[Block]| {
+        let from = came_from.as_deref().unwrap_or_default();
+        blocks
+            .iter()
             .find(|b| from.iter().any(|(id, version)| *id == b.id && same_version(version, &b.version)))
-            .map(|b| Why::TakenDown { reason: b.reason }),
-        (None, Some(from)) if from.is_empty() => None,
-        (None, _) => Some(Why::Unchecked),
+            .map(|b| Why::TakenDown { reason: b.reason.clone() })
+    };
+    let rows: Vec<(String, Block)> = said_of_rows(copy.as_deref());
+    // (The engine's word on this very folder, whatever its record says now;
+    // and on any other of the same version.)
+    let said: Vec<Block> = rows.iter().map(|(_, b)| b.clone()).collect();
+    if let Some(why) = named(&said) {
+        return Some(why);
+    }
+    if came_from.is_none()
+        && let Some((_, b)) = rows.iter().find(|(folder, _)| folder == id)
+    {
+        return Some(Why::TakenDown { reason: b.reason.clone() });
+    }
+    match (known(templates, copy.as_deref()), &came_from) {
+        (Known::Says(blocks), _) if blocks.is_empty() => None,
+        (Known::Says(_), None) => Some(Why::Unchecked),
+        (Known::Says(blocks), Some(_)) => named(&blocks),
+        (Known::Unreadable, Some(from)) | (Known::Missing, Some(from)) if from.is_empty() => None,
+        (Known::Unreadable, _) | (Known::Missing, Some(_)) => Some(Why::Unchecked),
+        // (None written yet, and a record that can't be read: as it was.)
+        (Known::Missing, None) => None,
     }
 }
 
@@ -313,6 +411,7 @@ mod tests {
         r.template("mine");
         r.template("from-a-file");
         r.write("from-a-file/.imported.json", r#"{"key":"k","version":"1.2.0","source":{"kind":"file"}}"#);
+        r.blocks(json!([]));
         assert!(["midnight", "midnight-2", "copy"].iter().all(|id| r.why(id).is_none()), "nothing taken down yet");
         r.midnight();
         assert_eq!(r.why("midnight"), Some(Why::TakenDown { reason: Some("It reads your keys.".into()) }));
@@ -342,7 +441,7 @@ mod tests {
         r.blocks(json!([]));
         assert_eq!(r.why("midnight"), None);
         std::fs::remove_file(r.templates.join(FILE)).unwrap();
-        assert_eq!(r.why("midnight"), None);
+        assert_eq!(r.why("midnight"), None, "the copy says nothing is");
     }
 
     #[test]
@@ -364,8 +463,12 @@ mod tests {
                 assert_eq!(r.why(id), None, "{why}: {id}");
             }
         };
-        // Neither has ever been: nothing is refused, not even an odd record.
-        for id in ["midnight", "copy", "torn", "mine"] {
+        // None there, and none kept: the store's are refused until there is;
+        // a file's whose record can't be read is as it was.
+        for id in ["midnight", "copy"] {
+            assert_eq!(r.why(id), Some(Why::Unchecked), "{id}");
+        }
+        for id in ["torn", "mine", "from-a-link"] {
             assert_eq!(r.why(id), None, "{id}");
         }
         r.write(FILE, "{");
@@ -408,10 +511,12 @@ mod tests {
         let approvals = r.root.join("trust/approvals.json");
         preview::enter_safe_for_test(false);
         r.store("midnight", "midnight", "1.2.0");
+        r.blocks(json!([]));
         let digest = preview::digest(&r.templates.join("midnight"));
         preview::approve_at(&approvals, "midnight", &digest).unwrap();
         live::set_active(&r.templates, "midnight").unwrap();
         assert_eq!((live::active(&r.templates), stop(&r.templates, Some(&approvals), None)), ("midnight".into(), None));
+        std::fs::remove_file(&r.copy).unwrap();
         r.write(FILE, "{");
         assert_eq!(live::active(&r.templates), live::BUILTIN, "refused before anything is laid down");
         assert_eq!(stop(&r.templates, Some(&approvals), None), Some(("midnight".into(), Why::Unchecked)));
@@ -438,5 +543,52 @@ mod tests {
         assert!(!preview::approved_at(&approvals, "midnight", &digest));
         assert_eq!(live::chosen(&r.templates), "mine");
         assert_eq!(stop(&r.templates, Some(&approvals), Some("mine")), None);
+    }
+
+    /// The engine's word on a row is a block at once and at the next launch
+    /// with no engine, its file not naming it (it couldn't be written); let go
+    /// of only by an answer without it and a file that reads without it.
+    #[test]
+    fn the_engine_s_word_on_a_row_is_kept_until_both_it_and_the_list_drop_it() {
+        let r = Rig::new("rows");
+        r.store("midnight-2", "midnight", "1.2.0");
+        r.template("copy");
+        r.write("copy/.lineage.json", r#"[{"id":"midnight","version":"1.2.0"}]"#);
+        r.store("other", "other", "1.0.0");
+        r.blocks(json!([]));
+        let row = |blocked: Json| json!({ "templates": [{ "id": "midnight-2", "blocked": blocked }, { "id": "other" }] });
+        let down = row(json!({ "id": "midnight", "version": "1.2.0", "reason": "It reads your keys.", "at": 1 }));
+        assert!(!take_rows(&r.templates, &row(Json::Null)), "nothing said");
+        assert!(take_rows(&r.templates, &down));
+        assert!(!take_rows(&r.templates, &down), "the same again");
+        for id in ["midnight-2", "copy"] {
+            assert_eq!(r.why(id), Some(Why::TakenDown { reason: Some("It reads your keys.".into()) }), "{id}");
+        }
+        assert_eq!(r.why("other"), None);
+        // A launch with no engine, its file gone or unreadable: as said.
+        for file in [None, Some("{")] {
+            match file {
+                Some(bad) => r.write(FILE, bad),
+                None => std::fs::remove_file(r.templates.join(FILE)).unwrap(),
+            }
+            assert!(r.down("midnight-2"));
+            // An answer without it lets nothing go while the file can't be read.
+            assert!(!take_rows(&r.templates, &row(Json::Null)));
+            assert!(r.down("midnight-2"));
+        }
+        // Nor one while the list names it, nor an answer without the row.
+        r.midnight();
+        assert!(!take_rows(&r.templates, &row(Json::Null)));
+        r.blocks(json!([]));
+        assert!(!take_rows(&r.templates, &json!({ "templates": [{ "id": "other" }] })));
+        assert!(!take_rows(&r.templates, &Json::Null) && !take_rows(&r.templates, &json!({ "error": "offline" })));
+        assert!(r.down("midnight-2"));
+        // Both without it: let go of.
+        assert!(take_rows(&r.templates, &row(Json::Null)));
+        assert_eq!((r.why("midnight-2"), r.why("copy")), (None, None));
+        // Its own record torn since: still the folder it said it of.
+        take_rows(&r.templates, &down);
+        r.write("midnight-2/.imported.json", "{");
+        assert!(r.down("midnight-2"));
     }
 }

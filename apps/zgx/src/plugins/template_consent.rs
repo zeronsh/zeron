@@ -68,8 +68,33 @@ fn key(keep: &str, pending: &str, hash: &str) -> String {
     format!("{keep}/{pending}@{hash}")
 }
 
+/// `item` as the sheet shows it: its own words one line of what prints, and
+/// short (words that read as Zeron's own, "✓ Verified", among them); a version
+/// only if it reads as one.
+fn shown(item: &Json) -> Json {
+    let mut out = item.clone();
+    for (key, most) in [("name", 64), ("description", 300), ("id", 64), ("zeron_version", 32)] {
+        if let Some(text) = item[key].as_str() {
+            out[key] = json!(super::consent::plain(text, most));
+        }
+    }
+    if out["name"].as_str().is_none_or(str::is_empty) {
+        out["name"] = out["id"].clone();
+    }
+    // (A version begins with a number: a word in its place is no version.)
+    if item["version"].as_str().is_some_and(|v| !super::consent::version_reads(v) || !v.starts_with(|c: char| c.is_ascii_digit())) {
+        out["version"] = json!("");
+    }
+    if let Some(files) = item["ignored"].as_array() {
+        out["ignored"] = files.iter().filter_map(Json::as_str).take(20).map(|f| super::consent::plain(f, 120)).collect::<Vec<_>>().into();
+    }
+    out
+}
+
 fn record(item: Option<&Json>, busy: bool, error: Option<&str>) -> Value {
     saw(item);
+    let item = item.map(shown);
+    let item = item.as_ref();
     let mut fields = vec![("busy", Value::from(busy))];
     if let Some(item) = item {
         fields.push(("item", json_value(item)));
@@ -135,6 +160,11 @@ fn keep_item(id: &str) -> Option<Json> {
     let dir = root.join(id);
     let files = super::live::files(&dir, zeron_plugin_guard::template::counted).len();
     let author = match &t.imported {
+        // (The store's, kept: what's there now isn't known to be its
+        // publisher's, and they're never named over what they didn't make.)
+        Some(imported) if imported["source"]["kind"] == "store" => {
+            json!({ "kind": "unknown", "reason": "From the store. Its files may have been changed on this device since." })
+        }
         Some(imported) => imported["author"].clone(),
         None => json!({ "kind": "unknown", "reason": "Made on this device, by you or an agent." }),
     };
@@ -307,6 +337,24 @@ fn host(
                     async move { engine::get().call("ReviewTemplate", asked).await }
                 })
                 .await {
+                    // What the store says of it changed since it was shown:
+                    // shown as it is now, and asked again (a second Allow).
+                    Ok(reply) if reply["changed"].is_object() => {
+                        let mut item = last.borrow().clone();
+                        if let Some(item) = item.as_mut().filter(|item| item["store"].is_object()) {
+                            for key in ["verified", "verified_at", "publisher", "publisher_id"] {
+                                item["store"][key] = reply["changed"][key].clone();
+                            }
+                            if let Some(username) = reply["changed"]["publisher"].as_str() {
+                                item["author"] = json!({ "kind": "verified", "username": username });
+                            }
+                            item["store_changed"] = json!(true);
+                        }
+                        SEEN.with(|s| s.borrow_mut().take());
+                        out.set(record(item.as_ref(), false, None));
+                        *last.borrow_mut() = item;
+                        return;
+                    }
                     Ok(reply) => params["review"] = reply["review"].clone(),
                     Err(error) => eprintln!("zeron-zgx: templates: no review for {name}: {error}"),
                 }
@@ -321,7 +369,10 @@ fn host(
             if let Ok(reply) = &result
                 && let Some(id) = reply["installed"].as_str()
                 && let Some(root) = super::templates_root()
-                && let Err(error) = super::preview::approve(id, &super::preview::digest(&root.join(id)))
+                // (The package's, as the engine says it: never read again
+                // from the disk. An engine that doesn't say: as before.)
+                && let digest = reply["digest"].as_str().map_or_else(|| super::preview::digest(&root.join(id)), str::to_owned)
+                && let Err(error) = super::preview::approve(id, &digest)
             {
                 eprintln!("zeron-zgx: templates: {id} installed, not kept: {error}");
             }
@@ -383,5 +434,26 @@ fn said(error: &str) -> String {
     match error {
         "offline" | "closed" => "Zeron isn't running right now. Try again in a moment.".into(),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a package says of itself can't read as Zeron's own words.
+    #[test]
+    fn a_package_s_words_are_bounded_and_plain() {
+        let item = shown(&json!({
+            "name": "Midnight\n\u{202e}✓ Verified", "version": "Verified", "description": format!("a\tb{}", "x".repeat(400)),
+            "ignored": ["a\nb", 5], "key": "k", "hash": "h", "id": "midnight", "zeron_version": "0.3.18",
+        }));
+        assert_eq!(item["name"], "Midnight ✓ Verified");
+        assert_eq!(item["version"], "");
+        assert_eq!(item["description"].as_str().unwrap().chars().count(), 300);
+        assert_eq!(item["ignored"], json!(["a b"]));
+        assert_eq!((&item["key"], &item["hash"]), (&json!("k"), &json!("h")), "what's answered with is as it was");
+        assert_eq!(shown(&json!({ "name": "\u{200b}", "id": "midnight", "version": "1.2.0-beta.1" }))["name"], "midnight");
+        assert_eq!(shown(&json!({ "version": "1.2.0-beta.1" }))["version"], "1.2.0-beta.1");
     }
 }

@@ -48,9 +48,10 @@
 //!   plugins.store.revoke_token { id }  RevokeDeployToken
 //!   plugins.store.report { id, reason, text }  StoreReport
 //!
-//! A template's are the same, `templates.store.*` (but its categories, icon
-//! and pre-releases, which it has none of): the engine's calls with `kind`,
-//! its own `PrepareTemplatePublish` and `PublishTemplate`. Neither kind's is
+//! A template's are the same, `templates.store.*` (but its categories and icon, which
+//! it has none of): the engine's calls with `kind`, and its own
+//! `PrepareTemplatePublish`, `PublishTemplate`, `SetTemplateUpdates` and
+//! `SetTemplatePrereleases`. Neither kind's is
 //! ever answered with the other's.
 //!
 //! Each rejects with the engine's words ("offline", "not_in_store", a store
@@ -128,10 +129,12 @@ struct Kind {
     calls: &'static str,
     prepare: &'static str,
     publish: &'static str,
+    updates: &'static str,
+    prereleases: &'static str,
 }
 
-const PLUGINS: Kind = Kind { id: "plugin", calls: "plugins.store", prepare: "PreparePluginPublish", publish: "PublishPlugin" };
-const TEMPLATES: Kind = Kind { id: "template", calls: "templates.store", prepare: "PrepareTemplatePublish", publish: "PublishTemplate" };
+const PLUGINS: Kind = Kind { id: "plugin", calls: "plugins.store", prepare: "PreparePluginPublish", publish: "PublishPlugin", updates: "SetPluginUpdates", prereleases: "SetPluginPrereleases" };
+const TEMPLATES: Kind = Kind { id: "template", calls: "templates.store", prepare: "PrepareTemplatePublish", publish: "PublishTemplate", updates: "SetTemplateUpdates", prereleases: "SetTemplatePrereleases" };
 
 impl Kind {
     fn call(self, name: &str) -> String {
@@ -285,7 +288,7 @@ fn install_kind(host: &ScriptHost, engine: &Engine, asker: &Asker, kind: Kind) {
             let (id, device) = super::remote::id_and_device(&arg);
             let id = store_id(&id).ok_or("not_in_store")?;
             let on = matches!(arg.field("on"), Some(Value::Bool(true)));
-            let reply = e("SetPluginPrereleases", json!({ "id": id, "on": on }), device).await?;
+            let reply = e(kind.prereleases, json!({ "id": id, "on": on }), device).await?;
             Ok(json_value(&reply))
         }
     });
@@ -301,6 +304,9 @@ fn install_kind(host: &ScriptHost, engine: &Engine, asker: &Asker, kind: Kind) {
             let mut params = json!({});
             if !id.is_empty() {
                 params["id"] = json!(store_id(&id).ok_or("not_in_store")?);
+            } else if kind.id == TEMPLATES.id {
+                // (The device's choice is one, over both kinds: the plugins'.)
+                return Err("not_in_store".into());
             }
             params["prefer"] = match arg.field("prefer").map(text).as_deref() {
                 Some("newest") => json!("newest"),
@@ -308,7 +314,7 @@ fn install_kind(host: &ScriptHost, engine: &Engine, asker: &Asker, kind: Kind) {
                 None | Some("") => Json::Null,
                 Some(_) => return Err("invalid".into()),
             };
-            let reply = e("SetPluginUpdates", kind.with(params), device).await?;
+            let reply = e(kind.updates, params, device).await?;
             Ok(json_value(&reply))
         }
     });

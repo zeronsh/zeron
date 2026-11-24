@@ -409,7 +409,8 @@ fn a_template_s_calls_say_what_they_re_for() {
         (r#"ui.call("templates.store.version", { id = "midnight", version = "1.0.0" })"#, "StoreVersion", json!({ "id": "midnight", "version": "1.0.0", "kind": "template" })),
         (r#"ui.call("templates.store.mine", nil)"#, "StoreMyPlugins", json!({ "kind": "template" })),
         (r#"ui.call("templates.store.version_action", { id = "midnight", version = "1.0.0", action = "yank" })"#, "StoreVersionAction", json!({ "id": "midnight", "version": "1.0.0", "action": "yank", "kind": "template" })),
-        (r#"ui.call("templates.store.updates", { id = "midnight", prefer = "verified" })"#, "SetPluginUpdates", json!({ "id": "midnight", "prefer": "verified", "kind": "template" })),
+        (r#"ui.call("templates.store.updates", { id = "midnight", prefer = "verified" })"#, "SetTemplateUpdates", json!({ "id": "midnight", "prefer": "verified" })),
+        (r#"ui.call("templates.store.prereleases", { id = "midnight", on = true })"#, "SetTemplatePrereleases", json!({ "id": "midnight", "on": true })),
         (r#"ui.call("templates.store.report", { id = "midnight", reason = "malware" })"#, "StoreReport", json!({ "id": "midnight", "reason": "malware", "kind": "template" })),
         (r#"ui.call("templates.store.prepare", "midnight")"#, "PrepareTemplatePublish", json!({ "id": "midnight" })),
     ] {
