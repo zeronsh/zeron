@@ -4423,7 +4423,8 @@
         "changes": "Changes sent to its thread",
         "snoozed": "Snoozed",
         "back": "Brought back",
-        "answered": "Answered"
+        "answered": "Answered",
+        "reopened_started": "Reopened and started"
       },
       "fact": {
         "status": "Status",
@@ -4440,7 +4441,13 @@
         "accept": "You say it looks good"
       },
       "what_happened": "What happened",
-      "more_asks": "{n} more"
+      "more_asks": "{n} more",
+      "reopen_start": "Reopen and start",
+      "refused": {
+        "question": "Only a question puts it here",
+        "answer": "Answer it first",
+        "parked": "Parked by its orchestrator"
+      }
     },
     "reports": {
       "title": "Crew updates",

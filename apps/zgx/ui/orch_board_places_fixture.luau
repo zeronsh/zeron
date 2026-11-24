@@ -368,6 +368,30 @@ ui.command { id = "twin_orchestrators", title = "Two orchestrators of one name",
 end }
 
 -- Every drawer open (for pictures: a state's JSON can't go in a shot's spec).
+-- A Planned card its orchestrator parked with a thread on it.
+ui.command { id = "probes_parked", title = "A held card with a thread", run = function()
+	patch(items, "it-probes", { threads = { "th-chat" } })
+end }
+-- A card carried over a target, as a drag shows it (ds/orch_board_drop):
+-- for pictures; tests drag.
+local carry = ui.shared("orch_board_carry", nil :: any)
+for name, c in {
+	carry_pause = { "it-chat", "planned" },
+	carry_resume = { "it-exits", "running" },
+	carry_start = { "it-keyed", "running" },
+	carry_done = { "it-chat", "done" },
+	carry_reopen = { "it-asks", "planned" },
+	carry_reopen_start = { "it-asks", "running" },
+	carry_bring_back = { "it-prs", "needs_you" },
+	carry_refused_needs_you = { "it-chat", "needs_you" },
+	carry_refused_answer = { "it-merge", "planned" },
+	carry_lifted = { "it-chat", false },
+} :: { [string]: { any } } do
+	ui.command { id = name, title = name, run = function()
+		carry:set({ id = c[1], over = c[2] or nil })
+	end }
+end
+
 ui.command { id = "drawers_open", title = "Open every drawer", run = function()
 	drawers:set({ snoozed = true, planned = true, earlier = true })
 end }
@@ -579,8 +603,15 @@ local function board_props(): { [string]: any }
 			if no then
 				return no
 			end
+			-- (A closed card, as the engine has it: reopened and started.)
+			local closed = false
+			for _, c in cards:peek() do
+				if c.id == id and (c.place == "done" or c.place == "dropped") then
+					closed = true
+				end
+			end
 			patch(items, id, { state = "active", paused_at = false })
-			move(id, "running", "working", "You resumed it", { old_state = "active" })
+			move(id, "running", "working", if closed then "You reopened and started it" else "You resumed it", { old_state = "active", closed = false })
 			return nil
 		end,
 		on_start = function(id: string): any

@@ -12,9 +12,10 @@
 --
 -- Nobody sets a card's column. The engine works each card's place out from
 -- facts (its threads, its asks, its finish line, what the person did) and
--- keeps it in the card's row; the board draws it (ds/orch_board_model). So
--- there is nothing to drag: the person answers, snoozes, pauses, marks done
--- or drops, and the card moves when the engine says it has.
+-- keeps it in the card's row; the board draws it (ds/orch_board_model). The
+-- person answers, snoozes, pauses, marks done or drops, and the card moves
+-- when the engine says it has. A card dropped on a column (or on Planned)
+-- does what its menu does there, or nothing (ds/orch_board_drop).
 --
 -- Over the columns: tabs with their counts (All tasks, and each column
 -- alone), the orchestrators' filter (the Control room), the switch between
@@ -55,6 +56,7 @@ local Detail = require("@self/orch_board_detail")
 local List = require("@self/orch_board_list")
 local NewTask = require("@self/orch_board_new")
 local Actions = require("@self/orch_board_actions")
+local Drop = require("@self/orch_board_drop")
 local trace = require("@self/orch_perf_trace")
 local reduce = require("@self/motion")
 local Motion = require("@self/orch_board_motion")
@@ -88,12 +90,24 @@ end
 -- The detail's width beside the board.
 local DETAIL_W = 420
 
+-- `extra`'s props (a drop target's) on `node`'s.
+local function with(extra: { [any]: any }, node: { [any]: any }): any
+	for k, v in extra do
+		node[k] = v
+	end
+	return node
+end
+
 -- Each column's glyph's status (its ink and shape are the status').
 local HEAD: { [string]: string } = { needs_you = "asked", running = "working", done = "done" }
 
 local OrchBoard = ui.component(function(props: Props): Node
 	local ctx = Ctx.make(props)
 	local act = Actions.make(ctx)
+	-- (A card dropped on it: its menu's action. Its cards tell it they're
+	-- carried, ds/orch_board_card.)
+	local drop = Drop.make(ctx, act);
+	(ctx :: any).drop = drop
 	local compact = ctx.compact
 	local view = Ctx.kept(props.view, ui.use_state("board"))
 	local tab = Ctx.kept(props.tab, ui.use_state("all"))
@@ -267,11 +281,16 @@ local OrchBoard = ui.component(function(props: Props): Node
 			min_w = 0,
 			ui.show(function(): boolean
 				return count() > 0
-			end, ui.column {
+			end, ui.column(with(if place == "planned" then drop.target(place) else {}, {
 				id = `orch-drawer-{place}`,
 				class = "orch-drawer",
 				w_full = true,
 				min_w = 0,
+				relative = true,
+				-- (Refusing the card carried, apart from its column: faded.)
+				opacity = function(): number
+					return if place == "planned" and drop.faded(place) and not drop.faded("running") and drop.over() ~= place then 0.45 else 1
+				end,
 				ui.button {
 					class = "orch-drawer-head",
 					on_mount = function(el: any)
@@ -323,8 +342,9 @@ local OrchBoard = ui.component(function(props: Props): Node
 						color = "$text.tertiary",
 					},
 					ui.div { grow = 1, min_w = 0 },
+					if place == "planned" then drop.Badge(place) else nil,
 					ui.show(function(): boolean
-						return not open() and hint:get() ~= ""
+						return not open() and hint:get() ~= "" and drop.over() ~= place
 					end, ui.text {
 						function(): string
 							return hint:get()
@@ -378,7 +398,8 @@ local OrchBoard = ui.component(function(props: Props): Node
 						exit = reduce.transition({ opacity = 0, duration = Motion.DRAWER, ease = Motion.EASE }),
 					}),
 				},
-			}),
+				if place == "planned" then drop.Lit(place, "$radius.md") else nil,
+			}))),
 		}
 	end
 
@@ -435,9 +456,17 @@ local OrchBoard = ui.component(function(props: Props): Node
 				anime.animate(g, { clipBottom = { to = base }, duration = Motion.TRAVEL, ease = Motion.EASE })
 			end
 		end
-		return ui.column {
+		-- (A card dropped on it does its menu's action there: Planned's
+		-- drawer is a target of its own, over its column's.)
+		local below = drawer_refs[model.DRAWER[place]]
+		return ui.column(with(drop.target(place), {
 			id = `orch-col-{place}`,
 			class = "orch-column",
+			-- (Refusing the card carried: faded, but under the pointer, where
+			-- its head says why.)
+			opacity = function(): number
+				return if drop.faded(place) and drop.over() ~= place then 0.45 else 1
+			end,
 			label = locale.t(`orch.board.place.{place}`),
 			grow = 1,
 			basis = 0,
@@ -514,6 +543,7 @@ local OrchBoard = ui.component(function(props: Props): Node
 					color = "$text.primary",
 				},
 				ui.div { grow = 1, min_w = 0 },
+				drop.Badge(place),
 				ui.text {
 					function(): string
 						return tostring(count())
@@ -599,7 +629,22 @@ local OrchBoard = ui.component(function(props: Props): Node
 				),
 			},
 			drawer(model.DRAWER[place]),
-		}
+			-- Taking the card carried: edged, down to Planned's drawer, which
+			-- takes it apart.
+			ui.div {
+				pointer_events = "none",
+				absolute = true,
+				top = 0,
+				left = 0,
+				right = 0,
+				bottom = function(): number
+					local h = if place == "running" then (below.height or 0) else 0
+					return if h > 0 then h + 6 else 0
+				end,
+				z = 4,
+				drop.Lit(place, "$radius.xl"),
+			},
+		}))
 	end
 
 	-- The columns: side by side where three fit, else one under another.
