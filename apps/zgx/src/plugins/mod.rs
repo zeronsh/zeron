@@ -1830,11 +1830,17 @@ impl Bridge {
         if compose || kept || retry || was != id || cached.is_none() {
             self.publish_page();
         }
-        if (kept || (changed > 0 && template))
-            && let Err(error) = self.host.reload()
-        {
+        let reloads = kept || (changed > 0 && template);
+        if reloads && let Err(error) = self.host.reload() {
             eprintln!("zeron-zgx: the window didn't reload: {}", recovery::first_line(&error));
             self.blame_as(&error, true);
+        }
+        // Only Zeron's own ui/ changed: the host's watch hears it only for
+        // the modules it watched at its last load, never one first required
+        // after it (the Board's, required as it opens). Every required file's
+        // time looked at: nothing when the watch already reloaded.
+        if !reloads && changed > 0 {
+            self.host.reload_if_changed();
         }
         // What failed as a preview, laid down as it is now.
         if retry {
