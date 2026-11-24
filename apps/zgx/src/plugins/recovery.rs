@@ -36,10 +36,18 @@ pub fn blame(error: &str, plugins: &[Plugin]) -> Option<String> {
 /// The file an app's error is at: after its VM's preamble (`app.luau:
 /// runtime error: `), up to `.luau:<line>`.
 fn located(error: &str) -> Option<&str> {
-    let line = error.lines().next()?;
+    let line = failed_line(error)?;
     let rest = line.split_once(" error: ").map_or(line, |(_, rest)| rest);
     let end = rest.find(".luau:")? + ".luau".len();
     rest[end + 1..].starts_with(|c: char| c.is_ascii_digit()).then(|| &rest[..end])
+}
+
+/// The line of `error` that says where it failed: the one with Luau's
+/// "runtime error: " (zgx may lead with the function that raised it, on a
+/// line of its own: "app.luau: in the key function of ui.each (defined at
+/// …):"), else its first.
+fn failed_line(error: &str) -> Option<&str> {
+    error.lines().find(|line| line.contains("runtime error: ")).or_else(|| error.lines().next())
 }
 
 /// Whether `file` is in `dir`, by whole parts (`/var` and `/private/var`
@@ -140,8 +148,8 @@ fn rule_broken(line: &str) -> Option<String> {
 /// An error's first line, without the VM's preamble and the copy's path: what
 /// a person reads ("sidebar.luau:12: attempt to index nil").
 pub fn first_line(error: &str) -> String {
-    let line = error.lines().next().unwrap_or(error);
-    let line = line.split(": runtime error: ").last().unwrap_or(line);
+    let line = failed_line(error).unwrap_or(error);
+    let line = line.split("runtime error: ").last().unwrap_or(line);
     // A path: its file name onward.
     let line = match line.find(".luau:") {
         Some(at) => {
@@ -173,6 +181,10 @@ mod tests {
         assert_eq!(blame("focused: runtime error: x", &plugins), None);
         let private = "app.luau: runtime error: /private/d/plugins/.loaded/focus/0123/a.luau:2: x";
         assert_eq!(blame(private, &plugins).as_deref(), Some("focus"));
+        // The function that raised it said first, on a line of its own.
+        let led = "app.luau: in the text function of ui.text (defined at /d/plugins/.loaded/focus/0123/a.luau:1):\nruntime error: /d/plugins/.loaded/focus/0123/a.luau:2: x";
+        assert_eq!(blame(led, &plugins).as_deref(), Some("focus"));
+        assert_eq!(first_line(led), "a.luau:2: x");
     }
 
     /// R26: one plugin can't get another withdrawn by naming its snapshot

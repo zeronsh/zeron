@@ -1286,34 +1286,39 @@ return ui.component(function(props: Props): Node
 	local highlight = mentions.highlighter(md.highlight)
 	-- The caret kept out of a list item's folded marker (ds/markdown_edit
 	-- `marker_caret`): it lands at the item's text, or, stepped back from
-	-- there, at the line before's end. (Read about the caret alone: a
-	-- line's start and head, a fence count only on a list's line.)
+	-- there, at the line before's end. Looked at once the caret's event is
+	-- over (the draft may not hold the edit that moved it yet), and only
+	-- for a caret near its line's start (a marker's reach): then the
+	-- caret's line start and head are read, a fence count only on a list's
+	-- line.
+	local MARKER_REACH = 24
 	local caret_was: number? = nil
-	local function out_of_marker(anchor: number, focus: number)
+	local function out_of_marker(column: number, anchor: number, focus: number)
 		local was = caret_was
 		caret_was = focus
-		if anchor ~= focus then
+		if anchor ~= focus or column > MARKER_REACH then
 			return
 		end
-		local start, line = Draft.line_at(value, focus)
-		if start == nil or line == nil then
-			return
-		end
-		local back = if was ~= nil and was >= start and was <= start + #line then was - start else nil
-		local to = markdown.marker_caret(line, focus - start, back)
-		if to == nil or Draft.fenced(value, start) then
-			return
-		end
-		local target = if to >= 0 then start + to elseif start > 0 then start - 1 else start + (markdown.marker_caret(line, 0, nil) or 0)
 		ui.after(0, function()
 			local el = field:peek()
 			if not el then
 				return
 			end
 			local a, b = el:selection_bytes()
-			if a == focus and b == focus then
-				el:set_selection_bytes(target, target)
+			if a ~= focus or b ~= focus then
+				return
 			end
+			local start, line = Draft.line_at(value, focus)
+			if start == nil or line == nil then
+				return
+			end
+			local back = if was ~= nil and was >= start and was <= start + #line then was - start else nil
+			local to = markdown.marker_caret(line, focus - start, back)
+			if to == nil or Draft.fenced(value, start) then
+				return
+			end
+			local target = if to >= 0 then start + to elseif start > 0 then start - 1 else start + (markdown.marker_caret(line, 0, nil) or 0)
+			el:set_selection_bytes(target, target)
 		end)
 	end
 	-- File-icon SVGs follow the active theme's light/dark icon set; only runs
@@ -2259,7 +2264,7 @@ return ui.component(function(props: Props): Node
 				active_descendant = m.descendant,
 				on_caret = function(line, column, anchor, focus)
 					m.on_caret(line, column, anchor, focus)
-					out_of_marker(anchor, focus)
+					out_of_marker(column, anchor, focus)
 					if spoken then
 						spoken.on_caret()
 					end
