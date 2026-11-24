@@ -85,6 +85,11 @@ export type Task = {
 	ended: string?,
 	-- A subagent that ended badly: its mark says so.
 	failed: boolean?,
+	-- A subagent at work that isn't simply running: it waits on work of its
+	-- own, or asks the person something.
+	state: ("waiting" | "input" | "approval")?,
+	-- A subagent that can be stopped on its own (a chat's).
+	stops: boolean?,
 }
 export type Tray = "alerts" | "todos" | "agents" | "tasks" | "queue"
 -- Something to know about the chat (a context nearly full, a rate limit, a
@@ -122,6 +127,9 @@ export type Alert = {
 	cells: { string }?,
 	trail: string?,
 	quiet: boolean?,
+	-- Its answers, side by side under its words (each an alert: its `action`
+	-- the label, its `id` what comes to `on_alert_action`).
+	buttons: { Alert }?,
 }
 export type Props = {
 	queue: State<{ Queued }>?,
@@ -1156,7 +1164,8 @@ end
 -- A running task or terminal: its glyph, its name, a word on it, how long,
 -- and Stop. A subagent's is its mark (working, or how it ended), its title
 -- and, ended, how; with `on_open_task` the whole row opens it, and it has no
--- Stop (the host stops a process, not a subagent).
+-- Stop, unless it's a chat of its own (`stops`): the host stops those, not
+-- a subagent of the chat's own runtime.
 -- A command as one line: its line breaks as spaces (a script of several
 -- lines would otherwise stand as several rows in a one-line slot).
 local function one_line(text: string): string
@@ -1206,9 +1215,12 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 			if agent
 				then ui.switch(function(): string
 					local r = row:get()
-					return if not r.ended then "working" elseif r.failed then "failed" else "done"
+					return if not r.ended then r.state or "working" elseif r.failed then "failed" else "done"
 				end, {
 					working = status.StatusIcon { kind = "working", size = 14 },
+					waiting = status.StatusIcon { kind = "waiting", size = 14 },
+					input = status.StatusIcon { kind = "input", size = 14 },
+					approval = status.StatusIcon { kind = "approval", size = 14 },
 					done = status.StatusIcon { kind = "done", size = 14 },
 					failed = status.StatusIcon { kind = "failed", size = 14 },
 				})
@@ -1246,12 +1258,13 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 			color = "$text.tertiary",
 		},
 	}
-	if not agent then
+	if not agent or t.stops then
 		table.insert(
 			parts,
 			ui.show(
 				function()
-					return not ended()
+					local r = row:get()
+					return r.ended == nil and (not agent or r.stops == true)
 				end,
 				IconButton {
 					icon = "stop",
@@ -1264,7 +1277,8 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 							props.on_stop_task(t.id)
 						end
 					end,
-				}
+				},
+				if agent then ui.div { w = 6, shrink = 0 } else nil
 			)
 		)
 	else
@@ -1463,6 +1477,36 @@ local function alert_row(a: Alert, row: State<Alert>, props: Props, height: numb
 		words(function(): string?
 			return row:get().note
 		end),
+		ui.show(function(): boolean
+			return row:get().buttons ~= nil and props.on_alert_action ~= nil
+		end, ui.row {
+			pl = ui.raw(26, "under the row's words"),
+			pr = "$space.2",
+			pb = "$space.2",
+			gap = "$space.1",
+			wrap = true,
+			ui.each(ui.computed(function(): { Alert }
+				return row:get().buttons or {}
+			end), function(x: Alert): Node
+				return Button {
+					x.action or "",
+					size = "sm",
+					tone = "ghost",
+					h = 24,
+					px = "$space.2",
+					text_size = "$font.size.xs",
+					on_click = function()
+						(props.on_alert_action :: (string) -> ())(x.id)
+					end,
+				}
+			end, {
+				key = function(x: Alert): string
+					return x.id
+				end,
+				row = true,
+				gap = "$space.1",
+			}),
+		}),
 	}
 end
 

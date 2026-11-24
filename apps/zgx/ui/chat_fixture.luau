@@ -163,6 +163,48 @@ do
 			sessions.now:set(now)
 		end,
 	}
+	-- s2 delegated to two children on other providers, one on another device,
+	-- which asks to run a command (as the host says it); answers are noted
+	-- (`respond_child:<chat>:<request>:<decision>`), stops too.
+	ui.command {
+		id = "delegated",
+		title = "s2 waits on children it delegated to, one asking for approval",
+		run = function()
+			local now = table.clone(sessions.now:peek() :: any)
+			local children = table.clone(now.children or {})
+			children.s2 = {
+				{ id = "k1", parent = "s2", title = "Audit the parser", device = "box", status = "input", updated = 20, created = 10, since = os.time() - 192, child_kind = "subagent", harness_name = "Codex" },
+				{ id = "k2", parent = "s2", title = "Draft the release notes", device = "mac", status = "working", updated = 20, created = 20, since = os.time() - 65, child_kind = "subagent", harness_name = "Cursor" },
+			}
+			now.children = children
+			sessions.now:set(now)
+			ui.shared("chat.ask_details", {} :: { [string]: any }):set({
+				k1 = { request = "r1", kind = "approval", command = "cargo fuzz run parse -- -max_total_time=60" },
+			})
+			ui.shared("chat.asks", {} :: { [string]: string }):set({ k1 = "approval" })
+		end,
+	}
+	-- s2 was woken with what they came to.
+	ui.command {
+		id = "delegated_woke",
+		title = "s2 is woken with its children's results",
+		run = function()
+			store.messages:push {
+				id = "wake1",
+				role = "wake",
+				text = "",
+				wake = {
+					kind = "results",
+					open = 1,
+					tasks = {
+						{ chat = "k1", title = "Audit the parser", agent = "openai", status = "done" },
+						{ chat = "k2", title = "Draft the release notes", agent = "cursor", status = "failed" },
+					},
+				},
+			}
+			store.messages:push { id = "wake2", role = "assistant", text = "The parser audit came back clean. The release notes run failed, so I'm writing those here while the benchmark finishes.", model = "Opus" }
+		end,
+	}
 	local published = ui.shared("chat.subagents", {} :: { any })
 	ui.command {
 		id = "subagents_running",
@@ -503,6 +545,18 @@ ui.command {
 }
 stub.interrupt = function(id: string)
 	note(`interrupt:{id}`)
+end
+-- A child's approval answered, and a child chat stopped.
+stub.respond_child = function(chat: string, request: string, decision: string): any
+	note(`respond_child:{chat}:{request}:{decision}`)
+	return settled(nil)
+end
+do
+	local children_stub = require("@account/sessions") :: any
+	children_stub.stop = function(id: string): any
+		note(`stop:{id}`)
+		return settled(nil)
+	end
 end
 -- A background process stopped (noted); `stop_fails` makes the next fail.
 local STOP_FAILS = ui.state("fixture_stop_fails", false)

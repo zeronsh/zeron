@@ -321,6 +321,12 @@ function M.load_catalog()
 	ui.invoke("chat.catalog")
 end
 
+-- A child's approval answered on the chat that delegated to it ("once",
+-- "deny"): a promise.
+function M.respond_child(chat: string, request: string, decision: string): any
+	return ui.call("chat.respond_child", { chat = chat, request = request, decision = decision })
+end
+
 -- A background process of `session` stopped on its host: a promise of
 -- whether it's stopping (false: it had ended already).
 function M.stop_task(session: string, task: string): any

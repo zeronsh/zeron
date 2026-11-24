@@ -114,6 +114,11 @@ struct Chats {
     /// "question", by chat (`chat.asks`, for the sidebar's rows).
     asks: RefCell<HashMap<String, &'static str>>,
     asks_shared: RefCell<Vec<Shared>>,
+    /// What each of them asks, whole (its transcript's input part): what an
+    /// approval would do, and the request answering it
+    /// (`chat.ask_details`, for the chat that delegated to it).
+    ask_parts: RefCell<HashMap<String, Json>>,
+    ask_parts_shared: RefCell<Vec<Shared>>,
     /// A look at a waiting chat's latest entries, to tell which, until
     /// its first frame comes.
     ask_looks: RefCell<HashMap<String, Watch>>,
@@ -940,7 +945,7 @@ impl PendingSwitch {
     }
 }
 
-fn known_harness_name(id: &str) -> &str {
+pub(crate) fn known_harness_name(id: &str) -> &str {
     match id {
         "claude-code" => "Claude Code",
         "codex" => "Codex",
@@ -1189,6 +1194,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let chats = CHATS.with(Rc::clone);
     chats.catalog.borrow_mut().push(host.shared("chat.catalog", chats.catalog_value()));
     chats.asks_shared.borrow_mut().push(host.shared("chat.asks", chats.asks_value()));
+    chats.ask_parts_shared.borrow_mut().push(host.shared("chat.ask_details", chats.ask_details_value()));
     let view = Rc::new(View {
         session: host.shared("chat.session", Value::Nil),
         messages: host.shared("chat.messages", Value::List(Rc::from([]))),
@@ -1387,6 +1393,12 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     host.async_action("chat.respond", move |args| {
         let v = pick(&args);
         async move { crate::plugins::preview::refuse("chat.respond")?; v.respond(args).await.map(|_| Value::Nil).map_err(String::from) }
+    });
+    // A child's approval, answered on the chat that delegated to it.
+    host.async_action("chat.respond_child", |args| async move {
+        crate::plugins::preview::refuse("chat.respond_child")?;
+        let chats = CHATS.with(Rc::clone);
+        chats.respond_child(args).await.map(|_| Value::Nil).map_err(String::from)
     });
     // A question's Back: its page before again, with what was picked there.
     let back = which.clone();
@@ -1620,6 +1632,7 @@ impl Chats {
             keep
         });
         self.ask_looks.borrow_mut().retain(|id, _| waiting.contains(id));
+        self.ask_parts.borrow_mut().retain(|id, _| waiting.contains(id));
         let rpc = self.rpc.borrow().clone().filter(|r| !r.is_closed());
         for id in waiting {
             if self.asks.borrow().contains_key(&id) || self.ask_looks.borrow().contains_key(&id) {
@@ -1628,9 +1641,15 @@ impl Chats {
             // The open chat's own transcript says it at once.
             let open = self.views().iter().find_map(|v| {
                 let open = v.open.borrow();
-                open.as_ref().filter(|o| o.id == id && o.heard).map(|o| ask_kind(o.entries.iter().rev().filter_map(|e| e.json.as_ref())))
+                open.as_ref().filter(|o| o.id == id && o.heard).map(|o| {
+                    let newest = || o.entries.iter().rev().filter_map(|e| e.json.as_ref());
+                    (ask_kind(newest()), asked(newest()).cloned())
+                })
             });
-            if let Some(kind) = open {
+            if let Some((kind, part)) = open {
+                if let Some(part) = part {
+                    self.ask_parts.borrow_mut().insert(id.clone(), part);
+                }
                 self.asks.borrow_mut().insert(id, kind);
                 changed = true;
                 continue;
@@ -1645,6 +1664,9 @@ impl Chats {
                     let Some(me) = weak.upgrade() else { return };
                     let Some(entries) = item["reset"].as_array() else { return };
                     let kind = ask_kind(entries.iter().rev());
+                    if let Some(part) = asked(entries.iter().rev()) {
+                        me.ask_parts.borrow_mut().insert(chat.clone(), part.clone());
+                    }
                     me.asks.borrow_mut().insert(chat.clone(), kind);
                     // Seen: let it go (dropped once this callback returns).
                     let done = me.ask_looks.borrow_mut().remove(&chat);
@@ -1668,6 +1690,61 @@ impl Chats {
         for shared in self.asks_shared.borrow().iter() {
             shared.set(value.clone());
         }
+        let value = self.ask_details_value();
+        for shared in self.ask_parts_shared.borrow().iter() {
+            shared.set(value.clone());
+        }
+    }
+
+    /// What each waiting chat asks, by chat: `{ request, kind, command?,
+    /// detail? }`, an approval with what it would do.
+    fn ask_details_value(&self) -> Value {
+        Value::record(self.ask_parts.borrow().iter().map(|(id, part)| {
+            let questions = part["questions"].as_array().map(Vec::as_slice).unwrap_or_default();
+            let opt = |v: Option<&str>| v.map_or(Value::Nil, Value::from);
+            let words = questions.first().and_then(|q| q["question"].as_str()).unwrap_or_default();
+            let approval = is_approval(questions);
+            let (command, detail) = if approval {
+                approval_parts(words, questions[0]["note"].as_str())
+            } else {
+                (None, Some(words.to_owned()))
+            };
+            (
+                id.as_str(),
+                Value::record([
+                    ("request", opt(part["requestId"].as_str())),
+                    ("kind", Value::from(if approval { "approval" } else { "question" })),
+                    ("command", opt(command)),
+                    ("detail", opt(detail.as_deref())),
+                ]),
+            )
+        }))
+    }
+
+    /// An approval answered where it isn't shown (`chat.respond_child`: a
+    /// child's, on the chat that delegated to it): allowed once, or not.
+    async fn respond_child(&self, args: Value) -> Result<(), Outcome> {
+        let id = args.field("chat").map(text).unwrap_or_default();
+        let request = args.field("request").map(text).unwrap_or_default();
+        let part = self.ask_parts.borrow().get(&id).cloned().ok_or("missing")?;
+        let questions = part["questions"].as_array().cloned().unwrap_or_default();
+        if part["requestId"].as_str() != Some(&request) || !is_approval(&questions) {
+            return Err("missing");
+        }
+        let label = match args.field("decision").map(text).unwrap_or_default().as_str() {
+            "once" => "Yes",
+            "deny" => "No",
+            _ => return Err("missing"),
+        };
+        command(
+            &id,
+            json!({ "kind": "respondInput", "requestId": request, "answers": single(&questions, label) }),
+        )
+        .await?;
+        // (Answered: not offered again while its chat moves on.)
+        self.ask_parts.borrow_mut().remove(&id);
+        self.publish_asks();
+        Ok(())
     }
 
     fn views(&self) -> Vec<Rc<View>> {
@@ -5460,6 +5537,47 @@ impl Subagents {
     }
 }
 
+/// Zeron's wake of a chat that delegated (`role = "wake"`): what settled, or
+/// which child asks, each openable.
+fn wake_row(id: &str, notice: &zeron_proto::WakeNotice) -> Value {
+    let tasks = notice.tasks.iter().map(|task| {
+        Value::record([
+            ("chat", Value::from(task.chat_id.as_str())),
+            ("title", Value::from(task.title.as_str())),
+            ("device", Value::from(task.device_id.as_str())),
+            ("agent", crate::agents::glyph(task.harness.as_str()).map_or(Value::Nil, |g| Value::from(g.as_str()))),
+            (
+                "status",
+                Value::from(match task.status {
+                    zeron_proto::DelegatedStatus::Failed => "failed",
+                    zeron_proto::DelegatedStatus::Cancelled => "stopped",
+                    zeron_proto::DelegatedStatus::AwaitingInput => "input",
+                    _ => "done",
+                }),
+            ),
+        ])
+    });
+    Value::record([
+        ("id", Value::from(id)),
+        ("role", Value::from("wake")),
+        ("text", Value::from("")),
+        (
+            "wake",
+            Value::record([
+                (
+                    "kind",
+                    Value::from(match notice.kind {
+                        zeron_proto::WakeKind::Results => "results",
+                        zeron_proto::WakeKind::Question => "question",
+                    }),
+                ),
+                ("tasks", Value::List(tasks.collect())),
+                ("open", Value::from(notice.open as f64)),
+            ]),
+        ),
+    ])
+}
+
 /// An entry as ds/transcript's message; nil for one it doesn't show.
 pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
     let id = entry["id"].as_str()?;
@@ -5479,6 +5597,11 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             // said, so no bubble.
             if image_note_only(entry) {
                 return None;
+            }
+            // What a chat's children came to, as Zeron woke it with: a row of
+            // its own, never the person's bubble (its words are the agent's).
+            if let Some((notice, _)) = zeron_proto::delegation::wake_notice(&text) {
+                return Some(wake_row(id, &notice));
             }
             // A message from another chat: its routing header is the agent's to
             // read; the transcript shows who sent it, over its words.

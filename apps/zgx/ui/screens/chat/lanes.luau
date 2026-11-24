@@ -137,8 +137,20 @@ local CHILD = "chat:"
 -- there. Each task's id is the subagent's doc (`ref`). With the chat
 -- (`session`), its child chats a Zeron chat started (`child_kind`, a
 -- subagent's or a side chat's, made through Zeron's tools) are among them,
--- listed as a subagent is; those the person started aren't.
-function M.tasks(session: string?): { any }
+-- listed as a subagent is; those the person started aren't. A child chat's
+-- says what it runs on and, when that's another device than the chat's own
+-- (`device`), where; what it asks the person (`asks`, as `chat.asks` says
+-- it); and can be stopped.
+local asks = ui.shared("chat.asks", {} :: { [string]: string })
+local function device_name(id: string): string?
+	for _, d in sessions.now:get().devices or {} do
+		if d.id == id then
+			return d.name
+		end
+	end
+	return nil
+end
+function M.tasks(session: string?, device: string?): { any }
 	local active, finished = {}, {}
 	for _, s in subagents:get() do
 		local task = { id = s.ref, kind = "agent", name = s.title }
@@ -158,9 +170,28 @@ function M.tasks(session: string?): { any }
 	end)
 	for _, c in children do
 		if c.child_kind ~= nil then
-			local task = { id = CHILD .. c.id, kind = "agent", name = c.title }
+			local where = if c.device ~= device then device_name(c.device) else nil
+			local said: { string } = {}
+			for _, word in { c.harness_name or "", where or "" } do
+				if word ~= "" then
+					table.insert(said, word)
+				end
+			end
+			local task: any = {
+				id = CHILD .. c.id,
+				kind = "agent",
+				name = c.title,
+				detail = if #said > 0 then table.concat(said, " · ") else nil,
+			}
 			local st = c.status
 			if st == "working" or st == "waiting" or st == "input" then
+				task.since = c.since
+				task.stops = true
+				if st == "input" then
+					task.state = if asks:get()[c.id] == "approval" then "approval" else "input"
+				elseif st == "waiting" then
+					task.state = "waiting"
+				end
 				table.insert(active, task)
 			else
 				task.ended = if st == "failed" then "failed" else "done"
@@ -194,6 +225,11 @@ function M.open_task(session: string, ref: string)
 			return
 		end
 	end
+end
+
+-- The child chat a tray row stands for, nil for a subagent of its own.
+function M.child_of(ref: string): string?
+	return if string.sub(ref, 1, #CHILD) == CHILD then string.sub(ref, #CHILD + 1) else nil
 end
 
 -- A lane's chat, as the host watches it in `slot`.

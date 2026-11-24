@@ -65,7 +65,8 @@ export type Message = {
 	id: string,
 	-- A person's, a reply, or the seam where the chat moved to another
 	-- agent (`[mark] From → [mark] To` over the prompt that moved it).
-	role: "user" | "assistant" | "switch",
+	-- ("wake": Zeron's, not a person's: what the chat's subagents came to.)
+	role: "user" | "assistant" | "switch" | "wake",
 	text: string,
 	-- A person's: what came with it.
 	attachments: { UserMessage.Attachment }?,
@@ -110,7 +111,10 @@ export type Message = {
 	to_mark: Mark.Name?,
 	-- A person's that another chat sent: which, and its title when it was sent.
 	sender: { chat: string, title: string }?,
+	-- A wake's: the subagents it's about, and how many still run.
+	wake: { kind: "results" | "question", tasks: { WakeTask }, open: number }?,
 }
+export type WakeTask = { chat: string, title: string, device: string?, agent: Mark.Name?, status: "done" | "failed" | "stopped" | "input" }
 
 export type Props = {
 	messages: State<{ Message }>,
@@ -445,6 +449,66 @@ local function seam(m: Message): Node
 			},
 			switch_side(m.to, m.to_mark),
 		},
+	}
+end
+
+-- What woke the chat: its subagents' results (or a question of one's), a
+-- quiet line, then each as a chip that opens its chat. Never a bubble: nobody
+-- said it.
+local function wake_row(m: Message, props: Props): Node
+	local wake = m.wake :: { kind: string, tasks: { WakeTask }, open: number }
+	local chips: { [any]: any } = { w_full = true, gap = "$space.2", wrap = true, items = "center" }
+	for _, t in wake.tasks do
+		local function now(): { title: string, mark: Mark.Name? }?
+			return if props.chat_of then props.chat_of(t.chat) else nil
+		end
+		local function title(): string
+			local live = now()
+			return if live then live.title else t.title
+		end
+		table.insert(chips, ui.button {
+			label = function(): string
+				return locale.s("ds.transcript.delegated.open_chat", { title = title() })
+			end,
+			h = 28,
+			px = "$space.2",
+			max_w = ui.raw(280, "a chip of a title, cut past that"),
+			min_w = 0,
+			gap = ui.raw(6, "Zeron's caption gap"),
+			items = "center",
+			rounded = "$radius.md",
+			border = 1,
+			border_color = "$border",
+			bg = "#00000000",
+			hover = { bg = "$hover" },
+			active = { bg = "$pressed" },
+			cursor = "pointer",
+			on_click = function()
+				if props.open_sender then
+					props.open_sender(t.chat, title())
+				elseif props.open_link then
+					props.open_link(`zeron-chat:{t.chat}`)
+				end
+			end,
+			status.StatusIcon { kind = if t.status == "failed" then "failed" elseif t.status == "input" then "input" elseif t.status == "stopped" then "idle" else "done", size = 14 },
+			if t.agent then Mark { name = t.agent, size = 14, bare = true } else Icon { name = "chat-round-line", size = 14 },
+			ui.text { title, literal = true, truncate = true, min_w = 0, text_size = "$font.size.sm", color = "$text.secondary" },
+			if t.status == "stopped"
+				then ui.text { locale.t("ds.transcript.delegated.stopped"), shrink = 0, text_size = "$font.size.xs", color = "$text.tertiary" }
+				else nil,
+		})
+	end
+	local said = locale.s(if wake.kind == "question" then "ds.transcript.delegated.question" else "ds.transcript.delegated.results", { n = #wake.tasks })
+	if wake.open > 0 and wake.kind ~= "question" then
+		said ..= ` · {locale.s("ds.transcript.delegated.open", { n = wake.open })}`
+	end
+	return ui.column {
+		hook = "chat.message.wake",
+		class = "message message-wake",
+		w_full = true,
+		gap = "$space.2",
+		ui.text { said, text_size = "$font.size.sm", color = "$text.tertiary", selectable = false },
+		ui.row(chips),
 	}
 end
 
@@ -2605,6 +2669,7 @@ local function Transcript(props: Props): Node
 						end
 					end,
 				if m.role == "switch" then seam(m)
+					elseif m.role == "wake" then wake_row(m, props)
 					elseif mine then ui.column {
 						hook = "chat.message.prompt",
 						-- What it is, for a plugin's selector (and the

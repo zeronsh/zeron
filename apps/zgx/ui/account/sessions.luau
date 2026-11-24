@@ -73,6 +73,8 @@ export type Chat = {
 	working_side_chats: number?,
 	-- What its agent waits on after its turn (status "waiting").
 	waiting: { WaitingOn }?,
+	-- Since when, in Unix seconds.
+	waiting_since: number?,
 	-- Put to sleep: until when; or, woken and not looked at since, when it
 	-- woke (Unix seconds).
 	sleep_until: number?,
@@ -83,7 +85,9 @@ export type Chat = {
 	turn: string?,
 	turn_fresh: boolean?,
 }
-export type WaitingOn = { id: string, kind: string, label: string }
+-- ("agent" and "process": its own runtime's; "chat": a child chat it
+-- delegated to, with which, where, on what agent, and since when.)
+export type WaitingOn = { id: string, kind: string, label: string, chat: string?, device: string?, harness_name: string?, since: number? }
 -- A side chat: a chat under another (its `parent`).
 export type Child = {
 	id: string,
@@ -98,6 +102,10 @@ export type Child = {
 	-- Started by a Zeron chat (through Zeron's tools), as a subagent or a
 	-- side chat: "subagent" | "side"; nil for one the person started.
 	child_kind: string?,
+	harness_name: string?,
+	model: string?,
+	-- At work (or asking): since when, in Unix seconds.
+	since: number?,
 }
 -- `github`: its GitHub repository (`owner/name`), the one a Cloud chat of it
 -- clones.

@@ -402,7 +402,10 @@ impl Rig {
 
     async fn finished(&self) {
         self.until("the parent finishes", |r| {
-            let row = r.row();
+            // (None yet, right after a restart.)
+            let Some(row) = r.core.sessions.session_status("parent") else {
+                return false;
+            };
             row.status == SessionStatus::Idle && row.waiting.is_none() && row.last_completed_turn.is_some()
         })
         .await;

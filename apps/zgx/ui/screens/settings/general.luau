@@ -32,6 +32,7 @@ search.index(M.ID, ui.t("settings.general.title"), ui.t("settings.general.terms"
 	{ key = "hide_emails", title = ui.t("settings.general.hide_emails.label"), section = ui.t("settings.general.privacy"), terms = ui.t("settings.general.hide_emails.terms") },
 	{ key = "keep_chats_local", title = ui.t("settings.general.keep_chats_local.label"), section = ui.t("settings.general.privacy"), terms = ui.t("settings.general.keep_chats_local.terms") },
 	{ key = "thread_naming", title = ui.t("settings.general.thread_naming.label"), terms = ui.t("settings.general.thread_naming.terms") },
+	{ key = "async_delegation", title = ui.t("settings.general.async_delegation.label"), terms = ui.t("settings.general.async_delegation.terms") },
 	{ key = "worktrees", title = ui.t("settings.general.worktrees.label"), section = ui.t("settings.general.git"), terms = ui.t("settings.general.worktrees.terms") },
 	{ key = "commit_credit", title = ui.t("settings.general.commit_credit.label"), section = ui.t("settings.general.git"), terms = ui.t("settings.general.commit_credit.terms") },
 })
@@ -45,6 +46,7 @@ type Worktrees = {
 	environmentOverride: string?,
 }
 type Titles = { harness: string?, model: string? }
+local delegation = ui.state("settings_async_delegation", nil :: { enabled: boolean, chosen: boolean }?)
 local credit = ui.state("settings_commit_credit", nil :: Credit?)
 local worktrees = ui.state("settings_worktrees", nil :: Worktrees?)
 local titles = ui.state("settings_titles", nil :: Titles?)
@@ -95,6 +97,7 @@ local function load_all()
 		keep_local:set(on == true)
 	end, function() end)
 	load("credit", "GetCommitCredit", credit)
+	load("delegation", "GetAsyncDelegation", delegation)
 	load("worktrees", "GetWorktreeSettings", worktrees)
 	load("titles", "GetTitleSettings", titles)
 	load("background", "GetBackgroundSettings", background)
@@ -329,6 +332,23 @@ function M.view(): Node
 							else ui.t("settings.general.thread_naming.model"):get()
 					end,
 					control = naming(),
+				}),
+				row("async_delegation", {
+					label = ui.t("settings.general.async_delegation.label"),
+					description = function()
+						if failed:get().delegation then
+							return says(failed:get().delegation):get()
+						end
+						return ui.t("settings.general.async_delegation.description"):get()
+					end,
+					control = engine_switch(ui.t("settings.general.async_delegation.label"), function()
+						local d = delegation:get()
+						return if d then d.enabled else nil
+					end, function(on: boolean)
+						change("delegation", delegation, { enabled = on, chosen = true }, "SetAsyncDelegation", { enabled = on })
+					end, function()
+						return delegation:get() == nil
+					end),
 				}),
 			},
 		},

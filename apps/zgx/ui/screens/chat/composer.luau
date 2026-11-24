@@ -32,6 +32,7 @@ local sessions = require("@account/sessions")
 local cloud = require("@account/cloud")
 local LinkNotice = require("@app/screens/chat/link_notice")
 local CloudTray = require("@app/screens/chat/cloud_tray")
+local Delegates = require("@app/screens/chat/delegates")
 local Held = require("@app/screens/chat/held")
 local CloudMachine = require("@app/screens/chat/cloud_machine")
 local Where = require("@app/screens/chat/where")
@@ -136,7 +137,7 @@ local function same_pick(a: { [string]: any }?, b: { [string]: any }?): boolean
 end
 -- The tray open behind the composer (its todos, tasks or queue), kept
 -- across a reload.
-local TRAY = ui.state("chat_tray", nil :: ("todos" | "tasks" | "queue")?)
+local TRAY = ui.state("chat_tray", nil :: ("alerts" | "todos" | "agents" | "tasks" | "queue")?)
 
 local function Composer(): Node
 	-- The session shown, or nil on a new chat.
@@ -616,7 +617,7 @@ local function Composer(): Node
 		local shown = store.session:get()
 		local id = session_id:get()
 		if shown and id and shown.id == id then
-			out = lanes.tasks(id)
+			out = lanes.tasks(id, shown.device)
 		end
 		local first_ended = #out + 1
 		for i, t in out do
@@ -670,6 +671,22 @@ local function Composer(): Node
 		-- transcript, under it.
 		sending = function(): boolean
 			return CloudMachine.sending_last(store.messages)
+		end,
+	}
+	-- What its subagents ask the person, before that.
+	local delegates = Delegates.bind {
+		chat = function(): string?
+			return session_id:get()
+		end,
+		alerts = machine.alerts,
+		on_alert = machine.on_alert,
+		failed = function()
+			own_notice:set { tone = "danger", key = "chat.delegates.failed", dismissable = true }
+		end,
+		asked = function()
+			if TRAY:peek() == nil then
+				TRAY:set("alerts")
+			end
 		end,
 	}
 	-- This device's outbox for the chat (#1256): sends uploading or stopped,
@@ -1566,6 +1583,14 @@ local function Composer(): Node
 				if not id then
 					return
 				end
+				-- A child chat's: its turn's Stop, wherever it runs.
+				local child = lanes.child_of(task)
+				if child then
+					sessions.stop(child):after(function() end, function()
+						own_notice:set { tone = "danger", key = "chat.delegates.stop_failed", dismissable = true }
+					end)
+					return
+				end
 				store.stop_task(id, task):after(function() end, function()
 					own_notice:set { tone = "danger", key = "chat.composer.couldnt_stop_task", dismissable = true }
 				end)
@@ -1586,8 +1611,8 @@ local function Composer(): Node
 			end,
 			-- (The only notice with an action: a sleeping machine's Wake.)
 			on_notice_action = machine.wake,
-			alerts = machine.alerts,
-			on_alert_action = machine.on_alert,
+			alerts = delegates.alerts,
+			on_alert_action = delegates.on_alert,
 			on_dismiss_alert = machine.dismiss,
 			disabled = function(): boolean
 				local s = store.session:get()
