@@ -145,13 +145,14 @@ cp "$ROOT/assets/fonts/licenses/"* "$STAGE/licenses/fonts/"
 cp "$ROOT/crates/voice/NOTICE.md" "$STAGE/licenses/parakeet-v3.txt"
 if [[ -n "$ZGX_VERSION" && -n "${ZGX_BUNDLE:-}" ]]; then
   # The scripts as `zgx build` writes them: the folder as shipped below,
-  # with a zgx.json naming the app, its version and its modules.
+  # with a zgx.json of its own (apps/zgx/ui/zgx.json's windows, and the app's
+  # id, version and modules).
   APP="$OUT_DIR/.app"
   rm -rf "$APP" "$OUT_DIR/.bundle"
   rsync -a --exclude '.zgx/' --exclude '/tests/' --exclude '.lock' --exclude '.DS_Store' \
     "$ROOT/apps/zgx/ui/" "$APP/"
-  printf '{ "app_id": "zeron", "version": "%s", "modules": { "reply": "%s" } }\n' \
-    "$ZGX_VERSION" "$ROOT/apps/zgx/modules/reply" >"$APP/zgx.json"
+  python3 "$ROOT/scripts/zgx-app-json.py" "$ROOT/apps/zgx/ui/zgx.json" "$ZGX_VERSION" \
+    reply="$ROOT/apps/zgx/modules/reply" "$APP/zgx.json"
   "${ZGX:-zgx}" build --out "$OUT_DIR/.bundle" --version "$ZGX_VERSION" "$APP"
   cp -r "$OUT_DIR/.bundle/manifest.json" "$OUT_DIR/.bundle/ui" "$OUT_DIR/.bundle/modules" "$STAGE/"
   rm -rf "$APP" "$OUT_DIR/.bundle"
@@ -163,6 +164,8 @@ if [[ -n "$ZGX_VERSION" ]]; then
   # beside the binary. Not zgx's generated types or the tests.
   [[ -n "${ZGX_BUNDLE:-}" ]] || rsync -a --exclude '.zgx/' --exclude '/tests/' --exclude '.lock' --exclude '.DS_Store' \
     "$ROOT/apps/zgx/ui/" "$STAGE/ui/"
+  # What ships says every window the interface's zgx.json does.
+  python3 "$ROOT/scripts/check-packaged-zgx-json.py" "$ROOT/apps/zgx/ui/zgx.json" "$STAGE/ui/zgx.json"
   rsync -a --exclude '.zgx/' --exclude '.DS_Store' \
     "$ROOT/apps/zgx/plugins-builtin/" "$STAGE/plugins-builtin/"
   # Each ships the canonical SDK, as scripts/package-zgx-macos.sh.
@@ -171,6 +174,11 @@ if [[ -n "$ZGX_VERSION" ]]; then
   done
   cp "$ROOT/apps/zgx/fonts/"*-OFL.txt "$STAGE/licenses/fonts/"
   rm -rf "$OUT_DIR/.stable"
+  # And the runtime's package opens its first window, from its checked files
+  # (ZGX_CHECK_OPENS=0: not here, where there is no Xvfb).
+  if [[ -n "${ZGX_BUNDLE:-}" && "${ZGX_CHECK_OPENS:-1}" != 0 ]]; then
+    python3 "$ROOT/scripts/check-packaged-opens.py" "$STAGE"
+  fi
 fi
 
 cat >"$STAGE/install.sh" <<'INSTALL'

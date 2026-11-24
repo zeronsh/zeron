@@ -68,17 +68,17 @@ keeps a `Str`, and nothing in `src/` turns one into the other.
 ## The pin
 
 This branch pins zgx's runtime line (`runtime/stage-2-at-b8f298b`,
-6e90e1b38): native modules, `zgx run` and `zgx build`, bundles, stage 2
+cc6053b19): native modules, `zgx run` and `zgx build`, bundles, stage 2
 (a module's threads posting to its host, timers, shared state, async
 actions), stage 2b (a shared list patched by key, images by name, a
 write to a gone host failing), stage 2c (a shared list's rows moved and
 inserted by key, zgx #2453), and a window's look and the named windows
-of `zgx.json` (zgx #2458, with a558d8161's traffic lights, which it builds
-on), on the zgx this app was released with. zgx's main has 2 to 2c since
+of `zgx.json`, a bundle's read through its checked files (zgx #2458, with
+a558d8161's traffic lights, which it builds on), on the zgx this app was
+released with. zgx's main has 2 to 2c since
 00dd7549c (#2414, #2415, #2416, #2440, #2446 and #2453): moving the app's
-pins
-and the modules' `zgx-module` pins there brings everything else main has
-gained since, and is Zeron's call.
+pins and the modules' `zgx-module` pins there brings everything else main
+has gained since, and is Zeron's call.
 
 The sessions module (`sessions/`) is stage 2's proof: the chat list kept
 from an engine connection of its own, beside the app's own list, loaded
@@ -118,3 +118,25 @@ interleaved launches under Xvfb, without the engine:
 | Bundle, first launch (its scripts hashed: 26 ms) | 71.2 | 176.3 |
 | Today, later launches | 84.3 | 145.4 |
 | Bundle, later launches (checked by stamps: 5.5 ms) | 71.5 | 133.9 |
+
+## For Zeron V3 to take or leave
+
+A change on this branch reaches past `apps/zgx`, and goes with
+`apps/zgx/ui/zgx.json` (Zeron's windows), not without it; another is
+needed for CI to test it:
+
+- `scripts/package-linux.sh` and `scripts/package-zgx-macos.sh` made a
+  zgx.json of their own (the app's id, version and modules) over the
+  interface's, which a packaged Zeron then couldn't open a window from.
+  They start from the interface's now (`scripts/zgx-app-json.py`), fail if
+  the file that ships lost anything it says
+  (`scripts/check-packaged-zgx-json.py`), and a Linux package made with
+  `ZGX_BUNDLE` must open its first window
+  (`scripts/check-packaged-opens.py`; `ZGX_CHECK_OPENS=0` skips it).
+- Not made here, as it needs a login that may change workflows: CI runs
+  `scripts/tests/test_ci_*.py` alone, in a sparse checkout without
+  `apps/zgx/ui/zgx.json`, so it doesn't run
+  `scripts/tests/test_packaged_zgx_json.py`. Adding `apps/zgx/ui/account`
+  to that checkout in `.github/workflows/ci.yml` (for the zgx.json beside
+  it, about 1 MB) and naming the file `test_ci_packaged_zgx_json.py` does.
+  Renamed without it, the job fails.

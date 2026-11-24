@@ -146,7 +146,7 @@ mod updates;
 #[cfg(test)]
 mod visuals_tests;
 
-use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
+use std::{cell::RefCell, path::{Path, PathBuf}, rc::Rc, sync::Arc, time::Duration};
 
 use intro_handoff::Handoff;
 use zgx::{compose::component, platform::PlatformService, reactive::Signal, scene::Rect, widgets::Ui};
@@ -1271,14 +1271,51 @@ fn run_menu_command(host: &ScriptHost, id: &str) {
     host.run_command(id);
 }
 
+/// Which zgx.json said a window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SaidBy {
+    /// A bundle's, checked against its manifest as it was read.
+    Bundle,
+    /// A folder's (a checkout's, or an install without a bundle), as it is.
+    Folder,
+}
+
+/// The bundle the scripts in `ui` are read from, if they are a bundle's
+/// (as `ui_host` reads them).
+fn bundle_of<'a>(
+    bundle: Option<&'a zgx_script::app_bundle::Opened>,
+    ui: &Path,
+) -> Option<&'a zgx_script::app_bundle::Opened> {
+    bundle.filter(|bundle| ui.starts_with(&bundle.ui))
+}
+
+/// The window `name` of the zgx.json of the scripts in `ui`, and which said
+/// it: through `bundle`'s checked files where the scripts are a bundle's,
+/// so a zgx.json changed since the build is refused, as a script is.
+fn window_said(
+    bundle: Option<&zgx_script::app_bundle::Opened>,
+    ui: &Path,
+    name: &str,
+) -> Result<(WindowOptions, SaidBy), String> {
+    match bundle_of(bundle, ui) {
+        Some(bundle) => {
+            let (options, _) = zgx_run::window_options_in(bundle, Some(name))?;
+            Ok((options, SaidBy::Bundle))
+        }
+        None => {
+            let (options, _) = zgx_run::window_options(&ui.join("app.luau"), Some(name))?;
+            Ok((options, SaidBy::Folder))
+        }
+    }
+}
+
 /// The window `name` of `ui/zgx.json`'s `named_windows`, as zgx-run would
 /// open it: Zeron's windows are said there, not built here (the consent
 /// windows, plugins' own, still build on `zeron_window`).
 fn window_of(name: &str) -> WindowOptions {
-    let script = ui_dir().join("app.luau");
-    match zgx_run::window_options(&script, Some(name)) {
+    match window_said(bundle(), &ui_dir(), name) {
         Ok((options, _)) => options,
-        Err(why) => panic!("zeron-zgx: ui/zgx.json: {why}"),
+        Err(why) => panic!("zeron-zgx: its windows: {why}"),
     }
 }
 
@@ -1528,6 +1565,49 @@ mod window_tests {
         for (name, built) in built {
             assert_eq!(format!("{:?}", window_of(name)), format!("{built:?}"), "{name}");
         }
+    }
+}
+
+#[cfg(test)]
+mod window_source_tests {
+    use super::*;
+    /// A bundle's windows come from its checked files and a folder's from
+    /// the folder: told by what each does with a zgx.json changed on the
+    /// disk after the build, as well as by what `window_said` says ran.
+    #[test]
+    fn a_bundles_windows_are_read_checked_and_a_folders_as_they_are() {
+        let dir = std::env::temp_dir().join(format!("zeron-window-source-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let app = dir.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("app.luau"), "return ui.text(\"x\")").unwrap();
+        let ours = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui").join("zgx.json");
+        std::fs::copy(&ours, app.join("zgx.json")).unwrap();
+        let out = dir.join("bundle");
+        let options = zgx_script::app_bundle::Options {
+            out: Some(out.clone()),
+            ..Default::default()
+        };
+        zgx_script::app_bundle::write(&app, &options).unwrap();
+        let bundle = zgx_script::app_bundle::open(&out).unwrap();
+
+        let (checked, said) = window_said(Some(&bundle), &bundle.ui, "main").unwrap();
+        assert_eq!((said, checked.min_size), (SaidBy::Bundle, Some((760., 500.))));
+        // A folder that isn't the bundle's, with a bundle beside it.
+        let (_, said) = window_said(Some(&bundle), &app, "main").unwrap();
+        assert_eq!(said, SaidBy::Folder);
+        assert_eq!(window_said(None, &app, "main").unwrap().1, SaidBy::Folder);
+
+        // Changed since the build: the checked read refuses it, where a
+        // plain read of the same folder takes it.
+        let on_disk = bundle.ui.join("zgx.json");
+        let altered = std::fs::read_to_string(&on_disk).unwrap().replace("760", "10");
+        std::fs::write(&on_disk, altered).unwrap();
+        let refused = window_said(Some(&bundle), &bundle.ui, "main").unwrap_err();
+        assert!(refused.contains("isn't the file its bundle's manifest names"), "{refused}");
+        let (taken, said) = window_said(None, &bundle.ui, "main").unwrap();
+        assert_eq!((said, taken.min_size), (SaidBy::Folder, Some((10., 500.))));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
 

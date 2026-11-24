@@ -167,13 +167,14 @@ plutil -lint "$PLIST" >/dev/null
 # plugins live in the data dir). Not zgx's generated types or the tests.
 if [[ -n "${ZGX_BUNDLE:-}" ]]; then
   # As `zgx build` writes them: the folder as shipped otherwise, with a
-  # zgx.json naming the app, its version and its modules.
+  # zgx.json of its own (apps/zgx/ui/zgx.json's windows, and the app's id,
+  # version and modules).
   BUILT="$OUT_DIR/.app" BUNDLE="$OUT_DIR/.bundle"
   rm -rf "$BUILT" "$BUNDLE"
   rsync -a --exclude '.zgx/' --exclude '/tests/' --exclude '.lock' --exclude '.DS_Store' \
     "$ROOT/apps/zgx/ui/" "$BUILT/"
-  printf '{ "app_id": "zeron", "version": "%s", "modules": { "reply": "%s" } }\n' \
-    "$VERSION" "$ROOT/apps/zgx/modules/reply" >"$BUILT/zgx.json"
+  python3 "$ROOT/scripts/zgx-app-json.py" "$ROOT/apps/zgx/ui/zgx.json" "$VERSION" \
+    reply="$ROOT/apps/zgx/modules/reply" "$BUILT/zgx.json"
   "${ZGX:-zgx}" build --out "$BUNDLE" --version "$VERSION" "$BUILT"
   cp -R "$BUNDLE/manifest.json" "$BUNDLE/ui" "$BUNDLE/modules" "$APP/Contents/Resources/"
   rm -rf "$BUILT" "$BUNDLE"
@@ -183,6 +184,8 @@ else
   rsync -a --exclude '.zgx/' --exclude '/tests/' --exclude '.lock' --exclude '.DS_Store' \
     "$ROOT/apps/zgx/ui/" "$APP/Contents/Resources/ui/"
 fi
+# What ships says every window the interface's zgx.json does.
+python3 "$ROOT/scripts/check-packaged-zgx-json.py" "$ROOT/apps/zgx/ui/zgx.json" "$APP/Contents/Resources/ui/zgx.json"
 rsync -a --exclude '.zgx/' --exclude '.DS_Store' \
   "$ROOT/apps/zgx/plugins-builtin/" "$APP/Contents/Resources/plugins-builtin/"
 # Each ships the canonical SDK, whatever copy sits in its folder (examples_tests
