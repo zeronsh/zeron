@@ -133,7 +133,7 @@ const OPENED: [string, string, string | undefined, (page: Page) => Promise<void>
     await expect.poll(() => page.getByRole("heading", { name: "Copy your token now" }).isVisible()).toBe(true);
   }],
   ["a token's fourteen plugins, shown", "/account/tokens", "user_ada", async (page) => {
-    await page.getByText("Show all 14").click();
+    await page.locator("summary", { hasText: "14 plugins" }).click();
     await expect.poll(() => page.getByRole("list", { name: "What GitHub Actions, the monorepo can publish" }).isVisible()).toBe(true);
   }],
   ["the stop new installs dialog", "/account/plugins/session-badges", "user_ada", async (page) => {

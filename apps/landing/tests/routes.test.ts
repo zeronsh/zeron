@@ -560,23 +560,30 @@ describe("signed-in pages", () => {
     expect(response.headers.get("cloudflare-cdn-cache-control") ?? "").not.toMatch(/public/);
   });
 
-  test("where each plugin's newest version stands: verified, not yet, the reviewer's note, taken down and why, removed", async () => {
+  test("where each plugin's newest version stands: verified, not yet, the reviewer's note, taken down and why, removed; a second line only for what's unusual", async () => {
     const { body } = await html("/account", await site.signIn("user_ada"));
-    const row = (id: string) => body.slice(body.indexOf(`<div class="id">${id}</div>`), body.indexOf("</li>", body.indexOf(`<div class="id">${id}</div>`)));
-    expect(row("linear-issues")).toMatch(/<span class="state ok">.*?Verified<\/span>/);
-    expect(row("linear-issues")).toMatch(/<small>Verified on [A-Z][a-z]{2} \d{1,2}<\/small>/);
+    const at = (id: string) => body.indexOf(`href="/account/plugins/${id}"`);
+    const row = (id: string) => body.slice(at(id), body.indexOf("</a>", at(id)));
+    // One line, its name cut on it and whole in its title; the id isn't in the row (it's on the plugin's own page).
+    expect(row("linear-issues")).toMatch(/<span class="nm" title="Linear issues">Linear issues<\/span>/);
+    expect(row("linear-issues")).not.toContain(">linear-issues<");
+    expect(row("linear-issues")).toMatch(/<b class="mono">1\.0\.0<\/b><span class="state ok">.*?Verified<\/span>/);
+    // (Verified, from one of your devices: nothing more to say, no second line.)
+    expect(row("linear-issues")).not.toContain('class="c-note"');
+    expect(row("linear-issues")).not.toMatch(/Verified on|One of your devices/);
     expect(row("first-light")).toContain('<span class="state no">Not verified yet</span>');
-    expect(row("first-light")).toContain("Nothing verified yet: agents can&#39;t install it until one is.");
     // (Not verified: the reviewer's note, in the app's words, to its author only.)
     expect(row("rough-draft")).toContain('<span class="state bad">Not verified</span>');
-    expect(row("rough-draft")).toContain('<small class="why">The reviewer&#39;s note: “The README is one line.');
+    expect(row("rough-draft")).toMatch(/<span class="c-note">The reviewer&#39;s note: “The README is one line\./);
     expect(row("clipboard-sync")).toContain('<span class="state bad">Taken down</span>');
-    expect(row("clipboard-sync")).toMatch(/“It sent every copied password to its sync host in plain text\.” Off since [A-Z][a-z]{2} \d{1,2}\./);
+    expect(row("clipboard-sync")).toMatch(/<span class="c-note">“It sent every copied password to its sync host in plain text\.” · Off since [A-Z][a-z]{2} \d{1,2}\./);
     expect(row("old-sketch")).toContain('<span class="state bad">Removed</span>');
-    // (One whose newest isn't verified says which is, and since when.)
-    expect(row("session-badges")).toMatch(/1\.1\.1 is the newest verified, since [A-Z][a-z]{2} \d{1,2}/);
-    // Where it was published from: a deploy key by its name, or one of your devices.
-    expect(body).toContain("One of your devices");
+    // (One whose newest isn't verified says which is.)
+    expect(row("session-badges")).toContain('<span class="c-note">1.1.1 is the newest verified</span>');
+    // From a deploy token: "via token", its name on hover and to a screen reader; from a device, nothing.
+    expect(row("cloud-costs")).toMatch(/<span class="via" title="Sent by the deploy token “[^”]+”"><svg[^>]*><use href="#i-key"><\/use><\/svg>via token<span class="sr-only">: [^<]+<\/span><\/span>/);
+    expect(body).not.toContain("One of your devices");
+    expect(row("focus-timer")).not.toContain('class="via"');
   });
 
   test("an id with nothing that can be installed says it goes back after 90 days", async () => {
@@ -879,40 +886,31 @@ describe("forms", () => {
     expect((await html("/plugins/worst-case-listing-at-every-limit-xyz12/versions/1.1.0")).body).toContain("Its author stopped new installs of it.");
   });
 
-  test("the account's deploy tokens: each with what it can publish, never cut; its short id; the revoked and ended apart", async () => {
+  test("the account's deploy tokens: a row each, its name and short id, what it can publish, last used, when it ends, Revoke; the revoked and ended apart", async () => {
     const { body } = await html("/account/tokens", await site.signIn("user_ada"));
-    // Twelve live, each with Revoke; five revoked or ended, in their group.
-    expect(body.match(/<a class="btn ghost sm" href="\/account\/tokens\/tok_[0-9A-Za-z]{16}">Revoke/g)).toHaveLength(12);
-    // (Three named in full; all twenty of Ada's by name, counted, every one on request.)
-    expect(body).toMatch(/<div class="names">[^<,]+, [^<,]+, [^<,]+<\/div><small>3 plugins<\/small>/);
-    expect(body).toContain('<div class="count">20 plugins</div>');
-    expect(body).toContain('<span class="tile s more">+17</span>');
+    // Twelve live, each with Revoke (a quiet button in the danger's ink); five revoked or ended, in their group.
+    expect(body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_[0-9A-Za-z]{16}">Revoke/g)).toHaveLength(12);
     expect(body).toMatch(/<details class="gone"><summary>Revoked and ended tokens · 5/);
     expect(body).toMatch(/<span class="state quiet">Ended [A-Z][a-z]{2} \d{1,2}<\/span>/);
-    // Each by its short id, the store's: never more of a token, which this page never has.
-    const ids = [...body.matchAll(/<div class="id">([^<]*)<\/div>/g)].map((m) => m[1]);
+    // Each by its name (one line, whole in its title) and short id beside it, the store's: never more of a token, which this page never has.
+    const ids = [...body.matchAll(/<span class="nm" title="[^"]*">[^<]*<\/span><span class="id">([^<]*)<\/span>/g)].map((m) => m[1]);
     expect(ids).toHaveLength(17);
     for (const id of ids) expect(id).toMatch(/^[0-9A-Za-z]{8}$/);
-    expect(body).toContain('<div class="id">xJVb81Wo</div>');
+    expect(body).toContain('<span class="nm" title="GitHub Actions">GitHub Actions</span><span class="id">xJVb81Wo</span>');
     expect(body).not.toMatch(/zdt_[0-9A-Za-z]/);
-    // All of yours; one to three named in full; past three, three tiles, "+n", and every one on request.
-    expect(body).toMatch(/All your plugins<\/div><small>\d+ today, and any you publish later<\/small>/);
-    // (A name with no spaces breaks inside itself, evenly; every other word only at its spaces. "on" stays with the plugin it names.)
-    const long = "Averyveryverylongpluginnamewithoutanyspacesatallthatkeepsgoing64";
-    expect(body).toContain(`<div class="names">Focus\u00a0timer and <span class="lw">${long}</span></div><small>2 plugins</small>`);
-    // (A short name is kept whole: names break between one another.)
-    expect(body).toContain('<div class="names">Agent\u00a0relay, Quick\u00a0links, Theme\u00a0sync</div>');
-    expect(body).toContain(`<small>on\u00a0<span class="lw">${long}</span></small>`);
-    expect(body).toContain("<small>on\u00a0Focus timer</small>");
-    // (Past three: the count, and "Show all" under it in the same column; the list in the same scope.)
-    const many = body.slice(body.indexOf("GitHub Actions, the monorepo"), body.indexOf("</ul>", body.indexOf('<ul class="plist"')));
-    expect(many).toContain('<div class="scope many">');
-    expect(many).toContain('<span class="tile s more">+11</span>');
-    expect(many).toMatch(/<div class="count">14 plugins<\/div><details class="every"><summary>Show all 14/);
+    // What it can publish, in its own column: all of yours (how many today on hover); one plugin by name and tile; or how many, up to three tiles, "+n", and Show all.
+    expect(body).toMatch(/<span class="c-scope" title="\d+ today, and any you publish later"><span class="sw">All your plugins<\/span><\/span>/);
+    expect(body).toMatch(/<span class="c-scope"><span class="tiles" aria-hidden="true"><span class="tile xs[^"]*"[^>]*>[\s\S]*?<\/span><\/span><span class="sw">Focus timer<\/span><\/span>/);
+    const many = body.slice(body.indexOf(">GitHub Actions, the monorepo<"), body.indexOf("</ul>", body.indexOf('<ul class="plist"')));
+    expect(many).toMatch(/<details class="every"><summary class="c-scope"><span class="sw">14 plugins<\/span><span class="tiles" aria-hidden="true">(<span class="tile xs[^"]*"[^>]*>[\s\S]*?<\/span>){3}<span class="more num">\+11<\/span><\/span><span class="show">Show all<span class="sr-only"> plugins GitHub Actions, the monorepo can publish<\/span><\/span>/);
+    // (The list, every one by name, opens as a row of its own under the token.)
     const list = body.slice(body.indexOf('<ul class="plist"'), body.indexOf("</ul>", body.indexOf('<ul class="plist"')));
     expect(list.match(/<li class="pl">/g)).toHaveLength(14);
-    expect(body).not.toMatch(/text-overflow|…<\/div><small>\d+ plugins?/);
-    // Ending within 14 days: the warning's pill, in days.
+    // Last used: when, and on which plugin, one line; or not yet (when it was made, on hover).
+    expect(body).toMatch(/<span class="c-used" title="[^"]+ · Focus timer"><span>[^<]+ · Focus timer<\/span><\/span>/);
+    expect(body).toMatch(/<span class="c-used" title="Made [A-Z][a-z]{2} \d{1,2}(, \d{4})?"><span class="t3">Not used yet<\/span><\/span>/);
+    // Ends: a date, doesn't, or within 14 days the warning's pill, in days.
+    expect(body).toContain('<span class="c-ends">Doesn&#39;t expire</span>');
     expect(body).toMatch(/<span class="state no">Ends in \d+ days?<\/span>/);
     // New token: a link to its page, which the script opens in place as the dialog holding the same form.
     expect(body).toContain('<a class="btn pri" href="/account/tokens/new" data-dialog="new-token">');
@@ -932,15 +930,15 @@ describe("forms", () => {
       await site.fake("many", { on: "1" });
       const { body } = await html("/account/tokens", await site.signIn("user_ada"));
       const every = body.slice(body.indexOf(">Every one<"), body.indexOf("</ul>", body.indexOf(">Every one<")));
-      expect(every).toContain('<div class="count">50 plugins</div>');
-      expect(every).toContain('<span class="tile s more">+47</span>');
+      expect(every).toContain('<span class="sw">50 plugins</span>');
+      expect(every).toContain('<span class="more num">+47</span>');
       expect(every.match(/<li class="pl">/g)).toHaveLength(50);
       // (Every one a plugin of hers, by its name: never an id in its place.)
       expect(every).not.toMatch(/<li class="pl">.*?<span>[a-z0-9-]+<\/span><\/li>/);
     } finally {
       await site.fake("many");
     }
-    expect((await html("/account/tokens", await site.signIn("user_ada"))).body).toContain('<div class="count">20 plugins</div>');
+    expect((await html("/account/tokens", await site.signIn("user_ada"))).body).toContain('<span class="sw">20 plugins</span>');
   });
 
   test("revoking a token asks first, then the token stops", async () => {
@@ -1016,10 +1014,10 @@ describe("forms", () => {
 
         // The list has it by name and short id, and never the token.
         const list = await html("/account/tokens", ada);
-        expect(list.body).toContain(`<div class="id">${short}</div>`);
+        expect(list.body).toContain(`<span class="id">${short}</span>`);
         expect(list.body).toContain(">Release CI<");
         expect(tokensIn(list.body)).toEqual([]);
-        expect(list.body.match(/<a class="btn ghost sm" href="\/account\/tokens\/tok_/g)).toHaveLength(13);
+        expect(list.body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_/g)).toHaveLength(13);
 
         // The sign-in's ticket is spent: another token signs in again first, and comes back to the form as it was, with no token anywhere in the address.
         const again = await make(ada, [["name", "Second"], ["ends", "never"], ["scope", "all"]]);
@@ -1027,7 +1025,7 @@ describe("forms", () => {
         const location = again.response.headers.get("location")!;
         expect(location).toBe(`/auth/web/login?${new URLSearchParams({ return_to: "/account/tokens/new?again=1&name=Second&ends=never&scope=all" })}`);
         expect(tokensIn(decodeURIComponent(location))).toEqual([]);
-        expect((await html("/account/tokens", ada)).body.match(/<a class="btn ghost sm" href="\/account\/tokens\/tok_/g)).toHaveLength(13);
+        expect((await html("/account/tokens", ada)).body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_/g)).toHaveLength(13);
       } finally {
         await site.fake("tokens");
       }
@@ -1045,7 +1043,7 @@ describe("forms", () => {
         const back = "/account/tokens/new?again=1&name=Nightly&ends=365&scope=chosen&plugins=focus-timer%2Cweather";
         expect(sent.response.headers.get("location")).toBe(`/auth/web/login?${new URLSearchParams({ return_to: back })}`);
         // (Nothing was made.)
-        expect((await html("/account/tokens", stale)).body.match(/<a class="btn ghost sm" href="\/account\/tokens\/tok_/g)).toHaveLength(12);
+        expect((await html("/account/tokens", stale)).body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_/g)).toHaveLength(12);
         // Signed in again, the form as it was, and a word that it's ready.
         const fresh = await signedIn("user_ada");
         const filled = await html(back, fresh);
@@ -1100,7 +1098,7 @@ describe("forms", () => {
       const noCsrf = await post("/account/tokens/new", ada, fields);
       expect(noCsrf.status).toBe(303);
       expect(flashOf(noCsrf)).toBe("__Host-zeron_flash=expired");
-      expect((await html("/account/tokens", ada)).body.match(/<a class="btn ghost sm" href="\/account\/tokens\/tok_/g)).toHaveLength(12);
+      expect((await html("/account/tokens", ada)).body.match(/<a class="btn ghost sm revoke" href="\/account\/tokens\/tok_/g)).toHaveLength(12);
     });
   });
 
