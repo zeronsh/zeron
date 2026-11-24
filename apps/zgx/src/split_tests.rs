@@ -2156,3 +2156,80 @@ fn passes_per_text_input() {
         eprintln!("INPUTS {n}: {:.1} layout passes a frame, {} measures a frame, {ms:.3} ms a frame", passes.len() as f64 / 20., measures / 20);
     }
 }
+
+/// Many lines pasted into a split pane's draft grow the composer; its
+/// wrapped lines settle their heights in layout. The caret's
+/// `input_method_area` and the selection's own `text_area` are the same
+/// place then — on the paste and across pane focus, not the ~66px stale
+/// offset a click used to take to refresh (#1435).
+#[test]
+fn a_pasted_split_draft_survives_copy_focus_without_stale_geometry() {
+    let mut app = mount(&scratch("paste-geometry"));
+    open(&mut app, "Fix the build");
+    split_right(&mut app, "Tidy the tests");
+
+    let aligned = |app: &mut TestApp| {
+        let editor = app
+            .ui
+            .focused_editor()
+            .expect("the composer's box keeps the keyboard");
+        let caret = editor.input_method_area();
+        let (_, at) = editor.selection();
+        let place = editor.text_area(at..at).expect("the selection has a place");
+        assert!(
+            (caret.y - place.y).abs() < 2.0 && (caret.x - place.x).abs() < 2.0,
+            "the caret sits where the selection is, not at a stale offset: caret {caret:?} vs its place {place:?}"
+        );
+    };
+
+    let field = "#chat-composer-dock >> role:textbox \"Message\"";
+    app.click(field);
+    app.frames(5);
+    let text: String = std::iter::repeat("a paragraph of wrapped words to paste in\n\n")
+        .take(30)
+        .collect();
+    let editor = app.ui.focused_editor().expect("the box has the keyboard");
+    app.ui.paste_into(&editor, Some(&text));
+    app.frames(20);
+    aligned(&mut app);
+
+    // Focus across to the other pane and back: the same draft, aligned.
+    for pane in ["#split-pane-a1", "#split-pane-a3"] {
+        let at = middle(app.bounds(pane));
+        pointer(&mut app, InputEvent::PointerMove { x: at.0, y: at.1 });
+        pointer(
+            &mut app,
+            InputEvent::PointerDown { x: at.0, y: at.1, button: PointerButton::Primary },
+        );
+        pointer(
+            &mut app,
+            InputEvent::PointerUp { x: at.0, y: at.1, button: PointerButton::Primary },
+        );
+        app.frames(10);
+    }
+    app.click(field);
+    app.frames(5);
+    aligned(&mut app);
+    assert_eq!(app.error(), None);
+}
+
+#[test]
+fn probe_paste_growth() {
+    let mut app = mount(&scratch("probe2"));
+    open(&mut app, "Fix the build");
+    split_right(&mut app, "Tidy the tests");
+    let field = "#chat-composer-dock >> role:textbox \"Message\"";
+    app.click(field);
+    app.frames(5);
+    println!("BEFORE {:?}", app.bounds("#chat-composer"));
+    let text: String = std::iter::repeat("a paragraph of wrapped words to paste in\n\n").take(30).collect();
+    let editor = app.ui.focused_editor().unwrap();
+    app.ui.paste_into(&editor, Some(&text));
+    for n in [1, 3, 10] {
+        app.frames(n);
+        let e = app.ui.focused_editor().unwrap();
+        let (_, at) = e.selection();
+        println!("AFTER+{n} composer={:?} caret={:?} place={:?} sel={at}", app.bounds("#chat-composer"), e.input_method_area(), e.text_area(at..at));
+    }
+    panic!("probe2");
+}

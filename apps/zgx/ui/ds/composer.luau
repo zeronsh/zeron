@@ -2247,6 +2247,20 @@ return ui.component(function(props: Props): Node
 					end
 					return false
 				end,
+				-- Wrapped lines refine their heights during layout, after a
+				-- paste grows the field among them. Refresh the selection
+				-- after that pass so the caret and the text use the same
+				-- positions, instead of a stale offset until the next click.
+				on_resize = function(size: Size, el: Element)
+					if size.w > 0 and size.h > 0 then
+						ui.after(0, function()
+							local a, b = el:selection_bytes()
+							if a and b then
+								el:set_selection_bytes(a, b)
+							end
+						end)
+					end
+				end,
 				-- Enter sends; Shift+Enter breaks the line, continuing a
 				-- list (or undoing an empty item). The mentions' keys come
 				-- first, then a question's (1 to 9 pick, Escape goes back
