@@ -4541,7 +4541,9 @@
       "store_changed": "What the store says of it changed. Look again.",
       "now_unverified": "Zeron's mark was taken off it just now. Look again.",
       "now_verified": "Zeron verified it just now. Look again.",
-      "now_publisher": "Its publisher changed just now. Look again."
+      "now_publisher": "Its publisher changed just now. Look again.",
+      "taken_down": "Zeron took this version down, so it can't be installed.",
+      "not_in_store": "This version isn't in the template store anymore."
     },
     "store": {
       "search": "Search templates",

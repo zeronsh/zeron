@@ -123,6 +123,12 @@ end
 for _, name in { "en", "zh-Hans" } do
 	ui.command { id = `locale_{name}`, title = name, run = function() ui.locale:set(name) end }
 end
+-- (Allow refused, the store's word as the engine gives it.)
+for id, word in { refused_taken_down = "taken_down: It reads your keys", refused_gone = "not_in_store", refused_offline = "Zeron couldn't check this with the store. Try again." } do
+	ui.command { id = id, title = id, run = function()
+		shown:set({ busy = false, item = table.clone(PACKAGES.store), error = word } :: any)
+	end }
+end
 -- (Pictures: each scheme.)
 local actions = require("@screens/onboarding/actions")
 for _, scheme in { "light", "dark" } do

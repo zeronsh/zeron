@@ -185,6 +185,23 @@ test("what the store says of it changed as it showed: said, and Allow armed agai
 	expect(app:has("#template-consent-owner")).to_be(false)
 end)
 
+test("an Allow the store refuses says why, the sheet staying to try again", function()
+	for show, said in
+		{
+			refused_taken_down = "Zeron took this version down, so it can't be installed.",
+			refused_gone = "This version isn't in the template store anymore.",
+			refused_offline = "Zeron couldn't check this with the store. Try again.",
+		}
+	do
+		local app = open()
+		app:command(show)
+		app:frames(20)
+		expect(app:tree("#template-consent")).to_contain(said)
+		expect(app:tree("#template-consent")).to_contain("Install Midnight?")
+		expect(app:has("#template-consent-allow")).to_be(true)
+	end
+end)
+
 test("one from a file or a link says it isn't from the store", function()
 	local app = open()
 	expect(app:tree("#template-consent")).to_contain("From a file, not from the store")

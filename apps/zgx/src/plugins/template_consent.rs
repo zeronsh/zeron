@@ -341,6 +341,7 @@ fn host(
         let name = arg.field("pending").map(text).unwrap_or_default();
         eprintln!("zeron-zgx: templates: {name} {}", if allow { "allowed" } else { "not allowed (Not now)" });
         generation.set(generation.get() + 1);
+        let asked_at = generation.get();
         out.set(record(last.borrow().as_ref(), true, None));
         let (weak, window, out, pending, generation, last) =
             (weak.clone(), window.clone(), out.clone(), pending.clone(), generation.clone(), last.clone());
@@ -350,11 +351,17 @@ fn host(
             // (`ReviewTemplate`, the engine authority's).
             let mut params = json!({ "pending": name, "allow": allow, "hash": hash });
             if allow {
-                match crate::auth::after_setup(|| {
+                let review = crate::auth::after_setup(|| {
                     let asked = json!({ "pending": name, "hash": hash });
                     async move { engine::get().call("ReviewTemplate", asked).await }
                 })
-                .await {
+                .await;
+                // (Another package came to show meanwhile: this Allow is
+                // nobody's, and what came of it isn't that one's.)
+                if generation.get() != asked_at || *pending.borrow() != name {
+                    return;
+                }
+                match review {
                     // What the store says of it changed since it was shown:
                     // shown as it is now, and asked again (a second Allow).
                     Ok(reply) if reply["changed"].is_object() => {
@@ -368,6 +375,14 @@ fn host(
                         return;
                     }
                     Ok(reply) => params["review"] = reply["review"].clone(),
+                    // The store's: taken down, gone, or not to be asked. Said
+                    // in the sheet, which stays; nothing is allowed.
+                    Err(error) if last.borrow().as_ref().is_some_and(|item| item["store"].is_object()) => {
+                        eprintln!("zeron-zgx: templates: {name} isn't allowed: {error}");
+                        let item = last.borrow().clone();
+                        out.set(record(item.as_ref(), false, Some(&said(&error))));
+                        return;
+                    }
                     Err(error) => eprintln!("zeron-zgx: templates: no review for {name}: {error}"),
                 }
             }

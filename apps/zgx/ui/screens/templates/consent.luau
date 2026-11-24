@@ -102,6 +102,15 @@ local function fact(icon: string, title: string | Message, detail: (string | Mes
 	}
 end
 
+-- Why it wasn't done: the engine's reason in Zeron's words where it has them,
+-- else as it says it.
+local OWN: { [string]: string } = { taken_down = "taken_down", not_in_store = "not_in_store" }
+local function why(error: any): string
+	local said = if type(error) == "string" then error else ""
+	local own = OWN[string.match(said, "^([%l_]+): ") or string.match(said, "^([%l_]+)$") or ""]
+	return if own then ui.t(`templates.consent.{own}`):get() else words.failure(said)
+end
+
 local function body(key: string): Node
 	if key == "loading" then
 		return ds.EmptyState { icon = "shield-check", title = ui.t("templates.consent.checking"), size = "sm" }
@@ -315,7 +324,7 @@ local function body(key: string): Node
 				return consent:get().error ~= nil
 			end, ui.text {
 				function(): string
-					return consent:get().error or ""
+					return why(consent:get().error)
 				end,
 				text_size = "$font.size.sm",
 				color = "$zeron.tone.danger.ink",
