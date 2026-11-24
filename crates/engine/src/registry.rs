@@ -1155,6 +1155,7 @@ fn full_registry() -> HarnessRegistry {
             enabled: None,
             access_modes: vec![AccessMode::Auto, AccessMode::FullAccess],
             supports_plan: false,
+            supports_titles: zeron_harness::supports_titles(HarnessId::Kimi),
         },
         Box::new(|| zeron_harness::AcpHarness::kimi().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::kimi()) as Arc<dyn Harness>)),
