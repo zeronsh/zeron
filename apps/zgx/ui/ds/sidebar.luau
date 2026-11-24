@@ -45,6 +45,7 @@ local Switch = require("@self/switch")
 local Glass = require("@self/glass")
 local material = require("@self/material")
 local Menu = require("@self/menu")
+local Dropdown = require("@self/dropdown")
 local icon_button = require("@self/icon_button")
 local IconButton = icon_button.IconButton
 local ToggleButton = require("@self/toggle_button")
@@ -220,6 +221,11 @@ export type Props = {
 	-- (`on_activity_settings`).
 	activity: State<boolean>?,
 	on_activity_settings: (() -> ())?,
+	-- How many days a chat may sit idle before it's archived (0: never), in
+	-- any view, and the choices: a row of the view menu opening them beside
+	-- it.
+	archive_after: State<number>?,
+	archive_choices: { number }?,
 	-- You, at its foot, chosen (your profile), and whether your profile is
 	-- open (the row shows chosen).
 	on_user: (() -> ())?,
@@ -4909,6 +4915,91 @@ fn layer(input:LayerInput)->vec4<f32> {
 					end, function()
 						st:set(not st:peek())
 					end, owned)
+				)
+			end
+			-- How long a chat may sit idle before it's archived: the days set
+			-- under its name (at its end they'd crowd the name out of the menu's
+			-- width), their choices beside the menu (hovered or pressed, as a
+			-- submenu opens). In either view: idle chats are archived in both.
+			if props.archive_after and props.archive_choices then
+				local after = props.archive_after
+				local function days_label(days: number): string
+					return if days == 0
+						then locale.s("ds.sidebar.view.archive_never")
+						else locale.s("ds.sidebar.view.archive_days", { n = days })
+				end
+				-- (Each with a glyph: a menu's rows, not the letter tiles of a list
+				-- of names.)
+				local choices: { Dropdown.Item } = {}
+				for _, days in props.archive_choices do
+					table.insert(choices, {
+						value = tostring(days),
+						label = days_label(days),
+						icon = if days == 0 then "close-circle" else "calendar",
+					})
+				end
+				-- (Dropdown's values are strings: the days as one, and back.)
+				local picked = ui.use_state(tostring(after:peek()) :: string?)
+				ui.effect(function()
+					picked:set(tostring(after:get()))
+				end)
+				local label = locale.s("ds.sidebar.view.archive_after")
+				table.insert(
+					show_rows,
+					Dropdown {
+						value = picked,
+						items = choices,
+						-- (A choice, as a sort is: the menu closes on it.)
+						on_choose = function(v: string)
+							after:set(tonumber(v) or 0)
+							view_open:set(false)
+						end,
+						label = label,
+						search = false,
+						submenu = true,
+						-- Beside the menu, as a submenu sits (as the composer's do).
+						placement = { side = "right", align = "start", offset = 7 },
+						trigger = function(menu: Dropdown.Menu): Node
+							local function open()
+								if not menu.open:peek() then
+									menu.toggle()
+								end
+							end
+							return ui.menu_item(Menu.look({
+								label = label,
+								items = "center",
+								bg = function()
+									return if menu.open:get() then "$hover" else "#00000000"
+								end,
+								on_click = open,
+								on_hover = function(inside: boolean)
+									if menu.on_hover then
+										menu.on_hover(inside)
+									end
+									if inside then
+										open()
+									end
+								end,
+								Menu.glyph("archive-minimalistic"),
+								-- (As a menu row's description sits under its name.)
+								ui.column {
+									grow = 1,
+									min_w = 0,
+									gap = "$zeron.space.hair",
+									FadeText { label, text_size = "$font.size.md", color = "$text.primary" },
+									ui.text {
+										function(): string
+											return days_label(after:get())
+										end,
+										text_size = "$font.size.sm",
+										line_height = "$font.line.sm",
+										color = "$text.tertiary",
+									},
+								},
+								Menu.chevron(),
+							}, true))
+						end,
+					}
 				)
 			end
 			-- Activity: the view itself (a choice: the menu closes on it), and the

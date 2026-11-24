@@ -494,7 +494,10 @@
         "projects_first": "Projects first",
         "empty_projects": "Empty projects",
         "activity": "Activity",
-        "activity_settings": "Activity settings…"
+        "activity_settings": "Activity settings…",
+        "archive_after": "Archive idle chats",
+        "archive_never": "Never",
+        "archive_days": "{n, plural, one {After # day} other {After # days}}"
       },
       "empty": "No sessions yet",
       "resize": "Resize sidebar",
@@ -2349,7 +2352,7 @@
       "archive_section": "Archiving",
       "archive_after": {
         "label": "Archive idle chats",
-        "description": "Chats with nothing new for this long move to Archived. Pinned, working and asleep chats stay, as do chats waiting on you.",
+        "description": "Chats with nothing new for this long move to Archived, in every sidebar view. Pinned, working and asleep chats stay, as do chats waiting on you.",
         "terms": "auto archive idle old clean up",
         "never": "Never",
         "days": "{n, plural, one {After # day} other {After # days}}"
