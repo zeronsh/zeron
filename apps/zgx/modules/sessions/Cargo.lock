@@ -312,7 +312,7 @@ dependencies = [
 [[package]]
 name = "zgx-module"
 version = "0.1.10"
-source = "git+https://github.com/zeronsh/zgx?rev=317278b0856ab911c671294f984214b272ea0e66#317278b0856ab911c671294f984214b272ea0e66"
+source = "git+https://github.com/zeronsh/zgx?rev=888f59b1e61bca802aae32a2aa6267db5e7b9243#888f59b1e61bca802aae32a2aa6267db5e7b9243"
 dependencies = [
  "zgx-module-macros",
 ]
@@ -320,7 +320,7 @@ dependencies = [
 [[package]]
 name = "zgx-module-macros"
 version = "0.1.10"
-source = "git+https://github.com/zeronsh/zgx?rev=317278b0856ab911c671294f984214b272ea0e66#317278b0856ab911c671294f984214b272ea0e66"
+source = "git+https://github.com/zeronsh/zgx?rev=888f59b1e61bca802aae32a2aa6267db5e7b9243#888f59b1e61bca802aae32a2aa6267db5e7b9243"
 dependencies = [
  "proc-macro2",
  "quote",

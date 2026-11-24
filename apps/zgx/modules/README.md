@@ -68,10 +68,12 @@ keeps a `Str`, and nothing in `src/` turns one into the other.
 ## The pin
 
 This branch pins zgx's runtime line (`runtime/stage-2-at-b8f298b`,
-317278b08): native modules, `zgx run` and `zgx build`, bundles, and stage
-2 (a module's threads posting to its host, timers, shared state, async
-actions), on the zgx this app was released with. zgx's main has all of it
-since cd6c2d595 (#2414, #2415, #2416 and #2440): moving the app's pins
+888f59b1e): native modules, `zgx run` and `zgx build`, bundles, stage 2
+(a module's threads posting to its host, timers, shared state, async
+actions) and stage 2b (a shared list patched by key, images by name, a
+write to a gone host failing), on the zgx this app was released with.
+zgx's main has all of it since 235c37315 (#2414, #2415, #2416, #2440 and
+#2446): moving the app's pins
 and the modules' `zgx-module` pins there brings everything else main has
 gained since, and is Zeron's call.
 

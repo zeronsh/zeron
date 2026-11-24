@@ -1,8 +1,9 @@
 //! The chat list as a native module (Cargo.toml says why). On the
 //! interface's thread: what scripts call, and the jobs the connection's
 //! thread posts. On the connection's thread: the engine's socket, read and
-//! parsed there, so the interface's thread only makes the list's values and
-//! sets them.
+//! parsed there, and each list diffed there against the last by chat id, so
+//! the interface's thread makes values only for the rows that changed and
+//! writes them by key (`Shared::upsert`, `Shared::remove`).
 
 use serde_json::{Value as Json, json};
 use std::{
@@ -36,8 +37,60 @@ struct Costs {
     waits: Mutex<Vec<u64>>,
     /// The interface's thread: making the list's values and setting them.
     on_ui: AtomicU64,
-    /// The connection's thread: reading a frame and parsing it.
+    /// The connection's thread: reading a frame, parsing it and diffing it.
     off_ui: AtomicU64,
+    /// Rows made on the interface's thread: in whole lists, and patched.
+    whole: AtomicU64,
+    rows: AtomicU64,
+    /// Lists the engine sent, each (those that changed nothing aren't
+    /// posted, so aren't `frames`).
+    lists: AtomicU64,
+}
+
+/// What changed in the list since the last, found on the connection's
+/// thread: what the interface's thread writes.
+enum Patch {
+    /// The whole list: the first, or one whose order changed.
+    Whole(Vec<Json>),
+    /// Rows by `id`: these written (new or changed), these removed.
+    Rows { changed: Vec<Json>, gone: Vec<String> },
+}
+
+/// The last list, as the connection's thread diffs against it: its ids in
+/// order, and each row by id.
+#[derive(Default)]
+struct Last {
+    order: Vec<String>,
+    rows: HashMap<String, Json>,
+}
+impl Last {
+    /// What changed in `list` since this, which becomes `list`.
+    fn diff(&mut self, list: Vec<Json>, first: bool) -> Patch {
+        let id_of = |row: &Json| row.get("id").and_then(Json::as_str).unwrap_or("").to_owned();
+        let order: Vec<String> = list.iter().map(id_of).collect();
+        let now: std::collections::HashSet<&str> = order.iter().map(String::as_str).collect();
+        let gone: Vec<String> = self.order.iter().filter(|id| !now.contains(id.as_str())).cloned().collect();
+        // In the same order, with new rows after the rest (where an upsert
+        // puts them)? Else the whole list, in its order.
+        let kept = self.order.iter().filter(|id| now.contains(id.as_str()));
+        let added = order.iter().filter(|id| !self.rows.contains_key(*id));
+        let same_order = !first && kept.chain(added).eq(order.iter());
+        let mut changed = Vec::new();
+        let mut rows = HashMap::with_capacity(list.len());
+        let whole = !same_order;
+        let mut all = Vec::new();
+        for (id, row) in order.iter().zip(list) {
+            if whole {
+                all.push(row.clone());
+            } else if self.rows.get(id) != Some(&row) {
+                changed.push(row.clone());
+            }
+            rows.insert(id.clone(), row);
+        }
+        self.order = order;
+        self.rows = rows;
+        if whole { Patch::Whole(all) } else { Patch::Rows { changed, gone } }
+    }
 }
 
 /// A value of the engine's JSON: made on the interface's thread.
@@ -82,7 +135,7 @@ fn connected(ui: zgx_module::Ui, port: u16, data_dir: PathBuf, commands: mpsc::R
         Err(why) => {
             ui.post(move |host| {
                 if let Some(error) = host.shared("sessions.error", Value::NIL) {
-                    error.set(Value::from(why.as_str()));
+                    let _ = error.set(Value::from(why.as_str()));
                 }
             });
             return;
@@ -96,6 +149,8 @@ fn connected(ui: zgx_module::Ui, port: u16, data_dir: PathBuf, commands: mpsc::R
     let _ = socket.get_mut().set_read_timeout(Some(Duration::from_millis(20)));
     let mut next = 2u64;
     let mut pending: HashMap<u64, Promise<Value>> = HashMap::new();
+    let mut last = Last::default();
+    let mut first = true;
     loop {
         while let Ok(command) = commands.try_recv() {
             match command {
@@ -126,7 +181,17 @@ fn connected(ui: zgx_module::Ui, port: u16, data_dir: PathBuf, commands: mpsc::R
             let Ok(mut frame) = serde_json::from_str::<Json>(line) else { continue };
             let id = frame.get("id").and_then(Json::as_u64);
             if id == Some(1) {
-                let Some(list) = frame.get_mut("item").map(Json::take) else { continue };
+                let Some(Json::Array(list)) = frame.get_mut("item").map(Json::take) else { continue };
+                costs.lists.fetch_add(1, Ordering::Relaxed);
+                let patch = last.diff(list, std::mem::take(&mut first));
+                if let Patch::Rows { changed, gone } = &patch
+                    && changed.is_empty()
+                    && gone.is_empty()
+                {
+                    // (Nothing of the list changed: nothing to post.)
+                    costs.off_ui.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    continue;
+                }
                 let posted = Instant::now();
                 costs.off_ui.fetch_add(posted.duration_since(started).as_nanos() as u64, Ordering::Relaxed);
                 let costs = costs.clone();
@@ -134,7 +199,21 @@ fn connected(ui: zgx_module::Ui, port: u16, data_dir: PathBuf, commands: mpsc::R
                     let begun = Instant::now();
                     costs.waits.lock().unwrap().push(begun.duration_since(posted).as_nanos() as u64);
                     if let Some(chats) = host.shared("sessions.chats", Value::NIL) {
-                        chats.set(value_of(&list));
+                        let written = match &patch {
+                            Patch::Whole(list) => chats.set(Value::list(list.iter().map(value_of))).map(drop),
+                            Patch::Rows { changed, gone } => chats
+                                .upsert("id", changed.iter().map(value_of))
+                                .and_then(|()| chats.remove("id", gone.iter().map(String::as_str)).map(drop)),
+                        };
+                        if let Err(why) = written
+                            && let Some(error) = host.shared("sessions.error", Value::NIL)
+                        {
+                            let _ = error.set(Value::from(why.0.as_str()));
+                        }
+                        match patch {
+                            Patch::Whole(list) => costs.whole.fetch_add(list.len() as u64, Ordering::Relaxed),
+                            Patch::Rows { changed, .. } => costs.rows.fetch_add(changed.len() as u64, Ordering::Relaxed),
+                        };
                     }
                     costs.frames.fetch_add(1, Ordering::Relaxed);
                     costs.on_ui.fetch_add(begun.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -193,6 +272,9 @@ zgx_module::register!("sessions", |host: &Host| {
             ("ui_ms", Value::from(ms(on))),
             ("thread_ms", Value::from(ms(off))),
             ("off_ui_share", Value::from(if on + off == 0 { 0. } else { off as f64 / (on + off) as f64 })),
+            ("lists", Value::from(costs.lists.load(Ordering::Relaxed) as f64)),
+            ("rows_whole", Value::from(costs.whole.load(Ordering::Relaxed) as f64)),
+            ("rows_patched", Value::from(costs.rows.load(Ordering::Relaxed) as f64)),
         ])
     });
 });
