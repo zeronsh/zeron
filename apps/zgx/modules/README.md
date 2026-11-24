@@ -65,6 +65,20 @@ zgx's values have types of its own on this pin (`Str`, `List`, `Map`,
 pattern). A `Str` is not an `Rc<str>`: what keeps a value's string here
 keeps a `Str`, and nothing in `src/` turns one into the other.
 
+## The pin
+
+This branch pins zgx's runtime line (`runtime/stage-2-at-b8f298b`,
+317278b08): native modules, `zgx run` and `zgx build`, bundles, and stage
+2 (a module's threads posting to its host, timers, shared state, async
+actions), on the zgx this app was released with. zgx's main has all of it
+since cd6c2d595 (#2414, #2415, #2416 and #2440): moving the app's pins
+and the modules' `zgx-module` pins there brings everything else main has
+gained since, and is Zeron's call.
+
+The sessions module (`sessions/`) is stage 2's proof: the chat list kept
+from an engine connection of its own, beside the app's own list, loaded
+only where `ZERON_ZGX_SESSIONS_MODULE` names its library.
+
 ## Releases without a Rust build
 
 On this branch, `scripts/package-linux.sh` with `ZGX_BUNDLE=1` packages the
