@@ -72,7 +72,7 @@ describe("POST /store/v1/updates", () => {
     const bad = await hashOf(id, "1.1.0");
     expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/versions/1.1.0/take-down`, { reason: "It sends your files away." })).status).toBe(200);
     const res = await check({ zeron: "0.4.0", plugins: [{ id, version: "1.1.0", hash: bad }] });
-    expect(res.blocked).toEqual([{ id, version: "1.1.0", reason: "It sends your files away." }]);
+    expect(res.blocked).toEqual([{ id, version: "1.1.0", reason: "It sends your files away.", item_kind: "plugin" }]);
     expect(res.updates).toEqual([]);
     expect((await check({ zeron: "0.4.0", plugins: [{ id, version: "1.1.0", hash: "0".repeat(64) }] })).blocked).toEqual([]);
     // Suspended: no updates, blocks still said.
@@ -90,7 +90,7 @@ describe("POST /store/v1/updates", () => {
     const hash = await hashOf(id, "1.1.0");
     expect((await adminCall("POST", `/store/v1/admin/plugins/${id}/versions/1.1.0/remove`, { reason: "A copyright claim." })).status).toBe(200);
     const res = await check({ zeron: "0.4.0", plugins: [{ id, version: "1.1.0", hash }] });
-    expect(res).toEqual({ updates: [], blocked: [] });
+    expect(res).toEqual({ updates: [], template_updates: [], blocked: [] });
   });
 
   it("refuses a malformed request", async () => {
@@ -105,6 +105,6 @@ describe("POST /store/v1/updates", () => {
       { zeron: "0.4.0", plugins: Array.from({ length: 201 }, (_, i) => ({ id: `p${i}x`, version: "1.0.0", hash: "0".repeat(64) })) }
     ];
     for (const body of bad) expect((await call(undefined, "POST", "/store/v1/updates", body)).status, JSON.stringify(body)?.slice(0, 80)).toBe(400);
-    expect(await check({ zeron: "0.4.0", plugins: [] })).toEqual({ updates: [], blocked: [] });
+    expect(await check({ zeron: "0.4.0", plugins: [] })).toEqual({ updates: [], template_updates: [], blocked: [] });
   });
 });

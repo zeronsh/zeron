@@ -1,6 +1,8 @@
 /**
  * The store's D1 catalog (migrations/store): reads and the statements that
- * keep a plugin's listing in step with its versions.
+ * keep an item's listing in step with its versions. The `plugins` table
+ * holds both kinds of item (plugins and templates: kind.ts); a plugin's
+ * route reads plugins and a template's templates (`listedOf`).
  *
  * A version is listed the moment it is published (amendment 45); a review
  * only marks it verified. A plugin is listed while it is `active` and has a
@@ -13,11 +15,13 @@
  */
 import type { Env } from "../env";
 import type { PluginOwnership } from "../user-directory";
+import type { Kind } from "./kind";
 
 export interface PluginRow {
   readonly seq: number;
   readonly id: string;
-  readonly kind: string;
+  /** A plugin or a template, fixed when the id was claimed. */
+  readonly kind: Kind;
   readonly owner_id: string;
   readonly owner_since: number;
   readonly skeleton: string;
@@ -34,7 +38,8 @@ export interface PluginRow {
   readonly name: string | null;
   readonly summary: string | null;
   readonly icon: string | null;
-  /** The card version's first screenshot, a package path (0002_card_cover.sql). */
+  /** A plugin's card version's first screenshot, a template's preview: a
+   * package path (0002, 0003). */
   readonly cover: string | null;
   readonly categories: string | null;
   readonly keywords: string | null;
@@ -131,8 +136,12 @@ export const supersededAt = async (db: D1Database, id: string, version: string, 
 
 /** The listed version first: releases before pre-releases, then precedence. */
 const LISTING_ORDER = "is_release DESC, major DESC, minor DESC, patch DESC, pre_key DESC";
-/** Where a plugin shows to the public. */
-export const LISTED = "p.status = 'active' AND p.listed_version IS NOT NULL";
+/** Where an item of either kind shows to the public. */
+const SHOWN = "p.status = 'active' AND p.listed_version IS NOT NULL";
+/** Where an item of `kind` shows to the public: what every list, search,
+ * count and shelf reads, so a template never shows where a plugin is asked
+ * for, nor the reverse. */
+export const listedOf = (kind: Kind): string => `p.kind = '${kind}' AND ${SHOWN}`;
 /** Versions anyone may see and download. */
 export const PUBLIC_STATUSES = ["listed", "yanked"] as const;
 /** The same, as SQL for a `versions` row (unqualified, or with `alias.`). */
@@ -182,8 +191,8 @@ export const relist = (db: D1Database, id: string, author: string | null): D1Pre
          verified_at = (SELECT verified_at FROM vetted),
          name = (SELECT name FROM best),
          summary = (SELECT summary FROM best),
-         icon = (SELECT icon FROM best),
-         cover = (SELECT json_extract(screenshots, '$[0]') FROM best),
+         icon = CASE WHEN kind = 'template' THEN NULL ELSE (SELECT icon FROM best) END,
+         cover = CASE WHEN kind = 'template' THEN (SELECT 'preview.png' FROM best) ELSE (SELECT json_extract(screenshots, '$[0]') FROM best) END,
          categories = (SELECT categories FROM best),
          keywords = (SELECT keywords FROM best),
          author_username = COALESCE(?2, author_username),
@@ -199,21 +208,21 @@ export const relist = (db: D1Database, id: string, author: string | null): D1Pre
        SELECT p.seq, p.name, p.summary, COALESCE((SELECT group_concat(value, ' ') FROM json_each(p.keywords)), ''),
               COALESCE(p.author_username, ''), substr(v.readme, 1, 65536)
        FROM plugins p JOIN versions v ON v.plugin_id = p.id AND v.version = p.listed_version
-       WHERE p.id = ? AND ${LISTED}`
+       WHERE p.id = ? AND ${SHOWN}`
     )
     .bind(id),
   db.prepare("DELETE FROM plugin_categories WHERE plugin_id = ?").bind(id),
   db
     .prepare(
       `INSERT INTO plugin_categories (plugin_id, category)
-       SELECT p.id, j.value FROM plugins p, json_each(p.categories) j WHERE p.id = ? AND ${LISTED}`
+       SELECT p.id, j.value FROM plugins p, json_each(p.categories) j WHERE p.id = ? AND ${SHOWN}`
     )
     .bind(id),
   db.prepare("DELETE FROM plugin_keywords WHERE plugin_id = ?").bind(id),
   db
     .prepare(
       `INSERT INTO plugin_keywords (plugin_id, keyword)
-       SELECT p.id, j.value FROM plugins p, json_each(p.keywords) j WHERE p.id = ? AND ${LISTED}`
+       SELECT p.id, j.value FROM plugins p, json_each(p.keywords) j WHERE p.id = ? AND ${SHOWN}`
     )
     .bind(id)
 ];

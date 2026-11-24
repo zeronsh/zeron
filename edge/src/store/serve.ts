@@ -3,6 +3,8 @@
  *
  *   GET /store/v1/plugins/:id/versions/:version/package
  *   GET /store/v1/plugins/:id/files/:version/*path
+ *   (and the same under /store/v1/templates, of templates: an id of the other
+ *   kind there doesn't exist)
  *
  * Who may read: a listed or yanked version of an active plugin's package
  * (a yanked one for the devices that have it) and its pictures (PNG and
@@ -25,6 +27,7 @@ import type { Env } from "../env";
 import { cleanImage } from "../image-check";
 import { STATE_TTL, cacheKey, cachedBytes, cachedValue } from "./cache";
 import { filesKey, packageKey } from "./db";
+import type { Kind } from "./kind";
 import { fail, notFound } from "./http";
 import { plainPath } from "./paths";
 import { MAX_VERSION_LENGTH, parseVersion } from "./semver";
@@ -71,6 +74,7 @@ const privileged = async (request: Request, env: Env, owner: string): Promise<bo
 
 /** What decides who may read a version's package. */
 interface PackageState {
+  readonly kind: Kind;
   readonly public: boolean;
   readonly owner: string;
   readonly version: string;
@@ -82,17 +86,18 @@ export const packageBytesKey = (sha256: string): string => cacheKey(["bytes", "p
 
 const PUBLIC_SQL = "p.status = 'active' AND v.status IN ('listed', 'yanked')";
 
-export const servePackage = async (request: Request, env: Env, db: D1Database, bucket: R2Bucket, id: string, segment: string): Promise<Response> => {
+export const servePackage = async (request: Request, env: Env, db: D1Database, bucket: R2Bucket, kind: Kind, id: string, segment: string): Promise<Response> => {
   const versionText = versionSegment(segment);
   if (!versionText) return notFound();
   const state = await cachedValue<PackageState>(request, packageStateKey(id, versionText), STATE_TTL, async () => {
     const row = await db
-      .prepare(`SELECT ${PUBLIC_SQL} AS public, p.owner_id, v.version, v.package_sha256 FROM versions v JOIN plugins p ON p.id = v.plugin_id WHERE v.plugin_id = ? AND v.version = ?`)
+      .prepare(`SELECT ${PUBLIC_SQL} AS public, p.kind, p.owner_id, v.version, v.package_sha256 FROM versions v JOIN plugins p ON p.id = v.plugin_id WHERE v.plugin_id = ? AND v.version = ?`)
       .bind(id, versionText)
-      .first<{ public: number; owner_id: string; version: string; package_sha256: string }>();
-    return row ? { public: row.public === 1, owner: row.owner_id, version: row.version, sha256: row.package_sha256 } : undefined;
+      .first<{ public: number; kind: Kind; owner_id: string; version: string; package_sha256: string }>();
+    return row ? { kind: row.kind, public: row.public === 1, owner: row.owner_id, version: row.version, sha256: row.package_sha256 } : undefined;
   });
-  if (!state) return notFound();
+  // (The state is the item's, whichever prefix asked; only its own answers.)
+  if (!state || state.kind !== kind) return notFound();
   const isPublic = state.public;
   if (!isPublic && !(await privileged(request, env, state.owner))) return notFound();
   const read = async () => {
@@ -103,7 +108,7 @@ export const servePackage = async (request: Request, env: Env, db: D1Database, b
   if (!bytes) return fail(503, "unavailable", "The package can't be read right now.");
   const headers = baseHeaders(isPublic && !hasCredentials(request) ? PUBLIC_CACHE : "private, no-store");
   headers.set("content-type", "application/octet-stream");
-  headers.set("content-disposition", `attachment; filename="${attachmentName(`${id}-${state.version}`)}.zeron-plugin"`);
+  headers.set("content-disposition", `attachment; filename="${attachmentName(`${id}-${state.version}`)}.zeron-${kind}"`);
   headers.set("content-length", String(bytes.length));
   headers.set("etag", `"${state.sha256}"`);
   return new Response(request.method === "HEAD" ? null : bytes, { headers });
@@ -111,6 +116,7 @@ export const servePackage = async (request: Request, env: Env, db: D1Database, b
 
 /** What decides who may read one packaged file, and where its bytes are. */
 interface FileState {
+  readonly itemKind: Kind;
   readonly public: boolean;
   readonly owner: string;
   readonly version: string;
@@ -130,6 +136,7 @@ export const serveFile = async (
   env: Env,
   db: D1Database,
   bucket: R2Bucket,
+  kind: Kind,
   id: string,
   segment: string,
   pathSegments: readonly string[]
@@ -143,14 +150,15 @@ export const serveFile = async (
   const state = await cachedValue<FileState>(request, fileStateKey(id, versionText, path), STATE_TTL, async () => {
     const row = await db
       .prepare(
-        `SELECT ${PUBLIC_SQL} AS public, p.owner_id, v.version, v.package_sha256, v.icon, f.at, f.bytes, f.sha256, f.kind
+        `SELECT ${PUBLIC_SQL} AS public, p.kind AS item_kind, p.owner_id, v.version, v.package_sha256, v.icon, f.at, f.bytes, f.sha256, f.kind
          FROM version_files f JOIN versions v ON v.plugin_id = f.plugin_id AND v.version = f.version JOIN plugins p ON p.id = f.plugin_id
          WHERE f.plugin_id = ? AND f.version = ? AND f.path = ?`
       )
       .bind(id, versionText, path)
-      .first<{ public: number; owner_id: string; version: string; package_sha256: string; icon: string; at: number; bytes: number; sha256: string; kind: FileState["kind"] }>();
+      .first<{ public: number; item_kind: Kind; owner_id: string; version: string; package_sha256: string; icon: string; at: number; bytes: number; sha256: string; kind: FileState["kind"] }>();
     if (!row) return undefined;
     return {
+      itemKind: row.item_kind,
       public: row.public === 1,
       owner: row.owner_id,
       version: row.version,
@@ -162,7 +170,7 @@ export const serveFile = async (
       icon: row.icon === path
     };
   });
-  if (!state) return notFound();
+  if (!state || state.itemKind !== kind) return notFound();
   const pictureKind = state.kind === "png" || state.kind === "jpeg" || (state.kind === "svg" && state.icon);
   const readRaw = async (): Promise<Uint8Array | undefined> => {
     if (state.bytes === 0) return new Uint8Array(0);

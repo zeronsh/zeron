@@ -12,9 +12,10 @@
  */
 import type { Env } from "../env";
 import { handleAdmin } from "./admin";
-import { handleAuthorAction, handleInstalled, handleMyPlugins, handleReport } from "./author";
+import { handleAuthorAction, handleInstalled, handleMine, handleReport } from "./author";
 import { handleCatalog } from "./catalog";
 import { fail, notFound, rateLimited } from "./http";
+import { kindOfSegment } from "./kind";
 import { handlePublish } from "./publish";
 import { serveFile, servePackage } from "./serve";
 import { handleUpdates } from "./updates";
@@ -29,10 +30,11 @@ const allowRead = async (request: Request, env: Env): Promise<boolean> => {
   return !ip || !env.STORE_READS || (await env.STORE_READS.limit({ key: ip })).success;
 };
 
-/** What a deploy token may reach: publishing a version, and nothing else
- * (contract "A token publishes and reads nothing"). */
+/** What a deploy token may reach: publishing a version of a plugin or a
+ * template, and nothing else (contract "A token publishes and reads
+ * nothing"). */
 const deployTokenMayCall = (method: string, parts: readonly string[]): boolean =>
-  method === "POST" && parts[2] === "plugins" && parts.length === 5 && parts[4] === "versions";
+  method === "POST" && kindOfSegment(parts[2]) !== undefined && parts.length === 5 && parts[4] === "versions";
 
 const route = async (request: Request, env: Env, db: D1Database, bucket: R2Bucket, url: URL, parts: readonly string[]): Promise<Response> => {
   const method = request.method;
@@ -41,29 +43,31 @@ const route = async (request: Request, env: Env, db: D1Database, bucket: R2Bucke
   const bearer = headerBearer(request);
   if (bearer !== undefined && looksLikeDeployToken(bearer) && !deployTokenMayCall(method, parts)) return sessionRequired();
   if (parts[2] === "admin") return handleAdmin(request, env, db, bucket, url, parts.slice(2));
-  if (parts[2] === "me" && parts[3] === "plugins" && parts.length === 4 && read) return handleMyPlugins(request, env, db);
+  const mine = parts[2] === "me" && parts.length === 4 ? kindOfSegment(parts[3]) : undefined;
+  if (mine !== undefined && read) return handleMine(request, env, db, mine);
   if (parts[2] === "updates" && parts.length === 3 && method === "POST") {
     if (!(await allowRead(request, env))) return rateLimited();
     return handleUpdates(request, env, db);
   }
-  if (read && (parts[2] === "categories" || parts[2] === "plugins") && !(await allowRead(request, env))) return rateLimited();
+  const kind = kindOfSegment(parts[2]);
+  if (read && (parts[2] === "categories" || kind !== undefined) && !(await allowRead(request, env))) return rateLimited();
   const catalog = await handleCatalog(request, env, db, url, parts);
   if (catalog) return catalog;
-  if (parts[2] !== "plugins" || parts.length < 5) return notFound();
+  if (kind === undefined || parts.length < 5) return notFound();
   const id = parts[3]!;
   if (!ID_RE.test(id)) return notFound();
   const sub = parts[4];
-  if (sub === "versions" && parts.length === 5 && method === "POST") return handlePublish(request, env, db, bucket, id);
-  if (sub === "installed" && parts.length === 5 && method === "POST") return handleInstalled(request, env, db, id);
-  if (sub === "reports" && parts.length === 5 && method === "POST") return handleReport(request, env, db, id);
+  if (sub === "versions" && parts.length === 5 && method === "POST") return handlePublish(request, env, db, bucket, kind, id);
+  if (sub === "installed" && parts.length === 5 && method === "POST") return handleInstalled(request, env, db, kind, id);
+  if (sub === "reports" && parts.length === 5 && method === "POST") return handleReport(request, env, db, kind, id);
   if (sub === "versions" && parts.length === 7) {
     const action = parts[6];
-    if (action === "package" && read) return servePackage(request, env, db, bucket, id, parts[5]!);
+    if (action === "package" && read) return servePackage(request, env, db, bucket, kind, id, parts[5]!);
     if ((action === "yank" || action === "unyank") && method === "POST") {
-      return handleAuthorAction(request, env, db, id, parts[5]!, action);
+      return handleAuthorAction(request, env, db, kind, id, parts[5]!, action);
     }
   }
-  if (sub === "files" && parts.length >= 7 && read) return serveFile(request, env, db, bucket, id, parts[5]!, parts.slice(6));
+  if (sub === "files" && parts.length >= 7 && read) return serveFile(request, env, db, bucket, kind, id, parts[5]!, parts.slice(6));
   return notFound();
 };
 

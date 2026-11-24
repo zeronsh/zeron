@@ -14,13 +14,15 @@ import { JsonError, type JsonObject, canonicalJson, compareUtf8, isObject, parse
 import {
   changelogNotes,
   checkListing,
-  listingOf
+  checkTemplate,
+  listingOf,
+  listingOfTemplate
 } from "./listing";
 import { idProblem, readManifest } from "./manifest";
-import { MAX_MANIFEST_JSON, MAX_MANIFEST_VALUES, PackageRefusal, checkSignature, contentHash, signaturePayload, verifyPackage } from "./package";
+import { MAX_MANIFEST_JSON, MAX_MANIFEST_VALUES, PackageRefusal, checkSignature, contentHash, signaturePayload, verifyPackage, verifyTemplate } from "./package";
 import { MAX_PUBLISH_BODY_BYTES } from "./identity/body";
 import { plainPath } from "./paths";
-import { crc32, deployTokenHash, parseDeployToken, tokenChecksum, tokenFromBody } from "./identity/deploy-token";
+import { crc32, deployTokenHash, parseDeployToken, readScopeIds, tokenChecksum, tokenFromBody } from "./identity/deploy-token";
 import { comparePrecedence, parseRange, parseVersion, satisfies } from "./semver";
 import { STORE_DATA } from "./data";
 
@@ -44,8 +46,14 @@ const expand = (value: any): any => {
 const rawVectors: any = JSON.parse(readFileSync(resolve(here, "../../../docs/plugin-package-vectors.json"), "utf8"));
 const v: any = expand(JSON.parse(readFileSync(resolve(here, "../../../docs/plugin-package-vectors.json"), "utf8")));
 /** A `files_b64` value: base64, or (written as parts) its text's UTF-8 bytes. */
-const fileBytes = (raw: unknown, written: unknown): Uint8Array =>
-  written && typeof written === "object" ? new TextEncoder().encode(raw as string) : fromB64(raw as string);
+const fileBytes = (raw: unknown, written: unknown): Uint8Array => {
+  if (written && typeof written === "object" && Array.isArray((written as { bytes?: unknown }).bytes)) {
+    // `{ bytes: [...] }`: the parts' bytes one after another, each a base64
+    // string or `{ repeat, count }`.
+    return new Uint8Array(Buffer.concat((written as { bytes: (string | { repeat: string; count: number })[] }).bytes.map((p) => (typeof p === "string" ? Buffer.from(p, "base64") : Buffer.from(p.repeat.repeat(p.count))))));
+  }
+  return written && typeof written === "object" ? new TextEncoder().encode(raw as string) : fromB64(raw as string);
+};
 
 
 const hashesOf = (files: Record<string, string>) => new Map(Object.entries(files));
@@ -174,6 +182,76 @@ describe("engine vectors (docs/plugin-package-vectors.json)", () => {
     }
   });
 
+  it("deploy tokens: a scope's ids, of either kind, trimmed, sorted, each once", () => {
+    expect(v.deploy_token.scopes.some((c: any) => c.ok) && v.deploy_token.scopes.some((c: any) => !c.ok)).toBe(true);
+    for (const c of v.deploy_token.scopes) {
+      const read = readScopeIds(c.ids);
+      if (c.ok) expect(read, JSON.stringify(c.ids)).toEqual(c.scope);
+      else expect(read, JSON.stringify(c.ids)).toHaveProperty("error");
+    }
+  });
+
+  it("template content hashes: the plugin's function, over a manifest that is no plugin's", async () => {
+    for (const c of v.template_content_hash) {
+      expect(await contentHash(json(c.manifest) as JsonObject, hashesOf(c.files)), c.name).toBe(c.hash);
+    }
+  });
+
+  it("template packages: read as a device reads one, and as the store reads a token's publish", async () => {
+    const read = async (raw: Uint8Array, signed: boolean) => {
+      try {
+        const t = await verifyTemplate(raw, undefined, signed);
+        const left = new Set(t.ignored);
+        // (`paths`: what a device installs; `ignored` what it leaves out, as the engine's map.)
+        return {
+          ok: true, id: t.id, version: t.version, key: t.key, hash: t.hash, sha256: t.sha256,
+          files: t.files.size - t.ignored.length,
+          paths: [...t.files.keys()].filter((p) => !left.has(p)).sort(compareUtf8), ignored: [...t.ignored].sort(compareUtf8)
+        };
+      } catch (e) {
+        if (!(e instanceof PackageRefusal)) throw e;
+        return { ok: false, error: e.code };
+      }
+    };
+    expect(v.template_packages.length).toBeGreaterThan(0);
+    for (const [i, c] of v.template_packages.entries()) {
+      const raw = c.package_parts !== undefined ? new TextEncoder().encode(joinParts(rawVectors.template_packages[i].package_parts)) : fromB64(c.package_b64);
+      // From a file or link, and from a device's own publish: signed.
+      const fromDevice = await read(raw, true);
+      expect(fromDevice.ok ? { ...fromDevice, version: undefined } : fromDevice, c.name).toEqual(c.result.ok ? { ...c.result, version: undefined } : c.result);
+      if (c.result.ok && c.result.version !== undefined) expect((fromDevice as { version: string }).version, c.name).toBe(c.result.version);
+      // As a token's: unsigned only. A device refuses a signed one under a
+      // record naming no signer (`store_mismatch`); the store refuses it
+      // first, as its publish says it (`bad_signature`). An unsigned one that
+      // breaks no other rule is taken.
+      const fromToken = await read(raw, false);
+      if (c.store_result.ok) expect({ ...fromToken, version: undefined }, c.name).toEqual({ ...c.store_result, version: undefined });
+      else if (c.store_result.error === "store_mismatch") expect(fromToken, c.name).toEqual({ ok: false, error: "bad_signature" });
+      else expect(fromToken.ok, `${c.name}: ${JSON.stringify(c.store_result)}`).toBe(false);
+    }
+  });
+
+  it("template listing rules", () => {
+    for (const [i, c] of v.template_listing.entries()) {
+      const written = rawVectors.template_listing[i].files_b64 as Record<string, unknown>;
+      const files = new Map(Object.entries(c.files_b64 as Record<string, unknown>).map(([p, b]) => [p, fileBytes(b, written[p])]));
+      const raw = json(c.manifest) as JsonObject;
+      const { problems, warnings } = checkTemplate(raw, files, isText);
+      const shape = (list: { rule: string; field: string | null; path: string | null; cause?: string; word?: string }[]) =>
+        list.map((p) => ({ field: p.field, path: p.path, rule: p.rule, ...(p.cause === undefined ? {} : { cause: p.cause }), ...(p.word === undefined ? {} : { word: p.word }) }));
+      expect(shape(problems), c.name).toEqual(c.problems);
+      expect(shape(warnings), c.name).toEqual(c.warnings);
+      if (problems.length === 0) {
+        const kept = listingOfTemplate(raw, files);
+        expect({
+          categories: kept.categories, engines_zeron: kept.engines, homepage: kept.homepage,
+          keywords: kept.keywords, license: kept.license, repository: kept.repository, screenshots: kept.screenshots
+        }, c.name).toEqual(Object.fromEntries(Object.entries({ homepage: null, repository: null, license: null, ...c.listing })));
+        expect(kept.icon).toBe("");
+      }
+    }
+  }, 60_000);
+
   it("paths", () => {
     for (const c of v.paths) expect(plainPath(c.path), JSON.stringify(c.path)).toBe(c.ok);
   });
@@ -230,7 +308,7 @@ describe("engine vectors (docs/plugin-package-vectors.json)", () => {
         }, c.name).toEqual(Object.fromEntries(Object.entries({ homepage: null, repository: null, license: null, engines_zeron: null, ...c.listing })));
       }
     }
-  });
+  }, 60_000);
 
   it("changelog notes", () => {
     for (const c of v.changelog) expect(changelogNotes(c.changelog, c.version) ?? null, c.version).toBe(c.notes);

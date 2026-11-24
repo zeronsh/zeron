@@ -8,7 +8,9 @@ import { type ConsentItem, RISKY_ASKS, askPartsOf, consentDiff, fullControl } fr
 import { pictureType } from "./listing";
 import type { Listing, Problem } from "./listing";
 import { riskyHost } from "./manifest";
-import type { VerifiedPackage } from "./package";
+import type { Kind } from "./kind";
+import type { JsonObject } from "./json";
+import type { VerifiedContents } from "./package";
 
 /** Warnings stored one by one, at most. */
 export const MAX_WARNINGS = 50;
@@ -135,7 +137,11 @@ export const sizeText = (n: number): string => {
 };
 
 export interface CheckInput {
-  readonly pkg: VerifiedPackage;
+  readonly kind: Kind;
+  readonly pkg: VerifiedContents;
+  /** The plugin's manifest as a value, for what it asks against the base
+   * (none, a template's: it asks for nothing). */
+  readonly manifest: JsonObject | null;
   readonly listing: Listing;
   /** The engine's listing warnings (`binary_file`, `no_notes`). */
   readonly warnings: readonly Problem[];
@@ -149,7 +155,7 @@ export interface CheckInput {
 }
 
 export const runChecks = (input: CheckInput): Check[] => {
-  const { pkg, listing, consent, base } = input;
+  const { kind, pkg, listing, consent, base } = input;
   const unshown = unshownPictures(listing, input.kinds);
   const checks: Check[] = [];
   const add = (id: string, level: Check["level"], message: string) => checks.push({ id, level, message });
@@ -179,8 +185,11 @@ export const runChecks = (input: CheckInput): Check[] => {
   // Pictures the page or the listing shows, that won't show: not in the
   // package, or not a PNG or JPEG image-check.ts takes.
   for (const path of unshown.slice(0, MAX_WARNINGS)) {
-    checks.push({ id: "picture_unshown", level: "warn", message: `${path}: it won't show: it isn't a PNG or JPEG picture in the plugin that the store can read.`, path });
+    checks.push({ id: "picture_unshown", level: "warn", message: `${path}: it won't show: it isn't a PNG or JPEG picture in the ${kind} that the store can read.`, path });
   }
+
+  // A template asks for nothing: it runs as Zeron itself (its page says so).
+  if (kind === "template") return checks;
 
   const risky = consent.asks.filter((a) => RISKY_ASKS.includes(a));
   add("asks", risky.length ? "warn" : "ok", risky.length ? `Asks for: ${list(risky, 12)}.` : "Asks for nothing that reaches past Zeron.");
@@ -193,7 +202,7 @@ export const runChecks = (input: CheckInput): Check[] => {
   if (consent.asks.includes("network") && consent.network_hosts.length === 0) add("hosts", "warn", "Reaches any public host.");
 
   if (base) {
-    const diff = consentDiff(base.consent, consent, { before: askPartsOf(base.manifest), after: askPartsOf(pkg.manifest.raw) });
+    const diff = consentDiff(base.consent, consent, { before: askPartsOf(base.manifest), after: askPartsOf(input.manifest!) });
     const grew = [
       diff.added.length ? `asks ${list(diff.added)}` : "",
       diff.added_commands.length ? `runs ${list(diff.added_commands)}` : "",

@@ -59,6 +59,19 @@ export const consentItem = (m: Manifest): ConsentItem => ({
   tools: m.tools.map((t) => ({ name: t.name, description: t.description }))
 });
 
+/** What a template asks: nothing (it runs as Zeron itself). */
+export const NO_CONSENT: ConsentItem = {
+  asks: [],
+  ui: { change: [], replace: [] },
+  commands: [],
+  commands_anything: [],
+  commands_full_control: [],
+  network_hosts: [],
+  network_local: [],
+  network_named: [],
+  tools: []
+};
+
 /** A tool's input when it names none (manifest.rs). */
 const NO_INPUT = '{"type":"object"}';
 

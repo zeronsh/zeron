@@ -44,7 +44,7 @@ import {
 } from "../../user-directory";
 import { cookieSession, bearerUser, forbidden, headerBearer, sessionRequired, unauthenticated } from "./callers";
 import { readBody } from "./body";
-import { DEPLOY_TOKEN_ID_RE, deployTokenHash, looksLikeDeployToken, newDeployToken, newDeployTokenId, parseDeployToken } from "./deploy-token";
+import { DEPLOY_TOKEN_ID_RE, deployTokenHash, looksLikeDeployToken, newDeployToken, newDeployTokenId, parseDeployToken, readScopeIds } from "./deploy-token";
 import { PLUGIN_ID_RE } from "./signing";
 
 /** Who owns a store plugin id, since when, and when it was first claimed;
@@ -92,13 +92,10 @@ const readScope = (raw: unknown): DeployTokenScope | Response => {
   const keys = Object.keys(scope);
   if (keys.length === 1 && scope.all === true) return { all: true };
   if (keys.length !== 1 || !Array.isArray(scope.plugins)) return invalid("scope is { all: true } or { plugins: [id, …] }.");
-  const ids = scope.plugins as unknown[];
-  if (ids.length < 1 || ids.length > MAX_DEPLOY_TOKEN_PLUGINS) return invalid(`A token's scope lists 1 to ${MAX_DEPLOY_TOKEN_PLUGINS} plugins.`);
-  const bad = ids.filter((id) => typeof id !== "string" || !PLUGIN_ID_RE.test(id));
-  if (bad.length) return invalid("Each plugin is a plugin id.", bad);
-  const repeated = ids.filter((id, i) => ids.indexOf(id) !== i);
-  if (repeated.length) return invalid("Name each plugin once.", [...new Set(repeated)]);
-  return { plugins: (ids as string[]).slice().sort() };
+  const read = readScopeIds(scope.plugins as unknown[]);
+  if ("plugins" in read) return read;
+  if (read.error === "count") return invalid(`A token's scope lists 1 to ${MAX_DEPLOY_TOKEN_PLUGINS} plugins or templates.`);
+  return read.error === "id" ? invalid("Each is a plugin's or a template's id.", read.ids) : invalid("Name each one once.", read.ids);
 };
 
 /** The signed-in caller (never a deploy token) with the step-up ticket a

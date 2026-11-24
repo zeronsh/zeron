@@ -1,6 +1,12 @@
 /**
  * `POST /store/v1/plugins/:id/versions`, body: the `.zeron-plugin` file.
+ * `POST /store/v1/templates/:id/versions`, body: the `.zeron-template` file.
  * → 201 { id, version, status: "listed", verified: false, checks }
+ *
+ * The same rules hold for both kinds, each with its own package and listing
+ * rules (a template's: listing.ts `checkTemplate`, its preview a picture the
+ * store serves). An id of the other kind under a prefix is 409 `wrong_kind`
+ * to its owner and 404 to anyone else. The limits are counted across both.
  *
  * A version that passes is listed and installable by everyone at once
  * (amendment 45); a reviewer's decision later only marks it verified.
@@ -28,12 +34,14 @@
 import type { Env } from "../env";
 import { isReservedUsername, skeleton } from "../username";
 import { type FileKind, fileKind, isText, runChecks } from "./checks";
-import { type ConsentItem, consentItem } from "./consent";
-import { VERSION_ORDER, auditIfChanged, filesKey, packageKey, pluginRow, relist } from "./db";
+import { type ConsentItem, NO_CONSENT, consentItem } from "./consent";
+import { type PluginRow, VERSION_ORDER, auditIfChanged, filesKey, packageKey, pluginRow, relist } from "./db";
 import { purgeCatalog } from "./purge";
-import { fail, answer, rateLimited } from "./http";
-import { type Listing, type Problem, checkListing, listingOf } from "./listing";
-import { PackageRefusal, verifyPackage } from "./package";
+import { fail, answer, notFound, rateLimited } from "./http";
+import type { JsonObject } from "./json";
+import type { Kind } from "./kind";
+import { type Listing, type Problem, checkListing, checkTemplate, listingOf, listingOfTemplate, previewProblem } from "./listing";
+import { PackageRefusal, type VerifiedContents, verifyPackage, verifyTemplate } from "./package";
 import { MAX_PUBLISH_BODY_BYTES, type Publisher, authenticatePublisher, invalidToken, readBody, signingKeyAllowed, tokenInScope, tokenNotAllowed } from "./principal";
 import { userDirectoryStub } from "../user-directory";
 import { isPrerelease, preKey, precedenceText } from "./semver";
@@ -149,57 +157,101 @@ const listingRefusal = (first: Problem, all: readonly Problem[]): Response =>
 const accepted = (id: string, version: string, status: string, verified: boolean, checks: unknown, superseded: readonly string[] = []): Response =>
   answer({ id, version, status, verified, checks, superseded }, 201);
 
-export const handlePublish = async (request: Request, env: Env, db: D1Database, bucket: R2Bucket, id: string): Promise<Response> => {
+export const handlePublish = async (request: Request, env: Env, db: D1Database, bucket: R2Bucket, kind: Kind, id: string): Promise<Response> => {
   const publisher = await authenticatePublisher(request, env, { publishing: true });
   if (publisher instanceof Response) return publisher;
-  const res = await publishAs(publisher, request, env, db, bucket, id);
+  const res = await publishAs(publisher, request, env, db, bucket, kind, id);
   // A deploy token's last use is a version it published (or the same one
   // again), never an attempt refused.
   if (res.status === 201 && publisher.token) await userDirectoryStub(env)?.deployTokenUsed(publisher.token.id, id);
   return res;
 };
 
-const publishAs = async (publisher: Publisher, request: Request, env: Env, db: D1Database, bucket: R2Bucket, id: string): Promise<Response> => {
+/** An id of the other kind: its owner is told which it is; to anyone else
+ * there's no such item here. */
+const wrongKind = (row: PluginRow, publisher: Publisher, id: string): Response =>
+  row.owner_id === publisher.userId ? fail(409, "wrong_kind", `"${id}" is a ${row.kind}.`) : notFound();
+
+/** What a package is to be listed as: verified, its listing read, its
+ * problems (the first problem's order is the engine's), and what it asks
+ * for. */
+interface Read {
+  readonly pkg: VerifiedContents;
+  readonly manifest: JsonObject | null;
+  readonly problems: readonly Problem[];
+  readonly warnings: readonly Problem[];
+  readonly consent: ConsentItem;
+  /** Only once there are no problems. */
+  readonly listing: () => Listing | Problem;
+}
+
+const readPlugin = async (body: Uint8Array, id: string, signed: boolean): Promise<Read | Response> => {
+  const pkg = await verifyPackage(body, STORE_MAX_PACKAGE_BYTES, signed);
+  if (pkg.manifest.id !== id) return idMismatch(pkg.manifest.id, id);
+  const { problems, warnings } = checkListing(pkg.manifest, pkg.files, isText);
+  return { pkg, manifest: pkg.manifest.raw, problems, warnings, consent: consentItem(pkg.manifest), listing: () => listingOf(pkg.manifest, pkg.files) };
+};
+
+const readTemplate = async (body: Uint8Array, id: string, signed: boolean): Promise<Read | Response> => {
+  const pkg = await verifyTemplate(body, STORE_MAX_PACKAGE_BYTES, signed);
+  if (pkg.id !== id) return idMismatch(pkg.id, id);
+  const { problems, warnings } = checkTemplate(pkg.manifest, pkg.files, isText);
+  // The device's preview check (a PNG, of a size) passed: then that it's a
+  // picture the store serves, so a published cover is never a 404.
+  if (!problems.some((p) => p.field === "preview")) {
+    const bad = previewProblem(pkg.files);
+    if (bad) problems.push(bad);
+  }
+  return { pkg, manifest: null, problems, warnings, consent: NO_CONSENT, listing: () => listingOfTemplate(pkg.manifest, pkg.files) };
+};
+
+const idMismatch = (found: string, id: string): Response => fail(400, "bad_package", `The package is "${found}", not "${id}".`, { reason: "id_mismatch" });
+
+const publishAs = async (publisher: Publisher, request: Request, env: Env, db: D1Database, bucket: R2Bucket, kind: Kind, id: string): Promise<Response> => {
   if (!(await allowWrite(env, publisher.userId))) return rateLimited();
-  // Who may publish what, before the body is read: a deploy token only a
-  // plugin its account owns now that its scope holds, never a first version;
+  // Who may publish what, before the body is read: a deploy token only an
+  // item its account owns now that its scope holds, never a first version;
   // a live token asking for any other is 403 `token_not_allowed`.
   const plugin = await pluginRow(db, id);
   if (publisher.via === "deploy_token" && (!plugin || plugin.owner_id !== publisher.userId || !tokenInScope(publisher, plugin))) return tokenNotAllowed();
+  // An id of the other kind (after the token's check: a token never learns
+  // of one it may not publish).
+  if (plugin && plugin.kind !== kind) return wrongKind(plugin, publisher, id);
   if (!publisher.username) return fail(403, "needs_username", "Publishing needs a username: every listing reads \"by @username\".");
 
   const body = await readBody(request, STORE_MAX_PACKAGE_BYTES);
   if (body === "too_large") return fail(413, "too_large", `The store takes packages up to ${STORE_MAX_PACKAGE_BYTES / (1024 * 1024)} MB.`);
-  let pkg;
+  let read: Read | Response;
   try {
     // From a device, signed; with a deploy token, not (contract a315eef5a).
-    pkg = await verifyPackage(body, STORE_MAX_PACKAGE_BYTES, publisher.via === "session");
+    read = await (kind === "plugin" ? readPlugin : readTemplate)(body, id, publisher.via === "session");
   } catch (e) {
     if (e instanceof PackageRefusal) return refusal(e);
     throw e;
   }
-  if (pkg.manifest.id !== id) return fail(400, "bad_package", `The package is "${pkg.manifest.id}", not "${id}".`, { reason: "id_mismatch" });
+  if (read instanceof Response) return read;
+  const { pkg } = read;
   // Who may publish this, before any work on what it is: a stranger's key,
-  // someone else's id, a suspended plugin are refused here. From a device,
+  // someone else's id, a suspended item are refused here. From a device,
   // the package is signed by one of the account's live keys; with a deploy
   // token, the token is the publisher's word (contract a315eef5a).
   if (publisher.via === "session" && !(await signingKeyAllowed(env, publisher, pkg.key!))) {
     return fail(403, "key_not_allowed", "The key that signed this package isn't one of this account's.");
   }
   if (plugin && plugin.owner_id !== publisher.userId) return fail(403, "id_taken", `"${id}" belongs to another account.`);
-  if (plugin?.status === "suspended") return fail(403, "suspended", "This plugin is suspended: it can't take new versions.");
+  if (plugin?.status === "suspended") return fail(403, "suspended", `This ${kind} is suspended: it can't take new versions.`);
   if (!plugin && (await idReserved(db, id, publisher.userId))) return fail(403, "id_reserved", `"${id}" is kept back: ask Zeron for it.`);
   if (!plugin) {
     const near = await tooSimilar(db, id, publisher.userId);
-    if (near) return fail(403, "id_too_similar", `"${id}" is too like "${near}", another publisher's plugin. Choose another id, or ask Zeron for this one.`, { similar_to: near });
+    if (near) return fail(403, "id_too_similar", `"${id}" is too like "${near}", another publisher's. Choose another id, or ask Zeron for this one.`, { similar_to: near });
   }
   if (!plugin && (await overClaims(db, publisher.userId, Date.now()))) return claimsRefusal();
 
   // The engine's listing rules (what `zeron plugin check` says on the
   // device), then the store's own size limits.
-  const { problems, warnings } = checkListing(pkg.manifest, pkg.files, isText);
+  const { problems, warnings, consent } = read;
   if (problems.length > 0) return listingRefusal(problems[0]!, problems);
-  const listing = listingOf(pkg.manifest, pkg.files);
+  const listing = read.listing();
   if ("rule" in listing) return listingRefusal(listing, [listing]);
 
   const version = listing.version;
@@ -233,9 +285,10 @@ const publishAs = async (publisher: Publisher, request: Request, env: Env, db: D
     .bind(id)
     .first<{ version: string }>();
   const kinds = new Map<string, FileKind>([...pkg.files].map(([path, bytes]) => [path, fileKind(path, bytes)]));
-  const consent = consentItem(pkg.manifest);
   const checks = runChecks({
+    kind,
     pkg,
+    manifest: read.manifest,
     listing,
     warnings,
     kinds,
@@ -287,10 +340,10 @@ const publishAs = async (publisher: Publisher, request: Request, env: Env, db: D
     const statements: D1PreparedStatement[] = [
       // A new id is claimed within the weekly limit, and the claim recorded.
       db
-        .prepare(`INSERT INTO plugins (id, owner_id, owner_since, skeleton, created_at) SELECT ?1, ?2, ?4, ?3, ?4 WHERE ${CLAIMS_SQL_AT} ON CONFLICT DO NOTHING`)
-        .bind(id, publisher.userId, skeleton(id), now, now - WEEK, CLAIMS_PER_WEEK),
+        .prepare(`INSERT INTO plugins (id, kind, owner_id, owner_since, skeleton, created_at) SELECT ?1, ?7, ?2, ?4, ?3, ?4 WHERE ${CLAIMS_SQL_AT} ON CONFLICT DO NOTHING`)
+        .bind(id, publisher.userId, skeleton(id), now, now - WEEK, CLAIMS_PER_WEEK, kind),
       db.prepare("INSERT INTO id_claims (user_id, plugin_id, at) SELECT ?, ?, ? WHERE changes() = 1").bind(publisher.userId, id, now),
-      insertVersion(db, publisher, id, now, {
+      insertVersion(db, publisher, kind, id, now, {
         version: version.text,
         precedence,
         order,
@@ -371,15 +424,17 @@ const publishAs = async (publisher: Publisher, request: Request, env: Env, db: D
   // Lost: to another publish of this version, or to a change since the
   // checks above. Its objects are the sweep's to delete, once no row names them.
   await maybeOrphaned(db, [pkgKey, blobKey]);
-  if (landed) return fail(409, "version_exists", `Version ${landed.version} was already published, with other contents. Publish a new version.`);
   const now2 = await pluginRow(db, id);
+  // (The id was claimed meanwhile, as the other kind.)
+  if (now2 && now2.kind !== kind) return wrongKind(now2, publisher, id);
+  if (landed) return fail(409, "version_exists", `Version ${landed.version} was already published, with other contents. Publish a new version.`);
   if (!now2 && (await overClaims(db, publisher.userId, Date.now()))) return claimsRefusal();
   if (!now2 && (await db.prepare("SELECT 1 FROM plugins WHERE skeleton = ?").bind(skeleton(id)).first())) {
-    return fail(403, "id_reserved", `"${id}" is too close to the id of a plugin already in the store.`);
+    return fail(403, "id_reserved", `"${id}" is too close to the id of one already in the store.`);
   }
-  if (!now2) return fail(409, "not_newer", "Another publish changed this plugin meanwhile: try again.");
+  if (!now2) return fail(409, "not_newer", `Another publish changed this ${kind} meanwhile: try again.`);
   if (now2.owner_id !== publisher.userId) return fail(403, "id_taken", `"${id}" belongs to another account.`);
-  if (now2.status === "suspended") return fail(403, "suspended", "This plugin is suspended: it can't take new versions.");
+  if (now2.status === "suspended") return fail(403, "suspended", `This ${kind} is suspended: it can't take new versions.`);
   if (await overRate(db, publisher.userId, Date.now())) return fail(429, "rate_limited", "Too many versions submitted lately. Try again later.");
   const later = await notNewerThan(db, id, order);
   return fail(409, "not_newer", `Version ${version.text} isn't later than ${later ?? "a version published just now"}.`);
@@ -445,7 +500,7 @@ interface NewVersion {
 
 /** The version's insert, guarded by every rule a publish is held to, so
  * the guard and the insert are one step. */
-const insertVersion = (db: D1Database, publisher: Publisher, id: string, now: number, v: NewVersion): D1PreparedStatement => {
+const insertVersion = (db: D1Database, publisher: Publisher, kind: Kind, id: string, now: number, v: NewVersion): D1PreparedStatement => {
   const l = v.listing;
   const columns: [string, unknown][] = [
     ["plugin_id", id],
@@ -489,12 +544,12 @@ const insertVersion = (db: D1Database, publisher: Publisher, id: string, now: nu
     .prepare(
       `INSERT INTO versions (${columns.map(([c]) => c).join(", ")})
        SELECT ${columns.map(() => "?").join(", ")}
-       WHERE EXISTS (SELECT 1 FROM plugins WHERE id = ? AND owner_id = ? AND status = 'active')
+       WHERE EXISTS (SELECT 1 FROM plugins WHERE id = ? AND owner_id = ? AND kind = ? AND status = 'active')
          AND NOT EXISTS (SELECT 1 FROM versions WHERE ${NOT_NEWER_SQL})
          AND ${RATE_SQL}
        ON CONFLICT DO NOTHING`
     )
-    .bind(...columns.map(([, value]) => value), id, publisher.userId, id, ...v.order, ...rateBinds(publisher.userId, now));
+    .bind(...columns.map(([, value]) => value), id, publisher.userId, kind, id, ...v.order, ...rateBinds(publisher.userId, now));
 };
 
 /** The version's file rows, in statements of a bounded size, each written

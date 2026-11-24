@@ -49,17 +49,23 @@ export const pathProblem = (rel: string): string | undefined => {
 export const plainPath = (rel: string): boolean =>
   pathProblem(rel) === undefined && rel.split("/").every((part) => !part.startsWith("."));
 
-/** plugin-guard `fold`, after Unicode normalization (NFC): how macOS and
- * Windows compare two paths (listing.rs `fold_path`). Two that fold the
- * same are one file there. */
-export const foldPath = (rel: string): string =>
-  [...rel.normalize("NFC").replaceAll("\\", "/")]
+/** plugin-guard `fold` (path.rs): how the files no template replaces are
+ * compared: `\` as `/`, each character's uppercase then its lowercase,
+ * empty and `.` parts dropped, each part without its trailing dots and
+ * spaces. */
+export const fold = (rel: string): string =>
+  [...rel.replaceAll("\\", "/")]
     .map((c) => c.toUpperCase().toLowerCase())
     .join("")
     .split("/")
     .filter((part) => part !== "" && part !== ".")
     .map((part) => part.replace(/[. ]+$/, ""))
     .join("/");
+
+/** plugin-guard `fold`, after Unicode normalization (NFC): how macOS and
+ * Windows compare two paths (listing.rs `fold_path`). Two that fold the
+ * same are one file there. */
+export const foldPath = (rel: string): string => fold(rel.normalize("NFC"));
 
 /** What a device writes beside a plugin's files, which no file may fold to
  * (install.rs `SOURCE_FILE`). */

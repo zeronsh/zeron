@@ -27,9 +27,9 @@
  */
 
 import { type Json, type JsonObject, JsonError, canonicalJson, isObject, parseJson } from "./json";
-import { MANIFEST_FILE, type Manifest, idProblem, readManifest } from "./manifest";
+import { MANIFEST_FILE, type Manifest, idProblem, readManifest, rustTrim } from "./manifest";
 import { LIMITS, STORE_DATA } from "./data";
-import { SOURCE_FILE, firstCollision, plainPath } from "./paths";
+import { SOURCE_FILE, firstCollision, fold, pathProblem, plainPath } from "./paths";
 import { Scanner, decodeBase64String, decodedBound as spanBound, stringIs, stringText } from "./scan";
 
 export const FORMAT: string = STORE_DATA.package_format;
@@ -76,8 +76,8 @@ export class PackageRefusal extends Error {
   }
 }
 
-export interface VerifiedPackage {
-  readonly manifest: Manifest;
+/** What every verified package is, whichever kind. */
+export interface VerifiedContents {
   /** The manifest's canonical JSON without its signature: what the
    * content hash covers (the signature's file hashes are kept per file). */
   readonly manifestCanonical: string;
@@ -96,6 +96,49 @@ export interface VerifiedPackage {
   readonly sha256: string;
   readonly bytes: number;
 }
+
+export interface VerifiedPackage extends VerifiedContents {
+  readonly manifest: Manifest;
+}
+
+/** A template's package (template_packages.rs `Package`). */
+export interface VerifiedTemplate extends VerifiedContents {
+  /** Its manifest as a value (signed; its signature removed in
+   * `manifestCanonical`). */
+  readonly manifest: JsonObject;
+  /** Its id and version, trimmed, as a device reads them. */
+  readonly id: string;
+  readonly version: string;
+  /** Files it carries that a device leaves out when it installs: what no
+   * template may replace, and a manifest of its own. */
+  readonly ignored: readonly string[];
+}
+
+export const TEMPLATE_FORMAT: string = STORE_DATA.template_format;
+export const TEMPLATE_PAYLOAD_PREFIX: string = STORE_DATA.template_payload_prefix;
+/** A template's manifest file, and what a device writes beside its files. */
+export const TEMPLATE_MANIFEST_FILE = "zeron-template.json";
+const TEMPLATE_IMPORTED_FILE = ".imported.json";
+/** The one file that may start with a dot, at the root. */
+const LUAURC = ".luaurc";
+/** Zeron's own template's id: no one's. */
+const ZERON_ID = "zeron";
+const TEMPLATE_ID_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
+/** Whether `id` can be a template's (templates.rs `valid_id`). */
+export const validTemplateId = (id: string): boolean => TEMPLATE_ID_RE.test(id);
+
+/** templates.rs `inside`: a safe path inside a template, whose parts never
+ * start with a dot, but `.luaurc` at its root. */
+export const insideTemplate = (rel: string): boolean => pathProblem(rel) === undefined && rel.split("/").every((part) => !part.startsWith(".") || rel === LUAURC);
+
+/** What no template replaces, each one a file or a folder (data file
+ * `template_protected`), folded as a device folds a path. */
+const PROTECTED: readonly string[] = STORE_DATA.template_protected.map(fold);
+/** Whether `rel` is, or is under, one of them (template_packages.rs `protected`). */
+export const protectedPath = (rel: string): boolean => {
+  const path = fold(rel);
+  return PROTECTED.some((p) => path === p || path.startsWith(`${p}/`));
+};
 
 const encoder = new TextEncoder();
 
@@ -326,8 +369,25 @@ const readFiles = (raw: Uint8Array, files: Span): Map<string, Span | null> => {
   return entries;
 };
 
+/** A kind of package: its format, its signing domain, and which paths it
+ * keeps. */
+interface PackageKind {
+  readonly format: string;
+  readonly prefix: string;
+  readonly keeps: (rel: string) => boolean;
+}
+
+const PLUGIN_PACKAGE: PackageKind = { format: FORMAT, prefix: PAYLOAD_PREFIX, keeps: (rel) => plainPath(rel) && rel !== MANIFEST_FILE };
+const TEMPLATE_PACKAGE: PackageKind = { format: TEMPLATE_FORMAT, prefix: TEMPLATE_PAYLOAD_PREFIX, keeps: insideTemplate };
+
+/** A package read and verified (package.rs `parse`), before its kind's own
+ * rules. */
+interface Read extends VerifiedContents {
+  readonly manifestValue: JsonObject;
+}
+
 /**
- * The package `raw`, verified as install.rs `parse` verifies it, or a
+ * The package `raw`, read as a device reads one of `kind`, or a
  * `PackageRefusal` naming the engine's reason. `maxBytes` is the caller's
  * ceiling on the file itself (the engine's, or the store's lower one).
  * `signed: false` reads a deploy token's package: one with no signature,
@@ -338,7 +398,7 @@ const readFiles = (raw: Uint8Array, files: Span): Map<string, Span | null> => {
  * `MAX_MANIFEST_JSON` and `MAX_MANIFEST_VALUES`, and each file's base64 is
  * decoded from the request's bytes into one buffer.
  */
-export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTES, signed = true): Promise<VerifiedPackage> => {
+const readPackage = async (raw: Uint8Array, kind: PackageKind, maxBytes: number, signed: boolean): Promise<Read> => {
   if (raw.length > maxBytes) refuse("too_big");
   let parts: ReturnType<typeof readParts>;
   try {
@@ -349,7 +409,7 @@ export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTE
   }
   if (!parts) return refuse("not_a_package");
   const format = stringSpan(raw, parts.format);
-  if (!format || format.end - format.start > 128 || stringText(raw, format.start, format.end) !== FORMAT) return refuse("not_a_package");
+  if (!format || format.end - format.start > 128 || stringText(raw, format.start, format.end) !== kind.format) return refuse("not_a_package");
   const { files: filesSpan, manifest: manifestSpan } = parts;
   if (!filesSpan || raw[filesSpan.start] !== 0x7b || !manifestSpan || raw[manifestSpan.start] !== 0x7b) return refuse("not_a_package");
 
@@ -373,7 +433,7 @@ export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTE
   const decoded = new Map<string, Uint8Array>();
   let total = 0;
   for (const rel of paths) {
-    if (rel === TOO_LONG_KEY || !plainPath(rel) || rel === MANIFEST_FILE) refuse("bad_file", JSON.stringify(rel.slice(0, 80)));
+    if (rel === TOO_LONG_KEY || !kind.keeps(rel)) refuse("bad_file", JSON.stringify(rel.slice(0, 80)));
     const span = entries.get(rel);
     const written = span ? decodeBase64String(raw, span.start, span.end, blob, total) : -1;
     if (written < 0) return refuse("bad_file", JSON.stringify(rel));
@@ -385,24 +445,14 @@ export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTE
   for (const [rel, bytes] of decoded) hashes.set(rel, await sha256Hex(bytes));
   let key: string | null = null;
   if (signed) {
-    const checked = await checkSignature(PAYLOAD_PREFIX, manifestValue, hashes);
+    const checked = await checkSignature(kind.prefix, manifestValue, hashes);
     if ("invalid" in checked) return refuse(checked.invalid === "files_differ" ? "tampered" : checked.invalid);
     key = checked.valid;
   } else if (manifestValue.has("signature")) {
     return refuse("bad_signature", "A package published with a deploy token isn't signed: the token is its publisher's word");
   }
-  // Paths a device would write as one file, or a file where a folder must
-  // be (amendment 42): refused as a device refuses them, after the
-  // package's own checks and before the manifest's.
-  const collision = firstCollision(decoded.keys(), [MANIFEST_FILE, SOURCE_FILE]);
-  if (collision) refuse("paths_collide", collision);
-  const manifest = readManifest(manifestValue);
-  if (manifest.problem) refuse("bad_manifest", manifest.problem);
-  const badId = idProblem(manifest.id);
-  if (badId) refuse("bad_id", badId);
-  if (!decoded.has(manifest.entry)) refuse("missing_entry", `Its entry file ${manifest.entry} is missing`);
   return {
-    manifest,
+    manifestValue,
     manifestCanonical: canonicalJson(unsignedOf(manifestValue)),
     key,
     files: decoded,
@@ -412,6 +462,43 @@ export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTE
     sha256: await sha256Hex(raw),
     bytes: raw.length
   };
+};
+
+/** The plugin package `raw`, verified as install.rs `parse` verifies it
+ * (and the collisions and the manifest's own rules after its signature). */
+export const verifyPackage = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTES, signed = true): Promise<VerifiedPackage> => {
+  const { manifestValue, ...contents } = await readPackage(raw, PLUGIN_PACKAGE, maxBytes, signed);
+  // Paths a device would write as one file, or a file where a folder must
+  // be (amendment 42): refused as a device refuses them, after the
+  // package's own checks and before the manifest's.
+  const collision = firstCollision(contents.files.keys(), [MANIFEST_FILE, SOURCE_FILE]);
+  if (collision) refuse("paths_collide", collision);
+  const manifest = readManifest(manifestValue);
+  if (manifest.problem) refuse("bad_manifest", manifest.problem);
+  const badId = idProblem(manifest.id);
+  if (badId) refuse("bad_id", badId);
+  if (!contents.files.has(manifest.entry)) refuse("missing_entry", `Its entry file ${manifest.entry} is missing`);
+  return { ...contents, manifest };
+};
+
+/** The template package `raw`, verified as template_packages.rs `parse`
+ * verifies it: its id, then what a device leaves out (`ignored`) set aside,
+ * then two paths of the rest that would be one file. Its other rules are
+ * the listing's (listing.ts `checkTemplate`). */
+export const verifyTemplate = async (raw: Uint8Array, maxBytes = MAX_PACKAGE_BYTES, signed = true): Promise<VerifiedTemplate> => {
+  const { manifestValue, ...contents } = await readPackage(raw, TEMPLATE_PACKAGE, maxBytes, signed);
+  const text = (key: string): string => {
+    const value = manifestValue.get(key);
+    return typeof value === "string" ? rustTrim(value) : "";
+  };
+  const id = text("id");
+  if (!validTemplateId(id) || id === ZERON_ID) refuse("bad_id", JSON.stringify(id.slice(0, 80)));
+  const ignored = [...contents.files.keys()].filter((rel) => protectedPath(rel) || rel === TEMPLATE_MANIFEST_FILE);
+  const left = new Set(ignored);
+  const kept = [...contents.files.keys()].filter((rel) => !left.has(rel));
+  const collision = firstCollision(kept, [TEMPLATE_MANIFEST_FILE, TEMPLATE_IMPORTED_FILE]);
+  if (collision) refuse("paths_collide", collision);
+  return { ...contents, manifest: manifestValue, id, version: text("version"), ignored };
 };
 
 /**
