@@ -308,8 +308,13 @@ describe("the catalog, from the edge's real listing", () => {
     expect(body).toContain('src="/plugins/focus-timer/files/1.0.0/shots/one.png"');
     expect(body).toContain('href="/@adawren"');
     expect(body).toContain('href="zeron://open/plugin/focus-timer"');
-    // The same page signed in, byte for byte.
-    expect((await adaOnWeb.get("/plugins/focus-timer")).body).toBe(body);
+    expect(response.headers.get("cache-control")).toBe("public, max-age=30");
+    // Signed in, the same page drawn for her: the bar names her, the page itself is the same, and it is hers alone.
+    const signedIn = await adaOnWeb.get("/plugins/focus-timer");
+    const main = (html: string) => html.slice(html.indexOf("<main"), html.indexOf("</main>"));
+    expect(main(signedIn.body)).toBe(main(body));
+    expect(signedIn.body.slice(0, signedIn.body.indexOf("</header>"))).toContain(">@adawren<");
+    expect(signedIn.response.headers.get("cache-control")).toBe("private, no-store");
   });
 
   test("the files proxy serves the edge's files as pictures in a sandbox, and nothing else", async () => {
