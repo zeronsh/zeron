@@ -3335,6 +3335,14 @@ impl Inner {
         ))
     }
 
+    /// Before a run's servers are collected: the vault's MCP connections
+    /// listed again when stale, so one added on another device is there.
+    pub(super) async fn refresh_mcp_servers_for_run(&self) {
+        if let Some(mcp_servers) = self.mcp_servers.get() {
+            mcp_servers.refresh_for_run().await;
+        }
+    }
+
     /// Collect all extra MCP servers stamped onto an agent run: allowed
     /// plugins' native MCP servers plus managed external MCP servers (remote
     /// servers routed via the loopback MCP Gateway + local stdio servers).
@@ -4813,6 +4821,7 @@ async fn drive_run(
     }
     // Plugins' native MCP servers and managed external MCP servers come from
     // this host's own configuration — never from what a sender put here.
+    inner.refresh_mcp_servers_for_run().await;
     request.extra_mcp = inner.extra_mcp_servers(_mcp_grant.as_ref());
     request.code_mode = code_mode;
     // The MCP servers the agent starts from this run's config: the only

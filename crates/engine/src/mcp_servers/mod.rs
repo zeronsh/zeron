@@ -21,7 +21,7 @@ pub mod vault_client;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::stream::BoxStream;
 use serde_json::Value;
@@ -105,6 +105,12 @@ struct VaultState {
     connections: Vec<VaultConnectionView>,
 }
 
+/// How old the vault's connection list may be when a run starts before it's
+/// listed again (see [`McpServers::refresh_for_run`]).
+const RUN_REFRESH_AGE: Duration = Duration::from_secs(30);
+/// The longest a run waits for that listing.
+const RUN_REFRESH_WAIT: Duration = Duration::from_secs(3);
+
 /// Coordinator for managed external MCP servers across Local and Vault storage.
 pub struct McpServers {
     scope: WorkspaceScope,
@@ -120,6 +126,12 @@ pub struct McpServers {
     oauth_overrides: Mutex<HashMap<String, OAuthClientOverride>>,
     http: reqwest::Client,
     snapshot_tx: watch::Sender<McpServersSnapshot>,
+    /// When the vault's connections were last listed: a run on this device
+    /// lists them again once this is older than [`RUN_REFRESH_AGE`], so a
+    /// server added, removed or switched on another device reaches it.
+    vault_listed_at: Mutex<Option<Instant>>,
+    /// One listing at a time for runs starting together.
+    run_refresh: tokio::sync::Mutex<()>,
 }
 
 impl McpServers {
@@ -182,6 +194,8 @@ impl McpServers {
             oauth_overrides: Mutex::new(HashMap::new()),
             http,
             snapshot_tx,
+            vault_listed_at: Mutex::new(None),
+            run_refresh: tokio::sync::Mutex::new(()),
         });
 
         manager.publish_snapshot();
@@ -219,6 +233,8 @@ impl McpServers {
             oauth_overrides: Mutex::new(HashMap::new()),
             http,
             snapshot_tx,
+            vault_listed_at: Mutex::new(None),
+            run_refresh: tokio::sync::Mutex::new(()),
         });
         manager.publish_snapshot();
         manager
@@ -329,6 +345,28 @@ impl McpServers {
         });
     }
 
+    /// Before a run: the vault's connections listed again if the last
+    /// listing is older than [`RUN_REFRESH_AGE`] (another device may have
+    /// added, removed or switched a server since), waiting at most
+    /// [`RUN_REFRESH_WAIT`]; past that, or offline, the run takes what's
+    /// known. Runs starting together share one listing.
+    pub async fn refresh_for_run(&self) {
+        if self.vault_client_raw().is_none() {
+            return;
+        }
+        let fresh = |listed: Option<Instant>| listed.is_some_and(|at| at.elapsed() < RUN_REFRESH_AGE);
+        if fresh(*lock(&self.vault_listed_at)) {
+            return;
+        }
+        let _one = self.run_refresh.lock().await;
+        if fresh(*lock(&self.vault_listed_at)) {
+            return;
+        }
+        if tokio::time::timeout(RUN_REFRESH_WAIT, self.refresh()).await.is_err() {
+            tracing::warn!("mcp: the vault's servers didn't list in time; the run takes those known");
+        }
+    }
+
     /// Refresh Vault-backed MCP connections (best-effort when offline) and
     /// republish the merged snapshot.
     pub async fn refresh(&self) -> McpServersSnapshot {
@@ -338,6 +376,7 @@ impl McpServers {
                     let mut state = lock(&self.vault);
                     state.disabled = view.disabled;
                     state.connections = view.connections;
+                    *lock(&self.vault_listed_at) = Some(Instant::now());
                 }
                 Err(err) => {
                     tracing::debug!(
@@ -2113,6 +2152,91 @@ mod tests {
             Some("Bearer lin-tok-1")
         );
         assert!(dir.path().join("vault-device-key").exists());
+
+        server_task.abort();
+    }
+
+    /// A run lists the vault's servers again once its list is stale, and only
+    /// then: a server connected on another device reaches this one's runs.
+    #[tokio::test]
+    async fn runs_relist_the_vaults_servers_once_stale() {
+        let lists = Arc::new(AtomicUsize::new(0));
+        // The vault's servers: Linear, then Context7 too (added elsewhere).
+        let with_context7 = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let (lists_srv, more_srv) = (lists.clone(), with_context7.clone());
+        let server_task = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let (lists, more) = (lists_srv.clone(), more_srv.clone());
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..n]).into_owned();
+                    let conn = |id: &str, name: &str| {
+                        serde_json::json!({
+                            "id": format!("mcp:{id}"), "kind": "mcp", "name": name, "preset": id,
+                            "url": format!("https://mcp.{id}.test/mcp"), "transport": "http",
+                            "enabled": true, "authKind": "none", "status": "connected",
+                            "headerKeys": [], "scopes": [], "authorizedDevices": ["*"],
+                            "updatedAt": 1700000000000i64
+                        })
+                    };
+                    let body = if head.starts_with("GET /vault/org-1/connections?kind=mcp ") {
+                        lists.fetch_add(1, Ordering::SeqCst);
+                        let mut connections = vec![conn("linear", "Linear")];
+                        if more.load(Ordering::SeqCst) {
+                            connections.push(conn("context7", "Context7"));
+                        }
+                        serde_json::json!({ "disabled": false, "connections": connections }).to_string()
+                    } else {
+                        r#"{"error":"not_found","message":"nope"}"#.to_owned()
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let profile = EngineProfile::synced(dir.path(), "org-1", "user-1");
+        let signer = VaultDeviceSigner::Laptop(Arc::new(LaptopDeviceKey::new(dir.path(), "dev-1")));
+        let vault = Arc::new(VaultClient::new(
+            &base,
+            "org-1",
+            "user-1",
+            Arc::new(zeron_rpc::StaticToken("user-bearer".into())),
+            signer,
+            build_http_client(),
+        ));
+        let mgr = McpServers::with_vault_client(&profile, dir.path(), "dev-1", Some(vault));
+        let names = |mgr: &McpServers| -> Vec<String> {
+            let mut out: Vec<String> = mgr.snapshot().servers.into_iter().map(|s| s.id).collect();
+            out.sort();
+            out
+        };
+
+        // A run with no list yet: listed (the start's own listing may be it).
+        mgr.refresh_for_run().await;
+        assert_eq!(names(&mgr), ["linear"]);
+        let listed = lists.load(Ordering::SeqCst);
+        assert!(listed >= 1);
+
+        // Another run within the age: no listing.
+        with_context7.store(true, Ordering::SeqCst);
+        mgr.refresh_for_run().await;
+        assert_eq!(lists.load(Ordering::SeqCst), listed);
+        assert_eq!(names(&mgr), ["linear"]);
+
+        // Past the age: listed again, and Context7 (added elsewhere) is there.
+        *lock(&mgr.vault_listed_at) = Some(Instant::now() - RUN_REFRESH_AGE - Duration::from_secs(1));
+        mgr.refresh_for_run().await;
+        assert_eq!(lists.load(Ordering::SeqCst), listed + 1);
+        assert_eq!(names(&mgr), ["context7", "linear"]);
 
         server_task.abort();
     }
